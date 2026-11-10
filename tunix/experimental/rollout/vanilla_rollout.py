@@ -149,7 +149,8 @@ def _build_engine(
   """Returns an engine running `model` as `rollout_config` describes.
 
   Args:
-    model: The model to sample from. Its `init_kv_cache` builds its KV caches.
+    model: The model to sample from. Its `cache_geometries` returns the
+      geometry of each of its KV caches.
     tokenizer: The tokenizer for text prompts.
     rollout_config: The engine's settings.
     mesh: The mesh the model runs on.
@@ -209,7 +210,7 @@ class VanillaRollout(base_rollout.BaseRollout):
 
     Args:
       model: The rollout actor. Must have a `config` with a `dtype`, and
-        implement `init_kv_cache(cache_config)`.
+        implement `cache_geometries()`.
       tokenizer: A `TokenizerAdapter`, or a raw tokenizer to wrap in one.
       rollout_config: The engine's settings. The engine is built once from this
         config; later `generate` calls only vary the per-request sampling

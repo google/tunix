@@ -1,6 +1,25 @@
 from absl.testing import absltest
+from absl.testing import parameterized
 import optax
 from tunix.common import configs
+from tunix.common import datatypes
+
+
+class CacheGeometryTest(parameterized.TestCase):
+
+  @parameterized.named_parameters(
+      dict(testcase_name="zero_num_kv_heads", field="num_kv_heads", value=0),
+      dict(testcase_name="zero_head_dim", field="head_dim", value=0),
+      dict(testcase_name="zero_window_size", field="window_size", value=0),
+      dict(
+          testcase_name="negative_window_size", field="window_size", value=-8
+      ),
+  )
+  def test_non_positive_field_raises(self, field, value):
+    kwargs = dict(num_kv_heads=2, head_dim=16, window_size=8)
+    kwargs[field] = value
+    with self.assertRaisesRegex(ValueError, rf"{field} must be positive"):
+      datatypes.CacheGeometry(**kwargs)
 
 
 class ConfigsTest(absltest.TestCase):

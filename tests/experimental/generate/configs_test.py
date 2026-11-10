@@ -36,23 +36,6 @@ def _create_mesh(
   return jax.sharding.Mesh(np.array(devices).reshape(shape), axis_names)
 
 
-class CacheGeometryTest(parameterized.TestCase):
-
-  @parameterized.named_parameters(
-      dict(testcase_name="zero_num_kv_heads", field="num_kv_heads", value=0),
-      dict(testcase_name="zero_head_dim", field="head_dim", value=0),
-      dict(testcase_name="zero_window_size", field="window_size", value=0),
-      dict(
-          testcase_name="negative_window_size", field="window_size", value=-8
-      ),
-  )
-  def test_non_positive_field_raises(self, field, value):
-    kwargs = dict(num_kv_heads=2, head_dim=16, window_size=8)
-    kwargs[field] = value
-    with self.assertRaisesRegex(ValueError, rf"{field} must be positive"):
-      configs.CacheGeometry(**kwargs)
-
-
 class CacheConfigTest(parameterized.TestCase):
 
   def test_valid_config(self):

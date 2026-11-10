@@ -23,6 +23,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tunix.common import datatypes
 from tunix.experimental.generate import configs
 from tunix.experimental.generate import kv_cache_manager
 from tunix.experimental.generate import request as request_lib
@@ -64,7 +65,7 @@ def _create_kv_cache_manager(
             num_host_pages=num_host_pages,
         ),
         cache_geometries={
-            "cache_0": configs.CacheGeometry(
+            "cache_0": datatypes.CacheGeometry(
                 num_kv_heads=2, head_dim=16
             )
         },

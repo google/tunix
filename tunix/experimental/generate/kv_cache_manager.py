@@ -35,6 +35,7 @@ import collections
 from collections.abc import Mapping, Sequence
 
 import jax
+from tunix.common import datatypes
 from tunix.experimental.generate import configs
 from tunix.experimental.generate import request as request_lib
 from tunix.experimental.generate import single_type_kv_cache_manager
@@ -47,19 +48,19 @@ Page = single_type_kv_cache_manager.Page
 
 def _create_kv_cache_group_managers(
     config: configs.CacheConfig,
-    cache_geometries: Mapping[str, configs.CacheGeometry],
+    cache_geometries: Mapping[str, datatypes.CacheGeometry],
 ) -> tuple[list[single_type_kv_cache_manager.SingleTypeKVCacheManager], int]:
   """Creates one `SingleTypeKVCacheManager` per unique cache geometry."""
   if not cache_geometries:
     raise ValueError("At least one cache must be configured.")
 
-  caches_by_geometry: dict[configs.CacheGeometry, list[str]] = (
+  caches_by_geometry: dict[datatypes.CacheGeometry, list[str]] = (
       collections.defaultdict(list)
   )
   for cache, geometry in cache_geometries.items():
     caches_by_geometry[geometry].append(cache)
 
-  kv_shapes: dict[configs.CacheGeometry, tuple[int, int, int]] = {
+  kv_shapes: dict[datatypes.CacheGeometry, tuple[int, int, int]] = {
       geometry: utils.derive_kv_geometry(
           config, geometry.num_kv_heads, geometry.head_dim
       )
@@ -98,7 +99,7 @@ class KVCacheManager:
   def __init__(
       self,
       config: configs.CacheConfig,
-      cache_geometries: Mapping[str, configs.CacheGeometry],
+      cache_geometries: Mapping[str, datatypes.CacheGeometry],
   ):
     """Initializes the cache.
 
@@ -107,7 +108,6 @@ class KVCacheManager:
       cache_geometries: The geometry of each named cache.
     """
     self._cache_names = tuple(cache_geometries.keys())
-    self._cache_geometries = dict(cache_geometries)
 
     self._page_size = config.page_size
     self._enable_prefix_caching = config.enable_prefix_caching
@@ -129,11 +129,6 @@ class KVCacheManager:
   def cache_names(self) -> tuple[str, ...]:
     """Returns the names of all allocated caches."""
     return self._cache_names
-
-  @property
-  def cache_geometries(self) -> Mapping[str, configs.CacheGeometry]:
-    """Returns the geometry of each named cache."""
-    return self._cache_geometries
 
   @property
   def _null_computed_pages(self) -> tuple[tuple[Page | None, ...], ...]:

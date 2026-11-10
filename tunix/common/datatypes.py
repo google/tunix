@@ -29,6 +29,33 @@ class CacheConfig:
   head_dim: int
 
 
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class CacheGeometry:
+  """The shape and reach of one KV cache.
+
+  Attributes:
+    num_kv_heads: The number of KV heads in the model.
+    head_dim: The dimension of each KV head.
+    window_size: The window size of the KV cache. None if the cache is global.
+  """
+
+  num_kv_heads: int
+  head_dim: int
+  window_size: int | None = None
+
+  def __post_init__(self):
+    positive_checks = {
+        "num_kv_heads": self.num_kv_heads,
+        "head_dim": self.head_dim,
+    }
+    if self.window_size is not None:
+      positive_checks["window_size"] = self.window_size
+
+    for field_name, value in positive_checks.items():
+      if value <= 0:
+        raise ValueError(f"{field_name} must be positive, got {value}.")
+
+
 ROUTED_EXPERTS_ENCODE_MODES: tuple[str, ...] = (
     "auto",
     "uint8",

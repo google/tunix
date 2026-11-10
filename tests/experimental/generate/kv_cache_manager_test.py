@@ -25,6 +25,7 @@ from absl.testing import parameterized
 import jax
 import jax.numpy as jnp
 import numpy as np
+from tunix.common import datatypes
 from tunix.experimental.generate import configs
 from tunix.experimental.generate import kv_cache_manager
 from tunix.experimental.generate import request as request_lib
@@ -69,12 +70,12 @@ def _create_cache_geometries(
     num_kv_heads: int = 2,
     head_dim: int = 16,
     cache_to_window_size: dict[str, int | None] | None = None,
-) -> dict[str, configs.CacheGeometry]:
+) -> dict[str, datatypes.CacheGeometry]:
   if cache_to_window_size is None:
     cache_to_window_size = {f"cache_{i}": None for i in range(num_caches)}
 
   return {
-      cache_name: configs.CacheGeometry(
+      cache_name: datatypes.CacheGeometry(
           num_kv_heads=num_kv_heads,
           head_dim=head_dim,
           window_size=window_size,
@@ -244,10 +245,10 @@ class KVCacheManagerInitTest(parameterized.TestCase):
       mgr = kv_cache_manager.KVCacheManager(
           config=cfg,
           cache_geometries={
-              "cache_0": configs.CacheGeometry(
+              "cache_0": datatypes.CacheGeometry(
                   num_kv_heads=2, head_dim=8, window_size=8
               ),
-              "cache_1": configs.CacheGeometry(
+              "cache_1": datatypes.CacheGeometry(
                   num_kv_heads=1, head_dim=16
               ),
           },
@@ -291,10 +292,10 @@ class KVCacheManagerInitTest(parameterized.TestCase):
       mgr = kv_cache_manager.KVCacheManager(
           config=cfg,
           cache_geometries={
-              "local": configs.CacheGeometry(
+              "local": datatypes.CacheGeometry(
                   num_kv_heads=2, head_dim=8, window_size=8
               ),
-              "global": configs.CacheGeometry(
+              "global": datatypes.CacheGeometry(
                   num_kv_heads=1, head_dim=16
               ),
           },

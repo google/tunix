@@ -21,15 +21,15 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from tunix.common import datatypes
 from tunix.experimental.generate import configs
 from tunix.experimental.generate import engine as engine_lib
-from tunix.experimental.generate import kv_cache_manager as kv_cache_manager_lib
 from tunix.experimental.generate import request as request_lib
 
 VOCAB_SIZE = 32
 PAGE_SIZE = 4
 GEOMETRIES = {
-    'layer_0': configs.CacheGeometry(num_kv_heads=1, head_dim=1)
+    'layer_0': datatypes.CacheGeometry(num_kv_heads=1, head_dim=1)
 }
 # One page of one cache: `page_size` slots of a packed K and V float32 value.
 BYTES_PER_PAGE = PAGE_SIZE * 2 * 4
@@ -59,17 +59,15 @@ class PagedSumTransformer(nnx.Module):
       self,
       offset: jax.typing.ArrayLike = 0.0,
       dtype: jax.typing.DTypeLike = jnp.float32,
-      geometries: Mapping[str, configs.CacheGeometry] = GEOMETRIES,
+      geometries: Mapping[str, datatypes.CacheGeometry] = GEOMETRIES,
   ):
     self.config = PagedSumConfig(dtype=dtype)
     self.offset = nnx.Param(jnp.asarray(offset, dtype=dtype))
     self.geometries = dict(geometries)
 
-  def init_kv_cache(
-      self, cache_config: configs.CacheConfig
-  ) -> kv_cache_manager_lib.KVCacheManager:
-    """Builds one cache per entry of `geometries`."""
-    return kv_cache_manager_lib.KVCacheManager(cache_config, self.geometries)
+  def cache_geometries(self) -> dict[str, datatypes.CacheGeometry]:
+    """Returns the geometry of each configured KV cache."""
+    return dict(self.geometries)
 
   def __call__(
       self, tokens, positions, cache, metadata, mesh, logits_idxs=None

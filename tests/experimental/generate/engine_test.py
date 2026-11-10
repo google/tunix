@@ -21,6 +21,7 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from tunix.common import datatypes
 from tunix.experimental.generate import configs
 from tunix.experimental.generate import engine as engine_lib
 from tunix.experimental.generate import request as request_lib
@@ -75,7 +76,7 @@ class LLMEngineTest(absltest.TestCase):
   def test_truncates_chunked_prefill_length_to_sliding_window(self):
     transformer = testing_utils.PagedSumTransformer(
         geometries={
-            'layer_0': configs.CacheGeometry(
+            'layer_0': datatypes.CacheGeometry(
                 num_kv_heads=1, head_dim=1, window_size=12
             )
         }
@@ -396,8 +397,8 @@ class StepTest(parameterized.TestCase):
   )
   def test_chunk_fits_in_the_smallest_window(self, window_size, expected):
     geometries = {
-        'full': configs.CacheGeometry(num_kv_heads=1, head_dim=1),
-        'sliding': configs.CacheGeometry(
+        'full': datatypes.CacheGeometry(num_kv_heads=1, head_dim=1),
+        'sliding': datatypes.CacheGeometry(
             num_kv_heads=1, head_dim=1, window_size=window_size
         ),
     }

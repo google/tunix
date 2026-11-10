@@ -300,16 +300,10 @@ class CacheSizingTest(parameterized.TestCase):
         dtype=jnp.bfloat16,
         page_size=16,
     )
-    geometries = (
-        configs.CacheGeometry(num_kv_heads=8, head_dim=64),
-        configs.CacheGeometry(num_kv_heads=8, head_dim=64),
-        configs.CacheGeometry(num_kv_heads=4, head_dim=32, window_size=128),
-        configs.CacheGeometry(num_kv_heads=4, head_dim=32, window_size=128),
-    )
     with jax.set_mesh(_create_mesh((1,), ("tp",))):
       element_shapes = tuple(
-          utils.derive_kv_geometry(cfg, g.num_kv_heads, g.head_dim)
-          for g in geometries
+          utils.derive_kv_geometry(cfg, num_kv_heads, head_dim)
+          for num_kv_heads, head_dim in ((8, 64), (8, 64), (4, 32), (4, 32))
       )
       self.assertEqual(
           element_shapes, ((8, 2, 64), (8, 2, 64), (4, 2, 32), (4, 2, 32))
