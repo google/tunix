@@ -181,6 +181,11 @@ class RolloutConfig:
   # Whether to return logprobs from the sampler.
   return_logprobs: bool = False
 
+  # Number of most likely tokens whose logprobs the vLLM sampler returns per
+  # generated token. Values > 1 also return the `[gen_len, k]` top-k token ids
+  # and log probs used by Score Centering.
+  num_logprobs: int = 1
+
   # Whether to return output logits from the sampler.
   return_logits: bool = False
 
@@ -368,6 +373,8 @@ class RolloutConfig:
           f"weight_sync_mode must be one of {_VALID_WEIGHT_SYNC_MODES}, got"
           f" {self.weight_sync_mode!r}."
       )
+    if self.num_logprobs < 1:
+      raise ValueError(f"num_logprobs must be >= 1, got {self.num_logprobs}.")
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)

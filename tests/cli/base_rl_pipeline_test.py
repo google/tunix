@@ -831,6 +831,23 @@ vllm_config:
         allocation_policy="PERFORMANCE",
     )
 
+  def test_score_centering_auto_derives_and_validates_num_logprobs(self):
+    sc_yaml = """
+grpo_config:
+  num_generations: 2
+  num_iterations: 1
+  score_centering: true
+  score_centering_top_k: 64
+"""
+    pipeline = _make_pipeline(sc_yaml)
+    self.assertEqual(pipeline.create_rollout_config().num_logprobs, 64)
+
+    bad_pipeline = _make_pipeline_with_cli_args(
+        sc_yaml, ["rollout_config.num_logprobs=16"]
+    )
+    with self.assertRaisesRegex(ValueError, "num_logprobs.*score_centering"):
+      bad_pipeline.create_rollout_config()
+
 
 if __name__ == "__main__":
   absltest.main()

@@ -2586,6 +2586,8 @@ class ExactTokenContinuityBatchTest(absltest.TestCase):
       trajectory_store=None,
       mode=rl_engine_lib.Mode.TRAIN,
       expected_step=None,
+      mini_batch_size=None,
+      **cfg,
   ):
     import copy  # pylint: disable=g-import-not-at-top
     from tunix.perf.experimental import tracer  # pylint: disable=g-import-not-at-top
@@ -2596,8 +2598,9 @@ class ExactTokenContinuityBatchTest(absltest.TestCase):
         max_response_length=20,
         beta=0.0,
         use_rollout_logps=True,
+        **cfg,
     )
-    obj._full_batch_size = 0
+    obj._full_batch_size = 4 if mini_batch_size is not None else 0
     obj.metric_fns = []
     obj._compute_rewards = lambda **kw: jnp.array([0.0, 1.0])
     obj.rl_engine = types.SimpleNamespace(
@@ -2616,7 +2619,7 @@ class ExactTokenContinuityBatchTest(absltest.TestCase):
             training_config=types.SimpleNamespace(
                 max_seq_tokens_per_device=32 if packed else None,
                 compute_logps_micro_batch_size=1,
-                mini_batch_size=None,
+                mini_batch_size=mini_batch_size,
             ),
         ),
     )
@@ -2694,6 +2697,48 @@ class ExactTokenContinuityBatchTest(absltest.TestCase):
             for line in logs.output
         )
     )
+
+  def test_score_centering_batch_keeps_leading_topk_columns(self):
+    raw = self._raw_trajectory()
+    n = len(raw["conversation_tokens"])
+    store = in_memory_store.InMemoryTrajectoryStore()
+    # vLLM may return more candidates (num_logprobs) than score_centering_top_k.
+    for width in (2, 3):
+      with self.subTest(width=width):
+        raw["old_topk_token_ids"] = np.tile(np.arange(width), (n, 1))
+        raw["old_topk_logprobs"] = np.tile(np.linspace(-0.1, -3, width), (n, 1))
+        batch = self._make_batch(
+            raw=raw,
+            trajectory_store=store,
+            score_centering=True,
+            score_centering_top_k=2,
+        )
+        np.testing.assert_array_equal(
+            batch.old_topk_token_ids[0, :n], raw["old_topk_token_ids"][:, :2]
+        )
+        np.testing.assert_allclose(
+            batch.old_topk_logps[0, :n], raw["old_topk_logprobs"][:, :2]
+        )
+        np.testing.assert_array_equal(batch.old_topk_logps[0, n:], -np.inf)
+    extra = store.get_trajectories_metrics()["traj_7_g0"].extra
+    self.assertNotIn("old_topk_token_ids", extra)
+    self.assertNotIn("old_topk_logprobs", extra)
+    raw["old_topk_token_ids"] = raw["old_topk_token_ids"][:, :1]
+    with self.assertRaisesRegex(ValueError, "top-k logprobs"):
+      self._make_batch(raw=raw, score_centering=True, score_centering_top_k=2)
+
+  def test_score_centering_needs_one_on_policy_update(self):
+    raw = self._raw_trajectory()
+    n = len(raw["conversation_tokens"])
+    raw["old_topk_token_ids"] = np.zeros((n, 2), np.int32)
+    raw["old_topk_logprobs"] = np.full((n, 2), -1.0, np.float32)
+    with self.assertRaisesRegex(ValueError, "one on-policy update"):
+      self._make_batch(
+          raw=raw,
+          score_centering=True,
+          score_centering_top_k=2,
+          mini_batch_size=2,
+      )
 
   def test_exact_batch_keeps_recorded_ids_masks_and_logprobs(self):
     raw = self._raw_trajectory()
@@ -2818,6 +2863,65 @@ class ExactTokenContinuityBatchTest(absltest.TestCase):
     self.assertFalse(
         np.array_equal(np.asarray(with_mask), np.asarray(without_mask))
     )
+
+
+class ScoreCenteringTest(absltest.TestCase):
+
+  def test_score_centering_rejects_rollout_without_topk(self):
+    vocab = _mock_vocab()
+    tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
+    model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    mesh = pxla.thread_resources.env.physical_mesh
+    cluster_config = rl_engine_lib.ClusterConfig(
+        role_to_mesh={
+            rl_engine_lib.Role.ACTOR: mesh,
+            rl_engine_lib.Role.REFERENCE: mesh,
+            rl_engine_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine="vanilla",
+        offload_to_cpu=False,
+        training_config=rl_engine_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=10,
+            max_steps=1,
+            mini_batch_size=2,
+            train_micro_batch_size=2,
+            compute_logps_micro_batch_size=2,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_prompt_length=32,
+            max_tokens_to_generate=8,
+            return_logprobs=True,
+            kv_cache_size=256,
+        ),
+    )
+    rl_engine = rl_engine_lib.RLEngine(
+        actor=model,
+        reference=None,
+        tokenizer=tokenizer,
+        cluster_config=cluster_config,
+    )
+    grpo_config = agentic_grpo_learner.GRPOConfig(
+        beta=0.0,
+        num_generations=2,
+        num_iterations=1,
+        loss_algo="grpo",
+        max_response_length=8,
+        use_rollout_logps=True,
+        sampler_is="token",
+        score_centering=True,
+        score_centering_top_k=4,
+    )
+    with self.assertRaisesRegex(ValueError, "requires the vLLM rollout"):
+      agentic_grpo_learner.GRPOLearner(
+          rl_engine=rl_engine,
+          reward_fns=reward_fn_1,
+          algo_config=grpo_config,
+          chat_parser=MockChatParser(),
+      )
 
 
 if __name__ == "__main__":

@@ -673,7 +673,11 @@ class VllmSamplerConfigTest(absltest.TestCase):
     sampler.llm.generate.assert_not_called()
     self.assertEqual(engine.add_request.call_count, 2)
     self.assertEqual([o.request_id for o in outputs], ["0", "1"])
-    texts, logprobs, tokens, _ = sampler.detokenize(["a", "b"], outputs)
+    texts, logprobs, tokens, _, topk_ids, topk_logps = sampler.detokenize(
+        ["a", "b"], outputs
+    )
+    self.assertIsNone(topk_ids)
+    self.assertIsNone(topk_logps)
     self.assertEqual(texts, [["t01", "t12"]])
     self.assertEqual(logprobs, [[[], []]])
     self.assertEqual([t.tolist() for t in tokens[0]], [[0, 1], [1, 2]])
@@ -718,7 +722,7 @@ class VllmSamplerConfigTest(absltest.TestCase):
     output.request_id = "7"
     output.outputs = [sample]
 
-    texts, logprobs, tokens, _ = sampler.detokenize(["a"], [output])
+    texts, logprobs, tokens, _, _, _ = sampler.detokenize(["a"], [output])
 
     self.assertEqual(texts, [["text"]])
     self.assertEqual(logprobs, [[[]]])
@@ -756,7 +760,7 @@ class VllmSamplerConfigTest(absltest.TestCase):
     )
 
     self.assertEqual([o.request_id for o in outputs], ["0", "1"])
-    texts, logprobs, _, _ = sampler.detokenize(["a", "b"], outputs)
+    texts, logprobs, _, _, _, _ = sampler.detokenize(["a", "b"], outputs)
     self.assertEqual(texts, [["t01", "t12"]])
     self.assertEqual(logprobs, [[[], []]])
     self.assertEqual(sampler.tokenizer.decode.call_count, 2)
@@ -938,6 +942,7 @@ class VllmSamplerTokenInputTest(absltest.TestCase):
         eos_tokens=None,
         sampling_kwargs={},
         overlap_postprocessing=False,  # upstream 323946941 added this field
+        num_logprobs=1,
     )
     obj._driver = None
     obj._request_counter = itertools.count()
@@ -976,6 +981,49 @@ class VllmSamplerTokenInputTest(absltest.TestCase):
         out.padded_prompt_tokens, [[0, 0, 0, 0, 3], [0, 0, 4, 0, 5]]
     )
     np.testing.assert_array_equal(out.logprobs, [[-0.25, -0.75]] * 2)
+
+  def test_num_logprobs_returns_topk_per_prompt(self):
+    for bad in (0, -1, False, True):
+      with self.assertRaisesRegex(ValueError, "num_logprobs must be >= 1"):
+        vllm_sampler.VllmConfig(num_logprobs=bad)
+    obj = self._sampler()
+    cfg = vllm_sampler.VllmConfig(return_logprobs=True, num_logprobs=4)
+    self.assertEqual(obj._vllm_config(cfg)["max_logprobs"], 4)
+    obj.config.num_logprobs = 2
+    out = obj(None, 4, prompt_token_ids=[[1, 2], [3, 4]])
+    params = obj.llm.generate.call_args.kwargs["sampling_params"]
+    self.assertEqual(params.logprobs, 2)
+    self.assertLen(out.topk_token_ids, 2)
+    for ids, logps in zip(out.topk_token_ids, out.topk_logprobs):
+      # The fake engine returns one candidate per position; the rest is
+      # padding.
+      np.testing.assert_array_equal(ids, [[7, 0], [0, 0]])
+      np.testing.assert_array_equal(
+          logps, [[-0.25, -np.inf], [-0.75, -np.inf]]
+      )
+
+    # return_logprobs=False still returns top-k when num_logprobs > 1, while
+    # per-call num_logprobs=1 skips top-k (e.g. eval rollouts).
+    obj.config.return_logprobs = False
+    out_no_sampled = obj(None, 4, prompt_token_ids=[[1, 2]])
+    self.assertIsNone(out_no_sampled.logprobs)
+    self.assertLen(out_no_sampled.topk_token_ids, 1)
+    np.testing.assert_array_equal(
+        out_no_sampled.topk_token_ids[0], [[7, 0], [0, 0]]
+    )
+
+    out_eval = obj(
+        None,
+        4,
+        prompt_token_ids=[[1, 2]],
+        return_logprobs=False,
+        num_logprobs=1,
+    )
+    eval_params = obj.llm.generate.call_args.kwargs["sampling_params"]
+    self.assertEqual(eval_params.logprobs, 0)
+    self.assertIsNone(out_eval.logprobs)
+    self.assertIsNone(out_eval.topk_token_ids)
+    self.assertIsNone(out_eval.topk_logprobs)
 
   def test_invalid_token_inputs_fail_before_submission(self):
     for kwargs in (

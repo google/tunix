@@ -23,6 +23,7 @@ multi-pair trajectory collection.
 import asyncio
 import copy
 import inspect
+import itertools
 import json
 import time
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Sequence, Set, Tuple
@@ -178,6 +179,78 @@ async def _encode_turn_routed_async(
       step_obj.assistant_routed_experts = asst_r
       step_obj.env_routed_experts = env_r
   return encoded
+
+
+def _topk_padding(length: int, k: int) -> tuple[np.ndarray, np.ndarray]:
+  """Top-k ids and log probs (`0` / `-inf`) for tokens that were not sampled."""
+  return (
+      np.zeros((length, k), dtype=np.int32),
+      np.full((length, k), -np.inf, dtype=np.float32),
+  )
+
+
+def _extract_step_topk(
+    rollout_output: base_rollout.RolloutOutput,
+    sampled_tokens: int,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+  """Extracts and validates `[sampled_tokens, k]` top-k arrays for one turn."""
+  if (rollout_output.topk_token_ids is None) != (
+      rollout_output.topk_logprobs is None
+  ):
+    raise ValueError(
+        "RolloutOutput must set both topk_token_ids and topk_logprobs or"
+        " neither."
+    )
+  if rollout_output.topk_token_ids is None:
+    return None, None
+  assert rollout_output.topk_logprobs is not None
+  ids = rollout_output.topk_token_ids[0]
+  logps = rollout_output.topk_logprobs[0]
+  if (
+      ids.ndim != 2
+      or ids.shape != logps.shape
+      or (rollout_output.tokens and ids.shape[0] != sampled_tokens)
+  ):
+    raise ValueError(
+        "RolloutOutput top-k arrays must have matching shape"
+        f" ({sampled_tokens}, k); got {ids.shape} and {logps.shape}."
+    )
+  return ids, logps
+
+
+def _concat_steps_topk(
+    steps: List[agent_types.Step],
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+  """Concatenates `[len, k]` top-k logprobs across steps, padding env turns."""
+  arrays = itertools.chain.from_iterable(
+      (s.topk_token_ids, s.topk_logprobs) for s in steps
+  )
+  top_k = next((a.shape[-1] for a in arrays if a is not None), None)
+  if top_k is None:
+    return None, None
+  ids, logps = [], []
+  for idx, step in enumerate(steps):
+    if step.assistant_tokens is not None:
+      expected = (len(step.assistant_tokens), top_k)
+      if (
+          step.topk_token_ids is None
+          or step.topk_logprobs is None
+          or step.topk_token_ids.shape != expected
+          or step.topk_logprobs.shape != expected
+      ):
+        raise ValueError(
+            f"Step {idx} missing or mismatched top-k logprobs; expected"
+            f" {expected}."
+        )
+      ids.append(step.topk_token_ids)
+      logps.append(step.topk_logprobs)
+    if step.env_tokens is not None:
+      pad_ids, pad_logps = _topk_padding(len(step.env_tokens), top_k)
+      ids.append(pad_ids)
+      logps.append(pad_logps)
+  if not ids:
+    return None, None
+  return np.concatenate(ids), np.concatenate(logps)
 
 
 class TrajectoryCollectEngine:
@@ -843,6 +916,9 @@ class TrajectoryCollectEngine:
             casting="no",
         )
 
+      old_topk_ids, old_topk_logps = _concat_steps_topk(
+          self.agent.trajectory.steps
+      )
       result = {
           "conversation_text": self.agent.chat_completions,
           "prompt_tokens": prompt_tokens,
@@ -859,6 +935,8 @@ class TrajectoryCollectEngine:
           "old_logprobs": (
               np.concatenate(logprobs, axis=0) if logprobs else None
           ),
+          "old_topk_token_ids": old_topk_ids,
+          "old_topk_logprobs": old_topk_logps,
           "routed_experts": final_routed_experts,
           "policy_versions": self._collect_policy_versions(),
           "original_input": self.agent.trajectory.task,
@@ -1329,6 +1407,9 @@ class TrajectoryCollectEngine:
     cur_step = self.agent.trajectory.steps[step_idx]
     if rollout_output.logprobs is not None:
       cur_step.logprobs = rollout_output.logprobs[0]
+    cur_step.topk_token_ids, cur_step.topk_logprobs = _extract_step_topk(
+        rollout_output, sampled_tokens
+    )
     if self._current_step_initial_routed_experts is not None:
       cur_step.assistant_routed_experts = (
           self._current_step_initial_routed_experts
@@ -1358,6 +1439,19 @@ class TrajectoryCollectEngine:
           cur_step.logprobs = np.concatenate(
               [cur_step.logprobs, np.zeros(n_append, dtype=np.float32)],
               axis=0,
+          )
+        if (
+            cur_step.topk_token_ids is not None
+            and cur_step.topk_logprobs is not None
+        ):
+          pad_ids, pad_logps = _topk_padding(
+              n_append, cur_step.topk_token_ids.shape[-1]
+          )
+          cur_step.topk_token_ids = np.concatenate(
+              [cur_step.topk_token_ids, pad_ids]
+          )
+          cur_step.topk_logprobs = np.concatenate(
+              [cur_step.topk_logprobs, pad_logps]
           )
 
     logging.debug(

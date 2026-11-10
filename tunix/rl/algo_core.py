@@ -400,6 +400,40 @@ def ppo_value_loss_fn(
 # ==============================================================================
 
 
+def _score_centering_topk_ids(
+    train_example: common.TrainExample,
+    use_score_centering: bool,
+    should_fuse_sampler_agreement: bool,
+) -> jax.Array | np.ndarray | None:
+  """Validates Score Centering inputs and returns `old_topk_token_ids`."""
+  if not use_score_centering:
+    return None
+  topk_ids = train_example.old_topk_token_ids
+  topk_logps = train_example.old_topk_logps
+  if topk_ids is None or topk_logps is None:
+    raise ValueError("score_centering needs the sampler's top-k logprobs.")
+  if (
+      topk_ids.ndim != 3
+      or topk_ids.shape != topk_logps.shape
+      or topk_ids.shape[:2] != train_example.completion_ids.shape
+  ):
+    raise ValueError(
+        "score_centering expects matching [B, C, K] old_topk_token_ids and"
+        f" old_topk_logps aligned with completion_ids"
+        f" {train_example.completion_ids.shape}, got {topk_ids.shape} and"
+        f" {topk_logps.shape}."
+    )
+  if (
+      train_example.old_per_token_logps is not None
+      and not should_fuse_sampler_agreement
+  ):
+    raise ValueError(
+        "score_centering with old_per_token_logps requires fused single-step"
+        " sampler agreement."
+    )
+  return topk_ids
+
+
 @function_registry.register_policy_loss_fn("grpo")
 def grpo_loss_fn(
     model,
@@ -455,7 +489,18 @@ def grpo_loss_fn(
     token_mask = jnp.concatenate(
         [train_example.prompt_mask, completion_attention_mask], axis=1
     )
-  per_token_logps, token_entropy = common.compute_per_token_logps(
+  use_score_centering = algo_config.score_centering
+  sampler_is_weights = train_example.sampler_is_weights
+  should_fuse_sampler_agreement = (
+      algo_config.use_rollout_logps
+      and train_example.old_per_token_logps is not None
+      and sampler_is_weights is None
+      and not train_example.sampler_agreement_applied
+  )
+  topk_token_ids = _score_centering_topk_ids(
+      train_example, use_score_centering, should_fuse_sampler_agreement
+  )
+  logp_outputs = common.compute_per_token_logps(
       graphdef,
       state,
       prompt_tokens=train_example.prompt_ids,
@@ -470,19 +515,17 @@ def grpo_loss_fn(
       chunk_size=kwargs.get("compute_logps_chunk_size", 0),
       routed_experts=getattr(train_example, "routed_experts", None),
       token_mask=token_mask,
+      topk_token_ids=topk_token_ids,
   )
+  trainer_topk_logps = None
+  if use_score_centering:
+    logp_outputs, trainer_topk_logps = logp_outputs
+  per_token_logps, token_entropy = logp_outputs
   per_token_logps = jnp.astype(per_token_logps, jnp.float32)
   # TODO(tsbao): We should handle token level advantages.
   advantages = jnp.astype(train_example.advantages, jnp.float32)
 
-  sampler_is_weights = train_example.sampler_is_weights
   sa_metrics = {}
-  should_fuse_sampler_agreement = (
-      algo_config.use_rollout_logps
-      and train_example.old_per_token_logps is not None
-      and sampler_is_weights is None
-      and not train_example.sampler_agreement_applied
-  )
   if should_fuse_sampler_agreement:
     rollout_per_token_logps = jnp.astype(
         train_example.old_per_token_logps, jnp.float32
@@ -511,7 +554,10 @@ def grpo_loss_fn(
   # Use on-policy stop_gradient(per_token_logps) as the PPO ratio baseline when:
   # 1. No rollout/old logps were provided, or
   # 2. Fused in-loss IS/RS/error-masking is active (since sampler_is_weights
-  #    already corrects for trainer-vs-sampler divergence outside the PPO clip).
+  #    already corrects for trainer-vs-sampler divergence outside the PPO clip),
+  #    or
+  # 3. Fused in-loss Score Centering is active (the centering term below
+  #    corrects for the sampler-vs-trainer mismatch instead of the PPO ratio).
   use_on_policy_old_logps = (
       train_example.old_per_token_logps is None
       or (
@@ -520,6 +566,7 @@ def grpo_loss_fn(
               algo_config.sampler_is is not None
               or algo_config.sampler_rs is not None
               or algo_config.seq_logprob_error_threshold is not None
+              or use_score_centering
           )
       )
   )
@@ -633,6 +680,28 @@ def grpo_loss_fn(
     )
     per_token_loss = per_token_loss * safe_sis
 
+  # Score Centering (arXiv:2609.20807). The coefficients are detached, so the
+  # gradient flows only through the trainer's top-k log probabilities; the term
+  # is zero in value, so the reported loss is unchanged. Its IS weights mirror
+  # the token IS applied above, if any.
+  sc_stats = {}
+  if use_score_centering:
+    sc_logp_correction, sc_stats = common.compute_score_centering_correction(
+        trainer_topk_logps=trainer_topk_logps,  # pyrefly: ignore[bad-argument-type]
+        sampler_topk_logps=train_example.old_topk_logps,  # pyrefly: ignore[bad-argument-type]
+        sampler_is=algo_config.sampler_is,
+        sampler_is_threshold=algo_config.sampler_is_threshold,
+        eps=algo_config.score_centering_eps,
+        completion_mask=active_mask,
+        has_sampler_is_weights=sampler_is_weights is not None,
+        completion_ids=completion_ids,
+        topk_token_ids=jnp.asarray(topk_token_ids),
+    )
+    sc_logp_correction = jnp.where(
+        per_token_pg_clipfrac_lower > 0.0, 0.0, sc_logp_correction
+    )
+    per_token_loss = per_token_loss + adv * sc_logp_correction
+
   # Two independent aggregations of the same policy loss (equal today):
   #   unreduced (sum/denom, deferred) — feeds the gradient
   #   reduced   (eager per-sequence mean, pre-CL form) — metric only
@@ -700,6 +769,7 @@ def grpo_loss_fn(
         token_denom, token_denom, min_denom=1.0
     )
     aux["sampler_is/weight_min"] = jnp.float32(1.0)
+  aux.update(sc_stats)
   for metric_name, (metric_val, _) in sa_metrics.items():
     aux[metric_name] = metric_val
   # We do not always compute KL divergence (e.g. when beta is 0.0 unless

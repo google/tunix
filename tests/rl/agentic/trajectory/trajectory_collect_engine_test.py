@@ -1255,6 +1255,88 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     np.testing.assert_array_equal(routed[3], agent_types.UNSET_ROUTED_EXPERT)
 
   @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_token_mode_aligns_topk_with_conversation_tokens(self, mock_convert):
+    # The parser appends end token 999 to every assistant turn.
+    self.mock_chat_parser.update_assistant_end_tokens.side_effect = (
+        lambda tokens: (np.append(tokens, 999), 1)
+    )
+
+    def _output(prompt, tokens, topk_ids, topk_logprobs='auto'):
+      if topk_logprobs in ('auto', 'ok') and topk_ids is not None:
+        lps = [np.tile(np.float32([-0.1, -2.0]), (len(tokens), 1))]
+      elif topk_logprobs is None or topk_ids is None:
+        lps = None
+      else:
+        lps = [np.array(topk_logprobs, np.float32)]
+      return RolloutOutput(
+          text=['resp'],
+          logits=None,
+          tokens=[np.array(tokens, dtype=np.int32)],
+          left_padded_prompt_tokens=np.array([prompt], dtype=np.int32),
+          prompt_lengths=np.array([len(prompt)], dtype=np.int32),
+          logprobs=[np.full(len(tokens), -0.1, dtype=np.float32)],
+          topk_token_ids=(
+              None if topk_ids is None else [np.array(topk_ids, np.int32)]
+          ),
+          topk_logprobs=lps,
+      )
+
+    for bad_second in (
+        None,
+        ([[203, 7, 8]], 'auto'),  # intra-step ids vs logprobs mismatch
+        ([[203, 7, 8]], [[-0.1, -2.0, -3.0]]),  # cross-step k=2 vs k=3 mismatch
+        ([[203, 7]], None),  # missing topk_logprobs
+        ([[203, 7]], 'ok'),
+    ):
+      with self.subTest(bad_second=bad_second):
+        mock_convert.side_effect = [
+            ([301, 302], [0, 0]),  # env tokens after turn 1
+        ]
+        self.mock_env.step.side_effect = [
+            ('obs1', 1.0, False, {}),
+            ('obs2', 2.0, True, {}),
+        ]
+        second_ids, second_lps = (
+            (None, None) if bad_second is None else bad_second
+        )
+        self.mock_model_call.side_effect = [
+            _output([101], [201, 202], [[201, 5], [202, 6]]),
+            _output(
+                [101, 201, 202, 999, 301, 302],
+                [203],
+                second_ids,
+                second_lps,
+            ),
+        ]
+        engine = trajectory_collect_engine.TrajectoryCollectEngine(
+            agent=self.mock_agent,
+            env=self.mock_env,
+            model_call=self.mock_model_call,
+            tokenizer=self.mock_tokenizer,
+            chat_parser=self.mock_chat_parser,
+        )
+        if second_lps != 'ok':
+          with self.assertRaisesRegex(ValueError, 'top-k|topk'):
+            asyncio.run(self._run_collect(engine, mode='Token'))
+          continue
+        token_data = asyncio.run(self._run_collect(engine, mode='Token'))
+
+        np.testing.assert_array_equal(
+            token_data['conversation_tokens'],
+            [201, 202, 999, 301, 302, 203, 999],
+        )
+        ids = token_data['old_topk_token_ids']
+        logps = token_data['old_topk_logprobs']
+        sampled = np.array([1, 1, 0, 0, 0, 1, 0], dtype=bool)
+        np.testing.assert_array_equal(
+            ids[sampled], [[201, 5], [202, 6], [203, 7]]
+        )
+        np.testing.assert_allclose(logps[sampled], [[-0.1, -2.0]] * 3)
+        # Parser-suffix and environment tokens were not sampled.
+        np.testing.assert_array_equal(ids[~sampled], 0)
+        np.testing.assert_array_equal(logps[~sampled], -np.inf)
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
   def test_env_routed_experts_length_mismatch_raises_error(self, mock_convert):
     mock_convert.side_effect = [
         ([301, 302, 303], [1, 1, 1]),  # env tokens len 3

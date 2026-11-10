@@ -48,6 +48,60 @@ GRPOConfig = algo_config_lib.GRPOConfig
 TGrpoConfig = TypeVar("TGrpoConfig", bound=GRPOConfig)
 
 
+def _validate_score_centering_rollout(
+    algo_config: GRPOConfig,
+    rl_engine: rl_engine_lib.RLEngine,
+    packing_enabled: bool,
+) -> None:
+  """Validates `score_centering` rollout and packing requirements."""
+  if not algo_config.score_centering:
+    return
+  rollout_config = rl_engine.get_rollout_config(mode=rl_engine_lib.Mode.TRAIN)
+  if (
+      rl_engine.cluster_config.rollout_engine != "vllm"
+      or (algo_config.use_rollout_logps and not rollout_config.return_logprobs)
+      or rollout_config.num_logprobs < algo_config.score_centering_top_k
+      or packing_enabled
+  ):
+    raise ValueError(
+        "score_centering requires the vLLM rollout with"
+        " num_logprobs >= score_centering_top_k (and return_logprobs=True when"
+        " use_rollout_logps=True) on the train RolloutConfig, and no sequence"
+        " packing."
+    )
+
+
+def _pad_rollout_topk(
+    rollout_output: rl_engine_lib.base_rollout.RolloutOutput,
+    max_length: int,
+    k: int,
+) -> tuple[np.ndarray, np.ndarray]:
+  """Pads `rollout_output`'s leading `k` top-k columns to `max_length`."""
+  tk_ids = rollout_output.topk_token_ids
+  tk_logps = rollout_output.topk_logprobs
+  if tk_ids is None or tk_logps is None:
+    raise ValueError("score_centering needs top-k logprobs from the rollout.")
+  batch = len(rollout_output.tokens)
+  ids = np.zeros((batch, max_length, k), dtype=np.int32)
+  logps = np.full((batch, max_length, k), -np.inf, dtype=np.float32)
+  for i, tokens in enumerate(rollout_output.tokens):
+    length = len(tokens)
+    if (
+        tk_ids[i].shape != tk_logps[i].shape
+        or tk_ids[i].ndim != 2
+        or tk_ids[i].shape[0] != length
+        or tk_ids[i].shape[1] < k
+    ):
+      raise ValueError(
+          f"Completion {i} needs [{length}, >= {k}] top-k logprobs, got"
+          f" {tk_ids[i].shape}."
+      )
+    n = min(length, max_length)
+    ids[i, :n] = tk_ids[i][:n, :k]
+    logps[i, :n] = tk_logps[i][:n, :k]
+  return ids, logps
+
+
 class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
   """GRPO (Group Relative Policy Optimization) learner.
 
@@ -100,6 +154,9 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     self.algo_config.temperature = self.rl_engine.get_rollout_config(
         mode=rl_engine_lib.Mode.TRAIN
     ).temperature
+    _validate_score_centering_rollout(
+        self.algo_config, self.rl_engine, self._packing_enabled
+    )
 
     policy_loss_fn = function_registry.get_policy_loss_fn(
         self.algo_config.policy_loss_fn
@@ -146,6 +203,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         "sampler_trainer/probs_pearson_corr": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
         "sampler_trainer/seq_error_masked_frac": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
         "sampler_trainer/seq_error_masked_count": np.sum,
+        **common.SCORE_CENTERING_METRICS,
     })
     self.rl_engine.actor_trainer.with_tqdm_metrics_to_display([  # pyrefly: ignore[bad-argument-type]
         lambda: "kl" if self.algo_config.beta != 0.0 else None,
@@ -262,12 +320,15 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
           for logprobs in rollout_output.logprobs
       ])
       old_per_token_logps = rollout_per_token_logps
-    needs_trainer_logps = not self.algo_config.use_rollout_logps or (
-        rollout_per_token_logps is not None
-        and (
-            self.algo_config.sampler_is is not None
-            or self.algo_config.sampler_rs is not None
-            or self.algo_config.seq_logprob_error_threshold is not None
+    needs_trainer_logps = not self.algo_config.score_centering and (
+        not self.algo_config.use_rollout_logps
+        or (
+            rollout_per_token_logps is not None
+            and (
+                self.algo_config.sampler_is is not None
+                or self.algo_config.sampler_rs is not None
+                or self.algo_config.seq_logprob_error_threshold is not None
+            )
         )
     )
     if needs_trainer_logps:
@@ -380,6 +441,14 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
       )
       self.rl_engine.buffer_metrics(user_defined_metric, mode=mode)
 
+    old_topk_token_ids = old_topk_logps = None
+    if self.algo_config.score_centering:
+      old_topk_token_ids, old_topk_logps = _pad_rollout_topk(
+          rollout_output,
+          rollout_config.max_tokens_to_generate,
+          self.algo_config.score_centering_top_k,
+      )
+
     return TrainExample(
         prompt_ids=prompt_ids,
         prompt_mask=prompt_mask,
@@ -389,6 +458,8 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         advantages=jax.device_put(advantages),
         old_per_token_logps=old_per_token_logps,
         sampler_is_weights=sampler_is_weights,
+        old_topk_token_ids=old_topk_token_ids,
+        old_topk_logps=old_topk_logps,
         routed_experts=(
             None if routed_experts is None else jax.device_put(routed_experts)
         ),
