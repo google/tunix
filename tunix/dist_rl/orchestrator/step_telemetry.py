@@ -21,7 +21,7 @@ running program.
 """
 
 import collections
-from collections.abc import Mapping, Sequence
+from collections.abc import Hashable, Mapping, Sequence
 import dataclasses
 from typing import Any
 
@@ -201,6 +201,7 @@ class RolloutFacts:
 
   Attributes:
     traj_id: The rollout's trajectory id.
+    prompt_id: The prompt identifier grouping rollouts in a GRPO cohort.
     status: Name of the `TrajectoryStatus` the rollout ended in.
     num_turns: Assistant turns in `conversation_text`, or None without one.
     turn_lengths: Tokens sampled per assistant turn, from the
@@ -218,6 +219,7 @@ class RolloutFacts:
   num_turns: int | None
   turn_lengths: Sequence[int] | None
   window: RolloutWindow | None
+  prompt_id: Hashable | None = None
   task_name: str = ""
   env_time_s: float | None = None
 
@@ -248,6 +250,7 @@ class RolloutFacts:
     )
     return cls(
         traj_id=item.traj_id,
+        prompt_id=item.prompt_id,
         status=traj["status"].name,
         num_turns=_num_turns(traj),
         turn_lengths=traj.get("assistant_turn_lengths"),
@@ -280,6 +283,8 @@ def _add_percentiles(
     include_mean: bool = False,
 ) -> None:
   """Records `prefix/{mean,pXX,...,max}` summary statistics into `metrics`."""
+  if len(values) == 0:
+    return
   if include_mean:
     metrics[f"{prefix}/mean"] = float(np.mean(values))
   for p, val in zip(
@@ -317,9 +322,14 @@ def rollout_health(facts: Sequence[RolloutFacts]) -> RolloutHealth:
       and `rollout/worker_queue_wait_sec/{p50,p90,p99,max}` is
       `max(0, (finish_time_s - received_time_s) - execution_sec)` measured on
       the winning worker's clock (`duration ≈ dispatch_delay +
-      worker_queue_wait + execution`). `rollout/tail_sec` is max - p50, and
+      worker_queue_wait + execution`). `rollout/tail_sec` is max - p50,
       `rollout/batch_wall_sec` is the maximum cohort span from first dispatch
-      to last finish within each `batch_idx` cohort.
+      to last finish within each `batch_idx` cohort, and
+      `rollout/group_straggler_sec/{mean,p50,p90,p99,max}` is the first-to-last
+      finish span (`max(finish_time_s) - min(finish_time_s)`) within each
+      `(batch_idx, prompt_id)` group with `> 1` rollout (including cross-host
+      clock skew when a prompt group is striped across multiple rollout
+      workers).
 
   The turn and duration families skip rollouts that lack their inputs and are
   omitted when no rollout has them.
@@ -335,6 +345,9 @@ def rollout_health(facts: Sequence[RolloutFacts]) -> RolloutHealth:
   turn_lengths: list[int] = []
   windows: list[RolloutWindow] = []
   env_times: list[float] = []
+  by_prompt: collections.defaultdict[
+      tuple[int | None, Hashable], list[RolloutWindow]
+  ] = collections.defaultdict(list)
   for fact in facts:
     status_counts[fact.status] += 1
     if fact.num_turns is not None:
@@ -343,6 +356,8 @@ def rollout_health(facts: Sequence[RolloutFacts]) -> RolloutHealth:
       turn_lengths.extend(fact.turn_lengths)
     if fact.window is not None:
       windows.append(fact.window)
+      if fact.prompt_id not in (None, ""):
+        by_prompt[(fact.window.batch_idx, fact.prompt_id)].append(fact.window)
     if fact.env_time_s is not None:
       env_times.append(fact.env_time_s)
 
@@ -353,18 +368,12 @@ def rollout_health(facts: Sequence[RolloutFacts]) -> RolloutHealth:
   if turns:
     metrics["rollout/num_turns_mean"] = float(np.mean(turns))
     metrics["rollout/num_turns_max"] = float(np.max(turns))
-  if turn_lengths:
-    _add_percentiles(
-        metrics,
-        "rollout/turn_length",
-        turn_lengths,
-        (50, 99),
-        include_mean=True,
-    )
-  if env_times:
-    _add_percentiles(
-        metrics, "rollout/env_time_sec", env_times, (50, 99), include_mean=True
-    )
+  _add_percentiles(
+      metrics, "rollout/turn_length", turn_lengths, (50, 99), include_mean=True
+  )
+  _add_percentiles(
+      metrics, "rollout/env_time_sec", env_times, (50, 99), include_mean=True
+  )
   if windows:
     durations = np.array([window.duration_s for window in windows])
     _add_percentiles(metrics, "rollout/duration_sec", durations)
@@ -384,26 +393,36 @@ def rollout_health(facts: Sequence[RolloutFacts]) -> RolloutHealth:
             for cohort in cohorts.values()
         )
     )
+    group_lags = [
+        max(w.finish_time_s for w in grp) - min(w.finish_time_s for w in grp)
+        for grp in by_prompt.values()
+        if len(grp) > 1
+    ]
+    _add_percentiles(
+        metrics,
+        "rollout/group_straggler_sec",
+        group_lags,
+        (50, 90, 99),
+        include_mean=True,
+    )
     dispatch_delays = [
         max(0.0, window.received_time_s - window.dispatch_time_s)
         for window in windows
         if window.received_time_s is not None
     ]
-    if dispatch_delays:
-      _add_percentiles(metrics, "rollout/dispatch_delay_sec", dispatch_delays)
+    _add_percentiles(metrics, "rollout/dispatch_delay_sec", dispatch_delays)
     exec_durations = [
         window.execution_time_s
         for window in windows
         if window.execution_time_s is not None
     ]
-    if exec_durations:
-      _add_percentiles(metrics, "rollout/execution_sec", exec_durations)
-      queue_waits = [
-          max(0.0, window.duration_s - window.execution_time_s)
-          for window in windows
-          if window.execution_time_s is not None
-      ]
-      _add_percentiles(metrics, "rollout/queue_wait_sec", queue_waits)
+    _add_percentiles(metrics, "rollout/execution_sec", exec_durations)
+    queue_waits = [
+        max(0.0, window.duration_s - window.execution_time_s)
+        for window in windows
+        if window.execution_time_s is not None
+    ]
+    _add_percentiles(metrics, "rollout/queue_wait_sec", queue_waits)
     worker_queue_waits = [
         max(
             0.0,
@@ -414,10 +433,9 @@ def rollout_health(facts: Sequence[RolloutFacts]) -> RolloutHealth:
         if window.received_time_s is not None
         and window.execution_time_s is not None
     ]
-    if worker_queue_waits:
-      _add_percentiles(
-          metrics, "rollout/worker_queue_wait_sec", worker_queue_waits
-      )
+    _add_percentiles(
+        metrics, "rollout/worker_queue_wait_sec", worker_queue_waits
+    )
   return RolloutHealth(metrics=metrics, status_counts=status_counts)
 
 

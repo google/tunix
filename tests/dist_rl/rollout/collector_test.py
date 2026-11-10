@@ -395,13 +395,53 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
       )
       return await engine.run_episode()
 
-    item = asyncio.run(_run())
+    with mock.patch.object(collector, "time") as mock_time:
+      mock_time.perf_counter.side_effect = [10.0, 10.45, 20.0, 20.30]
+      item = asyncio.run(_run())
 
     # The second turn uses up the response budget, so the overlong filter
     # zeroes the training mask; the per-turn lengths are recorded regardless.
     self.assertEqual(item.traj["status"], "MAX_CONTEXT_LIMIT_REACHED")
     self.assertFalse(np.any(item.traj["conversation_masks"]))
     self.assertEqual(item.traj["assistant_turn_lengths"], [30, 20])
+    self.assertAlmostEqual(item.traj["sampler_time_s"], 0.75)
+
+  def test_run_episode_records_sampler_time_on_timed_out_turn(self):
+    never_set = asyncio.Event()
+
+    class _SlowSecondTurnSampler(_MockSampler):
+
+      async def sample(self, req, **kwargs):
+        if self._call_count == 1:
+          await never_set.wait()
+        return await super().sample(req, **kwargs)
+
+    async def _run():
+      engine = collector.TrajectoryCollectorEngine(
+          traj_id="t_timeout",
+          request=datatypes.RolloutRequest(
+              prompt_id="p1",
+              prompt="What is 2+2?",
+              max_response_length=50,
+              metadata={"episode_timeout": 0.25},
+          ),
+          sampler=_SlowSecondTurnSampler(token_lengths=[10, 10]),
+          env_client=_MultiStepEnv(
+              task={"question": "2+2", "answer": "4"}, max_steps=3
+          ),
+          agent=model_agent.ModelAgent("test_agent"),
+          tokenizer=_MockTokenizer(),
+          chat_parser=_RecordingParser(),
+      )
+      return await engine.run_episode()
+
+    with mock.patch.object(collector, "time") as mock_time:
+      mock_time.perf_counter.side_effect = [1.0, 1.15, 2.0, 2.05]
+      item = asyncio.run(_run())
+
+    self.assertEqual(item.traj["status"], "TIMEOUT")
+    self.assertEqual(item.traj["assistant_turn_lengths"], [10])
+    self.assertAlmostEqual(item.traj["sampler_time_s"], 0.20)
 
   def test_model_call_preserves_explicit_seed_in_generation_kwargs(self):
     async def _run():
@@ -666,10 +706,12 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
     )
     agent = mocks.MockAgent()
     agent.trajectory.steps = [
-        types.SimpleNamespace(info={"guard_blocked": True,
-                                    "guard_reason": "invalid_action"}),
-        types.SimpleNamespace(info={"guard_blocked": True,
-                                    "guard_reason": "invalid_action"}),
+        types.SimpleNamespace(
+            info={"guard_blocked": True, "guard_reason": "invalid_action"}
+        ),
+        types.SimpleNamespace(
+            info={"guard_blocked": True, "guard_reason": "invalid_action"}
+        ),
         types.SimpleNamespace(info={"guard_blocked": False}),
     ]
     engine = collector.TrajectoryCollectorEngine(

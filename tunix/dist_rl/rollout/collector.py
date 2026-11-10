@@ -15,6 +15,7 @@
 """Trajectory Collector Engine wrapping TrajectoryCollectEngine with pause/resume/cancel control."""
 
 import asyncio
+import time
 from typing import Any, Callable, Collection, List, Mapping, Optional, Sequence
 from absl import logging
 import numpy as np
@@ -176,6 +177,7 @@ class TrajectoryCollectorEngine:
   async def run_episode(self) -> agent_types.TrajectoryItem:
     """Executes multi-turn agentic rollout episode and returns TrajectoryItem."""
     self._episode_cache_salt = None
+    sampler_time_s = 0.0
 
     # Note: model_call is an async coroutine callback invoked directly by
     # TrajectoryCollectEngine on the asyncio event loop without blocking
@@ -184,6 +186,7 @@ class TrajectoryCollectorEngine:
         chat_completions, env=None, max_generation_steps=None, **kwargs
     ):
       del env
+      nonlocal sampler_time_s
       await self._unpaused.wait()
       generation_kwargs = dict(self.request.generation_kwargs)
       # NB: extra kwargs can be passed in from trajectory_collect_engine.
@@ -257,7 +260,11 @@ class TrajectoryCollectorEngine:
           prompt=prompt_payload,
           sampling_params=sampling_params,
       )
-      res = await self.sampler.sample(sampling_req, **generation_kwargs)
+      sample_start = time.perf_counter()
+      try:
+        res = await self.sampler.sample(sampling_req, **generation_kwargs)
+      finally:
+        sampler_time_s += time.perf_counter() - sample_start
       text = res if isinstance(res, str) else getattr(res, "text", str(res))
       tokens = getattr(res, "token_ids", np.array([], dtype=np.int32))
       logprobs = getattr(res, "logprobs", None)
@@ -309,7 +316,7 @@ class TrajectoryCollectorEngine:
     self._inner_engine = inner_engine
     rl_traj = await inner_engine.collect(mode="Token")
     self.is_done = True
-    return self._convert_to_trajectory(rl_traj)
+    return self._convert_to_trajectory(rl_traj, sampler_time_s=sampler_time_s)
 
   def _annotate_response_budget(
       self, rl_traj: Mapping[str, Any], metadata: dict[str, Any]
@@ -394,13 +401,18 @@ class TrajectoryCollectorEngine:
     metadata["clipped"] = clipped
 
   def _convert_to_trajectory(
-      self, rl_traj: dict[str, Any]
+      self,
+      rl_traj: dict[str, Any],
+      *,
+      sampler_time_s: float | None = None,
   ) -> agent_types.TrajectoryItem:
     """Converts internal Token-mode rollout trajectory to agent_types.TrajectoryItem."""
     if not isinstance(rl_traj, dict):
       raise TypeError(
           f"Expected rl_traj to be a dict, got {type(rl_traj).__name__}"
       )
+    if sampler_time_s is not None:
+      rl_traj["sampler_time_s"] = sampler_time_s
 
     # Metadata carries only request-scoped context. Everything about the
     # episode itself stays on `traj`, which is the single source of truth and

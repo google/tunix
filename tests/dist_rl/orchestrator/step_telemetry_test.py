@@ -70,6 +70,7 @@ def _rollout_lineage(
 def _health_item(
     group_index=0,
     *,
+    prompt_id="p0",
     status=datatypes.TrajectoryStatus.SUCCEEDED,
     num_turns=None,
     turn_lengths=None,
@@ -108,7 +109,7 @@ def _health_item(
         task_name=task_name,
     )
   return datatypes.TrajectoryItem(
-      prompt_id="p0", group_index=group_index, traj=traj, metadata=metadata
+      prompt_id=prompt_id, group_index=group_index, traj=traj, metadata=metadata
   )
 
 
@@ -407,15 +408,45 @@ class RolloutHealthTest(absltest.TestCase):
 
   def test_groups_batch_wall_sec_by_batch_idx_cohort(self):
     # Cohort 0 ran in [100, 140] (40s); cohort 1 ran in [300, 330] (30s).
-    # Grouping by `batch_idx` reports max(40, 30) = 40s rather than 330 - 100.
+    # Grouping by `batch_idx` reports max(40, 30) = 40s rather than 330 - 100,
+    # and scopes `group_straggler_sec` per `(batch_idx, prompt_id)` cohort.
     health = step_telemetry.rollout_health(
         _facts(
-            _health_item(0, window=(100.0, 140.0), batch_idx=0),
-            _health_item(1, window=(300.0, 330.0), batch_idx=1),
+            _health_item(0, prompt_id="p0", window=(100.0, 100.0), batch_idx=0),
+            _health_item(1, prompt_id="p0", window=(100.0, 140.0), batch_idx=0),
+            _health_item(0, prompt_id="p0", window=(300.0, 300.0), batch_idx=1),
+            _health_item(1, prompt_id="p0", window=(300.0, 330.0), batch_idx=1),
         )
     )
 
     self.assertEqual(health.metrics["rollout/batch_wall_sec"], 40.0)
+    self.assertEqual(health.metrics["rollout/group_straggler_sec/max"], 40.0)
+
+  def test_computes_group_straggler_sec_from_first_to_last_finish_per_prompt(
+      self,
+  ):
+    # Prompt p0 finishes at 110s and 130s (group lag = 20s).
+    # Prompt p1 finishes at 105s and 145s (group lag = 40s).
+    # Prompt p2 has only 1 sample (skipped for intra-group lag).
+    health = step_telemetry.rollout_health(
+        _facts(
+            _health_item(0, prompt_id="p0", window=(100.0, 110.0)),
+            _health_item(1, prompt_id="p0", window=(100.0, 130.0)),
+            _health_item(0, prompt_id="p1", window=(100.0, 105.0)),
+            _health_item(1, prompt_id="p1", window=(100.0, 145.0)),
+            _health_item(0, prompt_id="p2", window=(100.0, 200.0)),
+        )
+    )
+
+    self.assertEqual(health.metrics["rollout/group_straggler_sec/mean"], 30.0)
+    self.assertEqual(health.metrics["rollout/group_straggler_sec/p50"], 30.0)
+    self.assertAlmostEqual(
+        health.metrics["rollout/group_straggler_sec/p90"], 38.0
+    )
+    self.assertAlmostEqual(
+        health.metrics["rollout/group_straggler_sec/p99"], 39.8
+    )
+    self.assertEqual(health.metrics["rollout/group_straggler_sec/max"], 40.0)
 
   def test_omits_families_without_inputs(self):
     health = step_telemetry.rollout_health(_facts(_health_item(0)))
@@ -425,6 +456,7 @@ class RolloutHealthTest(absltest.TestCase):
     self.assertNotIn("rollout/turn_length/max", health.metrics)
     self.assertNotIn("rollout/duration_sec/max", health.metrics)
     self.assertNotIn("rollout/batch_wall_sec", health.metrics)
+    self.assertNotIn("rollout/group_straggler_sec/max", health.metrics)
 
   def test_no_rollouts_report_no_metrics(self):
     health = step_telemetry.rollout_health([])
