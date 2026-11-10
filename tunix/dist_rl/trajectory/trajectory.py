@@ -14,6 +14,7 @@ import dataclasses
 import datetime
 import enum
 import functools
+import logging
 import math
 import sys
 import types
@@ -1082,6 +1083,16 @@ class Agent(pydantic.BaseModel):
   )
 
 
+def _rehydrate_sequence(
+    items: Sequence[Any],
+    rehydrator: Callable[[Any], Any] | None,
+) -> list[Any]:
+  """Copies `items` into a list, applying `rehydrator` when provided."""
+  if rehydrator is None:
+    return list(items)
+  return [rehydrator(item) for item in items]
+
+
 class TrajectoryMetadata(pydantic.BaseModel):
   """Metadata for a trajectory (excluding steps and subagents)."""
 
@@ -1296,6 +1307,10 @@ class TrajectoryMetadata(pydantic.BaseModel):
       trajectory_cls: type[TrajectoryT],
       steps: Sequence[Any] | None,
       subagent_trajectories: Sequence[Any] | None,
+      *,
+      step_rehydrator: Callable[[Any], Any] | None = None,
+      subagent_rehydrator: Callable[..., Any] | None = None,
+      strict: bool = True,
   ) -> TrajectoryT:
     """Constructs `trajectory_cls` from this metadata, steps, and subagents.
 
@@ -1307,6 +1322,12 @@ class TrajectoryMetadata(pydantic.BaseModel):
       trajectory_cls: Concrete Trajectory class to build.
       steps: Sequence of step instances, or None.
       subagent_trajectories: Sequence of subagent trajectory instances, or None.
+      step_rehydrator: Optional callable applied to each step before validation.
+      subagent_rehydrator: Optional callable applied to each subagent trajectory
+        before validation.
+      strict: Whether to raise on validation or step-sequence errors. When
+        False, skips corrupt items and retains the longest contiguous step
+        prefix starting from `trajectory_cls.STEP_ID_START`.
 
     Returns:
       The constructed paired trajectory instance.
@@ -1327,10 +1348,75 @@ class TrajectoryMetadata(pydantic.BaseModel):
         "subagent_trajectories",
     }
     data = {field: getattr(self, field) for field in metadata_fields}
+    if strict:
+      if steps is not None:
+        data["steps"] = _rehydrate_sequence(steps, step_rehydrator)
+      if subagent_trajectories is not None:
+        data["subagent_trajectories"] = _rehydrate_sequence(
+            subagent_trajectories,
+            subagent_rehydrator,
+        )
+      return trajectory_cls(**data)
+
+    rehydrated_steps: list[Any] = []
+    if steps:
+      for step in steps:
+        try:
+          rehydrated_step = (
+              step_rehydrator(step) if step_rehydrator is not None else step
+          )
+          if not isinstance(rehydrated_step, Step):
+            raise TypeError(
+                f"Expected Step instance, got {type(rehydrated_step).__name__}"
+            )
+          rehydrated_steps.append(rehydrated_step)
+        except Exception:  # pylint: disable=broad-exception-caught
+          logging.warning(
+              "Skipping corrupted step %s in trajectory %r.",
+              getattr(step, "step_id", None),
+              self.trajectory_id,
+              exc_info=True,
+          )
+    sorted_steps = sorted(rehydrated_steps, key=lambda s: s.step_id)
+    valid_steps: list[Any] = []
+    expected_step_id = trajectory_cls.STEP_ID_START
+    for step in sorted_steps:
+      if step.step_id != expected_step_id:
+        break
+      valid_steps.append(step)
+      expected_step_id += 1
     if steps is not None:
-      data["steps"] = list(steps)
+      data["steps"] = valid_steps
     if subagent_trajectories is not None:
-      data["subagent_trajectories"] = list(subagent_trajectories)
+      valid_subagents: list[Any] = []
+      seen_subagent_ids: set[str] = set()
+      for subagent_trajectory in subagent_trajectories:
+        try:
+          rehydrated_subagent = (
+              subagent_rehydrator(subagent_trajectory, strict=False)
+              if subagent_rehydrator is not None
+              else subagent_trajectory
+          )
+          if not isinstance(rehydrated_subagent, Trajectory):
+            raise TypeError(
+                "Expected Trajectory instance, got"
+                f" {type(rehydrated_subagent).__name__}"
+            )
+          subagent_id = rehydrated_subagent.trajectory_id
+          if subagent_id is None or subagent_id in seen_subagent_ids:
+            raise ValueError(
+                f"Invalid or duplicate subagent trajectory_id: {subagent_id!r}"
+            )
+          seen_subagent_ids.add(subagent_id)
+          valid_subagents.append(rehydrated_subagent)
+        except Exception:  # pylint: disable=broad-exception-caught
+          logging.warning(
+              "Skipping corrupted subagent trajectory %r in trajectory %r.",
+              getattr(subagent_trajectory, "trajectory_id", None),
+              self.trajectory_id,
+              exc_info=True,
+          )
+      data["subagent_trajectories"] = valid_subagents
     return trajectory_cls(**data)
 
   @classmethod
@@ -1374,6 +1460,9 @@ class TrajectoryMetadata(pydantic.BaseModel):
       self,
       steps: Sequence[Any] | None = None,
       subagent_trajectories: Sequence[Any] | None = None,
+      *,
+      strict: bool = True,
+      is_incomplete: bool = False,
   ) -> Trajectory[Any]:
     """Creates a full Trajectory from this metadata, steps, and subagents.
 
@@ -1385,13 +1474,22 @@ class TrajectoryMetadata(pydantic.BaseModel):
     Args:
       steps: Sequence of step instances, or None.
       subagent_trajectories: Sequence of subagent trajectory instances, or None.
+      strict: Whether to enforce strict sequential step IDs and raise on step
+        validation errors. When False, skips corrupted steps and retains the
+        longest contiguous prefix starting from `STEP_ID_START`.
+      is_incomplete: Whether any step was already skipped as corrupted before
+        calling this method.
 
     Returns:
       The constructed trajectory instance.
     """
+    del is_incomplete
     trajectory_cls = self._get_or_create_paired_trajectory_cls()
     return self._create_paired_trajectory(
-        trajectory_cls, steps, subagent_trajectories
+        trajectory_cls,
+        steps,
+        subagent_trajectories,
+        strict=strict,
     )
 
 
@@ -1403,7 +1501,7 @@ class Trajectory(TrajectoryMetadata, Generic[StepT]):
 
   # First step_id in a well-formed trajectory; step_ids must be sequential
   # from here.
-  _STEP_ID_START: ClassVar[int] = 1
+  STEP_ID_START: ClassVar[int] = 1
 
   steps: list[StepT] = pydantic.Field(
       default_factory=list,
@@ -1417,14 +1515,19 @@ class Trajectory(TrajectoryMetadata, Generic[StepT]):
   @pydantic.field_validator("steps")
   @classmethod
   def validate_step_ids(cls, steps: list[StepT]) -> list[StepT]:
-    """Validate that step_ids are sequential from `_STEP_ID_START`."""
-    steps.sort(key=lambda step: step.step_id)
-    for expected_step_id, step in enumerate(steps, start=cls._STEP_ID_START):
+    """Validate that step_ids are sequential from `STEP_ID_START`."""
+    for expected_step_id, step in enumerate(steps, start=cls.STEP_ID_START):
       if step.step_id != expected_step_id:
-        raise ValueError(
-            f"Expected step_id {expected_step_id} (sequential from"
-            f" {cls._STEP_ID_START}), got {step.step_id}"
-        )
+        steps.sort(key=lambda s: s.step_id)
+        for sorted_expected_id, sorted_step in enumerate(
+            steps, start=cls.STEP_ID_START
+        ):
+          if sorted_step.step_id != sorted_expected_id:
+            raise ValueError(
+                f"Expected step_id {sorted_expected_id} (sequential from"
+                f" {cls.STEP_ID_START}), got {sorted_step.step_id}"
+            )
+        break
     return steps
 
   @pydantic.field_validator("subagent_trajectories")
@@ -1489,7 +1592,7 @@ class Trajectory(TrajectoryMetadata, Generic[StepT]):
     Returns:
       The newly created and appended step.
     """
-    step_id = len(self.steps) + self._STEP_ID_START
+    step_id = len(self.steps) + self.STEP_ID_START
     new_step = Step(
         step_id=step_id,
         timestamp=timestamp or datetime.datetime.now(datetime.timezone.utc),
@@ -1794,7 +1897,10 @@ class TunixTrajectoryMetadata(TrajectoryMetadata):
   def create_trajectory(
       self,
       steps: Sequence[Step] | None = None,
-      subagent_trajectories: Sequence[Trajectory] | None = None,
+      subagent_trajectories: Sequence[Trajectory[Any]] | None = None,
+      *,
+      strict: bool = True,
+      is_incomplete: bool = False,
   ) -> TunixTrajectory:
     """Creates a TunixTrajectory, rehydrating 1-indexed ATIF inputs.
 
@@ -1803,20 +1909,40 @@ class TunixTrajectoryMetadata(TrajectoryMetadata):
         the Tunix subclass for their source), or None.
       subagent_trajectories: Embedded Tunix subagent trajectories (kept as-is)
         or 1-indexed ATIF trajectories (rehydrated recursively), or None.
+      strict: Whether to enforce sequential step IDs and raise on step or
+        subagent rehydration errors. When False, skips corrupted items, retains
+        the longest contiguous prefix from `STEP_ID_START`, and resets `status`
+        and `total_reward` to `None` when incomplete.
+      is_incomplete: Whether any step was already skipped as corrupted before
+        calling this method.
 
     Returns:
       The constructed TunixTrajectory.
     """
-    if steps is not None:
-      steps = [_upcast_atif_step(step) for step in steps]
-    if subagent_trajectories is not None:
-      subagent_trajectories = [
-          TunixTrajectory.from_atif_trajectory(subagent_trajectory)
-          for subagent_trajectory in subagent_trajectories
-      ]
-    return self._create_paired_trajectory(
-        TunixTrajectory, steps, subagent_trajectories
+    trajectory = self._create_paired_trajectory(
+        TunixTrajectory,
+        steps,
+        subagent_trajectories,
+        step_rehydrator=_upcast_atif_step,
+        subagent_rehydrator=TunixTrajectory.from_atif_trajectory,
+        strict=strict,
     )
+    if not strict:
+      num_input_steps = len(steps) if steps is not None else 0
+      num_valid_steps = len(trajectory.steps)
+      expected_total = (
+          self.final_metrics.total_steps
+          if self.final_metrics is not None
+          else None
+      )
+      tail_mismatch = self.status in ("COMPLETED", "SUCCEEDED") and (
+          (expected_total is not None and num_valid_steps < expected_total)
+          or (expected_total is None and num_valid_steps == 0)
+      )
+      if is_incomplete or num_valid_steps < num_input_steps or tail_mismatch:
+        trajectory.status = None
+        trajectory.total_reward = None
+    return trajectory
 
 
 class TunixTrajectory(
@@ -1825,7 +1951,7 @@ class TunixTrajectory(
 ):
   """Tunix-specific trajectory object containing the interaction history."""
 
-  _STEP_ID_START: ClassVar[int] = 0
+  STEP_ID_START: ClassVar[int] = 0
 
   subagent_trajectories: list[TunixTrajectory] | None = pydantic.Field(
       default=None,
@@ -1860,7 +1986,7 @@ class TunixTrajectory(
       extra: dict[str, Any] | None = None,
   ) -> TunixAgentStep | TunixEnvStep:
     """Helper to create and append a step, automatically assigning step_id."""
-    step_id = len(self.steps) + self._STEP_ID_START
+    step_id = len(self.steps) + self.STEP_ID_START
     ts = timestamp or datetime.datetime.now(datetime.timezone.utc)
     if source == Source.AGENT:
       new_step = TunixAgentStep(
@@ -1916,7 +2042,12 @@ class TunixTrajectory(
     return TunixTrajectoryMetadata(**data)
 
   @classmethod
-  def from_atif_trajectory(cls, atif_trajectory: Trajectory) -> TunixTrajectory:
+  def from_atif_trajectory(
+      cls,
+      atif_trajectory: Trajectory[Any],
+      *,
+      strict: bool = True,
+  ) -> TunixTrajectory:
     """Rehydrates a 1-indexed ATIF Trajectory to a 0-indexed TunixTrajectory."""
     if isinstance(atif_trajectory, cls):
       return atif_trajectory
@@ -1926,4 +2057,5 @@ class TunixTrajectory(
     ).create_trajectory(
         steps=atif_trajectory.steps,
         subagent_trajectories=atif_trajectory.subagent_trajectories,
+        strict=strict,
     )
