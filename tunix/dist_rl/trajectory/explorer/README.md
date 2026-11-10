@@ -3,6 +3,11 @@
 
 `trajectory-explore` is a read-only diagnostic CLI for inspecting agentic RL rollouts and trajectories stored in a `TrajectoryStore`.
 
+## Scope
+
+- **Tunix entry point**: run as a program (`trajectory-explore`), `run_explorer.py` passes `TunixDiagnostics` (`diagnostics/tunix_diagnostics.py`), the statistics specific to Tunix RL rollouts, to the subcommands.
+- **Schema-agnostic CLI and library**: the subcommands (`commands/`), `run_explorer.launch_cli()` and the rest of `diagnostics/` (`stats.py`, `schema_diagnostics.py`, `formatting.py`) depend on no particular trajectory schema: statistics specific to one schema come from the schema diagnostics they are given (see *Schema Diagnostics* below). The library has no CLI dependencies. They are planned to move into a standalone trajectory library, leaving `trajectory-explore` in Tunix as a thin entry point.
+
 ## Core Design Concepts
 
 1. **Strict Read-Only Protocol Boundary (`TrajectoryReader`)**
@@ -29,7 +34,7 @@
 | Command | What it prints |
 |---|---|
 | `ping` | Store connectivity and the number of trajectories. |
-| `summary [--limit=<N>]` | One row per trajectory (status, steps by source, tokens, tool calls, reward, then the columns of each schema diagnostics that applies) followed by run totals: steps, tokens, status counts, mean reward, the totals of each schema diagnostics that applies, and per-tool call counts. Optional `--limit` bounds trajectory loading and table size. Under `--json`, the rows are the records of `RunStats.df`. |
+| `summary [--limit=<N>] [--show_trajectory_table]` | Run totals: steps, tokens, status counts, the reward signs of each status, mean reward, the totals of each schema diagnostics that applies, and per-tool call counts. `--show_trajectory_table` also prints one row per trajectory above them (status, steps by source, tokens, tool calls, reward, then the columns of each schema diagnostics that applies). Optional `--limit` bounds trajectory loading and table size. Under `--json`, the rows are always included, as the records of `RunStats.df`. |
 | `show --trajectory_id=<id> [<id> ...]` | Each trajectory's header (status, reward, steps, tokens, subagents, then one line per value of each schema diagnostics that applies), every step with its message, reasoning, tool calls and observations (truncated to `--max_chars`, `0` for no truncation), and the tool-call sequence. Accepts space- or comma-separated IDs; multiple trajectories are separated by an `====` rule (`--json` emits a list when 2+ IDs are given). |
 
 ---
@@ -42,7 +47,7 @@ python3 -m tunix.dist_rl.trajectory.explorer.run_explorer \
   --store file \
   --root_dir /tmp/tx_smoke \
   --run_id run_95d297b1 \
-  summary
+  summary --show_trajectory_table
 ```
 
 ```
@@ -54,11 +59,13 @@ Trajectories: 2
 Steps: 5 (agent 2, user 3, system 0, other 0)
 Tokens: 300 (200+100) reported by 2/2
 Statuses: SUCCEEDED x2 reported by 2/2
+Rewards by status:
+  SUCCEEDED: 2 r>0, 0 r<=0, 0 unscored
 Mean reward: 3.5 reported by 2/2
 Tool calls: search x2
 ```
 
-Schema diagnostics that apply to the run (see *Schema Diagnostics* below) add their columns after `reward` and their totals after `Mean reward:`.
+Without `--show_trajectory_table`, `summary` prints only the totals, from `Trajectories:` on. `Rewards by status:` counts the trajectories of each status by the sign of their reward: above 0 (`r>0`), at most 0 (`r<=0`) or unreported (`unscored`), most frequent status first. It states signs only: whether a positive reward means a solved task depends on the reward function. Trajectories that report no status are not counted, and the lines are left out when no trajectory reports one. Schema diagnostics that apply to the run (see *Schema Diagnostics* below) add their columns after `reward` and their totals after `Mean reward:`.
 
 ### Machine-Readable JSON Output
 ```bash
@@ -73,7 +80,7 @@ python3 -m tunix.dist_rl.trajectory.explorer.run_explorer \
 
 ## Schema Diagnostics
 
-`diagnostics/stats.py` only computes what every ATIF trajectory reports. Statistics for fields that only one schema stores come from a `SchemaDiagnostics` subclass (`diagnostics/schema_diagnostics.py`), whose generic parameter is the schema's `TrajectoryMetadata` subclass:
+`diagnostics/stats.py` only computes what every ATIF trajectory reports. Statistics for fields that only one schema stores come from a `SchemaDiagnostics` subclass (`diagnostics/schema_diagnostics.py`), whose generic parameter is the schema's `TrajectoryMetadata` subclass, or its `Trajectory` subclass when `compute_columns()` reads the steps (as `TunixDiagnostics` does with `TunixTrajectory`):
 
 ```python
 class AcmeEvalDiagnostics(
@@ -82,9 +89,10 @@ class AcmeEvalDiagnostics(
   COLUMN_DTYPES = {"verdict": "string", "latency_ms": "Float64"}
 ```
 
-- **Columns**: each column must use a nullable pandas dtype (`string`, `Int64`, `Float64` or `boolean`). In `RunStats.df` it becomes `{NAMESPACE}__{column}`, where the namespace comes from the schema's `EXTENSIONS_KEY` (`_acme_eval_extensions` becomes `acme_eval`). In the `summary` table it appears under its own name, so, unless `format_summary_columns()` renames it, it must not reuse a header already in the table (`trajectory`, `status`, `steps`, `agent`, `env`, `tokens`, `tool calls`, `reward`, or a column of another diagnostics): `summary` raises `ValueError` rather than overwrite that column.
+- **Columns**: each column must use a nullable pandas dtype (`string`, `Int64`, `Float64` or `boolean`). In `RunStats.df` it becomes `{NAMESPACE}__{column}`, where the namespace comes from the schema's `EXTENSIONS_KEY` (`_acme_eval_extensions` becomes `acme_eval`). In the `summary` table it appears under its own name, so, unless `format_summary_columns()` renames it, it must not reuse a header already in the table (`trajectory`, `status`, `steps`, `agent`, `env`, `tokens`, `tool calls`, `reward`, or a column of another diagnostics): `summary` raises `ValueError` rather than overwrite that column. Nor may it have the name of a core column of `RunStats.df` (`stats.COLUMN_DTYPES`, e.g. `status` or `total_reward`), since the run-level hooks receive both: `TrajectoryStats.from_trajectory` and `RunStats.from_trajectories` raise `ValueError` for such a diagnostics, whatever trajectories they get.
 - **Output**: `summary` adds the columns after `reward` (rows of other schemas show `-`) and `show` adds one `column: value` line to the header of each trajectory of the schema; lines from `format_summary_totals()` follow `Mean reward:`. Under `--json`, `summary` rows carry `acme_eval__verdict` and `acme_eval__latency_ms`, `show` reports the values under `stats.schema_stats["acme_eval"]`, and `summary` reports the run summary under `run.schema_stats["acme_eval"]`.
-- **Hooks**: `compute_columns()` returns a record's value of each column; by default, it reads the record's attribute of the same name. `extract()` is final: it returns the result of `compute_columns()` after checking it against `COLUMN_DTYPES`. Override `compute_run_summary()` for the run summary (`schema_stats` in `--json`; the final `summarize()` checks that it is JSON serializable), and `format_show_header()`, `format_summary_columns()` or `format_summary_totals()` to change what `show` and `summary` print.
+- **Hidden columns**: the default `format_summary_columns()` and `format_show_header()` leave out the columns listed in `HIDDEN_COLUMNS` (e.g. `HIDDEN_COLUMNS = frozenset({"latency_ms"})`, each a column of `COLUMN_DTYPES`). They are still extracted, so they reach `RunStats.df`, `compute_run_summary()` and `--json`: use them for values that the run summary needs but that are not worth printing per trajectory.
+- **Hooks**: `compute_columns()` returns a record's value of each column; by default, it reads the record's attribute of the same name. `extract()` is final: it returns the result of `compute_columns()` after checking it against `COLUMN_DTYPES`. The run-level hooks, `compute_run_summary()` and `format_summary_columns()`, receive one row per trajectory of the schema (so `df["total_reward"].mean()` covers only those): the core columns of `RunStats.df` (e.g. `status`, `total_reward`, `steps_agent`), then this class's columns under their own names. Override `compute_run_summary()` for the run summary (`schema_stats` in `--json`; the final `summarize()` checks that it is JSON serializable), and `format_show_header()`, `format_summary_columns()` or `format_summary_totals()` to change what `show` and `summary` print.
 - **Activation**: nothing is registered. Pass instances to `TrajectoryStats.from_trajectory(..., diagnostics=...)` and `RunStats.from_trajectories(..., diagnostics=...)`, or to `run_explorer.launch_cli(diagnostics=...)` from a CLI entry point; the bundled `trajectory-explore` entry point passes the diagnostics of its own schema, `TunixDiagnostics` (`diagnostics/tunix_diagnostics.py`). A diagnostics class only applies to trajectories that are instances of its schema.
 
 ---

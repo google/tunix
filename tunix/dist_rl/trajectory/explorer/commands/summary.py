@@ -14,7 +14,7 @@
 
 """Summarizes every trajectory in a run."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 import dataclasses
 import json
 import sys
@@ -30,11 +30,16 @@ from tunix.dist_rl.trajectory.explorer.diagnostics import stats
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class SummaryCommand(base.BaseCommand):
-  """Prints one line per trajectory plus totals over the run."""
+  """Prints totals over the run, and optionally one line per trajectory."""
 
   limit: int | None = simple_parsing.field(
       default=None,
       help="Maximum number of trajectories to load and display.",
+  )
+  show_trajectory_table: bool = simple_parsing.field(
+      default=False,
+      action="store_true",
+      help="Also print one row per trajectory above the run totals.",
   )
 
   def execute(
@@ -95,12 +100,9 @@ class SummaryCommand(base.BaseCommand):
     elif total_count == 0:
       print("No trajectories found.")
     else:
-      print(
-          _table(run_stats, diagnostics),
-          "",
-          *_totals(run_stats, diagnostics),
-          sep="\n",
-      )
+      if self.show_trajectory_table:
+        print(_table(run_stats, diagnostics), end="\n\n")
+      print(*_totals(run_stats, diagnostics), sep="\n")
     return 0
 
 
@@ -179,12 +181,13 @@ def _totals(
           f"Statuses: {formatting.format_counts(run_stats.status_counts)}"
           f" reported by {run_stats.num_with_status}/{n}"
       ),
-      (
-          "Mean reward:"
-          f" {formatting.format_optional(run_stats.mean_reward, '.3g')}"
-          f" reported by {run_stats.num_with_reward}/{n}"
-      ),
   ]
+  lines.extend(_format_reward_signs(run_stats.reward_signs_by_status))
+  lines.append(
+      "Mean reward:"
+      f" {formatting.format_optional(run_stats.mean_reward, '.3g')}"
+      f" reported by {run_stats.num_with_reward}/{n}"
+  )
   for d in diagnostics:
     if d.NAMESPACE in run_stats.schema_stats:
       run_summary = run_stats.schema_stats[d.NAMESPACE]
@@ -192,5 +195,33 @@ def _totals(
   if run_stats.tool_counts:
     lines.append(
         f"Tool calls: {formatting.format_counts(run_stats.tool_counts)}"
+    )
+  return lines
+
+
+def _format_reward_signs(
+    by_status: Mapping[str, stats.RewardSignCounts],
+) -> list[str]:
+  """Returns the `Rewards by status:` line, then one aligned line per status.
+
+  Statuses come most frequent first, as on the `Statuses:` line. There are no
+  lines when no trajectory reports a status.
+
+  Args:
+    by_status: The run's `reward_signs_by_status`.
+  """
+  if not by_status:
+    return []
+  label_width = max(map(len, by_status)) + 1
+  # No count exceeds the total of its status.
+  width = len(str(max(counts.total for counts in by_status.values())))
+  lines = ["Rewards by status:"]
+  for status, counts in sorted(
+      by_status.items(), key=lambda item: item[1].total, reverse=True
+  ):
+    lines.append(
+        f"  {status + ':':<{label_width}} {counts.positive:>{width}} r>0,"
+        f" {counts.non_positive:>{width}} r<=0,"
+        f" {counts.unscored:>{width}} unscored"
     )
   return lines
