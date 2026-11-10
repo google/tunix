@@ -39,6 +39,11 @@ from tunix.dist_rl.trajectory.explorer.diagnostics import schema_diagnostics
 
 _Trajectory = trajectory_lib.Trajectory[trajectory_lib.StepT]
 
+# The status of a trajectory whose episode ran to completion, as rollout callers
+# write it (`TrajectoryStats` strips and upper-cases statuses). Statuses are not
+# checked against any vocabulary; `OutcomeCounts` relies on this one alone.
+SUCCEEDED_STATUS = "SUCCEEDED"
+
 
 class StepCountsJson(TypedDict):
   """JSON form of `StepCounts`, plus the derived `total`."""
@@ -61,6 +66,15 @@ class TokenCountsJson(TypedDict):
   completion: int | None
   cached: int | None
   total: int | None
+
+
+class OutcomeCountsJson(TypedDict):
+  """JSON form of `OutcomeCounts`, plus the derived `total`."""
+
+  solved: int
+  unsolved: int
+  unscored: int
+  total: int
 
 
 class TrajectoryStatsJson(TypedDict):
@@ -86,6 +100,7 @@ class RunStatsJson(TypedDict):
   num_with_tokens: int
   status_counts: dict[str, int]
   num_with_status: int
+  outcome: OutcomeCountsJson | None
   mean_reward: float | None
   num_with_reward: int
   tool_counts: dict[str, int]
@@ -276,6 +291,47 @@ def _sum_reported(values: Iterable[int | None]) -> int | None:
   """Returns the sum of the non-None `values`, or None if none is reported."""
   reported = [v for v in values if v is not None]
   return sum(reported) if reported else None
+
+
+class OutcomeCounts(NamedTuple):
+  """How the trajectories of a run whose status is `SUCCEEDED_STATUS` scored.
+
+  Trajectories with any other status (e.g. a rollout that failed or hit its
+  step limit) are not counted, whatever their reward.
+
+  Attributes:
+    solved: Number of them whose `total_reward` is positive.
+    unsolved: Number of them whose `total_reward` is zero or negative.
+    unscored: Number of them that report no `total_reward`.
+  """
+
+  solved: int
+  unsolved: int
+  unscored: int
+
+  @property
+  def total(self) -> int:
+    """Returns the number of `SUCCEEDED_STATUS` trajectories."""
+    return sum(self)
+
+  def __str__(self) -> str:
+    """Returns the counts and their total in words.
+
+    E.g. `3 solved (r>0), 1 unsolved (r<=0), 0 unscored of 4 SUCCEEDED`.
+    """
+    return (
+        f"{self.solved} solved (r>0), {self.unsolved} unsolved (r<=0),"
+        f" {self.unscored} unscored of {self.total} {SUCCEEDED_STATUS}"
+    )
+
+  def to_json_dict(self) -> OutcomeCountsJson:
+    """Returns the counts as a plain JSON-serializable dict."""
+    return OutcomeCountsJson(
+        solved=self.solved,
+        unsolved=self.unsolved,
+        unscored=self.unscored,
+        total=self.total,
+    )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -607,6 +663,22 @@ class RunStats:
       return None
     return float(self.df["total_reward"].mean())
 
+  @property
+  def outcome(self) -> OutcomeCounts | None:
+    """Returns how the `SUCCEEDED_STATUS` trajectories scored.
+
+    Returns None if no trajectory of the run has that status.
+    """
+    succeeded = self.df["status"].eq(SUCCEEDED_STATUS).fillna(False)
+    rewards = self.df.loc[succeeded, "total_reward"]
+    if rewards.empty:
+      return None
+    return OutcomeCounts(
+        solved=int(rewards.gt(0).sum()),
+        unsolved=int(rewards.le(0).sum()),
+        unscored=int(rewards.isna().sum()),
+    )
+
   def columns_of(
       self, diagnostics: schema_diagnostics.SchemaDiagnostics
   ) -> pd.DataFrame:
@@ -629,6 +701,7 @@ class RunStats:
     """Returns the totals as a plain JSON-serializable dict."""
     status_counts = collections.Counter(self.status_counts).most_common()
     tool_counts = collections.Counter(self.tool_counts).most_common()
+    outcome = self.outcome
     return RunStatsJson(
         num_trajectories=self.num_trajectories,
         num_total_trajectories=(
@@ -641,6 +714,7 @@ class RunStats:
         num_with_tokens=self.num_with_tokens,
         status_counts=dict(status_counts),
         num_with_status=self.num_with_status,
+        outcome=outcome.to_json_dict() if outcome is not None else None,
         mean_reward=self.mean_reward,
         num_with_reward=self.num_with_reward,
         tool_counts=dict(tool_counts),

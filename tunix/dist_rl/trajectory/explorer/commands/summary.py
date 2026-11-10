@@ -30,11 +30,16 @@ from tunix.dist_rl.trajectory.explorer.diagnostics import stats
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class SummaryCommand(base.BaseCommand):
-  """Prints one line per trajectory plus totals over the run."""
+  """Prints totals over the run, and optionally one line per trajectory."""
 
   limit: int | None = simple_parsing.field(
       default=None,
       help="Maximum number of trajectories to load and display.",
+  )
+  show_trajectory_table: bool = simple_parsing.field(
+      default=False,
+      action="store_true",
+      help="Also print one row per trajectory above the run totals.",
   )
 
   def execute(
@@ -95,12 +100,9 @@ class SummaryCommand(base.BaseCommand):
     elif total_count == 0:
       print("No trajectories found.")
     else:
-      print(
-          _table(run_stats, diagnostics),
-          "",
-          *_totals(run_stats, diagnostics),
-          sep="\n",
-      )
+      if self.show_trajectory_table:
+        print(_table(run_stats, diagnostics), end="\n\n")
+      print(*_totals(run_stats, diagnostics), sep="\n")
     return 0
 
 
@@ -179,12 +181,15 @@ def _totals(
           f"Statuses: {formatting.format_counts(run_stats.status_counts)}"
           f" reported by {run_stats.num_with_status}/{n}"
       ),
-      (
-          "Mean reward:"
-          f" {formatting.format_optional(run_stats.mean_reward, '.3g')}"
-          f" reported by {run_stats.num_with_reward}/{n}"
-      ),
   ]
+  outcome = run_stats.outcome
+  if outcome is not None:
+    lines.append(f"Outcome: {outcome}")
+  lines.append(
+      "Mean reward:"
+      f" {formatting.format_optional(run_stats.mean_reward, '.3g')}"
+      f" reported by {run_stats.num_with_reward}/{n}"
+  )
   for d in diagnostics:
     if d.NAMESPACE in run_stats.schema_stats:
       run_summary = run_stats.schema_stats[d.NAMESPACE]

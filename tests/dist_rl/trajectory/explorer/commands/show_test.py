@@ -25,6 +25,7 @@ from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.dist_rl.trajectory import trajectory_testing
 from tunix.dist_rl.trajectory.explorer.commands import show
 from tunix.dist_rl.trajectory.explorer.commands import testing
+from tunix.dist_rl.trajectory.explorer.diagnostics import schema_diagnostics
 from tunix.dist_rl.trajectory.explorer.diagnostics import tunix_diagnostics
 
 _NO_OUTCOME_TRAJECTORY = trajectory_testing.TRAJECTORY_2
@@ -268,7 +269,38 @@ class ShowTest(absltest.TestCase):
     self.assertEqual(exit_code, 0)
     self.assertEqual(
         json.loads(out)["stats"]["schema_stats"],
-        {"tunix": {"masked_out": False}},
+        {"tunix": {"masked_out": False, "trainable_tokens": 2, "valid": True}},
+    )
+
+  def test_hidden_schema_columns_are_only_in_json(self) -> None:
+    class HidingDiagnostics(
+        schema_diagnostics.SchemaDiagnostics[
+            trajectory_lib.TunixTrajectoryMetadata
+        ]
+    ):
+      COLUMN_DTYPES = {"masked_out": "boolean", "prompt_id": "string"}
+      HIDDEN_COLUMNS = frozenset({"prompt_id"})
+
+    mem_store = testing.create_store(trajectories=[_SUCCEEDED_TRAJECTORY])
+    cmd = show.ShowCommand(
+        trajectory_id=[_trajectory_id(_SUCCEEDED_TRAJECTORY)]
+    )
+    diagnostics = (HidingDiagnostics(),)
+    _, out = testing.execute_command(cmd, mem_store, diagnostics=diagnostics)
+    _, json_out = testing.execute_command(
+        cmd, mem_store, output_json=True, diagnostics=diagnostics
+    )
+    header = out.split("\n\n", maxsplit=1)[0].splitlines()
+    self.assertEqual(header[-1], "masked_out: False")
+    self.assertNotIn("prompt_id", out)
+    self.assertEqual(
+        json.loads(json_out)["stats"]["schema_stats"],
+        {
+            "tunix": {
+                "masked_out": False,
+                "prompt_id": _SUCCEEDED_TRAJECTORY.prompt_id,
+            }
+        },
     )
 
   def test_max_chars_truncates_content(self) -> None:
