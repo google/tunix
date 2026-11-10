@@ -25,12 +25,15 @@ from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.dist_rl.trajectory import trajectory_testing
 from tunix.dist_rl.trajectory.explorer.commands import summary
 from tunix.dist_rl.trajectory.explorer.commands import testing
+from tunix.dist_rl.trajectory.explorer.diagnostics import schema_diagnostics
+from tunix.dist_rl.trajectory.explorer.diagnostics import tunix_diagnostics
 
 _NO_OUTCOME_TRAJECTORY_1 = trajectory_testing.TRAJECTORY_1
 _NO_OUTCOME_TRAJECTORY_2 = trajectory_testing.TRAJECTORY_2
 _TOOL_CALLING_TRAJECTORY = trajectory_testing.PAIRED_ATIF_TRAJECTORY
 _SUCCEEDED_TRAJECTORY = trajectory_testing.PAIRED_TUNIX_TRAJECTORY
 _ROLLOUT_TRAJECTORY = trajectory_testing.TUNIX_ROLLOUT_TRAJECTORY
+_TUNIX_DIAGNOSTICS = (tunix_diagnostics.TunixDiagnostics(),)
 
 
 class TrackingReader(store.TrajectoryReader[trajectory_lib.TrajectoryMetadata]):
@@ -227,6 +230,72 @@ class SummaryTest(absltest.TestCase):
     data = json.loads(out)
     self.assertEqual(data["trajectories"][0]["total_reward"], 1 / 3)
     self.assertEqual(data["run"]["mean_reward"], 1 / 3)
+
+  def test_json_output_with_schema_diagnostics(self) -> None:
+    mem_store = testing.create_store(
+        trajectories=[_SUCCEEDED_TRAJECTORY, _ROLLOUT_TRAJECTORY]
+    )
+    exit_code, out = testing.execute_command(
+        self.cmd, mem_store, output_json=True, diagnostics=_TUNIX_DIAGNOSTICS
+    )
+    self.assertEqual(exit_code, 0)
+    data = json.loads(out)
+    self.assertEqual(
+        data["run"]["schema_stats"],
+        {"tunix": {"num_masked_out": 0, "num_with_masked_out": 1}},
+    )
+    # The rollout was not post-processed, so it does not report the value.
+    self.assertEqual(
+        [t["tunix__masked_out"] for t in data["trajectories"]], [False, None]
+    )
+
+  def test_human_readable_with_schema_diagnostics(self) -> None:
+    mem_store = testing.create_store(
+        trajectories=[_SUCCEEDED_TRAJECTORY, _ROLLOUT_TRAJECTORY]
+    )
+    exit_code, out = testing.execute_command(
+        self.cmd, mem_store, diagnostics=_TUNIX_DIAGNOSTICS
+    )
+    self.assertEqual(exit_code, 0)
+    lines = out.splitlines()
+    # Schema columns come after the base columns.
+    self.assertRegex(lines[0], r"\s+reward\s+masked_out$")
+    self.assertRegex(
+        lines[1], rf"\s+{_SUCCEEDED_TRAJECTORY.total_reward}\s+False$"
+    )
+    # The rollout was not post-processed, so it does not report the value.
+    self.assertRegex(lines[2], r"\s+-\s+-$")
+    # Schema totals come before the tool calls.
+    self.assertIn(
+        "Mean reward: 3.5 reported by 1/2\n"
+        "Masked out: 0 reported by 1/2\n"
+        "Tool calls: search x1\n",
+        out,
+    )
+
+  def test_schema_diagnostics_skip_runs_of_other_schemas(self) -> None:
+    mem_store = testing.create_store(
+        trajectories=[_NO_OUTCOME_TRAJECTORY_1, _TOOL_CALLING_TRAJECTORY]
+    )
+    _, with_diagnostics = testing.execute_command(
+        self.cmd, mem_store, diagnostics=_TUNIX_DIAGNOSTICS
+    )
+    _, without_diagnostics = testing.execute_command(self.cmd, mem_store)
+    self.assertMultiLineEqual(with_diagnostics, without_diagnostics)
+
+  def test_schema_columns_must_not_reuse_a_table_header(self) -> None:
+    class StatusDiagnostics(
+        schema_diagnostics.SchemaDiagnostics[
+            trajectory_lib.TunixTrajectoryMetadata
+        ]
+    ):
+      COLUMN_DTYPES = {"status": "string"}
+
+    mem_store = testing.create_store(trajectories=[_SUCCEEDED_TRAJECTORY])
+    with self.assertRaisesRegex(ValueError, "'status' is already in the table"):
+      testing.execute_command(
+          self.cmd, mem_store, diagnostics=(StatusDiagnostics(),)
+      )
 
   def test_limit_truncates_loaded_trajectories_and_updates_totals(self) -> None:
     mem_store = testing.create_store(
