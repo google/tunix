@@ -72,7 +72,7 @@ spec:
                     resources:
                       requests:
                         storage: 400Gi
-            containers:
+            initContainers:
             - name: pathways-rm
               image: ${SERVER_IMAGE}
               imagePullPolicy: IfNotPresent
@@ -128,6 +128,7 @@ spec:
               ports:
               - containerPort: 29000
                 protocol: TCP
+            containers:
             - name: ${USER_CONTAINER}
               image: ${USER_CONTAINER_IMAGE}
               imagePullPolicy: Always
@@ -252,7 +253,6 @@ spec:
             - name: pathways-worker
               image: ${SERVER_IMAGE}
               imagePullPolicy: Always
-              restartPolicy: OnFailure
               args:
               - --server_port=29005
               - --resource_manager_address=$$(PATHWAYS_HEAD):29001

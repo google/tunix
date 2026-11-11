@@ -281,7 +281,6 @@ spec:
             - name: pathways-worker
               image: ${SERVER_IMAGE}
               imagePullPolicy: Always
-              restartPolicy: OnFailure
               # restartPolicyRules:
               # - action: RestartAllContainers
               #   exitCodes:

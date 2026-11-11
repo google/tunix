@@ -429,8 +429,12 @@ class YamlGeneratorTest(parameterized.TestCase):
         )
         self.assertIn("memory: 512Mi", rendered)
 
-  def test_generate_pathways_yaml_init_containers(self):
-    template_file = _get_template_path("jobset.pathways.yaml")
+  @parameterized.parameters(
+      "jobset.pathways.yaml",
+      "jobset.pathways.qwen3.5-397b.yaml",
+  )
+  def test_generate_pathways_yaml_init_containers(self, template_name):
+    template_file = _get_template_path(template_name)
     argv = [
         "yaml_generator.py",
         template_file,
@@ -449,6 +453,42 @@ class YamlGeneratorTest(parameterized.TestCase):
         container_names = [c["name"] for c in proc_spec["containers"]]
         self.assertEqual(init_names, ["pathways-rm", "pathways-proxy"])
         self.assertEqual(container_names, ["worker"])
+        for init_container in proc_spec["initContainers"]:
+          self.assertEqual(init_container["restartPolicy"], "Always")
+
+  @parameterized.parameters(
+      "jobset.cpu.yaml",
+      "jobset.pathways.yaml",
+      "jobset.pathways.qwen3.5-397b.yaml",
+      "jobset.tpu.yaml",
+      "jobset.mcjax.yaml",
+      "jobset.mcjax.ray.yaml",
+  )
+  def test_regular_containers_omit_container_level_restart_policy(
+      self, template_name
+  ):
+    template_file = _get_template_path(template_name)
+    argv = [
+        "yaml_generator.py",
+        template_file,
+        "--jobset_name=test-job",
+        "--tpu_slice=tpuv5e:4x4",
+        "--cpu_machine=n2-standard-64",
+    ]
+    with mock.patch.object(sys, "argv", argv):
+      with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        yaml_generator.main()
+        doc = yaml.safe_load(mock_stdout.getvalue())
+    for rjob in doc["spec"]["replicatedJobs"]:
+      pod_spec = rjob["template"]["spec"]["template"]["spec"]
+      for container in pod_spec["containers"]:
+        self.assertNotIn(
+            "restartPolicy",
+            container,
+            f"Regular container {container['name']!r} in replicatedJob"
+            f" {rjob['name']!r} ({template_name}) must not set container-level"
+            " restartPolicy.",
+        )
 
   @parameterized.named_parameters(
       (
