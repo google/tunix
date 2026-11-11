@@ -22,7 +22,7 @@ from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
-from tunix.cli import config as cli_config
+from tunix.cli import optimizer_jax
 from tunix.dist_rl.launch.common import launcher_testing
 from tunix.dist_rl.launch.common import resolve_config
 from tunix.dist_rl.launch.nodes import orchestrator
@@ -84,7 +84,7 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
         config["agentic_grpo_config"]["max_turns"],
     )
     optimizer = config["rl_training_config"]["actor_optimizer_config"]
-    self.assertEqual(cli_config.create_learning_rate(optimizer), 1e-6)
+    self.assertEqual(optimizer_jax.create_learning_rate(optimizer), 1e-6)
     _, derived_rpc_timeout = orchestrator.resolve_weight_sync_timeouts(hp)
     self.assertEqual(derived_rpc_timeout, 5100.0)
 

@@ -25,7 +25,7 @@ from absl.testing import absltest
 from jax.sharding import Mesh
 import omegaconf
 from orbax.checkpoint import v1 as ocp_v1
-from tunix.cli import config as cli_config
+from tunix.cli import optimizer_jax
 from tunix.dist_rl.common import execution_target
 from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.launch.common import resolve_config
@@ -541,9 +541,9 @@ class TrainerFactoryTest(absltest.TestCase):
 class TrainerOptimizerTest(absltest.TestCase):
 
   def _forwarded_optimizer_config(self, hp: resolve_config.DistHyperParameters):
-    create_optimizer = cli_config.create_optimizer
+    create_optimizer = optimizer_jax.create_optimizer
     with mock.patch.object(
-        cli_config, "create_optimizer", side_effect=create_optimizer
+        optimizer_jax, "create_optimizer", side_effect=create_optimizer
     ) as mock_create:
       trainer._create_optimizer(hp)
     return mock_create.call_args_list[0].args[0]
@@ -843,7 +843,7 @@ class MaxTextOptionsTest(absltest.TestCase):
     self.assertEqual(opts.profiler_steps, 2)
 
   def test_adamw_options_follow_optimizer_config(self):
-    # Names are case-insensitive, as cli.config.create_optimizer reads them.
+    # Names are case-insensitive, as optimizer_jax.create_optimizer reads them.
     self.assertEqual(
         trainer._maxtext_adamw_options(
             _hp(

@@ -30,7 +30,7 @@ import jax
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh
 from orbax import checkpoint as ocp
-from tunix.cli import config as cli_config
+from tunix.cli import optimizer_jax
 from tunix.cli.utils import model as model_utils
 from tunix.common import configs as common_configs
 from tunix.dist_rl.common import otel_setup
@@ -60,8 +60,8 @@ def _optimizer_config_from_args(args) -> dict[str, Any]:
 
   Every flag named `--optimizer_<key>` becomes `<key>` in the returned dict,
   which mirrors the `optimizer_config` block of `tunix/cli/base_config.yaml`
-  and is the keyword mapping `tunix.cli.config.create_optimizer` consumes:
-  `opt_type` picks the `optax` optimizer, `schedule_type` picks the
+  and is the keyword mapping `tunix.cli.optimizer_jax.create_optimizer`
+  consumes: `opt_type` picks the `optax` optimizer, `schedule_type` picks the
   `optax.schedules` function, and the remaining keys are forwarded to whichever
   of the two declares them. Keys that neither declares are ignored, and flags
   left unset are omitted so that the `optax` defaults apply.
@@ -85,8 +85,8 @@ def _build_optimizer(args):
   Defaults reproduce the previous bare optax.adamw with a constant learning
   rate (no clipping, optax defaults b2=0.999 / weight_decay=0.0).
 
-  The optimizer is built by `tunix.cli.config.create_optimizer` from the flag
-  dict, so the runner and the YAML driven cli share one implementation:
+  The optimizer is built by `tunix.cli.optimizer_jax.create_optimizer` from the
+  flag dict, so the runner and the YAML driven cli share one implementation:
   `--optimizer_opt_type` picks the `optax` optimizer and
   `--optimizer_schedule_type` picks the `optax.schedules` function.
 
@@ -101,7 +101,7 @@ def _build_optimizer(args):
   Returns:
     The optimizer, preceded by the chained transformation when configured.
   """
-  return cli_config.create_optimizer(
+  return optimizer_jax.create_optimizer(
       _optimizer_config_from_args(args), "run_trainer_node"
   )
 

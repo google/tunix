@@ -39,6 +39,7 @@ from jax.sharding import Mesh
 import optax
 from orbax import checkpoint as ocp
 from tunix.cli import config as cli_config
+from tunix.cli import optimizer_jax
 from tunix.cli.utils import model as model_utils
 from tunix.dist_rl.distributed.runtime import context as context_lib
 from tunix.dist_rl.launch.common import resolve_config
@@ -224,12 +225,15 @@ def _create_optimizer(
   `opt_type` picks the `optax` optimizer, `schedule_type` the
   `optax.schedules` function, and `opt_chain_type` + `chain_kwargs` (e.g.
   `clip_by_global_norm` + `{max_norm: 1.0}`) a transformation chained ahead of
-  it, all via the shared `tunix.cli.config.create_optimizer`.
+  it, all via `tunix.cli.optimizer_jax.create_optimizer`.
 
   Args:
     hp: Validated distributed RL configuration.
   """
-  return hp.create_optimizer(_RL_TRAINING_KEY, _ACTOR_OPTIMIZER_KEY)
+  return optimizer_jax.create_optimizer(
+      hp.config_mapping(_RL_TRAINING_KEY)[_ACTOR_OPTIMIZER_KEY],
+      f"{_RL_TRAINING_KEY} -> {_ACTOR_OPTIMIZER_KEY}",
+  )
 
 
 def _lora_config(actor: Mapping[str, object]) -> dict[str, object] | None:

@@ -113,7 +113,7 @@
       }
     },
     {
-      "tunix.cli.config.create_optimizer": {
+      "tunix.cli.optimizer_jax.create_optimizer": {
         "args": [
           {
             "b1": 0.9,
@@ -186,7 +186,7 @@
       "tunix.dist_rl.train.peft_trainer_v2.PeftTrainer": {
         "args": [
           "<tunix.models.automodel.AutoModel.from_pretrained()[0]>",
-          "<tunix.cli.config.create_optimizer()>",
+          "<tunix.cli.optimizer_jax.create_optimizer()>",
           "<tunix.common.configs.TrainingConfig()>"
         ],
         "kwargs": {

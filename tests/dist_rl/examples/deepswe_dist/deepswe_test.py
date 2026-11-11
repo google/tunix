@@ -34,7 +34,7 @@ except ImportError as exc:
 import datasets
 import grain
 import numpy as np
-from tunix.cli import config as cli_config
+from tunix.cli import optimizer_jax
 from tunix.dist_rl.common import registry
 from tunix.dist_rl.examples.deepswe_dist import deepswe
 from tunix.dist_rl.launch.common import resolve_config
@@ -583,7 +583,7 @@ class DeepSWEDistTest(parameterized.TestCase):
     self.assertEqual(rl_train["max_steps"], 201)
     self.assertEqual(rl_train["checkpointing_options"]["max_to_keep"], 2)
     optimizer = rl_train["actor_optimizer_config"]
-    self.assertEqual(cli_config.create_learning_rate(optimizer), 1e-6)
+    self.assertEqual(optimizer_jax.create_learning_rate(optimizer), 1e-6)
     self.assertEqual((optimizer["b1"], optimizer["b2"]), (0.9, 0.99))
     self.assertEqual(optimizer["weight_decay"], 0.01)
     self.assertEqual(optimizer["chain_kwargs"], {"max_norm": 1.0})

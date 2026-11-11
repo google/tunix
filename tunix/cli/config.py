@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Config and CLI launched interface."""
+
+from __future__ import annotations
+
 import ast
 import collections
 from collections.abc import Callable
@@ -25,19 +28,16 @@ import os
 import pathlib
 import shutil
 import stat
-from typing import Any, Dict, Iterator, Sequence
+from typing import Any, Iterator, Sequence
 
 from absl import logging
 import dotenv
-import jax
 import omegaconf
-import optax
 from tunix.models import naming
 from tunix.perf import metrics as perf_metrics
 from tunix.sft import checkpoint_options
 from tunix.sft import metrics_logger
 from tunix.sft import profiler
-from tunix.utils import mesh as mesh_lib
 import yaml
 
 # Define a prefix for environment variables that can override YAML keys
@@ -298,9 +298,9 @@ def get_project_root() -> pathlib.Path:
 
 
 # TODO(noghabi): Split this module into a light config loader
-# (`HyperParameters`, override handling, `format_cli_arg`) and the builders that
-# need JAX (`create_optimizer`, `obtain_training_config_dict`), so launchers
-# that only build arguments don't import JAX.
+# (`HyperParameters`, override handling, `format_cli_arg`) and
+# `obtain_training_config_dict`, so launchers that only build arguments don't
+# import heavy training dependencies.
 def format_cli_arg(key: str, value: object) -> str:
   """Returns the `key=value` argument that sets `key` to `value`.
 
@@ -353,12 +353,16 @@ def _dict_to_cli_args(
       yield format_cli_arg(new_key, v)
 
 
-def _extract_kwargs(
+_OPT_CHAIN_TYPE_KEY = "opt_chain_type"
+_CHAIN_KWARGS_KEY = "chain_kwargs"
+
+
+def extract_kwargs(
     func: Callable[..., Any],
-    config: Dict[str, Any],
+    config: Mapping[str, Any],
     config_path_info: str,
     learning_rate: Any | None = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
   """Extracts and validates kwargs for a function from a config dictionary.
 
   Args:
@@ -376,15 +380,16 @@ def _extract_kwargs(
     ValueError: If a parameter without a default is missing from the config.
   """
   sig = inspect.signature(func)
-  kwargs = {}
+  kwargs: dict[str, Any] = {}
   for param in sig.parameters.values():
     param_name = param.name
     if learning_rate is not None and param_name == "learning_rate":
       kwargs[param_name] = learning_rate
-    elif param_name in config:
+    elif param_name in config and (
+        param_name != "learning_rate" or config[param_name] is not None
+    ):
       kwargs[param_name] = config[param_name]
     elif param.default is param.empty:
-      # Safely get a name or representation for the callable
       func_name = getattr(func, "__name__", repr(func))
       raise ValueError(
           f"Missing required argument '{param_name}' for {func_name} "
@@ -393,58 +398,37 @@ def _extract_kwargs(
   return kwargs
 
 
-def get_schedule_fn(
-    schedule_type: str, config_path_info: str = ""
-) -> Callable[..., Any]:
-  """Dynamically imports a schedule function from optax.schedules.
-
-  Args:
-    schedule_type: The type of schedule (e.g., "constant_schedule",
-      "warmup_cosine_decay_schedule").
-    config_path_info: The path to the config file, used for error reporting.
-
-  Returns:
-    The corresponding function from optax.schedules.
-
-  Raises:
-    AttributeError: If the schedule type does not correspond to a valid
-                    function in optax.schedules.
-  """
-  try:
-    schedule_fn = getattr(optax.schedules, schedule_type)
-    return schedule_fn
-  except AttributeError as exc:
-    raise AttributeError(
-        f"Config {config_path_info}: '{schedule_type}' is not a valid"
-        " function in optax.schedules."
-    ) from exc
-
-
 def create_learning_rate(
-    optimizer_config: Dict[str, Any], config_path_info: str = ""
+    optimizer_config: Mapping[str, Any],
+    config_path_info: str = "",
+    *,
+    schedule_fn: Callable[..., Any] | None = None,
 ) -> Any:
-  """Creates a learning rate schedule based on the optimizer config.
+  """Creates a learning-rate schedule or scalar from `optimizer_config`.
 
   Args:
     optimizer_config: Optimizer settings. When it holds a `schedule_type` key,
-      the remaining keys are passed as kwargs to the matching
-      `optax.schedules` function; otherwise `learning_rate` is used as a
-      constant.
+      the remaining keys are passed as kwargs to `schedule_fn`; otherwise
+      `learning_rate` is validated as a scalar.
     config_path_info: The path to the config file, used for error reporting.
+    schedule_fn: Pre-resolved schedule callable for `schedule_type`.
 
   Returns:
-    An `optax` schedule callable, or the scalar learning rate when no schedule
-    is configured.
+    A schedule callable, or the scalar learning rate when no schedule is set.
 
   Raises:
-    TypeError: If no schedule is configured and `learning_rate` is not a
-      scalar.
+    TypeError: If no schedule is configured and `learning_rate` is not a scalar.
+    ValueError: If `schedule_type` is set without `schedule_fn`.
   """
   schedule_type = optimizer_config.get("schedule_type")
   if schedule_type:
-    schedule_func = get_schedule_fn(schedule_type, config_path_info)
-    schedule_kwargs = _extract_kwargs(
-        schedule_func, optimizer_config, config_path_info
+    if schedule_fn is None:
+      raise ValueError(
+          "schedule_fn is required when schedule_type is"
+          f" set in config at {config_path_info}."
+      )
+    schedule_kwargs = extract_kwargs(
+        schedule_fn, optimizer_config, config_path_info
     )
     logging.info(
         "Creating learning rate with schedule_type: %s, and following"
@@ -452,9 +436,8 @@ def create_learning_rate(
         schedule_type,
         schedule_kwargs,
     )
-    return schedule_func(**schedule_kwargs)
+    return schedule_fn(**schedule_kwargs)
 
-  # Default: No schedule, learning_rate should be a scalar
   learning_rate = optimizer_config.get("learning_rate")
   if learning_rate is not None and not isinstance(learning_rate, (float, int)):
     raise TypeError(
@@ -465,103 +448,20 @@ def create_learning_rate(
   return learning_rate
 
 
-_OPT_CHAIN_TYPE_KEY = "opt_chain_type"
-_CHAIN_KWARGS_KEY = "chain_kwargs"
-
-
-def create_optimizer(
-    optimizer_config: Dict[str, Any], config_path_info: str = ""
-) -> optax.GradientTransformation:
-  """Creates an optimizer from a dictionary of optimizer settings.
-
-  Args:
-    optimizer_config: Optimizer settings. `opt_type` names a function in
-      `optax`, and the remaining keys are forwarded to it when they match its
-      signature; unrelated keys are ignored. Any `optax` factory can be named,
-      including plain gradient transformations such as `clip_by_global_norm`.
-      The learning rate is resolved by `create_learning_rate`. The optional
-      `opt_chain_type` names a further `optax` factory (e.g.
-      `clip_by_global_norm`) built from `chain_kwargs` (e.g.
-      `{"max_norm": 0.1}`) and chained ahead of the optimizer; it defaults to
-      `None`, which leaves the optimizer unchained.
-    config_path_info: The path to the config file, used for error reporting.
-
-  Returns:
-    An optimizer instance, preceded by `opt_chain_type` when it is set.
-
-  Raises:
-    ValueError: If the config is not a dictionary, `opt_type` is missing or
-      unsupported, or the optimizer requires a learning rate that the config
-      does not provide.
-    TypeError: If the extracted kwargs do not match the optimizer signature.
-  """
-  if not isinstance(optimizer_config, omegaconf.dictconfig.DictConfig | dict):
+def parse_optimizer_config(
+    optimizer_config: Mapping[str, Any],
+) -> tuple[str, dict[str, Any] | None]:
+  """Validates `optimizer_config` and extracts `(opt_type, chain_config)`."""
+  if not isinstance(optimizer_config, Mapping):
     raise ValueError("optimizer_config must be a dictionary")
-
   opt_type = optimizer_config.get("opt_type")
   if not opt_type:
     raise ValueError("Optimizer name is required")
-
-  try:
-    opt_func = getattr(optax, opt_type.lower())
-  except (AttributeError, ValueError) as e:
-    # `getattr` raises AttributeError for an unknown name, and `opt_type.lower`
-    # raises AttributeError when `opt_type` is not a string.
-    raise ValueError(
-        f"Optimizer type '{opt_type}' not supported from {config_path_info}."
-        " Available options, see"
-        " https://optax.readthedocs.io/en/latest/api/optimizers.html#optimizers"
-    ) from e
-
-  # Handle learning rate, potentially creating a schedule
-  learning_rate_val = create_learning_rate(optimizer_config, config_path_info)
-  if learning_rate_val is None and (
-      "learning_rate" in inspect.signature(opt_func).parameters
-      and inspect.signature(opt_func).parameters["learning_rate"].default
-      is inspect.Parameter.empty
-  ):
-    # learning_rate is required by opt_func but not provided and no schedule
-    raise ValueError(
-        "Missing required argument 'learning_rate' for optimizer"
-        f" '{opt_type}' and no schedule defined in config at"
-        f" {config_path_info}."
-    )
-
-  opt_kwargs = _extract_kwargs(
-      opt_func, optimizer_config, config_path_info, learning_rate_val
-  )
-  # Wrap the optimizer function with inject_hyperparams so that
-  # the learning rate can be tracked and logged during training.
-  # Plain gradient transformations (such as chained clip_by_global_norm)
-  # have no learning rate and must not be wrapped, preserving their argument
-  # dtypes (e.g. max_norm) so they do not conflict with bfloat16 updates.
-  if learning_rate_val is not None:
-    opt_func_to_call = optax.inject_hyperparams(
-        opt_func, hyperparam_dtype=jax.numpy.float32  # pyrefly: ignore[bad-argument-type]
-    )
-  else:
-    opt_func_to_call = opt_func
-  # Call the optimizer function with the extracted kwargs
-  try:
-    optimizer = opt_func_to_call(**opt_kwargs)
-  except TypeError as e:
-    raise TypeError(
-        f"Error calling {opt_type} with arguments {opt_kwargs}. "
-        f"Check if the arguments match the signature of optax.{opt_type}: {e}"
-    ) from e
-
-  # `opt_chain_type` is built by this same helper, since `opt_type` resolves any
-  # `optax` factory, and is chained ahead of the optimizer. Gradient clipping
-  # reaches the optimizer this way rather than as an optimizer keyword, which
-  # `optax` optimizers do not declare.
   opt_chain_type = optimizer_config.get(_OPT_CHAIN_TYPE_KEY)
   if not opt_chain_type:
-    return optimizer
-  chain_kwargs = optimizer_config.get(_CHAIN_KWARGS_KEY) or {}
-  chained = create_optimizer(
-      {"opt_type": opt_chain_type, **chain_kwargs}, config_path_info
-  )
-  return optax.chain(chained, optimizer)
+    return opt_type, None
+  chain_kwargs = dict(optimizer_config.get(_CHAIN_KWARGS_KEY) or ())
+  return opt_type, {"opt_type": opt_chain_type, **chain_kwargs}
 
 
 class HyperParameters:
@@ -1081,55 +981,6 @@ class HyperParameters:
           f" got '{model_source}'."
       )
 
-  def _get_nested_config(self, keys: Sequence[str]) -> Any:
-    """Helper to retrieve a value from a nested dictionary."""
-    current_level = self.config
-    for i, key in enumerate(keys):
-      if not isinstance(current_level, omegaconf.dictconfig.DictConfig | dict):
-        raise TypeError(
-            f"Attempted to access key '{key}' on a non-dictionary element "
-            f"at path: {' -> '.join(keys[:i])}"
-        )
-      try:
-        current_level = current_level[key]
-      except KeyError as exc:
-        raise KeyError(
-            f"Key '{key}' not found in config path: {' -> '.join(keys[:i+1])}"
-        ) from exc
-    return current_level
-
-  def create_optimizer(
-      self, *optimizer_keys: str
-  ) -> optax.GradientTransformation:
-    """Creates the optimizer based on a config path.
-
-    Args:
-        *optimizer_keys: One or more strings representing the keys to navigate
-          the nested self.config dictionary. For example, ('rl_training_config',
-          'actor_optimizer_config') would access
-          self.config['rl_training_config']['actor_optimizer_config'].
-
-    Returns:
-        An optimizer instance.
-
-    Raises:
-        ValueError: If no optimizer_keys are provided.
-        KeyError: If a key in the path is not found.
-        TypeError: If an intermediate element in the path is not a dictionary.
-    """
-
-    if not optimizer_keys:
-      raise ValueError("At least one optimizer key must be provided.")
-    config_path_info = " -> ".join(optimizer_keys)
-
-    try:
-      optimizer_config = self._get_nested_config(optimizer_keys)
-    except KeyError as e:
-      raise KeyError(f"Could not resolve optimizer config path: {e}") from e
-
-    # Use module-level helper.
-    return create_optimizer(optimizer_config, config_path_info)
-
   def parse_mesh_config(
       self, model_key: str
   ) -> tuple[tuple[int, ...], tuple[str, ...]]:
@@ -1272,9 +1123,17 @@ class HyperParameters:
           "The 'mesh' configuration must be a dictionary-like object, got"
           f" {type(mesh_config)}."
       )
-    return mesh_lib.normalize_allocation_policy(
-        mesh_config.get("allocation_policy")
-    )
+    allocation_policy = mesh_config.get("allocation_policy")
+    if allocation_policy is None:
+      return "COMPACT"
+    if not isinstance(allocation_policy, str) or (
+        allocation_policy.upper() not in ("COMPACT", "PERFORMANCE")
+    ):
+      raise ValueError(
+          "allocation_policy must be one of ['COMPACT', 'PERFORMANCE'], got"
+          f" {allocation_policy!r}."
+      )
+    return allocation_policy.upper()
 
   def obtain_training_config_dict(self, key):
     """Obtain training config dictionary from specified key in self.config.
