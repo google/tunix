@@ -22,6 +22,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
 import jax
+import omegaconf
 import optax
 from tunix.cli import config
 from tunix.sft import peft_trainer
@@ -871,6 +872,83 @@ class ConfigTest(parameterized.TestCase):
     expected = ["a=1", "b=null", "c.d=null", "c.e=2"]
     got = list(config._dict_to_cli_args(d))
     self.assertEqual(expected, got)
+
+  def test_dict_to_cli_args_quotes_strings(self):
+    d = {"a": "", "b": "0", "c": {"d": "true", "e": 1}, "f": {}}
+    expected = ['a=""', 'b="0"', 'c.d="true"', "c.e=1", "f={}"]
+    got = list(config._dict_to_cli_args(d))
+    self.assertEqual(expected, got)
+
+  @parameterized.named_parameters(
+      dict(testcase_name="empty_string", value="", expected='k=""'),
+      dict(testcase_name="number_string", value="0", expected='k="0"'),
+      dict(testcase_name="none", value=None, expected="k=null"),
+      dict(testcase_name="int", value=1, expected="k=1"),
+      dict(testcase_name="bool", value=True, expected="k=True"),
+      dict(testcase_name="list", value=["a", 1], expected="k=['a', 1]"),
+      dict(testcase_name="empty_mapping", value={}, expected="k={}"),
+  )
+  def test_format_cli_arg(self, value: object, expected: str):
+    self.assertEqual(expected, config.format_cli_arg("k", value))
+
+  @parameterized.parameters(
+      "",
+      "0",
+      "1e-5",
+      "true",
+      "on",
+      "null",
+      "~",
+      "x: y",
+      "[1, 2]",
+      "- x",
+      "# x",
+      "a # b",
+      "*x",
+      "!x",
+      " padded ",
+      'say "hi"',
+      "C:\\path",
+      "line\nbreak",
+      "caf\u00e9",
+      "\U0001f600",
+      "\x7f\x85\u2028",
+  )
+  def test_format_cli_arg_strings_round_trip_through_from_cli(self, value: str):
+    arg = config.format_cli_arg("section.key", value)
+    parsed = omegaconf.OmegaConf.to_container(
+        omegaconf.OmegaConf.from_cli([arg])
+    )
+    self.assertEqual({"section": {"key": value}}, parsed)
+
+  def test_format_cli_arg_keeps_long_strings_on_one_line(self):
+    value = " ".join(["word"] * 50)
+    self.assertEqual(f'k="{value}"', config.format_cli_arg("k", value))
+
+  @parameterized.named_parameters(
+      dict(testcase_name="default", with_flags=False),
+      dict(testcase_name="with_flags", with_flags=True),
+  )
+  def test_override_file_keeps_string_values(self, with_flags: bool):
+    ov = self.create_tempdir().create_file(
+        "ov.yaml",
+        content=(
+            'tokenizer_config:\n  tokenizer_path: "123"\n'
+            'vllm_config:\n  a: "0"\n  b: "true"\n  c: ""\n  d: 1\n'
+        ),
+    )
+    overrides = [f"override_config_file={ov.full_path}"]
+    if with_flags:
+      hp = self._initialize_with_flags(overrides)
+    else:
+      hp = self.initialize_config(overrides)
+    self.assertEqual(
+        hp.config_mapping("tokenizer_config")["tokenizer_path"], "123"
+    )
+    self.assertEqual(
+        hp.config_mapping("vllm_config"),
+        {"a": "0", "b": "true", "c": "", "d": 1},
+    )
 
   def test_obtain_training_config_dict_checkpointing(self):
     hp = self.initialize_config([])

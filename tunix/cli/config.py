@@ -20,6 +20,7 @@ from collections.abc import MutableMapping
 import copy
 import importlib
 import inspect
+import math
 import os
 import pathlib
 import shutil
@@ -37,6 +38,7 @@ from tunix.sft import checkpoint_options
 from tunix.sft import metrics_logger
 from tunix.sft import profiler
 from tunix.utils import mesh as mesh_lib
+import yaml
 
 # Define a prefix for environment variables that can override YAML keys
 _TUNIX_PREFIX = "T_"
@@ -295,13 +297,51 @@ def get_project_root() -> pathlib.Path:
   return pathlib.Path.cwd()
 
 
-# TODO(noghabi): Merge override files with OmegaConf.load/merge to keep value
-# types (quoted strings currently re-parse as YAML); affects the flags-off path,
-# so needs its own change.
+# TODO(noghabi): Split this module into a light config loader
+# (`HyperParameters`, override handling, `format_cli_arg`) and the builders that
+# need JAX (`create_optimizer`, `obtain_training_config_dict`), so launchers
+# that only build arguments don't import JAX.
+def format_cli_arg(key: str, value: object) -> str:
+  """Returns the `key=value` argument that sets `key` to `value`.
+
+  `OmegaConf.from_cli` parses each value as YAML. Strings are written as
+  one-line double-quoted YAML scalars, which parse back unchanged: `""`, `"0"`
+  or `"true"` stays a string instead of becoming None, 0 or True. None is
+  written as `null`, and other values with `str()`.
+
+  Args:
+    key: Dotted config path, e.g. `rl_training_config.max_steps`.
+    value: The value to set.
+
+  Returns:
+    The `key=value` argument.
+  """
+  if value is None:
+    return f"{key}=null"
+  if isinstance(value, str):
+    # `width=math.inf` keeps long strings on one line.
+    quoted = yaml.safe_dump(value, default_style='"', width=math.inf)
+    return f"{key}={quoted.rstrip()}"
+  return f"{key}={value}"
+
+
 def _dict_to_cli_args(
     d: collections.abc.Mapping[str, Any], parent_key: str = "", sep: str = "."
 ) -> Iterator[str]:
-  """Converts a dictionary to an Iterator string of CLI arguments."""
+  """Converts a dictionary to an Iterator string of CLI arguments.
+
+  Leaves are formatted by `format_cli_arg`, so strings keep their type when
+  `OmegaConf.from_cli` parses the arguments: an override file's `""`, `"0"` or
+  `"true"` stays a string instead of becoming None, 0 or True.
+
+  Args:
+    d: The (nested) override mapping, e.g. a loaded override YAML file.
+    parent_key: Dotted path of `d` in the config.
+    sep: Separator between the parts of a dotted path.
+
+  Yields:
+    One `dotted.key=value` argument per leaf of `d`.
+  """
   for k, v in d.items():
     new_key = f"{parent_key}{sep}{k}" if parent_key else k
     if isinstance(v, (collections.abc.Mapping, omegaconf.DictConfig)):
@@ -310,10 +350,7 @@ def _dict_to_cli_args(
       else:
         yield f"{new_key}={{}}"
     else:
-      if v is None:
-        yield f"{new_key}=null"
-      else:
-        yield f"{new_key}={v}"
+      yield format_cli_arg(new_key, v)
 
 
 def _extract_kwargs(
