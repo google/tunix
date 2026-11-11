@@ -82,6 +82,17 @@ class VanillaRolloutSeedTest(absltest.TestCase):
     seeds = self._seeds_used(seed=jax.random.PRNGKey(3), num_calls=2)
     self.assertLen({s.tobytes() for s in seeds}, 2)
 
+  def test_typed_key_seed_is_accepted(self):
+    seeds = self._seeds_used(seed=jax.random.key(3), num_calls=2)
+    self.assertLen({s.tobytes() for s in seeds}, 2)
+
+  def test_numpy_and_jax_int_seeds_match_python_int(self):
+    expected = self._seeds_used(seed=5, num_calls=2)
+    for seed in (np.int32(5), np.int64(5), jax.numpy.int32(5)):
+      seeds = self._seeds_used(seed=seed, num_calls=2)
+      for a, b in zip(expected, seeds):
+        np.testing.assert_array_equal(a, b)
+
 
 if __name__ == '__main__':
   absltest.main()

@@ -21,6 +21,7 @@ from typing import Any, Optional, Tuple
 from flax import nnx
 import jax
 import jaxtyping
+import numpy as np
 from tunix.generate import sampler
 from tunix.rl import common
 from tunix.rl.rollout import base_rollout
@@ -54,15 +55,23 @@ class VanillaRollout(base_rollout.BaseRollout):
     while making successive calls differ.
 
     Args:
-      seed: The seed from the rollout config: an int, a PRNG key, or None
-        (treated as 0).
+      seed: The seed from the rollout config: an integer (Python, NumPy or JAX
+        scalar), a PRNG key (raw `jax.random.PRNGKey` data or a typed
+        `jax.random.key`), or None (treated as 0).
 
     Returns:
       A PRNG key unique to this call.
     """
     if seed is None:
       seed = 0
-    key = jax.random.PRNGKey(seed) if isinstance(seed, int) else seed
+    if hasattr(seed, 'dtype') and jax.dtypes.issubdtype(
+        seed.dtype, jax.dtypes.prng_key
+    ):
+      key = seed  # Typed key from jax.random.key().
+    elif np.ndim(seed) == 0:
+      key = jax.random.PRNGKey(seed)  # Integer seed of any scalar type.
+    else:
+      key = seed  # Raw key data from jax.random.PRNGKey().
     return jax.random.fold_in(key, next(self._generate_calls))
 
   def generate(
