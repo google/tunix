@@ -43,9 +43,9 @@ from typing import Any, Final
 import omegaconf
 from tunix.cli import config as cli_config
 from tunix.common import datatypes as common_datatypes
+from tunix.dist_rl.common import datatypes as dist_rl_datatypes
 from tunix.dist_rl.common import gcs_cache
 from tunix.dist_rl.distributed.deployment import yaml_generator
-from tunix.dist_rl.queue_manager import trajectory_queue_manager
 from tunix.dist_rl.weight_sync import weight_sync
 
 LAUNCH_DIR = pathlib.Path(__file__).parent
@@ -110,6 +110,34 @@ class DistHyperParameters(cli_config.HyperParameters):
         _dist_argv(overrides), merge_replace_keys=True, validate_nested=True
     )
     finalize_dist_config(self)
+
+
+def _sync_packed_token_budget(
+    section: MutableMapping[str, Any], section_name: str
+) -> None:
+  """Validates and syncs `max_seq_tokens_per_device` and `max_seq_token_per_tpu`."""
+  dev_val = section["max_seq_tokens_per_device"]
+  tpu_val = section["max_seq_token_per_tpu"]
+  for key, val in (
+      ("max_seq_tokens_per_device", dev_val),
+      ("max_seq_token_per_tpu", tpu_val),
+  ):
+    if val is not None and (
+        isinstance(val, bool) or not isinstance(val, int) or val < 0
+    ):
+      raise ValueError(
+          f"{section_name}.{key} must be a non-negative integer or None, got"
+          f" {val!r}."
+      )
+  if dev_val is not None and tpu_val is not None and dev_val != tpu_val:
+    raise ValueError(
+        f"{section_name}.max_seq_tokens_per_device ({dev_val}) and"
+        f" {section_name}.max_seq_token_per_tpu ({tpu_val}) must match when"
+        " both are set."
+    )
+  resolved = dev_val if dev_val is not None else tpu_val
+  section["max_seq_tokens_per_device"] = resolved
+  section["max_seq_token_per_tpu"] = resolved
 
 
 def _mutable_section(
@@ -203,7 +231,11 @@ def _finalize_dist_defaults(hp: cli_config.HyperParameters) -> None:
           artifact_root / "models" / str(role_cfg["model_name"])
       )
 
+  _sync_packed_token_budget(
+      _mutable_section(hp, "training_config"), "training_config"
+  )
   rl_train = _mutable_section(hp, "rl_training_config")
+  _sync_packed_token_budget(rl_train, "rl_training_config")
   if rl_train["mini_batch_size"] is None:
     rl_train["mini_batch_size"] = int(hp.config["batch_size"])
   if not rl_train["checkpoint_root_directory"]:
@@ -651,7 +683,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
           "actor_model_config.model_source='maxtext' requires"
           " actor_model_config.model_path (or model_config.model_path)."
       )
-    if rl_train["max_seq_token_per_tpu"] is None:
+    if not rl_train["max_seq_tokens_per_device"]:
       micro_batch = int(rl_train["train_micro_batch_size"])
       if micro_batch % actor_axes["fsdp"] != 0:
         raise ValueError(
@@ -691,13 +723,10 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
       _CHAT_PARSER_TYPES,
   )
   grpo = hp.config_mapping("agentic_grpo_config")
-  # TODO(noghabi): Move `GroupOrder` into a dependency-free module (e.g. under
-  # `dist_rl/common/`) so the resolver doesn't depend on `queue_manager`, and
-  # through it on flax and the agentic types. (`weight_sync.py` has no deps.)
   _check_choice(
       "agentic_grpo_config.trajectory_group_order",
       grpo["trajectory_group_order"],
-      tuple(order.value for order in trajectory_queue_manager.GroupOrder),
+      tuple(order.value for order in dist_rl_datatypes.GroupOrder),
   )
   max_version_span = grpo["max_version_span"]
   if max_version_span is not None:
@@ -708,7 +737,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
       )
     if (
         grpo["trajectory_group_order"]
-        == trajectory_queue_manager.GroupOrder.PROMPT_ARRIVAL.value
+        == dist_rl_datatypes.GroupOrder.PROMPT_ARRIVAL.value
     ):
       raise ValueError(
           "agentic_grpo_config.max_version_span is only supported with"
@@ -755,7 +784,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   # `train_micro_batch_size` counts trajectories in the distributed trainer:
   # gradient accumulation = mini_batch_size * num_generations /
   # train_micro_batch_size (not applicable with sequence packing).
-  if not rl_train["max_seq_token_per_tpu"]:
+  if not rl_train["max_seq_tokens_per_device"]:
     trajectories = mini_batch_size * num_generations
     if trajectories % micro_batch != 0:
       raise ValueError(
@@ -806,7 +835,7 @@ def rollout_init_with_random_weights(hp: cli_config.HyperParameters) -> bool:
   True makes the `inprocess_vllm` rollout start from random weights (vLLM's
   `load_format="dummy"`) instead of loading the checkpoint. Only Raiden weight
   sync replaces them: its bootstrap sync loads the trainer's weights before
-  step 0. `fallback` moves no weights, and `none` skips the sync.
+  step 0, whereas `none` skips the sync.
 
   Args:
     hp: Loaded configuration.

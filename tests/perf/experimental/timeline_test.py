@@ -304,6 +304,15 @@ class AsyncTimelineTest(absltest.TestCase):
           mock_block.assert_called_once_with(waitlist)
           success_cb.assert_called_once()
           failure_cb.assert_not_called()
+
+      with self.subTest("Lazy jax import without prior attribute access"):
+        timeline.__dict__.pop("jax", None)
+        lazy_success = mock.create_autospec(lambda: None)
+        lazy_failure = mock.create_autospec(lambda e: None)
+        t_lazy = timeline._async_wait(waitlist, lazy_success, lazy_failure)
+        t_lazy.join()
+        lazy_success.assert_called_once()
+        lazy_failure.assert_not_called()
     finally:
       self.patcher.start()
 

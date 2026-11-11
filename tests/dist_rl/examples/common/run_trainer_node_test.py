@@ -632,11 +632,12 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
   @mock.patch.object(
       run_trainer_node.maxtext_utils, "build_maxtext_config", autospec=True
   )
-  def test_create_maxtext_trainer_factory_plumbs_max_seq_token_per_tpu(
+  def test_create_maxtext_trainer_factory_plumbs_max_seq_tokens_per_device(
       self, mock_build_cfg, mock_create_mesh, mock_get_pad_id
   ):
+    del mock_create_mesh, mock_get_pad_id
     args = run_trainer_node._parse_args([
-        "--max_seq_token_per_tpu",
+        "--max_seq_tokens_per_device",
         "4096",
     ])
     run_trainer_node._create_maxtext_trainer_factory(args)
@@ -853,22 +854,26 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
   @mock.patch.object(run_trainer_node, "_create_mesh")
   @mock.patch.object(run_trainer_node, "_load_actor_model")
   @mock.patch.object(run_trainer_node.peft_trainer_v2, "TrainingConfig")
-  def test_create_tunix_trainer_factory_ignores_max_seq_token_per_tpu(
+  def test_create_tunix_trainer_factory_ignores_max_seq_tokens_per_device(
       self,
       mock_training_config,
       mock_load_model,
       mock_create_mesh,
       mock_ensure_dir,
   ):
+    del mock_load_model, mock_create_mesh, mock_ensure_dir
     # The flag is for MaxText's max_target_length. Under the orchestrator the
     # PeftTrainer never packs -- the SequencePackedBatchAssembler does, and the
     # packing weights arrive on the payload -- so it stays off TrainingConfig.
     args = run_trainer_node._parse_args([
-        "--max_seq_token_per_tpu",
+        "--max_seq_tokens_per_device",
         "4096",
     ])
     run_trainer_node._create_tunix_trainer_factory(args)
     mock_training_config.assert_called_once()
+    self.assertNotIn(
+        "max_seq_tokens_per_device", mock_training_config.call_args.kwargs
+    )
     self.assertNotIn(
         "max_seq_token_per_tpu", mock_training_config.call_args.kwargs
     )
@@ -883,7 +888,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         "4",
         "--mesh_fsdp",
         "4",
-        "--max_seq_token_per_tpu",
+        "--max_seq_tokens_per_device",
         "4096",
     ])
     self.assertEqual(run_trainer_node._gradient_accumulation_steps(args), 1)
@@ -1480,6 +1485,25 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         run_trainer_node._ensure_model_dir_for_trainer(
             tmp_file.name, "Qwen/Qwen3-1.7B"
         )
+
+
+  def test_parse_args_syncs_max_seq_tokens_per_device_and_rejects_mismatch(
+      self,
+  ):
+    args_device = run_trainer_node._parse_args(
+        ["--max_seq_tokens_per_device=8192"]
+    )
+    self.assertEqual(args_device.max_seq_tokens_per_device, 8192)
+    self.assertEqual(args_device.max_seq_token_per_tpu, 8192)
+    self.assertEqual(
+        run_trainer_node._gradient_accumulation_steps(args_device), 1
+    )
+
+    with self.assertRaises(SystemExit):
+      run_trainer_node._parse_args([
+          "--max_seq_tokens_per_device=8192",
+          "--max_seq_token_per_tpu=4096",
+      ])
 
 
 if __name__ == "__main__":

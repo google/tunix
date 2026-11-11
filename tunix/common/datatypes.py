@@ -104,3 +104,16 @@ class Role(str, enum.Enum):
   REFERENCE = "reference"  # kept fixed during training
   REWARD = "reward"
   ROLLOUT = "rollout"
+
+
+class WeightSyncMode(str, enum.Enum):
+  """Modes for weight synchronization across workers."""
+
+  NONE = "none"
+  RAIDEN = "raiden"
+  IN_MEMORY = "in_memory"
+  FS = "fs"
+  NCCL = "nccl"
+
+
+DEFAULT_WEIGHT_SYNC_MODE = WeightSyncMode.NONE

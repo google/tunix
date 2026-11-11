@@ -18,14 +18,25 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 import contextlib
 import threading
 import time
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
-import jax
-import jaxtyping
 import numpy as np
 from tunix.perf import metrics
 from tunix.perf.experimental import timeline
 from tunix.perf.experimental import timeline_utils
+
+if TYPE_CHECKING:
+  import jax
+  import jaxtyping
+
+
+def __getattr__(name: str) -> Any:
+  if name == "jax":
+    import jax as _jax  # pylint: disable=g-import-not-at-top
+
+    globals()[name] = _jax
+    return _jax
+  raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 JaxDevice = timeline_utils.JaxDevice
@@ -38,8 +49,9 @@ BatchAsyncTimelines = timeline.BatchAsyncTimelines
 
 
 def _synchronize_devices() -> None:
-  for device in jax.local_devices():
-    jax.device_put(0.0, device=device).block_until_ready()
+  jax_mod = globals()["jax"] if "jax" in globals() else __getattr__("jax")
+  for device in jax_mod.local_devices():
+    jax_mod.device_put(0.0, device=device).block_until_ready()
 
 
 class AsyncWaitlist:

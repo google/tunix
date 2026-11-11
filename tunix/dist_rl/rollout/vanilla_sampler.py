@@ -206,7 +206,7 @@ class VanillaSampler(
        to `RaidenWeightSyncDelegate`. Binds destination memory buffers using
        `self.transformer_state` and executes phased synchronization lifecycle
        hooks (`bind`, `pre`, `sync`, `post`).
-    2. Fallback Direct Mode (`weight_sync_mode == FALLBACK`):
+    2. In-Memory Direct Mode (`weight_sync_mode == IN_MEMORY`):
        Synchronizes weights in-place without Raiden transport. When a weight
        payload is received in `sync_request.weights`, updates
        `self.transformer_state` directly.
