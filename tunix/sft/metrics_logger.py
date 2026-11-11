@@ -3,6 +3,9 @@
 import collections
 import dataclasses
 import enum
+import importlib.metadata
+import os
+import subprocess
 from typing import Any, Callable
 
 from absl import logging
@@ -10,6 +13,41 @@ import jax
 from metrax import logging as metrax_logging
 import numpy as np
 from tunix.utils import env_utils
+
+try:
+  import vllm  # pylint: disable=g-import-not-at-top
+except ImportError:
+  vllm = None
+
+
+def _get_module_info(
+    module: Any, path_for_git: str = "", package_name: str = ""
+) -> tuple[str, str]:
+  """Resolves (version, commit) concisely for environment fingerprinting."""
+  if module is None and not package_name and not path_for_git:
+    return "not_installed", "not_installed"
+
+  ver = getattr(module, "__version__", "")
+  if package_name:
+    try:
+      ver = importlib.metadata.version(package_name)
+    except Exception:
+      pass
+  ver = ver or "unknown"
+
+  commit = ""
+  path = path_for_git or getattr(module, "__file__", "")
+  if path and os.path.exists(path):
+    try:
+      d = os.path.dirname(path) if os.path.isfile(path) else path
+      commit = subprocess.check_output(
+          ["git", "rev-parse", "HEAD"], cwd=d, stderr=subprocess.DEVNULL, text=True
+      ).strip()
+    except Exception:
+      pass
+
+  commit = commit or (ver.split("+")[-1] if "+" in ver else "unknown")
+  return ver, commit
 
 LoggingBackend = metrax_logging.LoggingBackend
 TensorboardBackend = metrax_logging.TensorboardBackend
@@ -55,6 +93,16 @@ class MetricsLoggerOptions:
     if jax.process_index() != 0:
       return []
 
+    tunix_version, tunix_commit = _get_module_info(
+        None, path_for_git=__file__, package_name="google-tunix"
+    )
+    vllm_version, vllm_commit = _get_module_info(vllm)
+
+    logging.info("=== Tunix Environment Fingerprint ===")
+    logging.info("Tunix: version=%s, commit=%s", tunix_version, tunix_commit)
+    logging.info("vLLM:  version=%s, commit=%s", vllm_version, vllm_commit)
+    logging.info("=====================================")
+
     # Case 1: Override. Use user-provided factories.
     if (
         "custom_backend" in self.backend_kwargs
@@ -83,7 +131,13 @@ class MetricsLoggerOptions:
           )
       )
       try:
-        wandb_kwargs = kwargs_dict.get("wandb", {})
+        wandb_kwargs = dict(kwargs_dict.get("wandb", {}))
+        wandb_config = dict(wandb_kwargs.get("config", {}))
+        wandb_config["tunix_version"] = tunix_version
+        wandb_config["tunix_commit"] = tunix_commit
+        wandb_config["vllm_version"] = vllm_version
+        wandb_config["vllm_commit"] = vllm_commit
+        wandb_kwargs["config"] = wandb_config
         active_backends.append(
             WandbBackend(
                 project=self.project_name,
