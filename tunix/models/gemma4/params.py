@@ -34,9 +34,20 @@ import jax
 from jax import numpy as jnp
 from orbax import checkpoint as ocp
 from tunix.models.gemma4 import model as model_lib
+from tunix.models.gemma4 import params_safetensors
 from tunix.utils import compat
 
 import sentencepiece as spm
+
+HfVariant = params_safetensors.HfVariant
+from_hf_impl = params_safetensors.from_hf_impl
+to_hf_impl = params_safetensors.to_hf_impl
+build_from_hf_manifest = params_safetensors.build_from_hf_manifest
+build_to_hf_manifest = params_safetensors.build_to_hf_manifest
+export_to_hf_state_dict = params_safetensors.export_to_hf_state_dict
+create_model_from_safe_tensors = (
+    params_safetensors.create_model_from_safe_tensors
+)
 
 # Pretrained
 GEMMA4_E2B_PT = 'gs://gemma-data/checkpoints/gemma4-e2b-pt'

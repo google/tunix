@@ -27,6 +27,7 @@ import jax.numpy as jnp
 import numpy as np
 import safetensors.numpy as safe_np
 from tunix.generate import utils as gen_utils
+from tunix.models import hf_mapping
 from tunix.models.qwen3p5 import model as qwen3p5_model
 from tunix.models.qwen3p5 import params as qwen3p5_params
 
@@ -379,10 +380,28 @@ class Qwen3p5ModelTest(parameterized.TestCase):
           use_language_model_prefix=False,
           use_tied_embedding=False,
       ),
+      dict(
+          testcase_name='multimodal_prefix_untied_top_level_lm_head',
+          use_language_model_prefix=True,
+          use_tied_embedding=False,
+      ),
+      dict(
+          testcase_name='standalone_prefix_tied',
+          use_language_model_prefix=False,
+          use_tied_embedding=True,
+      ),
   )
   def test_safetensors_loading(
-      self, use_language_model_prefix: bool, use_tied_embedding: bool
+      self,
+      use_language_model_prefix: bool,
+      use_tied_embedding: bool,
   ):
+    """Tests Qwen3.5 checkpoint loading for each declared HF wrapper variant.
+
+    DEPRECATED (testing-only): The inline hand-written HF fixture below is
+    deprecated, retained strictly for bit-by-bit parity testing during migration
+    to `hf_mapping`, and will be removed in a follow-up cleanup CL.
+    """
     cfg = _make_tiny_qwen3p5_config(use_tied_embedding=use_tied_embedding)
     ref_model = qwen3p5_model.Qwen3p5(cfg, rngs=nnx.Rngs(99))
     for layer in ref_model.layers:
@@ -403,7 +422,15 @@ class Qwen3p5ModelTest(parameterized.TestCase):
       )
 
     ckpt_dir = self.create_tempdir().full_path
+    # DEPRECATED (testing-only): Legacy hand-written HF fixture is deprecated,
+    # retained strictly for bit-by-bit parity testing during migration to
+    # `hf_mapping`, and will be removed in a follow-up cleanup CL.
     root = 'model.language_model' if use_language_model_prefix else 'model'
+    hf_variant = (
+        qwen3p5_params.HfVariant.CONDITIONAL_GENERATION
+        if use_language_model_prefix
+        else qwen3p5_params.HfVariant.CAUSAL_LM
+    )
     state = {
         f'{root}.embed_tokens.weight': np.asarray(
             ref_model.embedder.input_embedding.value
@@ -415,12 +442,7 @@ class Qwen3p5ModelTest(parameterized.TestCase):
         'mtp.fc.weight': np.ones((8, 8), dtype=np.float32),
     }
     if not use_tied_embedding:
-      lm_head_key = (
-          'model.language_model.lm_head.weight'
-          if use_language_model_prefix
-          else 'lm_head.weight'
-      )
-      state[lm_head_key] = np.asarray(ref_model.lm_head.w.value).T
+      state['lm_head.weight'] = np.asarray(ref_model.lm_head.w.value).T
 
     for i, layer in enumerate(ref_model.layers):
       p = f'{root}.layers.{i}'
@@ -491,12 +513,15 @@ class Qwen3p5ModelTest(parameterized.TestCase):
       state[k] = np.ascontiguousarray(v)
     safe_np.save_file(state, os.path.join(ckpt_dir, 'model.safetensors'))
 
+    # `hf_variant=None` infers the layout from the shard header keys.
     loaded_model = qwen3p5_params.create_model_from_safe_tensors(
         file_dir=ckpt_dir,
         config=cfg,
         mesh=None,
         dtype=jnp.float32,
     )
+    stamped = loaded_model._hf_variant  # pylint: disable=protected-access
+    self.assertIs(stamped, hf_variant)
 
     tokens = jnp.array([[1, 4, 9, 16]], dtype=jnp.int32)
     positions = jnp.arange(4, dtype=jnp.int32)[None, :]
@@ -506,13 +531,37 @@ class Qwen3p5ModelTest(parameterized.TestCase):
     np.testing.assert_allclose(
         np.asarray(ref_logits), np.asarray(loaded_logits), rtol=1e-5, atol=1e-5
     )
+    # The stamped layout survives `nnx.split`/`nnx.merge` and drives export;
+    # a fresh-init model carries none and must be given one explicitly.
+    exported = qwen3p5_params.export_to_hf_state_dict(
+        nnx.merge(*nnx.split(loaded_model)), cfg
+    )
+    with self.assertRaisesRegex(ValueError, 'Pass `hf_variant`'):
+      qwen3p5_params.export_to_hf_state_dict(ref_model, cfg)
+    expected_hf = {
+        k: v
+        for k, v in state.items()
+        if k not in ('model.visual.patch_embed.proj.weight', 'mtp.fc.weight')
+    }
+    self.assertEqual(set(exported.keys()), set(expected_hf.keys()))
+    for k, v in expected_hf.items():
+      np.testing.assert_array_equal(np.asarray(exported[k]), v, err_msg=k)
 
   def test_save_lora_merged_model_as_safetensors_end_to_end(self):
+    """Tests Qwen3.5 LoRA safetensors merge against legacy hand-written fixture.
+
+    DEPRECATED (testing-only): The inline hand-written HF state-dict builder
+    below is deprecated, retained strictly for bit-by-bit parity testing during
+    migration to `hf_mapping`, and will be removed in a follow-up cleanup CL.
+    """
     cfg = _make_tiny_qwen3p5_config(use_tied_embedding=True)
     base_model = qwen3p5_model.Qwen3p5(cfg, rngs=nnx.Rngs(33))
     base_dir = self.create_tempdir().full_path
     merged_dir = self.create_tempdir().full_path
 
+    # DEPRECATED (testing-only): Legacy hand-written HF fixture is deprecated,
+    # retained strictly for bit-by-bit parity testing during migration to
+    # `hf_mapping`, and will be removed in a follow-up cleanup CL.
     state = {
         'model.language_model.embed_tokens.weight': np.asarray(
             base_model.embedder.input_embedding.value
@@ -589,19 +638,41 @@ class Qwen3p5ModelTest(parameterized.TestCase):
       state[k] = np.ascontiguousarray(v)
     safe_np.save_file(state, os.path.join(base_dir, 'model.safetensors'))
 
+    exported_base = qwen3p5_params.export_to_hf_state_dict(
+        base_model,
+        cfg,
+        hf_variant=qwen3p5_params.HfVariant.CONDITIONAL_GENERATION,
+    )
+    self.assertEqual(set(exported_base.keys()), set(state.keys()))
+    for k, v in state.items():
+      np.testing.assert_array_equal(np.asarray(exported_base[k]), v, err_msg=k)
+
     rank = 2
     alpha = 4.0
     q_lora_a = jax.random.normal(jax.random.key(50), (cfg.embed_dim, rank))
     q_lora_b = jax.random.normal(
         jax.random.key(51), (rank, cfg.num_heads, cfg.head_dim * 2)
     )
-    base_model.layers[3].attn.q_proj.lora_a = nnx.LoRAParam(q_lora_a)
-    base_model.layers[3].attn.q_proj.lora_b = nnx.LoRAParam(q_lora_b)
+    # Fresh-init models carry no layout: LoRA save needs an explicit one.
+    with self.assertRaisesRegex(ValueError, 'Pass `hf_variant`'):
+      qwen3p5_params.save_lora_merged_model_as_safetensors(
+          base_dir, merged_dir, base_model, rank, alpha
+      )
+    # A loaded model's stamped layout survives `nnx.split`/`nnx.merge`.
+    lora_model = nnx.merge(
+        *nnx.split(
+            qwen3p5_params.create_model_from_safe_tensors(
+                file_dir=base_dir, config=cfg, mesh=None, dtype=jnp.float32
+            )
+        )
+    )
+    lora_model.layers[3].attn.q_proj.lora_a = nnx.LoRAParam(q_lora_a)
+    lora_model.layers[3].attn.q_proj.lora_b = nnx.LoRAParam(q_lora_b)
 
     qwen3p5_params.save_lora_merged_model_as_safetensors(
         local_model_path=base_dir,
         output_dir=merged_dir,
-        lora_model=base_model,
+        lora_model=lora_model,
         rank=rank,
         alpha=alpha,
     )
@@ -678,6 +749,14 @@ class Qwen3p5ModelTest(parameterized.TestCase):
     cfg.num_experts_per_tok = 2
     with self.assertRaises(NotImplementedError):
       qwen3p5_model.Qwen3p5(cfg, rngs=nnx.Rngs(0))
+    for moe_preset in (
+        qwen3p5_model.ModelConfig.qwen3p5_35b_a3b(),
+        qwen3p5_model.ModelConfig.qwen3p5_397b_a17b(),
+    ):
+      with self.assertRaises(NotImplementedError):
+        qwen3p5_params.build_from_hf_manifest(
+            moe_preset, qwen3p5_model.HfVariant.CONDITIONAL_GENERATION
+        )
 
   def test_backend_mappings_vllm_jax_and_unavailable_raises_runtime_error(self):
     self.assertIn(
@@ -694,19 +773,24 @@ class Qwen3p5ModelTest(parameterized.TestCase):
     with self.assertRaises(ValueError):
       model(tokens, positions, cache, None, segment_ids=segment_ids)
 
-  def test_state_key_to_safetensors_key_prefix_handling(self):
-    self.assertEqual(
-        qwen3p5_params._qwen3p5_state_key_to_safetensors_key(
-            'layers.3.attn.q_proj'
-        ),
-        'model.language_model.layers.3.self_attn.q_proj.weight',
-    )
-    self.assertEqual(
-        qwen3p5_params._qwen3p5_state_key_to_safetensors_key(
-            'layers.3.attn.q_proj', use_language_model_prefix=False
-        ),
-        'model.layers.3.self_attn.q_proj.weight',
-    )
+  def test_qwen3p5_hf_variant_selects_key_layout(self):
+    cfg = _make_tiny_qwen3p5_config(use_tied_embedding=False)
+    variants = qwen3p5_params.HfVariant
+    for variant, prefix in (
+        (variants.CONDITIONAL_GENERATION, 'model.language_model.'),
+        (variants.CAUSAL_LM, 'model.'),
+    ):
+      manifest = qwen3p5_params.build_from_hf_manifest(cfg, variant)
+      self.assertEqual(manifest['model_type'], f'qwen3p5/{variant.value}')
+      sources = hf_mapping.active_source_keys(manifest)
+      self.assertIn(f'{prefix}layers.3.self_attn.q_proj.weight', sources)
+      self.assertIn(f'{prefix}embed_tokens.weight', sources)
+      self.assertIn('lm_head.weight', sources)
+      self.assertTrue(
+          all(k.startswith(prefix) for k in sources - {'lm_head.weight'})
+      )
+    with self.assertRaisesRegex(ValueError, 'Pass `hf_variant`'):
+      qwen3p5_params.build_from_hf_manifest(cfg, None)
 
   def test_flash_attention_matches_eager_and_supports_segment_ids(self):
     cfg_eager = _make_tiny_qwen3p5_config()

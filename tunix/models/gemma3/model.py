@@ -102,6 +102,19 @@ class QueryPreAttentionNormalisation(enum.Enum):
   BY_ONE_OVER_SQRT_EMBED_DIM_DIV_NUM_HEADS = enum.auto()
 
 
+class HfVariant(enum.Enum):
+  """HF key layout, fixed by the HF class that wrote the checkpoint."""
+
+  # `Gemma3ForCausalLM`: text decoder under `model.`, no vision tower.
+  CAUSAL_LM = 'causal_lm'
+  # `Gemma3ForConditionalGeneration` (transformers v5): text decoder under
+  # `model.language_model.`, towers under `model.`.
+  CONDITIONAL_GENERATION = 'conditional_generation'
+  # `Gemma3ForConditionalGeneration` before the `model.` wrapper: text decoder
+  # under `language_model.model.`, towers at top level.
+  CONDITIONAL_GENERATION_LEGACY = 'conditional_generation_legacy'
+
+
 @dataclasses.dataclass(slots=True, kw_only=True)
 class ModelConfig:
   """Transformer config."""
@@ -967,6 +980,7 @@ class Gemma3(BackendMappingMixin, nnx.Module):
 
   def __init__(self, config: ModelConfig, *, rngs: nnx.Rngs):
     self.config = config
+    self._hf_variant: HfVariant | None = None
 
     if config.vision_config is not None:
       self.vision_encoder = vision.SigLiP(

@@ -128,6 +128,7 @@ class CheckpointManagerTest(parameterized.TestCase):
     self.assertIsNone(cp_manager.latest_step())
     self.assertFalse(cp_manager.save(1, None))  # pyrefly: ignore[bad-argument-type]
     self.assertEqual(cp_manager.maybe_restore(None), (0, {}))  # pyrefly: ignore[bad-argument-type]
+    cp_manager.close()
 
   def test_checkpoint_manager_options_none_sets_default(self):
     cp_path = f'{self.temp_path}/{self.id()}'
@@ -520,12 +521,11 @@ class CheckpointManagerTest(parameterized.TestCase):
         jax.sharding.SingleDeviceSharding,
     )
 
-    restored_step, _ = ckpt_manager.maybe_restore(
-        model, new_optimizer
-    )
+    restored_step, _ = ckpt_manager.maybe_restore(model, new_optimizer)
     self.assertEqual(restored_step, 1)
 
     errors = []
+
     def assert_named_sharding(path, x):
       if hasattr(x, 'sharding'):
         try:
@@ -687,13 +687,16 @@ class CheckpointManagerTest(parameterized.TestCase):
     cp_manager = checkpoint_manager.CheckpointManager(cp_path, options=options)
     model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
 
-    with mock.patch.object(
-        cp_manager._checkpointer,
-        'save_checkpointables_async',
-        return_value=mock.MagicMock(),
-    ) as mock_async, mock.patch.object(
-        cp_manager._checkpointer, 'save_checkpointables', return_value=True
-    ) as mock_sync:
+    with (
+        mock.patch.object(
+            cp_manager._checkpointer,
+            'save_checkpointables_async',
+            return_value=mock.MagicMock(),
+        ) as mock_async,
+        mock.patch.object(
+            cp_manager._checkpointer, 'save_checkpointables', return_value=True
+        ) as mock_sync,
+    ):
       cp_manager.save(1, model)
       if enable_async:
         mock_async.assert_called_once()
@@ -737,6 +740,43 @@ class CheckpointManagerTest(parameterized.TestCase):
     assert cp_manager._checkpointer is not None
     cp_manager._checkpointer.wait()
     self.assertEqual(cp_manager.latest_step(), 1)
+
+  def test_export_safetensors_delegates_to_export_fn(self):
+    cp_path = f'{self.temp_path}/{self.id()}'
+    cp_manager = checkpoint_manager.CheckpointManager(cp_path)
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+    captured: dict[str, object] = {}
+
+    def _fake_export(
+        local_model_path,
+        target_dir,
+        m,
+        *,
+        num_ranks=1,
+        max_bucket_bytes=None,
+    ):
+      captured['local_model_path'] = local_model_path
+      captured['target_dir'] = target_dir
+      captured['model'] = m
+      captured['num_ranks'] = num_ranks
+      captured['max_bucket_bytes'] = max_bucket_bytes
+      return target_dir
+
+    result = cp_manager.export_safetensors(
+        step=5,
+        model=model,
+        export_fn=_fake_export,
+        local_model_path='/tmp/base',
+        num_ranks=2,
+        max_bucket_bytes=1024,
+    )
+    self.assertEqual(result, os.path.join(cp_path, '5', 'safetensors'))
+    self.assertEqual(captured['num_ranks'], 2)
+    self.assertEqual(captured['max_bucket_bytes'], 1024)
+    disabled_manager = checkpoint_manager.CheckpointManager(None)
+    self.assertIsNone(
+        disabled_manager.export_safetensors(1, model, _fake_export)
+    )
 
 
 if __name__ == '__main__':

@@ -14,11 +14,11 @@
 
 """Checkpoint manager for PEFT."""
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 import functools
 import os
 import time
-from typing import Any
+from typing import Any, TypeVar
 
 from absl import logging
 from flax import nnx
@@ -29,6 +29,8 @@ from orbax.checkpoint import utils as ocp_utils
 from orbax.checkpoint import v1 as ocp
 from tunix.sft import checkpoint_options
 from tunix.utils import sharding_utils
+
+_ExportResultT = TypeVar('_ExportResultT')
 
 
 def _convert_host_local_array(x: Any) -> Any:
@@ -140,10 +142,9 @@ class CheckpointManager:
         the checkpoint manager will be disabled.
       options: The options for the checkpoint manager.
     """
+    self._root_directory: str | None = root_directory
     self._checkpointer: ocp.training.Checkpointer | None = None
-    self._options = checkpoint_options.resolve_checkpointing_defaults(
-        options
-    )
+    self._options = checkpoint_options.resolve_checkpointing_defaults(options)
     if root_directory:
       self._checkpointer = ocp.training.Checkpointer(
           root_directory,
@@ -374,3 +375,28 @@ class CheckpointManager:
     if self._checkpointer is None:
       return
     self._checkpointer.close()
+
+  def export_safetensors(
+      self,
+      step: int,
+      model: nnx.Module,
+      export_fn: Callable[..., _ExportResultT],
+      *,
+      output_dir: str | None = None,
+      local_model_path: str | None = None,
+      num_ranks: int = 1,
+      max_bucket_bytes: int | None = None,
+  ) -> _ExportResultT | None:
+    """Exports the model as safetensors via the provided exporter callable."""
+    if output_dir is None and self._root_directory is None:
+      return None
+    target_dir = output_dir or os.path.join(
+        self._root_directory or '', str(step), 'safetensors'
+    )
+    return export_fn(
+        local_model_path,
+        target_dir,
+        model,
+        num_ranks=num_ranks,
+        max_bucket_bytes=max_bucket_bytes,
+    )
