@@ -465,6 +465,7 @@ class PeftTrainerTest(parameterized.TestCase):
         initial_step=0,
         max_step=config.max_steps,
         profiler_options=profiler_options,
+        backend=mock.ANY,
     )
     expected_calls = (
         # steps 0 through 8.
