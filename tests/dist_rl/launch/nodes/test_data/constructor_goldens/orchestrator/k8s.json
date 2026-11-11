@@ -102,7 +102,11 @@
     {
       "tunix.dist_rl.common.datatypes.FaultToleranceConfig": {
         "kwargs": {
-          "enabled": true
+          "enabled": true,
+          "max_task_retries": 1,
+          "min_active_rollout_grace_s": 900.0,
+          "min_active_rollout_ratio": 0.5,
+          "poll_retry_budget_s": null
         }
       }
     },

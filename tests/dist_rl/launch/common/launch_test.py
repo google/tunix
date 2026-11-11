@@ -270,11 +270,20 @@ class LaunchScriptsTest(absltest.TestCase):
     self.assertIn(
         "old example launchers are set: ROLLOUT_FAULT_TOLERANCE", res.stderr
     )
-    res = self._run_launch(args, extra_env={"MIN_ROLLOUT_WORKERS": "2"})
-    self.assertNotEqual(res.returncode, 0)
-    self.assertIn(
-        "old example launchers are set: MIN_ROLLOUT_WORKERS", res.stderr
-    )
+    for legacy_ft_var in (
+        "MIN_ROLLOUT_WORKERS",
+        "MIN_ROLLOUT_REPLICAS",
+        "MAX_TASK_RETRIES",
+        "POLL_RETRY_BUDGET_S",
+        "MIN_ACTIVE_ROLLOUT_RATIO",
+        "MIN_ACTIVE_ROLLOUT_GRACE_S",
+    ):
+      with self.subTest(var=legacy_ft_var):
+        res = self._run_launch(args, extra_env={legacy_ft_var: "1"})
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn(
+            f"old example launchers are set: {legacy_ft_var}", res.stderr
+        )
     # An empty variable is not a setting.
     res = self._run_launch(args, extra_env={"MODEL_NAME": ""})
     self.assertEqual(res.returncode, 0, msg=res.stderr)

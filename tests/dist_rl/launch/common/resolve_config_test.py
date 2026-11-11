@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from unittest import mock
 
@@ -945,13 +946,108 @@ weight_sync_config:
       resolve_config.initialize(["vllm_config.detokenize=yes_please"])
     with self.assertRaisesRegex(TypeError, "vllm_config.server_mode"):
       resolve_config.initialize(["vllm_config.server_mode=0"])
-    for bad_ft in ("yes_please", "0"):
+    for bad_ft in ("yes_please", "0", "null"):
       with self.assertRaisesRegex(
           TypeError, r"cluster_config\.rollout_fault_tolerance"
       ):
         resolve_config.initialize(
             [f"cluster_config.rollout_fault_tolerance={bad_ft}"]
         )
+
+  def test_rollout_fault_tolerance_settings_and_validation(self):
+    ft_keys = (
+        "rollout_fault_tolerance",
+        "max_task_retries",
+        "poll_retry_budget_s",
+        "min_active_rollout_ratio",
+        "min_active_rollout_grace_s",
+    )
+
+    def ft_values(*overrides: str) -> dict[str, object]:
+      cluster = resolve_config.initialize(list(overrides)).config_mapping(
+          "cluster_config"
+      )
+      return {key: cluster[key] for key in ft_keys}
+
+    self.assertEqual(
+        ft_values(),
+        {
+            "rollout_fault_tolerance": True,
+            "max_task_retries": 1,
+            "poll_retry_budget_s": None,
+            "min_active_rollout_ratio": 0.5,
+            "min_active_rollout_grace_s": 900.0,
+        },
+    )
+    self.assertEqual(
+        ft_values(
+            "cluster_config.rollout_fault_tolerance=false",
+            "cluster_config.max_task_retries=3",
+            "cluster_config.poll_retry_budget_s=45.5",
+            "cluster_config.min_active_rollout_ratio=null",
+            "cluster_config.min_active_rollout_grace_s=0",
+        ),
+        {
+            "rollout_fault_tolerance": False,
+            "max_task_retries": 3,
+            "poll_retry_budget_s": 45.5,
+            "min_active_rollout_ratio": None,
+            "min_active_rollout_grace_s": 0,
+        },
+    )
+    self.assertEqual(
+        ft_values(
+            "cluster_config.max_task_retries=0",
+            "cluster_config.poll_retry_budget_s=0",
+            "cluster_config.min_active_rollout_ratio=1",
+        ),
+        {
+            "rollout_fault_tolerance": True,
+            "max_task_retries": 0,
+            "poll_retry_budget_s": 0,
+            "min_active_rollout_ratio": 1,
+            "min_active_rollout_grace_s": 900.0,
+        },
+    )
+
+    for arg in (
+        "cluster_config.max_task_retries=true",
+        "cluster_config.max_task_retries=1.5",
+        "cluster_config.max_task_retries=null",
+        "cluster_config.max_task_retries=abc",
+        "cluster_config.poll_retry_budget_s=true",
+        "cluster_config.poll_retry_budget_s=abc",
+        "cluster_config.min_active_rollout_ratio=false",
+        "cluster_config.min_active_rollout_ratio=abc",
+        "cluster_config.min_active_rollout_grace_s=true",
+        "cluster_config.min_active_rollout_grace_s=null",
+        "cluster_config.min_active_rollout_grace_s=abc",
+    ):
+      key = arg.split("=", 1)[0]
+      with self.subTest(arg=arg):
+        with self.assertRaisesRegex(TypeError, re.escape(key)):
+          resolve_config.initialize([arg])
+
+    for arg in (
+        "cluster_config.max_task_retries=-1",
+        "cluster_config.poll_retry_budget_s=-0.1",
+        "cluster_config.poll_retry_budget_s=.inf",
+        "cluster_config.poll_retry_budget_s=-.inf",
+        "cluster_config.poll_retry_budget_s=.nan",
+        "cluster_config.min_active_rollout_ratio=0.0",
+        "cluster_config.min_active_rollout_ratio=-0.5",
+        "cluster_config.min_active_rollout_ratio=1.1",
+        "cluster_config.min_active_rollout_ratio=.nan",
+        "cluster_config.min_active_rollout_ratio=.inf",
+        "cluster_config.min_active_rollout_grace_s=-1.0",
+        "cluster_config.min_active_rollout_grace_s=.inf",
+        "cluster_config.min_active_rollout_grace_s=-.inf",
+        "cluster_config.min_active_rollout_grace_s=.nan",
+    ):
+      key = arg.split("=", 1)[0]
+      with self.subTest(arg=arg):
+        with self.assertRaisesRegex(ValueError, re.escape(key)):
+          resolve_config.initialize([arg])
 
   def test_typed_vllm_keys_rejected_in_free_form_kwargs(self):
     with self.assertRaisesRegex(

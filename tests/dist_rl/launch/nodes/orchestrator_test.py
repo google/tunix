@@ -748,9 +748,31 @@ class ClusterTest(absltest.TestCase):
     self.assertEmpty(cluster.registry.infos())
 
     disabled_cluster = self._cluster(
-        _config("cluster_config.rollout_fault_tolerance=false")
+        _config(
+            "cluster_config.rollout_fault_tolerance=false",
+            "cluster_config.max_task_retries=3",
+            "cluster_config.poll_retry_budget_s=42.5",
+            "cluster_config.min_active_rollout_ratio=0.75",
+            "cluster_config.min_active_rollout_grace_s=120",
+        )
     )
-    self.assertFalse(disabled_cluster.fault_tolerance_manager.config.enabled)
+    self.assertEqual(
+        disabled_cluster.fault_tolerance_manager.config,
+        datatypes.FaultToleranceConfig(
+            enabled=False,
+            max_task_retries=3,
+            poll_retry_budget_s=42.5,
+            min_active_rollout_ratio=0.75,
+            min_active_rollout_grace_s=120.0,
+        ),
+    )
+
+    unguarded_cluster = self._cluster(
+        _config("cluster_config.min_active_rollout_ratio=null")
+    )
+    self.assertIsNone(
+        unguarded_cluster.fault_tolerance_manager.config.min_active_rollout_ratio
+    )
 
   def test_wait_for_workers_registers_with_rpc_timeout(self):
     hp = _config("agentic_grpo_config.beta=0.0")

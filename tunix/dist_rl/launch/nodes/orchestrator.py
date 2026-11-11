@@ -456,14 +456,22 @@ def create_cluster(
     weight_sync_timeouts: weight_sync_coordinator.PhaseTimeouts,
 ) -> cluster_orchestrator.ClusterOrchestrator:
   """Creates the `ClusterOrchestrator`; the workers register in `run_program`."""
-  rollout_ft = bool(
-      hp.config_mapping("cluster_config")["rollout_fault_tolerance"]
-  )
+  cluster = hp.config_mapping("cluster_config")
+  budget = cluster["poll_retry_budget_s"]
+  ratio = cluster["min_active_rollout_ratio"]
   return cluster_orchestrator.ClusterOrchestrator(
       weight_sync_mode=_weight_sync_mode(hp).value,
       trajectory_store_config=node_utils.trajectory_store_config(hp),
       weight_sync_timeouts=weight_sync_timeouts,
-      fault_tolerance_config=datatypes.FaultToleranceConfig(enabled=rollout_ft),
+      fault_tolerance_config=datatypes.FaultToleranceConfig(
+          enabled=bool(cluster["rollout_fault_tolerance"]),
+          max_task_retries=int(cluster["max_task_retries"]),
+          poll_retry_budget_s=None if budget is None else float(budget),
+          min_active_rollout_ratio=None if ratio is None else float(ratio),
+          min_active_rollout_grace_s=float(
+              cluster["min_active_rollout_grace_s"]
+          ),
+      ),
   )
 
 

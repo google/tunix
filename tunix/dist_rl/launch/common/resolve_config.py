@@ -561,6 +561,62 @@ def _validate_rollout_logps_settings(hp: cli_config.HyperParameters) -> None:
     )
 
 
+def _validate_fault_tolerance(hp: cli_config.HyperParameters) -> None:
+  """Checks the `cluster_config` rollout fault-tolerance settings.
+
+  Args:
+    hp: Loaded configuration.
+
+  Raises:
+    TypeError: If `rollout_fault_tolerance` is not a bool, `max_task_retries`
+      is not an int, or `poll_retry_budget_s`, `min_active_rollout_ratio`, or
+      `min_active_rollout_grace_s` is not a number (the first two may be null).
+    ValueError: If a setting is non-finite or out of range.
+  """
+  cluster = hp.config_mapping("cluster_config")
+  enabled = cluster["rollout_fault_tolerance"]
+  if not isinstance(enabled, bool):
+    raise TypeError(
+        "cluster_config.rollout_fault_tolerance must be a bool, got"
+        f" {enabled!r}."
+    )
+  nullable_number = (int, float, type(None))
+  for key, allowed, type_desc in (
+      ("max_task_retries", int, "an int"),
+      ("poll_retry_budget_s", nullable_number, "a number or null"),
+      ("min_active_rollout_ratio", nullable_number, "a number or null"),
+      ("min_active_rollout_grace_s", (int, float), "a number"),
+  ):
+    value = cluster[key]
+    if isinstance(value, bool) or not isinstance(value, allowed):
+      raise TypeError(
+          f"cluster_config.{key} must be {type_desc}, got {value!r}."
+      )
+  retries = cluster["max_task_retries"]
+  if retries < 0:
+    raise ValueError(
+        f"cluster_config.max_task_retries must be >= 0, got {retries}."
+    )
+  budget = cluster["poll_retry_budget_s"]
+  if budget is not None and not (0.0 <= budget < math.inf):
+    raise ValueError(
+        "cluster_config.poll_retry_budget_s must be finite and >= 0, got"
+        f" {budget}."
+    )
+  ratio = cluster["min_active_rollout_ratio"]
+  if ratio is not None and not (0.0 < ratio <= 1.0):
+    raise ValueError(
+        "cluster_config.min_active_rollout_ratio must be in (0.0, 1.0], got"
+        f" {ratio}."
+    )
+  grace = cluster["min_active_rollout_grace_s"]
+  if not (0.0 <= grace < math.inf):
+    raise ValueError(
+        "cluster_config.min_active_rollout_grace_s must be finite and >= 0,"
+        f" got {grace}."
+    )
+
+
 def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   """Validates cross-field invariants across trainer and rollout configs."""
   # TODO(noghabi): Check which of these checks can be consolidated with the
@@ -572,12 +628,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   _validate_rollout_replicas(hp)
   _validate_trajectory_logging(hp)
   _validate_rollout_logps_settings(hp)
-  rollout_ft = hp.config_mapping("cluster_config")["rollout_fault_tolerance"]
-  if not isinstance(rollout_ft, bool):
-    raise TypeError(
-        "cluster_config.rollout_fault_tolerance must be a bool, got"
-        f" {rollout_ft!r}."
-    )
+  _validate_fault_tolerance(hp)
   batch_size = int(hp.config["batch_size"])
   rl_train = hp.config_mapping("rl_training_config")
   mini_batch_size = int(rl_train["mini_batch_size"])

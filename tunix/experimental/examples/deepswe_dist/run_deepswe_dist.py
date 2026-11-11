@@ -17,10 +17,15 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterator
+import contextlib
 import functools
 import logging
+import math
 import os
+import signal
 import sys
+import threading
 from typing import Any
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
@@ -283,7 +288,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--rollout_replicas",
       type=int,
       default=1,
-      help="Number of rollout worker replicas to wait for before step 0.",
+      help="Total rollout worker replicas deployed in the cluster.",
+  )
+  parser.add_argument(
+      "--min_rollout_replicas",
+      type=_optional_int,
+      default=_optional_int(os.getenv("MIN_ROLLOUT_REPLICAS")),
+      help=(
+          "Minimum rollout worker replicas to wait for before bring-up; slower"
+          " initial replicas join in the background. Defaults to"
+          " rollout_replicas when unset."
+      ),
   )
   parser.add_argument(
       "--max_warmpool_replicas",
@@ -400,16 +415,64 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " ahead of time during worker configuration."
       ),
   )
+  ft_defaults = datatypes.FaultToleranceConfig()
+  raw_ft = os.getenv("ROLLOUT_FAULT_TOLERANCE", "").strip()
+  raw_max_retries = os.getenv("MAX_TASK_RETRIES", "").strip()
+  raw_poll_budget = os.getenv("POLL_RETRY_BUDGET_S", "").strip()
+  raw_min_ratio = os.getenv("MIN_ACTIVE_ROLLOUT_RATIO", "").strip()
+  raw_min_grace = os.getenv("MIN_ACTIVE_ROLLOUT_GRACE_S", "").strip()
   parser.add_argument(
       "--rollout_fault_tolerance",
       type=_str2bool,
-      default=_str2bool(os.getenv("ROLLOUT_FAULT_TOLERANCE", "true")),
+      default=_str2bool(raw_ft) if raw_ft else ft_defaults.enabled,
       nargs="?",
       const=True,
       help=(
           "Whether to enable rollout worker fault tolerance (automatic"
           " eviction and task retry)."
       ),
+  )
+  parser.add_argument(
+      "--max_task_retries",
+      type=int,
+      default=(
+          int(raw_max_retries)
+          if raw_max_retries
+          else ft_defaults.max_task_retries
+      ),
+      help=(
+          "Maximum cross-worker task re-dispatches when fault tolerance is on."
+      ),
+  )
+  parser.add_argument(
+      "--poll_retry_budget_s",
+      type=_optional_float,
+      default=(
+          _optional_float(raw_poll_budget)
+          if raw_poll_budget
+          else ft_defaults.poll_retry_budget_s
+      ),
+      help="Transient poll retry budget in seconds, or null for default.",
+  )
+  parser.add_argument(
+      "--min_active_rollout_ratio",
+      type=_optional_float,
+      default=(
+          _optional_float(raw_min_ratio)
+          if raw_min_ratio
+          else ft_defaults.min_active_rollout_ratio
+      ),
+      help="Minimum active/peak rollout ratio in (0, 1], or null to disable.",
+  )
+  parser.add_argument(
+      "--min_active_rollout_grace_s",
+      type=float,
+      default=(
+          float(raw_min_grace)
+          if raw_min_grace
+          else ft_defaults.min_active_rollout_grace_s
+      ),
+      help="Grace period in seconds below min_active_rollout_ratio.",
   )
   args = parser.parse_args(argv)
   return args
@@ -419,9 +482,9 @@ def _optional_float(v: str | float | None) -> float | None:
   """Parses an optional float CLI argument where 'none'/'null'/'' maps to None."""
   if v is None:
     return None
-  if isinstance(v, (int, float)):
+  if isinstance(v, (int, float)) and not isinstance(v, bool):
     return float(v)
-  s = v.strip()
+  s = str(v).strip()
   if not s or s.lower() in ("none", "null"):
     return None
   return float(s)
@@ -548,6 +611,70 @@ def _validate_args(
   return weight_sync_timeouts
 
 
+def _build_fault_tolerance_config(
+    args: argparse.Namespace,
+) -> datatypes.FaultToleranceConfig:
+  """Validates and builds `FaultToleranceConfig` from parsed CLI flags."""
+  budget = args.poll_retry_budget_s
+  if budget is not None and not (0.0 <= budget < math.inf):
+    raise ValueError(
+        f"poll_retry_budget_s must be finite and >= 0, got {budget}."
+    )
+  grace = args.min_active_rollout_grace_s
+  if not (0.0 <= grace < math.inf):
+    raise ValueError(
+        f"min_active_rollout_grace_s must be finite and >= 0, got {grace}."
+    )
+  return datatypes.FaultToleranceConfig(
+      enabled=args.rollout_fault_tolerance,
+      max_task_retries=args.max_task_retries,
+      poll_retry_budget_s=budget,
+      min_active_rollout_ratio=args.min_active_rollout_ratio,
+      min_active_rollout_grace_s=grace,
+  )
+
+
+def _required_workers(
+    args: argparse.Namespace,
+) -> dict[datatypes.Role, int]:
+  """Validates replica counts and returns startup worker registration targets."""
+  if args.rollout_replicas < 1:
+    raise ValueError(
+        f"rollout_replicas must be >= 1, got {args.rollout_replicas}."
+    )
+  min_rollouts = (
+      args.rollout_replicas
+      if args.min_rollout_replicas is None
+      else args.min_rollout_replicas
+  )
+  if not (1 <= min_rollouts <= args.rollout_replicas):
+    raise ValueError(
+        f"min_rollout_replicas ({min_rollouts}) must be in"
+        f" [1, {args.rollout_replicas}]."
+    )
+  return {
+      datatypes.Role.ACTOR: 1,
+      datatypes.Role.ROLLOUT: min_rollouts,
+      datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
+  }
+
+
+@contextlib.contextmanager
+def _preserve_signal_handlers() -> Iterator[None]:
+  """Restores main-thread signal handlers clobbered by `AsyncTrajectoryLogger`."""
+  signals = (
+      (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+      if threading.current_thread() is threading.main_thread()
+      else ()
+  )
+  saved = [(sig, signal.getsignal(sig)) for sig in signals]
+  try:
+    yield
+  finally:
+    for sig, handler in saved:
+      signal.signal(sig, signal.SIG_DFL if handler is None else handler)
+
+
 def main(argv: list[str], context: ProcessContext | None = None) -> None:
   assert (
       context and context.ipc and context.ipc.discovery
@@ -561,6 +688,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   )
 
   weight_sync_timeouts = _validate_args(args)
+  fault_tolerance_config = _build_fault_tolerance_config(args)
+  min_workers = _required_workers(args)
 
   logging.info("=== Starting Distributed DeepSWE GRPO Orchestrator ===")
   logging.info(
@@ -618,33 +747,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   )
 
   trajectory_store_config = _trajectory_store_config(args)
-  cluster = orchestrator.ClusterOrchestrator(
-      weight_sync_mode=args.weight_sync_mode,
-      trajectory_store_config=trajectory_store_config,
-      weight_sync_timeouts=weight_sync_timeouts,
-      fault_tolerance_config=datatypes.FaultToleranceConfig(
-          enabled=args.rollout_fault_tolerance
-      ),
-  )
-  context.ipc.discovery.on_register(
-      functools.partial(
-          cluster.registry.register_from_hostname,
-          rpc_timeout_s=args.rpc_timeout_s,
-      )
-  )
-
-  cluster.registry.wait_for_workers(
-      min_workers={
-          datatypes.Role.ACTOR: 1,
-          datatypes.Role.ROLLOUT: max(1, args.rollout_replicas),
-          datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
-      },
-      timeout=args.init_timeout_s,
-  )
-  logging.info("Registered workers: %s", cluster.registry.infos())
-
   algo_config = _build_algo(args)
-
   wandb_backend_kwargs: dict[str, Any] = {"config": vars(args)}
   if args.wandb_entity:
     os.environ["WANDB_ENTITY"] = args.wandb_entity
@@ -657,145 +760,167 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       backend_kwargs={"wandb": wandb_backend_kwargs},
   )
 
-  prompt_iter = deepswe.iter_prompt_items(
-      dataset=dataset,
-      max_steps=args.max_steps,
-      batch_size=args.batch_size,
-      max_turns=args.max_turns,
-      max_response_length=args.max_response_length,
-      temperature=args.temperature,
-      top_p=args.top_p,
-      top_k=0 if args.top_k < 0 else args.top_k,
-      step_timeout_secs=args.step_timeout_secs,
-      reward_timeout_secs=args.reward_timeout_secs,
-      episode_timeout_secs=args.episode_timeout_secs,
-      env_backend=args.env_backend,
-      use_agent_sandbox=args.use_agent_sandbox,
-      scaffold=args.scaffold,
-      env_verbose=args.env_verbose,
-      overlong_filter=args.overlong_filter,
-      max_staleness=args.max_staleness,
-      return_routed_experts=args.return_routed_experts,
+  cluster = orchestrator.ClusterOrchestrator(
+      weight_sync_mode=args.weight_sync_mode,
+      trajectory_store_config=trajectory_store_config,
+      weight_sync_timeouts=weight_sync_timeouts,
+      fault_tolerance_config=fault_tolerance_config,
   )
   orchestrator_fleet = None
   prewarm_iter = None
-  if args.use_agent_sandbox:
-    job_id = os.environ["ORCHESTRATOR_ID"]
-    max_warmpool_replicas = (
-        args.max_warmpool_replicas
-        if args.max_warmpool_replicas is not None
-        else args.num_generations
-    )
-    logging.info(
-        "Initializing orchestrator SandboxFleet + PrewarmDatasetIterator "
-        "(job_id=%s, batch_size=%d, num_generations=%d, max_concurrency=%d, "
-        "max_warmpool_replicas=%d, max_staleness=%d).",
-        job_id,
-        args.batch_size,
-        args.num_generations,
-        args.max_concurrency,
-        max_warmpool_replicas,
-        args.max_staleness,
-    )
-    orchestrator_fleet = sandbox_utils.init_global_fleet(
-        tasks=None,
-        max_concurrency=args.max_concurrency,
-        num_generations=args.num_generations,
-        batch_size=args.batch_size,
-        max_warmpool_replicas=max_warmpool_replicas,
-        scaffold=args.scaffold,
-        job_id=job_id,
-        warm_on_init=False,
-        teardown_on_exit=True,
-    )
-    prewarm_iter = sandbox_utils.PrewarmDatasetIterator(
-        prompt_iter,
-        fleet=orchestrator_fleet,
-        num_generations=args.num_generations,
-        batch_size=args.batch_size,
-        max_warmpool_replicas=max_warmpool_replicas,
-        # StandardRLProgram.rollout_dispatch_stage wraps the dataset in
-        # iter_dataset_async(..., prefetch_size=full_batch_size), which pulls
-        # one full batch ahead of dispatch_window.admit(). Add +1 so the
-        # prefetched batch does not prematurely unwarm the oldest active batch.
-        max_staleness=args.max_staleness + 1,
-        unwarm_on_exhaustion=True,
-        scaffold=args.scaffold,
-    )
-    prompt_iter = prewarm_iter
+  program = None
+  with orchestrator.managed_cluster_teardown(
+      cluster, stop_workers_on_exit=args.stop_workers_on_exit
+  ):
+    try:
+      context.ipc.discovery.on_register(
+          functools.partial(
+              cluster.registry.register_from_hostname,
+              rpc_timeout_s=args.rpc_timeout_s,
+          )
+      )
+      logging.info("Waiting for workers to register: %s", min_workers)
+      cluster.registry.wait_for_workers(
+          min_workers=min_workers,
+          timeout=args.init_timeout_s,
+      )
+      logging.info("Registered workers: %s", cluster.registry.infos())
 
-  program = rl_program.StandardRLProgram(
-      algo_config=algo_config,
-      dataset=prompt_iter,
-      max_steps=args.max_steps,
-      reward_fns=[],
-      generation_args=datatypes.GenerationArgs(
+      prompt_iter = deepswe.iter_prompt_items(
+          dataset=dataset,
+          max_steps=args.max_steps,
+          batch_size=args.batch_size,
+          max_turns=args.max_turns,
+          max_response_length=args.max_response_length,
           temperature=args.temperature,
           top_p=args.top_p,
           top_k=0 if args.top_k < 0 else args.top_k,
-          return_logprobs=args.use_rollout_logps,
+          step_timeout_secs=args.step_timeout_secs,
+          reward_timeout_secs=args.reward_timeout_secs,
+          episode_timeout_secs=args.episode_timeout_secs,
+          env_backend=args.env_backend,
+          use_agent_sandbox=args.use_agent_sandbox,
+          scaffold=args.scaffold,
+          env_verbose=args.env_verbose,
+          overlong_filter=args.overlong_filter,
+          max_staleness=args.max_staleness,
           return_routed_experts=args.return_routed_experts,
-      ),
-      batch_size=args.batch_size,
-      batch_config=batch_assembly.BatchConfig(
-          mini_batch_size=args.mini_batch_size,
-          train_micro_batch_size=args.train_micro_batch_size,
-          pad_id=pad_id,
-          eos_id=eos_id,
-          max_prompt_length=args.max_prompt_length,
-          max_response_length=args.max_response_length,
-          max_seq_token_per_tpu=args.max_seq_token_per_tpu,
-          max_segments_per_packed_row=args.max_segments_per_packed_row,
-          segment_alignment_boundary=args.segment_alignment_boundary,
-          num_data_shards=args.num_data_shards,
-      ),
-      metrics_logging_options=metrics_logging_options,
-      trajectory_log_dir=(
-          args.trajectory_log_dir if args.trajectory_logging else ""
-      ),
-      trajectory_store=cluster.trajectory_store,
-      max_staleness=args.max_staleness,
-      max_version_span=args.max_version_span,
-      group_order=args.trajectory_group_order,
-      sync_weights=(args.weight_sync_mode != weight_sync.WeightSyncMode.NONE),
-      precompile_trainer=args.trainer_precompile,
-      on_step_begin=lambda step: logging.info(
-          ">>> DeepSWE step %d starting | policy_version=%d",
-          step,
-          step,
-      ),
-      on_step_end=lambda step, result: logging.info(
-          "<<< DeepSWE step %d finished | train_result=%s",
-          step,
-          result,
-      ),
-  )
+      )
+      with _preserve_signal_handlers():
+        if args.use_agent_sandbox:
+          job_id = os.environ["ORCHESTRATOR_ID"]
+          max_warmpool_replicas = (
+              args.max_warmpool_replicas
+              if args.max_warmpool_replicas is not None
+              else args.num_generations
+          )
+          logging.info(
+              "Initializing orchestrator SandboxFleet + PrewarmDatasetIterator "
+              "(job_id=%s, batch_size=%d, num_generations=%d,"
+              " max_concurrency=%d, max_warmpool_replicas=%d,"
+              " max_staleness=%d).",
+              job_id,
+              args.batch_size,
+              args.num_generations,
+              args.max_concurrency,
+              max_warmpool_replicas,
+              args.max_staleness,
+          )
+          orchestrator_fleet = sandbox_utils.init_global_fleet(
+              tasks=None,
+              max_concurrency=args.max_concurrency,
+              num_generations=args.num_generations,
+              batch_size=args.batch_size,
+              max_warmpool_replicas=max_warmpool_replicas,
+              scaffold=args.scaffold,
+              job_id=job_id,
+              warm_on_init=False,
+              teardown_on_exit=False,
+          )
+          prewarm_iter = sandbox_utils.PrewarmDatasetIterator(
+              prompt_iter,
+              fleet=orchestrator_fleet,
+              num_generations=args.num_generations,
+              batch_size=args.batch_size,
+              max_warmpool_replicas=max_warmpool_replicas,
+              # StandardRLProgram.rollout_dispatch_stage wraps the dataset in
+              # iter_dataset_async(..., prefetch_size=full_batch_size), which
+              # pulls one full batch ahead of dispatch_window.admit(). Add +1 so
+              # the prefetched batch does not prematurely unwarm the oldest
+              # active batch.
+              max_staleness=args.max_staleness + 1,
+              unwarm_on_exhaustion=True,
+              scaffold=args.scaffold,
+          )
+          prompt_iter = prewarm_iter
 
-  try:
-    logging.info("Bringing up remote workers through ClusterOrchestrator...")
-    cluster.bring_up_workers(dummy_data=None)
-    logging.info("Starting DeepSWE StandardRLProgram execution...")
-    cluster.run(
-        program=program,
-        num_steps=args.max_steps,
-        bring_up=False,
-    )
-  except Exception:
-    logging.exception("Fatal error in DeepSWE orchestrator execution.")
-    raise
-  finally:
-    if prewarm_iter is not None:
-      prewarm_iter.close()
-    if orchestrator_fleet is not None:
-      sandbox_utils.teardown_global_fleet()
-    program.close()
-    if args.stop_workers_on_exit:
-      logging.info("Shutting down cluster workers...")
-      cluster.shutdown()
-    else:
-      cluster.monitor.close()
-      if cluster.trajectory_store is not None:
-        cluster.trajectory_store.close()
+        program = rl_program.StandardRLProgram(
+            algo_config=algo_config,
+            dataset=prompt_iter,
+            max_steps=args.max_steps,
+            reward_fns=[],
+            generation_args=datatypes.GenerationArgs(
+                temperature=args.temperature,
+                top_p=args.top_p,
+                top_k=0 if args.top_k < 0 else args.top_k,
+                return_logprobs=args.use_rollout_logps,
+                return_routed_experts=args.return_routed_experts,
+            ),
+            batch_size=args.batch_size,
+            batch_config=batch_assembly.BatchConfig(
+                mini_batch_size=args.mini_batch_size,
+                train_micro_batch_size=args.train_micro_batch_size,
+                pad_id=pad_id,
+                eos_id=eos_id,
+                max_prompt_length=args.max_prompt_length,
+                max_response_length=args.max_response_length,
+                max_seq_token_per_tpu=args.max_seq_token_per_tpu,
+                max_segments_per_packed_row=args.max_segments_per_packed_row,
+                segment_alignment_boundary=args.segment_alignment_boundary,
+                num_data_shards=args.num_data_shards,
+            ),
+            metrics_logging_options=metrics_logging_options,
+            trajectory_log_dir=(
+                args.trajectory_log_dir if args.trajectory_logging else ""
+            ),
+            trajectory_store=cluster.trajectory_store,
+            max_staleness=args.max_staleness,
+            max_version_span=args.max_version_span,
+            group_order=args.trajectory_group_order,
+            sync_weights=(
+                args.weight_sync_mode != weight_sync.WeightSyncMode.NONE
+            ),
+            precompile_trainer=args.trainer_precompile,
+            on_step_begin=lambda step: logging.info(
+                ">>> DeepSWE step %d starting | policy_version=%d",
+                step,
+                step,
+            ),
+            on_step_end=lambda step, result: logging.info(
+                "<<< DeepSWE step %d finished | train_result=%s",
+                step,
+                result,
+            ),
+        )
+
+      logging.info("Bringing up remote workers through ClusterOrchestrator...")
+      cluster.bring_up_workers(dummy_data=None)
+      logging.info("Starting DeepSWE StandardRLProgram execution...")
+      cluster.run(
+          program=program,
+          num_steps=args.max_steps,
+          bring_up=False,
+      )
+    except Exception:
+      logging.exception("Fatal error in DeepSWE orchestrator execution.")
+      raise
+    finally:
+      if prewarm_iter is not None:
+        prewarm_iter.close()
+      if orchestrator_fleet is not None:
+        sandbox_utils.teardown_global_fleet()
+      if program is not None:
+        program.close()
 
   result = program.last_step_result
   if result is None:
