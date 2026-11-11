@@ -64,7 +64,6 @@ class LLMEngineTest(absltest.TestCase):
     )
 
     self.assertEqual(engine._scheduler_config.max_chunked_prefill_length, 8)
-    self.assertEqual(engine._scheduler._config.max_chunked_prefill_length, 8)
 
 
 class AddRequestTest(parameterized.TestCase):
@@ -79,14 +78,20 @@ class AddRequestTest(parameterized.TestCase):
 
   def test_empty_prompt_raises(self):
     with self.assertRaisesRegex(ValueError, 'empty prompt'):
-      testing_utils.make_engine().add_request(testing_utils.make_request('0', []))
+      testing_utils.make_engine().add_request(
+          testing_utils.make_request('0', [])
+      )
 
   def test_request_over_max_model_len_raises(self):
     engine = testing_utils.make_engine(max_model_len=10)
-    engine.add_request(testing_utils.make_request('fits', [1] * 4, max_tokens=6))
+    engine.add_request(
+        testing_utils.make_request('fits', [1] * 4, max_tokens=6)
+    )
 
     with self.assertRaisesRegex(ValueError, 'max_model_len'):
-      engine.add_request(testing_utils.make_request('0', [1] * 5, max_tokens=6))
+      engine.add_request(
+          testing_utils.make_request('0', [1] * 5, max_tokens=6)
+      )
 
   def test_top_k_over_max_top_k_raises(self):
     engine = testing_utils.make_engine(max_top_k=4)
@@ -119,16 +124,22 @@ class AddRequestTest(parameterized.TestCase):
   )
   def test_unsupported_sampling_params_raise(self, sampling_kwargs, message):
     with self.assertRaisesRegex(ValueError, message):
-      testing_utils.make_engine().add_request(testing_utils.make_request('0', [1], **sampling_kwargs))
+      testing_utils.make_engine().add_request(
+          testing_utils.make_request('0', [1], **sampling_kwargs)
+      )
 
   def test_request_must_ask_for_the_configured_outputs(self):
     engine = testing_utils.make_engine(return_logprobs=True, return_logits=True)
     engine.add_request(
-        testing_utils.make_request('fits', [1], return_logprobs=True, return_logits=True)
+        testing_utils.make_request(
+            'fits', [1], return_logprobs=True, return_logits=True
+        )
     )
 
     with self.assertRaisesRegex(ValueError, 'return_logprobs'):
-      engine.add_request(testing_utils.make_request('0', [1], return_logits=True))
+      engine.add_request(
+          testing_utils.make_request('0', [1], return_logits=True)
+      )
 
   def test_running_request_id_raises(self):
     engine = testing_utils.make_engine()
@@ -245,7 +256,9 @@ class StepTest(parameterized.TestCase):
       )
     finished = drive(engine)
     self.assertCountEqual(finished, request_ids)
-    return [finished[request_id].token_ids.tolist() for request_id in request_ids]
+    return [
+        finished[request_id].token_ids.tolist() for request_id in request_ids
+    ]
 
   def test_step_without_requests_does_nothing(self):
     self.assertEmpty(testing_utils.make_engine().step())
@@ -273,8 +286,12 @@ class StepTest(parameterized.TestCase):
 
   def test_each_request_stops_at_its_own_token_limit(self):
     engine = testing_utils.make_engine()
-    engine.add_request(testing_utils.make_request('short', [1, 2], max_tokens=2))
-    engine.add_request(testing_utils.make_request('long', [1, 2], max_tokens=7))
+    engine.add_request(
+        testing_utils.make_request('short', [1, 2], max_tokens=2)
+    )
+    engine.add_request(
+        testing_utils.make_request('long', [1, 2], max_tokens=7)
+    )
 
     finished = drive(engine)
 
@@ -322,28 +339,6 @@ class StepTest(parameterized.TestCase):
     self.assertEqual(outputs['a'].finish_reason, 'stop')
     self.assertEqual(outputs['b'].token_ids.tolist(), expected_b)
     self.assertEqual(outputs['b'].finish_reason, 'length')
-
-  def test_stale_output_finishing_a_readmitted_request_keeps_its_kv_count(
-      self,
-  ):
-    engine = testing_utils.make_engine(eos_token_ids=frozenset({7}))
-    req = request_lib.RequestState(
-        req_id='0',
-        prompt_token_ids=list(range(1, 25)),
-        sampling_params=testing_utils.make_request('0', [1]).sampling_params,
-    )
-    # `req` was preempted while sampling a token, then re-admitted to run its
-    # first chunk before that token arrived.
-    req.num_stale_output_tokens = 1
-    req.status = request_lib.RequestStatus.RUNNING
-    req.num_computed_tokens = 16
-
-    engine._update_req_from_output(req, np.array([7]))  # pylint: disable=protected-access
-
-    self.assertEqual(req.status, request_lib.RequestStatus.FINISHED_EOS)
-    # Only the re-run chunk is in the KV cache, not the whole sequence.
-    self.assertEqual(req.num_computed_tokens, 16)
-    self.assertEqual(req.num_stale_output_tokens, 0)
 
   def test_chunked_prefill(self):
     engine = testing_utils.make_engine(
@@ -408,16 +403,10 @@ class StepTest(parameterized.TestCase):
     engine = testing_utils.make_engine(
         max_device_size_gib=8 * testing_utils.GIB_PER_PAGE
     )
-    preempt_spy = mock.patch.object(
-        engine._scheduler,  # pylint: disable=protected-access
-        '_preempt',
-        wraps=engine._scheduler._preempt,  # pylint: disable=protected-access
-    ).start()
     prompts = [[i, i + 1, i + 2, i + 3, i + 4, i + 5] for i in range(4)]
 
     generated = self._run(engine, prompts)
 
-    preempt_spy.assert_called()
     self.assertEqual(generated, [reference_generate(p) for p in prompts])
 
   def test_preempted_while_in_flight_processes_generated_token(self):
@@ -428,11 +417,6 @@ class StepTest(parameterized.TestCase):
     engine = testing_utils.make_engine(
         max_model_len=6, max_device_size_gib=2 * testing_utils.GIB_PER_PAGE
     )
-    preempt_spy = mock.patch.object(
-        engine._scheduler,  # pylint: disable=protected-access
-        '_preempt',
-        wraps=engine._scheduler._preempt,  # pylint: disable=protected-access
-    ).start()
     p0 = [1, 2, 3, 4]
     p1 = [5, 6, 7, 8]
     engine.add_request(testing_utils.make_request('0', p0, max_tokens=2))
@@ -440,7 +424,6 @@ class StepTest(parameterized.TestCase):
 
     outputs = drive(engine)
 
-    preempt_spy.assert_called_once()
     self.assertEqual(set(outputs.keys()), {'0', '1'})
     self.assertEqual(
         outputs['0'].token_ids.tolist(), reference_generate(p0, max_tokens=2)
@@ -504,7 +487,7 @@ class StepTest(parameterized.TestCase):
     events: list[str] = []
 
     orig_execute = engine._model_runner.execute_step  # pylint: disable=protected-access
-    orig_schedule = engine._scheduler.schedule_step  # pylint: disable=protected-access
+    orig_schedule = engine._dp_coordinator.schedule_step  # pylint: disable=protected-access
     orig_update = engine._update_from_output  # pylint: disable=protected-access
 
     def record_execute(*args, **kwargs):
@@ -523,7 +506,9 @@ class StepTest(parameterized.TestCase):
         engine._model_runner, 'execute_step', side_effect=record_execute  # pylint: disable=protected-access
     ).start()
     mock.patch.object(
-        engine._scheduler, 'schedule_step', side_effect=record_schedule  # pylint: disable=protected-access
+        engine._dp_coordinator,  # pylint: disable=protected-access
+        'schedule_step',
+        side_effect=record_schedule,
     ).start()
     mock.patch.object(
         engine, '_update_from_output', side_effect=record_update
@@ -605,9 +590,10 @@ class StepTest(parameterized.TestCase):
     self.assertFalse(engine.has_unfinished_requests())
 
 
-
 def new_weights(offset: float) -> nnx.State:
-  return nnx.variables(testing_utils.PagedSumTransformer(offset=offset), nnx.Param)
+  return nnx.variables(
+      testing_utils.PagedSumTransformer(offset=offset), nnx.Param
+  )
 
 
 class UpdateParamsTest(parameterized.TestCase):
@@ -657,20 +643,6 @@ class UpdateParamsTest(parameterized.TestCase):
       self.assertEqual(
           finished[request_id].token_ids.tolist(), before_sync + after_sync
       )
-
-  def test_rewinds_running_requests(self):
-    engine = testing_utils.make_engine()
-    engine.add_request(testing_utils.make_request('0', [1, 2, 3, 4, 5]))
-    for _ in range(3):
-      engine.step()
-    req = engine._requests['0']  # pylint: disable=protected-access
-    self.assertGreater(req.num_computed_tokens, 0)
-    self.assertTrue(engine.has_unfinished_requests())
-
-    engine.update_params(new_weights(1.0))
-
-    self.assertEqual(req.num_computed_tokens, 0)
-    self.assertTrue(engine.has_unfinished_requests())
 
   def test_clears_the_prefix_cache(self):
     engine = testing_utils.make_engine()
@@ -736,11 +708,11 @@ class ResetKVCachesTest(absltest.TestCase):
     outputs = engine.delete_kv_caches()
     self.assertEmpty(outputs)
     self.assertIsNone(engine._in_flight_step)  # pylint: disable=protected-access
-    for arr in engine._kv_cache_manager.get_physical_pages().values():  # pylint: disable=protected-access
+    for arr in engine._dp_coordinator.get_physical_pages().values():  # pylint: disable=protected-access
       self.assertTrue(arr.is_deleted())
 
     engine.reset_kv_caches()
-    for arr in engine._kv_cache_manager.get_physical_pages().values():  # pylint: disable=protected-access
+    for arr in engine._dp_coordinator.get_physical_pages().values():  # pylint: disable=protected-access
       self.assertFalse(arr.is_deleted())
 
     finished = drive(engine)

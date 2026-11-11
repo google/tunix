@@ -55,6 +55,11 @@ _DONE_STATUSES = frozenset({
 
 FinishReason = Literal['stop', 'length']
 
+_FINISH_REASONS: dict[RequestStatus, FinishReason] = {
+    RequestStatus.FINISHED_EOS: 'stop',
+    RequestStatus.FINISHED_LENGTH: 'length',
+}
+
 
 @dataclasses.dataclass(kw_only=True)
 class SamplingParams:
@@ -181,3 +186,25 @@ class RequestState:
   @property
   def request_id(self) -> str:
     return self._request_id
+
+  def to_response(self) -> EngineResponse:
+    """Returns the output of the finished request."""
+    generated = self.token_ids[self.prompt_length :]
+    return EngineResponse(
+        request_id=self._request_id,
+        prompt_token_ids=np.asarray(
+            self.token_ids[: self.prompt_length], dtype=np.int32
+        ),
+        token_ids=np.asarray(generated, dtype=np.int32),
+        logprobs=(
+            np.asarray(self.logprobs, dtype=np.float32)
+            if self.sampling_params.return_logprobs
+            else None
+        ),
+        logits=(
+            np.asarray(self.logits)
+            if self.sampling_params.return_logits
+            else None
+        ),
+        finish_reason=_FINISH_REASONS[self.status],
+    )

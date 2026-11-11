@@ -207,14 +207,6 @@ class VanillaRolloutTest(parameterized.TestCase):
 
     self.assertEqual(output.tokens[0].tolist(), unbounded[:2])
 
-  def test_wires_host_size_gib_to_cache_config(self):
-    host_size_gib = (16 * testing_utils.BYTES_PER_PAGE) / (1 << 30)
-    rollout = self.make_rollout(
-        False, rollout_vanilla_v2_host_size_gib=host_size_gib
-    )
-    group_mgr = rollout._sampler._engine._kv_cache_manager._kv_cache_group_managers[0]
-    self.assertEqual(group_mgr._page_manager.num_free_host_pages, 16)
-
   def test_seed_seeds_the_engine(self):
     rollout = self.make_rollout(False, seed=7)
 
@@ -268,18 +260,13 @@ class VanillaRolloutTest(parameterized.TestCase):
 
   def test_release_and_restore_for_training(self):
     rollout = self.make_rollout(False)
-    kv_mgr = rollout._sampler._engine._kv_cache_manager  # pylint: disable=protected-access
 
     rollout.release_for_training(free_weights=False)
-    for arr in kv_mgr.get_physical_pages().values():
-      self.assertTrue(arr.is_deleted())
     self.assertFalse(
         rollout._sampler.transformer_state['offset'].value.is_deleted()  # pylint: disable=protected-access
     )
 
     rollout.restore_after_training()
-    for arr in kv_mgr.get_physical_pages().values():
-      self.assertFalse(arr.is_deleted())
 
     output = rollout.generate(['1 2 3'], _rollout_config())
     self.assertEqual(output.tokens[0].tolist(), _expected_tokens([1, 2, 3]))

@@ -23,7 +23,10 @@ from absl.testing import parameterized
 import jax
 import jax.numpy as jnp
 import numpy as np
+from tunix.common import configs as common_configs
+from tunix.common import datatypes
 from tunix.experimental.generate import configs
+from tunix.experimental.generate import request as request_lib
 from tunix.experimental.generate import utils
 
 # Sharding tests need up to 4 devices.
@@ -457,6 +460,115 @@ class CacheSizingTest(parameterized.TestCase):
       size_gib = utils.resolve_max_device_size_gib(0.5, mesh)
     # 0.5 * 32 GiB - 4 GiB (deduplicated across shards sharing buf_id) = 12 GiB.
     self.assertEqual(size_gib, 12.0)
+
+
+class ConfigAndSamplingParamsTest(parameterized.TestCase):
+
+  def test_to_cache_config_wires_host_size_gib(self):
+    mesh = _create_mesh((1,), ("tp",))
+    rollout_config = common_configs.RolloutConfig(
+        rollout_vanilla_v2_host_size_gib=2.5
+    )
+    with mock.patch.object(
+        utils, "resolve_max_device_size_gib", return_value=8.0
+    ):
+      cache_config = utils.to_cache_config(
+          rollout_config, jnp.bfloat16, mesh
+      )
+
+    self.assertEqual(cache_config.max_device_size_gib, 8.0)
+    self.assertEqual(cache_config.max_host_size_gib, 2.5)
+    self.assertEqual(cache_config.dtype, jnp.bfloat16)
+
+  def test_to_scheduler_config_truncates_chunked_prefill_to_sliding_window(self):
+    rollout_config = common_configs.RolloutConfig(
+        rollout_vanilla_v2_chunked_prefill_length=32
+    )
+    geometries = {
+        "full": datatypes.CacheGeometry(num_kv_heads=1, head_dim=1),
+        "sliding": datatypes.CacheGeometry(
+            num_kv_heads=1, head_dim=1, window_size=12
+        ),
+    }
+
+    scheduler_config = utils.to_scheduler_config(rollout_config, geometries)
+
+    self.assertEqual(scheduler_config.max_chunked_prefill_length, 8)
+
+  def test_verify_sampling_params_top_k_over_max_top_k_raises(self):
+    rollout_config = common_configs.RolloutConfig(top_k=4)
+    utils.verify_sampling_params(
+        "fits",
+        request_lib.SamplingParams(max_tokens=8, top_k=4),
+        rollout_config,
+    )
+
+    with self.assertRaisesRegex(ValueError, "max_top_k"):
+      utils.verify_sampling_params(
+          "0",
+          request_lib.SamplingParams(max_tokens=8, top_k=5),
+          rollout_config,
+      )
+
+  def test_verify_sampling_params_any_top_k_allowed_without_max_top_k(self):
+    rollout_config = common_configs.RolloutConfig(top_k=None)
+    utils.verify_sampling_params(
+        "0",
+        request_lib.SamplingParams(max_tokens=8, top_k=1000),
+        rollout_config,
+    )
+
+  @parameterized.named_parameters(
+      ("zero_max_tokens", dict(max_tokens=0), "max_tokens"),
+      (
+          "negative_temperature",
+          dict(max_tokens=8, temperature=-0.1),
+          "temperature",
+      ),
+      ("zero_top_p", dict(max_tokens=8, top_p=0.0), "top_p"),
+      ("top_p_over_one", dict(max_tokens=8, top_p=1.5), "top_p"),
+      ("beam_size", dict(max_tokens=8, beam_size=2), "beam_size"),
+      (
+          "routed_experts",
+          dict(max_tokens=8, return_routed_experts=True),
+          "routed_experts",
+      ),
+      (
+          "routed_experts_prompt_start",
+          dict(max_tokens=8, routed_experts_prompt_start=1),
+          "routed_experts_prompt_start",
+      ),
+      ("logprobs", dict(max_tokens=8, return_logprobs=True), "return_logprobs"),
+      ("logits", dict(max_tokens=8, return_logits=True), "return_logits"),
+  )
+  def test_verify_sampling_params_unsupported_raises(
+      self, sampling_kwargs, message
+  ):
+    with self.assertRaisesRegex(ValueError, message):
+      utils.verify_sampling_params(
+          "0",
+          request_lib.SamplingParams(**sampling_kwargs),
+          common_configs.RolloutConfig(),
+      )
+
+  def test_verify_sampling_params_must_match_configured_outputs(self):
+    rollout_config = common_configs.RolloutConfig(
+        return_logprobs=True, return_logits=True
+    )
+    utils.verify_sampling_params(
+        "fits",
+        request_lib.SamplingParams(
+            max_tokens=8, return_logprobs=True, return_logits=True
+        ),
+        rollout_config,
+    )
+
+    with self.assertRaisesRegex(ValueError, "return_logprobs"):
+      utils.verify_sampling_params(
+          "0",
+          request_lib.SamplingParams(max_tokens=8, return_logits=True),
+          rollout_config,
+      )
 
 
 if __name__ == "__main__":

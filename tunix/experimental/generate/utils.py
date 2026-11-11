@@ -15,13 +15,16 @@
 """Utilities for the v2 sampler."""
 
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 import math
 from typing import Any
 
 import jax
 import jax.numpy as jnp
+from tunix.common import configs as common_configs
+from tunix.common import datatypes
 from tunix.experimental.generate import configs
+from tunix.experimental.generate import request as request_lib
 
 _GIB = 1 << 30
 
@@ -127,6 +130,124 @@ def resolve_max_device_size_gib(
     available_per_device.append(avail)
 
   return min(available_per_device) / _GIB
+
+
+def to_cache_config(
+    rollout_config: common_configs.RolloutConfig,
+    dtype: jax.typing.DTypeLike,
+    mesh: jax.sharding.Mesh,
+) -> configs.CacheConfig:
+  """Returns the cache config for the given rollout config, dtype, and mesh."""
+  return configs.CacheConfig(
+      max_device_size_gib=resolve_max_device_size_gib(
+          rollout_config.rollout_vanilla_v2_hbm_utilization, mesh
+      ),
+      max_host_size_gib=rollout_config.rollout_vanilla_v2_host_size_gib,
+      page_size=rollout_config.rollout_vanilla_v2_kv_cache_page_size,
+      enable_prefix_caching=rollout_config.rollout_vanilla_v2_enable_prefix_caching,
+      dtype=dtype,
+  )
+
+
+def to_scheduler_config(
+    rollout_config: common_configs.RolloutConfig,
+    cache_geometries: Mapping[str, datatypes.CacheGeometry],
+) -> configs.SchedulerConfig:
+  """Returns the scheduler config for the given rollout config and geometries."""
+  # A sliding window layer must hold the KV of every token in its window while
+  # it processes a prefill chunk, so a longer chunk size is truncated to the
+  # largest power of 2 within the smallest window.
+  window_sizes = [
+      g.window_size
+      for g in cache_geometries.values()
+      if g.window_size is not None
+  ]
+  max_chunked_prefill_length = (
+      rollout_config.rollout_vanilla_v2_chunked_prefill_length
+  )
+  if window_sizes:
+    min_window_size = min(window_sizes)
+    max_chunked_prefill_length = min(
+        max_chunked_prefill_length,
+        1 << (min_window_size.bit_length() - 1),
+    )
+  return configs.SchedulerConfig(
+      max_num_batched_tokens=rollout_config.rollout_vanilla_v2_max_num_batched_tokens,
+      max_num_seqs=rollout_config.rollout_vanilla_v2_max_num_seqs,
+      max_chunked_prefill_length=max_chunked_prefill_length,
+      num_scheduler_steps=rollout_config.rollout_vanilla_v2_num_scheduler_steps,
+  )
+
+
+def to_model_runner_config(
+    rollout_config: common_configs.RolloutConfig,
+    mesh: jax.sharding.Mesh,
+) -> configs.ModelRunnerConfig:
+  """Returns the model runner config for the given rollout config and mesh."""
+  return configs.ModelRunnerConfig(
+      max_top_k=rollout_config.top_k or -1,
+      mesh=mesh,
+      return_logprobs=rollout_config.return_logprobs,
+      return_logits=rollout_config.return_logits,
+      num_scheduler_steps=rollout_config.rollout_vanilla_v2_num_scheduler_steps,
+      seed=0 if rollout_config.seed is None else int(rollout_config.seed),
+  )
+
+
+def verify_sampling_params(
+    request_id: str,
+    params: request_lib.SamplingParams,
+    rollout_config: common_configs.RolloutConfig,
+) -> None:
+  """Raises a ValueError if the engine cannot sample with `params`."""
+  if params.max_tokens < 1:
+    raise ValueError(
+        f"Request {request_id} has max_tokens={params.max_tokens}; it must"
+        " be positive."
+    )
+  if params.temperature < 0.0:
+    raise ValueError(
+        f"Request {request_id} has temperature={params.temperature}; it"
+        " must be non-negative."
+    )
+  if params.top_p is not None and not 0.0 < params.top_p <= 1.0:
+    raise ValueError(
+        f"Request {request_id} has top_p={params.top_p}; it must be in"
+        " (0, 1]."
+    )
+  if params.top_k is not None:
+    max_top_k = rollout_config.top_k or -1
+    if max_top_k > 0 and params.top_k > max_top_k:
+      raise ValueError(
+          f"Request {request_id} has top_k={params.top_k}, over"
+          f" max_top_k={max_top_k}."
+      )
+
+  unsupported = {
+      "cache_salt": params.cache_salt is not None,
+      "beam_size": params.beam_size is not None,
+      "return_routed_experts": params.return_routed_experts,
+      "routed_experts_prompt_start": params.routed_experts_prompt_start != 0,
+  }
+  for name, is_set in unsupported.items():
+    if is_set:
+      raise ValueError(
+          f"Request {request_id} sets {name}, which the engine does not"
+          " support."
+      )
+  # The model runner config fixes the outputs of every step, so a request
+  # must ask for exactly those.
+  if params.return_logprobs != rollout_config.return_logprobs:
+    raise ValueError(
+        f"Request {request_id} has return_logprobs={params.return_logprobs},"
+        " but the engine has"
+        f" return_logprobs={rollout_config.return_logprobs}."
+    )
+  if params.return_logits != rollout_config.return_logits:
+    raise ValueError(
+        f"Request {request_id} has return_logits={params.return_logits},"
+        f" but the engine has return_logits={rollout_config.return_logits}."
+    )
 
 
 def cdiv(a: int, b: int) -> int:
