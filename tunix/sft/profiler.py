@@ -14,12 +14,17 @@
 
 """Profiler class for Tunix trainers."""
 
+from __future__ import annotations
+
 import dataclasses
 import inspect
 import threading
+from typing import TYPE_CHECKING
 
 from absl import logging
-import jax
+
+if TYPE_CHECKING:
+  import jax
 
 
 @dataclasses.dataclass(frozen=True)
@@ -55,7 +60,12 @@ class Profiler:
       max_step: int | None,
       profiler_options: ProfilerOptions | None,
   ):
-    if jax.process_index() != 0 or profiler_options is None:
+    if profiler_options is None:
+      self._do_not_profile = True
+      return
+    import jax  # pylint: disable=g-import-not-at-top
+
+    if jax.process_index() != 0:
       self._do_not_profile = True
       return
     self._profiler_options = profiler_options
@@ -93,6 +103,8 @@ class Profiler:
     """Returns True if max_num_hosts is set and supported by JAX start_trace."""
     if self._profiler_options.max_num_hosts is None:
       return False
+    import jax  # pylint: disable=g-import-not-at-top
+
     try:
       sig = inspect.signature(jax.profiler.start_trace)
       if "max_num_hosts" in sig.parameters:
@@ -116,6 +128,8 @@ class Profiler:
       profiler_options: jax.profiler.ProfileOptions | None = None,
   ) -> None:
     """Starts JAX trace, conditionally passing max_num_hosts if supported."""
+    import jax  # pylint: disable=g-import-not-at-top
+
     if self._check_if_max_num_hosts_supported():
       jax.profiler.start_trace(
           log_dir=log_dir,
@@ -132,6 +146,8 @@ class Profiler:
     """Start the profiler."""
     if self._do_not_profile or step != self._first_profile_step:
       return
+    import jax  # pylint: disable=g-import-not-at-top
+
     with Profiler._lock:
       if Profiler._is_active:
         logging.warning(
@@ -167,6 +183,8 @@ class Profiler:
     """End the profiler."""
     if self._do_not_profile or step != self._last_profile_step:
       return
+    import jax  # pylint: disable=g-import-not-at-top
+
     with Profiler._lock:
       if not self._started_by_this_instance:
         logging.warning(

@@ -53,7 +53,7 @@ class InprocessVllmSamplerTest(absltest.TestCase):
 
     self.mock_tokenizer = mock.MagicMock()
     self.config = configs.RolloutConfig(
-        weight_sync_mode=weight_sync.WeightSyncMode.FALLBACK,
+        weight_sync_mode=weight_sync.WeightSyncMode.IN_MEMORY,
         tensor_parallel_size=1,
         data_parallel_size=1,
         temperature=0.7,
@@ -613,7 +613,7 @@ class RoutedExpertsTest(absltest.TestCase):
         server_id="rollout",
         tokenizer=mock.MagicMock(),
         config=configs.RolloutConfig(
-            weight_sync_mode=weight_sync.WeightSyncMode.FALLBACK,
+            weight_sync_mode=weight_sync.WeightSyncMode.IN_MEMORY,
             return_routed_experts=engine_captures,
         ),
     )

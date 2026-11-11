@@ -758,7 +758,7 @@ class AutoModelTest(parameterized.TestCase):
   )
   @mock.patch.object(automodel, "create_gemma_model_from_params", autospec=True)
   @mock.patch.object(automodel, "_get_gemma_base_model", autospec=True)
-  @mock.patch("tunix.models.automodel.ocp.StandardCheckpointer", autospec=True)
+  @mock.patch("orbax.checkpoint.StandardCheckpointer", autospec=True)
   @mock.patch("os.path.exists", return_value=False)
   def test_create_gemma_model_with_nnx_conversion_dir_name(
       self,

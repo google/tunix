@@ -1,3 +1,5 @@
+import copy
+
 from absl.testing import absltest
 from absl.testing import parameterized
 import optax
@@ -149,7 +151,44 @@ class ConfigsTest(absltest.TestCase):
     cfg_disabled = configs.TrainingConfig(eval_every_n_steps=1)
     self.assertFalse(cfg_disabled.sequence_packing_enabled)
     self.assertFalse(configs.is_sequence_packing_enabled(cfg_disabled))
-    self.assertFalse(configs.is_sequence_packing_enabled(object()))
+
+    cfg_zero = configs.TrainingConfig(
+        eval_every_n_steps=1, max_seq_tokens_per_device=0
+    )
+    self.assertFalse(cfg_zero.sequence_packing_enabled)
+    self.assertFalse(configs.is_sequence_packing_enabled(cfg_zero))
+    self.assertEqual(cfg_zero.max_seq_token_per_tpu, 0)
+
+    cfg_device = configs.RLTrainingConfig(
+        eval_every_n_steps=1,
+        actor_optimizer=self.actor_optimizer,
+        mini_batch_size=6,
+        train_micro_batch_size=4,
+        max_seq_tokens_per_device=2048,
+    )
+    self.assertTrue(cfg_device.sequence_packing_enabled)
+    self.assertEqual(cfg_device.max_seq_token_per_tpu, 2048)
+
+    # Post-init attribute mutation keeps both aliases synchronized.
+    cfg_device.max_seq_tokens_per_device = 0
+    self.assertEqual(cfg_device.max_seq_token_per_tpu, 0)
+    self.assertFalse(cfg_device.sequence_packing_enabled)
+    cfg_device.max_seq_token_per_tpu = 1024
+    self.assertEqual(cfg_device.max_seq_tokens_per_device, 1024)
+    self.assertTrue(cfg_device.sequence_packing_enabled)
+    cfg_copied = copy.deepcopy(cfg_device)
+    self.assertEqual(cfg_copied.max_seq_tokens_per_device, 1024)
+    self.assertEqual(cfg_copied.max_seq_token_per_tpu, 1024)
+
+    with self.assertRaisesRegex(ValueError, "non-negative integer or None"):
+      cfg_device.max_seq_tokens_per_device = -1
+
+    with self.assertRaisesRegex(ValueError, "must match when both are set"):
+      configs.TrainingConfig(
+          eval_every_n_steps=1,
+          max_seq_tokens_per_device=2048,
+          max_seq_token_per_tpu=4096,
+      )
 
   def test_rl_profile_config_defaults_and_validation(self):
     cfg = configs.RLProfileConfig()
@@ -213,7 +252,19 @@ class ConfigsTest(absltest.TestCase):
       ):
         configs.RolloutConfig(episode_timeout=bad_timeout)  # pytype: disable=wrong-arg-types
 
-    for bad_mode in ("raden", "RAIDEN", "invalid", ""):
+    for valid_mode in (
+        "none",
+        "raiden",
+        "in_memory",
+        "fs",
+        "nccl",
+    ):
+      self.assertEqual(
+          configs.RolloutConfig(weight_sync_mode=valid_mode).weight_sync_mode,
+          valid_mode,
+      )
+
+    for bad_mode in ("fallback", "raden", "RAIDEN", "invalid", ""):
       with self.assertRaisesRegex(
           ValueError, "weight_sync_mode must be one of"
       ):

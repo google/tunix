@@ -14,9 +14,10 @@
 
 """Algorithm core implementations for RL and Agentic RL learners."""
 
+from __future__ import annotations
+
 import functools
-from typing import Any, Callable
-from flax import nnx
+from typing import Any, Callable, TYPE_CHECKING
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -25,6 +26,9 @@ from tunix.rl import algorithm_config
 from tunix.rl import common
 from tunix.rl import function_registry
 from tunix.sft import utils as sft_utils
+
+if TYPE_CHECKING:
+  from flax import nnx
 
 registry = function_registry.default_registry
 
@@ -188,6 +192,7 @@ def ppo_policy_loss_fn(
   completion_mask = train_example.completion_mask
 
   return_entropy = entropy_coef is not None and entropy_coef != 0.0
+  from flax import nnx  # pylint: disable=g-import-not-at-top
   graphdef, state = nnx.split(model)
   outputs = common.compute_per_token_logps(
       graphdef,
@@ -446,6 +451,7 @@ def grpo_loss_fn(
   num_segments = getattr(train_example, "num_segments", None)
 
   # TODO(tsbao): split can be avoided with updated peft_trainer model handling.
+  from flax import nnx  # pylint: disable=g-import-not-at-top
   graphdef, state = nnx.split(model)
   completion_attention_mask = getattr(
       train_example, "completion_attention_mask", None

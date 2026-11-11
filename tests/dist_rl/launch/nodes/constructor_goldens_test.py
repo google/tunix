@@ -174,7 +174,7 @@ _K8S_OVERRIDES = (
     "agentic_grpo_config.max_version_span=2",
     "weight_sync_config.mode=raiden",
     "trajectory_store_config.enable=true",
-    "rl_training_config.max_seq_token_per_tpu=4096",
+    "rl_training_config.max_seq_tokens_per_device=4096",
     "actor_model_config.mesh.shape=(2,2)",
 )
 # `k8s.sh` gives each rollout replica its index; the goldens run the second.

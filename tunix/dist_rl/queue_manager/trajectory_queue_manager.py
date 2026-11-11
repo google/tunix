@@ -32,7 +32,6 @@ from __future__ import annotations
 import asyncio
 import collections
 from collections.abc import Callable, Hashable, Sequence
-import enum
 import heapq
 import itertools
 import logging
@@ -43,43 +42,10 @@ from tunix.rl.agentic.queue_manager import group_queue_manager
 
 _T = TypeVar("_T")
 TrajectoryItem = datatypes.TrajectoryItem
+GroupOrder = datatypes.GroupOrder
 GroupFn = group_queue_manager.GroupFn
 FilterFn = group_queue_manager.FilterFn
 
-
-class GroupOrder(enum.Enum):
-  """Order in which the scored group queue yields ready groups to the trainer.
-
-  Attributes:
-    TRAJECTORY_COMPLETION: Yields completed groups as soon as they finish
-      scoring via `FifoGroupQueue`, regardless of which dataset prompt batch
-      they originated from. When `priority_fn` is wired on `FifoGroupQueue`,
-      simultaneously buffered groups are served in oldest-valid-first
-      (Earliest-Deadline-First) policy-version order with FIFO tie-breaking to
-      reduce the risk of older valid groups aging past `max_staleness` behind
-      newer arrivals. Raw groups whose valid items fall outside the policy
-      window `[current - max_staleness, current]` or whose cross-turn/cross-item
-      version span exceeds `max_version_span` are dropped at `raw_q` via
-      `TrajectoryQueueManager.create` (enforcing group-wide span `max - min <=
-      max_version_span` and group completion window `max in [current -
-      max_staleness, current]` across valid items when `max_version_span` is
-      set, or per-item `item_policy_version(item) in [current - max_staleness,
-      current]` when `max_version_span` is `None`).
-    PROMPT_ARRIVAL: Partitions scored groups by dataset prompt batch (`batch_idx
-      = prompt_idx // full_batch_size`) via `BatchOrderedGroupQueue` and serves
-      only groups belonging to the current batch cursor (`next_batch_idx`),
-      withholding groups from later batches until the current batch commits.
-      Because `DispatchWindow` bounds in-flight batches to `next_batch +
-      max_staleness` and `pre_weight_sync` synchronizes in-flight rollouts at
-      each step boundary, every batch delivers all `full_batch_size` groups
-      within the staleness window without dropping groups or creating short
-      batches.
-  """
-
-  # Completion order: any ready group, as soon as it exists.
-  TRAJECTORY_COMPLETION = "trajectory_completion"
-  # Prompt-arrival order: only groups of the batch the cursor points at.
-  PROMPT_ARRIVAL = "prompt_arrival"
 
 
 def has_policy_version(item: TrajectoryItem) -> bool:

@@ -572,7 +572,7 @@ weight_sync_config:
         # Null: random weights only when Raiden's bootstrap sync replaces them.
         ("raiden", "null", True),
         ("none", "null", False),
-        ("fallback", "null", False),
+        ("in_memory", "null", False),
         # Explicit values are kept; any mode may load the checkpoint.
         ("raiden", "true", True),
         ("raiden", "false", False),
@@ -588,7 +588,7 @@ weight_sync_config:
         )
 
   def test_rollout_random_init_without_raiden_fails_loud(self):
-    for mode in ("none", "fallback"):
+    for mode in ("none", "in_memory"):
       with self.subTest(mode=mode):
         with self.assertRaisesRegex(
             ValueError,
@@ -623,7 +623,7 @@ weight_sync_config:
     ]
     for rollout_engine in ("inprocess_vllm", "vllm"):
       # vLLM's `MaxTextForCausalLM` never loads the checkpoint itself.
-      for mode in ("none", "fallback"):
+      for mode in ("none", "in_memory"):
         with self.subTest(rollout_engine=rollout_engine, mode=mode):
           with self.assertRaisesRegex(
               ValueError,
@@ -789,13 +789,13 @@ weight_sync_config:
   def test_orchestrator_choices_fail_loud(self):
     hp = resolve_config.initialize([
         "agentic_grpo_config.trajectory_group_order=prompt_arrival",
-        "weight_sync_config.mode=fallback",
+        "weight_sync_config.mode=in_memory",
     ])
     self.assertEqual(
         hp.config["agentic_grpo_config"]["trajectory_group_order"],
         "prompt_arrival",
     )
-    self.assertEqual(hp.config["weight_sync_config"]["mode"], "fallback")
+    self.assertEqual(hp.config["weight_sync_config"]["mode"], "in_memory")
     with self.assertRaisesRegex(
         ValueError, "agentic_grpo_config.trajectory_group_order must be one of"
     ):
@@ -805,7 +805,7 @@ weight_sync_config:
     with self.assertRaisesRegex(
         ValueError, "weight_sync_config.mode must be one of"
     ):
-      resolve_config.initialize(["weight_sync_config.mode=nccl"])
+      resolve_config.initialize(["weight_sync_config.mode=gloo"])
     with self.assertRaisesRegex(
         ValueError, "agentic_grpo_config.max_version_span must be non-negative"
     ):
@@ -816,6 +816,40 @@ weight_sync_config:
       resolve_config.initialize([
           "agentic_grpo_config.max_version_span=2",
           "agentic_grpo_config.trajectory_group_order=prompt_arrival",
+      ])
+
+  def test_max_seq_tokens_per_device_syncs_with_legacy_tpu_field(self):
+    hp = resolve_config.initialize([
+        "batch_size=6",
+        "rl_training_config.max_seq_tokens_per_device=4096",
+        "rl_training_config.mini_batch_size=3",
+        "rl_training_config.train_micro_batch_size=4",
+    ])
+    self.assertEqual(
+        hp.config["rl_training_config"]["max_seq_token_per_tpu"], 4096
+    )
+    self.assertEqual(
+        hp.config["rl_training_config"]["max_seq_tokens_per_device"], 4096
+    )
+
+    # Setting max_seq_tokens_per_device=0 disables packing, so MaxText
+    # micro-batch FSDP divisibility validation still fires.
+    with self.assertRaisesRegex(
+        ValueError, "must be divisible by actor_model_config.mesh fsdp"
+    ):
+      resolve_config.initialize([
+          "actor_model_config.model_source=maxtext",
+          "actor_model_config.model_path=/ckpt/qwen3-1.7b/0/items",
+          "actor_model_config.kwargs.maxtext_model_name=qwen3-1.7b",
+          "actor_model_config.mesh.shape=(2,1)",
+          "rl_training_config.max_seq_tokens_per_device=0",
+          "rl_training_config.train_micro_batch_size=1",
+      ])
+
+    with self.assertRaisesRegex(ValueError, "must match when both are set"):
+      resolve_config.initialize([
+          "rl_training_config.max_seq_tokens_per_device=4096",
+          "rl_training_config.max_seq_token_per_tpu=8192",
       ])
 
   def test_weight_sync_requires_matching_maxtext_sources(self):
@@ -833,7 +867,7 @@ weight_sync_config:
       )
     with self.assertRaisesRegex(ValueError, "got 'huggingface' and 'maxtext'"):
       resolve_config.initialize([
-          "weight_sync_config.mode=fallback",
+          "weight_sync_config.mode=in_memory",
           "rollout_model_config.model_source=maxtext",
           "rollout_model_config.kwargs.maxtext_model_name=qwen3-1.7b",
       ])

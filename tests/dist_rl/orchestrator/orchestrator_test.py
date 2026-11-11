@@ -94,7 +94,7 @@ class ClusterOrchestratorTest(absltest.TestCase):
         registry=self.mock_registry,
         lifecycle_driver=mock_lifecycle_ws,
         monitor=self.mock_monitor,
-        weight_sync_mode="fallback",
+        weight_sync_mode="noop",
     )
     orch_ws.bring_up_workers("dummy_warmup_data")
     mock_lifecycle_ws.enable_late_registration.assert_called_once_with(
@@ -150,7 +150,7 @@ class ClusterOrchestratorTest(absltest.TestCase):
 
     registry = worker_registry.WorkerRegistry()
     orch = orchestrator.ClusterOrchestrator(
-        registry=registry, weight_sync_mode="fallback"
+        registry=registry, weight_sync_mode="noop"
     )
     orch.registry.register_handle(
         "rollout-0", [datatypes.Role.ROLLOUT], mock_rollout
@@ -556,7 +556,7 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
     orch_mismatch = orchestrator.ClusterOrchestrator(
         registry=worker_registry.WorkerRegistry(),
         monitor=mock.MagicMock(),
-        weight_sync_mode="fallback",
+        weight_sync_mode="noop",
     )
     mock_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
     mock_rollout.submit.side_effect = [
@@ -592,7 +592,7 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
     orch_aligned = orchestrator.ClusterOrchestrator(
         registry=worker_registry.WorkerRegistry(),
         monitor=mock.MagicMock(),
-        weight_sync_mode="fallback",
+        weight_sync_mode="noop",
         weight_sync_timeouts=aligned_timeouts,
     )
     mock_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
@@ -622,7 +622,7 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
     orch_partial = orchestrator.ClusterOrchestrator(
         registry=worker_registry.WorkerRegistry(),
         monitor=mock.MagicMock(),
-        weight_sync_mode="fallback",
+        weight_sync_mode="noop",
     )
     mock_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
     mock_rollout.submit.side_effect = [
@@ -643,7 +643,7 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
     orch = orchestrator.ClusterOrchestrator(
         registry=worker_registry.WorkerRegistry(),
         monitor=mock.MagicMock(),
-        weight_sync_mode="fallback",
+        weight_sync_mode="noop",
     )
     mock_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
     mock_rollout.submit.return_value = datatypes.Response()
@@ -676,7 +676,7 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
     orch = orchestrator.ClusterOrchestrator(
         registry=worker_registry.WorkerRegistry(),
         monitor=mock.MagicMock(),
-        weight_sync_mode="fallback",
+        weight_sync_mode="noop",
         trajectory_store_config=cfg,
     )
     mock_trainer = mock.MagicMock(spec=remote_execution.ActorHandle)
@@ -744,7 +744,7 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
     orch = orchestrator.ClusterOrchestrator(
         registry=worker_registry.WorkerRegistry(),
         monitor=mock.MagicMock(),
-        weight_sync_mode="fallback",
+        weight_sync_mode="noop",
     )
     self.addCleanup(orch.lifecycle_driver.shutdown)
     mock_rollout_0 = mock.MagicMock(spec=remote_execution.ActorHandle)

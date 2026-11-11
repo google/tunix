@@ -179,15 +179,24 @@ def create_default_handler(
     )
     logging.info("Built RaidenHandler natively; port %d", handler.port)
     return handler
-  elif mode_name in (weight_sync.WeightSyncMode.FALLBACK.value, "noop", "no-op"):
+  elif mode_name in ("noop", "no-op"):
     logging.info(
-        "Built fallback NullHandler; weight sync running protocol-only."
+        "Built protocol-only NullHandler; weight sync running protocol-only."
     )
     return NullHandler()
   elif mode_name == weight_sync.WeightSyncMode.NONE.value:
     raise ValueError(
         "WEIGHT_SYNC_MODE=none disables weight sync; no handler should be"
         " constructed."
+    )
+  elif mode_name in (
+      weight_sync.WeightSyncMode.IN_MEMORY.value,
+      weight_sync.WeightSyncMode.FS.value,
+      weight_sync.WeightSyncMode.NCCL.value,
+  ):
+    raise NotImplementedError(
+        f"Weight sync handler for mode={mode_name!r} is not implemented in"
+        " WeightSyncCoordinator yet."
     )
   else:
     raise ValueError(f"Unknown weight sync mode: {mode_name!r}")

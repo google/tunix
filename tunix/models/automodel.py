@@ -13,19 +13,23 @@
 # limitations under the License.
 """AutoModel class for Tunix."""
 
+from __future__ import annotations
+
 import dataclasses
 import enum
 import gc
 import importlib
 import os
 import shutil
-from typing import Any
+from typing import Any, TYPE_CHECKING
 from absl import logging
-from flax import nnx
-import jax
-import jax.numpy as jnp
-from orbax import checkpoint as ocp
 from tunix.models import naming
+from tunix.oss import utils as oss_utils
+
+if TYPE_CHECKING:
+  from flax import nnx
+  import jax
+  import jax.numpy as jnp
 
 
 _BASE_MODULE_PATH = 'tunix.models'  # pylint: disable=invalid-name
@@ -123,6 +127,11 @@ def _get_gemma_base_model(
     mesh: jax.sharding.Mesh,
 ) -> tuple[nnx.Module, Any]:
   """Get the base model from the intermediate checkpoint."""
+  from flax import nnx  # pylint: disable=g-import-not-at-top
+  import jax  # pylint: disable=g-import-not-at-top
+  import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+  from orbax import checkpoint as ocp  # pylint: disable=g-import-not-at-top
+
   model_params = call_model_config(model_name)
   model_lib_module = get_model_module(model_name, ModelModule.MODEL)
   abs_model: nnx.Module = nnx.eval_shape(
@@ -199,6 +208,8 @@ def create_gemma_model_with_nnx_conversion(
         dir_name = version_dashed
 
     params_path = os.path.join(ckpt_path, dir_name)  # pyrefly: ignore[no-matching-overload]
+    from flax import nnx  # pylint: disable=g-import-not-at-top
+    from orbax import checkpoint as ocp  # pylint: disable=g-import-not-at-top
 
     model, params = create_gemma_model_from_params(params_path, model_name)
 
@@ -252,6 +263,10 @@ def create_gemma_model_from_params(
   elif naming_info.model_family == 'gemma2':
     version = f'2-{version}'
   if mesh is not None and not mesh.empty:
+    from flax import nnx  # pylint: disable=g-import-not-at-top
+    import jax  # pylint: disable=g-import-not-at-top
+    import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+
     host_params = params_lib.load_and_format_host_params(params_path)
     model = model_module_lib.Gemma.from_params(host_params, version=version)
     del host_params
@@ -323,12 +338,8 @@ def download_model(
   """
 
   if model_source == ModelSource.KAGGLE:
-    from tunix.oss import utils as oss_utils  # pylint: disable=g-import-not-at-top
-
     return oss_utils.kaggle_pipeline(model_id_or_path, model_download_path)
   elif model_source == ModelSource.HUGGINGFACE:
-    from tunix.oss import utils as oss_utils  # pylint: disable=g-import-not-at-top
-
     return oss_utils.hf_pipeline(model_id_or_path, model_download_path)
   elif model_source in (ModelSource.GCS, ModelSource.MAXTEXT):
     return model_id_or_path
@@ -606,6 +617,8 @@ class AutoModel:
 
     # Common path for all other native Tunix models -- create model from safe tensors
     if not model_params:
+      import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+
       # pick corresponding config based on model version
       model_params = call_model_config(naming_info.model_name)  # pyrefly: ignore[bad-argument-type]
 
