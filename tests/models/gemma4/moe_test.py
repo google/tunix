@@ -67,16 +67,24 @@ class MoERouterTest(parameterized.TestCase):
     )
 
     np.testing.assert_array_equal(choices[:, 0], own_choices[:, 0])
-    np.testing.assert_array_equal(weights[:, 0], own_weights[:, 0])
+    np.testing.assert_allclose(weights[:, 0], own_weights[:, 0], rtol=1e-6)
     np.testing.assert_array_equal(choices[:, 1], [[1, 0]])
     probs = jax.nn.softmax(logits[0, 1])
     expected = [
         probs[1] / (probs[1] + probs[0]),
         probs[0] / (probs[1] + probs[0]),
     ]
+    np.testing.assert_allclose(weights[0, 1], expected, rtol=1e-6)
+
+    # Large logit gaps (>88 in float32) must not underflow combine weights to 0.
+    wide_logits = jnp.array([[[100.0, 99.0, -5.0, -6.0]]])
+    wide_weights, wide_choices = module._router(
+        wide_logits, forced_routed_experts=jnp.array([[[2, 3]]])
+    )
+    np.testing.assert_array_equal(wide_choices, [[[2, 3]]])
     np.testing.assert_allclose(
-        jnp.take_along_axis(weights[0, 1], choices[0, 1], axis=-1),
-        expected,
+        wide_weights[0, 0],
+        jax.nn.softmax(jnp.array([-5.0, -6.0])),
         rtol=1e-6,
     )
 

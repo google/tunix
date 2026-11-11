@@ -210,6 +210,11 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         completion_lengths=[len(t) for t in rollout_output.tokens],
         prompt_width=prompt_ids.shape[-1],
         completion_width=rollout_config.max_tokens_to_generate,
+        num_experts=(
+            common.model_num_experts(self.rl_engine.actor_trainer.model)
+            if rollout_output.routed_experts
+            else None
+        ),
     )
 
     # Assemble masks

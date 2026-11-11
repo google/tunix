@@ -791,6 +791,44 @@ class TrainerWorkerTest(absltest.TestCase):
       self.assertEqual(payload1.routed_experts.dtype, np.uint8)
       self.assertEqual(payload1.routed_experts.shape, (1,) + shape[1:])
 
+  def test_out_of_range_routed_experts_rejected_on_host(self):
+    @dataclasses.dataclass
+    class _MoEConfig(tc.ModelConfig):
+      num_experts: int = 4
+
+    self.fake_trainer.model.config = _MoEConfig()
+    bad_routed = np.full((3, 7, 2, 2), 4, dtype=np.int16)
+
+    worker = trainer_worker.TrainerWorker(
+        trainer_factory=lambda: self.fake_trainer, worker_id="trainer_range_lp"
+    )
+    worker.initialize()
+    with self.assertRaisesRegex(ValueError, "num_experts"):
+      worker.per_token_logps(
+          items=dataclasses.replace(
+              self._unpacked_request(), routed_experts=bad_routed
+          )
+      )
+    self.assertEmpty(self.fake_trainer.fwd_only_calls)
+
+    worker_train = trainer_worker.TrainerWorker(
+        trainer_factory=lambda: self.fake_trainer, worker_id="trainer_range_fb"
+    )
+    worker_train.initialize()
+    train_req = datatypes.TrainRequest(
+        payload=datatypes.RLTrainerPayload(
+            prompt_ids=np.ones((2, 3), dtype=np.int32),
+            prompt_mask=np.ones((2, 3), dtype=np.int32),
+            completion_ids=np.ones((2, 4), dtype=np.int32),
+            completion_mask=np.ones((2, 4), dtype=np.int32),
+            advantages=np.ones((2, 4), dtype=np.float32),
+            routed_experts=bad_routed[:2],
+        )
+    )
+    with self.assertRaisesRegex(ValueError, "num_experts"):
+      worker_train.fwd_bwd(train_req)
+    self.assertEmpty(self.fake_trainer.fwd_bwd_calls)
+
   def test_per_token_logps_end_to_end_with_real_peft_trainer(self):
     tc.safe_set_n_cpu_devices(2)
     mesh = shd.Mesh(

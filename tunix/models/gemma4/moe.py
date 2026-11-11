@@ -20,16 +20,6 @@ import jax.numpy as jnp
 from tunix.models import gpu_kernels as kernels_lib
 
 
-def _renormalization_factor(router_probs: jax.Array, choices: jax.Array):
-  """Computes the renormalization factor for routing weights."""
-  indicator = jax.nn.one_hot(
-      choices, router_probs.shape[-1], dtype=router_probs.dtype
-  ).sum(axis=-2)
-  gate_weights = indicator * router_probs
-  renormalization_factor = jnp.sum(gate_weights, axis=-1, keepdims=True)
-  return jnp.where(renormalization_factor > 0.0, renormalization_factor, 1.0)
-
-
 def _replay_choices(
     router_choices: jax.Array,
     forced_routed_experts: jax.Array,
@@ -65,12 +55,12 @@ def _expert_dispatch(
     x: jax.Array,
     expert_choices: jax.Array,
     expert_weights: jax.Array,
+    num_experts: int,
 ):
   """Sorts tokens by expert for each expert choice."""
   num_groups, group_size, k = expert_choices.shape
   x = x.reshape((-1, x.shape[-1]))
   batch_size = num_groups * group_size
-  num_experts = expert_weights.shape[2]
 
   expert_choices_flat = expert_choices.ravel()
   xs_order = expert_choices_flat.argsort()
@@ -81,19 +71,11 @@ def _expert_dispatch(
       expert_choices, num_classes=num_experts, dtype=jnp.int32
   )
   xs_tokens_per_expert = jnp.sum(expert_choices_oh, axis=(0, 1, 2))
-  xs_combine_weights = (
-      (
-          expert_choices_oh[:, :, :, :num_experts].astype(jnp.float32)
-          * jnp.expand_dims(expert_weights, axis=2)
-      )
-      .sum(axis=-1)
-      .astype(expert_weights.dtype)
-  )
   return (
       xs_tokens_per_expert,
       sorted_xs,
       xs_reverse_argsort,
-      xs_combine_weights,
+      expert_weights,
   )
 
 
@@ -154,8 +136,7 @@ class MoERagged(nnx.Module):
       forced_routed_experts: jax.Array | None = None,
   ) -> tuple[jax.Array, jax.Array]:
     router_logits = router_logits.astype(jnp.float32)
-    router_probs = jax.nn.softmax(router_logits, axis=-1)
-    weights, choices = jax.lax.top_k(
+    _, choices = jax.lax.top_k(
         router_logits,
         k=self.num_experts_per_datapoint,
     )
@@ -163,9 +144,11 @@ class MoERagged(nnx.Module):
       choices = _replay_choices(
           choices, forced_routed_experts, self.num_experts
       )
-    # Weights still come from the router's own probabilities, so the router
-    # keeps receiving gradients under replay (unless `freeze_router`).
-    weights = router_probs / _renormalization_factor(router_probs, choices)
+    # Softmax over only the chosen experts' logits is mathematically identical
+    # to renormalizing full-expert probabilities, while avoiding float32
+    # underflow when replayed experts lie >88 logits below the router's top-1.
+    chosen_logits = jnp.take_along_axis(router_logits, choices, axis=-1)
+    weights = jax.nn.softmax(chosen_logits, axis=-1)
     return weights, choices
 
   def _run_ffw_and_routing(
@@ -179,7 +162,7 @@ class MoERagged(nnx.Module):
         sorted_xs,
         xs_reverse_argsort,
         xs_combine_weights,
-    ) = _expert_dispatch(x, expert_choices, expert_weights)
+    ) = _expert_dispatch(x, expert_choices, expert_weights, self.num_experts)
 
     w_gate = self.gating_einsum.value
     w_gate = jnp.transpose(w_gate, (0, 3, 1, 2))

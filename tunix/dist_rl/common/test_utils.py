@@ -466,6 +466,13 @@ class FakeMoeModelConfig:
   num_experts: int
 
 
+@dataclasses.dataclass(frozen=True)
+class FakeMoeModel:
+  """Minimal fake model wrapper exposing `config` on `FakeTrainer.model`."""
+
+  config: FakeMoeModelConfig
+
+
 class FakeTrainer(abstract_trainer.AbstractTrainer):
   """Pure CPU / zero XLA model compilation implementation of AbstractTrainer."""
 
@@ -493,6 +500,9 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
           num_experts_per_tok=int(routed_experts_shape_spec[1]),
           num_experts=int(num_experts),
       )
+    self.model: FakeMoeModel | None = (
+        FakeMoeModel(config=self._config) if self._config is not None else None
+    )
     self.trainer_id = trainer_id
     self.policy_version = policy_version
     self.step_count = step_count

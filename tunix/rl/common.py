@@ -334,6 +334,8 @@ def align_routed_experts(
     completion_lengths: Sequence[int],
     prompt_width: int,
     completion_width: int,
+    *,
+    num_experts: int | None = None,
 ) -> np.ndarray | None:
   """Lays rollout routing out over the padded `[prompt | completion]` stream.
 
@@ -352,6 +354,8 @@ def align_routed_experts(
       sides are padded.
     prompt_width: Padded prompt length.
     completion_width: Padded completion length.
+    num_experts: Optional model expert count; when set, validates on the host
+      that all captured expert IDs lie in `[-1, num_experts)`.
 
   Returns:
     `[B, prompt_width + completion_width, num_layers, top_k]`, or None.
@@ -372,6 +376,9 @@ def align_routed_experts(
           "routed_experts must be [length, num_layers, top_k]; got shape"
           f" {routed.shape}"
       )
+    packing.validate_routed_experts_range(
+        routed, num_experts, batched=False
+    )
     # Prompts are left-padded, so an over-long one keeps its tail; completions
     # are right-padded, so an over-long one keeps its head.
     split = max(routed.shape[0] - completion_len, 0)
@@ -411,6 +418,30 @@ def model_call_contains(model, target_arg: str) -> bool:
   target_obj = model.transformer if hasattr(model, "transformer") else model
 
   return _call_contains_by_type(type(target_obj), target_arg)
+
+
+def model_num_experts(model: object) -> int | None:
+  """Returns the positive integer `num_experts` from `model`, if configured."""
+  try:
+    target = model.transformer  # pyrefly: ignore[missing-attribute]
+  except AttributeError:
+    target = model
+  try:
+    cfg = target.config  # pyrefly: ignore[missing-attribute]
+  except AttributeError:
+    cfg = None
+  if cfg is None:
+    try:
+      cfg = target.base.config  # pyrefly: ignore[missing-attribute]
+    except AttributeError:
+      return None
+  try:
+    num_experts = cfg.num_experts  # pyrefly: ignore[missing-attribute]
+  except AttributeError:
+    return None
+  if isinstance(num_experts, int) and not isinstance(num_experts, bool):
+    return num_experts if num_experts > 0 else None
+  return None
 
 
 def decode_routed_experts_jax(routed_experts: jax.Array) -> jax.Array:

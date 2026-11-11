@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import dataclasses
+
 from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
@@ -1884,6 +1886,34 @@ class ProcessIdsTokenMaskTest(absltest.TestCase):
         np.testing.assert_array_equal(
             np.asarray(logps_compact), np.asarray(logps_i16)
         )
+
+  def test_align_routed_experts_and_model_num_experts_validate_range(self):
+    cfg_cls = dataclasses.make_dataclass("Cfg", [("num_experts", int | None)])
+    mod_cls = dataclasses.make_dataclass("Mod", [("config", object)])
+    wrap_cls = dataclasses.make_dataclass("Wrap", [("transformer", object)])
+    mt_cls = dataclasses.make_dataclass(
+        "Adapter", [("config", object), ("base", object)]
+    )
+    self.assertEqual(common.model_num_experts(mod_cls(cfg_cls(8))), 8)
+    self.assertEqual(
+        common.model_num_experts(wrap_cls(mod_cls(cfg_cls(16)))), 16
+    )
+    self.assertEqual(
+        common.model_num_experts(mt_cls(None, mod_cls(cfg_cls(32)))), 32
+    )
+    self.assertIsNone(common.model_num_experts(mod_cls(cfg_cls(None))))
+
+    valid = [np.array([[[0, 3]], [[-1, -1]]], dtype=np.int16)]
+    aligned = common.align_routed_experts(
+        valid, completion_lengths=[1], prompt_width=2, completion_width=2,
+        num_experts=4,
+    )
+    self.assertEqual(aligned.shape, (1, 4, 1, 2))
+    with self.assertRaisesRegex(ValueError, "num_experts"):
+      common.align_routed_experts(
+          valid, completion_lengths=[1], prompt_width=2, completion_width=2,
+          num_experts=3,
+      )
 
 
 if __name__ == "__main__":

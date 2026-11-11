@@ -364,6 +364,15 @@ class TrainerWorker(abstract_worker.Worker):
     trainer = self._ensure_ready()
     self._otel.record_starvation(mb_ready_s)
     try:
+      if (
+          isinstance(request.payload, datatypes.RLTrainerPayload)
+          and request.payload.routed_experts is not None
+      ):
+        packing.validate_routed_experts_range(
+            request.payload.routed_experts,
+            rl_common.model_num_experts(trainer.model),
+            batched=True,
+        )
       # TODO(b/579110728): `fwd_bwd` records host dispatch duration under JAX
       # async dispatch; queued device time surfaces in the next synchronizing
       # RPC (`update`, `prepare_weight_sync`, or `per_token_logps`).
@@ -401,6 +410,15 @@ class TrainerWorker(abstract_worker.Worker):
     trainer = self._ensure_ready()
     req_metadata = dict(request.metadata) if request.metadata else {}
     try:
+      if (
+          isinstance(request.payload, datatypes.RLTrainerPayload)
+          and request.payload.routed_experts is not None
+      ):
+        packing.validate_routed_experts_range(
+            request.payload.routed_experts,
+            rl_common.model_num_experts(trainer.model),
+            batched=True,
+        )
       with self._otel.track_rpc(phase="eval_step"):
         trainer.eval_step(request.payload)
       self._last_error = None
@@ -499,6 +517,9 @@ class TrainerWorker(abstract_worker.Worker):
             routed_raw
             if routed_enc in ("uint8", "uint10")
             else np.asarray(routed_raw, dtype=np.int16)
+        )
+        packing.validate_routed_experts_range(
+            routed, rl_common.model_num_experts(trainer.model), batched=True
         )
       with self._otel.track_rpc(phase="per_token_logps"):
         micro_batch_size = self._logps_micro_batch_size or batch_size
