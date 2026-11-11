@@ -1991,6 +1991,28 @@ class DestinationStatusFilterTest(CoordinatorTestBase):
         },
     )
 
+  def test_create_default_handler_returns_null_handler_for_none_and_rejects_invalid_modes(
+      self,
+  ):
+    for mode in (weight_sync.WeightSyncMode.NONE, "none", "NONE"):
+      with self.subTest(mode=mode):
+        self.assertIsInstance(
+            weight_sync_coordinator.create_default_handler(mode),
+            weight_sync_coordinator.NullHandler,
+        )
+    for mode in (
+        weight_sync.WeightSyncMode.IN_MEMORY,
+        weight_sync.WeightSyncMode.FS,
+        weight_sync.WeightSyncMode.NCCL,
+    ):
+      with self.subTest(mode=mode.value):
+        with self.assertRaisesRegex(NotImplementedError, "not implemented"):
+          weight_sync_coordinator.create_default_handler(mode)
+    for invalid_mode in ("noop", "no-op", "fallback", "invalid"):
+      with self.subTest(invalid_mode=invalid_mode):
+        with self.assertRaisesRegex(ValueError, "Unknown weight sync mode"):
+          weight_sync_coordinator.create_default_handler(invalid_mode)
+
 
 if __name__ == "__main__":
   absltest.main()

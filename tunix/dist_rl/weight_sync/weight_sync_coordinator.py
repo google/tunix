@@ -166,12 +166,23 @@ class NullHandler(weight_sync.WeightSyncHandler):
 def create_default_handler(
     mode: str | weight_sync.WeightSyncMode | None = None,
 ) -> weight_sync.WeightSyncHandler:
-  """Creates the default weight sync handler based on options or env vars."""
-  mode_name = mode or os.getenv("WEIGHT_SYNC_MODE", "raiden")
-  if isinstance(mode_name, weight_sync.WeightSyncMode):
-    mode_name = mode_name.value
-  mode_name = str(mode_name).lower()
-  if mode_name == weight_sync.WeightSyncMode.RAIDEN.value:
+  """Creates the default coordinator weight sync handler.
+
+  Supports `WeightSyncMode.RAIDEN` for production TPU RMA weight sync and
+  `WeightSyncMode.NONE` for protocol-only no-op transfers (`NullHandler`).
+  Raises `NotImplementedError` for valid modes without a coordinator transport
+  handler yet, and `ValueError` for unknown mode strings.
+  """
+  raw_mode = mode or os.getenv("WEIGHT_SYNC_MODE", "raiden")
+  try:
+    resolved_mode = (
+        raw_mode
+        if isinstance(raw_mode, weight_sync.WeightSyncMode)
+        else weight_sync.WeightSyncMode(str(raw_mode).lower())
+    )
+  except ValueError as exc:
+    raise ValueError(f"Unknown weight sync mode: {raw_mode!r}") from exc
+  if resolved_mode == weight_sync.WeightSyncMode.RAIDEN:
     from tunix.dist_rl.weight_sync import raiden_handler
 
     handler = raiden_handler.RaidenHandler(
@@ -179,18 +190,15 @@ def create_default_handler(
     )
     logging.info("Built RaidenHandler natively; port %d", handler.port)
     return handler
-  elif mode_name in (weight_sync.WeightSyncMode.FALLBACK.value, "noop", "no-op"):
+  if resolved_mode == weight_sync.WeightSyncMode.NONE:
     logging.info(
-        "Built fallback NullHandler; weight sync running protocol-only."
+        "Built protocol-only NullHandler; weight sync running protocol-only."
     )
     return NullHandler()
-  elif mode_name == weight_sync.WeightSyncMode.NONE.value:
-    raise ValueError(
-        "WEIGHT_SYNC_MODE=none disables weight sync; no handler should be"
-        " constructed."
-    )
-  else:
-    raise ValueError(f"Unknown weight sync mode: {mode_name!r}")
+  raise NotImplementedError(
+      f"Weight sync handler for mode={resolved_mode.value!r} is not"
+      " implemented in WeightSyncCoordinator yet."
+  )
 
 
 _Participant = tuple[str, remote_execution.ActorHandle]

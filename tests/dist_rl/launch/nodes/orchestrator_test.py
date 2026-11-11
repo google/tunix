@@ -726,7 +726,7 @@ class ClusterTest(absltest.TestCase):
     return cluster
 
   def test_create_cluster_forwards_settings(self):
-    hp = _config("weight_sync_config.mode=fallback")
+    hp = _config("weight_sync_config.mode=in_memory")
     phase_timeouts = weight_sync_coordinator.PhaseTimeouts()
     with mock.patch.object(
         cluster_orchestrator,
@@ -738,7 +738,7 @@ class ClusterTest(absltest.TestCase):
       )
     self.addCleanup(_close_keeping_workers, cluster)
     cluster_cls.assert_called_once_with(
-        weight_sync_mode="fallback",
+        weight_sync_mode="in_memory",
         trajectory_store_config=None,
         weight_sync_timeouts=phase_timeouts,
         fault_tolerance_config=datatypes.FaultToleranceConfig(enabled=True),
@@ -1017,7 +1017,7 @@ class ProgramTest(absltest.TestCase):
         "agentic_grpo_config.num_generations=4",
         "agentic_grpo_config.off_policy_steps=1",
         "agentic_grpo_config.trajectory_group_order=prompt_arrival",
-        "weight_sync_config.mode=fallback",
+        "weight_sync_config.mode=in_memory",
         "dist_training_config.precompile_trainer=false",
         "vllm_config.return_routed_experts=true",
     )

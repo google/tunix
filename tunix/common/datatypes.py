@@ -104,3 +104,31 @@ class Role(str, enum.Enum):
   REFERENCE = "reference"  # kept fixed during training
   REWARD = "reward"
   ROLLOUT = "rollout"
+
+
+class WeightSyncMode(str, enum.Enum):
+  """Modes for weight synchronization between trainer and rollout workers.
+
+  Attributes:
+    NONE: Disables weight synchronization; rollout workers keep their initial
+      weights across training steps.
+    RAIDEN: Multi-process TPU transport via Raiden host-staged RMA/ICI channels
+      (wired in `WeightSyncCoordinator` via `RaidenHandler`).
+    IN_MEMORY: Direct in-process tensor transfer via `WeightSyncRequest.weights`
+      when trainer and rollout samplers share a Python process (used by
+      in-process `VanillaSampler` / `InprocessVllmSampler` sync; not used by the
+      multi-process `WeightSyncCoordinator`).
+    FS: Shared-filesystem / checkpoint-staged weight transfer (schema value
+      accepted by config resolution; coordinator handler not yet wired).
+    NCCL: GPU collective / NCCL broadcast weight transfer (schema value accepted
+      by config resolution; coordinator handler not yet wired).
+  """
+
+  NONE = "none"
+  RAIDEN = "raiden"
+  IN_MEMORY = "in_memory"
+  FS = "fs"
+  NCCL = "nccl"
+
+
+DEFAULT_WEIGHT_SYNC_MODE = WeightSyncMode.NONE

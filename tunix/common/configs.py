@@ -38,6 +38,9 @@ if TYPE_CHECKING:
 # For base_rollout typing inside ClusterConfig
 
 MetricsLoggerOptions = sft_metrics_logger.MetricsLoggerOptions
+_VALID_WEIGHT_SYNC_MODES = tuple(
+    mode.value for mode in datatypes.WeightSyncMode
+)
 Mode = datatypes.Mode
 Role = datatypes.Role
 
@@ -311,10 +314,10 @@ class RolloutConfig:
           f" {self.episode_timeout!r}."
       )
     self.episode_timeout = float(self.episode_timeout)
-    if self.weight_sync_mode not in ("none", "fallback", "raiden"):
+    if self.weight_sync_mode not in _VALID_WEIGHT_SYNC_MODES:
       raise ValueError(
-          "weight_sync_mode must be one of ('none', 'fallback', 'raiden'),"
-          f" got {self.weight_sync_mode!r}."
+          f"weight_sync_mode must be one of {_VALID_WEIGHT_SYNC_MODES}, got"
+          f" {self.weight_sync_mode!r}."
       )
 
 

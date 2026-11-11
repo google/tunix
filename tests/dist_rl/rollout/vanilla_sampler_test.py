@@ -59,7 +59,7 @@ class VanillaSamplerTest(parameterized.TestCase):
     self.config = configs.RolloutConfig(
         kv_cache_size=64,
         temperature=0.0,
-        weight_sync_mode=weight_sync.WeightSyncMode.FALLBACK,
+        weight_sync_mode=weight_sync.WeightSyncMode.IN_MEMORY,
     )
     self.vanilla_sampler = vanilla_sampler.VanillaSampler(
         server_id='tpu_slice_01',
@@ -1064,7 +1064,7 @@ class VanillaSamplerTest(parameterized.TestCase):
             temperature=1.0,
             top_p=1.0,
             seed=42,
-            weight_sync_mode=weight_sync.WeightSyncMode.FALLBACK,
+            weight_sync_mode=weight_sync.WeightSyncMode.IN_MEMORY,
         ),
         transformer=self.transformer,
         tokenizer=self.vocab,
@@ -1095,7 +1095,7 @@ class VanillaSamplerTest(parameterized.TestCase):
             kv_cache_size=64,
             temperature=0.0,
             return_logprobs=True,
-            weight_sync_mode=weight_sync.WeightSyncMode.FALLBACK,
+            weight_sync_mode=weight_sync.WeightSyncMode.IN_MEMORY,
         ),
         transformer=self.transformer,
         tokenizer=self.vocab,

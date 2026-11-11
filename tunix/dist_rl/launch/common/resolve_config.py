@@ -43,10 +43,9 @@ from typing import Any, Final
 import omegaconf
 from tunix.cli import config as cli_config
 from tunix.common import datatypes as common_datatypes
+from tunix.dist_rl.common import datatypes as dist_rl_datatypes
 from tunix.dist_rl.common import gcs_cache
 from tunix.dist_rl.distributed.deployment import yaml_generator
-from tunix.dist_rl.queue_manager import trajectory_queue_manager
-from tunix.dist_rl.weight_sync import weight_sync
 
 LAUNCH_DIR = pathlib.Path(__file__).parent
 REPO_ROOT = LAUNCH_DIR.parents[3]
@@ -691,13 +690,10 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
       _CHAT_PARSER_TYPES,
   )
   grpo = hp.config_mapping("agentic_grpo_config")
-  # TODO(noghabi): Move `GroupOrder` into a dependency-free module (e.g. under
-  # `dist_rl/common/`) so the resolver doesn't depend on `queue_manager`, and
-  # through it on flax and the agentic types. (`weight_sync.py` has no deps.)
   _check_choice(
       "agentic_grpo_config.trajectory_group_order",
       grpo["trajectory_group_order"],
-      tuple(order.value for order in trajectory_queue_manager.GroupOrder),
+      tuple(order.value for order in dist_rl_datatypes.GroupOrder),
   )
   max_version_span = grpo["max_version_span"]
   if max_version_span is not None:
@@ -708,7 +704,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
       )
     if (
         grpo["trajectory_group_order"]
-        == trajectory_queue_manager.GroupOrder.PROMPT_ARRIVAL.value
+        == dist_rl_datatypes.GroupOrder.PROMPT_ARRIVAL.value
     ):
       raise ValueError(
           "agentic_grpo_config.max_version_span is only supported with"
@@ -717,7 +713,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   _check_choice(
       "weight_sync_config.mode",
       hp.config_mapping("weight_sync_config")["mode"],
-      tuple(mode.value for mode in weight_sync.WeightSyncMode),
+      tuple(mode.value for mode in common_datatypes.WeightSyncMode),
   )
   _validate_maxtext_pairing(hp)
   _validate_maxtext_model_names(hp)
@@ -786,7 +782,7 @@ def _validate_maxtext_pairing(hp: cli_config.HyperParameters) -> None:
       is "maxtext".
   """
   mode = hp.config_mapping("weight_sync_config")["mode"]
-  if mode == weight_sync.WeightSyncMode.NONE.value:
+  if mode == common_datatypes.WeightSyncMode.NONE.value:
     return
   actor_source = hp.config_mapping("actor_model_config")["model_source"]
   rollout_source = hp.config_mapping("rollout_model_config")["model_source"]
@@ -806,7 +802,7 @@ def rollout_init_with_random_weights(hp: cli_config.HyperParameters) -> bool:
   True makes the `inprocess_vllm` rollout start from random weights (vLLM's
   `load_format="dummy"`) instead of loading the checkpoint. Only Raiden weight
   sync replaces them: its bootstrap sync loads the trainer's weights before
-  step 0. `fallback` moves no weights, and `none` skips the sync.
+  step 0, whereas `none` skips the sync.
 
   Args:
     hp: Loaded configuration.
@@ -821,7 +817,7 @@ def rollout_init_with_random_weights(hp: cli_config.HyperParameters) -> bool:
   value = hp.config_mapping("vllm_config")["init_with_random_weights"]
   if value is None:
     mode = hp.config_mapping("weight_sync_config")["mode"]
-    return mode == weight_sync.WeightSyncMode.RAIDEN.value
+    return mode == common_datatypes.WeightSyncMode.RAIDEN.value
   if not isinstance(value, bool):
     raise TypeError(
         "vllm_config.init_with_random_weights must be a bool or null, got"
@@ -850,7 +846,7 @@ def _validate_rollout_weights(hp: cli_config.HyperParameters) -> None:
   """
   random_init = rollout_init_with_random_weights(hp)
   mode = hp.config_mapping("weight_sync_config")["mode"]
-  if mode == weight_sync.WeightSyncMode.RAIDEN.value:
+  if mode == common_datatypes.WeightSyncMode.RAIDEN.value:
     return
   rollout_engine = hp.config["rollout_engine"]
   rollout_source = hp.config_mapping("rollout_model_config")["model_source"]
@@ -958,7 +954,7 @@ def _validate_maxtext_model_names(hp: cli_config.HyperParameters) -> None:
     names[role_key] = name
   mode = hp.config_mapping("weight_sync_config")["mode"]
   if (
-      mode != weight_sync.WeightSyncMode.NONE.value
+      mode != common_datatypes.WeightSyncMode.NONE.value
       and len(names) == 2
       and names["actor_model_config"] != names["rollout_model_config"]
   ):

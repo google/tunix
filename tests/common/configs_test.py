@@ -213,7 +213,19 @@ class ConfigsTest(absltest.TestCase):
       ):
         configs.RolloutConfig(episode_timeout=bad_timeout)  # pytype: disable=wrong-arg-types
 
-    for bad_mode in ("raden", "RAIDEN", "invalid", ""):
+    for valid_mode in (
+        "none",
+        "raiden",
+        "in_memory",
+        "fs",
+        "nccl",
+    ):
+      self.assertEqual(
+          configs.RolloutConfig(weight_sync_mode=valid_mode).weight_sync_mode,
+          valid_mode,
+      )
+
+    for bad_mode in ("fallback", "raden", "RAIDEN", "invalid", ""):
       with self.assertRaisesRegex(
           ValueError, "weight_sync_mode must be one of"
       ):

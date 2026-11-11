@@ -439,7 +439,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           os.getenv("WEIGHT_SYNC_MODE", "none")
       ),
       choices=list(weight_sync_lib.WeightSyncMode),
-      help="Weight sync mode (none, fallback, or raiden).",
+      help="Weight sync mode (none, raiden, in_memory, fs, or nccl).",
   )
   parser.add_argument(
       "--prefuse_moe_weights",

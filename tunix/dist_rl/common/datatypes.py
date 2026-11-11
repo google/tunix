@@ -190,6 +190,22 @@ class AdmissionStatus(enum.Enum):
   ACTIVE = "active"
 
 
+class GroupOrder(enum.Enum):
+  """Order in which the scored group queue yields ready groups to the trainer.
+
+  Attributes:
+    TRAJECTORY_COMPLETION: Yields completed groups as soon as they finish
+      scoring via `FifoGroupQueue`, regardless of which dataset prompt batch
+      they originated from.
+    PROMPT_ARRIVAL: Partitions scored groups by dataset prompt batch (`batch_idx
+      = prompt_idx // full_batch_size`) via `BatchOrderedGroupQueue` and serves
+      only groups belonging to the current batch cursor.
+  """
+
+  TRAJECTORY_COMPLETION = "trajectory_completion"
+  PROMPT_ARRIVAL = "prompt_arrival"
+
+
 @dataclasses.dataclass(kw_only=True)
 class HealthReport:
   """A snapshot of a worker's health and readiness state.
@@ -504,7 +520,7 @@ class WeightSyncRequest(Request):
     controller_id: Optional identifier for transport controllers (e.g., TPU
       Raiden).
     policy_version: Target policy version identifier of the weights to sync.
-    weights: Optional source weights payload for non-Raiden / fallback sync.
+    weights: Optional source weights payload for non-Raiden / in-memory sync.
     source_metadata: Optional transport/layout metadata describing source
       weights.
     extra_config: Optional backend-specific configuration parameters.

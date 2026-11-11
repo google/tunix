@@ -54,7 +54,7 @@ class ExperimentalWeightSyncShimTest(absltest.TestCase):
         "fallback",
         "none",
         "invalid",
-        dist_weight_sync.WeightSyncMode.FALLBACK,
+        dist_weight_sync.WeightSyncMode.IN_MEMORY,
         dist_weight_sync.WeightSyncMode.NONE,
     ):
       with self.subTest(bad_mode=bad_mode):
