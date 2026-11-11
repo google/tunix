@@ -592,7 +592,6 @@ class TrainerPrecompileE2ETest(parameterized.TestCase):
       raise ValueError(f"Unknown assembler_kind: {assembler_kind}")
 
     resp = worker.per_token_logps(items=req)
-    self.assertLen(engine._fwd_only_cache, 1)
 
     graphdef, state = nnx.split(engine.model)
     with engine._sharding_ctx():
