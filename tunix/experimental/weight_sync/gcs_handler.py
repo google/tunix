@@ -12,11 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Coordinator-side `WeightSyncHandler` validating staged Orbax checkpoints."""
+"""Coordinator-side `WeightSyncHandler` validating staged checkpoints."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import functools
 import threading
 
 from etils import epath
@@ -49,46 +50,63 @@ def _resolve_registered_artifact(
   if stale_src:
     return (
         None,
-        f"Source work unit(s) did not register a fresh artifact_uri for this"
-        f" round: {stale_src!r}",
+        (
+            "Source work unit(s) did not register a fresh artifact_uri for"
+            f" this round: {stale_src!r}"
+        ),
     )
 
   artifact_uris: set[str] = {
-      uri
-      for unit in src_units
-      if (uri := units[unit].artifact_uri) is not None
+      uri for unit in src_units if (uri := units[unit].artifact_uri) is not None
   }
   if len(artifact_uris) != 1:
     return (
         None,
-        "Source work units published conflicting artifact_uri values:"
-        f" {sorted(artifact_uris)!r}",
+        (
+            "Source work units published conflicting artifact_uri values:"
+            f" {sorted(artifact_uris)!r}"
+        ),
     )
   return next(iter(artifact_uris)), ""
 
 
-def _check_finalized_artifact(artifact_uri: str) -> tuple[bool, str]:
-  """Verifies `artifact_uri` exists and passes Orbax finalization checks."""
+def _probe_finalized_artifact(artifact_uri: str) -> tuple[bool, bool]:
+  """Probes `(exists, is_finalized)` for Safetensors or Orbax step paths."""
+  ckpt_path = epath.Path(artifact_uri)
+  if not ckpt_path.exists():
+    return False, False
   try:
-    ckpt_path = epath.Path(artifact_uri)
-    if not ckpt_path.exists():
-      return False, f"Checkpoint artifact does not exist: {artifact_uri}"
-    is_finalized = gcs_synchronizer.run_blocking(
-        lambda: ocp.path.step.is_path_finalized(ckpt_path)
+    files = gcs_synchronizer.resolve_safetensors_files(ckpt_path)
+  except FileNotFoundError:
+    return True, False
+  if files is not None:
+    return True, True
+  return True, ocp.path.step.is_path_finalized(ckpt_path)
+
+
+def _check_finalized_artifact(artifact_uri: str) -> tuple[bool, str]:
+  """Verifies `artifact_uri` exists and passes Safetensors/Orbax finalization."""
+  try:
+    exists, is_finalized = gcs_synchronizer.run_blocking(
+        functools.partial(_probe_finalized_artifact, artifact_uri)
     )
   except Exception as exc:  # pylint: disable=broad-exception-caught
     return (
         False,
-        f"Failed checking checkpoint artifact finalization for"
-        f" {artifact_uri}: {exc}",
+        (
+            "Failed checking checkpoint artifact finalization for"
+            f" {artifact_uri}: {exc}"
+        ),
     )
+  if not exists:
+    return False, f"Checkpoint artifact does not exist: {artifact_uri}"
   if not is_finalized:
     return False, f"Checkpoint artifact is not finalized: {artifact_uri}"
   return True, ""
 
 
 class GCSHandler(weight_sync.WeightSyncHandler):
-  """Validates per-round Orbax checkpoint finalization before destination H2D."""
+  """Coordinator-side `WeightSyncHandler` gating H2D on finalized checkpoints."""
 
   def __init__(self) -> None:
     self._lock = threading.Lock()
@@ -113,7 +131,7 @@ class GCSHandler(weight_sync.WeightSyncHandler):
   ) -> weight_sync.TransferResult:
     """Verifies the source round's staged checkpoint exists and is finalized."""
     del generation
-    resolved_req_id = req_id or ""
+    resolved_req_id = "" if req_id is None else req_id
     with self._lock:
       artifact_uri, err_msg = _resolve_registered_artifact(
           self._units, self._fresh_sources, src_units, dst_units
@@ -122,15 +140,33 @@ class GCSHandler(weight_sync.WeightSyncHandler):
         return weight_sync.TransferResult(
             req_id=resolved_req_id, success=False, message=err_msg
         )
-      self._fresh_sources.difference_update(src_units)
 
     ok, finalize_msg = _check_finalized_artifact(artifact_uri)
+    if not ok:
+      return weight_sync.TransferResult(
+          req_id=resolved_req_id, success=False, message=finalize_msg
+      )
+    with self._lock:
+      current_uri, concurrent_err = _resolve_registered_artifact(
+          self._units, self._fresh_sources, src_units, dst_units
+      )
+      if current_uri != artifact_uri:
+        msg = concurrent_err
+        if not msg:
+          msg = (
+              "Source artifact changed concurrently during verification"
+              f" ({artifact_uri!r} -> {current_uri!r})."
+          )
+        return weight_sync.TransferResult(
+            req_id=resolved_req_id, success=False, message=msg
+        )
+      self._fresh_sources.difference_update(src_units)
     return weight_sync.TransferResult(
-        req_id=resolved_req_id, success=ok, message=finalize_msg
+        req_id=resolved_req_id, success=True, message=finalize_msg
     )
 
   def close(self) -> None:
-    """Clears registered work-unit metadata."""
+    """Clears registered work-unit metadata and freshness state."""
     with self._lock:
       self._units.clear()
       self._fresh_sources.clear()

@@ -594,23 +594,43 @@ weight_sync_config:
     with self.assertRaisesRegex(ValueError, "num_generations must be > 1"):
       resolve_config.initialize(["agentic_grpo_config.num_generations=1"])
 
-  def test_rollout_random_init_defaults_to_raiden_weight_sync(self):
+  def test_rollout_random_init_defaults_to_weight_sync_modes(self):
     hp = resolve_config.initialize([])
     self.assertIsNone(hp.config["vllm_config"]["init_with_random_weights"])
     self.assertIs(resolve_config.rollout_init_with_random_weights(hp), False)
-    for mode, init, expected in (
-        # Null: random weights only when Raiden's bootstrap sync replaces them.
-        ("raiden", "null", True),
-        ("none", "null", False),
-        ("in_memory", "null", False),
+    for extra, init, expected in (
+        # Null: random weights when bootstrap sync (raiden/fs/gcs) replaces them.
+        (("weight_sync_config.mode=raiden",), "null", True),
+        (
+            ("weight_sync_config.mode=fs", "weight_sync_config.staging_dir=gs://b/ws"),
+            "null",
+            True,
+        ),
+        (
+            ("weight_sync_config.mode=gcs", "weight_sync_config.staging_dir=gs://b/ws"),
+            "null",
+            True,
+        ),
+        (("weight_sync_config.mode=none",), "null", False),
+        (("weight_sync_config.mode=in_memory",), "null", False),
         # Explicit values are kept; any mode may load the checkpoint.
-        ("raiden", "true", True),
-        ("raiden", "false", False),
-        ("none", "false", False),
+        (("weight_sync_config.mode=raiden",), "true", True),
+        (("weight_sync_config.mode=raiden",), "false", False),
+        (
+            ("weight_sync_config.mode=fs", "weight_sync_config.staging_dir=gs://b/ws"),
+            "true",
+            True,
+        ),
+        (
+            ("weight_sync_config.mode=fs", "weight_sync_config.staging_dir=gs://b/ws"),
+            "false",
+            False,
+        ),
+        (("weight_sync_config.mode=none",), "false", False),
     ):
-      with self.subTest(mode=mode, init=init):
+      with self.subTest(extra=extra, init=init):
         hp = resolve_config.initialize([
-            f"weight_sync_config.mode={mode}",
+            *extra,
             f"vllm_config.init_with_random_weights={init}",
         ])
         self.assertIs(
@@ -913,6 +933,67 @@ weight_sync_config:
           "rl_training_config.max_seq_tokens_per_device=4096",
           "rl_training_config.max_seq_token_per_tpu=8192",
       ])
+
+  def test_fs_weight_sync_staging_dir_and_preconditions(self):
+    for mode in ("fs", "gcs"):
+      with self.subTest(valid_mode=mode):
+        hp = resolve_config.initialize([
+            f"weight_sync_config.mode={mode}",
+            "weight_sync_config.staging_dir=gs://bucket/ws",
+        ])
+        self.assertEqual(
+            hp.config_mapping("weight_sync_config")["staging_dir"],
+            "gs://bucket/ws",
+        )
+    for argv in (
+        ["weight_sync_config.mode=fs"],
+        ["weight_sync_config.mode=gcs"],
+        ["weight_sync_config.mode=fs", "weight_sync_config.staging_dir= "],
+        [
+            "weight_sync_config.mode=raiden",
+            "weight_sync_config.staging_dir=gs://bucket/ws",
+        ],
+    ):
+      with self.subTest(argv=argv):
+        with self.assertRaisesRegex(
+            ValueError, "staging_dir must be set exactly when"
+        ):
+          resolve_config.initialize(argv)
+
+    base_fs = [
+        "weight_sync_config.mode=fs",
+        "weight_sync_config.staging_dir=gs://bucket/ws",
+    ]
+    for extra, pattern in (
+        (["rollout_engine=vllm"], "requires rollout_engine='inprocess_vllm'"),
+        (
+            ["rollout_engine=vanilla"],
+            "requires rollout_engine='inprocess_vllm'",
+        ),
+        (
+            [
+                "model_config.model_source=maxtext",
+                "model_config.model_path=/ckpt/qwen3-1.7b/0/items",
+                "model_config.kwargs.maxtext_model_name=qwen3-1.7b",
+            ],
+            "not supported with actor_model_config.model_source='maxtext'",
+        ),
+        (
+            ["vllm_config.tpu_backend_type=torchax"],
+            "requires vllm_config.tpu_backend_type='jax'",
+        ),
+        (
+            ["actor_model_config.lora_config={'rank': 8, 'alpha': 16.0}"],
+            "does not support LoRA",
+        ),
+        (
+            ["rollout_model_config.lora_config={'rank': 8, 'alpha': 16.0}"],
+            "does not support LoRA",
+        ),
+    ):
+      with self.subTest(extra=extra):
+        with self.assertRaisesRegex(ValueError, pattern):
+          resolve_config.initialize([*base_fs, *extra])
 
   def test_weight_sync_requires_matching_maxtext_sources(self):
     maxtext_actor = [

@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
 import os
 from typing import Any, List, Mapping
 
@@ -141,6 +143,11 @@ class RaidenWeightSyncDelegate:
   sampler's transformer state to the raiden transport, the transfer lands
   in host staging, and weight_sync installs it on device.
 
+  The transport is any synchronizer with the shared destination contract
+  (`bind`/`h2d`/`apply_to_sampler`/`abort`): Raiden by default, or the one
+  `synchronizer_factory(state)` builds at first bind (e.g. a checkpoint-staged
+  `GCSSynchronizer` whose HF manifest is fitted to the live sampler state).
+
   Caveat: the transport binds the live transformer state directly, so
   weight_sync writes into the serving copy rather than a shadow buffer.
   Serving is protected by the manager's closed-admission window, but an
@@ -152,27 +159,39 @@ class RaidenWeightSyncDelegate:
       *,
       worker_index: int = 0,
       server_id: str = "rollout",
+      synchronizer_factory: Callable[[Any], Any] | None = None,
   ):
     # TODO(tunix-dev): add a lock when enabling multiple samplers in one worker.
     # The bound sampler's `config` (a `RolloutConfig`) is the source of truth
     # for `partial_rollout` and `rollout_vllm_free_kv_cache_during_weight_sync`.
     self._sampler = None
 
-    self._synchronizers: List[Any] = [
-        raiden_synchronizer.RaidenSynchronizer(
-            job_name=server_id,
-            worker_index=worker_index,
-            auto_h2d=True,
-        )
-    ]
+    self._synchronizer_factory = synchronizer_factory
+    self._synchronizers: List[Any] = []
+    if synchronizer_factory is None:
+      self._synchronizers.append(
+          raiden_synchronizer.RaidenSynchronizer(
+              job_name=server_id,
+              worker_index=worker_index,
+              auto_h2d=True,
+          )
+      )
     self._version = 0
+    self._pending_version: int | None = None
+    self._kv_cache_freed = False
     self._tracker = weight_sync_coordinator.WorkerRoundTracker()
 
   def is_bounded(
       self,
   ) -> bool:
-    """Returns whether all managed synchronizers are bound."""
-    return all(s.bound for s in self._synchronizers)
+    """Returns whether every managed synchronizer exists and is bound.
+
+    A `synchronizer_factory` delegate holds no synchronizer until the first
+    `bind_weight_sync`, so it reports unbound until the factory has run.
+    """
+    return bool(self._synchronizers) and all(
+        s.bound for s in self._synchronizers
+    )
 
   async def bind_weight_sync(
       self,
@@ -186,6 +205,8 @@ class RaidenWeightSyncDelegate:
     if sampler is not None:
       self._sampler = sampler
 
+    if self._synchronizer_factory is not None and not self._synchronizers:
+      self._synchronizers = [self._synchronizer_factory(state)]
     for sync in self._synchronizers:
       # The state arrays never change, so one bind covers every round.
       if not sync.bound:
@@ -220,6 +241,7 @@ class RaidenWeightSyncDelegate:
       pass
     elif config.rollout_vllm_free_kv_cache_during_weight_sync:
       self._sampler.delete_cache()
+      self._kv_cache_freed = True
     else:
       # The KV pool stays allocated; only its stale prefix entries go.
       self._sampler.reset_prefix_cache()
@@ -234,22 +256,26 @@ class RaidenWeightSyncDelegate:
     del kwargs
     if self._has_round(sync_request):
       if not self._tracker.admit(sync_request, "h2d_done"):
-        return self._version
+        return (
+            self._pending_version
+            if self._pending_version is not None
+            else self._version
+        )
 
+    if not self.is_bounded():
+      raise RuntimeError("bind_weight_sync must run before weight_sync")
     for sync in self._synchronizers:
-      if not sync.bound:
-        raise RuntimeError("bind_weight_sync must run before weight_sync")
       # auto_h2d installs chunks as they arrive; this call is the round's
       # awaited install, so completion is guaranteed before checksums/post.
-      sync.h2d()
+      await asyncio.to_thread(sync.h2d, sync_request=sync_request)
       if os.environ.get("VERIFY_WEIGHTS", "").lower() == "true":
         logging.info("destination checksums: %s", sync.checksums())
-    self._version = sync_request.policy_version
+    self._pending_version = sync_request.policy_version
 
     if self._has_round(sync_request):
       self._tracker.complete(sync_request, "h2d_done")
 
-    return self._version
+    return self._pending_version
 
   async def post_weight_sync(
       self, sync_request: datatypes.WeightSyncRequest, **kwargs
@@ -267,14 +293,15 @@ class RaidenWeightSyncDelegate:
     if self._sampler is None:
       raise RuntimeError("Sampler is not available for weight sync")
 
-    config = self._sampler.config
-    if (
-        config.rollout_vllm_free_kv_cache_during_weight_sync
-        and not config.partial_rollout
-    ):
+    for sync in self._synchronizers:
+      await asyncio.to_thread(sync.apply_to_sampler, self._sampler)
+    if self._kv_cache_freed:
       self._sampler.reinitialize_cache()
+      self._kv_cache_freed = False
     else:
       self._sampler.refresh_state_leaves()
+    self._version = sync_request.policy_version
+    self._pending_version = None
 
     if self._has_round(sync_request):
       self._tracker.complete(sync_request, "committed")
@@ -289,6 +316,13 @@ class RaidenWeightSyncDelegate:
     if self._has_round(sync_request):
       if not self._tracker.admit(sync_request, "aborted"):
         return False
+    for sync in self._synchronizers:
+      sync.abort(sync_request)
+    self._pending_version = None
+    if self._kv_cache_freed and self._sampler is not None:
+      self._sampler.reinitialize_cache()
+      self._kv_cache_freed = False
+    if self._has_round(sync_request):
       self._tracker.complete(sync_request, "aborted")
     return True
 
