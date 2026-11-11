@@ -151,6 +151,33 @@ class CheckpointManagerTest(parameterized.TestCase):
       self.assertFalse(cp_manager._context.array_options.saving.use_ocdbt)
       self.assertFalse(cp_manager._context.array_options.saving.use_zarr3)
 
+  @parameterized.named_parameters(
+      ('unset', None, False),
+      ('zero', '0', False),
+      ('one', '1', True),
+  )
+  def test_context_pathways_persistence_follows_env(self, value, expected):
+    env = {'JAX_PLATFORMS': 'proxy'}
+    if value is not None:
+      env['ENABLE_PATHWAYS_PERSISTENCE'] = value
+    with (
+        mock.patch.dict(os.environ, env),
+        mock.patch.object(
+            checkpoint_manager.ocp_pathways.CheckpointingImpl,
+            'from_options',
+            wraps=checkpoint_manager.ocp_pathways.CheckpointingImpl.from_options,
+        ) as mock_from_options,
+    ):
+      if value is None:
+        os.environ.pop('ENABLE_PATHWAYS_PERSISTENCE', None)
+      cp_manager = checkpoint_manager.CheckpointManager(
+          f'{self.temp_path}/{self.id()}'
+      )
+      self.assertIsNotNone(cp_manager._context)
+    mock_from_options.assert_called_once_with(
+        use_persistence_array_handler=expected
+    )
+
   def test_save(self):
     cp_path = f'{self.temp_path}/{self.id()}'
     cp_manager = checkpoint_manager.CheckpointManager(cp_path)
@@ -606,6 +633,23 @@ class CheckpointManagerTest(parameterized.TestCase):
     cp_manager._checkpointer.wait()
     self.assertEqual(cp_manager.latest_step(), 1)
 
+  def test_wait_for_pending_saves(self):
+    cp_manager = checkpoint_manager.CheckpointManager(
+        f'{self.temp_path}/{self.id()}'
+    )
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+    self.assertTrue(cp_manager.save(1, model))
+    # `latest_step` already reports a save in flight, so check the wait itself.
+    checkpointer = cp_manager._checkpointer
+    assert checkpointer is not None
+    with mock.patch.object(
+        checkpointer, 'wait', wraps=checkpointer.wait
+    ) as wait:
+      cp_manager.wait()
+    wait.assert_called_once()
+    # Without a directory there is nothing to wait for.
+    checkpoint_manager.CheckpointManager(root_directory=None).wait()
+
   def test_context_timeout_secs(self):
     options = checkpoint_options.TunixCheckpointingOptions(
         async_options=checkpoint_manager.ocp.options.AsyncOptions(
@@ -616,6 +660,23 @@ class CheckpointManagerTest(parameterized.TestCase):
         self.temp_path, options=options
     )
     self.assertEqual(cp_manager._context.asynchronous.timeout_secs, 42)
+
+  def test_context_device_host_concurrent_gb(self):
+    # Unset by default: Orbax does not limit the bytes copied to host at once.
+    cp_manager = checkpoint_manager.CheckpointManager(
+        f'{self.temp_path}/{self.id()}_uncapped'
+    )
+    self.assertIsNone(cp_manager._context.memory.transfer_concurrent_bytes)
+    options = checkpoint_options.TunixCheckpointingOptions(
+        device_host_concurrent_gb=8
+    )
+    cp_manager = checkpoint_manager.CheckpointManager(
+        f'{self.temp_path}/{self.id()}_capped', options=options
+    )
+    # Decimal GB, as MaxText's `checkpoint_storage_device_host_concurrent_gb`.
+    self.assertEqual(
+        cp_manager._context.memory.transfer_concurrent_bytes, 8 * 10**9
+    )
 
   @parameterized.parameters(True, False)
   def test_checkpointing_method_selection(self, enable_async):

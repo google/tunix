@@ -12,19 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Common utilities for loading OSS model weights from safetensors files.
+"""Common utilities for loading model weights from safetensors files."""
 
-Not compatible with GOOGLE_INTERNAL_PACKAGE_PATH.
-"""
-
+import collections
+from collections.abc import Mapping, Sequence
 import concurrent.futures
 import contextlib
+import io
 import json
 import mmap
 import os
 import struct
-import threading
-from typing import Any
+import time
+from typing import Any, NamedTuple, cast
 
 from absl import logging
 from etils import epath
@@ -33,10 +33,10 @@ import jax
 import jax.numpy as jnp
 import ml_dtypes
 import numpy as np
-import safetensors.flax as safetensors
 from tunix.oss import utils
 from tunix.utils import compat
 from tunix.utils import env_utils
+from tunix.utils import sharding_utils
 from tunix.utils import torch_utils
 
 load_file_from_gcs = utils.load_file_from_gcs
@@ -80,7 +80,7 @@ def load_safetensors_with_offsets(filepath):
     A tuple containing:
       - contiguous_array: A numpy array containing the concatenated tensor data.
       - tensor_metadata: A list of dictionaries, each containing metadata
-        (name, offset_elements, size_elements, shape, dtype) for a tensor.
+        (name, start_byte, end_byte, shape, dtype) for a tensor.
       - mm: The mmap object used to read the file.
       - f: The file handle.
   """
@@ -94,70 +94,260 @@ def load_safetensors_with_offsets(filepath):
 
   tensor_metadata = []
 
-  itemsize = 2  # Default to bfloat16
-  common_dtype = None
   for tensor_name, metadata in header.items():
     if tensor_name == '__metadata__':
       continue
 
     dtype = metadata['dtype']
-    if common_dtype is None:
-      common_dtype = dtype
-      np_type = to_np_dtype(dtype)
-      itemsize = np.dtype(np_type).itemsize
-
     start_byte, end_byte = metadata['data_offsets']
     shape = tuple(metadata['shape'])
 
-    size_bytes = end_byte - start_byte
-    size_elements = size_bytes // itemsize
-    offset_elements = start_byte // itemsize
-
     tensor_metadata.append({
         'name': tensor_name,
-        'offset_elements': offset_elements,
-        'size_elements': size_elements,
+        'start_byte': start_byte,
+        'end_byte': end_byte,
         'shape': shape,
         'dtype': dtype,
     })
 
   file_size = os.path.getsize(filepath)
   data_size_bytes = file_size - data_block_start_offset_bytes
-  total_elements = data_size_bytes // itemsize
 
   f = open(filepath, 'rb')
 
   mm = mmap.mmap(f.fileno(), 0, prot=mmap.PROT_READ)
   contiguous_array = np.frombuffer(
       mm,
-      dtype=to_np_dtype(common_dtype),
-      count=total_elements,
+      dtype=np.uint8,
+      count=data_size_bytes,
       offset=data_block_start_offset_bytes,
   )
 
   return contiguous_array, tensor_metadata, mm, f
 
 
-def _normalize_tensor(v: Any) -> np.ndarray:
-  """Normalizes a tensor to a numpy array."""
-  if hasattr(v, 'numpy'):
-    if str(getattr(v, 'dtype', '')) == 'torch.bfloat16':
-      return v.detach().float().cpu().numpy().astype(ml_dtypes.bfloat16)
-    else:
-      return v.detach().cpu().numpy()
+_TensorTransform = tuple[Sequence[int] | None, Sequence[int] | None] | None
+_KeyMap = Mapping[str, tuple[str, _TensorTransform]]
+_Chunk = tuple[int, np.ndarray]  # (Absolute file offset, flat uint8 buffer.)
 
-  elif all(hasattr(v, attr) for attr in ('view', 'shape', 'dtype')):
-    is_explicit_bf16 = str(v.dtype) in ('bfloat16', 'BF16')
+_SAFETENSORS_DTYPES: Mapping[str, np.dtype] = {
+    'BOOL': np.dtype(np.bool_),
+    'U8': np.dtype(np.uint8),
+    'I8': np.dtype(np.int8),
+    'U16': np.dtype(np.uint16),
+    'I16': np.dtype(np.int16),
+    'U32': np.dtype(np.uint32),
+    'I32': np.dtype(np.int32),
+    'U64': np.dtype(np.uint64),
+    'I64': np.dtype(np.int64),
+    'F8_E4M3': np.dtype(ml_dtypes.float8_e4m3fn),
+    'F8_E5M2': np.dtype(ml_dtypes.float8_e5m2),
+    'BF16': np.dtype(ml_dtypes.bfloat16),
+    'F16': np.dtype(np.float16),
+    'F32': np.dtype(np.float32),
+    'F64': np.dtype(np.float64),
+}
+# Each read worker owns one file handle and pulls `_Chunk`s from a shared
+# queue; `readinto` fills preallocated host buffers with the GIL released.
+_READ_WORKERS = 16
+_READ_CHUNK_BYTES = 32 * 1024 * 1024
 
-    is_unknown_16bit = (
-        getattr(v.dtype, 'itemsize', None) == 2
-        and v.dtype not in (np.float16, np.int16, np.uint16)
+
+class _HostTensor(NamedTuple):
+  """A mapped checkpoint tensor and the host bytes it is read into."""
+
+  jax_key: str
+  transform: _TensorTransform
+  raw: np.ndarray  # Flat uint8 view into a span buffer.
+  dtype: np.dtype
+  shape: tuple[int, ...]
+
+
+def _plan_file_reads(
+    filepath: epath.Path, key_map: _KeyMap, skipped_keys: list[str]
+) -> tuple[list[_HostTensor], list[_Chunk]]:
+  """Allocates host buffers for the mapped tensors of one safetensors file.
+
+  Offset-adjacent tensors share one span buffer of at most `_READ_CHUNK_BYTES`,
+  so a run of small tensors costs one read; a larger tensor gets its own
+  buffer, read as `_READ_CHUNK_BYTES` stripes. Unmapped tensors are not read.
+
+  Args:
+    filepath: The safetensors file.
+    key_map: Regex mapping from checkpoint keys to model keys and transforms.
+    skipped_keys: Receives the checkpoint keys that map to no model weight.
+
+  Returns:
+    The mapped tensors in file order (buffers not yet filled), and the
+    `(file_offset, buffer)` chunks whose reads fill them.
+
+  Raises:
+    OSError: If the safetensors header or metadata section is truncated.
+  """
+  with cast(io.BufferedIOBase, filepath.open('rb')) as fh:
+    size_bytes = fh.read(8)
+    if len(size_bytes) != 8:
+      raise OSError(f'Truncated safetensors header in {filepath}.')
+    header_size = struct.unpack('<Q', size_bytes)[0]
+    header_bytes = fh.read(header_size)
+    if len(header_bytes) != header_size:
+      raise OSError(f'Truncated safetensors metadata in {filepath}.')
+    header = json.loads(header_bytes)
+
+  mapped = []  # (start, end, jax_key, transform, meta), data-section offsets.
+  for name, meta in header.items():
+    if name == '__metadata__':
+      continue
+    try:
+      jax_key, transform = torch_key_to_jax_key(key_map, name)
+    except ValueError:
+      skipped_keys.append(name)
+      continue
+    mapped.append((*meta['data_offsets'], jax_key, transform, meta))
+  mapped.sort(key=lambda entry: entry[0])
+
+  tensors: list[_HostTensor] = []
+  chunks: list[_Chunk] = []
+  i = 0
+  while i < len(mapped):
+    j = i + 1  # Grow the span over offset-adjacent tensors while it fits.
+    while (
+        j < len(mapped)
+        and mapped[j][0] == mapped[j - 1][1]
+        and mapped[j][1] - mapped[i][0] <= _READ_CHUNK_BYTES
+    ):
+      j += 1
+    lo, hi = mapped[i][0], mapped[j - 1][1]
+    buf = np.empty(hi - lo, dtype=np.uint8)
+    chunks += [
+        (8 + header_size + lo + off, buf[off : off + _READ_CHUNK_BYTES])
+        for off in range(0, hi - lo, _READ_CHUNK_BYTES)
+    ]
+    tensors += [
+        _HostTensor(
+            jax_key=jax_key,
+            transform=transform,
+            raw=buf[start - lo : end - lo],
+            dtype=_SAFETENSORS_DTYPES[meta['dtype']],
+            shape=tuple(meta['shape']),
+        )
+        for start, end, jax_key, transform, meta in mapped[i:j]
+    ]
+    i = j
+  return tensors, chunks
+
+
+def _read_chunk_queue(
+    filepath: epath.Path, pending: collections.deque[_Chunk]
+) -> None:
+  """Reads queued chunks into their buffers over one private file handle."""
+  with cast(io.BufferedIOBase, filepath.open('rb')) as fh:
+    while True:
+      try:
+        offset, buf = pending.popleft()
+      except IndexError:  # Drained, or cleared after another worker failed.
+        return
+      fh.seek(offset)
+      # GFile `readinto` (`ClifReadInto` -> `InputBuffer::Read`) releases the
+      # GIL and loops until `buf` is full: it returns -1 on a read error and a
+      # short count only at EOF. `io.BufferedReader.readinto` (OSS) also loops.
+      if (n := fh.readinto(buf)) != buf.nbytes:
+        raise OSError(
+            f'Read {n} of {buf.nbytes} bytes at offset {offset} of {filepath}.'
+        )
+
+
+def _apply_transform(
+    arr: np.ndarray, transform: _TensorTransform
+) -> np.ndarray:
+  """Applies an optional `(permute, reshape)` key-mapping transform."""
+  if transform is None:
+    return arr
+  permute, reshape = transform
+  if permute:
+    arr = arr.transpose(permute)
+  if reshape:
+    arr = arr.reshape(reshape)
+  return arr
+
+
+def _load_file_tensors(
+    filepath: epath.Path,
+    key_map: _KeyMap,
+    target_dtype: np.dtype | None,
+    skipped_keys: list[str],
+) -> dict[str, np.ndarray]:
+  """Reads the mapped tensors of one safetensors file into host arrays.
+
+  Every destination buffer is preallocated, so parallel reads need no byte
+  budget, locks or per-buffer refcounts: threads, open handles and memory are
+  bounded by construction.
+
+  Args:
+    filepath: The safetensors file.
+    key_map: Regex mapping from checkpoint keys to model keys and transforms.
+    target_dtype: Optional host dtype to cast the tensors to.
+    skipped_keys: Receives the checkpoint keys that map to no model weight.
+
+  Returns:
+    Host arrays keyed by model key.
+
+  Raises:
+    RuntimeError: If two checkpoint keys in the file map to the same model key.
+  """
+  tensors, chunks = _plan_file_reads(filepath, key_map, skipped_keys)
+  if chunks:
+    pending_chunks = collections.deque(chunks)
+    with concurrent.futures.ThreadPoolExecutor(_READ_WORKERS) as pool:
+      futures = [
+          pool.submit(_read_chunk_queue, filepath, pending_chunks)
+          for _ in range(min(_READ_WORKERS, len(chunks)))
+      ]
+      concurrent.futures.wait(
+          futures, return_when=concurrent.futures.FIRST_EXCEPTION
+      )
+      pending_chunks.clear()  # After a failure, stop the other workers early.
+    for future in futures:
+      future.result()
+  del chunks
+
+  pending = collections.deque(tensors)
+  del tensors  # Popping below frees each span once its tensors are converted.
+  loaded: dict[str, np.ndarray] = {}
+  while pending:
+    t = pending.popleft()
+    if t.jax_key in loaded:
+      raise RuntimeError(
+          f'Duplicate key {t.jax_key} found within file {filepath.name}.'
+      )
+    arr = _apply_transform(t.raw.view(t.dtype).reshape(t.shape), t.transform)
+    # Single pass casts and enforces C-contiguous, aligned, writable layout;
+    # zero-copy no-op when the raw span view already satisfies all flags.
+    loaded[t.jax_key] = np.require(
+        arr, dtype=target_dtype, requirements=('C', 'A', 'W')
     )
+  return loaded
 
-    if is_explicit_bf16 or is_unknown_16bit:
-      return v.view(ml_dtypes.bfloat16)
 
-  return np.asarray(v)
+def _match_params(
+    keys: Sequence[str],
+    params: Sequence[jax.ShapeDtypeStruct | jax.Array],
+    tensors: Mapping[str, np.ndarray | jax.Array],
+) -> list[tuple[int, np.ndarray | jax.Array]]:
+  """Returns `(param_index, tensor)` for each param found in `tensors`."""
+  matches = []
+  for i, key in enumerate(keys):
+    for k in (key, f'{key}.value'):  # nnx.Param may add a `.value` suffix.
+      if k not in tensors:
+        continue
+      if tensors[k].shape != params[i].shape:
+        raise ValueError(
+            f'Shape mismatch for {k}: got {tensors[k].shape}, expected'
+            f' {params[i].shape}'
+        )
+      matches.append((i, tensors[k]))
+      break
+  return matches
 
 
 def load_and_create_model_orig(
@@ -188,7 +378,7 @@ def load_and_create_model_orig(
   if file_dir.startswith('gs://'):
     file_dir = load_file_from_gcs(file_dir)
 
-  files = list(epath.Path(file_dir).expanduser().glob('*.safetensors'))
+  files = sorted(epath.Path(file_dir).expanduser().glob('*.safetensors'))
 
   if not files:
     raise ValueError(f'No safetensors found in {file_dir}')
@@ -206,76 +396,29 @@ def load_and_create_model_orig(
     )
 
   graph_def, abs_state = nnx.split(model)
-  state_dict = abs_state.to_pure_dict()
-
+  leaves, treedef = jax.tree_util.tree_flatten_with_path(
+      abs_state.to_pure_dict()
+  )
+  keys = [path_to_key(path) for path, _ in leaves]
+  params = [param for _, param in leaves]
   if mesh is not None:
-    sharding_dict = nnx.get_named_sharding(abs_state, mesh).to_pure_dict()
+    shardings = treedef.flatten_up_to(
+        nnx.get_named_sharding(abs_state, mesh).to_pure_dict()
+    )
   else:
-    sharding_dict = None
-
+    shardings = [jax.local_devices()[0]] * len(params)
   key_map = key_mapping(config)
+  target_dtype = None if dtype is None else np.dtype(dtype)
 
-  file_lock = threading.Lock()
-  dict_lock = threading.Lock()  # guards the duplicate-key check and write
-
-  # Load tensors from all files
-  skipped_keys = []
+  # One file at a time bounds host memory (all-file loading OOMs the Pathways
+  # IFRT proxy on 32B models) and allows one batched device_put per file.
   for f in files:
-    file_loaded_tensors = {}
-    with safetensors.safe_open(f, framework='numpy') as sf:
-      keys = sf.keys()
-
-      def process_key(k_name, f, sf_file, file_loaded_tensors):
-        try:
-          with file_lock:
-            v = sf_file.get_tensor(k_name)  # get_tensor is not thread-safe
-          try:
-            jax_key_mapped, transform = torch_utils.torch_key_to_jax_key(
-                key_map, k_name
-            )
-          except ValueError:
-            skipped_keys.append(k_name)
-            return
-
-          v = _normalize_tensor(v)
-          if transform is not None:
-            permute, reshape = transform
-            if permute:
-              v = v.transpose(permute)
-            if reshape:
-              v = v.reshape(reshape)
-
-          current_arr = jnp.array(v)
-          if dtype and current_arr.dtype != dtype:
-            current_arr = current_arr.astype(dtype)
-
-          with dict_lock:
-            if jax_key_mapped in file_loaded_tensors:
-              raise ValueError(
-                  f'Duplicate key {jax_key_mapped} found within file {f.name}.'
-              )
-            file_loaded_tensors[jax_key_mapped] = current_arr
-
-        except Exception as e:
-          raise RuntimeError(
-              f'Failed to load tensor {k_name} from file {f.name}: {e}'
-          ) from e
-
-      with concurrent.futures.ThreadPoolExecutor(
-          max_workers=os.cpu_count()
-      ) as executor:
-        futures = [
-            executor.submit(process_key, key, f, sf, file_loaded_tensors)
-            for key in keys
-        ]
-
-      for future in concurrent.futures.as_completed(futures):
-        if future.exception():
-          raise future.exception()  # pyrefly: ignore[bad-raise]
-
+    start_time = time.monotonic()
+    skipped_keys: list[str] = []
+    tensors = _load_file_tensors(f, key_map, target_dtype, skipped_keys)
     # Apply preprocessing if provided (e.g., for MoE expert stacking)
     if preprocess_fn is not None:
-      file_loaded_tensors = preprocess_fn(file_loaded_tensors)
+      tensors = preprocess_fn(tensors)
 
     if skipped_keys:
       logging.warning(
@@ -286,46 +429,26 @@ def load_and_create_model_orig(
           ', '.join(skipped_keys),
       )
 
-    def make_update_tensor_fn(current_file_tensors):
-      def update_tensor(path, param, shard=None):
-        current_path_key = path_to_key(path)
-
-        # nnx.Param adds a .value suffix to the key
-        possible_keys = [current_path_key, f'{current_path_key}.value']
-
-        for k in possible_keys:
-          if k in current_file_tensors:
-            loaded_arr = current_file_tensors[k]
-            if loaded_arr.shape != param.shape:
-              raise ValueError(
-                  f'Shape mismatch for {k}: got'
-                  f' {loaded_arr.shape}, expected {param.shape}'
-              )
-            if shard is not None:
-              # Ensure loaded_arr is a numpy array on host. device_put on a
-              # device array will compile an expensive device-to-device
-              # broadcast program instead of a simple host-to-device copy.
-              loaded_arr = jax.device_get(loaded_arr)
-              return jax.device_put(loaded_arr, shard)
-            else:
-              return jax.device_put(loaded_arr, jax.devices()[0])
-
-        return param
-
-      return update_tensor
-
-    current_file_update_tensor = make_update_tensor_fn(file_loaded_tensors)
-
-    if sharding_dict is not None:
-      state_dict = jax.tree.map_with_path(
-          current_file_update_tensor, state_dict, sharding_dict
+    matches = _match_params(keys, params, tensors)
+    if matches:
+      # `device_get` turns any `jax.Array` returned by `preprocess_fn` into a
+      # host array, so placement is a host-to-device copy, not a D2D program.
+      placed = sharding_utils.place_arrays_on_targets(
+          jax.device_get([tensor for _, tensor in matches]),
+          [shardings[i] for i, _ in matches],
       )
-    else:
-      state_dict = jax.tree.map_with_path(
-          current_file_update_tensor, state_dict
-      )
+      for (i, _), arr in zip(matches, placed, strict=True):
+        params[i] = arr
+      del placed
+    logging.info(
+        'Loaded %s: %d tensors in %.2fs.',
+        f.name,
+        len(matches),
+        time.monotonic() - start_time,
+    )
+    del tensors, matches  # Free host buffers before the next file.
 
-  return nnx.merge(graph_def, state_dict)
+  return nnx.merge(graph_def, jax.tree_util.tree_unflatten(treedef, params))
 
 
 def load_and_create_model_opt(
@@ -386,7 +509,7 @@ def load_and_create_model_opt(
   if mesh is not None:
     sharding_dict = nnx.get_named_sharding(abs_state, mesh).to_pure_dict()
   else:
-    device = jax.devices()[0]
+    device = jax.local_devices()[0]
     sharding_dict = jax.tree.map(lambda _: device, nnx_state_dict)
 
   key_map = key_mapping(config)
@@ -411,10 +534,10 @@ def load_and_create_model_opt(
       except ValueError:
         skipped_keys.append(metadata['name'])
         continue
-      parameter = array[
-          metadata['offset_elements'] : metadata['offset_elements']
-          + metadata['size_elements']
-      ].reshape(metadata['shape'])
+      raw_bytes = array[metadata['start_byte'] : metadata['end_byte']]
+      parameter = raw_bytes.view(to_np_dtype(metadata['dtype'])).reshape(
+          metadata['shape']
+      )
       if transform is not None:
         permute, reshape = transform
         if permute:
@@ -438,19 +561,12 @@ def load_and_create_model_opt(
   def shard_state(state_dict):
     def _shard_state(path, sharding):
       key = path_to_key(path)
-      possible_keys = [
-          key,
-          f'{key}.value',
-      ]  # for nnx.Param where a value suffix will be there
-      tensor = None
-      for k in possible_keys:
-        if k in state_dict:
-          tensor = state_dict[k]
-          break
-      if tensor is not None and dtype is not None:
-        np_dtype = to_np_dtype(dtype)
-        tensor = tensor.astype(np_dtype)
-      return jax.device_put(tensor, sharding)
+      tensor = (
+          state_dict[key] if key in state_dict else state_dict[f'{key}.value']
+      )
+      if dtype is not None:
+        tensor = tensor.astype(to_np_dtype(dtype))
+      return sharding_utils.place_array_on_target(tensor, sharding)
 
     return _shard_state
 

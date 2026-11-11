@@ -22,8 +22,6 @@ import asyncio
 import logging
 import os
 from pathlib import Path
-import pickle
-import signal
 import sys
 from typing import Any
 
@@ -35,6 +33,7 @@ from orbax import checkpoint as ocp
 from tunix.cli import config as cli_config
 from tunix.cli.utils import model as model_utils
 from tunix.common import configs as common_configs
+from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.train import peft_trainer_v2
 from tunix.dist_rl.weight_sync import raiden_preload
 from tunix.dist_rl.worker import remote_execution
@@ -545,6 +544,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " MaxText's training engine profiler ignores this for now."
       ),
   )
+  parser.add_argument(
+      "--run_id",
+      type=str,
+      default=os.getenv("RUN_ID", ""),
+      help="Run identifier shared between orchestrator and trainer workers.",
+  )
   return parser.parse_args(argv)
 
 
@@ -722,7 +727,8 @@ def _maxtext_adamw_options(
   if args.optimizer_opt_type.lower() != "adamw":
     raise ValueError(
         f"--optimizer_opt_type={args.optimizer_opt_type} is not supported by"
-        " the maxtext backend, which maps only adamw." + hint
+        " the maxtext backend, which maps only adamw."
+        + hint
     )
   chain = args.optimizer_opt_chain_type
   if not chain:
@@ -741,7 +747,8 @@ def _maxtext_adamw_options(
   else:
     raise ValueError(
         f"--optimizer_opt_chain_type={chain} is not supported by the maxtext"
-        " backend, which maps only clip_by_global_norm." + hint
+        " backend, which maps only clip_by_global_norm."
+        + hint
     )
   return maxtext_utils.AdamWOptions(
       b1=args.optimizer_b1,
@@ -782,6 +789,10 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
         upload_all_profiler_results=args.upload_all_profiler_results,
     )
 
+  # The legacy launchers set these two in the environment;
+  # `tunix.dist_rl.launch.nodes.trainer` takes them from the config instead.
+  d2h_gb = os.environ.get("CKPT_D2H_CONCURRENT_GB", "").strip()
+  extra_flags = os.environ.get("MAXTEXT_EXTRA_FLAGS", "").split()
   maxtext_config = maxtext_utils.build_maxtext_config(
       model_name=args.maxtext_model_name,
       worker_id=args.worker_id,
@@ -809,6 +820,8 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
       max_seq_token_per_tpu=args.max_seq_token_per_tpu,
       weight_dtype=args.model_load_dtype,
       attention=args.maxtext_attention,
+      device_host_concurrent_gb=int(d2h_gb) if d2h_gb else None,
+      extra_flags=extra_flags,
   )
   logging.info("Creating MaxText device mesh...")
   mesh = maxtext_utils.create_maxtext_mesh(maxtext_config)
@@ -944,6 +957,15 @@ def main(argv: list[str], context: Any = None) -> None:
   args = _parse_args(argv)
   logging.info("Parsed args: %s", args)
 
+  otel_setup.setup_metrics(
+      default_service_name="tunix-trainer",
+      resource_attributes={
+          "tunix.worker_id": args.worker_id,
+          "tunix.role": "trainer",
+          "tunix.run_id": args.run_id,
+      },
+  )
+
   if context:
     context.jax.initialize()
   if REPO_ROOT not in sys.path:
@@ -972,44 +994,18 @@ def main(argv: list[str], context: Any = None) -> None:
       execution_context=mesh,
   )
 
-  async def grpc_server_main() -> None:
-    server = remote_execution.GrpcRemoteExecutionServer(worker_service)
-    await server.start_serving_async(args.port)
-    logging.info("Serving trainer worker on port %d.", args.port)
-
-    context.ipc.discovery.register(
-        metadata=pickle.dumps({
-            "service_type": "trainer",
-            "service_port": args.port,
-            "worker_id": args.worker_id,
-        })
-    )
-    logging.info("Trainer worker is registered.")
-    # Shut down gracefully on SIGTERM/SIGINT so that TrainerWorker.stop() ->
-    # PeftTrainerV2.close() runs and blocks until every in-flight async ops is
-    # finished.
-    stop_event = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-      try:
-        loop.add_signal_handler(sig, stop_event.set)
-      except NotImplementedError:
-        pass
-
-    try:
-      await stop_event.wait()
-    except asyncio.CancelledError:
-      pass
-    finally:
-      logging.info("Draining trainer worker...")
-      try:
-        worker_service.stop()
-        logging.info("Trainer worker drained.")
-      except Exception:
-        logging.exception("Failed to drain trainer worker cleanly.")
-      await server.stop_serving()
-
-  asyncio.run(grpc_server_main())
+  asyncio.run(
+      remote_execution.serve_worker(
+          worker_service,
+          port=args.port,
+          discovery=context.ipc.discovery,
+          metadata={
+              "service_type": "trainer",
+              "service_port": args.port,
+              "worker_id": args.worker_id,
+          },
+      )
+  )
 
 
 if __name__ == "__main__":

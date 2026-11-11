@@ -21,10 +21,13 @@ from absl.testing import absltest
 from etils import epath
 from tunix.dist_rl.trajectory import file_store
 from tunix.dist_rl.trajectory import in_memory_store
+from tunix.dist_rl.trajectory import store
+from tunix.dist_rl.trajectory import trajectory_testing
 from tunix.dist_rl.trajectory.explorer import run_explorer
 from tunix.dist_rl.trajectory.explorer.commands import ping
 from tunix.dist_rl.trajectory.explorer.commands import show
 from tunix.dist_rl.trajectory.explorer.commands import summary
+from tunix.dist_rl.trajectory.explorer.diagnostics import tunix_diagnostics
 
 
 def _parse_cmd(cmd: str = "") -> run_explorer.ExplorerConfig:
@@ -180,6 +183,54 @@ class RunCliTest(absltest.TestCase):
     self.assertEqual(exit_code, 2)
     self.assertEmpty(stdout.getvalue())
     self.assertIn("trajectory-explore: error:", stderr.getvalue())
+
+  def test_schema_diagnostics_reach_the_subcommand(self) -> None:
+    # A Tunix trajectory read back from a file store must still be a Tunix
+    # trajectory, or its diagnostics would not apply.
+    root_dir = self.create_tempdir().full_path
+    trajectory = trajectory_testing.PAIRED_TUNIX_TRAJECTORY
+    writer = store.TrajectoryStore.from_config(
+        {"backend": "file", "root_dir": root_dir, "run_id": "my_run"}
+    )
+    assert writer is not None
+    for step in trajectory.steps:
+      writer.add_step(step, trajectory.get_metadata())
+    writer.close()
+
+    stdout = io.StringIO()
+    with contextlib.redirect_stdout(stdout):
+      exit_code = run_explorer.run_cli(
+          [
+              "--store",
+              "file",
+              "--root_dir",
+              root_dir,
+              "--run_id",
+              "my_run",
+              "--json",
+              "show",
+              "--trajectory_id",
+              str(trajectory.trajectory_id),
+          ],
+          diagnostics=(tunix_diagnostics.TunixDiagnostics(),),
+      )
+
+    self.assertEqual(exit_code, 0)
+    self.assertEqual(
+        json.loads(stdout.getvalue())["stats"]["schema_stats"],
+        {"tunix": {"masked_out": False}},
+    )
+
+
+class MainTest(absltest.TestCase):
+
+  def test_main_exits_with_the_subcommand_exit_code(self) -> None:
+    with (
+        self.assertRaises(SystemExit) as cm,
+        contextlib.redirect_stdout(io.StringIO()),
+    ):
+      run_explorer.main(["trajectory-explore", "--json", "ping"], diagnostics=())
+    self.assertEqual(cm.exception.code, 0)
 
 
 if __name__ == "__main__":

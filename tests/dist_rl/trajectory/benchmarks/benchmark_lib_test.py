@@ -1,5 +1,6 @@
 from collections.abc import Sequence
 import dataclasses
+from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -30,7 +31,16 @@ _MULTI_WORKER_WORKLOAD = data_generator.WorkloadConfig(
 )
 
 _WRITER_PER_WORKER_WORKLOAD = dataclasses.replace(
-    _MULTI_WORKER_WORKLOAD, writer_per_worker=True
+    _MULTI_WORKER_WORKLOAD,
+    writer_per_worker=True,
+    metrics_updates_per_trajectory=2,
+)
+
+_METRICS_WORKLOAD = data_generator.WorkloadConfig(
+    cumulative_trajectory_checkpoints=[3, 6],
+    steps_per_trajectory=2,
+    step_payload_chars=100,
+    metrics_updates_per_trajectory=2,
 )
 
 
@@ -75,10 +85,23 @@ class BenchmarkLibTest(parameterized.TestCase):
       self.assertGreaterEqual(cp.trajectory_load_latency_ms, 0)
       prev_count = target_count
 
+    if workload.metrics_updates_per_trajectory > 0:
+      expected_extra = {
+          f"metric_{i}": float(i)
+          for i in range(1, workload.metrics_updates_per_trajectory + 1)
+      } | {"latest_update": workload.metrics_updates_per_trajectory}
+      persisted_metrics = reader.get_trajectories_metrics()
+      self.assertLen(
+          persisted_metrics, workload.cumulative_trajectory_checkpoints[-1]
+      )
+      for metrics in persisted_metrics.values():
+        self.assertEqual(metrics.extra, expected_extra)
+
   @parameterized.named_parameters(
       ("two_checkpoints", _TWO_CHECKPOINTS_WORKLOAD),
       ("three_checkpoints", _THREE_CHECKPOINTS_WORKLOAD),
       ("multi_worker", _MULTI_WORKER_WORKLOAD),
+      ("with_metrics", _METRICS_WORKLOAD),
   )
   def test_run_recovery_benchmark_in_memory(
       self, workload: data_generator.WorkloadConfig
@@ -95,6 +118,7 @@ class BenchmarkLibTest(parameterized.TestCase):
       ("two_checkpoints", _TWO_CHECKPOINTS_WORKLOAD),
       ("three_checkpoints", _THREE_CHECKPOINTS_WORKLOAD),
       ("multi_worker", _MULTI_WORKER_WORKLOAD),
+      ("with_metrics", _METRICS_WORKLOAD),
   )
   def test_run_recovery_benchmark_file_store(
       self, workload: data_generator.WorkloadConfig
@@ -114,6 +138,7 @@ class BenchmarkLibTest(parameterized.TestCase):
       ("two_checkpoints", _TWO_CHECKPOINTS_WORKLOAD),
       ("three_checkpoints", _THREE_CHECKPOINTS_WORKLOAD),
       ("multi_worker", _MULTI_WORKER_WORKLOAD),
+      ("with_metrics", _METRICS_WORKLOAD),
   )
   def test_run_recovery_benchmark_sql_store(
       self, workload: data_generator.WorkloadConfig
@@ -161,6 +186,58 @@ class BenchmarkLibTest(parameterized.TestCase):
       benchmark_lib.run_recovery_benchmark(
           reader=store_instance, writer=writers, workload=workload
       )
+
+  def test_run_recovery_benchmark_reports_failed_validation_on_missing_metrics(
+      self,
+  ) -> None:
+    store_instance = in_memory_store.InMemoryTrajectoryStore()
+    with mock.patch.object(
+        store_instance,
+        "update_metrics",
+        autospec=True,
+        spec_set=True,
+    ):
+      report = benchmark_lib.run_recovery_benchmark(
+          reader=store_instance,
+          writer=store_instance,
+          workload=_METRICS_WORKLOAD,
+      )
+    self.assertFalse(report.checkpoints[0].validation_passed)
+    self.assertEqual(
+        report.checkpoints[0].validation_error,
+        "Expected 3 trajectory metrics entries, got 0",
+    )
+
+  @parameterized.named_parameters(
+      (
+          "missing_metadata",
+          "get_trajectories_metadata",
+          "Expected 3 metadata entries, got 0",
+      ),
+      (
+          "missing_trajectories",
+          "get_trajectories",
+          "Expected 3 loaded trajectories, got 0",
+      ),
+  )
+  def test_run_recovery_benchmark_reports_failed_validation_on_read_mismatch(
+      self, method_name: str, expected_error: str
+  ) -> None:
+    store_instance = in_memory_store.InMemoryTrajectoryStore()
+    with mock.patch.object(
+        store_instance,
+        method_name,
+        autospec=True,
+        spec_set=True,
+        return_value=[],
+    ):
+      report = benchmark_lib.run_recovery_benchmark(
+          reader=store_instance,
+          writer=store_instance,
+          workload=_TWO_CHECKPOINTS_WORKLOAD,
+      )
+    self.assertFalse(report.checkpoints[0].validation_passed)
+    self.assertEqual(report.checkpoints[0].validation_error, expected_error)
 
 
 if __name__ == "__main__":

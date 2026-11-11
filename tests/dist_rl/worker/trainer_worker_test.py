@@ -21,21 +21,30 @@ per-token log-prob scorer run through AbstractTrainer.fwd_only.
 
 import dataclasses
 import functools
+import os
 import threading
 from typing import Any
 from unittest import mock
 
 from absl.testing import absltest
 from flax import nnx
+import jax
 import jax.numpy as jnp
+import jax.sharding as shd
 import numpy as np
+import optax
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.train import abstract_trainer
+from tunix.dist_rl.train import peft_trainer_v2
 from tunix.dist_rl.worker import trainer_worker
 from tunix.rl import algo_core
 from tunix.rl import algorithm_config
 from tunix.rl import common as rl_common
 from tunix.tests import test_common as tc
+
+# CPU environment setup to simulate multi device env. Use 4 devices so pytest
+# collection does not downgrade XLA_FLAGS below what sibling dist_rl tests need.
+os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"
 
 
 class FakeTrainer(abstract_trainer.AbstractTrainer):
@@ -44,7 +53,9 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
     self.compile_calls = []
     self.fwd_bwd_calls = []
     self.eval_step_calls = []
+    # Payloads passed to `fwd_only`.
     self.fwd_only_calls = []
+    self.fwd_only_fn = None
     self.model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
     self.policy_version = 3
     self.step_count = 10
@@ -71,9 +82,15 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
   def eval_step(self, payload):
     self.eval_step_calls.append(payload)
 
-  def fwd_only(self, fn, *args, **kwargs):
-    self.fwd_only_calls.append((args, kwargs))
-    return fn(self.model, *args, **kwargs)
+  def with_fwd_only_fn(self, fn):
+    self.fwd_only_fn = fn
+    return self
+
+  def fwd_only(self, payload):
+    if self.fwd_only_fn is None:
+      raise ValueError("FakeTrainer.fwd_only needs with_fwd_only_fn() first.")
+    self.fwd_only_calls.append(payload)
+    return self.fwd_only_fn(self.model, payload)
 
   def save_checkpoint(self, metadata=None, *, step=None, force=False):
     pass
@@ -487,8 +504,9 @@ class TrainerWorkerTest(absltest.TestCase):
     self.assertIs(self.fake_trainer.eval_step_calls[0], payload)
 
   def test_update_returns_step_count(self):
-    step = self.worker.update()
+    step, metrics = self.worker.update()
     self.assertEqual(step, 11)
+    self.assertEqual(metrics, {"loss": 0.25})
 
   def test_set_target_state_configures_trainer(self):
     target_state = {"params": np.zeros((4, 4))}
@@ -592,10 +610,15 @@ class TrainerWorkerTest(absltest.TestCase):
     result = worker.per_token_logps(items=request)
 
     self.assertLen(self.fake_trainer.fwd_only_calls, 2)
-    first_args, _ = self.fake_trainer.fwd_only_calls[0]
-    second_args, _ = self.fake_trainer.fwd_only_calls[1]
-    np.testing.assert_array_equal(first_args[1], request.completion_tokens[:2])
-    np.testing.assert_array_equal(second_args[1], request.completion_tokens[2:])
+    first_payload = self.fake_trainer.fwd_only_calls[0]
+    second_payload = self.fake_trainer.fwd_only_calls[1]
+    self.assertIsInstance(first_payload, datatypes.LogprobsScoringPayload)
+    np.testing.assert_array_equal(
+        first_payload.completion_ids, request.completion_tokens[:2]
+    )
+    np.testing.assert_array_equal(
+        second_payload.completion_ids, request.completion_tokens[2:]
+    )
     np.testing.assert_allclose(
         result.per_token_logps,
         self._expected_logps(request),
@@ -614,9 +637,10 @@ class TrainerWorkerTest(absltest.TestCase):
 
     result = worker.per_token_logps(items=request)
 
-    _, kwargs = self.fake_trainer.fwd_only_calls[0]
-    self.assertEqual(kwargs["temperature"], 0.7)
-    self.assertEqual(kwargs["chunk_size"], 3)
+    payload = self.fake_trainer.fwd_only_calls[0]
+    self.assertEqual(payload.pad_id, 0)
+    self.assertEqual(payload.eos_id, 0)
+    self.assertEqual(payload.temperature, 0.7)
     np.testing.assert_allclose(
         result.per_token_logps,
         self._expected_logps(request, chunk_size=3),
@@ -676,9 +700,61 @@ class TrainerWorkerTest(absltest.TestCase):
 
   def test_per_token_logps_without_routing_passes_none(self):
     self.worker.per_token_logps(items=self._unpacked_request())
-    _, kwargs = self.fake_trainer.fwd_only_calls[0]
-    self.assertIsNone(kwargs["routed_experts"])
-    self.assertNotIn("token_mask", kwargs)
+    payload = self.fake_trainer.fwd_only_calls[0]
+    self.assertIsNone(payload.routed_experts)
+
+  def test_per_token_logps_payload_uses_scoring_payload_without_rl_masks(self):
+    request = self._unpacked_request(temperature=0.7)
+    self.worker.per_token_logps(items=request)
+    payload = self.fake_trainer.fwd_only_calls[0]
+    self.assertIsInstance(payload, datatypes.LogprobsScoringPayload)
+    np.testing.assert_array_equal(payload.prompt_ids, request.prompt_tokens)
+    np.testing.assert_array_equal(
+        payload.completion_ids, request.completion_tokens
+    )
+    self.assertEqual(payload.pad_id, request.pad_id)
+    self.assertEqual(payload.eos_id, request.eos_id)
+    self.assertEqual(payload.temperature, request.temperature)
+    self.assertFalse(hasattr(payload, "prompt_mask"))
+    self.assertFalse(hasattr(payload, "completion_mask"))
+    self.assertFalse(hasattr(payload, "advantages"))
+
+  def test_per_token_logps_falls_back_to_legacy_trainer_without_with_fwd_only_fn(
+      self,
+  ):
+    class _LegacyFakeTrainer:
+
+      def __init__(self):
+        self.model = tc.ToyTransformer(
+            config=tc.ModelConfig(), rngs=nnx.Rngs(0)
+        )
+        self.policy_version = 3
+        self.step_count = 10
+        self.fwd_only_calls = []
+
+      def fwd_only(self, fn, *args, **kwargs):
+        self.fwd_only_calls.append((fn, args, kwargs))
+        return fn(self.model, *args, **kwargs)
+
+    legacy_trainer = _LegacyFakeTrainer()
+    worker = trainer_worker.TrainerWorker(
+        trainer_factory=lambda: legacy_trainer,
+        worker_id="legacy_trainer",
+        logps_micro_batch_size=2,
+        logps_chunk_size=3,
+    )
+    worker.initialize()
+    request = self._unpacked_request(temperature=0.7)
+
+    result = worker.per_token_logps(items=request)
+
+    self.assertLen(legacy_trainer.fwd_only_calls, 2)
+    np.testing.assert_allclose(
+        result.per_token_logps,
+        self._expected_logps(request),
+        rtol=1e-4,
+        atol=1e-4,
+    )
 
   def test_per_token_logps_preserves_real_pad_eos_context_per_micro_batch(self):
     self.fake_trainer.model = _AttentionContextModel()
@@ -703,9 +779,9 @@ class TrainerWorkerTest(absltest.TestCase):
     result = worker.per_token_logps(items=request)
 
     self.assertLen(self.fake_trainer.fwd_only_calls, 2)
-    for row, (_, kwargs) in enumerate(self.fake_trainer.fwd_only_calls):
+    for row, payload in enumerate(self.fake_trainer.fwd_only_calls):
       np.testing.assert_array_equal(
-          kwargs["token_mask"], request.token_mask[row : row + 1]
+          payload.token_mask, request.token_mask[row : row + 1]
       )
     np.testing.assert_allclose(
         result.per_token_logps, self._expected_logps(request)
@@ -743,11 +819,11 @@ class TrainerWorkerTest(absltest.TestCase):
     result = worker.per_token_logps(items=request)
 
     self.assertLen(self.fake_trainer.fwd_only_calls, 2)
-    _, first_kwargs = self.fake_trainer.fwd_only_calls[0]
-    _, second_kwargs = self.fake_trainer.fwd_only_calls[1]
-    self.assertEqual(first_kwargs["routed_experts"].dtype, np.int16)
-    np.testing.assert_array_equal(first_kwargs["routed_experts"], routed[:2])
-    np.testing.assert_array_equal(second_kwargs["routed_experts"], routed[2:])
+    first_payload = self.fake_trainer.fwd_only_calls[0]
+    second_payload = self.fake_trainer.fwd_only_calls[1]
+    self.assertEqual(first_payload.routed_experts.dtype, np.int16)
+    np.testing.assert_array_equal(first_payload.routed_experts, routed[:2])
+    np.testing.assert_array_equal(second_payload.routed_experts, routed[2:])
     # The fake model does not accept `forced_routed_experts`, so scoring is
     # unchanged; the routing is only forwarded.
     np.testing.assert_allclose(
@@ -765,12 +841,105 @@ class TrainerWorkerTest(absltest.TestCase):
       compact_req = dataclasses.replace(request, routed_experts=compact_routed)
       worker.per_token_logps(items=compact_req)
       self.assertLen(self.fake_trainer.fwd_only_calls, 2)
-      _, kw0 = self.fake_trainer.fwd_only_calls[0]
-      _, kw1 = self.fake_trainer.fwd_only_calls[1]
-      self.assertEqual(kw0["routed_experts"].dtype, np.uint8)
-      self.assertEqual(kw0["routed_experts"].shape, (2,) + shape[1:])
-      self.assertEqual(kw1["routed_experts"].dtype, np.uint8)
-      self.assertEqual(kw1["routed_experts"].shape, (1,) + shape[1:])
+      payload0 = self.fake_trainer.fwd_only_calls[0]
+      payload1 = self.fake_trainer.fwd_only_calls[1]
+      self.assertEqual(payload0.routed_experts.dtype, np.uint8)
+      self.assertEqual(payload0.routed_experts.shape, (2,) + shape[1:])
+      self.assertEqual(payload1.routed_experts.dtype, np.uint8)
+      self.assertEqual(payload1.routed_experts.shape, (1,) + shape[1:])
+
+  def test_per_token_logps_end_to_end_with_real_peft_trainer(self):
+    tc.safe_set_n_cpu_devices(2)
+    mesh = shd.Mesh(
+        devices=np.array(jax.devices()[:2]).reshape(2, 1),
+        axis_names=("fsdp", "tp"),
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    config = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=100, max_steps=100
+    )
+    real_trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    with self.assertRaises(ValueError):
+      FakeTrainer().fwd_only(
+          datatypes.LogprobsScoringPayload(
+              prompt_ids=np.zeros((2, 2), dtype=np.int32),
+              completion_ids=np.ones((2, 2), dtype=np.int32),
+              pad_id=0,
+              eos_id=1,
+              temperature=1.0,
+          )
+      )
+
+    worker = trainer_worker.TrainerWorker(
+        trainer_factory=lambda: real_trainer,
+        worker_id="real_peft_trainer",
+        logps_micro_batch_size=2,
+        logps_chunk_size=2,
+    )
+    worker.initialize()
+    self.assertIsNone(real_trainer._jitted_fwd_only_fn)
+
+    unpacked_req = datatypes.LogprobsRequest(
+        prompt_tokens=np.arange(1, 13, dtype=np.int32).reshape(4, 3),
+        completion_tokens=np.arange(1, 17, dtype=np.int32).reshape(4, 4),
+        temperature=0.8,
+        pad_id=0,
+        eos_id=0,
+    )
+    packed_req = datatypes.LogprobsRequest(
+        prompt_tokens=np.zeros((4, 0), dtype=np.int32),
+        completion_tokens=np.array(
+            [[3, 4, 5, 0], [3, 4, 0, 0], [6, 7, 8, 9], [1, 2, 0, 0]],
+            dtype=np.int32,
+        ),
+        temperature=0.8,
+        pad_id=0,
+        eos_id=0,
+        segment_ids=np.array(
+            [[1, 1, 1, 0], [1, 1, 0, 0], [1, 1, 1, 1], [1, 1, 0, 0]],
+            dtype=np.int32,
+        ),
+        segment_positions=np.array(
+            [[0, 1, 2, 0], [0, 1, 0, 0], [0, 1, 2, 3], [0, 1, 0, 0]],
+            dtype=np.int32,
+        ),
+    )
+
+    with mesh:
+      unpacked_resp = worker.per_token_logps(items=unpacked_req)
+      self.assertIsNotNone(real_trainer._jitted_fwd_only_fn)
+
+      packed_resp = worker.per_token_logps(items=packed_req)
+      self.assertIsNotNone(real_trainer._jitted_fwd_only_fn)
+
+    graphdef, state = nnx.split(model)
+    for req, resp in ((unpacked_req, unpacked_resp), (packed_req, packed_resp)):
+      expected = np.asarray(
+          rl_common.compute_per_token_logps(
+              graphdef,
+              state,
+              prompt_tokens=jnp.asarray(req.prompt_tokens),
+              completion_tokens=jnp.asarray(req.completion_tokens),
+              pad_id=req.pad_id,
+              eos_id=req.eos_id,
+              stop_gradient=True,
+              temperature=req.temperature,
+              chunk_size=2,
+              segment_ids=(
+                  None
+                  if req.segment_ids is None
+                  else jnp.asarray(req.segment_ids)
+              ),
+              segment_positions=(
+                  None
+                  if req.segment_positions is None
+                  else jnp.asarray(req.segment_positions)
+              ),
+          )
+      )
+      np.testing.assert_allclose(
+          resp.per_token_logps, expected, rtol=1e-4, atol=1e-4
+      )
 
 
 class TrainerWorkerExecutionContextTest(absltest.TestCase):
@@ -868,6 +1037,51 @@ class TrainerWorkerExecutionContextTest(absltest.TestCase):
       self.worker.save_checkpoint(metadata={"step": 1})
 
     self.assertEqual(self.events, ["enter_ctx", "save_failed", "exit_ctx"])
+
+  def test_repeated_stop_closes_trainer_once(self):
+    self.worker.initialize()
+    close_calls = []
+    self.fake_trainer.close = lambda: close_calls.append(1)
+
+    first = self.worker.stop()
+    second = self.worker.stop()
+
+    self.assertEqual(self.worker.state, datatypes.WorkerState.STOPPED)
+    self.assertNotIn("already_stopped", first.metadata)
+    self.assertTrue(second.metadata["already_stopped"])
+    self.assertEqual(close_calls, [1])
+
+  def test_stop_keeps_failure_signal_without_reclosing_if_close_raises(self):
+    self.worker.initialize()
+    close_calls = []
+
+    def _failing_close():
+      close_calls.append(1)
+      raise RuntimeError("checkpoint flush failed")
+
+    self.fake_trainer.close = _failing_close
+    observed_aborts = []
+    self.worker.set_on_stop(observed_aborts.append)
+
+    # A clean (non-abort) stop whose close fails is escalated to an abort.
+    with self.assertRaisesRegex(RuntimeError, "checkpoint flush failed"):
+      self.worker.stop()
+
+    self.assertEqual(self.worker.state, datatypes.WorkerState.STOPPED)
+    self.assertEqual(close_calls, [1])
+    self.assertEqual(observed_aborts, [True])
+    self.assertEqual(
+        self.worker.heartbeat().last_error, "checkpoint flush failed"
+    )
+
+    # Local teardown (`worker_service.stop()`) does not re-close the trainer,
+    # but still surfaces the earlier failure with the abort flag latched.
+    with self.assertRaisesRegex(
+        RuntimeError, "failed to stop cleanly earlier: checkpoint flush failed"
+    ):
+      self.worker.stop()
+    self.assertEqual(close_calls, [1])
+    self.assertEqual(observed_aborts, [True, True])
 
 
 if __name__ == "__main__":

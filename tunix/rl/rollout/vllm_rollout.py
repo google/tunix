@@ -55,10 +55,16 @@ class VllmRollout(base_rollout.BaseRollout):
             return_routed_experts=rollout_config.return_routed_experts,
             eos_tokens=rollout_config.eos_tokens,
             init_with_random_weights=rollout_config.rollout_vllm_init_with_random_weights,
-            tpu_backend_type=rollout_config.rollout_vllm_tpu_backend_type,  # pyrefly: ignore[bad-argument-type]
+            tpu_backend_type=rollout_config.rollout_vllm_tpu_backend_type,
             additional_config=rollout_config.rollout_vllm_additional_config,
             enable_dp_attention=rollout_config.rollout_vllm_enable_dp_attention,
-            hbm_utilization=rollout_config.rollout_vllm_hbm_utilization,
+            # TODO(yatlas): Remove default hbm_utilization once colocated hbm
+            # fixes are landed.
+            hbm_utilization=(
+                rollout_config.rollout_vllm_hbm_utilization
+                if rollout_config.rollout_vllm_hbm_utilization is not None
+                else 0.2
+            ),
             lora_config=rollout_config.rollout_vllm_lora_config,
             mesh=mesh,
             tensor_parallel_size=rollout_config.tensor_parallel_size,
@@ -151,6 +157,18 @@ class VllmRollout(base_rollout.BaseRollout):
       filter_types: Optional[Tuple[Any, ...]] = None,
   ) -> None:
     self._sampler.update_params(params, filter_types)
+
+  def release_for_training(
+      self,
+      free_weights: bool = True,
+      src_state: jaxtyping.PyTree | None = None,
+  ) -> None:
+    self._sampler.release_for_training(
+        free_weights=free_weights, src_state=src_state
+    )
+
+  def restore_after_training(self) -> None:
+    self._sampler.restore_after_training()
 
   def pad_id(self) -> int:
     return self._sampler.tokenizer.pad_id()

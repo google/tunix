@@ -29,7 +29,9 @@ from jax.sharding import PartitionSpec as P
 import jaxtyping
 import numpy as np
 from tunix.models import cache_utils
+from tunix.models import gpu_kernels as kernels_lib
 from tunix.models import paged_attention
+from tunix.models import reference_attention as reference_attention_lib
 from tunix.models.gemma4.config import AttentionType
 from tunix.models.gemma4.config import K_MASK
 from tunix.models.gemma4.config import LayerCache
@@ -160,7 +162,9 @@ class Attention(nnx.Module):
 
     self.num_kv_heads = config.num_kv_heads
     self.head_dim = config.head_dim
+    self.sliding_window_size = config.sliding_window_size
     if attn_type == AttentionType.GLOBAL:
+      self.sliding_window_size = None
       if config.num_global_kv_heads is not None:
         self.num_kv_heads = config.num_global_kv_heads
       if config.global_key_size is not None:
@@ -445,6 +449,10 @@ class Attention(nnx.Module):
     prior_end_index = None
     if cache is not None:
       assert kv_shared_cache is None
+      is_ring_buffer = (
+          self.config.use_sliding_window_kv_cache
+          and self.sliding_window_size is not None
+      )
       if seq_len > 1:  # prefill
         new_cache, prefix_res, prior_end_index = (
             cache_utils.update_cache_prefill(
@@ -455,10 +463,7 @@ class Attention(nnx.Module):
                 is_chunked_prefill=is_chunked_prefill,
                 prefix_length=prefix_length,
                 input_mask=input_mask,
-                is_ring_buffer_read=(
-                    self.config.use_sliding_window_kv_cache
-                    and self.attn_type == AttentionType.LOCAL_SLIDING
-                ),
+                is_ring_buffer_read=is_ring_buffer,
                 is_ring_buffer_write=self.config.use_sliding_window_kv_cache,
             )
         )
@@ -471,10 +476,7 @@ class Attention(nnx.Module):
             key_proj,
             value_proj,
             attn_mask,
-            is_ring_buffer=(
-                self.config.use_sliding_window_kv_cache
-                and self.attn_type == AttentionType.LOCAL_SLIDING
-            ),
+            is_ring_buffer=is_ring_buffer,
         )
         new_cache = {
             'v': value_proj,
@@ -502,7 +504,23 @@ class Attention(nnx.Module):
         and not force_eager
     )
 
-    if use_flash:
+    if use_flash and (is_rectangular, cache, jax.default_backend()) == (
+        False,
+        None,
+        'gpu',
+    ):
+      encoded = kernels_lib.gpu_flash_attention(
+          query_proj,
+          key_proj,
+          value_proj,
+          scale=1.0,
+          is_causal=attn_mask is None,
+          mask=attn_mask,
+          segment_ids=segment_ids,
+          local_window_size=self.sliding_window_size,
+          query_sharding_spec=self.config.shd_config.act_btnh,
+      )
+    elif use_flash and jax.default_backend() != 'gpu':
       query_proj = query_proj.transpose(0, 2, 1, 3)
       key_proj = key_proj.transpose(0, 2, 1, 3)
       value_proj = value_proj.transpose(0, 2, 1, 3)
@@ -510,7 +528,7 @@ class Attention(nnx.Module):
       mesh = _resolve_active_mesh()
 
       # Offset: shifts Q positions so q[0] aligns with kv[prefix_len].
-      offset = kv_len - q_len if is_rectangular else 0
+      offset = kv_len - q_len
 
       (
           shd_b,
@@ -729,18 +747,6 @@ class Attention(nnx.Module):
       is_chunked_prefill: bool = False,
   ) -> jaxtyping.Array:
     """Eager einsum attention (non-flash path)."""
-    if self.use_gqa:
-      b, t, kg, h = query_proj.shape
-      n_groups = kg // self.num_kv_heads
-      query_reshaped = query_proj.reshape(
-          (b, t, self.num_kv_heads, n_groups, h)
-      )
-      logits = jnp.einsum('BTKGH,BSKH->BTKGS', query_reshaped, key_proj)
-      b, t, k, g, s = logits.shape
-      logits = logits.reshape((b, t, k * g, s))
-    else:
-      logits = jnp.einsum('BTNH,BSNH->BTNS', query_proj, key_proj)
-
     kv_len = key_proj.shape[1]
     q_len = query_proj.shape[1]
 
@@ -806,21 +812,14 @@ class Attention(nnx.Module):
         )
         attn_mask = sliding_mask * attn_mask
 
-    attn = jnp.where((jnp.expand_dims(attn_mask, -2)), logits, K_MASK)
-    attn = jax.nn.softmax(attn.astype(jnp.float32), axis=-1).astype(
-        key_proj.dtype
+    return reference_attention_lib.reference_attention(
+        query_proj,
+        key_proj,
+        value_proj,
+        scale=1.0,
+        attn_mask=attn_mask,
+        mask_value=K_MASK,
     )
-
-    if self.use_gqa:
-      b, t, kg, s = attn.shape
-      n_groups = kg // self.num_kv_heads
-      probs_reshaped = attn.reshape((b, t, self.num_kv_heads, n_groups, s))
-      encoded = jnp.einsum('BTKGS,BSKH->BTKGH', probs_reshaped, value_proj)
-      b, t, k, g, h = encoded.shape
-      encoded = encoded.reshape((b, t, k * g, h))
-    else:
-      encoded = jnp.einsum('BTNS,BSNH->BTNH', attn, value_proj)
-    return encoded
 
   @property
   def use_gqa(self) -> bool:
@@ -841,19 +840,24 @@ class Attention(nnx.Module):
     """Attends a ragged batch through the paged KV cache.
 
     Args:
-      x: `[1, num_tokens, embed_dim]` the batch's tokens, back to back.
-      segment_pos: `[1, num_tokens]` each token's position in its sequence.
+      x: `[num_groups, tokens_per_group, embed_dim]` the batch's tokens, one
+        row per DP group.
+      segment_pos: `[num_groups, tokens_per_group]` each token's position in its
+        sequence.
       kv_cache: this layer's paged KV cache, in `paged_attention`'s layout.
       metadata: the batch's ragged layout and page tables.
       cache_name: the key of `kv_cache` in `metadata.page_indices`.
       update_kv_cache: whether to write this layer's K/V into `kv_cache`.
         KV-shared layers pass False: their lender already wrote this step's
         K/V into the shared cache, and the kernel reads it from there.
-      mesh: the mesh to shard the kernel over, by KV head.
+      mesh: the mesh to shard the kernel over, by DP group and KV head.
 
     Returns:
-      A tuple of (updated `kv_cache`, `[1, num_tokens, embed_dim]` output).
+      A tuple of (updated `kv_cache`,
+      `[num_groups, tokens_per_group, embed_dim]` output).
     """
+    num_groups, tokens_per_group, _ = x.shape
+    num_tokens = num_groups * tokens_per_group
     x = x.astype(self.config.dtype)
     queries = self._query_norm(self.q_einsum(x))
     queries = apply_rope(
@@ -862,15 +866,16 @@ class Attention(nnx.Module):
         base_frequency=self.rope_base_frequency,
         scale_factor=self.rope_scale_factor,
         rope_proportion=self.rope_proportion,
-    )[0]
+    ).reshape(num_tokens, self.config.num_heads, self.head_dim)
     if update_kv_cache:
       keys, values, _ = self._compute_kv_projections(x, segment_pos, None)
-      keys, values = keys[0], values[0]
+      keys = keys.reshape(num_tokens, self.num_kv_heads, self.head_dim)
+      values = values.reshape(num_tokens, self.num_kv_heads, self.head_dim)
     else:
       # The kernel reads every K/V from the shared cache and ignores these,
       # but its signature still takes them.
       keys = jnp.zeros(
-          (queries.shape[0], self.num_kv_heads, self.head_dim), queries.dtype
+          (num_tokens, self.num_kv_heads, self.head_dim), queries.dtype
       )
       values = keys
 
@@ -882,7 +887,6 @@ class Attention(nnx.Module):
         metadata,
         cache_name=cache_name,
         mesh=mesh,
-        tp_axis=tuple(self.config.shd_config.act_btnh)[2],
         sliding_window=(
             self.config.sliding_window_size
             if self.attn_type == AttentionType.LOCAL_SLIDING
@@ -893,7 +897,10 @@ class Attention(nnx.Module):
         sm_scale=1.0,
     )
 
-    attn_output = self.attn_vec_einsum(attn_output[None])
+    attn_output = attn_output.reshape(
+        num_groups, tokens_per_group, self.config.num_heads, self.head_dim
+    )
+    attn_output = self.attn_vec_einsum(attn_output)
     attn_output = shard(attn_output, self.config.shd_config.act_btd)
     return kv_cache, attn_output
 

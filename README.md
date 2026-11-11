@@ -6,9 +6,9 @@
 
 </div>
 
-**Tunix (Tune-in-JAX)** is a JAX based library designed to streamline the
-post-training of Large Language Models. It provides efficient and scalable
-support for:
+**Tunix (Tune-in-Accelerators)** is a unified library designed to streamline the
+post-training of Large Language Models on accelerators. It provides efficient
+and scalable support for:
 
 - **SOTA Training performance on TPUs**
 - **Supervised Fine-Tuning**
@@ -18,8 +18,8 @@ support for:
 Tunix leverages the power of JAX for accelerated computation and seamless
 integration with JAX-based modeling frameworks like
 [Flax NNX](https://flax.readthedocs.io/en/latest/nnx_basics.html), and
-integrates with high-performance inference engines like vLLM and SGLang-JAX for
-rollout. **For our detailed documentation, please refer to the [Tunix Website](https://tunix.readthedocs.io/en/latest/index.html)**.
+integrates with high-performance inference engines like vLLM for rollout.
+**For our detailed documentation, please refer to the [Tunix Website](https://tunix.readthedocs.io/en/latest/index.html)**.
 
 
 **Current Status: V2 Release**
@@ -71,9 +71,8 @@ tuning workflows on top of the XLA and JAX infrastructure. See [Design Overview]
     -   Components are designed to be reusable and composable
     -   Easy to customize and extend
 -   **Performance & Efficiency**:
-    -   Native [vLLM](https://tunix.readthedocs.io/en/latest/rollout.html#vllm) and
-        [SGLang-JAX](https://tunix.readthedocs.io/en/latest/rollout.html#sglang) on TPU integration for performant
-        rollout
+    -   Native [vLLM](https://tunix.readthedocs.io/en/latest/rollout.html#vllm) on TPU
+        integration for performant rollout
     -   Native [MaxText](https://github.com/AI-Hypercomputer/maxtext) model
         integration for high performance kernels and model execution
     -   [Micro-batching](https://tunix.readthedocs.io/en/latest/performance.html#batching-config) support for component
@@ -82,6 +81,10 @@ tuning workflows on top of the XLA and JAX infrastructure. See [Design Overview]
     -   Seamless multi-host distributed training with Pathways which can scale
         up to thousands of devices
     -   [Checkpointing and Fault Tolerance](https://tunix.readthedocs.io/en/latest/reliability.html)
+-   **Observability & Diagnostics**:
+    -   [RL Monitoring and Profiling with Google Cloud ML Diagnostics](https://github.com/google/tunix/blob/main/docs/ml_diagnostics.md)
+        for scalar metrics tracking and per-role (`actor` / `rollout`) XProf
+        profiling
 
 ## Getting Started
 
@@ -133,7 +136,7 @@ cutting-edge research and easy reproducibility.
 ## Citing Tunix
 ```bibtex
 @misc{tunix2025,
-  title={Tunix (Tune-in-JAX)},
+  title={Tunix (Tune-in-Accelerators)},
   author={Bao, Tianshu and Carpenter, Jeff and Chai, Lin and Gao, Haoyu and Jiang, Yangmu and Noghabi, Shadi and Sharma, Abheesht and Tan, Sizhi and Wang, Lance and Yan, Ann and Yu, Weiren and others},
   year={2025},
   howpublished={\url{https://github.com/google/tunix}},

@@ -36,8 +36,8 @@ import numpy as np
 import optax
 from tunix.common import configs
 from tunix.dist_rl.common import datatypes
-from tunix.dist_rl.metrics import metrics as exp_metrics
 from tunix.dist_rl.train import abstract_trainer
+from tunix.dist_rl.train import jax_pytrees  # pylint: disable=unused-import
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
@@ -514,6 +514,8 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._jitted_update_step_fn = None
     self._jitted_eval_step_fn = None
     self._jitted_train_step_fn = None
+    self._fwd_only_fn: Callable[..., Any] | None = None
+    self._jitted_fwd_only_fn: Callable[..., Any] | None = None
     self._prof: profiler.Profiler | None = None
     self._sync_step_derived_state()
     self._buffered_train_metrics: MetricsBuffer | None = None
@@ -524,7 +526,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     # get_metrics to retrieve metrics from trainer, we need to write metrics to
     # a buffer. We should delete this once the metrics logging implementations
     # are updated according to the new design.
-    self._written_metrics: exp_metrics.MetricsBuffer | None = None
+    self._written_metrics: datatypes.MetricsBuffer | None = None
     self.training_hooks = None
     self.data_hooks = None
     self._jit_cache = set()
@@ -576,6 +578,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._jitted_update_step_fn = None
     self._jitted_eval_step_fn = None
     self._jitted_train_step_fn = None
+    self._jitted_fwd_only_fn = None
 
   @override
   def with_loss_fn(
@@ -771,20 +774,13 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     if mesh.empty:
       return
 
-    def _shard(x, p):
+    def _shard(x: Any, p: shd.PartitionSpec | None) -> Any:
       if not isinstance(x, (jax.Array, np.ndarray)):
         return x
-      if p is None:
-        p = shd.PartitionSpec()
       sharding = sharding_utils.get_sharding(
-          x, mesh, p
-      )  # pyrefly: ignore[bad-argument-type]
-      if hasattr(x, "sharding") and x.sharding == sharding:
-        return x
-      if getattr(x, "is_fully_addressable", True):
-        with jax.transfer_guard("allow"):
-          return jax.device_put(x, sharding)
-      return x
+          x, mesh, shd.PartitionSpec() if p is None else p
+      )
+      return sharding_utils.place_array_on_target(x, sharding)
 
     optimizer_state = nnx.state(self.optimizer, nnx.optimizer.OptState)
     optimizer_pspecs = nnx.get_partition_spec(optimizer_state)
@@ -804,9 +800,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       )
 
     # Denominator is a scalar — replicate across all devices
-    self.grad_accumulator.denom[...] = jax.device_put(
+    self.grad_accumulator.denom[...] = _shard(
         self.grad_accumulator.denom[...],
-        jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()),
+        shd.PartitionSpec(),
     )
 
   def jit_fwd_bwd_update_and_eval_step(
@@ -1070,11 +1066,11 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     weighted_metrics = {}
     scalar_metrics = {"loss": loss}
     for k, val in additional_metrics.items():
-      if isinstance(val, (utils.WeightedMetric, exp_metrics.WeightedMetric)):
+      if isinstance(val, utils.WeightedMetric):
         weighted_metrics[k] = val
       else:
         scalar_metrics[k] = val
-    self._written_metrics = exp_metrics.MetricsBuffer(
+    self._written_metrics = datatypes.MetricsBuffer(
         id=metrics_buffer.step,
         weighted_metrics=weighted_metrics,
         scalar_metrics=scalar_metrics,
@@ -1311,26 +1307,50 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
           self._buffered_eval_metrics = None
 
   @override
-  def fwd_only(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-    """Runs `fn(model, *args, **kwargs)` on `self.model'.
+  def with_fwd_only_fn(self, fn: Callable[..., Any]) -> "PeftTrainer":
+    def _step(
+        graphdef: nnx.GraphDef,
+        state: nnx.State,
+        payload: datatypes.TrainerPayload,
+    ) -> Any:
+      model = nnx.merge(graphdef, state, copy=True)
+      model.eval()
+      return fn(model, payload)
 
-    Shards the inputs and passes them to the function along with the live
-    model.
+    self._fwd_only_fn = _step
+    self._jitted_fwd_only_fn = None
+    return self
+
+  @override
+  def fwd_only(self, payload: datatypes.TrainerPayload) -> Any:
+    """Runs the registered `with_fwd_only_fn` callback under `jax.jit`.
+
+    Prepares and shards `payload` via `_prepare_payload` (stripping host
+    `metadata` and sharding arrays on `config.data_sharding_axis`),
+    reconstructs a read-only copy of the model (`nnx.merge(graphdef, state,
+    copy=True)` so live trainer state is never mutated), and invokes
+    `fn(model, payload)`.
+
+    Args:
+      payload: Input payload to prepare and shard on
+        `config.data_sharding_axis`.
+
+    Returns:
+      Whatever the callback returns.
+
+    Raises:
+      ValueError: If `with_fwd_only_fn` has not been called.
     """
-    axis = self.config.data_sharding_axis
-
-    def _shard(x: Any) -> Any:
-      if not isinstance(x, (jax.Array, np.ndarray)):
-        return x
-      x = jnp.asarray(x)
-      # Skip zero-column arrays (e.g. the empty prompt in packed mode) to avoid
-      # constructing degenerate global arrays.
-      if x.ndim >= 2 and x.shape[1] == 0:
-        return x
-      return sharding_utils.shard_input(x, axis)
-
-    args, kwargs = jax.tree.map(_shard, (args, kwargs))
-    return fn(self.model, *args, **kwargs)
+    if self._fwd_only_fn is None:
+      raise ValueError(
+          "PeftTrainer.fwd_only needs a callback: call with_fwd_only_fn()"
+          " first."
+      )
+    payload = self._prepare_payload(payload)
+    if self._jitted_fwd_only_fn is None:
+      self._jitted_fwd_only_fn = jax.jit(self._fwd_only_fn)
+    graphdef, state = nnx.split(self.model)
+    return self._jitted_fwd_only_fn(graphdef, state, payload)
 
   @override
   def save_checkpoint(
@@ -1460,7 +1480,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
           key_mapping_hook_fns=mapping_config.to_hf_hook_fns,
           transpose_keys=mapping_config.to_hf_transpose_keys,
           reshard_fn=None,
-          rollout_engine=backend,
           tp_size=self._rollout_tp_size,
       )
       worker.bind(converted_state)
@@ -1486,14 +1505,14 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     return True
 
   @override
-  def get_metrics(self) -> exp_metrics.MetricsBuffer:
+  def get_metrics(self) -> datatypes.MetricsBuffer:
     if (
         self._written_metrics is None
         and self._prev_buffered_train_metrics is not None
     ):
       self._write_train_metrics()
     if self._written_metrics is None:
-      return exp_metrics.MetricsBuffer(id=-1)
+      return datatypes.MetricsBuffer(id=-1)
     ret = self._written_metrics
     self._written_metrics = None
     return ret

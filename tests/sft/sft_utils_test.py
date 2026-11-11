@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from typing import Any
+from unittest import mock
 
 from absl.testing import absltest
 from flax import nnx
@@ -66,6 +67,36 @@ class UtilsTest(absltest.TestCase):
         [0, 0, 1, 1],
     ])
     np.testing.assert_array_equal(positions, expected_value)
+
+  def test_jax_hbm_usage_gb_handles_none_stats_and_cpu_devices(self):
+    def _make_device(platform: str, stats: dict[str, int] | None) -> jax.Device:
+      dev = mock.create_autospec(jax.Device, instance=True)
+      dev.platform = platform
+      dev.memory_stats.return_value = stats
+      return dev
+
+    self.assertEqual(
+        utils._jax_hbm_usage_gb([_make_device("gpu", None)]),
+        [],
+    )
+    self.assertEqual(
+        utils._jax_hbm_usage_gb(
+            [_make_device("cpu", {"bytes_in_use": 10, "bytes_limit": 100})]
+        ),
+        [],
+    )
+    self.assertEqual(
+        utils._jax_hbm_usage_gb(
+            [_make_device("gpu", {"bytes_in_use": 512, "bytes_limit": 0})]
+        ),
+        [(512, 0)],
+    )
+    self.assertEqual(
+        utils._jax_hbm_usage_gb(
+            [_make_device("gpu", {"bytes_in_use": 1024, "bytes_limit": 4096})]
+        ),
+        [(1024, 4096)],
+    )
 
 
 class WeightedMetricTest(absltest.TestCase):
@@ -304,9 +335,8 @@ class MetricReducerTest(absltest.TestCase):
     self.assertIs(utils.metric_reducer(jnp.array(1.0)), np.mean)
 
   def test_identifies_a_field_compatible_metric_from_another_module(self):
-    # `tunix.dist_rl.metrics.WeightedMetric` mirrors `WeightedMetric`
-    # without inheriting from it, so the check has to be structural. Stand in
-    # for it here rather than importing `dist_rl` from an `sft` test.
+    # The weighted-metric wire contract is structural, so any object with the
+    # same fields must reduce like `WeightedMetric` regardless of its class.
     class ForeignWeightedMetric:
 
       def __init__(self):

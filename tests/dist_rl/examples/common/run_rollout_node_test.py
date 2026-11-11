@@ -18,15 +18,17 @@ import contextlib
 import io
 import json
 import os
-import sys
-import types
 from unittest import mock
 
 from absl.testing import absltest
+import transformers
 from tunix.dist_rl.common import gcs_cache
+from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.examples.common import run_rollout_node
 from tunix.dist_rl.rollout import inprocess_vllm_sampler
 from tunix.dist_rl.rollout import vllm_sampler
+from tunix.dist_rl.worker import remote_execution
+from tunix.dist_rl.worker import rollout_worker
 from tunix.rl.agentic.parser.chat_template_parser import parser
 from tunix.utils import maxtext_utils
 
@@ -36,16 +38,40 @@ _ROUTED_EXPERTS_ARGV = (
 )
 
 
+def _vllm_rollout_config(argv: list[str]) -> rollout_worker.RolloutConfig:
+  """Returns the RolloutConfig `_create_vllm_sampler` passes to VllmSampler."""
+  with mock.patch.object(
+      vllm_sampler, "VllmSampler", autospec=True
+  ) as sampler_cls:
+    run_rollout_node._create_vllm_sampler(
+        run_rollout_node._parse_args(argv), tokenizer=None
+    )
+  return sampler_cls.call_args.kwargs["config"]
+
+
 def _vllm_engine_kwargs(argv: list[str]) -> dict[str, object]:
-  """Returns the AsyncEngineArgs kwargs `_create_vllm_sampler` builds."""
-  arg_utils = types.ModuleType("vllm.engine.arg_utils")
-  arg_utils.AsyncEngineArgs = mock.Mock()
-  with mock.patch.dict(sys.modules, {"vllm.engine.arg_utils": arg_utils}):
-    with mock.patch.object(vllm_sampler, "VllmSampler"):
-      run_rollout_node._create_vllm_sampler(
-          run_rollout_node._parse_args(argv), tokenizer=None
-      )
-  return arg_utils.AsyncEngineArgs.call_args.kwargs
+  """Returns the AsyncEngineArgs kwargs of the `--sampler=vllm` worker."""
+  sampler = run_rollout_node._create_vllm_sampler(
+      run_rollout_node._parse_args(argv), tokenizer=None
+  )
+  return sampler._engine_kwargs
+
+
+def _inprocess_vllm_rollout_config(
+    argv: list[str],
+) -> rollout_worker.RolloutConfig:
+  """Returns the RolloutConfig `_create_inprocess_vllm_sampler` builds."""
+  with (
+      mock.patch.object(run_rollout_node, "_import_vllm_sampler"),
+      mock.patch.object(run_rollout_node, "_create_rollout_mesh"),
+      mock.patch.object(
+          inprocess_vllm_sampler, "InprocessVllmSampler", autospec=True
+      ) as sampler_cls,
+  ):
+    run_rollout_node._create_inprocess_vllm_sampler(
+        run_rollout_node._parse_args(argv), tokenizer=None
+    )
+  return sampler_cls.call_args.kwargs["config"]
 
 
 class RunRolloutNodeTest(absltest.TestCase):
@@ -124,42 +150,55 @@ class RunRolloutNodeTest(absltest.TestCase):
   def test_in_flight_weight_updates_flag_sets_partial_rollout(self):
     args_default = run_rollout_node._parse_args(["--model_id=Qwen/Qwen3-8B"])
     self.assertFalse(args_default.in_flight_weight_updates)
-    kwargs_default = run_rollout_node._rollout_config_kwargs(args_default)
-    self.assertFalse(kwargs_default["partial_rollout"])
+    config_default = run_rollout_node._rollout_config(args_default)
+    self.assertFalse(config_default.partial_rollout)
 
     args_enabled = run_rollout_node._parse_args([
         "--model_id=Qwen/Qwen3-8B",
         "--in_flight_weight_updates",
     ])
     self.assertTrue(args_enabled.in_flight_weight_updates)
-    kwargs_enabled = run_rollout_node._rollout_config_kwargs(args_enabled)
-    self.assertTrue(kwargs_enabled["partial_rollout"])
+    config_enabled = run_rollout_node._rollout_config(args_enabled)
+    self.assertTrue(config_enabled.partial_rollout)
 
-  def test_detokenize_flag_defaults_off(self):
-    self.assertFalse(run_rollout_node._parse_args([]).detokenize)
+  def test_detokenize_flag_defaults_on_and_reaches_vllm_sampler_config(self):
+    self.assertTrue(run_rollout_node._parse_args([]).detokenize)
     self.assertTrue(
         run_rollout_node._parse_args(["--detokenize=true"]).detokenize
     )
     self.assertTrue(run_rollout_node._parse_args(["--detokenize"]).detokenize)
+    self.assertFalse(
+        run_rollout_node._parse_args(["--detokenize=false"]).detokenize
+    )
+    self.assertIs(
+        _vllm_rollout_config([]).rollout_vllm_sampling_kwargs["detokenize"],
+        True,
+    )
+    self.assertIs(
+        _vllm_rollout_config(
+            ["--detokenize=false"]
+        ).rollout_vllm_sampling_kwargs["detokenize"],
+        False,
+    )
 
   def test_routed_experts_flags_reach_rollout_config(self):
-    defaults = run_rollout_node._rollout_config_kwargs(
+    defaults = run_rollout_node._rollout_config(
         run_rollout_node._parse_args([])
     )
-    self.assertFalse(defaults["return_routed_experts"])
-    self.assertEqual(defaults["routed_experts_encode_mode"], "auto")
-    self.assertIsNone(defaults["routed_experts_num_experts"])
+    self.assertFalse(defaults.return_routed_experts)
+    self.assertEqual(defaults.routed_experts_encode_mode, "auto")
+    self.assertIsNone(defaults.routed_experts_num_experts)
 
-    enabled = run_rollout_node._rollout_config_kwargs(
+    enabled = run_rollout_node._rollout_config(
         run_rollout_node._parse_args([
             "--return_routed_experts",
             "--routed_experts_encode_mode=uint10",
             "--routed_experts_num_experts=256",
         ])
     )
-    self.assertTrue(enabled["return_routed_experts"])
-    self.assertEqual(enabled["routed_experts_encode_mode"], "uint10")
-    self.assertEqual(enabled["routed_experts_num_experts"], 256)
+    self.assertTrue(enabled.return_routed_experts)
+    self.assertEqual(enabled.routed_experts_encode_mode, "uint10")
+    self.assertEqual(enabled.routed_experts_num_experts, 256)
 
   def test_unknown_routed_experts_encode_mode_is_rejected(self):
     stderr = io.StringIO()
@@ -177,7 +216,7 @@ class RunRolloutNodeTest(absltest.TestCase):
 
   def test_vllm_sampler_captures_routed_experts_only_when_asked(self):
     default = _vllm_engine_kwargs(["--maxtext_model_name=qwen3-30b-a3b"])
-    self.assertNotIn("enable_return_routed_experts", default)
+    self.assertIs(default["enable_return_routed_experts"], False)
     self.assertNotIn(
         "return_routed_experts", default["additional_config"]["maxtext_config"]
     )
@@ -190,33 +229,19 @@ class RunRolloutNodeTest(absltest.TestCase):
     )
 
   def test_inprocess_vllm_sampler_captures_routed_experts(self):
-    vllm_sampler = mock.Mock()
-    with (
-        mock.patch.object(
-            run_rollout_node, "_import_vllm_sampler", return_value=vllm_sampler
-        ),
-        mock.patch.object(run_rollout_node, "_create_rollout_mesh"),
-        mock.patch.object(
-            inprocess_vllm_sampler, "InprocessVllmSampler"
-        ),
-    ):
-      run_rollout_node._create_inprocess_vllm_sampler(
-          run_rollout_node._parse_args(list(_ROUTED_EXPERTS_ARGV)),
-          tokenizer=None,
-      )
-
-    config_kwargs = vllm_sampler.VllmConfig.call_args.kwargs
-    self.assertIs(config_kwargs["return_routed_experts"], True)
+    config = _inprocess_vllm_rollout_config(list(_ROUTED_EXPERTS_ARGV))
+    self.assertIs(config.return_routed_experts, True)
     self.assertIs(
-        config_kwargs["additional_config"]["maxtext_config"][
+        config.rollout_vllm_additional_config["maxtext_config"][
             "return_routed_experts"
         ],
         True,
     )
 
   def test_vllm_samplers_plumb_float32_logit_flags_when_set(self):
-    default_kwargs = _vllm_engine_kwargs(["--maxtext_model_name=qwen3-30b-a3b"])
-    default_mt_cfg = default_kwargs["additional_config"]["maxtext_config"]
+    default_mt_cfg = _vllm_engine_kwargs(
+        ["--maxtext_model_name=qwen3-30b-a3b"]
+    )["additional_config"]["maxtext_config"]
     self.assertNotIn("float32_gate_logits", default_mt_cfg)
     self.assertNotIn("float32_logits", default_mt_cfg)
 
@@ -225,30 +250,57 @@ class RunRolloutNodeTest(absltest.TestCase):
         "--maxtext_float32_gate_logits=true",
         "--maxtext_float32_logits=false",
     ]
-    vllm_kwargs = _vllm_engine_kwargs(argv)
-    vllm_mt_cfg = vllm_kwargs["additional_config"]["maxtext_config"]
+    vllm_mt_cfg = _vllm_engine_kwargs(argv)["additional_config"][
+        "maxtext_config"
+    ]
     self.assertIs(vllm_mt_cfg["float32_gate_logits"], True)
     self.assertIs(vllm_mt_cfg["float32_logits"], False)
 
-    vllm_sampler = mock.Mock()
-    with (
-        mock.patch.object(
-            run_rollout_node, "_import_vllm_sampler", return_value=vllm_sampler
-        ),
-        mock.patch.object(run_rollout_node, "_create_rollout_mesh"),
-        mock.patch.object(
-            inprocess_vllm_sampler, "InprocessVllmSampler"
-        ),
-    ):
-      run_rollout_node._create_inprocess_vllm_sampler(
-          run_rollout_node._parse_args(argv),
-          tokenizer=None,
-      )
-    inproc_mt_cfg = vllm_sampler.VllmConfig.call_args.kwargs[
-        "additional_config"
-    ]["maxtext_config"]
+    inproc_mt_cfg = _inprocess_vllm_rollout_config(
+        argv
+    ).rollout_vllm_additional_config["maxtext_config"]
     self.assertIs(inproc_mt_cfg["float32_gate_logits"], True)
     self.assertIs(inproc_mt_cfg["float32_logits"], False)
+
+  def test_vllm_engine_length_defaults_to_prompt_plus_response(self):
+    argv = [
+        "--model_id=Qwen/Qwen3-8B",
+        "--max_prompt_length=300",
+        "--max_response_length=700",
+    ]
+    for sampler, config in (
+        ("vllm", _vllm_rollout_config(argv)),
+        ("inprocess_vllm", _inprocess_vllm_rollout_config(argv)),
+    ):
+      with self.subTest(sampler=sampler, max_model_len="default"):
+        self.assertEqual(config.kv_cache_size, 1000)
+    self.assertEqual(_vllm_engine_kwargs(argv)["max_model_len"], 1000)
+
+    argv.append("--vllm_max_model_len=4096")
+    for sampler, config in (
+        ("vllm", _vllm_rollout_config(argv)),
+        ("inprocess_vllm", _inprocess_vllm_rollout_config(argv)),
+    ):
+      with self.subTest(sampler=sampler, max_model_len=4096):
+        self.assertEqual(config.kv_cache_size, 4096)
+    self.assertEqual(_vllm_engine_kwargs(argv)["max_model_len"], 4096)
+
+  def test_inprocess_vllm_rollout_config_carries_engine_settings(self):
+    config = _inprocess_vllm_rollout_config([
+        "--model_id=Qwen/Qwen3-8B",
+        "--vllm_hbm_utilization=0.7",
+        "--vllm_max_num_seqs=64",
+        "--use_lora",
+        "--lora_rank=8",
+    ])
+    self.assertEqual(config.rollout_vllm_model_version, "Qwen/Qwen3-8B")
+    self.assertEqual(config.rollout_vllm_hbm_utilization, 0.7)
+    self.assertEqual(config.rollout_vllm_max_num_seqs, 64)
+    self.assertEqual(config.rollout_vllm_tpu_backend_type, "jax")
+    self.assertEqual(
+        config.rollout_vllm_lora_config, {"max_lora_rank": 8, "max_loras": 1}
+    )
+    self.assertIsNotNone(config.rollout_mapping_config)
 
   def test_main_restores_jax_cache_before_jax_init(self):
     events: list[str] = []
@@ -262,6 +314,7 @@ class RunRolloutNodeTest(absltest.TestCase):
 
     with (
         mock.patch.object(run_rollout_node.importlib, "import_module"),
+        mock.patch.object(otel_setup, "setup_metrics") as mock_otel_setup,
         mock.patch.object(
             gcs_cache,
             "restore_jax_cache",
@@ -271,8 +324,23 @@ class RunRolloutNodeTest(absltest.TestCase):
         ) as mock_restore,
     ):
       with self.assertRaisesRegex(RuntimeError, "stop at jax init"):
-        run_rollout_node.main(["--sampler=vanilla"], context=context)
+        run_rollout_node.main(
+            [
+                "--sampler=vanilla",
+                "--worker_id=rollout-7",
+                "--run_id=run_123",
+            ],
+            context=context,
+        )
 
+    mock_otel_setup.assert_called_once_with(
+        default_service_name="tunix-rollout",
+        resource_attributes={
+            "tunix.worker_id": "rollout-7",
+            "tunix.role": "rollout",
+            "tunix.run_id": "run_123",
+        },
+    )
     mock_restore.assert_called_once()
     self.assertEqual(mock_restore.call_args.kwargs["params"].sampler, "vanilla")
     self.assertEqual(events, ["restore:vanilla", "jax_init"])
@@ -280,15 +348,15 @@ class RunRolloutNodeTest(absltest.TestCase):
   def test_episode_timeout_derives_drain_timeout_in_rollout_config(self):
     with mock.patch.dict(os.environ, {}, clear=False):
       os.environ.pop("EPISODE_TIMEOUT_SECS", None)
-      defaults = run_rollout_node._rollout_config_kwargs(
+      defaults = run_rollout_node._rollout_config(
           run_rollout_node._parse_args([])
       )
-    self.assertEqual(defaults["drain_timeout_s"], 660.0)
+    self.assertEqual(defaults.drain_timeout_s, 660.0)
 
-    deepswe_cfg = run_rollout_node._rollout_config_kwargs(
+    deepswe_cfg = run_rollout_node._rollout_config(
         run_rollout_node._parse_args(["--episode_timeout_secs=1800"])
     )
-    self.assertEqual(deepswe_cfg["drain_timeout_s"], 1860.0)
+    self.assertEqual(deepswe_cfg.drain_timeout_s, 1860.0)
 
     stderr = io.StringIO()
     with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
@@ -309,33 +377,18 @@ class RunRolloutNodeTest(absltest.TestCase):
         0.8,
     )
 
-    mock_vllm = mock.Mock()
-    with (
-        mock.patch.object(
-            run_rollout_node, "_import_vllm_sampler", return_value=mock_vllm
-        ),
-        mock.patch.object(run_rollout_node, "_create_rollout_mesh"),
-        mock.patch.object(inprocess_vllm_sampler, "InprocessVllmSampler"),
-    ):
-      run_rollout_node._create_inprocess_vllm_sampler(
-          run_rollout_node._parse_args(["--sampler=inprocess_vllm"]),
-          tokenizer=None,
-      )
-      self.assertEqual(
-          mock_vllm.VllmConfig.call_args.kwargs["hbm_utilization"], 0.5
-      )
-
-      mock_vllm.reset_mock()
-      run_rollout_node._create_inprocess_vllm_sampler(
-          run_rollout_node._parse_args([
-              "--sampler=inprocess_vllm",
-              "--vllm_hbm_utilization=0.8",
-          ]),
-          tokenizer=None,
-      )
-      self.assertEqual(
-          mock_vllm.VllmConfig.call_args.kwargs["hbm_utilization"], 0.8
-      )
+    self.assertIsNone(
+        _inprocess_vllm_rollout_config(
+            ["--sampler=inprocess_vllm"]
+        ).rollout_vllm_hbm_utilization
+    )
+    self.assertEqual(
+        _inprocess_vllm_rollout_config([
+            "--sampler=inprocess_vllm",
+            "--vllm_hbm_utilization=0.8",
+        ]).rollout_vllm_hbm_utilization,
+        0.8,
+    )
 
   def test_vllm_config_json_merges_35b_recipe_config(self):
     recipe_vllm_config = {
@@ -512,7 +565,7 @@ class RunRolloutNodeTest(absltest.TestCase):
         "requires --maxtext_model_name to be set.",
     )
 
-    for key in run_rollout_node._FORBIDDEN_VLLM_CONFIG_JSON_KEYS:
+    for key in run_rollout_node._FORBIDDEN_ROLLOUT_KWARGS:
       with self.subTest(top_level_key=key):
         self._assert_parse_args_rejects(
             [
@@ -522,7 +575,7 @@ class RunRolloutNodeTest(absltest.TestCase):
             "managed by dedicated CLI flags or rollout contracts",
         )
 
-    for mt_key in run_rollout_node._FORBIDDEN_MAXTEXT_CONFIG_JSON_KEYS:
+    for mt_key in run_rollout_node._FORBIDDEN_MAXTEXT_CONFIG_KEYS:
       with self.subTest(maxtext_key=mt_key):
         payload = {"additional_config": {"maxtext_config": {mt_key: 1}}}
         self._assert_parse_args_rejects(
@@ -536,7 +589,7 @@ class RunRolloutNodeTest(absltest.TestCase):
 
     # Drift guard: every `AsyncEngineArgs` key produced by `_create_vllm_sampler`
     # under maximal CLI flags (except `additional_config`, which is deep-merged)
-    # must stay covered by `_FORBIDDEN_VLLM_CONFIG_JSON_KEYS`.
+    # must stay covered by `_FORBIDDEN_ROLLOUT_KWARGS`.
     maximal_kwargs = _vllm_engine_kwargs([
         "--sampler=vllm",
         "--maxtext_model_name=qwen3.5-35b-a3b",
@@ -557,7 +610,7 @@ class RunRolloutNodeTest(absltest.TestCase):
     ])
     self.assertLessEqual(
         set(maximal_kwargs) - {"additional_config"},
-        run_rollout_node._FORBIDDEN_VLLM_CONFIG_JSON_KEYS,
+        run_rollout_node._FORBIDDEN_ROLLOUT_KWARGS,
     )
     self.assertLessEqual(
         {
@@ -570,8 +623,129 @@ class RunRolloutNodeTest(absltest.TestCase):
             "float32_gate_logits",
             "float32_logits",
         },
-        run_rollout_node._FORBIDDEN_MAXTEXT_CONFIG_JSON_KEYS,
+        run_rollout_node._FORBIDDEN_MAXTEXT_CONFIG_KEYS,
     )
+
+  def test_main_rpc_stop_callback_drains_worker_cleanly_or_exits_nonzero_on_abort(
+      self,
+  ):
+    context = mock.MagicMock()
+    mock_tokenizer = mock.MagicMock(pad_token_id=0, eos_token="<eos>")
+    mock_worker_service = mock.MagicMock(spec=rollout_worker.RolloutWorker)
+    mock_worker_service.trajectory_store = None
+    mock_sampler = mock.MagicMock()
+    mock_sampler.stop = mock.AsyncMock()
+    mock_worker_service.sampler = mock_sampler
+    registered_callbacks = []
+    mock_worker_service.set_on_stop.side_effect = registered_callbacks.append
+
+    mock_server = mock.MagicMock(
+        spec=remote_execution.GrpcRemoteExecutionServer
+    )
+    mock_server.start_serving_async = mock.AsyncMock()
+    mock_server.stop_serving = mock.AsyncMock()
+
+    with (
+        mock.patch.object(run_rollout_node.importlib, "import_module"),
+        mock.patch.object(otel_setup, "setup_metrics"),
+        mock.patch.object(gcs_cache, "restore_jax_cache", return_value=False),
+        mock.patch.object(
+            transformers.AutoTokenizer,
+            "from_pretrained",
+            return_value=mock_tokenizer,
+        ),
+        mock.patch.object(
+            run_rollout_node,
+            "_create_vllm_worker",
+            return_value=mock_worker_service,
+        ),
+        mock.patch.object(
+            remote_execution,
+            "GrpcRemoteExecutionServer",
+            return_value=mock_server,
+        ),
+    ):
+
+      shutdown_order: list[str] = []
+
+      async def _stop_serving(grace: float = 0.5):
+        self.assertEqual(grace, 5.0)
+        shutdown_order.append("server.stop_serving")
+
+      def _stop_worker():
+        shutdown_order.append("worker_service.stop")
+
+      async def _stop_sampler():
+        shutdown_order.append("sampler.stop")
+
+      mock_server.stop_serving = mock.AsyncMock(side_effect=_stop_serving)
+      mock_worker_service.stop.side_effect = _stop_worker
+      mock_sampler.stop = mock.AsyncMock(side_effect=_stop_sampler)
+
+      def _register_and_trigger_clean_stop(*, metadata):
+        del metadata
+        self.assertTrue(callable(registered_callbacks[0]))
+        registered_callbacks[0](False)
+
+      context.ipc.discovery.register.side_effect = (
+          _register_and_trigger_clean_stop
+      )
+      with mock.patch.dict(os.environ):
+        os.environ.pop("VLLM_WORKER_MULTIPROC_METHOD", None)
+        run_rollout_node.main(
+            [
+                "--sampler=inprocess_vllm",
+                "--port=20001",
+                "--worker_id=rollout-0",
+            ],
+            context=context,
+        )
+        self.assertEqual(
+            os.environ.get("VLLM_WORKER_MULTIPROC_METHOD"), "spawn"
+        )
+      self.assertIsNone(registered_callbacks[-1])
+      self.assertEqual(
+          shutdown_order,
+          ["server.stop_serving", "worker_service.stop", "sampler.stop"],
+      )
+      mock_server.stop_serving.assert_awaited_once_with(grace=5.0)
+
+      shutdown_order.clear()
+      mock_sampler.stop.reset_mock()
+      mock_server.stop_serving = mock.AsyncMock(
+          side_effect=RuntimeError("gRPC stop_serving failed")
+      )
+
+      def _stop_worker_and_fail():
+        shutdown_order.append("worker_service.stop")
+        raise RuntimeError("worker_service.stop failed")
+
+      mock_worker_service.stop = mock.MagicMock(
+          side_effect=_stop_worker_and_fail
+      )
+      registered_callbacks.clear()
+
+      def _register_and_trigger_abort_stop(*, metadata):
+        del metadata
+        self.assertTrue(callable(registered_callbacks[0]))
+        registered_callbacks[0](True)
+
+      context.ipc.discovery.register.side_effect = (
+          _register_and_trigger_abort_stop
+      )
+      with self.assertRaises(SystemExit) as cm:
+        run_rollout_node.main(
+            [
+                "--sampler=inprocess_vllm",
+                "--port=20001",
+                "--worker_id=rollout-0",
+            ],
+            context=context,
+        )
+      self.assertEqual(cm.exception.code, 1)
+      self.assertIsNone(registered_callbacks[-1])
+      mock_server.stop_serving.assert_awaited_once_with(grace=5.0)
+      self.assertEqual(shutdown_order, ["worker_service.stop", "sampler.stop"])
 
 
 if __name__ == "__main__":

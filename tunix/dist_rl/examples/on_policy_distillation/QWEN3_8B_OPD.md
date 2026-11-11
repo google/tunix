@@ -105,7 +105,7 @@ bash tunix/dist_rl/examples/recipes/run_gsm8k_opd_qwen3_8b_from_qwen3_32b.sh \
   --teacher-url http://teacher-host:30001
 ```
 
-The run directory must be new or empty. The entry point validates local artifacts and the remote teacher identity/context, records the resolved experiment configuration, and delegates to the existing distributed GSM8K launcher with explicit settings. It uses the invoking Python environment and does not select a different student or inherit the smoke recipe's two-step budget.
+The run directory must be new or empty. The entry point validates local artifacts and the remote teacher identity/context, records the resolved experiment configuration, and delegates to `math_gsm8k_dist/opd_launcher.sh` with explicit settings. This OPD entry point retains the environment-based configuration; the general GSM8K launcher uses the shared YAML launcher. It uses the invoking Python environment and the profile's fixed student and training budget.
 
 Execution order is:
 

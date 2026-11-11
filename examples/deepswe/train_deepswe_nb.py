@@ -891,17 +891,6 @@ base_rollout_dict = {
     "max_tokens_to_generate": MAX_RESPONSE_LENGTH,
 }
 
-sglang_jax_rollout_dict = {
-    "rollout_sglang_jax_model_version": MODEL_PATH,  # Uses local absolute path
-    "rollout_sglang_jax_mem_fraction_static": 0.9,
-    "rollout_sglang_jax_init_with_random_weights": True,
-    "rollout_sglang_jax_disable_radix_cache": False,
-    "rollout_sglang_jax_enable_deterministic_sampling": False,
-    "rollout_sglang_jax_chunked_prefill_size": 2048,
-    "rollout_sglang_jax_max_running_requests": MAX_CONCURRENCY,
-    "rollout_sglang_jax_page_size": 128,
-}
-
 vllm_rollout_dict = {
     "rollout_vllm_model_version": (
         tokenizer_path if MODEL_SOURCE == "maxtext" else MODEL_PATH
@@ -947,11 +936,7 @@ if MODEL_SOURCE == "maxtext":
     logging.info("Forced use_no_op_mappings=True on actor/reference models.")
 
 
-if ROLLOUT_ENGINE == "sglang_jax":
-  rollout_engine_config = base_rollout.RolloutConfig(
-      **base_rollout_dict, **sglang_jax_rollout_dict
-  )
-elif ROLLOUT_ENGINE == "vllm":
+if ROLLOUT_ENGINE == "vllm":
   os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
   # Currently, vllm does not support LoRA properly.
   if TRAIN_WITH_LORA:

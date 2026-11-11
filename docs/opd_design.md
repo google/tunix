@@ -33,7 +33,7 @@ The existing text RL pipeline provides trajectory collection, within-group rewar
 
 | Dimension | Supported scope |
 | --- | --- |
-| Orchestration entry points | `StandardRLProgram` and `GRPOAdapter` |
+| Orchestration entry points | `StandardRLProgram`, `GRPOConfig`, and `BatchConfig` |
 | Inputs and outputs | Text trajectories; the student generates text tokens |
 | Teacher deployment | External SGLang `/generate` scoring service |
 | Teacher objective | Frozen teacher with a sampled-token reverse-KL signal |
@@ -165,7 +165,7 @@ class StandardRLProgram:
     # Other existing arguments are omitted.
     def __init__(
         self,
-        algo: AlgorithmAdapter,
+        algo_config: AlgorithmConfig,
         *,
         opd_config: OnPolicyDistillationConfig | None = None,
         teacher_scorer: TeacherScorer | None = None,

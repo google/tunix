@@ -79,12 +79,15 @@ def validate(workload):
 
 
 def dist_launch(workload, output, model_dir):
-  command = [sys.executable, "-c", CHILD, str(output / "launched.json")]
-  return command, {
-      "STEPS": str(workload["steps"]),
-      "MODEL_DTYPE": "bfloat16",
-      "MODEL_LOAD_DTYPE": "float32",
-  }
+  command = [
+      sys.executable,
+      "-c",
+      CHILD,
+      str(output / "launched.json"),
+      "model_config.dtype=bfloat16",
+      "model_config.load_dtype=float32",
+  ]
+  return command, {"STEPS": str(workload["steps"])}
 
 
 def agentic_config(workload, model_dir):
@@ -176,7 +179,6 @@ class BenchmarkTest(unittest.TestCase):
             end=rollout_end,
             seconds=rollout_end - rollout_start,
             ok=True,
-            exact_token_continuity=True,
             environment_seconds=0.25,
             reward=1.0,
             turns=2,
@@ -284,7 +286,6 @@ class BenchmarkTest(unittest.TestCase):
             None,
         ),
         ("timeout", "timed-out", trajectory, None),
-        ("continuity", "exact token continuity", trajectory, None),
     ):
       with self.subTest(case=case):
         changed = copy.deepcopy(events)
@@ -292,8 +293,6 @@ class BenchmarkTest(unittest.TestCase):
           changed = [e for e in changed if not edit_events(e)]
         elif case == "timeout":
           next(filter(edit_events, changed))["status"] = "ENV_TIMEOUT"
-        elif case == "continuity":
-          next(filter(edit_events, changed))["exact_token_continuity"] = False
         write_events(self.path / "events.jsonl", changed)
         benchmark.write_json(
             self.path / "manifest.json",
@@ -413,7 +412,6 @@ class BenchmarkTest(unittest.TestCase):
     output.prompt_lengths = None
     self.assertEqual(runtime._generation_counts(output), (99, 4))
     engine = types.SimpleNamespace(
-        exact_token_continuity=True,
         env=types.SimpleNamespace(
             task={"policy_version": 1},
             extra_kwargs={"benchmark_policy_version": 3},
@@ -437,7 +435,6 @@ class BenchmarkTest(unittest.TestCase):
     self.assertEqual(
         fields,
         {
-            "exact_token_continuity": True,
             "turns": 2,
             "reward": 1.0,
             "status": "SUCCEEDED",

@@ -22,12 +22,17 @@ from absl.testing import absltest
 import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import lineage
-from tunix.dist_rl.orchestrator import algorithm_adapter
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.orchestrator import distributed_rl_engine
+from tunix.dist_rl.orchestrator import fault_tolerance_manager as fault_tolerance_manager_lib
+from tunix.dist_rl.orchestrator import lifecycle
 from tunix.dist_rl.orchestrator import rl_engine_interface
 from tunix.dist_rl.orchestrator import worker_registry
+from tunix.dist_rl.testing import worker_registry_testing
+from tunix.dist_rl.weight_sync import weight_sync_coordinator as weight_sync_coordinator_lib
 from tunix.dist_rl.worker import remote_execution
+from tunix.rl import algo_core
+from tunix.rl import algorithm_config
 
 
 class MockActorHandle(mock.MagicMock):
@@ -68,7 +73,7 @@ class MockActorHandle(mock.MagicMock):
     )
     self.weight_sync = mock.AsyncMock()
     self.fwd_bwd = mock.AsyncMock()
-    self.update = mock.AsyncMock()
+    self.update = mock.AsyncMock(return_value=(1, {}))
     self.prepare_weight_sync = mock.AsyncMock()
     self.release_weight_sync = mock.AsyncMock()
     self.pre_weight_sync = mock.AsyncMock()
@@ -114,37 +119,43 @@ class MockActorHandle(mock.MagicMock):
 
 
 class _FakeSyncResult:
-  """Minimal result object exposing a `policy_version` attribute."""
+  """Minimal result object exposing `policy_version` and `workers`."""
 
-  def __init__(self, policy_version: int):
+  def __init__(self, policy_version: int, workers=()):
     self.policy_version = policy_version
+    self.workers = tuple(workers)
 
 
 class _FakeWeightSyncCoordinator:
   """Records sync calls and echoes (or forces) the resulting policy version."""
 
-  def __init__(self, forced_version: int | None = None):
+  def __init__(self, forced_version: int | None = None, workers=()):
     self.calls: list[int] = []
+    self.kwargs_history: list[dict[str, object]] = []
     self._forced_version = forced_version
+    self._workers = tuple(workers)
 
   async def sync(self, policy_version: int = 0, **kwargs):
-    del kwargs
     self.calls.append(policy_version)
+    self.kwargs_history.append(kwargs)
     version = (
         policy_version if self._forced_version is None else self._forced_version
     )
-    return _FakeSyncResult(version)
+    return _FakeSyncResult(version, workers=self._workers)
 
 
 def _make_engine(
     *,
+    registry: worker_registry.WorkerRegistry | None = None,
     rollout_workers=(),
     trainer_workers=None,
     inference_workers=None,
     weight_sync_coordinator=None,
     fault_tolerance_config: datatypes.FaultToleranceConfig | None = None,
 ) -> distributed_rl_engine.DistributedRLEngine:
-  registry = worker_registry.WorkerRegistry()
+  registry = (
+      registry if registry is not None else worker_registry.WorkerRegistry()
+  )
   for idx, handle in enumerate(rollout_workers):
     registry.register_handle(
         f"rollout-{idx}", [datatypes.Role.ROLLOUT], handle
@@ -153,10 +164,17 @@ def _make_engine(
     registry.register_handle(f"trainer-{role}", [role], handle)
   for role, handle in (inference_workers or {}).items():
     registry.register_handle(f"inference-{role}", [role], handle)
+  for wid in registry.worker_ids():
+    worker_registry_testing.set_status(
+        registry, wid, worker_registry.AdmissionStatus.ACTIVE
+    )
+  ftm = fault_tolerance_manager_lib.FaultToleranceManager(
+      registry, config=fault_tolerance_config
+  )
   return distributed_rl_engine.DistributedRLEngine(
       registry=registry,
       weight_sync_coordinator=weight_sync_coordinator,
-      fault_tolerance_config=fault_tolerance_config,
+      fault_tolerance_manager=ftm,
   )
 
 
@@ -173,6 +191,7 @@ class DistributedRLEngineTest(absltest.TestCase):
         rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
         trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
         inference_workers={datatypes.Role.REFERENCE: self.mock_ref},
+        fault_tolerance_config=datatypes.FaultToleranceConfig(enabled=True),
     )
 
   def test_generate_load_balances_across_rollout_workers(self):
@@ -374,7 +393,7 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.mock_actor.fwd_bwd.return_value = datatypes.Response(
           metadata={"queued": True}
       )
-      self.mock_actor.update.return_value = 3
+      self.mock_actor.update.return_value = (3, {"loss": 0.25})
       mock_payload = mock.MagicMock(spec=datatypes.RLTrainerPayload)
       mock_payload.metadata = {}
 
@@ -391,6 +410,7 @@ class DistributedRLEngineTest(absltest.TestCase):
               "updated": True,
               "train_step": 3,
               "accumulated": True,
+              "metrics": {"loss": 0.25},
           },
       )
 
@@ -509,7 +529,7 @@ class DistributedRLEngineTest(absltest.TestCase):
         weight_sync_coordinator=coordinator,
     )
 
-  def test_resume_from_checkpoint_returns_step_and_resyncs_weights(self):
+  def test_resume_from_checkpoint_returns_step_without_syncing_rollouts(self):
     async def _run():
       self.mock_actor.restore_checkpoint.return_value = {
           "step": 3,
@@ -521,14 +541,12 @@ class DistributedRLEngineTest(absltest.TestCase):
       result = await engine.resume_from_checkpoint(role=datatypes.Role.ACTOR)
 
       self.assertEqual(result, 3)
-      # Engine aligns its own policy version and resyncs rollout weights.
+      # Engine aligns its own policy version; rollout sync is handled by
+      # `prepare_rollout_policy`.
       self.assertEqual(engine._policy_version, 3)
-      self.assertEqual(coordinator.calls, [3])
+      self.assertEqual(coordinator.calls, [])
       self.mock_actor.restore_checkpoint.assert_called_once_with(step=None)
-      self.mock_rollout_1.get_target_state.assert_called_once_with()
-      self.mock_actor.set_target_state.assert_called_once_with(
-          target_state={"params": 1}
-      )
+      self.mock_rollout_1.get_target_state.assert_not_called()
 
     asyncio.run(_run())
 
@@ -545,7 +563,7 @@ class DistributedRLEngineTest(absltest.TestCase):
       result = await engine.resume_from_checkpoint()
       self.assertEqual(result, 3)
       self.assertEqual(engine._policy_version, 3)
-      self.assertEqual(coordinator.calls, [3])
+      self.assertEqual(coordinator.calls, [])
 
     asyncio.run(_run())
 
@@ -563,7 +581,7 @@ class DistributedRLEngineTest(absltest.TestCase):
 
       self.assertEqual(result, 3)
       self.assertEqual(engine._policy_version, 3)
-      self.assertEqual(coordinator.calls, [3])
+      self.assertEqual(coordinator.calls, [])
 
     asyncio.run(_run())
 
@@ -586,7 +604,7 @@ class DistributedRLEngineTest(absltest.TestCase):
 
       self.assertEqual(result, 3)
       self.assertEqual(engine._policy_version, 5)
-      self.assertEqual(coordinator.calls, [5])
+      self.assertEqual(coordinator.calls, [])
       self.assertEqual(engine.restored_checkpoint_metadata, ckpt_meta)
 
     asyncio.run(_run())
@@ -619,45 +637,6 @@ class DistributedRLEngineTest(absltest.TestCase):
           self.assertEqual(coordinator.calls, [])
 
         asyncio.run(_run())
-
-  def test_resume_from_checkpoint_skips_resync_when_disabled(self):
-    async def _run():
-      self.mock_actor.restore_checkpoint.return_value = {
-          "step": 2,
-          "policy_version": 2,
-      }
-      coordinator = _FakeWeightSyncCoordinator()
-      engine = self._engine_with_coordinator(coordinator)
-
-      with self.assertLogs(level="WARNING") as logs:
-        result = await engine.resume_from_checkpoint(
-            resync_rollout_weights=False
-        )
-
-      self.assertEqual(result, 2)
-      self.assertEqual(engine._policy_version, 2)
-      self.assertEqual(coordinator.calls, [])
-      self.assertTrue(
-          any("base weights" in line for line in logs.output), logs.output
-      )
-
-    asyncio.run(_run())
-
-  def test_resume_from_checkpoint_raises_on_version_mismatch(self):
-    async def _run():
-      self.mock_actor.restore_checkpoint.return_value = {
-          "step": 3,
-          "policy_version": 3,
-      }
-      coordinator = _FakeWeightSyncCoordinator(forced_version=1)
-      engine = self._engine_with_coordinator(coordinator)
-
-      with self.assertRaisesRegex(
-          RuntimeError, "does not match synced version"
-      ):
-        await engine.resume_from_checkpoint()
-
-    asyncio.run(_run())
 
   def test_train_step_sends_only_the_request_to_fwd_bwd(self):
     async def _run():
@@ -733,6 +712,7 @@ class DistributedRLEngineTest(absltest.TestCase):
     async def _run():
       class _FakeResult:
         policy_version = 7
+        workers = ()
 
       class _FakeCoordinator:
 
@@ -740,6 +720,7 @@ class DistributedRLEngineTest(absltest.TestCase):
           self.calls = []
 
         async def sync(self, policy_version=0, **kwargs):
+          del kwargs
           self.calls.append(policy_version)
           _FakeResult.policy_version = policy_version
           return _FakeResult
@@ -761,6 +742,7 @@ class DistributedRLEngineTest(absltest.TestCase):
     async def _run():
       class _FakeResult:
         policy_version = 0
+        workers = ()
 
       class _FakeCoordinator:
 
@@ -810,6 +792,30 @@ class DistributedRLEngineTest(absltest.TestCase):
           datatypes.Role.CRITIC
       )
       self.mock_rollout_1.get_target_state.assert_not_called()
+
+    asyncio.run(_run())
+
+  def test_maybe_configure_trainer_target_state_uses_pending_weight_sync_worker(
+      self,
+  ):
+    async def _run():
+      engine = _make_engine(
+          rollout_workers=[self.mock_rollout_1],
+          trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+      )
+      worker_registry_testing.set_status(
+          engine._registry,
+          "rollout-0",
+          worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
+      )
+      self.assertEmpty(engine._rollout_handles())
+
+      await engine._maybe_configure_trainer_target_state(datatypes.Role.ACTOR)
+
+      self.mock_rollout_1.get_target_state.assert_called_once_with()
+      self.mock_actor.set_target_state.assert_called_once_with(
+          target_state={"params": 1}
+      )
 
     asyncio.run(_run())
 
@@ -878,11 +884,10 @@ class DistributedRLEngineTest(absltest.TestCase):
           for req in call.kwargs["requests"]
       ]
 
-      # Routing on the per-trajectory key must not send the whole group to one
-      # worker. The split is hash-determined, so assert both workers are used
-      # rather than an exact ratio.
-      self.assertNotEmpty(dispatched_1)
-      self.assertNotEmpty(dispatched_2)
+      # Per-prompt least-loaded striping spreads the 4 trajectories across both
+      # active workers.
+      self.assertLen(dispatched_1, 2)
+      self.assertLen(dispatched_2, 2)
 
       # No trajectory is dropped or duplicated.
       self.assertEqual(
@@ -896,8 +901,9 @@ class DistributedRLEngineTest(absltest.TestCase):
 
   def test_dispatch_routes_same_trajectory_to_same_worker(self):
     async def _run():
-      # Same (prompt_id, group_index) => same traj_id => same worker, so a
-      # redispatch lands where the trajectory's KV cache may still live.
+      # Within a single dispatch_rollout_requests call, duplicate traj_id
+      # entries bucket into the same trajectory unit and land on the same
+      # worker.
       def _req(request_id: str) -> datatypes.RolloutRequest:
         return datatypes.RolloutRequest(
             request_id=request_id,
@@ -922,11 +928,12 @@ class DistributedRLEngineTest(absltest.TestCase):
           for req in call.kwargs["requests"]
       ]
 
-      # Both dispatches resolve to the same worker; which one is hash-defined.
+      # Both requests in the batch resolve to the same least-loaded worker.
       landed = dispatched_1 or dispatched_2
       self.assertEqual(
           [r.request_id for r in landed], ["first", "retry"]
       )
+      self.assertEmpty(dispatched_2 if dispatched_1 else dispatched_1)
 
     asyncio.run(_run())
 
@@ -946,9 +953,7 @@ class DistributedRLEngineTest(absltest.TestCase):
       req_ids = await self.engine.dispatch_rollouts([req1, req2])
       self.assertEqual(req_ids, ["1", "2"])
 
-      # Delegation, not placement: both requests must reach a worker. Which
-      # worker is hash-defined, and two trajectories may legitimately collide
-      # onto the same one.
+      # Delegation check: both requests must reach active rollout workers.
       dispatched = [
           req
           for mock in (self.mock_rollout_1, self.mock_rollout_2)
@@ -1203,6 +1208,65 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.assertEqual(ctx1.tracking_id, "traj_prompt_42_g1")
       self.assertEqual(ctx1.parent_tracking_ids, ["prompt_42"])
       self.assertEqual(ctx1.events[0].attributes["group_index"], 1)
+
+    asyncio.run(_run())
+
+  def test_dispatch_rollouts_stamps_task_name_from_prompt(self):
+    async def _run():
+      req_ids = await self.engine.dispatch_rollouts(
+          [
+              {
+                  "prompt": "Solve 2+2",
+                  "prompt_id": "p_gsm",
+                  "task_name": "gsm8k",
+              },
+              {
+                  "prompt": "Fix repo",
+                  "prompt_id": "p_swe",
+                  "task_name": "deepswe",
+              },
+              {"prompt": "No task", "prompt_id": "p_unset"},
+          ],
+          num_generations=2,
+          policy_version=2,
+      )
+      self.assertLen(req_ids, 6)
+
+      requests = []
+      for call in self.mock_rollout_1.generate.call_args_list:
+        requests.extend(call.kwargs.get("requests", []))
+      for call in self.mock_rollout_2.generate.call_args_list:
+        requests.extend(call.kwargs.get("requests", []))
+      by_prompt: dict[str, list[datatypes.RolloutRequest]] = {}
+      for req in requests:
+        by_prompt.setdefault(str(req.prompt_id), []).append(req)
+
+      self.assertLen(by_prompt["p_gsm"], 2)
+      for req in by_prompt["p_gsm"]:
+        gsm_ctx = req.metadata["lineage"]
+        self.assertEqual(gsm_ctx.task_name, "gsm8k")
+        self.assertNotIn("task_name", gsm_ctx.events[0].attributes)
+
+      self.assertLen(by_prompt["p_swe"], 2)
+      for req in by_prompt["p_swe"]:
+        swe_ctx = req.metadata["lineage"]
+        self.assertEqual(swe_ctx.task_name, "deepswe")
+        self.assertNotIn("task_name", swe_ctx.events[0].attributes)
+
+      self.assertLen(by_prompt["p_unset"], 2)
+      for req in by_prompt["p_unset"]:
+        unset_ctx = req.metadata["lineage"]
+        self.assertEqual(unset_ctx.task_name, "")
+        self.assertNotIn("task_name", unset_ctx.events[0].attributes)
+
+    asyncio.run(_run())
+
+  def test_dispatch_rollouts_rejects_non_string_task_name(self):
+    async def _run():
+      with self.assertRaisesRegex(TypeError, "non-string 'task_name'"):
+        await self.engine.dispatch_rollouts(
+            [{"prompt": "p", "prompt_id": "p1", "task_name": 123}]
+        )
 
     asyncio.run(_run())
 
@@ -1574,20 +1638,16 @@ class DistributedRLEngineTest(absltest.TestCase):
       distributed_rl_engine._response_to_trajectory_item(item)
 
   def test_configure_worker_actor_configures_loss_and_gen_model_input_fn(self):
-    mock_algo = mock.MagicMock()
-    mock_algo.algo_config.use_rollout_logps = True
-    mock_algo.algo_config.routed_experts_encode_mode = "auto"
-    mock_algo.requires_reference_kl = False
-    mock_algo.has_critic = False
-    mock_loss = mock.MagicMock()
-    mock_gen_fn = mock.MagicMock()
+    algo_cfg = algorithm_config.GRPOConfig(
+        beta=0.0,
+        use_rollout_logps=True,
+        routed_experts_encode_mode="auto",
+    )
+    algo_cfg.temperature = 1.0
     mock_assembler = mock.MagicMock()
     mock_assembler.pad_id = 10
-    mock_assembler.eos_id = 20
     mock_dummy = mock.MagicMock()
     mock_assembler.build_dummy_payload.return_value = mock_dummy
-    mock_algo.loss_fn.return_value = mock_loss
-    mock_algo.build_gen_model_input_fn.return_value = mock_gen_fn
     parent = mock.MagicMock()
     parent.attach_mock(self.mock_actor.with_loss_fn, "with_loss_fn")
     parent.attach_mock(
@@ -1597,16 +1657,24 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     self.engine.configure_worker(
         role=datatypes.Role.ACTOR,
-        algo=mock_algo,
+        algo_config=algo_cfg,
         assembler=mock_assembler,
+        eos_id=20,
     )
 
     self.mock_actor.with_loss_fn.assert_called_once_with(
-        mock_loss, has_aux=True
+        algo_core.grpo_loss_fn, has_aux=True
     )
-    self.mock_actor.with_gen_model_input_fn.assert_called_once_with(mock_gen_fn)
-    mock_algo.build_gen_model_input_fn.assert_called_once_with(
-        pad_id=10, eos_id=20
+    self.mock_actor.with_gen_model_input_fn.assert_called_once()
+    gen_fn = self.mock_actor.with_gen_model_input_fn.call_args.args[0]
+    self.assertEqual(
+        gen_fn("batch"),
+        {
+            "train_example": "batch",
+            "algo_config": algo_cfg,
+            "pad_id": 10,
+            "eos_id": 20,
+        },
     )
     mock_assembler.build_dummy_payload.assert_called_once_with(
         with_old_per_token_logps=True,
@@ -1626,18 +1694,19 @@ class DistributedRLEngineTest(absltest.TestCase):
   def test_configure_worker_actor_forwards_non_fused_sampler_agreement_flags(
       self,
   ):
-    mock_algo = mock.MagicMock()
-    mock_algo.algo_config.use_rollout_logps = True
-    mock_algo.algo_config.sampler_is = "token"
-    mock_algo.algo_config.sampler_rs = None
-    mock_algo.requires_reference_kl = True
+    algo_cfg = algorithm_config.GRPOConfig(
+        beta=0.04,
+        use_rollout_logps=True,
+        sampler_is="token",
+        sampler_rs=None,
+    )
+    algo_cfg.temperature = 1.0
     mock_assembler = mock.MagicMock()
     mock_assembler.pad_id = 0
-    mock_assembler.eos_id = 1
 
     self.engine.configure_worker(
         role=datatypes.Role.ACTOR,
-        algo=mock_algo,
+        algo_config=algo_cfg,
         assembler=mock_assembler,
         can_fuse_agreement_in_loss=False,
     )
@@ -1654,12 +1723,14 @@ class DistributedRLEngineTest(absltest.TestCase):
   def test_configure_worker_actor_builds_routed_experts_dummy_from_assembler(
       self,
   ):
-    mock_algo = mock.MagicMock()
-    mock_algo.algo_config.use_rollout_logps = True
-    mock_algo.algo_config.sampler_is = None
-    mock_algo.algo_config.sampler_rs = None
-    mock_algo.algo_config.routed_experts_encode_mode = "uint10"
-    mock_algo.requires_reference_kl = False
+    algo_cfg = algorithm_config.GRPOConfig(
+        beta=0.0,
+        use_rollout_logps=True,
+        sampler_is=None,
+        sampler_rs=None,
+        routed_experts_encode_mode="uint10",
+    )
+    algo_cfg.temperature = 1.0
     assembler = batch_assembly.PaddedBatchAssembler(
         batch_size=2,
         max_prompt_length=4,
@@ -1671,7 +1742,7 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     self.engine.configure_worker(
         role=datatypes.Role.ACTOR,
-        algo=mock_algo,
+        algo_config=algo_cfg,
         assembler=assembler,
         return_routed_experts=True,
     )
@@ -1688,17 +1759,17 @@ class DistributedRLEngineTest(absltest.TestCase):
     )
 
   def test_configure_worker_actor_precompile_false_skips_compile(self):
-    mock_algo = mock.MagicMock()
-    mock_algo.algo_config.use_rollout_logps = True
-    mock_algo.requires_reference_kl = False
-    mock_algo.has_critic = False
+    algo_cfg = algorithm_config.GRPOConfig(
+        beta=0.0,
+        use_rollout_logps=True,
+    )
+    algo_cfg.temperature = 1.0
     mock_assembler = mock.MagicMock()
     mock_assembler.pad_id = 0
-    mock_assembler.eos_id = 1
 
     self.engine.configure_worker(
         role=datatypes.Role.ACTOR,
-        algo=mock_algo,
+        algo_config=algo_cfg,
         assembler=mock_assembler,
         precompile=False,
     )
@@ -1734,10 +1805,10 @@ class DistributedRLEngineTest(absltest.TestCase):
     asyncio.run(_run())
 
   def test_configure_worker_actor_raises_when_algo_none(self):
-    with self.assertRaisesRegex(ValueError, "algo is required"):
+    with self.assertRaisesRegex(ValueError, "algo_config is required"):
       self.engine.configure_worker(
           role=datatypes.Role.ACTOR,
-          algo=None,
+          algo_config=None,
           assembler=mock.MagicMock(),
       )
 
@@ -1745,76 +1816,96 @@ class DistributedRLEngineTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, "assembler is required"):
       self.engine.configure_worker(
           role=datatypes.Role.ACTOR,
-          algo=mock.MagicMock(),
+          algo_config=mock.MagicMock(),
           assembler=None,
       )
 
   def test_configure_worker_critic_configures_loss_and_gen_model_input_fn(self):
     mock_critic = MockActorHandle()
-    mock_algo = mock.MagicMock()
-    mock_loss = mock.MagicMock()
-    mock_gen_fn = mock.MagicMock()
+    algo_cfg = algorithm_config.PPOConfig()
+    algo_cfg.temperature = 1.0
     mock_assembler = mock.MagicMock()
     mock_assembler.pad_id = 5
-    mock_assembler.eos_id = 6
-    mock_algo.loss_fn.return_value = mock_loss
-    mock_algo.build_gen_model_input_fn.return_value = mock_gen_fn
 
     engine = _make_engine(
         rollout_workers=[self.mock_rollout_1],
         trainer_workers={datatypes.Role.CRITIC: mock_critic},
     )
+    with self.assertRaisesRegex(ValueError, "requires a PPOConfig"):
+      engine.configure_worker(
+          role=datatypes.Role.CRITIC,
+          algo_config=algorithm_config.GRPOConfig(),
+          assembler=mock_assembler,
+      )
     engine.configure_worker(
         role=datatypes.Role.CRITIC,
-        algo=mock_algo,
+        algo_config=algo_cfg,
         assembler=mock_assembler,
+        eos_id=6,
     )
 
-    mock_critic.with_loss_fn.assert_called_once_with(mock_loss, has_aux=True)
-    mock_critic.with_gen_model_input_fn.assert_called_once_with(mock_gen_fn)
-    mock_algo.build_gen_model_input_fn.assert_called_once_with(
-        pad_id=5, eos_id=6
+    mock_critic.with_loss_fn.assert_called_once_with(
+        algo_core.ppo_value_loss_fn, has_aux=True
+    )
+    mock_critic.with_gen_model_input_fn.assert_called_once()
+    gen_fn = mock_critic.with_gen_model_input_fn.call_args.args[0]
+    self.assertEqual(
+        gen_fn("batch"),
+        {
+            "train_example": "batch",
+            "clip_range_value": algo_cfg.clip_range_value,
+            "pad_id": 5,
+            "eos_id": 6,
+        },
     )
 
   def test_configure_worker_fallback_pad_and_eos_kwargs(self):
-    mock_algo = mock.MagicMock()
-    mock_loss = mock.MagicMock()
-    mock_gen_fn = mock.MagicMock()
-    mock_algo.loss_fn.return_value = mock_loss
-    mock_algo.build_gen_model_input_fn.return_value = mock_gen_fn
+    algo_cfg = algorithm_config.GRPOConfig()
+    algo_cfg.temperature = 1.0
 
     self.engine.configure_worker(
         role=datatypes.Role.ACTOR,
-        algo=mock_algo,
-        assembler=mock.MagicMock(spec=["build_dummy_payload"]),
+        algo_config=algo_cfg,
+        assembler=mock.MagicMock(
+            spec=["pad_id", "build_dummy_payload"], pad_id=0
+        ),
         pad_id=42,
         eos_id=43,
     )
 
-    mock_algo.build_gen_model_input_fn.assert_called_once_with(
-        pad_id=42, eos_id=43
+    gen_fn = self.mock_actor.with_gen_model_input_fn.call_args.args[0]
+    self.assertEqual(
+        gen_fn("batch"),
+        {
+            "train_example": "batch",
+            "algo_config": algo_cfg,
+            "pad_id": 42,
+            "eos_id": 43,
+        },
     )
 
   def test_configure_worker_raises_on_missing_worker(self):
-    mock_algo = mock.MagicMock()
+    algo_cfg = algorithm_config.GRPOConfig()
+    algo_cfg.temperature = 1.0
     with self.assertRaises(ValueError):
       self.engine.configure_worker(
           role=datatypes.Role.CRITIC,
-          algo=mock_algo,
+          algo_config=algo_cfg,
           assembler=mock.MagicMock(),
       )
 
   def test_configure_worker_rollout_and_reference(self):
-    mock_algo = mock.MagicMock()
+    algo_cfg = algorithm_config.GRPOConfig()
+    algo_cfg.temperature = 1.0
     mock_assembler = mock.MagicMock()
     self.engine.configure_worker(
         role=datatypes.Role.ROLLOUT,
-        algo=mock_algo,
+        algo_config=algo_cfg,
         assembler=mock_assembler,
     )
     self.engine.configure_worker(
         role=datatypes.Role.REFERENCE,
-        algo=mock_algo,
+        algo_config=algo_cfg,
         assembler=mock_assembler,
     )
 
@@ -1825,23 +1916,24 @@ class DistributedRLEngineTest(absltest.TestCase):
     with self.assertRaises(ValueError):
       engine_no_workers.configure_worker(
           role=datatypes.Role.ROLLOUT,
-          algo=mock_algo,
+          algo_config=algo_cfg,
           assembler=mock_assembler,
       )
     with self.assertRaises(ValueError):
       engine_no_workers.configure_worker(
           role=datatypes.Role.REFERENCE,
-          algo=mock_algo,
+          algo_config=algo_cfg,
           assembler=mock_assembler,
       )
 
   def test_configure_worker_unsupported_role(self):
-    mock_algo = mock.MagicMock()
+    algo_cfg = algorithm_config.GRPOConfig()
+    algo_cfg.temperature = 1.0
     mock_assembler = mock.MagicMock()
     with self.assertRaises(ValueError):
       self.engine.configure_worker(
           role="unsupported_role",
-          algo=mock_algo,
+          algo_config=algo_cfg,
           assembler=mock_assembler,
       )
 
@@ -1849,24 +1941,29 @@ class DistributedRLEngineTest(absltest.TestCase):
     self.assertIsInstance(self.engine, rl_engine_interface.AbstractRLEngine)
 
   def test_configure_worker_default_role_is_actor(self):
-    mock_algo = mock.MagicMock()
-    mock_loss = mock.MagicMock()
-    mock_gen_fn = mock.MagicMock()
-    mock_assembler = mock.MagicMock(pad_id=1, eos_id=2)
-    mock_algo.loss_fn.return_value = mock_loss
-    mock_algo.build_gen_model_input_fn.return_value = mock_gen_fn
+    algo_cfg = algorithm_config.GRPOConfig()
+    algo_cfg.temperature = 1.0
+    mock_assembler = mock.MagicMock(pad_id=1)
 
     self.engine.configure_worker(
-        algo=mock_algo,
+        algo_config=algo_cfg,
         assembler=mock_assembler,
+        eos_id=2,
     )
 
     self.mock_actor.with_loss_fn.assert_called_once_with(
-        mock_loss, has_aux=True
+        algo_core.grpo_loss_fn, has_aux=True
     )
-    self.mock_actor.with_gen_model_input_fn.assert_called_once_with(mock_gen_fn)
-    mock_algo.build_gen_model_input_fn.assert_called_once_with(
-        pad_id=1, eos_id=2
+    self.mock_actor.with_gen_model_input_fn.assert_called_once()
+    gen_fn = self.mock_actor.with_gen_model_input_fn.call_args.args[0]
+    self.assertEqual(
+        gen_fn("batch"),
+        {
+            "train_example": "batch",
+            "algo_config": algo_cfg,
+            "pad_id": 1,
+            "eos_id": 2,
+        },
     )
 
   def test_configure_worker_actor_raises_when_no_actor_worker(self):
@@ -1879,24 +1976,32 @@ class DistributedRLEngineTest(absltest.TestCase):
     ):
       engine.configure_worker(
           role=datatypes.Role.ACTOR,
-          algo=mock.MagicMock(),
+          algo_config=mock.MagicMock(),
           assembler=mock.MagicMock(),
       )
 
   def test_configure_worker_pad_and_eos_defaults(self):
-    mock_algo = mock.MagicMock()
-    mock_loss = mock.MagicMock()
-    mock_gen_fn = mock.MagicMock()
-    mock_algo.loss_fn.return_value = mock_loss
-    mock_algo.build_gen_model_input_fn.return_value = mock_gen_fn
+    algo_cfg = algorithm_config.GRPOConfig()
+    algo_cfg.temperature = 1.0
 
-    # 1. Zero defaults when neither assembler nor kwargs define pad/eos
+    # 1. Zero defaults when assembler defines pad_id=0 and kwargs omit pad/eos
     self.engine.configure_worker(
         role=datatypes.Role.ACTOR,
-        algo=mock_algo,
-        assembler=mock.MagicMock(spec=["build_dummy_payload"]),
+        algo_config=algo_cfg,
+        assembler=mock.MagicMock(
+            spec=["pad_id", "build_dummy_payload"], pad_id=0
+        ),
     )
-    mock_algo.build_gen_model_input_fn.assert_called_with(pad_id=0, eos_id=0)
+    gen_fn = self.mock_actor.with_gen_model_input_fn.call_args.args[0]
+    self.assertEqual(
+        gen_fn("batch"),
+        {
+            "train_example": "batch",
+            "algo_config": algo_cfg,
+            "pad_id": 0,
+            "eos_id": 0,
+        },
+    )
 
     # 2. eos_id defaults to pad_id when only pad_id is set on assembler
     mock_assembler_pad_only = mock.MagicMock(
@@ -1905,10 +2010,19 @@ class DistributedRLEngineTest(absltest.TestCase):
     mock_assembler_pad_only.pad_id = 7
     self.engine.configure_worker(
         role=datatypes.Role.ACTOR,
-        algo=mock_algo,
+        algo_config=algo_cfg,
         assembler=mock_assembler_pad_only,
     )
-    mock_algo.build_gen_model_input_fn.assert_called_with(pad_id=7, eos_id=7)
+    gen_fn = self.mock_actor.with_gen_model_input_fn.call_args.args[0]
+    self.assertEqual(
+        gen_fn("batch"),
+        {
+            "train_example": "batch",
+            "algo_config": algo_cfg,
+            "pad_id": 7,
+            "eos_id": 7,
+        },
+    )
 
   def test_poll_rollouts_does_not_block_on_slow_or_idle_worker(self):
     async def _run():
@@ -2009,6 +2123,9 @@ class DistributedRLEngineTest(absltest.TestCase):
       registry.register_handle(
           "rollout-late", [datatypes.Role.ROLLOUT], late_rollout
       )
+      worker_registry_testing.set_status(
+          registry, "rollout-late", worker_registry.AdmissionStatus.ACTIVE
+      )
 
       req_ids = await engine.dispatch_rollouts(
           [{"prompt": "p_late", "prompt_id": "p_late"}],
@@ -2040,6 +2157,7 @@ class DistributedRLEngineTest(absltest.TestCase):
           RuntimeError, "Rollout worker process crashed with OOM"
       ):
         await self.engine.poll_rollouts(timeout_s=1.0)
+      self.assertEmpty(self.engine._registry.handles(datatypes.Role.ROLLOUT))
 
     asyncio.run(_run())
 
@@ -2047,11 +2165,6 @@ class DistributedRLEngineTest(absltest.TestCase):
       self,
   ):
     async def _run():
-      engine = _make_engine(
-          rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
-          fault_tolerance_config=datatypes.FaultToleranceConfig(enabled=True),
-      )
-
       async def _crashing_poll(timeout_s=50.0):
         del timeout_s
         await asyncio.sleep(0.005)
@@ -2075,25 +2188,25 @@ class DistributedRLEngineTest(absltest.TestCase):
       # "prompt_1" routes initially to mock_rollout_1; when mock_rollout_1's
       # poll_responses raises RuntimeError, TaskSession evicts mock_rollout_1
       # from WorkerRegistry and retries the request on mock_rollout_2.
-      await engine.dispatch_rollouts(
+      await self.engine.dispatch_rollouts(
           [{"prompt": "p1", "prompt_id": "prompt_1"}],
           num_generations=1,
           policy_version=0,
       )
-      results = await engine.poll_rollouts(timeout_s=1.0)
+      results = await self.engine.poll_rollouts(timeout_s=1.0)
       await asyncio.sleep(0)
 
       self.assertLen(results, 1)
       self.assertEqual(results[0].prompt_id, "prompt_1")
       self.assertEqual(
-          engine._registry.handles(datatypes.Role.ROLLOUT),
+          self.engine._registry.handles(datatypes.Role.ROLLOUT),
           [self.mock_rollout_2],
       )
-      self.assertNotIn("rollout-0", engine._registry)
+      self.assertNotIn("rollout-0", self.engine._registry)
       self.mock_rollout_1.sync_close.assert_called_once()
       self.assertEqual(self.mock_rollout_1.generate.call_count, 1)
       self.assertEqual(self.mock_rollout_2.generate.call_count, 1)
-      await engine.close()
+      await self.engine.close()
 
     asyncio.run(_run())
 
@@ -2159,10 +2272,6 @@ class DistributedRLEngineTest(absltest.TestCase):
       self,
   ):
     async def _run():
-      engine = _make_engine(
-          rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
-          fault_tolerance_config=datatypes.FaultToleranceConfig(enabled=True),
-      )
       self.mock_rollout_1.generate.side_effect = ConnectionError(
           "rollout-0 connection refused on dispatch"
       )
@@ -2180,7 +2289,7 @@ class DistributedRLEngineTest(absltest.TestCase):
       )
       self.mock_rollout_2.poll_responses.return_value = [resp1]
 
-      req_ids = await engine.dispatch_rollouts(
+      req_ids = await self.engine.dispatch_rollouts(
           [{"prompt": "p1", "prompt_id": "prompt_1"}],
           num_generations=1,
           policy_version=0,
@@ -2189,68 +2298,18 @@ class DistributedRLEngineTest(absltest.TestCase):
 
       self.assertEqual(req_ids, ["req_prompt_1_g0_v0"])
       self.assertEqual(
-          engine._registry.handles(datatypes.Role.ROLLOUT),
+          self.engine._registry.handles(datatypes.Role.ROLLOUT),
           [self.mock_rollout_2],
       )
-      self.assertNotIn("rollout-0", engine._registry)
+      self.assertNotIn("rollout-0", self.engine._registry)
       self.mock_rollout_1.sync_close.assert_called_once()
       self.assertEqual(self.mock_rollout_1.generate.call_count, 1)
       self.assertEqual(self.mock_rollout_2.generate.call_count, 1)
 
-      results = await engine.poll_rollouts(timeout_s=0.5)
+      results = await self.engine.poll_rollouts(timeout_s=0.5)
       self.assertLen(results, 1)
       self.assertEqual(results[0].prompt_id, "prompt_1")
-      await engine.close()
-
-    asyncio.run(_run())
-
-  def test_fault_tolerance_session_wiring_defaults_and_enabled(self):
-    async def _run():
-      self.assertEqual(
-          datatypes._FT_OFF_DEFAULT_POLL_RETRY_BUDGET_S,
-          distributed_rl_engine.task_session.DEFAULT_POLL_RETRY_BUDGET_S,
-      )
-      default_engine = _make_engine(
-          rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
-      )
-      self.assertEqual(
-          default_engine._rollout_session._poll_retry_budget_s, 300.0
-      )
-      self.assertEqual(default_engine._rollout_session._max_task_retries, 0)
-      self.assertIsNone(default_engine._rollout_session._on_worker_unreachable)
-      await default_engine.close()
-
-      disabled_custom_budget_engine = _make_engine(
-          rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
-          fault_tolerance_config=datatypes.FaultToleranceConfig(
-              enabled=False, poll_retry_budget_s=15.0
-          ),
-      )
-      self.assertEqual(
-          disabled_custom_budget_engine._rollout_session._poll_retry_budget_s,
-          15.0,
-      )
-      self.assertEqual(
-          disabled_custom_budget_engine._rollout_session._max_task_retries, 0
-      )
-      self.assertIsNone(
-          disabled_custom_budget_engine._rollout_session._on_worker_unreachable
-      )
-      await disabled_custom_budget_engine.close()
-
-      enabled_engine = _make_engine(
-          rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
-          fault_tolerance_config=datatypes.FaultToleranceConfig(enabled=True),
-      )
-      self.assertEqual(
-          enabled_engine._rollout_session._poll_retry_budget_s, 60.0
-      )
-      self.assertEqual(enabled_engine._rollout_session._max_task_retries, 1)
-      self.assertEqual(
-          enabled_engine._rollout_session._on_worker_unreachable,
-          enabled_engine._on_worker_unreachable,
-      )
-      await enabled_engine.close()
+      await self.engine.close()
 
     asyncio.run(_run())
 
@@ -2281,6 +2340,1137 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.mock_rollout_1.sync_close.assert_not_called()
       self.assertEqual(self.mock_rollout_1.generate.call_count, 1)
       self.assertEqual(self.mock_rollout_2.generate.call_count, 0)
+      self.assertEqual(engine._rollout_session._poll_retry_budget_s, 300.0)
+      self.assertEqual(engine._rollout_session._max_task_retries, 0)
+      self.assertIsNone(engine._rollout_session._on_worker_unreachable)
+      await engine.close()
+
+      self.assertEqual(
+          datatypes._FT_OFF_DEFAULT_POLL_RETRY_BUDGET_S,
+          distributed_rl_engine.task_session.DEFAULT_POLL_RETRY_BUDGET_S,
+      )
+      disabled_custom_budget_engine = _make_engine(
+          rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
+          fault_tolerance_config=datatypes.FaultToleranceConfig(
+              enabled=False, poll_retry_budget_s=15.0
+          ),
+      )
+      self.assertEqual(
+          disabled_custom_budget_engine._rollout_session._poll_retry_budget_s,
+          15.0,
+      )
+      self.assertEqual(
+          disabled_custom_budget_engine._rollout_session._max_task_retries, 0
+      )
+      self.assertIsNone(
+          disabled_custom_budget_engine._rollout_session._on_worker_unreachable
+      )
+      await disabled_custom_budget_engine.close()
+
+      self.assertEqual(self.engine._rollout_session._poll_retry_budget_s, 60.0)
+      self.assertEqual(self.engine._rollout_session._max_task_retries, 1)
+      self.assertEqual(
+          self.engine._rollout_session._on_worker_unreachable,
+          self.engine._fault_tolerance_manager.on_worker_unreachable,
+      )
+
+    asyncio.run(_run())
+
+  def test_sync_weights_includes_pending_weight_sync_and_promotes_committed_workers(
+      self,
+  ):
+    async def _run():
+      mock_rollout_3 = MockActorHandle()
+      mock_rollout_rejoined = MockActorHandle()
+      old_aba_handle = MockActorHandle()
+      new_aba_handle = MockActorHandle()
+      coordinator = _FakeWeightSyncCoordinator(
+          workers=(
+              weight_sync_coordinator_lib.WorkerRoundReport(
+                  worker_id="rollout-0",
+                  phase="committed",
+                  handle=self.mock_rollout_1,
+              ),
+              weight_sync_coordinator_lib.WorkerRoundReport(
+                  worker_id="rollout-1",
+                  phase="committed",
+                  handle=self.mock_rollout_2,
+              ),
+              weight_sync_coordinator_lib.WorkerRoundReport(
+                  worker_id="rollout-2", phase="aborted", handle=mock_rollout_3
+              ),
+              weight_sync_coordinator_lib.WorkerRoundReport(
+                  worker_id="rollout-rejoined",
+                  phase="committed",
+                  handle=mock_rollout_rejoined,
+              ),
+              weight_sync_coordinator_lib.WorkerRoundReport(
+                  worker_id="rollout-pending-aba",
+                  phase="committed",
+                  handle=old_aba_handle,
+              ),
+              weight_sync_coordinator_lib.WorkerRoundReport(
+                  worker_id="rollout-evicted",
+                  phase="committed",
+                  handle=MockActorHandle(),
+              ),
+          )
+      )
+      engine = _make_engine(
+          rollout_workers=[
+              self.mock_rollout_1,
+              self.mock_rollout_2,
+              mock_rollout_3,
+          ],
+          trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+          weight_sync_coordinator=coordinator,
+          fault_tolerance_config=datatypes.FaultToleranceConfig(enabled=True),
+      )
+      # Register rollout-rejoined in REGISTERED status so we can verify that
+      # REGISTERED workers are not promoted by sync_weights().
+      engine._registry.register_handle(
+          "rollout-rejoined",
+          [datatypes.Role.ROLLOUT],
+          mock_rollout_rejoined,
+      )
+      # Simulate ABA on "rollout-pending-aba": the round committed on
+      # old_aba_handle, but new_aba_handle is now registered under the same
+      # worker_id in PENDING_WEIGHT_SYNC without having synced weights.
+      engine._registry.register_handle(
+          "rollout-pending-aba",
+          [datatypes.Role.ROLLOUT],
+          new_aba_handle,
+      )
+      worker_registry_testing.set_status(
+          engine._registry,
+          "rollout-pending-aba",
+          worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
+      )
+      worker_registry_testing.set_status(
+          engine._registry,
+          "rollout-1",
+          worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
+      )
+      worker_registry_testing.set_status(
+          engine._registry,
+          "rollout-2",
+          worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
+      )
+      self.assertEqual(engine._rollout_handles(), [self.mock_rollout_1])
+
+      version = await engine.sync_weights(policy_version=4)
+      self.assertEqual(version, 4)
+      self.assertEqual(
+          coordinator.kwargs_history[-1].get("destination_statuses"),
+          (
+              worker_registry.AdmissionStatus.ACTIVE,
+              worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
+          ),
+      )
+      self.assertEqual(
+          engine._registry.status("rollout-1"),
+          worker_registry.AdmissionStatus.ACTIVE,
+      )
+      self.assertEqual(
+          engine._registry.status("rollout-2"),
+          worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
+      )
+      # A worker in REGISTERED, ABA-replaced, or evicted must NOT be promoted
+      # to ACTIVE.
+      self.assertEqual(
+          engine._registry.status("rollout-rejoined"),
+          worker_registry.AdmissionStatus.REGISTERED,
+      )
+      self.assertEqual(
+          engine._registry.status("rollout-pending-aba"),
+          worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
+      )
+      self.assertNotIn("rollout-evicted", engine._registry)
+      self.assertEqual(
+          engine._rollout_handles(),
+          [self.mock_rollout_1, self.mock_rollout_2],
+      )
+      await engine.close()
+
+    asyncio.run(_run())
+
+  def test_engine_without_fault_tolerance_manager_uses_default_ft_config(
+      self,
+  ):
+    async def _run():
+      registry = worker_registry.WorkerRegistry()
+      registry.register_handle(
+          "rollout-0", [datatypes.Role.ROLLOUT], self.mock_rollout_1
+      )
+      worker_registry_testing.set_status(
+          registry, "rollout-0", worker_registry.AdmissionStatus.ACTIVE
+      )
+      registry.register_handle(
+          "rollout-1",
+          [datatypes.Role.ROLLOUT],
+          self.mock_rollout_2,
+      )
+      worker_registry_testing.set_status(
+          registry,
+          "rollout-1",
+          worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
+      )
+      coordinator = _FakeWeightSyncCoordinator(
+          workers=(
+              weight_sync_coordinator_lib.WorkerRoundReport(
+                  worker_id="rollout-1",
+                  phase="committed",
+                  handle=self.mock_rollout_2,
+              ),
+          )
+      )
+      engine = distributed_rl_engine.DistributedRLEngine(
+          registry=registry,
+          weight_sync_coordinator=coordinator,
+      )
+      self.assertIsNotNone(engine._fault_tolerance_manager)
+      self.assertTrue(engine._fault_tolerance_manager.config.enabled)
+      self.assertEqual(
+          engine._fault_tolerance_manager.config.min_active_rollout_ratio, 0.5
+      )
+      self.assertEqual(engine._rollout_session._poll_retry_budget_s, 60.0)
+      self.assertEqual(engine._rollout_session._max_task_retries, 1)
+      self.assertIsNotNone(engine._rollout_session._on_worker_unreachable)
+
+      await engine.sync_weights(policy_version=2)
+      self.assertEqual(
+          coordinator.kwargs_history[-1].get("destination_statuses"),
+          (
+              worker_registry.AdmissionStatus.ACTIVE,
+              worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
+          ),
+      )
+      self.assertEqual(
+          registry.status("rollout-1"),
+          worker_registry.AdmissionStatus.ACTIVE,
+      )
+      await engine.close()
+
+    asyncio.run(_run())
+
+  def test_train_step_overlaps_final_fwd_bwd_and_gates_update_on_prior_fwd_bwd(
+      self,
+  ):
+    """Verifies final MB overlaps fwd_bwd with prior MB and awaits prior before update."""
+    events: list[str] = []
+    mb0_fwd_bwd_entered = asyncio.Event()
+    mb1_fwd_bwd_finished = asyncio.Event()
+    release_mb0_fwd_bwd = asyncio.Event()
+
+    async def _fwd_bwd(request: datatypes.TrainRequest):
+      mb_idx = request.metadata["mb_idx"]
+      events.append(f"fwd_bwd_start_{mb_idx}")
+      if mb_idx == 0:
+        mb0_fwd_bwd_entered.set()
+        await asyncio.wait_for(release_mb0_fwd_bwd.wait(), timeout=5.0)
+      events.append(f"fwd_bwd_end_{mb_idx}")
+      if mb_idx == 1:
+        mb1_fwd_bwd_finished.set()
+      return {"mb_idx": mb_idx}
+
+    async def _update():
+      events.append("update")
+      return 1, {"loss": 0.1}
+
+    self.mock_actor.fwd_bwd.side_effect = _fwd_bwd
+    self.mock_actor.update.side_effect = _update
+
+    async def _run():
+      p0 = datatypes.RLTrainerPayload(
+          prompt_ids=np.zeros((1, 2), dtype=np.int32),
+          prompt_mask=np.ones((1, 2), dtype=np.float32),
+          completion_ids=np.zeros((1, 2), dtype=np.int32),
+          completion_mask=np.ones((1, 2), dtype=np.float32),
+          advantages=np.ones((1, 2), dtype=np.float32),
+          metadata={"mb_idx": 0},
+      )
+      p1 = datatypes.RLTrainerPayload(
+          prompt_ids=np.zeros((1, 2), dtype=np.int32),
+          prompt_mask=np.ones((1, 2), dtype=np.float32),
+          completion_ids=np.zeros((1, 2), dtype=np.int32),
+          completion_mask=np.ones((1, 2), dtype=np.float32),
+          advantages=np.ones((1, 2), dtype=np.float32),
+          metadata={"mb_idx": 1},
+      )
+      t0 = asyncio.create_task(
+          self.engine.train_step(
+              p0,
+              role=datatypes.Role.ACTOR,
+              accumulate_gradients=True,
+              apply_optimizer=False,
+          )
+      )
+      await asyncio.wait_for(mb0_fwd_bwd_entered.wait(), timeout=5.0)
+      t1 = asyncio.create_task(
+          self.engine.train_step(
+              p1,
+              role=datatypes.Role.ACTOR,
+              accumulate_gradients=True,
+              apply_optimizer=True,
+          )
+      )
+      # mb_1's fwd_bwd runs and finishes while mb_0's fwd_bwd is still running.
+      await asyncio.wait_for(mb1_fwd_bwd_finished.wait(), timeout=5.0)
+      await asyncio.sleep(0.01)
+      # update must NOT be called while mb_0's fwd_bwd is still in flight!
+      self.mock_actor.update.assert_not_called()
+
+      release_mb0_fwd_bwd.set()
+      res0, res1 = await asyncio.gather(t0, t1)
+      self.assertEqual(res0, {"mb_idx": 0})
+      self.assertEqual(
+          res1,
+          {
+              "fwd_bwd": {"mb_idx": 1},
+              "updated": True,
+              "train_step": 1,
+              "accumulated": True,
+              "metrics": {"loss": 0.1},
+          },
+      )
+      self.assertEmpty(self.engine._inflight_fwd_bwd[datatypes.Role.ACTOR])
+
+    asyncio.run(_run())
+    self.assertEqual(
+        events,
+        [
+            "fwd_bwd_start_0",
+            "fwd_bwd_start_1",
+            "fwd_bwd_end_1",
+            "fwd_bwd_end_0",
+            "update",
+        ],
+    )
+
+  def test_train_step_skips_update_when_prior_inflight_fwd_bwd_fails(self):
+    """Verifies failing prior fwd_bwd aborts final train_step before update."""
+    mb0_entered = asyncio.Event()
+    mb1_finished = asyncio.Event()
+
+    async def _fwd_bwd(request: datatypes.TrainRequest):
+      mb_idx = request.metadata["mb_idx"]
+      if mb_idx == 0:
+        mb0_entered.set()
+        await asyncio.wait_for(mb1_finished.wait(), timeout=5.0)
+        raise RuntimeError("corrupted bulk stripe on mb_0")
+      loop = asyncio.get_running_loop()
+      loop.call_soon(mb1_finished.set)
+      return {"mb_idx": mb_idx}
+
+    self.mock_actor.fwd_bwd.side_effect = _fwd_bwd
+
+    async def _run():
+      p0 = datatypes.RLTrainerPayload(
+          prompt_ids=np.zeros((1, 2), dtype=np.int32),
+          prompt_mask=np.ones((1, 2), dtype=np.float32),
+          completion_ids=np.zeros((1, 2), dtype=np.int32),
+          completion_mask=np.ones((1, 2), dtype=np.float32),
+          advantages=np.ones((1, 2), dtype=np.float32),
+          metadata={"mb_idx": 0},
+      )
+      p1 = datatypes.RLTrainerPayload(
+          prompt_ids=np.zeros((1, 2), dtype=np.int32),
+          prompt_mask=np.ones((1, 2), dtype=np.float32),
+          completion_ids=np.zeros((1, 2), dtype=np.int32),
+          completion_mask=np.ones((1, 2), dtype=np.float32),
+          advantages=np.ones((1, 2), dtype=np.float32),
+          metadata={"mb_idx": 1},
+      )
+      t0 = asyncio.create_task(
+          self.engine.train_step(
+              p0,
+              role=datatypes.Role.ACTOR,
+              accumulate_gradients=True,
+              apply_optimizer=False,
+          )
+      )
+      await asyncio.wait_for(mb0_entered.wait(), timeout=5.0)
+      t1 = asyncio.create_task(
+          self.engine.train_step(
+              p1,
+              role=datatypes.Role.ACTOR,
+              accumulate_gradients=True,
+              apply_optimizer=True,
+          )
+      )
+      with self.assertRaisesRegex(
+          RuntimeError, "corrupted bulk stripe on mb_0"
+      ):
+        await t0
+      with self.assertRaisesRegex(
+          RuntimeError, "corrupted bulk stripe on mb_0"
+      ):
+        await t1
+      self.mock_actor.update.assert_not_called()
+      self.assertEmpty(self.engine._inflight_fwd_bwd[datatypes.Role.ACTOR])
+
+    asyncio.run(_run())
+
+  def test_train_step_skips_update_when_prior_fails_early_or_cancels(self):
+    """Verifies early failure or cancellation of prior fwd_bwd blocks update."""
+    mb0_entered = asyncio.Event()
+
+    async def _fwd_bwd(request: datatypes.TrainRequest):
+      mb_idx = request.metadata["mb_idx"]
+      if mb_idx == 0:
+        raise RuntimeError("early mb_0 failure")
+      if mb_idx == 2:
+        mb0_entered.set()
+        await asyncio.sleep(10.0)
+      return {"mb_idx": mb_idx}
+
+    self.mock_actor.fwd_bwd.side_effect = _fwd_bwd
+
+    async def _run():
+      def _payload(idx: int) -> datatypes.RLTrainerPayload:
+        return datatypes.RLTrainerPayload(
+            prompt_ids=np.zeros((1, 2), dtype=np.int32),
+            prompt_mask=np.ones((1, 2), dtype=np.float32),
+            completion_ids=np.zeros((1, 2), dtype=np.int32),
+            completion_mask=np.ones((1, 2), dtype=np.float32),
+            advantages=np.ones((1, 2), dtype=np.float32),
+            metadata={"mb_idx": idx},
+        )
+
+      # Case 1: t0 fails completely BEFORE t1 (apply_optimizer=True) starts.
+      with self.assertRaisesRegex(RuntimeError, "early mb_0 failure"):
+        await self.engine.train_step(
+            _payload(0),
+            role=datatypes.Role.ACTOR,
+            accumulate_gradients=True,
+            apply_optimizer=False,
+        )
+      with self.assertRaisesRegex(RuntimeError, "early mb_0 failure"):
+        await self.engine.train_step(
+            _payload(1),
+            role=datatypes.Role.ACTOR,
+            accumulate_gradients=True,
+            apply_optimizer=True,
+        )
+      self.mock_actor.update.assert_not_called()
+      self.assertEmpty(self.engine._inflight_fwd_bwd[datatypes.Role.ACTOR])
+
+      # Case 2: prior fwd_bwd is cancelled while final train_step is in flight;
+      # final train_step raises RuntimeError (not raw CancelledError).
+      t_cancel = asyncio.create_task(
+          self.engine.train_step(
+              _payload(2),
+              role=datatypes.Role.ACTOR,
+              accumulate_gradients=True,
+              apply_optimizer=False,
+          )
+      )
+      await asyncio.wait_for(mb0_entered.wait(), timeout=5.0)
+      t_final = asyncio.create_task(
+          self.engine.train_step(
+              _payload(3),
+              role=datatypes.Role.ACTOR,
+              accumulate_gradients=True,
+              apply_optimizer=True,
+          )
+      )
+      t_cancel.cancel()
+      with self.assertRaises(asyncio.CancelledError):
+        await t_cancel
+      with self.assertRaisesRegex(
+          RuntimeError, "Prior in-flight fwd_bwd was cancelled"
+      ):
+        await t_final
+      self.mock_actor.update.assert_not_called()
+      self.assertEmpty(self.engine._inflight_fwd_bwd[datatypes.Role.ACTOR])
+
+    asyncio.run(_run())
+
+  def test_fault_tolerance_metrics_reports_fleet_gauges_and_counters(self):
+    async def _run():
+      registry = worker_registry.WorkerRegistry()
+      for idx in range(3):
+        bad_handle = MockActorHandle()
+        bad_handle.generate.side_effect = ConnectionError("dispatch failed")
+        registry.register_handle(
+            f"bad-{idx}", [datatypes.Role.ROLLOUT], bad_handle
+        )
+        worker_registry_testing.set_status(
+            registry, f"bad-{idx}", worker_registry.AdmissionStatus.ACTIVE
+        )
+
+      registry.register_handle(
+          "rollout-0", [datatypes.Role.ROLLOUT], self.mock_rollout_1
+      )
+      worker_registry_testing.set_status(
+          registry, "rollout-0", worker_registry.AdmissionStatus.ACTIVE
+      )
+
+      promoted_reports = []
+      for idx in range(4):
+        h_promote = MockActorHandle()
+        wid = f"rollout-promote-{idx}"
+        registry.register_handle(wid, [datatypes.Role.ROLLOUT], h_promote)
+        worker_registry_testing.set_status(
+            registry, wid, worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC
+        )
+        promoted_reports.append(
+            weight_sync_coordinator_lib.WorkerRoundReport(
+                worker_id=wid, phase="committed", handle=h_promote
+            )
+        )
+
+      coordinator = _FakeWeightSyncCoordinator(workers=promoted_reports)
+      mock_lifecycle = mock.MagicMock(
+          spec=lifecycle.LifecycleDriver,
+          bring_up_failures_total=6,
+      )
+      ftm = fault_tolerance_manager_lib.FaultToleranceManager(
+          registry,
+          config=datatypes.FaultToleranceConfig(
+              enabled=True, max_task_retries=1
+          ),
+          lifecycle_driver=mock_lifecycle,
+      )
+      engine = distributed_rl_engine.DistributedRLEngine(
+          registry=registry,
+          weight_sync_coordinator=coordinator,
+          fault_tolerance_manager=ftm,
+      )
+
+      # Drive TaskSession counters with `route_key=0` (selects lexicographically
+      # first ACTIVE worker):
+      # 1) `req_fail`: `bad-0` fails (eviction #1) -> retries on `bad-1`
+      #    (retry #1), which also fails (eviction #2) -> terminal failure #1.
+      with self.assertRaises(ConnectionError):
+        await engine._rollout_session.submit(
+            "req_fail", "generate", requests=[], route_key=0
+        )
+      # 2) `req_ok`: `bad-2` fails (eviction #3) -> retries on `rollout-0`
+      #    (retry #2), which accepts dispatch.
+      await engine._rollout_session.submit(
+          "req_ok", "generate", requests=[], route_key=0
+      )
+
+      await engine.sync_weights(policy_version=1)
+
+      for idx in range(7):
+        wid = f"rollout-pending-{idx}"
+        registry.register_handle(
+            wid, [datatypes.Role.ROLLOUT], MockActorHandle()
+        )
+        worker_registry_testing.set_status(
+            registry, wid, worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC
+        )
+      for idx in range(8):
+        registry.register_handle(
+            f"rollout-registered-{idx}",
+            [datatypes.Role.ROLLOUT],
+            MockActorHandle(),
+        )
+
+      self.assertEqual(
+          engine.fault_tolerance_metrics(),
+          {
+              "ft/rollout/task_unrecovered_total": 1.0,
+              "ft/rollout/task_retries_total": 2.0,
+              "ft/evictions_total/task_session": 3.0,
+              "ft/rejoin/promoted_total": 4.0,
+              "ft/fleet/rollout_active": 5.0,
+              "ft/fleet/rollout_active_ratio": 1.0,
+              "ft/rejoin/bring_up_failures_total": 6.0,
+              "ft/fleet/rollout_pending_weight_sync": 7.0,
+              "ft/fleet/rollout_registered": 8.0,
+          },
+      )
+      await engine.close()
+
+      minimal_engine = distributed_rl_engine.DistributedRLEngine(
+          registry=worker_registry.WorkerRegistry()
+      )
+      self.assertEqual(
+          minimal_engine.fault_tolerance_metrics(),
+          {
+              "ft/fleet/rollout_registered": 0.0,
+              "ft/fleet/rollout_pending_weight_sync": 0.0,
+              "ft/fleet/rollout_active": 0.0,
+              "ft/fleet/rollout_active_ratio": 1.0,
+              "ft/evictions_total/task_session": 0.0,
+              "ft/rollout/task_retries_total": 0.0,
+              "ft/rollout/task_unrecovered_total": 0.0,
+              "ft/rejoin/promoted_total": 0.0,
+              "ft/rejoin/bring_up_failures_total": 0.0,
+          },
+      )
+      await minimal_engine.close()
+
+    asyncio.run(_run())
+
+  def test_engine_enforces_rollout_capacity_floor_across_init_poll_and_sync(
+      self,
+  ):
+    async def _run():
+      registry = worker_registry.WorkerRegistry()
+      w0, w1 = MockActorHandle(), MockActorHandle()
+      for idx, handle in enumerate((w0, w1)):
+        wid = f"rollout-{idx}"
+        registry.register_handle(wid, [datatypes.Role.ROLLOUT], handle)
+        worker_registry_testing.set_status(
+            registry, wid, worker_registry.AdmissionStatus.ACTIVE
+        )
+
+      w1_q: asyncio.Queue[remote_execution.ExecutionResponse] = asyncio.Queue()
+
+      async def _w1_generate(*, requests):
+        req = requests[0]
+        w1_q.put_nowait(
+            remote_execution.ExecutionResponse(
+                request_id=req.request_id,
+                result=[
+                    datatypes.RolloutResponse(
+                        request_id=req.request_id,
+                        status="COMPLETED",
+                        payload=datatypes.TrajectoryItem(
+                            prompt_id=str(req.prompt_id),
+                            group_index=req.group_index,
+                            traj={
+                                "trajectory_reward": 1.0,
+                                "status": datatypes.TrajectoryStatus.SUCCEEDED,
+                            },
+                        ),
+                    )
+                ],
+            )
+        )
+
+      async def _w1_poll(timeout_s=50.0):
+        del timeout_s
+        return await w1_q.get()
+
+      w1.generate.side_effect = _w1_generate
+      w1.poll_responses.side_effect = _w1_poll
+      w0.poll_responses.side_effect = ConnectionError("w0 died on first poll")
+
+      now = [0.0]
+      ftm = fault_tolerance_manager_lib.FaultToleranceManager(
+          registry,
+          config=datatypes.FaultToleranceConfig(
+              enabled=True,
+              max_task_retries=1,
+              min_active_rollout_ratio=1.0,
+              min_active_rollout_grace_s=10.0,
+          ),
+      )
+      coordinator = _FakeWeightSyncCoordinator(workers=[])
+      with mock.patch.object(
+          fault_tolerance_manager_lib, "_monotonic", side_effect=lambda: now[0]
+      ):
+        engine = distributed_rl_engine.DistributedRLEngine(
+            registry=registry,
+            weight_sync_coordinator=coordinator,
+            fault_tolerance_manager=ftm,
+        )
+
+        # Dispatch 2 requests (1 to w0, 1 to w1). w0 is evicted during the first
+        # poll_rollouts() call; because __init__ seeded peak=2, poll_rollouts()
+        # observes 1/2 < 1.0 and starts the grace timer at t=0.0.
+        await engine.dispatch_rollout_requests([
+            datatypes.RolloutRequest(
+                request_id=f"req_{g}",
+                prompt="p",
+                prompt_id="p0",
+                group_index=g,
+            )
+            for g in range(2)
+        ])
+        completed: list[datatypes.TrajectoryItem] = []
+        while len(completed) < 2:
+          completed.extend(await engine.poll_rollouts(timeout_s=1.0))
+        self.assertLen(completed, 2)
+        self.assertEqual(
+            engine.fault_tolerance_metrics()["ft/fleet/rollout_active_ratio"],
+            0.5,
+        )
+
+        # Once the 10s grace window elapses without rejoin, sync_weights()
+        # raises RolloutCapacityError with the 1/2 active baseline intact.
+        now[0] = 10.0
+        with self.assertRaisesRegex(
+            fault_tolerance_manager_lib.RolloutCapacityError,
+            r"for 10\.0s \(grace 10\.0s\): 1/2 active \(0\.500 < 1\.000\)",
+        ):
+          await engine.sync_weights(policy_version=1)
+        await engine.close()
+
+    asyncio.run(_run())
+
+  def _bind_completion_queues(self, workers: list[MockActorHandle]):
+    queues = [
+        asyncio.Queue[remote_execution.ExecutionResponse]() for _ in workers
+    ]
+    for handle, response_q in zip(workers, queues, strict=True):
+
+      async def _poll(timeout_s=50.0, q=response_q):
+        del timeout_s
+        return await q.get()
+
+      handle.poll_responses.side_effect = _poll
+
+    def _enqueue_completions(worker_idx: int, count: int) -> None:
+      handle = workers[worker_idx]
+      for _ in range(count):
+        req_id = handle._dispatched_request_ids.popleft()
+        queues[worker_idx].put_nowait(
+            remote_execution.ExecutionResponse(
+                request_id=req_id,
+                result=[
+                    datatypes.RolloutResponse(
+                        request_id=req_id,
+                        status="COMPLETED",
+                        payload=datatypes.TrajectoryItem(
+                            prompt_id="done",
+                            group_index=0,
+                            traj={
+                                "trajectory_reward": 1.0,
+                                "status": datatypes.TrajectoryStatus.SUCCEEDED,
+                            },
+                        ),
+                    )
+                ],
+            )
+        )
+
+    return _enqueue_completions
+
+  def test_dispatch_rollout_requests_stripes_onto_least_loaded_workers(self):
+    async def _run():
+      workers = [MockActorHandle() for _ in range(4)]
+      enqueue_completions = self._bind_completion_queues(workers)
+      w0, w1, w2, w3 = workers
+      engine = _make_engine(rollout_workers=workers)
+
+      # Dispatch two 16-request groups so loads start at [8, 8, 8, 8], then
+      # complete 0 on w0, 8 on w1, 4 on w2, and 8 on w3 via poll_rollouts() to
+      # establish skewed active loads [8, 0, 4, 0] through public APIs.
+      for seed_idx in range(2):
+        await engine.dispatch_rollout_requests([
+            datatypes.RolloutRequest(
+                prompt=f"seed_{seed_idx}",
+                prompt_id=f"seed_prompt_{seed_idx}",
+                group_index=g,
+            )
+            for g in range(16)
+        ])
+      enqueue_completions(1, 8)
+      enqueue_completions(2, 4)
+      enqueue_completions(3, 8)
+      drained = 0
+      while drained < 20:
+        batch = await engine.poll_rollouts(timeout_s=1.0)
+        drained += len(batch)
+      self.assertEqual(drained, 20)
+      for handle in workers:
+        handle.generate.reset_mock()
+
+      reqs_p0 = [
+          datatypes.RolloutRequest(
+              prompt="p0",
+              prompt_id="deepswe_0",
+              group_index=g,
+          )
+          for g in range(16)
+      ]
+      await engine.dispatch_rollout_requests(reqs_p0)
+      # Active loads started at [8, 0, 4, 0]:
+      # - Stripe 0 (g=0..3) -> w1 (load 0 -> 4, rr_cursor=2)
+      # - Stripe 1 (g=4..7) -> w3 (load 0 -> 4, rr_cursor=0)
+      # - Stripe 2 (g=8..11) -> w1 (load 4 -> 8, tied [8,4,4,4], rr_cursor=0)
+      # - Stripe 3 (g=12..15) -> w2 (load 4 -> 8, tied [8,8,4,4], rr_cursor=2)
+      self.assertEqual(w0.generate.call_count, 0)
+      self.assertEqual(w1.generate.call_count, 8)
+      self.assertEqual(w2.generate.call_count, 4)
+      self.assertEqual(w3.generate.call_count, 4)
+
+      w1_group_indices = [
+          call.kwargs["requests"][0].group_index
+          for call in w1.generate.call_args_list
+      ]
+      w2_group_indices = [
+          call.kwargs["requests"][0].group_index
+          for call in w2.generate.call_args_list
+      ]
+      w3_group_indices = [
+          call.kwargs["requests"][0].group_index
+          for call in w3.generate.call_args_list
+      ]
+      self.assertEqual(w1_group_indices, [0, 1, 2, 3, 8, 9, 10, 11])
+      self.assertEqual(w3_group_indices, [4, 5, 6, 7])
+      self.assertEqual(w2_group_indices, [12, 13, 14, 15])
+
+      # Active loads are now [8, 8, 8, 4]; with G=4 on 4 workers, eff_stripe=1,
+      # so all 4 trajectories route to w3 (4 -> 5 -> 6 -> 7 -> 8).
+      reqs_p1 = [
+          datatypes.RolloutRequest(
+              prompt="p1",
+              prompt_id="deepswe_1",
+              group_index=g,
+          )
+          for g in range(4)
+      ]
+      await engine.dispatch_rollout_requests(reqs_p1)
+      self.assertEqual(w3.generate.call_count, 8)
+      await engine.close()
+
+    asyncio.run(_run())
+
+  def test_dispatch_rollout_requests_handles_remainder_stripe(self):
+    async def _run():
+      w0, w1 = MockActorHandle(), MockActorHandle()
+      engine = _make_engine(rollout_workers=[w0, w1])
+      # G=10 on 2 workers -> eff_stripe = min(4, 10 // 2) = 4:
+      # stripes [0, 1, 2, 3] -> w0 (load 4), [4, 5, 6, 7] -> w1 (load 4),
+      # and remainder [8, 9] -> w0 (load 6).
+      await engine.dispatch_rollout_requests([
+          datatypes.RolloutRequest(
+              prompt="p_rem",
+              prompt_id="prompt_rem",
+              group_index=g,
+          )
+          for g in range(10)
+      ])
+      w0_groups = [
+          call.kwargs["requests"][0].group_index
+          for call in w0.generate.call_args_list
+      ]
+      w1_groups = [
+          call.kwargs["requests"][0].group_index
+          for call in w1.generate.call_args_list
+      ]
+      self.assertEqual(w0_groups, [0, 1, 2, 3, 8, 9])
+      self.assertEqual(w1_groups, [4, 5, 6, 7])
+
+      # A follow-up G=2 prompt (eff_stripe=1) sends both requests to w1 (load
+      # 4 -> 5 -> 6) to balance w0's load of 6.
+      await engine.dispatch_rollout_requests([
+          datatypes.RolloutRequest(
+              prompt="p_next",
+              prompt_id="prompt_next",
+              group_index=g,
+          )
+          for g in range(2)
+      ])
+      self.assertEqual(w0.generate.call_count, 6)
+      self.assertEqual(w1.generate.call_count, 6)
+      await engine.close()
+
+    asyncio.run(_run())
+
+  def test_dispatch_rollout_requests_load_balances_small_groups(self):
+    async def _run():
+      pool4 = [MockActorHandle() for _ in range(4)]
+      engine = _make_engine(rollout_workers=pool4)
+      for p_idx in range(2):
+        await engine.dispatch_rollout_requests([
+            datatypes.RolloutRequest(
+                prompt=f"small_{p_idx}",
+                prompt_id=f"small_prompt_{p_idx}",
+                group_index=g,
+            )
+            for g in range(2)
+        ])
+      self.assertEqual([w.generate.call_count for w in pool4], [1, 1, 1, 1])
+      await engine.close()
+
+    asyncio.run(_run())
+
+  def test_dispatch_rollout_requests_persists_tie_break_cursor_across_completions(
+      self,
+  ):
+    async def _run():
+      workers = [MockActorHandle() for _ in range(4)]
+      enqueue_completions = self._bind_completion_queues(workers)
+      engine = _make_engine(rollout_workers=workers)
+
+      # Step 1: G=2 on 4 idle workers (eff_stripe=1) routes to w0 and w1,
+      # leaving _last_routed_actor=w1 (next cursor index=2 -> w2).
+      await engine.dispatch_rollout_requests([
+          datatypes.RolloutRequest(
+              prompt="p_a",
+              prompt_id="prompt_a",
+              group_index=g,
+          )
+          for g in range(2)
+      ])
+      self.assertEqual([w.generate.call_count for w in workers], [1, 1, 0, 0])
+
+      # Complete both tasks so active loads return to a 4-way tie [0, 0, 0, 0].
+      enqueue_completions(0, 1)
+      enqueue_completions(1, 1)
+      drained = 0
+      while drained < 2:
+        drained += len(await engine.poll_rollouts(timeout_s=1.0))
+      self.assertEqual(drained, 2)
+
+      # Step 2: G=1 with tied loads [0, 0, 0, 0] must resume at w2 (not reset
+      # to w0).
+      await engine.dispatch_rollout_requests([
+          datatypes.RolloutRequest(
+              prompt="p_b",
+              prompt_id="prompt_b",
+              group_index=0,
+          )
+      ])
+      self.assertEqual([w.generate.call_count for w in workers], [1, 1, 1, 0])
+
+      # Complete w2's task (loads [0, 0, 0, 0]) and verify a G=2 prompt wraps
+      # around onto w3 (g=0) and w0 (g=1).
+      enqueue_completions(2, 1)
+      self.assertLen(await engine.poll_rollouts(timeout_s=1.0), 1)
+      await engine.dispatch_rollout_requests([
+          datatypes.RolloutRequest(
+              prompt="p_c",
+              prompt_id="prompt_c",
+              group_index=g,
+          )
+          for g in range(2)
+      ])
+      self.assertEqual([w.generate.call_count for w in workers], [2, 1, 1, 1])
+      await engine.close()
+
+    asyncio.run(_run())
+
+  def test_dispatch_rollout_requests_tie_break_cursor_tracks_actor_identity_across_eviction(
+      self,
+  ):
+    async def _run():
+      registry = worker_registry.WorkerRegistry()
+      workers = [MockActorHandle() for _ in range(4)]
+      enqueue_completions = self._bind_completion_queues(workers)
+      w0, w1, w2, w3 = workers
+      engine = _make_engine(registry=registry, rollout_workers=workers)
+
+      # Route G=2 onto w0 and w1 (_last_routed_actor=w1), drain both tasks, and
+      # evict rollout-0 so live actors shift to [w1, w2, w3] at loads [0, 0, 0].
+      await engine.dispatch_rollout_requests([
+          datatypes.RolloutRequest(
+              prompt="p_init",
+              prompt_id="prompt_init",
+              group_index=g,
+          )
+          for g in range(2)
+      ])
+      enqueue_completions(0, 1)
+      enqueue_completions(1, 1)
+      drained = 0
+      while drained < 2:
+        drained += len(await engine.poll_rollouts(timeout_s=1.0))
+      self.assertEqual(drained, 2)
+      registry.unregister("rollout-0")
+
+      # Identity-based cursor resumes immediately after w1 onto w2 (rather than
+      # skipping w2 via a stale positional index=2 -> w3).
+      await engine.dispatch_rollout_requests([
+          datatypes.RolloutRequest(
+              prompt="p_after_evict",
+              prompt_id="prompt_after_evict",
+              group_index=0,
+          )
+      ])
+      self.assertEqual(
+          [w.generate.call_count for w in (w0, w1, w2, w3)], [1, 1, 1, 0]
+      )
+      await engine.close()
+
+    asyncio.run(_run())
+
+  def test_dispatch_rollout_requests_spreads_single_trajectory_prompts_evenly(
+      self,
+  ):
+    async def _run():
+      # 16 distinct G=1 prompts in one batch on 8 idle workers must spread
+      # evenly ([2] * 8) rather than packing 4 unrelated prompts onto 0..3.
+      pool8 = [MockActorHandle() for _ in range(8)]
+      engine = _make_engine(rollout_workers=pool8)
+      await engine.dispatch_rollout_requests([
+          datatypes.RolloutRequest(
+              prompt=f"p_{idx}",
+              prompt_id=f"prompt_{idx}",
+              group_index=0,
+          )
+          for idx in range(16)
+      ])
+      self.assertEqual([w.generate.call_count for w in pool8], [2] * 8)
+      await engine.close()
+
+    asyncio.run(_run())
+
+  def test_dispatch_rollout_requests_never_straddles_prompt_boundaries(self):
+    async def _run():
+      # 3 prompts with G=6 on 2 workers (_ROLLOUT_PROMPT_STRIPE_SIZE=4) must
+      # compute eff_stripe = min(4, 6 // 2) = 3 per prompt so stripes never
+      # straddle distinct prompt_ids.
+      w0, w1 = MockActorHandle(), MockActorHandle()
+      engine = _make_engine(rollout_workers=[w0, w1])
+      multi_reqs: list[datatypes.RolloutRequest] = []
+      for pid in ("alpha", "beta", "gamma"):
+        for g in range(6):
+          multi_reqs.append(
+              datatypes.RolloutRequest(
+                  prompt=f"text_{pid}",
+                  prompt_id=pid,
+                  group_index=g,
+              )
+          )
+      await engine.dispatch_rollout_requests(multi_reqs)
+      w0_pairs = [
+          (
+              call.kwargs["requests"][0].prompt_id,
+              call.kwargs["requests"][0].group_index,
+          )
+          for call in w0.generate.call_args_list
+      ]
+      w1_pairs = [
+          (
+              call.kwargs["requests"][0].prompt_id,
+              call.kwargs["requests"][0].group_index,
+          )
+          for call in w1.generate.call_args_list
+      ]
+      self.assertEqual(
+          w0_pairs,
+          [
+              ("alpha", 0),
+              ("alpha", 1),
+              ("alpha", 2),
+              ("beta", 0),
+              ("beta", 1),
+              ("beta", 2),
+              ("gamma", 0),
+              ("gamma", 1),
+              ("gamma", 2),
+          ],
+      )
+      self.assertEqual(
+          w1_pairs,
+          [
+              ("alpha", 3),
+              ("alpha", 4),
+              ("alpha", 5),
+              ("beta", 3),
+              ("beta", 4),
+              ("beta", 5),
+              ("gamma", 3),
+              ("gamma", 4),
+              ("gamma", 5),
+          ],
+      )
+      await engine.close()
+
+    asyncio.run(_run())
+
+  def test_dispatch_rollout_requests_eviction_spreads_retries_across_survivors(
+      self,
+  ):
+    async def _run():
+      trigger_crash = asyncio.Event()
+      registry = worker_registry.WorkerRegistry()
+      workers = [MockActorHandle() for _ in range(4)]
+      w0, w1, w2, w3 = workers
+      survivor_queues: dict[
+          MockActorHandle, asyncio.Queue[remote_execution.ExecutionResponse]
+      ] = {
+          w1: asyncio.Queue(),
+          w2: asyncio.Queue(),
+          w3: asyncio.Queue(),
+      }
+
+      for survivor, response_q in survivor_queues.items():
+
+        def _bind_survivor(
+            handle: MockActorHandle,
+            q: asyncio.Queue[remote_execution.ExecutionResponse],
+        ) -> None:
+          async def _generate(*, requests):
+            req = requests[0]
+            q.put_nowait(
+                remote_execution.ExecutionResponse(
+                    request_id=req.request_id,
+                    result=[
+                        datatypes.RolloutResponse(
+                            request_id=req.request_id,
+                            status="COMPLETED",
+                            payload=datatypes.TrajectoryItem(
+                                prompt_id=str(req.prompt_id),
+                                group_index=req.group_index,
+                                traj={
+                                    "trajectory_reward": 1.0,
+                                    "status": (
+                                        datatypes.TrajectoryStatus.SUCCEEDED
+                                    ),
+                                },
+                            ),
+                        )
+                    ],
+                )
+            )
+
+          async def _poll(timeout_s=50.0):
+            del timeout_s
+            return await q.get()
+
+          handle.generate.side_effect = _generate
+          handle.poll_responses.side_effect = _poll
+
+        _bind_survivor(survivor, response_q)
+
+      async def _crashing_poll(timeout_s=50.0):
+        del timeout_s
+        await trigger_crash.wait()
+        raise ConnectionError("rollout-0 crashed with active striped tasks")
+
+      w0.poll_responses.side_effect = _crashing_poll
+
+      engine = _make_engine(
+          registry=registry,
+          rollout_workers=workers,
+          fault_tolerance_config=datatypes.FaultToleranceConfig(
+              enabled=True, max_task_retries=1
+          ),
+      )
+
+      # G=32 on 4 workers places 8 trajectories on each worker (w0 receives
+      # g=0..3 and g=16..19 via preferred_actor=w0 while keeping
+      # route_key=req.traj_id).
+      await engine.dispatch_rollout_requests([
+          datatypes.RolloutRequest(
+              request_id=f"req_evict_g{g}",
+              prompt="p_evict",
+              prompt_id="prompt_evict",
+              group_index=g,
+          )
+          for g in range(32)
+      ])
+      self.assertEqual(w0.generate.call_count, 8)
+      before_eviction_counts = [w.generate.call_count for w in (w1, w2, w3)]
+      self.assertEqual(before_eviction_counts, [8, 8, 8])
+
+      trigger_crash.set()
+      completed: list[datatypes.TrajectoryItem] = []
+      while len(completed) < 32:
+        completed.extend(await engine.poll_rollouts(timeout_s=1.0))
+
+      self.assertLen(completed, 32)
+      self.assertEqual(
+          sorted(item.group_index for item in completed), list(range(32))
+      )
+      self.assertNotIn("rollout-0", registry)
+      retried_per_survivor = [
+          w.generate.call_count - 8 for w in (w1, w2, w3)
+      ]
+      self.assertEqual(sum(retried_per_survivor), 8)
+      # Retries hash distinct traj_id strings across all 3 survivors instead of
+      # collapsing all 8 orphaned tasks onto a single k % (N - 1) survivor.
+      self.assertTrue(all(count > 0 for count in retried_per_survivor))
       await engine.close()
 
     asyncio.run(_run())

@@ -17,7 +17,7 @@ class DummyModelCreatorTest(absltest.TestCase):
     config = config_fn()
     mesh = jax.make_mesh(*mesh_config, axis_types=(jax.sharding.AxisType.Auto,) * len(mesh_config[0]))
 
-    with mesh:
+    with jax.set_mesh(mesh):
       # pylint: disable=broad-exception-caught
       try:
         model = create_dummy_model(

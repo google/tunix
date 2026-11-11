@@ -15,6 +15,7 @@
 """Unit tests for universal Actor Model (`remote_execution.py`)."""
 
 import asyncio
+import concurrent.futures
 import contextlib
 import contextvars
 import socket
@@ -164,6 +165,17 @@ class _LockReturner:
 
   def get(self):
     return threading.Lock()  # not serializable by (cloud)pickle
+
+
+def _aio_rpc_error(code_name: str, details: str) -> Exception:
+  import grpc  # pylint: disable=g-import-not-at-top
+
+  return grpc.aio.AioRpcError(
+      getattr(grpc.StatusCode, code_name),
+      initial_metadata=grpc.aio.Metadata(),
+      trailing_metadata=grpc.aio.Metadata(),
+      details=details,
+  )
 
 
 class RemoteExecutionTest(parameterized.TestCase):
@@ -647,9 +659,7 @@ class RemoteExecutionTest(parameterized.TestCase):
 
     server = remote_lib.InProcessRemoteExecutionServer(ThrowingWorker())
     resp4 = server.execute_sync_request(
-        remote_lib.ExecutionRequest(
-            request_id="req_err_5", method_name="fail"
-        )
+        remote_lib.ExecutionRequest(request_id="req_err_5", method_name="fail")
     )
     self.assertEqual(resp4.error_type, "ValueError")
     self.assertEqual(resp4.error_message, "Intentional failure")
@@ -745,6 +755,86 @@ class RemoteExecutionTest(parameterized.TestCase):
       finally:
         asyncio.run(handle.close())  # tears down the persistent submit loop
 
+  def test_grpc_sync_submit_in_flight_aborts_cleanly_on_close(self):
+    entered = threading.Event()
+    release = threading.Event()
+
+    class _BlockingWorker:
+
+      async def block(self):
+        entered.set()
+        while not release.is_set():
+          await asyncio.sleep(0.01)
+        return "done"
+
+    port = portpicker.pick_unused_port()
+    with background_server(_BlockingWorker(), port):
+      handle = remote_lib.GrpcRemoteActorHandle(
+          target_address=f"grpc://localhost:{port}"
+      )
+      errors: list[BaseException] = []
+
+      def _call_submit() -> None:
+        try:
+          handle.submit("block")
+        except BaseException as exc:  # pylint: disable=broad-exception-caught
+          errors.append(exc)
+
+      caller = threading.Thread(target=_call_submit, daemon=True)
+      try:
+        caller.start()
+        self.assertTrue(entered.wait(timeout=5.0))
+        handle.sync_close()
+        caller.join(timeout=5.0)
+        self.assertFalse(caller.is_alive())
+        self.assertLen(errors, 1)
+        self.assertIsInstance(
+            errors[0],
+            (concurrent.futures.CancelledError, asyncio.CancelledError),
+        )
+        self.assertIsNone(handle._sync_loop)
+      finally:
+        release.set()
+        caller.join(timeout=5.0)
+
+  def test_grpc_handle_does_not_reopen_channels_after_close(self):
+    handle = remote_lib.GrpcRemoteActorHandle(
+        target_address=f"grpc://localhost:{portpicker.pick_unused_port()}"
+    )
+
+    async def _run():
+      await handle.close()
+      # A holder of an evicted handle must not resurrect a channel.
+      with self.assertRaisesRegex(RuntimeError, "is closed"):
+        await handle.asubmit("get_weight_sync_status")
+      with self.assertRaisesRegex(RuntimeError, "is closed"):
+        await handle.poll_responses(timeout_s=0.1)
+      self.assertIsNone(handle._channel)
+      await handle.close()  # Idempotent.
+
+    asyncio.run(_run())
+    with self.assertRaisesRegex(RuntimeError, "is closed"):
+      handle.submit("heartbeat")
+    self.assertIsNone(handle._sync_loop)
+
+  def test_grpc_handle_sync_close_in_running_loop_is_terminal_at_once(self):
+    handle = remote_lib.GrpcRemoteActorHandle(
+        target_address=f"grpc://localhost:{portpicker.pick_unused_port()}"
+    )
+
+    async def _run():
+      # Production evictions call `sync_close()` from the event loop, which
+      # only schedules `close()`; the handle must refuse RPCs before it runs.
+      handle.sync_close()
+      with self.assertRaisesRegex(RuntimeError, "is closed"):
+        await handle.asubmit("get_weight_sync_status")
+      self.assertIsNone(handle._channel)
+      await asyncio.gather(
+          *list(remote_lib._BACKGROUND_CLOSE_TASKS), return_exceptions=True
+      )
+
+    asyncio.run(_run())
+
   def test_grpc_options_tolerate_client_keepalive_pings(self):
     options = dict(network_lib._grpc_options())
     self.assertEqual(options["grpc.keepalive_time_ms"], 60000)
@@ -763,6 +853,29 @@ class RemoteExecutionTest(parameterized.TestCase):
     self.assertEqual(channel_options["grpc.keepalive_time_ms"], 60000)
     self.assertEqual(channel_options["grpc.keepalive_timeout_ms"], 60000)
     self.assertEqual(channel_options["grpc.max_reconnect_backoff_ms"], 10000)
+    self.assertEqual(channel_options["grpc.use_local_subchannel_pool"], 1)
+
+    server_options = dict(network_lib._grpc_server_options())
+    self.assertEqual(server_options["grpc.so_reuseport"], 0)
+
+  def test_grpc_server_rejects_duplicate_live_port_bind(self):
+    async def _run():
+      port = portpicker.pick_unused_port()
+      server1 = remote_lib.GrpcRemoteExecutionServer(
+          StubWorkerEngine("worker_bind_1")
+      )
+      server2 = remote_lib.GrpcRemoteExecutionServer(
+          StubWorkerEngine("worker_bind_2")
+      )
+      await server1.start_serving_async(port=port)
+      try:
+        with self.assertRaisesRegex(RuntimeError, "(?i)bind"):
+          await server2.start_serving_async(port=port)
+      finally:
+        await server2.stop_serving()
+        await server1.stop_serving()
+
+    asyncio.run(_run())
 
   def test_grpc_poll_responses_maps_unavailable_and_deadline_to_transient_error(
       self,
@@ -891,9 +1004,7 @@ class RemoteExecutionTest(parameterized.TestCase):
         restored_payload["strided_logps"], strided_view
     )
     np.testing.assert_array_equal(restored_payload["advantages"], advantages)
-    self.assertEqual(
-        restored_payload["metadata"], {"step": 7, "packed": True}
-    )
+    self.assertEqual(restored_payload["metadata"], {"step": 7, "packed": True})
     # Reconstructed arrays backed by released bytearrays must be writable.
     restored_payload["completion_ids"][0, 0] = 999
     self.assertEqual(restored_payload["completion_ids"][0, 0], 999)
@@ -948,9 +1059,7 @@ class RemoteExecutionTest(parameterized.TestCase):
         )
 
         # 2. Verify client-streaming dispatch + server-streaming poll
-        ack_id = await handle.dispatch_task(
-            "req_stream_1", "echo_batch", batch
-        )
+        ack_id = await handle.dispatch_task("req_stream_1", "echo_batch", batch)
         self.assertEqual(ack_id, "req_stream_1")
         polled = await handle.poll_responses(timeout_s=5.0)
         self.assertIsNotNone(polled)
@@ -1062,7 +1171,7 @@ class RemoteExecutionTest(parameterized.TestCase):
       self.assertNotEmpty(first_chunk)
       await stream.aclose()
 
-      # Subsequent poll must still receive the re-queued response
+      # The next poll does not ACK `req_requeue_1`, so the server resends it.
       recovered = await remote_lib.ExecutionResponse.deserialize_async_chunks(
           server._handle_poll_responses(b"", context=None)
       )
@@ -1535,6 +1644,7 @@ class RemoteExecutionTest(parameterized.TestCase):
     aux_bulk_server = network_lib._BulkTransferServer()
     aux_port = aux_bulk_server.start()
     try:
+
       async def _run():
         engine = StubWorkerEngine("worker_port_mismatch")
         port = portpicker.pick_unused_port()
@@ -1563,7 +1673,8 @@ class RemoteExecutionTest(parameterized.TestCase):
           handle._bulk_port = aux_port
           handle._seen_bulk_targets.add(("127.0.0.2", aux_port))
           with self.assertRaisesRegex(
-              ConnectionError, "Bulk push manifest port mismatch"
+              remote_lib.TransientTransportError,
+              "Bulk push manifest port mismatch",
           ):
             await handle.dispatch_task(
                 "req_mismatch_dt", "echo", {"tensor": arr}
@@ -2610,6 +2721,7 @@ class RemoteExecutionTest(parameterized.TestCase):
     bulk_server = network_lib._BulkTransferServer()
     port = bulk_server.start()
     try:
+
       async def _run():
         loop = asyncio.get_running_loop()
 
@@ -2828,6 +2940,7 @@ class RemoteExecutionTest(parameterized.TestCase):
     accept_thread.start()
 
     try:
+
       async def _run():
         # 1. Cancel _OP_PULL blocked on recv_into; use a real threading.Event
         # set in the finally block of _pull_stripe_sync (V6) to synchronize on
@@ -3015,9 +3128,12 @@ class RemoteExecutionTest(parameterized.TestCase):
 
       asyncio.run(_run())
     finally:
-      stall_listener.close()
+      network_lib._shutdown_and_close_socket(stall_listener)
+      for c in list(accepted_conns):
+        network_lib._shutdown_and_close_socket(c)
+      accept_thread.join(timeout=2.0)
       for c in accepted_conns:
-        c.close()
+        network_lib._shutdown_and_close_socket(c)
 
   def test_bulk_socket_pool_evicts_expired_idle_sockets_and_handles_fork(self):
     bulk_server = network_lib._BulkTransferServer()
@@ -3113,9 +3229,7 @@ class RemoteExecutionTest(parameterized.TestCase):
     # A1 regression test: non-host[:port] gRPC target schemes (e.g. dns:/// or
     # unix:) are rejected with a clear message when enable_bulk_transport=True,
     # and accepted when enable_bulk_transport=False.
-    with self.assertRaisesRegex(
-        ValueError, "pass enable_bulk_transport=False"
-    ):
+    with self.assertRaisesRegex(ValueError, "pass enable_bulk_transport=False"):
       remote_lib.GrpcRemoteActorHandle(
           "grpc://dns:///worker.ns.svc:50051", enable_bulk_transport=True
       )
@@ -3669,17 +3783,16 @@ class RemoteExecutionTest(parameterized.TestCase):
         heartbeat_threads.append(threading.current_thread())
         return "alive"
 
-      def pause_on_loop(self) -> bool:
-        _ = asyncio.get_running_loop()
-        if self._pause_event is None:
-          self._pause_event = asyncio.Event()
-        self._pause_event.set()
+      def pause(self) -> bool:
+        loop_threads.append(threading.current_thread())
+        asyncio.get_running_loop()
+        self._pause_event = asyncio.Event()
         return self._pause_event.is_set()
 
-      async def async_ping(self) -> str:
-        loop_threads.append(threading.current_thread())
-        await asyncio.sleep(0)
-        return "pong"
+      def resume(self) -> bool:
+        assert self._pause_event is not None
+        self._pause_event.set()
+        return self._pause_event.is_set()
 
     async def _run():
       async with running_grpc_server(_MixedWorker()) as (_, handle):
@@ -3688,17 +3801,17 @@ class RemoteExecutionTest(parameterized.TestCase):
         )
         await asyncio.to_thread(entered_compile.wait, 10.0)
         self.assertTrue(entered_compile.is_set())
-        # While @offload_to_thread blocking_compile is parked on the worker
-        # thread, unmarked sync heartbeat, unmarked loop-affine sync methods,
-        # and async coroutines must all complete promptly on the server loop.
+        # While blocking_compile is parked on the worker thread, undecorated
+        # heartbeat() and loop-affined pause()/resume() must still complete
+        # promptly on the gRPC server event loop thread.
         hb = await asyncio.wait_for(handle.asubmit("heartbeat"), timeout=2.0)
         self.assertEqual(hb, "alive")
-        paused = await asyncio.wait_for(
-            handle.asubmit("pause_on_loop"), timeout=2.0
+        self.assertFalse(
+            await asyncio.wait_for(handle.asubmit("pause"), timeout=2.0)
         )
-        self.assertTrue(paused)
-        pong = await asyncio.wait_for(handle.asubmit("async_ping"), timeout=2.0)
-        self.assertEqual(pong, "pong")
+        self.assertTrue(
+            await asyncio.wait_for(handle.asubmit("resume"), timeout=2.0)
+        )
         self.assertFalse(compile_task.done())
         release_compile.set()
         self.assertEqual(await compile_task, "compiled:step1")
@@ -3707,7 +3820,7 @@ class RemoteExecutionTest(parameterized.TestCase):
     self.assertLen(compile_threads, 1)
     self.assertLen(heartbeat_threads, 1)
     self.assertLen(loop_threads, 1)
-    self.assertIsNot(compile_threads[0], loop_threads[0])
+    self.assertIsNot(compile_threads[0], heartbeat_threads[0])
     self.assertIs(heartbeat_threads[0], loop_threads[0])
 
   def test_grpc_concurrent_offloaded_sync_methods_serialize_and_copy_contextvars(
@@ -3782,16 +3895,12 @@ class RemoteExecutionTest(parameterized.TestCase):
     async def _run():
       worker = _AwaitableReturningWorker()
       inproc_handle = create_in_process_handle(worker)
-      self.assertEqual(
-          await inproc_handle.asubmit("inline_coro_factory", 5), 6
-      )
+      self.assertEqual(await inproc_handle.asubmit("inline_coro_factory", 5), 6)
       self.assertEqual(
           await inproc_handle.asubmit("offloaded_coro_factory", 5), 15
       )
       async with running_grpc_server(worker) as (_, grpc_handle):
-        self.assertEqual(
-            await grpc_handle.asubmit("inline_coro_factory", 7), 8
-        )
+        self.assertEqual(await grpc_handle.asubmit("inline_coro_factory", 7), 8)
         self.assertEqual(
             await grpc_handle.asubmit("offloaded_coro_factory", 7), 17
         )
@@ -3926,6 +4035,801 @@ class RemoteExecutionTest(parameterized.TestCase):
       await asyncio.sleep(0)
       handle_err.close.assert_awaited_once()
       self.assertEmpty(remote_lib._BACKGROUND_CLOSE_TASKS)
+
+    asyncio.run(_run())
+
+  def test_grpc_default_runs_sync_off_loop_and_inprocess_runs_on_loop(self):
+    """Verifies gRPC runs @offload_to_thread sync methods off loop, InProcess inline."""
+    loop_threads: list[int] = []
+    sync_threads: list[int] = []
+    call_order: list[int] = []
+
+    class _SyncAndAsyncWorker:
+
+      async def get_loop_tid(self) -> int:
+        tid = threading.get_ident()
+        loop_threads.append(tid)
+        return tid
+
+      @remote_lib.offload_to_thread
+      def sync_op(self, x: int, payload: np.ndarray) -> int:
+        del payload
+        sync_threads.append(threading.get_ident())
+        call_order.append(x)
+        return x + 1
+
+    async def _run():
+      worker = _SyncAndAsyncWorker()
+      # 1. InProcessRemoteExecutionServer runs sync methods inline on loop.
+      inproc_server = remote_lib.InProcessRemoteExecutionServer(worker)
+      self.assertFalse(inproc_server._RUN_SYNC_METHODS_OFF_LOOP)
+      inproc_handle = remote_lib.InProcessActorHandle(inproc_server)
+      inproc_loop_tid = await inproc_handle.asubmit("get_loop_tid")
+      inproc_res = await inproc_handle.asubmit(
+          "sync_op", 9, np.ones((4,), dtype=np.int32)
+      )
+      self.assertEqual(inproc_res, 10)
+      self.assertEqual(sync_threads, [inproc_loop_tid])
+      self.assertIsNone(inproc_server._sync_executor)
+
+      # 2. GrpcRemoteExecutionServer runs sync methods off-loop by default.
+      sync_threads.clear()
+      call_order.clear()
+      port = portpicker.pick_unused_port()
+      server = remote_lib.GrpcRemoteExecutionServer(worker)
+      self.assertTrue(server._RUN_SYNC_METHODS_OFF_LOOP)
+      await server.start_serving_async(port)
+      handle = remote_lib.GrpcRemoteActorHandle(f"localhost:{port}")
+      try:
+        loop_tid = await handle.asubmit("get_loop_tid")
+        arr_0 = np.ones((1024,), dtype=np.int32)
+        arr_1 = np.ones((1024,), dtype=np.int32)
+        t0 = asyncio.create_task(handle.asubmit("sync_op", 0, arr_0))
+        t1 = asyncio.create_task(handle.asubmit("sync_op", 1, arr_1))
+        res0, res1 = await asyncio.gather(t0, t1)
+        self.assertEqual((res0, res1), (1, 2))
+        self.assertLen(sync_threads, 2)
+        self.assertLen(set(sync_threads), 1)
+        self.assertNotEqual(sync_threads[0], loop_tid)
+        self.assertCountEqual(call_order, [0, 1])
+        self.assertIsNotNone(server._sync_executor)
+      finally:
+        await handle.close()
+        await server.stop_serving(grace=0.0)
+
+    asyncio.run(_run())
+
+  def test_grpc_sync_worker_overlaps_network_transfer_and_deserialization(self):
+    """Verifies off-loop Trainer sync execution overlaps network and serde."""
+    events: list[str] = []
+    compute_threads: list[int] = []
+    mb0_compute_entered = threading.Event()
+    mb2_deserialized_on_server = threading.Event()
+
+    class _SyncTrainerStub:
+
+      @remote_lib.offload_to_thread
+      def fwd_bwd(self, mb_idx: int, payload: np.ndarray) -> dict[str, int]:
+        compute_threads.append(threading.get_ident())
+        events.append(f"compute_start_{mb_idx}")
+        if mb_idx == 0:
+          mb0_compute_entered.set()
+          # Wait until mb_2 has been transferred AND deserialized on the server
+          # while mb_0 is blocked inside synchronous fwd_bwd!
+          if not mb2_deserialized_on_server.wait(timeout=5.0):
+            raise TimeoutError(
+                "mb_2 was not deserialized on server while mb_0 was in fwd_bwd"
+            )
+        events.append(f"compute_end_{mb_idx}")
+        return {"mb_idx": mb_idx, "nbytes": int(payload.nbytes)}
+
+    orig_deserialize = remote_lib.ExecutionRequest.deserialize_async_chunks
+
+    async def _tracked_deserialize(chunks, **kwargs):
+      req = await orig_deserialize(chunks, **kwargs)
+      if req.method_name == "fwd_bwd":
+        mb_idx = int(req.args[0])
+        events.append(f"unpickled_{mb_idx}")
+        if mb_idx == 2:
+          mb2_deserialized_on_server.set()
+      return req
+
+    async def _run():
+      worker = _SyncTrainerStub()
+      port = portpicker.pick_unused_port()
+      server = remote_lib.GrpcRemoteExecutionServer(worker)
+      await server.start_serving_async(port)
+      handle = remote_lib.GrpcRemoteActorHandle(f"localhost:{port}")
+      try:
+        arr_0 = np.ones((512 * 1024,), dtype=np.int32)
+        arr_1 = np.ones((1024,), dtype=np.int32)
+        arr_2 = np.ones((1024,), dtype=np.int32)
+        with mock.patch.object(
+            remote_lib.ExecutionRequest,
+            "deserialize_async_chunks",
+            side_effect=_tracked_deserialize,
+        ):
+          t0 = asyncio.create_task(handle.asubmit("fwd_bwd", 0, arr_0))
+          await asyncio.to_thread(mb0_compute_entered.wait, 5.0)
+          t1 = asyncio.create_task(handle.asubmit("fwd_bwd", 1, arr_1))
+          t2 = asyncio.create_task(handle.asubmit("fwd_bwd", 2, arr_2))
+          res0, res1, res2 = await asyncio.gather(t0, t1, t2)
+        self.assertEqual(res0, {"mb_idx": 0, "nbytes": arr_0.nbytes})
+        self.assertEqual(res1, {"mb_idx": 1, "nbytes": arr_1.nbytes})
+        self.assertEqual(res2, {"mb_idx": 2, "nbytes": arr_2.nbytes})
+      finally:
+        await handle.close()
+        await server.stop_serving(grace=0.0)
+
+    asyncio.run(_run())
+    # All 3 synchronous calls ran on the same dedicated compute thread.
+    self.assertLen(compute_threads, 3)
+    self.assertLen(set(compute_threads), 1)
+    # mb_2 finished unpickling on the server BEFORE mb_0 finished compute.
+    self.assertLess(events.index("unpickled_2"), events.index("compute_end_0"))
+
+  def test_grpc_handle_send_lock_is_isolated_per_event_loop(self):
+    """Verifies submit() on background loop does not reset main _send_lock."""
+    stream_events: list[str] = []
+    first_stream_in_progress = asyncio.Event()
+    allow_first_stream_finish = asyncio.Event()
+
+    class _EchoWorker:
+
+      def heartbeat(self) -> str:
+        return "ok"
+
+      def send_mb(self, idx: int) -> int:
+        return idx
+
+    async def _run():
+      worker = _EchoWorker()
+      port = portpicker.pick_unused_port()
+      server = remote_lib.GrpcRemoteExecutionServer(worker)
+      await server.start_serving_async(port)
+      handle = remote_lib.GrpcRemoteActorHandle(f"localhost:{port}")
+      orig_prepare = handle._prepare_request_chunks
+
+      async def _instrumented_prepare(request, get_bulk_port_rpc, **kwargs):
+        bulk_port, raw_chunks = await orig_prepare(
+            request, get_bulk_port_rpc, **kwargs
+        )
+        if request.method_name != "send_mb":
+          return bulk_port, raw_chunks
+        mb_idx = int(request.args[0])
+
+        async def _tracked_chunks():
+          stream_events.append(f"stream_start_{mb_idx}")
+          if mb_idx == 0:
+            first_stream_in_progress.set()
+            await asyncio.wait_for(
+                allow_first_stream_finish.wait(), timeout=5.0
+            )
+          async for chunk in raw_chunks:
+            yield chunk
+          stream_events.append(f"stream_end_{mb_idx}")
+
+        return bulk_port, _tracked_chunks()
+
+      try:
+        with mock.patch.object(
+            handle, "_prepare_request_chunks", side_effect=_instrumented_prepare
+        ):
+          t0 = asyncio.create_task(handle.asubmit("send_mb", 0))
+          await asyncio.wait_for(first_stream_in_progress.wait(), timeout=5.0)
+          # Run a blocking submit("heartbeat") on another thread while t0 holds
+          # the main event loop's send_lock.
+          hb = await asyncio.to_thread(handle.submit, "heartbeat")
+          self.assertEqual(hb, "ok")
+          # Start t1 on the main event loop: it must wait for t0's stream to
+          # finish rather than acquiring a swapped-out lock!
+          t1 = asyncio.create_task(handle.asubmit("send_mb", 1))
+          await asyncio.sleep(0.02)
+          self.assertEqual(stream_events, ["stream_start_0"])
+          allow_first_stream_finish.set()
+          res0, res1 = await asyncio.gather(t0, t1)
+          self.assertEqual((res0, res1), (0, 1))
+      finally:
+        await handle.close()
+        await server.stop_serving(grace=0.0)
+
+    asyncio.run(_run())
+    self.assertEqual(
+        stream_events,
+        [
+            "stream_start_0",
+            "stream_end_0",
+            "stream_start_1",
+            "stream_end_1",
+        ],
+    )
+
+  def test_stop_serving_drains_active_and_cancels_queued_sync_executor_work(
+      self,
+  ):
+    """Verifies stop_serving awaits active sync call and cancels queued ones."""
+    call_events: list[str] = []
+    first_entered = threading.Event()
+    allow_first_exit = threading.Event()
+
+    class _SlowSyncWorker:
+
+      @remote_lib.offload_to_thread
+      def work(self, label: str) -> str:
+        call_events.append(f"start_{label}")
+        if label == "first":
+          first_entered.set()
+          allow_first_exit.wait(timeout=5.0)
+        call_events.append(f"end_{label}")
+        return label
+
+    async def _run():
+      worker = _SlowSyncWorker()
+      port = portpicker.pick_unused_port()
+      server = remote_lib.GrpcRemoteExecutionServer(worker)
+      await server.start_serving_async(port)
+      t_first = asyncio.create_task(
+          server.execute_request(
+              remote_lib.ExecutionRequest(method_name="work", args=("first",))
+          )
+      )
+      await asyncio.to_thread(first_entered.wait, 5.0)
+      t_second = asyncio.create_task(
+          server.execute_request(
+              remote_lib.ExecutionRequest(method_name="work", args=("second",))
+          )
+      )
+      await asyncio.sleep(0.01)
+
+      stop_task = asyncio.create_task(server.stop_serving(grace=0.0))
+      await asyncio.sleep(0.02)
+      # stop_serving must still be waiting because "first" has not exited yet.
+      self.assertFalse(stop_task.done())
+      allow_first_exit.set()
+      await stop_task
+      await asyncio.gather(t_first, t_second, return_exceptions=True)
+
+    asyncio.run(_run())
+    # "first" finished cleanly before stop_serving returned; "second" was
+    # cancelled in the queue and never started.
+    self.assertEqual(call_events, ["start_first", "end_first"])
+
+  def test_grpc_dispatch_task_maps_transient_errors_and_preserves_fatal_errors(
+      self,
+  ):
+    """Verifies dispatch_task maps transient RPC/bulk faults to TransientTransportError."""
+    import grpc  # pylint: disable=g-import-not-at-top
+
+    async def _run():
+      # 1. Closed/unreachable port -> UNAVAILABLE -> TransientTransportError.
+      closed_port = portpicker.pick_unused_port()
+      dead_handle = remote_lib.GrpcRemoteActorHandle(
+          target_address=f"grpc://localhost:{closed_port}",
+          rpc_timeout_s=1.0,
+      )
+      try:
+        with self.assertRaises(remote_lib.TransientTransportError) as cm:
+          await dead_handle.dispatch_task("req_unavail", "echo", "x")
+        self.assertIn("UNAVAILABLE", str(cm.exception))
+      finally:
+        await dead_handle.close()
+
+      # 2. Slow server dispatch -> DEADLINE_EXCEEDED -> TransientTransportError,
+      # and non-transient gRPC status (INTERNAL) -> AioRpcError (not transient).
+      engine = StubWorkerEngine("dispatch_err_worker")
+      async with running_grpc_server(engine, rpc_timeout_s=0.1) as (
+          _,
+          handle,
+      ):
+        hold_gate = asyncio.Event()
+        await handle._ensure_async_channel()
+
+        class _FakeAioRpcError(grpc.aio.AioRpcError):
+
+          def __init__(self, code, details):
+            super().__init__(
+                code,
+                initial_metadata=grpc.aio.Metadata(),
+                trailing_metadata=grpc.aio.Metadata(),
+                details=details,
+            )
+
+        async def _deadline_rpc(chunks, timeout=None):
+          del chunks, timeout
+          raise _FakeAioRpcError(
+              grpc.StatusCode.DEADLINE_EXCEEDED, "dispatch deadline exceeded"
+          )
+
+        async def _internal_rpc(chunks, timeout=None):
+          del chunks, timeout
+          raise _FakeAioRpcError(grpc.StatusCode.INTERNAL, "server bug")
+
+        async def _bulk_err_rpc(chunks, timeout=None):
+          del chunks, timeout
+          raise network_lib._BulkTransportError("bulk socket reset")
+
+        async def _blocking_rpc(chunks, timeout=None):
+          del chunks, timeout
+          await hold_gate.wait()
+          return "ack"
+
+        with mock.patch.object(
+            handle, "_dispatch_rpc", side_effect=_deadline_rpc
+        ):
+          with self.assertRaisesRegex(
+              remote_lib.TransientTransportError, "DEADLINE_EXCEEDED"
+          ):
+            await handle.dispatch_task("req_dl", "echo", "x")
+
+        with mock.patch.object(
+            handle, "_dispatch_rpc", side_effect=_internal_rpc
+        ):
+          with self.assertRaises(grpc.aio.AioRpcError) as internal_cm:
+            await handle.dispatch_task("req_int", "echo", "x")
+          self.assertNotIsInstance(
+              internal_cm.exception, remote_lib.TransientTransportError
+          )
+
+        handle._bulk_port = 12345
+        with mock.patch.object(
+            handle, "_dispatch_rpc", side_effect=_bulk_err_rpc
+        ):
+          with self.assertRaisesRegex(
+              remote_lib.TransientTransportError, "bulk socket reset"
+          ):
+            await handle.dispatch_task("req_bulk", "echo", "x")
+        self.assertIsNone(handle._bulk_port)
+
+        # When `_stream_bulk_push_chunks` catches a bulk TCP error, it sets
+        # `push_tracker.error` and re-raises into `grpc.aio`'s request-iterator
+        # consumer, which cancels the `StreamUnaryCall` (`_dispatch_rpc` raises
+        # `asyncio.CancelledError()` with `curr_task.cancelling() == 0`). That
+        # must still map to `TransientTransportError`.
+        dead_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        dead_sock.bind(("127.0.0.1", 0))
+        dead_bulk_port = int(dead_sock.getsockname()[1])
+        dead_sock.close()
+
+        async def _grpc_aio_iter_cancelled_rpc(chunks, timeout=None):
+          del timeout
+          try:
+            async for _ in chunks:
+              pass
+          except OSError as e:
+            raise asyncio.CancelledError() from e
+          return "ack"
+
+        handle._bulk_port = dead_bulk_port
+        with mock.patch.object(
+            handle, "_dispatch_rpc", side_effect=_grpc_aio_iter_cancelled_rpc
+        ):
+          with self.assertRaises(remote_lib.TransientTransportError):
+            await handle.dispatch_task(
+                "req_bulk_iter_err",
+                "echo",
+                {"tensor": np.ones(256 * 1024, dtype=np.int32)},
+            )
+        self.assertIsNone(handle._bulk_port)
+
+        # Caller task cancellation must re-raise CancelledError directly, even
+        # when cancelling an active bulk transfer aborts sockets and populates
+        # `push_tracker.error`.
+        with mock.patch.object(
+            handle, "_dispatch_rpc", side_effect=_blocking_rpc
+        ):
+          t = asyncio.create_task(
+              handle.dispatch_task("req_cancel", "echo", "x")
+          )
+          await asyncio.sleep(0.01)
+          t.cancel()
+          with self.assertRaises(asyncio.CancelledError):
+            await t
+
+        stall_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        stall_listener.bind(("127.0.0.1", 0))
+        stall_listener.listen(8)
+        stall_port = int(stall_listener.getsockname()[1])
+        accepted_conns: list[socket.socket] = []
+        push_accepted = threading.Event()
+
+        def _accept_loop() -> None:
+          while True:
+            try:
+              conn, _ = stall_listener.accept()
+              accepted_conns.append(conn)
+              push_accepted.set()
+            except OSError:
+              break
+
+        accept_thread = threading.Thread(target=_accept_loop, daemon=True)
+        accept_thread.start()
+        try:
+          handle._bulk_port = stall_port
+
+          async def _blocking_bulk_rpc(chunks, timeout=None):
+            del timeout
+            await anext(chunks)
+            await hold_gate.wait()
+            return "ack"
+
+          with mock.patch.object(
+              handle, "_dispatch_rpc", side_effect=_blocking_bulk_rpc
+          ):
+            bulk_payload = np.ones(256 * 1024, dtype=np.int32)
+            t_bulk = asyncio.create_task(
+                handle.dispatch_task(
+                    "req_cancel_bulk", "echo", {"tensor": bulk_payload}
+                )
+            )
+            self.assertTrue(await asyncio.to_thread(push_accepted.wait, 5.0))
+            t_bulk.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+              await t_bulk
+        finally:
+          stall_listener.close()
+          for conn in accepted_conns:
+            conn.close()
+          accept_thread.join(timeout=2.0)
+
+    asyncio.run(_run())
+
+  def test_dispatch_task_deduplicates_in_flight_request_ids(self):
+    """Duplicate dispatches execute once while in flight; none is cached."""
+    gate = asyncio.Event()
+    calls: list[str] = []
+
+    class _IdempotentWorker:
+
+      async def compute(self, label: str) -> str:
+        calls.append(label)
+        if label == "gated":
+          await gate.wait()
+        return f"done:{label}"
+
+    def _request(label: str) -> remote_lib.ExecutionRequest:
+      return remote_lib.ExecutionRequest(
+          request_id="req_dup", method_name="compute", args=(label,)
+      )
+
+    async def _run():
+      server = remote_lib.InProcessRemoteExecutionServer(_IdempotentWorker())
+
+      # 1. A retried dispatch (lost ACK) while the first is still running is
+      # acknowledged without executing again, and only one response is
+      # enqueued.
+      self.assertEqual(await server.dispatch_task(_request("gated")), "req_dup")
+      await asyncio.sleep(0.01)
+      self.assertEqual(await server.dispatch_task(_request("gated")), "req_dup")
+      self.assertEqual(calls, ["gated"])
+      gate.set()
+      resp = await server.poll_response(timeout_s=1.0)
+      assert resp is not None
+      self.assertEqual(
+          (resp.request_id, resp.unwrap()), ("req_dup", "done:gated")
+      )
+      self.assertIsNone(await server.poll_response(timeout_s=0.0))
+      self.assertEmpty(server._in_flight_requests)
+
+      # 2. Once delivered, the server keeps no per-request state: a later
+      # dispatch with the same ID executes again (the client drops the
+      # duplicate response), so reused IDs can never be black-holed.
+      self.assertEqual(await server.dispatch_task(_request("again")), "req_dup")
+      resp2 = await server.poll_response(timeout_s=1.0)
+      assert resp2 is not None
+      self.assertEqual(resp2.unwrap(), "done:again")
+      self.assertEqual(calls, ["gated", "again"])
+      self.assertEmpty(server._in_flight_requests)
+
+      # 3. On GrpcRemoteExecutionServer, `request_id` stays in
+      # `_in_flight_requests` while `_handle_poll_responses` is still streaming
+      # chunks, so an arriving retry mid-stream does not start a duplicate run.
+      grpc_server = remote_lib.GrpcRemoteExecutionServer(
+          _IdempotentWorker(), stream_chunk_bytes=16
+      )
+      self.assertEqual(
+          await grpc_server.dispatch_task(_request("streamed" * 8)), "req_dup"
+      )
+      await asyncio.sleep(0.01)
+      stream = grpc_server._handle_poll_responses(b"", context=None)
+      self.assertNotEmpty(await stream.__anext__())
+      self.assertIn("req_dup", grpc_server._in_flight_requests)
+      self.assertEqual(
+          await grpc_server.dispatch_task(_request("streamed" * 8)), "req_dup"
+      )
+      self.assertEqual(calls, ["gated", "again", "streamed" * 8])
+      await stream.aclose()
+      self.assertIn("req_dup", grpc_server._in_flight_requests)
+      delivered = await remote_lib.ExecutionResponse.deserialize_async_chunks(
+          grpc_server._handle_poll_responses(b"", context=None)
+      )
+      self.assertEqual(delivered.unwrap(), "done:" + "streamed" * 8)
+      self.assertEmpty(grpc_server._in_flight_requests)
+
+      # 4. A task that dies without enqueuing a response releases its ID, so a
+      # retry runs again instead of being acknowledged as a no-op forever.
+      with mock.patch.object(
+          server, "execute_request", side_effect=RuntimeError("boom")
+      ):
+        self.assertEqual(
+            await server.dispatch_task(_request("crash")), "req_dup"
+        )
+        await asyncio.sleep(0.01)
+      self.assertEmpty(server._in_flight_requests)
+
+    asyncio.run(_run())
+
+  def test_task_session_retries_reply_lost_grpc_dispatch_in_place(self):
+    """Real gRPC: a lost DispatchTask reply neither evicts nor re-executes."""
+
+    class _GatedEngine:
+
+      def __init__(self):
+        self.calls: list[str] = []
+        self.gate = asyncio.Event()
+
+      async def compute(self, label: str) -> str:
+        self.calls.append(label)
+        await self.gate.wait()
+        return f"done:{label}"
+
+    async def _run():
+      engine = _GatedEngine()
+      unreachable: list[remote_lib.ActorHandle] = []
+      async with running_grpc_server(engine) as (_, handle):
+        await handle._ensure_async_channel()
+        real_dispatch_rpc = handle._dispatch_rpc
+        lost_replies = 0
+
+        async def _lose_first_reply(chunks, **call_kwargs):
+          nonlocal lost_replies
+          ack = await real_dispatch_rpc(chunks, **call_kwargs)
+          if lost_replies == 0:
+            lost_replies += 1
+            raise _aio_rpc_error("UNAVAILABLE", "reply lost")
+          return ack
+
+        with mock.patch.object(
+            handle, "_dispatch_rpc", side_effect=_lose_first_reply
+        ):
+          async with task_session.TaskSession(
+              lambda: [handle],
+              poll_retry_initial_backoff_s=0.02,
+              poll_retry_max_backoff_s=0.02,
+              fault_tolerance_config=task_session.TaskSessionFaultToleranceConfig(
+                  max_task_retries=1,
+                  on_worker_unreachable=lambda a, e: unreachable.append(a),
+              ),
+          ) as session:
+            await session.submit("r1", "compute", "x")
+            engine.gate.set()
+            batch = await session.poll_completed(timeout_s=5.0)
+            self.assertEqual(batch, [("done:x", None)])
+            self.assertEqual(session.task_retries_total, 1)
+            self.assertEqual(session.stale_responses_total, 0)
+      self.assertEqual(lost_replies, 1)
+      # The retry was deduplicated by the server: executed exactly once.
+      self.assertEqual(engine.calls, ["x"])
+      self.assertEmpty(unreachable)
+
+    asyncio.run(_run())
+
+  def test_grpc_session_rpcs_map_peer_cancelled_to_transient_transport_error(
+      self,
+  ):
+    import grpc  # pylint: disable=g-import-not-at-top
+
+    async def _run():
+      hold_poll = False
+      poll_started = asyncio.Event()
+      release_poll = asyncio.Event()
+
+      async def _handle_dispatch(request_iterator, context):
+        async for _ in request_iterator:
+          pass
+        await context.abort(grpc.StatusCode.CANCELLED, "server shutting down")
+
+      async def _handle_poll(request_bytes, context):
+        del request_bytes
+        if hold_poll:
+          poll_started.set()
+          await release_poll.wait()
+          return
+        await context.abort(grpc.StatusCode.CANCELLED, "server shutting down")
+        yield b""  # pylint: disable=unreachable
+
+      port = portpicker.pick_unused_port()
+      server = grpc.aio.server()
+      server.add_generic_rpc_handlers((
+          grpc.method_handlers_generic_handler(
+              "tunix.ExecutionService",
+              {
+                  "DispatchTask": grpc.stream_unary_rpc_method_handler(
+                      _handle_dispatch,
+                      request_deserializer=lambda b: b,
+                      response_serializer=lambda b: b,
+                  ),
+                  "PollResponses": grpc.unary_stream_rpc_method_handler(
+                      _handle_poll,
+                      request_deserializer=lambda b: b,
+                      response_serializer=lambda b: b,
+                  ),
+              },
+          ),
+      ))
+      server.add_insecure_port(f"[::]:{port}")
+      await server.start()
+      handle = remote_lib.GrpcRemoteActorHandle(
+          target_address=f"grpc://localhost:{port}",
+          enable_bulk_transport=False,
+      )
+      try:
+        with self.assertRaisesRegex(
+            remote_lib.TransientTransportError, "CANCELLED"
+        ):
+          await handle.dispatch_task("r1", "compute", "x")
+        with self.assertRaisesRegex(
+            remote_lib.TransientTransportError, "CANCELLED"
+        ):
+          await handle.poll_responses(timeout_s=0.0)
+
+        hold_poll = True
+        poll_task = asyncio.create_task(handle.poll_responses(timeout_s=30.0))
+        await asyncio.wait_for(poll_started.wait(), timeout=5.0)
+        poll_task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+          await poll_task
+      finally:
+        release_poll.set()
+        await handle.close()
+        await server.stop(0)
+
+    asyncio.run(_run())
+
+  def test_poll_responses_redelivers_until_acknowledged(self):
+    async def _run():
+      engine = StubWorkerEngine("ack_worker", latency=0.0)
+      server = remote_lib.GrpcRemoteExecutionServer(engine)
+
+      async def _dispatch(req_id: str, arg: str) -> None:
+        await server.dispatch_task(
+            remote_lib.ExecutionRequest(req_id, "compute_trajectory", (arg,))
+        )
+
+      async def _poll(ack, client_id: str = "c1", timeout_s: float = 5.0):
+        payload = remote_lib.cloudpickle.dumps((timeout_s, client_id, ack))
+        return await remote_lib.ExecutionResponse.deserialize_async_chunks(
+            server._handle_poll_responses(payload, context=None),
+            allow_empty=True,
+        )
+
+      for i in (1, 2):
+        await _dispatch(f"req_{i}", f"p{i}")
+
+      first = await _poll(None)
+      assert first is not None and first.ack_id is not None
+      redelivered = await _poll(None)
+      assert redelivered is not None
+      self.assertEqual(
+          (redelivered.request_id, redelivered.ack_id),
+          (first.request_id, first.ack_id),
+      )
+      self.assertEqual(list(server._unacked_responses), [first.ack_id])
+
+      second = await _poll(first.ack_id)
+      assert second is not None and second.ack_id is not None
+      self.assertNotEqual(second.request_id, first.request_id)
+      self.assertEqual(list(server._unacked_responses), [second.ack_id])
+
+      # Reusing `second.request_id` executes again; if the poll carrying
+      # `ack=second.ack_id` drops in transit and retries with the same stale
+      # `ack`, `rerun` has a distinct `ack_id` and is resent instead of lost.
+      await _dispatch(second.request_id, "p_again")
+      rerun = await _poll(second.ack_id)
+      assert rerun is not None and rerun.ack_id is not None
+      rerun_retry = await _poll(second.ack_id, timeout_s=0.0)
+      assert rerun_retry is not None
+      self.assertEqual(rerun_retry.ack_id, rerun.ack_id)
+      self.assertIn("p_again", rerun_retry.unwrap())
+
+      # Resending `rerun` must not evict a newly started in-flight task that
+      # reuses `rerun.request_id`.
+      engine.latency = 10.0
+      await _dispatch(rerun.request_id, "in_flight")
+      self.assertIn(rerun.request_id, server._in_flight_requests)
+      await _poll(second.ack_id, timeout_s=0.0)
+      self.assertIn(rerun.request_id, server._in_flight_requests)
+
+      # A new handle (`client_id="c2"`) never inherits `"c1"`'s unacked item.
+      self.assertIsNone(await _poll(None, client_id="c2", timeout_s=0.0))
+      self.assertEmpty(server._unacked_responses)
+
+      # `stop_serving()` clears `_unacked_responses` and `_in_flight_requests`.
+      engine.latency = 0.0
+      await _dispatch("req_tail", "tail")
+      self.assertIsNotNone(await _poll(None, client_id="c2"))
+      self.assertNotEmpty(server._unacked_responses)
+      await server.stop_serving()
+      self.assertEmpty(server._unacked_responses)
+      self.assertEmpty(server._in_flight_requests)
+
+    asyncio.run(_run())
+
+  def test_task_session_recovers_poll_reply_lost_after_server_sent_it(self):
+    """Real gRPC: lost poll recovery, piggybacked ACK, stale dedup & flush."""
+
+    async def _run():
+      engine = StubWorkerEngine("ack_worker", latency=0.0)
+      async with running_grpc_server(engine) as (server, handle):
+        await handle._ensure_async_channel()
+        real_poll_rpc = handle._poll_rpc
+        poll_calls = 0
+        saved_first_chunks: list[bytes] = []
+
+        def _intercept_poll(request, **call_kwargs):
+          nonlocal poll_calls
+          poll_calls += 1
+          call_idx = poll_calls
+          if call_idx == 3:
+            # Inject a duplicate redelivery after `TaskSession` settled the
+            # first task to exercise `stale_responses_total`.
+            async def _replay():
+              for chunk in saved_first_chunks:
+                yield chunk
+
+            return _replay()
+          call = real_poll_rpc(request, **call_kwargs)
+
+          async def _chunks():
+            chunks = [chunk async for chunk in call]
+            if call_idx == 1:
+              raise _aio_rpc_error(
+                  "UNAVAILABLE", "connection dropped after the final frame"
+              )
+            if call_idx == 2:
+              saved_first_chunks.extend(chunks)
+            for chunk in chunks:
+              yield chunk
+
+          return _chunks()
+
+        with mock.patch.object(
+            handle, "_poll_rpc", side_effect=_intercept_poll
+        ):
+          async with task_session.TaskSession(
+              lambda: [handle],
+              poll_retry_initial_backoff_s=0.02,
+              poll_retry_max_backoff_s=0.02,
+          ) as session:
+            await session.submit("r1", "compute_trajectory", "p1")
+            await session.submit("r2", "compute_trajectory", "p2")
+            completed = []
+            while len(completed) < 2:
+              completed.extend(await session.poll_completed(timeout_s=5.0))
+            self.assertEqual([err for _, err in completed], [None, None])
+            outputs = [out for out, _ in completed]
+            self.assertTrue(any("p1" in out for out in outputs))
+            self.assertTrue(any("p2" in out for out in outputs))
+            self.assertEqual(session.stale_responses_total, 1)
+
+        self.assertEqual(engine.call_count, 2)
+        # Polling the 2nd response piggybacked `ack_id=1`, leaving only `[2]`.
+        self.assertEqual(list(server._unacked_responses), [2])
+
+        # A separate handle sending `x-tunix-poll-ack` must not wipe `handle`'s
+        # unacked state, while `dispatch_task` and `asubmit` on `handle` do.
+        probe = remote_lib.GrpcRemoteActorHandle(handle.target_address)
+        probe._last_ack_id = 2
+        try:
+          await probe.asubmit("get_status")
+        finally:
+          await probe.close()
+        self.assertEqual(list(server._unacked_responses), [2])
+        await handle.dispatch_task("r3", "compute_trajectory", "p3")
+        self.assertEmpty(server._unacked_responses)
+        self.assertIsNotNone(await handle.poll_responses(timeout_s=5.0))
+        self.assertEqual(list(server._unacked_responses), [3])
+        await handle.asubmit("get_status")
+        self.assertEmpty(server._unacked_responses)
 
     asyncio.run(_run())
 

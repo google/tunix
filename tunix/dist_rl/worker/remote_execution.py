@@ -41,6 +41,7 @@ import contextvars
 import functools
 import inspect
 import pickle
+import signal
 import threading
 import time
 import traceback as traceback_lib
@@ -48,11 +49,13 @@ from typing import (
     Any,
     AsyncIterable,
     AsyncIterator,
+    Awaitable,
     Callable,
     Dict,
     Iterable,
     Iterator,
     List,
+    Mapping,
     NoReturn,
     Optional,
     Sequence,
@@ -61,6 +64,8 @@ from typing import (
     TypeVar,
     Union,
 )
+import uuid
+import weakref
 
 from absl import logging
 import cloudpickle
@@ -83,6 +88,7 @@ is_bulk_lz4_enabled = network.is_bulk_lz4_enabled
 set_bulk_lz4_enabled = network.set_bulk_lz4_enabled
 
 _BULK_CAPABILITY_METADATA = (("x-tunix-bulk", "1"),)
+_POLL_ACK_METADATA_KEY = "x-tunix-poll-ack"
 OFFLOAD_TO_THREAD_ATTR = "_tunix_offload_to_thread"
 _F = TypeVar("_F", bound=Callable[..., Any])
 
@@ -221,6 +227,7 @@ class ExecutionResponse:
       traceback: Optional[str] = None,
       retryable: bool = False,
       request_id: Optional[str] = None,
+      ack_id: Optional[int] = None,
   ):
     self.result = result
     self.error_message = error_message
@@ -228,6 +235,7 @@ class ExecutionResponse:
     self.traceback = traceback
     self.retryable = retryable
     self.request_id = request_id
+    self.ack_id = ack_id
 
   def _as_tuple(self) -> Tuple[Any, ...]:
     return (
@@ -237,6 +245,7 @@ class ExecutionResponse:
         self.traceback,
         self.retryable,
         self.request_id,
+        self.ack_id,
     )
 
   def _record_serialization_error(self, e: Exception) -> None:
@@ -366,11 +375,56 @@ class ExecutionResponse:
 class RemoteExecutionServer(abc.ABC):
   """Daemon that binds a target domain object and executes method calls dynamically."""
 
+  _RUN_SYNC_METHODS_OFF_LOOP: bool = False
+
   def __init__(self, instance: Optional[Any] = None):
     self._instance: Optional[Any] = instance
     self._response_queue: Optional[asyncio.Queue[ExecutionResponse]] = None
     self._request_counter: int = 0
+    # Request IDs accepted by `dispatch_task` whose response has not yet been
+    # delivered to a poller, mapped to their execution task; a duplicate
+    # dispatch of one of these (a client retry after a lost ACK) is
+    # acknowledged without executing it again.
+    self._in_flight_requests: Dict[str, asyncio.Task[None]] = {}
     self._background_tasks: set[asyncio.Task[Any]] = set()
+    self._sync_executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
+    self._sync_executor_lock = threading.Lock()
+    self._stopped: bool = False
+
+  def _get_sync_executor(self) -> concurrent.futures.ThreadPoolExecutor:
+    with self._sync_executor_lock:
+      if self._stopped:
+        raise RuntimeError(f"{type(self).__name__} is stopped.")
+      if self._sync_executor is None:
+        self._sync_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="remote-exec-sync"
+        )
+      return self._sync_executor
+
+  def _shutdown_sync_executor(
+      self, *, wait: bool = False, cancel_futures: bool = False
+  ) -> None:
+    with self._sync_executor_lock:
+      executor = self._sync_executor
+      self._sync_executor = None
+    if executor is not None:
+      executor.shutdown(wait=wait, cancel_futures=cancel_futures)
+
+  async def _drain_sync_executor_async(
+      self, *, cancel_futures: bool = True
+  ) -> None:
+    """Cancels queued sync work and waits off-loop for the active call."""
+    with self._sync_executor_lock:
+      executor = self._sync_executor
+      self._sync_executor = None
+    if executor is not None:
+      loop = asyncio.get_running_loop()
+      await loop.run_in_executor(
+          None,
+          functools.partial(
+              executor.shutdown, wait=True, cancel_futures=cancel_futures
+          ),
+      )
 
   def _get_response_queue(self) -> asyncio.Queue[ExecutionResponse]:
     if self._response_queue is None:
@@ -382,10 +436,40 @@ class RemoteExecutionServer(abc.ABC):
     if not request.request_id:
       self._request_counter += 1
       request.request_id = f"task_{self._request_counter}"
+    req_id = request.request_id
+    if req_id in self._in_flight_requests:
+      logging.debug(
+          "[RemoteExecutionServer] Deduplicating in-flight dispatch for"
+          " request_id=%s",
+          req_id,
+      )
+      return req_id
     task = asyncio.create_task(self._run_and_enqueue(request))
+    self._in_flight_requests[req_id] = task
     self._background_tasks.add(task)
     task.add_done_callback(self._background_tasks.discard)
-    return request.request_id
+    task.add_done_callback(
+        functools.partial(self._release_unanswered_request, req_id)
+    )
+    return req_id
+
+  def _release_unanswered_request(
+      self, req_id: str, task: asyncio.Task[None]
+  ) -> None:
+    """Forgets `req_id` if its task ended without enqueuing a response."""
+    if task.cancelled():
+      if self._in_flight_requests.get(req_id) is task:
+        self._in_flight_requests.pop(req_id, None)
+      return
+    exc = task.exception()
+    if exc is not None:
+      if self._in_flight_requests.get(req_id) is task:
+        self._in_flight_requests.pop(req_id, None)
+      logging.error(
+          "[RemoteExecutionServer] Task %s failed without a response: %r",
+          req_id,
+          exc,
+      )
 
   async def _run_and_enqueue(self, request: ExecutionRequest) -> None:
     logging.debug(
@@ -408,10 +492,10 @@ class RemoteExecutionServer(abc.ABC):
       )
     await self._get_response_queue().put(response)
 
-  async def poll_response(
+  async def _dequeue_response(
       self, timeout_s: float = LONG_POLL_TIMEOUT_S
   ) -> Optional[ExecutionResponse]:
-    """Long-polls server-side response queue for completed task results."""
+    """Dequeues the next completed response, or returns `None` on timeout."""
     try:
       if timeout_s == 0.0:
         return self._get_response_queue().get_nowait()
@@ -420,6 +504,15 @@ class RemoteExecutionServer(abc.ABC):
       )
     except (asyncio.TimeoutError, asyncio.QueueEmpty):
       return None
+
+  async def poll_response(
+      self, timeout_s: float = LONG_POLL_TIMEOUT_S
+  ) -> Optional[ExecutionResponse]:
+    """Long-polls server-side response queue for completed task results."""
+    response = await self._dequeue_response(timeout_s=timeout_s)
+    if response is not None and response.request_id:
+      self._in_flight_requests.pop(response.request_id, None)
+    return response
 
   def register_instance(self, instance: Any) -> None:
     """Binds a local Python object (e.g., RolloutWorkerService, TrainerWorker) to the server."""
@@ -483,8 +576,16 @@ class RemoteExecutionServer(abc.ABC):
   ) -> Any:
     """Invokes `method(*args, **kwargs)` and awaits any returned awaitable."""
     if inspect.iscoroutinefunction(method):
-      return await method(*args, **kwargs)
-    result = method(*args, **kwargs)
+      result = await method(*args, **kwargs)
+    elif self._RUN_SYNC_METHODS_OFF_LOOP and should_offload_to_thread(method):
+      ctx = contextvars.copy_context()
+      loop = asyncio.get_running_loop()
+      result = await loop.run_in_executor(
+          self._get_sync_executor(),
+          functools.partial(ctx.run, method, *args, **kwargs),
+      )
+    else:
+      result = method(*args, **kwargs)
     if inspect.isawaitable(result):
       return await result
     return result
@@ -529,18 +630,20 @@ class InProcessRemoteExecutionServer(RemoteExecutionServer):
 
 
 class GrpcRemoteExecutionServer(RemoteExecutionServer):
-  """RemoteExecutionServer implementation speaking gRPC over physical TCP sockets.
+  """gRPC RemoteExecutionServer speaking over physical TCP sockets.
 
-  Threading contract:
-    Coroutine methods (`async def`) and unmarked synchronous methods execute
-    inline on the gRPC server's asyncio event loop thread. This preserves
-    loop-thread affinity for workers that mutate `asyncio` primitives (such as
-    `RolloutWorker.stop`, `pause`, and `resume`) and allows lightweight
-    read-only probes (`heartbeat`, `info`, `get_worker_id`) to complete without
-    waiting behind long-running work. Synchronous methods explicitly marked with
-    `@offload_to_thread` (or `_tunix_offload_to_thread = True`) execute in FIFO
-    order on a single-worker `ThreadPoolExecutor` with copied `contextvars`.
+  Synchronous (`def`) methods decorated with `@offload_to_thread` on the bound
+  instance execute off the `asyncio` event loop on a single-worker thread pool
+  (`_sync_executor`, `max_workers=1`) so blocking compute or I/O never stalls
+  incoming gRPC streams or heartbeats, while undecorated lightweight synchronous
+  probes (`heartbeat`, `info`, `get_worker_id`) stay inline on the event loop.
+  Note that offloaded synchronous methods lose their execution atomicity
+  relative to concurrent `async def` coroutines running on the event loop;
+  workers sharing mutable state between offloaded sync and async methods should
+  synchronize access or marshal loop-affined operations onto the event loop.
   """
+
+  _RUN_SYNC_METHODS_OFF_LOOP: bool = True
 
   def __init__(
       self,
@@ -585,38 +688,48 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
     self._max_message_bytes = max_message_bytes
     self._enable_bulk_transport = enable_bulk_transport
     self._configured_bulk_port = bulk_port
-    self._sync_exec_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
-    self._stopped: bool = False
+    # Sent responses kept until the active poll client acknowledges `ack_id`.
+    self._unacked_responses: Dict[
+        int, Tuple[ExecutionResponse, Optional[asyncio.Task[None]]]
+    ] = {}
+    self._poll_client_id: str = ""
+    self._next_ack_id: int = 0
 
-  def _get_sync_exec_pool(self) -> concurrent.futures.ThreadPoolExecutor:
-    if self._stopped:
-      raise RuntimeError("GrpcRemoteExecutionServer is stopped.")
-    if self._sync_exec_pool is None:
-      self._sync_exec_pool = concurrent.futures.ThreadPoolExecutor(
-          max_workers=1, thread_name_prefix="tunix-grpc-exec"
-      )
-    return self._sync_exec_pool
-
-  async def _invoke_method(
+  def _release_in_flight(
       self,
-      method: Callable[..., Any],
-      args: Tuple[Any, ...],
-      kwargs: Dict[str, Any],
-  ) -> Any:
-    """Offloads `@offload_to_thread` sync methods to the serialized worker thread."""
-    if not inspect.iscoroutinefunction(method) and should_offload_to_thread(
-        method
+      response: ExecutionResponse,
+      orig_task: Optional[asyncio.Task[None]],
+  ) -> None:
+    if (
+        orig_task is not None
+        and response.request_id
+        and self._in_flight_requests.get(response.request_id) is orig_task
     ):
-      loop = asyncio.get_running_loop()
-      ctx = contextvars.copy_context()
-      result = await loop.run_in_executor(
-          self._get_sync_exec_pool(),
-          functools.partial(ctx.run, method, *args, **kwargs),
-      )
-      if inspect.isawaitable(result):
-        return await result
-      return result
-    return await super()._invoke_method(method, args, kwargs)
+      self._in_flight_requests.pop(response.request_id, None)
+
+  def _pop_unacked(self, ack_id: int) -> None:
+    popped = self._unacked_responses.pop(ack_id, None)
+    if popped is not None:
+      self._release_in_flight(*popped)
+
+  def _clear_unacked(self) -> None:
+    for response, orig_task in self._unacked_responses.values():
+      self._release_in_flight(response, orig_task)
+    self._unacked_responses.clear()
+
+  def _ack_from_context(self, context: Any) -> None:
+    """Drops an acknowledged poll response carried in RPC metadata."""
+    if context is None or not self._unacked_responses:
+      return
+    inv_meta = context.invocation_metadata()
+    if not inv_meta:
+      return
+    for key, val in inv_meta:
+      if key == _POLL_ACK_METADATA_KEY and isinstance(val, str):
+        client_id, sep, ack_str = val.partition(":")
+        if sep and client_id == self._poll_client_id:
+          self._pop_unacked(int(ack_str))
+        return
 
   async def _handle_get_bulk_port(
       self, request_bytes: bytes, context: Any
@@ -641,6 +754,7 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
       self, request_iterator: AsyncIterator[bytes], context: Any
   ) -> AsyncIterator[bytes]:
     """Handles bidirectional chunked streaming execution requests."""
+    self._ack_from_context(context)
     try:
       request = await ExecutionRequest.deserialize_async_chunks(
           request_iterator, bulk_server=self._bulk_server
@@ -667,6 +781,7 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
       self, request_iterator: AsyncIterator[bytes], context: Any
   ) -> bytes:
     """Handles client-streaming task dispatch and returns the task ACK ID."""
+    self._ack_from_context(context)
     try:
       request = await ExecutionRequest.deserialize_async_chunks(
           request_iterator, bulk_server=self._bulk_server
@@ -679,16 +794,50 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
   async def _handle_poll_responses(
       self, request_bytes: bytes, context: Any
   ) -> AsyncIterator[bytes]:
-    """Handles server-streaming long-polling for completed task responses."""
-    timeout_s = (
+    """Streams the next completed task response to a long-polling client.
+
+    Each non-empty request pickles `(timeout_s, client_id, ack_id)`. Dequeued
+    responses receive a monotonic `ack_id` and stay in `_unacked_responses`
+    until the same `client_id` acknowledges `ack_id` (on a later poll or via
+    `x-tunix-poll-ack` RPC metadata) or a new `client_id` takes over;
+    unacknowledged responses are resent before dequeuing from
+    `_response_queue`.
+
+    Args:
+      request_bytes: Pickled `(timeout_s, client_id, ack_id)` tuple, or `b""` to
+        use `(LONG_POLL_TIMEOUT_S, "", None)`.
+      context: The gRPC servicer context, or `None` in direct unit-test calls.
+
+    Yields:
+      Serialized byte chunks for at most one `ExecutionResponse`.
+    """
+    timeout_s, client_id, ack_id = (
         cloudpickle.loads(request_bytes)  # pylint: disable=g-unsafe-pickle-load
         if request_bytes
-        else LONG_POLL_TIMEOUT_S
+        else (LONG_POLL_TIMEOUT_S, "", None)
     )
-    response = await self.poll_response(timeout_s=timeout_s)
-    if response is None:
-      return
-    completed = False
+    if client_id != self._poll_client_id:
+      self._poll_client_id = client_id
+      self._clear_unacked()
+    elif ack_id is not None:
+      self._pop_unacked(ack_id)
+    if self._unacked_responses:
+      _, (response, orig_task) = next(iter(self._unacked_responses.items()))
+    else:
+      response = await self._dequeue_response(timeout_s=timeout_s)
+      if response is None:
+        return
+      if client_id != self._poll_client_id:
+        self._get_response_queue().put_nowait(response)
+        return
+      orig_task = (
+          self._in_flight_requests.get(response.request_id)
+          if response.request_id
+          else None
+      )
+      self._next_ack_id += 1
+      response.ack_id = self._next_ack_id
+      self._unacked_responses[response.ack_id] = (response, orig_task)
     # pylint: disable=protected-access
     poll_chunk_bytes = min(
         self._stream_chunk_bytes, network._CONCURRENT_STREAM_CHUNK_BYTES
@@ -701,11 +850,11 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
           bulk_server=self._bulk_server if use_bulk else None,
       ):
         yield chunk
-      completed = True
+      # Release `_in_flight_requests` once streamed so reused `request_id`s can
+      # execute again while `_unacked_responses` retains the payload until ACK.
+      self._release_in_flight(response, orig_task)
     finally:
       network._dec_active_poll_rpcs()
-      if not completed:
-        self._get_response_queue().put_nowait(response)
     # pylint: enable=protected-access
 
   async def start_serving_async(self, port: int = 50051) -> Any:
@@ -716,7 +865,7 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
     self._stopped = False
     # pylint: disable=protected-access
     self._server = _grpc_aio_lib.server(
-        options=network._grpc_options(self._max_message_bytes)
+        options=network._grpc_server_options(self._max_message_bytes)
     )
     # pylint: enable=protected-access
     handler = _grpc_lib.method_handlers_generic_handler(
@@ -794,29 +943,103 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
         loop.run_until_complete(asyncio.sleep(0.1))
     finally:
       self._stopped = True
+      for task in list(self._background_tasks):
+        task.cancel()
+      self._unacked_responses.clear()
+      self._in_flight_requests.clear()
+      self._shutdown_sync_executor(wait=True, cancel_futures=True)
       if self._bulk_server is not None:
         self._bulk_server.stop()
         self._bulk_server = None
-      if self._sync_exec_pool is not None:
-        pool = self._sync_exec_pool
-        self._sync_exec_pool = None
-        pool.shutdown(wait=True, cancel_futures=True)
       self._serve_loop = None
       asyncio.set_event_loop(None)
       loop.close()
 
   async def stop_serving(self, grace: float = 0.5) -> None:
+    """Stops the gRPC server, cancels background tasks, and drains executors."""
     if self._server:
       await self._server.stop(grace)
     self._stopped = True
+    if self._background_tasks:
+      tasks = list(self._background_tasks)
+      for task in tasks:
+        task.cancel()
+      await asyncio.gather(*tasks, return_exceptions=True)
+    self._unacked_responses.clear()
+    self._in_flight_requests.clear()
+    await self._drain_sync_executor_async(cancel_futures=True)
     if self._bulk_server is not None:
       bulk_srv = self._bulk_server
       self._bulk_server = None
       await asyncio.get_running_loop().run_in_executor(None, bulk_srv.stop)
-    if self._sync_exec_pool is not None:
-      pool = self._sync_exec_pool
-      self._sync_exec_pool = None
-      await asyncio.to_thread(pool.shutdown, wait=True, cancel_futures=True)
+
+
+async def serve_worker(
+    worker_service: Any,
+    *,
+    port: int,
+    discovery: Any,
+    metadata: Mapping[str, Any],
+    drain_fn: Optional[Callable[[], Awaitable[Any]]] = None,
+    stop_grace_s: float = 5.0,
+) -> None:
+  """Serves `worker_service` over gRPC, registers discovery, and drains on stop.
+
+  Wakes on `SIGINT`/`SIGTERM` or when `worker_service` invokes its `set_on_stop`
+  callback (from an incoming `stop(abort=...)` RPC), stops the gRPC server
+  before invoking `worker_service.stop()` and optional `drain_fn`, and raises
+  `SystemExit(1)` if an abort stop was requested.
+
+  Args:
+    worker_service: Bound worker instance exposing `set_on_stop` and `stop`.
+    port: TCP port for `GrpcRemoteExecutionServer`.
+    discovery: Discovery client exposing `register(metadata=...)`.
+    metadata: Registration metadata mapping to pickle and publish.
+    drain_fn: Optional async callback awaited after `worker_service.stop()`.
+    stop_grace_s: Grace period in seconds for `server.stop_serving`.
+
+  Raises:
+    SystemExit: With code `1` if an abort stop (`abort=True`) was requested.
+  """
+  stop_event = asyncio.Event()
+  loop = asyncio.get_running_loop()
+  aborted: List[bool] = []
+  worker_service.set_on_stop(
+      lambda abort=False: (
+          aborted.append(bool(abort)),
+          loop.call_soon_threadsafe(stop_event.set),
+      )
+  )
+
+  server = GrpcRemoteExecutionServer(worker_service)
+  await server.start_serving_async(port)
+  try:
+    discovery.register(metadata=pickle.dumps(dict(metadata)))
+    for sig in (signal.SIGINT, signal.SIGTERM):
+      with contextlib.suppress(NotImplementedError):
+        loop.add_signal_handler(sig, stop_event.set)
+    with contextlib.suppress(asyncio.CancelledError):
+      await stop_event.wait()
+  finally:
+    await asyncio.sleep(0)
+    try:
+      await server.stop_serving(grace=stop_grace_s)
+    except Exception:  # pylint: disable=broad-exception-caught
+      logging.exception("Failed to stop worker gRPC server cleanly.")
+    try:
+      worker_service.stop()
+    except Exception:  # pylint: disable=broad-exception-caught
+      logging.exception("Failed to stop worker service cleanly.")
+    finally:
+      worker_service.set_on_stop(None)
+    if drain_fn is not None:
+      try:
+        await drain_fn()
+      except Exception:  # pylint: disable=broad-exception-caught
+        logging.exception("Failed to drain worker resources cleanly.")
+
+  if any(aborted):
+    raise SystemExit(1)
 
 
 class ActorHandle(abc.ABC):
@@ -1053,12 +1276,52 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     # calls reuse one channel. gRPC aio channels are bound to the loop that
     # created them, so they cannot be shared with the caller's async loop nor
     # survive a per-call asyncio.run() loop.
-    self._sync_loop: Optional[Any] = None
+    self._sync_loop: Optional[asyncio.AbstractEventLoop] = None
     self._sync_thread: Optional[threading.Thread] = None
     self._sync_channel: Optional[Any] = None
     self._sync_rpc: Optional[Any] = None
     self._sync_get_bulk_port_rpc: Optional[Any] = None
     self._sync_lock = threading.Lock()
+    # Terminal: once closed, a handle never opens a new channel. A caller that
+    # still holds the handle (e.g. a weight sync round that started before the
+    # worker was evicted) gets an error instead of leaking a fresh channel.
+    self._closed = False
+    self._send_locks: weakref.WeakKeyDictionary[
+        asyncio.AbstractEventLoop, asyncio.Lock
+    ] = weakref.WeakKeyDictionary()
+    self._send_locks_guard = threading.Lock()
+    self._client_id: str = uuid.uuid4().hex
+    # Server `ack_id` of the last polled response; see `_handle_poll_responses`.
+    self._last_ack_id: Optional[int] = None
+
+  def _call_metadata(self, *, bulk: bool) -> Tuple[Tuple[str, str], ...]:
+    base = _BULK_CAPABILITY_METADATA if bulk else ()
+    ack_id = self._last_ack_id
+    if ack_id is None:
+      return base
+    return (*base, (_POLL_ACK_METADATA_KEY, f"{self._client_id}:{ack_id}"))
+
+  def _raise_if_closed(self) -> None:
+    if self._closed:
+      raise RuntimeError(
+          f"GrpcRemoteActorHandle to {self._host_port} is closed."
+      )
+
+  def sync_close(self) -> None:
+    # Terminal immediately: inside a running loop the base class only schedules
+    # `close()`, and the handle must not open channels before that task runs.
+    with self._sync_lock:
+      self._closed = True
+    super().sync_close()
+
+  def _get_send_lock(self) -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    with self._send_locks_guard:
+      lock = self._send_locks.get(loop)
+      if lock is None:
+        lock = asyncio.Lock()
+        self._send_locks[loop] = lock
+      return lock
 
   def _make_rpc(self, channel: Any) -> Any:
     return channel.stream_stream(
@@ -1226,8 +1489,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
           self._bulk_probe_failed_until = float("inf")
         else:
           self._record_bulk_fallback(
-              "GetBulkPort RPC to %s failed (%s); falling back to gRPC"
-              " chunks.",
+              "GetBulkPort RPC to %s failed (%s); falling back to gRPC chunks.",
               self._host_port,
               exc,
           )
@@ -1323,6 +1585,27 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     )
     # pylint: enable=protected-access
 
+  @staticmethod
+  async def _cancel_and_close_request_stream(
+      call: Any,
+      chunks: Optional[AsyncIterator[bytes]],
+  ) -> None:
+    """Cancels gRPC's request poller task before closing the chunk generator."""
+    if call is not None:
+      if hasattr(call, "cancel"):
+        with contextlib.suppress(Exception):
+          call.cancel()
+      poller = getattr(call, "_async_request_poller", None)
+      if isinstance(poller, asyncio.Task) and not poller.done():
+        poller.cancel()
+        with contextlib.suppress(BaseException):
+          await poller
+    if chunks is not None:
+      aclose = getattr(chunks, "aclose", None)
+      if aclose is not None:
+        with contextlib.suppress(Exception):
+          await aclose()
+
   def _check_post_rpc_push_tracker(
       self, push_tracker: network._BulkPushTracker  # pylint: disable=protected-access
   ) -> None:
@@ -1358,9 +1641,87 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       self._invalidate_bulk_port()
     raise exc
 
+  @staticmethod
+  def _is_retryable_transport_error(
+      exc: BaseException,
+      push_tracker: Optional[network._BulkPushTracker],  # pylint: disable=protected-access
+  ) -> bool:
+    """Returns whether a failed session RPC may succeed if simply retried."""
+    # When the bulk-push request iterator raises, `grpc.aio` cancels the
+    # `StreamUnaryCall` (`exc` is `CancelledError` with `push_tracker.error`
+    # set); real caller cancellation is already re-raised as `CancelledError`
+    # by `_handle_rpc_exception` before this check runs.
+    if push_tracker is not None and push_tracker.error is not None:
+      return True
+    if isinstance(exc, network._BulkTransportError):  # pylint: disable=protected-access
+      return True
+    return (
+        _grpc_lib is not None
+        and _grpc_aio_lib is not None
+        and isinstance(exc, _grpc_aio_lib.AioRpcError)
+        and exc.code()
+        in (
+            _grpc_lib.StatusCode.UNAVAILABLE,
+            _grpc_lib.StatusCode.DEADLINE_EXCEEDED,
+            # Stale cached bulk port; retried after invalidation.
+            _grpc_lib.StatusCode.FAILED_PRECONDITION,
+            # A server shutting down (e.g. restarting) may cancel an in-flight
+            # call instead of failing it with UNAVAILABLE. Caller cancellation
+            # surfaces as `asyncio.CancelledError` instead.
+            _grpc_lib.StatusCode.CANCELLED,
+        )
+    )
+
+  def _raise_session_rpc_error(
+      self,
+      exc: BaseException,
+      operation: str,
+      push_tracker: Optional[network._BulkPushTracker] = None,  # pylint: disable=protected-access
+  ) -> NoReturn:
+    """Raises the error for a failed `dispatch_task` / `poll_responses` RPC.
+
+    Retryable transport faults (bulk transfer failures, a stale bulk port, and
+    gRPC `UNAVAILABLE` / `DEADLINE_EXCEEDED` / peer-side `CANCELLED`) are raised
+    as
+    `TransientTransportError` so `TaskSession` retries them; caller
+    cancellation and all other errors propagate unchanged.
+
+    Args:
+      exc: The exception raised by the RPC.
+      operation: Description of the RPC for error messages, e.g. "polling".
+      push_tracker: Bulk push tracker of a dispatch RPC, if any.
+
+    Raises:
+      TransientTransportError: If the failure is retryable.
+    """
+    try:
+      self._handle_rpc_exception(
+          exc,
+          push_tracker
+          if push_tracker is not None
+          else network._BulkPushTracker(),  # pylint: disable=protected-access
+      )
+    except BaseException as raised:
+      if isinstance(
+          raised, asyncio.CancelledError
+      ) or not self._is_retryable_transport_error(exc, push_tracker):
+        raise
+      if (
+          _grpc_aio_lib is not None
+          and isinstance(exc, _grpc_aio_lib.AioRpcError)
+          and raised is exc
+      ):
+        detail = f"{exc.code().name} ({exc.details()})"
+      else:
+        detail = str(raised)
+      raise TransientTransportError(
+          f"Transient transport error {operation} {self._host_port}: {detail}"
+      ) from raised
+
   async def _ensure_async_channel(self) -> Any:
     """Ensures the async gRPC channel and stubs are bound to the active loop."""
     assert _grpc_aio_lib is not None
+    self._raise_if_closed()
     current_loop = _running_loop()
     if (
         self._channel is None
@@ -1405,27 +1766,61 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
         method_name=method_name, args=args, kwargs=kwargs
     )
     push_tracker = network._BulkPushTracker()  # pylint: disable=protected-access
-    bulk_port, chunks = await self._prepare_request_chunks(
-        request,
-        get_bulk_port_rpc,
-        push_tracker=push_tracker,
-        need_port_for_response=True,
-    )
-    call_kwargs: Dict[str, Any] = {"timeout": self._rpc_timeout_s}
-    if bulk_port > 0:
-      call_kwargs["metadata"] = _BULK_CAPABILITY_METADATA
-    call = rpc(chunks, **call_kwargs)
+    send_lock = self._get_send_lock()
+    await send_lock.acquire()
+    lock_released = False
+
+    def _release_send_lock() -> None:
+      nonlocal lock_released
+      if not lock_released:
+        lock_released = True
+        send_lock.release()
+
+    raw_chunks: Optional[AsyncIterator[bytes]] = None
     try:
-      response = await ExecutionResponse.deserialize_async_chunks(
-          call,
-          bulk_hosts=self._active_bulk_hosts,
-          seen_bulk_targets=self._seen_bulk_targets,
+      bulk_port, raw_chunks = await self._prepare_request_chunks(
+          request,
+          get_bulk_port_rpc,
+          push_tracker=push_tracker,
+          need_port_for_response=True,
       )
-    except BaseException as exc:  # pylint: disable=broad-exception-caught
-      self._handle_rpc_exception(exc, push_tracker)
-    self._check_post_rpc_push_tracker(push_tracker)
-    assert response is not None
-    return response.unwrap()
+
+      async def _locked_chunks() -> AsyncIterator[bytes]:
+        assert raw_chunks is not None
+        try:
+          async for chunk in raw_chunks:
+            yield chunk
+        finally:
+          aclose = getattr(raw_chunks, "aclose", None)
+          if aclose is not None:
+            with contextlib.suppress(Exception):
+              await aclose()
+          _release_send_lock()
+
+      call_kwargs: Dict[str, Any] = {"timeout": self._rpc_timeout_s}
+      metadata = self._call_metadata(bulk=bulk_port > 0)
+      if metadata:
+        call_kwargs["metadata"] = metadata
+      call = rpc(_locked_chunks(), **call_kwargs)
+      try:
+        response = await ExecutionResponse.deserialize_async_chunks(
+            call,
+            bulk_hosts=self._active_bulk_hosts,
+            seen_bulk_targets=self._seen_bulk_targets,
+        )
+      except BaseException as exc:  # pylint: disable=broad-exception-caught
+        await self._cancel_and_close_request_stream(call, raw_chunks)
+        self._handle_rpc_exception(exc, push_tracker)
+      self._check_post_rpc_push_tracker(push_tracker)
+      assert response is not None
+      return response.unwrap()
+    finally:
+      if raw_chunks is not None and not lock_released:
+        aclose = getattr(raw_chunks, "aclose", None)
+        if aclose is not None:
+          with contextlib.suppress(Exception):
+            await aclose()
+      _release_send_lock()
 
   def submit(self, method_name: Optional[str] = None, *args, **kwargs) -> Any:
     """Blocking gRPC invocation; safe to call repeatedly.
@@ -1439,24 +1834,28 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
           "GrpcRemoteActorHandle.submit() is blocking and cannot be called from"
           " a running event loop; use asubmit() instead."
       )
-    loop = self._ensure_sync_loop()
-    future = asyncio.run_coroutine_threadsafe(
-        self._invoke_on_sync_loop(method_name, args, kwargs), loop
-    )
+    with self._sync_lock:
+      self._raise_if_closed()
+      loop = self._ensure_sync_loop_locked()
+      coro = self._invoke_on_sync_loop(method_name, args, kwargs)
+      try:
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+      except BaseException:
+        coro.close()
+        raise
     return future.result()
 
-  def _ensure_sync_loop(self) -> Any:
+  def _ensure_sync_loop_locked(self) -> asyncio.AbstractEventLoop:
     """Lazily starts (once) the background loop used by blocking submit()."""
-    with self._sync_lock:
-      if self._sync_loop is None:
-        self._sync_loop = asyncio.new_event_loop()
-        self._sync_thread = threading.Thread(
-            target=self._sync_loop.run_forever,
-            name=f"grpc-submit-{self._host_port}",
-            daemon=True,
-        )
-        self._sync_thread.start()
-      return self._sync_loop
+    if self._sync_loop is None:
+      self._sync_loop = asyncio.new_event_loop()
+      self._sync_thread = threading.Thread(
+          target=self._sync_loop.run_forever,
+          name=f"grpc-submit-{self._host_port}",
+          daemon=True,
+      )
+      self._sync_thread.start()
+    return self._sync_loop
 
   async def _invoke_on_sync_loop(
       self,
@@ -1465,17 +1864,21 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       kwargs: Dict[str, Any],
   ) -> Any:
     assert _grpc_aio_lib is not None
-    if self._sync_rpc is None:
-      self._sync_channel = _grpc_aio_lib.insecure_channel(
-          self._host_port,
-          options=network._grpc_channel_options(self._max_message_bytes),  # pylint: disable=protected-access
-      )
-      self._sync_rpc = self._make_rpc(self._sync_channel)
-      self._sync_get_bulk_port_rpc = self._make_get_bulk_port_rpc(
-          self._sync_channel
-      )
+    with self._sync_lock:
+      self._raise_if_closed()
+      if self._sync_rpc is None:
+        self._sync_channel = _grpc_aio_lib.insecure_channel(
+            self._host_port,
+            options=network._grpc_channel_options(self._max_message_bytes),  # pylint: disable=protected-access
+        )
+        self._sync_rpc = self._make_rpc(self._sync_channel)
+        self._sync_get_bulk_port_rpc = self._make_get_bulk_port_rpc(
+            self._sync_channel
+        )
+      rpc = self._sync_rpc
+      get_bulk_port_rpc = self._sync_get_bulk_port_rpc
     return await self._execute_rpc(
-        self._sync_rpc, self._sync_get_bulk_port_rpc, method_name, args, kwargs
+        rpc, get_bulk_port_rpc, method_name, args, kwargs
     )
 
   async def asubmit(
@@ -1496,67 +1899,84 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
   ) -> str:
     """Asynchronously dispatches task request on remote server, returning task ACK ID."""
     await self._ensure_async_channel()
-    assert self._dispatch_rpc is not None
+    # Bind the stubs before the next `await`: a concurrent `close()` (e.g. a
+    # mid-run eviction) resets them to `None`, and calling `None` would raise a
+    # `TypeError` that `TaskSession` treats as a non-retryable caller error.
+    dispatch_rpc = self._dispatch_rpc
+    get_bulk_port_rpc = self._get_bulk_port_rpc
+    assert dispatch_rpc is not None
     request = ExecutionRequest(
         request_id=request_id, method_name=method_name, args=args, kwargs=kwargs
     )
     push_tracker = network._BulkPushTracker()  # pylint: disable=protected-access
     _, chunks = await self._prepare_request_chunks(
         request,
-        self._get_bulk_port_rpc,
+        get_bulk_port_rpc,
         push_tracker=push_tracker,
         need_port_for_response=False,
     )
+    call_kwargs: Dict[str, Any] = {"timeout": self._rpc_timeout_s}
+    metadata = self._call_metadata(bulk=False)
+    if metadata:
+      call_kwargs["metadata"] = metadata
+    call: Any = None
     try:
-      result = await self._dispatch_rpc(chunks, timeout=self._rpc_timeout_s)
+      call = dispatch_rpc(chunks, **call_kwargs)
+      result = await call
     except BaseException as exc:  # pylint: disable=broad-exception-caught
-      self._handle_rpc_exception(exc, push_tracker)
+      await self._cancel_and_close_request_stream(call, chunks)
+      self._raise_session_rpc_error(exc, "dispatching to", push_tracker)
+    finally:
+      aclose = getattr(chunks, "aclose", None)
+      if aclose is not None:
+        with contextlib.suppress(Exception):
+          await aclose()
     self._check_post_rpc_push_tracker(push_tracker)
     return result
 
   async def poll_responses(
       self, timeout_s: float = LONG_POLL_TIMEOUT_S
   ) -> Optional[ExecutionResponse]:
-    """Long-polls remote server response queue for completed task results."""
+    """Long-polls the server for the next completed response (with poll ACK)."""
     await self._ensure_async_channel()
-    assert self._poll_rpc is not None
+    # Bind the stub before the next `await`; see `dispatch_task`.
+    poll_rpc = self._poll_rpc
+    assert poll_rpc is not None
     bulk_port = await self._ensure_bulk_port(self._get_bulk_port_rpc)
     call_kwargs: Dict[str, Any] = {"timeout": self._rpc_timeout_s}
     if bulk_port > 0:
       call_kwargs["metadata"] = _BULK_CAPABILITY_METADATA
-    call = self._poll_rpc(timeout_s, **call_kwargs)
+    call = poll_rpc(
+        (timeout_s, self._client_id, self._last_ack_id), **call_kwargs
+    )
     try:
-      return await ExecutionResponse.deserialize_async_chunks(
+      response = await ExecutionResponse.deserialize_async_chunks(
           call,
           allow_empty=True,
           bulk_hosts=self._active_bulk_hosts,
           seen_bulk_targets=self._seen_bulk_targets,
       )
-    except network._BulkTransportError as exc:  # pylint: disable=protected-access
-      self._invalidate_bulk_port()
-      if hasattr(call, "cancel"):
-        call.cancel()
-      raise TransientTransportError(
-          f"Transient bulk transport error polling {self._host_port}: {exc}"
-      ) from exc
     except BaseException as exc:  # pylint: disable=broad-exception-caught
-      if (
-          _grpc_lib is not None
-          and _grpc_aio_lib is not None
-          and isinstance(exc, _grpc_aio_lib.AioRpcError)
-          and exc.code()
-          in (
-              _grpc_lib.StatusCode.UNAVAILABLE,
-              _grpc_lib.StatusCode.DEADLINE_EXCEEDED,
-          )
+      if isinstance(exc, network._BulkTransportError) and hasattr(  # pylint: disable=protected-access
+          call, "cancel"
       ):
-        raise TransientTransportError(
-            f"Transient gRPC error polling {self._host_port}:"
-            f" {exc.code().name} ({exc.details()})"
-        ) from exc
-      raise
+        call.cancel()
+      self._raise_session_rpc_error(exc, "polling")
+    if response is not None and response.ack_id is not None:
+      self._last_ack_id = response.ack_id
+    return response
 
   async def close(self) -> None:
+    with self._sync_lock:
+      self._closed = True
+      sync_loop = self._sync_loop
+      sync_thread = self._sync_thread
+      sync_channel = self._sync_channel
+      self._sync_loop = None
+      self._sync_thread = None
+      self._sync_channel = None
+      self._sync_rpc = None
+      self._sync_get_bulk_port_rpc = None
     loop = _running_loop()
     if loop is not None:
       active_task = self._get_active_resolve_task(loop)
@@ -1565,6 +1985,11 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     self._invalidate_bulk_port()
     self._seen_bulk_targets.clear()
     if self._channel is not None:
+      # TODO(b/577214994): When `close()` runs on another thread (e.g. a
+      # displaced handle closed from the discovery server thread) while
+      # `self._channel_loop` is still running, schedule the `_resolve_task`
+      # cancellation and `channel.close()` onto `self._channel_loop` via
+      # `asyncio.run_coroutine_threadsafe` instead of the current loop.
       # `self._channel` is lazily created on the caller's event loop (e.g.
       # `RLProgram.run()`), which is typically already closed by the time
       # `WorkerRegistry.close()` runs on a fresh shutdown loop. Calling
@@ -1581,35 +2006,56 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       self._get_bulk_port_rpc = None
       self._dispatch_rpc = None
       self._poll_rpc = None
-    sync_loop = self._sync_loop
     if sync_loop is not None:
 
       async def _close_sync_channel() -> None:
-        if self._sync_channel is not None:
-          await self._sync_channel.close()
+        current = asyncio.current_task()
+        pending = [
+            task
+            for task in asyncio.all_tasks(sync_loop)
+            if task is not current and not task.done()
+        ]
+        for task in pending:
+          task.cancel()
+        if sync_channel is not None:
+          # Still drain the cancelled tasks below if closing the channel fails.
+          with contextlib.suppress(Exception):
+            await sync_channel.close()
+        if pending:
+          await asyncio.gather(*pending, return_exceptions=True)
+          # Let `_chain_future` done-callbacks scheduled via `call_soon` settle
+          # each caller's `concurrent.futures.Future` before the loop stops.
+          await asyncio.sleep(0)
 
       try:
-        await asyncio.wrap_future(
-            asyncio.run_coroutine_threadsafe(_close_sync_channel(), sync_loop)
+        # `shield` keeps a cancelled `close()` (e.g. a background `sync_close()`
+        # task whose loop is exiting) from cancelling the teardown itself.
+        await asyncio.shield(
+            asyncio.wrap_future(
+                asyncio.run_coroutine_threadsafe(
+                    _close_sync_channel(), sync_loop
+                )
+            )
         )
       except Exception:  # pylint: disable=broad-exception-caught
         pass
-      sync_loop.call_soon_threadsafe(sync_loop.stop)
-      if self._sync_thread is not None:
+      finally:
+        # Runs even if `close()` is cancelled, so the loop and thread exit.
+        sync_loop.call_soon_threadsafe(sync_loop.stop)
+      if sync_thread is not None:
         await asyncio.get_running_loop().run_in_executor(
-            None, self._sync_thread.join, 5
+            None, sync_thread.join, 5
         )
-        if self._sync_thread.is_alive():
+        if sync_thread.is_alive():
           logging.warning(
               "Background sync thread '%s' failed to join within 5 seconds. "
               "This may lead to leaked thread resources.",
-              self._sync_thread.name,
+              sync_thread.name,
           )
-      self._sync_loop = None
-      self._sync_thread = None
-      self._sync_channel = None
-      self._sync_rpc = None
-      self._sync_get_bulk_port_rpc = None
+        else:
+          sync_loop.close()
+    with self._send_locks_guard:
+      self._send_locks.clear()
 
 
 class InProcessActorHandle(ActorHandle):

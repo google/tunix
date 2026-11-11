@@ -20,7 +20,7 @@ from tunix.dist_rl.common import dispatch_window
 
 @dataclasses.dataclass
 class _FakeItem:
-  prompt_id: str
+  prompt_id: int | str
 
 
 class DispatchWindowTest(absltest.TestCase):
@@ -32,6 +32,14 @@ class DispatchWindowTest(absltest.TestCase):
       dispatch_window.DispatchWindow(
           max_staleness=0, next_batch_fn=lambda: 0, full_batch_size=0
       )
+    window = dispatch_window.DispatchWindow(
+        max_staleness=0, next_batch_fn=lambda: 0
+    )
+    with self.assertRaises(ValueError):
+      asyncio.run(window.admit(""))
+    with self.assertRaises(ValueError):
+      asyncio.run(window.admit(None))
+    self.assertEqual(window.in_flight_prompts, 0)
 
   def test_admits_batches_within_max_staleness_and_parks_beyond(self):
     async def _run():
@@ -43,7 +51,7 @@ class DispatchWindowTest(absltest.TestCase):
 
       async def _dispatch_all():
         for batch_idx in range(4):
-          await window.wait_for(batch_idx)
+          await window.admit(f"prompt_{batch_idx}")
           admitted.append(batch_idx)
 
       task = asyncio.create_task(_dispatch_all())
@@ -73,7 +81,7 @@ class DispatchWindowTest(absltest.TestCase):
 
       async def _dispatch_all():
         for batch_idx in range(4):
-          await window.wait_for(batch_idx)
+          await window.admit(f"prompt_{batch_idx}")
           admitted.append(batch_idx)
 
       task = asyncio.create_task(_dispatch_all())
@@ -88,7 +96,7 @@ class DispatchWindowTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_on_group_filtered_advances_next_batch_and_records_skipped_ids(self):
+  def test_on_group_filtered_records_skipped_ids_and_releases(self):
     step = 0
     window = dispatch_window.DispatchWindow(
         max_staleness=1,
@@ -98,16 +106,14 @@ class DispatchWindowTest(absltest.TestCase):
     )
     self.assertEqual(window.next_batch, 0)
     window.on_group_filtered([_FakeItem("p1")])
-    # ceil(1 / 2) = 1 -> next_batch shifts from 0 to 1.
-    self.assertEqual(window.next_batch, 1)
+    self.assertEqual(window.next_batch, 0)
     self.assertEqual(window.skipped_prompt_ids, {"p1"})
     self.assertTrue(window.is_released)
 
+    window.on_group_filtered([])
+    window.on_group_filtered([_FakeItem("")])
     window.on_group_filtered([_FakeItem("p2")])
-    # ceil(2 / 2) = 1 -> still 1 until a 3rd group is filtered.
-    self.assertEqual(window.next_batch, 1)
-    window.on_group_filtered([_FakeItem("p3")])
-    self.assertEqual(window.next_batch, 2)
+    self.assertEqual(window.skipped_prompt_ids, {"p1", "p2"})
 
   def test_checkpoint_metadata_and_out_of_order_resume_admit(self):
     async def _run():
@@ -118,25 +124,40 @@ class DispatchWindowTest(absltest.TestCase):
           full_batch_size=2,
           out_of_order_resume=True,
       )
+      self.assertEqual(window.checkpoint_metadata(), {})
       window.on_group_filtered([_FakeItem("prompt_1")])
-      window.record_committed_groups([[_FakeItem("prompt_0")]])
+      window.record_committed_groups([[], [_FakeItem("")], [_FakeItem(0)]])
       ckpt = window.checkpoint_metadata(
-          pending_groups=[[_FakeItem("prompt_3")]]
+          pending_groups=[[], [_FakeItem("")], [_FakeItem("prompt_3")]]
       )
       self.assertEqual(
           ckpt,
           {
-              "committed_prompt_ids": ["prompt_0", "prompt_3"],
+              "committed_prompt_ids": ["0", "prompt_3"],
               "skipped_prompt_ids": ["prompt_1"],
           },
       )
 
+      # Construct at cursor=0 and advance cursor=1 before first admit, matching
+      # StandardRLProgram.__init__ -> _resume_from_checkpoint.
+      cursor = 0
       resumed = dispatch_window.DispatchWindow(
           max_staleness=0,
-          next_batch_fn=lambda: step,
+          next_batch_fn=lambda: cursor,
           full_batch_size=2,
           out_of_order_resume=True,
       )
+      cursor = 1
+      self.assertEqual(resumed.in_flight_prompts, 0)
+      self.assertFalse(resumed.restore_checkpoint_metadata(None))
+      self.assertFalse(resumed.restore_checkpoint_metadata({}))
+      self.assertTrue(
+          resumed.restore_checkpoint_metadata(
+              {"committed_prompt_ids": "not_a_list", "skipped_prompt_ids": 123}
+          )
+      )
+      self.assertEqual(resumed.committed_prompt_ids, set())
+      self.assertEqual(resumed.skipped_prompt_ids, set())
       self.assertTrue(resumed.restore_checkpoint_metadata(ckpt))
       self.assertEqual(resumed.dataset_skip_count, 0)
 
@@ -144,7 +165,8 @@ class DispatchWindowTest(absltest.TestCase):
 
       async def _dispatch():
         for idx in range(6):
-          if await resumed.admit(idx, {"prompt_id": f"prompt_{idx}"}):
+          pid: int | str = 0 if idx == 0 else f"prompt_{idx}"
+          if await resumed.admit(pid):
             admitted.append(idx)
 
       task = asyncio.create_task(_dispatch())
@@ -152,11 +174,49 @@ class DispatchWindowTest(absltest.TestCase):
       # Step 1 (max_staleness=0) admits 2 non-skipped prompts (prompt_2,
       # prompt_4) into batch_idx=1, then parks prompt_5 (batch_idx=2).
       self.assertEqual(admitted, [2, 4])
+      self.assertEqual(resumed.in_flight_prompts, 2)
 
-      step = 2
+      cursor = 2
       resumed.release()
       await asyncio.wait_for(task, timeout=1.0)
       self.assertEqual(admitted, [2, 4, 5])
+      self.assertEqual(resumed.in_flight_prompts, 1)
+
+    asyncio.run(_run())
+
+  def test_in_order_prefix_resume_anchors_start_step_on_first_admit(self):
+    async def _run():
+      # StandardRLProgram.__init__ constructs DispatchWindow at cursor=0, and
+      # _resume_from_checkpoint advances cursor before the first admit().
+      cursor = 0
+      window = dispatch_window.DispatchWindow(
+          max_staleness=1,
+          next_batch_fn=lambda: cursor,
+          full_batch_size=2,
+          out_of_order_resume=False,
+      )
+      cursor = 2
+      self.assertEqual(window.dataset_skip_count, 4)
+
+      admitted: list[int] = []
+
+      async def _dispatch():
+        for idx in range(4, 10):
+          if await window.admit(f"prompt_{idx}"):
+            admitted.append(idx)
+
+      task = asyncio.create_task(_dispatch())
+      await asyncio.sleep(0.01)
+      # Capacity is (max_staleness + 1) * full_batch_size = 4 prompts (4..7);
+      # prompt 8 must park until cursor advances from 2 to 3.
+      self.assertEqual(admitted, [4, 5, 6, 7])
+      self.assertEqual(window.in_flight_prompts, 4)
+
+      cursor = 3
+      window.release()
+      await asyncio.wait_for(task, timeout=1.0)
+      self.assertEqual(admitted, [4, 5, 6, 7, 8, 9])
+      self.assertEqual(window.in_flight_prompts, 4)
 
     asyncio.run(_run())
 
@@ -175,7 +235,7 @@ class DispatchWindowTest(absltest.TestCase):
 
       async def _dispatch():
         for idx in range(8):
-          if await window.admit(idx, {"prompt_id": f"prompt_{idx}"}):
+          if await window.admit(f"prompt_{idx}"):
             admitted.append(idx)
 
       task = asyncio.create_task(_dispatch())
@@ -224,6 +284,49 @@ class DispatchWindowTest(absltest.TestCase):
     )
     self.assertFalse(window.uses_prompt_id_resume)
     self.assertEqual(window.dataset_skip_count, 2)
+
+  def test_admit_replenishes_one_prompt_per_filtered_group(self):
+    async def _run():
+      step = 0
+      window = dispatch_window.DispatchWindow(
+          max_staleness=1,
+          next_batch_fn=lambda: step,
+          full_batch_size=4,
+          out_of_order_resume=True,
+      )
+      admitted: list[int] = []
+
+      async def _dispatch():
+        for idx in range(12):
+          if await window.admit(f"prompt_{idx}"):
+            admitted.append(idx)
+
+      task = asyncio.create_task(_dispatch())
+      await asyncio.sleep(0.01)
+      # Step 0 with max_staleness=1 and full_batch_size=4 admits 8 prompts
+      # (0..7).
+      self.assertEqual(admitted, list(range(8)))
+      self.assertEqual(window.in_flight_prompts, 8)
+
+      # Filtering 1 group must replenish exactly 1 prompt (idx=8), NOT an entire
+      # batch of 4 prompts (8..11).
+      window.on_group_filtered([_FakeItem("prompt_0")])
+      await asyncio.sleep(0.01)
+      self.assertEqual(admitted, list(range(9)))
+      self.assertEqual(window.in_flight_prompts, 8)
+
+      window.on_group_filtered([_FakeItem("prompt_1")])
+      await asyncio.sleep(0.01)
+      self.assertEqual(admitted, list(range(10)))
+      self.assertEqual(window.in_flight_prompts, 8)
+
+      step = 1
+      window.release()
+      await asyncio.wait_for(task, timeout=1.0)
+      self.assertEqual(admitted, list(range(12)))
+      self.assertEqual(window.in_flight_prompts, 6)
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":

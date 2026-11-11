@@ -41,7 +41,7 @@ RUN bash scripts/install_tunix_vllm_requirement.sh
 # Copy pyproject.toml, README.md, and CMakeLists.txt to install dependencies first
 COPY pyproject.toml README.md CMakeLists.txt /app/
 RUN mkdir /app/tunix && touch /app/tunix/__init__.py
-RUN uv pip install .
+RUN uv pip install ".[tpu]"
 
 # Install SFT/MaxText dependencies (unconditional)
 RUN uv pip install --upgrade flax && \

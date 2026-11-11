@@ -20,14 +20,14 @@ import logging
 import pickle
 from typing import Sequence
 
+from transformers import AutoConfig  # pylint: disable=g-importing-member
 from transformers import AutoTokenizer  # pylint: disable=g-importing-member
 from tunix.dist_rl.common import test_utils as mocks
 from tunix.dist_rl.distributed.runtime.context import ProcessContext  # pylint: disable=g-importing-member
-from tunix.dist_rl.common import registry
 from tunix.dist_rl.rollout import inprocess_vllm_sampler as inprocess_sampler_lib
+from tunix.dist_rl.weight_sync import weight_sync
 from tunix.dist_rl.worker import remote_execution
 from tunix.dist_rl.worker import rollout_worker
-from tunix.generate import vllm_sampler
 
 
 def main(argv: Sequence[str], context: ProcessContext | None) -> None:
@@ -65,7 +65,23 @@ def main(argv: Sequence[str], context: ProcessContext | None) -> None:
   tokenizer = AutoTokenizer.from_pretrained(args.model_name)
   if tokenizer is None:
     raise ValueError(f"No tokenizer found for {args.model_name!r}.")
-  config = vllm_sampler.VllmConfig(engine_kwargs={"model": args.model_name})
+  config = rollout_worker.RolloutConfig(
+      weight_sync_mode=weight_sync.WeightSyncMode.FALLBACK,
+      max_tokens_to_generate=128,
+      temperature=0.0,
+      # Serve the model's full context, as vLLM does when `max_model_len` is
+      # unset.
+      kv_cache_size=AutoConfig.from_pretrained(
+          args.model_name
+      ).max_position_embeddings,
+      rollout_vllm_model_version=args.model_name,
+      rollout_vllm_server_mode=True,
+      rollout_vllm_hbm_utilization=0.5,
+      rollout_vllm_tpu_backend_type="jax",
+      rollout_vllm_async_scheduling=True,
+      tensor_parallel_size=1,
+      data_parallel_size=1,
+  )
   sampler_server = inprocess_sampler_lib.InprocessVllmSampler(
       server_id="vllm-0",
       tokenizer=tokenizer,
@@ -75,11 +91,10 @@ def main(argv: Sequence[str], context: ProcessContext | None) -> None:
 
   worker_service = rollout_worker.RolloutWorker(
       worker_id=args.worker_id,
+      config=config,
       sampler=sampler_server,
-      env_pool=mocks.MockEnvironmentPool(
-          pool_size=1, env_factory=registry.ENV_REGISTRY.get("mock_env")
-      ),
-      agent_factory=registry.AGENT_REGISTRY.get("mock_agent"),
+      env_name="mock_env",
+      agent_name="mock_agent",
       tokenizer=tokenizer,
       chat_parser=mocks.MockChatParser(),
   )

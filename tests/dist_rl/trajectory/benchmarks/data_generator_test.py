@@ -5,11 +5,19 @@ from tunix.dist_rl.trajectory.benchmarks import data_generator
 class WorkloadConfigTest(absltest.TestCase):
 
   def test_valid_workload_config(self) -> None:
-    _ = data_generator.WorkloadConfig(
+    config = data_generator.WorkloadConfig(
         cumulative_trajectory_checkpoints=[10, 50, 100],
         steps_per_trajectory=5,
         step_payload_chars=1000,
+        metrics_updates_per_trajectory=2,
     )
+    self.assertEqual(config.metrics_updates_per_trajectory, 2)
+
+  def test_negative_metrics_updates_per_trajectory_raises(self) -> None:
+    with self.assertRaisesRegex(
+        ValueError, r"metrics_updates_per_trajectory must be >= 0"
+    ):
+      data_generator.WorkloadConfig(metrics_updates_per_trajectory=-1)
 
   def test_empty_checkpoints_raises(self) -> None:
     with self.assertRaises(ValueError):

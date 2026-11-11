@@ -25,11 +25,13 @@ from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.dist_rl.trajectory import trajectory_testing
 from tunix.dist_rl.trajectory.explorer.commands import show
 from tunix.dist_rl.trajectory.explorer.commands import testing
+from tunix.dist_rl.trajectory.explorer.diagnostics import tunix_diagnostics
 
 _NO_OUTCOME_TRAJECTORY = trajectory_testing.TRAJECTORY_2
 _TOOL_CALLING_TRAJECTORY = trajectory_testing.PAIRED_ATIF_TRAJECTORY
 _SUCCEEDED_TRAJECTORY = trajectory_testing.PAIRED_TUNIX_TRAJECTORY
 _ROLLOUT_TRAJECTORY = trajectory_testing.TUNIX_ROLLOUT_TRAJECTORY
+_TUNIX_DIAGNOSTICS = (tunix_diagnostics.TunixDiagnostics(),)
 
 
 def _trajectory_id(trajectory: trajectory_lib.Trajectory[Any]) -> str:
@@ -221,23 +223,53 @@ class ShowTest(absltest.TestCase):
     self.assertRegex(out, rf"Status: \S*{_SUCCEEDED_TRAJECTORY.status}")
     self.assertIn(f"Reward: {_SUCCEEDED_TRAJECTORY.total_reward}", out)
 
-  def test_unrecognized_status_exits_1_with_message_on_stderr(self) -> None:
+  def test_any_status_is_shown_upper_cased(self) -> None:
     trajectory = _SUCCEEDED_TRAJECTORY.model_copy(
         update={"status": "not_a_status"}
     )
     mem_store = testing.create_store(trajectories=[trajectory])
     cmd = show.ShowCommand(trajectory_id=[_trajectory_id(trajectory)])
-    stderr = io.StringIO()
-    with contextlib.redirect_stderr(stderr):
-      exit_code, out = testing.execute_command(cmd, mem_store)
-    self.assertEqual(exit_code, 1)
-    self.assertEmpty(out)
-    self.assertIn(
-        f"error: trajectory {trajectory.trajectory_id}: Unrecognized"
-        " trajectory status 'not_a_status'",
-        stderr.getvalue(),
+    exit_code, out = testing.execute_command(cmd, mem_store)
+    self.assertEqual(exit_code, 0)
+    self.assertIn("Status: NOT_A_STATUS", out)
+
+  def test_schema_diagnostics_lines_end_the_header(self) -> None:
+    mem_store = testing.create_store(trajectories=[_SUCCEEDED_TRAJECTORY])
+    cmd = show.ShowCommand(
+        trajectory_id=[_trajectory_id(_SUCCEEDED_TRAJECTORY)]
     )
-    self.assertNotIn("Traceback", stderr.getvalue())
+    exit_code, out = testing.execute_command(
+        cmd, mem_store, diagnostics=_TUNIX_DIAGNOSTICS
+    )
+    self.assertEqual(exit_code, 0)
+    header = out.split("\n\n", maxsplit=1)[0].splitlines()
+    self.assertEqual(header[-2:], ["Tokens: 150 (100+50)", "masked_out: False"])
+
+  def test_schema_diagnostics_skip_trajectories_of_other_schemas(
+      self,
+  ) -> None:
+    cmd = show.ShowCommand(
+        trajectory_id=[_trajectory_id(_NO_OUTCOME_TRAJECTORY)]
+    )
+    _, with_diagnostics = testing.execute_command(
+        cmd, self.mem_store, diagnostics=_TUNIX_DIAGNOSTICS
+    )
+    _, without_diagnostics = testing.execute_command(cmd, self.mem_store)
+    self.assertMultiLineEqual(with_diagnostics, without_diagnostics)
+
+  def test_json_output_carries_schema_stats(self) -> None:
+    mem_store = testing.create_store(trajectories=[_SUCCEEDED_TRAJECTORY])
+    cmd = show.ShowCommand(
+        trajectory_id=[_trajectory_id(_SUCCEEDED_TRAJECTORY)]
+    )
+    exit_code, out = testing.execute_command(
+        cmd, mem_store, output_json=True, diagnostics=_TUNIX_DIAGNOSTICS
+    )
+    self.assertEqual(exit_code, 0)
+    self.assertEqual(
+        json.loads(out)["stats"]["schema_stats"],
+        {"tunix": {"masked_out": False}},
+    )
 
   def test_max_chars_truncates_content(self) -> None:
     cmd = show.ShowCommand(
@@ -344,32 +376,6 @@ class ShowTest(absltest.TestCase):
     self.assertEqual(exit_code, 1)
     self.assertEmpty(out)
     self.assertIn("trajectory not found: missing_traj", stderr.getvalue())
-
-  def test_multiple_trajectories_invalid_status_fails_batch_with_nothing_printed(
-      self,
-  ) -> None:
-    bad_trajectory = _SUCCEEDED_TRAJECTORY.model_copy(
-        update={"trajectory_id": "traj_bad", "status": "not_a_status"}
-    )
-    mem_store = testing.create_store(
-        trajectories=[_SUCCEEDED_TRAJECTORY, bad_trajectory]
-    )
-    cmd = show.ShowCommand(
-        trajectory_id=[
-            _trajectory_id(_SUCCEEDED_TRAJECTORY),
-            _trajectory_id(bad_trajectory),
-        ]
-    )
-    stderr = io.StringIO()
-    with contextlib.redirect_stderr(stderr):
-      exit_code, out = testing.execute_command(cmd, mem_store)
-    self.assertEqual(exit_code, 1)
-    self.assertEmpty(out)
-    self.assertIn(
-        f"error: trajectory {bad_trajectory.trajectory_id}: Unrecognized"
-        " trajectory status 'not_a_status'",
-        stderr.getvalue(),
-    )
 
   def test_empty_trajectory_id_list_exits_2(self) -> None:
     for raw_ids in ([], ["", ","]):

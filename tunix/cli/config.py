@@ -20,6 +20,7 @@ from collections.abc import MutableMapping
 import copy
 import importlib
 import inspect
+import math
 import os
 import pathlib
 import shutil
@@ -31,11 +32,13 @@ import dotenv
 import jax
 import omegaconf
 import optax
+from tunix.models import naming
 from tunix.perf import metrics as perf_metrics
 from tunix.sft import checkpoint_options
 from tunix.sft import metrics_logger
 from tunix.sft import profiler
 from tunix.utils import mesh as mesh_lib
+import yaml
 
 # Define a prefix for environment variables that can override YAML keys
 _TUNIX_PREFIX = "T_"
@@ -55,7 +58,6 @@ _OPEN_DICT_KEYS: frozenset[str] = frozenset({
     "agent_kwargs",
     "env_kwargs",
     "kubernetes_config",
-    "sglang_jax_config",
     "agentic_ppo_config",
     "perf_metrics_options",
 })
@@ -195,37 +197,6 @@ def _inherits(
   return key in base and role[key] == base[key]
 
 
-def normalize_argv(
-    argv: Sequence[str],
-    default_base_config: str | pathlib.Path,
-) -> list[str]:
-  """Normalizes `argv` into `[entry_point, base_yaml_path, *overrides]`.
-
-  Args:
-    argv: Command-line arguments. The first element is treated as the entry
-      point when it neither ends in `.yaml`/`.yml` nor contains `=`; otherwise
-      `"resolve_config"` is used. The next element is the base YAML when it does
-      not contain `=`.
-    default_base_config: Base YAML used when `argv` does not name one, or names
-      a file with the same basename.
-
-  Returns:
-    The normalized argument list.
-  """
-  args = list(argv)
-  entry_point = "resolve_config"
-  if args and not args[0].endswith((".yaml", ".yml")) and "=" not in args[0]:
-    entry_point = args[0] or "resolve_config"
-    args = args[1:]
-
-  default_path = pathlib.Path(default_base_config)
-  if not args or "=" in args[0]:
-    return [entry_point, str(default_path)] + args
-  if args[0] == default_path.name:
-    return [entry_point, str(default_path)] + args[1:]
-  return [entry_point, args[0]] + args[1:]
-
-
 def yaml_key_to_env_key(s: str) -> str:
   return _TUNIX_PREFIX + s.upper()
 
@@ -326,13 +297,51 @@ def get_project_root() -> pathlib.Path:
   return pathlib.Path.cwd()
 
 
-# TODO(noghabi): Merge override files with OmegaConf.load/merge to keep value
-# types (quoted strings currently re-parse as YAML); affects the flags-off path,
-# so needs its own change.
+# TODO(noghabi): Split this module into a light config loader
+# (`HyperParameters`, override handling, `format_cli_arg`) and the builders that
+# need JAX (`create_optimizer`, `obtain_training_config_dict`), so launchers
+# that only build arguments don't import JAX.
+def format_cli_arg(key: str, value: object) -> str:
+  """Returns the `key=value` argument that sets `key` to `value`.
+
+  `OmegaConf.from_cli` parses each value as YAML. Strings are written as
+  one-line double-quoted YAML scalars, which parse back unchanged: `""`, `"0"`
+  or `"true"` stays a string instead of becoming None, 0 or True. None is
+  written as `null`, and other values with `str()`.
+
+  Args:
+    key: Dotted config path, e.g. `rl_training_config.max_steps`.
+    value: The value to set.
+
+  Returns:
+    The `key=value` argument.
+  """
+  if value is None:
+    return f"{key}=null"
+  if isinstance(value, str):
+    # `width=math.inf` keeps long strings on one line.
+    quoted = yaml.safe_dump(value, default_style='"', width=math.inf)
+    return f"{key}={quoted.rstrip()}"
+  return f"{key}={value}"
+
+
 def _dict_to_cli_args(
     d: collections.abc.Mapping[str, Any], parent_key: str = "", sep: str = "."
 ) -> Iterator[str]:
-  """Converts a dictionary to an Iterator string of CLI arguments."""
+  """Converts a dictionary to an Iterator string of CLI arguments.
+
+  Leaves are formatted by `format_cli_arg`, so strings keep their type when
+  `OmegaConf.from_cli` parses the arguments: an override file's `""`, `"0"` or
+  `"true"` stays a string instead of becoming None, 0 or True.
+
+  Args:
+    d: The (nested) override mapping, e.g. a loaded override YAML file.
+    parent_key: Dotted path of `d` in the config.
+    sep: Separator between the parts of a dotted path.
+
+  Yields:
+    One `dotted.key=value` argument per leaf of `d`.
+  """
   for k, v in d.items():
     new_key = f"{parent_key}{sep}{k}" if parent_key else k
     if isinstance(v, (collections.abc.Mapping, omegaconf.DictConfig)):
@@ -341,10 +350,7 @@ def _dict_to_cli_args(
       else:
         yield f"{new_key}={{}}"
     else:
-      if v is None:
-        yield f"{new_key}=null"
-      else:
-        yield f"{new_key}={v}"
+      yield format_cli_arg(new_key, v)
 
 
 def _extract_kwargs(
@@ -576,7 +582,6 @@ class HyperParameters:
 
   Optional keyword-only flags (all off by default; existing CLI behavior is
   unchanged when they are off):
-  * `default_base_config`: Base YAML used when `argv` does not name one.
   * `merge_replace_keys`: Deep-merge instead of replace. Allows multiple
     `override_config_file=` arguments, disables `replace_keys`, and merges
     `model_config` into role configs per nested sub-key while preserving
@@ -610,7 +615,6 @@ class HyperParameters:
       self,
       argv: Sequence[str],
       *,
-      default_base_config: str | pathlib.Path | None = None,
       merge_replace_keys: bool = False,
       validate_nested: bool = False,
       **kwargs: object,
@@ -620,9 +624,7 @@ class HyperParameters:
     dotenv.load_dotenv()
     raw_keys = collections.OrderedDict()
 
-    if default_base_config is not None:
-      argv = normalize_argv(argv, default_base_config)
-    elif len(argv) < 2 or "=" in argv[1]:
+    if len(argv) < 2 or "=" in argv[1]:
       raise ValueError(
           "The first argument must be a path to a base config file."
       )
@@ -976,8 +978,10 @@ class HyperParameters:
   def _validate_tokenizer(self):
     """Validate the tokenizer configuration.
 
-    Currently only sentencepiece and huggingface are supported. `HF_TOKEN` must
-    be set if huggingface tokenizer is used.
+    Currently only sentencepiece and huggingface are supported. Hugging Face Hub
+    tokenizers remain supported both for public repositories (without
+    `HF_TOKEN`) and for gated/private repositories (using `HF_TOKEN` from
+    `os.environ` at tokenizer download time).
     """
     tokenizer_config = self.config["tokenizer_config"]
     tokenizer_type = tokenizer_config["tokenizer_type"]
@@ -988,14 +992,8 @@ class HyperParameters:
           f"tokenizer_type {tokenizer_type} is not supported, currently only"
           f" {valid_tokenizer_type} is supported"
       )
-    if tokenizer_type == "huggingface":
-      # Only require HF_TOKEN when loading from HuggingFace Hub (not a local
-      # or CNS path).
-      is_local_path = tokenizer_path.startswith(("/", "gs://"))
-      if not is_local_path and "HF_TOKEN" not in os.environ:
-        raise ValueError("Missing `HF_TOKEN` to access hf tokenizer")
-      if not tokenizer_path:
-        raise ValueError("tokenizer_path must be specified.")
+    if tokenizer_type == "huggingface" and not tokenizer_path:
+      raise ValueError("tokenizer_path must be specified.")
 
   def clear_directory_contents(self):
     """Removes all files, directories, and links within the specified directory."""
@@ -1064,21 +1062,16 @@ class HyperParameters:
     )
     # TODO: b/467448875 - Add support for other sources, such as kaggle for other
     # models.
-    supported_sources["gemma"] = ["kaggle", "internal", "maxtext"]
-    supported_sources["gemma2"] = ["kaggle", "internal", "maxtext"]
+    supported_sources["gemma"] = ["kaggle", "gcs", "internal", "maxtext"]
+    supported_sources["gemma1p1"] = ["kaggle", "gcs", "internal", "maxtext"]
+    supported_sources["gemma2"] = ["kaggle", "gcs", "internal", "maxtext"]
     supported_sources["gemma3"] = ["gcs", "internal", "maxtext"]
     # TODO: support maxtext for gemma4.
     supported_sources["gemma4"] = ["kaggle", "huggingface", "gcs", "internal"]
 
-    if model_name.startswith(("gemma4", "gemma-4")):
-      model_family = "gemma4"
-    elif model_name.startswith(("gemma3", "gemma-3")):
-      model_family = "gemma3"
-    elif model_name.startswith(("gemma2", "gemma-2")):
-      model_family = "gemma2"
-    elif model_name.startswith("gemma"):
-      model_family = "gemma"
-    else:
+    try:
+      model_family = naming.ModelNaming(model_name=model_name).model_family
+    except ValueError:
       model_family = "other"
 
     expected_sources = supported_sources[model_family]
@@ -1632,14 +1625,12 @@ class HyperParameters:
 def initialize(
     argv: Sequence[str],
     *,
-    default_base_config: str | pathlib.Path | None = None,
     merge_replace_keys: bool = False,
     validate_nested: bool = False,
     **kwargs: object,
 ) -> HyperParameters:
   return HyperParameters(
       argv,
-      default_base_config=default_base_config,
       merge_replace_keys=merge_replace_keys,
       validate_nested=validate_nested,
       **kwargs,

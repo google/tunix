@@ -280,7 +280,7 @@ class BasePipeline(abc.ABC, config.HyperParameters):
 
     Agentic mode: same base. Same kv_cache_size calculation.
 
-    Engine-specific extras (sglang_jax_config, vllm_config) are also applied.
+    Engine-specific extras (vllm_config) are also applied.
 
     Args:
       role_to_mesh: Optional mapping from logical role to JAX mesh.
@@ -308,27 +308,17 @@ class BasePipeline(abc.ABC, config.HyperParameters):
         max_prompt + max_response + 256
     )
     if self._is_agentic_mode(mode):
-      agentic_cfg = self._config_mapping(f"{mode}_config")
       filtered["kv_cache_size"] = kv_cache_size
       logging.info("kv_cache_size: %d", kv_cache_size)
-
-      max_running_requests = agentic_cfg.get("max_concurrency", 16)
     else:
-      rl_algm_cfg = self._config_mapping(f"{mode}_config")
       # Standard: kv_cache_size = max_prompt + max_response + 256
       if max_prompt and max_response or "kv_cache_size" in rollout_cfg:
         filtered["kv_cache_size"] = kv_cache_size
-      # Defaults to global batch size * num_generations to allow full
-      # concurrency.
-      max_running_requests = self.config.get("batch_size", 1) * rl_algm_cfg.get(
-          "num_generations", 1
-      )
 
     # Engine-specific extras
     extra = self._rollout_engine_extra(
         engine,
         kv_cache_size,
-        max_running_requests,
         role_to_mesh=role_to_mesh,
     )
     filtered.update({k: v for k, v in extra.items() if k in valid_fields})
@@ -338,39 +328,11 @@ class BasePipeline(abc.ABC, config.HyperParameters):
       self,
       engine: str,
       kv_cache_size: int,
-      max_running_requests: int,
       role_to_mesh: dict[rl_engine_lib.Role, jax.sharding.Mesh] | None = None,
   ) -> dict[str, Any]:
-    """Return engine-specific RolloutConfig fields for agentic mode."""
-    model_id = self._config_mapping("actor_model_config").get("model_id", "")
-
-    if engine == "sglang_jax":
-      sg = self._config_mapping("sglang_jax_config")
-      return dict(
-          rollout_sglang_jax_model_version=sg.get("model_version", model_id),
-          rollout_sglang_jax_mem_fraction_static=sg.get(
-              "mem_fraction_static", 0.8
-          ),
-          rollout_sglang_jax_init_with_random_weights=sg.get(
-              "init_with_random_weights", True
-          ),
-          rollout_sglang_jax_disable_radix_cache=sg.get(
-              "disable_radix_cache", True
-          ),
-          rollout_sglang_jax_enable_deterministic_sampling=sg.get(
-              "enable_deterministic_sampling", False
-          ),
-          rollout_sglang_jax_chunked_prefill_size=sg.get(
-              "chunked_prefill_size", 2048
-          ),
-          rollout_sglang_jax_max_running_requests=sg.get(
-              "max_running_requests",
-              max_running_requests,
-          ),
-          rollout_sglang_jax_page_size=sg.get("page_size", 128),
-      )
-
+    """Return engine-specific RolloutConfig fields (e.g. vllm_config)."""
     if engine == "vllm":
+      model_id = self._config_mapping("actor_model_config").get("model_id", "")
       vllm = self._config_mapping("vllm_config")
       if role_to_mesh is None:
         raise ValueError(

@@ -97,14 +97,28 @@ def _write_trajectory(
     writer: store.TrajectoryWriter,
     metadata: trajectory_lib.TrajectoryMetadata,
     steps: list[trajectory_lib.Step],
+    metrics_updates: int = 0,
 ) -> tuple[int, int]:
-  """Writes all trajectory steps and returns (step_count, byte_count)."""
+  """Writes trajectory steps and optional metrics updates."""
   step_bytes = 0
   for step in steps:
     writer.add_step(step, metadata)
     # Generated steps consist solely of string messages; see
     # data_generator.generate_trajectories for details.
     step_bytes += len(step.message)
+  if metrics_updates > 0:
+    if metadata.trajectory_id is None:
+      raise ValueError("Benchmark TrajectoryMetadata must set trajectory_id.")
+    for update_idx in range(1, metrics_updates + 1):
+      writer.update_metrics(
+          metadata.trajectory_id,
+          trajectory_lib.TrajectoryMetrics(
+              extra={
+                  f"metric_{update_idx}": float(update_idx),
+                  "latest_update": update_idx,
+              }
+          ),
+      )
   return len(steps), step_bytes
 
 
@@ -114,6 +128,7 @@ def _drain_trajectories(
         tuple[trajectory_lib.TrajectoryMetadata, list[trajectory_lib.Step]]
     ],
     lock: threading.Lock,
+    metrics_updates: int = 0,
 ) -> tuple[int, int]:
   """Writes trajectories from a shared iterator until it is exhausted.
 
@@ -125,6 +140,7 @@ def _drain_trajectories(
     writer: The writer dedicated to this worker for the whole checkpoint.
     trajectories: Iterator shared by all workers of the checkpoint.
     lock: Serializes `next()` calls because generators are not thread-safe.
+    metrics_updates: Number of TrajectoryMetrics updates per trajectory.
 
   Returns:
     The (step_count, byte_count) written by this worker.
@@ -137,9 +153,36 @@ def _drain_trajectories(
     if item is None:
       return total_steps, total_bytes
     metadata, steps = item
-    steps_written, bytes_written = _write_trajectory(writer, metadata, steps)
+    steps_written, bytes_written = _write_trajectory(
+        writer, metadata, steps, metrics_updates=metrics_updates
+    )
     total_steps += steps_written
     total_bytes += bytes_written
+
+
+def _validate_checkpoint_reads(
+    reader: store.TrajectoryReader,
+    target_ids: Sequence[str],
+    metas: Sequence[trajectory_lib.TrajectoryMetadata],
+    loaded_trajs: Sequence[trajectory_lib.Trajectory],
+    metrics_updates: int,
+) -> str | None:
+  """Validates recovered metadata, trajectories, and optional metrics."""
+  target_count = len(target_ids)
+  if len(metas) != target_count:
+    return f"Expected {target_count} metadata entries, got {len(metas)}"
+  if len(loaded_trajs) != target_count:
+    return (
+        f"Expected {target_count} loaded trajectories, got {len(loaded_trajs)}"
+    )
+  if metrics_updates > 0:
+    loaded_metrics = reader.get_trajectories_metrics()
+    if len(loaded_metrics) != target_count:
+      return (
+          f"Expected {target_count} trajectory metrics entries, got"
+          f" {len(loaded_metrics)}"
+      )
+  return None
 
 
 def _run_checkpoint(
@@ -152,6 +195,7 @@ def _run_checkpoint(
     target_traj_count: int,
     executor: concurrent.futures.ThreadPoolExecutor,
     num_workers: int,
+    metrics_updates: int = 0,
 ) -> BenchmarkCheckpointMetrics:
   """Executes write, flush, read scan, and validation for a single checkpoint."""
   total_steps = 0
@@ -175,6 +219,7 @@ def _run_checkpoint(
             writers[worker_idx % len(writers)],
             checkpoint_trajectories,
             lock,
+            metrics_updates,
         )
         for worker_idx in range(num_workers)
     ]
@@ -208,19 +253,14 @@ def _run_checkpoint(
     loaded_trajs = reader.get_trajectories(target_ids)
 
   # 3. Validation
-  validation_passed = True
-  validation_error = None
-  if len(metas) != target_traj_count:
-    validation_passed = False
-    validation_error = (
-        f"Expected {target_traj_count} metadata entries, got {len(metas)}"
-    )
-  elif len(loaded_trajs) != target_traj_count:
-    validation_passed = False
-    validation_error = (
-        f"Expected {target_traj_count} loaded trajectories, got"
-        f" {len(loaded_trajs)}"
-    )
+  validation_error = _validate_checkpoint_reads(
+      reader=reader,
+      target_ids=target_ids,
+      metas=metas,
+      loaded_trajs=loaded_trajs,
+      metrics_updates=metrics_updates,
+  )
+  validation_passed = validation_error is None
 
   return BenchmarkCheckpointMetrics(
       checkpoint_write_count=checkpoint_write_count,
@@ -304,6 +344,7 @@ def run_recovery_benchmark(
           target_traj_count=target_traj_count,
           executor=executor,
           num_workers=workload.num_workers,
+          metrics_updates=workload.metrics_updates_per_trajectory,
       )
       status_color = "green" if checkpoint.validation_passed else "red"
       print(

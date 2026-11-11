@@ -16,6 +16,7 @@
 
 from collections.abc import Sequence
 import dataclasses
+import functools
 import sys
 from typing import Any
 from absl import app
@@ -26,6 +27,8 @@ from tunix.dist_rl.trajectory import store
 from tunix.dist_rl.trajectory.explorer import commands
 from tunix.dist_rl.trajectory.explorer.commands import base
 from tunix.dist_rl.trajectory.explorer.commands import ping
+from tunix.dist_rl.trajectory.explorer.diagnostics import schema_diagnostics
+from tunix.dist_rl.trajectory.explorer.diagnostics import tunix_diagnostics
 
 _PROGRAM_NAME = "trajectory-explore"
 
@@ -150,11 +153,16 @@ def get_reader(config: ExplorerConfig) -> store.TrajectoryStore[Any]:
   return trajectory_store
 
 
-def run_cli(argv: Sequence[str] | None = None) -> int:
+def run_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    diagnostics: Sequence[schema_diagnostics.SchemaDiagnostics] = (),
+) -> int:
   """Parses arguments and executes the selected subcommand.
 
   Args:
     argv: Optional sequence of command-line arguments.
+    diagnostics: Schema diagnostics for the subcommand to compute and render.
 
   Returns:
     Process exit code: 0 on success, 2 for a bad combination of flags, and
@@ -169,7 +177,9 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
     print(f"{_PROGRAM_NAME}: error: {error}", file=sys.stderr)
     return 2
   try:
-    return config.cmd.execute(reader, output_json=config.json)
+    return config.cmd.execute(
+        reader, output_json=config.json, diagnostics=diagnostics
+    )
   finally:
     reader.close()
 
@@ -180,19 +190,35 @@ def _flags_parser(argv: Sequence[str]) -> Sequence[str]:
   return argv
 
 
-def main(argv: Sequence[str]) -> None:
+def main(
+    argv: Sequence[str],
+    *,
+    diagnostics: Sequence[schema_diagnostics.SchemaDiagnostics],
+) -> None:
   """Main entry point when executed via absl.app.run.
 
   Args:
     argv: Command-line arguments passed by absl.app.run.
+    diagnostics: Schema diagnostics for the subcommand to compute and render.
   """
-  sys.exit(run_cli(argv[1:]))
+  sys.exit(run_cli(argv[1:], diagnostics=diagnostics))
 
 
-def launch_cli() -> None:
-  """Launches the CLI via absl.app.run with custom flags parser."""
-  app.run(main, flags_parser=_flags_parser)
+def launch_cli(
+    diagnostics: Sequence[schema_diagnostics.SchemaDiagnostics] = (),
+) -> None:
+  """Launches the CLI via absl.app.run with custom flags parser.
+
+  Args:
+    diagnostics: Schema diagnostics for subcommands to compute and render. An
+      entry point passes the diagnostics of the schemas its users store; with
+      none, subcommands report only the statistics every schema shares.
+  """
+  app.run(
+      functools.partial(main, diagnostics=diagnostics),
+      flags_parser=_flags_parser,
+  )
 
 
 if __name__ == "__main__":
-  launch_cli()
+  launch_cli(diagnostics=(tunix_diagnostics.TunixDiagnostics(),))

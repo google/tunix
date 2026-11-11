@@ -21,7 +21,19 @@ import gc
 import math
 import numbers
 import re
-from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Mapping,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 from absl import logging
 from flax import nnx
@@ -30,6 +42,7 @@ import jax
 from jax import lax
 import jax.numpy as jnp
 import numpy as np
+from tunix.rl import packing
 
 
 def validate_unfiltered_sampling(params: Mapping[str, Any] | Any) -> None:
@@ -144,16 +157,6 @@ def next_power_of_2(x: int) -> int:
   if x == 0:
     return 1
   return int(2 ** int(jnp.ceil(jnp.log2(x))))
-
-
-def cdiv(a: int, b: int) -> int:
-  """Returns the ceiling of `a / b` for integers."""
-  return -(-a // b)
-
-
-def get_dtype_packing(dtype: jax.typing.DTypeLike) -> int:
-  """Returns the number of elements of `dtype` packed into 32 bits."""
-  return max(1, 32 // jax.dtypes.itemsize_bits(dtype))
 
 
 def pad_to_length(
@@ -638,36 +641,25 @@ def _unroll_scanned_layers(
 def _apply_transpose(
     val: jnp.ndarray,
     src_key: str,
-    transpose_keys: Optional[Dict[str, Tuple[int, ...]]],
-    rollout_engine: Optional[str],
+    transpose_keys: Optional[Mapping[str, Tuple[int, ...]]],
 ) -> jnp.ndarray:
   """Apply transpose operation if configured for this key."""
-  if not transpose_keys:
+  if not transpose_keys or 'lora' in src_key:
     return val
 
   last_key = src_key.split('.')[-1]
-  all_key = src_key
   target_key = ''
-  if last_key in transpose_keys and 'lora' not in last_key:
+  if last_key in transpose_keys:
     target_key = last_key
-  elif all_key in transpose_keys and 'lora' not in all_key:
-    target_key = all_key
+  elif src_key in transpose_keys:
+    target_key = src_key
   else:
     for k, _ in transpose_keys.items():
       if '*' in k:
         pattern = '^' + re.escape(k).replace('\\*', '.*') + '$'
-        if re.match(pattern, all_key):
+        if re.match(pattern, src_key):
           target_key = k
           break
-
-  # For LoRA
-  # Note: The following codes takes effect in SGLangJAx rollout, and may not take effect in other rollout engine.
-
-  if rollout_engine == 'sglang_jax' and 'lora' in all_key:
-    for r_key in transpose_keys:
-      if re.compile(rf'{r_key}').match(all_key):
-        logging.debug('Applying LoRA transpose on %s', src_key)
-        return jnp.transpose(val[None, :, :], transpose_keys[r_key])
 
   if target_key != '':
     logging.debug('Applying transpose on %s', src_key)
@@ -680,7 +672,6 @@ def _align_shape(
     val: jnp.ndarray,
     tgt_shape: Tuple[int, ...],
     src_key: str,
-    rollout_engine: Optional[str] = None,
     **kwargs,
 ) -> jnp.ndarray:
   """Align source value shape to target shape through padding or repeating.
@@ -691,15 +682,11 @@ def _align_shape(
       biases and projections.
   2.  Padding/Repeating: For attention-related weights, it can pad the head
       dimension or repeat along the number of heads dimension.
-  3.  Special Handling: Includes specific logic for 1-D KV biases in
-      'sglang_jax' rollout.
 
   Args:
       val: Source value.
       tgt_shape: Target shape.
       src_key: Source key for error messages.
-      rollout_engine: Optional string indicating the rollout engine, used for
-        special-casing certain alignments (e.g., 'sglang_jax').
       **kwargs: Additional keyword arguments, potentially containing metadata
         like 'num_kv_heads' and 'head_dim' for specific alignment logic.
 
@@ -800,23 +787,6 @@ def _align_shape(
       raise ShapeMismatchError(
           f'Rank mismatch for {src_key}: {val.shape} vs {tgt_shape}'
       )
-  elif re.compile(r'layers\..*\.attn\.(k|v)_bias').match(src_key):
-    logging.debug('Handling 1-D KV bias for %s in SGLangJAX rollout.', src_key)
-    assert tgt_shape[0] > val.shape[0] and tgt_shape[0] % val.shape[0] == 0, (
-        f'Unexpected attention bias shape: {val.shape} and target shape:'
-        f' {tgt_shape}'
-    )
-    repeat_factor = tgt_shape[0] // val.shape[0]
-    logging.debug(
-        'Replicating 1-D KV bias on %s: %s -> %s (repeat x%d per head)',
-        src_key,
-        val.shape,
-        tgt_shape,
-        repeat_factor,
-    )
-    val_2d = jnp.reshape(val, (kwargs['num_kv_heads'], kwargs['head_dim']))
-    val_2d = jnp.repeat(val_2d, repeat_factor, axis=0)
-    return jnp.reshape(val_2d, tgt_shape)
 
   attention_patterns = [
       r'.*(q|k|v|o|qkv)_proj.*',
@@ -896,47 +866,145 @@ def _apply_dtype_cast(
   return val
 
 
+_FlatKey = Union[str, Tuple[Union[str, int], ...]]
+_StateLeaf = Union[nnx.Variable, jax.Array, np.ndarray, jax.ShapeDtypeStruct]
+
+
+def _flat_key_to_path(flat_key: _FlatKey) -> str:
+  return (
+      flat_key
+      if isinstance(flat_key, str)
+      else '.'.join(str(k) for k in flat_key)
+  )
+
+
+def _lookup_resharded_value(
+    resharded_flat_dict: Mapping[Any, jax.Array | np.ndarray],
+    tgt_key: _FlatKey,
+) -> jax.Array | np.ndarray:
+  """Looks up `tgt_key` across string and tuple-path key representations."""
+  val = resharded_flat_dict.get(tgt_key)
+  if val is None:
+    alt_keys: list[_FlatKey] = (
+        [tuple(tgt_key.split('.')), (tgt_key,)]
+        if isinstance(tgt_key, str)
+        else ['.'.join(str(k) for k in tgt_key)]
+    )
+    for alt_key in alt_keys:
+      if (val := resharded_flat_dict.get(alt_key)) is not None:
+        break
+  assert val is not None, f'Key {tgt_key} not in resharded values'
+  return val
+
+
+class _TiedLmHead(NamedTuple):
+  """Matched source-updated embedding and unsynced target `lm_head` leaves."""
+
+  embed: _StateLeaf
+  lm_head_index: int
+  lm_head_key: _FlatKey
+  lm_head: _StateLeaf
+
+
+def _find_tied_lm_head_pair(
+    tgt_flat_list: Sequence[Tuple[_FlatKey, _StateLeaf]],
+    transferred_target_keys: set[str],
+    *,
+    warn_on_mismatch: bool = False,
+) -> Optional[_TiedLmHead]:
+  """Finds a compatible tied `(embed, lm_head)` pair when `lm_head` is unsynced.
+
+  Args:
+    tgt_flat_list: Sequence of `(flat_key, target_leaf)` pairs for `dst_state`.
+    transferred_target_keys: Dot-separated target key paths updated (or planned
+      to be updated) by the mapping transfer.
+    warn_on_mismatch: Whether to log a warning if a candidate `lm_head` is
+      skipped due to shape or dtype incompatibility with the embedding.
+
+  Returns:
+    A `_TiedLmHead` entry when `embed` is in `transferred_target_keys`,
+    `lm_head` is not, and both leaves share matching shape and dtype; otherwise
+    `None`.
+  """
+  if any(
+      key.endswith(('lm_head', 'lm_head.weight'))
+      for key in transferred_target_keys
+  ):
+    return None
+  embed_param: Optional[_StateLeaf] = None
+  lm_head_entry: Optional[Tuple[int, _FlatKey, _StateLeaf]] = None
+  for idx, (flat_key, tgt_param) in enumerate(tgt_flat_list):
+    path = _flat_key_to_path(flat_key)
+    if (
+        path.endswith(('embedding', 'embed_tokens.weight'))
+        and path in transferred_target_keys
+    ):
+      embed_param = tgt_param
+    elif path.endswith(('lm_head', 'lm_head.weight')):
+      lm_head_entry = (idx, flat_key, tgt_param)
+  if embed_param is None or lm_head_entry is None:
+    return None
+  lm_head_idx, lm_head_flat_key, lm_head_param = lm_head_entry
+  embed_val = getattr(embed_param, 'value', embed_param)
+  lm_head_val = getattr(lm_head_param, 'value', lm_head_param)
+  embed_shape = getattr(embed_val, 'shape', None)
+  embed_dtype = getattr(embed_val, 'dtype', None)
+  lm_head_shape = getattr(lm_head_val, 'shape', None)
+  lm_head_dtype = getattr(lm_head_val, 'dtype', None)
+  if embed_shape is None or (lm_head_shape, lm_head_dtype) != (
+      embed_shape,
+      embed_dtype,
+  ):
+    if warn_on_mismatch:
+      logging.log_first_n(
+          logging.WARNING,
+          'Skipping tied lm_head sync for %s: shape/dtype (%s, %s) does not'
+          ' match embedding (%s, %s).',
+          5,
+          _flat_key_to_path(lm_head_flat_key),
+          lm_head_shape,
+          lm_head_dtype,
+          embed_shape,
+          embed_dtype,
+      )
+    return None
+  return _TiedLmHead(
+      embed=embed_param,
+      lm_head_index=lm_head_idx,
+      lm_head_key=lm_head_flat_key,
+      lm_head=lm_head_param,
+  )
+
+
 def _sync_tied_lm_head_if_needed(
-    tgt_flat_list: List[Tuple[Tuple[str, ...], Any]],
+    tgt_flat_list: List[Tuple[_FlatKey, _StateLeaf]],
     transferred_target_keys: set[str],
 ) -> None:
   """Mirrors embed weights into lm_head when the target implies a tied head.
 
-  Some JAX/vLLM state layouts materialize `lm_head` as a separate destination
-  leaf even when the module graph ties it to `embed.embedding`. If the mapping
-  updates only `embed.embedding`, keep `lm_head` in sync unless `lm_head` was
-  actually transferred from the source state.
+  Some JAX/vLLM state layouts (both `nnx.State` trees and flat `dict` states in
+  `VllmModelWrapper`) materialize `lm_head` as a separate destination leaf even
+  when the model ties it to `embed.embedding`. If the mapping updates the
+  embedding leaf without transferring `lm_head`, keep `lm_head` in sync and
+  record its path in `transferred_target_keys` so resharding handles it
+  uniformly.
 
   Args:
-    tgt_flat_list: A list of tuples, where each tuple contains the nested keys
-      and the corresponding target parameter.
-    transferred_target_keys: Target keys that were actually written during the
-      transfer loop.
+    tgt_flat_list: A list of `(flat_key, target_leaf)` pairs.
+    transferred_target_keys: Target key paths written during the transfer loop;
+      updated in-place with the `lm_head` path when mirrored.
   """
-  if any(key.endswith('lm_head') for key in transferred_target_keys):
+  tied = _find_tied_lm_head_pair(
+      tgt_flat_list, transferred_target_keys, warn_on_mismatch=True
+  )
+  if tied is None:
     return
-
-  embed_param = None
-  lm_head_param = None
-  for flat_key, tgt_param in tgt_flat_list:
-    path = (
-        flat_key
-        if isinstance(flat_key, str)
-        else '.'.join(str(k) for k in flat_key)
-    )
-    if path.endswith(('embedding', 'embed_tokens.weight')):
-      embed_param = tgt_param
-    elif path.endswith(('lm_head', 'lm_head.weight')):
-      lm_head_param = tgt_param
-
-  if embed_param is None or lm_head_param is None:
-    return
-  if not hasattr(embed_param, 'value') or not hasattr(lm_head_param, 'value'):
-    return
-  if embed_param.value.shape != lm_head_param.value.shape:
-    return
-
-  lm_head_param.value = embed_param.value
+  embed_val = getattr(tied.embed, 'value', tied.embed)
+  if hasattr(tied.lm_head, 'value'):
+    setattr(tied.lm_head, 'value', embed_val)
+  else:
+    tgt_flat_list[tied.lm_head_index] = (tied.lm_head_key, embed_val)
+  transferred_target_keys.add(_flat_key_to_path(tied.lm_head_key))
 
 
 def transfer_state_with_mappings(
@@ -946,14 +1014,20 @@ def transfer_state_with_mappings(
     key_mapping_hook_fns=None,
     transpose_keys=None,
     reshard_fn=None,
-    rollout_engine=None,
     **kwargs,
 ):
   """Transfer state using mappings, with optional transpose and shard logic.
 
+  Only target keys updated by `key_mappings` (plus a shape/dtype-compatible
+  tied `lm_head` when mirrored from a transferred embedding) are snapshotted,
+  passed to `reshard_fn`, or freed when `delete_dst_buffers=True`; unmapped
+  destination leaves (such as RNGs, `ShapeDtypeStruct` placeholders, or
+  inference-only rotary caches) are preserved untouched.
+
   Args:
     src_state: The source state to transfer from.
-    dst_state: The destination state to transfer to.
+    dst_state: The destination state to transfer to (`nnx.State`, state with
+      `flat_state()`, or a flat `dict` keyed by dotted strings or key tuples).
     key_mappings: A dictionary defining how to map keys from the source state to
       the target state. The keys of the dictionary are the source keys, and the
       values are tuples containing the target key and the sharding information.
@@ -963,11 +1037,13 @@ def transfer_state_with_mappings(
     transpose_keys: A dictionary defining which keys to transpose and the
       corresponding axes to transpose.
     reshard_fn: A function to shard the value.
-    rollout_engine: The name of the rollout engine being used.
-    **kwargs: Additional keyword arguments.
+    **kwargs: Additional keyword arguments (including `delete_dst_buffers` and
+      `reshard_chunk_size`).
 
   Returns:
-    The target state with the transferred values.
+    The updated target state. When `dst_state` is a `dict`, returns a new
+    `dict` with dotted-string keys that callers must write back if in-place
+    state mutation is required.
   """
   # Get flat target state
   tgt_flat_list = (
@@ -976,24 +1052,39 @@ def transfer_state_with_mappings(
       else list(dst_state.items())
   )
 
-  # Build sharding dictionary if resharding is needed
-  sharding_dict = None
-
-  if reshard_fn:
-    sharding_dict = {
-        key: (
-            tgt_params.value.sharding
-            if hasattr(tgt_params, 'value')
-            else tgt_params.sharding
-        )
-        for key, tgt_params in tgt_flat_list
-    }
-
   # Build source-to-target mapping
   src_to_tgt_map = build_flat_dict(tgt_flat_list, key_mappings)  # type: ignore
 
   # Unroll scanned layers and flatten source state
   unscanned_src_to_tgt_flat = _unroll_scanned_layers(src_state, src_to_tgt_map)
+  planned_target_keys = {
+      _flat_key_to_path(tgt_key) for _, tgt_key in unscanned_src_to_tgt_flat
+  }
+
+  # Snapshot original target buffers prior to in-place parameter updates only
+  # for mapped target keys (plus tied `lm_head` if applicable), leaving
+  # unmapped state leaves (such as RNGs, ShapeDtypeStruct placeholders, or
+  # rotary caches with custom TPU layouts) completely untouched.
+  sharding_dict = None
+  orig_tgt_buffers = None
+  if reshard_fn and planned_target_keys:
+    snapshot_paths = set(planned_target_keys)
+    tied = _find_tied_lm_head_pair(tgt_flat_list, planned_target_keys)
+    if tied is not None:
+      snapshot_paths.add(_flat_key_to_path(tied.lm_head_key))
+    orig_tgt_buffers = {
+        key: tgt_params.value if hasattr(tgt_params, 'value') else tgt_params
+        for key, tgt_params in tgt_flat_list
+        if _flat_key_to_path(key) in snapshot_paths
+    }
+    sharding_dict = {
+        key: _snapshot_dst_sharding(arr)
+        for key, arr in orig_tgt_buffers.items()
+    }
+
+  tgt_path_to_idx = {
+      _flat_key_to_path(tk): idx for idx, (tk, _) in enumerate(tgt_flat_list)
+  }
   transferred_target_keys = set()
 
   # Transfer values with transformations
@@ -1002,7 +1093,7 @@ def transfer_state_with_mappings(
       tgt_param,
   ) in unscanned_src_to_tgt_flat.items():
     # Apply transpose if configured
-    val = _apply_transpose(val, flat_src_key, transpose_keys, rollout_engine)
+    val = _apply_transpose(val, flat_src_key, transpose_keys)
 
     # Apply optional hook function
     if key_mapping_hook_fns and flat_src_key in key_mapping_hook_fns:
@@ -1010,9 +1101,7 @@ def transfer_state_with_mappings(
 
     # Align shapes (padding/repeating as needed)
     tgt_val = tgt_param.value if hasattr(tgt_param, 'value') else tgt_param
-    val = _align_shape(
-        val, tgt_val.shape, flat_src_key, rollout_engine, **kwargs
-    )
+    val = _align_shape(val, tgt_val.shape, flat_src_key, **kwargs)
 
     # Cast to target dtype
     val = _apply_dtype_cast(val, tgt_val.dtype, flat_src_key)
@@ -1021,11 +1110,9 @@ def transfer_state_with_mappings(
     if hasattr(tgt_param, 'value'):
       tgt_param.value = val
     else:
-      for idx, (tk, _) in enumerate(tgt_flat_list):
-        if tk == flat_tgt_key:
-          tgt_flat_list[idx] = (tk, val)
-          break
-    transferred_target_keys.add(flat_tgt_key)
+      idx = tgt_path_to_idx[flat_tgt_key]
+      tgt_flat_list[idx] = (tgt_flat_list[idx][0], val)
+    transferred_target_keys.add(_flat_key_to_path(flat_tgt_key))
 
   # Target rollout engine might have different implementation and have materialized lm_head
   _sync_tied_lm_head_if_needed(tgt_flat_list, transferred_target_keys)
@@ -1034,39 +1121,35 @@ def transfer_state_with_mappings(
   del unscanned_src_to_tgt_flat
   gc.collect()
 
-  # Batch reshard and assign if resharding is configured
-  if reshard_fn:
+  # Batch reshard and assign only the keys updated by this transfer, leaving
+  # unmapped buffers (e.g. RNGs or cos_sin_cache with custom Format) untouched.
+  if reshard_fn and transferred_target_keys:
+    assert orig_tgt_buffers is not None
+    assert sharding_dict is not None
     tgt_flat_dict = {
         key: tgt_params.value if hasattr(tgt_params, 'value') else tgt_params
         for key, tgt_params in tgt_flat_list
+        if _flat_key_to_path(key) in transferred_target_keys
     }
+    orig_tgt_buffers = {key: orig_tgt_buffers[key] for key in tgt_flat_dict}
+    sharding_dict = {key: sharding_dict[key] for key in tgt_flat_dict}
     if kwargs.get('reshard_chunk_size', None) is not None:
       resharded_values_flat_dict = _reshard_in_chunks(
           src_flat=tgt_flat_dict,
-          spec_flat=sharding_dict,  # pyrefly: ignore[bad-argument-type]
+          spec_flat=orig_tgt_buffers,
           reshard_fn=reshard_fn,
           chunk_size=kwargs['reshard_chunk_size'],
           delete_spec_buffers=kwargs.get('delete_dst_buffers', False),
       )
     else:
       if kwargs.get('delete_dst_buffers', False):
-        _delete_target_buffers(
-            sharding_dict, tgt_flat_dict
-        )  # pyrefly: ignore[bad-argument-type]
+        _delete_target_buffers(orig_tgt_buffers, tgt_flat_dict)
       resharded_values_flat_dict = reshard_fn(tgt_flat_dict, sharding_dict)
 
     for idx, (tgt_key, tgt_param) in enumerate(tgt_flat_list):
-      val = resharded_values_flat_dict.get(tgt_key)
-      if val is None:
-        alt_keys = (
-            [tuple(tgt_key.split('.')), (tgt_key,)]
-            if isinstance(tgt_key, str)
-            else ['.'.join(str(k) for k in tgt_key)]
-        )
-        for alt_key in alt_keys:
-          if (val := resharded_values_flat_dict.get(alt_key)) is not None:
-            break
-      assert val is not None, f'Key {tgt_key} not in resharded values'
+      if _flat_key_to_path(tgt_key) not in transferred_target_keys:
+        continue
+      val = _lookup_resharded_value(resharded_values_flat_dict, tgt_key)
       if hasattr(tgt_param, 'value'):
         tgt_param.value = val
       else:
@@ -1599,7 +1682,7 @@ def _fuse_moe_weights(
 
 
 def _collect_src_buffer_ids(
-    src_flat: Mapping[Tuple[str, ...], jax.Array | np.ndarray | nnx.Variable],
+    src_flat: Mapping[Any, Any],
 ) -> Optional[set[int]]:
   """Collects physical device buffer pointers for arrays in src_flat.
 
@@ -1629,20 +1712,37 @@ def _collect_src_buffer_ids(
 
 
 def _delete_target_buffers(
-    spec_flat: Mapping[Tuple[str, ...], jax.Array | np.ndarray | nnx.Variable],
-    src_flat: Mapping[Tuple[str, ...], jax.Array | np.ndarray | nnx.Variable],
+    spec_flat: Mapping[Any, Any],
+    src_flat: Mapping[Any, Any],
 ) -> None:
   """Deletes target arrays in spec_flat that don't alias any source shard."""
   # This will be a set() of IDs, or None if we are on Pathways
   src_buffer_ids = _collect_src_buffer_ids(src_flat)
+  src_obj_ids = {
+      id(v.value if hasattr(v, 'value') else v) for v in src_flat.values()
+  }
+
   for tgt_val in spec_flat.values():
     tgt_arr = tgt_val.value if hasattr(tgt_val, 'value') else tgt_val
+
+    # Skip if the target array is the same object as a source array.
+    if id(tgt_arr) in src_obj_ids:
+      continue
+
     # Skip if the array cannot be deleted or is already deleted
     if (
         not hasattr(tgt_arr, 'delete')
         or getattr(tgt_arr, 'is_deleted', lambda: False)()
     ):
       continue
+
+    # Never delete CPU-offloaded buffers on pinned_host
+    if (
+        isinstance(tgt_arr, jax.Array)
+        and tgt_arr.sharding.memory_kind == 'pinned_host'
+    ):
+      continue
+
     # Check for aliasing only if the backend supports buffer pointer tracking
     if src_buffer_ids is not None and hasattr(tgt_arr, 'addressable_shards'):
       aliases_source = any(
@@ -1652,6 +1752,100 @@ def _delete_target_buffers(
       if aliases_source:
         continue
     tgt_arr.delete()
+
+
+def _flatten_state(
+    state: Any,
+) -> Dict[Tuple[str, ...], jax.Array | np.ndarray | nnx.Variable]:
+  """Flattens a state container into a dict keyed by string path tuples."""
+  if state is None:
+    return {}
+  items = (
+      state.flat_state()
+      if hasattr(state, 'flat_state')
+      else traverse_util.flatten_dict(state).items()
+  )
+  return {tuple(_flat_key_to_path(k).split('.')): v for k, v in items}
+
+
+def _mapped_target_items(
+    src_to_tgt_map: Mapping[str, Any],
+) -> Dict[Tuple[str, ...], Any]:
+  """Extracts `(path_tuple -> target_leaf)` items from `build_flat_dict`."""
+  spec_flat: Dict[Tuple[str, ...], Any] = {}
+  for tgt_param, tgt_path, _ in src_to_tgt_map.values():
+    pairs = (
+        zip(tgt_param, tgt_path)
+        if isinstance(tgt_path, list)
+        else [(tgt_param, tgt_path)]
+    )
+    for val, path in pairs:
+      spec_flat[tuple(path.split('.'))] = val
+  return spec_flat
+
+
+def delete_state_buffers(
+    dst_state: Any,
+    src_state: Any = None,
+    key_mappings: Optional[Mapping[str, Any]] = None,
+) -> None:
+  """Deletes device weight buffers in `dst_state` that will be overwritten.
+
+  Supports three modes:
+  1. `key_mappings` + `src_state` provided: deletes only target leaves mapped
+     from keys present in `src_state` (plus a compatible tied `lm_head`),
+     skipping any target buffer that aliases a `src_state` buffer.
+  2. `key_mappings` + `src_state=None`: deletes all mapped target leaves (plus
+     a compatible tied `lm_head`) while preserving unmapped buffers such as
+     `cos_sin_cache`; no source-aliasing check is performed since `src_state`
+     is omitted.
+  3. `key_mappings=None`: deletes non-`rng` target leaves (intersected with
+     `src_state` keys and checked for aliasing when `src_state` is provided).
+
+  Args:
+    dst_state: Destination state holding device buffers to free.
+    src_state: Optional source state used to scope partial updates and protect
+      aliased buffers from deletion.
+    key_mappings: Optional source-to-target mapping dictionary.
+  """
+  tgt_flat = _flatten_state(dst_state)
+  if not tgt_flat:
+    return
+  if not key_mappings:
+    src_flat = _flatten_state(src_state)
+    spec_flat = {
+        k: v
+        for k, v in tgt_flat.items()
+        if 'rng' not in k and (not src_flat or k in src_flat)
+    }
+    _delete_target_buffers(spec_flat, src_flat)
+    return
+
+  tgt_flat_items = list(tgt_flat.items())
+  src_to_tgt_map = build_flat_dict(
+      tgt_flat_items, dict(key_mappings)  # pyrefly: ignore[bad-argument-type]
+  )
+  if src_state is None:
+    src_flat = {}
+    spec_flat = _mapped_target_items(src_to_tgt_map)
+  else:
+    unscanned = _unroll_scanned_layers(src_state, src_to_tgt_map)
+    spec_flat = {
+        tuple(tgt_key.split('.')): tgt_param
+        for (_, tgt_key), (_, tgt_param) in unscanned.items()
+    }
+    src_flat = {
+        tuple(tgt_key.split('.')): val
+        for (_, tgt_key), (val, _) in unscanned.items()
+    }
+  tied = _find_tied_lm_head_pair(
+      tgt_flat_items, {'.'.join(k) for k in spec_flat}
+  )
+  if tied is not None:
+    spec_flat[tuple(_flat_key_to_path(tied.lm_head_key).split('.'))] = (
+        tied.lm_head
+    )
+  _delete_target_buffers(spec_flat, src_flat)
 
 
 def _snapshot_dst_sharding(
@@ -2213,26 +2407,6 @@ def is_token_id_sequence(prompt: Any) -> bool:
   )
 
 
-def as_token_ids(value) -> np.ndarray:
-  """Copies token IDs into an owned 1-D int32 array.
-
-  Raises:
-    ValueError: `value` is not one-dimensional.
-  """
-  array = np.array(value, dtype=np.int32)
-  if array.ndim != 1:
-    raise ValueError(f'token ids must be 1-D, got shape {array.shape}')
-  return array
-
-
-def unpad_prompt(padded_tokens, length: int) -> np.ndarray:
-  """Returns the last `length` tokens of a left-padded prompt row."""
-  arr = as_token_ids(padded_tokens)
-  if length <= 0:
-    return np.zeros(0, dtype=np.int32)
-  return arr[-int(length) :]
-
-
 def unpad_prompt_tokens(
     padded_tokens: Any,
     pad_id: int | None = None,
@@ -2240,7 +2414,7 @@ def unpad_prompt_tokens(
 ) -> np.ndarray:
   """Returns sampler-tokenized prompt ids without backend left padding."""
   if prompt_length is not None:
-    return unpad_prompt(padded_tokens, int(prompt_length))
+    return packing.unpad_prompt(padded_tokens, int(prompt_length))
   arr = np.asarray(padded_tokens, dtype=np.int32).reshape(-1)
   if not isinstance(pad_id, numbers.Integral):
     return arr
@@ -2268,7 +2442,7 @@ def resolve_prompt_tokens(
       raise ValueError('prompt_token_ids must not be empty')
     if not single_output_per_row:
       raise ValueError('prompt_token_ids requires exactly one output per row')
-    prompt_ids = [as_token_ids(row) for row in prompt_token_ids]
+    prompt_ids = [packing.as_token_ids(row) for row in prompt_token_ids]
     if max_total_length is not None and any(
         len(row) + max_generation_steps > max_total_length for row in prompt_ids
     ):
@@ -2362,8 +2536,44 @@ def check_prompt_echo(
     if isinstance(echoed, (int, np.integer)):
       matches = int(echoed) == len(expected)
     else:
-      matches = np.array_equal(as_token_ids(echoed), expected)
+      matches = np.array_equal(packing.as_token_ids(echoed), expected)
     if not matches:
       raise ValueError(
           f'{backend_name} prompt echo / prompt_token_ids differed from input'
       )
+
+
+def merge_additional_config(
+    base: Mapping[str, Any] | None,
+    override: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+  """Merges vLLM `additional_config` overrides onto a base config.
+
+  Top-level keys in `override` replace those in `base`, except
+  `maxtext_config`, whose entries are merged one level deep so that an override
+  only replaces the MaxText settings it names.
+
+  Args:
+    base: The base `additional_config`, or None.
+    override: Entries to apply on top of `base`, or None.
+
+  Returns:
+    The merged config, or None if both inputs are None or the merged config is
+    empty.
+  """
+  if base is None and override is None:
+    return None
+  merged: dict[str, Any] = dict(base) if base is not None else {}
+  if override:
+    override_items = dict(override)
+    if 'maxtext_config' in override_items:
+      override_maxtext_config = override_items.pop('maxtext_config')
+      if override_maxtext_config is not None:
+        merged['maxtext_config'] = {
+            **(merged.get('maxtext_config') or {}),
+            **override_maxtext_config,
+        }
+      else:
+        merged['maxtext_config'] = None
+    merged.update(override_items)
+  return merged or None

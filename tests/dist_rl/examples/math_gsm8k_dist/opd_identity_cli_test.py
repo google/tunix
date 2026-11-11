@@ -64,7 +64,7 @@ class OPDIdentityCliTest(unittest.TestCase):
   def test_launcher_forwards_declared_revision_as_one_argument(self):
     launcher = (
         Path(__file__).resolve().parents[4]
-        / "tunix/dist_rl/examples/math_gsm8k_dist/launcher.sh"
+        / "tunix/dist_rl/examples/math_gsm8k_dist/opd_launcher.sh"
     ).read_text()
     start = launcher.index("  ORCHESTRATOR_CMD=(")
     end = launcher.index("  export JAX_PLATFORMS=cpu", start)

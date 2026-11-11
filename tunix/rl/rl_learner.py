@@ -30,6 +30,7 @@ from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import common
 from tunix.rl import function_registry
+from tunix.rl import packing
 from tunix.rl import reward_manager
 from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl import utils as rl_utils
@@ -135,7 +136,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       else:
         r_config = rollout_config
 
-      rl_utils.validate_packing_budget(
+      packing.validate_packing_budget(
           self._training_config.max_seq_token_per_tpu,
           getattr(r_config, "max_prompt_length", 1000000),
           getattr(algo_config, "max_response_length", None)
@@ -157,14 +158,11 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         )
     )
 
-    # Enable async rollout if trainer and rollout are not on the same mesh.
-    # If they do, then doesn't make sense for the interleave because they will
-    # have resource contention.
-    self.can_enable_async_rollout = (
-        self.rl_engine.cluster_config.role_to_mesh[rl_engine_lib.Role.ACTOR]
-        != self.rl_engine.cluster_config.role_to_mesh[
-            rl_engine_lib.Role.ROLLOUT
-        ]
+    # Enable async rollout if trainer and rollout are not colocated on the same
+    # physical devices. If they are colocated, interleaving causes resource
+    # contention.
+    self.can_enable_async_rollout = not self.rl_engine.is_colocated(
+        rl_engine_lib.Role.ACTOR, rl_engine_lib.Role.ROLLOUT
     )
     self.executor = futures.ThreadPoolExecutor(max_workers=1)
     self._last_iter_step = self.rl_engine.actor_trainer.iter_steps

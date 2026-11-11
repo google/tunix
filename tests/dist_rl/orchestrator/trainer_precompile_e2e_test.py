@@ -19,7 +19,8 @@ Drives the exact production sequence against a real `PeftTrainer` on CPU:
 1. `LifecycleDriver.bring_up`: `initialize()`, `compile(None)`, `start()`.
 2. `DistributedRLEngine.configure_worker`: `with_loss_fn`,
    `with_gen_model_input_fn`, then `compile(assembler.build_dummy_payload())`.
-3. First real microbatch from `GRPOAdapter` + the same assembler.
+3. First real microbatch from `payload_builder.create_trainer_payloads` + the
+   same assembler.
 
 and asserts step 3 triggers neither a new trace nor an XLA backend compile of
 any trainer step executable (`fwd_bwd`, `update`, `eval`).
@@ -34,17 +35,20 @@ from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
 import jax
+import jax.numpy as jnp
 import numpy as np
 import optax
 from tunix.dist_rl.common import datatypes
-from tunix.dist_rl.orchestrator import algorithm_adapter
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.orchestrator import distributed_rl_engine
+from tunix.dist_rl.orchestrator import payload_builder
 from tunix.dist_rl.orchestrator import worker_registry
+from tunix.dist_rl.testing import worker_registry_testing
 from tunix.dist_rl.train import peft_trainer_v2
 from tunix.dist_rl.worker import remote_execution
 from tunix.dist_rl.worker import trainer_worker
 from tunix.rl import algorithm_config
+from tunix.rl import common as rl_common
 from tunix.tests import test_common as tc
 
 try:
@@ -60,7 +64,7 @@ _BACKEND_COMPILE_EVENT = "/jax/core/compile/backend_compile_duration"
 # Names of the jitted trainer step bodies as they appear in compile events;
 # `traced_*` are the wrappers installed by `_build_trainer` below.
 _STEP_EXECUTABLES = ("traced_fwd_bwd", "traced_update", "_eval_step")
-_MAXTEXT_STEP_EXECUTABLES = ("fwd_bwd", "fwd_bwd_accum", "update", "kernel")
+_MAXTEXT_STEP_EXECUTABLES = ("fwd_bwd", "accumulate", "update", "kernel")
 
 
 def _rollouts(
@@ -293,19 +297,25 @@ class TrainerPrecompileE2ETest(parameterized.TestCase):
         wrap_with_tunix_adapter=True,
         tokenizer_pad_id=0,
     )
-    trace_counts = {"fwd_bwd": 0, "update": 0}
+    trace_counts = {"fwd_bwd": 0, "accumulate": 0, "update": 0}
     orig_fwd_bwd = engine._fwd_bwd_kernel
+    orig_accumulate = engine._accumulate_kernel
     orig_update = engine._update_kernel
 
     def traced_fwd_bwd(*args, **kwargs):
       trace_counts["fwd_bwd"] += 1
       return orig_fwd_bwd(*args, **kwargs)
 
+    def traced_accumulate(*args, **kwargs):
+      trace_counts["accumulate"] += 1
+      return orig_accumulate(*args, **kwargs)
+
     def traced_update(*args, **kwargs):
       trace_counts["update"] += 1
       return orig_update(*args, **kwargs)
 
     engine._fwd_bwd_kernel = traced_fwd_bwd
+    engine._accumulate_kernel = traced_accumulate
     engine._update_kernel = traced_update
     return engine, trace_counts
 
@@ -327,6 +337,9 @@ class TrainerPrecompileE2ETest(parameterized.TestCase):
     )
     registry = worker_registry.WorkerRegistry()
     registry.register_handle("trainer-0", [datatypes.Role.ACTOR], handle)
+    worker_registry_testing.set_status(
+        registry, "trainer-0", worker_registry.AdmissionStatus.ACTIVE
+    )
     engine = distributed_rl_engine.DistributedRLEngine(registry=registry)
     handle.submit("initialize")
     handle.submit("compile", None)
@@ -340,30 +353,23 @@ class TrainerPrecompileE2ETest(parameterized.TestCase):
         routed_experts_encode_mode=routed_experts_encode_mode,
     )
     algo_cfg.temperature = 1.0
-    adapter = algorithm_adapter.GRPOAdapter(
-        algo_config=algo_cfg,
-        mini_batch_size=1,
-        train_micro_batch_size=2,
-        max_packed_len=8,
-        max_response_length=3,
-    )
     assembler = _make_assembler(assembler_kind)
     self.compiled_fns.clear()
     engine.configure_worker(
         role=datatypes.Role.ACTOR,
-        algo=adapter,
+        algo_config=algo_cfg,
         assembler=assembler,
         can_fuse_agreement_in_loss=can_fuse_agreement_in_loss,
         precompile=precompile,
         return_routed_experts=routed_experts_shape is not None,
     )
-    return worker, adapter, assembler
+    return worker, algo_cfg, assembler
 
   def _run_first_real_step(
       self,
       worker,
       trainer,
-      adapter,
+      algo_cfg,
       assembler,
       *,
       can_fuse_agreement_in_loss: bool = True,
@@ -372,9 +378,10 @@ class TrainerPrecompileE2ETest(parameterized.TestCase):
   ) -> int:
     (assembled,) = list(
         assembler.feed(
-            adapter.create_trainer_payloads(
+            payload_builder.create_trainer_payloads(
                 _rollouts(routed_experts_shape, num_experts=num_experts),
                 [1.0, 0.0],
+                algo_config=algo_cfg,
             )
         )
     )
@@ -392,7 +399,7 @@ class TrainerPrecompileE2ETest(parameterized.TestCase):
     )
     self.compiled_fns.clear()
     worker.fwd_bwd(datatypes.TrainRequest(payload=real_payload))
-    step = worker.update()
+    step, _ = worker.update()
     params_after = nnx.state(trainer.model, nnx.Param)
     self.assertTrue(
         any(
@@ -508,9 +515,9 @@ class TrainerPrecompileE2ETest(parameterized.TestCase):
         can_fuse_agreement_in_loss=can_fuse_agreement_in_loss,
     )
 
-    # `compile_kernels` lowers both `fwd_bwd` and `fwd_bwd_accum` (2 traces of
-    # `_fwd_bwd_kernel`) and `update` (1 trace of `_update_kernel`).
-    self.assertEqual(trace_counts, {"fwd_bwd": 2, "update": 1})
+    # `compile` lowers `fwd_bwd`, `accumulate`, and `update` (1 trace each of
+    # `_fwd_bwd_kernel`, `_accumulate_kernel`, and `_update_kernel`).
+    self.assertEqual(trace_counts, {"fwd_bwd": 1, "accumulate": 1, "update": 1})
     compiled_at_configure = self._compiled_step_executables(
         _MAXTEXT_STEP_EXECUTABLES
     )
@@ -532,6 +539,87 @@ class TrainerPrecompileE2ETest(parameterized.TestCase):
     self.assertEqual(step, 1)
     self.assertEqual(trace_counts, traces_after_configure)
     self.assertEmpty(self._compiled_step_executables(_MAXTEXT_STEP_EXECUTABLES))
+
+  @absltest.skipUnless(
+      MAXTEXT_AVAILABLE
+      # TODO(igorts): Drop hasattr guard once cl/1015725345 lands.
+      and hasattr(maxtext_engine.MaxTextTrainingEngine, "with_fwd_only_fn"),
+      "requires MaxText with with_fwd_only_fn",
+  )
+  @parameterized.named_parameters(
+      ("padded", "padded"),
+      ("packed", "packed"),
+  )
+  def test_maxtext_engine_per_token_logps_padded_and_packed(
+      self, assembler_kind
+  ):
+    engine, _ = self._build_maxtext_trainer()
+    worker = trainer_worker.TrainerWorker(
+        trainer_factory=lambda: engine,
+        worker_id="trainer-0",
+        logps_micro_batch_size=1,
+    )
+    worker.initialize()
+
+    if assembler_kind == "padded":
+      req = datatypes.LogprobsRequest(
+          prompt_tokens=np.array([[0, 1, 2, 3], [0, 0, 1, 2]], dtype=np.int32),
+          completion_tokens=np.array([[4, 5, 1], [6, 1, 0]], dtype=np.int32),
+          temperature=1.0,
+          pad_id=0,
+          eos_id=1,
+      )
+    elif assembler_kind == "packed":
+      req = datatypes.LogprobsRequest(
+          prompt_tokens=np.zeros((2, 0), dtype=np.int32),
+          completion_tokens=np.array(
+              [[2, 3, 1, 4, 5, 1, 0, 0], [3, 4, 5, 1, 0, 0, 0, 0]],
+              dtype=np.int32,
+          ),
+          segment_ids=np.array(
+              [[1, 1, 1, 2, 2, 2, 0, 0], [1, 1, 1, 1, 0, 0, 0, 0]],
+              dtype=np.int32,
+          ),
+          segment_positions=np.array(
+              [[0, 1, 2, 0, 1, 2, 0, 0], [0, 1, 2, 3, 0, 0, 0, 0]],
+              dtype=np.int32,
+          ),
+          temperature=1.0,
+          pad_id=0,
+          eos_id=1,
+      )
+    else:
+      raise ValueError(f"Unknown assembler_kind: {assembler_kind}")
+
+    resp = worker.per_token_logps(items=req)
+
+    graphdef, state = nnx.split(engine.model)
+    with engine._sharding_ctx():
+      expected = np.asarray(
+          rl_common.compute_per_token_logps(
+              graphdef,
+              state,
+              prompt_tokens=jnp.asarray(req.prompt_tokens),
+              completion_tokens=jnp.asarray(req.completion_tokens),
+              pad_id=req.pad_id,
+              eos_id=req.eos_id,
+              stop_gradient=True,
+              temperature=req.temperature,
+              segment_ids=(
+                  None
+                  if req.segment_ids is None
+                  else jnp.asarray(req.segment_ids)
+              ),
+              segment_positions=(
+                  None
+                  if req.segment_positions is None
+                  else jnp.asarray(req.segment_positions)
+              ),
+          )
+      )
+    np.testing.assert_allclose(
+        resp.per_token_logps, expected, rtol=1e-4, atol=1e-4
+    )
 
 
 if __name__ == "__main__":

@@ -25,16 +25,16 @@ import copy
 import inspect
 import json
 import time
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from absl import logging
 import numpy as np
 from tunix.dist_rl.trajectory import base_store as store_lib
 from tunix.dist_rl.trajectory import converter as converter_lib
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
-from tunix.generate import utils as generate_utils
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import tracer as perf_tracer_v2
+from tunix.rl import packing
 from tunix.rl.agentic import utils
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
@@ -43,6 +43,141 @@ from tunix.rl.rollout import base_rollout
 
 BaseTaskEnv = base_environment.BaseTaskEnv
 ConversationAgentBase = base_agent.ConversationAgentBase
+
+
+def encode_turn_routed_experts(
+    routed: np.ndarray,
+    encode_mode: packing.RoutedExpertsEncodeMode,
+    num_experts: Optional[int],
+    ep_enc: Optional[packing.RoutedExpertsWireEncoding],
+    prompt_routed: Optional[np.ndarray],
+    step_routed_pairs: Sequence[
+        Tuple[Optional[np.ndarray], Optional[np.ndarray]]
+    ],
+) -> Tuple[
+    np.ndarray,
+    Optional[packing.RoutedExpertsWireEncoding],
+    Optional[np.ndarray],
+    Optional[List[Tuple[Optional[np.ndarray], Optional[np.ndarray]]]],
+]:
+  """Pure worker-thread helper that encodes one turn's `routed_experts`.
+
+  Widens raw model output (including raw 0-based `uint8` arrays emitted by vLLM
+  when `num_experts <= 256`, which must never be passed to
+  `encode_routed_experts`
+  as `uint8` since `uint8` denotes already `+1`-shifted wire bytes) to `int16`
+  before encoding, and performs zero mutations on `TrajectoryCollectEngine` or
+  `Trajectory` state so an `asyncio.timeout` cancellation never partially
+  mutates
+  episode slices.
+
+  Args:
+    routed: Unbatched `(T, L, K)` integer array of raw expert IDs for this turn.
+    encode_mode: Configured wire encoding mode (`"auto"`, `"uint8"`, `"uint10"`,
+      or `"int16"`).
+    num_experts: Optional total expert count per MoE layer for bounds/tiering.
+    ep_enc: Active episode wire tier from earlier turns, or `None` on turn 0.
+    prompt_routed: Existing encoded `traj.prompt_routed_experts`, if any.
+    step_routed_pairs: Existing `(assistant_routed_experts, env_routed_experts)`
+      tuples for recorded steps prior to this turn.
+
+  Returns:
+    A 4-tuple `(encoded_turn, new_ep_enc, new_prompt, new_steps)` where
+    `new_prompt` and `new_steps` are non-`None` only when this turn promoted
+    `ep_enc` to a wider wire tier.
+  """
+  raw = np.asarray(routed)
+  if raw.dtype.kind not in ("i", "u"):
+    raise ValueError(
+        f"routed_experts must have an integer dtype, got {raw.dtype}."
+    )
+  if (
+      raw.size
+      and (raw.dtype.itemsize > 2 or raw.dtype == np.uint16)
+      and not (-32768 <= int(raw.min()) <= int(raw.max()) <= 32767)
+  ):
+    raise ValueError("routed_experts values exceed int16 range.")
+  raw_i16 = np.asarray(raw, dtype=np.int16)
+  if encode_mode == "auto" and num_experts is None and ep_enc != "int16":
+    logging.log_first_n(
+        logging.WARNING,
+        "Encoding routed_experts with routed_experts_encode_mode='auto'"
+        " and routed_experts_num_experts=None. For MoE models with >255"
+        " experts, set routed_experts_num_experts (or"
+        " routed_experts_encode_mode='uint10') to avoid re-encoding"
+        " earlier turns on mid-episode tier promotion and tier mismatches"
+        " across trajectories in a batch.",
+        1,
+    )
+  effective_mode: packing.RoutedExpertsEncodeMode = (
+      "int16" if ep_enc == "int16" else encode_mode
+  )
+  encoded = packing.encode_routed_experts(
+      raw_i16,
+      mode=effective_mode,
+      num_experts=num_experts,
+      batched=False,
+  )
+  turn_enc = packing.routed_experts_encoding(encoded, batched=False)
+  if ep_enc is None or ep_enc == turn_enc:
+    return encoded, turn_enc, None, None
+  if packing.widest_routed_encoding((ep_enc, turn_enc)) == ep_enc:
+    return (
+        packing.encode_routed_experts(raw_i16, mode=ep_enc, batched=False),
+        ep_enc,
+        None,
+        None,
+    )
+  # Rare safety-net branch: (a) triggers only when `mode="auto"` and
+  # `num_experts=None` encounters a wider expert ID on a later turn; (b)
+  # `num_experts` (recommended; see warning above) or an explicit tier pins the
+  # tier at turn 0, and under the default `auto`/`None` config `E <= 255` never
+  # promotes while `E >= 256` almost always reaches its final tier on turn 0
+  # because its `T * L * K` samples already span IDs `> 254`; (c) computing
+  # widened slices purely here and committing on the event-loop thread beats the
+  # naive alternative of keeping raw `int16` for the whole episode and encoding
+  # at exit (which doubles in-memory routing RAM across concurrent long-context
+  # episodes) while keeping `asyncio.timeout` cancellation atomic.
+  new_prompt = packing.encode_routed_experts(
+      prompt_routed,
+      mode=turn_enc,
+      batched=False,
+  )
+  new_steps = [
+      (
+          packing.encode_routed_experts(asst_r, mode=turn_enc, batched=False),
+          packing.encode_routed_experts(env_r, mode=turn_enc, batched=False),
+      )
+      for asst_r, env_r in step_routed_pairs
+  ]
+  return encoded, turn_enc, new_prompt, new_steps
+
+
+async def _encode_turn_routed_async(
+    engine: "TrajectoryCollectEngine", routed: np.ndarray
+) -> np.ndarray:
+  """Offloads turn router encoding to a worker thread and commits atomically."""
+  traj: agent_types.Trajectory = engine.agent.trajectory
+  prompt_routed = traj.prompt_routed_experts
+  step_pairs = [
+      (s.assistant_routed_experts, s.env_routed_experts) for s in traj.steps
+  ]
+  encoded, new_ep_enc, new_prompt, new_steps = await asyncio.to_thread(
+      encode_turn_routed_experts,
+      routed,
+      engine.routed_experts_encode_mode,
+      engine.routed_experts_num_experts,
+      engine._episode_routed_experts_encoding,  # pylint: disable=protected-access
+      prompt_routed,
+      step_pairs,
+  )
+  engine._episode_routed_experts_encoding = new_ep_enc  # pylint: disable=protected-access
+  if new_steps is not None:
+    traj.prompt_routed_experts = new_prompt
+    for step_obj, (asst_r, env_r) in zip(traj.steps, new_steps):
+      step_obj.assistant_routed_experts = asst_r
+      step_obj.env_routed_experts = env_r
+  return encoded
 
 
 class TrajectoryCollectEngine:
@@ -75,11 +210,12 @@ class TrajectoryCollectEngine:
       filter_statuses: Optional[Set[agent_types.TrajectoryStatus]] = None,
       overlong_filter: bool = False,
       perf_v2: Optional[perf_tracer_v2.Tracer] = None,
-      exact_token_continuity: bool = False,
       policy_version: Optional[int] = None,
       trajectory_store: Optional[store_lib.TrajectoryWriter] = None,
       metadata: Optional[trajectory_lib.TrajectoryMetadata] = None,
       store_routed_experts: bool = False,
+      routed_experts_encode_mode: packing.RoutedExpertsEncodeMode = "int16",
+      routed_experts_num_experts: Optional[int] = None,
   ):
     """Initialize the trajectory collection engine.
 
@@ -87,9 +223,15 @@ class TrajectoryCollectEngine:
         agent (ConversationAgentBase): The agent that will interact with the
           environment
         env (BaseTaskEnv): The environment providing tasks and feedback
-        model_call (Callable): Function that takes chat completions as first
-          argument with optional kwargs and returns model response string.
-          Handles the actual LLM inference.
+        model_call (Callable): Sync or async callable handling LLM inference and
+          returning a `RolloutOutput`. Invoked as `model_call(chat_completions,
+          env, max_generation_steps=..., **kwargs)` on the first turn (and on
+          all turns when token tracking is disabled). When both `tokenizer` and
+          `chat_parser` are provided, turns after the first pass
+          `chat_completions=None` and keyword argument `prompt_token_ids`
+          containing the recorded token IDs from prior turns; every turn's
+          `RolloutOutput` must provide 2-D `left_padded_prompt_tokens` and
+          non-None `prompt_lengths` echoing the submitted prompt IDs.
         model_call_kwargs (Optional[Dict[str, Any]]): Optional kwargs to pass to
           model_call.
         gamma (float): Discount factor for MC reward calculation (1.0 = no
@@ -99,8 +241,8 @@ class TrajectoryCollectEngine:
         timeout (float): Maximum episode duration in seconds before timeout
           termination. Model calls after the first turn are cut off, and no
           model call or env.step starts, once it is spent.
-        reset_timeout (Optional[float]): Deadline in seconds for `env.reset`;
-          if it passes, `collect()` raises `asyncio.TimeoutError` and closes the
+        reset_timeout (Optional[float]): Deadline in seconds for `env.reset`; if
+          it passes, `collect()` raises `asyncio.TimeoutError` and closes the
           env while `env.reset` may still run in its executor thread. Defaults
           to 3600.0; None means no deadline.
         final_reward_timeout (Optional[float]): Deadline in seconds for the
@@ -108,16 +250,19 @@ class TrajectoryCollectEngine:
           `asyncio.TimeoutError` and closes the env while the grader may still
           run in its executor thread. Defaults to 3600.0; None means no
           deadline.
-        tokenizer: Optional tokenizer for converting messages to token IDs. This
-          is required if we want to track down token counts.
-        chat_parser: Optional chat parser for formatting messages
+        tokenizer: Optional tokenizer for encoding environment observations.
+          Providing both `tokenizer` and `chat_parser` enables token tracking
+          with multi-turn token continuity (first turn tokenized by
+          `model_call`, subsequent turns prompted via `prompt_token_ids`, and
+          `agent` chat history restricted to append-only updates).
+        chat_parser: Optional chat template parser used with `tokenizer` to
+          tokenize environment observations and append assistant end-of-turn
+          suffix tokens (`update_assistant_end_tokens` must only append tokens).
         filter_statuses (Set[TrajectoryStatus]): A set of statuses that are
           masked out for overlong filtering.
         overlong_filter: Whether to filter overlong trajectories.
         perf_v2 (Optional[perf_tracer_v2.Tracer]): Optional performance tracer
           to use for performance measurements. Defaults to a no-op tracer.
-        exact_token_continuity: Preserve recorded token history on later turns.
-          Requires a token-aware model_call, tokenizer, and parser.
         policy_version: Optional policy version integer to pass down for
           trajectory and performance tracing.
         trajectory_store: Optional TrajectoryWriter to write trajectory steps
@@ -125,12 +270,23 @@ class TrajectoryCollectEngine:
         metadata: Optional TrajectoryMetadata for the current episode.
         store_routed_experts: Whether to persist captured prefill MoE
           routed_experts to `trajectory_store` on each agent step.
+        routed_experts_encode_mode: Wire encoding mode (`"auto"`, `"uint8"`,
+          `"uint10"`, or `"int16"`) applied to each turn's captured MoE
+          `routed_experts` before storing in trajectory steps and
+          `trajectory_store`.
+        routed_experts_num_experts: Optional total number of experts per MoE
+          layer used to select a deterministic compact tier when
+          `routed_experts_encode_mode == "auto"`.
     """
     if not isinstance(store_routed_experts, bool):
       raise ValueError(
           "store_routed_experts must be a bool, got"
           f" {store_routed_experts!r}"
       )
+    packing.validate_routed_experts_encode_config(
+        routed_experts_encode_mode,
+        routed_experts_num_experts,
+    )
     self.agent = agent
     self.env = env
     self.model_call = model_call
@@ -138,12 +294,12 @@ class TrajectoryCollectEngine:
     self.trajectory_store = trajectory_store
     self.metadata = metadata
     self.store_routed_experts = store_routed_experts
-    self.final_reward_fn = None
+    self.routed_experts_encode_mode: packing.RoutedExpertsEncodeMode = (
+        routed_experts_encode_mode
+    )
+    self.routed_experts_num_experts: Optional[int] = routed_experts_num_experts
     self.model_call_kwargs = model_call_kwargs or {}
-    if exact_token_continuity and (tokenizer is None or chat_parser is None):
-      raise ValueError("exact_token_continuity requires a tokenizer and parser")
-    self.exact_token_continuity = exact_token_continuity
-    self._exact_chat_history = None
+    self._recorded_chat_history: List[Dict[str, Any]] = []
     self.perf_v2 = (
         perf_v2 if perf_v2 is not None else perf_tracer_v2.NoopTracer()
     )
@@ -161,6 +317,9 @@ class TrajectoryCollectEngine:
     # Tokenizer utilities for stepwise tokenization
     self.tokenizer = tokenizer
     self.chat_parser = chat_parser
+    self._tracks_tokens: bool = (
+        tokenizer is not None and chat_parser is not None
+    )
     self._start_ts: float = 0.0
     self._logged_clip_reasons: Set[str] = set()
     self.filter_statuses = filter_statuses or {
@@ -180,6 +339,9 @@ class TrajectoryCollectEngine:
     # This turn's raw prefill routing as (rows, prefill_start,
     # prefill_num_context), persisted as-is on the turn's agent step.
     self._current_prefill: Optional[Tuple[np.ndarray, int, int]] = None
+    self._episode_routed_experts_encoding: Optional[
+        packing.RoutedExpertsWireEncoding
+    ] = None
     self.env_time = {
         "reset_latency": 0.0,  # Wall-clock time (Total real-world time elapsed)
         "step_latency": [],  # List of per-step wall-clock times, ordered by step index
@@ -191,9 +353,7 @@ class TrajectoryCollectEngine:
         ),  # Wall-clock time (Total real-world time elapsed)
     }
 
-    if self.max_response_length is not None and not (
-        self.tokenizer and self.chat_parser
-    ):
+    if self.max_response_length is not None and not self._tracks_tokens:
       logging.warning(
           "max_response_length is set to %d, but no tokenizer or chat_parser is"
           " provided. response length limits will not be enforced.",
@@ -238,16 +398,17 @@ class TrajectoryCollectEngine:
     logging.warning("%s trajectory clipped: %s", self._debug_prefix, reason)
 
   def _finalize_terminal_step_routing(self) -> None:
-    """Pad the terminal step's unrouted trailing tokens with UNSET_ROUTED_EXPERT.
+    """Pad the terminal step's unrouted trailing tokens with unset routing.
 
-    In autoregressive sampling, vLLM routes P + G - 1 tokens; the G-th token
-    (plus any chat-parser suffix tokens and any terminal env tokens when
-    MAX_STEPS_REACHED terminates a turn with done=False) is only routed if a
-    subsequent turn prefills it. On episode termination, those trailing tokens
-    were never forwarded through a subsequent prefill. In causal loss, targets
-    are rolled by -1 and targets_segmentation is 0 at all suffix, env, and
-    past-end positions, so padding with UNSET_ROUTED_EXPERT has zero effect on
-    training loss.
+    Uses `UNSET_ROUTED_EXPERT` (`-1`) for raw `int16` and `0` for compact
+    `uint8`/`uint10`. In autoregressive sampling, vLLM routes P + G - 1 tokens;
+    the G-th token (plus any chat-parser suffix tokens and any terminal env
+    tokens when MAX_STEPS_REACHED terminates a turn with done=False) is only
+    routed if a subsequent turn prefills it. On episode termination, those
+    trailing tokens were never forwarded through a subsequent prefill. In causal
+    loss, targets are rolled by -1 and targets_segmentation is 0 at all suffix,
+    env, and past-end positions, so padding with unset routing has zero effect
+    on training loss.
     """
     if not self.agent.trajectory.steps:
       return
@@ -255,6 +416,8 @@ class TrajectoryCollectEngine:
     if final_step.assistant_routed_experts is None:
       return
     expert_shape = final_step.assistant_routed_experts.shape[1:]
+    pad_dtype = final_step.assistant_routed_experts.dtype
+    pad_fill = 0 if pad_dtype == np.uint8 else agent_types.UNSET_ROUTED_EXPERT
     if final_step.assistant_tokens is not None and len(
         final_step.assistant_routed_experts
     ) < len(final_step.assistant_tokens):
@@ -263,8 +426,8 @@ class TrajectoryCollectEngine:
       )
       pad = np.full(
           (missing,) + expert_shape,
-          agent_types.UNSET_ROUTED_EXPERT,
-          dtype=np.int16,
+          pad_fill,
+          dtype=pad_dtype,
       )
       final_step.assistant_routed_experts = np.concatenate(
           [final_step.assistant_routed_experts, pad], axis=0
@@ -276,22 +439,61 @@ class TrajectoryCollectEngine:
     ):
       final_step.env_routed_experts = np.full(
           (len(final_step.env_tokens),) + expert_shape,
-          agent_types.UNSET_ROUTED_EXPERT,
-          dtype=np.int16,
+          pad_fill,
+          dtype=pad_dtype,
       )
 
-  def _sync_trajectory_metadata(self, *, include_timings: bool = True) -> None:
-    """Syncs metadata status and agent trajectory timing/reward in place."""
+  def _resolve_policy_version(self) -> Optional[int]:
+    """Resolves policy version from `self.policy_version` or `env.task`.
+
+    Returns:
+      The resolved policy version integer, or None if neither source defines it.
+    """
+    if self.policy_version is not None:
+      return self.policy_version
+    task = getattr(self.env, "task", None)
+    if isinstance(task, dict):
+      return task.get("policy_version")
+    return None
+
+  def _collect_policy_versions(self) -> Optional[List[int]]:
+    """Returns the ordered per-turn policy versions across trajectory steps."""
+    step_versions = [
+        step.info["policy_version"]
+        for step in self.agent.trajectory.steps
+        if step.info and step.info.get("policy_version") is not None
+    ]
+    return step_versions or None
+
+  def _sync_trajectory_metadata(
+      self,
+      *,
+      include_timings: bool = True,
+      include_final_metrics: bool = False,
+  ) -> None:
+    """Syncs metadata status and agent trajectory timing/reward in place.
+
+    Args:
+      include_timings: Whether to sync `env_time` and `reward_time`.
+      include_final_metrics: Whether to compute and set the ATIF
+        `final_metrics` rollup. Only enabled at episode end so per-step syncs
+        keep metadata unchanged and do not trigger metadata rewrites.
+    """
     if self.trajectory_store is None or self.metadata is None:
       return
     try:
       converter_lib.update_trajectory_metadata(
           metadata=self.metadata,
           agent=self.agent,
-          policy_version=self.policy_version,
+          policy_version=self._resolve_policy_version(),
           gamma=self.gamma,
           env_time=self.env_time if include_timings else None,
           reward_time=self.reward_time if include_timings else None,
+          final_metrics=(
+              converter_lib.compute_final_metrics(self.agent.trajectory)
+              if include_final_metrics
+              else None
+          ),
       )
     except Exception:  # pylint: disable=broad-exception-caught
       logging.warning(
@@ -305,7 +507,7 @@ class TrajectoryCollectEngine:
     if self.trajectory_store is None or self.metadata is None:
       return
     try:
-      self._sync_trajectory_metadata()
+      self._sync_trajectory_metadata(include_final_metrics=True)
       self.trajectory_store.update_metadata(self.metadata)
     except Exception:  # pylint: disable=broad-exception-caught
       logging.warning(
@@ -322,15 +524,14 @@ class TrajectoryCollectEngine:
     prompt_length = self.agent.trajectory.prompt_length
     if prompt_length is None:
       return np.asarray(prompt_tokens)
-    # Exact mode stores the first-turn prompt left-padded alongside its length.
-    return generate_utils.unpad_prompt(prompt_tokens, prompt_length)
+    return packing.unpad_prompt(prompt_tokens, prompt_length)
 
   def _record_task_step(self) -> None:
     """Writes the initial task step (step 0) live to trajectory_store.
 
     The step carries the unpadded first-turn prompt token ids in `env_tokens`
     once they are known, so Token-mode data can be rebuilt from the store
-    without re-tokenizing. In exact token continuity mode, the ids are only
+    without re-tokenizing. When token tracking is enabled, the ids are only
     known after the first `model_call`, so the step is re-recorded (upserted on
     `step_id=0`) at that point.
     """
@@ -369,6 +570,9 @@ class TrajectoryCollectEngine:
       step: Optional[agent_types.Step],
   ) -> None:
     """Writes an agent turn step (2*i + 1) live to trajectory_store."""
+    policy_version = self._resolve_policy_version()
+    if step is not None and policy_version is not None:
+      step.info["policy_version"] = policy_version
     if self.trajectory_store is None or self.metadata is None or step is None:
       return
     try:
@@ -383,7 +587,7 @@ class TrajectoryCollectEngine:
       agent_step = converter_lib.create_agent_step(
           step,
           tunix_step_id=self.agent.trajectory.step_idx,
-          policy_version=self.policy_version,
+          policy_version=policy_version,
           prefill_routed_experts=prefill_rows,
           prefill_start=prefill_start,
           prefill_num_context=prefill_num_context,
@@ -553,7 +757,7 @@ class TrajectoryCollectEngine:
                   f" {len(step_routed)} does not match assistant_tokens length"
                   f" {len(assistant_tokens)}."
               )
-            routed_experts.append(np.asarray(step_routed, dtype=np.int16))
+            routed_experts.append(np.asarray(step_routed))
         if env_tokens is not None:
           conversation_tokens.append(env_tokens)
           conversation_masks.append(step.env_masks)
@@ -570,7 +774,7 @@ class TrajectoryCollectEngine:
                   f" {len(step_env_routed)} does not match env_tokens length"
                   f" {len(env_tokens)}."
               )
-            routed_experts.append(np.asarray(step_env_routed, dtype=np.int16))
+            routed_experts.append(np.asarray(step_env_routed))
 
       conversation_tokens = [
           np.asarray(tokens)
@@ -610,19 +814,12 @@ class TrajectoryCollectEngine:
             iter(routed_experts),
             prompt_routed,
         )
-        sample_shape = (
-            sample_arr.shape[1:] if sample_arr is not None else (0, 0)
+        sample_shape, sample_dtype = (
+            (sample_arr.shape[1:], sample_arr.dtype)
+            if sample_arr is not None
+            else ((0, 0), np.int16)
         )
-        conv_routed = (
-            np.concatenate(routed_experts, axis=0)
-            if routed_experts
-            else np.zeros((0,) + sample_shape, dtype=np.int16)
-        )
-        prompt_len = (
-            (self.agent.trajectory.prompt_length or 0)
-            if self.exact_token_continuity
-            else (len(prompt_tokens) if prompt_tokens is not None else 0)
-        )
+        prompt_len = self.agent.trajectory.prompt_length or 0
         if prompt_len > 0:
           if prompt_routed is None:
             raise ValueError(
@@ -635,12 +832,15 @@ class TrajectoryCollectEngine:
                 f" {getattr(prompt_routed, 'shape', None)} does not match"
                 f" prompt_tokens length {prompt_len}."
             )
-          prompt_routed_arr = np.asarray(prompt_routed, dtype=np.int16)
+          prompt_routed_arr = np.asarray(prompt_routed)
         else:
-          prompt_routed_arr = np.zeros((0,) + sample_shape, dtype=np.int16)
+          prompt_routed_arr = np.zeros((0,) + sample_shape, dtype=sample_dtype)
 
         final_routed_experts = np.concatenate(
-            [prompt_routed_arr, conv_routed], axis=0
+            [prompt_routed_arr, *routed_experts],
+            axis=0,
+            dtype=sample_dtype,
+            casting="no",
         )
 
       result = {
@@ -660,12 +860,12 @@ class TrajectoryCollectEngine:
               np.concatenate(logprobs, axis=0) if logprobs else None
           ),
           "routed_experts": final_routed_experts,
-          "policy_version": self.env.task.get("policy_version"),
+          "policy_versions": self._collect_policy_versions(),
           "original_input": self.agent.trajectory.task,
           "group_id": self.env.extra_kwargs.get("group_id"),
       }
       if self.agent.trajectory.prompt_length is not None:
-        # Set only by exact token continuity; lets training unpad by length.
+        # Lets training unpad left-padded first-turn prompt tokens by length.
         result["prompt_length"] = self.agent.trajectory.prompt_length
       return result
     elif mode == "Conversation":
@@ -684,6 +884,8 @@ class TrajectoryCollectEngine:
       filter_statuses: Optional[Set[agent_types.TrajectoryStatus]] = None,
       overlong_filter: bool = True,
       perf_v2: Optional[perf_tracer_v2.Tracer] = None,
+      routed_experts_encode_mode: packing.RoutedExpertsEncodeMode = "int16",
+      routed_experts_num_experts: Optional[int] = None,
   ) -> AsyncGenerator[Tuple[int, Any], None]:
     """Execute multiple agent-environment pairs concurrently.
 
@@ -704,6 +906,12 @@ class TrajectoryCollectEngine:
         overlong_filter (bool): Whether to filter overlong trajectories.
         perf_v2 (Optional[perf_tracer_v2.Tracer]): Optional performance tracer
           to use for performance measurements.
+        routed_experts_encode_mode: Wire encoding mode (`"auto"`, `"uint8"`,
+          `"uint10"`, or `"int16"`) applied to each turn's captured MoE
+          `routed_experts`.
+        routed_experts_num_experts: Optional total number of experts per MoE
+          layer used to select a deterministic compact tier when
+          `routed_experts_encode_mode == "auto"`.
 
     Yields:
         Tuple[int, Any]: `(pair_index, result)`. The type of `result`
@@ -722,6 +930,8 @@ class TrajectoryCollectEngine:
           filter_statuses=filter_statuses,
           overlong_filter=overlong_filter,
           perf_v2=perf_v2,
+          routed_experts_encode_mode=routed_experts_encode_mode,
+          routed_experts_num_experts=routed_experts_num_experts,
       )
       traj = await engine.collect(mode=mode)
       return i, traj
@@ -734,8 +944,8 @@ class TrajectoryCollectEngine:
   async def _reset(self):
     """Resets the environment and agent at the beginning of a new episode.
 
-    This involves calling the environment's reset method, updating the agent's
-    state, and optionally tokenizing the initial prompt messages.
+    Calls `env.reset`, initializes episode state on the agent, and snapshots the
+    initial chat history when token tracking is active.
     """
     self.agent.reset()
     self.agent.trajectory.step_idx = -1
@@ -751,6 +961,7 @@ class TrajectoryCollectEngine:
     self._current_step_initial_routed_experts = None
     self._has_routed_experts = False
     self._current_prefill = None
+    self._episode_routed_experts_encoding = None
     self.env_time = {
         "reset_latency": 0.0,
         "step_latency": [],
@@ -771,11 +982,6 @@ class TrajectoryCollectEngine:
     )
 
     self.env_time["reset_latency"] += wall_time
-    self.final_reward_fn = (
-        self.env.final_reward_fn
-        if hasattr(self.env, "final_reward_fn")
-        else None
-    )
     self._start_ts = time.perf_counter()
     self.agent.update_from_env(
         observation=obs,
@@ -784,40 +990,29 @@ class TrajectoryCollectEngine:
         info=self._rollout_state_info(info),
     )
 
-    if (
-        self.tokenizer is not None
-        and self.chat_parser is not None
-        and not self.exact_token_continuity
-    ):
-      # Get the current messages (usually System + User)
-      init_messages = self.agent.chat_completions
-      prompt_tokens, _ = utils.tokenize_and_generate_masks(
-          init_messages,
-          tokenizer=self.tokenizer,
-          parser=self.chat_parser,
-          contains_first_msg=True,
-          contains_generation_msg=True,
-      )
-      self.agent.trajectory.prompt_tokens = prompt_tokens
-    if self.exact_token_continuity:
-      self._exact_chat_history = copy.deepcopy(self.agent.chat_completions)
+    if self._tracks_tokens:
+      self._recorded_chat_history = [
+          copy.deepcopy(msg) for msg in self.agent.chat_completions
+      ]
 
-  def _record_exact_turn(
-      self, cur_step: agent_types.Step, *, terminal: bool
-  ) -> None:
+  def _record_turn(self, cur_step: agent_types.Step, *, terminal: bool) -> None:
     """Closes the recorded turn and checks the agent only appended messages.
+
+    Args:
+      cur_step: Current trajectory step being finalized.
+      terminal: Whether this turn terminates the episode.
 
     Raises:
       ValueError: the agent rewrote earlier chat history, which would silently
         desynchronize text from the recorded ids.
     """
     messages = self.agent.chat_completions
-    previous = self._exact_chat_history
-    if previous is not None and messages[: len(previous)] != previous:
+    previous = self._recorded_chat_history
+    if messages[: len(previous)] != previous:
       raise ValueError("agent rewrote previously recorded chat history")
     if terminal:
       cur_step.done = True
-    self._exact_chat_history = copy.deepcopy(messages)
+    previous.extend(copy.deepcopy(msg) for msg in messages[len(previous) :])
 
   @property
   def _debug_prefix(self) -> str:
@@ -837,6 +1032,9 @@ class TrajectoryCollectEngine:
     enriched_info = dict(info or {})
     enriched_info["max_steps"] = self.max_steps
     enriched_info["cur_tokens"] = self._response_token_count
+    policy_version = self._resolve_policy_version()
+    if policy_version is not None:
+      enriched_info["policy_version"] = policy_version
     return enriched_info
 
   def _get_perf_tags(self) -> Dict[str, Any]:
@@ -849,10 +1047,9 @@ class TrajectoryCollectEngine:
       pair_index = self.env.extra_kwargs.get("pair_index")
       if pair_index is not None:
         tags[perf_constants.PAIR_INDEX] = pair_index
-    if hasattr(self.env, "task"):
-      policy_version = self.env.task.get("policy_version")
-      if policy_version is not None:
-        tags[perf_constants.STEP] = policy_version
+    policy_version = self._resolve_policy_version()
+    if policy_version is not None:
+      tags[perf_constants.STEP] = policy_version
     return tags
 
   def _assistant_suffix_len(self) -> int:
@@ -863,9 +1060,10 @@ class TrajectoryCollectEngine:
     Those tokens are part of the recorded completion, so the response budget
     must reserve room for them.
     """
-    if self.tokenizer is None or self.chat_parser is None:
+    if not self._tracks_tokens:
       return 0
     if self._assistant_suffix_len_cache is None:
+      assert self.chat_parser is not None
       _, n_append = self.chat_parser.update_assistant_end_tokens(
           np.zeros((0,), dtype=np.int32)
       )
@@ -921,8 +1119,9 @@ class TrajectoryCollectEngine:
     # `step_idx` is bound to `_one_step()` (starts at -1 on reset; first turn is 0)
     # rather than `len(steps)` so it is available before `update_from_model()`.
     self.agent.trajectory.step_idx += 1
-    # `_on_model_interact` does not await after the model call, so only
-    # generation is interrupted.
+    # `_on_model_interact` commits no trajectory state across awaits (the
+    # `to_thread` router encode is pure and only applied after the await
+    # returns), so deadline expiry leaves prior steps untouched.
     deadline = asyncio.timeout(remaining)
     try:
       async with deadline:
@@ -956,7 +1155,7 @@ class TrajectoryCollectEngine:
 
     chat_input = self.agent.chat_completions
     call_kwargs = dict(self.model_call_kwargs)
-    if self.exact_token_continuity and self.agent.trajectory.steps:
+    if self._tracks_tokens and self.agent.trajectory.steps:
       chat_input = None  # later turn: recorded ids, not re-encoded text
       call_kwargs["prompt_token_ids"] = utils.continuation_prompt_tokens(
           self.agent.trajectory
@@ -1005,7 +1204,12 @@ class TrajectoryCollectEngine:
       )
     logging.debug("%s model_call done", self._debug_prefix)
 
-    if self.exact_token_continuity:
+    if self._tracks_tokens:
+      if rollout_output.prompt_lengths is None:
+        raise ValueError(
+            "model_call must return RolloutOutput.prompt_lengths when tokenizer"
+            " and chat_parser are provided"
+        )
       if not self.agent.trajectory.steps:
         # The owned first-turn prompt; later turns replay exactly these ids.
         self.agent.trajectory.prompt_tokens = (
@@ -1017,7 +1221,7 @@ class TrajectoryCollectEngine:
         # Prompt ids are only known now; upsert step 0 to include them.
         self._record_task_step()
       else:
-        echoed = generate_utils.unpad_prompt(
+        echoed = packing.unpad_prompt(
             rollout_output.left_padded_prompt_tokens[0],
             rollout_output.prompt_lengths[0],
         )
@@ -1047,17 +1251,8 @@ class TrajectoryCollectEngine:
       )
 
     if routed is not None and not self.agent.trajectory.steps:
-      init_routed = np.asarray(routed, dtype=np.int16)
-      prompt_len = (
-          (self.agent.trajectory.prompt_length or 0)
-          if self.exact_token_continuity
-          else (
-              len(self.agent.trajectory.prompt_tokens)
-              if getattr(self.agent.trajectory, "prompt_tokens", None)
-              is not None
-              else 0
-          )
-      )
+      init_routed = await _encode_turn_routed_async(self, routed)
+      prompt_len = self.agent.trajectory.prompt_length or 0
       self.agent.trajectory.prompt_routed_experts = (  # pyrefly: ignore[missing-attribute]
           init_routed[:prompt_len]
       )
@@ -1066,7 +1261,7 @@ class TrajectoryCollectEngine:
       self._cumulative_prompt_tokens = init_routed.shape[0]
       self._current_step_initial_routed_experts = init_routed[prompt_len:]
     elif routed is not None:
-      delta_routed = np.asarray(routed, dtype=np.int16)
+      delta_routed = await _encode_turn_routed_async(self, routed)
       prev_step = self.agent.trajectory.steps[-1]
       needed_asst = 0
       if (
@@ -1138,20 +1333,18 @@ class TrajectoryCollectEngine:
       cur_step.assistant_routed_experts = (
           self._current_step_initial_routed_experts
       )
-    if self.tokenizer and self.chat_parser and rollout_output.tokens:
+    if self._tracks_tokens and rollout_output.tokens:
+      assert self.chat_parser is not None
       assistant_message = utils.get_recent_assistant_message(
           self.agent.chat_completions
       )
       if assistant_message:
-        cur_step.assistant_tokens, n_append = (
-            self.chat_parser.update_assistant_end_tokens(
-                rollout_output.tokens[0]
-            )
+        updated_tokens, n_append = self.chat_parser.update_assistant_end_tokens(
+            rollout_output.tokens[0]
         )
-        if self.exact_token_continuity:
-          cur_step.assistant_tokens = utils.assistant_with_suffix(
-              rollout_output.tokens[0], cur_step.assistant_tokens, n_append
-          )
+        cur_step.assistant_tokens = utils.assistant_with_suffix(
+            rollout_output.tokens[0], updated_tokens, n_append
+        )
         # Sampled tokens were counted after the model call; count the suffix.
         self._response_token_count += n_append
         cur_step.assistant_masks = np.concatenate(
@@ -1188,6 +1381,7 @@ class TrajectoryCollectEngine:
     # If the budget is already spent (e.g. by the unbounded first model call),
     # skip env.step and end as TIMEOUT below rather than as a hung env.
     budget_spent = remaining_time <= 0
+    truncated = False
     if not budget_spent and not self._check_and_set_context_limit_reached():
       try:
         with self.perf_v2.span(
@@ -1237,12 +1431,15 @@ class TrajectoryCollectEngine:
           self._debug_prefix,
           json.dumps(info, default=str, indent=2),
       )
-      self.agent.update_from_env(obs, rew, done, self._rollout_state_info(info))
+      enriched_info = self._rollout_state_info(info)
+      truncated = done and bool(enriched_info.get("truncated"))
+      self.agent.update_from_env(obs, rew, done, enriched_info)
     else:
       done = True
 
     step_timed_out = budget_spent or self._remaining_time() < 0
-    if self.tokenizer and self.chat_parser:
+    if self._tracks_tokens:
+      assert self.tokenizer is not None and self.chat_parser is not None
       env_messages = utils.get_recent_env_messages(self.agent.chat_completions)
       # Terminal-step environment messages are not appended to the response
       # token stream when the step ends the trajectory.
@@ -1275,13 +1472,18 @@ class TrajectoryCollectEngine:
           cur_step.env_masks = np.array(e_masks)
           self._response_token_count += len(e_tokens)
 
-    if self.exact_token_continuity:
-      self._record_exact_turn(cur_step, terminal=done or step_timed_out)
+      self._record_turn(cur_step, terminal=done or step_timed_out)
 
     if step_timed_out:
       self._mark_timeout()
       cur_step.done = True
       return True
+
+    if truncated:
+      self.agent.trajectory.status = (
+          agent_types.TrajectoryStatus.MAX_STEPS_REACHED
+      )
+      self._log_trajectory_clip("MAX_STEPS_REACHED")
 
     return done
 
@@ -1306,22 +1508,21 @@ class TrajectoryCollectEngine:
   async def _append_final_reward(self):
     """Compute and add final reward to the last step of the episode.
 
-    Applies the final reward function (if provided) to the episode's
-    final response and adds it to the last step's reward. This enables
-    additional reward signals based on overall episode performance.
+    Applies `self.env.final_reward_fn` (if provided) once at episode end and
+    adds the result to the terminal step's reward.
     """
     last_step = self.agent.get_current_step()
-    if (
-        last_step is None
-        or self.final_reward_fn is None
-        or not callable(self.final_reward_fn)
-    ):
-      # Skip reward computation in trajectory collection if no reward function
-      # is provided or no step is taken.
+    final_reward_fn = self.env.final_reward_fn
+    if last_step is None or final_reward_fn is None:
       logging.debug("%s Final reward function is skipped", self._debug_prefix)
       return
+    if not callable(final_reward_fn):
+      raise TypeError(
+          "env.final_reward_fn must be callable or None, got"
+          f" {type(final_reward_fn).__name__}"
+      )
     final_reward, wall_time = await self._run_with_timing(
-        self.final_reward_fn, timeout=self.final_reward_timeout
+        final_reward_fn, timeout=self.final_reward_timeout
     )
 
     self.reward_time["reward_latency"] += wall_time

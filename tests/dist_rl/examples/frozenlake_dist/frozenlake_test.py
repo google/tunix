@@ -14,37 +14,39 @@
 
 """Tests for the self-contained distributed FrozenLake recipe."""
 
-import os
 from pathlib import Path
-import sys
 import unittest
-from unittest import mock
 
 from absl.testing import absltest
 
-if "pytest" in sys.modules:
-  try:
-    import pytest  # pylint: disable=g-import-not-at-top
-
-    pytest.importorskip("gymnasium")
-  except ImportError:
-    pass
-
+# `gymnasium` comes with the optional `frozenlake` extra. pytest also reports
+# this module-level `unittest.SkipTest` as a skip.
 try:
   import gymnasium  # pylint: disable=unused-import,g-import-not-at-top
 except ImportError:
   raise unittest.SkipTest("gymnasium is not installed")  # pylint: disable=raise-missing-from
 
 # pylint: disable=g-import-not-at-top
-from datasets import Dataset
+import datasets
+from tunix.dist_rl.common import registry
+from tunix.dist_rl.examples.frozenlake_dist import frozenlake
+from tunix.dist_rl.launch.common import resolve_config
+from tunix.dist_rl.launch.nodes import orchestrator
+from tunix.models import automodel
 from examples.frozenlake import agent as frozenlake_agent
 from examples.frozenlake import data as frozenlake_data
 from examples.frozenlake import env as frozenlake_env
-from tunix.dist_rl.examples.frozenlake_dist import frozenlake
-from tunix.dist_rl.examples.frozenlake_dist import run_frozenlake_dist
-from tunix.dist_rl.common import registry
-from tunix.models import automodel
+
 # pylint: enable=g-import-not-at-top
+
+_FROZENLAKE_YAML = Path(frozenlake.__file__).parent / "frozenlake.yaml"
+
+
+def _hp(*overrides: str) -> resolve_config.DistHyperParameters:
+  """Resolves `frozenlake.yaml` on top of `base_dist_config.yaml`."""
+  return resolve_config.initialize(
+      [f"override_config_file={_FROZENLAKE_YAML}", *overrides]
+  )
 
 
 class FrozenLakeDistTest(absltest.TestCase):
@@ -71,8 +73,8 @@ class FrozenLakeDistTest(absltest.TestCase):
     self.assertNotIn("class FrozenLakeEnv", source)
 
   def test_dataset_is_deterministic_and_uses_reference_ranges(self):
-    first = frozenlake.create_dataset(size=5, seed=123)
-    second = frozenlake.create_dataset(size=5, seed=123)
+    first = frozenlake.generate_entries(size=5, seed=123)
+    second = frozenlake.generate_entries(size=5, seed=123)
 
     self.assertEqual(first, second)
     self.assertLen(first, 5)
@@ -82,7 +84,7 @@ class FrozenLakeDistTest(absltest.TestCase):
       self.assertGreaterEqual(entry["p"], 0.6)
       self.assertLess(entry["p"], 0.85)
 
-    custom_range = frozenlake.create_dataset(
+    custom_range = frozenlake.generate_entries(
         size=10, seed=123, grid_size_range=(3, 5)
     )
     for entry in custom_range:
@@ -98,9 +100,11 @@ class FrozenLakeDistTest(absltest.TestCase):
         )
         for index, env_seed in enumerate(seeds)
     ]
-    expected = Dataset.from_list(reference).shuffle(seed=42).to_list()[:12]
+    expected = (
+        datasets.Dataset.from_list(reference).shuffle(seed=42).to_list()[:12]
+    )
 
-    actual = frozenlake.create_dataset(
+    actual = frozenlake.generate_entries(
         size=32, seed=42, shuffle_seed=42, limit=12
     )
 
@@ -152,124 +156,6 @@ class FrozenLakeDistTest(absltest.TestCase):
     self.assertEqual(action.action, "3")
     self.assertEqual(agent.trajectory.steps[-1].action, "3")
 
-  def test_prompt_item_carries_distributed_env_and_agent_config(self):
-    item = frozenlake.build_prompt_item(
-        entry={"seed": 1, "size": 4, "p": 0.75},
-        prompt_idx=2,
-        max_turns=8,
-        max_response_length=2048,
-        episode_timeout_secs=600,
-        temperature=0.7,
-        top_p=1.0,
-        top_k=0,
-        is_slippery=False,
-        use_multistep_prompt=True,
-    )
-
-    self.assertEqual(item["prompt_id"], "frozenlake_2")
-    self.assertEqual(item["max_turns"], 8)
-    self.assertEqual(item["max_response_length"], 2048)
-    self.assertEqual(item["generation_kwargs"]["temperature"], 0.7)
-    self.assertEqual(item["metadata"]["env_config"]["max_steps"], 8)
-    self.assertEqual(
-        item["metadata"]["agent_config"], {"use_multistep_prompt": True}
-    )
-
-  def test_prompt_iterator_emits_one_full_batch_per_step(self):
-    items = list(
-        frozenlake.iter_prompt_items(
-            dataset=[{"seed": 1, "size": 2, "p": 0.8}],
-            max_steps=2,
-            batch_size=3,
-            max_turns=4,
-            max_response_length=64,
-            episode_timeout_secs=30,
-            temperature=0.7,
-            top_p=1.0,
-            top_k=0,
-            is_slippery=False,
-            use_multistep_prompt=True,
-        )
-    )
-    self.assertLen(items, 6)
-    self.assertLen({item["prompt_id"] for item in items}, 6)
-
-    offpolicy_items = list(
-        frozenlake.iter_prompt_items(
-            dataset=[{"seed": 1, "size": 2, "p": 0.8}],
-            max_steps=2,
-            batch_size=3,
-            max_turns=4,
-            max_response_length=64,
-            episode_timeout_secs=30,
-            temperature=0.7,
-            top_p=1.0,
-            top_k=0,
-            is_slippery=False,
-            use_multistep_prompt=True,
-            max_staleness=2,
-        )
-    )
-    # max_steps=2 + extra_steps=max(8, 6, 0)=8 => 10 * 3 = 30 prompts
-    self.assertLen(offpolicy_items, 30)
-
-  def test_recipe_defaults_match_reference(self):
-    with mock.patch.dict(os.environ, {}, clear=False):
-      os.environ.pop("EPISODE_TIMEOUT_SECS", None)
-      args = run_frozenlake_dist._parse_args([])
-    self.assertEqual(args.model_id, "Qwen/Qwen3-8B")
-    self.assertEqual(args.batch_size, 64)
-    self.assertEqual(args.mini_batch_size, 64)
-    self.assertEqual(args.num_generations, 8)
-    self.assertEqual(args.num_batches, 150)
-    self.assertEqual(args.num_iterations, 1)
-    self.assertEqual(args.num_epochs, 3)
-    self.assertEqual(args.max_steps, 450)
-    self.assertEqual(args.max_turns, 8)
-    self.assertEqual(args.epsilon, 0.003)
-    self.assertEqual(args.epsilon_high, 0.005)
-    self.assertEqual(args.loss_algo, "gspo-token")
-    self.assertEqual(args.advantage_estimator, "rloo")
-    self.assertEqual(args.sampler_is, "token")
-    self.assertEqual(args.sampler_is_threshold, 2.0)
-    self.assertEqual(args.grid_size_range, (2, 9))
-    self.assertEqual(args.wandb_project, "tunix-frozenlake")
-    self.assertTrue(args.trainer_precompile)
-    self.assertEqual(args.episode_timeout_secs, 600)
-    self.assertIsNone(args.rpc_timeout_s)
-    ws_timeouts = run_frozenlake_dist._validate_args(args)
-    self.assertEqual(args.rpc_timeout_s, 1800.0)
-    self.assertEqual(ws_timeouts.pre, 900.0)
-
-    args_long_ep = run_frozenlake_dist._parse_args(
-        ["--episode_timeout_secs=1800"]
-    )
-    ws_long = run_frozenlake_dist._validate_args(args_long_ep)
-    self.assertEqual(args_long_ep.rpc_timeout_s, 2100.0)
-    self.assertEqual(ws_long.pre, 2100.0)
-
-    args_bad_rpc = run_frozenlake_dist._parse_args(
-        ["--episode_timeout_secs=1800", "--rpc_timeout_s=1800"]
-    )
-    with self.assertRaisesRegex(ValueError, "rpc_timeout_s"):
-      run_frozenlake_dist._validate_args(args_bad_rpc)
-
-    for bad_rpc in ("0", "-1", "nan", "inf"):
-      args_invalid_rpc = run_frozenlake_dist._parse_args(
-          [f"--rpc_timeout_s={bad_rpc}"]
-      )
-      with self.assertRaisesRegex(ValueError, "rpc_timeout_s"):
-        run_frozenlake_dist._validate_args(args_invalid_rpc)
-
-    args_no_precompile = run_frozenlake_dist._parse_args(
-        ["--trainer_precompile=false"]
-    )
-    self.assertFalse(args_no_precompile.trainer_precompile)
-
-    algo = run_frozenlake_dist._build_algo(args)
-    self.assertEqual(algo.algo_config.sampler_is, "token")
-    self.assertEqual(algo.algo_config.sampler_is_threshold, 2.0)
-
   def test_qwen3_8b_supported_by_distributed_workers(self):
     config = automodel.call_model_config("qwen3-8b")
     self.assertEqual(config.embed_dim, 4096)
@@ -283,55 +169,107 @@ class FrozenLakeDistTest(absltest.TestCase):
     # buffer KV cache stays off; assert the default the nodes rely on.
     self.assertFalse(config.use_sliding_window_kv_cache)
 
-  def test_launcher_uses_frozenlake_registry(self):
-    launcher = (Path(frozenlake.__file__).parent / "launcher.sh").read_text(
-        encoding="utf-8"
-    )
-    self.assertIn(
-        "--registry_module=tunix.dist_rl.examples.frozenlake_dist.frozenlake",
-        launcher,
-    )
-    self.assertIn("--env_name=frozenlake_env", launcher)
-    self.assertIn("--agent_name=frozenlake_agent", launcher)
-    self.assertEqual(launcher.count('--mini_batch_size="$MINI_BATCH_SIZE"'), 2)
-    self.assertEqual(launcher.count('--num_generations="$NUM_GENERATIONS"'), 2)
-    self.assertEqual(
-        launcher.count('--episode_timeout_secs="$EPISODE_TIMEOUT_SECS"'), 2
-    )
-    self.assertIn("WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-raiden}", launcher)
-    self.assertIn("MODEL_DTYPE=${MODEL_DTYPE:-float32}", launcher)
-    self.assertIn('--model_dtype="$MODEL_DTYPE"', launcher)
-    self.assertIn(
-        '--compute_logps_micro_batch_size="$COMPUTE_LOGPS_MICRO_BATCH_SIZE"',
-        launcher,
-    )
-    self.assertIn('--sampler_is="$SAMPLER_IS"', launcher)
-    self.assertIn('--rollout_mesh_tp="$ROLLOUT_TP"', launcher)
-    self.assertIn("GRID_SIZE_RANGE=${GRID_SIZE_RANGE:-2 9}", launcher)
-    self.assertIn("--grid_size_range $GRID_SIZE_RANGE", launcher)
-    self.assertIn("RUN_ID=", launcher)
-    self.assertIn("--enable_trajectory_store=", launcher)
-    self.assertIn("--trajectory_store_backend=", launcher)
-    self.assertIn("--trajectory_store_dir=", launcher)
-    self.assertIn("--run_id=", launcher)
 
-  def test_gemma4_launcher_matches_reference_runtime_limits(self):
-    launcher = (
-        Path(frozenlake.__file__).parent / "run_gemma4_e2b.sh"
-    ).read_text(encoding="utf-8")
-    self.assertIn("MODEL_NAME=${MODEL_NAME:-gemma-4-e2b}", launcher)
-    self.assertIn("MODEL_ID=${MODEL_ID:-google/gemma-4-E2B-it}", launcher)
-    self.assertIn("TRAINER_TPU_CHIPS:-0,1", launcher)
-    self.assertIn("TRAINER_FSDP:-2", launcher)
-    self.assertIn("TRAINER_TP:-1", launcher)
-    self.assertIn("ROLLOUT_TPU_CHIPS:-2,3", launcher)
-    self.assertIn("ROLLOUT_TP:-2", launcher)
-    self.assertIn("TRAIN_MICRO_BATCH_SIZE:-2", launcher)
-    self.assertIn("COMPUTE_LOGPS_MICRO_BATCH_SIZE:-2", launcher)
-    self.assertIn("COMPUTE_LOGPS_CHUNK_SIZE:-2048", launcher)
-    self.assertIn("ROLLOUT_MAX_CONCURRENCY:-512", launcher)
-    self.assertIn("VLLM_MAX_NUM_SEQS:-32", launcher)
-    self.assertIn("VLLM_MAX_NUM_BATCHED_TOKENS:-8192", launcher)
+class TaskRecordsTest(absltest.TestCase):
+  """Tests `create_dataset` records for the orchestrator and rollout worker."""
+
+  def test_create_dataset_wraps_the_generated_entries_in_order(self):
+    for shuffle, shuffle_seed in ((True, 42), (False, None)):
+      with self.subTest(shuffle=shuffle):
+        records = frozenlake.create_dataset(
+            split="train", shuffle=shuffle, seed=42, size=32, limit=12
+        )
+        entries = frozenlake.generate_entries(
+            32, 42, shuffle_seed=shuffle_seed, limit=12
+        )
+        self.assertEqual(
+            list(records),
+            [
+                {"prompt": "", "metadata": {"env_config": {"entry": entry}}}
+                for entry in entries
+            ],
+        )
+
+  def test_create_dataset_rejects_invalid_arguments(self):
+    with self.assertRaisesRegex(ValueError, "'train' split"):
+      frozenlake.create_dataset(split="test", shuffle=True, seed=42, size=8)
+    for grid_size_range in ((2,), (2, 5, 9), (True, 9), (1, 9), (5, 5)):
+      with self.subTest(grid_size_range=grid_size_range):
+        with self.assertRaisesRegex(ValueError, "grid_size_range"):
+          frozenlake.create_dataset(
+              split="train",
+              shuffle=True,
+              seed=42,
+              size=8,
+              grid_size_range=grid_size_range,
+          )
+
+  def test_rollout_env_matches_the_previous_launcher_env(self):
+    # Each `FrozenLakeEnv` sets the recipe's global `MAX_STEPS`.
+    self.addCleanup(
+        setattr, frozenlake_env, "MAX_STEPS", frozenlake_env.MAX_STEPS
+    )
+    record = frozenlake.create_dataset(
+        split="train", shuffle=True, seed=42, size=32, limit=12
+    )[0]
+    assert record is not None  # `MapDataset.__getitem__` is typed `T | None`.
+    env_config = record["metadata"]["env_config"]
+    env_class = registry.ENV_REGISTRY.get(frozenlake.FROZENLAKE_ENV_NAME)
+    # `RolloutManager` builds the env from `env_kwargs`, the record's
+    # `env_config`, and the group fields `DistributedRLEngine` adds to it.
+    env = env_class(**{
+        **_hp().config_mapping("env_kwargs"),
+        **env_config,
+        "group_index": 0,
+        "num_generations": 8,
+        "policy_version": 0,
+    })
+    # The previous launcher's requests set the map, the max turns as
+    # `max_steps`, and `is_slippery`.
+    legacy_env = env_class(
+        entry=env_config["entry"], max_steps=8, is_slippery=False
+    )
+    self.assertEqual(env.desc.tolist(), legacy_env.desc.tolist())
+    self.assertEqual(env.max_steps, legacy_env.max_steps)
+    self.assertEqual(env.env_kwargs, legacy_env.env_kwargs)
+    self.assertEqual(env.reset(), legacy_env.reset())
+
+  def test_orchestrator_loads_the_records_in_a_fixed_order(self):
+    items = orchestrator.load_prompt_items(
+        _hp("data_config.size=32", "data_config.limit=12")
+    )
+    item = items[0]
+    assert item is not None  # `MapDataset.__getitem__` is typed `T | None`.
+    # `frozenlake.yaml` shuffles the maps with seed 42.
+    entries = frozenlake.generate_entries(32, 42, shuffle_seed=42, limit=12)
+    self.assertEqual(
+        item,
+        {
+            "prompt": "",
+            "task_name": "frozenlake",
+            "max_turns": 8,
+            "metadata": {
+                "env_config": {"entry": entries[0]},
+                "episode_timeout": 600.0,
+                "overlong_filter": False,
+            },
+        },
+    )
+    # Every epoch repeats the same order.
+    self.assertEqual(
+        [items[index] for index in range(12, 24)],
+        [items[index] for index in range(12)],
+    )
+
+  def test_orchestrator_rejects_bad_data_config(self):
+    for override, error, regex in (
+        # `data_config` values reach `create_dataset` untyped.
+        ("data_config.grid_size_range=[2.5,9]", ValueError, "grid_size_range"),
+        ("data_config.data_dir=/tmp/data", TypeError, "data_dir"),
+    ):
+      with self.subTest(override=override):
+        with self.assertRaisesRegex(error, regex):
+          orchestrator.load_prompt_items(_hp(override))
 
 
 if __name__ == "__main__":

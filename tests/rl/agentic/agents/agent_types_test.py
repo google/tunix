@@ -19,6 +19,8 @@ from absl.testing import absltest
 import cloudpickle
 import numpy as np
 from tunix.rl.agentic.agents import agent_types
+from tunix.rl.agentic.agents import model_agent
+from tunix.rl.agentic.agents import tool_agent
 
 
 class TrajectoryItemTest(absltest.TestCase):
@@ -30,7 +32,7 @@ class TrajectoryItemTest(absltest.TestCase):
         "conversation_masks": np.array([1.0, 1.0], dtype=np.float32),
         "reward": 1.5,
         "status": agent_types.TrajectoryStatus.SUCCEEDED,
-        "policy_version": 2,
+        "policy_versions": [2],
     }
     item = agent_types.TrajectoryItem(
         prompt_id="prompt_42",
@@ -48,7 +50,7 @@ class TrajectoryItemTest(absltest.TestCase):
     self.assertEqual(restored.start_step, 0)
     self.assertEqual(restored.reward, 1.5)
     self.assertEqual(restored.status, agent_types.TrajectoryStatus.SUCCEEDED)
-    self.assertEqual(restored.policy_version, 2)
+    self.assertEqual(restored.policy_versions, [2])
     self.assertEqual(restored.user_tag, "test_tag")
     self.assertEqual(restored.metadata, {"user_tag": "test_tag"})
     np.testing.assert_array_equal(restored.prompt_tokens, item.prompt_tokens)
@@ -64,7 +66,7 @@ class TrajectoryItemTest(absltest.TestCase):
     traj = {
         "prompt_tokens": np.array([10, 20], dtype=np.int32),
         "reward": 2.0,
-        "policy_version": 3,
+        "policy_versions": [1, 3],
     }
     item = agent_types.TrajectoryItem(
         prompt_id="cloud_prompt",
@@ -80,7 +82,7 @@ class TrajectoryItemTest(absltest.TestCase):
     self.assertEqual(restored.prompt_id, "cloud_prompt")
     self.assertEqual(restored.group_index, 2)
     self.assertEqual(restored.reward, 2.0)
-    self.assertEqual(restored.policy_version, 3)
+    self.assertEqual(restored.policy_versions, [1, 3])
     self.assertEqual(restored.meta_key, "meta_val")
     np.testing.assert_array_equal(restored.prompt_tokens, [10, 20])
 
@@ -244,6 +246,53 @@ class TrajectoryTest(absltest.TestCase):
 
     traj.masked_out = True
     self.assertTrue(traj.to_dict()["masked_out"])
+
+
+class AgentChatCompletionsShallowSnapshotTest(absltest.TestCase):
+
+  def test_model_agent_shares_message_dicts_across_turns(self):
+    agent = model_agent.ModelAgent(system_prompt="sys")
+    agent.update_from_env(observation="q1", reward=0.0, done=False, info={})
+    agent.update_from_model("a1")
+    agent.update_from_env(observation="q2", reward=0.0, done=False, info={})
+    agent.update_from_model("a2")
+
+    step0, step1 = agent.trajectory.steps
+    self.assertLen(step0.chat_completions, 3)
+    self.assertLen(step1.chat_completions, 5)
+    self.assertIsNot(step0.chat_completions, agent.chat_completions)
+    self.assertIsNot(step1.chat_completions, agent.chat_completions)
+    for i in range(3):
+      self.assertIs(step0.chat_completions[i], step1.chat_completions[i])
+      self.assertIsNot(step0.chat_completions[i], agent.chat_completions[i])
+    for i in range(3, 5):
+      self.assertIsNot(step1.chat_completions[i], agent.chat_completions[i])
+
+    agent.chat_completions[1]["content"] = "mutated"
+    self.assertEqual(step0.chat_completions[1]["content"], "q1")
+    self.assertEqual(step1.chat_completions[1]["content"], "q1")
+
+  def test_tool_agent_shares_message_dicts_across_turns(self):
+    agent = tool_agent.ToolAgent(system_prompt="sys")
+    agent.update_from_env(observation="q1", reward=0.0, done=False, info={})
+    agent.update_from_model("a1")
+    agent.update_from_env(observation="q2", reward=0.0, done=False, info={})
+    agent.update_from_model("a2")
+
+    step0, step1 = agent.trajectory.steps
+    self.assertLen(step0.chat_completions, 3)
+    self.assertLen(step1.chat_completions, 5)
+    self.assertIsNot(step0.chat_completions, agent.chat_completions)
+    self.assertIsNot(step1.chat_completions, agent.chat_completions)
+    for i in range(3):
+      self.assertIs(step0.chat_completions[i], step1.chat_completions[i])
+      self.assertIsNot(step0.chat_completions[i], agent.chat_completions[i])
+    for i in range(3, 5):
+      self.assertIsNot(step1.chat_completions[i], agent.chat_completions[i])
+
+    agent.chat_completions[1]["content"] = "mutated"
+    self.assertEqual(step0.chat_completions[1]["content"], "q1")
+    self.assertEqual(step1.chat_completions[1]["content"], "q1")
 
 
 if __name__ == "__main__":

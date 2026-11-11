@@ -38,12 +38,13 @@ from transformers import PreTrainedTokenizerFast
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.distillation import on_policy
 from tunix.dist_rl.distillation import teacher
-from tunix.dist_rl.orchestrator import algorithm_adapter
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.orchestrator import rl_program
 from tunix.dist_rl.train import peft_trainer_v2
 from tunix.dist_rl.worker import trainer_worker
 from tunix.rl import algorithm_config
+from tunix.rl import algo_core
+from tunix.rl import function_registry
 
 _VOCAB = 6
 _GROUP_SIZE = 8
@@ -162,11 +163,16 @@ class _CpuEngine:
     del kwargs
     return 0
 
-  def configure_worker(self, *, algo, assembler, **kwargs):
+  def configure_worker(self, *, algo_config, assembler, **kwargs):
     del kwargs
-    self.worker.with_loss_fn(algo.loss_fn(), has_aux=True)
+    self.worker.with_loss_fn(
+        function_registry.get_policy_loss_fn(algo_config.policy_loss_fn),
+        has_aux=True,
+    )
     self.worker.with_gen_model_input_fn(
-        algo.build_gen_model_input_fn(pad_id=assembler.pad_id, eos_id=0)
+        algo_core.build_gen_model_input_fn(
+            algo_config, pad_id=assembler.pad_id, eos_id=0
+        )
     )
 
   async def prepare_rollout_policy(self, **kwargs):
@@ -220,7 +226,7 @@ class _CpuEngine:
                     {"role": "assistant", "content": "sampled response"},
                 ],
                 "status": datatypes.TrajectoryStatus.SUCCEEDED,
-                "policy_version": self.version,
+                "policy_versions": [self.version],
             },
         )
         items.append(item)
@@ -248,16 +254,19 @@ class _CpuEngine:
     self.batches.append((self.version, payload))
     self.worker.fwd_bwd(datatypes.TrainRequest(payload=payload))
     if apply_optimizer:
-      step = self.worker.update()
+      step, metrics = self.worker.update()
       self.after_updates.append(
           np.asarray(self.trainer.model.logits[...]).copy()
       )
-      return {"train_step": step}
+      return {"train_step": step, "metrics": metrics}
     return None
 
   async def get_metrics(self, **kwargs):
     del kwargs
     return self.worker.get_metrics()
+
+  def fault_tolerance_metrics(self):
+    return {}
 
   async def save_checkpoint(self, *, metadata, **kwargs):
     del kwargs
@@ -296,18 +305,12 @@ class OPDTrainingTest(unittest.IsolatedAsyncioTestCase):
     mesh = jax.sharding.Mesh(np.asarray(jax.devices("cpu")[:1]), ("fsdp",))
     with mesh, jax.default_device(jax.devices("cpu")[0]):
       engine = _CpuEngine(self.initial, mesh)
-      adapter = algorithm_adapter.GRPOAdapter(
-          algo_config=algorithm_config.GRPOConfig(
-              num_generations=_GROUP_SIZE,
-              beta=0.0,
-              reward_mode="env",
-              use_rollout_logps=True,
-              loss_agg_mode="token-mean",
-          ),
-          mini_batch_size=1,
-          train_micro_batch_size=2,
-          max_response_length=4,
-          max_packed_len=8,
+      adapter = algorithm_config.GRPOConfig(
+          num_generations=_GROUP_SIZE,
+          beta=0.0,
+          reward_mode="env",
+          use_rollout_logps=True,
+          loss_agg_mode="token-mean",
       )
       scorer = teacher.SGLangTeacherScorer(
           f"http://127.0.0.1:{self.server.server_port}",
@@ -317,7 +320,10 @@ class OPDTrainingTest(unittest.IsolatedAsyncioTestCase):
           max_concurrency=3,
       )
       program = rl_program.StandardRLProgram(
-          algo=adapter,
+          algo_config=adapter,
+          batch_config=batch_assembly.BatchConfig(
+              mini_batch_size=1, train_micro_batch_size=2, max_response_length=4
+          ),
           dataset=[
               {"prompt_id": f"p{step}", "prompt": "fixed"}
               for step in range(steps)

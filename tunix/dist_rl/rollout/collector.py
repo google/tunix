@@ -15,6 +15,7 @@
 """Trajectory Collector Engine wrapping TrajectoryCollectEngine with pause/resume/cancel control."""
 
 import asyncio
+import time
 from typing import Any, Callable, Collection, List, Mapping, Optional, Sequence
 from absl import logging
 import numpy as np
@@ -23,7 +24,6 @@ from tunix.dist_rl.common import timeouts
 from tunix.dist_rl.rollout import sampler as sampler_lib
 from tunix.dist_rl.trajectory import base_store as store
 from tunix.dist_rl.trajectory import converter as converter_lib
-from tunix.rl import packing
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.trajectory import trajectory_collect_engine as rl_collect_engine
 from tunix.rl.rollout import base_rollout
@@ -124,21 +124,6 @@ class TrajectoryCollectorEngine:
         routed_experts_encode_mode
     )
     self.routed_experts_num_experts: int | None = routed_experts_num_experts
-    if (
-        self.store_routed_experts
-        and self.routed_experts_encode_mode == "auto"
-        and self.routed_experts_num_experts is None
-    ):
-      logging.log_first_n(
-          logging.WARNING,
-          "store_routed_experts is enabled with"
-          " routed_experts_encode_mode='auto' and"
-          " routed_experts_num_experts=None. For MoE models with >255 experts,"
-          " set routed_experts_num_experts (or"
-          " routed_experts_encode_mode='uint10') to avoid per-step tier"
-          " switching between 4D uint8 and 5D uint10.",
-          1,
-      )
     self.is_paused: bool = False
     self.is_cancelled: bool = False
     self.is_done: bool = False
@@ -147,12 +132,10 @@ class TrajectoryCollectorEngine:
     self._unpaused = asyncio.Event()
     self._unpaused.set()
     self._episode_cache_salt: str | None = None
-    self._turn_policy_versions: list[int] = []
     self._inner_engine: Optional[rl_collect_engine.TrajectoryCollectEngine] = (
         None
     )
     self.max_response_length = request.max_response_length
-    self.exact_token_continuity = request.exact_token_continuity
     # The stop set the sampler was configured with, which is what decides
     # whether a rollout ended on its own. Defined at the recipe level via
     # `RolloutConfig.eos_tokens` (e.g. `<|im_end|>` for Qwen chat models) rather
@@ -194,7 +177,7 @@ class TrajectoryCollectorEngine:
   async def run_episode(self) -> agent_types.TrajectoryItem:
     """Executes multi-turn agentic rollout episode and returns TrajectoryItem."""
     self._episode_cache_salt = None
-    self._turn_policy_versions = []
+    sampler_time_s = 0.0
 
     # Note: model_call is an async coroutine callback invoked directly by
     # TrajectoryCollectEngine on the asyncio event loop without blocking
@@ -203,6 +186,7 @@ class TrajectoryCollectorEngine:
         chat_completions, env=None, max_generation_steps=None, **kwargs
     ):
       del env
+      nonlocal sampler_time_s
       await self._unpaused.wait()
       generation_kwargs = dict(self.request.generation_kwargs)
       # NB: extra kwargs can be passed in from trajectory_collect_engine.
@@ -241,11 +225,7 @@ class TrajectoryCollectorEngine:
           if self._policy_version_fn is not None
           else req_policy_version
       )
-      self._turn_policy_versions.append(turn_policy_version)
-      if (
-          self._inner_engine is not None
-          and turn_policy_version != req_policy_version
-      ):
+      if self._inner_engine is not None:
         self._inner_engine.policy_version = turn_policy_version
 
       cache_salt = generation_kwargs.pop("cache_salt", None)
@@ -280,7 +260,11 @@ class TrajectoryCollectorEngine:
           prompt=prompt_payload,
           sampling_params=sampling_params,
       )
-      res = await self.sampler.sample(sampling_req, **generation_kwargs)
+      sample_start = time.perf_counter()
+      try:
+        res = await self.sampler.sample(sampling_req, **generation_kwargs)
+      finally:
+        sampler_time_s += time.perf_counter() - sample_start
       text = res if isinstance(res, str) else getattr(res, "text", str(res))
       tokens = getattr(res, "token_ids", np.array([], dtype=np.int32))
       logprobs = getattr(res, "logprobs", None)
@@ -345,42 +329,17 @@ class TrajectoryCollectorEngine:
         max_response_length=self.max_response_length,
         timeout=self.episode_timeout,
         overlong_filter=self.overlong_filter,
-        exact_token_continuity=self.exact_token_continuity,
         policy_version=self.request.target_policy_version,
         trajectory_store=self.trajectory_store,
         metadata=self.metadata,
         store_routed_experts=self.store_routed_experts,
+        routed_experts_encode_mode=self.routed_experts_encode_mode,
+        routed_experts_num_experts=self.routed_experts_num_experts,
     )
     self._inner_engine = inner_engine
     rl_traj = await inner_engine.collect(mode="Token")
-    if isinstance(rl_traj, dict):
-      if self._turn_policy_versions:
-        rl_traj["policy_version"] = int(self._turn_policy_versions[0])
-        rl_traj["policy_versions"] = list(self._turn_policy_versions)
-      routed_experts = rl_traj.get("routed_experts")
-      if routed_experts is not None:
-        if (
-            self.routed_experts_encode_mode == "auto"
-            and self.routed_experts_num_experts is None
-        ):
-          logging.log_first_n(
-              logging.WARNING,
-              "Encoding routed_experts with routed_experts_encode_mode='auto'"
-              " and routed_experts_num_experts=None. For MoE models with >255"
-              " experts, set routed_experts_num_experts (or"
-              " routed_experts_encode_mode='uint10') to avoid per-step tier"
-              " switching between 4D uint8 and 5D uint10.",
-              1,
-          )
-        rl_traj["routed_experts"] = await asyncio.to_thread(
-            packing.encode_routed_experts,
-            routed_experts,
-            mode=self.routed_experts_encode_mode,
-            num_experts=self.routed_experts_num_experts,
-            batched=False,
-        )
     self.is_done = True
-    return self._convert_to_trajectory(rl_traj)
+    return self._convert_to_trajectory(rl_traj, sampler_time_s=sampler_time_s)
 
   def _annotate_response_budget(
       self, rl_traj: Mapping[str, Any], metadata: dict[str, Any]
@@ -465,13 +424,18 @@ class TrajectoryCollectorEngine:
     metadata["clipped"] = clipped
 
   def _convert_to_trajectory(
-      self, rl_traj: dict[str, Any]
+      self,
+      rl_traj: dict[str, Any],
+      *,
+      sampler_time_s: float | None = None,
   ) -> agent_types.TrajectoryItem:
     """Converts internal Token-mode rollout trajectory to agent_types.TrajectoryItem."""
     if not isinstance(rl_traj, dict):
       raise TypeError(
           f"Expected rl_traj to be a dict, got {type(rl_traj).__name__}"
       )
+    if sampler_time_s is not None:
+      rl_traj["sampler_time_s"] = sampler_time_s
 
     # Metadata carries only request-scoped context. Everything about the
     # episode itself stays on `traj`, which is the single source of truth and
@@ -480,21 +444,10 @@ class TrajectoryCollectorEngine:
     # reward was read instead of the real one, and the mirrored text held the
     # whole conversation rather than the model's answer.
     metadata = dict(self.request.metadata or {})
+    metadata.pop("env_config", None)
     metadata["prompt_id"] = self.request.prompt_id
     metadata["group_index"] = self.request.group_index
     metadata["status"] = rl_traj.get("status", "")
-    policy_version = getattr(
-        self.request,
-        "target_policy_version",
-        rl_traj.get("policy_version", 0),
-    )
-    if self._turn_policy_versions:
-      metadata["policy_version"] = int(self._turn_policy_versions[0])
-      metadata["policy_versions"] = list(self._turn_policy_versions)
-    else:
-      initial_version = int(policy_version or 0)
-      metadata["policy_version"] = initial_version
-      metadata["policy_versions"] = [initial_version]
 
     if metadata.pop("record_episode_summary", False):
       steps = self.agent.trajectory.steps

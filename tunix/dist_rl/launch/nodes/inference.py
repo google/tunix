@@ -56,14 +56,16 @@ def main(
   )
 
   hp = resolve_config.initialize(argv)
-  logging.info("Resolved config: %s", hp.config)
+  config_sha256 = node_utils.log_resolved_config(hp, "inference")
+  worker_id = node_utils.worker_id(hp, "inference", LOCAL_WORKER_ID)
+  port = node_utils.service_port(hp, "inference")
+  # Before the JAX initialization, which can block on the other processes, so
+  # a malformed port or OpenTelemetry setting fails fast.
+  node_utils.setup_otel_metrics(hp, "inference", worker_id)
 
   process_context.jax.initialize()
 
   ref = hp.config_mapping(_REFERENCE_KEY)
-  rollout = hp.config_mapping("rollout_config")
-  worker_id = node_utils.worker_id(hp, "inference", LOCAL_WORKER_ID)
-  port = node_utils.service_port(hp, "inference")
 
   model_dir = node_utils.ensure_local_safetensors(
       str(ref["model_download_path"]),
@@ -99,11 +101,13 @@ def main(
               "compute_logps_micro_batch_size"
           ]
       ),
-      max_prompt_length=int(rollout["max_prompt_length"]),
-      max_response_length=int(rollout["total_generation_steps"]),
-      temperature=float(rollout["temperature"]),
       execution_context=mesh,
   )
+
+  # On SIGTERM/SIGINT, stop the gRPC server first so in-flight scoring RPCs
+  # finish before transitioning the worker to STOPPED.
+  def _close() -> None:
+    worker_service.stop()
 
   asyncio.run(
       node_utils.serve_worker(
@@ -112,6 +116,8 @@ def main(
           role="inference",
           worker_id_str=worker_id,
           port=port,
+          config_sha256=config_sha256,
+          close_fn=_close,
       )
   )
 

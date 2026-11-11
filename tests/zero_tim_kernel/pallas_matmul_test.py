@@ -21,17 +21,9 @@ from absl.testing import parameterized
 import jax
 from jax.experimental import pallas as pl
 import jax.numpy as jnp
-from jax.sharding import PartitionSpec as P
 import numpy as np
 from tunix.zero_tim_kernel import pallas_matmul
 from tunix.zero_tim_kernel import test_utils
-
-_VMA_ENVS = (
-    pallas_matmul.CHECK_VMA_ENV,
-    pallas_matmul.CHECK_VMA_SCOPE_ENV,
-    pallas_matmul.RANK_PARALLEL_BACKWARD_ENV,
-    pallas_matmul.INPUT_FUSION_ENV,
-)
 
 
 def setUpModule():
@@ -59,9 +51,34 @@ class TilePolicyTest(parameterized.TestCase):
       (256, 4096, 1024, (128, 128, 128), (256, 1024, 128)),
       (256, 2560, 640, (128, 256, 256), (256, 640, 256)),
       (256, 2048, 1536, (128, 256, 256), (256, 512, 256)),
+      (8, 2048, 1024, (8, 256, 256), (8, 1024, 256)),
+      (32, 2048, 1536, (32, 128, 128), (32, 512, 128)),
   )
   def test_tile_policy(self, m, k, n, tiles, expected):
     self.assertEqual(pallas_matmul.tile_policy(m, k, n, tiles), expected)
+
+  @parameterized.parameters(
+      (1, 128, (8, 8)),
+      (4, 128, (8, 8)),
+      (8, 128, (8, 8)),
+      (12, 128, (16, 16)),
+      (32, 128, (32, 32)),
+      (64, 128, (64, 64)),
+      (65, 128, (128, 128)),
+      (128, 128, (128, 128)),
+      (200, 128, (256, 128)),
+      (4, 256, (8, 8)),
+      (128, 256, (128, 128)),
+      (200, 256, (256, 256)),
+  )
+  def test_adaptive_row_bucket(self, m, default_bm, expected):
+    self.assertEqual(pallas_matmul.adaptive_row_bucket(m, default_bm), expected)
+
+  def test_adaptive_row_bucket_rejects_non_positive(self):
+    with self.assertRaises(ValueError):
+      pallas_matmul.adaptive_row_bucket(0, 128)
+    with self.assertRaises(ValueError):
+      pallas_matmul.adaptive_row_bucket(8, 0)
 
   def test_block_k_is_never_changed(self):
     for tiles in pallas_matmul.CONTRACT_TILES:
@@ -83,6 +100,12 @@ class TilePolicyTest(parameterized.TestCase):
         )
     )
     self.assertEqual(launches, [("canon_matmul_bm128_bn128_bk256", (2, 8, 2))])
+    _, launches = _launches(
+        lambda: pallas_matmul.matmul(
+            x[:8], y, interpret=True, block_m=8, block_n=256, block_k=256
+        )
+    )
+    self.assertEqual(launches, [("canon_matmul_bm8_bn1024_bk256", (1, 1, 2))])
 
 
 class MatmulNumericsTest(parameterized.TestCase):
@@ -228,84 +251,14 @@ class MatmulValidationTest(parameterized.TestCase):
       )
 
 
-class VmaHelpersTest(absltest.TestCase):
+class InputFusionKnobTest(absltest.TestCase):
 
   def setUp(self):
     super().setUp()
     patcher = mock.patch.dict(os.environ)
     patcher.start()
     self.addCleanup(patcher.stop)
-    for name in _VMA_ENVS:
-      os.environ.pop(name, None)
-
-  def test_unscoped_mode_is_process_wide(self):
-    self.assertTrue(pallas_matmul.check_vma_scope_context())
-
-  def test_scope_requires_rank_parallel_manual_data_model_map(self):
-    os.environ[pallas_matmul.CHECK_VMA_SCOPE_ENV] = "1"
-    self.assertFalse(pallas_matmul.check_vma_scope_context())
-    os.environ[pallas_matmul.RANK_PARALLEL_BACKWARD_ENV] = "1"
-    self.assertFalse(pallas_matmul.check_vma_scope_context())
-
-    seen = []
-
-    def body(x):
-      seen.append(pallas_matmul.check_vma_scope_context())
-      return x
-
-    mesh = test_utils.cpu_mesh((2, 2), ("data", "model"))
-    jax.shard_map(
-        body, mesh=mesh, in_specs=P(), out_specs=P(), check_vma=False
-    )(jnp.zeros((), jnp.float32))
-    self.assertEqual(seen, [True])
-
-    seen.clear()
-    model_only = test_utils.cpu_mesh((4,), ("model",))
-    jax.shard_map(
-        body, mesh=model_only, in_specs=P(), out_specs=P(), check_vma=False
-    )(jnp.zeros((), jnp.float32))
-    self.assertEqual(seen, [False])
-
-  def test_invalid_scope_is_rejected(self):
-    os.environ[pallas_matmul.CHECK_VMA_SCOPE_ENV] = "2"
-    with self.assertRaises(ValueError):
-      pallas_matmul.check_vma_scope_context()
-
-  def test_helpers_are_identity_when_vma_mode_is_off(self):
-    x = jnp.ones((8, 128), jnp.bfloat16)
-    y = jnp.ones((128, 128), jnp.bfloat16)
-    aligned = pallas_matmul.check_vma_align_operands(x, y)
-    self.assertIs(aligned[0], x)
-    self.assertIs(aligned[1], y)
-    self.assertIsNone(pallas_matmul.check_vma_output_manual_axis_type(x, y))
-
-  def test_align_casts_replicated_operands_to_varying(self):
-    x_probe = jnp.ones((1,), jnp.bfloat16)
-    if not hasattr(jax.typeof(x_probe), "mat"):
-      self.skipTest("Requires VMA-enabled JAX (typeof.mat).")
-    os.environ[pallas_matmul.CHECK_VMA_ENV] = "1"
-    seen = {}
-
-    def body(x_local, y):
-      aligned = pallas_matmul.check_vma_align_operands(x_local, y)
-      seen["before"] = tuple(jax.typeof(v).mat.varying for v in (x_local, y))
-      seen["after"] = tuple(jax.typeof(v).mat.varying for v in aligned)
-      seen["out"] = pallas_matmul.check_vma_output_manual_axis_type(*aligned)
-      return aligned[0]
-
-    mesh = test_utils.cpu_mesh((4,), ("model",))
-    jax.shard_map(
-        body,
-        mesh=mesh,
-        in_specs=(P("model", None), P()),
-        out_specs=P("model", None),
-        check_vma=True,
-    )(jnp.ones((32, 128), jnp.bfloat16), jnp.ones((128, 128), jnp.bfloat16))
-    self.assertEqual(seen["before"], (frozenset({"model"}), frozenset()))
-    self.assertEqual(
-        seen["after"], (frozenset({"model"}), frozenset({"model"}))
-    )
-    self.assertEqual(seen["out"].varying, frozenset({"model"}))
+    os.environ.pop(pallas_matmul.INPUT_FUSION_ENV, None)
 
   def test_input_fusion_knob(self):
     self.assertFalse(pallas_matmul.input_fusion_enabled())

@@ -117,6 +117,7 @@ class TrajectoryReader(Protocol[MetadataT]):
     """
     ...
 
+
 @runtime_checkable
 class TrajectoryWriter(Protocol[MetadataT]):
   """Structural protocol defining write Trajectory Store operations."""
@@ -132,8 +133,10 @@ class TrajectoryWriter(Protocol[MetadataT]):
     asynchronously. Readers never observe partially written or inconsistent
     state.
 
-    Implementations snapshot `step` and `metadata` at call time, so callers may
-    keep mutating those objects afterwards without affecting what was logged.
+    Implementations always snapshot `metadata` at call time. Unless defensive
+    step copying is enabled on the backend, ownership of `step` transfers to
+    the writer on `add_step()`, so callers must not mutate `step` or its
+    nested containers afterwards.
 
     Args:
       step: Step object to log.
@@ -179,6 +182,7 @@ class TrajectoryWriter(Protocol[MetadataT]):
       metrics: TrajectoryMetrics containing the metrics data to record.
     """
     ...
+
   def flush(self) -> None:
     """Flushes any pending or asynchronous writes to persistent storage.
 
@@ -230,6 +234,10 @@ class TrajectoryStore(
   # instance (`self._metadata_cls`) either from `self.__orig_class__` (e.g.
   # `InMemoryStore[TunixMetadata]()`) or on the first read/write operation.
   _metadata_cls: type[MetadataT] | None = None
+
+  # Whether `exclude_step_arrays` has been validated against the bound metadata
+  # class's step schema. Set on the instance by `_validate_and_bind_metadata`.
+  _step_array_exclusions_validated: bool = False
 
   def __init_subclass__(cls, **kwargs: Any) -> None:
     super().__init_subclass__(**kwargs)
@@ -300,8 +308,43 @@ class TrajectoryStore(
     """The TrajectoryMetadata class bound to this store, or None if unbound."""
     return self._get_bound_metadata_cls()
 
+  @property
+  def exclude_step_arrays(self) -> frozenset[str]:
+    """Step array fields this store drops before writing steps.
+
+    Defaults to none; backends that support `exclude_step_arrays` override it.
+    """
+    return frozenset()
+
+  def _validate_step_array_exclusions(
+      self, metadata_cls: type[MetadataT]
+  ) -> None:
+    """Checks `exclude_step_arrays` against `metadata_cls`'s step schema.
+
+    Args:
+      metadata_cls: The TrajectoryMetadata class bound to this store.
+
+    Raises:
+      ValueError: If `exclude_step_arrays` names fields that no step class of
+        `metadata_cls` declares in `EXCLUDABLE_ARRAY_FIELDS`.
+    """
+    if self.exclude_step_arrays:
+      try:
+        trajectory_lib.validate_step_array_exclusions(
+            self.exclude_step_arrays,
+            allowed_fields=metadata_cls.excludable_step_array_fields(),
+        )
+      except ValueError as e:
+        raise ValueError(
+            f"{type(self).__name__} bound to {metadata_cls.__name__}: {e}"
+        ) from e
+    self._step_array_exclusions_validated = True
+
   def _validate_and_bind_metadata(self, metadata: MetadataT) -> None:
     """Validates and binds the store instance's single TrajectoryMetadata type.
+
+    On the first write, also validates `exclude_step_arrays` against the bound
+    metadata class's step schema (`TrajectoryMetadata.STEP_CLASSES`).
 
     Args:
       metadata: The metadata instance being written to the store.
@@ -310,9 +353,15 @@ class TrajectoryStore(
       TypeError: If `metadata` is not a `TrajectoryMetadata` instance (or is a
         `Trajectory`), or if its type does not match the metadata type already
         bound to this store instance.
+      ValueError: If `exclude_step_arrays` names fields that the bound metadata
+        class's step classes cannot exclude.
     """
     meta_cls = type(metadata)
-    if self._metadata_cls is not None and meta_cls is self._metadata_cls:
+    if (
+        self._metadata_cls is not None
+        and meta_cls is self._metadata_cls
+        and self._step_array_exclusions_validated
+    ):
       return
     if not isinstance(metadata, trajectory_lib.TrajectoryMetadata) or (
         isinstance(metadata, trajectory_lib.Trajectory)
@@ -329,6 +378,8 @@ class TrajectoryStore(
           f"{type(self).__name__} is bound to metadata type"
           f" {bound_cls.__name__}, got {meta_cls.__name__}."
       )
+    if not self._step_array_exclusions_validated:
+      self._validate_step_array_exclusions(meta_cls)
 
   def _rehydrate_metadata(
       self, atif_metadata: trajectory_lib.TrajectoryMetadata
@@ -451,8 +502,11 @@ class TrajectoryStore(
 
     Raises:
       ValueError: If `config` contains the removed "enabled" key, "backend"
-        names no known implementation, or the selected backend rejects the
-        rest of the config.
+        names no known implementation, "exclude_step_arrays" names fields the
+        bound metadata class's step classes cannot exclude, or the selected
+        backend rejects the rest of the config.
+      TypeError: If "exclude_step_arrays" is a string or contains non-string
+        entries.
     """
     if config is None:
       return None
@@ -471,8 +525,15 @@ class TrajectoryStore(
           f"Unknown Trajectory Store backend {backend!r}; expected one of"
           f" {sorted(cls._REGISTRY)}."
       )
-    store = cls._REGISTRY[backend]._from_config(config)  # pylint: disable=protected-access
     metadata_cls = getattr(cls, "_metadata_cls", None)
+    # Fail fast at startup for schema-bound stores (e.g. TunixTrajectoryStore);
+    # unbound stores validate on the first write instead.
+    exclude = config.get("exclude_step_arrays")
+    if metadata_cls is not None and exclude is not None:
+      trajectory_lib.validate_step_array_exclusions(
+          exclude, allowed_fields=metadata_cls.excludable_step_array_fields()
+      )
+    store = cls._REGISTRY[backend]._from_config(config)  # pylint: disable=protected-access
     if metadata_cls is not None:
       store._metadata_cls = metadata_cls  # pylint: disable=protected-access
     return cast(Self, store)

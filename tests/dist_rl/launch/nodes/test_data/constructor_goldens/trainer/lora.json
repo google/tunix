@@ -1,0 +1,216 @@
+{
+  "calls": [
+    {
+      "context.jax.initialize": {}
+    },
+    {
+      "tunix.dist_rl.launch.nodes.node_utils.ensure_local_safetensors": {
+        "args": [
+          "/artifacts/models/Qwen3-1.7B",
+          "Qwen/Qwen3-1.7B"
+        ],
+        "kwargs": {
+          "model_key": "actor_model_config"
+        }
+      }
+    },
+    {
+      "jax.experimental.mesh_utils.create_device_mesh": {
+        "args": [
+          [
+            1,
+            2
+          ],
+          [
+            "<jax.devices()[0]>",
+            "<jax.devices()[1]>"
+          ]
+        ]
+      }
+    },
+    {
+      "tunix.dist_rl.launch.nodes.node_utils.Mesh": {
+        "args": [
+          "<jax.experimental.mesh_utils.create_device_mesh()>"
+        ],
+        "kwargs": {
+          "axis_names": [
+            "fsdp",
+            "tp"
+          ]
+        }
+      }
+    },
+    {
+      "tunix.sft.checkpoint_options.TunixCheckpointingOptions": {
+        "kwargs": {
+          "async_options": {
+            "__type__": "AsyncOptions"
+          },
+          "device_host_concurrent_gb": null,
+          "enable_async_checkpointing": true,
+          "preservation_policy": {
+            "__type__": "LatestN",
+            "n": 10
+          },
+          "save_decision_policy": {
+            "__type__": "FixedIntervalPolicy",
+            "interval": 0
+          },
+          "step_name_format": null
+        }
+      }
+    },
+    {
+      "tunix.sft.metrics_logger.MetricsLoggerOptions": {
+        "kwargs": {
+          "flush_every_n_steps": 1,
+          "log_dir": "/artifacts/metrics",
+          "project_name": "trellis-gsm8k",
+          "run_name": ""
+        }
+      }
+    },
+    {
+      "tunix.sft.checkpoint_options.TunixCheckpointingOptions": {
+        "kwargs": {
+          "async_options": {
+            "__type__": "AsyncOptions"
+          },
+          "device_host_concurrent_gb": null,
+          "enable_async_checkpointing": true,
+          "preservation_policy": {
+            "__type__": "LatestN",
+            "n": 10
+          },
+          "save_decision_policy": {
+            "__type__": "FixedIntervalPolicy",
+            "interval": 0
+          },
+          "step_name_format": null
+        }
+      }
+    },
+    {
+      "tunix.common.configs.TrainingConfig": {
+        "kwargs": {
+          "checkpoint_root_directory": null,
+          "checkpointing_options": "<tunix.sft.checkpoint_options.TunixCheckpointingOptions()#2>",
+          "data_sharding_axis": [
+            "fsdp"
+          ],
+          "eval_every_n_steps": 50,
+          "gradient_accumulation_steps": 32,
+          "metrics_prefix": "actor",
+          "pbar_description": "Actor Training",
+          "resume_from_checkpoint_on_init": false
+        }
+      }
+    },
+    {
+      "tunix.cli.config.create_optimizer": {
+        "args": [
+          {
+            "b1": 0.9,
+            "b2": 0.999,
+            "chain_kwargs": {
+              "max_norm": 1.0
+            },
+            "decay_steps": 500,
+            "end_value": 0.0,
+            "eps": 1e-08,
+            "init_value": 0.0,
+            "learning_rate": 2e-07,
+            "opt_chain_type": "clip_by_global_norm",
+            "opt_type": "adamw",
+            "peak_value": 2e-07,
+            "schedule_type": "warmup_cosine_decay_schedule",
+            "value": null,
+            "warmup_ratio": 0.1,
+            "warmup_steps": 50,
+            "weight_decay": 0.01
+          },
+          "rl_training_config -> actor_optimizer_config"
+        ]
+      }
+    },
+    {
+      "tunix.dist_rl.worker.trainer_worker.TrainerWorker": {
+        "kwargs": {
+          "execution_context": "<tunix.dist_rl.launch.nodes.node_utils.Mesh()>",
+          "logps_chunk_size": 0,
+          "logps_micro_batch_size": 1,
+          "trainer_factory": "<function tunix.dist_rl.launch.nodes.trainer._create_tunix_trainer_factory.<locals>._factory>",
+          "worker_id": "trainer-0"
+        }
+      }
+    },
+    {
+      "tunix.dist_rl.launch.nodes.node_utils.serve_worker": {
+        "args": [
+          "<tunix.dist_rl.worker.trainer_worker.TrainerWorker()>"
+        ],
+        "kwargs": {
+          "close_fn": "<function tunix.dist_rl.launch.nodes.trainer.main.<locals>._close>",
+          "config_sha256": "<resolve_config.config_fingerprint(hp)>",
+          "port": 20000,
+          "process_context": "<context>",
+          "role": "trainer",
+          "worker_id_str": "trainer-0"
+        }
+      }
+    },
+    {
+      "trainer_factory": {}
+    },
+    {
+      "tunix.models.automodel.AutoModel.from_pretrained": {
+        "kwargs": {
+          "dtype": "bfloat16",
+          "flash_attention_block_size": 256,
+          "load_dtype": "float32",
+          "mesh": "<tunix.dist_rl.launch.nodes.node_utils.Mesh()>",
+          "model_id": "Qwen3-1.7B",
+          "model_path": "/artifacts/models/Qwen3-1.7B",
+          "remat_config": "decoder",
+          "use_flash_attention": true
+        }
+      }
+    },
+    {
+      "tunix.cli.utils.model.apply_lora_to_model": {
+        "args": [
+          "<tunix.models.automodel.AutoModel.from_pretrained()[0]>"
+        ],
+        "kwargs": {
+          "lora_config": {
+            "alpha": 32.0,
+            "module_path": ".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*down_proj|.*up_proj",
+            "rank": 16,
+            "tile_size": 128,
+            "weight_qtype": "nf4"
+          },
+          "mesh": "<tunix.dist_rl.launch.nodes.node_utils.Mesh()>"
+        }
+      }
+    },
+    {
+      "tunix.dist_rl.train.peft_trainer_v2.PeftTrainer": {
+        "args": [
+          "<tunix.cli.utils.model.apply_lora_to_model()>",
+          "<tunix.cli.config.create_optimizer()>",
+          "<tunix.common.configs.TrainingConfig()>"
+        ],
+        "kwargs": {
+          "rollout_tp_size": 4,
+          "sampler_type": "vllm"
+        }
+      }
+    }
+  ],
+  "env": {
+    "TPU_RAIDEN_DATA_NICS": "eth0",
+    "VERIFY_WEIGHTS": "false"
+  },
+  "jax_config": {}
+}

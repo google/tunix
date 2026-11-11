@@ -19,13 +19,13 @@ This module centralizes type aliases and dataclasses used for:
 2) Defining common data structures used by Orchestrator and workers.
 """
 
+from collections.abc import Callable, Mapping
 import dataclasses
 import enum
+import math
 import time
-from typing import Any, Dict
+from typing import Any, Dict, Protocol
 import uuid
-import flax
-from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
 from tunix.common import datatypes as common_datatypes
 from tunix.rl.agentic.agents import agent_types
@@ -170,6 +170,26 @@ _ALLOWED_TRANSITIONS: dict[WorkerState, set[WorkerState]] = {
 }
 
 
+class AdmissionStatus(enum.Enum):
+  """Control-plane admission status of a registered worker.
+
+  Tracked by the orchestrator to decide which workers may receive data-plane
+  traffic. Distinct from `WorkerState`, the lifecycle state a worker
+  self-reports via `heartbeat()`: a worker can report `READY` while still
+  `PENDING_WEIGHT_SYNC` here.
+
+  Attributes:
+    REGISTERED: Registered but not yet brought up by `LifecycleDriver`.
+    PENDING_WEIGHT_SYNC: Brought up and awaiting its first committed weight
+      sync; a weight sync destination but not routable.
+    ACTIVE: Routable by the data plane.
+  """
+
+  REGISTERED = "registered"
+  PENDING_WEIGHT_SYNC = "pending_weight_sync"
+  ACTIVE = "active"
+
+
 @dataclasses.dataclass(kw_only=True)
 class HealthReport:
   """A snapshot of a worker's health and readiness state.
@@ -220,41 +240,79 @@ _FT_ON_DEFAULT_POLL_RETRY_BUDGET_S = 60.0
 class FaultToleranceConfig:
   """Configuration for worker fault tolerance.
 
-  TODO(b/577214994): Decouple task retry budget from worker eviction budget
-  (a failed `dispatch_task` should only mark a worker suspect until its poll
-  loop confirms the failure), extend with circuit-breaking knobs, and then flip
-  `enabled` to default to `True`.
-
   Attributes:
     enabled: Whether worker fault tolerance (automatic eviction and task retry)
-      is enabled. Defaults to `False`: in v1 a single transport failure evicts a
-      worker, and an evicted worker whose process is still alive never
-      re-registers (rollout workers register with discovery only once at
-      startup), so a transient fault on a healthy worker permanently shrinks the
-      rollout pool. Until dynamic worker rejoin lands, an evicted worker's id is
-      also rejected if it tries to re-register
-      (`WorkerRegistry.unregister_handle`), so a restarted worker never receives
-      tasks without bring-up and weight sync. When `False`, fault tolerance is
-      disabled and `effective_max_task_retries` is `0`.
+      is enabled; defaults to `True`. Transient transport errors are retried in
+      place on the same worker—up to 3 total attempts (1 initial send + 2
+      serialized probes, ~1.5s default backoff, capped by
+      `effective_poll_retry_budget_s`) on `dispatch_task`, and up to
+      `effective_poll_retry_budget_s` (`60.0s` by default) on
+      `poll_responses`—before evicting the worker and re-dispatching its
+      in-flight tasks (`ft/rollout/task_retries_total` counts both cross-worker
+      re-dispatches and in-place retry probes/resends). When `False`, fault
+      tolerance is disabled (`effective_max_task_retries` is `0` and
+      `min_active_rollout_ratio` is ignored). Known limitations when `True`:
+      weight_sync: `TaskSession` detects failures only on workers holding
+        in-flight tasks, so a rollout worker that dies with none (after its last
+        delivery and before or during the next weight-sync round) is noticed
+        only by the next weight-sync round, which fails and aborts the program,
+        as with `enabled=False`. If the worker restarts and re-registers through
+        discovery before that round starts, it re-enters `REGISTERED` ->
+        `PENDING_WEIGHT_SYNC` and rejoins without failing the round (provided at
+        least one rollout worker is `ACTIVE` or `PENDING_WEIGHT_SYNC` when the
+        round starts). TODO(b/577214994): Add weight-sync fault tolerance after
+        the weight-sync redesign.
+      sampler_errors: Detects worker failures only via transport errors (e.g.
+        process exit or unreachability). If the worker process stays up, a hung
+        generation never returns (the first turn has no episode timeout) and
+        sampler errors return `FAILED` trajectories without evicting the worker.
+        TODO(b/577214994): Make fatal sampler errors exit the worker process so
+        they surface as worker failures.
+      live_evicted_workers: Rollout workers register with discovery only once at
+        startup, so a live worker evicted after exhausting its retry budget does
+        not rejoin (sustained pool shrink is bounded by
+        `min_active_rollout_ratio`).
+      poison_prompts: A prompt that deterministically crashes workers evicts up
+        to `max_task_retries + 1` workers before surfacing the terminal error
+        and aborting the program (as with `enabled=False`).
     max_task_retries: Maximum number of times an in-flight task is re-dispatched
       onto surviving workers after a worker failure when `enabled=True`. Because
-      each send-path or poll-path transport failure evicts the failing worker in
-      v1, `max_task_retries` also bounds the number of workers a single request
-      can evict; defaults to `1`.
+      a task is re-dispatched only after its worker is evicted,
+      `max_task_retries` also bounds the number of workers a single request can
+      evict; defaults to `1`.
     poll_retry_budget_s: Optional override for the maximum wall-clock duration
-      in seconds to retry transient poll errors on a rollout worker before
-      failing its in-flight tasks (`0.0` fails immediately on the first
-      transient poll error). When `None` (default),
-      `effective_poll_retry_budget_s` resolves to `60.0` when `enabled=True`
-      (gRPC keepalive ~30s plus margin) and `300.0` when `enabled=False`
-      (matching `TaskSession`'s default budget).
+      in seconds to retry transient `poll_responses` errors (and cap in-place
+      `dispatch_task` retry backoff when `enabled=True`) on a rollout worker
+      before failing its in-flight tasks (`0.0` fails immediately on the first
+      transient error). When `None` (default), `effective_poll_retry_budget_s`
+      resolves to `60.0` when `enabled=True` (gRPC keepalive ~30s plus margin;
+      bounds step stall when a pod is rescheduled to a new IP) and `300.0` when
+      `enabled=False` (matching `TaskSession`'s standalone default budget).
+    min_active_rollout_ratio: Minimum ratio of currently `ACTIVE` rollout
+      workers to the peak `ACTIVE` rollout worker count observed since startup,
+      in `(0.0, 1.0]`, or `None` to disable the capacity-floor guardrail;
+      defaults to `0.5`. When `enabled=True` and set, `FaultToleranceManager`
+      raises `RolloutCapacityError` once `active / peak_active <
+      min_active_rollout_ratio` (strictly below; e.g. `1 / 2` and `2 / 4` at
+      `0.5` do not trigger) continuously for at least
+      `min_active_rollout_grace_s` seconds after the first rollout worker has
+      reached `ACTIVE`. Ignored when `enabled=False`.
+    min_active_rollout_grace_s: Wall-clock grace period in seconds (`>= 0.0`,
+      default `900.0`) that the active rollout ratio may remain strictly below
+      `min_active_rollout_ratio` before `RolloutCapacityError` is raised,
+      allowing crashed workers time to be restarted and rejoin. The grace timer
+      starts on worker eviction, while the floor is checked at
+      `DistributedRLEngine` construction, after each `poll_rollouts()`, and
+      after `sync_weights()` promotion, so `RolloutCapacityError` surfaces on
+      the first poll or weight-sync boundary once `min_active_rollout_grace_s`
+      has elapsed.
   """
 
-  # TODO(b/577214994): Change `enabled` default to `True` once dispatch failure
-  # is decoupled from worker eviction.
-  enabled: bool = False
+  enabled: bool = True
   max_task_retries: int = 1
   poll_retry_budget_s: float | None = None
+  min_active_rollout_ratio: float | None = 0.5
+  min_active_rollout_grace_s: float = 900.0
 
   def __post_init__(self) -> None:
     if self.max_task_retries < 0:
@@ -264,6 +322,21 @@ class FaultToleranceConfig:
     if self.poll_retry_budget_s is not None and self.poll_retry_budget_s < 0.0:
       raise ValueError(
           f"poll_retry_budget_s must be >= 0, got {self.poll_retry_budget_s}"
+      )
+    if self.min_active_rollout_ratio is not None and not (
+        0.0 < self.min_active_rollout_ratio <= 1.0
+    ):
+      raise ValueError(
+          "min_active_rollout_ratio must be in (0.0, 1.0], got"
+          f" {self.min_active_rollout_ratio}"
+      )
+    if (
+        math.isnan(self.min_active_rollout_grace_s)
+        or self.min_active_rollout_grace_s < 0.0
+    ):
+      raise ValueError(
+          "min_active_rollout_grace_s must be >= 0, got"
+          f" {self.min_active_rollout_grace_s}"
       )
 
   @property
@@ -340,8 +413,6 @@ class RolloutRequest(Request):
       turns of the rollout episode.
     target_policy_version: Policy model version identifier to use for rollout
       generation.
-    exact_token_continuity: Whether to preserve exact token IDs across
-      multi-turn rollout steps (Token-In-Token-Out). Defaults to True.
   """
 
   prompt: Any = ""
@@ -351,7 +422,6 @@ class RolloutRequest(Request):
   max_turns: int = 10
   max_response_length: int | None = None
   target_policy_version: int = 0
-  exact_token_continuity: bool = True
 
   @property
   def traj_id(self) -> str:
@@ -505,14 +575,29 @@ class WeightSyncMetadata:
 
 
 ##### Training DTOs #####
+#
+# Trainer payloads are plain frozen dataclasses so this module stays free of
+# any ML framework: the orchestrator builds them from numpy arrays (the wire
+# contract, see `rpc_utils.validate_wire_safe`) and ships them unchanged.
+# Framework-specific container behaviour is registered next to the trainer
+# that needs it; for JAX, importing `tunix.dist_rl.train.jax_pytrees`
+# registers them as pytrees, after which a trainer may hold device arrays in
+# the same fields. Use `dataclasses.replace` to derive modified copies.
+
+# Marks a payload field as static configuration rather than array data. Array
+# fields are the per-batch tensors a trainer traces / shards / moves between
+# devices; static fields describe the batch (e.g. a packing bound) and must
+# stay Python values. `jax.tree_util.register_dataclass` reads this exact
+# metadata key to pick `meta_fields`, so JAX needs no separate field list.
+STATIC_FIELD_METADATA = {"static": True}
 
 
-@flax.struct.dataclass(frozen=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, kw_only=True)
 class TrainerPayload:
   """Base abstract class for generic trainer payloads."""
 
 
-@flax.struct.dataclass(frozen=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, kw_only=True)
 class SFTTrainerPayload(TrainerPayload):
   """Supervised Fine-Tuning (SFT) trainer payload.
 
@@ -526,15 +611,15 @@ class SFTTrainerPayload(TrainerPayload):
     segment_positions: Optional [B, T] position indices within each segment.
   """
 
-  token_ids: ArrayLike
-  token_mask: ArrayLike
-  segment_ids: ArrayLike | None = None
-  segment_positions: ArrayLike | None = None
+  token_ids: np.ndarray
+  token_mask: np.ndarray
+  segment_ids: np.ndarray | None = None
+  segment_positions: np.ndarray | None = None
 
 
 # TODO(tunix-dev): Introduce PPOTrainerPayload to replace generic
 # RLTrainerPayload when PPO specific fields are needed.
-@flax.struct.dataclass(frozen=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, kw_only=True)
 class RLTrainerPayload(TrainerPayload):
   """RL training payload.
 
@@ -571,32 +656,66 @@ class RLTrainerPayload(TrainerPayload):
     returns: Optional [B, C] value baseline returns (for PPO / Critic).
     old_values: Optional [B, C] critic value estimates (for PPO / Critic).
     num_segments: Optional static upper bound on number of segments in packed
-      rows.
-    metadata: Extra payload metadata dictionary.
+      rows (static field, see `STATIC_FIELD_METADATA`).
+    sampler_agreement_applied: Whether the orchestrator already scored the batch
+      against the trainer (static field).
+    metadata: Extra payload metadata dictionary (static field).
   """
 
-  prompt_ids: ArrayLike
-  prompt_mask: ArrayLike
-  completion_ids: ArrayLike
-  completion_mask: ArrayLike
-  advantages: ArrayLike
-  completion_attention_mask: ArrayLike | None = None
-  segment_ids: ArrayLike | None = None
-  segment_positions: ArrayLike | None = None
-  ref_per_token_logps: ArrayLike | None = None
-  old_per_token_logps: ArrayLike | None = None
-  sampler_is_weights: ArrayLike | None = None
-  routed_experts: ArrayLike | None = None
-  returns: ArrayLike | None = None
-  old_values: ArrayLike | None = None
-  num_segments: int | None = flax.struct.field(default=None, pytree_node=False)
-  sampler_agreement_applied: bool = flax.struct.field(
-      default=False, pytree_node=False
+  prompt_ids: np.ndarray
+  prompt_mask: np.ndarray
+  completion_ids: np.ndarray
+  completion_mask: np.ndarray
+  advantages: np.ndarray
+  completion_attention_mask: np.ndarray | None = None
+  segment_ids: np.ndarray | None = None
+  segment_positions: np.ndarray | None = None
+  ref_per_token_logps: np.ndarray | None = None
+  old_per_token_logps: np.ndarray | None = None
+  sampler_is_weights: np.ndarray | None = None
+  routed_experts: np.ndarray | None = None
+  returns: np.ndarray | None = None
+  old_values: np.ndarray | None = None
+  num_segments: int | None = dataclasses.field(
+      default=None, metadata=STATIC_FIELD_METADATA
   )
-  metadata: dict[str, Any] = flax.struct.field(
-      default_factory=dict, pytree_node=False
+  sampler_agreement_applied: bool = dataclasses.field(
+      default=False, metadata=STATIC_FIELD_METADATA
+  )
+  metadata: dict[str, Any] = dataclasses.field(
+      default_factory=dict, metadata=STATIC_FIELD_METADATA
   )
   # TODO(tunix-dev): add ppo specific fields in PPORLTrainerPayload.
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class LogprobsScoringPayload(TrainerPayload):
+  """Read-only payload for actor-side per-token log-probability scoring.
+
+  Attributes:
+    prompt_ids: [B, P] prompt token IDs.
+    completion_ids: [B, C] completion (or packed sequence) token IDs.
+    pad_id: Padding token ID (static field, see `STATIC_FIELD_METADATA`).
+    eos_id: End-of-sequence token ID (static field, see
+      `STATIC_FIELD_METADATA`).
+    temperature: Softmax temperature used when scoring log-probs (static field,
+      see `STATIC_FIELD_METADATA`).
+    segment_ids: Optional [B, T] packing segment ids.
+    segment_positions: Optional [B, T] position indices within each segment.
+    routed_experts: Optional MoE expert ids captured during rollout.
+    token_mask: Optional [B, P + C] valid attention positions, including real
+      EOS tokens and observations excluded from the policy loss.
+  """
+
+  prompt_ids: np.ndarray
+  completion_ids: np.ndarray
+  pad_id: int = dataclasses.field(metadata=STATIC_FIELD_METADATA)
+  eos_id: int = dataclasses.field(metadata=STATIC_FIELD_METADATA)
+  temperature: float = dataclasses.field(metadata=STATIC_FIELD_METADATA)
+  segment_ids: np.ndarray | None = None
+  segment_positions: np.ndarray | None = None
+  routed_experts: np.ndarray | None = None
+  token_mask: np.ndarray | None = None
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -610,6 +729,68 @@ class TrainRequest(Request):
 
   payload: TrainerPayload
   target_policy_version: int = 0
+
+
+class WeightedMetricLike(Protocol):
+  """An unreduced weighted metric transported across the wire.
+
+  Trainers accumulate some metrics as a running `unreduced_sum` and a
+  `denominator` so the orchestrator can reduce them correctly across
+  micro-batches and workers. This is the structural wire contract; readers match
+  on these read-only attributes rather than a concrete class so the wire format
+  stays framework-neutral. `tunix.sft.utils.WeightedMetric` is the on-device JAX
+  counterpart whose `jax.Array` fields must be converted to host numpy/float
+  values before crossing the wire (`rpc_utils.validate_wire_safe` rejects
+  `jax.Array`).
+  """
+
+  @property
+  def unreduced_sum(self) -> np.ndarray | np.number | float:
+    ...
+
+  @property
+  def denominator(self) -> np.ndarray | np.number | float:
+    ...
+
+  @property
+  def eps(self) -> float | None:
+    ...
+
+  @property
+  def min_denom(self) -> float | None:
+    ...
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class MetricsBuffer:
+  """Step metrics returned by a trainer worker to the orchestrator.
+
+  Carries one update's metrics unreduced so the orchestrator can apply the
+  right reduction per metric; values must already be host (numpy/float) scalars
+  when the buffer crosses the wire.
+
+  Attributes:
+    id: The trainer step (or any caller-chosen identifier) the metrics belong
+      to.
+    weighted_metrics: Metrics that reduce as `unreduced_sum / denominator`.
+    scalar_metrics: Metrics that reduce with a plain aggregation function.
+    aggregation_fns: Optional per-metric host-side aggregation overrides for
+      `scalar_metrics`, keyed by metric name.
+    mode: The training mode the metrics were collected in (`"train"` /
+      `"eval"`).
+  """
+
+  id: int | str
+  weighted_metrics: Mapping[str, WeightedMetricLike] = dataclasses.field(
+      default_factory=dict
+  )
+  scalar_metrics: Mapping[str, np.ndarray | np.number | float] = (
+      dataclasses.field(default_factory=dict)
+  )
+  aggregation_fns: Mapping[
+      str, Callable[[np.ndarray | np.number | float], Any]
+  ] = dataclasses.field(default_factory=dict)
+  mode: str = "train"
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -626,10 +807,9 @@ class LogprobsRequest(Request):
     pad_id: Pad token id. Used by the trainer/actor scoring path; the reference
       path leaves it unset and relies on the worker's own id.
     eos_id: End-of-sequence token id, used by the trainer/actor scoring path.
-    segment_ids: Optional packing segment ids (sequence packing); trainer path
-      only.
+    segment_ids: Optional packing segment ids (sequence packing).
     segment_positions: Optional packing local position indices (sequence
-      packing); trainer path only.
+      packing).
     routed_experts: Optional MoE expert ids captured during rollout, laid out
       like `RLTrainerPayload.routed_experts` (`4D` `int16` `[B, P + C,
       num_layers, top_k]` with `-1` unset, `4D` `+1`-shifted `uint8` `[B, P + C,
@@ -644,16 +824,16 @@ class LogprobsRequest(Request):
       packed segment metadata instead for packed sequences.
   """
 
-  prompt_tokens: ArrayLike
-  completion_tokens: ArrayLike
+  prompt_tokens: np.ndarray
+  completion_tokens: np.ndarray
   temperature: float
   model_role: str = "reference"
   pad_id: int | None = None
   eos_id: int | None = None
-  segment_ids: ArrayLike | None = None
-  segment_positions: ArrayLike | None = None
-  routed_experts: ArrayLike | None = None
-  token_mask: ArrayLike | None = None
+  segment_ids: np.ndarray | None = None
+  segment_positions: np.ndarray | None = None
+  routed_experts: np.ndarray | None = None
+  token_mask: np.ndarray | None = None
 
 
 ##### Inference DTOs #####

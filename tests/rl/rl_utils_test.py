@@ -872,27 +872,5 @@ class ComputePackSizeTest(parameterized.TestCase):
     self.assertIn("'tp': 4", logs.output[0])
 
 
-class ValidatePackingBudgetTest(absltest.TestCase):
-
-  def test_accepts_budget_that_fits_a_maximal_sequence(self):
-    utils.validate_packing_budget(
-        max_token_budget=4096, max_prompt_length=1024, max_response_length=1024
-    )
-    # Exactly one maximal sequence per row is the boundary case, still valid.
-    utils.validate_packing_budget(
-        max_token_budget=2048, max_prompt_length=1024, max_response_length=1024
-    )
-
-  def test_raises_when_a_maximal_sequence_cannot_fit(self):
-    # Without this check the run reaches pack_sequences' per-sequence raise only
-    # once a maximal sequence actually shows up, potentially hours in.
-    with self.assertRaisesRegex(ValueError, 'max_seq_token_per_tpu >= 2048'):
-      utils.validate_packing_budget(
-          max_token_budget=1024,
-          max_prompt_length=1024,
-          max_response_length=1024,
-      )
-
-
 if __name__ == '__main__':
   absltest.main()

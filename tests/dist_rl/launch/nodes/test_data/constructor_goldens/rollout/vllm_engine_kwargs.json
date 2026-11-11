@@ -1,0 +1,303 @@
+{
+  "calls": [
+    {
+      "importlib.import_module": {
+        "args": [
+          "tunix.dist_rl.examples.math_gsm8k_dist.gsm8k"
+        ]
+      }
+    },
+    {
+      "tunix.dist_rl.common.gcs_cache.RolloutCacheKeyParams": {
+        "kwargs": {
+          "enable_prefix_caching": false,
+          "lora_rank": 8,
+          "max_prompt_length": 1024,
+          "max_response_length": 1024,
+          "mesh_expert": 1,
+          "mesh_fsdp": 1,
+          "mesh_tp": 2,
+          "model_name": "qwen3-1.7b",
+          "sampler": "vllm",
+          "tpu_slice": "tpuv5e:4x4",
+          "use_lora": true,
+          "vllm_async_scheduling": false,
+          "vllm_max_model_len": 8192
+        }
+      }
+    },
+    {
+      "tunix.dist_rl.common.gcs_cache.restore_jax_cache": {
+        "kwargs": {
+          "params": "<tunix.dist_rl.common.gcs_cache.RolloutCacheKeyParams()>"
+        }
+      }
+    },
+    {
+      "transformers.models.auto.tokenization_auto.AutoTokenizer.from_pretrained": {
+        "args": [
+          "/models/tokenizer"
+        ],
+        "kwargs": {
+          "trust_remote_code": true
+        }
+      }
+    },
+    {
+      "tunix.dist_rl.worker.rollout_worker.RolloutConfig": {
+        "kwargs": {
+          "drain_timeout_s": 660.0,
+          "eos_tokens": [
+            151645,
+            151643
+          ],
+          "kv_cache_size": 2048,
+          "max_prompt_length": 1024,
+          "max_tokens_to_generate": 1024,
+          "partial_rollout": false,
+          "return_logprobs": true,
+          "return_routed_experts": true,
+          "routed_experts_encode_mode": "uint10",
+          "routed_experts_num_experts": 128,
+          "temperature": 1.0,
+          "top_k": -1,
+          "top_p": 1.0,
+          "trajectory_store_config": null,
+          "weight_sync_mode": "WeightSyncMode.RAIDEN"
+        }
+      }
+    },
+    {
+      "tunix.dist_rl.worker.rollout_worker.RolloutConfig": {
+        "kwargs": {
+          "beam_size": null,
+          "data_parallel_size": 1,
+          "data_type": null,
+          "drain_timeout_s": 660.0,
+          "eos_tokens": [
+            151645,
+            151643
+          ],
+          "episode_timeout": 600.0,
+          "expert_parallel_size": 1,
+          "kv_cache_size": 8192,
+          "max_prompt_length": 1024,
+          "max_response_length": null,
+          "max_tokens_to_generate": 1024,
+          "overlong_filter": false,
+          "partial_rollout": false,
+          "return_logits": false,
+          "return_logprobs": true,
+          "return_routed_experts": true,
+          "rollout_mapping_config": null,
+          "rollout_vanilla_v2_chunked_prefill_length": 512,
+          "rollout_vanilla_v2_enable_prefix_caching": true,
+          "rollout_vanilla_v2_hbm_utilization": 0.2,
+          "rollout_vanilla_v2_host_size_gib": 0.0,
+          "rollout_vanilla_v2_kv_cache_page_size": 16,
+          "rollout_vanilla_v2_max_num_batched_tokens": 2048,
+          "rollout_vanilla_v2_max_num_seqs": 32,
+          "rollout_vanilla_v2_num_scheduler_steps": 1,
+          "rollout_vanilla_v2_server_mode": false,
+          "rollout_vanilla_v2_server_mode_submission_threshold": 0,
+          "rollout_vanilla_v2_server_mode_submission_timeout_s": 0.0,
+          "rollout_vllm_additional_config": {
+            "maxtext_config": {
+              "allow_split_physical_axes": true,
+              "attention": "vllm_rpa",
+              "enable_dp_attention": false,
+              "float32_gate_logits": true,
+              "log_config": false,
+              "model_call_mode": "inference",
+              "model_name": "qwen3-1.7b",
+              "prefuse_moe_weights": true,
+              "return_routed_experts": true,
+              "scan_layers": false,
+              "weight_dtype": "bfloat16"
+            }
+          },
+          "rollout_vllm_async_scheduling": false,
+          "rollout_vllm_delete_dst_buffers": true,
+          "rollout_vllm_enable_dp_attention": false,
+          "rollout_vllm_free_kv_cache_during_weight_sync": true,
+          "rollout_vllm_hbm_utilization": 0.85,
+          "rollout_vllm_hf_config_path": null,
+          "rollout_vllm_init_with_random_weights": true,
+          "rollout_vllm_kwargs": {
+            "additional_config": {
+              "maxtext_config": {
+                "allow_split_physical_axes": false,
+                "use_multimodal": false
+              },
+              "sharding": {
+                "sharding_strategy": {
+                  "expert_parallelism": 4
+                }
+              }
+            },
+            "block_size": 256,
+            "dtype": "bfloat16",
+            "enable_expert_parallel": true,
+            "enable_prefix_caching": false,
+            "hf_overrides": {
+              "architectures": [
+                "MaxTextForCausalLM"
+              ]
+            },
+            "tokenizer": "/models/tokenizer"
+          },
+          "rollout_vllm_logprobs_mode": "processed_logprobs",
+          "rollout_vllm_lora_config": {
+            "max_lora_rank": 8,
+            "max_loras": 1
+          },
+          "rollout_vllm_max_num_batched_tokens": null,
+          "rollout_vllm_max_num_seqs": null,
+          "rollout_vllm_model_version": "Qwen/Qwen3-1.7B",
+          "rollout_vllm_overlap_postprocessing": true,
+          "rollout_vllm_reshard_chunk_size": null,
+          "rollout_vllm_sampling_kwargs": {
+            "detokenize": true
+          },
+          "rollout_vllm_server_mode": true,
+          "rollout_vllm_server_mode_submission_threshold": 0,
+          "rollout_vllm_server_mode_submission_timeout_s": 0.0,
+          "rollout_vllm_tpu_backend_type": "jax",
+          "routed_experts_encode_mode": "uint10",
+          "routed_experts_num_experts": 128,
+          "seed": null,
+          "store_routed_experts": false,
+          "temperature": 1.0,
+          "tensor_parallel_size": 2,
+          "top_k": -1,
+          "top_p": 1.0,
+          "trajectory_store_config": null,
+          "weight_sync_mode": "WeightSyncMode.RAIDEN"
+        }
+      }
+    },
+    {
+      "tunix.dist_rl.rollout.vllm_sampler.VllmSampler": {
+        "kwargs": {
+          "config": "<tunix.dist_rl.worker.rollout_worker.RolloutConfig()#2>",
+          "server_id": "rollout-0"
+        }
+      }
+    },
+    {
+      "tunix.generate.tokenizer_adapter.TokenizerAdapter": {
+        "args": [
+          "<tokenizer>"
+        ]
+      }
+    },
+    {
+      "tunix.rl.agentic.parser.chat_template_parser.parser.RawTextParser": {
+        "args": [
+          "<tokenizer>"
+        ]
+      }
+    },
+    {
+      "tunix.dist_rl.worker.rollout_worker.RolloutWorker": {
+        "kwargs": {
+          "agent_config": {},
+          "agent_name": "gsm8kagent",
+          "chat_parser": "<tunix.rl.agentic.parser.chat_template_parser.parser.RawTextParser()>",
+          "config": "<tunix.dist_rl.worker.rollout_worker.RolloutConfig()#2>",
+          "env_config": {},
+          "env_name": "gsm8kenv",
+          "max_concurrency": 256,
+          "sampler": "<tunix.dist_rl.rollout.vllm_sampler.VllmSampler()>",
+          "tokenizer": "<tunix.generate.tokenizer_adapter.TokenizerAdapter()>",
+          "worker_id": "rollout-0"
+        }
+      }
+    },
+    {
+      "tunix.dist_rl.launch.nodes.node_utils.serve_worker": {
+        "args": [
+          "<tunix.dist_rl.worker.rollout_worker.RolloutWorker()>"
+        ],
+        "kwargs": {
+          "config_sha256": "<resolve_config.config_fingerprint(hp)>",
+          "drain_fn": "<function tunix.dist_rl.launch.nodes.rollout.main.<locals>.grpc_server_main.<locals>._drain>",
+          "extra_metadata": {
+            "trajectory_store_config": null
+          },
+          "port": 20001,
+          "process_context": "<context>",
+          "role": "rollout",
+          "worker_id_str": "rollout-0"
+        }
+      }
+    },
+    {
+      "sampler.initialize": {}
+    },
+    {
+      "vllm.engine.arg_utils.AsyncEngineArgs": {
+        "kwargs": {
+          "additional_config": {
+            "maxtext_config": {
+              "allow_split_physical_axes": false,
+              "attention": "vllm_rpa",
+              "enable_dp_attention": false,
+              "float32_gate_logits": true,
+              "log_config": false,
+              "model_call_mode": "inference",
+              "model_name": "qwen3-1.7b",
+              "prefuse_moe_weights": true,
+              "return_routed_experts": true,
+              "scan_layers": false,
+              "use_multimodal": false,
+              "weight_dtype": "bfloat16"
+            },
+            "sharding": {
+              "sharding_strategy": {
+                "expert_parallelism": 4
+              }
+            }
+          },
+          "async_scheduling": false,
+          "block_size": 256,
+          "data_parallel_size": 1,
+          "dtype": "bfloat16",
+          "enable_expert_parallel": true,
+          "enable_lora": true,
+          "enable_prefix_caching": false,
+          "enable_return_routed_experts": true,
+          "gpu_memory_utilization": 0.85,
+          "hf_overrides": {
+            "architectures": [
+              "MaxTextForCausalLM"
+            ]
+          },
+          "logprobs_mode": "processed_logprobs",
+          "max_logprobs": 1,
+          "max_lora_rank": 8,
+          "max_loras": 1,
+          "max_model_len": 8192,
+          "max_num_batched_tokens": null,
+          "max_num_seqs": null,
+          "model": "Qwen/Qwen3-1.7B",
+          "tensor_parallel_size": 2,
+          "tokenizer": "/models/tokenizer",
+          "trust_remote_code": true
+        }
+      }
+    }
+  ],
+  "env": {
+    "DISABLE_MOSAIC_ATTN": "1",
+    "NEW_MODEL_DESIGN": "1",
+    "SKIP_JAX_PRECOMPILE": "1",
+    "TPU_RAIDEN_DATA_NICS": "eth0",
+    "VERIFY_WEIGHTS": "false",
+    "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
+    "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
+    "VLLM_TPU_RPA_VERSION": "2",
+    "VLLM_WORKER_MULTIPROC_METHOD": "spawn"
+  },
+  "jax_config": {}
+}

@@ -27,8 +27,8 @@ Environment Variables:
   the episode (default: MAX_MODEL_LEN - 256).
   ENABLE_GUARD: Set to "true" to enable action guard via GuardedSWEEnv (default:
   "false").
-  ROLLOUT_ENGINE: The underlying LLM engine to use. Choices are 'vanilla',
-  'vllm', or 'sglang_jax' (default: "vllm").
+  ROLLOUT_ENGINE: The underlying LLM engine to use. Choices are 'vanilla' or
+  'vllm' (default: "vllm").
   VLLM_HBM_UTILIZATION: HBM utilization ratio for vLLM engine (default: 0.4).
   VLLM_INIT_RANDOM_WEIGHTS: Set to "true" to init vLLM with random weights and
   sync later (default: "true").
@@ -36,10 +36,6 @@ Environment Variables:
   VLLM_MAX_NUM_SEQS: Maximum number of concurrent sequences in vLLM (default:
   128).
   VLLM_MAX_BATCHED_TOKENS: Maximum batched tokens for vLLM (default: 165888).
-  SGLANG_MEM_FRACTION_STATIC: Static memory fraction for SGLang (default: 0.4).
-  SGLANG_INIT_RANDOM_WEIGHTS: Set to "true" to init SGLang with random weights
-  and sync later (default: "true").
-  SGLANG_MAX_RUNNING_REQUESTS: Maximum running requests for SGLang (default: 1).
   OUTPUT_DIR: Directory where the evaluation results JSONL file will be saved
   (default: "eval_results").
   JAX_PLATFORMS: If set to "proxy", initializes Pathways utils.
@@ -83,6 +79,7 @@ from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.parser.chat_template_parser import parser
 from tunix.rl.agentic.pipeline.rollout_orchestrator import RolloutOrchestrator
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
+from tunix.rl.rollout import base_rollout
 from tunix.sft import utils as sft_utils
 
 Counter = collections.Counter
@@ -124,14 +121,6 @@ VLLM_INIT_RANDOM_WEIGHTS = (
 VLLM_SERVER_MODE = os.getenv("VLLM_SERVER_MODE", "true").lower() == "true"
 VLLM_MAX_NUM_SEQS = int(os.getenv("VLLM_MAX_NUM_SEQS", "128"))
 VLLM_MAX_BATCHED_TOKENS = int(os.getenv("VLLM_MAX_BATCHED_TOKENS", "165888"))
-
-SGLANG_MEM_FRACTION_STATIC = float(
-    os.getenv("SGLANG_MEM_FRACTION_STATIC", "0.4")
-)
-SGLANG_INIT_RANDOM_WEIGHTS = (
-    os.getenv("SGLANG_INIT_RANDOM_WEIGHTS", "true").lower() == "true"
-)
-SGLANG_MAX_RUNNING_REQUESTS = int(os.getenv("SGLANG_MAX_RUNNING_REQUESTS", "1"))
 
 OUTPUT_DIR = os.getenv(
     "OUTPUT_DIR", os.path.join(os.path.dirname(__file__), "eval_results")
@@ -293,41 +282,10 @@ elif ROLLOUT_ENGINE == "vllm":
   sampler.load_checkpoint(nnx.state(model))
   logger.info("Synced model weights to vLLM engine.")
 
-elif ROLLOUT_ENGINE == "sglang_jax":
-  from tunix.generate import mappings
-  from tunix.generate.sglang_jax_sampler import SglangJaxConfig, SglangJaxSampler
-
-  mapping_config = mappings.MappingConfig.build(
-      mapping_obj=None,
-      model=model,
-      backend="sglang_jax",
-  )
-  sampler = SglangJaxSampler(
-      tokenizer=tokenizer,
-      config=SglangJaxConfig(
-          mesh=mesh,
-          mapping_config=mapping_config,
-          model_version=MODEL_VERSION,
-          context_length=MAX_MODEL_LEN,
-          mem_fraction_static=SGLANG_MEM_FRACTION_STATIC,
-          init_with_random_weights=SGLANG_INIT_RANDOM_WEIGHTS,
-          disable_radix_cache=True,
-          enable_deterministic_sampling=False,
-          precompile_token_paddings=[8192, 16384],
-          precompile_bs_paddings=[1],
-          max_running_requests=SGLANG_MAX_RUNNING_REQUESTS,
-      ),
-  )
-  if SGLANG_INIT_RANDOM_WEIGHTS:
-    from flax import nnx
-
-    sampler.load_checkpoint(nnx.state(model))
-    logger.info("Synced model weights to sglang_jax engine.")
-
 else:
   raise ValueError(
       f"Unsupported ROLLOUT_ENGINE: {ROLLOUT_ENGINE!r}. "
-      "Choose from: 'vanilla', 'vllm', 'sglang_jax'"
+      "Choose from: 'vanilla', 'vllm'"
   )
 
 # ========================== Model Call ==========================
@@ -354,26 +312,42 @@ def _is_prompt_overflow_error(exc: Exception) -> bool:
   )
 
 
-def model_call(chat_completions, env_unused):
+def model_call(
+    chat_completions,
+    env_unused,
+    *,
+    max_generation_steps=None,
+    prompt_token_ids=None,
+    **kwargs,
+):
   """Model inference via tunix sampler."""
+  del kwargs
   pair_index = None
   instance_id = "unknown"
   if env_unused is not None:
     pair_index = getattr(env_unused, "extra_kwargs", {}).get("pair_index")
     instance_id = getattr(env_unused, "entry", {}).get("instance_id", "unknown")
 
-  prompt = chat_parser.parse(
-      chat_completions,
-      add_generation_prompt=True,
-      is_first_msg=True,
-  )
-  prompt_token_count = len(tokenizer.encode(prompt))
+  if prompt_token_ids is not None:
+    prompt = None
+    token_rows = [prompt_token_ids]
+    prompt_chars = 0
+    prompt_token_count = len(prompt_token_ids)
+  else:
+    prompt = chat_parser.parse(
+        chat_completions,
+        add_generation_prompt=True,
+        is_first_msg=True,
+    )
+    token_rows = None
+    prompt_chars = len(prompt)
+    prompt_token_count = len(tokenizer.encode(prompt))
   logger.info(
       "[pair=%s instance=%s] model_call start prompt_chars=%d prompt_tokens=%d"
       " max_model_len=%d",
       pair_index,
       instance_id,
-      len(prompt),
+      prompt_chars,
       prompt_token_count,
       MAX_MODEL_LEN,
   )
@@ -382,22 +356,29 @@ def model_call(chat_completions, env_unused):
         "Prompt too long before sampler call:"
         f" prompt_tokens={prompt_token_count}, max_model_len={MAX_MODEL_LEN}"
     )
+  gen_steps = (
+      MAX_RESPONSE_LENGTH
+      if max_generation_steps is None
+      else min(MAX_RESPONSE_LENGTH, max_generation_steps)
+  )
   t0 = time.time()
   try:
     if sampler_lock is None:
       out = sampler(
           prompt,
-          max_generation_steps=MAX_RESPONSE_LENGTH,
+          max_generation_steps=gen_steps,
           echo=False,
           eos_tokens=qwen_eos_tokens,
+          prompt_token_ids=token_rows,
       )
     else:
       with sampler_lock:
         out = sampler(
             prompt,
-            max_generation_steps=MAX_RESPONSE_LENGTH,
+            max_generation_steps=gen_steps,
             echo=False,
             eos_tokens=qwen_eos_tokens,
+            prompt_token_ids=token_rows,
         )
   except Exception as exc:
     if _is_prompt_overflow_error(exc):
@@ -410,7 +391,15 @@ def model_call(chat_completions, env_unused):
       len(out.text[0]) if out.text else 0,
       time.time() - t0,
   )
-  return out
+  return base_rollout.RolloutOutput(
+      text=out.text,
+      logits=out.logits,
+      tokens=out.tokens,
+      left_padded_prompt_tokens=out.padded_prompt_tokens,
+      logprobs=out.logprobs,
+      routed_experts=out.routed_experts,
+      prompt_lengths=out.prompt_lengths,
+  )
 
 
 # ========================== Evaluation ==========================
@@ -538,7 +527,7 @@ async def run_evaluation():
       engine_kwargs=dict(
           model_call=model_call,
           timeout=TIMEOUT,
-          max_context_limit=MAX_CONTEXT_LIMIT,
+          max_response_length=MAX_CONTEXT_LIMIT,
           tokenizer=tokenizer_for_agentic,
           chat_parser=chat_parser,
       ),

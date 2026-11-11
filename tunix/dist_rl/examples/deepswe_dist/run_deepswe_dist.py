@@ -36,16 +36,15 @@ if REPO_ROOT not in sys.path:
 
 # pylint: disable=g-import-not-at-top
 from tunix.dist_rl.common import datatypes
+from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.common import timeouts
 from tunix.dist_rl.distributed.runtime import context as runtime_context
 from tunix.dist_rl.examples.deepswe_dist import deepswe
-from tunix.dist_rl.orchestrator import algorithm_adapter
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.orchestrator import orchestrator
 from tunix.dist_rl.orchestrator import rl_program
 from tunix.dist_rl.weight_sync import weight_sync
 from tunix.dist_rl.weight_sync import weight_sync_coordinator
-from tunix.dist_rl.worker import remote_execution
 from tunix.rl import algorithm_config
 from tunix.sft import metrics_logger as metrics_logger_lib
 
@@ -189,6 +188,23 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--scaffold", choices=("r2egym", "sweagent"), default="r2egym"
   )
   parser.add_argument("--use_agent_sandbox", action="store_true")
+  parser.add_argument(
+      "--max_warmpool_concurrency",
+      type=int,
+      default=int(os.getenv("MAX_WARMPOOL_CONCURRENCY", "128")),
+      help="Maximum concurrent warmpool operations / sandbox claims.",
+  )
+  parser.add_argument(
+      "--max_warmpool_replicas",
+      type=int,
+      default=(
+          int(val) if (val := os.getenv("MAX_WARMPOOL_REPLICAS")) else None
+      ),
+      help=(
+          "Maximum warmpool replicas per task image. Defaults to"
+          " num_generations when unset."
+      ),
+  )
   parser.add_argument("--env_verbose", action="store_true")
   parser.add_argument(
       "--flush_every_n_steps",
@@ -274,6 +290,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " ahead of time during worker configuration."
       ),
   )
+  parser.add_argument(
+      "--rollout_fault_tolerance",
+      type=_str2bool,
+      default=_str2bool(os.getenv("ROLLOUT_FAULT_TOLERANCE", "true")),
+      nargs="?",
+      const=True,
+      help=(
+          "Whether to enable rollout worker fault tolerance (automatic"
+          " eviction and task retry)."
+      ),
+  )
   args = parser.parse_args(argv)
   return args
 
@@ -307,8 +334,8 @@ def _trajectory_store_config(
   return config
 
 
-def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
-  algo_config = algorithm_config.GRPOConfig(
+def _build_algo(args: argparse.Namespace) -> algorithm_config.GRPOConfig:
+  return algorithm_config.GRPOConfig(
       num_generations=args.num_generations,
       epsilon=args.epsilon,
       beta=args.beta,
@@ -316,38 +343,6 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
       routed_experts_encode_mode=args.routed_experts_encode_mode,
       routed_experts_num_experts=args.routed_experts_num_experts,
       reward_mode="env",
-  )
-  return algorithm_adapter.GRPOAdapter(
-      algo_config=algo_config,
-      mini_batch_size=args.mini_batch_size,
-      train_micro_batch_size=args.train_micro_batch_size,
-      max_turns=args.max_turns,
-      max_packed_len=(
-          args.max_seq_token_per_tpu
-          if args.max_seq_token_per_tpu is not None
-          else args.max_prompt_length + args.max_response_length
-      ),
-      max_response_length=args.max_response_length,
-  )
-
-
-def _configure_trainer_loss(
-    trainer_handle: remote_execution.ActorHandle,
-    *,
-    algo: algorithm_adapter.GRPOAdapter,
-    pad_id: int,
-    eos_id: int,
-) -> None:
-  logging.info(
-      "Configuring trainer-side GRPO loss via TrainerWorker RPC (beta=%s, "
-      "epsilon=%s).",
-      algo.algo_config.beta,
-      algo.algo_config.epsilon,
-  )
-  trainer_handle.submit("with_loss_fn", algo.loss_fn(), has_aux=True)
-  trainer_handle.submit(
-      "with_gen_model_input_fn",
-      algo.build_gen_model_input_fn(pad_id=pad_id, eos_id=eos_id),
   )
 
 
@@ -406,6 +401,14 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
 
   weight_sync_timeouts = _validate_args(args)
 
+  otel_setup.setup_metrics(
+      default_service_name="tunix-orchestrator",
+      resource_attributes={
+          "tunix.role": "orchestrator",
+          "tunix.run_id": args.run_id,
+      },
+  )
+
   logging.info("=== Starting Distributed DeepSWE GRPO Orchestrator ===")
   logging.info(
       "Configuration: model_id=%s, batch_size=%d prompt group(s), "
@@ -461,124 +464,142 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       len(dataset),
   )
 
+  if args.use_agent_sandbox:
+    from examples.deepswe import sandbox_utils  # pylint: disable=g-import-not-at-top
+
+    logging.info(
+        "Initializing orchestrator SandboxFleet and warming dataset images "
+        "(size=%d, max_warmpool_concurrency=%d, num_generations=%d, "
+        "max_warmpool_replicas=%s)...",
+        len(dataset),
+        args.max_warmpool_concurrency,
+        args.num_generations,
+        args.max_warmpool_replicas,
+    )
+    sandbox_utils.init_global_fleet(
+        tasks=dataset,
+        max_concurrency=args.max_warmpool_concurrency,
+        num_generations=args.num_generations,
+        batch_size=args.batch_size,
+        max_warmpool_replicas=args.max_warmpool_replicas,
+        scaffold=args.scaffold,
+    )
+    sandbox_utils.warm_global_fleet()
+
   trajectory_store_config = _trajectory_store_config(args)
   cluster = orchestrator.ClusterOrchestrator(
       weight_sync_mode=args.weight_sync_mode,
       trajectory_store_config=trajectory_store_config,
       weight_sync_timeouts=weight_sync_timeouts,
-  )
-  context.ipc.discovery.on_register(
-      functools.partial(
-          cluster.registry.register_from_hostname,
-          rpc_timeout_s=args.rpc_timeout_s,
-      )
-  )
-
-  cluster.registry.wait_for_workers(
-      min_workers={
-          datatypes.Role.ACTOR: 1,
-          datatypes.Role.ROLLOUT: 1,
-          datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
-      },
-      timeout=args.init_timeout_s,
-  )
-  logging.info("Registered workers: %s", cluster.registry.infos())
-
-  algo = _build_algo(args)
-  trainer_handles = cluster.registry.handles(datatypes.Role.ACTOR)
-  if len(trainer_handles) != 1:
-    raise ValueError(f"Expected 1 trainer worker, got {len(trainer_handles)}.")
-
-  metrics_logging_options = metrics_logger_lib.MetricsLoggerOptions(
-      log_dir=args.log_dir,
-      project_name=args.wandb_project,
-      run_name=args.wandb_run_name,
-      flush_every_n_steps=args.flush_every_n_steps,
-      backend_kwargs={"wandb": {"config": vars(args)}},
-  )
-
-  program = rl_program.StandardRLProgram(
-      algo=algo,
-      dataset=deepswe.iter_prompt_items(
-          dataset=dataset,
-          max_steps=args.max_steps,
-          batch_size=args.batch_size,
-          max_turns=args.max_turns,
-          max_response_length=args.max_response_length,
-          temperature=args.temperature,
-          top_p=args.top_p,
-          top_k=0 if args.top_k < 0 else args.top_k,
-          step_timeout_secs=args.step_timeout_secs,
-          reward_timeout_secs=args.reward_timeout_secs,
-          episode_timeout_secs=args.episode_timeout_secs,
-          env_backend=args.env_backend,
-          use_agent_sandbox=args.use_agent_sandbox,
-          scaffold=args.scaffold,
-          env_verbose=args.env_verbose,
-          overlong_filter=args.overlong_filter,
-          max_staleness=args.max_staleness,
-      ),
-      max_steps=args.max_steps,
-      reward_fns=[],
-      generation_args=datatypes.GenerationArgs(
-          temperature=args.temperature,
-          top_p=args.top_p,
-          top_k=0 if args.top_k < 0 else args.top_k,
-          return_logprobs=args.use_rollout_logps,
-      ),
-      batch_size=args.batch_size,
-      batch_config=batch_assembly.BatchConfig(
-          pad_id=pad_id,
-          max_prompt_length=args.max_prompt_length,
-          max_response_length=args.max_response_length,
-          max_seq_token_per_tpu=args.max_seq_token_per_tpu,
-          max_segments_per_packed_row=args.max_segments_per_packed_row,
-          segment_alignment_boundary=args.segment_alignment_boundary,
-          num_data_shards=args.num_data_shards,
-      ),
-      metrics_logging_options=metrics_logging_options,
-      trajectory_log_dir=args.trajectory_log_dir,
-      trajectory_store=cluster.trajectory_store,
-      max_staleness=args.max_staleness,
-      group_order=args.trajectory_group_order,
-      sync_weights=(args.weight_sync_mode != weight_sync.WeightSyncMode.NONE),
-      precompile_trainer=args.trainer_precompile,
-      on_step_begin=lambda step: logging.info(
-          ">>> DeepSWE step %d starting | policy_version=%d",
-          step,
-          step,
-      ),
-      on_step_end=lambda step, result: logging.info(
-          "<<< DeepSWE step %d finished | train_result=%s",
-          step,
-          result,
+      fault_tolerance_config=datatypes.FaultToleranceConfig(
+          enabled=args.rollout_fault_tolerance
       ),
   )
-  _configure_trainer_loss(
-      trainer_handles[0],
-      algo=algo,
-      pad_id=pad_id,
-      eos_id=eos_id,
-  )
-
-  try:
-    logging.info("Bringing up remote workers through ClusterOrchestrator...")
-    cluster.bring_up_workers(dummy_data=None)
-    logging.info("Starting DeepSWE StandardRLProgram execution...")
-    cluster.run(
-        program=program,
-        num_steps=args.max_steps,
-        bring_up=False,
+  with orchestrator.managed_cluster_teardown(
+      cluster, stop_workers_on_exit=args.stop_workers_on_exit
+  ):
+    context.ipc.discovery.on_register(
+        functools.partial(
+            cluster.registry.register_from_hostname,
+            rpc_timeout_s=args.rpc_timeout_s,
+        )
     )
-  finally:
-    program.close()
-    if args.stop_workers_on_exit:
-      logging.info("Shutting down cluster workers...")
-      cluster.shutdown()
-    else:
-      cluster.monitor.close()
-      if cluster.trajectory_store is not None:
-        cluster.trajectory_store.close()
+
+    cluster.registry.wait_for_workers(
+        min_workers={
+            datatypes.Role.ACTOR: 1,
+            datatypes.Role.ROLLOUT: 1,
+            datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
+        },
+        timeout=args.init_timeout_s,
+    )
+    logging.info("Registered workers: %s", cluster.registry.infos())
+
+    algo_config = _build_algo(args)
+
+    metrics_logging_options = metrics_logger_lib.MetricsLoggerOptions(
+        log_dir=args.log_dir,
+        project_name=args.wandb_project,
+        run_name=args.wandb_run_name,
+        flush_every_n_steps=args.flush_every_n_steps,
+        backend_kwargs={"wandb": {"config": vars(args)}},
+    )
+
+    program = rl_program.StandardRLProgram(
+        algo_config=algo_config,
+        dataset=deepswe.iter_prompt_items(
+            dataset=dataset,
+            max_steps=args.max_steps,
+            batch_size=args.batch_size,
+            max_turns=args.max_turns,
+            max_response_length=args.max_response_length,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            top_k=0 if args.top_k < 0 else args.top_k,
+            step_timeout_secs=args.step_timeout_secs,
+            reward_timeout_secs=args.reward_timeout_secs,
+            episode_timeout_secs=args.episode_timeout_secs,
+            env_backend=args.env_backend,
+            use_agent_sandbox=args.use_agent_sandbox,
+            scaffold=args.scaffold,
+            env_verbose=args.env_verbose,
+            overlong_filter=args.overlong_filter,
+            max_staleness=args.max_staleness,
+        ),
+        max_steps=args.max_steps,
+        reward_fns=[],
+        generation_args=datatypes.GenerationArgs(
+            temperature=args.temperature,
+            top_p=args.top_p,
+            top_k=0 if args.top_k < 0 else args.top_k,
+            return_logprobs=args.use_rollout_logps,
+        ),
+        batch_size=args.batch_size,
+        batch_config=batch_assembly.BatchConfig(
+            mini_batch_size=args.mini_batch_size,
+            train_micro_batch_size=args.train_micro_batch_size,
+            pad_id=pad_id,
+            eos_id=eos_id,
+            max_prompt_length=args.max_prompt_length,
+            max_response_length=args.max_response_length,
+            max_seq_token_per_tpu=args.max_seq_token_per_tpu,
+            max_segments_per_packed_row=args.max_segments_per_packed_row,
+            segment_alignment_boundary=args.segment_alignment_boundary,
+            num_data_shards=args.num_data_shards,
+        ),
+        metrics_logging_options=metrics_logging_options,
+        trajectory_log_dir=args.trajectory_log_dir,
+        trajectory_store=cluster.trajectory_store,
+        max_staleness=args.max_staleness,
+        group_order=args.trajectory_group_order,
+        sync_weights=(args.weight_sync_mode != weight_sync.WeightSyncMode.NONE),
+        precompile_trainer=args.trainer_precompile,
+        on_step_begin=lambda step: logging.info(
+            ">>> DeepSWE step %d starting | policy_version=%d",
+            step,
+            step,
+        ),
+        on_step_end=lambda step, result: logging.info(
+            "<<< DeepSWE step %d finished | train_result=%s",
+            step,
+            result,
+        ),
+    )
+    try:
+      logging.info("Bringing up remote workers through ClusterOrchestrator...")
+      cluster.bring_up_workers(dummy_data=None)
+      logging.info("Starting DeepSWE StandardRLProgram execution...")
+      cluster.run(
+          program=program,
+          num_steps=args.max_steps,
+          bring_up=False,
+      )
+    finally:
+      program.close()
+      if args.use_agent_sandbox:
+        from examples.deepswe import sandbox_utils  # pylint: disable=g-import-not-at-top
+
+        sandbox_utils.teardown_global_fleet()
 
   result = program.last_step_result
   if result is None:

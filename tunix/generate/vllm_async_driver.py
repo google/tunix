@@ -384,10 +384,11 @@ class VLLMInProcessDriver:
       )
 
     if mode == "keep":
-      with self._engine_lock:
-        self._pause_mode = "keep"
-        self._unpaused_event.clear()
-        self._work_event.set()
+      # Signal pause before waiting on _step_idle_event without acquiring
+      # _engine_lock (which an in-flight step() holds). Callers must serialize
+      # pause() and resume() calls.
+      self._pause_mode = "keep"
+      self._unpaused_event.clear()
       if not self._step_idle_event.wait(timeout=timeout_s):
         raise TimeoutError(
             "Timed out waiting for in-flight vLLM step to complete during"
@@ -423,11 +424,10 @@ class VLLMInProcessDriver:
         self._apply_pause_engine_effects_locked(mode, clear_cache)
       return
 
-    # mode == "abort"
-    with self._engine_lock:
-      self._pause_mode = "abort"
-      self._unpaused_event.clear()
-      self._work_event.set()
+    # mode == "abort": signal pause before waiting on _step_idle_event without
+    # acquiring _engine_lock (which an in-flight step() holds).
+    self._pause_mode = "abort"
+    self._unpaused_event.clear()
     if not self._step_idle_event.wait(timeout=timeout_s):
       raise TimeoutError(
           "Timed out waiting for in-flight vLLM step to complete during"
@@ -467,11 +467,8 @@ class VLLMInProcessDriver:
           continue
         if not self._wait_for_work():
           continue
-        with self._engine_lock:
-          if not self._unpaused_event.is_set():
-            continue
-          self._step_idle_event.clear()
         outputs = []
+        self._step_idle_event.clear()
         try:
           outputs = self._step_engine()
           logging.log_every_n(
@@ -531,6 +528,10 @@ class VLLMInProcessDriver:
         100,
     )
     with self._engine_lock:
+      # Re-check under _engine_lock after _loop() cleared _step_idle_event so a
+      # pause() that arrived after _wait_for_work() cannot race into step().
+      if not self._unpaused_event.is_set():
+        return []
       if self._pause_mode != "wait":
         self._drain_submission_queue_locked()
       logging.log_every_n(

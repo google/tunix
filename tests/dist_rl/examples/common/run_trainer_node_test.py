@@ -27,6 +27,7 @@ from unittest import mock
 from absl.testing import absltest
 import jax
 from jax.sharding import Mesh
+from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.examples.common import run_trainer_node
 from tunix.dist_rl.train import peft_trainer_v2
 from tunix.dist_rl.worker import remote_execution
@@ -51,11 +52,11 @@ class TrainerWorkerMeshExecutionContextTest(absltest.TestCase):
 
   def test_save_checkpoint_runs_within_mesh_context_and_propagates_args(self):
     call_order = []
-    self.mock_mesh.__enter__.side_effect = (
-        lambda: call_order.append("enter_mesh")
+    self.mock_mesh.__enter__.side_effect = lambda: call_order.append(
+        "enter_mesh"
     )
-    self.mock_mesh.__exit__.side_effect = (
-        lambda *args: call_order.append("exit_mesh")
+    self.mock_mesh.__exit__.side_effect = lambda *args: call_order.append(
+        "exit_mesh"
     )
     self.mock_trainer.save_checkpoint.side_effect = (
         lambda *args, **kwargs: call_order.append("save_checkpoint")
@@ -67,9 +68,7 @@ class TrainerWorkerMeshExecutionContextTest(absltest.TestCase):
     self.mock_trainer.save_checkpoint.assert_called_once_with(
         metadata, step=10, force=True
     )
-    self.assertEqual(
-        call_order, ["enter_mesh", "save_checkpoint", "exit_mesh"]
-    )
+    self.assertEqual(call_order, ["enter_mesh", "save_checkpoint", "exit_mesh"])
 
   def test_save_checkpoint_propagates_exception_and_exits_mesh(self):
     self.mock_trainer.save_checkpoint.side_effect = RuntimeError("Disk full")
@@ -83,11 +82,11 @@ class TrainerWorkerMeshExecutionContextTest(absltest.TestCase):
       self,
   ):
     call_order = []
-    self.mock_mesh.__enter__.side_effect = (
-        lambda: call_order.append("enter_mesh")
+    self.mock_mesh.__enter__.side_effect = lambda: call_order.append(
+        "enter_mesh"
     )
-    self.mock_mesh.__exit__.side_effect = (
-        lambda *args: call_order.append("exit_mesh")
+    self.mock_mesh.__exit__.side_effect = lambda *args: call_order.append(
+        "exit_mesh"
     )
     self.mock_trainer.restore_checkpoint.side_effect = (
         lambda *args, **kwargs: call_order.append("restore_checkpoint")
@@ -121,10 +120,12 @@ class TrainerWorkerMeshExecutionContextTest(absltest.TestCase):
 
   def test_update_runs_within_mesh(self):
     self.mock_trainer.update.return_value = 5
+    self.mock_trainer.get_metrics.return_value = {"loss": 0.1}
     result = self.worker.update()
-    self.assertEqual(result, 5)
+    self.assertEqual(result, (5, {"loss": 0.1}))
     self.mock_mesh.__enter__.assert_called_once()
     self.mock_trainer.update.assert_called_once_with()
+    self.mock_trainer.get_metrics.assert_called_once_with()
     self.mock_mesh.__exit__.assert_called_once()
 
   def test_eval_step_runs_within_mesh(self):
@@ -150,7 +151,6 @@ class TrainerWorkerMeshExecutionContextTest(absltest.TestCase):
     )
     self.mock_mesh.__exit__.assert_called_once()
 
-
   def test_prepare_weight_sync_never_drains_checkpoint(self):
     """Checkpoint staging and the Raiden transfer must stay overlapped.
 
@@ -161,7 +161,6 @@ class TrainerWorkerMeshExecutionContextTest(absltest.TestCase):
     setattr(self.mock_trainer, "_checkpoint_manager", manager)
     self.mock_trainer.prepare_weight_sync()
     manager.wait_until_finished.assert_not_called()
-
 
   def test_stop_runs_close_within_mesh(self):
     self.worker.stop()
@@ -277,13 +276,18 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
       if sig == signal.SIGTERM:
         loop_self.call_soon(callback)
 
-    with self._patch_signal_handlers(mock_add_signal_handler):
+    with (
+        self._patch_signal_handlers(mock_add_signal_handler),
+        mock.patch.object(otel_setup, "setup_metrics") as mock_otel_setup,
+    ):
       run_trainer_node.main(
           [
               "--port",
               "20000",
               "--worker_id",
               "trainer-0",
+              "--run_id",
+              "run_xyz",
               "--compute_logps_chunk_size",
               "128",
               "--compute_logps_micro_batch_size",
@@ -292,6 +296,14 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
           context=self.mock_context,
       )
 
+    mock_otel_setup.assert_called_once_with(
+        default_service_name="tunix-trainer",
+        resource_attributes={
+            "tunix.worker_id": "trainer-0",
+            "tunix.role": "trainer",
+            "tunix.run_id": "run_xyz",
+        },
+    )
     self.assertIn(signal.SIGINT, signal_handlers)
     self.assertIn(signal.SIGTERM, signal_handlers)
     self.mock_context.jax.initialize.assert_called_once()
@@ -302,10 +314,11 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         logps_micro_batch_size=2,
         execution_context=mock_create_mesh.return_value,
     )
+    mock_grpc_server_cls.assert_called_once_with(self.mock_worker_service)
     self.mock_server.start_serving_async.assert_called_once_with(20000)
     self.mock_context.ipc.discovery.register.assert_called_once()
-    self.mock_worker_service.stop.assert_called_once()
     self.mock_server.stop_serving.assert_called_once()
+    self.mock_worker_service.stop.assert_called_once()
 
   @mock.patch.object(run_trainer_node, "_ensure_model_dir_for_trainer")
   @mock.patch.object(run_trainer_node, "_create_mesh")
@@ -439,6 +452,162 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
 
     self.mock_worker_service.stop.assert_called_once()
     self.mock_server.stop_serving.assert_called_once()
+
+  @mock.patch.object(run_trainer_node, "_ensure_model_dir_for_trainer")
+  @mock.patch.object(run_trainer_node, "_create_mesh")
+  @mock.patch.object(run_trainer_node, "_load_actor_model")
+  @mock.patch.object(run_trainer_node, "_create_trainer_factory")
+  @mock.patch.object(trainer_worker, "TrainerWorker")
+  @mock.patch.object(remote_execution, "GrpcRemoteExecutionServer")
+  def test_shutdown_stops_server_before_draining_worker(
+      self,
+      mock_grpc_server_cls,
+      mock_trainer_worker_cls,
+      mock_create_trainer_factory,
+      mock_load_actor_model,
+      mock_create_mesh,
+      mock_ensure_model_dir,
+  ):
+    self._setup_main_mocks(
+        mock_ensure_model_dir,
+        mock_create_mesh,
+        mock_load_actor_model,
+        mock_create_trainer_factory,
+        mock_trainer_worker_cls,
+        mock_grpc_server_cls,
+    )
+    shutdown_order: list[str] = []
+
+    async def _stop_serving(grace: float = 0.5):
+      self.assertEqual(grace, 5.0)
+      shutdown_order.append("server.stop_serving")
+
+    def _stop_worker():
+      shutdown_order.append("worker_service.stop")
+
+    self.mock_server.stop_serving = mock.AsyncMock(side_effect=_stop_serving)
+    self.mock_worker_service.stop.side_effect = _stop_worker
+
+    def mock_add_signal_handler(loop_self, sig, callback):
+      if sig == signal.SIGTERM:
+        loop_self.call_soon(callback)
+
+    with self._patch_signal_handlers(mock_add_signal_handler):
+      run_trainer_node.main(
+          ["--port", "20000", "--worker_id", "trainer-0"],
+          context=self.mock_context,
+      )
+
+    self.assertEqual(
+        shutdown_order, ["server.stop_serving", "worker_service.stop"]
+    )
+
+  @mock.patch.object(run_trainer_node, "_ensure_model_dir_for_trainer")
+  @mock.patch.object(run_trainer_node, "_create_mesh")
+  @mock.patch.object(run_trainer_node, "_load_actor_model")
+  @mock.patch.object(run_trainer_node, "_create_trainer_factory")
+  @mock.patch.object(trainer_worker, "TrainerWorker")
+  @mock.patch.object(remote_execution, "GrpcRemoteExecutionServer")
+  def test_shutdown_drains_worker_even_if_stop_serving_raises(
+      self,
+      mock_grpc_server_cls,
+      mock_trainer_worker_cls,
+      mock_create_trainer_factory,
+      mock_load_actor_model,
+      mock_create_mesh,
+      mock_ensure_model_dir,
+  ):
+    self._setup_main_mocks(
+        mock_ensure_model_dir,
+        mock_create_mesh,
+        mock_load_actor_model,
+        mock_create_trainer_factory,
+        mock_trainer_worker_cls,
+        mock_grpc_server_cls,
+    )
+    self.mock_server.stop_serving = mock.AsyncMock(
+        side_effect=RuntimeError("gRPC stop_serving failed")
+    )
+
+    def mock_add_signal_handler(loop_self, sig, callback):
+      if sig == signal.SIGTERM:
+        loop_self.call_soon(callback)
+
+    with self._patch_signal_handlers(mock_add_signal_handler):
+      run_trainer_node.main(
+          ["--port", "20000", "--worker_id", "trainer-0"],
+          context=self.mock_context,
+      )
+
+    self.mock_server.stop_serving.assert_called_once()
+    self.mock_worker_service.stop.assert_called_once()
+
+  @mock.patch.object(run_trainer_node, "_ensure_model_dir_for_trainer")
+  @mock.patch.object(run_trainer_node, "_create_mesh")
+  @mock.patch.object(run_trainer_node, "_load_actor_model")
+  @mock.patch.object(run_trainer_node, "_create_trainer_factory")
+  @mock.patch.object(trainer_worker, "TrainerWorker")
+  @mock.patch.object(remote_execution, "GrpcRemoteExecutionServer")
+  def test_rpc_stop_callback_wakes_server_cleanly_or_exits_nonzero_on_abort(
+      self,
+      mock_grpc_server_cls,
+      mock_trainer_worker_cls,
+      mock_create_trainer_factory,
+      mock_load_actor_model,
+      mock_create_mesh,
+      mock_ensure_model_dir,
+  ):
+    self._setup_main_mocks(
+        mock_ensure_model_dir,
+        mock_create_mesh,
+        mock_load_actor_model,
+        mock_create_trainer_factory,
+        mock_trainer_worker_cls,
+        mock_grpc_server_cls,
+    )
+    registered_callbacks = []
+    self.mock_worker_service.set_on_stop.side_effect = (
+        registered_callbacks.append
+    )
+
+    def _register_and_trigger_clean_stop(*, metadata):
+      del metadata
+      self.assertTrue(callable(registered_callbacks[0]))
+      registered_callbacks[0](False)
+
+    self.mock_context.ipc.discovery.register.side_effect = (
+        _register_and_trigger_clean_stop
+    )
+    run_trainer_node.main(
+        ["--port", "20000", "--worker_id", "trainer-0"],
+        context=self.mock_context,
+    )
+    self.assertIsNone(registered_callbacks[-1])
+    self.mock_server.stop_serving.assert_called_once()
+    self.mock_worker_service.stop.assert_called_once()
+
+    # Abort stop (`abort=True`) must still drain cleanly and then exit(1).
+    self.mock_server.stop_serving.reset_mock()
+    self.mock_worker_service.stop.reset_mock()
+    registered_callbacks.clear()
+
+    def _register_and_trigger_abort_stop(*, metadata):
+      del metadata
+      self.assertTrue(callable(registered_callbacks[0]))
+      registered_callbacks[0](True)
+
+    self.mock_context.ipc.discovery.register.side_effect = (
+        _register_and_trigger_abort_stop
+    )
+    with self.assertRaises(SystemExit) as cm:
+      run_trainer_node.main(
+          ["--port", "20000", "--worker_id", "trainer-0"],
+          context=self.mock_context,
+      )
+    self.assertEqual(cm.exception.code, 1)
+    self.assertIsNone(registered_callbacks[-1])
+    self.mock_server.stop_serving.assert_called_once()
+    self.mock_worker_service.stop.assert_called_once()
 
   @mock.patch.object(run_trainer_node, "_create_tunix_trainer_factory")
   @mock.patch.object(run_trainer_node, "_create_maxtext_trainer_factory")
@@ -582,6 +751,42 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertEqual(kwargs["base_num_kv_heads"], 8)
     self.assertEqual(kwargs["attention"], "flash")
 
+  @mock.patch.object(
+      run_trainer_node.maxtext_utils, "get_tokenizer_pad_id", return_value=0
+  )
+  @mock.patch.object(run_trainer_node.maxtext_utils, "create_maxtext_mesh")
+  @mock.patch.object(
+      run_trainer_node.maxtext_utils, "build_maxtext_config", autospec=True
+  )
+  def test_create_maxtext_trainer_factory_passes_legacy_launcher_env(
+      self, mock_build_cfg, mock_create_mesh, mock_get_pad_id
+  ):
+    del mock_create_mesh, mock_get_pad_id  # Unused.
+    args = run_trainer_node._parse_args([])
+    # The legacy launchers set these in the environment.
+    with mock.patch.dict(
+        "os.environ",
+        {
+            "CKPT_D2H_CONCURRENT_GB": " 8 ",
+            "MAXTEXT_EXTRA_FLAGS": "remat_policy=full  opt_type=sgd ",
+        },
+    ):
+      run_trainer_node._create_maxtext_trainer_factory(args)
+    kwargs = mock_build_cfg.call_args.kwargs
+    self.assertEqual(kwargs["device_host_concurrent_gb"], 8)
+    self.assertEqual(
+        kwargs["extra_flags"], ["remat_policy=full", "opt_type=sgd"]
+    )
+
+    mock_build_cfg.reset_mock()
+    with mock.patch.dict("os.environ", {}, clear=False):
+      run_trainer_node.os.environ.pop("CKPT_D2H_CONCURRENT_GB", None)
+      run_trainer_node.os.environ.pop("MAXTEXT_EXTRA_FLAGS", None)
+      run_trainer_node._create_maxtext_trainer_factory(args)
+    kwargs = mock_build_cfg.call_args.kwargs
+    self.assertIsNone(kwargs["device_host_concurrent_gb"])
+    self.assertEqual(kwargs["extra_flags"], [])
+
   def test_maxtext_adamw_options_follow_optimizer_flags(self):
     # Names are case-insensitive, as cli.config.create_optimizer reads them.
     args = run_trainer_node._parse_args([
@@ -713,9 +918,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
 
     factory()
     mock_load_model.assert_called_once()
-    self.assertEqual(
-        mock_peft_trainer.call_args.kwargs["rollout_tp_size"], 4
-    )
+    self.assertEqual(mock_peft_trainer.call_args.kwargs["rollout_tp_size"], 4)
 
   def test_main_raises_without_discovery_context(self):
     with self.assertRaisesRegex(RuntimeError, "Require discovery API"):
@@ -932,13 +1135,11 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
 
   def test_gradient_accumulation_uses_prompt_level_mini_batch(self):
     # pylint: disable=protected-access
-    args = run_trainer_node._parse_args(
-        [
-            "--mini_batch_size=2",
-            "--num_generations=8",
-            "--train_micro_batch_size=4",
-        ]
-    )
+    args = run_trainer_node._parse_args([
+        "--mini_batch_size=2",
+        "--num_generations=8",
+        "--train_micro_batch_size=4",
+    ])
 
     steps = run_trainer_node._gradient_accumulation_steps(args)
     # pylint: enable=protected-access
@@ -947,29 +1148,25 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
 
   def test_gradient_accumulation_requires_exact_divisibility(self):
     # pylint: disable=protected-access
-    args = run_trainer_node._parse_args(
-        [
-            "--mini_batch_size=2",
-            "--num_generations=3",
-            "--train_micro_batch_size=4",
-        ]
-    )
+    args = run_trainer_node._parse_args([
+        "--mini_batch_size=2",
+        "--num_generations=3",
+        "--train_micro_batch_size=4",
+    ])
 
     with self.assertRaisesRegex(ValueError, "must be divisible"):
       run_trainer_node._gradient_accumulation_steps(args)
     # pylint: enable=protected-access
 
   def test_optimizer_config_from_args_maps_flags_to_kwargs(self):
-    args = run_trainer_node._parse_args(  # pylint: disable=protected-access
-        [
-            "--learning_rate=1e-6",
-            "--adam_b1=0.9",
-            "--adam_b2=0.99",
-            "--weight_decay=0.01",
-            "--optimizer_opt_chain_type=clip_by_global_norm",
-            "--optimizer_chain_kwargs={'max_norm': 1.0}",
-        ]
-    )
+    args = run_trainer_node._parse_args([  # pylint: disable=protected-access
+        "--learning_rate=1e-6",
+        "--adam_b1=0.9",
+        "--adam_b2=0.99",
+        "--weight_decay=0.01",
+        "--optimizer_opt_chain_type=clip_by_global_norm",
+        "--optimizer_chain_kwargs={'max_norm': 1.0}",
+    ])
     # pylint: disable=protected-access
     config = run_trainer_node._optimizer_config_from_args(args)
     # pylint: enable=protected-access
@@ -1009,16 +1206,14 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
 
   def test_optimizer_config_from_frozenlake_recipe_flags(self):
     """The frozenlake launcher passes the unprefixed adam/clipping flags."""
-    args = run_trainer_node._parse_args(  # pylint: disable=protected-access
-        [
-            "--learning_rate=1e-6",
-            "--adam_b1=0.9",
-            "--adam_b2=0.95",
-            "--weight_decay=0.0",
-            "--optimizer_opt_chain_type=clip_by_global_norm",
-            "--optimizer_chain_kwargs={'max_norm': 100.0}",
-        ]
-    )
+    args = run_trainer_node._parse_args([  # pylint: disable=protected-access
+        "--learning_rate=1e-6",
+        "--adam_b1=0.9",
+        "--adam_b2=0.95",
+        "--weight_decay=0.0",
+        "--optimizer_opt_chain_type=clip_by_global_norm",
+        "--optimizer_chain_kwargs={'max_norm': 100.0}",
+    ])
     # pylint: disable=protected-access
     config = run_trainer_node._optimizer_config_from_args(args)
     # pylint: enable=protected-access
@@ -1039,23 +1234,21 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     `create_optimizer` chains `clip_by_global_norm(1.0)` ahead of an `adamw`
     driven by `warmup_cosine_decay_schedule`.
     """
-    args = run_trainer_node._parse_args(  # pylint: disable=protected-access
-        [
-            "--optimizer_learning_rate=2.0e-7",
-            "--optimizer_weight_decay=0.01",
-            "--optimizer_b1=0.9",
-            "--optimizer_b2=0.999",
-            "--optimizer_eps=1.0e-8",
-            "--optimizer_opt_chain_type=clip_by_global_norm",
-            "--optimizer_chain_kwargs={'max_norm': 1.0}",
-            "--optimizer_schedule_type=warmup_cosine_decay_schedule",
-            "--optimizer_init_value=0.0",
-            "--optimizer_peak_value=2.0e-7",
-            "--optimizer_end_value=0.0",
-            "--optimizer_warmup_steps=50",
-            "--optimizer_decay_steps=500",
-        ]
-    )
+    args = run_trainer_node._parse_args([  # pylint: disable=protected-access
+        "--optimizer_learning_rate=2.0e-7",
+        "--optimizer_weight_decay=0.01",
+        "--optimizer_b1=0.9",
+        "--optimizer_b2=0.999",
+        "--optimizer_eps=1.0e-8",
+        "--optimizer_opt_chain_type=clip_by_global_norm",
+        "--optimizer_chain_kwargs={'max_norm': 1.0}",
+        "--optimizer_schedule_type=warmup_cosine_decay_schedule",
+        "--optimizer_init_value=0.0",
+        "--optimizer_peak_value=2.0e-7",
+        "--optimizer_end_value=0.0",
+        "--optimizer_warmup_steps=50",
+        "--optimizer_decay_steps=500",
+    ])
     # pylint: disable=protected-access
     config = run_trainer_node._optimizer_config_from_args(args)
     # pylint: enable=protected-access
@@ -1082,19 +1275,17 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
 
   def test_build_optimizer_from_gsm8k_recipe_flags_warms_up(self):
     """The gsm8k schedule starts at init_value, not the peak learning rate."""
-    args = run_trainer_node._parse_args(  # pylint: disable=protected-access
-        [
-            "--optimizer_learning_rate=2.0e-7",
-            "--optimizer_opt_chain_type=clip_by_global_norm",
-            "--optimizer_chain_kwargs={'max_norm': 1.0}",
-            "--optimizer_schedule_type=warmup_cosine_decay_schedule",
-            "--optimizer_init_value=0.0",
-            "--optimizer_peak_value=2.0e-7",
-            "--optimizer_end_value=0.0",
-            "--optimizer_warmup_steps=50",
-            "--optimizer_decay_steps=500",
-        ]
-    )
+    args = run_trainer_node._parse_args([  # pylint: disable=protected-access
+        "--optimizer_learning_rate=2.0e-7",
+        "--optimizer_opt_chain_type=clip_by_global_norm",
+        "--optimizer_chain_kwargs={'max_norm': 1.0}",
+        "--optimizer_schedule_type=warmup_cosine_decay_schedule",
+        "--optimizer_init_value=0.0",
+        "--optimizer_peak_value=2.0e-7",
+        "--optimizer_end_value=0.0",
+        "--optimizer_warmup_steps=50",
+        "--optimizer_decay_steps=500",
+    ])
     # pylint: disable=protected-access
     optimizer = run_trainer_node._build_optimizer(args)
     # pylint: enable=protected-access
@@ -1105,13 +1296,11 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertEqual(float(state[1].hyperparams["learning_rate"]), 0.0)
 
   def test_optimizer_config_from_args_ignores_steps_without_schedule(self):
-    args = run_trainer_node._parse_args(  # pylint: disable=protected-access
-        [
-            "--learning_rate=1e-5",
-            "--warmup_steps=10",
-            "--lr_decay_steps=100",
-        ]
-    )
+    args = run_trainer_node._parse_args([  # pylint: disable=protected-access
+        "--learning_rate=1e-5",
+        "--warmup_steps=10",
+        "--lr_decay_steps=100",
+    ])
     # pylint: disable=protected-access
     config = run_trainer_node._optimizer_config_from_args(args)
     # pylint: enable=protected-access
@@ -1121,17 +1310,15 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertEqual(config["learning_rate"], 1e-5)
 
   def test_optimizer_config_from_args_passes_schedule_flags_through(self):
-    args = run_trainer_node._parse_args(  # pylint: disable=protected-access
-        [
-            "--learning_rate=1e-5",
-            "--optimizer_schedule_type=warmup_cosine_decay_schedule",
-            "--optimizer_init_value=1e-7",
-            "--optimizer_peak_value=3e-5",
-            "--optimizer_end_value=1e-6",
-            "--warmup_steps=10",
-            "--lr_decay_steps=100",
-        ]
-    )
+    args = run_trainer_node._parse_args([  # pylint: disable=protected-access
+        "--learning_rate=1e-5",
+        "--optimizer_schedule_type=warmup_cosine_decay_schedule",
+        "--optimizer_init_value=1e-7",
+        "--optimizer_peak_value=3e-5",
+        "--optimizer_end_value=1e-6",
+        "--warmup_steps=10",
+        "--lr_decay_steps=100",
+    ])
     # pylint: disable=protected-access
     config = run_trainer_node._optimizer_config_from_args(args)
     # pylint: enable=protected-access
@@ -1158,18 +1345,16 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertAlmostEqual(float(state.hyperparams["learning_rate"]), 1e-6)
 
   def test_build_optimizer_uses_warmup_cosine_decay_schedule(self):
-    args = run_trainer_node._parse_args(  # pylint: disable=protected-access
-        [
-            "--learning_rate=1e-5",
-            "--optimizer_schedule_type=warmup_cosine_decay_schedule",
-            "--optimizer_init_value=0.0",
-            "--optimizer_peak_value=1e-5",
-            "--optimizer_end_value=0.0",
-            "--warmup_steps=10",
-            "--lr_decay_steps=100",
-            "--adam_eps=1e-6",
-        ]
-    )
+    args = run_trainer_node._parse_args([  # pylint: disable=protected-access
+        "--learning_rate=1e-5",
+        "--optimizer_schedule_type=warmup_cosine_decay_schedule",
+        "--optimizer_init_value=0.0",
+        "--optimizer_peak_value=1e-5",
+        "--optimizer_end_value=0.0",
+        "--warmup_steps=10",
+        "--lr_decay_steps=100",
+        "--adam_eps=1e-6",
+    ])
     # pylint: disable=protected-access
     optimizer = run_trainer_node._build_optimizer(args)
     # pylint: enable=protected-access
@@ -1180,13 +1365,11 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertAlmostEqual(float(state.hyperparams["learning_rate"]), 0.0)
 
   def test_build_optimizer_uses_explicit_schedule_type(self):
-    args = run_trainer_node._parse_args(  # pylint: disable=protected-access
-        [
-            "--learning_rate=1e-6",
-            "--schedule_type=constant_schedule",
-            "--optimizer_value=3e-5",
-        ]
-    )
+    args = run_trainer_node._parse_args([  # pylint: disable=protected-access
+        "--learning_rate=1e-6",
+        "--schedule_type=constant_schedule",
+        "--optimizer_value=3e-5",
+    ])
     # pylint: disable=protected-access
     optimizer = run_trainer_node._build_optimizer(args)
     # pylint: enable=protected-access
@@ -1195,11 +1378,12 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertAlmostEqual(float(state.hyperparams["learning_rate"]), 3e-5)
 
   def test_build_optimizer_applies_gradient_clipping(self):
-    args = run_trainer_node._parse_args(  # pylint: disable=protected-access
-        ["--optimizer_opt_type=sgd", "--learning_rate=1.0",
-         "--optimizer_opt_chain_type=clip_by_global_norm",
-         "--optimizer_chain_kwargs={'max_norm': 1.0}"]
-    )
+    args = run_trainer_node._parse_args([  # pylint: disable=protected-access
+        "--optimizer_opt_type=sgd",
+        "--learning_rate=1.0",
+        "--optimizer_opt_chain_type=clip_by_global_norm",
+        "--optimizer_chain_kwargs={'max_norm': 1.0}",
+    ])
     # pylint: disable=protected-access
     optimizer = run_trainer_node._build_optimizer(args)
     # pylint: enable=protected-access
@@ -1209,15 +1393,13 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     grads = {"w": jax.numpy.array([60.0, 80.0])}
     updates, _ = optimizer.update(grads, optimizer.init(params), params)
     update = jax.tree.leaves(updates)[0]
-    self.assertAlmostEqual(
-        float(jax.numpy.linalg.norm(update)), 1.0, places=4
-    )
+    self.assertAlmostEqual(float(jax.numpy.linalg.norm(update)), 1.0, places=4)
 
   def test_build_optimizer_forwards_clipping_as_opt_chain_type(self):
-    args = run_trainer_node._parse_args(  # pylint: disable=protected-access
-        ["--optimizer_opt_chain_type=clip_by_global_norm",
-         "--optimizer_chain_kwargs={'max_norm': 1.0}"]
-    )
+    args = run_trainer_node._parse_args([  # pylint: disable=protected-access
+        "--optimizer_opt_chain_type=clip_by_global_norm",
+        "--optimizer_chain_kwargs={'max_norm': 1.0}",
+    ])
     create_optimizer = run_trainer_node.cli_config.create_optimizer
     with mock.patch.object(
         run_trainer_node.cli_config,
@@ -1298,6 +1480,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         run_trainer_node._ensure_model_dir_for_trainer(
             tmp_file.name, "Qwen/Qwen3-1.7B"
         )
+
 
 if __name__ == "__main__":
   absltest.main()

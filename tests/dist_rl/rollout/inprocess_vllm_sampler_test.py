@@ -15,7 +15,6 @@
 """Tests for InprocessVllmSampler with Tunix VllmSampler and Raiden delegate."""
 
 import asyncio
-import dataclasses
 from unittest import mock
 
 from absl.testing import absltest
@@ -26,18 +25,7 @@ from tunix.dist_rl.rollout import sampler as base_sampler_lib
 from tunix.dist_rl.weight_sync import raiden_weight_sync_delegate
 from tunix.dist_rl.weight_sync import weight_sync
 from tunix.generate import base_sampler
-
-
-@dataclasses.dataclass
-class _EngineOnlyConfig:
-  """A config without a `weight_sync_mode` field, like `VllmConfig`.
-
-  `partial_rollout` is the only field `InprocessVllmSampler.__init__` reads.
-  The real `VllmConfig` can't be imported here: its module imports vLLM, which
-  needs Transformers v5, and this target links v4.
-  """
-
-  partial_rollout: bool = False
+from tunix.generate import mappings
 
 
 class InprocessVllmSamplerTest(absltest.TestCase):
@@ -64,13 +52,17 @@ class InprocessVllmSamplerTest(absltest.TestCase):
     self.patcher.start()
 
     self.mock_tokenizer = mock.MagicMock()
-    self.mock_config = mock.MagicMock()
-    self.mock_config.enable_raiden = False
+    self.config = configs.RolloutConfig(
+        weight_sync_mode=weight_sync.WeightSyncMode.FALLBACK,
+        tensor_parallel_size=1,
+        data_parallel_size=1,
+        temperature=0.7,
+    )
 
     self.sampler = inprocess_vllm_sampler.InprocessVllmSampler(
         server_id="vllm_slice_01",
         tokenizer=self.mock_tokenizer,
-        config=self.mock_config,
+        config=self.config,
     )
     self.sampler.initialize()
 
@@ -85,30 +77,15 @@ class InprocessVllmSamplerTest(absltest.TestCase):
     with self.assertRaises(TypeError):
       inprocess_vllm_sampler.InprocessVllmSampler(  # pyrefly: ignore[missing-argument]
           server_id="vllm_slice_01",
-          config=self.mock_config,
+          config=self.config,
       )
 
-  def test_explicit_weight_sync_mode_overrides_config(self):
-    fallback_config = mock.MagicMock()
-    fallback_config.weight_sync_mode = weight_sync.WeightSyncMode.FALLBACK
-    mock_delegate = mock.MagicMock(
-        spec=raiden_weight_sync_delegate.RaidenWeightSyncDelegate
-    )
-    sampler = inprocess_vllm_sampler.InprocessVllmSampler(
-        server_id="vllm_raiden_slice",
-        tokenizer=self.mock_tokenizer,
-        config=fallback_config,
-        raiden_sync_delegate=mock_delegate,
-        weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN,
-    )
-    self.assertEqual(
-        sampler.weight_sync_mode, weight_sync.WeightSyncMode.RAIDEN
-    )
-    self.assertTrue(sampler.enable_raiden)
-
   def test_real_raiden_delegate_instantiation(self):
-    raiden_config = mock.MagicMock()
-    raiden_config.weight_sync_mode = weight_sync.WeightSyncMode.RAIDEN
+    raiden_config = configs.RolloutConfig(
+        weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN,
+        tensor_parallel_size=1,
+        data_parallel_size=1,
+    )
     sampler = inprocess_vllm_sampler.InprocessVllmSampler(
         server_id="vllm_raiden_slice",
         tokenizer=self.mock_tokenizer,
@@ -122,36 +99,216 @@ class InprocessVllmSamplerTest(absltest.TestCase):
     )
     self.assertFalse(sampler.raiden_sync_delegate.is_bounded())
 
-  def test_weight_sync_mode_defaults_to_fallback_without_config(self):
-    sampler = inprocess_vllm_sampler.InprocessVllmSampler(
-        server_id="no_cfg", tokenizer=self.mock_tokenizer
-    )
-    self.assertEqual(
-        sampler.weight_sync_mode, weight_sync.DEFAULT_WEIGHT_SYNC_MODE
-    )
-    self.assertFalse(sampler.enable_raiden)
-    self.assertIsNone(sampler.raiden_sync_delegate)
-
-  def test_engine_config_without_weight_sync_mode_defaults_to_fallback(self):
-    sampler = inprocess_vllm_sampler.InprocessVllmSampler(
-        server_id="engine_cfg",
-        tokenizer=self.mock_tokenizer,
-        config=_EngineOnlyConfig(),
-    )
-    self.assertEqual(
-        sampler.weight_sync_mode, weight_sync.DEFAULT_WEIGHT_SYNC_MODE
-    )
-    self.assertFalse(sampler.enable_raiden)
-    self.assertIsNone(sampler.raiden_sync_delegate)
-
   def test_weight_sync_mode_read_from_rollout_config(self):
     sampler = inprocess_vllm_sampler.InprocessVllmSampler(
         server_id="rollout_cfg",
         tokenizer=self.mock_tokenizer,
         config=configs.RolloutConfig(weight_sync_mode="none"),
     )
-    self.assertEqual(sampler.weight_sync_mode, weight_sync.WeightSyncMode.NONE)
+    self.assertEqual(
+        sampler.config.weight_sync_mode, weight_sync.WeightSyncMode.NONE
+    )
     self.assertFalse(sampler.enable_raiden)
+    self.assertIsNone(sampler.raiden_sync_delegate)
+
+    invalid_cfg = configs.RolloutConfig()
+    invalid_cfg.weight_sync_mode = "invalid"  # type: ignore[assignment]
+    with self.assertRaises(ValueError):
+      inprocess_vllm_sampler.InprocessVllmSampler(
+          server_id="bad_mode",
+          tokenizer=self.mock_tokenizer,
+          config=invalid_cfg,
+      )
+
+  def test_initialize_builds_vllm_config_from_rollout_config(self):
+    mesh = mock.MagicMock()
+    config = configs.RolloutConfig(
+        weight_sync_mode="none",
+        tensor_parallel_size=2,
+        data_parallel_size=4,
+        return_logprobs=True,
+        return_routed_experts=True,
+        eos_tokens=[7],
+        partial_rollout=True,
+        rollout_vllm_model_version="/models/qwen",
+        rollout_vllm_hbm_utilization=0.6,
+        rollout_vllm_init_with_random_weights=False,
+        rollout_vllm_max_num_seqs=32,
+        rollout_vllm_kwargs={"max_model_len": 2048, "dtype": "bfloat16"},
+        rollout_vllm_sampling_kwargs={"skip_special_tokens": False},
+    )
+    self.mock_vllm_lib.VllmConfig.reset_mock()
+    sampler = inprocess_vllm_sampler.InprocessVllmSampler(
+        server_id="engine_cfg",
+        tokenizer=self.mock_tokenizer,
+        config=config,
+        mesh=mesh,
+    )
+    sampler.initialize()
+
+    vllm_config_kwargs = self.mock_vllm_lib.VllmConfig.call_args.kwargs
+    # Concurrent sample() threads need the single-engine-loop driver.
+    self.assertTrue(vllm_config_kwargs["server_mode"])
+    self.assertIs(vllm_config_kwargs["mesh"], mesh)
+    self.assertEqual(vllm_config_kwargs["tensor_parallel_size"], 2)
+    self.assertEqual(vllm_config_kwargs["data_parallel_size"], 4)
+    self.assertTrue(vllm_config_kwargs["return_logprobs"])
+    self.assertTrue(vllm_config_kwargs["return_routed_experts"])
+    self.assertEqual(vllm_config_kwargs["eos_tokens"], [7])
+    self.assertTrue(vllm_config_kwargs["partial_rollout"])
+    self.assertEqual(vllm_config_kwargs["hbm_utilization"], 0.6)
+    self.assertFalse(vllm_config_kwargs["init_with_random_weights"])
+    self.assertEqual(
+        vllm_config_kwargs["sampling_kwargs"], {"skip_special_tokens": False}
+    )
+    self.assertEqual(
+        vllm_config_kwargs["mapping_config"], mappings.MappingConfig()
+    )
+    engine_kwargs = vllm_config_kwargs["engine_kwargs"]
+    self.assertEqual(engine_kwargs["model"], "/models/qwen")
+    self.assertEqual(engine_kwargs["max_num_seqs"], 32)
+    self.assertEqual(engine_kwargs["max_model_len"], 2048)
+    self.assertEqual(engine_kwargs["dtype"], "bfloat16")
+    self.assertEqual(engine_kwargs["max_logprobs"], 1)
+    self.mock_vllm_lib.VllmSampler.assert_called_with(
+        tokenizer=sampler.tokenizer,
+        config=self.mock_vllm_lib.VllmConfig.return_value,
+    )
+
+  def test_initialize_passes_the_configured_mapping_config(self):
+    mapping_config = mappings.MappingConfig()
+    sampler = inprocess_vllm_sampler.InprocessVllmSampler(
+        server_id="mapping_cfg",
+        tokenizer=self.mock_tokenizer,
+        config=configs.RolloutConfig(
+            tensor_parallel_size=1,
+            data_parallel_size=1,
+            rollout_mapping_config=mapping_config,
+        ),
+    )
+    sampler.initialize()
+    self.assertIs(
+        self.mock_vllm_lib.VllmConfig.call_args.kwargs["mapping_config"],
+        mapping_config,
+    )
+
+  def test_initialize_takes_engine_defaults_from_rollout_config(self):
+    with mock.patch.dict("os.environ", {"TPU_MULTIHOST_BACKEND": "ray"}):
+      sampler = inprocess_vllm_sampler.InprocessVllmSampler(
+          server_id="engine_defaults",
+          tokenizer=self.mock_tokenizer,
+          config=configs.RolloutConfig(
+              kv_cache_size=4096,
+              tensor_parallel_size=1,
+              data_parallel_size=1,
+              rollout_vllm_additional_config={
+                  "maxtext_config": {
+                      "weight_dtype": "bfloat16",
+                      "allow_split": True,
+                  }
+              },
+              rollout_vllm_kwargs={
+                  "additional_config": {
+                      "sharding": {"ep": 4},
+                      "maxtext_config": {"allow_split": False},
+                  }
+              },
+          ),
+      )
+      sampler.initialize()
+
+    vllm_config_kwargs = self.mock_vllm_lib.VllmConfig.call_args.kwargs
+    self.assertEqual(vllm_config_kwargs["tpu_backend_type"], "jax")
+    self.assertEqual(vllm_config_kwargs["hbm_utilization"], 0.5)
+    self.assertEqual(
+        vllm_config_kwargs["additional_config"],
+        {
+            "sharding": {"ep": 4},
+            "maxtext_config": {
+                "weight_dtype": "bfloat16",
+                "allow_split": False,
+            },
+        },
+    )
+    engine_kwargs = vllm_config_kwargs["engine_kwargs"]
+    self.assertEqual(engine_kwargs["max_model_len"], 4096)
+    self.assertEqual(engine_kwargs["distributed_executor_backend"], "ray")
+    self.assertTrue(engine_kwargs["trust_remote_code"])
+
+  def test_initialize_validates_parallelism_and_lora(self):
+    with self.assertRaisesRegex(ValueError, "tensor_parallel_size"):
+      inprocess_vllm_sampler.InprocessVllmSampler(
+          server_id="bad_tp",
+          tokenizer=self.mock_tokenizer,
+          config=configs.RolloutConfig(),
+      ).initialize()
+
+    with self.assertRaisesRegex(
+        ValueError, "LoRA is not supported with rollout data parallelism"
+    ):
+      inprocess_vllm_sampler.InprocessVllmSampler(
+          server_id="bad_lora_dp",
+          tokenizer=self.mock_tokenizer,
+          config=configs.RolloutConfig(
+              tensor_parallel_size=1,
+              data_parallel_size=2,
+              rollout_vllm_lora_config={"max_lora_rank": 8},
+          ),
+      ).initialize()
+
+  def test_initialize_warns_when_server_mode_is_false(self):
+    self.mock_vllm_lib.VllmConfig.reset_mock()
+    sampler = inprocess_vllm_sampler.InprocessVllmSampler(
+        server_id="warn_slice",
+        tokenizer=self.mock_tokenizer,
+        config=configs.RolloutConfig(
+            tensor_parallel_size=1,
+            data_parallel_size=1,
+            rollout_vllm_server_mode=False,
+        ),
+    )
+    with self.assertLogs(level="WARNING") as cm:
+      sampler.initialize()
+    self.assertTrue(
+        any("rollout_vllm_server_mode=False" in msg for msg in cm.output)
+    )
+    self.assertTrue(
+        self.mock_vllm_lib.VllmConfig.call_args.kwargs["server_mode"]
+    )
+
+    self.mock_vllm_lib.VllmConfig.reset_mock()
+    inprocess_vllm_sampler.InprocessVllmSampler(
+        server_id="extra_kwargs_slice",
+        tokenizer=self.mock_tokenizer,
+        config=configs.RolloutConfig(
+            tensor_parallel_size=1,
+            data_parallel_size=1,
+            rollout_vllm_kwargs={
+                "server_mode": False,
+                "gpu_memory_utilization": 0.85,
+            },
+        ),
+    ).initialize()
+    vllm_cfg_kwargs = self.mock_vllm_lib.VllmConfig.call_args.kwargs
+    self.assertNotIn("server_mode", vllm_cfg_kwargs["engine_kwargs"])
+    self.assertEqual(vllm_cfg_kwargs["hbm_utilization"], 0.85)
+
+  def test_sample_renders_chat_message_prompts_with_chat_template(self):
+    self.mock_tokenizer.apply_chat_template.return_value = "<templated>"
+    messages = [{"role": "user", "content": "hi"}]
+    req = base_sampler_lib.SamplingRequest(
+        prompt=messages,
+        sampling_params=base_sampler_lib.SamplingParams(max_tokens=9),
+    )
+    asyncio.run(self.sampler.sample(req))
+
+    self.mock_tokenizer.apply_chat_template.assert_called_once_with(
+        messages, add_generation_prompt=True, tokenize=False
+    )
+    self.assertEqual(
+        self.mock_vllm_sampler.call_args.kwargs["input_strings"],
+        ["<templated>"],
+    )
 
   def test_lifecycle_methods(self):
     self.assertTrue(asyncio.run(self.sampler.start()))
@@ -308,9 +465,11 @@ class InprocessVllmSamplerTest(absltest.TestCase):
     fake_transformer_state = {"param": "tensor"}
     self.mock_vllm_sampler.transformer_state = fake_transformer_state
 
-    raiden_config = mock.MagicMock()
-    raiden_config.weight_sync_mode = weight_sync.WeightSyncMode.RAIDEN
-    raiden_config.partial_rollout = False
+    raiden_config = configs.RolloutConfig(
+        weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN,
+        tensor_parallel_size=1,
+        data_parallel_size=1,
+    )
 
     raiden_sampler = inprocess_vllm_sampler.InprocessVllmSampler(
         server_id="vllm_raiden_slice",
@@ -360,8 +519,11 @@ class InprocessVllmSamplerTest(absltest.TestCase):
     mock_delegate.bind_weight_sync = mock.AsyncMock(return_value=True)
     self.mock_vllm_sampler.transformer_state = {"param": "tensor"}
 
-    raiden_config = mock.MagicMock()
-    raiden_config.weight_sync_mode = weight_sync.WeightSyncMode.RAIDEN
+    raiden_config = configs.RolloutConfig(
+        weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN,
+        tensor_parallel_size=1,
+        data_parallel_size=1,
+    )
 
     raiden_sampler = inprocess_vllm_sampler.InprocessVllmSampler(
         server_id="vllm_raiden_slice",
@@ -382,8 +544,11 @@ class InprocessVllmSamplerTest(absltest.TestCase):
     if hasattr(self.mock_vllm_sampler, "transformer_state"):
       del self.mock_vllm_sampler.transformer_state
 
-    raiden_config = mock.MagicMock()
-    raiden_config.weight_sync_mode = weight_sync.WeightSyncMode.RAIDEN
+    raiden_config = configs.RolloutConfig(
+        weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN,
+        tensor_parallel_size=1,
+        data_parallel_size=1,
+    )
 
     raiden_sampler = inprocess_vllm_sampler.InprocessVllmSampler(
         server_id="vllm_raiden_slice",
@@ -395,6 +560,47 @@ class InprocessVllmSamplerTest(absltest.TestCase):
 
     with self.assertRaisesRegex(RuntimeError, "transformer_state"):
       asyncio.run(raiden_sampler.bind_weight_sync())
+
+  def test_exposes_weights_and_cache_hooks_from_vllm_sampler(self):
+    fake_state = {"w": 1}
+    self.mock_vllm_sampler.transformer_state = fake_state
+    self.assertIs(self.sampler.transformer_state, fake_state)
+    self.assertIs(
+        self.sampler._get_underlying_sampler(), self.mock_vllm_sampler
+    )
+
+    self.sampler.update_params({"w": 2})
+    self.mock_vllm_sampler.update_params.assert_called_once_with(
+        {"w": 2}, filter_types=None
+    )
+    self.mock_vllm_sampler.update_params.reset_mock()
+    self.sampler.update_params({"w": 3}, filter_types=(int,))
+    self.mock_vllm_sampler.update_params.assert_called_once_with(
+        {"w": 3}, filter_types=(int,)
+    )
+
+    self.sampler.delete_cache()
+    self.mock_vllm_sampler.delete_cache.assert_called_once_with()
+
+    self.sampler.reset_prefix_cache()
+    self.mock_vllm_sampler.reset_prefix_cache.assert_called_once_with()
+
+    self.sampler.reinitialize_cache()
+    self.mock_vllm_sampler.reinitialize_cache.assert_called_once_with()
+
+    self.sampler.refresh_state_leaves()
+    self.mock_vllm_sampler.refresh_state_leaves.assert_called_once_with()
+
+    uninit = inprocess_vllm_sampler.InprocessVllmSampler(
+        server_id="uninit_slice",
+        tokenizer=self.mock_tokenizer,
+        config=self.config,
+    )
+    self.assertIsNone(uninit._get_underlying_sampler())
+    with self.assertRaisesRegex(RuntimeError, "not initialized"):
+      _ = uninit.transformer_state
+    with self.assertRaisesRegex(RuntimeError, "not initialized"):
+      uninit.update_params({"w": 2})
 
   def test_other_sampler_methods(self):
     self.assertEqual(
@@ -415,36 +621,31 @@ class InprocessVllmSamplerTest(absltest.TestCase):
 
   def test_uninitialized_sampler_raises(self):
     uninit = inprocess_vllm_sampler.InprocessVllmSampler(
-        server_id="empty", tokenizer=self.mock_tokenizer
+        server_id="empty",
+        tokenizer=self.mock_tokenizer,
+        config=self.config,
     )
-    with self.assertRaises(RuntimeError):
-      asyncio.run(
-          uninit.sample(base_sampler_lib.SamplingRequest(prompt="test"))
-      )
-
-  def test_initialize_without_config_does_not_start_the_engine(self):
-    sampler = inprocess_vllm_sampler.InprocessVllmSampler(
-        server_id="no_cfg", tokenizer=self.mock_tokenizer
-    )
-    engine_builds = self.mock_vllm_lib.VllmSampler.call_count
-    sampler.initialize()
-    self.assertIsNone(sampler.vllm_sampler)
-    self.assertEqual(self.mock_vllm_lib.VllmSampler.call_count, engine_builds)
     with self.assertRaisesRegex(RuntimeError, "not initialized"):
       asyncio.run(
-          sampler.sample(base_sampler_lib.SamplingRequest(prompt="test"))
+          uninit.sample(base_sampler_lib.SamplingRequest(prompt="test"))
       )
 
   def test_sample_none_requests_raises(self):
     with self.assertRaises(ValueError):
       asyncio.run(self.sampler.sample(None))
 
+  def test_sample_raw_prompt_raises_type_error(self):
+    with self.assertRaises(TypeError):
+      asyncio.run(self.sampler.sample("raw prompt"))
+    with self.assertRaises(TypeError):
+      asyncio.run(self.sampler.sample(["raw prompt"]))
+
   def test_vllm_sampler_deferred_to_initialize(self):
     self.mock_vllm_lib.VllmSampler.reset_mock()
     sampler = inprocess_vllm_sampler.InprocessVllmSampler(
         server_id="deferred_slice",
         tokenizer=self.mock_tokenizer,
-        config=self.mock_config,
+        config=self.config,
     )
     self.assertIsNone(sampler.vllm_sampler)
     self.mock_vllm_lib.VllmSampler.assert_not_called()
@@ -470,9 +671,13 @@ class RoutedExpertsTest(absltest.TestCase):
         logprobs=None,
         routed_experts=routed_experts,
     )
-    inner_sampler.config = mock.Mock(return_routed_experts=engine_captures)
     sampler = inprocess_vllm_sampler.InprocessVllmSampler(
-        server_id="rollout", tokenizer=mock.MagicMock()
+        server_id="rollout",
+        tokenizer=mock.MagicMock(),
+        config=configs.RolloutConfig(
+            weight_sync_mode=weight_sync.WeightSyncMode.FALLBACK,
+            return_routed_experts=engine_captures,
+        ),
     )
     sampler.vllm_sampler = inner_sampler
     return sampler
@@ -571,7 +776,7 @@ class RoutedExpertsTest(absltest.TestCase):
     sampler = inprocess_vllm_sampler.InprocessVllmSampler(
         server_id="vllm_concurrent_slice",
         tokenizer=mock.MagicMock(),
-        config=None,
+        config=configs.RolloutConfig(),
         max_concurrency=num_concurrent,
     )
     sampler.vllm_sampler = mock.MagicMock(side_effect=_blocking_vllm_call)
@@ -632,6 +837,7 @@ class RoutedExpertsTest(absltest.TestCase):
     sampler = inprocess_vllm_sampler.InprocessVllmSampler(
         server_id="vllm_hf_tok_slice",
         tokenizer=hf_tok,
+        config=configs.RolloutConfig(),
     )
     self.assertIsInstance(sampler.tokenizer, tokenizer_adapter.TokenizerAdapter)
     inner_sampler = mock.MagicMock()
@@ -700,9 +906,11 @@ class RoutedExpertsTest(absltest.TestCase):
     sampler = inprocess_vllm_sampler.InprocessVllmSampler(
         server_id="rollout",
         tokenizer=mock.MagicMock(),
+        config=configs.RolloutConfig(
+            weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN,
+            partial_rollout=True,
+        ),
         raiden_sync_delegate=mock_delegate,
-        weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN,
-        partial_rollout=True,
     )
     sampler.vllm_sampler = inner_sampler
     sync_req = base_sampler_lib.WeightSyncRequest(policy_version=2)

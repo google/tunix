@@ -138,6 +138,42 @@ class _PartitionedPagePool(Generic[_ArrayT]):
 
       self.partition_pages[k] = new_arr
 
+  def delete_pages(self) -> None:
+    """Deletes underlying device buffers if supported."""
+    live_arrays = [
+        arr
+        for arr in self.partition_pages.values()
+        if isinstance(arr, jax.Array) and not arr.is_deleted()
+    ]
+    if live_arrays:
+      jax.block_until_ready(live_arrays)
+      for arr in live_arrays:
+        arr.delete()
+
+  def reallocate_pages(self) -> None:
+    """Reallocates zeroed page pool arrays if they were deleted."""
+    if not self.is_deleted:
+      return
+    first_arr = next(iter(self.partition_pages.values()))
+    assert isinstance(first_arr, jax.Array)
+    sharding = first_arr.sharding
+    init_fn = jax.jit(
+        lambda: jnp.zeros(
+            self._expected_shape,
+            dtype=self._expected_dtype,
+        ),
+        out_shardings=sharding,
+    )
+    new_pages = {k: init_fn() for k in self.partition_pages}
+    self.update_pages(new_pages)
+
+  @property
+  def is_deleted(self) -> bool:
+    return any(
+        isinstance(arr, jax.Array) and arr.is_deleted()
+        for arr in self.partition_pages.values()
+    )
+
   @property
   def num_pages(self) -> int:
     return self._expected_shape[0]
@@ -372,6 +408,14 @@ class TieredPagePoolManager:
   def update_device_pool(self, new_pages: Mapping[str, jax.Array]) -> None:
     """Updates the underlying device pool partition pages with new pages."""
     self._device_pool.update_pages(new_pages)
+
+  def delete_device_pool(self) -> None:
+    """Deletes the underlying device page pool arrays to free HBM."""
+    self._device_pool.delete_pages()
+
+  def reallocate_device_pool(self) -> None:
+    """Reallocates zeroed device page pool arrays if they were deleted."""
+    self._device_pool.reallocate_pages()
 
   @property
   def _device_sharding(self) -> jax.sharding.Sharding:

@@ -394,7 +394,9 @@ def _launch(args: argparse.Namespace, config: dict[str, Any]) -> int:
       require_resume=args.resume,
   )
   launcher = (
-      Path(__file__).resolve().parents[1] / "math_gsm8k_dist" / "launcher.sh"
+      Path(__file__).resolve().parents[1]
+      / "math_gsm8k_dist"
+      / "opd_launcher.sh"
   )
   plan = {
       "config_sha256": config_digest(config),

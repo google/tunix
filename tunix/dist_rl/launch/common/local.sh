@@ -83,11 +83,6 @@ INFERENCE_CMD=(
   "${NODE_CONFIG_ARGS[@]}"
 )
 
-EFFECTIVE_INFERENCE_ADDR="${INFERENCE_ADDR}"
-if is_true "${RUN_INFERENCE_NODE}" && [[ -z "${EFFECTIVE_INFERENCE_ADDR}" ]]; then
-  EFFECTIVE_INFERENCE_ADDR="localhost:${INFERENCE_PORT}"
-fi
-
 ORCHESTRATOR_CMD=(
   "$PYTHON_BIN" -m tunix.dist_rl.distributed.runtime.main
   --discovery_id="${ORCHESTRATOR_ID}"
@@ -95,9 +90,6 @@ ORCHESTRATOR_CMD=(
   --process_main="${ORCHESTRATOR_MAIN}"
   "${NODE_CONFIG_ARGS[@]}"
 )
-if [[ -n "${EFFECTIVE_INFERENCE_ADDR}" ]]; then
-  ORCHESTRATOR_CMD+=("cluster_config.inference_addr=${EFFECTIVE_INFERENCE_ADDR}")
-fi
 
 print_command() {
   local label="$1"
@@ -237,15 +229,13 @@ convert_maxtext_ckpt() {
     echo "Found existing local MAXTEXT_CKPT: ${ACTOR_MAXTEXT_CKPT_PATH}"
     return
   fi
-  local maxtext_model_name
-  maxtext_model_name="${MAXTEXT_MODEL_NAME:-$(printf '%s' "${ACTOR_MODEL_NAME}" | tr '[:upper:]' '[:lower:]')}"
   local ckpt_base
   ckpt_base="$(dirname "$(dirname "${ACTOR_MAXTEXT_CKPT_PATH}")")"
   echo "Converting HF checkpoint ${ACTOR_MODEL_DIR} to MaxText Orbax checkpoint at ${ckpt_base}..."
   mkdir -p "$ckpt_base"
   JAX_PLATFORMS=cpu "$PYTHON_BIN" \
     -m maxtext.checkpoint_conversion.to_maxtext \
-    model_name="${maxtext_model_name}" \
+    model_name="${ACTOR_MAXTEXT_MODEL_NAME}" \
     --hf_model_path="${ACTOR_MODEL_DIR}" \
     base_output_directory="${ckpt_base}" \
     scan_layers=True \
@@ -435,8 +425,6 @@ echo "Launching trainer node on TPU chips ${LOCAL_TRAINER_TPU_CHIPS}..."
   if is_true "${LOCAL_ALLOW_MULTIPLE_LIBTPU_LOAD}"; then
     export ALLOW_MULTIPLE_LIBTPU_LOAD=1
   fi
-  export VERIFY_WEIGHTS="${WEIGHT_SYNC_VERIFY_WEIGHTS}"
-  export CKPT_D2H_CONCURRENT_GB="${CKPT_D2H_CONCURRENT_GB}"
   export PYTHONUNBUFFERED=1
   print_command "Trainer command" "${TRAINER_CMD[@]}"
   exec "${TRAINER_CMD[@]}" > "$TRAINER_LOG" 2>&1
@@ -447,7 +435,6 @@ echo "Trainer pid=$TRAINER_PID log=$TRAINER_LOG"
 echo "Launching rollout node on TPU chips ${LOCAL_ROLLOUT_TPU_CHIPS}..."
 (
   export JAX_PLATFORMS=tpu,cpu
-  export SKIP_JAX_PRECOMPILE=1
   export TPU_VISIBLE_DEVICES="${LOCAL_ROLLOUT_TPU_CHIPS}"
   export TPU_VISIBLE_CHIPS="${TPU_VISIBLE_DEVICES}"
   export TPU_CHIPS_PER_HOST_BOUNDS="${LOCAL_TPU_CHIPS_PER_HOST_BOUNDS}"
@@ -466,7 +453,6 @@ echo "Launching rollout node on TPU chips ${LOCAL_ROLLOUT_TPU_CHIPS}..."
       export NODE_SELECTOR_VAL="${SANDBOX_NODE_SELECTOR_VAL}"
     fi
   fi
-  export VERIFY_WEIGHTS="${WEIGHT_SYNC_VERIFY_WEIGHTS}"
   export PYTHONUNBUFFERED=1
   print_command "Rollout command" "${ROLLOUT_CMD[@]}"
   exec "${ROLLOUT_CMD[@]}" > "$ROLLOUT_LOG" 2>&1

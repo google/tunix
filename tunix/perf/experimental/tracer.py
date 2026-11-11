@@ -38,7 +38,7 @@ BatchAsyncTimelines = timeline.BatchAsyncTimelines
 
 
 def _synchronize_devices() -> None:
-  for device in jax.devices():
+  for device in jax.local_devices():
     jax.device_put(0.0, device=device).block_until_ready()
 
 

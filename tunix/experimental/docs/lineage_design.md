@@ -93,6 +93,7 @@ class LineageContext:
     tracking_id: str             # Native orchestrator ID (e.g. traj_p0_g0, batch_0)
     parent_tracking_ids: list[str] = dataclasses.field(default_factory=list)
     events: list[LineageEvent] = dataclasses.field(default_factory=list)
+    task_name: str = ""          # Semantic benchmark/capability task label (e.g. "gsm8k", "deepswe")
 
     def add_event(self, component: str, operation: str, attributes: dict[str, Any] = None):
         event = LineageEvent(
@@ -114,12 +115,24 @@ class LineageContext:
         attributes: dict[str, Any] = None,
     ) -> "LineageContext":
         """Used by Batch Assemblers to merge N trajectories into a single parent batch lineage."""
-        parent_ids = [ctx.tracking_id for ctx in contexts if ctx is not None]
-        
-        new_ctx = cls(tracking_id=batch_id, parent_tracking_ids=parent_ids)
+        valid_contexts = [ctx for ctx in contexts if ctx is not None]
+        parent_ids = [ctx.tracking_id for ctx in valid_contexts]
+        unique_tasks = {ctx.task_name for ctx in valid_contexts}
+        merged_task_name = next(iter(unique_tasks)) if len(unique_tasks) == 1 else ""
+
+        new_ctx = cls(
+            tracking_id=batch_id,
+            parent_tracking_ids=parent_ids,
+            task_name=merged_task_name,
+        )
         new_ctx.add_event(component, operation, attributes)
         return new_ctx
 ```
+
+> **Why `task_name` is distinct from `env_name` and `dataset_name`:**
+> - `env_name` (`RolloutRequest.env_name`) is an **execution routing key** on the Rollout Worker (`None` for single-turn direct vLLM sampling; a registered `TaskEnvironment` class name for multi-turn agentic loops). Multiple tasks can share one `env_name` (e.g. 10+ Reasoning Gym tasks or multiple coding benchmarks running inside one generic sandbox environment), and a single task can be evaluated across different environments (e.g. single-turn `env_name=None` vs. tool-assisted `env_name="python_sandbox"`, or local vs. Kubernetes sandbox environments).
+> - `dataset_name` / `data_source` is a **storage configuration key** identifying where prompt records are loaded from (a single premixed file/table may contain rows from multiple tasks).
+> - `task_name` (`LineageContext.task_name`) is the **semantic capability/benchmark label** used for per-task telemetry slicing, reward routing, and batch provenance.
 
 ## 2. Cross-Boundary Data Flow & Engine-Driven Injection
 
@@ -130,12 +143,14 @@ All RPC interactions use typed `Request` envelopes carrying
 ### Stage 1: Auto-Stamping on Dispatch
 **Component:** `DistributedRLEngine.dispatch_rollouts`
 
-The program passes raw prompt dictionaries or objects. The Engine automatically
-extracts `prompt_id`, expands groups, instantiates `LineageContext`, and
-attaches it to `RolloutRequest.metadata["lineage"]`.
+Prompt dictionaries stamped at dataset load (`record["task_name"]` with fallback
+to `hp.config["task_name"]`) or recipe prompt construction carry an optional
+`"task_name"` string key. The Engine automatically extracts `prompt_id` and
+`task_name`, expands groups, instantiates `LineageContext`, and attaches it to
+`RolloutRequest.metadata["lineage"]`.
 
 ```python
-# Inside DistributedRLEngine.dispatch_rollout_requests
+# Inside DistributedRLEngine._build_rollout_requests / dispatch_rollout_requests
 for req in requests:
     prompt_id = str(req.prompt_id)
     traj_id = req.traj_id  # Formatted as f"traj_{prompt_id}_g{req.group_index}"
@@ -144,7 +159,8 @@ for req in requests:
     if lineage is None:
         lineage = LineageContext(
             tracking_id=traj_id,
-            parent_tracking_ids=[prompt_id]
+            parent_tracking_ids=[prompt_id],
+            task_name=resolved_task_name,  # From prompt Mapping["task_name"] or explicit task_name arg
         )
         lineage.add_event(
             component="engine.dispatch",
@@ -417,7 +433,7 @@ logging.
 
    | Entity Type | `tracking_id` (Key) | `parent_tracking_ids` (Pointers) | Attributes & Metrics |
    | :--- | :--- | :--- | :--- |
-   | **Prompt** | `prompt_42` | `[]` | `{"text": "Solve 2+2", "task": "gsm8k"}` |
+   | **Prompt** | `prompt_42` | `[]` | `{"text": "Solve 2+2", "task_name": "gsm8k"}` |
    | **Trajectory** | `traj_prompt_42_g0` | `["prompt_42"]` | `{"reward": 1.0, "latency_ms": 42}` |
    | **Microbatch** | `batch_0` | `["traj_prompt_42_g0", ...]` | `{"bin_size": 16, "packed_len": 8192}` |
    | **Policy Version** | `policy_v2` | `["batch_0", ...]` | `{"global_step": 1, "loss": 0.342}` |

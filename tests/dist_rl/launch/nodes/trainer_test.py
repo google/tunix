@@ -16,12 +16,14 @@
 
 import contextlib
 import importlib
+import os
 from unittest import mock
 
 from absl.testing import absltest
 from jax.sharding import Mesh
 from orbax.checkpoint import v1 as ocp_v1
 from tunix.cli import config as cli_config
+from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.launch.common import resolve_config
 from tunix.dist_rl.launch.nodes import node_utils
 from tunix.dist_rl.launch.nodes import trainer
@@ -31,7 +33,17 @@ from tunix.sft import checkpoint_options
 from tunix.utils import maxtext_utils
 
 _OPT = "rl_training_config.actor_optimizer_config"
-_MAXTEXT_ARGV = ("actor_model_config.kwargs.maxtext_model_name=qwen3-0.6b",)
+_MAXTEXT_ARGV = (
+    "actor_model_config.model_source=maxtext",
+    "actor_model_config.model_path=/ckpt/qwen3-0.6b/0/items",
+    "actor_model_config.kwargs.maxtext_model_name=qwen3-0.6b",
+)
+# The variables `node_utils.apply_library_env` sets.
+_LIBRARY_ENV_VARS = (
+    "VERIFY_WEIGHTS",
+    "TPU_RAIDEN_DATA_NICS",
+    "SKIP_JAX_PRECOMPILE",
+)
 
 
 def _hp(*argv: str) -> resolve_config.DistHyperParameters:
@@ -43,6 +55,10 @@ class TrainerMainTest(absltest.TestCase):
 
   def setUp(self):
     super().setUp()
+    # `main` sets the library variables: start without them, and restore the
+    # test's environment afterwards.
+    env = {k: v for k, v in os.environ.items() if k not in _LIBRARY_ENV_VARS}
+    self.enter_context(mock.patch.dict(os.environ, env, clear=True))
     self.mock_context = mock.MagicMock()
     self.mock_worker_service = mock.MagicMock(spec=trainer_worker.TrainerWorker)
     self.mock_mesh = mock.MagicMock(spec=Mesh)
@@ -65,10 +81,21 @@ class TrainerMainTest(absltest.TestCase):
             node_utils, "serve_worker", new_callable=mock.AsyncMock
         )
     )
+    self.mock_setup_metrics = self.enter_context(
+        mock.patch.object(otel_setup, "setup_metrics", return_value=False)
+    )
 
-  def test_main_builds_worker_and_serves_with_drain(self):
-    trainer.main(
-        ["cluster_config.ports.trainer=20050"], context=self.mock_context
+  def test_main_builds_worker_and_serves_with_close(self):
+    argv = ["cluster_config.ports.trainer=20050", "cluster_config.run_id=run_1"]
+    trainer.main(argv, context=self.mock_context)
+
+    self.mock_setup_metrics.assert_called_once_with(
+        default_service_name="tunix-trainer",
+        resource_attributes={
+            "tunix.worker_id": trainer.LOCAL_WORKER_ID,
+            "tunix.role": "trainer",
+            "tunix.run_id": "run_1",
+        },
     )
 
     self.mock_context.jax.initialize.assert_called_once()
@@ -86,14 +113,21 @@ class TrainerMainTest(absltest.TestCase):
     self.assertEqual(serve_kwargs["role"], "trainer")
     self.assertEqual(serve_kwargs["worker_id_str"], trainer.LOCAL_WORKER_ID)
     self.assertEqual(serve_kwargs["port"], 20050)
-    # The drain callback stops the worker and discards its `Response`.
-    self.assertIsNone(serve_kwargs["drain_fn"]())
+    # The worker registers with the fingerprint of the config it resolved.
+    self.assertEqual(
+        serve_kwargs["config_sha256"],
+        resolve_config.config_fingerprint(_hp(*argv)),
+    )
+    # The worker is stopped after the gRPC server, not drained before it.
+    self.assertNotIn("drain_fn", serve_kwargs)
+    self.assertIsNone(serve_kwargs["close_fn"]())
     self.mock_worker_service.stop.assert_called_once_with()
 
   def test_k8s_target_registers_with_k8s_trainer_id(self):
     trainer.main(
         [
             "cluster_config.target=k8s",
+            "agentic_grpo_config.beta=0.0",
             "cluster_config.k8s.trainer_id=trainer-1",
         ],
         context=self.mock_context,
@@ -104,6 +138,67 @@ class TrainerMainTest(absltest.TestCase):
     self.assertEqual(
         self.mock_serve_worker.call_args.kwargs["worker_id_str"], "trainer-1"
     )
+
+  def test_external_target_reads_worker_port_and_fails_fast_before_jax_init(
+      self,
+  ):
+    argv = [
+        "cluster_config.target=external",
+        "cluster_config.artifact_root=/artifacts/run_1",
+    ]
+    with mock.patch.dict(
+        os.environ, {"DIST_RL_WORKER_PORT": "41234"}, clear=True
+    ):
+      trainer.main(argv, context=self.mock_context)
+    self.assertEqual(
+        self.mock_serve_worker.call_args.kwargs["worker_id_str"], "trainer-0"
+    )
+    self.assertEqual(self.mock_serve_worker.call_args.kwargs["port"], 41234)
+
+    self.mock_context.jax.initialize.reset_mock()
+    with mock.patch.dict(os.environ, {}, clear=True):
+      with self.assertRaisesRegex(
+          ValueError, "DIST_RL_WORKER_PORT must be set"
+      ):
+        trainer.main(argv, context=self.mock_context)
+    self.mock_context.jax.initialize.assert_not_called()
+
+  def test_main_sets_library_env_before_logging_the_resolved_config(self):
+    logged_env: dict[str, str] = {}
+
+    def _log_resolved_config(
+        hp: resolve_config.DistHyperParameters, role: str
+    ) -> str:
+      del hp, role
+      logged_env.update(
+          (name, os.environ[name])
+          for name in _LIBRARY_ENV_VARS
+          if name in os.environ
+      )
+      return "config-sha"
+
+    with mock.patch.object(
+        node_utils, "log_resolved_config", side_effect=_log_resolved_config
+    ):
+      trainer.main(
+          [
+              "weight_sync_config.verify_weights=true",
+              "weight_sync_config.raiden_data_nics=eth0,eth1",
+          ],
+          context=self.mock_context,
+      )
+    self.assertEqual(
+        logged_env,
+        {"VERIFY_WEIGHTS": "true", "TPU_RAIDEN_DATA_NICS": "eth0,eth1"},
+    )
+
+  def test_main_rejects_another_library_value_before_jax_init(self):
+    os.environ["VERIFY_WEIGHTS"] = "true"
+    with self.assertRaisesRegex(
+        ValueError, "set weight_sync_config.verify_weights instead"
+    ):
+      trainer.main([], context=self.mock_context)
+    self.mock_context.jax.initialize.assert_not_called()
 
   def test_main_raises_without_discovery_context(self):
     with self.assertRaisesRegex(RuntimeError, "Require discovery API"):
@@ -239,10 +334,7 @@ class TrainerFactoryTest(absltest.TestCase):
     mock_create_maxtext.assert_not_called()
 
     mock_create_tunix.reset_mock()
-    hp_maxtext = _hp(
-        "actor_model_config.model_source=maxtext",
-        "actor_model_config.model_path=/ckpt/items",
-    )
+    hp_maxtext = _hp(*_MAXTEXT_ARGV)
     trainer._create_trainer_factory(hp_maxtext, "trainer-0")
     mock_create_maxtext.assert_called_once_with(hp_maxtext, "trainer-0")
     mock_create_tunix.assert_not_called()
@@ -323,6 +415,11 @@ class TrainerFactoryTest(absltest.TestCase):
     ):
       self.fail(f"Unexpected preservation_policy {preservation_policy!r}.")
     self.assertEqual(preservation_policy.n, 3)
+    # No D2H cap for the Tunix trainer yet: the resolver rejects a
+    # `dist_training_config.ckpt_d2h_concurrent_gb` for it.
+    if not isinstance(ckpt, checkpoint_options.TunixCheckpointingOptions):
+      self.fail(f"Unexpected checkpointing_options {ckpt!r}.")
+    self.assertIsNone(ckpt.device_host_concurrent_gb)
 
   def test_tunix_trainer_factory_ignores_max_seq_token_per_tpu(self):
     # The field is for MaxText's max_target_length. Under the orchestrator the
@@ -359,6 +456,13 @@ class TrainerFactoryTest(absltest.TestCase):
       factory()
     training_config = mock_peft_trainer.call_args.args[2]
     self.assertIsNone(training_config.checkpoint_root_directory)
+
+  def test_tunix_training_config_accepts_null_metrics_logging_options(self):
+    training_config = trainer._tunix_training_config(
+        _hp("rl_training_config.metrics_logging_options=null"),
+        gradient_accumulation_steps=1,
+    )
+    self.assertIsNone(training_config.metrics_logging_options)
 
   def test_checkpoint_root_directory_kept_when_saving_enabled(self):
     hp = _hp(
@@ -489,17 +593,6 @@ class MaxTextTrainerFactoryTest(absltest.TestCase):
     )
     mock_build_cfg.assert_called_once()
     return mock_build_cfg.call_args.kwargs
-
-  def test_requires_maxtext_model_name(self, mock_build_cfg, *_):
-    for argv in (
-        (),
-        ("actor_model_config.kwargs.maxtext_model_name=null",),
-        ("actor_model_config.kwargs.maxtext_model_name=",),
-    ):
-      with self.subTest(argv=argv):
-        with self.assertRaisesRegex(ValueError, "kwargs.maxtext_model_name"):
-          trainer._create_maxtext_trainer_factory(_hp(*argv), "trainer-0")
-    mock_build_cfg.assert_not_called()
 
   def test_plumbs_core_config(self, mock_build_cfg, *_):
     kwargs = self._build_kwargs(
@@ -656,6 +749,25 @@ class MaxTextTrainerFactoryTest(absltest.TestCase):
     self.assertEqual(kwargs["checkpointing_options"].save_interval_steps, 5)
     self.assertEqual(kwargs["checkpointing_options"].max_to_keep, 3)
 
+  def test_plumbs_checkpoint_d2h_cap_and_extra_flags(self, mock_build_cfg, *_):
+    defaults = self._build_kwargs(mock_build_cfg)
+    # null keeps MaxText's own cap.
+    self.assertIsNone(defaults["device_host_concurrent_gb"])
+    self.assertEqual(defaults["extra_flags"], [])
+    mock_build_cfg.reset_mock()
+    kwargs = self._build_kwargs(
+        mock_build_cfg,
+        "dist_training_config.ckpt_d2h_concurrent_gb=16",
+        (
+            "dist_training_config.maxtext_extra_flags="
+            "remat_policy=full opt_type=sgd"
+        ),
+    )
+    self.assertEqual(kwargs["device_host_concurrent_gb"], 16)
+    self.assertEqual(
+        kwargs["extra_flags"], ["remat_policy=full", "opt_type=sgd"]
+    )
+
 
 class MaxTextOptionsTest(absltest.TestCase):
 
@@ -665,6 +777,25 @@ class MaxTextOptionsTest(absltest.TestCase):
     )
     self.assertTrue(opts.read_only)
     self.assertEqual(opts.save_interval_steps, 0)
+
+  def test_profiling_options_accepts_null_metrics_logging_options(self):
+    self.assertIsNone(
+        trainer._maxtext_profiling_options(
+            _hp(
+                *_MAXTEXT_ARGV,
+                "rl_training_config.metrics_logging_options=null",
+            )
+        )
+    )
+    opts = trainer._maxtext_profiling_options(
+        _hp(
+            *_MAXTEXT_ARGV,
+            "rl_training_config.metrics_logging_options=null",
+            "rl_training_config.profiler_options.profiler_steps=2",
+        )
+    )
+    self.assertIsInstance(opts, maxtext_utils.ProfilerOptions)
+    self.assertEqual(opts.profiler_steps, 2)
 
   def test_adamw_options_follow_optimizer_config(self):
     # Names are case-insensitive, as cli.config.create_optimizer reads them.
@@ -702,10 +833,13 @@ class MaxTextOptionsTest(absltest.TestCase):
 
   def test_adamw_options_reject_unmapped_settings(self):
     for argv, error in (
-        ([f"{_OPT}.opt_type=sgd"], "maps only adamw.*MAXTEXT_EXTRA_FLAGS"),
+        (
+            [f"{_OPT}.opt_type=sgd"],
+            "maps only adamw.*maxtext_extra_flags",
+        ),
         (
             [f"{_OPT}.opt_chain_type=clip"],
-            "maps only clip_by_global_norm.*MAXTEXT_EXTRA_FLAGS",
+            "maps only clip_by_global_norm.*maxtext_extra_flags",
         ),
         ([f"{_OPT}.chain_kwargs.max_norm=null"], "needs a max_norm"),
         ([f"{_OPT}.chain_kwargs.max_norm=0"], "must be positive"),

@@ -201,7 +201,7 @@ def init_global_fleet(
     max_warmpool_replicas: int | None = None,
     namespace: str | None = None,
     scaffold: str = "r2egym",
-    image_rewrite: Any | None = None,
+    image_rewrite: Callable[[str], str] | None = None,
     node_selector: dict[str, str] | None = None,
 ) -> Any:
   """Initialize the process-wide SandboxFleet instance once upfront."""
@@ -293,28 +293,27 @@ def init_global_fleet(
     if getattr(fleet_cfg, "install_teardown_hooks", False):
       fleet_inst._install_teardown_hooks()
     fleet_inst._torndown = False
-    if hasattr(fleet_inst, "preflight"):
-      fleet_inst.preflight()
     if hasattr(fleet_inst, "plan"):
       fleet_inst.plan()
-      entries = (
-          getattr(getattr(fleet_inst, "plan_", None), "entries", None) or []
-      )
-      images = [e.image for e in entries]
-      if images and hasattr(fleet_inst, "warm_images"):
-        target_replicas = fleet_kwargs["max_warmpool_size"]
-        fleet_inst.warm_images(
-            images, replicas_override=target_replicas, wait=False
-        )
-        logging.info(
-            "[SandboxFleet] Started initial warmpools for %d image(s) (%d"
-            " replicas each).",
-            len(images),
-            target_replicas,
-        )
     _GLOBAL_FLEET = fleet_inst
     atexit.register(teardown_global_fleet)
     return _GLOBAL_FLEET
+
+
+def warm_global_fleet() -> None:
+  """Warms all planned task images in the global SandboxFleet and waits until ready."""
+  fleet_inst = get_global_fleet()
+  entries = fleet_inst.plan_.entries
+  images = [e.image for e in entries]
+  if images:
+    target_replicas = fleet_inst.config.max_warmpool_size
+    fleet_inst.warm_images(images, replicas_override=target_replicas, wait=True)
+    logging.info(
+        "[SandboxFleet] Started initial warmpools for %d image(s) (%s"
+        " replicas each, wait=True).",
+        len(images),
+        target_replicas,
+    )
 
 
 def get_global_fleet() -> Any:

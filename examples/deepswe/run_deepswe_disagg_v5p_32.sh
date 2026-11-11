@@ -108,7 +108,7 @@ python -m tunix.cli.grpo_main \
   reward_functions=[] \
   verl_compatible=false \
   \
-  `# ── Rollout engine (vanilla | vllm | sglang_jax) ─────────────────────` \
+  `# ── Rollout engine (vanilla | vllm) ──────────────────────────────────` \
   rollout_engine="vllm" \
   offload_to_cpu=false \
   \
@@ -120,14 +120,6 @@ python -m tunix.cli.grpo_main \
   rollout_config.top_p=null \
   rollout_config.top_k=null \
   rollout_config.return_logprobs=true \
-  \
-  `# ── SGLang-JAX (used when rollout_engine=sglang_jax) ─────────────────` \
-  sglang_jax_config.mem_fraction_static=0.9 \
-  sglang_jax_config.init_with_random_weights=true \
-  sglang_jax_config.disable_radix_cache=false \
-  sglang_jax_config.enable_deterministic_sampling=false \
-  sglang_jax_config.chunked_prefill_size=2048 \
-  sglang_jax_config.page_size=128 \
   \
   `# ── vLLM (used when rollout_engine=vllm) ─────────────────────────────` \
   vllm_config.hbm_utilization=0.4 \

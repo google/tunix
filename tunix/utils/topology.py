@@ -39,11 +39,12 @@ Source references:
 """
 
 import ast
-import functools
 import math
 import os
 import re
 from typing import Any, Sequence
+
+import jax
 
 _MULTI_HOST_BOUNDS = (2, 2, 1)
 # Edge families expose a 2D chip torus; fish families expose a 3D torus. The two
@@ -51,7 +52,8 @@ _MULTI_HOST_BOUNDS = (2, 2, 1)
 # derive the full supported set from them.
 _EDGE_FAMILIES = frozenset({"v5e", "v6e"})
 _FISH_FAMILIES = frozenset({"v4", "v5p", "v7x"})
-_SUPPORTED_FAMILIES = _EDGE_FAMILIES | _FISH_FAMILIES
+_GPU_FAMILIES = frozenset({"b200", "h200", "h100", "a100", "l4"})
+_SUPPORTED_FAMILIES = _EDGE_FAMILIES | _FISH_FAMILIES | _GPU_FAMILIES
 # Supported fish-family (v4/v5p/v7x) sub-cube chip shapes below the first full
 # cube, keyed by chip count. Each volume is unique, so a chip count maps to
 # exactly one shape. At or above the first full cube (4x4x4), multiple axis
@@ -233,14 +235,17 @@ def _shape_fits_within(
   return all(dim <= limit for dim, limit in zip(shape, available_shape))
 
 
-@functools.cache
 def _is_pathways_backend_used() -> bool:
   """Returns whether the current process is attached to a Pathways backend.
 
   Returns:
     True if a Pathways backend is used, otherwise False.
   """
-  if "proxy" in os.environ.get("JAX_PLATFORMS", ""):
+  jax_platforms_env = os.environ.get("JAX_PLATFORMS", "").lower()
+  if "proxy" in jax_platforms_env or "pathways" in jax_platforms_env:
+    return True
+  jax_platforms_cfg = (jax.config.jax_platforms or "").lower()
+  if "proxy" in jax_platforms_cfg or "pathways" in jax_platforms_cfg:
     return True
   try:
     import pathwaysutils  # pylint: disable=g-import-not-at-top  # pyrefly: ignore[missing-import]
@@ -305,12 +310,13 @@ def _normalize_device_kind(device_kind: str) -> str | None:
   """Maps a raw JAX ``device_kind`` string to a normalized family key.
 
   Args:
-    device_kind: The runtime device kind, e.g. ``"TPU v5 lite"`` or ``"TPU
-      v7"``.
+    device_kind: The runtime device kind, e.g. ``"TPU v5 lite"``, ``"TPU v7"``,
+      or ``"NVIDIA H100 80GB HBM3"``.
 
   Returns:
-    The normalized family key (``"v4"``, ``"v5e"``, ``"v5p"``, ``"v6e"``, or
-    ``"v7x"``), or None when the kind does not name a supported TPU family.
+    The normalized TPU (``"v4"``, ``"v5e"``, ``"v5p"``, ``"v6e"``, ``"v7x"``)
+    or GPU (``"b200"``, ``"h200"``, ``"h100"``, ``"a100"``, ``"l4"``) family
+    key, or None when the kind does not name a supported accelerator family.
   """
   device_kind = device_kind.lower()
   if "v7" in device_kind:
@@ -323,7 +329,24 @@ def _normalize_device_kind(device_kind: str) -> str | None:
     return "v5p"
   if "v4" in device_kind:
     return "v4"
+  if "gb200" in device_kind or "b200" in device_kind:
+    return "b200"
+  if "h200" in device_kind:
+    return "h200"
+  if "h100" in device_kind:
+    return "h100"
+  if "a100" in device_kind:
+    return "a100"
+  if "l4" in device_kind:
+    return "l4"
   return None
+
+
+def is_gpu_family(device_kind_or_family: str | None) -> bool:
+  """Returns whether a raw device kind or family key names a supported GPU family."""
+  if device_kind_or_family is None:
+    return False
+  return _resolve_family(device_kind_or_family) in _GPU_FAMILIES
 
 
 def _resolve_family(device_kind_or_family: str) -> str | None:
@@ -564,6 +587,9 @@ def supported_topology_shapes_for_chip_count(
       return [shape[:2] for shape in supported_shapes]
     if chip_rank == 3:
       return supported_shapes  # pyrefly: ignore[bad-return]
+    return []
+
+  if family not in _FISH_FAMILIES:
     return []
 
   if chip_rank != 3:

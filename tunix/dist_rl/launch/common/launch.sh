@@ -18,18 +18,23 @@
 # Resolves YAML + CLI key=value configuration via `resolve_config.py` and
 # dispatches to `local.sh` (when `cluster_config.target=local`) or `k8s.sh`
 # (when `cluster_config.target=k8s`). This is the only script that parses
-# command-line arguments.
+# command-line arguments. Another launcher (e.g. a job scheduler that starts
+# each process separately) starts the processes of
+# `cluster_config.target=external` runs, so this script rejects that target.
 #
 # Usage:
-#   bash launch.sh [start|stop|orchestrator|trainer|rollout] [--dry-run] \
+#   bash launch.sh [start|stop|orchestrator|trainer|rollout|otel|stop-otel] \
+#     [--dry-run] \
 #     [override_config_file=<config.yaml> ...] [section.key=value ...]
 
 set -Eeuo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/legacy_env.sh"
 
 usage() {
-  echo "Usage: $0 [start|stop|orchestrator|trainer|rollout] [--dry-run]" \
+  echo "Usage: $0 [start|stop|orchestrator|trainer|rollout|otel|stop-otel]" \
+    "[--dry-run]" \
     "[override_config_file=<config.yaml> ...] [section.key=value ...]"
 }
 
@@ -38,7 +43,7 @@ CONFIG_ARGS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    start|stop|orchestrator|trainer|rollout)
+    start|stop|orchestrator|trainer|rollout|otel|stop-otel)
       COMMAND="$1"
       shift
       ;;
@@ -65,6 +70,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+fail_on_legacy_launcher_env
+fail_on_maxtext_env_overrides
 resolve_config_or_die "${CONFIG_ARGS[@]}"
 
 case "${CLUSTER_TARGET}" in
@@ -77,6 +84,10 @@ case "${CLUSTER_TARGET}" in
     ;;
   k8s)
     exec "${LAUNCH_DIR}/k8s.sh" "${COMMAND}" "${CONFIG_ARGS[@]}"
+    ;;
+  external)
+    echo "Error: cluster_config.target=external runs are started by another launcher (e.g. a job scheduler that starts each process separately), not by launch.sh; use cluster_config.target=local or k8s here." >&2
+    exit 1
     ;;
   *)
     echo "Error: Unsupported CLUSTER_TARGET='${CLUSTER_TARGET}' (expected 'local' or 'k8s')." >&2

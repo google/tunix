@@ -37,7 +37,6 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from tunix.generate import utils as generate_utils
 from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import algo_core  # pylint: disable=unused-import
 from tunix.rl import common
@@ -79,6 +78,8 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
       when it would normally be skipped (e.g., when beta is 0.0).
     epsilon: PPO-style clipping epsilon.
     epsilon_high: PPO-style clipping epsilon upper bound.
+    epsilon_c: Dual-clip lower bound applied when advantages are negative.
+      `None` (default) disables dual clipping.
     loss_algo: "grpo" or "gspo-token".
     system_prompt: System prompt for the agent.
     max_concurrency: Maximum number of concurrent rollout engines.
@@ -110,6 +111,7 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
   system_prompt: str = ""
   max_concurrency: int = 16
   epsilon_high: float | None = None  # 0.28 from DAPO.
+  epsilon_c: float | None = None
   off_policy_steps: int = 0
   # Deprecated. Will remove in the next release.
   degenerate_group_masking: bool = (
@@ -261,10 +263,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         "log_ratio/abs_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
         "pg_loss/unclipped_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
         "pg_loss/clipped_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
-        "advantage/abs_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
-        "advantage/max": np.max,
-        "advantage/min": np.min,
-        "advantage/nonzero_frac": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
         "sampler_is/weight_mean": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
         "sampler_is/weight_min": np.min,
         "sampler_is/weight_max": np.max,
@@ -517,10 +515,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       old_logprobs_list.append(
           np.asarray(old_logprobs) if old_logprobs is not None else None
       )
-      policy_version = item.traj.get("policy_version")
-      if policy_version is None:
-        raise ValueError("policy_version is missing from trajectory task.")
-      policy_versions_list.append(policy_version)
+      policy_versions = item.traj.get("policy_versions")
+      if not policy_versions:
+        raise ValueError("policy_versions is missing from trajectory task.")
+      policy_versions_list.append(policy_versions[-1])
       trajectory_rewards_list.append(item.traj.get("trajectory_reward"))
 
     # Log trajectory.
@@ -560,12 +558,12 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           if prompt_len_raw is not None
           else len(prompt_tokens)
       )
-      if self.algo_config.exact_token_continuity and (
+      if (
           prompt_len > rollout_config.max_prompt_length
           or len(completion_tokens) > max_response_length
       ):
         raise ValueError(
-            "Exact trajectory exceeds training padding budget:"
+            "Trajectory exceeds training padding budget:"
             f" prompt={prompt_len}/{rollout_config.max_prompt_length},"
             f" completion={len(completion_tokens)}/{max_response_length}"
         )
@@ -616,19 +614,15 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           )
 
     prompt_ids = jnp.asarray(padded_prompt_ids)
-    prompt_mask = prompt_ids != pad_value
     completion_ids = jnp.asarray(padded_completion_ids)
     completion_mask = jnp.asarray(padded_completion_masks)
-    completion_attention_mask = None
-    token_mask = None
-    if self.algo_config.exact_token_continuity:
-      # Validity by length: environment/template tokens are context, and a
-      # real token equal to the pad id stays valid.
-      prompt_mask = jnp.asarray(padded_prompt_masks)
-      completion_attention_mask = jnp.asarray(padded_completion_attention_masks)
-      token_mask = jnp.concatenate(
-          [prompt_mask, completion_attention_mask], axis=1
-      )
+    # Validity by length: environment/template tokens are context, and a real
+    # token equal to the pad id stays valid.
+    prompt_mask = jnp.asarray(padded_prompt_masks)
+    completion_attention_mask = jnp.asarray(padded_completion_attention_masks)
+    token_mask = jnp.concatenate(
+        [prompt_mask, completion_attention_mask], axis=1
+    )
     logging.debug(
         "Token shapes: prompt_ids=%s, completion_ids=%s",
         prompt_ids.shape,

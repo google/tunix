@@ -22,6 +22,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
 import jax
+import omegaconf
 import optax
 from tunix.cli import config
 from tunix.sft import peft_trainer
@@ -151,6 +152,38 @@ class ConfigTest(parameterized.TestCase):
       dict(
           testcase_name="gcs_ckpt_source",
           overrides=["model_name=gemma-3-1b-pt", "model_source=gcs"],
+      ),
+      dict(
+          testcase_name="gemma2_gcs_ckpt_source",
+          overrides=["model_name=gemma-2-2b-it", "model_source=gcs"],
+      ),
+      dict(
+          testcase_name="gemma_gcs_ckpt_source",
+          overrides=["model_name=gemma-2b", "model_source=gcs"],
+      ),
+      dict(
+          testcase_name="gemma1p1_gcs_ckpt_source",
+          overrides=["model_name=gemma-1.1-2b-it", "model_source=gcs"],
+      ),
+      dict(
+          testcase_name="gemma1p1_kaggle_with_ckpt",
+          overrides=[
+              "model_name=gemma-1.1-2b-it",
+              "model_source=kaggle",
+              "intermediate_ckpt_dir=/path/to/ckpt",
+          ],
+      ),
+      dict(
+          testcase_name="gemma4_gcs_ckpt_source",
+          overrides=["model_name=gemma-4-e2b", "model_source=gcs"],
+      ),
+      dict(
+          testcase_name="custom_hf_model_name",
+          overrides=[
+              "model_name=custom-finetune-7b",
+              "model_source=huggingface",
+              "intermediate_ckpt_dir=/path/to/ckpt",
+          ],
       ),
       dict(
           testcase_name="maxtext_source",
@@ -840,6 +873,83 @@ class ConfigTest(parameterized.TestCase):
     got = list(config._dict_to_cli_args(d))
     self.assertEqual(expected, got)
 
+  def test_dict_to_cli_args_quotes_strings(self):
+    d = {"a": "", "b": "0", "c": {"d": "true", "e": 1}, "f": {}}
+    expected = ['a=""', 'b="0"', 'c.d="true"', "c.e=1", "f={}"]
+    got = list(config._dict_to_cli_args(d))
+    self.assertEqual(expected, got)
+
+  @parameterized.named_parameters(
+      dict(testcase_name="empty_string", value="", expected='k=""'),
+      dict(testcase_name="number_string", value="0", expected='k="0"'),
+      dict(testcase_name="none", value=None, expected="k=null"),
+      dict(testcase_name="int", value=1, expected="k=1"),
+      dict(testcase_name="bool", value=True, expected="k=True"),
+      dict(testcase_name="list", value=["a", 1], expected="k=['a', 1]"),
+      dict(testcase_name="empty_mapping", value={}, expected="k={}"),
+  )
+  def test_format_cli_arg(self, value: object, expected: str):
+    self.assertEqual(expected, config.format_cli_arg("k", value))
+
+  @parameterized.parameters(
+      "",
+      "0",
+      "1e-5",
+      "true",
+      "on",
+      "null",
+      "~",
+      "x: y",
+      "[1, 2]",
+      "- x",
+      "# x",
+      "a # b",
+      "*x",
+      "!x",
+      " padded ",
+      'say "hi"',
+      "C:\\path",
+      "line\nbreak",
+      "caf\u00e9",
+      "\U0001f600",
+      "\x7f\x85\u2028",
+  )
+  def test_format_cli_arg_strings_round_trip_through_from_cli(self, value: str):
+    arg = config.format_cli_arg("section.key", value)
+    parsed = omegaconf.OmegaConf.to_container(
+        omegaconf.OmegaConf.from_cli([arg])
+    )
+    self.assertEqual({"section": {"key": value}}, parsed)
+
+  def test_format_cli_arg_keeps_long_strings_on_one_line(self):
+    value = " ".join(["word"] * 50)
+    self.assertEqual(f'k="{value}"', config.format_cli_arg("k", value))
+
+  @parameterized.named_parameters(
+      dict(testcase_name="default", with_flags=False),
+      dict(testcase_name="with_flags", with_flags=True),
+  )
+  def test_override_file_keeps_string_values(self, with_flags: bool):
+    ov = self.create_tempdir().create_file(
+        "ov.yaml",
+        content=(
+            'tokenizer_config:\n  tokenizer_path: "123"\n'
+            'vllm_config:\n  a: "0"\n  b: "true"\n  c: ""\n  d: 1\n'
+        ),
+    )
+    overrides = [f"override_config_file={ov.full_path}"]
+    if with_flags:
+      hp = self._initialize_with_flags(overrides)
+    else:
+      hp = self.initialize_config(overrides)
+    self.assertEqual(
+        hp.config_mapping("tokenizer_config")["tokenizer_path"], "123"
+    )
+    self.assertEqual(
+        hp.config_mapping("vllm_config"),
+        {"a": "0", "b": "true", "c": "", "d": 1},
+    )
+
   def test_obtain_training_config_dict_checkpointing(self):
     hp = self.initialize_config([])
 
@@ -895,53 +1005,10 @@ class ConfigTest(parameterized.TestCase):
   ) -> config.HyperParameters:
     """Initializes from the default base YAML with the opt-in flags."""
     return config.initialize(
-        ["resolve_config", *overrides],
-        default_base_config=_BASE_YAML,
+        ["prog", str(_BASE_YAML), *overrides],
         merge_replace_keys=merge_replace_keys,
         validate_nested=validate_nested,
     )
-
-  def test_default_base_config_and_normalize_argv(self):
-    hp = config.initialize(
-        [
-            "resolve_config",
-            "model_config.model_name=qwen2.5-0.5b",
-            "model_config.model_source=maxtext",
-        ],
-        default_base_config=_BASE_YAML,
-    )
-    self.assertEqual(
-        hp.config_mapping("model_config")["model_name"], "qwen2.5-0.5b"
-    )
-    self.assertEqual(
-        hp.config_mapping("actor_model_config")["model_name"], "qwen2.5-0.5b"
-    )
-
-  @parameterized.named_parameters(
-      dict(testcase_name="flags_off", flags_on=False),
-      dict(testcase_name="flags_on", flags_on=True),
-  )
-  def test_default_base_config_matches_explicit_base(self, flags_on: bool):
-    ov = self.create_tempdir().create_file(
-        "ov.yaml", content="rollout_config:\n  temperature: 0.5\n"
-    )
-    overrides = [
-        f"override_config_file={ov.full_path}",
-        "model_config.model_name=qwen2.5-0.5b",
-        "model_config.model_source=maxtext",
-    ]
-    explicit = config.initialize(
-        ["resolve_config", str(_BASE_YAML), *overrides],
-        merge_replace_keys=flags_on,
-        validate_nested=flags_on,
-    )
-    default = config.initialize(
-        ["resolve_config", *overrides],
-        default_base_config=_BASE_YAML,
-        merge_replace_keys=flags_on,
-        validate_nested=flags_on,
-    )
-    self.assertEqual(explicit.config, default.config)
 
   def test_merge_replace_keys_and_multiple_override_files(self):
     tmp_dir = self.create_tempdir()
@@ -1335,6 +1402,52 @@ class ConfigTest(parameterized.TestCase):
           ["override_config_file=a.yaml", "override_config_file=b.yaml"]
       )
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="gemma_2b_rejects_hf",
+          model_name="gemma-2b",
+          model_source="huggingface",
+      ),
+      dict(
+          testcase_name="gemma1p1_rejects_hf",
+          model_name="gemma-1.1-2b-it",
+          model_source="huggingface",
+      ),
+      dict(
+          testcase_name="gemma2_config_id_rejects_hf",
+          model_name="gemma2_2b_it",
+          model_source="huggingface",
+      ),
+      dict(
+          testcase_name="gemma3_rejects_kaggle",
+          model_name="gemma-3-1b-it",
+          model_source="kaggle",
+      ),
+      dict(
+          testcase_name="gemma4_rejects_maxtext",
+          model_name="gemma-4-e2b",
+          model_source="maxtext",
+      ),
+      dict(
+          testcase_name="custom_model_rejects_gcs",
+          model_name="custom-finetune-7b",
+          model_source="gcs",
+      ),
+  )
+  def test_check_supported_workflow_rejects_unsupported_source(
+      self, model_name, model_source
+  ):
+    overrides = [
+        f"model_config.model_name={model_name}",
+        f"model_config.model_source={model_source}",
+        "model_config.intermediate_ckpt_dir=/tmp/ckpt",
+    ]
+    with self.assertRaisesRegex(
+        ValueError,
+        f"Model '{model_name}' must use source\\(s\\).*got '{model_source}'",
+    ):
+      self.initialize_config(overrides)
+
   def test_empty_override_config_file_path_raises(self):
     with self.assertRaisesRegex(
         ValueError, "Empty path in override_config_file"
@@ -1343,6 +1456,4 @@ class ConfigTest(parameterized.TestCase):
 
 
 if __name__ == "__main__":
-  if "HF_TOKEN" not in os.environ:
-    os.environ["HF_TOKEN"] = "TestToken"
   absltest.main()

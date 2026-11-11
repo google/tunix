@@ -40,7 +40,10 @@ from absl.testing import absltest
 import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.orchestrator import batch_assembly
+from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.rl import packing
+from tunix.rl.agentic.agents import agent_types
+from tunix.rl.agentic.trajectory import trajectory_collect_engine
 
 _FULL_SCALE = flags.DEFINE_bool(
     "batch_assembly_full_scale",
@@ -415,6 +418,268 @@ class BatchAssemblyPerfTest(absltest.TestCase):
       )
       self.assertGreater(res.million_tokens_per_sec, 0.0)
 
+  def _run_encode_decode_backend(
+      self,
+      workload: str,
+      raw: np.ndarray,
+      *,
+      mode: str,
+      num_experts: int,
+      backend: str,
+      use_cpp: bool,
+  ) -> PackingPerfResult:
+    """Runs warmup + timed iterations for `encode_routed_experts` + `decode_routed_experts`."""
+    num_iters = max(1, _num_iterations())
+    num_tokens = int(raw.shape[0])
+    ext_val = packing._packing_ext if use_cpp else None  # pylint: disable=protected-access
+
+    def _one_roundtrip() -> int:
+      enc = packing.encode_routed_experts(
+          raw, mode=mode, num_experts=num_experts, batched=False
+      )
+      dec = packing.decode_routed_experts(enc, batched=False)
+      return int(dec.shape[0])
+
+    with mock.patch.object(packing, "_packing_ext", ext_val):
+      self.assertEqual(_one_roundtrip(), num_tokens)
+
+      async def _measure() -> tuple[list[float], LoopLagMetrics]:
+        monitor = EventLoopLagMonitor(interval_s=0.001)
+        monitor.start()
+        iter_ms: list[float] = []
+        for _ in range(num_iters):
+          t0 = time.perf_counter()
+          count = await asyncio.to_thread(_one_roundtrip)
+          iter_ms.append((time.perf_counter() - t0) * 1000.0)
+          self.assertEqual(count, num_tokens)
+        lag = await monitor.stop()
+        return iter_ms, lag
+
+      iter_ms, lag = asyncio.run(_measure())
+
+    arr = np.asarray(iter_ms, dtype=np.float64)
+    mean_ms = float(np.mean(arr))
+    p50_ms = float(np.percentile(arr, 50))
+    min_ms = float(np.min(arr))
+    mean_s = mean_ms / 1000.0
+    res = PackingPerfResult(
+        workload=workload,
+        backend=backend,
+        num_trajectories=1,
+        total_tokens=num_tokens,
+        num_batches=1,
+        mean_wall_ms=mean_ms,
+        p50_wall_ms=p50_ms,
+        min_wall_ms=min_ms,
+        trajectories_per_sec=1.0 / mean_s,
+        million_tokens_per_sec=(num_tokens / 1e6) / mean_s,
+        loop_lag=lag,
+    )
+    self.__class__._results.append(res)
+    return res
+
+  def test_w0b_routed_experts_encode_decode_isolated(self) -> None:
+    """Benchmarks isolated `encode_routed_experts` + `decode_routed_experts` across tiers."""
+    num_tokens = 4096 if _full_scale() else 2048
+    num_layers = 32 if _full_scale() else 16
+    rng = np.random.default_rng(42)
+
+    for label, top_k, num_experts, mode in (
+        (f"W0b_EncodeDecode_Uint8_L{num_layers}_K8", 8, 128, "uint8"),
+        (f"W0b_EncodeDecode_Uint10_Div4_L{num_layers}_K8", 8, 512, "uint10"),
+        (f"W0b_EncodeDecode_Uint10_Tail_L{num_layers}_K10", 10, 512, "uint10"),
+    ):
+      raw = rng.integers(
+          -1, num_experts, size=(num_tokens, num_layers, top_k), dtype=np.int16
+      )
+      raw[0, 0, 0] = num_experts - 1
+      for backend, use_cpp in (("Python", False), ("C++ nogil", True)):
+        res = self._run_encode_decode_backend(
+            label,
+            raw,
+            mode=mode,
+            num_experts=num_experts,
+            backend=backend,
+            use_cpp=use_cpp,
+        )
+        self.assertGreater(res.million_tokens_per_sec, 0.0)
+
+  def _run_multiturn_early_vs_late(
+      self,
+      label: str,
+      turns_per_ep: list[list[np.ndarray]],
+      *,
+      num_experts: int | None,
+      store_step_json: bool,
+  ) -> None:
+    """Benchmarks episode-end packing against per-turn packing across episodes.
+
+    Args:
+      label: Workload row label for the benchmark report table.
+      turns_per_ep: Per-episode list of per-turn raw `int16` router arrays.
+      num_experts: Optional MoE expert count passed to `encode_routed_experts`.
+      store_step_json: If True, includes per-turn `TunixAgentStep` ATIF JSON
+        serialization via `asyncio.to_thread`.
+    """
+    num_episodes = len(turns_per_ep)
+    num_turns = len(turns_per_ep[0])
+    tokens_per_turn = int(turns_per_ep[0][0].shape[0])
+    total_tokens = num_episodes * num_turns * tokens_per_turn
+    num_iters = max(1, _num_iterations())
+
+    def _dump_step_json(t_idx: int, prefill_arr: np.ndarray) -> int:
+      step = trajectory_lib.TunixAgentStep(
+          step_id=t_idx,
+          source=trajectory_lib.Source.AGENT,
+          message="ok",
+          prefill_routed_experts=prefill_arr,
+          prefill_start=t_idx * tokens_per_turn,
+          prefill_num_context=16,
+      )
+      return len(step.to_atif_step().model_dump_json())
+
+    async def _run_late_episode(ep_turns: list[np.ndarray]) -> np.ndarray:
+      raw_slices: list[np.ndarray] = []
+      for t_idx, raw_t in enumerate(ep_turns):
+        arr_i16 = np.asarray(raw_t, dtype=np.int16)
+        if store_step_json:
+          await asyncio.to_thread(_dump_step_json, t_idx, arr_i16)
+        raw_slices.append(arr_i16)
+      full_raw = np.concatenate(raw_slices, axis=0)
+      return await asyncio.to_thread(
+          packing.encode_routed_experts,
+          full_raw,
+          mode="auto",
+          num_experts=num_experts,
+          batched=False,
+      )
+
+    async def _run_early_episode(ep_turns: list[np.ndarray]) -> np.ndarray:
+      ep_enc = None
+      prompt_slice = None
+      steps: list[agent_types.Step] = []
+      for t_idx, raw_t in enumerate(ep_turns):
+        encoded_t, ep_enc, new_prompt, promoted = await asyncio.to_thread(
+            trajectory_collect_engine.encode_turn_routed_experts,
+            raw_t,
+            "auto",
+            num_experts,
+            ep_enc,
+            prompt_slice,
+            tuple(
+                (s.assistant_routed_experts, s.env_routed_experts)
+                for s in steps
+            ),
+        )
+        if promoted is not None:
+          prompt_slice = new_prompt
+          for s, (a_r, e_r) in zip(steps, promoted):
+            s.assistant_routed_experts = a_r
+            s.env_routed_experts = e_r
+        if store_step_json:
+          await asyncio.to_thread(_dump_step_json, t_idx, encoded_t)
+        if t_idx == 0:
+          prompt_slice = encoded_t[:16]
+          steps.append(
+              agent_types.Step(assistant_routed_experts=encoded_t[16:])
+          )
+        else:
+          steps.append(agent_types.Step(assistant_routed_experts=encoded_t))
+      if prompt_slice is None:
+        raise RuntimeError("prompt_slice must be populated on turn 0")
+      return np.concatenate(
+          [prompt_slice] + [s.assistant_routed_experts for s in steps],
+          axis=0,
+          casting="no",
+      )
+
+    warm_by_strategy: dict[str, list[np.ndarray]] = {}
+    for strategy_name, runner in (
+        ("LateEpisodeEnd (baseline)", _run_late_episode),
+        ("EarlyPerTurn (this CL)", _run_early_episode),
+    ):
+
+      async def _measure(
+          run_fn=runner,
+      ) -> tuple[list[np.ndarray], list[float], LoopLagMetrics]:
+        warm = await asyncio.gather(*(run_fn(ep) for ep in turns_per_ep))
+        self.assertLen(warm, num_episodes)
+        monitor = EventLoopLagMonitor(interval_s=0.001)
+        monitor.start()
+        iter_ms: list[float] = []
+        for _ in range(num_iters):
+          t0 = time.perf_counter()
+          outs = await asyncio.gather(*(run_fn(ep) for ep in turns_per_ep))
+          iter_ms.append((time.perf_counter() - t0) * 1000.0)
+          self.assertEqual(outs[0].shape[0], num_turns * tokens_per_turn)
+        lag = await monitor.stop()
+        return list(warm), iter_ms, lag
+
+      warm_outs, iter_ms, lag = asyncio.run(_measure())
+      warm_by_strategy[strategy_name] = warm_outs
+      arr_ms = np.asarray(iter_ms, dtype=np.float64)
+      mean_ms = float(np.mean(arr_ms))
+      mean_s = mean_ms / 1000.0
+      res = PackingPerfResult(
+          workload=label,
+          backend=strategy_name,
+          num_trajectories=num_episodes,
+          total_tokens=total_tokens,
+          num_batches=num_turns,
+          mean_wall_ms=mean_ms,
+          p50_wall_ms=float(np.percentile(arr_ms, 50)),
+          min_wall_ms=float(np.min(arr_ms)),
+          trajectories_per_sec=num_episodes / mean_s,
+          million_tokens_per_sec=(total_tokens / 1e6) / mean_s,
+          loop_lag=lag,
+      )
+      self.__class__._results.append(res)
+      self.assertGreater(res.million_tokens_per_sec, 0.0)
+
+    for ep_early, ep_late in zip(
+        warm_by_strategy["EarlyPerTurn (this CL)"],
+        warm_by_strategy["LateEpisodeEnd (baseline)"],
+        strict=True,
+    ):
+      np.testing.assert_array_equal(ep_early, ep_late)
+
+  def test_w0c_early_per_turn_vs_late_episode_end_packing(self) -> None:
+    """Benchmarks multi-turn early per-turn packing against episode-end packing."""
+    num_episodes = 8 if _full_scale() else 4
+    num_turns = 16 if _full_scale() else 8
+    tokens_per_turn = 1024 if _full_scale() else 256
+    num_layers = 32 if _full_scale() else 16
+    rng = np.random.default_rng(123)
+
+    for label, top_k, num_experts, promote_mid, store_json in (
+        (f"W0c_WithStore_Uint8_L{num_layers}_K8", 8, 128, False, True),
+        (f"W0c_WithStore_Uint10_L{num_layers}_K8", 8, 512, False, True),
+        (f"W0c_WithStore_Uint10_Tail_L{num_layers}_K10", 10, 512, False, True),
+        (f"W0c_WithStore_AutoPromo_L{num_layers}_K8", 8, None, True, True),
+        (f"W0c_NoStore_Uint10_L{num_layers}_K8", 8, 512, False, False),
+    ):
+      turns_per_ep: list[list[np.ndarray]] = []
+      for _ in range(num_episodes):
+        ep_turns: list[np.ndarray] = []
+        for t_idx in range(num_turns):
+          if promote_mid and t_idx < num_turns // 2:
+            hi = 128
+          else:
+            hi = num_experts if num_experts is not None else 512
+          arr = rng.integers(
+              0, hi, size=(tokens_per_turn, num_layers, top_k), dtype=np.int16
+          )
+          if hi >= 512:
+            arr[0, 0, 0] = 511
+          ep_turns.append(arr)
+        turns_per_ep.append(ep_turns)
+      self._run_multiturn_early_vs_late(
+          label,
+          turns_per_ep,
+          num_experts=num_experts,
+          store_step_json=store_json,
+      )
+
   def test_w1_sequence_packed_dense_rollouts(self) -> None:
     """Benchmarks FFD sequence packing on 512 dense variable-length rollouts."""
     num_items = 1024 if _full_scale() else 512
@@ -471,11 +736,11 @@ class BatchAssemblyPerfTest(absltest.TestCase):
     """Benchmarks sequence packing with MoE routed_experts (int16 vs uint8 vs uint10)."""
     num_items = 256 if _full_scale() else 128
     num_layers = 32 if _full_scale() else 16
-    top_k = 8
-    for mode_label, num_experts, compact in (
-        (f"W3a_MoE_Int16_L{num_layers}_K{top_k}", 128, False),
-        (f"W3b_MoE_Uint8_L{num_layers}_K{top_k}", 128, True),
-        (f"W3c_MoE_Uint10_L{num_layers}_K{top_k}", 512, True),
+    for mode_label, num_experts, compact, top_k in (
+        (f"W3a_MoE_Int16_L{num_layers}_K8", 128, False, 8),
+        (f"W3b_MoE_Uint8_L{num_layers}_K8", 128, True, 8),
+        (f"W3c_MoE_Uint10_L{num_layers}_K8", 512, True, 8),
+        (f"W3d_MoE_Uint10_Tail_L{num_layers}_K10", 512, True, 10),
     ):
       payloads, total_tokens = _build_rollout_payloads(
           num_items,

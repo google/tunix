@@ -526,12 +526,28 @@ MODEL_CATALOG = (
         model_config_category='qwen3',
     ),
     naming.ModelNaming(
+        model_id='Qwen/Qwen3.5-0.8B',
+        model_name='qwen3.5-0.8b',
+        model_family='qwen3p5',
+        model_version='0p8b',
+        model_config_id='qwen3p5_0p8b',
+        model_config_category='qwen3p5',
+    ),
+    naming.ModelNaming(
+        model_id='Qwen/Qwen3.5-2B',
+        model_name='qwen3.5-2b',
+        model_family='qwen3p5',
+        model_version='2b',
+        model_config_id='qwen3p5_2b',
+        model_config_category='qwen3p5',
+    ),
+    naming.ModelNaming(
         model_id='Qwen/Qwen3.5-35B-A3B',
         model_name='qwen3.5-35b-a3b',
         model_family='qwen3p5',
         model_version='35b_a3b',
         model_config_id='qwen3p5_35b_a3b',
-        model_config_category='qwen3',
+        model_config_category='qwen3p5',
     ),
     naming.ModelNaming(
         model_id='Qwen/Qwen3.5-397B-A17B',
@@ -539,6 +555,6 @@ MODEL_CATALOG = (
         model_family='qwen3p5',
         model_version='397b_a17b',
         model_config_id='qwen3p5_397b_a17b',
-        model_config_category='qwen3',
+        model_config_category='qwen3p5',
     ),
 )

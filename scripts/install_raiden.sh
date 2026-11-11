@@ -42,7 +42,14 @@ RAIDEN_WHEEL_SHA256=${RAIDEN_WHEEL_SHA256:-"c9e8113402848e264f3d2754dd0f2635f2a8
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 RAIDEN_WHEEL_DIR=${RAIDEN_WHEEL_DIR:-"${ROOT_DIR}/raiden_wheels"}
-PIP_INSTALL=(python3 -m pip install --force-reinstall --no-deps)
+PYTHON_BIN=$(command -v python3)
+# CI and Tunix Dockerfiles provide uv; fall back to pip for local environments without it.
+if command -v uv >/dev/null 2>&1; then
+  PIP=(uv pip install --python "${PYTHON_BIN}")
+else
+  PIP=("${PYTHON_BIN}" -m pip install)
+fi
+PIP_INSTALL=("${PIP[@]}" --force-reinstall --no-deps)
 
 # Raiden is imported at module scope by the trainer, the rollout, and the
 # orchestrator. If it is missing, weight sync silently no-ops and only surfaces
@@ -54,7 +61,7 @@ verify_install() {
 
 compile_protos() {
   echo "Compiling distributed runtime gRPC protobuf definitions..."
-  python3 -m pip install grpcio-tools
+  "${PIP[@]}" grpcio-tools
 
   local proto_dir="${ROOT_DIR}/tunix/dist_rl/distributed"
   if [[ ! -d "${proto_dir}" ]]; then

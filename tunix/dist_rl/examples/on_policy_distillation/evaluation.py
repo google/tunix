@@ -218,7 +218,8 @@ def _response_record(
     raise ValueError(f"Evaluation rollout has invalid status {status}.")
   if status == "SUCCEEDED" and not getattr(item, "is_valid", True):
     raise ValueError("Evaluation received an invalid successful trajectory.")
-  version = getattr(item, "policy_version", None)
+  versions = traj.get("policy_versions")
+  version = versions[-1] if versions else None
   if (
       isinstance(version, bool)
       or not isinstance(version, numbers.Integral)
@@ -228,8 +229,12 @@ def _response_record(
         "Evaluation response policy version does not match the synchronized"
         " policy."
     )
-  versions = getattr(item, "policy_versions", None)
-  if versions is not None and any(v != policy_version for v in versions):
+  if any(
+      isinstance(v, bool)
+      or not isinstance(v, numbers.Integral)
+      or v != policy_version
+      for v in versions
+  ):
     raise ValueError("Evaluation trajectory mixed policy versions.")
   if "conversation_text" not in traj:
     raise ValueError("Evaluation response is missing conversation_text.")

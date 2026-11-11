@@ -23,19 +23,22 @@ import importlib
 import json
 import logging
 import os
-import pickle
-import signal
 import sys
 from typing import Any
 
+import transformers
 from tunix.common import datatypes as common_datatypes
 from tunix.dist_rl.common import gcs_cache
+from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.common import timeouts
 from tunix.dist_rl.weight_sync import raiden_preload
 from tunix.dist_rl.weight_sync import weight_sync as weight_sync_lib
+from tunix.dist_rl.worker import rollout_worker
 from tunix.models import automodel
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
 from tunix.utils import maxtext_utils
+
+import sentencepiece as spm
 
 # Import Raiden before any other libraries to ensure correct JAX compilation.
 raiden_preload.import_raiden()
@@ -59,12 +62,11 @@ CHAT_PARSERS = {
 DEFAULT_REGISTRY_MODULE = "tunix.dist_rl.examples.math_gsm8k_dist.gsm8k"
 DEFAULT_ENV_NAME = "gsm8kenv"
 DEFAULT_AGENT_NAME = "gsm8kagent"
-_DEFAULT_INPROCESS_VLLM_HBM_UTILIZATION = 0.5
 
-# Keep in sync with every `AsyncEngineArgs` key set by CLI flags or rollout
-# invariants in `_create_vllm_sampler` (`hbm_utilization` is an alias guard for
-# `gpu_memory_utilization`).
-_FORBIDDEN_VLLM_CONFIG_JSON_KEYS = frozenset({
+# Keep in sync with every vLLM kwarg set by CLI flags or rollout invariants in
+# `_vllm_rollout_config` and `VllmSampler` (`hbm_utilization` is an alias guard
+# for `gpu_memory_utilization`).
+_FORBIDDEN_ROLLOUT_KWARGS = frozenset({
     "model",
     "tokenizer",
     "tensor_parallel_size",
@@ -89,7 +91,7 @@ _FORBIDDEN_VLLM_CONFIG_JSON_KEYS = frozenset({
 
 # Keep in sync with CLI-flag-owned keys and rollout invariants in
 # `maxtext_utils.build_vllm_maxtext_additional_config`.
-_FORBIDDEN_MAXTEXT_CONFIG_JSON_KEYS = frozenset({
+_FORBIDDEN_MAXTEXT_CONFIG_KEYS = frozenset({
     "model_name",
     "model_call_mode",
     "scan_layers",
@@ -129,7 +131,7 @@ def _parse_vllm_config_json(
     ) from exc
   if not isinstance(parsed, dict):
     raise ValueError("--vllm_config_json must decode to a JSON object.")
-  forbidden = sorted(set(parsed) & _FORBIDDEN_VLLM_CONFIG_JSON_KEYS)
+  forbidden = sorted(set(parsed) & _FORBIDDEN_ROLLOUT_KWARGS)
   if forbidden:
     raise ValueError(
         "--vllm_config_json contains keys managed by dedicated CLI flags or"
@@ -153,9 +155,7 @@ def _parse_vllm_config_json(
             "--vllm_config_json['additional_config']['maxtext_config'] requires"
             " --maxtext_model_name to be set."
         )
-      forbidden_mt = sorted(
-          set(maxtext_cfg) & _FORBIDDEN_MAXTEXT_CONFIG_JSON_KEYS
-      )
+      forbidden_mt = sorted(set(maxtext_cfg) & _FORBIDDEN_MAXTEXT_CONFIG_KEYS)
       if forbidden_mt:
         raise ValueError(
             "--vllm_config_json['additional_config']['maxtext_config']"
@@ -163,21 +163,6 @@ def _parse_vllm_config_json(
             f" contracts: {forbidden_mt}"
         )
   return dict(parsed)
-
-
-def _merge_vllm_config_overrides(
-    engine_kwargs: dict[str, Any], overrides: dict[str, Any]
-) -> None:
-  """Merges validated `--vllm_config_json` overrides into `engine_kwargs`."""
-  overrides = dict(overrides)
-  json_add = dict(overrides.pop("additional_config", None) or {})
-  json_mt = json_add.pop("maxtext_config", None)
-  add = {**engine_kwargs.get("additional_config", {}), **json_add}
-  if json_mt is not None:
-    add["maxtext_config"] = {**add.get("maxtext_config", {}), **json_mt}
-  if add:
-    engine_kwargs["additional_config"] = add
-  engine_kwargs.update(overrides)
 
 
 def _import_vllm_sampler():
@@ -467,14 +452,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument(
       "--detokenize",
       type=_str2bool,
-      default=False,
+      default=True,
       nargs="?",
       const=True,
       help=(
           "Detokenize vLLM outputs so `SamplingResponse.text` is populated"
           " (--sampler=vllm only). Agentic recipes that parse the action from"
-          " the completion text need this; token-only workflows can leave it"
-          " off."
+          " the completion text need this. Token-only workflows can pass"
+          " --detokenize=false, but vLLM then rejects stop strings, so stop"
+          " on --eos_tokens ids instead."
       ),
   )
   parser.add_argument(
@@ -538,11 +524,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--vllm_init_with_random_weights",
       action=argparse.BooleanOptionalAction,
       default=True,
-  )
-  parser.add_argument(
-      "--vllm_server_mode",
-      action=argparse.BooleanOptionalAction,
-      default=None,
   )
   parser.add_argument(
       "--vllm_async_scheduling",
@@ -628,9 +609,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 def _get_tensor_parallel_size(args: argparse.Namespace) -> int:
   """Derives tensor_parallel_size from mesh_tp if not explicitly set."""
-  tp = getattr(args, "tensor_parallel_size", None)
+  tp = args.tensor_parallel_size
   if tp is None:
-    tp = getattr(args, "sampler_mesh_tp", None) or getattr(args, "mesh_tp", 1)
+    tp = args.mesh_tp
     args.tensor_parallel_size = tp
     if tp > 1:
       logging.info("Auto-derived tensor_parallel_size=%d from mesh_tp", tp)
@@ -651,17 +632,15 @@ def _trajectory_store_config(
     args: argparse.Namespace,
 ) -> dict[str, Any] | None:
   """Builds TrajectoryStore config dict from parsed CLI flags."""
-  if not getattr(args, "enable_trajectory_store", False):
+  if not args.enable_trajectory_store:
     return None
   config: dict[str, Any] = {
-      "backend": getattr(args, "trajectory_store_backend", "file") or "file",
+      "backend": args.trajectory_store_backend or "file",
   }
-  root_dir = getattr(args, "trajectory_store_dir", "")
-  if root_dir:
-    config["root_dir"] = root_dir
-  run_id = getattr(args, "run_id", "")
-  if run_id:
-    config["run_id"] = run_id
+  if args.trajectory_store_dir:
+    config["root_dir"] = args.trajectory_store_dir
+  if args.run_id:
+    config["run_id"] = args.run_id
   return config
 
 
@@ -704,27 +683,37 @@ def _eos_token_ids(
   return token_ids
 
 
-def _rollout_config_kwargs(
-    args: argparse.Namespace, tokenizer: Any = None
-) -> dict[str, Any]:
-  return {
-      "weight_sync_mode": args.weight_sync_mode,
-      "max_prompt_length": args.max_prompt_length,
-      "max_tokens_to_generate": args.max_response_length,
-      "temperature": 1.0,
-      "top_p": 1.0,
-      "return_logprobs": True,
-      "eos_tokens": _eos_token_ids(args, tokenizer),
-      "env_name": args.env_name,
-      "agent_name": args.agent_name,
-      "agent_config": _agent_config(args),
-      "partial_rollout": bool(getattr(args, "in_flight_weight_updates", False)),
-      "drain_timeout_s": timeouts.drain_timeout_for(args.episode_timeout_secs),
-      "trajectory_store_config": _trajectory_store_config(args),
-      "return_routed_experts": args.return_routed_experts,
-      "routed_experts_encode_mode": args.routed_experts_encode_mode,
-      "routed_experts_num_experts": args.routed_experts_num_experts,
-  }
+def _rollout_config(
+    args: argparse.Namespace,
+    tokenizer: (
+        transformers.PreTrainedTokenizerBase | spm.SentencePieceProcessor | None
+    ) = None,
+) -> rollout_worker.RolloutConfig:
+  """Builds the `rollout_worker.RolloutConfig` every sampler starts from.
+
+  Args:
+    args: Parsed rollout node flags.
+    tokenizer: Tokenizer used to resolve token strings to ids.
+
+  Returns:
+    The rollout config, with `kv_cache_size` sized for the vanilla sampler.
+  """
+  return rollout_worker.RolloutConfig(
+      weight_sync_mode=args.weight_sync_mode,
+      max_prompt_length=args.max_prompt_length,
+      max_tokens_to_generate=args.max_response_length,
+      kv_cache_size=args.max_prompt_length + args.max_response_length,
+      temperature=1.0,
+      top_p=1.0,
+      return_logprobs=True,
+      eos_tokens=_eos_token_ids(args, tokenizer),
+      partial_rollout=bool(args.in_flight_weight_updates),
+      drain_timeout_s=timeouts.drain_timeout_for(args.episode_timeout_secs),
+      trajectory_store_config=_trajectory_store_config(args),
+      return_routed_experts=args.return_routed_experts,
+      routed_experts_encode_mode=args.routed_experts_encode_mode,
+      routed_experts_num_experts=args.routed_experts_num_experts,
+  )
 
 
 def _create_rollout_mesh(args) -> Any:
@@ -751,9 +740,6 @@ def _create_vanilla_worker(args, tokenizer):
   from tunix.dist_rl.rollout import (  # pylint: disable=g-import-not-at-top
       vanilla_sampler,
   )
-  from tunix.dist_rl.worker import (  # pylint: disable=g-import-not-at-top
-      rollout_worker,
-  )
   from tunix.generate import (  # pylint: disable=g-import-not-at-top
       tokenizer_adapter as tokenizer_adapter_lib,
   )
@@ -768,11 +754,7 @@ def _create_vanilla_worker(args, tokenizer):
         dtype=args.model_dtype,
         load_dtype=args.model_dtype,
     )
-  config = rollout_worker.RolloutConfig(
-      sampler_type="vanilla",
-      kv_cache_size=args.max_prompt_length + args.max_response_length,
-      **_rollout_config_kwargs(args, tokenizer),
-  )
+  config = _rollout_config(args, tokenizer)
   sampler = vanilla_sampler.VanillaSampler(
       server_id=args.worker_id,
       transformer=model,
@@ -791,6 +773,9 @@ def _create_vanilla_worker(args, tokenizer):
       worker_id=args.worker_id,
       config=config,
       sampler=sampler,
+      env_name=args.env_name,
+      agent_name=args.agent_name,
+      agent_config=_agent_config(args),
       tokenizer=rollout_tokenizer,
       chat_parser=chat_parser,
       max_concurrency=args.max_concurrency,
@@ -799,19 +784,14 @@ def _create_vanilla_worker(args, tokenizer):
 
 def _create_vllm_worker(args, tokenizer):
   """Creates an in-process vLLM sampler rollout worker instance."""
-  from tunix.dist_rl.worker import (  # pylint: disable=g-import-not-at-top
-      rollout_worker,
-  )
   from tunix.generate import (  # pylint: disable=g-import-not-at-top
       tokenizer_adapter as tokenizer_adapter_lib,
   )
 
   if args.sampler == "vllm":
-    sampler_adapter, rollout_config = _create_vllm_sampler(args, tokenizer)
+    sampler_adapter = _create_vllm_sampler(args, tokenizer)
   else:
-    sampler_adapter, rollout_config = _create_inprocess_vllm_sampler(
-        args, tokenizer
-    )
+    sampler_adapter = _create_inprocess_vllm_sampler(args, tokenizer)
 
   rollout_tokenizer = tokenizer_adapter_lib.TokenizerAdapter(tokenizer)
   chat_parser = _chat_parser_for(
@@ -823,41 +803,145 @@ def _create_vllm_worker(args, tokenizer):
   logging.info("Creating RolloutWorker wrapper...")
   return rollout_worker.RolloutWorker(
       worker_id=args.worker_id,
-      config=rollout_config,
+      config=sampler_adapter.config,
       sampler=sampler_adapter,
+      env_name=args.env_name,
+      agent_name=args.agent_name,
+      agent_config=_agent_config(args),
       tokenizer=rollout_tokenizer,
       chat_parser=chat_parser,
       max_concurrency=args.max_concurrency,
   )
 
 
-def _create_inprocess_vllm_sampler(args, tokenizer):
-  """Creates an in-process vLLM sampler rollout worker instance."""
-  vllm_sampler = _import_vllm_sampler()
-  import jax  # pylint: disable=g-import-not-at-top
-  from tunix.dist_rl.rollout import (  # pylint: disable=g-import-not-at-top
-      inprocess_vllm_sampler,
+def _vllm_model(args: argparse.Namespace) -> str:
+  """Returns the local model dir when it holds files, else the model id."""
+  if (
+      args.model_dir
+      and os.path.isdir(args.model_dir)
+      and os.listdir(args.model_dir)
+  ):
+    return args.model_dir
+  return args.model_id
+
+
+# TODO(yatlas): Remove Gemma4-specific model handling.
+def _vllm_passthrough_kwargs(
+    args: argparse.Namespace, vllm_model: str, is_gemma4: bool
+) -> dict[str, Any]:
+  """Builds the pass-through `rollout_vllm_kwargs` for vLLM rollout samplers."""
+  # vLLM settings without a dedicated `RolloutConfig` field.
+  kwargs: dict[str, Any] = {
+      "tokenizer": args.tokenizer_path or vllm_model,
+      "enable_prefix_caching": bool(
+          args.enable_prefix_caching or args.in_flight_weight_updates
+      ),
+      "dtype": args.vllm_dtype,
+  }
+  hf_overrides = _vllm_hf_overrides(args)
+  if hf_overrides:
+    kwargs["hf_overrides"] = hf_overrides
+  if is_gemma4:
+    kwargs["kv_cache_metrics"] = True
+    kwargs["disable_log_stats"] = False
+  if args.vllm_config_json is not None:
+    kwargs.update(
+        _parse_vllm_config_json(
+            args.vllm_config_json,
+            has_maxtext_model=bool(args.maxtext_model_name),
+        )
+    )
+  return kwargs
+
+
+def _maxtext_additional_config(
+    args: argparse.Namespace,
+) -> dict[str, Any] | None:
+  """Returns the vLLM `additional_config` of a MaxText rollout, else None."""
+  if not args.maxtext_model_name:
+    return None
+  # Select MaxText's `MaxTextForCausalLM` as rollout model (the architectures
+  # override is applied by `_vllm_hf_overrides`).
+  logging.info(
+      "Loading MaxText model %r natively via maxtext_vllm_adapter's"
+      " MaxTextForCausalLM (architectures override).",
+      args.maxtext_model_name,
   )
-  from tunix.dist_rl.worker import (  # pylint: disable=g-import-not-at-top
-      rollout_worker,
-  )
-  from tunix.generate import (  # pylint: disable=g-import-not-at-top
-      tokenizer_adapter as tokenizer_adapter_lib,
+  return maxtext_utils.build_vllm_maxtext_additional_config(
+      args.maxtext_model_name,
+      attention=args.maxtext_attention,
+      prefuse_moe_weights=args.prefuse_moe_weights,
+      return_routed_experts=args.return_routed_experts,
+      float32_gate_logits=args.maxtext_float32_gate_logits,
+      float32_logits=args.maxtext_float32_logits,
   )
 
-  logging.info("Creating vLLM mapping config...")
-  mapping_config = _mapping_config_for(args.model_id or args.model_name)
-  vllm_model = (
-      args.model_dir
-      if (
-          args.model_dir
-          and os.path.isdir(args.model_dir)
-          and bool(os.listdir(args.model_dir))
-      )
-      else args.model_id
-  )
+
+def _vllm_rollout_config(
+    args: argparse.Namespace,
+    tokenizer: (
+        transformers.PreTrainedTokenizerBase | spm.SentencePieceProcessor
+    ),
+    sampler_type: str,
+) -> rollout_worker.RolloutConfig:
+  """Builds the `rollout_worker.RolloutConfig` for a vLLM rollout worker.
+
+  Args:
+    args: Parsed rollout node flags.
+    tokenizer: Tokenizer used to resolve token strings to ids.
+    sampler_type: Sampler the worker runs, "inprocess_vllm" or "vllm".
+
+  Returns:
+    The rollout config.
+  """
+  vllm_model = _vllm_model(args)
   max_model_len = args.vllm_max_model_len or (
       args.max_prompt_length + args.max_response_length
+  )
+  family_name = args.model_id or args.model_name
+  is_gemma4 = _is_gemma4_model(family_name)
+  sampling_kwargs: dict[str, Any] = (
+      {"skip_special_tokens": False} if is_gemma4 else {}
+  )
+  if sampler_type == "vllm":
+    sampling_kwargs["detokenize"] = args.detokenize
+
+  return dataclasses.replace(
+      _rollout_config(args, tokenizer),
+      kv_cache_size=max_model_len,
+      tensor_parallel_size=_get_tensor_parallel_size(args),
+      data_parallel_size=max(1, int(args.mesh_fsdp)),
+      rollout_mapping_config=(
+          _mapping_config_for(family_name)
+          if sampler_type == "inprocess_vllm"
+          else None
+      ),
+      rollout_vllm_model_version=vllm_model,
+      # Both vLLM samplers always run in server mode.
+      rollout_vllm_server_mode=True,
+      rollout_vllm_init_with_random_weights=args.vllm_init_with_random_weights,
+      rollout_vllm_hbm_utilization=args.vllm_hbm_utilization,
+      rollout_vllm_tpu_backend_type="jax",
+      rollout_vllm_lora_config=(
+          {"max_lora_rank": args.lora_rank, "max_loras": 1}
+          if args.use_lora
+          else None
+      ),
+      rollout_vllm_additional_config=_maxtext_additional_config(args),
+      rollout_vllm_async_scheduling=args.vllm_async_scheduling,
+      rollout_vllm_max_num_seqs=args.vllm_max_num_seqs,
+      rollout_vllm_max_num_batched_tokens=args.vllm_max_num_batched_tokens,
+      rollout_vllm_logprobs_mode="processed_logprobs",
+      rollout_vllm_kwargs=_vllm_passthrough_kwargs(args, vllm_model, is_gemma4),
+      rollout_vllm_sampling_kwargs=sampling_kwargs,
+  )
+
+
+def _create_inprocess_vllm_sampler(args, tokenizer):
+  """Creates an in-process vLLM sampler rollout worker instance."""
+  _import_vllm_sampler()
+  from tunix.dist_rl.rollout import (  # pylint: disable=g-import-not-at-top
+      inprocess_vllm_sampler,
   )
 
   multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "")
@@ -865,115 +949,15 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
     assert (
         multihost_backend != "ray" or args.mesh_tp is not None
     ), "Must set --mesh_tp when using Ray backend."
-
-  partial_rollout = bool(getattr(args, "in_flight_weight_updates", False))
-  enable_prefix_caching = bool(
-      args.enable_prefix_caching or partial_rollout
-  )
-  engine_kwargs = {
-      "model": vllm_model,
-      "max_model_len": max_model_len,
-      "enable_prefix_caching": enable_prefix_caching,
-      "async_scheduling": args.vllm_async_scheduling,
-      "dtype": args.vllm_dtype,
-      "max_logprobs": 1,
-      "logprobs_mode": "processed_logprobs",
-  }
-  hf_overrides = _vllm_hf_overrides(args)
-  if hf_overrides:
-    engine_kwargs["hf_overrides"] = hf_overrides
-  is_gemma4 = _is_gemma4_model(args.model_id or args.model_name)
-  if is_gemma4:
-    engine_kwargs["kv_cache_metrics"] = True
-    engine_kwargs["disable_log_stats"] = False
-  if args.vllm_max_num_seqs is not None:
-    engine_kwargs["max_num_seqs"] = args.vllm_max_num_seqs
-  if args.vllm_max_num_batched_tokens is not None:
-    engine_kwargs["max_num_batched_tokens"] = args.vllm_max_num_batched_tokens
-  # Select MaxText's `MaxTextForCausalLM` as rollout model (the architectures
-  # override is applied by `_vllm_hf_overrides`).
-  # `additional_config` must be set on VllmConfig (not engine_kwargs): the
-  # sampler overwrites args["additional_config"] from the VllmConfig field.
-  maxtext_additional_config = None
-  if args.maxtext_model_name:
-    logging.info(
-        "Loading MaxText model %r natively via maxtext_vllm_adapter's"
-        " MaxTextForCausalLM (architectures override).",
-        args.maxtext_model_name,
-    )
-    maxtext_additional_config = (
-        maxtext_utils.build_vllm_maxtext_additional_config(
-            args.maxtext_model_name,
-            attention=args.maxtext_attention,
-            prefuse_moe_weights=args.prefuse_moe_weights,
-            return_routed_experts=args.return_routed_experts,
-            float32_gate_logits=args.maxtext_float32_gate_logits,
-            float32_logits=args.maxtext_float32_logits,
-        )
-    )
-
-  if multihost_backend:
-    engine_kwargs["distributed_executor_backend"] = multihost_backend
-  # Enable VLLMInProcessDriver (`server_mode=True`) on both single-host and
-  # multi-host TPUs so concurrent `InprocessVllmSampler.sample()` worker
-  # threads submit into a single engine loop for continuous batching without
-  # racing on donated JAX KV-cache buffers. `--no-vllm_server_mode` opts out.
-  server_mode = (
-      args.vllm_server_mode if args.vllm_server_mode is not None else True
-  )
   rollout_mesh = None if multihost_backend else _create_rollout_mesh(args)
-
-  tp_size = _get_tensor_parallel_size(args)
-  logging.info(
-      "Creating vLLM config for model=%s mesh=%s tensor_parallel_size=%d "
-      "data_parallel_size=%d max_model_len=%d...",
-      vllm_model,
-      rollout_mesh,
-      tp_size,
-      args.mesh_fsdp,
-      max_model_len,
-  )
-  lora_config = None
-  if args.use_lora:
-    lora_config = {
-        "max_lora_rank": args.lora_rank,
-        "max_loras": 1,
-    }
-  vllm_config = vllm_sampler.VllmConfig(
-      server_mode=server_mode,
-      mesh=rollout_mesh,
-      tensor_parallel_size=tp_size,
-      data_parallel_size=args.mesh_fsdp,
-      return_logprobs=True,
-      return_routed_experts=args.return_routed_experts,
-      init_with_random_weights=args.vllm_init_with_random_weights,
-      hbm_utilization=(
-          args.vllm_hbm_utilization
-          if args.vllm_hbm_utilization is not None
-          else _DEFAULT_INPROCESS_VLLM_HBM_UTILIZATION
-      ),
-      lora_config=lora_config,
-      mapping_config=mapping_config,
-      additional_config=maxtext_additional_config,
-      sampling_kwargs={"skip_special_tokens": False} if is_gemma4 else {},
-      engine_kwargs=engine_kwargs,
-      eos_tokens=_eos_token_ids(args, tokenizer),
-      partial_rollout=partial_rollout,
-  )
-  sampler = inprocess_vllm_sampler.InprocessVllmSampler(
+  config = _vllm_rollout_config(args, tokenizer, sampler_type="inprocess_vllm")
+  return inprocess_vllm_sampler.InprocessVllmSampler(
       server_id=args.worker_id,
       tokenizer=tokenizer,
-      config=vllm_config,
-      weight_sync_mode=args.weight_sync_mode,
+      config=config,
+      mesh=rollout_mesh,
       max_concurrency=args.max_concurrency,
-      partial_rollout=partial_rollout,
   )
-  config = rollout_worker.RolloutConfig(
-      sampler_type="inprocess_vllm",
-      rollout_vllm_model_version=vllm_model,
-      **_rollout_config_kwargs(args, tokenizer),
-  )
-  return sampler, config
 
 
 def _create_vllm_sampler(args, tokenizer):
@@ -981,114 +965,12 @@ def _create_vllm_sampler(args, tokenizer):
   from tunix.dist_rl.rollout import (  # pylint: disable=g-import-not-at-top
       vllm_sampler,
   )
-  from tunix.dist_rl.worker import (  # pylint: disable=g-import-not-at-top
-      rollout_worker,
-  )
-  from vllm.engine.arg_utils import (  # pylint: disable=g-import-not-at-top
-      AsyncEngineArgs,
-  )
 
-  vllm_model = (
-      args.model_dir
-      if (
-          args.model_dir
-          and os.path.exists(args.model_dir)
-          and any(os.scandir(args.model_dir))
-      )
-      else args.model_id
-  )
-  max_model_len = args.vllm_max_model_len or (
-      args.max_prompt_length + args.max_response_length
-  )
-  tp_size = _get_tensor_parallel_size(args)
-  dp_size = max(1, int(getattr(args, "mesh_fsdp", 1) or 1))
-  logging.info(
-      "Creating vLLM VllmSampler config for model=%s tensor_parallel_size=%d "
-      "data_parallel_size=%d (%d chips) max_model_len=%d...",
-      vllm_model,
-      tp_size,
-      dp_size,
-      tp_size * dp_size,
-      max_model_len,
-  )
-  if dp_size > 1 and args.use_lora:
-    raise ValueError(
-        "LoRA is not supported with rollout data parallelism:"
-        f" --mesh_fsdp={dp_size} with --use_lora. Set --mesh_fsdp=1 or drop"
-        " LoRA."
-    )
-  partial_rollout = bool(getattr(args, "in_flight_weight_updates", False))
-  enable_prefix_caching = bool(
-      args.enable_prefix_caching or partial_rollout
-  )
-  engine_kwargs: dict[str, Any] = dict(
-      model=vllm_model,
-      tokenizer=args.tokenizer_path or vllm_model,
-      tensor_parallel_size=tp_size,
-      data_parallel_size=dp_size,
-      max_model_len=max_model_len,
-      trust_remote_code=True,
-      dtype=args.vllm_dtype,
-      enable_lora=args.use_lora,
-      max_lora_rank=args.lora_rank if args.use_lora else None,
-      max_loras=1 if args.use_lora else None,
-      enable_prefix_caching=enable_prefix_caching,
-      async_scheduling=args.vllm_async_scheduling,
-      max_logprobs=1,
-      logprobs_mode="processed_logprobs",
-  )
-  hf_overrides = _vllm_hf_overrides(args)
-  if hf_overrides:
-    engine_kwargs["hf_overrides"] = hf_overrides
-  if args.vllm_hbm_utilization is not None:
-    engine_kwargs["gpu_memory_utilization"] = args.vllm_hbm_utilization
-  if args.vllm_max_num_seqs is not None:
-    engine_kwargs["max_num_seqs"] = args.vllm_max_num_seqs
-  if args.vllm_max_num_batched_tokens is not None:
-    engine_kwargs["max_num_batched_tokens"] = args.vllm_max_num_batched_tokens
-  if args.return_routed_experts:
-    engine_kwargs["enable_return_routed_experts"] = True
-  if args.maxtext_model_name:
-    # The architectures override is applied by `_vllm_hf_overrides`.
-    logging.info(
-        "Loading MaxText model %r natively via maxtext_vllm_adapter's"
-        " MaxTextForCausalLM (architectures override).",
-        args.maxtext_model_name,
-    )
-    engine_kwargs["additional_config"] = (
-        maxtext_utils.build_vllm_maxtext_additional_config(
-            args.maxtext_model_name,
-            attention=args.maxtext_attention,
-            prefuse_moe_weights=args.prefuse_moe_weights,
-            return_routed_experts=args.return_routed_experts,
-            float32_gate_logits=args.maxtext_float32_gate_logits,
-            float32_logits=args.maxtext_float32_logits,
-        )
-    )
-  if args.vllm_config_json is not None:
-    _merge_vllm_config_overrides(
-        engine_kwargs,
-        _parse_vllm_config_json(
-            args.vllm_config_json,
-            has_maxtext_model=bool(args.maxtext_model_name),
-        ),
-    )
-  engine_args = AsyncEngineArgs(**engine_kwargs)  # type: ignore[arg-type]
-  config = rollout_worker.RolloutConfig(
-      sampler_type="vllm",
-      rollout_vllm_model_version=vllm_model,
-      **_rollout_config_kwargs(args, tokenizer),
-  )
-  sampler = vllm_sampler.VllmSampler(
+  config = _vllm_rollout_config(args, tokenizer, sampler_type="vllm")
+  return vllm_sampler.VllmSampler(
       server_id=args.worker_id,
-      engine_args=engine_args,
-      model_name=vllm_model,
       config=config,
-      weight_sync_mode=args.weight_sync_mode,
-      partial_rollout=partial_rollout,
-      detokenize=args.detokenize,
   )
-  return sampler, config
 
 
 def _build_rollout_cache_params(
@@ -1108,11 +990,7 @@ def _build_rollout_cache_params(
       use_lora=bool(args.use_lora),
       lora_rank=args.lora_rank,
       enable_prefix_caching=bool(args.enable_prefix_caching),
-      vllm_server_mode=(
-          args.vllm_server_mode
-          if args.vllm_server_mode is not None
-          else env_params.vllm_server_mode
-      ),
+      vllm_server_mode=True,
       vllm_async_scheduling=bool(args.vllm_async_scheduling),
   )
 
@@ -1137,6 +1015,15 @@ def main(argv: list[str], context: Any = None) -> None:
     os.environ["TUNIX_LOG_ROLLOUT_TEXT"] = "1"
   logging.info("Parsed args: %s", args)
 
+  otel_setup.setup_metrics(
+      default_service_name="tunix-rollout",
+      resource_attributes={
+          "tunix.worker_id": args.worker_id,
+          "tunix.role": "rollout",
+          "tunix.run_id": args.run_id,
+      },
+  )
+
   if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
   logging.info("Repo root inserted into sys.path: %s", REPO_ROOT)
@@ -1152,6 +1039,7 @@ def main(argv: list[str], context: Any = None) -> None:
   os.environ.setdefault("VLLM_TPU_RPA_VERSION", "2")
   os.environ.setdefault("DISABLE_MOSAIC_ATTN", "1")
   os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+  os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
   if args.maxtext_model_name:
     os.environ.setdefault("NEW_MODEL_DESIGN", "1")
 
@@ -1176,13 +1064,11 @@ def main(argv: list[str], context: Any = None) -> None:
         remote_execution,
     )
 
-    logging.info("Creating rollout gRPC server...")
-    server = remote_execution.GrpcRemoteExecutionServer(worker_service)
-    await server.start_serving_async(args.port)
-    logging.info("Serving vLLM rollout worker on port %d.", args.port)
-
-    context.ipc.discovery.register(
-        metadata=pickle.dumps({
+    await remote_execution.serve_worker(
+        worker_service,
+        port=args.port,
+        discovery=context.ipc.discovery,
+        metadata={
             "service_type": "rollout",
             "service_port": args.port,
             "worker_id": args.worker_id,
@@ -1191,35 +1077,9 @@ def main(argv: list[str], context: Any = None) -> None:
                 if worker_service.trajectory_store is not None
                 else None
             ),
-        })
+        },
+        drain_fn=worker_service.sampler.stop,
     )
-    logging.info("Rollout worker is registered.")
-
-    # Shut down gracefully on SIGTERM/SIGINT.
-    stop_event = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-      try:
-        loop.add_signal_handler(sig, stop_event.set)
-      except NotImplementedError:
-        pass
-
-    try:
-      await stop_event.wait()
-    except asyncio.CancelledError:
-      pass
-    finally:
-      logging.info("Draining rollout worker...")
-      try:
-        # Cancel in-flight trajectory collections
-        worker_service.stop()
-        if hasattr(worker_service.sampler, "stop"):
-          # Shut down vLLM engine
-          await worker_service.sampler.stop()
-        logging.info("Rollout worker drained.")
-      except Exception:
-        logging.exception("Failed to drain rollout worker cleanly.")
-      await server.stop_serving()
 
   asyncio.run(grpc_server_main())
 

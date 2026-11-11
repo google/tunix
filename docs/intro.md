@@ -1,10 +1,11 @@
+
 <!-- DO NOT REMOVE! Placeholder for TOC. -->
 
 # Tunix: A Lightweight LLM Post-Training Library
 
-**Tunix (Tune-in-JAX)** is a JAX based library designed to streamline the
-post-training of Large Language Models. It provides efficient and scalable
-support for:
+**Tunix (Tune-in-Accelerators)** is a unified library designed to streamline the
+post-training of Large Language Models on accelerators. It provides efficient
+and scalable support for:
 
 - **SOTA Training performance on TPUs**
 - **Supervised Fine-Tuning**
@@ -14,8 +15,7 @@ support for:
 Tunix leverages the power of JAX for accelerated computation and seamless
 integration with JAX-based modeling frameworks like
 [Flax NNX](https://flax.readthedocs.io/en/latest/nnx_basics.html), and
-integrates with high-performance inference engines like vLLM and SGLang-JAX for
-rollout.
+integrates with high-performance inference engines like vLLM for rollout.
 
 **Current Status: V2 Release**
 
@@ -65,8 +65,7 @@ See [Design Overview](design.md) for more details on the architecture.
     -   Components are designed to be reusable and composable
     -   Easy to customize and extend
 -   **Performance & Efficiency**:
-    -   Native [vLLM](rollout.md#vllm) and [SGLang-JAX](rollout.md#sglang) on
-        TPU integration for performant rollout
+    -   Native [vLLM](rollout.md#vllm) on TPU integration for performant rollout
     -   Native [MaxText](https://github.com/AI-Hypercomputer/maxtext) model
         integration for high performance kernels and model execution
     -   [Micro-batching](performance.md#batching-config) support for component
@@ -75,6 +74,10 @@ See [Design Overview](design.md) for more details on the architecture.
     -   Seamless multi-host distributed training with Pathways which can scale
         up to thousands of devices
     -   [Checkpointing and Fault Tolerance](reliability.md)
+-   **Observability & Diagnostics**:
+    -   [RL Monitoring and Profiling with Google Cloud ML Diagnostics](https://github.com/google/tunix/blob/main/docs/ml_diagnostics.md)
+        for scalar metrics tracking and per-role (`actor` / `rollout`) XProf
+        profiling
 
 ## Getting Started
 
@@ -105,7 +108,7 @@ See [Models](models.md) for a full list and details on how to add new ones.
 
 ```bibtex
 @misc{tunix2025,
-  title={Tunix (Tune-in-JAX)},
+  title={Tunix (Tune-in-Accelerators)},
   author={Bao, Tianshu and Carpenter, Jeff and Chai, Lin and Gao, Haoyu and Jiang, Yangmu and Noghabi, Shadi and Sharma, Abheesht and Tan, Sizhi and Wang, Lance and Yan, Ann and Yu, Weiren and others},
   year={2025},
   howpublished={\url{https://github.com/google/tunix}},

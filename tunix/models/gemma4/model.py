@@ -19,17 +19,14 @@ from __future__ import annotations
 import dataclasses
 from functools import partial
 import itertools
-import typing
 from flax import nnx
 import jax
 from jax import numpy as jnp
 import jaxtyping
+from tunix.common import datatypes
 from tunix.generate.mappings import BackendMappingMixin
 from tunix.models import paged_attention
 from tunix.utils import compat
-
-if typing.TYPE_CHECKING:
-  from tunix.experimental.generate import kv_cache_manager
 
 # Re-export symbols to preserve public API paths after module decomposition.
 # pylint: disable=g-multiple-import,unused-import
@@ -71,7 +68,7 @@ from tunix.models.gemma4.attention import Attention, MeshType
 # pylint: enable=g-multiple-import,unused-import
 
 # Paged KV caches in `paged_attention`'s layout, keyed by
-# cache name (see `Gemma4.init_kv_cache`).
+# cache name (see `Gemma4.cache_geometries`).
 PagedCache = dict[str, jax.Array]
 
 
@@ -265,6 +262,7 @@ class DecoderLayer(nnx.Module):
       prefix_length: int = 0,
       input_mask: jaxtyping.Array | None = None,
       force_eager: bool = False,
+      forced_routed_experts: jaxtyping.Array | None = None,
   ) -> tuple[
       LayerCache | None,
       jaxtyping.Array,
@@ -288,7 +286,11 @@ class DecoderLayer(nnx.Module):
         input_mask=input_mask,
         force_eager=force_eager,
     )
-    return cache, self._post_attention(x, attn, per_layer_input), kv
+    return (
+        cache,
+        self._post_attention(x, attn, per_layer_input, forced_routed_experts),
+        kv,
+    )
 
   def paged_block(
       self,
@@ -312,13 +314,16 @@ class DecoderLayer(nnx.Module):
         update_kv_cache=update_kv_cache,
         mesh=mesh,
     )
-    return kv_cache, self._post_attention(x, attn, per_layer_input)
+    return kv_cache, self._post_attention(
+        x, attn, per_layer_input, forced_routed_experts=None
+    )
 
   def _post_attention(
       self,
       x: jaxtyping.Array,
       attn: jaxtyping.Array,
       per_layer_input: jaxtyping.Array | None,
+      forced_routed_experts: jaxtyping.Array | None,
   ) -> jaxtyping.Array:
     """Applies the residuals, FFW and per-layer input after attention."""
     attn = self.post_attention_norm(attn)
@@ -329,7 +334,11 @@ class DecoderLayer(nnx.Module):
     if self.config.enable_moe:
       ffw = self.dense_post_ffw_norm(ffw)
       moe_norm_ffw = self.moe_pre_ffw_norm(attn)
-      moe_out = self.moe(moe_norm_ffw, router_input=attn)
+      moe_out = self.moe(
+          moe_norm_ffw,
+          router_input=attn,
+          forced_routed_experts=forced_routed_experts,
+      )
       moe_out = self.moe_post_ffw_norm(moe_out)
       ffw += moe_out
     ffw = self.post_ffw_norm(ffw)
@@ -358,6 +367,7 @@ class DecoderLayer(nnx.Module):
       is_chunked_prefill: bool = False,
       prefix_length: int = 0,
       input_mask: jaxtyping.Array | None = None,
+      forced_routed_experts: jaxtyping.Array | None = None,
   ) -> tuple[
       LayerCache | None,
       jaxtyping.Array,
@@ -404,6 +414,7 @@ class DecoderLayer(nnx.Module):
             prefix_length=bucketed_prefix,
             input_mask=input_mask,
             force_eager=force_eager,
+            forced_routed_experts=forced_routed_experts,
         )
 
       return jax.checkpoint(_checkpointed_block, policy=policy)(
@@ -428,6 +439,7 @@ class DecoderLayer(nnx.Module):
           prefix_length=bucketed_prefix,
           input_mask=input_mask,
           force_eager=force_eager,
+          forced_routed_experts=forced_routed_experts,
       )
 
   def init_cache(self, batch_size, max_seq_len, dtype):
@@ -435,6 +447,34 @@ class DecoderLayer(nnx.Module):
 
 
 GemmaDecoderLayer = DecoderLayer
+
+
+def _check_forced_routed_experts(
+    forced_routed_experts: jaxtyping.Array,
+    tokens: jaxtyping.Array,
+    config: ModelConfig,
+) -> None:
+  """Raises if `forced_routed_experts` cannot be replayed on `tokens`."""
+  if not config.enable_moe:
+    raise ValueError(
+        '`forced_routed_experts` requires an MoE model (enable_moe=True).'
+    )
+  expected_shape = (
+      *tokens.shape,
+      config.num_layers,
+      config.num_experts_per_tok,
+  )
+  if forced_routed_experts.shape != expected_shape:
+    raise ValueError(
+        '`forced_routed_experts` must be [batch, seq, num_layers,'
+        f' num_experts_per_tok] = {expected_shape}, got'
+        f' {forced_routed_experts.shape}.'
+    )
+  if not jnp.issubdtype(forced_routed_experts.dtype, jnp.signedinteger):
+    raise TypeError(
+        '`forced_routed_experts` must hold signed integer expert ids, got'
+        f' dtype {forced_routed_experts.dtype}.'
+    )
 
 
 class Gemma4(BackendMappingMixin, nnx.Module):
@@ -529,8 +569,13 @@ class Gemma4(BackendMappingMixin, nnx.Module):
       metadata: paged_attention.PagedAttnMetadata | None = None,
       mesh: MeshType | None = None,
       logits_idxs: jaxtyping.Array | None = None,
+      forced_routed_experts: jaxtyping.Array | None = None,
   ) -> tuple[jaxtyping.Array, Cache | PagedCache | None]:
     if metadata is not None:
+      if forced_routed_experts is not None:
+        raise ValueError(
+            '`forced_routed_experts` is not supported with `metadata`.'
+        )
       if cache is None or positions is None or mesh is None:
         raise ValueError(
             '`metadata` requires `cache`, `positions`, and `mesh`.'
@@ -566,6 +611,13 @@ class Gemma4(BackendMappingMixin, nnx.Module):
           f'`prefix_length` was set to {prefix_length} > 0, but'
           ' `is_chunked_prefill` is False.'
       )
+    # Router replay: `forced_routed_experts` holds the experts each token was
+    # routed to at rollout, `[B, T, num_layers, num_experts_per_tok]` (the
+    # name `tunix.rl.common.compute_per_token_logps` forwards them under).
+    # Layer `i` routes to `[:, :, i]` instead of its own top-k; see
+    # `moe._replay_choices` for unset (-1) ids.
+    if forced_routed_experts is not None:
+      _check_forced_routed_experts(forced_routed_experts, tokens, self.config)
 
     if is_chunked_prefill and input_mask is None:
       input_mask = jnp.ones_like(tokens, dtype=jnp.bool_)
@@ -670,6 +722,9 @@ class Gemma4(BackendMappingMixin, nnx.Module):
           is_chunked_prefill=is_chunked_prefill,
           prefix_length=prefix_length,
           input_mask=input_mask,
+          forced_routed_experts=forced_routed_experts[:, :, i]
+          if forced_routed_experts is not None
+          else None,
       )
       if is_prefill and i in self.shared_layer_origins:
         transient_kvs[layer_name] = layers_kvs
@@ -702,20 +757,22 @@ class Gemma4(BackendMappingMixin, nnx.Module):
     """Runs a ragged batch through the paged KV cache.
 
     Args:
-      tokens: `[num_tokens]` the batch's tokens, back to back.
-      positions: `[num_tokens]` each token's position in its sequence.
-      cache: the paged KV caches, keyed by `init_kv_cache` name.
+      tokens: `[num_groups, tokens_per_group]` each DP group's padded ragged
+        tokens.
+      positions: `[num_groups, tokens_per_group]` each token's position in its
+        sequence.
+      cache: the paged KV caches, keyed by `cache_geometries` name.
       metadata: the batch's ragged layout and page tables.
       mesh: the mesh to shard attention over.
-      logits_idxs: `[num_logits]` the tokens to compute logits for, or None for
-        every token.
+      logits_idxs: `[num_groups, logits_per_group]` per-group token indices to
+        compute logits for, or None for every token.
 
     Returns:
       A tuple of (`[num_logits, vocab_size]` logits, updated cache).
     """
-    # The ragged tokens run as one sequence of batch 1, so every layer keeps its
-    # `[B, T, ...]` shapes; only attention sees the ragged layout.
-    tokens, positions = tokens[None], positions[None]
+    # Each DP group runs as one row of the batch axis `B = num_groups`, so
+    # every layer keeps its `[B, T, ...]` shapes and shards `B` across the DP
+    # axes; only attention sees the ragged layout within each group.
     x = self.embedder.encode(tokens)
     per_layer_inputs = None
     if self.config.per_layer_input_dim > 0:
@@ -739,34 +796,28 @@ class Gemma4(BackendMappingMixin, nnx.Module):
     if logits_idxs is not None:
       # Skips unembedding the other tokens, whose logits are the largest
       # activation of a long batch.
-      x = x[:, logits_idxs]
+      x = jnp.take_along_axis(x, logits_idxs[..., None], axis=1)
     logits = self.compute_final_logits(self.final_norm(x))
-    return logits[0], cache
+    return logits.reshape(-1, logits.shape[-1]), cache
 
-  def init_kv_cache(
-      self, cache_config: kv_cache_manager.CacheConfig
-  ) -> kv_cache_manager.KVCacheManager:
-    """Builds the paged KV caches `_paged_call` reads.
+  def cache_geometries(self) -> dict[str, datatypes.CacheGeometry]:
+    """Returns the geometry of each paged KV cache `_paged_call` reads.
 
     Gemma 4's global layers project a different number of KV heads at a
     different head dim than its local ones, so caches differ in geometry.
     KV-shared layers get no cache of their own; they read their lender's.
 
-    Args:
-      cache_config: Capacity, page geometry and sharding, owned by the caller.
-
     Returns:
-      A manager holding one cache per unshared layer, named `layer_{i}`.
+      A mapping from cache name (`layer_{i}`) to its `CacheGeometry` for each
+      unshared layer.
     """
-    from tunix.experimental.generate import kv_cache_manager  # pylint: disable=g-import-not-at-top
-
     cache_geometries = {}
     for i, layer in enumerate(self.layers):
       if self.kv_cache_sharing_patterns[i] != i:
         continue
       # `attn.num_kv_heads` / `attn.head_dim` are already resolved per
       # attention type; the raw config values are the local-layer ones.
-      cache_geometries[f'layer_{i}'] = kv_cache_manager.CacheGeometry(
+      cache_geometries[f'layer_{i}'] = datatypes.CacheGeometry(
           num_kv_heads=layer.attn.num_kv_heads,
           head_dim=layer.attn.head_dim,
           window_size=(
@@ -775,7 +826,7 @@ class Gemma4(BackendMappingMixin, nnx.Module):
               else None
           ),
       )
-    return kv_cache_manager.KVCacheManager(cache_config, cache_geometries)
+    return cache_geometries
 
   def _encode_vision(self, vision_input: PreprocessedVisionInput):
     """Encode images into the same space as the text embeddings."""

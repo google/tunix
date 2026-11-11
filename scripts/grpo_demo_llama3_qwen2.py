@@ -20,6 +20,8 @@ includes training, evaluation, and inference.
 Example usage:
 python3 grpo_demo_llama3_qwen2.py --root-dir=/path/to/root_dir \
 --model-version=Qwen/Qwen2.5-0.5B-Instruct
+python3 grpo_demo_llama3_qwen2.py --root-dir=/path/to/root_dir \
+--model-version=unsloth/Llama-3.2-1B-Instruct
 
 """
 
@@ -39,7 +41,6 @@ from tqdm.auto import tqdm
 import transformers
 from tunix.cli.utils import data as data_lib
 from tunix.examples.data import math_dataset
-from tunix.generate import mappings
 from tunix.models.llama3 import model as llama_lib
 from tunix.models.llama3 import params as llama_params
 from tunix.models.qwen2 import model as qwen2_lib
@@ -104,9 +105,12 @@ parser.add_argument(
 parser.add_argument(
     "--model-version",
     type=str,
-    default="meta-llama/Llama-3.2-1B-Instruct",
+    default="Qwen/Qwen2.5-0.5B-Instruct",
     required=False,
-    help="The model version to use.",
+    help=(
+        "Hugging Face model ID to use (e.g., Qwen/Qwen2.5-0.5B-Instruct, "
+        "unsloth/Llama-3.2-1B-Instruct, or unsloth/Llama-3.2-3B-Instruct)."
+    ),
 )
 parser.add_argument(
     "--num-generations",
@@ -161,7 +165,7 @@ parser.add_argument(
     "--rollout-engine",
     type=str,
     default="vanilla",
-    choices=["vanilla", "vllm", "sglang_jax"],
+    choices=["vanilla", "vllm"],
     required=False,
     help="Rollout engine to use (vanilla or vllm).",
 )
@@ -288,13 +292,6 @@ parser.add_argument(
     help="Alpha of LoRA.",
 )
 parser.add_argument(
-    "--lora-target-modules",
-    nargs="+",
-    type=str,
-    default=None,
-    help="List of target modules to apply LoRA",
-)
-parser.add_argument(
     "--enable-perf-v1",
     action="store_true",
     default=False,
@@ -351,8 +348,6 @@ VLLM_MODEL_VERSION = os.path.join(
     args.root_dir, VLLM_MODEL_SUBDIR, HF_MODEL_VERSION
 )
 
-SGLANGJAX_MODEL_VERSION = VLLM_MODEL_VERSION
-
 # ====== Base Model ======
 NNX_CKPT_DIR = os.path.join(args.root_dir, "rl/grpo/models/", HF_MODEL_VERSION)
 
@@ -363,11 +358,6 @@ SEED = 42
 ENABLE_LORA = args.enable_lora
 RANK = args.lora_rank
 ALPHA = args.lora_alpha
-LORA_TARGET_MODULES = args.lora_target_modules
-if ENABLE_LORA and LORA_TARGET_MODULES is None:
-  raise ValueError(
-      f"{LORA_TARGET_MODULES} can not be None when LoRA is enabled!"
-  )
 
 # ====== Sharding ======
 if "Qwen2.5-0.5B-Instruct" in args.model_version:
@@ -683,6 +673,8 @@ test_dataset, _ = data_lib.post_init_dataset(
 MODEL_CONFIG = {
     "meta-llama/Llama-3.2-1B-Instruct": llama_lib.ModelConfig.llama3p2_1b,
     "meta-llama/Llama-3.2-3B-Instruct": llama_lib.ModelConfig.llama3p2_3b,
+    "unsloth/Llama-3.2-1B-Instruct": llama_lib.ModelConfig.llama3p2_1b,
+    "unsloth/Llama-3.2-3B-Instruct": llama_lib.ModelConfig.llama3p2_3b,
     "meta-llama/Llama-3.1-8B-Instruct": llama_lib.ModelConfig.llama3p1_8b,
     "Qwen/Qwen2.5-0.5B-Instruct": qwen2_lib.ModelConfig.qwen2p5_0p5b,
     "Qwen/Qwen2.5-7B-Instruct": qwen2_lib.ModelConfig.qwen2p5_7b,
@@ -1118,59 +1110,6 @@ if args.enable_profiler:
   )
 
 
-def get_rollout_config(engine: str) -> base_rollout.RolloutConfig:
-  if engine == "sglang_jax":
-    config = base_rollout.RolloutConfig(
-        max_tokens_to_generate=TOTAL_GENERATION_STEPS,
-        max_prompt_length=MAX_PROMPT_LENGTH,
-        kv_cache_size=MAX_PROMPT_LENGTH + TOTAL_GENERATION_STEPS + 256,
-        temperature=TEMPERATURE,
-        top_p=TOP_P,
-        top_k=TOP_K,
-        rollout_mapping_config=mappings.MappingConfig.build(
-            model=ref_model, backend="sglang_jax"
-        ),
-        rollout_sglang_jax_model_version=SGLANGJAX_MODEL_VERSION,
-        rollout_sglang_jax_mem_fraction_static=0.2,
-        rollout_sglang_jax_init_with_random_weights=True,
-        rollout_sglang_jax_disable_radix_cache=True,
-        rollout_sglang_jax_enable_deterministic_sampling=False,
-        rollout_sglang_jax_precompile_bs_paddings=[8],
-        rollout_sglang_jax_precompile_token_paddings=[2048],
-        rollout_sglang_jax_chunked_prefill_size=2048,
-        rollout_sglang_jax_page_size=64,
-    )
-    if ENABLE_LORA:
-      config.rollout_sglang_jax_enable_static_lora = True
-      config.rollout_sglang_jax_lora_target_modules = LORA_TARGET_MODULES
-      config.rollout_sglang_jax_max_lora_rank = RANK
-      config.rollout_sglang_jax_lora_scaling = ALPHA / RANK
-
-    return config
-
-  return base_rollout.RolloutConfig(
-      max_tokens_to_generate=TOTAL_GENERATION_STEPS,
-      max_prompt_length=MAX_PROMPT_LENGTH,
-      kv_cache_size=MAX_PROMPT_LENGTH + TOTAL_GENERATION_STEPS + 256,
-      temperature=TEMPERATURE,
-      top_p=TOP_P,
-      top_k=TOP_K,
-      data_parallel_size=ROLLOUT_MESH[0][0],
-      tensor_parallel_size=ROLLOUT_MESH[0][1],
-      rollout_vllm_model_version=VLLM_MODEL_VERSION,
-      rollout_vllm_hbm_utilization=0.2,
-      rollout_vllm_tpu_backend_type="jax",
-      rollout_vllm_server_mode=args.rollout_server_mode,
-        rollout_vllm_server_mode_submission_threshold=(
-          args.rollout_server_mode_submission_threshold
-        ),
-        rollout_vllm_server_mode_submission_timeout_s=(
-          args.rollout_server_mode_submission_timeout_s
-        ),
-      rollout_vllm_async_scheduling=args.async_scheduling,
-  )
-
-
 # Training config
 cluster_config = rl_engine_lib.ClusterConfig(
     role_to_mesh={
@@ -1193,7 +1132,27 @@ cluster_config = rl_engine_lib.ClusterConfig(
         checkpointing_options=checkpointing_options,
         profiler_options=profiler_options,
     ),
-    rollout_config=get_rollout_config(args.rollout_engine),
+    rollout_config=base_rollout.RolloutConfig(
+        max_tokens_to_generate=TOTAL_GENERATION_STEPS,
+        max_prompt_length=MAX_PROMPT_LENGTH,
+        kv_cache_size=MAX_PROMPT_LENGTH + TOTAL_GENERATION_STEPS + 256,
+        temperature=TEMPERATURE,
+        top_p=TOP_P,
+        top_k=TOP_K,
+        data_parallel_size=ROLLOUT_MESH[0][0],
+        tensor_parallel_size=ROLLOUT_MESH[0][1],
+        rollout_vllm_model_version=VLLM_MODEL_VERSION,
+        rollout_vllm_hbm_utilization=0.2,
+        rollout_vllm_tpu_backend_type="jax",
+        rollout_vllm_server_mode=args.rollout_server_mode,
+        rollout_vllm_server_mode_submission_threshold=(
+            args.rollout_server_mode_submission_threshold
+        ),
+        rollout_vllm_server_mode_submission_timeout_s=(
+            args.rollout_server_mode_submission_timeout_s
+        ),
+        rollout_vllm_async_scheduling=args.async_scheduling,
+    ),
 )
 
 grpo_config = grpo_learner.GRPOConfig(

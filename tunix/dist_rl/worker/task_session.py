@@ -15,8 +15,8 @@
 """Multiplexed out-of-order task execution session (`TaskSession`, `DefaultRouter`)."""
 
 import asyncio
+import contextlib
 import dataclasses
-import hashlib
 import pickle
 import random
 import time
@@ -33,6 +33,7 @@ from typing import (
 )
 
 from absl import logging
+from tunix.common import routing
 from tunix.dist_rl.worker import remote_execution
 
 ActorHandle = remote_execution.ActorHandle
@@ -43,11 +44,14 @@ TransientTransportError = remote_execution.TransientTransportError
 DEFAULT_POLL_RETRY_BUDGET_S: float = 300.0
 DEFAULT_POLL_RETRY_INITIAL_BACKOFF_S: float = 0.5
 DEFAULT_POLL_RETRY_MAX_BACKOFF_S: float = 10.0
+MAX_IN_PLACE_DISPATCH_ATTEMPTS: int = 3
 
 _monotonic: Callable[[], float] = time.monotonic
 
 RouteFn = Callable[[Sequence[ActorHandle], Optional[Any]], ActorHandle]
 OnWorkerUnreachableFn = Callable[[ActorHandle, Exception], None]
+
+_CALLER_ERRORS = (TypeError, ValueError, pickle.PickleError)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -67,9 +71,11 @@ class TaskSessionFaultToleranceConfig:
       the live membership source backing `actors`. Defaults to `None`.
   """
 
-  # TODO(b/577214994): Keep `max_task_retries=0` and
-  # `on_worker_unreachable=None` as the production default until control-plane
-  # dynamic worker eviction support is wired up.
+  # Standalone `TaskSession` defaults to `max_task_retries=0` and
+  # `on_worker_unreachable=None` because direct callers may pass a static
+  # `actors` sequence without membership eviction; production sessions build
+  # this config via `FaultToleranceManager.task_session_fault_tolerance_config`
+  # (`FaultToleranceConfig.enabled=True` by default).
   max_task_retries: int = 0
   on_worker_unreachable: Optional[OnWorkerUnreachableFn] = None
 
@@ -94,36 +100,39 @@ class _InFlightTask:
   args: Tuple[Any, ...]
   kwargs: Dict[str, Any]
   route_key: Optional[Any] = None
+  preferred_actor: Optional[ActorHandle] = None
   retries: int = 0
   dispatching: bool = False
+
+
+@dataclasses.dataclass(slots=True, eq=False)
+class _WorkerRetryState:
+  """Serializes in-place retry probes for a worker after a transient error."""
+
+  outage_start: float
+  next_probe_at: float
+  last_error: TransientTransportError
+  probe_attempts: int = 1
+  # Tasks currently inside `_retry_in_place` for this state.
+  waiters: int = 0
+  # Whether one waiter has a probe `dispatch_task` in flight.
+  probing: bool = False
+  # Wakes every waiter when the state changes: a probe ends, a response is
+  # delivered for the worker, or the state is dropped.
+  wakeup: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
+
+  def wake_waiters(self) -> None:
+    """Wakes current waiters; later waiters wait on a fresh event."""
+    self.wakeup.set()
+    self.wakeup = asyncio.Event()
 
 
 class WorkerUnreachableError(ConnectionError):
   """Raised when a worker remains unreachable past the poll retry budget."""
 
 
-def stable_route_hash(route_key: Any) -> int:
-  """Maps a sticky routing key to a process-stable non-negative integer.
-
-  Args:
-    route_key: The sticky routing key. Non-negative integers are returned
-      as-is; any other value is hashed via its `str()` representation.
-
-  Returns:
-    A non-negative integer suitable for `% num_actors` bucketing.
-
-  Raises:
-    ValueError: If `route_key` is a negative integer.
-  """
-  if isinstance(route_key, int):
-    if route_key < 0:
-      raise ValueError(
-          "An integer route_key is an explicit shard index and must be"
-          f" non-negative, got {route_key}."
-      )
-    return route_key
-  digest = hashlib.blake2b(str(route_key).encode("utf-8"), digest_size=8)
-  return int.from_bytes(digest.digest(), "big")
+# Re-exported: `tunix.dist_rl.worker` exposes it as part of its API.
+stable_route_hash = routing.stable_route_hash
 
 
 class DefaultRouter:
@@ -188,12 +197,13 @@ class TaskSession:
         Defaults to `DefaultRouter()`.
       poll_retry_budget_s: Maximum wall-clock duration in seconds to retry
         consecutive `TransientTransportError` failures when polling a worker
-        before failing all of its in-flight tasks with `WorkerUnreachableError`.
-        Set to `0.0` to fail immediately on the first transient poll error.
+        (or, with fault tolerance enabled, when dispatching to it) before
+        failing all of its in-flight tasks with `WorkerUnreachableError`. Set to
+        `0.0` to fail immediately on the first transient error.
       poll_retry_initial_backoff_s: Initial exponential backoff delay in seconds
-        after the first transient poll failure.
+        after the first transient poll or dispatch failure.
       poll_retry_max_backoff_s: Maximum backoff delay cap in seconds between
-        transient poll retries.
+        transient poll or dispatch retries.
       fault_tolerance_config: Optional `TaskSessionFaultToleranceConfig`
         controlling task retry budget (`max_task_retries`) and upward worker
         eviction notification (`on_worker_unreachable`). Defaults to
@@ -254,11 +264,15 @@ class TaskSession:
     )
     self._response_queue: asyncio.Queue[Any] = asyncio.Queue()
     self._dispatched_tasks: Dict[ActorHandle, Dict[str, _InFlightTask]] = {}
+    self._retry_states: Dict[ActorHandle, _WorkerRetryState] = {}
     self._poll_tasks: Dict[ActorHandle, asyncio.Task[Any]] = {}
     self._retry_tasks: set[asyncio.Task[Any]] = set()
     self._in_flight = 0
     self._closed = False
     self._sentinel = object()
+    self._task_retries_total = 0
+    self._task_unrecovered_total = 0
+    self._stale_responses_total = 0
 
   async def __aenter__(self) -> "TaskSession":
     return self
@@ -266,6 +280,23 @@ class TaskSession:
   async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
     del exc_type, exc_val, exc_tb
     await self.close()
+
+  @property
+  def task_retries_total(self) -> int:
+    """Number of times a task was re-dispatched (in place or across workers)."""
+    return self._task_retries_total
+
+  @property
+  def task_unrecovered_total(self) -> int:
+    """Tasks lost to a worker/transport fault or empty pool, not retried."""
+    return self._task_unrecovered_total
+
+  @property
+  def stale_responses_total(self) -> int:
+    """Responses dropped because their task was no longer pending."""
+    # TODO(b/577214994): Export as `ft/rollout/stale_responses_total` in
+    # `FaultToleranceManager.metrics()`.
+    return self._stale_responses_total
 
   def _notify_if_zero_flight(self) -> None:
     if self._in_flight == 0:
@@ -276,7 +307,22 @@ class TaskSession:
     # TODO(tunix-dev): Incorporate per-worker in-flight load
     # (`len(self._dispatched_tasks.get(actor, ()))`) into routing so retried
     # and newly submitted tasks avoid queueing behind heavily loaded workers.
-    return self._route_fn(self._actors_fn(), route_key)
+    actors = self._actors_fn()
+    if not actors:
+      raise RuntimeError("TaskSession has no registered ActorHandles.")
+    return self._route_fn(actors, route_key)
+
+  def worker_inflight_loads(self) -> list[tuple[ActorHandle, int]]:
+    """Returns `(actor, in_flight_count)` pairs for each current live actor."""
+    return [
+        (
+            actor,
+            len(self._dispatched_tasks[actor])
+            if actor in self._dispatched_tasks
+            else 0,
+        )
+        for actor in self._actors_fn()
+    ]
 
   async def submit(
       self,
@@ -284,6 +330,7 @@ class TaskSession:
       method_name: Optional[str] = None,
       *args: Any,
       route_key: Optional[Any] = None,
+      preferred_actor: Optional[ActorHandle] = None,
       **kwargs: Any,
   ) -> str:
     """Dispatches a task to a routed worker and tracks its completion.
@@ -292,24 +339,39 @@ class TaskSession:
       request_id: Unique identifier for the in-flight request.
       method_name: Remote method name to invoke on the selected worker.
       *args: Positional arguments forwarded to `dispatch_task`.
-      route_key: Optional sticky routing key consumed by `route_fn`.
+      route_key: Optional sticky routing key consumed by `route_fn` when
+        `preferred_actor` is omitted, no longer live, or retried after failure.
+      preferred_actor: Optional initial target `ActorHandle`. Used on the first
+        dispatch attempt if still present in live `actors`; stale handles and
+        fault-tolerant retries fall back to `route_fn(..., route_key)`.
       **kwargs: Keyword arguments forwarded to `dispatch_task`.
 
     Returns:
       The submitted `request_id`.
 
     Raises:
+      TypeError: If `preferred_actor` is neither `None` nor an `ActorHandle`.
       RuntimeError: If the session is closed or no `ActorHandle`s are
         available.
+      WorkerUnreachableError: If the routed worker failed and the task could
+        not be re-dispatched onto a surviving worker.
     """
     if self._closed:
       raise RuntimeError("TaskSession is closed.")
+    if preferred_actor is not None and not isinstance(
+        preferred_actor, ActorHandle
+    ):
+      raise TypeError(
+          "Expected ActorHandle for preferred_actor, got"
+          f" {type(preferred_actor)}"
+      )
     task = _InFlightTask(
         request_id=request_id,
         method_name=method_name,
         args=args,
         kwargs=dict(kwargs) if self._max_task_retries > 0 else kwargs,
         route_key=route_key,
+        preferred_actor=preferred_actor,
     )
     # Increment in_flight BEFORE awaiting dispatch_task so a fast worker
     # completing before dispatch_task's coroutine resumes always finds
@@ -317,10 +379,16 @@ class TaskSession:
     self._in_flight += 1
     try:
       await self._dispatch_with_retries(task)
-    except BaseException:
+    except BaseException as exc:
       # `task.dispatching` stays True only if another path (the poller or
       # `close()`) already accounted for this task's `_in_flight` slot.
       if not task.dispatching:
+        if (
+            not self._closed
+            and isinstance(exc, Exception)
+            and (task.retries > 0 or not isinstance(exc, _CALLER_ERRORS))
+        ):
+          self._task_unrecovered_total += 1
         self._in_flight = max(0, self._in_flight - 1)
         self._notify_if_zero_flight()
       raise
@@ -328,16 +396,230 @@ class TaskSession:
 
   def _fail_task_to_queue(self, exc: Exception) -> None:
     """Delivers a terminal `(None, exc)` outcome and releases its slot."""
+    if not self._closed:
+      self._task_unrecovered_total += 1
     self._response_queue.put_nowait((None, exc))
     self._in_flight = max(0, self._in_flight - 1)
     self._notify_if_zero_flight()
 
-  def _can_retry(self, task: _InFlightTask) -> bool:
-    return (
-        not self._closed
-        and task.retries < self._max_task_retries
-        and bool(self._actors_fn())
+  def _can_retry(self, task: _InFlightTask, failed_actor: ActorHandle) -> bool:
+    if self._closed or task.retries >= self._max_task_retries:
+      return False
+    actors = self._actors_fn()
+    return bool(actors) and failed_actor not in actors
+
+  def _compute_retry_backoff_s(self, attempt: int, elapsed_s: float) -> float:
+    remaining_budget_s = self._poll_retry_budget_s - elapsed_s
+    raw_backoff_s = min(
+        self._poll_retry_max_backoff_s,
+        self._poll_retry_initial_backoff_s * (2 ** min(attempt - 1, 60)),
     )
+    return min(raw_backoff_s * random.uniform(0.8, 1.0), remaining_budget_s)
+
+  async def _retry_in_place(
+      self,
+      actor: ActorHandle,
+      task: _InFlightTask,
+      exc: TransientTransportError,
+  ) -> None:
+    """Retries `task` in place on `actor` after a transient dispatch error.
+
+    Tasks that fail on the same worker share one `_WorkerRetryState`: one
+    waiter at a time sends a probe, at most one per backoff interval, and the
+    worker is declared unreachable once `MAX_IN_PLACE_DISPATCH_ATTEMPTS` or
+    `poll_retry_budget_s` is used up. Once a probe succeeds the state is
+    dropped, and the remaining waiters re-send their own dispatch concurrently.
+    The outage a task waited on still counts toward that task's attempts and
+    budget (measured from its first failure), so a task whose re-sends keep
+    failing on a flapping worker is bounded too. The state is also dropped when
+    its last waiter leaves, so a later blip never inherits a finished outage.
+
+    Args:
+      actor: The worker whose `dispatch_task` raised `exc`.
+      task: The task whose dispatch outcome is ambiguous.
+      exc: The transient error raised by the first dispatch attempt.
+
+    Raises:
+      TransientTransportError: If fault tolerance is disabled, or this
+        coroutine is being cancelled.
+      WorkerUnreachableError: If `actor` was evicted or the retry budget ran
+        out.
+      RuntimeError: If the session is closed.
+    """
+    curr = asyncio.current_task()
+    if not self._fault_tolerance_enabled or (
+        curr is not None and curr.cancelling() > 0
+    ):
+      raise exc
+    if self._poll_retry_budget_s <= 0.0 or MAX_IN_PLACE_DISPATCH_ATTEMPTS <= 1:
+      raise WorkerUnreachableError(
+          f"Worker {actor!r} failed dispatch attempt 1 for"
+          f" request_id={task.request_id!r}: {exc}"
+      ) from exc
+    retry_start = _monotonic()
+    attempts = 1
+    while True:
+      if self._retry_settled(actor, task, exc):
+        return
+      state = self._retry_states.get(actor)
+      if state is None:
+        now = _monotonic()
+        elapsed_s = now - retry_start
+        state = _WorkerRetryState(
+            outage_start=retry_start,
+            next_probe_at=now
+            + self._compute_retry_backoff_s(attempts, elapsed_s),
+            last_error=exc,
+            probe_attempts=attempts,
+        )
+        self._retry_states[actor] = state
+      state.waiters += 1
+      try:
+        if await self._probe_until_recovered(actor, task, state):
+          return
+      finally:
+        state.waiters -= 1
+        if state.waiters == 0 and self._retry_states.get(actor) is state:
+          del self._retry_states[actor]
+      attempts = max(attempts, state.probe_attempts)
+      if self._retry_states.get(actor) is not None:
+        continue  # A newer outage replaced `state`; wait on that one.
+      # Another task's probe succeeded: re-send concurrently.
+      if self._retry_settled(actor, task, exc):
+        return
+      try:
+        self._task_retries_total += 1
+        await actor.dispatch_task(
+            task.request_id, task.method_name, *task.args, **task.kwargs
+        )
+        return
+      except TransientTransportError as replay_exc:
+        if curr is not None and curr.cancelling() > 0:
+          raise
+        exc = replay_exc
+        attempts += 1
+        elapsed_s = _monotonic() - retry_start
+        if (
+            attempts >= MAX_IN_PLACE_DISPATCH_ATTEMPTS
+            or elapsed_s >= self._poll_retry_budget_s
+        ):
+          raise WorkerUnreachableError(
+              f"Worker {actor!r} failed {attempts} dispatch attempts across"
+              f" {elapsed_s:.1f}s for request_id={task.request_id!r}: {exc}"
+          ) from exc
+
+  async def _probe_until_recovered(
+      self,
+      actor: ActorHandle,
+      task: _InFlightTask,
+      state: _WorkerRetryState,
+  ) -> bool:
+    """Waits on `state`, probing `actor` with `task` when a probe is due.
+
+    At most one waiter probes at a time (`state.probing`). Every other waiter
+    sleeps on `state.wakeup`, so a response the poller delivers for any waiter
+    releases that waiter immediately.
+
+    Args:
+      actor: The worker being probed.
+      task: The task to re-send as the probe.
+      state: The worker's current retry state.
+
+    Returns:
+      `True` if `task` is done: its own probe succeeded (dropping `state`) or
+      the poller delivered its response. `False` if another task's probe
+      resolved `state` (or a newer outage replaced it) first.
+
+    Raises:
+      WorkerUnreachableError: If `actor` was evicted or the retry budget ran
+        out.
+      RuntimeError: If the session is closed.
+    """
+    curr = asyncio.current_task()
+    while True:
+      # Snapshot before the checks: any change after them sets this event.
+      wakeup = state.wakeup
+      if self._retry_settled(actor, task, state.last_error):
+        return True
+      if self._retry_states.get(actor) is not state:
+        return False
+      if state.probing:
+        await wakeup.wait()
+        continue
+      if state.probe_attempts >= MAX_IN_PLACE_DISPATCH_ATTEMPTS:
+        raise WorkerUnreachableError(
+            f"Worker {actor!r} failed {state.probe_attempts} dispatch"
+            f" attempts for request_id={task.request_id!r}:"
+            f" {state.last_error}"
+        ) from state.last_error
+      delay_s = state.next_probe_at - _monotonic()
+      if delay_s > 0.0:
+        with contextlib.suppress(asyncio.TimeoutError):
+          await asyncio.wait_for(wakeup.wait(), timeout=delay_s)
+        continue
+      state.probing = True
+      try:
+        self._task_retries_total += 1
+        await actor.dispatch_task(
+            task.request_id, task.method_name, *task.args, **task.kwargs
+        )
+      except TransientTransportError as probe_exc:
+        if curr is not None and curr.cancelling() > 0:
+          raise
+        state.last_error = probe_exc
+        state.probe_attempts += 1
+        now = _monotonic()
+        elapsed_s = now - state.outage_start
+        # Checked right after the probe fails, so the last backoff (clamped to
+        # the remaining budget) still ends in a probe.
+        if elapsed_s >= self._poll_retry_budget_s:
+          raise WorkerUnreachableError(
+              f"Worker {actor!r} stayed unreachable for {elapsed_s:.1f}s"
+              f" across {state.probe_attempts} dispatch attempts for"
+              f" request_id={task.request_id!r}: {probe_exc}"
+          ) from probe_exc
+        state.next_probe_at = now + self._compute_retry_backoff_s(
+            state.probe_attempts, elapsed_s
+        )
+      else:
+        if self._retry_states.get(actor) is state:
+          del self._retry_states[actor]
+        return True
+      finally:
+        state.probing = False
+        state.wake_waiters()
+
+  def _retry_settled(
+      self,
+      actor: ActorHandle,
+      task: _InFlightTask,
+      last_error: TransientTransportError,
+  ) -> bool:
+    """Returns whether `task` no longer needs an in-place retry on `actor`.
+
+    Args:
+      actor: The worker `task` is being retried on.
+      task: The task being retried.
+      last_error: The latest transient error, chained onto raised errors.
+
+    Returns:
+      `True` if the poller already delivered `task`'s response.
+
+    Raises:
+      RuntimeError: If the session is closed.
+      WorkerUnreachableError: If `actor` was evicted or removed from the live
+        actors.
+    """
+    if self._dispatched_tasks[actor].get(task.request_id) is not task:
+      return True
+    if self._closed:
+      raise RuntimeError("TaskSession is closed.")
+    if actor not in self._poll_tasks or actor not in self._actors_fn():
+      raise WorkerUnreachableError(
+          f"Worker {actor!r} failed while retrying"
+          f" request_id={task.request_id!r}: {last_error}"
+      ) from last_error
+    return False
 
   async def _dispatch_with_retries(self, task: _InFlightTask) -> None:
     """Routes and dispatches `task`, retrying on surviving workers on failure.
@@ -348,17 +630,38 @@ class TaskSession:
 
     Args:
       task: The in-flight task to route and dispatch.
+
+    Raises:
+      RuntimeError: If no `ActorHandle`s are registered in the session.
+      WorkerUnreachableError: If the target worker fails while dispatching with
+        fault tolerance enabled and no retry succeeds.
     """
     while True:
-      actor = self.route(task.route_key)
+      live_actors = self._actors_fn()
+      if not live_actors:
+        raise RuntimeError("TaskSession has no registered ActorHandles.")
+      preferred = task.preferred_actor
+      task.preferred_actor = None
+      actor = (
+          preferred
+          if preferred is not None and preferred in live_actors
+          else self._route_fn(live_actors, task.route_key)
+      )
       dispatched_map = self._dispatched_tasks.setdefault(actor, {})
       task.dispatching = True
       dispatched_map[task.request_id] = task
       self._ensure_worker_polling(actor)
+      dedup_eviction = False
       try:
-        await actor.dispatch_task(
-            task.request_id, task.method_name, *task.args, **task.kwargs
-        )
+        if task.retries > 0:
+          self._task_retries_total += 1
+        try:
+          await actor.dispatch_task(
+              task.request_id, task.method_name, *task.args, **task.kwargs
+          )
+        except TransientTransportError as exc:
+          dedup_eviction = True
+          await self._retry_in_place(actor, task, exc)
         # `_ensure_worker_polling` registered a poller for `actor` above; it
         # can only have disappeared if `_handle_worker_failure(actor, ...)` ran
         # while `dispatch_task` was awaiting.
@@ -369,6 +672,7 @@ class TaskSession:
         ):
           if self._fault_tolerance_enabled:
             # `actor` was evicted; never respawn a poller on it.
+            dedup_eviction = True
             raise WorkerUnreachableError(
                 f"Worker {actor!r} failed while dispatching"
                 f" request_id={task.request_id!r}."
@@ -396,22 +700,30 @@ class TaskSession:
           )
           cancel_err.__cause__ = exc
           exc = cancel_err
-        if dispatched_map.pop(task.request_id, None) is None:
+        if dispatched_map.get(task.request_id) is not task:
           # The poller already delivered this task's result and released its
           # `_in_flight` slot (or `close()` cleared it).
           if isinstance(exc, Exception):
             task.dispatching = False
             return
           raise
+        poller_alive = actor in self._poll_tasks
+        del dispatched_map[task.request_id]
         task.dispatching = False
+        if not dispatched_map:
+          poll_task = self._poll_tasks.pop(actor, None)
+          if poll_task is not None and not poll_task.done():
+            poll_task.cancel()
         if (
             isinstance(exc, Exception)
-            and not isinstance(exc, (TypeError, ValueError, pickle.PickleError))
+            and not isinstance(exc, _CALLER_ERRORS)
             and not self._closed
             and self._fault_tolerance_enabled
+            and (current is None or current.cancelling() == 0)
         ):
-          self._handle_worker_failure(actor, exc)
-          if self._can_retry(task):
+          if poller_alive or not dedup_eviction:
+            self._handle_worker_failure(actor, exc)
+          if self._can_retry(task, actor):
             task.retries += 1
             continue
         raise exc
@@ -431,6 +743,9 @@ class TaskSession:
         and not poll_task.done()
     ):
       poll_task.cancel()
+    state = self._retry_states.pop(actor, None)
+    if state is not None:
+      state.wake_waiters()
     if self._on_worker_unreachable is not None:
       try:
         self._on_worker_unreachable(actor, exc)
@@ -448,7 +763,7 @@ class TaskSession:
     ]
     for task in orphaned_tasks:
       dispatched_map.pop(task.request_id, None)
-      if self._can_retry(task):
+      if self._can_retry(task, actor):
         task.retries += 1
         retry_task = asyncio.create_task(self._retry_or_fail_task(task, exc))
         self._retry_tasks.add(retry_task)
@@ -478,20 +793,12 @@ class TaskSession:
 
   async def _poll_worker_loop(self, actor: ActorHandle) -> None:
     """Long-polls a single active worker until its in-flight set drains."""
-    # TODO: b/577214994 - Add ACK-based response redelivery so a response whose
-    # final frame was handed to the server transport just before a connection
-    # drop is retained until acknowledged by the client. Currently no outer
-    # orchestrator timeout covers this window, so a lost response stalls
-    # polling_stage until ACK redelivery lands.
-    # TODO: b/577214994 - Detect in-place worker restarts. If a worker process
-    # restarts at the same address within `poll_retry_budget_s` (e.g., a k8s
-    # `restartPolicy: OnFailure` container restart), the reconnected poll
-    # returns `None` from the new process's empty response queue and resets
-    # the outage budget below, so tasks dispatched to the old process are
-    # never completed or failed. Planned fix: have the server attach a
-    # per-process incarnation token to `PollResponses` and `DispatchTask`
-    # responses, and raise a non-transient `WorkerRestartedError` from
-    # `GrpcRemoteActorHandle` when it changes.
+    # TODO(b/577214994): Detect same-port server restarts for static-handle
+    # callers (e.g. via a per-process incarnation token). Discovery-backed
+    # rollout workers replace `actor` in `self._actors_fn()` on rejoin, whereas
+    # static-handle `TaskSession` callers (pinned by
+    # `test_bug_pin_same_port_worker_restart_loses_in_flight_task`) can still
+    # reconnect to an empty restarted server and stall.
     outage_start: Optional[float] = None
     retry_attempts = 0
     try:
@@ -499,22 +806,52 @@ class TaskSession:
         dispatched_map = self._dispatched_tasks.setdefault(actor, {})
         if not dispatched_map:
           break
+        if (
+            self._fault_tolerance_enabled or outage_start is not None
+        ) and actor not in self._actors_fn():
+          self._handle_worker_failure(
+              actor,
+              WorkerUnreachableError(
+                  f"Worker {actor!r} was removed from active actors while"
+                  " tasks remained in flight."
+              ),
+          )
+          break
         backoff_s: Optional[float] = None
         try:
-          response = await actor.poll_responses(timeout_s=LONG_POLL_TIMEOUT_S)
+          poll_timeout_s = (
+              0.0 if outage_start is not None else LONG_POLL_TIMEOUT_S
+          )
+          response = await actor.poll_responses(timeout_s=poll_timeout_s)
+          if self._closed or not dispatched_map:
+            break
           outage_start = None
           retry_attempts = 0
           if isinstance(response, ExecutionResponse):
-            if (
-                not response.request_id
-                or response.request_id not in dispatched_map
-            ):
+            if not response.request_id:
               raise RuntimeError(
-                  "Received ExecutionResponse with unknown or missing"
+                  "Received ExecutionResponse with missing"
                   f" request_id={response.request_id!r}; in-flight"
                   f" request_ids={sorted(dispatched_map)!r}."
               )
+            if response.request_id not in dispatched_map:
+              self._stale_responses_total += 1
+              logging.log_every_n_seconds(
+                  logging.WARNING,
+                  "Dropping response for request_id=%r from worker %r that is"
+                  " no longer pending (stale_responses_total=%d).",
+                  10.0,
+                  response.request_id,
+                  actor,
+                  self._stale_responses_total,
+              )
+              continue
             dispatched_map.pop(response.request_id)
+            # Wake retry waiters on this worker so a delivered task stops
+            # waiting.
+            state = self._retry_states.get(actor)
+            if state is not None:
+              state.wake_waiters()
             self._in_flight = max(0, self._in_flight - 1)
             try:
               res = response.unwrap()
@@ -563,14 +900,7 @@ class TaskSession:
             unreachable_err.__cause__ = exc
             self._handle_worker_failure(actor, unreachable_err)
             break
-          remaining_budget_s = self._poll_retry_budget_s - elapsed_s
-          raw_backoff_s = min(
-              self._poll_retry_max_backoff_s,
-              self._poll_retry_initial_backoff_s
-              * (2 ** min(retry_attempts - 1, 60)),
-          )
-          jittered_backoff_s = raw_backoff_s * random.uniform(0.8, 1.0)
-          backoff_s = min(jittered_backoff_s, remaining_budget_s)
+          backoff_s = self._compute_retry_backoff_s(retry_attempts, elapsed_s)
           if retry_attempts == 1:
             logging.warning(
                 "Transient transport error polling worker %r (attempt %d,"
@@ -664,6 +994,9 @@ class TaskSession:
   async def close(self) -> None:
     """Closes the session and cancels all background polling and retry tasks."""
     self._closed = True
+    for state in self._retry_states.values():
+      state.wake_waiters()
+    self._retry_states.clear()
     self._response_queue.put_nowait(self._sentinel)
     tasks = list(self._poll_tasks.values()) + list(self._retry_tasks)
     for t in tasks:

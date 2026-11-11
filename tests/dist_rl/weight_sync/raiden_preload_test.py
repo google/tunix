@@ -30,7 +30,10 @@ class ImportRaidenTest(absltest.TestCase):
     self.assertEqual(loaded, raiden_preload.RAIDEN_MODULES)
     self.assertEqual(
         [c.args[0] for c in importer.call_args_list],
-        [f"tpu_sync.frameworks.jax.{n}" for n in raiden_preload.RAIDEN_MODULES],
+        [
+            f"tpu_sync.frameworks.jax.{n}"
+            for n in raiden_preload.RAIDEN_MODULES
+        ],
     )
 
   def test_absent_wheel_is_not_an_error(self):

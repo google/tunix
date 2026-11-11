@@ -300,7 +300,7 @@ class PerfTracerTest(absltest.TestCase):
     t = tracer.PerfTracer()
 
     with mock.patch.object(tracer, "jax", autospec=True) as mock_jax:
-      mock_jax.devices.return_value = ["fast_dev", "slow_dev"]
+      mock_jax.local_devices.return_value = ["fast_dev", "slow_dev"]
 
       # Mock device_put returning an object with block_until_ready
       mock_future_fast = mock.Mock()
@@ -675,7 +675,7 @@ class PrivateHelpersTest(absltest.TestCase):
 
   def test_synchronize_devices(self):
     with mock.patch.object(tracer, "jax", autospec=True) as mock_jax:
-      mock_jax.devices.return_value = ["d1"]
+      mock_jax.local_devices.return_value = ["d1"]
       mock_put = mock_jax.device_put
       mock_put.return_value.block_until_ready = mock.Mock()
 

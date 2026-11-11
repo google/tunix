@@ -11,7 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""GSM8K agentic components used by the distributed GRPO example."""
+"""GSM8K components for the distributed GRPO example.
+
+* The rollout node imports this module (`cluster_config.registry_module`),
+  which registers `GSM8KEnv` and `GSM8KAgent`.
+* The orchestrator calls `create_dataset(**data_config)` (`data_module`) for
+  the task records.
+
+`gsm8k_rewards.py` holds the orchestrator-side reward function for
+`agentic_grpo_config.reward_mode: reward_fn`.
+"""
 
 import collections.abc
 import logging
@@ -51,7 +60,17 @@ normalize_answer = gsm8k_vtc.normalize_answer
 def score_gsm8k_completion(
     completion: str, gold_answer: Any
 ) -> tuple[float, dict[str, Any]]:
-  """Scores a completion with the VTC recipe reward (1.0 / 0.1 / 0.5 / 0.0)."""
+  """Scores a completion against the gold answer.
+
+  Args:
+    completion: Model completion.
+    gold_answer: Gold answer, as read from the dataset.
+
+  Returns:
+    The reward (1.0 for a correct answer in the expected format, 0.5 for a
+    correct answer only, 0.1 for the format only, and 0.0 otherwise) and the
+    format check, answer check, and normalized answers behind it.
+  """
   reward, format_ok, answer_ok, _ = gsm8k_vtc.vtc_completion_outcome(
       completion, gold_answer
   )
@@ -65,7 +84,7 @@ def score_gsm8k_completion(
 
 def load_gsm8k_dataset(
     split: str = "train",
-    data_dir: str = "/tmp/gsm8k_data",
+    data_dir: str | None = "/tmp/gsm8k_data",
     shuffle: bool = True,
     seed: int = 42,
     dataset_name: str = "gsm8k",
@@ -98,6 +117,57 @@ def load_gsm8k_dataset(
   )
 
 
+def create_dataset(
+    *, split: str, shuffle: bool, seed: int, data_dir: str | None = None
+) -> grain.MapDataset:
+  """Returns the GSM8K task records for the distributed orchestrator.
+
+  The orchestrator calls `create_dataset(**data_config)` (`data_module`). Each
+  record holds the prompt and its `metadata`: `question` and the gold `answer`
+  for trajectory logging and reward functions, plus the `env_config` that the
+  rollout worker builds `GSM8KEnv` from.
+
+  Args:
+    split: TFDS split, e.g. "train" or "train[:16]".
+    shuffle: Whether to shuffle the split.
+    seed: Shuffle seed.
+    data_dir: TFDS data directory; GSM8K is downloaded there when missing. None
+      uses the TFDS default (`TFDS_DATA_DIR`, or `~/tensorflow_datasets`).
+
+  Returns:
+    The `{"prompt", "metadata"}` records.
+  """
+  return load_gsm8k_dataset(
+      split=split, data_dir=data_dir, shuffle=shuffle, seed=seed
+  ).map(_to_task_record)
+
+
+# TODO(noghabi): Validate a non-empty `#### <answer>` in `load_gsm8k_dataset`
+# (and stop coercing a missing answer to "" in `GSM8KEnv.__init__`), and type
+# the task records with a `TypedDict`.
+def _to_task_record(
+    example: collections.abc.Mapping[str, object],
+) -> dict[str, object]:
+  """Maps a `load_gsm8k_dataset` example to an orchestrator task record."""
+  prompt = example["prompts"]
+  question = example["question"]
+  answer = example["answer"]
+  return {
+      "prompt": prompt,
+      "metadata": {
+          "question": question,
+          "answer": answer,
+          # `GSM8KEnv` is constructed from `env_config` on the rollout worker
+          # and stripped before returning trajectories to the orchestrator.
+          "env_config": {
+              "prompt": prompt,
+              "question": question,
+              "answer": answer,
+          },
+      },
+  }
+
+
 def gsm8k_env_reward(
     task: dict[str, Any], action: Any
 ) -> tuple[float, dict[str, Any]]:
@@ -106,42 +176,9 @@ def gsm8k_env_reward(
   return score_gsm8k_completion(str(completion), gold_answer)
 
 
-def make_gsm8k_reward_fn(
-    debug: bool = False,
-) -> collections.abc.Callable[..., list[float]]:
-  """Creates an orchestrator-side reward function scoring completions against gold answers."""
-
-  def reward_fn(
-      prompts: collections.abc.Sequence[str],
-      completions: collections.abc.Sequence[str],
-      answer: collections.abc.Sequence[str],
-      **kwargs: Any,
-  ) -> list[float]:
-    del kwargs
-    rewards: list[float] = []
-    for prompt, completion, gold_answer in zip(
-        prompts, completions, answer, strict=True
-    ):
-      reward, _ = score_gsm8k_completion(completion, gold_answer)
-      if debug:
-        logging.debug(
-            "[Orchestrator] Sampler response for %s:\n"
-            "[Sampled Response] ---\n%s\n--- [End Response] ---\n"
-            "Gold Answer: %s, Extracted Answer: %s",
-            prompt,
-            completion,
-            gold_answer,
-            extract_boxed_answer(completion),
-        )
-      rewards.append(reward)
-    return rewards
-
-  return reward_fn
-
-
 @registry.register_env(GSM8K_ENV_NAME)
 class GSM8KEnv(base_environment.BaseTaskEnv):
-  """Single-step GSM8K environment for VTC math rollouts."""
+  """Single-step GSM8K math environment."""
 
   def __init__(
       self,

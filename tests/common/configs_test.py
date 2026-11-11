@@ -1,6 +1,25 @@
 from absl.testing import absltest
+from absl.testing import parameterized
 import optax
 from tunix.common import configs
+from tunix.common import datatypes
+
+
+class CacheGeometryTest(parameterized.TestCase):
+
+  @parameterized.named_parameters(
+      dict(testcase_name="zero_num_kv_heads", field="num_kv_heads", value=0),
+      dict(testcase_name="zero_head_dim", field="head_dim", value=0),
+      dict(testcase_name="zero_window_size", field="window_size", value=0),
+      dict(
+          testcase_name="negative_window_size", field="window_size", value=-8
+      ),
+  )
+  def test_non_positive_field_raises(self, field, value):
+    kwargs = dict(num_kv_heads=2, head_dim=16, window_size=8)
+    kwargs[field] = value
+    with self.assertRaisesRegex(ValueError, rf"{field} must be positive"):
+      datatypes.CacheGeometry(**kwargs)
 
 
 class ConfigsTest(absltest.TestCase):
@@ -158,6 +177,47 @@ class ConfigsTest(absltest.TestCase):
 
     with self.assertRaisesRegex(ValueError, "timeout_secs must be > 0"):
       configs.RLProfileConfig(timeout_secs=float("nan"))
+
+  def test_rollout_config_validation(self):
+    cfg = configs.RolloutConfig(
+        max_response_length=256,
+        episode_timeout=120,
+        weight_sync_mode="raiden",
+    )
+    self.assertEqual(cfg.max_response_length, 256)
+    self.assertEqual(cfg.episode_timeout, 120.0)
+    self.assertIsInstance(cfg.episode_timeout, float)
+    self.assertEqual(cfg.weight_sync_mode, "raiden")
+
+    # Positional arguments should be rejected (kw_only=True).
+    with self.assertRaises(TypeError):
+      configs.RolloutConfig(64)  # pytype: disable=wrong-arg-count
+
+    for bad_max_resp in (0, -1, True, 1.5):
+      with self.assertRaisesRegex(
+          ValueError, "max_response_length must be a positive integer"
+      ):
+        configs.RolloutConfig(max_response_length=bad_max_resp)  # pytype: disable=wrong-arg-types
+
+    for bad_timeout in (
+        0,
+        -1.0,
+        True,
+        False,
+        float("nan"),
+        float("inf"),
+        "60",
+    ):
+      with self.assertRaisesRegex(
+          ValueError, "episode_timeout must be a positive finite number"
+      ):
+        configs.RolloutConfig(episode_timeout=bad_timeout)  # pytype: disable=wrong-arg-types
+
+    for bad_mode in ("raden", "RAIDEN", "invalid", ""):
+      with self.assertRaisesRegex(
+          ValueError, "weight_sync_mode must be one of"
+      ):
+        configs.RolloutConfig(weight_sync_mode=bad_mode)
 
 
 if __name__ == "__main__":

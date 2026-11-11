@@ -21,6 +21,7 @@ AbstractRLEngine.
 """
 
 import asyncio
+import collections
 from collections.abc import Mapping, Sequence
 import concurrent.futures
 import hashlib
@@ -35,13 +36,15 @@ import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import lineage
 from tunix.dist_rl.common import logging_utils
-from tunix.dist_rl.metrics import metrics as exp_metrics
-from tunix.dist_rl.orchestrator import algorithm_adapter
 from tunix.dist_rl.orchestrator import batch_assembly
+from tunix.dist_rl.orchestrator import fault_tolerance_manager as fault_tolerance_manager_lib
 from tunix.dist_rl.orchestrator import rl_engine_interface
 from tunix.dist_rl.orchestrator import worker_registry
 from tunix.dist_rl.worker import remote_execution
 from tunix.dist_rl.worker import task_session
+from tunix.rl import algo_core
+from tunix.rl import algorithm_config
+from tunix.rl import function_registry
 
 
 def _rollout_seed(
@@ -60,6 +63,16 @@ def _rollout_seed(
 
 
 _summarize_list = logging_utils.summarize_list
+# Maximum number of contiguous trajectories per prompt stripe.
+_ROLLOUT_PROMPT_STRIPE_SIZE: int = 4
+# Lower-bound target on stripes per prompt when capping stripe size for fanout.
+_TARGET_STRIPES_PER_PROMPT: int = 4
+
+# Weight sync pushes to serving workers and to late joiners awaiting first sync.
+_WEIGHT_SYNC_DESTINATION_STATUSES = (
+    worker_registry.AdmissionStatus.ACTIVE,
+    worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
+)
 
 
 def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
@@ -100,43 +113,33 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       registry: worker_registry.WorkerRegistry,
       weight_sync_coordinator: Any = None,
       *,
-      fault_tolerance_config: datatypes.FaultToleranceConfig | None = None,
+      fault_tolerance_manager: (
+          fault_tolerance_manager_lib.FaultToleranceManager | None
+      ) = None,
   ):
+    """Initializes DistributedRLEngine."""
     self._registry = registry
-    ft_cfg = fault_tolerance_config or datatypes.FaultToleranceConfig()
-    self._fault_tolerance_config = ft_cfg
+    self._fault_tolerance_manager = (
+        fault_tolerance_manager
+        or fault_tolerance_manager_lib.FaultToleranceManager(registry)
+    )
+    self._fault_tolerance_manager.check_rollout_capacity()
     self._rollout_session = task_session.TaskSession(
         self._rollout_handles,
-        poll_retry_budget_s=ft_cfg.effective_poll_retry_budget_s,
-        fault_tolerance_config=task_session.TaskSessionFaultToleranceConfig(
-            max_task_retries=ft_cfg.effective_max_task_retries,
-            on_worker_unreachable=(
-                self._on_worker_unreachable if ft_cfg.enabled else None
-            ),
+        poll_retry_budget_s=(
+            self._fault_tolerance_manager.config.effective_poll_retry_budget_s
+        ),
+        fault_tolerance_config=(
+            self._fault_tolerance_manager.task_session_fault_tolerance_config()
         ),
     )
     self._policy_version = 0
+    self._last_routed_actor: remote_execution.ActorHandle | None = None
     self._weight_sync_coordinator = weight_sync_coordinator
     self._restored_checkpoint_metadata: dict[str, Any] | None = None
-
-  def _on_worker_unreachable(
-      self,
-      handle: remote_execution.ActorHandle,
-      exc: Exception,
-  ) -> None:
-    """Evicts an unreachable worker handle from the control-plane registry."""
-    # TODO(b/577214994): Track and log worker failure counts (total failure
-    # events and distinct failed workers), report the percentage of failed
-    # workers to the user, and add `terminate_on_worker_failure_percent` to
-    # fail the job when the failed worker ratio reaches the configured
-    # threshold.
-    worker_id = self._registry.unregister_handle(handle)
-    if worker_id is not None:
-      logging.warning(
-          "Evicted unreachable worker %r from WorkerRegistry: %s",
-          worker_id,
-          exc,
-      )
+    self._inflight_fwd_bwd: dict[
+        datatypes.Role | str, set[asyncio.Future[None]]
+    ] = collections.defaultdict(set)
 
   def _rollout_handles(self) -> list[remote_execution.ActorHandle]:
     return self._registry.handles(datatypes.Role.ROLLOUT)
@@ -158,7 +161,11 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
   ) -> None:
     """Seeds trainer-side weight sync with the rollout target-state skeleton."""
     trainer = self._role_handle(role)
-    rollout_handles = self._rollout_handles()
+    # Match the weight sync destinations: a rejoined rollout worker still in
+    # PENDING_WEIGHT_SYNC can seed the trainer before its first sync.
+    rollout_handles = self._registry.handles(
+        datatypes.Role.ROLLOUT, statuses=_WEIGHT_SYNC_DESTINATION_STATUSES
+    )
     if trainer is None or not rollout_handles:
       return
 
@@ -188,29 +195,94 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       self,
       requests: Sequence[datatypes.RolloutRequest],
   ) -> list[str]:
-    """Dispatches pre-formed RolloutRequests across rollout workers."""
+    """Dispatches pre-formed RolloutRequests across rollout workers.
+
+    When multiple rollout workers are active, groups requests by `prompt_id`
+    (colocating duplicate `traj_id` entries submitted within the same call, not
+    across separate calls), slices each prompt's trajectories into contiguous
+    stripes of size `min(_ROLLOUT_PROMPT_STRIPE_SIZE, max(1, num_trajs //
+    min(num_workers, _TARGET_STRIPES_PER_PROMPT)))`, and assigns each stripe via
+    `preferred_actor` to the worker with the lowest in-flight load (breaking
+    ties via an actor-identity round-robin cursor). Every submission retains
+    `route_key=req.traj_id` so stale-handle fallbacks and fault-tolerant retries
+    spread across surviving workers.
+
+    Args:
+      requests: Rollout requests to dispatch.
+
+    Returns:
+      The list of dispatched `request_id` strings.
+    """
     requests = self._build_rollout_requests(requests)
+    actors_and_loads = self._rollout_session.worker_inflight_loads()
+    actors = [actor for actor, _ in actors_and_loads]
+    worker_loads = [load for _, load in actors_and_loads]
+    num_workers = len(actors)
     logging.info(
         "Dispatching %d rollout request(s) across %d worker(s).",
         len(requests),
-        len(self._rollout_handles()),
+        num_workers,
     )
     for req in requests:
       logging.debug(
           "Dispatched rollout request (prompt_id=%s, group_index=%d,"
           " request_id=%s).",
-          getattr(req, "prompt_id", ""),
-          getattr(req, "group_index", 0),
+          req.prompt_id,
+          req.group_index,
           req.request_id,
       )
+
+    target_actors: list[remote_execution.ActorHandle | None] = [None] * len(
+        requests
+    )
+    if num_workers > 1 and requests:
+      prompt_traj_buckets: dict[str, dict[str, list[int]]] = {}
+      for idx, req in enumerate(requests):
+        pid = str(req.prompt_id)
+        if pid not in prompt_traj_buckets:
+          prompt_traj_buckets[pid] = {}
+        traj_buckets = prompt_traj_buckets[pid]
+        if req.traj_id not in traj_buckets:
+          traj_buckets[req.traj_id] = []
+        traj_buckets[req.traj_id].append(idx)
+
+      min_stripes = min(num_workers, _TARGET_STRIPES_PER_PROMPT)
+      rr_cursor = 0
+      if self._last_routed_actor is not None:
+        for w_idx, actor in enumerate(actors):
+          if actor == self._last_routed_actor:
+            rr_cursor = (w_idx + 1) % num_workers
+            break
+      best_w = 0
+      for traj_buckets in prompt_traj_buckets.values():
+        traj_units = list(traj_buckets.values())
+        eff_stripe = min(
+            _ROLLOUT_PROMPT_STRIPE_SIZE,
+            max(1, len(traj_units) // min_stripes),
+        )
+        for i in range(0, len(traj_units), eff_stripe):
+          stripe_req_indices: list[int] = []
+          for unit in traj_units[i : i + eff_stripe]:
+            stripe_req_indices.extend(unit)
+          _, _, best_w = min(
+              (worker_loads[w], (w - rr_cursor) % num_workers, w)
+              for w in range(num_workers)
+          )
+          worker_loads[best_w] += len(stripe_req_indices)
+          rr_cursor = (best_w + 1) % num_workers
+          for req_idx in stripe_req_indices:
+            target_actors[req_idx] = actors[best_w]
+      self._last_routed_actor = actors[best_w]
+
     await asyncio.gather(*(
         self._rollout_session.submit(
             req.request_id,
             "generate",
             requests=[req],
             route_key=req.traj_id,
+            preferred_actor=actor,
         )
-        for req in requests
+        for req, actor in zip(requests, target_actors, strict=True)
     ))
 
     return [r.request_id for r in requests]
@@ -236,6 +308,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     version = kwargs.get("policy_version", policy_version)
 
     rollout_reqs: list[datatypes.RolloutRequest] = []
+    req_task_names: list[str] = []
     for idx, p in enumerate(prompts):
       if isinstance(p, datatypes.RolloutRequest):
         if p.prompt_id is None or p.prompt_id == "":
@@ -254,6 +327,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         for k, v in base_generation_kwargs.items():
           p.generation_kwargs.setdefault(k, v)
         rollout_reqs.append(p)
+        req_task_names.append("")
         continue
 
       item_metadata = dict(getattr(p, "metadata", {}) or {})
@@ -277,6 +351,14 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         )
 
       prompt_id = str(prompt_id)
+      item_task_name = (
+          p["task_name"] if isinstance(p, Mapping) and "task_name" in p else ""
+      )
+      if not isinstance(item_task_name, str):
+        raise TypeError(
+            f"Prompt at index {idx} has non-string 'task_name' of type"
+            f" {type(item_task_name).__name__}."
+        )
       raw_prompt = (
           p.get("prompt", p)
           if isinstance(p, Mapping)
@@ -319,12 +401,10 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
                 generation_kwargs=generation_kwargs,
                 max_turns=max_turns,
                 max_response_length=max_response_length,
-                exact_token_continuity=kwargs.get(
-                    "exact_token_continuity", True
-                ),
                 metadata=request_metadata,
             )
         )
+        req_task_names.append(item_task_name)
 
     prompt_ids = list(dict.fromkeys(req.prompt_id for req in rollout_reqs))
     logging.info(
@@ -336,12 +416,13 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         version,
         _summarize_list(prompt_ids),
     )
-    for req in rollout_reqs:
+    for req, req_task_name in zip(rollout_reqs, req_task_names, strict=True):
       if req.metadata is None:
         req.metadata = {}  # pyrefly: ignore[bad-assignment]
       if req.metadata.get("lineage") is None:
         lineage_ctx = lineage.LineageContext(
             tracking_id=req.traj_id,
+            task_name=req_task_name,
             parent_tracking_ids=[str(req.prompt_id)],
         )
         dispatch_attrs: dict[str, Any] = {
@@ -372,8 +453,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     """Dispatches rollout requests across workers, constructing RolloutRequests internally.
 
     Every prompt item in `prompts` MUST have a unique, collision-free
-    `prompt_id`
-    attribute or dict key. Missing prompt IDs raise a ValueError.
+    `prompt_id` attribute or dict key (missing prompt IDs raise a `ValueError`),
+    and may optionally provide a string `task_name` dict key to stamp onto its
+    `LineageContext` (non-string `task_name` values raise a `TypeError`).
     """
     rollout_reqs = self._build_rollout_requests(
         prompts,
@@ -408,6 +490,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
             traj_item.group_index,
         )
         completed.append(traj_item)
+    self._fault_tolerance_manager.check_rollout_capacity()
     return completed
 
   async def generate(
@@ -533,17 +616,49 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         payload=payload,
         metadata=metadata,
     )
-    fwd_bwd_result = await self._invoke_worker(
-        worker, "fwd_bwd", request=request
+    inflight_set = self._inflight_fwd_bwd[role]
+    prior_fwd_bwd = tuple(inflight_set) if apply_optimizer else ()
+    fwd_bwd_done: asyncio.Future[None] = (
+        asyncio.get_running_loop().create_future()
     )
+    inflight_set.add(fwd_bwd_done)
+    try:
+      fwd_bwd_result = await self._invoke_worker(
+          worker, "fwd_bwd", request=request
+      )
+    except BaseException as exc:
+      if not fwd_bwd_done.done():
+        prior_exc = (
+            RuntimeError(
+                "Prior in-flight fwd_bwd was cancelled before optimizer update."
+            )
+            if isinstance(exc, asyncio.CancelledError)
+            else exc
+        )
+        fwd_bwd_done.set_exception(prior_exc)
+        fwd_bwd_done.exception()
+      if apply_optimizer:
+        inflight_set.discard(fwd_bwd_done)
+        inflight_set.difference_update(prior_fwd_bwd)
+      raise
+    else:
+      if not fwd_bwd_done.done():
+        fwd_bwd_done.set_result(None)
+      inflight_set.discard(fwd_bwd_done)
     if not apply_optimizer:
       return fwd_bwd_result
-    train_step = await self._invoke_worker(worker, "update")
+    try:
+      for prior in prior_fwd_bwd:
+        await asyncio.shield(prior)
+    finally:
+      inflight_set.difference_update(prior_fwd_bwd)
+    train_step, metrics = await self._invoke_worker(worker, "update")
     return {
         "fwd_bwd": fwd_bwd_result,
         "updated": True,
         "train_step": train_step,
         "accumulated": accumulate_gradients,
+        "metrics": metrics,
     }
 
   async def get_metrics(
@@ -551,8 +666,8 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       role: datatypes.Role = datatypes.Role.ACTOR,
       **kwargs: Any,
   ) -> (
-      exp_metrics.MetricsBuffer
-      | Sequence[exp_metrics.MetricsBuffer]
+      datatypes.MetricsBuffer
+      | Sequence[datatypes.MetricsBuffer]
       | dict[str, Any]
       | None
   ):
@@ -579,7 +694,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       self,
       role: datatypes.Role = datatypes.Role.ACTOR,
       *,
-      algo: algorithm_adapter.AlgorithmAdapter,
+      algo_config: algorithm_config.AlgorithmConfig,
       assembler: batch_assembly.BatchAssembler[Any],
       **kwargs: Any,
   ) -> None:
@@ -592,18 +707,21 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
 
     Args:
       role: Target worker role to configure (defaults to `Role.ACTOR`).
-      algo: Algorithm adapter providing the loss and model-input functions.
+      algo_config: Algorithm configuration used to resolve the loss and
+        model-input functions.
       assembler: Batch assembler used to build the dummy microbatch for
         ahead-of-time compilation.
       **kwargs: Role-specific configuration options (for trainer roles:
         `can_fuse_agreement_in_loss: bool = True`, `precompile: bool = True`,
-        `return_routed_experts: bool = False`, and optional `pad_id` / `eos_id`
-        overrides).
+        `return_routed_experts: bool = False`, and `pad_id` / `eos_id`.
+        `StandardRLProgram` passes both from its `BatchConfig`; direct callers
+        may omit them, in which case `pad_id` is read from the assembler and
+        `eos_id` defaults to `pad_id`).
     """
     role_name = role.value if isinstance(role, datatypes.Role) else str(role)
-    if algo is None:
+    if algo_config is None:
       raise ValueError(
-          f"algo is required to configure worker for role {role_name}"
+          f"algo_config is required to configure worker for role {role_name}"
       )
     if assembler is None:
       raise ValueError(
@@ -618,42 +736,66 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
             "Auto-configuring trainer loss and model input fn on %s worker...",
             role_name,
         )
-        pad_id = getattr(assembler, "pad_id", kwargs.get("pad_id", 0))
-        eos_id = getattr(assembler, "eos_id", kwargs.get("eos_id", pad_id))
+        pad_id = kwargs.get("pad_id", assembler.pad_id)
+        eos_id = kwargs.get("eos_id", pad_id)
         can_fuse_agreement_in_loss = bool(
             kwargs.get("can_fuse_agreement_in_loss", True)
         )
         precompile = bool(kwargs.get("precompile", True))
         return_routed_experts = bool(kwargs.get("return_routed_experts", False))
-        gen_fn = algo.build_gen_model_input_fn(
-            pad_id=pad_id,
-            eos_id=eos_id,
-        )
-        use_rollout_logps = algo.algo_config.use_rollout_logps
+        if role == datatypes.Role.CRITIC:
+          # TODO(sizhi): The PPO critic is not supported end to end yet:
+          # `create_trainer_payloads` never fills `old_values` and
+          # `build_dummy_payload` carries no `returns` / `old_values`, so the
+          # value loss cannot be precompiled or trained. This branch only wires
+          # the loss and model-input functions.
+          if not isinstance(algo_config, algorithm_config.PPOConfig):
+            raise ValueError(
+                "Configuring a CRITIC trainer worker requires a PPOConfig"
+                f" (with value_loss_fn), got {type(algo_config).__name__}."
+            )
+          loss_fn = function_registry.get_value_loss_fn(
+              algo_config.value_loss_fn
+          )
+          gen_fn = algo_core.build_critic_model_input_fn(
+              algo_config,
+              pad_id=pad_id,
+              eos_id=eos_id,
+          )
+        else:
+          loss_fn = function_registry.get_policy_loss_fn(
+              algo_config.policy_loss_fn
+          )
+          gen_fn = algo_core.build_gen_model_input_fn(
+              algo_config,
+              pad_id=pad_id,
+              eos_id=eos_id,
+          )
+        use_rollout_logps = algo_config.use_rollout_logps
         sampler_agreement_applied = (
             use_rollout_logps and not can_fuse_agreement_in_loss
         )
         with_sampler_is_weights = sampler_agreement_applied and (
-            algo.algo_config.sampler_is is not None
-            or algo.algo_config.sampler_rs is not None
+            algo_config.sampler_is is not None
+            or algo_config.sampler_rs is not None
         )
 
         def _configure():
           assert worker is not None
           # Both setters clear the trainer's JIT cache, so the ahead-of-time
           # compile must run strictly after them.
-          worker.submit("with_loss_fn", algo.loss_fn(), has_aux=True)
+          worker.submit("with_loss_fn", loss_fn, has_aux=True)
           worker.submit("with_gen_model_input_fn", gen_fn)
           if not precompile:
             return
           routed_experts_encode_mode = (
-              algo.algo_config.routed_experts_encode_mode
+              algo_config.routed_experts_encode_mode
               if return_routed_experts
               else "auto"
           )
           dummy_payload = assembler.build_dummy_payload(
               with_old_per_token_logps=use_rollout_logps,
-              with_ref_per_token_logps=algo.requires_reference_kl,
+              with_ref_per_token_logps=algo_config.requires_reference_kl,
               with_sampler_is_weights=with_sampler_is_weights,
               sampler_agreement_applied=sampler_agreement_applied,
               with_routed_experts=return_routed_experts,
@@ -740,14 +882,37 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         next_policy_version,
     )
     result = await self._weight_sync_coordinator.sync(
-        policy_version=next_policy_version
+        policy_version=next_policy_version,
+        destination_statuses=_WEIGHT_SYNC_DESTINATION_STATUSES,
     )
+    for r in result.workers:
+      if r.phase != "committed":
+        continue
+      if self._registry.set_status(
+          r.worker_id,
+          worker_registry.AdmissionStatus.ACTIVE,
+          expected_handle=r.handle,
+          expected_status=worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
+      ):
+        self._fault_tolerance_manager.record_rejoin_promoted()
+        logging.info(
+            "Promoted synced rollout worker %r to %s.",
+            r.worker_id,
+            worker_registry.AdmissionStatus.ACTIVE.value,
+        )
+    self._fault_tolerance_manager.check_rollout_capacity()
     self._policy_version = result.policy_version
     logging.info(
         "Weight synchronization complete (policy_version=%d).",
         self._policy_version,
     )
     return result.policy_version
+
+  def fault_tolerance_metrics(self) -> dict[str, float]:
+    """Returns rollout fleet gauges and cumulative fault-tolerance counters."""
+    return self._fault_tolerance_manager.metrics(
+        rollout_session=self._rollout_session
+    )
 
   async def save_checkpoint(
       self,
@@ -784,13 +949,17 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
   async def resume_from_checkpoint(
       self,
       role: datatypes.Role = datatypes.Role.ACTOR,
-      resync_rollout_weights: bool = True,
   ) -> int:
-    """Restores a checkpoint and realigns the mesh to the restored state.
+    """Restores the trainer checkpoint for `role` and aligns engine policy state.
 
-    See `rl_engine_interface.AbstractRLEngine.resume_from_checkpoint`.
+    Args:
+      role: Trainer role whose checkpoint should be restored.
+
+    Returns:
+      The restored step, or 0 when starting fresh.
     """
     self._restored_checkpoint_metadata = None
+    self._inflight_fwd_bwd[role].clear()
     metadata = await self._restore_checkpoint(role=role)
     if not isinstance(metadata, Mapping):
       if metadata is not None:
@@ -846,25 +1015,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         restored_policy_version,
         metadata,
     )
-    if resync_rollout_weights:
-      await self._maybe_configure_trainer_target_state(role)
-      synced_version = await self.sync_weights(
-          role=role,
-          policy_version=restored_policy_version,
-      )
-      if synced_version != restored_policy_version:
-        raise RuntimeError(
-            "Resumed policy_version=%d does not match synced version=%d"
-            % (restored_policy_version, synced_version)
-        )
-    else:
-      logging.warning(
-          "resync_rollout_weights is False. Resumed rollout workers will use"
-          " base weights instead of restored checkpoint version %d.",
-          restored_policy_version,
-      )
     return restored_step
 
   async def close(self) -> None:
     """Closes the rollout execution session and cancels any pending polling tasks."""
+    self._inflight_fwd_bwd.clear()
     await self._rollout_session.close()

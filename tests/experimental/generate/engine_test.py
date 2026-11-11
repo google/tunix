@@ -21,12 +21,39 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from tunix.common import datatypes
 from tunix.experimental.generate import engine as engine_lib
-from tunix.experimental.generate import kv_cache_manager as kv_cache_manager_lib
-from tunix.experimental.generate import model_runner as model_runner_lib
 from tunix.experimental.generate import request as request_lib
-from tunix.experimental.generate import scheduler as scheduler_lib
 from tunix.experimental.generate import testing_utils
+
+
+def _request_state(request_id: str) -> request_lib.RequestState:
+  request = testing_utils.make_request(request_id, [1, 2])
+  return request_lib.RequestState(
+      request.request_id, request.prompt_token_ids, request.sampling_params
+  )
+
+
+class ScheduledBatchTest(absltest.TestCase):
+
+  def _batch(self) -> engine_lib.ScheduledBatch:
+    # Rank 0: a decode, a chunked prefill and a full prefill. Rank 1: empty.
+    # Rank 2: two decodes and a full prefill.
+    return engine_lib.ScheduledBatch.concat([
+        (tuple(_request_state(f'a{i}') for i in range(3)), (1, 2, 3)),
+        ((), (0, 0, 0)),
+        (tuple(_request_state(f'c{i}') for i in range(3)), (2, 2, 3)),
+    ])
+
+  def test_concat_and_split_round_trip(self):
+    batch = self._batch()
+    self.assertLen(batch.requests, 6)
+    self.assertEqual(batch.distributions, ((1, 2, 3), (0, 0, 0), (2, 2, 3)))
+    ranks = batch.split()
+    self.assertEqual(
+        [[r.request_id for r in reqs] for reqs, _ in ranks],
+        [['a0', 'a1', 'a2'], [], ['c0', 'c1', 'c2']],
+    )
 
 
 class LLMEngineTest(absltest.TestCase):
@@ -40,27 +67,6 @@ class LLMEngineTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, 'needs up to 7 pages'):
       testing_utils.make_engine(
           max_model_len=24, max_device_size_gib=6 * testing_utils.GIB_PER_PAGE
-      )
-
-  def test_mismatched_num_scheduler_steps_raises(self):
-    with self.assertRaisesRegex(ValueError, 'num_scheduler_steps'):
-      engine_lib.LLMEngine(
-          testing_utils.PagedSumTransformer(),
-          cache_config=kv_cache_manager_lib.CacheConfig(
-              max_device_size_gib=64 * testing_utils.GIB_PER_PAGE,
-              page_size=testing_utils.PAGE_SIZE,
-              dtype=jnp.float32,
-          ),
-          scheduler_config=scheduler_lib.SchedulerConfig(
-              max_num_batched_tokens=32,
-              max_num_seqs=4,
-              max_chunked_prefill_length=32,
-              num_scheduler_steps=2,
-          ),
-          model_runner_config=model_runner_lib.ModelRunnerConfig(
-              max_top_k=4, mesh=testing_utils.mesh(), num_scheduler_steps=1
-          ),
-          max_model_len=24,
       )
 
   def test_exposes_the_model(self):
@@ -77,7 +83,7 @@ class LLMEngineTest(absltest.TestCase):
   def test_truncates_chunked_prefill_length_to_sliding_window(self):
     transformer = testing_utils.PagedSumTransformer(
         geometries={
-            'layer_0': kv_cache_manager_lib.CacheGeometry(
+            'layer_0': datatypes.CacheGeometry(
                 num_kv_heads=1, head_dim=1, window_size=12
             )
         }
@@ -87,7 +93,6 @@ class LLMEngineTest(absltest.TestCase):
     )
 
     self.assertEqual(engine._scheduler_config.max_chunked_prefill_length, 8)
-    self.assertEqual(engine._scheduler._config.max_chunked_prefill_length, 8)
 
 
 class AddRequestTest(parameterized.TestCase):
@@ -102,14 +107,20 @@ class AddRequestTest(parameterized.TestCase):
 
   def test_empty_prompt_raises(self):
     with self.assertRaisesRegex(ValueError, 'empty prompt'):
-      testing_utils.make_engine().add_request(testing_utils.make_request('0', []))
+      testing_utils.make_engine().add_request(
+          testing_utils.make_request('0', [])
+      )
 
   def test_request_over_max_model_len_raises(self):
     engine = testing_utils.make_engine(max_model_len=10)
-    engine.add_request(testing_utils.make_request('fits', [1] * 4, max_tokens=6))
+    engine.add_request(
+        testing_utils.make_request('fits', [1] * 4, max_tokens=6)
+    )
 
     with self.assertRaisesRegex(ValueError, 'max_model_len'):
-      engine.add_request(testing_utils.make_request('0', [1] * 5, max_tokens=6))
+      engine.add_request(
+          testing_utils.make_request('0', [1] * 5, max_tokens=6)
+      )
 
   def test_top_k_over_max_top_k_raises(self):
     engine = testing_utils.make_engine(max_top_k=4)
@@ -142,16 +153,22 @@ class AddRequestTest(parameterized.TestCase):
   )
   def test_unsupported_sampling_params_raise(self, sampling_kwargs, message):
     with self.assertRaisesRegex(ValueError, message):
-      testing_utils.make_engine().add_request(testing_utils.make_request('0', [1], **sampling_kwargs))
+      testing_utils.make_engine().add_request(
+          testing_utils.make_request('0', [1], **sampling_kwargs)
+      )
 
   def test_request_must_ask_for_the_configured_outputs(self):
     engine = testing_utils.make_engine(return_logprobs=True, return_logits=True)
     engine.add_request(
-        testing_utils.make_request('fits', [1], return_logprobs=True, return_logits=True)
+        testing_utils.make_request(
+            'fits', [1], return_logprobs=True, return_logits=True
+        )
     )
 
     with self.assertRaisesRegex(ValueError, 'return_logprobs'):
-      engine.add_request(testing_utils.make_request('0', [1], return_logits=True))
+      engine.add_request(
+          testing_utils.make_request('0', [1], return_logits=True)
+      )
 
   def test_running_request_id_raises(self):
     engine = testing_utils.make_engine()
@@ -268,7 +285,9 @@ class StepTest(parameterized.TestCase):
       )
     finished = drive(engine)
     self.assertCountEqual(finished, request_ids)
-    return [finished[request_id].token_ids.tolist() for request_id in request_ids]
+    return [
+        finished[request_id].token_ids.tolist() for request_id in request_ids
+    ]
 
   def test_step_without_requests_does_nothing(self):
     self.assertEmpty(testing_utils.make_engine().step())
@@ -296,8 +315,12 @@ class StepTest(parameterized.TestCase):
 
   def test_each_request_stops_at_its_own_token_limit(self):
     engine = testing_utils.make_engine()
-    engine.add_request(testing_utils.make_request('short', [1, 2], max_tokens=2))
-    engine.add_request(testing_utils.make_request('long', [1, 2], max_tokens=7))
+    engine.add_request(
+        testing_utils.make_request('short', [1, 2], max_tokens=2)
+    )
+    engine.add_request(
+        testing_utils.make_request('long', [1, 2], max_tokens=7)
+    )
 
     finished = drive(engine)
 
@@ -346,28 +369,6 @@ class StepTest(parameterized.TestCase):
     self.assertEqual(outputs['b'].token_ids.tolist(), expected_b)
     self.assertEqual(outputs['b'].finish_reason, 'length')
 
-  def test_stale_output_finishing_a_readmitted_request_keeps_its_kv_count(
-      self,
-  ):
-    engine = testing_utils.make_engine(eos_token_ids=frozenset({7}))
-    req = request_lib.RequestState(
-        req_id='0',
-        prompt_token_ids=list(range(1, 25)),
-        sampling_params=testing_utils.make_request('0', [1]).sampling_params,
-    )
-    # `req` was preempted while sampling a token, then re-admitted to run its
-    # first chunk before that token arrived.
-    req.num_stale_output_tokens = 1
-    req.status = request_lib.RequestStatus.RUNNING
-    req.num_computed_tokens = 16
-
-    engine._update_req_from_output(req, np.array([7]))  # pylint: disable=protected-access
-
-    self.assertEqual(req.status, request_lib.RequestStatus.FINISHED_EOS)
-    # Only the re-run chunk is in the KV cache, not the whole sequence.
-    self.assertEqual(req.num_computed_tokens, 16)
-    self.assertEqual(req.num_stale_output_tokens, 0)
-
   def test_chunked_prefill(self):
     engine = testing_utils.make_engine(
         max_num_batched_tokens=8, chunked_prefill_length=4
@@ -398,8 +399,8 @@ class StepTest(parameterized.TestCase):
   )
   def test_chunk_fits_in_the_smallest_window(self, window_size, expected):
     geometries = {
-        'full': kv_cache_manager_lib.CacheGeometry(num_kv_heads=1, head_dim=1),
-        'sliding': kv_cache_manager_lib.CacheGeometry(
+        'full': datatypes.CacheGeometry(num_kv_heads=1, head_dim=1),
+        'sliding': datatypes.CacheGeometry(
             num_kv_heads=1, head_dim=1, window_size=window_size
         ),
     }
@@ -431,16 +432,10 @@ class StepTest(parameterized.TestCase):
     engine = testing_utils.make_engine(
         max_device_size_gib=8 * testing_utils.GIB_PER_PAGE
     )
-    preempt_spy = mock.patch.object(
-        engine._scheduler,  # pylint: disable=protected-access
-        '_preempt',
-        wraps=engine._scheduler._preempt,  # pylint: disable=protected-access
-    ).start()
     prompts = [[i, i + 1, i + 2, i + 3, i + 4, i + 5] for i in range(4)]
 
     generated = self._run(engine, prompts)
 
-    preempt_spy.assert_called()
     self.assertEqual(generated, [reference_generate(p) for p in prompts])
 
   def test_preempted_while_in_flight_processes_generated_token(self):
@@ -451,11 +446,6 @@ class StepTest(parameterized.TestCase):
     engine = testing_utils.make_engine(
         max_model_len=6, max_device_size_gib=2 * testing_utils.GIB_PER_PAGE
     )
-    preempt_spy = mock.patch.object(
-        engine._scheduler,  # pylint: disable=protected-access
-        '_preempt',
-        wraps=engine._scheduler._preempt,  # pylint: disable=protected-access
-    ).start()
     p0 = [1, 2, 3, 4]
     p1 = [5, 6, 7, 8]
     engine.add_request(testing_utils.make_request('0', p0, max_tokens=2))
@@ -463,7 +453,6 @@ class StepTest(parameterized.TestCase):
 
     outputs = drive(engine)
 
-    preempt_spy.assert_called_once()
     self.assertEqual(set(outputs.keys()), {'0', '1'})
     self.assertEqual(
         outputs['0'].token_ids.tolist(), reference_generate(p0, max_tokens=2)
@@ -527,7 +516,7 @@ class StepTest(parameterized.TestCase):
     events: list[str] = []
 
     orig_execute = engine._model_runner.execute_step  # pylint: disable=protected-access
-    orig_schedule = engine._scheduler.schedule_step  # pylint: disable=protected-access
+    orig_schedule = engine._schedule_step  # pylint: disable=protected-access
     orig_update = engine._update_from_output  # pylint: disable=protected-access
 
     def record_execute(*args, **kwargs):
@@ -546,7 +535,7 @@ class StepTest(parameterized.TestCase):
         engine._model_runner, 'execute_step', side_effect=record_execute  # pylint: disable=protected-access
     ).start()
     mock.patch.object(
-        engine._scheduler, 'schedule_step', side_effect=record_schedule  # pylint: disable=protected-access
+        engine, '_schedule_step', side_effect=record_schedule
     ).start()
     mock.patch.object(
         engine, '_update_from_output', side_effect=record_update
@@ -628,9 +617,10 @@ class StepTest(parameterized.TestCase):
     self.assertFalse(engine.has_unfinished_requests())
 
 
-
 def new_weights(offset: float) -> nnx.State:
-  return nnx.variables(testing_utils.PagedSumTransformer(offset=offset), nnx.Param)
+  return nnx.variables(
+      testing_utils.PagedSumTransformer(offset=offset), nnx.Param
+  )
 
 
 class UpdateParamsTest(parameterized.TestCase):
@@ -680,20 +670,6 @@ class UpdateParamsTest(parameterized.TestCase):
       self.assertEqual(
           finished[request_id].token_ids.tolist(), before_sync + after_sync
       )
-
-  def test_rewinds_running_requests(self):
-    engine = testing_utils.make_engine()
-    engine.add_request(testing_utils.make_request('0', [1, 2, 3, 4, 5]))
-    for _ in range(3):
-      engine.step()
-    req = engine._requests['0']  # pylint: disable=protected-access
-    self.assertGreater(req.num_computed_tokens, 0)
-    self.assertTrue(engine.has_unfinished_requests())
-
-    engine.update_params(new_weights(1.0))
-
-    self.assertEqual(req.num_computed_tokens, 0)
-    self.assertTrue(engine.has_unfinished_requests())
 
   def test_clears_the_prefix_cache(self):
     engine = testing_utils.make_engine()
@@ -749,6 +725,43 @@ class ResetKVCachesTest(absltest.TestCase):
     self.assertEqual(
         finished['0'].token_ids.tolist(), before_reset + after_reset
     )
+
+  def test_delete_kv_caches_and_reallocate_on_reset(self):
+    engine = testing_utils.make_engine()
+    prompt = [1, 2, 3, 4, 5]
+    engine.add_request(testing_utils.make_request('0', list(prompt)))
+    engine.step()
+
+    outputs = engine.delete_kv_caches()
+    self.assertEmpty(outputs)
+    self.assertIsNone(engine._in_flight_step)  # pylint: disable=protected-access
+    for arr in engine._dp_coordinators[0].get_physical_pages().values():  # pylint: disable=protected-access
+      self.assertTrue(arr.is_deleted())
+
+    engine.reset_kv_caches()
+    for arr in engine._dp_coordinators[0].get_physical_pages().values():  # pylint: disable=protected-access
+      self.assertFalse(arr.is_deleted())
+
+    finished = drive(engine)
+    self.assertEqual(
+        finished['0'].token_ids.tolist(), reference_generate(prompt)
+    )
+
+  def test_delete_kv_caches_returns_requests_finished_in_flight(self):
+    engine = testing_utils.make_engine()
+    prompt = [1, 2, 3]
+    engine.add_request(
+        testing_utils.make_request('0', list(prompt), max_tokens=2)
+    )
+    self.assertEmpty(engine.step())
+
+    outputs = engine.delete_kv_caches()
+    self.assertLen(outputs, 1)
+    self.assertEqual(outputs[0].request_id, '0')
+    self.assertEqual(
+        outputs[0].token_ids.tolist(), reference_generate(prompt, 2)
+    )
+    self.assertFalse(engine.has_unfinished_requests())
 
 
 if __name__ == '__main__':

@@ -329,6 +329,20 @@ class UpdateParamsTest(absltest.TestCase):
       expected.extend(reference.step())
     self.assertEqual(output.token_ids.tolist(), expected[0].token_ids.tolist())
 
+  def test_delete_kv_caches_resolves_requests_finished_in_flight(self):
+    driver = driver_lib.VanillaInProcessDriver(testing_utils.make_engine())
+    self.addCleanup(driver.shutdown)
+    future = driver.submit_request(
+        testing_utils.make_request('0', [1, 2, 3], max_tokens=2)
+    )
+    self.assertEmpty(driver._step_engine())  # pylint: disable=protected-access
+    self.assertFalse(future.done())
+
+    driver.delete_kv_caches()
+
+    self.assertTrue(future.done())
+    self.assertEqual(future.result(timeout=_TIMEOUT_S).request_id, '0')
+
 
 if __name__ == '__main__':
   absltest.main()

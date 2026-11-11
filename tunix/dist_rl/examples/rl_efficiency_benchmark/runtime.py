@@ -152,18 +152,18 @@ def _timed(fn, clock, wait_fn, on_finish):
 
 def trainer_main(*args, **kwargs):
   """Benchmark entry point; fences execute in the process owning TPU arrays."""
-  from tunix.dist_rl.examples.common import run_trainer_node
+  from tunix.dist_rl.launch.nodes import trainer  # pylint: disable=g-import-not-at-top
 
   install("trainer-worker")
-  return run_trainer_node.main(*args, **kwargs)
+  return trainer.main(*args, **kwargs)
 
 
 def rollout_main(*args, **kwargs):
   """Records rollout trajectories in the rollout process."""
-  from tunix.dist_rl.examples.common import run_rollout_node
+  from tunix.dist_rl.launch.nodes import rollout  # pylint: disable=g-import-not-at-top
 
   install("rollout-worker")
-  return run_rollout_node.main(*args, **kwargs)
+  return rollout.main(*args, **kwargs)
 
 
 class Recorder:
@@ -274,7 +274,6 @@ def _trajectory_fields(engine):
   trajectory = engine.agent.trajectory
   env_time = engine.env_time
   return {
-      "exact_token_continuity": engine.exact_token_continuity,
       "turns": len(trajectory.steps),
       "environment_seconds": (
           env_time["reset_latency"]

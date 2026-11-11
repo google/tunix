@@ -209,6 +209,8 @@ class BaseTaskEnv(BaseEnv):
 
   * A `task` dictionary holding problem specification and metadata.
   * An optional `reward_fn` that can be used by subclasses.
+  * An optional zero-argument `final_reward_fn` invoked once at episode end by
+    `TrajectoryCollectEngine` and added to the terminal step's reward.
   * `max_steps` and `step_count` to control and track episode length.
 
   Subclasses should implement `_initial_observation()` and `_step_impl()`
@@ -230,11 +232,23 @@ class BaseTaskEnv(BaseEnv):
   counting and max_steps truncation.
   """
 
+  task: Dict[str, Any]
+  # TODO(tsbao): Consider pushing `reward_fn` down to subclasses that evaluate
+  # action text in `_step_impl` (such as `TaskEnvironment` and
+  # `ToolEnvironment`), since `BaseTaskEnv` and `TrajectoryCollectEngine` only
+  # consume `final_reward_fn`.
+  reward_fn: Callable[..., Any] | None = None
+  final_reward_fn: Callable[[], float] | None = None
+  max_steps: int = 1
+  step_count: int = 0
+  extra_kwargs: Dict[str, Any]
+
   def __init__(
       self,
       task: Dict[str, Any] | None = None,
       *,
       reward_fn: Callable[..., Any] | None = None,
+      final_reward_fn: Callable[[], float] | None = None,
       max_steps: int = 1,
       **kwargs,
   ):
@@ -245,13 +259,25 @@ class BaseTaskEnv(BaseEnv):
         other task-specific parameters. If None, defaults to empty dict.
       reward_fn: Optional reward function that subclasses may use to compute
         rewards. The exact signature is defined by the environment.
+      final_reward_fn: Optional zero-argument episode-end grading callback
+        invoked once after the episode terminates and folded into the terminal
+        step's reward by `TrajectoryCollectEngine`.
       max_steps: Maximum number of interaction steps before forced termination.
         Prevents infinite loops and controls episode length.
       **kwargs: Additional arguments that subclasses may use and store.
+
+    Raises:
+      TypeError: If `final_reward_fn` is neither None nor callable.
     """
+    if final_reward_fn is not None and not callable(final_reward_fn):
+      raise TypeError(
+          "final_reward_fn must be callable or None, got"
+          f" {type(final_reward_fn).__name__}"
+      )
     super().__init__()
     self.task = task or {}
     self.reward_fn = reward_fn
+    self.final_reward_fn = final_reward_fn
     self.max_steps = max_steps
     self.step_count = 0
     # Allow subclasses to store any extra initialization arguments if needed.
@@ -312,15 +338,25 @@ class BaseTaskEnv(BaseEnv):
       action: The agent's action to execute.
 
     Returns:
-      A tuple of (observation, reward, done, info).
+      A tuple of (observation, reward, done, info). When `max_steps` forces
+      termination on a non-terminal `_step_impl` result, `info["truncated"]` is
+      set to True.
     """
     self.step_count += 1
     result = self._step_impl(action)
 
     # Enforce maximum episode length; if _step_impl has already finished
-    # the episode, keep done=True.
-    done = result.done or (self.step_count >= self.max_steps)
-    return result.observation, result.reward, done, result.info
+    # the episode, keep done=True without marking truncation.
+    truncated = not result.done and self.step_count >= self.max_steps
+    done = result.done or truncated
+    raw_info = result.info or {}
+    if truncated:
+      info = {**raw_info, "truncated": True}
+    elif result.done and "truncated" in raw_info:
+      info = {**raw_info, "truncated": False}
+    else:
+      info = raw_info if result.info is not None else {}
+    return result.observation, result.reward, done, info
 
   @classmethod
   def from_dict(cls, env_args: Dict[str, Any]) -> "BaseTaskEnv":

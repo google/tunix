@@ -270,7 +270,6 @@ rollout_config:
 
 rollout_engine: "vanilla"
 vllm_config: {}
-sglang_jax_config: {}
 
 offload_to_cpu: false
 

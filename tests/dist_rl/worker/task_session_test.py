@@ -72,6 +72,151 @@ def create_in_process_handle(
   return remote_lib.InProcessActorHandle(server)
 
 
+class GatedEngine:
+  """Engine whose `compute` blocks on a per-label gate when one is set."""
+
+  def __init__(self, name: str):
+    self.name = name
+    self.calls: list[str] = []
+    self.gates: dict[str, asyncio.Event] = {}
+
+  async def compute(self, label: str) -> str:
+    self.calls.append(label)
+    gate = self.gates.get(label)
+    if gate is not None:
+      await gate.wait()
+    return f"[{self.name}] {label}"
+
+
+class BlipHandle(remote_lib.ActorHandle):
+  """Server-backed handle that injects transient dispatch faults.
+
+  Per-request `plan` actions (consumed one per `dispatch_task` call; requests
+  without a plan, or with an exhausted plan, follow `fail_all`):
+    - "fail": raise `TransientTransportError` before reaching the server.
+    - "lose_reply": the server accepts the task, then the ACK is lost.
+    - "late_lose_reply": like "lose_reply", but the ACK is lost only after
+      the poller had time to deliver the task's response.
+    - "gate": wait on `retry_gate`, then forward to the server normally.
+    - "ok": forward to the server normally.
+  """
+
+  def __init__(
+      self,
+      engine: GatedEngine,
+      plan: Optional[dict[str, list[str]]] = None,
+      fail_all: bool = False,
+      quick_poll: bool = False,
+  ):
+    self.engine = engine
+    self.quick_poll = quick_poll
+    self.poll_calls = 0
+    self.poll_blips = 0
+    self.poll_timeouts: list[float] = []
+    self.server = remote_lib.InProcessRemoteExecutionServer(engine)
+    self.plan: dict[str, list[str]] = {
+        k: list(v) for k, v in (plan or {}).items()
+    }
+    self.fail_all = fail_all
+    self.dispatch_log: list[str] = []
+    self.failed_dispatches = 0
+    self.retry_gate = asyncio.Event()
+    self.measure = False
+    self._inflight = 0
+    self.max_inflight_measured = 0
+
+  def submit(self, method_name=None, *args, **kwargs):
+    raise NotImplementedError()
+
+  async def asubmit(self, method_name=None, *args, **kwargs):
+    raise NotImplementedError()
+
+  async def close(self) -> None:
+    pass
+
+  def sync_close(self) -> None:
+    pass
+
+  async def dispatch_task(
+      self, request_id=None, method_name=None, *args, **kwargs
+  ) -> str:
+    assert request_id is not None
+    self.dispatch_log.append(request_id)
+    steps = self.plan.get(request_id)
+    action = steps.pop(0) if steps else ("fail" if self.fail_all else "ok")
+    self._inflight += 1
+    if self.measure:
+      self.max_inflight_measured = max(
+          self.max_inflight_measured, self._inflight
+      )
+    try:
+      await asyncio.sleep(0.002)
+      if action == "fail":
+        self.failed_dispatches += 1
+        raise remote_lib.TransientTransportError(f"UNAVAILABLE {request_id}")
+      if action == "gate":
+        await self.retry_gate.wait()
+      ack = await self.server.dispatch_task(
+          remote_lib.ExecutionRequest(
+              request_id=request_id,
+              method_name=method_name,
+              args=args,
+              kwargs=kwargs,
+          )
+      )
+      if action in ("lose_reply", "late_lose_reply"):
+        if action == "late_lose_reply":
+          await asyncio.sleep(0.05)
+        self.failed_dispatches += 1
+        raise remote_lib.TransientTransportError(f"reply lost {request_id}")
+      return ack
+    finally:
+      self._inflight -= 1
+
+  async def poll_responses(self, timeout_s=50.0):
+    self.poll_calls += 1
+    self.poll_timeouts.append(timeout_s)
+    if self.poll_blips > 0:
+      self.poll_blips -= 1
+      raise remote_lib.TransientTransportError("poll blip")
+    if self.quick_poll:
+      timeout_s = min(timeout_s, 0.005)
+    return await self.server.poll_response(timeout_s=timeout_s)
+
+
+async def wait_until(cond, timeout_s: float = 2.0) -> None:
+  """Polls `cond()` on the running loop until it holds or times out."""
+  loop = asyncio.get_running_loop()
+  deadline = loop.time() + timeout_s
+  while not cond():
+    if loop.time() > deadline:
+      raise AssertionError("Timed out waiting for condition.")
+    await asyncio.sleep(0.002)
+
+
+def ft_session(actors, **kwargs) -> task_session.TaskSession:
+  """Builds a fault-tolerant `TaskSession` that evicts into `unreachable`."""
+  unreachable: list[remote_lib.ActorHandle] = kwargs.pop("unreachable")
+  live: list[remote_lib.ActorHandle] = actors
+
+  def _evict(actor, exc):
+    del exc
+    unreachable.append(actor)
+    if actor in live:
+      live.remove(actor)
+
+  kwargs.setdefault("poll_retry_initial_backoff_s", 0.02)
+  kwargs.setdefault("poll_retry_max_backoff_s", 0.02)
+  return task_session.TaskSession(
+      lambda: list(live),
+      fault_tolerance_config=task_session.TaskSessionFaultToleranceConfig(
+          max_task_retries=kwargs.pop("max_task_retries", 1),
+          on_worker_unreachable=_evict,
+      ),
+      **kwargs,
+  )
+
+
 class TaskSessionTest(parameterized.TestCase):
   """Tests verifying TaskSession and DefaultRouter."""
 
@@ -414,12 +559,8 @@ class TaskSessionTest(parameterized.TestCase):
       def __init__(self):
         self.poll_event = asyncio.Event()
         self.responses = [
-            remote_lib.ExecutionResponse(
-                request_id="req_2", result="res_2"
-            ),
-            remote_lib.ExecutionResponse(
-                request_id="req_1", result="res_1"
-            ),
+            remote_lib.ExecutionResponse(request_id="req_2", result="res_2"),
+            remote_lib.ExecutionResponse(request_id="req_1", result="res_1"),
         ]
 
       def submit(
@@ -670,12 +811,14 @@ class TaskSessionTest(parameterized.TestCase):
 
     asyncio.run(session.close())
 
-  def test_task_session_rejects_unknown_or_missing_request_id(self):
+  def test_task_session_drops_unknown_and_rejects_missing_request_id(self):
+    """Unknown IDs are dropped as duplicates; a missing ID is fatal."""
+
     class CorruptedIdHandle(remote_lib.ActorHandle):
 
       def __init__(self, response_id: str):
         self._response_id = response_id
-        self._returned = False
+        self._script: list[str] = [response_id, "req_1"]
 
       def submit(self, method_name=None, *args, **kwargs):
         raise NotImplementedError()
@@ -690,25 +833,32 @@ class TaskSessionTest(parameterized.TestCase):
         return request_id or ""
 
       async def poll_responses(self, timeout_s=50.0):
-        if not self._returned:
-          self._returned = True
-          return remote_lib.ExecutionResponse(
-              request_id=self._response_id, result="stale_or_corrupted"
-          )
+        if self._script:
+          rid = self._script.pop(0)
+          return remote_lib.ExecutionResponse(request_id=rid, result=rid)
         await asyncio.sleep(timeout_s)
         return None
 
     async def _run():
-      for bad_id in ("unknown_req_id", ""):
-        handle = CorruptedIdHandle(bad_id)
-        async with task_session.TaskSession([handle]) as session:
-          await session.submit("req_1", "generate")
-          batch = await session.poll_completed(timeout_s=1.0)
-          self.assertLen(batch, 1)
-          res, exc = batch[0]
-          self.assertIsNone(res)
-          self.assertIsInstance(exc, RuntimeError)
-          self.assertIn("unknown or missing request_id", str(exc))
+      # Unknown (e.g. duplicate) request_id: dropped and counted; the real
+      # response still completes the task.
+      handle = CorruptedIdHandle("unknown_req_id")
+      async with task_session.TaskSession([handle]) as session:
+        await session.submit("req_1", "generate")
+        batch = await session.poll_completed(timeout_s=1.0)
+        self.assertEqual(batch, [("req_1", None)])
+        self.assertEqual(session.stale_responses_total, 1)
+
+      # Missing request_id is a protocol violation and fails loudly.
+      handle = CorruptedIdHandle("")
+      async with task_session.TaskSession([handle]) as session:
+        await session.submit("req_1", "generate")
+        batch = await session.poll_completed(timeout_s=1.0)
+        self.assertLen(batch, 1)
+        res, exc = batch[0]
+        self.assertIsNone(res)
+        self.assertIsInstance(exc, RuntimeError)
+        self.assertIn("missing request_id", str(exc))
 
     asyncio.run(_run())
 
@@ -1470,6 +1620,8 @@ class TaskSessionTest(parameterized.TestCase):
         self.assertEqual(h3.dispatched_count, 0)
         self.assertEqual(evicted, [h1, h2])
         self.assertEqual(session._in_flight, 0)
+        self.assertEqual(session.task_retries_total, 1)
+        self.assertEqual(session.task_unrecovered_total, 1)
 
     asyncio.run(_run())
 
@@ -1768,6 +1920,227 @@ class TaskSessionTest(parameterized.TestCase):
 
     asyncio.run(_run())
 
+  def test_worker_inflight_loads_tracks_active_and_dynamic_actors(self):
+    async def _run():
+      release = asyncio.Event()
+
+      class _GatedWorker:
+
+        async def compute_trajectory(
+            self, prompt_id: str, turns: int = 1
+        ) -> str:
+          await release.wait()
+          return f"{prompt_id}:{turns}"
+
+      handle_0 = create_in_process_handle(_GatedWorker())
+      handle_1 = create_in_process_handle(_GatedWorker())
+      handle_late = create_in_process_handle(_GatedWorker())
+      live_handles = [handle_0, handle_1]
+
+      async with task_session.TaskSession(
+          lambda: list(live_handles)
+      ) as session:
+        self.assertEqual(
+            session.worker_inflight_loads(),
+            [(handle_0, 0), (handle_1, 0)],
+        )
+        await session.submit(
+            "req_0_a",
+            "compute_trajectory",
+            "p0",
+            turns=1,
+            preferred_actor=handle_0,
+        )
+        await session.submit(
+            "req_0_b",
+            "compute_trajectory",
+            "p1",
+            turns=1,
+            preferred_actor=handle_0,
+        )
+        await session.submit(
+            "req_1_a",
+            "compute_trajectory",
+            "p2",
+            turns=1,
+            preferred_actor=handle_1,
+        )
+        live_handles.append(handle_late)
+        loads_with_late = session.worker_inflight_loads()
+        # Evict handle_late (0 tasks) and handle_1 (1 active task still in
+        # _dispatched_tasks) and verify both are omitted from live loads.
+        live_handles.remove(handle_late)
+        live_handles.remove(handle_1)
+        loads_after_eviction = session.worker_inflight_loads()
+        release.set()
+
+        outcomes = []
+        async for res, exc in session.as_completed():
+          self.assertIsNone(exc)
+          outcomes.append(res)
+        loads_after_drain = session.worker_inflight_loads()
+
+      self.assertEqual(
+          loads_with_late,
+          [(handle_0, 2), (handle_1, 1), (handle_late, 0)],
+      )
+      self.assertEqual(loads_after_eviction, [(handle_0, 2)])
+      self.assertLen(outcomes, 3)
+      self.assertEqual(loads_after_drain, [(handle_0, 0)])
+
+    asyncio.run(_run())
+
+  def test_submit_rejects_non_actor_handle_preferred_actor(self):
+    async def _run():
+      handle_0 = create_in_process_handle(
+          StubWorkerEngine("worker_0", latency=0.0)
+      )
+      async with task_session.TaskSession([handle_0]) as session:
+        bad_actor: Any = "not_a_handle"
+        with self.assertRaisesRegex(
+            TypeError, "Expected ActorHandle for preferred_actor"
+        ):
+          await session.submit(
+              "req_bad",
+              "compute_trajectory",
+              "p_bad",
+              preferred_actor=bad_actor,
+          )
+
+    asyncio.run(_run())
+
+  def test_submit_dispatches_to_live_preferred_actor(self):
+    async def _run():
+      engine_0 = StubWorkerEngine("worker_0", latency=0.0)
+      engine_1 = StubWorkerEngine("worker_1", latency=0.0)
+      handle_0 = create_in_process_handle(engine_0)
+      handle_1 = create_in_process_handle(engine_1)
+
+      async with task_session.TaskSession([handle_0, handle_1]) as session:
+        # route_key=0 alone would route to handle_0; preferred_actor=handle_1
+        # overrides initial placement while handle_1 is live.
+        await session.submit(
+            "req_pref",
+            "compute_trajectory",
+            "p_pref",
+            turns=1,
+            route_key=0,
+            preferred_actor=handle_1,
+        )
+        outcomes = []
+        async for res, exc in session.as_completed():
+          self.assertIsNone(exc)
+          outcomes.append(res)
+
+      self.assertEqual(
+          outcomes, ["[worker_1] Trajectory for prompt p_pref (1 turns)"]
+      )
+      self.assertEqual(engine_0.call_count, 0)
+
+    asyncio.run(_run())
+
+  def test_submit_falls_back_to_route_key_for_stale_preferred_actor(self):
+    async def _run():
+      engine_0 = StubWorkerEngine("worker_0", latency=0.0)
+      engine_1 = StubWorkerEngine("worker_1", latency=0.0)
+      engine_stale = StubWorkerEngine("worker_stale", latency=0.0)
+      handle_0 = create_in_process_handle(engine_0)
+      handle_1 = create_in_process_handle(engine_1)
+      handle_stale = create_in_process_handle(engine_stale)
+
+      async with task_session.TaskSession([handle_0, handle_1]) as session:
+        # handle_stale is absent from live actors, so submit falls back to
+        # route_key=0 -> handle_0 without touching handle_stale.
+        await session.submit(
+            "req_stale",
+            "compute_trajectory",
+            "p_stale",
+            turns=1,
+            route_key=0,
+            preferred_actor=handle_stale,
+        )
+        outcomes = []
+        async for res, exc in session.as_completed():
+          self.assertIsNone(exc)
+          outcomes.append(res)
+
+      self.assertEqual(
+          outcomes, ["[worker_0] Trajectory for prompt p_stale (1 turns)"]
+      )
+      self.assertEqual(engine_1.call_count, 0)
+      self.assertEqual(engine_stale.call_count, 0)
+
+    asyncio.run(_run())
+
+  def test_submit_preferred_actor_retries_via_route_key_on_worker_failure(self):
+    async def _run():
+      trigger_crash = asyncio.Event()
+
+      class _CrashingPollHandle(remote_lib.ActorHandle):
+
+        def submit(self, method_name=None, *args, **kwargs):
+          raise NotImplementedError()
+
+        async def asubmit(self, method_name=None, *args, **kwargs):
+          raise NotImplementedError()
+
+        async def dispatch_task(
+            self, request_id=None, method_name=None, *args, **kwargs
+        ) -> str:
+          del method_name, args, kwargs
+          return request_id or ""
+
+        async def poll_responses(self, timeout_s=50.0):
+          del timeout_s
+          await trigger_crash.wait()
+          raise ConnectionError("preferred worker crashed mid-poll")
+
+      bad_handle = _CrashingPollHandle()
+      engine_a = StubWorkerEngine("survivor_a", latency=0.0)
+      engine_b = StubWorkerEngine("survivor_b", latency=0.0)
+      survivor_a = create_in_process_handle(engine_a)
+      survivor_b = create_in_process_handle(engine_b)
+      live_actors: list[remote_lib.ActorHandle] = [
+          bad_handle,
+          survivor_a,
+          survivor_b,
+      ]
+
+      def _evict(actor, exc):
+        del exc
+        if actor in live_actors:
+          live_actors.remove(actor)
+
+      async with task_session.TaskSession(
+          lambda: list(live_actors),
+          fault_tolerance_config=task_session.TaskSessionFaultToleranceConfig(
+              max_task_retries=1,
+              on_worker_unreachable=_evict,
+          ),
+      ) as session:
+        for g in range(8):
+          await session.submit(
+              f"req_g{g}",
+              "compute_trajectory",
+              f"p_g{g}",
+              turns=1,
+              route_key=f"traj_p0_g{g}",
+              preferred_actor=bad_handle,
+          )
+        trigger_crash.set()
+
+        outcomes = []
+        async for res, exc in session.as_completed():
+          self.assertIsNone(exc)
+          outcomes.append(res)
+
+      self.assertLen(outcomes, 8)
+      self.assertGreater(engine_a.call_count, 0)
+      self.assertGreater(engine_b.call_count, 0)
+      self.assertEqual(engine_a.call_count + engine_b.call_count, 8)
+
+    asyncio.run(_run())
+
   def test_task_session_retry_failure_chains_original_worker_error(self):
     class DeadOnPollHandle(remote_lib.ActorHandle):
 
@@ -1825,6 +2198,622 @@ class TaskSessionTest(parameterized.TestCase):
         self.assertIn("no route for retried task", str(exc))
         self.assertIsInstance(exc.__cause__, ConnectionError)
         self.assertEqual(session._in_flight, 0)
+        # `route()` raised before any surviving worker was selected for
+        # re-dispatch, so no retry was actually re-dispatched.
+        self.assertEqual(session.task_retries_total, 0)
+        self.assertEqual(session.task_unrecovered_total, 1)
+
+    asyncio.run(_run())
+
+  def test_unrecovered_total_counts_empty_pool(self):
+    class DeadOnPollHandle(remote_lib.ActorHandle):
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, args, kwargs
+        return request_id or ""
+
+      async def poll_responses(self, timeout_s=50.0):
+        del timeout_s
+        await asyncio.sleep(0.01)
+        raise ConnectionError("w1 crashed mid-generation")
+
+    async def _run():
+      w1 = DeadOnPollHandle()
+      w2 = create_in_process_handle(StubWorkerEngine("w2"))
+      live_actors: list[remote_lib.ActorHandle] = [w1, w2]
+
+      def _on_unreachable(actor, exc):
+        del exc
+        if actor in live_actors:
+          live_actors.remove(actor)
+        # Evict w2 on the next event-loop turn: `_can_retry` still sees `[w2]`
+        # and schedules `_retry_or_fail_task`, then `live_actors` becomes empty
+        # right before `_retry_or_fail_task` calls `DefaultRouter`.
+        asyncio.get_running_loop().call_soon(live_actors.clear)
+
+      async with task_session.TaskSession(
+          lambda: list(live_actors),
+          fault_tolerance_config=task_session.TaskSessionFaultToleranceConfig(
+              max_task_retries=1,
+              on_worker_unreachable=_on_unreachable,
+          ),
+      ) as session:
+        # Caller argument error on a non-empty pool is not a worker failure.
+        with self.assertRaises(ValueError):
+          await session.submit("bad_key", "compute_trajectory", route_key=-1)
+        self.assertEqual(session.task_unrecovered_total, 0)
+
+        # Route req_1 deterministically to w1 (`route_key=0`).
+        await session.submit("req_1", "compute_trajectory", "p1", route_key=0)
+        batch = await session.poll_completed(timeout_s=1.0)
+        self.assertLen(batch, 1)
+        res, exc = batch[0]
+        self.assertIsNone(res)
+        self.assertIsInstance(exc, RuntimeError)
+        self.assertIn("no registered ActorHandles", str(exc))
+        self.assertIsInstance(exc.__cause__, ConnectionError)
+        # `live_actors` emptied before `route()` ran on the retry, so zero
+        # workers received a re-dispatch.
+        self.assertEqual(session.task_retries_total, 0)
+        self.assertEqual(session.task_unrecovered_total, 1)
+
+        # Foreground submit onto the now-empty pool also counts as a task
+        # failure without a retry.
+        with self.assertRaisesRegex(RuntimeError, "no registered ActorHandles"):
+          await session.submit("req_2", "compute_trajectory", "p2", route_key=0)
+        self.assertEqual(session.task_retries_total, 0)
+        self.assertEqual(session.task_unrecovered_total, 2)
+        self.assertEqual(session._in_flight, 0)
+
+      # Custom `route_fn` that would otherwise raise `ValueError` on an empty
+      # sequence (`min([])`) also gets the empty-pool `RuntimeError` contract.
+      async with task_session.TaskSession(
+          lambda: [],
+          route_fn=lambda actors, key: min(actors, key=id),
+      ) as custom_empty_session:
+        with self.assertRaisesRegex(RuntimeError, "no registered ActorHandles"):
+          await custom_empty_session.submit("req_empty", "compute_trajectory")
+        self.assertEqual(custom_empty_session.task_unrecovered_total, 1)
+        self.assertEqual(custom_empty_session._in_flight, 0)
+
+    asyncio.run(_run())
+
+  def test_dispatch_blip_on_idle_worker_retries_in_place_without_stall(self):
+    """A dispatch that never reached an idle worker is re-sent after backoff."""
+
+    async def _run():
+      engine = GatedEngine("w1")
+      w1 = BlipHandle(engine, plan={"r1": ["fail"]})
+      unreachable: list[remote_lib.ActorHandle] = []
+      loop = asyncio.get_running_loop()
+      async with ft_session([w1], unreachable=unreachable) as session:
+        t0 = loop.time()
+        await session.submit("r1", "compute", "r1")
+        batch = await session.poll_completed(timeout_s=2.0)
+        # No `LONG_POLL_TIMEOUT_S` stall waiting on an empty server queue.
+        self.assertLess(loop.time() - t0, 1.0)
+        self.assertEqual(batch, [("[w1] r1", None)])
+        self.assertEqual(w1.dispatch_log, ["r1", "r1"])
+        self.assertEqual(engine.calls, ["r1"])
+        self.assertEmpty(unreachable)
+        self.assertEmpty(session._retry_states)
+        self.assertEqual(session.task_retries_total, 1)
+        self.assertEqual(session.stale_responses_total, 0)
+
+    asyncio.run(_run())
+
+  def test_reply_lost_response_delivered_during_backoff_skips_retry_rpc(self):
+    """A reply-lost task stays pending, so its response is accepted directly."""
+
+    async def _run():
+      engine = GatedEngine("w1")
+      engine.gates["r1"] = asyncio.Event()
+      w1 = BlipHandle(engine, plan={"r1": ["lose_reply"], "r2": ["gate"]})
+      unreachable: list[remote_lib.ActorHandle] = []
+      loop = asyncio.get_running_loop()
+      async with ft_session(
+          [w1],
+          unreachable=unreachable,
+          poll_retry_initial_backoff_s=0.5,
+          poll_retry_max_backoff_s=0.5,
+      ) as session:
+        # `r2` stays in its first, healthy `dispatch_task` throughout.
+        submit_r2 = asyncio.create_task(session.submit("r2", "compute", "r2"))
+        await wait_until(lambda: w1.dispatch_log == ["r2"])
+        t0 = loop.time()
+        submit_r1 = asyncio.create_task(session.submit("r1", "compute", "r1"))
+        await wait_until(lambda: w1.failed_dispatches == 1)
+        await asyncio.sleep(0.01)
+        self.assertFalse(submit_r1.done())
+        engine.gates["r1"].set()
+        batch = await session.poll_completed(timeout_s=0.3)
+        self.assertEqual(batch, [("[w1] r1", None)])
+        # Delivery wakes `submit()` immediately via `state.wakeup` without
+        # waiting out the 0.5s backoff or sending a retry RPC.
+        self.assertEqual(await submit_r1, "r1")
+        self.assertLess(loop.time() - t0, 0.35)
+        # `r1` was the last retry waiter, so its state is dropped even though
+        # `r2` is still dispatching.
+        self.assertEmpty(session._retry_states)
+        w1.retry_gate.set()
+        self.assertEqual(await submit_r2, "r2")
+        self.assertEqual(
+            await session.poll_completed(timeout_s=1.0), [("[w1] r2", None)]
+        )
+        self.assertEqual(w1.dispatch_log, ["r2", "r1"])
+        self.assertCountEqual(engine.calls, ["r1", "r2"])
+        self.assertEqual(session.task_retries_total, 0)
+        self.assertEqual(session.stale_responses_total, 0)
+        self.assertEmpty(unreachable)
+        self.assertEqual(session._in_flight, 0)
+
+    asyncio.run(_run())
+
+  def test_retry_landing_after_delivery_drops_duplicate_without_crash(self):
+    """A retry that re-executes after delivery yields a dropped duplicate."""
+
+    async def _run():
+      engine = GatedEngine("w1")
+      engine.gates["r1"] = asyncio.Event()
+      w1 = BlipHandle(engine, plan={"r1": ["lose_reply", "gate"]})
+      unreachable: list[remote_lib.ActorHandle] = []
+      async with ft_session(
+          [w1],
+          unreachable=unreachable,
+          poll_retry_initial_backoff_s=0.01,
+          poll_retry_max_backoff_s=0.01,
+      ) as session:
+        submit_r1 = asyncio.create_task(session.submit("r1", "compute", "r1"))
+        # The retry RPC is in flight (held before reaching the server).
+        await wait_until(lambda: len(w1.dispatch_log) == 2)
+        engine.gates["r1"].set()
+        batch = await session.poll_completed(timeout_s=1.0)
+        self.assertEqual(batch, [("[w1] r1", None)])
+        w1.retry_gate.set()
+        self.assertEqual(await submit_r1, "r1")
+        # The server keeps no completed-ID state, so the late retry re-ran.
+        await wait_until(lambda: len(engine.calls) == 2)
+        await asyncio.sleep(0.01)
+        # Restart polling with another task; the duplicate must be dropped
+        # (not raise), and `r1` is never delivered twice.
+        await session.submit("r2", "compute", "r2")
+        batch2 = await session.poll_completed(timeout_s=1.0)
+        self.assertEqual(batch2, [("[w1] r2", None)])
+        self.assertEqual(session.stale_responses_total, 1)
+        self.assertEqual(session._in_flight, 0)
+        self.assertEmpty(unreachable)
+
+    asyncio.run(_run())
+
+  def test_concurrent_tasks_on_degraded_worker_probe_single_flight(self):
+    """At most one follow-up probe dispatch is in flight at a time."""
+
+    async def _run():
+      engine = GatedEngine("w1")
+      w1 = BlipHandle(engine, fail_all=True)
+      unreachable: list[remote_lib.ActorHandle] = []
+      async with ft_session(
+          [w1],
+          unreachable=unreachable,
+          poll_retry_budget_s=10.0,
+          poll_retry_initial_backoff_s=0.03,
+          poll_retry_max_backoff_s=0.03,
+      ) as session:
+        submits = [
+            asyncio.create_task(session.submit(f"r{i}", "compute", f"r{i}"))
+            for i in range(16)
+        ]
+        # First wave: all 16 dispatches were already on the wire.
+        await wait_until(lambda: w1.failed_dispatches >= 16)
+        w1.measure = True
+        # Wait for 1 follow-up probe to fail (`probe_attempts` == 2 < 3); while
+        # degraded, at most 1 follow-up probe RPC may be in flight at a time.
+        await wait_until(lambda: w1.failed_dispatches >= 17)
+        w1.measure = False
+        self.assertEqual(w1.max_inflight_measured, 1)
+        w1.fail_all = False
+        await asyncio.wait_for(asyncio.gather(*submits), timeout=2.0)
+        results = []
+        while len(results) < 16:
+          for res, exc in await session.poll_completed(timeout_s=1.0):
+            self.assertIsNone(exc)
+            results.append(res)
+        self.assertEqual(w1.failed_dispatches, 17)
+        self.assertCountEqual(engine.calls, [f"r{i}" for i in range(16)])
+        self.assertEmpty(unreachable)
+        self.assertEmpty(session._retry_states)
+
+    asyncio.run(_run())
+
+  def test_waiters_resend_concurrently_after_probe_recovers_worker(self):
+    """Waiters re-send in parallel after recovery, even past the budget."""
+
+    async def _run():
+      engine = GatedEngine("w1")
+      labels = [f"r{i}" for i in range(4)]
+      w1 = BlipHandle(engine, plan={r: ["fail", "gate"] for r in labels})
+      unreachable: list[remote_lib.ActorHandle] = []
+      async with ft_session(
+          [w1],
+          unreachable=unreachable,
+          poll_retry_budget_s=0.2,
+          poll_retry_initial_backoff_s=0.02,
+          poll_retry_max_backoff_s=0.02,
+      ) as session:
+        submits = [
+            asyncio.create_task(session.submit(r, "compute", r)) for r in labels
+        ]
+        await wait_until(lambda: w1.failed_dispatches == 4)
+        w1.measure = True
+        # The single probe succeeds only after the outage budget has elapsed.
+        await wait_until(lambda: len(w1.dispatch_log) == 5)
+        await asyncio.sleep(0.25)
+        w1.retry_gate.set()
+        await asyncio.wait_for(asyncio.gather(*submits), timeout=1.0)
+        results = []
+        while len(results) < 4:
+          for res, exc in await session.poll_completed(timeout_s=1.0):
+            self.assertIsNone(exc)
+            results.append(res)
+        self.assertCountEqual(results, [f"[w1] {r}" for r in labels])
+        # The recovered worker is kept, and the 3 waiters re-sent their
+        # dispatches concurrently rather than one at a time.
+        self.assertEmpty(unreachable)
+        self.assertGreater(w1.max_inflight_measured, 1)
+        self.assertLen(w1.dispatch_log, 8)
+        self.assertCountEqual(engine.calls, labels)
+        self.assertEmpty(session._retry_states)
+
+    asyncio.run(_run())
+
+  def test_delivery_during_backoff_releases_non_probing_waiter(self):
+    """A waiter delivered during another task's backoff returns immediately."""
+
+    async def _run():
+      engine = GatedEngine("w1")
+      engine.gates["b"] = asyncio.Event()
+      w1 = BlipHandle(engine, plan={"a": ["fail", "fail"], "b": ["lose_reply"]})
+      unreachable: list[remote_lib.ActorHandle] = []
+      loop = asyncio.get_running_loop()
+      async with ft_session(
+          [w1],
+          unreachable=unreachable,
+          poll_retry_budget_s=10.0,
+          poll_retry_initial_backoff_s=0.5,
+          poll_retry_max_backoff_s=0.5,
+      ) as session:
+        # `a` creates the worker's retry state and starts its 0.5s backoff.
+        submit_a = asyncio.create_task(session.submit("a", "compute", "a"))
+        await wait_until(lambda: w1 in session._retry_states)
+        # `b`'s ACK is lost, so it joins the same retry state behind `a`.
+        submit_b = asyncio.create_task(session.submit("b", "compute", "b"))
+        await wait_until(lambda: w1.failed_dispatches == 2)
+        await asyncio.sleep(0.01)
+        self.assertEqual(session._retry_states[w1].waiters, 2)
+        t0 = loop.time()
+        engine.gates["b"].set()
+        self.assertEqual(
+            await session.poll_completed(timeout_s=0.3), [("[w1] b", None)]
+        )
+        # `b` returns without waiting out `a`'s backoff and probes.
+        self.assertEqual(await asyncio.wait_for(submit_b, timeout=0.2), "b")
+        self.assertLess(loop.time() - t0, 0.3)
+        self.assertFalse(submit_a.done())
+        self.assertEqual(w1.dispatch_log.count("b"), 1)
+        self.assertEqual(await asyncio.wait_for(submit_a, timeout=2.0), "a")
+        self.assertEqual(
+            await session.poll_completed(timeout_s=1.0), [("[w1] a", None)]
+        )
+        self.assertEqual(w1.dispatch_log.count("a"), 3)
+        self.assertEmpty(unreachable)
+        self.assertEmpty(session._retry_states)
+        self.assertEqual(session._in_flight, 0)
+
+    asyncio.run(_run())
+
+  def test_replay_failures_after_recovery_count_toward_task_attempts(self):
+    """A waiter whose replays fail after another probe recovers stays bounded."""
+
+    async def _run():
+      w_bad = BlipHandle(
+          GatedEngine("bad"), plan={"r0": ["fail"], "r1": ["fail"] * 10}
+      )
+      w_good = BlipHandle(GatedEngine("good"))
+      unreachable: list[remote_lib.ActorHandle] = []
+      async with ft_session(
+          [w_bad, w_good], unreachable=unreachable, poll_retry_budget_s=10.0
+      ) as session:
+        submit_r0 = asyncio.create_task(
+            session.submit("r0", "compute", "r0", route_key=0)
+        )
+        await wait_until(lambda: w_bad in session._retry_states)
+        # `r1` joins `r0`'s outage; `r0`'s probe recovers `w_bad`, but every
+        # dispatch of `r1` to `w_bad` keeps failing.
+        submit_r1 = asyncio.create_task(
+            session.submit("r1", "compute", "r1", route_key=0)
+        )
+        await asyncio.wait_for(
+            asyncio.gather(submit_r0, submit_r1), timeout=2.0
+        )
+        results = []
+        while len(results) < 2:
+          for res, exc in await session.poll_completed(timeout_s=1.0):
+            self.assertIsNone(exc)
+            results.append(res)
+        self.assertIn("[good] r1", results)
+        # The outage `r1` waited on counts toward its own attempts, so `r1`
+        # sends exactly `MAX_IN_PLACE_DISPATCH_ATTEMPTS` dispatches to `w_bad`
+        # before `w_bad` is evicted, however the recovering probe interleaves.
+        self.assertEqual(
+            w_bad.dispatch_log.count("r1"),
+            task_session.MAX_IN_PLACE_DISPATCH_ATTEMPTS,
+        )
+        self.assertEqual(unreachable, [w_bad])
+        self.assertEmpty(session._retry_states)
+        self.assertEqual(session._in_flight, 0)
+
+    asyncio.run(_run())
+
+  def test_reply_lost_after_delivery_creates_no_retry_state(self):
+    """A lost ACK for an already delivered task leaves no retry state behind."""
+
+    async def _run():
+      engine = GatedEngine("w1")
+      w1 = BlipHandle(engine, plan={"r1": ["late_lose_reply"], "r2": ["gate"]})
+      unreachable: list[remote_lib.ActorHandle] = []
+      async with ft_session([w1], unreachable=unreachable) as session:
+        submit_r2 = asyncio.create_task(session.submit("r2", "compute", "r2"))
+        await wait_until(lambda: w1.dispatch_log == ["r2"])
+        # `r1`'s response is delivered before its ACK is lost, while `r2` is
+        # still dispatching on the same worker.
+        self.assertEqual(await session.submit("r1", "compute", "r1"), "r1")
+        self.assertEqual(
+            await session.poll_completed(timeout_s=1.0), [("[w1] r1", None)]
+        )
+        self.assertNotIn(w1, session._retry_states)
+        w1.retry_gate.set()
+        self.assertEqual(await submit_r2, "r2")
+        self.assertEqual(
+            await session.poll_completed(timeout_s=1.0), [("[w1] r2", None)]
+        )
+        self.assertEqual(w1.dispatch_log, ["r2", "r1"])
+        self.assertEqual(session.task_retries_total, 0)
+        self.assertEmpty(unreachable)
+
+    asyncio.run(_run())
+
+  def test_ack_after_mid_dispatch_eviction_fails_over_without_reevicting(self):
+    """A normal ACK from a worker evicted mid-dispatch fails over once."""
+
+    async def _run():
+      w_bad = BlipHandle(GatedEngine("bad"), plan={"r1": ["gate"]})
+      w_bad.poll_blips = 1
+      w_good = BlipHandle(GatedEngine("good"))
+      unreachable: list[remote_lib.ActorHandle] = []
+      async with ft_session(
+          [w_bad, w_good], unreachable=unreachable, poll_retry_budget_s=0.0
+      ) as session:
+        submit_r1 = asyncio.create_task(
+            session.submit("r1", "compute", "r1", route_key=0)
+        )
+        # The poller's blip evicts `w_bad` while `r1`'s dispatch is in flight.
+        await wait_until(lambda: unreachable == [w_bad])
+        w_bad.retry_gate.set()
+        self.assertEqual(await submit_r1, "r1")
+        self.assertEqual(
+            await session.poll_completed(timeout_s=1.0), [("[good] r1", None)]
+        )
+        self.assertEqual(unreachable, [w_bad])
+        self.assertNotIn(w_bad, session._poll_tasks)
+        self.assertEqual(session._in_flight, 0)
+
+    asyncio.run(_run())
+
+  def test_concurrent_batch_on_dead_worker_evicts_once_after_constant_probes(
+      self,
+  ):
+    """K=16 submits send 2 follow-up probes, evict w_bad once, and rescue orphans."""
+
+    async def _run():
+      bad_engine = GatedEngine("bad")
+      bad_engine.gates["orphan"] = asyncio.Event()
+      w_bad = BlipHandle(bad_engine)
+      w_good = BlipHandle(GatedEngine("good"))
+      unreachable: list[remote_lib.ActorHandle] = []
+      loop = asyncio.get_running_loop()
+      async with ft_session(
+          [w_bad, w_good],
+          unreachable=unreachable,
+          poll_retry_budget_s=60.0,
+          poll_retry_initial_backoff_s=0.02,
+          poll_retry_max_backoff_s=0.5,
+      ) as session:
+        # Park a non-dispatching in-flight task on `w_bad` before it breaks.
+        await session.submit("orphan", "compute", "orphan", route_key=0)
+        w_bad.fail_all = True
+        t0 = loop.time()
+        await asyncio.gather(*(
+            session.submit(f"r{i}", "compute", f"r{i}", route_key=0)
+            for i in range(16)
+        ))
+        elapsed_s = loop.time() - t0
+        results = []
+        while len(results) < 17:
+          for res, exc in await session.poll_completed(timeout_s=1.0):
+            self.assertIsNone(exc)
+            results.append(res)
+        self.assertCountEqual(
+            results,
+            ["[good] orphan"] + [f"[good] r{i}" for i in range(16)],
+        )
+        # 1 (`orphan`) + 16 concurrent Wave-1 RPCs + 2 serialized follow-up
+        # probes before `w_bad` is evicted and all 17 tasks run on `w_good`.
+        self.assertLen(
+            w_bad.dispatch_log,
+            1 + 16 + task_session.MAX_IN_PLACE_DISPATCH_ATTEMPTS - 1,
+        )
+        self.assertLess(elapsed_s, 0.5)
+        self.assertEqual(unreachable, [w_bad])
+        self.assertNotIn(w_bad, session._poll_tasks)
+        self.assertEmpty(session._retry_states)
+        self.assertIs(session.route(0), w_good)
+        self.assertEqual(session._in_flight, 0)
+
+    asyncio.run(_run())
+
+  def test_dispatch_retry_respects_poll_retry_budget(self):
+    """A budget shorter than the backoff still ends in one final probe."""
+
+    async def _run():
+      w1 = BlipHandle(GatedEngine("w1"), fail_all=True, quick_poll=True)
+      unreachable: list[remote_lib.ActorHandle] = []
+      loop = asyncio.get_running_loop()
+      async with ft_session(
+          [w1],
+          unreachable=unreachable,
+          poll_retry_budget_s=0.05,
+          poll_retry_initial_backoff_s=0.5,
+          poll_retry_max_backoff_s=0.5,
+      ) as session:
+        t0 = loop.time()
+        with self.assertRaises(task_session.WorkerUnreachableError) as cm:
+          await session.submit("r", "compute", "r")
+        self.assertIsInstance(
+            cm.exception.__cause__, remote_lib.TransientTransportError
+        )
+        # The 0.5s backoff is clamped to the 0.05s budget and then probed once
+        # more; the budget (not the 3-attempt cap) triggers the eviction.
+        self.assertLess(loop.time() - t0, 0.3)
+        self.assertEqual(w1.failed_dispatches, 2)
+        self.assertEqual(unreachable, [w1])
+        self.assertEqual(session._in_flight, 0)
+
+    asyncio.run(_run())
+
+  def test_cancel_or_close_during_probe_backoff_cleans_up_and_hands_off(self):
+    """Cancelling or closing during backoff cleans ledger and retry state."""
+
+    async def _run():
+      engine = GatedEngine("w1")
+      w1 = BlipHandle(engine, fail_all=True)
+      unreachable: list[remote_lib.ActorHandle] = []
+      async with ft_session(
+          [w1],
+          unreachable=unreachable,
+          poll_retry_budget_s=10.0,
+          poll_retry_initial_backoff_s=0.2,
+          poll_retry_max_backoff_s=0.2,
+      ) as session:
+        # 1. Cancelling the first waiter hands probing off to the next one.
+        submit_a = asyncio.create_task(session.submit("a", "compute", "a"))
+        submit_b = asyncio.create_task(session.submit("b", "compute", "b"))
+        await wait_until(lambda: w1.failed_dispatches >= 2)
+        await asyncio.sleep(0.01)
+        submit_a.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+          await submit_a
+        self.assertNotIn("a", session._dispatched_tasks.get(w1, {}))
+        w1.fail_all = False
+        await asyncio.wait_for(submit_b, timeout=1.0)
+        batch = await session.poll_completed(timeout_s=1.0)
+        self.assertEqual(batch, [("[w1] b", None)])
+        self.assertEqual(engine.calls, ["b"])
+        self.assertEqual(session._in_flight, 0)
+        self.assertEmpty(session._retry_states)
+        self.assertEmpty(unreachable)
+
+        # 2. Cancelling the sole dispatching task clears `_retry_states[w1]` so
+        # no stale `outage_start` lingers, and stops the idle poller.
+        w1.fail_all = True
+        submit_c = asyncio.create_task(session.submit("c", "compute", "c"))
+        await wait_until(lambda: w1.failed_dispatches >= 3)
+        await asyncio.sleep(0.01)
+        self.assertIn(w1, session._retry_states)
+        self.assertIn(w1, session._poll_tasks)
+        submit_c.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+          await submit_c
+        self.assertEmpty(session._retry_states)
+        self.assertNotIn(w1, session._poll_tasks)
+        self.assertEqual(session._in_flight, 0)
+
+        # 3. Closing the session during a 10s backoff wakes `submit()` in <0.5s
+        # via `state.wakeup` and raises `RuntimeError`.
+        session._poll_retry_initial_backoff_s = 10.0
+        session._poll_retry_max_backoff_s = 10.0
+        submit_d = asyncio.create_task(session.submit("d", "compute", "d"))
+        await wait_until(lambda: w1.failed_dispatches >= 4)
+        await asyncio.sleep(0.01)
+        t0 = asyncio.get_running_loop().time()
+        await asyncio.wait_for(session.close(), timeout=0.5)
+        with self.assertRaisesRegex(RuntimeError, "TaskSession is closed"):
+          await asyncio.wait_for(submit_d, timeout=0.5)
+        self.assertLess(asyncio.get_running_loop().time() - t0, 0.5)
+
+    asyncio.run(_run())
+
+  def test_poll_recovery_zero_timeout_probe_and_external_eviction(self):
+    """Covers timeout_s=0.0 post-blip poll probe, external removal, and non-evicting callback."""
+
+    async def _run():
+      # 1. `poll_responses(timeout_s=0.0)` recovery probe resets `outage_start`
+      # without blocking 50s on a quiet queue, then external removal from
+      # `actors_fn()` evicts the worker and fails over its in-flight task.
+      eng1 = GatedEngine("w1")
+      eng1.gates["q"] = asyncio.Event()
+      w1 = BlipHandle(eng1, quick_poll=True)
+      w1.poll_blips = 1
+      w2 = BlipHandle(GatedEngine("w2"))
+      live: list[remote_lib.ActorHandle] = [w1, w2]
+      unreachable: list[remote_lib.ActorHandle] = []
+      async with ft_session(
+          live,
+          unreachable=unreachable,
+          poll_retry_budget_s=0.08,
+          poll_retry_initial_backoff_s=0.01,
+          poll_retry_max_backoff_s=0.01,
+      ) as session:
+        await session.submit("q", "compute", "q", route_key=0)
+        await wait_until(lambda: len(w1.poll_timeouts) >= 3)
+        self.assertEqual(
+            w1.poll_timeouts[:3],
+            [
+                task_session.LONG_POLL_TIMEOUT_S,
+                0.0,
+                task_session.LONG_POLL_TIMEOUT_S,
+            ],
+        )
+        self.assertEmpty(unreachable)
+        # External removal from `actors_fn()` aborts the poll loop on the next
+        # poll cycle and fails `q` over to `w2`.
+        live.remove(w1)
+        batch = await session.poll_completed(timeout_s=1.0)
+        self.assertEqual(batch, [("[w2] q", None)])
+        self.assertEqual(unreachable, [w1])
+        eng1.gates["q"].set()
+
+      # 2. If `on_worker_unreachable` leaves `actor` in `actors`, `submit()`
+      # fails fast instead of re-routing onto the dead actor.
+      w_stuck = BlipHandle(GatedEngine("stuck"), fail_all=True)
+      async with task_session.TaskSession(
+          lambda: [w_stuck],
+          poll_retry_budget_s=0.0,
+          fault_tolerance_config=task_session.TaskSessionFaultToleranceConfig(
+              max_task_retries=2,
+              on_worker_unreachable=lambda a, e: None,
+          ),
+      ) as s_stuck:
+        with self.assertRaises(task_session.WorkerUnreachableError):
+          await s_stuck.submit("r_stuck", "compute", "r_stuck")
+        self.assertEqual(w_stuck.failed_dispatches, 1)
 
     asyncio.run(_run())
 

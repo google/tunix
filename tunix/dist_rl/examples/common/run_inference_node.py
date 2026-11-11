@@ -21,7 +21,6 @@ import asyncio
 import logging
 import os
 from pathlib import Path
-import pickle
 import sys
 from typing import Any
 
@@ -29,6 +28,7 @@ import jax
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh
 from transformers import AutoTokenizer
+from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.worker import inference_worker as exp_inference_worker
 from tunix.dist_rl.worker import remote_execution
 from tunix.models import automodel
@@ -72,6 +72,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--max_prompt_length", type=int, default=1024)
   parser.add_argument("--max_response_length", type=int, default=1024)
   parser.add_argument("--temperature", type=float, default=1.0)
+  parser.add_argument(
+      "--run_id",
+      type=str,
+      default=os.getenv("RUN_ID", ""),
+      help="Run identifier shared between orchestrator and inference workers.",
+  )
   return parser.parse_args(argv)
 
 
@@ -133,6 +139,15 @@ def main(argv: list[str], context: Any = None) -> None:
   args = _parse_args(argv)
   logging.info("Parsed args: %s", args)
 
+  otel_setup.setup_metrics(
+      default_service_name="tunix-inference",
+      resource_attributes={
+          "tunix.worker_id": args.worker_id,
+          "tunix.role": "inference",
+          "tunix.run_id": args.run_id,
+      },
+  )
+
   if context:
     context.jax.initialize()
   if REPO_ROOT not in sys.path:
@@ -173,35 +188,21 @@ def main(argv: list[str], context: Any = None) -> None:
       pad_id=pad_id,
       eos_id=eos_id,
       chunk_size=args.compute_logps_micro_batch_size,
-      max_prompt_length=args.max_prompt_length,
-      max_response_length=args.max_response_length,
-      temperature=args.temperature,
       execution_context=mesh,
   )
 
-  async def grpc_server_main() -> None:
-    server = remote_execution.GrpcRemoteExecutionServer(worker_service)
-    logging.info("Serving reference inference worker on port %d.", args.port)
-    await server.start_serving_async(args.port)
-
-    context.ipc.discovery.register(
-        metadata=pickle.dumps({
-            "service_type": "inference",
-            "service_port": args.port,
-            "worker_id": args.worker_id,
-        })
-    )
-    logging.info("Inference worker is registered.")
-
-    try:
-      while True:
-        await asyncio.sleep(1)
-    except asyncio.CancelledError:
-      pass
-    finally:
-      await server.stop_serving()
-
-  asyncio.run(grpc_server_main())
+  asyncio.run(
+      remote_execution.serve_worker(
+          worker_service,
+          port=args.port,
+          discovery=context.ipc.discovery,
+          metadata={
+              "service_type": "inference",
+              "service_port": args.port,
+              "worker_id": args.worker_id,
+          },
+      )
+  )
 
 
 if __name__ == "__main__":

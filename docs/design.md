@@ -2,11 +2,11 @@
 
 # Design Overview
 
-This document provides an overview of Tunix (Tune-in-JAX), a JAX-native
-framework for post-training large language models. It covers the overall layered
-architecture and the training loop architectures for Supervised Fine-Tuning
-(SFT), Reinforcement Learning (RL), and Agentic RL. Understanding this design
-should help you better utilize and extend Tunix for model tuning.
+This document provides an overview of Tunix (Tune-in-Accelerators), a unified
+framework for post-training large language models on accelerators. It covers the
+overall layered architecture and the training loop architectures for Supervised
+Fine-Tuning (SFT), Reinforcement Learning (RL), and Agentic RL. Understanding
+this design should help you better utilize and extend Tunix for model tuning.
 
 ## High Level Architecture
 
@@ -93,7 +93,7 @@ algorithm being used.
     execution of the chosen RL algorithm (such as PPO or GRPO). See
     [Algorithms Supported](algorithms.md) for more details.
 -   **Rollout Workers**: These workers generate sample trajectories from the
-    current model using optimized runtimes like **vLLM** or **SGLang**. This
+    current model using optimized runtimes like **vLLM**. This
     ensures high-throughput data collection, crucial for efficient RL training.
     See [Rollout](rollout.md) for more details.
 -   **Inference Workers**: These workers host inference models (e.g., critic,

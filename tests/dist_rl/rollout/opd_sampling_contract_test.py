@@ -15,6 +15,7 @@
 """Checks actual worker/engine sampling settings rather than request fields."""
 
 import dataclasses
+import sys
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -100,9 +101,19 @@ class OPDSamplingContractTest(unittest.IsolatedAsyncioTestCase):
       self,
   ):
     sampler = vllm_sampler.VllmSampler(
-        engine_args=SimpleNamespace(model="fake"),
-        config=configs.RolloutConfig(weight_sync_mode="none"),
+        server_id="cpu-opd",
+        config=configs.RolloutConfig(
+            weight_sync_mode="none", tensor_parallel_size=1, data_parallel_size=1
+        ),
     )
+    sampler.engine_args = SimpleNamespace(model="fake")
+    # Prompt constructors are optional vLLM imports; no engine runs here.
+    inputs_patch = mock.patch.dict(
+        sys.modules,
+        {"vllm.inputs": SimpleNamespace(TextPrompt=dict, TokensPrompt=dict)},
+    )
+    inputs_patch.start()
+    self.addCleanup(inputs_patch.stop)
     generate = mock.Mock()
     sampler._engine = SimpleNamespace(generate=generate)
     sampler._is_running = True

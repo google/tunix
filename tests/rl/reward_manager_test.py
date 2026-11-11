@@ -19,6 +19,7 @@ import multiprocessing
 import time
 from typing import Any, List
 from unittest import mock
+import warnings
 
 from absl import logging
 from absl.testing import absltest
@@ -65,6 +66,12 @@ def nan_reward(
 nan_reward.__name__ = "nan_reward"
 
 
+def _step_value(log_metrics: dict[str, Any], name: str) -> float:
+  """Reduces a `(values, agg_fn)` log metric the way the step loggers do."""
+  values, agg_fn = log_metrics[name]
+  return float(agg_fn(np.asarray(values)))
+
+
 @dataclasses.dataclass(slots=True, kw_only=True)
 class TestAlgoConfig(algo_config_lib.AlgorithmConfig):
   """Test Algorithm Config."""
@@ -102,7 +109,7 @@ class SequenceRewardManagerTest(parameterized.TestCase):
 
     expected_rewards = np.array([float(len("c1_long")), float(len("c2"))])
     np.testing.assert_array_equal(rewards_info["rewards"], expected_rewards)
-    self.assertLen(rewards_info["log_metrics"], 7)
+    self.assertLen(rewards_info["log_metrics"], 9)
 
   def test_multiple_reward_fns(self):
     manager = reward_manager.SequenceRewardManager(
@@ -120,7 +127,6 @@ class SequenceRewardManagerTest(parameterized.TestCase):
         prompt_len_reward(self.prompts, self.completions, custom_param=2.0)
     )
     expected_rewards = r1 + r2
-    rewards_matrix = np.array([r1, r2])
     np.testing.assert_array_almost_equal(
         rewards_info["rewards"], expected_rewards
     )
@@ -143,15 +149,23 @@ class SequenceRewardManagerTest(parameterized.TestCase):
         r2,
         err_msg="rewards/prompt_len_reward mismatch",
     )
-    for col_idx in range(rewards_matrix.shape[0]):
-      npt.assert_allclose(
-          test_metrics["rewards/min"][0][col_idx],
-          np.min(rewards_matrix[:, col_idx]),
-      )
-      npt.assert_allclose(
-          test_metrics["rewards/max"][0][col_idx],
-          np.max(rewards_matrix[:, col_idx]),
-      )
+    # `rewards/{mean,std,min,max,sum}` summarize total rewards over the step.
+    self.assertAlmostEqual(
+        _step_value(test_metrics, "rewards/mean"), np.mean(expected_rewards)
+    )
+    self.assertAlmostEqual(
+        _step_value(test_metrics, "rewards/std"), np.std(expected_rewards)
+    )
+    self.assertAlmostEqual(
+        _step_value(test_metrics, "rewards/min"), np.min(expected_rewards)
+    )
+    self.assertAlmostEqual(
+        _step_value(test_metrics, "rewards/max"), np.max(expected_rewards)
+    )
+    self.assertAlmostEqual(
+        _step_value(test_metrics, "rewards/sum"), np.sum(expected_rewards)
+    )
+    self.assertEqual(_step_value(test_metrics, "rewards/nonfinite_frac"), 0.0)
 
   def test_algo_config_param_passing(self):
     # Mock the reward function to spy on its call arguments
@@ -198,6 +212,25 @@ class SequenceRewardManagerTest(parameterized.TestCase):
         expected_rewards,
         err_msg="rewards/sum mismatch",
     )
+
+  def test_partial_nan_reward_fn_does_not_poison_step_metrics(self):
+    def partial_nan(prompts: List[str], completions: List[str]) -> List[float]:
+      del prompts, completions
+      return [1.0, np.nan]
+
+    manager = reward_manager.SequenceRewardManager(
+        reward_fns=[len_reward, partial_nan],
+        algo_config=self.test_algo_config,
+    )
+    log_metrics = manager(self.prompts, self.completions)["log_metrics"]
+    # A NaN reward-function score counts as 0 in the total, so both
+    # trajectories stay finite: totals are [7 + 1, 2].
+    self.assertEqual(_step_value(log_metrics, "rewards/min"), 2.0)
+    self.assertEqual(_step_value(log_metrics, "rewards/max"), 8.0)
+    self.assertEqual(_step_value(log_metrics, "rewards/nonfinite_frac"), 0.0)
+    # The per-function series skips the NaN score.
+    self.assertEqual(_step_value(log_metrics, "rewards/partial_nan"), 1.0)
+    manager.close()
 
   @parameterized.named_parameters(
       dict(
@@ -271,6 +304,46 @@ class SequenceRewardManagerTest(parameterized.TestCase):
     npt.assert_allclose(rewards_info["rewards"], [2.0 + 7.0, 3.0 + 2.0])
     manager.close()
 
+  def test_dataset_env_rewards_kwarg_forwarded_to_reward_fn(self):
+    def uses_env_rewards_col(
+        prompts: List[str], completions: List[str], env_rewards: List[float]
+    ) -> List[float]:
+      del prompts, completions
+      return [x * 0.5 for x in env_rewards]
+
+    manager = reward_manager.SequenceRewardManager(
+        reward_fns=[uses_env_rewards_col],
+        algo_config=self.test_algo_config,
+    )
+    res = manager(self.prompts, self.completions, env_rewards=[100.0, 200.0])
+    npt.assert_allclose(res["rewards"], [50.0, 100.0])
+    self.assertNotIn("rewards/env", res["log_metrics"])
+    manager.close()
+
+  def test_compute_rewards_positional_and_kwargs_compatibility(self):
+    manager = reward_manager.SequenceRewardManager(
+        reward_fns=[answer_reward],
+        algo_config=self.test_algo_config,
+    )
+    res = manager._compute_rewards(  # pylint: disable=protected-access
+        self.prompts, self.completions, answer=["3.0", "5.0"]
+    )
+    npt.assert_allclose(res["rewards"], [3.0, 5.0])
+    manager.close()
+
+  @parameterized.parameters("sum", "mean", "min", "max")
+  def test_reward_fn_named_after_summary_metric_raises(self, name):
+    def fn(prompts: List[str], completions: List[str]) -> List[float]:
+      del prompts, completions
+      return [1.0, 2.0]
+
+    fn.__name__ = name
+    with self.assertRaisesRegex(ValueError, "reserved"):
+      reward_manager.SequenceRewardManager(
+          reward_fns=[len_reward, fn],
+          algo_config=self.test_algo_config,
+      )
+
 
 class AgenticSequenceRewardManagerTest(parameterized.TestCase):
 
@@ -290,27 +363,170 @@ class AgenticSequenceRewardManagerTest(parameterized.TestCase):
         self.prompts, self.completions, trajectory_rewards=traj_rewards
     )
     log_metrics = rewards_info["log_metrics"]
-    # Verify trajectory metrics exist and are correctly prefixed
-    self.assertIn("trajectory_rewards/sum", log_metrics)
-    self.assertIn("trajectory_rewards/mean", log_metrics)
-    # Verify general reward metrics exist and preserve their own prefix
-    self.assertIn("rewards/sum", log_metrics)
-    self.assertIn("rewards/len_reward", log_metrics)
+    self.assertFalse(
+        any(k.startswith("trajectory_rewards/") for k in log_metrics)
+    )
+    npt.assert_allclose(rewards_info["rewards"], [17.0, 22.0])
+    npt.assert_allclose(log_metrics["rewards/sum"][0], [17.0, 22.0])
+    self.assertEqual(_step_value(log_metrics, "rewards/sum"), 39.0)
+    self.assertEqual(_step_value(log_metrics, "rewards/mean"), 19.5)
+    self.assertEqual(_step_value(log_metrics, "rewards/min"), 17.0)
+    self.assertEqual(_step_value(log_metrics, "rewards/max"), 22.0)
+    self.assertEqual(_step_value(log_metrics, "rewards/env"), 15.0)
+    self.assertEqual(_step_value(log_metrics, "rewards/len_reward"), 4.5)
+    manager.close()
 
   def test_log_metrics_non_interference_no_reward_fns(self):
     manager = reward_manager.AgenticSequenceRewardManager(
         reward_fns=None,
         algo_config=self.test_algo_config,
     )
-    traj_rewards = [5.0, 5.0]
+    traj_rewards = [2.0, 6.0]
     rewards_info = manager(
         self.prompts, self.completions, trajectory_rewards=traj_rewards
     )
     log_metrics = rewards_info["log_metrics"]
-    # With no reward_fns, only trajectory log metrics should be populated
-    self.assertIn("trajectory_rewards/sum", log_metrics)
-    self.assertIn("trajectory_rewards/mean", log_metrics)
-    self.assertNotIn("rewards/sum", log_metrics)
+    self.assertFalse(
+        any(k.startswith("trajectory_rewards/") for k in log_metrics)
+    )
+    self.assertNotIn("rewards/env", log_metrics)
+    npt.assert_allclose(rewards_info["rewards"], [2.0, 6.0])
+    self.assertEqual(_step_value(log_metrics, "rewards/sum"), 8.0)
+    self.assertEqual(_step_value(log_metrics, "rewards/mean"), 4.0)
+    self.assertEqual(_step_value(log_metrics, "rewards/std"), 2.0)
+    self.assertEqual(_step_value(log_metrics, "rewards/min"), 2.0)
+    self.assertEqual(_step_value(log_metrics, "rewards/max"), 6.0)
+    manager.close()
+
+  def test_empty_batch_raises(self):
+    manager = reward_manager.AgenticSequenceRewardManager(
+        reward_fns=None,
+        algo_config=self.test_algo_config,
+    )
+    with self.assertRaisesRegex(ValueError, "empty batch"):
+      manager([], [], trajectory_rewards=[])
+    with self.assertRaisesRegex(ValueError, "empty batch"):
+      manager(np.array([]), [], trajectory_rewards=[])
+    manager.close()
+
+  def test_trajectory_rewards_shape_mismatch_raises(self):
+    manager = reward_manager.AgenticSequenceRewardManager(
+        reward_fns=None,
+        algo_config=self.test_algo_config,
+    )
+    with self.assertRaisesRegex(ValueError, "trajectory_rewards"):
+      manager(self.prompts, self.completions, trajectory_rewards=[1.0])
+    manager.close()
+
+  def test_numpy_ndarray_prompts(self):
+    manager = reward_manager.AgenticSequenceRewardManager(
+        reward_fns=None,
+        algo_config=self.test_algo_config,
+    )
+    res = manager(
+        np.array(self.prompts), self.completions, trajectory_rewards=[2.0, 6.0]
+    )
+    npt.assert_allclose(res["rewards"], [2.0, 6.0])
+    manager.close()
+
+  def test_nan_trajectory_rewards_propagate(self):
+    pure_manager = reward_manager.AgenticSequenceRewardManager(
+        reward_fns=None,
+        algo_config=self.test_algo_config,
+    )
+    pure_res = pure_manager(
+        self.prompts, self.completions, trajectory_rewards=[np.nan, 1.0]
+    )
+    self.assertTrue(np.isnan(pure_res["rewards"][0]))
+    npt.assert_allclose(pure_res["rewards"][1:], [1.0])
+    pure_manager.close()
+
+    hybrid_manager = reward_manager.AgenticSequenceRewardManager(
+        reward_fns=[len_reward],
+        algo_config=self.test_algo_config,
+    )
+    hybrid_res = hybrid_manager(
+        self.prompts, self.completions, trajectory_rewards=[np.nan, 1.0]
+    )
+    self.assertTrue(np.isnan(hybrid_res["rewards"][0]))
+    npt.assert_allclose(hybrid_res["rewards"][1:], [3.0])
+    hybrid_manager.close()
+
+  def test_nan_env_reward_trajectory_excluded_from_step_metrics(self):
+    manager = reward_manager.AgenticSequenceRewardManager(
+        reward_fns=[len_reward],
+        algo_config=self.test_algo_config,
+    )
+    log_metrics = manager(
+        self.prompts, self.completions, trajectory_rewards=[np.nan, 1.0]
+    )["log_metrics"]
+    # Only the second trajectory (total 1 + 2) is finite; the NaN one is
+    # excluded rather than turning the step's metrics into NaN.
+    for name in ("mean", "min", "max", "sum"):
+      self.assertEqual(_step_value(log_metrics, f"rewards/{name}"), 3.0)
+    self.assertEqual(_step_value(log_metrics, "rewards/std"), 0.0)
+    self.assertEqual(_step_value(log_metrics, "rewards/nonfinite_frac"), 0.5)
+    self.assertEqual(_step_value(log_metrics, "rewards/env"), 1.0)
+    self.assertEqual(_step_value(log_metrics, "rewards/len_reward"), 2.0)
+    manager.close()
+
+  def test_all_nonfinite_env_rewards_report_nan_summary(self):
+    manager = reward_manager.AgenticSequenceRewardManager(
+        reward_fns=None,
+        algo_config=self.test_algo_config,
+    )
+    log_metrics = manager(
+        self.prompts, self.completions, trajectory_rewards=[np.nan, np.inf]
+    )["log_metrics"]
+    self.assertEqual(_step_value(log_metrics, "rewards/nonfinite_frac"), 1.0)
+    with warnings.catch_warnings():
+      warnings.simplefilter("ignore", RuntimeWarning)
+      self.assertTrue(np.isnan(_step_value(log_metrics, "rewards/mean")))
+      self.assertTrue(np.isnan(_step_value(log_metrics, "rewards/max")))
+    manager.close()
+
+  def test_reward_fn_named_sum_raises(self):
+    def sum(prompts: List[str], completions: List[str]) -> List[float]:  # pylint: disable=redefined-builtin
+      del prompts, completions
+      return [7.0, 2.0]
+
+    with self.assertRaisesRegex(ValueError, "reserved"):
+      reward_manager.AgenticSequenceRewardManager(
+          reward_fns=[sum],
+          algo_config=self.test_algo_config,
+      )
+
+  def test_dataset_env_rewards_kwarg_forwarded_to_reward_fn(self):
+    def uses_env_rewards_col(
+        prompts: List[str], completions: List[str], env_rewards: List[float]
+    ) -> List[float]:
+      del prompts, completions
+      return [x * 0.5 for x in env_rewards]
+
+    manager = reward_manager.AgenticSequenceRewardManager(
+        reward_fns=[uses_env_rewards_col],
+        algo_config=self.test_algo_config,
+    )
+    res = manager(
+        self.prompts,
+        self.completions,
+        trajectory_rewards=[1.0, 2.0],
+        env_rewards=[100.0, 200.0],
+    )
+    npt.assert_allclose(res["rewards"], [51.0, 102.0])
+    npt.assert_allclose(res["log_metrics"]["rewards/env"][0], [1.0, 2.0])
+    manager.close()
+
+  def test_reserved_env_reward_fn_name_raises(self):
+    def env(prompts: List[str], completions: List[str]) -> List[float]:
+      del completions
+      return [1.0] * len(prompts)
+
+    with self.assertRaisesRegex(ValueError, "reserved"):
+      reward_manager.AgenticSequenceRewardManager(
+          reward_fns=[env],
+          algo_config=self.test_algo_config,
+      )
 
   def test_empty_list_reward_fns_env_mode(self):
     manager = reward_manager.AgenticSequenceRewardManager(
@@ -323,6 +539,7 @@ class AgenticSequenceRewardManagerTest(parameterized.TestCase):
         self.prompts, self.completions, trajectory_rewards=traj_rewards
     )
     npt.assert_allclose(rewards_info["rewards"], [1.0, 2.0])
+    self.assertNotIn("rewards/env", rewards_info["log_metrics"])
     manager.close()
 
   def test_int_and_ndarray_trajectory_rewards_not_mutated_with_reward_fns(self):

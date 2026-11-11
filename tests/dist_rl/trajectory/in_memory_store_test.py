@@ -93,6 +93,31 @@ class InMemoryTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
     re_read = mem_store.get_trajectories_metrics(["t1"])["t1"]
     self.assertEqual(re_read.extra["tags"], ["a", "b"])
 
+  def test_add_step_when_caller_mutates_step_preserves_stored_step(
+      self,
+  ) -> None:
+    """Verifies mutating input step after add_step keeps stored step intact."""
+    mem_store = in_memory_store.InMemoryTrajectoryStore()
+    meta = trajectory_lib.TrajectoryMetadata(
+        trajectory_id="step_iso_1",
+        agent=trajectory_lib.Agent(name="a1", version="1.0"),
+    )
+    step = trajectory_lib.Step(
+        step_id=1,
+        source=trajectory_lib.Source.AGENT,
+        message="initial message",
+        extra={"nested": ["v1"]},
+    )
+
+    mem_store.add_step(step, meta)
+    step.message = "mutated message"
+    assert step.extra is not None
+    step.extra["nested"].append("v2")
+
+    (stored_traj,) = mem_store.get_trajectories(["step_iso_1"])
+    self.assertEqual(stored_traj.steps[0].message, "initial message")
+    self.assertEqual(stored_traj.steps[0].extra, {"nested": ["v1"]})
+
 
 class InMemoryTrajectoryStoreMetadataClsTest(
     store_testing.TrajectoryStoreMetadataClsTestCase

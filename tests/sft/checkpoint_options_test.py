@@ -82,11 +82,37 @@ class CheckpointOptionsTest(parameterized.TestCase):
     options.preservation_policy = None
     options.step_name_format = None
     options.enable_async_checkpointing = None
+    options.device_host_concurrent_gb = None
 
     opts = checkpoint_options.resolve_checkpointing_defaults(options)
     self.assertIsNotNone(opts.async_options)
     assert opts.async_options is not None
     self.assertEqual(opts.async_options.timeout_secs, 5000)
+
+  def test_resolve_checkpointing_defaults_keeps_device_host_cap(self):
+    opts = checkpoint_options.resolve_checkpointing_defaults(
+        checkpoint_options.TunixCheckpointingOptions(
+            device_host_concurrent_gb=8
+        )
+    )
+    self.assertEqual(opts.device_host_concurrent_gb, 8)
+    # Options without the field carry no cap.
+    self.assertIsNone(
+        checkpoint_options.resolve_checkpointing_defaults(
+            ocp_v0.CheckpointManagerOptions()
+        ).device_host_concurrent_gb
+    )
+    self.assertIsNone(
+        checkpoint_options.resolve_checkpointing_defaults(
+            None
+        ).device_host_concurrent_gb
+    )
+    with self.assertRaisesRegex(TypeError, 'must be an int or None'):
+      checkpoint_options.TunixCheckpointingOptions(
+          device_host_concurrent_gb=True
+      )
+    with self.assertRaisesRegex(ValueError, 'must be positive'):
+      checkpoint_options.TunixCheckpointingOptions(device_host_concurrent_gb=0)
 
   def test_resolve_checkpointing_defaults_with_modern_options(self):
     modern_opts = checkpoint_options.TunixCheckpointingOptions(
@@ -114,6 +140,7 @@ class CheckpointOptionsTest(parameterized.TestCase):
         ),
         preservation_policy=ocp.training.preservation_policies.LatestN(10),
         enable_async_checkpointing=False,
+        device_host_concurrent_gb=8,
     )
     self.assertIsInstance(opts, checkpoint_options.TunixCheckpointingOptions)
     self.assertEqual(
@@ -125,6 +152,7 @@ class CheckpointOptionsTest(parameterized.TestCase):
         ocp.training.preservation_policies.LatestN(10),
     )
     self.assertFalse(opts.enable_async_checkpointing)
+    self.assertEqual(opts.device_host_concurrent_gb, 8)
 
   def test_checkpointing_options_from_dict(self):
     opts_dict = {

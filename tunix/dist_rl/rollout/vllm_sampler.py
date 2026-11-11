@@ -39,13 +39,11 @@ from tunix.dist_rl.weight_sync import weight_sync
 from tunix.dist_rl.weight_sync import weight_sync_coordinator
 from tunix.generate import utils as generate_utils
 
+# TODO(yatlas): Clean up lazy vLLM imports so TYPE_CHECKING is not needed.
 if TYPE_CHECKING:
-  from vllm.engine.arg_utils import AsyncEngineArgs
-  from vllm.engine.async_llm_engine import AsyncLLMEngine
-  from vllm.inputs import TextPrompt, TokensPrompt
-  from vllm.sampling_params import SamplingParams as VllmSamplingParams
-
-os.environ["VLLM_USE_V1"] = "0"
+  from vllm.engine.arg_utils import AsyncEngineArgs  # pylint: disable=g-import-not-at-top
+  from vllm.engine.async_llm_engine import AsyncLLMEngine  # pylint: disable=g-import-not-at-top
+  from vllm.sampling_params import SamplingParams as VllmSamplingParams  # pylint: disable=g-import-not-at-top
 
 Sampler = base_sampler_lib.Sampler
 logger = logging.getLogger(__name__)
@@ -67,6 +65,19 @@ def _get_val(obj: Any, key: str, default: Any = None) -> Any:
   else:
     val = getattr(obj, key, default)
   return default if val is None else val
+
+
+def _sync_request_id(
+    sync_request: base_sampler_lib.WeightSyncRequest | None,
+) -> Any | None:
+  """Extracts the transfer request ID from `sync_request`, if present."""
+  if sync_request is None:
+    return None
+  if sync_request.extra_config:
+    rid = sync_request.extra_config.get("req_id")
+    if rid:
+      return rid
+  return sync_request.request_id
 
 
 async def _flush_engine_stats_periodically(
@@ -113,31 +124,99 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
 
   def __init__(
       self,
-      server_id: str = "vllm-rollout-0",
-      engine_args: AsyncEngineArgs | None = None,
-      model_name: str = "",
-      config: configs.RolloutConfig | None = None,
+      server_id: str,
+      config: configs.RolloutConfig,
       worker_index: int = 0,
       parallelism: int = 4,
-      weight_sync_mode: weight_sync.WeightSyncMode | str | None = None,
-      free_kv_cache: bool = False,
-      partial_rollout: bool = False,
-      detokenize: bool = False,
-      **kwargs: Any,
   ):
-    del kwargs
-    if config is None:
-      config = configs.RolloutConfig(
-          weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN
-      )
+    """Initializes the sampler and builds its vLLM engine arguments.
+
+    Args:
+      server_id: Unique identifier for this rollout replica.
+      config: Rollout configuration. The engine arguments come from its
+        `rollout_vllm_model_version`, `tensor_parallel_size`,
+        `data_parallel_size`, `kv_cache_size` (as `max_model_len`),
+        `rollout_vllm_hbm_utilization` (as `gpu_memory_utilization`),
+        `rollout_vllm_lora_config`, `rollout_vllm_hf_config_path`,
+        `rollout_vllm_async_scheduling`, `rollout_vllm_max_num_seqs`,
+        `rollout_vllm_max_num_batched_tokens`, `rollout_vllm_logprobs_mode`,
+        `return_routed_experts` and `rollout_vllm_additional_config` fields,
+        then `rollout_vllm_kwargs`. `sample()` reads the sampling settings from
+        it and `rollout_vllm_sampling_kwargs`. Its other `rollout_vllm_*` fields
+        are not used.
+      worker_index: Host index within this replica.
+      parallelism: Number of hosts in this replica.
+    """
     self.config: configs.RolloutConfig = config
     self.server_id = server_id
-    self.engine_args = engine_args
-    self.model_name = (
-        model_name
-        or (engine_args.model if engine_args is not None else "")
-        or (self.config.rollout_vllm_model_version or "")
+    if not config.rollout_vllm_server_mode:
+      logger.warning(
+          "VllmSampler [%s] always runs in server mode; ignoring"
+          " config.rollout_vllm_server_mode=False.",
+          self.server_id,
+      )
+    lora_config = config.rollout_vllm_lora_config
+    # TODO(tunix-dev): Share this engine-kwargs construction with
+    # `InprocessVllmSampler.initialize` in one helper so the two samplers can't
+    # drift.
+    engine_kwargs: dict[str, Any] = {
+        "model": config.rollout_vllm_model_version,
+        "tensor_parallel_size": config.tensor_parallel_size,
+        "data_parallel_size": config.data_parallel_size,
+        "max_model_len": config.kv_cache_size,
+        "async_scheduling": config.rollout_vllm_async_scheduling,
+        "max_num_seqs": config.rollout_vllm_max_num_seqs,
+        "max_num_batched_tokens": config.rollout_vllm_max_num_batched_tokens,
+        # Only the logprob of each sampled token is needed.
+        "max_logprobs": 1,
+        "logprobs_mode": config.rollout_vllm_logprobs_mode,
+        "enable_return_routed_experts": config.return_routed_experts,
+        "trust_remote_code": True,
+        "enable_lora": lora_config is not None,
+    }
+    if lora_config is not None:
+      max_lora_rank = lora_config.get("max_lora_rank")
+      if max_lora_rank is not None:
+        engine_kwargs["max_lora_rank"] = max_lora_rank
+      max_loras = lora_config.get("max_loras", 1)
+      if max_loras is not None:
+        engine_kwargs["max_loras"] = max_loras
+    # TODO(yatlas): Remove default hbm_utilization once colocated hbm fixes are
+    # landed.
+    if config.rollout_vllm_hbm_utilization is not None:
+      engine_kwargs["gpu_memory_utilization"] = (
+          config.rollout_vllm_hbm_utilization
+      )
+    if config.rollout_vllm_hf_config_path is not None:
+      engine_kwargs["hf_config_path"] = config.rollout_vllm_hf_config_path
+    extra_kwargs = dict(config.rollout_vllm_kwargs)
+    additional_config = generate_utils.merge_additional_config(
+        config.rollout_vllm_additional_config,
+        extra_kwargs.pop("additional_config", None),
     )
+    if additional_config is not None:
+      engine_kwargs["additional_config"] = additional_config
+    # Applied last, so these override the values above.
+    engine_kwargs.update(extra_kwargs)
+    tp_size = engine_kwargs["tensor_parallel_size"]
+    dp_size = engine_kwargs["data_parallel_size"]
+    if tp_size < 1 or dp_size < 1:
+      raise ValueError(
+          f"VllmSampler [{server_id}] requires positive"
+          " config.tensor_parallel_size and config.data_parallel_size, got"
+          f" {tp_size} and {dp_size}."
+      )
+    if (lora_config is not None or engine_kwargs.get("enable_lora")) and (
+        dp_size > 1
+    ):
+      raise ValueError(
+          "LoRA is not supported with rollout data parallelism:"
+          f" config.data_parallel_size={dp_size} with"
+          " config.rollout_vllm_lora_config. Set data_parallel_size=1 or drop"
+          " LoRA."
+      )
+    self._engine_kwargs: dict[str, Any] = engine_kwargs
+    self.engine_args: AsyncEngineArgs | None = None
     self.worker_index = worker_index
     # Raiden treats units sharing a job_name as hosts of ONE job and splits the
     # weights across them (`num_dst_physical_hosts` in raiden_controller), so
@@ -146,35 +225,10 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
     # host index *within* one replica.
     self.raiden_job_name = f"replica_{self.server_id}"
     self._parallelism = parallelism
-    # Default to False: Raiden updates weights in-place on device without
-    # allocating a second weight copy in HBM, and pre_weight_sync already
-    # invalidates the prefix cache (`reset_prefix_cache`), so deallocating and
-    # reallocating the KV cache pool on every sync step is unnecessary.
-    self.free_kv_cache = free_kv_cache
-    self.partial_rollout: bool = bool(
-        partial_rollout or self.config.partial_rollout
-    )
-    # When set (run_rollout_node's `--detokenize`), every request is
-    # detokenized unless it explicitly opts out. Agentic rollouts read the
-    # action from `SamplingResponse.text`.
-    self.detokenize: bool = bool(detokenize)
 
-    # TODO(tunix-dev): Share this weight-sync-mode resolution with
-    # InprocessVllmSampler and VanillaSampler in one helper; each sampler passes
-    # its own default mode.
-    # Resolution order: the explicit `weight_sync_mode` argument, then
-    # `config.weight_sync_mode` (RAIDEN only if that is unset). A supplied
-    # `RolloutConfig` defaults to "none", so Raiden stays off unless the caller
-    # asks for it; only `config=None` keeps the historical always-Raiden
-    # behaviour, through the default config above.
-    if weight_sync_mode is None:
-      weight_sync_mode = self.config.weight_sync_mode
-    if isinstance(weight_sync_mode, weight_sync.WeightSyncMode):
-      self.weight_sync_mode = weight_sync_mode
-    elif isinstance(weight_sync_mode, str):
-      self.weight_sync_mode = weight_sync.WeightSyncMode(weight_sync_mode)
-    else:
-      self.weight_sync_mode = weight_sync.WeightSyncMode.RAIDEN
+    self.weight_sync_mode = weight_sync.WeightSyncMode(
+        self.config.weight_sync_mode
+    )
     self.enable_raiden = (
         self.weight_sync_mode == weight_sync.WeightSyncMode.RAIDEN
     )
@@ -183,10 +237,9 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
           "VllmSampler [%s] weight_sync_mode=%s; Raiden weight sync is"
           " disabled.",
           self.server_id,
-          self.weight_sync_mode.value,
+          self.weight_sync_mode,
       )
 
-    self._initialized: bool = self.engine_args is not None
     self._engine: AsyncLLMEngine | None = None
     self._is_running: bool = False
     self._is_paused: bool = False
@@ -201,22 +254,12 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
     self._log_stats_task: asyncio.Task[None] | None = None
 
   def initialize(self) -> None:
-    """Initializes VllmSampler engine arguments if not already configured."""
-    if self.engine_args is None and self.model_name:
-      from vllm.engine.arg_utils import AsyncEngineArgs  # pylint: disable=g-import-not-at-top
+    """Builds the vLLM `AsyncEngineArgs` from the rollout configuration."""
+    if self.engine_args is not None:
+      return
+    from vllm.engine.arg_utils import AsyncEngineArgs  # pylint: disable=g-import-not-at-top
 
-      self.engine_args = AsyncEngineArgs(model=self.model_name)
-    if self.engine_args is None:
-      raise RuntimeError(
-          f"VllmSampler [{self.server_id}] requires valid engine_args or"
-          " model_name."
-      )
-    self._initialized = True
-
-  def _require_initialized(self) -> None:
-    """Raises RuntimeError if the sampler has not been initialized."""
-    if not self._initialized and self.engine_args is None:
-      raise RuntimeError(f"VllmSampler [{self.server_id}] is not initialized.")
+    self.engine_args = AsyncEngineArgs(**self._engine_kwargs)
 
   # ---------------------------------------------------------------------------
   # Lifecycle & Inference Methods
@@ -225,12 +268,12 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
   async def start(self, **kwargs: Any) -> None:
     """Initializes the vLLM engine and execution environment."""
     del kwargs
-    self._require_initialized()
     if self._is_running:
       logger.warning("VllmSampler is already running.")
       return
-
+    self.initialize()
     assert self.engine_args is not None
+
     logger.info(
         "Initializing VllmSampler with model: %s", self.engine_args.model
     )
@@ -263,8 +306,6 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
     lifecycle and can guarantee the engine is up before it issues any phase
     call; the ordering belongs there, not in a guard on each entry point.
     """
-    if not self._initialized:
-      self.initialize()
     if not self._is_running:
       logger.info(
           "VllmSampler [%s] starting engine for weight sync (no sample has"
@@ -276,7 +317,6 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
   async def stop(self, **kwargs: Any) -> None:
     """Stops the sampler and releases resources."""
     del kwargs
-    self._require_initialized()
     if not self._is_running:
       return
     logger.info("Stopping VllmSampler...")
@@ -290,63 +330,56 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
     self._is_running = False
     logger.info("VllmSampler stopped.")
 
-  async def pause(
-      self, partial_rollout: bool | None = None, **kwargs: Any
-  ) -> None:
+  def _check_partial_rollout_kwarg(self, kwargs: Mapping[str, Any]) -> None:
+    """Rejects a per-call `partial_rollout` kwarg that disagrees with config."""
+    # TODO(yatlas): Stop passing `partial_rollout` from
+    # `RolloutManager.pre_weight_sync` and remove `**kwargs` on `pause` /
+    # `pre_weight_sync`.
+    partial_rollout = kwargs.get("partial_rollout")
+    if (
+        partial_rollout is not None
+        and bool(partial_rollout) != self.config.partial_rollout
+    ):
+      raise ValueError(
+          f"VllmSampler [{self.server_id}] received"
+          f" partial_rollout={partial_rollout!r}, which disagrees with"
+          f" config.partial_rollout={self.config.partial_rollout}."
+      )
+
+  async def pause(self, **kwargs: Any) -> None:
     """Pauses request intake and drains or freezes active batch iterations during weight updates."""
-    del kwargs
-    self._require_initialized()
+    self._check_partial_rollout_kwarg(kwargs)
     if self._is_paused:
       return
     self._is_paused = True
-    use_partial = (
-        self.partial_rollout
-        if partial_rollout is None
-        else bool(partial_rollout)
-    )
-    if (
-        use_partial
-        and self._engine
-        and hasattr(self._engine, "pause_generation")
-    ):
+    if self.config.partial_rollout and self._engine is not None:
       logger.info(
           "Pausing VllmSampler generation in-place (mode='keep',"
           " clear_cache=False)..."
       )
       await self._engine.pause_generation(mode="keep", clear_cache=False)
       self._paused_generation = True
-    elif self._engine and hasattr(self._engine, "pause_background_loop"):
-      # Note: vLLM's pause_background_loop stops the scheduler from taking new
-      # requests from the queue. Ongoing requests in the batch will be
-      # completed or drained depending on internal vLLM state.
-      logger.info("Pausing VllmSampler inference intake for weight sync...")
-      await self._engine.pause_background_loop()
+    else:
+      # TODO(tunix-dev): Without partial_rollout this neither drains nor
+      # freezes the engine; RolloutManager drains in-flight trajectories before
+      # pre_weight_sync. Drain here or correct the docstring.
       self._paused_generation = False
     await asyncio.sleep(0.01)
 
   async def resume(self, **kwargs: Any) -> None:
     """Resumes inference processing after weight sync completion."""
     del kwargs
-    self._require_initialized()
     if not self._is_paused:
       return
-    if (
-        self._paused_generation
-        and self._engine
-        and hasattr(self._engine, "resume_generation")
-    ):
+    if self._paused_generation and self._engine is not None:
       logger.info("Resuming VllmSampler generation...")
       await self._engine.resume_generation()
       self._paused_generation = False
-    elif self._engine and hasattr(self._engine, "resume_background_loop"):
-      logger.info("Resuming VllmSampler inference serving...")
-      await self._engine.resume_background_loop()
     self._is_paused = False
 
   async def get_mesh(self, **kwargs: Any) -> Any | None:
     """Returns the JAX device mesh."""
     del kwargs
-    self._require_initialized()
     return self._mesh
 
   # ---------------------------------------------------------------------------
@@ -380,11 +413,17 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
     # `kwargs` goes through `_get_val` too: callers pass unset fields as
     # explicit `None`, so `.get(key, default)` returns `None` rather than
     # the default, defeating it before `_get_val` can coalesce.
-    vllm_kwargs: dict[str, Any] = dict(
+    sampling_defaults = self.config.rollout_vllm_sampling_kwargs
+    vllm_kwargs: dict[str, Any] = dict(sampling_defaults)
+    vllm_kwargs.update(
         temperature=_get_val(
             sparams,
             "temperature",
-            _get_val(kwargs, "temperature", self.config.temperature),
+            _get_val(
+                kwargs,
+                "temperature",
+                sampling_defaults.get("temperature", self.config.temperature),
+            ),
         ),
         top_p=_get_val(
             sparams,
@@ -392,7 +431,12 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
             _get_val(
                 kwargs,
                 "top_p",
-                self.config.top_p if self.config.top_p is not None else 0.95,
+                sampling_defaults.get(
+                    "top_p",
+                    self.config.top_p
+                    if self.config.top_p is not None
+                    else 0.95,
+                ),
             ),
         ),
         top_k=_get_val(
@@ -401,35 +445,58 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
             _get_val(
                 kwargs,
                 "top_k",
-                self.config.top_k if self.config.top_k is not None else -1,
+                sampling_defaults.get(
+                    "top_k",
+                    self.config.top_k if self.config.top_k is not None else -1,
+                ),
             ),
         ),
         max_tokens=_get_val(
             sparams,
             "max_tokens",
-            _get_val(kwargs, "max_tokens", self.config.max_tokens_to_generate),
+            _get_val(
+                kwargs,
+                "max_tokens",
+                sampling_defaults.get(
+                    "max_tokens", self.config.max_tokens_to_generate
+                ),
+            ),
         ),
         stop=_get_val(sparams, "stop_sequences")
         or _get_val(sparams, "stop")
-        or kwargs.get("stop"),
-        stop_token_ids=list(stop_token_ids)
-        if stop_token_ids is not None
-        else None,
+        or kwargs.get("stop")
+        or sampling_defaults.get("stop"),
+        stop_token_ids=(
+            list(stop_token_ids)
+            if stop_token_ids is not None
+            else sampling_defaults.get("stop_token_ids")
+        ),
         include_stop_str_in_output=bool(
             _get_val(
                 sparams,
                 "include_stop_str_in_output",
-                _get_val(kwargs, "include_stop_str_in_output", True),
+                _get_val(
+                    kwargs,
+                    "include_stop_str_in_output",
+                    sampling_defaults.get("include_stop_str_in_output", True),
+                ),
             )
         ),
         # Detokenize by default so callers that read `SamplingResponse.text`
         # (e.g. agentic rollouts) receive populated text, matching vLLM's
-        # default. Token-only callers can opt out by passing `detokenize=False`.
+        # default. Token-only callers can opt out via
+        # `config.rollout_vllm_sampling_kwargs` or per-request
+        # `detokenize=False`.
+        # TODO(yatlas): Drop per-request `detokenize` overrides.
         detokenize=bool(
             _get_val(
                 sparams,
                 "detokenize",
-                _get_val(kwargs, "detokenize", True),
+                _get_val(
+                    kwargs,
+                    "detokenize",
+                    sampling_defaults.get("detokenize", True),
+                ),
             )
         ),
         logprobs=1
@@ -591,9 +658,6 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
     """
     if sampling_requests is None:
       raise ValueError("sampling_requests cannot be None.")
-    self._require_initialized()
-    if self.detokenize:
-      kwargs.setdefault("detokenize", True)
 
     while self._is_paused:
       await asyncio.sleep(0.05)
@@ -633,6 +697,8 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
       req_list = [sampling_requests]
     else:
       req_list = list(sampling_requests)
+
+    from vllm.inputs import TextPrompt, TokensPrompt  # pylint: disable=g-import-not-at-top,g-multiple-import
 
     pending_tasks = []
     for idx, req in enumerate(req_list):
@@ -716,7 +782,7 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
     """Purges prefix caching blocks from HBM."""
     logger.info("Clearing vLLM RadixAttention prefix cache...")
     self._cache_valid = False
-    if self._engine and hasattr(self._engine, "reset_prefix_cache"):
+    if self._engine is not None:
       await self._engine.reset_prefix_cache()
 
   # ---------------------------------------------------------------------------
@@ -814,7 +880,7 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
       raise NotImplementedError(
           f"VllmSampler [{self.server_id}] does not support"
           " get_weight_sync_metadata when Raiden is disabled"
-          f" (weight_sync_mode={self.weight_sync_mode.value})."
+          f" (weight_sync_mode={self.config.weight_sync_mode})."
       )
     await self._ensure_started()
     meta = await self.get_raiden_metadata()
@@ -827,9 +893,8 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
 
   async def pre_weight_sync(
       self,
-      sync_request: Any = None,
-      free_kv_cache: bool | None = None,
-      partial_rollout: bool | None = None,
+      sync_request: base_sampler_lib.WeightSyncRequest | None = None,
+      free_kv_cache: bool = False,
       **kwargs: Any,
   ) -> Any:
     """Phase 1: Pauses intake, invalidates prefix cache, and optionally drops KV cache.
@@ -842,22 +907,15 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
     per-step latency overhead of deallocating (`delete_kv_cache`) and
     reallocating (`reinitialize_kv_cache`) the HBM KV buffer pool.
     """
-    del kwargs
+    self._check_partial_rollout_kwarg(kwargs)
     if not self.enable_raiden:
       return True
-    self._require_initialized()
     async with self._sync_lock:
       if not self._tracker.admit(sync_request, "prepared"):
         return True
 
-      use_partial = (
-          self.partial_rollout
-          if partial_rollout is None
-          else bool(partial_rollout)
-      )
-      use_free_kv = (
-          self.free_kv_cache if free_kv_cache is None else bool(free_kv_cache)
-      )
+      use_partial = self.config.partial_rollout
+      use_free_kv = bool(free_kv_cache)
       logger.info(
           "Executing pre_weight_sync for server_id=%s (free_kv_cache=%s,"
           " partial_rollout=%s)",
@@ -866,17 +924,11 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
           use_partial,
       )
 
-      if sync_request is not None:
-        rid = _get_val(
-            _get_val(sync_request, "extra_config"), "req_id"
-        ) or _get_val(sync_request, "req_id")
-        if rid:
-          self._transfer_statuses[str(rid)] = "IN_PROGRESS"
+      rid = _sync_request_id(sync_request)
+      if rid:
+        self._transfer_statuses[str(rid)] = "IN_PROGRESS"
 
-      if use_partial:
-        await self.pause(partial_rollout=True)
-      else:
-        await self.pause()
+      await self.pause()
       if not (use_partial and not use_free_kv):
         await self._clear_prefix_cache()
 
@@ -891,7 +943,11 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
       self._tracker.complete(sync_request, "prepared")
       return True
 
-  async def weight_sync(self, sync_request: Any = None, **kwargs: Any) -> Any:
+  async def weight_sync(
+      self,
+      sync_request: base_sampler_lib.WeightSyncRequest | None = None,
+      **kwargs: Any,
+  ) -> Any:
     """Phase 2: Flushes/awaits H2D transfers across TPU workers and refreshes state_leaves."""
     del kwargs
     if not self.enable_raiden:
@@ -900,9 +956,8 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
       raise RuntimeError(
           f"VllmSampler [{self.server_id}] supports Raiden weight sync only;"
           " no fallback path exists"
-          f" (weight_sync_mode={self.weight_sync_mode.value})."
+          f" (weight_sync_mode={self.config.weight_sync_mode})."
       )
-    self._require_initialized()
     async with self._sync_lock:
       if not self._tracker.admit(sync_request, "h2d_done"):
         return True
@@ -924,23 +979,19 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
       return True
 
   async def post_weight_sync(
-      self, sync_request: Any = None, **kwargs: Any
+      self,
+      sync_request: base_sampler_lib.WeightSyncRequest | None = None,
+      **kwargs: Any,
   ) -> Any:
     """Phase 3: Closes weight update session (reinitializes KV cache if freed), restores request intake, and bumps active policy version."""
     del kwargs
     if not self.enable_raiden:
       return True
-    self._require_initialized()
     async with self._sync_lock:
       if not self._tracker.admit(sync_request, "committed"):
         return True
 
-      rid = (
-          _get_val(_get_val(sync_request, "extra_config"), "req_id")
-          or _get_val(sync_request, "req_id")
-          if sync_request is not None
-          else None
-      )
+      rid = _sync_request_id(sync_request)
       logger.info("Executing post_weight_sync (req_id=%s)...", rid)
       if self._kv_cache_freed:
         await self._call_worker_method("finish_weight_update")
@@ -950,9 +1001,8 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
         self._transfer_statuses[str(rid)] = "SUCCESS"
       await self.resume()
 
-      version = getattr(sync_request, "policy_version", None)
-      if version is not None:
-        self._policy_version = version
+      if sync_request is not None and sync_request.policy_version is not None:
+        self._policy_version = sync_request.policy_version
       else:
         self._policy_version += 1
 
@@ -963,13 +1013,14 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
       return self._policy_version
 
   async def abort_weight_sync(
-      self, sync_request: Any = None, **kwargs: Any
+      self,
+      sync_request: base_sampler_lib.WeightSyncRequest | None = None,
+      **kwargs: Any,
   ) -> Any:
     """Safely rolls back to serving previous policy version without publishing staging."""
     del kwargs
     if not self.enable_raiden:
       return True
-    self._require_initialized()
     async with self._sync_lock:
       if not self._tracker.admit(sync_request, "aborted"):
         return False
@@ -995,18 +1046,15 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
   async def get_transfer_status(self, req_id: Any, **kwargs: Any) -> str:
     """Queries status of an ongoing weight transfer or KV-cache migration."""
     del kwargs
-    self._require_initialized()
     return self._transfer_statuses.get(str(req_id), "MISSING")
 
   def get_target_state(self) -> Any:
     """Returns target state shape/dtype pytree for weight conversion."""
-    self._require_initialized()
     return None
 
   async def get_load_info(self, **kwargs: Any) -> base_sampler_lib.LoadInfo:
     """Returns current load info (num_requests_waiting, num_requests_running, kv_cache_usage_perc)."""
     del kwargs
-    self._require_initialized()
     num_waiting = 0
     num_running = 0
     kv_cache_usage_perc = 0.0
@@ -1062,7 +1110,6 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
   ) -> bool:
     """Triggers Raiden P2P KV-cache block transfer from source to target sampler slice."""
     del source_server_id, target_server_id, token_ids, kwargs
-    self._require_initialized()
     raise NotImplementedError(
         "P2P KV-cache migration is pending live TPU Raiden controller"
         " integration."

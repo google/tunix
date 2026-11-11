@@ -36,10 +36,6 @@ Pins the call-site controls for ragged-paged-attention (RPA v3):
   verbatim, backward = chunked-cache replica with cache cotangents).  The
   older ``CANON_RPA_VJP`` (``rpa_diff``: prefill-only contract, zero KV-cache
   gradient) is kept for prefill-only workloads.
-* rank-parallel local-attention validation: inside the rank-parallel
-  backward's outer manual ``("data", "model")`` map the attention operands are
-  already TP-local, so KV-head replication is skipped and only the local
-  shapes are validated.
 """
 
 from __future__ import annotations
@@ -51,7 +47,6 @@ from typing import Any
 from absl import logging
 import jax
 import jax.numpy as jnp
-from tunix.zero_tim_kernel import fixed_order_reduce
 from tunix.zero_tim_kernel import rpa_diff
 from tunix.zero_tim_kernel import rpa_diff_chunked
 
@@ -62,9 +57,27 @@ BLOCK_SIZE_ENVS = (
     ("m_block_sizes", "CANON_RPA_M"),
 )
 # Canonical block sizes and token bucket.
-# TODO(tunix-dev): Allow overriding canonical RPA block sizes, token bucket,
-# default page size, and mesh axis names via configuration.
-CANONICAL_BLOCK_SIZES = (128, 512, 128, 512)
+CANONICAL_BQ_SZ = 128
+CANONICAL_BKV_SZ = 512
+CANONICAL_BQ_CSZ = 128
+CANONICAL_BKV_CSZ = 512
+CANONICAL_BLOCK_SIZES = (
+    CANONICAL_BQ_SZ,
+    CANONICAL_BKV_SZ,
+    CANONICAL_BQ_CSZ,
+    CANONICAL_BKV_CSZ,
+)
+# Minimal valid decode block sizes when `FORCE_MIXED` routes every sequence
+# through `m_block_sizes` (`distribution = [0, 0, k]`): the idle decode
+# branch is still traced at compile time, so `bq_sz = 1` shrinks its unused
+# `bq_double_buf` / `l_scratch` / `m_scratch` / `acc_scratch` VMEM by 128x
+# while `bkv_sz = 512` stays divisible by any valid `page_size | 512`.
+CANONICAL_IDLE_DECODE_BLOCK_SIZES = (
+    1,
+    CANONICAL_BKV_CSZ,
+    1,
+    CANONICAL_BKV_CSZ,
+)
 CANONICAL_MIN_TOKEN_BUCKET = 256
 FORCE_MIXED_ENV = "CANON_FORCE_MIXED"
 RPA_VJP2_ENV = "CANON_RPA_VJP2"
@@ -110,9 +123,47 @@ def pinned_block_size_kwargs(
   return kwargs
 
 
-def canonical_block_size_kwargs() -> dict[str, tuple[int, ...]]:
-  """The canonical bundle's pinned kwargs, independent of the environment."""
-  return {key: CANONICAL_BLOCK_SIZES for key, _ in BLOCK_SIZE_ENVS}
+def canonical_block_size_kwargs(
+    *,
+    bkv_sz: int = CANONICAL_BKV_SZ,
+    force_mixed: bool = False,
+) -> dict[str, tuple[int, int, int, int]]:
+  """Returns canonical RPA v3 block-size kwargs, independent of the environment.
+
+  The inner compute tiles `(bq_csz, bkv_csz) = (128, 512)` and outer query block
+  `bq_sz = 128` govern the online-softmax reduction granularity and causal bound
+  and are locked. Any outer KV DMA block `bkv_sz` that is a positive multiple of
+  `bkv_csz = 512` (e.g. `1024` on long contexts) shares the same VMEM online
+  softmax accumulators across `512`-token inner sub-blocks and produces
+  bitwise-identical forward outputs.
+
+  When `force_mixed=True` (`distribution = [0, 0, k]`), `p_block_sizes` is
+  omitted (never consumed when `chunk_prefill_size is None`) and `d_block_sizes`
+  is set to `CANONICAL_IDLE_DECODE_BLOCK_SIZES = (1, 512, 1, 512)` to shrink
+  compile-time VMEM scratch in the idle `RpaCase.DECODE` branch by 128x.
+
+  Args:
+    bkv_sz: Outer KV DMA block size (`bkv_sz % 512 == 0`).
+    force_mixed: Whether all sequences are routed to the mixed pass.
+  """
+  bkv_sz = int(bkv_sz)
+  if bkv_sz <= 0 or bkv_sz % CANONICAL_BKV_CSZ != 0:
+    raise ValueError(
+        "canonical_block_size_kwargs requires bkv_sz to be a positive multiple "
+        f"of {CANONICAL_BKV_CSZ}, got {bkv_sz}"
+    )
+  mixed_blocks = (
+      CANONICAL_BQ_SZ,
+      bkv_sz,
+      CANONICAL_BQ_CSZ,
+      CANONICAL_BKV_CSZ,
+  )
+  if force_mixed:
+    return {
+        "d_block_sizes": CANONICAL_IDLE_DECODE_BLOCK_SIZES,
+        "m_block_sizes": mixed_blocks,
+    }
+  return {key: mixed_blocks for key, _ in BLOCK_SIZE_ENVS}
 
 
 def force_mixed_distribution(distribution):
@@ -188,25 +239,6 @@ def differentiable_rpa(
   return kernel_fn
 
 
-def rank_parallel_local_attention_context(mesh) -> bool:
-  """Whether the rank-parallel backward already sliced attention over DP/TP.
-
-  Args:
-    mesh: The live engine mesh.
-
-  Returns:
-    True iff ``CANON_RANK_PARALLEL_BACKWARD=1`` and the abstract mesh is the
-    manual ``('data', 'model')`` map matching ``mesh``; see
-    ``fixed_order_reduce.rank_parallel_backward_context``.
-
-  Raises:
-    RuntimeError: If the manual context and the engine topology disagree.
-  """
-  return fixed_order_reduce.rank_parallel_backward_context(
-      mesh=mesh, tp_axis="model", label="attention"
-  )
-
-
 def scratch_kv_cache_shape(
     k,
     *,
@@ -269,61 +301,4 @@ def bind_scratch_kv_cache(
       num_pages=num_pages,
       scratch_kv_cache=scratch_kv_cache,
       scratch_page_indices=scratch_page_indices,
-  )
-
-
-def validate_rank_parallel_local_attention(
-    q, k, v, kv_cache, tp_size: int
-) -> None:
-  """Validates TP-local RPA operands inside the rank-parallel map.
-
-  Args:
-    q: ``[T, local_q_heads, head_dim]``.
-    k: ``[T, local_kv_heads, head_dim]``.
-    v: Same shape as ``k``.
-    kv_cache: ``[pages, page_size, cache_heads, packing, head_dim]`` with
-      ``cache_heads = ceil(2 * local_kv_heads / packing)``, or ``None`` when
-      using ``bind_scratch_kv_cache``.
-    tp_size: The TP degree (for the receipt).
-
-  Raises:
-    ValueError: On any rank, GQA-ratio or cache-layout mismatch.
-  """
-  if (
-      kv_cache is None
-      and len(k.shape) == 3
-      and k.shape[1] > 0
-      and k.shape[2] > 0
-  ):
-    kv_cache = jax.ShapeDtypeStruct(
-        scratch_kv_cache_shape(k),
-        k.dtype,
-    )
-  shapes = tuple(tuple(map(int, value.shape)) for value in (q, k, v, kv_cache))
-  q_shape, k_shape, v_shape, cache_shape = shapes
-  if len(q_shape) != 3 or len(cache_shape) != 5 or k_shape != v_shape:
-    raise ValueError(
-        f"rank-parallel local attention rank/shape mismatch: {shapes} "
-    )
-  if k_shape[0] != q_shape[0] or k_shape[2] != q_shape[2]:
-    raise ValueError(f"rank-parallel local attention Q/K/V mismatch: {shapes}")
-  if k_shape[1] <= 0 or q_shape[1] % k_shape[1] != 0:
-    raise ValueError(
-        f"rank-parallel local attention GQA ratio mismatch: {shapes} "
-    )
-  packing = cache_shape[3]
-  if packing <= 0:
-    raise ValueError(
-        f"rank-parallel local attention cache packing mismatch: {shapes} "
-    )
-  expected_cache_heads = (2 * k_shape[1] + packing - 1) // packing
-  if cache_shape[2] != expected_cache_heads or cache_shape[4] != k_shape[2]:
-    raise ValueError(
-        f"rank-parallel local attention cache shape mismatch: {shapes} "
-    )
-  _log_once(
-      f"RANK_PARALLEL_RPA_LOCAL_KV_READY tp={tp_size} "
-      f"local_q_heads={q_shape[1]} "
-      f"local_kv_heads={k_shape[1]} cache_heads={cache_shape[2]} "
-      f"packing={packing}"
   )

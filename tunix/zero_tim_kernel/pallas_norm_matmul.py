@@ -13,16 +13,11 @@
 # limitations under the License.
 """Fused `pallas_rmsnorm` prologue + `pallas_matmul` in one custom call.
 
-Why: the decode layer computes rmsnorm(x) only to feed the very next
-projection matmul, paying a [M, F] bf16 round-trip through HBM plus one
-extra kernel launch per site.  This kernel normalizes the row block once
-into VMEM scratch with the verbatim pallas_rmsnorm arithmetic (f32 promotion,
-BF-blocked left-to-right sumsq, rsqrt(mean + eps), f32 scale by gamma,
-bf16 cast) and then runs the verbatim pallas_matmul tile loop (bf16 tiles, f32
-accumulator, same BK order) against that scratch.  Every per-element
-chain is the one the two-kernel chain executes, so outputs are bitwise
-equal; only the intermediate's residency changes (VMEM scratch instead
-of an HBM tensor).
+Normalizes each `block_m` row block once into VMEM scratch via
+`pallas_rmsnorm.canonical_rmsnorm` (Single Source of Truth) and then runs the
+verbatim `pallas_matmul` tile loop (`bf16` tiles, `f32` accumulator, same
+`block_k` order) against that scratch. Every per-element chain matches the
+two-kernel chain bit for bit while keeping the normalized rows in VMEM.
 """
 
 from __future__ import annotations
@@ -35,6 +30,27 @@ from tunix.zero_tim_kernel import pallas_matmul
 from tunix.zero_tim_kernel import pallas_rmsnorm
 
 BF = pallas_rmsnorm.BF
+# Cap per-program output column group width so `acc_ref` `(block_m, group_n)`
+# and double-buffered `y_ref` / `out_ref` stay comfortably inside TPU VMEM even
+# for wide fused MLP projections (`Gate + Up` on 8B/32B models).
+MAX_GROUP_N = 3072
+
+
+def column_group_width(
+    n: int, block_n: int, max_group_n: int = MAX_GROUP_N
+) -> int:
+  """Returns the largest multiple of `block_n` dividing `n` and `<= max(block_n, max_group_n)`."""
+  if n <= 0 or block_n <= 0 or n % block_n != 0:
+    raise ValueError(
+        "column_group_width requires positive n % block_n == 0, got "
+        f"{(n, block_n)}"
+    )
+  n_tiles = n // block_n
+  max_tiles = max(1, max_group_n // block_n)
+  for tiles in range(min(n_tiles, max_tiles), 0, -1):
+    if n_tiles % tiles == 0:
+      return tiles * block_n
+  return block_n
 
 
 def norm_matmul(
@@ -48,8 +64,9 @@ def norm_matmul(
     block_m: int = pallas_matmul.BM,
     block_n: int = pallas_matmul.BN,
     block_k: int = pallas_matmul.BK,
+    max_group_n: int = MAX_GROUP_N,
 ):
-  """Compute pallas_matmul.matmul(pallas_rmsnorm.rmsnorm(x, gamma), y) as one custom call."""
+  """Computes `pallas_matmul.matmul(pallas_rmsnorm.rmsnorm(x, gamma), y)` as one custom call."""
   if x.ndim != 2 or y.ndim != 2 or gamma.ndim != 1:
     raise ValueError(
         "pallas_norm_matmul expects x[M,K] gamma[K] y[K,N], got "
@@ -76,49 +93,38 @@ def norm_matmul(
     raise ValueError(
         f"pallas_norm_matmul epsilon must be positive, got {epsilon} "
     )
+  if min(block_m, block_n, block_k) <= 0:
+    raise ValueError("pallas_norm_matmul block sizes must be positive")
   if m % block_m or n % block_n or k % block_k or k % BF:
     raise ValueError(
         "pallas_norm_matmul shape must divide BM/BN/BK/BF="
         f"{block_m}/{block_n}/{block_k}/{BF}, got {(m, k, n)}"
     )
-  x, gamma, y = pallas_matmul.check_vma_align_operands(x, gamma, y)
+  if (block_n, block_k) in pallas_matmul.CONTRACT_NK_TILES:
+    for candidate in pallas_matmul.BLOCK_N_CANDIDATES:
+      if n % candidate == 0:
+        block_n = candidate
+        break
+  group_n = column_group_width(n, block_n, max_group_n)
 
   def _kernel(x_ref, gamma_ref, y_ref, out_ref, acc_ref, normed_ref):
-    # Design note: the n dimension lives INSIDE the kernel as a static tile
-    # loop, so the row block and its normalized scratch stream from
-    # HBM once per (i, q) instead of once per (i, j, q).  Each
-    # n-tile's dot keeps the exact (block_m, block_k) x (block_k,
-    # block_n) shape and the same sequential q order, so every
-    # output element's accumulation chain is unchanged.
-    q = pl.program_id(1)
+    q = pl.program_id(2)
 
     @pl.when(q == 0)
     def _norm():
-      # Verbatim pallas_rmsnorm: f32 promote, BF-blocked left-to-right sumsq
-      # (python-static expansion), rsqrt(mean + eps), f32 gamma
-      # scale, bf16 cast.  Row-independent, so the 128-row batch
-      # changes nothing per row.
-      xf = x_ref[...].astype(jnp.float32).reshape(block_m, k // BF, BF)
-      sumsq = jnp.zeros((block_m,), dtype=jnp.float32)
-      for b in range(k // BF):
-        block = xf[:, b, :]
-        sumsq = sumsq + jnp.sum(block * block, axis=-1, dtype=jnp.float32)
-      inv = jax.lax.rsqrt(sumsq / jnp.float32(k) + jnp.float32(epsilon))
-      normed_ref[...] = (
-          x_ref[...].astype(jnp.float32)
-          * inv[:, None]
-          * gamma_ref[...].astype(jnp.float32)[None, :]
-      ).astype(jnp.bfloat16)
+      normed_ref[...] = pallas_rmsnorm.canonical_rmsnorm(
+          x_ref[...],
+          gamma_ref[...],
+          epsilon=epsilon,
+          out_dtype=jnp.bfloat16,
+      )
 
     @pl.when(q == 0)
     def _init():
       acc_ref[...] = jnp.zeros_like(acc_ref)
 
-    # Verbatim pallas_matmul tile step on the scratch rows: bf16 tiles, f32
-    # accumulator, the same sequential BK order; n tiles unrolled
-    # statically with the identical per-tile dot shape.
     xk = normed_ref[:, pl.ds(q * block_k, block_k)]
-    for j in range(n // block_n):
+    for j in range(group_n // block_n):
       lo = j * block_n
       acc_ref[:, lo : lo + block_n] = acc_ref[:, lo : lo + block_n] + jnp.dot(
           xk,
@@ -127,45 +133,37 @@ def norm_matmul(
           preferred_element_type=jnp.float32,
       )
 
-    # The output block is resident across the q loop (its block index does
-    # not depend on q); the single store of the final accumulator is the
-    # same value the branch's per-step store left behind, minus the
-    # k/block_k - 1 redundant f32 -> bf16 casts (deviation from the branch:
-    # store placement only, no numerics).
-    @pl.when(q == pl.num_programs(1) - 1)
+    @pl.when(q == pl.num_programs(2) - 1)
     def _store():
       out_ref[...] = acc_ref[...].astype(out_ref.dtype)
 
   return pl.pallas_call(
       _kernel,
-      out_shape=pallas_matmul.make_out_shape(
-          (m, n),
-          jnp.bfloat16,
-          manual_axis_type=pallas_matmul.check_vma_output_manual_axis_type(
-              x, gamma, y
-          ),
-      ),
+      out_shape=jax.ShapeDtypeStruct((m, n), jnp.bfloat16),
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=0,
           in_specs=[
-              pl.BlockSpec((block_m, k), lambda i, _q: (i, 0)),
-              pl.BlockSpec((k,), lambda _i, _q: (0,)),
-              pl.BlockSpec((block_k, n), lambda _i, q: (q, 0)),
+              pl.BlockSpec((block_m, k), lambda i, _g, _q: (i, 0)),
+              pl.BlockSpec((k,), lambda _i, _g, _q: (0,)),
+              pl.BlockSpec((block_k, group_n), lambda _i, g, q: (q, g)),
           ],
-          out_specs=pl.BlockSpec((block_m, n), lambda i, _q: (i, 0)),
-          grid=(m // block_m, k // block_k),
+          out_specs=pl.BlockSpec((block_m, group_n), lambda i, g, _q: (i, g)),
+          grid=(m // block_m, n // group_n, k // block_k),
           scratch_shapes=[
-              pltpu.VMEM((block_m, n), jnp.float32),
+              pltpu.VMEM((block_m, group_n), jnp.float32),
               pltpu.VMEM((block_m, k), jnp.bfloat16),
           ],
       ),
       compiler_params=pltpu.CompilerParams(
-          # q must run in grid order: the row block's normalize happens
-          # at its first visit and later steps read the scratch.
-          dimension_semantics=("parallel", "arbitrary"),
+          # `q` (`k // block_k`) must be `"arbitrary"` (sequential): `q == 0`
+          # populates `normed_ref` and zeros `acc_ref` read by all `q > 0`.
+          dimension_semantics=("parallel", "parallel", "arbitrary"),
           allow_input_fusion=(False, False, False),
           shape_invariant_numerics=shape_invariant_numerics,
       ),
       interpret=interpret,
-      name=f"canon_norm_matmul_bm{block_m}_bn{block_n}_bk{block_k}_f{k}",
+      name=(
+          f"canon_norm_matmul_bm{block_m}_bn{block_n}_gn{group_n}_bk{block_k}"
+          f"_f{k}"
+      ),
   )(x, gamma, y)

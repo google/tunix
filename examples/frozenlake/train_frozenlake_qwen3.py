@@ -40,7 +40,7 @@ print("Logging configured at INFO level.")
 
 from tunix.models.qwen3 import params as params_lib
 from tunix.models.qwen3 import model as model_lib
-from tunix.google.stubs import utils_stub as oss_utils
+from tunix.oss import utils as oss_utils
 from tunix.sft import metrics_logger
 from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
 from tunix.rl.agentic.parser.chat_template_parser import parser
@@ -60,21 +60,87 @@ except Exception:
   pass
 
 if not _DISTRIBUTED_INITIALIZED:
-  # Multi-host TPU (e.g. v5p-16, v6e-16+) needs jax.distributed.initialize()
-  # for Orbax checkpoint barrier sync. Single-host slices are auto-detected,
-  # so this is a no-op there.
-  try:
-    jax.distributed.initialize()
-  except Exception as exc:
-    print(f"jax.distributed.initialize() skipped: {exc}")
+  # Support explicit multi-host GPU coordination (e.g., GKE Indexed Jobs,
+  # torchrun, SLURM) via JAX_COORDINATOR_ADDRESS / JAX_NUM_PROCESSES /
+  # JAX_PROCESS_ID (or Kubernetes JOB_COMPLETION_INDEX), as well as zero-arg
+  # auto-detection on multi-host TPU/SLURM/OpenMPI slices.
+  _coord_addr = os.getenv("JAX_COORDINATOR_ADDRESS")
+  _num_procs = os.getenv("JAX_NUM_PROCESSES")
+  _proc_id = os.getenv("JAX_PROCESS_ID") or os.getenv("JOB_COMPLETION_INDEX")
+  if any((_coord_addr, _num_procs, _proc_id)):
+    if not (_coord_addr and _num_procs and _proc_id):
+      raise ValueError(
+          "Multi-host coordination requires JAX_COORDINATOR_ADDRESS, "
+          "JAX_NUM_PROCESSES, and JAX_PROCESS_ID (or JOB_COMPLETION_INDEX) to "
+          f"all be set; got coordinator_address={_coord_addr!r}, "
+          f"num_processes={_num_procs!r}, process_id={_proc_id!r}."
+      )
+    jax.distributed.initialize(
+        coordinator_address=_coord_addr,
+        num_processes=int(_num_procs),
+        process_id=int(_proc_id),
+    )
+  else:
+    try:
+      jax.distributed.initialize()
+    except (RuntimeError, ValueError) as exc:
+      print(f"jax.distributed.initialize() skipped: {exc}")
 
-print("jax devices: ", jax.devices())
+print(
+    f"[Multi-Host Topology] backend={jax.default_backend()}"
+    f" process={jax.process_index()}/{jax.process_count()}"
+    f" local_devices={jax.local_device_count()} ({jax.local_devices()})"
+    f" global_devices={jax.device_count()} ({jax.devices()})"
+)
 
 # %%
 import argparse
 
 arg_parser = argparse.ArgumentParser(
-    description="Train FrozenLake on Qwen3-8B (single-host TPU)."
+    description="Train FrozenLake on Qwen3 (single- or multi-host TPU/GPU)."
+)
+arg_parser.add_argument(
+    "--model_version",
+    type=str,
+    default=os.getenv("MODEL_VERSION", "Qwen/Qwen3-8B"),
+    help=(
+        "HuggingFace model ID to train. Defaults to Qwen/Qwen3-8B on all "
+        "accelerator backends; pass --model_version=Qwen/Qwen3-0.6B for sub-1B "
+        "runs."
+    ),
+)
+arg_parser.add_argument(
+    "--rollout_engine",
+    type=str,
+    default=os.getenv("ROLLOUT_ENGINE", "vllm"),
+    help="Rollout engine ('vllm' or 'vanilla').",
+)
+arg_parser.add_argument(
+    "--mesh_shape",
+    type=str,
+    default=os.getenv("MESH_SHAPE", ""),
+    help=(
+        "Optional comma-separated mesh shape 'fsdp,tp' (e.g. '2,1' for 2-host "
+        "FSDP or '1,8' for 8-way TP). Defaults to '1,<global_device_count>'."
+    ),
+)
+arg_parser.add_argument(
+    "--train_micro_batch_size",
+    type=int,
+    default=None,
+    help="Optional override for trainer forward/backward micro-batch size.",
+)
+arg_parser.add_argument(
+    "--compute_logps_micro_batch_size",
+    type=int,
+    default=None,
+    help="Optional override for log-prob recomputation micro-batch size.",
+)
+arg_parser.add_argument(
+    "--profiler_dir",
+    type=str,
+    default=os.getenv("PROFILER_DIR", ""),
+    help="Optional output directory for XProf (.xplane.pb) / Perfetto traces.",
 )
 # Effective on-policy batch is `batch_size * num_generations` per global step.
 # Tuned together with `num_generations=8` to keep per-step rollout latency
@@ -90,6 +156,16 @@ arg_parser.add_argument("--b1", type=float, default=0.9)
 arg_parser.add_argument("--b2", type=float, default=0.95)
 arg_parser.add_argument("--weight_decay", type=float, default=0.0)
 arg_parser.add_argument("--num_batches", type=int, default=150)
+arg_parser.add_argument(
+    "--max_steps",
+    type=int,
+    default=None,
+    help=(
+        "Optional explicit cap on training steps (e.g. 20-30 for fast dev "
+        "trend verification; omit for full multi-epoch validation)."
+    ),
+)
+arg_parser.add_argument("--eval_every_n_steps", type=int, default=10)
 arg_parser.add_argument("--num_generations", type=int, default=8)
 arg_parser.add_argument("--beta", type=float, default=0.0)
 # GSPO-token defaults: tight clip ratios because the importance ratio is
@@ -142,10 +218,13 @@ TRAIN_FRACTION = 1.0
 SEED = args.seed
 
 # ====== Sharding ======
-# Single shared mesh across actor / reference / rollout. Pure tensor-parallel
-# (fsdp=1) so the rollout sampler's batch=1 prefill is not split across an
-# fsdp axis.
-SHARED_MESH_SHAPE = (1, jax.device_count())
+# Single shared mesh across actor / reference / rollout. Defaults to pure
+# tensor-parallel (1, global_device_count), or an explicit --mesh_shape "f,t"
+# (e.g. "2,1" or "1,2" across multi-host GPU slices).
+if args.mesh_shape:
+  SHARED_MESH_SHAPE = tuple(int(x) for x in args.mesh_shape.split(","))
+else:
+  SHARED_MESH_SHAPE = (1, jax.device_count())
 SHARED_MESH_AXIS_NAMES = ("fsdp", "tp")
 
 # ====== GRPO ======
@@ -192,9 +271,13 @@ NUM_BATCHES = args.num_batches
 # BATCH_SIZE * num_generations.
 NUM_TEST_BATCHES = 2
 
-EVAL_EVERY_N_STEPS = 10
+EVAL_EVERY_N_STEPS = args.eval_every_n_steps
 NUM_EPOCHS = 3
-MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
+MAX_STEPS = (
+    args.max_steps
+    if args.max_steps is not None
+    else int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
+)
 
 MAX_CONCURRENCY = args.max_concurrency
 OFF_POLICY_STEPS = 0
@@ -223,16 +306,21 @@ SAVE_INTERVAL_STEPS = 10**9  # effectively disabled; set CKPT_DIR + lower this t
 MAX_TO_KEEP = 1
 
 # ====== Rollout ======
-ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vllm")  # "vanilla" | "vllm"
+ROLLOUT_ENGINE = args.rollout_engine  # "vanilla" | "vllm"
 
 # ====== Paths ======
-MODEL_VERSION = "Qwen/Qwen3-8B"
-MODEL_DOWNLOAD_DIR = "/tmp/models/Qwen3-8B"
-DATA_DIR = "/tmp/data/frozenlake"
+# Always default to Qwen/Qwen3-8B across all backends (TPU and GPU).
+# Pass --model_version=Qwen/Qwen3-0.6B (or MODEL_VERSION=...) for sub-1B runs.
+MODEL_VERSION = args.model_version
+MODEL_DOWNLOAD_DIR = os.getenv(
+    "MODEL_DOWNLOAD_DIR",
+    f"/tmp/models/{MODEL_VERSION.split('/')[-1]}",
+)
+DATA_DIR = os.getenv("DATA_DIR", "/tmp/data/frozenlake")
 
 # Checkpointing is opt-in: set CKPT_DIR to a writable path to enable.
 CKPT_DIR = None
-TB_LOG_DIR = "/tmp/tunix-tb/frozenlake"
+TB_LOG_DIR = os.getenv("TB_LOG_DIR", "/tmp/tunix-tb/frozenlake")
 
 
 # ====== Build the single shared mesh ======
@@ -274,6 +362,23 @@ def create_datasets(
     train_ds_path: str = TRAIN_DATA_PATH,
     test_ds_path: str = TEST_DATA_PATH,
 ):
+  from examples.frozenlake import data as frozenlake_data  # pylint: disable=g-import-not-at-top
+
+  is_local_path = "://" not in train_ds_path and "://" not in test_ds_path
+  for is_leader_turn in (True, False) if is_local_path else ():
+    if (jax.process_index() == 0) == is_leader_turn and (
+        not os.path.exists(train_ds_path) or not os.path.exists(test_ds_path)
+    ):
+      frozenlake_data.create_dataset(
+          "train", data_dir=os.path.dirname(train_ds_path), seed=SEED
+      )
+      frozenlake_data.create_dataset(
+          "test", data_dir=os.path.dirname(test_ds_path), seed=123
+      )
+    if jax.process_count() > 1:
+      jax.experimental.multihost_utils.sync_global_devices(
+          f"frozenlake_data_ready_{int(is_leader_turn)}"
+      )
   with fsspec.open(train_ds_path, "rb") as train_f, fsspec.open(
       test_ds_path, "rb"
   ) as test_f:
@@ -324,14 +429,28 @@ show_hbm_usage = sft_utils.show_hbm_usage
 show_hbm_usage("Done with loading datasets")
 
 # ====== Download + load model ======
-# Download safetensors from HF if not present locally.
-if not os.path.isdir(MODEL_DOWNLOAD_DIR) or not any(
-    f.endswith(".safetensors") for f in os.listdir(MODEL_DOWNLOAD_DIR)
-):
-  os.makedirs(MODEL_DOWNLOAD_DIR, exist_ok=True)
+# Download safetensors from HF if not present locally (leader first so shared
+# filesystems never race across processes, followed by non-leader hosts when
+# MODEL_DOWNLOAD_DIR is host-local).
+os.makedirs(MODEL_DOWNLOAD_DIR, exist_ok=True)
+if jax.process_index() == 0:
   oss_utils.hf_pipeline(MODEL_VERSION, MODEL_DOWNLOAD_DIR)
+if jax.process_count() > 1:
+  jax.experimental.multihost_utils.sync_global_devices("model_weights_leader")
+  if jax.process_index() != 0 and not os.path.exists(
+      os.path.join(MODEL_DOWNLOAD_DIR, ".hf_complete")
+  ):
+    oss_utils.hf_pipeline(MODEL_VERSION, MODEL_DOWNLOAD_DIR)
+  jax.experimental.multihost_utils.sync_global_devices("model_weights_ready")
 
-config = model_lib.ModelConfig.qwen3_8b()
+_QWEN3_CONFIG_MAP = {
+    "Qwen/Qwen3-0.6B": model_lib.ModelConfig.qwen3_0p6b,
+    "Qwen/Qwen3-0.6B-Base": model_lib.ModelConfig.qwen3_0p6b_base,
+    "Qwen/Qwen3-1.7B": model_lib.ModelConfig.qwen3_1p7b,
+    "Qwen/Qwen3-4B": model_lib.ModelConfig.qwen3_4b,
+    "Qwen/Qwen3-8B": model_lib.ModelConfig.qwen3_8b,
+}
+config = _QWEN3_CONFIG_MAP[MODEL_VERSION]()
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.DECODER
 if ENABLE_FLASH_ATTENTION:
@@ -468,8 +587,20 @@ cluster_config = rl_engine_lib.ClusterConfig(
         # dominant allocation on small TPU slices) at the cost of more
         # micro-step launches per optimizer update. It does NOT change the
         # effective optimizer batch size or training dynamics.
-        train_micro_batch_size=4,
-        compute_logps_micro_batch_size=4,
+        train_micro_batch_size=(  # pylint: disable=g-long-ternary
+            args.train_micro_batch_size
+            if args.train_micro_batch_size is not None
+            else min(
+                MINI_BATCH_SIZE, 1 if jax.default_backend() == "gpu" else 4
+            )
+        ),
+        compute_logps_micro_batch_size=(  # pylint: disable=g-long-ternary
+            args.compute_logps_micro_batch_size
+            if args.compute_logps_micro_batch_size is not None
+            else min(
+                MINI_BATCH_SIZE, 1 if jax.default_backend() == "gpu" else 4
+            )
+        ),
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,
@@ -553,4 +684,9 @@ show_hbm_usage("after GRPOLearner creation")
 # Pass test_dataset as the eval set so the learner runs held-out rollouts
 # every EVAL_EVERY_N_STEPS and logs `eval/...` metrics (including
 # trajectory_reward → solve rate) separately from train metrics.
-grpo_trainer.train(train_dataset, eval_dataset=test_dataset)
+if args.profiler_dir:
+  os.makedirs(args.profiler_dir, exist_ok=True)
+  with jax.profiler.trace(args.profiler_dir):
+    grpo_trainer.train(train_dataset, eval_dataset=test_dataset)
+else:
+  grpo_trainer.train(train_dataset, eval_dataset=test_dataset)

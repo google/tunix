@@ -26,6 +26,7 @@ Run at full MoE router-replay scale (>2.15 GiB payloads):
 """
 
 import asyncio
+import collections
 from collections.abc import AsyncIterator, Callable
 import contextlib
 import dataclasses
@@ -37,6 +38,7 @@ import sys
 import threading
 import time
 from typing import Any
+from unittest import mock
 
 from absl import flags
 from absl import logging
@@ -186,9 +188,9 @@ class OrchestratorComputeSimulator:
     self._src_logps = np.linspace(
         -2.5, -0.1, 16 * 2048, dtype=np.float32
     ).reshape(16, 2048)
-    self._src_routed = np.arange(
-        1024 * 62 * 8, dtype=np.int16
-    ).reshape(1024, 62, 8)
+    self._src_routed = np.arange(1024 * 62 * 8, dtype=np.int16).reshape(
+        1024, 62, 8
+    )
     self._staging_routed = np.empty((1024, 62, 8), dtype=np.int16)
 
   def _run_one_step(self, step_idx: int) -> int:
@@ -218,8 +220,10 @@ class OrchestratorComputeSimulator:
     weighted_logps = self._src_logps * advantages
     np.copyto(self._staging_routed, self._src_routed)
     self._staging_routed[0, 0, 0] = np.int16(step_idx & 0x7FFF)
-    return int(reward_sum) + int(weighted_logps[0, 0]) + int(
-        self._staging_routed[0, 0, 0]
+    return (
+        int(reward_sum)
+        + int(weighted_logps[0, 0])
+        + int(self._staging_routed[0, 0, 0])
     )
 
   def _worker_loop(self) -> None:
@@ -469,7 +473,7 @@ def _format_results_table(results: list[PerfResult]) -> str:
             f"p95={res.extra['idle_ping_p95_ms']:.2f}ms]"
         )
       lines.append(
-          f"  --> Concurrent Control Ping Latency: "
+          "  --> Concurrent Control Ping Latency: "
           f"p50={res.extra['ping_p50_ms']:.2f}ms, "
           f"p95={res.extra['ping_p95_ms']:.2f}ms, "
           f"max={res.extra['ping_max_ms']:.2f}ms "
@@ -478,7 +482,7 @@ def _format_results_table(results: list[PerfResult]) -> str:
     if "rollout_to_orch_ms" in res.extra:
       e2e_gibs = res.extra["e2e_batch_gib_s"]
       lines.append(
-          f"  --> 3-Tier Hop Breakdown: "
+          "  --> 3-Tier Hop Breakdown: "
           f"4xRollout->Orch={res.extra['rollout_to_orch_ms']:.1f}ms, "
           f"Orch->Trainer={res.extra['orch_to_trainer_ms']:.1f}ms "
           f"(E2E Batch Goodput={e2e_gibs:.2f} GiB/s, "
@@ -499,6 +503,13 @@ def _format_results_table(results: list[PerfResult]) -> str:
           f"(in-memory={res.extra['in_mem_mib']:.2f} MiB, "
           f"raw_int16={res.payload_mib:.2f} MiB, "
           f"wire_reduction={res.extra['wire_reduction_x']:.2f}x)"
+      )
+    if "avg_trainer_idle_gap_ms" in res.extra:
+      lines.append(
+          "  --> Trainer Pipeline Utilization: "
+          f"utilization={res.extra['trainer_utilization_pct']:.1f}%, "
+          f"avg_inter_mb_gap={res.extra['avg_trainer_idle_gap_ms']:.2f}ms, "
+          f"total_compute={res.extra['total_compute_ms']:.1f}ms"
       )
   lines.append("=" * 112)
   return "\n".join(lines)
@@ -741,9 +752,7 @@ class RemoteExecutionPerfTest(absltest.TestCase):
         async def _dispatch_and_poll(
             idx: int, hdl: remote_execution.GrpcRemoteActorHandle
         ) -> dict[str, Any]:
-          req_id = await hdl.dispatch_task(
-              f"req_{idx}", "generate_large", idx
-          )
+          req_id = await hdl.dispatch_task(f"req_{idx}", "generate_large", idx)
           self.assertEqual(req_id, f"req_{idx}")
           resp = await hdl.poll_responses(timeout_s=300.0)
           assert resp is not None
@@ -880,14 +889,10 @@ class RemoteExecutionPerfTest(absltest.TestCase):
     """Benchmarks multi-process E2E gRPC with Rollout, Orchestrator, and Trainer in isolated OS processes."""
     target_bytes = self._target_bytes()
     remote_rollout_list = [
-        t.strip()
-        for t in _REMOTE_ROLLOUT_TARGETS.value.split(",")
-        if t.strip()
+        t.strip() for t in _REMOTE_ROLLOUT_TARGETS.value.split(",") if t.strip()
     ]
     remote_trainer_addr = _REMOTE_TRAINER_TARGET.value.strip()
-    num_rollout_workers = (
-        len(remote_rollout_list) if remote_rollout_list else 4
-    )
+    num_rollout_workers = len(remote_rollout_list) if remote_rollout_list else 4
     per_worker_bytes = target_bytes // num_rollout_workers
     gc.collect()
 
@@ -1025,9 +1030,7 @@ class RemoteExecutionPerfTest(absltest.TestCase):
           self.assertEqual(warm_summary["total_nbytes"], expected_single_nbytes)
           self.assertEqual(warm_summary["meta_nbytes"], expected_meta_nbytes)
           self.assertEqual(warm_summary["meta_sum"], expected_meta_sum)
-          self.assertEqual(
-              warm_summary["checksum"], expected_single_checksum
-          )
+          self.assertEqual(warm_summary["checksum"], expected_single_checksum)
 
           monitor_a = EventLoopLagMonitor()
           monitor_a.start()
@@ -1115,17 +1118,15 @@ class RemoteExecutionPerfTest(absltest.TestCase):
             last_batch_nbytes = 0
             for step_idx in range(num_iters):
               t0 = time.perf_counter()
-              rollout_batches = await asyncio.gather(
-                  *[
-                      _dispatch_and_poll(i, h)
-                      for i, h in enumerate(rollout_handles)
-                  ]
-              )
+              rollout_batches = await asyncio.gather(*[
+                  _dispatch_and_poll(i, h)
+                  for i, h in enumerate(rollout_handles)
+              ])
               t1 = time.perf_counter()
               trainer_batch = {
-                  "routed_experts": (
-                      rollout_batches[0]["payload"]["routed_experts"]
-                  ),
+                  "routed_experts": rollout_batches[0]["payload"][
+                      "routed_experts"
+                  ],
                   "trajectory_shards": [
                       b["payload"]["routed_experts"]
                       for b in rollout_batches[1:]
@@ -1175,12 +1176,10 @@ class RemoteExecutionPerfTest(absltest.TestCase):
           try:
             for iter_idx in range(num_iters):
               t0_b = time.perf_counter()
-              results = await asyncio.gather(
-                  *[
-                      _dispatch_and_poll(i, h)
-                      for i, h in enumerate(rollout_handles)
-                  ]
-              )
+              results = await asyncio.gather(*[
+                  _dispatch_and_poll(i, h)
+                  for i, h in enumerate(rollout_handles)
+              ])
               walls_b_ms.append((time.perf_counter() - t0_b) * 1000.0)
               iter_b_nbytes = 0
               for i, r in enumerate(results):
@@ -1557,13 +1556,190 @@ class RemoteExecutionPerfTest(absltest.TestCase):
     self.assertGreater(results[2].extra["wire_reduction_x"], 4.0)
     self.assertGreater(results[3].extra["wire_reduction_x"], 3.5)
 
+  def test_w8_trainer_microbatch_pipeline_overlap(self) -> None:
+    """Benchmarks Depth-1 serial vs Depth-2 pipelined Trainer dispatch."""
+    num_microbatches = 4
+    mb_bytes = 32 * 1024 * 1024  # 32 MiB per microbatch (128 MiB per step)
+    compute_sleep_s = 0.08  # 80 ms simulated H2D + TPU kernel launch per MB
+    microbatches = [
+        _build_single_buffer_payload(mb_bytes) for _ in range(num_microbatches)
+    ]
+    total_step_mib = sum(mb["routed_experts"].nbytes for mb in microbatches) / (
+        1024**2
+    )
+    total_step_gib = total_step_mib / 1024.0
+
+    class _SyncTrainerPipelineWorker:
+      """Synchronous Trainer worker stub recording inter-microbatch gaps."""
+
+      def __init__(self) -> None:
+        self.intervals: list[tuple[int, float, float]] = []
+        self.unpickled_times: dict[int, float] = {}
+
+      def reset_intervals(self) -> None:
+        self.intervals.clear()
+        self.unpickled_times.clear()
+
+      def ping(self, seq: int) -> int:
+        return seq + 1
+
+      @remote_execution.offload_to_thread
+      def fwd_bwd(self, mb_idx: int, payload: dict[str, Any]) -> dict[str, int]:
+        t_start = time.perf_counter()
+        routed = payload["routed_experts"]
+        first_val = int(routed.flat[0])
+        last_val = int(routed.flat[-1])
+        time.sleep(compute_sleep_s)
+        t_end = time.perf_counter()
+        self.intervals.append((mb_idx, t_start, t_end))
+        return {
+            "mb_idx": mb_idx,
+            "nbytes": int(routed.nbytes),
+            "first_val": first_val,
+            "last_val": last_val,
+        }
+
+    orig_deserialize = (
+        remote_execution.ExecutionRequest.deserialize_async_chunks
+    )
+
+    async def _run_pipeline_variant(
+        name: str,
+        max_inflight: int,
+        run_sync_off_loop: bool,
+        worker: _SyncTrainerPipelineWorker,
+    ) -> PerfResult:
+      port = portpicker.pick_unused_port()
+      server = remote_execution.GrpcRemoteExecutionServer(worker)
+      # pylint: disable=invalid-name
+      server._RUN_SYNC_METHODS_OFF_LOOP = run_sync_off_loop
+      # pylint: enable=invalid-name
+      await server.start_serving_async(port)
+      handle = remote_execution.GrpcRemoteActorHandle(
+          f"localhost:{port}", rpc_timeout_s=300.0
+      )
+
+      async def _tracked_deserialize(chunks: Any, **kwargs: Any) -> Any:
+        req = await orig_deserialize(chunks, **kwargs)
+        if req.method_name == "fwd_bwd":
+          mb_idx = int(req.args[0])
+          if mb_idx >= 0:
+            worker.unpickled_times[mb_idx] = time.perf_counter()
+        return req
+
+      try:
+        await handle.asubmit("ping", 1)
+        # Warm up once.
+        _ = await handle.asubmit("fwd_bwd", -1, microbatches[0])
+        worker.reset_intervals()
+
+        monitor = EventLoopLagMonitor()
+        monitor.start()
+        t0 = time.perf_counter()
+        pending: collections.deque[asyncio.Task[dict[str, int]]] = (
+            collections.deque()
+        )
+        completed: list[dict[str, int]] = []
+        with mock.patch.object(
+            remote_execution.ExecutionRequest,
+            "deserialize_async_chunks",
+            side_effect=_tracked_deserialize,
+        ):
+          for mb_idx, mb_payload in enumerate(microbatches):
+            while len(pending) >= max_inflight:
+              completed.append(await pending.popleft())
+            pending.append(
+                asyncio.create_task(
+                    handle.asubmit("fwd_bwd", mb_idx, mb_payload)
+                )
+            )
+            # Yield briefly to simulate fast CPU packing of next microbatch
+            # (~1 ms) so the in-flight RPC task begins streaming immediately.
+            await asyncio.sleep(0.001)
+          while pending:
+            completed.append(await pending.popleft())
+        wall_ms = (time.perf_counter() - t0) * 1000.0
+        lag = await monitor.stop()
+      finally:
+        await handle.close()
+        await server.stop_serving(grace=0.0)
+
+      self.assertEqual(
+          [r["mb_idx"] for r in completed], list(range(num_microbatches))
+      )
+      self.assertEqual(
+          [iv[0] for iv in worker.intervals], list(range(num_microbatches))
+      )
+      overlapped_unpickles = sum(
+          1
+          for i in range(1, len(worker.intervals))
+          if worker.unpickled_times.get(i, float("inf"))
+          < worker.intervals[i - 1][2]
+      )
+      gaps_ms = [
+          max(
+              0.0,
+              (worker.intervals[i][1] - worker.intervals[i - 1][2]) * 1000.0,
+          )
+          for i in range(1, len(worker.intervals))
+      ]
+      avg_gap_ms = float(np.mean(gaps_ms)) if gaps_ms else 0.0
+      total_compute_ms = sum(
+          (iv[2] - iv[1]) * 1000.0 for iv in worker.intervals
+      )
+      active_window_ms = (
+          worker.intervals[-1][2] - worker.intervals[0][1]
+      ) * 1000.0
+      trainer_util_pct = (
+          (total_compute_ms / active_window_ms) * 100.0
+          if active_window_ms > 0.0
+          else 0.0
+      )
+      return PerfResult(
+          workload=name,
+          payload_mib=total_step_mib,
+          wall_ms=wall_ms,
+          throughput_gib_s=total_step_gib / (wall_ms / 1000.0),
+          chunk_count=num_microbatches,
+          loop_lag=lag,
+          extra={
+              "avg_trainer_idle_gap_ms": avg_gap_ms,
+              "trainer_utilization_pct": trainer_util_pct,
+              "total_compute_ms": total_compute_ms,
+              "overlapped_unpickles": float(overlapped_unpickles),
+          },
+      )
+
+    async def _main() -> list[PerfResult]:
+      worker = _SyncTrainerPipelineWorker()
+      # W8A models the pre-change baseline (Depth-1 + inline-on-loop sync
+      # execution); W8B models the pipelined Trainer path (Depth-2 + default
+      # off-loop sync execution on GrpcRemoteExecutionServer).
+      res_d1 = await _run_pipeline_variant(
+          "W8A_Trainer_4xMB_Depth1_Serial", 1, False, worker
+      )
+      res_d2 = await _run_pipeline_variant(
+          "W8B_Trainer_4xMB_Depth2_Pipelined", 2, True, worker
+      )
+      return [res_d1, res_d2]
+
+    results = asyncio.run(_main())
+    self.__class__._results.extend(results)
+    res_serial, res_pipelined = results
+    self.assertGreater(res_serial.throughput_gib_s, 0.0)
+    self.assertGreater(res_pipelined.throughput_gib_s, 0.0)
+    # Structural overlap invariant: Depth-1 never unpickles MB_k before
+    # MB_{k-1} finishes compute (0 overlaps), whereas Depth-2 + off-loop sync
+    # execution unpickles subsequent microbatches on the server while the
+    # previous microbatch is still executing fwd_bwd.
+    self.assertEqual(res_serial.extra["overlapped_unpickles"], 0.0)
+    self.assertGreaterEqual(res_pipelined.extra["overlapped_unpickles"], 1.0)
+
 
 def _run_isolated_worker_server(port: int, payload_bytes: int) -> None:
   """Runs an isolated gRPC worker server until stdin is closed."""
   payload = (
-      _build_single_buffer_payload(payload_bytes)
-      if payload_bytes > 0
-      else {}
+      _build_single_buffer_payload(payload_bytes) if payload_bytes > 0 else {}
   )
   worker = _EchoPayloadWorker(response_payload=payload)
 

@@ -17,8 +17,10 @@ kind: JobSet
 metadata:
   name: ${JOBSET_NAME}
   namespace: ${NAMESPACE}
-${QUEUE_LABEL}spec:
+  ${QUEUE_LABEL}
+spec:
   failurePolicy:
+    maxRestarts: ${STARTUP_RETRIES}
     restartStrategy: Recreate
   network:
     enableDNSHostnames: true
@@ -27,7 +29,7 @@ ${QUEUE_LABEL}spec:
   - name: proc
     template:
       spec:
-        backoffLimit: 2048000
+        backoffLimit: ${BACKOFF_LIMIT}
         completionMode: Indexed
         completions: ${COMPLETIONS}
         parallelism: ${PARALLELISM}
@@ -35,43 +37,22 @@ ${QUEUE_LABEL}spec:
           metadata:
             annotations:
               cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
-              # # place on nodes in the same block
-              # kueue.k8s.io/podset-required-topology: cloud.google.com/gce-topology-block
-              # # place on nodes in the same slice
-              # kueue.x-k8s.io/podset-slice-required-topology: cloud.google.com/gke-tpu-slice-${PODSET_SLICE_TOPOLOGY}-id
-              # kueue.x-k8s.io/podset-slice-size: "${PODSET_SLICE_SIZE}"
+              ${TPU_ANNOTATIONS}
           spec:
-            serviceAccountName: ${SERVICE_ACCOUNT}
+            ${PRIORITY_CLASS_LINE}
+            ${SERVICE_ACCOUNT_LINE}
             dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
-            restartPolicy: OnFailure${PRIORITY_CLASS_LINE}
-            terminationGracePeriodSeconds: 10
+            restartPolicy: ${RESTART_POLICY}
+            terminationGracePeriodSeconds: ${TERMINATION_GRACE_SECONDS}
             nodeSelector:
+              # tpu7x dynamic slicing: no gke-tpu-topology selector and no
+              # nodepool affinity (a carved slice can span pools); the generator
+              # fills in the slice annotations and partition-state affinity.
               cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}
-              cloud.google.com/gke-tpu-topology: ${TPU_TOPOLOGY}${RESERVATION_SELECTOR}
-            affinity:
-              # place on nodes in the same nodepool
-              podAffinity:
-                requiredDuringSchedulingIgnoredDuringExecution:
-                - topologyKey: cloud.google.com/gke-nodepool
-                  labelSelector:
-                    matchExpressions:
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: In
-                      values:
-                      - ${JOBSET_NAME}
-              # ensure exclusive access to the nodepool (among all jobsets created with this yaml)
-              podAntiAffinity:
-                requiredDuringSchedulingIgnoredDuringExecution:
-                - topologyKey: cloud.google.com/gke-nodepool
-                  labelSelector:
-                    matchExpressions:
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: Exists
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: NotIn
-                      values:
-                      - ${JOBSET_NAME}
+              ${TPU_TOPOLOGY_SELECTOR}
+              ${RESERVATION_SELECTOR}
+            ${PW_NODE_AFFINITY}
             # tolerations:
             # - key: "google.com/tpu"
             #   operator: "Equal"
@@ -94,10 +75,15 @@ ${QUEUE_LABEL}spec:
                 - |
                   # PID 1 wrapper: forwards SIGTERM to background child process so K8s
                   # termination grace period shuts down workload cleanly without SIGKILL.
-                  # Polling sleep loop ensures bash wakes up promptly to run trap handler.
+                  # Wait loop wakes up immediately on SIGTERM to run trap handler and wait for
+                  # the subshell's direct foreground child to drain (STARTUP_COMMAND should
+                  # launch the workload directly or via `exec`).
 
                   echo "Program Start: $$(date)"
-                  _sigterm() (kill -SIGTERM $$! 2>/dev/null)
+                  _sigterm() {
+                    pkill -SIGTERM -P "$$PID" 2>/dev/null || kill -SIGTERM $$(cat /proc/$$PID/task/$$PID/children 2>/dev/null) 2>/dev/null || true
+                    kill -SIGTERM "$$PID" 2>/dev/null || true
+                  }
                   trap _sigterm SIGTERM
 
                   # Ray bootstrap. One sampler spans every pod of this JobSet:
@@ -110,33 +96,56 @@ ${QUEUE_LABEL}spec:
                   echo "Ray head: $${RAY_HEAD}, this pod index: $${POD_INDEX}"
 
                   (
+                    trap 'exit 143' SIGTERM
                     if [ "$${POD_INDEX}" = "0" ]; then
                       ${RAY_HEAD_PRE_INIT_COMMAND}
+                      RAY_WAIT_TIMEOUT="$${RAY_CLUSTER_WAIT_TIMEOUT_S:-600}"
                       echo "Starting Ray head..."
-                      ray start --head --port=6379
-                      sleep 5; until ray status; do sleep 5; done
+                      ray start --head --port=6379 || exit 1
+                      SECONDS=0
+                      until ray status 2>/dev/null | grep -E -q "/${NUM_CHIPS}(\.0)? TPU"; do
+                        if [ "$$SECONDS" -ge "$$RAY_WAIT_TIMEOUT" ]; then
+                          echo "ERROR: Timed out after $${RAY_WAIT_TIMEOUT}s waiting for ${NUM_CHIPS} TPUs in Ray cluster." >&2
+                          exit 1
+                        fi
+                        sleep 2
+                      done
 
                       ${STARTUP_COMMAND}
                     else
                       ${RAY_WORKER_PRE_INIT_COMMAND}
+                      RAY_WAIT_TIMEOUT="$${RAY_CLUSTER_WAIT_TIMEOUT_S:-600}"
                       # The head may not be up yet; JobSet gives no ordering.
-                      until ray start --address=$${RAY_HEAD}:6379 --block; do
+                      SECONDS=0
+                      until ray status --address=$${RAY_HEAD}:6379 >/dev/null 2>&1; do
+                        if [ "$$SECONDS" -ge "$$RAY_WAIT_TIMEOUT" ]; then
+                          echo "ERROR: Timed out after $${RAY_WAIT_TIMEOUT}s waiting for Ray head $${RAY_HEAD}:6379." >&2
+                          exit 1
+                        fi
                         echo "Ray head $${RAY_HEAD} not ready, retrying in 5s..."
                         sleep 5
                       done
+                      ray start --address=$${RAY_HEAD}:6379 --block
                     fi
                   ) & PID=$$!
 
                   while kill -0 $$PID 2>/dev/null; do
-                    sleep 5
+                    wait $$PID 2>/dev/null || true
                   done
                   wait $$PID
                   EXIT_CODE=$$?
+                  ${WORKER_NONZERO_EXIT_GUARD}
 
                   echo "Program End: $$(date)"
                   echo "EXIT_CODE=$$EXIT_CODE"
                   exit $$EXIT_CODE
               env:
+              - name: RAIDEN_BROADCAST_K
+                value: "${RAIDEN_BROADCAST_K}"
+              - name: ENABLE_MULTI_NUMA
+                value: "${ENABLE_MULTI_NUMA}"
+              - name: TPU_RAIDEN_DATA_NICS
+                value: "${TPU_RAIDEN_DATA_NICS}"
               # Injects the JobSet Name
               - name: JOBSET_NAME
                 valueFrom:

@@ -40,6 +40,10 @@ class DummyScoringCore:
 
 class DummyTrainer:
 
+  def with_fwd_only_fn(self, fn):
+    del fn
+    return self
+
   def compile(self, *args, **kwargs):
     pass
 
@@ -73,6 +77,8 @@ class AbstractWorkerTest(parameterized.TestCase):
               worker_id="w2",
               config=rollout_worker.RolloutConfig(),
               sampler=mocks.MockBaseSamplerImpl(sampler_name="mock_sampler"),
+              env_name="mock_env",
+              agent_name="mock_agent",
               tokenizer=mocks.MockTokenizer(),
               chat_parser=mocks.MockChatParser(),
           ),
@@ -290,6 +296,87 @@ class AbstractWorkerTest(parameterized.TestCase):
 
     worker.compile(None)
     self.assertEqual(log, ["enter_1", "enter_2", "exit_2", "exit_1"])
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="inference_worker",
+          worker_cls=inference_worker.InferenceWorker,
+          kwargs=dict(
+              core=DummyScoringCore(),
+              worker_id="w1",
+              pad_id=0,
+              eos_id=1,
+          ),
+      ),
+      dict(
+          testcase_name="rollout_worker",
+          worker_cls=rollout_worker.RolloutWorker,
+          kwargs=dict(
+              worker_id="w2",
+              config=rollout_worker.RolloutConfig(),
+              sampler=mocks.MockBaseSamplerImpl(sampler_name="mock_sampler"),
+              env_name="mock_env",
+              agent_name="mock_agent",
+              tokenizer=mocks.MockTokenizer(),
+              chat_parser=mocks.MockChatParser(),
+          ),
+      ),
+      dict(
+          testcase_name="trainer_worker",
+          worker_cls=trainer_worker.TrainerWorker,
+          kwargs=dict(trainer_factory=DummyTrainer, worker_id="w3"),
+      ),
+  )
+  def test_stop_fires_on_stop_callback_with_abort_flag(
+      self, worker_cls, kwargs
+  ):
+    worker = worker_cls(**kwargs)
+    observed_aborts = []
+    worker.set_on_stop(observed_aborts.append)
+
+    resp = worker.stop()
+    self.assertEqual(worker.state, WorkerState.STOPPED)
+    self.assertFalse(resp.metadata.get("abort", True))
+    self.assertEqual(observed_aborts, [False])
+
+    worker2 = worker_cls(**kwargs)
+    observed_aborts_2 = []
+    worker2.set_on_stop(observed_aborts_2.append)
+    resp2 = worker2.stop(abort=True)
+    self.assertEqual(worker2.state, WorkerState.STOPPED)
+    self.assertTrue(resp2.metadata.get("abort", False))
+    self.assertEqual(observed_aborts_2, [True])
+
+  def test_on_stop_abort_flag_is_latched_across_repeated_stops(self):
+    worker = trainer_worker.TrainerWorker(
+        trainer_factory=DummyTrainer, worker_id="w_latch"
+    )
+    observed_aborts = []
+    worker.set_on_stop(observed_aborts.append)
+
+    worker.stop(abort=True)
+    worker.stop()
+    worker.stop(abort=False)
+
+    self.assertEqual(observed_aborts, [True, True, True])
+
+  def test_on_stop_callback_error_is_logged_and_does_not_fail_stop(self):
+    worker = trainer_worker.TrainerWorker(
+        trainer_factory=DummyTrainer, worker_id="w_cb_error"
+    )
+
+    def _failing_callback(abort: bool) -> None:
+      del abort
+      raise RuntimeError("event loop is closed")
+
+    worker.set_on_stop(_failing_callback)
+
+    with self.assertLogs(level="ERROR") as logs:
+      resp = worker.stop()
+
+    self.assertEqual(worker.state, WorkerState.STOPPED)
+    self.assertTrue(resp.metadata["stopped"])
+    self.assertIn("on_stop callback failed", "\n".join(logs.output))
 
 
 if __name__ == "__main__":

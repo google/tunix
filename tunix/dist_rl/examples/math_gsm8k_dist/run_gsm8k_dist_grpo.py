@@ -51,7 +51,7 @@ if REPO_ROOT not in sys.path:
 from tunix.dist_rl.common import datatypes  # pylint: disable=g-import-not-at-top
 from tunix.dist_rl.distributed.runtime import context as runtime_context  # pylint: disable=g-import-not-at-top
 from tunix.dist_rl.examples.math_gsm8k_dist import gsm8k  # pylint: disable=g-import-not-at-top
-from tunix.dist_rl.orchestrator import algorithm_adapter  # pylint: disable=g-import-not-at-top
+from tunix.dist_rl.examples.math_gsm8k_dist import gsm8k_rewards  # pylint: disable=g-import-not-at-top
 from tunix.dist_rl.orchestrator import batch_assembly  # pylint: disable=g-import-not-at-top
 from tunix.dist_rl.orchestrator import dataset_utils  # pylint: disable=g-import-not-at-top
 from tunix.dist_rl.orchestrator import orchestrator  # pylint: disable=g-import-not-at-top
@@ -588,8 +588,8 @@ def _trajectory_store_config(
   return config
 
 
-def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
-  """Builds the GRPO algorithm adapter from CLI arguments."""
+def _build_algo(args: argparse.Namespace) -> algorithm_config.GRPOConfig:
+  """Builds the GRPO algorithm configuration from CLI arguments."""
   algo_config = algorithm_config.GRPOConfig(
       num_generations=args.num_generations,
       epsilon=args.epsilon,
@@ -597,17 +597,7 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
       use_rollout_logps=args.use_rollout_logps,
       reward_mode=args.reward_mode,
   )
-  return algorithm_adapter.GRPOAdapter(
-      algo_config=algo_config,
-      mini_batch_size=args.mini_batch_size,
-      train_micro_batch_size=args.train_micro_batch_size,
-      max_packed_len=(
-          args.max_seq_token_per_tpu
-          if args.max_seq_token_per_tpu is not None
-          else args.max_prompt_length + args.max_response_length
-      ),
-      max_response_length=args.max_response_length,
-  )
+  return algo_config
 
 
 def _build_prompt_item(
@@ -785,9 +775,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   )
 
   reward_fns = (
-      [gsm8k.make_gsm8k_reward_fn(debug=args.debug)]
-      if args.reward_mode == "reward_fn"
-      else []
+      [gsm8k_rewards.reward_fn] if args.reward_mode == "reward_fn" else []
   )
   generation_args = datatypes.GenerationArgs(
       temperature=args.temperature,
@@ -817,7 +805,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         "require_resume": args.opd_require_resume,
     }
   program = program_class(
-      algo=algo,
+      algo_config=algo,
       dataset=_iter_prompt_items(args),
       max_steps=args.max_steps,
       reward_fns=reward_fns,
@@ -825,6 +813,9 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       batch_size=args.batch_size,
       batch_config=batch_assembly.BatchConfig(
           pad_id=pad_id,
+          eos_id=eos_id,
+          mini_batch_size=args.mini_batch_size,
+          train_micro_batch_size=args.train_micro_batch_size,
           max_prompt_length=args.max_prompt_length,
           max_response_length=args.max_response_length,
           max_seq_token_per_tpu=args.max_seq_token_per_tpu,

@@ -536,10 +536,21 @@ class MaxTextUtilsTest(absltest.TestCase):
     self.assertIn("enable_checkpointing=False", argv)
     self.assertNotIn("enable_checkpointing=True", argv)
 
-  def test_ckpt_d2h_concurrent_gb_override(self):
+  def test_device_host_concurrent_gb_sets_checkpoint_d2h_cap(self):
+    argv = self._build_config_argv(device_host_concurrent_gb=32)
+    self.assertIn("checkpoint_storage_device_host_concurrent_gb=32", argv)
+    # Without it MaxText keeps its own cap; the environment is not read.
     with mock.patch.dict("os.environ", {"CKPT_D2H_CONCURRENT_GB": "32"}):
       argv = self._build_config_argv()
-    self.assertIn("checkpoint_storage_device_host_concurrent_gb=32", argv)
+    self.assertEmpty([
+        a
+        for a in argv
+        if a.startswith("checkpoint_storage_device_host_concurrent_gb=")
+    ])
+    with self.assertRaisesRegex(TypeError, "must be an int or None"):
+      self._build_config_argv(device_host_concurrent_gb=True)
+    with self.assertRaisesRegex(ValueError, "must be positive"):
+      self._build_config_argv(device_host_concurrent_gb=0)
 
   def test_checkpoint_save_interval_positive_enables_saving(self):
     argv = self._build_config_argv(
@@ -652,24 +663,33 @@ class MaxTextUtilsTest(absltest.TestCase):
     self.assertIn("skip_first_n_steps_for_profiler=-1", argv)
     self.assertNotIn("profiler=xplane", argv)
 
-  def test_build_maxtext_config_maxtext_extra_flags_passthrough_and_validation(
-      self,
-  ):
+  def test_build_maxtext_config_extra_flags_passthrough_and_validation(self):
+    with self.assertLogs(level="INFO") as logs:
+      argv = self._build_config_argv(
+          extra_flags=("use_ring_of_experts=true", "sa_block_q=512")
+      )
+    # Appended last, so they override the arguments built before them.
+    self.assertEqual(argv[-2:], ["use_ring_of_experts=true", "sa_block_q=512"])
+    # Log tooling parses this line.
+    self.assertIn(
+        "MAXTEXT_EXTRA_FLAGS adding 2 flag(s): ['use_ring_of_experts=true',"
+        " 'sa_block_q=512']",
+        "\n".join(logs.output),
+    )
+
+    with self.assertRaisesRegex(
+        ValueError, "extra_flags entries must be key=value, got: invalid_flag"
+    ):
+      self._build_config_argv(
+          extra_flags=["use_ring_of_experts=true", "invalid_flag"]
+      )
+
+    # The environment is not read.
     with mock.patch.dict(
-        "os.environ",
-        {"MAXTEXT_EXTRA_FLAGS": "use_ring_of_experts=true sa_block_q=512"},
+        "os.environ", {"MAXTEXT_EXTRA_FLAGS": "use_ring_of_experts=true"}
     ):
       argv = self._build_config_argv()
-    self.assertEqual(argv[-2:], ["use_ring_of_experts=true", "sa_block_q=512"])
-
-    with mock.patch.dict(
-        "os.environ",
-        {"MAXTEXT_EXTRA_FLAGS": "use_ring_of_experts=true invalid_flag"},
-    ):
-      with self.assertRaisesRegex(
-          ValueError, "MAXTEXT_EXTRA_FLAGS entries must be key=value"
-      ):
-        self._build_config_argv()
+    self.assertNotIn("use_ring_of_experts=true", argv)
 
   def test_vllm_additional_config_returns_routed_experts_only_when_asked(self):
     default = maxtext_utils.build_vllm_maxtext_additional_config(

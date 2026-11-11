@@ -19,7 +19,7 @@ from unittest import mock
 
 from absl.testing import absltest
 from tunix.dist_rl.common import datatypes
-from tunix.dist_rl.common import registry
+from tunix.dist_rl.common import test_utils
 from tunix.dist_rl.rollout import manager as manager_lib
 from tunix.dist_rl.rollout import sampler as sampler_lib
 from tunix.dist_rl.worker import rollout_worker
@@ -48,7 +48,11 @@ class GetWeightSyncMetadataTest(unittest.IsolatedAsyncioTestCase):
   async def test_delegates_to_sampler(self):
     sampler = _FakeSampler([{"unit": "sampler0"}])
     manager = manager_lib.RolloutManager(
-        sampler=sampler, tokenizer="mock", chat_parser="mock"
+        sampler=sampler,
+        tokenizer="mock",
+        chat_parser="mock",
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
     )
     result = await manager.get_weight_sync_metadata()
     self.assertEqual(result, [{"unit": "sampler0"}])
@@ -56,7 +60,11 @@ class GetWeightSyncMetadataTest(unittest.IsolatedAsyncioTestCase):
   async def test_forwards_kwargs(self):
     sampler = _FakeSampler([])
     manager = manager_lib.RolloutManager(
-        sampler=sampler, tokenizer="mock", chat_parser="mock"
+        sampler=sampler,
+        tokenizer="mock",
+        chat_parser="mock",
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
     )
     await manager.get_weight_sync_metadata(timeout_s=5)
     self.assertEqual(sampler.calls, [{"timeout_s": 5}])
@@ -64,13 +72,19 @@ class GetWeightSyncMetadataTest(unittest.IsolatedAsyncioTestCase):
   async def test_missing_sampler_raises(self):
     with self.assertRaises(TypeError):
       manager_lib.RolloutManager(  # pyrefly: ignore[missing-argument]
-          tokenizer="mock", chat_parser="mock"
+          tokenizer="mock",
+          chat_parser="mock",
+          env_factory=_CaptureEnv,
+          agent_factory=test_utils.MockAgent,
       )
 
   async def test_missing_tokenizer_raises(self):
     with self.assertRaises(TypeError):
       manager_lib.RolloutManager(  # pyrefly: ignore[missing-argument]
-          sampler=_FakeSampler([]), chat_parser="mock"
+          sampler=_FakeSampler([]),
+          chat_parser="mock",
+          env_factory=_CaptureEnv,
+          agent_factory=test_utils.MockAgent,
       )
 
 
@@ -83,17 +97,14 @@ class _FakeSyncSampler(_FakeSampler):
     return "ok"
 
 
-class _CaptureEnv:
+class _CaptureEnv(test_utils.MockEnvironment):
 
   last_init_kwargs = None
 
   def __init__(self, **kwargs):
+    super().__init__()
     self.init_kwargs = dict(kwargs)
     _CaptureEnv.last_init_kwargs = self.init_kwargs
-
-
-if not registry.ENV_REGISTRY.contains("manager_capture_env"):
-  registry.ENV_REGISTRY.register("manager_capture_env")(_CaptureEnv)
 
 
 class _NoopCollector:
@@ -141,9 +152,10 @@ class RegisteredEnvMetadataTest(unittest.IsolatedAsyncioTestCase):
   async def test_generate_forwards_request_metadata_to_registered_env(self):
     _CaptureEnv.last_init_kwargs = None
     manager = manager_lib.RolloutManager(
-        config=rollout_worker.RolloutConfig(env_name="manager_capture_env"),
+        config=rollout_worker.RolloutConfig(),
         sampler=_FakeSyncSampler([]),
-        agent_factory=lambda: object(),
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
         tokenizer="mock",
         chat_parser="mock",
     )
@@ -185,6 +197,90 @@ class RegisteredEnvMetadataTest(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(_CaptureEnv.last_init_kwargs["gold_answer"], "42")
     self.assertEqual(_CaptureEnv.last_init_kwargs["max_steps"], 3)
 
+  async def test_worker_env_config_shallow_merged_with_request_and_overrides_defaults(
+      self,
+  ):
+    _CaptureEnv.last_init_kwargs = None
+    manager = manager_lib.RolloutManager(
+        config=rollout_worker.RolloutConfig(),
+        sampler=_FakeSyncSampler([]),
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
+        env_config={
+            "backend": "k8s",
+            "max_steps": 10,
+            "group_index": 99,
+        },
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    request = datatypes.RolloutRequest(
+        request_id="req_merge",
+        prompt="prompt text",
+        prompt_id="prompt_merge",
+        group_index=2,
+        target_policy_version=7,
+        metadata={
+            "env_config": {
+                "max_steps": 3,
+            },
+        },
+    )
+
+    with mock.patch.object(
+        manager_lib.collector_lib,
+        "TrajectoryCollectorEngine",
+        _NoopCollector,
+    ):
+      await manager.generate(request)
+
+    self.assertEqual(
+        _CaptureEnv.last_init_kwargs,
+        {
+            "backend": "k8s",
+            "max_steps": 3,
+            "group_index": 99,
+            "policy_version": 7,
+        },
+    )
+
+  async def test_failed_episode_strips_env_config_from_trajectory_error(self):
+    class _FailingCollector(_NoopCollector):
+
+      async def run_episode(self):
+        raise RuntimeError("sandbox boom")
+
+    manager = manager_lib.RolloutManager(
+        config=rollout_worker.RolloutConfig(),
+        sampler=_FakeSyncSampler([]),
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    request = datatypes.RolloutRequest(
+        request_id="req_err",
+        prompt="",
+        prompt_id="prompt_err",
+        group_index=1,
+        target_policy_version=3,
+        metadata={
+            "question": "Q0",
+            "env_config": {"verifier_bytes": b"\x80\xff"},
+        },
+    )
+
+    with mock.patch.object(
+        manager_lib.collector_lib,
+        "TrajectoryCollectorEngine",
+        _FailingCollector,
+    ):
+      err = await manager.generate(request)
+
+    self.assertNotIn("env_config", err.metadata)
+    self.assertEqual(err.metadata["question"], "Q0")
+    self.assertIn("env_config", request.metadata)
+
 
 class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
 
@@ -193,6 +289,8 @@ class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
         sampler=_FakeSyncSampler([]),
         tokenizer="mock",
         chat_parser="mock",
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
         **kwargs,
     )
 
@@ -216,14 +314,23 @@ class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
   async def test_bind_delegates_to_sampler(self):
     sampler = _FakeSyncSampler([])
     manager = manager_lib.RolloutManager(
-        sampler=sampler, tokenizer="mock", chat_parser="mock")
+        sampler=sampler,
+        tokenizer="mock",
+        chat_parser="mock",
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
+    )
     await manager.bind_weight_sync()
 
   async def test_abort_weight_sync_delegates_and_reopens_admission(self):
     sampler = mock.AsyncMock(spec=sampler_lib.Sampler)
     sampler.abort_weight_sync.return_value = "aborted"
     manager = manager_lib.RolloutManager(
-        sampler=sampler, tokenizer="mock", chat_parser="mock"
+        sampler=sampler,
+        tokenizer="mock",
+        chat_parser="mock",
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
     )
     manager._traffic.transition_to_syncing()
     res = await manager.abort_weight_sync()
@@ -270,25 +377,18 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
   async def test_request_agent_config_overrides_worker_config(self):
     created_configs = []
 
-    class FakeAgent:
+    class FakeAgent(test_utils.MockAgent):
 
       def __init__(self, **kwargs):
+        super().__init__()
         created_configs.append(kwargs)
 
-    class FakeEnv:
-
-      def __init__(self, **kwargs):
-        del kwargs
-
-    config = rollout_worker.RolloutConfig(
-        agent_name="fake_agent_for_manager_test",
-        agent_config={"source": "worker"},
-        env_name="fake_env_for_manager_test",
-        env_config={},
-    )
     manager = manager_lib.RolloutManager(
-        config=config,
+        config=rollout_worker.RolloutConfig(),
         sampler=_FakeSyncSampler([]),
+        env_factory=_CaptureEnv,
+        agent_factory=FakeAgent,
+        agent_config={"source": "worker", "worker_only": True},
         tokenizer="mock",
         chat_parser="mock",
     )
@@ -301,14 +401,6 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
     )
 
     with mock.patch.object(
-        registry.AGENT_REGISTRY, "contains", return_value=True
-    ), mock.patch.object(
-        registry.AGENT_REGISTRY, "get", return_value=FakeAgent
-    ), mock.patch.object(
-        registry.ENV_REGISTRY, "contains", return_value=True
-    ), mock.patch.object(
-        registry.ENV_REGISTRY, "get", return_value=FakeEnv
-    ), mock.patch.object(
         manager_lib.collector_lib, "TrajectoryCollectorEngine"
     ) as collector_cls:
       collector = collector_cls.return_value
@@ -326,39 +418,24 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
   async def test_worker_agent_config_is_fallback(self):
     created_configs = []
 
-    class FakeAgent:
+    class FakeAgent(test_utils.MockAgent):
 
       def __init__(self, **kwargs):
+        super().__init__()
         created_configs.append(kwargs)
 
-    class FakeEnv:
-
-      def __init__(self, **kwargs):
-        del kwargs
-
-    config = rollout_worker.RolloutConfig(
-        agent_name="fake_agent_for_manager_test",
-        agent_config={"source": "worker"},
-        env_name="fake_env_for_manager_test",
-        env_config={},
-    )
     manager = manager_lib.RolloutManager(
-        config=config,
+        config=rollout_worker.RolloutConfig(),
         sampler=_FakeSyncSampler([]),
+        env_factory=_CaptureEnv,
+        agent_factory=FakeAgent,
+        agent_config={"source": "worker"},
         tokenizer="mock",
         chat_parser="mock",
     )
     request = datatypes.RolloutRequest(prompt="prompt", prompt_id="p0")
 
     with mock.patch.object(
-        registry.AGENT_REGISTRY, "contains", return_value=True
-    ), mock.patch.object(
-        registry.AGENT_REGISTRY, "get", return_value=FakeAgent
-    ), mock.patch.object(
-        registry.ENV_REGISTRY, "contains", return_value=True
-    ), mock.patch.object(
-        registry.ENV_REGISTRY, "get", return_value=FakeEnv
-    ), mock.patch.object(
         manager_lib.collector_lib, "TrajectoryCollectorEngine"
     ) as collector_cls:
       collector = collector_cls.return_value
@@ -381,6 +458,8 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
         sampler=_FakeSyncSampler([]),
         tokenizer="mock",
         chat_parser="mock",
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
     )
     request = datatypes.RolloutRequest(prompt="prompt", prompt_id="p0")
 
@@ -404,6 +483,8 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
         sampler=_FakeSyncSampler([]),
         tokenizer="mock",
         chat_parser="mock",
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
     )
     request = datatypes.RolloutRequest(prompt="prompt", prompt_id="p0")
 
@@ -425,6 +506,8 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
         sampler=_FakeSyncSampler([]),
         tokenizer="mock",
         chat_parser="mock",
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
     )
     request = datatypes.RolloutRequest(
         prompt="prompt",
@@ -479,6 +562,8 @@ class PartialRolloutTest(unittest.IsolatedAsyncioTestCase):
         sampler=sampler,
         tokenizer="mock",
         chat_parser="mock",
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
         drain_timeout_s=10.0,
     )
 
@@ -568,6 +653,8 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
         sampler=sampler,
         tokenizer="mock",
         chat_parser="mock",
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
     )
 
     await manager.pre_weight_sync()
@@ -627,6 +714,8 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
         sampler=sampler,
         tokenizer="mock",
         chat_parser="mock",
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
     )
     finish_turn = asyncio.Event()
 
@@ -682,6 +771,8 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
         sampler=sampler,
         tokenizer="mock",
         chat_parser="mock",
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
     )
     turn_started = asyncio.Event()
 
@@ -745,6 +836,8 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
         sampler=sampler,
         tokenizer="mock",
         chat_parser="mock",
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
     )
     in_env_step = asyncio.Event()
     finish_turn2 = asyncio.Event()
@@ -813,26 +906,34 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
 
     class _FakeInnerCollectEngine:
 
-      def __init__(self, *, model_call, **kwargs):
+      def __init__(self, *, model_call, policy_version=0, **kwargs):
         del kwargs
         self._model_call = model_call
+        self.policy_version = policy_version
+        self._policy_versions = []
 
       async def collect(self, mode="Token"):
         del mode
         # Turn 1 under v0
         await self._model_call([{"role": "user", "content": "q1"}])
+        self._policy_versions.append(self.policy_version)
         # Environment step in progress when weight sync begins
         in_env_step.set()
         await release_env_step.wait()
         # Turn 2 must block on collector._unpaused until post_weight_sync
         await self._model_call([{"role": "user", "content": "q2"}])
-        return {"conversation_tokens": [1, 2, 3, 4], "status": "DONE"}
+        self._policy_versions.append(self.policy_version)
+        return {
+            "conversation_tokens": [1, 2, 3, 4],
+            "status": "DONE",
+            "policy_versions": self._policy_versions,
+        }
 
     manager = manager_lib.RolloutManager(
         config=rollout_worker.RolloutConfig(partial_rollout=True),
         sampler=sampler,
-        env_pool=types.SimpleNamespace(acquire_env=lambda _: object()),
-        agent_factory=object,
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
         tokenizer=types.SimpleNamespace(eos_token_id=2),
         chat_parser=types.SimpleNamespace(
             parse=lambda msgs, **kw: "prompt_str"
@@ -876,8 +977,7 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
 
     self.assertTrue(turn2_called_sampler.is_set())
     self.assertEqual(turn_versions_seen, [0, 1])
-    self.assertEqual(traj.policy_version, 0)
-    self.assertEqual(traj.metadata["policy_versions"], [0, 1])
+    self.assertEqual(traj.policy_versions, [0, 1])
 
   async def test_fr1_synthetic_straggler_ab_benchmark(self):
 
@@ -891,6 +991,8 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
           sampler=sampler,
           tokenizer="mock",
           chat_parser="mock",
+          env_factory=_CaptureEnv,
+          agent_factory=test_utils.MockAgent,
       )
 
       class _StragglerCollector(_NoopCollector):
@@ -1014,6 +1116,8 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
         sampler=_PauseTrackingSampler(),
         tokenizer="mock",
         chat_parser="mock",
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
     )
     captured_kwargs = {}
 
@@ -1040,6 +1144,8 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
         sampler=_PauseTrackingSampler(),
         tokenizer="mock",
         chat_parser="mock",
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
     )
     self.assertEqual(manager.drain_timeout_s, 660.0)
     self.assertFalse(manager.partial_rollout)
@@ -1052,6 +1158,8 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
             sampler=_PauseTrackingSampler(),
             tokenizer="mock",
             chat_parser="mock",
+            env_factory=_CaptureEnv,
+            agent_factory=test_utils.MockAgent,
             drain_timeout_s=invalid,
         )
 

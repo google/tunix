@@ -18,6 +18,8 @@ from unittest import mock
 
 from absl.testing import absltest
 from jax.sharding import Mesh
+from tunix.dist_rl.common import otel_setup
+from tunix.dist_rl.launch.common import resolve_config
 from tunix.dist_rl.launch.nodes import inference
 from tunix.dist_rl.launch.nodes import node_utils
 from tunix.dist_rl.worker import inference_worker as exp_inference_worker
@@ -63,11 +65,14 @@ class InferenceMainTest(absltest.TestCase):
             return_value=mock.sentinel.core_worker,
         )
     )
+    self.mock_worker_service = mock.MagicMock(
+        spec=exp_inference_worker.InferenceWorker
+    )
     self.mock_exp_worker_cls = self.enter_context(
         mock.patch.object(
             exp_inference_worker,
             "InferenceWorker",
-            return_value=mock.sentinel.worker_service,
+            return_value=self.mock_worker_service,
         )
     )
     self.mock_serve_worker = self.enter_context(
@@ -75,20 +80,28 @@ class InferenceMainTest(absltest.TestCase):
             node_utils, "serve_worker", new_callable=mock.AsyncMock
         )
     )
+    self.mock_setup_metrics = self.enter_context(
+        mock.patch.object(otel_setup, "setup_metrics", return_value=False)
+    )
 
   def test_main_loads_model_with_separate_load_dtype_and_serves_worker(self):
-    inference.main(
-        [
-            "reference_model_config.model_name=Qwen3-4B",
-            "reference_model_config.dtype=bfloat16",
-            "reference_model_config.load_dtype=float32",
-            "rl_training_config.compute_logps_micro_batch_size=4",
-            "rollout_config.max_prompt_length=256",
-            "rollout_config.total_generation_steps=128",
-            "rollout_config.temperature=0.7",
-            "cluster_config.ports.inference=20052",
-        ],
-        context=self.mock_context,
+    argv = [
+        "reference_model_config.model_name=Qwen3-4B",
+        "reference_model_config.dtype=bfloat16",
+        "reference_model_config.load_dtype=float32",
+        "rl_training_config.compute_logps_micro_batch_size=4",
+        "cluster_config.ports.inference=20052",
+        "cluster_config.run_id=run_1",
+    ]
+    inference.main(argv, context=self.mock_context)
+
+    self.mock_setup_metrics.assert_called_once_with(
+        default_service_name="tunix-inference",
+        resource_attributes={
+            "tunix.worker_id": "reference-inference-0",
+            "tunix.role": "inference",
+            "tunix.run_id": "run_1",
+        },
     )
 
     self.mock_context.jax.initialize.assert_called_once()
@@ -108,18 +121,24 @@ class InferenceMainTest(absltest.TestCase):
         pad_id=2,
         eos_id=9,
         chunk_size=4,
-        max_prompt_length=256,
-        max_response_length=128,
-        temperature=0.7,
         execution_context=self.mock_mesh,
     )
-    self.mock_serve_worker.assert_awaited_once_with(
-        mock.sentinel.worker_service,
-        process_context=self.mock_context,
-        role="inference",
-        worker_id_str="reference-inference-0",
-        port=20052,
+    self.mock_serve_worker.assert_awaited_once()
+    serve_kwargs = self.mock_serve_worker.call_args.kwargs
+    self.assertIs(
+        self.mock_serve_worker.call_args.args[0], self.mock_worker_service
     )
+    self.assertIs(serve_kwargs["process_context"], self.mock_context)
+    self.assertEqual(serve_kwargs["role"], "inference")
+    self.assertEqual(serve_kwargs["worker_id_str"], "reference-inference-0")
+    self.assertEqual(serve_kwargs["port"], 20052)
+    self.assertEqual(
+        serve_kwargs["config_sha256"],
+        resolve_config.config_fingerprint(resolve_config.initialize(argv)),
+    )
+    self.assertNotIn("drain_fn", serve_kwargs)
+    self.assertIsNone(serve_kwargs["close_fn"]())
+    self.mock_worker_service.stop.assert_called_once_with()
 
   def test_main_raises_without_discovery_context(self):
     with self.assertRaisesRegex(RuntimeError, "Require discovery API"):

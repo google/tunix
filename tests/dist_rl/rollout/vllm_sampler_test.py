@@ -70,21 +70,29 @@ for _name in (
 # hook, which breaks under TAP's import profiler.
 importlib.import_module("torch._inductor.pattern_matcher")
 
+from tunix.common import configs  # pylint: disable=g-import-not-at-top
 from tunix.dist_rl.rollout import sampler as base_sampler_lib  # pylint: disable=g-import-not-at-top
 from tunix.dist_rl.rollout import vllm_sampler  # pylint: disable=g-import-not-at-top
 from tunix.dist_rl.weight_sync import raiden_weight_sync_delegate  # pylint: disable=g-import-not-at-top
-from vllm.engine.arg_utils import AsyncEngineArgs  # pylint: disable=g-import-not-at-top
 from vllm.engine.async_llm_engine import AsyncLLMEngine  # pylint: disable=g-import-not-at-top
+
+
+def _config(**overrides: Any) -> configs.RolloutConfig:
+  """Returns a RolloutConfig that VllmSampler can build its engine args from."""
+  fields: dict[str, Any] = dict(
+      tensor_parallel_size=1,
+      data_parallel_size=1,
+      rollout_vllm_model_version="Qwen/Qwen2.5-1.5B",
+  )
+  fields.update(overrides)
+  return configs.RolloutConfig(**fields)
 
 
 class VllmSamplerTest(absltest.TestCase):
 
   def setUp(self):
     super().setUp()
-    self.engine_args = SimpleNamespace(model="Qwen/Qwen2.5-1.5B")
     self.mock_engine = mock.MagicMock()
-    self.mock_engine.pause_background_loop = mock.AsyncMock()
-    self.mock_engine.resume_background_loop = mock.AsyncMock()
     self.mock_engine.pause_generation = mock.AsyncMock()
     self.mock_engine.resume_generation = mock.AsyncMock()
     self.mock_engine.reset_prefix_cache = mock.AsyncMock()
@@ -93,7 +101,11 @@ class VllmSamplerTest(absltest.TestCase):
 
     self.sampler = vllm_sampler.VllmSampler(
         server_id="vllm_slice_01",
-        engine_args=self.engine_args,
+        config=_config(
+            temperature=0.7,
+            return_logprobs=True,
+            weight_sync_mode="raiden",
+        ),
     )
     self.sampler._engine = self.mock_engine
     self.sampler._is_running = True
@@ -212,10 +224,9 @@ class VllmSamplerTest(absltest.TestCase):
 
     self.mock_engine.generate.side_effect = mock_failing_stream
     reqs = [
-        SimpleNamespace(
+        base_sampler_lib.SamplingRequest(
             prompt="Test error prompt",
             request_id="err_req",
-            sampling_params=None,
         )
     ]
     results = asyncio.run(self.sampler.sample(reqs))
@@ -250,11 +261,11 @@ class VllmSamplerTest(absltest.TestCase):
     self.sampler._mesh = "mock_mesh"
     asyncio.run(self.sampler.pause())
     self.assertTrue(self.sampler._is_paused)
-    self.mock_engine.pause_background_loop.assert_awaited_once()
+    self.mock_engine.pause_generation.assert_not_awaited()
 
     asyncio.run(self.sampler.resume())
     self.assertFalse(self.sampler._is_paused)
-    self.mock_engine.resume_background_loop.assert_awaited_once()
+    self.mock_engine.resume_generation.assert_not_awaited()
 
     mesh = asyncio.run(self.sampler.get_mesh())
     self.assertEqual(mesh, "mock_mesh")
@@ -343,56 +354,142 @@ class VllmSamplerTest(absltest.TestCase):
     self.assertEqual(load_info.num_requests_running, 1)
     self.assertAlmostEqual(load_info.kv_cache_usage_perc, 25.5)
 
-  def test_uninitialized_raises(self):
-    uninit = vllm_sampler.VllmSampler(server_id="empty")
-    with self.assertRaises(RuntimeError):
-      asyncio.run(uninit.sample(base_sampler_lib.SamplingRequest(prompt="hi")))
-    with self.assertRaises(RuntimeError):
-      asyncio.run(uninit.stop())
-    with self.assertRaises(RuntimeError):
-      asyncio.run(uninit.pause())
-    with self.assertRaises(RuntimeError):
-      asyncio.run(uninit.resume())
-    with self.assertRaises(RuntimeError):
-      asyncio.run(uninit.get_mesh())
-    with self.assertRaises(RuntimeError):
-      asyncio.run(uninit.get_weight_sync_metadata())
-    with self.assertRaises(RuntimeError):
-      asyncio.run(uninit.pre_weight_sync(None))
-    with self.assertRaises(RuntimeError):
-      asyncio.run(uninit.weight_sync(None))
-    with self.assertRaises(RuntimeError):
-      asyncio.run(uninit.post_weight_sync(None))
-    with self.assertRaises(RuntimeError):
-      asyncio.run(uninit.get_transfer_status("req"))
-    with self.assertRaises(RuntimeError):
-      asyncio.run(uninit.get_load_info())
-    with self.assertRaises(RuntimeError):
-      asyncio.run(
-          uninit.migrate_kv_cache(
-              source_server_id="s", target_server_id="t", token_ids=[1]
-          )
-      )
-
   def test_sample_none_requests_raises(self):
     with self.assertRaises(ValueError):
       asyncio.run(self.sampler.sample(None))
 
-  def test_engine_args_deferred_to_initialize(self):
-    with mock.patch(
-        "vllm.engine.arg_utils.AsyncEngineArgs",
-        return_value=self.engine_args,
-    ) as mock_args_cls:
-      sampler = vllm_sampler.VllmSampler(
-          server_id="deferred_vllm",
-          model_name="Qwen/Qwen3-8B",
-      )
-      self.assertIsNone(sampler.engine_args)
-      mock_args_cls.assert_not_called()
+  def test_engine_args_built_from_config(self):
+    sampler = vllm_sampler.VllmSampler(
+        server_id="engine_args",
+        config=_config(
+            kv_cache_size=4096,
+            tensor_parallel_size=2,
+            data_parallel_size=3,
+            return_routed_experts=True,
+            rollout_vllm_model_version="Qwen/Qwen3-8B",
+            rollout_vllm_hbm_utilization=0.75,
+            rollout_vllm_async_scheduling=True,
+            rollout_vllm_max_num_seqs=16,
+            rollout_vllm_max_num_batched_tokens=4096,
+            rollout_vllm_hf_config_path="/tmp/hf_config.json",
+            rollout_vllm_kwargs={"dtype": "bfloat16"},
+        ),
+    )
+    self.assertIsNone(sampler.engine_args)
+    sampler.initialize()
+    engine_args = sampler.engine_args
+    self.assertIsNotNone(engine_args)
+    assert engine_args is not None
+    self.assertEqual(engine_args.model, "Qwen/Qwen3-8B")
+    self.assertEqual(engine_args.max_model_len, 4096)
+    self.assertTrue(engine_args.trust_remote_code)
+    self.assertEqual(engine_args.gpu_memory_utilization, 0.75)
+    self.assertEqual(engine_args.hf_config_path, "/tmp/hf_config.json")
+    self.assertEqual(engine_args.tensor_parallel_size, 2)
+    self.assertEqual(engine_args.data_parallel_size, 3)
+    self.assertTrue(engine_args.async_scheduling)
+    self.assertEqual(engine_args.max_num_seqs, 16)
+    self.assertEqual(engine_args.max_num_batched_tokens, 4096)
+    self.assertEqual(engine_args.max_logprobs, 1)
+    self.assertEqual(engine_args.logprobs_mode, "processed_logprobs")
+    self.assertTrue(engine_args.enable_return_routed_experts)
+    self.assertEqual(engine_args.dtype, "bfloat16")
 
-      sampler.initialize()
-      self.assertIs(sampler.engine_args, self.engine_args)
-      mock_args_cls.assert_called_once_with(model="Qwen/Qwen3-8B")
+  def test_lora_config_expanded_and_rejects_dp_greater_than_one(self):
+    sampler = vllm_sampler.VllmSampler(
+        server_id="lora_args",
+        config=_config(
+            data_parallel_size=1,
+            rollout_vllm_lora_config={"max_lora_rank": 16, "max_loras": 2},
+        ),
+    )
+    sampler.initialize()
+    assert sampler.engine_args is not None
+    self.assertTrue(sampler.engine_args.enable_lora)
+    self.assertEqual(sampler.engine_args.max_lora_rank, 16)
+    self.assertEqual(sampler.engine_args.max_loras, 2)
+
+    with self.assertRaisesRegex(
+        ValueError, "LoRA is not supported with rollout data parallelism"
+    ):
+      vllm_sampler.VllmSampler(
+          server_id="lora_bad_dp",
+          config=_config(
+              data_parallel_size=2,
+              rollout_vllm_lora_config={"max_lora_rank": 16},
+          ),
+      )
+
+    with self.assertRaisesRegex(
+        ValueError, "LoRA is not supported with rollout data parallelism"
+    ):
+      vllm_sampler.VllmSampler(
+          server_id="lora_bad_dp_kwarg",
+          config=_config(
+              data_parallel_size=1,
+              rollout_vllm_lora_config={"max_lora_rank": 16},
+              rollout_vllm_kwargs={"data_parallel_size": 2},
+          ),
+      )
+
+  def test_rollout_vllm_kwargs_override_engine_args(self):
+    sampler = vllm_sampler.VllmSampler(
+        server_id="engine_args_override",
+        config=_config(
+            kv_cache_size=4096,
+            rollout_vllm_kwargs={
+                "async_scheduling": None,
+                "max_model_len": 2048,
+            },
+        ),
+    )
+    sampler.initialize()
+    assert sampler.engine_args is not None
+    self.assertIsNone(sampler.engine_args.async_scheduling)
+    self.assertEqual(sampler.engine_args.max_model_len, 2048)
+
+  def test_additional_config_passed_only_when_set(self):
+    unset = vllm_sampler.VllmSampler(server_id="no_extra", config=_config())
+    unset.initialize()
+    assert unset.engine_args is not None
+    self.assertEqual(unset.engine_args.additional_config, {})
+    with_extra = vllm_sampler.VllmSampler(
+        server_id="extra",
+        config=_config(
+            rollout_vllm_additional_config={
+                "model": "maxtext",
+                "maxtext_config": {
+                    "weight_dtype": "bfloat16",
+                    "allow_split": True,
+                },
+            },
+            rollout_vllm_kwargs={
+                "additional_config": {
+                    "sharding": {"ep": 4},
+                    "maxtext_config": {"allow_split": False},
+                }
+            },
+        ),
+    )
+    with_extra.initialize()
+    assert with_extra.engine_args is not None
+    self.assertEqual(
+        with_extra.engine_args.additional_config,
+        {
+            "model": "maxtext",
+            "sharding": {"ep": 4},
+            "maxtext_config": {
+                "weight_dtype": "bfloat16",
+                "allow_split": False,
+            },
+        },
+    )
+
+  def test_non_positive_parallelism_raises(self):
+    with self.assertRaisesRegex(ValueError, "tensor_parallel_size"):
+      vllm_sampler.VllmSampler(
+          server_id="bad_parallelism", config=configs.RolloutConfig()
+      )
 
   def test_weight_sync_starts_an_idle_engine(self):
     self.sampler._is_running = False
@@ -401,7 +498,9 @@ class VllmSamplerTest(absltest.TestCase):
 
     async def run_test():
       await self.sampler.bind_weight_sync()
-      mock_llm_cls.from_engine_args.assert_called_once_with(self.engine_args)
+      mock_llm_cls.from_engine_args.assert_called_once_with(
+          self.sampler.engine_args
+      )
       self.mock_engine.collective_rpc.assert_any_call(
           "bind_raiden_sync",
           args=(0, 4, "replica_vllm_slice_01"),
@@ -418,21 +517,9 @@ class VllmSamplerTest(absltest.TestCase):
     ):
       asyncio.run(run_test())
 
-  def test_weight_sync_apis_fail_when_uninitialized(self):
-    uninit = vllm_sampler.VllmSampler(server_id="vllm_slice_01")
-    for coro in (
-        uninit.bind_weight_sync(),
-        uninit.pre_weight_sync(None),
-        uninit.weight_sync(None),
-        uninit.post_weight_sync(None),
-        uninit.abort_weight_sync(None),
-    ):
-      with self.assertRaises(RuntimeError):
-        asyncio.run(coro)
-
-  def test_raiden_disabled_phases_short_circuit_before_initialization(self):
+  def test_raiden_disabled_phases_short_circuit_before_engine_start(self):
     uninit = vllm_sampler.VllmSampler(
-        server_id="uninit_no_raiden", weight_sync_mode="none"
+        server_id="uninit_no_raiden", config=_config(weight_sync_mode="none")
     )
     self.assertIsNone(asyncio.run(uninit.bind_weight_sync()))
     self.assertTrue(asyncio.run(uninit.pre_weight_sync(None)))
@@ -445,34 +532,26 @@ class VllmSamplerTest(absltest.TestCase):
     ):
       asyncio.run(uninit.weight_sync(None))
 
-  def test_bind_weight_sync_initializes_engine_args_lazily(self):
-    mock_llm_cls = mock.MagicMock()
-    mock_llm_cls.from_engine_args.return_value = self.mock_engine
-
-    async def run_test(sampler):
-      await sampler.bind_weight_sync()
-      mock_llm_cls.from_engine_args.assert_called_once_with(self.engine_args)
-      await sampler.stop()
-
-    with mock.patch(
-        "vllm.engine.arg_utils.AsyncEngineArgs",
-        return_value=self.engine_args,
-    ) as mock_args_cls, mock.patch(
-        "vllm.engine.async_llm_engine.AsyncLLMEngine",
-        mock_llm_cls,
-    ):
-      sampler = vllm_sampler.VllmSampler(
-          server_id="lazy_vllm", model_name="Qwen/Qwen3-8B"
-      )
-      asyncio.run(run_test(sampler))
-      mock_args_cls.assert_called_once_with(model="Qwen/Qwen3-8B")
-
   def test_raiden_job_name_derived_from_server_id(self):
-    sampler = vllm_sampler.VllmSampler(
-        server_id="worker-42",
-        engine_args=self.engine_args,
-    )
+    sampler = vllm_sampler.VllmSampler(server_id="worker-42", config=_config())
     self.assertEqual(sampler.raiden_job_name, "replica_worker-42")
+
+  def test_init_does_not_warn_when_server_mode_is_on(self):
+    with self.assertNoLogs(vllm_sampler.logger, level="WARNING"):
+      vllm_sampler.VllmSampler(
+          server_id="worker-default",
+          config=_config(rollout_vllm_server_mode=True),
+      )
+
+  def test_init_warns_when_server_mode_is_false(self):
+    with self.assertLogs(level="WARNING") as cm:
+      vllm_sampler.VllmSampler(
+          server_id="worker-warn",
+          config=_config(rollout_vllm_server_mode=False),
+      )
+    self.assertTrue(
+        any("rollout_vllm_server_mode=False" in msg for msg in cm.output)
+    )
 
   def test_canonicalize_variable_names_bracketed_to_dotted(self):
     entry = {
@@ -518,8 +597,7 @@ class VllmSamplerTest(absltest.TestCase):
   def test_partial_rollout_uses_pause_generation_keep_and_preserves_cache(self):
     sampler = vllm_sampler.VllmSampler(
         server_id="vllm_slice_partial",
-        engine_args=self.engine_args,
-        partial_rollout=True,
+        config=_config(weight_sync_mode="raiden", partial_rollout=True),
     )
     sampler._engine = self.mock_engine
     sampler._is_running = True
@@ -537,9 +615,15 @@ class VllmSamplerTest(absltest.TestCase):
     self.mock_engine.reset_prefix_cache.assert_not_awaited()
     self.mock_engine.resume_generation.assert_awaited_once()
 
+    with self.assertRaisesRegex(ValueError, "disagrees with"):
+      asyncio.run(sampler.pause(partial_rollout=False))
+    with self.assertRaisesRegex(ValueError, "disagrees with"):
+      asyncio.run(sampler.pre_weight_sync(req, partial_rollout=False))
+
   def test_build_vllm_params_forwards_cache_salt(self):
     sampler = vllm_sampler.VllmSampler(
-        engine_args=self.engine_args, partial_rollout=True
+        server_id="cache_salt",
+        config=_config(temperature=0.6, partial_rollout=True),
     )
     req_params = SimpleNamespace(
         max_tokens=32,
@@ -608,7 +692,9 @@ class VllmSamplerTest(absltest.TestCase):
     )
 
   def test_build_vllm_params_forwards_routed_experts_prompt_start(self):
-    sampler = vllm_sampler.VllmSampler(engine_args=self.engine_args)
+    sampler = vllm_sampler.VllmSampler(
+        server_id="routed_experts", config=_config(temperature=0.6)
+    )
     req_params = SimpleNamespace(
         max_tokens=32,
         temperature=0.6,
@@ -620,18 +706,24 @@ class VllmSamplerTest(absltest.TestCase):
         getattr(vllm_params, "routed_experts_prompt_start", 0), 48
     )
 
-  def test_build_vllm_params_detokenizes_by_default(self):
-    """Requests without a detokenize field still get text back."""
-    sampler = vllm_sampler.VllmSampler(engine_args=self.engine_args)
-    req = SimpleNamespace(
-        sampling_params=SimpleNamespace(max_tokens=32, temperature=0.6)
+  def test_build_vllm_params_detokenizes(self):
+    """Callers that read `SamplingResponse.text` get text back."""
+    sampler = vllm_sampler.VllmSampler(
+        server_id="detokenize", config=_config(temperature=0.6)
+    )
+    req = base_sampler_lib.SamplingRequest(
+        prompt="test",
+        sampling_params=base_sampler_lib.SamplingParams(max_tokens=32),
     )
     vllm_params = sampler._build_vllm_params(req, {})
     self.assertTrue(vllm_params.detokenize)
+    self.assertTrue(vllm_params.include_stop_str_in_output)
 
   def test_build_vllm_params_detokenize_opt_out_via_sampling_params(self):
     """An explicit detokenize=False from sampling_params is honored."""
-    sampler = vllm_sampler.VllmSampler(engine_args=self.engine_args)
+    sampler = vllm_sampler.VllmSampler(
+        server_id="detokenize", config=_config(temperature=0.6)
+    )
     req = SimpleNamespace(
         sampling_params=SimpleNamespace(
             max_tokens=32, temperature=0.6, detokenize=False
@@ -641,17 +733,28 @@ class VllmSamplerTest(absltest.TestCase):
     self.assertFalse(vllm_params.detokenize)
 
   def test_build_vllm_params_detokenize_opt_out_via_kwargs(self):
-    """An explicit detokenize=False from kwargs is honored."""
-    sampler = vllm_sampler.VllmSampler(engine_args=self.engine_args)
-    req = SimpleNamespace(
-        sampling_params=SimpleNamespace(max_tokens=32, temperature=0.6)
+    """An explicit detokenize=False from kwargs is honored even when rollout_vllm_sampling_kwargs sets detokenize=True."""
+    sampler = vllm_sampler.VllmSampler(
+        server_id="detokenize",
+        config=_config(
+            temperature=0.6,
+            rollout_vllm_sampling_kwargs={"detokenize": True},
+        ),
+    )
+    req = base_sampler_lib.SamplingRequest(
+        prompt="test",
+        sampling_params=base_sampler_lib.SamplingParams(
+            max_tokens=32, temperature=0.6
+        ),
     )
     vllm_params = sampler._build_vllm_params(req, {"detokenize": False})
     self.assertFalse(vllm_params.detokenize)
 
   def test_build_vllm_params_sampling_params_overrides_kwargs(self):
     """sampling_params.detokenize takes precedence over conflicting kwargs."""
-    sampler = vllm_sampler.VllmSampler(engine_args=self.engine_args)
+    sampler = vllm_sampler.VllmSampler(
+        server_id="detokenize", config=_config(temperature=0.6)
+    )
     req = SimpleNamespace(
         sampling_params=SimpleNamespace(
             max_tokens=32, temperature=0.6, detokenize=False
@@ -660,50 +763,24 @@ class VllmSamplerTest(absltest.TestCase):
     vllm_params = sampler._build_vllm_params(req, {"detokenize": True})
     self.assertFalse(vllm_params.detokenize)
 
-  def _kwargs_passed_to_build_vllm_params(self, sampler, **sample_kwargs):
-    async def mock_generate_stream(prompt, sampling_params, request_id):
-      del prompt, sampling_params, request_id
-      yield SimpleNamespace(
-          outputs=[
-              SimpleNamespace(
-                  text="t", token_ids=[1], finish_reason="stop", logprobs=None
-              )
-          ]
-      )
-
-    sampler._engine = self.mock_engine
-    sampler._is_running = True
-    self.mock_engine.generate.side_effect = mock_generate_stream
-    with mock.patch.object(
-        sampler, "_build_vllm_params", wraps=sampler._build_vllm_params
-    ) as build:
-      asyncio.run(
-          sampler.sample(
-              base_sampler_lib.SamplingRequest(prompt="hi"), **sample_kwargs
-          )
-      )
-    return build.call_args.args[1]
-
-  def test_detokenize_flag_off_by_default(self):
-    self.assertFalse(self.sampler.detokenize)
-    self.assertEqual(self._kwargs_passed_to_build_vllm_params(self.sampler), {})
-
-  def test_detokenize_flag_enabled_is_forwarded(self):
+  def test_build_vllm_params_applies_rollout_vllm_sampling_kwargs(self):
+    """A worker opts out of the detokenize and stop-string defaults."""
     sampler = vllm_sampler.VllmSampler(
-        engine_args=self.engine_args, detokenize=True
+        server_id="sampling_kwargs",
+        config=_config(
+            rollout_vllm_sampling_kwargs={
+                "detokenize": False,
+                "include_stop_str_in_output": False,
+            }
+        ),
     )
-    self.assertEqual(
-        self._kwargs_passed_to_build_vllm_params(sampler), {"detokenize": True}
+    req = base_sampler_lib.SamplingRequest(
+        prompt="test",
+        sampling_params=base_sampler_lib.SamplingParams(max_tokens=32),
     )
-
-  def test_explicit_detokenize_kwarg_wins_over_sampler_flag(self):
-    sampler = vllm_sampler.VllmSampler(
-        engine_args=self.engine_args, detokenize=True
-    )
-    self.assertEqual(
-        self._kwargs_passed_to_build_vllm_params(sampler, detokenize=False),
-        {"detokenize": False},
-    )
+    vllm_params = sampler._build_vllm_params(req, {})
+    self.assertFalse(vllm_params.detokenize)
+    self.assertFalse(vllm_params.include_stop_str_in_output)
 
   def test_duck_typed_request_processing(self):
     async def mock_generate_stream(prompt, sampling_params, request_id):
@@ -758,7 +835,7 @@ class VllmSamplerTest(absltest.TestCase):
         extra_config={"req_id": "transfer_99", "uuid": 1},
     )
     asyncio.run(self.sampler.pre_weight_sync(sync_req, free_kv_cache=True))
-    self.mock_engine.pause_background_loop.assert_awaited_once()
+    self.assertTrue(self.sampler._is_paused)
     self.mock_engine.reset_prefix_cache.assert_awaited_once()
     self.mock_engine.collective_rpc.assert_any_call(
         "start_weight_update", args=(), kwargs={"free_kv_cache": True}
@@ -794,9 +871,7 @@ class VllmSamplerTest(absltest.TestCase):
 
   def test_weight_sync_when_raiden_disabled(self):
     sampler = vllm_sampler.VllmSampler(
-        server_id="vllm_no_raiden",
-        engine_args=self.engine_args,
-        weight_sync_mode="none",
+        server_id="vllm_no_raiden", config=_config(weight_sync_mode="none")
     )
     self.assertFalse(sampler.enable_raiden)
     self.assertIsNone(asyncio.run(sampler.bind_weight_sync()))
@@ -807,6 +882,11 @@ class VllmSamplerTest(absltest.TestCase):
       asyncio.run(sampler.weight_sync())
     self.assertTrue(asyncio.run(sampler.post_weight_sync()))
     self.assertTrue(asyncio.run(sampler.abort_weight_sync()))
+
+    invalid_cfg = _config()
+    invalid_cfg.weight_sync_mode = "invalid"  # type: ignore[assignment]
+    with self.assertRaises(ValueError):
+      vllm_sampler.VllmSampler(server_id="bad_mode", config=invalid_cfg)
 
 
 class RoundUuidTest(absltest.TestCase):
@@ -863,7 +943,7 @@ class VllmSamplerLogStatsTest(absltest.TestCase):
     engine_cls_patcher.start()
     self.addCleanup(engine_cls_patcher.stop)
     self.sampler = vllm_sampler.VllmSampler(
-        engine_args=AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
+        server_id="vllm-rollout-0", config=_config()
     )
 
   def test_start_flushes_stats_until_stop(self):

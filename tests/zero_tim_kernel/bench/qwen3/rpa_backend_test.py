@@ -296,6 +296,20 @@ class MetadataTest(parameterized.TestCase):
     )
     self.assertEqual(
         rpa_backend.kernel_kwargs(
+            scale=0.5,
+            pin_block_sizes=True,
+            out_dtype=None,
+            force_mixed=True,
+            bkv_sz=1024,
+        ),
+        {
+            'sm_scale': 0.5,
+            'd_block_sizes': (1, 512, 1, 512),
+            'm_block_sizes': (128, 1024, 128, 512),
+        },
+    )
+    self.assertEqual(
+        rpa_backend.kernel_kwargs(
             scale=0.5, pin_block_sizes=False, out_dtype=None
         ),
         {'sm_scale': 0.5},
@@ -573,7 +587,11 @@ class AdapterTest(parameterized.TestCase):
     self.assertEqual(shapes[1], ((256, kh, _D), 'float32'))
     self.assertEqual(shapes[3], ((b * 1, 16, 2 * kh, 1, _D), 'float32'))
     self.assertEqual(
-        kwargs, {'sm_scale': 0.1, **rpa_canonical.canonical_block_size_kwargs()}
+        kwargs,
+        {
+            'sm_scale': 0.1,
+            **rpa_canonical.canonical_block_size_kwargs(force_mixed=True),
+        },
     )
     kv_lens, page_indices, cu_q_lens, distribution = metadata
     np.testing.assert_array_equal(kv_lens, [t, t])

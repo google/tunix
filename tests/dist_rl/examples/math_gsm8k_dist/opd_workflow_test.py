@@ -33,7 +33,8 @@ class OPDWorkflowTest(unittest.IsolatedAsyncioTestCase):
     self.scorer = mock.Mock(score=mock.AsyncMock())
     with mock.patch.object(rl_program, "MetricsLogger"):
       program = entry._EvaluatedOPDProgram(
-          algo=entry._build_algo(args),
+          algo_config=entry._build_algo(args),
+          batch_config=entry.batch_assembly.BatchConfig(mini_batch_size=1),
           generation_args=entry.datatypes.GenerationArgs(
               temperature=1, top_p=1, top_k=0, seed=42
           ),

@@ -19,8 +19,12 @@ from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
+import jax
 import jax.numpy as jnp
+import numpy as np
 
+from tunix.common import datatypes
+from tunix.experimental.generate import configs
 from tunix.experimental.generate import kv_cache_manager
 from tunix.experimental.generate import request as request_lib
 from tunix.experimental.generate import scheduler
@@ -33,12 +37,12 @@ def _create_cache_config(
     num_layers: int = 1,
     num_kv_heads: int = 2,
     head_dim: int = 16,
-) -> kv_cache_manager.CacheConfig:
+) -> configs.CacheConfig:
   bytes_per_layer_page = page_size * (2 * num_kv_heads) * head_dim * 4
   total_device_bytes_per_page = bytes_per_layer_page * num_layers
   total_host_bytes_per_page = bytes_per_layer_page * num_layers
   gib = 1 << 30
-  return kv_cache_manager.CacheConfig(
+  return configs.CacheConfig(
       max_device_size_gib=(total_device_bytes_per_page * num_device_pages)
       / gib,
       max_host_size_gib=(total_host_bytes_per_page * num_host_pages) / gib,
@@ -52,21 +56,23 @@ def _create_kv_cache_manager(
     num_device_pages: int = 20,
     num_host_pages: int = 20,
 ) -> kv_cache_manager.KVCacheManager:
-  return kv_cache_manager.KVCacheManager(
-      config=_create_cache_config(
-          page_size=page_size,
-          num_device_pages=num_device_pages,
-          num_host_pages=num_host_pages,
-      ),
-      cache_geometries={
-          "cache_0": kv_cache_manager.CacheGeometry(
-              num_kv_heads=2, head_dim=16
-          )
-      },
-  )
+  mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ("tp",))
+  with jax.set_mesh(mesh):
+    return kv_cache_manager.KVCacheManager(
+        config=_create_cache_config(
+            page_size=page_size,
+            num_device_pages=num_device_pages,
+            num_host_pages=num_host_pages,
+        ),
+        cache_geometries={
+            "cache_0": datatypes.CacheGeometry(
+                num_kv_heads=2, head_dim=16
+            )
+        },
+    )
 
 
-def _create_scheduler_config(**overrides) -> scheduler.SchedulerConfig:
+def _create_scheduler_config(**overrides) -> configs.SchedulerConfig:
   kwargs = dict(
       max_num_batched_tokens=64,
       max_num_seqs=4,
@@ -74,7 +80,7 @@ def _create_scheduler_config(**overrides) -> scheduler.SchedulerConfig:
       num_scheduler_steps=1,
   )
   kwargs.update(overrides)
-  return scheduler.SchedulerConfig(**kwargs)
+  return configs.SchedulerConfig(**kwargs)
 
 
 def _create_request(
@@ -134,29 +140,8 @@ def _complete_in_flight(
 
 class SchedulerConfigTest(parameterized.TestCase):
 
-  def test_valid_config(self):
-    config = scheduler.SchedulerConfig(
-        max_num_batched_tokens=128,
-        max_num_seqs=8,
-        max_chunked_prefill_length=16,
-        num_scheduler_steps=1,
-    )
-    self.assertEqual(config.max_num_batched_tokens, 128)
-    self.assertEqual(config.max_num_seqs, 8)
-    self.assertEqual(config.max_chunked_prefill_length, 16)
-    self.assertEqual(config.num_scheduler_steps, 1)
-
-  @parameterized.parameters(0, -2)
-  def test_non_positive_max_chunked_prefill_length_raises(self, length):
-    with self.assertRaisesRegex(ValueError, "must be positive"):
-      scheduler.SchedulerConfig(
-          max_num_batched_tokens=128,
-          max_num_seqs=8,
-          max_chunked_prefill_length=length,
-      )
-
   def test_non_power_of_two_max_chunked_prefill_length_rounds_down(self):
-    config = scheduler.SchedulerConfig(
+    config = configs.SchedulerConfig(
         max_num_batched_tokens=128,
         max_num_seqs=8,
         max_chunked_prefill_length=14,
@@ -166,16 +151,6 @@ class SchedulerConfigTest(parameterized.TestCase):
     )
     self.assertEqual(config.max_chunked_prefill_length, 14)
     self.assertEqual(sched.chunked_prefill_length, 8)
-
-  def test_max_chunked_prefill_length_exceeds_max_batch_tokens_raises(self):
-    with self.assertRaisesRegex(
-        ValueError, "must be less than or equal to max_num_batched_tokens"
-    ):
-      scheduler.SchedulerConfig(
-          max_num_batched_tokens=16,
-          max_num_seqs=8,
-          max_chunked_prefill_length=32,
-      )
 
 
 class PreemptionTest(parameterized.TestCase):
@@ -518,7 +493,7 @@ class ScheduleStepTest(parameterized.TestCase):
   def setUp(self):
     super().setUp()
     self.kv_mgr = _create_kv_cache_manager(page_size=4, num_device_pages=20)
-    self.config = scheduler.SchedulerConfig(
+    self.config = configs.SchedulerConfig(
         max_num_batched_tokens=64,
         max_num_seqs=4,
         max_chunked_prefill_length=16,
@@ -548,7 +523,7 @@ class ScheduleStepTest(parameterized.TestCase):
   def test_schedule_step_chunked_prefill(self):
     # Prompt is 32 tokens, but chunked_prefill_length is 16 and
     # max_num_batched_tokens is 16.
-    small_config = scheduler.SchedulerConfig(
+    small_config = configs.SchedulerConfig(
         max_num_batched_tokens=16,
         max_num_seqs=4,
         max_chunked_prefill_length=16,
@@ -603,7 +578,7 @@ class ScheduleStepTest(parameterized.TestCase):
     self.assertLen(self.sched._running_requests, 4)
 
   def test_token_budget_exhaustion(self):
-    config = scheduler.SchedulerConfig(
+    config = configs.SchedulerConfig(
         max_num_batched_tokens=16,
         max_num_seqs=4,
         max_chunked_prefill_length=16,
@@ -664,7 +639,7 @@ class ColocatedSchedulingTest(parameterized.TestCase):
   def setUp(self):
     super().setUp()
     self.kv_mgr = _create_kv_cache_manager(page_size=4, num_device_pages=20)
-    self.config = scheduler.SchedulerConfig(
+    self.config = configs.SchedulerConfig(
         max_num_batched_tokens=64,
         max_num_seqs=4,
         max_chunked_prefill_length=16,

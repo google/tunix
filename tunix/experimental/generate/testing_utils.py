@@ -16,21 +16,24 @@
 
 from collections.abc import Mapping
 import dataclasses
+from unittest import mock
 
 from flax import nnx
 import jax
+from jax.experimental import shard_map
 import jax.numpy as jnp
+from jax.sharding import PartitionSpec as P
 import numpy as np
+from tunix.common import configs as common_configs
+from tunix.common import datatypes
 from tunix.experimental.generate import engine as engine_lib
-from tunix.experimental.generate import kv_cache_manager as kv_cache_manager_lib
-from tunix.experimental.generate import model_runner as model_runner_lib
 from tunix.experimental.generate import request as request_lib
-from tunix.experimental.generate import scheduler as scheduler_lib
+from tunix.experimental.generate import utils
 
 VOCAB_SIZE = 32
 PAGE_SIZE = 4
 GEOMETRIES = {
-    'layer_0': kv_cache_manager_lib.CacheGeometry(num_kv_heads=1, head_dim=1)
+    'layer_0': datatypes.CacheGeometry(num_kv_heads=1, head_dim=1)
 }
 # One page of one cache: `page_size` slots of a packed K and V float32 value.
 BYTES_PER_PAGE = PAGE_SIZE * 2 * 4
@@ -60,24 +63,60 @@ class PagedSumTransformer(nnx.Module):
       self,
       offset: jax.typing.ArrayLike = 0.0,
       dtype: jax.typing.DTypeLike = jnp.float32,
-      geometries: Mapping[str, kv_cache_manager_lib.CacheGeometry] = GEOMETRIES,
+      geometries: Mapping[str, datatypes.CacheGeometry] = GEOMETRIES,
   ):
     self.config = PagedSumConfig(dtype=dtype)
     self.offset = nnx.Param(jnp.asarray(offset, dtype=dtype))
     self.geometries = dict(geometries)
 
-  def init_kv_cache(
-      self, cache_config: kv_cache_manager_lib.CacheConfig
-  ) -> kv_cache_manager_lib.KVCacheManager:
-    """Builds one cache per entry of `geometries`."""
-    return kv_cache_manager_lib.KVCacheManager(cache_config, self.geometries)
+  def cache_geometries(self) -> dict[str, datatypes.CacheGeometry]:
+    """Returns the geometry of each configured KV cache."""
+    return dict(self.geometries)
 
   def __call__(
       self, tokens, positions, cache, metadata, mesh, logits_idxs=None
   ):
-    del mesh
+    logits, cache = self._forward(tokens, positions, cache, metadata, mesh)
+    if logits_idxs is not None:
+      logits = jnp.take_along_axis(logits, logits_idxs[..., None], axis=1)
+    return logits.reshape(-1, VOCAB_SIZE), cache
+
+  def _forward(self, tokens, positions, cache, metadata, model_mesh):
+    """Returns the `[num_ranks, tokens_per_rank, vocab]` logits and cache."""
+    # As in paged attention, each device runs its DP rank's slice of rows and
+    # tokens against its own pages.
+    dp_axes = utils.kv_cache_dp_axes(model_mesh)
+    cache_specs = {name: P(dp_axes) for name in cache}
+    return shard_map.shard_map(
+        self._run,
+        mesh=model_mesh,
+        in_specs=(
+            P(dp_axes),
+            P(dp_axes),
+            cache_specs,
+            {name: P(dp_axes) for name in metadata.page_indices},
+            P(dp_axes),
+            P(),
+        ),
+        out_specs=(P(dp_axes), cache_specs),
+        check_rep=False,
+    )(
+        tokens,
+        positions,
+        cache,
+        {
+            name: jnp.asarray(table)
+            for name, table in metadata.page_indices.items()
+        },
+        jnp.asarray(metadata.query_lens),
+        self.offset.value,
+    )
+
+  def _run(self, tokens, positions, cache, page_indices, query_lens, offset):
+    """Runs one DP rank's rows, which come first, against its pages."""
+    tokens = jnp.squeeze(tokens, axis=0)
+    positions = jnp.squeeze(positions, axis=0)
     num_tokens = tokens.shape[0]
-    query_lens = jnp.asarray(metadata.query_lens)
     rows = jnp.repeat(
         jnp.arange(len(query_lens)),
         query_lens,
@@ -88,14 +127,14 @@ class PagedSumTransformer(nnx.Module):
     new_cache = {}
     next_tokens = jnp.zeros((num_tokens,), dtype=jnp.int32)
     for name, pages in cache.items():
-      page_table = jnp.asarray(metadata.page_indices[name])
+      page_table = jnp.asarray(page_indices[name])
       num_pages, page_size = pages.shape[:2]
 
       # Padding tokens point past the last page, so their writes are dropped.
       page_ids = jnp.where(
           is_real, page_table[rows, positions // page_size], num_pages
       )
-      values = tokens.astype(pages.dtype) + self.offset.value
+      values = tokens.astype(pages.dtype) + offset
       pages = pages.at[page_ids, positions % page_size, 0, 0, 0].set(
           values, mode='drop'
       )
@@ -112,9 +151,7 @@ class PagedSumTransformer(nnx.Module):
       )
       next_tokens = jnp.mod(jnp.round(total), VOCAB_SIZE).astype(jnp.int32)
 
-    logits = 10.0 * jax.nn.one_hot(next_tokens, VOCAB_SIZE)
-    if logits_idxs is not None:
-      logits = logits[logits_idxs]
+    logits = 10.0 * jax.nn.one_hot(next_tokens[None], VOCAB_SIZE)
     return logits, new_cache
 
 
@@ -158,6 +195,7 @@ def make_engine(
     *,
     max_model_len: int = 24,
     max_device_size_gib: float = 64 * GIB_PER_PAGE,
+    max_host_size_gib: float = 0.0,
     max_num_batched_tokens: int = 32,
     chunked_prefill_length: int = 32,
     num_scheduler_steps: int = 1,
@@ -165,35 +203,57 @@ def make_engine(
     return_logprobs: bool = False,
     return_logits: bool = False,
     eos_token_ids: frozenset[int] = frozenset(),
+    max_num_seqs: int = 4,
+    dp_mesh: jax.sharding.Mesh | None = None,
 ) -> engine_lib.LLMEngine:
-  """Returns an engine running `transformer`, a `PagedSumTransformer` if None."""
-  return engine_lib.LLMEngine(
-      transformer if transformer is not None else PagedSumTransformer(),
-      cache_config=kv_cache_manager_lib.CacheConfig(
-          max_device_size_gib=max_device_size_gib,
-          page_size=PAGE_SIZE,
-          dtype=jnp.float32,
-      ),
-      scheduler_config=scheduler_lib.SchedulerConfig(
-          max_num_batched_tokens=max_num_batched_tokens,
-          max_num_seqs=4,
-          max_chunked_prefill_length=chunked_prefill_length,
-          num_scheduler_steps=num_scheduler_steps,
-      ),
-      model_runner_config=model_runner_lib.ModelRunnerConfig(
-          max_top_k=max_top_k,
-          mesh=mesh(),
-          return_logprobs=return_logprobs,
-          return_logits=return_logits,
-          num_scheduler_steps=num_scheduler_steps,
-      ),
-      max_model_len=max_model_len,
-      eos_token_ids=eos_token_ids,
+  """Returns an engine running `transformer`, a `PagedSumTransformer` if None.
+
+  Args:
+    transformer: The model to run.
+    max_model_len: The engine's maximum sequence length.
+    max_device_size_gib: The KV cache budget of each device.
+    max_host_size_gib: The KV cache budget of the host.
+    max_num_batched_tokens: The token budget of each DP rank.
+    chunked_prefill_length: The longest prefill chunk.
+    num_scheduler_steps: The forward passes of each engine step.
+    max_top_k: The largest `top_k` requests may use.
+    return_logprobs: Whether requests return logprobs.
+    return_logits: Whether requests return logits.
+    eos_token_ids: The tokens that finish a request.
+    max_num_seqs: The sequence budget of each DP rank.
+    dp_mesh: A mesh to split the KV caches into DP ranks over, one per device
+      along its axes. None runs one rank on a single device.
+  """
+  device_mesh = dp_mesh if dp_mesh is not None else mesh()
+  rollout_config = common_configs.RolloutConfig(
+      top_k=max_top_k,
+      eos_tokens=list(eos_token_ids),
+      return_logprobs=return_logprobs,
+      return_logits=return_logits,
+      rollout_vanilla_v2_kv_cache_page_size=PAGE_SIZE,
+      rollout_vanilla_v2_host_size_gib=max_host_size_gib,
+      rollout_vanilla_v2_max_num_seqs=max_num_seqs,
+      rollout_vanilla_v2_max_num_batched_tokens=max_num_batched_tokens,
+      rollout_vanilla_v2_chunked_prefill_length=chunked_prefill_length,
+      rollout_vanilla_v2_num_scheduler_steps=num_scheduler_steps,
   )
+  with mock.patch.object(
+      utils, 'resolve_max_device_size_gib', return_value=max_device_size_gib
+  ):
+    return engine_lib.LLMEngine(
+        transformer if transformer is not None else PagedSumTransformer(),
+        rollout_config=rollout_config,
+        mesh=device_mesh,
+        max_model_len=max_model_len,
+    )
 
 
 def make_request(
-    request_id: str, prompt: list[int], **sampling_kwargs
+    request_id: str,
+    prompt: list[int],
+    *,
+    route_key: int | str | None = None,
+    **sampling_kwargs,
 ) -> request_lib.EngineRequest:
   """Returns a greedy request, generating up to 8 tokens by default."""
   sampling_kwargs.setdefault('max_tokens', 8)
@@ -202,4 +262,5 @@ def make_request(
       request_id=request_id,
       prompt_token_ids=list(prompt),
       sampling_params=request_lib.SamplingParams(**sampling_kwargs),
+      route_key=route_key,
   )

@@ -18,7 +18,6 @@ import atexit
 import concurrent.futures
 import copy
 import dataclasses
-import gc
 from itertools import count
 import os
 import threading
@@ -73,7 +72,8 @@ class VllmConfig:
   # vLLM engine arg related, requires additional processing before passing into engine
   additional_config: Optional[Dict[str, Any]] = None
   enable_dp_attention: bool = False
-  hbm_utilization: float = 0.5
+  # `None` currently falls back to 0.2 (see the TODO in `_vllm_config`).
+  hbm_utilization: Optional[float] = 0.5
   lora_config: Optional[Dict[str, Any]] = None
   mesh: Optional[jax.sharding.Mesh] = None
   data_parallel_size: int = -1
@@ -151,6 +151,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       base_sampler.BaseSampler
   """
 
+  _kv_cache_deleted: bool = False
+
   def __init__(
       self,
       tokenizer: Any,
@@ -188,6 +190,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     self._thread_local = threading.local()
     self._driver: VLLMInProcessDriver | None = None
     self.llm: LLM | None = None
+    self._kv_cache_deleted = False
     self._request_counter = count()
 
     if config.server_mode:
@@ -250,12 +253,15 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     return bool(self._driver is not None and self._driver.is_paused)
 
   def delete_cache(self) -> None:
+    if self._kv_cache_deleted:
+      return
     if self.llm is not None:
       self.llm.reset_prefix_cache()
       self.llm.collective_rpc("delete_kv_cache")  # will free hbm
     elif self._driver is not None:
       self._driver.llm_engine.reset_prefix_cache()
       self._driver.llm_engine.collective_rpc("delete_kv_cache")
+    self._kv_cache_deleted = True
 
   def reset_prefix_cache(self) -> None:
     if self.llm is not None:
@@ -265,8 +271,15 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
   def refresh_state_leaves(self) -> None:
     """Re-reads the runner's state leaves after its params were updated."""
-    self._model_runner.state_leaves = tuple(
-        jax.tree_util.tree_leaves(self._model_runner.state)
+    runner = self._model_runner
+    if hasattr(runner, "refresh_state_leaves"):
+      runner.refresh_state_leaves()
+      return
+    state = runner.state
+    runner.state_leaves = (
+        state
+        if isinstance(state, dict)
+        else tuple(jax.tree_util.tree_leaves(state))
     )
 
   def reinitialize_cache(self) -> None:
@@ -276,6 +289,37 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       self.llm.collective_rpc("reinitialize_kv_cache")
     elif self._driver is not None:
       self._driver.llm_engine.collective_rpc("reinitialize_kv_cache")
+    self._kv_cache_deleted = False
+
+  def release_for_training(
+      self,
+      free_weights: bool = True,
+      src_state: jaxtyping.PyTree | None = None,
+  ) -> None:
+    """Releases rollout HBM (KV cache and optionally model weights) before training."""
+    if self.config.partial_rollout:
+      return
+    if self.config.free_kv_cache_during_weight_sync:
+      self.delete_cache()
+    if (
+        free_weights
+        and self.config.delete_dst_buffers
+        and not self._is_torchax_backend()
+    ):
+      jax.effects_barrier()
+      utils.delete_state_buffers(
+          self.transformer_state,
+          src_state=src_state,
+          key_mappings=self.to_hf_key_mappings or None,
+      )
+      self._model_runner.state_leaves = ()
+
+  def restore_after_training(self) -> None:
+    """Reallocates the KV cache if it was deleted before training."""
+    if self._kv_cache_deleted:
+      self.reinitialize_cache()
+    else:
+      self.refresh_state_leaves()
 
   # TODO(b/434969743): Optimize weight sharing between trainer and vllm sampler.
   def update_params(
@@ -348,7 +392,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           reshard_chunk_size=self.config.reshard_chunk_size,
       )
 
-    if self.config.free_kv_cache_during_weight_sync and not keep_active_kv:
+    if (
+        self.config.free_kv_cache_during_weight_sync or self._kv_cache_deleted
+    ) and not keep_active_kv:
       self.reinitialize_cache()
     else:
       self.refresh_state_leaves()
@@ -395,8 +441,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     runner.model.load_canonical_weights(canonical, runner.state)
 
   def _update_params_jax(self, updated_weights: jaxtyping.PyTree) -> None:
-    """Mapped weight sync into the tpu-inference flax/nnx model state."""
-    utils.transfer_state_with_mappings(
+    """Mapped weight sync into the tpu-inference flax/nnx or flat dict state."""
+    updated_dst = utils.transfer_state_with_mappings(
         src_state=updated_weights,
         dst_state=self.transformer_state,
         key_mappings=self.to_hf_key_mappings,
@@ -417,6 +463,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         ),
         tp_size=self.args.get("tensor_parallel_size", 1),
     )
+    if isinstance(self.transformer_state, dict):
+      # Mutate in place to preserve `runner.state` dict identity for aliases.
+      self.transformer_state.update(updated_dst)
 
   def load_checkpoint(self, path_or_weights: str | jaxtyping.PyTree):
     # TODO(b/434741253): Consider support orbax checkpoint loading
@@ -429,12 +478,22 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     """Setup vllm config from Tunix Vllm config."""
     args = config._processed_engine_kwargs.copy()
 
+    # Skip unused multimodal vision towers by default during text-only RL
+    # rollouts; vLLM only evaluates this option for multimodal checkpoints and
+    # callers can override it via `engine_kwargs={"language_model_only": ...}`.
+    args.setdefault("language_model_only", True)
+
     # Init vLLM model with random weights to speed up bootstrap time, because
     # model weights are synced from trainer later on
     if config.init_with_random_weights:
       args["load_format"] = "dummy"
 
-    args["gpu_memory_utilization"] = config.hbm_utilization
+    # TODO(yatlas): Remove default hbm_utilization once colocated hbm fixes are
+    # landed.
+    if config.hbm_utilization is not None:
+      args["gpu_memory_utilization"] = config.hbm_utilization
+    else:
+      args["gpu_memory_utilization"] = 0.2
 
     if config.return_logprobs:
       args.setdefault("max_logprobs", 1)
@@ -443,7 +502,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     if config.return_routed_experts:
       args["enable_return_routed_experts"] = True
 
-    args["additional_config"] = config.additional_config or {}
+    args["additional_config"] = dict(config.additional_config or {})
 
     if config.lora_config is not None:
       args["additional_config"]["lora_config"] = config.lora_config

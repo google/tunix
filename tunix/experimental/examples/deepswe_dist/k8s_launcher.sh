@@ -60,6 +60,7 @@ export WARMUP_STEPS_FRACTION=${WARMUP_STEPS_FRACTION:-0.0}
 export BETA=${BETA:-0.0}
 export EPSILON=${EPSILON:-0.2}
 export MAX_STALENESS=${MAX_STALENESS:-0}
+export MAX_VERSION_SPAN=${MAX_VERSION_SPAN:-}
 export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-trajectory_completion}
 export TEMPERATURE=${TEMPERATURE:-1.0}
 export TOP_P=${TOP_P:-1.0}
@@ -150,10 +151,19 @@ export TRAINER_MESH_CONTEXT=${TRAINER_MESH_CONTEXT:-1}
 export TRAINER_PADDED_MOE_MLP_DIM=${TRAINER_PADDED_MOE_MLP_DIM:-}
 export ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP:-2}
 export ROLLOUT_MESH_FSDP=${ROLLOUT_MESH_FSDP:-1}
+if [[ -n "${MIN_ROLLOUT_WORKERS:-}" ]]; then
+  echo "Error: MIN_ROLLOUT_WORKERS has been renamed to MIN_ROLLOUT_REPLICAS." >&2
+  exit 1
+fi
 export ROLLOUT_REPLICAS=${ROLLOUT_REPLICAS:-1}
 export ROLLOUT_START_INDEX=${ROLLOUT_START_INDEX:-0}
 export ROLLOUT_COUNT=${ROLLOUT_COUNT:-}
-export MIN_ROLLOUT_WORKERS=${MIN_ROLLOUT_WORKERS:-${ROLLOUT_REPLICAS}}
+export MIN_ROLLOUT_REPLICAS=${MIN_ROLLOUT_REPLICAS:-}
+export ROLLOUT_FAULT_TOLERANCE=${ROLLOUT_FAULT_TOLERANCE:-}
+export MAX_TASK_RETRIES=${MAX_TASK_RETRIES:-}
+export POLL_RETRY_BUDGET_S=${POLL_RETRY_BUDGET_S:-}
+export MIN_ACTIVE_ROLLOUT_RATIO=${MIN_ACTIVE_ROLLOUT_RATIO:-}
+export MIN_ACTIVE_ROLLOUT_GRACE_S=${MIN_ACTIVE_ROLLOUT_GRACE_S:-}
 export ROLLOUT_USE_BATCHED_RPA=${ROLLOUT_USE_BATCHED_RPA:-}
 export ROLLOUT_MAXTEXT_ATTENTION=${ROLLOUT_MAXTEXT_ATTENTION:-}
 export ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING:-}
@@ -424,6 +434,7 @@ start_orchestrator() {
         --mini_batch_size=${MINI_BATCH_SIZE} \
         --num_generations=${NUM_GENERATIONS} \
         --rollout_replicas=${ROLLOUT_REPLICAS} \
+        ${MIN_ROLLOUT_REPLICAS:+--min_rollout_replicas=${MIN_ROLLOUT_REPLICAS}} \
         --max_concurrency=${MAX_CONCURRENCY} \
         --temperature=${TEMPERATURE} \
         --top_p=${TOP_P} \
@@ -445,6 +456,7 @@ start_orchestrator() {
         ${SAMPLER_RS_MAX:+--sampler_rs_max=${SAMPLER_RS_MAX}} \
         ${SEQ_LOGPROB_ERROR_THRESHOLD:+--seq_logprob_error_threshold=${SEQ_LOGPROB_ERROR_THRESHOLD}} \
         --max_staleness=${MAX_STALENESS} \
+        ${MAX_VERSION_SPAN:+--max_version_span=${MAX_VERSION_SPAN}} \
         --trajectory_group_order=${TRAJECTORY_GROUP_ORDER} \
         --dataset_name=${DATASET_NAME} \
         --dataset_split=${DATASET_SPLIT} \
@@ -463,6 +475,11 @@ start_orchestrator() {
         --wandb_run_name=\"${WANDB_RUN_NAME}\" \
         --weight_sync_mode=${WEIGHT_SYNC_MODE} \
         --trainer_precompile=${TRAINER_PRECOMPILE} \
+        ${ROLLOUT_FAULT_TOLERANCE:+--rollout_fault_tolerance=${ROLLOUT_FAULT_TOLERANCE}} \
+        ${MAX_TASK_RETRIES:+--max_task_retries=${MAX_TASK_RETRIES}} \
+        ${POLL_RETRY_BUDGET_S:+--poll_retry_budget_s=${POLL_RETRY_BUDGET_S}} \
+        ${MIN_ACTIVE_ROLLOUT_RATIO:+--min_active_rollout_ratio=${MIN_ACTIVE_ROLLOUT_RATIO}} \
+        ${MIN_ACTIVE_ROLLOUT_GRACE_S:+--min_active_rollout_grace_s=${MIN_ACTIVE_ROLLOUT_GRACE_S}} \
         --return_routed_experts=${RETURN_ROUTED_EXPERTS} \
         --routed_experts_encode_mode=${ROUTED_EXPERTS_ENCODE_MODE} \
         ${ROUTED_EXPERTS_NUM_EXPERTS:+--routed_experts_num_experts=${ROUTED_EXPERTS_NUM_EXPERTS}} \

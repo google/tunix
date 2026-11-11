@@ -269,7 +269,6 @@ rollout_config:
 ############################### Other RL  Config ###############################
 
 rollout_engine: "vanilla"
-sglang_jax_config: {}
 vllm_config: {}
 
 offload_to_cpu: false

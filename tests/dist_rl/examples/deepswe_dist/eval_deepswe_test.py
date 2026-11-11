@@ -59,7 +59,6 @@ class EvalDeepSWETest(unittest.TestCase):
         "temperature": 0.0,
         "return_logprobs": False,
     })
-    self.assertFalse(request["metadata"]["exact_token_continuity"])
     self.assertTrue(request["metadata"]["record_episode_summary"])
     self.assertEqual(request["metadata"]["env_config"]["entry"], entry)
 

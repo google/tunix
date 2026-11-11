@@ -15,7 +15,7 @@
 """Simple utils used by SFT."""
 
 import collections
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 import contextlib
 import functools
 import gc
@@ -29,6 +29,15 @@ import humanize
 import jax
 import jax.numpy as jnp
 import numpy as np
+# Registers the dist_rl trainer payloads as JAX pytrees. This module is the one
+# Tunix module every JAX training engine imports (Tunix's own trainers and
+# MaxText's `training_engine`, which takes `LossOutput` / `WeightedMetric` from
+# here), so importing the registration from it guarantees payloads are pytrees
+# in any JAX trainer process without each engine importing it explicitly.
+# TODO(tsbao): Once MaxText can depend on a Tunix release that ships
+# `tunix.dist_rl.train.jax_pytrees`, have the engines import it directly and
+# drop this hook (`sft` should not depend on `dist_rl`).
+from tunix.dist_rl.train import jax_pytrees  # pylint: disable=unused-import
 from tunix.oss import utils as google_utils
 
 
@@ -132,20 +141,21 @@ def _pathways_hbm_usage_gb(devices: Any) -> List[Tuple[float, Optional[float]]]:
   return [(hbm_used[device], hbm_limit) for device in devices]
 
 
-def _jax_hbm_usage_gb(devices: Any) -> List[Tuple[float, float]]:
-  """Returns the HBM usage for each device when using JAX."""
-  hbm_used = []
+def _jax_hbm_usage_gb(devices: Sequence[jax.Device]) -> list[tuple[int, int]]:
+  """Returns the HBM/VRAM usage in bytes for each accelerator device."""
+  hbm_used: list[tuple[int, int]] = []
   for device in devices:
     if device.platform == "cpu":
       logging.warning(
-          "Skipping non-TPU device: %s. You might be missing jax[tpu]"
-          " dependency.",
+          "Skipping CPU device (no HBM/VRAM memory_stats): %s.",
           device.platform,
       )
       return []
     stats = device.memory_stats()
-    used = stats["bytes_in_use"]
-    limit = stats["bytes_limit"]
+    if stats is None:
+      return []
+    used = int(stats["bytes_in_use"])
+    limit = int(stats["bytes_limit"])
     hbm_used.append((used, limit))
   return hbm_used
 
@@ -174,11 +184,12 @@ def show_hbm_usage(title=""):
     hbm_stats = _jax_hbm_usage_gb(devices)
 
     for i, (used, limit) in enumerate(hbm_stats):
+      pct_str = f"{100.0 * used / limit:.1f}%" if limit > 0 else "N/A"
       logging.info(
           "Using %s / %s (%s) on %s",
           fmt_size(used),
           fmt_size(limit),
-          used / limit,
+          pct_str,
           devices[i],
       )
 
@@ -231,10 +242,10 @@ _WEIGHTED_METRIC_FIELDS = ("unreduced_sum", "denominator", "eps", "min_denom")
 def is_weighted_metric(value: Any) -> bool:
   """Structurally identifies an unreduced weighted metric.
 
-  `tunix.dist_rl.metrics.WeightedMetric` mirrors `WeightedMetric` field for
-  field without inheriting from it, so reducers have to accept both. Matching on
-  the fields rather than the type covers either one without `sft.utils` taking a
-  dependency on `dist_rl`.
+  The wire contract for weighted metrics is structural
+  (`tunix.dist_rl.common.datatypes.WeightedMetricLike`): any object carrying
+  these fields reduces the same way, whichever framework produced it. Matching
+  on the fields rather than on `WeightedMetric` honours that contract.
 
   Args:
     value: Candidate metric value to inspect.

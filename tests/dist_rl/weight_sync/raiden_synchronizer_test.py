@@ -90,6 +90,10 @@ class _ProxyDevice:
   platform = "proxy"
 
 
+class _PathwaysDevice:
+  platform = "pathways"
+
+
 class _ProxyArray:
   """Array-like leaf living on a proxy device; must be dropped."""
 
@@ -99,6 +103,20 @@ class _ProxyArray:
 
   def devices(self):
     return {_ProxyDevice()}
+
+  def block_until_ready(self):
+    return self
+
+
+class _PathwaysArray:
+  """Array-like leaf living on a Pathways device."""
+
+  shape = (2,)
+  dtype = np.dtype(np.float32)
+  ndim = 1
+
+  def devices(self):
+    return {_PathwaysDevice()}
 
   def block_until_ready(self):
     return self
@@ -217,11 +235,11 @@ class RaidenSynchronizerTest(absltest.TestCase):
 
   def test_census_keeps_proxy_platforms_for_ffi(self):
     names, _ = raiden_synchronizer._filter_bindable(
-        ["good", "proxy"],
-        [_FakeBindableArray(), _ProxyArray()],
+        ["good", "proxy", "pathways"],
+        [_FakeBindableArray(), _ProxyArray(), _PathwaysArray()],
         allow_proxy=True,
     )
-    self.assertEqual(names, ["good", "proxy"])
+    self.assertEqual(names, ["good", "proxy", "pathways"])
 
   def test_census_keeps_bfloat16_weights(self):
     names, _ = raiden_synchronizer._filter_bindable(
@@ -352,7 +370,41 @@ class RaidenSynchronizerTest(absltest.TestCase):
       sync = raiden_synchronizer.RaidenSynchronizer("trainer")
     self.assertTrue(sync._is_proxy)
 
+  def test_enables_ffi_from_raiden_use_ffi_env(self):
+    with mock.patch.dict(
+        "os.environ",
+        {"RAIDEN_USE_FFI": "  ", "USE_RAIDEN_FFI": "1"},
+        clear=True,
+    ):
+      sync = raiden_synchronizer.RaidenSynchronizer("trainer")
+    self.assertTrue(sync._is_proxy)
+
+  def test_raiden_use_ffi_zero_overrides_proxy_env(self):
+    with mock.patch.dict(
+        "os.environ",
+        {"RAIDEN_USE_FFI": "0", "JAX_PLATFORMS": "proxy,cpu"},
+        clear=True,
+    ):
+      sync = raiden_synchronizer.RaidenSynchronizer("rollout")
+    self.assertFalse(sync._is_proxy)
+
+  def test_enables_ffi_from_jax_config_pathways(self):
+    prev = jax.config.jax_platforms
+    self.addCleanup(jax.config.update, "jax_platforms", prev)
+    jax.config.update("jax_platforms", "pathways")
+    with mock.patch.dict("os.environ", {}, clear=True):
+      sync = raiden_synchronizer.RaidenSynchronizer("trainer")
+    self.assertTrue(sync._is_proxy)
+
+  def test_rejects_invalid_raiden_use_ffi_env(self):
+    with mock.patch.dict("os.environ", {"RAIDEN_USE_FFI": "maybe"}, clear=True):
+      with self.assertRaisesRegex(ValueError, "Unsupported RAIDEN_USE_FFI"):
+        raiden_synchronizer.RaidenSynchronizer("trainer")
+
   def test_defaults_to_non_ffi_without_proxy(self):
+    prev = jax.config.jax_platforms
+    self.addCleanup(jax.config.update, "jax_platforms", prev)
+    jax.config.update("jax_platforms", None)
     with mock.patch.dict("os.environ", {}, clear=True):
       sync = raiden_synchronizer.RaidenSynchronizer("trainer")
     self.assertFalse(sync._is_proxy)

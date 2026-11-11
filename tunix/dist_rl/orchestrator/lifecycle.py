@@ -16,16 +16,20 @@
 
 Sequences the worker lifecycle (`initialize` -> `compile` -> `start`) across an
 entire registry, phase by phase, so every worker finishes one phase before the
-next begins (e.g. all compiles happen before any worker starts serving).
-Shutdown is best-effort: every worker gets a `stop()` even if an earlier one
-raised, and the collected failures are reported together.
+next begins (e.g. all compiles happen before any worker starts serving). Also
+drives background bring-up (`REGISTERED` -> `PENDING_WEIGHT_SYNC` or `ACTIVE`)
+for late-joining rollout workers. Shutdown closes registration, stops background
+bring-up, unregisters late-joining workers still in `REGISTERED`, and runs
+best-effort `stop()` across every remaining worker.
 """
 
 from collections.abc import Callable, Sequence
 import concurrent.futures
-import logging
+import threading
+import time
 from typing import Any
 
+from absl import logging
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.orchestrator import worker_registry
 from tunix.dist_rl.worker import remote_execution
@@ -56,34 +60,42 @@ class LifecycleDriver:
       max_workers: int = 32,
       verify_fn: Callable[[Sequence[datatypes.WorkerInfo]], None] | None = None,
   ):
+    """Initializes the driver.
+
+    Args:
+      registry: Registry whose workers are brought up and shut down.
+      max_workers: Maximum number of concurrent lifecycle RPCs.
+      verify_fn: Optional check run on the brought-up workers' `WorkerInfo`s
+        after `initialize` and before `compile`; raises to abort bring-up.
+    """
     self._registry = registry
     self._max_workers = max_workers
     self._verify_fn = verify_fn
+    self._late_lock = threading.Lock()
+    self._late_executor: concurrent.futures.ThreadPoolExecutor | None = None
+    self._reconciler_thread: threading.Thread | None = None
+    self._bring_up_failures_total = 0
 
-  def bring_up(
+  @property
+  def bring_up_failures_total(self) -> int:
+    """Number of late or rejoined rollout workers that failed bring-up."""
+    with self._late_lock:
+      return self._bring_up_failures_total
+
+  def _run_bring_up_phases(
       self,
+      resolved_targets: Sequence[
+          tuple[datatypes.WorkerInfo, remote_execution.ActorHandle]
+      ],
       dummy_data: Any = None,
   ) -> None:
-    """Runs initialize -> verify -> compile -> start across workers, phase by phase.
-
-    Each phase runs across all target workers before the next phase begins. If
-    any worker raises an exception during a phase, the exception is re-raised
-    after all workers have attempted the phase, preventing subsequent phases
-    from running.
-
-    Args:
-      dummy_data: Dummy data each worker uses to synthesize warmup dummies.
-
-    Raises:
-      RuntimeError: If a target worker was unregistered or re-registered with a
-        different handle during bring-up.
-    """
-    resolved_targets = self._registry.targets()
+    """Runs initialize -> verify -> compile -> start, phase by phase."""
 
     def _init_worker(
         target: tuple[datatypes.WorkerInfo, remote_execution.ActorHandle],
     ) -> None:
       info, handle = target
+      t0 = time.monotonic()
       resp = handle.submit("initialize")
       metadata = {
           k: resp.metadata[k] for k in _INIT_METADATA_KEYS if k in resp.metadata
@@ -95,48 +107,267 @@ class LifecycleDriver:
             f"worker {info.worker_id!r} was unregistered or re-registered"
             " with a different handle during bring-up"
         )
+      logging.info(
+          "Lifecycle bring-up: worker %r finished initialize in %.2fs.",
+          info.worker_id,
+          time.monotonic() - t0,
+      )
 
+    worker_ids = [info.worker_id for info, _ in resolved_targets]
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=self._max_workers
     ) as pool:
       # TODO(noghabi): Refactor to allow successful workers to proceed to
       # compile/start and potentially retry failed ones, rather than fail-fast
       # on the first error.
+      if worker_ids:
+        logging.info(
+            "Lifecycle bring-up: starting initialize for %s.", worker_ids
+        )
       list(pool.map(_init_worker, resolved_targets))
       if self._verify_fn is not None:
         self._verify_fn([info for info, _ in resolved_targets])
+      t_compile = time.monotonic()
+      if worker_ids:
+        logging.info("Lifecycle bring-up: starting compile for %s.", worker_ids)
       list(
           pool.map(
               lambda target: target[1].submit("compile", dummy_data),
               resolved_targets,
           )
       )
+      if worker_ids:
+        logging.info(
+            "Lifecycle bring-up: finished compile for %s in %.2fs.",
+            worker_ids,
+            time.monotonic() - t_compile,
+        )
+      t_start = time.monotonic()
+      if worker_ids:
+        logging.info("Lifecycle bring-up: starting start for %s.", worker_ids)
       list(
           pool.map(
               lambda target: target[1].submit("start"),
               resolved_targets,
           )
       )
+      if worker_ids:
+        logging.info(
+            "Lifecycle bring-up: finished start for %s in %.2fs.",
+            worker_ids,
+            time.monotonic() - t_start,
+        )
 
-  def shutdown(self) -> None:
-    """Stops every worker best-effort, then raises if any stop() failed."""
+  def bring_up(
+      self,
+      dummy_data: Any = None,
+  ) -> None:
+    """Runs initialize -> verify -> compile -> start across workers, phase by phase.
+
+    Brings up all currently `REGISTERED` workers and promotes them to `ACTIVE`
+    on completion. Each phase runs across all target workers before the next
+    phase begins. If any worker raises an exception during a phase, the
+    exception is re-raised after all workers have attempted the phase,
+    preventing subsequent phases from running.
+
+    Args:
+      dummy_data: Dummy data each worker uses to synthesize warmup dummies.
+
+    Raises:
+      RuntimeError: If a target worker was unregistered or re-registered with a
+        different handle during bring-up.
+    """
+    targets = self._registry.targets(
+        statuses=(worker_registry.AdmissionStatus.REGISTERED,)
+    )
+    self._run_bring_up_phases(targets, dummy_data)
+    for info, handle in targets:
+      if not self._registry.set_status(
+          info.worker_id,
+          worker_registry.AdmissionStatus.ACTIVE,
+          expected_handle=handle,
+          expected_status=worker_registry.AdmissionStatus.REGISTERED,
+      ):
+        raise RuntimeError(
+            f"worker {info.worker_id!r} was unregistered or re-registered"
+            " with a different handle during bring-up"
+        )
+
+  def enable_late_registration(
+      self,
+      *,
+      require_weight_sync: bool = True,
+  ) -> None:
+    """Starts the background reconciler for late-registering rollout workers.
+
+    Only `Role.ROLLOUT` workers may register after initial cluster bring-up, and
+    `RolloutWorker.compile` ignores `dummy_data`. If late-registering workers
+    ever require warmup data, inject a per-role provider (e.g.
+    `warmup_data_fn(info) -> Any`) rather than caching the initial bring-up
+    `dummy_data`.
+
+    Args:
+      require_weight_sync: If True (default), late rollout workers transition to
+        `PENDING_WEIGHT_SYNC` after bring-up and await weight sync promotion. If
+        False (e.g. `weight_sync_mode in (None, "none")`), late rollout workers
+        transition directly to `ACTIVE`.
+    """
+    with self._late_lock:
+      # Checked under `_late_lock` so a concurrent `shutdown()` cannot finish
+      # between this check and starting the reconciler.
+      if self._registry.is_closed or self._reconciler_thread is not None:
+        return
+      self._late_executor = concurrent.futures.ThreadPoolExecutor(
+          max_workers=self._max_workers,
+          thread_name_prefix="late-rollout-bringup",
+      )
+      target_status = (
+          worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC
+          if require_weight_sync
+          else worker_registry.AdmissionStatus.ACTIVE
+      )
+      self._reconciler_thread = threading.Thread(
+          target=self._reconcile_loop,
+          args=(target_status,),
+          name="late-rollout-reconciler",
+          daemon=True,
+      )
+      self._reconciler_thread.start()
+
+  def _reconcile_loop(
+      self, target_status: worker_registry.AdmissionStatus
+  ) -> None:
+    """Watches `WorkerRegistry` for `REGISTERED` workers and brings them up."""
+    rollout_roles = frozenset({datatypes.Role.ROLLOUT.value})
+    # Handles already submitted to `_late_executor`. Owned by this thread only.
+    # A dispatched worker stays `REGISTERED` until its bring-up finishes, so
+    # pruning against the current `REGISTERED` snapshot drops exactly the
+    # finished ones (promoted, unregistered, or displaced).
+    dispatched: set[remote_execution.ActorHandle] = set()
+    while registered := self._registry.wait_for_registered(exclude=dispatched):
+      dispatched.intersection_update(handle for _, handle in registered)
+      for info, handle in registered:
+        if handle in dispatched:
+          continue
+        # TODO(linchai): Support late registration and background bring-up for
+        # non-rollout roles (e.g. trainer/reference) once role-specific warmup
+        # data providers and checkpoint recovery are wired up.
+        if info.roles != rollout_roles:
+          logging.warning(
+              "Rejecting late registration for worker %r with non-rollout"
+              " roles %s; only %r is permitted after initial bring-up.",
+              info.worker_id,
+              sorted(info.roles),
+              datatypes.Role.ROLLOUT.value,
+          )
+          self._registry.unregister_handle(handle)
+          continue
+        with self._late_lock:
+          # `shutdown()` cleared the executor; it unregisters all remaining
+          # `REGISTERED` workers after joining this thread.
+          if self._late_executor is None:
+            return
+          self._late_executor.submit(
+              self._bring_up_late_worker, info, handle, target_status
+          )
+          dispatched.add(handle)
+
+  def _bring_up_late_worker(
+      self,
+      info: datatypes.WorkerInfo,
+      handle: remote_execution.ActorHandle,
+      target_status: worker_registry.AdmissionStatus,
+  ) -> None:
+    """Brings up a late rollout worker and promotes it to `target_status`."""
+    worker_id = info.worker_id
+    if self._registry.is_closed:
+      self._registry.unregister_handle(handle)
+      return
+    try:
+      self._run_bring_up_phases([(info, handle)])
+      if self._registry.set_status(
+          worker_id,
+          target_status,
+          expected_handle=handle,
+          expected_status=worker_registry.AdmissionStatus.REGISTERED,
+      ):
+        logging.info(
+            "Late rollout worker %r finished bring-up and entered status %s.",
+            worker_id,
+            target_status.value,
+        )
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+      if self._registry.unregister_handle(handle) is not None:
+        with self._late_lock:
+          self._bring_up_failures_total += 1
+        logging.warning(
+            "Late rollout worker %r failed background bring-up; unregistering:"
+            " %s",
+            worker_id,
+            exc,
+        )
+
+  # TODO(b/577214994): Add `stop_workers: bool = True` (also on
+  # `ClusterOrchestrator.shutdown()`) so `stop_workers_on_exit=False` callers
+  # still close registration, the late bring-up executor, and local handles
+  # without sending `stop` to remote workers.
+  def shutdown(self, *, abort: bool = False) -> None:
+    """Closes registration, stops late bring-up tasks, and stops all workers.
+
+    Args:
+      abort: Whether this is an abnormal teardown (an unrecoverable error or
+        preemption). If True, passes `abort=True` to each worker's `stop` RPC;
+        see `Worker.stop`.
+
+    Raises:
+      LifecycleError: If stopping any worker fails.
+    """
+    self._registry.close_registration()
+    with self._late_lock:
+      reconciler = self._reconciler_thread
+      executor = self._late_executor
+      self._late_executor = None
+    if reconciler is not None and reconciler is not threading.current_thread():
+      reconciler.join()
+    if executor is not None:
+      # Registration is closed, so no new `REGISTERED` workers can appear. Close
+      # their handles before waiting on the background executor so in-flight
+      # initialize/compile/start RPCs abort immediately and queued futures that
+      # get cancelled still have their handles closed.
+      for _, handle in self._registry.targets(
+          statuses=(worker_registry.AdmissionStatus.REGISTERED,)
+      ):
+        self._registry.unregister_handle(handle)
+      executor.shutdown(wait=True, cancel_futures=True)
+
     failures: list[tuple[str, BaseException]] = []
-    worker_ids = self._registry.worker_ids()
+    targets = self._registry.targets(statuses=None)
+    # Only pass `abort` when set, so a clean shutdown sends the same `stop` RPC
+    # as before (older workers and test doubles take no `abort` argument).
+    stop_kwargs = {"abort": True} if abort else {}
 
-    def _stop_worker(wid: str) -> None:
+    def _stop_worker(
+        info: datatypes.WorkerInfo, handle: remote_execution.ActorHandle
+    ) -> None:
+      wid = info.worker_id
       try:
-        handle = self._registry.handle(wid)
+        current_handle = self._registry.handle(wid)
       except KeyError:
+        current_handle = None
+      if current_handle is not handle:
         logging.warning(
             "Worker %r unregistered concurrently, nothing to stop.", wid
         )
-        return  # Worker unregistered concurrently, nothing to stop.
-      handle.submit("stop")
+        return
+      handle.submit("stop", **stop_kwargs)
 
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=self._max_workers
     ) as pool:
-      futures = {pool.submit(_stop_worker, wid): wid for wid in worker_ids}
+      futures = {
+          pool.submit(_stop_worker, info, handle): info.worker_id
+          for info, handle in targets
+      }
       for future in concurrent.futures.as_completed(futures):
         wid = futures[future]
         try:

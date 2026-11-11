@@ -28,6 +28,15 @@ class WorkloadConfig:
       default=20000,
       metadata={"help": "Character length of step message payload (~20KB)."},
   )
+  metrics_updates_per_trajectory: int = dataclasses.field(
+      default=0,
+      metadata={
+          "help": (
+              "Number of TrajectoryMetrics updates written per trajectory (0"
+              " disables metrics writes and validation)."
+          )
+      },
+  )
   num_workers: int = dataclasses.field(
       default=1,
       metadata={
@@ -69,6 +78,8 @@ class WorkloadConfig:
       raise ValueError("steps_per_trajectory must be > 0.")
     if self.step_payload_chars <= 0:
       raise ValueError("step_payload_chars must be > 0.")
+    if self.metrics_updates_per_trajectory < 0:
+      raise ValueError("metrics_updates_per_trajectory must be >= 0.")
     if self.num_workers <= 0:
       raise ValueError("num_workers must be > 0.")
 

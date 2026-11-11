@@ -22,7 +22,6 @@ from unittest import mock
 import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.distillation import on_policy
-from tunix.dist_rl.orchestrator import algorithm_adapter
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.orchestrator import rl_program
 from tunix.rl import algorithm_config
@@ -51,7 +50,7 @@ def _group(rewards=(0.0, 0.0), *, second_valid=True):
                     {"role": "user", "content": "question"},
                     {"role": "assistant", "content": "answer"},
                 ],
-                "policy_version": 0,
+                "policy_versions": [0],
             },
         )
     )
@@ -95,13 +94,7 @@ class OPDProgramTest(unittest.IsolatedAsyncioTestCase):
         reward_mode="env",
     )
     options.update(algorithm_options or {})
-    adapter = algorithm_adapter.GRPOAdapter(
-        algo_config=algorithm_config.GRPOConfig(**options),
-        mini_batch_size=1,
-        train_micro_batch_size=2,
-        max_packed_len=16,
-        max_response_length=4,
-    )
+    adapter = algorithm_config.GRPOConfig(**options)
     if packed:
       assembler = batch_assembly.SequencePackedBatchAssembler(
           batch_size=1,
@@ -120,7 +113,10 @@ class OPDProgramTest(unittest.IsolatedAsyncioTestCase):
       )
     with mock.patch.object(rl_program, "MetricsLogger"):
       program = rl_program.StandardRLProgram(
-          algo=adapter,
+          algo_config=adapter,
+          batch_config=batch_assembly.BatchConfig(
+              mini_batch_size=1, train_micro_batch_size=2, max_response_length=4
+          ),
           assembler=assembler,
           generation_args=generation_args
           or datatypes.GenerationArgs(temperature=1.0, top_p=1.0, top_k=0),
@@ -332,7 +328,6 @@ class OPDProgramTest(unittest.IsolatedAsyncioTestCase):
             )
         },
         {"algorithm_options": {"use_rollout_logps": False}},
-        {"algorithm_options": {"exact_token_continuity": False}},
         {"max_staleness": 1},
         {"sync_weights": False},
         {"num_generations": 1},
@@ -524,10 +519,10 @@ class OPDProgramTest(unittest.IsolatedAsyncioTestCase):
     with self.assertRaises(ValueError):
       self._program(opd_config=on_policy.OnPolicyDistillationConfig())
 
-  def test_rejects_non_grpo_adapter(self):
+  def test_rejects_non_grpo_config(self):
     with self.assertRaises(ValueError):
       rl_program.StandardRLProgram(
-          algo=algorithm_adapter.PPOAdapter(num_generations=2),
+          algo_config=algorithm_config.PPOConfig(num_generations=2),
           generation_args=datatypes.GenerationArgs(
               temperature=1.0, top_p=1.0, top_k=0
           ),

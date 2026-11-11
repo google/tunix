@@ -23,45 +23,63 @@ def _rollout_lineage(
     finish_s: float,
     worker_id: str = "rollout-0",
     *,
+    received_s: float | None = None,
     execution_time_s: float | None = None,
     batch_idx: int | None = None,
+    task_name: str = "",
 ) -> lineage.LineageContext:
-  """Lineage as a rollout carries it back: dispatched, then finished."""
+  """Lineage a rollout carries back: dispatched, received, then finished."""
   dispatch_attrs = {}
   if batch_idx is not None:
     dispatch_attrs["batch_idx"] = batch_idx
   finish_attrs: dict[str, float | str] = {"worker_id": worker_id}
   if execution_time_s is not None:
     finish_attrs["execution_time_s"] = execution_time_s
+  events = [
+      lineage.LineageEvent(
+          component="engine.dispatch",
+          operation="rollout",
+          timestamp_s=dispatch_s,
+          attributes=dispatch_attrs,
+      ),
+  ]
+  if received_s is not None:
+    events.append(
+        lineage.LineageEvent(
+            component="worker.received",
+            operation="generate",
+            timestamp_s=received_s,
+            attributes={"worker_id": worker_id},
+        )
+    )
+  events.append(
+      lineage.LineageEvent(
+          component="worker.rollout",
+          operation="generate",
+          timestamp_s=finish_s,
+          attributes=finish_attrs,
+      )
+  )
   return lineage.LineageContext(
       tracking_id="traj",
-      events=[
-          lineage.LineageEvent(
-              component="engine.dispatch",
-              operation="rollout",
-              timestamp_s=dispatch_s,
-              attributes=dispatch_attrs,
-          ),
-          lineage.LineageEvent(
-              component="worker.rollout",
-              operation="generate",
-              timestamp_s=finish_s,
-              attributes=finish_attrs,
-          ),
-      ],
+      task_name=task_name,
+      events=events,
   )
 
 
 def _health_item(
     group_index=0,
     *,
+    prompt_id="p0",
     status=datatypes.TrajectoryStatus.SUCCEEDED,
     num_turns=None,
     turn_lengths=None,
     window=None,
+    received_time_s=None,
     worker_id="rollout-0",
     execution_time_s=None,
     batch_idx=None,
+    task_name="",
     env_time=None,
     reward_time=None,
 ):
@@ -85,11 +103,13 @@ def _health_item(
     metadata["lineage"] = _rollout_lineage(
         *window,
         worker_id=worker_id,
+        received_s=received_time_s,
         execution_time_s=execution_time_s,
         batch_idx=batch_idx,
+        task_name=task_name,
     )
   return datatypes.TrajectoryItem(
-      prompt_id="p0", group_index=group_index, traj=traj, metadata=metadata
+      prompt_id=prompt_id, group_index=group_index, traj=traj, metadata=metadata
   )
 
 
@@ -109,6 +129,7 @@ class RolloutFactsTest(absltest.TestCase):
             turn_lengths=[5, 57344],
             window=(100.0, 130.0),
             worker_id="w1",
+            task_name="gsm8k",
         )
     )
 
@@ -116,6 +137,7 @@ class RolloutFactsTest(absltest.TestCase):
     self.assertEqual(facts.status, "MAX_CONTEXT_LIMIT_REACHED")
     self.assertEqual(facts.num_turns, 2)
     self.assertEqual(facts.turn_lengths, [5, 57344])
+    self.assertEqual(facts.task_name, "gsm8k")
     self.assertEqual(
         facts.window,
         step_telemetry.RolloutWindow(
@@ -132,6 +154,7 @@ class RolloutFactsTest(absltest.TestCase):
     self.assertIsNone(facts.num_turns)
     self.assertIsNone(facts.turn_lengths)
     self.assertIsNone(facts.window)
+    self.assertEqual(facts.task_name, "")
 
   def test_rollout_without_status_raises(self):
     # `critique_stage` stamps every scored rollout's status, so a missing one
@@ -165,7 +188,7 @@ class RolloutHealthTest(absltest.TestCase):
     )
 
     self.assertEqual(health.metrics["rollout/status/succeeded_frac"], 0.75)
-    self.assertEqual(health.metrics["rollout/success_rate"], 0.75)
+    self.assertNotIn("rollout/success_rate", health.metrics)
     self.assertEqual(
         health.metrics["rollout/status/max_context_limit_reached_frac"], 0.25
     )
@@ -242,7 +265,7 @@ class RolloutHealthTest(absltest.TestCase):
     self.assertEqual(health.metrics["rollout/tail_sec"], 15.0)
     self.assertEqual(health.metrics["rollout/batch_wall_sec"], 50.0)
 
-  def test_separates_worker_execution_from_queue_wait_and_logs_env_reward_time(
+  def test_separates_worker_execution_from_queue_wait_and_logs_env_time(
       self,
   ):
     health = step_telemetry.rollout_health(
@@ -250,6 +273,7 @@ class RolloutHealthTest(absltest.TestCase):
             _health_item(
                 0,
                 window=(100.0, 130.0),
+                received_time_s=105.0,
                 execution_time_s=10.0,
                 env_time={
                     "reset_latency": 1.0,
@@ -261,6 +285,7 @@ class RolloutHealthTest(absltest.TestCase):
             _health_item(
                 1,
                 window=(100.0, 150.0),
+                received_time_s=120.0,
                 execution_time_s=20.0,
                 env_time={
                     "reset_latency": 1.5,
@@ -272,26 +297,156 @@ class RolloutHealthTest(absltest.TestCase):
         )
     )
 
+    self.assertEqual(health.metrics["rollout/dispatch_delay_sec/p50"], 12.5)
+    self.assertEqual(health.metrics["rollout/dispatch_delay_sec/max"], 20.0)
     self.assertEqual(health.metrics["rollout/execution_sec/p50"], 15.0)
     self.assertEqual(health.metrics["rollout/execution_sec/max"], 20.0)
-    # Total durations are 30s and 50s; execution times are 10s and 20s, so
-    # queue wait times are 20s and 30s.
     self.assertEqual(health.metrics["rollout/queue_wait_sec/p50"], 25.0)
     self.assertEqual(health.metrics["rollout/queue_wait_sec/max"], 30.0)
+    # Item 0: finish=130, received=105, exec=10 -> worker_queue_wait=15s.
+    # Item 1: finish=150, received=120, exec=20 -> worker_queue_wait=10s.
+    self.assertEqual(health.metrics["rollout/worker_queue_wait_sec/p50"], 12.5)
+    self.assertEqual(health.metrics["rollout/worker_queue_wait_sec/max"], 15.0)
     self.assertEqual(health.metrics["rollout/env_time_sec/mean"], 6.5)
-    self.assertEqual(health.metrics["rollout/reward_time_sec/mean"], 0.5)
+    # `reward_time` on the trajectory is not reported as a rollout metric.
+    self.assertFalse(
+        any(k.startswith("rollout/reward_time_sec") for k in health.metrics)
+    )
+
+  def test_rerouted_rollout_uses_latest_worker_received_and_isolates_queue_wait(
+      self,
+  ):
+    item = _health_item(0)
+    item.metadata["lineage"] = lineage.LineageContext(
+        tracking_id="traj_p0_g0",
+        events=[
+            lineage.LineageEvent(
+                component="engine.dispatch",
+                operation="rollout",
+                timestamp_s=100.0,
+            ),
+            lineage.LineageEvent(
+                component="worker.received",
+                operation="generate",
+                timestamp_s=101.0,
+                attributes={"worker_id": "dead-worker"},
+            ),
+            lineage.LineageEvent(
+                component="worker.received",
+                operation="generate",
+                timestamp_s=110.0,
+                attributes={"worker_id": "winning-worker"},
+            ),
+            lineage.LineageEvent(
+                component="worker.received",
+                operation="generate",
+                timestamp_s=140.0,
+                attributes={"worker_id": "winning-worker"},
+            ),
+            lineage.LineageEvent(
+                component="worker.rollout",
+                operation="generate",
+                timestamp_s=165.0,
+                attributes={
+                    "worker_id": "winning-worker",
+                    "execution_time_s": 20.0,
+                },
+            ),
+        ],
+    )
+
+    facts = step_telemetry.RolloutFacts.of(item)
+    self.assertIsNotNone(facts.window)
+    self.assertEqual(facts.window.received_time_s, 140.0)
+    self.assertEqual(facts.window.worker_id, "winning-worker")
+
+    health = step_telemetry.rollout_health([facts])
+    self.assertEqual(health.metrics["rollout/duration_sec/max"], 65.0)
+    self.assertEqual(health.metrics["rollout/dispatch_delay_sec/max"], 40.0)
+    self.assertEqual(health.metrics["rollout/execution_sec/max"], 20.0)
+    self.assertEqual(health.metrics["rollout/queue_wait_sec/max"], 45.0)
+    self.assertEqual(health.metrics["rollout/worker_queue_wait_sec/max"], 5.0)
+
+  def test_ignores_worker_received_from_different_worker_id(self):
+    item = _health_item(0)
+    item.metadata["lineage"] = lineage.LineageContext(
+        tracking_id="traj_p0_g0",
+        events=[
+            lineage.LineageEvent(
+                component="engine.dispatch",
+                operation="rollout",
+                timestamp_s=100.0,
+            ),
+            lineage.LineageEvent(
+                component="worker.received",
+                operation="generate",
+                timestamp_s=101.0,
+                attributes={"worker_id": "dead-worker"},
+            ),
+            lineage.LineageEvent(
+                component="worker.rollout",
+                operation="generate",
+                timestamp_s=165.0,
+                attributes={
+                    "worker_id": "winning-worker",
+                    "execution_time_s": 20.0,
+                },
+            ),
+        ],
+    )
+
+    facts = step_telemetry.RolloutFacts.of(item)
+    self.assertIsNotNone(facts.window)
+    self.assertIsNone(facts.window.received_time_s)
+    self.assertEqual(facts.window.worker_id, "winning-worker")
+
+    health = step_telemetry.rollout_health([facts])
+    self.assertNotIn("rollout/dispatch_delay_sec/max", health.metrics)
+    self.assertNotIn("rollout/worker_queue_wait_sec/max", health.metrics)
+    self.assertEqual(health.metrics["rollout/queue_wait_sec/max"], 45.0)
+    self.assertEqual(health.metrics["rollout/execution_sec/max"], 20.0)
 
   def test_groups_batch_wall_sec_by_batch_idx_cohort(self):
     # Cohort 0 ran in [100, 140] (40s); cohort 1 ran in [300, 330] (30s).
-    # Grouping by `batch_idx` reports max(40, 30) = 40s rather than 330 - 100.
+    # Grouping by `batch_idx` reports max(40, 30) = 40s rather than 330 - 100,
+    # and scopes `group_straggler_sec` per `(batch_idx, prompt_id)` cohort.
     health = step_telemetry.rollout_health(
         _facts(
-            _health_item(0, window=(100.0, 140.0), batch_idx=0),
-            _health_item(1, window=(300.0, 330.0), batch_idx=1),
+            _health_item(0, prompt_id="p0", window=(100.0, 100.0), batch_idx=0),
+            _health_item(1, prompt_id="p0", window=(100.0, 140.0), batch_idx=0),
+            _health_item(0, prompt_id="p0", window=(300.0, 300.0), batch_idx=1),
+            _health_item(1, prompt_id="p0", window=(300.0, 330.0), batch_idx=1),
         )
     )
 
     self.assertEqual(health.metrics["rollout/batch_wall_sec"], 40.0)
+    self.assertEqual(health.metrics["rollout/group_straggler_sec/max"], 40.0)
+
+  def test_computes_group_straggler_sec_from_first_to_last_finish_per_prompt(
+      self,
+  ):
+    # Prompt p0 finishes at 110s and 130s (group lag = 20s).
+    # Prompt p1 finishes at 105s and 145s (group lag = 40s).
+    # Prompt p2 has only 1 sample (skipped for intra-group lag).
+    health = step_telemetry.rollout_health(
+        _facts(
+            _health_item(0, prompt_id="p0", window=(100.0, 110.0)),
+            _health_item(1, prompt_id="p0", window=(100.0, 130.0)),
+            _health_item(0, prompt_id="p1", window=(100.0, 105.0)),
+            _health_item(1, prompt_id="p1", window=(100.0, 145.0)),
+            _health_item(0, prompt_id="p2", window=(100.0, 200.0)),
+        )
+    )
+
+    self.assertEqual(health.metrics["rollout/group_straggler_sec/mean"], 30.0)
+    self.assertEqual(health.metrics["rollout/group_straggler_sec/p50"], 30.0)
+    self.assertAlmostEqual(
+        health.metrics["rollout/group_straggler_sec/p90"], 38.0
+    )
+    self.assertAlmostEqual(
+        health.metrics["rollout/group_straggler_sec/p99"], 39.8
+    )
+    self.assertEqual(health.metrics["rollout/group_straggler_sec/max"], 40.0)
 
   def test_omits_families_without_inputs(self):
     health = step_telemetry.rollout_health(_facts(_health_item(0)))
@@ -301,6 +456,7 @@ class RolloutHealthTest(absltest.TestCase):
     self.assertNotIn("rollout/turn_length/max", health.metrics)
     self.assertNotIn("rollout/duration_sec/max", health.metrics)
     self.assertNotIn("rollout/batch_wall_sec", health.metrics)
+    self.assertNotIn("rollout/group_straggler_sec/max", health.metrics)
 
   def test_no_rollouts_report_no_metrics(self):
     health = step_telemetry.rollout_health([])

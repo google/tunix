@@ -795,7 +795,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             "conversation_tokens": np.array([1, 2, 3]),
             "conversation_masks": np.array([1, 1, 1]),
             "old_logprobs": None,
-            "policy_version": 0,
+            "policy_versions": [0],
             "trajectory_reward": 1.0,
             "prompt_tokens": np.array([4, 5]),
             "original_input": {"prompts": "hello"},
@@ -1045,7 +1045,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             "conversation_tokens": np.array([1, 2, 3]),
             "conversation_masks": np.array([1, 1, 1]),
             "old_logprobs": old_logprobs,
-            "policy_version": 0,
+            "policy_versions": [0],
             "trajectory_reward": reward,
             "prompt_tokens": np.array([4, 5]),
             "original_input": {"prompts": "hello"},
@@ -1533,7 +1533,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             "conversation_tokens": np.array([1, 2, 3]),
             "conversation_masks": np.array([1, 1, 1]),
             "old_logprobs": None,
-            "policy_version": 0,
+            "policy_versions": [0],
             "trajectory_reward": 1.0,
             "prompt_tokens": np.array([4, 5]),
             "original_input": {"prompts": "hello"},
@@ -1633,7 +1633,6 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         num_generations=2,
         num_iterations=num_iterations,
         use_rollout_logps=use_rollout_logps,
-        exact_token_continuity=False,
     )
     learner = agentic_grpo_learner.GRPOLearner(
         rl_engine=rl_engine,
@@ -1655,7 +1654,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             "old_logprobs": (
                 np.full(3, 1.0, dtype=np.float32) if return_logprobs else None
             ),
-            "policy_version": 0,
+            "policy_versions": [0],
             "trajectory_reward": 1.0,
             "prompt_tokens": np.array([4, 5]),
             "original_input": {"prompts": "hello"},
@@ -2141,7 +2140,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         assistant_msgs = [m for m in conversation if m["role"] == "assistant"]
         self.assertNotEmpty(assistant_msgs)
         self.assertIn(assistant_msgs[0]["content"], _MOCK_RESPONSES)
-        self.assertEqual(traj.get("policy_version"), 0)
+        self.assertEqual(traj.get("policy_versions"), [0])
 
   def test_grpo_with_lora_model(self):
     # reshard through default device_put.
@@ -2469,7 +2468,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             "conversation_tokens": np.array([1, 2, 3]),
             "conversation_masks": np.array([1, 1, 1]),
             "old_logprobs": np.full(3, -0.5, dtype=np.float32),
-            "policy_version": 0,
+            "policy_versions": [0],
             "trajectory_reward": 1.0,
             "prompt_tokens": np.array([4, 5]),
             "original_input": {"prompts": "hello"},
@@ -2516,19 +2515,18 @@ class ExactTokenContinuityBatchTest(absltest.TestCase):
             np.array([1, 1, 0, 0, 0, 1, 0, 0, 1, 1, 0], np.float32) * -0.5
         ),
         "conversation_text": [{"role": "assistant", "content": "action"}],
-        "policy_version": 7,
+        "policy_versions": [7],
         "trajectory_reward": 1.0,
         "original_input": {"prompts": ["fixture"]},
     }
 
-  def _make_batch(self, *, exact=True, packed=False, raw=None):
+  def _make_batch(self, *, packed=False, raw=None):
     import copy  # pylint: disable=g-import-not-at-top
     from tunix.perf.experimental import tracer  # pylint: disable=g-import-not-at-top
     from tunix.rl.agentic.agents import agent_types  # pylint: disable=g-import-not-at-top
 
     obj = object.__new__(agentic_grpo_learner.GRPOLearner)
     obj.algo_config = agentic_grpo_learner.GRPOConfig(
-        exact_token_continuity=exact,
         max_response_length=20,
         beta=0.0,
         use_rollout_logps=True,
@@ -2629,14 +2627,6 @@ class ExactTokenContinuityBatchTest(absltest.TestCase):
           packed.completion_mask[0][positions],
           [0, 0, 0] + list(raw["conversation_masks"]),
       )
-
-  def test_native_default_keeps_pad_id_validity(self):
-    from tunix.rl import utils as rl_utils  # pylint: disable=g-import-not-at-top
-
-    batch = self._make_batch(exact=False)
-    self.assertIsNone(batch.completion_attention_mask)
-    np.testing.assert_array_equal(batch.prompt_mask[0], [0, 0, 1, 1, 1])
-    self.assertLen(rl_utils.unpad_train_example(batch)[0]["completion_ids"], 5)
 
   def test_actor_ref_and_loss_consume_token_mask(self):
     from tunix.rl import common  # pylint: disable=g-import-not-at-top

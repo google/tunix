@@ -21,7 +21,6 @@ from absl.testing import absltest
 from absl.testing import parameterized
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import test_utils as mocks
-from tunix.dist_rl.common import registry
 from tunix.dist_rl.rollout import collector
 from tunix.dist_rl.trajectory import in_memory_store
 from tunix.dist_rl.trajectory import store as trajectory_store_lib
@@ -35,15 +34,12 @@ class RolloutWorkerTest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
-    self.env_pool = mocks.MockEnvironmentPool(
-        pool_size=5, env_factory=registry.ENV_REGISTRY.get("mock_env")
-    )
     self.sampler = mocks.MockBaseSamplerImpl(default_delay=0.05)
     self.service = worker.RolloutWorker(
         worker_id="test_worker_01",
         sampler=self.sampler,
-        env_pool=self.env_pool,
-        agent_factory=registry.AGENT_REGISTRY.get("mock_agent"),
+        env_name="mock_env",
+        agent_name="mock_agent",
         max_concurrency=10,
         tokenizer=mocks.MockTokenizer(),
         chat_parser=mocks.MockChatParser(),
@@ -138,19 +134,20 @@ class RolloutWorkerTest(parameterized.TestCase):
           generation_kwargs={"delay_seconds": 0.05, "max_generation_steps": 64},
       )
 
-      _ = asyncio.create_task(
-          self.actor_handle.asubmit("generate", [req_a, req_b, req_c])
-      )
-
       completed_order: List[str] = []
-      stream = self.service.as_completed_stream()
-      for _ in range(3):
-        traj = await stream.__anext__()
-        completed_order.append(traj.request_id)
+      responses = await self.service.generate(
+          [req_a, req_b, req_c],
+          on_complete=lambda traj: completed_order.append(traj.request_id),
+      )
 
       self.assertEqual(
           completed_order, ["traj_fast_B_g0", "traj_med_C_g0", "traj_slow_A_g0"]
       )
+      self.assertEqual(
+          [r.request_id for r in responses],
+          ["traj_slow_A_g0", "traj_fast_B_g0", "traj_med_C_g0"],
+      )
+      self.assertEqual(self.service.heartbeat().queue_depth, 0)
 
     asyncio.run(_run_test())
 
@@ -163,10 +160,8 @@ class RolloutWorkerTest(parameterized.TestCase):
           sampler=mocks.MockBaseSamplerImpl(
               sampler_name="sampler_slice_1", default_delay=0.02
           ),
-          env_pool=mocks.MockEnvironmentPool(
-              pool_size=2, env_factory=registry.ENV_REGISTRY.get("mock_env")
-          ),
-          agent_factory=registry.AGENT_REGISTRY.get("mock_agent"),
+          env_name="mock_env",
+          agent_name="mock_agent",
           tokenizer=mocks.MockTokenizer(),
           chat_parser=mocks.MockChatParser(),
       )
@@ -178,10 +173,8 @@ class RolloutWorkerTest(parameterized.TestCase):
           sampler=mocks.MockBaseSamplerImpl(
               sampler_name="sampler_slice_2", default_delay=0.04
           ),
-          env_pool=mocks.MockEnvironmentPool(
-              pool_size=2, env_factory=registry.ENV_REGISTRY.get("mock_env")
-          ),
-          agent_factory=registry.AGENT_REGISTRY.get("mock_agent"),
+          env_name="mock_env",
+          agent_name="mock_agent",
           tokenizer=mocks.MockTokenizer(),
           chat_parser=mocks.MockChatParser(),
       )
@@ -288,8 +281,8 @@ class RolloutWorkerTest(parameterized.TestCase):
               trajectory_store_config={"backend": "memory"}
           ),
           sampler=self.sampler,
-          env_pool=self.env_pool,
-          agent_factory=registry.AGENT_REGISTRY.get("mock_agent"),
+          env_name="mock_env",
+          agent_name="mock_agent",
           tokenizer=mocks.MockTokenizer(),
           chat_parser=mocks.MockChatParser(),
       )
@@ -363,8 +356,8 @@ class RolloutWorkerTest(parameterized.TestCase):
               trajectory_store_config={"backend": "memory"}
           ),
           sampler=self.sampler,
-          env_pool=self.env_pool,
-          agent_factory=registry.AGENT_REGISTRY.get("mock_agent"),
+          env_name="mock_env",
+          agent_name="mock_agent",
           tokenizer=mocks.MockTokenizer(),
           chat_parser=mocks.MockChatParser(),
       )
@@ -408,9 +401,6 @@ class RolloutWorkerTest(parameterized.TestCase):
         "run_id": "test_cancel_and_max_steps",
     }
 
-    class _OneStepEnv(mocks.MockEnvironment):
-      max_steps = 1
-
     async def _run_test():
       # 1. Real in-flight episode cancelled via RolloutWorker.stop() with
       # FileTrajectoryStore persists status="CANCELLED" without raising
@@ -419,8 +409,8 @@ class RolloutWorkerTest(parameterized.TestCase):
           worker_id="test_cancel_worker",
           config=worker.RolloutConfig(trajectory_store_config=file_store_cfg),
           sampler=self.sampler,
-          env_pool=self.env_pool,
-          agent_factory=registry.AGENT_REGISTRY.get("mock_agent"),
+          env_name="mock_env",
+          agent_name="mock_agent",
           tokenizer=mocks.MockTokenizer(),
           chat_parser=mocks.MockChatParser(),
       )
@@ -453,17 +443,15 @@ class RolloutWorkerTest(parameterized.TestCase):
 
       # 2. Unmocked episode hitting MAX_STEPS_REACHED preserves
       # MAX_STEPS_REACHED and populates env_time/reward_time.
-      max_steps_pool = mocks.MockEnvironmentPool(
-          pool_size=2, env_factory=_OneStepEnv
-      )
       max_steps_svc = worker.RolloutWorker(
           worker_id="test_max_steps_worker",
           config=worker.RolloutConfig(
               trajectory_store_config={"backend": "memory"}
           ),
           sampler=self.sampler,
-          env_pool=max_steps_pool,
-          agent_factory=registry.AGENT_REGISTRY.get("mock_agent"),
+          env_name="mock_env",
+          agent_name="mock_agent",
+          env_config={"max_steps": 1},
           tokenizer=mocks.MockTokenizer(),
           chat_parser=mocks.MockChatParser(),
       )

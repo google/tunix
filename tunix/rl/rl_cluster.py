@@ -42,13 +42,12 @@ from tunix.common import configs
 from tunix.common import datatypes
 from tunix.experimental.rollout import vanilla_rollout as vanilla_rollout_v2
 from tunix.generate import tokenizer_adapter
-from tunix.generate import utils as generate_utils
-# Internal placeholder for sglang_jax rollout worker stub, don't change this line.
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import tracer as perf_tracer_v2
 from tunix.rl import common
+from tunix.rl import packing
 from tunix.rl import reshard
 from tunix.rl import trainer as rl_trainer
 from tunix.rl import utils as rl_utils
@@ -185,6 +184,7 @@ class RLEngine:
     self._buffered_train_metrics: list[MetricsBuffer] = []
     self._buffered_eval_metrics: list[MetricsBuffer] = []
     self._external_metrics_logger = None
+    self._rollout_released_for_training: bool = False
 
     self._init_engine()
     gc.collect()
@@ -204,11 +204,13 @@ class RLEngine:
         collections.defaultdict(list)
     )
 
-    if self.r2m[Role.ACTOR] == self.r2m[Role.ROLLOUT]:
+    if self.r2m[Role.ACTOR] == self.r2m[
+        Role.ROLLOUT
+    ] and self.cluster_config.rollout_engine in ("vanilla", "vanilla_v2"):
       # Given that we load both actor trainer and rollout from `actor`,
-      # if the meshes are the same, they are able to share the same model.
-      # TODO(linchai): We may want to enable different shardings for actor
-      # trainer and rollout even when they are colocated.
+      # if the meshes are the same under `vanilla`/`vanilla_v2`, they are able
+      # to share the same model. External rollout engines (`vllm`, `sglang_jax`)
+      # allocate their own internal weight buffers.
       self._backbone_sharing_map[Role.ACTOR].append(Role.ROLLOUT)
       self._backbone_sharing_map[Role.ROLLOUT].append(Role.ACTOR)
 
@@ -225,6 +227,72 @@ class RLEngine:
       # TODO(linchai): maybe support critic backbone sharing.
 
     self._propagate_backbone_sharing_map()
+
+  def is_colocated(self, role_a: Role, role_b: Role) -> bool:
+    """Returns whether `role_a` and `role_b` share any physical JAX devices."""
+    mesh_a = self.r2m[role_a]
+    mesh_b = self.r2m[role_b]
+    if mesh_a == mesh_b:
+      return True
+    if mesh_a.empty or mesh_b.empty:
+      return False
+    devices_a = set(mesh_a.devices.flatten().tolist())
+    devices_b = set(mesh_b.devices.flatten().tolist())
+    return bool(devices_a & devices_b)
+
+  def release_rollout_for_training(self) -> None:
+    """Releases colocated rollout HBM (KV cache and unshared weights) before training."""
+    if self._rollout_released_for_training:
+      return
+    if not self.is_colocated(Role.ACTOR, Role.ROLLOUT):
+      return
+    free_weights = (
+        Role.ROLLOUT not in self._backbone_sharing_map[Role.ACTOR]
+        and not self.cluster_config.offload_to_cpu
+    )
+    src_state = None
+    if free_weights:
+      filter_types = (
+          nnx.LoRAParam
+          if sft_utils.is_lora_enabled(self.actor_trainer.model)
+          else nnx.Param,
+      )
+      src_state = nnx.state(self.actor_trainer.model, filter_types)
+    self.rollout.release_for_training(
+        free_weights=free_weights,
+        src_state=src_state,
+    )
+    self._rollout_released_for_training = True
+
+  def maybe_restore_rollout_for_generation(self) -> None:
+    """Restores rollout KV cache (and weights if needed) if released for training."""
+    if not self._rollout_released_for_training:
+      return
+    if (
+        Role.ROLLOUT not in self._backbone_sharing_map[Role.ACTOR]
+        and not self.cluster_config.offload_to_cpu
+    ):
+      filter_types = (
+          nnx.LoRAParam
+          if sft_utils.is_lora_enabled(self.actor_trainer.model)
+          else nnx.Param,
+      )
+      src_state = (
+          statelib.filter_state(self._anchor_policy_state, filter_types)
+          if self._anchor_policy_state is not None
+          else nnx.state(self.actor_trainer.model, filter_types)
+      )
+      staged_src = not self._is_state_on_device(src_state)
+      if staged_src:
+        src_state = rl_utils.put_params_on_memory_kind(
+            src_state, self._default_memory_kind
+        )
+      self.rollout.update_params(src_state, filter_types)
+      if staged_src:
+        del src_state
+        gc.collect()
+    self.rollout.restore_after_training()
+    self._rollout_released_for_training = False
 
   def _load_model(
       self,
@@ -289,21 +357,116 @@ class RLEngine:
 
   def _init_engine(self):
     """Initializes the RL engine."""
-    # 1. Initialize rollout.
     if isinstance(
         self.cluster_config.rollout_engine, str
     ) and self.cluster_config.rollout_engine not in [
         "vanilla",
         "vanilla_v2",
         "vllm",
-        "sglang_jax",
     ]:
       raise ValueError(
           "`cluster_config.rollout_engine` should be one of `'vanilla'`, "
-          "`'vanilla_v2'`, `'vllm'`, or `'sglang_jax'`. Received:"
+          "`'vanilla_v2'`, or `'vllm'`. Received:"
           f" '{self.cluster_config.rollout_engine}'."
       )
 
+    # Initialize the performance tracer before building trainers and rollout.
+    self._perf = perf_trace.NoopTracer()
+    self._perf_v2 = perf_tracer_v2.NoopTracer()
+
+    if self.perf_config:
+      export_fn_v1 = self.perf_config.custom_export_fn
+      export_fn_v2 = self.perf_config.custom_export_fn_v2
+
+      if export_fn_v1 or export_fn_v2:
+        devices = list(
+            itertools.chain.from_iterable(
+                mesh.devices.flatten().tolist()
+                for mesh in self.cluster_config.role_to_mesh.values()
+            )
+        )
+
+        if export_fn_v1:
+          self._perf = perf_trace.PerfTracer(devices, export_fn_v1)
+
+        if export_fn_v2:
+          self._perf_v2 = perf_tracer_v2.PerfTracer(
+              devices,
+              export_fn=export_fn_v2,
+              concurrent_device_spans=[
+                  perf_constants.ROLLOUT,
+                  perf_constants.ENVIRONMENT,
+              ],
+          )
+
+    # 1. Initialize inference worker.
+    inference_models = {}
+    if self.critic is not None:
+      inference_models["critic"] = self.critic
+    if self.reference is not None:
+      inference_models["reference"] = self.reference
+      del self.reference
+    if self.reward is not None:
+      inference_models["reward"] = self.reward
+      del self.reward
+    self._inference_worker = inference_worker.InferenceWorker(inference_models)
+
+    # 2. Initialize trainer before rollout so resident trainer optimizer state
+    # is already accounted for when the rollout engine sizes its KV cache from
+    # available device HBM (`hbm_utilization`).
+    if (
+        self.critic
+        and Role.CRITIC not in self._backbone_sharing_map[Role.ACTOR]
+    ):
+      critic_config = copy.deepcopy(self.cluster_config.training_config)
+      critic_config.metrics_prefix = "critic"
+      critic_config.pbar_description = "Critic Training"
+      if critic_config.checkpoint_root_directory:
+        critic_config.checkpoint_root_directory = os.path.join(
+            critic_config.checkpoint_root_directory, "critic"
+        )
+      with self._get_mesh_and_logical_axis_rules_cm(Role.CRITIC):
+        self._critic_trainer = rl_trainer.Trainer(
+            model=self.critic,
+            optimizer=self.cluster_config.training_config.critic_optimizer,  # pyrefly: ignore[bad-argument-type]
+            training_config=critic_config,
+            custom_checkpoint_metadata_fn=lambda: {
+                "global_step": self.global_steps + 1,
+                "role": Role.CRITIC.value,
+            },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
+            metrics_logger=self._rl_metrics_logger,
+            perf_tracer=self._perf,
+            perf_tracer_v2=self._perf_v2,
+        )
+      del self.critic
+      self._maybe_offload_model_to_cpu(self._critic_trainer.model, Role.CRITIC)
+
+    self._maybe_load_model_from_cpu(self.train_actor, Role.ACTOR)
+    actor_config = copy.deepcopy(self.cluster_config.training_config)
+    actor_config.metrics_prefix = "actor"
+    actor_config.pbar_description = "Actor Training"
+    if actor_config.checkpoint_root_directory:
+      actor_config.checkpoint_root_directory = os.path.join(
+          actor_config.checkpoint_root_directory, "actor"
+      )
+    with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR):
+      self._actor_trainer = rl_trainer.Trainer(
+          model=self.train_actor,
+          optimizer=self.cluster_config.training_config.actor_optimizer,
+          training_config=actor_config,
+          custom_checkpoint_metadata_fn=lambda: {
+              "global_step": self.global_steps + 1,
+              "role": Role.ACTOR.value,
+          },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
+          metrics_logger=self._rl_metrics_logger,
+          perf_tracer=self._perf,
+          perf_tracer_v2=self._perf_v2,
+      )
+    self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
+        nnx.state(self.actor_trainer.model), "pinned_host"
+    )
+
+    # 3. Initialize rollout.
     if isinstance(self.cluster_config.rollout_config, dict):
       # train_cfg should always be provided.
       train_cfg = self.cluster_config.rollout_config[Mode.TRAIN]
@@ -383,34 +546,6 @@ class RLEngine:
             mesh=self.r2m[Role.ROLLOUT],
             rollout_config=loaded_vllm_config,
         )
-    elif self.cluster_config.rollout_engine == "sglang_jax":
-      from tunix.rl.rollout import sglang_jax_rollout
-
-      if isinstance(self.cluster_config.rollout_config, dict):
-        loaded_sglang_jax_config = self.cluster_config.rollout_config[
-            Mode.TRAIN
-        ]
-      else:
-        loaded_sglang_jax_config = self.cluster_config.rollout_config
-
-      if (
-          sft_utils.is_lora_enabled(self.rollout_actor)
-          and not loaded_sglang_jax_config.rollout_sglang_jax_enable_static_lora
-      ):
-        raise ValueError(
-            "Rollout sglang jax lora config is missing: must set"
-            " rollout_sglang_jax_lora_target_modules,"
-            " rollout_sglang_jax_enable_static_lora,"
-            " rollout_sglang_jax_max_lora_rank,"
-            " rollout_sglang_jax_lora_scaling."
-        )
-
-      self._rollout = sglang_jax_rollout.SglangJaxRollout(
-          self.rollout_actor,
-          self.tokenizer,
-          mesh=self.r2m[Role.ROLLOUT],
-          rollout_config=loaded_sglang_jax_config,
-      )
     elif (
         isinstance(self.cluster_config.rollout_engine, type)
         and issubclass(
@@ -445,102 +580,15 @@ class RLEngine:
     if hasattr(self._rollout, "mesh") and self._rollout.mesh is not None:
       self.r2m[Role.ROLLOUT] = self._rollout.mesh
 
-    # Initialize the performance tracer after we have all the meshes
-    self._perf = perf_trace.NoopTracer()
-    self._perf_v2 = perf_tracer_v2.NoopTracer()
-
-    if self.perf_config:
-      export_fn_v1 = self.perf_config.custom_export_fn
-      export_fn_v2 = self.perf_config.custom_export_fn_v2
-
-      if export_fn_v1 or export_fn_v2:
-        devices = list(
-            itertools.chain.from_iterable(
-                mesh.devices.flatten().tolist()
-                for mesh in self.cluster_config.role_to_mesh.values()
-            )
-        )
-
-        if export_fn_v1:
-          self._perf = perf_trace.PerfTracer(devices, export_fn_v1)
-
-        if export_fn_v2:
-          self._perf_v2 = perf_tracer_v2.PerfTracer(
-              devices,
-              export_fn=export_fn_v2,
-              concurrent_device_spans=[
-                  perf_constants.ROLLOUT,
-                  perf_constants.ENVIRONMENT,
-              ],
-          )
-
-    # 2. Initialize inference worker.
-    inference_models = {}
-    if self.critic is not None:
-      inference_models["critic"] = self.critic
-    if self.reference is not None:
-      inference_models["reference"] = self.reference
-      del self.reference
-    if self.reward is not None:
-      inference_models["reward"] = self.reward
-      del self.reward
-    self._inference_worker = inference_worker.InferenceWorker(inference_models)
-
-    # 3. Initialize trainer.
-    if (
-        self.critic
-        and Role.CRITIC not in self._backbone_sharing_map[Role.ACTOR]
-    ):
-      critic_config = copy.deepcopy(self.cluster_config.training_config)
-      critic_config.metrics_prefix = "critic"
-      critic_config.pbar_description = "Critic Training"
-      if critic_config.checkpoint_root_directory:
-        critic_config.checkpoint_root_directory = os.path.join(
-            critic_config.checkpoint_root_directory, "critic"
-        )
-      with self._get_mesh_and_logical_axis_rules_cm(Role.CRITIC):
-        self._critic_trainer = rl_trainer.Trainer(
-            model=self.critic,
-            optimizer=self.cluster_config.training_config.critic_optimizer,  # pyrefly: ignore[bad-argument-type]
-            training_config=critic_config,
-            custom_checkpoint_metadata_fn=lambda: {
-                "global_step": self.global_steps + 1,
-                "role": Role.CRITIC.value,
-            },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
-            metrics_logger=self._rl_metrics_logger,
-            perf_tracer=self._perf,
-            perf_tracer_v2=self._perf_v2,
-        )
-      del self.critic
-      self._maybe_offload_model_to_cpu(self._critic_trainer.model, Role.CRITIC)
-
-    self._maybe_load_model_from_cpu(self.train_actor, Role.ACTOR)
-    actor_config = copy.deepcopy(self.cluster_config.training_config)
-    actor_config.metrics_prefix = "actor"
-    actor_config.pbar_description = "Actor Training"
-    if actor_config.checkpoint_root_directory:
-      actor_config.checkpoint_root_directory = os.path.join(
-          actor_config.checkpoint_root_directory, "actor"
-      )
-    with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR):
-      self._actor_trainer = rl_trainer.Trainer(
-          model=self.train_actor,
-          optimizer=self.cluster_config.training_config.actor_optimizer,
-          training_config=actor_config,
-          custom_checkpoint_metadata_fn=lambda: {
-              "global_step": self.global_steps + 1,
-              "role": Role.ACTOR.value,
-          },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
-          metrics_logger=self._rl_metrics_logger,
-          perf_tracer=self._perf,
-          perf_tracer_v2=self._perf_v2,
-      )
     del self.rollout_actor
     del self.train_actor
     self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
-    self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
-        nnx.state(self.actor_trainer.model), "pinned_host"
-    )
+    restored = self.actor_trainer.checkpoint_manager.latest_step() is not None
+    if restored and not rl_utils.is_sharing_weights(
+        self.actor_trainer.model, self.rollout.model()
+    ):
+      # The rollout was built from the actor's weights before the restore.
+      self.sync_weights(increment_global_steps=False)
 
   def _propagate_backbone_sharing_map(self):
     """Propagates backbone sharing map."""
@@ -820,8 +868,17 @@ class RLEngine:
     else:
       raise ValueError(f"Unsupported role for train: {role}")
 
-  def update_actor(self, train_ds, eval_ds, skip_jit=False):
+  def update_actor(
+      self,
+      train_ds,
+      eval_ds,
+      skip_jit: bool = False,
+      release_rollout: bool = True,
+  ):
     """Runs a training update step for the actor model."""
+    if release_rollout:
+      self.release_rollout_for_training()
+
     with _profile_scope(
         self, Role.ACTOR, future_output=self.actor_trainer.model
     ):
@@ -873,6 +930,7 @@ class RLEngine:
       max_generation_steps: int | None = None,
       *,
       prompt_token_ids: Sequence[Sequence[int] | np.ndarray] | None = None,
+      route_key: int | str | None = None,
   ) -> base_rollout.RolloutOutput:
     """Generates text from the given prompts.
 
@@ -888,6 +946,9 @@ class RLEngine:
       trace_tags: Optional tags to add to the performance tracer.
       prompt_token_ids: Explicit unpadded token rows. Mutually exclusive with
         text prompts and chat templating; requires backend token-input support.
+      route_key: Optional key of the prompts' data parallel rank in a
+        `vanilla_v2` rollout. Prompts with the same key run in the same rank,
+        and so can share its prefix cache. Other rollouts ignore it.
 
     Returns:
       A `RolloutOutput` object containing the generated text and other info.
@@ -897,7 +958,7 @@ class RLEngine:
       if prompts is not None:
         raise ValueError("Provide exactly one of prompts or prompt_token_ids.")
       prompt_rows: list[Any] = [
-          generate_utils.as_token_ids(row)
+          packing.as_token_ids(row)
           for row in prompt_token_ids
       ]
     else:
@@ -925,6 +986,7 @@ class RLEngine:
     micro_batch_size = micro_batch_size or len(prompt_rows)
 
     with self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT) as (mesh, _):
+      self.maybe_restore_rollout_for_generation()
       model = self.rollout.model()
       self._maybe_load_model_from_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
@@ -955,15 +1017,24 @@ class RLEngine:
             mesh.devices,
             tags=perf_tags,
         ) as span_v2:
+          # Only `vanilla_v2` routes prompts to data parallel ranks.
+          generate_kwargs = (
+              {"route_key": route_key}
+              if self.cluster_config.rollout_engine == "vanilla_v2"
+              else {}
+          )
           outputs = [
               self.rollout.generate(
                   cast(Any, None),
                   rollout_config,
                   prompt_token_ids=prompt_rows[s],
+                  **generate_kwargs,
               )
               if exact_input
               else self.rollout.generate(
-                  cast(list[str], prompt_rows[s]), rollout_config
+                  cast(list[str], prompt_rows[s]),
+                  rollout_config,
+                  **generate_kwargs,
               )
               for s in rl_utils.chunk_slices_by_size(
                   stop=len(prompt_rows), step=micro_batch_size
@@ -1149,6 +1220,7 @@ class RLEngine:
     micro_batch_size = micro_batch_size or batch_size
 
     with self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT):
+      self.maybe_restore_rollout_for_generation()
       model = self.rollout.model()
       self._maybe_load_model_from_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
@@ -1302,8 +1374,12 @@ class RLEngine:
         )
       return actor_per_token_logps
 
-  def sync_weights(self):
-    """Syncs the weights of between the sampler model and trainer model."""
+  def sync_weights(self, *, increment_global_steps: bool = True):
+    """Syncs the weights of between the sampler model and trainer model.
+
+    Args:
+      increment_global_steps: Whether this sync ends a global step.
+    """
     if jax.devices() and jax.default_backend() not in ["tpu", "gpu"]:
       cm = contextlib.ExitStack()
       cm.enter_context(jax.transfer_guard_device_to_host("disallow_explicit"))
@@ -1318,6 +1394,8 @@ class RLEngine:
       )
       src_filtered_params = nnx.state(self.actor_trainer.model, filter_types)
       self.rollout.update_params(src_filtered_params, filter_types)
+      self.rollout.restore_after_training()
+      self._rollout_released_for_training = False
       if self.cluster_config.gc_collect_after_weight_sync:
         gc.collect()
       # The anchor policy state is snapshotted from actor_trainer.model.
@@ -1325,8 +1403,10 @@ class RLEngine:
           nnx.state(self.actor_trainer.model), "pinned_host"
       )
 
-    # sync weights marks the end of a full batch, so increment the global steps.
-    self.global_steps += 1
+    if increment_global_steps:
+      # sync weights marks the end of a full batch, so increment the global
+      # steps.
+      self.global_steps += 1
 
   def get_values(
       self,

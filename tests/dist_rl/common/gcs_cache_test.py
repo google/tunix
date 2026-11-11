@@ -47,8 +47,8 @@ def _make_rollout_worker(
       sampler=mocks.MockBaseSamplerImpl(
           sampler_name="test_sampler", default_delay=0.0
       ),
-      env_pool=mocks.MockEnvironmentPool(pool_size=4, default_delay=0.0),
-      agent_factory=mocks.MockAgent,
+      env_name="mock_env",
+      agent_name="mock_agent",
       tokenizer=mocks.MockTokenizer(),
       chat_parser=mocks.MockChatParser(),
       jax_cache_config=jax_cache_config,

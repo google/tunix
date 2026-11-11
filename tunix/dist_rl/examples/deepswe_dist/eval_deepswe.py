@@ -36,6 +36,8 @@ import time
 
 
 ROOT = Path(__file__).resolve().parents[4]
+# Model context tokens kept free of responses, so the prompt still fits.
+_CONTEXT_HEADROOM_TOKENS = 256
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -54,8 +56,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
   parser.add_argument("--mesh_tp", type=int, default=8)
   parser.add_argument("--max_model_len", type=int, default=32768)
   parser.add_argument(
-      "--max_context_limit", type=int, default=0,
-      help="Cumulative response budget; zero uses model length minus 256.",
+      "--max_context_limit",
+      type=int,
+      default=0,
+      help=(
+          "Cumulative response budget; zero uses model length minus"
+          f" {_CONTEXT_HEADROOM_TOKENS}."
+      ),
   )
   parser.add_argument("--max_response_length", type=int, default=8192,
                       help="Maximum generated tokens per agent turn.")
@@ -90,8 +97,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.error(
         "Task/context limits must be nonnegative and HBM utilization in (0, 1)"
     )
-  if args.max_response_length > args.max_model_len - 256:
-    parser.error("max_response_length must leave 256 context tokens")
+  if args.max_response_length > args.max_model_len - _CONTEXT_HEADROOM_TOKENS:
+    parser.error(
+        f"max_response_length must leave {_CONTEXT_HEADROOM_TOKENS} context"
+        " tokens"
+    )
   if len(set(args.worker_addresses)) != len(args.worker_addresses):
     parser.error("worker_addresses must be unique")
   if args.max_concurrent < len(args.worker_addresses):
@@ -123,6 +133,11 @@ def load_entries(args: argparse.Namespace) -> list[dict]:
   return entries
 
 
+def response_budget(args: argparse.Namespace) -> int:
+  """Returns the cumulative response budget of one trajectory."""
+  return args.max_context_limit or args.max_model_len - _CONTEXT_HEADROOM_TOKENS
+
+
 def request_fields(args: argparse.Namespace, entry: dict, index: int) -> dict:
   """Use the same one-trajectory limits and greedy sampling as agentic eval."""
   return {
@@ -131,9 +146,7 @@ def request_fields(args: argparse.Namespace, entry: dict, index: int) -> dict:
       "group_index": 0,
       "prompt": str(entry.get("problem_statement", "")),
       "max_turns": args.max_steps,
-      "max_response_length": (
-          args.max_context_limit or args.max_model_len - 256
-      ),
+      "max_response_length": response_budget(args),
       "generation_kwargs": {
           "max_generation_steps": args.max_response_length,
           "temperature": 0.0,
@@ -141,7 +154,6 @@ def request_fields(args: argparse.Namespace, entry: dict, index: int) -> dict:
       },
       "metadata": {
           "episode_timeout": args.timeout,
-          "exact_token_continuity": False,
           "record_episode_summary": True,
           "env_config": {
               "entry": entry,
@@ -375,7 +387,7 @@ async def run_worker(args: argparse.Namespace):
   os.environ.setdefault("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
   # Evaluation must load checkpoint weights even after a training shell export.
   os.environ.pop("JAX_RANDOM_WEIGHTS", None)
-  from tunix.generate import vllm_sampler
+  from tunix.generate import vllm_sampler  # pylint: disable=g-import-not-at-top,unused-import
   import jax
   from jax.experimental import mesh_utils
   from jax.sharding import Mesh
@@ -398,20 +410,30 @@ async def run_worker(args: argparse.Namespace):
     raise ValueError("<|im_end|> must encode to one Qwen token")
   mesh = Mesh(mesh_utils.create_device_mesh(
       (args.mesh_fsdp, args.mesh_tp), jax.devices()), ("fsdp", "tp"))
-  config = vllm_sampler.VllmConfig(
-      mesh=mesh,
-      server_mode=True,
-      init_with_random_weights=False,
-      hbm_utilization=args.vllm_hbm_utilization,
+  env_name = deepswe.DEEPSWE_ENV_NAME
+  if args.enable_guard:
+    env_name = register_guarded_env(deepswe)
+  # One greedy trajectory per task.
+  config = rollout_worker.RolloutConfig(
+      weight_sync_mode="none",
+      max_tokens_to_generate=args.max_response_length,
+      max_response_length=response_budget(args),
+      kv_cache_size=args.max_model_len,
+      episode_timeout=float(args.timeout),
+      temperature=0.0,
+      return_logprobs=False,
+      eos_tokens=eos,
       data_parallel_size=args.mesh_fsdp,
       tensor_parallel_size=args.mesh_tp,
-      eos_tokens=eos,
-      engine_kwargs={
-          "model": model,
+      rollout_vllm_model_version=model,
+      rollout_vllm_server_mode=True,
+      rollout_vllm_init_with_random_weights=False,
+      rollout_vllm_hbm_utilization=args.vllm_hbm_utilization,
+      rollout_vllm_tpu_backend_type="jax",
+      rollout_vllm_max_num_seqs=args.vllm_max_num_seqs,
+      rollout_vllm_max_num_batched_tokens=args.vllm_max_batched_tokens,
+      rollout_vllm_kwargs={
           "tokenizer": args.tokenizer_path or model,
-          "max_model_len": args.max_model_len,
-          "max_num_seqs": args.vllm_max_num_seqs,
-          "max_num_batched_tokens": args.vllm_max_batched_tokens,
           "enable_prefix_caching": True,
           "dtype": "bfloat16",
       },
@@ -420,12 +442,9 @@ async def run_worker(args: argparse.Namespace):
       server_id="deepswe-eval",
       tokenizer=tokenizer,
       config=config,
-      weight_sync_mode="none",
+      mesh=mesh,
       max_concurrency=args.max_concurrent,
   )
-  env_name = deepswe.DEEPSWE_ENV_NAME
-  if args.enable_guard:
-    env_name = register_guarded_env(deepswe)
 
   stop = asyncio.Event()
 
@@ -436,8 +455,6 @@ async def run_worker(args: argparse.Namespace):
 
     async def evaluate(self, fields):
       response = await self.generate(datatypes.RolloutRequest(**fields))
-      # generate also publishes a copy for streaming RL consumers.
-      await self.pop_next_completed()
       return compact_result(response)
 
     def shutdown(self):
@@ -446,12 +463,10 @@ async def run_worker(args: argparse.Namespace):
 
   worker = EvaluationWorker(
       worker_id="deepswe-eval",
-      config=rollout_worker.RolloutConfig(
-          sampler_type="inprocess_vllm", weight_sync_mode="none",
-          env_name=env_name, agent_name=deepswe.DEEPSWE_AGENT_NAME,
-          eos_tokens=eos,
-      ),
+      config=config,
       sampler=sampler,
+      env_name=env_name,
+      agent_name=deepswe.DEEPSWE_AGENT_NAME,
       tokenizer=tokenizer_adapter.TokenizerAdapter(tokenizer),
       chat_parser=parser.QwenChatTemplateParser(
           tokenizer, enable_thinking=not args.disable_thinking
@@ -460,8 +475,8 @@ async def run_worker(args: argparse.Namespace):
   )
   server = remote_execution.GrpcRemoteExecutionServer(worker)
   try:
-    await sampler.start()
     worker.initialize()
+    await sampler.start()
     await server.start_serving_async(args.port)
     logging.info("DeepSWE eval worker ready on port %d", args.port)
     loop = asyncio.get_running_loop()

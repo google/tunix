@@ -73,7 +73,7 @@ class SchemaTestCase(parameterized.TestCase, metaclass=ParameterizedABCMeta):
     super().tearDown()
 
   def test_insert_and_defaults(self) -> None:
-    """Verifies inserting runs, trajectories, and steps with default values."""
+    """Verifies inserting rows across all tables with default values."""
     with self.engine.begin() as conn:
       conn.execute(
           schema.RUNS_TABLE.insert().values(
@@ -94,6 +94,13 @@ class SchemaTestCase(parameterized.TestCase, metaclass=ParameterizedABCMeta):
               trajectory_id="traj_001",
               step_id=0,
               payload={"reward": 1.0, "observation": "initial"},
+          )
+      )
+      conn.execute(
+          schema.TRAJECTORY_METRICS_TABLE.insert().values(
+              run_id="run_alpha",
+              trajectory_id="traj_001",
+              payload={"extra": {"score": 10.0}},
           )
       )
 
@@ -138,8 +145,28 @@ class SchemaTestCase(parameterized.TestCase, metaclass=ParameterizedABCMeta):
           {"reward": 1.0, "observation": "initial"},
       )
 
+      metrics_row = (
+          conn.execute(
+              sa.select(schema.TRAJECTORY_METRICS_TABLE).where(
+                  (schema.TRAJECTORY_METRICS_TABLE.c.run_id == "run_alpha")
+                  & (
+                      schema.TRAJECTORY_METRICS_TABLE.c.trajectory_id
+                      == "traj_001"
+                  )
+              )
+          )
+          .mappings()
+          .one()
+      )
+      self.assertEqual(
+          metrics_row["payload"],
+          {"extra": {"score": 10.0}},
+      )
+      self.assertIsNotNone(metrics_row["created_at"])
+      self.assertIsNotNone(metrics_row["updated_at"])
+
   def test_delete_run_cascades_to_trajectories_and_steps(self) -> None:
-    """Verifies that deleting a run cascades to trajectories and steps."""
+    """Verifies deleting a run cascades to trajectories, steps, and metrics."""
     with self.engine.begin() as conn:
       conn.execute(
           schema.RUNS_TABLE.insert().values(
@@ -162,6 +189,13 @@ class SchemaTestCase(parameterized.TestCase, metaclass=ParameterizedABCMeta):
               payload={"reward": 1.0, "observation": "initial"},
           )
       )
+      conn.execute(
+          schema.TRAJECTORY_METRICS_TABLE.insert().values(
+              run_id="run_alpha",
+              trajectory_id="traj_001",
+              payload={"extra": {"score": 10.0}},
+          )
+      )
 
       conn.execute(
           schema.RUNS_TABLE.delete().where(
@@ -178,6 +212,14 @@ class SchemaTestCase(parameterized.TestCase, metaclass=ParameterizedABCMeta):
       self.assertEqual(
           conn.execute(
               sa.select(sa.func.count()).select_from(schema.STEPS_TABLE)
+          ).scalar(),
+          0,
+      )
+      self.assertEqual(
+          conn.execute(
+              sa.select(sa.func.count()).select_from(
+                  schema.TRAJECTORY_METRICS_TABLE
+              )
           ).scalar(),
           0,
       )
@@ -213,6 +255,13 @@ class SchemaTestCase(parameterized.TestCase, metaclass=ParameterizedABCMeta):
               payload={"obs": "step1"},
           )
       )
+      conn.execute(
+          schema.TRAJECTORY_METRICS_TABLE.insert().values(
+              run_id="run_beta",
+              trajectory_id="traj_002",
+              payload={"extra": {"score": 5.0}},
+          )
+      )
 
       # Delete trajectory only (keeping run_beta intact).
       conn.execute(
@@ -222,12 +271,20 @@ class SchemaTestCase(parameterized.TestCase, metaclass=ParameterizedABCMeta):
           )
       )
 
-      # Associated steps and trajectory are deleted; parent run remains.
+      # Associated steps and trajectory are deleted; run and metrics remain.
       self.assertEqual(
           conn.execute(
               sa.select(sa.func.count()).select_from(schema.STEPS_TABLE)
           ).scalar(),
           0,
+      )
+      self.assertEqual(
+          conn.execute(
+              sa.select(sa.func.count()).select_from(
+                  schema.TRAJECTORY_METRICS_TABLE
+              )
+          ).scalar(),
+          1,
       )
       self.assertEqual(
           conn.execute(
@@ -251,6 +308,26 @@ class SchemaTestCase(parameterized.TestCase, metaclass=ParameterizedABCMeta):
               agent_name="agent_test",
           )
       )
+      conn.execute(
+          schema.RUNS_TABLE.insert().values(
+              run_id="run_beta",
+              agent_name="agent_test",
+          )
+      )
+      conn.execute(
+          schema.TRAJECTORY_METRICS_TABLE.insert().values(
+              run_id="run_alpha",
+              trajectory_id="traj_001",
+              payload={"extra": {"score": 1.0}},
+          )
+      )
+      conn.execute(
+          schema.TRAJECTORY_METRICS_TABLE.insert().values(
+              run_id="run_beta",
+              trajectory_id="traj_001",
+              payload={"extra": {"score": 2.0}},
+          )
+      )
 
     with self.assertRaisesRegex(
         sa.exc.IntegrityError, r"(?i)(unique|duplicate)"
@@ -260,6 +337,18 @@ class SchemaTestCase(parameterized.TestCase, metaclass=ParameterizedABCMeta):
             schema.RUNS_TABLE.insert().values(
                 run_id="run_alpha",
                 agent_name="agent_test_duplicate",
+            )
+        )
+
+    with self.assertRaisesRegex(
+        sa.exc.IntegrityError, r"(?i)(unique|duplicate)"
+    ):
+      with self.engine.begin() as conn:
+        conn.execute(
+            schema.TRAJECTORY_METRICS_TABLE.insert().values(
+                run_id="run_alpha",
+                trajectory_id="traj_001",
+                payload={"extra": {"score": 3.0}},
             )
         )
 
@@ -284,6 +373,43 @@ class SchemaTestCase(parameterized.TestCase, metaclass=ParameterizedABCMeta):
                 payload={"obs": "step0"},
             )
         )
+
+    with self.assertRaisesRegex(sa.exc.IntegrityError, r"(?i)foreign key"):
+      with self.engine.begin() as conn:
+        conn.execute(
+            schema.TRAJECTORY_METRICS_TABLE.insert().values(
+                run_id="nonexistent_run",
+                trajectory_id="traj_001",
+                payload={"extra": {"score": 1.0}},
+            )
+        )
+
+  def test_insert_metrics_without_trajectory_row_succeeds(self) -> None:
+    """Verifies metrics can be inserted for a run before trajectory metadata."""
+    with self.engine.begin() as conn:
+      conn.execute(
+          schema.RUNS_TABLE.insert().values(
+              run_id="metrics_only_run",
+              agent_name="agent_test",
+          )
+      )
+      conn.execute(
+          schema.TRAJECTORY_METRICS_TABLE.insert().values(
+              run_id="metrics_only_run",
+              trajectory_id="nonexistent_traj",
+              payload={"extra": {"score": 1.0}},
+          )
+      )
+      saved_payload = conn.execute(
+          sa.select(schema.TRAJECTORY_METRICS_TABLE.c.payload).where(
+              (schema.TRAJECTORY_METRICS_TABLE.c.run_id == "metrics_only_run")
+              & (
+                  schema.TRAJECTORY_METRICS_TABLE.c.trajectory_id
+                  == "nonexistent_traj"
+              )
+          )
+      ).scalar_one()
+      self.assertEqual(saved_payload, {"extra": {"score": 1.0}})
 
   def test_non_nullable_column_raises_integrity_error(self) -> None:
     """Verifies omitting required non-nullable columns raises IntegrityError."""
@@ -341,3 +467,31 @@ class SchemaTestCase(parameterized.TestCase, metaclass=ParameterizedABCMeta):
       if updated_at.tzinfo is None:
         updated_at = updated_at.replace(tzinfo=datetime.timezone.utc)
       self.assertGreater(updated_at, past_timestamp)
+
+      conn.execute(
+          schema.TRAJECTORY_METRICS_TABLE.insert().values(
+              run_id="run_alpha",
+              trajectory_id="traj_001",
+              payload={"extra": {"score": 1.0}},
+              updated_at=past_timestamp,
+          )
+      )
+      conn.execute(
+          schema.TRAJECTORY_METRICS_TABLE.update()
+          .where(
+              (schema.TRAJECTORY_METRICS_TABLE.c.run_id == "run_alpha")
+              & (schema.TRAJECTORY_METRICS_TABLE.c.trajectory_id == "traj_001")
+          )
+          .values(payload={"extra": {"score": 2.0}})
+      )
+      metrics_updated_at = conn.execute(
+          sa.select(schema.TRAJECTORY_METRICS_TABLE.c.updated_at).where(
+              (schema.TRAJECTORY_METRICS_TABLE.c.run_id == "run_alpha")
+              & (schema.TRAJECTORY_METRICS_TABLE.c.trajectory_id == "traj_001")
+          )
+      ).scalar_one()
+      if metrics_updated_at.tzinfo is None:
+        metrics_updated_at = metrics_updated_at.replace(
+            tzinfo=datetime.timezone.utc
+        )
+      self.assertGreater(metrics_updated_at, past_timestamp)

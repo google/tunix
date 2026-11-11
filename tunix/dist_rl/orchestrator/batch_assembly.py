@@ -34,7 +34,6 @@ import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import lineage
 from tunix.rl import packing
-from tunix.rl import utils as rl_utils
 
 T = TypeVar("T")
 
@@ -207,6 +206,10 @@ class BatchConfig:
 
   Attributes:
     pad_id: Token ID used for padding prompts and completions.
+    eos_id: End-of-sequence token ID handed to the trainer loss and to actor
+      re-scoring requests. When None, `StandardRLProgram` uses `pad_id`.
+    mini_batch_size: Number of prompt groups per optimizer step.
+    train_micro_batch_size: Number of sequences per trainer forward pass.
     max_prompt_length: Maximum prompt length for padding or budget validation.
     max_response_length: Maximum response length for padding or budget
       validation.
@@ -227,6 +230,9 @@ class BatchConfig:
   """
 
   pad_id: int = 0
+  eos_id: int | None = None
+  mini_batch_size: int = 4
+  train_micro_batch_size: int = 1
   max_prompt_length: int | None = None
   max_response_length: int | None = None
   max_seq_token_per_tpu: int | None = None
@@ -248,10 +254,14 @@ class BatchAssembler(Generic[T], Protocol):
     num_generations: Number of rollout trajectories / generations generated per
       prompt group (G). Must be a positive integer.
     mini_batch_size: Number of prompt groups per optimizer update.
+    pad_id: Token ID the assembler pads with. The trainer loss derives attention
+      masks and positions from it, so it must match the `BatchConfig.pad_id` the
+      program hands to the trainer.
   """
 
   num_generations: int
   mini_batch_size: int
+  pad_id: int
 
   @property
   def rollouts_per_optimizer_update(self) -> int:
@@ -557,14 +567,13 @@ def to_pack_item(item: datatypes.RLTrainerPayload) -> packing.PackItem:
 
   routed = None
   if item.routed_experts is not None:
-    # The adapter aligns routing to the `[prompt | completion]` sequence
-    # (see `algorithm_adapter._routed_experts_for`); `PackItem` re-validates
-    # the `(p + c - 1 or p + c, num_layers, top_k)` shape.
+    # `payload_builder._routed_experts_for` aligns routing to the
+    # `[prompt | completion]` sequence; `PackItem` re-validates the
+    # `(p + c - 1 or p + c, num_layers, top_k)` shape.
     raw_routed = np.asarray(item.routed_experts)
-    if raw_routed.dtype == np.uint8 and (
-        raw_routed.ndim == 3
-        or (raw_routed.ndim == 4 and raw_routed.shape[3] == 5)
-    ):
+    if raw_routed.dtype == np.uint8:
+      # Validate compact uint8/uint10 shape; raises ValueError on invalid 4D.
+      packing.routed_experts_encoding(raw_routed, batched=False)
       routed = raw_routed
     else:
       routed = np.asarray(raw_routed, dtype=np.int16)
@@ -672,8 +681,8 @@ class SequencePackedBatchAssembler:
       segment_alignment_boundary: Enforces that every packed sequence starts at
         an index that is a multiple of this value, padding any gaps. By default
         (1), sequences are packed tightly back-to-back. Use larger values to
-        align with chunk boundaries for models with chunked processing (e.g.,
-        64 for Qwen3.5 GatedDeltaNet).
+        align with chunk boundaries for models with chunked processing (e.g., 64
+        for Qwen3.5 GatedDeltaNet).
       start_batch_index: Initial microbatch index offset for tracking IDs.
     """
     if batch_size <= 0:
@@ -1265,7 +1274,7 @@ class PaddedBatchAssembler:
       routed_mode = "int16"
       if replay_routing:
         routed_shape: tuple[int, int] | None = None
-        encs: set[str] = set()
+        encs: set[packing.RoutedExpertsWireEncoding] = set()
         for item in chunk:
           if item.routed_experts is None:
             continue
@@ -1283,41 +1292,10 @@ class PaddedBatchAssembler:
           encs.add(packing.routed_experts_encoding(r, batched=False))
         if routed_shape is not None:
           total_seq_len = self.max_prompt_length + self.max_response_length
-          if "int16" not in encs and "uint10" in encs:
-            routed_mode = "uint10"
-            batched_routed_experts = np.zeros(
-                (
-                    self.batch_size,
-                    total_seq_len,
-                    routed_shape[0],
-                    routed_shape[1] // 4,
-                    5,
-                ),
-                dtype=np.uint8,
-            )
-          elif encs == {"uint8"}:
-            routed_mode = "uint8"
-            batched_routed_experts = np.zeros(
-                (
-                    self.batch_size,
-                    total_seq_len,
-                    routed_shape[0],
-                    routed_shape[1],
-                ),
-                dtype=np.uint8,
-            )
-          else:
-            routed_mode = "int16"
-            batched_routed_experts = np.full(
-                (
-                    self.batch_size,
-                    total_seq_len,
-                    routed_shape[0],
-                    routed_shape[1],
-                ),
-                datatypes.UNSET_ROUTED_EXPERT,
-                dtype=np.int16,
-            )
+          routed_mode = packing.widest_routed_encoding(encs)
+          batched_routed_experts = packing.alloc_batched_routed_experts(
+              self.batch_size, total_seq_len, routed_shape, routed_mode
+          )
       truncated_prompts = truncated_completions = 0
       row_valid_tokens = np.zeros(self.batch_size, dtype=np.int64)
       row_num_sequences = np.zeros(self.batch_size, dtype=np.int64)
@@ -1497,8 +1475,6 @@ class PaddedBatchAssembler:
 def create_batch_assembler(
     *,
     num_generations: int,
-    mini_batch_size: int,
-    train_micro_batch_size: int,
     batch_config: BatchConfig,
 ) -> BatchAssembler:
   """Builds the batch assembler based on sequence packing or padding parameters.
@@ -1506,7 +1482,7 @@ def create_batch_assembler(
   If `batch_config.max_seq_token_per_tpu` is provided, a
   `SequencePackedBatchAssembler` is used. The packing `batch_size` (pack_size)
   is set to `batch_config.num_data_shards` (or defaults to
-  `train_micro_batch_size` with a warning if not set).
+  `batch_config.train_micro_batch_size` with a warning if not set).
   The packing budget is validated against `batch_config.max_prompt_length` and
   `max_response_length`.
 
@@ -1518,14 +1494,15 @@ def create_batch_assembler(
 
   Args:
     num_generations: Number of rollout generations per prompt group (G).
-    mini_batch_size: Number of prompt groups per model update.
-    train_micro_batch_size: Micro-batch size for training.
-    batch_config: BatchConfig containing packing, padding, and data shard
-      settings.
+    batch_config: BatchConfig containing packing, padding, batching, and data
+      shard settings.
 
   Returns:
     A BatchAssembler instance.
   """
+  mini_batch_size = batch_config.mini_batch_size
+  train_micro_batch_size = batch_config.train_micro_batch_size
+
   if batch_config.max_seq_token_per_tpu is not None:
     if batch_config.num_data_shards is None:
       logging.warning(
@@ -1541,7 +1518,7 @@ def create_batch_assembler(
         batch_config.max_prompt_length is not None
         and batch_config.max_response_length is not None
     ):
-      rl_utils.validate_packing_budget(
+      packing.validate_packing_budget(
           batch_config.max_seq_token_per_tpu,
           batch_config.max_prompt_length,
           batch_config.max_response_length,

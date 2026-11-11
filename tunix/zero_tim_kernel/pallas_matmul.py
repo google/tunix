@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#     https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,182 +13,95 @@
 # limitations under the License.
 """Fixed-tile, batch-invariant Pallas TPU matmul.
 
-Why this kernel exists: XLA's ``jnp.dot`` picks a different tiling/reduction
-strategy per operand shape, so the value of one output row depends on M (the
-number of rows in the batch).  Decode (M=1..8) and prefill/scoring (M=bucket)
-therefore disagree by a few ULPs.  This kernel fixes the per-element
-contraction order: every output element is ``sum_q x[i, q*BK:(q+1)*BK] @
-y[q*BK:(q+1)*BK, j]`` accumulated left-to-right in f32 over ``q`` and rounded
-to bf16 exactly once, independently of M, of the row position, and of the
-contents of any other row.  ``block_m``/``block_n`` only choose which output
-tile a program writes, so they are bitwise neutral; ``block_k`` is the only
-tile that enters the numerics and is never changed by the policy.
+Why this kernel exists: XLA's `jnp.dot` picks a different tiling/reduction
+strategy per operand shape, so the value of one output row depends on `M` (the
+number of rows in the batch). Decode (`M=1..8`) and prefill/scoring (`M=bucket`)
+therefore disagree by a few ULPs. This kernel fixes the per-element contraction
+order: every output element is `sum_q x[i, q*BK:(q+1)*BK] @
+y[q*BK:(q+1)*BK, j]` accumulated left-to-right in `f32` over `q` and rounded to
+`bf16` exactly once, independently of `M`, of the row position, and of the
+contents of any other row. `block_m` / `block_n` only choose which output tile a
+program writes, so they are bitwise neutral; `block_k` is the only tile that
+enters the numerics and is never changed by `tile_policy`.
 """
 
 from __future__ import annotations
 
 import os
 
-from absl import logging
 import jax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
-from tunix.zero_tim_kernel import fixed_order_reduce
 
-# TODO(tunix-dev): Generalize default block sizes, contract tile whitelist, and
-# wide-N candidate ladder beyond Qwen3 TP widths (e.g., 1280/640 for 2560).
+MIN_BLOCK_M = 8
 BM = 128
 BN = 256
 BK = 256
-# The (128, 256, 256) tiles ran every
-# production shape at 55-59 TFLOP/s (14% of v5p bf16 peak).  With the k-block
-# accumulation order (BK) unchanged, wider output tiles are bitwise identical
-# per element and 2-4x faster ([128,4096]x[4096,6144] 118 -> 58 us at
-# (128,2048|1024,256); [512,4096]x[4096,6144] 439 -> 107 us at (256,1024,256);
-# every variant bitwise == production).  Small block_m (8-64) is slower
-# (weight streaming), so rows are never sub-tiled.
-TILE_POLICY = "v2"
-_TILE_RECEIPTS: set[tuple[int, int, int]] = set()
-# The fixed tile triples the model_contracts model contracts pass explicitly
-# (model_contracts.py: tp1/tp2/1.7B 128/256/256, tp8 128/128/128).
-# A caller passing one of these gets the shape policy; any other explicit
-# tiles are honored as written.
 CONTRACT_TILES = frozenset({(BM, BN, BK), (128, 128, 128)})
-# Output-column tile candidates in preference order (bitwise-neutral: bn never
-# enters an element's contraction order).  See tile_policy.
+CONTRACT_NK_TILES = frozenset({(BN, BK), (128, 128)})
 BLOCK_N_CANDIDATES = (1024, 1280, 640, 512)
-
-# Compiler-only knob: producer fusion changes materialization, not values.
 INPUT_FUSION_ENV = "CANON_PALLAS_INPUT_FUSION"
-# check-VMA manual-axis typing knobs.  They only matter while tracing inside a
-# checked ``shard_map`` over the rank-parallel ("data", "model") manual mesh.
-CHECK_VMA_ENV = fixed_order_reduce.CHECK_VMA_ENV
-CHECK_VMA_SCOPE_ENV = fixed_order_reduce.CHECK_VMA_SCOPE_ENV
-RANK_PARALLEL_BACKWARD_ENV = fixed_order_reduce.RANK_PARALLEL_BACKWARD_ENV
+
+
+def adaptive_row_bucket(m: int, default_bm: int = BM) -> tuple[int, int]:
+  """Returns `(m_padded, block_m)` using power-of-2 row buckets for small `m`.
+
+  For `m < default_bm`, selects the smallest power-of-2 bucket in
+  `[MIN_BLOCK_M, default_bm)` that is `>= m` (aligned to TPU VREG sublanes
+  `MIN_BLOCK_M = 8`), avoiding padding small decode batches all the way to `128`
+  or `256`. Because rows are independent in the matmul contraction, `block_m`
+  is bitwise neutral. For `m >= default_bm` (or when the next power of 2 reaches
+  `default_bm`), rounds `m` up to a multiple of `default_bm`.
+
+  Args:
+    m: Semantic row count (`> 0`).
+    default_bm: Target row block/chunk size for full batches (`> 0`).
+
+  Returns:
+    `(m_padded, block_m)`.
+  """
+  if m <= 0 or default_bm <= 0:
+    raise ValueError(
+        "adaptive_row_bucket requires positive (m, default_bm), got "
+        f"{(m, default_bm)}"
+    )
+  if default_bm >= MIN_BLOCK_M and m < default_bm:
+    bucket = max(MIN_BLOCK_M, 1 << (m - 1).bit_length())
+    if bucket < default_bm:
+      return bucket, bucket
+  mp = ((m + default_bm - 1) // default_bm) * default_bm
+  return mp, default_bm
 
 
 def tile_policy(
     m: int, k: int, n: int, tiles: tuple[int, int, int] = (BM, BN, BK)
 ) -> tuple[int, int, int]:
-  """Return (block_m, block_n, block_k) for a [m,k]@[k,n] bf16 matmul.
+  """Returns `(block_m, block_n, block_k)` for an `[m, k] @ [k, n]` bf16 matmul.
 
-  block_m 256 when m divides by 256 else the caller's; block_n the first of
-  BLOCK_N_CANDIDATES dividing n else the caller's; block_k always the
-  caller's, so the per-element accumulation order never changes (the tp8
-  contract accumulates in 128-wide k blocks).  1280 and 640 exist for the
-  Qwen3-4B TP-local widths (2560-multiples: o_proj/down_proj N=2560, and
-  the contract-padded MLP width 2432->2560, 1216->1280); they divide none of
-  the 8B/1.7B widths, so those shapes keep the 1024/512 choice
-  (o_proj 22.9->15.4 us, down_proj 42.5->24.9 us at M=256, bitwise == 128/512).
+  `block_m` is promoted from `BM` (`128`) to `256` when `m % 256 == 0` (smaller
+  adaptive decode `block_m` values are preserved); `block_n` is promoted to the
+  first candidate in `BLOCK_N_CANDIDATES` dividing `n`; `block_k` is kept
+  unchanged so the per-element accumulation order never changes.
 
   Args:
     m: Rows of the left operand.
     k: Contracted extent (unused; kept for signature parity).
     n: Columns of the right operand.
-    tiles: The caller's (block_m, block_n, block_k).
+    tiles: The caller's `(block_m, block_n, block_k)`.
 
   Returns:
-    The (block_m, block_n, block_k) the kernel runs with.
+    The `(block_m, block_n, block_k)` the kernel runs with.
   """
-  del k  # The contraction tile is never changed by the policy.
+  del k
   block_m, block_n, block_k = tiles
-  if m % 256 == 0:
+  if block_m == BM and m % 256 == 0:
     block_m = 256
   for candidate in BLOCK_N_CANDIDATES:
     if n % candidate == 0:
       block_n = candidate
       break
   return block_m, block_n, block_k
-
-
-def _tile_receipt(m: int, k: int, n: int, tiles: tuple[int, int, int]) -> None:
-  key = (m, k, n)
-  if key in _TILE_RECEIPTS:
-    return
-  _TILE_RECEIPTS.add(key)
-  logging.info(
-      "[PATHTRACE] matmul_tile_policy=%s M=%d K=%d N=%d bm=%d bn=%d bk=%d",
-      TILE_POLICY,
-      m,
-      k,
-      n,
-      tiles[0],
-      tiles[1],
-      tiles[2],
-  )
-
-
-def check_vma_scope_context() -> bool:
-  """Whether a scope-limited check-VMA mutation is inside the outer map.
-
-  The check-VMA compatibility flag is process-wide, while the engine's serving
-  and trainer programs share that process.  The repair candidate must therefore
-  preserve the historical serving program and retain VMA annotations only while
-  the rank-parallel backward is tracing its exact manual DP/TP pullback.  The
-  singleton FrozenLake rank-parallel carrier keeps a manual ``data`` axis of
-  size 1, so ``min_data_size=1`` is admitted here.
-  """
-  return fixed_order_reduce.check_vma_scope_context(
-      min_data_size=1, error_cls=ValueError
-  )
-
-
-def _vma_active() -> bool:
-  return os.environ.get(CHECK_VMA_ENV, "0") == "1" and check_vma_scope_context()
-
-
-def check_vma_align_operands(*values):
-  """Give operands of a local Pallas operation one common VMA type.
-
-  JAX dot primitives require all operands to have matching varying manual
-  axes.  A pcast from replicated to varying is a runtime identity; its
-  transpose supplies the psum that the replicated operand needs.  check-VMA only
-  admits plain-varying state here, never an already reduced/unreduced value.
-
-  Args:
-    *values: The operands of one local Pallas call.
-
-  Returns:
-    The operands, each pcast to the union of their varying manual axes when
-    the check-VMA mode is active; otherwise the operands unchanged.
-  """
-  if not _vma_active():
-    return values
-  mats = tuple(jax.typeof(value).mat for value in values)
-  if any(mat.unreduced or mat.reduced for mat in mats):
-    raise ValueError(
-        "check-VMA Pallas does not admit reduced/unreduced operands: "
-        + ", ".join(str(mat) for mat in mats)
-    )
-  varying = frozenset().union(*(mat.varying for mat in mats))
-  aligned = []
-  for value, mat in zip(values, mats, strict=True):
-    for axis in sorted(varying - mat.varying):
-      value = jax.lax.pcast(value, axis, to="varying")
-    aligned.append(value)
-  return tuple(aligned)
-
-
-def check_vma_output_manual_axis_type(*values):
-  """Return the explicit Pallas output VMA type for aligned operands."""
-  if not _vma_active():
-    return None
-  mats = tuple(jax.typeof(value).mat for value in values)
-  if any(mat.unreduced or mat.reduced for mat in mats):
-    raise ValueError(
-        "check-VMA Pallas output does not admit reduced/unreduced operands: "
-        + ", ".join(str(mat) for mat in mats)
-    )
-  varying = frozenset().union(*(mat.varying for mat in mats))
-  return jax.sharding.ManualAxisType(varying=varying)
-
-
-def make_out_shape(shape, dtype, manual_axis_type=None):
-  """Constructs ShapeDtypeStruct, omitting manual_axis_type when None for OSS."""
-  if manual_axis_type is not None:
-    return jax.ShapeDtypeStruct(shape, dtype, manual_axis_type=manual_axis_type)
-  return jax.ShapeDtypeStruct(shape, dtype)
 
 
 def input_fusion_enabled() -> bool:
@@ -206,7 +119,7 @@ def matmul(
     block_n: int = BN,
     block_k: int = BK,
 ):
-  """Compute bf16 [M,K] @ [K,N] with fixed BM/BN/BK and f32 accumulation."""
+  """Computes `bf16 [M, K] @ [K, N]` with fixed `BM/BN/BK` and `f32` accumulation."""
   if x.ndim != 2 or y.ndim != 2:
     raise ValueError(
         f"pallas_matmul expects rank-2 inputs, got {x.shape}, {y.shape} "
@@ -219,13 +132,16 @@ def matmul(
     raise ValueError(
         f"pallas_matmul requires bf16 inputs, got {x.dtype}, {y.dtype} "
     )
-  if (block_m, block_n, block_k) in CONTRACT_TILES:
-    # Callers that pass a contract's fixed tiles (or nothing) get the
-    # shape policy; explicit non-contract tiles are honored as written.
+  is_adaptive_small_m = (
+      MIN_BLOCK_M <= block_m < BM
+      and block_m % MIN_BLOCK_M == 0
+      and block_m == m
+      and (block_n, block_k) in CONTRACT_NK_TILES
+  )
+  if (block_m, block_n, block_k) in CONTRACT_TILES or is_adaptive_small_m:
     block_m, block_n, block_k = tile_policy(
         m, k, n, (block_m, block_n, block_k)
     )
-    _tile_receipt(m, k, n, (block_m, block_n, block_k))
   if min(block_m, block_n, block_k) <= 0:
     raise ValueError("pallas_matmul block sizes must be positive")
   if m % block_m or n % block_n or k % block_k:
@@ -233,7 +149,6 @@ def matmul(
         "pallas_matmul shape must divide BM/BN/BK="
         f"{block_m}/{block_n}/{block_k}, got {(m, k, n)}"
     )
-  x, y = check_vma_align_operands(x, y)
 
   def _kernel(x_ref, y_ref, out_ref, acc_ref):
     @pl.when(pl.program_id(2) == 0)
@@ -247,22 +162,13 @@ def matmul(
         preferred_element_type=jnp.float32,
     )
 
-    # The (i, j) output block is written back
-    # only after its last k step, so store it once there instead of on
-    # every k step.  The f32 accumulation sequence and the single final
-    # bf16 cast are unchanged, so every element is bitwise the
-    # per-step-store form; only the per-k-step VMEM store goes away.
     @pl.when(pl.program_id(2) == pl.num_programs(2) - 1)
     def _finalize():
       out_ref[...] = acc_ref[...].astype(out_ref.dtype)
 
   return pl.pallas_call(
       _kernel,
-      out_shape=make_out_shape(
-          (m, n),
-          jnp.bfloat16,
-          manual_axis_type=check_vma_output_manual_axis_type(x, y),
-      ),
+      out_shape=jax.ShapeDtypeStruct((m, n), jnp.bfloat16),
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=0,
           in_specs=[
@@ -275,9 +181,6 @@ def matmul(
       ),
       compiler_params=pltpu.CompilerParams(
           dimension_semantics=("parallel", "parallel", "arbitrary"),
-          # Producer fusion changes materialization, not
-          # values -- the fused producers are elementwise-exact and
-          # the kernel reads identical operand values either way.
           allow_input_fusion=(
               (True, True) if input_fusion_enabled() else (False, False)
           ),

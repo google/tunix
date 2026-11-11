@@ -16,8 +16,7 @@
 
 import contextlib
 import functools
-import threading
-from typing import Any, Callable, cast, ContextManager, TypeVar
+from typing import Any, Callable, ContextManager, cast
 
 from flax import nnx
 import jax
@@ -30,42 +29,75 @@ from tunix.rl import common as rl_common
 from tunix.rl import packing
 
 WorkerState = datatypes.WorkerState
-# Matches `remote_execution.OFFLOAD_TO_THREAD_ATTR` without adding a `grpc`
-# dependency to `:trainer_worker`.
-_OFFLOAD_TO_THREAD_ATTR = "_tunix_offload_to_thread"
-_F = TypeVar("_F", bound=Callable[..., Any])
-
-
-def _offload_to_thread(fn: _F) -> _F:
-  """Offloads a `TrainerWorker` method to the RPC thread and holds `_trainer_lock`."""
-
-  @functools.wraps(fn)
-  def _wrapped(self: "TrainerWorker", *args: Any, **kwargs: Any) -> Any:
-    with self._trainer_lock:  # pylint: disable=protected-access
-      return fn(self, *args, **kwargs)
-
-  setattr(_wrapped, _OFFLOAD_TO_THREAD_ATTR, True)
-  return cast(_F, _wrapped)
 
 
 def _compute_per_token_logps(
-    model: nnx.Module, *args: Any, **kwargs: Any
+    model: nnx.Module,
+    payload: datatypes.LogprobsScoringPayload,
+    *,
+    chunk_size: int,
 ) -> jax.Array:
-  """Computes per-token log-probabilities under live model weights.
+  """Computes per-token log-probabilities on the read-only model copy.
 
   Args:
     model: The NNX Module instance to score with.
-    *args: Positional arguments forwarded to
-      `rl_common.compute_per_token_logps`.
-    **kwargs: Keyword arguments forwarded to
-      `rl_common.compute_per_token_logps`.
+    payload: The `LogprobsScoringPayload` micro-batch containing prompt,
+      completion, static scoring parameters (`pad_id`, `eos_id`, `temperature`),
+      and optional packing/routing arrays.
+    chunk_size: Sequence chunk size for computing log-probabilities (0 computes
+      all at once).
 
   Returns:
     A JAX Array containing the computed per-token log-probabilities.
   """
   graphdef, state = nnx.split(model)
-  return rl_common.compute_per_token_logps(
-      graphdef, state, *args, stop_gradient=True, **kwargs
+  logps = rl_common.compute_per_token_logps(
+      graphdef,
+      state,
+      prompt_tokens=jnp.asarray(payload.prompt_ids),
+      completion_tokens=jnp.asarray(payload.completion_ids),
+      pad_id=payload.pad_id,
+      eos_id=payload.eos_id,
+      stop_gradient=True,
+      return_entropy=False,
+      segment_ids=(
+          None
+          if payload.segment_ids is None
+          else jnp.asarray(payload.segment_ids)
+      ),
+      segment_positions=(
+          None
+          if payload.segment_positions is None
+          else jnp.asarray(payload.segment_positions)
+      ),
+      temperature=payload.temperature,
+      token_mask=(
+          None
+          if payload.token_mask is None
+          else jnp.asarray(payload.token_mask)
+      ),
+      chunk_size=chunk_size,
+      routed_experts=(
+          None
+          if payload.routed_experts is None
+          else jnp.asarray(payload.routed_experts)
+      ),
+  )
+  return cast(jax.Array, logps)
+
+
+# TODO(igorts): Drop legacy callback once cl/1015725345 lands and
+# requirements/maxtext_requirements.txt advances.
+def _compute_per_token_logps_legacy(
+    model: nnx.Module, *args: Any, **kwargs: Any
+) -> jax.Array:
+  """Legacy variadic callback for trainers without `with_fwd_only_fn`."""
+  graphdef, state = nnx.split(model)
+  return cast(
+      jax.Array,
+      rl_common.compute_per_token_logps(
+          graphdef, state, *args, stop_gradient=True, **kwargs
+      ),
   )
 
 
@@ -95,8 +127,8 @@ class TrainerWorker(abstract_worker.Worker):
         a context manager (e.g., a JAX Mesh) to enter during trainer
         initialization and worker method execution.
       logps_chunk_size: Optionally chunk the vocab (final-logits) computation.
-      logps_micro_batch_size: Row chunk size for `per_token_logps`.
-        If `None`, the whole request is scored in one forward.
+      logps_micro_batch_size: Row chunk size for `per_token_logps`. If `None`,
+        the whole request is scored in one forward.
     """
     self._execution_context = execution_context
     self._trainer_factory = trainer_factory
@@ -111,7 +143,8 @@ class TrainerWorker(abstract_worker.Worker):
     self._worker_id = worker_id
     self._state = WorkerState.PENDING
     self._last_error: str | None = None
-    self._trainer_lock = threading.RLock()
+    # Set when `stop()` failed to close the trainer; later stops re-raise it.
+    self._stop_error: str | None = None
 
   def _policy_version(self) -> int:
     trainer = self._trainer
@@ -136,7 +169,7 @@ class TrainerWorker(abstract_worker.Worker):
       raise RuntimeError(f"TrainerWorker is not ready: {self.state.value}.")
     return self._trainer
 
-  @_offload_to_thread
+  @abstract_worker.offload_to_thread
   def initialize(self) -> datatypes.Response:
     """Initializes the worker and the underlying trainer."""
     if self.state == WorkerState.READY:
@@ -148,6 +181,14 @@ class TrainerWorker(abstract_worker.Worker):
           trainer = self._trainer_factory()
           if hasattr(trainer, "is_managed_externally"):
             trainer.is_managed_externally = True
+          # TODO(igorts): Drop hasattr guard once cl/1015725345 lands and
+          # requirements/maxtext_requirements.txt advances.
+          if hasattr(trainer, "with_fwd_only_fn"):
+            trainer.with_fwd_only_fn(
+                functools.partial(
+                    _compute_per_token_logps, chunk_size=self._logps_chunk_size
+                )
+            )
           if self._pending_loss_fn is not None:
             trainer.with_loss_fn(*self._pending_loss_fn)
             self._pending_loss_fn = None
@@ -165,7 +206,7 @@ class TrainerWorker(abstract_worker.Worker):
       if self.state == WorkerState.INITIALIZING:
         self.state = WorkerState.READY
 
-  @_offload_to_thread
+  @abstract_worker.offload_to_thread
   def compile(self, dummy_data: Any = None) -> datatypes.Response:
     """Triggers JIT compilation using the provided dummy_data."""
     trainer = self._ensure_ready()
@@ -184,25 +225,59 @@ class TrainerWorker(abstract_worker.Worker):
       if self.state == WorkerState.COMPILING:
         self.state = WorkerState.READY
 
-  @_offload_to_thread
+  @abstract_worker.offload_to_thread
   def start(self) -> datatypes.Response:
     """Starts the worker's main loop."""
     self._ensure_ready()
     self._is_running = True
     return self._response(started=True)
 
-  @_offload_to_thread
-  def stop(self) -> datatypes.Response:
-    """Gracefully stops the worker."""
-    if self.state == WorkerState.STOPPED:
-      return self._response(stopped=True, already_stopped=True)
-    self._is_running = False
-    if self.state == WorkerState.READY:
-      self.state = WorkerState.DRAINING
-    if self._trainer is not None:
-      self._trainer.close()
-    self.state = WorkerState.STOPPED
-    return self._response(stopped=True)
+  @abstract_worker.offload_to_thread
+  def stop(self, *, abort: bool = False) -> datatypes.Response:
+    """Gracefully stops the worker, closing the trainer at most once.
+
+    If closing the trainer fails, the worker still ends up `STOPPED` so that
+    teardown never re-runs a partially failed close. The failure is kept instead
+    of dropped: it is recorded as the worker's last error, escalated to an abort
+    for the `set_on_stop` callback, and re-raised by every later `stop()` call,
+    so local node teardown still exits non-zero.
+
+    Args:
+      abort: Whether the stop is part of an abnormal cluster teardown; see
+        `Worker.stop`.
+
+    Returns:
+      A response with `stopped=True` and the requested `abort` flag, plus
+      `already_stopped=True` if the worker was already stopped.
+
+    Raises:
+      RuntimeError: If an earlier `stop()` failed to close the trainer.
+    """
+    try:
+      if self.state == WorkerState.STOPPED:
+        if self._stop_error is not None:
+          raise RuntimeError(
+              f"TrainerWorker {self._worker_id!r} failed to stop cleanly"
+              f" earlier: {self._stop_error}"
+          )
+        return self._response(
+            stopped=True, already_stopped=True, abort=bool(abort)
+        )
+      self._is_running = False
+      if self.state == WorkerState.READY:
+        self.state = WorkerState.DRAINING
+      try:
+        if self._trainer is not None:
+          self._trainer.close()
+      except Exception as exc:
+        self._stop_error = self._last_error = str(exc)
+        abort = True
+        raise
+      finally:
+        self.state = WorkerState.STOPPED
+      return self._response(stopped=True, abort=bool(abort))
+    finally:
+      self._notify_stopped(abort)
 
   def info(self) -> datatypes.WorkerInfo:
     trainer = self._trainer
@@ -226,7 +301,7 @@ class TrainerWorker(abstract_worker.Worker):
         last_error=self._last_error,
     )
 
-  @_offload_to_thread
+  @abstract_worker.offload_to_thread
   def with_loss_fn(
       self, loss_fn: Callable[..., Any], has_aux: bool = False
   ) -> datatypes.Response:
@@ -256,7 +331,7 @@ class TrainerWorker(abstract_worker.Worker):
       self._trainer.with_loss_fn(loss_fn, has_aux)
     return self._response(loss_fn_configured=True)
 
-  @_offload_to_thread
+  @abstract_worker.offload_to_thread
   def with_gen_model_input_fn(
       self, gen_model_input_fn: Callable[[Any], dict[str, Any]]
   ) -> datatypes.Response:
@@ -267,13 +342,13 @@ class TrainerWorker(abstract_worker.Worker):
       self._trainer.with_gen_model_input_fn(gen_model_input_fn)
     return self._response(gen_model_input_fn_configured=True)
 
-  @_offload_to_thread
+  @abstract_worker.offload_to_thread
   def set_target_state(self, target_state: Any) -> datatypes.Response:
     """Stores rollout target_state so trainer-side weight sync can convert."""
     self._ensure_ready().set_target_state(target_state)
     return self._response(target_state_configured=True)
 
-  @_offload_to_thread
+  @abstract_worker.offload_to_thread
   def fwd_bwd(self, request: datatypes.TrainRequest) -> datatypes.Response:
     """Executes one forward/backward pass."""
     trainer = self._ensure_ready()
@@ -289,20 +364,21 @@ class TrainerWorker(abstract_worker.Worker):
       self.state = WorkerState.ERROR
       raise
 
-  @_offload_to_thread
-  def update(self) -> int:
-    """Applies the accumulated (mean) gradients as one optimizer update."""
+  @abstract_worker.offload_to_thread
+  def update(self) -> tuple[int, Any]:
+    """Applies the accumulated (mean) gradients and returns `(train_step, metrics)`."""
     trainer = self._ensure_ready()
     try:
       train_step = trainer.update()
+      metrics = trainer.get_metrics()
       self._last_error = None
-      return train_step
+      return train_step, metrics
     except Exception as exc:
       self._last_error = str(exc)
       self.state = WorkerState.ERROR
       raise
 
-  @_offload_to_thread
+  @abstract_worker.offload_to_thread
   def eval_step(self, request: datatypes.TrainRequest) -> datatypes.Response:
     """Executes one evaluation step on the given payload."""
     trainer = self._ensure_ready()
@@ -318,7 +394,7 @@ class TrainerWorker(abstract_worker.Worker):
       self.state = WorkerState.ERROR
       raise
 
-  @_offload_to_thread
+  @abstract_worker.offload_to_thread
   def run_eval(self, eval_ds: Any) -> datatypes.Response:
     """Runs an explicit evaluation phase over eval micro-batches."""
     trainer = self._ensure_ready()
@@ -349,7 +425,7 @@ class TrainerWorker(abstract_worker.Worker):
       self.state = WorkerState.ERROR
       raise
 
-  @_offload_to_thread
+  @abstract_worker.offload_to_thread
   def per_token_logps(
       self, items: datatypes.LogprobsRequest, **kwargs: Any
   ) -> datatypes.LogprobsResponse:
@@ -419,28 +495,41 @@ class TrainerWorker(abstract_worker.Worker):
             else np.asarray(routed_raw, dtype=np.int16)
         )
       micro_batch_size = self._logps_micro_batch_size or batch_size
+      use_callback_fwd_only = hasattr(trainer, "with_fwd_only_fn")
       outs = []
       for start in range(0, batch_size, micro_batch_size):
         sl = slice(start, start + micro_batch_size)
-        outs.append(
-            trainer.fwd_only(
-                _compute_per_token_logps,
-                prompt[sl],
-                completion[sl],
-                pad_id=items.pad_id,
-                eos_id=items.eos_id,
-                temperature=temperature,
-                chunk_size=self._logps_chunk_size,
-                segment_ids=None if seg_ids is None else seg_ids[sl],
-                segment_positions=None if seg_pos is None else seg_pos[sl],
-                routed_experts=None if routed is None else routed[sl],
-                **(
-                    {"token_mask": token_mask[sl]}
-                    if token_mask is not None
-                    else {}
-                ),
-            )
-        )
+        if use_callback_fwd_only:
+          payload = datatypes.LogprobsScoringPayload(
+              prompt_ids=prompt[sl],
+              completion_ids=completion[sl],
+              pad_id=int(items.pad_id),
+              eos_id=int(items.eos_id),
+              temperature=temperature,
+              segment_ids=None if seg_ids is None else seg_ids[sl],
+              segment_positions=None if seg_pos is None else seg_pos[sl],
+              routed_experts=None if routed is None else routed[sl],
+              token_mask=None if token_mask is None else token_mask[sl],
+          )
+          outs.append(trainer.fwd_only(payload))
+        else:
+          # TODO(igorts): Drop legacy fallback once cl/1015725345 lands and
+          # requirements/maxtext_requirements.txt advances.
+          outs.append(
+              cast(Any, trainer).fwd_only(
+                  _compute_per_token_logps_legacy,
+                  prompt[sl],
+                  completion[sl],
+                  pad_id=items.pad_id,
+                  eos_id=items.eos_id,
+                  temperature=temperature,
+                  chunk_size=self._logps_chunk_size,
+                  segment_ids=None if seg_ids is None else seg_ids[sl],
+                  segment_positions=None if seg_pos is None else seg_pos[sl],
+                  routed_experts=None if routed is None else routed[sl],
+                  token_mask=None if token_mask is None else token_mask[sl],
+              )
+          )
       result = np.asarray(jnp.concatenate(outs, axis=0), dtype=np.float32)
       self._last_error = None
       return datatypes.LogprobsResponse(
@@ -453,7 +542,7 @@ class TrainerWorker(abstract_worker.Worker):
       self.state = WorkerState.ERROR
       raise
 
-  @_offload_to_thread
+  @abstract_worker.offload_to_thread
   def save_checkpoint(
       self,
       metadata: Any = None,
@@ -472,12 +561,12 @@ class TrainerWorker(abstract_worker.Worker):
       self.state = WorkerState.ERROR
       raise
 
-  @_offload_to_thread
+  @abstract_worker.offload_to_thread
   def restore_checkpoint(self, step: int | None = None) -> Any:
     """Restore state from a checkpoint and return the metadata pytree."""
     return self._ensure_ready().restore_checkpoint(step=step)
 
-  @_offload_to_thread
+  @abstract_worker.offload_to_thread
   def prepare_weight_sync(self, sync_request: Any = None) -> Any:
     """Stages weights for transfer and returns their metadata."""
     trainer = self._ensure_ready()
@@ -493,7 +582,7 @@ class TrainerWorker(abstract_worker.Worker):
       self.state = WorkerState.ERROR
       raise
 
-  @_offload_to_thread
+  @abstract_worker.offload_to_thread
   def release_weight_sync(self, sync_request: Any = None) -> Any:
     """Releases this round's staging and restores READY."""
     # Not `_ensure_ready()`: `prepare_weight_sync` left the state at SYNCING,
@@ -507,7 +596,7 @@ class TrainerWorker(abstract_worker.Worker):
       self.state = WorkerState.READY
     return result
 
-  @_offload_to_thread
+  @abstract_worker.offload_to_thread
   def get_metrics(self) -> Any:
     """Returns and clears the recently collected step metric records."""
     return self._ensure_ready().get_metrics()

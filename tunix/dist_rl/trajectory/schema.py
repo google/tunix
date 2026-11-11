@@ -12,10 +12,11 @@ Dialect-Specific Notes:
   - Timestamps: DateTime columns use `DateTime(timezone=True)`. On PostgreSQL,
     this compiles to `TIMESTAMPTZ`. On SQLite, timestamps are serialized as
     ISO-8601 strings.
-  - Timestamp Updates: `trajectories.updated_at` specifies
-    `onupdate=sa.func.now()`. This is a client-side SQLAlchemy Core construct
-    evaluated during SQLAlchemy-generated `update()` statements. Direct updates
-    outside SQLAlchemy on PostgreSQL require a database trigger.
+  - Timestamp Updates: `trajectories.updated_at` and
+    `trajectory_metrics.updated_at` specify `onupdate=sa.func.now()`. This is a
+    client-side SQLAlchemy Core construct evaluated during SQLAlchemy-generated
+    `update()` statements. Direct updates outside SQLAlchemy on PostgreSQL
+    require a database trigger.
   - Table Partitioning: `steps` specifies
     `postgresql_partition_by="HASH (run_id)"` with `STEPS_HASH_PARTITIONS` (16)
     fixed modulus child partitions (`steps_p00` .. `steps_p15`) registered via
@@ -132,6 +133,38 @@ TRAJECTORIES_TABLE = sa.Table(
     sa.Index("idx_trajectories_updated_at", "run_id", "updated_at"),
     sa.Index("idx_trajectories_status", "run_id", "status"),
     sa.Index("idx_trajectories_created_at", "run_id", "created_at"),
+)
+
+TRAJECTORY_METRICS_TABLE = sa.Table(
+    "trajectory_metrics",
+    METADATA,
+    sa.Column("run_id", sa.String(128), nullable=False),
+    sa.Column("trajectory_id", sa.String(128), nullable=False),
+    sa.Column("payload", _JSON_TYPE, nullable=False),
+    sa.Column(
+        "created_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+    sa.Column(
+        "updated_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+        onupdate=sa.func.now(),
+    ),
+    sa.PrimaryKeyConstraint(
+        "run_id", "trajectory_id", name="pk_trajectory_metrics"
+    ),
+    # References `runs` only (not `trajectories`) so metrics can be recorded
+    # before or without trajectory metadata.
+    sa.ForeignKeyConstraint(
+        ["run_id"],
+        ["runs.run_id"],
+        name="fk_trajectory_metrics_runs",
+        ondelete="CASCADE",
+    ),
 )
 
 # 16 (2^4) fixed hash buckets reduce per-partition row count and B-tree index

@@ -237,11 +237,12 @@ def create_gemma_model_with_nnx_conversion(
 
 
 def create_gemma_model_from_params(
-    params_path: str, model_name: str
+    params_path: str,
+    model_name: str,
+    mesh: jax.sharding.Mesh | None = None,
 ) -> tuple[nnx.Module, Any]:
   """Loads Gemma params and creates a model."""
   params_lib = get_model_module(model_name, ModelModule.PARAMS)
-  model_params = params_lib.load_and_format_params(params_path)
   model_module_lib = get_model_module(model_name, ModelModule.MODEL)
   # TODO(b/451662153): have gemma2 version handling done better in naming.py
   naming_info = naming.ModelNaming(model_name=model_name)
@@ -250,6 +251,20 @@ def create_gemma_model_from_params(
     version = f'1.1-{version}'
   elif naming_info.model_family == 'gemma2':
     version = f'2-{version}'
+  if mesh is not None and not mesh.empty:
+    host_params = params_lib.load_and_format_host_params(params_path)
+    model = model_module_lib.Gemma.from_params(host_params, version=version)
+    del host_params
+    state = nnx.state(model)
+    sharded_state = jax.tree.map(
+        lambda x, s: jnp.asarray(x, device=s),
+        state,
+        nnx.get_named_sharding(state, mesh),
+    )
+    del state
+    nnx.update(model, sharded_state)
+    return model, model.config
+  model_params = params_lib.load_and_format_params(params_path)
   model = model_module_lib.Gemma.from_params(model_params, version=version)
   return model, model_params
 
@@ -310,11 +325,11 @@ def download_model(
   if model_source == ModelSource.KAGGLE:
     from tunix.oss import utils as oss_utils  # pylint: disable=g-import-not-at-top
 
-    return oss_utils.kaggle_pipeline(model_id_or_path, model_download_path)  # pyrefly: ignore[bad-argument-type]
+    return oss_utils.kaggle_pipeline(model_id_or_path, model_download_path)
   elif model_source == ModelSource.HUGGINGFACE:
     from tunix.oss import utils as oss_utils  # pylint: disable=g-import-not-at-top
 
-    return oss_utils.hf_pipeline(model_id_or_path, model_download_path)  # pyrefly: ignore[bad-argument-type]
+    return oss_utils.hf_pipeline(model_id_or_path, model_download_path)
   elif model_source in (ModelSource.GCS, ModelSource.MAXTEXT):
     return model_id_or_path
   elif model_source == ModelSource.INTERNAL:
@@ -476,8 +491,10 @@ class AutoModel:
       if 'skip_jax_distributed_system' not in kwargs:
         kwargs['skip_jax_distributed_system'] = True
 
-      if 'hf_access_token' not in kwargs and 'HF_TOKEN' in os.environ:
-        kwargs['hf_access_token'] = os.environ['HF_TOKEN']
+      if 'hf_access_token' not in kwargs and (
+          hf_token := os.getenv('HF_TOKEN', '').strip()
+      ):
+        kwargs['hf_access_token'] = hf_token
 
       valid_keys = set()
       if hasattr(MaxTextConfig, 'model_fields'):
@@ -561,9 +578,12 @@ class AutoModel:
             mesh=mesh,
             model_path=model_path,
         )
-      elif model_source == ModelSource.INTERNAL:
+      elif model_source in (ModelSource.INTERNAL, ModelSource.GCS):
+        assert naming_info.model_name is not None
         model, model_params = create_gemma_model_from_params(
-            params_path=resolved_model_path, model_name=naming_info.model_name  # pyrefly: ignore[bad-argument-type]
+            params_path=resolved_model_path,
+            model_name=naming_info.model_name,
+            mesh=mesh,
         )
       elif model_source == ModelSource.HUGGINGFACE:
         logging.info(
@@ -573,7 +593,7 @@ class AutoModel:
         )
       else:
         raise NotImplementedError(
-            'Gemma models are only supported from KAGGLE, INTERNAL, or'
+            'Gemma models are only supported from KAGGLE, GCS, INTERNAL, or'
             f' HUGGINGFACE. Specified model source: {model_source}'
         )
     # TODO(b/467448875): Add support for other models from KAGGLE/GCS.

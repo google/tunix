@@ -22,7 +22,6 @@ import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.distillation import identity
 from tunix.dist_rl.distillation import on_policy
-from tunix.dist_rl.orchestrator import algorithm_adapter
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.orchestrator import rl_program
 from tunix.rl import algorithm_config
@@ -35,17 +34,15 @@ class OPDCheckpointIdentityTest(unittest.IsolatedAsyncioTestCase):
     self.scorer.score = mock.AsyncMock(
         return_value=[np.array([-0.5]), np.array([-1.5])]
     )
-    adapter = algorithm_adapter.GRPOAdapter(
-        algo_config=algorithm_config.GRPOConfig(
-            num_generations=2, beta=0, use_rollout_logps=True, reward_mode="env"
-        ),
-        mini_batch_size=1,
-        train_micro_batch_size=2,
-        max_response_length=2,
+    adapter = algorithm_config.GRPOConfig(
+        num_generations=2, beta=0, use_rollout_logps=True, reward_mode="env"
     )
     with mock.patch.object(rl_program, "MetricsLogger"):
       program = rl_program.StandardRLProgram(
-          algo=adapter,
+          algo_config=adapter,
+          batch_config=batch_assembly.BatchConfig(
+              mini_batch_size=1, train_micro_batch_size=2, max_response_length=2
+          ),
           dataset=["question"],
           max_steps=1,
           assembler=batch_assembly.PaddedBatchAssembler(
@@ -86,6 +83,7 @@ class OPDCheckpointIdentityTest(unittest.IsolatedAsyncioTestCase):
     engine.save_checkpoint = mock.AsyncMock()
     engine.train_step = mock.AsyncMock(return_value={"train_step": 1})
     engine.get_metrics = mock.AsyncMock(return_value=None)
+    engine.fault_tolerance_metrics = mock.Mock(return_value={})
     engine.sync_weights = mock.AsyncMock(return_value=1)
     return engine
 
@@ -99,7 +97,7 @@ class OPDCheckpointIdentityTest(unittest.IsolatedAsyncioTestCase):
     program.engine = self._engine(metadata=metadata)
     await program._resume_from_checkpoint()
     self.assertEqual(program.step, 3)
-    self.assertEqual(program.policy_version, 4)
+    self.assertEqual(program.policy_version, 3)
 
   async def test_mismatch_rejected_before_dispatch_or_teacher_request(self):
     for field, value in (
@@ -185,6 +183,7 @@ class OPDCheckpointIdentityTest(unittest.IsolatedAsyncioTestCase):
                       "conversation_masks": np.array([1], dtype=np.float32),
                       "old_logprobs": np.array([-1], dtype=np.float32),
                       "trajectory_reward": 0,
+                      "policy_versions": [0],
                       "status": datatypes.TrajectoryStatus.SUCCEEDED,
                       "conversation_text": [
                           {"role": "user", "content": "question"},

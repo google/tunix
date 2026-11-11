@@ -25,6 +25,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 import contextlib
 import dataclasses
 import os
+import sys
 import threading
 import time
 from typing import Any
@@ -38,13 +39,14 @@ from tunix.dist_rl.common import tagging
 from tunix.dist_rl.distillation import identity
 from tunix.dist_rl.distillation import on_policy
 from tunix.dist_rl.distillation import teacher
-from tunix.dist_rl.orchestrator import algorithm_adapter
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.orchestrator import dataset_utils
+from tunix.dist_rl.orchestrator import payload_builder
 from tunix.dist_rl.orchestrator import rl_engine_interface
 from tunix.dist_rl.orchestrator import step_telemetry
 from tunix.dist_rl.queue_manager import trajectory_queue_manager
 from tunix.dist_rl.trajectory import store as trajectory_store_lib
+from tunix.rl import algorithm_config
 from tunix.rl import common as rl_common
 from tunix.rl import function_registry
 from tunix.rl import reward_manager as reward_manager_lib
@@ -67,6 +69,15 @@ RewardLogMetricAggFn = Callable[[np.ndarray], float | np.number]
 RewardLogMetrics = Mapping[
     str, tuple[np.ndarray | float | np.number, RewardLogMetricAggFn]
 ]
+
+# Maximum number of microbatch `train_step` tasks allowed in flight concurrently
+# in `StandardRLProgram.train_stage`. Depth 2 double-buffers microbatch dispatch
+# so the next microbatch's serialization, network transfer, and server-side
+# unpickling overlap with the active microbatch's Trainer execution while
+# bounding Trainer host memory to at most 2 in-flight microbatches (and
+# Orchestrator host memory to at most 4 microbatches across packing,
+# `pending_prep`, and `pending_trains`).
+_MAX_INFLIGHT_TRAIN_STEPS = 2
 
 
 def _opd_token_mean(values: np.ndarray) -> float:
@@ -200,6 +211,24 @@ def _extract_reward(item: Any) -> float:
   return float(traj["trajectory_reward"])
 
 
+def _extract_rollout_prompt(
+    metadata: Mapping[str, Any], conversation: Any
+) -> str:
+  """Extracts the initial prompt text for trajectory logging."""
+  if "prompt" in metadata and metadata["prompt"]:
+    return str(metadata["prompt"])
+  if not isinstance(conversation, list):
+    return ""
+  return next(
+      (
+          str(msg.get("content") or "")
+          for msg in conversation
+          if isinstance(msg, dict) and msg.get("role") == "user"
+      ),
+      "",
+  )
+
+
 def _format_rollout_completion(conversation: Any) -> str:
   """Renders post-prompt interaction (assistant + env) for trajectory logging.
 
@@ -255,8 +284,8 @@ class ScoredGroup:
 
   Attributes:
     payloads: Trainer tensor DTOs for the group's rollouts (`len == G`),
-      produced by `algo.create_trainer_payloads`. Single owner of each rollout's
-      `routed_experts` until packed by the batch assembler.
+      produced by `payload_builder.create_trainer_payloads`. Single owner of
+      each rollout's `routed_experts` until packed by the batch assembler.
     items: Telemetry and lineage views of the group's rollouts with
       `routed_experts` stripped (`len == G`).
     rewards: Scalar rewards computed by `critique_stage` (`len == G`), also
@@ -290,6 +319,33 @@ class ScoredGroup:
 def _scored_group_batch_idx(group: ScoredGroup) -> int:
   """Extracts the prompt-batch index for a `ScoredGroup`."""
   return trajectory_queue_manager.default_batch_idx_fn(group.items[0])
+
+
+def _scored_group_policy_version(group: ScoredGroup) -> int:
+  """Returns the oldest valid item policy version in `group` for EDF ordering."""
+  valid_items = [item for item in group.items if item.is_valid]
+  if valid_items:
+    return min(
+        trajectory_queue_manager.item_policy_version(item)
+        for item in valid_items
+    )
+  return sys.maxsize
+
+
+def _group_latest_policy_version(
+    group: Sequence[datatypes.TrajectoryItem],
+) -> int | None:
+  """Returns the latest policy version across valid items in `group`.
+
+  Returns:
+    The latest policy version, or None if no valid items carry a version.
+  """
+  valid_versions = [
+      trajectory_queue_manager.item_policy_version(it)
+      for it in group
+      if it.is_valid and trajectory_queue_manager.has_policy_version(it)
+  ]
+  return max(valid_versions) if valid_versions else None
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -347,7 +403,7 @@ class StandardRLProgram(RLProgram):
 
   def __init__(
       self,
-      algo: algorithm_adapter.AlgorithmAdapter,
+      algo_config: algorithm_config.AlgorithmConfig,
       dataset: Iterable[Any] | None = None,
       max_steps: int | None = None,
       reward_fns: (
@@ -360,6 +416,7 @@ class StandardRLProgram(RLProgram):
       generation_args: datatypes.GenerationArgs | None = None,
       batch_size: int | None = None,
       max_staleness: int = 0,
+      max_version_span: int | None = None,
       sync_weights: bool = True,
       precompile_trainer: bool = True,
       metrics_logging_options: MetricsLoggerOptions | None = None,
@@ -378,25 +435,30 @@ class StandardRLProgram(RLProgram):
     self.engine: rl_engine_interface.AbstractRLEngine | None = None
     if max_staleness < 0:
       raise ValueError("max_staleness must be non-negative.")
+    if max_version_span is not None and max_version_span < 0:
+      raise ValueError("max_version_span must be non-negative.")
     self.dataset = dataset
     self.max_steps = max_steps
-    self.algo = algo
-    algo_config = getattr(self.algo, "algo_config", None)
-    algo_max_response_length = getattr(self.algo, "max_response_length", None)
-    if algo_max_response_length is None and algo_config is not None:
-      algo_max_response_length = getattr(
-          algo_config, "max_response_length", None
-      )
-    self.max_response_length = algo_max_response_length
+    self.algo_config = algo_config
+    self.batch_config = batch_config or batch_assembly.BatchConfig()
+    self.max_response_length = self.batch_config.max_response_length
+    self.pad_id = self.batch_config.pad_id
+    # The trainer loss and the actor re-scoring request need a concrete eos
+    # token; this is the one place the unset case falls back to `pad_id`.
+    self.eos_id = (
+        self.batch_config.eos_id
+        if self.batch_config.eos_id is not None
+        else self.pad_id
+    )
     self.generation_args = generation_args or datatypes.GenerationArgs()
     self.opd_config = opd_config
     self.teacher_scorer = teacher_scorer
     if opd_config is None and teacher_scorer is not None:
       raise ValueError("teacher_scorer requires an OPD configuration.")
     if opd_config is not None:
-      if not isinstance(algo, algorithm_adapter.GRPOAdapter):
-        raise ValueError("OPD currently supports GRPOAdapter only.")
-      if algo.num_generations < 2:
+      if not isinstance(algo_config, algorithm_config.GRPOConfig):
+        raise ValueError("OPD currently supports GRPOConfig only.")
+      if algo_config.num_generations < 2:
         raise ValueError(
             "OPD currently requires at least two generations per prompt."
         )
@@ -408,25 +470,27 @@ class StandardRLProgram(RLProgram):
         raise ValueError(
             "OPD requires sync_weights=True for fresh student rollouts."
         )
-      if not self.algo.algo_config.use_rollout_logps:
+      if not self.algo_config.use_rollout_logps:
         raise ValueError("OPD requires use_rollout_logps=True.")
-      if not self.algo.algo_config.exact_token_continuity:
-        raise ValueError("OPD requires exact_token_continuity=True.")
+      # Token-mode collectors always preserve token IDs across turns.
       if max_staleness != 0:
         raise ValueError("OPD currently requires max_staleness=0.")
 
-    if self.algo.algo_config.temperature is not None:
+    # `algo_config` has a 1:1 relationship with a single `StandardRLProgram`
+    # instance and is not shared across multiple programs, so we propagate
+    # `generation_args.temperature` into `algo_config.temperature` in place.
+    if self.algo_config.temperature is not None:
       raise ValueError(
           "Do not set temperature on AlgorithmConfig; configure it via"
           " generation_args on StandardRLProgram."
       )
     gen_temp = self.generation_args.temperature
     if gen_temp is not None:
-      self.algo.algo_config.temperature = gen_temp
+      self.algo_config.temperature = gen_temp
 
     self.generation_args = dataclasses.replace(
         self.generation_args,
-        return_logprobs=self.algo.algo_config.use_rollout_logps,
+        return_logprobs=self.algo_config.use_rollout_logps,
     )
     if opd_config is not None:
       self.generation_args = dataclasses.replace(
@@ -446,33 +510,26 @@ class StandardRLProgram(RLProgram):
           " declarations do not verify the weights actually served by a remote"
           " endpoint."
       )
-    self.sampler_is = getattr(self.algo.algo_config, "sampler_is", None)
-    self.sampler_is_threshold = getattr(
-        self.algo.algo_config, "sampler_is_threshold", 2.0
-    )
-    self.sampler_rs = getattr(self.algo.algo_config, "sampler_rs", None)
-    self.sampler_rs_min = getattr(self.algo.algo_config, "sampler_rs_min", None)
-    self.sampler_rs_max = getattr(self.algo.algo_config, "sampler_rs_max", None)
-    raw_seq_err_thresh = getattr(
-        self.algo.algo_config, "seq_logprob_error_threshold", None
-    )
+    self.sampler_is = self.algo_config.sampler_is
+    self.sampler_is_threshold = self.algo_config.sampler_is_threshold
+    self.sampler_rs = self.algo_config.sampler_rs
+    self.sampler_rs_min = self.algo_config.sampler_rs_min
+    self.sampler_rs_max = self.algo_config.sampler_rs_max
     self.seq_logprob_error_threshold = (
-        float(raw_seq_err_thresh)
-        if isinstance(raw_seq_err_thresh, (int, float))
-        else None
+        self.algo_config.seq_logprob_error_threshold
     )
 
     reward_manager_fn = function_registry.get_reward_manager(
-        self.algo.algo_config.reward_mode
+        self.algo_config.reward_mode
     )
     self.reward_manager: reward_manager_lib.AbstractRewardManager = (
         reward_manager_fn(
             reward_fns=reward_fns,
-            algo_config=self.algo.algo_config,
+            algo_config=self.algo_config,
         )
     )
-    self.num_generations = algo.num_generations
-    self.mini_batch_size = algo.mini_batch_size
+    self.num_generations = self.algo_config.num_generations
+    self.mini_batch_size = self.batch_config.mini_batch_size
     if self.mini_batch_size <= 0 or self.num_generations <= 0:
       raise ValueError("mini_batch_size and num_generations must be positive.")
     self.full_batch_size = (
@@ -489,29 +546,42 @@ class StandardRLProgram(RLProgram):
           f"mini_batch_size={self.mini_batch_size}."
       )
     self.can_fuse_agreement_in_loss = (
-        algo_config is not None
-        and getattr(algo_config, "policy_loss_fn", "grpo") == "grpo"
-        and getattr(algo_config, "num_iterations", 1) == 1
+        self.algo_config.policy_loss_fn == "grpo"
+        and self.algo_config.num_iterations == 1
         and self.mini_batch_size >= self.full_batch_size
     )
-    self.batch_config = batch_config or batch_assembly.BatchConfig()
-    if self.batch_config.max_response_length is None:
-      self.batch_config = dataclasses.replace(
-          self.batch_config,
-          max_response_length=self.max_response_length,
-      )
     if assembler is not None:
+      # The loss derives attention masks and positions from the pad id the
+      # program forwards to the trainer, so a pre-built assembler must pad
+      # with that same id and agree on the group and mini-batch sizes.
+      if assembler.pad_id != self.pad_id:
+        raise ValueError(
+            "assembler.pad_id must match batch_config.pad_id; got"
+            f" assembler.pad_id={assembler.pad_id} and"
+            f" batch_config.pad_id={self.pad_id}."
+        )
+      if assembler.num_generations != self.num_generations:
+        raise ValueError(
+            "assembler.num_generations must match"
+            " algo_config.num_generations; got"
+            f" assembler.num_generations={assembler.num_generations} and"
+            f" algo_config.num_generations={self.num_generations}."
+        )
+      if assembler.mini_batch_size != self.mini_batch_size:
+        raise ValueError(
+            "assembler.mini_batch_size must match"
+            " batch_config.mini_batch_size; got"
+            f" assembler.mini_batch_size={assembler.mini_batch_size} and"
+            f" batch_config.mini_batch_size={self.mini_batch_size}."
+        )
       self.assembler = assembler
-      self.assembler.num_generations = self.num_generations
-      self.assembler.mini_batch_size = self.mini_batch_size
     else:
       self.assembler = batch_assembly.create_batch_assembler(
           num_generations=self.num_generations,
-          mini_batch_size=self.mini_batch_size,
-          train_micro_batch_size=getattr(algo, "train_micro_batch_size", 1),
           batch_config=self.batch_config,
       )
     self.max_staleness = max_staleness
+    self.max_version_span = max_version_span
     self.sync_weights = sync_weights
     self.precompile_trainer = precompile_trainer
     self.metrics_logger: MetricsLogger = MetricsLogger(metrics_logging_options)
@@ -556,6 +626,11 @@ class StandardRLProgram(RLProgram):
     )
     self.raw_q: TrajectoryQueueManager
     if self.group_order == GroupOrder.PROMPT_ARRIVAL:
+      if max_version_span is not None:
+        raise ValueError(
+            "max_version_span is only supported with"
+            " GroupOrder.TRAJECTORY_COMPLETION."
+        )
       ordered_q: BatchOrderedGroupQueue[ScoredGroup] = (
           BatchOrderedGroupQueue.create(
               full_batch_size=self.full_batch_size,
@@ -563,6 +638,9 @@ class StandardRLProgram(RLProgram):
           )
       )
       self.scored_q = ordered_q
+      # PROMPT_ARRIVAL cannot drop groups in `raw_q` without stalling the
+      # downstream `BatchOrderedGroupQueue` at the missing `batch_idx`;
+      # staleness is bounded upstream by `DispatchWindow` instead.
       self.raw_q = TrajectoryQueueManager.create(
           num_generations=self.num_generations,
       )
@@ -572,7 +650,11 @@ class StandardRLProgram(RLProgram):
           full_batch_size=self.full_batch_size,
       )
     else:
-      self.scored_q = FifoGroupQueue.create()
+      self.scored_q = FifoGroupQueue.create(
+          priority_fn=(
+              _scored_group_policy_version if max_staleness > 0 else None
+          ),
+      )
       self.dispatch_window = dispatch_window.DispatchWindow(
           max_staleness=max_staleness,
           next_batch_fn=lambda: self._step,
@@ -582,6 +664,7 @@ class StandardRLProgram(RLProgram):
       self.raw_q = TrajectoryQueueManager.create(
           num_generations=self.num_generations,
           max_staleness=max_staleness,
+          max_version_span=max_version_span,
           current_policy_version=lambda: self.policy_version,
           on_group_filtered=self.dispatch_window.on_group_filtered,
       )
@@ -608,20 +691,18 @@ class StandardRLProgram(RLProgram):
   async def _resume_from_checkpoint(self) -> None:
     """Realigns program orchestration state with the engine's restored checkpoint.
 
-    Delegates the mesh-level work (restoring the trainer checkpoint and, when
-    `sync_weights` is enabled, resyncing rollout worker weights to the restored
-    policy) to the engine, then translates the restored step into program
+    Delegates restoring the trainer checkpoint to the engine (`run_async`
+    synchronizes rollout weights once in `prepare_rollout_policy` after
+    `configure_worker`), then translates the restored step into program
     orchestration state: the train-loop bound (`_step`), the exact set of
     committed and skipped `prompt_id`s (when off-policy state was persisted),
     or the dataset prefix to skip (resumed `_step` if any).
     """
     assert self.engine is not None
-    restored = await self.engine.resume_from_checkpoint(
+    restored_step = await self.engine.resume_from_checkpoint(
         role=datatypes.Role.ACTOR,
-        resync_rollout_weights=self.sync_weights,
     )
-    restored_step = restored[0] if isinstance(restored, tuple) else restored
-    ckpt_meta = getattr(self.engine, "restored_checkpoint_metadata", None)
+    ckpt_meta = self.engine.restored_checkpoint_metadata
     if restored_step <= 0:
       if isinstance(ckpt_meta, Mapping) and identity.METADATA_KEY in ckpt_meta:
         identity.validate_resume_manifest(self._opd_manifest, ckpt_meta)
@@ -631,12 +712,26 @@ class StandardRLProgram(RLProgram):
     self.policy_version = restored_step
     if isinstance(self.scored_q, BatchOrderedGroupQueue):
       self.scored_q.skip(0, restored_step)
+    ckpt_meta = self.engine.restored_checkpoint_metadata
+    off_policy_resume = self.dispatch_window.restore_checkpoint_metadata(
+        ckpt_meta
+    )
+    # Matches `DistributedRLEngine.resume_from_checkpoint()`: a recorded
+    # `policy_version` is honored only with off-policy resume state; otherwise
+    # resume at the step boundary.
     if (
-        isinstance(ckpt_meta, Mapping)
+        off_policy_resume
+        and isinstance(ckpt_meta, Mapping)
         and ckpt_meta.get("policy_version") is not None
     ):
       self.policy_version = int(ckpt_meta["policy_version"])
-    if self.dispatch_window.restore_checkpoint_metadata(ckpt_meta):
+    if not self.sync_weights:
+      logging.warning(
+          "sync_weights is False; resumed rollout workers will use base weights"
+          " instead of restored checkpoint policy_version=%d.",
+          self.policy_version,
+      )
+    if off_policy_resume:
       logging.info(
           "Resuming from off-policy checkpoint: step=%d policy_version=%d"
           " (committed=%d, skipped=%d).",
@@ -651,7 +746,7 @@ class StandardRLProgram(RLProgram):
         " already-trained dataset items).",
         restored_step,
         self.policy_version,
-        self.dispatch_window.next_batch * self.full_batch_size,
+        self.dispatch_window.dataset_skip_count,
     )
 
   async def rollout_dispatch_stage(self) -> None:
@@ -678,26 +773,32 @@ class StandardRLProgram(RLProgram):
           skip_count=self.dispatch_window.dataset_skip_count,
           prefetch_size=max(1, self.full_batch_size),
       ):
-        if not await self.dispatch_window.admit(prompt_idx, prompt_item):
-          continue
-        coordinates = tagging.prompt_coordinates(
-            prompt_idx, self.full_batch_size
-        )
-        if isinstance(prompt_item, dict):
+        if isinstance(prompt_item, Mapping):
           prompt_item = dict(prompt_item)
-          prompt_item.setdefault("prompt_id", f"prompt_{prompt_idx}")
-          if self.max_response_length is not None:
-            prompt_item.setdefault(
-                "max_response_length", self.max_response_length
-            )
-        elif not hasattr(prompt_item, "prompt_id"):
+          if "prompt_id" not in prompt_item:
+            prompt_item["prompt_id"] = f"prompt_{prompt_idx}"
+          if (
+              self.max_response_length is not None
+              and "max_response_length" not in prompt_item
+          ):
+            prompt_item["max_response_length"] = self.max_response_length
+          prompt_id = prompt_item["prompt_id"]
+        elif hasattr(prompt_item, "prompt_id"):
+          prompt_id = prompt_item.prompt_id
+        else:
+          prompt_id = f"prompt_{prompt_idx}"
           prompt_item = {
               "prompt": prompt_item,
-              "prompt_id": f"prompt_{prompt_idx}",
+              "prompt_id": prompt_id,
           }
           if self.max_response_length is not None:
             prompt_item["max_response_length"] = self.max_response_length
 
+        if not await self.dispatch_window.admit(prompt_id):
+          continue
+        coordinates = tagging.prompt_coordinates(
+            prompt_idx, self.full_batch_size
+        )
         prompt_item = tagging.tag_prompt(prompt_item, coordinates)
         if self.opd_config is not None:
           sampling = self.generation_args.as_kwargs()
@@ -708,11 +809,6 @@ class StandardRLProgram(RLProgram):
           )
           sampling.update(overrides or {})
           self._validate_opd_sampling(sampling)
-        prompt_id = (
-            prompt_item["prompt_id"]
-            if isinstance(prompt_item, dict)
-            else prompt_item.prompt_id
-        )
         logging.info(
             "[pipeline] DISPATCH prompt_id=%s prompt_idx=%d batch_idx=%d"
             " intra_batch_idx=%d policy_version=%d next_batch=%d",
@@ -727,9 +823,6 @@ class StandardRLProgram(RLProgram):
         dispatch_kwargs: dict[str, Any] = {
             "num_generations": self.num_generations,
             "policy_version": self.policy_version,
-            "exact_token_continuity": getattr(
-                self.algo.algo_config, "exact_token_continuity", True
-            ),
         }
         if self.generation_args is not None:
           dispatch_kwargs["generation_args"] = self.generation_args
@@ -958,6 +1051,96 @@ class StandardRLProgram(RLProgram):
         ),
     )
 
+  def _build_scored_item(
+      self,
+      src_item: datatypes.TrajectoryItem,
+      payload: datatypes.RLTrainerPayload,
+      reward_val: float,
+  ) -> datatypes.TrajectoryItem:
+    """Builds a scored TrajectoryItem for telemetry and trajectory logging."""
+    src_traj = src_item.traj
+    if isinstance(src_traj, dict):
+      raw_status = src_traj.get("status") or getattr(src_item, "status", None)
+      traj_dict = dict(src_traj)
+      src_traj.pop("routed_experts", None)
+    elif src_traj is not None:
+      raw_status = getattr(src_traj, "status", None) or getattr(
+          src_item, "status", None
+      )
+      traj_dict = src_traj.to_dict() if hasattr(src_traj, "to_dict") else {}
+    else:
+      raw_status = getattr(src_item, "status", None)
+      traj_dict = {}
+    if isinstance(raw_status, datatypes.TrajectoryStatus):
+      status = raw_status
+    elif isinstance(raw_status, str):
+      status = getattr(
+          datatypes.TrajectoryStatus,
+          raw_status.upper(),
+          datatypes.TrajectoryStatus.SUCCEEDED
+          if raw_status.upper() in ("COMPLETED", "SUCCESS")
+          else datatypes.TrajectoryStatus.RUNNING,
+      )
+    else:
+      status = datatypes.TrajectoryStatus.RUNNING
+    metadata = dict(src_item.metadata) if src_item.metadata else {}
+    if isinstance(src_item.metadata, dict):
+      src_item.metadata.pop("routed_experts", None)
+    metadata.pop("routed_experts", None)
+    traj_dict.pop("routed_experts", None)
+    traj_dict["trajectory_reward"] = reward_val
+    traj_dict["status"] = status
+    traj_dict["conversation_masks"] = payload.completion_mask
+    return datatypes.TrajectoryItem(
+        prompt_id=src_item.prompt_id,
+        group_index=src_item.group_index,
+        start_step=0,
+        traj=traj_dict,
+        is_valid=src_item.is_valid,
+        prompt_tokens=getattr(src_item, "prompt_tokens", None),
+        completion_tokens=getattr(src_item, "completion_tokens", None),
+        action_mask=getattr(src_item, "action_mask", None),
+        routed_experts=None,
+        metadata=metadata,
+        # TODO: b/552087289 - Replace TrajectoryItem with a compact typed
+        # telemetry record (identity + reward + generation facts +
+        # RolloutFacts).
+    )
+
+  def _critique_group(
+      self,
+      group: Sequence[datatypes.TrajectoryItem],
+  ) -> ScoredGroup:
+    """Scores a trajectory group and builds its RLTrainerPayloads and ScoredGroup off-loop."""
+    rewards, group_reward_log_metrics = self._score_group(group)
+    # Pure OPD keeps task scores for reporting without creating task advantages.
+    training_rewards = (
+        [0.0] * len(rewards)
+        if self.opd_config is not None
+        and self.opd_config.task_reward_coefficient == 0
+        else rewards
+    )
+    payloads = payload_builder.create_trainer_payloads(
+        group,
+        rewards=training_rewards,
+        algo_config=self.algo_config,
+    )
+    if len(payloads) != len(group):
+      raise ValueError(
+          f"create_trainer_payloads returned {len(payloads)} payloads"
+          f" for a group of {len(group)} items."
+      )
+    items = [
+        self._build_scored_item(src_item, payload, reward_val)
+        for src_item, payload, reward_val in zip(group, payloads, rewards)
+    ]
+    return ScoredGroup(
+        payloads=tuple(payloads),
+        items=tuple(items),
+        rewards=tuple(rewards),
+        reward_log_metrics=group_reward_log_metrics,
+    )
+
   async def critique_stage(self) -> None:
     """Stage 2: Scores rewards, PRMs, and reference KL logprobs."""
     assert self.engine is not None
@@ -976,129 +1159,31 @@ class StandardRLProgram(RLProgram):
               f" num_generations={self.num_generations}."
           )
 
-        rewards, group_reward_log_metrics = await asyncio.to_thread(
-            self._score_group, group
-        )
-
-        # Pure OPD retains task scores for evaluation/telemetry but does not
-        # pass them to the group-relative task advantage estimator.
-        training_rewards = (
-            [0.0] * len(rewards)
-            if self.opd_config is not None
-            and self.opd_config.task_reward_coefficient == 0
-            else rewards
-        )
-        raw_payloads = self.algo.create_trainer_payloads(
-            group, rewards=training_rewards
-        )
-        if len(raw_payloads) != len(group):
-          raise ValueError(
-              f"create_trainer_payloads returned {len(raw_payloads)} payloads"
-              f" for a group of {len(group)} items."
-          )
+        scored_group = await asyncio.to_thread(self._critique_group, group)
         if self.opd_config is not None:
-          raw_payloads, opd_metrics = await self._apply_opd(raw_payloads)
-          group_reward_log_metrics = {
-              **group_reward_log_metrics,
-              **opd_metrics,
-          }
-        trainer_payloads = collections.deque(raw_payloads)
-        del raw_payloads
-        group_payloads: list[datatypes.RLTrainerPayload] = []
-        group_items: list[datatypes.TrajectoryItem] = []
-        for idx in range(len(trainer_payloads)):
-          payload = trainer_payloads.popleft()
-          reward_val = rewards[idx]
-          src_item = group[idx]
-          src_traj = getattr(src_item, "traj", None)
-          if isinstance(src_traj, dict):
-            raw_status = src_traj.get("status") or getattr(
-                src_item, "status", None
-            )
-            traj_dict = dict(src_traj)
-          elif src_traj is not None:
-            raw_status = getattr(src_traj, "status", None) or getattr(
-                src_item, "status", None
-            )
-            traj_dict = (
-                src_traj.to_dict() if hasattr(src_traj, "to_dict") else {}
-            )
-          else:
-            raw_status = getattr(src_item, "status", None)
-            traj_dict = {}
-          if isinstance(raw_status, datatypes.TrajectoryStatus):
-            status = raw_status
-          elif isinstance(raw_status, str):
-            status = getattr(
-                datatypes.TrajectoryStatus,
-                raw_status.upper(),
-                datatypes.TrajectoryStatus.SUCCEEDED
-                if raw_status.upper() in ("COMPLETED", "SUCCESS")
-                else datatypes.TrajectoryStatus.RUNNING,
-            )
-          else:
-            status = datatypes.TrajectoryStatus.RUNNING
-          src_metadata = getattr(src_item, "metadata", None)
-          metadata = dict(src_metadata) if src_metadata else {}
-          metadata.pop("routed_experts", None)
-          traj_dict.pop("routed_experts", None)
-          if isinstance(src_traj, dict):
-            src_traj.pop("routed_experts", None)
-          if isinstance(src_metadata, dict):
-            src_metadata.pop("routed_experts", None)
-          src_policy_version = getattr(src_item, "policy_version", None)
-          if src_policy_version is None:
-            src_policy_version = metadata.get("policy_version", 0)
-          src_policy_version = int(src_policy_version or 0)
-          traj_dict["trajectory_reward"] = reward_val
-          traj_dict["status"] = status
-          traj_dict["conversation_masks"] = payload.completion_mask
-          traj_dict["policy_version"] = src_policy_version
-          item = datatypes.TrajectoryItem(
-              prompt_id=getattr(src_item, "prompt_id", ""),
-              group_index=getattr(src_item, "group_index", 0),
-              start_step=0,
-              traj=traj_dict,
-              is_valid=getattr(src_item, "is_valid", True),
-              prompt_tokens=getattr(src_item, "prompt_tokens", None),
-              completion_tokens=getattr(src_item, "completion_tokens", None),
-              action_mask=getattr(src_item, "action_mask", None),
-              routed_experts=None,
-              policy_version=src_policy_version,
-              metadata=metadata,
-              # TODO: b/552087289 - Replace TrajectoryItem with a compact typed
-              # telemetry record (identity + reward + generation facts +
-              # RolloutFacts).
+          payloads, opd_metrics = await self._apply_opd(scored_group.payloads)
+          scored_group = dataclasses.replace(
+              scored_group,
+              payloads=tuple(payloads),
+              reward_log_metrics={
+                  **scored_group.reward_log_metrics,
+                  **opd_metrics,
+              },
           )
-          group_payloads.append(payload)
-          group_items.append(item)
-          del payload, src_item, src_traj, src_metadata
-          del traj_dict, metadata, item
-        scored_group = ScoredGroup(
-            payloads=tuple(group_payloads),
-            items=tuple(group_items),
-            rewards=tuple(rewards),
-            reward_log_metrics=group_reward_log_metrics,
-        )
-        del group_payloads, group_items, trainer_payloads
-        del group_reward_log_metrics
         await self.scored_q.put(scored_group)
         del scored_group
         if group:
-          first_meta = getattr(group[0], "metadata", None) or {}
-          first_policy_version = getattr(group[0], "policy_version", None)
-          if first_policy_version is None:
-            first_policy_version = first_meta.get("policy_version", 0)
+          first_meta = group[0].metadata
           logging.info(
               "[pipeline] ARRIVED prompt_id=%s prompt_idx=%s batch_idx=%s"
-              " intra_batch_idx=%s policy_version=%d",
-              getattr(group[0], "prompt_id", ""),
+              " intra_batch_idx=%s policy_version=%s",
+              group[0].prompt_id,
               first_meta.get("prompt_idx"),
               first_meta.get("batch_idx"),
               first_meta.get("intra_batch_idx"),
-              int(first_policy_version or 0),
+              _group_latest_policy_version(group),
           )
-        del group, rewards
+        del group
     finally:
       await self.scored_q.close()
 
@@ -1132,7 +1217,6 @@ class StandardRLProgram(RLProgram):
       self,
       *,
       all_step_items: Sequence[datatypes.TrajectoryItem],
-      step_rewards: Sequence[float],
       step_advantages: Sequence[float] | None = None,
       prompt_lengths: Sequence[int] = (),
       completion_lengths: Sequence[int] = (),
@@ -1173,18 +1257,24 @@ class StandardRLProgram(RLProgram):
         p_len + c_len
         for p_len, c_len in zip(prompt_lengths, completion_lengths, strict=True)
     ]
-    staleness_list = []
+    staleness_list: list[float] = []
+    version_span_list: list[float] = []
     for item in all_step_items:
-      # Batch ingestion staleness: consumed_policy_version - item.policy_version
-      pol_ver = getattr(item, "policy_version", None)
-      if (
-          pol_ver is None
-          and hasattr(item, "metadata")
-          and isinstance(item.metadata, dict)
-      ):
-        pol_ver = item.metadata.get("policy_version")
-      if pol_ver is not None:
-        staleness_list.append(float(max(0, consumed_policy_version - pol_ver)))
+      # Invalid items contribute no gradient, so their version is not part of
+      # the consumed batch's staleness. A valid item must carry one.
+      if not item.is_valid:
+        continue
+      item_version = trajectory_queue_manager.item_policy_version(item)
+      # With `max_staleness == 0` only current-version rollouts are admitted,
+      # so staleness is 0 by construction and is not logged. Version span is
+      # still logged: in-flight weight updates can raise it without staleness.
+      if self.max_staleness > 0:
+        staleness_list.append(
+            float(max(0, consumed_policy_version - item_version))
+        )
+      version_span_list.append(
+          float(trajectory_queue_manager.item_version_span(item))
+      )
 
     if prompt_lengths:
       self._log_metric(
@@ -1232,6 +1322,17 @@ class StandardRLProgram(RLProgram):
       }
       for tag, val in staleness_stats.items():
         self._log_metric(f"rollout/{tag}", val, log_step)
+    if version_span_list:
+      self._log_metric(
+          "rollout/version_span_mean",
+          float(np.mean(version_span_list)),
+          log_step,
+      )
+      self._log_metric(
+          "rollout/version_span_max",
+          float(np.max(version_span_list)),
+          log_step,
+      )
 
     rollout_facts = [
         step_telemetry.RolloutFacts.of(item) for item in all_step_items
@@ -1266,7 +1367,6 @@ class StandardRLProgram(RLProgram):
     )
 
     # --- 2. Reward Metrics ---
-    rewards_to_log = step_rewards
     if all_step_items:
       valid_flags = [item.is_valid for item in all_step_items]
       self._log_metric(
@@ -1274,22 +1374,10 @@ class StandardRLProgram(RLProgram):
           1.0 - float(np.mean(valid_flags)),
           log_step,
       )
-      rewards_to_log = [
-          reward
-          for reward, is_valid in zip(step_rewards, valid_flags)
-          if is_valid
-      ]
-
-    reward_mean = float(np.mean(rewards_to_log)) if rewards_to_log else 0.0
-    reward_std = float(np.std(rewards_to_log)) if rewards_to_log else 0.0
-    reward_min = float(np.min(rewards_to_log)) if rewards_to_log else 0.0
-    reward_max = float(np.max(rewards_to_log)) if rewards_to_log else 0.0
-    reward_sum = float(np.sum(rewards_to_log)) if rewards_to_log else 0.0
-    # Reduce each reward manager metric over all of the step's groups with its
-    # own aggregation function, the same way `MetricsBuffer` reduces per-call
-    # values in the RL learners: per-group scalars such as
-    # `trajectory_rewards/mean` are reduced across groups, and per-trajectory
-    # arrays such as `rewards/<reward_fn>` across all trajectories.
+    # Reduce each per-trajectory reward manager metric (such as
+    # `rewards/{mean,std,min,max,sum}`, `rewards/<reward_fn>` and `rewards/env`)
+    # across all valid trajectories in the step with its own aggregation
+    # function. The reward manager only scores valid trajectories.
     reward_metrics_accum: dict[
         str, tuple[RewardLogMetricAggFn, list[np.ndarray]]
     ] = {}
@@ -1301,18 +1389,18 @@ class StandardRLProgram(RLProgram):
     step_reward_metrics: dict[str, float] = {
         name: float(agg_fn(np.concatenate(values)))
         for name, (agg_fn, values) in reward_metrics_accum.items()
-        if values
     }
-    if rewards_to_log:
-      step_reward_metrics.update({
-          "rewards/mean": reward_mean,
-          "rewards/std": reward_std,
-          "rewards/min": reward_min,
-          "rewards/max": reward_max,
-          "rewards/sum": reward_sum,
-      })
     for name, val in step_reward_metrics.items():
       self._log_metric(name, val, log_step)
+    # A step whose groups all lack valid trajectories has no reward summary.
+    reward_mean, reward_std = (
+        (
+            step_reward_metrics["rewards/mean"],
+            step_reward_metrics["rewards/std"],
+        )
+        if "rewards/mean" in step_reward_metrics
+        else (0.0, 0.0)
+    )
 
     # --- Advantage Metrics ---
     advantage_mean = float(np.mean(step_advantages)) if step_advantages else 0.0
@@ -1345,13 +1433,15 @@ class StandardRLProgram(RLProgram):
         "policy_version": float(self.policy_version),
         "num_rollouts": float(num_rollouts),
         "num_microbatches": float(num_microbatches),
-        "step_time_sec": float(step_time_sec),
     }
     for tag, val in orchestrator_stats.items():
       self._log_metric(f"orchestrator/{tag}", val, log_step)
     if step_times is not None:
       for tag, val in dataclasses.asdict(step_times).items():
         self._log_metric(f"perf/{tag}", val, log_step)
+    if self.engine is not None:
+      for tag, val in self.engine.fault_tolerance_metrics().items():
+        self._log_metric(tag, val, log_step)
     if padding_stats:
       for tag, val in batch_assembly.summarize_padding_stats(
           padding_stats
@@ -1513,8 +1603,8 @@ class StandardRLProgram(RLProgram):
         completion_tokens=batch.completion_ids,
         temperature=gen_temp if gen_temp is not None else 1.0,
         model_role="actor",
-        pad_id=self.batch_config.pad_id,
-        eos_id=getattr(self.assembler, "eos_id", self.batch_config.pad_id),
+        pad_id=self.pad_id,
+        eos_id=self.eos_id,
         segment_ids=batch.segment_ids,
         segment_positions=batch.segment_positions,
         # Score under the same replayed routing the loss will use, so the
@@ -1577,9 +1667,7 @@ class StandardRLProgram(RLProgram):
     for item in all_step_items:
       metadata = dict(getattr(item, "metadata", None) or {})
       metadata.pop("routed_experts", None)
-      env_config = metadata.get("env_config")
-      if not isinstance(env_config, dict):
-        env_config = {}
+      metadata.pop("env_config", None)
       # Logging must never take down a training step, so read defensively
       # rather than reusing the strict `_extract_reward` above.
       traj = dict(getattr(item, "traj", None) or {})
@@ -1593,17 +1681,22 @@ class StandardRLProgram(RLProgram):
           "consumed_policy_version": consumed_policy_version,
           "prompt_id": getattr(item, "prompt_id", ""),
           "group_index": getattr(item, "group_index", 0),
-          "rollout_policy_version": getattr(item, "policy_version", 0),
+          "rollout_policy_version": (
+              trajectory_queue_manager.item_policy_version(item)
+              if trajectory_queue_manager.has_policy_version(item)
+              else None
+          ),
           "status": status or "UNKNOWN",
           "reward": float(reward) if reward is not None else None,
-          "question": metadata.get("question", env_config.get("question", "")),
-          "prompt": metadata.get("prompt", env_config.get("prompt", "")),
+          "question": metadata.get("question", ""),
+          "prompt": _extract_rollout_prompt(
+              metadata, traj.get("conversation_text")
+          ),
           "completion": _format_rollout_completion(
               traj.get("conversation_text", "")
           ),
           "gold_answer": metadata.get(
-              "gold_answer",
-              metadata.get("answer", env_config.get("gold_answer", "")),
+              "gold_answer", metadata.get("answer", "")
           ),
           "prompt_tokens": getattr(item, "prompt_tokens", None),
           "completion_tokens": getattr(item, "completion_tokens", None),
@@ -1614,12 +1707,21 @@ class StandardRLProgram(RLProgram):
 
   async def _timed_train_step(
       self, batch: datatypes.RLTrainerPayload, *, apply_optimizer: bool
-  ) -> tuple[Any, float]:
-    """Runs one microbatch's `train_step`; returns its result and seconds.
+  ) -> tuple[Any, float, float]:
+    """Runs one microbatch's `train_step`; returns (result, start, end).
 
-    Intermediate microbatches (`apply_optimizer=False`) intentionally return
-    once `fwd_bwd` is dispatched so the next microbatch's RPC, host-to-device
-    input sharding, and XLA launch stay pipelined with TPU execution.
+    Intermediate `train_step` calls (`apply_optimizer=False`) return once
+    `fwd_bwd` is dispatched on the Trainer, and up to
+    `_MAX_INFLIGHT_TRAIN_STEPS` microbatches may be in flight concurrently so
+    the next microbatch's RPC serialization, network transfer, and worker
+    deserialization overlap with the current microbatch's Trainer execution.
+
+    Args:
+      batch: Microbatch payload for the trainer worker.
+      apply_optimizer: Whether to apply the accumulated gradients on this step.
+
+    Returns:
+      A `(result, start_time, end_time)` tuple.
     """
     assert self.engine is not None
     start = time.monotonic()
@@ -1629,28 +1731,61 @@ class StandardRLProgram(RLProgram):
         accumulate_gradients=True,
         apply_optimizer=apply_optimizer,
     )
-    return result, time.monotonic() - start
+    return result, start, time.monotonic()
 
   async def train_stage(self) -> None:
     """Stage 3: Streaming gradient accumulation with RLTrainerPayloads."""
     assert self.engine is not None
 
-    pending_train: asyncio.Task[tuple[Any, float]] | None = None
+    pending_prep: asyncio.Task[None] | None = None
+    pending_trains: collections.deque[
+        asyncio.Task[tuple[Any, float, float]]
+    ] = collections.deque()
     step_result: Any = None
     step_times = step_telemetry.StepTimes()
+    last_train_end_mono = 0.0
 
-    async def _await_pending_train() -> None:
-      nonlocal pending_train, step_result
-      task, pending_train = pending_train, None
+    async def _drain_pending_prep() -> None:
+      nonlocal pending_prep
+      task, pending_prep = pending_prep, None
       if task is not None:
-        step_result, train_sec = await task
-        step_times.policy_training_time += train_sec
+        await task
+
+    async def _next_scored_group() -> ScoredGroup | None:
+      # Surface a failed in-flight `pending_prep` while waiting for the next
+      # group instead of stalling until that group arrives from `scored_q`.
+      get_task = asyncio.ensure_future(self.scored_q.get())
+      try:
+        while (prep := pending_prep) is not None and not get_task.done():
+          await asyncio.wait(
+              (get_task, prep), return_when=asyncio.FIRST_COMPLETED
+          )
+          if prep.done():
+            await _drain_pending_prep()
+        return await get_task
+      finally:
+        get_task.cancel()
+
+    async def _await_oldest_train() -> None:
+      nonlocal step_result, last_train_end_mono
+      if not pending_trains:
+        return
+      task = pending_trains.popleft()
+      step_result, start_mono, end_mono = await task
+      effective_start = max(start_mono, last_train_end_mono)
+      step_times.policy_training_time += max(0.0, end_mono - effective_start)
+      last_train_end_mono = max(last_train_end_mono, end_mono)
+
+    async def _drain_pending_trains() -> None:
+      while pending_trains:
+        await _await_oldest_train()
 
     try:
       while self.max_steps is None or self._step < self.max_steps:
         current_step = self._step
         step_start_time = time.monotonic()
         step_times = step_telemetry.StepTimes()
+        last_train_end_mono = 0.0
         consumed_policy_version = self.policy_version
 
         uncommitted_groups: list[list[datatypes.TrajectoryItem]] = []
@@ -1658,7 +1793,6 @@ class StandardRLProgram(RLProgram):
         step_result = None
         trainer_metrics = None
         step_sampler_agreement: dict[str, tuple[Any, list[Any]]] = {}
-        step_rewards: list[float] = []
         step_advantages: list[float] = []
         step_prompt_lengths: list[int] = []
         step_completion_lengths: list[int] = []
@@ -1698,9 +1832,86 @@ class StandardRLProgram(RLProgram):
           step_times.checkpoint_time += time.monotonic() - checkpoint_start
           checkpoint_saved = True
 
+        async def _prepare_and_enqueue_train(
+            mb: batch_assembly.AssembledBatch,
+        ) -> None:
+          nonlocal num_microbatches
+          batch = self._with_opd_attention_mask(mb.payload, mb.padding_stats)
+          if self.algo_config.requires_reference_kl:
+            if not isinstance(batch, datatypes.RLTrainerPayload):
+              raise TypeError(
+                  "Reference KL requires an assembler that returns "
+                  "datatypes.RLTrainerPayload microbatches; got "
+                  f"{type(batch).__name__}."
+              )
+            reference_start = time.monotonic()
+            gen_temp = self.generation_args.temperature
+            ref_req = datatypes.LogprobsRequest(
+                request_id="reference_logps",
+                prompt_tokens=batch.prompt_ids,
+                completion_tokens=batch.completion_ids,
+                temperature=gen_temp if gen_temp is not None else 1.0,
+                model_role="reference",
+                segment_ids=batch.segment_ids,
+                segment_positions=batch.segment_positions,
+                token_mask=(
+                    None
+                    if batch.completion_attention_mask is None
+                    else np.concatenate(
+                        [batch.prompt_mask, batch.completion_attention_mask],
+                        axis=1,
+                    )
+                ),
+            )
+            ref_logps = await self.engine.per_token_logps(
+                datatypes.Role.REFERENCE,
+                items=ref_req,
+            )
+            del ref_req
+            step_times.reference_logps_time += (
+                time.monotonic() - reference_start
+            )
+            batch = batch_assembly.with_ref_per_token_logps(batch, ref_logps)
+          if (
+              isinstance(batch, datatypes.RLTrainerPayload)
+              and batch.old_per_token_logps is not None
+              and self.algo_config.use_rollout_logps
+              and not self.can_fuse_agreement_in_loss
+          ):
+            await _drain_pending_trains()
+            agreement_start = time.monotonic()
+            batch = await self._apply_sampler_trainer_agreement(
+                batch, step_sampler_agreement
+            )
+            step_times.sampler_agreement_time += (
+                time.monotonic() - agreement_start
+            )
+
+          num_microbatches += 1
+          step_padding_stats.append(mb.padding_stats)
+          logging.info(
+              "Packed %d trajectories into microbatch: %s"
+              " (padding_ratio=%.3f, row_imbalance=%.3f)",
+              len(mb.trajectory_ids),
+              logging_utils.summarize_list(list(mb.trajectory_ids)),
+              mb.padding_stats.padding_ratio,
+              mb.padding_stats.row_imbalance,
+          )
+          is_final_batch = mb.is_final_batch
+          while pending_trains and (
+              pending_trains[0].done()
+              or len(pending_trains) >= _MAX_INFLIGHT_TRAIN_STEPS
+          ):
+            await _await_oldest_train()
+          pending_trains.append(
+              asyncio.create_task(
+                  self._timed_train_step(batch, apply_optimizer=is_final_batch)
+              )
+          )
+
         while groups_consumed < self.full_batch_size:
           wait_start = time.monotonic()
-          scored_group = await self.scored_q.get()
+          scored_group = await _next_scored_group()
           step_times.exposed_generation_time += time.monotonic() - wait_start
           had_scored_items = scored_group is not None
           if scored_group is None:
@@ -1714,13 +1925,11 @@ class StandardRLProgram(RLProgram):
             if scored_group.reward_log_metrics:
               step_reward_log_metrics.append(scored_group.reward_log_metrics)
             payloads: list[datatypes.RLTrainerPayload] = []
-            for item, payload, reward_val in zip(
+            for item, payload in zip(
                 scored_group.items,
                 scored_group.payloads,
-                scored_group.rewards,
                 strict=True,
             ):
-              step_rewards.append(reward_val)
               advantages = np.asarray(payload.advantages)
               if advantages.size > 0:
                 step_advantages.append(float(np.mean(advantages)))
@@ -1739,7 +1948,7 @@ class StandardRLProgram(RLProgram):
                   },
               )
               payloads.append(payload)
-              del item, payload, reward_val
+              del item, payload
             del scored_group
             uncommitted_groups.append(group_items)
             all_step_items.extend(group_items)
@@ -1758,66 +1967,14 @@ class StandardRLProgram(RLProgram):
             step_packing_time_sec += time.perf_counter() - packing_start_time
             if mb is None:
               break
-            batch = self._with_opd_attention_mask(mb.payload, mb.padding_stats)
-            if getattr(self.algo, "requires_reference_kl", False):
-              if not isinstance(batch, datatypes.RLTrainerPayload):
-                raise TypeError(
-                    "Reference KL requires an assembler that returns "
-                    "datatypes.RLTrainerPayload microbatches; got "
-                    f"{type(batch).__name__}."
-                )
-              reference_start = time.monotonic()
-              ref_logps = await self.engine.per_token_logps(
-                  datatypes.Role.REFERENCE,
-                  items=batch,
-                  temperature=self.generation_args.temperature,
-              )
-              step_times.reference_logps_time += (
-                  time.monotonic() - reference_start
-              )
-              batch = batch_assembly.with_ref_per_token_logps(batch, ref_logps)
-            algo_config = getattr(self.algo, "algo_config", None)
-            if (
-                isinstance(batch, datatypes.RLTrainerPayload)
-                and batch.old_per_token_logps is not None
-                and algo_config is not None
-                and algo_config.use_rollout_logps
-                and not self.can_fuse_agreement_in_loss
-            ):
-              await _await_pending_train()
-              agreement_start = time.monotonic()
-              batch = await self._apply_sampler_trainer_agreement(
-                  batch, step_sampler_agreement
-              )
-              step_times.sampler_agreement_time += (
-                  time.monotonic() - agreement_start
-              )
-
-            num_microbatches += 1
-            step_padding_stats.append(mb.padding_stats)
-            logging.info(
-                "Packed %d trajectories into microbatch: %s"
-                " (padding_ratio=%.3f, row_imbalance=%.3f)",
-                len(mb.trajectory_ids),
-                logging_utils.summarize_list(list(mb.trajectory_ids)),
-                mb.padding_stats.padding_ratio,
-                mb.padding_stats.row_imbalance,
-            )
+            await _drain_pending_prep()
             is_final_batch = mb.is_final_batch
-            await _await_pending_train()
-            pending_train = asyncio.create_task(
-                self._timed_train_step(batch, apply_optimizer=is_final_batch)
-            )
-            del batch, mb
             if is_final_batch:
-              await _await_pending_train()
-              metrics_start = time.monotonic()
-              trainer_metrics = await self.engine.get_metrics(
-                  role=datatypes.Role.ACTOR
-              )
-              step_times.policy_training_time += (
-                  time.monotonic() - metrics_start
-              )
+              await _prepare_and_enqueue_train(mb)
+              del mb
+              await _drain_pending_trains()
+              if isinstance(step_result, dict):
+                trainer_metrics = step_result.get("metrics")
               final_minibatch_completed = True
               # TODO(tunix-dev): Configurable checkpointing frequency. Today we
               # checkpoint at the same frequency as the weight update.
@@ -1833,14 +1990,21 @@ class StandardRLProgram(RLProgram):
               )
               if full_batch_complete:
                 await _maybe_save_checkpoint()
+            else:
+              pending_prep = asyncio.create_task(_prepare_and_enqueue_train(mb))
+              del mb
+              await asyncio.sleep(0)
+              if pending_prep.done():
+                await _drain_pending_prep()
           del batch_iter
 
           if not had_scored_items or groups_consumed >= self.full_batch_size:
-            if not checkpoint_saved and final_minibatch_completed:
-              await _maybe_save_checkpoint()
             break
 
-        await _await_pending_train()
+        await _drain_pending_prep()
+        await _drain_pending_trains()
+        if not checkpoint_saved and final_minibatch_completed:
+          await _maybe_save_checkpoint()
 
         if not all_step_items:
           logging.info(
@@ -1871,16 +2035,9 @@ class StandardRLProgram(RLProgram):
             current_step,
             self.dispatch_window.next_batch,
             consumed_policy_version,
+            [_group_latest_policy_version(g) for g in uncommitted_groups if g],
             [
-                getattr(g[0], "policy_version", 0)
-                for g in uncommitted_groups
-                if g
-            ],
-            [
-                (
-                    getattr(g[0], "prompt_id", ""),
-                    (getattr(g[0], "metadata", None) or {}).get("batch_idx"),
-                )
+                (g[0].prompt_id, g[0].metadata.get("batch_idx"))
                 for g in uncommitted_groups
                 if g
             ],
@@ -1894,7 +2051,6 @@ class StandardRLProgram(RLProgram):
 
         metrics_summary = self._collect_and_log_step_metrics(
             all_step_items=all_step_items,
-            step_rewards=step_rewards,
             step_advantages=step_advantages,
             prompt_lengths=step_prompt_lengths,
             completion_lengths=step_completion_lengths,
@@ -1949,15 +2105,22 @@ class StandardRLProgram(RLProgram):
         if self.on_step_end:
           self.on_step_end(current_step, step_result)
         self._step += 1
-        # Strictly after the increment: the dispatcher re-reads `next_batch` on
-        # waking, and waking it on the old value would park it again with no one
-        # left to set the event.
+        # Strictly after the increment: the dispatcher re-reads
+        # `in_flight_prompts` on waking, and waking it on the old step would
+        # park it again with no one left to set the event.
         self.dispatch_window.release()
     finally:
-      if pending_train is not None:
-        pending_train.cancel()
+      if pending_prep is not None:
+        pending_prep.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
-          await _await_pending_train()
+          await pending_prep
+        pending_prep = None
+      for task in pending_trains:
+        task.cancel()
+      while pending_trains:
+        task = pending_trains.popleft()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+          await task
 
   async def run_async(
       self,
@@ -1975,8 +2138,10 @@ class StandardRLProgram(RLProgram):
 
     engine.configure_worker(
         role=datatypes.Role.ACTOR,
-        algo=self.algo,
+        algo_config=self.algo_config,
         assembler=self.assembler,
+        pad_id=self.pad_id,
+        eos_id=self.eos_id,
         can_fuse_agreement_in_loss=self.can_fuse_agreement_in_loss,
         precompile=self.precompile_trainer,
         return_routed_experts=bool(self.generation_args.return_routed_experts),

@@ -18,7 +18,7 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-  "datasets",
+  "datasets>=4.0.0",  # Avoid pip backtracking to legacy datasets/pyarrow sdist on Python 3.12+
   "flax>=0.12.5",
   "fsspec",  # notebook dependency
   "google-metrax>=0.2.3",
@@ -29,7 +29,7 @@ dependencies = [
   "importlib_resources",
   # Jax 0.7.2 has performance regression on OSS
   # Jax 0.11.1 removed jax.experimental.hijax.MutableHiType, which flax (through 0.12.8, the newest release) still subclasses
-  "jax[tpu]>=0.6.0,!=0.7.2,<0.11.1",
+  "jax>=0.6.0,!=0.7.2,<0.11.1",
   "jaxtyping",
   "jinja2",  # Huggingface chat template
   "kagglehub",
@@ -65,6 +65,24 @@ docs = [
     "sphinx_contributors",
 ]
 prod = [
+  "jax[tpu]>=0.6.0,!=0.7.2,<0.11.1",
+  "tokamax>=0.0.4",
+]
+tpu = [
+  "jax[tpu]>=0.6.0,!=0.7.2,<0.11.1",
+  "tokamax>=0.0.4",
+]
+gpu = [
+  "jax[cuda12]>=0.6.0,!=0.7.2,<0.11.1",
+  "tokamax>=0.0.4",
+  "triton",
+  "jax-triton",  # vLLM Triton GPU paged attention (not yet supported by Tokamax)
+]
+cuda13 = [
+  "jax[cuda13]>=0.6.0,!=0.7.2,<0.11.1",
+  "tokamax>=0.0.4",
+  "triton",
+  "jax-triton",  # vLLM Triton GPU paged attention (not yet supported by Tokamax)
 ]
 dev = [
   # Manully install vLLM & tpu-inferece, which depends on jax[tpu]==0.7.2
@@ -74,16 +92,18 @@ test = [
   "pytest-xdist",
   "gcsfs",
   "chex",
+  "opentelemetry-exporter-otlp-proto-grpc>=1.25.0",
   "opentelemetry-sdk>=1.25.0",
-  "wandb",  # Offline end-to-end test for the OpenTelemetry W&B exporter
 ]
 cli = [
   "tensorflow",
 ]
 otel = [
-  # Experimental OpenTelemetry double-write path for MetricsLogger.
+  # OpenTelemetry metrics export for dist_rl.
   "opentelemetry-api>=1.25.0",
   "opentelemetry-sdk>=1.25.0",
+  # OTLP/gRPC exporter so the SDK can reach a collector.
+  "opentelemetry-exporter-otlp-proto-grpc>=1.25.0",
 ]
 frozenlake = [
   "gymnasium",
@@ -147,3 +167,21 @@ known_third_party = ["tunix"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 addopts = ["--import-mode=importlib"]
+
+[tool.cl_complexity_gate]
+# CL Complexity Gate configuration:
+# - enabled_dimensions: active gate dimensions (subset of [1, 2, 3, 4]; e.g., [3] isolates Dim 3 only)
+# - Dim 1 (Soft Scope Budget): formatting-invariant AST statement delta weighted into continuous Score (no standalone LOC hard cliff)
+# - Dim 2 (Local Control Flow): per-function cognitive (12/15), cyclomatic (10/15), nesting (3/4), legacy delta budget (+5)
+# - Dim 3 (Structural Indirection): per-file single-caller chains, trivial wrapper additions, inner closures, and sprawl
+# - Dim 4 (Structural Clone & Fork Hygiene): position-independent AST 2-gram Multiset Jaccard + sanctioned forks
+enabled_dimensions = [1, 2, 3, 4]
+weights = { prod_loc = 0.15, cognitive_excess = 2.0, call_depth_excess = 15.0, trivial_helper = 10.0, pass_through_func = 10.0, nested_closure = 5.0, duplicate_clone = 20.0 }
+thresholds = { max_cognitive_warn = 12, max_cognitive_fail = 15, max_cyclomatic_fail = 15, max_nesting_fail = 4, max_legacy_cog_delta_fail = 5, max_legacy_cyc_delta_fail = 5, max_call_depth_warn = 2, max_call_depth_fail = 2, max_trivial_helpers_fail = 3, max_pass_through_ratio_fail = 0.25, max_nested_closures_warn = 2, max_nested_closures_fail = 4, trivial_helper_max_stmts = 4, trivial_helper_max_cognitive = 1, max_sprawl_helpers_fail = 5, max_file_cog_delta_sprawl = 40, min_clone_stmts = 7, min_clone_cognitive = 4, min_clone_jaccard = 0.60 }
+intentional_forks = [
+  ["sft/peft_trainer.py", "dist_rl/train/peft_trainer_v2.py"],
+  ["generate/sampler.py", "dist_rl/rollout/vanilla_sampler.py"],
+  ["models/*/model.py", "models/*/model.py"],
+  ["models/*/params*.py", "models/*/params*.py"],
+  ["dist_rl/examples/*", "experimental/examples/*"],
+]

@@ -27,6 +27,7 @@ from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.examples.on_policy_distillation import evaluation
 from tunix.dist_rl.orchestrator import distributed_rl_engine
 from tunix.dist_rl.orchestrator import worker_registry
+from tunix.dist_rl.testing import worker_registry_testing
 from tunix.dist_rl.worker import remote_execution
 
 
@@ -208,6 +209,9 @@ class EvaluationEngineTest(unittest.IsolatedAsyncioTestCase):
     handle.asubmit = mock.AsyncMock(side_effect=respond)
     registry = worker_registry.WorkerRegistry()
     registry.register_handle("rollout-eval", [datatypes.Role.ROLLOUT], handle)
+    worker_registry_testing.set_status(
+        registry, "rollout-eval", datatypes.AdmissionStatus.ACTIVE
+    )
     engine = distributed_rl_engine.DistributedRLEngine(registry)
     engine._policy_version = 2
     report = await self._evaluate(engine)
@@ -292,7 +296,7 @@ class EvaluationEngineTest(unittest.IsolatedAsyncioTestCase):
           if problem == "unknown":
             items[0].prompt_id = "unknown"
           elif problem == "stale":
-            items[0].traj["policy_version"] = 1
+            items[0].traj["policy_versions"] = [1]
           elif problem == "failed":
             items[0].traj["status"] = "FAILED"
           elif problem == "mask":

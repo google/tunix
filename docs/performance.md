@@ -224,8 +224,7 @@ ClusterConfig(
 
 Weight transfer and sync is critical to keeping rollout models up-to-date with
 the policy model. This process is controlled by RLEngine regardless of which
-rollout engine is used (vanilla, vllm, or sglang-jax), and requires no user
-intervention.
+rollout engine is used (vanilla or vllm), and requires no user intervention.
 
 Rollout models often have different mesh or sharding specifications than policy
 models, meaning that when syncing weights, resharding is required to place the

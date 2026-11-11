@@ -14,6 +14,7 @@
 
 """Summarizes every trajectory in a run."""
 
+from collections.abc import Sequence
 import dataclasses
 import json
 import sys
@@ -22,7 +23,8 @@ import pandas as pd
 import simple_parsing
 from tunix.dist_rl.trajectory import store
 from tunix.dist_rl.trajectory.explorer.commands import base
-from tunix.dist_rl.trajectory.explorer.commands import formatting
+from tunix.dist_rl.trajectory.explorer.diagnostics import formatting
+from tunix.dist_rl.trajectory.explorer.diagnostics import schema_diagnostics
 from tunix.dist_rl.trajectory.explorer.diagnostics import stats
 
 
@@ -36,13 +38,18 @@ class SummaryCommand(base.BaseCommand):
   )
 
   def execute(
-      self, reader: store.TrajectoryReader, output_json: bool = False
+      self,
+      reader: store.TrajectoryReader,
+      output_json: bool = False,
+      *,
+      diagnostics: Sequence[schema_diagnostics.SchemaDiagnostics] = (),
   ) -> int:
     """Summarizes all trajectories the reader can see.
 
     Args:
       reader: The trajectory store reader backend.
       output_json: Whether to format output as machine-readable JSON.
+      diagnostics: Schema diagnostics to compute and render for the run.
 
     Returns:
       Process exit code (0 for success).
@@ -70,6 +77,7 @@ class SummaryCommand(base.BaseCommand):
     run_stats = stats.RunStats.from_trajectories(
         reader.get_trajectories(ids),
         num_total_trajectories=total_count,
+        diagnostics=diagnostics,
     )
     if output_json:
       # `to_dict` yields native Python values (unlike `to_json`, which rounds
@@ -87,12 +95,32 @@ class SummaryCommand(base.BaseCommand):
     elif total_count == 0:
       print("No trajectories found.")
     else:
-      print(_table(run_stats.df), "", *_totals(run_stats), sep="\n")
+      print(
+          _table(run_stats, diagnostics),
+          "",
+          *_totals(run_stats, diagnostics),
+          sep="\n",
+      )
     return 0
 
 
-def _table(df: pd.DataFrame) -> str:
-  """Renders one row per trajectory; unreported quantities print as `-`."""
+def _table(
+    run_stats: stats.RunStats,
+    diagnostics: Sequence[schema_diagnostics.SchemaDiagnostics],
+) -> str:
+  """Renders one row per trajectory; unreported quantities print as `-`.
+
+  Args:
+    run_stats: The run to render.
+    diagnostics: The schema diagnostics `run_stats` was computed with.
+
+  Returns:
+    The table: the base columns, then those of each active schema diagnostics.
+
+  Raises:
+    ValueError: If a schema diagnostics' column header is already in the table.
+  """
+  df = run_stats.df
   steps = df[["steps_agent", "steps_user", "steps_system", "steps_other"]]
   token_columns = [f"tokens_{f}" for f in stats.TokenCounts._fields]
   tokens = [
@@ -109,19 +137,37 @@ def _table(df: pd.DataFrame) -> str:
       "tool calls": df["num_tool_calls"],
       "reward": df["total_reward"].map("{:.3g}".format, na_action="ignore"),
   })
+  for d in diagnostics:
+    if d.NAMESPACE not in run_stats.schema_stats:
+      continue
+    columns = d.format_summary_columns(run_stats.columns_of(d))
+    for header, column in columns.items():
+      if header in table.columns:
+        raise ValueError(
+            f"{type(d).__name__}: summary column {header!r} is"
+            " already in the table."
+        )
+      table[header] = column
   table = table.astype("string").fillna(formatting.MISSING)
   return table.to_string(index=False)
 
 
-def _totals(run_stats: stats.RunStats) -> list[str]:
-  """Returns one line per run-level total."""
+def _totals(
+    run_stats: stats.RunStats,
+    diagnostics: Sequence[schema_diagnostics.SchemaDiagnostics],
+) -> list[str]:
+  """Returns one line per run-level total.
+
+  Args:
+    run_stats: The run to render.
+    diagnostics: The schema diagnostics `run_stats` was computed with.
+  """
   n = run_stats.num_trajectories
   total = run_stats.num_total_trajectories
   if total is not None and n < total:
     trajectories_line = f"Trajectories: {n} (of {total})"
   else:
     trajectories_line = f"Trajectories: {n}"
-  statuses = {s.name: c for s, c in run_stats.status_counts.items()}
   lines = [
       trajectories_line,
       f"Steps: {run_stats.steps}",
@@ -130,7 +176,7 @@ def _totals(run_stats: stats.RunStats) -> list[str]:
           f" reported by {run_stats.num_with_tokens}/{n}"
       ),
       (
-          f"Statuses: {formatting.format_counts(statuses)}"
+          f"Statuses: {formatting.format_counts(run_stats.status_counts)}"
           f" reported by {run_stats.num_with_status}/{n}"
       ),
       (
@@ -139,6 +185,10 @@ def _totals(run_stats: stats.RunStats) -> list[str]:
           f" reported by {run_stats.num_with_reward}/{n}"
       ),
   ]
+  for d in diagnostics:
+    if d.NAMESPACE in run_stats.schema_stats:
+      run_summary = run_stats.schema_stats[d.NAMESPACE]
+      lines.extend(d.format_summary_totals(run_summary, n))
   if run_stats.tool_counts:
     lines.append(
         f"Tool calls: {formatting.format_counts(run_stats.tool_counts)}"
