@@ -1102,7 +1102,9 @@ class AttentionTest(parameterized.TestCase):
     """Verifies init_cache creates NamedSharding and calls _zeros on device."""
     act_btnh = ('fsdp', None, 'tp', None)
     config = model_lib.ModelConfig.gemma4_e2b()
-    config.shd_config = mock.MagicMock(act_btnh=act_btnh)
+    config.shd_config = dataclasses.replace(
+        config.shd_config, act_btnh=act_btnh
+    )
     attn = attention_lib.Attention(
         config=config,
         attn_type=model_lib.AttentionType.GLOBAL,
@@ -1155,6 +1157,67 @@ class AttentionTest(parameterized.TestCase):
     self.assertTrue((cache['k'] == 0.0).all())
     self.assertTrue((cache['v'] == 0.0).all())
     self.assertTrue((cache['end_index'] == 0).all())
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='default_fsdp',
+          shd_config=config_lib.ShardingConfig.get_default_sharding(
+              is_sampling=False
+          ),
+          expected_kv_sharding=P(None, None, 'fsdp', None),
+      ),
+      dict(
+          testcase_name='sampling_replicated_no_fsdp',
+          shd_config=config_lib.ShardingConfig.get_default_sharding(
+              is_sampling=True
+          ),
+          expected_kv_sharding=P(None, None, None, None),
+      ),
+      dict(
+          testcase_name='custom_axis_name',
+          shd_config=dataclasses.replace(
+              config_lib.ShardingConfig.get_default_sharding(is_sampling=True),
+              kv_weight_cndh=P(None, 'tp', 'dp', None),
+          ),
+          expected_kv_sharding=P(None, None, 'dp', None),
+      ),
+  )
+  def test_single_kv_head_kv_einsum_sharding_respects_shd_config(
+      self,
+      shd_config: config_lib.ShardingConfig,
+      expected_kv_sharding: P,
+  ):
+    config = model_lib.ModelConfig.gemma4_e2b(sharding_config=shd_config)
+    abs_attn = nnx.eval_shape(
+        lambda: attention_lib.Attention(
+            config=config,
+            attn_type=model_lib.AttentionType.LOCAL_SLIDING,
+            rngs=nnx.Rngs(0),
+        )
+    )
+    self.assertEqual(abs_attn.num_kv_heads, 1)
+    pspecs = nnx.get_partition_spec(nnx.state(abs_attn))
+    self.assertEqual(pspecs.kv_einsum.w.get_value(), expected_kv_sharding)
+
+  def test_single_kv_head_named_sharding_on_dp_tp_mesh_succeeds(self):
+    shd_config = config_lib.ShardingConfig.get_default_sharding(
+        is_sampling=True
+    )
+    config = model_lib.ModelConfig.gemma4_e2b(sharding_config=shd_config)
+    devices = np.array(jax.devices()[:1]).reshape(1, 1)
+    mesh = jax.sharding.Mesh(devices, ('dp', 'tp'))
+    abs_attn = nnx.eval_shape(
+        lambda: attention_lib.Attention(
+            config=config,
+            attn_type=model_lib.AttentionType.LOCAL_SLIDING,
+            rngs=nnx.Rngs(0),
+        )
+    )
+    named_shardings = nnx.get_named_sharding(nnx.state(abs_attn), mesh)
+    self.assertEqual(
+        named_shardings.kv_einsum.w.get_value(),
+        jax.sharding.NamedSharding(mesh, P(None, None, None, None)),
+    )
 
 
 if __name__ == '__main__':

@@ -204,10 +204,9 @@ class Attention(nnx.Module):
           param_dtype=config.param_dtype,
       )
     else:
-      if self.num_kv_heads == 1:
-        kv_sharding = (None, None, 'fsdp', None)
-      else:
-        kv_sharding = config.shd_config.kv_weight_cndh
+      shd_c, shd_n, shd_d, shd_h = config.shd_config.kv_weight_cndh
+      shd_n_kv = None if self.num_kv_heads == 1 else shd_n
+      kv_sharding = (shd_c, shd_n_kv, shd_d, shd_h)
 
       self.kv_einsum = Einsum(
           einsum_str='BSD,CKDH->CBSKH',
