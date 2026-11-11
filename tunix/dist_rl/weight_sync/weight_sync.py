@@ -33,6 +33,7 @@ from tunix.common import datatypes as common_datatypes
 
 WeightSyncMode = common_datatypes.WeightSyncMode
 DEFAULT_WEIGHT_SYNC_MODE = common_datatypes.DEFAULT_WEIGHT_SYNC_MODE
+is_fs_weight_sync_mode = common_datatypes.is_fs_weight_sync_mode
 
 
 @dataclasses.dataclass(frozen=True)

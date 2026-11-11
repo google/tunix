@@ -87,6 +87,35 @@ async def _flush_engine_stats_periodically(
       logger.exception("Failed to flush vLLM engine stats.")
 
 
+def _resolve_weight_sync_mode(
+    config: configs.RolloutConfig, server_id: str
+) -> weight_sync.WeightSyncMode:
+  """Returns the configured weight-sync mode; FS/GCS need in-process rollout.
+
+  Args:
+    config: Rollout configuration carrying `weight_sync_mode`.
+    server_id: Rollout replica id, for logging.
+
+  Raises:
+    ValueError: If the mode is FS or GCS, which `VllmSampler` cannot serve.
+  """
+  mode = weight_sync.WeightSyncMode(config.weight_sync_mode)
+  if weight_sync.is_fs_weight_sync_mode(mode):
+    raise ValueError(
+        f"weight_sync_mode={mode.value!r} needs the in-process rollout"
+        " (rollout_engine: inprocess_vllm); VllmSampler syncs only over"
+        " Raiden."
+    )
+  if mode != weight_sync.WeightSyncMode.RAIDEN:
+    logger.info(
+        "VllmSampler [%s] weight_sync_mode=%s; Raiden weight sync is"
+        " disabled.",
+        server_id,
+        mode,
+    )
+  return mode
+
+
 class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
   """Rollout sampler backed by vLLM's asynchronous engine (`AsyncLLMEngine`).
 
@@ -208,19 +237,12 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
     self.raiden_job_name = f"replica_{self.server_id}"
     self._parallelism = parallelism
 
-    self.weight_sync_mode = weight_sync.WeightSyncMode(
-        self.config.weight_sync_mode
+    self.weight_sync_mode = _resolve_weight_sync_mode(
+        self.config, self.server_id
     )
     self.enable_raiden = (
         self.weight_sync_mode == weight_sync.WeightSyncMode.RAIDEN
     )
-    if not self.enable_raiden:
-      logger.info(
-          "VllmSampler [%s] weight_sync_mode=%s; Raiden weight sync is"
-          " disabled.",
-          self.server_id,
-          self.weight_sync_mode,
-      )
 
     self._engine: AsyncLLMEngine | None = None
     self._is_running: bool = False
