@@ -426,7 +426,7 @@ class SequenceRewardManager(AbstractRewardManager):
     sum_rewards = _sum_trajectory_rewards(
         rewards,
         env_rewards,
-        propagate_nan=getattr(self.algo_config, "mask_nan_rewards", False),
+        propagate_nan=self.algo_config.mask_nan_rewards,
     )
     # Prepare metrics for logging.
     log_metrics = self._prepare_log_metrics(

@@ -325,7 +325,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
 
     # Log raw scores from the reward model fn
     log_rewards = rewards
-    if getattr(self.algo_config, "mask_nan_rewards", False):
+    if self.algo_config.mask_nan_rewards:
       log_rewards = rewards[~np.isnan(rewards)]
     if log_rewards.size:
       self.rl_engine.buffer_metrics(
