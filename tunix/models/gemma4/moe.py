@@ -30,6 +30,37 @@ def _renormalization_factor(router_probs: jax.Array, choices: jax.Array):
   return jnp.where(renormalization_factor > 0.0, renormalization_factor, 1.0)
 
 
+def _replay_choices(
+    router_choices: jax.Array,
+    forced_routed_experts: jax.Array,
+    num_experts: int,
+) -> jax.Array:
+  """Replaces the router's top-k with the replayed experts, token by token.
+
+  A token is replayed only when all of its top-k slots hold an expert id in
+  `[0, num_experts)`. Any other id, in particular `-1`
+  (`tunix.rl.common.UNSET_ROUTED_EXPERT`, which marks padding and the final
+  token the rollout never routed), leaves the whole token to the router.
+  Unlike MaxText's Gemma 4 `get_topk`, which zeroes the combine weights of
+  invalid slots, falling back to the router's top-k avoids producing an
+  all-zero MoE output if an unmasked non-terminal token has unset routing.
+
+  Args:
+    router_choices: `[..., k]` experts picked by the router's top-k.
+    forced_routed_experts: `[..., k]` experts captured at rollout.
+    num_experts: Number of experts.
+
+  Returns:
+    `[..., k]` experts: the replayed ones where a token's row is complete, the
+    router's own elsewhere.
+  """
+  forced = forced_routed_experts.astype(router_choices.dtype)
+  is_replayed = jnp.all(
+      (forced >= 0) & (forced < num_experts), axis=-1, keepdims=True
+  )
+  return jnp.where(is_replayed, forced, router_choices)
+
+
 def _expert_dispatch(
     x: jax.Array,
     expert_choices: jax.Array,
@@ -117,13 +148,23 @@ class MoERagged(nnx.Module):
         jnp.ones((self.features,), dtype=config.param_dtype)
     )
 
-  def _router(self, router_logits: jax.Array):
+  def _router(
+      self,
+      router_logits: jax.Array,
+      forced_routed_experts: jax.Array | None = None,
+  ) -> tuple[jax.Array, jax.Array]:
     router_logits = router_logits.astype(jnp.float32)
     router_probs = jax.nn.softmax(router_logits, axis=-1)
     weights, choices = jax.lax.top_k(
         router_logits,
         k=self.num_experts_per_datapoint,
     )
+    if forced_routed_experts is not None:
+      choices = _replay_choices(
+          choices, forced_routed_experts, self.num_experts
+      )
+    # Weights still come from the router's own probabilities, so the router
+    # keeps receiving gradients under replay (unless `freeze_router`).
     weights = router_probs / _renormalization_factor(router_probs, choices)
     return weights, choices
 
@@ -132,7 +173,7 @@ class MoERagged(nnx.Module):
       x: jax.Array,
       expert_choices: jax.Array,
       expert_weights: jax.Array,
-  ):
+  ) -> jax.Array:
     (
         xs_tokens_per_expert,
         sorted_xs,
@@ -188,11 +229,34 @@ class MoERagged(nnx.Module):
     )
     return out
 
-  def block(self, x, router_input=None):
+  def block(
+      self,
+      x: jax.Array,
+      router_input: jax.Array | None = None,
+      forced_routed_experts: jax.Array | None = None,
+  ) -> jax.Array:
+    """Routes `x` to its top-k experts and combines their outputs.
+
+    Args:
+      x: `[B, T, D]` expert inputs.
+      router_input: `[B, T, D]` router inputs; defaults to `x`.
+      forced_routed_experts: Optional `[B, T, k]` experts to replay instead of
+        the router's top-k; see `_replay_choices` for how unset ids are
+        handled.
+
+    Returns:
+      `[B, T, D]` combined expert outputs.
+    """
     if router_input is None:
       router_input = x
     var = jnp.mean(jnp.square(router_input.astype(jnp.float32)), axis=-1, keepdims=True)
     router_input = router_input * jax.lax.rsqrt(var + 1e-06).astype(router_input.dtype)
+
+    router_scale = self.router_scale.value
+    router_kernel = self.router_logits.value
+    if self.config.freeze_router:
+      router_scale = jax.lax.stop_gradient(router_scale)
+      router_kernel = jax.lax.stop_gradient(router_kernel)
 
     root_size = jax.lax.rsqrt(
         jnp.array(self.features, dtype=router_input.dtype)
@@ -200,22 +264,31 @@ class MoERagged(nnx.Module):
     router_input = (
         router_input
         * root_size
-        * self.router_scale.value.astype(router_input.dtype)
+        * router_scale.astype(router_input.dtype)
     )
     logits = jnp.einsum(
         'gsd,de->gse',
         router_input,
-        self.router_logits.value.astype(router_input.dtype),
+        router_kernel.astype(router_input.dtype),
     )
-    weights, choices = self._router(logits)
+    weights, choices = self._router(logits, forced_routed_experts)
     out = self._run_ffw_and_routing(x, choices, weights)
     return out
 
-  def __call__(self, x, router_input=None):
-    remat_config = getattr(self.config, 'remat_config', None)
+  def __call__(
+      self,
+      x: jax.Array,
+      router_input: jax.Array | None = None,
+      forced_routed_experts: jax.Array | None = None,
+  ) -> jax.Array:
+    remat_config = self.config.remat_config
     if remat_config is not None and str(remat_config).endswith('BLOCK'):
       return nnx.remat(self.block.__func__, graph_updates=False)(
-          self, x, router_input
+          self, x, router_input, forced_routed_experts
       )
     else:
-      return self.block(x, router_input=router_input)
+      return self.block(
+          x,
+          router_input=router_input,
+          forced_routed_experts=forced_routed_experts,
+      )

@@ -16,8 +16,10 @@
 
 `tunix/rl` reaches the model through `compute_per_token_logps`, which only
 forwards `forced_routed_experts` to models that advertise the kwarg. MaxText's
-`TunixMaxTextAdapter` does; tunix's own models do not. These tests pin both
-halves of that, and that the replay actually changes what the trainer computes.
+`TunixMaxTextAdapter` does, as does tunix's own Gemma 4 (tested in
+`rl/router_replay_gemma4_test.py`); tunix's other models do not. These tests pin
+both halves of that, and that the replay actually changes what the trainer
+computes.
 
 Skipped unless MaxText is importable, since tunix does not depend on it.
 """
