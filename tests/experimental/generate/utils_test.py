@@ -480,6 +480,21 @@ class ConfigAndSamplingParamsTest(parameterized.TestCase):
     self.assertEqual(cache_config.max_host_size_gib, 2.5)
     self.assertEqual(cache_config.dtype, jnp.bfloat16)
 
+  def test_to_cache_config_splits_host_size_gib_across_dp_ranks(self):
+    mesh = _create_mesh((4, 1), ("dp", "tp"))
+    rollout_config = common_configs.RolloutConfig(
+        rollout_vanilla_v2_host_size_gib=10.0
+    )
+    with mock.patch.object(
+        utils, "resolve_max_device_size_gib", return_value=8.0
+    ):
+      cache_config = utils.to_cache_config(
+          rollout_config, jnp.bfloat16, mesh
+      )
+
+    self.assertEqual(cache_config.max_device_size_gib, 8.0)
+    self.assertEqual(cache_config.max_host_size_gib, 2.5)
+
   def test_to_scheduler_config_truncates_chunked_prefill_to_sliding_window(self):
     rollout_config = common_configs.RolloutConfig(
         rollout_vanilla_v2_chunked_prefill_length=32
@@ -571,5 +586,84 @@ class ConfigAndSamplingParamsTest(parameterized.TestCase):
       )
 
 
+class DPRanksTest(parameterized.TestCase):
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="dp_and_tp",
+          shape=(2, 2),
+          axis_names=("dp", "tp"),
+          expected_device_ids=((0, 1), (2, 3)),
+      ),
+      # A rank's devices run along "tp", wherever it is in the mesh.
+      dict(
+          testcase_name="tp_first",
+          shape=(2, 2),
+          axis_names=("tp", "dp"),
+          expected_device_ids=((0, 2), (1, 3)),
+      ),
+      # The DP axes ("dp" and "fsdp") index the ranks, in mesh order.
+      dict(
+          testcase_name="two_dp_axes",
+          shape=(2, 2),
+          axis_names=("dp", "fsdp"),
+          expected_device_ids=((0,), (1,), (2,), (3,)),
+      ),
+      dict(
+          testcase_name="tp_only",
+          shape=(4,),
+          axis_names=("tp",),
+          expected_device_ids=((0, 1, 2, 3),),
+      ),
+  )
+  def test_dp_ranks(self, shape, axis_names, expected_device_ids):
+    devices = jax.devices()
+    ranks = utils.dp_ranks(_create_mesh(shape, axis_names))
+
+    self.assertEqual(
+        tuple(tuple(r.devices.flat) for r in ranks),
+        tuple(tuple(devices[i] for i in ids) for ids in expected_device_ids),
+    )
+    for r in ranks:
+      self.assertEqual(r.axis_names, ("tp",))
+
+  def test_stitch_and_split_physical_pages_single_rank(self):
+    mesh = _create_mesh((1,), ("tp",))
+    pages = {"layer_0": jnp.zeros((2, 4, 2, 1, 8), dtype=jnp.float32)}
+    stitched = utils.stitch_physical_pages(mesh, [pages])
+    np.testing.assert_array_equal(stitched["layer_0"], pages["layer_0"])
+    (split_rank,) = utils.split_physical_pages(stitched, [pages])
+    np.testing.assert_array_equal(split_rank["layer_0"], pages["layer_0"])
+
+  def test_stitch_and_split_physical_pages_multiple_ranks(self):
+    mesh = _create_mesh((2,), ("dp",))
+    rank_pages = []
+    for r, rank_mesh in enumerate(utils.dp_ranks(mesh)):
+      sharding = jax.sharding.NamedSharding(
+          rank_mesh,
+          jax.sharding.PartitionSpec(),
+      )
+      arr = jax.device_put(
+          jnp.full((2, 4, 2, 1, 8), r + 1, dtype=jnp.float32), sharding
+      )
+      rank_pages.append({"layer_0": arr})
+
+    stitched = utils.stitch_physical_pages(mesh, rank_pages)
+    self.assertEqual(stitched["layer_0"].shape, (4, 4, 2, 1, 8))
+    np.testing.assert_array_equal(stitched["layer_0"][:2], 1.0)
+    np.testing.assert_array_equal(stitched["layer_0"][2:], 2.0)
+
+    split_ranks = utils.split_physical_pages(stitched, rank_pages)
+    self.assertLen(split_ranks, 2)
+    for r, (split_rank, orig_rank) in enumerate(
+        zip(split_ranks, rank_pages)
+    ):
+      self.assertEqual(
+          split_rank["layer_0"].shape, orig_rank["layer_0"].shape
+      )
+      self.assertEqual(
+          split_rank["layer_0"].sharding, orig_rank["layer_0"].sharding
+      )
+      np.testing.assert_array_equal(split_rank["layer_0"], r + 1)
 if __name__ == "__main__":
   absltest.main()

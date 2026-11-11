@@ -17,7 +17,6 @@
 import asyncio
 import contextlib
 import dataclasses
-import hashlib
 import pickle
 import random
 import time
@@ -34,6 +33,7 @@ from typing import (
 )
 
 from absl import logging
+from tunix.common import routing
 from tunix.dist_rl.worker import remote_execution
 
 ActorHandle = remote_execution.ActorHandle
@@ -131,28 +131,8 @@ class WorkerUnreachableError(ConnectionError):
   """Raised when a worker remains unreachable past the poll retry budget."""
 
 
-def stable_route_hash(route_key: Any) -> int:
-  """Maps a sticky routing key to a process-stable non-negative integer.
-
-  Args:
-    route_key: The sticky routing key. Non-negative integers are returned
-      as-is; any other value is hashed via its `str()` representation.
-
-  Returns:
-    A non-negative integer suitable for `% num_actors` bucketing.
-
-  Raises:
-    ValueError: If `route_key` is a negative integer.
-  """
-  if isinstance(route_key, int):
-    if route_key < 0:
-      raise ValueError(
-          "An integer route_key is an explicit shard index and must be"
-          f" non-negative, got {route_key}."
-      )
-    return route_key
-  digest = hashlib.blake2b(str(route_key).encode("utf-8"), digest_size=8)
-  return int.from_bytes(digest.digest(), "big")
+# Re-exported: `tunix.dist_rl.worker` exposes it as part of its API.
+stable_route_hash = routing.stable_route_hash
 
 
 class DefaultRouter:

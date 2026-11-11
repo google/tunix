@@ -207,6 +207,20 @@ class VanillaRolloutTest(parameterized.TestCase):
 
     self.assertEqual(output.tokens[0].tolist(), unbounded[:2])
 
+  def test_forwards_route_key_to_the_sampler(self):
+    rollout = self.make_rollout(False)
+    sampler = self.enterContext(
+        mock.patch.object(rollout, '_sampler', wraps=rollout._sampler)
+    )
+
+    rollout.generate(['1 2 3'], _rollout_config(), route_key='g3_p5')
+    rollout.generate(['1 2 3'], _rollout_config())
+
+    self.assertEqual(
+        [call.kwargs['route_key'] for call in sampler.call_args_list],
+        ['g3_p5', None],
+    )
+
   def test_seed_seeds_the_engine(self):
     rollout = self.make_rollout(False, seed=7)
 

@@ -27,6 +27,35 @@ from tunix.experimental.generate import request as request_lib
 from tunix.experimental.generate import testing_utils
 
 
+def _request_state(request_id: str) -> request_lib.RequestState:
+  request = testing_utils.make_request(request_id, [1, 2])
+  return request_lib.RequestState(
+      request.request_id, request.prompt_token_ids, request.sampling_params
+  )
+
+
+class ScheduledBatchTest(absltest.TestCase):
+
+  def _batch(self) -> engine_lib.ScheduledBatch:
+    # Rank 0: a decode, a chunked prefill and a full prefill. Rank 1: empty.
+    # Rank 2: two decodes and a full prefill.
+    return engine_lib.ScheduledBatch.concat([
+        (tuple(_request_state(f'a{i}') for i in range(3)), (1, 2, 3)),
+        ((), (0, 0, 0)),
+        (tuple(_request_state(f'c{i}') for i in range(3)), (2, 2, 3)),
+    ])
+
+  def test_concat_and_split_round_trip(self):
+    batch = self._batch()
+    self.assertLen(batch.requests, 6)
+    self.assertEqual(batch.distributions, ((1, 2, 3), (0, 0, 0), (2, 2, 3)))
+    ranks = batch.split()
+    self.assertEqual(
+        [[r.request_id for r in reqs] for reqs, _ in ranks],
+        [['a0', 'a1', 'a2'], [], ['c0', 'c1', 'c2']],
+    )
+
+
 class LLMEngineTest(absltest.TestCase):
 
   def test_non_positive_max_model_len_raises(self):
@@ -487,7 +516,7 @@ class StepTest(parameterized.TestCase):
     events: list[str] = []
 
     orig_execute = engine._model_runner.execute_step  # pylint: disable=protected-access
-    orig_schedule = engine._dp_coordinator.schedule_step  # pylint: disable=protected-access
+    orig_schedule = engine._schedule_step  # pylint: disable=protected-access
     orig_update = engine._update_from_output  # pylint: disable=protected-access
 
     def record_execute(*args, **kwargs):
@@ -506,9 +535,7 @@ class StepTest(parameterized.TestCase):
         engine._model_runner, 'execute_step', side_effect=record_execute  # pylint: disable=protected-access
     ).start()
     mock.patch.object(
-        engine._dp_coordinator,  # pylint: disable=protected-access
-        'schedule_step',
-        side_effect=record_schedule,
+        engine, '_schedule_step', side_effect=record_schedule
     ).start()
     mock.patch.object(
         engine, '_update_from_output', side_effect=record_update
@@ -708,11 +735,11 @@ class ResetKVCachesTest(absltest.TestCase):
     outputs = engine.delete_kv_caches()
     self.assertEmpty(outputs)
     self.assertIsNone(engine._in_flight_step)  # pylint: disable=protected-access
-    for arr in engine._dp_coordinator.get_physical_pages().values():  # pylint: disable=protected-access
+    for arr in engine._dp_coordinators[0].get_physical_pages().values():  # pylint: disable=protected-access
       self.assertTrue(arr.is_deleted())
 
     engine.reset_kv_caches()
-    for arr in engine._dp_coordinator.get_physical_pages().values():  # pylint: disable=protected-access
+    for arr in engine._dp_coordinators[0].get_physical_pages().values():  # pylint: disable=protected-access
       self.assertFalse(arr.is_deleted())
 
     finished = drive(engine)

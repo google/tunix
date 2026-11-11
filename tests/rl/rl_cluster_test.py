@@ -1285,14 +1285,16 @@ class RlEngineTest(parameterized.TestCase):
 class RlEngineTokenInputTest(parameterized.TestCase):
   """Explicit token rows through RLEngine.generate and VllmRollout.generate."""
 
-  def _fake_engine(self):
+  def _fake_engine(self, rollout_engine='vanilla'):
     import contextlib  # pylint: disable=g-import-not-at-top
     from types import SimpleNamespace  # pylint: disable=g-import-not-at-top
     from tunix.perf import trace  # pylint: disable=g-import-not-at-top
     from tunix.perf.experimental import tracer  # pylint: disable=g-import-not-at-top
 
-    def generate(prompts, cfg, *, prompt_token_ids=None):
+    def generate(prompts, cfg, *, prompt_token_ids=None, **kwargs):
       del cfg
+      if rollout_engine != 'vanilla_v2':
+        self.assertEmpty(kwargs)
       self.assertIsNone(prompts)
       rows = prompt_token_ids
       width = 3  # the sampler pads every microbatch to max_prompt_length
@@ -1315,6 +1317,7 @@ class RlEngineTokenInputTest(parameterized.TestCase):
         ),
         cluster_config=SimpleNamespace(
             offload_to_cpu=False,
+            rollout_engine=rollout_engine,
             rollout_config=base_rollout.RolloutConfig(max_tokens_to_generate=4),
         ),
         tokenizer=SimpleNamespace(
@@ -1331,6 +1334,20 @@ class RlEngineTokenInputTest(parameterized.TestCase):
         _perf=trace.NoopTracer(),
         _perf_v2=tracer.NoopTracer(),
     )
+
+  @parameterized.parameters('vanilla', 'vanilla_v2')
+  def test_route_key_reaches_only_a_vanilla_v2_rollout(self, rollout_engine):
+    engine = self._fake_engine(rollout_engine)
+
+    rl_engine_lib.RLEngine.generate(
+        engine, None, prompt_token_ids=[[0, 3]], route_key='g1_p2'
+    )
+
+    kwargs = engine.rollout.generate.call_args.kwargs
+    if rollout_engine == 'vanilla_v2':
+      self.assertEqual(kwargs['route_key'], 'g1_p2')
+    else:
+      self.assertNotIn('route_key', kwargs)
 
   def test_token_rows_split_into_microbatches_and_merge_back(self):
     engine = self._fake_engine()

@@ -113,6 +113,7 @@ class VanillaRollout(base_rollout.BaseRollout):
       rollout_config: base_rollout.RolloutConfig,
       *,
       prompt_token_ids: list[Any] | None = None,
+      route_key: int | str | None = None,
       **kwargs,
   ) -> base_rollout.RolloutOutput:
     """Generates a completion for each prompt.
@@ -122,6 +123,8 @@ class VanillaRollout(base_rollout.BaseRollout):
       rollout_config: The sampling settings for this call. Its `seed` is not
         used: the engine was seeded once, when it was built.
       prompt_token_ids: The prompts as token ids, used instead of `prompts`.
+      route_key: Optional key of the prompts' data parallel rank. Prompts with
+        the same key run in the same rank, and so can share its prefix cache.
       **kwargs: Ignored.
 
     Returns:
@@ -140,6 +143,7 @@ class VanillaRollout(base_rollout.BaseRollout):
         return_logprobs=rollout_config.return_logprobs,
         return_logits=rollout_config.return_logits,
         prompt_token_ids=prompt_token_ids,
+        route_key=route_key,
     )
     return base_rollout.RolloutOutput(
         text=output.text,

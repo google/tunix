@@ -459,6 +459,19 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       if "pair_index" in env.extra_kwargs:
         tags[perf_constants.PAIR_INDEX] = env.extra_kwargs["pair_index"]
 
+    # Every turn of a trajectory runs in the same data parallel rank, where it
+    # reuses the KV cache of its earlier turns.
+    route_key = None
+    if (
+        env
+        and hasattr(env, "extra_kwargs")
+        and "group_id" in env.extra_kwargs
+        and "pair_index" in env.extra_kwargs
+    ):
+      route_key = (
+          f"g{env.extra_kwargs['group_id']}_p{env.extra_kwargs['pair_index']}"
+      )
+
     if prompt_token_ids is None:
       if chat_lists is None:
         raise ValueError(
@@ -486,6 +499,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           mode=rl_engine_lib.Mode.TRAIN,
           trace_tags=tags,
           max_generation_steps=max_generation_steps,
+          route_key=route_key,
       )
 
     return self.rl_engine.generate(
@@ -495,6 +509,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         trace_tags=tags,
         max_generation_steps=max_generation_steps,
         prompt_token_ids=[packing.as_token_ids(prompt_token_ids)],
+        route_key=route_key,
     )
 
   def _build_orchestrator(self) -> rollout_orchestrator.RolloutOrchestrator:

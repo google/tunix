@@ -111,6 +111,9 @@ class EngineRequest:
   prompt_token_ids: list[int]
   # Sampling parameters for the request.
   sampling_params: SamplingParams
+  # Requests with the same route key run in the same data parallel rank, and
+  # so can share its prefix cache. None routes the request by its id.
+  route_key: int | str | None = None
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)

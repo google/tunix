@@ -21,6 +21,7 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from tunix.common import configs as common_configs
 from tunix.common import datatypes
 from tunix.experimental.generate import configs
@@ -137,12 +138,23 @@ def to_cache_config(
     dtype: jax.typing.DTypeLike,
     mesh: jax.sharding.Mesh,
 ) -> configs.CacheConfig:
-  """Returns the cache config for the given rollout config, dtype, and mesh."""
+  """Returns the cache config of each DP rank of `mesh`.
+
+  The device budget is per device, so every rank gets all of it. The host
+  budget is for the whole host, so the ranks split it.
+
+  Args:
+    rollout_config: The rollout configuration.
+    dtype: The data type of KV cache entries.
+    mesh: The mesh the KV caches are sharded over.
+  """
   return configs.CacheConfig(
       max_device_size_gib=resolve_max_device_size_gib(
           rollout_config.rollout_vanilla_v2_hbm_utilization, mesh
       ),
-      max_host_size_gib=rollout_config.rollout_vanilla_v2_host_size_gib,
+      max_host_size_gib=(
+          rollout_config.rollout_vanilla_v2_host_size_gib / len(dp_ranks(mesh))
+      ),
       page_size=rollout_config.rollout_vanilla_v2_kv_cache_page_size,
       enable_prefix_caching=rollout_config.rollout_vanilla_v2_enable_prefix_caching,
       dtype=dtype,
@@ -293,6 +305,117 @@ def jit_scatter_last_column(
       .set(source[:, -1], mode="drop")
       .reshape(target.shape)
   )
+
+
+def dp_ranks(
+    mesh: jax.sharding.Mesh,
+) -> tuple[jax.sharding.Mesh, ...]:
+  """Returns the sub-mesh of each DP rank of `mesh`, in DP-axis order.
+
+  A DP rank is the slice of `mesh` at a fixed coordinate along the DP axes
+  (`"dp"` and `"fsdp"`). When `mesh` has no non-DP axes, each rank's 1-device
+  sub-mesh is given a length-1 `"tp"` axis.
+
+  Args:
+    mesh: The mesh the KV caches are sharded over.
+
+  Returns:
+    A tuple of `jax.sharding.Mesh` objects, one per DP rank in DP-axis order.
+  """
+  dp_axes = kv_cache_dp_axes(mesh)
+  if not dp_axes:
+    return (mesh,)
+  other_axes = tuple(axis for axis in mesh.axis_names if axis not in dp_axes)
+  axis_order = [
+      mesh.axis_names.index(axis) for axis in (*dp_axes, *other_axes)
+  ]
+  num_ranks = math.prod(mesh.shape[axis] for axis in dp_axes)
+  rank_shape = tuple(mesh.shape[axis] for axis in other_axes) or (1,)
+  rank_axis_names = other_axes or ("tp",)
+  devices = np.transpose(mesh.devices, axis_order).reshape(
+      num_ranks, *rank_shape
+  )
+  return tuple(
+      jax.sharding.Mesh(devices[r], rank_axis_names) for r in range(num_ranks)
+  )
+
+
+def stitch_physical_pages(
+    mesh: jax.sharding.Mesh,
+    rank_pages: Sequence[Mapping[str, jax.Array]],
+) -> dict[str, jax.Array]:
+  """Returns every DP rank's device pages of each cache, as one array.
+
+  Rank `r`'s pages are the array's pages `[r * n, (r + 1) * n)`, where `n` is a
+  rank's page count, on the rank's own devices. The array shares the ranks'
+  device memory.
+
+  Args:
+    mesh: The mesh of the whole engine.
+    rank_pages: Each DP rank's mapping from cache name to its physical device
+      page array.
+
+  Returns:
+    Mapping from cache name to the combined physical device page array sharded
+    across all DP ranks.
+  """
+  if len(rank_pages) == 1:
+    return dict(rank_pages[0])
+  with jax.set_mesh(mesh):
+    sharding = derive_cache_sharding()
+  physical_pages = {}
+  for name in rank_pages[0]:
+    shards: dict[jax.Device, jax.Array] = {}
+    for pages in rank_pages:
+      for shard in pages[name].addressable_shards:
+        shards[shard.device] = shard.data
+    rank_shape = rank_pages[0][name].shape
+    shape = (len(rank_pages) * rank_shape[0], *rank_shape[1:])
+    physical_pages[name] = jax.make_array_from_single_device_arrays(
+        shape,
+        sharding,
+        [shards[d] for d in sharding.addressable_devices_indices_map(shape)],
+    )
+  return physical_pages
+
+
+def split_physical_pages(
+    stitched_pages: Mapping[str, jax.Array],
+    rank_pages: Sequence[Mapping[str, jax.Array]],
+) -> tuple[dict[str, jax.Array], ...]:
+  """Splits full-mesh `stitched_pages` into each DP rank's device page dict.
+
+  Each returned array wraps the rank's single-device shards from
+  `stitched_pages` with the shape and sharding of that rank's existing array
+  in `rank_pages`, without copying device memory.
+
+  Args:
+    stitched_pages: Mapping from cache name to the full-mesh physical device
+      page array returned by `ModelRunner.execute_step`.
+    rank_pages: Each DP rank's current mapping from cache name to its
+      physical device page array (used for per-rank shape and sharding).
+
+  Returns:
+    A tuple of dicts (one per DP rank) mapping each cache name to that rank's
+    updated `jax.Array`.
+  """
+  if len(rank_pages) == 1:
+    return (dict(stitched_pages),)
+  per_rank: list[dict[str, jax.Array]] = [{} for _ in rank_pages]
+  for name, stitched in stitched_pages.items():
+    shards: dict[jax.Device, jax.Array] = {
+        shard.device: shard.data for shard in stitched.addressable_shards
+    }
+    for r, existing in enumerate(rank_pages):
+      template = existing[name]
+      sharding = template.sharding
+      shape = template.shape
+      per_rank[r][name] = jax.make_array_from_single_device_arrays(
+          shape,
+          sharding,
+          [shards[d] for d in sharding.addressable_devices_indices_map(shape)],
+      )
+  return tuple(per_rank)
 
 
 def derive_kv_geometry(

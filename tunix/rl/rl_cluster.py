@@ -930,6 +930,7 @@ class RLEngine:
       max_generation_steps: int | None = None,
       *,
       prompt_token_ids: Sequence[Sequence[int] | np.ndarray] | None = None,
+      route_key: int | str | None = None,
   ) -> base_rollout.RolloutOutput:
     """Generates text from the given prompts.
 
@@ -945,6 +946,9 @@ class RLEngine:
       trace_tags: Optional tags to add to the performance tracer.
       prompt_token_ids: Explicit unpadded token rows. Mutually exclusive with
         text prompts and chat templating; requires backend token-input support.
+      route_key: Optional key of the prompts' data parallel rank in a
+        `vanilla_v2` rollout. Prompts with the same key run in the same rank,
+        and so can share its prefix cache. Other rollouts ignore it.
 
     Returns:
       A `RolloutOutput` object containing the generated text and other info.
@@ -1013,15 +1017,24 @@ class RLEngine:
             mesh.devices,
             tags=perf_tags,
         ) as span_v2:
+          # Only `vanilla_v2` routes prompts to data parallel ranks.
+          generate_kwargs = (
+              {"route_key": route_key}
+              if self.cluster_config.rollout_engine == "vanilla_v2"
+              else {}
+          )
           outputs = [
               self.rollout.generate(
                   cast(Any, None),
                   rollout_config,
                   prompt_token_ids=prompt_rows[s],
+                  **generate_kwargs,
               )
               if exact_input
               else self.rollout.generate(
-                  cast(list[str], prompt_rows[s]), rollout_config
+                  cast(list[str], prompt_rows[s]),
+                  rollout_config,
+                  **generate_kwargs,
               )
               for s in rl_utils.chunk_slices_by_size(
                   stop=len(prompt_rows), step=micro_batch_size

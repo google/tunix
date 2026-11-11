@@ -122,6 +122,7 @@ class Sampler(base_sampler.BaseSampler):
       pad_output: bool = False,
       return_logprobs: bool = False,
       prompt_token_ids: Sequence[Sequence[int] | np.ndarray] | None = None,
+      route_key: int | str | None = None,
   ) -> base_sampler.SamplerOutput:
     """Samples a completion for each prompt, blocking until all finish.
 
@@ -146,6 +147,9 @@ class Sampler(base_sampler.BaseSampler):
         to a uniform length.
       return_logprobs: Whether to return per-token log-probabilities.
       prompt_token_ids: Pre-tokenized prompts, used instead of `input_strings`.
+      route_key: Optional key of the requests' data parallel rank. Requests
+        with the same key run in the same rank, and so can share its prefix
+        cache.
 
     Returns:
       A `SamplerOutput` with the completions in the order the prompts were
@@ -202,6 +206,7 @@ class Sampler(base_sampler.BaseSampler):
                 request_id=str(next(self._request_counter)),
                 prompt_token_ids=prompt,
                 sampling_params=sampling_params,
+                route_key=route_key,
             )
         )
 

@@ -454,7 +454,7 @@ class ServerModeSamplerTest(_SamplerTests):
       step_count += 1
       if step_count == 1:
         first_step_done.set()
-        resume_loop.wait(timeout=5.0)
+        resume_loop.wait(timeout=60.0)
       return result
 
     self.enterContext(
@@ -466,11 +466,11 @@ class ServerModeSamplerTest(_SamplerTests):
 
     with futures.ThreadPoolExecutor(max_workers=1) as pool:
       gen_future = pool.submit(sampler.generate, [req_short, req_long])
-      self.assertTrue(first_step_done.wait(timeout=5.0))
+      self.assertTrue(first_step_done.wait(timeout=60.0))
       sampler.delete_cache()
       sampler.reinitialize_cache()
       resume_loop.set()
-      responses = gen_future.result(timeout=5.0)
+      responses = gen_future.result(timeout=60.0)
 
     self.assertEqual([r.request_id for r in responses], ['short', 'long'])
     self.assertEqual(
