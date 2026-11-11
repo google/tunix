@@ -15,7 +15,7 @@ from tunix.models import naming
 from tunix.models.gemma import model as gemma_model
 from tunix.models.gemma import params as gemma_params
 from tunix.oss import utils as oss_utils
-from tunix.utils import env_utils
+from tunix.utils import sharding_utils
 
 
 def _get_all_models_test_parameters():
@@ -323,7 +323,7 @@ class AutoModelTest(parameterized.TestCase):
   def test_create_gemma_model_from_params_shards_with_mesh(
       self, mock_get_model_module
   ):
-    env_utils.setup_sharding_environment()
+    sharding_utils.setup_sharding_environment()
 
     class TinyGemma(nnx.Module):
 

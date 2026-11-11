@@ -63,7 +63,10 @@ class MeshUtilsTest(absltest.TestCase):
         )
 
     with mock.patch.object(
-        mesh.topology, "_is_pathways_backend_used", return_value=True
+        mesh.topology,
+        "is_pathways_backend_used",
+        autospec=True,
+        return_value=True,
     ):
       self.assertEqual(mesh.device_host_key(FakeDevice()), (4, 11))
 

@@ -23,7 +23,7 @@ import re
 import string
 from typing import Any
 
-from tunix.dist_rl.common import env_utils
+from tunix.utils import env_utils
 
 _K8S_LABEL_VALUE_RE = re.compile(r"^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$")
 _STANDALONE_PLACEHOLDER_RE = re.compile(
@@ -747,9 +747,9 @@ def build_substitutions(
     tpu_affinity = ""
 
   sidecar_image = os.environ.get("COLOCATED_PYTHON_SIDECAR_IMAGE", "").strip()
-  sidecar_shm = os.environ.get(
-      "COLOCATED_PYTHON_SIDECAR_SHM", "1"
-  ).strip().lower() not in ("0", "false", "no")
+  sidecar_shm = env_utils.parse_env_bool(
+      "COLOCATED_PYTHON_SIDECAR_SHM", default=True
+  )
   sidecar_memory = os.environ.get(
       "COLOCATED_PYTHON_SIDECAR_MEMORY", "16Gi"
   ).strip()

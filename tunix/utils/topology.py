@@ -235,24 +235,21 @@ def _shape_fits_within(
   return all(dim <= limit for dim, limit in zip(shape, available_shape))
 
 
-def _is_pathways_backend_used() -> bool:
+def is_pathways_backend_used() -> bool:
   """Returns whether the current process is attached to a Pathways backend.
 
+  Checks both `JAX_PLATFORMS` and `jax.config.jax_platforms` for
+  single-controller `"proxy"` or `"pathways"` backends without importing
+  `pathwaysutils` or its FastAPI/Uvicorn side-effect dependencies.
+
   Returns:
-    True if a Pathways backend is used, otherwise False.
+    True if a Pathways backend is configured, otherwise False.
   """
   jax_platforms_env = os.environ.get("JAX_PLATFORMS", "").lower()
   if "proxy" in jax_platforms_env or "pathways" in jax_platforms_env:
     return True
   jax_platforms_cfg = (jax.config.jax_platforms or "").lower()
-  if "proxy" in jax_platforms_cfg or "pathways" in jax_platforms_cfg:
-    return True
-  try:
-    import pathwaysutils  # pylint: disable=g-import-not-at-top  # pyrefly: ignore[missing-import]
-
-    return bool(pathwaysutils.is_pathways_backend_used())
-  except ImportError:
-    return False
+  return "proxy" in jax_platforms_cfg or "pathways" in jax_platforms_cfg
 
 
 def _pathways_device_host_attr(device: Any, attr_name: str) -> Any:
@@ -400,7 +397,7 @@ def _device_host_key(device: Any) -> tuple[Any, ...] | None:
   Returns:
     A (slice_id, task_id) tuple, or None if no task metadata is available.
   """
-  if _is_pathways_backend_used():
+  if is_pathways_backend_used():
     task_id = _pathways_device_host_attr(device, "logical_task")
   else:
     task_id = _device_attr(device, "process_index")

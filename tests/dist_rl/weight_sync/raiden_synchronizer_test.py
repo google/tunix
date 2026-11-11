@@ -741,7 +741,8 @@ class RaidenSynchronizerTest(absltest.TestCase):
 
     with mock.patch.object(
         raiden_synchronizer.mesh.topology,
-        "_is_pathways_backend_used",
+        "is_pathways_backend_used",
+        autospec=True,
         return_value=True,
     ):
       # TPU v4/v5p: 4 devices per host across 2 hosts
@@ -774,7 +775,8 @@ class RaidenSynchronizerTest(absltest.TestCase):
     ).reshape(4, 2)
     with mock.patch.object(
         raiden_synchronizer.mesh.topology,
-        "_is_pathways_backend_used",
+        "is_pathways_backend_used",
+        autospec=True,
         return_value=True,
     ):
       host_indices, local_slots = raiden_synchronizer._derive_ffi_host_slots(

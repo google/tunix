@@ -23,6 +23,7 @@ from safetensors import numpy as stnp
 from tunix.models import safetensors_loader
 from tunix.tests import test_common
 from tunix.utils import env_utils
+from tunix.utils import topology
 
 
 def key_mapping(config):
@@ -725,6 +726,87 @@ class SafetensorsLoaderTest(parameterized.TestCase):
     jax.tree.map(
         np.testing.assert_array_equal, self.state, nnx.state(mh_loaded)
     )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='pathways_enabled_uses_original',
+          pathways_enabled=True,
+          expected_loader='load_and_create_model_orig',
+      ),
+      dict(
+          testcase_name='pathways_disabled_uses_optimized',
+          pathways_enabled=False,
+          expected_loader='load_and_create_model_opt',
+      ),
+  )
+  def test_mode_dispatch_respects_pathways_backend(
+      self, pathways_enabled: bool, expected_loader: str
+  ):
+    stnp.save_file(
+        self.tensors, os.path.join(self.st_dir, 'model.safetensors')
+    )
+    with (
+        mock.patch.object(
+            env_utils, 'is_internal_env', autospec=True, return_value=False
+        ),
+        mock.patch.object(
+            topology,
+            'is_pathways_backend_used',
+            autospec=True,
+            return_value=pathways_enabled,
+        ),
+        mock.patch.object(
+            safetensors_loader.logging, 'warning', autospec=True
+        ) as mock_warn,
+        mock.patch.object(
+            safetensors_loader,
+            'load_and_create_model_orig',
+            wraps=safetensors_loader.load_and_create_model_orig,
+        ) as mock_orig,
+        mock.patch.object(
+            safetensors_loader,
+            'load_and_create_model_opt',
+            wraps=safetensors_loader.load_and_create_model_opt,
+        ) as mock_opt,
+    ):
+      loaded = safetensors_loader.load_and_create_model(
+          self.st_dir,
+          test_common.ToyTransformer,
+          self.model.config,
+          key_mapping,
+          dtype=jnp.float32,
+          mode='auto',
+      )
+      jax.tree.map(
+          np.testing.assert_array_equal, self.state, nnx.state(loaded)
+      )
+      safetensors_loader.load_and_create_model(
+          self.st_dir,
+          test_common.ToyTransformer,
+          self.model.config,
+          key_mapping,
+          dtype=jnp.float32,
+          mode='original',
+      )
+      if expected_loader == 'load_and_create_model_orig':
+        self.assertEqual(mock_orig.call_count, 2)
+        mock_opt.assert_not_called()
+        mock_warn.assert_not_called()
+        with self.assertRaisesRegex(ValueError, 'Optimized mode'):
+          safetensors_loader.load_and_create_model(
+              self.st_dir,
+              test_common.ToyTransformer,
+              self.model.config,
+              key_mapping,
+              dtype=jnp.float32,
+              mode='optimized',
+          )
+      else:
+        mock_opt.assert_called_once()
+        mock_orig.assert_called_once()
+        mock_warn.assert_called_once_with(
+            'Optimized mode is faster and recommended if possible.'
+        )
 
 
 if __name__ == '__main__':

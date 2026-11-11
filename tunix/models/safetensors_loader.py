@@ -37,6 +37,7 @@ from tunix.oss import utils
 from tunix.utils import compat
 from tunix.utils import env_utils
 from tunix.utils import sharding_utils
+from tunix.utils import topology
 from tunix.utils import torch_utils
 
 load_file_from_gcs = utils.load_file_from_gcs
@@ -621,14 +622,14 @@ def load_and_create_model(
     model_class_kwargs = {}
 
   if mode == 'auto':
-    if env_utils.is_internal_env() or env_utils.is_pathways_initialized():
+    if env_utils.is_internal_env() or topology.is_pathways_backend_used():
       mode = 'original'
     else:
       mode = 'optimized'
 
   # TODO(tunix-dev): Fix optimized mode when pathways is initialized.
   if mode == 'optimized':
-    if env_utils.is_internal_env() or env_utils.is_pathways_initialized():
+    if env_utils.is_internal_env() or topology.is_pathways_backend_used():
       raise ValueError(
           'Optimized mode is not supported in GOOGLE_INTERNAL_PACKAGE_PATH or pathways initialized.'
       )
@@ -636,7 +637,7 @@ def load_and_create_model(
   if mode == 'original':
     if (
         not env_utils.is_internal_env()
-        and not env_utils.is_pathways_initialized()
+        and not topology.is_pathways_backend_used()
     ):
       logging.warning('Optimized mode is faster and recommended if possible.')
 

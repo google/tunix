@@ -33,7 +33,7 @@ from tunix.models import gpu_kernels as kernels_lib
 from tunix.models import reference_attention as reference_attention_lib
 from tunix.models.qwen3 import model as _qwen3_model
 from tunix.utils import compat
-from tunix.utils import env_utils
+from tunix.utils import sharding_utils
 
 # `//third_party/py/jax/experimental:pallas_tpu_ops` has a package-group
 # visibility allowlist in `//learning/brain/research/jax/lib/jax.bzl` that
@@ -43,7 +43,7 @@ from tunix.utils import env_utils
 splash = _qwen3_model.splash
 mask_lib = _qwen3_model.mask_lib
 
-env_utils.setup_sharding_environment()
+sharding_utils.setup_sharding_environment()
 
 
 K_MASK = -2.3819763e38

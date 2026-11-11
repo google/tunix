@@ -12,31 +12,60 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Environment utils."""
+"""Runtime environment detection and boolean variable parsing utilities."""
 
-import flax
+import importlib.util
+import os
+from typing import Final
+
+_INTERNAL_PACKAGE_ROOT: Final[str] = "GOOGLE_INTERNAL_PACKAGE_PATH"
+_TRUTHY_ENV_VALUES: Final[frozenset[str]] = frozenset(
+    {"1", "true", "yes", "on"}
+)
+_FALSY_ENV_VALUES: Final[frozenset[str]] = frozenset(
+    {"0", "false", "no", "off"}
+)
 
 
-def setup_sharding_environment():
-  """Sets up the sharding environment."""
-  if hasattr(flax.config, 'flax_always_shard_variable'):
-    flax.config.update('flax_always_shard_variable', False)
-
-
-def is_internal_env():
-  """Checks if the code is running within the internal environment."""
+def is_internal_env() -> bool:
+  """Returns whether the current runtime has the internal package loader."""
   try:
-    from GOOGLE_INTERNAL_PACKAGE_PATH.pyglib import gfile  # noqa: F401
+    spec = importlib.util.find_spec(_INTERNAL_PACKAGE_ROOT)
+  except (ImportError, ValueError):
+    return False
+  return spec is not None and spec.loader is not None
 
+
+def parse_env_bool(
+    name: str,
+    *,
+    default: bool = False,
+) -> bool:
+  """Parses boolean environment variable `name`, failing fast on bad tokens.
+
+  Args:
+    name: Environment variable name to inspect in `os.environ`.
+    default: Fallback boolean returned when `name` is unset or whitespace-only.
+
+  Returns:
+    Parsed boolean value (`1/true/yes/on` -> `True`, `0/false/no/off` ->
+    `False`), or `default` when `name` is unset or empty after stripping.
+
+  Raises:
+    ValueError: If `name` is set to a non-empty value outside the recognized
+      boolean tokens.
+  """
+  raw_value = os.environ.get(name)
+  if raw_value is None:
+    return default
+  raw = raw_value.strip().lower()
+  if not raw:
+    return default
+  if raw in _TRUTHY_ENV_VALUES:
     return True
-  except ImportError:
+  if raw in _FALSY_ENV_VALUES:
     return False
-
-
-def is_pathways_initialized():
-  """Checks if Pathways is initialized."""
-  try:
-    import pathwaysutils  # noqa: F401
-    return pathwaysutils.is_pathways_backend_used()
-  except ImportError:
-    return False
+  raise ValueError(
+      f"Unsupported {name}={raw_value!r}; expected"
+      " 0/1/true/false/yes/no/on/off."
+  )
