@@ -80,12 +80,13 @@ export VLLM_MAX_NUM_BATCHED_TOKENS=${VLLM_MAX_NUM_BATCHED_TOKENS:-16384}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-raiden}
 export IN_FLIGHT_WEIGHT_UPDATES=${IN_FLIGHT_WEIGHT_UPDATES:-false}
 # Router replay: rollout captures the MoE experts each token was routed to and
-# the MaxText trainer (TRAINER_BACKEND=maxtext) replays them. Set
+# the trainer (MaxText or Tunix Gemma 4) replays them. Set
 # ROUTED_EXPERTS_NUM_EXPERTS when the model has 256-1023 experts per layer so
 # every batch uses the same encoding.
 export RETURN_ROUTED_EXPERTS=${RETURN_ROUTED_EXPERTS:-false}
 export ROUTED_EXPERTS_ENCODE_MODE=${ROUTED_EXPERTS_ENCODE_MODE:-auto}
 export ROUTED_EXPERTS_NUM_EXPERTS=${ROUTED_EXPERTS_NUM_EXPERTS:-}
+export FREEZE_ROUTER=${FREEZE_ROUTER:-false}
 
 # DeepSWE dataset and environment configuration
 export DATASET_NAME=${DATASET_NAME:-R2E-Gym/R2E-Gym-Subset}
@@ -229,8 +230,19 @@ fi
 
 case "${RETURN_ROUTED_EXPERTS}" in
   1|[tT][rR][uU][eE]|[yY][eE][sS]|[yY]|[tT])
-    if [[ "${TRAINER_BACKEND}" != "maxtext" ]]; then
-      echo "Error: RETURN_ROUTED_EXPERTS needs TRAINER_BACKEND=maxtext; only the MaxText trainer replays routed experts."
+    if [[ "${TRAINER_BACKEND}" != "maxtext" ]] && \
+       [[ ! "${MODEL_NAME,,} ${MODEL_ID,,}" =~ gemma[-_]?4 ]]; then
+      echo "Error: RETURN_ROUTED_EXPERTS requires TRAINER_BACKEND=maxtext or a Gemma 4 model on TRAINER_BACKEND=tunix."
+      exit 1
+    fi
+    ;;
+esac
+
+case "${FREEZE_ROUTER}" in
+  1|[tT][rR][uU][eE]|[yY][eE][sS]|[yY]|[tT])
+    if [[ "${TRAINER_BACKEND}" != "tunix" ]] || \
+       [[ ! "${MODEL_NAME,,} ${MODEL_ID,,}" =~ gemma[-_]?4 ]]; then
+      echo "Error: FREEZE_ROUTER requires a Gemma 4 model on TRAINER_BACKEND=tunix."
       exit 1
     fi
     ;;
@@ -480,6 +492,8 @@ start_trainer() {
         --optimizer_weight_decay=${WEIGHT_DECAY} \
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
+        --freeze_router=${FREEZE_ROUTER} \
+        --return_routed_experts=${RETURN_ROUTED_EXPERTS} \
         --sampler=${SAMPLER} \
         --run_id=\"${RUN_ID}\" \
         ${lora_args} \
