@@ -1,0 +1,22 @@
+{
+  "model_id": "tiny-categorical-fixture",
+  "policy_id": "shared_math",
+  "model_sharing": true,
+  "enable_thinking": false,
+  "group_size": 8,
+  "tasks_per_step": 1,
+  "num_steps": 2,
+  "seed": 42,
+  "max_solver_turns": 2,
+  "max_prompt_length": 16,
+  "max_response_length": 3,
+  "micro_batch_size": 4,
+  "normalization": "role",
+  "invalid_action_penalty": 0.1,
+  "learning_rate": 0.2,
+  "train_temperature": 1.0,
+  "train_top_p": 1.0,
+  "eval_temperature": 0.6,
+  "eval_top_p": 0.95,
+  "eval_attempts": 8
+}

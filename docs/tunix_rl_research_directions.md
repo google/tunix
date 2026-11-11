@@ -34,6 +34,8 @@ Sources checked through **November 9, 2026**. This roadmap starts with broad are
 
 ## 2. Swarms: Multi-Agent Collaborative RL
 
+Implementation checkpoint (November 11, 2026): the shared Dr. MAS math slice now has local numerical and training validation. Distributed transport and pretrained 4B quality remain the next gate. [Recipe](../examples/swarm_math/README.md) · [Validation](swarm_training_validation.md).
+
 | Stage | Feature milestone | Observable outcome / acceptance demonstration | References |
 | --- | --- | --- | --- |
 | SW1 | **Conditional shared-policy collaboration** | Shared Qwen3-4B Solver → Verifier → optional Solver revision; export exact per-call traces and rule-based final scores. | [Dr. MAS workflow](https://github.com/langfengQ/DrMAS) |

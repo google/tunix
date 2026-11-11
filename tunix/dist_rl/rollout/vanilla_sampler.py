@@ -841,6 +841,7 @@ class VanillaSampler(
       max_prompt_length: int | None = None,
       echo: bool = False,
       pad_output: bool = False,
+      include_eos: bool = False,
       forbidden_tokens: Iterable[int] | None = None,
       images: (
           str
@@ -872,6 +873,9 @@ class VanillaSampler(
         otherwise it will be max_generation_steps + max_prompt_length. The
         padding now only supports right padding. Can modify to support left
         padding if needed.
+      include_eos: Keep the sampled EOS token and its score in unpadded,
+        completion-only output. This preserves the termination action for RL,
+        including an immediate EOS. Defaults to False for compatibility.
       forbidden_tokens: Optional Iterable of token IDs that are disallowed.
       images: input images to process. Can be a string/array, list of
         strings/arrays, or list of list of strings/arrays depending on whether
@@ -896,6 +900,12 @@ class VanillaSampler(
     Returns:
       A single SamplingResponse or a list of SamplingResponse objects.
     """
+    if include_eos and (
+        echo or pad_output or self.config.beam_size is not None
+    ):
+      raise ValueError(
+          'include_eos requires unpadded completion-only, non-beam output.'
+      )
     if require_unfiltered:
       # Native decoding reads the static worker config, rather than per-turn
       # SamplingParams. A correct request alone cannot establish correctness.
@@ -1083,6 +1093,8 @@ class VanillaSampler(
           )
           + max_prompt_length
       )
+      if include_eos:
+        end_idx = min(end_idx + 1, len(token_buffer))
       return start_idx, end_idx
 
     if pad_output:

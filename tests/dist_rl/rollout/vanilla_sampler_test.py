@@ -1232,6 +1232,36 @@ class VanillaSamplerTest(parameterized.TestCase):
 
 class SamplerTokenInputTest(absltest.TestCase):
 
+  def test_include_eos_preserves_immediate_termination_and_logprob(self):
+    sampler = self._make_sampler(
+        return_logprobs=True, eos_tokens=list(range(256))
+    )
+    request = base_sampler_lib.SamplingRequest(
+        prompt=[3, 4],
+        sampling_params=base_sampler_lib.SamplingParams(max_tokens=3),
+    )
+    legacy = asyncio.run(sampler.sample(request))
+    kept = asyncio.run(sampler.sample(request, include_eos=True))
+    self.assertEmpty(legacy.token_ids)
+    self.assertLen(kept.token_ids, 1)
+    self.assertLen(kept.logprobs, 1)
+    self.assertTrue(np.isfinite(kept.logprobs).all())
+    self.assertLess(float(kept.logprobs[0]), 0.0)
+
+  def test_include_eos_does_not_append_an_unsampled_token_at_length_limit(self):
+    sampler = self._make_sampler(return_logprobs=True, eos_tokens=[999])
+    request = base_sampler_lib.SamplingRequest(
+        prompt=[3, 4],
+        sampling_params=base_sampler_lib.SamplingParams(max_tokens=2),
+    )
+    legacy = asyncio.run(sampler.sample(request))
+    kept = asyncio.run(sampler.sample(request, include_eos=True))
+    np.testing.assert_array_equal(kept.token_ids, legacy.token_ids)
+    np.testing.assert_array_equal(kept.logprobs, legacy.logprobs)
+    self.assertLen(kept.token_ids, 2)
+    with self.assertRaisesRegex(ValueError, 'unpadded completion-only'):
+      asyncio.run(sampler.sample(request, include_eos=True, pad_output=True))
+
   def _make_sampler(self, cache_size: int = 16, **config_kwargs):
     vocab = tc.MockVocab()
     transformer = tc.ToyTransformer(

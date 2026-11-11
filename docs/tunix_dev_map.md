@@ -13,7 +13,7 @@
 | 动态并行 recipe | 动态成员、消息/工作区、anytime reward、物理 deadline、保留采样前缀的后端取消 | 截止后无副作用、真实重叠执行、等预算质量与延迟报告 |
 | 后续扩展 | 多独立 policy 的版本/checkpoint 集合、角色 OPD、环境 fork、外层 RSI curriculum | 每条扩展独立验收；不能把单 policy 引擎或 metadata 当作已支持 |
 
-Dr. MAS 的共享模式是原实现支持的配置，但公开 launcher 默认不共享。原文约 4×H100、35 小时只作资源参考，Tunix 的 mesh、精度、采样契约和吞吐仍待实测。现阶段没有 swarm 训练结果。参考：[官方代码](https://github.com/langfengQ/DrMAS)、[后续 Swarm-Repair 专项设计](swarm_rlcr_design.md)。
+Dr. MAS 的共享模式是原实现支持的配置，但公开 launcher 默认不共享。原文约 4×H100、35 小时只作资源参考，Tunix 的 mesh、精度、采样契约和吞吐仍待实测。共享模型的本机数值验证和两轮最小训练闭环已完成，包含随机小型 Qwen3 的原生采样与训练；预训练 4B、分布式 transport 和任务效果仍待验收。参见[实现与验证记录](swarm_training_validation.md)。参考：[官方代码](https://github.com/langfengQ/DrMAS)、[后续 Swarm-Repair 专项设计](swarm_rlcr_design.md)。
 
 
 路线更新日期：2026 年 11 月 10 日。原有能力审计基线是 `2176443ad6bb61093e8d133a0d2d19045655db80`，参考 Miles 固定版本 `88cf4fc932fca650aebc409ccbb5bc9dd7f59afe`；本图同时包含 `haoyu-next` 工作区新增的 OPD 实现。
@@ -176,7 +176,7 @@ flowchart TD
 
 下一项默认工作是 OPD 的真实服务与 TPU 验收。通过后交付质量对照，并开始单图 VLM；若 teacher 资源持续缺位，就先推进图像输入/attention 验证。每次只选择一个新的训练语义或系统变量，已有 baseline 用来判断变化来自哪里。
 
-[algo]: ../tunix/dist_rl/orchestrator/algorithm_adapter.py
+[algo]: ../tunix/dist_rl/orchestrator/payload_builder.py
 [program]: ../tunix/dist_rl/orchestrator/rl_program.py
 [automodel]: ../tunix/models/automodel.py
 [zero-tim]: ../tunix/zero_tim_kernel/README.md

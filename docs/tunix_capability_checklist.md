@@ -162,7 +162,7 @@ Evidence: [Miles examples and experimental labels][m-examples], [Miles environme
 
 ## 8. Optional Swarm and Multi-Agent Training Directions
 
-**Design update — November 10, 2026:** the [common swarm system design](swarm_training_design.md) selects Dr. MAS shared-policy math as the first recipe, followed by frozen-worker orchestration and then Avalon-inspired Swarm-Repair. Separate interaction, policy binding, call traces, credit statistics, and learning/reduction contracts. This is a planned sequence; implementation and training results are pending.
+**Design update — November 10, 2026:** the [common swarm system design](swarm_training_design.md) selects Dr. MAS shared-policy math as the first recipe, followed by frozen-worker orchestration and then Avalon-inspired Swarm-Repair. Separate interaction, policy binding, call traces, credit statistics, and learning/reduction contracts. The first local shared-policy slice is implemented and CPU-validated as of November 11, 2026; distributed transport and pretrained 4B results remain pending. See the [recipe](../examples/swarm_math/README.md) and [validation record](swarm_training_validation.md).
 
 The first gate must preserve reference active-call role statistics and the global baseline's per-episode reward aggregation, exact context/token ownership, independent development/test data, real train/sync/restore, and matched-budget quality/cost controls. Dynamic workspaces/deadlines, independent trainable policies, counterfactual forks, and swarm OPD are separate capability gates.
 

@@ -1,6 +1,8 @@
 # Tunix Swarm Training: English Quick Overview
 
-**Status:** proposal; implementation and training results pending. **Updated:** November 10, 2026.
+**Status:** local shared-policy implementation and CPU validation complete; distributed transport and pretrained 4B results pending. **Updated:** November 11, 2026.
+
+The first slice lives in `dist_rl/swarm/`, with a sibling `SwarmRLProgram` and the task-specific `examples/swarm_math/` recipe. It has passed upstream numerical comparisons and local training loops, including a small random Qwen3 Transformer. The diagrams below show the target distributed architecture. [Runnable recipe](../examples/swarm_math/README.md) · [Validation record](swarm_training_validation.md).
 
 [Chinese overview](swarm_training_overview_zh.md) · [Lead one-pager](swarm_training_onepager.md) · [Formal system design](swarm_training_design.md)
 

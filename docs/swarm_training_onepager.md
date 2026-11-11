@@ -1,6 +1,8 @@
 # Tunix Swarm Training: Lead Review One-Pager
 
-**Status:** proposal; implementation and training results pending. **Updated:** November 10, 2026.
+**Status:** local shared-policy slice implemented and CPU-validated; distributed transport and pretrained 4B results pending. **Updated:** November 11, 2026.
+
+**Implementation checkpoint:** reusable trace/runtime/credit code is under `dist_rl/swarm/`; the sibling `SwarmRLProgram` reuses native batching and training. The first recipe includes pinned prompts/grader, role/global credit comparisons and two-round local training. The diagram below remains the distributed target. [Recipe](../examples/swarm_math/README.md) · [Validation](swarm_training_validation.md).
 
 [English quick overview](swarm_training_overview.md) · [Chinese quick overview](swarm_training_overview_zh.md) · [Formal system design](swarm_training_design.md)
 

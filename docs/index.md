@@ -20,6 +20,7 @@ swarm_training_onepager.md
 swarm_training_overview.md
 swarm_training_overview_zh.md
 swarm_training_design.md
+swarm_training_validation.md
 swarm_rlcr_design.md
 models.md
 metrics.md

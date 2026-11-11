@@ -2,15 +2,15 @@
 
 | Item | Decision |
 | --- | --- |
-| Status | Design proposal; implementation and accelerator results pending |
-| Version | 2.0 |
-| Updated | November 10, 2026 |
+| Status | Local shared-policy slice implemented and CPU-validated; distributed transport and 4B results pending |
+| Version | 2.1 |
+| Updated | November 11, 2026 |
 | Implementation scope | Extend `tunix/dist_rl` |
 | First recipe | Dr. MAS shared-policy math with Qwen3-4B |
 | Later recipe | Avalon-inspired dynamic parallel Swarm-Repair |
 | Review entry points | [One-pager](swarm_training_onepager.md), [English overview](swarm_training_overview.md), [Chinese overview](swarm_training_overview_zh.md) |
 
-This document is authoritative for the proposed common framework and first recipe. The [Swarm-Repair design](swarm_rlcr_design.md) specifies an optional later specialization. All new interfaces below are proposals. Existing source links identify integration points, not completed swarm support. Recipe values copied from references are distinguished from deployment settings that require measurement.
+This document is authoritative for the common framework and first recipe. The [Swarm-Repair design](swarm_rlcr_design.md) specifies an optional later specialization. The first implementation is a local-transport slice: immutable call traces, Solver–Verifier execution, role/episode credit, native training and weight publication. The broader contracts and distributed lifecycle below remain target design unless listed as implemented. See the [recipe and directory rationale](../examples/swarm_math/README.md) and [validation evidence](swarm_training_validation.md). Recipe values copied from references are distinguished from deployment settings that require measurement.
 
 ## 1. Goals and Scope
 
@@ -57,25 +57,26 @@ The control plane dispatches complete team attempts. One rollout owner holds an 
 | [RolloutManager](../tunix/dist_rl/rollout/manager.py), [RolloutWorker](../tunix/dist_rl/worker/rollout_worker.py) | Replace hard-coded collector construction with explicit collector selection and common drain/close lifecycle |
 | [Sampler](../tunix/dist_rl/rollout/sampler.py) | Reuse exact token sampling and behavior scores; request advanced capabilities only when a recipe needs them |
 | [StandardRLProgram](../tunix/dist_rl/orchestrator/rl_program.py) | Preserve ordinary trajectory processing; add a sibling program for one episode expanding into several calls |
-| [AlgorithmAdapter](../tunix/dist_rl/orchestrator/algorithm_adapter.py) | Reuse token loss infrastructure; introduce explicit episode credit and batch compilation |
+| [AlgorithmConfig](../tunix/rl/algorithm_config.py), [payload builder](../tunix/dist_rl/orchestrator/payload_builder.py), and [loss wiring](../tunix/rl/algo_core.py) | Reuse token loss infrastructure; introduce explicit episode credit and batch compilation |
 | [Payloads](../tunix/dist_rl/common/datatypes.py), [batch assembly](../tunix/dist_rl/orchestrator/batch_assembly.py) | Carry lineage, masks, credit, and explicit reduction contributions through padding and microbatching |
 | [TrainerWorker](../tunix/dist_rl/worker/trainer_worker.py), [PeftTrainer V2](../tunix/dist_rl/train/peft_trainer_v2.py) | Reuse forward/backward, optimizer, and accumulation; validate reference loss equivalence |
 | [Weight sync](../tunix/dist_rl/weight_sync), [trajectory storage](../tunix/dist_rl/trajectory) | Reuse transport/storage foundations with exact episode and checkpoint identity |
 
 Current constraints matter: `StandardRLProgram` checks one payload per input trajectory; the manager constructs a specific collector; the distributed engine maintains one policy version and its sync implementation ignores role selectors. V0 fits the single-policy engine. Independent policy training requires actual engine and lifecycle changes, not just an additional role field.
 
-Proposed module boundaries:
+Module boundaries and current implementation:
 
 | Module | Responsibility |
 | --- | --- |
-| `common/swarm_types.py` | Transport schemas and identity |
-| `swarm/program.py`, `swarm/runtime.py` | Interaction interface and bounded execution services |
-| `rollout/swarm_collector.py` | Adapt episode execution to the existing worker lifecycle |
-| `orchestrator/swarm_program.py` | Distributed collection/training/evaluation/commit loop |
-| `swarm/learning.py` | Credit assignment, update plans, reduction contracts |
-| `examples/swarm_math/` | Pinned first-recipe data, prompts, config, launchers, evaluation |
+| `swarm/trace.py` | Implemented immutable call/episode records; extend these for later transport contracts |
+| `swarm/runtime.py` | Implemented sampling recorder; broader bounded tools/spawn/cancellation services remain planned |
+| `swarm/credit.py` | Implemented role/episode credit and native trainer payloads; multi-policy learning plans remain planned |
+| `swarm/local_engine.py` | Implemented local adapter to existing TrainerWorker; no second optimizer or loss stack |
+| `orchestrator/swarm_program.py` | Implemented synchronous collect/score/train/publish loop with variable call cardinality |
+| `rollout/swarm_collector.py` | Planned worker lifecycle and distributed episode transport adapter |
+| `examples/swarm_math/` | Implemented pinned prompts/grader, data preparation, configs, local launcher and evaluation |
 
-These proposed paths do not imply the files currently exist.
+Keep the reusable contracts inside `dist_rl/swarm/` and task-specific choices in the example. Do not create a separate top-level swarm training framework. The current launcher owns local evaluation and final checkpoint writing. Durable round commits, cursor resume, remote worker selection and Raiden acceptance are still pending; the architecture diagram describes that target distributed path.
 
 ## 3. Common Contracts
 

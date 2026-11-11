@@ -1197,6 +1197,7 @@ class PaddedBatchAssembler:
     # Optional per-token fields are emitted for the whole batch only when all
     # rows carry them.
     optional_fields = (
+        "completion_attention_mask",
         "ref_per_token_logps",
         "old_per_token_logps",
         "returns",
@@ -1436,6 +1437,9 @@ class PaddedBatchAssembler:
         prompt_mask=batched_prompt_mask,
         completion_ids=batched_completion_ids,
         completion_mask=batched_completion_mask,
+        completion_attention_mask=stacked_optional.get(
+            "completion_attention_mask"
+        ),
         ref_per_token_logps=(
             stacked_optional["ref_per_token_logps"]
             if "ref_per_token_logps" in stacked_optional

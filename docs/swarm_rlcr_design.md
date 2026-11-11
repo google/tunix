@@ -11,6 +11,8 @@
 | Implementation scope | Extend `tunix/dist_rl` |
 | Target recipe | Swarm-Repair: shared-policy, time-budgeted collaborative code repair |
 
+**Implementation context:** the first local shared-policy math slice is now [CPU-validated](swarm_training_validation.md). Swarm-Repair itself remains unimplemented; the system below is its target design.
+
 **Document authority:** the [common system design](swarm_training_design.md) defines framework interfaces and the first Dr. MAS math recipe. This document defines the later Swarm-Repair specialization. Shared weights, collective credit, workspace tools, dynamic membership, physical deadlines, and fixed team-capacity reduction below apply to this recipe only. New interfaces are proposed additions; implementation and accelerator acceptance remain pending.
 
 **Delivery order:** shared-policy math correctness and held-out results → frozen-worker orchestration → this dynamic parallel recipe → optional independent-policy, distillation, counterfactual, and RSI extensions. The [internal overview](swarm_training_overview.md) summarizes the complete program.
@@ -143,7 +145,7 @@ flowchart TD
 | [RolloutManager](../tunix/dist_rl/rollout/manager.py) | Replace hard-coded collector construction with explicit single-agent/team collector selection; track and drain both |
 | [Sampler protocol](../tunix/dist_rl/rollout/sampler.py) / [in-process vLLM](../tunix/dist_rl/rollout/inprocess_vllm_sampler.py) | Reuse token-ID sampling, concurrency, and policy state; add prefix streaming and request abort |
 | [StandardRLProgram](../tunix/dist_rl/orchestrator/rl_program.py) | Keep ordinary trajectory behavior; implement `SwarmRLProgram` alongside it because team-to-call expansion changes group cardinality |
-| [GRPOAdapter](../tunix/dist_rl/orchestrator/algorithm_adapter.py) | Reuse the advantage estimator and policy loss; add team-level scoring and one-to-many payload construction |
+| [GRPOConfig](../tunix/rl/algorithm_config.py) and [payload builder](../tunix/dist_rl/orchestrator/payload_builder.py) | Reuse the advantage estimator and policy loss; add team-level scoring and one-to-many payload construction |
 | [Payloads](../tunix/dist_rl/common/datatypes.py) / [batch assembly](../tunix/dist_rl/orchestrator/batch_assembly.py) | Preserve original token/mask arrays; add explicit per-row loss-denominator contributions |
 | [TrainerWorker](../tunix/dist_rl/worker/trainer_worker.py) / [native trainer](../tunix/dist_rl/train/peft_trainer_v2.py) | Reuse forward/backward, denominator-aware accumulation, optimizer update, and checkpointing |
 | [Weight synchronization](../tunix/dist_rl/weight_sync) | Reuse policy transfer and barriers; prohibit synchronization while a training team is active |
@@ -157,7 +159,7 @@ All paths below are proposed additions within `dist_rl`.
 
 | Path | Responsibility |
 | --- | --- |
-| `common/swarm_types.py` | Shared transport DTOs without dependencies on collector/trainer implementations |
+| `swarm/trace.py` | Shared transport DTOs without dependencies on collector/trainer implementations |
 | `rollout/swarm_collector.py` + recipe `SwarmProgram` | Common collector lifecycle; recipe agent loops, spawn/retire, budgets and deadline |
 | `examples/swarm_repair/environment.py` | Recipe message broker, versioned workspace, tools, freeze/score boundary |
 | `orchestrator/swarm_program.py` | Task-group rounds and training/checkpoint lifecycle |
@@ -199,7 +201,7 @@ The first deadline-training pool must be homogeneous: every team compared within
 1. The recipe launcher resolves model/tokenizer revisions, task manifests, prompts, tool schemas, verifier image, optimizer settings, and deployment configuration into a hashed run manifest.
 2. Register trainer and rollout handles with `ClusterOrchestrator`. Run the existing `initialize → compile → start` lifecycle and verify worker descriptions.
 3. Add swarm startup validation: positive budgets, K ≥ 2, compatible model/tokenizer/template digests, team concurrency, a writable artifact/checkpoint destination, supported sampling probabilities, and streaming/abort capability for deadline mode.
-4. Configure `TeamGRPOAdapter` and `PaddedBatchAssembler` through `engine.configure_worker`. Dummy compilation payloads must include the new denominator tensor, old logprobs, and explicit attention masks with the same structure as real batches.
+4. Configure `GRPOConfig` and `PaddedBatchAssembler` through `engine.configure_worker(algo_config=..., assembler=...)`. The recipe's `TeamGRPOAdapter` owns credit and call-row expansion in `SwarmRLProgram`; trainer loss/input wiring uses the shared function registry and `algo_core`. Dummy compilation payloads must include the new denominator tensor, old logprobs, and explicit attention masks with the same structure as real batches.
 5. For a new run, establish policy version 0 and save an initial restorable model/optimizer checkpoint. For resume, read the last published training commit and select its exact checkpoint; do not infer the data cursor from the newest checkpoint directory.
 6. Restore model/optimizer state and the run cursor, validate digests, synchronize the selected policy version, and verify acknowledgement from every participating rollout replica.
 7. Start scheduling only after those checks. Evaluation-only startup follows the same pinning and synchronization path but never configures an optimizer update.
@@ -646,7 +648,7 @@ The resulting artifacts support a reproducible account of whether team training 
 
 | Change | Main files / dependency | Review criterion |
 | --- | --- | --- |
-| Transport and collector selection | `common/swarm_types.py`, `common/datatypes.py`, rollout manager/worker, engine interface/router | Standard single-agent requests preserve their existing result shape and lifecycle; team envelopes survive serialization |
+| Transport and collector selection | `swarm/trace.py`, `common/datatypes.py`, rollout manager/worker, engine interface/router | Standard single-agent requests preserve their existing result shape and lifecycle; team envelopes survive serialization |
 | Team runtime and environment | Team collector, sampler streaming/abort, workspace/message/tool adapters | Concurrent requests, snapshot consistency, quotas, and cutoff behavior pass independently of RL |
 | Team training path | Team adapter, payload/assembler/model-input extensions, loss reduction, swarm program | Full-update gradient oracle and microbatch/device equivalence pass |
 | Commit and recovery | Checkpoint receipt/restore selector, explicit policy metadata, run-commit storage | Crash injection before/after update, save, publication, and sync recovers the declared state |

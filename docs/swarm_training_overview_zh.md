@@ -1,6 +1,8 @@
 # Tunix Swarm 训练：内部速览
 
-**状态：**设计提案；功能实现与训练结果待验收。**更新日期：**2026 年 11 月 10 日。
+**状态：**共享模型的本机实现与 CPU 验证已完成；分布式 transport 与预训练 Qwen3-4B 实验待验收。**更新日期：**2026 年 11 月 11 日。
+
+代码放在 `dist_rl/swarm/`，训练调度用同级的 `SwarmRLProgram`，数学任务的 prompt、判题、数据和配置放在 `examples/swarm_math/`。已对照原作验证数值，并跑通真实优化器的两轮训练，也覆盖了随机小型 Qwen3 Transformer 的原生采样与训练。下方组件图仍描述完整分布式目标。[运行说明](../examples/swarm_math/README.md) · [验证记录](swarm_training_validation.md)。
 
 [英文速览](swarm_training_overview.md) · [Lead review one-pager](swarm_training_onepager.md) · [正式系统设计（英文）](swarm_training_design.md)
 
