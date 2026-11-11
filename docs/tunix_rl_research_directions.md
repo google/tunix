@@ -1,11 +1,11 @@
 # Tunix RL Development Directions
 
-Sources checked through **November 9, 2026**. This roadmap starts with broad areas, then lists **feature milestones, observable acceptance outcomes, and references**. Swarms emphasizes Avalon-M1 / RLCR and includes a proposed blog outline. Paper and code availability are recorded in the [research reference index](#research-reference-index).
+Sources checked through **November 9, 2026**. This roadmap starts with broad areas, then lists **feature milestones, observable acceptance outcomes, and references**. Swarm architecture and recipe selection were updated on November 10, 2026: Dr. MAS shared-policy math first, frozen-worker orchestration next, then Avalon-inspired dynamic parallelism. Paper and code availability are recorded in the [research reference index](#research-reference-index).
 
 | Area | Opportunities | Representative references |
 | --- | --- | --- |
 | **1. OPD and Distillation** | Extend OPD with feedback, hindsight, roles, and multiple teachers. | [SDPO](https://arxiv.org/abs/2601.20802), [SEED](https://arxiv.org/abs/2607.14777), [SRD](https://arxiv.org/abs/2610.08077), [MAS-OPD](https://arxiv.org/abs/2609.34234) |
-| **2. Swarms: Multi-Agent Collaborative RL** | Shared-policy teams, collective rewards and time pressure, orchestration, communication, and credit. | [RLCR](https://www.gr.inc/avalonm1.pdf), [PARL](https://www.kimi.com/en/blog/kimi-k2-5), [AT-GRPO](https://arxiv.org/abs/2510.11062), [C3](https://arxiv.org/abs/2603.06859) |
+| **2. Swarms: Multi-Agent Collaborative RL** | Reusable execution/binding/learning contracts; shared-policy math first, then frozen-worker orchestration and dynamic parallel teams. | [Dr. MAS](https://github.com/langfengQ/DrMAS), [RLCR](https://www.gr.inc/avalonm1.pdf), [PARL](https://www.kimi.com/en/blog/kimi-k2-5), [AT-GRPO](https://arxiv.org/abs/2510.11062), [C3](https://arxiv.org/abs/2603.06859) |
 | **3. RSI: Recursive Self-Improvement** | Automatic curricula, skill evolution, team experience, workflow/code improvement. | [R²Orch](https://arxiv.org/abs/2610.22740), [Skill-SP](https://arxiv.org/abs/2607.22529), [MASS](https://arxiv.org/abs/2610.12176), [SwarmRSI](https://arxiv.org/abs/2610.20431) |
 | **4. Multimodal: Understanding and Interactive RL** | Image/audio/video inputs, visual tools, multimodal OPD. | [VAGEN](https://arxiv.org/abs/2510.16907), [Miles GEO3K VLM](https://github.com/radixark/miles/tree/88cf4fc932fca650aebc409ccbb5bc9dd7f59afe/examples/geo3k_vlm) |
 | **5. Diffusion: Image/Video Generation RL** | Continuous diffusion/flow training, generation rewards, sampling objectives. | [Flow-GRPO](https://arxiv.org/abs/2505.05470), [DiffusionNFT](https://arxiv.org/abs/2509.16117), [Miles Diffusion](https://github.com/radixark/miles_diffusion) |
@@ -36,12 +36,14 @@ Sources checked through **November 9, 2026**. This roadmap starts with broad are
 
 | Stage | Feature milestone | Observable outcome / acceptance demonstration | References |
 | --- | --- | --- | --- |
-| SW1 | **Shared-model collaborative team example** | Run one model in 2–4 roles that divide work, communicate, and use a shared workspace; export team results and complete trajectories. | [RLCR method][rlcr-pdf], [PettingLLMs](https://github.com/pettingllms-ai/PettingLLMs) |
-| SW2 | **Shared-policy team RL recipe** | Train the shared policy for all roles from team scores; produce restorable checkpoints and single-agent/team comparison reports. | [Avalon-M1 / RLCR][rlcr-pdf], [AT-GRPO implementation](https://github.com/pettingllms-ai/PettingLLMs) — Method reference versus implementation reference. |
-| SW3 | **Time-budgeted team training** | Allow a team deadline and intermediate progress scoring; report quality, actual elapsed time, and cost at fixed budgets. | [How to Train a Swarm][rlcr-blog] |
-| SW4 | **Dynamic team size and parallel collaboration** | Recruit/terminate members, execute work concurrently, and join results; compare team sizes and communication overhead. | [RLCR][rlcr-blog], [PARL](https://www.kimi.com/en/blog/kimi-k2-5) — These references use different training approaches. |
-| SW5 | **Optional: independent-role policy co-training** | Allow solver/verifier or other roles to use separate models/configurations and collaborate, update, and restore within one task. | [Miles multi-policy][m-multipolicy] |
-| SW6 | **Optional: role credit and team distillation** | Compare shared rewards, role/counterfactual credit, or role OPD; evaluate specialization and collaboration benefits. | [C3](https://github.com/EIT-EAST-Lab/C3), [MAS-OPD](https://arxiv.org/abs/2609.34234) |
+| SW1 | **Conditional shared-policy collaboration** | Shared Qwen3-4B Solver → Verifier → optional Solver revision; export exact per-call traces and rule-based final scores. | [Dr. MAS workflow](https://github.com/langfengQ/DrMAS) |
+| SW2 | **First verifiable multi-agent RL recipe** | Reference-aligned Dr. MAS/global normalization; train/sync/resume; locked-test quality and cost against untrained teams and matched-budget single-agent RL. | [Dr. MAS launcher](https://github.com/langfengQ/DrMAS/blob/master/examples/drmas_trainer/run_math.sh) |
+| SW3 | **Trainable orchestrator with frozen workers** | Change workflow and policy binding without rewriting the trainer; verify frozen parameters do not update. | [PARL](https://www.kimi.com/en/blog/kimi-k2-5), [MARTI](https://github.com/TsinghuaC3I/MARTI) |
+| SW4 | **Dynamic parallel, time-budgeted teams** | Dynamic members, messages/workspace, anytime scoring, physical deadlines and prefix-preserving abort; compare quality/latency at matched budgets. | [RLCR][rlcr-blog], [Swarm-Repair design](swarm_rlcr_design.md) |
+| SW5 | **Optional: independent-role policy co-training** | Per-policy routing, versions, optimizers, synchronization and checkpoint bundles; restore all policies consistently. | [Dr. MAS](https://github.com/langfengQ/DrMAS), [Miles multi-policy][m-multipolicy] |
+| SW6 | **Optional: teacher, preference and counterfactual learning** | Role OPD with actor/teacher context separation; offline preference generation; environment forks and recipe-specific credit. | [MAS-OPD](https://arxiv.org/abs/2609.34234), [MALT](https://arxiv.org/abs/2412.01928), [MPT](https://github.com/Embodied-Minds-Lab/MPT) |
+
+Common contracts separate interaction, parameter binding, and learning. Static workflows, conditional loops, and dynamic swarms use the same episode/call trace and trainer integration. Shared files and deadlines are recipe capabilities. See the [formal system design](swarm_training_design.md).
 
 ### 2.1 Focus reference: How to Train a Swarm / Avalon-M1
 
@@ -60,25 +62,25 @@ Primary sources: [How to Train a Swarm (blog)](https://www.gr.inc/blog/how-to-tr
 
 Method details follow [report §2](https://www.gr.inc/avalonm1.pdf); time pressure, anytime returns, and communication follow the [blog](https://www.gr.inc/blog/how-to-train-a-swarm). Equal-return rollouts completed before the deadline do not receive different rewards solely because one finishes earlier: a deadline is not a per-second latency bonus.
 
-### 2.2 Initial Tunix RLCR Prototype
+### 2.2 Initial Tunix Recipe and Delivery Order
 
-Milestones: **SW1 demonstrable collaborative team → SW2 trainable shared-policy team → SW3 time-budgeted RLCR-style recipe**. SW4 adds dynamic parallelism; SW5/SW6 are independent-policy, credit-assignment, and distillation branches rather than initial prerequisites.
+Read the [one-pager](swarm_training_onepager.md), [English overview](swarm_training_overview.md), [Chinese overview](swarm_training_overview_zh.md), and [formal system design](swarm_training_design.md). The first recipe uses shared Qwen3-4B math with K=8 complete team attempts, a conditional Solver–Verifier workflow, and external rule-based scoring. Reference starting learning rate is `1e-6`; deployment and sampling details require a pinned source and actual validation.
 
-The first prototype can reuse Tunix GRPO for **RLCR-style** validation; the original primarily uses CISPO, so a blog should state that difference. Broadcasting a collective advantage does not replace token ownership, failure handling, or valid-group checks.
+Port the active-call role statistics and the global baseline's episode-level aggregation separately. Keep credit scope, statistical unit, and loss weighting explicit; Tunix GRPO defaults are not a faithful port by themselves. Reserve development data from training and lock the test set. Publish baseline/final quality, cost, seed uncertainty, numerical parity, and real accelerator sync/restore evidence.
 
-### 2.3 Proposed Blog Angle
+Milestones: **SW1 conditional execution → SW2 first math result → SW3 frozen-worker orchestration → SW4 dynamic parallel Swarm-Repair**. SW5/SW6 add independent policy and learning capabilities; RSI task/skill generation stays in an outer versioned curriculum controller.
 
-Suggested title: **“From Single-Agent RL to Shared-Policy Teams: An RLCR Design for Tunix.”**
+The [Swarm-Repair specification](swarm_rlcr_design.md) retains Team-GRPO, communication/workspace, bounded dynamic membership, physical deadlines and distributed train/eval/resume as a later specialization. Its fixed team-capacity denominator does not apply to every recipe. Native Team-GRPO is an adaptation of RLCR, whose original main objective is CISPO.
 
-1. **Question:** when do more agents and tokens translate into faster task completion?
-2. **Training:** shared weights, collective advantages, and ownership of generated-token gradients.
-3. **Environment:** communication, shared workspaces, anytime rewards, and actual time budgets.
-4. **Tunix milestones:** a collaborative-team example, shared-policy RL recipe, and time-budgeted training/evaluation reports.
-5. **Evidence:** budget-matched controls, progress over time, and communication ablations; separate measurements from untested hypotheses.
+### 2.3 Publication Evidence
 
-Keep the conditions when citing results: the reported **3.9×** is an average **derived-latency** speedup at matched output-token budgets and comparable scores, not training throughput or a universal hardware wall-clock speedup. [Report §3.2.2](https://www.gr.inc/avalonm1.pdf) The inspected report is still marked under revision.
+The first report should document a reproducible multi-agent math recipe: pinned model/data/prompts, the conditional workflow, normalization semantics, numerical parity, locked-test controls, costs and limitations. Quality or stability improvement must be established experimentally. This result does not establish dynamic parallelism or a latency speedup.
+
+The later Avalon-inspired report can study shared weights, communication, anytime progress and physical deadlines, using matched-budget controls and actual execution traces. Keep the source conditions when citing **3.9×**: it is reported average **derived latency** at matched output-token budgets and comparable scores, not training throughput or a guaranteed wall-clock gain. [Avalon report](https://www.gr.inc/avalonm1.pdf)
 
 ## 3. RSI: Recursive Self-Improvement
+
+Task generation, skill evolution and self-play selection run outside the swarm episode collector. Each cycle publishes versioned task/skill manifests and an explicit learning plan; trainable Proposer/Director policies require the corresponding policy lifecycle support. See the [common system design](swarm_training_design.md#7-extending-to-different-swarms).
 
 | Stage | Feature milestone | Observable outcome / acceptance demonstration | References |
 | --- | --- | --- | --- |

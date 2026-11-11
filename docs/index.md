@@ -15,6 +15,11 @@ rollout.md
 algorithms.md
 tunix_capability_checklist.md
 tunix_rl_research_directions.md
+swarm_training_onepager.md
+swarm_training_overview.md
+swarm_training_overview_zh.md
+swarm_training_design.md
+swarm_rlcr_design.md
 models.md
 metrics.md
 examples.md

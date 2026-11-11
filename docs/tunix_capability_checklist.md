@@ -162,6 +162,10 @@ Evidence: [Miles examples and experimental labels][m-examples], [Miles environme
 
 ## 8. Optional Swarm and Multi-Agent Training Directions
 
+**Design update — November 10, 2026:** the [common swarm system design](swarm_training_design.md) selects Dr. MAS shared-policy math as the first recipe, followed by frozen-worker orchestration and then Avalon-inspired Swarm-Repair. Separate interaction, policy binding, call traces, credit statistics, and learning/reduction contracts. This is a planned sequence; implementation and training results are pending.
+
+The first gate must preserve reference active-call role statistics and the global baseline's per-episode reward aggregation, exact context/token ownership, independent development/test data, real train/sync/restore, and matched-budget quality/cost controls. Dynamic workspaces/deadlines, independent trainable policies, counterfactual forks, and swarm OPD are separate capability gates.
+
 All ten unique references supplied for this task are retained below; the duplicated RLCR entry is included once. These are optional research tracks, not claims of existing Tunix recipes. The component column is a proposed Tunix work list, not a description of what the cited paper implements in Tunix.
 
 | ID | Reference | Verified mechanism / update pattern | Tunix components to add |
@@ -171,7 +175,7 @@ All ten unique references supplied for this task are retained below; the duplica
 | S03 | [R²Orch](https://arxiv.org/abs/2610.22740), [code](https://github.com/beita6969/R2Orch) | Proposer/Director self-play with frozen execution workers; graph editing and recursive-learnability task selection inside a skill-internalization loop. Skill-visible/hidden comparisons drive skill removal and internalization into orchestration behavior. | Proposer and Director policies; graph-edit environment; versioned skills; paired skill ablations; outer-loop task/skill controller |
 | S04 | [Kimi K2.5 / PARL](https://www.kimi.com/en/blog/kimi-k2-5) | Train the central orchestrator while subagents stay frozen; learn decomposition and useful parallel execution with scheduled rewards and critical-path constraints. | Spawn/wait/join/cancel primitives; frozen worker services; orchestrator-only loss mask; critical-path metrics and reward schedules |
 | S05 | [MAGRPO: LLM Collaboration With Multi-Agent Reinforcement Learning](https://arxiv.org/abs/2508.04652) | Cooperative multi-agent, multi-turn group-relative policy optimization. | Team-level rollout grouping; per-agent/turn logprobs and masks; joint-policy objective; team reward evaluation |
-| S06 | [Dr. MAS: Stable Reinforcement Learning for Multi-Agent LLM Systems](https://arxiv.org/abs/2602.08847) | Normalize advantages using each agent's reward statistics to stabilize heterogeneous role gradients. | Agent-wise statistics; configurable normalization groups; role-wise gradient/reward diagnostics; per-agent optimization settings |
+| S06 | [Dr. MAS: Stable Reinforcement Learning for Multi-Agent LLM Systems](https://arxiv.org/abs/2602.08847) | Normalize advantages using each agent's reward statistics to stabilize heterogeneous role gradients. | First recipe: shared Qwen3-4B Solver–Verifier math; reference active-call statistics and explicit loss reduction; held-out controls and role diagnostics |
 | S07 | [MAPoRL](https://arxiv.org/abs/2502.18439) | Independently draft, discuss over multiple turns, then co-train using correctness plus corrective/persuasive discussion rewards. | Discussion environment; immutable speaker ownership; answer/discussion verifier; multi-policy updates and collaboration metrics |
 | S08 | [MALT](https://arxiv.org/abs/2412.01928) | Generate/verify/refine search trees; value propagation produces role-specific offline SFT/preference data. This is not an online multi-agent GRPO recipe. | Tree collector; return/value propagation; role-specific dataset export; existing SFT/DPO trainer integration |
 | S09 | [MAS-OPD: On-Policy Distillation for Multi-Agent Systems](https://arxiv.org/abs/2609.34234) | Independent role policies plus frozen-teacher token scores; target-role and counterfactual-role scoring, with completed-history error attribution. | Extend current OPD with role-conditioned teacher calls, contrastive scores, history-only attribution, per-role policy/version routing |
@@ -208,9 +212,9 @@ These modules can support multiple swarm/RSI tracks. Choosing one track does not
 
 - [ ] **Team trajectory schema:** `episode_id`, `team_id`, `agent_id`, role, parent/action/message relationships, timestamps, policy ID/version, and token ownership.
 - [ ] **Multi-policy registry:** independent trainable/frozen policies, optimizers, engines, synchronization, checkpoint identity, and routing.
-- [ ] **Team scheduler:** spawn/wait/join/cancel, DAG dependencies, message queues, workspace, concurrency limits, and resource budgets.
+- [ ] **Interaction program and runtime:** conditional/asynchronous workflows and common lifecycle; optional spawn/join/messages/workspaces/deadlines declared by recipe capability.
 - [ ] **Time-aware execution:** monotonic deadlines, anytime rewards, critical-path latency, timeout attribution, and cleanup.
-- [ ] **Credit/advantage plugins:** team broadcast, agent-wise normalization, counterfactual/difference credit, bucket brigade, and tree-value propagation.
+- [ ] **Credit and learning contracts:** comparison groups, episode/active-call statistical units, role partitions, objective/reduction declarations; later counterfactual, bucket-brigade and tree-value implementations.
 - [ ] **Team-aware masking:** update only tokens generated by the selected trainable policy; keep received messages/tool observations as context.
 - [ ] **Counterfactual environments:** deterministic reset, snapshot/restore, branch identity, and reproducible paired interventions.
 - [ ] **Role-aware distillation:** target/alternative-role teacher scores, history visibility, and teacher/policy identity in data and checkpoints.
