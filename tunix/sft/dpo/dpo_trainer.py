@@ -633,9 +633,10 @@ def _generate_ids_and_masks(
     tokenizer: Any,
     max_length: int,
     left_pad: bool = True,
+    add_bos: bool = True,
 ) -> tuple[jax.Array, jax.Array]:
   """Generates ids and masks for a list of strings."""
-  tokens = [_tokenize(x, tokenizer) for x in input_strings]
+  tokens = [_tokenize(x, tokenizer, add_bos=add_bos) for x in input_strings]
   all_input_ids = jnp.array([
       common.pad_to_length(
           x[:max_length],
@@ -651,10 +652,18 @@ def _generate_ids_and_masks(
   return all_input_ids, all_input_mask
 
 
-def _tokenize(input_string: str, tokenizer: Any) -> jax.Array:
-  """Tokenizes the input string."""
+def _tokenize(
+    input_string: str, tokenizer: Any, add_bos: bool = True
+) -> jax.Array:
+  """Tokenizes the input string, with a leading BOS only if `add_bos`."""
   input_ids = tokenizer.encode(input_string)
-  bos_tok = [tokenizer.bos_id()] if tokenizer.bos_id() else []
+  bos_id = tokenizer.bos_id()
+  if not add_bos:
+    # Drop a BOS the tokenizer itself added (e.g. Hugging Face tokenizers).
+    if bos_id is not None and input_ids[:1] == [bos_id]:
+      input_ids = input_ids[1:]
+    return jnp.array(input_ids, dtype=jnp.int32)
+  bos_tok = [bos_id] if bos_id else []
   input_ids = jnp.array(
       tokenizer.dedup_bos_ids(bos_tok + input_ids), dtype=jnp.int32
   )
@@ -752,11 +761,20 @@ def process_dpo_record(
       max_prompt_length,
       left_pad=True,
   )
+  # Responses continue the prompt, so they must not start with a BOS.
   chosen_ids, chosen_mask = _generate_ids_and_masks(
-      chosen_responses, tokenizer, max_response_length, left_pad=False  # pyrefly: ignore[bad-argument-type]
+      chosen_responses,  # pyrefly: ignore[bad-argument-type]
+      tokenizer,
+      max_response_length,
+      left_pad=False,
+      add_bos=False,
   )
   rejected_ids, rejected_mask = _generate_ids_and_masks(
-      rejected_responses, tokenizer, max_response_length, left_pad=False  # pyrefly: ignore[bad-argument-type]
+      rejected_responses,  # pyrefly: ignore[bad-argument-type]
+      tokenizer,
+      max_response_length,
+      left_pad=False,
+      add_bos=False,
   )
   if images is not None:
     if image_processor is None:
