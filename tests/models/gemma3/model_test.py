@@ -85,9 +85,11 @@ class Gemma3ModelTest(absltest.TestCase):
     positions = jnp.arange(tokens.shape[1], dtype=jnp.int32)[None, :]
     attention_mask = model.get_attention_mask(tokens)
 
-    @nnx.jit
-    def run_headless(model, tokens, positions, attention_mask):
-      hidden_states, _ = model(
+    graphdef, state = nnx.split(model)
+
+    def run_headless(state, tokens, positions, attention_mask):
+      model_local = nnx.merge(graphdef, state)
+      hidden_states, _ = model_local(
           tokens,
           positions,
           None,
@@ -98,11 +100,11 @@ class Gemma3ModelTest(absltest.TestCase):
       return hidden_states
 
     jaxpr = str(
-        jax.make_jaxpr(run_headless)(model, tokens, positions, attention_mask)
+        jax.make_jaxpr(run_headless)(state, tokens, positions, attention_mask)
     )
-    self.assertNotIn('vocabulary_logits', jaxpr)
+    self.assertNotIn('embedder_decode', jaxpr)
     self.assertEqual(
-        run_headless(model, tokens, positions, attention_mask).shape,
+        nnx.jit(run_headless)(state, tokens, positions, attention_mask).shape,
         (1, 3, model.config.embed_dim),
     )
 
