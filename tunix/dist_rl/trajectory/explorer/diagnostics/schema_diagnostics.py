@@ -17,10 +17,12 @@
 A `SchemaDiagnostics` subclass declares the columns, run summary and output
 lines that one `TrajectoryMetadata` subclass contributes to the explorer:
 
-  class TunixDiagnostics(SchemaDiagnostics[TunixTrajectoryMetadata]):
-    COLUMN_DTYPES = {"masked_out": "boolean"}
+  class AcmeEvalDiagnostics(SchemaDiagnostics[EvalTrajectoryMetadata]):
+    COLUMN_DTYPES = {"verdict": "string", "latency_ms": "Float64"}
 
-Diagnostics are not registered; callers pass instances explicitly.
+The schema may also be a `Trajectory` subclass, so that `compute_columns` can
+read the steps, as `TunixDiagnostics` does with `TunixTrajectory`. Diagnostics
+are not registered; callers pass instances explicitly.
 """
 
 from __future__ import annotations
@@ -67,10 +69,11 @@ class SchemaDiagnostics(Generic[MetadataT]):
   final. Instances hold no state.
 
   `compute_columns` and `format_show_header` are called only for trajectories
-  that are instances of the schema. `compute_run_summary` and
-  `format_summary_columns` receive this class's columns, under their own names
-  (e.g. `df["masked_out"]`), with one row per trajectory of the run; the rows of
-  trajectories of other schemas are null.
+  that are instances of the schema, and `compute_run_summary` and
+  `format_summary_columns` receive only their rows of the run: the core columns
+  of `RunStats.df` (`stats.COLUMN_DTYPES`, e.g. `df["total_reward"]`), then
+  this class's columns under their own names (e.g. `df["masked_out"]`). A
+  column must therefore not have the name of a core column.
 
   Attributes:
     SCHEMA: The generic parameter of the class's `SchemaDiagnostics[X]` base.
@@ -78,11 +81,17 @@ class SchemaDiagnostics(Generic[MetadataT]):
       `SCHEMA.EXTENSIONS_KEY` ("_tunix_extensions" -> "tunix").
     COLUMN_DTYPES: The nullable pandas dtype of each column: "string", "Int64",
       "Float64" or "boolean".
+    HIDDEN_COLUMNS: Columns of `COLUMN_DTYPES` that the default
+      `format_show_header` and `format_summary_columns` leave out, e.g. inputs
+      of the run summary that are not worth printing per trajectory. They are
+      still extracted, so they reach `RunStats.df` and the JSON output. Empty by
+      default.
   """
 
   SCHEMA: ClassVar[type[trajectory_lib.TrajectoryMetadata]]
   NAMESPACE: ClassVar[str]
   COLUMN_DTYPES: ClassVar[Mapping[str, str]]
+  HIDDEN_COLUMNS: ClassVar[frozenset[str]] = frozenset()
 
   def __init_subclass__(cls, **kwargs: Any) -> None:
     """Derives `SCHEMA` and `NAMESPACE`, and validates the subclass.
@@ -94,8 +103,9 @@ class SchemaDiagnostics(Generic[MetadataT]):
       TypeError: If the class does not subclass `SchemaDiagnostics[X]` directly
         for a `TrajectoryMetadata` subclass `X`, if `X.EXTENSIONS_KEY` does not
         have the form `_<namespace>_extensions`, if the class overrides
-        `extract` or `summarize`, or if a column name is not an identifier or
-        its dtype is not nullable.
+        `extract` or `summarize`, if a column name is not an identifier or
+        its dtype is not nullable, or if `HIDDEN_COLUMNS` names a column that
+        is not in `COLUMN_DTYPES`.
       AttributeError: If the class declares no `COLUMN_DTYPES`, or `X` has no
         `EXTENSIONS_KEY`.
     """
@@ -122,6 +132,12 @@ class SchemaDiagnostics(Generic[MetadataT]):
             f"{cls.__name__}: column {column!r} has dtype {dtype!r}; expected"
             f" a nullable dtype, one of {list(_NULLABLE_DTYPES)}."
         )
+    unknown_hidden = cls.HIDDEN_COLUMNS.difference(cls.COLUMN_DTYPES)
+    if unknown_hidden:
+      raise TypeError(
+          f"{cls.__name__}: HIDDEN_COLUMNS {sorted(unknown_hidden)} are not"
+          " columns of COLUMN_DTYPES."
+      )
 
   @final
   def extract(self, record: MetadataT) -> Mapping[str, JsonScalar]:
@@ -179,7 +195,8 @@ class SchemaDiagnostics(Generic[MetadataT]):
     JSON serializable.
 
     Args:
-      df: This class's columns, one row per trajectory of the run.
+      df: The run's core columns, then this class's columns, one row per
+        trajectory of the schema.
 
     Raises:
       TypeError: If `compute_run_summary` returns a value that is not JSON
@@ -209,7 +226,8 @@ class SchemaDiagnostics(Generic[MetadataT]):
     mapping.
 
     Args:
-      df: This class's columns, one row per trajectory of the run.
+      df: The run's core columns, then this class's columns, one row per
+        trajectory of the schema.
     """
     del df  # Unused.
     return {}
@@ -221,7 +239,8 @@ class SchemaDiagnostics(Generic[MetadataT]):
   ) -> Sequence[str]:
     """Returns the lines this class adds to a trajectory's header in `show`.
 
-    The default returns one `column: value` line per column, with `-` for None.
+    The default returns one `column: value` line per column that is not in
+    `HIDDEN_COLUMNS`, with `-` for None.
 
     Args:
       values: This class's `extract()` result for the trajectory.
@@ -229,6 +248,7 @@ class SchemaDiagnostics(Generic[MetadataT]):
     return [
         f"{column}: {formatting.format_optional(values[column])}"
         for column in self.COLUMN_DTYPES
+        if column not in self.HIDDEN_COLUMNS
     ]
 
   def format_summary_columns(
@@ -236,12 +256,18 @@ class SchemaDiagnostics(Generic[MetadataT]):
   ) -> Mapping[str, pd.Series]:
     """Returns the columns this class adds to the `summary` table, by header.
 
-    The default returns each column under its own name.
+    The default returns each column that is not in `HIDDEN_COLUMNS` under its
+    own name.
 
     Args:
-      df: This class's columns, one row per trajectory of the run.
+      df: The run's core columns, then this class's columns, one row per
+        trajectory of the schema.
     """
-    return {column: df[column] for column in self.COLUMN_DTYPES}
+    return {
+        column: df[column]
+        for column in self.COLUMN_DTYPES
+        if column not in self.HIDDEN_COLUMNS
+    }
 
   def format_summary_totals(
       self, run_summary: Mapping[str, JsonValue], num_trajectories: int
