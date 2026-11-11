@@ -477,6 +477,43 @@ class GRPOLearnerTest(parameterized.TestCase):
     )
     self.assertIsNone(train_example.sampler_is_weights)
 
+  def test_mask_nan_rewards_keeps_score_metrics_finite(self):
+    rl_engine, _, _ = setup({'rollout_micro_batch_size': 1})
+    buffered = {}
+    original_buffer_metrics = rl_engine.buffer_metrics
+
+    def capture_buffer_metrics(metrics, mode, **kwargs):
+      buffered.update(metrics)
+      return original_buffer_metrics(metrics, mode=mode, **kwargs)
+
+    rl_engine.buffer_metrics = capture_buffer_metrics
+
+    def nan_after_first(prompts, completions, **kwargs):
+      del completions, kwargs
+      return [1.0] + [np.nan] * (len(prompts) - 1)
+
+    grpo_config = grpo_lib.GRPOConfig(
+        num_generations=2,
+        num_iterations=1,
+        beta=0.0,
+        mask_nan_rewards=True,
+    )
+    grpo_learner = grpo_lib.GRPOLearner(
+        rl_engine=rl_engine,
+        reward_fns=nan_after_first,
+        algo_config=grpo_config,
+    )
+    train_example = grpo_learner._generate_and_compute_advantage({
+        'prompts': np.array(['input string', 'input string']),
+        'answer': np.array(['answer', 'answer']),
+    })
+    for name in ('mean', 'max', 'min'):
+      self.assertEqual(float(buffered[f'rewards/score/{name}'][0]), 1.0)
+    # The NaN trajectory is excluded, leaving too few valid ones in the group.
+    np.testing.assert_array_equal(
+        np.asarray(train_example.advantages), np.zeros(2, dtype=np.float32)
+    )
+
   def test_vllm_missing_rollout_logps_does_not_recompute_on_rollout(self):
     rl_engine, _, _ = setup(
         {'return_logprobs': False, 'rollout_micro_batch_size': 1}

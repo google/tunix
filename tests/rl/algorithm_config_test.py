@@ -362,6 +362,14 @@ class AlgorithmConfigTest(parameterized.TestCase):
     with self.assertRaisesRegex(ValueError, "value_loss_fn must be one of"):
       algorithm_config.PPOConfig(value_loss_fn="bad_value_loss")
 
+  def test_mask_nan_rewards(self):
+    self.assertFalse(algorithm_config.AlgorithmConfig().mask_nan_rewards)
+    self.assertTrue(
+        algorithm_config.GRPOConfig(mask_nan_rewards=True).mask_nan_rewards
+    )
+    with self.assertRaisesRegex(ValueError, "not supported for PPO"):
+      algorithm_config.PPOConfig(mask_nan_rewards=True)
+
 
 if __name__ == "__main__":
   absltest.main()

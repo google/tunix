@@ -32,6 +32,13 @@ class AlgorithmConfig:
       `trajectory_rewards`, and also sums `reward_fns` on top when `reward_fns`
       are provided (`AgenticSequenceRewardManager`). Custom managers registered
       via `function_registry.register_reward_manager` are also accepted.
+    mask_nan_rewards: If `True`, a `NaN` from any reward function makes that
+      trajectory's total reward `NaN`, so the advantage estimator excludes it
+      (advantage `0.0`, left out of group statistics). Use when a reward
+      function returns `NaN` to mean "could not score" (for example a sandbox
+      timeout). Default `False` keeps the existing behaviour, where `NaN`
+      reward-function scores count as `0`. Supported by the GRPO-family
+      advantage estimators only; `PPOConfig` rejects it.
     num_generations: Number of trajectories sampled per prompt (the group size
       `G`). Must be positive; GRPO-style estimators require more than one.
     num_iterations: Number of optimizer passes over each batch of rollouts.
@@ -45,6 +52,7 @@ class AlgorithmConfig:
   advantage_estimator: str = "grpo"
   policy_loss_fn: str = "grpo"
   reward_mode: str = "reward_fn"
+  mask_nan_rewards: bool = False
   num_generations: int = 1
   num_iterations: int = 1
   beta: float = 0.0
@@ -397,6 +405,12 @@ class PPOConfig(AlgorithmConfig):
       raise ValueError(
           f"Invalid KL method: {self.kl_method}. Must be one of"
           " ['low_var_kl', 'kl', 'mse_kl']."
+      )
+
+    if self.mask_nan_rewards:
+      raise ValueError(
+          "`mask_nan_rewards` is not supported for PPO: GAE does not exclude"
+          " NaN rewards."
       )
 
     valid_value_loss_fns = ["ppo"]

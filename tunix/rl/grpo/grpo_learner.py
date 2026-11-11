@@ -324,14 +324,18 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
       )
 
     # Log raw scores from the reward model fn
-    self.rl_engine.buffer_metrics(
-        {
-            "rewards/score/mean": (np.mean(rewards), np.mean),
-            "rewards/score/max": (np.max(rewards), np.max),
-            "rewards/score/min": (np.min(rewards), np.min),
-        },
-        mode=mode,
-    )
+    log_rewards = rewards
+    if getattr(self.algo_config, "mask_nan_rewards", False):
+      log_rewards = rewards[~np.isnan(rewards)]
+    if log_rewards.size:
+      self.rl_engine.buffer_metrics(
+          {
+              "rewards/score/mean": (np.mean(log_rewards), np.mean),
+              "rewards/score/max": (np.max(log_rewards), np.max),
+              "rewards/score/min": (np.min(log_rewards), np.min),
+          },
+          mode=mode,
+      )
 
     # Log completion lengths.
     agg_completion_mask = completion_mask.sum(axis=-1)
