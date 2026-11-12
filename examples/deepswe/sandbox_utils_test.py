@@ -266,6 +266,63 @@ class SandboxUtilsTest(absltest.TestCase):
       next(iterator)
     self.assertEqual(fleet.active_pools, {})
 
+  def test_init_global_fleet_registers_subsequent_task_images_in_plan(self):
+    class _FakeTask:
+
+      def __init__(self, id, image, metadata=None):  # pylint: disable=redefined-builtin
+        self.id = id
+        self.image = image
+        self.metadata = metadata or {}
+
+    mock_fleet = mock.MagicMock()
+    mock_fleet.tasks = []
+    mock_fleet._image_rewrite_fn = None
+    planned_images = set()
+
+    def _load_tasks(tasks, **kwargs):
+      del kwargs
+      mock_fleet.tasks = list(tasks)
+
+    def _plan():
+      planned_images.clear()
+      for t in mock_fleet.tasks:
+        planned_images.add(t.image)
+
+    mock_fleet.load_tasks.side_effect = _load_tasks
+    mock_fleet.plan.side_effect = _plan
+    mock_fleet.plan_.for_image.side_effect = (
+        lambda img: img if img in planned_images else None
+    )
+
+    mock_as_rl = mock.MagicMock()
+    mock_as_rl.Task = _FakeTask
+    mock_as_rl.SandboxFleet.return_value = mock_fleet
+
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": mock_as_rl}):
+      with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", None):
+        fleet1 = sandbox_utils.init_global_fleet(
+            tasks=[{"docker_image": "img_A"}],
+            num_generations=4,
+        )
+        self.assertEqual(planned_images, {"img_A"})
+        self.assertEqual(mock_fleet.plan.call_count, 1)
+
+        # Second call with a new image updates the singleton's plan
+        fleet2 = sandbox_utils.init_global_fleet(
+            tasks=[{"docker_image": "img_B"}],
+            num_generations=4,
+        )
+        self.assertIs(fleet1, fleet2)
+        self.assertEqual(planned_images, {"img_A", "img_B"})
+        self.assertEqual(mock_fleet.plan.call_count, 2)
+
+        # Third call with an already-planned image is a no-op
+        _ = sandbox_utils.init_global_fleet(
+            tasks=[{"docker_image": "img_B"}],
+            num_generations=4,
+        )
+        self.assertEqual(mock_fleet.plan.call_count, 2)
+
   def test_get_global_fleet_uninitialized_raises(self):
     sandbox_utils._GLOBAL_FLEET = None
     with self.assertRaises(RuntimeError):

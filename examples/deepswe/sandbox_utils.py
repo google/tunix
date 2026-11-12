@@ -27,7 +27,7 @@ from typing import Any, Callable
 import numpy as np
 
 _GLOBAL_FLEET = None
-_FLEET_LOCK = threading.Lock()
+_FLEET_LOCK = threading.RLock()
 _PATCH_LOCK = threading.Lock()
 _R2EGYM_PATCHED = False
 
@@ -193,6 +193,50 @@ def normalize_tasks_for_fleet(
   return normalized
 
 
+def ensure_tasks_in_fleet_plan(
+    fleet: Any,
+    tasks: list[Any] | None,
+    *,
+    scaffold: str = "r2egym",
+    image_rewrite: Callable[[str], str] | None = None,
+) -> None:
+  """Registers `tasks` in `fleet.plan_` so `acquire()` hits warm pools (`on_demand=False`)."""
+  if fleet is None or not tasks:
+    return
+  with _FLEET_LOCK:
+    image_rewrite_fn = get_image_rewrite_fn(
+        image_rewrite or fleet._image_rewrite_fn
+    )
+    normalized_tasks = normalize_tasks_for_fleet(
+        tasks, scaffold=scaffold, image_rewrite=image_rewrite_fn
+    )
+    if not normalized_tasks:
+      return
+
+    plan = fleet.plan_
+    if plan is not None:
+      missing = [
+          t for t in normalized_tasks if plan.for_image(t.image) is None
+      ]
+      if not missing:
+        return
+    else:
+      missing = list(normalized_tasks)
+
+    existing_tasks = list(fleet.tasks) if fleet.tasks else []
+    existing_images = {t.image for t in existing_tasks}
+    new_tasks = []
+    for t in missing:
+      if t.image not in existing_images:
+        new_tasks.append(t)
+        existing_images.add(t.image)
+    if not new_tasks and plan is not None:
+      return
+
+    fleet.load_tasks(existing_tasks + new_tasks)
+    fleet.plan()
+
+
 def init_global_fleet(
     tasks: list[Any] | None = None,
     max_concurrency: int = 128,
@@ -208,6 +252,13 @@ def init_global_fleet(
   global _GLOBAL_FLEET
   with _FLEET_LOCK:
     if _GLOBAL_FLEET is not None:
+      if tasks is not None:
+        ensure_tasks_in_fleet_plan(
+            _GLOBAL_FLEET,
+            tasks,
+            scaffold=scaffold,
+            image_rewrite=image_rewrite,
+        )
       return _GLOBAL_FLEET
 
     patch_r2egym_for_agent_sandbox()
