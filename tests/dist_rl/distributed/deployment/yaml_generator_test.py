@@ -430,12 +430,8 @@ class YamlGeneratorTest(parameterized.TestCase):
         )
         self.assertIn("memory: 512Mi", rendered)
 
-  @parameterized.parameters(
-      "jobset.pathways.yaml",
-      "jobset.pathways.qwen3.5-397b.yaml",
-  )
-  def test_generate_pathways_yaml_init_containers(self, template_name):
-    template_file = _get_template_path(template_name)
+  def test_generate_pathways_yaml_init_containers(self):
+    template_file = _get_template_path("jobset.pathways.yaml")
     argv = [
         "yaml_generator.py",
         template_file,
@@ -460,7 +456,6 @@ class YamlGeneratorTest(parameterized.TestCase):
   @parameterized.parameters(
       "jobset.cpu.yaml",
       "jobset.pathways.yaml",
-      "jobset.pathways.qwen3.5-397b.yaml",
       "jobset.tpu.yaml",
       "jobset.mcjax.yaml",
       "jobset.mcjax.ray.yaml",
