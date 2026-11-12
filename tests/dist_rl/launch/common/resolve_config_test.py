@@ -220,6 +220,39 @@ weight_sync_config:
     with self.assertRaisesRegex(ValueError, "artifact_root must not be empty"):
       resolve_config.initialize(["cluster_config.artifact_root="])
 
+  def test_artifact_root_rejects_uris(self):
+    # `pathlib` would turn the URI into the relative path `gs:/bucket/run`.
+    for target in ("local", "k8s", "external"):
+      with self.subTest(target=target):
+        with self.assertRaisesRegex(
+            ValueError,
+            "cluster_config.artifact_root must be a filesystem path, got"
+            " 'gs://bucket/run'",
+        ):
+          resolve_config.initialize([
+              f"cluster_config.target={target}",
+              "agentic_grpo_config.beta=0.0",
+              "cluster_config.artifact_root=gs://bucket/run",
+          ])
+
+  def test_output_paths_can_be_uris(self):
+    hp = resolve_config.initialize([
+        "cluster_config.target=k8s",
+        "agentic_grpo_config.beta=0.0",
+        "rl_training_config.checkpoint_root_directory=gs://bucket/ckpt",
+        "rl_training_config.metrics_logging_options.log_dir=gs://bucket/logs",
+        "trajectory_store_config.enable=true",
+        "trajectory_store_config.dir=gs://bucket/store",
+    ])
+    rl_train = hp.config_mapping("rl_training_config")
+    self.assertEqual(rl_train["checkpoint_root_directory"], "gs://bucket/ckpt")
+    self.assertEqual(
+        rl_train["metrics_logging_options"]["log_dir"], "gs://bucket/logs"
+    )
+    self.assertEqual(
+        hp.config_mapping("trajectory_store_config")["dir"], "gs://bucket/store"
+    )
+
   def test_null_sandbox_namespace_follows_the_gke_namespace(self):
     hp = resolve_config.initialize([
         "cluster_config.target=k8s",

@@ -362,9 +362,11 @@ cluster_config:
   registry_module: "tunix.dist_rl.examples.math_gsm8k_dist.gsm8k"
   # Relative paths are resolved against the repo root on `target: local` and
   # against the container working directory (repo root) on `target: k8s`;
-  # `target: external` requires an absolute filesystem path. The models,
-  # checkpoints, and metrics default to subdirectories of it. Each task recipe
-  # sets its own value.
+  # `target: external` requires an absolute filesystem path. URIs such as
+  # `gs://...` are rejected; set the output paths themselves (checkpoints,
+  # metrics, trajectory store) to URIs instead. The models, checkpoints, and
+  # metrics default to subdirectories of it. Each task recipe sets its own
+  # value.
   artifact_root: "artifacts/dist_rl"
   run_id: ""
   # Print the commands (local) or manifests (k8s) instead of launching.

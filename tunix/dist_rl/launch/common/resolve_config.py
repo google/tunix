@@ -173,6 +173,17 @@ def _finalize_dist_defaults(hp: cli_config.HyperParameters) -> None:
 
   if not cluster["artifact_root"]:
     raise ValueError("cluster_config.artifact_root must not be empty.")
+  # `pathlib` turns `gs://bucket/run` into the relative path `gs:/bucket/run`,
+  # so the derived output paths would silently land on local disk.
+  if "://" in str(cluster["artifact_root"]):
+    raise ValueError(
+        "cluster_config.artifact_root must be a filesystem path, got"
+        f" {str(cluster['artifact_root'])!r}. To write the outputs to a URI,"
+        " set rl_training_config.checkpoint_root_directory,"
+        " rl_training_config.metrics_logging_options.log_dir,"
+        " trajectory_store_config.dir and (for a MaxText trainer)"
+        " actor_model_config.kwargs.maxtext_output_dir instead."
+    )
   artifact_root = pathlib.Path(str(cluster["artifact_root"]))
   if target == "external" and not artifact_root.is_absolute():
     raise ValueError(
