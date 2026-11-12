@@ -1523,41 +1523,11 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       except Exception as e:  # pylint: disable=broad-exception-caught
         logging.warning("Prompt stream close note: %s", e)
     if fleet is not None:
+      # The orchestrator owns the job, and the run is over here, so it is the
+      # one process that reaps the shared run_id. Rollout workers only tear
+      # down their own fleet (see sandbox_utils.teardown_global_fleet).
       logging.info("Tearing down SandboxFleet on orchestrator...")
-      try:
-        fleet.teardown()
-      except Exception as e:  # pylint: disable=broad-exception-caught
-        logging.warning("Fleet teardown note: %s", e)
-      try:
-        from agent_sandbox_rl import reap  # pylint: disable=g-import-not-at-top
-
-        run_id = getattr(fleet, "run_id", None)
-        if run_id:
-          for c in getattr(fleet, "registry", []):
-            c_ns = (
-                getattr(c, "namespace", None)
-                or os.getenv("SANDBOX_NAMESPACE")
-                or os.getenv("NAMESPACE", "priority-dev")
-            )
-            logging.info(
-                "Reaping agent_sandbox_rl resources for run_id=%s in namespace=%s...",
-                run_id,
-                c_ns,
-            )
-            reap(
-                run_id=run_id,
-                in_cluster=getattr(c, "in_cluster", True),
-                namespace=c_ns,
-                delete_pods=True,
-            )
-      except Exception as e:  # pylint: disable=broad-exception-caught
-        logging.warning("Reaper note: %s", e)
-    try:
-      from examples.deepswe import sandbox_utils  # pylint: disable=g-import-not-at-top
-
-      sandbox_utils.teardown_global_fleet()
-    except Exception as e:  # pylint: disable=broad-exception-caught
-      logging.warning("Global fleet teardown note: %s", e)
+      sandbox_utils.teardown_global_fleet(reap_run=True)
     if args.stop_workers_on_exit:
       logging.info("Shutting down cluster workers...")
       cluster.shutdown()

@@ -713,7 +713,7 @@ async def run_controller(a):
     if fleet is not None:
       from examples.deepswe import sandbox_utils  # pylint: disable=import-outside-toplevel
 
-      await asyncio.to_thread(sandbox_utils.teardown_global_fleet)
+      await asyncio.to_thread(sandbox_utils.teardown_global_fleet, reap_run=True)
     validation_time = (
         time.monotonic() - t_eval_start if t_eval_start is not None else None
     )

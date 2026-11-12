@@ -867,7 +867,7 @@ def run_pipeline_e2e(
   logging.info("5. Tearing down iterator and cleaning up fleet...")
   iterator.close()
   if not is_mock:
-    sandbox_utils.teardown_global_fleet()
+    sandbox_utils.teardown_global_fleet(reap_run=True)
   else:
     fleet.teardown()
 
