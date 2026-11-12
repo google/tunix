@@ -44,6 +44,32 @@ def _log_softmax_f64(logits) -> np.ndarray:
   return shifted - np.log(np.exp(shifted).sum(axis=-1, keepdims=True))
 
 
+class TilesPerStepTest(parameterized.TestCase):
+
+  @parameterized.parameters(
+      (1, 1),
+      (5, 5),
+      (8, 8),
+      (9, 5),
+      (16, 8),
+      (19, 5),
+      (38, 8),
+      (75, 5),
+      (149, 6),
+      (150, 6),
+      (152, 8),
+  )
+  def test_minimal_padding_widest_on_ties(self, tiles, expected):
+    tps = canonical_logsoftmax._tiles_per_step(tiles)
+    self.assertEqual(tps, expected)
+    # The Stage 2 operand width never changes.
+    padded = -(-tiles // tps) * tps
+    self.assertEqual(
+        canonical_logsoftmax._summary_width(padded),
+        canonical_logsoftmax._summary_width(tiles),
+    )
+
+
 class ValidateAndShapeInvarianceTest(parameterized.TestCase):
 
   def test_validate_accepts_bf16_f32_and_arbitrary_positive_shapes(self):
@@ -141,8 +167,11 @@ class LogSoftmaxTest(parameterized.TestCase):
     for got, want in zip(gathered_bf16, gathered_f32):
       test_utils.assert_bitwise_equal(got, want)
 
-  def test_rows_are_independent_of_the_batch(self):
-    logits = _logits(1, 19, 1000)
+  @parameterized.parameters(1000, 9000)
+  def test_rows_are_independent_of_the_batch(self, vocab):
+    # `vocab=9000` with 19 rows: 3 row blocks x 2 vocab steps in interpret
+    # mode, so the fused kernel's scratch is reused across both grid axes.
+    logits = _logits(1, 19, vocab)
     full = canonical_logsoftmax.log_softmax(logits, interpret=True)
     head = canonical_logsoftmax.log_softmax(logits[:5], interpret=True)
     test_utils.assert_bitwise_equal(head, full[:5])

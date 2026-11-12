@@ -17,10 +17,15 @@
 ``jax.nn.log_softmax`` over a 151936-wide vocabulary lets XLA choose the
 reduction tree per shape and per program, so the sampler's logprob of a token
 and the learner's recomputed logprob of the same token can differ in the last
-bits. Here the row normalizer is computed by a fixed two-stage Pallas program:
+bits. Here the row normalizer is computed by a fixed two-stage program:
 per-1024-column tile max/sum-exp (stage 1) and a strict left-to-right combine
 of the compact tile summaries (stage 2, the only cross-tile reduction),
-followed by flag-proof ``float32`` subtraction.
+followed by flag-proof ``float32`` subtraction. On one device both stages run
+in a single Pallas launch (the tile summaries stay in VMEM scratch); under
+tensor parallelism each rank runs stage 1 on its shard and a small combine
+kernel runs stage 2 on the all-gathered summaries. Both forms evaluate the
+same per-tile arithmetic and the same stage-2 operand shape, so they agree bit
+for bit.
 
 Both ``bfloat16`` and ``float32`` ``[M, V]`` inputs of any positive shape are
 accepted directly without environment-variable gates or ``M <= 256`` row caps.
@@ -82,151 +87,229 @@ def _validate(logits: jax.Array | jax.ShapeDtypeStruct) -> tuple[int, int]:
   return m, vocab
 
 
-def _run_partial_stage(
+def _combine_rows(l_max: jax.Array, l_sum: jax.Array) -> jax.Array:
+  """Stage 2 arithmetic: ``[rows, tiles]`` summaries -> ``[rows]`` normalizer.
+
+  The single cross-tile reduction of the program. Both the standalone combine
+  kernel and the fused single-launch kernel call this on identically shaped
+  ``[block_rows, summary_width]`` operands, so they produce the same bits.
+
+  Args:
+    l_max: Per-tile maxima, ``float32[rows, tiles]``.
+    l_sum: Per-tile ``sum(exp(x - max))``, ``float32[rows, tiles]``.
+
+  Returns:
+    ``float32[rows]`` log-normalizers ``max + log(sum)``.
+  """
+  global_max = jnp.max(l_max, axis=-1)
+  global_sum = jnp.sum(
+      l_sum * jnp.exp(l_max - global_max[:, None]),
+      axis=-1,
+      dtype=jnp.float32,
+  )
+  return global_max + jnp.log(global_sum)
+
+
+def _tiles_per_step(tiles: int) -> int:
+  """Tiles one grid step loads: ``<= TILES_PER_GROUP``, minimal step padding.
+
+  The last step may run past the real tiles (those columns are padded /
+  dropped), so among ``1..TILES_PER_GROUP`` the width with the least padding
+  wins, the widest on ties (fewer grid steps). Widths below 4 are only used
+  for ``tiles < 4``: a step costs more than the padded tiles it saves. The
+  padded tile count never exceeds ``round_up(tiles, TILES_PER_GROUP)``, so
+  the Stage 2 operand width (``_summary_width``) is the same as with
+  ``TILES_PER_GROUP``-wide steps.
+
+  Args:
+    tiles: Number of real 1024-column tiles.
+
+  Returns:
+    Tiles per grid step.
+  """
+  if tiles <= TILES_PER_GROUP:
+    return tiles
+  candidates = range(4, TILES_PER_GROUP + 1)
+  return min(
+      candidates,
+      key=lambda tps: (model_contracts.round_up(tiles, tps) - tiles, -tps),
+  )
+
+
+def _summary_width(tiles: int) -> int:
+  """Summary columns: ``tiles`` padded to a multiple of ``TILES_PER_GROUP``.
+
+  Padding columns hold ``(finfo(float32).min, VOCAB_TILE)``: the summary of a
+  fully masked tile, which contributes ``VOCAB_TILE * exp(min - max) == 0``.
+
+  Args:
+    tiles: Number of real 1024-column tiles.
+
+  Returns:
+    The padded column count.
+  """
+  return model_contracts.round_up(tiles, TILES_PER_GROUP)
+
+
+def _tile_stage(
     logits_2d: jax.Array,
     *,
     block_rows: int,
     tiles: int,
     vocab_limit: int | None,
     col_start: jax.Array | None,
+    finalize: bool,
     interpret: bool,
     name: str,
-) -> tuple[jax.Array, jax.Array]:
-  """Stage 1: per-(row, 1024-col tile) ``(max, sum_exp)`` summaries."""
-  mp = int(logits_2d.shape[0])
+) -> tuple[jax.Array, ...]:
+  """Stage 1 (+ Stage 2 when ``finalize``) in one Pallas launch.
+
+  Grid ``(row blocks, vocab steps)`` with the vocab axis ``"arbitrary"``: each
+  step loads ``_tiles_per_step(tiles)`` 1024-column tiles, computes every
+  tile's ``(max, sum_exp)`` over its ``[rows_per_step, 1024]`` slice and
+  stores it in a compact ``[rows, _summary_width(tiles)]`` VMEM scratch
+  (pre-filled with the masked-tile summary). The summaries never touch HBM:
+
+  * ``finalize=True`` (unsharded normalizer): the last vocab step runs Stage 2
+    (``_combine_rows``) on ``block_rows``-row slices of the scratch -- the
+    operand shape of the standalone combine kernel -- and writes the
+    ``[mp, SUMMARY_ALIGN]`` normalizer tile: one launch instead of two.
+  * ``finalize=False`` (vocab-parallel Stage 1 of one TP rank): the last step
+    writes the lane-dense ``[mp, width]`` summaries for the cross-rank
+    all-gather (no ``SUMMARY_ALIGN`` broadcast).
+
+  Each tile's reduction is a lane reduction over its own 1024 columns and the
+  Stage 2 operand keeps the combine kernel's block shape, so the normalizer
+  does not depend on the step width, the row count or whether the combine is
+  fused (``canonical_logsoftmax_test`` checks the fused path against the TP
+  combine path bitwise; on TPU the single-device program reproduces the
+  TP=4 program and the pre-fusion fingerprint at ``V = 151936``).
+
+  Args:
+    logits_2d: ``[mp, cols]`` logits, ``mp % (TILES_PER_GROUP * block_rows) ==
+      0`` and ``cols`` a multiple of ``_tiles_per_step(tiles) * VOCAB_TILE``
+      with ``cols >= tiles * VOCAB_TILE``.
+    block_rows: Rows per Stage 2 slice (8 on TPU, 1 in interpret mode).
+    tiles: Number of real 1024-column tiles.
+    vocab_limit: Columns ``>= vocab_limit`` (in global coordinates) are masked
+      to ``finfo(float32).min``; ``None`` if no column needs masking.
+    col_start: Optional traced global column of ``logits_2d[:, 0]`` (halo
+      aligned TP shards); ``None`` means column 0.
+    finalize: Whether to fuse Stage 2 and return the normalizer tile.
+    interpret: Run the kernel in Pallas interpret mode.
+    name: Kernel name.
+
+  Returns:
+    ``(norm_2d[mp, SUMMARY_ALIGN],)`` if ``finalize`` else ``(p_max, p_sum)``
+    of shape ``[mp, tiles]``.
+  """
+  mp, cols = map(int, logits_2d.shape)
   rows_per_step = TILES_PER_GROUP * block_rows
-  summary_shape = jax.ShapeDtypeStruct(
-      (mp // TILES_PER_GROUP, 1, TILES_PER_GROUP, tiles * SUMMARY_ALIGN),
-      jnp.float32,
-  )
-  in_specs = [
-      pl.BlockSpec((rows_per_step, VOCAB_TILE), lambda i, j: (i, j)),
-  ]
-  out_specs = [
-      pl.BlockSpec(
-          (block_rows, 1, TILES_PER_GROUP, SUMMARY_ALIGN),
-          lambda i, j: (i, 0, 0, j),
-      ),
-      pl.BlockSpec(
-          (block_rows, 1, TILES_PER_GROUP, SUMMARY_ALIGN),
-          lambda i, j: (i, 0, 0, j),
-      ),
-  ]
+  tiles_per_step = _tiles_per_step(tiles)
+  step_cols = tiles_per_step * VOCAB_TILE
+  if cols % step_cols or cols // VOCAB_TILE < tiles:
+    raise ValueError(
+        f"_tile_stage needs cols % {step_cols} == 0 and cols >="
+        f" {tiles * VOCAB_TILE}, got cols={cols}"
+    )
+  steps = cols // step_cols
+  width = _summary_width(steps * tiles_per_step)
+  f32_min = jnp.finfo(jnp.float32).min
 
-  if vocab_limit is None:
+  def kernel(meta_ref, x_ref, *refs):
+    if finalize:
+      out_ref, max_sc, sum_sc = refs
+    else:
+      max_out, sum_out, max_sc, sum_sc = refs
+    j = pl.program_id(1)
 
-    def partial_kernel(x_ref, max_ref, sum_ref):
-      x = x_ref[...].astype(jnp.float32)
-      x = x.reshape(block_rows, 1, TILES_PER_GROUP, VOCAB_TILE)
+    @pl.when(j == 0)
+    def _init():
+      max_sc[...] = jnp.full(max_sc.shape, f32_min, jnp.float32)
+      sum_sc[...] = jnp.full(sum_sc.shape, float(VOCAB_TILE), jnp.float32)
+
+    lane = jax.lax.broadcasted_iota(jnp.int32, (rows_per_step, width), 1)
+    cur_max = max_sc[...]
+    cur_sum = sum_sc[...]
+    for k in range(tiles_per_step):
+      x = x_ref[:, k * VOCAB_TILE : (k + 1) * VOCAB_TILE].astype(jnp.float32)
+      if vocab_limit is not None:
+        global_cols = (
+            meta_ref[0]
+            + (j * tiles_per_step + k) * VOCAB_TILE
+            + jax.lax.broadcasted_iota(jnp.int32, x.shape, 1)
+        )
+        x = jnp.where(global_cols < vocab_limit, x, f32_min)
       tile_max = jnp.max(x, axis=-1)
       tile_sum = jnp.sum(
-          jnp.exp(x - tile_max[..., None]), axis=-1, dtype=jnp.float32
+          jnp.exp(x - tile_max[:, None]), axis=-1, dtype=jnp.float32
       )
-      max_ref[...] = jnp.broadcast_to(tile_max[..., None], max_ref.shape)
-      sum_ref[...] = jnp.broadcast_to(tile_sum[..., None], sum_ref.shape)
+      hit = lane == j * tiles_per_step + k
+      cur_max = jnp.where(hit, tile_max[:, None], cur_max)
+      cur_sum = jnp.where(hit, tile_sum[:, None], cur_sum)
+    max_sc[...] = cur_max
+    sum_sc[...] = cur_sum
 
-    partial_max, partial_sum = pl.pallas_call(
-        partial_kernel,
-        out_shape=(summary_shape, summary_shape),
-        grid_spec=pltpu.PrefetchScalarGridSpec(
-            num_scalar_prefetch=0,
-            in_specs=in_specs,
-            out_specs=out_specs,
-            grid=(mp // rows_per_step, tiles),
-        ),
-        compiler_params=pltpu.CompilerParams(
-            dimension_semantics=("parallel", "parallel"),
-            allow_input_fusion=(False,),
-            shape_invariant_numerics=True,
-        ),
-        interpret=interpret,
-        name=name,
-    )(logits_2d)
-  elif col_start is None:
+    @pl.when(j == steps - 1)
+    def _finish():
+      if finalize:
+        for r in range(0, rows_per_step, block_rows):
+          normalizer = _combine_rows(
+              max_sc[r : r + block_rows, :], sum_sc[r : r + block_rows, :]
+          )
+          out_ref[r : r + block_rows, :] = jnp.broadcast_to(
+              normalizer[:, None], (block_rows, SUMMARY_ALIGN)
+          )
+      else:
+        max_out[...] = max_sc[...]
+        sum_out[...] = sum_sc[...]
 
-    def partial_tail_kernel(x_ref, max_ref, sum_ref):
-      x = x_ref[...].astype(jnp.float32)
-      cols = pl.program_id(1) * VOCAB_TILE + jax.lax.broadcasted_iota(
-          jnp.int32, x.shape, 1
-      )
-      x = jnp.where(cols < vocab_limit, x, jnp.finfo(jnp.float32).min)
-      x = x.reshape(block_rows, 1, TILES_PER_GROUP, VOCAB_TILE)
-      tile_max = jnp.max(x, axis=-1)
-      tile_sum = jnp.sum(
-          jnp.exp(x - tile_max[..., None]), axis=-1, dtype=jnp.float32
-      )
-      max_ref[...] = jnp.broadcast_to(tile_max[..., None], max_ref.shape)
-      sum_ref[...] = jnp.broadcast_to(tile_sum[..., None], sum_ref.shape)
-
-    partial_max, partial_sum = pl.pallas_call(
-        partial_tail_kernel,
-        out_shape=(summary_shape, summary_shape),
-        grid_spec=pltpu.PrefetchScalarGridSpec(
-            num_scalar_prefetch=0,
-            in_specs=in_specs,
-            out_specs=out_specs,
-            grid=(mp // rows_per_step, tiles),
-        ),
-        compiler_params=pltpu.CompilerParams(
-            dimension_semantics=("parallel", "parallel"),
-            allow_input_fusion=(False,),
-            shape_invariant_numerics=True,
-        ),
-        interpret=interpret,
-        name=name,
-    )(logits_2d)
+  if finalize:
+    out_shape = jax.ShapeDtypeStruct((mp, SUMMARY_ALIGN), jnp.float32)
+    out_specs = pl.BlockSpec(
+        (rows_per_step, SUMMARY_ALIGN), lambda i, j, _meta: (i, 0)
+    )
   else:
-
-    def partial_shifted_tail_kernel(meta_ref, x_ref, max_ref, sum_ref):
-      x = x_ref[...].astype(jnp.float32)
-      cols = (
-          meta_ref[0]
-          + pl.program_id(1) * VOCAB_TILE
-          + jax.lax.broadcasted_iota(jnp.int32, x.shape, 1)
-      )
-      x = jnp.where(cols < vocab_limit, x, jnp.finfo(jnp.float32).min)
-      x = x.reshape(block_rows, 1, TILES_PER_GROUP, VOCAB_TILE)
-      tile_max = jnp.max(x, axis=-1)
-      tile_sum = jnp.sum(
-          jnp.exp(x - tile_max[..., None]), axis=-1, dtype=jnp.float32
-      )
-      max_ref[...] = jnp.broadcast_to(tile_max[..., None], max_ref.shape)
-      sum_ref[...] = jnp.broadcast_to(tile_sum[..., None], sum_ref.shape)
-
-    shifted_in_specs = [
-        pl.BlockSpec((rows_per_step, VOCAB_TILE), lambda i, j, _meta: (i, j)),
+    summary = jax.ShapeDtypeStruct((mp, width), jnp.float32)
+    out_shape = (summary, summary)
+    out_specs = [
+        pl.BlockSpec((rows_per_step, width), lambda i, j, _meta: (i, 0)),
+        pl.BlockSpec((rows_per_step, width), lambda i, j, _meta: (i, 0)),
     ]
-    shifted_out_specs = [
-        pl.BlockSpec(
-            (block_rows, 1, TILES_PER_GROUP, SUMMARY_ALIGN),
-            lambda i, j, _meta: (i, 0, 0, j),
-        ),
-        pl.BlockSpec(
-            (block_rows, 1, TILES_PER_GROUP, SUMMARY_ALIGN),
-            lambda i, j, _meta: (i, 0, 0, j),
-        ),
-    ]
-    partial_max, partial_sum = pl.pallas_call(
-        partial_shifted_tail_kernel,
-        out_shape=(summary_shape, summary_shape),
-        grid_spec=pltpu.PrefetchScalarGridSpec(
-            num_scalar_prefetch=1,
-            in_specs=shifted_in_specs,
-            out_specs=shifted_out_specs,
-            grid=(mp // rows_per_step, tiles),
-        ),
-        compiler_params=pltpu.CompilerParams(
-            dimension_semantics=("parallel", "parallel"),
-            allow_input_fusion=(False, False),
-            shape_invariant_numerics=True,
-        ),
-        interpret=interpret,
-        name=name,
-    )(jnp.reshape(col_start.astype(jnp.int32), (1,)), logits_2d)
-
-  p_max = partial_max.reshape(mp, tiles, SUMMARY_ALIGN)[:, :, 0]
-  p_sum = partial_sum.reshape(mp, tiles, SUMMARY_ALIGN)[:, :, 0]
-  return p_max, p_sum
+  meta = (
+      jnp.zeros((1,), jnp.int32)
+      if col_start is None
+      else jnp.reshape(col_start.astype(jnp.int32), (1,))
+  )
+  result = pl.pallas_call(
+      kernel,
+      out_shape=out_shape,
+      grid_spec=pltpu.PrefetchScalarGridSpec(
+          num_scalar_prefetch=1,
+          in_specs=[
+              pl.BlockSpec(
+                  (rows_per_step, step_cols), lambda i, j, _meta: (i, j)
+              ),
+          ],
+          out_specs=out_specs,
+          grid=(mp // rows_per_step, steps),
+          scratch_shapes=[
+              pltpu.VMEM((rows_per_step, width), jnp.float32),
+              pltpu.VMEM((rows_per_step, width), jnp.float32),
+          ],
+      ),
+      compiler_params=pltpu.CompilerParams(
+          dimension_semantics=("parallel", "arbitrary"),
+          allow_input_fusion=(False, False),
+          shape_invariant_numerics=True,
+      ),
+      interpret=interpret,
+      name=name,
+  )(meta, logits_2d)
+  if finalize:
+    return (result,)
+  p_max, p_sum = result
+  return p_max[:, :tiles], p_sum[:, :tiles]
 
 
 def _run_combine_stage(
@@ -239,8 +322,7 @@ def _run_combine_stage(
 ) -> jax.Array:
   """Stage 2: combines compact ``[mp, total_tiles]`` summaries into ``[mp, 128]``."""
   mp, total_tiles = map(int, all_max.shape)
-  vocab_groups = (total_tiles + TILES_PER_GROUP - 1) // TILES_PER_GROUP
-  padded_tiles = vocab_groups * TILES_PER_GROUP
+  padded_tiles = _summary_width(total_tiles)
   if padded_tiles != total_tiles:
     all_max = jnp.pad(
         all_max,
@@ -254,15 +336,9 @@ def _run_combine_stage(
     )
 
   def combine_kernel(max_ref, sum_ref, norm_ref):
-    l_max = max_ref[...].astype(jnp.float32)
-    l_sum = sum_ref[...].astype(jnp.float32)
-    global_max = jnp.max(l_max, axis=-1)
-    global_sum = jnp.sum(
-        l_sum * jnp.exp(l_max - global_max[:, None]),
-        axis=-1,
-        dtype=jnp.float32,
+    normalizer = _combine_rows(
+        max_ref[...].astype(jnp.float32), sum_ref[...].astype(jnp.float32)
     )
-    normalizer = global_max + jnp.log(global_sum)
     norm_ref[...] = jnp.broadcast_to(normalizer[:, None], norm_ref.shape)
 
   return pl.pallas_call(
@@ -294,38 +370,32 @@ def _pallas_normalizer_2d(
     *,
     interpret: bool,
 ) -> tuple[int, int, int, jax.Array]:
-  """Runs Stages 1+2 on unsharded ``logits[M, V]`` and returns ``norm_2d[mp, 128]``."""
+  """Runs fused Stages 1+2 on unsharded ``logits[M, V]`` -> ``norm_2d[mp, 128]``."""
   m, vocab = _validate(logits)
   block_rows = 1 if interpret else ROW_BUCKET_ALIGN
   rows_per_step = TILES_PER_GROUP * block_rows
   mp = model_contracts.round_up(m, rows_per_step)
   total_tiles = (vocab + VOCAB_TILE - 1) // VOCAB_TILE
-  tile_padded_vocab = total_tiles * VOCAB_TILE
+  step_cols = _tiles_per_step(total_tiles) * VOCAB_TILE
+  padded_vocab = model_contracts.round_up(vocab, step_cols)
 
   padded_logits = logits
-  if mp != m or tile_padded_vocab != vocab:
+  if mp != m or padded_vocab != vocab:
     padded_logits = jnp.pad(
         logits,
-        ((0, mp - m), (0, tile_padded_vocab - vocab)),
+        ((0, mp - m), (0, padded_vocab - vocab)),
         constant_values=jnp.zeros((), dtype=logits.dtype),
     )
 
-  vocab_limit = vocab if tile_padded_vocab != vocab else None
-  p_max, p_sum = _run_partial_stage(
+  (norm_2d,) = _tile_stage(
       padded_logits,
       block_rows=block_rows,
       tiles=total_tiles,
-      vocab_limit=vocab_limit,
+      vocab_limit=vocab if padded_vocab != vocab else None,
       col_start=None,
+      finalize=True,
       interpret=interpret,
-      name=f"canon_logsoftmax_partial_m{mp}_v{vocab}_t{total_tiles}",
-  )
-  norm_2d = _run_combine_stage(
-      p_max,
-      p_sum,
-      block_rows=block_rows,
-      interpret=interpret,
-      name=f"canon_logsoftmax_combine_m{mp}_v{vocab}_t{total_tiles}",
+      name=f"canon_logsoftmax_fused_m{mp}_v{vocab}_t{total_tiles}",
   )
   return m, vocab, block_rows, norm_2d
 
@@ -626,8 +696,8 @@ def vocab_parallel_normalizer(
 
   if v_local % VOCAB_TILE == 0:
     max_tiles_local = v_local // VOCAB_TILE
+    counts = [max_tiles_local] * tp_size
     aligned_local = logits_local
-    valid_tile_indices = None
     vocab_limit = None
     col_start = None
   else:
@@ -638,10 +708,6 @@ def vocab_parallel_normalizer(
     counts = [end - start for start, end in zip(tile_starts, tile_ends)]
     max_tiles_local = max(counts)
     slice_width = max_tiles_local * VOCAB_TILE
-    valid_indices_list: list[int] = []
-    for r, count in enumerate(counts):
-      valid_indices_list.extend(r * max_tiles_local + k for k in range(count))
-    valid_tile_indices = jnp.asarray(valid_indices_list, dtype=jnp.int32)
     next_head = lax.ppermute(
         logits_local[:, :VOCAB_TILE],
         tp_axis,
@@ -672,14 +738,37 @@ def vocab_parallel_normalizer(
       vocab_limit = None
       col_start = None
 
-  p_max, p_sum = _run_partial_stage(
+  # Step padding (`_tiles_per_step`): the padded tiles are computed and
+  # sliced off by `_tile_stage`; tiles of a rank past its own `count` are
+  # dropped by `valid_tile_indices` after the all-gather.
+  step_cols = _tiles_per_step(max_tiles_local) * VOCAB_TILE
+  step_padded = model_contracts.round_up(
+      max_tiles_local * VOCAB_TILE, step_cols
+  )
+  if step_padded != max_tiles_local * VOCAB_TILE:
+    aligned_local = jnp.pad(
+        aligned_local,
+        ((0, 0), (0, step_padded - max_tiles_local * VOCAB_TILE)),
+        constant_values=jnp.zeros((), dtype=aligned_local.dtype),
+    )
+  valid_indices_list: list[int] = []
+  for r, count in enumerate(counts):
+    valid_indices_list.extend(r * max_tiles_local + k for k in range(count))
+  valid_tile_indices = (
+      None
+      if len(valid_indices_list) == tp_size * max_tiles_local
+      else jnp.asarray(valid_indices_list, dtype=jnp.int32)
+  )
+
+  p_max, p_sum = _tile_stage(
       aligned_local,
       block_rows=block_rows,
       tiles=max_tiles_local,
       vocab_limit=vocab_limit,
       col_start=col_start,
+      finalize=False,
       interpret=interpret,
-      name=f"canon_logsoftmax_vp_partial_m{mp}_vl{v_local}_t{max_tiles_local}",
+      name=f"canon_logsoftmax_vp_stage1_m{mp}_vl{v_local}_t{max_tiles_local}",
   )
   local_summary = jnp.stack([p_max, p_sum])  # [2, mp, max_tiles_local]
   all_summary = lax.all_gather(local_summary, tp_axis, axis=2, tiled=True)
