@@ -105,6 +105,22 @@ for otel_var in OTEL_EXPORTER_OTLP_ENDPOINT OTEL_METRIC_EXPORT_INTERVAL \
   fi
 done
 
+# Sandbox environment (`kubernetes_config` + `ORCHESTRATOR_ID` for job-scoped
+# fleets), placed before `ROLE_ENV_*` so role overrides take precedence.
+SANDBOX_ENV_PREFIX=""
+if [[ -n "${SANDBOX_NAMESPACE}" ]]; then
+  SANDBOX_ENV_PREFIX+="NAMESPACE=$(printf '%q' "${SANDBOX_NAMESPACE}") "
+  if [[ -n "${SANDBOX_NODE_SELECTOR_KEY}" && -n "${SANDBOX_NODE_SELECTOR_VAL}" ]]; then
+    SANDBOX_ENV_PREFIX+="NODE_SELECTOR_KEY=$(printf '%q' "${SANDBOX_NODE_SELECTOR_KEY}") NODE_SELECTOR_VAL=$(printf '%q' "${SANDBOX_NODE_SELECTOR_VAL}") "
+  fi
+fi
+if [[ -n "${SANDBOX_IMAGE_REWRITE_PREFIX}" ]]; then
+  SANDBOX_ENV_PREFIX+="IMAGE_REWRITE_PREFIX=$(printf '%q' "${SANDBOX_IMAGE_REWRITE_PREFIX}") "
+fi
+if is_true "${HAS_PROMPT_ITEMS_WRAPPER}"; then
+  SANDBOX_ENV_PREFIX+="ORCHESTRATOR_ID=$(printf '%q' "${K8S_ORCHESTRATOR_ID}") "
+fi
+
 is_jax_cache_disabled() {
   is_true "${K8S_JAX_CACHE_DISABLE:-false}"
 }
@@ -121,11 +137,19 @@ apply_manifest() {
 stop_orchestrator() {
   if is_true "${DRY_RUN}"; then
     echo "kubectl delete jobset ${K8S_ORCHESTRATOR_ID} -n ${K8S_NAMESPACE}"
+    if [[ -n "${SANDBOX_NAMESPACE}" ]]; then
+      echo "kubectl delete sandboxclaims,sandboxes,sandboxwarmpools,sandboxtemplates -n ${SANDBOX_NAMESPACE} -l agent-sandbox-rl-run=${SANDBOX_RUN_ID} --ignore-not-found=true"
+    fi
   else
     kubectl delete jobset "${K8S_ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=true
     while kubectl get jobset "${K8S_ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" &>/dev/null; do
       sleep 2
     done
+    if [[ -n "${SANDBOX_NAMESPACE}" ]]; then
+      kubectl delete sandboxclaims,sandboxes,sandboxwarmpools,sandboxtemplates \
+        -n "${SANDBOX_NAMESPACE}" -l "agent-sandbox-rl-run=${SANDBOX_RUN_ID}" \
+        --ignore-not-found=true 2>/dev/null || true
+    fi
   fi
 }
 
@@ -141,8 +165,12 @@ start_orchestrator() {
   if [[ -n "${WANDB_API_KEY:-}" ]]; then
     env_prefix+="WANDB_API_KEY=$(printf '%q' "${WANDB_API_KEY}") "
   fi
+  env_prefix+="${OTEL_ENV_PREFIX}${SANDBOX_ENV_PREFIX}"
+  if [[ -n "${ROLE_ENV_ORCHESTRATOR}" ]]; then
+    env_prefix+="${ROLE_ENV_ORCHESTRATOR} "
+  fi
 
-  local startup_cmd="${env_prefix}${OTEL_ENV_PREFIX}python -m tunix.dist_rl.distributed.runtime.main --discovery_id=${K8S_ORCHESTRATOR_ID} --discovery_port=${ORCHESTRATOR_PORT} --process_main=${ORCHESTRATOR_MAIN} ${CONTAINER_ARGS_STR}"
+  local startup_cmd="${env_prefix}python -m tunix.dist_rl.distributed.runtime.main --discovery_id=${K8S_ORCHESTRATOR_ID} --discovery_port=${ORCHESTRATOR_PORT} --process_main=${ORCHESTRATOR_MAIN} ${CONTAINER_ARGS_STR}"
 
   run_yaml_gen \
     "${YAML_DIR}/jobset.cpu.yaml" \
@@ -202,10 +230,13 @@ start_trainer() {
   if [[ -n "${K8S_TRAINER_EXTRA_ENV}" ]]; then
     env_prefix+=" ${K8S_TRAINER_EXTRA_ENV}"
   fi
+  if [[ -n "${ROLE_ENV_TRAINER}" ]]; then
+    env_prefix+=" ${ROLE_ENV_TRAINER}"
+  fi
 
   local startup_cmd="${OTEL_ENV_PREFIX}${env_prefix} python -m tunix.dist_rl.distributed.runtime.main --discovery_addrs=${K8S_ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} --process_executor=tunix.dist_rl.distributed.runtime.executor.K8sExecutor --process_main=${TRAINER_MAIN} ${CONTAINER_ARGS_STR}"
 
-  run_yaml_gen \
+  TPU_RAIDEN_DATA_NICS="${WEIGHT_SYNC_RAIDEN_DATA_NICS}" run_yaml_gen \
     "${YAML_DIR}/${K8S_TRAINER_JOBSET_YAML}" \
     --jobset_name="${K8S_TRAINER_ID}" \
     --namespace="${K8S_NAMESPACE}" \
@@ -287,11 +318,8 @@ start_rollout_instance() {
   if [[ -n "${VLLM_ADDITIONAL_CONFIG_JSON}" ]]; then
     env_prefix+=" VLLM_ADDITIONAL_CONFIG_JSON=$(printf '%q' "${VLLM_ADDITIONAL_CONFIG_JSON}")"
   fi
-  if [[ -n "${SANDBOX_NAMESPACE}" ]]; then
-    env_prefix+=" NAMESPACE=$(printf '%q' "${SANDBOX_NAMESPACE}")"
-    if [[ -n "${SANDBOX_NODE_SELECTOR_KEY}" && -n "${SANDBOX_NODE_SELECTOR_VAL}" ]]; then
-      env_prefix+=" NODE_SELECTOR_KEY=$(printf '%q' "${SANDBOX_NODE_SELECTOR_KEY}") NODE_SELECTOR_VAL=$(printf '%q' "${SANDBOX_NODE_SELECTOR_VAL}")"
-    fi
+  if [[ -n "${SANDBOX_ENV_PREFIX}" ]]; then
+    env_prefix+=" ${SANDBOX_ENV_PREFIX% }"
   fi
 
   if is_jax_cache_disabled; then
@@ -306,6 +334,9 @@ start_rollout_instance() {
     if [[ -n "${K8S_JAX_CACHE_SAVE}" ]]; then
       env_prefix+=" SAVE_JAX_CACHE=$(printf '%q' "${K8S_JAX_CACHE_SAVE}")"
     fi
+  fi
+  if [[ -n "${ROLE_ENV_ROLLOUT}" ]]; then
+    env_prefix+=" ${ROLE_ENV_ROLLOUT}"
   fi
 
   local ray_head_pre_init_cmd=""
@@ -326,7 +357,7 @@ start_rollout_instance() {
   env_prefix="${env_prefix# }"
   local startup_cmd="${OTEL_ENV_PREFIX}${env_prefix} python -m tunix.dist_rl.distributed.runtime.main --discovery_addrs=${K8S_ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} --process_executor=tunix.dist_rl.distributed.runtime.executor.K8sExecutor --process_main=${ROLLOUT_MAIN} ${CONTAINER_ARGS_STR}"
 
-  run_yaml_gen \
+  TPU_RAIDEN_DATA_NICS="${WEIGHT_SYNC_RAIDEN_DATA_NICS}" run_yaml_gen \
     "${YAML_DIR}/${K8S_ROLLOUT_JOBSET_YAML}" \
     --jobset_name="${target_id}" \
     --namespace="${K8S_NAMESPACE}" \
@@ -465,6 +496,18 @@ fi
 # (`node_utils.apply_library_env`). Unlike `local.sh`'s nodes, the pods don't
 # inherit the caller's environment, which would silently drop them.
 if [[ "${COMMAND}" == "start" || "${COMMAND}" == "trainer" || "${COMMAND}" == "rollout" ]]; then
+  if [[ -z "${WEIGHT_SYNC_RAIDEN_DATA_NICS}" ]]; then
+    for template in \
+      $([[ "${COMMAND}" != "rollout" ]] && echo "${K8S_TRAINER_JOBSET_YAML}") \
+      $([[ "${COMMAND}" != "trainer" ]] && echo "${K8S_ROLLOUT_JOBSET_YAML}"); do
+      if grep -q 'TPU_RAIDEN_DATA_NICS' "${YAML_DIR}/${template}"; then
+        echo "Error: weight_sync_config.raiden_data_nics is empty, but the" \
+          "${template} template always sets TPU_RAIDEN_DATA_NICS; set" \
+          "weight_sync_config.raiden_data_nics (e.g. eth0)." >&2
+        exit 1
+      fi
+    done
+  fi
   library_env_set=()
   for library_var in SKIP_JAX_PRECOMPILE TPU_RAIDEN_DATA_NICS VERIFY_WEIGHTS; do
     if [[ -n "${!library_var:-}" ]]; then

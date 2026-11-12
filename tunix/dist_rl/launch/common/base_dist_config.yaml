@@ -75,6 +75,10 @@ data_config:
   split: "train"
   shuffle: true
   seed: 42
+# Optional dotted `module.function` path (`orchestrator.PromptItemsWrapper`) and
+# extra keyword arguments that wrap the prompt items around the run.
+prompt_items_wrapper: ""
+prompt_items_wrapper_kwargs: {}
 dataset_name: "gsm8k"
 batch_size: 4
 prompt_key: "prompts"
@@ -424,6 +428,14 @@ cluster_config:
     # OTLP gRPC port of the OpenTelemetry collector that `launch.sh otel`
     # deploys on k8s.
     otel: 4317
+  # Extra `KEY: "VALUE"` string environment variables per process (`local.sh`
+  # and `k8s.sh`). Rejects config-backed library vars, `T_*`/`M_*` overrides,
+  # and worker identity vars; logged in resolved configs, so omit credentials.
+  role_env:
+    orchestrator: {}
+    trainer: {}
+    rollout: {}
+    inference: {}
   local:
     auto_detect_pci_tpus: false
     download_model_weights: true
