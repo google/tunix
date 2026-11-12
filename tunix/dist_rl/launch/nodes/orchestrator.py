@@ -27,6 +27,10 @@ the agentic `tunix.cli` path:
   record format is specific to this path (`{"prompt", "metadata", "task_name"}`
   with optional `metadata` and `task_name`, not `tunix.cli`'s flat columns);
   see `load_prompt_items`.
+* `prompt_items_wrapper` / `prompt_items_wrapper_kwargs`: an optional
+  `module.function` that wraps the prompt items for the run, e.g. to prepare
+  resources for upcoming batches and release them when the run ends; see
+  `PromptItemsWrapper`.
 * `reward_functions` and `agentic_grpo_config.reward_mode`: `reward_fn` scores
   completions with `reward_functions`; `env` uses the environment rewards, plus
   any `reward_functions`.
@@ -44,13 +48,16 @@ Run via the distributed runtime, e.g.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+import contextlib
 import dataclasses
+import importlib
 import logging
 import pickle
 import signal
 import threading
 import time
+from typing import Protocol
 
 import grain
 import jax
@@ -420,6 +427,83 @@ def load_prompt_items(
   return prompt_items.repeat()
 
 
+class PromptItemsWrapper(Protocol):
+  """Context-manager factory (`prompt_items_wrapper`) entered around the run."""
+
+  def __call__(
+      self,
+      prompt_items: grain.MapDataset[dict[str, object]],
+      *,
+      batch_size: int,
+      num_generations: int,
+      max_staleness: int,
+      env_kwargs: Mapping[str, object],
+      **kwargs: object,
+  ) -> contextlib.AbstractContextManager[Iterable[dict[str, object]]]:
+    ...
+
+
+def load_prompt_items_wrapper(
+    hp: resolve_config.DistHyperParameters,
+) -> PromptItemsWrapper | None:
+  """Imports `prompt_items_wrapper`, or returns None when unset."""
+  parts = resolve_config.prompt_items_wrapper_parts(hp)
+  if parts is None:
+    return None
+  module_name, function_name = parts
+  path = f"{module_name}.{function_name}"
+  wrapper = getattr(importlib.import_module(module_name), function_name)
+  if not callable(wrapper):
+    raise TypeError(
+        f"prompt_items_wrapper {path!r} is a {type(wrapper).__name__}, which"
+        " is not callable."
+    )
+  logging.info("Wrapping the prompt items with %s.", path)
+  return wrapper
+
+
+@contextlib.contextmanager
+def _preserve_signal_handlers() -> Iterator[None]:
+  """Restores main-thread SIGINT/SIGTERM/SIGHUP handlers on exit."""
+  signals = (
+      (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+      if threading.current_thread() is threading.main_thread()
+      else ()
+  )
+  saved_handlers = [(sig, signal.getsignal(sig)) for sig in signals]
+  try:
+    yield
+  finally:
+    for sig, handler in saved_handlers:
+      signal.signal(sig, signal.SIG_DFL if handler is None else handler)
+
+
+@contextlib.contextmanager
+def _wrap_prompt_items(
+    hp: resolve_config.DistHyperParameters,
+    prompt_items: grain.MapDataset[dict[str, object]],
+    wrapper: PromptItemsWrapper | None,
+) -> Iterator[Iterable[dict[str, object]]]:
+  """Yields `wrapper`'s items (preserving signal handlers), or `prompt_items`."""
+  if wrapper is None:
+    yield prompt_items
+    return
+  grpo = hp.config_mapping("agentic_grpo_config")
+  with _preserve_signal_handlers(), contextlib.ExitStack() as stack:
+    with _preserve_signal_handlers():
+      items = stack.enter_context(
+          wrapper(
+              prompt_items,
+              batch_size=int(hp.config["batch_size"]),
+              num_generations=int(grpo["num_generations"]),
+              max_staleness=int(grpo["off_policy_steps"]),
+              env_kwargs=hp.config_mapping("env_kwargs"),
+              **hp.config_mapping("prompt_items_wrapper_kwargs"),
+          )
+      )
+    yield items
+
+
 def required_workers(
     hp: resolve_config.DistHyperParameters,
 ) -> dict[datatypes.Role | str, int]:
@@ -597,7 +681,7 @@ def build_program(
     reward_fns: Sequence[reward_manager.RewardFn],
     pad_id: int,
     eos_id: int,
-    prompt_items: grain.MapDataset[dict[str, object]],
+    prompt_items: Iterable[dict[str, object]],
     trajectory_store: trajectory_store_lib.TrajectoryStore | None,
     metrics_logging_options: metrics_logger_lib.MetricsLoggerOptions | None,
 ) -> rl_program.StandardRLProgram:
@@ -610,7 +694,8 @@ def build_program(
     pad_id: Tokenizer padding id for batch assembly.
     eos_id: Tokenizer end-of-sequence id for the trainer loss and actor
       re-scoring.
-    prompt_items: Prompt items to dispatch (see `load_prompt_items`).
+    prompt_items: Prompt items to dispatch (see `load_prompt_items` and
+      `PromptItemsWrapper`).
     trajectory_store: The cluster's trajectory store, if enabled.
     metrics_logging_options: Metrics logging (see
       `build_metrics_logging_options`), or None to log no metrics.
@@ -625,13 +710,7 @@ def build_program(
   # installs its own `SIG_DFL`+`os.kill` handlers for SIGINT/SIGTERM/SIGHUP on
   # the main thread. Restore the active handlers (`managed_cluster_teardown`
   # owns SIGTERM; `run_program` flushes `program.close()` on unwind).
-  signals = (
-      (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
-      if threading.current_thread() is threading.main_thread()
-      else ()
-  )
-  saved_handlers = [(sig, signal.getsignal(sig)) for sig in signals]
-  try:
+  with _preserve_signal_handlers():
     return rl_program.StandardRLProgram(
         algo_config=algo_config,
         dataset=prompt_items,
@@ -651,9 +730,6 @@ def build_program(
             hp.config_mapping("dist_training_config")["precompile_trainer"]
         ),
     )
-  finally:
-    for sig, handler in saved_handlers:
-      signal.signal(sig, signal.SIG_DFL if handler is None else handler)
 
 
 def run_program(
@@ -748,14 +824,15 @@ def main(
   logging.info("Control-plane JAX backend: %s", jax.default_backend())
 
   # Everything that can fail on the config runs before waiting for the
-  # workers: the checks that need no download first, then the dataset and the
-  # tokenizer, then the program itself.
+  # workers: the checks that need no download first, then the dataset, its
+  # wrapper and the tokenizer, then the program itself.
   weight_sync_timeouts, rpc_timeout_s = resolve_weight_sync_timeouts(hp)
   algo_config = build_grpo_config(hp)
   reward_fns = hp.obtain_reward_fn()
   node_utils.setup_otel_metrics(hp, "orchestrator", worker_id_str=None)
   metrics_logging_options = build_metrics_logging_options(hp)
   prompt_items = load_prompt_items(hp)
+  prompt_items_wrapper = load_prompt_items_wrapper(hp)
   pad_id, eos_id = node_utils.pad_and_eos_ids(node_utils.load_hf_tokenizer(hp))
 
   cluster = create_cluster(hp, weight_sync_timeouts=weight_sync_timeouts)
@@ -765,24 +842,26 @@ def main(
   with cluster_orchestrator.managed_cluster_teardown(
       cluster, stop_workers_on_exit=stop_workers_on_exit
   ):
-    program = build_program(
-        hp,
-        algo_config=algo_config,
-        reward_fns=reward_fns,
-        pad_id=pad_id,
-        eos_id=eos_id,
-        prompt_items=prompt_items,
-        trajectory_store=cluster.trajectory_store,
-        metrics_logging_options=metrics_logging_options,
-    )
-    result = run_program(
-        hp,
-        cluster,
-        program,
-        discovery=discovery,
-        rpc_timeout_s=rpc_timeout_s,
-        config_sha256=config_sha256,
-    )
+    # Exits after `run_program` closes the program, before the teardown.
+    with _wrap_prompt_items(hp, prompt_items, prompt_items_wrapper) as items:
+      program = build_program(
+          hp,
+          algo_config=algo_config,
+          reward_fns=reward_fns,
+          pad_id=pad_id,
+          eos_id=eos_id,
+          prompt_items=items,
+          trajectory_store=cluster.trajectory_store,
+          metrics_logging_options=metrics_logging_options,
+      )
+      result = run_program(
+          hp,
+          cluster,
+          program,
+          discovery=discovery,
+          rpc_timeout_s=rpc_timeout_s,
+          config_sha256=config_sha256,
+      )
 
   if result is None:
     logging.info("=== GRPO run finished without a completed step ===")
