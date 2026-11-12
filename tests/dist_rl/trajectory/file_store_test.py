@@ -1,6 +1,6 @@
 """Unit tests for FileTrajectoryStore file layout and on-disk write behavior."""
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 import contextlib
 import tempfile
 import threading
@@ -28,7 +28,7 @@ _CONCURRENT_READ_TIMEOUT_SECONDS: Final[float] = 10.0
 # A read method of `FileTrajectoryStore`, called with the store and the IDs of
 # the trajectories to read.
 _ReadMethod: TypeAlias = Callable[
-    [file_store.FileTrajectoryStore[Any], list[str]], list[Any]
+    [file_store.FileTrajectoryStore[Any], Sequence[str]], dict[str, Any]
 ]
 
 
@@ -76,6 +76,8 @@ class FileTrajectoryReaderTest(store_testing.TrajectoryReaderTestCase):
     self.addCleanup(file_s.close)
     if initial_data:
       for meta, steps in initial_data:
+        if not steps:
+          file_s.update_metadata(meta)
         for step in steps:
           file_s.add_step(step, meta)
       file_s.flush()
@@ -125,7 +127,7 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     filtered_s.add_step(step, meta)
     filtered_s.flush()
 
-    (traj,) = filtered_s.get_trajectories([meta.trajectory_id])
+    traj = filtered_s.get_trajectories([meta.trajectory_id])[meta.trajectory_id]
     written_step = traj.steps[1]
     self.assertIsNone(written_step.assistant_tokens)
     self.assertIsNone(written_step.logprobs)
@@ -200,7 +202,7 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     filtered_s.add_step(step, meta)
     filtered_s.flush()
 
-    (traj,) = filtered_s.get_trajectories([meta.trajectory_id])
+    traj = filtered_s.get_trajectories([meta.trajectory_id])[meta.trajectory_id]
     written_step = traj.steps[1]
     self.assertIsNone(written_step.prefill_routed_experts)
     self.assertIsNone(written_step.prefill_start)
@@ -232,7 +234,10 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
 
     # Verify only valid trajectory metadata is returned.
     metas = self.file_s.get_trajectories_metadata()
-    self.assertEqual(metas, [trajectory_testing.METADATA_1])
+    self.assertEqual(
+        metas,
+        {trajectory_testing.TRAJECTORY_ID_1: trajectory_testing.METADATA_1},
+    )
 
   def test_get_trajectories_metadata_lists_in_sorted_order(self) -> None:
     """Verifies trajectories are listed in deterministic natural sorted ID order."""
@@ -252,7 +257,11 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
 
     metas = self.file_s.get_trajectories_metadata()
     self.assertEqual(
-        [m.trajectory_id for m in metas],
+        list(metas.keys()),
+        ["traj_1_g0", "traj_2_g0", "traj_10_g0"],
+    )
+    self.assertEqual(
+        [m.trajectory_id for m in metas.values()],
         ["traj_1_g0", "traj_2_g0", "traj_10_g0"],
     )
 
@@ -276,7 +285,10 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     (self.file_s.root_dir / file_name).write_text("Notes file")
 
     metas = self.file_s.get_trajectories_metadata()
-    self.assertEqual(metas, [trajectory_testing.METADATA_1])
+    self.assertEqual(
+        metas,
+        {trajectory_testing.TRAJECTORY_ID_1: trajectory_testing.METADATA_1},
+    )
 
   def test_skips_unrelated_files_in_trajectory_dir(self) -> None:
     """Verifies unrelated files inside a trajectory directory are skipped during trajectory loading."""
@@ -293,7 +305,9 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     (traj_dir / "lock_file.tmp").write_text("LOCK")
 
     # Verify trajectory loading ignores unrelated files.
-    (traj,) = self.file_s.get_trajectories([trajectory_testing.TRAJECTORY_ID_1])
+    traj = self.file_s.get_trajectories([trajectory_testing.TRAJECTORY_ID_1])[
+        trajectory_testing.TRAJECTORY_ID_1
+    ]
     self.assertEqual(traj, trajectory_testing.TRAJECTORY_1)
 
   def test_missing_metadata_in_trajectory_dir_raises_error(self) -> None:
@@ -341,8 +355,12 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
       metas = self.file_s.get_trajectories_metadata()
 
     self.assertTrue(both_reads_started.is_set())
-    self.assertCountEqual(
-        metas, [trajectory_testing.METADATA_1, trajectory_testing.METADATA_2]
+    self.assertEqual(
+        metas,
+        {
+            trajectory_testing.TRAJECTORY_ID_1: trajectory_testing.METADATA_1,
+            trajectory_testing.TRAJECTORY_ID_2: trajectory_testing.METADATA_2,
+        },
     )
 
   def test_get_trajectories_reads_trajectories_in_parallel(self) -> None:
@@ -393,7 +411,17 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     self.assertTrue(both_metadata_reads_started.is_set())
     self.assertEqual(
         trajs,
-        [trajectory_testing.TRAJECTORY_1, trajectory_testing.TRAJECTORY_2],
+        {
+            trajectory_testing.TRAJECTORY_ID_1: trajectory_testing.TRAJECTORY_1,
+            trajectory_testing.TRAJECTORY_ID_2: trajectory_testing.TRAJECTORY_2,
+        },
+    )
+    self.assertEqual(
+        list(trajs.keys()),
+        [
+            trajectory_testing.TRAJECTORY_ID_1,
+            trajectory_testing.TRAJECTORY_ID_2,
+        ],
     )
 
   def test_get_trajectories_reads_step_files_in_parallel(self) -> None:
@@ -401,11 +429,9 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     for step in trajectory_testing.TRAJECTORY_2.steps:
       self.file_s.add_step(step, trajectory_testing.METADATA_2)
     self.file_s.flush()
-    meta_path = self.file_s.get_trajectory_metadata_path(
-        trajectory_testing.TRAJECTORY_ID_2
-    )
     # Each step read waits for all of them to start, so reading the steps one at
     # a time breaks the barrier. Passing it needs a read thread for each step.
+    # Only step files are read as bytes, so the metadata read does not wait.
     all_step_reads_started = threading.Event()
     barrier = threading.Barrier(
         len(trajectory_testing.TRAJECTORY_2.steps),
@@ -413,25 +439,28 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
         timeout=_CONCURRENT_READ_TIMEOUT_SECONDS,
     )
     path_cls = type(self.tmp_dir)
-    orig_read_text = path_cls.read_text
+    orig_read_bytes = path_cls.read_bytes
 
-    def read_text_once_all_step_reads_start(
+    def read_bytes_once_all_step_reads_start(
         path_self: epath.Path, *args: Any, **kwargs: Any
-    ) -> str:
-      if path_self != meta_path:
-        barrier.wait()
-      return orig_read_text(path_self, *args, **kwargs)
+    ) -> bytes:
+      barrier.wait()
+      return orig_read_bytes(path_self, *args, **kwargs)
 
     with mock.patch.object(
         path_cls,
-        "read_text",
+        "read_bytes",
         autospec=True,
-        side_effect=read_text_once_all_step_reads_start,
+        spec_set=True,
+        side_effect=read_bytes_once_all_step_reads_start,
     ):
       trajs = self.file_s.get_trajectories([trajectory_testing.TRAJECTORY_ID_2])
 
     self.assertTrue(all_step_reads_started.is_set())
-    self.assertEqual(trajs, [trajectory_testing.TRAJECTORY_2])
+    self.assertEqual(
+        trajs,
+        {trajectory_testing.TRAJECTORY_ID_2: trajectory_testing.TRAJECTORY_2},
+    )
 
   def test_get_trajectories_reads_every_id_of_an_iterator(self) -> None:
     """Verifies all trajectories are read for IDs given as an iterator."""
@@ -442,9 +471,9 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
       self.file_s.add_step(step, trajectory_testing.METADATA_2)
     self.file_s.flush()
     # Iterators, which can be iterated over only once, work as well as the
-    # lists that the signature asks for.
+    # sequences that the signature asks for.
     trajectory_ids = cast(
-        list[str],
+        Sequence[str],
         iter([
             trajectory_testing.TRAJECTORY_ID_1,
             trajectory_testing.TRAJECTORY_ID_2,
@@ -455,7 +484,17 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
 
     self.assertEqual(
         trajs,
-        [trajectory_testing.TRAJECTORY_1, trajectory_testing.TRAJECTORY_2],
+        {
+            trajectory_testing.TRAJECTORY_ID_1: trajectory_testing.TRAJECTORY_1,
+            trajectory_testing.TRAJECTORY_ID_2: trajectory_testing.TRAJECTORY_2,
+        },
+    )
+    self.assertEqual(
+        list(trajs.keys()),
+        [
+            trajectory_testing.TRAJECTORY_ID_1,
+            trajectory_testing.TRAJECTORY_ID_2,
+        ],
     )
 
   def test_get_trajectories_metadata_reads_every_id_of_an_iterator(
@@ -466,9 +505,9 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     self.file_s.update_metadata(trajectory_testing.METADATA_2)
     self.file_s.flush()
     # Iterators, which can be iterated over only once, work as well as the
-    # lists that the signature asks for.
+    # sequences that the signature asks for.
     trajectory_ids = cast(
-        list[str],
+        Sequence[str],
         iter([
             trajectory_testing.TRAJECTORY_ID_1,
             trajectory_testing.TRAJECTORY_ID_2,
@@ -478,7 +517,18 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     metas = self.file_s.get_trajectories_metadata(trajectory_ids)
 
     self.assertEqual(
-        metas, [trajectory_testing.METADATA_1, trajectory_testing.METADATA_2]
+        metas,
+        {
+            trajectory_testing.TRAJECTORY_ID_1: trajectory_testing.METADATA_1,
+            trajectory_testing.TRAJECTORY_ID_2: trajectory_testing.METADATA_2,
+        },
+    )
+    self.assertEqual(
+        list(metas.keys()),
+        [
+            trajectory_testing.TRAJECTORY_ID_1,
+            trajectory_testing.TRAJECTORY_ID_2,
+        ],
     )
 
   @parameterized.named_parameters(
@@ -615,23 +665,342 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
         trajectory_testing.TRAJECTORY_ID_2, 3
     )
     path_cls = type(self.tmp_dir)
-    orig_read_text = path_cls.read_text
+    orig_read_bytes = path_cls.read_bytes
 
-    def read_text_failing_for_one_step(
+    def read_bytes_failing_for_one_step(
         path_self: epath.Path, *args: Any, **kwargs: Any
-    ) -> str:
+    ) -> bytes:
       if path_self == failing_path:
         raise OSError("disk error")
-      return orig_read_text(path_self, *args, **kwargs)
+      return orig_read_bytes(path_self, *args, **kwargs)
 
     with mock.patch.object(
         path_cls,
-        "read_text",
+        "read_bytes",
         autospec=True,
-        side_effect=read_text_failing_for_one_step,
+        spec_set=True,
+        side_effect=read_bytes_failing_for_one_step,
     ):
       with self.assertRaisesRegex(OSError, "disk error"):
         self.file_s.get_trajectories([trajectory_testing.TRAJECTORY_ID_2])
+      with self.assertRaisesRegex(OSError, "disk error"):
+        self.file_s.get_trajectories(
+            [trajectory_testing.TRAJECTORY_ID_2], strict=False
+        )
+
+  def test_get_trajectories_strict_false_clips_at_unparsable_step_file(
+      self,
+  ) -> None:
+    """Verifies strict=False clips at a corrupt .json step file without mutating disk."""
+    meta = trajectory_lib.TunixTrajectoryMetadata(
+        trajectory_id="corrupt_json_traj",
+        session_id="sess_corrupt_json",
+        agent=trajectory_lib.Agent(name="agent", version="1.0"),
+        status="SUCCEEDED",
+        total_reward=10.0,
+        extra={"lineage": "v1"},
+    )
+    step_1 = trajectory_testing.make_step(step_id=1, message="step 1")
+    step_2 = trajectory_testing.make_step(step_id=2, message="step 2")
+    step_3 = trajectory_testing.make_step(step_id=3, message="step 3")
+    self.file_s.add_step(step_1, meta)
+    self.file_s.add_step(step_2, meta)
+    self.file_s.add_step(step_3, meta)
+    self.file_s.flush()
+    self.file_s.get_step_path("corrupt_json_traj", 2).write_text("{")
+
+    trajs = self.file_s.get_trajectories(["corrupt_json_traj"], strict=False)
+
+    traj = trajs["corrupt_json_traj"]
+    self.assertIsInstance(traj, trajectory_lib.TunixTrajectory)
+    self.assertEqual([s.step_id for s in traj.steps], [0])
+    self.assertEqual([s.message for s in traj.steps], ["step 1"])
+    self.assertIsNone(traj.status)
+    self.assertIsNone(traj.total_reward)
+    self.assertEqual(traj.extra, {"lineage": "v1"})
+    # Storage remains unmutated on disk.
+    saved_meta = self.file_s.get_trajectories_metadata(["corrupt_json_traj"])[
+        "corrupt_json_traj"
+    ]
+    self.assertEqual(saved_meta.status, "SUCCEEDED")
+    self.assertEqual(saved_meta.total_reward, 10.0)
+
+  def test_get_trajectories_strict_false_salvages_valid_prefix_from_jsonl_chunk(
+      self,
+  ) -> None:
+    """Verifies strict=False salvages valid lines from corrupt or empty .jsonl chunks."""
+    meta = trajectory_lib.TunixTrajectoryMetadata(
+        trajectory_id="corrupt_chunk_traj",
+        agent=trajectory_lib.Agent(name="agent", version="1.0"),
+        status="SUCCEEDED",
+        total_reward=5.0,
+    )
+    self.file_s.update_metadata(meta)
+    self.file_s.flush()
+    step_1 = trajectory_testing.make_step(step_id=1, message="chunk step 1")
+    step_2 = trajectory_testing.make_step(step_id=2, message="chunk step 2")
+    chunk_path = self.file_s.get_steps_chunk_path("corrupt_chunk_traj", 1, 3)
+    chunk_path.write_text(
+        "\n".join([
+            step_1.to_atif_step().model_dump_json(exclude_none=True),
+            step_2.to_atif_step().model_dump_json(exclude_none=True),
+            "{corrupt_trailing_line",
+        ])
+    )
+
+    with self.assertRaises(pydantic.ValidationError):
+      self.file_s.get_trajectories(["corrupt_chunk_traj"], strict=True)
+
+    traj = self.file_s.get_trajectories(["corrupt_chunk_traj"], strict=False)[
+        "corrupt_chunk_traj"
+    ]
+    self.assertEqual([s.step_id for s in traj.steps], [0, 1])
+    self.assertEqual(
+        [s.message for s in traj.steps], ["chunk step 1", "chunk step 2"]
+    )
+    self.assertIsNone(traj.status)
+    self.assertIsNone(traj.total_reward)
+
+    chunk_path.write_text("   \n")
+    with self.assertRaises(pydantic.ValidationError):
+      self.file_s.get_trajectories(["corrupt_chunk_traj"], strict=True)
+    empty_chunk_traj = self.file_s.get_trajectories(
+        ["corrupt_chunk_traj"], strict=False
+    )["corrupt_chunk_traj"]
+    self.assertEmpty(empty_chunk_traj.steps)
+    self.assertIsNone(empty_chunk_traj.status)
+    self.assertIsNone(empty_chunk_traj.total_reward)
+
+  def test_get_trajectories_strict_false_corrupt_revision_evicts_chunk_step(
+      self,
+  ) -> None:
+    """Verifies a corrupt step_XXXXXX.json revision evicts the stale chunk step."""
+    meta = trajectory_lib.TunixTrajectoryMetadata(
+        trajectory_id="corrupt_revision_traj",
+        agent=trajectory_lib.Agent(name="agent", version="1.0"),
+        status="SUCCEEDED",
+        total_reward=8.0,
+    )
+    self.file_s.update_metadata(meta)
+    self.file_s.flush()
+    steps = [
+        trajectory_testing.make_step(step_id=1, message="chunk 1"),
+        trajectory_testing.make_step(step_id=2, message="stale chunk 2"),
+        trajectory_testing.make_step(step_id=3, message="chunk 3"),
+    ]
+    self.file_s.get_steps_chunk_path("corrupt_revision_traj", 1, 3).write_text(
+        "\n".join(
+            s.to_atif_step().model_dump_json(exclude_none=True) for s in steps
+        )
+    )
+    self.file_s.get_step_path("corrupt_revision_traj", 2).write_text("{")
+
+    traj = self.file_s.get_trajectories(
+        ["corrupt_revision_traj"], strict=False
+    )["corrupt_revision_traj"]
+
+    self.assertEqual([s.step_id for s in traj.steps], [0])
+    self.assertEqual([s.message for s in traj.steps], ["chunk 1"])
+    self.assertIsNone(traj.status)
+    self.assertIsNone(traj.total_reward)
+
+  def test_get_trajectories_strict_false_missing_revision_evicts_chunk_step(
+      self,
+  ) -> None:
+    """Verifies a revision file gone after listing evicts its chunk step."""
+    meta = trajectory_lib.TunixTrajectoryMetadata(
+        trajectory_id="missing_revision_traj",
+        agent=trajectory_lib.Agent(name="agent", version="1.0"),
+        status="SUCCEEDED",
+        total_reward=8.0,
+    )
+    self.file_s.update_metadata(meta)
+    self.file_s.flush()
+    steps = [
+        trajectory_testing.make_step(step_id=1, message="chunk 1"),
+        trajectory_testing.make_step(step_id=2, message="stale chunk 2"),
+        trajectory_testing.make_step(step_id=3, message="chunk 3"),
+    ]
+    self.file_s.get_steps_chunk_path("missing_revision_traj", 1, 3).write_text(
+        "\n".join(s.model_dump_json(exclude_none=True) for s in steps)
+    )
+    revision_path = self.file_s.get_step_path("missing_revision_traj", 2)
+    revision_path.write_text(steps[1].model_dump_json(exclude_none=True))
+    path_cls = type(self.tmp_dir)
+    orig_read_bytes = path_cls.read_bytes
+
+    def read_bytes_missing_the_revision(
+        path_self: epath.Path, *args: Any, **kwargs: Any
+    ) -> bytes:
+      # The revision file is listed, then deleted before it is read.
+      if path_self == revision_path:
+        raise FileNotFoundError(str(path_self))
+      return orig_read_bytes(path_self, *args, **kwargs)
+
+    with mock.patch.object(
+        path_cls,
+        "read_bytes",
+        autospec=True,
+        spec_set=True,
+        side_effect=read_bytes_missing_the_revision,
+    ):
+      with self.assertRaises(FileNotFoundError):
+        self.file_s.get_trajectories(["missing_revision_traj"], strict=True)
+      traj = self.file_s.get_trajectories(
+          ["missing_revision_traj"], strict=False
+      )["missing_revision_traj"]
+
+    self.assertEqual([s.message for s in traj.steps], ["chunk 1"])
+    self.assertIsNone(traj.status)
+    self.assertIsNone(traj.total_reward)
+
+  def test_get_trajectories_strict_false_missing_last_step_file_clears_outcome(
+      self,
+  ) -> None:
+    """Verifies a last step file gone after listing clears the outcome."""
+    meta = trajectory_lib.TunixTrajectoryMetadata(
+        trajectory_id="missing_tail_traj",
+        agent=trajectory_lib.Agent(name="agent", version="1.0"),
+        status="SUCCEEDED",
+        total_reward=8.0,
+    )
+    for step_id in (1, 2, 3):
+      self.file_s.add_step(
+          trajectory_testing.make_step(
+              step_id=step_id, message=f"step {step_id}"
+          ),
+          meta,
+      )
+    self.file_s.flush()
+    last_step_path = self.file_s.get_step_path("missing_tail_traj", 3)
+    path_cls = type(self.tmp_dir)
+    orig_read_bytes = path_cls.read_bytes
+
+    def read_bytes_missing_the_last_step(
+        path_self: epath.Path, *args: Any, **kwargs: Any
+    ) -> bytes:
+      # The last step file is listed, then deleted before it is read.
+      if path_self == last_step_path:
+        raise FileNotFoundError(str(path_self))
+      return orig_read_bytes(path_self, *args, **kwargs)
+
+    with mock.patch.object(
+        path_cls,
+        "read_bytes",
+        autospec=True,
+        spec_set=True,
+        side_effect=read_bytes_missing_the_last_step,
+    ):
+      traj = self.file_s.get_trajectories(["missing_tail_traj"], strict=False)[
+          "missing_tail_traj"
+      ]
+
+    # The two remaining steps are contiguous, so only the lost-step signal
+    # tells the trajectory that it is not complete.
+    self.assertEqual([s.message for s in traj.steps], ["step 1", "step 2"])
+    self.assertIsNone(traj.status)
+    self.assertIsNone(traj.total_reward)
+
+  def test_get_trajectories_with_step_file_torn_inside_multibyte_character(
+      self,
+  ) -> None:
+    """Verifies a step file cut inside a UTF-8 character is a corrupt step."""
+    meta = trajectory_lib.TunixTrajectoryMetadata(
+        trajectory_id="torn_json_traj",
+        agent=trajectory_lib.Agent(name="agent", version="1.0"),
+        status="SUCCEEDED",
+        total_reward=10.0,
+    )
+    self.file_s.add_step(
+        trajectory_testing.make_step(step_id=1, message="step 1"), meta
+    )
+    self.file_s.add_step(
+        trajectory_testing.make_step(step_id=2, message="step 2"), meta
+    )
+    self.file_s.add_step(
+        trajectory_testing.make_step(step_id=3, message="caf\u00e9"), meta
+    )
+    self.file_s.flush()
+    step_3_path = self.file_s.get_step_path("torn_json_traj", 3)
+    step_3_bytes = step_3_path.read_bytes()
+    # U+00E9 is the two bytes C3 A9 in UTF-8. Keeps only the first one, as a
+    # write interrupted mid-character leaves the file.
+    step_3_path.write_bytes(step_3_bytes[: step_3_bytes.index(b"\xc3\xa9") + 1])
+
+    with self.assertRaises(pydantic.ValidationError):
+      self.file_s.get_trajectories(["torn_json_traj"], strict=True)
+
+    traj = self.file_s.get_trajectories(["torn_json_traj"], strict=False)[
+        "torn_json_traj"
+    ]
+    self.assertEqual([s.message for s in traj.steps], ["step 1", "step 2"])
+    self.assertIsNone(traj.status)
+    self.assertIsNone(traj.total_reward)
+
+  def test_get_trajectories_strict_false_salvages_jsonl_lines_before_torn_character(
+      self,
+  ) -> None:
+    """Verifies strict=False keeps chunk lines before a torn UTF-8 character."""
+    meta = trajectory_lib.TunixTrajectoryMetadata(
+        trajectory_id="torn_chunk_traj",
+        agent=trajectory_lib.Agent(name="agent", version="1.0"),
+        status="SUCCEEDED",
+        total_reward=5.0,
+    )
+    self.file_s.update_metadata(meta)
+    self.file_s.flush()
+    line_1, line_2, line_3 = (
+        trajectory_testing.make_step(step_id=step_id, message=message)
+        .model_dump_json(exclude_none=True)
+        .encode()
+        for step_id, message in (
+            (1, "chunk step 1"),
+            (2, "chunk step 2"),
+            (3, "caf\u00e9"),
+        )
+    )
+    # U+00E9 is the two bytes C3 A9 in UTF-8. Keeps only the first one on the
+    # last line.
+    torn_line_3 = line_3[: line_3.index(b"\xc3\xa9") + 1]
+    self.file_s.get_steps_chunk_path("torn_chunk_traj", 1, 3).write_bytes(
+        b"\n".join([line_1, line_2, torn_line_3])
+    )
+
+    with self.assertRaises(pydantic.ValidationError):
+      self.file_s.get_trajectories(["torn_chunk_traj"], strict=True)
+
+    traj = self.file_s.get_trajectories(["torn_chunk_traj"], strict=False)[
+        "torn_chunk_traj"
+    ]
+
+    self.assertEqual(
+        [s.message for s in traj.steps], ["chunk step 1", "chunk step 2"]
+    )
+    self.assertIsNone(traj.status)
+    self.assertIsNone(traj.total_reward)
+
+  def test_get_trajectories_reads_jsonl_step_with_unicode_line_boundaries(
+      self,
+  ) -> None:
+    """Verifies a chunk line is not split at line boundaries inside a string."""
+    self.file_s.update_metadata(trajectory_testing.METADATA_1)
+    self.file_s.flush()
+    # JSON leaves these three characters unescaped, and `str.splitlines()`
+    # treats each of them as a line boundary.
+    message = "line separator\u2028paragraph separator\u2029next line\x85end"
+    self.file_s.get_steps_chunk_path(
+        trajectory_testing.TRAJECTORY_ID_1, 1, 1
+    ).write_text(
+        trajectory_testing.make_step(
+            step_id=1, message=message
+        ).model_dump_json(exclude_none=True)
+    )
+
+    traj = self.file_s.get_trajectories([trajectory_testing.TRAJECTORY_ID_1])[
+        trajectory_testing.TRAJECTORY_ID_1
+    ]
+
+    self.assertEqual([s.message for s in traj.steps], [message])
 
   def test_get_trajectories_metadata_with_read_error_raises_it(self) -> None:
     """Verifies an error reading a metadata file fails the read with it."""
@@ -739,7 +1108,7 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     self.file_s.add_step(trajectory_testing.STEP_1_1, meta)
     self.file_s.flush()
 
-    (recovered_traj,) = self.file_s.get_trajectories([traj_id])
+    recovered_traj = self.file_s.get_trajectories([traj_id])[traj_id]
     expected_traj = trajectory_testing.TRAJECTORY_1.model_copy(
         update={"trajectory_id": traj_id}
     )
@@ -978,7 +1347,7 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
 
     metas = self.file_s.get_trajectories_metadata()
     self.assertEqual(
-        {m.trajectory_id for m in metas},
+        set(metas.keys()),
         {
             trajectory_testing.TRAJECTORY_ID_1,
             trajectory_testing.TRAJECTORY_ID_2,
@@ -1410,7 +1779,7 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     self.file_s.flush()
 
     self.assertFalse(step_2_path.exists())
-    (recovered_traj,) = self.file_s.get_trajectories([traj_id])
+    recovered_traj = self.file_s.get_trajectories([traj_id])[traj_id]
     self.assertEqual(
         recovered_traj,
         meta_running.create_trajectory(steps=[trajectory_testing.STEP_2_1]),
@@ -1441,7 +1810,7 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
 
     self.assertEqual(
         self.file_s.get_trajectories_metadata([traj_id]),
-        [meta_running],
+        {traj_id: meta_running},
     )
     self.assertCountEqual(
         [entry.name for entry in traj_dir.iterdir()],
@@ -1469,7 +1838,7 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     )
 
     metas_2 = store_instance_2.get_trajectories_metadata()
-    self.assertEqual(metas_2, [meta])
+    self.assertEqual(metas_2, {trajectory_testing.TRAJECTORY_ID_2: meta})
 
     store_instance_2.add_step(trajectory_testing.STEP_2_2, meta)
     store_instance_2.add_step(trajectory_testing.STEP_2_3, meta)
@@ -1482,9 +1851,9 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
         root_dir=self.tmp_dir,
         run_id=run_id,
     )
-    (recovered_traj,) = store_instance_3.get_trajectories(
+    recovered_traj = store_instance_3.get_trajectories(
         [trajectory_testing.TRAJECTORY_ID_2]
-    )
+    )[trajectory_testing.TRAJECTORY_ID_2]
     self.assertEqual(recovered_traj, trajectory_testing.TRAJECTORY_2)
 
   def test_close_shuts_down_writer_and_rejects_further_writes(self) -> None:
@@ -1519,7 +1888,7 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
   def test_get_trajectories_metadata_nonexistent_root_dir_returns_empty(
       self,
   ) -> None:
-    """Verifies get_trajectories_metadata on a non-existent root_dir gracefully returns empty list."""
+    """Verifies get_trajectories_metadata on a non-existent root_dir gracefully returns empty dict."""
     nonexistent_root = self.tmp_dir / "does_not_exist"
     store_instance = file_store.FileTrajectoryStore(
         root_dir=nonexistent_root,
@@ -1649,7 +2018,8 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     self._write_metrics(traj_id, {"v": 1})
     self.file_s.get_trajectory_dir("empty_dir").mkdir(parents=True)
     self.assertEqual(
-        self.file_s.get_trajectories_metadata(), [trajectory_testing.METADATA_1]
+        self.file_s.get_trajectories_metadata(),
+        {traj_id: trajectory_testing.METADATA_1},
     )
     self.assertEqual(
         set(self.file_s.get_trajectories_metrics()), {traj_id, "metrics_only"}
@@ -1761,7 +2131,7 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
         [p.name for p in self.file_s.get_trajectory_dir(traj_id).iterdir()],
         ["metadata.json", "metrics.json", "steps_000001_000005.jsonl"],
     )
-    (recovered,) = self.file_s.get_trajectories([traj_id])
+    recovered = self.file_s.get_trajectories([traj_id])[traj_id]
     self.assertEqual(recovered.notes, "final")
     self.assertEqual(recovered.steps, trajectory_testing.TRAJECTORY_2.steps)
     self.assertEqual(
@@ -1792,9 +2162,10 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
 
     self.assertTrue(self.file_s.get_steps_chunk_path(traj_id_2, 1, 3).exists())
     self.assertTrue(self.file_s.get_step_path(traj_id_1, 1).exists())
-    recovered_1, recovered_2 = self.file_s.get_trajectories(
-        [traj_id_1, traj_id_2]
-    )
+    trajs = self.file_s.get_trajectories([traj_id_1, traj_id_2])
+    self.assertEqual(list(trajs.keys()), [traj_id_1, traj_id_2])
+    recovered_1 = trajs[traj_id_1]
+    recovered_2 = trajs[traj_id_2]
     self.assertEqual(recovered_1, trajectory_testing.TRAJECTORY_1)
     self.assertEqual(
         recovered_2.steps, trajectory_testing.TRAJECTORY_2.steps[:3]
@@ -1827,7 +2198,7 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
         revised_step_3.to_atif_step().model_dump_json(exclude_none=True)
     )
 
-    (recovered,) = self.file_s.get_trajectories([traj_id])
+    recovered = self.file_s.get_trajectories([traj_id])[traj_id]
 
     self.assertEqual(
         [s.step_id for s in recovered.steps],
@@ -1861,7 +2232,7 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
 
     step_path = self.file_s.get_step_path(traj_id, 1)
     self.assertTrue(step_path.exists())
-    (recovered,) = self.file_s.get_trajectories([traj_id])
+    recovered = self.file_s.get_trajectories([traj_id])[traj_id]
     (recovered_step,) = recovered.steps
     self.assertEqual(recovered_step.message, "v2")
 
@@ -1890,7 +2261,7 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     self.assertFalse(self.file_s.get_steps_chunk_path(traj_id, 2, 3).exists())
     self.assertTrue(self.file_s.get_step_path(traj_id, 2).exists())
     self.assertTrue(self.file_s.get_step_path(traj_id, 3).exists())
-    (recovered,) = self.file_s.get_trajectories([traj_id])
+    recovered = self.file_s.get_trajectories([traj_id])[traj_id]
     self.assertEqual(
         [step.message for step in recovered.steps],
         ["step 1 v2", "step 2 v2", trajectory_testing.STEP_2_3.message],
@@ -1921,7 +2292,7 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     self.assertTrue(self.file_s.get_steps_chunk_path(traj_id, 1, 5).exists())
     self.assertTrue(self.file_s.get_step_path(traj_id, 1).exists())
     self.assertTrue(self.file_s.get_step_path(traj_id, 5).exists())
-    (recovered,) = self.file_s.get_trajectories([traj_id])
+    recovered = self.file_s.get_trajectories([traj_id])[traj_id]
     self.assertEqual(
         [step.message for step in recovered.steps],
         [
@@ -1954,7 +2325,7 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     self.assertFalse(self.file_s.get_steps_chunk_path(traj_id, 1, 5).exists())
     self.assertEqual(
         self.file_s.get_trajectories([traj_id]),
-        [trajectory_testing.TRAJECTORY_2],
+        {traj_id: trajectory_testing.TRAJECTORY_2},
     )
 
   def test_add_step_in_batch_mode_on_chunk_write_error_logs_and_increases_wait(
@@ -2002,9 +2373,9 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
         trajectory_testing.TRAJECTORY_ID_2,
         self.file_s.get_trajectory_dir(trajectory_testing.TRAJECTORY_ID_2),
     )
-    (recovered_1,) = self.file_s.get_trajectories(
+    recovered_1 = self.file_s.get_trajectories(
         [trajectory_testing.TRAJECTORY_ID_1]
-    )
+    )[trajectory_testing.TRAJECTORY_ID_1]
     self.assertEqual(recovered_1, trajectory_testing.TRAJECTORY_1)
     self.assertAlmostEqual(self.file_s._writer.batch_wait_s, 2.0)
 
@@ -2041,7 +2412,7 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
         traj_id,
         self.file_s.get_step_path(traj_id, 3),
     )
-    (recovered,) = self.file_s.get_trajectories([traj_id])
+    recovered = self.file_s.get_trajectories([traj_id])[traj_id]
     self.assertEqual(
         recovered.steps,
         [trajectory_testing.STEP_2_1, trajectory_testing.STEP_2_2],
@@ -2095,7 +2466,7 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     self.assertAlmostEqual(wait_after_error, 1.0)
     self.assertTrue(self.file_s.get_steps_chunk_path(traj_id, 2, 5).exists())
     self.assertAlmostEqual(self.file_s._writer.batch_wait_s, 0.8)
-    (recovered,) = self.file_s.get_trajectories([traj_id])
+    recovered = self.file_s.get_trajectories([traj_id])[traj_id]
     self.assertEqual(recovered, trajectory_testing.TRAJECTORY_2)
 
   def test_init_with_custom_batch_config_exposes_batching_property(
@@ -2147,7 +2518,10 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     ):
       metas = self.file_s.get_trajectories_metadata()
 
-    self.assertEqual(metas, [trajectory_testing.METADATA_1])
+    self.assertEqual(
+        metas,
+        {trajectory_testing.TRAJECTORY_ID_1: trajectory_testing.METADATA_1},
+    )
     mock_exists.assert_not_called()
     mock_is_dir.assert_not_called()
 
@@ -2170,7 +2544,7 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     ):
       metas = self.file_s.get_trajectories_metadata()
 
-    self.assertEqual(metas, [])
+    self.assertEqual(metas, {})
     mock_exists.assert_not_called()
 
   @parameterized.named_parameters(
@@ -2210,7 +2584,7 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
 
     self.assertFalse(self.file_s.get_steps_chunk_path(traj_id, 1, 5).exists())
     self.assertTrue(self.file_s.get_steps_chunk_path(traj_id, 3, 5).exists())
-    (recovered,) = self.file_s.get_trajectories([traj_id])
+    recovered = self.file_s.get_trajectories([traj_id])[traj_id]
     self.assertEqual(
         [s.message for s in recovered.steps],
         [
@@ -2265,7 +2639,7 @@ class FileTrajectoryStoreConfigTest(
     original.flush()
 
     self.assertEqual(
-        [m.trajectory_id for m in rebuilt.get_trajectories_metadata()],
+        list(rebuilt.get_trajectories_metadata().keys()),
         [trajectory_testing.METADATA_1.trajectory_id],
     )
 
@@ -2337,7 +2711,9 @@ class FileTrajectoryStoreConfigTest(
     meta.notes = "mutated_after_add_step"
     default_store.flush()
 
-    (recovered,) = default_store.get_trajectories([meta.trajectory_id])
+    recovered = default_store.get_trajectories([meta.trajectory_id])[
+        meta.trajectory_id
+    ]
     self.assertEqual(recovered.notes, trajectory_testing.METADATA_1.notes)
     self.assertEqual(recovered.steps[0].message, "zero copy turn")
 

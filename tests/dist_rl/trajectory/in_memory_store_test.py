@@ -24,6 +24,8 @@ class InMemoryTrajectoryReaderTest(store_testing.TrajectoryReaderTestCase):
     mem_store = in_memory_store.InMemoryTrajectoryStore()
     if initial_data:
       for meta, steps in initial_data:
+        if not steps:
+          mem_store.update_metadata(meta)
         for step in steps:
           mem_store.add_step(step, meta)
       mem_store.flush()
@@ -53,7 +55,7 @@ class InMemoryTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
     mem_store.add_step(step, meta)
     meta.extra["status"] = "SUCCEEDED"
     mem_store.update_metadata(meta)
-    read_meta = mem_store.get_trajectories_metadata()[0]
+    read_meta = mem_store.get_trajectories_metadata()["t1"]
     self.assertEqual(read_meta.extra["status"], "SUCCEEDED")
 
   def test_metadata_mutation_isolation(self) -> None:
@@ -71,12 +73,12 @@ class InMemoryTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
     mem_store.add_step(step, meta)
 
     # Caller mutates the returned metadata
-    read_meta = mem_store.get_trajectories_metadata()[0]
+    read_meta = mem_store.get_trajectories_metadata()["iso_1"]
     read_meta.notes = "mutated notes"
     read_meta.extra["count"] = 99
 
     # Re-reading from store should still reflect original state
-    stored_meta = mem_store.get_trajectories_metadata()[0]
+    stored_meta = mem_store.get_trajectories_metadata()["iso_1"]
     self.assertEqual(stored_meta.notes, "initial notes")
     self.assertEqual(stored_meta.extra["count"], 1)
 
@@ -114,7 +116,7 @@ class InMemoryTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
     assert step.extra is not None
     step.extra["nested"].append("v2")
 
-    (stored_traj,) = mem_store.get_trajectories(["step_iso_1"])
+    stored_traj = mem_store.get_trajectories(["step_iso_1"])["step_iso_1"]
     self.assertEqual(stored_traj.steps[0].message, "initial message")
     self.assertEqual(stored_traj.steps[0].extra, {"nested": ["v1"]})
 

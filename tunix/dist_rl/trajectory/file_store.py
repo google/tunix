@@ -164,17 +164,105 @@ def _group_contiguous_step_ids(
     yield list(group)
 
 
-def _parse_step_file(filename: str, text: str) -> list[trajectory_lib.Step]:
-  """Parses a single-step .json file or a multi-step .jsonl chunk file."""
+def _parse_step_file(
+    filename: str,
+    content: bytes,
+    *,
+    strict: bool = True,
+    trajectory_id: str | None = None,
+) -> tuple[list[trajectory_lib.Step], bool]:
+  """Parses a single-step .json file or a multi-step .jsonl chunk file.
+
+  Takes the undecoded file contents so that a file cut inside a multi-byte
+  UTF-8 character fails step validation, which `strict=False` tolerates, rather
+  than failing to decode. Splitting bytes also breaks a chunk only at ASCII
+  newlines, never at a Unicode line boundary inside a JSON string.
+
+  Args:
+    filename: Step or chunk file name.
+    content: Raw file contents.
+    strict: Whether to raise on corrupt JSON or invalid Step payloads.
+    trajectory_id: Trajectory identifier used for warning logs when not strict.
+
+  Returns:
+    A tuple of `(parsed_steps, had_corrupt_entry)`.
+  """
   if filename.endswith(".jsonl"):
-    steps = [
-        trajectory_lib.Step.model_validate_json(line)
-        for line in text.splitlines()
-        if line and not line.isspace()
+    non_blank_lines = [
+        line for line in content.splitlines() if line and not line.isspace()
     ]
-    if steps:
-      return steps
-  return [trajectory_lib.Step.model_validate_json(text)]
+    if non_blank_lines:
+      return store.parse_raw_steps(
+          non_blank_lines,
+          trajectory_lib.Step.model_validate_json,
+          strict=strict,
+          trajectory_id=trajectory_id,
+          source_desc=f"step line in {filename}",
+      )
+    if strict:
+      return [trajectory_lib.Step.model_validate_json(content)], False
+    logging.warning(
+        "Skipping empty or blank step chunk file %s in trajectory %s.",
+        filename,
+        trajectory_id,
+    )
+    return [], True
+
+  return store.parse_raw_steps(
+      (content,),
+      trajectory_lib.Step.model_validate_json,
+      strict=strict,
+      trajectory_id=trajectory_id,
+      source_desc=f"step file {filename}",
+  )
+
+
+def _evict_overwritten_step_id(
+    filename: str, step_by_id: dict[int, trajectory_lib.Step]
+) -> None:
+  """Removes a stale chunk step when its single-step `.json` revision fails."""
+  match = _STEP_FILENAME_REGEX.match(filename)
+  if match is not None:
+    step_by_id.pop(int(match.group(1)), None)
+
+
+def _assemble_trajectory_steps(
+    traj_id: str,
+    step_content_futures: collections.deque[tuple[str, futures.Future[bytes]]],
+    *,
+    strict: bool,
+) -> tuple[list[trajectory_lib.Step], bool]:
+  """Resolves parallel step-file futures into sorted steps and completeness."""
+  step_by_id: dict[int, trajectory_lib.Step] = {}
+  is_incomplete = False
+  while step_content_futures:
+    filename, step_content_future = step_content_futures.popleft()
+    try:
+      step_content = step_content_future.result()
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+      if strict or not _is_not_found_error(exc):
+        raise
+      is_incomplete = True
+      _evict_overwritten_step_id(filename, step_by_id)
+      logging.warning(
+          "Skipping missing step file %s in trajectory %s.",
+          filename,
+          traj_id,
+      )
+      continue
+    parsed_steps, had_corrupt = _parse_step_file(
+        filename,
+        step_content,
+        strict=strict,
+        trajectory_id=traj_id,
+    )
+    if had_corrupt:
+      is_incomplete = True
+      _evict_overwritten_step_id(filename, step_by_id)
+    for step in parsed_steps:
+      step_by_id[step.step_id] = step
+  steps = [step_by_id[step_id] for step_id in sorted(step_by_id)]
+  return steps, is_incomplete
 
 
 def _is_local_filesystem(path: epath.Path) -> bool:
@@ -871,8 +959,11 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
       executor.shutdown(cancel_futures=True)
 
   def get_trajectories_metadata(
-      self, trajectory_ids: list[str] | None = None
-  ) -> list[MetadataT]:
+      self,
+      trajectory_ids: Sequence[str] | None = None,
+      *,
+      ignore_missing: bool = False,
+  ) -> dict[str, MetadataT]:
     """Retrieves metadata for trajectories in the run.
 
     Files are read in parallel to hide the latency of remote filesystems such
@@ -880,40 +971,60 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
     the files were read one by one.
 
     Args:
-      trajectory_ids: Optional list of unique trajectory identifiers. If
+      trajectory_ids: Optional sequence of unique trajectory identifiers. If
         specified, only metadata for these IDs is returned. If None, metadata
         for all trajectories in the run is returned.
+      ignore_missing: If True, trajectory IDs with no stored metadata are
+        omitted from the returned dictionary instead of raising
+        TrajectoryMetadataNotFoundError.
 
     Returns:
-      A list of TrajectoryMetadata objects for the requested trajectories.
+      A dictionary mapping trajectory IDs to TrajectoryMetadata objects for the
+      present trajectories, in the order of `trajectory_ids` if specified, or
+      natural ID order if None.
 
     Raises:
-      store.TrajectoryMetadataNotFoundError: If any requested trajectory ID does
-        not exist.
+      store.TrajectoryMetadataNotFoundError: If `ignore_missing` is False and
+        any requested trajectory ID does not exist.
       RuntimeError: If the reader threads cannot be started, e.g. during
         interpreter shutdown.
     """
-    metas: list[MetadataT] = []
+    metas: dict[str, MetadataT] = {}
     with self._open_parallel_reads(
         trajectory_ids, self.get_trajectory_metadata_path
     ) as reads:
       for traj_id, meta_text in reads:
         if meta_text is None:
-          if trajectory_ids is None:
-            if not _read_max_persisted_step_id(
-                self.get_trajectory_dir(traj_id)
-            ):
-              continue
-            meta_text = _read_text_or_none(
-                self.get_trajectory_metadata_path(traj_id)
-            )
+          meta_text = self._resolve_missing_metadata(
+              traj_id,
+              is_discovery=trajectory_ids is None,
+              ignore_missing=ignore_missing,
+          )
           if meta_text is None:
-            raise store.TrajectoryMetadataNotFoundError(traj_id)
-        metas.append(self._parse_metadata(meta_text))
+            continue
+        metas[traj_id] = self._parse_metadata(meta_text)
     return metas
 
+  def _resolve_missing_metadata(
+      self,
+      traj_id: str,
+      *,
+      is_discovery: bool,
+      ignore_missing: bool,
+  ) -> str | None:
+    """Re-checks discovered directories or raises when metadata is missing."""
+    if is_discovery:
+      if not _read_max_persisted_step_id(self.get_trajectory_dir(traj_id)):
+        return None
+      meta_text = _read_text_or_none(self.get_trajectory_metadata_path(traj_id))
+      if meta_text is not None:
+        return meta_text
+    if ignore_missing:
+      return None
+    raise store.TrajectoryMetadataNotFoundError(traj_id)
+
   def get_trajectories_metrics(
-      self, trajectory_ids: list[str] | None = None
+      self, trajectory_ids: Sequence[str] | None = None
   ) -> dict[str, trajectory_lib.TrajectoryMetrics]:
     """Retrieves metrics for trajectories in the run.
 
@@ -951,23 +1062,37 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
     return metrics_by_id
 
   def get_trajectories(
-      self, trajectory_ids: list[str]
-  ) -> list[trajectory_lib.Trajectory[Any]]:
-    """Retrieves full trajectories for a list of trajectory IDs.
+      self,
+      trajectory_ids: Sequence[str],
+      *,
+      ignore_missing: bool = False,
+      strict: bool = True,
+  ) -> dict[str, trajectory_lib.Trajectory[Any]]:
+    """Retrieves full trajectories for a sequence of trajectory IDs.
 
     Files are read in parallel to hide the latency of remote filesystems such
     as GCS. Errors are raised for the first failing trajectory in order, as if
     the files were read one by one.
 
     Args:
-      trajectory_ids: List of unique trajectory identifiers to load.
+      trajectory_ids: Sequence of unique trajectory identifiers to load.
+      ignore_missing: If True, trajectory IDs with no stored records are omitted
+        from the returned dictionary instead of raising TrajectoryNotFoundError.
+      strict: If False, retains the longest contiguous valid prefix [1..k] for
+        any trajectory with a corrupt step, step-ID gap, or step-count mismatch
+        instead of raising ValidationError, and resets completion fields
+        (`status = None`, `total_reward = None`) on the returned Trajectory
+        while preserving lineage metadata.
 
     Returns:
-      A list of full Trajectory objects corresponding to the requested IDs.
+      A dictionary mapping trajectory IDs to full Trajectory objects for the
+      present trajectories, in the order of `trajectory_ids`.
 
     Raises:
-      store.TrajectoryNotFoundError: If any requested trajectory ID does not
-      exist.
+      store.TrajectoryNotFoundError: If `ignore_missing` is False and any
+        requested trajectory ID does not exist.
+      pydantic.ValidationError: If `strict` is True and steps contain gaps or
+        fail model validation.
       RuntimeError: If the reader threads cannot be started, e.g. during
         interpreter shutdown.
     """
@@ -992,21 +1117,25 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
           )
           for traj_id in trajectory_ids
       )
-      trajs: list[trajectory_lib.Trajectory[Any]] = []
+      trajs: dict[str, trajectory_lib.Trajectory[Any]] = {}
       while pending_reads:
         traj_id, meta_text_future, step_reads_future = pending_reads.popleft()
         meta_text = meta_text_future.result()
         if meta_text is None:
+          if ignore_missing:
+            continue
           raise store.TrajectoryNotFoundError(traj_id)
         meta = self._parse_metadata(meta_text)
-        step_text_futures = step_reads_future.result()
-        step_by_id: dict[int, trajectory_lib.Step] = {}
-        while step_text_futures:
-          filename, step_text_future = step_text_futures.popleft()
-          for step in _parse_step_file(filename, step_text_future.result()):
-            step_by_id[step.step_id] = step
-        steps = [step_by_id[step_id] for step_id in sorted(step_by_id)]
-        trajs.append(meta.create_trajectory(steps=steps))
+        steps, is_incomplete = _assemble_trajectory_steps(
+            traj_id,
+            step_reads_future.result(),
+            strict=strict,
+        )
+        trajs[traj_id] = meta.create_trajectory(
+            steps=steps,
+            strict=strict,
+            is_incomplete=is_incomplete,
+        )
       return trajs
     finally:
       # Skips the reads that have not started and waits for the running ones,
@@ -1073,7 +1202,7 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
 
   def _submit_step_reads(
       self, trajectory_id: str, executor: futures.Executor
-  ) -> collections.deque[tuple[str, futures.Future[str]]]:
+  ) -> collections.deque[tuple[str, futures.Future[bytes]]]:
     """Lists a trajectory's step files and submits their reads to `executor`.
 
     Returns without waiting for the reads, so that no task on `executor` waits
@@ -1088,13 +1217,19 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
       `.jsonl` files are applied before single-step `.json` revisions.
     """
     matched_entries: list[tuple[tuple[int, int, int, str], epath.Path]] = []
-    for entry in self.get_trajectory_dir(trajectory_id).iterdir():
+    try:
+      entries = list(self.get_trajectory_dir(trajectory_id).iterdir())
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+      if _is_not_found_error(exc):
+        return collections.deque()
+      raise
+    for entry in entries:
       sort_key = _step_file_sort_key(entry.name)
       if sort_key is not None:
         matched_entries.append((sort_key, entry))
     matched_entries.sort()
     return collections.deque(
-        (entry.name, executor.submit(entry.read_text))
+        (entry.name, executor.submit(entry.read_bytes))
         for _, entry in matched_entries
     )
 

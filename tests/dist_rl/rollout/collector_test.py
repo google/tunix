@@ -1647,7 +1647,7 @@ class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
     # Step 1 is the TunixAgentStep containing prefill_routed_experts (2 prompt
     # tokens + 2 routed decode tokens).
     agent_steps = [
-        s for s in stored_trajs[0].steps if s.source.value == "agent"
+        s for s in stored_trajs["traj_u8"].steps if s.source.value == "agent"
     ]
     self.assertLen(agent_steps, 1)
     self.assertEqual(agent_steps[0].prefill_routed_experts.dtype, np.uint8)
@@ -1685,7 +1685,7 @@ class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
     )
     stored_u10 = store.get_trajectories(["traj_u10"])
     agent_steps_u10 = [
-        s for s in stored_u10[0].steps if s.source.value == "agent"
+        s for s in stored_u10["traj_u10"].steps if s.source.value == "agent"
     ]
     self.assertEqual(agent_steps_u10[0].prefill_routed_experts.dtype, np.uint8)
     self.assertEqual(
@@ -1719,7 +1719,7 @@ class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
     np.testing.assert_array_equal(item_i16.routed_experts, expected_full_routed)
     stored_i16 = store.get_trajectories(["traj_i16"])
     agent_steps_i16 = [
-        s for s in stored_i16[0].steps if s.source.value == "agent"
+        s for s in stored_i16["traj_i16"].steps if s.source.value == "agent"
     ]
     self.assertEqual(agent_steps_i16[0].prefill_routed_experts.dtype, np.int16)
     np.testing.assert_array_equal(
@@ -1932,7 +1932,9 @@ class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
     self.assertEqual(item.metadata["answer"], "0")
     self.assertEqual(req.metadata["env_config"]["verifier_bytes"], b"\x80\xff")
     self.assertLen(stored, 1)
-    self.assertEqual(stored[0].extra, {"question": "Q0", "answer": "0"})
+    self.assertEqual(
+        stored["traj_bin"].extra, {"question": "Q0", "answer": "0"}
+    )
 
   def test_multi_turn_trajectory_store_compression_and_jax_decode_parity(self):
     rng = np.random.default_rng(42)
@@ -2080,11 +2082,11 @@ class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
           )
           s_store_cmp.flush()
 
-          stored_f_i16 = f_store_i16.get_trajectories(["t_f_i16"])[0]
-          stored_f_cmp = f_store_cmp.get_trajectories(["t_f_cmp"])[0]
+          stored_f_i16 = f_store_i16.get_trajectories(["t_f_i16"])["t_f_i16"]
+          stored_f_cmp = f_store_cmp.get_trajectories(["t_f_cmp"])["t_f_cmp"]
 
-          stored_s_i16 = s_store_i16.get_trajectories(["t_s_i16"])[0]
-          stored_s_cmp = s_store_cmp.get_trajectories(["t_s_cmp"])[0]
+          stored_s_i16 = s_store_i16.get_trajectories(["t_s_i16"])["t_s_i16"]
+          stored_s_cmp = s_store_cmp.get_trajectories(["t_s_cmp"])["t_s_cmp"]
         finally:
           f_store_i16.close()
           f_store_cmp.close()

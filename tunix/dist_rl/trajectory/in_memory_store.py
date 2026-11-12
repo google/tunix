@@ -1,7 +1,8 @@
 """In-memory implementation for Trajectory Store."""
 
 import collections
-from typing import Any, ClassVar, Mapping, TypeVar
+from collections.abc import Mapping, Sequence
+from typing import Any, ClassVar, TypeVar
 
 from tunix.dist_rl.trajectory import base_store as store
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
@@ -62,61 +63,90 @@ class InMemoryTrajectoryStore(store.TrajectoryStore[MetadataT]):
     }
 
   def get_trajectories_metadata(
-      self, trajectory_ids: list[str] | None = None
-  ) -> list[MetadataT]:
+      self,
+      trajectory_ids: Sequence[str] | None = None,
+      *,
+      ignore_missing: bool = False,
+  ) -> dict[str, MetadataT]:
     """Retrieves metadata for trajectories in the run.
 
     Args:
-      trajectory_ids: Optional list of unique trajectory identifiers. If
+      trajectory_ids: Optional sequence of unique trajectory identifiers. If
         specified, only metadata for these IDs is returned. If None, metadata
         for all trajectories in the run is returned.
+      ignore_missing: If True, trajectory IDs with no stored metadata are
+        omitted from the returned dictionary instead of raising
+        TrajectoryMetadataNotFoundError.
 
     Returns:
-      A list of TrajectoryMetadata objects for the requested trajectories.
+      A dictionary mapping trajectory IDs to TrajectoryMetadata objects for the
+      present trajectories, in the order of `trajectory_ids` if specified.
 
     Raises:
-      store.TrajectoryMetadataNotFoundError: If any requested trajectory ID does
-        not exist.
+      store.TrajectoryMetadataNotFoundError: If `ignore_missing` is False and
+        any requested trajectory ID does not exist.
     """
     if trajectory_ids is None:
-      trajectory_ids = list(self._metadata_by_trajectory_id.keys())
-    metas: list[MetadataT] = []
+      return {
+          traj_id: trajectory_lib.deep_copy(meta)
+          for traj_id, meta in self._metadata_by_trajectory_id.items()
+      }
+    metas: dict[str, MetadataT] = {}
     for traj_id in trajectory_ids:
       if traj_id not in self._metadata_by_trajectory_id:
+        if ignore_missing:
+          continue
         raise store.TrajectoryMetadataNotFoundError(traj_id)
-      meta = trajectory_lib.deep_copy(self._metadata_by_trajectory_id[traj_id])
-      metas.append(meta)
+      metas[traj_id] = trajectory_lib.deep_copy(
+          self._metadata_by_trajectory_id[traj_id]
+      )
     return metas
 
   def get_trajectories(
-      self, trajectory_ids: list[str]
-  ) -> list[trajectory_lib.Trajectory[Any]]:
-    """Retrieves full trajectories for a list of trajectory IDs.
+      self,
+      trajectory_ids: Sequence[str],
+      *,
+      ignore_missing: bool = False,
+      strict: bool = True,
+  ) -> dict[str, trajectory_lib.Trajectory[Any]]:
+    """Retrieves full trajectories for a sequence of trajectory IDs.
 
     Args:
-      trajectory_ids: List of unique trajectory identifiers to load.
+      trajectory_ids: Sequence of unique trajectory identifiers to load.
+      ignore_missing: If True, trajectory IDs with no stored records are omitted
+        from the returned dictionary instead of raising TrajectoryNotFoundError.
+      strict: If False, retains the longest contiguous valid prefix [1..k] for
+        any trajectory with a corrupt step, step-ID gap, or step-count mismatch
+        instead of raising ValidationError, and resets completion fields
+        (`status = None`, `total_reward = None`) on the returned Trajectory
+        while preserving lineage metadata.
 
     Returns:
-      A list of full Trajectory objects corresponding to the requested IDs.
+      A dictionary mapping trajectory IDs to full Trajectory objects for the
+      present trajectories, in the order of `trajectory_ids`.
 
     Raises:
-      store.TrajectoryNotFoundError: If any requested trajectory ID does not
-      exist.
+      store.TrajectoryNotFoundError: If `ignore_missing` is False and any
+        requested trajectory ID does not exist.
+      pydantic.ValidationError: If `strict` is True and steps contain gaps or
+        fail model validation.
     """
-    result: list[trajectory_lib.Trajectory[Any]] = []
+    result: dict[str, trajectory_lib.Trajectory[Any]] = {}
     for traj_id in trajectory_ids:
       if traj_id not in self._metadata_by_trajectory_id:
+        if ignore_missing:
+          continue
         raise store.TrajectoryNotFoundError(traj_id)
       meta = self._metadata_by_trajectory_id[traj_id]
       steps = [
           trajectory_lib.deep_copy(s)
           for s in self._steps_by_trajectory_id.get(traj_id, [])
       ]
-      result.append(meta.create_trajectory(steps=steps))
+      result[traj_id] = meta.create_trajectory(steps=steps, strict=strict)
     return result
 
   def get_trajectories_metrics(
-      self, trajectory_ids: list[str] | None = None
+      self, trajectory_ids: Sequence[str] | None = None
   ) -> dict[str, trajectory_lib.TrajectoryMetrics]:
     """Retrieves trajectory metrics for the requested or all trajectories.
 
