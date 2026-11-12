@@ -111,15 +111,9 @@ orchestrator) with `../common/run_rollout_node.py` (configured with DeepSWE's
 settings from environment variables. Set `USE_AGENT_SANDBOX=1` to construct
 `SWEEnv` with `SandboxFleet` inside the rollout worker process.
 
-Their defaults follow the converging Qwen3-32B recipe where they expose the
-setting (model, batch/generations, steps, turns, sequence lengths, episode
-timeout, rollout concurrency, Raiden weight sync, trainer `tpuv5:4x4x4` with an
-`(fsdp=16, tp=4)` mesh, 260G trainer memory, and the 16 MiB pathways-proxy
-transfer threshold). They do not expose `epsilon_high`, the RLOO advantage
-estimator, `sequence-mean-token-scale` loss aggregation, token-level sampler
-importance sampling, the AdamW `b2`/weight decay, decoder remat and flash
-attention, the Qwen3 stop token, the vLLM HBM/batched-token limits, or more
-than one rollout replica; use the v2 launchers for the full recipe.
+Their defaults are the same converging Qwen3-32B recipe as `deepswe.yaml`
+(`k8s_launcher.sh`: `tpuv5:4x4x4` trainer with an `(8, 8)` mesh and
+`ROLLOUT_REPLICAS=16` single-host `tpuv5:2x2x1` rollouts).
 
 ```bash
 cd tunix/dist_rl/examples/deepswe_dist

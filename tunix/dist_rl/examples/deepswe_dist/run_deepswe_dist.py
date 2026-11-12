@@ -116,6 +116,36 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--beta", type=float, default=0.0)
   parser.add_argument("--epsilon", type=float, default=0.2)
   parser.add_argument(
+      "--epsilon_high",
+      type=_optional_float,
+      default=None,
+      help="Upper PPO clip bound; none uses --epsilon (symmetric clipping).",
+  )
+  parser.add_argument(
+      "--advantage_estimator",
+      type=str,
+      default="grpo",
+      help="Advantage estimator (e.g. 'grpo' or 'rloo').",
+  )
+  parser.add_argument(
+      "--loss_agg_mode",
+      type=str,
+      default="sequence-mean-token-mean",
+      help="Policy loss aggregation (e.g. 'sequence-mean-token-scale').",
+  )
+  parser.add_argument(
+      "--sampler_is",
+      type=_optional_str,
+      default=None,
+      help="Sampler importance-sampling level ('token', 'sequence', or none).",
+  )
+  parser.add_argument(
+      "--sampler_is_threshold",
+      type=_optional_float,
+      default=2.0,
+      help="Upper truncation threshold of the sampler IS ratio, or none.",
+  )
+  parser.add_argument(
       "--use_rollout_logps",
       action=argparse.BooleanOptionalAction,
       default=True,
@@ -188,6 +218,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--scaffold", choices=("r2egym", "sweagent"), default="r2egym"
   )
   parser.add_argument("--use_agent_sandbox", action="store_true")
+  parser.add_argument(
+      "--rollout_replicas",
+      type=int,
+      default=1,
+      help="Rollout workers to wait for before bring-up.",
+  )
   parser.add_argument(
       "--max_warmpool_concurrency",
       type=int,
@@ -316,6 +352,16 @@ def _str2bool(v: str | bool) -> bool:
   raise argparse.ArgumentTypeError(f"Boolean value expected, got {v}")
 
 
+def _optional_str(v: str) -> str | None:
+  """Parses a string flag, mapping '', 'none', and 'null' to None."""
+  return None if v.lower() in ("", "none", "null") else v
+
+
+def _optional_float(v: str) -> float | None:
+  """Parses a float flag, mapping '', 'none', and 'null' to None."""
+  return None if v.lower() in ("", "none", "null") else float(v)
+
+
 def _trajectory_store_config(
     args: argparse.Namespace,
 ) -> dict[str, Any] | None:
@@ -338,8 +384,13 @@ def _build_algo(args: argparse.Namespace) -> algorithm_config.GRPOConfig:
   return algorithm_config.GRPOConfig(
       num_generations=args.num_generations,
       epsilon=args.epsilon,
+      epsilon_high=args.epsilon_high,
       beta=args.beta,
+      advantage_estimator=args.advantage_estimator,
+      loss_agg_mode=args.loss_agg_mode,
       use_rollout_logps=args.use_rollout_logps,
+      sampler_is=args.sampler_is,
+      sampler_is_threshold=args.sampler_is_threshold,
       routed_experts_encode_mode=args.routed_experts_encode_mode,
       routed_experts_num_experts=args.routed_experts_num_experts,
       reward_mode="env",
@@ -356,6 +407,10 @@ def _validate_args(
     raise ValueError("num_generations must be greater than 1 for GRPO.")
   if args.batch_size <= 0:
     raise ValueError("batch_size must be positive.")
+  if args.rollout_replicas < 1:
+    raise ValueError(
+        f"rollout_replicas must be >= 1, got {args.rollout_replicas}."
+    )
   if args.max_staleness < 0:
     raise ValueError("offpolicy/max_staleness must be non-negative.")
   if args.step_timeout_secs <= 0:
@@ -508,7 +563,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
     cluster.registry.wait_for_workers(
         min_workers={
             datatypes.Role.ACTOR: 1,
-            datatypes.Role.ROLLOUT: 1,
+            datatypes.Role.ROLLOUT: args.rollout_replicas,
             datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
         },
         timeout=args.init_timeout_s,

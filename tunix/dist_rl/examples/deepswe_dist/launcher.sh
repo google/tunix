@@ -26,9 +26,8 @@ ORCHESTRATOR_PORT=${ORCHESTRATOR_PORT:-30000}
 TRAINER_PORT=${TRAINER_PORT:-20000}
 ROLLOUT_PORT=${ROLLOUT_PORT:-20001}
 
-# Defaults follow the converging Qwen3-32B DeepSWE recipe of `deepswe.yaml`
-# where this launcher exposes the setting; see the README for the settings it
-# does not expose. A single 4-chip host needs smaller overrides (e.g.
+# Defaults follow the converging Qwen3-32B DeepSWE recipe of `deepswe.yaml`.
+# A single 4-chip host needs smaller overrides (e.g.
 # MODEL_NAME=Qwen3-1.7B MODEL_ID=Qwen/Qwen3-1.7B BATCH_SIZE=1
 # NUM_GENERATIONS=2 MAX_STEPS=1 WEIGHT_SYNC_MODE=none).
 MODEL_NAME=${MODEL_NAME:-Qwen3-32B}
@@ -53,9 +52,23 @@ OPT_CHAIN_TYPE=${OPT_CHAIN_TYPE-clip_by_global_norm}
 MAX_GRAD_NORM=${MAX_GRAD_NORM:-1.0}
 BETA=${BETA:-0.0}
 EPSILON=${EPSILON:-0.2}
+EPSILON_HIGH=${EPSILON_HIGH:-0.28}
+ADVANTAGE_ESTIMATOR=${ADVANTAGE_ESTIMATOR:-rloo}
+LOSS_AGG_MODE=${LOSS_AGG_MODE:-sequence-mean-token-scale}
+SAMPLER_IS=${SAMPLER_IS:-token}
+SAMPLER_IS_THRESHOLD=${SAMPLER_IS_THRESHOLD:-2.0}
+ADAM_B2=${ADAM_B2:-0.99}
+WEIGHT_DECAY=${WEIGHT_DECAY:-0.01}
+REMAT_CONFIG=${REMAT_CONFIG:-decoder}
+USE_FLASH_ATTENTION=${USE_FLASH_ATTENTION:-true}
+COMPUTE_LOGPS_MICRO_BATCH_SIZE=${COMPUTE_LOGPS_MICRO_BATCH_SIZE:-8}
 MAX_STALENESS=${MAX_STALENESS:-0}
 TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-trajectory_completion}
 SAMPLER=${SAMPLER:-inprocess_vllm}
+# Qwen3 `<|im_end|>` token id.
+EOS_TOKENS=${EOS_TOKENS:-151645}
+VLLM_HBM_UTILIZATION=${VLLM_HBM_UTILIZATION:-0.7}
+VLLM_MAX_NUM_BATCHED_TOKENS=${VLLM_MAX_NUM_BATCHED_TOKENS:-16384}
 WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-raiden}
 IN_FLIGHT_WEIGHT_UPDATES=${IN_FLIGHT_WEIGHT_UPDATES:-false}
 USE_LORA=${USE_LORA:-0}
@@ -273,8 +286,12 @@ echo "Launching trainer node..."
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
     --model_dtype="$MODEL_DTYPE"
     --model_load_dtype="$MODEL_LOAD_DTYPE"
+    --remat_config="$REMAT_CONFIG"
+    --compute_logps_micro_batch_size="$COMPUTE_LOGPS_MICRO_BATCH_SIZE"
     --eval_every_n_steps="$EVAL_EVERY_N_STEPS"
     --learning_rate="$LEARNING_RATE"
+    --optimizer_b2="$ADAM_B2"
+    --optimizer_weight_decay="$WEIGHT_DECAY"
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
     --sampler_type="$SAMPLER"
@@ -288,6 +305,11 @@ echo "Launching trainer node..."
       --optimizer_opt_chain_type="$OPT_CHAIN_TYPE"
       --optimizer_chain_kwargs="{'max_norm': $MAX_GRAD_NORM}"
     )
+  fi
+  if [[ "$USE_FLASH_ATTENTION" == "1" || "$USE_FLASH_ATTENTION" == "true" || "$USE_FLASH_ATTENTION" == "True" ]]; then
+    TRAINER_CMD+=(--use_flash_attention)
+  else
+    TRAINER_CMD+=(--no-use_flash_attention)
   fi
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     TRAINER_CMD+=(--use_lora)
@@ -335,6 +357,15 @@ echo "Launching DeepSWE rollout node..."
     --max_concurrency="$ROLLOUT_MAX_CONCURRENCY"
     --episode_timeout_secs="$EPISODE_TIMEOUT_SECS"
   )
+  if [[ -n "$EOS_TOKENS" ]]; then
+    ROLLOUT_CMD+=(--eos_tokens="$EOS_TOKENS")
+  fi
+  if [[ -n "$VLLM_HBM_UTILIZATION" ]]; then
+    ROLLOUT_CMD+=(--vllm_hbm_utilization="$VLLM_HBM_UTILIZATION")
+  fi
+  if [[ -n "$VLLM_MAX_NUM_BATCHED_TOKENS" ]]; then
+    ROLLOUT_CMD+=(--vllm_max_num_batched_tokens="$VLLM_MAX_NUM_BATCHED_TOKENS")
+  fi
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     ROLLOUT_CMD+=(--use_lora)
   fi
@@ -391,6 +422,11 @@ echo "Launching CPU orchestrator..."
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
     --beta="$BETA"
     --epsilon="$EPSILON"
+    --epsilon_high="$EPSILON_HIGH"
+    --advantage_estimator="$ADVANTAGE_ESTIMATOR"
+    --loss_agg_mode="$LOSS_AGG_MODE"
+    --sampler_is="$SAMPLER_IS"
+    --sampler_is_threshold="$SAMPLER_IS_THRESHOLD"
     --max_staleness="$MAX_STALENESS"
     --trajectory_group_order="$TRAJECTORY_GROUP_ORDER"
     --dataset_name="$DATASET_NAME"

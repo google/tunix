@@ -621,13 +621,18 @@ def _ensure_model_dir_for_trainer(model_dir: str, model_id: str) -> str:
 
 
 def _create_mesh(args) -> Mesh:
+  """Builds the trainer's `(fsdp, tp)` mesh over all visible devices."""
   shape = (args.mesh_fsdp, args.mesh_tp)
   if args.mesh_fsdp * args.mesh_tp != jax.device_count():
     raise ValueError(
         "Trainer mesh dimensions must multiply to visible JAX device count. "
         f"Got shape={shape}, devices={jax.device_count()}."
     )
-  devices = mesh_utils.create_device_mesh(shape, jax.devices())
+  # Same as `launch/nodes/node_utils.create_mesh`: shapes such as (8, 8) on a
+  # 4x4x4 slice need a split physical axis.
+  devices = mesh_utils.create_device_mesh(
+      shape, jax.devices(), allow_split_physical_axes=True
+  )
   return Mesh(devices, axis_names=("fsdp", "tp"))
 
 

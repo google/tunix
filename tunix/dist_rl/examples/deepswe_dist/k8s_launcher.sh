@@ -22,8 +22,7 @@ if ! command -v "$PYTHON" &>/dev/null; then
 fi
 
 # Defaults follow the converging Qwen3-32B DeepSWE recipe of `deepswe.yaml` and
-# `k8s_launcher_v2.sh` where this launcher exposes the setting; see the README
-# for the settings it does not expose.
+# `k8s_launcher_v2.sh`.
 export MODEL_NAME=${MODEL_NAME:-Qwen3-32B}
 export MODEL_ID=${MODEL_ID:-Qwen/Qwen3-32B}
 # Must be model-specific: vLLM prioritizes non-empty local snapshot directories,
@@ -54,6 +53,17 @@ export OPT_CHAIN_TYPE=${OPT_CHAIN_TYPE-clip_by_global_norm}
 export MAX_GRAD_NORM=${MAX_GRAD_NORM:-1.0}
 export BETA=${BETA:-0.0}
 export EPSILON=${EPSILON:-0.2}
+export EPSILON_HIGH=${EPSILON_HIGH:-0.28}
+export ADVANTAGE_ESTIMATOR=${ADVANTAGE_ESTIMATOR:-rloo}
+export LOSS_AGG_MODE=${LOSS_AGG_MODE:-sequence-mean-token-scale}
+export SAMPLER_IS=${SAMPLER_IS:-token}
+export SAMPLER_IS_THRESHOLD=${SAMPLER_IS_THRESHOLD:-2.0}
+export ADAM_B2=${ADAM_B2:-0.99}
+export WEIGHT_DECAY=${WEIGHT_DECAY:-0.01}
+export REMAT_CONFIG=${REMAT_CONFIG:-decoder}
+export USE_FLASH_ATTENTION=${USE_FLASH_ATTENTION:-true}
+export COMPUTE_LOGPS_MICRO_BATCH_SIZE=${COMPUTE_LOGPS_MICRO_BATCH_SIZE:-8}
+export CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-2}
 export MAX_STALENESS=${MAX_STALENESS:-0}
 export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-trajectory_completion}
 export LORA_RANK=${LORA_RANK:-64}
@@ -63,6 +73,10 @@ export USE_LORA=${USE_LORA:-0}
 export DEBUG=${DEBUG:-0}
 export USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
+# Qwen3 `<|im_end|>` token id.
+export EOS_TOKENS=${EOS_TOKENS:-151645}
+export VLLM_HBM_UTILIZATION=${VLLM_HBM_UTILIZATION:-0.7}
+export VLLM_MAX_NUM_BATCHED_TOKENS=${VLLM_MAX_NUM_BATCHED_TOKENS:-16384}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-raiden}
 export IN_FLIGHT_WEIGHT_UPDATES=${IN_FLIGHT_WEIGHT_UPDATES:-false}
 # Router replay: rollout captures the MoE experts each token was routed to and
@@ -114,7 +128,7 @@ export TPU_PROFILE_CHIPS_PER_TASK=${TPU_PROFILE_CHIPS_PER_TASK:-1}
 export TPU_PROFILE_SPARSE_CORES=${TPU_PROFILE_SPARSE_CORES:-1}
 export TPU_PROFILE_SPARSE_CORE_TILES=${TPU_PROFILE_SPARSE_CORE_TILES:-1}
 export UPLOAD_ALL_PROFILER_RESULTS=${UPLOAD_ALL_PROFILER_RESULTS:-false}
-export TRAINER_MESH_TP=${TRAINER_MESH_TP:-4}
+export TRAINER_MESH_TP=${TRAINER_MESH_TP:-8}
 export TRAINER_MESH_EXPERT=${TRAINER_MESH_EXPERT:-1}
 # Padded MoE MLP intermediate dimension; must match rollout TP padding for MoE models.
 export TRAINER_PADDED_MOE_MLP_DIM=${TRAINER_PADDED_MOE_MLP_DIM:-}
@@ -161,14 +175,14 @@ export GCS_SCRATCH_LOCATION=${GCS_SCRATCH_LOCATION:-gs://cloud-pathways-staging/
 
 export TRAINER_JOBSET_YAML=${TRAINER_JOBSET_YAML:-jobset.pathways.yaml}
 export TRAINER_TPU_SLICE=${TRAINER_TPU_SLICE:-tpuv5:4x4x4}
-# `examples/common/run_trainer_node.py` builds its mesh without splitting
-# physical axes, so the 64 chips use (fsdp=16, tp=4) rather than the v2
-# launcher's (8, 8).
-export TRAINER_MESH_FSDP=${TRAINER_MESH_FSDP:-16}
+export TRAINER_MESH_FSDP=${TRAINER_MESH_FSDP:-8}
 # Loading Qwen3-32B in float32 raises trainer RSS above the default limit.
 export USER_CONTAINER_MEMORY=${USER_CONTAINER_MEMORY:-260G}
 export USER_CONTAINER_MEMORY_LIMIT=${USER_CONTAINER_MEMORY_LIMIT:-260G}
 export ROLLOUT_TPU_SLICE=${ROLLOUT_TPU_SLICE:-tpuv5:2x2x1}
+# Single-host rollout JobSets `${ROLLOUT_ID}-<i>`, one vLLM engine each
+# (`jobset.tpu.yaml` does not span hosts).
+export ROLLOUT_REPLICAS=${ROLLOUT_REPLICAS:-16}
 
 # JAX compilation cache configuration
 export LOCAL_JAX_CACHE_DIR=${LOCAL_JAX_CACHE_DIR:-${JAX_CACHE_DIR:-/tmp/jax_cache}}
@@ -306,6 +320,12 @@ start_orchestrator() {
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
         --beta=${BETA} \
         --epsilon=${EPSILON} \
+        --epsilon_high=${EPSILON_HIGH} \
+        --advantage_estimator=${ADVANTAGE_ESTIMATOR} \
+        --loss_agg_mode=${LOSS_AGG_MODE} \
+        --sampler_is=${SAMPLER_IS} \
+        --sampler_is_threshold=${SAMPLER_IS_THRESHOLD} \
+        --rollout_replicas=${ROLLOUT_REPLICAS} \
         --max_staleness=${MAX_STALENESS} \
         --trajectory_group_order=${TRAJECTORY_GROUP_ORDER} \
         --dataset_name=${DATASET_NAME} \
@@ -402,6 +422,10 @@ start_trainer() {
       raiden_env+=" RAIDEN_USE_FFI=1"
     fi
   fi
+  local flash_attention_flag="--no-use_flash_attention"
+  if [[ "${USE_FLASH_ATTENTION}" == "1" || "${USE_FLASH_ATTENTION}" == "true" || "${USE_FLASH_ATTENTION}" == "True" ]]; then
+    flash_attention_flag="--use_flash_attention"
+  fi
   local opt_chain_flags=""
   if [[ -n "${OPT_CHAIN_TYPE}" ]]; then
     opt_chain_flags="--optimizer_opt_chain_type=\"${OPT_CHAIN_TYPE}\" --optimizer_chain_kwargs=\"{'max_norm': ${MAX_GRAD_NORM}}\""
@@ -445,9 +469,15 @@ start_trainer() {
         --num_generations=${NUM_GENERATIONS} \
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
         --model_dtype=${MODEL_DTYPE} \
+        --remat_config=${REMAT_CONFIG} \
+        ${flash_attention_flag} \
+        --compute_logps_micro_batch_size=${COMPUTE_LOGPS_MICRO_BATCH_SIZE} \
+        --checkpoint_max_to_keep=${CHECKPOINT_MAX_TO_KEEP} \
         --eval_every_n_steps=${EVAL_EVERY_N_STEPS} \
         ${opt_chain_flags} \
         --learning_rate=${LEARNING_RATE} \
+        --optimizer_b2=${ADAM_B2} \
+        --optimizer_weight_decay=${WEIGHT_DECAY} \
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
         --sampler=${SAMPLER} \
@@ -460,11 +490,22 @@ start_trainer() {
     | apply_manifest
 }
 
-stop_rollout() {
-  if [[ "$DRY_RUN" == "true" ]]; then
-    echo "kubectl delete jobset ${ROLLOUT_ID} -n ${K8S_NAMESPACE}"
+rollout_replica_ids() {
+  if [[ "${ROLLOUT_REPLICAS}" -le 1 ]]; then
+    echo "${ROLLOUT_ID}"
   else
-    kubectl delete jobset "${ROLLOUT_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found
+    seq -f "${ROLLOUT_ID}-%g" 0 $((ROLLOUT_REPLICAS - 1))
+  fi
+}
+
+stop_rollout() {
+  local ids
+  ids=$(rollout_replica_ids | tr '\n' ' ')
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "kubectl delete jobset ${ids}-n ${K8S_NAMESPACE}"
+  else
+    # shellcheck disable=SC2086
+    kubectl delete jobset ${ids} -n "${K8S_NAMESPACE}" --ignore-not-found
   fi
 }
 
@@ -523,9 +564,13 @@ start_rollout() {
   if ! is_jax_cache_disabled && [[ -n "${ROLLOUT_JAX_CACHE_GCS_DIR}" ]]; then
     ray_worker_pre_init_cmd+=" && (python3 -m tunix.dist_rl.common.gcs_cache download \"${LOCAL_JAX_CACHE_DIR}\" \"${ROLLOUT_JAX_CACHE_GCS_DIR}\" || true)"
   fi
-  "$PYTHON" tunix/dist_rl/distributed/deployment/yaml_generator.py \
+  # Renders one manifest with a placeholder JobSet / worker id, then emits a
+  # copy per rollout replica.
+  local placeholder="__TUNIX_REPLICA_ID__"
+  local manifest_template
+  manifest_template=$("$PYTHON" tunix/dist_rl/distributed/deployment/yaml_generator.py \
     tunix/dist_rl/distributed/deployment/yamls/jobset.tpu.yaml \
-    --jobset_name="${ROLLOUT_ID}" \
+    --jobset_name="${placeholder}" \
     --namespace="${K8S_NAMESPACE}" \
     ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
     --tpu_slice=${ROLLOUT_TPU_SLICE} \
@@ -538,7 +583,7 @@ start_rollout() {
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.dist_rl.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.dist_rl.examples.common.run_rollout_node.main \
-        --worker_id=${ROLLOUT_ID} \
+        --worker_id=${placeholder} \
         --port=${ROLLOUT_PORT} \
         --model_id=${MODEL_ID} \
         --model_dir=${MODEL_DIR} \
@@ -548,6 +593,9 @@ start_rollout() {
         --mesh_tp=${ROLLOUT_MESH_TP} \
         --max_prompt_length=${MAX_PROMPT_LENGTH} \
         --max_response_length=${MAX_RESPONSE_LENGTH} \
+        ${EOS_TOKENS:+--eos_tokens=${EOS_TOKENS}} \
+        ${VLLM_HBM_UTILIZATION:+--vllm_hbm_utilization=${VLLM_HBM_UTILIZATION}} \
+        ${VLLM_MAX_NUM_BATCHED_TOKENS:+--vllm_max_num_batched_tokens=${VLLM_MAX_NUM_BATCHED_TOKENS}} \
         --sampler=${SAMPLER} \
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
@@ -569,8 +617,15 @@ start_rollout() {
         ${maxtext_args} \
         ${vllm_args} \
         ${DEBUG:+--debug} \
-    " \
-    | apply_manifest
+    ") || return $?
+  local first=true
+  for replica_id in $(rollout_replica_ids); do
+    if [[ "${first}" != "true" ]]; then
+      echo "---"
+    fi
+    first=false
+    printf '%s\n' "${manifest_template//${placeholder}/${replica_id}}"
+  done | apply_manifest
 }
 
 while [[ $# -gt 0 ]]; do
