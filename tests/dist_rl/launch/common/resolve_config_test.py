@@ -882,6 +882,94 @@ weight_sync_config:
           "agentic_grpo_config.trajectory_group_order=prompt_arrival",
       ])
 
+  def test_dispatch_window_and_group_filters_fail_loud(self):
+    hp = resolve_config.initialize([
+        "batch_size=4",
+        "agentic_grpo_config.off_policy_steps=1",
+        "dist_training_config.max_in_flight_groups=6",
+        "agentic_grpo_config.group_filters=[tied_rewards]",
+        "agentic_grpo_config.max_consecutive_filtered_groups=64",
+    ])
+    grpo = hp.config["agentic_grpo_config"]
+    dist_train = hp.config["dist_training_config"]
+    self.assertEqual(dist_train["max_in_flight_groups"], 6)
+    self.assertEqual(list(grpo["group_filters"]), ["tied_rewards"])
+    self.assertEqual(grpo["max_consecutive_filtered_groups"], 64)
+
+    with self.assertRaisesRegex(
+        TypeError, "dist_training_config.max_in_flight_groups must be an int"
+    ):
+      resolve_config.initialize(
+          ["dist_training_config.max_in_flight_groups=true"]
+      )
+    with self.assertRaisesRegex(
+        ValueError,
+        "dist_training_config.max_in_flight_groups must be at least batch_size",
+    ):
+      resolve_config.initialize([
+          "batch_size=4",
+          "dist_training_config.max_in_flight_groups=3",
+      ])
+    over_provisioned = [
+        "batch_size=4",
+        "agentic_grpo_config.off_policy_steps=1",
+        "dist_training_config.max_in_flight_groups=9",
+    ]
+    self.assertEqual(
+        resolve_config.initialize(over_provisioned).config[
+            "dist_training_config"
+        ]["max_in_flight_groups"],
+        9,
+    )
+    with self.assertRaisesRegex(
+        ValueError, "dist_training_config.max_in_flight_groups cannot exceed"
+    ):
+      resolve_config.initialize([
+          *over_provisioned,
+          "agentic_grpo_config.trajectory_group_order=prompt_arrival",
+      ])
+    with self.assertRaisesRegex(
+        TypeError, "agentic_grpo_config.group_filters must be a list"
+    ):
+      resolve_config.initialize(
+          ["agentic_grpo_config.group_filters=tied_rewards"]
+      )
+    with self.assertRaisesRegex(
+        ValueError, "agentic_grpo_config.group_filters must be one of"
+    ):
+      resolve_config.initialize(["agentic_grpo_config.group_filters=[nope]"])
+    with self.assertRaisesRegex(
+        ValueError, "agentic_grpo_config.group_filters are only supported"
+    ):
+      resolve_config.initialize([
+          "agentic_grpo_config.group_filters=[tied_rewards]",
+          "agentic_grpo_config.trajectory_group_order=prompt_arrival",
+      ])
+    with self.assertRaisesRegex(ValueError, "num_generations >= 2"):
+      resolve_config.initialize([
+          "agentic_grpo_config.group_filters=[tied_rewards]",
+          "agentic_grpo_config.num_generations=1",
+      ])
+    with self.assertRaisesRegex(ValueError, "not 'gae'"):
+      resolve_config.initialize([
+          "agentic_grpo_config.group_filters=[tied_rewards]",
+          "agentic_grpo_config.advantage_estimator=gae",
+      ])
+    with self.assertRaisesRegex(
+        TypeError,
+        "agentic_grpo_config.max_consecutive_filtered_groups must be an int",
+    ):
+      resolve_config.initialize(
+          ["agentic_grpo_config.max_consecutive_filtered_groups=true"]
+      )
+    with self.assertRaisesRegex(
+        ValueError,
+        "agentic_grpo_config.max_consecutive_filtered_groups must be positive",
+    ):
+      resolve_config.initialize(
+          ["agentic_grpo_config.max_consecutive_filtered_groups=0"]
+      )
+
   def test_max_seq_tokens_per_device_syncs_with_legacy_tpu_field(self):
     hp = resolve_config.initialize([
         "batch_size=6",

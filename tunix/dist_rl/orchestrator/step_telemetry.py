@@ -167,7 +167,7 @@ def _rollout_window(item: datatypes.TrajectoryItem) -> RolloutWindow | None:
 def _env_time_s(traj: Mapping[str, Any]) -> float | None:
   """Sums `reset_latency`, `step_latency`, and `close_latency` from `env_time`."""
   env_time = traj.get("env_time")
-  if env_time is None:
+  if not env_time:
     return None
   return float(
       env_time["reset_latency"]
@@ -476,3 +476,85 @@ def slowest_rollouts_summary(
     fields.append(f"worker={window.worker_id}")
     described.append(" ".join(fields))
   return f"slowest {len(described)} of {len(timed)}: " + " | ".join(described)
+
+
+def strip_routed_experts_in_place(
+    group: Sequence[datatypes.TrajectoryItem], *, reason: str
+) -> None:
+  """Strips MoE `routed_experts` arrays and stamps `drop_reason` in place."""
+  for item in group:
+    if isinstance(item.traj, dict):
+      item.traj.pop("routed_experts", None)
+    if isinstance(item.metadata, dict):
+      item.metadata.pop("routed_experts", None)
+      item.metadata.setdefault("drop_reason", reason)
+
+
+def sanitize_filtered_group(
+    group: Sequence[datatypes.TrajectoryItem],
+    *,
+    reason: str,
+    rewards: Sequence[float] | None = None,
+) -> list[datatypes.TrajectoryItem]:
+  """Builds sanitized `TrajectoryItem`s for a dropped group, preserving `is_valid`."""
+  reward_list = list(rewards) if rewards is not None else [None] * len(group)
+  out: list[datatypes.TrajectoryItem] = []
+  for src_item, reward_val in zip(group, reward_list, strict=True):
+    src_traj = src_item.traj
+    if isinstance(src_traj, dict):
+      src_traj.pop("routed_experts", None)
+      traj_dict: Any = dict(src_traj)
+      if reward_val is not None:
+        traj_dict["trajectory_reward"] = float(reward_val)
+    else:
+      traj_dict = src_traj
+    if isinstance(src_item.metadata, dict):
+      src_item.metadata.pop("routed_experts", None)
+    metadata = {**(src_item.metadata or {}), "drop_reason": reason}
+    metadata.pop("routed_experts", None)
+    out.append(
+        datatypes.TrajectoryItem(
+            traj_id=src_item.traj_id,
+            prompt_id=src_item.prompt_id,
+            group_index=src_item.group_index,
+            start_step=src_item.start_step,
+            traj=traj_dict,
+            is_valid=src_item.is_valid,
+            prompt_tokens=getattr(src_item, "prompt_tokens", None),
+            completion_tokens=getattr(src_item, "completion_tokens", None),
+            action_mask=getattr(src_item, "action_mask", None),
+            metadata=metadata,
+        )
+    )
+  return out
+
+
+def _item_token_count(item: datatypes.TrajectoryItem) -> int:
+  """Counts prompt and completion tokens on a raw or scored `TrajectoryItem`."""
+  traj = item.traj if isinstance(item.traj, Mapping) else {}
+  if (raw_plen := traj.get("prompt_length")) is not None:
+    prompt_len = int(raw_plen)
+  elif (pt := getattr(item, "prompt_tokens", None)) is not None:
+    prompt_len = len(pt)
+  elif (pt := traj.get("prompt_tokens")) is not None:
+    prompt_len = len(pt)
+  else:
+    prompt_len = 0
+  if (turn_lens := traj.get("assistant_turn_lengths")) is not None:
+    comp_len = int(sum(turn_lens))
+  elif (ct := getattr(item, "completion_tokens", None)) is not None:
+    comp_len = len(ct)
+  elif (ct := traj.get("conversation_tokens")) is not None:
+    comp_len = len(ct)
+  else:
+    comp_len = 0
+  return prompt_len + comp_len
+
+
+def filtered_groups_token_count(
+    filtered_groups: Sequence[Sequence[datatypes.TrajectoryItem]],
+) -> int:
+  """Sums prompt and completion tokens across `filtered_groups`."""
+  return sum(
+      _item_token_count(item) for group in filtered_groups for item in group
+  )

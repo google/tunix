@@ -619,8 +619,10 @@ def build_program(
     The RL program.
   """
   grpo = hp.config_mapping("agentic_grpo_config")
+  dist_train = hp.config_mapping("dist_training_config")
   raw_max_span = grpo["max_version_span"]
   max_version_span = int(raw_max_span) if raw_max_span is not None else None
+  raw_max_in_flight = dist_train["max_in_flight_groups"]
   # `StandardRLProgram` creates `AsyncTrajectoryLogger`, whose `__init__`
   # installs its own `SIG_DFL`+`os.kill` handlers for SIGINT/SIGTERM/SIGHUP on
   # the main thread. Restore the active handlers (`managed_cluster_teardown`
@@ -645,11 +647,12 @@ def build_program(
         trajectory_store=trajectory_store,
         max_staleness=int(grpo["off_policy_steps"]),
         max_version_span=max_version_span,
+        max_in_flight_groups=(
+            int(raw_max_in_flight) if raw_max_in_flight is not None else None
+        ),
         group_order=rl_program.GroupOrder(str(grpo["trajectory_group_order"])),
         sync_weights=_weight_sync_mode(hp) != weight_sync.WeightSyncMode.NONE,
-        precompile_trainer=bool(
-            hp.config_mapping("dist_training_config")["precompile_trainer"]
-        ),
+        precompile_trainer=bool(dist_train["precompile_trainer"]),
     )
   finally:
     for sig, handler in saved_handlers:

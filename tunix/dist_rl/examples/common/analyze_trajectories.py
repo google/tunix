@@ -342,7 +342,13 @@ def analyze_trajectories(
   total_zero_groups = 0
 
   for step in sorted(steps_data.keys()):
-    items = steps_data[step]
+    items = [
+        it
+        for it in steps_data[step]
+        if str(it.get("filtered", "")).strip().lower() not in ("true", "1")
+    ]
+    if not items:
+      continue
     groups: Dict[str, List[Dict[str, Any]]] = collections.defaultdict(list)
     for it in items:
       pid = it.get("prompt_id")

@@ -14,6 +14,7 @@
 
 """Algorithm core implementations for RL and Agentic RL learners."""
 
+import copy
 import functools
 from typing import Any, Callable
 from flax import nnx
@@ -811,6 +812,9 @@ def build_gen_model_input_fn(
         " via generation_args on StandardRLProgram (which propagates it to"
         " algo_config.temperature) before building the trainer model input fn."
     )
+  if algo_config.group_filters:
+    algo_config = copy.copy(algo_config)
+    algo_config.group_filters = ()
   return functools.partial(
       _algo_model_input,
       algo_config=algo_config,

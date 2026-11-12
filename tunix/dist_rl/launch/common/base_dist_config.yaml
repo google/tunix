@@ -285,6 +285,14 @@ agentic_grpo_config:
   off_policy_steps: 0
   max_version_span: null
   trajectory_group_order: "trajectory_completion"
+  # Dynamic-sampling built-in group filter names registered in
+  # `function_registry` (e.g. ["tied_rewards"] for DAPO; in `reward_mode:
+  # "reward_fn"`, list the primary task reward first in `reward_functions`).
+  # Requires `trajectory_group_order: "trajectory_completion"`.
+  group_filters: []
+  # Fail after this many consecutive groups are rejected by `group_filters`.
+  # Null disables the guard.
+  max_consecutive_filtered_groups: null
   reward_mode: "env"
   episode_timeout: 600
   max_turns: 8
@@ -319,6 +327,11 @@ dist_training_config:
   segment_alignment_boundary: 1
   # Precompile the trainer step before the first rollout batch arrives.
   precompile_trainer: true
+  # Maximum prompt groups admitted by the orchestrator ahead of training. Null
+  # keeps `(agentic_grpo_config.off_policy_steps + 1) * batch_size`. Must be at
+  # least `batch_size`, and with `trajectory_group_order: "prompt_arrival"` at
+  # most that default.
+  max_in_flight_groups: null
   # Whether the orchestrator logs the trajectories of each step, to
   # `trajectory_log_dir` or, when that is empty, under <log_dir>/trajectories
   # of `rl_training_config.metrics_logging_options` (none when that is null).

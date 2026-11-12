@@ -47,7 +47,6 @@ GroupFn = group_queue_manager.GroupFn
 FilterFn = group_queue_manager.FilterFn
 
 
-
 def has_policy_version(item: TrajectoryItem) -> bool:
   """Returns whether `item.traj` carries a non-empty `policy_versions` list."""
   return isinstance(item.traj, dict) and bool(item.traj.get("policy_versions"))
@@ -78,7 +77,7 @@ def item_version_span(item: TrajectoryItem) -> int:
   return max(versions) - min(versions)
 
 
-def _is_group_within_version_window(
+def is_group_within_version_window(
     valid_items: Sequence[TrajectoryItem],
     *,
     max_staleness: int,
@@ -216,7 +215,7 @@ class TrajectoryQueueManager(
           group: list[TrajectoryItem],
       ) -> tuple[list[TrajectoryItem], list[TrajectoryItem]]:
         valid_items = [item for item in group if item.is_valid]
-        if valid_items and not _is_group_within_version_window(
+        if valid_items and not is_group_within_version_window(
             valid_items,
             max_staleness=max_staleness,
             policy_version_fn=policy_version_fn,

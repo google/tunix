@@ -95,6 +95,92 @@ class AdvantagesTest(parameterized.TestCase):
       self.assertEqual(out.dtype, np.float32)
       np.testing.assert_array_equal(out, np.zeros((1, 2), dtype=np.float32))
 
+  def test_tied_rewards_group_filter_registered_and_handles_all_cases(self):
+    self.assertIs(
+        function_registry.get_group_filter("tied_rewards"),
+        advantages.tied_rewards,
+    )
+    # Tied vs mixed valid trajectories.
+    self.assertTrue(advantages.tied_rewards([1.0, 1.0], [True, True]))
+    self.assertFalse(advantages.tied_rewards([0.0, 1.0], [True, True]))
+    # Differing reward on an invalid trajectory is ignored -> tied.
+    self.assertTrue(
+        advantages.tied_rewards([1.0, 1.0, 0.0], [True, True, False])
+    )
+    # Non-finite rewards are ignored.
+    self.assertTrue(
+        advantages.tied_rewards([1.0, 1.0, float("nan")], [True, True, True])
+    )
+    # Single usable rollout has no peer baseline -> dropped (`True`).
+    self.assertTrue(advantages.tied_rewards([1.0, 0.0], [True, False]))
+    self.assertTrue(advantages.tied_rewards([1.0, float("inf")], [True, True]))
+    # All-invalid group (`usable == 0`) MUST return `False` so rollout outages
+    # reach step telemetry instead of hanging or hiding failures!
+    self.assertFalse(advantages.tied_rewards([0.0, 0.0], [False, False]))
+    self.assertFalse(
+        advantages.tied_rewards([float("nan"), float("nan")], [True, True])
+    )
+    # Continuous shaping rewards (e.g. length penalty) do not mask primary tie.
+    self.assertTrue(
+        advantages.tied_rewards(
+            [-0.12, -0.37],
+            [True, True],
+            reward_components={
+                "accuracy": [0.0, 0.0],
+                "length_penalty": [-0.12, -0.37],
+            },
+        )
+    )
+    self.assertTrue(
+        advantages.tied_rewards(
+            [0.9, 0.7],
+            [True, True],
+            reward_components={"shaping": [-0.1, -0.3], "env": [1.0, 1.0]},
+        )
+    )
+    self.assertFalse(
+        advantages.tied_rewards(
+            [0.9, -0.3],
+            [True, True],
+            reward_components={"env": [1.0, 0.0], "shaping": [-0.1, -0.3]},
+        )
+    )
+    with self.assertRaisesRegex(ValueError, "valid_mask shape"):
+      advantages.tied_rewards([1.0, 1.0], [True])
+    with self.assertRaisesRegex(ValueError, "reward_components"):
+      advantages.tied_rewards(
+          [1.0, 1.0], [True, True], reward_components={"env": [1.0]}
+      )
+
+  def test_tied_rewards_nan_primary_with_finite_shaping_and_canceling_totals(
+      self,
+  ):
+    # 4A: Primary task reward is all-NaN (verifier timeout) while shaping penalty
+    # is finite -> total is finite (nansum), so the group IS trainable (`usable=0`)
+    # and MUST be dropped (`True`) instead of training on pure length penalty!
+    self.assertTrue(
+        advantages.tied_rewards(
+            [-0.2, -0.5],
+            [True, True],
+            reward_components={
+                "accuracy": [float("nan"), float("nan")],
+                "length_penalty": [-0.2, -0.5],
+            },
+        )
+    )
+    # 4B: Primary is untied (`[1.0, 0.0]`), but overlong penalty (`[-1.0, 0.0]`)
+    # makes total tied (`[0.0, 0.0]`, zero advantage) -> dropped (`True`).
+    self.assertTrue(
+        advantages.tied_rewards(
+            [0.0, 0.0],
+            [True, True],
+            reward_components={
+                "accuracy": [1.0, 0.0],
+                "length_penalty": [-1.0, 0.0],
+            },
+        )
+    )
+
 
 if __name__ == "__main__":
   absltest.main()

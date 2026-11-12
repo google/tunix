@@ -14,11 +14,14 @@
 
 """Framework-neutral NumPy group-relative advantage estimators."""
 
+from collections.abc import Mapping
 import numpy as np
 from numpy import typing as npt
 from tunix.rl import function_registry
 
 MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE: int = 2
+# `tied_rewards` treats two group rewards as equal within float32 tolerance.
+_REWARD_TIE_ATOL: float = 1e-6
 
 
 def _grouped_valid_stats(
@@ -240,3 +243,68 @@ def compute_drgrpo_advantages(
       0.0,
   )
   return advantages.reshape(np.shape(rewards)).astype(np.float32)
+
+
+@function_registry.register_group_filter("tied_rewards")
+def tied_rewards(
+    rewards: npt.ArrayLike,
+    valid_mask: npt.ArrayLike | None = None,
+    *,
+    reward_components: Mapping[str, npt.ArrayLike] | None = None,
+) -> bool:
+  """Returns whether a prompt group should be dropped due to tied rewards (DAPO).
+
+  Checks finite rewards among valid trajectories. When `reward_components` is
+  provided (mapping `"env"` and/or `<reward_fn.__name__>` to per-trajectory
+  scores before summing), the tie check inspects the primary task reward
+  (`"env"` when present, otherwise the first reward component) so continuous
+  shaping terms such as length or format penalties do not mask an underlying
+  task-reward tie.
+
+  Groups with zero trainable rollouts (`mask & isfinite(total)` all `False`,
+  e.g. worker or sandbox outages) return `False` so they reach step telemetry
+  (`rollout/status/*`, `rollout/invalid_trajectory_frac`) instead of masking
+  failures or spinning indefinitely without `max_consecutive_filtered_groups`.
+  A group with fewer than 2 finite primary rewards, or whose primary or total
+  rewards tie across usable rollouts, yields zero task signal and returns
+  `True`.
+
+  Args:
+    rewards: 1D per-trajectory total rewards for one prompt group.
+    valid_mask: Optional boolean mask aligned with `rewards` (`True` for healthy
+      trajectories). Defaults to all `True`.
+    reward_components: Optional per-source unsummed reward arrays aligned with
+      `rewards`.
+
+  Returns:
+    `True` to drop the group and dispatch a replacement prompt; `False` to keep.
+  """
+  total = np.asarray(rewards, dtype=np.float64).reshape(-1)
+  mask = (
+      np.ones(total.shape, dtype=bool)
+      if valid_mask is None
+      else np.asarray(valid_mask, dtype=bool).reshape(-1)
+  )
+  if mask.shape != total.shape:
+    raise ValueError(
+        f"valid_mask shape {mask.shape} must match rewards shape {total.shape}."
+    )
+  primary = total
+  if reward_components:
+    key = "env" if "env" in reward_components else next(iter(reward_components))
+    candidate = np.asarray(reward_components[key], dtype=np.float64).reshape(-1)
+    if candidate.shape != total.shape:
+      raise ValueError(
+          f"reward_components[{key!r}] shape {candidate.shape} must match"
+          f" rewards shape {total.shape}."
+      )
+    primary = candidate
+  trainable = mask & np.isfinite(total)
+  if not np.any(trainable):
+    return False
+  usable = trainable & np.isfinite(primary)
+  if int(np.sum(usable)) < MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE:
+    return True
+  if float(np.ptp(primary[usable])) <= _REWARD_TIE_ATOL:
+    return True
+  return float(np.ptp(total[usable])) <= _REWARD_TIE_ATOL

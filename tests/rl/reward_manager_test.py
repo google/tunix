@@ -730,6 +730,62 @@ class ParallelSequenceRewardManagerTest(parameterized.TestCase):
     with self.assertRaisesRegex(ValueError, "reward_worker_timeout_seconds"):
       TestAlgoConfig(reward_worker_timeout_seconds=0)
 
+  def test_reward_components_returned_for_sequence_and_env_managers(self):
+    seq_mgr = reward_manager.SequenceRewardManager(
+        reward_fns=[len_reward], algo_config=TestAlgoConfig()
+    )
+    out = seq_mgr(["p0", "p1"], ["ab", "abcd"])
+    self.assertIn("reward_components", out)
+    np.testing.assert_array_equal(
+        out["reward_components"]["len_reward"], np.array([2.0, 4.0])
+    )
+
+    env_mgr = reward_manager.AgenticSequenceRewardManager(
+        reward_fns=[len_reward], algo_config=TestAlgoConfig(reward_mode="env")
+    )
+    env_out = env_mgr(
+        ["p0", "p1"], ["ab", "abcd"], trajectory_rewards=[1.0, 0.0]
+    )
+    np.testing.assert_array_equal(
+        env_out["reward_components"]["env"], np.array([1.0, 0.0])
+    )
+    np.testing.assert_array_equal(
+        env_out["reward_components"]["len_reward"], np.array([2.0, 4.0])
+    )
+    np.testing.assert_array_equal(env_out["rewards"], np.array([3.0, 4.0]))
+
+  def test_un_deepcopyable_group_filter_and_duplicate_lambda_reward_names(self):
+    import threading
+
+    class LockFilter:
+
+      def __init__(self):
+        self.lock = threading.Lock()
+
+      def __call__(self, rewards, valid_mask=None):
+        del rewards, valid_mask
+        with self.lock:
+          return False
+
+    cfg = algo_config_lib.GRPOConfig(
+        num_generations=2, group_filters=[LockFilter()]
+    )
+    mgr = reward_manager.SequenceRewardManager(
+        reward_fns=[
+            lambda prompts, completions, **_: [1.0, 0.0],
+            lambda prompts, completions, **_: [-0.1, -0.1],
+        ],
+        algo_config=cfg,
+    )
+    out = mgr(["p0", "p1"], ["a", "bb"])
+    # Duplicate `<lambda>` names must not overwrite index 0's primary task reward!
+    self.assertEqual(
+        list(out["reward_components"].keys()), ["<lambda>", "<lambda>_1"]
+    )
+    np.testing.assert_array_equal(
+        out["reward_components"]["<lambda>"], np.array([1.0, 0.0])
+    )
+
 
 if __name__ == "__main__":
   absltest.main()

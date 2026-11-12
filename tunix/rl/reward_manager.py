@@ -16,7 +16,7 @@
 
 import abc
 from collections.abc import Sequence
-from dataclasses import asdict
+import dataclasses
 import inspect
 import os
 from typing import Any, Callable, ClassVar, Dict, List
@@ -56,6 +56,22 @@ def _fork_context():
     return multiprocessing.get_context("forkserver")
   except ValueError:
     return None
+
+
+def _build_reward_components(
+    reward_fns: Sequence[RewardFn],
+    rewards: np.ndarray,
+    env_rewards: np.ndarray | None,
+) -> Dict[str, np.ndarray]:
+  """Builds ordered per-source unsummed reward arrays for group filtering."""
+  components: Dict[str, np.ndarray] = {}
+  if env_rewards is not None:
+    components["env"] = np.asarray(env_rewards, dtype=np.float64)
+  for i, reward_fn in enumerate(reward_fns):
+    raw_name = getattr(reward_fn, "__name__", None) or type(reward_fn).__name__
+    key = raw_name if raw_name not in components else f"{raw_name}_{i}"
+    components[key] = np.asarray(rewards[:, i], dtype=np.float64)
+  return components
 
 
 def _sum_trajectory_rewards(
@@ -367,7 +383,10 @@ class SequenceRewardManager(AbstractRewardManager):
           f"{type(self).__name__} received an empty batch; nothing to score."
       )
 
-    algo_config_params = asdict(self.algo_config)
+    algo_config_params = {
+        f.name: getattr(self.algo_config, f.name)
+        for f in dataclasses.fields(self.algo_config)
+    }
     base_kwargs = reward_kwargs.copy()
 
     num_reward_fns = len(self.reward_fns)
@@ -425,8 +444,12 @@ class SequenceRewardManager(AbstractRewardManager):
         sum_rewards=sum_rewards,
         env_rewards=env_rewards,
     )
+    reward_components = _build_reward_components(
+        self.reward_fns, rewards, env_rewards
+    )
     rewards_info = {
         "rewards": sum_rewards,
+        "reward_components": reward_components,
         "log_metrics": log_metrics,
     }
 

@@ -52,7 +52,10 @@ class FunctionRegistryTest(parameterized.TestCase):
   def test_empty_categories_instance(self):
     # Test-specific instance for empty categories
     registry = function_registry.FunctionRegistry(allowed_categories=[])
-    self.assertLen(registry.list_categories(), 4)
+    self.assertLen(
+        registry.list_categories(),
+        len(function_registry.FunctionRegistry.DEFAULT_ALLOWED_CATEGORIES),
+    )
 
   @parameterized.named_parameters(
       dict(
@@ -64,6 +67,12 @@ class FunctionRegistryTest(parameterized.TestCase):
       dict(
           testcase_name="advantage_a",
           category="advantage_estimator",
+          name="func_a",
+          func=dummy_func_a,
+      ),
+      dict(
+          testcase_name="group_filter_a",
+          category="group_filter",
           name="func_a",
           func=dummy_func_a,
       ),
@@ -121,6 +130,22 @@ class FunctionRegistryTest(parameterized.TestCase):
         LookupError, "No such category: 'advantage_estimator'"
     ):
       registry.list_functions("advantage_estimator")
+
+  def test_module_level_group_filter_helpers(self):
+    @function_registry.register_group_filter("unit_test_filter")
+    def _filter(rewards, valid_mask=None):
+      del valid_mask
+      return len(rewards) == 0
+
+    self.addCleanup(
+        function_registry.default_registry._registry["group_filter"].pop,
+        "unit_test_filter",
+        None,
+    )
+    self.assertIs(
+        function_registry.get_group_filter("unit_test_filter"), _filter
+    )
+    self.assertIn("unit_test_filter", function_registry.list_group_filters())
 
 
 if __name__ == "__main__":

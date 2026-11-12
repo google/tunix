@@ -508,6 +508,63 @@ class SlowestRolloutsSummaryTest(absltest.TestCase):
         step_telemetry.slowest_rollouts_summary(_facts(_health_item(0)), k=3)
     )
 
+  def test_filtered_group_sanitization_and_real_collector_token_count(self):
+    raw = datatypes.TrajectoryItem(
+        traj_id="t0",
+        prompt_id="p0",
+        group_index=0,
+        is_valid=False,
+        traj={
+            "status": "FAILED",
+            "prompt_tokens": [0],
+            "prompt_length": 0,
+            "conversation_tokens": [10, 11, 12],
+            "routed_experts": [1, 2, 3],
+        },
+        metadata={"routed_experts": [4, 5], "prompt_idx": 7},
+    )
+    raw2 = datatypes.TrajectoryItem(
+        traj_id="t1",
+        prompt_id="p0",
+        group_index=1,
+        is_valid=True,
+        traj={
+            "status": "SUCCEEDED",
+            "prompt_tokens": [1, 2, 3, 4],
+            "assistant_turn_lengths": [5, 6],
+        },
+        metadata={"prompt_idx": 7},
+    )
+    sanitized = step_telemetry.sanitize_filtered_group(
+        [raw, raw2], reason="group_filter:tied_rewards", rewards=[0.0, 1.0]
+    )
+    # Explicit `is_valid=False` preserved and `_is_valid` NOT leaked to metadata!
+    self.assertFalse(sanitized[0].is_valid)
+    self.assertNotIn("_is_valid", sanitized[0].metadata)
+    self.assertNotIn("routed_experts", sanitized[0].metadata)
+    self.assertNotIn("routed_experts", sanitized[0].traj)
+    self.assertEqual(
+        sanitized[0].metadata["drop_reason"], "group_filter:tied_rewards"
+    )
+    self.assertEqual(sanitized[1].traj["trajectory_reward"], 1.0)
+    # Token count uses `prompt_length=0 + len(conversation_tokens)=3` (=3) and
+    # `len(prompt_tokens)=4 + sum(assistant_turn_lengths)=11` (=15) -> 18!
+    self.assertEqual(
+        step_telemetry.filtered_groups_token_count([sanitized]), 18
+    )
+
+    in_place_grp = [
+        datatypes.TrajectoryItem(
+            traj_id="t2",
+            prompt_id="p1",
+            traj={"routed_experts": [9]},
+            metadata={"routed_experts": [9]},
+        )
+    ]
+    step_telemetry.strip_routed_experts_in_place(in_place_grp, reason="stale")
+    self.assertNotIn("routed_experts", in_place_grp[0].traj)
+    self.assertEqual(in_place_grp[0].metadata["drop_reason"], "stale")
+
 
 if __name__ == "__main__":
   absltest.main()
