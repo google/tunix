@@ -21,8 +21,11 @@ if ! command -v "$PYTHON" &>/dev/null; then
   PYTHON="python"
 fi
 
-export MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B}
-export MODEL_ID=${MODEL_ID:-Qwen/Qwen3-1.7B}
+# Defaults follow the converging Qwen3-32B DeepSWE recipe of `deepswe.yaml` and
+# `k8s_launcher_v2.sh` where this launcher exposes the setting; see the README
+# for the settings it does not expose.
+export MODEL_NAME=${MODEL_NAME:-Qwen3-32B}
+export MODEL_ID=${MODEL_ID:-Qwen/Qwen3-32B}
 # Must be model-specific: vLLM prioritizes non-empty local snapshot directories,
 # which can cause stale config/shape mismatches if shared across models.
 export MODEL_DIR=${MODEL_DIR:-artifacts/qwen3_dist_deepswe/models/${MODEL_NAME}}
@@ -30,13 +33,13 @@ export MODEL_DIR=${MODEL_DIR:-artifacts/qwen3_dist_deepswe/models/${MODEL_NAME}}
 # instead of failing on an initially empty local MODEL_DIR.
 export TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_ID}}
 
-export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
-export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-1024}
-export BATCH_SIZE=${BATCH_SIZE:-1}
-export NUM_GENERATIONS=${NUM_GENERATIONS:-2}
-export MAX_STEPS=${MAX_STEPS:-1}
-export MAX_TURNS=${MAX_TURNS:-3}
-export TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
+export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
+export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-28672}
+export BATCH_SIZE=${BATCH_SIZE:-8}
+export NUM_GENERATIONS=${NUM_GENERATIONS:-8}
+export MAX_STEPS=${MAX_STEPS:-201}
+export MAX_TURNS=${MAX_TURNS:-50}
+export TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-8}
 export MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-}
 export MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-}
 export SEGMENT_ALIGNMENT_BOUNDARY=${SEGMENT_ALIGNMENT_BOUNDARY:-}
@@ -60,7 +63,7 @@ export USE_LORA=${USE_LORA:-0}
 export DEBUG=${DEBUG:-0}
 export USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
-export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
+export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-raiden}
 export IN_FLIGHT_WEIGHT_UPDATES=${IN_FLIGHT_WEIGHT_UPDATES:-false}
 # Router replay: rollout captures the MoE experts each token was routed to and
 # the MaxText trainer (TRAINER_BACKEND=maxtext) replays them. Set
@@ -87,8 +90,8 @@ export SANDBOX_NODE_SELECTOR_KEY=${SANDBOX_NODE_SELECTOR_KEY:-}
 export SANDBOX_NODE_SELECTOR_VAL=${SANDBOX_NODE_SELECTOR_VAL:-}
 export STEP_TIMEOUT_SECS=${STEP_TIMEOUT_SECS:-1800}
 export REWARD_TIMEOUT_SECS=${REWARD_TIMEOUT_SECS:-1800}
-export EPISODE_TIMEOUT_SECS=${EPISODE_TIMEOUT_SECS:-1800}
-export ROLLOUT_MAX_CONCURRENCY=${ROLLOUT_MAX_CONCURRENCY:-64}
+export EPISODE_TIMEOUT_SECS=${EPISODE_TIMEOUT_SECS:-4800}
+export ROLLOUT_MAX_CONCURRENCY=${ROLLOUT_MAX_CONCURRENCY:-256}
 export FLUSH_EVERY_N_STEPS=${FLUSH_EVERY_N_STEPS:-1}
 export ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE:-0}
 export CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB:-8}
@@ -111,11 +114,11 @@ export TPU_PROFILE_CHIPS_PER_TASK=${TPU_PROFILE_CHIPS_PER_TASK:-1}
 export TPU_PROFILE_SPARSE_CORES=${TPU_PROFILE_SPARSE_CORES:-1}
 export TPU_PROFILE_SPARSE_CORE_TILES=${TPU_PROFILE_SPARSE_CORE_TILES:-1}
 export UPLOAD_ALL_PROFILER_RESULTS=${UPLOAD_ALL_PROFILER_RESULTS:-false}
-export TRAINER_MESH_TP=${TRAINER_MESH_TP:-1}
+export TRAINER_MESH_TP=${TRAINER_MESH_TP:-4}
 export TRAINER_MESH_EXPERT=${TRAINER_MESH_EXPERT:-1}
 # Padded MoE MLP intermediate dimension; must match rollout TP padding for MoE models.
 export TRAINER_PADDED_MOE_MLP_DIM=${TRAINER_PADDED_MOE_MLP_DIM:-}
-export ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP:-2}
+export ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP:-4}
 export ROLLOUT_MESH_FSDP=${ROLLOUT_MESH_FSDP:-1}
 # Optional: enable experimental batched-RPA attention kernel for rollout.
 export ROLLOUT_USE_BATCHED_RPA=${ROLLOUT_USE_BATCHED_RPA:-}
@@ -157,8 +160,14 @@ export CPU_MACHINE=${CPU_MACHINE:-n2-standard-64}
 export GCS_SCRATCH_LOCATION=${GCS_SCRATCH_LOCATION:-gs://cloud-pathways-staging/tmp}
 
 export TRAINER_JOBSET_YAML=${TRAINER_JOBSET_YAML:-jobset.pathways.yaml}
-export TRAINER_TPU_SLICE=${TRAINER_TPU_SLICE:-tpuv5:2x2x2}
-export TRAINER_MESH_FSDP=${TRAINER_MESH_FSDP:-8}
+export TRAINER_TPU_SLICE=${TRAINER_TPU_SLICE:-tpuv5:4x4x4}
+# `examples/common/run_trainer_node.py` builds its mesh without splitting
+# physical axes, so the 64 chips use (fsdp=16, tp=4) rather than the v2
+# launcher's (8, 8).
+export TRAINER_MESH_FSDP=${TRAINER_MESH_FSDP:-16}
+# Loading Qwen3-32B in float32 raises trainer RSS above the default limit.
+export USER_CONTAINER_MEMORY=${USER_CONTAINER_MEMORY:-260G}
+export USER_CONTAINER_MEMORY_LIMIT=${USER_CONTAINER_MEMORY_LIMIT:-260G}
 export ROLLOUT_TPU_SLICE=${ROLLOUT_TPU_SLICE:-tpuv5:2x2x1}
 
 # JAX compilation cache configuration
@@ -183,9 +192,10 @@ export EVAL_JAX_CACHE_GCS_DIR=${EVAL_JAX_CACHE_GCS_DIR:-${ROLLOUT_JAX_CACHE_GCS_
 export TRAINER_EXTRA_ENV=${TRAINER_EXTRA_ENV:-}
 # Trainer only: host buffers of at least this many bytes (e.g. 16777216) go
 # from the trainer to pathways-proxy through a shared tmpfs instead of
-# localhost gRPC. Unset keeps gRPC. Each in-flight buffer is also held in the
-# trainer container's memory, so raise USER_CONTAINER_MEMORY_LIMIT with it.
-export TRAINER_IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES=${TRAINER_IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES:-}
+# localhost gRPC. Set it to an empty string to keep gRPC. Each in-flight buffer
+# is also held in the trainer container's memory, so raise
+# USER_CONTAINER_MEMORY_LIMIT with it.
+export TRAINER_IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES=${TRAINER_IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES-16777216}
 export DRY_RUN=${DRY_RUN:-false}
 
 apply_manifest() {

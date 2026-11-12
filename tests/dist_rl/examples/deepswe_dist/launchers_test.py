@@ -34,13 +34,13 @@ _LOCAL = launcher_testing.Expected(
     example="deepswe_dist",
     module="deepswe",
     target="local",
-    batch_size=1,
-    mini_batch_size=1,
-    num_generations=2,
-    max_steps=1,
+    batch_size=8,
+    mini_batch_size=8,
+    num_generations=8,
+    max_steps=201,
     actor_mesh=(1, 2),
     rollout_mesh=(1, 2),
-    model_id="Qwen/Qwen3-1.7B",
+    model_id="Qwen/Qwen3-32B",
 )
 # Copybara replaces `k8s_launcher_v2.sh`'s internal default image with
 # `$TUNIX_IMAGE` (`copy.bara.sky`), so the GKE dry runs set one.
@@ -51,13 +51,13 @@ _K8S = launcher_testing.Expected(
     example="deepswe_dist",
     module="deepswe",
     target="k8s",
-    batch_size=1,
-    mini_batch_size=1,
-    num_generations=2,
-    max_steps=1,
-    actor_mesh=(8, 1, 1),
+    batch_size=8,
+    mini_batch_size=8,
+    num_generations=8,
+    max_steps=201,
+    actor_mesh=(8, 8, 1),
     rollout_mesh=(1, 4),
-    model_id="Qwen/Qwen3-1.7B",
+    model_id="Qwen/Qwen3-32B",
     extra_args=(_K8S_IMAGE,),
 )
 
@@ -76,7 +76,7 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
         config["chat_parser_config"],
         {"type": "auto", "enable_thinking": False},
     )
-    self.assertEqual(config["rollout_config"]["eos_tokens"], "")
+    self.assertEqual(config["rollout_config"]["eos_tokens"], "151645")
     self.assertEqual(config["env_class_path"], "deepswe_env")
     self.assertEqual(config["agent_class_path"], "deepswe_agent")
     self.assertEqual(
@@ -86,7 +86,7 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
     optimizer = config["rl_training_config"]["actor_optimizer_config"]
     self.assertEqual(cli_config.create_learning_rate(optimizer), 1e-6)
     _, derived_rpc_timeout = orchestrator.resolve_weight_sync_timeouts(hp)
-    self.assertEqual(derived_rpc_timeout, 2100.0)
+    self.assertEqual(derived_rpc_timeout, 5100.0)
 
   def test_local_positive_beta_requires_reference_inference_chips(self):
     run = self.run_launcher(
@@ -132,7 +132,7 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
     self.assertEqual(
         config["cluster_config"]["local"]["worker_shutdown_grace_secs"], 60
     )
-    self.assertFalse(resolve_config.rollout_init_with_random_weights(hp))
+    self.assertTrue(resolve_config.rollout_init_with_random_weights(hp))
 
   def test_k8s(self):
     run, hp = self.assert_launcher(_K8S)
@@ -147,13 +147,36 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
     self.assertEqual(config["cluster_config"]["ports"]["rollout"], 20001)
     self.assertEqual(config["cluster_config"]["ports"]["trainer"], 20002)
     self.assertEqual(hp.mesh_axes("actor_model_config")["fsdp"], 8)
+    self.assertEqual(hp.mesh_axes("actor_model_config")["tp"], 8)
+    self.assertEqual(hp.mesh_axes("rollout_model_config")["fsdp"], 1)
     self.assertEqual(hp.mesh_axes("rollout_model_config")["tp"], 4)
     k8s = config["cluster_config"]["k8s"]
+    self.assertEqual(k8s["cpu_memory"], "64G")
+    self.assertEqual(k8s["user_container_memory"], "260G")
+    self.assertEqual(k8s["user_container_memory_limit"], "260G")
     self.assertEqual(k8s["trainer"]["jobset_yaml"], "jobset.pathways.yaml")
-    self.assertEqual(k8s["trainer"]["tpu_slice"], "tpuv5:2x2x2")
+    self.assertEqual(k8s["trainer"]["tpu_slice"], "tpuv5:4x4x4")
+    self.assertIn(
+        "name: IFRT_PROXY_GRPC_LARGE_TRANSFER_OPTIMIZATION_THRESHOLD_BYTES\n"
+        '                value: "16777216"',
+        run.stdout,
+    )
     self.assertEqual(k8s["rollout"]["jobset_yaml"], "jobset.tpu.yaml")
     self.assertEqual(k8s["rollout"]["tpu_slice"], "tpuv5:2x2x1")
-    self.assertEqual(config["cluster_config"]["rollout_replicas"], 1)
+    self.assertEqual(config["cluster_config"]["rollout_replicas"], 16)
+    self.assertIn("testuser-roll-15", run.stdout)
+
+  def test_k8s_ifrt_proxy_threshold_env_override_takes_precedence(self):
+    with mock.patch.dict(
+        os.environ,
+        {"TRAINER_IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES": "33554432"},
+    ):
+      run = self.dry_run("deepswe_dist/k8s_launcher_v2.sh", _K8S_IMAGE)
+    self.assertIn(
+        "name: IFRT_PROXY_GRPC_LARGE_TRANSFER_OPTIMIZATION_THRESHOLD_BYTES\n"
+        '                value: "33554432"',
+        run.stdout,
+    )
 
   def test_k8s_sandbox_namespace_follows_the_gke_namespace(self):
     run = self.dry_run(
@@ -187,13 +210,12 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
     run = self.dry_run(
         "deepswe_dist/k8s_launcher_v2.sh",
         _K8S_IMAGE,
-        "batch_size=4",
-        "weight_sync_config.mode=raiden",
+        "batch_size=16",
         "cluster_config.rollout_replicas=2",
     )
     hp = run.resolve()
     config = hp.config
-    self.assertEqual(config["batch_size"], 4)
+    self.assertEqual(config["batch_size"], 16)
     self.assertTrue(resolve_config.rollout_init_with_random_weights(hp))
     self.assertEqual(config["cluster_config"]["rollout_replicas"], 2)
     self.assertIn("testuser-roll-1", run.stdout)

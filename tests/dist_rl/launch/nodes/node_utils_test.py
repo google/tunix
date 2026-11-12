@@ -16,6 +16,8 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+import dataclasses
+import itertools
 import json
 import os
 import pathlib
@@ -913,6 +915,38 @@ class CreateMeshTest(absltest.TestCase):
     mesh = node_utils.create_mesh(hp, "actor_model_config", "Trainer")
     self.assertEqual(mesh.axis_names, ("fsdp", "tp"))
     self.assertEqual(mesh.devices.shape, (num_devices, 1))
+
+  def test_splits_physical_axes_when_the_shape_needs_it(self):
+    # An (8, 8) mesh on a 4x4x4 v5p slice, where no product of whole physical
+    # axes (4, 4, 4) equals 8.
+    devices = [
+        _FakeTpuDevice(id=i, coords=coords)
+        for i, coords in enumerate(
+            itertools.product(range(4), range(4), range(4))
+        )
+    ]
+    hp = resolve_config.initialize(["actor_model_config.mesh.shape=(8,8)"])
+    with (
+        mock.patch.object(jax, "devices", return_value=devices),
+        mock.patch.object(jax, "device_count", return_value=len(devices)),
+        mock.patch.object(node_utils, "Mesh", autospec=True) as mesh_cls,
+    ):
+      node_utils.create_mesh(hp, "actor_model_config", "Trainer")
+    device_mesh = mesh_cls.call_args.args[0]
+    self.assertEqual(device_mesh.shape, (8, 8))
+    self.assertCountEqual([d.id for d in device_mesh.flat], range(64))
+
+
+@dataclasses.dataclass(frozen=True)
+class _FakeTpuDevice:
+  """The device attributes `mesh_utils.create_device_mesh` reads on TPU."""
+
+  id: int
+  coords: tuple[int, int, int]
+  platform: str = "tpu"
+  device_kind: str = "TPU v5p"
+  core_on_chip: int = 0
+  process_index: int = 0
 
 
 class EnsureLocalSafetensorsTest(absltest.TestCase):

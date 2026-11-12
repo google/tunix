@@ -36,7 +36,6 @@ from examples.deepswe import sandbox_utils
 from examples.deepswe import swe_agent
 from examples.deepswe import swe_env
 
-
 DEEPSWE_ENV_NAME = "deepswe_env"
 DEEPSWE_AGENT_NAME = "deepswe_agent"
 DEFAULT_DATASET_NAME = "R2E-Gym/R2E-Gym-Subset"
@@ -123,9 +122,7 @@ def _validate_str(
   return value
 
 
-def _validate_int(
-    value: object, name: str, *, positive: bool = False
-) -> int:
+def _validate_int(value: object, name: str, *, positive: bool = False) -> int:
   """Validates an integer option, rejecting booleans."""
   if isinstance(value, bool) or not isinstance(value, int):
     raise TypeError(f"{name} must be an int, got {type(value).__name__}.")
@@ -402,8 +399,12 @@ class DeepSWEEnv(swe_env.SWEEnv):
           num_generations,
           max_warmpool_replicas,
       )
+      # Rollout workers rely on on-demand warm pools rather than calling
+      # `warm_global_fleet()`; passing `tasks=[entry]` would record the first
+      # task's image in `fleet.plan_` without creating its warm pool, causing
+      # `SandboxFleet.acquire()` to fail looking up an uncreated pool.
       kwargs["fleet"] = sandbox_utils.init_global_fleet(
-          tasks=[entry],
+          tasks=None,
           max_concurrency=num_generations,
           num_generations=num_generations,
           max_warmpool_replicas=max_warmpool_replicas,

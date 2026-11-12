@@ -649,7 +649,11 @@ def create_mesh(
         f"{label} mesh dimensions must multiply to visible JAX device count. "
         f"Got {model_key}.mesh shape={shape}, devices={jax.device_count()}."
     )
-  devices = mesh_utils.create_device_mesh(shape, jax.devices())
+  # Shapes that already factor into whole physical axes get the same device
+  # order; shapes like (8, 8) on a 4x4x4 slice need a split physical axis.
+  devices = mesh_utils.create_device_mesh(
+      shape, jax.devices(), allow_split_physical_axes=True
+  )
   return Mesh(devices, axis_names=MESH_AXIS_NAMES)
 
 

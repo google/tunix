@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Example defaults for the distributed DeepSWE GRPO recipe (Qwen3-1.7B).
+# Example defaults for the distributed DeepSWE GRPO recipe (Qwen3-32B).
 #
 # Layered on top of `launch/common/base_dist_config.yaml`; cluster, mesh, and
 # chip placement default to `base_dist_config.yaml` (target local) unless set
@@ -21,11 +21,14 @@
 # overrides win.
 
 model_config:
-  model_name: "Qwen3-1.7B"
+  model_name: "Qwen3-32B"
   model_source: "huggingface"
-  model_id: "Qwen/Qwen3-1.7B"
+  model_id: "Qwen/Qwen3-32B"
   dtype: "float32"
   load_dtype: "float32"
+  remat_config: "decoder"
+  use_flash_attention: true
+  flash_attention_block_size: null
   mesh:
     shape: "(1,2)"
     axis_names: "('fsdp','tp')"
@@ -33,27 +36,35 @@ model_config:
 tokenizer_config:
   # A public Hugging Face hub id needs no `HF_TOKEN` (gated repos do). On a
   # host without hub access, set it to `model_config.model_download_path`.
-  tokenizer_path: "Qwen/Qwen3-1.7B"
+  tokenizer_path: "Qwen/Qwen3-32B"
 
 # Each model family's own chat template, without thinking (base: `raw`).
 chat_parser_config:
   type: "auto"
   enable_thinking: false
 
+# The Tunix trainer sends weights in the Tunix layout: only the in-process
+# sampler gives the trainer a destination weight tree to convert them to
+# (`vllm` needs a trainer that emits the rollout model's layout, such as
+# MaxText).
 rollout_engine: "inprocess_vllm"
 rollout_config:
-  max_prompt_length: 1024
-  total_generation_steps: 1024
+  max_prompt_length: 4096
+  total_generation_steps: 28672
   temperature: 1.0
   top_p: 1.0
   # Disabled.
   top_k: -1
-  # Stop on the tokenizer's EOS token.
-  eos_tokens: ""
+  # Qwen3 `<|im_end|>` token id.
+  eos_tokens: "151645"
   return_logprobs: true
 
+vllm_config:
+  hbm_utilization: 0.7
+  max_num_batched_tokens: 16384
+
 weight_sync_config:
-  mode: "none"
+  mode: "raiden"
   use_weight_converter: true
   verify_weights: false
   in_flight_weight_updates: false
@@ -72,11 +83,12 @@ data_config:
   # None.
   cache_dir: null
 
-batch_size: 1
+batch_size: 8
 rl_training_config:
-  mini_batch_size: 1
-  train_micro_batch_size: 1
-  max_steps: 1
+  mini_batch_size: 8
+  train_micro_batch_size: 8
+  compute_logps_micro_batch_size: 8
+  max_steps: 201
   eval_every_n_steps: 1000000
   actor_optimizer_config:
     opt_type: "adamw"
@@ -84,41 +96,39 @@ rl_training_config:
     # Empty: a constant learning rate.
     schedule_type: ""
     b1: 0.9
-    b2: 0.999
+    b2: 0.99
     eps: 1.0e-8
-    weight_decay: 0.0
+    weight_decay: 0.01
     opt_chain_type: "clip_by_global_norm"
     chain_kwargs:
       max_norm: 1.0
   checkpointing_options:
     save_interval_steps: 1
-    max_to_keep: 10
+    max_to_keep: 2
   metrics_logging_options:
     project_name: "trellis-deepswe"
     flush_every_n_steps: 1
 
 agentic_grpo_config:
-  num_generations: 2
+  num_generations: 8
   num_iterations: 1
   beta: 0.0
   epsilon: 0.2
-  # Canonical `GRPOConfig` loss defaults: symmetric clipping, "kl" penalty, and
-  # no sampler importance correction.
-  epsilon_high: null
+  epsilon_high: 0.28
   loss_algo: "grpo"
-  loss_agg_mode: "sequence-mean-token-mean"
+  loss_agg_mode: "sequence-mean-token-scale"
   kl_loss_mode: "kl"
-  advantage_estimator: "grpo"
-  sampler_is: null
+  advantage_estimator: "rloo"
+  sampler_is: "token"
   sampler_is_threshold: 2.0
-  max_concurrency: 64
+  max_concurrency: 256
   off_policy_steps: 0
   trajectory_group_order: "trajectory_completion"
   # "env": `DeepSWEEnv` evaluates each patch in its sandbox and returns reward.
   reward_mode: "env"
-  episode_timeout: 1800
+  episode_timeout: 4800
   # Keep equal to `env_kwargs.max_steps`.
-  max_turns: 3
+  max_turns: 50
   overlong_filter: false
   use_rollout_logps: true
 
@@ -129,7 +139,7 @@ env_class_path: "deepswe_env"
 # `prompt_id` through `metadata.env_config`.
 env_kwargs:
   # Keep equal to `agentic_grpo_config.max_turns`.
-  max_steps: 3
+  max_steps: 50
   step_timeout: 1800
   reward_timeout: 1800
   backend: "kubernetes"
@@ -155,7 +165,7 @@ cluster_config:
   registry_module: "tunix.dist_rl.examples.deepswe_dist.deepswe"
   artifact_root: "artifacts/deepswe"
   # Null derives the worker RPC deadline from the weight-sync phase timeouts,
-  # which scale with `agentic_grpo_config.episode_timeout` (2100s at 1800s).
+  # which scale with `agentic_grpo_config.episode_timeout` (5100s at 4800s).
   rpc_timeout_s: null
   local:
     worker_shutdown_grace_secs: 60

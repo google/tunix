@@ -153,7 +153,10 @@
             "<jax.devices()[0]>",
             "<jax.devices()[1]>"
           ]
-        ]
+        ],
+        "kwargs": {
+          "allow_split_physical_axes": true
+        }
       }
     },
     {
