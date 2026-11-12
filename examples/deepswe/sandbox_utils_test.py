@@ -14,6 +14,7 @@
 
 """Unit tests for tunix.oss.examples.deepswe.sandbox_utils."""
 
+import os
 from unittest import mock
 from absl.testing import absltest
 import numpy as np
@@ -373,6 +374,37 @@ class SandboxUtilsTest(absltest.TestCase):
           replicas_override=4,
           wait=True,
       )
+
+  def test_build_template_spec_sets_unmanaged_network_policy_and_pod_hardening(
+      self,
+  ):
+    mock_as_rl = mock.MagicMock()
+    mock_as_rl.ResourceSpec.side_effect = lambda **kw: kw
+    mock_as_rl.TemplateSpec.side_effect = lambda **kw: kw
+
+    with (
+        mock.patch.dict("sys.modules", {"agent_sandbox_rl": mock_as_rl}),
+        mock.patch.dict(os.environ, {}, clear=True),
+    ):
+      spec = sandbox_utils._build_template_spec()
+
+    self.assertEqual(spec["network_policy_management"], "Unmanaged")
+    self.assertEqual(
+        spec["resources"],
+        {
+            "cpu": "500m",
+            "memory": "1Gi",
+            "cpu_limit": "2",
+            "memory_limit": "4Gi",
+        },
+    )
+    self.assertEqual(
+        spec["extra_pod_spec"],
+        {
+            "automountServiceAccountToken": False,
+            "shareProcessNamespace": False,
+        },
+    )
 
 
 if __name__ == "__main__":

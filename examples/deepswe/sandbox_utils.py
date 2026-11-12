@@ -237,6 +237,33 @@ def ensure_tasks_in_fleet_plan(
     fleet.plan()
 
 
+def _build_template_spec() -> Any:
+  """Builds the SandboxFleet TemplateSpec for R2E-Gym / SWE-agent sandboxes."""
+  from agent_sandbox_rl import ResourceSpec  # pyrefly: ignore[missing-import]
+  from agent_sandbox_rl import TemplateSpec  # pyrefly: ignore[missing-import]
+
+  extra_pod_spec: dict[str, Any] = {
+      # Prevent untrusted task code from accessing the K8s ServiceAccount token.
+      "automountServiceAccountToken": False,
+      # Isolate container PID namespaces within the pod.
+      "shareProcessNamespace": False,
+  }
+
+  return TemplateSpec(
+      resources=ResourceSpec(
+          cpu=os.getenv("SANDBOX_CPU", "500m"),
+          memory=os.getenv("SANDBOX_MEM", "1Gi"),
+          cpu_limit=os.getenv("SANDBOX_CPU_LIMIT", "2"),
+          memory_limit=os.getenv("SANDBOX_MEM_LIMIT", "4Gi"),
+      ),
+      extra_pod_spec=extra_pod_spec,
+      # Prevent the agent-sandbox controller from creating a per-template
+      # NetworkPolicy CR for every task image, which bottlenecks GKE
+      # Dataplane V2 (Cilium eBPF policy compilation) at scale.
+      network_policy_management="Unmanaged",
+  )
+
+
 def init_global_fleet(
     tasks: list[Any] | None = None,
     max_concurrency: int = 128,
@@ -303,6 +330,7 @@ def init_global_fleet(
                 in_cluster=in_cluster,
             )
         ],
+        "template": _build_template_spec(),
         "max_concurrent": effective_max_concurrent,
         "window_size": batch_size,
         "max_warmpool_size": (
