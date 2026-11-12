@@ -638,26 +638,65 @@ class SandboxUtilsTest(absltest.TestCase):
               "custom-pool-{image_hash}",
           )
 
-  def test_teardown_global_fleet_invokes_teardown_and_reaper(self):
+  def _mock_fleet_for_teardown(self):
     mock_fleet = mock.MagicMock()
     mock_fleet.run_id = "test-run-1234"
     mock_cluster = mock.MagicMock()
     mock_cluster.namespace = "test-ns"
-    mock_cluster.in_cluster = True
+    mock_cluster.config.context = "test-context"
+    mock_cluster.config.kubeconfig = None
+    mock_cluster.config.in_cluster = False
     mock_fleet.registry = [mock_cluster]
+    return mock_fleet
 
+  def test_teardown_global_fleet_does_not_reap_shared_run_by_default(self):
+    # Rollout workers share the orchestrator's run_id and reach this through
+    # atexit: reaping here would delete the whole job's sandboxes.
+    mock_fleet = self._mock_fleet_for_teardown()
     mock_as_rl = mock.MagicMock()
     with mock.patch.dict("sys.modules", {"agent_sandbox_rl": mock_as_rl}):
       with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", mock_fleet):
         sandbox_utils.teardown_global_fleet()
         self.assertIsNone(sandbox_utils._GLOBAL_FLEET)
         mock_fleet.teardown.assert_called_once()
+        mock_as_rl.reap.assert_not_called()
+
+  def test_teardown_global_fleet_reaps_run_for_job_owner(self):
+    mock_fleet = self._mock_fleet_for_teardown()
+    mock_as_rl = mock.MagicMock()
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": mock_as_rl}):
+      with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", mock_fleet):
+        sandbox_utils.teardown_global_fleet(reap_run=True)
+        self.assertIsNone(sandbox_utils._GLOBAL_FLEET)
+        mock_fleet.teardown.assert_called_once()
+        # Connection settings come from the cluster's config, not a default.
         mock_as_rl.reap.assert_called_once_with(
             run_id="test-run-1234",
-            in_cluster=True,
+            context="test-context",
+            kubeconfig=None,
+            in_cluster=False,
             namespace="test-ns",
             delete_pods=True,
         )
+
+  def test_teardown_global_fleet_reaps_even_when_teardown_fails(self):
+    mock_fleet = self._mock_fleet_for_teardown()
+    mock_fleet.teardown.side_effect = RuntimeError("api server unreachable")
+    mock_as_rl = mock.MagicMock()
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": mock_as_rl}):
+      with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", mock_fleet):
+        sandbox_utils.teardown_global_fleet(reap_run=True)
+        mock_as_rl.reap.assert_called_once()
+
+  def test_teardown_global_fleet_is_a_noop_the_second_time(self):
+    mock_fleet = self._mock_fleet_for_teardown()
+    mock_as_rl = mock.MagicMock()
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": mock_as_rl}):
+      with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", mock_fleet):
+        sandbox_utils.teardown_global_fleet(reap_run=True)
+        sandbox_utils.teardown_global_fleet(reap_run=True)
+        mock_fleet.teardown.assert_called_once()
+        mock_as_rl.reap.assert_called_once()
 
   def test_init_global_fleet_registers_subsequent_task_images_in_plan(self):
     class _FakeTask:

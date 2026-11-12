@@ -1267,6 +1267,6 @@ finally:
   if USE_AGENT_SANDBOX:
     print("Tearing down agent sandbox fleet...", flush=True)
     try:
-      swe_env._teardown_global_fleet()
+      swe_env._teardown_global_fleet(reap_run=True)
     except Exception as teardown_e:
       print(f"Failed to teardown agent sandbox fleet: {teardown_e}", flush=True)

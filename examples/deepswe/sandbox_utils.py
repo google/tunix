@@ -645,15 +645,14 @@ def ensure_tasks_in_fleet_plan(
 ) -> None:
   """Ensures all task images in `tasks` are present in `fleet_inst.plan_`.
 
-  When rollout workers initialize `SandboxFleet` lazily per episode via
-  `init_global_fleet(tasks=[entry])`, subsequent episodes on the same worker
-  reuse the singleton `_GLOBAL_FLEET`. If a new episode's image is not added to
-  `fleet_inst.plan_`, `fleet.acquire(task)` treats it as `on_demand=True` and
-  calls `_ensure_pool` -> `ensure_template` (without `owner_run_id`), which
-  re-labels the orchestrator's `SandboxTemplate` with the rollout worker's
-  `run_id`. That causes the orchestrator to skip template deletion on unwarm
-  and later crash with `OwnedByAnotherRunError` / `FleetError` when re-warming
-  the same image in a subsequent batch.
+  Rollout workers create `SandboxFleet` lazily with
+  `init_global_fleet(tasks=[entry])` and reuse the singleton `_GLOBAL_FLEET` for
+  later episodes, so the plan must grow as new images arrive. `fleet.acquire`
+  treats an image that is not in the plan as on-demand: it logs a warning and
+  tries to create a size-1 pool and its template before it claims. With the
+  shared `run_id` those creates reuse the orchestrator's pool, but each one
+  still costs two extra API calls per episode. Adding the image to the plan
+  makes `acquire` claim straight from the orchestrator's warm pool.
   """
   if fleet_inst is None or not tasks:
     return
@@ -925,7 +924,6 @@ def init_global_fleet(
     logging.info(msg)
     if getattr(fleet_cfg, "install_teardown_hooks", False):
       fleet_inst._install_teardown_hooks()
-    fleet_inst._torndown = False
     if hasattr(fleet_inst, "plan"):
       fleet_inst.plan()
       logging.info(
@@ -948,44 +946,60 @@ def get_global_fleet() -> Any:
   return _GLOBAL_FLEET
 
 
-def teardown_global_fleet() -> None:
-  """Atexit handler to cleanly tear down warm pools and sandboxes on process exit."""
-  global _GLOBAL_FLEET
-  if _GLOBAL_FLEET is not None:
-    logging.info(
-        "[SandboxFleet] Automatically tearing down warm pools on exit..."
-    )
-    fleet = _GLOBAL_FLEET
-    _GLOBAL_FLEET = None
-    try:
-      if hasattr(fleet, "teardown"):
-        fleet.teardown()
-    except Exception as e:  # pylint: disable=broad-exception-caught
-      logging.warning("[SandboxFleet] Teardown note: %s", e)
-    try:
-      from agent_sandbox_rl import reap  # pyrefly: ignore[missing-import]
+def teardown_global_fleet(reap_run: bool = False) -> None:
+  """Tears down the process-wide SandboxFleet.
 
-      run_id = getattr(fleet, "run_id", None)
-      if run_id:
-        for c in getattr(fleet, "registry", []):
-          c_ns = (
-              getattr(c, "namespace", None)
-              or os.getenv("SANDBOX_NAMESPACE")
-              or os.getenv("NAMESPACE", "priority-dev")
-          )
-          logging.info(
-              "[SandboxFleet] Reaping resources for run_id=%s in namespace=%s",
-              run_id,
-              c_ns,
-          )
-          reap(
-              run_id=run_id,
-              in_cluster=getattr(c, "in_cluster", True),
-              namespace=c_ns,
-              delete_pods=True,
-          )
-    except Exception as e:  # pylint: disable=broad-exception-caught
-      logging.warning("[SandboxFleet] Reaper note: %s", e)
+  The orchestrator and every rollout worker build their fleet with the same
+  `run_id`, so the run-scoped reaper reaches the whole job: the claims, warm
+  pools, templates and pods of every process. `fleet.teardown()` is safe in any
+  process, because under a shared `run_id` it releases this process's claims
+  and deletes only the pools this process warmed.
+
+  Args:
+    reap_run: Also call `agent_sandbox_rl.reap` for the fleet's `run_id`. Set
+      this only in the process that owns the job (the orchestrator, the eval
+      controller, a single-process driver) once the job is over. The `atexit`
+      hook leaves it False, so a rollout worker that exits mid-run does not
+      delete the sandboxes the rest of the job is using. Objects a killed job
+      leaves behind are swept by `cluster_reaper.py`.
+  """
+  global _GLOBAL_FLEET
+  fleet = _GLOBAL_FLEET
+  _GLOBAL_FLEET = None
+  if fleet is None:
+    return
+  logging.info(
+      "[SandboxFleet] Tearing down sandbox fleet (reap_run=%s)...", reap_run
+  )
+  try:
+    if hasattr(fleet, "teardown"):
+      fleet.teardown()
+  except Exception:  # pylint: disable=broad-exception-caught
+    logging.exception("[SandboxFleet] Fleet teardown failed")
+  if not reap_run:
+    return
+  try:
+    from agent_sandbox_rl import reap  # pyrefly: ignore[missing-import]
+
+    # Each registry entry is an agent_sandbox_rl Cluster. Its connection
+    # settings live on `config`, so the reaper reaches the same cluster and
+    # namespace the fleet used, in or out of the cluster.
+    for c in fleet.registry:
+      logging.info(
+          "[SandboxFleet] Reaping resources for run_id=%s in namespace=%s",
+          fleet.run_id,
+          c.namespace,
+      )
+      reap(
+          run_id=fleet.run_id,
+          context=c.config.context,
+          kubeconfig=c.config.kubeconfig,
+          in_cluster=c.config.in_cluster,
+          namespace=c.namespace,
+          delete_pods=True,
+      )
+  except Exception:  # pylint: disable=broad-exception-caught
+    logging.exception("[SandboxFleet] Reaping the sandbox run failed")
 
 
 def _fleet_error_cls() -> type[Exception]:
