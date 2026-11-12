@@ -882,6 +882,47 @@ weight_sync_config:
           "agentic_grpo_config.trajectory_group_order=prompt_arrival",
       ])
 
+  def test_max_seq_tokens_per_device_syncs_with_legacy_tpu_field(self):
+    hp = resolve_config.initialize([
+        "batch_size=6",
+        "training_config.max_seq_tokens_per_device=2048",
+        "rl_training_config.max_seq_tokens_per_device=4096",
+        "rl_training_config.mini_batch_size=3",
+        "rl_training_config.train_micro_batch_size=4",
+    ])
+    self.assertEqual(
+        hp.config["training_config"]["max_seq_token_per_tpu"], 2048
+    )
+    self.assertEqual(
+        hp.config["training_config"]["max_seq_tokens_per_device"], 2048
+    )
+    self.assertEqual(
+        hp.config["rl_training_config"]["max_seq_token_per_tpu"], 4096
+    )
+    self.assertEqual(
+        hp.config["rl_training_config"]["max_seq_tokens_per_device"], 4096
+    )
+
+    # Setting max_seq_tokens_per_device=0 disables packing, so MaxText
+    # micro-batch FSDP divisibility validation still fires.
+    with self.assertRaisesRegex(
+        ValueError, "must be divisible by actor_model_config.mesh fsdp"
+    ):
+      resolve_config.initialize([
+          "actor_model_config.model_source=maxtext",
+          "actor_model_config.model_path=/ckpt/qwen3-1.7b/0/items",
+          "actor_model_config.kwargs.maxtext_model_name=qwen3-1.7b",
+          "actor_model_config.mesh.shape=(2,1)",
+          "rl_training_config.max_seq_tokens_per_device=0",
+          "rl_training_config.train_micro_batch_size=1",
+      ])
+
+    with self.assertRaisesRegex(ValueError, "must match when both are set"):
+      resolve_config.initialize([
+          "rl_training_config.max_seq_tokens_per_device=4096",
+          "rl_training_config.max_seq_token_per_tpu=8192",
+      ])
+
   def test_weight_sync_requires_matching_maxtext_sources(self):
     maxtext_actor = [
         "actor_model_config.model_source=maxtext",

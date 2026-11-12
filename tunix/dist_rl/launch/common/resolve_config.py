@@ -42,6 +42,7 @@ from typing import Any, Final
 
 import omegaconf
 from tunix.cli import config as cli_config
+from tunix.common import configs as common_configs
 from tunix.common import datatypes as common_datatypes
 from tunix.dist_rl.common import datatypes as dist_rl_datatypes
 from tunix.dist_rl.common import gcs_cache
@@ -110,6 +111,16 @@ class DistHyperParameters(cli_config.HyperParameters):
         _dist_argv(overrides), merge_replace_keys=True, validate_nested=True
     )
     finalize_dist_config(self)
+
+
+def _sync_packed_token_budget(section: MutableMapping[str, Any]) -> None:
+  """Validates and syncs `max_seq_tokens_per_device` and `max_seq_token_per_tpu`."""
+  resolved = common_configs.resolve_seq_tokens_budget(
+      section["max_seq_tokens_per_device"],
+      section["max_seq_token_per_tpu"],
+  )
+  section["max_seq_tokens_per_device"] = resolved
+  section["max_seq_token_per_tpu"] = resolved
 
 
 def _mutable_section(
@@ -214,7 +225,9 @@ def _finalize_dist_defaults(hp: cli_config.HyperParameters) -> None:
           artifact_root / "models" / str(role_cfg["model_name"])
       )
 
+  _sync_packed_token_budget(_mutable_section(hp, "training_config"))
   rl_train = _mutable_section(hp, "rl_training_config")
+  _sync_packed_token_budget(rl_train)
   if rl_train["mini_batch_size"] is None:
     rl_train["mini_batch_size"] = int(hp.config["batch_size"])
   if not rl_train["checkpoint_root_directory"]:
@@ -711,7 +724,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
           "actor_model_config.model_source='maxtext' requires"
           " actor_model_config.model_path (or model_config.model_path)."
       )
-    if rl_train["max_seq_token_per_tpu"] is None:
+    if not rl_train["max_seq_tokens_per_device"]:
       micro_batch = int(rl_train["train_micro_batch_size"])
       if micro_batch % actor_axes["fsdp"] != 0:
         raise ValueError(
@@ -812,7 +825,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   # `train_micro_batch_size` counts trajectories in the distributed trainer:
   # gradient accumulation = mini_batch_size * num_generations /
   # train_micro_batch_size (not applicable with sequence packing).
-  if not rl_train["max_seq_token_per_tpu"]:
+  if not rl_train["max_seq_tokens_per_device"]:
     trajectories = mini_batch_size * num_generations
     if trajectories % micro_batch != 0:
       raise ValueError(
@@ -965,7 +978,7 @@ def _validate_typed_vllm_settings(hp: cli_config.HyperParameters) -> None:
         "vllm_config.server_mode must be a bool or null, got"
         f" {vllm['server_mode']!r}."
     )
-  common_datatypes.validate_routed_experts_encode_config(
+  common_configs.validate_routed_experts_encode_config(
       vllm["routed_experts_encode_mode"], vllm["routed_experts_num_experts"]
   )
   if vllm["return_routed_experts"] and hp.config["rollout_engine"] == "vanilla":

@@ -139,6 +139,9 @@ training_config: &base_training_config
     profiler_steps: 0
   data_sharding_axis: ["fsdp"]
   max_inflight_computations: 2
+  max_seq_tokens_per_device: null
+  # TODO(b/583675740): Deprecate max_seq_token_per_tpu in favor of
+  # max_seq_tokens_per_device.
   max_seq_token_per_tpu: null
   max_segments_per_packed_row: null
 

@@ -69,18 +69,20 @@ KwargValue = int | float | str | bool
 _T = TypeVar("_T", int, float, str, bool)
 
 
-def _sequence_packing_enabled(hp: resolve_config.DistHyperParameters) -> bool:
-  """Returns whether `rl_training_config.max_seq_token_per_tpu > 0`.
+def _sequence_packing_enabled(
+    hp: resolve_config.DistHyperParameters,
+) -> bool:
+  """Returns whether `rl_training_config.max_seq_tokens_per_device > 0`.
 
   `common_configs.is_sequence_packing_enabled` needs a built TrainingConfig:
   `RLTrainingConfig` cannot be built for dist configs (its micro-batch is
   prompt-level, the dist one is trajectory-level), and the trainer's
-  `TrainingConfig` deliberately leaves `max_seq_token_per_tpu` unset.
+  `TrainingConfig` deliberately leaves `max_seq_tokens_per_device` unset.
 
   Args:
     hp: Validated distributed RL configuration.
   """
-  budget = hp.config_mapping(_RL_TRAINING_KEY)["max_seq_token_per_tpu"]
+  budget = hp.config_mapping(_RL_TRAINING_KEY)["max_seq_tokens_per_device"]
   return budget is not None and int(budget) > 0
 
 
@@ -203,14 +205,15 @@ def _tunix_training_config(
           device_host_concurrent_gb=_ckpt_d2h_concurrent_gb(hp),
       ),
       checkpoint_root_directory=_checkpoint_root_directory(hp),
-      # No max_seq_token_per_tpu here. Under the orchestrator the trainer never
-      # packs: the SequencePackedBatchAssembler does, and the weighting that
-      # packing needs rides in on the payload (`_fwd_bwd_step` accumulates with
-      # `denom=aux.primary_loss.denominator`). The only thing the field would
-      # change on this path is `_is_single_microstep()`, and the orchestrator
-      # drives `fwd_bwd` + `update` rather than the fused step it gates.
-      # The orchestrator owns resume: it calls restore_checkpoint() explicitly
-      # and realigns its step/policy_version from the returned metadata.
+      # No max_seq_tokens_per_device here. Under the orchestrator the trainer
+      # never packs: the SequencePackedBatchAssembler does, and the weighting
+      # that packing needs rides in on the payload (`_fwd_bwd_step` accumulates
+      # with `denom=aux.primary_loss.denominator`). The only thing the field
+      # would change on this path is `_is_single_microstep()`, and the
+      # orchestrator drives `fwd_bwd` + `update` rather than the fused step it
+      # gates. The orchestrator owns resume: it calls restore_checkpoint()
+      # explicitly and realigns its step/policy_version from the returned
+      # metadata.
       resume_from_checkpoint_on_init=False,
   )
 
@@ -337,9 +340,9 @@ def _create_tunix_trainer_factory(
   if _sequence_packing_enabled(hp):
     logging.info(
         "Trainer gradient accumulation is dynamic via sequence packing"
-        " (max_seq_token_per_tpu=%s, mini_batch_size=%s prompt groups,"
+        " (max_seq_tokens_per_device=%s, mini_batch_size=%s prompt groups,"
         " num_generations=%d).",
-        rl_train["max_seq_token_per_tpu"],
+        rl_train["max_seq_tokens_per_device"],
         rl_train["mini_batch_size"],
         num_generations,
     )
@@ -549,7 +552,7 @@ def _create_maxtext_trainer_factory(
         _ACTOR_OPTIMIZER_KEY,
         opt["schedule_type"],
     )
-  max_seq_token_per_tpu = rl_train["max_seq_token_per_tpu"]
+  max_seq_tokens_per_device = rl_train["max_seq_tokens_per_device"]
   maxtext_config = maxtext_utils.build_maxtext_config(
       model_name=maxtext_model_name,
       worker_id=worker_id,
@@ -586,7 +589,9 @@ def _create_maxtext_trainer_factory(
           hp.config_mapping("weight_sync_config")["use_weight_converter"]
       ),
       max_seq_token_per_tpu=(
-          int(max_seq_token_per_tpu) if max_seq_token_per_tpu is not None else 0
+          int(max_seq_tokens_per_device)
+          if max_seq_tokens_per_device is not None
+          else 0
       ),
       weight_dtype=str(actor["load_dtype"]),
       attention=_kwarg(kwargs, "attention", ""),

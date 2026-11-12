@@ -123,7 +123,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
     )
 
     if self._packing_enabled:
-      assert self._training_config.max_seq_token_per_tpu is not None
+      assert self._training_config.max_seq_tokens_per_device is not None
       # Fail now rather than mid-run: a maximal sequence must fit one packed
       # row. `max_response_length` lives on the algo config for agentic
       # learners and on the rollout config elsewhere.
@@ -137,7 +137,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         r_config = rollout_config
 
       packing.validate_packing_budget(
-          self._training_config.max_seq_token_per_tpu,
+          self._training_config.max_seq_tokens_per_device,
           getattr(r_config, "max_prompt_length", 1000000),
           getattr(algo_config, "max_response_length", None)
           or r_config.max_tokens_to_generate,
@@ -777,7 +777,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
 
     train_data_gen = queue_iterator()
     if self._packing_enabled:
-      assert self._training_config.max_seq_token_per_tpu is not None
+      assert self._training_config.max_seq_tokens_per_device is not None
       mesh = self.rl_engine.cluster_config.role_to_mesh[
           rl_engine_lib.Role.ACTOR
       ]
@@ -786,16 +786,16 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       pack_size = rl_utils.compute_pack_size(mesh)
 
       logging.info(
-          "Using sequence packing with max_seq_token_per_tpu: %d, "
+          "Using sequence packing with max_seq_tokens_per_device: %d, "
           " pack_size: %d",
-          self._training_config.max_seq_token_per_tpu,
+          self._training_config.max_seq_tokens_per_device,
           pack_size,
       )
       # Update boundary in sequences (mini-batch semantics): packing is
       # independent of any micro-batch/streaming granularity.
       train_data_gen = rl_utils.pack_sequences(
           train_data_gen,
-          self._training_config.max_seq_token_per_tpu,
+          self._training_config.max_seq_tokens_per_device,
           sequences_per_update=mini_batch_size * self._num_generations(),
           pack_size=pack_size,
           max_segments_per_packed_row=getattr(

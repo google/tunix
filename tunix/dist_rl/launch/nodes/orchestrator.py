@@ -134,15 +134,15 @@ def build_batch_config(
   # `create_rollout_config()` needs worker meshes for `rollout_engine=vllm`; the
   # CPU orchestrator only needs the length budgets.
   rollout = hp.config_mapping("rollout_config")
-  max_seq_token_per_tpu = rl_train["max_seq_token_per_tpu"]
+  max_seq_tokens_per_device = rl_train["max_seq_tokens_per_device"]
   max_segments_per_packed_row = rl_train["max_segments_per_packed_row"]
   return batch_assembly.BatchConfig(
       pad_id=pad_id,
       eos_id=eos_id,
       max_prompt_length=int(rollout["max_prompt_length"]),
       max_response_length=int(rollout["total_generation_steps"]),
-      max_seq_token_per_tpu=(
-          None if max_seq_token_per_tpu is None else int(max_seq_token_per_tpu)
+      max_seq_tokens_per_device=(
+          int(max_seq_tokens_per_device) if max_seq_tokens_per_device else None
       ),
       max_segments_per_packed_row=(
           None

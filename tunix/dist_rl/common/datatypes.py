@@ -27,6 +27,7 @@ import time
 from typing import Any, Dict, Protocol
 import uuid
 import numpy as np
+from tunix.common import configs as common_configs
 from tunix.common import datatypes as common_datatypes
 from tunix.rl.agentic.agents import agent_types
 
@@ -42,7 +43,7 @@ Role = common_datatypes.Role
 ROUTED_EXPERTS_ENCODE_MODES = common_datatypes.ROUTED_EXPERTS_ENCODE_MODES
 RoutedExpertsEncodeMode = common_datatypes.RoutedExpertsEncodeMode
 validate_routed_experts_encode_config = (
-    common_datatypes.validate_routed_experts_encode_config
+    common_configs.validate_routed_experts_encode_config
 )
 
 # Marks a router-replay slot the trainer must not replay, so the model falls

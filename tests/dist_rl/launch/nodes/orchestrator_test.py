@@ -346,9 +346,15 @@ class BuildersTest(absltest.TestCase):
     )
 
   def test_batch_config_packed_len_follows_sequence_packing_budget(self):
-    hp = _config("rl_training_config.max_seq_token_per_tpu=4096")
+    hp = _config("rl_training_config.max_seq_tokens_per_device=4096")
     config = orchestrator.build_batch_config(hp, pad_id=0, eos_id=1)
+    self.assertEqual(config.max_seq_tokens_per_device, 4096)
     self.assertEqual(config.max_seq_token_per_tpu, 4096)
+
+    hp_zero = _config("rl_training_config.max_seq_tokens_per_device=0")
+    config_zero = orchestrator.build_batch_config(hp_zero, pad_id=0, eos_id=1)
+    self.assertIsNone(config_zero.max_seq_tokens_per_device)
+    self.assertIsNone(config_zero.max_seq_token_per_tpu)
 
   def test_batch_config_shards_over_trainer_data_parallel_axes(self):
     hp = _config(

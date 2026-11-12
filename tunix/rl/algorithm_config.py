@@ -15,6 +15,7 @@
 from collections.abc import Sequence
 import dataclasses
 from absl import logging
+from tunix.common import configs as common_configs
 from tunix.common import datatypes as common_datatypes
 from tunix.rl import function_registry
 
@@ -159,7 +160,7 @@ class AlgorithmConfig:
           "reward_worker_timeout_seconds must be > 0."
           f" Received: {self.reward_worker_timeout_seconds}"
       )
-    common_datatypes.validate_routed_experts_encode_config(
+    common_configs.validate_routed_experts_encode_config(
         self.routed_experts_encode_mode,
         self.routed_experts_num_experts,
     )

@@ -32,6 +32,7 @@ from typing import Iterable, Literal, Mapping, Sequence, overload
 
 import numpy as np
 from numpy import typing as npt
+from tunix.common import configs as common_configs
 from tunix.common import datatypes as common_datatypes
 from tunix.rl.agentic.agents import agent_types
 
@@ -44,7 +45,7 @@ ROUTED_EXPERTS_ENCODE_MODES = common_datatypes.ROUTED_EXPERTS_ENCODE_MODES
 RoutedExpertsEncodeMode = common_datatypes.RoutedExpertsEncodeMode
 RoutedExpertsWireEncoding = Literal["int16", "uint8", "uint10"]
 validate_routed_experts_encode_config = (
-    common_datatypes.validate_routed_experts_encode_config
+    common_configs.validate_routed_experts_encode_config
 )
 _ROUTED_EXPERTS_TIER_ORDER: Mapping[RoutedExpertsWireEncoding, int] = {
     "uint8": 0,

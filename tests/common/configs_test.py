@@ -1,3 +1,5 @@
+import copy
+
 from absl.testing import absltest
 from absl.testing import parameterized
 import optax
@@ -150,6 +152,51 @@ class ConfigsTest(absltest.TestCase):
     self.assertFalse(cfg_disabled.sequence_packing_enabled)
     self.assertFalse(configs.is_sequence_packing_enabled(cfg_disabled))
     self.assertFalse(configs.is_sequence_packing_enabled(object()))
+
+    cfg_zero = configs.TrainingConfig(
+        eval_every_n_steps=1, max_seq_tokens_per_device=0
+    )
+    self.assertFalse(cfg_zero.sequence_packing_enabled)
+    self.assertFalse(configs.is_sequence_packing_enabled(cfg_zero))
+    self.assertIsNone(cfg_zero.max_seq_tokens_per_device)
+    self.assertIsNone(cfg_zero.max_seq_token_per_tpu)
+
+    cfg_device_with_zero_tpu = configs.TrainingConfig(
+        eval_every_n_steps=1,
+        max_seq_tokens_per_device=2048,
+        max_seq_token_per_tpu=0,
+    )
+    self.assertEqual(cfg_device_with_zero_tpu.max_seq_tokens_per_device, 2048)
+    self.assertEqual(cfg_device_with_zero_tpu.max_seq_token_per_tpu, 2048)
+
+    cfg_device = configs.RLTrainingConfig(
+        eval_every_n_steps=1,
+        actor_optimizer=self.actor_optimizer,
+        mini_batch_size=6,
+        train_micro_batch_size=4,
+        max_seq_tokens_per_device=2048,
+    )
+    self.assertTrue(cfg_device.sequence_packing_enabled)
+    self.assertEqual(cfg_device.max_seq_token_per_tpu, 2048)
+    self.assertNotIn(
+        "__class__", configs.RLTrainingConfig.__post_init__.__code__.co_freevars
+    )
+    cfg_copied = copy.deepcopy(cfg_device)
+    self.assertEqual(cfg_copied.max_seq_tokens_per_device, 2048)
+    self.assertEqual(cfg_copied.max_seq_token_per_tpu, 2048)
+
+    with self.assertRaisesRegex(ValueError, "non-negative integer or None"):
+      configs.TrainingConfig(
+          eval_every_n_steps=1,
+          max_seq_tokens_per_device=-1,
+      )
+
+    with self.assertRaisesRegex(ValueError, "must match when both are set"):
+      configs.TrainingConfig(
+          eval_every_n_steps=1,
+          max_seq_tokens_per_device=2048,
+          max_seq_token_per_tpu=4096,
+      )
 
   def test_rl_profile_config_defaults_and_validation(self):
     cfg = configs.RLProfileConfig()

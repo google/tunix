@@ -2484,6 +2484,21 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
 
 class CreateBatchAssemblerTest(absltest.TestCase):
 
+  def test_batch_config_syncs_max_seq_tokens_per_device_and_legacy_alias(self):
+    cfg = batch_assembly.BatchConfig(max_seq_tokens_per_device=2048)
+    self.assertEqual(cfg.max_seq_tokens_per_device, 2048)
+    self.assertEqual(cfg.max_seq_token_per_tpu, 2048)
+
+    legacy_cfg = batch_assembly.BatchConfig(max_seq_token_per_tpu=1024)
+    self.assertEqual(legacy_cfg.max_seq_tokens_per_device, 1024)
+    self.assertEqual(legacy_cfg.max_seq_token_per_tpu, 1024)
+
+    with self.assertRaisesRegex(ValueError, "must match when both are set"):
+      batch_assembly.BatchConfig(
+          max_seq_tokens_per_device=2048,
+          max_seq_token_per_tpu=1024,
+      )
+
   def test_create_sequence_packed_assembler_with_num_data_shards(self):
     assembler = batch_assembly.create_batch_assembler(
         num_generations=2,
@@ -2493,7 +2508,7 @@ class CreateBatchAssemblerTest(absltest.TestCase):
             pad_id=42,
             max_prompt_length=256,
             max_response_length=256,
-            max_seq_token_per_tpu=1024,
+            max_seq_tokens_per_device=1024,
             max_segments_per_packed_row=8,
             num_data_shards=8,
         ),
@@ -3729,6 +3744,25 @@ class BuildDummyPayloadTest(parameterized.TestCase):
     batches = list(asm.feed([_make_payload(2, 2)]))
     self.assertLen(batches, 1)
     self.assertEqual(asm._batch_counter, 6)
+
+  def test_batch_config_zero_budget_disables_packing_and_validates_type(self):
+    cfg = batch_assembly.BatchConfig(
+        max_seq_tokens_per_device=0,
+        max_prompt_length=4,
+        max_response_length=4,
+    )
+    self.assertIsNone(cfg.max_seq_tokens_per_device)
+    self.assertIsNone(cfg.max_seq_token_per_tpu)
+    asm = batch_assembly.create_batch_assembler(
+        num_generations=2, batch_config=cfg
+    )
+    self.assertIsInstance(asm, batch_assembly.PaddedBatchAssembler)
+    for bad_val in (-1, True):
+      with self.subTest(bad_val=bad_val):
+        with self.assertRaisesRegex(
+            ValueError, "must be a non-negative integer or None"
+        ):
+          batch_assembly.BatchConfig(max_seq_tokens_per_device=bad_val)  # pytype: disable=wrong-arg-types
 
 
 if __name__ == "__main__":

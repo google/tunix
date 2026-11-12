@@ -14,30 +14,33 @@
 
 """Common configuration classes for Tunix."""
 
+from __future__ import annotations
+
 import dataclasses
 import math
 from typing import Any, Optional, TYPE_CHECKING, Tuple
 
-import flax
-import jax
-from jax import numpy as jnp
-from jax.sharding import Mesh
 import numpy as np
-import optax
 from tunix.common import datatypes
 from tunix.generate import mappings
-from tunix.perf import metrics as perf_metrics
-from tunix.sft import checkpoint_options
-from tunix.sft import metrics_logger as sft_metrics_logger
-from tunix.sft import profiler
 
 if TYPE_CHECKING:
+  import flax  # pyrefly: ignore[missing-import]
+  import jax  # pyrefly: ignore[missing-import]
+  from jax import numpy as jnp  # pyrefly: ignore[missing-import]
+  from jax.sharding import Mesh  # pyrefly: ignore[missing-import]
+  import optax  # pyrefly: ignore[missing-import]
+  from tunix.perf import metrics as perf_metrics  # pyrefly: ignore[missing-import]
   from tunix.rl.rollout import base_rollout  # pyrefly: ignore[missing-import]
+  from tunix.sft import checkpoint_options  # pyrefly: ignore[missing-import]
+  from tunix.sft import metrics_logger as sft_metrics_logger  # pyrefly: ignore[missing-import]
+  from tunix.sft import profiler  # pyrefly: ignore[missing-import]
+
+  MetricsLoggerOptions = sft_metrics_logger.MetricsLoggerOptions
 
 # For rl_utils calls inside RLTrainingConfig
 # For base_rollout typing inside ClusterConfig
 
-MetricsLoggerOptions = sft_metrics_logger.MetricsLoggerOptions
 _VALID_WEIGHT_SYNC_MODES = tuple(
     mode.value for mode in datatypes.WeightSyncMode
 )
@@ -59,6 +62,52 @@ def _check_divisibility(small_size, big_size, small_size_name, big_size_name):
     raise ValueError(
         f"{big_size_name} must be a multiple of {small_size_name}."
     )
+
+
+def validate_routed_experts_encode_config(
+    encode_mode: str,
+    num_experts: int | None,
+) -> None:
+  """Validates `routed_experts_encode_mode` and `routed_experts_num_experts`."""
+  if encode_mode not in datatypes.ROUTED_EXPERTS_ENCODE_MODES:
+    raise ValueError(
+        "routed_experts_encode_mode must be one of"
+        f" {datatypes.ROUTED_EXPERTS_ENCODE_MODES}. Received: {encode_mode!r}"
+    )
+  if num_experts is not None and (
+      isinstance(num_experts, bool)
+      or not isinstance(num_experts, int)
+      or int(num_experts) <= 0
+  ):
+    raise ValueError(
+        "routed_experts_num_experts must be a positive int or None."
+        f" Received: {num_experts!r}"
+    )
+
+
+def resolve_seq_tokens_budget(
+    per_device: int | None,
+    per_tpu: int | None,
+) -> int | None:
+  """Validates and resolves `max_seq_tokens_per_device` and `max_seq_token_per_tpu`."""
+  for field_name, val in (
+      ("max_seq_tokens_per_device", per_device),
+      ("max_seq_token_per_tpu", per_tpu),
+  ):
+    if val is not None and (
+        isinstance(val, bool) or not isinstance(val, int) or val < 0
+    ):
+      raise ValueError(
+          f"{field_name} must be a non-negative integer or None, got {val!r}."
+      )
+  per_device = per_device or None
+  per_tpu = per_tpu or None
+  if per_device is not None and per_tpu is not None and per_device != per_tpu:
+    raise ValueError(
+        "max_seq_tokens_per_device and max_seq_token_per_tpu must match when"
+        f" both are set, got {per_device} vs {per_tpu}."
+    )
+  return per_device if per_device is not None else per_tpu
 
 
 CacheConfig = datatypes.CacheConfig
@@ -300,7 +349,7 @@ class RolloutConfig:
 
   def __post_init__(self):
     _is_positive_integer(self.max_response_length, "max_response_length")
-    datatypes.validate_routed_experts_encode_config(
+    validate_routed_experts_encode_config(
         self.routed_experts_encode_mode, self.routed_experts_num_experts
     )
     if (
@@ -404,18 +453,31 @@ class TrainingConfig:
   pbar_description: str | None = "Training"
 
   # Sequence packing configuration.
+  max_seq_tokens_per_device: int | None = None
+  # TODO(b/583675740): Deprecate max_seq_token_per_tpu in favor of
+  # max_seq_tokens_per_device.
+  # Note: because both fields are synced in `__post_init__`, callers using
+  # `dataclasses.replace` to change one must also pass or clear the other.
   max_seq_token_per_tpu: int | None = None
   # Static upper bound on real segments (sequences) per packed row, used to size
   # the segment-aware loss buckets (num_segments = this + 1 for the padding
-  # bucket). ``None`` defaults to ``max_seq_token_per_tpu`` -- provably safe (a
-  # pack of ``budget`` tokens holds at most ``budget`` unit-length segments) and
-  # needs no tuning. Set a smaller value only to shrink the loss buckets at very
-  # large budgets; ``pack_sequences`` raises if a pack exceeds it.
+  # bucket). ``None`` defaults to ``max_seq_tokens_per_device`` -- provably safe
+  # (a pack of ``budget`` tokens holds at most ``budget`` unit-length segments)
+  # and needs no tuning. Set a smaller value only to shrink the loss buckets at
+  # very large budgets; ``pack_sequences`` raises if a pack exceeds it.
   max_segments_per_packed_row: int | None = None
+
+  def __post_init__(self):
+    resolved = resolve_seq_tokens_budget(
+        self.max_seq_tokens_per_device,
+        self.max_seq_token_per_tpu,
+    )
+    self.max_seq_tokens_per_device = resolved
+    self.max_seq_token_per_tpu = resolved
 
   @property
   def sequence_packing_enabled(self) -> bool:
-    """Returns True if sequence packing (`max_seq_token_per_tpu > 0`) is enabled."""
+    """Returns True if sequence packing (`max_seq_tokens_per_device > 0`) is enabled."""
     return is_sequence_packing_enabled(self)
 
   def get_with_default(self, key: str, default: Any) -> Any:
@@ -425,10 +487,12 @@ class TrainingConfig:
     return val
 
 
-def is_sequence_packing_enabled(config: Any) -> bool:
-  """Returns True if sequence packing (`max_seq_token_per_tpu > 0`) is enabled."""
-  budget = getattr(config, "max_seq_token_per_tpu", None)
-  return isinstance(budget, int) and budget > 0
+def is_sequence_packing_enabled(
+    config: Any,
+) -> bool:
+  """Returns True if sequence packing (`max_seq_tokens_per_device > 0`) is enabled."""
+  budget = getattr(config, "max_seq_tokens_per_device", None)
+  return isinstance(budget, int) and not isinstance(budget, bool) and budget > 0
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -470,6 +534,11 @@ class RLTrainingConfig(TrainingConfig):
 
   def __post_init__(self):
     """Validates the configuration after initialization."""
+    # Call TrainingConfig.__post_init__(self) explicitly instead of
+    # super().__post_init__(): in Python <= 3.12, @dataclass(slots=True)
+    # recreates the class without updating the implicit __class__ closure cell
+    # used by zero-arg super() (CPython gh-90562).
+    TrainingConfig.__post_init__(self)
     if (
         self.profiler_options is not None
         and self.rl_profiler_config is not None
