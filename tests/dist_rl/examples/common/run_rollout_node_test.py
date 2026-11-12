@@ -188,6 +188,28 @@ class RunRolloutNodeTest(absltest.TestCase):
         False,
     )
 
+  def test_sampling_flags_reach_rollout_config(self):
+    defaults = run_rollout_node._rollout_config(
+        run_rollout_node._parse_args([])
+    )
+    self.assertEqual(defaults.temperature, 1.0)
+    self.assertEqual(defaults.top_p, 1.0)
+    self.assertIsNone(defaults.top_k)
+    self.assertFalse(defaults.overlong_filter)
+
+    custom = run_rollout_node._rollout_config(
+        run_rollout_node._parse_args([
+            "--temperature=0.7",
+            "--top_p=0.9",
+            "--top_k=20",
+            "--overlong_filter",
+        ])
+    )
+    self.assertEqual(custom.temperature, 0.7)
+    self.assertEqual(custom.top_p, 0.9)
+    self.assertEqual(custom.top_k, 20)
+    self.assertTrue(custom.overlong_filter)
+
   def test_routed_experts_flags_reach_rollout_config(self):
     defaults = run_rollout_node._rollout_config(
         run_rollout_node._parse_args([])
@@ -359,11 +381,13 @@ class RunRolloutNodeTest(absltest.TestCase):
           run_rollout_node._parse_args([])
       )
     self.assertEqual(defaults.drain_timeout_s, 660.0)
+    self.assertEqual(defaults.episode_timeout, 600.0)
 
     deepswe_cfg = run_rollout_node._rollout_config(
         run_rollout_node._parse_args(["--episode_timeout_secs=1800"])
     )
     self.assertEqual(deepswe_cfg.drain_timeout_s, 1860.0)
+    self.assertEqual(deepswe_cfg.episode_timeout, 1800.0)
 
     stderr = io.StringIO()
     with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
@@ -639,6 +663,7 @@ class RunRolloutNodeTest(absltest.TestCase):
     context = mock.MagicMock()
     mock_tokenizer = mock.MagicMock(pad_token_id=0, eos_token="<eos>")
     mock_worker_service = mock.MagicMock(spec=rollout_worker.RolloutWorker)
+    mock_worker_service.config = rollout_worker.RolloutConfig()
     mock_worker_service.trajectory_store = None
     mock_sampler = mock.MagicMock()
     mock_sampler.stop = mock.AsyncMock()

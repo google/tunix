@@ -53,9 +53,9 @@ class RolloutManager:
       chat_parser: Any,
       env_factory: Callable[..., base_environment.BaseTaskEnv],
       agent_factory: Callable[..., base_agent.ConversationAgentBase],
+      config: base_rollout.RolloutConfig,
       env_config: Mapping[str, Any] = types.MappingProxyType({}),
       agent_config: Mapping[str, Any] = types.MappingProxyType({}),
-      config: Optional[base_rollout.RolloutConfig] = None,
       max_concurrency: int = 64,
       drain_timeout_s: float = timeouts_lib.DEFAULT_DRAIN_TIMEOUT_S,
       trajectory_store: Optional[store.TrajectoryWriter] = None,
@@ -69,11 +69,11 @@ class RolloutManager:
       chat_parser: Chat parser for conversation templating.
       env_factory: Factory callable producing environment instances.
       agent_factory: Factory callable producing agent instances.
+      config: RolloutConfig configuration options.
       env_config: Default environment constructor kwargs. A request's
         `metadata["env_config"]` entries are shallow-merged on top of these.
       agent_config: Default agent constructor kwargs. A request's
         `metadata["agent_config"]` replaces these entirely when present.
-      config: RolloutConfig configuration options.
       max_concurrency: Maximum number of concurrent episodes.
       drain_timeout_s: Soft drain window (seconds) in `pre_weight_sync` when
         `partial_rollout` is False. Waits up to `drain_timeout_s` for in-flight
@@ -86,32 +86,7 @@ class RolloutManager:
     self._drain_timeout_s = timeouts_lib.validate_positive_finite(
         drain_timeout_s, "drain_timeout_s"
     )
-    self.config = config
-    self._partial_rollout: bool = (
-        bool(getattr(config, "partial_rollout", False))
-        if config is not None
-        else False
-    )
-    self._store_routed_experts: bool = (
-        bool(getattr(config, "store_routed_experts", False))
-        if config is not None
-        else False
-    )
-    self._routed_experts_encode_mode: datatypes.RoutedExpertsEncodeMode = (
-        config.routed_experts_encode_mode if config is not None else "auto"
-    )
-    self._routed_experts_num_experts: int | None = (
-        config.routed_experts_num_experts if config is not None else None
-    )
-    raw_max_prompt = config.max_prompt_length if config is not None else None
-    if raw_max_prompt is not None and (
-        isinstance(raw_max_prompt, bool) or not isinstance(raw_max_prompt, int)
-    ):
-      raise TypeError(
-          "RolloutConfig.max_prompt_length must be an int or None, got"
-          f" {raw_max_prompt!r}."
-      )
-    self._max_prompt_length: int | None = raw_max_prompt
+    self.config: base_rollout.RolloutConfig = config
     self._staging_buffer: staging_buffer_lib.RolloutStagingBuffer | None = (
         staging_buffer
     )
@@ -130,10 +105,6 @@ class RolloutManager:
     self.tokenizer = tokenizer
     self.chat_parser = chat_parser
     self.trajectory_store = trajectory_store
-    # `RolloutConfig.eos_tokens` is the stop set the sampler runs with, and it
-    # overrides the tokenizer's own EOS. Collectors need it to tell a rollout
-    # that stopped on its own from one that exhausted its budget.
-    self.eos_ids = getattr(config, "eos_tokens", None) if config else None
 
     self._active_collectors: Dict[
         str, collector_lib.TrajectoryCollectorEngine
@@ -147,7 +118,7 @@ class RolloutManager:
 
   @property
   def partial_rollout(self) -> bool:
-    return self._partial_rollout
+    return self.config.partial_rollout
 
   @property
   def active_tasks(self) -> tuple[asyncio.Task[Any], ...]:
@@ -205,7 +176,8 @@ class RolloutManager:
             " MoE routed_experts capture enabled."
         )
       encoding = datatypes.resolve_routed_experts_wire_encoding(
-          self._routed_experts_encode_mode, self._routed_experts_num_experts
+          self.config.routed_experts_encode_mode,
+          self.config.routed_experts_num_experts,
       )
       self._staging_bytes_per_token = datatypes.routed_experts_bytes_per_token(
           shape[0], shape[1], encoding
@@ -220,13 +192,14 @@ class RolloutManager:
           "RolloutRequest(stage_routed_experts=True) requires positive"
           f" request.max_response_length, got {max_resp!r}."
       )
-    if self._max_prompt_length is None or self._max_prompt_length <= 0:
+    if self.config.max_prompt_length <= 0:
       raise ValueError(
           "RolloutRequest(stage_routed_experts=True) requires positive"
-          f" RolloutConfig.max_prompt_length, got {self._max_prompt_length!r}."
+          " RolloutConfig.max_prompt_length, got"
+          f" {self.config.max_prompt_length!r}."
       )
     worst_case_bytes = (
-        self._max_prompt_length + max_resp
+        self.config.max_prompt_length + max_resp
     ) * self._staging_bytes_per_token
     return await self._staging_buffer.reserve(
         worst_case_bytes,
@@ -261,14 +234,14 @@ class RolloutManager:
         **request.metadata.get("agent_config", self.agent_config)
     )
     collector_kwargs: dict[str, Any] = {
-        "routed_experts_encode_mode": self._routed_experts_encode_mode,
-        "routed_experts_num_experts": self._routed_experts_num_experts,
+        "routed_experts_encode_mode": self.config.routed_experts_encode_mode,
+        "routed_experts_num_experts": self.config.routed_experts_num_experts,
     }
     if request.stage_routed_experts:
-      collector_kwargs["max_prompt_length"] = self._max_prompt_length
+      collector_kwargs["max_prompt_length"] = self.config.max_prompt_length
     if self.trajectory_store is not None:
       collector_kwargs["trajectory_store"] = self.trajectory_store
-    if self._store_routed_experts:
+    if self.config.store_routed_experts:
       collector_kwargs["store_routed_experts"] = True
     return collector_lib.TrajectoryCollectorEngine(
         traj_id=traj_id,
@@ -278,8 +251,11 @@ class RolloutManager:
         agent=agent,
         tokenizer=self.tokenizer,
         chat_parser=self.chat_parser,
-        eos_ids=self.eos_ids,
-        partial_rollout=self._partial_rollout,
+        # `RolloutConfig.eos_tokens` is the stop set the sampler runs with, and
+        # it overrides the tokenizer's own EOS. Collectors need it to tell a
+        # rollout that stopped on its own from one that exhausted its budget.
+        eos_ids=self.config.eos_tokens,
+        partial_rollout=self.config.partial_rollout,
         policy_version_fn=lambda: self._policy_version,
         **collector_kwargs,
     )
@@ -486,12 +462,12 @@ class RolloutManager:
     t0 = time.monotonic()
     self._traffic.transition_to_syncing()
     in_flight_before = len(self._active_collectors)
-    if not self._partial_rollout:
+    if not self.config.partial_rollout:
       await self._traffic.drain(self._drain_timeout_s)
     self.pause_all()
     res = None
     if self.sampler:
-      if self._partial_rollout:
+      if self.config.partial_rollout:
         res = await self.sampler.pre_weight_sync(
             sync_request, partial_rollout=True, **kwargs
         )
@@ -501,7 +477,7 @@ class RolloutManager:
     logging.info(
         "[RolloutManager] pre_weight_sync(partial_rollout=%s,"
         " in_flight_before=%d, in_flight_after=%d) completed in %.2f ms",
-        self._partial_rollout,
+        self.config.partial_rollout,
         in_flight_before,
         len(self._active_collectors),
         elapsed_ms,
@@ -555,7 +531,7 @@ class RolloutManager:
     logging.info(
         "[RolloutManager] post_weight_sync(partial_rollout=%s,"
         " resumed_collectors=%d) completed",
-        self._partial_rollout,
+        self.config.partial_rollout,
         len(self._active_collectors),
     )
     return res
@@ -584,12 +560,8 @@ class RolloutManager:
 
   async def get_weight_sync_metadata(self, **kwargs) -> Any:
     """Returns the sampler's transport metadata for weight sync registration."""
-    if self.sampler:
-      return await self.sampler.get_weight_sync_metadata(**kwargs)
-    return []
+    return await self.sampler.get_weight_sync_metadata(**kwargs)
 
   def get_target_state(self) -> Any:
     """Returns the sampler target-state skeleton used for trainer conversion."""
-    if self.sampler is None:
-      raise RuntimeError("RolloutManager has no sampler configured.")
     return self.sampler.get_target_state()
