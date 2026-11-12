@@ -24,6 +24,7 @@ import gc
 import itertools
 import operator
 import os
+import time
 from typing import Any, Callable, Mapping, Sequence, cast
 
 from absl import logging
@@ -40,6 +41,9 @@ import numpy as np
 import optax
 from tunix.common import configs
 from tunix.common import datatypes
+from tunix.dist_rl.trajectory import base_store
+from tunix.dist_rl.trajectory import file_store
+from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.experimental.rollout import vanilla_rollout as vanilla_rollout_v2
 from tunix.generate import tokenizer_adapter
 from tunix.perf import metrics as perf_metrics
@@ -73,6 +77,9 @@ ClusterConfig = configs.ClusterConfig
 ModelOrPath = nnx.Module | str
 MetricsT = perf_metrics.MetricsT
 MetricsBuffer = perf_metrics.MetricsBuffer
+
+# Subdirectory of the metrics log dir that holds the trajectory store.
+_TRAJECTORY_STORE_SUBDIR = "trajectories"
 
 
 @contextlib.contextmanager
@@ -184,6 +191,7 @@ class RLEngine:
     self._buffered_train_metrics: list[MetricsBuffer] = []
     self._buffered_eval_metrics: list[MetricsBuffer] = []
     self._external_metrics_logger = None
+    self._trajectory_store = self._create_trajectory_store()
     self._rollout_released_for_training: bool = False
 
     self._init_engine()
@@ -701,6 +709,68 @@ class RLEngine:
       self.critic_trainer.close()
     if self.profiler:
       self.profiler.close()
+    trajectory_store = getattr(self, "_trajectory_store", None)
+    if trajectory_store is not None:
+      trajectory_store.close()
+
+  def _create_trajectory_store(self) -> base_store.TrajectoryWriter | None:
+    """Creates the per-trajectory metrics store if a metrics log dir is set.
+
+    Like the metrics logging backends, the store only lives on the main process
+    so that multi-host runs do not write the same trajectories once per host.
+
+    Returns:
+      A `FileTrajectoryStore` under `<log_dir>/trajectories/`, or None.
+    """
+    options = self.cluster_config.training_config.metrics_logging_options
+    if not options or not options.log_dir or jax.process_index() != 0:
+      return None
+    # A new run directory per engine, so a relaunch does not overwrite the
+    # trajectories of an earlier launch (trajectory ids restart at 0).
+    return file_store.FileTrajectoryStore(
+        root_dir=os.path.join(options.log_dir, _TRAJECTORY_STORE_SUBDIR),
+        run_id=f"run_{int(time.time())}",
+    )
+
+  @property
+  def trajectory_store(self) -> base_store.TrajectoryWriter | None:
+    """The store per-trajectory metrics are written to, or None if disabled."""
+    return self._trajectory_store
+
+  def log_trajectory_metrics(
+      self,
+      trajectory_metrics: Sequence[tuple[str, Mapping[str, Any]]],
+      mode: Mode,
+      step: int | None,
+  ) -> None:
+    """Persists per-trajectory metrics to the trajectory store.
+
+    Each entry's metrics are recorded via `TrajectoryStore.update_metrics`,
+    with `mode` and `global_step` added. No-op if there is no store. Failures
+    are logged and never interrupt training.
+
+    Args:
+      trajectory_metrics: `(trajectory_id, metrics)` pairs, where `metrics` is
+        a JSON-serializable dict stored in `TrajectoryMetrics.extra`.
+      mode: The mode (TRAIN or EVAL) the trajectories were generated in.
+      step: The global step the trajectories belong to.
+    """
+    if self._trajectory_store is None:
+      return
+    for trajectory_id, metrics in trajectory_metrics:
+      try:
+        self._trajectory_store.update_metrics(
+            trajectory_id,
+            trajectory_lib.TrajectoryMetrics(
+                extra={**metrics, "mode": str(mode), "global_step": step}
+            ),
+        )
+      except Exception:  # pylint: disable=broad-exception-caught
+        logging.warning(
+            "Failed to log metrics for trajectory %s.",
+            trajectory_id,
+            exc_info=True,
+        )
 
   def _log_metrics(self, metrics_buffer: MetricsBuffer) -> None:
     """Log metrics."""

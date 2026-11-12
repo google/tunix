@@ -39,6 +39,9 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
+from tunix.dist_rl.trajectory import file_store
+from tunix.dist_rl.trajectory import in_memory_store
+from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.generate import tokenizer_adapter
 from tunix.rl import algo_core
 from tunix.rl import common as rl_common
@@ -52,7 +55,6 @@ from tunix.rl.queue import data_queue as queue_lib
 from tunix.rl.rollout import base_rollout
 from tunix.sft import metrics_logger
 from tunix.tests import test_common
-from tunix.utils import trajectory_logger
 from typing_extensions import override
 
 os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=2"
@@ -2126,29 +2128,77 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         chat_parser=MockChatParser(),
     )
     train_ds = _dummy_dataset(MySource(data=["1"], repeat=1), batch_size=1)
+    store = rl_engine.trajectory_store
+    self.assertIsInstance(store, file_store.FileTrajectoryStore)
 
-    with (
-        mock.patch.object(trajectory_logger, "log_item") as mock_log_item,
-        mock.patch.object(
-            rl_engine, "generate", side_effect=self._mock_generate
-        ),
+    with mock.patch.object(
+        rl_engine, "generate", side_effect=self._mock_generate
     ):
       grpo_learner.train(train_ds)
-      if grpo_learner._trajectory_logger:
-        grpo_learner._trajectory_logger.stop()
-      self.assertEqual(grpo_learner.rl_engine.global_steps, 1)
-      self.assertEqual(mock_log_item.call_count, 1)
+    self.assertEqual(grpo_learner.rl_engine.global_steps, 1)
 
-      logged_items = mock_log_item.call_args_list[0][0][1]
-      self.assertLen(logged_items, grpo_config.num_generations)
+    # `train()` closes the engine, which flushes and closes the store.
+    metrics_by_id = store.get_trajectories_metrics()
+    # One group (group_id 0) of `num_generations` trajectories, keyed by the
+    # canonical `TrajectoryItem.traj_id`.
+    self.assertCountEqual(
+        metrics_by_id,
+        [f"traj_0_g{i}" for i in range(grpo_config.num_generations)],
+    )
+    for metrics in metrics_by_id.values():
+      extra = metrics.extra
+      conversation = extra["conversation_text"]
+      assistant_msgs = [m for m in conversation if m["role"] == "assistant"]
+      self.assertNotEmpty(assistant_msgs)
+      self.assertIn(assistant_msgs[0]["content"], _MOCK_RESPONSES)
+      self.assertEqual(extra["mode"], "train")
+      self.assertEqual(extra["global_step"], 0)
+      self.assertEqual(extra["rollout_policy_version"], 0)
+      self.assertIn("reward", extra)
+      self.assertIn("advantage", extra)
+      self.assertIn("status", extra)
 
-      for traj in logged_items:
-        self.assertIn("conversation_text", traj)
-        conversation = traj["conversation_text"]
-        assistant_msgs = [m for m in conversation if m["role"] == "assistant"]
-        self.assertNotEmpty(assistant_msgs)
-        self.assertIn(assistant_msgs[0]["content"], _MOCK_RESPONSES)
-        self.assertEqual(traj.get("policy_versions"), [0])
+  def test_no_trajectory_store_without_metrics_log_dir(self):
+    vocab = _mock_vocab()
+    tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
+    model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    mesh = pxla.thread_resources.env.physical_mesh
+    cluster_config = rl_engine_lib.ClusterConfig(
+        role_to_mesh={
+            rl_engine_lib.Role.ACTOR: mesh,
+            rl_engine_lib.Role.REFERENCE: mesh,
+            rl_engine_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine="vanilla",
+        offload_to_cpu=False,
+        training_config=rl_engine_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=1,
+            max_steps=1,
+            gradient_accumulation_steps=None,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_prompt_length=256,
+            max_tokens_to_generate=10,
+            return_logprobs=True,
+            kv_cache_size=1024,
+        ),
+    )
+    with mock.patch.object(jax.monitoring, "register_scalar_listener"):
+      rl_engine = rl_engine_lib.RLEngine(
+          actor=model,
+          reference=model,
+          tokenizer=tokenizer,
+          cluster_config=cluster_config,
+      )
+    self.assertIsNone(rl_engine.trajectory_store)
+    # Without a store, recording trajectory metrics is a no-op.
+    rl_engine.log_trajectory_metrics(
+        [("traj_0_g0", {"reward": 1.0})], mode=rl_engine_lib.Mode.TRAIN, step=0
+    )
 
   def test_grpo_with_lora_model(self):
     # reshard through default device_put.
@@ -2528,7 +2578,15 @@ class ExactTokenContinuityBatchTest(absltest.TestCase):
         "original_input": {"prompts": ["fixture"]},
     }
 
-  def _make_batch(self, *, packed=False, raw=None):
+  def _make_batch(
+      self,
+      *,
+      packed=False,
+      raw=None,
+      trajectory_store=None,
+      mode=rl_engine_lib.Mode.TRAIN,
+      expected_step=None,
+  ):
     import copy  # pylint: disable=g-import-not-at-top
     from tunix.perf.experimental import tracer  # pylint: disable=g-import-not-at-top
     from tunix.rl.agentic.agents import agent_types  # pylint: disable=g-import-not-at-top
@@ -2539,7 +2597,6 @@ class ExactTokenContinuityBatchTest(absltest.TestCase):
         beta=0.0,
         use_rollout_logps=True,
     )
-    obj._trajectory_logger = None
     obj._full_batch_size = 0
     obj.metric_fns = []
     obj._compute_rewards = lambda **kw: jnp.array([0.0, 1.0])
@@ -2548,6 +2605,12 @@ class ExactTokenContinuityBatchTest(absltest.TestCase):
         r2m={rl_engine_lib.Role.ACTOR: None},
         perf_v2=tracer.NoopTracer(),
         buffer_metrics_async=mock.Mock(),
+        # The real `RLEngine.log_trajectory_metrics`, bound to a stub engine
+        # that only carries the trajectory store.
+        log_trajectory_metrics=functools.partial(
+            rl_engine_lib.RLEngine.log_trajectory_metrics,
+            types.SimpleNamespace(_trajectory_store=trajectory_store),
+        ),
         cluster_config=types.SimpleNamespace(
             rollout_config=base_rollout.RolloutConfig(max_prompt_length=5),
             training_config=types.SimpleNamespace(
@@ -2559,9 +2622,78 @@ class ExactTokenContinuityBatchTest(absltest.TestCase):
     )
     record = self._raw_trajectory() if raw is None else raw
     items = [
-        agent_types.TrajectoryItem(traj=copy.deepcopy(record)) for _ in range(2)
+        agent_types.TrajectoryItem(
+            prompt_id=7, group_index=i, traj=copy.deepcopy(record)
+        )
+        for i in range(2)
     ]
-    return obj._process_results(items)[0]
+    return obj._process_results(items, mode=mode, expected_step=expected_step)[
+        0
+    ]
+
+  def test_train_metrics_are_recorded_by_trajectory_id(self):
+    store = in_memory_store.InMemoryTrajectoryStore()
+    self._make_batch(trajectory_store=store, expected_step=3)
+    metrics_by_id = store.get_trajectories_metrics()
+    self.assertCountEqual(metrics_by_id, ["traj_7_g0", "traj_7_g1"])
+    raw = self._raw_trajectory()
+    for i, traj_id in enumerate(["traj_7_g0", "traj_7_g1"]):
+      extra = metrics_by_id[traj_id].extra
+      self.assertEqual(extra["mode"], "train")
+      self.assertEqual(extra["global_step"], 3)
+      self.assertEqual(extra["rollout_policy_version"], 7)
+      self.assertEqual(extra["trajectory_reward"], 1.0)
+      # `_compute_rewards` is stubbed to return [0.0, 1.0].
+      self.assertEqual(extra["reward"], float(i))
+      self.assertIn("advantage", extra)
+      self.assertEqual(extra["conversation_text"], raw["conversation_text"])
+      # Heavy per-token arrays are not duplicated into the metrics.
+      self.assertNotIn("conversation_tokens", extra)
+
+  def test_train_and_eval_metrics_share_store_without_collisions(self):
+    store = in_memory_store.InMemoryTrajectoryStore()
+    self._make_batch(trajectory_store=store, expected_step=2)
+    for step in (2, 4):
+      self._make_batch(
+          trajectory_store=store,
+          mode=rl_engine_lib.Mode.EVAL,
+          expected_step=step,
+      )
+    metrics_by_id = store.get_trajectories_metrics()
+    self.assertCountEqual(
+        metrics_by_id,
+        [
+            "traj_7_g0",
+            "traj_7_g1",
+            "traj_7_g0_step2",
+            "traj_7_g1_step2",
+            "traj_7_g0_step4",
+            "traj_7_g1_step4",
+        ],
+    )
+    self.assertEqual(metrics_by_id["traj_7_g1"].extra["mode"], "train")
+    eval_extra = metrics_by_id["traj_7_g1_step4"].extra
+    self.assertEqual(eval_extra["mode"], "eval")
+    self.assertEqual(eval_extra["global_step"], 4)
+
+  def test_trajectory_metrics_failure_is_not_fatal(self):
+    store = mock.create_autospec(
+        in_memory_store.InMemoryTrajectoryStore, instance=True
+    )
+    store.update_metrics.side_effect = RuntimeError("store is down")
+    with self.assertLogs(level="WARNING") as logs:
+      batch = self._make_batch(trajectory_store=store)
+    self.assertIsNotNone(batch)
+    self.assertEqual(store.update_metrics.call_count, 2)
+    traj_id, metrics = store.update_metrics.call_args.args
+    self.assertEqual(traj_id, "traj_7_g1")
+    self.assertIsInstance(metrics, trajectory_lib.TrajectoryMetrics)
+    self.assertTrue(
+        any(
+            "Failed to log metrics for trajectory" in line
+            for line in logs.output
+        )
+    )
 
   def test_exact_batch_keeps_recorded_ids_masks_and_logprobs(self):
     raw = self._raw_trajectory()

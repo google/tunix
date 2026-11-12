@@ -3026,7 +3026,6 @@ class ExactTokenContinuityCollectTest(absltest.TestCase):
         beta=0.0,
         use_rollout_logps=True,
     )
-    learner._trajectory_logger = None
     learner._full_batch_size = 0
     learner.metric_fns = []
     learner._compute_rewards = lambda **kw: np.array([0.0, 1.0])
@@ -3035,6 +3034,7 @@ class ExactTokenContinuityCollectTest(absltest.TestCase):
         r2m={rl_cluster.Role.ACTOR: None},
         perf_v2=perf_tracer_v2.NoopTracer(),
         buffer_metrics_async=mock.Mock(),
+        log_trajectory_metrics=mock.Mock(),
         cluster_config=SimpleNamespace(
             rollout_config=base_rollout.RolloutConfig(max_prompt_length=5),
             training_config=SimpleNamespace(
