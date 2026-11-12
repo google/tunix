@@ -20,18 +20,44 @@ import numpy as np
 from examples.deepswe import sandbox_utils
 
 
+class _FakePlan:
+  """Minimal FleetPlan implementation tracking planned task images."""
+
+  def __init__(self, images: set[str]):
+    self._images = set(images)
+
+  def for_image(self, image: str) -> str | None:
+    return image if image in self._images else None
+
+
 class FakeFleet:
   """Fake SandboxFleet that records calls and tracks active pool replica state."""
 
   def __init__(self):
+    self.tasks: list[object] = []
+    self.plan_: _FakePlan | None = None
+    self._image_rewrite_fn = None
     self.warm_calls: list[tuple[str, int | None, bool]] = []
     self.set_replicas_calls: list[tuple[str, int]] = []
     self.unwarm_calls: list[str] = []
     self.active_pools: dict[str, int] = {}
 
+  def load_tasks(self, tasks: list[object], **kwargs: object) -> None:
+    del kwargs
+    self.tasks = list(tasks)
+
+  def plan(self) -> _FakePlan:
+    self.plan_ = _FakePlan({getattr(t, "image") for t in self.tasks})
+    return self.plan_
+
   def warm_image(
       self, image: str, replicas_override: int | None = None, wait: bool = False
   ) -> None:
+    if self.plan_ is None or self.plan_.for_image(image) is None:
+      raise AssertionError(
+          f"warm_image({image!r}) called before registering image in"
+          " fleet.plan_"
+      )
     self.warm_calls.append((image, replicas_override, wait))
     self.active_pools[image] = replicas_override or 1
 
@@ -373,6 +399,44 @@ class SandboxUtilsTest(absltest.TestCase):
           replicas_override=4,
           wait=True,
       )
+
+  def test_max_staleness_and_job_scoped_fleet_config(self):
+    fleet = FakeFleet()
+    dataset = [
+        {"prompt": f"p{i}", "docker_image": f"img_{i}"} for i in range(4)
+    ]
+    iterator = sandbox_utils.PrewarmDatasetIterator(
+        dataset, fleet=fleet, num_generations=2, batch_size=1, max_staleness=1
+    )
+    self.assertEqual(next(iterator)["prompt"], "p0")
+    self.assertEqual(next(iterator)["prompt"], "p1")
+    self.assertEqual(next(iterator)["prompt"], "p2")
+    self.assertNotIn("img_0", fleet.unwarm_calls)
+    self.assertEqual(next(iterator)["prompt"], "p3")
+    self.assertIn("img_0", fleet.unwarm_calls)
+
+    captured: dict[str, object] = {}
+    mock_as_rl = mock.MagicMock()
+    mock_as_rl.FleetConfig.side_effect = lambda **kw: (
+        captured.update(kw)
+        or mock.MagicMock(install_teardown_hooks=kw["install_teardown_hooks"])
+    )
+    with (
+        mock.patch.dict("sys.modules", {"agent_sandbox_rl": mock_as_rl}),
+        mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", None),
+        mock.patch.object(sandbox_utils.atexit, "register") as mock_register,
+    ):
+      sandbox_utils.init_global_fleet(
+          tasks=None,
+          num_generations=8,
+          job_id="haoyugao-orch",
+          warm_on_init=False,
+          teardown_on_exit=False,
+      )
+      self.assertEqual(captured["template_name_prefix"], "r2e-haoyugao-")
+      self.assertLen(str(captured["run_id"]), 8)
+      self.assertFalse(captured["install_teardown_hooks"])
+      mock_register.assert_not_called()
 
 
 if __name__ == "__main__":

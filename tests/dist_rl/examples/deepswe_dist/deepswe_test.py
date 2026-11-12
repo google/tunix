@@ -16,6 +16,7 @@
 
 from collections.abc import Mapping
 import json
+import os
 import pathlib
 import unittest
 from unittest import mock
@@ -522,7 +523,7 @@ class DeepSWEDistTest(parameterized.TestCase):
         ),
     )
 
-  def test_deep_swe_env_initializes_on_demand_fleet_without_planning(self):
+  def test_deep_swe_env_initializes_or_attaches_sandbox_fleet(self):
     sentinel_fleet = object()
     mock_init = self.enter_context(
         mock.patch.object(
@@ -533,8 +534,11 @@ class DeepSWEDistTest(parameterized.TestCase):
             return_value=sentinel_fleet,
         )
     )
+    entry = {"instance_id": "repo__0", "docker_image": "img:v1"}
+    self.enter_context(mock.patch.dict(os.environ, {}, clear=False))
+    os.environ.pop("ORCHESTRATOR_ID", None)
     env = deepswe.DeepSWEEnv(
-        entry={"instance_id": "repo__0", "docker_image": "img:v1"},
+        entry=entry,
         prompt_id="repo__0",
         group_index=1,
         num_generations=8,
@@ -545,8 +549,104 @@ class DeepSWEDistTest(parameterized.TestCase):
         max_concurrency=8,
         num_generations=8,
         max_warmpool_replicas=8,
+        scaffold="r2egym",
+        job_id=None,
+        teardown_on_exit=True,
     )
     self.assertIs(env.fleet, sentinel_fleet)
+
+    mock_init.reset_mock()
+    with mock.patch.dict(os.environ, {"ORCHESTRATOR_ID": "testuser-orch"}):
+      deepswe.DeepSWEEnv(
+          entry=entry,
+          prompt_id="repo__0",
+          group_index=1,
+          num_generations=8,
+          use_agent_sandbox=True,
+      )
+    mock_init.assert_called_once_with(
+        tasks=[entry],
+        max_concurrency=8,
+        num_generations=8,
+        max_warmpool_replicas=8,
+        scaffold="r2egym",
+        job_id="testuser-orch",
+        teardown_on_exit=False,
+    )
+
+  def test_prewarm_sandboxes(self):
+    cleanup_calls: list[str] = []
+    mock_init = self.enter_context(
+        mock.patch.object(
+            deepswe.sandbox_utils, "init_global_fleet", autospec=True
+        )
+    )
+    mock_iter_cls = self.enter_context(
+        mock.patch.object(
+            deepswe.sandbox_utils, "PrewarmDatasetIterator", autospec=True
+        )
+    )
+    mock_teardown = self.enter_context(
+        mock.patch.object(
+            deepswe.sandbox_utils, "teardown_global_fleet", autospec=True
+        )
+    )
+    mock_iter_cls.return_value.close.side_effect = lambda: cleanup_calls.append(
+        "close"
+    )
+    mock_teardown.side_effect = lambda: cleanup_calls.append("teardown")
+    prompt_items: grain.MapDataset[dict[str, object]] = grain.MapDataset.source(
+        [{"prompt": "p0"}]
+    )
+
+    def wrap(use_agent_sandbox: bool):
+      return deepswe.prewarm_sandboxes(
+          prompt_items,
+          batch_size=8,
+          num_generations=8,
+          max_staleness=0,
+          env_kwargs={
+              "use_agent_sandbox": use_agent_sandbox,
+              "scaffold": "r2egym",
+          },
+          max_concurrency=256,
+          max_warmpool_replicas=8,
+      )
+
+    self.enter_context(mock.patch.dict(os.environ, {}, clear=False))
+    os.environ.pop("ORCHESTRATOR_ID", None)
+    with wrap(False) as wrapped:
+      self.assertIs(wrapped, prompt_items)
+    mock_init.assert_not_called()
+
+    with (
+        mock.patch.dict(os.environ, {"ORCHESTRATOR_ID": "testuser-orch"}),
+        wrap(True) as wrapped,
+    ):
+      self.assertIs(wrapped, mock_iter_cls.return_value)
+      self.assertEqual(cleanup_calls, [])
+    mock_init.assert_called_once_with(
+        tasks=None,
+        max_concurrency=256,
+        num_generations=8,
+        batch_size=8,
+        max_warmpool_replicas=8,
+        scaffold="r2egym",
+        job_id="testuser-orch",
+        warm_on_init=False,
+        teardown_on_exit=False,
+    )
+    mock_iter_cls.assert_called_once_with(
+        prompt_items,
+        fleet=mock_init.return_value,
+        num_generations=8,
+        batch_size=8,
+        max_warmpool_replicas=8,
+        max_staleness=1,
+        unwarm_on_exhaustion=True,
+        scaffold="r2egym",
+    )
+    self.assertEqual(cleanup_calls, ["close", "teardown"])
 
   def test_deepswe_yaml_preserves_recipe_defaults(self):
     hp = _hp()
@@ -604,6 +704,14 @@ class DeepSWEDistTest(parameterized.TestCase):
     self.assertEqual(grpo.reward_mode, "env")
     self.assertTrue(grpo.use_rollout_logps)
 
+    self.assertEqual(
+        hp.config["prompt_items_wrapper"],
+        "tunix.dist_rl.examples.deepswe_dist.deepswe.prewarm_sandboxes",
+    )
+    self.assertEqual(
+        hp.config_mapping("prompt_items_wrapper_kwargs"),
+        {"max_concurrency": 256, "max_warmpool_replicas": 8},
+    )
     _, derived_rpc_timeout = orchestrator.resolve_weight_sync_timeouts(hp)
     self.assertEqual(derived_rpc_timeout, 5100.0)
     cluster = hp.config_mapping("cluster_config")

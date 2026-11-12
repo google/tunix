@@ -83,6 +83,13 @@ data_config:
   # None.
   cache_dir: null
 
+# Pre-warms `SandboxFleet` warm pools on the orchestrator when
+# `env_kwargs.use_agent_sandbox` is true (no-op when false).
+prompt_items_wrapper: "tunix.dist_rl.examples.deepswe_dist.deepswe.prewarm_sandboxes"
+prompt_items_wrapper_kwargs:
+  max_concurrency: 256
+  max_warmpool_replicas: 8
+
 batch_size: 8
 rl_training_config:
   mini_batch_size: 8
@@ -151,14 +158,17 @@ agent_class_path: "deepswe_agent"
 agent_kwargs:
   scaffold: "r2egym"
 
-# Forwarded to the rollout worker as `NAMESPACE`, `NODE_SELECTOR_KEY`, and
-# `NODE_SELECTOR_VAL` for `SWEEnv` / `SandboxFleet` Kubernetes pods. On
-# `cluster_config.target=k8s`, `namespace: null` (what `k8s_launcher_v2.sh`
+# Forwarded by `k8s.sh` / `local.sh` to both the orchestrator and rollout
+# workers as `NAMESPACE`, `NODE_SELECTOR_KEY`, `NODE_SELECTOR_VAL`, and
+# `IMAGE_REWRITE_PREFIX` (alongside `ORCHESTRATOR_ID` when
+# `prompt_items_wrapper` is set) for `SWEEnv` / `SandboxFleet` Kubernetes pods.
+# On `cluster_config.target=k8s`, `namespace: null` (what `k8s_launcher_v2.sh`
 # sets) follows `cluster_config.k8s.namespace`.
 kubernetes_config:
   namespace: "rl-tunix-swebench"
   node_selector_key: null
   node_selector_val: null
+  image_rewrite_prefix: null
 
 cluster_config:
   # Imported by the rollout node to register `DeepSWEEnv` / `DeepSWEAgent`.
