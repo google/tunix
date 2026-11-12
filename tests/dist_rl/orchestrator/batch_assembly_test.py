@@ -4758,5 +4758,71 @@ class TwoPhaseRelayBatchAssemblerGoldenTest(parameterized.TestCase):
     self.assertEqual(np.count_nonzero(pad_all_fail_mb.payload.advantages), 0)
 
 
+def _with_topk(
+    payload: datatypes.RLTrainerPayload, fill: int
+) -> datatypes.RLTrainerPayload:
+  ids = np.full((len(payload.completion_ids), 2), fill, dtype=np.int32)
+  return dataclasses.replace(
+      payload, old_topk_token_ids=ids, old_topk_logps=-ids.astype(np.float32)
+  )
+
+
+class ScoreCenteringTopKTest(absltest.TestCase):
+
+  def test_padded_assembler_pads_truncates_and_matches_dummy(self):
+    make_asm = lambda: batch_assembly.PaddedBatchAssembler(
+        batch_size=3,
+        max_prompt_length=4,
+        max_response_length=3,
+        pad_id=0,
+        num_generations=2,
+        mini_batch_size=1,
+    )
+    old_lp = np.full(2, -0.5, dtype=np.float32)
+    (batch,) = list(
+        make_asm().feed([
+            _with_topk(_make_payload(2, 2, old_logps=old_lp), 5),
+            _with_topk(
+                _make_payload(2, 4, old_logps=np.full(4, -0.5, np.float32)), 6
+            ),
+        ])
+    )
+    ids, logps = batch.payload.old_topk_token_ids, batch.payload.old_topk_logps
+    np.testing.assert_array_equal(ids[0], [[5, 5], [5, 5], [0, 0]])
+    np.testing.assert_array_equal(ids[1], np.full((3, 2), 6))
+    np.testing.assert_array_equal(ids[2], 0)
+    np.testing.assert_array_equal(
+        logps[0], [[-5.0, -5.0], [-5.0, -5.0], [-np.inf, -np.inf]]
+    )
+    np.testing.assert_array_equal(logps[2], -np.inf)
+
+    dummy = make_asm().build_dummy_payload(
+        with_old_per_token_logps=True,
+        with_ref_per_token_logps=False,
+        score_centering_top_k=2,
+    )
+    BuildDummyPayloadTest()._assert_same_jit_signature(dummy, batch.payload)
+
+    with self.assertRaisesRegex(ValueError, "top-k logprobs"):
+      list(
+          make_asm().feed(
+              [_with_topk(_make_payload(2, 2), 5), _make_payload(2, 2)]
+          )
+      )
+
+  def test_sequence_packing_rejects_topk(self):
+    asm = batch_assembly.SequencePackedBatchAssembler(
+        batch_size=1, num_generations=2, mini_batch_size=1, max_packed_len=16
+    )
+    with self.assertRaisesRegex(ValueError, "sequence packing"):
+      asm.feed([_with_topk(_make_payload(2, 2), 5)])
+    with self.assertRaisesRegex(ValueError, "sequence packing"):
+      asm.build_dummy_payload(
+          with_old_per_token_logps=True,
+          with_ref_per_token_logps=False,
+          score_centering_top_k=2,
+      )
+
+
 if __name__ == "__main__":
   absltest.main()

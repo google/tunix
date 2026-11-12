@@ -102,6 +102,8 @@ class SamplingResponse(datatypes.Response):
       pad_output=True).
     logprobs: Array of per-token log-probabilities under the sampling policy
       (required for RL), or None if not requested.
+    topk_token_ids: Optional `[len(token_ids), k]` top-k candidate token IDs.
+    topk_logprobs: Optional `[len(token_ids), k]` log probs (`-inf` padded).
     logits: Array of per-token output logits when return_logits=True, else None.
     finish_reason: Reason generation terminated (e.g., "stop", "length",
       "cancelled", "error").
@@ -121,6 +123,8 @@ class SamplingResponse(datatypes.Response):
       default_factory=lambda: np.zeros(0, dtype=np.int32)
   )
   logprobs: np.ndarray | None = None
+  topk_token_ids: np.ndarray | None = None
+  topk_logprobs: np.ndarray | None = None
   logits: np.ndarray | None = None
   finish_reason: str = "stop"
   routed_experts: np.ndarray | None = None

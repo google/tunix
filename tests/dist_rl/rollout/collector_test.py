@@ -443,6 +443,35 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
     self.assertEqual(item.traj["assistant_turn_lengths"], [10])
     self.assertAlmostEqual(item.traj["sampler_time_s"], 0.20)
 
+  def test_run_episode_carries_sampler_topk_into_trajectory(self):
+    class _TopKSampler(_MockSampler):
+
+      async def sample(self, req, **kwargs):
+        res = await super().sample(req, **kwargs)
+        res.topk_token_ids = np.full(
+            (len(res.token_ids), 2), self._call_count, dtype=np.int32
+        )
+        res.topk_logprobs = -res.topk_token_ids.astype(np.float32)
+        return res
+
+    engine = collector.TrajectoryCollectorEngine(
+        traj_id="t1",
+        request=datatypes.RolloutRequest(
+            prompt_id="p1", prompt="2+2?", max_response_length=50
+        ),
+        sampler=_TopKSampler(token_lengths=[30, 20]),
+        env_client=_MultiStepEnv(task={"question": "2+2"}, max_steps=3),
+        agent=model_agent.ModelAgent("test_agent"),
+        tokenizer=_MockTokenizer(),
+        chat_parser=_RecordingParser(),
+    )
+    traj = asyncio.run(engine.run_episode()).traj
+    ids, logps = traj["old_topk_token_ids"], traj["old_topk_logprobs"]
+    sampled = np.asarray(traj["conversation_masks"]) > 0
+    expected = np.repeat([[1, 1], [2, 2]], [30, 20], axis=0)
+    np.testing.assert_array_equal(ids[sampled], expected)
+    np.testing.assert_array_equal(logps[sampled], -expected)
+
   def test_model_call_preserves_explicit_seed_in_generation_kwargs(self):
     async def _run():
       sampler = _MockVanillaSampler()

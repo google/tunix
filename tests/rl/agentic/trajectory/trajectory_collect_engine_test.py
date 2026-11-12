@@ -1302,10 +1302,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         self.mock_model_call.side_effect = [
             _output([101], [201, 202], [[201, 5], [202, 6]]),
             _output(
-                [101, 201, 202, 999, 301, 302],
-                [203],
-                second_ids,
-                second_lps,
+                [101, 201, 202, 999, 301, 302], [203], second_ids, second_lps
             ),
         ]
         engine = trajectory_collect_engine.TrajectoryCollectEngine(
@@ -1316,11 +1313,10 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
             chat_parser=self.mock_chat_parser,
         )
         if second_lps != 'ok':
-          with self.assertRaisesRegex(ValueError, 'top-k|topk'):
+          with self.assertRaisesRegex(ValueError, 'top-k'):
             asyncio.run(self._run_collect(engine, mode='Token'))
           continue
         token_data = asyncio.run(self._run_collect(engine, mode='Token'))
-
         np.testing.assert_array_equal(
             token_data['conversation_tokens'],
             [201, 202, 999, 301, 302, 203, 999],
@@ -1332,7 +1328,6 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
             ids[sampled], [[201, 5], [202, 6], [203, 7]]
         )
         np.testing.assert_allclose(logps[sampled], [[-0.1, -2.0]] * 3)
-        # Parser-suffix and environment tokens were not sampled.
         np.testing.assert_array_equal(ids[~sampled], 0)
         np.testing.assert_array_equal(logps[~sampled], -np.inf)
 

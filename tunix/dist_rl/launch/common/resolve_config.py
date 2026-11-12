@@ -334,6 +334,9 @@ def _finalize_dist_defaults(hp: cli_config.HyperParameters) -> None:
   # `GRPOConfig` spells "no sampler importance correction" as None.
   if grpo["sampler_is"] == "":
     grpo["sampler_is"] = None
+  _apply_score_centering_rollout_defaults(
+      _mutable_section(hp, "rollout_config"), grpo
+  )
 
   k8s = cluster["k8s"]
   if isinstance(k8s, MutableMapping):
@@ -352,6 +355,22 @@ def _finalize_dist_defaults(hp: cli_config.HyperParameters) -> None:
       k8s["inference_id"] = f"{user}-inf"
     if not k8s["otel_id"]:
       k8s["otel_id"] = f"{user}-otel"
+
+
+def _apply_score_centering_rollout_defaults(
+    rollout: MutableMapping[str, object], grpo: Mapping[str, object]
+) -> None:
+  """Auto-derives `rollout_config.num_logprobs` when left at default `1`."""
+  top_k = grpo["score_centering_top_k"]
+  if (
+      isinstance(grpo["score_centering"], bool)
+      and grpo["score_centering"]
+      and rollout["num_logprobs"] == 1
+      and not isinstance(top_k, bool)
+      and isinstance(top_k, int)
+      and top_k >= 1
+  ):
+    rollout["num_logprobs"] = max(2, top_k)
 
 
 def _validate_rollout_cache_settings(hp: cli_config.HyperParameters) -> None:
@@ -871,6 +890,47 @@ def _validate_local_settings(hp: cli_config.HyperParameters) -> None:
       )
 
 
+def _validate_score_centering_settings(hp: cli_config.HyperParameters) -> None:
+  """Validates `rollout_config.num_logprobs` and `score_centering*` invariants."""
+  rollout = hp.config_mapping("rollout_config")
+  grpo = hp.config_mapping("agentic_grpo_config")
+  rl_train = hp.config_mapping("rl_training_config")
+  enabled = grpo["score_centering"]
+  if not isinstance(enabled, bool):
+    raise TypeError(
+        f"agentic_grpo_config.score_centering must be a bool, got {enabled!r}."
+    )
+  num_logprobs = int(rollout["num_logprobs"])
+  top_k = int(grpo["score_centering_top_k"])
+  eps = float(grpo["score_centering_eps"])
+  if num_logprobs < 1 or top_k < 1 or not (0.0 < eps < math.inf):
+    raise ValueError(
+        "num_logprobs and score_centering_top_k must be >= 1, and"
+        " score_centering_eps must be finite and > 0."
+    )
+  if (num_logprobs > 1 or enabled) and hp.config["rollout_engine"] == "vanilla":
+    raise ValueError(
+        "Score Centering and num_logprobs > 1 require a vLLM rollout_engine."
+    )
+  if not enabled:
+    return
+  if (
+      num_logprobs < max(2, top_k)
+      or rl_train["max_seq_tokens_per_device"]
+      or int(rl_train["mini_batch_size"]) != int(hp.config["batch_size"])
+      or grpo["sampler_rs"] is not None
+      or (
+          grpo["sampler_is"] == "token"
+          and grpo["sampler_is_threshold"] is None
+      )
+  ):
+    raise ValueError(
+        "score_centering=true requires num_logprobs >= max(2, top_k),"
+        " mini_batch_size == batch_size, no max_seq_tokens_per_device, no"
+        " sampler_rs, and clipped or disabled sampler_is."
+    )
+
+
 def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   """Validates cross-field invariants across trainer and rollout configs."""
   # TODO(noghabi): Check which of these checks can be consolidated with the
@@ -977,6 +1037,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   _validate_maxtext_skip_step_kwargs(hp)
   _validate_rollout_weights(hp)
   _validate_library_settings(hp)
+  _validate_score_centering_settings(hp)
   if grpo["reward_mode"] == "reward_fn" and not hp.config["reward_functions"]:
     raise ValueError(
         "agentic_grpo_config.reward_mode='reward_fn' needs at least one entry"

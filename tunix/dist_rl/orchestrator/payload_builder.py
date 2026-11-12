@@ -112,6 +112,23 @@ def _extract_old_logps(
   return old_lp
 
 
+def _extract_old_topk(
+    item: datatypes.TrajectoryItem, completion_len: int, top_k: int
+) -> tuple[np.ndarray, np.ndarray]:
+  """Returns the first `top_k` sampler top-k ids and log probs, `[C, top_k]`."""
+  if not item.is_valid:
+    shape = (completion_len, top_k)
+    return np.zeros(shape, np.int32), np.full(shape, -np.inf, np.float32)
+  ids, logps = packing.pad_topk(
+      [item.traj["old_topk_token_ids"]],
+      [item.traj["old_topk_logprobs"]],
+      [completion_len],
+      completion_len,
+      top_k,
+  )
+  return ids[0], logps[0]
+
+
 def create_trainer_payloads(
     group: Sequence[datatypes.TrajectoryItem],
     rewards: Sequence[float] | np.ndarray,
@@ -126,8 +143,9 @@ def create_trainer_payloads(
     algo_config: Algorithm configuration. `advantage_estimator` selects the
       advantage math and `num_generations` is the group size handed to it;
       `use_rollout_logps` controls whether each rollout's `old_logprobs` are
-      attached as `old_per_token_logps`; the `routed_experts_*` fields control
-      how captured MoE routing is encoded.
+      attached as `old_per_token_logps`; `score_centering` attaches the first
+      `score_centering_top_k` sampler top-k ids and log probs; the
+      `routed_experts_*` fields control how captured MoE routing is encoded.
 
   Returns:
     One unbatched `RLTrainerPayload` per trajectory, in `group` order. Invalid
@@ -195,6 +213,11 @@ def create_trainer_payloads(
     # Custom estimators are not required to honor `valid_mask`, so the zero
     # advantage for invalid trajectories is enforced here.
     adv_val = float(advs[i]) if valid_mask[i] else 0.0
+    topk_ids = topk_logps = None
+    if algo_config.score_centering:
+      topk_ids, topk_logps = _extract_old_topk(
+          item, len(c_arr), algo_config.score_centering_top_k
+      )
     payloads.append(
         datatypes.RLTrainerPayload(
             prompt_ids=p_arr,
@@ -212,6 +235,8 @@ def create_trainer_payloads(
                 if returns is None
                 else np.full(len(c_arr), float(returns[i]), dtype=np.float32)
             ),
+            old_topk_token_ids=topk_ids,
+            old_topk_logps=topk_logps,
             routed_experts=_routed_experts_for(
                 item,
                 len(p_arr) + len(c_arr),

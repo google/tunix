@@ -187,8 +187,8 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
         "max_num_batched_tokens": config.rollout_vllm_max_num_batched_tokens,
         "max_num_seqs": config.rollout_vllm_max_num_seqs,
         "hf_config_path": config.rollout_vllm_hf_config_path,
-        # Only the logprob of each sampled token is needed.
-        "max_logprobs": 1,
+        # The sampled token's logprob, plus the top-k Score Centering uses.
+        "max_logprobs": config.num_logprobs,
         "logprobs_mode": config.rollout_vllm_logprobs_mode,
         "trust_remote_code": True,
     }
@@ -221,6 +221,7 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
             config.rollout_mapping_config or mappings.MappingConfig()
         ),
         return_logprobs=config.return_logprobs,
+        num_logprobs=config.num_logprobs,
         return_routed_experts=config.return_routed_experts,
         eos_tokens=config.eos_tokens,
         init_with_random_weights=config.rollout_vllm_init_with_random_weights,
@@ -551,6 +552,11 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
           req, sampler_output.padded_prompt_tokens[i], prompt_length=prompt_len
       )
       log_ps = np.array(lps, dtype=np.float32) if lps is not None else None
+      topk_ids = topk_logps = None
+      if sampler_output.topk_token_ids is not None:
+        topk_ids = sampler_output.topk_token_ids[i]
+      if sampler_output.topk_logprobs is not None:
+        topk_logps = sampler_output.topk_logprobs[i]
 
       responses.append(
           base_sampler_lib.SamplingResponse(
@@ -559,6 +565,8 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
               prompt_token_ids=prompt_token_ids,
               token_ids=tok_ids,
               logprobs=log_ps,
+              topk_token_ids=topk_ids,
+              topk_logprobs=topk_logps,
               routed_experts=routed,
               finish_reason="stop",
           )

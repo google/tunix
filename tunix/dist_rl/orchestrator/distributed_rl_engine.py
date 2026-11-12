@@ -1043,6 +1043,16 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
             algo_config.sampler_is is not None
             or algo_config.sampler_rs is not None
         )
+        if algo_config.score_centering and not can_fuse_agreement_in_loss:
+          raise ValueError(
+              "score_centering needs one on-policy update per batch:"
+              " num_iterations=1 and mini_batch_size >= batch_size."
+          )
+        score_centering_top_k = (
+            algo_config.score_centering_top_k
+            if algo_config.score_centering
+            else None
+        )
 
         def _configure():
           assert worker is not None
@@ -1064,6 +1074,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
               sampler_agreement_applied=sampler_agreement_applied,
               with_routed_experts=return_routed_experts,
               routed_experts_encode_mode=routed_experts_encode_mode,
+              score_centering_top_k=score_centering_top_k,
           )
           # TODO(tunix-dev): Move to the worker lifecycle (e.g., the
           # `initialize` step) so pre-compilation runs during the standard

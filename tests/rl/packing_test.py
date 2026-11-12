@@ -1344,5 +1344,24 @@ class TokenIdsTest(parameterized.TestCase):
         packing._packing_ext = orig_ext
 
 
+class PadTopKTest(absltest.TestCase):
+
+  def test_pad_topk_slices_pads_and_validates(self):
+    ids, logps = packing.pad_topk(
+        [np.array([[4, 6, 7], [5, 8, 9]], dtype=np.int32)],
+        [np.array([[-0.2, -1.0, -2.0], [-0.4, -1.2, -2.2]], dtype=np.float32)],
+        lengths=[2],
+        max_length=4,
+        k=2,
+        batch_size=2,
+    )
+    np.testing.assert_array_equal(ids[0], [[4, 6], [5, 8], [0, 0], [0, 0]])
+    np.testing.assert_array_equal(ids[1], 0)
+    self.assertTrue(np.isneginf(logps[0, 2:]).all())
+    self.assertTrue(np.isneginf(logps[1]).all())
+    with self.assertRaisesRegex(ValueError, "top-k logprobs"):
+      packing.pad_topk([None], [None], [2], max_length=4, k=2)
+
+
 if __name__ == "__main__":
   absltest.main()

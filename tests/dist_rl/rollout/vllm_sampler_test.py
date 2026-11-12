@@ -257,6 +257,54 @@ class VllmSamplerTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, "logprobs shape"):
       asyncio.run(self.sampler.sample(req))
 
+  def test_num_logprobs_above_one_returns_topk(self):
+    seen_params = []
+
+    async def mock_generate_stream(prompt, sampling_params, request_id):
+      del prompt, request_id
+      seen_params.append(sampling_params)
+      lp = lambda x: SimpleNamespace(logprob=x)
+      yield SimpleNamespace(
+          outputs=[
+              SimpleNamespace(
+                  text="ab",
+                  token_ids=[5, 6],
+                  finish_reason="stop",
+                  logprobs=[
+                      {5: lp(-2.0), 7: lp(-0.1), 8: lp(-1.5)},
+                      {6: lp(-0.2), 9: lp(-1.0)},
+                  ],
+              )
+          ]
+      )
+
+    self.mock_engine.generate.side_effect = mock_generate_stream
+
+    def _sample(sampler, return_logprobs=True):
+      sampler._engine = self.mock_engine
+      sampler._is_running = True
+      req = base_sampler_lib.SamplingRequest(
+          prompt="p",
+          sampling_params=base_sampler_lib.SamplingParams(
+              return_logprobs=return_logprobs
+          ),
+      )
+      return asyncio.run(sampler.sample(req))
+
+    topk_sampler = vllm_sampler.VllmSampler("topk", _config(num_logprobs=2))
+    topk_sampler.initialize()
+    self.assertEqual(topk_sampler.engine_args.max_logprobs, 2)
+    res = _sample(topk_sampler)
+    np.testing.assert_allclose(res.logprobs, [-2.0, -0.2])
+    np.testing.assert_array_equal(res.topk_token_ids, [[7, 8], [6, 9]])
+    np.testing.assert_allclose(res.topk_logprobs, [[-0.1, -1.5], [-0.2, -1.0]])
+    self.assertIsNone(_sample(self.sampler).topk_token_ids)
+    np.testing.assert_array_equal(
+        _sample(topk_sampler, return_logprobs=False).topk_token_ids,
+        [[7, 8], [6, 9]],
+    )
+    self.assertEqual([p.logprobs for p in seen_params], [2, 1, 2])
+
   def test_lifecycle_methods(self):
     self.sampler._mesh = "mock_mesh"
     asyncio.run(self.sampler.pause())

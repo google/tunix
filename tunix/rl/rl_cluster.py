@@ -1302,6 +1302,15 @@ class RLEngine:
           [cast(np.ndarray, out.prompt_lengths) for out in outputs]
       )
 
+    topk_token_ids = topk_logprobs = None
+    if outputs[0].topk_token_ids is not None:
+      topk_token_ids = list(
+          itertools.chain.from_iterable(out.topk_token_ids for out in outputs)  # pyrefly: ignore[bad-argument-type]
+      )
+      topk_logprobs = list(
+          itertools.chain.from_iterable(out.topk_logprobs for out in outputs)  # pyrefly: ignore[bad-argument-type]
+      )
+
     return base_rollout.RolloutOutput(
         text=texts,
         logits=logits,
@@ -1313,6 +1322,8 @@ class RLEngine:
         ),
         logprobs=logprobs,
         prompt_lengths=prompt_lengths,
+        topk_token_ids=topk_token_ids,
+        topk_logprobs=topk_logprobs,
     )
 
   def per_token_logps(

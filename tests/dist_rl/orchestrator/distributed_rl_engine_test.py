@@ -1689,6 +1689,7 @@ class DistributedRLEngineTest(absltest.TestCase):
         sampler_agreement_applied=False,
         with_routed_experts=False,
         routed_experts_encode_mode="auto",
+        score_centering_top_k=None,
     )
     self.mock_actor.compile.assert_called_once_with(mock_dummy)
     # Both setters clear the trainer JIT cache; compile must come last.
@@ -1724,6 +1725,27 @@ class DistributedRLEngineTest(absltest.TestCase):
         sampler_agreement_applied=True,
         with_routed_experts=False,
         routed_experts_encode_mode="auto",
+        score_centering_top_k=None,
+    )
+
+  def test_configure_worker_actor_score_centering_needs_fused_update(self):
+    algo_cfg = algorithm_config.GRPOConfig(
+        beta=0.0, score_centering=True, score_centering_top_k=16
+    )
+    algo_cfg.temperature = 1.0
+    asm = mock.MagicMock(pad_id=0)
+    with self.assertRaisesRegex(ValueError, "one on-policy update"):
+      self.engine.configure_worker(
+          datatypes.Role.ACTOR,
+          algo_config=algo_cfg,
+          assembler=asm,
+          can_fuse_agreement_in_loss=False,
+      )
+    self.engine.configure_worker(
+        datatypes.Role.ACTOR, algo_config=algo_cfg, assembler=asm
+    )
+    self.assertEqual(
+        asm.build_dummy_payload.call_args.kwargs["score_centering_top_k"], 16
     )
 
   def test_configure_worker_actor_builds_routed_experts_dummy_from_assembler(

@@ -1931,6 +1931,27 @@ weight_sync_config:
         with self.assertRaisesRegex(exc_type, pattern):
           resolve_config.initialize(overrides)
 
+  def test_score_centering_auto_derives_and_validates_num_logprobs(self):
+    for top_k, expected in ((64, 64), (1, 2)):
+      hp = resolve_config.initialize([
+          "agentic_grpo_config.score_centering=true",
+          f"agentic_grpo_config.score_centering_top_k={top_k}",
+      ])
+      self.assertEqual(hp.config["rollout_config"]["num_logprobs"], expected)
+
+    sc = ["agentic_grpo_config.score_centering=true"]
+    for bad_overrides, msg in (
+        ([*sc, "rollout_config.num_logprobs=16"], "num_logprobs"),
+        ([*sc, "rollout_engine=vanilla"], "vLLM rollout_engine"),
+        (
+            [*sc, "batch_size=8", "rl_training_config.mini_batch_size=4"],
+            "mini_batch_size == batch_size",
+        ),
+    ):
+      with self.subTest(overrides=bad_overrides):
+        with self.assertRaisesRegex(ValueError, msg):
+          resolve_config.initialize(bad_overrides)
+
 
 if __name__ == "__main__":
   absltest.main()

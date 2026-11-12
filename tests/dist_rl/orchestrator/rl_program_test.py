@@ -8738,6 +8738,7 @@ class StandardRLProgramRoutedExpertsCleanupTest(absltest.TestCase):
 
       routed = np.full((4, 2, 2), 3, dtype=np.int16)
       routed_ref = weakref.ref(routed)
+      topk = np.zeros((2, 4), dtype=np.int32)
       payload = datatypes.RLTrainerPayload(
           prompt_ids=np.array([10, 11], dtype=np.int32),
           prompt_mask=np.ones((2,), dtype=np.float32),
@@ -8745,6 +8746,8 @@ class StandardRLProgramRoutedExpertsCleanupTest(absltest.TestCase):
           completion_mask=np.ones((2,), dtype=np.float32),
           advantages=np.ones((2,), dtype=np.float32),
           routed_experts=routed,
+          old_topk_token_ids=topk,
+          old_topk_logps=topk.astype(np.float32),
       )
       mock_create_payloads = self.enterContext(
           mock.patch.object(
@@ -8816,6 +8819,8 @@ class StandardRLProgramRoutedExpertsCleanupTest(absltest.TestCase):
               "policy_versions": [0],
               "trajectory_reward": 1.0,
               "routed_experts": routed,
+              "old_topk_token_ids": topk,
+              "old_topk_logprobs": topk,
               "conversation_text": [
                   {"role": "user", "content": "q0"},
                   {"role": "assistant", "content": "answer"},
@@ -8828,7 +8833,7 @@ class StandardRLProgramRoutedExpertsCleanupTest(absltest.TestCase):
           metadata={"routed_experts": routed, "question": "q0"},
       )
       await program.raw_q.put(src_item)
-      del routed, payload
+      del routed, topk, payload
 
       # Run critique_stage concurrently with raw_q kept open so its coroutine
       # frame stays suspended at `await self.raw_q.get_group()` during training.
@@ -8837,6 +8842,8 @@ class StandardRLProgramRoutedExpertsCleanupTest(absltest.TestCase):
       mock_create_payloads.return_value = None
       mock_create_payloads.reset_mock()
       self.assertNotIn("routed_experts", src_item.traj)
+      self.assertNotIn("old_topk_token_ids", src_item.traj)
+      self.assertNotIn("old_topk_logprobs", src_item.traj)
       self.assertNotIn("routed_experts", src_item.metadata)
 
       self.assertIsNotNone(scored_group)
@@ -8844,7 +8851,12 @@ class StandardRLProgramRoutedExpertsCleanupTest(absltest.TestCase):
       self.assertIsNone(getattr(scored_group.items[0], "routed_experts", None))
       self.assertNotIn("routed_experts", scored_group.items[0].metadata)
       self.assertNotIn("routed_experts", scored_group.items[0].traj)
+      self.assertNotIn("old_topk_token_ids", scored_group.items[0].traj)
+      self.assertNotIn("old_topk_logprobs", scored_group.items[0].traj)
       self.assertIsNotNone(scored_group.payloads[0].routed_experts)
+      self.assertEqual(
+          scored_group.payloads[0].old_topk_token_ids.shape, (2, 4)
+      )
       self.assertIsNotNone(routed_ref())
 
       # Re-enqueue for train_stage consumption while critique_task remains
@@ -8872,6 +8884,8 @@ class StandardRLProgramRoutedExpertsCleanupTest(absltest.TestCase):
       logged_row = program.trajectory_logger.log_item_async.call_args.args[0]
       self.assertNotIn("routed_experts", logged_row["metadata"])
       self.assertNotIn("routed_experts", logged_row["trajectory"])
+      self.assertNotIn("old_topk_token_ids", logged_row["trajectory"])
+      self.assertNotIn("old_topk_logprobs", logged_row["trajectory"])
 
     asyncio.run(_run())
 

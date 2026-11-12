@@ -1320,6 +1320,18 @@ class RolloutMainTest(absltest.TestCase):
         execution_target.TORCH_TPU
     )
 
+  def test_score_centering_wires_num_logprobs_into_vllm_engine(self):
+    cfg = _inprocess_vllm_rollout_config(
+        "agentic_grpo_config.score_centering=true",
+        "agentic_grpo_config.score_centering_top_k=64",
+    )
+    self.assertEqual(cfg.num_logprobs, 64)
+    engine_kwargs = _vllm_engine_kwargs(
+        "agentic_grpo_config.score_centering=true",
+        "agentic_grpo_config.score_centering_top_k=64",
+    )
+    self.assertEqual(engine_kwargs["max_logprobs"], 64)
+
 
 if __name__ == "__main__":
   absltest.main()
