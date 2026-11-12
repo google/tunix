@@ -20,11 +20,24 @@ from __future__ import annotations
 
 import atexit
 import collections
+import dataclasses
+import hashlib
 import logging
 import os
+import re
 import threading
 from typing import Any, Callable
 import numpy as np
+
+
+@dataclasses.dataclass(frozen=True)
+class _FallbackTask:
+  """Minimal typed task record when `agent_sandbox_rl` is not installed."""
+
+  id: str
+  image: str
+  metadata: dict[str, Any]
+
 
 _GLOBAL_FLEET = None
 _FLEET_LOCK = threading.RLock()
@@ -153,6 +166,17 @@ def extract_task_image(item: dict[str, Any]) -> Any | None:
   return None
 
 
+def _decode_scalar(val: Any, default: str) -> str:
+  """Extracts a single string from a scalar, bytes, sequence, or ndarray."""
+  if isinstance(val, (list, tuple, np.ndarray)):
+    flat = np.asarray(val).reshape(-1).tolist()
+    val = flat[0] if flat else None
+  if val is None:
+    return default
+  decoded = val.decode("utf-8") if isinstance(val, bytes) else str(val)
+  return decoded or default
+
+
 def normalize_tasks_for_fleet(
     tasks: Any,
     scaffold: str = "r2egym",
@@ -161,35 +185,29 @@ def normalize_tasks_for_fleet(
   """Normalize heterogeneous dataset entries into Task objects for SandboxFleet."""
   del scaffold
   try:
-    from agent_sandbox_rl import Task  # pyrefly: ignore[missing-import]
+    from agent_sandbox_rl import Task as task_cls  # pyrefly: ignore[missing-import]
   except ImportError:
-    return list(tasks)
+    task_cls = _FallbackTask
 
   rewrite_fn = get_image_rewrite_fn(image_rewrite)
   normalized = []
   for item in tasks:
-    if hasattr(item, "image") and hasattr(item, "id"):
+    if not isinstance(item, dict):
       normalized.append(item)
-    elif isinstance(item, dict):
-      img = extract_task_image(item) or "default"
-      if isinstance(img, (list, np.ndarray)):
-        img = img[0] if len(img) > 0 else "default"
-      str_img = img.decode("utf-8") if hasattr(img, "decode") else str(img)
-      if rewrite_fn is not None:
-        str_img = rewrite_fn(str_img)
-
-      t_id = (
-          item.get("instance_id")
-          or item.get("id")
-          or item.get("prompt_id")
-          or str_img
-      )
-      if isinstance(t_id, (list, np.ndarray)):
-        t_id = t_id[0] if len(t_id) > 0 else "default"
-      str_id = t_id.decode("utf-8") if hasattr(t_id, "decode") else str(t_id)
-      normalized.append(Task(id=str_id, image=str_img, metadata={"ds": item}))
-    else:
-      normalized.append(item)
+      continue
+    str_img = _decode_scalar(extract_task_image(item), "default")
+    if rewrite_fn is not None:
+      str_img = rewrite_fn(str_img)
+    raw_id = next(
+        (
+            item[k]
+            for k in ("instance_id", "id", "prompt_id")
+            if item.get(k) is not None
+        ),
+        None,
+    )
+    str_id = _decode_scalar(raw_id, str_img)
+    normalized.append(task_cls(id=str_id, image=str_img, metadata={"ds": item}))
   return normalized
 
 
@@ -215,9 +233,7 @@ def ensure_tasks_in_fleet_plan(
 
     plan = fleet.plan_
     if plan is not None:
-      missing = [
-          t for t in normalized_tasks if plan.for_image(t.image) is None
-      ]
+      missing = [t for t in normalized_tasks if plan.for_image(t.image) is None]
       if not missing:
         return
     else:
@@ -264,6 +280,23 @@ def _build_template_spec() -> Any:
   )
 
 
+def _job_fleet_scope(job_id: str, scaffold: str) -> tuple[str, str]:
+  """Derives a deterministic 8-char hex `run_id` and DNS-1123 template prefix."""
+  stripped = job_id.strip()
+  clean_job = (
+      re.sub(r"[^a-z0-9-]+", "-", stripped.removesuffix("-orch").lower())
+      .strip("-")[:24]
+      .rstrip("-")
+  )
+  if not clean_job:
+    raise ValueError(
+        f"job_id {job_id!r} must contain at least one alphanumeric character."
+    )
+  run_id = hashlib.sha256(stripped.encode("utf-8")).hexdigest()[:8]
+  prefix = "swe" if scaffold == "sweagent" else "r2e"
+  return run_id, f"{prefix}-{clean_job}-"
+
+
 def init_global_fleet(
     tasks: list[Any] | None = None,
     max_concurrency: int = 128,
@@ -274,6 +307,9 @@ def init_global_fleet(
     scaffold: str = "r2egym",
     image_rewrite: Callable[[str], str] | None = None,
     node_selector: dict[str, str] | None = None,
+    job_id: str | None = None,
+    warm_on_init: bool = False,
+    teardown_on_exit: bool = True,
 ) -> Any:
   """Initialize the process-wide SandboxFleet instance once upfront."""
   global _GLOBAL_FLEET
@@ -302,23 +338,17 @@ def init_global_fleet(
       ) from e
 
     fleet_ns = namespace or os.getenv("NAMESPACE", "rl-tunix-swebench")
-    if node_selector is None:
-      key = os.environ.get("NODE_SELECTOR_KEY")
-      val = os.environ.get("NODE_SELECTOR_VAL")
-      node_sel = {key: val} if (key and val) else None
-    else:
-      node_sel = node_selector
-
-    logging.info(
-        "[SandboxFleet] Initializing SandboxFleet in namespace '%s' with"
-        " node_selector=%s",
-        fleet_ns,
-        node_sel,
-    )
-
+    key = os.environ.get("NODE_SELECTOR_KEY")
+    val = os.environ.get("NODE_SELECTOR_VAL")
+    node_sel = node_selector or ({key: val} if (key and val) else None)
     in_cluster = os.getenv("KUBERNETES_SERVICE_HOST") is not None
     effective_max_concurrent = max(
         max_concurrency, batch_size * num_generations * 2
+    )
+    target_warmpool_size = (
+        max_warmpool_replicas
+        if max_warmpool_replicas is not None
+        else num_generations
     )
 
     fleet_kwargs: dict[str, Any] = {
@@ -333,13 +363,19 @@ def init_global_fleet(
         "template": _build_template_spec(),
         "max_concurrent": effective_max_concurrent,
         "window_size": batch_size,
-        "max_warmpool_size": (
-            max_warmpool_replicas
-            if max_warmpool_replicas is not None
-            else num_generations
-        ),
+        "max_warmpool_size": target_warmpool_size,
         "warm_per_task": True,
+        "install_teardown_hooks": teardown_on_exit,
     }
+    if job_id is not None:
+      shared_run_id, template_prefix = _job_fleet_scope(job_id, scaffold)
+      fleet_kwargs["run_id"] = shared_run_id
+      fleet_kwargs["template_name_prefix"] = template_prefix
+      fleet_kwargs["labels"] = {
+          "app": "agent-sandbox-rl",
+          "agent-sandbox-rl-run": shared_run_id,
+          "app.kubernetes.io/created-by": job_id.strip(),
+      }
 
     fleet_cfg = FleetConfig(**fleet_kwargs)
     fleet_inst = SandboxFleet(fleet_cfg)
@@ -351,31 +387,28 @@ def init_global_fleet(
       normalized_tasks = normalize_tasks_for_fleet(
           tasks, scaffold=scaffold, image_rewrite=image_rewrite_fn
       )
-      if image_rewrite_fn is not None:
-        try:
-          fleet_inst.load_tasks(
-              normalized_tasks, image_rewrite=image_rewrite_fn
-          )
-        except TypeError:
-          fleet_inst.load_tasks(normalized_tasks)
-      else:
-        fleet_inst.load_tasks(normalized_tasks)
+      fleet_inst.load_tasks(normalized_tasks)
 
-    msg = (
-        f"[SandboxFleet] Initializing pipelined fleet in namespace={fleet_ns}"
-        f" (max_concurrent={effective_max_concurrent},"
-        f" window_size={batch_size},"
-        f" max_warmpool_replicas={fleet_kwargs['max_warmpool_size']},"
-        " warm_per_task=True)..."
+    logging.info(
+        "[SandboxFleet] Initialized fleet in namespace=%s (node_selector=%s,"
+        " max_concurrent=%d, window_size=%d, max_warmpool_replicas=%d,"
+        " job_id=%s).",
+        fleet_ns,
+        node_sel,
+        effective_max_concurrent,
+        batch_size,
+        target_warmpool_size,
+        job_id,
     )
-    logging.info(msg)
-    if getattr(fleet_cfg, "install_teardown_hooks", False):
+    if fleet_cfg.install_teardown_hooks:
       fleet_inst._install_teardown_hooks()
     fleet_inst._torndown = False
-    if hasattr(fleet_inst, "plan"):
-      fleet_inst.plan()
+    fleet_inst.plan()
     _GLOBAL_FLEET = fleet_inst
-    atexit.register(teardown_global_fleet)
+    if warm_on_init:
+      warm_global_fleet()
+    if teardown_on_exit:
+      atexit.register(teardown_global_fleet)
     return _GLOBAL_FLEET
 
 
@@ -442,17 +475,27 @@ class PrewarmDatasetIterator:
       batch_size: int = 8,
       lookahead_steps: int = 1,
       max_warmpool_replicas: int | None = None,
+      max_staleness: int = 0,
       unwarm_on_exhaustion: bool = False,
       scaffold: str = "r2egym",
       image_rewrite: Any | None = None,
   ):
     del lookahead_steps
+    if (
+        isinstance(max_staleness, bool)
+        or not isinstance(max_staleness, int)
+        or max_staleness < 0
+    ):
+      raise ValueError(
+          f"max_staleness must be a non-negative int, got {max_staleness!r}."
+      )
     self.scaffold = scaffold
     self.dataset_iter = iter(dataset)
     self.fleet = fleet or get_global_fleet()
     self.num_generations = num_generations
     self.batch_size = max(1, batch_size)
     self.max_warmpool_replicas = max_warmpool_replicas
+    self.max_staleness = max_staleness
     self.unwarm_on_exhaustion = unwarm_on_exhaustion
     self.image_rewrite = get_image_rewrite_fn(
         image_rewrite or getattr(self.fleet, "_image_rewrite_fn", None)
@@ -466,7 +509,9 @@ class PrewarmDatasetIterator:
     )
     self._current_batch_counts: dict[str, int] = {}
     self._next_batch_counts: dict[str, int] = {}
-    self._previous_batch_counts: dict[str, int] = {}
+    self._previous_batches: collections.deque[dict[str, int]] = (
+        collections.deque(maxlen=max_staleness + 1)
+    )
     self._image_counts: dict[str, int] = {}
     self._active_replicas: dict[str, int] = {}
     self.unwarm_calls: list[str] = []
@@ -573,12 +618,17 @@ class PrewarmDatasetIterator:
   ) -> int:
     """Consumes from dataset and adds item(s) to queue until samples >= batch_size."""
     current_samples = sum(s_cnt for _, _, s_cnt in queue)
+    flat_items: list[Any] = []
     while current_samples < self.batch_size and not self._exhausted:
       try:
         item = next(self.dataset_iter)
       except StopIteration:
         self._exhausted = True
         break
+      if isinstance(item, (list, tuple)):
+        flat_items.extend(item)
+      else:
+        flat_items.append(item)
       item_counts = self._extract_item_image_counts(item)
       img_count_sum = sum(item_counts.values())
       if img_count_sum > 0:
@@ -591,13 +641,21 @@ class PrewarmDatasetIterator:
       for img, count in item_counts.items():
         counts_dict[img] = counts_dict.get(img, 0) + count
       current_samples += sample_count
+    if flat_items:
+      ensure_tasks_in_fleet_plan(
+          self.fleet,
+          flat_items,
+          scaffold=self.scaffold,
+          image_rewrite=self.image_rewrite,
+      )
     return current_samples
 
   def _update_image_counts(self) -> None:
     """Updates dict to maintain samples of active batches."""
     self._image_counts.clear()
-    for img, count in self._previous_batch_counts.items():
-      self._image_counts[img] = self._image_counts.get(img, 0) + count
+    for prev_counts in self._previous_batches:
+      for img, count in prev_counts.items():
+        self._image_counts[img] = self._image_counts.get(img, 0) + count
     for img, count in self._current_batch_counts.items():
       self._image_counts[img] = self._image_counts.get(img, 0) + count
     for img, count in self._next_batch_counts.items():
@@ -675,9 +733,9 @@ class PrewarmDatasetIterator:
         raise StopIteration
 
       # The previous current_batch is now in-flight/running on the cluster.
-      # Retain its counts in _previous_batch_counts so its warm pool stays alive
-      # while workers connect and claim sandboxes.
-      self._previous_batch_counts = self._current_batch_counts
+      # Retain up to (max_staleness + 1) previous batches so their warm pools
+      # stay alive while workers connect and claim sandboxes.
+      self._previous_batches.append(self._current_batch_counts)
 
       # Shift next_batch to current_batch
       self.current_batch = self.next_batch
@@ -711,7 +769,7 @@ class PrewarmDatasetIterator:
           logging.warning("[PrewarmDatasetIterator] Final unwarm note: %s", e)
     self._active_replicas.clear()
     self._image_counts.clear()
-    self._previous_batch_counts.clear()
+    self._previous_batches.clear()
     self._current_batch_counts.clear()
     self._next_batch_counts.clear()
     self.current_batch.clear()
