@@ -981,7 +981,7 @@ class LaunchScriptsTest(absltest.TestCase):
         "cluster_config.local.trainer_shutdown_grace_secs=0",
     ]
     # Default download_model_weights=true runs pre-download even when custom
-    # wrapper mains (e.g. rl_efficiency_benchmark) are configured.
+    # wrapper mains (e.g. benchmarks/rl_efficiency) are configured.
     wrapped_default = self._run_launch(
         [
             *base_args,

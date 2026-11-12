@@ -16,8 +16,7 @@
 
 Planning and reporting need only the Python standard library. Training uses
 the repository's normal TPU dependencies. The workload module
-(`frozenlake_dist/frozenlake_benchmark.py`) supplies the training recipe for
-both stacks.
+(`frozenlake_workload.py`) supplies the training recipe for both stacks.
 """
 
 import argparse
@@ -32,11 +31,7 @@ import sys
 import time
 
 ROOT = Path(__file__).resolve().parents[4]
-WORKLOAD = (
-    Path(__file__).resolve().parents[1]
-    / "frozenlake_dist"
-    / "frozenlake_benchmark.py"
-)
+WORKLOAD = Path(__file__).resolve().with_name("frozenlake_workload.py")
 COMPLETED_STATUSES = (
     "SUCCEEDED",
     "MAX_STEPS_REACHED",

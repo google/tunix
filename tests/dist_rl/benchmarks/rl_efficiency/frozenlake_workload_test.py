@@ -15,7 +15,7 @@
 """CPU-only tests of the FrozenLake benchmark workload; no TPU/JAX/pytest.
 
 They read the YAML configs with PyYAML. Run directly:
-python3 tests/dist_rl/examples/frozenlake_dist/frozenlake_benchmark_test.py
+python3 tests/dist_rl/benchmarks/rl_efficiency/frozenlake_workload_test.py
 """
 
 import argparse
@@ -43,11 +43,13 @@ def load_module(path):
 
 
 benchmark = load_module(
-    ROOT / "tunix/dist_rl/examples/rl_efficiency_benchmark/benchmark.py"
+    ROOT / "tunix/dist_rl/benchmarks/rl_efficiency/benchmark.py"
 )
 workload = benchmark.load_workload()
-EXAMPLE = Path(workload.__file__).parent
-RECIPE = EXAMPLE.parent / "recipes" / "benchmark_frozenlake_gemma4_e2b.sh"
+EXAMPLE = ROOT / "tunix/dist_rl/examples/frozenlake_dist"
+RECIPE = (
+    ROOT / "tunix/dist_rl/examples/recipes/benchmark_frozenlake_gemma4_e2b.sh"
+)
 LAUNCH = ROOT / "tunix/dist_rl/launch"
 _ROLES = (
     "actor_model_config",

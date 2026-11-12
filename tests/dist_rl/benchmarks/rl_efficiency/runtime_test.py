@@ -25,7 +25,7 @@ from unittest import mock
 from flax import nnx
 import jax
 import jax.numpy as jnp
-from tunix.dist_rl.examples.rl_efficiency_benchmark import runtime
+from tunix.dist_rl.benchmarks.rl_efficiency import runtime
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
 
