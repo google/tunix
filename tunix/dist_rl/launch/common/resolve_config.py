@@ -38,7 +38,8 @@ import pathlib
 import re
 import shlex
 import sys
-from typing import Any, Final
+import types
+from typing import Any, Final, Literal
 
 import omegaconf
 from tunix.cli import config as cli_config
@@ -680,6 +681,140 @@ def _validate_fault_tolerance(hp: cli_config.HyperParameters) -> None:
     )
 
 
+# The arguments the orchestrator passes to `prompt_items_wrapper` itself
+# (`orchestrator.PromptItemsWrapper`), which its kwargs must not set.
+PROMPT_ITEMS_WRAPPER_ARGS: Final[tuple[str, ...]] = (
+    "prompt_items",
+    "batch_size",
+    "num_generations",
+    "max_staleness",
+    "env_kwargs",
+)
+
+
+def prompt_items_wrapper_parts(
+    hp: cli_config.HyperParameters,
+) -> tuple[str, str] | None:
+  """Returns the `(module, function)` parts of `prompt_items_wrapper`."""
+  raw = hp.config["prompt_items_wrapper"]
+  if raw is None:
+    return None
+  if not isinstance(raw, str):
+    raise TypeError(f"prompt_items_wrapper must be a str or null, got {raw!r}.")
+  if not raw:
+    return None
+  module_name, _, function_name = raw.rpartition(".")
+  if not module_name or not function_name:
+    raise ValueError(
+        "prompt_items_wrapper must be a dotted 'module.function' path, got"
+        f" {raw!r}."
+    )
+  return module_name, function_name
+
+
+def _validate_prompt_items_wrapper(hp: cli_config.HyperParameters) -> None:
+  """Checks `prompt_items_wrapper` and its kwargs without importing it."""
+  parts = prompt_items_wrapper_parts(hp)
+  kwargs = hp.config_mapping("prompt_items_wrapper_kwargs")
+  if kwargs and parts is None:
+    raise ValueError(
+        "prompt_items_wrapper_kwargs is set but prompt_items_wrapper is empty;"
+        " set prompt_items_wrapper to the 'module.function' that takes them,"
+        " or drop the kwargs."
+    )
+  reserved = sorted(set(PROMPT_ITEMS_WRAPPER_ARGS) & set(kwargs))
+  if reserved:
+    raise ValueError(
+        f"prompt_items_wrapper_kwargs sets {reserved}, which the orchestrator"
+        " passes to prompt_items_wrapper itself."
+    )
+
+
+ProcessRole = Literal["orchestrator", "trainer", "rollout", "inference"]
+PROCESS_ROLES: Final[tuple[ProcessRole, ...]] = (
+    "orchestrator",
+    "trainer",
+    "rollout",
+    "inference",
+)
+LIBRARY_ENV_CONFIG_KEYS: Final[Mapping[str, str]] = types.MappingProxyType({
+    "ENABLE_PATHWAYS_PERSISTENCE": (
+        "cluster_config.k8s.enable_pathways_persistence"
+    ),
+    "SKIP_JAX_PRECOMPILE": "vllm_config.skip_jax_precompile",
+    "TPU_RAIDEN_DATA_NICS": "weight_sync_config.raiden_data_nics",
+    "VERIFY_WEIGHTS": "weight_sync_config.verify_weights",
+})
+_FORBIDDEN_ROLE_ENVS: Final[Mapping[str, str]] = types.MappingProxyType({
+    **{k: f"set {v} instead" for k, v in LIBRARY_ENV_CONFIG_KEYS.items()},
+    "DIST_RL_WORKER_PORT": "launcher-managed worker identity",
+    "DIST_RL_ROLLOUT_REPLICA": "launcher-managed worker identity",
+})
+_ROLE_ENV_PREFIX_REASONS: Final[tuple[tuple[str, str], ...]] = (
+    ("T_", "Tunix config override"),
+    ("M_", "MaxText config override"),
+)
+_ENV_VAR_NAME_RE: Final[re.Pattern[str]] = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_]*\Z"
+)
+
+
+def role_env(
+    hp: cli_config.HyperParameters,
+) -> dict[ProcessRole, dict[str, str]]:
+  """Validates and returns `cluster_config.role_env` per process."""
+  raw = hp.config_mapping("cluster_config")["role_env"]
+  if not isinstance(raw, Mapping) or set(raw) != set(PROCESS_ROLES):
+    raise ValueError(
+        f"cluster_config.role_env must map {PROCESS_ROLES}, got {raw!r}."
+    )
+  result: dict[ProcessRole, dict[str, str]] = {}
+  for role in PROCESS_ROLES:
+    env = raw[role]
+    if not isinstance(env, Mapping):
+      raise TypeError(
+          f"cluster_config.role_env.{role} must be a mapping, got {env!r}."
+      )
+    if not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in env.items()
+    ):
+      raise TypeError(
+          f"cluster_config.role_env.{role} keys and values must be strings,"
+          f" got {dict(env)!r}."
+      )
+    result[role] = dict(env)
+  return result
+
+
+def _validate_role_env(hp: cli_config.HyperParameters) -> None:
+  """Checks `cluster_config.role_env` names and active roles."""
+  parsed = role_env(hp)
+  if (
+      parsed["inference"]
+      and not hp.config_mapping("cluster_config")["run_inference_node"]
+  ):
+    raise ValueError(
+        "cluster_config.role_env.inference is set, but"
+        " cluster_config.run_inference_node resolved to false."
+    )
+  pairs: list[tuple[str, str]] = []
+  for role, env in parsed.items():
+    pairs.extend((role, k) for k in env)
+  for role, name in pairs:
+    default_reason = (
+        _FORBIDDEN_ROLE_ENVS[name] if name in _FORBIDDEN_ROLE_ENVS else ""
+    )
+    reason = next(
+        (msg for pfx, msg in _ROLE_ENV_PREFIX_REASONS if name.startswith(pfx)),
+        default_reason,
+    )
+    if reason or not _ENV_VAR_NAME_RE.match(name):
+      raise ValueError(
+          f"cluster_config.role_env.{role} rejects {name!r}"
+          f" ({reason or 'invalid variable name'})."
+      )
+
+
 def _validate_local_settings(hp: cli_config.HyperParameters) -> None:
   """Validates `cluster_config.local.download_model_weights`."""
   local = hp.config_mapping("cluster_config")["local"]
@@ -688,6 +823,28 @@ def _validate_local_settings(hp: cli_config.HyperParameters) -> None:
         "cluster_config.local.download_model_weights must be a bool, got"
         f" {local['download_model_weights']!r}."
     )
+
+
+def _validate_sandbox_kubernetes_config(hp: cli_config.HyperParameters) -> None:
+  """Checks known string keys in `kubernetes_config` when present."""
+  sandbox_k8s = hp.config["kubernetes_config"]
+  if not isinstance(sandbox_k8s, Mapping):
+    return
+  for key in (
+      "namespace",
+      "node_selector_key",
+      "node_selector_val",
+      "image_rewrite_prefix",
+  ):
+    if (
+        key in sandbox_k8s
+        and sandbox_k8s[key] is not None
+        and not isinstance(sandbox_k8s[key], str)
+    ):
+      raise TypeError(
+          f"kubernetes_config.{key} must be a str or null, got"
+          f" {sandbox_k8s[key]!r}."
+      )
 
 
 def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
@@ -699,6 +856,9 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   _validate_k8s_scalars(hp)
   _validate_k8s_worker_jobsets(hp)
   _validate_rollout_replicas(hp)
+  _validate_sandbox_kubernetes_config(hp)
+  _validate_role_env(hp)
+  _validate_prompt_items_wrapper(hp)
   _validate_trajectory_logging(hp)
   _validate_rollout_logps_settings(hp)
   _validate_fault_tolerance(hp)
@@ -1031,8 +1191,7 @@ def _validate_maxtext_model_names(hp: cli_config.HyperParameters) -> None:
     names[role_key] = name
   mode = hp.config_mapping("weight_sync_config")["mode"]
   if (
-      mode
-      not in (
+      mode not in (
           common_datatypes.WeightSyncMode.NONE.value,
           common_datatypes.WeightSyncMode.NOOP.value,
       )
@@ -1286,6 +1445,11 @@ def _bash_quote(val: object) -> str:
   return shlex.quote(str(val))
 
 
+def _shell_env_words(env: Mapping[str, str]) -> str:
+  """Renders `env` as space-separated `KEY=VALUE` words, each value quoted."""
+  return " ".join(f"{name}={shlex.quote(value)}" for name, value in env.items())
+
+
 # TODO(noghabi): Consider auto-flattening `cluster_config.{local,k8s}` into
 # `UPPER_SNAKE_CASE` exports (and mapping only the non-cluster keys by hand),
 # which would shrink this list and the drift check in `launch_test.py`.
@@ -1357,6 +1521,7 @@ def render_bash_exports(hp: cli_config.HyperParameters) -> str:
       "WEIGHT_SYNC_RAIDEN_USE_FFI": (
           "" if ws["raiden_use_ffi"] is None else ws["raiden_use_ffi"]
       ),
+      "WEIGHT_SYNC_RAIDEN_DATA_NICS": ws["raiden_data_nics"],
       "VLLM_ADDITIONAL_CONFIG_JSON": (
           json.dumps(vllm["kwargs"], sort_keys=True) if vllm["kwargs"] else ""
       ),
@@ -1414,6 +1579,16 @@ def render_bash_exports(hp: cli_config.HyperParameters) -> str:
       # Empty without a GCS cache.
       "K8S_JAX_CACHE_ROLLOUT_GCS_DIR": rollout_cache_uri or "",
       "K8S_JAX_CACHE_SAVE": jax_cache["save"],
+      **{
+          f"ROLE_ENV_{role.upper()}": _shell_env_words(env)
+          for role, env in role_env(hp).items()
+      },
+      "HAS_PROMPT_ITEMS_WRAPPER": prompt_items_wrapper_parts(hp) is not None,
+      "SANDBOX_RUN_ID": (
+          hashlib.sha256(
+              str(k8s["orchestrator_id"]).strip().encode("utf-8")
+          ).hexdigest()[:8]
+      ),
       "SANDBOX_NAMESPACE": (
           sandbox_k8s["namespace"] if "namespace" in sandbox_k8s else ""
       ),
@@ -1425,6 +1600,11 @@ def render_bash_exports(hp: cli_config.HyperParameters) -> str:
       "SANDBOX_NODE_SELECTOR_VAL": (
           sandbox_k8s["node_selector_val"]
           if "node_selector_val" in sandbox_k8s
+          else ""
+      ),
+      "SANDBOX_IMAGE_REWRITE_PREFIX": (
+          sandbox_k8s["image_rewrite_prefix"]
+          if "image_rewrite_prefix" in sandbox_k8s
           else ""
       ),
   }

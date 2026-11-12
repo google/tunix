@@ -63,10 +63,11 @@ _RESOLVE_CONFIG_BIN = _COMMON_DIR / "resolve_config"
 _YAML_GEN_BIN = _DIST_RL_DIR / "distributed" / "deployment" / "yaml_generator"
 # `tunix.cli.config` reads `T_<KEY>` environment variables as config overrides.
 _CONFIG_OVERRIDE_ENV_PREFIX = "T_"
-# JAX compilation cache variables that `k8s.sh` rejects (or, for `BUCKET`, warns
-# about) in the launcher's environment; keep in sync with its guard. Values from
-# a developer's shell would fail or change the k8s dry runs.
-_K8S_GUARDED_CACHE_ENV = frozenset({
+# JAX compilation cache variables that `launch.sh` rejects (or, for `BUCKET`,
+# warns about) in the launcher's environment; keep in sync with
+# `JAX_CACHE_ENV_VARS` in `legacy_env.sh`. Values from a developer's shell would
+# fail or change the dry runs.
+_GUARDED_CACHE_ENV = frozenset({
     "BUCKET",
     "DISABLE_JAX_CACHE",
     "JAX_CACHE_BUCKET",
@@ -81,23 +82,17 @@ _K8S_GUARDED_CACHE_ENV = frozenset({
     "VLLM_LOCAL_JAX_CACHE_DIR",
     "VLLM_SAVE_JAX_CACHE",
 })
-# Library variables that `k8s.sh` rejects in the launcher's environment (the
-# nodes set them from the config); keep in sync with its guard.
-_K8S_GUARDED_LIBRARY_ENV = frozenset({
-    "SKIP_JAX_PRECOMPILE",
-    "TPU_RAIDEN_DATA_NICS",
-    "VERIFY_WEIGHTS",
-})
 
 
 def launcher_env() -> dict[str, str]:
   """Returns the hermetic environment to run the launch scripts with in tests.
 
-  Starts from `os.environ` without the `T_*` config overrides and the JAX
-  compilation cache and library variables `k8s.sh` guards against, and sets the current
-  interpreter, the built `resolve_config` and `yaml_generator` binaries when
-  present (they are not in the OSS export), a fixed `USER` (the k8s resource
-  names include it), and `FAKE_HF_TOKEN`.
+  Starts from `os.environ` without the `T_*` config overrides, the JAX
+  compilation cache variables `launch.sh` guards against, and the library
+  variables the nodes set from the config (`k8s.sh` rejects them), and sets the
+  current interpreter, the built `resolve_config` and `yaml_generator` binaries
+  when present (they are not in the OSS export), a fixed `USER` (the k8s
+  resource names include it), and `FAKE_HF_TOKEN`.
 
   Returns:
     The environment.
@@ -106,8 +101,8 @@ def launcher_env() -> dict[str, str]:
       key: value
       for key, value in os.environ.items()
       if not key.startswith(_CONFIG_OVERRIDE_ENV_PREFIX)
-      and key not in _K8S_GUARDED_CACHE_ENV
-      and key not in _K8S_GUARDED_LIBRARY_ENV
+      and key not in _GUARDED_CACHE_ENV
+      and key not in resolve_config.LIBRARY_ENV_CONFIG_KEYS
   }
   env["PYTHON_BIN"] = sys.executable or "python3"
   if _RESOLVE_CONFIG_BIN.is_file():
@@ -326,9 +321,7 @@ class LauncherTestCase(parameterized.TestCase):
     cluster = config["cluster_config"]
     self.assertEqual(cluster["target"], expected.target)
     self.assertEqual(cluster["orchestrator_main"], ORCHESTRATOR_MAIN)
-    module = (
-        f"tunix.dist_rl.{self.root}.{expected.example}.{expected.module}"
-    )
+    module = f"tunix.dist_rl.{self.root}.{expected.example}.{expected.module}"
     self.assertEqual(config["data_module"], module)
     self.assertEqual(cluster["registry_module"], module)
     self.assertEqual(config["batch_size"], expected.batch_size)

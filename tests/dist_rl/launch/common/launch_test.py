@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 import pathlib
@@ -259,14 +260,10 @@ class LaunchScriptsTest(absltest.TestCase):
     # Rogue K8s environment variables fail fast before rendering.
     res = self._run_launch(args, extra_env={"KUEUE_QUEUE_NAME": "rogue-q"})
     self.assertNotEqual(res.returncode, 0)
-    self.assertIn(
-        "old example launchers are set: KUEUE_QUEUE_NAME", res.stderr
-    )
+    self.assertIn("old example launchers are set: KUEUE_QUEUE_NAME", res.stderr)
     res = self._run_launch(args, extra_env={"K8S_NAMESPACE": "rogue-ns"})
     self.assertNotEqual(res.returncode, 0)
-    self.assertIn(
-        "old example launchers are set: K8S_NAMESPACE", res.stderr
-    )
+    self.assertIn("old example launchers are set: K8S_NAMESPACE", res.stderr)
     res = self._run_launch(args, extra_env={"ROLLOUT_FAULT_TOLERANCE": "false"})
     self.assertNotEqual(res.returncode, 0)
     self.assertIn(
@@ -438,9 +435,7 @@ class LaunchScriptsTest(absltest.TestCase):
   def test_drivers_refuse_direct_invocation(self):
     for script in ("local.sh", "k8s.sh"):
       with self.subTest(script=script):
-        env = {
-            k: v for k, v in os.environ.items() if k != "CLUSTER_TARGET"
-        }
+        env = {k: v for k, v in os.environ.items() if k != "CLUSTER_TARGET"}
         res = subprocess.run(
             ["bash", str(LAUNCH_DIR / script), "start"],
             env=env,
@@ -732,9 +727,7 @@ class LaunchScriptsTest(absltest.TestCase):
         orch_pod["nodeSelector"], {"cloud.google.com/gke-nodepool": "cpu-np"}
     )
     orch_container = orch_pod["containers"][0]
-    self.assertEqual(
-        orch_container["resources"]["requests"]["memory"], "64Gi"
-    )
+    self.assertEqual(orch_container["resources"]["requests"]["memory"], "64Gi")
     self.assertIn(
         '-l "scheduling.x-k8s.io/gang-id=run_k8s_gang"'
         ' --field-selector="metadata.name!=testuser-orch"',
@@ -827,9 +820,7 @@ class LaunchScriptsTest(absltest.TestCase):
     self.assertEqual(
         containers["main"]["resources"]["requests"]["memory"], "56G"
     )
-    self.assertEqual(
-        containers["main"]["resources"]["limits"]["memory"], "80G"
-    )
+    self.assertEqual(containers["main"]["resources"]["limits"]["memory"], "80G")
 
     # Worker pod (pw-node) container (pathways-worker).
     pw_spec = rjobs["pw-node"]
@@ -913,6 +904,102 @@ class LaunchScriptsTest(absltest.TestCase):
     self.assertNotEqual(res.returncode, 0)
     self.assertIn("OTEL_PORT", res.stderr)
 
+  def test_k8s_worker_pods_get_raiden_data_nics_from_the_config(self):
+    args = [
+        "start",
+        "--dry-run",
+        "cluster_config.target=k8s",
+        "cluster_config.k8s.tunix_image=test-image",
+        "agentic_grpo_config.beta=0.0",
+        "weight_sync_config.mode=raiden",
+        "cluster_config.k8s.rollout.jobset_yaml=jobset.tpu.yaml",
+    ]
+    res = self._run_launch(
+        [*args, "weight_sync_config.raiden_data_nics=eth1,eth2"]
+    )
+    self.assertEqual(res.returncode, 0, msg=res.stderr)
+    jobsets = _dry_run_jobsets(res.stdout)
+    for name, containers in (
+        ("testuser-train", {"pathways-worker", "main"}),
+        ("testuser-roll", {"main"}),
+    ):
+      with self.subTest(jobset=name):
+        nics = {}
+        for pod in _pod_specs(jobsets[name]):
+          all_containers = [*pod["containers"], *pod.get("initContainers", [])]
+          for container in all_containers:
+            for env in container.get("env", []):
+              if env["name"] == "TPU_RAIDEN_DATA_NICS":
+                nics[container["name"]] = env["value"]
+        self.assertContainsSubset(containers, nics)
+        self.assertEqual(set(nics.values()), {"eth1,eth2"})
+    res = self._run_launch([*args, "weight_sync_config.raiden_data_nics="])
+    self.assertNotEqual(res.returncode, 0)
+    self.assertIn(
+        "weight_sync_config.raiden_data_nics is empty, but the"
+        " jobset.pathways.yaml template always sets TPU_RAIDEN_DATA_NICS",
+        res.stderr,
+    )
+    self.assertNotIn("apiVersion:", res.stdout)
+
+  def test_role_env_and_sandbox_settings_render_into_processes(self):
+    role_args = [
+        "agentic_grpo_config.beta=0.0",
+        "cluster_config.role_env.orchestrator.ORCH_FLAG=x",
+        "cluster_config.role_env.trainer.TRAIN_FLAG='a b'",
+        "cluster_config.role_env.rollout.ROLL_FLAG='0'",
+    ]
+    local_res = self._run_launch(
+        ["--dry-run", "cluster_config.target=local", *role_args]
+    )
+    self.assertEqual(local_res.returncode, 0, msg=local_res.stderr)
+    for expected in (
+        "Trainer environment: TRAIN_FLAG='a b'",
+        "Rollout environment: ROLL_FLAG=0",
+        "Orchestrator environment: ORCH_FLAG=x",
+    ):
+      self.assertIn(expected, local_res.stdout)
+
+    k8s_res = self._run_launch([
+        "start",
+        "--dry-run",
+        "cluster_config.target=k8s",
+        "cluster_config.k8s.tunix_image=test-image",
+        "cluster_config.k8s.orchestrator_id=custom-orch",
+        "prompt_items_wrapper=pkg.mod.wrap_fn",
+        "kubernetes_config.namespace=swe-ns",
+        "kubernetes_config.node_selector_key=cloud.google.com/gke-nodepool",
+        "kubernetes_config.node_selector_val=swe-pool",
+        "kubernetes_config.image_rewrite_prefix=us-central1-docker.pkg.dev/p/r",
+        *role_args,
+    ])
+    self.assertEqual(k8s_res.returncode, 0, msg=k8s_res.stderr)
+    expected_run_id = hashlib.sha256(b"custom-orch").hexdigest()[:8]
+    self.assertIn(
+        "kubectl delete"
+        " sandboxclaims,sandboxes,sandboxwarmpools,sandboxtemplates -n swe-ns"
+        f" -l agent-sandbox-rl-run={expected_run_id} --ignore-not-found=true",
+        k8s_res.stdout,
+    )
+    for expected in ("ORCH_FLAG=x ", "TRAIN_FLAG='a b' ", "ROLL_FLAG=0 "):
+      self.assertIn(f"{expected}python -m", k8s_res.stdout)
+    self.assertEqual(
+        set(
+            re.findall(
+                r"NAMESPACE=swe-ns "
+                r"NODE_SELECTOR_KEY=cloud\.google\.com/gke-nodepool "
+                r"NODE_SELECTOR_VAL=swe-pool "
+                r"IMAGE_REWRITE_PREFIX=us-central1-docker\.pkg\.dev/p/r "
+                r"ORCHESTRATOR_ID=custom-orch .*--process_main=(\S+)",
+                k8s_res.stdout,
+            )
+        ),
+        {
+            "tunix.dist_rl.launch.nodes.orchestrator.main",
+            "tunix.dist_rl.launch.nodes.rollout.main",
+        },
+    )
+
   def test_drivers_only_read_exported_or_known_variables(self):
     exported = set(
         re.findall(
@@ -936,9 +1023,7 @@ class LaunchScriptsTest(absltest.TestCase):
         ),
     )
     unused = exported - referenced
-    self.assertEmpty(
-        unused, msg="Exports not read by any bash driver."
-    )
+    self.assertEmpty(unused, msg="Exports not read by any bash driver.")
 
   def test_local_live_download_model_weights_knob(self):
     with self.assertRaisesRegex(

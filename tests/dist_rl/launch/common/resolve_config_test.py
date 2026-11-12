@@ -148,9 +148,7 @@ weight_sync_config:
 
   def test_tokenizer_uses_base_cli_validation(self):
     # A Hugging Face hub id or local path works without HF_TOKEN.
-    env_without_token = {
-        k: v for k, v in os.environ.items() if k != "HF_TOKEN"
-    }
+    env_without_token = {k: v for k, v in os.environ.items() if k != "HF_TOKEN"}
     with mock.patch.dict(os.environ, env_without_token, clear=True):
       hp_hub = resolve_config.initialize([])
       self.assertEqual(
@@ -163,9 +161,7 @@ weight_sync_config:
     self.assertEqual(
         hp.config["tokenizer_config"]["tokenizer_path"], "/tmp/models/qwen"
     )
-    with self.assertRaisesRegex(
-        ValueError, "tokenizer_path must be specified"
-    ):
+    with self.assertRaisesRegex(ValueError, "tokenizer_path must be specified"):
       resolve_config.initialize(["tokenizer_config.tokenizer_path="])
     with self.assertRaisesRegex(ValueError, "tokenizer_type"):
       resolve_config.initialize(["tokenizer_config.tokenizer_type=bpe"])
@@ -574,7 +570,9 @@ weight_sync_config:
           ["batch_size=5", "rl_training_config.mini_batch_size=2"]
       )
 
-    with self.assertRaisesRegex(ValueError, "must be divisible by.*train_micro"):
+    with self.assertRaisesRegex(
+        ValueError, "must be divisible by.*train_micro"
+    ):
       resolve_config.initialize([
           "batch_size=2",
           "rl_training_config.mini_batch_size=1",
@@ -1578,6 +1576,106 @@ weight_sync_config:
                   resolve_config.initialize([*base, *overrides])
               ),
           )
+
+  def test_prompt_items_wrapper_and_sandbox_config_validation(self):
+    for empty in ([], ["prompt_items_wrapper=null"]):
+      self.assertIsNone(
+          resolve_config.prompt_items_wrapper_parts(
+              resolve_config.initialize(empty)
+          )
+      )
+    hp_direct = resolve_config.initialize([])
+    hp_direct.config["prompt_items_wrapper"] = None
+    self.assertIsNone(resolve_config.prompt_items_wrapper_parts(hp_direct))
+    hp_direct.config["prompt_items_wrapper"] = 123
+    with self.assertRaisesRegex(
+        TypeError, "prompt_items_wrapper must be a str or null"
+    ):
+      resolve_config.prompt_items_wrapper_parts(hp_direct)
+    hp = resolve_config.initialize([
+        "prompt_items_wrapper=pkg.mod.wrap_fn",
+        "prompt_items_wrapper_kwargs.max_concurrency=1024",
+    ])
+    self.assertEqual(
+        resolve_config.prompt_items_wrapper_parts(hp), ("pkg.mod", "wrap_fn")
+    )
+    for overrides, regex in (
+        (["prompt_items_wrapper=wrap_fn"], "dotted 'module.function' path"),
+        (
+            ["prompt_items_wrapper_kwargs.foo=1"],
+            "prompt_items_wrapper is empty",
+        ),
+        (
+            [
+                "prompt_items_wrapper=pkg.mod.wrap_fn",
+                "prompt_items_wrapper_kwargs.batch_size=8",
+            ],
+            "passes to prompt_items_wrapper",
+        ),
+    ):
+      with self.assertRaisesRegex(ValueError, regex):
+        resolve_config.initialize(overrides)
+    with self.assertRaisesRegex(
+        TypeError, "kubernetes_config.image_rewrite_prefix must be a str"
+    ):
+      resolve_config.initialize(["kubernetes_config.image_rewrite_prefix=123"])
+
+  def test_role_env(self):
+    hp = resolve_config.initialize([
+        "cluster_config.role_env.orchestrator.ORCH_FLAG=x",
+        "cluster_config.role_env.trainer.XLA_FLAGS='--xla_a --xla_b'",
+        "cluster_config.role_env.trainer.TPU_STDERR_LOG_LEVEL='0'",
+        "cluster_config.role_env.rollout.VLLM_LOGGING_LEVEL=DEBUG",
+        "agentic_grpo_config.beta=0.0",
+    ])
+    self.assertEqual(
+        resolve_config.role_env(hp),
+        {
+            "orchestrator": {"ORCH_FLAG": "x"},
+            "trainer": {
+                "XLA_FLAGS": "--xla_a --xla_b",
+                "TPU_STDERR_LOG_LEVEL": "0",
+            },
+            "rollout": {"VLLM_LOGGING_LEVEL": "DEBUG"},
+            "inference": {},
+        },
+    )
+    proc = subprocess.run(
+        [
+            "bash",
+            "-c",
+            resolve_config.render_bash_exports(hp)
+            + 'eval "w=(${ROLE_ENV_TRAINER})"; printf "%s\\n" "${w[@]}"',
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    self.assertEqual(
+        proc.stdout.splitlines(),
+        ["XLA_FLAGS=--xla_a --xla_b", "TPU_STDERR_LOG_LEVEL=0"],
+    )
+
+    trainer = "cluster_config.role_env.trainer"
+    with self.assertRaisesRegex(TypeError, "keys and values must be strings"):
+      resolve_config.initialize([f"{trainer}.FOO=1"])
+    with self.assertRaisesRegex(TypeError, f"{trainer} must be a mapping"):
+      resolve_config.initialize([f"{trainer}=null"])
+    for name, error in (
+        ("T_BATCH_SIZE", "Tunix config override"),
+        ("M_REMAT_POLICY", "MaxText config override"),
+        ("VERIFY_WEIGHTS", "weight_sync_config.verify_weights"),
+        ("DIST_RL_WORKER_PORT", "launcher-managed"),
+    ):
+      with self.assertRaisesRegex(ValueError, f"{trainer}.*{error}"):
+        resolve_config.initialize([f"{trainer}.{name}=x"])
+    with self.assertRaisesRegex(
+        ValueError, "run_inference_node resolved to false"
+    ):
+      resolve_config.initialize([
+          "agentic_grpo_config.beta=0.0",
+          "cluster_config.role_env.inference.FOO=x",
+      ])
 
   def test_render_bash_exports_evaluates_in_bash(self):
     hp = resolve_config.initialize([
