@@ -216,6 +216,9 @@ def create_trainer_payloads(
                 encode_mode=algo_config.routed_experts_encode_mode,
                 num_experts=algo_config.routed_experts_num_experts,
             ),
+            routed_experts_ref=(
+                item.routed_experts_ref if valid_mask[i] else None
+            ),
         )
     )
   return payloads

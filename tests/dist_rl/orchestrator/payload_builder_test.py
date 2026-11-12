@@ -14,6 +14,8 @@
 
 """Unit tests for trajectory-to-payload conversion (`payload_builder`)."""
 
+import dataclasses
+
 from absl.testing import absltest
 import numpy as np
 from tunix.dist_rl.common import datatypes
@@ -680,6 +682,54 @@ class ExcludeMaskedFromAdvantageTest(absltest.TestCase):
         ),
         rtol=1e-5,
     )
+
+  def test_routed_experts_ref_propagated_only_for_valid_trajectories(self):
+    ref0 = datatypes.RoutedExpertsRef(worker_id="w0", ref_id=10)
+    ref1 = datatypes.RoutedExpertsRef(worker_id="w0", ref_id=11)
+    ref2 = datatypes.RoutedExpertsRef(worker_id="w1", ref_id=12)
+    ref3 = datatypes.RoutedExpertsRef(worker_id="w1", ref_id=13)
+
+    items = [
+        dataclasses.replace(self._item(0), routed_experts_ref=ref0),
+        dataclasses.replace(self._item(1), routed_experts_ref=ref1),
+        dataclasses.replace(
+            self._item(2, masked=True), routed_experts_ref=ref2
+        ),
+        dataclasses.replace(self._item(3), routed_experts_ref=ref3),
+    ]
+    payloads = payload_builder.create_trainer_payloads(
+        items, rewards=[1.0, 3.0, 2.0, np.nan], algo_config=self._cfg()
+    )
+    self.assertEqual(payloads[0].routed_experts_ref, ref0)
+    self.assertEqual(payloads[1].routed_experts_ref, ref1)
+    self.assertIsNone(payloads[2].routed_experts_ref)
+    self.assertIsNone(payloads[3].routed_experts_ref)
+    for p in payloads:
+      self.assertIsNone(p.routed_experts)
+
+    # Degenerate group (< 2 valid peers) clears routed_experts_ref on the lone
+    # valid survivor so critique_stage can release it immediately.
+    degenerate_payloads = payload_builder.create_trainer_payloads(
+        items, rewards=[1.0, np.nan, 2.0, np.inf], algo_config=self._cfg()
+    )
+    for p in degenerate_payloads:
+      self.assertIsNone(p.routed_experts_ref)
+
+    # Inline non-Relay mode preserves routed_experts on invalid/zero-mask items
+    # so chunks without RoutedExpertsSpec retain static pytree structure.
+    inline_items = []
+    for idx, masked in enumerate((False, False, True, False)):
+      base = self._item(idx, masked=masked)
+      routed_traj = {**base.traj, "routed_experts": _routing(4, idx + 1)}
+      inline_items.append(dataclasses.replace(base, traj=routed_traj))
+    inline_payloads = payload_builder.create_trainer_payloads(
+        inline_items, rewards=[1.0, 3.0, 2.0, np.nan], algo_config=self._cfg()
+    )
+    for idx, p in enumerate(inline_payloads):
+      self.assertIsNone(p.routed_experts_ref)
+      self.assertIsNotNone(p.routed_experts)
+      decoded = packing.decode_routed_experts(p.routed_experts, batched=False)
+      np.testing.assert_array_equal(decoded, idx + 1)
 
 
 if __name__ == "__main__":

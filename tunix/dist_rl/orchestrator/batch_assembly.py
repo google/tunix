@@ -28,6 +28,7 @@ import collections
 from collections.abc import Iterator, Mapping, Sequence
 import dataclasses
 import functools
+import itertools
 from typing import Any, Generic, NamedTuple, Protocol, TypeVar
 from absl import logging
 import numpy as np
@@ -181,6 +182,245 @@ class AssembledBatch(NamedTuple):
   trajectory_ids: tuple[str, ...] = ()
 
 
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class RoutedExpertsSpec:
+  """Static MoE routing shape and wire encoding expected on assembled batches.
+
+  Attributes:
+    num_layers: Number of routed MoE layers (`L`).
+    top_k: Number of selected experts per token (`K`).
+    encoding: Wire encoding (`"int16"`, `"uint8"`, or `"uint10"`).
+  """
+
+  num_layers: int
+  top_k: int
+  encoding: packing.RoutedExpertsWireEncoding
+
+  def __post_init__(self) -> None:
+    if (
+        isinstance(self.num_layers, bool)
+        or not isinstance(self.num_layers, int)
+        or self.num_layers <= 0
+    ):
+      raise ValueError(
+          f"num_layers must be a positive int, got {self.num_layers!r}."
+      )
+    if (
+        isinstance(self.top_k, bool)
+        or not isinstance(self.top_k, int)
+        or self.top_k <= 0
+    ):
+      raise ValueError(f"top_k must be a positive int, got {self.top_k!r}.")
+    if self.encoding not in ("int16", "uint8", "uint10"):
+      raise ValueError(
+          "encoding must be one of ('int16', 'uint8', 'uint10'), got"
+          f" {self.encoding!r}."
+      )
+
+
+@dataclasses.dataclass(kw_only=True)
+class _SequencePackedPlanState:
+  """Opaque placement state for one planned sequence-packed chunk."""
+
+  bin_entries: tuple[
+      tuple[tuple[packing.PackItem, str, datatypes.RLTrainerPayload], ...], ...
+  ]
+  carried: tuple[str, ...]
+  max_segments: int
+  owner: object
+  reset_epoch: int
+  consumed: bool = False
+
+
+@dataclasses.dataclass(kw_only=True)
+class _PaddedPlanState:
+  """Opaque placement state for one planned PaddedBatchAssembler chunk."""
+
+  chunk: tuple[datatypes.RLTrainerPayload, ...]
+  owner: object
+  reset_epoch: int
+  consumed: bool = False
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True, eq=False)
+class BatchPlan:
+  """Planned microbatch placement emitted before fetching staged routing.
+
+  Each `BatchPlan` owns a unique popped chunk of trajectories and uses
+  object-identity equality (`eq=False`). It must be materialized at most once
+  via `pack_planned_batch` on the same assembler instance before `reset()`.
+
+  Attributes:
+    refs: Unique `RoutedExpertsRef`s required to materialize this microbatch, in
+      deterministic placement order.
+    is_final_batch: Whether this microbatch completes an optimizer update.
+    placement_state: Opaque assembler-internal placement state for this chunk.
+  """
+
+  refs: tuple[datatypes.RoutedExpertsRef, ...]
+  is_final_batch: bool
+  placement_state: _SequencePackedPlanState | _PaddedPlanState = (
+      dataclasses.field(repr=False)
+  )
+
+
+def _validate_routed_experts_spec(
+    spec: RoutedExpertsSpec,
+) -> RoutedExpertsSpec:
+  """Validates a non-None `RoutedExpertsSpec` argument."""
+  if not isinstance(spec, RoutedExpertsSpec):
+    raise TypeError(f"Expected RoutedExpertsSpec, got {type(spec).__name__}.")
+  return spec
+
+
+def _unique_routed_experts_refs(
+    items: Sequence[datatypes.RLTrainerPayload],
+) -> tuple[datatypes.RoutedExpertsRef, ...]:
+  """Returns unique non-None `routed_experts_ref`s in placement order."""
+  return tuple(
+      dict.fromkeys(
+          it.routed_experts_ref
+          for it in items
+          if it.routed_experts_ref is not None
+      )
+  )
+
+
+def _reject_unresolved_refs(
+    items: Sequence[datatypes.RLTrainerPayload], caller: str
+) -> None:
+  """Raises `ValueError` if any item has an unresolved `routed_experts_ref`."""
+  if any(it.routed_experts_ref is not None for it in items):
+    raise ValueError(
+        f"{caller} cannot pack unresolved routed_experts_ref; use ingest() +"
+        " plan_next_batch() + pack_planned_batch()."
+    )
+
+
+def _validate_plan_state(
+    state: _SequencePackedPlanState | _PaddedPlanState,
+    *,
+    owner: object,
+    reset_epoch: int,
+) -> None:
+  """Validates single-assembler, current-epoch, single-use `BatchPlan` state."""
+  if state.owner is not owner:
+    raise RuntimeError(
+        "BatchPlan belongs to a different BatchAssembler instance."
+    )
+  if state.reset_epoch != reset_epoch:
+    raise RuntimeError("Cannot pack a stale BatchPlan created before reset().")
+  if state.consumed:
+    raise RuntimeError(
+        "BatchPlan has already been consumed by pack_planned_batch()."
+    )
+
+
+def _or_fallback_routed_experts(
+    routed: np.ndarray | None,
+    batch_size: int,
+    seq_len: int,
+    spec: RoutedExpertsSpec | None,
+) -> np.ndarray | None:
+  """Allocates an all-unset `routed_experts` buffer when `routed` is None."""
+  if routed is not None or spec is None:
+    return routed
+  return packing.alloc_batched_routed_experts(
+      batch_size, seq_len, (spec.num_layers, spec.top_k), spec.encoding
+  )
+
+
+def _fill_one_chunk_entries(
+    entries: Sequence[tuple[packing.PackItem, str, datatypes.RLTrainerPayload]],
+    *,
+    pack_size: int,
+    budget: int,
+    max_segments: int,
+    segment_alignment_boundary: int,
+) -> tuple[
+    tuple[
+        tuple[tuple[packing.PackItem, str, datatypes.RLTrainerPayload], ...],
+        ...,
+    ],
+    list[tuple[packing.PackItem, str, datatypes.RLTrainerPayload]],
+]:
+  """Selects one FFD chunk over `(PackItem, trajectory_id, payload)` entries."""
+  ext = packing._packing_ext  # pylint: disable=protected-access
+  if ext is not None and entries and pack_size > 0 and max_segments > 0:
+    bin_indices, leftover_indices = ext.fill_one_chunk_fast(
+        [entry[0].num_tokens for entry in entries],
+        budget,
+        pack_size,
+        max_segments,
+        segment_alignment_boundary,
+    )
+    return (
+        tuple(tuple(entries[i] for i in b_idxs) for b_idxs in bin_indices),
+        [entries[i] for i in leftover_indices],
+    )
+  pack_items = [entry[0] for entry in entries]
+  id_to_entry = {id(item): entry for entry, item in zip(entries, pack_items)}
+  bins, leftover = packing.fill_one_chunk(
+      pack_items,
+      pack_size=pack_size,
+      budget=budget,
+      max_segments=max_segments,
+      segment_alignment_boundary=segment_alignment_boundary,
+  )
+  return (
+      tuple(tuple(id_to_entry[id(it)] for it in b) for b in bins),
+      [id_to_entry[id(it)] for it in leftover],
+  )
+
+
+def _resolve_fetched_routed_experts(
+    ref: datatypes.RoutedExpertsRef,
+    fetched: Mapping[datatypes.RoutedExpertsRef, np.ndarray],
+    *,
+    seq_len: int,
+    spec: RoutedExpertsSpec,
+) -> np.ndarray:
+  """Validates and slices a fetched `routed_experts` array to `seq_len`."""
+  if ref not in fetched:
+    raise KeyError(f"Missing fetched routed_experts for {ref!r}.")
+  raw = fetched[ref]
+  if not isinstance(raw, np.ndarray):
+    raise TypeError(
+        f"Fetched routed_experts for {ref!r} must be a numpy array, got"
+        f" {type(raw).__name__}."
+    )
+  try:
+    enc = packing.routed_experts_encoding(raw, batched=False)
+    logical = packing.routed_experts_logical_shape(raw, batched=False)
+  except ValueError as exc:
+    raise ValueError(
+        f"Invalid fetched routed_experts for {ref!r}: {exc}"
+    ) from exc
+  if enc == "int16" and raw.dtype != np.int16:
+    raise ValueError(
+        f"Fetched int16 routed_experts for {ref!r} must have dtype int16, got"
+        f" {raw.dtype}."
+    )
+  min_len = max(seq_len - 1, 0)
+  if logical[0] < min_len:
+    raise ValueError(
+        f"Fetched routed_experts for {ref!r} length must be >= {min_len}"
+        f" (seq_len - 1 for seq_len={seq_len}); got logical shape {logical}."
+    )
+  if (logical[1], logical[2]) != (spec.num_layers, spec.top_k):
+    raise ValueError(
+        f"Fetched routed_experts for {ref!r} (num_layers, top_k)"
+        f" {(logical[1], logical[2])} does not match RoutedExpertsSpec"
+        f" {(spec.num_layers, spec.top_k)}."
+    )
+  if enc != spec.encoding:
+    raise ValueError(
+        f"Fetched routed_experts for {ref!r} encoding {enc!r} does not match"
+        f" RoutedExpertsSpec encoding {spec.encoding!r}."
+    )
+  return raw[:seq_len]
+
+
 def _zeros_or_none(
     enabled: bool, shape: tuple[int, ...]
 ) -> np.ndarray | None:
@@ -290,17 +530,142 @@ class BatchAssembler(Generic[T], Protocol):
     """Total number of rollouts expected per optimizer update."""
     return self.mini_batch_size * self.num_generations
 
+  def set_routed_experts_spec(self, spec: RoutedExpertsSpec) -> None:
+    """Configures static MoE routing shape and wire encoding for Relay batches.
+
+    Both validates staged `routed_experts` arrays passed to `pack_planned_batch`
+    and allocates an all-`UNSET_ROUTED_EXPERT` buffer when an assembled chunk
+    contains zero routed trajectories, preserving static trainer pytree shape.
+
+    Args:
+      spec: Static `(num_layers, top_k, encoding)` routing specification.
+
+    Raises:
+      TypeError: If `spec` is not a `RoutedExpertsSpec` instance.
+    """
+    ...
+
+  def ingest(
+      self,
+      items: Sequence[T],
+  ) -> bool:
+    """Buffers unbatched payloads and advances the optimizer-update counter.
+
+    Args:
+      items: Unbatched trajectory payloads (typically one prompt group of `G`
+        generations) to validate and append to the internal rollout buffer.
+
+    Returns:
+      `True` when cumulative ingested rollouts reach or cross
+      `rollouts_per_optimizer_update` (wrapping the internal counter modulo
+      `rollouts_per_optimizer_update`), or `False` otherwise.
+
+    Raises:
+      ValueError: If the assembler validates items at ingest time (such as
+        `SequencePackedBatchAssembler`) and an item is malformed or exceeds
+        the row token budget (`PaddedBatchAssembler` defers item validation
+        to packing time).
+    """
+    ...
+
+  def plan_next_batch(
+      self,
+      *,
+      drain_all: bool,
+  ) -> BatchPlan | None:
+    """Selects and pops the next ready microbatch placement from the buffer.
+
+    Popped items become exclusively owned by the returned single-use
+    `BatchPlan`; dropping a plan or failing to materialize it discards those
+    items rather than returning them to the buffer.
+
+    Args:
+      drain_all: When `False`, emits a chunk only if buffered capacity can fill
+        a complete microbatch (`>= batch_size * max_packed_len` tokens for
+        sequence packing, or `>= batch_size` items for padding), holding back
+        streaming tails for subsequent `ingest` calls. When `True`, drains even
+        partial buffered tails and marks the final remaining chunk with
+        `is_final_batch=True`.
+
+    Returns:
+      A single-use `BatchPlan` tied to this assembler instance, or `None` when
+      insufficient buffered items exist to form a batch under `drain_all`.
+
+    Raises:
+      ValueError: If buffered items disagree on carried per-token fields.
+    """
+    ...
+
+  def pack_planned_batch(
+      self,
+      plan: BatchPlan,
+      fetched: Mapping[datatypes.RoutedExpertsRef, np.ndarray],
+  ) -> AssembledBatch:
+    """Materializes a single-use `BatchPlan` with `fetched` routing arrays.
+
+    Args:
+      plan: Unconsumed `BatchPlan` previously emitted by `plan_next_batch` on
+        this same assembler instance during the current `reset()` epoch.
+      fetched: Mapping containing every `RoutedExpertsRef` in `plan.refs`. Each
+        array must match the configured `RoutedExpertsSpec` `(num_layers,
+        top_k)` and wire encoding (`dtype=int16` for `"int16"`, `uint8` for
+        `"uint8"`/`"uint10"`) with logical token length `>= seq_len - 1`, and
+        is sliced to `[:seq_len]`. Extra keys are ignored.
+
+    Returns:
+      Packed `AssembledBatch` with `routed_experts_ref` cleared on the output
+      batched payload.
+
+    Raises:
+      TypeError: If `plan` was created for a different assembler class or any
+        value in `fetched` for `plan.refs` is not a `np.ndarray`.
+      RuntimeError: If `plan` came from a different assembler instance, predates
+        `reset()`, was already consumed, or requires `plan.refs` before
+        `set_routed_experts_spec` was called.
+      KeyError: If any `ref` in `plan.refs` is missing from `fetched`.
+      ValueError: If any fetched array violates shape, length, dtype, or wire
+        encoding requirements.
+    """
+    ...
+
   def feed(
       self,
       items: Sequence[T],
   ) -> Iterator[AssembledBatch]:
-    """Ingests rollouts and yields microbatches, flushing at the update boundary."""
+    """Synchronously ingests inline-routed items and yields ready microbatches.
+
+    Equivalent to `ingest(items)` followed by lazy `plan_next_batch` +
+    `pack_planned_batch(plan, {})`. Rejects unresolved `routed_experts_ref`.
+
+    Args:
+      items: Unbatched payloads without `routed_experts_ref`.
+
+    Returns:
+      Iterator of ready `AssembledBatch` microbatches, draining tail items at
+      update boundaries.
+
+    Raises:
+      ValueError: If any item carries an unresolved `routed_experts_ref` or
+        violates payload validation.
+    """
     ...
 
   def flush(
       self,
   ) -> Iterator[AssembledBatch]:
-    """Drains remaining buffered items, padding to the required static tensor shape."""
+    """Drains remaining buffered inline-routed items into padded microbatches.
+
+    Resets the partial optimizer-update rollout counter and drains all buffered
+    items with `drain_all=True`, marking the final emitted microbatch with
+    `is_final_batch=True`.
+
+    Returns:
+      Iterator of remaining buffered `AssembledBatch` microbatches.
+
+    Raises:
+      ValueError: If any buffered item carries an unresolved
+        `routed_experts_ref`.
+    """
     ...
 
   def build_dummy_payload(
@@ -366,6 +731,21 @@ class BatchAssembler(Generic[T], Protocol):
         tracking IDs.
     """
     ...
+
+
+def _iter_sync_batches(
+    assembler: BatchAssembler[datatypes.RLTrainerPayload],
+    *,
+    drain_all: bool,
+) -> Iterator[AssembledBatch]:
+  """Lazily yields assembled microbatches one chunk at a time."""
+  while (plan := assembler.plan_next_batch(drain_all=drain_all)) is not None:
+    # Clear `plan` and the yielded `AssembledBatch` from this generator frame
+    # before suspending at `yield` so neither stays pinned across checkpointing
+    # or weight-sync before the caller's next `next()` call.
+    ready = [assembler.pack_planned_batch(plan, {})]
+    del plan
+    yield ready.pop()
 
 
 def _left_pad(
@@ -742,16 +1122,26 @@ class SequencePackedBatchAssembler:
     self.segment_alignment_boundary = segment_alignment_boundary
     self._batch_counter = start_batch_index
 
-    # Each entry is a `(PackItem, trajectory_id, raw_payload)` converted once at ingest.
+    # Each entry is `(PackItem, trajectory_id, raw_payload)` converted once.
     self._buffer: list[
         tuple[packing.PackItem, str, datatypes.RLTrainerPayload]
     ] = []
+    self._buffered_tokens: int = 0
+    self._carried_dirty: bool = False
+    self._carried_cache: tuple[str, ...] = ()
     self._rollouts_since_update: int = 0
+    self._routed_experts_spec: RoutedExpertsSpec | None = None
+    self._plan_owner: object = object()
+    self._reset_epoch: int = 0
 
   @property
   def rollouts_per_optimizer_update(self) -> int:
     """Total number of rollouts expected per optimizer update."""
     return self.mini_batch_size * self.num_generations
+
+  def set_routed_experts_spec(self, spec: RoutedExpertsSpec) -> None:
+    """Configures static MoE routing shape/encoding; see `BatchAssembler`."""
+    self._routed_experts_spec = _validate_routed_experts_spec(spec)
 
   def _build_assembled_batch(
       self,
@@ -766,14 +1156,19 @@ class SequencePackedBatchAssembler:
       is_final_batch: bool,
   ) -> AssembledBatch:
     """Wraps a PackedChunk and its placement metadata into an AssembledBatch."""
-    num_unrouted = sum(item.routed_experts is None for item in placed)
-    if 0 < num_unrouted < len(placed):
-      logging.warning(
-          "Router replay: %d of %d packed trajectories carry no"
-          " routed_experts; their tokens use the trainer's own gate.",
-          num_unrouted,
-          len(placed),
+    if any(item.routed_experts is not None for item in placed):
+      num_unrouted = sum(
+          item.routed_experts is None
+          and bool(np.any(item.completion_mask != 0))
+          for item in placed
       )
+      if num_unrouted > 0:
+        logging.warning(
+            "Router replay: %d of %d packed trajectories carry no"
+            " routed_experts; their tokens use the trainer's own gate.",
+            num_unrouted,
+            len(placed),
+        )
     batch_tracking_id = f"{_BATCH_ID_PREFIX}_{self._batch_counter}"
     merged_lineage = _merge_batch_lineage(
         placed_items,
@@ -804,159 +1199,166 @@ class SequencePackedBatchAssembler:
         trajectory_ids=traj_ids,
     )
 
-  def _emit_one_chunk(
-      self, *, max_segments: int, drain_all: bool
-  ) -> AssembledBatch:
-    """Packs the head of the buffer into one microbatch, keeping leftovers."""
-    pack_items = [item for item, _, _ in self._buffer]
-    carried = packing.carried_per_token_fields(pack_items)
-    id_to_entry = {
-        id(item): entry for entry, item in zip(self._buffer, pack_items)
-    }
-    bins, leftover = packing.fill_one_chunk(
-        pack_items,
-        pack_size=self.batch_size,
-        budget=self.max_packed_len,
-        max_segments=max_segments,
-        segment_alignment_boundary=self.segment_alignment_boundary,
-    )
-    placed: list[packing.PackItem] = []
-    for bin_items in bins:
-      placed.extend(bin_items)
-    traj_ids = tuple(id_to_entry[id(item)][1] for item in placed)
-    placed_items = [id_to_entry[id(item)][2] for item in placed]
-    self._buffer = [id_to_entry[id(item)] for item in leftover]
-    chunk = packing.pack_chunk(
-        bins,
-        budget=self.max_packed_len,
-        pad_id=self.pad_id,
-        carried=carried,
-        segment_alignment_boundary=self.segment_alignment_boundary,
-    )
-    return self._build_assembled_batch(
-        chunk,
-        placed=placed,
-        traj_ids=traj_ids,
-        placed_items=placed_items,
-        row_valid_tokens=np.array(
-            [sum(item.num_tokens for item in b) for b in bins], dtype=np.int64
-        ),
-        row_num_sequences=np.array([len(b) for b in bins], dtype=np.int64),
-        max_segments=max_segments,
-        is_final_batch=drain_all and not self._buffer,
-    )
-
-  def _drain_buffer(self, *, drain_all: bool) -> Iterator[AssembledBatch]:
-    """Drains buffered items into microbatches using FFD packing.
-
-    When `drain_all` is False, only whole chunks whose token mass can fill a
-    full microbatch are emitted, so the streaming tail is held back until more
-    rollouts arrive. When `drain_all` is True (optimizer-update boundary or
-    `flush`), the buffer is drained completely and the last chunk is marked
-    final.
-
-    Args:
-      drain_all: Whether to flush all buffered items regardless of chunk
-        capacity.
-
-    Yields:
-      Assembled microbatches packed one chunk at a time.
-    """
-    if not self._buffer:
-      return
-    max_segments = packing.effective_max_segments(
-        self.max_packed_len, self.max_segments_per_packed_row
-    )
-    chunk_capacity = self.batch_size * self.max_packed_len
-    ext = packing._packing_ext  # pylint: disable=protected-access
-    if (
-        ext is not None
-        and "_emit_one_chunk" not in self.__dict__
-        and self.batch_size > 0
-        and max_segments > 0
-    ):
-      min_tokens = 0 if drain_all else chunk_capacity
-      if (
-          min_tokens > 0
-          and sum(entry[0].num_tokens for entry in self._buffer) < min_tokens
-      ):
-        return
-      pack_items = [entry[0] for entry in self._buffer]
-      chunks_with_bins, _ = packing.pack_chunks_with_bins_fast(
-          pack_items,
-          carried=packing.carried_per_token_fields(pack_items),
-          budget=self.max_packed_len,
-          pack_size=self.batch_size,
-          max_segments=max_segments,
-          pad_id=self.pad_id,
-          segment_alignment_boundary=self.segment_alignment_boundary,
-          min_buffered_tokens=min_tokens,
-      )
-      orig_buffer = self._buffer
-      remaining_mask = [True] * len(orig_buffer)
-      for chunk, bin_indices in chunks_with_bins:
-        placed_indices: list[int] = []
-        for b_idxs in bin_indices:
-          placed_indices.extend(b_idxs)
-        for i in placed_indices:
-          remaining_mask[i] = False
-        self._buffer = [
-            entry for entry, keep in zip(orig_buffer, remaining_mask) if keep
-        ]
-        yield self._build_assembled_batch(
-            chunk,
-            placed=[pack_items[i] for i in placed_indices],
-            traj_ids=tuple(orig_buffer[i][1] for i in placed_indices),
-            placed_items=[orig_buffer[i][2] for i in placed_indices],
-            row_valid_tokens=np.array(
-                [
-                    sum(pack_items[i].num_tokens for i in b_idxs)
-                    for b_idxs in bin_indices
-                ],
-                dtype=np.int64,
-            ),
-            row_num_sequences=np.array(chunk.num_real_segments, dtype=np.int64),
-            max_segments=max_segments,
-            is_final_batch=drain_all and not self._buffer,
-        )
-      return
-
-    while self._buffer:
-      if not drain_all:
-        buffered_tokens = sum(item[0].num_tokens for item in self._buffer)
-        if buffered_tokens < chunk_capacity:
-          break
-      yield self._emit_one_chunk(max_segments=max_segments, drain_all=drain_all)
-
-  def feed(
+  def ingest(
       self,
       items: Sequence[datatypes.RLTrainerPayload],
-  ) -> Iterator[AssembledBatch]:
-    """Ingests items and yields microbatches, flushing at the update boundary."""
+  ) -> bool:
+    """Buffers unbatched payloads; see `BatchAssembler.ingest`."""
+    new_entries: list[
+        tuple[packing.PackItem, str, datatypes.RLTrainerPayload]
+    ] = []
     ext = packing._packing_ext  # pylint: disable=protected-access
     if ext is not None:
       ext.ingest_payloads_fast(
-          items, self.max_packed_len, packing.PackItem, self._buffer
+          items, self.max_packed_len, packing.PackItem, new_entries
       )
     else:
       for item in items:
         pack_item = to_pack_item(item)
         packing.validate_items([pack_item], self.max_packed_len)
-        self._buffer.append((pack_item, _extract_trajectory_id(item), item))
+        new_entries.append((pack_item, _extract_trajectory_id(item), item))
+    if new_entries:
+      self._buffer.extend(new_entries)
+      self._buffered_tokens += sum(entry[0].num_tokens for entry in new_entries)
+      self._carried_dirty = True
     self._rollouts_since_update += len(items)
     is_update_done = (
         self._rollouts_since_update >= self.rollouts_per_optimizer_update
     )
     if is_update_done:
       self._rollouts_since_update %= self.rollouts_per_optimizer_update
-    return self._drain_buffer(drain_all=is_update_done)
+    return is_update_done
+
+  def plan_next_batch(
+      self,
+      *,
+      drain_all: bool,
+  ) -> BatchPlan | None:
+    """Plans and pops the next FFD-packed chunk; see `BatchAssembler`."""
+    if not self._buffer:
+      return None
+    if not drain_all and (
+        self._buffered_tokens < self.batch_size * self.max_packed_len
+    ):
+      return None
+    if self._carried_dirty:
+      self._carried_cache = packing.carried_per_token_fields(
+          [entry[0] for entry in self._buffer]
+      )
+      self._carried_dirty = False
+    carried = self._carried_cache
+    max_segments = packing.effective_max_segments(
+        self.max_packed_len, self.max_segments_per_packed_row
+    )
+    bin_entries, leftover = _fill_one_chunk_entries(
+        self._buffer,
+        pack_size=self.batch_size,
+        budget=self.max_packed_len,
+        max_segments=max_segments,
+        segment_alignment_boundary=self.segment_alignment_boundary,
+    )
+    self._buffer = leftover
+    placed_entries = list(itertools.chain.from_iterable(bin_entries))
+    self._buffered_tokens -= sum(e[0].num_tokens for e in placed_entries)
+    if not self._buffer:
+      self._carried_cache = ()
+    refs = _unique_routed_experts_refs([entry[2] for entry in placed_entries])
+    return BatchPlan(
+        refs=refs,
+        is_final_batch=drain_all and not self._buffer,
+        placement_state=_SequencePackedPlanState(
+            bin_entries=bin_entries,
+            carried=carried,
+            max_segments=max_segments,
+            owner=self._plan_owner,
+            reset_epoch=self._reset_epoch,
+        ),
+    )
+
+  def pack_planned_batch(
+      self,
+      plan: BatchPlan,
+      fetched: Mapping[datatypes.RoutedExpertsRef, np.ndarray],
+  ) -> AssembledBatch:
+    """Materializes a planned chunk; see `BatchAssembler.pack_planned_batch`."""
+    state = plan.placement_state
+    if not isinstance(state, _SequencePackedPlanState):
+      raise TypeError(
+          "SequencePackedBatchAssembler.pack_planned_batch expected a plan from"
+          f" SequencePackedBatchAssembler, got {type(state).__name__}."
+      )
+    _validate_plan_state(
+        state, owner=self._plan_owner, reset_epoch=self._reset_epoch
+    )
+    spec = self._routed_experts_spec
+    if plan.refs and spec is None:
+      raise RuntimeError(
+          "pack_planned_batch requires set_routed_experts_spec(...) before"
+          " materializing staged routed_experts_ref entries."
+      )
+    bins: list[list[packing.PackItem]] = []
+    placed: list[packing.PackItem] = []
+    traj_ids: list[str] = []
+    placed_items: list[datatypes.RLTrainerPayload] = []
+    for bin_entries in state.bin_entries:
+      row_items: list[packing.PackItem] = []
+      for pack_item, traj_id, payload in bin_entries:
+        ref = payload.routed_experts_ref
+        if ref is not None:
+          assert spec is not None
+          sliced = _resolve_fetched_routed_experts(
+              ref, fetched, seq_len=pack_item.num_tokens, spec=spec
+          )
+          pack_item = dataclasses.replace(pack_item, routed_experts=sliced)
+        row_items.append(pack_item)
+        placed.append(pack_item)
+        traj_ids.append(traj_id)
+        placed_items.append(payload)
+      bins.append(row_items)
+    state.consumed = True
+    chunk = packing.pack_chunk(
+        bins,
+        budget=self.max_packed_len,
+        pad_id=self.pad_id,
+        carried=state.carried,
+        segment_alignment_boundary=self.segment_alignment_boundary,
+    )
+    routed_fallback = _or_fallback_routed_experts(
+        chunk.routed_experts, chunk.ids.shape[0], self.max_packed_len, spec
+    )
+    if routed_fallback is not chunk.routed_experts:
+      chunk = dataclasses.replace(chunk, routed_experts=routed_fallback)
+    return self._build_assembled_batch(
+        chunk,
+        placed=placed,
+        traj_ids=tuple(traj_ids),
+        placed_items=placed_items,
+        row_valid_tokens=np.array(
+            [sum(item.num_tokens for item in b) for b in bins], dtype=np.int64
+        ),
+        row_num_sequences=np.array([len(b) for b in bins], dtype=np.int64),
+        max_segments=state.max_segments,
+        is_final_batch=plan.is_final_batch,
+    )
+
+  def feed(
+      self,
+      items: Sequence[datatypes.RLTrainerPayload],
+  ) -> Iterator[AssembledBatch]:
+    """Ingests inline items and yields microbatches; see `BatchAssembler`."""
+    _reject_unresolved_refs(items, "SequencePackedBatchAssembler.feed()")
+    return _iter_sync_batches(self, drain_all=self.ingest(items))
 
   def flush(
       self,
   ) -> Iterator[AssembledBatch]:
-    """Flushes any remaining buffered items, marking the last chunk final."""
+    """Flushes remaining buffered inline-routed items; see `BatchAssembler`."""
+    _reject_unresolved_refs(
+        [entry[2] for entry in self._buffer],
+        "SequencePackedBatchAssembler.flush()",
+    )
     self._rollouts_since_update = 0
-    return self._drain_buffer(drain_all=True)
+    return _iter_sync_batches(self, drain_all=True)
 
   def build_dummy_payload(
       self,
@@ -1016,7 +1418,11 @@ class SequencePackedBatchAssembler:
         tracking IDs across step boundaries.
     """
     self._buffer.clear()
+    self._buffered_tokens = 0
+    self._carried_dirty = False
+    self._carried_cache = ()
     self._rollouts_since_update = 0
+    self._reset_epoch += 1
     if start_batch_index is not None:
       self._batch_counter = start_batch_index
 
@@ -1075,6 +1481,9 @@ class PaddedBatchAssembler:
         collections.deque()
     )
     self._rollouts_since_update: int = 0
+    self._routed_experts_spec: RoutedExpertsSpec | None = None
+    self._plan_owner: object = object()
+    self._reset_epoch: int = 0
 
   @property
   def rollouts_per_optimizer_update(self) -> int:
@@ -1085,30 +1494,15 @@ class PaddedBatchAssembler:
   def max_seq_len(self) -> int:
     return self.max_prompt_length + self.max_response_length
 
-  def _emit_one_chunk(self, *, drain_all: bool) -> AssembledBatch:
-    """Pops up to `batch_size` items from the buffer and pads one microbatch."""
-    chunk = [
-        self._buffer.popleft()
-        for _ in range(min(self.batch_size, len(self._buffer)))
-    ]
-    payload, padding_stats = self._pack_chunk(chunk)
-    return AssembledBatch(
-        payload=payload,
-        is_final_batch=drain_all and not self._buffer,
-        padding_stats=padding_stats,
-        trajectory_ids=tuple(_extract_trajectory_id(it) for it in chunk),
-    )
+  def set_routed_experts_spec(self, spec: RoutedExpertsSpec) -> None:
+    """Configures static MoE routing shape/encoding; see `BatchAssembler`."""
+    self._routed_experts_spec = _validate_routed_experts_spec(spec)
 
-  def _drain_buffer(self, *, drain_all: bool) -> Iterator[AssembledBatch]:
-    """Drains buffered items into padded microbatches one chunk at a time."""
-    while len(self._buffer) >= self.batch_size or (drain_all and self._buffer):
-      yield self._emit_one_chunk(drain_all=drain_all)
-
-  def feed(
+  def ingest(
       self,
       items: Sequence[datatypes.RLTrainerPayload],
-  ) -> Iterator[AssembledBatch]:
-    """Ingests items and yields microbatches, flushing at the update boundary."""
+  ) -> bool:
+    """Buffers unbatched payloads; see `BatchAssembler.ingest`."""
     self._buffer.extend(items)
     self._rollouts_since_update += len(items)
     is_update_done = (
@@ -1116,14 +1510,89 @@ class PaddedBatchAssembler:
     )
     if is_update_done:
       self._rollouts_since_update %= self.rollouts_per_optimizer_update
-    return self._drain_buffer(drain_all=is_update_done)
+    return is_update_done
+
+  def plan_next_batch(
+      self,
+      *,
+      drain_all: bool,
+  ) -> BatchPlan | None:
+    """Pops up to `batch_size` buffered items; see `BatchAssembler`."""
+    if len(self._buffer) < self.batch_size and not (drain_all and self._buffer):
+      return None
+    chunk = tuple(
+        self._buffer.popleft()
+        for _ in range(min(self.batch_size, len(self._buffer)))
+    )
+    refs = _unique_routed_experts_refs(chunk)
+    return BatchPlan(
+        refs=refs,
+        is_final_batch=drain_all and not self._buffer,
+        placement_state=_PaddedPlanState(
+            chunk=chunk,
+            owner=self._plan_owner,
+            reset_epoch=self._reset_epoch,
+        ),
+    )
+
+  def pack_planned_batch(
+      self,
+      plan: BatchPlan,
+      fetched: Mapping[datatypes.RoutedExpertsRef, np.ndarray],
+  ) -> AssembledBatch:
+    """Pads a planned chunk; see `BatchAssembler.pack_planned_batch`."""
+    state = plan.placement_state
+    if not isinstance(state, _PaddedPlanState):
+      raise TypeError(
+          "PaddedBatchAssembler.pack_planned_batch expected a plan from"
+          f" PaddedBatchAssembler, got {type(state).__name__}."
+      )
+    _validate_plan_state(
+        state, owner=self._plan_owner, reset_epoch=self._reset_epoch
+    )
+    spec = self._routed_experts_spec
+    if plan.refs and spec is None:
+      raise RuntimeError(
+          "pack_planned_batch requires set_routed_experts_spec(...) before"
+          " materializing staged routed_experts_ref entries."
+      )
+    chunk: list[datatypes.RLTrainerPayload] = []
+    for item in state.chunk:
+      ref = item.routed_experts_ref
+      if ref is not None:
+        assert spec is not None
+        seq_len = len(item.prompt_ids) + len(item.completion_ids)
+        sliced = _resolve_fetched_routed_experts(
+            ref, fetched, seq_len=seq_len, spec=spec
+        )
+        item = dataclasses.replace(
+            item, routed_experts=sliced, routed_experts_ref=None
+        )
+      chunk.append(item)
+    state.consumed = True
+    payload, padding_stats = self._pack_chunk(chunk)
+    return AssembledBatch(
+        payload=payload,
+        is_final_batch=plan.is_final_batch,
+        padding_stats=padding_stats,
+        trajectory_ids=tuple(_extract_trajectory_id(it) for it in chunk),
+    )
+
+  def feed(
+      self,
+      items: Sequence[datatypes.RLTrainerPayload],
+  ) -> Iterator[AssembledBatch]:
+    """Ingests inline items and yields microbatches; see `BatchAssembler`."""
+    _reject_unresolved_refs(items, "PaddedBatchAssembler.feed()")
+    return _iter_sync_batches(self, drain_all=self.ingest(items))
 
   def flush(
       self,
   ) -> Iterator[AssembledBatch]:
-    """Flushes any remaining items padded to batch_size."""
+    """Flushes remaining buffered inline-routed items; see `BatchAssembler`."""
+    _reject_unresolved_refs(self._buffer, "PaddedBatchAssembler.flush()")
     self._rollouts_since_update = 0
-    return self._drain_buffer(drain_all=True)
+    return _iter_sync_batches(self, drain_all=True)
 
   def build_dummy_payload(
       self,
@@ -1185,6 +1654,7 @@ class PaddedBatchAssembler:
     """
     self._buffer.clear()
     self._rollouts_since_update = 0
+    self._reset_epoch += 1
     if start_batch_index is not None:
       self._batch_counter = start_batch_index
 
@@ -1196,6 +1666,7 @@ class PaddedBatchAssembler:
     item_list = list(items)
     if not item_list:
       return []
+    _reject_unresolved_refs(item_list, "PaddedBatchAssembler.pack()")
 
     payloads: list[datatypes.RLTrainerPayload] = []
     for i in range(0, len(item_list), self.batch_size):
@@ -1245,9 +1716,10 @@ class PaddedBatchAssembler:
           partially_present_fields,
       )
 
-    # Router replay is all-or-nothing per batch: a partially replayed batch
-    # would silently mix replayed and freshly routed rows.
-    replay_routing = bool(chunk) and all(
+    # Rows without routing (e.g. masked invalid trajectories) stay filled with
+    # UNSET_ROUTED_EXPERT so healthy rows keep router replay and static pytree
+    # structure is preserved.
+    replay_routing = bool(chunk) and any(
         it.routed_experts is not None for it in chunk
     )
     ext = packing._packing_ext  # pylint: disable=protected-access
@@ -1393,8 +1865,7 @@ class PaddedBatchAssembler:
               full_completion_len=c_full.size,
           )
 
-        # `replay_routing` already guarantees this is set; binding it locally
-        # also narrows the optional field for the type checker.
+        # Rows without routing keep their pre-filled UNSET_ROUTED_EXPERT slots.
         routed = item.routed_experts
         if (
             replay_routing
@@ -1428,6 +1899,13 @@ class PaddedBatchAssembler:
               self.max_response_length,
               out=batched_routed_experts[row_idx],
           )
+
+    batched_routed_experts = _or_fallback_routed_experts(
+        batched_routed_experts,
+        self.batch_size,
+        self.max_seq_len,
+        self._routed_experts_spec,
+    )
 
     if truncated_prompts or truncated_completions:
       logging.warning(

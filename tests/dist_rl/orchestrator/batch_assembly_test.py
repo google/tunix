@@ -14,9 +14,13 @@
 
 """Unit tests for Universal BatchAssembler (SequencePacked, GRPO, & Padded)."""
 
+import contextlib
 import dataclasses
+import gc
 import tracemalloc
+from typing import Any, cast
 from unittest import mock
+import weakref
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -358,14 +362,16 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         for i in range(3)
     ]
     emit_calls = 0
-    orig_emit = assembler._emit_one_chunk
+    orig_plan = assembler.plan_next_batch
 
-    def counting_emit(*args, **kwargs):
+    def counting_plan(*args, **kwargs):
       nonlocal emit_calls
-      emit_calls += 1
-      return orig_emit(*args, **kwargs)
+      plan = orig_plan(*args, **kwargs)
+      if plan is not None:
+        emit_calls += 1
+      return plan
 
-    assembler._emit_one_chunk = counting_emit
+    assembler.plan_next_batch = counting_plan
 
     batch_iter = assembler.feed(items)
     # Calling feed() validates/ingests items into _buffer without packing any
@@ -2273,12 +2279,35 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
     else:
       self.assertLess(net_peak, 65_536)
 
-  def test_partial_capture_disables_replay_for_the_batch(self):
-    """A half-replayed batch would silently mix replayed and fresh routing."""
-    packed = self._assembler().pack(
-        [self._payload(1), self._payload(2, with_routing=False)]
-    )
-    self.assertIsNone(packed[0].routed_experts)
+  def test_partial_capture_preserves_replay_with_unset_unrouted_rows(self):
+    """Unrouted rows are filled with UNSET while healthy rows keep replay."""
+    for use_cpp in (True, False):
+      ctx = (
+          contextlib.nullcontext()
+          if use_cpp
+          else mock.patch.object(packing, "_packing_ext", None)
+      )
+      with ctx:
+        packed = self._assembler().pack(
+            [self._payload(3), self._payload(2, with_routing=False)]
+        )
+      routed = packed[0].routed_experts
+      self.assertIsNotNone(routed)
+      self.assertEqual(
+          routed.shape,
+          (
+              2,
+              self.MAX_PROMPT + self.MAX_RESPONSE,
+              _ROUTING_LAYERS,
+              _ROUTING_TOP_K,
+          ),
+      )
+      # Row 0 has prompt len 2 (right-aligned in 4 -> indices 2..4) and
+      # completion len 3 (left-aligned in 4 -> indices 4..7).
+      np.testing.assert_array_equal(routed[0, :2], _UNSET)
+      np.testing.assert_array_equal(routed[0, 2:7], 3)
+      np.testing.assert_array_equal(routed[0, 7:], _UNSET)
+      np.testing.assert_array_equal(routed[1], _UNSET)
 
   def test_short_batch_pads_rows_as_unset(self):
     """Filler rows must not replay a real expert id."""
@@ -3218,7 +3247,7 @@ class SequencePackedRoutingTest(absltest.TestCase):
           "mixed_u8_u10",
           "mixed_u8_i16",
           "mixed_u10_i16",
-          "partial_none_disables_routing",
+          "partial_none_unset_row",
       )
       for mode in modes:
         with self.subTest(mode=mode):
@@ -3226,10 +3255,10 @@ class SequencePackedRoutingTest(absltest.TestCase):
           for idx, (p_len, c_len) in enumerate(lengths):
             full_len = p_len + c_len
             routed_len = full_len - (idx % 2)
-            if mode == "partial_none_disables_routing" and idx == 4:
+            if mode == "partial_none_unset_row" and idx == 4:
               routed = None
             else:
-              if mode in ("uint8", "partial_none_disables_routing"):
+              if mode in ("uint8", "partial_none_unset_row"):
                 tier = "uint8"
               elif mode == "uint10":
                 tier = "uint10"
@@ -3319,14 +3348,14 @@ class SequencePackedRoutingTest(absltest.TestCase):
 
           self.assertLen(cpp_batches, 1)
           routed_out = cpp_batches[0].payload.routed_experts
-          if mode == "partial_none_disables_routing":
-            self.assertIsNone(routed_out)
-          elif mode == "uint8":
+          if mode in ("uint8", "partial_none_unset_row"):
             self.assertIsNotNone(routed_out)
             self.assertEqual(routed_out.dtype, np.uint8)
             self.assertEqual(
                 routed_out.shape, (batch_size, seq_cap, num_layers, top_k)
             )
+            if mode == "partial_none_unset_row":
+              np.testing.assert_array_equal(routed_out[4], 0)
           elif mode in ("uint10", "mixed_u8_u10"):
             self.assertIsNotNone(routed_out)
             self.assertEqual(routed_out.dtype, np.uint8)
@@ -3763,6 +3792,849 @@ class BuildDummyPayloadTest(parameterized.TestCase):
             ValueError, "must be a non-negative integer or None"
         ):
           batch_assembly.BatchConfig(max_seq_tokens_per_device=bad_val)  # pytype: disable=wrong-arg-types
+
+
+class TwoPhaseRelayBatchAssemblerGoldenTest(parameterized.TestCase):
+  """Non-circular golden equivalence & spec fallback tests for Relay packing."""
+
+  def _build_reference_packed_batches(
+      self,
+      inline_payloads: list[datatypes.RLTrainerPayload],
+      *,
+      group_slices: list[slice],
+      batch_size: int,
+      num_generations: int,
+      mini_batch_size: int,
+      max_packed_len: int,
+      pad_id: int,
+      segment_alignment_boundary: int,
+      spec: batch_assembly.RoutedExpertsSpec,
+  ) -> list[batch_assembly.AssembledBatch]:
+    """Low-level reference oracle via `pack_chunks_with_bins_fast`."""
+    self.assertIsNotNone(packing._packing_ext)
+    rollouts_per_update = mini_batch_size * num_generations
+    max_segments = packing.effective_max_segments(max_packed_len, None)
+    chunk_capacity = batch_size * max_packed_len
+    buf: list[tuple[packing.PackItem, str, datatypes.RLTrainerPayload]] = []
+    rollouts_since_update = 0
+    out: list[batch_assembly.AssembledBatch] = []
+
+    def _drain_oracle(drain_all: bool) -> None:
+      nonlocal buf
+      if not buf:
+        return
+      min_tokens = 0 if drain_all else chunk_capacity
+      if min_tokens > 0 and sum(e[0].num_tokens for e in buf) < min_tokens:
+        return
+      pack_items = [e[0] for e in buf]
+      chunks_with_bins, _ = packing.pack_chunks_with_bins_fast(
+          pack_items,
+          carried=packing.carried_per_token_fields(pack_items),
+          budget=max_packed_len,
+          pack_size=batch_size,
+          max_segments=max_segments,
+          pad_id=pad_id,
+          segment_alignment_boundary=segment_alignment_boundary,
+          min_buffered_tokens=min_tokens,
+      )
+      orig_buf = buf
+      keep_mask = [True] * len(orig_buf)
+      for chunk, bin_indices in chunks_with_bins:
+        if chunk.routed_experts is None:
+          chunk = dataclasses.replace(
+              chunk,
+              routed_experts=packing.alloc_batched_routed_experts(
+                  batch_size,
+                  max_packed_len,
+                  (spec.num_layers, spec.top_k),
+                  spec.encoding,
+              ),
+          )
+        placed_idxs: list[int] = []
+        for b in bin_indices:
+          placed_idxs.extend(b)
+        for i in placed_idxs:
+          keep_mask[i] = False
+        buf = [e for e, keep in zip(orig_buf, keep_mask) if keep]
+        traj_ids = tuple(orig_buf[i][1] for i in placed_idxs)
+        padding_stats = batch_assembly.PaddingStats(
+            row_valid_tokens=np.array(
+                [sum(pack_items[i].num_tokens for i in b) for b in bin_indices],
+                dtype=np.int64,
+            ),
+            row_num_sequences=np.array(
+                chunk.num_real_segments, dtype=np.int64
+            ),
+            row_capacity=max_packed_len,
+        )
+        payload = batch_assembly.to_rl_trainer_payload(
+            chunk,
+            max_segments=max_segments,
+            trajectory_ids=traj_ids,
+            padding_stats=padding_stats,
+        )
+        out.append(
+            batch_assembly.AssembledBatch(
+                payload=payload,
+                is_final_batch=drain_all and not buf,
+                padding_stats=padding_stats,
+                trajectory_ids=traj_ids,
+            )
+        )
+
+    for sl in group_slices:
+      group = inline_payloads[sl]
+      for it in group:
+        pi = batch_assembly.to_pack_item(it)
+        packing.validate_items([pi], max_packed_len)
+        buf.append((pi, str(it.metadata.get("traj_id", "")), it))
+      rollouts_since_update += len(group)
+      drain_all = rollouts_since_update >= rollouts_per_update
+      if drain_all:
+        rollouts_since_update %= rollouts_per_update
+      _drain_oracle(drain_all)
+    _drain_oracle(True)
+    return out
+
+  def _build_reference_padded_batches(
+      self,
+      inline_payloads: list[datatypes.RLTrainerPayload],
+      *,
+      group_slices: list[slice],
+      batch_size: int,
+      num_generations: int,
+      mini_batch_size: int,
+      max_prompt_len: int,
+      max_response_len: int,
+      pad_id: int,
+      spec: batch_assembly.RoutedExpertsSpec,
+  ) -> list[batch_assembly.AssembledBatch]:
+    """Low-level reference oracle via manual 2D row alignment."""
+    rollouts_per_update = mini_batch_size * num_generations
+    buf: list[datatypes.RLTrainerPayload] = []
+    rollouts_since_update = 0
+    out: list[batch_assembly.AssembledBatch] = []
+    total_seq_len = max_prompt_len + max_response_len
+
+    def _pack_oracle_chunk(
+        chunk: list[datatypes.RLTrainerPayload], is_final: bool
+    ) -> batch_assembly.AssembledBatch:
+      p_ids = np.full((batch_size, max_prompt_len), pad_id, dtype=np.int32)
+      p_mask = np.zeros((batch_size, max_prompt_len), dtype=np.float32)
+      c_ids = np.full((batch_size, max_response_len), pad_id, dtype=np.int32)
+      c_mask = np.zeros((batch_size, max_response_len), dtype=np.float32)
+      advs = np.zeros((batch_size, max_response_len), dtype=np.float32)
+      old_lp = np.zeros((batch_size, max_response_len), dtype=np.float32)
+      routed = packing.alloc_batched_routed_experts(
+          batch_size,
+          total_seq_len,
+          (spec.num_layers, spec.top_k),
+          spec.encoding,
+      )
+      row_valid = np.zeros(batch_size, dtype=np.int64)
+      row_seqs = np.zeros(batch_size, dtype=np.int64)
+      for r_idx, it in enumerate(chunk):
+        pf = np.asarray(it.prompt_ids, dtype=np.int32).reshape(-1)
+        cf = np.asarray(it.completion_ids, dtype=np.int32).reshape(-1)
+        c_trunc = cf[:max_response_len]
+        row_valid[r_idx] = min(pf.size, max_prompt_len) + c_trunc.size
+        row_seqs[r_idx] = 1
+        p_ids[r_idx], p_mask[r_idx] = batch_assembly._left_pad(
+            pf, max_prompt_len, pad_id=pad_id
+        )
+        c_ids[r_idx], _ = batch_assembly._right_pad(
+            c_trunc, max_response_len, pad_value=pad_id, dtype=np.int32
+        )
+        c_mask[r_idx] = batch_assembly._completion_aligned(
+            it.completion_mask,
+            c_trunc.size,
+            max_response_len,
+            prompt_len=pf.size,
+            full_completion_len=cf.size,
+        )
+        advs[r_idx] = batch_assembly._completion_aligned(
+            it.advantages,
+            c_trunc.size,
+            max_response_len,
+            prompt_len=pf.size,
+            full_completion_len=cf.size,
+        )
+        old_lp[r_idx] = batch_assembly._completion_aligned(
+            it.old_per_token_logps,
+            c_trunc.size,
+            max_response_len,
+            prompt_len=pf.size,
+            full_completion_len=cf.size,
+        )
+        if it.routed_experts is not None:
+          batch_assembly._routed_experts_aligned(
+              it.routed_experts,
+              pf.size,
+              c_trunc.size,
+              max_prompt_len,
+              max_response_len,
+              out=routed[r_idx],
+          )
+      traj_ids = tuple(str(it.metadata.get("traj_id", "")) for it in chunk)
+      padding_stats = batch_assembly.PaddingStats(
+          row_valid_tokens=row_valid,
+          row_num_sequences=row_seqs,
+          row_capacity=total_seq_len,
+      )
+      return batch_assembly.AssembledBatch(
+          payload=datatypes.RLTrainerPayload(
+              prompt_ids=p_ids,
+              prompt_mask=p_mask,
+              completion_ids=c_ids,
+              completion_mask=c_mask,
+              advantages=advs,
+              old_per_token_logps=old_lp,
+              routed_experts=routed,
+              metadata={
+                  "trajectory_ids": traj_ids,
+                  **padding_stats.telemetry_metadata(),
+              },
+          ),
+          is_final_batch=is_final,
+          padding_stats=padding_stats,
+          trajectory_ids=traj_ids,
+      )
+
+    for sl in group_slices:
+      group = inline_payloads[sl]
+      buf.extend(group)
+      rollouts_since_update += len(group)
+      drain_all = rollouts_since_update >= rollouts_per_update
+      if drain_all:
+        rollouts_since_update %= rollouts_per_update
+      while len(buf) >= batch_size or (drain_all and buf):
+        take = min(batch_size, len(buf))
+        chunk, buf = buf[:take], buf[take:]
+        out.append(_pack_oracle_chunk(chunk, drain_all and not buf))
+    while buf:
+      take = min(batch_size, len(buf))
+      chunk, buf = buf[:take], buf[take:]
+      out.append(_pack_oracle_chunk(chunk, not buf))
+    return out
+
+  def _make_relay_and_inline_fixtures(
+      self, encoding: packing.RoutedExpertsWireEncoding
+  ) -> tuple[
+      list[datatypes.RLTrainerPayload],
+      list[datatypes.RLTrainerPayload],
+      dict[datatypes.RoutedExpertsRef, np.ndarray],
+      batch_assembly.RoutedExpertsSpec,
+  ]:
+    rng = np.random.default_rng(20261110)
+    num_layers, top_k = 4, 8
+    max_expert = {"uint8": 120, "uint10": 512, "int16": 2048}[encoding]
+    spec = batch_assembly.RoutedExpertsSpec(
+        num_layers=num_layers, top_k=top_k, encoding=encoding
+    )
+    inline_payloads: list[datatypes.RLTrainerPayload] = []
+    relay_payloads: list[datatypes.RLTrainerPayload] = []
+    staged_map: dict[datatypes.RoutedExpertsRef, np.ndarray] = {}
+
+    for i in range(28):
+      p_len = int(rng.integers(3, 18))
+      c_len = int(rng.integers(4, 22))
+      seq_len = p_len + c_len
+      # Mix (seq_len - 1), exact seq_len, and over-captured (seq_len + 3) arrays
+      # plus unrouted invalid trajectories (every 6th item).
+      unrouted = i % 6 == 4
+      prompt_ids = rng.integers(1, 300, size=p_len, dtype=np.int32)
+      comp_ids = rng.integers(1, 300, size=c_len, dtype=np.int32)
+      comp_mask = (
+          np.zeros(c_len, dtype=np.float32)
+          if unrouted
+          else np.ones(c_len, dtype=np.float32)
+      )
+      adv = (
+          np.zeros(c_len, dtype=np.float32)
+          if unrouted
+          else rng.standard_normal(c_len).astype(np.float32)
+      )
+      old_lp = rng.standard_normal(c_len).astype(np.float32)
+      meta = {"traj_id": f"relay_traj_{i}"}
+
+      inline_routed = None
+      ref = None
+      if not unrouted:
+        cap_len = (
+            seq_len - 1
+            if i % 3 == 0
+            else (seq_len if i % 3 == 1 else seq_len + 3)
+        )
+        raw_i16 = rng.integers(
+            0, max_expert, size=(cap_len, num_layers, top_k), dtype=np.int16
+        )
+        encoded_full = packing.encode_routed_experts(
+            raw_i16, mode=encoding, batched=False
+        )
+        assert encoded_full is not None
+        ref = datatypes.RoutedExpertsRef(
+            worker_id=f"rollout-{i % 2}", ref_id=(1 << 32) | i
+        )
+        staged_map[ref] = encoded_full
+        inline_routed = encoded_full[:seq_len]
+
+      base_kwargs = dict(
+          prompt_ids=prompt_ids,
+          prompt_mask=np.ones(p_len, dtype=np.float32),
+          completion_ids=comp_ids,
+          completion_mask=comp_mask,
+          advantages=adv,
+          old_per_token_logps=old_lp,
+          metadata=meta,
+      )
+      inline_payloads.append(
+          datatypes.RLTrainerPayload(
+              **base_kwargs, routed_experts=inline_routed
+          )
+      )
+      relay_payloads.append(
+          datatypes.RLTrainerPayload(**base_kwargs, routed_experts_ref=ref)
+      )
+    return inline_payloads, relay_payloads, staged_map, spec
+
+  def _assert_batches_equal(
+      self,
+      actual: list[batch_assembly.AssembledBatch],
+      expected: list[batch_assembly.AssembledBatch],
+  ) -> None:
+    self.assertEqual(len(actual), len(expected))
+    for act, exp in zip(actual, expected):
+      self.assertEqual(act.is_final_batch, exp.is_final_batch)
+      self.assertEqual(act.trajectory_ids, exp.trajectory_ids)
+      self.assertEqual(
+          act.padding_stats.row_capacity, exp.padding_stats.row_capacity
+      )
+      np.testing.assert_array_equal(
+          act.padding_stats.row_valid_tokens, exp.padding_stats.row_valid_tokens
+      )
+      np.testing.assert_array_equal(
+          act.padding_stats.row_num_sequences,
+          exp.padding_stats.row_num_sequences,
+      )
+      ts_key = batch_assembly.otel_metrics.MB_READY_TIME_S_METADATA_KEY
+      self.assertIn(ts_key, act.payload.metadata)
+      act_payload = dataclasses.replace(
+          act.payload,
+          metadata={k: v for k, v in act.payload.metadata.items() if k != ts_key},
+      )
+      exp_payload = dataclasses.replace(
+          exp.payload,
+          metadata={k: v for k, v in exp.payload.metadata.items() if k != ts_key},
+      )
+      self.assertEqual(
+          jax.tree.structure(act_payload), jax.tree.structure(exp_payload)
+      )
+      for field in (
+          "prompt_ids",
+          "prompt_mask",
+          "completion_ids",
+          "completion_mask",
+          "advantages",
+          "segment_ids",
+          "segment_positions",
+          "old_per_token_logps",
+          "routed_experts",
+      ):
+        a_val, e_val = getattr(act.payload, field), getattr(exp.payload, field)
+        if e_val is None:
+          self.assertIsNone(a_val)
+        else:
+          self.assertIsNotNone(a_val)
+          self.assertEqual(a_val.dtype, e_val.dtype)
+          np.testing.assert_array_equal(a_val, e_val, err_msg=field)
+
+  @parameterized.product(
+      encoding=("int16", "uint8", "uint10"),
+      boundary=(1, 32),
+      use_cpp=(True, False),
+  )
+  def test_sequence_packed_two_phase_matches_low_level_oracle(
+      self,
+      encoding: packing.RoutedExpertsWireEncoding,
+      boundary: int,
+      use_cpp: bool,
+  ):
+    inline_payloads, relay_payloads, staged_map, spec = (
+        self._make_relay_and_inline_fixtures(encoding)
+    )
+    # 7 prompt groups of G=4 across mini_batch_size=3 (rollouts_per_update=12,
+    # chunk_capacity = 2 * 48 = 96 tokens): buffered rollouts exceed
+    # chunk_capacity mid-update so plan_next_batch(drain_all=False) emits full
+    # chunks before update boundaries (asserted via mid_update_emissions > 0)
+    # and carries leftovers forward, while group 6 exercises the trailing
+    # partial-update tail flush.
+    group_slices = [slice(g * 4, (g + 1) * 4) for g in range(7)]
+    expected = self._build_reference_packed_batches(
+        inline_payloads,
+        group_slices=group_slices,
+        batch_size=2,
+        num_generations=4,
+        mini_batch_size=3,
+        max_packed_len=48,
+        pad_id=0,
+        segment_alignment_boundary=boundary,
+        spec=spec,
+    )
+
+    ctx = (
+        contextlib.nullcontext()
+        if use_cpp
+        else mock.patch.object(packing, "_packing_ext", None)
+    )
+    mid_update_emissions = 0
+    with ctx:
+      asm = batch_assembly.SequencePackedBatchAssembler(
+          batch_size=2,
+          num_generations=4,
+          mini_batch_size=3,
+          max_packed_len=48,
+          pad_id=0,
+          segment_alignment_boundary=boundary,
+      )
+      asm.set_routed_experts_spec(spec)
+      actual: list[batch_assembly.AssembledBatch] = []
+      for sl in group_slices:
+        drain_all = asm.ingest(relay_payloads[sl])
+        while (plan := asm.plan_next_batch(drain_all=drain_all)) is not None:
+          if not drain_all:
+            mid_update_emissions += 1
+          subset = {r: staged_map[r] for r in plan.refs}
+          actual.append(asm.pack_planned_batch(plan, subset))
+      while (plan := asm.plan_next_batch(drain_all=True)) is not None:
+        subset = {r: staged_map[r] for r in plan.refs}
+        actual.append(asm.pack_planned_batch(plan, subset))
+
+    self.assertGreater(mid_update_emissions, 0)
+    self._assert_batches_equal(actual, expected)
+
+  @parameterized.product(
+      encoding=("int16", "uint8", "uint10"),
+      use_cpp=(True, False),
+  )
+  def test_padded_two_phase_matches_low_level_oracle(
+      self,
+      encoding: packing.RoutedExpertsWireEncoding,
+      use_cpp: bool,
+  ):
+    inline_payloads, relay_payloads, staged_map, spec = (
+        self._make_relay_and_inline_fixtures(encoding)
+    )
+    group_slices = [slice(g * 4, (g + 1) * 4) for g in range(7)]
+    expected = self._build_reference_padded_batches(
+        inline_payloads,
+        group_slices=group_slices,
+        batch_size=3,
+        num_generations=4,
+        mini_batch_size=3,
+        max_prompt_len=14,
+        max_response_len=18,
+        pad_id=0,
+        spec=spec,
+    )
+
+    ctx = (
+        contextlib.nullcontext()
+        if use_cpp
+        else mock.patch.object(packing, "_packing_ext", None)
+    )
+    mid_update_emissions = 0
+    with ctx:
+      asm = batch_assembly.PaddedBatchAssembler(
+          batch_size=3,
+          max_prompt_length=14,
+          max_response_length=18,
+          pad_id=0,
+          num_generations=4,
+          mini_batch_size=3,
+      )
+      asm.set_routed_experts_spec(spec)
+      actual: list[batch_assembly.AssembledBatch] = []
+      for sl in group_slices:
+        drain_all = asm.ingest(relay_payloads[sl])
+        while (plan := asm.plan_next_batch(drain_all=drain_all)) is not None:
+          if not drain_all:
+            mid_update_emissions += 1
+          subset = {r: staged_map[r] for r in plan.refs}
+          actual.append(asm.pack_planned_batch(plan, subset))
+      while (plan := asm.plan_next_batch(drain_all=True)) is not None:
+        subset = {r: staged_map[r] for r in plan.refs}
+        actual.append(asm.pack_planned_batch(plan, subset))
+
+    self.assertGreater(mid_update_emissions, 0)
+    self._assert_batches_equal(actual, expected)
+
+  @parameterized.parameters("int16", "uint8", "uint10")
+  def test_all_unrouted_batch_with_spec_allocates_unset_routing(
+      self, encoding: packing.RoutedExpertsWireEncoding
+  ):
+    spec = batch_assembly.RoutedExpertsSpec(
+        num_layers=3, top_k=8, encoding=encoding
+    )
+    unrouted_items = [
+        _make_payload(3, 4, advantage=0.0),
+        _make_payload(2, 5, advantage=0.0),
+    ]
+    expected_fill = -1 if encoding == "int16" else 0
+    expected_dtype = np.int16 if encoding == "int16" else np.uint8
+
+    seq_asm = batch_assembly.SequencePackedBatchAssembler(
+        batch_size=2, num_generations=2, mini_batch_size=1, max_packed_len=16
+    )
+    seq_asm.set_routed_experts_spec(spec)
+    self.assertTrue(seq_asm.ingest(unrouted_items))
+    plan = seq_asm.plan_next_batch(drain_all=True)
+    assert plan is not None
+    self.assertEqual(plan.refs, ())
+    seq_mb = seq_asm.pack_planned_batch(plan, {})
+    self.assertIsNotNone(seq_mb.payload.routed_experts)
+    self.assertEqual(seq_mb.payload.routed_experts.dtype, expected_dtype)
+    np.testing.assert_array_equal(seq_mb.payload.routed_experts, expected_fill)
+    self.assertEqual(
+        packing.routed_experts_logical_shape(
+            seq_mb.payload.routed_experts, batched=True
+        ),
+        (2, 16, 3, 8),
+    )
+
+    pad_asm = batch_assembly.PaddedBatchAssembler(
+        batch_size=2,
+        max_prompt_length=4,
+        max_response_length=6,
+        pad_id=0,
+        num_generations=2,
+        mini_batch_size=1,
+    )
+    pad_asm.set_routed_experts_spec(spec)
+    self.assertTrue(pad_asm.ingest(unrouted_items))
+    pad_plan = pad_asm.plan_next_batch(drain_all=True)
+    assert pad_plan is not None
+    self.assertEqual(pad_plan.refs, ())
+    pad_mb = pad_asm.pack_planned_batch(pad_plan, {})
+    self.assertIsNotNone(pad_mb.payload.routed_experts)
+    self.assertEqual(pad_mb.payload.routed_experts.dtype, expected_dtype)
+    np.testing.assert_array_equal(pad_mb.payload.routed_experts, expected_fill)
+    self.assertEqual(
+        packing.routed_experts_logical_shape(
+            pad_mb.payload.routed_experts, batched=True
+        ),
+        (2, 10, 3, 8),
+    )
+
+    [direct_pad_payload] = pad_asm.pack(unrouted_items)
+    self.assertIsNotNone(direct_pad_payload.routed_experts)
+    self.assertEqual(direct_pad_payload.routed_experts.dtype, expected_dtype)
+    np.testing.assert_array_equal(
+        direct_pad_payload.routed_experts, expected_fill
+    )
+    self.assertEqual(
+        packing.routed_experts_logical_shape(
+            direct_pad_payload.routed_experts, batched=True
+        ),
+        (2, 10, 3, 8),
+    )
+
+  def test_zero_mask_unrouted_trajectory_in_routed_chunk_does_not_warn(self):
+    routed_item = dataclasses.replace(
+        _make_payload(2, 3, advantage=1.0),
+        routed_experts=np.full((5, 2, 4), 2, dtype=np.int16),
+    )
+    zero_mask_unrouted = dataclasses.replace(
+        _make_payload(2, 3, advantage=0.0),
+        completion_mask=np.zeros(3, dtype=np.float32),
+        routed_experts=None,
+    )
+    asm = batch_assembly.SequencePackedBatchAssembler(
+        batch_size=1, num_generations=2, mini_batch_size=1, max_packed_len=16
+    )
+    with self.assertNoLogs(level="WARNING"):
+      [mb] = list(asm.feed([routed_item, zero_mask_unrouted]))
+    self.assertIsNotNone(mb.payload.routed_experts)
+    np.testing.assert_array_equal(mb.payload.routed_experts[0, :5], 2)
+    np.testing.assert_array_equal(mb.payload.routed_experts[0, 5:], _UNSET)
+
+    trainable_unrouted = dataclasses.replace(
+        _make_payload(2, 3, advantage=1.0),
+        completion_mask=np.ones(3, dtype=np.float32),
+        routed_experts=None,
+    )
+    with self.assertLogs(level="WARNING") as logs:
+      list(asm.feed([routed_item, trainable_unrouted]))
+    self.assertIn("1 of 2 packed trajectories carry no", logs.output[0])
+
+  def test_sync_feed_generator_does_not_pin_unbatched_or_yielded_arrays(self):
+    for kind in ("sequence_packed", "padded"):
+      with self.subTest(kind=kind):
+        routed0 = np.full((5, 2, 4), 3, dtype=np.int16)
+        routed1 = np.full((5, 2, 4), 5, dtype=np.int16)
+        in_ref0 = weakref.ref(routed0)
+        item0 = dataclasses.replace(
+            _make_payload(2, 3, advantage=1.0), routed_experts=routed0
+        )
+        item1 = dataclasses.replace(
+            _make_payload(2, 3, advantage=-1.0), routed_experts=routed1
+        )
+        if kind == "sequence_packed":
+          asm: Any = batch_assembly.SequencePackedBatchAssembler(
+              batch_size=1,
+              num_generations=2,
+              mini_batch_size=1,
+              max_packed_len=6,
+          )
+        else:
+          asm = batch_assembly.PaddedBatchAssembler(
+              batch_size=1,
+              max_prompt_length=2,
+              max_response_length=3,
+              pad_id=0,
+              num_generations=2,
+              mini_batch_size=1,
+          )
+
+        it = asm.feed([item0, item1])
+        del routed0, routed1, item0, item1
+        mb0 = next(it)
+        self.assertFalse(mb0.is_final_batch)
+        assert mb0.payload.routed_experts is not None
+        out_ref0 = weakref.ref(mb0.payload.routed_experts)
+        del mb0
+        gc.collect()
+        # While `it` remains suspended before chunk 1, neither chunk 0's
+        # unbatched routing array nor chunk 0's yielded batched routing array
+        # may remain pinned by the generator frame.
+        self.assertIsNone(in_ref0())
+        self.assertIsNone(out_ref0())
+        [mb1] = list(it)
+        self.assertTrue(mb1.is_final_batch)
+
+  def test_routed_experts_spec_validation_and_setter_type_errors(self):
+    with self.assertRaisesRegex(ValueError, "num_layers"):
+      batch_assembly.RoutedExpertsSpec(num_layers=0, top_k=8, encoding="uint8")
+    with self.assertRaisesRegex(ValueError, "top_k"):
+      batch_assembly.RoutedExpertsSpec(
+          num_layers=4, top_k=cast(Any, False), encoding="uint8"
+      )
+    with self.assertRaisesRegex(ValueError, "encoding"):
+      batch_assembly.RoutedExpertsSpec(
+          num_layers=4, top_k=8, encoding=cast(Any, "auto")
+      )
+
+    seq_asm = batch_assembly.SequencePackedBatchAssembler(
+        batch_size=1, num_generations=1, mini_batch_size=1, max_packed_len=8
+    )
+    pad_asm = batch_assembly.PaddedBatchAssembler(
+        batch_size=1,
+        max_prompt_length=4,
+        max_response_length=4,
+        pad_id=0,
+        num_generations=1,
+        mini_batch_size=1,
+    )
+    for asm in (seq_asm, pad_asm):
+      with self.assertRaisesRegex(TypeError, "Expected RoutedExpertsSpec"):
+        asm.set_routed_experts_spec(cast(Any, None))
+      with self.assertRaisesRegex(TypeError, "Expected RoutedExpertsSpec"):
+        asm.set_routed_experts_spec(cast(Any, (2, 4)))
+
+  def test_pack_planned_batch_requires_spec_when_plan_has_refs(self):
+    ref = datatypes.RoutedExpertsRef(worker_id="w0", ref_id=99)
+    item = dataclasses.replace(_make_payload(2, 3), routed_experts_ref=ref)
+    fetched = {ref: np.zeros((5, 2, 4), dtype=np.uint8)}
+
+    seq_asm = batch_assembly.SequencePackedBatchAssembler(
+        batch_size=1, num_generations=1, mini_batch_size=1, max_packed_len=8
+    )
+    seq_asm.ingest([item])
+    seq_plan = seq_asm.plan_next_batch(drain_all=True)
+    assert seq_plan is not None
+    with self.assertRaisesRegex(
+        RuntimeError, "requires set_routed_experts_spec"
+    ):
+      seq_asm.pack_planned_batch(seq_plan, fetched)
+
+    pad_asm = batch_assembly.PaddedBatchAssembler(
+        batch_size=1,
+        max_prompt_length=4,
+        max_response_length=4,
+        pad_id=0,
+        num_generations=1,
+        mini_batch_size=1,
+    )
+    pad_asm.ingest([item])
+    pad_plan = pad_asm.plan_next_batch(drain_all=True)
+    assert pad_plan is not None
+    with self.assertRaisesRegex(
+        RuntimeError, "requires set_routed_experts_spec"
+    ):
+      pad_asm.pack_planned_batch(pad_plan, fetched)
+
+  def test_pack_planned_batch_fetched_validation_errors_include_ref(self):
+    ref = datatypes.RoutedExpertsRef(worker_id="w0", ref_id=99)
+    item = dataclasses.replace(_make_payload(2, 3), routed_experts_ref=ref)
+
+    def _new_plan(
+        encoding: packing.RoutedExpertsWireEncoding = "uint8",
+    ) -> tuple[
+        batch_assembly.SequencePackedBatchAssembler, batch_assembly.BatchPlan
+    ]:
+      asm = batch_assembly.SequencePackedBatchAssembler(
+          batch_size=1, num_generations=1, mini_batch_size=1, max_packed_len=8
+      )
+      asm.set_routed_experts_spec(
+          batch_assembly.RoutedExpertsSpec(
+              num_layers=2, top_k=4, encoding=encoding
+          )
+      )
+      asm.ingest([item])
+      plan = asm.plan_next_batch(drain_all=True)
+      assert plan is not None
+      return asm, plan
+
+    asm, plan = _new_plan("uint8")
+    with self.assertRaisesRegex(KeyError, "w0"):
+      asm.pack_planned_batch(plan, {})
+
+    asm, plan = _new_plan("uint8")
+    with self.assertRaisesRegex(TypeError, "w0.*must be a numpy array"):
+      asm.pack_planned_batch(plan, {ref: cast(Any, [[[0]]])})
+
+    asm, plan = _new_plan("uint8")
+    with self.assertRaisesRegex(ValueError, "w0.*length must be >= 4"):
+      asm.pack_planned_batch(plan, {ref: np.zeros((3, 2, 4), dtype=np.uint8)})
+
+    asm, plan = _new_plan("uint8")
+    with self.assertRaisesRegex(
+        ValueError, "w0.*does not match RoutedExpertsSpec"
+    ):
+      asm.pack_planned_batch(plan, {ref: np.zeros((5, 3, 4), dtype=np.uint8)})
+
+    asm, plan = _new_plan("uint8")
+    with self.assertRaisesRegex(
+        ValueError, "w0.*encoding 'int16' does not match"
+    ):
+      asm.pack_planned_batch(plan, {ref: np.zeros((5, 2, 4), dtype=np.int16)})
+
+    for bad_dtype in (np.float32, np.int32):
+      asm, plan = _new_plan("int16")
+      bad_arr = np.zeros((5, 2, 4), dtype=bad_dtype)
+      with self.assertRaisesRegex(ValueError, "w0.*must have dtype int16"):
+        asm.pack_planned_batch(plan, {ref: bad_arr})
+
+    asm, plan = _new_plan("int16")
+    with self.assertRaisesRegex(ValueError, "w0"):
+      asm.pack_planned_batch(plan, {ref: np.zeros((5, 2), dtype=np.int16)})
+
+  def test_batch_plan_identity_and_single_use_lifecycle(self):
+    item = _make_payload(2, 3)
+    seq_a = batch_assembly.SequencePackedBatchAssembler(
+        batch_size=1, num_generations=1, mini_batch_size=1, max_packed_len=8
+    )
+    seq_b = batch_assembly.SequencePackedBatchAssembler(
+        batch_size=1, num_generations=1, mini_batch_size=1, max_packed_len=8
+    )
+    pad_a = batch_assembly.PaddedBatchAssembler(
+        batch_size=1,
+        max_prompt_length=4,
+        max_response_length=4,
+        pad_id=0,
+        num_generations=1,
+        mini_batch_size=1,
+    )
+    pad_b = batch_assembly.PaddedBatchAssembler(
+        batch_size=1,
+        max_prompt_length=4,
+        max_response_length=4,
+        pad_id=0,
+        num_generations=1,
+        mini_batch_size=1,
+    )
+
+    seq_a.ingest([item])
+    plan1 = seq_a.plan_next_batch(drain_all=True)
+    seq_a.ingest([item])
+    plan2 = seq_a.plan_next_batch(drain_all=True)
+    assert plan1 is not None and plan2 is not None
+    self.assertNotEqual(plan1, plan2)
+
+    with self.assertRaisesRegex(TypeError, "expected a plan from Padded"):
+      pad_a.pack_planned_batch(plan1, {})
+    with self.assertRaisesRegex(
+        RuntimeError, "different BatchAssembler instance"
+    ):
+      seq_b.pack_planned_batch(plan1, {})
+
+    seq_a.pack_planned_batch(plan1, {})
+    with self.assertRaisesRegex(RuntimeError, "already been consumed"):
+      seq_a.pack_planned_batch(plan1, {})
+
+    seq_a.reset()
+    with self.assertRaisesRegex(RuntimeError, "before reset"):
+      seq_a.pack_planned_batch(plan2, {})
+
+    pad_a.ingest([item])
+    p_plan1 = pad_a.plan_next_batch(drain_all=True)
+    pad_a.ingest([item])
+    p_plan2 = pad_a.plan_next_batch(drain_all=True)
+    assert p_plan1 is not None and p_plan2 is not None
+    with self.assertRaisesRegex(
+        TypeError, "expected a plan from SequencePacked"
+    ):
+      seq_a.pack_planned_batch(p_plan1, {})
+    with self.assertRaisesRegex(
+        RuntimeError, "different BatchAssembler instance"
+    ):
+      pad_b.pack_planned_batch(p_plan1, {})
+    pad_a.pack_planned_batch(p_plan1, {})
+    with self.assertRaisesRegex(RuntimeError, "already been consumed"):
+      pad_a.pack_planned_batch(p_plan1, {})
+    pad_a.reset()
+    with self.assertRaisesRegex(RuntimeError, "before reset"):
+      pad_a.pack_planned_batch(p_plan2, {})
+
+  def test_sync_entrypoints_reject_unresolved_routed_experts_ref(self):
+    ref = datatypes.RoutedExpertsRef(worker_id="w0", ref_id=99)
+    item = dataclasses.replace(_make_payload(2, 3), routed_experts_ref=ref)
+    seq_asm = batch_assembly.SequencePackedBatchAssembler(
+        batch_size=1, num_generations=2, mini_batch_size=1, max_packed_len=8
+    )
+    pad_asm = batch_assembly.PaddedBatchAssembler(
+        batch_size=1,
+        max_prompt_length=4,
+        max_response_length=4,
+        pad_id=0,
+        num_generations=2,
+        mini_batch_size=1,
+    )
+    with self.assertRaisesRegex(
+        ValueError, "cannot pack unresolved routed_experts_ref"
+    ):
+      list(seq_asm.feed([item]))
+    with self.assertRaisesRegex(
+        ValueError, "cannot pack unresolved routed_experts_ref"
+    ):
+      list(pad_asm.feed([item]))
+    with self.assertRaisesRegex(
+        ValueError, "cannot pack unresolved routed_experts_ref"
+    ):
+      pad_asm.pack([item])
+
+    seq_asm.ingest([item])
+    with self.assertRaisesRegex(
+        ValueError, "cannot pack unresolved routed_experts_ref"
+    ):
+      list(seq_asm.flush())
+    self.assertEqual(seq_asm._rollouts_since_update, 1)
+
+    pad_asm.ingest([item])
+    with self.assertRaisesRegex(
+        ValueError, "cannot pack unresolved routed_experts_ref"
+    ):
+      list(pad_asm.flush())
+    self.assertEqual(pad_asm._rollouts_since_update, 1)
 
 
 if __name__ == "__main__":
