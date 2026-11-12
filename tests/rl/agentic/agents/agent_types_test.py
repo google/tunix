@@ -14,6 +14,7 @@
 
 """Tests for agent_types, especially TrajectoryItem serialization and attributes."""
 
+import dataclasses
 import pickle
 from absl.testing import absltest
 import cloudpickle
@@ -293,6 +294,58 @@ class AgentChatCompletionsShallowSnapshotTest(absltest.TestCase):
     agent.chat_completions[1]["content"] = "mutated"
     self.assertEqual(step0.chat_completions[1]["content"], "q1")
     self.assertEqual(step1.chat_completions[1]["content"], "q1")
+
+  def test_trajectory_item_routed_experts_ref_roundtrip_and_mutual_exclusion(
+      self,
+  ):
+    ref = agent_types.common_datatypes.RoutedExpertsRef(
+        worker_id="rollout-0", ref_id=42
+    )
+    item = agent_types.TrajectoryItem(
+        prompt_id="p_ref",
+        group_index=2,
+        traj={"reward": 1.0, "status": "SUCCEEDED"},
+        metadata={"extra": "ok"},
+        routed_experts_ref=ref,
+    )
+    self.assertEqual(item.routed_experts_ref, ref)
+    self.assertNotIn("routed_experts_ref", item.metadata)
+
+    serialized = item.to_dict()
+    self.assertEqual(
+        serialized["routed_experts_ref"],
+        {"worker_id": "rollout-0", "ref_id": 42},
+    )
+    self.assertEqual(serialized["metadata"], {"extra": "ok"})
+    restored = agent_types.TrajectoryItem.from_dict(serialized)
+    self.assertEqual(restored.routed_experts_ref, ref)
+    self.assertNotIn("routed_experts_ref", restored.metadata)
+
+    replaced = dataclasses.replace(item, group_index=7)
+    self.assertEqual(replaced.group_index, 7)
+    self.assertEqual(replaced.routed_experts_ref, ref)
+    self.assertEqual(replaced.metadata, {"extra": "ok"})
+    cleared = dataclasses.replace(item, routed_experts_ref=None)
+    self.assertIsNone(cleared.routed_experts_ref)
+    self.assertEqual(cleared.metadata, {"extra": "ok"})
+
+    inline = np.zeros((4, 2, 2), dtype=np.int16)
+    with self.assertRaisesRegex(ValueError, "cannot hold both"):
+      agent_types.TrajectoryItem(
+          prompt_id="p_conflict",
+          traj={"routed_experts": inline},
+          routed_experts_ref=ref,
+      )
+    item_inline = agent_types.TrajectoryItem(
+        prompt_id="p_inline", traj={"routed_experts": inline}
+    )
+    with self.assertRaisesRegex(ValueError, "cannot hold both"):
+      item_inline.routed_experts_ref = ref
+    with self.assertRaisesRegex(ValueError, "cannot hold both"):
+      item.traj = {"routed_experts": inline}
+    with self.assertRaisesRegex(ValueError, "cannot hold both"):
+      item.metadata = {"routed_experts": inline}
+    self.assertIn("routed_experts_ref=RoutedExpertsRef", repr(item))
 
 
 if __name__ == "__main__":

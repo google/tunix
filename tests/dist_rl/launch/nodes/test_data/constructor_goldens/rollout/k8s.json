@@ -133,6 +133,7 @@
           "routed_experts_encode_mode": "auto",
           "routed_experts_num_experts": null,
           "seed": null,
+          "staging_max_bytes": null,
           "store_routed_experts": false,
           "temperature": 1.0,
           "tensor_parallel_size": 2,

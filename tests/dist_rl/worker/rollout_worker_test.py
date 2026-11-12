@@ -27,6 +27,7 @@ from etils import epath
 import numpy as np
 from opentelemetry.sdk import metrics as sdk_metrics
 from opentelemetry.sdk.metrics import export as sdk_metrics_export
+import portpicker
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import lineage
 from tunix.dist_rl.common import registry
@@ -36,6 +37,7 @@ from tunix.dist_rl.trajectory import file_store
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.dist_rl.trajectory import trajectory_testing
 from tunix.dist_rl.worker import otel_metrics
+from tunix.dist_rl.worker import remote_execution
 from tunix.dist_rl.worker import rollout_worker
 
 
@@ -1257,6 +1259,444 @@ class RolloutWorkerOTelMetricsTest(absltest.TestCase):
         [attrs for _, _, attrs in metrics["tunix.worker.requests_inflight"]],
         [{"worker_id": "rollout_otel_0"}],
     )
+
+
+class RolloutWorkerStagingRpcTest(absltest.TestCase):
+
+  def _make_moe_worker(
+      self,
+      *,
+      staging_max_bytes: int = 8 * 1024 * 1024,
+      response_tokens_per_turn: int = 16,
+      num_layers: int = 4,
+      top_k: int = 8,
+      decode_sleep_s: float = 0.0,
+  ) -> rollout_worker.RolloutWorker:
+    cfg = rollout_worker.RolloutConfig(
+        max_prompt_length=64,
+        max_tokens_to_generate=response_tokens_per_turn,
+        return_routed_experts=True,
+        routed_experts_encode_mode="uint10",
+        routed_experts_num_experts=384,
+        staging_max_bytes=staging_max_bytes,
+    )
+    sampler = mocks.MockBaseSamplerImpl(
+        sampler_name="moe_sampler",
+        default_delay=decode_sleep_s,
+        response_tokens_per_turn=response_tokens_per_turn,
+        routed_experts_shape_spec=(num_layers, top_k),
+        num_experts=384,
+    )
+    return rollout_worker.RolloutWorker(
+        worker_id="rollout-moe-0",
+        config=cfg,
+        sampler=sampler,
+        env_name="mock_env",
+        agent_name="mock_agent",
+        tokenizer=mocks.MockTokenizer(),
+        chat_parser=mocks.MockChatParser(),
+    )
+
+  def test_inline_default_vs_staged_ref_and_info_resources(self):
+    worker = self._make_moe_worker()
+    info = worker.info()
+    self.assertEqual(info.resources["routed_experts_shape"], (4, 8))
+    self.assertEqual(info.resources["staging_max_bytes"], 8 * 1024 * 1024)
+    init_resp = worker.initialize()
+    self.assertEqual(init_resp.metadata["routed_experts_shape"], (4, 8))
+    self.assertEqual(init_resp.metadata["staging_max_bytes"], 8 * 1024 * 1024)
+    init_resp_idempotent = worker.initialize()
+    self.assertEqual(
+        init_resp_idempotent.metadata["routed_experts_shape"], (4, 8)
+    )
+    self.assertEqual(
+        init_resp_idempotent.metadata["staging_max_bytes"], 8 * 1024 * 1024
+    )
+
+    # Default stage_routed_experts=False keeps inline routed_experts.
+    inline_resp = asyncio.run(
+        worker.generate(
+            datatypes.RolloutRequest(
+                prompt="short",
+                prompt_id="p_inline",
+                max_turns=1,
+                max_response_length=16,
+                generation_kwargs={
+                    "return_routed_experts": True,
+                    "force_finish": True,
+                },
+                metadata={"env_config": {"env_id": "e", "max_steps": 1}},
+            )
+        )
+    )
+    assert isinstance(inline_resp, datatypes.RolloutResponse)
+    assert inline_resp.payload is not None
+    self.assertIsNone(inline_resp.payload.routed_experts_ref)
+    self.assertIn("routed_experts", inline_resp.payload.traj)
+    self.assertEqual(worker.get_metrics()["staging/used_bytes"], 0)
+
+    # stage_routed_experts=True returns RoutedExpertsRef with zero inline bytes.
+    staged_resp = asyncio.run(
+        worker.generate(
+            datatypes.RolloutRequest(
+                prompt="short",
+                prompt_id="p_staged",
+                max_turns=1,
+                max_response_length=16,
+                stage_routed_experts=True,
+                generation_kwargs={
+                    "return_routed_experts": True,
+                    "force_finish": True,
+                },
+                metadata={"env_config": {"env_id": "e", "max_steps": 1}},
+            )
+        )
+    )
+    assert isinstance(staged_resp, datatypes.RolloutResponse)
+    assert staged_resp.payload is not None
+    ref = staged_resp.payload.routed_experts_ref
+    self.assertIsNotNone(ref)
+    assert ref is not None
+    self.assertNotIn("routed_experts", staged_resp.payload.traj)
+    self.assertGreater(worker.get_metrics()["staging/used_bytes"], 0)
+
+    fetched = worker.fetch_staged([ref.ref_id])[ref.ref_id]
+    self.assertEqual(fetched.shape[1:], (4, 2, 5))
+    freed = worker.release_staged([ref.ref_id])
+    self.assertEqual(freed, fetched.nbytes)
+    self.assertEqual(worker.get_metrics()["staging/used_bytes"], 0)
+    self.assertEqual(worker.get_metrics()["staging/reserved_bytes"], 0)
+
+  def test_post_weight_sync_bool_safety_and_clear_staged_drains_all(self):
+    worker = self._make_moe_worker(decode_sleep_s=0.05)
+
+    async def _run():
+      # Stage an entry at policy_version=0.
+      r0 = await worker.generate(
+          datatypes.RolloutRequest(
+              prompt="a",
+              prompt_id="p_v0",
+              max_turns=1,
+              max_response_length=16,
+              stage_routed_experts=True,
+              generation_kwargs={
+                  "return_routed_experts": True,
+                  "force_finish": True,
+              },
+              metadata={"env_config": {"env_id": "e", "max_steps": 1}},
+          )
+      )
+      assert isinstance(r0, datatypes.RolloutResponse)
+      assert (
+          r0.payload is not None and r0.payload.routed_experts_ref is not None
+      )
+
+      # MockBaseSamplerImpl.post_weight_sync returns `True` (bool!): verify
+      # policy_version=5 is recorded cleanly and min_retained=1 evicts v0!
+      sync_req = datatypes.WeightSyncRequest(
+          policy_version=5, min_retained_policy_version=1
+      )
+      await worker.pre_weight_sync(sync_req)
+      await worker.weight_sync(sync_req)
+      await worker.post_weight_sync(sync_req)
+      self.assertEqual(worker.heartbeat().policy_version, 5)
+      metrics = worker.get_metrics()
+      self.assertEqual(metrics["staging/zombie_evictions_total"], 1)
+      self.assertEqual(metrics["staging/used_bytes"], 0)
+
+      # Stage one completed entry and one in-flight rollout, then clear_staged.
+      _ = await worker.generate(
+          datatypes.RolloutRequest(
+              prompt="b",
+              prompt_id="p_v5",
+              max_turns=1,
+              max_response_length=16,
+              stage_routed_experts=True,
+              generation_kwargs={
+                  "return_routed_experts": True,
+                  "force_finish": True,
+              },
+              metadata={"env_config": {"env_id": "e", "max_steps": 1}},
+          )
+      )
+      inflight = asyncio.create_task(
+          worker.generate(
+              datatypes.RolloutRequest(
+                  prompt="c",
+                  prompt_id="p_inflight",
+                  max_turns=1,
+                  max_response_length=16,
+                  stage_routed_experts=True,
+                  generation_kwargs={
+                      "return_routed_experts": True,
+                      "force_finish": True,
+                  },
+                  metadata={"env_config": {"env_id": "e", "max_steps": 1}},
+              )
+          )
+      )
+      await asyncio.sleep(0.01)
+      self.assertGreater(worker.get_metrics()["staging/reserved_bytes"], 0)
+      cleared = await worker.clear_staged()
+      self.assertEqual(cleared, 1)
+      with self.assertRaises(asyncio.CancelledError):
+        await inflight
+      self.assertEqual(worker.get_metrics()["staging/used_bytes"], 0)
+      self.assertEqual(worker.get_metrics()["staging/reserved_bytes"], 0)
+
+    asyncio.run(_run())
+
+  def test_grpc_bulk_tcp_fetch_and_release_staged_over_wire(self):
+    # 61 layers * top-8 uint10 (610 B/tok) * 1024 tokens > 620 KiB (> 512 KiB
+    # Bulk TCP threshold), exercising out-of-band Bulk TCP + LZ4 pull!
+    worker = self._make_moe_worker(
+        staging_max_bytes=16 * 1024 * 1024,
+        response_tokens_per_turn=1024,
+        num_layers=61,
+        top_k=8,
+    )
+
+    async def _run():
+      server = remote_execution.GrpcRemoteExecutionServer(
+          worker, enable_bulk_transport=True
+      )
+      port = portpicker.pick_unused_port()
+      await server.start_serving_async(port=port)
+      handle = remote_execution.GrpcRemoteActorHandle(
+          target_address=f"grpc://127.0.0.1:{port}",
+          enable_bulk_transport=True,
+      )
+      try:
+        resp = await handle.asubmit(
+            "generate",
+            datatypes.RolloutRequest(
+                prompt="wire",
+                prompt_id="p_wire",
+                max_turns=1,
+                max_response_length=1024,
+                stage_routed_experts=True,
+                generation_kwargs={
+                    "return_routed_experts": True,
+                    "force_finish": True,
+                },
+                metadata={"env_config": {"env_id": "e", "max_steps": 1}},
+            ),
+        )
+        assert isinstance(resp, datatypes.RolloutResponse)
+        assert resp.payload is not None
+        ref = resp.payload.routed_experts_ref
+        self.assertIsNotNone(ref)
+        assert ref is not None
+
+        fetched_map = await handle.asubmit("fetch_staged", [ref.ref_id])
+        arr = fetched_map[ref.ref_id]
+        self.assertGreater(arr.nbytes, 512 * 1024)
+        self.assertEqual(arr.shape[1:], (61, 2, 5))
+
+        freed = await handle.asubmit("release_staged", [ref.ref_id])
+        self.assertEqual(freed, arr.nbytes)
+        metrics = await handle.asubmit("get_metrics")
+        self.assertEqual(metrics["staging/used_bytes"], 0)
+        self.assertEqual(metrics["staging/reserved_bytes"], 0)
+      finally:
+        await handle.close()
+        await server.stop_serving(grace=0.0)
+
+    asyncio.run(_run())
+
+  def test_concurrent_and_cancelled_clear_staged_recovers_cleanly(self):
+    worker = self._make_moe_worker(decode_sleep_s=0.04)
+
+    async def _run():
+      _ = await worker.generate(
+          datatypes.RolloutRequest(
+              prompt="staged_0",
+              prompt_id="p_c0",
+              max_turns=1,
+              max_response_length=16,
+              stage_routed_experts=True,
+              generation_kwargs={
+                  "return_routed_experts": True,
+                  "force_finish": True,
+              },
+              metadata={"env_config": {"env_id": "e", "max_steps": 1}},
+          )
+      )
+      c1, c2 = await asyncio.gather(
+          worker.clear_staged(), worker.clear_staged()
+      )
+      self.assertEqual(c1 + c2, 1)
+      self.assertEqual(worker.get_metrics()["staging/used_bytes"], 0)
+
+      # Cancelling clear_staged() mid-drain must reopen the buffer so subsequent
+      # staged rollouts and clear_staged() calls still succeed.
+      inflight = asyncio.create_task(
+          worker.generate(
+              datatypes.RolloutRequest(
+                  prompt="inflight",
+                  prompt_id="p_c_inflight",
+                  max_turns=1,
+                  max_response_length=16,
+                  stage_routed_experts=True,
+                  generation_kwargs={
+                      "return_routed_experts": True,
+                      "force_finish": True,
+                  },
+                  metadata={"env_config": {"env_id": "e", "max_steps": 1}},
+              )
+          )
+      )
+      await asyncio.sleep(0.01)
+      clear_task = asyncio.create_task(worker.clear_staged())
+      await asyncio.sleep(0)
+      clear_task.cancel()
+      with self.assertRaises(asyncio.CancelledError):
+        await clear_task
+      with self.assertRaises(asyncio.CancelledError):
+        await inflight
+
+      # Buffer is reopened and accepts fresh staged requests cleanly.
+      fresh = await worker.generate(
+          datatypes.RolloutRequest(
+              prompt="fresh",
+              prompt_id="p_fresh",
+              max_turns=1,
+              max_response_length=16,
+              stage_routed_experts=True,
+              generation_kwargs={
+                  "return_routed_experts": True,
+                  "force_finish": True,
+              },
+              metadata={"env_config": {"env_id": "e", "max_steps": 1}},
+          )
+      )
+      assert isinstance(fresh, datatypes.RolloutResponse)
+      assert (
+          fresh.payload is not None
+          and fresh.payload.routed_experts_ref is not None
+      )
+      self.assertEqual(await worker.clear_staged(), 1)
+      self.assertEqual(worker.get_metrics()["staging/used_bytes"], 0)
+      self.assertEqual(worker.get_metrics()["staging/reserved_bytes"], 0)
+
+    asyncio.run(_run())
+
+  def test_auto_encode_mode_without_num_experts_allows_inline_and_rejects_staged(
+      self,
+  ):
+    cfg = rollout_worker.RolloutConfig(
+        max_prompt_length=16,
+        return_routed_experts=True,
+        routed_experts_encode_mode="auto",
+        routed_experts_num_experts=None,
+    )
+    worker = rollout_worker.RolloutWorker(
+        worker_id="rollout-moe-auto",
+        config=cfg,
+        sampler=mocks.MockBaseSamplerImpl(
+            sampler_name="moe_auto",
+            routed_experts_shape_spec=(4, 8),
+            response_tokens_per_turn=4,
+        ),
+        env_name="mock_env",
+        agent_name="mock_agent",
+        tokenizer=mocks.MockTokenizer(),
+        chat_parser=mocks.MockChatParser(),
+    )
+    init_resp = worker.initialize()
+    self.assertEqual(worker.state, datatypes.WorkerState.READY)
+    self.assertEqual(init_resp.metadata["routed_experts_shape"], (4, 8))
+
+    inline_resp = asyncio.run(
+        worker.generate(
+            datatypes.RolloutRequest(
+                prompt="inline",
+                prompt_id="p_auto_inline",
+                max_turns=1,
+                max_response_length=8,
+                generation_kwargs={
+                    "return_routed_experts": True,
+                    "force_finish": True,
+                },
+                metadata={"env_config": {"env_id": "e", "max_steps": 1}},
+            )
+        )
+    )
+    assert isinstance(inline_resp, datatypes.RolloutResponse)
+    assert inline_resp.payload is not None
+    self.assertIn("routed_experts", inline_resp.payload.traj)
+    self.assertIsNone(inline_resp.payload.routed_experts_ref)
+
+    with self.assertRaisesRegex(
+        ValueError, "requires a positive routed_experts_num_experts"
+    ):
+      asyncio.run(
+          worker.generate(
+              datatypes.RolloutRequest(
+                  prompt="staged",
+                  prompt_id="p_auto_staged",
+                  max_turns=1,
+                  max_response_length=8,
+                  stage_routed_experts=True,
+                  generation_kwargs={
+                      "return_routed_experts": True,
+                      "force_finish": True,
+                  },
+                  metadata={"env_config": {"env_id": "e", "max_steps": 1}},
+              )
+          )
+      )
+
+  def test_stop_closes_staging_buffer_and_clear_staged_recovers_on_error(self):
+    worker = rollout_worker.RolloutWorker(
+        worker_id="rollout-lifecycle",
+        sampler=mocks.MockBaseSamplerImpl(
+            sampler_name="mock_sampler",
+            routed_experts_shape_spec=(2, 4),
+        ),
+        env_name="mock_env",
+        agent_name="mock_agent",
+        tokenizer=mocks.MockTokenizer(),
+        chat_parser=mocks.MockChatParser(),
+        config=rollout_worker.RolloutConfig(
+            max_prompt_length=32,
+            routed_experts_encode_mode="uint8",
+            routed_experts_num_experts=128,
+        ),
+    )
+    worker.initialize()
+
+    async def _run():
+      req_sync = datatypes.WeightSyncRequest(
+          controller_id="c", policy_version=0
+      )
+      await worker.pre_weight_sync(req_sync)
+      await worker.weight_sync(
+          datatypes.WeightSyncRequest(controller_id="c", policy_version=2)
+      )
+      await worker.post_weight_sync(req_sync)
+      self.assertEqual(worker.info().resources["policy_version"], 2)
+
+      with absltest.mock.patch.object(
+          worker._staging_buffer,
+          "finish_clear",
+          side_effect=RuntimeError("boom"),
+      ):
+        with self.assertRaisesRegex(RuntimeError, "boom"):
+          await worker.clear_staged()
+      self.assertFalse(worker._staging_buffer.is_clearing)
+
+      res = await worker._staging_buffer.reserve(
+          worker._staging_buffer.max_bytes
+      )
+      waiter = asyncio.create_task(worker._staging_buffer.reserve(64))
+      await asyncio.sleep(0.01)
+      worker.stop()
+      with self.assertRaisesRegex(RuntimeError, "clearing"):
+        await asyncio.wait_for(waiter, timeout=1.0)
+      del res
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":

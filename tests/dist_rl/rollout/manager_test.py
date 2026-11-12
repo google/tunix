@@ -14,15 +14,19 @@
 
 import asyncio
 import types
+from typing import Any
 import unittest
 from unittest import mock
 
 from absl.testing import absltest
+import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import test_utils
 from tunix.dist_rl.rollout import manager as manager_lib
 from tunix.dist_rl.rollout import sampler as sampler_lib
+from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.dist_rl.worker import rollout_worker
+from tunix.dist_rl.worker import staging_buffer as sb_lib
 
 
 class _FakeSampler(sampler_lib.Sampler):
@@ -400,17 +404,18 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
         },
     )
 
+    expected_item = datatypes.TrajectoryItem(prompt_id="p0")
     with mock.patch.object(
         manager_lib.collector_lib, "TrajectoryCollectorEngine"
     ) as collector_cls:
       collector = collector_cls.return_value
       collector.traj_id = request.traj_id
       collector.env = None
-      collector.run_episode = mock.AsyncMock(return_value="trajectory")
+      collector.run_episode = mock.AsyncMock(return_value=expected_item)
 
       result = await manager._generate_one(request)
 
-    self.assertEqual(result, "trajectory")
+    self.assertIs(result, expected_item)
     self.assertEqual(
         created_configs, [{"source": "request", "scaffold": "r2egym"}]
     )
@@ -435,17 +440,18 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
     )
     request = datatypes.RolloutRequest(prompt="prompt", prompt_id="p0")
 
+    expected_item = datatypes.TrajectoryItem(prompt_id="p0")
     with mock.patch.object(
         manager_lib.collector_lib, "TrajectoryCollectorEngine"
     ) as collector_cls:
       collector = collector_cls.return_value
       collector.traj_id = request.traj_id
       collector.env = None
-      collector.run_episode = mock.AsyncMock(return_value="trajectory")
+      collector.run_episode = mock.AsyncMock(return_value=expected_item)
 
       result = await manager._generate_one(request)
 
-    self.assertEqual(result, "trajectory")
+    self.assertIs(result, expected_item)
     self.assertEqual(created_configs, [{"source": "worker"}])
 
   async def test_configured_eos_tokens_reach_the_collector(self):
@@ -469,7 +475,9 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
       collector = collector_cls.return_value
       collector.traj_id = request.traj_id
       collector.env = None
-      collector.run_episode = mock.AsyncMock(return_value="trajectory")
+      collector.run_episode = mock.AsyncMock(
+          return_value=datatypes.TrajectoryItem(prompt_id="p0")
+      )
 
       await manager._generate_one(request)
 
@@ -494,7 +502,9 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
       collector = collector_cls.return_value
       collector.traj_id = request.traj_id
       collector.env = None
-      collector.run_episode = mock.AsyncMock(return_value="trajectory")
+      collector.run_episode = mock.AsyncMock(
+          return_value=datatypes.TrajectoryItem(prompt_id="p0")
+      )
 
       await manager._generate_one(request)
 
@@ -1162,6 +1172,336 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
             agent_factory=test_utils.MockAgent,
             drain_timeout_s=invalid,
         )
+
+
+class StagingReservationManagerTest(unittest.IsolatedAsyncioTestCase):
+
+  def _make_staged_manager(
+      self,
+      *,
+      max_bytes: int = 1024,
+      sampler: Any = None,
+      max_prompt_length: int = 16,
+  ):
+    cfg = rollout_worker.RolloutConfig(
+        max_prompt_length=max_prompt_length,
+        max_tokens_to_generate=16,
+        return_routed_experts=True,
+        routed_experts_encode_mode="uint10",
+        routed_experts_num_experts=384,
+    )
+    buf = sb_lib.RolloutStagingBuffer("rollout-0", max_bytes=max_bytes)
+    active_sampler = sampler or test_utils.MockBaseSamplerImpl(
+        default_delay=0.0,
+        response_tokens_per_turn=8,
+        routed_experts_shape_spec=(2, 4),
+        num_experts=384,
+    )
+    mgr = manager_lib.RolloutManager(
+        config=cfg,
+        sampler=active_sampler,
+        tokenizer=test_utils.MockTokenizer(),
+        chat_parser=test_utils.MockChatParser(),
+        env_factory=test_utils.MockEnvironment,
+        agent_factory=test_utils.MockAgent,
+        staging_buffer=buf,
+    )
+    return mgr, buf
+
+  async def test_missing_max_response_length_fails_fast(self):
+    mgr, buf = self._make_staged_manager()
+    with self.assertRaisesRegex(ValueError, "max_response_length"):
+      await mgr.generate(
+          datatypes.RolloutRequest(
+              prompt="hi",
+              prompt_id="p0",
+              max_response_length=None,
+              stage_routed_experts=True,
+          )
+      )
+    self.assertEqual(buf.reserved_bytes, 0)
+
+  async def test_done_callback_reclaims_reservation_on_pre_step_and_mid_cancel(
+      self,
+  ):
+    entered = asyncio.Event()
+    unblock = asyncio.Event()
+
+    class _BlockingSampler(test_utils.MockBaseSamplerImpl):
+
+      async def sample(self, sampling_requests, **kwargs):
+        entered.set()
+        await unblock.wait()
+        return await super().sample(sampling_requests, **kwargs)
+
+    mgr, buf = self._make_staged_manager(
+        sampler=_BlockingSampler(
+            default_delay=0.0, routed_experts_shape_spec=(2, 4)
+        )
+    )
+    req = datatypes.RolloutRequest(
+        prompt="hi",
+        prompt_id="p_cancel",
+        max_turns=1,
+        max_response_length=16,
+        stage_routed_experts=True,
+        generation_kwargs={"return_routed_experts": True, "force_finish": True},
+    )
+
+    # 1. Cancel mid-sampling after `sample()` has started.
+    gen_mid = asyncio.create_task(mgr.generate(req))
+    await entered.wait()
+    self.assertEqual(buf.reserved_bytes, (16 + 16) * 10)
+    mgr.cancel_all()
+    with self.assertRaises(asyncio.CancelledError):
+      await gen_mid
+    self.assertEqual(buf.reserved_bytes, 0)
+
+    # 2. Cancel BEFORE `_run_and_enqueue` executes its first coroutine step!
+    entered.clear()
+    gen_pre = asyncio.create_task(mgr.generate(req))
+    # One event-loop turn lets `_generate_one` pass `reserve()` and
+    # `wait_for_admission()` and schedule `task`, then cancel immediately.
+    await asyncio.sleep(0)
+    mgr.cancel_all()
+    with self.assertRaises(asyncio.CancelledError):
+      await gen_pre
+    self.assertEqual(buf.reserved_bytes, 0)
+    self.assertEqual(mgr.active_tasks, ())
+
+  async def test_holding_reservation_across_sync_preserves_fifo_order(self):
+    admitted: list[str] = []
+
+    class _OrderRecordingCollector:
+
+      def __init__(self, traj_id, request, **kwargs):
+        del kwargs
+        self.traj_id = traj_id
+        self.request = request
+        self.is_done = False
+        self.is_paused = False
+
+      def pause(self):
+        self.is_paused = True
+
+      def resume(self):
+        self.is_paused = False
+
+      def cancel(self):
+        self.is_done = True
+
+      async def run_episode(self):
+        admitted.append(self.request.prompt_id)
+        return datatypes.TrajectoryItem(
+            prompt_id=self.request.prompt_id,
+            group_index=0,
+            traj={
+                "status": "SUCCEEDED",
+                "prompt_tokens": np.array([1, 2], dtype=np.int32),
+                "conversation_tokens": np.array([3, 4], dtype=np.int32),
+                "conversation_masks": np.array([1.0, 1.0], dtype=np.float32),
+                "routed_experts": np.ones((4, 2, 1, 5), dtype=np.uint8),
+            },
+        )
+
+    # Capacity 320 bytes = exactly 1 slot of (16 + 16) * 10 = 320 bytes.
+    mgr, buf = self._make_staged_manager(max_bytes=320)
+    await mgr.pre_weight_sync()  # Close admission (SYNCING).
+
+    with mock.patch.object(
+        manager_lib.collector_lib,
+        "TrajectoryCollectorEngine",
+        _OrderRecordingCollector,
+    ):
+      t_first = asyncio.create_task(
+          mgr.generate(
+              datatypes.RolloutRequest(
+                  prompt="p",
+                  prompt_id="first",
+                  max_response_length=16,
+                  stage_routed_experts=True,
+              )
+          )
+      )
+      await asyncio.sleep(0.01)
+      # `t_first` holds the sole 320B reservation across SYNCING without
+      # blocking `drain()`, while `t_second` queues behind it in `reserve()`.
+      self.assertEqual(buf.reserved_bytes, 320)
+      t_second = asyncio.create_task(
+          mgr.generate(
+              datatypes.RolloutRequest(
+                  prompt="p",
+                  prompt_id="second",
+                  max_response_length=16,
+                  stage_routed_experts=True,
+              )
+          )
+      )
+      await asyncio.sleep(0.01)
+
+      await mgr.post_weight_sync(datatypes.WeightSyncRequest(policy_version=1))
+      item_first = await t_first
+      assert isinstance(item_first, datatypes.TrajectoryItem)
+      assert item_first.routed_experts_ref is not None
+      buf.release_staged([item_first.routed_experts_ref.ref_id])
+      item_second = await t_second
+      assert isinstance(item_second, datatypes.TrajectoryItem)
+      assert item_second.routed_experts_ref is not None
+      buf.release_staged([item_second.routed_experts_ref.ref_id])
+
+    self.assertEqual(admitted, ["first", "second"])
+    self.assertEqual(buf.used_bytes, 0)
+    self.assertEqual(buf.reserved_bytes, 0)
+
+  async def test_invalid_zero_mask_trajectory_skips_staging_and_cancels_quota(
+      self,
+  ):
+    class _ZeroMaskCollector:
+
+      def __init__(self, traj_id, request, **kwargs):
+        del kwargs
+        self.traj_id = traj_id
+        self.request = request
+        self.is_done = False
+        self.is_paused = False
+
+      async def run_episode(self):
+        return datatypes.TrajectoryItem(
+            prompt_id=self.request.prompt_id,
+            group_index=0,
+            traj={
+                "status": "MAX_CONTEXT_LIMIT_REACHED",
+                "prompt_tokens": np.array([1, 2], dtype=np.int32),
+                "conversation_tokens": np.array([3, 4], dtype=np.int32),
+                "conversation_masks": np.zeros(2, dtype=np.float32),
+                "routed_experts": np.ones((4, 2, 1, 5), dtype=np.uint8),
+            },
+        )
+
+    mgr, buf = self._make_staged_manager(max_bytes=640)
+    with mock.patch.object(
+        manager_lib.collector_lib,
+        "TrajectoryCollectorEngine",
+        _ZeroMaskCollector,
+    ):
+      item = await mgr.generate(
+          datatypes.RolloutRequest(
+              prompt="p",
+              prompt_id="overlong",
+              max_response_length=16,
+              stage_routed_experts=True,
+          )
+      )
+    assert isinstance(item, datatypes.TrajectoryItem)
+    self.assertFalse(item.is_valid)
+    self.assertIsNone(item.routed_experts_ref)
+    self.assertNotIn("routed_experts", item.traj)
+    self.assertEqual(buf.used_bytes, 0)
+    self.assertEqual(buf.reserved_bytes, 0)
+
+  async def test_stage_routed_experts_without_routed_output_returns_tombstone(
+      self,
+  ):
+    mgr, buf = self._make_staged_manager(max_bytes=2048, max_prompt_length=128)
+    res = await mgr.generate(
+        datatypes.RolloutRequest(
+            prompt="p",
+            prompt_id="missing_routed",
+            max_turns=1,
+            max_response_length=16,
+            stage_routed_experts=True,
+            generation_kwargs={
+                "return_routed_experts": False,
+                "force_finish": True,
+            },
+        )
+    )
+    self.assertIsInstance(res, trajectory_lib.TrajectoryError)
+    assert isinstance(res, trajectory_lib.TrajectoryError)
+    self.assertIn("produced no routed_experts", res.error_message)
+    self.assertEqual(buf.used_bytes, 0)
+    self.assertEqual(buf.reserved_bytes, 0)
+
+  async def test_cancellation_duplicate_traj_id_and_post_weight_sync_order(
+      self,
+  ):
+    mgr, buf = self._make_staged_manager(max_bytes=4096, max_prompt_length=128)
+    gate = asyncio.Event()
+    orig_sample = mgr.sampler.sample
+
+    async def _gated_sample(req, **kwargs):
+      if getattr(req, "request_id", None) == "traj_dup_g0":
+        await gate.wait()
+      return await orig_sample(req, **kwargs)
+
+    mgr.sampler.sample = _gated_sample
+
+    # Duplicate traj_id ("traj_dup_g0") requests remain independently tracked.
+    req_dup = datatypes.RolloutRequest(
+        prompt="p",
+        prompt_id="dup",
+        group_index=0,
+        max_turns=1,
+        max_response_length=16,
+        stage_routed_experts=True,
+        generation_kwargs={
+            "return_routed_experts": True,
+            "force_finish": True,
+        },
+    )
+    t1 = asyncio.create_task(mgr.generate(req_dup))
+    t2 = asyncio.create_task(mgr.generate(req_dup))
+    await asyncio.sleep(0.02)
+    self.assertEqual(len(mgr.active_tasks), 2)
+    gate.set()
+    r1, r2 = await asyncio.gather(t1, t2)
+    self.assertEqual(mgr.active_tasks, ())
+    buf.release_staged(
+        [r1.routed_experts_ref.ref_id, r2.routed_experts_ref.ref_id]
+    )
+    self.assertEqual(buf.used_bytes, 0)
+
+    # Batch generate failure cancels siblings and reclaims completed refs.
+    req_ok = datatypes.RolloutRequest(
+        prompt="p",
+        prompt_id="ok_sib",
+        group_index=0,
+        max_turns=1,
+        max_response_length=16,
+        stage_routed_experts=True,
+        generation_kwargs={
+            "return_routed_experts": True,
+            "force_finish": True,
+        },
+    )
+    req_bad = datatypes.RolloutRequest(
+        prompt="p",
+        prompt_id="bad_sib",
+        group_index=0,
+        max_turns=1,
+        max_response_length=0,
+        stage_routed_experts=True,
+    )
+    with self.assertRaisesRegex(ValueError, "max_response_length"):
+      await mgr.generate([req_ok, req_bad])
+    self.assertEqual(buf.used_bytes, 0)
+    self.assertEqual(buf.reserved_bytes, 0)
+
+    # RolloutManager.post_weight_sync updates staging buffer version before
+    # reopening admission and preserves positive version on default 0 request.
+    await mgr.pre_weight_sync()
+    await mgr.weight_sync(
+        datatypes.WeightSyncRequest(controller_id="c", policy_version=2)
+    )
+    await mgr.post_weight_sync(
+        datatypes.WeightSyncRequest(controller_id="c", policy_version=0)
+    )
+    self.assertEqual(mgr._policy_version, 2)
+    item = await mgr.generate(req_ok)
+    assert isinstance(item, datatypes.TrajectoryItem)
+    assert item.routed_experts_ref is not None
+    evicted = buf.on_post_weight_sync(3, min_retained_policy_version=3)
+    self.assertEqual(evicted, 1)
 
 
 if __name__ == "__main__":

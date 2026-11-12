@@ -1310,6 +1310,39 @@ class TokenIdsTest(parameterized.TestCase):
     ):
       packing.alloc_batched_routed_experts(2, 6, (3, 8), bad_mode)  # pyrefly: ignore[bad-argument-type]
 
+  def test_routed_experts_bytes_per_token_matches_encode_routed_experts(self):
+    seq_len = 5
+    num_layers = 3
+    tier_specs = (
+        ("uint8", 128),
+        ("uint10", 384),
+        ("int16", 2048),
+    )
+    orig_ext = packing._packing_ext
+    for use_cpp in (True, False):
+      if use_cpp and orig_ext is None:
+        continue
+      try:
+        packing._packing_ext = orig_ext if use_cpp else None
+        for top_k in (6, 8, 9):
+          for enc, num_experts in tier_specs:
+            raw = np.zeros((seq_len, num_layers, top_k), dtype=np.int16)
+            encoded_explicit = packing.encode_routed_experts(
+                raw, mode=enc, num_experts=num_experts
+            )
+            encoded_auto = packing.encode_routed_experts(
+                raw, mode="auto", num_experts=num_experts
+            )
+            assert encoded_explicit is not None and encoded_auto is not None
+            expected_bytes = (
+                packing.routed_experts_bytes_per_token(num_layers, top_k, enc)
+                * seq_len
+            )
+            self.assertEqual(encoded_explicit.nbytes, expected_bytes)
+            self.assertEqual(encoded_auto.nbytes, expected_bytes)
+      finally:
+        packing._packing_ext = orig_ext
+
 
 if __name__ == "__main__":
   absltest.main()

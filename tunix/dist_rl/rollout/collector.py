@@ -38,6 +38,17 @@ def _build_prompt(chat_parser: Any, chat_completions: Any) -> Any:
   return chat_completions
 
 
+def _validate_max_prompt_length(value: int | None) -> int | None:
+  """Validates optional positive `max_prompt_length` bound."""
+  if value is None:
+    return None
+  if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+    raise ValueError(
+        f"max_prompt_length must be a positive int or None, got {value!r}."
+    )
+  return value
+
+
 def response_budget_facts(
     response_tokens: Sequence[int] | np.ndarray,
     max_response_length: int,
@@ -95,6 +106,7 @@ class TrajectoryCollectorEngine:
       store_routed_experts: bool = False,
       routed_experts_encode_mode: datatypes.RoutedExpertsEncodeMode = "auto",
       routed_experts_num_experts: int | None = None,
+      max_prompt_length: int | None = None,
   ):
     if (
         sampler is None
@@ -124,6 +136,9 @@ class TrajectoryCollectorEngine:
         routed_experts_encode_mode
     )
     self.routed_experts_num_experts: int | None = routed_experts_num_experts
+    self.max_prompt_length: int | None = _validate_max_prompt_length(
+        max_prompt_length
+    )
     self.is_paused: bool = False
     self.is_cancelled: bool = False
     self.is_done: bool = False
@@ -178,6 +193,7 @@ class TrajectoryCollectorEngine:
     """Executes multi-turn agentic rollout episode and returns TrajectoryItem."""
     self._episode_cache_salt = None
     sampler_time_s = 0.0
+    is_first_model_call = True
 
     # Note: model_call is an async coroutine callback invoked directly by
     # TrajectoryCollectEngine on the asyncio event loop without blocking
@@ -186,7 +202,8 @@ class TrajectoryCollectorEngine:
         chat_completions, env=None, max_generation_steps=None, **kwargs
     ):
       del env
-      nonlocal sampler_time_s
+      nonlocal sampler_time_s, is_first_model_call
+      is_turn0, is_first_model_call = is_first_model_call, False
       await self._unpaused.wait()
       generation_kwargs = dict(self.request.generation_kwargs)
       # NB: extra kwargs can be passed in from trajectory_collect_engine.
@@ -275,6 +292,15 @@ class TrajectoryCollectorEngine:
           dtype=np.int32,
       ).reshape(-1)
       prompt_len = int(prompt_tokens.size)
+      if (
+          self.max_prompt_length is not None
+          and is_turn0
+          and prompt_len > self.max_prompt_length
+      ):
+        raise ValueError(
+            f"Turn-0 prompt length ({prompt_len} tokens) for {self.traj_id}"
+            f" exceeds configured max_prompt_length ({self.max_prompt_length})."
+        )
       if prompt_tokens.size:
         prompt_tokens = prompt_tokens.reshape(1, -1)
       else:

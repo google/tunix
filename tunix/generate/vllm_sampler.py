@@ -597,6 +597,24 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     else:
       raise AttributeError("vLLM model runner doesn't have state.")
 
+  def routed_experts_shape(self) -> tuple[int, int] | None:
+    """Returns `(num_layers, top_k)` when MoE routing capture is enabled, else None."""
+    if not self.config.return_routed_experts:
+      return None
+    llm_engine = None
+    if self.llm is not None:
+      llm_engine = self.llm.llm_engine
+    elif self._driver is not None:
+      llm_engine = self._driver.llm_engine
+    if llm_engine is None:
+      return None
+    model_cfg = llm_engine.vllm_config.model_config
+    num_layers = int(model_cfg.get_total_num_hidden_layers())
+    top_k = int(model_cfg.get_num_experts_per_tok())
+    if num_layers <= 0 or top_k <= 0:
+      return None
+    return (num_layers, top_k)
+
   def tokenize(self, input_string: str) -> np.ndarray | list[int]:
     """Tokenizes the input string."""
     input_ids = self.tokenizer.encode(input_string)

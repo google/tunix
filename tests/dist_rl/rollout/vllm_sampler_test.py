@@ -1009,6 +1009,58 @@ class VllmSamplerLogStatsTest(absltest.TestCase):
 
     asyncio.run(run_test())
 
+  def test_routed_experts_shape_all_paths_and_caching(self):
+    # 1. return_routed_experts=False -> None without touching engine.
+    dense_sampler = vllm_sampler.VllmSampler(
+        server_id="dense",
+        config=_config(return_routed_experts=False),
+    )
+    self.assertIsNone(dense_sampler.routed_experts_shape())
+
+    # 2. Neither _engine nor engine_args initialized -> None.
+    uninit_moe = vllm_sampler.VllmSampler(
+        server_id="uninit_moe",
+        config=_config(return_routed_experts=True),
+    )
+    self.assertIsNone(uninit_moe.routed_experts_shape())
+
+    # 3. engine_args.create_model_config() path (plus non-positive -> None).
+    non_pos_cfg = SimpleNamespace(
+        get_total_num_hidden_layers=lambda: 32,
+        get_num_experts_per_tok=lambda: 0,
+    )
+    uninit_moe.engine_args = SimpleNamespace(
+        create_model_config=mock.Mock(return_value=non_pos_cfg)
+    )
+    self.assertIsNone(uninit_moe.routed_experts_shape())
+
+    valid_cfg = SimpleNamespace(
+        get_total_num_hidden_layers=mock.Mock(return_value=61),
+        get_num_experts_per_tok=mock.Mock(return_value=8),
+    )
+    uninit_moe.engine_args = SimpleNamespace(
+        create_model_config=mock.Mock(return_value=valid_cfg)
+    )
+    self.assertEqual(uninit_moe.routed_experts_shape(), (61, 8))
+    # Cached on second call without re-invoking create_model_config().
+    self.assertEqual(uninit_moe.routed_experts_shape(), (61, 8))
+    uninit_moe.engine_args.create_model_config.assert_called_once()
+
+    # 4. _engine.vllm_config.model_config path.
+    engine_moe = vllm_sampler.VllmSampler(
+        server_id="engine_moe",
+        config=_config(return_routed_experts=True),
+    )
+    engine_moe._engine = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            model_config=SimpleNamespace(
+                get_total_num_hidden_layers=lambda: 48,
+                get_num_experts_per_tok=lambda: 6,
+            )
+        )
+    )
+    self.assertEqual(engine_moe.routed_experts_shape(), (48, 6))
+
 
 if __name__ == "__main__":
   absltest.main()

@@ -25,6 +25,7 @@ from enum import Enum, auto
 from typing import Any, Dict, List, Optional
 
 import numpy as np
+from tunix.common import datatypes as common_datatypes
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -216,6 +217,13 @@ def format_traj_id(prompt_id: Hashable = "", group_index: int = 0) -> str:
   return f"traj_{prompt_id}_g{group_index}"
 
 
+def _has_inline_routed_experts(container: Any) -> bool:
+  return (
+      isinstance(container, Mapping)
+      and container.get("routed_experts") is not None
+  )
+
+
 @dataclasses.dataclass(kw_only=True)
 class TrajectoryItem:
   """Canonical trajectory container with metadata and token arrays for RL training.
@@ -251,6 +259,9 @@ class TrajectoryItem:
       parameters.
     is_valid: Whether the trajectory completed with a valid status and trainable
       tokens.
+    routed_experts_ref: Optional opaque handle referencing worker-staged
+      `routed_experts` on a `RolloutWorker` (mutually exclusive with inline
+      `routed_experts`).
   """
 
   prompt_id: Hashable = ""
@@ -259,6 +270,7 @@ class TrajectoryItem:
   traj: Any = None
   metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
   _is_valid: bool | None = dataclasses.field(default=None, repr=False)
+  routed_experts_ref: common_datatypes.RoutedExpertsRef | None = None
 
   def __init__(
       self,
@@ -269,8 +281,13 @@ class TrajectoryItem:
       traj: Any = None,
       metadata: dict[str, Any] | None = None,
       is_valid: bool | None = None,
+      routed_experts_ref: common_datatypes.RoutedExpertsRef | None = None,
       **kwargs: Any,
   ):
+    if is_valid is None and "_is_valid" in kwargs:
+      is_valid = kwargs.pop("_is_valid")
+    else:
+      kwargs.pop("_is_valid", None)
     self.prompt_id = prompt_id
     self.group_index = group_index
     self.start_step = start_step
@@ -280,6 +297,29 @@ class TrajectoryItem:
       if v is not None:
         self.metadata[k] = v
     self._is_valid = None if is_valid is None else bool(is_valid)
+    self.routed_experts_ref = routed_experts_ref
+
+  def __setattr__(self, name: str, value: Any) -> None:
+    if (
+        name == "routed_experts_ref"
+        and value is not None
+        and not isinstance(value, common_datatypes.RoutedExpertsRef)
+    ):
+      raise TypeError(
+          "Expected RoutedExpertsRef or None for routed_experts_ref, got"
+          f" {type(value).__name__}."
+      )
+    if name in ("routed_experts_ref", "traj", "metadata"):
+      next_state = self.__dict__ | {name: value}
+      if next_state.get("routed_experts_ref") is not None and (
+          _has_inline_routed_experts(next_state.get("traj"))
+          or _has_inline_routed_experts(next_state.get("metadata"))
+      ):
+        raise ValueError(
+            "TrajectoryItem cannot hold both inline routed_experts and"
+            " routed_experts_ref."
+        )
+    object.__setattr__(self, name, value)
 
   @property
   def is_valid(self) -> bool:
@@ -332,6 +372,11 @@ class TrajectoryItem:
         "traj": traj_dict,
         "metadata": dict(self.metadata),
         "is_valid": bool(self.is_valid),
+        "routed_experts_ref": (
+            dataclasses.asdict(self.routed_experts_ref)
+            if self.routed_experts_ref is not None
+            else None
+        ),
     }
 
   @classmethod
@@ -341,6 +386,18 @@ class TrajectoryItem:
     group_index = int(group_index_raw) if group_index_raw is not None else 0
     start_step_raw = data.get("start_step", 0)
     start_step = int(start_step_raw) if start_step_raw is not None else 0
+    raw_ref = data.get("routed_experts_ref")
+    if isinstance(raw_ref, Mapping):
+      routed_experts_ref = common_datatypes.RoutedExpertsRef(**raw_ref)
+    elif isinstance(raw_ref, common_datatypes.RoutedExpertsRef):
+      routed_experts_ref = raw_ref
+    elif raw_ref is None:
+      routed_experts_ref = None
+    else:
+      raise TypeError(
+          "Expected Mapping, RoutedExpertsRef, or None for"
+          f" data['routed_experts_ref'], got {type(raw_ref).__name__}."
+      )
     metadata = dict(data.get("metadata", {}) or {})
     for k, v in data.items():
       if k not in (
@@ -350,6 +407,7 @@ class TrajectoryItem:
           "traj",
           "metadata",
           "is_valid",
+          "routed_experts_ref",
       ):
         if k not in metadata:
           metadata[k] = v
@@ -360,6 +418,7 @@ class TrajectoryItem:
         traj=data.get("traj"),
         metadata=metadata,
         is_valid=data.get("is_valid"),
+        routed_experts_ref=routed_experts_ref,
     )
 
 

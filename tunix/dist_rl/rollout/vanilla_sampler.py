@@ -1163,6 +1163,10 @@ class VanillaSampler(
     return responses[0]
 
   # --- Weight Synchronization & Load Info ---
+  def routed_experts_shape(self) -> tuple[int, int] | None:
+    """Returns None; VanillaSampler does not capture MoE routed experts."""
+    return None
+
   async def get_transfer_status(self, req_id: str | Any, **kwargs) -> str | Any:
     """Queries status of an ongoing weight transfer or KV-cache migration."""
     del req_id, kwargs

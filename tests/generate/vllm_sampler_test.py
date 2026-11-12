@@ -1203,6 +1203,55 @@ class VllmSamplerTokenInputTest(absltest.TestCase):
 
     runner.refresh_state_leaves.assert_called_once_with()
 
+  def test_routed_experts_shape_llm_and_driver_paths(self):
+    obj = self._sampler()
+    # return_routed_experts=False -> None.
+    self.assertIsNone(obj.routed_experts_shape())
+
+    obj.config.return_routed_experts = True
+    obj.llm = None
+    obj._driver = None
+    self.assertIsNone(obj.routed_experts_shape())
+
+    # llm.llm_engine path + non-positive top_k -> None.
+    obj.llm = types.SimpleNamespace(
+        llm_engine=types.SimpleNamespace(
+            vllm_config=types.SimpleNamespace(
+                model_config=types.SimpleNamespace(
+                    get_total_num_hidden_layers=lambda: 32,
+                    get_num_experts_per_tok=lambda: 0,
+                )
+            )
+        )
+    )
+    self.assertIsNone(obj.routed_experts_shape())
+
+    obj.llm = types.SimpleNamespace(
+        llm_engine=types.SimpleNamespace(
+            vllm_config=types.SimpleNamespace(
+                model_config=types.SimpleNamespace(
+                    get_total_num_hidden_layers=lambda: 61,
+                    get_num_experts_per_tok=lambda: 8,
+                )
+            )
+        )
+    )
+    self.assertEqual(obj.routed_experts_shape(), (61, 8))
+
+    # _driver.llm_engine path when llm is None (server_mode=True).
+    obj.llm = None
+    obj._driver = types.SimpleNamespace(
+        llm_engine=types.SimpleNamespace(
+            vllm_config=types.SimpleNamespace(
+                model_config=types.SimpleNamespace(
+                    get_total_num_hidden_layers=lambda: 40,
+                    get_num_experts_per_tok=lambda: 6,
+                )
+            )
+        )
+    )
+    self.assertEqual(obj.routed_experts_shape(), (40, 6))
+
 
 if __name__ == "__main__":
   absltest.main()

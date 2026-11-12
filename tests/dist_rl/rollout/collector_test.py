@@ -2355,6 +2355,48 @@ class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
             jax_promo_cmp[0, : len(raw_promo_all)], raw_promo_all
         )
 
+  def test_turn0_overlong_prompt_aborts_immediately_when_max_prompt_length_set(
+      self,
+  ):
+    sample_calls = 0
+
+    class _CountingPromptSampler:
+
+      async def sample(self, sampling_requests, **kwargs):
+        del kwargs
+        nonlocal sample_calls
+        sample_calls += 1
+        return sampler_lib.SamplingResponse(
+            request_id=sampling_requests.request_id,
+            text="TOOL_CALL: step1",
+            prompt_token_ids=np.arange(12, dtype=np.int32),
+            token_ids=np.array([101, 102], dtype=np.int32),
+            logprobs=np.zeros(2, dtype=np.float32),
+            routed_experts=np.zeros((14, 2, 4), dtype=np.int16),
+        )
+
+    engine = collector.TrajectoryCollectorEngine(
+        traj_id="traj_overlong_prompt",
+        request=datatypes.RolloutRequest(
+            prompt="overlong",
+            prompt_id="p_over",
+            max_turns=3,
+            max_response_length=32,
+            stage_routed_experts=True,
+            generation_kwargs={"return_routed_experts": True},
+        ),
+        sampler=_CountingPromptSampler(),
+        env_client=self._make_single_turn_env(),
+        agent=model_agent.ModelAgent("sys"),
+        tokenizer=_MockTokenizer(),
+        chat_parser=_RecordingParser(),
+        routed_experts_encode_mode="uint10",
+        max_prompt_length=8,
+    )
+    with self.assertRaisesRegex(ValueError, "Turn-0 prompt length"):
+      asyncio.run(engine.run_episode())
+    self.assertEqual(sample_calls, 1)
+
 
 if __name__ == "__main__":
   absltest.main()

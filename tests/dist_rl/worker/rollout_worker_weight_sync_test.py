@@ -70,10 +70,11 @@ class _FakeManager:
     return True
 
 
-class _Request:
-
-  def __init__(self, req_id, uuid):
-    self.extra_config = {"req_id": req_id, "uuid": uuid}
+def _sync_req(req_id: str, uuid: int) -> datatypes.WeightSyncRequest:
+  return datatypes.WeightSyncRequest(
+      policy_version=1,
+      extra_config={"req_id": req_id, "uuid": uuid},
+  )
 
 
 class WeightSyncPhasesTest(unittest.IsolatedAsyncioTestCase):
@@ -93,19 +94,19 @@ class WeightSyncPhasesTest(unittest.IsolatedAsyncioTestCase):
 
   async def test_pre_leaves_worker_syncing(self):
     worker = self._worker()
-    await worker.pre_weight_sync(_Request("r1", 1))
+    await worker.pre_weight_sync(_sync_req("r1", 1))
     self.assertEqual(worker.state, WorkerState.SYNCING)
 
   async def test_post_restores_ready(self):
     worker = self._worker()
-    await worker.pre_weight_sync(_Request("r1", 1))
-    await worker.weight_sync(_Request("r1", 1))
-    await worker.post_weight_sync(_Request("r1", 1))
+    await worker.pre_weight_sync(_sync_req("r1", 1))
+    await worker.weight_sync(_sync_req("r1", 1))
+    await worker.post_weight_sync(_sync_req("r1", 1))
     self.assertEqual(worker.state, WorkerState.READY)
 
   async def test_status_reports_round(self):
     worker = self._worker()
-    await worker.pre_weight_sync(_Request("r1", 1))
+    await worker.pre_weight_sync(_sync_req("r1", 1))
     status = await worker.get_weight_sync_status()
     self.assertEqual(status["req_id"], "r1")
     self.assertEqual(status["uuid"], 1)
@@ -113,8 +114,8 @@ class WeightSyncPhasesTest(unittest.IsolatedAsyncioTestCase):
 
   async def test_abort_resumes_serving(self):
     worker = self._worker()
-    await worker.pre_weight_sync(_Request("r1", 1))
-    await worker.abort_weight_sync(_Request("r1", 1))
+    await worker.pre_weight_sync(_sync_req("r1", 1))
+    await worker.abort_weight_sync(_sync_req("r1", 1))
     self.assertEqual(worker.state, WorkerState.READY)
     status = await worker.get_weight_sync_status()
     self.assertEqual(status["phase"], "aborted")
@@ -126,14 +127,14 @@ class WeightSyncPhasesTest(unittest.IsolatedAsyncioTestCase):
 
   async def test_sync_falls_back_to_metadata_kwarg(self):
     worker = self._worker()
-    await worker.weight_sync(metadata=_Request("r2", 2))
+    await worker.weight_sync(metadata=_sync_req("r2", 2))
     status = await worker.get_weight_sync_status()
     self.assertEqual(status["req_id"], "r2")
     self.assertEqual(status["phase"], "h2d_done")
 
   async def test_full_round_call_order(self):
     worker = self._worker()
-    req = _Request("r1", 1)
+    req = _sync_req("r1", 1)
     await worker.bind_weight_sync()
     await worker.get_weight_sync_metadata()
     await worker.pre_weight_sync(req)
@@ -150,9 +151,9 @@ class WeightSyncPhasesTest(unittest.IsolatedAsyncioTestCase):
 
   async def test_abort_reopens_admission(self):
     worker = self._worker()
-    await worker.pre_weight_sync(_Request("r1", 1))
+    await worker.pre_weight_sync(_sync_req("r1", 1))
     worker.manager.admission_open = False
-    await worker.abort_weight_sync(_Request("r1", 1))
+    await worker.abort_weight_sync(_sync_req("r1", 1))
     self.assertTrue(worker.manager.admission_open)
     self.assertEqual(worker.state, WorkerState.READY)
 

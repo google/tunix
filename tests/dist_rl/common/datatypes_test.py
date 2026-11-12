@@ -388,7 +388,12 @@ class RLTrainerPayloadTest(absltest.TestCase):
     }
     self.assertEqual(
         static,
-        {"num_segments", "sampler_agreement_applied", "metadata"},
+        {
+            "num_segments",
+            "sampler_agreement_applied",
+            "routed_experts_ref",
+            "metadata",
+        },
     )
     self.assertEmpty([
         f.name
@@ -531,6 +536,68 @@ class IsValidTrajectoryTest(absltest.TestCase):
         },
     )
     self.assertTrue(item.is_valid)
+
+  def test_routed_experts_ref_and_static_wire_encoding_helpers(self):
+    ref = datatypes.RoutedExpertsRef(worker_id="w0", ref_id=(5 << 32) | 9)
+    self.assertEqual(ref.worker_id, "w0")
+    with self.assertRaises(ValueError):
+      datatypes.RoutedExpertsRef(worker_id="", ref_id=1)
+    with self.assertRaises(ValueError):
+      datatypes.RoutedExpertsRef(worker_id="w0", ref_id=-1)
+    with self.assertRaises(ValueError):
+      datatypes.RoutedExpertsRef(worker_id="w0", ref_id=1 << 63)
+    with self.assertRaises(ValueError):
+      datatypes.routed_experts_bytes_per_token(4.0, 8, "uint10")  # pyrefly: ignore[bad-argument-type]
+    with self.assertRaises(ValueError):
+      datatypes.routed_experts_bytes_per_token(4, "8", "uint10")  # pyrefly: ignore[bad-argument-type]
+
+    self.assertEqual(
+        datatypes.resolve_routed_experts_wire_encoding("auto", 128), "uint8"
+    )
+    self.assertEqual(
+        datatypes.resolve_routed_experts_wire_encoding("auto", 384), "uint10"
+    )
+    self.assertEqual(
+        datatypes.resolve_routed_experts_wire_encoding("auto", 2048), "int16"
+    )
+    with self.assertRaisesRegex(ValueError, "auto"):
+      datatypes.resolve_routed_experts_wire_encoding("auto", None)
+
+    self.assertEqual(
+        datatypes.routed_experts_bytes_per_token(61, 8, "uint10"), 610
+    )
+    self.assertEqual(
+        datatypes.routed_experts_bytes_per_token(61, 8, "uint8"), 488
+    )
+    self.assertEqual(
+        datatypes.routed_experts_bytes_per_token(61, 8, "int16"), 976
+    )
+
+    zeros_i = np.zeros((2,), dtype=np.int32)
+    zeros_f = np.zeros((2,), dtype=np.float32)
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=zeros_i,
+        prompt_mask=zeros_f,
+        completion_ids=zeros_i,
+        completion_mask=zeros_f,
+        advantages=zeros_f,
+        routed_experts_ref=ref,
+    )
+    self.assertEqual(payload.routed_experts_ref, ref)
+    with self.assertRaisesRegex(ValueError, "cannot hold both"):
+      datatypes.RLTrainerPayload(
+          prompt_ids=zeros_i,
+          prompt_mask=zeros_f,
+          completion_ids=zeros_i,
+          completion_mask=zeros_f,
+          advantages=zeros_f,
+          routed_experts=np.zeros((4, 2, 2), dtype=np.int16),
+          routed_experts_ref=ref,
+      )
+    with self.assertRaises(TypeError):
+      datatypes.WeightSyncRequest(policy_version=True)  # pyrefly: ignore[bad-argument-type]
+    with self.assertRaises(TypeError):
+      datatypes.WeightSyncRequest(min_retained_policy_version=True)  # pyrefly: ignore[bad-argument-type]
 
 
 if __name__ == "__main__":

@@ -166,6 +166,7 @@
           "routed_experts_encode_mode": "uint10",
           "routed_experts_num_experts": 128,
           "seed": null,
+          "staging_max_bytes": null,
           "store_routed_experts": false,
           "temperature": 1.0,
           "tensor_parallel_size": 2,

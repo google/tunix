@@ -252,6 +252,7 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
     self._policy_version: int = 0
     self._kv_cache_freed: bool = False
     self._log_stats_task: asyncio.Task[None] | None = None
+    self._routed_experts_shape: tuple[int, int] | None = None
 
   def initialize(self) -> None:
     """Builds the vLLM `AsyncEngineArgs` from the rollout configuration."""
@@ -381,6 +382,25 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
     """Returns the JAX device mesh."""
     del kwargs
     return self._mesh
+
+  def routed_experts_shape(self) -> tuple[int, int] | None:
+    """Returns `(num_layers, top_k)` when MoE routing capture is enabled, else None."""
+    if not self.config.return_routed_experts:
+      return None
+    if self._routed_experts_shape is not None:
+      return self._routed_experts_shape
+    if self._engine is not None:
+      model_cfg = self._engine.vllm_config.model_config
+    elif self.engine_args is not None:
+      model_cfg = self.engine_args.create_model_config()
+    else:
+      return None
+    num_layers = int(model_cfg.get_total_num_hidden_layers())
+    top_k = int(model_cfg.get_num_experts_per_tok())
+    if num_layers <= 0 or top_k <= 0:
+      return None
+    self._routed_experts_shape = (num_layers, top_k)
+    return self._routed_experts_shape
 
   # ---------------------------------------------------------------------------
   # Helper Methods for Sample Stream Processing

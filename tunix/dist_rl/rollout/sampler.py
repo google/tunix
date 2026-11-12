@@ -169,6 +169,10 @@ class Sampler(Protocol):
     """Returns the underlying device mesh topology."""
     ...
 
+  def routed_experts_shape(self) -> tuple[int, int] | None:
+    """Returns `(num_layers, top_k)` when MoE routing capture is enabled, else None."""
+    ...
+
   # --- Inference ---
   async def sample(
       self,
