@@ -31,9 +31,11 @@ from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import lineage
 from tunix.dist_rl.common import registry
 from tunix.dist_rl.common import test_utils as mocks
+from tunix.dist_rl.testing import otel_testing
 from tunix.dist_rl.trajectory import file_store
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.dist_rl.trajectory import trajectory_testing
+from tunix.dist_rl.worker import otel_metrics
 from tunix.dist_rl.worker import rollout_worker
 
 
@@ -725,20 +727,6 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
       )
 
 
-def _collect_otel_metrics(reader: sdk_metrics_export.InMemoryMetricReader):
-  """Extracts {metric_name: [(value_or_sum, count_or_none, dict(attributes)), ...]}."""
-  data = reader.get_metrics_data()
-  collected = collections.defaultdict(list)
-  for resource_metric in data.resource_metrics:
-    for scope_metric in resource_metric.scope_metrics:
-      for metric in scope_metric.metrics:
-        for dp in metric.data.data_points:
-          val = dp.sum if hasattr(dp, "sum") else dp.value
-          cnt = dp.count if hasattr(dp, "count") else None
-          collected[metric.name].append((val, cnt, dict(dp.attributes)))
-  return collected
-
-
 class RolloutWorkerOTelMetricsTest(absltest.TestCase):
   """Verifies direct OpenTelemetry SDK instruments emitted by RolloutWorker."""
 
@@ -797,7 +785,7 @@ class RolloutWorkerOTelMetricsTest(absltest.TestCase):
 
     resp = self.worker._to_rollout_response(item)
     self.assertEqual(resp.status, "COMPLETED")
-    metrics = _collect_otel_metrics(self.reader)
+    metrics = otel_testing.collect_metrics(self.reader)
 
     self.assertEqual(
         metrics["tunix.worker.trajectories.completed"],
@@ -961,7 +949,7 @@ class RolloutWorkerOTelMetricsTest(absltest.TestCase):
     self.assertLen(callback_responses, 1)
     self.assertIs(callback_responses[0], resp)
 
-    metrics = _collect_otel_metrics(self.reader)
+    metrics = otel_testing.collect_metrics(self.reader)
     completed_by_status = {
         attrs["status"]: (val, attrs)
         for val, _, attrs in metrics["tunix.worker.trajectories.completed"]
@@ -1175,10 +1163,10 @@ class RolloutWorkerOTelMetricsTest(absltest.TestCase):
           )
       )
       await enter_sample.wait()
-      active_metrics = _collect_otel_metrics(self.reader)
+      active_metrics = otel_testing.collect_metrics(self.reader)
       release_sample.set()
       await gen_task
-      idle_metrics = _collect_otel_metrics(self.reader)
+      idle_metrics = otel_testing.collect_metrics(self.reader)
       return active_metrics, idle_metrics
 
     active_metrics, idle_metrics = asyncio.run(_run_sync_and_inflight())
@@ -1218,12 +1206,57 @@ class RolloutWorkerOTelMetricsTest(absltest.TestCase):
     )
 
     worker_1.stop()
-    post_stop_metrics = _collect_otel_metrics(self.reader)
+    post_stop_metrics = otel_testing.collect_metrics(self.reader)
     post_stop_inflight = {
         attrs["worker_id"]: val
         for val, _, attrs in post_stop_metrics["tunix.worker.requests_inflight"]
     }
     self.assertEqual(post_stop_inflight, {"rollout_otel_0": 0})
+
+  def test_records_nothing_when_opentelemetry_is_not_installed(self):
+    with mock.patch.object(otel_metrics, "otel_api", None):
+      disabled_worker = rollout_worker.RolloutWorker(
+          worker_id="rollout_otel_disabled",
+          sampler=self.sampler,
+          env_name="mock_env",
+          agent_name="mock_agent",
+          tokenizer=mocks.MockTokenizer(),
+          chat_parser=mocks.MockChatParser(),
+          otel_meter_provider=self.meter_provider,
+      )
+    self.assertFalse(disabled_worker._otel._enabled)
+
+    resp = disabled_worker._to_rollout_response(
+        datatypes.TrajectoryItem(
+            prompt_id="p",
+            group_index=0,
+            traj={"status": "SUCCEEDED", "assistant_turn_lengths": [2]},
+        )
+    )
+    self.assertEqual(resp.status, "COMPLETED")
+
+    async def _run_sync_round():
+      req_sync = datatypes.WeightSyncRequest(
+          controller_id="c",
+          policy_version=2,
+          extra_config={"req_id": "wsync-v2-r0", "uuid": 1},
+      )
+      await disabled_worker.pre_weight_sync(req_sync)
+      await disabled_worker.weight_sync(req_sync)
+      await disabled_worker.post_weight_sync(req_sync)
+
+    asyncio.run(_run_sync_round())
+    disabled_worker._otel.unregister_inflight()
+
+    # Only the enabled worker from `setUp` is observed, and only through the
+    # `requests_inflight` gauge it registered.
+    metrics = otel_testing.collect_metrics(self.reader)
+    self.assertNotIn("tunix.worker.trajectories.completed", metrics)
+    self.assertNotIn("tunix.worker.weight_sync.duration", metrics)
+    self.assertEqual(
+        [attrs for _, _, attrs in metrics["tunix.worker.requests_inflight"]],
+        [{"worker_id": "rollout_otel_0"}],
+    )
 
 
 if __name__ == "__main__":

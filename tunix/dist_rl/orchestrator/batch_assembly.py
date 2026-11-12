@@ -33,6 +33,7 @@ from absl import logging
 import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import lineage
+from tunix.dist_rl.worker import otel_metrics
 from tunix.rl import packing
 
 T = TypeVar("T")
@@ -115,6 +116,14 @@ class PaddingStats:
   def row_imbalance(self) -> float:
     """Max-over-mean of per-row valid tokens; 1.0 means perfectly balanced."""
     return float(self.row_valid_tokens.max() / self.row_valid_tokens.mean())
+
+  def telemetry_metadata(self) -> dict[str, int | float]:
+    """Returns token counts and readiness timestamp for TrainerWorker OTel."""
+    return {
+        otel_metrics.VALID_TOKENS_METADATA_KEY: self.valid_tokens,
+        otel_metrics.CAPACITY_TOKENS_METADATA_KEY: self.capacity_tokens,
+        otel_metrics.MB_READY_TIME_S_METADATA_KEY: otel_metrics.now_s(),
+    }
 
 
 def summarize_padding_stats(
@@ -594,12 +603,15 @@ def to_rl_trainer_payload(
     max_segments: int,
     trajectory_ids: tuple[str, ...] = (),
     lineage_context: lineage.LineageContext | None = None,
+    padding_stats: PaddingStats | None = None,
 ) -> datatypes.RLTrainerPayload:
   """Converts a packing.PackedChunk to an RLTrainerPayload."""
   n_rows = chunk.ids.shape[0]
   metadata: dict[str, Any] = {"trajectory_ids": trajectory_ids}
   if lineage_context is not None:
     metadata["lineage"] = lineage_context
+  if padding_stats is not None:
+    metadata.update(padding_stats.telemetry_metadata())
   return datatypes.RLTrainerPayload(
       prompt_ids=np.zeros((n_rows, 0), dtype=np.int32),
       prompt_mask=np.zeros((n_rows, 0), dtype=np.float32),
@@ -760,20 +772,22 @@ class SequencePackedBatchAssembler:
         },
     )
     self._batch_counter += 1
+    padding_stats = PaddingStats(
+        row_valid_tokens=row_valid_tokens,
+        row_num_sequences=row_num_sequences,
+        row_capacity=self.max_packed_len,
+    )
     payload = to_rl_trainer_payload(
         chunk,
         max_segments=max_segments,
         trajectory_ids=traj_ids,
         lineage_context=merged_lineage,
+        padding_stats=padding_stats,
     )
     return AssembledBatch(
         payload=payload,
         is_final_batch=is_final_batch,
-        padding_stats=PaddingStats(
-            row_valid_tokens=row_valid_tokens,
-            row_num_sequences=row_num_sequences,
-            row_capacity=self.max_packed_len,
-        ),
+        padding_stats=padding_stats,
         trajectory_ids=traj_ids,
     )
 
@@ -1424,8 +1438,14 @@ class PaddedBatchAssembler:
         },
     )
     self._batch_counter += 1
+    padding_stats = PaddingStats(
+        row_valid_tokens=row_valid_tokens,
+        row_num_sequences=row_num_sequences,
+        row_capacity=self.max_seq_len,
+    )
     payload_metadata: dict[str, Any] = {
-        "trajectory_ids": tuple(_extract_trajectory_id(it) for it in chunk)
+        "trajectory_ids": tuple(_extract_trajectory_id(it) for it in chunk),
+        **padding_stats.telemetry_metadata(),
     }
     if merged_lineage:
       payload_metadata["lineage"] = merged_lineage
@@ -1463,11 +1483,6 @@ class PaddedBatchAssembler:
         ),
         routed_experts=batched_routed_experts,
         metadata=payload_metadata,
-    )
-    padding_stats = PaddingStats(
-        row_valid_tokens=row_valid_tokens,
-        row_num_sequences=row_num_sequences,
-        row_capacity=self.max_seq_len,
     )
     return payload, padding_stats
 

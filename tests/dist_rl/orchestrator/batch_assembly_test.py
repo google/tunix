@@ -1108,6 +1108,9 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
     self.assertEqual(stats.row_capacity, 16)
     self.assertAlmostEqual(stats.padding_ratio, 1.0 - 10 / 32)
     self.assertAlmostEqual(stats.row_imbalance, 2.0)
+    self.assertEqual(res[0].payload.metadata["valid_tokens"], 10)
+    self.assertEqual(res[0].payload.metadata["capacity_tokens"], 32)
+    self.assertGreater(res[0].payload.metadata["mb_ready_time_s"], 0.0)
 
   def test_padding_stats_with_one_segment_per_row(self):
     assembler = batch_assembly.SequencePackedBatchAssembler(
@@ -1223,6 +1226,17 @@ class PaddingStatsTest(absltest.TestCase):
     self.assertAlmostEqual(stats.padding_ratio, 0.6)
     np.testing.assert_allclose(stats.row_fill, [0.8, 0.2, 0.0, 0.6])
     self.assertAlmostEqual(stats.row_imbalance, 2.0)
+    with mock.patch.object(
+        batch_assembly.otel_metrics, "now_s", return_value=123.5
+    ):
+      self.assertEqual(
+          stats.telemetry_metadata(),
+          {
+              "valid_tokens": 16,
+              "capacity_tokens": 40,
+              "mb_ready_time_s": 123.5,
+          },
+      )
 
   def test_rejects_invalid_inputs(self):
     for valid, nseq, cap in (
@@ -1326,6 +1340,9 @@ class PaddedBatchAssemblerTest(absltest.TestCase):
     self.assertEqual(stats.row_capacity, 9)
     self.assertAlmostEqual(stats.padding_ratio, 1.0 - 14 / 18)
     self.assertAlmostEqual(stats.row_imbalance, 9 / 7)
+    self.assertEqual(res[0].payload.metadata["valid_tokens"], 14)
+    self.assertEqual(res[0].payload.metadata["capacity_tokens"], 18)
+    self.assertGreater(res[0].payload.metadata["mb_ready_time_s"], 0.0)
 
   def test_padding_stats_mark_filler_rows_in_remainder(self):
     res = list(
