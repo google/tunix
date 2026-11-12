@@ -1257,6 +1257,31 @@ class RaidenSynchronizerTest(absltest.TestCase):
     ):
       sync.apply_to_runner(runner)
 
+  def test_apply_to_runner_keeps_legacy_out_of_place_contract(self):
+    """Raiden rebuilds `state` and keeps `state_leaves` a tuple, never mutates."""
+    sync = raiden_synchronizer.RaidenSynchronizer("rollout")
+    new_w = np.ones((2,), dtype=np.float16)
+    sync.names = ["w1"]
+    sync.arrays = [new_w]
+
+    class _Runner:
+
+      def __init__(self, state):
+        self.state = state
+        self.state_leaves = tuple(jax.tree_util.tree_leaves(state))
+
+    old_w = np.zeros((2,), dtype=np.float32)
+    original_state = {"w1": old_w}
+    runner = _Runner(original_state)
+    # A dtype difference is not rejected on the Raiden path.
+    sync.apply_to_runner(runner)
+
+    self.assertIsNot(runner.state, original_state)
+    self.assertIs(original_state["w1"], old_w)
+    self.assertIs(runner.state["w1"], new_w)
+    self.assertIsInstance(runner.state_leaves, tuple)
+    self.assertEqual(runner.state_leaves, (new_w,))
+
   def test_explicit_global_shard_indices_and_multi_numa_endpoints(self):
     mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ("data",))
     sharding = jax.sharding.NamedSharding(
@@ -1348,6 +1373,17 @@ class RaidenSynchronizerTest(absltest.TestCase):
     self.assertFalse(
         hasattr(raiden_synchronizer, "create_weight_synchronizer")
     )
+
+  def test_raiden_synchronizer_round_lifecycle_hooks_are_no_ops(self):
+    sync = raiden_synchronizer.RaidenSynchronizer("trainer", self._state())
+    arrays = list(sync.arrays)
+    sync.h2d(sync_request={"round_id": 1})
+    sync.apply_to_sampler(None)
+    sync.release(sync_request={"round_id": 1})
+    sync.abort(sync_request={"round_id": 1})
+    sync.close()
+    self.assertTrue(sync.bound)
+    self.assertEqual(sync.arrays, arrays)
 
   def test_global_shard_indices_proxy_shards_use_mesh_devices(self):
     mesh = jax.sharding.Mesh(np.array(jax.devices()[:4]), ("data",))

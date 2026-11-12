@@ -20,7 +20,6 @@ import collections
 import contextlib
 import inspect
 import os
-import re
 import socket
 import threading
 from typing import Any, Callable, List, Optional, Protocol, Sequence, Tuple
@@ -30,6 +29,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from tunix.dist_rl.weight_sync import weight_sync
+from tunix.dist_rl.weight_sync import weight_utils
 from tunix.utils import mesh
 
 # Serializes FFI transport initialization across threads because
@@ -158,132 +158,11 @@ def local_ip() -> str:
   return "localhost"
 
 
-def flatten_weights(state: Any) -> Tuple[List[str], List[Any]]:
-  """Returns (names, arrays) for every array leaf, in stable tree order."""
-  names, arrays = [], []
-  for path, leaf in jax.tree_util.tree_leaves_with_path(state):
-    arr = getattr(leaf, "value", leaf)
-    if hasattr(arr, "shape") and hasattr(arr, "dtype"):
-      names.append(jax.tree_util.keystr(path))
-      arrays.append(arr)
-  return names, arrays
-
-
-# One bracketed component (`['w']`, `[0]`) or one dotted component (`w`).
-_PATH_COMPONENT_RE = re.compile(r"\[([^\]]*)\]|([^.\[\]]+)")
-# A trailing ordinal folded into the name, as in `layers_0`.
-_FOLDED_INDEX_RE = re.compile(r"^(.+?)_(\d+)$")
-
-
-def _param_key(name: str) -> str:
-  """Canonical dotted key for pairing a bound name with a runner tree path.
-
-  The two sides spell the same parameter differently: `flatten_weights` reports
-  JAX keystr (`['layers'][0]['w']`), callers pass bare names (`w1`) or
-  attribute paths (`layers.0.w`), and unscanned MaxText layers arrive with the
-  ordinal folded in (`layers_0`). Reducing every form to `layers.0.w` lets the
-  match ignore which side produced the name.
-  """
-  segments: List[str] = []
-  for bracketed, dotted in _PATH_COMPONENT_RE.findall(name):
-    component = (bracketed or dotted).strip("'\"")
-    if not component:
-      continue
-    folded = _FOLDED_INDEX_RE.match(component)
-    segments.extend(folded.groups() if folded else (component,))
-  # Wrapper roots and the nnx `.value` leaf are not part of the identity.
-  while segments and segments[0] in ("base", "model"):
-    segments.pop(0)
-  if segments and segments[-1] == "value":
-    segments.pop()
-  return ".".join(segments)
-
-
-def _bindable(arr: Any, *, allow_proxy: bool = False) -> bool:
-  """True if the native layer can bind this leaf.
-
-  Binding an unsupported leaf (e.g. RNG keys) can SIGSEGV, so only
-  floating-point, rank>=1 arrays on supported local platforms qualify.
-  """
-  try:
-    if not hasattr(arr, "shape") or not hasattr(arr, "dtype"):
-      return False
-    if arr.ndim < 1:
-      return False
-    if not jnp.issubdtype(arr.dtype, jnp.floating):
-      return False
-    devices = arr.devices()
-    if not devices:
-      return False
-    supported_platforms = {"tpu", "cpu"}
-    if allow_proxy:
-      supported_platforms.update(("proxy", "pathways"))
-    return all(
-        getattr(d, "platform", "?") in supported_platforms for d in devices
-    )
-  except Exception:
-    return False
-
-
-_KV_CACHE_SEGMENTS = frozenset(
-    {"cache", "cached_prefill_key", "cached_prefill_value"}
-)
-
-
-def _is_kv_cache(name: str) -> bool:
-  """True for inference KV-cache buffers, which are not weights.
-
-  The rollout's MaxText model carries per-layer KV cache arrays
-  (`...['attention']['cache']['cached_prefill_key']`). They are floating point
-  and rank>=1, so `_bindable` accepts them, but the trainer has no counterpart
-  and manifest preflight then rejects them as destination-only variables.
-  """
-  return any(seg in _KV_CACHE_SEGMENTS for seg in _param_key(name).split("."))
-
-
-def _filter_bindable(
-    names: List[str], arrays: List[Any], *, allow_proxy: bool = False
-) -> Tuple[List[str], List[Any]]:
-  """Drops leaves _bindable rejects, plus inference-only KV cache buffers."""
-  logging.vlog(
-      1,
-      "raiden bind census: %s",
-      collections.Counter(
-          (type(a).__name__, str(getattr(a, "dtype", "?"))) for a in arrays
-      ),
-  )
-  keep_names: List[str] = []
-  keep_arrays: List[Any] = []
-  dropped = []
-  cache_dropped = []
-  for name, arr in zip(names, arrays):
-    if _is_kv_cache(name):
-      cache_dropped.append(name)
-    elif _bindable(arr, allow_proxy=allow_proxy):
-      arr.block_until_ready()
-      keep_names.append(name)
-      keep_arrays.append(arr)
-    else:
-      dropped.append(name)
-  if cache_dropped:
-    logging.debug(
-        "raiden bind skipped %d KV-cache leaves: %s",
-        len(cache_dropped),
-        cache_dropped[:5],
-    )
-  if dropped:
-    logging.warning(
-        "raiden bind dropped %d unbindable leaves: %s", len(dropped), dropped[:5]
-    )
-  return keep_names, keep_arrays
-
-
-def _axis_name(axis: Any) -> str:
-  if axis is None:
-    return ""
-  if isinstance(axis, str):
-    return axis
-  return ",".join(axis)
+flatten_weights = weight_utils.flatten_weights
+_param_key = weight_utils.param_key
+_bindable = weight_utils.is_bindable
+_is_kv_cache = weight_utils.is_kv_cache
+_filter_bindable = weight_utils.filter_bindable
 
 
 def _resolve_device_host_keys(devices: Sequence[Any]) -> List[Any]:
@@ -480,69 +359,9 @@ def _patch_ffi_host_slots(
     raiden_ffi._prepare_shard_info = orig_prepare  # pylint: disable=protected-access
 
 
-def _compute_global_shard_index(
-    indices: Tuple[slice, ...], shape: Tuple[int, ...]
-) -> int:
-  """Flattens a shard's per-dimension slices into its row-major grid index."""
-  shard_idx = 0
-  stride = 1
-  for s, dim in zip(reversed(indices), reversed(shape)):
-    start = s.start or 0
-    step = s.stop - start if s.stop is not None else dim
-    num_shards = dim // step if step > 0 else 1
-    idx = start // step if step > 0 else 0
-    shard_idx += idx * stride
-    stride *= num_shards
-  return shard_idx
-
-
-def _global_shard_indices(
-    arr: Any,
-    sharding: Any,
-    devices: Optional[Sequence[jax.Device]] = None,
-) -> Tuple[int, ...]:
-  """Grid index of each shard `arr` is published from, in shard order.
-
-  A proxy (Pathways) array holds no local data, so the shards of every mesh
-  device are listed instead of the addressable ones. When `devices` is supplied
-  (e.g. host-grouped FFI shard order), shard indices follow that exact device
-  sequence so `WorkUnitMetadata.variables[i].global_shard_indices[p]` aligns
-  with `WorkUnitMetadata.shards[p]`.
-
-  Args:
-    arr: The array.
-    sharding: `arr.sharding`.
-    devices: Optional explicit device sequence overriding `mesh.devices.flat`.
-
-  Returns:
-    One flattened grid index per shard.
-  """
-  shape = tuple(arr.shape)
-  index_map = sharding.devices_indices_map(shape)
-  if devices is not None:
-    missing = [d for d in devices if d not in index_map]
-    if missing:
-      raise ValueError(
-          f"Explicit FFI device list has {len(missing)} device(s) missing"
-          f" from array sharding devices_indices_map: {missing[:4]!r}"
-      )
-    return tuple(
-        _compute_global_shard_index(index_map[d], shape) for d in devices
-    )
-  shards = getattr(arr, "addressable_shards", None)
-  if shards and not any(
-      s.device.platform in ("proxy", "pathways") for s in shards
-  ):
-    return tuple(_compute_global_shard_index(s.index, shape) for s in shards)
-  mesh_obj = getattr(sharding, "mesh", None)
-  mesh_devices = (
-      mesh_obj.devices.flat if hasattr(mesh_obj, "devices") else index_map
-  )
-  return tuple(
-      _compute_global_shard_index(index_map[d], shape)
-      for d in mesh_devices
-      if d in index_map
-  )
+_compute_global_shard_index = weight_utils.compute_global_shard_index
+_global_shard_indices = weight_utils.global_shard_indices
+_tensor_metadata = weight_utils.tensor_metadata
 
 
 def _compute_mesh_global_shard_indices(
@@ -581,47 +400,6 @@ def _routable_address(endpoint: str, ip: str) -> str:
   if sep and host in ("", "0.0.0.0", "127.0.0.1"):
     return f"{ip}:{port}"
   return endpoint
-
-
-def _tensor_metadata(
-    name: str,
-    arr: Any,
-    layer_idx: int,
-    *,
-    devices: Optional[Sequence[jax.Device]] = None,
-):
-  """Constructs `TensorMetadata` for `arr`."""
-  sharding: Any = getattr(arr, "sharding", None)
-  spec = tuple(getattr(sharding, "spec", ()) or ())
-  spec = (spec + (None,) * arr.ndim)[: arr.ndim]
-  if sharding is not None and hasattr(sharding, "shard_shape"):
-    try:
-      local = sharding.shard_shape(tuple(arr.shape))
-      mesh_shape = tuple(g // l for g, l in zip(arr.shape, local))
-    except Exception as e:  # pylint: disable=broad-exception-caught
-      logging.warning(
-          "Could not compute mesh_shape for %s from sharding: %s, falling back"
-          " to 1D",
-          name,
-          e,
-      )
-      mesh_shape = (1,) * arr.ndim
-  else:
-    mesh_shape = (1,) * arr.ndim
-  return weight_sync.TensorMetadata(
-      name=name,
-      shape=tuple(arr.shape),
-      mesh_shape=mesh_shape,
-      layout=tuple(reversed(range(arr.ndim))),
-      item_size=arr.dtype.itemsize,
-      layer_idx=layer_idx,
-      sharding_spec=tuple(_axis_name(a) for a in spec),
-      global_shard_indices=(
-          _global_shard_indices(arr, sharding, devices=devices)
-          if hasattr(sharding, "devices_indices_map")
-          else ()
-      ),
-  )
 
 
 def _use_ffi_transport() -> bool:
@@ -942,7 +720,8 @@ class RaidenSynchronizer:
     # (`bool(self.arrays)`) already blocks `d2h()`/`h2d()` until `bind()` runs.
     return count
 
-  def h2d(self) -> None:
+  def h2d(self, sync_request: Any = None) -> None:
+    del sync_request
     if not self.bound:
       raise RuntimeError(f"{self.job_name}: bind() must run before h2d()")
     if self._is_proxy:
@@ -952,6 +731,10 @@ class RaidenSynchronizer:
       self._sync.h2d()
       jax.block_until_ready(self.arrays)
 
+  # Deliberately not routed through `weight_utils.apply_to_runner`: that helper
+  # mutates `nnx.Variable`s and flat dicts in place and rejects dtype
+  # mismatches, while Raiden keeps its legacy contract of rebuilding
+  # `runner.state` from the positionally replaced `runner.state_leaves`.
   # TODO(tunix-dev): drop this once bind() records the runner's leaf identity so
   # h2d() writes back in place, making the name matching below unnecessary.
   def apply_to_runner(self, runner: Any) -> None:
@@ -1041,6 +824,31 @@ class RaidenSynchronizer:
         len(new_leaves),
     )
 
+  def apply_to_sampler(self, sampler: Any) -> None:
+    """No-op, preserving the legacy Raiden destination contract.
+
+    With the TCP transport, native `h2d()` writes into the bound buffers in
+    place, so the sampler already holds the new weights. With the FFI (proxy)
+    transport, `_ffi_h2d()` replaces `self.arrays` out of place; those arrays
+    reach a runner only through an explicit `apply_to_runner()` call, exactly as
+    before this hook existed.
+
+    Args:
+      sampler: Unused.
+    """
+    del sampler
+
+  def release(self, sync_request: Any = None) -> None:
+    """No-op per-round source release for Raiden's persistent staging."""
+    del sync_request
+
+  def abort(self, sync_request: Any = None) -> None:
+    """No-op per-round destination abort for Raiden."""
+    del sync_request
+
+  def close(self) -> None:
+    """No-op, so Raiden keeps its existing buffer lifetime on shutdown."""
+
   def work_unit_metadata_all(self) -> List[weight_sync.WorkUnitMetadata]:
     """Returns work unit metadata for registration.
 
@@ -1050,16 +858,27 @@ class RaidenSynchronizer:
     """
     return [self.work_unit_metadata()]
 
-  def metrics(self) -> dict:
+  def metrics(self) -> dict[str, Any]:
     return self._sync.get_metrics() if self._sync else {}
 
-  def checksums(self, sample: int = 3) -> dict:
-    """Per-tensor float32 abs-sums for cross-process verification."""
+  def checksums(self, sample: int = 3) -> dict[str, float | int]:
+    """Per-tensor float32 abs-sums for cross-process verification.
+
+    Reduces one tensor at a time and syncs each result to the host, so at most
+    one tensor's float32 temporaries are live on device at once.
+
+    Args:
+      sample: How many leading tensors (bind order) to report individually.
+
+    Returns:
+      The sampled per-tensor sums plus `__grand_total__`, `__tensor_count__`,
+      and `__element_count__` over every bound tensor.
+    """
 
     def total(arr):
       return float(jnp.sum(jnp.abs(arr).astype(jnp.float32)))
 
-    head = {
+    head: dict[str, float | int] = {
         name: total(arr)
         for name, arr in list(zip(self.names, self.arrays))[:sample]
     }

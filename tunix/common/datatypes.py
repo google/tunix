@@ -124,6 +124,9 @@ class WeightSyncMode(str, enum.Enum):
       accepted by config resolution; coordinator handler not yet wired).
     NCCL: GPU collective / NCCL broadcast weight transfer (schema value accepted
       by config resolution; coordinator handler not yet wired).
+    GCS: Experimental Orbax checkpoint-staged transfer through a shared
+      `gs://` or filesystem staging directory (wired via
+      `tunix.experimental.weight_sync`).
   """
 
   NONE = "none"
@@ -132,6 +135,7 @@ class WeightSyncMode(str, enum.Enum):
   IN_MEMORY = "in_memory"
   FS = "fs"
   NCCL = "nccl"
+  GCS = "gcs"
 
 
 DEFAULT_WEIGHT_SYNC_MODE = WeightSyncMode.NONE

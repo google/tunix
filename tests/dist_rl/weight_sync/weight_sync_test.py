@@ -193,9 +193,31 @@ class NeutralContractTest(absltest.TestCase):
     self.assertFalse(hasattr(weight_sync, "raiden_controller"))
     self.assertFalse(hasattr(weight_sync, "create_weight_synchronizer"))
 
+  def test_gcs_mode_and_artifact_metadata_roundtrip(self):
+    self.assertEqual(weight_sync.WeightSyncMode.GCS.value, "gcs")
+    with self.assertRaisesRegex(ValueError, "artifact_uri"):
+      weight_sync.WorkUnitMetadata(
+          unit=weight_sync.WorkUnitId("trainer"), artifact_uri="   "
+      )
+
+    meta = weight_sync.dict_to_metadata({
+        "unit": {"job_name": "trainer"},
+        "artifact_uri": "gs://bucket/step_1_r1",
+        "checksums": {"w": 2.0, "__grand_total__": 2.0, "__tensor_count__": 1},
+    })
+    self.assertEqual(meta.artifact_uri, "gs://bucket/step_1_r1")
+    self.assertEqual(meta.checksums["__tensor_count__"], 1)
+    self.assertIsInstance(hash(meta), int)
+    # A dict-valued `checksums` must not make the frozen metadata unhashable.
+    without_checksums = dataclasses.replace(meta, checksums=None)
+    self.assertEqual(hash(meta), hash(without_checksums))
+    self.assertNotEqual(meta, without_checksums)
+
 
 class MockVllmSampler(base_sampler.BaseSampler):
   """Mock vLLM sampler exposing VllmToyTransformer state and update_params."""
+
+  model_runner = None
 
   def __init__(self, config: test_common.ModelConfig, *, rngs: nnx.Rngs):
     self._transformer = test_common.VllmToyTransformer(config, rngs=rngs)

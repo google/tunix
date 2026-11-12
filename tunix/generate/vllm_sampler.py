@@ -581,6 +581,11 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     raise RuntimeError("vLLM engine is not initialized.")
 
   @property
+  def model_runner(self) -> Any:
+    """Public accessor for the active vLLM worker's model runner."""
+    return self._model_runner
+
+  @property
   def transformer(self):
     # vLLM doesn't expose the underlying model
     return None
