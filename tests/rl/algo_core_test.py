@@ -1293,6 +1293,22 @@ class GrpoLossSequenceLevelControlsTest(absltest.TestCase):
         float(out.aux_metrics['pg_clipfrac_lower'].compute()), 0.5, rtol=1e-5
     )
 
+  def test_build_gen_model_input_fn_strips_group_filters_preserving_temperature(
+      self,
+  ):
+    import cloudpickle
+    import threading
+
+    lock = threading.Lock()
+    cfg = self._config(group_filters=[lambda r, m=None: lock is None])
+    cfg.temperature = 0.7
+    fn = algo_core.build_gen_model_input_fn(cfg, pad_id=0, eos_id=-1)
+    # Closure must serialize cleanly over gRPC without pickling `lock`, and keep
+    # `temperature == 0.7`.
+    roundtripped = cloudpickle.loads(cloudpickle.dumps(fn))
+    self.assertEqual(roundtripped.keywords['algo_config'].group_filters, ())
+    self.assertEqual(roundtripped.keywords['algo_config'].temperature, 0.7)
+
 
 if __name__ == '__main__':
   absltest.main()

@@ -736,8 +736,8 @@ class RLProgramTest(absltest.TestCase):
     program, engine = self._resume_with_engine_metadata({
         "step": 3,
         "policy_version": 5,
-        "committed_prompt_ids": ["p0"],
-        "skipped_prompt_ids": [],
+        "min_unsettled_prompt_idx": 1,
+        "settled_offsets": [],
     })
 
     self.assertEqual(program.step, 3)
@@ -1156,7 +1156,7 @@ class RLProgramTest(absltest.TestCase):
       resumed = self._window_program()
       resumed.dataset = dataset
       resumed.dispatch_window.restore_checkpoint_metadata(
-          {"committed_prompt_ids": ["0"], "skipped_prompt_ids": []}
+          {"min_unsettled_prompt_idx": 1, "settled_offsets": []}
       )
       await resumed.rollout_dispatch_stage()
       self.assertEqual(dispatched, [1])
@@ -1254,6 +1254,340 @@ class RLProgramTest(absltest.TestCase):
       await asyncio.gather(dispatch_task, return_exceptions=True)
 
     asyncio.run(_run())
+
+  def test_max_in_flight_groups_overrides_and_validates(self):
+    def _build(**kwargs):
+      program = rl_program.StandardRLProgram(
+          dataset=["prompt_0"],
+          algo_config=self.algo_config,
+          batch_config=self.batch_config,
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
+          assembler=self.assembler,
+          **kwargs,
+      )
+      self.addCleanup(program.close)
+      return program
+
+    with self.assertRaisesRegex(ValueError, "max_in_flight_groups=1"):
+      _build(batch_size=2, max_staleness=1, max_in_flight_groups=1)
+    with self.assertRaisesRegex(ValueError, "PROMPT_ARRIVAL"):
+      _build(
+          max_staleness=1,
+          max_in_flight_groups=3,
+          group_order=rl_program.GroupOrder.PROMPT_ARRIVAL,
+      )
+    over_provisioned = _build(max_staleness=0, max_in_flight_groups=3)
+    self.assertEqual(over_provisioned.dispatch_window.window_capacity, 3)
+
+  def _dynamic_sampling_program(self, group_rewards, **kwargs):
+    dispatched: list[str] = []
+    ready: list[list[datatypes.TrajectoryItem]] = []
+
+    async def mock_dispatch(prompts, **dispatch_kwargs):
+      prompt = prompts[0]
+      prompt_id = prompt["prompt_id"]
+      prompt_meta = dict(prompt.get("metadata") or {})
+      dispatched.append(prompt_id)
+      group = [
+          dataclasses.replace(
+              item,
+              metadata={
+                  **item.metadata,
+                  **prompt_meta,
+                  "lineage": _rollout_lineage(1.0, 2.5, "rollout-0"),
+              },
+          )
+          for item in _make_trajectory_group(
+              prompt_id=prompt_id,
+              policy_version=dispatch_kwargs["policy_version"],
+          )
+      ]
+      ready.append(group)
+      return ["rollout"]
+
+    async def mock_poll(timeout_s=0.1):
+      del timeout_s
+      if ready:
+        return ready.pop(0)
+      await asyncio.sleep(0.01)
+      return []
+
+    self.mock_engine.dispatch_rollouts.side_effect = mock_dispatch
+    self.mock_engine.poll_rollouts.side_effect = mock_poll
+    group_filters = kwargs.pop("group_filters", ("tied_rewards",))
+    max_consecutive = kwargs.pop("max_consecutive_filtered_groups", None)
+    algo_cfg = dataclasses.replace(
+        self.algo_config,
+        group_filters=group_filters,
+        max_consecutive_filtered_groups=max_consecutive,
+    )
+    rewards_iter = iter(group_rewards)
+    reward_fns = kwargs.pop(
+        "reward_fns",
+        [lambda prompts, completions, **_: next(rewards_iter)],
+    )
+    program = rl_program.StandardRLProgram(
+        algo_config=algo_cfg,
+        batch_config=kwargs.pop("batch_config", self.batch_config),
+        reward_fns=reward_fns,
+        assembler=self.assembler,
+        **kwargs,
+    )
+    self.addCleanup(program.close)
+    return program, dispatched
+
+  def test_dynamic_sampling_drops_tied_group_preserves_telemetry_and_watermark(
+      self,
+  ):
+    async def _run():
+      program, dispatched = self._dynamic_sampling_program(
+          [[1.0, 1.0], [0.0, 1.0]],
+          dataset=["prompt_0", "prompt_1"],
+          max_steps=1,
+      )
+      logged = {}
+      log_metric = program._log_metric
+
+      def _record_metric(name, value, step, **kwargs):
+        logged[(name, step)] = value
+        log_metric(name, value, step, **kwargs)
+
+      program._log_metric = _record_metric
+      mock_traj_logger = mock.MagicMock()
+      program.trajectory_logger = mock_traj_logger
+
+      await asyncio.wait_for(program.run_async(self.mock_engine), timeout=10.0)
+
+      self.assertEqual(dispatched, ["prompt_0", "prompt_1"])
+      self.assertEqual(program.step, 1)
+      self.mock_engine.train_step.assert_called_once()
+      self.assertEqual(program.last_step_result.reward_mean, 0.5)
+      # Both prompt_0 (dropped) and prompt_1 (trained) are settled -> watermark=2.
+      metadata = self.mock_engine.save_checkpoint.call_args.kwargs["metadata"]
+      self.assertEqual(metadata["min_unsettled_prompt_idx"], 2)
+      self.assertEqual(metadata["settled_offsets"], [])
+      # Filtered group entered `filtered_groups`: lineage, tokens, and counts!
+      self.assertEqual(logged[("rollout/filtered_groups_count", 0)], 1.0)
+      self.assertEqual(logged[("rollout/filtered_trajectories_count", 0)], 2.0)
+      self.assertEqual(logged[("rollout/filtered_tokens_count", 0)], 8.0)
+      self.assertEqual(
+          logged[("rollout/group_filter_dropped_groups_count", 0)], 1.0
+      )
+      self.assertEqual(
+          logged[("rollout/group_filter_dropped_reward_mean", 0)], 1.0
+      )
+      # Trajectory logger captured both the 2 consumed and 2 filtered rollouts.
+      rows = [c.args[0] for c in mock_traj_logger.log_item_async.call_args_list]
+      self.assertLen(rows, 4)
+      self.assertEqual(
+          [(r["prompt_id"], r["filtered"]) for r in rows],
+          [
+              ("prompt_1", False),
+              ("prompt_1", False),
+              ("prompt_0", True),
+              ("prompt_0", True),
+          ],
+      )
+
+    asyncio.run(_run())
+
+  def test_dynamic_sampling_shaping_rewards_do_not_bypass_tied_rewards(self):
+    async def _run():
+      # Two wrong answers (`accuracy == 0`) of different lengths get distinct
+      # total rewards due to `length_penalty`, yet `tied_rewards` inspects the
+      # primary `accuracy` component and drops `prompt_0`!
+      acc_iter = iter([[0.0, 0.0], [0.0, 1.0]])
+      pen_iter = iter([[-0.1, -0.4], [-0.2, -0.2]])
+
+      def accuracy(prompts, completions, **_):
+        del prompts, completions
+        return next(acc_iter)
+
+      def length_penalty(prompts, completions, **_):
+        del prompts, completions
+        return next(pen_iter)
+
+      program, dispatched = self._dynamic_sampling_program(
+          [],
+          dataset=["prompt_0", "prompt_1"],
+          max_steps=1,
+          reward_fns=[accuracy, length_penalty],
+      )
+
+      await asyncio.wait_for(program.run_async(self.mock_engine), timeout=10.0)
+
+      self.assertEqual(dispatched, ["prompt_0", "prompt_1"])
+      self.assertEqual(program.step, 1)
+
+    asyncio.run(_run())
+
+  def test_all_invalid_group_reaches_telemetry_instead_of_tie_drop(self):
+    async def _run():
+      failed_group = [
+          dataclasses.replace(
+              it,
+              is_valid=False,
+              traj={**it.traj, "status": datatypes.TrajectoryStatus.FAILED},
+          )
+          for it in _make_trajectory_group(prompt_id="prompt_0")
+      ]
+      _set_mock_poll_batches(self.mock_engine, failed_group, [])
+      algo_cfg = dataclasses.replace(
+          self.algo_config, group_filters=("tied_rewards",)
+      )
+      program = self._create_program(
+          dataset=["prompt_0"],
+          max_steps=1,
+          reward_fns=[lambda prompts, completions, **_: [0.0] * len(prompts)],
+      )
+      program.algo_config = algo_cfg
+      # Re-init with real constructor so `_group_filters` is populated.
+      program.close()
+      program = rl_program.StandardRLProgram(
+          dataset=["prompt_0"],
+          max_steps=1,
+          algo_config=algo_cfg,
+          batch_config=self.batch_config,
+          reward_fns=[lambda prompts, completions, **_: [0.0] * len(prompts)],
+          assembler=self.assembler,
+      )
+      self.addCleanup(program.close)
+      logged = {}
+      orig_log = program._log_metric
+
+      def _spy(name, val, step, **kw):
+        logged[name] = val
+        orig_log(name, val, step, **kw)
+
+      program._log_metric = _spy
+
+      await asyncio.wait_for(program.run_async(self.mock_engine), timeout=10.0)
+
+      # All-invalid group was NOT swallowed by `tied_rewards`; it surfaced in
+      # `rollout/invalid_trajectory_frac` == 1.0 and `status/failed_frac` == 1.0!
+      self.assertEqual(logged["rollout/invalid_trajectory_frac"], 1.0)
+      self.assertEqual(logged["rollout/status/failed_frac"], 1.0)
+      self.assertEqual(logged["rollout/group_filter_dropped_groups_count"], 0.0)
+
+    asyncio.run(_run())
+
+  def test_over_provisioned_stale_groups_drop_before_scoring_and_at_train(self):
+    async def _run():
+      scored_prompts: list[str] = []
+
+      def _reward(prompts, completions, **kw):
+        del completions
+        scored_prompts.append(str(kw.get("prompt_id", ["?"])[0]))
+        return [0.0, 1.0][: len(prompts)]
+
+      program, dispatched = self._dynamic_sampling_program(
+          [],
+          dataset=["prompt_0", "prompt_1", "prompt_2", "prompt_3"],
+          max_steps=2,
+          max_staleness=0,
+          max_in_flight_groups=2,
+          group_filters=(),
+          reward_fns=[_reward],
+      )
+      logged = {}
+      orig_log = program._log_metric
+
+      def _spy(name, val, step, **kw):
+        logged[(name, step)] = val
+        orig_log(name, val, step, **kw)
+
+      program._log_metric = _spy
+
+      await asyncio.wait_for(program.run_async(self.mock_engine), timeout=10.0)
+
+      self.assertEqual(program.step, 2)
+      self.assertEqual(dispatched[:3], ["prompt_0", "prompt_1", "prompt_2"])
+      # Step 1 dropped the leftover v0 prompt_1 and trained v1 prompt_2.
+      metadata = self.mock_engine.save_checkpoint.call_args.kwargs["metadata"]
+      self.assertEqual(metadata["min_unsettled_prompt_idx"], 3)
+      self.assertEqual(logged[("rollout/filtered_groups_count", 1)], 1.0)
+
+      # Also verify critique_stage skips `_critique_group` altogether when a
+      # group sitting in `raw_q` is already stale before critique picks it up.
+      program2 = rl_program.StandardRLProgram(
+          dataset=["p0"],
+          max_steps=1,
+          algo_config=self.algo_config,
+          batch_config=self.batch_config,
+          reward_fns=[_reward],
+          assembler=self.assembler,
+          max_staleness=0,
+      )
+      self.addCleanup(program2.close)
+      program2.engine = self.mock_engine
+      program2.policy_version = 0
+      for it in _make_trajectory_group(
+          prompt_id="stale_in_raw", policy_version=0
+      ):
+        await program2.raw_q.put(it)
+      await program2.raw_q.close()
+      program2.policy_version = 1  # Sync happened while sitting in raw_q!
+      scored_before = list(scored_prompts)
+      await program2.critique_stage()
+      self.assertEqual(scored_prompts, scored_before)
+      drained = await program2._drain_filtered_groups()
+      self.assertLen(drained, 1)
+      self.assertEqual(drained[0][0].metadata["drop_reason"], "stale")
+
+    asyncio.run(_run())
+
+  def test_dynamic_sampling_raises_after_max_consecutive_and_resets_on_keep(
+      self,
+  ):
+    async def _run():
+      program_fail, _ = self._dynamic_sampling_program(
+          [[1.0, 1.0]] * 5,
+          dataset=[f"prompt_{i}" for i in range(5)],
+          max_steps=1,
+          max_consecutive_filtered_groups=2,
+      )
+      with self.assertRaisesRegex(RuntimeError, "dropped 2 groups in a row"):
+        await asyncio.wait_for(
+            program_fail.run_async(self.mock_engine), timeout=10.0
+        )
+
+      program_ok, dispatched = self._dynamic_sampling_program(
+          [[1.0, 1.0], [0.0, 1.0], [0.0, 0.0], [1.0, 0.0]],
+          dataset=[f"prompt_{i}" for i in range(4)],
+          max_steps=2,
+          max_consecutive_filtered_groups=2,
+      )
+      await asyncio.wait_for(
+          program_ok.run_async(self.mock_engine), timeout=10.0
+      )
+      self.assertEqual(program_ok.step, 2)
+      self.assertEqual(
+          dispatched, ["prompt_0", "prompt_1", "prompt_2", "prompt_3"]
+      )
+
+    asyncio.run(_run())
+
+  def test_group_filters_rejected_outside_train_or_completion_order(self):
+    algo_cfg = dataclasses.replace(
+        self.algo_config, group_filters=("tied_rewards",)
+    )
+    reward_fn = lambda prompts, completions, **_: [1.0] * len(prompts)
+    with self.assertRaisesRegex(ValueError, "TRAJECTORY_COMPLETION"):
+      rl_program.StandardRLProgram(
+          dataset=["p0"],
+          algo_config=algo_cfg,
+          batch_config=self.batch_config,
+          reward_fns=[reward_fn],
+          group_order=rl_program.GroupOrder.PROMPT_ARRIVAL,
+      )
+    with self.assertRaisesRegex(ValueError, "Mode.TRAIN"):
+      rl_program.StandardRLProgram(
+          dataset=["p0"],
+          algo_config=algo_cfg,
+          batch_config=self.batch_config,
+          reward_fns=[reward_fn],
+          mode=rl_program.Mode.EVAL,
+      )
 
   def test_window_advances_a_whole_batch_when_a_group_goes_missing(self):
     async def _run():
@@ -8289,7 +8623,7 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
       self.mock_engine.resume_from_checkpoint = mock.AsyncMock(return_value=2)
       self.mock_engine.restored_checkpoint_metadata = {
           "policy_version": 2,
-          "committed_prompt_ids": ["prompt_0"],
+          "min_unsettled_prompt_idx": 1,
       }
       program.engine = self.mock_engine
 
@@ -8297,7 +8631,7 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
       self.assertEqual(program.step, 2)
       self.assertEqual(program.policy_version, 2)
       self.assertEqual(program.dispatch_window.next_batch, 2)
-      self.assertFalse(program.dispatch_window.uses_prompt_id_resume)
+      self.assertFalse(program.dispatch_window.has_resume_state)
 
       # Dispatch stage skips batches 0 and 1 (4 prompts: p0..p3) and starts at
       # batch 2 (p4, p5).
@@ -8340,8 +8674,7 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
       # --- Run 1 (max_steps=1, max_staleness=2, full_batch_size=2) ---
       # Dataset: prompt_0 .. prompt_5
       # prompt_0 and prompt_3 complete fast -> trained & committed in Step 0.
-      # prompt_1 fails (< 2 valid items) -> dropped at raw_q -> in
-      # skipped_prompt_ids.
+      # prompt_1 is stale -> dropped at raw_q -> marked settled in watermark.
       # prompt_2 is slow -> still in-flight when Step 0 finishes and saves
       # checkpoint.
       run1_poll_queue: asyncio.Queue[list[datatypes.TrajectoryItem]] = (
@@ -8361,17 +8694,21 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
         p = prompts[0]
         pid = p["prompt_id"]
         pv = -3 if pid == "prompt_1" else kwargs.get("policy_version", 0)
+        p_meta = dict(p.get("metadata") or {})
         batch = [
-            distributed_rl_engine._response_to_trajectory_item(
-                _create_rollout_response(
-                    f"req_{pid}_{g_idx}",
-                    pid,
-                    group_index=g_idx,
-                    policy_version=pv,
-                    reward=1.0,
+            dataclasses.replace(it, metadata={**it.metadata, **p_meta})
+            for it in (
+                distributed_rl_engine._response_to_trajectory_item(
+                    _create_rollout_response(
+                        f"req_{pid}_{g_idx}",
+                        pid,
+                        group_index=g_idx,
+                        policy_version=pv,
+                        reward=1.0,
+                    )
                 )
+                for g_idx in range(4)
             )
-            for g_idx in range(4)
         ]
 
         if pid in ("prompt_0", "prompt_1", "prompt_3"):
@@ -8425,10 +8762,8 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
       ckpt_step0 = saved_checkpoints[0]
       self.assertEqual(ckpt_step0["global_step"], 1)
       self.assertEqual(ckpt_step0["policy_version"], 1)
-      self.assertEqual(
-          ckpt_step0["committed_prompt_ids"], ["prompt_0", "prompt_3"]
-      )
-      self.assertEqual(ckpt_step0["skipped_prompt_ids"], ["prompt_1"])
+      self.assertEqual(ckpt_step0["min_unsettled_prompt_idx"], 2)
+      self.assertEqual(ckpt_step0["settled_offsets"], [1])
 
       # --- Run 2: Resume from ckpt_step0 with max_steps=2 ---
       run2_poll_queue: asyncio.Queue[list[datatypes.TrajectoryItem]] = (
@@ -8455,17 +8790,21 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
         pid = p["prompt_id"]
         run2_dispatched.append(pid)
         pv = kwargs.get("policy_version", 0)
+        p_meta = dict(p.get("metadata") or {})
         batch = [
-            distributed_rl_engine._response_to_trajectory_item(
-                _create_rollout_response(
-                    f"req_{pid}_{g_idx}",
-                    pid,
-                    group_index=g_idx,
-                    policy_version=pv,
-                    reward=1.0,
+            dataclasses.replace(it, metadata={**it.metadata, **p_meta})
+            for it in (
+                distributed_rl_engine._response_to_trajectory_item(
+                    _create_rollout_response(
+                        f"req_{pid}_{g_idx}",
+                        pid,
+                        group_index=g_idx,
+                        policy_version=pv,
+                        reward=1.0,
+                    )
                 )
+                for g_idx in range(4)
             )
-            for g_idx in range(4)
         ]
 
         async def _delayed_put(b, d):
@@ -8528,11 +8867,8 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
       self.assertEqual(run2_dispatched, ["prompt_2", "prompt_4", "prompt_5"])
       self.assertEqual(run2_consumed, ["prompt_4", "prompt_2"])
       self.assertLen(run2_ckpts, 1)
-      self.assertEqual(
-          run2_ckpts[0]["committed_prompt_ids"],
-          ["prompt_0", "prompt_2", "prompt_3", "prompt_4"],
-      )
-      self.assertEqual(run2_ckpts[0]["skipped_prompt_ids"], ["prompt_1"])
+      self.assertEqual(run2_ckpts[0]["min_unsettled_prompt_idx"], 5)
+      self.assertEqual(run2_ckpts[0]["settled_offsets"], [])
 
     asyncio.run(_run())
 

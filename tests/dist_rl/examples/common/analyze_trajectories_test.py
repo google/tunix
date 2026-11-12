@@ -347,6 +347,32 @@ class AnalyzeTrajectoriesTest(absltest.TestCase):
     with self.assertRaises(FileNotFoundError):
       analyze_trajectories.parse_orchestrator_log("/nonexistent/orchestrator.log")
 
+  def test_analyze_skips_filtered_rows(self):
+    rows = [
+        {
+            "global_step": "0",
+            "prompt_id": "p_stale",
+            "reward": "",
+            "filtered": "True",
+        },
+        {
+            "global_step": "0",
+            "prompt_id": "p_trained",
+            "reward": "1.0",
+            "filtered": "False",
+        },
+        {
+            "global_step": "0",
+            "prompt_id": "p_trained",
+            "reward": "0.0",
+            "filtered": "False",
+        },
+    ]
+    summary = analyze_trajectories.analyze_trajectories(rows)
+    self.assertEqual(len(summary["steps"]), 1)
+    self.assertEqual(len(summary["steps"][0]["groups"]), 1)
+    self.assertAlmostEqual(summary["steps"][0]["mean_reward"], 0.5)
+
 
 if __name__ == "__main__":
   absltest.main()

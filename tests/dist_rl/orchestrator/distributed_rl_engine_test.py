@@ -593,8 +593,8 @@ class DistributedRLEngineTest(absltest.TestCase):
           "step": 3,
           "global_step": 3,
           "policy_version": 5,
-          "committed_prompt_ids": ["prompt_0", "prompt_3"],
-          "skipped_prompt_ids": ["prompt_1"],
+          "min_unsettled_prompt_idx": 2,
+          "settled_offsets": [1],
       }
       self.mock_actor.restore_checkpoint.return_value = ckpt_meta
       coordinator = _FakeWeightSyncCoordinator(forced_version=5)

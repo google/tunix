@@ -47,6 +47,8 @@ from tunix.common import datatypes as common_datatypes
 from tunix.dist_rl.common import datatypes as dist_rl_datatypes
 from tunix.dist_rl.common import gcs_cache
 from tunix.dist_rl.distributed.deployment import yaml_generator
+from tunix.rl import advantages as _rl_advantages  # pylint: disable=unused-import
+from tunix.rl import function_registry
 
 LAUNCH_DIR = pathlib.Path(__file__).parent
 REPO_ROOT = LAUNCH_DIR.parents[3]
@@ -690,6 +692,92 @@ def _validate_local_settings(hp: cli_config.HyperParameters) -> None:
     )
 
 
+def _validate_group_filters(hp: cli_config.HyperParameters) -> None:
+  """Validates `agentic_grpo_config.{group_filters, max_consecutive_filtered_groups}`."""
+  grpo = hp.config_mapping("agentic_grpo_config")
+  filter_names = grpo["group_filters"]
+  if isinstance(filter_names, (str, bytes)) or not isinstance(
+      filter_names, Sequence
+  ):
+    raise TypeError(
+        "agentic_grpo_config.group_filters must be a list of filter names,"
+        f" got {filter_names!r}."
+    )
+  registered_filters = tuple(function_registry.list_group_filters())
+  for filter_name in filter_names:
+    _check_choice(
+        "agentic_grpo_config.group_filters",
+        filter_name,
+        registered_filters,
+    )
+  prompt_arrival = (
+      grpo["trajectory_group_order"]
+      == dist_rl_datatypes.GroupOrder.PROMPT_ARRIVAL.value
+  )
+  if filter_names and prompt_arrival:
+    raise ValueError(
+        "agentic_grpo_config.group_filters are only supported with"
+        " trajectory_group_order='trajectory_completion'."
+    )
+  if "tied_rewards" in filter_names:
+    if int(grpo["num_generations"]) < 2:
+      raise ValueError(
+          "agentic_grpo_config.group_filters=['tied_rewards'] requires"
+          f" num_generations >= 2, got {grpo['num_generations']}."
+      )
+    if grpo["advantage_estimator"] == "gae":
+      raise ValueError(
+          "agentic_grpo_config.group_filters=['tied_rewards'] requires a"
+          " group-relative advantage_estimator, not 'gae'."
+      )
+  limit = grpo["max_consecutive_filtered_groups"]
+  if limit is None:
+    return
+  if isinstance(limit, bool) or not isinstance(limit, int):
+    raise TypeError(
+        "agentic_grpo_config.max_consecutive_filtered_groups must be an int"
+        f" or null, got {limit!r}."
+    )
+  if limit <= 0:
+    raise ValueError(
+        "agentic_grpo_config.max_consecutive_filtered_groups must be"
+        f" positive, got {limit}."
+    )
+
+
+def _validate_max_in_flight_groups(
+    hp: cli_config.HyperParameters, *, batch_size: int
+) -> None:
+  """Validates `dist_training_config.max_in_flight_groups`."""
+  max_in_flight = hp.config_mapping("dist_training_config")[
+      "max_in_flight_groups"
+  ]
+  if max_in_flight is None:
+    return
+  if isinstance(max_in_flight, bool) or not isinstance(max_in_flight, int):
+    raise TypeError(
+        "dist_training_config.max_in_flight_groups must be an int or null,"
+        f" got {max_in_flight!r}."
+    )
+  if max_in_flight < batch_size:
+    raise ValueError(
+        "dist_training_config.max_in_flight_groups must be at least"
+        f" batch_size ({batch_size}), got {max_in_flight}."
+    )
+  grpo = hp.config_mapping("agentic_grpo_config")
+  staleness_window = (int(grpo["off_policy_steps"]) + 1) * batch_size
+  if (
+      grpo["trajectory_group_order"]
+      == dist_rl_datatypes.GroupOrder.PROMPT_ARRIVAL.value
+      and max_in_flight > staleness_window
+  ):
+    raise ValueError(
+        "dist_training_config.max_in_flight_groups cannot exceed"
+        f" (off_policy_steps + 1) * batch_size ({staleness_window}) with"
+        f" trajectory_group_order='prompt_arrival', got {max_in_flight}."
+    )
+
+
 def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   """Validates cross-field invariants across trainer and rollout configs."""
   # TODO(noghabi): Check which of these checks can be consolidated with the
@@ -784,6 +872,8 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
           "agentic_grpo_config.max_version_span is only supported with"
           " trajectory_group_order='trajectory_completion'."
       )
+  _validate_group_filters(hp)
+  _validate_max_in_flight_groups(hp, batch_size=batch_size)
   _check_choice(
       "weight_sync_config.mode",
       hp.config_mapping("weight_sync_config")["mode"],

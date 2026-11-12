@@ -960,9 +960,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
 
     self._restored_checkpoint_metadata = dict(metadata)
     recorded_version = metadata.get("policy_version")
-    has_off_policy_state = (
-        "committed_prompt_ids" in metadata or "skipped_prompt_ids" in metadata
-    )
+    has_off_policy_state = "min_unsettled_prompt_idx" in metadata
     if has_off_policy_state and recorded_version is not None:
       restored_policy_version = int(recorded_version)
     else:

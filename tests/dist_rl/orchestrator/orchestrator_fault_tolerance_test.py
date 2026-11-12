@@ -821,8 +821,10 @@ class OrchestratorFaultToleranceTest(absltest.TestCase):
       future.result(timeout=60.0)
 
       self.assertEqual(harness.fake_trainer.step_count, 3)
-      self.assertIn("prompt_0", program.dispatch_window.skipped_prompt_ids)
-      self.assertNotIn("prompt_0", program.dispatch_window.committed_prompt_ids)
+      self.assertGreaterEqual(
+          program.dispatch_window.min_unsettled_prompt_idx, 4
+      )
+      self.assertEqual(program.dispatch_window._filtered_groups, 1)
 
   def test_bulk_transport_large_payload_rollout_roundtrip(self) -> None:
     with fake_cluster.FakeClusterHarness(

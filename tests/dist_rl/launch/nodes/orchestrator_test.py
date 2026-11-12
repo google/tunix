@@ -1051,6 +1051,28 @@ class ProgramTest(absltest.TestCase):
     self.assertEqual(
         program_span.group_order, rl_program.GroupOrder.TRAJECTORY_COMPLETION
     )
+    self.assertIsNone(program_span.max_in_flight_groups)
+    self.assertEqual(program_span.algo_config.group_filters, ())
+    self.assertIsNone(program_span.algo_config.max_consecutive_filtered_groups)
+
+    hp_dynamic = self._program_config(
+        "batch_size=4",
+        "rl_training_config.mini_batch_size=2",
+        "agentic_grpo_config.off_policy_steps=1",
+        "dist_training_config.max_in_flight_groups=6",
+        "agentic_grpo_config.group_filters=[tied_rewards]",
+        "agentic_grpo_config.max_consecutive_filtered_groups=64",
+    )
+    program_dynamic = self._build_program(hp_dynamic, reward_fns=[])
+    self.addCleanup(program_dynamic.close)
+    self.assertEqual(program_dynamic.max_in_flight_groups, 6)
+    self.assertEqual(program_dynamic.dispatch_window.window_capacity, 6)
+    self.assertEqual(
+        program_dynamic.algo_config.group_filters, ("tied_rewards",)
+    )
+    self.assertEqual(
+        program_dynamic.algo_config.max_consecutive_filtered_groups, 64
+    )
 
   def test_trajectory_logs_follow_the_metrics_logging_options(self):
     artifact_root = self.create_tempdir().full_path

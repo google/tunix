@@ -362,6 +362,47 @@ class AlgorithmConfigTest(parameterized.TestCase):
     with self.assertRaisesRegex(ValueError, "value_loss_fn must be one of"):
       algorithm_config.PPOConfig(value_loss_fn="bad_value_loss")
 
+  def test_group_filters_validation(self):
+    cfg = algorithm_config.GRPOConfig(
+        group_filters=["tied_rewards"],
+        max_consecutive_filtered_groups=32,
+    )
+    self.assertEqual(cfg.group_filters, ("tied_rewards",))
+    self.assertEqual(cfg.max_consecutive_filtered_groups, 32)
+
+    custom = lambda rewards, valid_mask: False
+    cfg_fn = algorithm_config.GRPOConfig(group_filters=[custom])
+    self.assertEqual(cfg_fn.group_filters, (custom,))
+
+    with self.assertRaisesRegex(TypeError, "sequence"):
+      algorithm_config.GRPOConfig(group_filters="tied_rewards")  # pytype: disable=wrong-arg-types
+    with self.assertRaisesRegex(TypeError, "str or callable"):
+      algorithm_config.GRPOConfig(group_filters=[123])  # pytype: disable=wrong-arg-types
+    with self.assertRaisesRegex(ValueError, "not registered"):
+      algorithm_config.GRPOConfig(group_filters=["unknown_filter"])
+    with self.assertRaisesRegex(ValueError, "not 'gae'"):
+      algorithm_config.GRPOConfig(
+          advantage_estimator="gae", group_filters=["tied_rewards"]
+      )
+    with self.assertRaisesRegex(ValueError, "num_generations >= 2"):
+      algorithm_config.AlgorithmConfig(
+          num_generations=1, group_filters=["tied_rewards"]
+      )
+    with self.assertRaisesRegex(TypeError, "int or None"):
+      algorithm_config.GRPOConfig(max_consecutive_filtered_groups=True)  # pytype: disable=wrong-arg-types
+    with self.assertRaisesRegex(ValueError, "positive"):
+      algorithm_config.GRPOConfig(max_consecutive_filtered_groups=0)
+
+  def test_group_filters_validates_entries_after_tied_rewards(self):
+    with self.assertRaisesRegex(ValueError, "not registered"):
+      algorithm_config.GRPOConfig(
+          group_filters=["tied_rewards", "unknown_after_tied"]
+      )
+    with self.assertRaisesRegex(TypeError, "str or callable"):
+      algorithm_config.GRPOConfig(
+          group_filters=["tied_rewards", 999]  # pytype: disable=wrong-arg-types
+      )
+
 
 if __name__ == "__main__":
   absltest.main()
