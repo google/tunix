@@ -981,25 +981,23 @@ def teardown_global_fleet(reap_run: bool = False) -> None:
   try:
     from agent_sandbox_rl import reap  # pyrefly: ignore[missing-import]
 
-    run_id = getattr(fleet, "run_id", None)
-    if run_id:
-      for c in getattr(fleet, "registry", []):
-        c_ns = (
-            getattr(c, "namespace", None)
-            or os.getenv("SANDBOX_NAMESPACE")
-            or os.getenv("NAMESPACE", "priority-dev")
-        )
-        logging.info(
-            "[SandboxFleet] Reaping resources for run_id=%s in namespace=%s",
-            run_id,
-            c_ns,
-        )
-        reap(
-            run_id=run_id,
-            in_cluster=getattr(c, "in_cluster", True),
-            namespace=c_ns,
-            delete_pods=True,
-        )
+    # Each registry entry is an agent_sandbox_rl Cluster. Its connection
+    # settings live on `config`, so the reaper reaches the same cluster and
+    # namespace the fleet used, in or out of the cluster.
+    for c in fleet.registry:
+      logging.info(
+          "[SandboxFleet] Reaping resources for run_id=%s in namespace=%s",
+          fleet.run_id,
+          c.namespace,
+      )
+      reap(
+          run_id=fleet.run_id,
+          context=c.config.context,
+          kubeconfig=c.config.kubeconfig,
+          in_cluster=c.config.in_cluster,
+          namespace=c.namespace,
+          delete_pods=True,
+      )
   except Exception:  # pylint: disable=broad-exception-caught
     logging.exception("[SandboxFleet] Reaping the sandbox run failed")
 

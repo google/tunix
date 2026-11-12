@@ -643,7 +643,9 @@ class SandboxUtilsTest(absltest.TestCase):
     mock_fleet.run_id = "test-run-1234"
     mock_cluster = mock.MagicMock()
     mock_cluster.namespace = "test-ns"
-    mock_cluster.in_cluster = True
+    mock_cluster.config.context = "test-context"
+    mock_cluster.config.kubeconfig = None
+    mock_cluster.config.in_cluster = False
     mock_fleet.registry = [mock_cluster]
     return mock_fleet
 
@@ -667,9 +669,12 @@ class SandboxUtilsTest(absltest.TestCase):
         sandbox_utils.teardown_global_fleet(reap_run=True)
         self.assertIsNone(sandbox_utils._GLOBAL_FLEET)
         mock_fleet.teardown.assert_called_once()
+        # Connection settings come from the cluster's config, not a default.
         mock_as_rl.reap.assert_called_once_with(
             run_id="test-run-1234",
-            in_cluster=True,
+            context="test-context",
+            kubeconfig=None,
+            in_cluster=False,
             namespace="test-ns",
             delete_pods=True,
         )
