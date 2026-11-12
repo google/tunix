@@ -12,7 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Entry point for the Trajectory Explorer CLI."""
+"""Entry point for the Trajectory Explorer CLI.
+
+`launch_cli()` runs the subcommands (`commands/`) with the schema diagnostics
+its caller passes; both depend on no particular trajectory schema. Run as a
+program (`trajectory-explore`), this module passes `TunixDiagnostics`, the only
+Tunix-specific part of the CLI. The statistics come from the schema-agnostic
+`diagnostics` library (`stats`, `schema_diagnostics`, `formatting`), which has
+no CLI dependencies.
+"""
 
 from collections.abc import Sequence
 import dataclasses

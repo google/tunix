@@ -28,6 +28,8 @@ from tunix.dist_rl.trajectory.explorer.diagnostics import tunix_diagnostics
 
 _AGENT = trajectory_lib.Agent(name="a", version="1.0")
 _TUNIX_DIAGNOSTICS = tunix_diagnostics.TunixDiagnostics()
+# The `RunStats.df` names of the Tunix columns, which the Tunix diagnostics own.
+_TUNIX_DF_COLUMNS = [f"tunix__{c}" for c in _TUNIX_DIAGNOSTICS.COLUMN_DTYPES]
 
 
 def _trajectory(
@@ -350,6 +352,22 @@ class OutcomeTest(parameterized.TestCase):
     )
 
 
+class OutcomeCountsTest(absltest.TestCase):
+
+  def test_total_and_str(self) -> None:
+    counts = stats_lib.OutcomeCounts(solved=3, unsolved=1, unscored=0)
+
+    self.assertEqual(counts.total, 4)
+    self.assertEqual(
+        str(counts),
+        "3 solved (r>0), 1 unsolved (r<=0), 0 unscored of 4 SUCCEEDED",
+    )
+    self.assertEqual(
+        counts.to_json_dict(),
+        {"solved": 3, "unsolved": 1, "unscored": 0, "total": 4},
+    )
+
+
 class RunStatsTest(parameterized.TestCase):
 
   def test_df_has_one_typed_row_per_trajectory(self) -> None:
@@ -489,6 +507,7 @@ class RunStatsTest(parameterized.TestCase):
     self.assertEqual(run.num_with_reward, 0)
     self.assertEmpty(run.status_counts)
     self.assertEqual(run.num_with_status, 0)
+    self.assertIsNone(run.outcome)
     self.assertEmpty(run.tool_counts)
 
   def test_status_counts_tally_only_reporting_trajectories(self) -> None:
@@ -512,6 +531,36 @@ class RunStatsTest(parameterized.TestCase):
     self.assertEqual(
         list(run.to_json_dict()["status_counts"]), ["SUCCEEDED", "TIMEOUT"]
     )
+
+  def test_outcome_splits_succeeded_trajectories_by_reward(self) -> None:
+    run = stats_lib.RunStats.from_trajectories([
+        _tunix_trajectory(status="SUCCEEDED", total_reward=1.0),
+        _tunix_trajectory(status=" succeeded", total_reward=0.25),
+        _tunix_trajectory(status="SUCCEEDED", total_reward=0.0),
+        _tunix_trajectory(status="SUCCEEDED", total_reward=-1.0),
+        _tunix_trajectory(status="SUCCEEDED"),
+        _tunix_trajectory(status="SUCCEEDED", total_reward=float("nan")),
+        # Other statuses are not counted, whatever their reward.
+        _tunix_trajectory(status="MAX_STEPS_REACHED", total_reward=1.0),
+        _tunix_trajectory(total_reward=1.0),
+    ])
+
+    self.assertEqual(
+        run.outcome, stats_lib.OutcomeCounts(solved=2, unsolved=2, unscored=2)
+    )
+    self.assertEqual(
+        run.to_json_dict()["outcome"],
+        {"solved": 2, "unsolved": 2, "unscored": 2, "total": 6},
+    )
+
+  def test_outcome_is_none_without_a_succeeded_trajectory(self) -> None:
+    run = stats_lib.RunStats.from_trajectories([
+        _tunix_trajectory(status="FAILED", total_reward=0.0),
+        _tunix_trajectory(total_reward=1.0),
+    ])
+
+    self.assertIsNone(run.outcome)
+    self.assertIsNone(run.to_json_dict()["outcome"])
 
   def test_tool_counts_are_summed_across_the_run(self) -> None:
     def with_tools(*names: str) -> trajectory_lib.Trajectory:
@@ -574,6 +623,7 @@ class RunStatsTest(parameterized.TestCase):
             "num_with_tokens": 1,
             "status_counts": {"SUCCEEDED": 1},
             "num_with_status": 1,
+            "outcome": {"solved": 1, "unsolved": 0, "unscored": 0, "total": 1},
             "mean_reward": 1.0,
             "num_with_reward": 1,
             "tool_counts": {},
@@ -689,14 +739,14 @@ class SchemaDiagnosticsTest(parameterized.TestCase):
   def test_trajectory_stats_carry_the_values_of_active_diagnostics(
       self,
   ) -> None:
+    trajectory = _tunix_trajectory(masked_out=True)
     stats = stats_lib.TrajectoryStats.from_trajectory(
-        _tunix_trajectory(masked_out=True), diagnostics=(_TUNIX_DIAGNOSTICS,)
+        trajectory, diagnostics=(_TUNIX_DIAGNOSTICS,)
     )
 
-    self.assertEqual(stats.schema_stats, {"tunix": {"masked_out": True}})
-    self.assertEqual(
-        stats.to_json_dict()["schema_stats"], {"tunix": {"masked_out": True}}
-    )
+    values = _TUNIX_DIAGNOSTICS.extract(trajectory)
+    self.assertEqual(stats.schema_stats, {"tunix": values})
+    self.assertEqual(stats.to_json_dict()["schema_stats"], {"tunix": values})
     self.assertIs(stats.to_row()["tunix__masked_out"], True)
 
   def test_diagnostics_skip_trajectories_of_other_schemas(self) -> None:
@@ -720,8 +770,7 @@ class SchemaDiagnosticsTest(parameterized.TestCase):
     )
 
     self.assertEqual(
-        run.df.columns.tolist(),
-        [*stats_lib.COLUMN_DTYPES, "tunix__masked_out"],
+        run.df.columns.tolist(), [*stats_lib.COLUMN_DTYPES, *_TUNIX_DF_COLUMNS]
     )
     masked_out = run.df["tunix__masked_out"]
     self.assertEqual(str(masked_out.dtype), "boolean")
@@ -730,7 +779,8 @@ class SchemaDiagnosticsTest(parameterized.TestCase):
     self.assertEqual(masked_out.isna().tolist(), [False, False, True, True])
     self.assertEqual(masked_out.dropna().tolist(), [True, False])
     self.assertEqual(
-        run.columns_of(_TUNIX_DIAGNOSTICS).columns.tolist(), ["masked_out"]
+        run.columns_of(_TUNIX_DIAGNOSTICS).columns.tolist(),
+        list(_TUNIX_DIAGNOSTICS.COLUMN_DTYPES),
     )
     self.assertEqual(
         run.schema_stats,
@@ -763,7 +813,7 @@ class SchemaDiagnosticsTest(parameterized.TestCase):
     self.assertEqual(
         run.df.columns.tolist()[len(stats_lib.COLUMN_DTYPES) :],
         [
-            "tunix__masked_out",
+            *_TUNIX_DF_COLUMNS,
             "acme_eval__verdict",
             "acme_eval__num_retries",
             "acme_eval__latency_ms",
