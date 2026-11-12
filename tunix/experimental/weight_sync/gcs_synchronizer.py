@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Orbax/GCS checkpoint-staged worker weight synchronizer."""
+"""Safetensors/Orbax checkpoint-staged worker weight synchronizer."""
 
 from __future__ import annotations
 
@@ -20,6 +20,8 @@ import asyncio
 from collections.abc import Callable, Mapping, Sequence
 from concurrent import futures
 import dataclasses
+import functools
+import json
 import os
 import time
 from typing import Any, Protocol, TypeVar, runtime_checkable
@@ -34,12 +36,30 @@ from orbax import checkpoint as ocp
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.weight_sync import weight_sync
 from tunix.dist_rl.weight_sync import weight_utils
+from tunix.models import hf_mapping
+from tunix.models import safetensors_loader
+from tunix.models import safetensors_saver
+from tunix.utils import sharding_utils
 
 _T = TypeVar("_T")
+_VALID_CHECKPOINT_FORMATS = ("safetensors", "orbax")
+_ORBAX_MARKERS = (
+    "_CHECKPOINT_METADATA",
+    "_METADATA",
+    "manifest.ocdbt",
+    "default",
+)
+_HOST0_ERROR_TYPES: Mapping[str, type[Exception]] = {
+    "FileNotFoundError": FileNotFoundError,
+    "KeyError": KeyError,
+    "ValueError": ValueError,
+    "OSError": OSError,
+    "RuntimeError": RuntimeError,
+}
 
 
 def run_blocking(fn: Callable[[], _T]) -> _T:
-  """Runs blocking Orbax I/O off any active thread-local asyncio event loop."""
+  """Runs blocking checkpoint I/O off any active thread-local event loop."""
   try:
     asyncio.get_running_loop()
     has_running_loop = True
@@ -149,27 +169,179 @@ def _build_restore_specs(
   return item, restore_args
 
 
+def _broadcast_host0_status(
+    fn: Callable[[], tuple[Any, Any]],
+) -> tuple[Any, Any]:
+  """Runs `fn()` on host 0, broadcasting status/errors on multi-host JAX."""
+  if jax.process_count() <= 1:
+    return fn()
+  local_val: Any = None
+  status: dict[str, Any] = {"ok": True}
+  if jax.process_index() == 0:
+    try:
+      local_val, payload = fn()
+      status["payload"] = payload
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+      msg = (
+          str(exc.args[0])
+          if isinstance(exc, KeyError) and exc.args
+          else str(exc)
+      )
+      err_type = type(exc).__name__
+      if err_type not in _HOST0_ERROR_TYPES and isinstance(exc, OSError):
+        err_type = "OSError"
+      elif err_type not in _HOST0_ERROR_TYPES and isinstance(exc, ValueError):
+        err_type = "ValueError"
+      status = {"ok": False, "error_type": err_type, "error": msg}
+  synced = sharding_utils.broadcast_host0_json(status)
+  if not synced["ok"]:
+    err_cls = _HOST0_ERROR_TYPES.get(synced.get("error_type", ""), RuntimeError)
+    raise err_cls(synced["error"])
+  return local_val, synced.get("payload")
+
+
+def resolve_safetensors_files(ckpt_path: epath.Path) -> list[epath.Path] | None:
+  """Returns validated safetensors shards, None for Orbax, or raises."""
+  if any(tag in ckpt_path.name for tag in (".tmp", ".orbax-checkpoint-tmp")):
+    raise FileNotFoundError(
+        f"Checkpoint directory is not finalized: {ckpt_path}."
+    )
+  index_path = ckpt_path / "model.safetensors.index.json"
+  if not index_path.exists():
+    single_path = ckpt_path / "model.safetensors"
+    if single_path.exists():
+      return [single_path]
+    if any((ckpt_path / marker).exists() for marker in _ORBAX_MARKERS):
+      return None
+    raise FileNotFoundError(
+        f"No finalized safetensors or Orbax checkpoint found in {ckpt_path}."
+    )
+  raw_index = json.loads(index_path.read_text())
+  if not isinstance(raw_index, Mapping) or not isinstance(
+      raw_index.get("weight_map"), Mapping
+  ):
+    raise ValueError(
+        f"Safetensors index {index_path} must contain a 'weight_map' mapping."
+    )
+  shard_names = list(dict.fromkeys(raw_index["weight_map"].values()))
+  if not shard_names:
+    raise FileNotFoundError(f"No safetensors shards listed in {index_path}.")
+  invalid = [
+      name
+      for name in shard_names
+      if not isinstance(name, str)
+      or os.path.basename(name) != name
+      or "\\" in name
+      or name in ("", ".", "..")
+  ]
+  if invalid:
+    raise ValueError(
+        f"Invalid shard filename {invalid[0]!r} in {index_path}; must be a"
+        " single relative filename within the checkpoint directory."
+    )
+  return [ckpt_path / name for name in shard_names]
+
+
+def _load_safetensors_host0(
+    ckpt_path: epath.Path,
+    keys: Sequence[str],
+    expected_shapes: Sequence[tuple[int, ...]],
+    from_hf_manifest: Mapping[str, Any] | None,
+    *,
+    checksum: bool,
+) -> tuple[dict[str, np.ndarray] | None, dict[str, Any]]:
+  """Probes format and loads/validates safetensors on host 0."""
+  files = resolve_safetensors_files(ckpt_path)
+  if files is None:
+    return None, {"is_safetensors": False, "wire_sums": None}
+  needed_keys = frozenset(keys)
+  if from_hf_manifest is not None:
+    manifest_targets = frozenset(
+        k
+        for rule in from_hf_manifest["rules"]
+        for k in rule["target_keys"]
+    ) | frozenset(dst for _, dst in from_hf_manifest["tied_keys"])
+    tied_src = frozenset(src for src, _ in from_hf_manifest["tied_keys"])
+    needed_keys = (
+        ((needed_keys | tied_src) - manifest_targets)
+        | hf_mapping.active_source_keys(from_hf_manifest)
+    )
+  host_tensors: dict[str, np.ndarray] = {}
+  seen_keys: set[str] = set()
+  for shard_file in files:
+    skipped: list[str] = []
+    # pylint: disable=protected-access
+    host_tensors.update(
+        safetensors_loader._load_file_tensors(
+            shard_file, needed_keys, None, skipped, seen_keys
+        )
+    )
+    # pylint: enable=protected-access
+  wire_sums = (
+      weight_utils.compute_checksums(
+          list(host_tensors),
+          list(host_tensors.values()),
+          sample=None,
+          canonical_keys=True,
+      )
+      if checksum
+      else None
+  )
+  if from_hf_manifest is not None:
+    host_tensors = hf_mapping.apply_host_manifest(
+        from_hf_manifest, host_tensors, drop_tied_targets=False
+    )
+  missing = [k for k in keys if k not in host_tensors]
+  if missing:
+    raise KeyError(
+        f"Missing {len(missing)} weight tensor(s) in {ckpt_path}:"
+        f" {missing[:5]!r}"
+    )
+  for key, exp_shape in zip(keys, expected_shapes, strict=True):
+    src_shape = host_tensors[key].shape
+    if src_shape != exp_shape:
+      raise ValueError(
+          f"Shape mismatch for {key!r}: checkpoint {src_shape} vs bound"
+          f" {exp_shape}."
+      )
+  return host_tensors, {"is_safetensors": True, "wire_sums": wire_sums}
+
+
+def _broadcast_and_place(
+    keys: Sequence[str],
+    arrays: Sequence[Any],
+    host_tensors: dict[str, np.ndarray] | None,
+) -> dict[str, jax.Array]:
+  """Broadcasts validated host-0 tensors across hosts and shards onto target."""
+  is_host0 = jax.process_index() == 0
+  multihost = jax.process_count() > 1
+  local_dev0 = jax.local_devices()[0]
+  restored: dict[str, jax.Array] = {}
+  for key, arr in zip(keys, arrays, strict=True):
+    exp_shape = tuple(int(d) for d in arr.shape)
+    exp_dtype = np.dtype(arr.dtype)
+    if is_host0:
+      assert host_tensors is not None
+      host_buf = np.asarray(host_tensors.pop(key), dtype=exp_dtype)
+    else:
+      host_buf = np.empty(exp_shape, dtype=exp_dtype)
+    if multihost:
+      host_buf = multihost_utils.broadcast_one_to_all(
+          host_buf, is_source=is_host0
+      )
+    target = arr.sharding if isinstance(arr, jax.Array) else local_dev0
+    restored[key] = sharding_utils.place_array_on_target(host_buf, target)
+  return restored
+
+
 @dataclasses.dataclass(frozen=True)
 class GCSSynchronizerConfig:
-  """Configuration for Orbax/GCS checkpoint-staged weight synchronization.
-
-  Attributes:
-    staging_dir: Base directory or `gs://` URI where the source worker writes
-      per-round `step_<policy_version>_<req_id>` checkpoints. Defaults to
-      `WEIGHT_SYNC_GCS_DIR` when unset; optional on read-only destinations.
-    max_to_keep: Maximum number of staged source checkpoints retained after
-      `release()`. Must be non-negative.
-    use_ocdbt: Whether Orbax writes OCDBT key-value tables.
-    use_zarr3: Whether Orbax writes Zarr v3 chunks.
-    use_compression: Whether Orbax enables chunk compression.
-    save_concurrent_gb: Max concurrent GB written per source host.
-    restore_concurrent_gb: Max concurrent GB restored per destination host.
-    cleanup_on_start: When True on a source worker with `staging_dir` set,
-      removes pre-existing `step_*` subdirectories at construction time.
-  """
+  """Configuration for Safetensors/Orbax checkpoint-staged weight sync."""
 
   staging_dir: str | None = None
   max_to_keep: int = 1
+  checkpoint_format: str = "safetensors"
+  max_shard_bytes: int = safetensors_saver.DEFAULT_MAX_SHARD_BYTES
   use_ocdbt: bool = True
   use_zarr3: bool = False
   use_compression: bool = True
@@ -178,11 +350,7 @@ class GCSSynchronizerConfig:
   cleanup_on_start: bool = False
 
   def __post_init__(self) -> None:
-    if self.staging_dir is None:
-      env_dir = os.environ.get("WEIGHT_SYNC_GCS_DIR", "").strip()
-      if env_dir:
-        object.__setattr__(self, "staging_dir", env_dir)
-    elif not self.staging_dir.strip():
+    if self.staging_dir is not None and not self.staging_dir.strip():
       raise ValueError(
           "GCSSynchronizerConfig.staging_dir must not be empty when set."
       )
@@ -191,22 +359,21 @@ class GCSSynchronizerConfig:
           "GCSSynchronizerConfig.max_to_keep must be a non-negative int, got"
           f" {self.max_to_keep!r}."
       )
-    if (
-        isinstance(self.save_concurrent_gb, bool)
-        or self.save_concurrent_gb <= 0
-    ):
+    if self.checkpoint_format not in _VALID_CHECKPOINT_FORMATS:
       raise ValueError(
-          "GCSSynchronizerConfig.save_concurrent_gb must be a positive int, got"
-          f" {self.save_concurrent_gb!r}."
+          "GCSSynchronizerConfig.checkpoint_format must be 'safetensors' or"
+          f" 'orbax', got {self.checkpoint_format!r}."
       )
-    if (
-        isinstance(self.restore_concurrent_gb, bool)
-        or self.restore_concurrent_gb <= 0
+    for field_name, value in (
+        ("max_shard_bytes", self.max_shard_bytes),
+        ("save_concurrent_gb", self.save_concurrent_gb),
+        ("restore_concurrent_gb", self.restore_concurrent_gb),
     ):
-      raise ValueError(
-          "GCSSynchronizerConfig.restore_concurrent_gb must be a positive int,"
-          f" got {self.restore_concurrent_gb!r}."
-      )
+      if isinstance(value, bool) or value <= 0:
+        raise ValueError(
+            f"GCSSynchronizerConfig.{field_name} must be a positive int, got"
+            f" {value!r}."
+        )
     if self.cleanup_on_start and self.staging_dir is None:
       raise ValueError(
           "GCSSynchronizerConfig.cleanup_on_start=True requires staging_dir."
@@ -214,7 +381,12 @@ class GCSSynchronizerConfig:
 
 
 class GCSSynchronizer:
-  """Worker-side weight synchronizer staging weights via Orbax checkpoints."""
+  """Worker-side weight synchronizer staging weights via Safetensors or Orbax.
+
+  `verify_weights` checks transport integrity in the wire namespace: with a
+  manifest, both peers checksum exactly the safetensors tensors written/read;
+  manifest transform correctness is covered by the wire preflight and tests.
+  """
 
   def __init__(
       self,
@@ -224,8 +396,10 @@ class GCSSynchronizer:
       worker_index: int | None = None,
       data_replica_idx: int = 0,
       verify_weights: bool | None = None,
+      to_hf_manifest: hf_mapping.RuleSpec | None = None,
+      from_hf_manifest: hf_mapping.RuleSpec | None = None,
   ) -> None:
-    if not job_name or not job_name.strip():
+    if not job_name.strip():
       raise ValueError("GCSSynchronizer job_name must not be empty.")
     resolved_worker_index = (
         jax.process_index() if worker_index is None else worker_index
@@ -241,10 +415,19 @@ class GCSSynchronizer:
     self.config: GCSSynchronizerConfig = (
         config if config is not None else GCSSynchronizerConfig()
     )
+    env_verify = os.environ.get("VERIFY_WEIGHTS", "").strip().lower() == "true"
     self._verify_weights: bool = (
-        os.environ.get("VERIFY_WEIGHTS", "").strip().lower() == "true"
-        if verify_weights is None
-        else bool(verify_weights)
+        env_verify if verify_weights is None else bool(verify_weights)
+    )
+    self._to_hf_manifest = (
+        hf_mapping.parse_manifest(to_hf_manifest)
+        if to_hf_manifest is not None
+        else None
+    )
+    self._from_hf_manifest = (
+        hf_mapping.parse_manifest(from_hf_manifest)
+        if from_hf_manifest is not None
+        else None
     )
     self.names: list[str] = []
     self.arrays: list[Any] = []
@@ -258,20 +441,19 @@ class GCSSynchronizer:
     self._d2h_count: int = 0
     self._h2d_count: int = 0
     self._prune_executor: futures.ThreadPoolExecutor | None = None
-
-    if not self.config.cleanup_on_start or self.config.staging_dir is None:
+    if not self.config.cleanup_on_start:
       return
-    if jax.process_index() == 0:
-      staging_root = epath.Path(self.config.staging_dir)
-      step_dirs = (
-          [c for c in staging_root.iterdir() if c.name.startswith("step_")]
-          if staging_root.exists()
-          else ()
-      )
-      for child in step_dirs:
-        child.rmtree(missing_ok=True)
-    if jax.process_count() > 1:
-      multihost_utils.sync_global_devices("gcs_weight_sync:cleanup_on_start")
+    assert self.config.staging_dir is not None
+    staging_root = epath.Path(self.config.staging_dir)
+
+    def _cleanup() -> tuple[None, None]:
+      if not staging_root.exists():
+        return None, None
+      for child in staging_root.glob("step_*"):
+        safetensors_saver.remove_tree(child)
+      return None, None
+
+    _broadcast_host0_status(_cleanup)
 
   @property
   def bound(self) -> bool:
@@ -338,29 +520,55 @@ class GCSSynchronizer:
     step_name = _resolve_step_dir_name(sync_request)
     ckpt_path = epath.Path(self.config.staging_dir) / step_name
     ckpt_uri = str(ckpt_path)
+
+    t0 = time.perf_counter()
+    wire_checksums: dict[str, float | int] | None = None
     flat_tree = {
         weight_utils.param_key(name): arr
         for name, arr in zip(self.names, self.arrays, strict=True)
     }
+    if self.config.checkpoint_format == "orbax":
 
-    t0 = time.perf_counter()
+      def _save_orbax() -> None:
+        with self._checkpointer() as checkpointer:
+          checkpointer.save(
+              ckpt_path,
+              args=ocp.args.PyTreeSave(item=flat_tree),
+              force=True,
+          )
 
-    def _save() -> None:
-      with self._checkpointer() as checkpointer:
-        checkpointer.save(
-            ckpt_path,
-            args=ocp.args.PyTreeSave(item=flat_tree),
-            force=True,
-        )
+      run_blocking(_save_orbax)
+    else:
+      checksum = self._verify_weights and self._to_hf_manifest is not None
+      checksum_fn = (
+          lambda tensors: weight_utils.compute_checksums(
+              list(tensors),
+              list(tensors.values()),
+              sample=None,
+              canonical_keys=True,
+          )
+      )
+      wire_checksums = run_blocking(
+          functools.partial(
+              safetensors_saver.save_safetensors,
+              flat_tree,
+              ckpt_path,
+              to_hf_manifest=self._to_hf_manifest,
+              max_shard_bytes=self.config.max_shard_bytes,
+              checksum_fn=checksum_fn if checksum else None,
+          )
+      ).checksums
 
-    run_blocking(_save)
     self._last_d2h_secs = time.perf_counter() - t0
     self._d2h_count += 1
     self._current_artifact_uri = ckpt_uri
     if ckpt_uri in self._staged_checkpoints:
       self._staged_checkpoints.remove(ckpt_uri)
     self._staged_checkpoints.append(ckpt_uri)
-    if self._verify_weights:
+    if wire_checksums is not None:
+      self._current_checksums = wire_checksums
+    elif self._verify_weights:
+      # Identity mode: the bound names are the wire names.
       self._current_checksums = weight_utils.compute_checksums(
           self.names, self.arrays, sample=None, canonical_keys=True
       )
@@ -384,41 +592,67 @@ class GCSSynchronizer:
     """Restores checkpoint into staged device buffers and verifies checksums."""
     if not self._bound:
       raise RuntimeError(f"{self.job_name}: bind() must run before h2d().")
-    if checkpoint_path is not None:
-      if not checkpoint_path.strip():
-        raise ValueError("checkpoint_path must not be empty when provided.")
-      resolved_uri = checkpoint_path
-      resolved_checksums = source_checksums
-    else:
-      resolved_uri, extracted_checksums = extract_source_artifact(sync_request)
-      resolved_checksums = (
-          source_checksums
-          if source_checksums is not None
-          else extracted_checksums
-      )
+    if checkpoint_path is not None and not checkpoint_path.strip():
+      raise ValueError("checkpoint_path must not be empty when provided.")
+    resolved_uri, extracted_checksums = (
+        (checkpoint_path, None)
+        if checkpoint_path is not None
+        else extract_source_artifact(sync_request)
+    )
+    resolved_checksums = (
+        source_checksums
+        if source_checksums is not None
+        else extracted_checksums
+    )
 
     self.abort()
-    item, restore_args = _build_restore_specs(self.names, self.arrays)
+    ckpt_path = epath.Path(resolved_uri)
+    verify = self._verify_weights and resolved_checksums is not None
+    keys = [weight_utils.param_key(name) for name in self.names]
+    expected_shapes = [tuple(int(d) for d in arr.shape) for arr in self.arrays]
     t0 = time.perf_counter()
 
-    def _restore() -> dict[str, Any]:
-      with self._checkpointer() as checkpointer:
-        return checkpointer.restore(
-            epath.Path(resolved_uri),
-            args=ocp.args.PyTreeRestore(item=item, restore_args=restore_args),
+    host_tensors, meta = run_blocking(
+        functools.partial(
+            _broadcast_host0_status,
+            functools.partial(
+                _load_safetensors_host0,
+                ckpt_path,
+                keys,
+                expected_shapes,
+                self._from_hf_manifest,
+                checksum=verify and self._from_hf_manifest is not None,
+            ),
         )
-
-    restored = run_blocking(_restore)
-    pending_arrays = [
-        restored[weight_utils.param_key(name)] for name in self.names
-    ]
+    )
+    if meta["is_safetensors"]:
+      restored = _broadcast_and_place(keys, self.arrays, host_tensors)
+      wire_checksums = meta["wire_sums"]
+    else:
+      item, restore_args = _build_restore_specs(self.names, self.arrays)
+      with self._checkpointer() as checkpointer:
+        restored = run_blocking(
+            functools.partial(
+                checkpointer.restore,
+                ckpt_path,
+                args=ocp.args.PyTreeRestore(
+                    item=item, restore_args=restore_args
+                ),
+            )
+        )
+      wire_checksums = None
+    pending_arrays = [restored[key] for key in keys]
     jax.block_until_ready(pending_arrays)
     self._last_h2d_secs = time.perf_counter() - t0
     self._h2d_count += 1
 
-    if self._verify_weights and resolved_checksums is not None:
-      dst_checksums = weight_utils.compute_checksums(
-          self.names, pending_arrays, sample=None, canonical_keys=True
+    if verify:
+      dst_checksums = (
+          wire_checksums
+          if wire_checksums is not None
+          else weight_utils.compute_checksums(
+              self.names, pending_arrays, sample=None, canonical_keys=True
+          )
       )
       try:
         weight_utils.verify_weight_checksums(resolved_checksums, dst_checksums)
@@ -481,6 +715,52 @@ class GCSSynchronizer:
         )
     )
 
+  def _wire_tensors(self) -> list[tuple[str, Any]]:
+    """Projects the bound tensors onto the safetensors wire namespace.
+
+    Peers are matched 1:1 on what crosses the wire, not on each engine's
+    private state names. A writer projects through `to_hf_manifest`; a reader
+    through the inverse of the first `from_hf_manifest` rule producing each wire
+    tensor. Both sides go through `to_hf_impl`, so `tied_keys` targets are
+    dropped exactly as `d2h()` drops them on write. Later fan-out rules
+    re-derive targets from already-claimed wire tensors (e.g. a tied `lm_head`
+    materialized from the embedding), so their targets are not on the wire
+    either. Identity mode writes the bound names.
+
+    Returns:
+      `(wire_name, array_or_shape_dtype_struct)` pairs, one per wire tensor.
+    """
+    bound = {
+        weight_utils.param_key(name): arr
+        for name, arr in zip(self.names, self.arrays, strict=True)
+    }
+    fan_out_targets: set[str] = set()
+    if self._to_hf_manifest is not None:
+      wire_manifest = self._to_hf_manifest
+    elif self._from_hf_manifest is not None:
+      claimed: set[str] = set()
+      producers: list[Mapping[str, Any]] = []
+      for rule in self._from_hf_manifest["rules"]:
+        if claimed.issuperset(rule["source_keys"]):
+          fan_out_targets.update(rule["target_keys"])
+        else:
+          producers.append(rule)
+          claimed.update(rule["source_keys"])
+      wire_manifest = hf_mapping.invert_manifest(
+          {**self._from_hf_manifest, "rules": producers}
+      )
+    else:
+      return list(bound.items())
+    abstract = {
+        k: jax.ShapeDtypeStruct(arr.shape, arr.dtype)
+        for k, arr in bound.items()
+        if k not in fan_out_targets
+    }
+    wire = jax.eval_shape(
+        functools.partial(hf_mapping.to_hf_impl, wire_manifest), abstract
+    )
+    return sorted(wire.items())
+
   def work_unit_metadata(self) -> weight_sync.WorkUnitMetadata:
     """Returns wire-safe `WorkUnitMetadata` with canonical tensor manifest."""
     if not self._bound:
@@ -500,12 +780,8 @@ class GCSSynchronizer:
       mesh_axes = tuple(mesh.axis_names)
       mesh_shape = tuple(int(mesh.shape[a]) for a in mesh.axis_names)
     variables = tuple(
-        weight_utils.tensor_metadata(
-            weight_utils.param_key(name), arr, layer_idx
-        )
-        for layer_idx, (name, arr) in enumerate(
-            zip(self.names, self.arrays, strict=True)
-        )
+        weight_utils.tensor_metadata(name, arr, layer_idx)
+        for layer_idx, (name, arr) in enumerate(self._wire_tensors())
     )
     unit = weight_sync.WorkUnitId(
         job_name=self.job_name,
@@ -563,7 +839,6 @@ class GCSSynchronizer:
     while len(self._staged_checkpoints) > self.config.max_to_keep:
       oldest = self._staged_checkpoints.pop(0)
       if oldest == self._current_artifact_uri:
-        # Stop advertising a checkpoint that is about to be deleted.
         self._current_artifact_uri = None
         self._current_checksums = None
       if jax.process_index() != 0:
@@ -602,11 +877,9 @@ class GCSSynchronizer:
 def _prune_checkpoint(path_str: str) -> None:
   """Removes an expired staged checkpoint directory, logging storage errors."""
   try:
-    epath.Path(path_str).rmtree(missing_ok=True)
+    safetensors_saver.remove_tree(epath.Path(path_str))
   except Exception as exc:  # pylint: disable=broad-exception-caught
-    logging.warning(
-        "Failed to prune old GCS checkpoint %s: %s", path_str, exc
-    )
+    logging.warning("Failed to prune old GCS checkpoint %s: %s", path_str, exc)
 
 
 @runtime_checkable
@@ -644,6 +917,8 @@ def tpu_worker_bind_gcs_sync(
     job_name: str = "rollout",
     *,
     config: GCSSynchronizerConfig | None = None,
+    to_hf_manifest: hf_mapping.RuleSpec | None = None,
+    from_hf_manifest: hf_mapping.RuleSpec | None = None,
 ) -> dict[str, Any]:
   """Binds `worker`'s live model weights to `GCSSynchronizer`."""
   del parallelism
@@ -658,15 +933,53 @@ def tpu_worker_bind_gcs_sync(
         job_name=job_name,
         config=config,
         worker_index=resolved_idx,
+        to_hf_manifest=to_hf_manifest,
+        from_hf_manifest=from_hf_manifest,
     )
+    try:
+      sync.bind(state)
+    except BaseException:
+      sync.close()
+      raise
     _WORKER_SYNCHRONIZERS[worker] = sync
-  else:
-    sync = _WORKER_SYNCHRONIZERS[worker]
+    weakref.finalize(worker, sync.close)
+    return dataclasses.asdict(sync.work_unit_metadata())
+
+  sync = _WORKER_SYNCHRONIZERS[worker]
+  prev = (
+      sync.job_name,
+      sync.worker_index,
+      sync.config,
+      sync._to_hf_manifest,  # pylint: disable=protected-access
+      sync._from_hf_manifest,  # pylint: disable=protected-access
+  )
+  try:
+    parsed_to = (
+        hf_mapping.parse_manifest(to_hf_manifest)
+        if to_hf_manifest is not None
+        else sync._to_hf_manifest  # pylint: disable=protected-access
+    )
+    parsed_from = (
+        hf_mapping.parse_manifest(from_hf_manifest)
+        if from_hf_manifest is not None
+        else sync._from_hf_manifest  # pylint: disable=protected-access
+    )
     sync.job_name = job_name
     sync.worker_index = resolved_idx
     if config is not None:
       sync.config = config
-  sync.bind(state)
+    sync._to_hf_manifest = parsed_to  # pylint: disable=protected-access
+    sync._from_hf_manifest = parsed_from  # pylint: disable=protected-access
+    sync.bind(state)
+  except BaseException:
+    (
+        sync.job_name,
+        sync.worker_index,
+        sync.config,
+        sync._to_hf_manifest,  # pylint: disable=protected-access
+        sync._from_hf_manifest,  # pylint: disable=protected-access
+    ) = prev
+    raise
   return dataclasses.asdict(sync.work_unit_metadata())
 
 
