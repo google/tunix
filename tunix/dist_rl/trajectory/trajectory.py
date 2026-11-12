@@ -1264,6 +1264,11 @@ class TrajectoryMetadata(pydantic.BaseModel):
       default=None,
       description="Reference to the continuation trajectory file.",
   )
+  attempt: int = pydantic.Field(
+      default=1,
+      ge=1,
+      description="1-based retry attempt counter for this trajectory.",
+  )
   extra: MetadataDict = pydantic.Field(
       default=None,
       description="Custom root-level metadata.",

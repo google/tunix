@@ -2137,6 +2137,7 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
     self.assertEqual(atif_metadata.trajectory_id, "t_atif")
     self.assertEqual(atif_metadata.session_id, "sess_01")
     self.assertEqual(atif_metadata.notes, "Metadata projection test")
+    self.assertEqual(atif_metadata.attempt, 1)
     self.assertEqual(
         atif_metadata.extra,
         {
@@ -2234,6 +2235,7 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
 
     self.assertIs(type(atif_metadata), trajectory.TrajectoryMetadata)
     self.assertEqual(atif_metadata.trajectory_id, "t_atif")
+    self.assertEqual(atif_metadata.attempt, 1)
     self.assertEqual(
         atif_metadata.extra,
         {
@@ -4088,6 +4090,40 @@ class TolerantCreateTrajectoryTest(absltest.TestCase):
     self.assertEqual(env_step.step_id, 0)
     self.assertEqual(agent_step.step_id, 1)
     self.assertEqual([s.step_id for s in traj.steps], [0, 1])
+
+  def test_canonical_metadata_attempt_defaults_and_round_trips(self) -> None:
+    default_meta = trajectory.TrajectoryMetadata(
+        trajectory_id="canon_default",
+        agent=trajectory.Agent(name="agent", version="1.0"),
+    )
+    self.assertEqual(default_meta.attempt, 1)
+
+    populated_meta = trajectory.TunixTrajectoryMetadata(
+        trajectory_id="canon_populated",
+        agent=trajectory.Agent(name="agent", version="1.0"),
+        attempt=3,
+        prompt_id="p_canon",
+    )
+    atif_meta = populated_meta.to_atif_metadata()
+    self.assertEqual(atif_meta.attempt, 3)
+    self.assertNotIn("attempt", atif_meta.get_extensions())
+
+    restored = trajectory.TunixTrajectoryMetadata.from_atif_metadata(
+        trajectory.TrajectoryMetadata.model_validate_json(
+            atif_meta.model_dump_json(exclude_none=True)
+        )
+    )
+    self.assertEqual(restored, populated_meta)
+
+  def test_metadata_attempt_rejects_non_positive_values(self) -> None:
+    for invalid_attempt in (0, -1, -99):
+      with self.subTest(invalid_attempt=invalid_attempt):
+        with self.assertRaises(pydantic.ValidationError):
+          trajectory.TrajectoryMetadata(
+              trajectory_id="invalid_attempt",
+              agent=trajectory.Agent(name="agent", version="1.0"),
+              attempt=invalid_attempt,
+          )
 
 
 if __name__ == "__main__":
