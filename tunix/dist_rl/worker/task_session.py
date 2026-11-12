@@ -26,6 +26,7 @@ from typing import (
     Callable,
     Dict,
     List,
+    Mapping,
     Optional,
     Sequence,
     Tuple,
@@ -187,6 +188,7 @@ class TaskSession:
       poll_retry_initial_backoff_s: float = DEFAULT_POLL_RETRY_INITIAL_BACKOFF_S,
       poll_retry_max_backoff_s: float = DEFAULT_POLL_RETRY_MAX_BACKOFF_S,
       fault_tolerance_config: Optional[TaskSessionFaultToleranceConfig] = None,
+      pass_session_attempt: bool = False,
   ):
     """Initializes the task execution session.
 
@@ -209,6 +211,11 @@ class TaskSession:
         eviction notification (`on_worker_unreachable`). Defaults to
         `TaskSessionFaultToleranceConfig()` (`max_task_retries=0`,
         `on_worker_unreachable=None`).
+      pass_session_attempt: When `True`, injects 1-based
+        `session_attempt=task.retries + 1` into `dispatch_task` keyword
+        arguments on every initial dispatch and retry (where `task.retries`
+        increments only on cross-worker failover after worker eviction, never on
+        in-place transient dispatch retries on the same worker).
 
     Raises:
       TypeError: If any item in a static `actors` sequence is not an
@@ -262,6 +269,7 @@ class TaskSession:
     self._fault_tolerance_enabled = (
         self._max_task_retries > 0 or self._on_worker_unreachable is not None
     )
+    self._pass_session_attempt: bool = pass_session_attempt
     self._response_queue: asyncio.Queue[Any] = asyncio.Queue()
     self._dispatched_tasks: Dict[ActorHandle, Dict[str, _InFlightTask]] = {}
     self._retry_states: Dict[ActorHandle, _WorkerRetryState] = {}
@@ -324,6 +332,27 @@ class TaskSession:
         for actor in self._actors_fn()
     ]
 
+  def _validate_submit_args(
+      self,
+      preferred_actor: Optional[ActorHandle],
+      kwargs: Mapping[str, Any],
+  ) -> None:
+    """Validates session state and caller arguments before submitting a task."""
+    if self._closed:
+      raise RuntimeError("TaskSession is closed.")
+    if preferred_actor is not None and not isinstance(
+        preferred_actor, ActorHandle
+    ):
+      raise TypeError(
+          "Expected ActorHandle for preferred_actor, got"
+          f" {type(preferred_actor)}"
+      )
+    if self._pass_session_attempt and "session_attempt" in kwargs:
+      raise ValueError(
+          "Cannot pass 'session_attempt' explicitly when"
+          " pass_session_attempt=True."
+      )
+
   async def submit(
       self,
       request_id: str,
@@ -355,16 +384,10 @@ class TaskSession:
         available.
       WorkerUnreachableError: If the routed worker failed and the task could
         not be re-dispatched onto a surviving worker.
+      ValueError: If `pass_session_attempt` is `True` and `'session_attempt'`
+        is passed explicitly in `kwargs`.
     """
-    if self._closed:
-      raise RuntimeError("TaskSession is closed.")
-    if preferred_actor is not None and not isinstance(
-        preferred_actor, ActorHandle
-    ):
-      raise TypeError(
-          "Expected ActorHandle for preferred_actor, got"
-          f" {type(preferred_actor)}"
-      )
+    self._validate_submit_args(preferred_actor, kwargs)
     task = _InFlightTask(
         request_id=request_id,
         method_name=method_name,
@@ -489,9 +512,7 @@ class TaskSession:
         return
       try:
         self._task_retries_total += 1
-        await actor.dispatch_task(
-            task.request_id, task.method_name, *task.args, **task.kwargs
-        )
+        await self._dispatch_task_rpc(actor, task)
         return
       except TransientTransportError as replay_exc:
         if curr is not None and curr.cancelling() > 0:
@@ -560,9 +581,7 @@ class TaskSession:
       state.probing = True
       try:
         self._task_retries_total += 1
-        await actor.dispatch_task(
-            task.request_id, task.method_name, *task.args, **task.kwargs
-        )
+        await self._dispatch_task_rpc(actor, task)
       except TransientTransportError as probe_exc:
         if curr is not None and curr.cancelling() > 0:
           raise
@@ -621,6 +640,19 @@ class TaskSession:
       ) from last_error
     return False
 
+  async def _dispatch_task_rpc(
+      self, actor: ActorHandle, task: _InFlightTask
+  ) -> str:
+    """Invokes `actor.dispatch_task`, injecting `session_attempt` when enabled."""
+    call_kwargs = (
+        {**task.kwargs, "session_attempt": task.retries + 1}
+        if self._pass_session_attempt
+        else task.kwargs
+    )
+    return await actor.dispatch_task(
+        task.request_id, task.method_name, *task.args, **call_kwargs
+    )
+
   async def _dispatch_with_retries(self, task: _InFlightTask) -> None:
     """Routes and dispatches `task`, retrying on surviving workers on failure.
 
@@ -656,9 +688,7 @@ class TaskSession:
         if task.retries > 0:
           self._task_retries_total += 1
         try:
-          await actor.dispatch_task(
-              task.request_id, task.method_name, *task.args, **task.kwargs
-          )
+          await self._dispatch_task_rpc(actor, task)
         except TransientTransportError as exc:
           dedup_eviction = True
           await self._retry_in_place(actor, task, exc)

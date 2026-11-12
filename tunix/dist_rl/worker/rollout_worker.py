@@ -22,7 +22,7 @@ import dataclasses
 import inspect
 import threading
 import types
-from typing import Any, List, Optional, TYPE_CHECKING, Union
+from typing import Any, Optional, TYPE_CHECKING, Union
 
 from absl import logging
 import numpy as np
@@ -412,8 +412,24 @@ class RolloutWorker(abstract_worker.Worker):
       self,
       requests: datatypes.RolloutRequest | Sequence[datatypes.RolloutRequest],
       on_complete: Optional[Callable[[datatypes.RolloutResponse], None]] = None,
-  ) -> datatypes.RolloutResponse | List[datatypes.RolloutResponse]:
-    """Coroutine method for single or batched generate requests."""
+      *,
+      session_attempt: int = 1,
+  ) -> datatypes.RolloutResponse | list[datatypes.RolloutResponse]:
+    """Coroutine method for single or batched generate requests.
+
+    Args:
+      requests: Single `RolloutRequest` or sequence of requests to execute.
+      on_complete: Optional per-item callback invoked as each request finishes.
+      session_attempt: 1-based rollout attempt counter injected by `TaskSession`
+        (unchanged on same-worker transient retries and incremented by +1 per
+        cross-worker failover), validated at entry.
+
+    Returns:
+      A single `RolloutResponse` or list of responses matching `requests`.
+    """
+    # TODO(b/552529132): Thread `session_attempt` into trajectory store writes
+    # once store-side attempt fencing lands.
+    manager_lib.validate_session_attempt(session_attempt)
     self._ensure_initialized()
     req_list = (
         [requests]
@@ -458,7 +474,11 @@ class RolloutWorker(abstract_worker.Worker):
         if on_complete is not None
         else None
     )
-    res = await self.manager.generate(requests, on_complete=cb)
+    res = await self.manager.generate(
+        requests,
+        on_complete=cb,
+        session_attempt=session_attempt,
+    )
     if isinstance(res, Sequence):
       responses = [_convert_once(r) for r in res]
       for resp in responses:

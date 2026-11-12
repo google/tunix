@@ -393,7 +393,7 @@ class RolloutWorkerTest(parameterized.TestCase):
     asyncio.run(_run_test())
 
   def test_trajectory_store_cancelled_and_non_succeeded_status(self):
-    """Verifies file-store cancellation via stop() sets CANCELLED and MAX_STEPS_REACHED is preserved."""
+    """Verifies stop() detaches store without writing unfenced CANCELLED and preserves MAX_STEPS_REACHED."""
     temp_dir = self.create_tempdir().full_path
     file_store_cfg = {
         "backend": "file",
@@ -403,8 +403,9 @@ class RolloutWorkerTest(parameterized.TestCase):
 
     async def _run_test():
       # 1. Real in-flight episode cancelled via RolloutWorker.stop() with
-      # FileTrajectoryStore persists status="CANCELLED" without raising
-      # RuntimeError when the store closes.
+      # FileTrajectoryStore detaches the store cleanly without raising
+      # RuntimeError on close or clobbering a surviving worker's status with
+      # unfenced status="CANCELLED".
       cancel_svc = worker.RolloutWorker(
           worker_id="test_cancel_worker",
           config=worker.RolloutConfig(trajectory_store_config=file_store_cfg),
@@ -425,6 +426,21 @@ class RolloutWorkerTest(parameterized.TestCase):
       )
       gen_task = asyncio.create_task(cancel_svc.generate(cancel_req))
       await asyncio.sleep(0.05)
+
+      survivor_store = trajectory_store_lib.TunixTrajectoryStore.from_config(
+          file_store_cfg
+      )
+      assert survivor_store is not None
+      (initial_meta,) = survivor_store.get_trajectories_metadata(  # pyrefly: ignore[missing-attribute]
+          ["traj_prompt_cancel_g0"]
+      )
+      self.assertEqual(initial_meta.status, "RUNNING")
+      survivor_meta = initial_meta.model_copy(
+          update={"status": "SUCCEEDED", "env_time": {"reset_latency": 0.12}}
+      )
+      survivor_store.update_metadata(survivor_meta)
+      survivor_store.close()
+
       cancel_svc.stop()
       with self.assertRaises(asyncio.CancelledError):
         await gen_task
@@ -436,9 +452,8 @@ class RolloutWorkerTest(parameterized.TestCase):
       (cancel_meta,) = reader_store.get_trajectories_metadata(  # pyrefly: ignore[missing-attribute]
           ["traj_prompt_cancel_g0"]
       )
-      self.assertEqual(cancel_meta.status, "CANCELLED")
-      self.assertIsInstance(cancel_meta.env_time, dict)
-      self.assertIn("reset_latency", cancel_meta.env_time)
+      self.assertEqual(cancel_meta.status, "SUCCEEDED")
+      self.assertEqual(cancel_meta.env_time, {"reset_latency": 0.12})
       reader_store.close()
 
       # 2. Unmocked episode hitting MAX_STEPS_REACHED preserves

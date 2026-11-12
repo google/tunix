@@ -113,6 +113,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         fault_tolerance_config=(
             self._fault_tolerance_manager.task_session_fault_tolerance_config()
         ),
+        pass_session_attempt=True,
     )
     self._policy_version = 0
     self._last_routed_actor: remote_execution.ActorHandle | None = None
