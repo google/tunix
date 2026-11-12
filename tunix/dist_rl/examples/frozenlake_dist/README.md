@@ -77,16 +77,16 @@ default, matching the reference recipe's environment construction; set
 
 ## Gemma4 E2B
 
-`run_gemma4_e2b.sh` runs the Gemma4 E2B recipe of
+`../recipes/benchmark_frozenlake_gemma4_e2b.sh` runs the Gemma4 E2B recipe of
 `examples/frozenlake/train_frozenlake.py` through `launcher.sh`. On a 4-chip
 host it assigns chips 0-1 to a two-way FSDP trainer and chips 2-3 to a two-way
 TP rollout worker:
 
 ```bash
-bash tunix/dist_rl/examples/frozenlake_dist/run_gemma4_e2b.sh
+bash tunix/dist_rl/examples/recipes/benchmark_frozenlake_gemma4_e2b.sh
 ```
 
-The wrapper selects `google/gemma-4-E2B-it` (also as the tokenizer),
+The recipe selects `google/gemma-4-E2B-it` (also as the tokenizer),
 two-trajectory trainer/logp micro-batches, `compute_logps_chunk_size=2048`, and
 `max_concurrency=512`, and writes its artifacts to
 `artifacts/gemma4_e2b_dist_frozenlake`. The rest comes from `frozenlake.yaml`:
@@ -98,19 +98,18 @@ block size 256, the Gemma4 non-thinking chat template, and the vLLM limits
 ## Distributed vs. agentic benchmark
 
 `../rl_efficiency_benchmark/benchmark.py` runs the Gemma4 E2B recipe on the
-distributed stack (`run_gemma4_e2b.sh`) or the agentic stack
-(`tunix.cli.grpo_main`), then compares recorded timings.
+distributed stack (`../recipes/benchmark_frozenlake_gemma4_e2b.sh`) or the
+agentic stack (`tunix.cli.grpo_main`), then compares recorded timings.
 `frozenlake_benchmark.py` generates matched configs for both stacks; for the
-distributed stack, they are `section.key=value` arguments of
-`run_gemma4_e2b.sh`, including the benchmark's own vLLM limits
-(`max_num_seqs=32`, `max_num_batched_tokens=8192`).
-`frozenlake_benchmark_test.py` checks them against `frozenlake.yaml` and the
-wrapper. Both stacks use BF16 compute, FP32 loading, exact token continuity,
-separate two-chip actor and rollout meshes, and one prompt group (8
-trajectories) per microbatch. The benchmark injects timing hooks through
-`cluster_config.trainer_main`, `cluster_config.rollout_main`, and
-`cluster_config.orchestrator_main`, which wrap the node mains in
-`launch/nodes/`.
+distributed stack, they are `section.key=value` arguments of the recipe,
+including the benchmark's own vLLM limits (`max_num_seqs=32`,
+`max_num_batched_tokens=8192`). `frozenlake_benchmark_test.py` checks them
+against `frozenlake.yaml` and the recipe. Both stacks use BF16 compute, FP32
+loading, exact token continuity, separate two-chip actor and rollout meshes,
+and one prompt group (8 trajectories) per microbatch. The benchmark injects
+timing hooks through `cluster_config.trainer_main`,
+`cluster_config.rollout_main`, and `cluster_config.orchestrator_main`, which
+wrap the node mains in `launch/nodes/`.
 
 Use one dedicated four-chip TPU host with a pre-downloaded model. Keep
 code, dependencies, and flags fixed across the runs you compare, and use a new

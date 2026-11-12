@@ -12,19 +12,23 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-# Distributed FrozenLake with Gemma4 E2B on a single 4-chip TPU host: the
-# trainer runs FSDP 2 on chips 0,1 and the rollout TP 2 on chips 2,3. Layered
-# on `launcher.sh` (`frozenlake.yaml`).
-#
+# ==============================================================================
+# Benchmark Recipe: Gemma4 E2B on FrozenLake on a Single 4-Chip TPU Host
+# ==============================================================================
+# Layered on `../frozenlake_dist/launcher.sh`
+# (`../frozenlake_dist/frozenlake.yaml`). The distributed-vs-agentic RL
+# efficiency benchmark runs this recipe with its own overrides.
+# - Trainer: FSDP 2 on chips 0,1
+# - Rollout: TP 2 on chips 2,3
+# ==============================================================================
 # Usage:
-#   bash run_gemma4_e2b.sh [--dry-run] [section.key=value ...]
+#   bash benchmark_frozenlake_gemma4_e2b.sh [--dry-run] [section.key=value ...]
 
 set -Eeuo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-exec "${DIR}/launcher.sh" \
+exec "${DIR}/../frozenlake_dist/launcher.sh" \
   model_config.model_name="gemma-4-e2b" \
   model_config.model_id="google/gemma-4-E2B-it" \
   tokenizer_config.tokenizer_path="google/gemma-4-E2B-it" \

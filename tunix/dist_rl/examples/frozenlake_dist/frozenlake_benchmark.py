@@ -14,10 +14,11 @@
 
 """FrozenLake workload for the distributed-vs-agentic RL benchmark.
 
-The distributed stack runs `run_gemma4_e2b.sh` with `section.key=value`
-overrides; the agentic stack runs the same Gemma4 E2B recipe through
-`tunix.cli.grpo_main`. The harness in `rl_efficiency_benchmark/benchmark.py`
-loads this file by path, so the module level imports only the standard library.
+The distributed stack runs `recipes/benchmark_frozenlake_gemma4_e2b.sh` with
+`section.key=value` overrides; the agentic stack runs the same Gemma4 E2B
+recipe through `tunix.cli.grpo_main`. The harness in
+`rl_efficiency_benchmark/benchmark.py` loads this file by path, so the module
+level imports only the standard library.
 """
 
 import functools
@@ -67,10 +68,10 @@ def validate(workload):
 def dist_launch(workload, output, model_dir):
   """Returns the distributed recipe command and the variables it sets.
 
-  The command passes the benchmark settings to run_gemma4_e2b.sh as
-  `section.key=value` overrides. Every other setting keeps its
-  run_gemma4_e2b.sh, frozenlake.yaml or launch/common/base_dist_config.yaml
-  value.
+  The command passes the benchmark settings to
+  recipes/benchmark_frozenlake_gemma4_e2b.sh as `section.key=value` overrides.
+  Every other setting keeps its recipe, frozenlake.yaml or
+  launch/common/base_dist_config.yaml value.
 
   Args:
     workload: Workload flag values.
@@ -123,7 +124,11 @@ def dist_launch(workload, output, model_dir):
   }
   command = [
       "bash",
-      str(Path(__file__).with_name("run_gemma4_e2b.sh")),
+      str(
+          Path(__file__).parents[1]
+          / "recipes"
+          / "benchmark_frozenlake_gemma4_e2b.sh"
+      ),
       *(f"{key}={value}" for key, value in overrides.items()),
   ]
   # launch/common/local.sh writes the node logs to LOG_ROOT.

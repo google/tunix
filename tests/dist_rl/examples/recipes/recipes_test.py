@@ -48,6 +48,20 @@ _CI_SMOKE_MAXTEXT = launcher_testing.Expected(
     rollout_mesh=(1, 4),
     model_id="Qwen/Qwen3-0.6B",
 )
+_BENCHMARK_FROZENLAKE_GEMMA4 = launcher_testing.Expected(
+    name="benchmark_frozenlake_gemma4_e2b",
+    script="recipes/benchmark_frozenlake_gemma4_e2b.sh",
+    example="frozenlake_dist",
+    module="frozenlake",
+    target="local",
+    batch_size=64,
+    mini_batch_size=64,
+    num_generations=8,
+    max_steps=450,
+    actor_mesh=(2, 1),
+    rollout_mesh=(1, 2),
+    model_id="google/gemma-4-E2B-it",
+)
 # Copybara replaces `k8s_launcher.sh`'s internal default image with
 # `$TUNIX_IMAGE` (`copy.bara.sky`), so the GKE dry runs set one.
 _K8S_IMAGE = "cluster_config.k8s.tunix_image=test-image"
@@ -72,7 +86,12 @@ class RecipesTest(launcher_testing.LauncherTestCase):
 
   @parameterized.named_parameters(
       (expected.name, expected)
-      for expected in (_CI_SMOKE, _CI_SMOKE_MAXTEXT, _TRELLIS)
+      for expected in (
+          _CI_SMOKE,
+          _CI_SMOKE_MAXTEXT,
+          _BENCHMARK_FROZENLAKE_GEMMA4,
+          _TRELLIS,
+      )
   )
   def test_recipe_contract(self, expected: launcher_testing.Expected):
     self.assert_launcher(expected)
@@ -152,6 +171,50 @@ class RecipesTest(launcher_testing.LauncherTestCase):
         config["rl_training_config"]["checkpoint_root_directory"].endswith(
             "artifacts/qwen3_dist_gsm8k/checkpoints_maxtext"
         )
+    )
+
+  def test_benchmark_frozenlake_gemma4_e2b(self):
+    _, hp = self.assert_launcher(_BENCHMARK_FROZENLAKE_GEMMA4)
+    for role in ("actor_model_config", "rollout_model_config"):
+      self.assertEqual(hp.config_mapping(role)["model_name"], "gemma-4-e2b")
+    # The trainer's FSDP 2 shards each batch two ways (the orchestrator's
+    # `num_data_shards` is `fsdp * dp * expert`).
+    self.assertEqual(
+        hp.mesh_axes("actor_model_config"),
+        {"fsdp": 2, "tp": 1, "expert": 1, "dp": 1},
+    )
+    rl_train = hp.config_mapping("rl_training_config")
+    self.assertEqual(rl_train["train_micro_batch_size"], 2)
+    self.assertEqual(rl_train["compute_logps_micro_batch_size"], 2)
+    self.assertEqual(rl_train["compute_logps_chunk_size"], 2048)
+    self.assertEqual(
+        hp.config_mapping("agentic_grpo_config")["max_concurrency"], 512
+    )
+    cluster = hp.config_mapping("cluster_config")
+    self.assertTrue(
+        cluster["artifact_root"].endswith(
+            "/artifacts/gemma4_e2b_dist_frozenlake"
+        )
+    )
+    local = cluster["local"]
+    self.assertEqual(local["trainer_tpu_chips"], "0,1")
+    self.assertEqual(local["rollout_tpu_chips"], "2,3")
+    self.assertEqual(local["tpu_chips_per_host_bounds"], "1,2,1")
+    # The rest comes from `frozenlake.yaml` (see `frozenlake_dist/README.md`).
+    actor = hp.config_mapping("actor_model_config")
+    self.assertEqual((actor["dtype"], actor["load_dtype"]), ("float32",) * 2)
+    self.assertEqual(actor["remat_config"], "decoder")
+    self.assertTrue(actor["use_flash_attention"])
+    self.assertEqual(actor["flash_attention_block_size"], 256)
+    # The tokenizer's EOS token stops a turn, not the base config's Qwen ids.
+    self.assertEqual(hp.config_mapping("rollout_config")["eos_tokens"], "")
+    self.assertEqual(
+        hp.config_mapping("chat_parser_config"),
+        {"type": "auto", "enable_thinking": False},
+    )
+    vllm = hp.config_mapping("vllm_config")
+    self.assertEqual(
+        (vllm["max_num_seqs"], vllm["max_num_batched_tokens"]), (512, 32768)
     )
 
   def test_trellis(self):
