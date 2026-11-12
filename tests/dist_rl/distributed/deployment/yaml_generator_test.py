@@ -1403,9 +1403,7 @@ class YamlGeneratorTest(parameterized.TestCase):
         self.assertIn("echo 'head pre-init'", rendered)
         self.assertIn("echo 'worker pre-init'", rendered)
         self.assertIn('grep -E -q "/16(\\.0)? TPU"', rendered)
-        self.assertIn(
-            "ERROR: Worker exited with code 0 unexpectedly", rendered
-        )
+        self.assertIn("ERROR: Worker exited with code 0 unexpectedly", rendered)
         doc = yaml.safe_load(rendered)
         self.assertEqual(doc["spec"]["failurePolicy"]["maxRestarts"], 5)
         job_spec = doc["spec"]["replicatedJobs"][0]["template"]["spec"]
@@ -1644,6 +1642,29 @@ class YamlGeneratorTest(parameterized.TestCase):
     )
     doc = yaml.safe_load(cpu_rendered)
     self.assertIsNotNone(doc)
+
+  def test_pathways_head_user_container_mounts_memory_dshm(self):
+    pathways_template = _get_template_path("jobset.pathways.yaml")
+    with open(pathways_template, "r") as f:
+      pathways_text = f.read()
+    rendered = yaml_generator.render_template(
+        pathways_text,
+        yaml_generator.parse_args([
+            pathways_template,
+            "--jobset_name=test-pathways",
+            "--tpu_slice=tpuv5:4x4x4",
+        ]),
+    )
+    doc = yaml.safe_load(rendered)
+    proc_spec = doc["spec"]["replicatedJobs"][0]["template"]["spec"][
+        "template"
+    ]["spec"]
+    self.assertIn(
+        {"name": "dshm", "emptyDir": {"medium": "Memory"}},
+        proc_spec["volumes"],
+    )
+    user_mounts = proc_spec["containers"][0]["volumeMounts"]
+    self.assertIn({"name": "dshm", "mountPath": "/dev/shm"}, user_mounts)
 
 
 if __name__ == "__main__":

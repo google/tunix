@@ -22,9 +22,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
+import contextlib
 import json
 import logging
+import math
+import os
 from typing import Any
 
 import grain
@@ -367,6 +370,59 @@ def iter_prompt_items(
     )
 
 
+@contextlib.contextmanager
+def prewarm_sandboxes(
+    prompt_items: grain.MapDataset[dict[str, object]],
+    *,
+    batch_size: int,
+    num_generations: int,
+    max_staleness: int,
+    env_kwargs: Mapping[str, object],
+    max_concurrency: int,
+    max_warmpool_replicas: int,
+) -> Iterator[Iterable[dict[str, object]]]:
+  """Warms job-scoped `SandboxFleet` pools ahead of dispatch when enabled."""
+  _validate_int(batch_size, "batch_size", positive=True)
+  use_agent_sandbox = env_kwargs["use_agent_sandbox"]
+  if not isinstance(use_agent_sandbox, bool):
+    raise TypeError(
+        "env_kwargs['use_agent_sandbox'] must be a bool, got"
+        f" {type(use_agent_sandbox).__name__}."
+    )
+  if not use_agent_sandbox:
+    yield prompt_items
+    return
+
+  scaffold = _validate_str(env_kwargs["scaffold"], "env_kwargs.scaffold")
+  fleet = sandbox_utils.init_global_fleet(
+      tasks=None,
+      max_concurrency=max_concurrency,
+      num_generations=num_generations,
+      batch_size=batch_size,
+      max_warmpool_replicas=max_warmpool_replicas,
+      scaffold=scaffold,
+      job_id=os.environ["ORCHESTRATOR_ID"],
+      warm_on_init=False,
+      teardown_on_exit=False,
+  )
+  try:
+    with contextlib.closing(
+        sandbox_utils.PrewarmDatasetIterator(
+            prompt_items,
+            fleet=fleet,
+            num_generations=num_generations,
+            batch_size=batch_size,
+            max_warmpool_replicas=max_warmpool_replicas,
+            max_staleness=max_staleness + math.ceil(2 / batch_size),
+            unwarm_on_exhaustion=True,
+            scaffold=scaffold,
+        )
+    ) as prewarm:
+      yield prewarm
+  finally:
+    sandbox_utils.teardown_global_fleet()
+
+
 @registry.register_env(DEEPSWE_ENV_NAME)
 class DeepSWEEnv(swe_env.SWEEnv):
   """Registry adapter that lets RolloutWorker construct SWEEnv per request."""
@@ -381,6 +437,9 @@ class DeepSWEEnv(swe_env.SWEEnv):
       group_id: Any = None,
       pair_index: int | None = None,
       max_warmpool_replicas: int | None = None,
+      scaffold: str = "r2egym",
+      use_agent_sandbox: bool = False,
+      fleet: Any | None = None,
       **kwargs: Any,
   ):
     entry = dict(entry or kwargs.pop("task", {}) or {})
@@ -392,28 +451,30 @@ class DeepSWEEnv(swe_env.SWEEnv):
       pair_index = group_index
     if max_warmpool_replicas is None:
       max_warmpool_replicas = num_generations
-    if kwargs.get("use_agent_sandbox") and kwargs.get("fleet") is None:
-      logging.info(
-          "Initializing DeepSWE SandboxFleet in rollout worker "
-          "(max_concurrency=%s, max_warmpool_replicas=%s).",
-          num_generations,
-          max_warmpool_replicas,
+    if use_agent_sandbox and fleet is None:
+      raw_job_id = (
+          os.environ["ORCHESTRATOR_ID"].strip()
+          if "ORCHESTRATOR_ID" in os.environ
+          else ""
       )
-      # Rollout workers rely on on-demand warm pools rather than calling
-      # `warm_global_fleet()`; passing `tasks=[entry]` would record the first
-      # task's image in `fleet.plan_` without creating its warm pool, causing
-      # `SandboxFleet.acquire()` to fail looking up an uncreated pool.
-      kwargs["fleet"] = sandbox_utils.init_global_fleet(
-          tasks=None,
+      job_id = raw_job_id or None
+      fleet = sandbox_utils.init_global_fleet(
+          tasks=[entry] if job_id else None,
           max_concurrency=num_generations,
           num_generations=num_generations,
           max_warmpool_replicas=max_warmpool_replicas,
+          scaffold=scaffold,
+          job_id=job_id,
+          teardown_on_exit=job_id is None,
       )
 
     super().__init__(
         entry=entry,
         group_id=group_id,
         pair_index=pair_index,
+        scaffold=scaffold,
+        use_agent_sandbox=use_agent_sandbox,
+        fleet=fleet,
         **kwargs,
     )
     self.task = {

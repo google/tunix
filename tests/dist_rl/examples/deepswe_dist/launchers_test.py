@@ -64,6 +64,12 @@ _K8S = launcher_testing.Expected(
 
 class LaunchersTest(launcher_testing.LauncherTestCase):
 
+  def setUp(self):
+    super().setUp()
+    self.enter_context(
+        mock.patch.dict(os.environ, {"DEEPSWE_SKIP_INTERNAL_ARGS": "1"})
+    )
+
   @parameterized.named_parameters(
       (expected.name, expected) for expected in (_LOCAL, _K8S)
   )
@@ -127,6 +133,7 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
             "namespace": "rl-tunix-swebench",
             "node_selector_key": None,
             "node_selector_val": None,
+            "image_rewrite_prefix": None,
         },
     )
     self.assertEqual(
@@ -153,7 +160,16 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
     k8s = config["cluster_config"]["k8s"]
     self.assertEqual(k8s["cpu_memory"], "64G")
     self.assertEqual(k8s["user_container_memory"], "260G")
-    self.assertEqual(k8s["user_container_memory_limit"], "260G")
+    self.assertEqual(k8s["user_container_memory_limit"], "340G")
+    self.assertEqual(
+        config["actor_model_config"]["model_download_path"], "/dev/shm/models"
+    )
+    self.assertEqual(
+        config["rollout_model_config"]["model_download_path"], "/dev/shm/models"
+    )
+    role_env = resolve_config.role_env(hp)
+    self.assertEqual(role_env["trainer"]["HF_HOME"], "/dev/shm/hf")
+    self.assertEqual(role_env["rollout"]["HF_HOME"], "/dev/shm/hf")
     self.assertEqual(k8s["trainer"]["jobset_yaml"], "jobset.pathways.yaml")
     self.assertEqual(k8s["trainer"]["tpu_slice"], "tpuv5:4x4x4")
     self.assertIn(
@@ -188,22 +204,33 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
     self.assertEqual(hp.config["kubernetes_config"]["namespace"], "team-ns")
     self.assertIn("NAMESPACE=team-ns", run.stdout)
 
-  def test_k8s_sandbox_node_selectors_propagate_to_rollout_pod(self):
+  def test_k8s_sandbox_settings_propagate_to_orchestrator_and_rollout(self):
     run = self.dry_run(
         "deepswe_dist/k8s_launcher_v2.sh",
         _K8S_IMAGE,
         "env_kwargs.use_agent_sandbox=true",
+        "cluster_config.k8s.orchestrator_id=custom-orch",
         "kubernetes_config.namespace=rl-tunix-swebench",
         "kubernetes_config.node_selector_key=cloud.google.com/gke-nodepool",
         "kubernetes_config.node_selector_val=swe-sandbox-pool",
+        "kubernetes_config.image_rewrite_prefix=us-central1-docker.pkg.dev/proj/repo",
     )
-    hp = run.resolve()
-    self.assertTrue(hp.config["env_kwargs"]["use_agent_sandbox"])
-    self.assertIn("NAMESPACE=rl-tunix-swebench", run.stdout)
-    self.assertIn(
-        "NODE_SELECTOR_KEY=cloud.google.com/gke-nodepool"
-        " NODE_SELECTOR_VAL=swe-sandbox-pool",
-        run.stdout,
+    matched_roles = set(
+        re.findall(
+            r"NAMESPACE=rl-tunix-swebench "
+            r"NODE_SELECTOR_KEY=cloud\.google\.com/gke-nodepool "
+            r"NODE_SELECTOR_VAL=swe-sandbox-pool "
+            r"IMAGE_REWRITE_PREFIX=us-central1-docker\.pkg\.dev/proj/repo "
+            r"ORCHESTRATOR_ID=custom-orch .*--process_main=(\S+)",
+            run.stdout,
+        )
+    )
+    self.assertEqual(
+        matched_roles,
+        {
+            "tunix.dist_rl.launch.nodes.orchestrator.main",
+            "tunix.dist_rl.launch.nodes.rollout.main",
+        },
     )
 
   def test_user_args_override_launcher_values(self):
