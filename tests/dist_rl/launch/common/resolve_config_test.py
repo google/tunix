@@ -721,6 +721,27 @@ weight_sync_config:
         ValueError, "head_nodepool requires .*use_dynamic_slicing=true"
     ):
       resolve_config.initialize([*k8s, "cluster_config.k8s.head_nodepool=np"])
+    with self.assertRaisesRegex(
+        TypeError, "head_excluded_nodepools must be a list of str"
+    ):
+      resolve_config.initialize(
+          [*k8s, "cluster_config.k8s.head_excluded_nodepools=cpu-np"]
+      )
+    with self.assertRaisesRegex(
+        ValueError, "head_excluded_nodepools: Invalid .*'cpu np'"
+    ):
+      resolve_config.initialize(
+          [*k8s, "cluster_config.k8s.head_excluded_nodepools=['cpu np']"]
+      )
+    with self.assertRaisesRegex(
+        ValueError, "head_excluded_nodepools requires .*use_dynamic_slicing"
+    ):
+      resolve_config.initialize([
+          *k8s,
+          "cluster_config.k8s.rollout.jobset_yaml=jobset.pathways.yaml",
+          "cluster_config.k8s.use_dynamic_slicing=true",
+          "cluster_config.k8s.head_excluded_nodepools=[cpu-np]",
+      ])
 
     # teardown_gang_on_exit requires run_id to be a valid K8s label value.
     with self.assertRaisesRegex(
@@ -783,8 +804,18 @@ weight_sync_config:
     self.assertIn("export K8S_STARTUP_RETRIES=5\n", exports)
     self.assertIn("export K8S_USE_DYNAMIC_SLICING=true\n", exports)
     self.assertIn("export K8S_HEAD_NODEPOOL=head-np\n", exports)
+    self.assertIn("export K8S_HEAD_EXCLUDED_NODEPOOLS=''\n", exports)
     # `k8s.sh` omits the flag, so each template keeps its own default.
     self.assertIn("export K8S_TERMINATION_GRACE_SECONDS=''\n", exports)
+    exports = resolve_config.render_bash_exports(
+        resolve_config.initialize([
+            *k8s,
+            "cluster_config.k8s.head_excluded_nodepools=[cpu-np,sandbox-pool]",
+        ])
+    )
+    self.assertIn(
+        "export K8S_HEAD_EXCLUDED_NODEPOOLS=cpu-np,sandbox-pool\n", exports
+    )
 
   def test_orchestrator_choices_fail_loud(self):
     hp = resolve_config.initialize([

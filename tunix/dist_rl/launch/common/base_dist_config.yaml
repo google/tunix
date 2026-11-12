@@ -492,6 +492,12 @@ cluster_config:
     # `use_dynamic_slicing`) pins the Pathways head pod to a node pool.
     use_dynamic_slicing: false
     head_nodepool: ""
+    # Without `use_dynamic_slicing`, the Pathways head pod runs on a pw-node
+    # host and requests no TPUs. List here the node pools of any Kueue CPU
+    # ResourceFlavors that come before the TPU flavor in the ClusterQueue, so
+    # Kueue does not admit the head pod to them (see
+    # `yaml_generator.render_colocated_head_affinity`).
+    head_excluded_nodepools: []
     # Rollout JAX compilation cache. Unless `disable`, the rollout pods cache in
     # `local_dir` and use a GCS cache: `rollout_gcs_dir`, or else a directory
     # under `gcs_dir` (or `gs://<bucket>/jax_cache`) named by the rollout config

@@ -104,6 +104,88 @@ def render_gang_labels(gang_id: str | None) -> str:
   return f'    scheduling.x-k8s.io/gang-id: "{gang_id}"\n'
 
 
+def parse_head_excluded_nodepools(value: str) -> tuple[str, ...]:
+  """Parses `--head_excluded_nodepools` into validated GKE node pool names.
+
+  Args:
+    value: Comma-separated node pool names; empty for none.
+
+  Returns:
+    The node pool names, in the given order.
+
+  Raises:
+    ValueError: If a name is not a valid Kubernetes label value or repeats.
+  """
+  if not value:
+    return ()
+  pools = tuple(pool.strip() for pool in value.split(","))
+  for pool in pools:
+    if len(pool) > 63 or not _K8S_LABEL_VALUE_RE.fullmatch(pool):
+      raise ValueError(
+          f"Invalid --head_excluded_nodepools entry {pool!r} in {value!r}: must"
+          " be a valid Kubernetes label value (<=63 chars, alphanumeric"
+          " start/end, [-A-Za-z0-9_.])."
+      )
+  if len(set(pools)) != len(pools):
+    raise ValueError(f"--head_excluded_nodepools repeats a name: {value!r}")
+  return pools
+
+
+def render_colocated_head_affinity(
+    jobset_name: str, excluded_nodepools: tuple[str, ...]
+) -> str:
+  """Renders the affinity of a Pathways head pod that runs on a pw-node host.
+
+  The head pod requests no `google.com/tpu`. Kueue matches a pod set against a
+  ResourceFlavor using only the node selector keys the flavor lists in its
+  `nodeLabels`, so the head pod's TPU `nodeSelector` does not rule out a CPU
+  flavor that lists only `cloud.google.com/gke-nodepool`. If such a flavor comes
+  before the TPU flavor in the ClusterQueue, Kueue admits the head pod to it and
+  adds that node pool to its `nodeSelector`, which no pw-node host matches.
+  Listing those node pools in `excluded_nodepools` makes the CPU flavors fail to
+  match.
+
+  Args:
+    jobset_name: Name of the Pathways JobSet.
+    excluded_nodepools: GKE node pools the head pod must not be admitted to.
+
+  Returns:
+    The `affinity` block of the head pod spec.
+  """
+  node_affinity = ""
+  if excluded_nodepools:
+    node_affinity = (
+        "  nodeAffinity:\n"
+        "    requiredDuringSchedulingIgnoredDuringExecution:\n"
+        "      nodeSelectorTerms:\n"
+        "      - matchExpressions:\n"
+        "        - key: cloud.google.com/gke-nodepool\n"
+        "          operator: NotIn\n"
+        "          values:\n"
+        + "".join(
+            f"          - {json.dumps(pool)}\n" for pool in excluded_nodepools
+        )
+    )
+  return (
+      "affinity:\n"
+      f"{node_affinity}"
+      "  podAffinity:\n"
+      "    requiredDuringSchedulingIgnoredDuringExecution:\n"
+      "    # place on one of the pathways-worker nodes\n"
+      "    - topologyKey: kubernetes.io/hostname\n"
+      "      labelSelector:\n"
+      "        matchExpressions:\n"
+      "        - key: jobset.sigs.k8s.io/jobset-name\n"
+      "          operator: In\n"
+      "          values:\n"
+      f"          - {jobset_name}\n"
+      "        - key: jobset.sigs.k8s.io/replicatedjob-name\n"
+      "          operator: In\n"
+      "          values:\n"
+      "          - pw-node"
+  )
+
+
 def render_teardown_on_exit(
     teardown_gang_on_exit: bool,
     gang_id: str | None,
@@ -239,6 +321,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
       "--head_nodepool",
       default=None,
       help="Kubernetes nodepool for Pathways head pod (e.g. cpu-np).",
+  )
+  parser.add_argument(
+      "--head_excluded_nodepools",
+      default="",
+      help=(
+          "Comma-separated GKE node pools that the Pathways head pod, which"
+          " runs on a pw-node host when --use_dynamic_slicing is off, must not"
+          " be admitted to. Set it to the node pools of the Kueue CPU"
+          " ResourceFlavors listed before the TPU flavor (see"
+          " `render_colocated_head_affinity`)."
+      ),
   )
   parser.add_argument(
       "--termination_grace_seconds",
@@ -533,6 +626,14 @@ def build_substitutions(
     raise ValueError(
         "--head_nodepool (or HEAD_NODEPOOL) requires --use_dynamic_slicing."
     )
+  head_excluded_nodepools = parse_head_excluded_nodepools(
+      args.head_excluded_nodepools
+  )
+  if head_excluded_nodepools and use_dynamic_slicing:
+    raise ValueError(
+        "--head_excluded_nodepools applies only without"
+        " --use_dynamic_slicing; with it, set --head_nodepool."
+    )
 
   if use_dynamic_slicing:
     if explicit_head_nodepool:
@@ -565,22 +666,8 @@ def build_substitutions(
     if reservation_selector:
       head_selector_lines.append(reservation_selector)
     head_node_selector = "\n".join(head_selector_lines)
-    head_affinity = (
-        "affinity:\n"
-        "  podAffinity:\n"
-        "    requiredDuringSchedulingIgnoredDuringExecution:\n"
-        "    # place on one of the pathways-worker nodes\n"
-        "    - topologyKey: kubernetes.io/hostname\n"
-        "      labelSelector:\n"
-        "        matchExpressions:\n"
-        "        - key: jobset.sigs.k8s.io/jobset-name\n"
-        "          operator: In\n"
-        "          values:\n"
-        f"          - {jobset_name}\n"
-        "        - key: jobset.sigs.k8s.io/replicatedjob-name\n"
-        "          operator: In\n"
-        "          values:\n"
-        "          - pw-node"
+    head_affinity = render_colocated_head_affinity(
+        jobset_name, head_excluded_nodepools
     )
     head_tolerations = ""
     tpu_topology_selector = (

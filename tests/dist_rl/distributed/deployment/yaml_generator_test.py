@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from typing import Any
 from unittest import mock
 
 from absl.testing import absltest
@@ -1202,6 +1203,85 @@ class YamlGeneratorTest(parameterized.TestCase):
         )
         self.assertEqual(proc_spec["tolerations"][0]["operator"], "Equal")
         self.assertEqual(proc_spec["tolerations"][0]["value"], "cpu-np")
+
+  def _render_pathways_head_spec(
+      self, extra_argv: list[str], env: dict[str, str]
+  ) -> dict[str, Any]:
+    template_file = _get_template_path("jobset.pathways.yaml")
+    with open(template_file, "r") as f:
+      template_text = f.read()
+    with mock.patch.dict(os.environ, env, clear=True):
+      args = yaml_generator.parse_args([
+          template_file,
+          "--jobset_name=test-pw",
+          "--tpu_slice=tpuv5:4x4x4",
+          *extra_argv,
+      ])
+      doc = yaml.safe_load(yaml_generator.render_template(template_text, args))
+    return doc["spec"]["replicatedJobs"][0]["template"]["spec"]["template"][
+        "spec"
+    ]
+
+  def test_colocated_head_has_no_node_affinity_by_default(self):
+    proc_spec = self._render_pathways_head_spec([], {})
+    self.assertEqual(list(proc_spec["affinity"]), ["podAffinity"])
+
+  @parameterized.named_parameters(
+      ("without_reservation", {}, {}),
+      (
+          "with_reservation",
+          {"TPU_RESERVATION": "my-res"},
+          {"cloud.google.com/reservation-name": "my-res"},
+      ),
+  )
+  def test_colocated_head_excludes_given_nodepools(
+      self, env: dict[str, str], extra_selector: dict[str, str]
+  ):
+    proc_spec = self._render_pathways_head_spec(
+        ["--head_excluded_nodepools=cpu-np,sandbox-pool"], env
+    )
+    self.assertEqual(
+        proc_spec["nodeSelector"],
+        {
+            "cloud.google.com/gke-tpu-accelerator": "tpu-v5p-slice",
+            "cloud.google.com/gke-tpu-topology": "4x4x4",
+            **extra_selector,
+        },
+    )
+    self.assertEqual(
+        proc_spec["affinity"]["nodeAffinity"],
+        {
+            "requiredDuringSchedulingIgnoredDuringExecution": {
+                "nodeSelectorTerms": [{
+                    "matchExpressions": [{
+                        "key": "cloud.google.com/gke-nodepool",
+                        "operator": "NotIn",
+                        "values": ["cpu-np", "sandbox-pool"],
+                    }]
+                }]
+            }
+        },
+    )
+    (pod_term,) = proc_spec["affinity"]["podAffinity"][
+        "requiredDuringSchedulingIgnoredDuringExecution"
+    ]
+    self.assertEqual(pod_term["topologyKey"], "kubernetes.io/hostname")
+
+  @parameterized.named_parameters(
+      ("empty_entry", ["--head_excluded_nodepools=cpu-np,"], "Invalid"),
+      ("bad_chars", ["--head_excluded_nodepools=cpu np"], "Invalid"),
+      ("repeated", ["--head_excluded_nodepools=a,a"], "repeats"),
+      (
+          "with_dynamic_slicing",
+          ["--head_excluded_nodepools=cpu-np", "--use_dynamic_slicing"],
+          "only without --use_dynamic_slicing",
+      ),
+  )
+  def test_invalid_head_excluded_nodepools_raise(
+      self, extra_argv: list[str], error: str
+  ):
+    with self.assertRaisesRegex(ValueError, error):
+      self._render_pathways_head_spec(extra_argv, {})
 
   def test_colocated_python_sidecar(self):
     pw_template = _get_template_path("jobset.pathways.yaml")

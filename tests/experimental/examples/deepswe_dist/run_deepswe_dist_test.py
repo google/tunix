@@ -242,6 +242,44 @@ class RunDeepsweDistTest(absltest.TestCase):
         run_deepswe_dist._required_workers(parsed)[datatypes.Role.ROLLOUT], 2
     )
 
+  def test_k8s_launcher_dry_run_forwards_head_excluded_nodepools(self):
+    launcher = pathlib.Path(run_deepswe_dist.__file__).with_name(
+        "k8s_launcher.sh"
+    )
+    tmp_dir = pathlib.Path(self.create_tempdir().full_path)
+    record_file = tmp_dir / "yaml_gen_args"
+    python_recorder = tmp_dir / "python_recorder.sh"
+    python_recorder.write_text(
+        "#!/bin/bash\n"
+        'if [[ "$1" == "-c" ]]; then cat; exit 0; fi\n'
+        f"printf '%s\\0' \"$@\" > {shlex.quote(str(record_file))}\n",
+        encoding="utf-8",
+    )
+    python_recorder.chmod(python_recorder.stat().st_mode | stat.S_IXUSR)
+    env = _clean_env(
+        USER="johndoe",
+        TUNIX_IMAGE="test-image",
+        PYTHON=str(python_recorder),
+        DISABLE_JAX_CACHE="1",
+        HEAD_EXCLUDED_NODEPOOLS="cpu-np,sandbox-pool",
+    )
+    subprocess.run(
+        ["bash", str(launcher), "--command=trainer", "--dry-run"],
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    yaml_gen_args = [
+        arg.decode("utf-8")
+        for arg in record_file.read_bytes().split(b"\0")
+        if arg
+    ]
+    self.assertTrue(yaml_gen_args[1].endswith("/jobset.pathways.yaml"))
+    self.assertIn(
+        "--head_excluded_nodepools=cpu-np,sandbox-pool", yaml_gen_args
+    )
+
   def test_main_aborts_cluster_and_preserves_sigterm_on_run_failure(self):
     fake_cluster = mock.MagicMock()
     fake_cluster.trajectory_store = None

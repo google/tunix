@@ -206,6 +206,10 @@ export CPU_MEMORY=${CPU_MEMORY:-}
 export GCS_SCRATCH_LOCATION=${GCS_SCRATCH_LOCATION:-gs://cloud-pathways-staging/tmp}
 
 export TRAINER_JOBSET_YAML=${TRAINER_JOBSET_YAML:-jobset.pathways.yaml}
+# Comma-separated node pools of the Kueue CPU ResourceFlavors listed before the
+# TPU flavor; the Pathways trainer head pod must not be admitted to them (see
+# `yaml_generator.render_colocated_head_affinity`).
+export HEAD_EXCLUDED_NODEPOOLS=${HEAD_EXCLUDED_NODEPOOLS:-}
 export TRAINER_TPU_SLICE=${TRAINER_TPU_SLICE:-tpuv5:2x2x2}
 export TRAINER_MESH_FSDP=${TRAINER_MESH_FSDP:-8}
 export ROLLOUT_TPU_SLICE=${ROLLOUT_TPU_SLICE:-tpuv5:2x2x1}
@@ -595,6 +599,7 @@ start_trainer() {
     ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
     --tpu_slice=${TRAINER_TPU_SLICE} \
     --cpu_machine=${CPU_MACHINE} \
+    ${HEAD_EXCLUDED_NODEPOOLS:+--head_excluded_nodepools="${HEAD_EXCLUDED_NODEPOOLS}"} \
     ${PATHWAYS_SERVER_IMAGE:+--pathways_server_image="${PATHWAYS_SERVER_IMAGE}"} \
     ${PATHWAYS_PROXY_IMAGE:+--pathways_proxy_server_image="${PATHWAYS_PROXY_IMAGE}"} \
     ${PATHWAYS_PROXY_MEMORY_LIMIT:+--pathways_proxy_memory_limit="${PATHWAYS_PROXY_MEMORY_LIMIT}"} \

@@ -219,6 +219,7 @@ start_trainer() {
     --startup_retries="${K8S_STARTUP_RETRIES}" \
     $(bool_flag "${K8S_USE_DYNAMIC_SLICING}" --use_dynamic_slicing) \
     ${K8S_HEAD_NODEPOOL:+--head_nodepool="${K8S_HEAD_NODEPOOL}"} \
+    ${K8S_HEAD_EXCLUDED_NODEPOOLS:+--head_excluded_nodepools="${K8S_HEAD_EXCLUDED_NODEPOOLS}"} \
     --tpu_slice="${K8S_TRAINER_TPU_SLICE}" \
     --cpu_machine="${K8S_CPU_MACHINE}" \
     --pathways_server_image="${K8S_PATHWAYS_SERVER_IMAGE}" \
@@ -339,6 +340,7 @@ start_rollout_instance() {
     --startup_retries="${K8S_STARTUP_RETRIES}" \
     $(bool_flag "${K8S_USE_DYNAMIC_SLICING}" --use_dynamic_slicing) \
     ${K8S_HEAD_NODEPOOL:+--head_nodepool="${K8S_HEAD_NODEPOOL}"} \
+    ${K8S_HEAD_EXCLUDED_NODEPOOLS:+--head_excluded_nodepools="${K8S_HEAD_EXCLUDED_NODEPOOLS}"} \
     --tpu_slice="${K8S_ROLLOUT_TPU_SLICE}" \
     --cpu_machine="${K8S_CPU_MACHINE}" \
     --pathways_server_image="${K8S_PATHWAYS_SERVER_IMAGE}" \

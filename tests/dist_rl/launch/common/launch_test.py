@@ -697,6 +697,7 @@ class LaunchScriptsTest(absltest.TestCase):
         "cluster_config.k8s.kueue_queue_name=rl-queue",
         "cluster_config.k8s.cpu_nodepool=cpu-np",
         "cluster_config.k8s.cpu_memory=64Gi",
+        "cluster_config.k8s.head_excluded_nodepools=[cpu-np,sandbox-pool]",
     ])
     self.assertEqual(res.returncode, 0, msg=res.stderr)
     jobsets = _dry_run_jobsets(res.stdout)
@@ -739,6 +740,21 @@ class LaunchScriptsTest(absltest.TestCase):
         ' --field-selector="metadata.name!=testuser-orch"',
         orch_container["command"][2],
     )
+    # The Pathways trainer head pod, on a pw-node host, keeps out of the listed
+    # node pools.
+    train_head_pod = _pod_specs(jobsets["testuser-train"])[0]
+    self.assertEqual(
+        train_head_pod["affinity"]["nodeAffinity"][
+            "requiredDuringSchedulingIgnoredDuringExecution"
+        ]["nodeSelectorTerms"],
+        [{
+            "matchExpressions": [{
+                "key": "cloud.google.com/gke-nodepool",
+                "operator": "NotIn",
+                "values": ["cpu-np", "sandbox-pool"],
+            }]
+        }],
+    )
 
     # Unset, the settings keep the template defaults.
     res = self._run_launch(args)
@@ -756,6 +772,8 @@ class LaunchScriptsTest(absltest.TestCase):
     self.assertEqual(rollout_pod["restartPolicy"], "OnFailure")
     (orch_pod,) = _pod_specs(jobsets["testuser-orch"])
     self.assertNotIn("kubectl delete", orch_pod["containers"][0]["command"][2])
+    train_head_pod = _pod_specs(jobsets["testuser-train"])[0]
+    self.assertEqual(list(train_head_pod["affinity"]), ["podAffinity"])
 
   def test_k8s_pathways_rollout_gets_cpu_machine_and_memory_settings(self):
     args = [

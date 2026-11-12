@@ -393,6 +393,32 @@ def _validate_k8s_scalars(hp: cli_config.HyperParameters) -> None:
     )
 
 
+def _head_excluded_nodepools(k8s: Mapping[str, object]) -> str:
+  """Returns `cluster_config.k8s.head_excluded_nodepools` as a flag value.
+
+  Args:
+    k8s: The `cluster_config.k8s` mapping.
+
+  Returns:
+    The node pools joined with commas, as `--head_excluded_nodepools` of the
+    YAML generator takes them.
+
+  Raises:
+    TypeError: If the setting is not a list of str.
+  """
+  pools = k8s["head_excluded_nodepools"]
+  if (
+      isinstance(pools, str)
+      or not isinstance(pools, Sequence)
+      or not all(isinstance(pool, str) for pool in pools)
+  ):
+    raise TypeError(
+        "cluster_config.k8s.head_excluded_nodepools must be a list of str, got"
+        f" {pools!r}."
+    )
+  return ",".join(pools)
+
+
 def _validate_k8s_worker_jobsets(hp: cli_config.HyperParameters) -> None:
   """Rejects `cluster_config.k8s` settings the worker templates cannot render.
 
@@ -404,10 +430,12 @@ def _validate_k8s_worker_jobsets(hp: cli_config.HyperParameters) -> None:
     hp: Loaded configuration.
 
   Raises:
+    TypeError: If `head_excluded_nodepools` is not a list of str.
     ValueError: If `target` is "k8s" and `run_id` is not a valid K8s label
       value when `teardown_gang_on_exit` is enabled, `head_nodepool` is set
-      without `use_dynamic_slicing`, or a JobSet-only setting is enabled with a
-      `leaderworkerset.*.yaml` worker template.
+      without `use_dynamic_slicing`, `head_excluded_nodepools` is set with
+      `use_dynamic_slicing` or names an invalid node pool, or a JobSet-only
+      setting is enabled with a `leaderworkerset.*.yaml` worker template.
   """
   cluster = hp.config_mapping("cluster_config")
   if cluster["target"] != "k8s":
@@ -426,6 +454,17 @@ def _validate_k8s_worker_jobsets(hp: cli_config.HyperParameters) -> None:
         "cluster_config.k8s.head_nodepool requires"
         " cluster_config.k8s.use_dynamic_slicing=true."
     )
+  excluded = _head_excluded_nodepools(k8s)
+  if excluded and k8s["use_dynamic_slicing"]:
+    raise ValueError(
+        "cluster_config.k8s.head_excluded_nodepools requires"
+        " cluster_config.k8s.use_dynamic_slicing=false; with it, set"
+        " cluster_config.k8s.head_nodepool."
+    )
+  try:
+    yaml_generator.parse_head_excluded_nodepools(excluded)
+  except ValueError as e:
+    raise ValueError(f"cluster_config.k8s.head_excluded_nodepools: {e}") from e
   enabled_jobset_keys = [
       f"cluster_config.k8s.{k}" for k in _K8S_JOBSET_ONLY_KEYS if k8s[k]
   ]
@@ -1341,6 +1380,7 @@ def render_bash_exports(hp: cli_config.HyperParameters) -> str:
       "K8S_TEARDOWN_GANG_ON_EXIT": k8s["teardown_gang_on_exit"],
       "K8S_USE_DYNAMIC_SLICING": k8s["use_dynamic_slicing"],
       "K8S_HEAD_NODEPOOL": k8s["head_nodepool"],
+      "K8S_HEAD_EXCLUDED_NODEPOOLS": _head_excluded_nodepools(k8s),
       "K8S_TRAINER_JOBSET_YAML": k8s_trainer["jobset_yaml"],
       "K8S_TRAINER_TPU_SLICE": k8s_trainer["tpu_slice"],
       "K8S_ROLLOUT_JOBSET_YAML": k8s_rollout["jobset_yaml"],
