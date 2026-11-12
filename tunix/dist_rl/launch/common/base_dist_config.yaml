@@ -421,6 +421,7 @@ cluster_config:
     otel: 4317
   local:
     auto_detect_pci_tpus: false
+    download_model_weights: true
     trainer_tpu_chips: "0,1"
     rollout_tpu_chips: "2,3"
     inference_tpu_chips: ""

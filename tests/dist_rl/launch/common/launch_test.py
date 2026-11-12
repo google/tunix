@@ -19,7 +19,9 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import subprocess
+import sys
 from typing import Any
 
 from absl.testing import absltest
@@ -918,6 +920,76 @@ class LaunchScriptsTest(absltest.TestCase):
     unused = exported - referenced
     self.assertEmpty(
         unused, msg="Exports not read by any bash driver."
+    )
+
+  def test_local_live_download_model_weights_knob(self):
+    with self.assertRaisesRegex(
+        TypeError, "cluster_config.local.download_model_weights must be a bool"
+    ):
+      resolve_config.initialize(
+          ["cluster_config.local.download_model_weights=maybe"]
+      )
+
+    tempdir = pathlib.Path(self.create_tempdir().full_path)
+    real_py = shlex.quote(sys.executable or "python3")
+    stub_py = tempdir / "stub_python.sh"
+    stub_py.write_text(
+        "#!/bin/bash\n"
+        "set -e\n"
+        'if [[ "$1" == */resolve_config.py ]]; then\n'
+        f'  exec {real_py} "$@"\n'
+        "fi\n"
+        'if [[ "$1" == "-" ]]; then\n'
+        "  script=$(cat)\n"
+        '  if [[ "$script" == *"hf_pipeline"* ]]; then\n'
+        "    exit 99\n"
+        "  fi\n"
+        "  exit 0\n"
+        "fi\n"
+        'if [[ "$*" == *"--discovery_addrs="* ]]; then\n'
+        "  exec sleep 30\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    stub_py.chmod(0o755)
+    artifact_root = tempdir / "artifacts"
+    base_args = [
+        "cluster_config.target=local",
+        f"cluster_config.artifact_root={artifact_root}",
+        "model_config.model_id=local/non_hf_tokenizer_dir",
+        "agentic_grpo_config.beta=0.0",
+        "cluster_config.local.worker_shutdown_grace_secs=0",
+        "cluster_config.local.trainer_shutdown_grace_secs=0",
+    ]
+    # Default download_model_weights=true runs pre-download even when custom
+    # wrapper mains (e.g. rl_efficiency_benchmark) are configured.
+    wrapped_default = self._run_launch(
+        [
+            *base_args,
+            "cluster_config.trainer_main=custom.wrapper.trainer_main",
+        ],
+        extra_env={"PYTHON_BIN": str(stub_py)},
+    )
+    self.assertEqual(
+        wrapped_default.returncode,
+        99,
+        msg=wrapped_default.stdout + wrapped_default.stderr,
+    )
+
+    skipped = self._run_launch(
+        [
+            *base_args,
+            "cluster_config.local.download_model_weights=false",
+            "cluster_config.trainer_main=custom.mock.trainer_main",
+            "cluster_config.rollout_main=custom.mock.rollout_main",
+            "weight_sync_config.mode=noop",
+        ],
+        extra_env={"PYTHON_BIN": str(stub_py)},
+    )
+    self.assertEqual(skipped.returncode, 0, msg=skipped.stdout + skipped.stderr)
+    self.assertIn(
+        "Distributed RL pipeline finished successfully.", skipped.stdout
     )
 
 

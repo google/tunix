@@ -111,7 +111,9 @@ class WeightSyncMode(str, enum.Enum):
 
   Attributes:
     NONE: Disables weight synchronization; rollout workers keep their initial
-      weights across training steps.
+      weights across training steps (`sync_weights=False`).
+    NOOP: Runs full weight-sync barrier handshakes (`NullHandler`) and advances
+      `policy_version` every step without transferring model weights.
     RAIDEN: Multi-process TPU transport via Raiden host-staged RMA/ICI channels
       (wired in `WeightSyncCoordinator` via `RaidenHandler`).
     IN_MEMORY: Direct in-process tensor transfer via `WeightSyncRequest.weights`
@@ -125,6 +127,7 @@ class WeightSyncMode(str, enum.Enum):
   """
 
   NONE = "none"
+  NOOP = "noop"
   RAIDEN = "raiden"
   IN_MEMORY = "in_memory"
   FS = "fs"

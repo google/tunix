@@ -215,6 +215,7 @@ class ConfigsTest(absltest.TestCase):
 
     for valid_mode in (
         "none",
+        "noop",
         "raiden",
         "in_memory",
         "fs",

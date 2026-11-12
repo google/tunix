@@ -1,0 +1,134 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Multi-worker mock data-plane benchmark configuration layered on top of
+# `tunix/dist_rl/launch/common/base_dist_config.yaml`.
+#
+# Models Kimi-K3-class MoE routing volume (61 layers, top-8, 384 experts ->
+# `uint10` = 610 bytes/token) with zero weight-loading or XLA compile time.
+
+model_config:
+  model_name: "mock-moe-61l-top8"
+  model_source: "huggingface"
+  model_id: "tunix/dist_rl/benchmarks/data_plane/tokenizer"
+  dtype: "bfloat16"
+  load_dtype: "bfloat16"
+  mesh:
+    shape: "(4,1)"
+    axis_names: "('fsdp','tp')"
+  kwargs:
+    mock_num_layers: 61
+    mock_top_k: 8
+    mock_decode_sleep_s: 0.05
+    mock_fwd_bwd_sleep_s: 0.10
+    # Per-turn generation length defaults to `total_generation_steps - 1` for
+    # single-turn runs (`max_turns: 1`) and divides the response budget evenly
+    # across `max_turns` when `max_turns >= 2` (override via
+    # `mock_response_tokens_per_turn` if needed).
+
+tokenizer_config:
+  tokenizer_path: "tunix/dist_rl/benchmarks/data_plane/tokenizer"
+  tokenizer_type: "huggingface"
+  add_bos: false
+  add_eos: false
+
+data_module: "tunix.dist_rl.benchmarks.data_plane.data_plane_benchmark"
+task_name: "data_plane_benchmark"
+data_config:
+  split: "train"
+  shuffle: false
+  seed: 42
+  num_records: 512
+  prompt_tokens: 512
+
+batch_size: 8
+
+rl_training_config:
+  max_steps: 4
+  eval_every_n_steps: 100000
+  mini_batch_size: 8
+  train_micro_batch_size: 16
+  max_seq_token_per_tpu: 65536
+  max_segments_per_packed_row: 16
+  checkpointing_options:
+    save_interval_steps: 0
+  metrics_logging_options: null
+
+rollout_config:
+  max_prompt_length: 2048
+  total_generation_steps: 30720
+  temperature: 1.0
+  top_p: 1.0
+  top_k: -1
+  eos_tokens: "1"
+  return_logprobs: true
+
+# `inprocess_vllm` satisfies `resolve_config`'s check that
+# `return_routed_experts: true` uses a vLLM `rollout_engine`; the mock rollout
+# worker constructs `MockBaseSamplerImpl` directly and never imports vLLM.
+# Note: `MockBaseSamplerImpl` emits synthetic token IDs `101..899` (outside the
+# bundled 20-token offline tokenizer vocab) because `FakeTrainer` only consumes
+# token shapes/masks while `RolloutWorker` uses `SamplingResponse.text` directly.
+rollout_engine: "inprocess_vllm"
+vllm_config:
+  init_with_random_weights: false
+  return_routed_experts: true
+  routed_experts_encode_mode: "uint10"
+  routed_experts_num_experts: 384
+
+chat_parser_config:
+  type: "raw"
+  enable_thinking: false
+
+agent_class_path: "mock_agent"
+agent_kwargs:
+  system_prompt: ""
+env_class_path: "mock_data_plane_env"
+
+agentic_grpo_config:
+  num_generations: 8
+  beta: 0.0
+  off_policy_steps: 2
+  trajectory_group_order: "trajectory_completion"
+  reward_mode: "env"
+  episode_timeout: 600
+  max_turns: 1
+  overlong_filter: false
+  use_rollout_logps: true
+  max_concurrency: 64
+
+reward_functions:
+  - "tunix.dist_rl.benchmarks.data_plane.benchmark_rewards"
+
+dist_training_config:
+  segment_alignment_boundary: 64
+  # `FakeTrainer` has no XLA compilation; disabling dummy precompile avoids
+  # clamping Trainer `VmHWM` above the live micro-batch footprint before Step 0.
+  precompile_trainer: false
+
+weight_sync_config:
+  # Selects built-in `NullHandler` (`WeightSyncMode.NOOP`) so every step runs
+  # full weight-sync barriers (`pre_weight_sync -> weight_sync ->
+  # post_weight_sync`) and advances `policy_version` without weight transfer.
+  mode: "noop"
+
+cluster_config:
+  target: "local"
+  orchestrator_main: "tunix.dist_rl.launch.nodes.orchestrator.main"
+  trainer_main: "tunix.dist_rl.benchmarks.data_plane.mock_trainer.trainer_main"
+  rollout_main: "tunix.dist_rl.benchmarks.data_plane.mock_rollout.rollout_main"
+  registry_module: "tunix.dist_rl.benchmarks.data_plane.data_plane_benchmark"
+  artifact_root: "artifacts/data_plane_benchmark"
+  local:
+    download_model_weights: false

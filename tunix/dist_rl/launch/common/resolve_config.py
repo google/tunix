@@ -93,6 +93,7 @@ def finalize_dist_config(hp: cli_config.HyperParameters) -> None:
     hp: Loaded configuration; updated in place.
   """
   _finalize_dist_defaults(hp)
+  _validate_local_settings(hp)
   _validate_dist_invariants(hp)
 
 
@@ -616,6 +617,16 @@ def _validate_fault_tolerance(hp: cli_config.HyperParameters) -> None:
     )
 
 
+def _validate_local_settings(hp: cli_config.HyperParameters) -> None:
+  """Validates `cluster_config.local.download_model_weights`."""
+  local = hp.config_mapping("cluster_config")["local"]
+  if not isinstance(local["download_model_weights"], bool):
+    raise TypeError(
+        "cluster_config.local.download_model_weights must be a bool, got"
+        f" {local['download_model_weights']!r}."
+    )
+
+
 def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   """Validates cross-field invariants across trainer and rollout configs."""
   # TODO(noghabi): Check which of these checks can be consolidated with the
@@ -782,7 +793,10 @@ def _validate_maxtext_pairing(hp: cli_config.HyperParameters) -> None:
       is "maxtext".
   """
   mode = hp.config_mapping("weight_sync_config")["mode"]
-  if mode == common_datatypes.WeightSyncMode.NONE.value:
+  if mode in (
+      common_datatypes.WeightSyncMode.NONE.value,
+      common_datatypes.WeightSyncMode.NOOP.value,
+  ):
     return
   actor_source = hp.config_mapping("actor_model_config")["model_source"]
   rollout_source = hp.config_mapping("rollout_model_config")["model_source"]
@@ -954,7 +968,11 @@ def _validate_maxtext_model_names(hp: cli_config.HyperParameters) -> None:
     names[role_key] = name
   mode = hp.config_mapping("weight_sync_config")["mode"]
   if (
-      mode != common_datatypes.WeightSyncMode.NONE.value
+      mode
+      not in (
+          common_datatypes.WeightSyncMode.NONE.value,
+          common_datatypes.WeightSyncMode.NOOP.value,
+      )
       and len(names) == 2
       and names["actor_model_config"] != names["rollout_model_config"]
   ):
@@ -1280,6 +1298,7 @@ def render_bash_exports(hp: cli_config.HyperParameters) -> str:
           json.dumps(vllm["kwargs"], sort_keys=True) if vllm["kwargs"] else ""
       ),
       "LOCAL_AUTO_DETECT_PCI_TPUS": local["auto_detect_pci_tpus"],
+      "LOCAL_DOWNLOAD_MODEL_WEIGHTS": local["download_model_weights"],
       "LOCAL_TRAINER_TPU_CHIPS": local["trainer_tpu_chips"],
       "LOCAL_ROLLOUT_TPU_CHIPS": local["rollout_tpu_chips"],
       "LOCAL_INFERENCE_TPU_CHIPS": local["inference_tpu_chips"],

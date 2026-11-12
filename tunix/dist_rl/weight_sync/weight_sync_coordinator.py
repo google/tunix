@@ -169,7 +169,8 @@ def create_default_handler(
   """Creates the default coordinator weight sync handler.
 
   Supports `WeightSyncMode.RAIDEN` for production TPU RMA weight sync and
-  `WeightSyncMode.NONE` for protocol-only no-op transfers (`NullHandler`).
+  `WeightSyncMode.NOOP` / `WeightSyncMode.NONE` for protocol-only no-op
+  transfers (`NullHandler`).
   Raises `NotImplementedError` for valid modes without a coordinator transport
   handler yet, and `ValueError` for unknown mode strings.
   """
@@ -190,7 +191,10 @@ def create_default_handler(
     )
     logging.info("Built RaidenHandler natively; port %d", handler.port)
     return handler
-  if resolved_mode == weight_sync.WeightSyncMode.NONE:
+  if resolved_mode in (
+      weight_sync.WeightSyncMode.NONE,
+      weight_sync.WeightSyncMode.NOOP,
+  ):
     logging.info(
         "Built protocol-only NullHandler; weight sync running protocol-only."
     )

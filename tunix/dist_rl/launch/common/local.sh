@@ -395,11 +395,13 @@ trap cleanup EXIT
 trap 'on_shutdown_signal SIGINT' INT
 trap 'on_shutdown_signal SIGTERM' TERM
 
-ensure_model_dir_for "${ACTOR_MODEL_ID}" "${ACTOR_MODEL_DIR}"
-if [[ "${ROLLOUT_MODEL_DIR}" != "${ACTOR_MODEL_DIR}" ]]; then
-  ensure_model_dir_for "${ROLLOUT_MODEL_ID}" "${ROLLOUT_MODEL_DIR}"
+if is_true "${LOCAL_DOWNLOAD_MODEL_WEIGHTS}"; then
+  ensure_model_dir_for "${ACTOR_MODEL_ID}" "${ACTOR_MODEL_DIR}"
+  if [[ "${ROLLOUT_MODEL_DIR}" != "${ACTOR_MODEL_DIR}" ]]; then
+    ensure_model_dir_for "${ROLLOUT_MODEL_ID}" "${ROLLOUT_MODEL_DIR}"
+  fi
+  convert_maxtext_ckpt
 fi
-convert_maxtext_ckpt
 
 mkdir -p "$LOG_ROOT" "$ARTIFACT_ROOT"
 : > "$TRAINER_LOG"
