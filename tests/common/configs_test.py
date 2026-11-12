@@ -231,6 +231,49 @@ class ConfigsTest(absltest.TestCase):
       ):
         configs.RolloutConfig(weight_sync_mode=bad_mode)
 
+  def test_training_config_step_skip_defaults_and_validation(self):
+    cfg = configs.TrainingConfig(eval_every_n_steps=10)
+    self.assertIsNone(cfg.skip_step_on_nan)
+    self.assertTrue(cfg.get_with_default("skip_step_on_nan", True))
+    self.assertIsNone(cfg.max_grad_norm_spike)
+
+    cfg_custom = configs.TrainingConfig(
+        eval_every_n_steps=10,
+        skip_step_on_nan=False,
+        max_grad_norm_spike=12,
+    )
+    self.assertFalse(cfg_custom.skip_step_on_nan)
+    self.assertEqual(cfg_custom.max_grad_norm_spike, 12.0)
+    self.assertIsInstance(cfg_custom.max_grad_norm_spike, float)
+
+    for bad_nan in (1, 0, "true"):
+      with self.assertRaisesRegex(
+          TypeError, "skip_step_on_nan must be a bool or None"
+      ):
+        configs.TrainingConfig(
+            eval_every_n_steps=10,
+            skip_step_on_nan=bad_nan,
+        )
+
+    for bad_spike in (0, -1.0, True, False, float("nan"), float("inf"), "10"):
+      with self.assertRaisesRegex(
+          ValueError, "max_grad_norm_spike must be a positive finite number"
+      ):
+        configs.TrainingConfig(
+            eval_every_n_steps=10,
+            max_grad_norm_spike=bad_spike,
+        )
+
+    # RLTrainingConfig must inherit TrainingConfig.__post_init__ validation.
+    with self.assertRaisesRegex(
+        ValueError, "max_grad_norm_spike must be a positive finite number"
+    ):
+      configs.RLTrainingConfig(
+          eval_every_n_steps=10,
+          actor_optimizer=self.actor_optimizer,
+          max_grad_norm_spike=-5.0,
+      )
+
 
 if __name__ == "__main__":
   absltest.main()
