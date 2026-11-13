@@ -76,6 +76,13 @@ def _inprocess_vllm_rollout_config(
 
 class RunRolloutNodeTest(absltest.TestCase):
 
+  def setUp(self):
+    super().setUp()
+    # `run_rollout_node.main` sets process-wide defaults such as
+    # `VLLM_TPU_RPA_VERSION`. Restore the environment after each test, so they
+    # don't leak into other tests that share the process (pytest workers).
+    self.enter_context(mock.patch.dict(os.environ))
+
   def test_gemma4_uses_gemma4_chat_parser(self):
     parser_factory = mock.Mock(return_value=mock.sentinel.chat_parser)
     with mock.patch.dict(
