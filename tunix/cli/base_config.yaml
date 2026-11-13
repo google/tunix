@@ -250,6 +250,10 @@ grpo_config:
   # stable updates.
   epsilon: 0.2
 
+  score_centering: false
+  score_centering_top_k: 128
+  score_centering_eps: 1.0e-6
+
 
 ############################### Rollout Config ###############################
 rollout_config:
@@ -264,6 +268,10 @@ rollout_config:
   top_p: 1.0
 
   top_k: 50
+
+  return_logprobs: false
+
+  num_logprobs: 1
 
 
 ############################### Other RL  Config ###############################

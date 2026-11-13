@@ -84,6 +84,7 @@
           "max_prompt_length": 1024,
           "max_response_length": null,
           "max_tokens_to_generate": 1024,
+          "num_logprobs": 1,
           "overlong_filter": false,
           "partial_rollout": true,
           "return_logits": false,

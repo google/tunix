@@ -532,6 +532,14 @@ class RLEngine:
 
       if isinstance(self.cluster_config.rollout_config, dict):
         loaded_vllm_config = self.cluster_config.rollout_config[Mode.TRAIN]
+        max_num_logprobs = max(
+            cfg.num_logprobs
+            for cfg in self.cluster_config.rollout_config.values()
+        )
+        if max_num_logprobs != loaded_vllm_config.num_logprobs:
+          loaded_vllm_config = dataclasses.replace(
+              loaded_vllm_config, num_logprobs=max_num_logprobs
+          )
       else:
         loaded_vllm_config = self.cluster_config.rollout_config
 
@@ -1138,6 +1146,21 @@ class RLEngine:
           [cast(np.ndarray, out.prompt_lengths) for out in outputs]
       )
 
+    topk_token_ids = topk_logprobs = None
+    if outputs[0].topk_token_ids is not None:
+      topk_token_ids = list(
+          itertools.chain.from_iterable(out.topk_token_ids for out in outputs)  # pyrefly: ignore[bad-argument-type]
+      )
+      topk_logprobs = list(
+          itertools.chain.from_iterable(out.topk_logprobs for out in outputs)  # pyrefly: ignore[bad-argument-type]
+      )
+
+    routed_experts = None
+    if outputs[0].routed_experts is not None:
+      routed_experts = list(
+          itertools.chain.from_iterable(out.routed_experts for out in outputs)  # pyrefly: ignore[bad-argument-type]
+      )
+
     return base_rollout.RolloutOutput(
         text=texts,
         logits=logits,
@@ -1149,6 +1172,9 @@ class RLEngine:
         ),
         logprobs=logprobs,
         prompt_lengths=prompt_lengths,
+        topk_token_ids=topk_token_ids,
+        topk_logprobs=topk_logprobs,
+        routed_experts=routed_experts,
     )
 
   def per_token_logps(

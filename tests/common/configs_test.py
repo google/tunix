@@ -198,6 +198,12 @@ class ConfigsTest(absltest.TestCase):
           max_seq_token_per_tpu=4096,
       )
 
+  def test_rollout_config_num_logprobs_validation(self):
+    self.assertEqual(configs.RolloutConfig().num_logprobs, 1)
+    self.assertEqual(configs.RolloutConfig(num_logprobs=32).num_logprobs, 32)
+    with self.assertRaisesRegex(ValueError, "num_logprobs must be >= 1"):
+      configs.RolloutConfig(num_logprobs=0)
+
   def test_rl_profile_config_defaults_and_validation(self):
     cfg = configs.RLProfileConfig()
     self.assertEqual(cfg.start_invocation, 2)

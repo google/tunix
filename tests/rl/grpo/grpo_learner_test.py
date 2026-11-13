@@ -1361,6 +1361,34 @@ class GRPOLearnerTest(parameterized.TestCase):
     )
     self.assertLen(rewards, len(prompts))
 
+  def test_score_centering_validation_and_topk_padding(self):
+    rl_engine, _, _ = setup()
+    with self.assertRaisesRegex(ValueError, 'vLLM rollout'):
+      grpo_lib.GRPOLearner(
+          rl_engine=rl_engine,
+          reward_fns=reward_1,
+          algo_config=grpo_lib.GRPOConfig(
+              num_generations=2,
+              num_iterations=1,
+              score_centering=True,
+              score_centering_top_k=2,
+          ),
+      )
+    rollout_out = base_rollout.RolloutOutput(
+        text=['x'],
+        logits=None,
+        tokens=[np.array([4, 5], dtype=np.int32)],
+        left_padded_prompt_tokens=np.array([[1, 2]], dtype=np.int32),
+        logprobs=[np.array([-0.2, -0.4], dtype=np.float32)],
+        topk_token_ids=[np.array([[4, 6, 7], [5, 8, 9]], dtype=np.int32)],
+        topk_logprobs=[
+            np.array([[-0.2, -1.0, -2.0], [-0.4, -1.2, -2.2]], dtype=np.float32)
+        ],
+    )
+    ids, logps = grpo_lib._pad_rollout_topk(rollout_out, max_length=4, k=2)
+    np.testing.assert_array_equal(ids, [[[4, 6], [5, 8], [0, 0], [0, 0]]])
+    self.assertTrue(np.isneginf(logps[0, 2:]).all())
+
 
 if __name__ == '__main__':
   absltest.main()

@@ -34,7 +34,6 @@ from typing import Any, Dict, List, Sequence, Type, TypeVar
 
 from absl import logging
 from flax import nnx
-import jax
 import jax.numpy as jnp
 import numpy as np
 from tunix.perf.experimental import constants as perf_constants
@@ -133,6 +132,36 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
     self._validate_sampler_is_and_rs_options()
 
 
+def _pad_topk(
+    trajectories: Sequence[Any],
+    lengths: List[int],
+    max_length: int,
+    k: int,
+) -> tuple[np.ndarray, np.ndarray]:
+  """Pads each trajectory's first `k` top-k columns into host arrays."""
+  ids = np.zeros((len(trajectories), max_length, k), dtype=np.int32)
+  logps = np.full((len(trajectories), max_length, k), -np.inf, dtype=np.float32)
+  for i, (item, length) in enumerate(zip(trajectories, lengths)):
+    tk_ids = item.traj["old_topk_token_ids"]
+    tk_logps = item.traj["old_topk_logprobs"]
+    if (
+        tk_ids is None
+        or tk_logps is None
+        or tk_ids.shape != tk_logps.shape
+        or tk_ids.ndim != 2
+        or tk_ids.shape[0] != length
+        or tk_ids.shape[1] < k
+    ):
+      raise ValueError(
+          f"Trajectory {i} needs [{length}, >= {k}] top-k logprobs, got"
+          f" {None if tk_ids is None else tk_ids.shape}."
+      )
+    n = min(length, max_length)
+    ids[i, :n] = tk_ids[:n, :k]
+    logps[i, :n] = tk_logps[:n, :k]
+  return ids, logps
+
+
 TGrpoConfig = TypeVar("TGrpoConfig", bound=GRPOConfig)
 
 
@@ -209,6 +238,27 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             mode=rl_engine_lib.Mode.TRAIN
         ).temperature
     )
+    if self.algo_config.score_centering:
+      cluster_config = self.rl_engine.cluster_config
+      rollout_config = self.rl_engine.get_rollout_config(
+          mode=rl_engine_lib.Mode.TRAIN
+      )
+      if (
+          cluster_config.rollout_engine != "vllm"
+          or (
+              self.algo_config.use_rollout_logps
+              and not rollout_config.return_logprobs
+          )
+          or rollout_config.num_logprobs
+          < self.algo_config.score_centering_top_k
+          or self._packing_enabled
+      ):
+        raise ValueError(
+            "score_centering requires the vLLM rollout with"
+            " num_logprobs >= score_centering_top_k (and return_logprobs=True"
+            " when use_rollout_logps=True) on the train RolloutConfig, and no"
+            " sequence packing (max_seq_tokens_per_device)."
+        )
 
     # Workaround to pass loss fn with algorithm flag
     policy_loss_fn = function_registry.get_policy_loss_fn(
@@ -264,6 +314,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         "sampler_trainer/probs_pearson_corr": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
         "sampler_trainer/seq_error_masked_frac": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
         "sampler_trainer/seq_error_masked_count": np.sum,
+        **common.SCORE_CENTERING_METRICS,
     })
     self.rl_engine.actor_trainer.with_tqdm_metrics_to_display([  # pyrefly: ignore[bad-argument-type]
         lambda: "kl"
@@ -458,6 +509,15 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         "Processing results to compute advantage for %d items.",
         len(trajectories),
     )
+    # Known only once training starts (it needs the batch size).
+    if (
+        self.algo_config.score_centering
+        and not self._can_fuse_agreement_in_loss()
+    ):
+      raise ValueError(
+          "score_centering needs one on-policy update per batch:"
+          " num_iterations=1 and mini_batch_size >= the batch size."
+      )
     # With a full group, sorting by pair_index is not necessary as they all
     # originate from the same initial prompt.
     pad_value = self.rl_engine.rollout.pad_id()
@@ -621,6 +681,14 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     prompt_ids = jnp.asarray(padded_prompt_ids)
     completion_ids = jnp.asarray(padded_completion_ids)
     completion_mask = jnp.asarray(padded_completion_masks)
+    old_topk_token_ids = old_topk_logps = None
+    if self.algo_config.score_centering:
+      old_topk_token_ids, old_topk_logps = _pad_topk(
+          trajectories,
+          [len(tokens) for tokens in completion_tokens_list],
+          max_response_length,
+          self.algo_config.score_centering_top_k,
+      )
     # Validity by length: environment/template tokens are context, and a real
     # token equal to the pad id stays valid.
     prompt_mask = jnp.asarray(padded_prompt_masks)
@@ -936,6 +1004,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         old_per_token_logps=old_per_token_logps,
         policy_version=policy_versions,
         sampler_is_weights=sampler_is_weights,
+        old_topk_token_ids=old_topk_token_ids,
+        old_topk_logps=old_topk_logps,
         completion_attention_mask=completion_attention_mask,
         routed_experts=routed_experts,
         sampler_agreement_applied=trainer_per_token_logps is not None,

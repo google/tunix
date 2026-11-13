@@ -67,6 +67,11 @@ class RolloutOutput:
   # TrajectoryCollectEngine tracks tokens (both tokenizer and chat_parser set).
   prompt_lengths: np.ndarray | None = None
 
+  # Per generation `[gen_length, k]` top-k token ids and log probs, set when
+  # `RolloutConfig.num_logprobs > 1`.
+  topk_token_ids: list[np.ndarray] | None = None
+  topk_logprobs: list[np.ndarray] | None = None
+
 
 class BaseRollout(ABC):
   """Base RolloutWorker."""
