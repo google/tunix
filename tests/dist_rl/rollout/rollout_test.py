@@ -36,6 +36,7 @@ class RolloutWorkerTest(parameterized.TestCase):
     super().setUp()
     self.sampler = mocks.MockBaseSamplerImpl(default_delay=0.05)
     self.service = worker.RolloutWorker(
+        config=worker.RolloutConfig(),
         worker_id="test_worker_01",
         sampler=self.sampler,
         env_name="mock_env",
@@ -156,6 +157,7 @@ class RolloutWorkerTest(parameterized.TestCase):
 
     async def _run_test():
       service_1 = worker.RolloutWorker(
+          config=worker.RolloutConfig(),
           worker_id="slice_01",
           sampler=mocks.MockBaseSamplerImpl(
               sampler_name="sampler_slice_1", default_delay=0.02
@@ -169,6 +171,7 @@ class RolloutWorkerTest(parameterized.TestCase):
       actor_1 = remote_execution.InProcessActorHandle(server_1)
 
       service_2 = worker.RolloutWorker(
+          config=worker.RolloutConfig(),
           worker_id="slice_02",
           sampler=mocks.MockBaseSamplerImpl(
               sampler_name="sampler_slice_2", default_delay=0.04
