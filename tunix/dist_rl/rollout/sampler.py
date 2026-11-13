@@ -212,7 +212,7 @@ class Sampler(Protocol):
 
   async def weight_sync(
       self, sync_request: WeightSyncRequest | Any = None, **kwargs
-  ) -> str | None | Any:
+  ) -> int | None:
     """Updates model weights in-place from the specified controller."""
     ...
 

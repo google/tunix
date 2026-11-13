@@ -777,7 +777,7 @@ class WeightSyncE2ETest(absltest.TestCase):
         weights=nnx.state(trainer.model),
     )
     result = asyncio.run(adapter.weight_sync(sync_request))
-    self.assertTrue(result)
+    self.assertIsNone(result)
 
     # Verify sampler received the updated weights directly
     tgt_flat = _to_flat_dict(adapter.transformer_state)
@@ -818,7 +818,7 @@ class WeightSyncE2ETest(absltest.TestCase):
         weights=nnx.state(trainer.model),
     )
     result = asyncio.run(adapter.weight_sync(sync_request))
-    self.assertTrue(result)
+    self.assertIsNone(result)
 
     # Verify mock_vllm_sampler received the converted parameter under the vLLM key
     tgt_flat = _to_flat_dict(self.mock_vllm_sampler.transformer_state)

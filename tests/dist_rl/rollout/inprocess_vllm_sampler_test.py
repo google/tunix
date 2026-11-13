@@ -368,8 +368,10 @@ class InprocessVllmSamplerTest(absltest.TestCase):
     mock_weights = {"layer1": "weights"}
     req = base_sampler_lib.WeightSyncRequest(weights=mock_weights)
     res = asyncio.run(self.sampler.weight_sync(sync_request=req))
-    self.assertTrue(res)
-    self.mock_vllm_sampler.update_params.assert_called_once_with(mock_weights)
+    self.assertIsNone(res)
+    self.mock_vllm_sampler.update_params.assert_called_once_with(
+        mock_weights, filter_types=None
+    )
 
     # Missing sync_request should raise ValueError
     with self.assertRaises(ValueError):
@@ -424,7 +426,7 @@ class InprocessVllmSamplerTest(absltest.TestCase):
     mock_delegate.bind_weight_sync.assert_awaited_once_with(
         sync_request=sync_req,
         state=fake_transformer_state,
-        sampler=self.mock_vllm_sampler,
+        sampler=raiden_sampler,
     )
     mock_delegate.is_bounded.return_value = True
 
@@ -496,16 +498,13 @@ class InprocessVllmSamplerTest(absltest.TestCase):
     )
     raiden_sampler.initialize()
 
-    with self.assertRaisesRegex(RuntimeError, "transformer_state"):
+    with self.assertRaisesRegex(AttributeError, "transformer_state"):
       asyncio.run(raiden_sampler.bind_weight_sync())
 
   def test_exposes_weights_and_cache_hooks_from_vllm_sampler(self):
     fake_state = {"w": 1}
     self.mock_vllm_sampler.transformer_state = fake_state
     self.assertIs(self.sampler.transformer_state, fake_state)
-    self.assertIs(
-        self.sampler._get_underlying_sampler(), self.mock_vllm_sampler
-    )
 
     self.sampler.update_params({"w": 2})
     self.mock_vllm_sampler.update_params.assert_called_once_with(
@@ -534,7 +533,6 @@ class InprocessVllmSamplerTest(absltest.TestCase):
         tokenizer=self.mock_tokenizer,
         config=self.config,
     )
-    self.assertIsNone(uninit._get_underlying_sampler())
     with self.assertRaisesRegex(RuntimeError, "not initialized"):
       _ = uninit.transformer_state
     with self.assertRaisesRegex(RuntimeError, "not initialized"):

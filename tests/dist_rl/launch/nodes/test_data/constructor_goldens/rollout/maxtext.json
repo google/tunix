@@ -211,7 +211,6 @@
     {
       "tunix.dist_rl.weight_sync.raiden_weight_sync_delegate.RaidenWeightSyncDelegate": {
         "kwargs": {
-          "partial_rollout": false,
           "server_id": "rollout-0"
         }
       }
