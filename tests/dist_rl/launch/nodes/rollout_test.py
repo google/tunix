@@ -17,12 +17,14 @@
 from collections.abc import Mapping
 import asyncio
 import contextlib
+import functools
 import json
 import os
 from typing import Any
 from unittest import mock
 
 from absl.testing import absltest
+from tunix.dist_rl.common import execution_target
 from tunix.dist_rl.common import gcs_cache
 from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.launch.common import resolve_config
@@ -862,6 +864,9 @@ class RolloutMainTest(absltest.TestCase):
   def test_main_restores_jax_cache_before_jax_init(self):
     events: list[str] = []
     context = mock.Mock()
+    context.initialize_runtime.side_effect = functools.partial(
+        node_utils.context_lib.ProcessContext.initialize_runtime, context
+    )
 
     def _fake_jax_init() -> None:
       events.append("jax_init")
@@ -1063,6 +1068,78 @@ class RolloutMainTest(absltest.TestCase):
   def test_main_raises_without_discovery_context(self):
     with self.assertRaisesRegex(RuntimeError, "Require discovery API"):
       rollout.main([], context=None)
+
+  def test_main_gpu_and_torch_tpu_targets_gate_tpu_env_and_jax_cache(self):
+    worker_service = mock.MagicMock(trajectory_store=None)
+    ctx_gpu = mock.Mock()
+    ctx_gpu.initialize_runtime.side_effect = functools.partial(
+        node_utils.context_lib.ProcessContext.initialize_runtime, ctx_gpu
+    )
+    with contextlib.ExitStack() as stack:
+      stack.enter_context(
+          mock.patch.dict(os.environ, {"DIST_RL_WORKER_PORT": "41234"})
+      )
+      stack.enter_context(mock.patch.object(rollout.importlib, "import_module"))
+      mock_restore = stack.enter_context(
+          mock.patch.object(gcs_cache, "restore_jax_cache")
+      )
+      stack.enter_context(mock.patch.object(node_utils, "load_hf_tokenizer"))
+      stack.enter_context(
+          mock.patch.object(
+              rollout, "_create_rollout_worker", return_value=worker_service
+          )
+      )
+      stack.enter_context(
+          mock.patch.object(
+              node_utils, "serve_worker", new_callable=mock.AsyncMock
+          )
+      )
+      rollout.main(
+          [
+              "cluster_config.target=external",
+              "cluster_config.artifact_root=/artifacts/run",
+              "execution_targets.rollout=jax:gpu",
+          ],
+          context=ctx_gpu,
+      )
+      self.assertNotIn("VLLM_TPU_RPA_VERSION", os.environ)
+      self.assertNotIn("DISABLE_MOSAIC_ATTN", os.environ)
+    mock_restore.assert_called_once()
+    ctx_gpu.initialize_runtime.assert_not_called()
+
+    ctx_torch = mock.Mock()
+    with contextlib.ExitStack() as stack:
+      stack.enter_context(
+          mock.patch.dict(os.environ, {"DIST_RL_WORKER_PORT": "41234"})
+      )
+      stack.enter_context(mock.patch.object(rollout.importlib, "import_module"))
+      mock_restore_torch = stack.enter_context(
+          mock.patch.object(gcs_cache, "restore_jax_cache")
+      )
+      stack.enter_context(mock.patch.object(node_utils, "load_hf_tokenizer"))
+      stack.enter_context(
+          mock.patch.object(
+              rollout, "_create_rollout_worker", return_value=worker_service
+          )
+      )
+      stack.enter_context(
+          mock.patch.object(
+              node_utils, "serve_worker", new_callable=mock.AsyncMock
+          )
+      )
+      rollout.main(
+          [
+              "cluster_config.target=external",
+              "cluster_config.artifact_root=/artifacts/run",
+              "execution_targets.rollout=torch:tpu",
+          ],
+          context=ctx_torch,
+      )
+      self.assertEqual(os.environ["VLLM_TPU_RPA_VERSION"], "2")
+    mock_restore_torch.assert_not_called()
+    ctx_torch.initialize_runtime.assert_called_once_with(
+        execution_target.TORCH_TPU
+    )
 
 
 if __name__ == "__main__":

@@ -299,6 +299,16 @@ verl_compatible: false
 reward_functions: []
 
 ######################## Distributed RL Extensions ########################
+# Per-role `<framework>:<accelerator>` execution target contract
+# (e.g. "jax:tpu", "jax:gpu", "torch:tpu"). Role-specific keys (`trainer`,
+# `rollout`, `inference`) inherit from `target` when left empty.
+execution_targets:
+  target: "jax:tpu"
+  trainer: ""
+  rollout: ""
+  inference: ""
+  placement: "disaggregated" # "colocated" or "disaggregated"
+
 # Trainer/orchestrator knobs that are not part of the `tunix.cli` training
 # config. Kept out of `rl_training_config` so the shared
 # `BasePipeline.create_rl_training_config()` builder accepts it unchanged.
@@ -330,6 +340,10 @@ dist_training_config:
   trajectory_log_dir: ""
 
 weight_sync_config:
+  # Weight synchronization transport mode ("none", "in_memory", "raiden", "fs",
+  # or "nccl"). "fs" selects disaggregated file/object-store staged weight sync,
+  # orthogonal to checkpoint serialization format ("orbax" vs "safetensors") and
+  # storage backend ("gcs" gs://, "GOOGLE_INTERNAL_STOAGE_PATH" /GOOGLE_INTERNAL_STOAGE_PATH/, or "local" POSIX paths via epath).
   mode: "none"
   raiden_use_ffi: null
   use_weight_converter: true

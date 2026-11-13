@@ -112,8 +112,8 @@ def _yaml_generator_env_vars() -> set[str]:
       ):
         env_vars.add(node.args[0].value)
       elif (
-          isinstance(node.func, ast.Name)
-          and node.func.id == "_env_bool"
+          isinstance(node.func, ast.Attribute)
+          and node.func.attr == "parse_env_bool"
           and node.args
           and isinstance(node.args[0], ast.Constant)
           and isinstance(node.args[0].value, str)

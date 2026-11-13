@@ -34,22 +34,19 @@ import types
 from typing import Any, cast
 
 from tunix.common import datatypes as common_datatypes
+from tunix.dist_rl.common import execution_target
 from tunix.dist_rl.common import gcs_cache
 from tunix.dist_rl.common import timeouts
 from tunix.dist_rl.distributed.runtime import context as context_lib
 from tunix.dist_rl.launch.common import resolve_config
 from tunix.dist_rl.launch.nodes import node_utils
 from tunix.dist_rl.rollout import sampler as sampler_lib
-from tunix.dist_rl.weight_sync import raiden_preload
 from tunix.dist_rl.weight_sync import weight_sync as weight_sync_lib
 from tunix.dist_rl.worker import rollout_worker
 from tunix.generate import mappings as mappings_lib
 from tunix.models import automodel
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
 from tunix.utils import maxtext_utils
-
-# Import Raiden before any other libraries to ensure correct JAX compilation.
-raiden_preload.import_raiden()
 
 LOCAL_WORKER_ID = "rollout-0"
 
@@ -830,11 +827,14 @@ def main(
   logging.info("Importing rollout registry module: %s", registry_module)
   importlib.import_module(registry_module)
 
-  gcs_cache.restore_jax_cache(params=resolve_config.rollout_cache_params(hp))
+  rollout_target = hp.cluster_targets.rollout
+  if rollout_target.framework == execution_target.Framework.JAX:
+    gcs_cache.restore_jax_cache(params=resolve_config.rollout_cache_params(hp))
 
   os.environ.setdefault("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
-  os.environ.setdefault("VLLM_TPU_RPA_VERSION", "2")
-  os.environ.setdefault("DISABLE_MOSAIC_ATTN", "1")
+  if rollout_target.accelerator == execution_target.Accelerator.TPU:
+    os.environ.setdefault("VLLM_TPU_RPA_VERSION", "2")
+    os.environ.setdefault("DISABLE_MOSAIC_ATTN", "1")
   os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
   # `AsyncLLMEngine` (`rollout_engine: vllm`) still launches an `EngineCore`
   # child process; default to `spawn` (`vllm.envs` reads this lazily) rather
@@ -847,8 +847,14 @@ def main(
   config_sha256 = node_utils.log_resolved_config(hp, "rollout")
 
   sampler_type = str(hp.config["rollout_engine"])
-  if sampler_type == "vanilla":
-    process_context.jax.initialize()
+  # On JAX, vLLM samplers (`inprocess_vllm`, `vllm`) initialize the JAX/Ray
+  # distributed runtime internally; vanilla JAX and non-JAX (e.g. `torch:tpu`)
+  # rollouts initialize their runtime here.
+  if (
+      sampler_type == "vanilla"
+      or rollout_target.framework != execution_target.Framework.JAX
+  ):
+    process_context.initialize_runtime(rollout_target)
 
   tokenizer = node_utils.load_hf_tokenizer(hp)
 

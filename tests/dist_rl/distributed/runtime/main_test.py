@@ -16,6 +16,8 @@
 
 from unittest import mock
 from absl.testing import absltest
+from tunix.dist_rl.common import execution_target
+from tunix.dist_rl.distributed.runtime import context
 from tunix.dist_rl.distributed.runtime import main as distributed_main
 
 
@@ -89,6 +91,32 @@ class MainTest(absltest.TestCase):
     argv = [f"--process_main={__name__}.nonexistent_fn"]
     with self.assertRaises(ValueError):
       distributed_main.prepare_process(argv)
+
+  @mock.patch.object(context.ProcessContext, "prepare_env")
+  @mock.patch.object(distributed_main, "import_symbol")
+  def test_prepare_process_applies_framework_spec_before_import(
+      self, mock_import_symbol, mock_prepare_env
+  ):
+    events: list[str] = []
+    mock_prepare_env.side_effect = lambda target: events.append(
+        f"prepare:{target}"
+    )
+
+    def _import(fqn: str):
+      events.append(f"import:{fqn}")
+      return dummy_process_main
+
+    mock_import_symbol.side_effect = _import
+    prepared = distributed_main.prepare_process([
+        f"--process_main={__name__}.dummy_process_main",
+        "--process_framework_spec=jax:gpu",
+    ])
+    self.assertIs(prepared.main_fn, dummy_process_main)
+    self.assertEqual(
+        events,
+        [f"prepare:jax:gpu", f"import:{__name__}.dummy_process_main"],
+    )
+    mock_prepare_env.assert_called_once_with(execution_target.JAX_GPU)
 
   @mock.patch.object(distributed_main, "import_symbol")
   def test_main_single_process(self, mock_import_symbol):

@@ -15,6 +15,7 @@
 """Unit tests for the distributed RL trainer worker node."""
 
 import contextlib
+import functools
 import importlib
 import json
 import os
@@ -25,6 +26,7 @@ from jax.sharding import Mesh
 import omegaconf
 from orbax.checkpoint import v1 as ocp_v1
 from tunix.cli import config as cli_config
+from tunix.dist_rl.common import execution_target
 from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.launch.common import resolve_config
 from tunix.dist_rl.launch.nodes import node_utils
@@ -62,6 +64,10 @@ class TrainerMainTest(absltest.TestCase):
     env = {k: v for k, v in os.environ.items() if k not in _LIBRARY_ENV_VARS}
     self.enter_context(mock.patch.dict(os.environ, env, clear=True))
     self.mock_context = mock.MagicMock()
+    self.mock_context.initialize_runtime.side_effect = functools.partial(
+        node_utils.context_lib.ProcessContext.initialize_runtime,
+        self.mock_context,
+    )
     self.mock_worker_service = mock.MagicMock(spec=trainer_worker.TrainerWorker)
     self.mock_mesh = mock.MagicMock(spec=Mesh)
     self.mock_create_trainer_factory = self.enter_context(
@@ -100,6 +106,9 @@ class TrainerMainTest(absltest.TestCase):
         },
     )
 
+    self.mock_context.initialize_runtime.assert_called_once_with(
+        execution_target.JAX_TPU
+    )
     self.mock_context.jax.initialize.assert_called_once()
     self.mock_create_trainer_factory.assert_called_once()
     worker_kwargs = self.mock_trainer_worker_cls.call_args.kwargs

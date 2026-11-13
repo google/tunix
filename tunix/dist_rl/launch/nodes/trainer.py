@@ -45,13 +45,9 @@ from tunix.dist_rl.launch.common import resolve_config
 from tunix.dist_rl.launch.nodes import node_utils
 from tunix.dist_rl.train import abstract_trainer
 from tunix.dist_rl.train import peft_trainer_v2
-from tunix.dist_rl.weight_sync import raiden_preload
 from tunix.dist_rl.worker import trainer_worker
 from tunix.models import automodel
 from tunix.utils import maxtext_utils
-
-# Import Raiden before any other libraries to ensure correct JAX compilation.
-raiden_preload.import_raiden()
 
 LOCAL_WORKER_ID = "trainer-0"
 
@@ -698,7 +694,7 @@ def main(
   # a malformed port or OpenTelemetry setting fails fast.
   node_utils.setup_otel_metrics(hp, "trainer", worker_id)
 
-  process_context.jax.initialize()
+  process_context.initialize_runtime(hp.cluster_targets.trainer)
 
   rl_train = hp.config_mapping(_RL_TRAINING_KEY)
 

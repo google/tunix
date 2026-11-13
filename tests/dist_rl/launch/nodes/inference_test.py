@@ -14,6 +14,7 @@
 
 """Unit tests for the distributed RL reference inference worker node."""
 
+import functools
 from unittest import mock
 
 from absl.testing import absltest
@@ -32,6 +33,10 @@ class InferenceMainTest(absltest.TestCase):
   def setUp(self):
     super().setUp()
     self.mock_context = mock.MagicMock()
+    self.mock_context.initialize_runtime.side_effect = functools.partial(
+        node_utils.context_lib.ProcessContext.initialize_runtime,
+        self.mock_context,
+    )
     self.mock_mesh = mock.MagicMock(spec=Mesh)
 
     self.enter_context(

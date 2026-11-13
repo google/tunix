@@ -45,6 +45,7 @@ from tunix.cli import config as cli_config
 from tunix.common import configs as common_configs
 from tunix.common import datatypes as common_datatypes
 from tunix.dist_rl.common import datatypes as dist_rl_datatypes
+from tunix.dist_rl.common import execution_target
 from tunix.dist_rl.common import gcs_cache
 from tunix.dist_rl.distributed.deployment import yaml_generator
 
@@ -84,7 +85,9 @@ def _dist_argv(overrides: Sequence[str]) -> list[str]:
   return [_DIST_PROG, str(DEFAULT_BASE_CONFIG_PATH), *overrides]
 
 
-def finalize_dist_config(hp: cli_config.HyperParameters) -> None:
+def finalize_dist_config(
+    hp: cli_config.HyperParameters,
+) -> execution_target.ClusterTargets:
   """Applies the distributed RL derived defaults, then validates invariants.
 
   Called at the end of `DistHyperParameters.__init__`, after
@@ -92,10 +95,14 @@ def finalize_dist_config(hp: cli_config.HyperParameters) -> None:
 
   Args:
     hp: Loaded configuration; updated in place.
+
+  Returns:
+    Resolved `ClusterTargets` for the cluster run.
   """
   _finalize_dist_defaults(hp)
   _validate_local_settings(hp)
   _validate_dist_invariants(hp)
+  return resolve_cluster_targets(hp)
 
 
 class DistHyperParameters(cli_config.HyperParameters):
@@ -106,11 +113,55 @@ class DistHyperParameters(cli_config.HyperParameters):
   in the base schema (`validate_nested`).
   """
 
+  cluster_targets: execution_target.ClusterTargets
+
   def __init__(self, overrides: Sequence[str]) -> None:
     super().__init__(
         _dist_argv(overrides), merge_replace_keys=True, validate_nested=True
     )
-    finalize_dist_config(self)
+    self.cluster_targets = finalize_dist_config(self)
+
+
+def resolve_cluster_targets(
+    hp: cli_config.HyperParameters,
+) -> execution_target.ClusterTargets:
+  """Resolves `execution_targets` and returns validated `ClusterTargets`."""
+  exec_section = _mutable_section(hp, "execution_targets")
+  for key in ("target", "trainer", "rollout", "inference", "placement"):
+    if not isinstance(exec_section[key], str):
+      raise TypeError(
+          f"execution_targets.{key} must be a str, got {exec_section[key]!r}."
+      )
+  default_target = execution_target.ExecutionTarget.parse(
+      exec_section["target"] or str(execution_target.JAX_TPU)
+  )
+  exec_section["target"] = str(default_target)
+  for role in ("trainer", "rollout", "inference"):
+    raw = exec_section[role].strip()
+    exec_section[role] = str(
+        execution_target.ExecutionTarget.parse(raw) if raw else default_target
+    )
+  placement_raw = (
+      exec_section["placement"].strip().lower()
+      or execution_target.Placement.DISAGGREGATED.value
+  )
+  _check_choice(
+      "execution_targets.placement",
+      placement_raw,
+      tuple(p.value for p in execution_target.Placement),
+  )
+  exec_section["placement"] = placement_raw
+  return execution_target.ClusterTargets(
+      trainer=execution_target.ExecutionTarget.parse(exec_section["trainer"]),
+      rollout=execution_target.ExecutionTarget.parse(exec_section["rollout"]),
+      inference=execution_target.ExecutionTarget.parse(
+          exec_section["inference"]
+      ),
+      placement=execution_target.Placement(placement_raw),
+      weight_sync_mode=common_datatypes.WeightSyncMode(
+          str(hp.config_mapping("weight_sync_config")["mode"])
+      ),
+  )
 
 
 def _sync_packed_token_budget(section: MutableMapping[str, Any]) -> None:

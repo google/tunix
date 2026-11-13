@@ -23,6 +23,8 @@ import re
 import string
 from typing import Any
 
+from tunix.dist_rl.common import env_utils
+
 _K8S_LABEL_VALUE_RE = re.compile(r"^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$")
 _STANDALONE_PLACEHOLDER_RE = re.compile(
     r"^(?P<indent>[ \t]*)\$\{(?P<key>[A-Z0-9_]+)\}[ \t]*\n",
@@ -79,10 +81,6 @@ def _substitute_template(
 
   expanded = _STANDALONE_PLACEHOLDER_RE.sub(_replace_standalone, template_text)
   return string.Template(expanded).substitute(substitutions)
-
-
-def _env_bool(name: str) -> bool:
-  return os.environ.get(name, "").strip().lower() in ("1", "true", "yes")
 
 
 def validate_gang_id(gang_id: str | None) -> None:
@@ -547,7 +545,7 @@ def build_substitutions(
   if args.preemptible is not None:
     preemptible = args.preemptible
   else:
-    preemptible = _env_bool("PREEMPTIBLE")
+    preemptible = env_utils.parse_env_bool("PREEMPTIBLE")
 
   labels: list[str] = []
   if args.queue_name:
@@ -564,7 +562,7 @@ def build_substitutions(
   fail_fast = (
       bool(args.fail_fast)
       if args.fail_fast is not None
-      else (_env_bool("FAIL_FAST") and supports_fail_fast)
+      else (env_utils.parse_env_bool("FAIL_FAST") and supports_fail_fast)
   )
   supports_teardown = (
       not template_text or "${TEARDOWN_ON_EXIT}" in template_text
@@ -572,7 +570,10 @@ def build_substitutions(
   teardown_gang_on_exit = (
       bool(args.teardown_gang_on_exit)
       if args.teardown_gang_on_exit is not None
-      else (_env_bool("TEARDOWN_GANG_ON_EXIT") and supports_teardown)
+      else (
+          env_utils.parse_env_bool("TEARDOWN_GANG_ON_EXIT")
+          and supports_teardown
+      )
   )
 
   if args.cpu_nodepool:
@@ -617,7 +618,7 @@ def build_substitutions(
   if args.use_dynamic_slicing is not None:
     use_dynamic_slicing = args.use_dynamic_slicing
   else:
-    use_dynamic_slicing = _env_bool("USE_DYNAMIC_SLICING")
+    use_dynamic_slicing = env_utils.parse_env_bool("USE_DYNAMIC_SLICING")
 
   explicit_head_nodepool = (
       args.head_nodepool or os.environ.get("HEAD_NODEPOOL", "").strip()

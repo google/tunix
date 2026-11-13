@@ -56,6 +56,7 @@ def main(
   )
 
   hp = resolve_config.initialize(argv)
+  node_utils.apply_library_env(hp, "inference")
   config_sha256 = node_utils.log_resolved_config(hp, "inference")
   worker_id = node_utils.worker_id(hp, "inference", LOCAL_WORKER_ID)
   port = node_utils.service_port(hp, "inference")
@@ -63,7 +64,7 @@ def main(
   # a malformed port or OpenTelemetry setting fails fast.
   node_utils.setup_otel_metrics(hp, "inference", worker_id)
 
-  process_context.jax.initialize()
+  process_context.initialize_runtime(hp.cluster_targets.inference)
 
   ref = hp.config_mapping(_REFERENCE_KEY)
 

@@ -25,6 +25,7 @@ from unittest import mock
 from absl.testing import absltest
 import omegaconf
 from tunix.cli import config as cli_config
+from tunix.dist_rl.common import execution_target
 from tunix.dist_rl.common import gcs_cache
 from tunix.dist_rl.launch.common import resolve_config
 
@@ -1669,6 +1670,92 @@ weight_sync_config:
         "local|qwen3-0.6b|raiden|swe-ns|"
         "tunix.dist_rl.launch.nodes.trainer.main|false",
     )
+
+  def test_execution_targets_default_and_per_role_overrides(self):
+    hp = resolve_config.initialize([])
+    self.assertEqual(
+        hp.cluster_targets,
+        execution_target.ClusterTargets(
+            trainer=execution_target.JAX_TPU,
+            rollout=execution_target.JAX_TPU,
+            inference=execution_target.JAX_TPU,
+            placement=execution_target.Placement.DISAGGREGATED,
+        ),
+    )
+
+    hp_override = resolve_config.initialize([
+        "cluster_config.target=external",
+        "cluster_config.artifact_root=/artifacts/run",
+        "execution_targets.target=jax:gpu",
+        "execution_targets.trainer=torch:tpu",
+        "execution_targets.placement=disaggregated",
+    ])
+    self.assertEqual(
+        hp_override.cluster_targets.trainer, execution_target.TORCH_TPU
+    )
+    self.assertEqual(
+        hp_override.cluster_targets.rollout, execution_target.JAX_GPU
+    )
+    self.assertEqual(
+        hp_override.cluster_targets.inference, execution_target.JAX_GPU
+    )
+
+    hp_colocated = resolve_config.initialize([
+        "execution_targets.target=jax:gpu",
+        "execution_targets.placement=colocated",
+    ])
+    self.assertEqual(
+        hp_colocated.cluster_targets.placement,
+        execution_target.Placement.COLOCATED,
+    )
+
+  def test_execution_targets_validation_errors(self):
+    for overrides, exc_type, pattern in (
+        (
+            ["execution_targets.target=123"],
+            TypeError,
+            "execution_targets.target must be a str",
+        ),
+        (
+            ["execution_targets.placement=invalid_mode"],
+            ValueError,
+            "execution_targets.placement must be one of",
+        ),
+        (
+            ["execution_targets.trainer=torch:gpu"],
+            ValueError,
+            "Unsupported execution target 'torch:gpu'",
+        ),
+        (
+            [
+                "cluster_config.target=external",
+                "cluster_config.artifact_root=/artifacts/run",
+                "execution_targets.trainer=jax:tpu",
+                "execution_targets.rollout=jax:gpu",
+                "execution_targets.placement=colocated",
+            ],
+            ValueError,
+            "Placement 'colocated' requires identical execution targets",
+        ),
+        (
+            [
+                "execution_targets.trainer=torch:tpu",
+                "execution_targets.rollout=jax:tpu",
+                "execution_targets.placement=colocated",
+            ],
+            ValueError,
+            "Placement 'colocated' requires identical execution targets",
+        ),
+        (
+            ["weight_sync_config.mode=nccl"],
+            ValueError,
+            "weight_sync_mode='nccl' requires GPU accelerators on both trainer"
+            " and rollout",
+        ),
+    ):
+      with self.subTest(overrides=overrides):
+        with self.assertRaisesRegex(exc_type, pattern):
+          resolve_config.initialize(overrides)
 
 
 if __name__ == "__main__":
