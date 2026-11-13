@@ -16,17 +16,38 @@ Tunix offers a configurable CLI to launch SFT and RL job directly from the comma
 
 ### Configuration Hierarchy
 
-You can tune CLI parameters in one of three ways. Configurations are merged from these sources in the following order of precedence (later sources override earlier ones):
+You can tune CLI parameters across four configuration sources. Configurations
+are merged in the following order of precedence (later sources override earlier
+ones):
 
 1.  **Base Config File** (Lowest Priority):
-    The default settings found in `base_config.yaml`.
+    The default settings found in `base_config.yaml` (or
+    `base_agentic_config.yaml` for agentic RL workflows), passed as the first
+    positional argument.
 
 2.  **Config File Override**:
     An optional secondary config file specified via the `override_config_file` argument (e.g., `override_config_file=/path/to/override.yaml`). Values here override the base config.
-    *(See an [example script](https://github.com/google/tunix/blob/main/examples/rl/grpo/gsm8k/configs/gemma2_2b.yaml)).*
+    *(See an [example config](https://github.com/google/tunix/blob/main/examples/rl/grpo/gsm8k/configs/gemma2_2b.yaml)).*
 
-3.  **CLI Arguments** (Highest Priority):
-    Individual `key=value` pairs provided as command-line arguments. These override values from both the base config and the override file.
+3.  **Environment Variables (`T_<KEY>`)**:
+    Environment variables prefixed with `T_` (including entries loaded from
+    `.env`) override keys in the base config (for example, `T_BATCH_SIZE=32`).
+    Note: setting the same parameter via both a `T_` environment variable and an
+    `override_config_file` or CLI argument raises a `ValueError` to prevent
+    ambiguous overrides.
+
+4.  **CLI Arguments** (Highest Priority):
+    Individual positional `key=value` pairs provided on the command line
+    (without `--` prefixes). These override values from both the base config and
+    `override_config_file`.
+
+> **Note (`replace_keys` behavior):** By default (`merge_replace_keys=False`),
+> overriding top-level dictionary sections in `replace_keys` (`lora_config`,
+> `training_config`, `optimizer_config`, `profiler_options`,
+> `rl_training_config`) as a mapping replaces that section wholesale rather than
+> deep-merging all base keys; use dotted `section.key=value` overrides (or
+> enable `merge_replace_keys=True` in custom entry points) when overriding
+> individual nested fields.
 
 
 ### Example CLI Scripts
@@ -115,7 +136,7 @@ Instead of typing `export` every time, we will save these credentials in a file 
 
     *Refer to the [hardware requirement](https://github.com/google/tunix/blob/main/examples/sft/mtnt/README.md) before proceeding.*
 
-    *   **Peft Training on MTNT dataset** ([Source Folder](https://github.com/google/tunix/blob/main/examples/sft/mtnt))
+    *   **Peft Training on MTNT dataset** ([Source Folder](https://github.com/google/tunix/tree/main/examples/sft/mtnt))
 
         | Model Variant     | Script Name             | Link                                                                                                                             |
         | :---------------- | :---------------------- | :------------------------------------------------------------------------------------------------------------------------------- |
@@ -130,7 +151,7 @@ Instead of typing `export` every time, we will save these credentials in a file 
 
     *Refer to the [hardware requirement](https://github.com/google/tunix/blob/main/examples/rl/README.md) before proceeding.*
 
-    *   **GRPO Training on GSM8K dataset** ([Source Folder](https://github.com/google/tunix/blob/main/examples/rl/grpo/gsm8k/))
+    *   **GRPO Training on GSM8K dataset** ([Source Folder](https://github.com/google/tunix/tree/main/examples/rl/grpo/gsm8k/))
 
         | Model Variant     | Script Name             | Link                                                                                                                             |
         | :---------------- | :---------------------- | :------------------------------------------------------------------------------------------------------------------------------- |
@@ -138,50 +159,66 @@ Instead of typing `export` every time, we will save these credentials in a file 
         | **Gemma 2 2B**    | `run_gemma2_2b.sh`      | [View Script](https://github.com/google/tunix/blob/main/examples/rl/grpo/gsm8k/run_gemma2_2b.sh)      |
         | **Gemma 3 1B**    | `run_gemma3_1b.sh`      | [View Script](https://github.com/google/tunix/blob/main/examples/rl/grpo/gsm8k/run_gemma3_1b.sh)      |
         | **Gemma 3 4B**    | `run_gemma3_4b.sh`      | [View Script](https://github.com/google/tunix/blob/main/examples/rl/grpo/gsm8k/run_gemma3_4b.sh)      |
+        | **Gemma 3 12B**   | `run_gemma3_12b.sh`     | [View Script](https://github.com/google/tunix/blob/main/examples/rl/grpo/gsm8k/run_gemma3_12b.sh)     |
         | **Llama 3.1 8B**  | `run_llama3.1_8b.sh`    | [View Script](https://github.com/google/tunix/blob/main/examples/rl/grpo/gsm8k/run_llama3.1_8b.sh)    |
         | **Llama 3.2 1B**  | `run_llama3.2_1b.sh`    | [View Script](https://github.com/google/tunix/blob/main/examples/rl/grpo/gsm8k/run_llama3.2_1b.sh)    |
+        | **Qwen 3 0.6B**   | `run_qwen3.sh`          | [View Script](https://github.com/google/tunix/blob/main/examples/rl/grpo/gsm8k/run_qwen3.sh)          |
+        | **Qwen 3 (Simple Reward)** | `run_qwen3_simplereward.sh` | [View Script](https://github.com/google/tunix/blob/main/examples/rl/grpo/gsm8k/run_qwen3_simplereward.sh) |
+        | **Qwen 3 (vLLM Disagg)**   | `run_qwen3_vllm_disagg.sh`  | [View Script](https://github.com/google/tunix/blob/main/examples/rl/grpo/gsm8k/run_qwen3_vllm_disagg.sh)  |
+        | **Qwen 3 8B (Disagg)**     | `run_qwen3_8b_disagg.sh`    | [View Script](https://github.com/google/tunix/blob/main/examples/rl/grpo/gsm8k/run_qwen3_8b_disagg.sh)    |
+        | **Qwen 3 8B (MaxText Disagg)** | `run_qwen3_8b_disagg_maxtext.sh` | [View Script](https://github.com/google/tunix/blob/main/examples/rl/grpo/gsm8k/run_qwen3_8b_disagg_maxtext.sh) |
 
-    *   **PPO Training on GSM8K dataset** ([Source Folder](https://github.com/google/tunix/blob/main/examples/rl/PPO/gsm8k/))
+    *   **PPO Training on GSM8K dataset** ([Source Folder](https://github.com/google/tunix/tree/main/examples/rl/ppo/gsm8k/))
 
         | Model Variant     | Script Name             | Link                                                                                                                             |
         | :---------------- | :---------------------- | :------------------------------------------------------------------------------------------------------------------------------- |
-        | **Gemma 2B**      | `run_gemma_7b.sh`       | [View Script](https://github.com/google/tunix/blob/main/examples/rl/ppo/gsm8k/run_gemma_2b.sh)       |
+        | **Gemma 2B**      | `run_gemma_2b.sh`       | [View Script](https://github.com/google/tunix/blob/main/examples/rl/ppo/gsm8k/run_gemma_2b.sh)       |
         | **Gemma 2 2B**    | `run_gemma2_2b.sh`      | [View Script](https://github.com/google/tunix/blob/main/examples/rl/ppo/gsm8k/run_gemma2_2b.sh)      |
         | **Gemma 3 1B**    | `run_gemma3_1b.sh`      | [View Script](https://github.com/google/tunix/blob/main/examples/rl/ppo/gsm8k/run_gemma3_1b.sh)      |
         | **Llama 3.1 8B**  | `run_llama3.1_8b.sh`    | [View Script](https://github.com/google/tunix/blob/main/examples/rl/ppo/gsm8k/run_llama3.1_8b.sh)    |
-        | **Qwen 3 1.7B**  | `run_llama3.2_1b.sh`    | [View Script](https://github.com/google/tunix/blob/main/examples/rl/ppo/gsm8k/run_qwen3_1.7b.sh)    |
+        | **Qwen 3 1.7B**   | `run_qwen3_1.7b.sh`     | [View Script](https://github.com/google/tunix/blob/main/examples/rl/ppo/gsm8k/run_qwen3_1.7b.sh)     |
 
+    *   **Agentic RL Launch Scripts**
 
-
+        | Task / Benchmark  | Script Name             | Link                                                                                                                             |
+        | :---------------- | :---------------------- | :------------------------------------------------------------------------------------------------------------------------------- |
+        | **FrozenLake (Gemma 4 E2B)** | `run_gemma4_e2b.sh` | [View Script](https://github.com/google/tunix/blob/main/examples/frozenlake/run_gemma4_e2b.sh) |
+        | **DeepScaleR (Disaggregated)** | `run_deepscaler_disagg_v5p16.sh` | [View Script](https://github.com/google/tunix/blob/main/examples/deepscaler/run_deepscaler_disagg_v5p16.sh) |
+        | **DeepSWE (Disaggregated)** | `run_deepswe_disagg_v5p_32.sh` | [View Script](https://github.com/google/tunix/blob/main/examples/deepswe/run_deepswe_disagg_v5p_32.sh) |
 
 
 ### CLI Scripts Overview
 
 CLI Core code and CLI example launch scripts reside separately. This section provides a high level overview of the CLI structure.
 
-* [CLI Core](https://github.com/google/tunix/blob/main/cli)
-  * `base_config.yaml`: Define all the configurations that could be tuned when launching a job.
+* [CLI Core](https://github.com/google/tunix/tree/main/tunix/cli)
+  * `base_config.yaml`: Base configuration schema for standard SFT, GRPO, and PPO CLI jobs.
+
+  * `base_agentic_config.yaml`: Base configuration schema for agentic RL CLI jobs.
+
+  * `base_rl_pipeline.py`: Shared RL pipeline builder handling role meshes (`same_mesh_as`), `rl_training_config`, and performance tracing setup.
 
   * `peft_main.py`: Main entry point to trigger Parameter-Efficient Fine-Tuning (PEFT) Trainer from the CLI configs.
 
   * `grpo_main.py`: Main entry point to trigger Group Relative Policy Optimization (GRPO) Trainer from the CLI configs.
 
+  * `grpo_vllm_main.py`: Entry point for GRPO / Agentic GRPO workflows backed by vLLM rollout.
+
   * `ppo_main.py`: Main entry point to trigger Proximal Policy Optimization (PPO) Trainer from the CLI configs.
 
-  * `config.py`: Logic to read and process the config passed by command line or environment variable.
+  * `config.py`: Logic to read, validate, and merge configs from YAML files, `T_<KEY>` environment variables, and CLI arguments.
 
-  * `reward_fn/...`: Predefined reward functions for reinforcement learning jobs. You could modify your shell scripts to use your own reward function.
+  * `reward_fn/`: Predefined reward functions for reinforcement learning jobs (`gsm8k.py` on [gsm8k dataset](https://www.tensorflow.org/datasets/catalog/gsm8k), `gsm8k_verl.py` compatible with [verl](https://github.com/google/tunix/blob/main/examples/rl/grpo/gsm8k/verl_compatible/README.md), and `simple_math.py`).
 
-  * `gsm8k.py`: Predefined reward functions running on [gsm8k dataset](https://www.tensorflow.org/datasets/catalog/gsm8k).
+  * `recipes/` & `utils/`: Dataset helpers (`deepscaler_data.py`, `utils/data.py`) and model loading helpers (`utils/model.py`).
 
-  * `gsm8k_verl.py`: Predefined reward functions on gsm8k dataset compatible with verl, refer to [this](https://github.com/google/tunix/blob/main/examples/rl/grpo/gsm8k/verl_compatible/README.md) for details.
+* [CLI Examples](https://github.com/google/tunix/tree/main/examples)
 
+  * `sft/..`: SFT CLI shell scripts and YAML configs.
 
-* [CLI Examples](https://github.com/google/tunix/blob/main/examples)
+  * `rl/..`: GRPO and PPO CLI shell scripts and YAML configs.
 
-  * `SFT/..`: All available SFT CLI shell scripts.
-
-  * `RL/.. `: All available RL CLI shell scripts.
+  * `frozenlake/`, `deepscaler/`, `deepswe/`: Agentic RL launch scripts and configs.
 
 
 ### Usage
@@ -263,7 +300,7 @@ This section provides a detailed explanation of the configuration parameters ava
 
 #### Model Configuration (`model_config`)
 
-These parameters define the base model, where to download it from, and how to shard it across TPUs/GPUs. Note that `actor_model_config`, `reference_model_config`, and `rollout_model_config` typically inherit from this base configuration. 
+These parameters define the base model, where to download it from, and how to shard it across TPUs/GPUs. Note that in RL configs, `actor_model_config`, `reference_model_config`, and `rollout_model_config` inherit from `model_config` by default, and `critic_model_config` (set to `null` by default) configures the critic/value model in PPO.
 
 * **`model_name`**: The unique full name identifier of the model. This
     corresponds to the full name and should match exactly with the model name
@@ -272,15 +309,18 @@ These parameters define the base model, where to download it from, and how to sh
     *   *Example*: `gemma-2b`, `llama-3.1-8b`, `gemma2-2b-it`.
     Refer to [models documentation](models.md#naming-conventions) for model naming.
 
-* **`model_source`**: The source repository for the model. Options: `"huggingface"`, `"kaggle"`, `"gcs"`, or empty string `""` for local paths.
-* **`model_id`**: The exact repository ID (case sensitive) as it appears on Hugging Face or Kaggle (e.g., `"meta-llama/Llama-3.1-8B"`).
-  * *Example for Hugging Face*: `meta-llama/Llama-3.1-8B` is extracted as shown belows
-  {: width="75%"}
-  * *Example for Kaggle*: `google/gemma-2/flax/gemma2-2b-it` is extracted as shown belows
-  {: width="75%"}
+* **`model_source`**: The source repository for the model. Options: `"huggingface"`, `"kaggle"`, `"gcs"`, `"maxtext"`, or empty string `""` for local paths.
+* **`model_id`**: Model identifier (case sensitive) used by Tunix to determine model architecture/configuration, and to download weights when `model_source` is `"huggingface"` (e.g., Hugging Face Hub ID `"meta-llama/Llama-3.1-8B"` or Tunix config ID `"gemma2_2b_it"`).
+  * *Example for Hugging Face*: `meta-llama/Llama-3.1-8B` is extracted as shown below:
 
+    ![Hugging Face extracting Model ID](images/model_id_huggingface.png)
 
-* **`model_path`**: Used if `model_source` is GCS or local. Specifies the direct file path to the model.
+* **`model_path`**: Path or source handle for non-Hugging Face sources:
+  * **Kaggle (`model_source: "kaggle"`)**: Kaggle Hub model handle, e.g., `"google/gemma-2/flax/gemma2-2b-it"`, extracted as shown below:
+
+    ![Kaggle extracting Model ID](images/model_id_kaggle.png)
+
+  * **GCS / MaxText / Local**: Direct GCS bucket URI (`"gs://..."`), MaxText checkpoint path, or local filesystem directory.
 * **`model_download_path`**: Local directory where downloaded checkpoints will be cached (e.g., `"/tmp/models"`).
 * **`rng_seed`**: Integer seed for initializing the `nnx.Rngs` state to manage randomness (e.g., `0`).
 * **`model_display`**: Boolean flag. If set to `true`, prints the model structure/summary.
@@ -293,9 +333,11 @@ These parameters define the base model, where to download it from, and how to sh
   * `tile_size`: Tile size for efficient computation (e.g., `256`).
 
 
-* **`mesh`**: Defines the hardware mesh layout for distributed training.
+* **`mesh`**: Defines the hardware mesh layout for distributed training (set `mesh: null` on a role config when sharing another role's mesh via `same_mesh_as`).
   * `shape`: Tuple string defining mesh dimensions (e.g., `"(2,2)"` for a 2x2 grid).
   * `axis_names`: Names for mesh axes, often used for parallelism strategies (e.g., `"('fsdp','tp')"` for Fully Sharded Data Parallelism and Tensor Parallelism).
+  * `allocation_policy`: Device allocation policy (`"COMPACT"` or `"PERFORMANCE"`).
+* **`same_mesh_as`**: *(RL role model configs only)* Shares another active role's mesh (for example, setting `mesh: null` and `same_mesh_as: "actor"` under `reference_model_config`, `rollout_model_config`, or `critic_model_config` for colocated execution).
 
 
 #### Tokenizer Configuration (`tokenizer_config`)
@@ -322,33 +364,45 @@ These parameters define the base model, where to download it from, and how to sh
 
 #### Optimizer Configuration (`optimizer_config`)
 
-Controls the gradient descent algorithm and learning rate scheduling. Tunix uses [optax](https://optax.readthedocs.io/en/latest/getting_started.html) to for optimizer.
+Controls the gradient descent algorithm and learning rate scheduling. Tunix uses [optax](https://optax.readthedocs.io/en/latest/getting_started.html) for optimizers.
 
-* **`opt_type`**: The optimizer algorithm to use (e.g., `"adamw"`). Refer to [optax.optimizer](https://optax.readthedocs.io/en/latest/api/optimizers.html#optimizers) for available optimizer.
+* **`opt_type`**: The optimizer algorithm to use (e.g., `"adamw"`). Refer to [optax.optimizer](https://optax.readthedocs.io/en/latest/api/optimizers.html#optimizers) for available optimizers.
 
 * **`learning_rate`**: A global scaling factor, either fixed or evolving along iterations with a scheduler if `schedule_type` is set.
 
-* **`schedule_type`**: The learning rate schedule function (e.g., `"warmup_cosine_decay_schedule"`). Refer to [optax.schedule](https://optax.readthedocs.io/en/latest/api/optimizer_schedules.html#) for available schedulers.
+* **`schedule_type`**: The learning rate schedule function (e.g., `"warmup_cosine_decay_schedule"`). Refer to [optax.schedule](https://optax.readthedocs.io/en/latest/api/optimizer_schedules.html) for available schedulers.
 
 * **`warmup_steps`**: Number of steps to linearly increase the learning rate from `init_value` to `peak_value`.
 
 * **`decay_steps`**: Number of steps for the decay phase of the schedule.
 
-* **`max_grad_norm`**: Gradient clipping threshold. Essential for preventing exploding gradients, especially in RL.
+* **`opt_chain_type`** & **`chain_kwargs`**: Optional gradient transformation chained ahead of `opt_type`. To enable global-norm gradient clipping in the CLI, configure:
+  ```yaml
+  opt_chain_type: "clip_by_global_norm"
+  chain_kwargs:
+    max_norm: 1.0
+  ```
 
+> **Warning:** Although `max_grad_norm` appears in legacy `base_config.yaml` templates, `create_optimizer` filters optimizer kwargs against `inspect.signature(optax.<opt_type>)`, so `max_grad_norm` is currently a **no-op** unless `opt_chain_type: "clip_by_global_norm"` and `chain_kwargs.max_norm` are configured.
 
-
-
-#### Training Configuration (`training_config`)
+#### Training Configuration (`training_config` for SFT, `rl_training_config` for RL)
 
 General settings for the training loop, logging, and checkpointing.
+
+* **SFT (`peft_main.py`)** reads top-level **`training_config`** and **`optimizer_config`**.
+* **RL (`grpo_main.py`, `grpo_vllm_main.py`, `ppo_main.py`)** reads **`rl_training_config`**, which inherits defaults from `training_config` via YAML anchor (`<<: *base_training_config`) and adds:
+  * **`actor_optimizer_config`** & **`critic_optimizer_config`**: Per-role optimizer dictionaries (same schema as `optimizer_config`).
+  * **`mini_batch_size`**, **`train_micro_batch_size`**, **`rollout_micro_batch_size`**, **`compute_logps_micro_batch_size`**: RL batching and micro-batching knobs (for RL, `gradient_accumulation_steps` must remain `null` and is derived automatically from `mini_batch_size // train_micro_batch_size`).
+
+> **Warning (RL CLI Overrides):** Because YAML `<<:` anchors resolve when `base_config.yaml` is parsed—before CLI overrides are applied—RL jobs **must** override `rl_training_config.*` (for example, `rl_training_config.max_steps=100` and `rl_training_config.actor_optimizer_config.learning_rate=3e-6`). Passing `training_config.*` or top-level `optimizer_config.*` to `grpo_main.py` or `ppo_main.py` has no effect.
+
+Common fields in `training_config` / `rl_training_config`:
 
 * **`max_steps`**: Total number of training steps to run.
 
 * **`eval_every_n_steps`**: Frequency of running evaluation steps.
 
-* **`gradient_accumulation_steps`**: Number of steps to accumulate gradients 
-before performing a parameter update (simulates larger batch sizes).
+* **`gradient_accumulation_steps`**: Number of steps to accumulate gradients before performing a parameter update in SFT (must be `null` in `rl_training_config`).
 
 * **`checkpointing_options`**:
   * `max_to_keep`: Number of recent checkpoints to retain.
@@ -367,7 +421,7 @@ before performing a parameter update (simulates larger batch sizes).
 
 Specific parameters for Group Relative Policy Optimization (GRPO).
 
-* **`num_generations`**: (GRPO specific) The number of responses generated per prompt in a single step (corresponds to $\varepsilon$ in the paper).
+* **`num_generations`**: (GRPO specific) The number of responses generated per prompt in a single step (corresponds to $G$ in the paper).
 
 * **`beta`**: Coefficient for the KL divergence penalty. Keeps the trained model close to the reference model.
 
@@ -385,9 +439,9 @@ Specific parameters for Group Relative Policy Optimization (GRPO).
 
 Specific parameters for Proximal Policy Optimization (PPO).
 
-* **`num_iterations`**: (PPO specific) The number of iterations per batch (corresponds to $\varmu$ in the paper)
+* **`num_iterations`**: (PPO specific) The number of iterations per batch (corresponds to $\mu$ in the paper).
 
-* **`lambda`**: The lambda parameter for Generalized Advantage Estimation (GAE).
+* **`gae_lambda`**: The lambda parameter (`ppo_config.gae_lambda`) for Generalized Advantage Estimation (GAE).
 
 * **`gamma`**: The discount factor for future rewards in GAE.
 

@@ -45,13 +45,14 @@ As of right now, JAX GPU support covers the following components and boundaries:
     `train_frozenlake_qwen3.py`).
 *   **Not Yet Supported — Disaggregated Distributed RL Stack
     (`tunix.dist_rl`)**: Multi-node `RLProgram` / `StandardRLProgram`
-    orchestration, `tunix.dist_rl.launch` worker nodes (`TrainerWorker`,
-    `RolloutWorker`), and cross-slice Raiden weight sync
+    orchestration, `tunix.dist_rl.worker.{trainer_worker,rollout_worker}` worker
+    nodes (`TrainerWorker`, `RolloutWorker`), and cross-slice Raiden weight sync
     (`tunix.dist_rl.weight_sync`).
 *   **Not Yet Supported — External / vLLM JAX Rollout Workers
     (`rollout_engine="vllm"` / `inprocess_vllm`)**:
     `tunix.rl.rollout.vllm_rollout.VllmRollout`,
-    `tunix.dist_rl.rollout.vllm_sampler.VllmSampler`, and `InprocessVllmSampler`
+    `tunix.dist_rl.rollout.vllm_sampler.VllmSampler`, and
+    `tunix.dist_rl.rollout.inprocess_vllm_sampler.InprocessVllmSampler`
     currently target TPU (`vllm_jax` / `tpu-inference`).
 *   **Not Yet Supported — Standalone `PeftTrainer` v1 & Tokamax GPU Paged
     Attention**: Standalone SFT/PEFT GPU workflows target `PeftTrainer` v2
@@ -105,13 +106,13 @@ contracts (no silent fallbacks):
 :              :                                                : via `jax_triton` (GPU paged         :
 :              :                                                : attention is not yet supported by   :
 :              :                                                : Tokamax)                            :
-| **Multi-Host | `utils.sharding_utils.place_array_on_target`,  | `jax.make_array_from_callback` for  |
-: Sharding**   : `utils.sharding_utils.shard`,                  : non-fully-addressable               :
-:              : `sft.checkpoint_manager`,                      : `NamedSharding` across              :
-:              : `dist_rl.train.peft_trainer_v2`,               : `jax.process_count() > 1`;          :
-:              : `PeftTrainer._shard_optimizer`                 : `jax.local_devices()` sync in       :
-:              :                                                : `perf/trace.py` and                 :
-:              :                                                : `perf/experimental/tracer.py`       :
+| **Multi-Host | `tunix.utils.sharding_utils.place_array_on_target`, | `jax.make_array_from_callback` for |
+: Sharding**   : `tunix.utils.sharding_utils.shard`,            : non-fully-addressable               :
+:              : `tunix.sft.checkpoint_manager`,                : `NamedSharding` across              :
+:              : `tunix.dist_rl.train.peft_trainer_v2`,         : `jax.process_count() > 1`;          :
+:              : `tunix.sft.peft_trainer.PeftTrainer._shard_optimizer` : `jax.local_devices()` sync in :
+:              :                                                : `tunix/perf/trace.py` and           :
+:              :                                                : `tunix/perf/experimental/tracer.py` :
 | **Topology & | `tunix.utils.topology`, `tunix.sft.utils`      | GPU device family normalization     |
 : Memory**     :                                                : (`a100`, `l4`, `h100`, `h200`,      :
 :              :                                                : `b200`) and null-safe CUDA          :
@@ -304,8 +305,8 @@ query 0 non-empty (`q == 0`).
 Validated end-to-end across 2 GPU hosts (`process_count=2`,
 `Mesh('fsdp': 1, 'tp': 2)`, 30 steps of `Qwen/Qwen3-0.6B` on FrozenLake GRPO):
 
-*   **Convergence**: `rewards/solve_ratio` improved from `0.8369` (Step 1) to
-    `0.9995-1.0000` (Steps 4–30), with held-out `eval/rewards/solve_ratio`
+*   **Convergence**: `rewards/train/solve_ratio` improved from `0.8369` (Step 1)
+    to `0.9995-1.0000` (Steps 4–30), with held-out `rewards/eval/solve_ratio`
     reaching `0.9900` and surrogate loss converging from `+1.960` to `+0.104`.
 *   **Throughput & Memory**: Steady-state step latency reached `1.574s/step`
     (`1,300.7 tok/s`), with per-host peak HBM flat at `8.35 GiB` across all 30

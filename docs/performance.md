@@ -68,14 +68,14 @@ then the effective global batch size will be 1024. For algorithms that don't
 require group generation (e.g. PPO), global batch size equals dataloader's batch
 size. **Note**: you don't directly tune the global batch size in Tunix, but
 instead this is derived from the dataloader batch size and
-[num_generation](https://github.com/google/tunix/blob/04f17e0b842901c13339874a25db77ba920adbc5/tunix/rl/grpo/grpo_learner.py#L52-L55)
+[num_generations](https://github.com/google/tunix/blob/main/tunix/rl/algorithm_config.py#L307)
 configurations.
 
 ![global batch flow](./images/global_batch_flow.png)
 
 ### Mini Batch Size
 
-[Mini batch size](https://github.com/google/tunix/blob/04f17e0b842901c13339874a25db77ba920adbc5/tunix/rl/rl_cluster.py#L102)
+[Mini batch size](https://github.com/google/tunix/blob/main/tunix/common/configs.py#L461)
 determines how frequently the model is updated within a global step (commonly
 known as mini-batch gradient update), which is used to reduce memory pressure on
 the trainer for a large global batch and stabilize training. For a global batch
@@ -99,17 +99,17 @@ the inference worker.
 Tunix allows per-component micro-batching to maximize throughput across
 different stages:
 
-1.  [rollout_micro_batch_size](https://github.com/google/tunix/blob/04f17e0b842901c13339874a25db77ba920adbc5/tunix/rl/rl_cluster.py#L104)
+1.  [rollout_micro_batch_size](https://github.com/google/tunix/blob/main/tunix/common/configs.py#L463)
     controls the input batch size to rollout engine. **NOTE**: with the new
     agentic rollout, this is deprecated as the system automatically decomposes
     batches into individual prompts to leverage continuous batching.
 
-2.  [compute_logps_micro_batch_size](https://github.com/google/tunix/blob/04f17e0b842901c13339874a25db77ba920adbc5/tunix/rl/rl_cluster.py#L105):
+2.  [compute_logps_micro_batch_size](https://github.com/google/tunix/blob/main/tunix/common/configs.py#L464):
     Controls the batch size for the inference worker during log-probability
     calculation. Since this is forward-only, you can typically set this 2–4x
     higher than the trainer's micro-batch size.
 
-3.  [train_micro_batch_size](https://github.com/google/tunix/blob/04f17e0b842901c13339874a25db77ba920adbc5/tunix/rl/rl_cluster.py#L103C3-L103C25):
+3.  [train_micro_batch_size](https://github.com/google/tunix/blob/main/tunix/common/configs.py#L462):
     Controls the trainer's input batch size. Setting this automatically enables
     **gradient accumulation**, where the number of accumulation steps is
     calculated as `mini_batch_size / train_micro_batch_size`. This value is
@@ -152,7 +152,7 @@ sharded across every available chip to fit into memory. In collocated mode, each
 component will be executed in sequential order, which means the cluster will
 finish rollout generation before shifting to inference and training. To further
 maximize the hardware utility, you can consider enabling
-[host_offloading](https://github.com/google/tunix/blob/main/rl/rl_cluster.py?q=offload_to_cpu)
+[host_offloading](https://github.com/google/tunix/blob/main/tunix/common/configs.py#L552)
 with `offload_to_cpu`, which saves HBM by moving non-active models to CPU RAM
 when a different component is occupying the TPU.
 
@@ -164,19 +164,20 @@ every component when configuring the `role_to_mesh` mapping for your
 import numpy as np
 import jax
 from jax.sharding import Mesh
-from tunix.rl.rl_engine import ClusterConfig, Role
+from tunix.rl.rl_cluster import ClusterConfig, Role
 
 devices = jax.devices()
 devices_mesh = np.array(devices).reshape(len(devices), 1)
 mesh = Mesh(devices_mesh, axis_names=('fsdp', 'tp'))
 
-ClusterConfig(
-  role_to_mesh={
-      Role.ACTOR: mesh,
-      Role.REFERENCE: mesh,
-      Role.ROLLOUT: mesh,
-  },
-  ...
+cluster_config = ClusterConfig(
+    role_to_mesh={
+        Role.ACTOR: mesh,
+        Role.REFERENCE: mesh,
+        Role.ROLLOUT: mesh,
+    },
+    training_config=training_config,
+    rollout_config=rollout_config,
 )
 ```
 
@@ -201,7 +202,7 @@ when defining the role_to_mesh mapping in your rl_engine configuration.
 import numpy as np
 import jax
 from jax.sharding import Mesh
-from tunix.rl.rl_engine import ClusterConfig, Role
+from tunix.rl.rl_cluster import ClusterConfig, Role
 
 devices = jax.devices()
 split = int(len(devices) / 2)
@@ -210,13 +211,14 @@ train_devices = np.array(devices[split:]).reshape(split, 1)
 rollout_mesh = Mesh(rollout_devices, axis_names=('fsdp', 'tp'))
 train_mesh = Mesh(train_devices, axis_names=('fsdp', 'tp'))
 
-ClusterConfig(
-  role_to_mesh={
-      Role.ACTOR: train_mesh,
-      Role.REFERENCE: train_mesh,
-      Role.ROLLOUT: rollout_mesh,
-  },
-  ...
+cluster_config = ClusterConfig(
+    role_to_mesh={
+        Role.ACTOR: train_mesh,
+        Role.REFERENCE: train_mesh,
+        Role.ROLLOUT: rollout_mesh,
+    },
+    training_config=training_config,
+    rollout_config=rollout_config,
 )
 ```
 
@@ -235,7 +237,7 @@ requirements.
 The Tunix resharding algorithm eliminates expensive all-gather collective operations
 between different meshes when needed. It resolves the OOM issue where all-gather
 replicates the model weights to each TPU device. Please see
-[this section](https://github.com/google/tunix/blob/main/rl/reshard.py;l=70-93)
+[this section](https://github.com/google/tunix/blob/main/tunix/rl/reshard.py#L81-L142)
 for more details.
 
 The following diagram illustrates how the Tunix resharding algorithm avoids OOM caused by

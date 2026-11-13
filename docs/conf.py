@@ -12,7 +12,7 @@ from sphinx.util import logging as sphinx_logging
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
 project = "Tunix"
-copyright = "2025, Tunix Developers"  # pylint: disable=redefined-builtin
+copyright = "2026, Tunix Developers"  # pylint: disable=redefined-builtin
 author = "Tunix Developers"
 
 # -- General configuration ---------------------------------------------------

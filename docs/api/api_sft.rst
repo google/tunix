@@ -10,7 +10,10 @@ Supervised fine-tuning (SFT)
 
     DPOTrainer
     DPOTrainingConfig
+    ORPOTrainer
+    ORPOTrainingConfig
 
+    CheckpointManager
     MetricsLogger
     MetricsLoggerOptions
 
@@ -31,6 +34,25 @@ Supervised fine-tuning (SFT)
 -------
 
 .. autoclass:: DPOTrainingConfig
+
+-------
+
+.. autoclass:: ORPOTrainer
+
+-------
+
+.. autoclass:: ORPOTrainingConfig
+
+.. note::
+
+   ``ORPOTrainingConfig`` is an alias for :class:`DPOTrainingConfig`, where
+   ``algorithm`` defaults to ``"dpo"``. Pass ``algorithm="orpo"`` explicitly
+   when configuring ORPO training (for example,
+   ``ORPOTrainingConfig(algorithm="orpo", ...)``).
+
+-------
+
+.. autoclass:: CheckpointManager
 
 -------
 

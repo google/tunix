@@ -135,15 +135,15 @@ If you prefer a single-line install that directly overrides `tpu-inference`, you
 
 ```sh
 pip install vllm @git+https://github.com/vllm-project/vllm.git@<commit>
-pip install --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \\
-            --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html \\
-            --pre \\
+pip install --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
+            --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html \
+            --pre \
             tpu-inference@git+https://github.com/vllm-project/tpu-inference.git@<commit>
 ```
 
 Or install from source:
 
-```
+```sh
 bash scripts/install_tunix_vllm_requirement.sh
 ```
 
@@ -157,7 +157,7 @@ CLI, you may need to install `gcsfs`:
 pip install gcsfs
 ```
 
-## Quick start: GRPO
+## Quick Start: SFT & LoRA/QLoRA
 
 To get started with the library, let's walk through an example of training (full
 , LoRA and QLoRA fine-tuning) the Gemma 3 270M model on the English-to-French
@@ -212,7 +212,7 @@ from tunix.generate import tokenizer_adapter
 from tunix.examples.data import translation_dataset as data_lib
 
 tokenizer = tokenizer_adapter.Tokenizer(
-    tokenizer_path="./tokenizer_gemma.model")
+    tokenizer_path="./tokenizer_gemma3.model")
 train_ds, val_ds = data_lib.create_datasets(
     'mtnt/en-fr',
     global_batch_size=64,
@@ -303,9 +303,9 @@ sampler = sampler_lib.Sampler(
     tokenizer=tokenizer,
     cache_config=sampler_lib.CacheConfig(
         cache_size=256,
-        num_layers=model_config.num_layers,
-        num_kv_heads=model_config.num_kv_heads,
-        head_dim=model_config.head_dim,
+        num_layers=config.num_layers,
+        num_kv_heads=config.num_kv_heads,
+        head_dim=config.head_dim,
     ),
 )
 
@@ -318,6 +318,70 @@ out_data = sampler(
     input_strings=input_batch,
     max_generation_steps=10,  # number of generated tokens
 )
+```
+
+## Quick Start: GRPO
+
+To train a model with Group Relative Policy Optimization (GRPO), configure an
+`RLEngine` with `ClusterConfig`, `RLTrainingConfig`, and `RolloutConfig`, define
+one or more reward functions, and run `GRPOLearner`. For a complete end-to-end
+tutorial, see the
+[GRPO Gemma notebook](https://github.com/google/tunix/blob/main/examples/grpo_gemma.ipynb).
+
+```python
+import optax
+from tunix import ClusterConfig, GRPOConfig, GRPOLearner, RLEngine, RLTrainingConfig, Role, RolloutConfig
+
+# 1. Define a reward function scoring completions for each prompt.
+def format_reward_fn(prompts, completions, **kwargs):
+  return [1.0 if "<answer>" in c and "</answer>" in c else 0.0 for c in completions]
+
+# 2. Configure the RL cluster (collocated actor, reference, and rollout meshes).
+cluster_config = ClusterConfig(
+    role_to_mesh={
+        Role.ACTOR: mesh,
+        Role.REFERENCE: mesh,
+        Role.ROLLOUT: mesh,
+    },
+    rollout_engine="vanilla",
+    training_config=RLTrainingConfig(
+        actor_optimizer=optax.adamw(learning_rate=3e-6),
+        eval_every_n_steps=10,
+        max_steps=100,
+        mini_batch_size=4,
+        train_micro_batch_size=1,
+    ),
+    rollout_config=RolloutConfig(
+        max_prompt_length=256,
+        max_tokens_to_generate=512,
+        kv_cache_size=1024,
+        temperature=0.9,
+        top_p=1.0,
+        top_k=50,
+    ),
+)
+
+# 3. Initialize RLEngine and GRPOLearner, then train on prompt batches.
+rl_engine = RLEngine(
+    actor=lora_model,
+    reference=model,
+    tokenizer=tokenizer,
+    cluster_config=cluster_config,
+)
+
+grpo_learner = GRPOLearner(
+    rl_engine=rl_engine,
+    algo_config=GRPOConfig(
+        num_generations=4,
+        num_iterations=1,
+        beta=0.04,
+        epsilon=0.2,
+    ),
+    reward_fns=[format_reward_fn],
+)
+
+train_prompts = [{"prompts": ["Solve: 12 + 30 = ? Put your answer in <answer>...</answer>." * 1]} for _ in range(100)]
+grpo_learner.train(train_ds=train_prompts)
 ```
 
 ### Trajectory Logging
@@ -348,7 +412,7 @@ further detail.
 
 ### 1. Create a Pathways cluster in GKE
 
-#### Install xpx
+#### Install xpk
 
 We will use XPK to create a Pathways cluster in GKE.
 
@@ -395,7 +459,7 @@ export CLUSTER_NAME='your-cluster-name'
 export ZONE='your-tpu-zones'
 export TPU_TYPE='your-tpu-type' # e.g. v5p-16
 export CLUSTER_CPU_MACHINE_TYPE=n2d-standard-32 # you can adjust this to use beefier CPU node
-export PROJECT='your-gke-projec'
+export PROJECT='your-gke-project'
 
 NETWORK_NAME=${CLUSTER_NAME}-mtu9k-wx
 NETWORK_FW_NAME=${NETWORK_NAME}-fw-wx
@@ -433,8 +497,8 @@ xpk cluster create-pathways \
 
 Build local docker image. We will be using the `build_docker.sh`
 [script](https://github.com/google/tunix/blob/main/build_docker.sh).
-in the `tunix` directory. If you do not have docker on glinux, please install it
-before building the docker image.
+in the `tunix` directory. If you do not have Docker installed on Linux, please
+install it before building the docker image.
 
 ```sh
 # cleanup unused docker images and caches if disk is not enough
@@ -469,6 +533,6 @@ Now that you've completed the quick start, you can explore other training
 techniques and models. In particular, the following would be worth exploring:
 
 -   [SFT and PEFT](https://github.com/google/tunix/blob/main/examples/qlora_gemma.ipynb)
--   [Agentic RL](https://github.com/google/tunix/blob/main/examples/math_gsm8k/gemma_grpo_demo_nb.py)
+-   [Agentic RL](agentic_rl.md)
 
 A complete list is given [here](examples.md).

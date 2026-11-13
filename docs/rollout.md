@@ -28,7 +28,7 @@ These are used by all the rollout engines:
 -   `max_prompt_length`: prompts are padded/truncated to this length.
 -   `temperature`, `top_p`, `top_k`: sampling knobs.
 
-The rollout interface and config live in [Base Rollout](https://github.com/google/tunix/blob/main/rl/rollout/base_rollout.py).
+The rollout interface and config live in [Base Rollout](https://github.com/google/tunix/blob/main/tunix/rl/rollout/base_rollout.py).
 
 This doc focuses on the basic rollout. For tool calling enabled rollout or multi
 turn rollout, please refer to [Agentic RL](agentic_rl.md).
@@ -45,9 +45,9 @@ At a high level:
     (completions) for prompts.
 -   When `rollout_engine="vllm"`, Tunix creates a vLLM-based rollout worker:
     -   Implementation:
-        [vllm_rollout.py](https://github.com/google/tunix/blob/main/rl/rollout/vllm_rollout.py)
+        [vllm_rollout.py](https://github.com/google/tunix/blob/main/tunix/rl/rollout/vllm_rollout.py)
     -   vLLM sampler wrapper:
-        [vllm_sampler.py](https://github.com/google/tunix/blob/main/generate/vllm_sampler.py)
+        [vllm_sampler.py](https://github.com/google/tunix/blob/main/tunix/generate/vllm_sampler.py)
 -   The vLLM engine is initialized (optionally with **dummy/random weights**)
     and then Tunix **synchronizes weights in-memory** from the trainer to vLLM.
     -   Today, vLLM rollout in Tunix supports **in-memory weight sync** (not
@@ -62,15 +62,15 @@ At a high level:
 #### TPU (JAX backend)
 
 1. Direct install from pypi
-```
+```sh
 VLLM_TARGET_DEVICE="tpu" pip install vllm
 pip install tpu-inference
 ```
 
 2. Install and run the docker image
-```
+```sh
 docker pull vllm/vllm-tpu:nightly
-docker run -it local_vllm vllm/vllm-tpu:nightly /bin/bash
+docker run -it --name local_vllm vllm/vllm-tpu:nightly /bin/bash
 ```
 
 #### GPU
@@ -82,7 +82,7 @@ the backend you intend to run.
 ### Choosing vLLM as the Rollout
 
 In the code, rollout engine selection happens in
-[rl_cluster.py](https://github.com/google/tunix/blob/main/rl/rl_cluster.py).
+[rl_cluster.py](https://github.com/google/tunix/blob/main/tunix/rl/rl_cluster.py).
 Setting `cluster_config.rollout_engine="vllm"` enables the vllm rollout/sampler.
 
 ### Configuration knobs
@@ -173,7 +173,7 @@ settings are specific to vLLM:
 #### LoRA
 
 There is a `rollout_vllm_lora_config` field, but note that LoRA support for
-Tunix + vLLM is WIP. Check [vLLM Sampler](https://github.com/google/tunix/blob/main/generate/vllm_sampler.py)
+Tunix + vLLM is WIP. Check [vLLM Sampler](https://github.com/google/tunix/blob/main/tunix/generate/vllm_sampler.py)
 for the latest status.
 
 ### Example: using vLLM rollout in a Python entrypoint

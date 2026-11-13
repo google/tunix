@@ -82,4 +82,36 @@
 
 .. raw:: html
 
+    <div class="sphx-glr-thumbcontainer" tooltip="QLoRA Llama 3.1 8B on NVIDIA GPUs">
+
+.. only:: html
+
+  .. image:: _static/img/sphx_glr_local_module_thumb.png
+    :alt: QLoRA Llama 3.1 8B on NVIDIA GPUs
+
+  :doc:`_collections/examples/qlora_llama3_gpu`
+
+.. raw:: html
+
+      <div class="sphx-glr-thumbnail-title">QLoRA Llama 3.1 8B on NVIDIA GPUs</div>
+    </div>
+
+.. raw:: html
+
+    <div class="sphx-glr-thumbcontainer" tooltip="Fine-tuning a Vision Language Model (VLM) using DPO">
+
+.. only:: html
+
+  .. image:: _static/img/sphx_glr_local_module_thumb.png
+    :alt: Fine-tuning a Vision Language Model (VLM) using DPO
+
+  :doc:`_collections/examples/vl_dpo_gemma3`
+
+.. raw:: html
+
+      <div class="sphx-glr-thumbnail-title">Fine-tuning a Vision Language Model (VLM) using DPO</div>
+    </div>
+
+.. raw:: html
+
     </div>

@@ -8,16 +8,18 @@ Tunix supports the following models:
 
 | Model | Sizes |
 |:---|:---|
-| Gemma | 2B, 7B, 9B |
+| Gemma | 2B, 7B |
+| Gemma 1.1 | 2B, 7B |
 | Gemma 2 | 2B, 9B |
 | Gemma 3 | 270M, 1B, 4B, 12B, 27B |
 | Gemma 4 | E2B, E4B, 12B, 26B-A4B, 31B |
-| Llama 3 | 70B, 405B |
+| Llama 3 | 70B |
 | Llama 3.1 | 8B, 70B, 405B |
 | Llama 3.2 | 1B, 3B |
-| Qwen 2.5 | 0.5B, 1.5B, 3B, 7B |
-| Qwen 3 | 0.6B, 1.7B, 4B, 8B, 14B, 30B, 32B |
-| Qwen 3.5 | 35B, 397B |
+| Qwen 2.5 | 0.5B, 1.5B, 3B, 7B (plus Coder 0.5B/3B/7B & Math 1.5B) |
+| DeepSeek-R1-Distill-Qwen | 1.5B |
+| Qwen 3 | 0.6B, 1.7B, 4B, 8B, 14B, 30B-A3B, 32B |
+| Qwen 3.5 | 0.8B, 2B, 35B-A3B (MaxText), 397B-A17B (MaxText) |
 
 ### Model Sources
 
@@ -59,7 +61,7 @@ Model optimization is critical for efficient model execution. This includes opti
 ## Adding a new model
 You can add new models to Tunix codebase by following the Tunix convention.
 ### Model Family
-If the new model falls into one of the existing model families (e.g. Gemma, Llama, etc.) then adding a new model doesn't need to create new files. You just need to add the model specs to the corresponding model family. Take a look at the [Llama examples](https://github.com/google/tunix/blob/main/models/llama3/model.py;l=98-135).
+If the new model falls into one of the existing model families (e.g. Gemma, Llama, etc.) then adding a new model doesn't need to create new files. You just need to add the model specs to the corresponding model family. Take a look at the [Llama examples](https://github.com/google/tunix/blob/main/tunix/models/llama3/model.py#L107-L144).
 If the new model is from a new model family that Tunix hasn't supported yet. You will need to follow the design and APIs as the existing model families to create the model implementation.
 
 ### Naming
@@ -79,7 +81,7 @@ identifier and your JAX sharding mesh. By default this will download the model
 from Huggingface.
 
 ```python
-from tunix.models.automodel import AutoModel
+from tunix.models.automodel import AutoModel, ModelSource
 import jax
 
 # 1. Define your mesh
@@ -107,8 +109,12 @@ example above.
 
 #### From Kaggle:
 
-For Kaggle, you must provide the `model_id` which is the Huggingface identifier or model_config_id (see [Naming Conventions](models.md#naming-conventions)) to determine the model configuration and the `model_path` which is the Kaggle
-Hub model identifier (used to download the model from Kaggle).
+For Kaggle, you must provide the `model_id` which is the Huggingface identifier
+or model_config_id (see [Naming Conventions](models.md#naming-conventions)) to
+determine the model configuration and the `model_path` which is the Kaggle Hub
+model identifier (used to download the model from Kaggle). For Gemma and Gemma 2
+Kaggle checkpoints, also provide `intermediate_ckpt_dir` for NNX checkpoint
+conversion.
 
 ```python
 model, model_path = AutoModel.from_pretrained(
@@ -116,12 +122,14 @@ model, model_path = AutoModel.from_pretrained(
     mesh=mesh,
     model_source=ModelSource.KAGGLE,
     model_path="google/gemma-2/flax/gemma2-2b-it",
+    intermediate_ckpt_dir="/tmp/intermediate_ckpt",
 )
 ```
 
-For example the `model_path` for the `google/gemma-2/flax/gemma2-2b-it` is extracted on Kaggle as shown below
+For example, the `model_path` for `google/gemma-2/flax/gemma2-2b-it` is
+extracted on Kaggle as shown below:
 
-![Kaggle extracting Model ID](images/model_id_kaggle.png){: width="75%"}
+![Kaggle extracting Model ID](images/model_id_kaggle.png)
 
 #### From GCS:
 
@@ -154,16 +162,18 @@ model, model_path = AutoModel.from_pretrained(
 )
 ```
 
-To load a Maxtext model when launching training via a shell script, append the corresponding override arguments directly to the script execution:
+To load a Maxtext model when launching training via a shell script, append the
+corresponding positional `key=value` override arguments directly to the script
+execution:
 
 ```bash
 bash examples/rl/grpo/gsm8k/run_qwen3.sh \
-  --model_config.model_name="Qwen3-0.5B" \
-  --model_config.model_source="maxtext" \
-  --model_config.model_path="gs://my-bucket/maxtext-checkpoint" \
-  --model_config.kwargs.base_emb_dim=4096 \
-  --model_config.kwargs.sparse_matmul=true \
-  --model_config.kwargs.remat_policy="minimal"
+  model_config.model_name="qwen3-0.6b" \
+  model_config.model_source="maxtext" \
+  model_config.model_path="gs://my-bucket/maxtext-checkpoint" \
+  model_config.kwargs.base_emb_dim=4096 \
+  model_config.kwargs.sparse_matmul=true \
+  model_config.kwargs.remat_policy="minimal"
 ```
 
 
@@ -191,10 +201,10 @@ The `ModelNaming` dataclass handles the parsing and standardization of model nam
     on Huggingface, including the parent directory. 
       * **Extracting model_id from HF**: For example,
     `meta-llama/Llama-3.1-8B` is extracted as shown below:
-      ![Huggingface extracting Model ID](images/model_id_huggingface.png){: width="75%"}
+      ![Huggingface extracting Model ID](images/model_id_huggingface.png)
    
     2. **Native Tunix model_configs:** the `model_config_id` representing the exact config from the model class can be used directly as the `model_id`. In this case it will also be treated as the `model_name`.
-      * **Extracting model_id from model_config_id**: In this case, you would need to refer to the source code (`model.py`) for each model family and select the config id from the `ModelConfig` class, for example `llama3p1_8b` from the llama [model code](https://github.com/google/tunix/blob/main/models/llama3/model.py;bpv=1;bpt=1;l=138).
+      * **Extracting model_id from model_config_id**: In this case, you would need to refer to the source code (`model.py`) for each model family and select the config id from the `ModelConfig` class, for example `llama3p1_8b` from the llama [model code](https://github.com/google/tunix/blob/main/tunix/models/llama3/model.py#L146).
 
 
 *   **`model_name`**: The unique full name identifier of the model. This

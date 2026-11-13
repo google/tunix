@@ -7,6 +7,8 @@ Reinforcement learning (RL)
 
     GRPOConfig
     GRPOLearner
+    AgenticGRPOConfig
+    AgenticGRPOLearner
     RewardFn
 
     PPOConfig
@@ -14,9 +16,11 @@ Reinforcement learning (RL)
 
     ClusterConfig
     RLEngine
+    RLCluster
     RLTrainingConfig
     Role
     RolloutConfig
+    MetricsBuffer
 
 -------
 
@@ -25,6 +29,14 @@ Reinforcement learning (RL)
 -------
 
 .. autoclass:: GRPOLearner
+
+-------
+
+.. autoclass:: AgenticGRPOConfig
+
+-------
+
+.. autoclass:: AgenticGRPOLearner
 
 -------
 
@@ -49,6 +61,10 @@ Reinforcement learning (RL)
 
 -------
 
+.. autoclass:: RLCluster
+
+-------
+
 .. autoclass:: RLTrainingConfig
 
 -------
@@ -59,3 +75,6 @@ Reinforcement learning (RL)
 
 .. autoclass:: RolloutConfig
 
+-------
+
+.. autoclass:: MetricsBuffer

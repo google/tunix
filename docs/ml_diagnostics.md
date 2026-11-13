@@ -13,7 +13,7 @@ topologies.
 
 Unlike Supervised Fine-Tuning (SFT), where every training step runs a uniform
 forward/backward pass on a single mesh, RL workloads coordinate distinct
-training and inference roles within an `RLCluster`—often across disaggregated
+training and inference roles within an `RLEngine`—often across disaggregated
 trainer and sampler TPU slices:
 
 -   **`actor`**: Executes policy gradient updates and actor evaluation on
@@ -39,7 +39,7 @@ the
 ## Enabling ML Diagnostics in Tunix RL Workloads
 
 To enable ML Diagnostics in a training script that runs Tunix RL algorithms
-(`RLCluster`, `GrpoLearner`, `PpoLearner`):
+(`RLEngine`, `GRPOLearner`, `PPOLearner`):
 
 1.  **Install the SDK packages**:
 
@@ -51,7 +51,7 @@ To enable ML Diagnostics in a training script that runs Tunix RL algorithms
     `requirements/maxtext_requirements.txt`.)*
 
 2.  **Initialize `machinelearning_run`** in your training script before creating
-    `RLCluster`.
+    `RLEngine`.
 
 3.  **Pass `MLDiagScalarBackend` to `MetricsLoggerOptions`** (alongside
     `TensorboardBackend` if TensorBoard logging is also desired) and
@@ -70,7 +70,7 @@ To enable ML Diagnostics in a training script that runs Tunix RL algorithms
 import functools
 import google_cloud_mldiagnostics as mldiag
 from tunix.common import configs
-from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl.grpo import grpo_learner
 from tunix.rl.metrics import mldiag_backend
 from tunix.sft import metrics_logger
@@ -108,7 +108,7 @@ def build_rl_profiler_config(
     num_invocations: int = 1,
     timeout_secs: float = 60.0,
 ) -> configs.RLProfileConfig:
-  """Configures per-role invocation profiling for Tunix RLCluster."""
+  """Configures per-role invocation profiling for Tunix RLEngine."""
   return configs.RLProfileConfig(
       start_invocation=start_invocation,
       num_invocations=num_invocations,
@@ -118,7 +118,7 @@ def build_rl_profiler_config(
   )
 
 
-# 1. Start the ML Diagnostics run before creating RLCluster.
+# 1. Start the ML Diagnostics run before creating RLEngine.
 mldiag.machinelearning_run(
     name="tunix-grpo-run",
     run_group="rl-experiments",
@@ -142,7 +142,7 @@ rl_profiler_config = build_rl_profiler_config(
 )
 
 # 3. Pass both into RLTrainingConfig (keep profiler_options=None).
-training_config = rl_cluster_lib.RLTrainingConfig(
+training_config = rl_engine_lib.RLTrainingConfig(
     actor_optimizer=optimizer,
     eval_every_n_steps=10,
     max_steps=100,
@@ -152,24 +152,24 @@ training_config = rl_cluster_lib.RLTrainingConfig(
     rl_profiler_config=rl_profiler_config,
 )
 
-cluster_config = rl_cluster_lib.ClusterConfig(
+cluster_config = rl_engine_lib.ClusterConfig(
     role_to_mesh={
-        rl_cluster_lib.Role.ACTOR: actor_mesh,
-        rl_cluster_lib.Role.REFERENCE: reference_mesh,
-        rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
+        rl_engine_lib.Role.ACTOR: actor_mesh,
+        rl_engine_lib.Role.REFERENCE: reference_mesh,
+        rl_engine_lib.Role.ROLLOUT: rollout_mesh,
     },
     training_config=training_config,
     rollout_config=rollout_config,
 )
 
-rl_cluster = rl_cluster_lib.RLCluster(
+rl_engine = rl_engine_lib.RLEngine(
     actor=actor_model,
     reference=reference_model,
     tokenizer=tokenizer,
     cluster_config=cluster_config,
 )
-learner = grpo_learner.GrpoLearner(
-    rl_cluster=rl_cluster,
+learner = grpo_learner.GRPOLearner(
+    rl_engine=rl_engine,
     reward_fns=reward_fns,
     algo_config=grpo_config,
 )
@@ -188,7 +188,7 @@ learner.train(train_dataset)
 | `start_invocation` | `int` | `2` | Zero-indexed invocation count at which to start profiling for each role. Set to a higher value such as `20` to skip initial warmup and XLA compilation. |
 | `num_invocations` | `int` | `1` | Number of invocations to profile for each role once `start_invocation` is reached. |
 | `output_dir` | `str` | `""` | Output directory for raw JAX `.xplane.pb` traces when `managed_mldiagnostics=False`. |
-| `mldiagnostics_dir` | `str` | `""` | Optional GCS output directory when `managed_mldiagnostics=False` (overrides `output_dir`). |
+| `mldiagnostics_dir` | `str` | `""` | Optional local or GCS output directory when `managed_mldiagnostics=False` (overrides `output_dir`). |
 | `managed_mldiagnostics` | `bool` | `False` | If `True`, uploads traces to the active `MLRun` for viewing in the ML Diagnostics UI. |
 | `timeout_secs` | `float` | `60.0` | Timeout in seconds to wait for trace finalization and upload. |
 
@@ -200,7 +200,7 @@ learner.train(train_dataset)
 | :--- | :--- |
 | **Actor Training Metrics** | `actor/train/loss`, `actor/train/kl`, `actor/train/grad_norm`, `actor/train/learning_rate` |
 | **Reward Metrics** | `rewards/train/mean`, `rewards/train/sum`, `rewards/train/min`, `rewards/train/max`, `rewards/train/score/mean`, `rewards/train/<reward_fn>` |
-| **Completion Length Metrics** | `completions/train/mean_length` (GRPO), `generation/train/completions/mean_length` (PPO) |
+| **Completion Length Metrics** | `completions/train/mean_length` (GRPO), `generation/train/completions/mean_length` (PPO & Agentic GRPO) |
 | **Performance Metrics** | `perf/train/global_step_time`, `perf/train/weight_sync_time`, `perf/train/mean/rollout_time`, `perf/train/mean/actor_train_time` |
 | **Per-Role XProf Traces** | `actor_invocation_20`, `rollout_invocation_20` |
 
