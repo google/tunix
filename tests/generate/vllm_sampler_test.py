@@ -558,6 +558,13 @@ class VllmSamplerTest(absltest.TestCase):
 class VllmSamplerConfigTest(absltest.TestCase):
   """Unit tests for VllmSampler config plumbing (no hardware required)."""
 
+  def setUp(self):
+    super().setUp()
+    # `VllmSampler` sets process-wide variables (`TPU_BACKEND_TYPE`, and
+    # `NEW_MODEL_DESIGN` with data parallelism); restore the environment after
+    # each test, so they don't reach the engines of later tests in the process.
+    self.enter_context(mock.patch.dict(os.environ))
+
   def _make_mock_mesh(self, total_devices):
     mesh = mock.MagicMock()
     mesh.shape = {"axis": total_devices}
