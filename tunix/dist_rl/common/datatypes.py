@@ -234,6 +234,19 @@ class HealthReport:
   heartbeat_unix_s: float = dataclasses.field(default_factory=time.time)
 
 
+@dataclasses.dataclass(frozen=True)
+class TargetParamSpec:
+  """Framework-neutral shape and dtype descriptor for a target parameter leaf.
+
+  Attributes:
+    shape: Dimension sizes of the target parameter tensor.
+    dtype: Canonical dtype name (for example `"bfloat16"` or `"float32"`).
+  """
+
+  shape: tuple[int, ...]
+  dtype: str
+
+
 @dataclasses.dataclass(kw_only=True)
 class WorkerInfo:
   """Static metadata describing a worker's identity and capabilities.
@@ -331,9 +344,9 @@ class FaultToleranceConfig:
       `min_active_rollout_ratio` and to any Relay staging-slot floor installed
       via `DistributedRLEngine.configure_staging_liveness` (during a staging
       shortfall, surviving rollout workers may block in
-      `RolloutStagingBuffer.reserve()` until capacity recovers or grace
-      elapses; when `enabled=False`, staging-slot shortfalls fail fast). Both
-      timers start immediately on worker eviction and are checked at
+      `RolloutStagingBuffer.reserve()` until capacity recovers or grace elapses;
+      when `enabled=False`, staging-slot shortfalls fail fast). Both timers
+      start immediately on worker eviction and are checked at
       `DistributedRLEngine` construction, after each `poll_rollouts()`, and
       after `sync_weights()` promotion, so `RolloutCapacityError` surfaces on
       the first poll or weight-sync boundary once `min_active_rollout_grace_s`

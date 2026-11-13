@@ -12,13 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""End-to-end check that `configure_worker` precompiles the trainer.
+"""End-to-end check that `bring_up_workers(program=...)` precompiles the trainer.
 
-Drives the exact production sequence against a real `PeftTrainer` on CPU:
+Drives the exact production sequence against real `PeftTrainer` and
+`MaxTextTrainingEngine` on CPU:
 
-1. `LifecycleDriver.bring_up`: `initialize()`, `compile(None)`, `start()`.
-2. `DistributedRLEngine.configure_worker`: `with_loss_fn`,
-   `with_gen_model_input_fn`, then `compile(assembler.build_dummy_payload())`.
+1. `ClusterOrchestrator.bring_up_workers(program=...)`:
+   `initialize()` -> `with_loss_fn(..., algo_config=...)` ->
+   `compile(build_trainer_dummy_payload(...))` -> `start()`.
+2. `DistributedRLEngine.configure_worker(...)` during `run_async` (spec hit;
+   no-op that preserves the AOT-compiled JIT cache).
 3. First real microbatch from `payload_builder.create_trainer_payloads` + the
    same assembler.
 
@@ -40,10 +43,10 @@ import numpy as np
 import optax
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.orchestrator import batch_assembly
-from tunix.dist_rl.orchestrator import distributed_rl_engine
+from tunix.dist_rl.orchestrator import orchestrator
 from tunix.dist_rl.orchestrator import payload_builder
+from tunix.dist_rl.orchestrator import rl_program
 from tunix.dist_rl.orchestrator import worker_registry
-from tunix.dist_rl.testing import worker_registry_testing
 from tunix.dist_rl.train import peft_trainer_v2
 from tunix.dist_rl.worker import remote_execution
 from tunix.dist_rl.worker import trainer_worker
@@ -187,10 +190,16 @@ class TrainerPrecompileE2ETest(parameterized.TestCase):
       if event == _BACKEND_COMPILE_EVENT:
         self.compiled_fns.append(kwargs["fun_name"])
 
+    def _cleanup_listener() -> None:
+      try:
+        jax.monitoring.unregister_event_duration_listener(_listener)
+      except AssertionError:
+        # `PeftTrainer.close()` -> `MetricsLogger.close()` calls
+        # `jax.monitoring.clear_event_listeners()` during cluster shutdown.
+        pass
+
     jax.monitoring.register_event_duration_secs_listener(_listener)
-    self.addCleanup(
-        jax.monitoring.unregister_event_duration_listener, _listener
-    )
+    self.addCleanup(_cleanup_listener)
 
   def _compiled_step_executables(
       self, step_names: tuple[str, ...] = _STEP_EXECUTABLES
@@ -337,31 +346,51 @@ class TrainerPrecompileE2ETest(parameterized.TestCase):
     )
     registry = worker_registry.WorkerRegistry()
     registry.register_handle("trainer-0", [datatypes.Role.ACTOR], handle)
-    worker_registry_testing.set_status(
-        registry, "trainer-0", worker_registry.AdmissionStatus.ACTIVE
+    cluster = orchestrator.ClusterOrchestrator(
+        registry=registry, weight_sync_mode="none"
     )
-    engine = distributed_rl_engine.DistributedRLEngine(registry=registry)
-    handle.submit("initialize")
-    handle.submit("compile", None)
-    handle.submit("start")
+    self.addCleanup(cluster.shutdown)
 
     algo_cfg = algorithm_config.GRPOConfig(
         num_generations=2,
         beta=0.0,
+        reward_mode="env",
         use_rollout_logps=True,
         sampler_is="token" if not can_fuse_agreement_in_loss else None,
         routed_experts_encode_mode=routed_experts_encode_mode,
     )
-    algo_cfg.temperature = 1.0
     assembler = _make_assembler(assembler_kind)
+    batch_cfg = batch_assembly.BatchConfig(
+        mini_batch_size=1,
+        pad_id=0,
+        max_prompt_length=4,
+        max_response_length=4,
+    )
+    program = rl_program.StandardRLProgram(
+        algo_config=algo_cfg,
+        rollout_temperature=1.0,
+        rollout_returns_routed_experts=routed_experts_shape is not None,
+        assembler=assembler,
+        batch_config=batch_cfg,
+        batch_size=1 if can_fuse_agreement_in_loss else 2,
+        precompile_trainer=precompile,
+        sync_weights=False,
+        max_steps=0,
+        use_routed_experts_relay=False,
+    )
     self.compiled_fns.clear()
-    engine.configure_worker(
+    cluster.bring_up_workers(dummy_data=None, program=program)
+    assert cluster.engine is not None
+    # Emulate StandardRLProgram.run_async calling configure_worker with the same
+    # spec: must hit the spec cache and preserve precompiled JIT executables.
+    cluster.engine.configure_worker(
         role=datatypes.Role.ACTOR,
         algo_config=algo_cfg,
         assembler=assembler,
-        can_fuse_agreement_in_loss=can_fuse_agreement_in_loss,
-        precompile=precompile,
-        return_routed_experts=routed_experts_shape is not None,
+        pad_id=program.pad_id,
+        eos_id=program.eos_id,
+        can_fuse_agreement_in_loss=program.can_fuse_agreement_in_loss,
+        return_routed_experts=program.rollout_returns_routed_experts,
     )
     return worker, algo_cfg, assembler
 
@@ -480,7 +509,7 @@ class TrainerPrecompileE2ETest(parameterized.TestCase):
     self.assertEqual(trace_counts, traces_after_configure)
     self.assertEmpty(self._compiled_step_executables())
 
-  def test_precompile_disabled_skips_configure_compile_and_compiles_on_first_step(
+  def test_precompile_disabled_skips_bring_up_compile_and_compiles_on_first_step(
       self,
   ):
     trainer, trace_counts = self._build_trainer()
@@ -488,8 +517,8 @@ class TrainerPrecompileE2ETest(parameterized.TestCase):
         trainer, precompile=False
     )
 
-    # With `precompile=False` on `configure_worker`, `with_loss_fn` and
-    # `with_gen_model_input_fn` invalidate the JIT cache and skip AOT compile.
+    # With `precompile_trainer=False`, bring_up compiles None (a no-op) and
+    # configures the loss without triggering AOT XLA compilation.
     self.assertEqual(trace_counts, {"fwd_bwd": 0, "update": 0})
     self.assertEmpty(self._compiled_step_executables())
 

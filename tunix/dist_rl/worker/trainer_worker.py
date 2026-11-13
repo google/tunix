@@ -35,8 +35,12 @@ from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.train import abstract_trainer
 from tunix.dist_rl.worker import abstract_worker
 from tunix.dist_rl.worker import otel_metrics
+from tunix.rl import algo_core
+from tunix.rl import algorithm_config
 from tunix.rl import common as rl_common
+from tunix.rl import function_registry
 from tunix.rl import packing
+from tunix.sft import utils as sft_utils
 
 if TYPE_CHECKING:
   from opentelemetry import metrics as otel_api_types  # pylint: disable=g-bad-import-order,g-import-not-at-top
@@ -61,6 +65,161 @@ def _as_metrics_buffer(
       mode=str(mode),
       microbatch_data_waits=microbatch_data_waits,
   )
+
+
+def _validate_narrow_policy_loss_fn(
+    loss_fn: algorithm_config.PolicyLossFn,
+    algo_config: algorithm_config.AlgorithmConfig,
+) -> None:
+  """Runs a minimal CPU dry-run verifying a custom `PolicyLossFn` contract."""
+  with jax.default_device(jax.devices("cpu")[0]):
+    dummy_logps = jnp.full((2, 4), -0.5, dtype=jnp.float32)
+    dummy_inputs = algorithm_config.PolicyLossInputs(
+        per_token_logps=dummy_logps,
+        completion_mask=jnp.ones((2, 4), dtype=jnp.float32),
+        advantages=jnp.array([1.0, -1.0], dtype=jnp.float32),
+        old_per_token_logps=(
+            dummy_logps if algo_config.use_rollout_logps else None
+        ),
+        ref_per_token_logps=(
+            dummy_logps if algo_config.requires_reference_kl else None
+        ),
+    )
+    out = loss_fn(dummy_inputs, algo_config)
+  if not isinstance(out, algorithm_config.PolicyLossOutput):
+    raise TypeError(
+        "Custom PolicyLossFn must return algorithm_config.PolicyLossOutput,"
+        f" got {type(out).__name__}."
+    )
+  if not isinstance(out.loss_sum, jax.Array):
+    raise TypeError(
+        "PolicyLossOutput.loss_sum must be a jax.Array, got"
+        f" {type(out.loss_sum).__name__}."
+    )
+  if not isinstance(out.denominator, jax.Array):
+    raise TypeError(
+        "PolicyLossOutput.denominator must be a jax.Array, got"
+        f" {type(out.denominator).__name__}."
+    )
+  if out.token_denom is not None and not isinstance(out.token_denom, jax.Array):
+    raise TypeError(
+        "PolicyLossOutput.token_denom must be a jax.Array or None, got"
+        f" {type(out.token_denom).__name__}."
+    )
+  for metric_name, metric_val in out.metrics.items():
+    if not isinstance(metric_val, jax.Array):
+      raise TypeError(
+          f"PolicyLossOutput.metrics[{metric_name!r}] must be a jax.Array, got"
+          f" {type(metric_val).__name__}."
+      )
+
+
+def _wrap_narrow_policy_loss_fn(
+    loss_fn: algorithm_config.PolicyLossFn,
+) -> Callable[..., sft_utils.LossOutput]:
+  """Adapts a custom narrow `PolicyLossFn` to trainer `LossOutput`."""
+
+  def _adapted_loss_fn(
+      model: nnx.Module,
+      train_example: rl_common.TrainExample,
+      algo_config: algorithm_config.AlgorithmConfig,
+      pad_id: int,
+      eos_id: int,
+      **kwargs: Any,
+  ) -> sft_utils.LossOutput:
+    graphdef, state = nnx.split(model)
+    temperature = (
+        1.0
+        if algo_config.temperature is None
+        else float(algo_config.temperature)
+    )
+    per_token_logps, token_entropy = cast(
+        tuple[jax.Array, jax.Array],
+        rl_common.compute_per_token_logps(
+            graphdef,
+            state,
+            prompt_tokens=train_example.prompt_ids,
+            completion_tokens=train_example.completion_ids,
+            pad_id=pad_id,
+            eos_id=eos_id,
+            stop_gradient=False,
+            return_entropy=True,
+            segment_ids=train_example.segment_ids,
+            segment_positions=train_example.segment_positions,
+            temperature=temperature,
+            chunk_size=kwargs.get("compute_logps_chunk_size", 0),
+            routed_experts=train_example.routed_experts,
+        ),
+    )
+    per_token_logps = jnp.astype(per_token_logps, jnp.float32)
+    completion_mask = jnp.asarray(train_example.completion_mask)
+    advantages = jnp.astype(train_example.advantages, jnp.float32)
+    segment_ids = (
+        None
+        if train_example.segment_ids is None
+        else jnp.asarray(train_example.segment_ids)
+    )
+    old_per_token_logps = (
+        None
+        if train_example.old_per_token_logps is None
+        else jnp.asarray(train_example.old_per_token_logps)
+    )
+    ref_per_token_logps = (
+        None
+        if train_example.ref_per_token_logps is None
+        else jnp.asarray(train_example.ref_per_token_logps)
+    )
+    sampler_is_weights = (
+        None
+        if train_example.sampler_is_weights is None
+        else jnp.asarray(train_example.sampler_is_weights)
+    )
+    out = loss_fn(
+        algorithm_config.PolicyLossInputs(
+            per_token_logps=per_token_logps,
+            completion_mask=completion_mask,
+            advantages=advantages,
+            old_per_token_logps=old_per_token_logps,
+            ref_per_token_logps=ref_per_token_logps,
+            sampler_is_weights=sampler_is_weights,
+            segment_ids=segment_ids,
+            num_segments=train_example.num_segments,
+            sampler_agreement_applied=bool(
+                train_example.sampler_agreement_applied
+            ),
+        ),
+        algo_config,
+    )
+    token_denom = (
+        out.token_denom
+        if out.token_denom is not None
+        else jnp.sum(completion_mask)
+    )
+    loss_agg_mode = (
+        algo_config.loss_agg_mode
+        if isinstance(algo_config, algorithm_config.GRPOConfig)
+        else "sequence-mean-token-mean"
+    )
+    entropy = rl_common.aggregate_loss(
+        jnp.where(completion_mask > 0, token_entropy, 0.0),
+        completion_mask,
+        loss_agg_mode,
+        segment_ids=segment_ids,
+        num_segments=train_example.num_segments,
+    )
+    aux_metrics: dict[str, jax.Array | sft_utils.WeightedMetric] = {
+        k: sft_utils.WeightedMetric(v, token_denom, min_denom=1.0)
+        for k, v in out.metrics.items()
+    }
+    aux_metrics.setdefault("entropy", entropy)
+    return sft_utils.LossOutput(
+        primary_loss=sft_utils.WeightedMetric(
+            out.loss_sum, out.denominator, min_denom=1.0
+        ),
+        aux_metrics=aux_metrics,
+    )
+
+  return _adapted_loss_fn
 
 
 def _compute_per_token_logps(
@@ -342,9 +501,18 @@ class TrainerWorker(abstract_worker.Worker):
 
   @abstract_worker.offload_to_thread
   def with_loss_fn(
-      self, loss_fn: Callable[..., Any], has_aux: bool = False
+      self,
+      loss_fn: str | Callable[..., Any],
+      has_aux: bool = False,
+      *,
+      algo_config: algorithm_config.AlgorithmConfig | None = None,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+      pad_id: int = 0,
+      eos_id: int = 0,
+      fuse_agreement_in_loss: bool = True,
+      return_routed_experts: bool = False,
   ) -> datatypes.Response:
-    """Sets the loss function used by `fwd_bwd` (and evaluation).
+    """Sets the loss function (and model-input adapter when `algo_config` given).
 
     When the worker was built with a positive `logps_chunk_size`, it is bound
     into the loss as `compute_logps_chunk_size` (as the agentic GRPO learner
@@ -353,21 +521,83 @@ class TrainerWorker(abstract_worker.Worker):
     `gen_model_input_fn` still takes precedence.
 
     Args:
-      loss_fn: The loss function; must accept `compute_logps_chunk_size` as a
-        keyword argument (or `**kwargs`) when chunking is enabled.
-      has_aux: Whether `loss_fn` returns auxiliary outputs.
+      loss_fn: Registered loss name (`str`), narrow `PolicyLossFn`, or legacy
+        trainer loss callable (when `algo_config is None`).
+      has_aux: Whether `loss_fn` returns auxiliary outputs (used when
+        `algo_config is None`; resolved algorithm configs always return aux
+        metrics).
+      algo_config: Optional algorithm configuration. When supplied, resolves
+        registered losses/custom `PolicyLossFn`s and registers both the loss and
+        the matching `gen_model_input_fn`.
+      role: Trainer role (`Role.ACTOR` or `Role.CRITIC`) when `algo_config` is
+        provided.
+      pad_id: Pad token ID forwarded to the model-input builder.
+      eos_id: End-of-sequence token ID forwarded to the model-input builder.
+      fuse_agreement_in_loss: Accepted for worker parity with data-only
+        trainers.
+      return_routed_experts: Accepted for worker parity with data-only trainers.
 
     Returns:
       A response confirming the loss function was configured.
     """
+    del fuse_agreement_in_loss, return_routed_experts
+    gen_fn: Callable[[Any], dict[str, Any]] | None = None
+    if algo_config is None:
+      if not callable(loss_fn):
+        raise ValueError(
+            "with_loss_fn requires a callable loss_fn when algo_config is None."
+        )
+      resolved_fn = loss_fn
+      resolved_has_aux = has_aux
+    else:
+      if role == datatypes.Role.CRITIC:
+        if not isinstance(algo_config, algorithm_config.PPOConfig):
+          raise ValueError(
+              "Configuring a CRITIC trainer worker requires a PPOConfig"
+              f" (with value_loss_fn), got {type(algo_config).__name__}."
+          )
+        if isinstance(loss_fn, str):
+          resolved_fn = function_registry.get_value_loss_fn(loss_fn)
+        elif callable(loss_fn):
+          resolved_fn = loss_fn
+        else:
+          raise TypeError(
+              "CRITIC loss_fn must be a str or callable, got"
+              f" {type(loss_fn).__name__}."
+          )
+        gen_fn = algo_core.build_critic_model_input_fn(
+            algo_config, pad_id=pad_id, eos_id=eos_id
+        )
+      elif role == datatypes.Role.ACTOR:
+        if isinstance(loss_fn, str):
+          resolved_fn = function_registry.get_policy_loss_fn(loss_fn)
+        elif callable(loss_fn):
+          _validate_narrow_policy_loss_fn(loss_fn, algo_config)
+          resolved_fn = _wrap_narrow_policy_loss_fn(loss_fn)
+        else:
+          raise TypeError(
+              "ACTOR loss_fn must be a str or PolicyLossFn callable, got"
+              f" {type(loss_fn).__name__}."
+          )
+        gen_fn = algo_core.build_gen_model_input_fn(
+            algo_config, pad_id=pad_id, eos_id=eos_id
+        )
+      else:
+        raise ValueError(f"Unsupported role for with_loss_fn: {role!r}")
+      resolved_has_aux = True
+
     if self._logps_chunk_size and self._logps_chunk_size > 0:
-      loss_fn = functools.partial(
-          loss_fn, compute_logps_chunk_size=self._logps_chunk_size
+      resolved_fn = functools.partial(
+          resolved_fn, compute_logps_chunk_size=self._logps_chunk_size
       )
     if self._trainer is None:
-      self._pending_loss_fn = (loss_fn, has_aux)
+      self._pending_loss_fn = (resolved_fn, resolved_has_aux)
+      if gen_fn is not None:
+        self._pending_gen_model_input_fn = gen_fn
     else:
-      self._trainer.with_loss_fn(loss_fn, has_aux)
+      self._trainer.with_loss_fn(resolved_fn, resolved_has_aux)
+      if gen_fn is not None:
+        self._trainer.with_gen_model_input_fn(gen_fn)
     return self._response(loss_fn_configured=True)
 
   @abstract_worker.offload_to_thread

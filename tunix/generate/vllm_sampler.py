@@ -15,25 +15,36 @@
 """Sampler for vLLM-style autoregressive decoding using JAX and NNX models."""
 
 import atexit
+import collections
+from collections.abc import Callable, Iterator, Mapping, Set as AbstractSet
 import concurrent.futures
+import contextlib
 import copy
 import dataclasses
+import functools
 from itertools import count
+import json
 import os
 import threading
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, cast
 
 from absl import logging
+from flax import nnx
 import jax
+from jax.experimental import multihost_utils
 import jaxtyping
 import numpy as np
 import tqdm
+from tunix.dist_rl.weight_sync import weight_sync
 from tunix.generate import base_sampler
 from tunix.generate import tokenizer_adapter as tok_adapter
 from tunix.generate import utils
+from tunix.generate import vllm_hf_manifest
 from tunix.generate.mappings import MappingConfig
 from tunix.generate.vllm_async_driver import VLLMInProcessDriver
+from tunix.models import hf_mapping
 from tunix.rl import reshard
+from tunix.utils import sharding_utils
 from vllm import LLM
 from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import TokensPrompt
@@ -142,6 +153,184 @@ class VllmConfig:
             "Engine kwargs setting key '%s' with value '%s'.", key, value
         )
         setattr(self, key, value)
+
+
+def _get_nnx_var_value(
+    tgt_vars: Mapping[str, nnx.Variable[Any]], path: str
+) -> Any:
+  return tgt_vars[path].value
+
+
+def _set_nnx_var_value(
+    tgt_vars: Mapping[str, nnx.Variable[Any]], path: str, value: jax.Array
+) -> None:
+  tgt_vars[path].value = value
+
+
+def _get_dict_state_value(
+    dst_state: Mapping[Any, Any], tgt_keys: Mapping[str, Any], path: str
+) -> Any:
+  raw_val = dst_state[tgt_keys[path]]
+  return raw_val.value if isinstance(raw_val, nnx.Variable) else raw_val
+
+
+def _set_dict_state_value(
+    dst_state: dict[Any, Any],
+    tgt_keys: Mapping[str, Any],
+    path: str,
+    value: jax.Array,
+) -> None:
+  raw_key = tgt_keys[path]
+  raw_val = dst_state[raw_key]
+  if isinstance(raw_val, nnx.Variable):
+    raw_val.value = value
+  else:
+    dst_state[raw_key] = value
+
+
+def _build_dst_state_accessors(
+    dst_state: Any,
+) -> tuple[set[str], Callable[[str], Any], Callable[[str, jax.Array], None]]:
+  """Returns `(available_paths, get_value, set_value)` for `transformer_state`."""
+  if isinstance(dst_state, nnx.State):
+    tgt_vars: dict[str, nnx.Variable[Any]] = {
+        ".".join(str(k) for k in path): var
+        for path, var in dst_state.flat_state()
+        if isinstance(var, nnx.Variable)
+    }
+    return (
+        set(tgt_vars.keys()),
+        functools.partial(_get_nnx_var_value, tgt_vars),
+        functools.partial(_set_nnx_var_value, tgt_vars),
+    )
+  if isinstance(dst_state, dict):
+    tgt_dict_keys: dict[str, Any] = {
+        (k if isinstance(k, str) else ".".join(str(p) for p in k)): k
+        for k in dst_state
+    }
+    return (
+        set(tgt_dict_keys.keys()),
+        functools.partial(_get_dict_state_value, dst_state, tgt_dict_keys),
+        functools.partial(_set_dict_state_value, dst_state, tgt_dict_keys),
+    )
+  raise TypeError(
+      "Expected VllmSampler.transformer_state to be nnx.State or dict,"
+      f" got {type(dst_state)}"
+  )
+
+
+def _validate_hf_inputs_and_shapes(
+    manifest: Mapping[str, Any],
+    dst_rule: str,
+    hf_weights: Mapping[str, jax.Array | np.ndarray],
+    available_tgt_paths: AbstractSet[str],
+    get_tgt_value: Callable[[str], Any],
+) -> tuple[list[tuple[str, str]], set[str]]:
+  """Validates HF input keys, target shapes, and `tied_keys` upfront."""
+  dropped = set(manifest["dropped_keys"])
+  expected_src_keys = set(hf_mapping.active_source_keys(manifest))
+  tied_pairs = [
+      (str(s), str(d)) for s, d in manifest["tied_keys"] if d not in dropped
+  ]
+  tied_dst = {d for _, d in tied_pairs}
+  provided_src_keys = set(hf_weights.keys()) - dropped - tied_dst
+  if provided_src_keys != expected_src_keys:
+    missing = sorted(expected_src_keys - provided_src_keys)
+    unexpected = sorted(provided_src_keys - expected_src_keys)
+    raise ValueError(
+        f"HF weight keys mismatch: missing={missing}, unexpected={unexpected}"
+    )
+
+  abstract_inputs = {
+      k: jax.ShapeDtypeStruct(hf_weights[k].shape, hf_weights[k].dtype)
+      for k in expected_src_keys
+  }
+  expected_out = jax.eval_shape(
+      functools.partial(hf_mapping.from_hf, dst_rule, mesh=None),
+      abstract_inputs,
+  )
+  rule_tgt_keys = expected_out.keys() - tied_dst
+  missing_tgt = sorted(rule_tgt_keys - available_tgt_paths)
+  if missing_tgt:
+    raise KeyError(f"Destination state missing target keys: {missing_tgt}")
+  for tgt_key in rule_tgt_keys:
+    out_spec = expected_out[tgt_key]
+    old_arr = get_tgt_value(tgt_key)
+    if tuple(out_spec.shape) != tuple(old_arr.shape):
+      raise ValueError(
+          f"Shape mismatch for target key {tgt_key!r}:"
+          f" converted={tuple(out_spec.shape)} != target={tuple(old_arr.shape)}"
+      )
+
+  for src_key, dst_key in tied_pairs:
+    if dst_key not in available_tgt_paths:
+      raise KeyError(
+          f"Tied target key {dst_key!r} missing from destination state."
+      )
+    if src_key not in available_tgt_paths:
+      raise KeyError(
+          f"Tied source key {src_key!r} missing from destination state."
+      )
+    src_arr = get_tgt_value(src_key)
+    old_dst = get_tgt_value(dst_key)
+    if tuple(src_arr.shape) != tuple(old_dst.shape):
+      raise ValueError(
+          f"Shape mismatch for tied key {dst_key!r}:"
+          f" {tuple(src_arr.shape)} != {tuple(old_dst.shape)}"
+      )
+  return tied_pairs, tied_dst
+
+
+def _stage_hf_weights_on_cpu(
+    hf_weights: Mapping[str, jax.Array | np.ndarray],
+    src_keys: Sequence[str],
+    cpu_device: jax.Device,
+) -> dict[str, jax.Array]:
+  """Gathers multi-host arrays deterministically and stages inputs on CPU."""
+  cpu_inputs: dict[str, jax.Array] = {}
+  with jax.transfer_guard("allow"):
+    for k in sorted(src_keys):
+      arr = hf_weights[k]
+      if isinstance(arr, jax.Array) and not arr.is_fully_addressable:
+        arr = multihost_utils.process_allgather(arr, tiled=True)
+      cpu_inputs[k] = jax.device_put(arr, cpu_device)
+  return cpu_inputs
+
+
+def _install_target_buffer(
+    tgt_key: str,
+    src_arr: jax.Array,
+    *,
+    get_tgt_value: Callable[[str], Any],
+    set_tgt_value: Callable[[str, jax.Array], None],
+    buffer_refcounts: collections.Counter[int],
+    delete_dst_buffers: bool,
+) -> None:
+  """Deletes superseded buffers by refcount and places `src_arr` on target."""
+  old_arr = get_tgt_value(tgt_key)
+  if old_arr is src_arr:
+    return
+  dst_sharding = old_arr.sharding if isinstance(old_arr, jax.Array) else None
+  if (
+      delete_dst_buffers
+      and isinstance(old_arr, jax.Array)
+      and not old_arr.is_deleted()
+  ):
+    arr_id = id(old_arr)
+    buffer_refcounts[arr_id] -= 1
+    if buffer_refcounts[arr_id] == 0:
+      old_arr.delete()
+  if dst_sharding is None:
+    new_arr = src_arr
+  elif (
+      isinstance(src_arr, jax.Array)
+      and not src_arr.is_fully_addressable
+      and src_arr.sharding != dst_sharding
+  ):
+    new_arr = reshard.reshard_pytree(src_arr, dst_sharding)
+  else:
+    new_arr = sharding_utils.place_array_on_target(src_arr, dst_sharding)
+  set_tgt_value(tgt_key, new_arr)
 
 
 class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
@@ -324,18 +513,15 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     else:
       self.refresh_state_leaves()
 
-  # TODO(b/434969743): Optimize weight sharing between trainer and vllm sampler.
-  def update_params(
+  @contextlib.contextmanager
+  def _weight_update_context(
       self,
-      updated_weights: jaxtyping.PyTree,
-      filter_types: Optional[Tuple[Any, ...]] = None,
       *,
       preserve_active_kv_cache: Optional[bool] = None,
-  ):
-    del filter_types
-    cfg_partial = getattr(self.config, "partial_rollout", False)
+  ) -> Iterator[None]:
+    """Coordinates KV-cache invalidation and leaf refresh around weight sync."""
     keep_active_kv = (
-        bool(isinstance(cfg_partial, bool) and cfg_partial)
+        bool(self.config.partial_rollout)
         if preserve_active_kv_cache is None
         else bool(preserve_active_kv_cache)
     )
@@ -353,54 +539,192 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
     # Synchronization point before weight sync
     jax.effects_barrier()
-
-    if self.to_hf_key_mappings:
-      preprocess_fn = self.config.mapping_config.preprocess_src_state
-      if preprocess_fn:
-        tp_size = (
-            1
-            if self._is_torchax_backend()
-            else self.args.get("tensor_parallel_size", 1)
-        )
-        try:
-          updated_weights = preprocess_fn(updated_weights, tp_size=tp_size)
-        except TypeError:
-          updated_weights = preprocess_fn(updated_weights)
-
-      if self._is_torchax_backend():
-        self._update_params_torchax(updated_weights)
-      else:
-        self._update_params_jax(updated_weights)
-    else:
-      # Direct Weight Sync (e.g. MaxText -> MaxText)
-      logging.debug(
-          "No key mappings configuration found. Proceeding with direct"
-          " structural weight synchronization (assuming matching source/target"
-          " structures)."
-      )
-
-      additional_config = self.config.additional_config or {}
-      if "maxtext_config" not in additional_config:
-        raise ValueError(
-            "Direct weight synchronization is currently supported only for "
-            "MaxText models. The required 'maxtext_config' key is missing "
-            "from 'additional_config'."
-        )
-
-      utils.transfer_state_directly(
-          src_state=updated_weights,
-          dst_state=self.transformer_state,
-          reshard_fn=reshard.reshard_pytree,
-          delete_dst_buffers=True,  # Ensure old weights are deleted to free up HBM memory
-          reshard_chunk_size=self.config.reshard_chunk_size,
-      )
-
+    yield
     if (
         self.config.free_kv_cache_during_weight_sync or self._kv_cache_deleted
     ) and not keep_active_kv:
       self.reinitialize_cache()
     else:
       self.refresh_state_leaves()
+
+  # TODO(b/434969743): Optimize weight sharing between trainer and vllm sampler.
+  def update_params(
+      self,
+      updated_weights: jaxtyping.PyTree,
+      filter_types: Optional[Tuple[Any, ...]] = None,
+      *,
+      preserve_active_kv_cache: Optional[bool] = None,
+  ):
+    del filter_types
+    with self._weight_update_context(
+        preserve_active_kv_cache=preserve_active_kv_cache
+    ):
+      if self.to_hf_key_mappings:
+        preprocess_fn = self.config.mapping_config.preprocess_src_state
+        if preprocess_fn:
+          # Torchax targets canonical TP=1 weight specs
+          # (`load_canonical_weights`), so `preprocess_src_state` must not
+          # TP-interleave fused projections.
+          tp_size = (
+              1
+              if self._is_torchax_backend()
+              else self.args.get("tensor_parallel_size", 1)
+          )
+          try:
+            updated_weights = preprocess_fn(updated_weights, tp_size=tp_size)
+          except TypeError:
+            updated_weights = preprocess_fn(updated_weights)
+
+        if self._is_torchax_backend():
+          self._update_params_torchax(updated_weights)
+        else:
+          self._update_params_jax(updated_weights)
+      else:
+        # Direct Weight Sync (e.g. MaxText -> MaxText)
+        logging.debug(
+            "No key mappings configuration found. Proceeding with direct"
+            " structural weight synchronization (assuming matching"
+            " source/target structures)."
+        )
+
+        additional_config = self.config.additional_config or {}
+        if "maxtext_config" not in additional_config:
+          raise ValueError(
+              "Direct weight synchronization is currently supported only for "
+              "MaxText models. The required 'maxtext_config' key is missing "
+              "from 'additional_config'."
+          )
+
+        # Ensure old weights are deleted to free up HBM memory.
+        utils.transfer_state_directly(
+            src_state=updated_weights,
+            dst_state=self.transformer_state,
+            reshard_fn=reshard.reshard_pytree,
+            delete_dst_buffers=True,
+            reshard_chunk_size=self.config.reshard_chunk_size,
+        )
+
+  def from_hf_manifest(self) -> dict[str, Any]:
+    """Builds the declarative HF-to-vLLM-JAX manifest for the loaded model."""
+    if self._is_torchax_backend():
+      raise NotImplementedError(
+          "from_hf_manifest requires the JAX NNX backend"
+          " (tpu_backend_type='jax'), not torchax."
+      )
+    layout_flag = (
+        os.environ["LAYOUT_Q_PROJ_AS_NDH"]
+        if "LAYOUT_Q_PROJ_AS_NDH" in os.environ
+        else "0"
+    )
+    if layout_flag not in ("", "0", "false", "False"):
+      raise NotImplementedError(
+          "LAYOUT_Q_PROJ_AS_NDH is not supported by from_hf_manifest."
+      )
+    runner = self._model_runner
+    model_config = runner.model_config
+    hf_config = model_config.hf_config
+    parallel_cfg = runner.vllm_config.parallel_config
+    tp_size = (
+        int(parallel_cfg.tensor_parallel_size)
+        if parallel_cfg is not None
+        else 1
+    )
+    mesh_shape = self.mesh.shape
+    head_sharding_size = (
+        int(mesh_shape["model"]) if "model" in mesh_shape else tp_size
+    )
+    vocab_size = int(model_config.get_vocab_size())
+    return vllm_hf_manifest.build_from_hf_manifest(
+        hf_config,
+        tp_size=tp_size,
+        head_sharding_size=head_sharding_size,
+        vocab_size=vocab_size,
+    )
+
+  def expected_hf_variables(self) -> tuple[weight_sync.TensorMetadata, ...]:
+    """Derives canonical HF TensorMetadata expected by this sampler."""
+    return vllm_hf_manifest.derive_hf_variables_from_manifest(
+        self.from_hf_manifest(), self.transformer_state
+    )
+
+  def update_params_from_hf(
+      self,
+      hf_weights: Mapping[str, jax.Array | np.ndarray],
+      *,
+      preserve_active_kv_cache: Optional[bool] = None,
+  ) -> None:
+    """Converts canonical HF weights on CPU and installs them into state."""
+    manifest = hf_mapping.parse_manifest(self.from_hf_manifest())
+    dst_rule = json.dumps(manifest, sort_keys=True)
+    available_tgt_paths, get_tgt_value, set_tgt_value = (
+        _build_dst_state_accessors(self.transformer_state)
+    )
+    tied_pairs, tied_dst = _validate_hf_inputs_and_shapes(
+        manifest,
+        dst_rule,
+        hf_weights,
+        available_tgt_paths,
+        get_tgt_value,
+    )
+
+    with self._weight_update_context(
+        preserve_active_kv_cache=preserve_active_kv_cache
+    ):
+      local_cpus = jax.local_devices(backend="cpu")
+      cpu_device = local_cpus[0] if local_cpus else jax.devices("cpu")[0]
+      dropped = set(manifest["dropped_keys"])
+      buffer_refcounts: collections.Counter[int] = collections.Counter()
+      for tgt_path in available_tgt_paths:
+        arr = get_tgt_value(tgt_path)
+        if isinstance(arr, jax.Array):
+          buffer_refcounts[id(arr)] += 1
+
+      for rule in manifest["rules"]:
+        if dropped.intersection((*rule["source_keys"], *rule["target_keys"])):
+          continue
+        active_tgts = [
+            t for t in rule["target_keys"] if t not in tied_dst
+        ]
+        if not active_tgts:
+          continue
+        rule_cpu_inputs = _stage_hf_weights_on_cpu(
+            hf_weights, rule["source_keys"], cpu_device
+        )
+        rule_manifest_json = json.dumps(
+            {"rules": [{**rule, "sharding": None}]}, sort_keys=True
+        )
+        with jax.default_device(cpu_device):
+          converted = hf_mapping.from_hf(
+              rule_manifest_json, rule_cpu_inputs, mesh=None
+          )
+        del rule_cpu_inputs
+        for tgt_key in sorted(converted):
+          if tgt_key in tied_dst or tgt_key in dropped:
+            continue
+          cpu_arr = converted[tgt_key]
+          old_arr = get_tgt_value(tgt_key)
+          if cpu_arr.dtype != old_arr.dtype:
+            with jax.default_device(cpu_device):
+              cpu_arr = cpu_arr.astype(old_arr.dtype)
+          _install_target_buffer(
+              tgt_key,
+              cpu_arr,
+              get_tgt_value=get_tgt_value,
+              set_tgt_value=set_tgt_value,
+              buffer_refcounts=buffer_refcounts,
+              delete_dst_buffers=self.config.delete_dst_buffers,
+          )
+        del converted
+
+      for src_key, dst_key in tied_pairs:
+        _install_target_buffer(
+            dst_key,
+            get_tgt_value(src_key),
+            get_tgt_value=get_tgt_value,
+            set_tgt_value=set_tgt_value,
+            buffer_refcounts=buffer_refcounts,
+            delete_dst_buffers=self.config.delete_dst_buffers,
+        )
 
   def _is_torchax_backend(self) -> bool:
     """True when tpu-inference runs the vLLM (torchax) model implementation.
@@ -635,9 +959,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         if return_logprobs is None
         else return_logprobs
     )
-    eff_num = (
-        self.config.num_logprobs if num_logprobs is None else num_logprobs
-    )
+    eff_num = self.config.num_logprobs if num_logprobs is None else num_logprobs
     if isinstance(eff_num, bool) or eff_num < 1:
       raise ValueError(f"num_logprobs must be >= 1, got {eff_num!r}.")
     if "max_logprobs" in self.args and eff_num > self.args["max_logprobs"]:
@@ -931,6 +1253,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     if self.tokenizer is not None and self.tokenizer.eos_id() is not None:
       eos_ids.add(self.tokenizer.eos_id())
     return list(eos_ids)
+
   def __call__(
       self,
       input_strings: str | List[str] | None = None,
@@ -1105,9 +1428,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         else None
     )
     per_prompt_salts = (
-        raw_cache_salt
-        if isinstance(raw_cache_salt, (list, tuple))
-        else None
+        raw_cache_salt if isinstance(raw_cache_salt, (list, tuple)) else None
     )
     if per_prompt_starts is not None or per_prompt_salts is not None:
       if per_prompt_starts is not None:

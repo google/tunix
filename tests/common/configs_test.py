@@ -273,11 +273,13 @@ class ConfigsTest(absltest.TestCase):
         "in_memory",
         "fs",
         "nccl",
+        "basic",
     ):
       self.assertEqual(
           configs.RolloutConfig(weight_sync_mode=valid_mode).weight_sync_mode,
           valid_mode,
       )
+    self.assertEqual(datatypes.WeightSyncMode.BASIC, "basic")
 
     for bad_mode in ("fallback", "raden", "RAIDEN", "invalid", ""):
       with self.assertRaisesRegex(
