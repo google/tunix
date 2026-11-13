@@ -154,6 +154,150 @@ class CreateTrainerPayloadsTest(absltest.TestCase):
     self.assertIsNone(payloads[0].old_per_token_logps)
     self.assertIsNone(payloads[1].old_per_token_logps)
 
+  def test_grpo_create_trainer_payloads_with_empty_failed_trajectory(self):
+    cfg = algorithm_config.GRPOConfig(num_generations=4)
+    failed_missing_logps = datatypes.TrajectoryItem(
+        group_index=0,
+        prompt_id="g1",
+        start_step=0,
+        traj={
+            "status": datatypes.TrajectoryStatus.FAILED,
+            "trajectory_reward": 0.0,
+            "prompt_tokens": np.zeros(0, dtype=np.int32),
+            "conversation_tokens": np.zeros(0, dtype=np.int32),
+            "conversation_masks": np.zeros(0, dtype=np.float32),
+        },
+    )
+    failed_none_logps = datatypes.TrajectoryItem(
+        group_index=1,
+        prompt_id="g1",
+        start_step=0,
+        traj={
+            "status": datatypes.TrajectoryStatus.FAILED.name,
+            "trajectory_reward": 0.0,
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.zeros(0, dtype=np.int32),
+            "conversation_masks": np.zeros(0, dtype=np.float32),
+            "old_logprobs": None,
+        },
+    )
+    normal_item1 = datatypes.TrajectoryItem(
+        group_index=2,
+        prompt_id="g1",
+        start_step=0,
+        traj={
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([3, 4], dtype=np.int32),
+            "conversation_masks": np.array([1, 1], dtype=np.float32),
+            "old_logprobs": np.array([-0.5, -0.2], dtype=np.float32),
+        },
+    )
+    normal_item2 = datatypes.TrajectoryItem(
+        group_index=3,
+        prompt_id="g1",
+        start_step=0,
+        traj={
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([5, 6], dtype=np.int32),
+            "conversation_masks": np.array([1, 1], dtype=np.float32),
+            "old_logprobs": np.array([-0.1, -0.4], dtype=np.float32),
+        },
+    )
+    group = [
+        failed_missing_logps,
+        failed_none_logps,
+        normal_item1,
+        normal_item2,
+    ]
+    payloads = payload_builder.create_trainer_payloads(
+        group, rewards=[0.0, 0.0, 1.0, 2.0], algo_config=cfg
+    )
+    self.assertLen(payloads, 4)
+    for empty_idx in (0, 1):
+      with self.subTest(empty_idx=empty_idx):
+        self.assertIsNotNone(payloads[empty_idx].old_per_token_logps)
+        self.assertEqual(
+            payloads[empty_idx].old_per_token_logps.dtype, np.float32
+        )
+        self.assertEqual(payloads[empty_idx].old_per_token_logps.shape, (0,))
+    np.testing.assert_allclose(
+        payloads[2].old_per_token_logps,
+        np.array([-0.5, -0.2], dtype=np.float32),
+    )
+    np.testing.assert_allclose(
+        payloads[3].old_per_token_logps,
+        np.array([-0.1, -0.4], dtype=np.float32),
+    )
+
+    pack_items = [
+        packing.PackItem(
+            prompt_ids=p.prompt_ids,
+            completion_ids=p.completion_ids,
+            completion_mask=p.completion_mask,
+            advantages=p.advantages,
+            per_token=(
+                {"old_per_token_logps": p.old_per_token_logps}
+                if p.old_per_token_logps is not None
+                else {}
+            ),
+        )
+        for p in payloads
+    ]
+    self.assertEqual(
+        packing.carried_per_token_fields(pack_items),
+        ("old_per_token_logps",),
+    )
+
+    disabled_payloads = payload_builder.create_trainer_payloads(
+        group,
+        rewards=[0.0, 0.0, 1.0, 2.0],
+        algo_config=algorithm_config.GRPOConfig(
+            num_generations=4, use_rollout_logps=False
+        ),
+    )
+    for payload in disabled_payloads:
+      self.assertIsNone(payload.old_per_token_logps)
+
+  def test_grpo_create_trainer_payloads_extracts_old_logprobs_from_metadata(
+      self,
+  ):
+    cfg = algorithm_config.GRPOConfig(num_generations=2)
+    item1 = datatypes.TrajectoryItem(
+        group_index=0,
+        prompt_id="g1",
+        start_step=0,
+        traj={
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([3, 4], dtype=np.int32),
+            "conversation_masks": np.array([1, 1], dtype=np.float32),
+        },
+        metadata={"old_logprobs": np.array([-0.5, -0.2], dtype=np.float32)},
+    )
+    item2 = datatypes.TrajectoryItem(
+        group_index=1,
+        prompt_id="g1",
+        start_step=0,
+        traj={
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([5, 6], dtype=np.int32),
+            "conversation_masks": np.array([1, 1], dtype=np.float32),
+            "old_logprobs": None,
+        },
+        old_logprobs=np.array([-0.1, -0.4], dtype=np.float32),
+    )
+    payloads = payload_builder.create_trainer_payloads(
+        [item1, item2], rewards=[1.0, 2.0], algo_config=cfg
+    )
+    self.assertLen(payloads, 2)
+    np.testing.assert_allclose(
+        payloads[0].old_per_token_logps,
+        np.array([-0.5, -0.2], dtype=np.float32),
+    )
+    np.testing.assert_allclose(
+        payloads[1].old_per_token_logps,
+        np.array([-0.1, -0.4], dtype=np.float32),
+    )
+
   def test_grpo_create_trainer_payloads_with_mismatched_logps_length(self):
     cfg = algorithm_config.GRPOConfig(num_generations=2)
     item1 = datatypes.TrajectoryItem(
