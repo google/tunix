@@ -382,6 +382,75 @@ class ClusterOrchestratorTest(absltest.TestCase):
     mock_program.run.assert_called_once()
 
 
+def _orchestrator_with_rollout_resource(
+    key: str, **values: float | bool | None
+) -> orchestrator.ClusterOrchestrator:
+  """Registers one rollout worker per entry; None means it reported none."""
+  registry = worker_registry.WorkerRegistry()
+  for worker_id, value in values.items():
+    resources = {} if value is None else {key: value}
+    registry.register_handle(
+        worker_id,
+        [datatypes.Role.ROLLOUT],
+        mock.MagicMock(spec=remote_execution.ActorHandle),
+        resources=resources,
+    )
+  return orchestrator.ClusterOrchestrator(registry=registry)
+
+
+class RolloutTemperatureTest(absltest.TestCase):
+
+  def test_returns_the_temperature_all_rollout_workers_report(self):
+    orch = _orchestrator_with_rollout_resource("temperature", r0=0.7, r1=0.7)
+    self.assertEqual(orch.rollout_temperature(), 0.7)
+
+  def test_raises_when_rollout_workers_disagree(self):
+    orch = _orchestrator_with_rollout_resource("temperature", r0=0.7, r1=1.0)
+    with self.assertRaisesRegex(ValueError, "one sampling temperature"):
+      orch.rollout_temperature()
+
+  def test_raises_when_a_rollout_worker_reported_none(self):
+    orch = _orchestrator_with_rollout_resource("temperature", r0=0.7, r1=None)
+    with self.assertRaisesRegex(ValueError, "'r1' did not report"):
+      orch.rollout_temperature()
+
+  def test_raises_without_rollout_workers(self):
+    orch = _orchestrator_with_rollout_resource("temperature")
+    with self.assertRaisesRegex(ValueError, "No rollout worker is registered"):
+      orch.rollout_temperature()
+
+
+class RolloutReturnRoutedExpertsTest(absltest.TestCase):
+
+  def test_returns_the_setting_all_rollout_workers_report(self):
+    orch = _orchestrator_with_rollout_resource(
+        "return_routed_experts", r0=True, r1=True
+    )
+    self.assertIs(orch.rollout_return_routed_experts(), True)
+
+  def test_returns_false_when_all_rollout_workers_report_false(self):
+    orch = _orchestrator_with_rollout_resource(
+        "return_routed_experts", r0=False, r1=False
+    )
+    self.assertIs(orch.rollout_return_routed_experts(), False)
+
+  def test_raises_when_rollout_workers_disagree(self):
+    orch = _orchestrator_with_rollout_resource(
+        "return_routed_experts", r0=True, r1=False
+    )
+    with self.assertRaisesRegex(
+        ValueError, "one return_routed_experts setting"
+    ):
+      orch.rollout_return_routed_experts()
+
+  def test_raises_when_a_rollout_worker_reported_none(self):
+    orch = _orchestrator_with_rollout_resource(
+        "return_routed_experts", r0=True, r1=None
+    )
+    with self.assertRaisesRegex(ValueError, "'r1' did not report"):
+      orch.rollout_return_routed_experts()
+
+
 def _trajectory_store_orchestrator(
     **kwargs,
 ) -> orchestrator.ClusterOrchestrator:
