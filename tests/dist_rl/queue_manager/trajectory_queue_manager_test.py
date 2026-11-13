@@ -17,6 +17,7 @@
 import asyncio
 
 from absl.testing import absltest
+from absl.testing import parameterized
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.queue_manager import trajectory_queue_manager
 from tunix.rl.agentic.queue_manager import group_queue_manager
@@ -940,6 +941,101 @@ class BatchOrderedGroupQueueTest(absltest.TestCase):
       self.assertEqual(await manager.get_ordered_group(), (0, fresh))
 
     asyncio.run(_run_test())
+
+
+class GroupQueueDropCallbackTest(parameterized.TestCase):
+  """Covers `on_group_dropped` across FIFO and batch-ordered group queues."""
+
+  @parameterized.named_parameters(
+      dict(testcase_name="fifo_clear", mode="fifo_clear"),
+      dict(testcase_name="fifo_put_after_abort", mode="fifo_put_after_abort"),
+      dict(
+          testcase_name="fifo_put_abort_under_lock",
+          mode="fifo_put_abort_under_lock",
+      ),
+      dict(testcase_name="ordered_clear", mode="ordered_clear"),
+      dict(
+          testcase_name="ordered_put_after_abort",
+          mode="ordered_put_after_abort",
+      ),
+      dict(
+          testcase_name="ordered_put_abort_under_lock",
+          mode="ordered_put_abort_under_lock",
+      ),
+      dict(testcase_name="ordered_late_arrival", mode="ordered_late_arrival"),
+      dict(testcase_name="ordered_skip_pending", mode="ordered_skip_pending"),
+  )
+  def test_on_group_dropped_invoked_once_per_discarded_group(self, mode: str):
+    async def _run():
+      dropped: list[tuple[str, int]] = []
+      if mode.startswith("fifo_"):
+        q = trajectory_queue_manager.FifoGroupQueue.create(
+            on_group_dropped=dropped.append
+        )
+        kept = ("kept", 0)
+        await q.put(kept)
+        self.assertEqual(await q.get(), kept)
+        self.assertEmpty(dropped)
+
+        if mode == "fifo_clear":
+          await q.put(("g0", 0))
+          await q.put(("g1", 0))
+          await q.clear()
+          self.assertEqual(dropped, [("g0", 0), ("g1", 0)])
+        elif mode == "fifo_put_after_abort":
+          await q.abort(RuntimeError("boom"))
+          await q.put(("g_abort", 0))
+          self.assertEqual(dropped, [("g_abort", 0)])
+        else:
+          async with q._lock:
+            put_task = asyncio.create_task(q.put(("g_locked_abort", 0)))
+            await asyncio.sleep(0)
+            q._clearing = True
+          await put_task
+          self.assertEqual(dropped, [("g_locked_abort", 0)])
+        return
+
+      ordered = trajectory_queue_manager.BatchOrderedGroupQueue.create(
+          full_batch_size=1,
+          batch_idx_fn=lambda g: g[1],
+          on_group_dropped=dropped.append,
+      )
+      kept = ("kept", 0)
+      await ordered.put(kept)
+      self.assertEqual(await ordered.get(), kept)
+      self.assertEmpty(dropped)
+
+      if mode == "ordered_clear":
+        ordered.commit_batch(0)
+        await ordered.put(("b1", 1))
+        await ordered.put(("b2", 2))
+        await ordered.clear()
+        self.assertEqual(dropped, [("b1", 1), ("b2", 2)])
+      elif mode == "ordered_put_after_abort":
+        await ordered.abort(RuntimeError("boom"))
+        await ordered.put(("b_abort", 1))
+        self.assertEqual(dropped, [("b_abort", 1)])
+      elif mode == "ordered_put_abort_under_lock":
+        async with ordered._lock:
+          put_task = asyncio.create_task(ordered.put(("b_locked_abort", 1)))
+          await asyncio.sleep(0)
+          ordered._clearing = True
+        await put_task
+        self.assertEqual(dropped, [("b_locked_abort", 1)])
+      elif mode == "ordered_late_arrival":
+        ordered.commit_batch(0)
+        await ordered.put(("b_late", 0))
+        self.assertEqual(dropped, [("b_late", 0)])
+      else:
+        ordered.commit_batch(0)
+        await ordered.put(("b1_skip", 1))
+        await ordered.put(("b2_skip", 2))
+        await ordered.put(("b3_keep", 3))
+        ordered.skip(1, 3)
+        self.assertEqual(dropped, [("b1_skip", 1), ("b2_skip", 2)])
+        self.assertEqual(await ordered.get(), ("b3_keep", 3))
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":

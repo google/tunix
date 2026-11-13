@@ -31,6 +31,7 @@ from tunix.dist_rl.common import lineage
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.orchestrator import distributed_rl_engine
 from tunix.dist_rl.orchestrator import payload_builder
+from tunix.dist_rl.orchestrator import relay_coordinator
 from tunix.dist_rl.orchestrator import rl_program
 from tunix.dist_rl.orchestrator import step_telemetry
 from tunix.dist_rl.orchestrator import worker_registry
@@ -289,10 +290,33 @@ class RLProgramTest(absltest.TestCase):
       await asyncio.sleep(0.01)
       return []
 
+    async def _mock_get_metrics(
+        role: datatypes.Role = datatypes.Role.ACTOR, **kwargs
+    ):
+      del kwargs
+      if role == datatypes.Role.ROLLOUT:
+        return [{
+            "staging/used_bytes": 0,
+            "staging/reserved_bytes": 0,
+            "staging/zombie_evictions_total": 0,
+        }]
+      return None
+
     self.mock_engine.prepare_rollout_policy = mock.AsyncMock(return_value=0)
     self.mock_engine.sync_weights = mock.AsyncMock(return_value=1)
-    self.mock_engine.get_metrics = mock.AsyncMock(return_value=None)
+    self.mock_engine.get_metrics = mock.AsyncMock(side_effect=_mock_get_metrics)
     self.mock_engine.poll_rollouts = mock.AsyncMock(side_effect=_mock_poll)
+    self.mock_engine.routed_experts_spec = mock.MagicMock(
+        return_value=batch_assembly.RoutedExpertsSpec(
+            num_layers=2, top_k=2, encoding="uint8"
+        )
+    )
+    self.mock_engine.configure_staging_liveness = mock.MagicMock()
+    self.mock_engine.fetch_routed_experts = mock.AsyncMock(return_value={})
+    self.mock_engine.release_routed_experts = mock.AsyncMock(return_value=None)
+    self.mock_engine.clear_all_staged_routed_experts = mock.AsyncMock(
+        return_value=None
+    )
     self.algo_config = algorithm_config.GRPOConfig(
         num_generations=2,
         beta=0.0,
@@ -550,7 +574,8 @@ class RLProgramTest(absltest.TestCase):
           },
       )
       self.mock_engine.sync_weights.assert_called_once_with(
-          role=datatypes.Role.ACTOR
+          role=datatypes.Role.ACTOR,
+          min_retained_policy_version=None,
       )
       self.assertIsNotNone(program.last_step_result)
       self.assertEqual(program.last_step_result.num_rollouts, 2)
@@ -632,7 +657,8 @@ class RLProgramTest(absltest.TestCase):
       await program.run_async(self.mock_engine, num_steps=1)
 
       self.mock_engine.sync_weights.assert_called_once_with(
-          role=datatypes.Role.ACTOR
+          role=datatypes.Role.ACTOR,
+          min_retained_policy_version=None,
       )
       self.assertEqual(program.policy_version, 5)
       self.assertIsNotNone(program.last_step_result)
@@ -763,8 +789,13 @@ class RLProgramTest(absltest.TestCase):
 
     coordinator = mock.MagicMock()
 
-    async def _sync(*, policy_version, destination_statuses):
-      del destination_statuses
+    async def _sync(
+        *,
+        policy_version,
+        destination_statuses,
+        min_retained_policy_version=None,
+    ):
+      del destination_statuses, min_retained_policy_version
       events.append(("sync", policy_version))
       return mock.MagicMock(policy_version=policy_version, workers=())
 
@@ -2429,7 +2460,8 @@ class RLProgramTest(absltest.TestCase):
           [False, True, False, True],
       )
       self.mock_engine.sync_weights.assert_called_once_with(
-          role=datatypes.Role.ACTOR
+          role=datatypes.Role.ACTOR,
+          min_retained_policy_version=None,
       )
       self.mock_engine.save_checkpoint.assert_called_once()
       checkpoint_metadata = self.mock_engine.save_checkpoint.call_args.kwargs[
@@ -7382,6 +7414,690 @@ class RLProgramTest(absltest.TestCase):
       program.close()
 
     asyncio.run(_run())
+
+  def test_relay_batch_config_requires_explicit_prompt_and_response_lengths(
+      self,
+  ):
+    gen_args = datatypes.GenerationArgs(return_routed_experts=True)
+    relay_algo = algorithm_config.GRPOConfig(
+        num_generations=2,
+        beta=0.0,
+        routed_experts_encode_mode="int16",
+    )
+    with self.assertRaisesRegex(
+        ValueError, "BatchConfig.max_prompt_length must be positive"
+    ):
+      rl_program.StandardRLProgram(
+          algo_config=relay_algo,
+          dataset=["p0"],
+          batch_config=batch_assembly.BatchConfig(
+              mini_batch_size=1,
+              max_prompt_length=None,
+              max_response_length=8,
+          ),
+          generation_args=gen_args,
+      )
+    with self.assertRaisesRegex(
+        ValueError, "BatchConfig.max_response_length must be positive"
+    ):
+      rl_program.StandardRLProgram(
+          algo_config=relay_algo,
+          dataset=["p0"],
+          batch_config=batch_assembly.BatchConfig(
+              mini_batch_size=1,
+              max_prompt_length=8,
+              max_response_length=None,
+          ),
+          generation_args=gen_args,
+      )
+
+  def test_relay_two_phase_pipeline_plumbs_spec_fetch_release_and_sync_bound(
+      self,
+  ):
+    async def _run():
+      self.algo_config.routed_experts_encode_mode = "uint8"
+      self.mock_create_trainer_payloads.side_effect = (
+          self._orig_create_trainer_payloads
+      )
+      ref0 = datatypes.RoutedExpertsRef(worker_id="w0", ref_id=11)
+      ref1 = datatypes.RoutedExpertsRef(worker_id="w1", ref_id=22)
+      arr0 = np.full((6, 2, 2), 3, dtype=np.uint8)
+      arr1 = np.full((6, 2, 2), 5, dtype=np.uint8)
+      self.mock_engine.fetch_routed_experts.return_value = {
+          ref0: arr0,
+          ref1: arr1,
+      }
+      self.mock_engine.get_metrics = mock.AsyncMock(
+          return_value=[{
+              "staging/used_bytes": 0,
+              "staging/reserved_bytes": 0,
+              "staging/zombie_evictions_total": 1,
+          }]
+      )
+
+      group = [
+          datatypes.TrajectoryItem(
+              prompt_id="prompt_0",
+              group_index=g,
+              traj={
+                  "conversation_text": [
+                      {"role": "user", "content": "q"},
+                      {"role": "assistant", "content": f"a{g}"},
+                  ],
+                  "prompt_tokens": np.array([1, 2], dtype=np.int32),
+                  "conversation_tokens": np.array([3, 4], dtype=np.int32),
+                  "conversation_masks": np.array([1, 1], dtype=np.int32),
+                  "old_logprobs": np.array([-0.2, -0.3], dtype=np.float32),
+                  "trajectory_reward": 1.0 if g == 0 else -1.0,
+                  "status": datatypes.TrajectoryStatus.SUCCEEDED,
+                  "policy_versions": [0],
+              },
+              prompt_tokens=np.array([1, 2], dtype=np.int32),
+              completion_tokens=np.array([3, 4], dtype=np.int32),
+              routed_experts_ref=ref0 if g == 0 else ref1,
+              metadata={
+                  "prompt_idx": 0,
+                  "batch_idx": 0,
+                  "intra_batch_idx": 0,
+              },
+          )
+          for g in range(2)
+      ]
+      _set_mock_poll_batches(self.mock_engine, group, [])
+
+      batch_cfg = batch_assembly.BatchConfig(
+          mini_batch_size=1,
+          train_micro_batch_size=1,
+          max_seq_token_per_tpu=16,
+          max_prompt_length=8,
+          max_response_length=8,
+      )
+      assembler = batch_assembly.SequencePackedBatchAssembler(
+          batch_size=1,
+          num_generations=2,
+          mini_batch_size=1,
+          max_packed_len=16,
+      )
+      program = self._create_program(
+          dataset=["prompt_data_0"],
+          max_steps=1,
+          assembler=assembler,
+          batch_config=batch_cfg,
+          reward_fns=[
+              lambda prompts, completions, **_: [1.0, -1.0][: len(prompts)]
+          ],
+          generation_args=datatypes.GenerationArgs(return_routed_experts=True),
+          max_staleness=2,
+          max_version_span=1,
+      )
+      try:
+        await program.run_async(self.mock_engine)
+        self.mock_engine.routed_experts_spec.assert_called_once_with(
+            encode_mode="uint8",
+            num_experts=None,
+        )
+        self.mock_engine.configure_staging_liveness.assert_called_once_with(
+            worst_case_bytes=64,
+            required_slots=8,
+            overcommit_factor=1.0,
+        )
+        dispatch_kwargs = self.mock_engine.dispatch_rollouts.call_args.kwargs
+        self.assertTrue(dispatch_kwargs["stage_routed_experts"])
+        self.assertEqual(dispatch_kwargs["max_response_length"], 8)
+
+        self.mock_engine.fetch_routed_experts.assert_awaited_once_with(
+            (ref0, ref1)
+        )
+        trained_batch = self.mock_engine.train_step.call_args.args[0]
+        self.assertIsNone(trained_batch.routed_experts_ref)
+        self.assertEqual(trained_batch.routed_experts.shape, (1, 16, 2, 2))
+        self.assertEqual(trained_batch.routed_experts.dtype, np.uint8)
+
+        self.mock_engine.release_routed_experts.assert_awaited_once_with(
+            (ref0, ref1)
+        )
+        # V_new = 1 -> 1 - (2*2 + 1 + 2) = -6.
+        self.mock_engine.sync_weights.assert_awaited_once_with(
+            role=datatypes.Role.ACTOR,
+            min_retained_policy_version=-6,
+        )
+        self.mock_engine.clear_all_staged_routed_experts.assert_awaited_once()
+        self.assertAlmostEqual(
+            program.metrics_logger.get_metric(
+                "rollout", "staging_zombie_evictions_total", "train"
+            ),
+            1.0,
+        )
+        self.assertTrue(
+            program.metrics_logger.metric_exists(
+                "perf", "routed_experts_fetch_time", "train"
+            )
+        )
+      finally:
+        program.close()
+
+    asyncio.run(_run())
+
+  def test_relay_releases_refs_on_critique_stale_filter_and_queue_drop(
+      self,
+  ):
+    async def _run():
+      self.algo_config.routed_experts_encode_mode = "uint8"
+      self.mock_create_trainer_payloads.side_effect = (
+          self._orig_create_trainer_payloads
+      )
+      batch_cfg = batch_assembly.BatchConfig(
+          mini_batch_size=1,
+          train_micro_batch_size=1,
+          max_seq_token_per_tpu=16,
+          max_prompt_length=8,
+          max_response_length=8,
+      )
+
+      def _make_item(
+          pid: str, g: int, ref_id: int, version: int, batch_idx: int
+      ):
+        return datatypes.TrajectoryItem(
+            prompt_id=pid,
+            group_index=g,
+            traj={
+                "conversation_text": [
+                    {"role": "user", "content": "q"},
+                    {"role": "assistant", "content": "a"},
+                ],
+                "prompt_tokens": np.array([1, 2], dtype=np.int32),
+                "conversation_tokens": np.array([3, 4], dtype=np.int32),
+                "conversation_masks": np.array([1, 1], dtype=np.int32),
+                "old_logprobs": np.array([-0.1, -0.1], dtype=np.float32),
+                "trajectory_reward": 1.0,
+                "status": datatypes.TrajectoryStatus.SUCCEEDED,
+                "policy_versions": [version],
+            },
+            prompt_tokens=np.array([1, 2], dtype=np.int32),
+            completion_tokens=np.array([3, 4], dtype=np.int32),
+            routed_experts_ref=datatypes.RoutedExpertsRef(
+                worker_id="w0", ref_id=ref_id
+            ),
+            metadata={
+                "prompt_idx": batch_idx,
+                "batch_idx": batch_idx,
+                "intra_batch_idx": 0,
+            },
+        )
+
+      # 1. Stale raw group filtered in `raw_q` + degenerate critique group.
+      program = rl_program.StandardRLProgram(
+          algo_config=self.algo_config,
+          dataset=["p0"],
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
+          batch_config=batch_cfg,
+          generation_args=datatypes.GenerationArgs(return_routed_experts=True),
+          max_staleness=0,
+      )
+      try:
+        assert program._relay is not None
+        program.engine = self.mock_engine
+        program._relay.bind_engine(
+            self.mock_engine,
+            assembler=program.assembler,
+            encode_mode="uint8",
+            num_experts=None,
+            batch_config=batch_cfg,
+            max_staleness=0,
+            full_batch_size=1,
+            num_generations=2,
+        )
+        program.policy_version = 2
+        await program.raw_q.put(_make_item("stale_p", 0, 100, 0, 0))
+        await program.raw_q.put(_make_item("stale_p", 1, 101, 0, 0))
+        await program._relay.flush_releases()
+        self.mock_engine.release_routed_experts.assert_awaited_once_with((
+            datatypes.RoutedExpertsRef(worker_id="w0", ref_id=100),
+            datatypes.RoutedExpertsRef(worker_id="w0", ref_id=101),
+        ))
+        self.mock_engine.release_routed_experts.reset_mock()
+
+        # Degenerate `< 2` valid group (`g=1` is an invalid tombstone, so
+        # `payload_builder` zeroes `valid_mask` and clears `g=0`'s ref).
+        await program.raw_q.put(_make_item("degen_p", 0, 200, 2, 1))
+        tombstone = datatypes.TrajectoryItem(
+            prompt_id="degen_p",
+            group_index=1,
+            traj={
+                "prompt_tokens": np.array([1], dtype=np.int32),
+                "conversation_tokens": np.array([2], dtype=np.int32),
+                "conversation_masks": np.array([0], dtype=np.int32),
+                "old_logprobs": np.array([0.0], dtype=np.float32),
+                "trajectory_reward": 0.0,
+                "status": datatypes.TrajectoryStatus.FAILED,
+            },
+            is_valid=False,
+            metadata={
+                "prompt_idx": 1,
+                "batch_idx": 1,
+                "intra_batch_idx": 0,
+            },
+        )
+        await program.raw_q.put(tombstone)
+        await program.raw_q.close()
+        await program.critique_stage()
+        await program._relay.flush_releases()
+        self.mock_engine.release_routed_experts.assert_awaited_once_with((
+            datatypes.RoutedExpertsRef(worker_id="w0", ref_id=200),
+        ))
+      finally:
+        program.close()
+
+      # 2. Late group dropped in `BatchOrderedGroupQueue` (`PROMPT_ARRIVAL`).
+      self.mock_engine.release_routed_experts.reset_mock()
+      ordered_prog = rl_program.StandardRLProgram(
+          algo_config=self.algo_config,
+          dataset=["p0"],
+          reward_fns=[
+              lambda prompts, completions, **_: [1.0, -1.0][: len(prompts)]
+          ],
+          batch_config=batch_cfg,
+          generation_args=datatypes.GenerationArgs(return_routed_experts=True),
+          group_order=rl_program.GroupOrder.PROMPT_ARRIVAL,
+      )
+      try:
+        assert ordered_prog._relay is not None
+        ordered_prog.engine = self.mock_engine
+        ordered_prog._relay.bind_engine(
+            self.mock_engine,
+            assembler=ordered_prog.assembler,
+            encode_mode="uint8",
+            num_experts=None,
+            batch_config=batch_cfg,
+            max_staleness=0,
+            full_batch_size=1,
+            num_generations=2,
+        )
+        assert isinstance(
+            ordered_prog.scored_q, rl_program.BatchOrderedGroupQueue
+        )
+        ordered_prog.scored_q.skip(0, 1)
+        late_group = ordered_prog._critique_group([
+            _make_item("late_p", 0, 300, 0, 0),
+            _make_item("late_p", 1, 301, 0, 0),
+        ])
+        await ordered_prog.scored_q.put(late_group)
+        await ordered_prog._relay.flush_releases()
+        self.mock_engine.release_routed_experts.assert_awaited_once_with((
+            datatypes.RoutedExpertsRef(worker_id="w0", ref_id=300),
+            datatypes.RoutedExpertsRef(worker_id="w0", ref_id=301),
+        ))
+      finally:
+        ordered_prog.close()
+
+      # 3. `critique_stage` releases `scored_group` refs when `scored_q.put`
+      # raises (e.g. closed `scored_q`).
+      self.mock_engine.release_routed_experts.reset_mock()
+      put_fail_prog = rl_program.StandardRLProgram(
+          algo_config=self.algo_config,
+          dataset=["p0"],
+          reward_fns=[
+              lambda prompts, completions, **_: [1.0, -1.0][: len(prompts)]
+          ],
+          batch_config=batch_cfg,
+          generation_args=datatypes.GenerationArgs(return_routed_experts=True),
+      )
+      try:
+        assert put_fail_prog._relay is not None
+        put_fail_prog.engine = self.mock_engine
+        put_fail_prog._relay.bind_engine(
+            self.mock_engine,
+            assembler=put_fail_prog.assembler,
+            encode_mode="uint8",
+            num_experts=None,
+            batch_config=batch_cfg,
+            max_staleness=0,
+            full_batch_size=1,
+            num_generations=2,
+        )
+        await put_fail_prog.raw_q.put(_make_item("put_err_p", 0, 400, 0, 0))
+        await put_fail_prog.raw_q.put(_make_item("put_err_p", 1, 401, 0, 0))
+        await put_fail_prog.raw_q.close()
+        await put_fail_prog.scored_q.close()
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+          await put_fail_prog.critique_stage()
+        await put_fail_prog._relay.flush_releases()
+        self.mock_engine.release_routed_experts.assert_awaited_once_with((
+            datatypes.RoutedExpertsRef(worker_id="w0", ref_id=400),
+            datatypes.RoutedExpertsRef(worker_id="w0", ref_id=401),
+        ))
+      finally:
+        put_fail_prog.close()
+
+    asyncio.run(_run())
+
+  def test_relay_surfaces_release_error_and_preserves_primary_exception(self):
+    async def _run():
+      self.algo_config.routed_experts_encode_mode = "uint8"
+      self.mock_create_trainer_payloads.side_effect = (
+          self._orig_create_trainer_payloads
+      )
+      ref0 = datatypes.RoutedExpertsRef(worker_id="w0", ref_id=1)
+      ref1 = datatypes.RoutedExpertsRef(worker_id="w0", ref_id=2)
+      arr = np.ones((4, 2, 2), dtype=np.uint8)
+      self.mock_engine.fetch_routed_experts.return_value = {
+          ref0: arr,
+          ref1: arr,
+      }
+      batch_cfg = batch_assembly.BatchConfig(
+          mini_batch_size=1,
+          train_micro_batch_size=1,
+          max_seq_token_per_tpu=16,
+          max_prompt_length=8,
+          max_response_length=8,
+      )
+
+      def _group():
+        return [
+            datatypes.TrajectoryItem(
+                prompt_id="p0",
+                group_index=g,
+                traj={
+                    "conversation_text": [
+                        {"role": "user", "content": "q"},
+                        {"role": "assistant", "content": "a"},
+                    ],
+                    "prompt_tokens": np.array([1, 2], dtype=np.int32),
+                    "conversation_tokens": np.array([3, 4], dtype=np.int32),
+                    "conversation_masks": np.array([1, 1], dtype=np.int32),
+                    "old_logprobs": np.array([-0.1, -0.2], dtype=np.float32),
+                    "trajectory_reward": 1.0 if g == 0 else -1.0,
+                    "status": datatypes.TrajectoryStatus.SUCCEEDED,
+                    "policy_versions": [0],
+                },
+                prompt_tokens=np.array([1, 2], dtype=np.int32),
+                completion_tokens=np.array([3, 4], dtype=np.int32),
+                routed_experts_ref=ref0 if g == 0 else ref1,
+            )
+            for g in range(2)
+        ]
+
+      # 1. Clean run with failing `release_routed_experts` raises release error
+      # AND still runs `clear_all_staged_routed_experts`.
+      self.mock_engine.release_routed_experts.side_effect = RuntimeError(
+          "release RPC boom"
+      )
+      _set_mock_poll_batches(self.mock_engine, _group(), [])
+      prog1 = self._create_program(
+          dataset=["p0"],
+          max_steps=1,
+          batch_config=batch_cfg,
+          reward_fns=[
+              lambda prompts, completions, **_: [1.0, -1.0][: len(prompts)]
+          ],
+          generation_args=datatypes.GenerationArgs(return_routed_experts=True),
+      )
+      try:
+        with self.assertRaisesRegex(RuntimeError, "release RPC boom"):
+          await prog1.run_async(self.mock_engine)
+        self.mock_engine.clear_all_staged_routed_experts.assert_awaited_once()
+      finally:
+        prog1.close()
+
+      # 2. Primary `train_step` failure is never masked by secondary teardown
+      # errors.
+      self.mock_engine.release_routed_experts.side_effect = None
+      self.mock_engine.clear_all_staged_routed_experts.reset_mock()
+      self.mock_engine.clear_all_staged_routed_experts.side_effect = (
+          RuntimeError("secondary clear boom")
+      )
+      self.mock_engine.train_step.side_effect = ValueError("primary train boom")
+      _set_mock_poll_batches(self.mock_engine, _group(), [])
+      prog2 = self._create_program(
+          dataset=["p0"],
+          max_steps=1,
+          batch_config=batch_cfg,
+          reward_fns=[
+              lambda prompts, completions, **_: [1.0, -1.0][: len(prompts)]
+          ],
+          generation_args=datatypes.GenerationArgs(return_routed_experts=True),
+      )
+      try:
+        with self.assertRaisesRegex(ValueError, "primary train boom"):
+          await prog2.run_async(self.mock_engine)
+        self.mock_engine.clear_all_staged_routed_experts.assert_awaited_once()
+      finally:
+        prog2.close()
+
+    asyncio.run(_run())
+
+  def test_relay_tail_flush_resets_assembler_update_counter(self):
+    async def _run():
+      relay = relay_coordinator.RelayCoordinator()
+      asm = batch_assembly.SequencePackedBatchAssembler(
+          batch_size=1,
+          num_generations=2,
+          mini_batch_size=2,
+          max_packed_len=16,
+          pad_id=0,
+      )
+      relay.bind_engine(
+          self.mock_engine,
+          assembler=asm,
+          encode_mode="uint8",
+          num_experts=64,
+          batch_config=batch_assembly.BatchConfig(
+              mini_batch_size=2, max_prompt_length=8, max_response_length=8
+          ),
+          max_staleness=0,
+          full_batch_size=2,
+          num_generations=2,
+      )
+      ref0 = datatypes.RoutedExpertsRef(worker_id="w0", ref_id=1)
+      ref1 = datatypes.RoutedExpertsRef(worker_id="w0", ref_id=2)
+      self.mock_engine.fetch_routed_experts.return_value = {
+          ref0: np.ones((4, 2, 2), dtype=np.uint8),
+          ref1: np.ones((4, 2, 2), dtype=np.uint8),
+      }
+      lock = threading.Lock()
+      step_times = step_telemetry.StepTimes()
+
+      def _item(ref: datatypes.RoutedExpertsRef) -> datatypes.RLTrainerPayload:
+        return datatypes.RLTrainerPayload(
+            prompt_ids=np.array([1, 2], dtype=np.int32),
+            prompt_mask=np.array([1.0, 1.0], dtype=np.float32),
+            completion_ids=np.array([3, 4], dtype=np.int32),
+            completion_mask=np.array([1.0, 1.0], dtype=np.float32),
+            advantages=np.array([1.0, 1.0], dtype=np.float32),
+            routed_experts_ref=ref,
+        )
+
+      # Partial group (`2 < 4` rollouts per update) holds back streaming tail.
+      emitted = [
+          mb
+          async for mb, _ in relay.iter_planned_microbatches(
+              assembler=asm,
+              lock=lock,
+              payloads=[_item(ref0), _item(ref1)],
+              step_times=step_times,
+          )
+      ]
+      self.assertEmpty(emitted)
+
+      # Tail flush (`payloads=None`) drains the partial batch AND resets
+      # `_rollouts_since_update` so a subsequent group starts cleanly at 0.
+      flushed = [
+          mb
+          async for mb, _ in relay.iter_planned_microbatches(
+              assembler=asm,
+              lock=lock,
+              payloads=None,
+              step_times=step_times,
+          )
+      ]
+      self.assertLen(flushed, 1)
+      self.assertTrue(flushed[0].is_final_batch)
+      await relay.flush_releases()
+      self.assertFalse(asm.ingest([_item(ref0), _item(ref1)]))
+
+    asyncio.run(_run())
+
+  def test_iter_planned_microbatches_releases_refs_when_fetch_fails(self):
+    async def _run():
+      ref0 = datatypes.RoutedExpertsRef(worker_id="w0", ref_id=1)
+      ref1 = datatypes.RoutedExpertsRef(worker_id="w1", ref_id=2)
+      released: list[tuple[datatypes.RoutedExpertsRef, ...]] = []
+
+      class _FailingFetchEngine:
+
+        async def fetch_routed_experts(self, refs):
+          del refs
+          raise RuntimeError("boom during fetch")
+
+        async def release_routed_experts(self, refs):
+          released.append(tuple(refs))
+
+      relay = relay_coordinator.RelayCoordinator()
+      relay._engine = _FailingFetchEngine()  # type: ignore[assignment]
+      asm = batch_assembly.PaddedBatchAssembler(
+          batch_size=2,
+          max_prompt_length=4,
+          max_response_length=4,
+          pad_id=0,
+          num_generations=2,
+          mini_batch_size=1,
+      )
+      asm.set_routed_experts_spec(
+          batch_assembly.RoutedExpertsSpec(
+              num_layers=1, top_k=1, encoding="int16"
+          )
+      )
+
+      def _item(ref):
+        return datatypes.RLTrainerPayload(
+            prompt_ids=np.array([1, 2], dtype=np.int32),
+            prompt_mask=np.array([1.0, 1.0], dtype=np.float32),
+            completion_ids=np.array([3, 4], dtype=np.int32),
+            completion_mask=np.array([1.0, 1.0], dtype=np.float32),
+            advantages=np.array([1.0, 1.0], dtype=np.float32),
+            routed_experts_ref=ref,
+        )
+
+      with self.assertRaisesRegex(RuntimeError, "boom during fetch"):
+        async for _ in relay.iter_planned_microbatches(
+            assembler=asm,
+            lock=threading.Lock(),
+            payloads=[_item(ref0), _item(ref1)],
+            step_times=step_telemetry.StepTimes(),
+        ):
+          pass
+      await relay.flush_releases()
+      self.assertEqual(released, [(ref0, ref1)])
+
+    asyncio.run(_run())
+
+  def test_use_routed_experts_relay_false_disables_relay_for_baseline(self):
+    async def _run():
+      inline_routed = np.ones((4, 1, 1), dtype=np.int16)
+      group = [
+          datatypes.TrajectoryItem(
+              prompt_id="prompt_0",
+              group_index=g,
+              traj={
+                  "conversation_text": [
+                      {"role": "user", "content": "q"},
+                      {"role": "assistant", "content": f"a{g}"},
+                  ],
+                  "prompt_tokens": np.array([1, 2], dtype=np.int32),
+                  "conversation_tokens": np.array([3, 4], dtype=np.int32),
+                  "conversation_masks": np.array([1, 1], dtype=np.int32),
+                  "old_logprobs": np.array([-0.2, -0.3], dtype=np.float32),
+                  "trajectory_reward": 1.0 if g == 0 else -1.0,
+                  "status": datatypes.TrajectoryStatus.SUCCEEDED,
+                  "policy_versions": [0],
+                  "routed_experts": inline_routed,
+              },
+              prompt_tokens=np.array([1, 2], dtype=np.int32),
+              completion_tokens=np.array([3, 4], dtype=np.int32),
+              metadata={"prompt_idx": 0, "batch_idx": 0, "intra_batch_idx": 0},
+          )
+          for g in range(2)
+      ]
+      _set_mock_poll_batches(self.mock_engine, group, [])
+
+      batch_cfg = batch_assembly.BatchConfig(
+          mini_batch_size=1,
+          train_micro_batch_size=1,
+          max_prompt_length=8,
+          max_response_length=8,
+      )
+      program = rl_program.StandardRLProgram(
+          dataset=["prompt_data_0"],
+          max_steps=1,
+          algo_config=algorithm_config.GRPOConfig(
+              num_generations=2,
+              beta=0.0,
+              routed_experts_encode_mode="int16",
+          ),
+          batch_config=batch_cfg,
+          reward_fns=[
+              lambda prompts, completions, **_: [1.0, -1.0][: len(prompts)]
+          ],
+          generation_args=datatypes.GenerationArgs(return_routed_experts=True),
+          use_routed_experts_relay=False,
+      )
+      self.assertIsNone(program._relay)
+      self.mock_create_trainer_payloads.side_effect = (
+          self._orig_create_trainer_payloads
+      )
+      trained_routed_flags: list[tuple[bool, bool]] = []
+
+      async def _capture_train_step(batch, **_):
+        trained_routed_flags.append(
+            (batch.routed_experts is not None, batch.routed_experts_ref is None)
+        )
+        return "step_done"
+
+      self.mock_engine.train_step.side_effect = _capture_train_step
+      try:
+        await program.run_async(self.mock_engine)
+        self.mock_engine.configure_staging_liveness.assert_not_called()
+        self.mock_engine.fetch_routed_experts.assert_not_awaited()
+        self.mock_engine.release_routed_experts.assert_not_awaited()
+        self.assertEqual(trained_routed_flags, [(True, True), (True, True)])
+      finally:
+        program.close()
+
+    asyncio.run(_run())
+
+  def test_use_routed_experts_relay_auto_falls_back_inline_when_encoding_unresolved(
+      self,
+  ):
+    batch_cfg = batch_assembly.BatchConfig(
+        mini_batch_size=1,
+        train_micro_batch_size=1,
+        max_prompt_length=8,
+        max_response_length=8,
+    )
+    auto_algo = algorithm_config.GRPOConfig(
+        num_generations=2,
+        beta=0.0,
+        routed_experts_encode_mode="auto",
+        routed_experts_num_experts=None,
+    )
+    fallback_prog = rl_program.StandardRLProgram(
+        algo_config=auto_algo,
+        batch_config=batch_cfg,
+        reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
+        generation_args=datatypes.GenerationArgs(return_routed_experts=True),
+    )
+    self.assertIsNone(fallback_prog._relay)
+
+    with self.assertRaisesRegex(
+        ValueError, "requires a positive routed_experts_num_experts"
+    ):
+      rl_program.StandardRLProgram(
+          algo_config=auto_algo,
+          batch_config=batch_cfg,
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
+          generation_args=datatypes.GenerationArgs(return_routed_experts=True),
+          use_routed_experts_relay=True,
+      )
 
 
 def _traj_item(tokens, clipped=None, raw_length=None):

@@ -21,7 +21,14 @@ pipelines.
 import abc
 import asyncio
 import collections
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Callable,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 import contextlib
 import dataclasses
 import os
@@ -39,6 +46,7 @@ from tunix.dist_rl.common import tagging
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.orchestrator import dataset_utils
 from tunix.dist_rl.orchestrator import payload_builder
+from tunix.dist_rl.orchestrator import relay_coordinator
 from tunix.dist_rl.orchestrator import rl_engine_interface
 from tunix.dist_rl.orchestrator import step_telemetry
 from tunix.dist_rl.queue_manager import trajectory_queue_manager
@@ -390,6 +398,28 @@ class StandardRLProgram(RLProgram):
   2. Polling stage: Long-polls completed rollout responses into grouping queue.
   3. Critique stage: Scores rewards, PRMs, and reference KL logprobs.
   4. Train stage: Streaming gradient accumulation over microbatches.
+
+  When `generation_args.return_routed_experts=True`:
+  - `use_routed_experts_relay=None` (default): enables Orchestrator Relay
+    automatically when the wire encoding is statically resolvable
+    (`algo_config.routed_experts_encode_mode != "auto"` or positive
+    `algo_config.routed_experts_num_experts`), otherwise logs a warning and
+    falls back to inline `routed_experts`.
+  - `use_routed_experts_relay=True`: requires Orchestrator Relay and raises
+    `ValueError` at construction time if the wire encoding is not statically
+    resolvable.
+  - `use_routed_experts_relay=False`: forces the inline baseline for A/B
+    comparison.
+
+  When Relay is enabled, rollout workers stage MoE `routed_experts` arrays
+  locally and return lightweight `RoutedExpertsRef` handles materialized per
+  microbatch. Relay requires positive `BatchConfig.max_prompt_length` and
+  `BatchConfig.max_response_length` and a finite
+  `staging_overcommit_factor >= 1.0` (values `> 1.0` relax the strict
+  deadlock-free worst-case bound assuming average trajectories are shorter
+  than `max_response_length`). Note that Relay does not preserve
+  rollout-worker fault tolerance: evicting a rollout worker with pending
+  staged refs will fail `fetch_routed_experts`.
   """
 
   def __init__(
@@ -418,6 +448,8 @@ class StandardRLProgram(RLProgram):
       group_order: GroupOrder | str = GroupOrder.TRAJECTORY_COMPLETION,
       on_step_begin: Callable[[int], None] | None = None,
       on_step_end: Callable[[int, Any], None] | None = None,
+      use_routed_experts_relay: bool | None = None,
+      staging_overcommit_factor: float = 1.0,
   ):
     super().__init__()
     self.engine: rl_engine_interface.AbstractRLEngine | None = None
@@ -456,6 +488,29 @@ class StandardRLProgram(RLProgram):
         self.generation_args,
         return_logprobs=self.algo_config.use_rollout_logps,
     )
+    self._relay: relay_coordinator.RelayCoordinator | None = None
+    if (
+        self.generation_args.return_routed_experts
+        and use_routed_experts_relay is not False
+    ):
+      try:
+        datatypes.resolve_routed_experts_wire_encoding(
+            self.algo_config.routed_experts_encode_mode,
+            self.algo_config.routed_experts_num_experts,
+        )
+      except ValueError as exc:
+        if use_routed_experts_relay is True:
+          raise
+        logging.warning(
+            "Orchestrator Relay disabled (falling back to inline"
+            " routed_experts): %s",
+            exc,
+        )
+      else:
+        relay_coordinator.validate_batch_config(self.batch_config)
+        self._relay = relay_coordinator.RelayCoordinator(
+            staging_overcommit_factor=staging_overcommit_factor
+        )
     self.sampler_is = self.algo_config.sampler_is
     self.sampler_is_threshold = self.algo_config.sampler_is_threshold
     self.sampler_rs = self.algo_config.sampler_rs
@@ -581,6 +636,7 @@ class StandardRLProgram(RLProgram):
           BatchOrderedGroupQueue.create(
               full_batch_size=self.full_batch_size,
               batch_idx_fn=_scored_group_batch_idx,
+              on_group_dropped=self._on_scored_group_dropped,
           )
       )
       self.scored_q = ordered_q
@@ -600,6 +656,7 @@ class StandardRLProgram(RLProgram):
           priority_fn=(
               _scored_group_policy_version if max_staleness > 0 else None
           ),
+          on_group_dropped=self._on_scored_group_dropped,
       )
       self.dispatch_window = dispatch_window.DispatchWindow(
           max_staleness=max_staleness,
@@ -612,12 +669,25 @@ class StandardRLProgram(RLProgram):
           max_staleness=max_staleness,
           max_version_span=max_version_span,
           current_policy_version=lambda: self.policy_version,
-          on_group_filtered=self.dispatch_window.on_group_filtered,
+          on_group_filtered=self._on_raw_group_filtered,
       )
 
   @property
   def trajectory_store(self) -> trajectory_store_lib.TrajectoryStore | None:
     return self._trajectory_store
+
+  def _on_scored_group_dropped(self, group: ScoredGroup) -> None:
+    """Releases staged routing refs owned by a dropped `ScoredGroup`."""
+    if self._relay is not None:
+      self._relay.release_dropped_refs(group.payloads)
+
+  def _on_raw_group_filtered(
+      self, group: list[datatypes.TrajectoryItem]
+  ) -> None:
+    """Notifies `dispatch_window` and frees staged refs of filtered groups."""
+    self.dispatch_window.on_group_filtered(group)
+    if self._relay is not None:
+      self._relay.release_dropped_refs(group)
 
   def close(self) -> None:
     """Flushes and closes loggers, the reward manager, and program resources.
@@ -759,6 +829,9 @@ class StandardRLProgram(RLProgram):
         }
         if self.generation_args is not None:
           dispatch_kwargs["generation_args"] = self.generation_args
+        if self._relay is not None:
+          dispatch_kwargs["stage_routed_experts"] = True
+          dispatch_kwargs["max_response_length"] = self.max_response_length
         await self.engine.dispatch_rollouts(
             [prompt_item],
             **dispatch_kwargs,
@@ -902,6 +975,7 @@ class StandardRLProgram(RLProgram):
         completion_tokens=getattr(src_item, "completion_tokens", None),
         action_mask=getattr(src_item, "action_mask", None),
         routed_experts=None,
+        routed_experts_ref=None,
         metadata=metadata,
         # TODO: b/552087289 - Replace TrajectoryItem with a compact typed
         # telemetry record (identity + reward + generation facts +
@@ -954,7 +1028,15 @@ class StandardRLProgram(RLProgram):
           )
 
         scored_group = await asyncio.to_thread(self._critique_group, group)
-        await self.scored_q.put(scored_group)
+        if self._relay is not None:
+          self._relay.release_unreferenced_critique_refs(
+              group, scored_group.payloads
+          )
+        try:
+          await self.scored_q.put(scored_group)
+        except BaseException:
+          self._on_scored_group_dropped(scored_group)
+          raise
         del scored_group
         if group:
           first_meta = group[0].metadata
@@ -1507,6 +1589,43 @@ class StandardRLProgram(RLProgram):
     )
     return result, start, time.monotonic()
 
+  async def _iter_group_microbatches(
+      self,
+      payloads: list[datatypes.RLTrainerPayload] | None,
+      step_times: step_telemetry.StepTimes,
+  ) -> AsyncIterator[tuple[batch_assembly.AssembledBatch, float]]:
+    """Yields `(microbatch, pack_dt)` without retaining suspended frame refs."""
+    if self._relay is not None:
+      async for item in self._relay.iter_planned_microbatches(
+          assembler=self.assembler,
+          lock=self._assembler_lock,
+          payloads=payloads,
+          step_times=step_times,
+      ):
+        yield item
+      return
+
+    with self._assembler_lock:
+      batch_iter = iter(
+          self.assembler.flush()
+          if payloads is None
+          else self.assembler.feed(payloads)
+      )
+    del payloads
+    while True:
+      packing_start = time.perf_counter()
+      mb = (
+          await asyncio.to_thread(
+              _next_microbatch, batch_iter, self._assembler_lock
+          )
+      ).pop()
+      pack_dt = time.perf_counter() - packing_start
+      if mb is None:
+        break
+      ready = [mb]
+      del mb
+      yield ready.pop(), pack_dt
+
   async def train_stage(self) -> None:
     """Stage 3: Streaming gradient accumulation with RLTrainerPayloads."""
     assert self.engine is not None
@@ -1679,9 +1798,8 @@ class StandardRLProgram(RLProgram):
           scored_group = await _next_scored_group()
           step_times.exposed_generation_time += time.monotonic() - wait_start
           had_scored_items = scored_group is not None
-          if scored_group is None:
-            batch_iter = iter(self.assembler.flush())
-          else:
+          payloads: list[datatypes.RLTrainerPayload] | None = None
+          if scored_group is not None:
             if groups_consumed == 0 and self.on_step_begin:
               self.on_step_begin(current_step)
 
@@ -1689,7 +1807,7 @@ class StandardRLProgram(RLProgram):
             group_items = list(scored_group.items)
             if scored_group.reward_log_metrics:
               step_reward_log_metrics.append(scored_group.reward_log_metrics)
-            payloads: list[datatypes.RLTrainerPayload] = []
+            payloads = []
             for item, payload in zip(
                 scored_group.items,
                 scored_group.payloads,
@@ -1719,19 +1837,11 @@ class StandardRLProgram(RLProgram):
             all_step_items.extend(group_items)
             num_rollouts += len(group_items)
             del group_items
-            batch_iter = iter(self.assembler.feed(payloads))
-            del payloads
 
-          while True:
-            packing_start_time = time.perf_counter()
-            mb = (
-                await asyncio.to_thread(
-                    _next_microbatch, batch_iter, self._assembler_lock
-                )
-            ).pop()
-            step_packing_time_sec += time.perf_counter() - packing_start_time
-            if mb is None:
-              break
+          mb_iter = self._iter_group_microbatches(payloads, step_times)
+          payloads = None
+          async for mb, pack_dt in mb_iter:
+            step_packing_time_sec += pack_dt
             await _drain_pending_prep()
             is_final_batch = mb.is_final_batch
             if is_final_batch:
@@ -1761,7 +1871,6 @@ class StandardRLProgram(RLProgram):
               await asyncio.sleep(0)
               if pending_prep.done():
                 await _drain_pending_prep()
-          del batch_iter
 
           if not had_scored_items or groups_consumed >= self.full_batch_size:
             break
@@ -1777,13 +1886,24 @@ class StandardRLProgram(RLProgram):
           )
           break
 
+        if self._relay is not None:
+          await self._relay.flush_releases()
+
         if self.sync_weights:
           # TODO(tunix-dev): Split into drain/transfer/publish once
           # `sync_weights` reports per-phase times; draining in-flight rollouts
           # can dominate this.
           sync_start = time.monotonic()
+          min_retained: int | None = None
+          if self._relay is not None:
+            min_retained = relay_coordinator.min_retained_policy_version(
+                self.policy_version + 1,
+                max_staleness=self.max_staleness,
+                max_version_span=self.max_version_span,
+            )
           new_version = await self.engine.sync_weights(
-              role=datatypes.Role.ACTOR
+              role=datatypes.Role.ACTOR,
+              min_retained_policy_version=min_retained,
           )
           step_times.weight_sync_time += time.monotonic() - sync_start
           self.policy_version = (
@@ -1813,6 +1933,9 @@ class StandardRLProgram(RLProgram):
         step_time_sec = time.monotonic() - step_start_time
 
         filtered_groups = await self._drain_filtered_groups()
+        if self._relay is not None:
+          await self._relay.flush_releases()
+          await self._relay.log_staging_metrics(current_step, self._log_metric)
 
         metrics_summary = self._collect_and_log_step_metrics(
             all_step_items=all_step_items,
@@ -1901,59 +2024,76 @@ class StandardRLProgram(RLProgram):
     await self._resume_from_checkpoint()
     logging.info("Starting StandardRLProgram concurrent stages...")
 
-    engine.configure_worker(
-        role=datatypes.Role.ACTOR,
-        algo_config=self.algo_config,
-        assembler=self.assembler,
-        pad_id=self.pad_id,
-        eos_id=self.eos_id,
-        can_fuse_agreement_in_loss=self.can_fuse_agreement_in_loss,
-        precompile=self.precompile_trainer,
-        return_routed_experts=bool(self.generation_args.return_routed_experts),
-    )
-
-    if self.sync_weights:
-      await engine.prepare_rollout_policy(
-          role=datatypes.Role.ACTOR,
-          sync_weights=True,
-          policy_version=self.policy_version,
+    if self._relay is not None:
+      self._relay.bind_engine(
+          engine,
+          assembler=self.assembler,
+          encode_mode=self.algo_config.routed_experts_encode_mode,
+          num_experts=self.algo_config.routed_experts_num_experts,
+          batch_config=self.batch_config,
+          max_staleness=self.max_staleness,
+          full_batch_size=self.full_batch_size,
+          num_generations=self.num_generations,
       )
 
-    train_task = asyncio.create_task(self.train_stage())
-    tasks = [
-        asyncio.create_task(self.rollout_dispatch_stage()),
-        asyncio.create_task(self.polling_stage()),
-        asyncio.create_task(self.critique_stage()),
-        train_task,
-    ]
-
-    pending_tasks = set(tasks)
+    tasks: list[asyncio.Task[Any]] = []
+    completed_cleanly = False
     try:
-      while not train_task.done() and pending_tasks:
-        done, pending_tasks = await asyncio.wait(
-            pending_tasks, return_when=asyncio.FIRST_COMPLETED, timeout=0.05
+      engine.configure_worker(
+          role=datatypes.Role.ACTOR,
+          algo_config=self.algo_config,
+          assembler=self.assembler,
+          pad_id=self.pad_id,
+          eos_id=self.eos_id,
+          can_fuse_agreement_in_loss=self.can_fuse_agreement_in_loss,
+          precompile=self.precompile_trainer,
+          return_routed_experts=bool(
+              self.generation_args.return_routed_experts
+          ),
+      )
+
+      if self.sync_weights:
+        await engine.prepare_rollout_policy(
+            role=datatypes.Role.ACTOR,
+            sync_weights=True,
+            policy_version=self.policy_version,
         )
-        for task in done:
-          if task.exception():
-            raise task.exception()  # pyrefly: ignore[bad-raise]
-      if train_task.exception():
-        raise train_task.exception()  # pyrefly: ignore[bad-raise]
-    except Exception as exc:
-      logging.error("Exception in StandardRLProgram execution: %s", exc)
-      for task in tasks:
-        if not task.done():
-          task.cancel()
-      await self.raw_q.abort(exc)
-      await self.scored_q.abort(exc)
-      with contextlib.suppress(asyncio.CancelledError, Exception):
-        await train_task
-      with self._assembler_lock:
-        self.assembler.reset()
-      raise
+
+      train_task = asyncio.create_task(self.train_stage())
+      tasks = [
+          asyncio.create_task(self.rollout_dispatch_stage()),
+          asyncio.create_task(self.polling_stage()),
+          asyncio.create_task(self.critique_stage()),
+          train_task,
+      ]
+
+      pending_tasks = set(tasks)
+      try:
+        while not train_task.done() and pending_tasks:
+          done, pending_tasks = await asyncio.wait(
+              pending_tasks, return_when=asyncio.FIRST_COMPLETED, timeout=0.05
+          )
+          for task in done:
+            if task.exception():
+              raise task.exception()  # pyrefly: ignore[bad-raise]
+        if train_task.exception():
+          raise train_task.exception()  # pyrefly: ignore[bad-raise]
+        completed_cleanly = True
+      except Exception as exc:
+        logging.error("Exception in StandardRLProgram execution: %s", exc)
+        await self.raw_q.abort(exc)
+        await self.scored_q.abort(exc)
+        raise
     finally:
       for task in tasks:
         if not task.done():
           task.cancel()
+      if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+      with self._assembler_lock:
+        self.assembler.reset()
+      if self._relay is not None:
+        await self._relay.teardown(suppress_errors=not completed_cleanly)
 
   def run(
       self,
