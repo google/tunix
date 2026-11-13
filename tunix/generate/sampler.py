@@ -21,6 +21,7 @@ import dataclasses
 import functools
 import inspect
 import operator
+import secrets
 from typing import Any
 import warnings
 
@@ -842,7 +843,8 @@ class Sampler(base_sampler.BaseSampler):
       top_p: top-p sampling threshold.
       top_k: top-k sampling threshold.
       beam_size: beam size for beam search.
-      seed: random seed for sampling.
+      seed: random seed for sampling. If None, a fresh seed is generated for
+        each call.
       pad_output: whether to pad the output to maximum length. If this set as
         True, the output len will be max_generation_steps if echo is False,
         otherwise it will be max_generation_steps + max_prompt_length. The
@@ -934,7 +936,14 @@ class Sampler(base_sampler.BaseSampler):
       )
 
     if seed is None:
-      seed = jax.random.PRNGKey(0)  # pyrefly: ignore[bad-assignment]
+      # A fixed fallback makes repeated calls produce identical samples. This
+      # is especially harmful for agentic RL, where each generation in a group
+      # is sampled in a separate call and identical outputs yield no reward
+      # variance. Use system entropy only when the caller does not request
+      # reproducibility with an explicit seed.
+      seed = jax.random.PRNGKey(  # pyrefly: ignore[bad-assignment]
+          secrets.randbits(32)
+      )
     elif isinstance(seed, int):
       seed = jax.random.PRNGKey(seed)  # pyrefly: ignore[bad-assignment]
     sampling_state = self.init_sample_state(
