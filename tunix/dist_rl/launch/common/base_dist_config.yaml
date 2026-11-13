@@ -311,9 +311,11 @@ dist_training_config:
   # Extra MaxText config arguments for a MaxText trainer
   # (`actor_model_config.model_source: maxtext`), as space-separated
   # `key=value` pairs, e.g. "remat_policy=custom opt_type=sgd". The trainer
-  # appends them to the MaxText config it builds. Set them here, not in the
-  # `MAXTEXT_EXTRA_FLAGS` or `M_<KEY>` environment variables, which `launch.sh`
-  # rejects.
+  # appends them to the MaxText config it builds. Keys it builds from this
+  # config (e.g. `learning_rate`, `per_device_batch_size`,
+  # `ici_fsdp_parallelism`) are rejected; set the config keys instead. Set the
+  # flags here, not in the `MAXTEXT_EXTRA_FLAGS` or `M_<KEY>` environment
+  # variables, which `launch.sh` rejects.
   maxtext_extra_flags: ""
   profiler_period: -1
   segment_alignment_boundary: 1

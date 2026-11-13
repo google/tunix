@@ -1265,6 +1265,53 @@ weight_sync_config:
         "remat_policy=custom opt_type=sgd",
     )
 
+  def test_maxtext_extra_flags_reject_keys_built_from_the_config(self):
+    maxtext = [
+        "model_config.model_source=maxtext",
+        "model_config.model_path=/ckpt/qwen3-1.7b/0/items",
+        "model_config.kwargs.maxtext_model_name=qwen3-1.7b",
+        "weight_sync_config.mode=raiden",
+    ]
+    # Appended last, these would silently override the config values.
+    with self.assertRaisesRegex(
+        ValueError,
+        r"maxtext_extra_flags must not set MaxText keys that the trainer builds"
+        r" from the config: learning_rate \(set"
+        r" rl_training_config\.actor_optimizer_config\.learning_rate instead\),"
+        r" ici_fsdp_parallelism \(set the 'fsdp' axis of"
+        r" actor_model_config\.mesh instead\)\.",
+    ):
+      resolve_config.initialize([
+          *maxtext,
+          (
+              "dist_training_config.maxtext_extra_flags=remat_policy=custom"
+              " learning_rate=1e-6 ici_fsdp_parallelism=4"
+          ),
+      ])
+    # A repeated key is named once.
+    with self.assertRaisesRegex(
+        ValueError, "must not set MaxText keys"
+    ) as raised:
+      resolve_config.initialize([
+          *maxtext,
+          (
+              "dist_training_config.maxtext_extra_flags=learning_rate=1e-5"
+              " learning_rate=1e-6"
+          ),
+      ])
+    self.assertEqual(str(raised.exception).count("learning_rate (set"), 1)
+    # Fixed builder settings, which have no config key, stay overridable.
+    flags = (
+        "use_tokamax_gmm=true grad_dtype=float32"
+        " context_parallel_load_balance=false"
+    )
+    hp = resolve_config.initialize(
+        [*maxtext, f"dist_training_config.maxtext_extra_flags={flags}"]
+    )
+    self.assertEqual(
+        hp.config_mapping("dist_training_config")["maxtext_extra_flags"], flags
+    )
+
   def test_library_settings(self):
     hp = resolve_config.initialize([])
     vllm = hp.config_mapping("vllm_config")

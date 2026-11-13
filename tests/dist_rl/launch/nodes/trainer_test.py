@@ -853,5 +853,97 @@ class MaxTextOptionsTest(absltest.TestCase):
           trainer._maxtext_adamw_options(_hp(*argv))
 
 
+class MaxTextExtraFlagsTest(absltest.TestCase):
+  """Keeps the resolver's `maxtext_extra_flags` check in sync with the builder.
+
+  The resolver rejects a flag for any key the trainer builds from the config.
+  Every other key `build_maxtext_config` emits is one of `_FIXED_KEYS`, which
+  have no config key and may be overridden. A key added to the builder must
+  join one of the two groups.
+  """
+
+  _FIXED_KEYS = frozenset({
+      "allow_split_physical_axes",
+      "checkpoint_storage_use_ocdbt",
+      "checkpoint_storage_use_zarr3",
+      "context_parallel_load_balance",
+      "convert_checkpoint_if_possible",
+      "dtype",
+      "enable_tensorboard",
+      "grad_dtype",
+      "init_weights_seed",
+      "override_model_config",
+      "record_internal_nn_metrics",
+      "rollout_weight_dtype",
+      "run_name",
+      "scan_layers",
+      "skip_jax_distributed_system",
+      "use_gmm_v2",
+      "use_tokamax_gmm",
+  })
+
+  def _built_keys(self) -> set[str]:
+    """Returns the keys of a MaxText config with every optional setting on."""
+    hp = _hp(
+        *_MAXTEXT_ARGV, "rl_training_config.profiler_options.profiler_steps=1"
+    )
+    pyconfig = mock.MagicMock()
+    pyconfig.__file__ = "/fake/maxtext/configs/pyconfig.py"
+    with (
+        mock.patch.object(
+            maxtext_utils,
+            "maxtext_modules",
+            return_value=(pyconfig, mock.MagicMock(), mock.MagicMock()),
+        ),
+        # The MaxText `base.yml` next to the fake `pyconfig`.
+        mock.patch.object(os.path, "exists", return_value=True),
+        mock.patch.dict(os.environ, {"ENABLE_PATHWAYS_PERSISTENCE": "1"}),
+    ):
+      maxtext_utils.build_maxtext_config(
+          model_name="qwen3-0.6b",
+          load_parameters_path="/ckpt/qwen3-0.6b/0/items",
+          padded_moe_mlp_dim=64,
+          checkpointing_options=trainer._maxtext_checkpointing_options(hp),
+          profiling_options=trainer._maxtext_profiling_options(hp),
+          mesh_context=2,
+          base_num_kv_heads=8,
+          rollout_mesh_tp=1,
+          adamw_options=trainer._maxtext_adamw_options(hp),
+          device_host_concurrent_gb=8,
+      )
+    argv = pyconfig.initialize.call_args.args[0]
+    return {arg.split("=", 1)[0] for arg in argv if "=" in arg}
+
+  def test_key_groups_match_the_builder(self):
+    built = self._built_keys()
+    # Every key the builder emits is in exactly one group, and neither group
+    # keeps a key the builder no longer emits.
+    self.assertEqual(
+        built - self._FIXED_KEYS,
+        set(resolve_config._MAXTEXT_KEYS_FROM_CONFIG),
+    )
+    self.assertLessEqual(self._FIXED_KEYS, built)
+
+  def test_flags_for_keys_built_from_the_config_are_rejected(self):
+    from_config = sorted(self._built_keys() - self._FIXED_KEYS)
+    flags = " ".join(f"{key}=1" for key in from_config)
+    with self.assertRaisesRegex(
+        ValueError, "must not set MaxText keys"
+    ) as raised:
+      _hp(*_MAXTEXT_ARGV, f"dist_training_config.maxtext_extra_flags={flags}")
+    for key in from_config:
+      self.assertIn(f" {key} (set ", str(raised.exception))
+
+  def test_flags_for_fixed_settings_are_accepted(self):
+    fixed = sorted(self._built_keys() & self._FIXED_KEYS)
+    flags = " ".join(f"{key}=1" for key in fixed)
+    hp = _hp(
+        *_MAXTEXT_ARGV, f"dist_training_config.maxtext_extra_flags={flags}"
+    )
+    self.assertEqual(
+        hp.config_mapping("dist_training_config")["maxtext_extra_flags"], flags
+    )
+
+
 if __name__ == "__main__":
   absltest.main()

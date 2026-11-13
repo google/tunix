@@ -1048,13 +1048,108 @@ def _validate_maxtext_model_names(hp: cli_config.HyperParameters) -> None:
     )
 
 
+# TODO(noghabi): Replace the free-form `maxtext_extra_flags` string with typed
+# config (config keys for the MaxText settings recipes need, or a typed mapping),
+# then drop the flag and this table.
+# MaxText config keys that the trainer builds from this config, mapped to a
+# hint naming the config keys they come from. Only the error message below uses
+# the hints; the values themselves are computed in
+# `trainer._create_maxtext_trainer_factory` and
+# `maxtext_utils.build_maxtext_config`. `maxtext_extra_flags` are appended last,
+# so a flag for one of these keys would silently override the config value.
+# The fixed settings the builder adds (e.g. `scan_layers`, `grad_dtype`,
+# `use_tokamax_gmm`) have no config key and may still be overridden.
+# `trainer_test.MaxTextExtraFlagsTest` checks this key set against the builder.
+_MAXTEXT_KEYS_FROM_CONFIG: Final[Mapping[str, str]] = {
+    "model_name": "actor_model_config.kwargs.maxtext_model_name",
+    "load_parameters_path": "actor_model_config.model_path",
+    "base_output_directory": (
+        "actor_model_config.kwargs.maxtext_output_dir (default:"
+        " <cluster_config.artifact_root>/maxtext)"
+    ),
+    "weight_dtype": "actor_model_config.load_dtype",
+    "attention": "actor_model_config.kwargs.attention",
+    "padded_base_moe_mlp_dim": (
+        "actor_model_config.kwargs.padded_moe_mlp_dim (when 0, derived from"
+        " the 'tp' axis of rollout_model_config.mesh)"
+    ),
+    "base_num_kv_heads": (
+        "actor_model_config.kwargs.base_num_kv_heads (replicated up to the"
+        " 'tp' axis of rollout_model_config.mesh)"
+    ),
+    "prefuse_moe_weights": "actor_model_config.kwargs.prefuse_moe_weights",
+    "ici_fsdp_parallelism": "the 'fsdp' axis of actor_model_config.mesh",
+    "ici_tensor_parallelism": "the 'tp' axis of actor_model_config.mesh",
+    "ici_expert_parallelism": "the 'expert' axis of actor_model_config.mesh",
+    "ici_context_parallelism": "actor_model_config.kwargs.mesh_context",
+    "rollout_tensor_parallelism": "the 'tp' axis of rollout_model_config.mesh",
+    "per_device_batch_size": (
+        "rl_training_config.train_micro_batch_size, or with sequence packing"
+        " the 'fsdp' and 'expert' axes of actor_model_config.mesh, per device"
+    ),
+    "gradient_accumulation_steps": (
+        "rl_training_config.mini_batch_size,"
+        " agentic_grpo_config.num_generations and"
+        " rl_training_config.train_micro_batch_size (1 with sequence packing)"
+    ),
+    "max_target_length": (
+        "rollout_config.max_prompt_length and total_generation_steps, or"
+        " rl_training_config.max_seq_tokens_per_device"
+    ),
+    "learning_rate": "rl_training_config.actor_optimizer_config.learning_rate",
+    "warmup_steps_fraction": "actor_model_config.kwargs.warmup_steps_fraction",
+    "adam_b1": "rl_training_config.actor_optimizer_config.b1",
+    "adam_b2": "rl_training_config.actor_optimizer_config.b2",
+    "adam_eps": "rl_training_config.actor_optimizer_config.eps",
+    "adam_weight_decay": (
+        "rl_training_config.actor_optimizer_config.weight_decay"
+    ),
+    "gradient_clipping_threshold": (
+        "rl_training_config.actor_optimizer_config.chain_kwargs.max_norm"
+    ),
+    "enable_checkpointing": (
+        "rl_training_config.checkpointing_options.save_interval_steps"
+    ),
+    "checkpoint_period": (
+        "rl_training_config.checkpointing_options.save_interval_steps"
+    ),
+    "max_num_checkpoints_to_keep": (
+        "rl_training_config.checkpointing_options.max_to_keep"
+    ),
+    "checkpoint_storage_device_host_concurrent_gb": (
+        "dist_training_config.ckpt_d2h_concurrent_gb"
+    ),
+    "use_weight_converter": "weight_sync_config.use_weight_converter",
+    "profiler": "rl_training_config.profiler_options",
+    "profiler_steps": "rl_training_config.profiler_options",
+    "skip_first_n_steps_for_profiler": "rl_training_config.profiler_options",
+    "profile_periodically_period": "dist_training_config.profiler_period",
+    "upload_all_profiler_results": (
+        "actor_model_config.kwargs.upload_all_profiler_results"
+    ),
+    "enable_tpu_profiling_options": (
+        "actor_model_config.kwargs.enable_tpu_profiling_options"
+    ),
+    "tpu_num_chips_to_profile_per_task": (
+        "actor_model_config.kwargs.tpu_num_chips_to_profile_per_task"
+    ),
+    "tpu_num_sparse_cores_to_trace": (
+        "actor_model_config.kwargs.tpu_num_sparse_cores_to_trace"
+    ),
+    "tpu_num_sparse_core_tiles_to_trace": (
+        "actor_model_config.kwargs.tpu_num_sparse_core_tiles_to_trace"
+    ),
+}
+
+
 def _validate_maxtext_extra_flags(hp: cli_config.HyperParameters) -> None:
   """Checks `dist_training_config.maxtext_extra_flags` before any job starts.
 
   The flags are extra MaxText config arguments, which only a MaxText trainer
   reads (`maxtext_utils.build_maxtext_config`); a Tunix trainer would silently
   ignore them. A malformed entry would otherwise fail only inside the trainer,
-  after the launcher has submitted the jobs.
+  after the launcher has submitted the jobs. A flag for a key the trainer builds
+  from this config would silently override that config value.
 
   Args:
     hp: Loaded configuration.
@@ -1062,7 +1157,8 @@ def _validate_maxtext_extra_flags(hp: cli_config.HyperParameters) -> None:
   Raises:
     TypeError: If the flags are not a string.
     ValueError: If the flags are set and `actor_model_config.model_source` is
-      not "maxtext", or an entry is not a `key=value` pair.
+      not "maxtext", an entry is not a `key=value` pair, or an entry sets a key
+      in `_MAXTEXT_KEYS_FROM_CONFIG`.
   """
   flags = hp.config_mapping("dist_training_config")["maxtext_extra_flags"]
   if not isinstance(flags, str):
@@ -1085,6 +1181,19 @@ def _validate_maxtext_extra_flags(hp: cli_config.HyperParameters) -> None:
     raise ValueError(
         "dist_training_config.maxtext_extra_flags entries must be key=value"
         f" pairs, got {malformed!r}."
+    )
+  # `dict.fromkeys` names a repeated key once, in flag order.
+  from_config = [
+      f"{key} (set {_MAXTEXT_KEYS_FROM_CONFIG[key]} instead)"
+      for key in dict.fromkeys(entry.split("=", 1)[0] for entry in entries)
+      if key in _MAXTEXT_KEYS_FROM_CONFIG
+  ]
+  if from_config:
+    raise ValueError(
+        "dist_training_config.maxtext_extra_flags must not set MaxText keys"
+        " that the trainer builds from the config: "
+        + ", ".join(from_config)
+        + "."
     )
 
 
