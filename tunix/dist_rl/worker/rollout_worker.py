@@ -102,7 +102,7 @@ class RolloutWorker(abstract_worker.Worker):
       chat_parser: Any,
       env_name: str,
       agent_name: str,
-      config: Optional[RolloutConfig] = None,
+      config: RolloutConfig,
       env_config: Mapping[str, Any] = types.MappingProxyType({}),
       agent_config: Mapping[str, Any] = types.MappingProxyType({}),
       max_concurrency: int = 64,
@@ -118,7 +118,7 @@ class RolloutWorker(abstract_worker.Worker):
       chat_parser: Chat parser for conversation templating.
       env_name: Name of the registered environment in `ENV_REGISTRY`.
       agent_name: Name of the registered agent in `AGENT_REGISTRY`.
-      config: Optional RolloutConfig configuration options.
+      config: RolloutConfig configuration options.
       env_config: Default environment constructor kwargs. A request's
         `metadata["env_config"]` entries are shallow-merged on top of these.
       agent_config: Default agent constructor kwargs. A request's
@@ -130,7 +130,7 @@ class RolloutWorker(abstract_worker.Worker):
     """
     super().__init__()
     self.worker_id = worker_id
-    self.config = config
+    self.config: RolloutConfig = config
     self._policy_version = 0
     self._state = datatypes.WorkerState.PENDING
     # Set when `stop()` failed to clean up; later stops re-raise it.
@@ -149,7 +149,7 @@ class RolloutWorker(abstract_worker.Worker):
     # constructing the store twice. See store.TrajectoryStore.from_config.
     self._trajectory_store = (
         trajectory_store_lib.TunixTrajectoryStore.from_config(
-            config.trajectory_store_config if config is not None else None
+            config.trajectory_store_config
         )
     )
     if self._trajectory_store is not None:
@@ -161,14 +161,10 @@ class RolloutWorker(abstract_worker.Worker):
           worker_id,
           self._trajectory_store.to_redacted_config(),
       )
-    drain_timeout_s = (
-        config.drain_timeout_s
-        if config is not None
-        else timeouts.DEFAULT_DRAIN_TIMEOUT_S
-    )
+    drain_timeout_s = config.drain_timeout_s
     self._staging_buffer = staging_buffer_lib.RolloutStagingBuffer(
         worker_id=worker_id,
-        max_bytes=config.staging_max_bytes if config is not None else None,
+        max_bytes=config.staging_max_bytes,
     )
     self._clear_staged_lock = asyncio.Lock()
     self.manager = manager_lib.RolloutManager(
