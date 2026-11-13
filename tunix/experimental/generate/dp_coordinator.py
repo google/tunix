@@ -67,7 +67,14 @@ class DPCoordinator:
 
     with jax.set_mesh(mesh):
       self._kv_cache_manager = kv_cache_manager_lib.KVCacheManager(
-          cache_config, cache_geometries
+          cache_config,
+          cache_geometries,
+          max_num_seqs=scheduler_config.max_num_seqs,
+          max_chunked_prefill_length=(
+              scheduler_config.max_chunked_prefill_length
+          ),
+          num_scheduler_steps=scheduler_config.num_scheduler_steps,
+          max_num_batched_tokens=scheduler_config.max_num_batched_tokens,
       )
     self._scheduler = scheduler_lib.Scheduler(
         config=scheduler_config, kv_cache_manager=self._kv_cache_manager
@@ -85,11 +92,36 @@ class DPCoordinator:
     if self._max_pages_per_seq > self._kv_cache_manager.num_device_pages:
       raise ValueError(
           f'A sequence of max_model_len={max_model_len} with'
-          f' num_scheduler_steps={self._scheduler_config.num_scheduler_steps} and'
-          f' page_size={self._kv_cache_manager.page_size} needs up to'
+          f' num_scheduler_steps={self._scheduler_config.num_scheduler_steps}'
+          f' and page_size={self._kv_cache_manager.page_size} needs up to'
           f' {self._max_pages_per_seq} pages, but the KV cache only has'
           f' {self._kv_cache_manager.num_device_pages} device pages.'
       )
+    for (
+        window_size,
+        _,
+        group_pages,
+    ) in self._kv_cache_manager.group_device_page_counts:
+      if window_size is not None:
+        min_local_pages = utils.local_window_active_pages_per_seq(
+            window_size=window_size,
+            page_size=self._kv_cache_manager.page_size,
+            max_chunked_prefill_length=(
+                self._scheduler_config.max_chunked_prefill_length
+            ),
+            num_scheduler_steps=self._scheduler_config.num_scheduler_steps,
+        )
+        if min_local_pages > group_pages:
+          raise ValueError(
+              f'A sliding-window group with window_size={window_size},'
+              ' max_chunked_prefill_length='
+              f'{self._scheduler_config.max_chunked_prefill_length},'
+              ' num_scheduler_steps='
+              f'{self._scheduler_config.num_scheduler_steps}, and'
+              f' page_size={self._kv_cache_manager.page_size} needs up to'
+              f' {min_local_pages} pages per sequence, but only has'
+              f' {group_pages} device pages.'
+          )
 
     # Requests submitted since the last step, in submission order.
     self._queued_requests: list[request_lib.RequestState] = []
@@ -97,6 +129,16 @@ class DPCoordinator:
     # removed when aborted in `abort_request` or when finished in
     # `update_from_output`.
     self._requests: dict[str, request_lib.RequestState] = {}
+
+  @property
+  def group_device_page_counts(self) -> tuple[tuple[int | None, int, int], ...]:
+    """Per-group `(window_size, num_caches, num_device_pages)` summary."""
+    return self._kv_cache_manager.group_device_page_counts
+
+  @property
+  def cache_groups(self) -> tuple[tuple[str, ...], ...]:
+    """Returns cache names grouped by shared geometry."""
+    return self._kv_cache_manager.cache_groups
 
   def reset_kv_caches(self) -> None:
     """Discards all KV, for after the weights change in place.
@@ -183,8 +225,14 @@ class DPCoordinator:
       generated_tokens: np.ndarray,
       logits: np.ndarray | None = None,
       logprobs: np.ndarray | None = None,
+      num_steps: int | None = None,
   ) -> list[request_lib.RequestState]:
     """Updates request state based on a sampler output and returns completed requests."""
+    eff_steps = (
+        self._scheduler_config.num_scheduler_steps
+        if num_steps is None
+        else num_steps
+    )
     i, j, k = distribution
     completed_reqs = []
     for row in itertools.chain(range(i), range(j, k)):
@@ -196,9 +244,10 @@ class DPCoordinator:
 
       self._update_req_from_output(
           req,
-          generated_tokens[row],
-          logits[row] if logits is not None else None,
-          logprobs[row] if logprobs is not None else None,
+          generated_tokens[row, :eff_steps],
+          logits[row, :eff_steps] if logits is not None else None,
+          logprobs[row, :eff_steps] if logprobs is not None else None,
+          num_steps=eff_steps,
       )
 
       if req.is_done:
@@ -215,18 +264,23 @@ class DPCoordinator:
       generated_tokens: np.ndarray,
       logits: np.ndarray | None = None,
       logprobs: np.ndarray | None = None,
+      num_steps: int | None = None,
   ) -> None:
     """Updates request state based on a sampler output."""
-    num_steps = self._scheduler_config.num_scheduler_steps
+    eff_steps = (
+        self._scheduler_config.num_scheduler_steps
+        if num_steps is None
+        else num_steps
+    )
     had_stale_output = req.num_stale_output_tokens > 0
     if had_stale_output:
       # Sampled before `req` was preempted. The tokens are still appended,
       # but `_preempt` already reset the counters this step advanced.
       req.num_stale_output_tokens = max(
-          0, req.num_stale_output_tokens - num_steps
+          0, req.num_stale_output_tokens - eff_steps
       )
     else:
-      req.num_in_flight_tokens = max(0, req.num_in_flight_tokens - num_steps)
+      req.num_in_flight_tokens = max(0, req.num_in_flight_tokens - eff_steps)
     if req.is_done:
       return
 
@@ -273,6 +327,7 @@ class DPCoordinator:
       self,
       scheduled: tuple[request_lib.RequestState, ...],
       prev_scheduled: tuple[request_lib.RequestState, ...] = (),
+      step_tokens: int | None = None,
   ) -> tuple[
       list[int],
       dict[int, int],
@@ -283,27 +338,34 @@ class DPCoordinator:
     """Packs the scheduled requests into this rank's tokens and ragged metadata.
 
     Every row buffer spans `max_num_seqs` rows and every page table
-    `max_pages_per_seq` pages, so their shapes never change.
+    `max_pages_per_seq` pages, so their shapes never change. Caches sharing a
+    KV geometry alias the same backing table so the model runner transfers one
+    table per group instead of one per layer.
 
     Args:
       scheduled: The scheduled requests, ordered as decodes, chunked prefills
         and full prefills.
       prev_scheduled: The requests running in the in-flight step, if any.
+      step_tokens: Number of forward steps executed in this batch.
 
     Returns:
       A tuple of (the rank's token list with prefill tokens loaded and blank
       slots for in-flight decodes, the mapping from previous-step row to decode
       slot, query_lens, kv_lens, page_indices).
     """
+    eff_steps = (
+        self._scheduler_config.num_scheduler_steps
+        if step_tokens is None
+        else step_tokens
+    )
     num_rows = self._scheduler_config.max_num_seqs
     query_lens = np.zeros((num_rows,), dtype=np.int32)
     kv_lens = np.zeros((num_rows,), dtype=np.int32)
-    page_indices = {
-        cache_name: np.full(
-            (num_rows, self._max_pages_per_seq), -1, dtype=np.int32
-        )
-        for cache_name in self._kv_cache_manager.cache_names
-    }
+    cache_groups = self._kv_cache_manager.cache_groups
+    group_tables = [
+        np.full((num_rows, self._max_pages_per_seq), -1, dtype=np.int32)
+        for _ in cache_groups
+    ]
 
     prev_row_by_id = {
         req.request_id: prev_row for prev_row, req in enumerate(prev_scheduled)
@@ -326,16 +388,20 @@ class DPCoordinator:
           prev_to_decode_row[prev_row_by_id[req.request_id]] = row
         else:
           batch_tokens.extend(req.token_ids[start:end])
-        req.num_in_flight_tokens += self._scheduler_config.num_scheduler_steps
-        req.num_computed_tokens = (
-            end + self._scheduler_config.num_scheduler_steps - 1
-        )
+        req.num_in_flight_tokens += eff_steps
+        req.num_computed_tokens = end + eff_steps - 1
 
       query_lens[row] = end - start
       kv_lens[row] = end
-      for cache_name, idxs in self._kv_cache_manager.get_page_idxs(req).items():
-        page_indices[cache_name][row, : len(idxs)] = idxs
+      for group_idx, idxs in enumerate(
+          self._kv_cache_manager.get_group_page_idxs(req)
+      ):
+        group_tables[group_idx][row, : len(idxs)] = idxs
 
+    page_indices: dict[str, np.ndarray] = {}
+    for group_names, table in zip(cache_groups, group_tables, strict=True):
+      for cache_name in group_names:
+        page_indices[cache_name] = table
     return (
         batch_tokens,
         prev_to_decode_row,

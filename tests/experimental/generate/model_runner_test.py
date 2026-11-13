@@ -12,8 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from concurrent import futures
 import dataclasses
 import os
+import threading
+import time
 from unittest import mock
 
 from absl.testing import absltest
@@ -162,9 +165,7 @@ class SampleTest(absltest.TestCase):
     ]
 
     self.assertEqual(self._sampled_set([s[0] for s in samples]), {1})
-    self.assertEqual(
-        self._sampled_set([s[1] for s in samples]), {0, 1, 2, 3}
-    )
+    self.assertEqual(self._sampled_set([s[1] for s in samples]), {0, 1, 2, 3})
 
   def test_top_k_keeps_the_k_most_likely_tokens(self):
     logits = _logits([0.0, 3.0, 2.9, 1.0], num_rows=1000)
@@ -191,9 +192,7 @@ class SampleTest(absltest.TestCase):
     # Probabilities 0.4, 0.35 and 0.25: the first two already exceed 0.5.
     logits = _logits(np.log([0.4, 0.35, 0.25]).tolist(), num_rows=1000)
 
-    tokens, logp = self._sample(
-        logits, _metadata(*[_params(top_p=0.5)] * 1000)
-    )
+    tokens, logp = self._sample(logits, _metadata(*[_params(top_p=0.5)] * 1000))
 
     self.assertEqual(self._sampled_set(tokens), {0, 1})
     # The logprob is taken over the unfiltered distribution.
@@ -506,9 +505,7 @@ class ModelRunnerTest(absltest.TestCase):
     runner = _runner(_transformer())
 
     with self.assertRaisesRegex(ValueError, 'Only LoRAParam is supported'):
-      runner.transformer_state = nnx.State(
-          {'w': nnx.BatchStat(jnp.ones((1,)))}
-      )
+      runner.transformer_state = nnx.State({'w': nnx.BatchStat(jnp.ones((1,)))})
 
   def test_update_params_replaces_the_weights(self):
     runner = _runner(_transformer(seed=0))
@@ -605,9 +602,7 @@ class _NextTokenTransformer(nnx.Module):
     # The cache keeps its shape, as the decode loop carries it between steps.
     return logits, {
         'positions': (
-            cache['positions']
-            .at[: flat_positions.shape[0]]
-            .set(flat_positions)
+            cache['positions'].at[: flat_positions.shape[0]].set(flat_positions)
         )
     }
 
@@ -629,18 +624,23 @@ class _UniformTransformer(nnx.Module):
 
 
 def _rpa_metadata(
-    kv_lens: list[int], query_lens: list[int], distribution: list[int]
+    kv_lens: list[int],
+    query_lens: list[int],
+    distribution: list[int],
+    *,
+    decode_only: bool = False,
 ) -> paged_attention.PagedAttnMetadata:
   num_rows = len(query_lens)
   return paged_attention.PagedAttnMetadata(
       page_indices={
-          'layer_0': np.arange(2 * num_rows, dtype=np.int32).reshape(
-              num_rows, 2
+          'layer_0': (
+              np.arange(2 * num_rows, dtype=np.int32).reshape(num_rows, 2)
           )
       },
       kv_lens=np.array(kv_lens, dtype=np.int32),
       query_lens=np.array(query_lens, dtype=np.int32),
       distribution=np.array([distribution], dtype=np.int32),
+      decode_only=decode_only,
   )
 
 
@@ -669,12 +669,11 @@ class ExecuteStepTest(absltest.TestCase):
     )
 
   def test_get_token_positions(self):
-    runner = _runner(_NextTokenTransformer())
     metadata = _rpa_metadata(
         kv_lens=[1, 7, 0], query_lens=[1, 3, 0], distribution=[1, 1, 2]
     )
 
-    positions = runner._get_token_positions(
+    positions = model_runner_lib._get_token_positions(
         tokens=jnp.zeros((1, 6), dtype=jnp.int32), metadata=metadata
     )
 
@@ -796,9 +795,19 @@ class ExecuteStepSeedTest(absltest.TestCase):
 
     self.assertFalse(np.array_equal(tokens, other))
 
-def _fake_step_fn(params, cache, tokens, metadata, sampling_metadata, rng):
-  """A stand-in for `ModelRunner._model_step_fn` that always samples token 1."""
-  del params, tokens, sampling_metadata
+
+def _fake_step_fn(
+    graphdef,
+    compile_key,
+    params,
+    cache,
+    tokens,
+    metadata,
+    sampling_metadata,
+    rng,
+):
+  """A stand-in for `_model_step_impl` that always samples token 1."""
+  del graphdef, compile_key, params, tokens, sampling_metadata
   rng, _ = jax.random.split(rng)
   num_rows = len(metadata.query_lens)
   return jnp.ones((num_rows,), dtype=jnp.int32), None, None, cache, rng
@@ -819,29 +828,27 @@ class SplitRowsTest(absltest.TestCase):
 
   def test_splits_rows_across_the_dp_axes(self):
     mesh = self._mesh_2x2()
-    runner = _runner(_NextTokenTransformer(), mesh=mesh)
 
-    split = jax.jit(runner._split_rows)(jnp.zeros((8, 3)))
+    split = jax.jit(lambda x: model_runner_lib._split_rows(x, mesh))(
+        jnp.zeros((8, 3))
+    )
 
     # The "tp" devices of a DP group share its rows.
     self.assertTrue(
         split.sharding.is_equivalent_to(
-            jax.sharding.NamedSharding(
-                mesh, jax.sharding.PartitionSpec('dp')
-            ),
+            jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec('dp')),
             2,
         )
     )
 
   def test_rows_that_do_not_divide_stay_whole(self):
     mesh = self._mesh_2x2()
-    runner = _runner(_NextTokenTransformer(), mesh=mesh)
     x = jax.device_put(
         jnp.zeros((3, 3)),
         jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()),
     )
 
-    out = jax.jit(runner._split_rows)(x)
+    out = jax.jit(lambda t: model_runner_lib._split_rows(t, mesh))(x)
 
     self.assertTrue(out.sharding.is_fully_replicated)
 
@@ -953,23 +960,21 @@ class MultiStepExecuteTest(absltest.TestCase):
 
   def test_surviving_rows_keep_decoding(self):
     runner = _runner(_NextTokenTransformer(), num_scheduler_steps=3)
-    decode_loop_traces = mock.Mock(wraps=runner._decode_loop_fn)
-    runner._compiled_decode_loop_fn = jax.jit(
-        decode_loop_traces,
-        donate_argnames=['cache'],
-        static_argnames=['num_steps'],
-    )
+    jax.clear_caches()
+    with mock.patch.object(
+        model_runner_lib,
+        '_run_decode_scan',
+        wraps=model_runner_lib._run_decode_scan,
+    ) as decode_loop_traces:
+      tokens, _, _, cache = self._execute(runner)
+      runner.execute_step(
+          cache=_positions_cache(8),
+          tokens=self.tokens,
+          metadata=self.metadata,
+          sampling_params=self.greedy,
+      )
 
-    tokens, _, _, cache = self._execute(runner)
-    runner.execute_step(
-        cache=_positions_cache(8),
-        tokens=self.tokens,
-        metadata=dataclasses.replace(self.metadata, decode_only=True),
-        sampling_params=self.greedy,
-    )
-
-    # `_compiled_decode_loop_fn` compiles once across mixed and decode_only
-    # steps.
+    # `_jit_prefill_and_decode_loop` compiles once for a given layout/bucket.
     decode_loop_traces.assert_called_once()
     np.testing.assert_array_equal(tokens[0], [5, 6, 7])
     np.testing.assert_array_equal(tokens[2], [10, 11, 12])
@@ -999,15 +1004,16 @@ class MultiStepExecuteTest(absltest.TestCase):
   def test_the_metadata_advances_between_steps(self):
     runner = _runner(_NextTokenTransformer(), num_scheduler_steps=3)
     mock_step = mock.Mock(wraps=_fake_step_fn)
-    runner._model_step_fn = mock_step
-    runner._compiled_model_step_fn = mock_step
 
     # The decode loop is a compiled `scan`, so its metadata is only concrete
     # with tracing turned off.
-    with jax.disable_jit():
+    with (
+        mock.patch.object(model_runner_lib, '_model_step_impl', mock_step),
+        jax.disable_jit(),
+    ):
       self._execute(runner)
 
-    step_metadata = [call.args[3] for call in mock_step.call_args_list]
+    step_metadata = [call.args[5] for call in mock_step.call_args_list]
     self.assertLen(step_metadata, 3)
     # The scheduled batch runs as-is.
     np.testing.assert_array_equal(step_metadata[0].query_lens, [1, 4, 3, 0])
@@ -1028,17 +1034,18 @@ class MultiStepExecuteTest(absltest.TestCase):
     np.testing.assert_array_equal(
         step_metadata[1].page_indices['layer_0'][:2], [[0, 1], [4, 5]]
     )
-    step_rngs = [call.args[5] for call in mock_step.call_args_list]
+    step_rngs = [call.args[7] for call in mock_step.call_args_list]
     self.assertFalse(np.array_equal(step_rngs[0], step_rngs[1]))
     self.assertFalse(np.array_equal(step_rngs[1], step_rngs[2]))
 
   def test_sampling_settings_follow_their_rows(self):
     runner = _runner(_NextTokenTransformer(), num_scheduler_steps=2)
     mock_step = mock.Mock(wraps=_fake_step_fn)
-    runner._model_step_fn = mock_step
-    runner._compiled_model_step_fn = mock_step
 
-    with jax.disable_jit():
+    with (
+        mock.patch.object(model_runner_lib, '_model_step_impl', mock_step),
+        jax.disable_jit(),
+    ):
       runner.execute_step(
           cache=_positions_cache(8),
           tokens=self.tokens,
@@ -1050,7 +1057,7 @@ class MultiStepExecuteTest(absltest.TestCase):
           ),
       )
 
-    decode_sampling_metadata = mock_step.call_args_list[1].args[4]
+    decode_sampling_metadata = mock_step.call_args_list[1].args[6]
     # The full prefill's settings move up with it, and the vacated rows sample
     # greedily like any other padding row.
     np.testing.assert_allclose(
@@ -1069,43 +1076,719 @@ class MultiStepExecuteTest(absltest.TestCase):
         _NextTokenTransformer(), max_top_k=-1, num_scheduler_steps=2
     )
     mock_step = mock.Mock(wraps=_fake_step_fn)
-    runner._model_step_fn = mock_step
-    runner._compiled_model_step_fn = mock_step
-    for sampling_params, expected in (
-        ((_params(temperature=0.5), _params(), _params(temperature=0.0)), True),
-        ((_params(temperature=0.5, top_p=0.8), _params(), _params()), False),
-    ):
-      mock_step.reset_mock()
-      with jax.disable_jit():
-        runner.execute_step(
-            cache=_positions_cache(8),
-            tokens=self.tokens,
-            metadata=self.metadata,
-            sampling_params=sampling_params,
+    with mock.patch.object(model_runner_lib, '_model_step_impl', mock_step):
+      for sampling_params, expected in (
+          (
+              (_params(temperature=0.5), _params(), _params(temperature=0.0)),
+              True,
+          ),
+          ((_params(temperature=0.5, top_p=0.8), _params(), _params()), False),
+      ):
+        mock_step.reset_mock()
+        with jax.disable_jit():
+          runner.execute_step(
+              cache=_positions_cache(8),
+              tokens=self.tokens,
+              metadata=self.metadata,
+              sampling_params=sampling_params,
+          )
+        self.assertEqual(
+            [c.args[6].unconstrained for c in mock_step.call_args_list],
+            [expected, expected],
         )
-      self.assertEqual(
-          [c.args[4].unconstrained for c in mock_step.call_args_list],
-          [expected, expected],
-      )
 
   def test_stops_when_every_row_drops_out(self):
     # A batch of nothing but chunked prefills has no row left to decode, so
     # only the scheduled step runs.
     runner = _runner(_NextTokenTransformer(), num_scheduler_steps=4)
-    runner._compiled_decode_loop_fn = mock.Mock()
+    with mock.patch.object(
+        model_runner_lib, '_jit_prefill_and_decode_loop'
+    ) as mock_loop:
+      tokens, _, _, _ = runner.execute_step(
+          cache=_positions_cache(8),
+          tokens=self.tokens,
+          metadata=_rpa_metadata(
+              kv_lens=[4, 4, 0], query_lens=[4, 4, 0], distribution=[0, 2, 2]
+          ),
+          sampling_params=self.greedy[:2],
+      )
 
-    tokens, _, _, _ = runner.execute_step(
-        cache=_positions_cache(8),
-        tokens=self.tokens,
-        metadata=_rpa_metadata(
-            kv_lens=[4, 4, 0], query_lens=[4, 4, 0], distribution=[0, 2, 2]
+    mock_loop.assert_not_called()
+    self.assertEqual(tokens.shape, (3, 4))
+    np.testing.assert_array_equal(tokens[:, 1:], 0)
+
+  def test_max_steps_override_runs_single_step_and_repeats_first_token(self):
+    runner = _runner(_NextTokenTransformer(), num_scheduler_steps=4)
+    with mock.patch.object(
+        model_runner_lib, '_jit_prefill_and_decode_loop'
+    ) as mock_loop:
+      tokens, _, _, _ = runner.execute_step(
+          cache=_positions_cache(8),
+          tokens=self.tokens,
+          metadata=self.metadata,
+          sampling_params=self.greedy,
+          max_steps=1,
+      )
+    mock_loop.assert_not_called()
+    self.assertEqual(tokens.shape, (4, 4))
+    # Column 0 and column -1 both hold the single sampled token for pipelined
+    # scatter_last_column reads on surviving rows.
+    np.testing.assert_array_equal(tokens[0], [5, 5, 5, 5])
+    np.testing.assert_array_equal(tokens[2], [10, 10, 10, 10])
+    with self.assertRaisesRegex(ValueError, 'max_steps'):
+      runner.execute_step(
+          cache=_positions_cache(8),
+          tokens=self.tokens,
+          metadata=self.metadata,
+          sampling_params=self.greedy,
+          max_steps=2,
+      )
+
+  def test_p10_1_recreated_model_runner_reuses_compiled_cache(self):
+    jax.clear_caches()
+
+    pure_tokens = np.array([[4, 9, 0, 0]], dtype=np.int32)
+    pure_meta = dataclasses.replace(
+        _rpa_metadata(
+            kv_lens=[6, 3, 0, 0],
+            query_lens=[1, 1, 0, 0],
+            distribution=[2, 2, 2],
         ),
+        decode_only=True,
+    )
+
+    runner_a = _runner(_NextTokenTransformer(), num_scheduler_steps=3, seed=7)
+    mixed_tok_a, _, _, _ = self._execute(runner_a)
+    pure_tok_a, _, _, _ = runner_a.execute_step(
+        cache=_positions_cache(8),
+        tokens=pure_tokens,
+        metadata=pure_meta,
         sampling_params=self.greedy[:2],
     )
 
-    runner._compiled_decode_loop_fn.assert_not_called()
-    self.assertEqual(tokens.shape, (3, 4))
-    np.testing.assert_array_equal(tokens[:, 1:], 0)
+    # A recreated ModelRunner (e.g., new rollout cycle with different seed)
+    # must hit the module-level JAX JIT caches with zero retracing.
+    runner_b = _runner(_NextTokenTransformer(), num_scheduler_steps=3, seed=99)
+    with (
+        mock.patch.object(
+            model_runner_lib,
+            '_model_step_impl',
+            wraps=model_runner_lib._model_step_impl,
+        ) as step_traces,
+        mock.patch.object(
+            model_runner_lib,
+            '_run_decode_scan',
+            wraps=model_runner_lib._run_decode_scan,
+        ) as scan_traces,
+    ):
+      mixed_tok_b, _, _, _ = self._execute(runner_b)
+      pure_tok_b, _, _, _ = runner_b.execute_step(
+          cache=_positions_cache(8),
+          tokens=pure_tokens,
+          metadata=pure_meta,
+          sampling_params=self.greedy[:2],
+      )
+
+    step_traces.assert_not_called()
+    scan_traces.assert_not_called()
+    np.testing.assert_array_equal(mixed_tok_b, mixed_tok_a)
+    np.testing.assert_array_equal(pure_tok_b, pure_tok_a)
+
+  def test_p10_2_pure_decode_multi_step_single_scan_parity(self):
+    pure_meta = dataclasses.replace(
+        _rpa_metadata(
+            kv_lens=[6, 3, 0, 0],
+            query_lens=[1, 1, 0, 0],
+            distribution=[2, 2, 2],
+        ),
+        decode_only=True,
+    )
+    pure_tokens = np.array([[0, 9, 0, 0]], dtype=np.int32)
+    prev_generated = jnp.array(
+        [[3, 4], [0, 0], [0, 0], [0, 0]], dtype=jnp.int32
+    )
+    target_idxs = np.array([0, 4, 4, 4], dtype=np.int32)
+    sampling = (_params(temperature=0.7, top_k=4), _params(temperature=0.0))
+
+    runner_fused = _runner(
+        _NextTokenTransformer(),
+        num_scheduler_steps=4,
+        return_logits=True,
+        return_logprobs=True,
+        seed=17,
+    )
+    with (
+        mock.patch.object(
+            model_runner_lib,
+            '_jit_packed_model_step',
+            wraps=model_runner_lib._jit_packed_model_step,
+        ) as mock_step0,
+        mock.patch.object(
+            model_runner_lib,
+            '_jit_prefill_and_decode_loop',
+            wraps=model_runner_lib._jit_prefill_and_decode_loop,
+        ) as mock_mixed_loop,
+        mock.patch.object(
+            model_runner_lib,
+            '_jit_decode_only_loop',
+            wraps=model_runner_lib._jit_decode_only_loop,
+        ) as mock_pure_loop,
+    ):
+      toks_f, logits_f, logp_f, cache_f = runner_fused.execute_step(
+          cache=_positions_cache(8),
+          tokens=pure_tokens,
+          metadata=pure_meta,
+          sampling_params=sampling,
+          prev_generated_tokens=prev_generated,
+          target_idxs=target_idxs,
+      )
+
+    mock_step0.assert_not_called()
+    mock_mixed_loop.assert_not_called()
+    mock_pure_loop.assert_called_once()
+
+    runner_ref = _runner(
+        _NextTokenTransformer(),
+        num_scheduler_steps=4,
+        return_logits=True,
+        return_logprobs=True,
+        seed=17,
+    )
+    toks_r, logits_r, logp_r, cache_r = runner_ref.execute_step(
+        cache=_positions_cache(8),
+        tokens=pure_tokens,
+        metadata=dataclasses.replace(pure_meta, decode_only=False),
+        sampling_params=sampling,
+        prev_generated_tokens=prev_generated,
+        target_idxs=target_idxs,
+    )
+
+    assert logits_f is not None and logits_r is not None
+    assert logp_f is not None and logp_r is not None
+    np.testing.assert_array_equal(toks_f, toks_r)
+    np.testing.assert_allclose(logits_f, logits_r, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(logp_f, logp_r, rtol=1e-6, atol=1e-6)
+    np.testing.assert_array_equal(cache_f['positions'], cache_r['positions'])
+
+
+class DistributedTopKAndPackingTest(absltest.TestCase):
+  """Verifies exact two-stage distributed top-k and packed metadata scatter."""
+
+  def setUp(self):
+    super().setUp()
+    if len(jax.devices()) < 4:
+      self.skipTest('needs 4 devices')
+
+  def test_distributed_top_k_matches_jax_top_k_including_ties(self):
+    mesh_1x4 = jax.sharding.Mesh(
+        np.array(jax.devices()[:4]).reshape(1, 4), ('fsdp', 'tp')
+    )
+    mesh_2x2 = jax.sharding.Mesh(
+        np.array(jax.devices()[:4]).reshape(2, 2), ('dp', 'tp')
+    )
+    rng = np.random.default_rng(42)
+    # Mix distinct logits, cross-shard exact ties, and -inf entries.
+    base = rng.normal(size=(4, 64)).astype(np.float32)
+    base[0, [3, 19, 35, 51]] = 9.5  # exact 4-way tie across all 4 TP ranks
+    base[1, :] = 0.0  # all-equal row
+    base[2, 16:48] = -np.inf  # -inf shards
+    logits = jnp.asarray(base)
+
+    for mesh, k in ((mesh_1x4, 8), (mesh_1x4, 20), (mesh_2x2, 6)):
+      expected_vals, expected_idxs = jax.lax.top_k(logits, k)
+      got_vals, got_idxs = jax.jit(
+          lambda x, k=k, m=mesh: model_runner_lib._distributed_top_k(
+              x, k, mesh=m
+          )
+      )(logits)
+      np.testing.assert_array_equal(got_vals, expected_vals)
+      np.testing.assert_array_equal(got_idxs, expected_idxs)
+
+  def test_blocked_local_and_distributed_top_k_bit_exact_with_ties(self):
+    mesh_1x4 = jax.sharding.Mesh(
+        np.array(jax.devices()[:4]).reshape(1, 4), ('fsdp', 'tp')
+    )
+    rng = np.random.default_rng(99)
+    # 32768 vocab -> 8192 per TP shard (2 blocks of 4096) and 8 blocks locally.
+    for vocab_size, dtype in ((8192, np.float32), (32768, jnp.bfloat16)):
+      raw = rng.normal(size=(3, vocab_size)).astype(np.float32)
+      # Equal-logit ties spanning block boundaries (4095/4096) and TP shards.
+      tie_cols = [17, 4095, 4096, 8191, vocab_size - 4096, vocab_size - 1]
+      raw[0, tie_cols] = 11.25
+      raw[1, :] = -2.0
+      raw[2, 4096:8192] = -np.inf
+      logits = jnp.asarray(raw, dtype=dtype)
+
+      for k in (1, 16, 64):
+        exp_vals, exp_idxs = jax.lax.top_k(logits, k)
+        blk_vals, blk_idxs = jax.jit(
+            lambda x, k=k: model_runner_lib._blocked_local_top_k(x, k)
+        )(logits)
+        np.testing.assert_array_equal(blk_vals, exp_vals)
+        np.testing.assert_array_equal(blk_idxs, exp_idxs)
+
+        if vocab_size == 32768:
+          sharded = jax.device_put(
+              logits,
+              jax.sharding.NamedSharding(
+                  mesh_1x4, jax.sharding.PartitionSpec(None, 'tp')
+              ),
+          )
+          dist_vals, dist_idxs = jax.jit(
+              lambda x, k=k: model_runner_lib._distributed_top_k(
+                  x, k, mesh=mesh_1x4
+              )
+          )(sharded)
+          np.testing.assert_array_equal(dist_vals, exp_vals)
+          np.testing.assert_array_equal(dist_idxs, exp_idxs)
+
+  def test_sample_with_tp_mesh_matches_reference(self):
+    mesh = jax.sharding.Mesh(
+        np.array(jax.devices()[:4]).reshape(1, 4), ('fsdp', 'tp')
+    )
+    rng = np.random.default_rng(7)
+    logits = jnp.asarray(rng.normal(size=(4, 64)).astype(np.float32))
+    key = jax.random.PRNGKey(123)
+    meta = model_runner_lib.SamplingMetadata(
+        temperature=jnp.array([0.0, 0.7, 1.0, 0.5], dtype=jnp.float32),
+        top_p=jnp.array([1.0, 0.9, 0.95, 1.0], dtype=jnp.float32),
+        top_k=jnp.array([1, 8, 12, 4], dtype=jnp.int32),
+    )
+    ref_toks, ref_logp = jax.jit(
+        lambda x: model_runner_lib.sample(
+            x, key, meta, max_top_k=12, return_logprobs=True, mesh=None
+        )
+    )(logits)
+    sharded_logits = jax.device_put(
+        logits,
+        jax.sharding.NamedSharding(
+            mesh, jax.sharding.PartitionSpec(None, 'tp')
+        ),
+    )
+    got_toks, got_logp = jax.jit(
+        lambda x: model_runner_lib.sample(
+            x, key, meta, max_top_k=12, return_logprobs=True, mesh=mesh
+        )
+    )(sharded_logits)
+    np.testing.assert_array_equal(got_toks, ref_toks)
+    np.testing.assert_allclose(got_logp, ref_logp, rtol=1e-5, atol=1e-5)
+
+  def test_pack_paged_metadata_deduplicates_and_fuses_scatter(self):
+    local_tbl = np.arange(8, dtype=np.int32).reshape(4, 2)
+    global_tbl = np.arange(8, 16, dtype=np.int32).reshape(4, 2)
+    page_indices: dict[str, jax.Array | np.ndarray] = {}
+    for i in range(5):
+      page_indices[f'local_{i}'] = local_tbl
+    for i in range(2):
+      page_indices[f'global_{i}'] = global_tbl
+    metadata = paged_attention.PagedAttnMetadata(
+        page_indices=page_indices,
+        kv_lens=np.array([6, 4, 3, 0], dtype=np.int32),
+        query_lens=np.array([1, 4, 3, 0], dtype=np.int32),
+        distribution=np.array([[1, 2, 3]], dtype=np.int32),
+    )
+    packed = model_runner_lib._pack_paged_metadata(metadata)
+    self.assertEqual(packed.packed_page_indices.shape, (2, 4, 2))
+    unpacked = packed.unpack()
+    self.assertEqual(
+        set(unpacked.page_indices.keys()), set(page_indices.keys())
+    )
+    np.testing.assert_array_equal(unpacked.page_indices['local_3'], local_tbl)
+    np.testing.assert_array_equal(unpacked.page_indices['global_1'], global_tbl)
+
+    runner = _runner(_NextTokenTransformer(), num_scheduler_steps=2)
+    prev_generated = jnp.array(
+        [[3, 4], [0, 0], [0, 0], [0, 0]], dtype=jnp.int32
+    )
+    target_idxs = np.array([0, 8, 8, 8], dtype=np.int32)
+    host_tokens = np.array([[0, 1, 2, 3, 4, 7, 8, 9]], dtype=np.int32)
+    with mock.patch.object(
+        runner, '_to_device', wraps=runner._to_device
+    ) as mock_to_device:
+      tokens, _, _, _ = runner.execute_step(
+          cache=_positions_cache(8),
+          tokens=host_tokens,
+          metadata=metadata,
+          sampling_params=(_params(temperature=0.0),) * 3,
+          prev_generated_tokens=prev_generated,
+          target_idxs=target_idxs,
+      )
+    mock_to_device.assert_called_once()
+    packed_arg = mock_to_device.call_args.args[0]
+    self.assertIsInstance(packed_arg, np.ndarray)
+    self.assertEqual(packed_arg.ndim, 1)
+    self.assertEqual(packed_arg.dtype, np.int32)
+    # Row 0 received scattered token `4` -> predicts `5`, then `6`.
+    np.testing.assert_array_equal(tokens[0], [5, 6])
+    np.testing.assert_array_equal(tokens[2], [10, 11])
+
+  def test_p13_1_single_h2d_and_fused_prefill_decode_sampling_parity(self):
+    metadata = _rpa_metadata(
+        kv_lens=[6, 4, 3, 0],
+        query_lens=[1, 4, 3, 0],
+        distribution=[1, 2, 3],
+    )
+    host_tokens = np.array([[0, 1, 2, 3, 4, 7, 8, 9]], dtype=np.int32)
+    prev_generated = jnp.array(
+        [[3, 4], [0, 0], [0, 0], [0, 0]], dtype=jnp.int32
+    )
+    target_idxs = np.array([0, 8, 8, 8], dtype=np.int32)
+    sampling = (
+        _params(temperature=0.6, top_p=0.9, top_k=4),
+        _params(temperature=0.8),
+        _params(temperature=0.4, top_p=0.75, top_k=3),
+    )
+
+    runner = _runner(
+        _NextTokenTransformer(),
+        num_scheduler_steps=3,
+        return_logits=True,
+        return_logprobs=True,
+        seed=41,
+    )
+    with (
+        mock.patch.object(
+            runner, '_to_device', wraps=runner._to_device
+        ) as mock_h2d,
+        mock.patch.object(
+            model_runner_lib,
+            '_jit_packed_model_step',
+            wraps=model_runner_lib._jit_packed_model_step,
+        ) as mock_step0,
+        mock.patch.object(
+            model_runner_lib,
+            '_jit_prefill_and_decode_loop',
+            wraps=model_runner_lib._jit_prefill_and_decode_loop,
+        ) as mock_fused,
+    ):
+      toks, logits, logp, cache = runner.execute_step(
+          cache=_positions_cache(8),
+          tokens=host_tokens,
+          metadata=metadata,
+          sampling_params=sampling,
+          prev_generated_tokens=prev_generated,
+          target_idxs=target_idxs,
+      )
+
+    # One single contiguous 1D int32 H2D transfer + one single fused JIT call.
+    mock_h2d.assert_called_once()
+    self.assertIsInstance(mock_h2d.call_args.args[0], np.ndarray)
+    self.assertEqual(mock_h2d.call_args.args[0].ndim, 1)
+    self.assertEqual(mock_h2d.call_args.args[0].dtype, np.int32)
+    mock_step0.assert_not_called()
+    mock_fused.assert_called_once()
+
+    # Verify JAX-array input packing matches NumPy host packing bit-for-bit.
+    runner_jax = _runner(
+        _NextTokenTransformer(),
+        num_scheduler_steps=3,
+        return_logits=True,
+        return_logprobs=True,
+        seed=41,
+    )
+    toks_j, logits_j, logp_j, cache_j = runner_jax.execute_step(
+        cache=_positions_cache(8),
+        tokens=jnp.asarray(host_tokens),
+        metadata=metadata,
+        sampling_params=sampling,
+        prev_generated_tokens=prev_generated,
+        target_idxs=jnp.asarray(target_idxs),
+    )
+    assert logits is not None and logits_j is not None
+    assert logp is not None and logp_j is not None
+    np.testing.assert_array_equal(toks, toks_j)
+    np.testing.assert_allclose(logits, logits_j, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(logp, logp_j, rtol=1e-6, atol=1e-6)
+    np.testing.assert_array_equal(cache['positions'], cache_j['positions'])
+
+  def test_p13_4_topk_uses_direct_lax_topk_when_tpu_custom_call_profitable(
+      self,
+  ):
+    self.assertTrue(
+        model_runner_lib._tpu_topk_custom_call_profitable(32, 65536, 64)
+    )
+    self.assertTrue(
+        model_runner_lib._tpu_topk_custom_call_profitable(512, 65536, 128)
+    )
+    self.assertFalse(
+        model_runner_lib._tpu_topk_custom_call_profitable(4, 8192, 2048)
+    )
+    # Direct path lowers as a single rank-2 top_k over 65536 (not 16x4096).
+    x = jnp.zeros((32, 65536), dtype=jnp.bfloat16)
+    hlo = (
+        jax.jit(lambda a: model_runner_lib._blocked_local_top_k(a, 64))
+        .lower(x)
+        .as_text()
+    )
+    self.assertIn('32x65536', hlo)
+    self.assertNotIn('512x4096', hlo)
+
+
+class CrossMeshAbstractReuseTest(absltest.TestCase):
+  """Tests AbstractMesh JIT trace sharing and cold-start warmup serialization."""
+
+  def setUp(self):
+    super().setUp()
+    if len(jax.devices()) < 4:
+      self.skipTest('needs 4 devices')
+
+  def _disjoint_meshes(
+      self,
+  ) -> tuple[jax.sharding.Mesh, jax.sharding.Mesh]:
+    devices = jax.devices()
+    mesh_a = jax.sharding.Mesh(np.array(devices[:2]), ('tp',))
+    mesh_b = jax.sharding.Mesh(np.array(devices[2:4]), ('tp',))
+    return mesh_a, mesh_b
+
+  def test_disjoint_identical_meshes_share_trace_and_match_outputs(self):
+    trace_counter = [0]
+
+    class _CountingTransformer(_NextTokenTransformer):
+
+      def __call__(
+          self, tokens, positions, cache, metadata, mesh, logits_idxs=None
+      ):
+        trace_counter[0] += 1
+        return super().__call__(
+            tokens, positions, cache, metadata, mesh, logits_idxs=logits_idxs
+        )
+
+    mesh_a, mesh_b = self._disjoint_meshes()
+    runner_a = _runner(
+        _CountingTransformer(),
+        mesh=mesh_a,
+        num_scheduler_steps=2,
+        return_logprobs=True,
+        seed=17,
+    )
+    runner_b = _runner(
+        _CountingTransformer(),
+        mesh=mesh_b,
+        num_scheduler_steps=2,
+        return_logprobs=True,
+        seed=17,
+    )
+
+    self.assertIsInstance(runner_a._compile_key.mesh, jax.sharding.AbstractMesh)
+    self.assertEqual(runner_a._compile_key, runner_b._compile_key)
+    self.assertEqual(runner_a._static_graphdef, runner_b._static_graphdef)
+
+    # 1. Pure decode-only loop shares one Python trace across disjoint meshes.
+    decode_meta = _rpa_metadata(
+        kv_lens=[4, 6, 3],
+        query_lens=[1, 1, 1],
+        distribution=[3, 3, 3],
+        decode_only=True,
+    )
+    decode_tokens = np.array([[2, 5, 9]], dtype=np.int32)
+    sampling = (
+        _params(temperature=0.0),
+        _params(temperature=0.0),
+        _params(temperature=0.0),
+    )
+    shd_a = jax.sharding.NamedSharding(mesh_a, jax.sharding.PartitionSpec())
+    shd_b = jax.sharding.NamedSharding(mesh_b, jax.sharding.PartitionSpec())
+    cache_a = {'positions': jax.device_put(jnp.zeros((3,), jnp.int32), shd_a)}
+    cache_b = {'positions': jax.device_put(jnp.zeros((3,), jnp.int32), shd_b)}
+
+    toks_a, _, logp_a, out_cache_a = runner_a.execute_step(
+        cache=cache_a,
+        tokens=decode_tokens,
+        metadata=decode_meta,
+        sampling_params=sampling,
+    )
+    traces_after_a = trace_counter[0]
+    self.assertEqual(traces_after_a, 1)
+
+    toks_b, _, logp_b, out_cache_b = runner_b.execute_step(
+        cache=cache_b,
+        tokens=decode_tokens,
+        metadata=decode_meta,
+        sampling_params=sampling,
+    )
+    self.assertEqual(trace_counter[0], traces_after_a)
+    np.testing.assert_array_equal(np.asarray(toks_a), np.asarray(toks_b))
+    np.testing.assert_allclose(
+        np.asarray(logp_a), np.asarray(logp_b), rtol=1e-6, atol=1e-6
+    )
+    np.testing.assert_array_equal(
+        np.asarray(out_cache_a['positions']),
+        np.asarray(out_cache_b['positions']),
+    )
+
+    # 2. Mixed prefill + decode loop also shares a single trace across meshes.
+    mixed_meta = _rpa_metadata(
+        kv_lens=[6, 3, 0], query_lens=[1, 3, 0], distribution=[1, 1, 2]
+    )
+    mixed_tokens = np.array([[4, 7, 8, 9]], dtype=np.int32)
+    mixed_sampling = (_params(temperature=0.0), _params(temperature=0.0))
+    m_cache_a = {'positions': jax.device_put(jnp.zeros((4,), jnp.int32), shd_a)}
+    m_cache_b = {'positions': jax.device_put(jnp.zeros((4,), jnp.int32), shd_b)}
+
+    mtoks_a, _, mlogp_a, _ = runner_a.execute_step(
+        cache=m_cache_a,
+        tokens=mixed_tokens,
+        metadata=mixed_meta,
+        sampling_params=mixed_sampling,
+    )
+    traces_after_mixed_a = trace_counter[0]
+    # Prefill+decode invokes transformer twice in a single JIT trace (step 0 +
+    # scan body).
+    self.assertEqual(traces_after_mixed_a, traces_after_a + 2)
+
+    mtoks_b, _, mlogp_b, _ = runner_b.execute_step(
+        cache=m_cache_b,
+        tokens=mixed_tokens,
+        metadata=mixed_meta,
+        sampling_params=mixed_sampling,
+    )
+    self.assertEqual(trace_counter[0], traces_after_mixed_a)
+    np.testing.assert_array_equal(np.asarray(mtoks_a), np.asarray(mtoks_b))
+    np.testing.assert_allclose(
+        np.asarray(mlogp_a), np.asarray(mlogp_b), rtol=1e-6, atol=1e-6
+    )
+
+  def test_concurrent_cold_start_across_disjoint_meshes_traces_once(self):
+    trace_lock = threading.Lock()
+    trace_counter = [0]
+
+    class _SlowTracingTransformer(_NextTokenTransformer):
+
+      def __call__(
+          self, tokens, positions, cache, metadata, mesh, logits_idxs=None
+      ):
+        time.sleep(0.05)
+        with trace_lock:
+          trace_counter[0] += 1
+        return super().__call__(
+            tokens, positions, cache, metadata, mesh, logits_idxs=logits_idxs
+        )
+
+    mesh_a, mesh_b = self._disjoint_meshes()
+    runner_a = _runner(
+        _SlowTracingTransformer(),
+        mesh=mesh_a,
+        num_scheduler_steps=3,
+        max_top_k=7,
+        seed=23,
+    )
+    runner_b = _runner(
+        _SlowTracingTransformer(),
+        mesh=mesh_b,
+        num_scheduler_steps=3,
+        max_top_k=7,
+        seed=23,
+    )
+    meta = _rpa_metadata(
+        kv_lens=[3, 5, 7, 2, 4],
+        query_lens=[1, 1, 1, 1, 1],
+        distribution=[5, 5, 5],
+        decode_only=True,
+    )
+    tokens = np.array([[1, 2, 3, 4, 5]], dtype=np.int32)
+    sampling = (_params(temperature=0.0),) * 5
+    shd_a = jax.sharding.NamedSharding(mesh_a, jax.sharding.PartitionSpec())
+    shd_b = jax.sharding.NamedSharding(mesh_b, jax.sharding.PartitionSpec())
+    cache_a = {'positions': jax.device_put(jnp.zeros((5,), jnp.int32), shd_a)}
+    cache_b = {'positions': jax.device_put(jnp.zeros((5,), jnp.int32), shd_b)}
+    barrier = threading.Barrier(2)
+
+    def _run(runner, cache):
+      barrier.wait()
+      out_toks, _, _, _ = runner.execute_step(
+          cache=cache,
+          tokens=tokens,
+          metadata=meta,
+          sampling_params=sampling,
+      )
+      return np.asarray(out_toks)
+
+    with futures.ThreadPoolExecutor(max_workers=2) as pool:
+      fut_a = pool.submit(_run, runner_a, cache_a)
+      fut_b = pool.submit(_run, runner_b, cache_b)
+      res_a = fut_a.result(timeout=30.0)
+      res_b = fut_b.result(timeout=30.0)
+
+    # Cold-start guard serializes the initial trace so sibling slice reuses it.
+    self.assertEqual(trace_counter[0], 1)
+    np.testing.assert_array_equal(res_a, res_b)
+
+  def test_packed_model_step_fuses_padding_and_shares_single_compilation(self):
+    trace_counter = [0]
+
+    class _CountingTransformer(_NextTokenTransformer):
+
+      def __call__(
+          self, tokens, positions, cache, metadata, mesh, logits_idxs=None
+      ):
+        trace_counter[0] += 1
+        return super().__call__(
+            tokens, positions, cache, metadata, mesh, logits_idxs=logits_idxs
+        )
+
+    runner = _runner(
+        _CountingTransformer(),
+        num_scheduler_steps=4,
+        return_logits=True,
+        return_logprobs=True,
+        seed=29,
+    )
+    # Case 1: chunked-prefill-only (num_surviving == 0) -> repeat_first=False
+    # (steps 1..3 zero-padded in tokens, logits, and logprobs).
+    chunked_meta = _rpa_metadata(
+        kv_lens=[4, 4, 0, 0],
+        query_lens=[4, 4, 0, 0],
+        distribution=[0, 2, 2],
+        decode_only=False,
+    )
+    tokens = np.array([[1, 2, 3, 4, 5, 6, 7, 8]], dtype=np.int32)
+    sampling = (_params(temperature=0.0), _params(temperature=0.0))
+    with mock.patch.object(
+        model_runner_lib,
+        '_jit_packed_model_step',
+        wraps=model_runner_lib._jit_packed_model_step,
+    ) as mock_step0:
+      toks_c, logits_c, logp_c, _ = runner.execute_step(
+          cache=_positions_cache(8),
+          tokens=tokens,
+          metadata=chunked_meta,
+          sampling_params=sampling,
+      )
+    mock_step0.assert_called_once()
+    self.assertEqual(trace_counter[0], 1)
+    self.assertEqual(toks_c.shape, (4, 4))
+    assert logits_c is not None and logp_c is not None
+    self.assertEqual(logits_c.shape[:2], (4, 4))
+    self.assertEqual(logp_c.shape, (4, 4))
+    np.testing.assert_array_equal(np.asarray(toks_c)[:, 1:], 0)
+    np.testing.assert_array_equal(np.asarray(logits_c)[:, 1:], 0)
+    np.testing.assert_array_equal(np.asarray(logp_c)[:, 1:], 0)
+
+    # Case 2: max_steps=1 with surviving sequences (num_surviving > 0) ->
+    # repeat_first=True on tokens (so column -1 carries step 0 for next step's
+    # scatter_last_column) while logits/logprobs stay zero-padded, AND reuses
+    # the exact same compiled XLA trace without retracing!
+    surviving_meta = _rpa_metadata(
+        kv_lens=[4, 4, 0, 0],
+        query_lens=[4, 4, 0, 0],
+        distribution=[0, 0, 2],
+        decode_only=False,
+    )
+    toks_s, logits_s, logp_s, _ = runner.execute_step(
+        cache=_positions_cache(8),
+        tokens=tokens,
+        metadata=surviving_meta,
+        sampling_params=sampling,
+        max_steps=1,
+    )
+    self.assertEqual(trace_counter[0], 1)
+    toks_s_np = np.asarray(toks_s)
+    for col in range(1, 4):
+      np.testing.assert_array_equal(toks_s_np[:, col], toks_s_np[:, 0])
+    assert logits_s is not None and logp_s is not None
+    np.testing.assert_array_equal(np.asarray(logits_s)[:, 1:], 0)
+    np.testing.assert_array_equal(np.asarray(logp_s)[:, 1:], 0)
+
 
 if __name__ == '__main__':
   absltest.main()

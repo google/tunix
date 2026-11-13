@@ -711,6 +711,28 @@ class TieredPagePoolManagerTest(parameterized.TestCase):
       self.assertEqual(arr.shape, config._page_shape(config.num_device_pages))
       self.assertEqual(arr.dtype, config.dtype)
 
+  def test_resolve_device_page_indices(self):
+    config = self.get_config("no device sharding", has_subshape=False)
+    manager = config.create_manager()
+    pids = manager.allocate_device_pages(3)
+    expected = [manager.page_idx(pids[0]), -1, manager.page_idx(pids[2])]
+    self.assertEqual(
+        manager.resolve_device_page_indices([pids[0], None, pids[2]]),
+        expected,
+    )
+    self.assertEqual(manager.resolve_device_page_indices([]), [])
+
+    with self.assertRaisesRegex(
+        ValueError, r"Page 999 not found in page manager\."
+    ):
+      manager.resolve_device_page_indices([pids[0], 999])
+
+    manager.offload([pids[1]])
+    with self.assertRaisesRegex(
+        ValueError, rf"Page {pids[1]} is not resident on device"
+    ):
+      manager.resolve_device_page_indices([pids[0], pids[1]])
+
 
 if __name__ == "__main__":
   absltest.main()

@@ -35,6 +35,7 @@ import collections
 from collections.abc import Mapping, Sequence
 
 import jax
+import numpy as np
 from tunix.common import datatypes
 from tunix.experimental.generate import configs
 from tunix.experimental.generate import request as request_lib
@@ -49,6 +50,11 @@ Page = single_type_kv_cache_manager.Page
 def _create_kv_cache_group_managers(
     config: configs.CacheConfig,
     cache_geometries: Mapping[str, datatypes.CacheGeometry],
+    *,
+    max_num_seqs: int | None = None,
+    max_chunked_prefill_length: int = 0,
+    num_scheduler_steps: int = 1,
+    max_num_batched_tokens: int | None = None,
 ) -> tuple[Sequence[single_type_kv_cache_manager.SingleTypeKVCacheManager], int]:
   """Creates one `SingleTypeKVCacheManager` per unique cache geometry."""
   if not cache_geometries:
@@ -67,14 +73,28 @@ def _create_kv_cache_group_managers(
       for geometry in caches_by_geometry
   }
   sharding = utils.derive_cache_sharding()
-  num_device_pages, num_host_pages = utils.compute_page_limits(
+  group_specs = [
+      utils.CacheGroupSpec(
+          element_shape=kv_shapes[geometry],
+          num_caches=len(caches),
+          window_size=geometry.window_size,
+      )
+      for geometry, caches in caches_by_geometry.items()
+  ]
+  group_page_limits = utils.compute_group_page_limits(
       config=config,
-      element_shapes=[kv_shapes[g] for g in cache_geometries.values()],
+      group_specs=group_specs,
       sharding=sharding,
+      max_num_seqs=max_num_seqs,
+      max_chunked_prefill_length=max_chunked_prefill_length,
+      num_scheduler_steps=num_scheduler_steps,
+      max_num_batched_tokens=max_num_batched_tokens,
   )
 
   managers: list[single_type_kv_cache_manager.SingleTypeKVCacheManager] = []
-  for geometry, caches in caches_by_geometry.items():
+  for (geometry, caches), (num_device_pages, num_host_pages) in zip(
+      caches_by_geometry.items(), group_page_limits, strict=True
+  ):
     page_pool_config = page_pool_lib.TieredPagePoolConfig(
         page_size=config.page_size,
         element_shape=kv_shapes[geometry],
@@ -90,7 +110,15 @@ def _create_kv_cache_group_managers(
             window_size=geometry.window_size,
         )
     )
-  return managers, num_device_pages
+  full_attention_pages = [
+      m.num_device_pages for m in managers if m.window_size is None
+  ]
+  reported_num_device_pages = (
+      min(full_attention_pages)
+      if full_attention_pages
+      else min(m.num_device_pages for m in managers)
+  )
+  return managers, reported_num_device_pages
 
 
 class KVCacheManager:
@@ -100,12 +128,24 @@ class KVCacheManager:
       self,
       config: configs.CacheConfig,
       cache_geometries: Mapping[str, datatypes.CacheGeometry],
+      *,
+      max_num_seqs: int | None = None,
+      max_chunked_prefill_length: int = 0,
+      num_scheduler_steps: int = 1,
+      max_num_batched_tokens: int | None = None,
   ):
     """Initializes the cache.
 
     Args:
       config: Cache configuration.
       cache_geometries: The geometry of each named cache.
+      max_num_seqs: Maximum concurrent sequences scheduled in a step, used to
+        bound sliding-window groups when mixed with full-attention layers.
+      max_chunked_prefill_length: Maximum tokens prefilled in one step.
+      num_scheduler_steps: Number of forward passes per engine step.
+      max_num_batched_tokens: Maximum total tokens scheduled across all
+        sequences in one engine step. When set, tightens the sliding-window
+        active-page upper bound across concurrent sequences.
     """
     self._cache_names = tuple(cache_geometries.keys())
 
@@ -113,7 +153,14 @@ class KVCacheManager:
     self._enable_prefix_caching = config.enable_prefix_caching
     self._request_to_prefix_hashes: dict[str, list[int]] = {}
     self._kv_cache_group_managers, self._num_device_pages = (
-        _create_kv_cache_group_managers(config, cache_geometries)
+        _create_kv_cache_group_managers(
+            config,
+            cache_geometries,
+            max_num_seqs=max_num_seqs,
+            max_chunked_prefill_length=max_chunked_prefill_length,
+            num_scheduler_steps=num_scheduler_steps,
+            max_num_batched_tokens=max_num_batched_tokens,
+        )
     )
 
   @property
@@ -122,13 +169,38 @@ class KVCacheManager:
 
   @property
   def num_device_pages(self) -> int:
-    """The number of device pages per cache."""
+    """Device page capacity for full-attention caches (or smallest group)."""
     return self._num_device_pages
+
+  @property
+  def group_device_page_counts(self) -> tuple[tuple[int | None, int, int], ...]:
+    """Per-group `(window_size, num_caches, num_device_pages)` summary."""
+    return tuple(
+        (m.window_size, len(m.cache_names), m.num_device_pages)
+        for m in self._kv_cache_group_managers
+    )
 
   @property
   def cache_names(self) -> tuple[str, ...]:
     """Returns the names of all allocated caches."""
     return self._cache_names
+
+  @property
+  def cache_groups(self) -> tuple[tuple[str, ...], ...]:
+    """Returns cache names grouped by shared geometry."""
+    return tuple(
+        tuple(manager.cache_names) for manager in self._kv_cache_group_managers
+    )
+
+  def get_group_page_idxs(
+      self,
+      req: request_lib.RequestState,
+  ) -> tuple[tuple[int, ...], ...]:
+    """Returns per-group device page indices in `cache_groups` order."""
+    return tuple(
+        tuple(manager.get_page_idxs(req.request_id))
+        for manager in self._kv_cache_group_managers
+    )
 
   @property
   def _null_computed_pages(self) -> tuple[tuple[Page | None, ...], ...]:
@@ -139,14 +211,20 @@ class KVCacheManager:
       self, tokens: Sequence[int], start_hash: int = 0
   ) -> list[int]:
     """Chunks tokens into pages and hashes them."""
-    hashes = []
+    n_pages = len(tokens) // self._page_size
+    if n_pages == 0:
+      return []
+    aligned = np.asarray(
+        tokens[: n_pages * self._page_size], dtype=np.int64
+    )
+    raw = memoryview(aligned.tobytes())
+    chunk_bytes = self._page_size * aligned.dtype.itemsize
+    hashes: list[int] = []
     parent_hash = start_hash
-    aligned_n_tokens = (len(tokens) // self._page_size) * self._page_size
     # TODO(yatlas): Python hash is only 64 bits, so collisions are not
     # negligible. This should be replaced with SHA256.
-    for i in range(0, aligned_n_tokens, self._page_size):
-      chunk = tuple(tokens[i : i + self._page_size])
-      parent_hash = hash((parent_hash, chunk))
+    for offset in range(0, n_pages * chunk_bytes, chunk_bytes):
+      parent_hash = hash((parent_hash, raw[offset : offset + chunk_bytes]))
       hashes.append(parent_hash)
     return hashes
 

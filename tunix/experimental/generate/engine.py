@@ -23,12 +23,14 @@ next tokens.
 from collections.abc import Sequence
 import dataclasses
 import itertools
+import math
 from typing import Any
 
 from flax import nnx
 from flax.nnx import graph
 from flax.nnx import statelib
 import jax
+import jax.numpy as jnp
 import jaxtyping
 import numpy as np
 
@@ -85,6 +87,22 @@ class _InFlightStep:
   generated_tokens: jax.Array
   logits: jax.Array | None
   logprobs: jax.Array | None
+  num_steps: int
+
+
+def _pad_batch_token_count(
+    num_tokens: int, min_bucket: int, max_tokens: int
+) -> int:
+  """Pads `num_tokens` onto power-of-two shape buckets above 256 to limit padding waste."""
+  target = max(num_tokens, min_bucket)
+  if target <= min_bucket:
+    return min(min_bucket, max_tokens)
+  if max_tokens <= 256:
+    return min(utils.next_power_of_2(target), max_tokens)
+  bucket = max(min_bucket, 256)
+  while bucket < target and bucket < max_tokens:
+    bucket *= 2
+  return min(bucket, max_tokens)
 
 
 class LLMEngine:
@@ -147,6 +165,25 @@ class LLMEngine:
     self._request_to_rank: dict[str, int] = {}
     # The step launched during the previous step's forward pass.
     self._in_flight_step: _InFlightStep | None = None
+    # Uniform device placeholder passed on cold steps so `execute_step` keeps a
+    # single JIT trace signature across cold and pipelined steps.
+    dp_axes = utils.kv_cache_dp_axes(mesh)
+    num_dp_shards = math.prod(mesh.shape[axis] for axis in dp_axes)
+    row_spec = (
+        jax.sharding.PartitionSpec(dp_axes)
+        if num_dp_shards > 1 and self._max_num_rows % num_dp_shards == 0
+        else jax.sharding.PartitionSpec()
+    )
+    self._empty_prev_generated_tokens: jax.Array = jax.device_put(
+        jnp.zeros(
+            (
+                self._max_num_rows,
+                self._scheduler_config.num_scheduler_steps,
+            ),
+            dtype=jnp.int32,
+        ),
+        jax.sharding.NamedSharding(mesh, row_spec),
+    )
 
   def model_def_and_state(
       self,
@@ -161,6 +198,13 @@ class LLMEngine:
   @property
   def mesh(self) -> jax.sharding.Mesh:
     return self._model_runner_config.mesh
+
+  @property
+  def kv_cache_group_page_counts(
+      self,
+  ) -> tuple[tuple[int | None, int, int], ...]:
+    """Per-group `(window_size, num_caches, num_device_pages)` summary."""
+    return self._dp_coordinators[0].group_device_page_counts
 
   def update_params(
       self,
@@ -267,6 +311,12 @@ class LLMEngine:
         coordinator.schedule_step() for coordinator in self._dp_coordinators
     ])
 
+  def _step_num_tokens(self, batch: ScheduledBatch) -> int:
+    """Returns forward steps to run for `batch` (`1` when chunked prefilling)."""
+    if any(j > i for i, j, _ in batch.distributions):
+      return 1
+    return self._scheduler_config.num_scheduler_steps
+
   def step(self) -> list[request_lib.EngineResponse]:
     """Runs one step of the continuous batch.
 
@@ -283,16 +333,21 @@ class LLMEngine:
       batch = self._schedule_step()
       if not batch.requests:
         return []
-      tokens, target_idxs, metadata = self._prepare_batch(batch)
-      in_flight = self._execute_batch(batch, tokens, target_idxs, metadata)
+      step_tokens = self._step_num_tokens(batch)
+      tokens, target_idxs, metadata = self._prepare_batch(
+          batch, step_tokens=step_tokens
+      )
+      in_flight = self._execute_batch(
+          batch, tokens, target_idxs, metadata, step_tokens=step_tokens
+      )
 
-    # Schedule the next step, load its prefill token buffer onto the device,
-    # write its decode tokens from `in_flight.generated_tokens`, and launch it
-    # while the current forward pass runs on device.
+    # Schedule the next step, pack its prefill tokens and scatter indices on
+    # host, and launch it while the current forward pass runs on device.
     next_batch = self._schedule_step()
     if next_batch.requests:
+      next_step_tokens = self._step_num_tokens(next_batch)
       next_tokens, target_idxs, next_metadata = self._prepare_batch(
-          next_batch, prev_batch=in_flight.batch
+          next_batch, prev_batch=in_flight.batch, step_tokens=next_step_tokens
       )
       self._in_flight_step = self._execute_batch(
           next_batch,
@@ -300,6 +355,7 @@ class LLMEngine:
           target_idxs,
           next_metadata,
           prev_generated_tokens=in_flight.generated_tokens,
+          step_tokens=next_step_tokens,
       )
 
     return self._consume_in_flight_step(in_flight)
@@ -317,6 +373,7 @@ class LLMEngine:
         generated_tokens,
         logits,
         logprobs,
+        num_steps=in_flight.num_steps,
     )
     if self._in_flight_step is not None and all(
         req.is_done for req in self._in_flight_step.batch.requests
@@ -330,16 +387,23 @@ class LLMEngine:
   def _execute_batch(
       self,
       batch: ScheduledBatch,
-      tokens: jax.Array,
-      target_idxs: jax.Array,
+      tokens: np.ndarray,
+      target_idxs: np.ndarray,
       metadata: paged_attention.PagedAttnMetadata,
       prev_generated_tokens: jax.Array | None = None,
+      step_tokens: int | None = None,
   ) -> _InFlightStep:
-    """Writes any in-flight decode tokens on device and launches the runner."""
-    if prev_generated_tokens is not None:
-      tokens = utils.jit_scatter_last_column(
-          tokens, prev_generated_tokens, target_idxs
-      )
+    """Launches the model runner with optional in-flight decode scatter."""
+    num_steps = (
+        self._scheduler_config.num_scheduler_steps
+        if step_tokens is None
+        else step_tokens
+    )
+    effective_prev = (
+        self._empty_prev_generated_tokens
+        if prev_generated_tokens is None
+        else prev_generated_tokens
+    )
     rank_pages = [
         coordinator.get_physical_pages()
         for coordinator in self._dp_coordinators
@@ -352,6 +416,9 @@ class LLMEngine:
             sampling_params=tuple(
                 req.sampling_params for req in batch.requests
             ),
+            prev_generated_tokens=effective_prev,
+            target_idxs=target_idxs,
+            max_steps=num_steps,
         )
     )
 
@@ -375,6 +442,7 @@ class LLMEngine:
         generated_tokens=generated_tokens,
         logits=logits,
         logprobs=logprobs,
+        num_steps=num_steps,
     )
 
   def _update_from_output(
@@ -383,6 +451,7 @@ class LLMEngine:
       generated_tokens: np.ndarray,
       logits: np.ndarray | None = None,
       logprobs: np.ndarray | None = None,
+      num_steps: int | None = None,
   ) -> list[request_lib.RequestState]:
     """Updates request state across all DP ranks based on sampler output."""
     rows_per_rank = self._scheduler_config.max_num_seqs
@@ -398,6 +467,7 @@ class LLMEngine:
           generated_tokens[row_slice],
           None if logits is None else logits[row_slice],
           None if logprobs is None else logprobs[row_slice],
+          num_steps=num_steps,
       )
       completed_reqs.extend(finished)
 
@@ -407,21 +477,25 @@ class LLMEngine:
       self,
       batch: ScheduledBatch,
       prev_batch: ScheduledBatch | None = None,
-  ) -> tuple[jax.Array, jax.Array, paged_attention.PagedAttnMetadata]:
-    """Packs each DP rank's scheduled requests into the model runner's inputs.
+      step_tokens: int | None = None,
+  ) -> tuple[np.ndarray, np.ndarray, paged_attention.PagedAttnMetadata]:
+    """Packs each DP rank's scheduled requests into the model runner's host inputs.
 
     Every row buffer spans `max_num_rows` rows and every page table
-    `max_pages_per_seq` pages, so their shapes never change.
+    `max_pages_per_seq` pages, so their shapes never change. Caches sharing a
+    KV geometry alias the same backing table so the model runner transfers one
+    table per group instead of one per layer.
 
     Args:
       batch: The scheduled requests of every DP rank.
       prev_batch: The requests running in the in-flight step, if any.
+      step_tokens: Number of forward steps executed in this batch.
 
     Returns:
-      A tuple of (the device token buffer with prefill tokens loaded and blank
-      slots for in-flight decodes, the target indices mapping each row of the
-      previous step to its decode slot or out of bounds, the ragged execution
-      metadata).
+      A tuple of (the host token buffer with prefill tokens loaded and blank
+      slots for in-flight decodes, the host target indices mapping each row of
+      the previous step to its decode slot or out of bounds, the ragged
+      execution metadata).
     """
     num_rows = self._max_num_rows
     rows_per_rank = self._scheduler_config.max_num_seqs
@@ -433,7 +507,9 @@ class LLMEngine:
         else [((), (0, 0, 0))] * num_ranks
     )
     rank_batches = [
-        coordinator.prepare_batch(scheduled, prev_scheduled)
+        coordinator.prepare_batch(
+            scheduled, prev_scheduled, step_tokens=step_tokens
+        )
         for coordinator, (scheduled, _), (prev_scheduled, _) in zip(
             self._dp_coordinators, batch.split(), prev_ranks
         )
@@ -446,13 +522,23 @@ class LLMEngine:
         rank_page_indices,
     ) = zip(*rank_batches)
 
-    # Pad each DP rank's token slice to the same power-of-2 length to limit
-    # jax recompilation in the model runner and shard evenly across DP ranks.
-    max_rank_tokens = max((len(t) for t in rank_batch_tokens), default=0)
-    tokens_per_rank = min(
-        utils.next_power_of_2(max_rank_tokens),
-        self._scheduler_config.max_num_batched_tokens,
+    is_decode_only = bool(
+        all(i == k for i, _, k in batch.distributions)
+        and any(k > 0 for _, _, k in batch.distributions)
     )
+    if is_decode_only:
+      # Keep exact `max_num_seqs` width on pure-decode batches so non-pow2
+      # `max_num_seqs` (e.g. 40) stay on `_jit_decode_only_loop` without
+      # padding MLP/LM-head compute up to `next_power_of_2`.
+      tokens_per_rank = self._scheduler_config.max_num_seqs
+    else:
+      max_rank_tokens = max((len(t) for t in rank_batch_tokens), default=0)
+      min_bucket = utils.next_power_of_2(self._scheduler_config.max_num_seqs)
+      tokens_per_rank = _pad_batch_token_count(
+          max_rank_tokens,
+          min_bucket,
+          self._scheduler_config.max_num_batched_tokens,
+      )
     num_tokens = num_ranks * tokens_per_rank
     tokens = np.zeros((num_ranks, tokens_per_rank), dtype=np.int32)
     for r, rank_tokens in enumerate(rank_batch_tokens):
@@ -465,26 +551,24 @@ class LLMEngine:
             r * tokens_per_rank + decode_row
         )
 
+    cache_groups = self._dp_coordinators[0].cache_groups
+    page_indices: dict[str, jax.Array | np.ndarray] = {}
+    for group_names in cache_groups:
+      rep_name = group_names[0]
+      table = (
+          rank_page_indices[0][rep_name]
+          if num_ranks == 1
+          else np.concatenate([p[rep_name] for p in rank_page_indices], axis=0)
+      )
+      for cache_name in group_names:
+        page_indices[cache_name] = table
+
     metadata = paged_attention.PagedAttnMetadata(
-        page_indices={
-            cache_name: np.concatenate(
-                [p[cache_name] for p in rank_page_indices], axis=0
-            )
-            for cache_name in rank_page_indices[0]
-        },
+        page_indices=page_indices,
         kv_lens=np.concatenate(rank_kv_lens, axis=0),
         query_lens=np.concatenate(rank_query_lens, axis=0),
         distribution=np.asarray(batch.distributions, dtype=np.int32),
-        decode_only=bool(
-            all(i == k for i, _, k in batch.distributions)
-            and any(k > 0 for _, _, k in batch.distributions)
-        ),
-    )
-    replicated_sharding = jax.sharding.NamedSharding(
-        self.mesh, jax.sharding.PartitionSpec()
-    )
-    device_tokens, device_target_idxs = jax.device_put(
-        (tokens, target_idxs), replicated_sharding
+        decode_only=is_decode_only,
     )
 
-    return device_tokens, device_target_idxs, metadata
+    return tokens, target_idxs, metadata

@@ -616,6 +616,206 @@ class StepTest(parameterized.TestCase):
 
     self.assertFalse(engine.has_unfinished_requests())
 
+  def test_mixed_global_and_sliding_window_asymmetric_pool_end_to_end(self):
+    # 4 local layers (window=4) + 1 global layer. Budget holds 25 uniform pages
+    # across all 5 layers (5 * 25), insufficient for max_model_len=128
+    # (33 pages) under uniform allocation, but with per-group allocation the
+    # local group takes 4 * (3 + 1) = 16 pages and global expands to
+    # 25 + 4 * (25 - 16) = 61 pages (> 33).
+    geometries = {
+        f'local_{i}': datatypes.CacheGeometry(
+            num_kv_heads=1, head_dim=1, window_size=4
+        )
+        for i in range(4)
+    } | {
+        'global_0': datatypes.CacheGeometry(
+            num_kv_heads=1, head_dim=1, window_size=None
+        )
+    }
+    transformer = testing_utils.PagedSumTransformer(geometries=geometries)
+    engine = testing_utils.make_engine(
+        transformer,
+        max_model_len=128,
+        max_device_size_gib=5 * 25 * testing_utils.GIB_PER_PAGE,
+        chunked_prefill_length=32,
+        num_scheduler_steps=1,
+    )
+    group_counts = dict(
+        (w, pages) for w, _, pages in engine.kv_cache_group_page_counts
+    )
+    self.assertEqual(group_counts[4], 16)
+    self.assertEqual(group_counts[None], 61)
+    prompt = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
+    engine.add_request(
+        testing_utils.make_request('0', list(prompt), max_tokens=4)
+    )
+    finished = drive(engine)
+    self.assertIn('0', finished)
+    self.assertLen(finished['0'].token_ids, 4)
+
+  def test_prepare_batch_aliases_shared_group_page_tables(self):
+    geometries = {
+        f'local_{i}': datatypes.CacheGeometry(
+            num_kv_heads=1, head_dim=1, window_size=8
+        )
+        for i in range(4)
+    } | {
+        f'global_{i}': datatypes.CacheGeometry(
+            num_kv_heads=1, head_dim=1, window_size=None
+        )
+        for i in range(2)
+    }
+    engine = testing_utils.make_engine(
+        testing_utils.PagedSumTransformer(geometries=geometries),
+        max_model_len=32,
+        num_scheduler_steps=2,
+    )
+    spy = spy_on_execute_step(engine)
+    engine.add_request(
+        testing_utils.make_request('0', [1, 2, 3, 4], max_tokens=3)
+    )
+    drive(engine)
+    metadata = spy.call_args_list[0].kwargs['metadata']
+    # All local caches share one page-table object, all global share another.
+    self.assertIs(
+        metadata.page_indices['local_0'], metadata.page_indices['local_3']
+    )
+    self.assertIs(
+        metadata.page_indices['global_0'], metadata.page_indices['global_1']
+    )
+    self.assertIsNot(
+        metadata.page_indices['local_0'], metadata.page_indices['global_0']
+    )
+
+  def test_coarse_token_padding_buckets(self):
+    self.assertEqual(
+        {
+            engine_lib._pad_batch_token_count(n, 32, 4096)  # pylint: disable=protected-access
+            for n in (
+                1,
+                17,
+                32,
+                33,
+                64,
+                129,
+                256,
+                257,
+                512,
+                513,
+                1024,
+                1025,
+                2048,
+                2049,
+                4096,
+            )
+        },
+        {32, 256, 512, 1024, 2048, 4096},
+    )
+    self.assertEqual(
+        engine_lib._pad_batch_token_count(5, 4, 64),  # pylint: disable=protected-access
+        8,
+    )
+
+  def test_chunked_prefill_with_active_decode_drains_at_one_step_and_matches_reference(
+      self,
+  ):
+    engine = testing_utils.make_engine(
+        max_num_batched_tokens=16,
+        chunked_prefill_length=4,
+        num_scheduler_steps=4,
+        max_model_len=40,
+    )
+    spy = spy_on_execute_step(engine)
+    short_prompt = [1, 2, 3]
+    long_prompt = list(range(1, 15))
+    engine.add_request(
+        testing_utils.make_request('short', list(short_prompt), max_tokens=12)
+    )
+    engine.step()
+    engine.add_request(
+        testing_utils.make_request('long', list(long_prompt), max_tokens=10)
+    )
+    finished = drive(engine)
+
+    self.assertEqual(
+        finished['short'].token_ids.tolist(),
+        reference_generate(short_prompt, max_tokens=12),
+    )
+    self.assertEqual(
+        finished['long'].token_ids.tolist(),
+        reference_generate(long_prompt, max_tokens=10),
+    )
+    # Every step receives a concrete prev_generated_tokens array (no None trace)
+    # and mixed chunked-prefill steps execute max_steps=1 before snapping back
+    # to num_scheduler_steps=4 once chunks drain.
+    self.assertTrue(
+        all(
+            c.kwargs['prev_generated_tokens'] is not None
+            for c in spy.call_args_list
+        )
+    )
+    mixed_max_steps = [
+        c.kwargs['max_steps']
+        for c in spy.call_args_list
+        if c.kwargs['metadata'].distribution[0, 1]
+        > c.kwargs['metadata'].distribution[0, 0]
+    ]
+    self.assertNotEmpty(mixed_max_steps)
+    self.assertTrue(all(s == 1 for s in mixed_max_steps))
+    decode_max_steps = [
+        c.kwargs['max_steps']
+        for c in spy.call_args_list
+        if c.kwargs['metadata'].distribution[0, 1]
+        == c.kwargs['metadata'].distribution[0, 0]
+    ]
+    self.assertTrue(all(s == 4 for s in decode_max_steps))
+
+  def test_non_power_of_two_max_num_seqs_uses_exact_pure_decode_shape(self):
+    engine = testing_utils.make_engine(
+        max_num_seqs=6,
+        max_num_batched_tokens=16,
+        chunked_prefill_length=8,
+        num_scheduler_steps=3,
+        max_model_len=32,
+    )
+    spy = spy_on_execute_step(engine)
+    prompts = {str(i): [i + 1, i + 2] for i in range(6)}
+    for req_id, prompt in prompts.items():
+      engine.add_request(
+          testing_utils.make_request(req_id, list(prompt), max_tokens=6)
+      )
+    finished = drive(engine)
+
+    self.assertEqual(set(finished), set(prompts))
+    for req_id, prompt in prompts.items():
+      self.assertEqual(
+          finished[req_id].token_ids.tolist(),
+          reference_generate(prompt, max_tokens=6),
+      )
+
+    decode_calls = [
+        c
+        for c in spy.call_args_list
+        if c.kwargs['metadata'].distribution[0, 0]
+        == c.kwargs['metadata'].distribution[0, 2]
+    ]
+    prefill_calls = [
+        c
+        for c in spy.call_args_list
+        if c.kwargs['metadata'].distribution[0, 0]
+        < c.kwargs['metadata'].distribution[0, 2]
+    ]
+    self.assertNotEmpty(decode_calls)
+    self.assertNotEmpty(prefill_calls)
+    # Pure-decode steps keep exact `(1, 6)` shape and `decode_only=True`
+    # instead of padding up to the next power of two `(1, 8)`.
+    for c in decode_calls:
+      self.assertEqual(c.kwargs['tokens'].shape, (1, 6))
+      self.assertTrue(c.kwargs['metadata'].decode_only)
+    for c in prefill_calls:
+      self.assertGreaterEqual(c.kwargs['tokens'].shape[1], 8)
+      self.assertFalse(c.kwargs['metadata'].decode_only)
+
 
 def new_weights(offset: float) -> nnx.State:
   return nnx.variables(

@@ -248,9 +248,7 @@ class KVCacheManagerInitTest(parameterized.TestCase):
               "cache_0": datatypes.CacheGeometry(
                   num_kv_heads=2, head_dim=8, window_size=8
               ),
-              "cache_1": datatypes.CacheGeometry(
-                  num_kv_heads=1, head_dim=16
-              ),
+              "cache_1": datatypes.CacheGeometry(num_kv_heads=1, head_dim=16),
           },
       )
 
@@ -295,9 +293,7 @@ class KVCacheManagerInitTest(parameterized.TestCase):
               "local": datatypes.CacheGeometry(
                   num_kv_heads=2, head_dim=8, window_size=8
               ),
-              "global": datatypes.CacheGeometry(
-                  num_kv_heads=1, head_dim=16
-              ),
+              "global": datatypes.CacheGeometry(num_kv_heads=1, head_dim=16),
           },
       )
 
@@ -317,7 +313,9 @@ class KVCacheManagerInitTest(parameterized.TestCase):
         max_device_size_gib=10 / _GIB,
     )
     with jax.set_mesh(_create_mesh((1,), ("tp",))):
-      with self.assertRaisesRegex(ValueError, r"Cannot allocate 0 device pages"):
+      with self.assertRaisesRegex(
+          ValueError, r"Cannot allocate 0 device pages"
+      ):
         kv_cache_manager.KVCacheManager(
             config=cfg,
             cache_geometries=_create_cache_geometries(num_caches=1),
@@ -330,6 +328,25 @@ class SyncRequestStateTest(parameterized.TestCase):
     mgr = _create_manager()
     hashes = mgr._chunk_and_hash(list(range(10)))
     self.assertLen(hashes, 2)  # 10 tokens -> 2 full pages of 4.
+    self.assertEqual(mgr._chunk_and_hash([]), [])
+    self.assertEqual(mgr._chunk_and_hash([1, 2, 3]), [])
+    # Same tokens from list, tuple, and range produce identical hashes, and
+    # chained calls match a single full-sequence call.
+    seq = list(range(12))
+    full_hashes = mgr._chunk_and_hash(seq)
+    self.assertLen(full_hashes, 3)
+    self.assertEqual(full_hashes, mgr._chunk_and_hash(tuple(seq)))
+    self.assertEqual(full_hashes, mgr._chunk_and_hash(range(12)))
+    self.assertEqual(
+        full_hashes,
+        mgr._chunk_and_hash(seq[:4])
+        + mgr._chunk_and_hash(seq[4:], start_hash=full_hashes[0]),
+    )
+    # Different tokens produce distinct hashes (including negative sentinels).
+    self.assertNotEqual(
+        mgr._chunk_and_hash([0, 1, 2, 3]),
+        mgr._chunk_and_hash([0, 1, 2, -1]),
+    )
 
   def test_sync_request_state_withholds_last_token(self):
     mgr = _create_manager()
@@ -368,7 +385,8 @@ class SyncRequestStateTest(parameterized.TestCase):
 
     self.assertEqual(
         mgr._request_to_prefix_hashes["r1"],
-        first_hashes + mgr._chunk_and_hash(list(range(8, 12)), first_hashes[-1]),
+        first_hashes
+        + mgr._chunk_and_hash(list(range(8, 12)), first_hashes[-1]),
     )
 
   def test_sync_request_state_caches_pages_in_every_group(self):
@@ -830,6 +848,69 @@ class InspectionTest(parameterized.TestCase):
     np.testing.assert_array_equal(
         mgr.get_physical_pages()["cache_0"], old_pages["cache_0"]
     )
+
+  def test_asymmetric_local_and_global_pools_and_prefix_caching(self):
+    # 4 local layers (window=8, page_size=4) + 1 global layer, total budget =
+    # 5 caches * 100 uniform pages. With max_num_seqs=2, chunk=8, steps=1:
+    # base local needs 2 * ((cdiv(8+8, 4)+1) + 2) = 14 pages; generous global
+    # budget (>= 3x uniform = 300 pages) expands local tail cache to 3x window
+    # pages: 2 * (5 + 3 * 2) = 22 pages, leaving 500 - 4 * 22 = 412 global
+    # pages.
+    geometries = {
+        "local_0": datatypes.CacheGeometry(
+            num_kv_heads=2, head_dim=16, window_size=8
+        ),
+        "local_1": datatypes.CacheGeometry(
+            num_kv_heads=2, head_dim=16, window_size=8
+        ),
+        "local_2": datatypes.CacheGeometry(
+            num_kv_heads=2, head_dim=16, window_size=8
+        ),
+        "local_3": datatypes.CacheGeometry(
+            num_kv_heads=2, head_dim=16, window_size=8
+        ),
+        "global_0": datatypes.CacheGeometry(
+            num_kv_heads=2, head_dim=16, window_size=None
+        ),
+    }
+    cfg = _create_cache_config(
+        page_size=4, num_device_pages=100, num_host_pages=0, num_caches=5
+    )
+    with jax.set_mesh(_create_mesh((1,), ("tp",))):
+      mgr = kv_cache_manager.KVCacheManager(
+          config=cfg,
+          cache_geometries=geometries,
+          max_num_seqs=2,
+          max_chunked_prefill_length=8,
+          num_scheduler_steps=1,
+      )
+
+    local_mgr, global_mgr = mgr._kv_cache_group_managers
+    self.assertEqual(local_mgr.window_size, 8)
+    self.assertIsNone(global_mgr.window_size)
+    self.assertEqual(local_mgr.num_device_pages, 22)
+    self.assertEqual(global_mgr.num_device_pages, 412)
+    self.assertEqual(mgr.num_device_pages, 412)
+    self.assertEqual(mgr.group_device_page_counts, ((8, 4, 22), (None, 1, 412)))
+
+    # Run a 26-page (104-token) request — longer than the entire 22-page local
+    # pool — confirming out-of-window eviction keeps local pool free while the
+    # global group retains all 26 pages and prefix-caches the full history.
+    tokens = list(range(1, 106))
+    req1 = _create_request(req_id="r1", prompt_token_ids=tokens)
+    for step in range(26):
+      mgr.sync_request_state(req1)
+      self.assertTrue(mgr.allocate_slots(req1, num_new_tokens=4))
+      req1.num_computed_tokens = (step + 1) * 4
+    mgr.release_request(req1)
+
+    req2 = _create_request(req_id="r2", prompt_token_ids=tokens)
+    mgr.sync_request_state(req2)
+    n_hit, computed = mgr.get_computed_pages(req2)
+    self.assertEqual(n_hit, 26)
+    self.assertLen(computed[1], 26)
+    # Local group only holds the tail 2 pages (window=8, page_size=4) non-None.
+    self.assertEqual(sum(p is not None for p in computed[0]), 2)
 
 
 if __name__ == "__main__":
