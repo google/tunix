@@ -52,6 +52,7 @@ class GetWeightSyncMetadataTest(unittest.IsolatedAsyncioTestCase):
   async def test_delegates_to_sampler(self):
     sampler = _FakeSampler([{"unit": "sampler0"}])
     manager = manager_lib.RolloutManager(
+        config=rollout_worker.RolloutConfig(),
         sampler=sampler,
         tokenizer="mock",
         chat_parser="mock",
@@ -64,6 +65,7 @@ class GetWeightSyncMetadataTest(unittest.IsolatedAsyncioTestCase):
   async def test_forwards_kwargs(self):
     sampler = _FakeSampler([])
     manager = manager_lib.RolloutManager(
+        config=rollout_worker.RolloutConfig(),
         sampler=sampler,
         tokenizer="mock",
         chat_parser="mock",
@@ -75,7 +77,8 @@ class GetWeightSyncMetadataTest(unittest.IsolatedAsyncioTestCase):
 
   async def test_missing_sampler_raises(self):
     with self.assertRaises(TypeError):
-      manager_lib.RolloutManager(  # pyrefly: ignore[missing-argument]
+      manager_lib.RolloutManager(
+          config=rollout_worker.RolloutConfig(),  # pyrefly: ignore[missing-argument]
           tokenizer="mock",
           chat_parser="mock",
           env_factory=_CaptureEnv,
@@ -84,7 +87,8 @@ class GetWeightSyncMetadataTest(unittest.IsolatedAsyncioTestCase):
 
   async def test_missing_tokenizer_raises(self):
     with self.assertRaises(TypeError):
-      manager_lib.RolloutManager(  # pyrefly: ignore[missing-argument]
+      manager_lib.RolloutManager(
+          config=rollout_worker.RolloutConfig(),  # pyrefly: ignore[missing-argument]
           sampler=_FakeSampler([]),
           chat_parser="mock",
           env_factory=_CaptureEnv,
@@ -122,11 +126,10 @@ class _NoopCollector:
       agent,
       tokenizer,
       chat_parser,
-      eos_ids=None,
-      partial_rollout=False,
+      config=None,
       policy_version_fn=None,
-      routed_experts_encode_mode="auto",
-      routed_experts_num_experts=None,
+      trajectory_store=None,
+      max_prompt_length=None,
   ):
     del (
         request,
@@ -134,11 +137,10 @@ class _NoopCollector:
         agent,
         tokenizer,
         chat_parser,
-        eos_ids,
-        partial_rollout,
+        config,
         policy_version_fn,
-        routed_experts_encode_mode,
-        routed_experts_num_experts,
+        trajectory_store,
+        max_prompt_length,
     )
     self.traj_id = traj_id
     self.env = env_client
@@ -290,6 +292,7 @@ class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
 
   def _manager(self, **kwargs):
     return manager_lib.RolloutManager(
+        config=rollout_worker.RolloutConfig(),
         sampler=_FakeSyncSampler([]),
         tokenizer="mock",
         chat_parser="mock",
@@ -318,6 +321,7 @@ class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
   async def test_bind_delegates_to_sampler(self):
     sampler = _FakeSyncSampler([])
     manager = manager_lib.RolloutManager(
+        config=rollout_worker.RolloutConfig(),
         sampler=sampler,
         tokenizer="mock",
         chat_parser="mock",
@@ -330,6 +334,7 @@ class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
     sampler = mock.AsyncMock(spec=sampler_lib.Sampler)
     sampler.abort_weight_sync.return_value = "aborted"
     manager = manager_lib.RolloutManager(
+        config=rollout_worker.RolloutConfig(),
         sampler=sampler,
         tokenizer="mock",
         chat_parser="mock",
@@ -482,7 +487,7 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
       await manager._generate_one(request)
 
     self.assertEqual(
-        collector_cls.call_args.kwargs["eos_ids"], [151643, 151645]
+        collector_cls.call_args.kwargs["config"].eos_tokens, [151643, 151645]
     )
 
   async def test_unset_eos_tokens_leave_the_collector_on_its_default(self):
@@ -508,7 +513,7 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
 
       await manager._generate_one(request)
 
-    self.assertIsNone(collector_cls.call_args.kwargs["eos_ids"])
+    self.assertIsNone(collector_cls.call_args.kwargs["config"].eos_tokens)
 
   async def test_generate_stamps_request_metadata_on_trajectory_error(self):
     manager = manager_lib.RolloutManager(
@@ -910,7 +915,7 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
       turn_versions_seen.append(v)
       if len(turn_versions_seen) == 2:
         turn2_called_sampler.set()
-      return "ans"
+      return sampler_lib.SamplingResponse(request_id="req", text="ans")
 
     sampler.sample = _sample_fn
 
@@ -1146,11 +1151,14 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
           datatypes.RolloutRequest(prompt="p", prompt_id="p0", group_index=0)
       )
 
-    self.assertEqual(captured_kwargs["routed_experts_encode_mode"], "uint10")
-    self.assertEqual(captured_kwargs["routed_experts_num_experts"], 384)
+    self.assertEqual(
+        captured_kwargs["config"].routed_experts_encode_mode, "uint10"
+    )
+    self.assertEqual(captured_kwargs["config"].routed_experts_num_experts, 384)
 
   async def test_drain_timeout_default_and_validation(self):
     manager = manager_lib.RolloutManager(
+        config=rollout_worker.RolloutConfig(),
         sampler=_PauseTrackingSampler(),
         tokenizer="mock",
         chat_parser="mock",
@@ -1165,6 +1173,7 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
           ValueError, "drain_timeout_s must be a positive finite number"
       ):
         manager_lib.RolloutManager(
+            config=rollout_worker.RolloutConfig(),
             sampler=_PauseTrackingSampler(),
             tokenizer="mock",
             chat_parser="mock",

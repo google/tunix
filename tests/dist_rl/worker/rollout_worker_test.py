@@ -51,6 +51,7 @@ class RolloutWorkerTest(absltest.TestCase):
         sampler_name="test_sampler", default_delay=0.0
     )
     self.worker = rollout_worker.RolloutWorker(
+        config=rollout_worker.RolloutConfig(),
         worker_id="rollout_worker_42",
         sampler=self.sampler,
         env_name="mock_env",
@@ -61,7 +62,8 @@ class RolloutWorkerTest(absltest.TestCase):
 
   def test_missing_tokenizer_raises(self):
     with self.assertRaises(TypeError):
-      rollout_worker.RolloutWorker(  # pyrefly: ignore[missing-argument]
+      rollout_worker.RolloutWorker(
+          config=rollout_worker.RolloutConfig(),  # pyrefly: ignore[missing-argument]
           worker_id="rollout_worker_42",
           sampler=self.sampler,
           env_name="mock_env",
@@ -299,6 +301,7 @@ class RolloutWorkerTest(absltest.TestCase):
 
     async_sampler = _AsyncSampler()
     worker = rollout_worker.RolloutWorker(
+        config=rollout_worker.RolloutConfig(),
         worker_id="rollout_async",
         sampler=async_sampler,
         env_name="mock_env",
@@ -334,6 +337,7 @@ class RolloutWorkerTest(absltest.TestCase):
 
   def test_bind_and_get_weight_sync_metadata_auto_initialize_from_pending(self):
     worker = rollout_worker.RolloutWorker(
+        config=rollout_worker.RolloutConfig(),
         worker_id="rollout_pending_sync",
         sampler=self.sampler,
         env_name="mock_env",
@@ -346,6 +350,7 @@ class RolloutWorkerTest(absltest.TestCase):
     self.assertEqual(worker.state, datatypes.WorkerState.READY)
 
     worker2 = rollout_worker.RolloutWorker(
+        config=rollout_worker.RolloutConfig(),
         worker_id="rollout_pending_meta",
         sampler=self.sampler,
         env_name="mock_env",
@@ -432,10 +437,10 @@ class RolloutWorkerTest(absltest.TestCase):
     )
 
 
-def _worker(config=None):
+def _worker(config: rollout_worker.RolloutConfig | None = None):
   return rollout_worker.RolloutWorker(
       worker_id="w0",
-      config=config,
+      config=config if config is not None else rollout_worker.RolloutConfig(),
       sampler=mocks.MockBaseSamplerImpl(sampler_name="mock_sampler"),
       env_name="mock_env",
       agent_name="mock_agent",
@@ -445,10 +450,6 @@ def _worker(config=None):
 
 
 class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
-
-  def test_no_config_means_no_store(self):
-    worker = _worker()
-    self.assertIsNone(worker.trajectory_store)
 
   def test_config_without_trajectory_store_config_means_no_store(self):
     worker = _worker(config=rollout_worker.RolloutConfig())
@@ -707,6 +708,7 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
   def test_unregistered_env_or_agent_raises_key_error(self):
     with self.assertRaises(KeyError):
       rollout_worker.RolloutWorker(
+          config=rollout_worker.RolloutConfig(),
           worker_id="rollout_worker_bad_env",
           sampler=mocks.MockBaseSamplerImpl(
               sampler_name="test_sampler", default_delay=0.0
@@ -718,6 +720,7 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
       )
     with self.assertRaises(KeyError):
       rollout_worker.RolloutWorker(
+          config=rollout_worker.RolloutConfig(),
           worker_id="rollout_worker_bad_agent",
           sampler=mocks.MockBaseSamplerImpl(
               sampler_name="test_sampler", default_delay=0.0
@@ -743,6 +746,7 @@ class RolloutWorkerOTelMetricsTest(absltest.TestCase):
         sampler_name="test_sampler", default_delay=0.0
     )
     self.worker = rollout_worker.RolloutWorker(
+        config=rollout_worker.RolloutConfig(),
         worker_id="rollout_otel_0",
         sampler=self.sampler,
         env_name="mock_env",
@@ -1115,6 +1119,7 @@ class RolloutWorkerOTelMetricsTest(absltest.TestCase):
         return await super().sample(req, **kwargs)
 
     worker_1 = rollout_worker.RolloutWorker(
+        config=rollout_worker.RolloutConfig(),
         worker_id="rollout_otel_1",
         sampler=_BlockingSampler(sampler_name="blocking_sampler"),
         env_name="mock_env",
@@ -1218,6 +1223,7 @@ class RolloutWorkerOTelMetricsTest(absltest.TestCase):
   def test_records_nothing_when_opentelemetry_is_not_installed(self):
     with mock.patch.object(otel_metrics, "otel_api", None):
       disabled_worker = rollout_worker.RolloutWorker(
+          config=rollout_worker.RolloutConfig(),
           worker_id="rollout_otel_disabled",
           sampler=self.sampler,
           env_name="mock_env",
