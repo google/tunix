@@ -234,16 +234,11 @@ class RolloutWorkerTest(parameterized.TestCase):
       handle = self.actor_handle
 
       # Direct async submission of pre_weight_sync and weight_sync over handle
-      metadata = datatypes.WeightSyncMetadata(
-          new_policy_version=333,
-          transfer_mode="p2p",
-          source_endpoints=["trainer:50051"],
-          sharding_topology={"mesh": [2, 2]},
-      )
-      await handle.asubmit("pre_weight_sync", metadata)
-      v = await handle.asubmit("weight_sync", metadata)
+      sync_request = datatypes.WeightSyncRequest(policy_version=333)
+      await handle.asubmit("pre_weight_sync", sync_request)
+      v = await handle.asubmit("weight_sync", sync_request)
       self.assertEqual(v, 333)
-      await handle.asubmit("post_weight_sync", metadata)
+      await handle.asubmit("post_weight_sync", sync_request)
 
       # Direct coroutine execution of generate over handle
       req = datatypes.RolloutRequest(

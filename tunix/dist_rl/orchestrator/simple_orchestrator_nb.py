@@ -130,14 +130,9 @@ class SimulatedTrainerWorker(abstract_worker.Worker):
     logging.info("[%s] Executing gradient update (fwd_bwd)", self.worker_id)
     return {"loss": 0.25, "grad_norm": 1.2}
 
-  def prepare_weight_sync(self) -> datatypes.WeightSyncMetadata:
+  def prepare_weight_sync(self) -> datatypes.WeightSyncRequest:
     logging.info("[%s] Staging weights for sync", self.worker_id)
-    meta = datatypes.WeightSyncMetadata(
-        new_policy_version=1,
-        transfer_mode="p2p",
-        source_endpoints=["trainer:50051"],
-    )
-    return meta
+    return datatypes.WeightSyncRequest(policy_version=1)
 
   def heartbeat(self) -> datatypes.HealthReport:
     return datatypes.HealthReport(state=datatypes.WorkerState.READY)

@@ -255,20 +255,20 @@ class MockBaseSamplerImpl(base_sampler_lib.Sampler):
 
   async def post_weight_sync(
       self,
-      sync_request: (
-          datatypes.WeightSyncRequest | datatypes.WeightSyncMetadata | None
-      ) = None,
+      sync_request: datatypes.WeightSyncRequest,
       **kwargs,
   ) -> Any:
     del kwargs
     if self.staging_policy_version is not None:
       self.current_policy_version = self.staging_policy_version
       self.staging_policy_version = None
-    elif isinstance(sync_request, datatypes.WeightSyncRequest):
-      self.current_policy_version = int(sync_request.policy_version)
+    else:
+      self.current_policy_version = sync_request.policy_version
     return True
 
-  async def abort_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+  async def abort_weight_sync(
+      self, sync_request: datatypes.WeightSyncRequest, **kwargs
+  ) -> Any:
     del sync_request, kwargs
     self.staging_policy_version = None
     return True
@@ -428,33 +428,21 @@ class MockBaseSamplerImpl(base_sampler_lib.Sampler):
 
   async def pre_weight_sync(
       self,
-      sync_request: (
-          datatypes.WeightSyncRequest | datatypes.WeightSyncMetadata | None
-      ) = None,
+      sync_request: datatypes.WeightSyncRequest,
       **kwargs,
   ) -> Any:
     self.staging_policy_version = None
-    if isinstance(sync_request, datatypes.WeightSyncRequest):
-      return int(sync_request.policy_version)
-    metadata = kwargs.pop("metadata", sync_request)
-    if isinstance(metadata, datatypes.WeightSyncMetadata):
-      return metadata.new_policy_version
-    return None
+    del kwargs
+    return sync_request.policy_version
 
   async def weight_sync(
       self,
-      sync_request: (
-          datatypes.WeightSyncRequest | datatypes.WeightSyncMetadata | None
-      ) = None,
+      sync_request: datatypes.WeightSyncRequest,
       **kwargs,
   ) -> Any:
-    if isinstance(sync_request, datatypes.WeightSyncRequest):
-      self.staging_policy_version = int(sync_request.policy_version)
-      return self.staging_policy_version
-    metadata = kwargs.pop("metadata", sync_request)
-    if isinstance(metadata, datatypes.WeightSyncMetadata):
-      self.current_policy_version = metadata.new_policy_version
-    return self.current_policy_version
+    del kwargs
+    self.staging_policy_version = sync_request.policy_version
+    return self.staging_policy_version
 
 
 @dataclasses.dataclass(frozen=True)
@@ -820,23 +808,6 @@ class MockGlobalOrchestrator:
     if self.trainer_handle:
       return await self.trainer_handle.asubmit("train_step", valid_trajs)
     return 1
-
-  def synchronize_weights(
-      self, metadata: datatypes.WeightSyncMetadata
-  ) -> List[int]:
-    """Executes Phase 3 weight synchronization across rollout handles."""
-    if self.trainer_handle:
-      self.trainer_handle.submit(
-          "push_weights", metadata.source_endpoints or []
-      )
-
-    versions: List[int] = []
-    for handle in self.actor_handles:
-      handle.submit("pre_weight_sync", metadata)
-    for handle in self.actor_handles:
-      v = handle.submit("weight_sync", metadata)
-      versions.append(v)
-    return versions
 
 
 def is_tpu_available() -> bool:

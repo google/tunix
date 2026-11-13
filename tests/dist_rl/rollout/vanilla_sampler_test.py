@@ -1144,13 +1144,25 @@ class VanillaSamplerTest(parameterized.TestCase):
 
   def test_weight_sync_without_raiden_delegate(self):
     self.assertIsNone(asyncio.run(self.vanilla_sampler.bind_weight_sync()))
-    self.assertTrue(asyncio.run(self.vanilla_sampler.pre_weight_sync()))
+    self.assertTrue(
+        asyncio.run(
+            self.vanilla_sampler.pre_weight_sync(
+                base_sampler_lib.WeightSyncRequest()
+            )
+        )
+    )
     new_state = self.vanilla_sampler.transformer_state
     req = base_sampler_lib.WeightSyncRequest(weights=new_state)
-    self.assertTrue(
+    self.assertIsNone(
         asyncio.run(self.vanilla_sampler.weight_sync(sync_request=req))
     )
-    self.assertTrue(asyncio.run(self.vanilla_sampler.post_weight_sync()))
+    self.assertTrue(
+        asyncio.run(
+            self.vanilla_sampler.post_weight_sync(
+                base_sampler_lib.WeightSyncRequest()
+            )
+        )
+    )
     with self.assertRaises(NotImplementedError):
       asyncio.run(self.vanilla_sampler.get_weight_sync_metadata())
 

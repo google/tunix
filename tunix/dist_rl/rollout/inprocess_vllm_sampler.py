@@ -126,7 +126,6 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
       raiden_sync_delegate = (
           raiden_weight_sync_delegate.RaidenWeightSyncDelegate(
               server_id=self.server_id,
-              partial_rollout=self.config.partial_rollout,
           )
       )
 
@@ -247,11 +246,6 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
         tokenizer=self.tokenizer, config=vllm_config
     )
 
-  def _get_underlying_sampler(
-      self,
-  ) -> generate_vllm_lib.VllmSampler | None:
-    return self.vllm_sampler
-
   def _require_vllm_sampler(self) -> generate_vllm_lib.VllmSampler:
     if self.vllm_sampler is None:
       raise RuntimeError(
@@ -259,11 +253,6 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
           " initialized."
       )
     return self.vllm_sampler
-
-  @property
-  def partial_rollout(self) -> bool:
-    """Whether in-flight weight updates (partial rollout) are enabled."""
-    return self.config.partial_rollout
 
   @property
   def transformer_state(self) -> Any:
