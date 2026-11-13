@@ -101,7 +101,10 @@ class InferenceMainTest(absltest.TestCase):
     inference.main(argv, context=self.mock_context)
 
     self.mock_setup_metrics.assert_called_once_with(
-        default_service_name="tunix-inference",
+        service_name="tunix-inference",
+        endpoint="",
+        export_interval_ms=otel_setup.DEFAULT_EXPORT_INTERVAL_MS,
+        export_timeout_s=otel_setup.DEFAULT_EXPORT_TIMEOUT_S,
         resource_attributes={
             "tunix.worker_id": "reference-inference-0",
             "tunix.role": "inference",

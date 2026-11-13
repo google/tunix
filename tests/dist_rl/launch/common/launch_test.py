@@ -46,9 +46,6 @@ _ENV_PASSTHROUGH = frozenset({
     "HF_TOKEN",
     "LOG_ROOT",
     "ORCHESTRATOR_ID",
-    "OTEL_EXPORTER_OTLP_ENDPOINT",
-    "OTEL_EXPORTER_OTLP_TIMEOUT",
-    "OTEL_METRIC_EXPORT_INTERVAL",
     "PYTHON",
     "PYTHONPATH",
     "PYTHON_BIN",
@@ -752,51 +749,49 @@ class LaunchScriptsTest(absltest.TestCase):
     self.assertNotIn("gcs_cache download", res.stdout)
 
   def test_k8s_passes_otel_settings_to_every_pod(self):
-    args = [
+    base_args = [
         "start",
         "--dry-run",
         "cluster_config.target=k8s",
         "cluster_config.k8s.tunix_image=test-image",
         "agentic_grpo_config.beta=0.0",
     ]
-    res = self._run_launch(
-        args,
-        extra_env={
-            "OTEL_EXPORTER_OTLP_ENDPOINT": "http://testuser-otel:4317",
-            "OTEL_METRIC_EXPORT_INTERVAL": "5000",
-            "OTEL_EXPORTER_OTLP_TIMEOUT": "10000",
-        },
-    )
+    res = self._run_launch([
+        *base_args,
+        "otel_config.enable=true",
+        "otel_config.export_interval_ms=5000",
+        "otel_config.dashboard_id=dash-1",
+        "otel_config.dashboard_project=proj-1",
+    ])
     self.assertEqual(res.returncode, 0, msg=res.stderr)
-    # Each startup command is one line of its rendered manifest.
-    exporting = set(
-        re.findall(
-            r"OTEL_EXPORTER_OTLP_ENDPOINT=http://testuser-otel:4317 "
-            r"OTEL_METRIC_EXPORT_INTERVAL=5000 "
-            r"OTEL_EXPORTER_OTLP_TIMEOUT=10000 .*--process_main=(\S+)",
-            res.stdout,
-        )
-    )
     mains = {
         "tunix.dist_rl.launch.nodes.orchestrator.main",
         "tunix.dist_rl.launch.nodes.trainer.main",
         "tunix.dist_rl.launch.nodes.rollout.main",
     }
-    self.assertEqual(exporting, mains)
-    # Every pod resolves the collector name the launcher deployed, not one
-    # from the container's `$USER`.
+    # Every pod gets the pinned collector id and the `otel_config.*` arguments,
+    # with no `OTEL_*` environment variable prefix.
     pinned = set(
         re.findall(
             r"--process_main=(\S+) [^\n]*"
-            r"cluster_config\.k8s\.otel_id=testuser-otel",
+            r"cluster_config\.k8s\.otel_id=testuser-otel [^\n]*"
+            r"otel_config\.enable=true otel_config\.export_interval_ms=5000 "
+            r"otel_config\.dashboard_id=dash-1 "
+            r"otel_config\.dashboard_project=proj-1",
             res.stdout,
         )
     )
     self.assertEqual(pinned, mains)
-    # Unset in the caller's environment, the pods get neither.
-    res = self._run_launch(args)
-    self.assertEqual(res.returncode, 0, msg=res.stderr)
     self.assertNotIn("OTEL_", res.stdout)
+
+    # Legacy `OTEL_*` environment variables fail fast with a migration hint.
+    legacy = self._run_launch(
+        base_args,
+        extra_env={"OTEL_EXPORTER_OTLP_ENDPOINT": "http://testuser-otel:4317"},
+    )
+    self.assertNotEqual(legacy.returncode, 0)
+    self.assertIn("OTEL_EXPORTER_OTLP_ENDPOINT", legacy.stderr)
+    self.assertIn("otel_config.enable=true", legacy.stderr)
 
   def test_k8s_passes_restart_and_scheduling_settings_to_the_jobsets(self):
     args = [

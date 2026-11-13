@@ -48,6 +48,7 @@ from tunix.common import datatypes as common_datatypes
 from tunix.dist_rl.common import datatypes as dist_rl_datatypes
 from tunix.dist_rl.common import execution_target
 from tunix.dist_rl.common import gcs_cache
+from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.distributed.deployment import yaml_generator
 
 LAUNCH_DIR = pathlib.Path(__file__).parent
@@ -350,8 +351,133 @@ def _finalize_dist_defaults(hp: cli_config.HyperParameters) -> None:
       k8s["rollout_id"] = f"{user}-roll"
     if not k8s["inference_id"]:
       k8s["inference_id"] = f"{user}-inf"
-    if not k8s["otel_id"]:
+    if isinstance(k8s["otel_id"], str) and not k8s["otel_id"]:
       k8s["otel_id"] = f"{user}-otel"
+
+  _finalize_otel_config(hp, target)
+
+
+def _validate_otel_cluster_settings(
+    hp: cli_config.HyperParameters, target: str
+) -> tuple[int, str]:
+  """Validates `cluster_config.ports.otel` and `cluster_config.k8s.otel_id`."""
+  cluster = hp.config_mapping("cluster_config")
+  otel_port = cluster["ports"]["otel"]
+  if isinstance(otel_port, bool) or not isinstance(otel_port, int):
+    raise TypeError(
+        f"cluster_config.ports.otel must be an int, got {otel_port!r}."
+    )
+  if not 1 <= otel_port <= 65535:
+    raise ValueError(
+        f"cluster_config.ports.otel must be in 1..65535, got {otel_port}."
+    )
+  otel_id = cluster["k8s"]["otel_id"]
+  if target == "k8s":
+    if not isinstance(otel_id, str):
+      raise TypeError(
+          f"cluster_config.k8s.otel_id must be a str, got {otel_id!r}."
+      )
+    if not otel_id or any(ch.isspace() for ch in otel_id):
+      raise ValueError(
+          "cluster_config.k8s.otel_id must be non-empty without whitespace,"
+          f" got {otel_id!r}."
+      )
+  return otel_port, str(otel_id)
+
+
+def _validate_otel_scalars(otel: Mapping[str, Any]) -> tuple[bool, int, float]:
+  """Checks types and numeric ranges of `otel_config` scalar fields."""
+  enable = otel["enable"]
+  if not isinstance(enable, bool):
+    raise TypeError(f"otel_config.enable must be a bool, got {enable!r}.")
+  googlecloud = otel["googlecloud"]
+  if not isinstance(googlecloud, bool):
+    raise TypeError(
+        f"otel_config.googlecloud must be a bool, got {googlecloud!r}."
+    )
+  for key in ("endpoint", "dashboard_id", "dashboard_project"):
+    if not isinstance(otel[key], str):
+      raise TypeError(
+          f"otel_config.{key} must be a str, got {otel[key]!r} (quote numeric"
+          " IDs on the command line)."
+      )
+  interval_ms = otel["export_interval_ms"]
+  if isinstance(interval_ms, bool) or not isinstance(interval_ms, int):
+    raise TypeError(
+        f"otel_config.export_interval_ms must be an int, got {interval_ms!r}."
+    )
+  if interval_ms <= 0:
+    raise ValueError(
+        f"otel_config.export_interval_ms must be > 0, got {interval_ms}."
+    )
+  timeout_s = otel["export_timeout_s"]
+  if isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float)):
+    raise TypeError(
+        f"otel_config.export_timeout_s must be a number, got {timeout_s!r}."
+    )
+  if not (0.0 < float(timeout_s) < math.inf):
+    raise ValueError(
+        "otel_config.export_timeout_s must be finite and > 0, got"
+        f" {timeout_s!r}."
+    )
+  return enable, interval_ms, float(timeout_s)
+
+
+def _finalize_otel_config(hp: cli_config.HyperParameters, target: str) -> None:
+  """Validates `otel_config` and derives a default collector endpoint when enabled."""
+  otel_port, otel_id = _validate_otel_cluster_settings(hp, target)
+  otel = _mutable_section(hp, "otel_config")
+  enable, interval_ms, timeout_s = _validate_otel_scalars(otel)
+  endpoint = otel["endpoint"].strip()
+  dash_id = otel["dashboard_id"].strip()
+  dash_proj = otel["dashboard_project"].strip()
+  otel["export_timeout_s"] = timeout_s
+  if not enable:
+    ignored = [
+        name
+        for name, is_set in (
+            ("endpoint", bool(endpoint)),
+            ("dashboard_id", bool(dash_id)),
+            ("dashboard_project", bool(dash_proj)),
+            (
+                "export_interval_ms",
+                interval_ms != otel_setup.DEFAULT_EXPORT_INTERVAL_MS,
+            ),
+            (
+                "export_timeout_s",
+                timeout_s != otel_setup.DEFAULT_EXPORT_TIMEOUT_S,
+            ),
+        )
+        if is_set
+    ]
+    if ignored:
+      raise ValueError(
+          f"otel_config sets {ignored}, which only take effect with"
+          " otel_config.enable=true. Set otel_config.enable=true or clear them."
+      )
+    otel["endpoint"] = ""
+    otel["dashboard_id"] = ""
+    otel["dashboard_project"] = ""
+    return
+
+  if bool(dash_id) != bool(dash_proj):
+    raise ValueError(
+        "otel_config.dashboard_id and otel_config.dashboard_project must both"
+        " be set or both be empty."
+    )
+  otel["dashboard_id"] = dash_id
+  otel["dashboard_project"] = dash_proj
+  if not endpoint:
+    if target == "k8s":
+      endpoint = f"http://{otel_id}:{otel_port}"
+    elif target == "local":
+      endpoint = f"http://localhost:{otel_port}"
+    else:
+      raise ValueError(
+          "otel_config.enable=true on cluster_config.target='external'"
+          " requires an explicit otel_config.endpoint."
+      )
+  otel["endpoint"] = otel_setup.normalize_endpoint(endpoint)
 
 
 def _validate_rollout_cache_settings(hp: cli_config.HyperParameters) -> None:
@@ -760,6 +886,16 @@ _FORBIDDEN_ROLE_ENVS: Final[Mapping[str, str]] = types.MappingProxyType({
     **{k: f"set {v} instead" for k, v in LIBRARY_ENV_CONFIG_KEYS.items()},
     "ENABLE_PATHWAYS_PERSISTENCE": (
         "set cluster_config.k8s.enable_pathways_persistence instead"
+    ),
+    "OTEL_EXPORTER_OTLP_ENDPOINT": (
+        "set otel_config.enable=true (and otel_config.endpoint if needed)"
+        " instead"
+    ),
+    "OTEL_METRIC_EXPORT_INTERVAL": (
+        "set otel_config.enable=true and otel_config.export_interval_ms instead"
+    ),
+    "OTEL_EXPORTER_OTLP_TIMEOUT": (
+        "set otel_config.enable=true and otel_config.export_timeout_s instead"
     ),
     "DIST_RL_WORKER_PORT": "launcher-managed worker identity",
     "DIST_RL_ROLLOUT_REPLICA": "launcher-managed worker identity",
@@ -1680,6 +1816,7 @@ def render_bash_exports(hp: DistHyperParameters) -> str:
   actor = hp.config_mapping("actor_model_config")
   rollout_model = hp.config_mapping("rollout_model_config")
   ws = hp.config_mapping("weight_sync_config")
+  otel = hp.config_mapping("otel_config")
   sandbox_k8s = (
       hp.config["kubernetes_config"]
       if isinstance(hp.config["kubernetes_config"], Mapping)
@@ -1728,6 +1865,7 @@ def render_bash_exports(hp: DistHyperParameters) -> str:
       "ROLLOUT_PORT": ports["rollout"],
       "INFERENCE_PORT": ports["inference"],
       "OTEL_PORT": ports["otel"],
+      "OTEL_GOOGLECLOUD": otel["googlecloud"],
       "ACTOR_MAXTEXT_MODEL_NAME": (
           actor["kwargs"]["maxtext_model_name"]
           if actor["model_source"] == "maxtext"
