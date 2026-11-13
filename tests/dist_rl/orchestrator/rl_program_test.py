@@ -3934,8 +3934,6 @@ class RLProgramTest(absltest.TestCase):
           generation_metrics={},
           step_result={"loss": 0.1},
           trainer_metrics=None,
-          num_rollouts=4,
-          num_microbatches=2,
           padding_stats=[],
           packing_time_sec=0.0,
           step_time_sec=0.1,
@@ -4024,8 +4022,6 @@ class RLProgramTest(absltest.TestCase):
           generation_metrics={},
           step_result={"loss": 0.1},
           trainer_metrics=None,
-          num_rollouts=4,
-          num_microbatches=2,
           padding_stats=[],
           packing_time_sec=0.0,
           step_time_sec=0.1,
@@ -4088,8 +4084,6 @@ class RLProgramTest(absltest.TestCase):
       summary = prog._collect_and_log_step_metrics(
           all_step_items=list(g0.items) + list(g1.items),
           step_advantages=[0.0, 0.0, 0.0, 0.0],
-          num_rollouts=4,
-          num_microbatches=1,
           padding_stats=[],
           packing_time_sec=0.0,
           step_time_sec=0.1,
@@ -4181,12 +4175,7 @@ class RLProgramTest(absltest.TestCase):
       # 1. Actor Trainer Metrics (retrieved from TrainerWorker.get_metrics)
       self.assertTrue(logger.metric_exists("actor", "loss", "train"))
       self.assertAlmostEqual(logger.get_metric("actor", "loss", "train"), 0.5)
-      self.assertTrue(logger.metric_exists("actor", "perplexity", "train"))
-      self.assertAlmostEqual(
-          logger.get_metric("actor", "perplexity", "train"),
-          float(np.exp(0.5)),
-          places=5,
-      )
+      self.assertFalse(logger.metric_exists("actor", "perplexity", "train"))
       self.assertTrue(logger.metric_exists("actor", "learning_rate", "train"))
       self.assertAlmostEqual(
           logger.get_metric("actor", "learning_rate", "train"), 1e-4
@@ -4311,17 +4300,11 @@ class RLProgramTest(absltest.TestCase):
       self.assertAlmostEqual(
           logger.get_metric("orchestrator", "policy_version", "train"), 0.0
       )
-      self.assertTrue(
+      self.assertFalse(
           logger.metric_exists("orchestrator", "num_rollouts", "train")
       )
-      self.assertAlmostEqual(
-          logger.get_metric("orchestrator", "num_rollouts", "train"), 2.0
-      )
-      self.assertTrue(
+      self.assertFalse(
           logger.metric_exists("orchestrator", "num_microbatches", "train")
-      )
-      self.assertAlmostEqual(
-          logger.get_metric("orchestrator", "num_microbatches", "train"), 1.0
       )
       # Step time is logged once, as `perf/global_step_time`.
       self.assertFalse(
@@ -5071,9 +5054,8 @@ class RLProgramTest(absltest.TestCase):
       await program.train_stage()
 
       logger = program.metrics_logger
-      self.assertEqual(
-          logger.get_metric("orchestrator", "num_microbatches", "train"), 2.0
-      )
+      self.assertIsNotNone(program.last_step_result)
+      self.assertEqual(program.last_step_result.num_microbatches, 2)
       # Times accumulate over both microbatches: 2 x 0.05 s per phase.
       for name in (
           "policy_training_time",
@@ -5091,8 +5073,6 @@ class RLProgramTest(absltest.TestCase):
 
     program._collect_and_log_step_metrics(
         all_step_items=[],
-        num_rollouts=0,
-        num_microbatches=0,
         padding_stats=[],
         packing_time_sec=0.0,
         step_time_sec=10.0,
@@ -5136,8 +5116,6 @@ class RLProgramTest(absltest.TestCase):
 
     program._collect_and_log_step_metrics(
         all_step_items=[],
-        num_rollouts=0,
-        num_microbatches=0,
         padding_stats=[],
         packing_time_sec=0.0,
         step_time_sec=1.0,
@@ -5363,6 +5341,7 @@ class RLProgramTest(absltest.TestCase):
         logged_keys = {k for d in logged_dicts for k in d.keys()}
 
         self.assertIn("actor/train/loss", logged_keys)
+        self.assertNotIn("actor/train/perplexity", logged_keys)
         self.assertIn("actor/train/learning_rate", logged_keys)
         self.assertIn("rewards/train/mean", logged_keys)
         self.assertNotIn("rewards/train/env", logged_keys)
@@ -5378,6 +5357,8 @@ class RLProgramTest(absltest.TestCase):
         self.assertIn("rollout/train/version_span_mean", logged_keys)
         self.assertIn("perf/train/global_step_time", logged_keys)
         self.assertIn("orchestrator/train/policy_version", logged_keys)
+        self.assertNotIn("orchestrator/train/num_rollouts", logged_keys)
+        self.assertNotIn("orchestrator/train/num_microbatches", logged_keys)
         self.assertFalse(any(k.startswith("generation/") for k in logged_keys))
 
         # Verify wandb.finish was called on close
@@ -6296,8 +6277,6 @@ class RLProgramTest(absltest.TestCase):
           step_advantages=[],
           step_result=None,
           trainer_metrics=None,
-          num_rollouts=2,
-          num_microbatches=2,
           padding_stats=[],
           packing_time_sec=0.0,
           step_time_sec=1.0,
@@ -6339,8 +6318,6 @@ class RLProgramTest(absltest.TestCase):
         step_advantages=[],
         step_result=None,
         trainer_metrics=None,
-        num_rollouts=0,
-        num_microbatches=0,
         padding_stats=[],
         packing_time_sec=0.0,
         step_time_sec=0.0,
@@ -6387,8 +6364,6 @@ class RLProgramTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, "is missing policy_version"):
       program._collect_and_log_step_metrics(
           all_step_items=[unversioned],
-          num_rollouts=1,
-          num_microbatches=0,
           padding_stats=[],
           packing_time_sec=0.0,
           step_time_sec=0.0,
@@ -6404,8 +6379,6 @@ class RLProgramTest(absltest.TestCase):
     )
     program._collect_and_log_step_metrics(
         all_step_items=[tombstone],
-        num_rollouts=1,
-        num_microbatches=0,
         padding_stats=[],
         packing_time_sec=0.0,
         step_time_sec=0.0,
@@ -6634,8 +6607,6 @@ class RLProgramTest(absltest.TestCase):
         step_advantages=[0.5, 0.0],
         step_result=None,
         trainer_metrics=None,
-        num_rollouts=2,
-        num_microbatches=1,
         padding_stats=[],
         packing_time_sec=0.0,
         step_time_sec=0.0,
@@ -6664,8 +6635,6 @@ class RLProgramTest(absltest.TestCase):
         step_advantages=[0.0, 0.0],
         step_result=None,
         trainer_metrics=None,
-        num_rollouts=2,
-        num_microbatches=1,
         padding_stats=[],
         packing_time_sec=0.0,
         step_time_sec=0.0,
@@ -6693,8 +6662,6 @@ class RLProgramTest(absltest.TestCase):
         step_advantages=[],
         step_result=None,
         trainer_metrics=None,
-        num_rollouts=0,
-        num_microbatches=1,
         padding_stats=[],
         packing_time_sec=0.0,
         step_time_sec=0.0,
@@ -6802,8 +6769,6 @@ class RLProgramTest(absltest.TestCase):
           step_advantages=[0.0, 0.0],
           step_result=None,
           trainer_metrics=None,
-          num_rollouts=2,
-          num_microbatches=1,
           padding_stats=[],
           packing_time_sec=0.0,
           step_time_sec=0.0,
@@ -8261,8 +8226,6 @@ class GenerationMetricsLoggingTest(absltest.TestCase):
     program._collect_and_log_step_metrics(
         all_step_items=[],
         generation_metrics=metrics,
-        num_rollouts=0,
-        num_microbatches=0,
         padding_stats=[],
         packing_time_sec=0.0,
         step_time_sec=0.0,
@@ -8317,8 +8280,6 @@ class EfficiencyMetricsLoggingTest(absltest.TestCase):
     program.metrics_logger = mock.MagicMock()
     program._collect_and_log_step_metrics(
         all_step_items=[],
-        num_rollouts=0,
-        num_microbatches=len(padding_stats),
         padding_stats=padding_stats,
         packing_time_sec=packing_time_sec,
         step_time_sec=0.0,
@@ -8344,6 +8305,7 @@ class EfficiencyMetricsLoggingTest(absltest.TestCase):
     )
     self.assertAlmostEqual(logged["efficiency/padding/row_imbalance_max"], 1.5)
     self.assertEqual(logged["efficiency/padding/valid_tokens"], 12.0)
+    self.assertNotIn("efficiency/padding/capacity_tokens", logged)
 
   def test_logs_step_packing_time(self):
     stats = [
@@ -9597,8 +9559,6 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
         # rather than initial turn version v_0=1, and log version_span_*.
         program._collect_and_log_step_metrics(
             all_step_items=first.items,
-            num_rollouts=2,
-            num_microbatches=1,
             padding_stats=[],
             packing_time_sec=0.0,
             step_time_sec=1.0,
