@@ -901,7 +901,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         training_config=rl_engine_lib.RLTrainingConfig(
             actor_optimizer=optax.sgd(1e-3),
             eval_every_n_steps=100,
-            max_seq_token_per_tpu=16,
+            max_seq_tokens_per_device=16,
         ),
         rollout_config=base_rollout.RolloutConfig(
             max_prompt_length=8, max_tokens_to_generate=8, return_logprobs=True
@@ -981,7 +981,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         training_config=rl_engine_lib.RLTrainingConfig(
             actor_optimizer=optax.sgd(1e-3),
             eval_every_n_steps=100,
-            max_seq_token_per_tpu=16,
+            max_seq_tokens_per_device=16,
         ),
         rollout_config=base_rollout.RolloutConfig(
             max_prompt_length=8, max_tokens_to_generate=8, return_logprobs=True

@@ -321,7 +321,7 @@ class DataPlaneBenchmarkTest(parameterized.TestCase):
         "rl_training_config.mini_batch_size=2",
         "rl_training_config.train_micro_batch_size=4",
         "rl_training_config.max_steps=3",
-        "rl_training_config.max_seq_token_per_tpu=2048",
+        "rl_training_config.max_seq_tokens_per_device=2048",
         "rollout_config.max_prompt_length=256",
         "rollout_config.total_generation_steps=512",
         "data_config.num_records=32",

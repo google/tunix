@@ -129,7 +129,7 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
     batch_config = orchestrator.build_batch_config(hp, pad_id=0, eos_id=1)
     self.assertEqual(batch_config.max_prompt_length, 2048)
     self.assertEqual(batch_config.max_response_length, 2048)
-    self.assertIsNone(batch_config.max_seq_token_per_tpu)
+    self.assertIsNone(batch_config.max_seq_tokens_per_device)
     options = orchestrator.build_metrics_logging_options(hp)
     assert options is not None  # Narrows the type for pytype.
     self.assertEqual(options.project_name, "tunix-frozenlake")

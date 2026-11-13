@@ -2558,7 +2558,7 @@ class CreateBatchAssemblerTest(absltest.TestCase):
         batch_config=batch_assembly.BatchConfig(
             mini_batch_size=2,
             train_micro_batch_size=3,
-            max_seq_token_per_tpu=512,
+            max_seq_tokens_per_device=512,
         ),
     )
     self.assertIsInstance(
@@ -2576,7 +2576,7 @@ class CreateBatchAssemblerTest(absltest.TestCase):
               train_micro_batch_size=1,
               max_prompt_length=512,
               max_response_length=512,
-              max_seq_token_per_tpu=256,  # 256 < 512 + 512
+              max_seq_tokens_per_device=256,  # 256 < 512 + 512
           ),
       )
 
@@ -2621,7 +2621,7 @@ class CreateBatchAssemblerTest(absltest.TestCase):
               train_micro_batch_size=1,
               max_prompt_length=512,
               max_response_length=512,
-              max_seq_token_per_tpu=256,  # 256 < 512 + 512
+              max_seq_tokens_per_device=256,  # 256 < 512 + 512
           ),
       )
 
@@ -2641,13 +2641,13 @@ class CreateBatchAssemblerTest(absltest.TestCase):
     self.assertEqual(assembler.segment_alignment_boundary, 1)
 
   def test_create_sequence_packed_assembler_forwards_segment_alignment(self):
-    for max_seq_token_per_tpu in (1024, None):
+    for max_seq_tokens_per_device in (1024, None):
       assembler = batch_assembly.create_batch_assembler(
           num_generations=2,
           batch_config=batch_assembly.BatchConfig(
               mini_batch_size=1,
               train_micro_batch_size=2,
-              max_seq_token_per_tpu=max_seq_token_per_tpu,
+              max_seq_tokens_per_device=max_seq_tokens_per_device,
               segment_alignment_boundary=64,
           ),
       )
@@ -3566,7 +3566,7 @@ class BuildDummyPayloadTest(parameterized.TestCase):
             mini_batch_size=1,
             train_micro_batch_size=2,
             pad_id=7,
-            max_seq_token_per_tpu=16,
+            max_seq_tokens_per_device=16,
             max_segments_per_packed_row=3,
             segment_alignment_boundary=4,
         ),

@@ -1855,7 +1855,7 @@ class Depth1FastPathTest(parameterized.TestCase):
         eval_every_n_steps=1,
         max_steps=4,
         gradient_accumulation_steps=accum_steps,
-        max_seq_token_per_tpu=max_seq_token,
+        max_seq_tokens_per_device=max_seq_token,
     )
     rngs = nnx.Rngs(0)
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
@@ -2198,7 +2198,7 @@ class OptimizerMemoryTest(parameterized.TestCase):
         eval_every_n_steps=100,
         max_steps=1,
         gradient_accumulation_steps=steps,
-        max_seq_token_per_tpu=max_seq_token,
+        max_seq_tokens_per_device=max_seq_token,
     )
     trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
     leaves = jax.tree_util.tree_leaves(trainer.grad_accumulator.grads)

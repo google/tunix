@@ -112,7 +112,9 @@ def setup(kwargs: Optional[Dict[str, Any]] = None):
           train_micro_batch_size=1
           if kwargs.get('gradient_accumulation_steps', None)
           else None,
-          max_seq_token_per_tpu=kwargs.get('max_seq_token_per_tpu', None),
+          max_seq_tokens_per_device=kwargs.get(
+              'max_seq_tokens_per_device', None
+          ),
           rollout_micro_batch_size=kwargs.get('rollout_micro_batch_size', None),
       ),
       rollout_config=base_rollout.RolloutConfig(
@@ -805,7 +807,7 @@ class GRPOLearnerTest(parameterized.TestCase):
     # Train with sequence packing
     kwargs_packed = {
         'eval_every_n_steps': 2,
-        'max_seq_token_per_tpu': max_token_len,
+        'max_seq_tokens_per_device': max_token_len,
     }
     rl_engine_packed, model_packed, _ = setup(kwargs_packed)
     grpo_config_packed = grpo_lib.GRPOConfig(

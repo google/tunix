@@ -105,7 +105,7 @@ class RLLearnerTest(parameterized.TestCase):
         train_micro_batch_size=3,
         rollout_micro_batch_size=None,
         compute_logps_micro_batch_size=None,
-        max_seq_token_per_tpu=128,
+        max_seq_tokens_per_device=128,
         eval_every_n_steps=1,
         max_steps=1,
     )

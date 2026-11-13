@@ -59,7 +59,7 @@ rl_training_config:
   eval_every_n_steps: 100000
   mini_batch_size: 8
   train_micro_batch_size: 16
-  max_seq_token_per_tpu: 65536
+  max_seq_tokens_per_device: 65536
   max_segments_per_packed_row: 16
   checkpointing_options:
     save_interval_steps: 0

@@ -301,7 +301,7 @@ class RLProgramTest(absltest.TestCase):
     self.batch_config = batch_assembly.BatchConfig(
         mini_batch_size=1,
         train_micro_batch_size=1,
-        max_seq_token_per_tpu=16,
+        max_seq_tokens_per_device=16,
         max_response_length=1024,
     )
 
@@ -3582,7 +3582,7 @@ class RLProgramTest(absltest.TestCase):
           await self._run_toy_reference_kl_program(
               batch_config=batch_assembly.BatchConfig(
                   pad_id=0,
-                  max_seq_token_per_tpu=12,
+                  max_seq_tokens_per_device=12,
                   max_prompt_length=4,
                   max_response_length=4,
                   mini_batch_size=1,
@@ -5766,7 +5766,7 @@ class RLProgramTest(absltest.TestCase):
         reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
         assembler=None,
         batch_config=batch_assembly.BatchConfig(
-            max_seq_token_per_tpu=1024,
+            max_seq_tokens_per_device=1024,
             max_segments_per_packed_row=4,
             num_data_shards=4,
         ),
@@ -7531,7 +7531,7 @@ class GenerationMetricsLoggingTest(absltest.TestCase):
     )
     batch_config = batch_assembly.BatchConfig(
         mini_batch_size=1,
-        max_seq_token_per_tpu=16,
+        max_seq_tokens_per_device=16,
         max_response_length=1024,
     )
     program = rl_program.StandardRLProgram(
@@ -7588,7 +7588,7 @@ class EfficiencyMetricsLoggingTest(absltest.TestCase):
     )
     batch_config = batch_assembly.BatchConfig(
         mini_batch_size=1,
-        max_seq_token_per_tpu=16,
+        max_seq_tokens_per_device=16,
         max_response_length=1024,
     )
     program = rl_program.StandardRLProgram(
@@ -7656,7 +7656,7 @@ class StandardRLProgramTrajectoryStoreTest(absltest.TestCase):
     )
     self.batch_config = batch_assembly.BatchConfig(
         mini_batch_size=1,
-        max_seq_token_per_tpu=16,
+        max_seq_tokens_per_device=16,
         max_response_length=1024,
     )
     self.assembler = batch_assembly.SequencePackedBatchAssembler(
@@ -7710,7 +7710,7 @@ class StandardRLProgramAsyncDatasetTest(absltest.TestCase):
     self.batch_config = batch_assembly.BatchConfig(
         mini_batch_size=2,
         train_micro_batch_size=2,
-        max_seq_token_per_tpu=16,
+        max_seq_tokens_per_device=16,
         max_response_length=16,
     )
 
@@ -7773,7 +7773,7 @@ class StandardRLProgramRoutedExpertsCleanupTest(absltest.TestCase):
       )
       batch_config = batch_assembly.BatchConfig(
           mini_batch_size=1,
-          max_seq_token_per_tpu=8,
+          max_seq_tokens_per_device=8,
           max_response_length=8,
       )
 
@@ -7931,7 +7931,7 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
     self.batch_config = batch_assembly.BatchConfig(
         mini_batch_size=2,
         train_micro_batch_size=2,
-        max_seq_token_per_tpu=16,
+        max_seq_tokens_per_device=16,
         max_response_length=16,
     )
     self.mock_create_trainer_payloads = self.enterContext(

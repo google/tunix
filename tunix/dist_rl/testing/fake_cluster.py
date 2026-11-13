@@ -367,7 +367,7 @@ class FakeClusterHarness:
     batch_cfg = batch_assembly.BatchConfig(
         mini_batch_size=mini_batch_size,
         train_micro_batch_size=1,
-        max_seq_token_per_tpu=64,
+        max_seq_tokens_per_device=64,
         max_response_length=32,
     )
     effective_batch_size = (
