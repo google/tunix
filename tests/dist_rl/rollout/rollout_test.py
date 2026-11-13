@@ -315,29 +315,30 @@ class RolloutWorkerTest(parameterized.TestCase):
 
         metas = mem_store.get_trajectories_metadata()
         self.assertLen(metas, 1)
-        self.assertEqual(metas[0].trajectory_id, "traj_prompt_store_test_g0")
-        self.assertEqual(metas[0].prompt_id, "prompt_store_test")
-        self.assertEqual(metas[0].status, "SUCCEEDED")
-        self.assertEqual(metas[0].target_policy_versions, [7])
-        self.assertEqual(metas[0].extra.get("pair_idx"), 42)
+        meta = metas["traj_prompt_store_test_g0"]
+        self.assertEqual(meta.trajectory_id, "traj_prompt_store_test_g0")
+        self.assertEqual(meta.prompt_id, "prompt_store_test")
+        self.assertEqual(meta.status, "SUCCEEDED")
+        self.assertEqual(meta.target_policy_versions, [7])
+        self.assertEqual(meta.extra.get("pair_idx"), 42)
         self.assertEqual(
-            metas[0].hyperparams,
+            meta.hyperparams,
             {
                 "delay_seconds": 0.01,
                 "force_finish": True,
                 "max_generation_steps": 64,
             },
         )
-        self.assertIsInstance(metas[0].env_time, dict)
-        self.assertIn("reset_latency", metas[0].env_time)
-        self.assertIn("step_latency", metas[0].env_time)
-        self.assertIn("close_latency", metas[0].env_time)
-        self.assertIsInstance(metas[0].reward_time, dict)
-        self.assertIn("reward_latency", metas[0].reward_time)
+        self.assertIsInstance(meta.env_time, dict)
+        self.assertIn("reset_latency", meta.env_time)
+        self.assertIn("step_latency", meta.env_time)
+        self.assertIn("close_latency", meta.env_time)
+        self.assertIsInstance(meta.reward_time, dict)
+        self.assertIn("reward_latency", meta.reward_time)
 
         trajs = mem_store.get_trajectories(["traj_prompt_store_test_g0"])
         self.assertLen(trajs, 1)
-        self.assertNotEmpty(trajs[0].steps)
+        self.assertNotEmpty(trajs["traj_prompt_store_test_g0"].steps)
         svc.stop()
         mock_flush.assert_not_called()
         mock_close.assert_called_once()
@@ -384,9 +385,10 @@ class RolloutWorkerTest(parameterized.TestCase):
 
       metas = mem_store.get_trajectories_metadata()
       self.assertLen(metas, 1)
-      self.assertEqual(metas[0].trajectory_id, "traj_prompt_grp_test_g2")
-      self.assertEqual(metas[0].group_index, 2)
-      self.assertEqual(metas[0].extra.get("custom_ref"), custom_obj)
+      meta = metas["traj_prompt_grp_test_g2"]
+      self.assertEqual(meta.trajectory_id, "traj_prompt_grp_test_g2")
+      self.assertEqual(meta.group_index, 2)
+      self.assertEqual(meta.extra.get("custom_ref"), custom_obj)
 
       svc.stop()
 
@@ -433,9 +435,11 @@ class RolloutWorkerTest(parameterized.TestCase):
           file_store_cfg
       )
       assert reader_store is not None
-      (cancel_meta,) = reader_store.get_trajectories_metadata(  # pyrefly: ignore[missing-attribute]
+      cancel_meta = reader_store.get_trajectories_metadata(  # pyrefly: ignore[missing-attribute]
           ["traj_prompt_cancel_g0"]
-      )
+      )[
+          "traj_prompt_cancel_g0"
+      ]
       self.assertEqual(cancel_meta.status, "CANCELLED")
       self.assertIsInstance(cancel_meta.env_time, dict)
       self.assertIn("reset_latency", cancel_meta.env_time)
@@ -473,13 +477,14 @@ class RolloutWorkerTest(parameterized.TestCase):
           ["traj_prompt_max_steps_g0"]
       )
       self.assertLen(max_steps_metas, 1)
-      self.assertEqual(max_steps_metas[0].status, "MAX_STEPS_REACHED")
-      self.assertIsInstance(max_steps_metas[0].env_time, dict)
-      self.assertIn("reset_latency", max_steps_metas[0].env_time)
-      self.assertIn("step_latency", max_steps_metas[0].env_time)
-      self.assertIn("close_latency", max_steps_metas[0].env_time)
-      self.assertIsInstance(max_steps_metas[0].reward_time, dict)
-      self.assertIn("reward_latency", max_steps_metas[0].reward_time)
+      max_steps_meta = max_steps_metas["traj_prompt_max_steps_g0"]
+      self.assertEqual(max_steps_meta.status, "MAX_STEPS_REACHED")
+      self.assertIsInstance(max_steps_meta.env_time, dict)
+      self.assertIn("reset_latency", max_steps_meta.env_time)
+      self.assertIn("step_latency", max_steps_meta.env_time)
+      self.assertIn("close_latency", max_steps_meta.env_time)
+      self.assertIsInstance(max_steps_meta.reward_time, dict)
+      self.assertIn("reward_latency", max_steps_meta.reward_time)
       max_steps_svc.stop()
 
     asyncio.run(_run_test())

@@ -229,7 +229,7 @@ class BenchmarkLibTest(parameterized.TestCase):
         method_name,
         autospec=True,
         spec_set=True,
-        return_value=[],
+        return_value={},
     ):
       report = benchmark_lib.run_recovery_benchmark(
           reader=store_instance,

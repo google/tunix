@@ -1016,26 +1016,36 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
       self._engine_handle.release()
 
   def get_trajectories_metadata(
-      self, trajectory_ids: Sequence[str] | None = None
-  ) -> list[MetadataT]:
+      self,
+      trajectory_ids: Sequence[str] | None = None,
+      *,
+      ignore_missing: bool = False,
+  ) -> dict[str, MetadataT]:
     """Retrieves metadata for trajectories in the run.
 
     Args:
       trajectory_ids: Optional sequence of unique trajectory identifiers. If
         specified, only metadata for these IDs is returned. If None, metadata
         for all trajectories in the run is returned.
+      ignore_missing: If True, trajectory IDs with no stored metadata are
+        omitted from the returned dictionary instead of raising
+        TrajectoryMetadataNotFoundError.
 
     Returns:
-      A list of TrajectoryMetadata objects for the requested trajectories.
+      A dictionary mapping trajectory IDs to TrajectoryMetadata objects for the
+      present trajectories, in the order of `trajectory_ids` if specified.
 
     Raises:
-      store.TrajectoryMetadataNotFoundError: If any requested trajectory ID does
-        not exist.
+      store.TrajectoryMetadataNotFoundError: If `ignore_missing` is False and
+        any requested trajectory ID does not exist.
     """
     # Query all trajectory metadata in the run when no ID filter is provided.
     if trajectory_ids is None:
       statement = (
-          sa.select(schema.TRAJECTORIES_TABLE.c.trajectory_metadata)
+          sa.select(
+              schema.TRAJECTORIES_TABLE.c.trajectory_id,
+              schema.TRAJECTORIES_TABLE.c.trajectory_metadata,
+          )
           .where(schema.TRAJECTORIES_TABLE.c.run_id == self._run_id)
           .order_by(
               schema.TRAJECTORIES_TABLE.c.created_at,
@@ -1044,11 +1054,14 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
       )
       with self._engine.connect() as conn:
         metadata_rows = conn.execute(statement)
-        return [self._load_metadata(row) for row in metadata_rows.scalars()]
+        return {
+            row.trajectory_id: self._load_metadata(row.trajectory_metadata)
+            for row in metadata_rows
+        }
 
     # Query only the requested trajectory IDs when a sequence is provided.
     if not trajectory_ids:
-      return []
+      return {}
 
     statement = sa.select(
         schema.TRAJECTORIES_TABLE.c.trajectory_id,
@@ -1063,30 +1076,46 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
           row.trajectory_id: self._load_metadata(row.trajectory_metadata)
           for row in metadata_rows
       }
-    metadata_list = []
+    ordered_metadata: dict[str, MetadataT] = {}
     for trajectory_id in trajectory_ids:
       if trajectory_id not in metadata_by_trajectory_id:
+        if ignore_missing:
+          continue
         raise store.TrajectoryMetadataNotFoundError(trajectory_id)
-      metadata_list.append(metadata_by_trajectory_id[trajectory_id])
-    return metadata_list
+      ordered_metadata[trajectory_id] = metadata_by_trajectory_id[trajectory_id]
+    return ordered_metadata
 
   def get_trajectories(
-      self, trajectory_ids: Sequence[str]
-  ) -> list[trajectory_lib.Trajectory[Any]]:
+      self,
+      trajectory_ids: Sequence[str],
+      *,
+      ignore_missing: bool = False,
+      strict: bool = True,
+  ) -> dict[str, trajectory_lib.Trajectory[Any]]:
     """Retrieves full trajectories for a sequence of trajectory IDs.
 
     Args:
       trajectory_ids: Sequence of unique trajectory identifiers to load.
+      ignore_missing: If True, trajectory IDs with no stored records are omitted
+        from the returned dictionary instead of raising TrajectoryNotFoundError.
+      strict: If False, retains the longest contiguous valid prefix [1..k] for
+        any trajectory with a corrupt step, step-ID gap, or step-count mismatch
+        instead of raising ValidationError, and resets completion fields
+        (`status = None`, `total_reward = None`) on the returned Trajectory
+        while preserving lineage metadata.
 
     Returns:
-      A list of full Trajectory objects corresponding to the requested IDs.
+      A dictionary mapping trajectory IDs to full Trajectory objects for the
+      present trajectories, in the order of `trajectory_ids`.
 
     Raises:
-      store.TrajectoryNotFoundError: If any requested trajectory ID does not
-        exist.
+      store.TrajectoryNotFoundError: If `ignore_missing` is False and any
+        requested trajectory ID does not exist.
+      pydantic.ValidationError: If `strict` is True and steps contain gaps or
+        fail model validation.
     """
     if not trajectory_ids:
-      return []
+      return {}
 
     metadata_statement = sa.select(
         schema.TRAJECTORIES_TABLE.c.trajectory_id,
@@ -1122,16 +1151,24 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
       for trajectory_id, payload in step_rows:
         steps_by_trajectory_id[trajectory_id].append(payload)
 
-    trajectories: list[trajectory_lib.Trajectory[Any]] = []
+    trajectories: dict[str, trajectory_lib.Trajectory[Any]] = {}
     for trajectory_id in trajectory_ids:
       if trajectory_id not in metadata_by_trajectory_id:
+        if ignore_missing:
+          continue
         raise store.TrajectoryNotFoundError(trajectory_id)
       meta = self._load_metadata(metadata_by_trajectory_id[trajectory_id])
-      steps = [
-          trajectory_lib.Step.model_validate(step_payload)
-          for step_payload in steps_by_trajectory_id.get(trajectory_id, [])
-      ]
-      trajectories.append(meta.create_trajectory(steps=steps))
+      steps, is_incomplete = store.parse_raw_steps(
+          steps_by_trajectory_id.get(trajectory_id, ()),
+          trajectory_lib.Step.model_validate,
+          strict=strict,
+          trajectory_id=trajectory_id,
+      )
+      trajectories[trajectory_id] = meta.create_trajectory(
+          steps=steps,
+          strict=strict,
+          is_incomplete=is_incomplete,
+      )
 
     return trajectories
 

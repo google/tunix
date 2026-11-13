@@ -69,13 +69,13 @@ class SummaryCommand(base.BaseCommand):
     # `get_trajectories_metadata` already does, and call it directly here.
     all_ids = [
         m.trajectory_id
-        for m in reader.get_trajectories_metadata()
+        for m in reader.get_trajectories_metadata().values()
         if m.trajectory_id is not None
     ]
     total_count = len(all_ids)
     ids = all_ids[: self.limit] if self.limit is not None else all_ids
     run_stats = stats.RunStats.from_trajectories(
-        reader.get_trajectories(ids),
+        reader.get_trajectories(ids).values(),
         num_total_trajectories=total_count,
         diagnostics=diagnostics,
     )
