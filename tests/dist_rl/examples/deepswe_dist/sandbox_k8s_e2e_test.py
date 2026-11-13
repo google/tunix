@@ -65,17 +65,42 @@ except ImportError:
     import sandbox_utils
 
 
+class _FakePlan:
+  """Minimal FleetPlan implementation tracking planned task images."""
+
+  def __init__(self, images: set[str]):
+    self._images = set(images)
+
+  def for_image(self, image: str) -> str | None:
+    return image if image in self._images else None
+
+
 class FakeFleet:
   """Mock SandboxFleet tracking calls for local verification without a live GKE cluster."""
 
   def __init__(self):
     self._lock = threading.Lock()
+    self.tasks: list[Any] = []
+    self.plan_: _FakePlan | None = None
+    self._image_rewrite_fn = None
     self.warm_calls: list[tuple[str, int | None, bool]] = []
     self.set_replicas_calls: list[tuple[str, int]] = []
     self.unwarm_calls: list[str] = []
     self.active_pools: dict[str, int] = {}
     self.acquired_tasks: list[Any] = []
     self.released_handles: list[Any] = []
+
+  def load_tasks(self, tasks: list[Any], **kwargs: Any) -> None:
+    del kwargs
+    with self._lock:
+      self.tasks = list(tasks)
+
+  def plan(self) -> _FakePlan:
+    with self._lock:
+      self.plan_ = _FakePlan(
+          {getattr(t, "image", "default") for t in self.tasks}
+      )
+      return self.plan_
 
   def warm_image(
       self, image: str, replicas_override: int | None = None, wait: bool = False
