@@ -406,6 +406,13 @@ class SandboxUtilsTest(absltest.TestCase):
         },
     )
 
+  def test_teardown_global_fleet_verifies_teardown_and_resets_singleton(self):
+    mock_fleet = mock.MagicMock()
+    with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", mock_fleet):
+      sandbox_utils.teardown_global_fleet()
+      mock_fleet.teardown.assert_called_once_with(verify=True)
+      self.assertIsNone(sandbox_utils._GLOBAL_FLEET)
+
 
 if __name__ == "__main__":
   absltest.main()

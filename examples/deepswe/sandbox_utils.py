@@ -412,7 +412,9 @@ def teardown_global_fleet() -> None:
         "[SandboxFleet] Automatically tearing down warm pools on exit..."
     )
     try:
-      _GLOBAL_FLEET.teardown()
+      # verify=True runs the run-scoped reaper after teardown to force-delete
+      # any lingering pods belonging to this fleet's run_id.
+      _GLOBAL_FLEET.teardown(verify=True)
     except Exception as e:  # pylint: disable=broad-exception-caught
       logging.warning("[SandboxFleet] Teardown note: %s", e)
     _GLOBAL_FLEET = None
