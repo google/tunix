@@ -96,6 +96,30 @@ def place_arrays_on_targets(
     return list(jax.device_put(list(arrays), list(targets)))
 
 
+def spec_on_mesh(
+    spec: shd.PartitionSpec | Sequence[str | tuple[str, ...] | None] | None,
+    mesh: shd.Mesh,
+) -> shd.PartitionSpec:
+  """Returns `spec` with the axes that `mesh` does not have replicated.
+
+  For example, `('fsdp', 'tp')` is `P(None, 'tp')` on a `('dp', 'tp')` mesh,
+  and `(('dp', 'fsdp'), None)` is `P('dp', None)`.
+
+  Args:
+    spec: The partition spec, or None for a replicated array.
+    mesh: The mesh to shard on.
+  """
+
+  def _axis_on_mesh(axis):
+    axes = tuple(
+        a
+        for a in (axis if isinstance(axis, tuple) else (axis,))
+        if a in mesh.axis_names
+    )
+    return axes if len(axes) > 1 else (axes[0] if axes else None)
+
+  return shd.PartitionSpec(*(_axis_on_mesh(a) for a in spec or ()))
+
 # TODO(abheesht17): Use this function for all models and unify with the fn in
 # sft/sharding_utils.py.
 def shard(
@@ -117,7 +141,7 @@ def shard(
   mesh = pxla.thread_resources.env.physical_mesh
   if mesh.empty or jax.devices()[0].platform == 'cpu':
     return jnp.asarray(x)
-  sharding = shd.NamedSharding(mesh, shd.PartitionSpec(*s))
+  sharding = shd.NamedSharding(mesh, spec_on_mesh(s, mesh))
   if eager:
     return place_array_on_target(x, sharding)
   return jax.lax.with_sharding_constraint(x, sharding)
