@@ -259,6 +259,10 @@ def build_maxtext_config(
     attention: str = "",
     device_host_concurrent_gb: int | None = None,
     extra_flags: Sequence[str] = (),
+    skip_step_on_spikes: bool = False,
+    skip_step_on_nan: bool = False,
+    skip_step_interval: int = 128,
+    skip_step_scaling_factor: float = 6.0,
 ) -> Any:
   """Builds the MaxText HyperParameters the training engine runs on.
 
@@ -618,6 +622,20 @@ def build_maxtext_config(
               f"rollout_tensor_parallelism={rollout_mesh_tp or kv_tp_size or moe_mlp_tp_size}"
           ]
           if (rollout_mesh_tp or kv_tp_size or moe_mlp_tp_size) > 0
+          else []
+      ),
+      *(["skip_step_on_spikes=True"] if skip_step_on_spikes else []),
+      *(
+          ["skip_step_on_nan=True"]
+          if skip_step_on_nan
+          else ["skip_step_on_nan=False"]
+      ),
+      *(
+          [
+              f"skip_step_interval={skip_step_interval}",
+              f"skip_step_scaling_factor={skip_step_scaling_factor}",
+          ]
+          if skip_step_on_spikes
           else []
       ),
   ])
