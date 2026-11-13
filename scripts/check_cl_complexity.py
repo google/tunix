@@ -12,70 +12,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-r"""4D CL Complexity Gate, AST Hygiene Checks, and Dependency Shard Planner.
+r"""CL Complexity Check for Tunix.
 
-Evaluates Python changes across four orthogonal understandability dimensions,
-optional G1/G2 AST hygiene checks, and parallel AST dependency shard planning:
-  - Dim 1 (Scope): Formatting-invariant AST statement delta (`net_stmts`).
-  - Dim 2 (Local Control Flow): Cognitive, cyclomatic, and nesting ratchets.
-  - Dim 3 (Anti-Layering): Single-caller hops, trivial helpers, pass-through
-    wrappers, nested closures, and generator verb-to-execution naming.
-  - Dim 4 (Clone Hygiene): Position-independent 2-gram AST Jaccard clones.
-  - G1/G2 AST Hygiene (`--strict` / `--hygiene`):
-      * `[G1:mock-branch]`: Blocks `unittest.mock` / `MagicMock` in prod `.py`.
-      * `[G1:silent-except]`: Blocks broad `except: pass/continue` sans `noqa`.
-      * `[G1:trivial-contract]`: Blocks 1-field `@dataclass`/`TypedDict` knob
-        wrappers and 1-method `Protocol`s in prod `.py`.
-      * `[G2:test-skip]`: Blocks unconditional `@skip`/`@xfail`/`skipTest` in
-        test files unless `ALLOW_TEST_SKIP_WITH_BUG=<issue-id>` is set.
-      * `[G2:vacuous-test]`: Blocks empty `def test_*` stubs (`pass`/`...`).
-      * `--check-test-coverage`: Requires co-located `<stem>_test.py`
-        (`G2_MISSING_UNIT_TEST`), 100% function coverage
-        (`G2_UNCOVERED_FUNCTIONS`), and `>= 90%` statement line coverage
-        (`G2_LOW_STMT_COVERAGE`).
-  - Parallel Shard Planner (`--shard-plan`): Parses candidate `.py` files with
-    `ThreadPoolExecutor(16)`, extracts cross-file import edges and top-level
-    public 1-line signatures, weights files by `stmts + 2 * total_cognitive`,
-    groups Union-Find connected components, cuts oversized components on Hub
-    modules, packs `<= --max-shards` bins via Longest Processing Time (LPT),
-    and emits 1-line `frozen_contracts` for cross-shard edges.
+Evaluates Python changes across four orthogonal complexity checks:
+  - scope (Change Scope): Formatting-invariant AST statement delta
+    (`net_stmts`).
+  - control_flow (Control Flow): Cognitive, cyclomatic, and nesting ratchets.
+  - indirection (Call Indirection): Single-caller hops, trivial helpers,
+    pass-through wrappers, nested closures, and generator verb naming.
+  - duplication (Code Duplication): Position-independent 2-gram AST clones.
 
 Usage Examples:
-  # 1. Standard strict 4D gate + ratcheted G1/G2 hygiene on active VCS changes:
-  python3 scripts/check_cl_complexity.py --strict
-
-  # 2. Check changes against a base revision or explicit file list:
+  python3 scripts/check_cl_complexity.py
   python3 scripts/check_cl_complexity.py --rev main --strict
-  python3 scripts/check_cl_complexity.py --files a.py a_test.py --hygiene
-
-  # 3. Build a balanced AST dependency shard plan (stdout + optional JSON file):
-  python3 scripts/check_cl_complexity.py --shard-plan --max-shards 4 \
-      --files pkg/hub.py pkg/worker_a.py pkg/worker_b.py --out /tmp/plan.json
-
-`--shard-plan` Output JSON Schema:
-  {
-    "max_shards": int,
-    "total_files": int,
-    "total_weight": int,
-    "connected_components": list[list[str]],
-    "hub_modules_cut": list[str],
-    "shards": [{
-      "shard_id": int,
-      "files": list[str],
-      "stmts": int,
-      "cognitive": int,
-      "weight": int,
-      "frozen_contracts": list[str]
-    }],
-    "cross_shard_edges": [{
-      "caller": str,
-      "callee": str,
-      "caller_shard": int,
-      "callee_shard": int,
-      "symbols": list[str]
-    }],
-    "frozen_contracts": list[str]
-  }
+  python3 scripts/check_cl_complexity.py --files a.py b.py --checks indirection
 """
 
 from __future__ import annotations
@@ -104,34 +54,26 @@ if str(pathlib.Path(__file__).resolve().parent) not in sys.path:
 
 try:
   from scripts.ast_gate_lib import (  # pylint: disable=g-import-not-at-top,g-importing-member,g-multiple-import
-      count_duck_typing_calls,
-      evaluate_hygiene,
-      evaluate_test_coverage,
-      format_public_signature,
+      BLOCK_NODES as _BLOCK_NODES,
+      FUNC_TYPES as _FUNC_TYPES,
+      has_docstring,
       iter_scope_defs,
-      read_candidate_source,
-      sum_duck_typing_delta,
       try_parse_ast,
   )
 except ImportError:
   from ast_gate_lib import (  # pylint: disable=g-import-not-at-top,g-importing-member,g-multiple-import  # pyrefly: ignore[missing-import]
-      count_duck_typing_calls,
-      evaluate_hygiene,
-      evaluate_test_coverage,
-      format_public_signature,
+      BLOCK_NODES as _BLOCK_NODES,
+      FUNC_TYPES as _FUNC_TYPES,
+      has_docstring,
       iter_scope_defs,
-      read_candidate_source,
-      sum_duck_typing_delta,
       try_parse_ast,
   )
 
 _DEFAULT_CONFIG = pathlib.Path("pyproject.toml")
 _PKG_CONFIG = pathlib.Path(__file__).absolute().parent.parent / _DEFAULT_CONFIG
 _FALLBACK_CFG = pathlib.Path(__file__).with_name("cl_complexity_config.toml")
-_FUNC_TYPES = (ast.FunctionDef, ast.AsyncFunctionDef)
 _CALLABLE_TYPES = (*_FUNC_TYPES, ast.Lambda)
 _SKIP_RE = re.compile(r"SKIP_CL_COMPLEXITY\s*[=:]\s*([^\s\"'\\][^\n\"'\\]*)")
-_BLOCK_NODES = (ast.stmt, ast.ExceptHandler, ast.match_case)
 _SHINGLE_OPS = (ast.operator, ast.unaryop, ast.boolop, ast.cmpop)
 _FnNode = ast.FunctionDef | ast.AsyncFunctionDef
 _LoopNode = ast.For | ast.AsyncFor | ast.While
@@ -197,13 +139,14 @@ _EAGER_STREAM_VERBS = (
     "gather_",
     "load_all_",
 )
+DEFAULT_CHECKS = ("scope", "control_flow", "indirection", "duplication")
 
 
 @dataclasses.dataclass
 class GateConfig:
-  """Configuration thresholds, weights, and fork rules for the gate."""
+  """Configuration thresholds, weights, and fork rules for the check."""
 
-  enabled_dimensions: tuple[int, ...]
+  enabled_checks: tuple[str, ...]
   intentional_forks: tuple[tuple[str, str], ...]
   weight_prod_loc: float
   weight_cognitive_excess: float
@@ -236,7 +179,7 @@ class GateConfig:
 
 @dataclasses.dataclass
 class FunctionMetrics:
-  """Per-function complexity, layering, and clone-matching metrics."""
+  """Per-function complexity, indirection, and clone-matching metrics."""
 
   file_path: str
   qualname: str
@@ -265,11 +208,11 @@ class FunctionMetrics:
 
 @dataclasses.dataclass
 class GateReport:
-  """Aggregated CL Complexity Gate evaluation report."""
+  """Aggregated CL Complexity Check evaluation report."""
 
   passed: bool
   score: float
-  enabled_dimensions: list[int]
+  enabled_checks: list[str]
   prod_loc_added: int
   net_loc_delta: int
   net_cog_delta: int
@@ -287,7 +230,6 @@ class GateReport:
   violations: list[str]
   skip_reason: str
   warnings: list[str] = dataclasses.field(default_factory=list)
-  duck_typing_calls: int = 0
 
 
 def load_config(
@@ -298,9 +240,9 @@ def load_config(
   base = (cwd or pathlib.Path.cwd()).resolve()
   ancs = (p / _DEFAULT_CONFIG for p in (base, *base.parents))
   pool = (
-      (base / config_path, config_path, *ancs, _PKG_CONFIG, _FALLBACK_CFG)
+      (*ancs, _PKG_CONFIG, _FALLBACK_CFG)
       if config_path == _DEFAULT_CONFIG
-      else (config_path,)
+      else (base / config_path, config_path)
   )
   cands = [p for p in pool if p.is_file()]
   valid = [
@@ -321,12 +263,12 @@ def load_config(
   raw_forks = cfg.get("intentional_forks", ())
   assert isinstance(raw_forks, Sequence)
   forks = tuple((str(a), str(b)) for a, b in raw_forks)
-  raw_dims = cfg.get("enabled_dimensions", (1, 2, 3, 4))
-  assert isinstance(raw_dims, Sequence)
-  dims = tuple(int(d) for d in raw_dims)
+  raw_checks = cfg.get("enabled_checks", DEFAULT_CHECKS)
+  assert isinstance(raw_checks, (list, tuple))
+  checks = tuple(str(c) for c in raw_checks)
   merged = dict(thresh_tbl) | weights
   merged["intentional_forks"] = forks
-  merged["enabled_dimensions"] = dims
+  merged["enabled_checks"] = checks
   valid_fields = {f.name for f in dataclasses.fields(GateConfig)}
   return GateConfig(**{k: v for k, v in merged.items() if k in valid_fields})
 
@@ -342,7 +284,7 @@ def count_code_loc(source: str) -> set[int]:
       n.body[0].lineno
       for n in ast.walk(tree)
       if isinstance(n, (ast.Module, ast.ClassDef, *_FUNC_TYPES))
-      and ast.get_docstring(n, clean=False) is not None
+      and has_docstring(n)
   }
   toks = [
       range(t.start[0], t.end[0] + 1)
@@ -363,10 +305,10 @@ def count_ast_stmts(source: str) -> int:
       id(n.body[0])
       for n in ast.walk(tree)
       if isinstance(n, (ast.Module, ast.ClassDef, *_FUNC_TYPES))
-      and ast.get_docstring(n, clean=False) is not None
+      and has_docstring(n)
   }
   return sum(
-      isinstance(n, ast.stmt) and id(n) not in docs for n in ast.walk(tree)
+      1 for n in ast.walk(tree) if isinstance(n, ast.stmt) and id(n) not in docs
   )
 
 
@@ -446,8 +388,10 @@ def multiset_jaccard(
     a: collections.Counter[str], b: collections.Counter[str]
 ) -> float:
   """Computes exact multiset Jaccard similarity `sum(min) / sum(max)`."""
-  union = a | b
-  return (a & b).total() / union.total() if union else 0.0
+  ta, tb = a.total(), b.total()
+  if not ta or not tb or min(ta, tb) / max(ta, tb) < 0.35:
+    return 0.0
+  return (a & b).total() / (a | b).total()
 
 
 def canonical_ast_digest(stmts: list[ast.stmt]) -> str:
@@ -485,7 +429,7 @@ def extract_callee_name(
 def is_pass_through(node: ast.AST, stmts: list[ast.stmt]) -> bool:
   """Detects 1-line `return f(x)` and 2-line `r = f(x); return r` shims."""
   if not isinstance(node, _CALLABLE_TYPES) or not stmts:
-    return not isinstance(node, _CALLABLE_TYPES)
+    return False
   first = stmts[0]
   if not isinstance(first, (ast.Return, ast.Expr, ast.Assign)):
     return False
@@ -544,9 +488,10 @@ class _ComplexityVisitor(ast.NodeVisitor):
     )
     self.arg_lambdas = {id(a) for a in call_args if isinstance(a, ast.Lambda)}
     self.visit_block(body, 0)
+    is_partial_alias = not isinstance(fn, _CALLABLE_TYPES)
     self.pass_through = (
         not self.semantic_decorated
-        and is_pass_through(fn, body)
+        and (is_partial_alias or is_pass_through(fn, body))
         and self.cognitive == 0
     )
 
@@ -670,7 +615,7 @@ class _ComplexityVisitor(ast.NodeVisitor):
       self.cognitive += len(gen.ifs)
     self.visit_block(list(ast.iter_child_nodes(node)), 1)
 
-  visit_SetComp = visit_GeneratorExp = visit_DictComp = _comp = visit_ListComp
+  visit_SetComp = visit_GeneratorExp = visit_DictComp = visit_ListComp
 
   def visit_Call(self, node: ast.Call) -> None:
     for expr in (node.func, *node.args, *(kw.value for kw in node.keywords)):
@@ -736,7 +681,7 @@ def analyze_functions(
     v = _ComplexityVisitor(node, qual, body, local_defs)
     raw = qual.split(".")[-1].split(":", 1)[0].split("@", 1)[0]
     body_mod = ast.Module(body=body, type_ignores=[])
-    stmts = sum(isinstance(sub, ast.stmt) for sub in ast.walk(body_mod))
+    stmts = sum(1 for sub in ast.walk(body_mod) if isinstance(sub, ast.stmt))
     out.append(
         FunctionMetrics(
             file_path=file_path,
@@ -905,6 +850,8 @@ def detect_clones(
     cfg: GateConfig,
 ) -> list[str]:
   """Detects newly introduced intra-file and cross-file structural clones."""
+  if "duplication" not in cfg.enabled_checks:
+    return []
   all_new_and_ref = [*new_by_file.values(), *ref_by_file.values()]
   pool = [
       f
@@ -960,6 +907,22 @@ def run_cmd_stdout(cmd: list[str], cwd: pathlib.Path) -> str:
   return res.stdout if res.returncode == 0 else ""
 
 
+def _vcs_diff_specs(
+    cwd: pathlib.Path, rev: str | None
+) -> list[tuple[str, str, str]]:
+  """Builds ordered `(list_cmd, base_fmt, new_cmd)` VCS diff specs."""
+  specs: list[tuple[str, str, str]] = []
+  gdiff = "git diff --name-only --diff-filter=AMDR"
+  if rev:
+    specs.append((f"{gdiff} {rev}", f"git show {rev}:{{}}", ""))
+  else:
+    specs.extend([
+        (f"{gdiff} HEAD", "git show HEAD:{}", ""),
+        (f"{gdiff} HEAD~1", "git show HEAD~1:{}", ""),
+    ])
+  return specs
+
+
 def resolve_changed_files(
     cwd: pathlib.Path,
     rev: str | None,
@@ -968,52 +931,45 @@ def resolve_changed_files(
 ) -> tuple[list[str], collections.defaultdict[str, str]]:
   """Resolves changed `.py` files and their baseline source contents."""
   bases: collections.defaultdict[str, str] = collections.defaultdict(str)
-  nsrc = new_sources if new_sources is not None else {}
+  nsrc = {} if new_sources is None else new_sources
   if explicit_files:
     bpath = cwd / (rev or "__none__")
-    cands = [
+    pairs = itertools.chain.from_iterable(
         (
-            f,
+            (f, bpath),
             (
-                bpath,
+                f,
                 bpath
                 / re.sub(r"^.*?/(?:\.gemini/config|_agents|GOOGLE_INTERNAL_PACKAGE_PATH)/", "", f),
-            )[bpath.is_dir()],
+            ),
         )
         for f in explicit_files
-    ]
-    bases.update(
-        {f: p.read_text(encoding="utf-8") for f, p in cands if p.is_file()}
     )
-    nsrc.update([(os.path.relpath(bpath, cwd), "")] * bpath.is_file())
+    bases.update(
+        {f: p.read_text(encoding="utf-8") for f, p in pairs if p.is_file()}
+    )
+    if bpath.is_file():
+      nsrc[os.path.relpath(bpath, cwd)] = ""
     return explicit_files, bases
-  gdiff = "git diff --name-only --diff-filter=AMDR"
-  git_rev = [(f"{gdiff} {rev}", f"git show {rev}:{{}}", "")]
-  git_def = [
-      (f"{gdiff} HEAD", "git show HEAD:{}", ""),
-      (f"{gdiff} HEAD~1", "git show HEAD~1:{}", ""),
-  ]
-  git_specs = git_rev if rev else git_def
-  for lcmd, bfmt, ncmd in [
-      *git_specs,
-  ]:
-    if files := re.findall(
-        r"(?m)^(\S+\.py)$", run_cmd_stdout(lcmd.split(), cwd)
-    ):
-      bases.update(
-          {f: run_cmd_stdout(bfmt.format(f).split(), cwd) for f in files}
-      )
-      nsrc.update({
-          f: run_cmd_stdout([*ncmd.split(), f], cwd) for f in files * bool(ncmd)
-      })
-      return files, bases
+  for lcmd, bfmt, ncmd in _vcs_diff_specs(cwd, rev):
+    files = re.findall(r"(?m)^(\S+\.py)$", run_cmd_stdout(lcmd.split(), cwd))
+    if not files:
+      continue
+    bases.update(
+        {f: run_cmd_stdout(bfmt.format(f).split(), cwd) for f in files}
+    )
+    if ncmd:
+      nsrc.update({f: run_cmd_stdout([*ncmd.split(), f], cwd) for f in files})
+    return files, bases
   return [], bases
 
 
 def func_local_violations(
     rel: str, fn: FunctionMetrics, cfg: GateConfig
 ) -> list[str]:
-  """Checks per-function Dim 2 ratchets (Cognitive, Cyclomatic, Nesting)."""
+  """Checks per-function control_flow ratchets (Cognitive, Cyclomatic, Nest)."""
+  if "control_flow" not in cfg.enabled_checks:
+    return []
   cog_lim = (
       cfg.max_cognitive_fail
       if fn.base_cognitive <= cfg.max_cognitive_fail
@@ -1028,21 +984,21 @@ def func_local_violations(
       (
           fn.delta_cognitive > 0 and fn.cognitive > cog_lim,
           (
-              f"Dim 2: {rel}:{fn.qualname} cognitive={fn.cognitive}"
+              f"[control_flow] {rel}:{fn.qualname} cognitive={fn.cognitive}"
               f" (base={fn.base_cognitive}, delta=+{fn.delta_cognitive})"
           ),
       ),
       (
           fn.delta_cyclomatic > 0 and fn.cyclomatic > cyc_lim,
           (
-              f"Dim 2: {rel}:{fn.qualname} cyclomatic={fn.cyclomatic}"
+              f"[control_flow] {rel}:{fn.qualname} cyclomatic={fn.cyclomatic}"
               f" (delta=+{fn.delta_cyclomatic})"
           ),
       ),
       (
           fn.delta_nesting > 0 and fn.max_nesting > cfg.max_nesting_fail,
           (
-              f"Dim 2: {rel}:{fn.qualname} nesting={fn.max_nesting}"
+              f"[control_flow] {rel}:{fn.qualname} nesting={fn.max_nesting}"
               f" > {cfg.max_nesting_fail}"
           ),
       ),
@@ -1094,8 +1050,8 @@ def check_file_violations(
     bmap_all: dict[str, FunctionMetrics],
     cfg: GateConfig,
 ) -> tuple[int, list[str], list[str], list[str]]:
-  """Evaluates per-file Dim 2 & Dim 3 ratchets and returns violations."""
-  dims = set(cfg.enabled_dimensions)
+  """Evaluates per-file control_flow and indirection ratchets."""
+  active = set(cfg.enabled_checks)
   eff_map = {f"{b.file_path}:{b.qualname}": b for b in bfuncs} | {
       f.matched_base_key: bmap_all[f.matched_base_key]
       for f in nfuncs
@@ -1111,13 +1067,12 @@ def check_file_violations(
   fcog = sum([f.cognitive for f in nfuncs]) - sum(
       [bf.cognitive for bf in eff_bfuncs]
   )
-  new_privs = [
-      f.qualname for f in nfuncs if f.is_private and not f.matched_base_key
-  ]
+  unmatched = [f for f in nfuncs if not f.matched_base_key]
+  new_privs = [f.qualname for f in unmatched if f.is_private]
   misnamed = [f.qualname for f in nfuncs if is_misnamed_generator(f)]
-  pt_ratio = sum(
-      [f.is_pass_through and not f.matched_base_key for f in nfuncs]
-  ) / max(len(nfuncs), 4)
+  pt_ratio = sum(1 for f in unmatched if f.is_pass_through) / max(
+      len(nfuncs), 4
+  )
   nclos = list(
       itertools.chain.from_iterable([f.nested_closures for f in nfuncs])
   )
@@ -1128,30 +1083,30 @@ def check_file_violations(
       (
           hops > cfg.max_call_depth_fail and hops > bhops,
           (
-              f"Dim 3: {rel} max_call_depth_hops={hops} ({' -> '.join(chain)};"
-              " preserve outer domain names and inline single-caller inner"
-              " callees upward)"
+              f"[indirection] {rel} max_call_depth_hops={hops} ("
+              f"{' -> '.join(chain)}; preserve outer domain names and inline"
+              " single-caller inner callees upward)"
           ),
       ),
       (
           len(added_triv) >= cfg.max_trivial_helpers_fail,
           (
-              f"Dim 3: {rel} trivial_single_call_helpers={len(added_triv)}"
-              f" ({added_triv}; preserve outer domain name when callee has 1"
-              " caller, inline inner callee upward)"
+              f"[indirection] {rel} trivial_single_call_helpers="
+              f"{len(added_triv)} ({added_triv}; preserve outer domain name"
+              " when callee has 1 caller, inline inner callee upward)"
           ),
       ),
       (
           pt_ratio > cfg.max_pass_through_ratio_fail,
           (
-              f"Dim 3: {rel} pass_through_ratio={pt_ratio:.2f}"
+              f"[indirection] {rel} pass_through_ratio={pt_ratio:.2f}"
               f" > {cfg.max_pass_through_ratio_fail}"
           ),
       ),
       (
           len(nclos) > cfg.max_nested_closures_fail and len(nclos) > len(bclos),
           (
-              f"Dim 3: {rel} nested_closures={len(nclos)}"
+              f"[indirection] {rel} nested_closures={len(nclos)}"
               f" > {cfg.max_nested_closures_fail}"
           ),
       ),
@@ -1159,32 +1114,38 @@ def check_file_violations(
           bool(eff_bfuncs)
           and len(new_privs) >= cfg.max_sprawl_helpers_fail
           and fcog > cfg.max_file_cog_delta_sprawl,
-          f"Dim 3: {rel} complexity_sprawl={len(new_privs)} (+{fcog} Cog)",
+          (
+              f"[indirection] {rel} complexity_sprawl={len(new_privs)}"
+              f" (+{fcog} Cog)"
+          ),
       ),
       (
           bool(misnamed),
           (
-              f"Dim 3: {rel} semantic_verb_mismatch={misnamed} (lazy generator"
-              " yields items; prefer stdlib iter(callable, sentinel) or"
-              " _iter_*/_stream_* over eager drain/flush/collect verbs)"
+              f"[indirection] {rel} generator_verb_mismatch={misnamed} (lazy"
+              " generator yields items; prefer stdlib iter(callable, sentinel)"
+              " or _iter_*/_stream_* over eager drain/flush/collect verbs)"
           ),
       ),
   )
-  dim3_v = [msg for failed, msg in checks if failed] * (3 in dims)
-  dim2_v = list(
+  ind_v = [msg for failed, msg in checks if "indirection" in active and failed]
+  cf_v = list(
       itertools.chain.from_iterable(
-          [func_local_violations(rel, fn, cfg) for fn in nfuncs]
+          func_local_violations(rel, fn, cfg) for fn in nfuncs
       )
-  ) * (2 in dims)
-  return hops, chain, added_triv, dim3_v + dim2_v
+  )
+  return hops, chain, added_triv, ind_v + cf_v
 
 
 def discover_ref_sources(
     cwd: pathlib.Path,
     prod_rels: list[str],
     excl: set[str] | frozenset[str] = frozenset(),
+    enabled: bool = True,
 ) -> dict[str, str]:
   """Discovers unmodified sibling/package `.py` files for clone detection."""
+  if not enabled:
+    return {}
   c_res = cwd.resolve()
   skip = set(prod_rels) | excl
   roots = {
@@ -1236,8 +1197,8 @@ def partition_warnings(
   )
   if score > cap:
     warns.append(
-        f"Dim 1: score={score} > {cap} (soft split signal; never"
-        " statement-golf)"
+        f"[scope] score={score} > {cap} (soft split signal; do not compress"
+        " formatting to reduce statement count)"
     )
   return kept, warns
 
@@ -1250,8 +1211,8 @@ def evaluate_gate(
     ref_sources: dict[str, str] | None = None,
     new_sources: dict[str, str] | None = None,
 ) -> GateReport:
-  """Evaluates active dimensions across changed Python files and baselines."""
-  dims = set(cfg.enabled_dimensions)
+  """Evaluates active checks across changed Python files and baselines."""
+  active = set(cfg.enabled_checks)
   all_rels = sorted(set(files) | set(bases))
   disk_src = {
       r: (cwd / r).read_text(encoding="utf-8")
@@ -1280,11 +1241,7 @@ def evaluate_gate(
   ])
   base_by_file = collections.defaultdict(
       list,
-      {
-          r: analyze_functions(raw_sources[r][1], r)
-          for r in prod_rels
-          if raw_sources[r][1]
-      },
+      {r: analyze_functions(raw_sources[r][1], r) for r in prod_rels},
   )
   new_by_file = {
       r: analyze_functions(raw_sources[r][0], r)
@@ -1309,7 +1266,7 @@ def evaluate_gate(
       itertools.chain.from_iterable([tr for _, _, tr, _ in per_file])
   )
   refs = (
-      discover_ref_sources(cwd, prod_rels * (4 in dims), set(nsrc))
+      discover_ref_sources(cwd, prod_rels, set(nsrc), "duplication" in active)
       if ref_sources is None
       else ref_sources
   )
@@ -1318,22 +1275,20 @@ def evaluate_gate(
       for p, s in refs.items()
       if p not in new_by_file
   }
-  clones = detect_clones(new_by_file, base_by_file, ref_by_file, cfg) * (
-      4 in dims
-  )
+  clones = detect_clones(new_by_file, base_by_file, ref_by_file, cfg)
   syntax_viols = [
-      f"Dim 2: {r} syntax_error ({err})"
-      for r in all_rels * (2 in dims)
-      if (err := try_parse_ast(raw_sources[r][0])[1])
+      f"[control_flow] {r} syntax_error ({err})"
+      for r in all_rels
+      if "control_flow" in active
+      and (err := try_parse_ast(raw_sources[r][0])[1])
   ]
-  viols = (
-      syntax_viols
-      + list(itertools.chain.from_iterable([fv for _, _, _, fv in per_file]))
-      + (
-          [f"Dim 4: duplicate_logic_clones={len(clones)} ({clones[:3]})"]
-          * bool(clones)
-      )
+  viols = syntax_viols + list(
+      itertools.chain.from_iterable([fv for _, _, _, fv in per_file])
   )
+  if clones:
+    viols.append(
+        f"[duplication] duplicate_logic_clones={len(clones)} ({clones[:3]})"
+    )
   closures = list(
       itertools.chain.from_iterable([f.nested_closures for f in funcs])
   )
@@ -1341,34 +1296,37 @@ def evaluate_gate(
       itertools.chain.from_iterable([bf.nested_closures for bf in bfuncs_all])
   )
   added_clos = max(0, len(closures) - len(bclos_all))
-  pass_through = [f.qualname for f in funcs if f.is_pass_through]
-  added_pt = sum(not f.matched_base_key for f in funcs if f.is_pass_through)
-  s1 = (1 in dims) * cfg.weight_prod_loc * max(0, net_stmts)
-  s2 = (
-      (2 in dims)
-      * cfg.weight_cognitive_excess
-      * sum([
-          max(0, f.cognitive - cfg.max_cognitive_warn)
-          for f in funcs
-          if f.delta_cognitive > 0
-      ])
-  )
-  s3 = (3 in dims) * (
-      cfg.weight_call_depth_excess * max(0, max_hops - cfg.max_call_depth_warn)
-      + cfg.weight_trivial_helper * len(trivial_new)
-      + cfg.weight_pass_through_func * added_pt
-      + cfg.weight_nested_closure
-      * max(0, added_clos - cfg.max_nested_closures_warn)
-  )
-  s4 = (4 in dims) * cfg.weight_duplicate_clone * len(clones)
-  score = round(s1 + s2 + s3 + s4, 1)
+  pt_funcs = [f for f in funcs if f.is_pass_through]
+  pass_through = [f.qualname for f in pt_funcs]
+  added_pt = sum(1 for f in pt_funcs if not f.matched_base_key)
+  check_scores = {
+      "scope": cfg.weight_prod_loc * max(0, net_stmts),
+      "control_flow": (
+          cfg.weight_cognitive_excess
+          * sum([
+              max(0, f.cognitive - cfg.max_cognitive_warn)
+              for f in funcs
+              if f.delta_cognitive > 0
+          ])
+      ),
+      "indirection": (
+          cfg.weight_call_depth_excess
+          * max(0, max_hops - cfg.max_call_depth_warn)
+          + cfg.weight_trivial_helper * len(trivial_new)
+          + cfg.weight_pass_through_func * added_pt
+          + cfg.weight_nested_closure
+          * max(0, added_clos - cfg.max_nested_closures_warn)
+      ),
+      "duplication": cfg.weight_duplicate_clone * len(clones),
+  }
+  score = round(sum(check_scores[c] for c in active), 1)
   viols, warns = partition_warnings(viols, funcs, max_hops, score, cfg)
   skip_reason = resolve_skip_reason(cwd)
   passed = not viols or bool(skip_reason)
   return GateReport(
       passed=passed,
       score=score,
-      enabled_dimensions=list(cfg.enabled_dimensions),
+      enabled_checks=list(cfg.enabled_checks),
       prod_loc_added=max(0, net_stmts),
       net_loc_delta=net_stmts,
       net_cog_delta=net_cog,
@@ -1386,299 +1344,19 @@ def evaluate_gate(
       violations=viols,
       skip_reason=skip_reason,
       warnings=warns,
-      duck_typing_calls=sum_duck_typing_delta(raw_sources, prod_rels),
   )
-
-
-@dataclasses.dataclass(frozen=True)
-class FileShardProfile:
-  """Per-file AST metrics, imports, and public signatures for shard planning."""
-
-  path: str
-  stmts: int
-  cognitive: int
-  weight: int
-  imports: tuple[tuple[int, str, tuple[str, ...]], ...]
-  attr_refs: dict[str, tuple[str, ...]]
-  public_signatures: dict[str, str]
-
-
-def profile_shard_file(rel: str, source: str) -> FileShardProfile:
-  """Profiles AST statements, cognitive weight, imports, and signatures."""
-  tree, _ = try_parse_ast(source)
-  if tree is None:
-    return FileShardProfile(rel, 0, 0, 0, (), {}, {})
-  stmts = count_ast_stmts(source)
-  cog = sum(fn.cognitive for fn in analyze_functions(source, rel))
-  imports: list[tuple[int, str, tuple[str, ...]]] = []
-  aliases: list[tuple[str | None, str]] = []
-  raw_attrs: dict[str, set[str]] = collections.defaultdict(set)
-  for node in ast.walk(tree):
-    if isinstance(node, (ast.Import, ast.ImportFrom)):
-      lvl = getattr(node, "level", 0)
-      mod = getattr(node, "module", None)
-      imports.append((lvl, mod or "", tuple(a.name for a in node.names)))
-      aliases.extend((a.asname, a.name.split(".")[-1]) for a in node.names)
-    elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
-      keep = not node.attr.startswith("_")
-      raw_attrs[node.value.id].update((node.attr,) * keep)
-  for asc, orig in aliases:
-    if asc:
-      raw_attrs[orig].update(raw_attrs.get(asc, ()))
-  attr_refs = {k: tuple(sorted(v)) for k, v in raw_attrs.items() if v}
-  sigs = dict(filter(None, (format_public_signature(s) for s in tree.body)))
-  return FileShardProfile(
-      rel, stmts, cog, stmts + 2 * cog, tuple(imports), attr_refs, sigs
-  )
-
-
-def build_module_index(paths: Sequence[str]) -> dict[str, str]:
-  """Maps unambiguous dotted module suffixes to candidate `.py` paths."""
-  buckets: dict[str, set[str]] = collections.defaultdict(set)
-  for rel in paths:
-    stem = rel.removesuffix(".py")
-    for cand in filter(None, {stem, stem.removesuffix("/__init__")}):
-      parts = cand.split("/")
-      for key in (".".join(parts[i:]) for i in range(len(parts))):
-        buckets[key].add(rel)
-  return {k: next(iter(v)) for k, v in buckets.items() if len(v) == 1}
-
-
-def match_single_import(
-    caller: str,
-    imp: tuple[int, str, tuple[str, ...]],
-    attr_refs: Mapping[str, Sequence[str]],
-    mod_index: Mapping[str, str],
-    known_paths: set[str],
-) -> list[tuple[str, tuple[str, ...]]]:
-  """Resolves one AST import tuple to `(callee_path, symbols)` pairs."""
-  level, mod, names = imp
-  if level == 0:
-    direct = [(mod_index[mod], names)] if mod in mod_index else []
-    dotted = [
-        (mod_index[c], tuple(attr_refs.get(nm.split(".")[-1], ())))
-        for nm in names
-        if (c := ".".join(filter(None, (mod, nm)))) in mod_index
-    ]
-    return direct + dotted
-  parents = list(pathlib.PurePosixPath(caller).parents)
-  anc = parents[min(level - 1, len(parents) - 1)]
-  raw_base = str(anc / mod.replace(".", "/")) if mod else str(anc)
-  rel_dir = raw_base.removeprefix("./").removesuffix(".")
-  hits = [
-      (c, names)
-      for c in (f"{rel_dir}.py", f"{rel_dir}/__init__.py")
-      if rel_dir and c in known_paths
-  ]
-  sub_cands = [
-      (nm, f"{rel_dir}/{nm}".lstrip("/") + sfx)
-      for nm, sfx in itertools.product(names, (".py", "/__init__.py"))
-  ]
-  hits.extend(
-      (c, tuple(attr_refs.get(nm, ())))
-      for nm, c in sub_cands
-      if c in known_paths
-  )
-  return hits
-
-
-def resolve_import_edges(
-    profiles: Sequence[FileShardProfile],
-) -> list[tuple[str, str, tuple[str, ...]]]:
-  """Extracts deduplicated cross-file `(caller, callee, symbols)` edges."""
-  known = {p.path for p in profiles}
-  by_path = {p.path: p for p in profiles}
-  mod_index = build_module_index([p.path for p in profiles])
-  merged: dict[tuple[str, str], set[str]] = collections.defaultdict(set)
-  for prof in profiles:
-    found = itertools.chain.from_iterable(
-        match_single_import(prof.path, imp, prof.attr_refs, mod_index, known)
-        for imp in prof.imports
-    )
-    valid = [(c, s) for c, s in found if c != prof.path]
-    for callee, syms in valid:
-      merged[(prof.path, callee)].update(set(syms) - {"*"})
-  edges: list[tuple[str, str, tuple[str, ...]]] = []
-  for (caller, callee), syms in sorted(merged.items()):
-    pub = by_path[callee].public_signatures
-    resolved = sorted(syms & set(pub)) or sorted(pub)
-    edges.append((caller, callee, tuple(resolved)))
-  return edges
-
-
-def connected_file_components(
-    paths: Sequence[str],
-    edges: Sequence[tuple[str, str, tuple[str, ...]]],
-) -> list[list[str]]:
-  """Groups `paths` into deterministic Union-Find connected components."""
-  parent = {p: p for p in sorted(paths)}
-  for src, dst, _ in edges:
-    if src not in parent or dst not in parent:
-      continue
-    while parent[src] != src:
-      parent[src] = parent[parent[src]]
-      src = parent[src]
-    while parent[dst] != dst:
-      parent[dst] = parent[parent[dst]]
-      dst = parent[dst]
-    lo, hi = (src, dst) if src < dst else (dst, src)
-    parent[hi] = lo
-  groups: dict[str, list[str]] = collections.defaultdict(list)
-  for p in sorted(parent):
-    root = p
-    while parent[root] != root:
-      root = parent[root]
-    groups[root].append(p)
-  return sorted(groups.values(), key=lambda g: g[0])
-
-
-def split_oversized_components(
-    components: Sequence[list[str]],
-    weights: Mapping[str, int],
-    edges: Sequence[tuple[str, str, tuple[str, ...]]],
-    max_shards: int,
-) -> tuple[list[list[str]], list[str]]:
-  """Cuts oversized connected components on highest-degree Hub modules."""
-  eff = min(max(1, max_shards), max(1, sum(len(c) for c in components)))
-  if eff <= 1:
-    return [list(c) for c in components], []
-  total_w = max(1, sum(weights.values()))
-  caps = {2: total_w * 0.65}
-  default_cap = (total_w / eff) * 1.25
-  units, hubs_cut = [], []
-  queue = collections.deque(list(c) for c in components)
-  while queue:
-    comp = queue.popleft()
-    if len(comp) <= 1 or sum(weights[p] for p in comp) <= caps.get(
-        len(comp), default_cap
-    ):
-      units.append(comp)
-      continue
-    cset = set(comp)
-    in_e = [(s, d) for s, d, _ in edges if s in cset and d in cset]
-    deg = collections.Counter(itertools.chain.from_iterable(in_e))
-    indeg = collections.Counter(d for _, d in in_e)
-    hub = max(comp, key=lambda p: (deg[p], indeg[p], weights[p], p))
-    hubs_cut.append(hub)
-    units.append([hub])
-    rem = [p for p in comp if p != hub]
-    sub_e = [e for e in edges if hub not in e[:2]]
-    queue.extend(connected_file_components(rem, sub_e))
-  return units, hubs_cut
-
-
-def pack_units_lpt(
-    units: Sequence[list[str]], weights: Mapping[str, int], max_shards: int
-) -> list[list[str]]:
-  """Packs file units into `<= max_shards` balanced bins via LPT."""
-  if not units:
-    return []
-  k = min(max(1, max_shards), len(units))
-  ordered = sorted(units, key=lambda u: (-sum(weights[p] for p in u), u[0]))
-  bins: list[list[str]] = [[] for _ in range(k)]
-  loads = [0] * k
-  for unit in ordered:
-    idx = min(range(k), key=lambda i: (loads[i], i))
-    bins[idx].extend(unit)
-    loads[idx] += sum(weights[p] for p in unit)
-  return [sorted(b) for b in bins if b]
-
-
-def collect_frozen_contracts(
-    shards: Sequence[Sequence[str]],
-    profiles: Mapping[str, FileShardProfile],
-    edges: Sequence[tuple[str, str, tuple[str, ...]]],
-) -> tuple[list[dict[str, object]], list[str], dict[int, list[str]]]:
-  """Emits cross-shard edge metadata and 1-line `frozen_contracts` strings."""
-  shard_of: dict[str, int] = {}
-  for idx, s in enumerate(shards):
-    shard_of.update(dict.fromkeys(s, idx))
-  cross = [
-      (c, d, syms, shard_of[c], shard_of[d])
-      for c, d, syms in edges
-      if shard_of.get(c, -1) != shard_of.get(d, -1)
-  ]
-  cross_edges: list[dict[str, object]] = []
-  callers_by_sig: dict[tuple[str, str], set[str]] = collections.defaultdict(set)
-  shards_by_sig: dict[tuple[str, str], set[int]] = collections.defaultdict(set)
-  for caller, callee, syms, cs, ds in cross:
-    cross_edges.append({
-        "caller": caller,
-        "callee": callee,
-        "caller_shard": cs,
-        "callee_shard": ds,
-        "symbols": list(syms),
-    })
-    pub = profiles[callee].public_signatures
-    for sig in [pub[s] for s in syms if s in pub] or [f"module {callee}"]:
-      callers_by_sig[(callee, sig)].add(caller)
-      shards_by_sig[(callee, sig)].update((cs, ds))
-  contracts: list[str] = []
-  per_shard: dict[int, list[str]] = collections.defaultdict(list)
-  for (callee, sig), callers in sorted(callers_by_sig.items()):
-    line = f"{callee}: {sig}  # callers: {', '.join(sorted(callers))}"
-    contracts.append(line)
-    for sid in sorted(shards_by_sig[(callee, sig)]):
-      per_shard[sid].append(line)
-  return cross_edges, contracts, per_shard
-
-
-def build_shard_plan(
-    cwd: pathlib.Path,
-    files: Sequence[str],
-    max_shards: int = 4,
-    new_sources: Mapping[str, str] | None = None,
-) -> dict[str, object]:
-  """Builds a parallel AST dependency & LPT shard plan (`<= max_shards`)."""
-  nsrc, td_re = new_sources or {}, re.compile(r"/(testdata|test_data)/")
-  raw_items = [read_candidate_source(cwd, r, nsrc) for r in sorted(set(files))]
-  items = [
-      (r, s)
-      for r, s in raw_items
-      if (s or r in nsrc) and not td_re.search(f"/{r}")
-  ]
-  with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
-    prof_list = list(pool.map(lambda it: profile_shard_file(*it), items))
-  profs = {p.path: p for p in prof_list}
-  weights = {p.path: p.weight for p in prof_list}
-  edges = resolve_import_edges(prof_list)
-  comps = connected_file_components(list(profs), edges)
-  units, hubs = split_oversized_components(comps, weights, edges, max_shards)
-  packed = pack_units_lpt(units, weights, max_shards)
-  cross, contracts, per_s = collect_frozen_contracts(packed, profs, edges)
-  shards = [
-      {
-          "shard_id": i,
-          "files": fs,
-          "frozen_contracts": per_s.get(i, []),
-          "stmts": sum(profs[f].stmts for f in fs),
-          "cognitive": sum(profs[f].cognitive for f in fs),
-          "weight": sum(profs[f].weight for f in fs),
-      }
-      for i, fs in enumerate(packed)
-  ]
-  return {
-      "max_shards": max(1, max_shards),
-      "total_files": len(prof_list),
-      "total_weight": sum(weights.values()),
-      "connected_components": comps,
-      "hub_modules_cut": hubs,
-      "shards": shards,
-      "cross_shard_edges": cross,
-      "frozen_contracts": contracts,
-  }
 
 
 def format_report(r: GateReport) -> str:
-  """Formats the human-readable CL Complexity Gate summary."""
+  """Formats the human-readable CL Complexity Check summary."""
   status = "PASS" if r.passed else "FAIL"
   lines = [
-      f"=== CL Complexity Gate: {status} (Score: {r.score}/100) ===",
+      f"=== CL Complexity Check: {status} (Score: {r.score}/100) ===",
       (
           f"  Scope: net_stmts={r.net_loc_delta:+d},"
-          f" net_cog={r.net_cog_delta:+d} | Local: cog={r.max_cognitive},"
-          f" cyc={r.max_cyclomatic} | Layer: hops={r.max_call_depth_hops} |"
-          f" Clones: {len(r.duplicate_clones)}"
+          f" net_cog={r.net_cog_delta:+d} | ControlFlow: cog={r.max_cognitive},"
+          f" cyc={r.max_cyclomatic} | Indirection: hops={r.max_call_depth_hops}"
+          f" | Duplication: clones={len(r.duplicate_clones)}"
       ),
       *[f"  [WARNING] {w}" for w in r.warnings],
       *[f"  [VIOLATION] {v}" for v in r.violations],
@@ -1705,7 +1383,7 @@ def emit_output(rendered: str, out_path: pathlib.Path | None) -> None:
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-  """Constructs the CLI `ArgumentParser` with usage examples and schema."""
+  """Constructs the CLI `ArgumentParser` with usage examples."""
   p = argparse.ArgumentParser(
       description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
   )
@@ -1713,27 +1391,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
   p.add_argument("--rev", help="Base VCS revision or baseline file path.")
   p.add_argument("--base", dest="rev", help="Alias for --rev.")
   p.add_argument("--files", nargs="*", help="Explicit .py files to analyze.")
-  p.add_argument("--dimensions", nargs="+", type=int, help="Dimensions 1..4.")
+  p.add_argument(
+      "--checks", nargs="+", choices=DEFAULT_CHECKS, help="Checks to run."
+  )
   p.add_argument(
       "--config", default=_DEFAULT_CONFIG, type=pathlib.Path, help="TOML path."
   )
   p.add_argument("--json", action="store_true", help="Emit GateReport JSON.")
   p.add_argument(
-      "--strict", action="store_true", help="Exit 1 on gate/hygiene violations."
-  )
-  p.add_argument(
-      "--hygiene", action="store_true", help="Enforce full-file G1/G2 hygiene."
-  )
-  p.add_argument(
-      "--check-test-coverage",
-      action="store_true",
-      help="Require unit tests with 100%% fn and >=90%% stmt coverage.",
-  )
-  p.add_argument(
-      "--shard-plan", action="store_true", help="Emit LPT AST shard plan JSON."
-  )
-  p.add_argument(
-      "--max-shards", type=int, default=4, help="Max shards (default: 4)."
+      "--strict", action="store_true", help="Exit 1 on check violations."
   )
   p.add_argument(
       "--base-score",
@@ -1746,35 +1412,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-  """CLI entrypoint for the Tunix CL Understandability & Complexity Gate."""
+  """CLI entrypoint for the Tunix CL Complexity Check."""
   args = build_arg_parser().parse_args(argv)
   cwd, new_sources = pathlib.Path(args.cwd), {}
   files, bases = resolve_changed_files(cwd, args.rev, args.files, new_sources)
-  if args.shard_plan:
-    plan = build_shard_plan(cwd, files, args.max_shards, new_sources)
-    emit_output(json.dumps(plan, indent=2), args.out)
-    return 0
   cfg = load_config(args.config, cwd)
-  cfg.enabled_dimensions = tuple(args.dimensions or cfg.enabled_dimensions)
+  cfg.enabled_checks = tuple(args.checks or cfg.enabled_checks)
   cfg.base_score = args.base_score
   r = evaluate_gate(cwd, files, bases, cfg, new_sources=new_sources)
-  hyg = args.hygiene if args.dimensions else (args.strict or args.hygiene)
-  hyg_v = (
-      evaluate_hygiene(cwd, files, bases, new_sources, not args.hygiene)
-      if hyg
-      else []
-  )
-  cov_v = evaluate_test_coverage(cwd, files) if args.check_test_coverage else []
-  r.violations.extend(hyg_v + cov_v)
-  r.passed = r.passed and not (hyg_v or cov_v)
   rendered = (
       json.dumps(dataclasses.asdict(r), indent=2)
       if args.json
       else format_report(r)
   )
   emit_output(rendered, args.out)
-  enforce = args.strict or args.hygiene or args.check_test_coverage
-  return 1 * (enforce and not r.passed)
+  return 1 if (args.strict and not r.passed) else 0
 
 
 if __name__ == "__main__":

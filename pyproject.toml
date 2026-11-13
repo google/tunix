@@ -168,13 +168,13 @@ pythonpath = ["."]
 addopts = ["--import-mode=importlib"]
 
 [tool.cl_complexity_gate]
-# CL Complexity Gate configuration:
-# - enabled_dimensions: active gate dimensions (subset of [1, 2, 3, 4]; e.g., [3] isolates Dim 3 only)
-# - Dim 1 (Soft Scope Budget): formatting-invariant AST statement delta weighted into continuous Score (no standalone LOC hard cliff)
-# - Dim 2 (Local Control Flow): per-function cognitive (12/15), cyclomatic (10/15), nesting (3/4), legacy delta budget (+5)
-# - Dim 3 (Structural Indirection): per-file single-caller chains, trivial wrapper additions, inner closures, and sprawl
-# - Dim 4 (Structural Clone & Fork Hygiene): position-independent AST 2-gram Multiset Jaccard + sanctioned forks
-enabled_dimensions = [1, 2, 3, 4]
+# CL Complexity Check configuration:
+# - enabled_checks: active checks (subset of ["scope", "control_flow", "indirection", "duplication"]; e.g., ["indirection"] isolates Call Indirection only)
+# - scope (Change Scope): formatting-invariant AST statement delta weighted into continuous Score (no standalone LOC hard cliff)
+# - control_flow (Control Flow): per-function cognitive (12/15), cyclomatic (10/15), nesting (3/4), legacy delta budget (+5)
+# - indirection (Call Indirection): per-file single-caller chains, trivial wrapper additions, inner closures, and sprawl
+# - duplication (Code Duplication): position-independent AST 2-gram Multiset Jaccard + sanctioned forks
+enabled_checks = ["scope", "control_flow", "indirection", "duplication"]
 weights = { prod_loc = 0.15, cognitive_excess = 2.0, call_depth_excess = 15.0, trivial_helper = 10.0, pass_through_func = 10.0, nested_closure = 5.0, duplicate_clone = 20.0 }
 thresholds = { max_cognitive_warn = 12, max_cognitive_fail = 15, max_cyclomatic_fail = 15, max_nesting_fail = 4, max_legacy_cog_delta_fail = 5, max_legacy_cyc_delta_fail = 5, max_call_depth_warn = 2, max_call_depth_fail = 2, max_trivial_helpers_fail = 3, max_pass_through_ratio_fail = 0.25, max_nested_closures_warn = 2, max_nested_closures_fail = 4, trivial_helper_max_stmts = 4, trivial_helper_max_cognitive = 1, max_sprawl_helpers_fail = 5, max_file_cog_delta_sprawl = 40, min_clone_stmts = 7, min_clone_cognitive = 4, min_clone_jaccard = 0.60 }
 intentional_forks = [
