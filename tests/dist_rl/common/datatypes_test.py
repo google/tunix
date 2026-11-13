@@ -20,6 +20,7 @@ import time
 from absl.testing import absltest
 import cloudpickle
 import numpy as np
+from tunix.common import datatypes as common_datatypes
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import rpc_utils
 
@@ -605,6 +606,10 @@ class IsValidTrajectoryTest(absltest.TestCase):
       datatypes.WeightSyncRequest(policy_version=True)  # pyrefly: ignore[bad-argument-type]
     with self.assertRaises(TypeError):
       datatypes.WeightSyncRequest(min_retained_policy_version=True)  # pyrefly: ignore[bad-argument-type]
+
+  def test_weight_sync_mode_tcp(self):
+    self.assertEqual(common_datatypes.WeightSyncMode.TCP, "tcp")
+    self.assertEqual(common_datatypes.WeightSyncMode.TCP.value, "tcp")
 
 
 if __name__ == "__main__":

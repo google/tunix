@@ -340,9 +340,10 @@ dist_training_config:
 
 weight_sync_config:
   # Weight synchronization transport mode ("none", "in_memory", "raiden", "fs",
-  # or "nccl"). "fs" selects disaggregated file/object-store staged weight sync,
-  # orthogonal to checkpoint serialization format ("orbax" vs "safetensors") and
-  # storage backend ("gcs" gs://, "GOOGLE_INTERNAL_STOAGE_PATH" /GOOGLE_INTERNAL_STOAGE_PATH/, or "local" POSIX paths via epath).
+  # "tcp", or "nccl"). "fs" selects disaggregated file/object-store staged weight
+  # sync, orthogonal to checkpoint serialization format ("orbax" vs
+  # "safetensors") and storage backend ("gcs" gs://, "GOOGLE_INTERNAL_STOAGE_PATH" /GOOGLE_INTERNAL_STOAGE_PATH/, or "local"
+  # POSIX paths via epath). "tcp" streams weights directly over TCP.
   mode: "none"
   raiden_use_ffi: null
   use_weight_converter: true

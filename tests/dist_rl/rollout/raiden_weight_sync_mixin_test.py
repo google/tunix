@@ -26,13 +26,19 @@ class _MockAdapter(raiden_weight_sync_mixin.RaidenDestinationWeightSyncMixin):
   def __init__(self, enable_raiden=True, partial_rollout=False):
     self.server_id = "test_server"
     self.enable_raiden = enable_raiden
-    self.partial_rollout = partial_rollout
+    self._partial_rollout = partial_rollout
     self.raiden_sync_delegate = mock.AsyncMock()
     self.raiden_sync_delegate.is_bounded = mock.MagicMock(return_value=True)
+    self.raiden_sync_delegate.serving_corrupted = False
+    self._sync_delegate = self.raiden_sync_delegate if enable_raiden else None
     self.sampler = mock.MagicMock()
     self.sampler.transformer_state = {"param": 1}
     self.pause = mock.AsyncMock(return_value=True)
     self.resume = mock.AsyncMock(return_value=True)
+
+  @property
+  def partial_rollout(self) -> bool:
+    return self._partial_rollout
 
 
 class _SelfHostedAdapter(
@@ -45,6 +51,8 @@ class _SelfHostedAdapter(
     self.enable_raiden = enable_raiden
     self.raiden_sync_delegate = mock.AsyncMock()
     self.raiden_sync_delegate.is_bounded = mock.MagicMock(return_value=False)
+    self.raiden_sync_delegate.serving_corrupted = False
+    self._sync_delegate = self.raiden_sync_delegate if enable_raiden else None
     self.transformer_state = {"param": 2}
     self.update_params = mock.MagicMock()
 
@@ -179,6 +187,17 @@ class RaidenDestinationWeightSyncMixinTest(unittest.IsolatedAsyncioTestCase):
     sync_req = mock.MagicMock(weights={"w": 2})
     self.assertTrue(await adapter.weight_sync(sync_request=sync_req))
     adapter.update_params.assert_called_once_with({"w": 2})
+
+  async def test_abort_weight_sync_inhibits_resume_when_corrupted(self):
+    adapter = _MockAdapter(enable_raiden=False)
+    mock_delegate = mock.AsyncMock()
+    mock_delegate.serving_corrupted = True
+    mock_delegate.abort_weight_sync.side_effect = RuntimeError("corrupted")
+    adapter._sync_delegate = mock_delegate
+
+    with self.assertRaisesRegex(RuntimeError, "corrupted"):
+      await adapter.abort_weight_sync()
+    adapter.resume.assert_not_awaited()
 
 
 if __name__ == "__main__":

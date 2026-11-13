@@ -23,6 +23,7 @@ from tunix.common import configs
 from tunix.dist_rl.rollout import inprocess_vllm_sampler
 from tunix.dist_rl.rollout import sampler as base_sampler_lib
 from tunix.dist_rl.weight_sync import raiden_weight_sync_delegate
+from tunix.dist_rl.weight_sync import tcp_delegate
 from tunix.dist_rl.weight_sync import weight_sync
 from tunix.generate import base_sampler
 from tunix.generate import mappings
@@ -98,6 +99,22 @@ class InprocessVllmSamplerTest(absltest.TestCase):
         "vllm_raiden_slice",
     )
     self.assertFalse(sampler.raiden_sync_delegate.is_bounded())
+
+  def test_real_tcp_delegate_instantiation(self):
+    tcp_config = configs.RolloutConfig(
+        weight_sync_mode=weight_sync.WeightSyncMode.TCP,
+        tensor_parallel_size=1,
+        data_parallel_size=1,
+    )
+    sampler = inprocess_vllm_sampler.InprocessVllmSampler(
+        server_id="vllm_tcp_slice",
+        tokenizer=self.mock_tokenizer,
+        config=tcp_config,
+    )
+    self.assertFalse(sampler.enable_raiden)
+    self.assertIsNotNone(sampler._sync_delegate)
+    self.assertEqual(sampler._sync_delegate._server_id, "vllm_tcp_slice")
+    self.assertFalse(sampler._sync_delegate.is_bounded())
 
   def test_weight_sync_mode_read_from_rollout_config(self):
     sampler = inprocess_vllm_sampler.InprocessVllmSampler(
@@ -529,6 +546,18 @@ class InprocessVllmSamplerTest(absltest.TestCase):
     self.sampler.refresh_state_leaves()
     self.mock_vllm_sampler.refresh_state_leaves.assert_called_once_with()
 
+    self.assertIsInstance(self.sampler, tcp_delegate.HfWeightUpdatableSampler)
+    manifest_sentinel = object()
+    self.mock_vllm_sampler.from_hf_manifest.return_value = manifest_sentinel
+    self.assertIs(self.sampler.from_hf_manifest(), manifest_sentinel)
+    self.mock_vllm_sampler.from_hf_manifest.assert_called_once_with()
+
+    hf_weights = {"model.norm.weight": np.ones((4,), dtype=np.float32)}
+    self.sampler.update_params_from_hf(hf_weights)
+    self.mock_vllm_sampler.update_params_from_hf.assert_called_once_with(
+        hf_weights
+    )
+
     uninit = inprocess_vllm_sampler.InprocessVllmSampler(
         server_id="uninit_slice",
         tokenizer=self.mock_tokenizer,
@@ -836,6 +865,7 @@ class RoutedExpertsTest(absltest.TestCase):
     mock_delegate = mock.MagicMock(
         spec=raiden_weight_sync_delegate.RaidenWeightSyncDelegate
     )
+    mock_delegate.serving_corrupted = False
     mock_delegate.pre_weight_sync = mock.AsyncMock(return_value=True)
     mock_delegate.post_weight_sync = mock.AsyncMock(return_value=True)
     mock_delegate.abort_weight_sync = mock.AsyncMock(return_value=True)
