@@ -63,6 +63,15 @@ class TokenCountsJson(TypedDict):
   total: int | None
 
 
+class RewardSignCountsJson(TypedDict):
+  """JSON form of `RewardSignCounts`, plus the derived `total`."""
+
+  positive: int
+  non_positive: int
+  unscored: int
+  total: int
+
+
 class TrajectoryStatsJson(TypedDict):
   """JSON form of `TrajectoryStats`."""
 
@@ -86,6 +95,8 @@ class RunStatsJson(TypedDict):
   num_with_tokens: int
   status_counts: dict[str, int]
   num_with_status: int
+  # Keyed in the order of `status_counts`.
+  reward_signs_by_status: dict[str, RewardSignCountsJson]
   mean_reward: float | None
   num_with_reward: int
   tool_counts: dict[str, int]
@@ -270,6 +281,37 @@ def _sum_reported(values: Iterable[int | None]) -> int | None:
   return sum(reported) if reported else None
 
 
+class RewardSignCounts(NamedTuple):
+  """How many trajectories scored above 0, at most 0, or not at all.
+
+  The counts state the sign of `total_reward` and nothing more: whether a
+  positive reward means a solved task depends on the reward function.
+
+  Attributes:
+    positive: Number of trajectories whose `total_reward` is above 0.
+    non_positive: Number of trajectories whose `total_reward` is 0 or less.
+    unscored: Number of trajectories that report no `total_reward`.
+  """
+
+  positive: int = 0
+  non_positive: int = 0
+  unscored: int = 0
+
+  @property
+  def total(self) -> int:
+    """Returns the number of trajectories counted."""
+    return sum(self)
+
+  def to_json_dict(self) -> RewardSignCountsJson:
+    """Returns the counts as a plain JSON-serializable dict."""
+    return RewardSignCountsJson(
+        positive=self.positive,
+        non_positive=self.non_positive,
+        unscored=self.unscored,
+        total=self.total,
+    )
+
+
 @dataclasses.dataclass(frozen=True)
 class TrajectoryStats:
   """Derived summary statistics of a single trajectory.
@@ -319,13 +361,14 @@ class TrajectoryStats:
         trajectory is not an instance of are skipped.
 
     Raises:
-      ValueError: If two `diagnostics` share a `NAMESPACE`, or a diagnostics'
+      ValueError: If two `diagnostics` share a `NAMESPACE`, a diagnostics has a
+        column named like a core column of `RunStats.df`, or a diagnostics'
         `compute_columns()` does not return exactly the columns of its
         `COLUMN_DTYPES`.
       TypeError: If a diagnostics' `compute_columns()` returns a value that does
         not fit its column's dtype.
     """
-    _check_unique_namespaces(diagnostics)
+    _check_diagnostics(diagnostics)
     status: str | None = None
     raw_status = trajectory.status
     if raw_status is not None:
@@ -408,22 +451,50 @@ def _schema_column(namespace: str, column: str) -> str:
 
 
 def _columns_of(
-    df: pd.DataFrame, diagnostics: schema_diagnostics.SchemaDiagnostics
+    df: pd.DataFrame,
+    diagnostics: schema_diagnostics.SchemaDiagnostics,
+    rows: pd.Index,
 ) -> pd.DataFrame:
-  """Returns the columns of `diagnostics` in `df`, under their own names."""
+  """Returns the rows of `df` that the run-level hooks of `diagnostics` receive.
+
+  The core columns (`COLUMN_DTYPES`) keep their names, and those of
+  `diagnostics` follow under their own names. The rows keep their labels in
+  `df`.
+
+  Args:
+    df: The per-trajectory frame of a run, `RunStats.df`.
+    diagnostics: A schema diagnostics active in the run.
+    rows: The labels of the rows of `df` whose trajectories are instances of
+      the `SCHEMA` of `diagnostics`.
+  """
   names = {
       _schema_column(diagnostics.NAMESPACE, column): column
       for column in diagnostics.COLUMN_DTYPES
   }
-  return df[list(names)].rename(columns=names)
+  return df.loc[rows, [*COLUMN_DTYPES, *names]].rename(columns=names)
 
 
-def _check_unique_namespaces(
+def _check_diagnostics(
     diagnostics: Sequence[schema_diagnostics.SchemaDiagnostics],
 ) -> None:
-  """Raises ValueError if two of `diagnostics` share a `NAMESPACE`."""
+  """Checks `diagnostics` up front, whatever trajectories they get.
+
+  Args:
+    diagnostics: The schema diagnostics passed to compute.
+
+  Raises:
+    ValueError: If one of `diagnostics` has a column named like a core column
+      (`COLUMN_DTYPES`), which its run-level hooks also receive, or two of them
+      share a `NAMESPACE`.
+  """
   seen: dict[str, schema_diagnostics.SchemaDiagnostics] = {}
   for d in diagnostics:
+    shadowed = d.COLUMN_DTYPES.keys() & COLUMN_DTYPES.keys()
+    if shadowed:
+      raise ValueError(
+          f"{type(d).__name__}: columns {sorted(shadowed)} have the names of"
+          " core columns of RunStats.df."
+      )
     if d.NAMESPACE in seen:
       raise ValueError(
           "Schema diagnostics must have distinct namespaces;"
@@ -460,8 +531,8 @@ class RunStats:
     tool_counts: Read-only mapping from tool name to its number of calls across
       the run, keyed in first-seen order.
     schema_stats: The `summarize()` result of each schema diagnostics active in
-      the run, by `NAMESPACE`, in the order passed. Computed once, from `df`,
-      when the run is built.
+      the run, by `NAMESPACE`, in the order passed. Computed once, from
+      `columns_of()`, when the run is built.
     num_total_trajectories: Total number of trajectories in the run, or None if
       equal to the number of loaded trajectories in `df`.
   """
@@ -470,6 +541,12 @@ class RunStats:
   tool_counts: Mapping[str, int]
   schema_stats: Mapping[str, Mapping[str, schema_diagnostics.JsonValue]]
   num_total_trajectories: int | None = None
+  # The labels of the rows of `df` whose trajectories are instances of the
+  # `SCHEMA` of each active schema diagnostics, by `NAMESPACE`: the rows that
+  # its run-level hooks receive (see `columns_of`).
+  _schema_rows: Mapping[str, pd.Index] = dataclasses.field(
+      default_factory=dict, repr=False
+  )
 
   @classmethod
   def from_trajectories(
@@ -487,10 +564,11 @@ class RunStats:
         if all of them are given.
       diagnostics: Schema diagnostics to compute. One is active in the run if
         any trajectory is an instance of its `SCHEMA`; the other trajectories
-        get nulls in its columns.
+        get nulls in its columns, and its run-level hooks don't see them.
 
     Raises:
-      ValueError: If two `diagnostics` share a `NAMESPACE`, a diagnostics'
+      ValueError: If two `diagnostics` share a `NAMESPACE`, a diagnostics has a
+        column named like a core column of `df`, a diagnostics'
         `compute_columns()` does not return exactly the columns of its
         `COLUMN_DTYPES`, or its `compute_run_summary()` returns a non-finite
         float.
@@ -498,18 +576,21 @@ class RunStats:
         not fit its column's dtype, or its `compute_run_summary()` returns a
         value that is not JSON serializable.
     """
-    _check_unique_namespaces(diagnostics)
+    _check_diagnostics(diagnostics)
     rows = []
     tool_counts = collections.Counter[str]()
-    active_namespaces: set[str] = set()
-    for trajectory in trajectories:
+    # The positions of the trajectories of each schema, by `NAMESPACE`; they
+    # are also the labels of their rows in `df`.
+    schema_rows = collections.defaultdict[str, list[int]](list)
+    for position, trajectory in enumerate(trajectories):
       stats = TrajectoryStats.from_trajectory(
           trajectory, diagnostics=diagnostics
       )
       tool_counts.update(stats.tool_call_names)
-      active_namespaces.update(stats.schema_stats)
+      for namespace in stats.schema_stats:
+        schema_rows[namespace].append(position)
       rows.append(stats.to_row())
-    active = tuple(d for d in diagnostics if d.NAMESPACE in active_namespaces)
+    active = tuple(d for d in diagnostics if d.NAMESPACE in schema_rows)
     column_dtypes = dict(COLUMN_DTYPES)
     for d in active:
       for column, dtype in d.COLUMN_DTYPES.items():
@@ -519,17 +600,24 @@ class RunStats:
     df = pd.DataFrame(rows, columns=list(column_dtypes), dtype=object).astype(
         column_dtypes
     )
+    active_rows = {
+        d.NAMESPACE: pd.Index(schema_rows[d.NAMESPACE]) for d in active
+    }
     return cls(
         df=df,
         tool_counts=types.MappingProxyType(tool_counts),
-        schema_stats=types.MappingProxyType(
-            {d.NAMESPACE: d.summarize(_columns_of(df, d)) for d in active}
-        ),
+        schema_stats=types.MappingProxyType({
+            d.NAMESPACE: d.summarize(
+                _columns_of(df, d, active_rows[d.NAMESPACE])
+            )
+            for d in active
+        }),
         num_total_trajectories=(
             num_total_trajectories
             if num_total_trajectories is not None
             else len(df)
         ),
+        _schema_rows=types.MappingProxyType(active_rows),
     )
 
   @property
@@ -595,10 +683,39 @@ class RunStats:
       return None
     return float(self.df["total_reward"].mean())
 
+  @property
+  def reward_signs_by_status(self) -> Mapping[str, RewardSignCounts]:
+    """Returns a read-only mapping from status to its reward sign counts.
+
+    Statuses are keyed in first-seen order, like `status_counts`. Trajectories
+    that report no status are not counted.
+    """
+    reported = self.df[self.df["status"].notna()]
+    reward = reported["total_reward"]
+    # The columns follow the order of the `RewardSignCounts` fields.
+    counts = (
+        pd.DataFrame({
+            "positive": reward.gt(0),
+            "non_positive": reward.le(0),
+            "unscored": reward.isna(),
+        })
+        .groupby(reported["status"], sort=False)
+        .sum()
+    )
+    return types.MappingProxyType({
+        str(status): RewardSignCounts(*map(int, row))
+        for status, *row in counts.itertuples()
+    })
+
   def columns_of(
       self, diagnostics: schema_diagnostics.SchemaDiagnostics
   ) -> pd.DataFrame:
-    """Returns the columns of `diagnostics` in `df`, under their own names.
+    """Returns the frame that the run-level hooks of `diagnostics` receive.
+
+    `compute_run_summary` and `format_summary_columns` get one row per
+    trajectory of its `SCHEMA`, under its label in `df`: the core columns
+    (`COLUMN_DTYPES`) under their names, then the columns of `diagnostics`
+    under their own names.
 
     Args:
       diagnostics: An active schema diagnostics of the run.
@@ -611,12 +728,15 @@ class RunStats:
           f"Schema diagnostics {diagnostics.NAMESPACE!r} is not active in the"
           " run."
       )
-    return _columns_of(self.df, diagnostics)
+    return _columns_of(
+        self.df, diagnostics, self._schema_rows[diagnostics.NAMESPACE]
+    )
 
   def to_json_dict(self) -> RunStatsJson:
     """Returns the totals as a plain JSON-serializable dict."""
     status_counts = collections.Counter(self.status_counts).most_common()
     tool_counts = collections.Counter(self.tool_counts).most_common()
+    reward_signs = self.reward_signs_by_status
     return RunStatsJson(
         num_trajectories=self.num_trajectories,
         num_total_trajectories=(
@@ -629,6 +749,10 @@ class RunStats:
         num_with_tokens=self.num_with_tokens,
         status_counts=dict(status_counts),
         num_with_status=self.num_with_status,
+        reward_signs_by_status={
+            status: reward_signs[status].to_json_dict()
+            for status, _ in status_counts
+        },
         mean_reward=self.mean_reward,
         num_with_reward=self.num_with_reward,
         tool_counts=dict(tool_counts),
