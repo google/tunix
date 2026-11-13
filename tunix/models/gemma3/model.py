@@ -1027,7 +1027,9 @@ class Gemma3(BackendMappingMixin, nnx.Module):
       cache: Attention KV cache or None.
       attention_mask: transformer input mask.
       output_hidden_states: whether to output the hidden states.
-      skip_lm_head: whether to skip the final lm head.
+      skip_lm_head: whether to return the final normalized hidden states without
+        computing vocabulary logits. When ``output_hidden_states`` is also
+        True, the same hidden states are recorded in the NNX intermediate state.
       decode_only_last_token: whether to only compute the logits for the last
         token of the sequence. This saves a large amount of memory and compute
         during prefill, where only the last token's logits are used to sample
@@ -1035,9 +1037,10 @@ class Gemma3(BackendMappingMixin, nnx.Module):
       images: Input images. If None, the model will not process images.
 
     Returns:
-      predicted_logits, new_cache
+      predicted_logits or final hidden states, new_cache
 
-      predicted_logits: output logits predicted by the model
+      predicted_logits: output logits predicted by the model, or final
+        normalized hidden states when ``skip_lm_head`` is True.
       new_cache: updated cache if the input cache is not None, None elsewhere.
     """
     new_cache = None if cache is None else {}
