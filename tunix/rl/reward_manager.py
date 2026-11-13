@@ -61,9 +61,16 @@ def _fork_context():
 def _sum_trajectory_rewards(
     rewards: np.ndarray,
     env_rewards: np.ndarray | None = None,
+    propagate_nan: bool = False,
 ) -> np.ndarray:
-  """Sums per-trajectory reward-function columns, propagating NaN env rewards."""
-  fn_sum = np.nansum(rewards, axis=1)
+  """Sums per-trajectory reward-function columns, propagating NaN env rewards.
+
+  With `propagate_nan=True`, a NaN reward-function score also makes the total
+  NaN (see `AlgorithmConfig.mask_nan_rewards`).
+  """
+  fn_sum = (
+      np.sum(rewards, axis=1) if propagate_nan else np.nansum(rewards, axis=1)
+  )
   return fn_sum if env_rewards is None else env_rewards + fn_sum
 
 
@@ -416,7 +423,11 @@ class SequenceRewardManager(AbstractRewardManager):
 
       rewards[:, i] = np.array(r)
 
-    sum_rewards = _sum_trajectory_rewards(rewards, env_rewards)
+    sum_rewards = _sum_trajectory_rewards(
+        rewards,
+        env_rewards,
+        propagate_nan=self.algo_config.mask_nan_rewards,
+    )
     # Prepare metrics for logging.
     log_metrics = self._prepare_log_metrics(
         prompts,
