@@ -532,6 +532,14 @@ class RLEngine:
 
       if isinstance(self.cluster_config.rollout_config, dict):
         loaded_vllm_config = self.cluster_config.rollout_config[Mode.TRAIN]
+        max_num_logprobs = max(
+            cfg.num_logprobs
+            for cfg in self.cluster_config.rollout_config.values()
+        )
+        if max_num_logprobs != loaded_vllm_config.num_logprobs:
+          loaded_vllm_config = dataclasses.replace(
+              loaded_vllm_config, num_logprobs=max_num_logprobs
+          )
       else:
         loaded_vllm_config = self.cluster_config.rollout_config
 

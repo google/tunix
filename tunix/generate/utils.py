@@ -366,6 +366,37 @@ def get_logprobs_from_vllm_output(
   return extracted
 
 
+def get_topk_logprobs_from_vllm_output(
+    logprobs: Sequence[Optional[Dict[int, Any]]] | None, top_k: int
+) -> Tuple[np.ndarray, np.ndarray]:
+  """Returns the `[L, top_k]` most likely token ids and log probs per position.
+
+  Args:
+    logprobs: Per-position vLLM dicts mapping token id to `Logprob`, or `None` /
+      empty on zero-token generations.
+    top_k: Number of candidates to keep per position.
+
+  Returns:
+    `int32` ids and `float32` log probs, padded with `0` / `-inf` where a
+    position has fewer than `top_k` candidates.
+  """
+  if not logprobs:
+    return np.zeros((0, top_k), dtype=np.int32), np.empty(
+        (0, top_k), dtype=np.float32
+    )
+  topk_ids = np.zeros((len(logprobs), top_k), dtype=np.int32)
+  topk_logps = np.full((len(logprobs), top_k), -np.inf, dtype=np.float32)
+  for t, candidates in enumerate(logprobs):
+    if candidates is None:
+      raise ValueError(f'Missing vLLM logprobs at position {t}.')
+    best = sorted(
+        candidates.items(), key=lambda kv: (-kv[1].logprob, kv[0])
+    )[:top_k]
+    topk_ids[t, : len(best)] = [token_id for token_id, _ in best]
+    topk_logps[t, : len(best)] = [logprob.logprob for _, logprob in best]
+  return topk_ids, topk_logps
+
+
 def build_flat_dict(
     flat_state: Iterator[tuple[tuple[str, ...], nnx.State]],
     mappings: Dict[str, tuple[str, tuple[int, ...]]],

@@ -272,6 +272,31 @@ class AlgorithmConfigTest(parameterized.TestCase):
     )
     self.assertEqual(cfg_capped_seq_mask_tis.sampler_is_threshold, 5.0)
 
+  def test_grpo_config_score_centering_validation(self):
+    config = algorithm_config.GRPOConfig(
+        score_centering=True, sampler_is="token", score_centering_top_k=32
+    )
+    self.assertTrue(config.score_centering)
+    with self.assertRaisesRegex(ValueError, "score_centering_top_k"):
+      algorithm_config.GRPOConfig(score_centering_top_k=0)
+    with self.assertRaisesRegex(ValueError, "score_centering_eps"):
+      algorithm_config.GRPOConfig(score_centering_eps=0.0)
+    with self.assertRaisesRegex(ValueError, "'grpo' policy loss"):
+      algorithm_config.GRPOConfig(score_centering=True, policy_loss_fn="ppo")
+    with self.assertRaisesRegex(ValueError, "num_iterations == 1"):
+      algorithm_config.GRPOConfig(score_centering=True, num_iterations=2)
+    with self.assertRaisesRegex(ValueError, "does not support sampler_rs"):
+      algorithm_config.GRPOConfig(
+          score_centering=True,
+          sampler_rs="geometric",
+          sampler_rs_min=0.999,
+          sampler_rs_max=1.002,
+      )
+    with self.assertRaisesRegex(ValueError, "no-op with unclipped token IS"):
+      algorithm_config.GRPOConfig(
+          score_centering=True, sampler_is="token", sampler_is_threshold=None
+      )
+
   def test_grpo_config_custom_policy_loss_and_advantage(self):
     """Verifies GRPOConfig supports dynamically registered custom functions."""
     function_registry.register_policy_loss_fn("chicken_loss_custom_123")(
