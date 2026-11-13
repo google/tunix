@@ -23,7 +23,7 @@ bring-up, unregisters late-joining workers still in `REGISTERED`, and runs
 best-effort `stop()` across every remaining worker.
 """
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 import concurrent.futures
 import threading
 import time
@@ -90,8 +90,20 @@ class LifecycleDriver:
           tuple[datatypes.WorkerInfo, remote_execution.ActorHandle]
       ],
       dummy_data: Any = None,
+      *,
+      pre_compile_fn: (
+          Callable[
+              [
+                  Sequence[
+                      tuple[datatypes.WorkerInfo, remote_execution.ActorHandle]
+                  ]
+              ],
+              Mapping[str, Any] | None,
+          ]
+          | None
+      ) = None,
   ) -> None:
-    """Runs initialize -> verify -> compile -> start, phase by phase."""
+    """Runs initialize -> verify -> pre_compile_fn -> compile -> start."""
 
     def _init_worker(
         target: tuple[datatypes.WorkerInfo, remote_execution.ActorHandle],
@@ -129,15 +141,27 @@ class LifecycleDriver:
       list(pool.map(_init_worker, resolved_targets))
       if self._verify_fn is not None:
         self._verify_fn([info for info, _ in resolved_targets])
+      per_worker_dummy: Mapping[str, Any] = {}
+      if pre_compile_fn is not None:
+        resolved_dummies = pre_compile_fn(resolved_targets)
+        if resolved_dummies is not None:
+          per_worker_dummy = resolved_dummies
+
+      def _compile_worker(
+          target: tuple[datatypes.WorkerInfo, remote_execution.ActorHandle],
+      ) -> None:
+        info, handle = target
+        worker_dummy = (
+            per_worker_dummy[info.worker_id]
+            if info.worker_id in per_worker_dummy
+            else dummy_data
+        )
+        handle.submit("compile", worker_dummy)
+
       t_compile = time.monotonic()
       if worker_ids:
         logging.info("Lifecycle bring-up: starting compile for %s.", worker_ids)
-      list(
-          pool.map(
-              lambda target: target[1].submit("compile", dummy_data),
-              resolved_targets,
-          )
-      )
+      list(pool.map(_compile_worker, resolved_targets))
       if worker_ids:
         logging.info(
             "Lifecycle bring-up: finished compile for %s in %.2fs.",
@@ -163,6 +187,18 @@ class LifecycleDriver:
   def bring_up(
       self,
       dummy_data: Any = None,
+      *,
+      pre_compile_fn: (
+          Callable[
+              [
+                  Sequence[
+                      tuple[datatypes.WorkerInfo, remote_execution.ActorHandle]
+                  ]
+              ],
+              Mapping[str, Any] | None,
+          ]
+          | None
+      ) = None,
   ) -> None:
     """Runs initialize -> verify -> compile -> start across workers, phase by phase.
 
@@ -174,6 +210,11 @@ class LifecycleDriver:
 
     Args:
       dummy_data: Dummy data each worker uses to synthesize warmup dummies.
+      pre_compile_fn: Optional hook called after `initialize` and `verify_fn`
+        and before `compile`. Receives the active bring-up `(WorkerInfo,
+        ActorHandle)` targets and optionally returns a `worker_id -> dummy_data`
+        mapping overriding `dummy_data` for those workers (including explicit
+        `None`).
 
     Raises:
       RuntimeError: If a target worker was unregistered or re-registered with a
@@ -182,7 +223,9 @@ class LifecycleDriver:
     targets = self._registry.targets(
         statuses=(worker_registry.AdmissionStatus.REGISTERED,)
     )
-    self._run_bring_up_phases(targets, dummy_data)
+    self._run_bring_up_phases(
+        targets, dummy_data, pre_compile_fn=pre_compile_fn
+    )
     for info, handle in targets:
       if not self._registry.set_status(
           info.worker_id,

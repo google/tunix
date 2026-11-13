@@ -12,12 +12,85 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping
 import dataclasses
+from typing import Any, Generic, Protocol, TypeAlias, TypeVar, runtime_checkable
 from absl import logging
 from tunix.common import configs as common_configs
 from tunix.common import datatypes as common_datatypes
 from tunix.rl import function_registry
+
+TensorT = TypeVar("TensorT")
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class PolicyLossInputs(Generic[TensorT]):
+  """Framework-neutral token-level inputs to a narrow policy loss kernel.
+
+  Attributes:
+    per_token_logps: Current-policy per-token log-probabilities.
+    completion_mask: Binary or float mask identifying valid completion tokens.
+    advantages: Sequence- or token-level advantage values.
+    old_per_token_logps: Optional behavior-policy per-token log-probabilities.
+    ref_per_token_logps: Optional reference-policy per-token log-probabilities.
+    sampler_is_weights: Optional per-token importance sampling weights.
+    segment_ids: Optional packing segment IDs for 1D packed batches.
+    num_segments: Optional static upper bound on segments per packed row.
+    sampler_agreement_applied: Whether sampler-agreement gating/IS was already
+      applied on the orchestrator side.
+  """
+
+  per_token_logps: TensorT
+  completion_mask: TensorT
+  advantages: TensorT
+  old_per_token_logps: TensorT | None = None
+  ref_per_token_logps: TensorT | None = None
+  sampler_is_weights: TensorT | None = None
+  segment_ids: TensorT | None = None
+  num_segments: int | None = None
+  sampler_agreement_applied: bool = False
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class PolicyLossOutput(Generic[TensorT]):
+  """Unreduced scalar tensor outputs of a narrow policy loss kernel.
+
+  Attributes:
+    loss_sum: Unreduced primary policy loss scalar tensor.
+    denominator: Reduction denominator corresponding to `loss_sum`.
+    metrics: Auxiliary scalar tensor metrics keyed by metric name.
+    token_denom: Optional token-count denominator for auxiliary metrics.
+  """
+
+  loss_sum: TensorT
+  denominator: TensorT
+  metrics: Mapping[str, TensorT] = dataclasses.field(default_factory=dict)
+  token_denom: TensorT | None = None
+
+
+@runtime_checkable
+class PolicyLossPlugin(Protocol[TensorT]):
+  """Framework-neutral L5 protocol for named policy loss plugins."""
+
+  def validate(
+      self,
+      algo_config: "AlgorithmConfig",
+      *,
+      fuse_agreement_in_loss: bool = False,
+  ) -> None:
+    ...
+
+  def __call__(
+      self,
+      inputs: PolicyLossInputs[TensorT],
+      algo_config: "AlgorithmConfig",
+  ) -> PolicyLossOutput[TensorT]:
+    ...
+
+
+PolicyLossFn: TypeAlias = Callable[
+    [PolicyLossInputs[Any], "AlgorithmConfig"], PolicyLossOutput[Any]
+]
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)

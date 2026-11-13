@@ -335,10 +335,12 @@ class GradientAccumulator(nnx.Module):
     gradients.
     """
     if self.persistent:
+
       def _zero_in_place(v):
         # `x * 0` rather than `jnp.zeros_like(x)`, to preserve the buffer's
         # sharding.
         v.set_value(v[...] * 0)
+
       jax.tree_util.tree_map(
           _zero_in_place,
           self.grads,
@@ -404,6 +406,45 @@ def _cast_state_to_target_dtypes(
       converted_leaves.append(src_leaf)
 
   return jax.tree_util.tree_unflatten(src_treedef, converted_leaves)
+
+
+def _contains_target_param_spec(node: Any) -> bool:
+  """Returns whether `node` contains any `datatypes.TargetParamSpec` leaf."""
+  if isinstance(node, datatypes.TargetParamSpec):
+    return True
+  if isinstance(node, Mapping):
+    return any(_contains_target_param_spec(v) for v in node.values())
+  if isinstance(node, (list, tuple)):
+    return any(_contains_target_param_spec(v) for v in node)
+  return False
+
+
+def _rehydrate_target_state_node(node: Any) -> Any:
+  """Converts `TargetParamSpec` leaves and mapping containers to NNX state."""
+  if isinstance(node, datatypes.TargetParamSpec):
+    return nnx.Param(
+        jax.ShapeDtypeStruct(shape=node.shape, dtype=jnp.dtype(node.dtype))
+    )
+  if isinstance(node, Mapping):
+    return nnx.State(
+        {k: _rehydrate_target_state_node(v) for k, v in node.items()}
+    )
+  if isinstance(node, list):
+    return [_rehydrate_target_state_node(v) for v in node]
+  if isinstance(node, tuple):
+    return tuple(_rehydrate_target_state_node(v) for v in node)
+  return node
+
+
+def _rehydrate_target_state(target_state: Any) -> Any:
+  """Rehydrates a serialized `TargetParamSpec` dict tree into `nnx.State`."""
+  if target_state is None or isinstance(target_state, nnx.State):
+    return target_state
+  if isinstance(target_state, Mapping) and (
+      not target_state or _contains_target_param_spec(target_state)
+  ):
+    return _rehydrate_target_state_node(target_state)
+  return target_state
 
 
 class PeftTrainer(abstract_trainer.AbstractTrainer):
@@ -567,7 +608,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self.data_hooks = data_hooks
 
   def set_target_state(self, target_state: Any) -> None:
-    self._target_state = target_state
+    self._target_state = _rehydrate_target_state(target_state)
 
   def clear_jit_cache(self):
     """Clears the JIT cache of the train and eval step functions.
@@ -1225,9 +1266,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     return self._record_update(grad_norm)
 
   @override
-  def compile(
-      self, dummy_data: datatypes.TrainerPayload | None = None
-  ) -> None:
+  def compile(self, dummy_data: datatypes.TrainerPayload | None = None) -> None:
     """Pre-compiles jitted trainer step executables ahead of time."""
     if dummy_data is None:
       return
@@ -1273,7 +1312,8 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     mode is set to EVAL and buffered metrics are written on exit.
     """
     _, _, eval_step_fn = self.jit_fwd_bwd_update_and_eval_step(
-        skip_jit=skip_jit, cache_nnx_graph=cache_nnx_graph,
+        skip_jit=skip_jit,
+        cache_nnx_graph=cache_nnx_graph,
     )
     loss, aux = eval_step_fn(self._prepare_payload(payload))
     loss = jax.lax.stop_gradient(loss)

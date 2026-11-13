@@ -144,22 +144,72 @@ class ClusterOrchestrator:
     else:
       self.shutdown()
 
-  def bring_up_workers(self, dummy_data: Any = None) -> None:
+  def bring_up_workers(
+      self,
+      dummy_data: Any = None,
+      *,
+      program: rl_program.RLProgram | None = None,
+  ) -> None:
     """Brings up registered workers and enables late rollout registration.
 
     Rollout workers that register afterwards are brought up in the background
     and staged in `PENDING_WEIGHT_SYNC` until the next weight sync (or promoted
     directly to `ACTIVE` when weight sync is disabled).
+
+    Args:
+      dummy_data: Default dummy data passed to worker `compile` RPCs.
+      program: Optional program whose trainer loss configuration and dummy
+        precompile layout are applied before the lifecycle `compile` phase.
     """
     logging.info(
         "Bringing up %d registered worker(s)...",
         len(self.registry),
     )
-    self.lifecycle_driver.bring_up(dummy_data)
+    pre_configured_specs: dict[Any, tuple[Any, ...]] = {}
+    if isinstance(program, rl_program.StandardRLProgram):
+
+      def _pre_compile(targets: Sequence[tuple[datatypes.WorkerInfo, Any]]):
+        per_worker_dummy: dict[str, Any] = {}
+        for info, handle in targets:
+          if datatypes.Role.ACTOR.value not in info.roles:
+            continue
+          spec_key = distributed_rl_engine.configure_trainer_handle(
+              handle,
+              algo_config=program.algo_config,
+              role=datatypes.Role.ACTOR,
+              loss_fn=program.loss_fn,
+              pad_id=program.pad_id,
+              eos_id=program.eos_id,
+              can_fuse_agreement_in_loss=program.can_fuse_agreement_in_loss,
+              return_routed_experts=program.rollout_returns_routed_experts,
+          )
+          pre_configured_specs[handle] = spec_key
+          if program.precompile_trainer and dummy_data is None:
+            per_worker_dummy[info.worker_id] = (
+                distributed_rl_engine.build_trainer_dummy_payload(
+                    program.algo_config,
+                    program.assembler,
+                    can_fuse_agreement_in_loss=(
+                        program.can_fuse_agreement_in_loss
+                    ),
+                    return_routed_experts=(
+                        program.rollout_returns_routed_experts
+                    ),
+                )
+            )
+          else:
+            per_worker_dummy[info.worker_id] = dummy_data
+        return per_worker_dummy
+
+      self.lifecycle_driver.bring_up(dummy_data, pre_compile_fn=_pre_compile)
+    else:
+      self.lifecycle_driver.bring_up(dummy_data)
     self.lifecycle_driver.enable_late_registration(
         require_weight_sync=self._weight_sync_enabled
     )
     self.engine = self._create_engine()
+    for handle, spec_key in pre_configured_specs.items():
+      self.engine.record_configured_trainer_spec(handle, spec_key)
     logging.info("All workers brought up successfully.")
 
   def _verify_rollout_workers(
@@ -281,7 +331,7 @@ class ClusterOrchestrator:
       **kwargs: Additional keyword arguments forwarded to program.run.
     """
     if bring_up:
-      self.bring_up_workers(dummy_data=dummy_data)
+      self.bring_up_workers(dummy_data=dummy_data, program=program)
 
     self.monitor.poll(statuses=(worker_registry.AdmissionStatus.ACTIVE,))
     logging.info("Executing program %s...", type(program).__name__)

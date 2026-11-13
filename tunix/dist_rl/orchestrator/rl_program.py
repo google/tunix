@@ -502,6 +502,7 @@ class StandardRLProgram(RLProgram):
       max_version_span: int | None = None,
       sync_weights: bool = True,
       precompile_trainer: bool = True,
+      loss_fn: str | algorithm_config.PolicyLossFn | None = None,
       metrics_logging_options: MetricsLoggerOptions | None = None,
       trajectory_log_dir: str | None = None,
       trajectory_store: trajectory_store_lib.TrajectoryStore | None = None,
@@ -549,10 +550,7 @@ class StandardRLProgram(RLProgram):
       )
     self.algo_config.temperature = rollout_temperature
     self._relay: relay_coordinator.RelayCoordinator | None = None
-    if (
-        rollout_returns_routed_experts
-        and use_routed_experts_relay is not False
-    ):
+    if rollout_returns_routed_experts and use_routed_experts_relay is not False:
       try:
         datatypes.resolve_routed_experts_wire_encoding(
             self.algo_config.routed_experts_encode_mode,
@@ -652,6 +650,7 @@ class StandardRLProgram(RLProgram):
     self.max_version_span = max_version_span
     self.sync_weights = sync_weights
     self.precompile_trainer = precompile_trainer
+    self.loss_fn = loss_fn
     self.metrics_logger: MetricsLogger = MetricsLogger(metrics_logging_options)
     if trajectory_log_dir is None and metrics_logging_options is not None:
       log_dir = getattr(metrics_logging_options, "log_dir", "")
@@ -761,6 +760,10 @@ class StandardRLProgram(RLProgram):
   @property
   def trajectory_store(self) -> trajectory_store_lib.TrajectoryStore | None:
     return self._trajectory_store
+
+  @property
+  def rollout_returns_routed_experts(self) -> bool:
+    return self._rollout_returns_routed_experts
 
   def _on_scored_group_dropped(self, group: ScoredGroup) -> None:
     """Releases staged routing refs owned by a dropped `ScoredGroup`."""
@@ -1425,7 +1428,10 @@ class StandardRLProgram(RLProgram):
       self._log_metric(name, val, log_step)
     # A step whose groups all lack valid trajectories has no reward summary.
     reward_mean, reward_std = (
-        (step_reward_metrics["rewards/mean"], step_reward_metrics["rewards/std"])
+        (
+            step_reward_metrics["rewards/mean"],
+            step_reward_metrics["rewards/std"],
+        )
         if "rewards/mean" in step_reward_metrics
         else (0.0, 0.0)
     )
@@ -2348,8 +2354,8 @@ class StandardRLProgram(RLProgram):
           pad_id=self.pad_id,
           eos_id=self.eos_id,
           can_fuse_agreement_in_loss=self.can_fuse_agreement_in_loss,
-          precompile=self.precompile_trainer,
           return_routed_experts=self._rollout_returns_routed_experts,
+          **({"loss_fn": self.loss_fn} if self.loss_fn is not None else {}),
       )
 
       if self.sync_weights:

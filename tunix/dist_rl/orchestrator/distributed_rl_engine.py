@@ -25,6 +25,7 @@ import bisect
 import collections
 from collections.abc import Iterable, Mapping, Sequence
 import concurrent.futures
+import dataclasses
 import inspect
 import itertools
 import math
@@ -42,9 +43,7 @@ from tunix.dist_rl.orchestrator import rl_engine_interface
 from tunix.dist_rl.orchestrator import worker_registry
 from tunix.dist_rl.worker import remote_execution
 from tunix.dist_rl.worker import task_session
-from tunix.rl import algo_core
 from tunix.rl import algorithm_config
-from tunix.rl import function_registry
 
 _summarize_list = logging_utils.summarize_list
 # Maximum number of contiguous trajectories per prompt stripe.
@@ -57,6 +56,140 @@ _WEIGHT_SYNC_DESTINATION_STATUSES = (
     worker_registry.AdmissionStatus.ACTIVE,
     worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
 )
+
+
+def _hashable_spec_value(value: Any) -> Any:
+  """Converts a trainer config/loss value into a deterministically hashable key."""
+  if isinstance(value, Mapping):
+    return tuple(sorted((k, _hashable_spec_value(v)) for k, v in value.items()))
+  if isinstance(value, (list, tuple)):
+    return tuple(_hashable_spec_value(v) for v in value)
+  if dataclasses.is_dataclass(value) and not isinstance(value, type):
+    return (
+        type(value),
+        tuple(
+            (f.name, _hashable_spec_value(getattr(value, f.name)))
+            for f in dataclasses.fields(value)
+        ),
+    )
+  try:
+    hash(value)
+    return value
+  except TypeError:
+    return id(value)
+
+
+def _resolve_trainer_loss_spec(
+    role: datatypes.Role,
+    algo_config: algorithm_config.AlgorithmConfig,
+    loss_fn: str | algorithm_config.PolicyLossFn | None,
+) -> tuple[Any, ...]:
+  """Validates `role`/`algo_config` and returns `(resolved_loss_fn, ...)`."""
+  if role == datatypes.Role.CRITIC:
+    # TODO(sizhi): The PPO critic is not supported end to end yet:
+    # `create_trainer_payloads` never fills `old_values` and
+    # `build_dummy_payload` carries no `returns` / `old_values`, so the value
+    # loss cannot be precompiled or trained. This branch only wires the loss.
+    if not isinstance(algo_config, algorithm_config.PPOConfig):
+      raise ValueError(
+          "Configuring a CRITIC trainer worker requires a PPOConfig"
+          f" (with value_loss_fn), got {type(algo_config).__name__}."
+      )
+    resolved_loss_fn = algo_config.value_loss_fn if loss_fn is None else loss_fn
+  elif role == datatypes.Role.ACTOR:
+    resolved_loss_fn = (
+        algo_config.policy_loss_fn if loss_fn is None else loss_fn
+    )
+  else:
+    raise ValueError(f"Unsupported trainer role: {role!r}")
+  return (resolved_loss_fn,)
+
+
+def _trainer_spec_key(
+    *,
+    role: datatypes.Role,
+    resolved_loss_fn: str | algorithm_config.PolicyLossFn,
+    algo_config: algorithm_config.AlgorithmConfig,
+    pad_id: int,
+    eos_id: int,
+    can_fuse_agreement_in_loss: bool,
+    return_routed_experts: bool,
+) -> tuple[Any, ...]:
+  """Builds a hashable spec key identifying a trainer worker's loss wiring."""
+  return (
+      role,
+      _hashable_spec_value(resolved_loss_fn),
+      _hashable_spec_value(algo_config),
+      int(pad_id),
+      int(eos_id),
+      bool(can_fuse_agreement_in_loss),
+      bool(return_routed_experts),
+  )
+
+
+def build_trainer_dummy_payload(
+    algo_config: algorithm_config.AlgorithmConfig,
+    assembler: batch_assembly.BatchAssembler[Any],
+    *,
+    can_fuse_agreement_in_loss: bool = True,
+    return_routed_experts: bool = False,
+) -> datatypes.RLTrainerPayload:
+  """Builds a synthetic dummy microbatch matching the trainer's static step layout."""
+  use_rollout_logps = bool(algo_config.use_rollout_logps)
+  sampler_agreement_applied = (
+      use_rollout_logps and not can_fuse_agreement_in_loss
+  )
+  with_sampler_is_weights = sampler_agreement_applied and (
+      algo_config.sampler_is is not None or algo_config.sampler_rs is not None
+  )
+  routed_experts_encode_mode = (
+      algo_config.routed_experts_encode_mode
+      if return_routed_experts
+      else "auto"
+  )
+  return assembler.build_dummy_payload(
+      with_old_per_token_logps=use_rollout_logps,
+      with_ref_per_token_logps=algo_config.requires_reference_kl,
+      with_sampler_is_weights=with_sampler_is_weights,
+      sampler_agreement_applied=sampler_agreement_applied,
+      with_routed_experts=return_routed_experts,
+      routed_experts_encode_mode=routed_experts_encode_mode,
+  )
+
+
+def configure_trainer_handle(
+    worker: remote_execution.ActorHandle,
+    *,
+    algo_config: algorithm_config.AlgorithmConfig,
+    role: datatypes.Role = datatypes.Role.ACTOR,
+    loss_fn: str | algorithm_config.PolicyLossFn | None = None,
+    pad_id: int = 0,
+    eos_id: int = 0,
+    can_fuse_agreement_in_loss: bool = True,
+    return_routed_experts: bool = False,
+) -> tuple[Any, ...]:
+  """Configures one trainer handle via `with_loss_fn` and returns its spec key."""
+  (resolved_loss_fn,) = _resolve_trainer_loss_spec(role, algo_config, loss_fn)
+  spec_key = _trainer_spec_key(
+      role=role,
+      resolved_loss_fn=resolved_loss_fn,
+      algo_config=algo_config,
+      pad_id=pad_id,
+      eos_id=eos_id,
+      can_fuse_agreement_in_loss=can_fuse_agreement_in_loss,
+      return_routed_experts=return_routed_experts,
+  )
+  worker.submit(
+      "with_loss_fn",
+      resolved_loss_fn,
+      algo_config=algo_config,
+      role=role,
+      pad_id=int(pad_id),
+      eos_id=int(eos_id),
+      fuse_agreement_in_loss=bool(can_fuse_agreement_in_loss),
+      return_routed_experts=bool(return_routed_experts),
+  )
+  return spec_key
 
 
 def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
@@ -369,6 +502,17 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     self._staging_overcommit_factor: float = 1.0
     self._evicted_release_skips_total: int = 0
     self._rollout_epoch: int = 0
+    self._configured_trainer_specs: dict[
+        remote_execution.ActorHandle, tuple[Any, ...]
+    ] = {}
+
+  def record_configured_trainer_spec(
+      self,
+      worker: remote_execution.ActorHandle,
+      spec_key: tuple[Any, ...],
+  ) -> None:
+    """Records the loss configuration spec already applied to `worker`."""
+    self._configured_trainer_specs[worker] = spec_key
 
   def _rollout_handles(self) -> list[remote_execution.ActorHandle]:
     return self._registry.handles(datatypes.Role.ROLLOUT)
@@ -402,13 +546,19 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       role: datatypes.Role,
   ) -> None:
     """Seeds trainer-side weight sync with the rollout target-state skeleton."""
-    trainer = self._role_handle(role)
+    targets = self._registry.targets(
+        role, statuses=(worker_registry.AdmissionStatus.ACTIVE,)
+    )
+    if not targets:
+      return
+
+    trainer = targets[0][1]
     # Match the weight sync destinations: a rejoined rollout worker still in
     # PENDING_WEIGHT_SYNC can seed the trainer before its first sync.
     rollout_handles = self._registry.handles(
         datatypes.Role.ROLLOUT, statuses=_WEIGHT_SYNC_DESTINATION_STATUSES
     )
-    if trainer is None or not rollout_handles:
+    if not rollout_handles:
       return
 
     rollout = rollout_handles[0]
@@ -744,15 +894,13 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     if not requests:
       return []
 
-    results = await asyncio.gather(
-        *(
-            self._rollout_session.route(req.traj_id).asubmit(
-                "generate",
-                requests=[req],
-            )
-            for req in requests
+    results = await asyncio.gather(*(
+        self._rollout_session.route(req.traj_id).asubmit(
+            "generate",
+            requests=[req],
         )
-    )
+        for req in requests
+    ))
     raw_items = [
         item
         for sublist in results
@@ -939,25 +1087,22 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       assembler: batch_assembly.BatchAssembler[Any],
       **kwargs: Any,
   ) -> None:
-    """Configures worker(s) under the specified role with algorithm or runtime settings.
-
-    For trainer roles this registers the loss and model-input functions, then
-    precompiles the trainer step executables against a dummy microbatch built
-    by `assembler.build_dummy_payload(...)`, so the first real train step does
-    not stall on XLA compilation.
+    """Configures worker(s) under the specified role with algorithm settings.
 
     Args:
       role: Target worker role to configure (defaults to `Role.ACTOR`).
-      algo_config: Algorithm configuration used to resolve the loss and
-        model-input functions.
-      assembler: Batch assembler used to build the dummy microbatch for
-        ahead-of-time compilation.
+      algo_config: Algorithm configuration forwarded to the trainer worker.
+      assembler: Batch assembler providing tokenizer padding defaults.
       **kwargs: Role-specific configuration options (for trainer roles:
-        `can_fuse_agreement_in_loss: bool = True`, `precompile: bool = True`,
-        `return_routed_experts: bool = False`, and `pad_id` / `eos_id`.
-        `StandardRLProgram` passes both from its `BatchConfig`; direct callers
-        may omit them, in which case `pad_id` is read from the assembler and
-        `eos_id` defaults to `pad_id`).
+        `loss_fn: str | PolicyLossFn | None = None`,
+        `can_fuse_agreement_in_loss: bool = True`, `return_routed_experts: bool
+        = False`, and `pad_id` / `eos_id`. `StandardRLProgram` passes both from
+        its `BatchConfig`; direct callers may omit them, in which case `pad_id`
+        is read from the assembler and `eos_id` defaults to `pad_id`).
+
+    Raises:
+      ValueError: If `algo_config` or `assembler` is missing, no active worker
+        is registered for `role`, or `Role.CRITIC` receives a non-`PPOConfig`.
     """
     role_name = role.value if isinstance(role, datatypes.Role) else str(role)
     if algo_config is None:
@@ -970,86 +1115,58 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       )
     match role:
       case datatypes.Role.ACTOR | datatypes.Role.CRITIC:
-        worker = self._role_handle(role)
-        if worker is None:
-          raise ValueError(f"No trainer worker registered for role {role_name}")
-        logging.info(
-            "Auto-configuring trainer loss and model input fn on %s worker...",
-            role_name,
+        targets = self._registry.targets(
+            role, statuses=(worker_registry.AdmissionStatus.ACTIVE,)
         )
+        if not targets:
+          raise ValueError(f"No trainer worker registered for role {role_name}")
+        worker = targets[0][1]
         pad_id = kwargs.get("pad_id", assembler.pad_id)
         eos_id = kwargs.get("eos_id", pad_id)
         can_fuse_agreement_in_loss = bool(
             kwargs.get("can_fuse_agreement_in_loss", True)
         )
-        precompile = bool(kwargs.get("precompile", True))
         return_routed_experts = bool(kwargs.get("return_routed_experts", False))
-        if role == datatypes.Role.CRITIC:
-          # TODO(sizhi): The PPO critic is not supported end to end yet:
-          # `create_trainer_payloads` never fills `old_values` and
-          # `build_dummy_payload` carries no `returns` / `old_values`, so the
-          # value loss cannot be precompiled or trained. This branch only wires
-          # the loss and model-input functions.
-          if not isinstance(algo_config, algorithm_config.PPOConfig):
-            raise ValueError(
-                "Configuring a CRITIC trainer worker requires a PPOConfig"
-                f" (with value_loss_fn), got {type(algo_config).__name__}."
-            )
-          loss_fn = function_registry.get_value_loss_fn(
-              algo_config.value_loss_fn
-          )
-          gen_fn = algo_core.build_critic_model_input_fn(
-              algo_config,
-              pad_id=pad_id,
-              eos_id=eos_id,
-          )
-        else:
-          loss_fn = function_registry.get_policy_loss_fn(
-              algo_config.policy_loss_fn
-          )
-          gen_fn = algo_core.build_gen_model_input_fn(
-              algo_config,
-              pad_id=pad_id,
-              eos_id=eos_id,
-          )
-        use_rollout_logps = algo_config.use_rollout_logps
-        sampler_agreement_applied = (
-            use_rollout_logps and not can_fuse_agreement_in_loss
-        )
-        with_sampler_is_weights = sampler_agreement_applied and (
-            algo_config.sampler_is is not None
-            or algo_config.sampler_rs is not None
-        )
+        loss_fn = kwargs.get("loss_fn")
 
-        def _configure():
-          assert worker is not None
-          # Both setters clear the trainer's JIT cache, so the ahead-of-time
-          # compile must run strictly after them.
-          worker.submit("with_loss_fn", loss_fn, has_aux=True)
-          worker.submit("with_gen_model_input_fn", gen_fn)
-          if not precompile:
-            return
-          routed_experts_encode_mode = (
-              algo_config.routed_experts_encode_mode
-              if return_routed_experts
-              else "auto"
-          )
-          dummy_payload = assembler.build_dummy_payload(
-              with_old_per_token_logps=use_rollout_logps,
-              with_ref_per_token_logps=algo_config.requires_reference_kl,
-              with_sampler_is_weights=with_sampler_is_weights,
-              sampler_agreement_applied=sampler_agreement_applied,
-              with_routed_experts=return_routed_experts,
-              routed_experts_encode_mode=routed_experts_encode_mode,
-          )
-          # TODO(tunix-dev): Move to the worker lifecycle (e.g., the
-          # `initialize` step) so pre-compilation runs during the standard
-          # lifecycle `compile` phase instead of re-compiling here.
+        (resolved_loss_fn,) = _resolve_trainer_loss_spec(
+            role, algo_config, loss_fn
+        )
+        spec_key = _trainer_spec_key(
+            role=role,
+            resolved_loss_fn=resolved_loss_fn,
+            algo_config=algo_config,
+            pad_id=pad_id,
+            eos_id=eos_id,
+            can_fuse_agreement_in_loss=can_fuse_agreement_in_loss,
+            return_routed_experts=return_routed_experts,
+        )
+        if self._configured_trainer_specs.get(worker) == spec_key:
           logging.info(
-              "Precompiling trainer step executables on %s worker...",
+              "Skipping redundant trainer configuration on %s worker"
+              " (spec unchanged).",
               role_name,
           )
-          worker.submit("compile", dummy_payload)
+          return
+
+        logging.info(
+            "Configuring trainer loss on %s worker...",
+            role_name,
+        )
+
+        def _configure() -> None:
+          assert worker is not None
+          recorded_key = configure_trainer_handle(
+              worker,
+              algo_config=algo_config,
+              role=role,
+              loss_fn=loss_fn,
+              pad_id=pad_id,
+              eos_id=eos_id,
+              can_fuse_agreement_in_loss=can_fuse_agreement_in_loss,
+              return_routed_experts=return_routed_experts,
+          )
+          self.record_configured_trainer_spec(worker, recorded_key)
 
         try:
           loop = asyncio.get_running_loop()

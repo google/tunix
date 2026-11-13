@@ -414,6 +414,65 @@ class AlgorithmConfigTest(parameterized.TestCase):
       with self.assertRaisesRegex(ValueError, "positive int or None"):
         algorithm_config.GRPOConfig(max_consecutive_filtered_groups=bad_limit)
 
+  def test_narrow_policy_loss_dataclasses_and_fn(self):
+    inputs = algorithm_config.PolicyLossInputs(
+        per_token_logps=[[-0.5, -0.2]],
+        completion_mask=[[1.0, 1.0]],
+        advantages=[1.0],
+    )
+    self.assertIsNone(inputs.old_per_token_logps)
+    self.assertIsNone(inputs.ref_per_token_logps)
+    self.assertIsNone(inputs.sampler_is_weights)
+    self.assertIsNone(inputs.segment_ids)
+    self.assertIsNone(inputs.num_segments)
+    self.assertFalse(inputs.sampler_agreement_applied)
+
+    with self.assertRaises(TypeError):
+      algorithm_config.PolicyLossInputs([[-0.5]], [[1.0]], [1.0])  # type: ignore[misc]
+    with self.assertRaises(TypeError):
+      algorithm_config.PolicyLossOutput(0.7, 2.0)  # type: ignore[misc]
+
+    default_out = algorithm_config.PolicyLossOutput(
+        loss_sum=0.7,
+        denominator=2.0,
+    )
+    self.assertEqual(default_out.metrics, {})
+    self.assertIsNone(default_out.token_denom)
+
+    class _ValidPlugin:
+
+      def validate(
+          self,
+          algo_config: algorithm_config.AlgorithmConfig,
+          *,
+          fuse_agreement_in_loss: bool = False,
+      ) -> None:
+        del algo_config, fuse_agreement_in_loss
+
+      def __call__(
+          self,
+          loss_inputs: algorithm_config.PolicyLossInputs[list[list[float]]],
+          cfg: algorithm_config.AlgorithmConfig,
+      ) -> algorithm_config.PolicyLossOutput[float]:
+        del cfg
+        token_count = sum(sum(row) for row in loss_inputs.completion_mask)
+        return algorithm_config.PolicyLossOutput(
+            loss_sum=-sum(sum(row) for row in loss_inputs.per_token_logps),
+            denominator=float(len(loss_inputs.advantages)),
+            metrics={"clipfrac": 0.25},
+            token_denom=token_count,
+        )
+
+    plugin = _ValidPlugin()
+    self.assertIsInstance(plugin, algorithm_config.PolicyLossPlugin)
+    self.assertNotIsInstance(object(), algorithm_config.PolicyLossPlugin)
+
+    loss_fn: algorithm_config.PolicyLossFn = plugin
+    out = loss_fn(inputs, algorithm_config.GRPOConfig())
+    self.assertAlmostEqual(out.loss_sum, 0.7)
+    self.assertAlmostEqual(out.denominator, 1.0)
+    self.assertEqual(out.metrics, {"clipfrac": 0.25})
+    self.assertAlmostEqual(out.token_denom, 2.0)
 
 if __name__ == "__main__":
   absltest.main()
