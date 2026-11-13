@@ -16,21 +16,116 @@
 
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+from collections.abc import Mapping
+from typing import Any, Protocol, TYPE_CHECKING, runtime_checkable
 
 from flax import nnx
-import jax
+import jax.numpy as jnp
 from tunix.common import configs
+from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.rollout import sampler as base_sampler_lib
 
 
-class RaidenDestinationWeightSyncMixin:
+def _serialize_target_state_tree(node: Any) -> Any:
+  """Serializes an NNX/array state tree to plain dicts and TargetParamSpecs."""
+  if isinstance(node, nnx.Variable):
+    value = node.value
+    return datatypes.TargetParamSpec(
+        shape=tuple(int(d) for d in value.shape),
+        dtype=jnp.dtype(value.dtype).name,
+    )
+  if hasattr(node, "shape") and hasattr(node, "dtype"):
+    return datatypes.TargetParamSpec(
+        shape=tuple(int(d) for d in node.shape),
+        dtype=jnp.dtype(node.dtype).name,
+    )
+  if isinstance(node, Mapping):
+    return {k: _serialize_target_state_tree(v) for k, v in node.items()}
+  if isinstance(node, list):
+    return [_serialize_target_state_tree(v) for v in node]
+  if isinstance(node, tuple):
+    return tuple(_serialize_target_state_tree(v) for v in node)
+  return node
+
+
+if TYPE_CHECKING:
+  from tunix.dist_rl.weight_sync import weight_sync  # pylint: disable=g-import-not-at-top
+
+
+@runtime_checkable
+class DestinationWeightSyncDelegate(Protocol):
+  """Protocol for destination-side weight sync delegates (Raiden, basic, etc.)."""
+
+  @property
+  def serving_corrupted(self) -> bool:
+    ...
+
+  @property
+  def has_uncommitted_mutation(self) -> bool:
+    ...
+
+  def is_bounded(self) -> bool:
+    ...
+
+  def close(self) -> None:
+    ...
+
+  async def get_weight_sync_metadata(
+      self, **kwargs: Any
+  ) -> list[weight_sync.WorkUnitMetadata]:
+    ...
+
+  async def bind_weight_sync(self, **kwargs: Any) -> Any:
+    ...
+
+  async def pre_weight_sync(
+      self,
+      sync_request: base_sampler_lib.WeightSyncRequest,
+      **kwargs: Any,
+  ) -> Any:
+    ...
+
+  async def weight_sync(
+      self,
+      sync_request: base_sampler_lib.WeightSyncRequest,
+      **kwargs: Any,
+  ) -> Any:
+    ...
+
+  async def post_weight_sync(
+      self,
+      sync_request: base_sampler_lib.WeightSyncRequest,
+      **kwargs: Any,
+  ) -> Any:
+    ...
+
+  async def abort_weight_sync(
+      self,
+      sync_request: base_sampler_lib.WeightSyncRequest,
+      **kwargs: Any,
+  ) -> Any:
+    ...
+
+  def get_weight_sync_status(self) -> Mapping[str, Any]:
+    ...
+
+
+class DestinationWeightSyncMixin:
   """Mixin providing destination-side weight sync hooks for samplers."""
 
   server_id: str
   config: configs.RolloutConfig
-  enable_raiden: bool
-  raiden_sync_delegate: Any
+  enable_raiden: bool = False
+  raiden_sync_delegate: Any = None
+  _sync_delegate: DestinationWeightSyncDelegate | None = None
+
+  def _get_active_delegate(self) -> DestinationWeightSyncDelegate | None:
+    if self._sync_delegate is not None:
+      return self._sync_delegate
+    if self.enable_raiden:
+      return self.raiden_sync_delegate
+    return None
 
   @property
   def transformer_state(self) -> Any:
@@ -81,11 +176,12 @@ class RaidenDestinationWeightSyncMixin:
     )
 
   def _check_weight_sync_boundness(self) -> None:
-    """Verifies that the Raiden delegate has been bound before executing sync phases."""
-    if not self.enable_raiden:
+    """Verifies that the weight sync delegate has been bound before executing sync phases."""
+    delegate = self._get_active_delegate()
+    if delegate is None:
       return
 
-    if not self.raiden_sync_delegate.is_bounded():
+    if not delegate.is_bounded():
       raise RuntimeError(
           f"{self.__class__.__name__} [{self.server_id}] weight sync delegate"
           " is not bounded."
@@ -95,12 +191,13 @@ class RaidenDestinationWeightSyncMixin:
     """Returns sharding specs and layout metadata across devices for weights."""
     self._check_weight_sync_boundness()
 
-    if self.enable_raiden:
-      return await self.raiden_sync_delegate.get_weight_sync_metadata(**kwargs)
+    delegate = self._get_active_delegate()
+    if delegate is not None:
+      return await delegate.get_weight_sync_metadata(**kwargs)
 
     raise NotImplementedError(
         f"{self.__class__.__name__} [{self.server_id}] does not support"
-        " get_weight_sync_metadata when Raiden is disabled."
+        " get_weight_sync_metadata when weight sync is disabled."
     )
 
   async def bind_weight_sync(
@@ -109,27 +206,22 @@ class RaidenDestinationWeightSyncMixin:
       **kwargs,
   ) -> Any:
     """Binds destination-side transport resources for weight transfer."""
-    if self.enable_raiden:
-      state = self.transformer_state
-      if self.raiden_sync_delegate.is_bounded():
-        return True
-
-      return await self.raiden_sync_delegate.bind_weight_sync(
-          sync_request=sync_request,
-          state=state,
-          sampler=self,
-          **kwargs,
-      )
-    return None
+    delegate = self._get_active_delegate()
+    if delegate is None:
+      return None
+    if delegate.is_bounded():
+      return True
+    state = self.transformer_state if self.enable_raiden else None
+    return await delegate.bind_weight_sync(
+        sync_request=sync_request,
+        state=state,
+        sampler=self,
+        **kwargs,
+    )
 
   def get_target_state(self) -> Any:
-    """Returns target state shape/dtype pytree for weight conversion."""
-    state = self.transformer_state
-    return jax.tree.map(
-        lambda x: nnx.Param(jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype)),
-        state,
-        is_leaf=lambda x: isinstance(x, nnx.Variable),
-    )
+    """Returns a framework-neutral shape/dtype tree for weight conversion."""
+    return _serialize_target_state_tree(self.transformer_state)
 
   # TODO(tunix-dev): Make `pause`/`resume` abstract (or type the host sampler
   # with a Protocol) so a sampler that forgets to override them fails loudly
@@ -155,16 +247,22 @@ class RaidenDestinationWeightSyncMixin:
     # and delegate -> resume in post/abort. The coordinator requires
     # destinations to serialize whole phase bodies, because a timed-out phase
     # (e.g. a long pause drain) can still be running when the abort arrives.
-    partial_rollout = self.config.partial_rollout
+    raw_partial = (
+        kwargs["partial_rollout"] if "partial_rollout" in kwargs else None
+    )
+    use_partial = (
+        bool(self.config.partial_rollout)
+        if raw_partial is None
+        else bool(raw_partial)
+    )
     await self.pause(
-        mode="keep" if partial_rollout else "wait",
-        clear_cache=not partial_rollout,
+        mode="keep" if use_partial else "wait",
+        clear_cache=not use_partial,
     )
 
-    if self.enable_raiden:
-      return await self.raiden_sync_delegate.pre_weight_sync(
-          sync_request=sync_request, **kwargs
-      )
+    delegate = self._get_active_delegate()
+    if delegate is not None:
+      return await delegate.pre_weight_sync(sync_request=sync_request, **kwargs)
     return True
 
   async def weight_sync(
@@ -175,9 +273,13 @@ class RaidenDestinationWeightSyncMixin:
     """Updates model weights in-place from the specified controller or request."""
     self._check_weight_sync_boundness()
 
-    if self.enable_raiden:
-      return await self.raiden_sync_delegate.weight_sync(
-          sync_request=sync_request, **kwargs
+    delegate = self._get_active_delegate()
+    if delegate is not None:
+      return await delegate.weight_sync(sync_request=sync_request, **kwargs)
+    if sync_request is None:
+      raise ValueError(
+          f"{self.__class__.__name__} [{self.server_id}] weight_sync:"
+          " sync_request is None."
       )
     weights = sync_request.weights
     if weights is None:
@@ -188,20 +290,35 @@ class RaidenDestinationWeightSyncMixin:
     self.update_params(weights)
     return None
 
+  def _is_safe_to_resume(self) -> bool:
+    delegate = self._get_active_delegate()
+    if delegate is None:
+      return True
+    return not (
+        bool(delegate.serving_corrupted)
+        or bool(delegate.has_uncommitted_mutation)
+    )
+
   async def post_weight_sync(
       self,
       sync_request: base_sampler_lib.WeightSyncRequest,
       **kwargs,
   ) -> str | None | Any:
     """Finalizes and switches active policy weights after transfer completion."""
+    cancelled = False
     try:
-      if self.enable_raiden:
-        return await self.raiden_sync_delegate.post_weight_sync(
+      delegate = self._get_active_delegate()
+      if delegate is not None:
+        return await delegate.post_weight_sync(
             sync_request=sync_request, **kwargs
         )
       return True
+    except asyncio.CancelledError:
+      cancelled = True
+      raise
     finally:
-      await self.resume()
+      if not cancelled and self._is_safe_to_resume():
+        await self.resume()
 
   async def abort_weight_sync(
       self,
@@ -209,17 +326,28 @@ class RaidenDestinationWeightSyncMixin:
       **kwargs,
   ) -> str | None | Any:
     """Safely aborts weight sync round."""
+    cancelled = False
     try:
-      if self.enable_raiden and self.raiden_sync_delegate is not None:
-        return await self.raiden_sync_delegate.abort_weight_sync(
+      delegate = self._get_active_delegate()
+      if delegate is not None:
+        return await delegate.abort_weight_sync(
             sync_request=sync_request, **kwargs
         )
       return True
+    except asyncio.CancelledError:
+      cancelled = True
+      raise
     finally:
-      await self.resume()
+      if not cancelled and self._is_safe_to_resume():
+        await self.resume()
 
   async def get_weight_sync_status(self) -> Any:
     """Reports worker-side round status for coordinator recovery checks."""
-    if self.enable_raiden and self.raiden_sync_delegate is not None:
-      return self.raiden_sync_delegate.get_weight_sync_status()
+    delegate = self._get_active_delegate()
+    if delegate is not None:
+      return delegate.get_weight_sync_status()
     return {}
+
+
+# Backward compatibility alias
+RaidenDestinationWeightSyncMixin = DestinationWeightSyncMixin

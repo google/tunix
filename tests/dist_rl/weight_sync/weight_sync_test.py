@@ -28,13 +28,13 @@ from typing import Any, Optional
 
 from absl.testing import absltest
 from flax import nnx
-import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.orchestrator import worker_registry
 from tunix.dist_rl.rollout import inprocess_vllm_sampler
+from tunix.dist_rl.rollout import raiden_weight_sync_mixin
 from tunix.dist_rl.rollout import sampler as base_sampler_lib
 from tunix.dist_rl.rollout import vanilla_sampler
 from tunix.dist_rl.testing import worker_registry_testing
@@ -264,10 +264,8 @@ class MockVllmSampler(base_sampler.BaseSampler):
     return np.array([1, 2], dtype=np.int32)
 
   def get_target_state(self) -> Any:
-    return jax.tree.map(
-        lambda x: nnx.Param(jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype)),
-        self._transformer_state,
-        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    return raiden_weight_sync_mixin._serialize_target_state_tree(  # pylint: disable=protected-access
+        self._transformer_state
     )
 
   def pause(self, mode: str = "keep", *, clear_cache: bool = False) -> None:
@@ -282,7 +280,9 @@ class MockVllmSampler(base_sampler.BaseSampler):
 
 def _to_flat_dict(state: Any) -> dict[str, Any]:
   if hasattr(state, "flat_state"):
-    return {".".join(str(p) for p in path): var for path, var in state.flat_state()}
+    return {
+        ".".join(str(p) for p in path): var for path, var in state.flat_state()
+    }
   return dict(state)
 
 
@@ -293,9 +293,7 @@ def _trainer_process_fn(
     target_state: Any,
 ):
   model_config = test_common.ModelConfig(**model_config_kwargs)
-  toy_trainer_model = test_common.ToyTransformer(
-      model_config, rngs=nnx.Rngs(0)
-  )
+  toy_trainer_model = test_common.ToyTransformer(model_config, rngs=nnx.Rngs(0))
   # Initialize any lazy module parameters
   toy_trainer_model(
       jnp.zeros((1, 4), dtype=jnp.int32), jnp.zeros((1, 4), dtype=jnp.int32)
@@ -769,7 +767,9 @@ class WeightSyncE2ETest(absltest.TestCase):
     )
 
     # Mutate trainer model weights
-    new_embedding = jnp.ones_like(self.toy_trainer_model.emb.embedding.value) * 99.0
+    new_embedding = (
+        jnp.ones_like(self.toy_trainer_model.emb.embedding.value) * 99.0
+    )
     self.toy_trainer_model.emb.embedding.value = new_embedding
 
     # Execute weight sync in IN_MEMORY mode
@@ -810,7 +810,9 @@ class WeightSyncE2ETest(absltest.TestCase):
     )
 
     # Mutate trainer model weights
-    new_embedding = jnp.ones_like(self.toy_trainer_model.emb.embedding.value) * 42.0
+    new_embedding = (
+        jnp.ones_like(self.toy_trainer_model.emb.embedding.value) * 42.0
+    )
     self.toy_trainer_model.emb.embedding.value = new_embedding
 
     # Execute weight sync in IN_MEMORY mode

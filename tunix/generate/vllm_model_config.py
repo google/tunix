@@ -29,6 +29,12 @@ _GEMMA4_PATTERN = re.compile(
 _QWEN3P5_PATTERN = re.compile(
     r"(?<![a-z0-9])qwen[-_]?3(?:[._]5|p5)(?![a-z0-9])", re.IGNORECASE
 )
+_QWEN3_PATTERN = re.compile(
+    r"(?<![a-z0-9])qwen[-_]?3(?![._]5|p5|[a-z0-9])", re.IGNORECASE
+)
+_QWEN3_UNANCHORED_PATTERN = re.compile(
+    r"qwen[-_]?3(?![._]5|p5|[a-z0-9])", re.IGNORECASE
+)
 _QWEN3P5_MOE_PATTERN = re.compile(
     r"(?<![a-z0-9])(?:moe|a[0-9]+b)(?![a-z0-9])", re.IGNORECASE
 )
@@ -125,6 +131,72 @@ def is_qwen3p5_moe_model(model_name: str) -> bool:
   return bool(_QWEN3P5_MOE_PATTERN.search(segment[matches[-1].end() :]))
 
 
+def _qwen3_match_tail(model_name: str) -> str | None:
+  """Returns the trailing substring after a Qwen3 (non-3.5) token, or None."""
+  if is_qwen3p5_model(model_name) or is_gemma4_model(model_name):
+    return None
+  target_segment = _target_model_segment(model_name)
+  matches = list(_QWEN3_PATTERN.finditer(target_segment))
+  if matches:
+    return target_segment[matches[-1].end() :]
+  if not _MODEL_SEGMENT_PATTERN.search(target_segment):
+    for segment in reversed([s for s in re.split(r"[/\\]+", model_name) if s]):
+      unanchored = list(_QWEN3_UNANCHORED_PATTERN.finditer(segment))
+      if unanchored:
+        return segment[unanchored[-1].end() :]
+  return None
+
+
+def is_qwen3_moe_model(model_name: str) -> bool:
+  """Returns whether `model_name` names a Mixture-of-Experts Qwen3 variant."""
+  tail = _qwen3_match_tail(model_name)
+  return tail is not None and bool(_QWEN3P5_MOE_PATTERN.search(tail))
+
+
+def _is_qwen3_model(model_name: str) -> bool:
+  """Returns whether `model_name` names a Qwen3 (non-3.5) model family."""
+  return _qwen3_match_tail(model_name) is not None
+
+
+def _validate_basic_model_family(
+    model_name: str,
+    *,
+    maxtext_model_name: str = "",
+    sampler_type: str = "inprocess_vllm",
+    use_lora: bool = False,
+) -> None:
+  """Validates model-family and rollout constraints for `WeightSyncMode.BASIC`."""
+  if maxtext_model_name:
+    raise NotImplementedError(
+        "MaxText rollout with weight_sync_mode='basic' is not yet supported."
+    )
+  if sampler_type != "inprocess_vllm":
+    raise ValueError(
+        f"Rollout sampler={sampler_type!r} with weight_sync_mode='basic'"
+        " is not supported; use inprocess_vllm instead."
+    )
+  if use_lora:
+    raise NotImplementedError(
+        "LoRA rollout weight sync with weight_sync_mode='basic' is not yet"
+        " supported."
+    )
+  if is_gemma4_model(model_name) or is_qwen3p5_model(model_name):
+    raise NotImplementedError(
+        "Hugging Face-to-vLLM JAX mapping is not yet supported for"
+        f" {model_name!r}."
+    )
+  if is_qwen3_moe_model(model_name):
+    raise NotImplementedError(
+        "Qwen3 MoE Hugging Face-to-vLLM JAX mapping is not yet supported"
+        f" for weight_sync_mode='basic': {model_name!r}."
+    )
+  if not _is_qwen3_model(model_name):
+    raise ValueError(
+        "The in-process distributed rollout supports Qwen3 with"
+        f" weight_sync_mode='basic'; got model {model_name!r}."
+    )
+
+
 def validate_vllm_rollout_config(
     model_name: str,
     *,
@@ -141,6 +213,9 @@ def validate_vllm_rollout_config(
   (`weight_sync_mode` in `{"none", "noop"}`) bypass Tunix-to-vLLM parameter
   conversion and return without error once `weight_sync_mode` is validated. For
   active Tunix trainer weight sync:
+  - Under `WeightSyncMode.BASIC`, weights arrive in canonical HuggingFace
+    format via `VllmSampler.update_params_from_hf`, requiring `inprocess_vllm`,
+    no LoRA adapters, and a supported Qwen3 model family.
   - Out-of-process `sampler_type == "vllm"` (`VllmSampler`) returns `None` from
     `get_target_state()`, causing `PeftTrainerV2` to bind raw Tunix state
     without `MappingConfig` conversion for all non-MaxText families, and
@@ -159,7 +234,7 @@ def validate_vllm_rollout_config(
       "vanilla").
     tp_size: Rollout tensor-parallel degree (`tensor_parallel_size`).
     weight_sync_mode: Weight synchronization mode (`WeightSyncMode` or string
-      such as "raiden", "in_memory", "fs", "noop", or "none").
+      such as "raiden", "basic", "in_memory", "fs", "noop", or "none").
     maxtext_model_name: MaxText model name when serving via
       `MaxTextForCausalLM`, or "" for non-MaxText rollouts.
     use_lora: Whether LoRA adapters are enabled on the rollout model.
@@ -167,14 +242,24 @@ def validate_vllm_rollout_config(
       rather than loading checkpoint safetensors prior to weight sync.
 
   Raises:
-    ValueError: If `weight_sync_mode` is invalid, if `sampler_type == "vllm"`
-      is paired with active non-MaxText weight sync on `Qwen3.5` or `Gemma4`,
-      or if active non-MaxText `Qwen3.5` `inprocess_vllm` weight sync disables
-      `init_with_random_weights`.
-    NotImplementedError: If active non-MaxText Qwen3.5 vLLM weight sync uses an
-      MoE Qwen3.5 variant, LoRA adapters, or `tp_size != 1`.
+    ValueError: If `weight_sync_mode` is invalid, if `weight_sync_mode` is
+      `"basic"` with a non-`inprocess_vllm` sampler or non-Qwen3 model, if
+      `sampler_type == "vllm"` is paired with active non-MaxText weight sync on
+      `Qwen3.5` or `Gemma4`, or if active non-MaxText `Qwen3.5`
+      `inprocess_vllm` weight sync disables `init_with_random_weights`.
+    NotImplementedError: If `weight_sync_mode` is `"basic"` with LoRA or an
+      unsupported Gemma4/Qwen3.5 family, or if active non-MaxText Qwen3.5 vLLM
+      weight sync uses an MoE Qwen3.5 variant, LoRA adapters, or `tp_size != 1`.
   """
   mode = _normalize_weight_sync_mode(weight_sync_mode)
+  if mode == common_datatypes.WeightSyncMode.BASIC:
+    _validate_basic_model_family(
+        model_name,
+        maxtext_model_name=maxtext_model_name,
+        sampler_type=sampler_type,
+        use_lora=use_lora,
+    )
+    return
   if not _uses_tunix_weight_sync(
       maxtext_model_name=maxtext_model_name, weight_sync_mode=mode
   ):
@@ -230,21 +315,34 @@ def vllm_mapping_config_for_model(
     maxtext_model_name: MaxText model name when serving via
       `MaxTextForCausalLM`, or "" for non-MaxText rollouts.
     weight_sync_mode: Optional rollout weight sync mode. Under MaxText
-      (`maxtext_model_name` non-empty) or non-transferring modes
-      (`weight_sync_mode` in `{"none", "noop"}`), Tunix-to-vLLM key mappings are
-      unused and an empty `MappingConfig()` is returned across all model
-      families.
+      (`maxtext_model_name` non-empty), non-transferring modes
+      (`weight_sync_mode` in `{"none", "noop"}`), or `WeightSyncMode.BASIC`
+      for Qwen3 (which uses `VllmSampler.from_hf_manifest()` /
+      `update_params_from_hf()` directly), an empty `MappingConfig()` is
+      returned.
 
   Returns:
     A `MappingConfig` populated from the model family's `VLLM_JAX_MAPPING`, or
-    an empty `MappingConfig()` when Tunix weight sync is inactive.
+    an empty `MappingConfig()` when Tunix-NNX weight sync is inactive or
+    `BASIC` routes directly through `VllmSampler.update_params_from_hf()`.
 
   Raises:
     NotImplementedError: If `model_name` is a Qwen3.5 MoE variant and Tunix
-      weight sync is active (or `weight_sync_mode` is omitted without MaxText).
+      weight sync is active (or `weight_sync_mode` is omitted without MaxText),
+      or if `weight_sync_mode` is `"basic"` for Gemma4 or Qwen3.5.
     ValueError: If `weight_sync_mode` is invalid or `model_name` does not belong
       to Qwen3, Qwen3.5, or Gemma4 when Tunix weight sync is active.
   """
+  normalized_mode = (
+      _normalize_weight_sync_mode(weight_sync_mode)
+      if weight_sync_mode is not None
+      else None
+  )
+  if normalized_mode == common_datatypes.WeightSyncMode.BASIC:
+    _validate_basic_model_family(
+        model_name, maxtext_model_name=maxtext_model_name
+    )
+    return mappings_lib.MappingConfig()
   if not _uses_tunix_weight_sync(
       maxtext_model_name=maxtext_model_name,
       weight_sync_mode=weight_sync_mode,
@@ -267,11 +365,7 @@ def vllm_mapping_config_for_model(
     )
 
     return mappings_lib.MappingConfig(**qwen3p5_mapping.VLLM_JAX_MAPPING)
-  target_segment = _target_model_segment(model_name)
-  has_known_family = bool(_MODEL_SEGMENT_PATTERN.search(target_segment))
-  if "qwen3" in target_segment.lower() or (
-      not has_known_family and "qwen3" in model_name.lower()
-  ):
+  if _is_qwen3_model(model_name):
     from tunix.models.qwen3 import (  # pylint: disable=g-import-not-at-top
         mapping_vllm_jax as qwen3_mapping,
     )

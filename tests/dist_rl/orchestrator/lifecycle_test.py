@@ -803,6 +803,63 @@ class LifecycleDriverTest(absltest.TestCase):
     self.assertEqual(info.resources["routed_experts_shape"], (61, 8))
     self.assertEqual(info.resources["staging_max_bytes"], 16 * 1024 * 1024)
 
+  def test_bring_up_runs_pre_compile_fn_and_overrides_dummy_data(self):
+    registry = worker_registry.WorkerRegistry()
+    events: list[tuple[str, str, object]] = []
+
+    def _make_handle(wid: str) -> mock.MagicMock:
+      handle = mock.MagicMock(spec=remote_execution.ActorHandle)
+
+      def _submit(method_name, *args, **kwargs):
+        del kwargs
+        events.append((wid, method_name, args[0] if args else None))
+        return datatypes.Response()
+
+      handle.submit.side_effect = _submit
+      return handle
+
+    actor_handle = _make_handle("actor-0")
+    rollout_handle = _make_handle("rollout-0")
+    registry.register_handle("actor-0", [datatypes.Role.ACTOR], actor_handle)
+    registry.register_handle(
+        "rollout-0", [datatypes.Role.ROLLOUT], rollout_handle
+    )
+
+    def _verify(infos):
+      events.append(("verify", "verify", [i.worker_id for i in infos]))
+
+    def _pre_compile(targets):
+      events.append(
+          ("pre_compile", "pre_compile", [i.worker_id for i, _ in targets])
+      )
+      # Explicit None on rollout-0 must override non-None global dummy_data.
+      return {"actor-0": "actor-dummy", "rollout-0": None}
+
+    lifecycle.LifecycleDriver(registry, verify_fn=_verify).bring_up(
+        "default-dummy", pre_compile_fn=_pre_compile
+    )
+
+    init_idx = max(i for i, (_, m, _) in enumerate(events) if m == "initialize")
+    verify_idx = next(i for i, (_, m, _) in enumerate(events) if m == "verify")
+    pre_idx = next(
+        i for i, (_, m, _) in enumerate(events) if m == "pre_compile"
+    )
+    compile_idx = min(i for i, (_, m, _) in enumerate(events) if m == "compile")
+    self.assertLess(init_idx, verify_idx)
+    self.assertLess(verify_idx, pre_idx)
+    self.assertLess(pre_idx, compile_idx)
+    actor_handle.submit.assert_any_call("compile", "actor-dummy")
+    rollout_handle.submit.assert_any_call("compile", None)
+
+    # Returning None keeps the default dummy_data for all workers.
+    registry2 = worker_registry.WorkerRegistry()
+    handle2 = _make_handle("worker-0")
+    registry2.register_handle("worker-0", [datatypes.Role.ROLLOUT], handle2)
+    lifecycle.LifecycleDriver(registry2).bring_up(
+        "kept-dummy", pre_compile_fn=lambda targets: None
+    )
+    handle2.submit.assert_any_call("compile", "kept-dummy")
+
 
 if __name__ == "__main__":
   absltest.main()
