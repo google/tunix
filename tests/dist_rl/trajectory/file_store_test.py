@@ -2,6 +2,10 @@
 
 from collections.abc import Callable, Iterator
 import contextlib
+import dataclasses
+import importlib
+import io
+import itertools
 import tempfile
 import threading
 import time
@@ -13,6 +17,7 @@ from absl import logging
 from absl.testing import absltest
 from absl.testing import parameterized
 from etils import epath
+from etils.epath import backend as epath_backend
 import pydantic
 from tunix.dist_rl.trajectory import async_writer
 from tunix.dist_rl.trajectory import file_store
@@ -30,6 +35,173 @@ _CONCURRENT_READ_TIMEOUT_SECONDS: Final[float] = 10.0
 _ReadMethod: TypeAlias = Callable[
     [file_store.FileTrajectoryStore[Any], list[str]], list[Any]
 ]
+
+_FAKE_ARROW_FILE_TYPE: Final[Any] = types.SimpleNamespace(
+    NotFound=0,
+    File=2,
+    Directory=3,
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class _FakeArrowFileSelector:
+  base_dir: str
+  allow_not_found: bool = False
+  recursive: bool = False
+
+
+@dataclasses.dataclass(frozen=True)
+class _FakeArrowFileInfo:
+  base_name: str
+  type: int
+
+
+_FAKE_ARROW_FS_MODULE: Final[Any] = types.SimpleNamespace(
+    FileType=_FAKE_ARROW_FILE_TYPE,
+    FileSelector=_FakeArrowFileSelector,
+)
+
+
+class _FakeArrowOutputStream(io.BytesIO):
+  """In-memory output stream capturing written bytes into a shared mapping."""
+
+  def __init__(self, objects_by_path: dict[str, bytes], path: str) -> None:
+    super().__init__()
+    self._objects_by_path = objects_by_path
+    self._path = path
+
+  def close(self) -> None:
+    if not self.closed:
+      self._objects_by_path[self._path] = self.getvalue()
+    super().close()
+
+
+class _FakeArrowGcsFileSystem:
+  """Fake PyArrow GcsFileSystem implementation backed by an in-memory dict."""
+
+  def __init__(self) -> None:
+    self.objects_by_path: dict[str, bytes] = {}
+    self.raise_on_open_input: OSError | None = None
+
+  def open_output_stream(
+      self, path: str, compression: str | None = None
+  ) -> _FakeArrowOutputStream:
+    del compression
+    return _FakeArrowOutputStream(self.objects_by_path, path)
+
+  def open_input_file(self, path: str) -> io.BytesIO:
+    if self.raise_on_open_input is not None:
+      raise self.raise_on_open_input
+    if path not in self.objects_by_path:
+      raise FileNotFoundError(path)
+    return io.BytesIO(self.objects_by_path[path])
+
+  def get_file_info(
+      self, path_or_selector: str | _FakeArrowFileSelector
+  ) -> _FakeArrowFileInfo | list[_FakeArrowFileInfo]:
+    if isinstance(path_or_selector, _FakeArrowFileSelector):
+      prefix = path_or_selector.base_dir.rstrip("/") + "/"
+      files: set[str] = set()
+      directories: set[str] = set()
+      for obj_path in self.objects_by_path:
+        if not obj_path.startswith(prefix):
+          continue
+        remainder = obj_path.removeprefix(prefix)
+        if not remainder:
+          continue
+        if "/" in remainder:
+          parts = remainder.split("/")
+          directories.add(parts[0])
+          if path_or_selector.recursive:
+            directories.update(parts[1:-1])
+            files.add(parts[-1])
+        else:
+          files.add(remainder)
+      files = files - directories
+      if (
+          not files
+          and not directories
+          and path_or_selector.base_dir.rstrip("/") not in self.objects_by_path
+          and not path_or_selector.allow_not_found
+      ):
+        raise FileNotFoundError(path_or_selector.base_dir)
+      infos = [
+          _FakeArrowFileInfo(name, _FAKE_ARROW_FILE_TYPE.Directory)
+          for name in sorted(directories)
+      ] + [
+          _FakeArrowFileInfo(name, _FAKE_ARROW_FILE_TYPE.File)
+          for name in sorted(files)
+      ]
+      infos.sort(key=lambda info: info.base_name)
+      return infos
+
+    target = path_or_selector.rstrip("/")
+    if target in self.objects_by_path:
+      base_name = target.rsplit("/", 1)[-1]
+      return _FakeArrowFileInfo(base_name, _FAKE_ARROW_FILE_TYPE.File)
+    prefix = target + "/"
+    if any(k.startswith(prefix) for k in self.objects_by_path):
+      base_name = target.rsplit("/", 1)[-1]
+      return _FakeArrowFileInfo(base_name, _FAKE_ARROW_FILE_TYPE.Directory)
+    return _FakeArrowFileInfo("", _FAKE_ARROW_FILE_TYPE.NotFound)
+
+
+class _DisallowedFsspecBackend(epath_backend._FileSystemSpecBackend):
+  """Strict epath backend verifying fsspec is never invoked."""
+
+  def fs(self, path: Any) -> Any:
+    raise AssertionError(
+        f"Unexpected fsspec fs({path!r}) while Arrow GCS is active."
+    )
+
+  def exists(self, path: Any) -> bool:
+    raise AssertionError(
+        f"Unexpected fsspec exists({path!r}) while Arrow GCS is active."
+    )
+
+  def isdir(self, path: Any) -> bool:
+    raise AssertionError(
+        f"Unexpected fsspec isdir({path!r}) while Arrow GCS is active."
+    )
+
+  def listdir(self, path: Any) -> list[str]:
+    raise AssertionError(
+        f"Unexpected fsspec listdir({path!r}) while Arrow GCS is active."
+    )
+
+  def glob(self, path: Any) -> Any:
+    raise AssertionError(
+        f"Unexpected fsspec glob({path!r}) while Arrow GCS is active."
+    )
+
+  def makedirs(self, path: Any, exist_ok: bool = False) -> None:
+    raise AssertionError(
+        f"Unexpected fsspec makedirs({path!r}) while Arrow GCS is active."
+    )
+
+  def open(self, path: Any, mode: str = "r", **kwargs: Any) -> Any:
+    raise AssertionError(
+        f"Unexpected fsspec open({path!r}, {mode!r}) while Arrow GCS is active."
+    )
+
+
+def _make_fsspec_path_cls(
+    backend: epath_backend._FileSystemSpecBackend,
+    uri_example: str = "gs://test-bucket/root",
+) -> type[epath.Path]:
+  """Constructs an epath.Path class whose instances route to `backend`."""
+  base_path_cls: Any = type(epath.Path(uri_example))
+
+  class _FsspecPath(base_path_cls):
+
+    @property
+    def _backend(self) -> epath_backend._FileSystemSpecBackend:
+      return backend
+
+  return _FsspecPath
+
+
+_RUN_COUNTER: Final[Any] = itertools.count()
 
 
 def _make_gfile_error(code: int) -> OSError:
@@ -82,6 +254,55 @@ class FileTrajectoryReaderTest(store_testing.TrajectoryReaderTestCase):
     return file_s
 
 
+class ArrowGcsFileTrajectoryReaderTest(store_testing.TrajectoryReaderTestCase):
+  """Contract tests for TrajectoryReader backed by PyArrow GCS."""
+
+  NUM_MANY_TRAJECTORIES = 3 * file_store._MAX_READ_WORKERS
+
+  def setUp(self) -> None:
+    self.arrow_fs = _FakeArrowGcsFileSystem()
+    self.enter_context(
+        mock.patch.object(
+            file_store,
+            "_load_arrow_gcs_fs",
+            autospec=True,
+            spec_set=True,
+            return_value=(_FAKE_ARROW_FS_MODULE, self.arrow_fs),
+        )
+    )
+    disallowed_backend = _DisallowedFsspecBackend()
+    self.path_cls = _make_fsspec_path_cls(
+        disallowed_backend, uri_example="gs://test-bucket/root"
+    )
+    super().setUp()
+
+  def _create_reader(
+      self,
+      initial_data: (
+          list[
+              tuple[
+                  trajectory_lib.TrajectoryMetadata, list[trajectory_lib.Step]
+              ]
+          ]
+          | None
+      ) = None,
+  ) -> store.TrajectoryReader:
+    root_dir = self.path_cls(
+        f"gs://test-bucket/reader_run_{next(_RUN_COUNTER)}"
+    )
+    file_s = file_store.FileTrajectoryStore(
+        root_dir=root_dir,
+        run_id="run_1",
+    )
+    self.addCleanup(file_s.close)
+    if initial_data:
+      for meta, steps in initial_data:
+        for step in steps:
+          file_s.add_step(step, meta)
+      file_s.flush()
+    return file_s
+
+
 class FileTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
   """Contract tests for FileTrajectoryStore's TrajectoryWriter implementation."""
 
@@ -92,6 +313,40 @@ class FileTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
     file_s = file_store.FileTrajectoryStore(
         root_dir=tmp_dir,
         run_id="test_writer_run",
+    )
+    self.addCleanup(file_s.close)
+    return file_s, file_s
+
+
+class ArrowGcsFileTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
+  """Contract tests for TrajectoryWriter backed by PyArrow GCS."""
+
+  def setUp(self) -> None:
+    self.arrow_fs = _FakeArrowGcsFileSystem()
+    self.enter_context(
+        mock.patch.object(
+            file_store,
+            "_load_arrow_gcs_fs",
+            autospec=True,
+            spec_set=True,
+            return_value=(_FAKE_ARROW_FS_MODULE, self.arrow_fs),
+        )
+    )
+    disallowed_backend = _DisallowedFsspecBackend()
+    self.path_cls = _make_fsspec_path_cls(
+        disallowed_backend, uri_example="gs://test-bucket/root"
+    )
+    super().setUp()
+
+  def _create_reader_and_writer(
+      self,
+  ) -> tuple[store.TrajectoryReader, store.TrajectoryWriter]:
+    root_dir = self.path_cls(
+        f"gs://test-bucket/writer_run_{next(_RUN_COUNTER)}"
+    )
+    file_s = file_store.FileTrajectoryStore(
+        root_dir=root_dir,
+        run_id="run_1",
     )
     self.addCleanup(file_s.close)
     return file_s, file_s
@@ -1097,6 +1352,13 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     path_cls = type(gcs_root)
 
     with (
+        mock.patch.object(
+            file_store,
+            "_load_arrow_gcs_fs",
+            autospec=True,
+            spec_set=True,
+            return_value=None,
+        ),
         mock.patch.object(path_cls, "mkdir", autospec=True) as mock_mkdir,
         mock.patch.object(path_cls, "write_text", autospec=True) as mock_write,
     ):
@@ -2351,6 +2613,215 @@ class FileTrajectoryStoreConfigTest(
         AssertionError, "step should not be deep copied"
     ):
       copy_store.add_step(step, trajectory_testing.METADATA_1)
+
+
+class FileTrajectoryStoreArrowGcsTest(absltest.TestCase):
+  """Tests verifying GIL-free pyarrow.fs.GcsFileSystem stream routing."""
+
+  def setUp(self) -> None:
+    super().setUp()
+    self.arrow_fs = _FakeArrowGcsFileSystem()
+    self.load_arrow_patcher = mock.patch.object(
+        file_store,
+        "_load_arrow_gcs_fs",
+        autospec=True,
+        spec_set=True,
+        return_value=(_FAKE_ARROW_FS_MODULE, self.arrow_fs),
+    )
+    self.load_arrow_mock = self.load_arrow_patcher.start()
+    self.addCleanup(self.load_arrow_patcher.stop)
+    disallowed_backend = _DisallowedFsspecBackend()
+    self.gcs_path_cls = _make_fsspec_path_cls(
+        disallowed_backend, uri_example="gs://test-bucket/root"
+    )
+    self.gcs_root = self.gcs_path_cls("gs://test-bucket/trajectories")
+    self.gcs_store = file_store.FileTrajectoryStore(
+        root_dir=self.gcs_root,
+        run_id="run_arrow",
+    )
+    self.addCleanup(self.gcs_store.close)
+
+  def test_add_step_on_fsspec_gcs_writes_objects_without_dir_markers(
+      self,
+  ) -> None:
+    meta = trajectory_testing.METADATA_1
+    traj_id = meta.trajectory_id
+
+    self.gcs_store.add_step(trajectory_testing.STEP_1_1, meta)
+    self.gcs_store.flush()
+
+    prefix = f"test-bucket/trajectories/run_arrow/traj_{traj_id}"
+    expected_keys = {
+        f"{prefix}/metadata.json",
+        f"{prefix}/step_000001.json",
+    }
+    self.assertEqual(set(self.arrow_fs.objects_by_path), expected_keys)
+
+  def test_get_trajectories_metadata_with_unrelated_entries_returns_sorted_trajectories(
+      self,
+  ) -> None:
+    prefix = "test-bucket/trajectories/run_arrow"
+    self.arrow_fs.objects_by_path[f"{prefix}/README.md"] = b"docs"
+    self.arrow_fs.objects_by_path[f"{prefix}/traj__notes.txt"] = b"notes"
+    self.arrow_fs.objects_by_path[f"{prefix}/tb_logs/events.out"] = b"events"
+    self.arrow_fs.objects_by_path[
+        f"{prefix}/tb_logs/traj_nested_ignored/metadata.json"
+    ] = b"{}"
+    self.arrow_fs.objects_by_path[
+        f"{prefix}/traj_{trajectory_testing.METADATA_2.trajectory_id}/metadata.json"
+    ] = file_store._dump_json(trajectory_testing.METADATA_2).encode("utf-8")
+    self.arrow_fs.objects_by_path[
+        f"{prefix}/traj_{trajectory_testing.METADATA_1.trajectory_id}/metadata.json"
+    ] = file_store._dump_json(trajectory_testing.METADATA_1).encode("utf-8")
+
+    metas = self.gcs_store.get_trajectories_metadata()
+
+    self.assertSequenceEqual(
+        metas, [trajectory_testing.METADATA_1, trajectory_testing.METADATA_2]
+    )
+
+  def test_get_trajectories_metadata_on_empty_gcs_run_returns_empty_list(
+      self,
+  ) -> None:
+    metas = self.gcs_store.get_trajectories_metadata()
+
+    self.assertEmpty(metas)
+
+  def test_get_trajectories_with_nested_subdir_ignores_nested_steps(
+      self,
+  ) -> None:
+    meta = trajectory_testing.METADATA_1
+    traj_id = meta.trajectory_id
+    self.gcs_store.add_step(trajectory_testing.STEP_1_1, meta)
+    self.gcs_store.flush()
+    traj_prefix = f"test-bucket/trajectories/run_arrow/traj_{traj_id}"
+    self.arrow_fs.objects_by_path[
+        f"{traj_prefix}/subagent/step_000002.json"
+    ] = b"{}"
+
+    trajectories = self.gcs_store.get_trajectories([traj_id])
+
+    self.assertLen(trajectories, 1)
+    self.assertSequenceEqual(
+        trajectories[0].steps, [trajectory_testing.STEP_1_1]
+    )
+
+  def test_get_trajectories_metadata_on_generic_os_error_for_missing_object_raises_not_found(
+      self,
+  ) -> None:
+    self.arrow_fs.raise_on_open_input = OSError("Arrow IOError")
+
+    with self.assertRaises(store.TrajectoryMetadataNotFoundError):
+      self.gcs_store.get_trajectories_metadata(["missing"])
+
+  def test_get_trajectories_metadata_on_os_error_for_existing_object_reraises(
+      self,
+  ) -> None:
+    self.arrow_fs.objects_by_path[
+        "test-bucket/trajectories/run_arrow/traj_t1/metadata.json"
+    ] = b"{}"
+    self.arrow_fs.raise_on_open_input = PermissionError("Permission denied")
+
+    with self.assertRaisesRegex(PermissionError, "Permission denied"):
+      self.gcs_store.get_trajectories_metadata(["t1"])
+
+  def test_add_step_when_pyarrow_unavailable_falls_back_to_epath_write_text(
+      self,
+  ) -> None:
+    self.load_arrow_mock.return_value = None
+    mock_write = self.enter_context(
+        mock.patch.object(
+            self.gcs_path_cls,
+            "write_text",
+            autospec=True,
+            spec_set=True,
+            return_value=10,
+        )
+    )
+
+    self.gcs_store.add_step(
+        trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
+    )
+    self.gcs_store.flush()
+
+    self.assertEqual(mock_write.call_count, 2)
+
+  def test_add_step_on_non_gcs_fsspec_uri_bypasses_arrow_fs(self) -> None:
+    disallowed_backend = _DisallowedFsspecBackend()
+    s3_path_cls = _make_fsspec_path_cls(
+        disallowed_backend, uri_example="s3://test-bucket/root"
+    )
+    mock_write = self.enter_context(
+        mock.patch.object(
+            s3_path_cls,
+            "write_text",
+            autospec=True,
+            spec_set=True,
+            return_value=10,
+        )
+    )
+    s3_store = file_store.FileTrajectoryStore(
+        root_dir=s3_path_cls("s3://test-bucket/trajectories"),
+        run_id="run_s3",
+    )
+    self.addCleanup(s3_store.close)
+
+    s3_store.add_step(
+        trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
+    )
+    s3_store.flush()
+
+    self.assertEqual(mock_write.call_count, 2)
+    self.assertEmpty(self.arrow_fs.objects_by_path)
+
+  def test_resolve_arrow_gcs_target_on_empty_bucket_uri_returns_none(
+      self,
+  ) -> None:
+    empty_gcs_path = mock.create_autospec(epath.Path, instance=True)
+    empty_gcs_path._backend = _DisallowedFsspecBackend()
+    empty_gcs_path.as_uri.return_value = "gs://"
+
+    self.assertIsNone(file_store._resolve_arrow_gcs_target(empty_gcs_path))
+
+  def test_load_arrow_gcs_fs_when_available_returns_module_and_filesystem(
+      self,
+  ) -> None:
+    self.load_arrow_patcher.stop()
+    file_store._load_arrow_gcs_fs.cache_clear()
+    self.addCleanup(file_store._load_arrow_gcs_fs.cache_clear)
+    self.addCleanup(self.load_arrow_patcher.start)
+    fake_fs_instance = object()
+    fake_pafs = types.SimpleNamespace(
+        GcsFileSystem=mock.MagicMock(return_value=fake_fs_instance)
+    )
+
+    with mock.patch.object(
+        importlib,
+        "import_module",
+        autospec=True,
+        return_value=fake_pafs,
+    ) as mock_import:
+      loaded = file_store._load_arrow_gcs_fs()
+
+    mock_import.assert_called_once_with("pyarrow.fs")
+    fake_pafs.GcsFileSystem.assert_called_once_with()
+    self.assertEqual(loaded, (fake_pafs, fake_fs_instance))
+
+  def test_load_arrow_gcs_fs_when_import_fails_returns_none(self) -> None:
+    self.load_arrow_patcher.stop()
+    file_store._load_arrow_gcs_fs.cache_clear()
+    self.addCleanup(file_store._load_arrow_gcs_fs.cache_clear)
+    self.addCleanup(self.load_arrow_patcher.start)
+
+    with mock.patch.object(
+        importlib,
+        "import_module",
+        autospec=True,
+        side_effect=ImportError("No pyarrow"),
+    ):
+      loaded = file_store._load_arrow_gcs_fs()
+
+    self.assertIsNone(loaded)
 
 
 if __name__ == "__main__":

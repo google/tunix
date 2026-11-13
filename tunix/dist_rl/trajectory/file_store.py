@@ -6,6 +6,7 @@ from concurrent import futures
 import contextlib
 import dataclasses
 import functools
+import importlib
 import itertools
 import re
 import types
@@ -13,6 +14,7 @@ from typing import Any, ClassVar, Final, TypeVar
 
 from absl import logging
 from etils import epath
+from etils.epath import backend as epath_backend
 import pydantic
 from tunix.dist_rl.trajectory import async_writer
 from tunix.dist_rl.trajectory import base_store as store
@@ -185,8 +187,81 @@ def _is_local_filesystem(path: epath.Path) -> bool:
   return not path.is_absolute() or path.as_uri().startswith("file://")
 
 
+@functools.lru_cache(maxsize=1)
+def _load_arrow_gcs_fs() -> tuple[Any, Any] | None:
+  """Loads `(pyarrow.fs, GcsFileSystem())` when PyArrow GCS is available."""
+  try:
+    pafs = importlib.import_module("pyarrow.fs")
+    return (pafs, pafs.GcsFileSystem())
+  except (
+      AttributeError,
+      ImportError,
+      NotImplementedError,
+      OSError,
+      ValueError,
+  ):
+    return None
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _ArrowGcsTarget:
+  """Resolved PyArrow GCS filesystem client and bucket/object path."""
+
+  pafs: Any
+  fs: Any
+  object_path: str
+
+  def list_child_names(self, *, file_type: Any) -> Iterator[str]:
+    """Yields direct child names matching `file_type` under `object_path`."""
+    selector = self.pafs.FileSelector(
+        self.object_path, allow_not_found=True, recursive=False
+    )
+    for info in self.fs.get_file_info(selector):
+      if info.type == file_type and info.base_name:
+        yield info.base_name
+
+
+def _resolve_arrow_gcs_target(
+    path: epath.Path,
+) -> _ArrowGcsTarget | None:
+  """Returns `_ArrowGcsTarget` for `fsspec`-backed GCS paths."""
+  backend = getattr(path, "_backend", None)
+  if not isinstance(backend, epath_backend._FileSystemSpecBackend):  # pylint: disable=protected-access
+    return None
+  uri = path.as_uri()
+  if not uri.startswith("gs://"):
+    return None
+  object_path = uri.removeprefix("gs://").rstrip("/")
+  fs_pair = _load_arrow_gcs_fs()
+  if not object_path or fs_pair is None:
+    return None
+  pafs, arrow_fs = fs_pair
+  return _ArrowGcsTarget(pafs=pafs, fs=arrow_fs, object_path=object_path)
+
+
+def _iter_file_entries(dir_path: epath.Path) -> Iterator[epath.Path]:
+  """Yields child file paths inside `dir_path`."""
+  target = _resolve_arrow_gcs_target(dir_path)
+  if target is not None:
+    for name in target.list_child_names(file_type=target.pafs.FileType.File):
+      yield dir_path / name
+    return
+  for entry in dir_path.iterdir():
+    if not entry.is_dir():
+      yield entry
+
+
 def _write_text(path: epath.Path, content: str) -> None:
   """Writes `content` to `path`, using atomic temp-file replacement locally."""
+  target = _resolve_arrow_gcs_target(path)
+  if target is not None:
+    encoded = content.encode("utf-8")
+    with target.fs.open_output_stream(
+        target.object_path, compression=None
+    ) as stream:
+      stream.write(encoded)
+    return
+
   if not _is_local_filesystem(path):
     path.write_text(content)
     return
@@ -217,6 +292,18 @@ def _is_not_found_error(exc: BaseException) -> bool:
   )
 
 
+def _read_text(
+    path: epath.Path,
+    target: _ArrowGcsTarget | None = None,
+) -> str:
+  """Reads UTF-8 text from `path`, releasing the GIL on `gs://`."""
+  resolved = target if target is not None else _resolve_arrow_gcs_target(path)
+  if resolved is not None:
+    with resolved.fs.open_input_file(resolved.object_path) as stream:
+      return stream.read().decode("utf-8")
+  return path.read_text()
+
+
 def _read_text_or_none(path: epath.Path) -> str | None:
   """Returns the contents of the file at `path`, or None if it is missing.
 
@@ -227,13 +314,22 @@ def _read_text_or_none(path: epath.Path) -> str | None:
   Args:
     path: The path of the file to read.
   """
+  target = _resolve_arrow_gcs_target(path)
   try:
-    return path.read_text()
+    return _read_text(path, target)
   except Exception as exc:  # pylint: disable=broad-exception-caught
     if _is_not_found_error(exc):
       return None
-    if isinstance(exc, OSError) and not path.exists():
-      return None
+    if isinstance(exc, OSError):
+      if target is not None:
+        exists = (
+            target.fs.get_file_info(target.object_path).type
+            != target.pafs.FileType.NotFound
+        )
+      else:
+        exists = path.exists()
+      if not exists:
+        return None
     raise
 
 
@@ -241,7 +337,7 @@ def _read_max_persisted_step_id(traj_dir: epath.Path) -> int:
   """Returns the maximum ATIF step_id already present under `traj_dir`."""
   max_step_id = 0
   try:
-    for entry in traj_dir.iterdir():
+    for entry in _iter_file_entries(traj_dir):
       if (sort_key := _step_file_sort_key(entry.name)) is not None:
         _, _, last_step_id, _ = sort_key
         max_step_id = max(max_step_id, last_step_id)
@@ -1031,6 +1127,19 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
     Returns:
       An iterator over the trajectory IDs, sorted naturally by trajectory ID.
     """
+    target = _resolve_arrow_gcs_target(self.root_dir)
+    if target is not None:
+      names = target.list_child_names(file_type=target.pafs.FileType.Directory)
+      return iter(
+          sorted(
+              (
+                  match.group(1)
+                  for name in names
+                  if (match := _TRAJECTORY_DIR_REGEX.match(name))
+              ),
+              key=_natural_sort_key,
+          )
+      )
 
     def _entry_sort_key(item: tuple[str, epath.Path]) -> list[int | str]:
       trajectory_id, _ = item
@@ -1088,13 +1197,13 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
       `.jsonl` files are applied before single-step `.json` revisions.
     """
     matched_entries: list[tuple[tuple[int, int, int, str], epath.Path]] = []
-    for entry in self.get_trajectory_dir(trajectory_id).iterdir():
+    for entry in _iter_file_entries(self.get_trajectory_dir(trajectory_id)):
       sort_key = _step_file_sort_key(entry.name)
       if sort_key is not None:
         matched_entries.append((sort_key, entry))
     matched_entries.sort()
     return collections.deque(
-        (entry.name, executor.submit(entry.read_text))
+        (entry.name, executor.submit(_read_text, entry))
         for _, entry in matched_entries
     )
 
