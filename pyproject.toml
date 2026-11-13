@@ -36,6 +36,7 @@ dependencies = [
   "omegaconf", # CLI config
   "orbax-checkpoint>=0.12.0",
   "pillow",  # Image processing
+  "psycopg2-binary>=2.9.9",
   "pydantic",  # data modeling and serialization for agent trajectories
   "pylatexenc",  # Eval result parsing
   "python-dotenv",  # Huggingface API key
