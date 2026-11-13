@@ -81,6 +81,7 @@ class WeightSyncPhasesTest(unittest.IsolatedAsyncioTestCase):
 
   def _worker(self):
     worker = rollout_worker_lib.RolloutWorker(
+        config=rollout_worker_lib.RolloutConfig(),
         worker_id="w0",
         sampler=mocks.MockBaseSamplerImpl(sampler_name="mock_sampler"),
         env_name="mock_env",

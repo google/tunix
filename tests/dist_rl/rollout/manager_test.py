@@ -52,6 +52,7 @@ class GetWeightSyncMetadataTest(unittest.IsolatedAsyncioTestCase):
   async def test_delegates_to_sampler(self):
     sampler = _FakeSampler([{"unit": "sampler0"}])
     manager = manager_lib.RolloutManager(
+        config=rollout_worker.RolloutConfig(),
         sampler=sampler,
         tokenizer="mock",
         chat_parser="mock",
@@ -64,6 +65,7 @@ class GetWeightSyncMetadataTest(unittest.IsolatedAsyncioTestCase):
   async def test_forwards_kwargs(self):
     sampler = _FakeSampler([])
     manager = manager_lib.RolloutManager(
+        config=rollout_worker.RolloutConfig(),
         sampler=sampler,
         tokenizer="mock",
         chat_parser="mock",
@@ -75,7 +77,8 @@ class GetWeightSyncMetadataTest(unittest.IsolatedAsyncioTestCase):
 
   async def test_missing_sampler_raises(self):
     with self.assertRaises(TypeError):
-      manager_lib.RolloutManager(  # pyrefly: ignore[missing-argument]
+      manager_lib.RolloutManager(
+          config=rollout_worker.RolloutConfig(),  # pyrefly: ignore[missing-argument]
           tokenizer="mock",
           chat_parser="mock",
           env_factory=_CaptureEnv,
@@ -84,7 +87,8 @@ class GetWeightSyncMetadataTest(unittest.IsolatedAsyncioTestCase):
 
   async def test_missing_tokenizer_raises(self):
     with self.assertRaises(TypeError):
-      manager_lib.RolloutManager(  # pyrefly: ignore[missing-argument]
+      manager_lib.RolloutManager(
+          config=rollout_worker.RolloutConfig(),  # pyrefly: ignore[missing-argument]
           sampler=_FakeSampler([]),
           chat_parser="mock",
           env_factory=_CaptureEnv,
@@ -290,6 +294,7 @@ class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
 
   def _manager(self, **kwargs):
     return manager_lib.RolloutManager(
+        config=rollout_worker.RolloutConfig(),
         sampler=_FakeSyncSampler([]),
         tokenizer="mock",
         chat_parser="mock",
@@ -318,6 +323,7 @@ class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
   async def test_bind_delegates_to_sampler(self):
     sampler = _FakeSyncSampler([])
     manager = manager_lib.RolloutManager(
+        config=rollout_worker.RolloutConfig(),
         sampler=sampler,
         tokenizer="mock",
         chat_parser="mock",
@@ -330,6 +336,7 @@ class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
     sampler = mock.AsyncMock(spec=sampler_lib.Sampler)
     sampler.abort_weight_sync.return_value = "aborted"
     manager = manager_lib.RolloutManager(
+        config=rollout_worker.RolloutConfig(),
         sampler=sampler,
         tokenizer="mock",
         chat_parser="mock",
@@ -1151,6 +1158,7 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
 
   async def test_drain_timeout_default_and_validation(self):
     manager = manager_lib.RolloutManager(
+        config=rollout_worker.RolloutConfig(),
         sampler=_PauseTrackingSampler(),
         tokenizer="mock",
         chat_parser="mock",
@@ -1165,6 +1173,7 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
           ValueError, "drain_timeout_s must be a positive finite number"
       ):
         manager_lib.RolloutManager(
+            config=rollout_worker.RolloutConfig(),
             sampler=_PauseTrackingSampler(),
             tokenizer="mock",
             chat_parser="mock",
