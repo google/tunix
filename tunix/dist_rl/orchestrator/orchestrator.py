@@ -219,6 +219,37 @@ class ClusterOrchestrator:
             f" orchestrator weight_sync_timeouts.pre is {timeouts_cfg.pre}s."
         )
 
+  def _rollout_setting(self, key: str, description: str) -> Any:
+    """Returns the value of `key` that every rollout worker reported."""
+    infos = self.registry.infos(datatypes.Role.ROLLOUT)
+    if not infos:
+      raise ValueError(
+          f"No rollout worker is registered to report its {description}."
+      )
+    values: dict[str, Any] = {}
+    for info in infos:
+      if key not in info.resources:
+        raise ValueError(
+            f"Rollout worker {info.worker_id!r} did not report its"
+            f" {description}."
+        )
+      values[info.worker_id] = info.resources[key]
+    if len(set(values.values())) != 1:
+      raise ValueError(
+          f"All rollout workers must report one {description}, got {values!r}."
+      )
+    return next(iter(values.values()))
+
+  def rollout_temperature(self) -> float:
+    """Returns the sampling temperature reported by all rollout workers."""
+    return self._rollout_setting("temperature", "sampling temperature")
+
+  def rollout_return_routed_experts(self) -> bool:
+    """Returns whether all rollout workers return MoE routed experts."""
+    return self._rollout_setting(
+        "return_routed_experts", "return_routed_experts setting"
+    )
+
   def shutdown(self, *, abort: bool = False) -> None:
     """Stops all workers and closes handles and health monitoring resources.
 

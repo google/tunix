@@ -51,9 +51,12 @@
             151645,
             151643
           ],
+          "episode_timeout": 600.0,
           "kv_cache_size": 2048,
           "max_prompt_length": 1024,
+          "max_response_length": 1024,
           "max_tokens_to_generate": 1024,
+          "overlong_filter": false,
           "partial_rollout": false,
           "return_logprobs": true,
           "return_routed_experts": false,
@@ -86,7 +89,7 @@
           "expert_parallel_size": 1,
           "kv_cache_size": 2048,
           "max_prompt_length": 1024,
-          "max_response_length": null,
+          "max_response_length": 1024,
           "max_tokens_to_generate": 1024,
           "num_logprobs": 1,
           "overlong_filter": false,
@@ -247,6 +250,8 @@
           "config_sha256": "<resolve_config.config_fingerprint(hp)>",
           "drain_fn": "<function tunix.dist_rl.launch.nodes.rollout.main.<locals>.grpc_server_main.<locals>._drain>",
           "extra_metadata": {
+            "return_routed_experts": "<tunix.dist_rl.worker.rollout_worker.RolloutWorker().config.return_routed_experts>",
+            "temperature": "<tunix.dist_rl.worker.rollout_worker.RolloutWorker().config.temperature>",
             "trajectory_store_config": "<tunix.dist_rl.worker.rollout_worker.RolloutWorker().trajectory_store.to_config()>"
           },
           "port": 20001,
