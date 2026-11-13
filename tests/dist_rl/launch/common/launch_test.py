@@ -46,6 +46,8 @@ _ENV_PASSTHROUGH = frozenset({
     "HF_TOKEN",
     "LOG_ROOT",
     "ORCHESTRATOR_ID",
+    "OTEL_DASHBOARD",
+    "OTEL_DASHBOARD_BIN",
     "PYTHON",
     "PYTHONPATH",
     "PYTHON_BIN",
@@ -1198,6 +1200,116 @@ class LaunchScriptsTest(absltest.TestCase):
     )
     self.assertNotEqual(res.returncode, 0)
     self.assertIn("OTEL_PORT", res.stderr)
+
+  def test_k8s_ensures_and_logs_otel_dashboard_url(self):
+    bin_dir = pathlib.Path(self.create_tempdir().full_path)
+    state_file = bin_dir / "dashboards.json"
+    create_count_file = bin_dir / "create_count.txt"
+    kubectl_log = bin_dir / "kubectl_manifests.log"
+    state_file.write_text("[]")
+    create_count_file.write_text("0")
+
+    fake_kubectl = bin_dir / "kubectl"
+    fake_kubectl.write_text(
+        "#!/bin/bash\n"
+        'if [[ "$1" == "get" ]]; then exit 1; fi\n'
+        f'if [[ "$1" == "apply" ]]; then cat >> "{kubectl_log}"; fi\n'
+        "exit 0\n"
+    )
+    fake_kubectl.chmod(0o755)
+
+    fake_gcloud = bin_dir / "gcloud"
+    fake_gcloud.write_text(
+        "#!/bin/bash\n"
+        'if [[ "${FAKE_GCLOUD_FAIL:-0}" == "1" ]]; then\n'
+        '  echo "auth err" >&2; exit 1\n'
+        "fi\n"
+        'if [[ "$1 $2 $3" == "monitoring dashboards list" ]]; then\n'
+        f'  cat "{state_file}"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [[ "$1 $2 $3" == "monitoring dashboards create" ]]; then\n'
+        f'  n=$(( $(cat "{create_count_file}") + 1 ))\n'
+        f'  echo "$n" > "{create_count_file}"\n'
+        '  cfg=""\n'
+        '  for a in "$@"; do\n'
+        '    case "$a" in --config-from-file=*) cfg="${a#*=}" ;; esac\n'
+        "  done\n"
+        '  rev="$(grep -oE \'"tunix_dashboard_rev": "[^"]+"\' "$cfg"'
+        " | cut -d'\"' -f4)\"\n"
+        f'  printf \'[{{"name":"projects/1/dashboards/shared-42",'
+        '"displayName":"Tunix dist_rl: streaming OTel metrics",'
+        '"labels":{"tunix":"dist_rl","tunix_dashboard_rev":"%s"}}]\\n\' "$rev"'
+        f' > "{state_file}"\n'
+        '  echo \'{"name":"projects/1/dashboards/shared-42"}\'\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 1\n"
+    )
+    fake_gcloud.chmod(0o755)
+
+    base_env = {
+        "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+        "ENTER_KUBE_CONTEXT": "/dev/null",
+        "GOOGLE_CLOUD_PROJECT": "proj-auto",
+    }
+
+    # 1. First `launch.sh otel` creates the shared template dashboard.
+    res = self._run_launch(
+        ["otel", "cluster_config.target=k8s"], extra_env=base_env
+    )
+    self.assertEqual(res.returncode, 0, msg=res.stderr)
+    self.assertEqual(create_count_file.read_text().strip(), "1")
+    self.assertIn(
+        "[launcher] OTel dashboard:"
+        " https://console.cloud.google.com/monitoring/dashboards/builder/shared-42"
+        "?project=proj-auto",
+        res.stderr,
+    )
+
+    # 2. `launch.sh start` reuses the shared template without creating a second
+    #    dashboard, logs the run-filtered URL, and does not alter pod args.
+    start_args = [
+        "start",
+        "cluster_config.target=k8s",
+        "cluster_config.k8s.tunix_image=test-image",
+        "cluster_config.run_id=run_auto_1",
+        "agentic_grpo_config.beta=0.0",
+        "otel_config.enable=true",
+    ]
+    res = self._run_launch(start_args, extra_env=base_env)
+    self.assertEqual(res.returncode, 0, msg=res.stderr)
+    self.assertEqual(create_count_file.read_text().strip(), "1")
+    self.assertIn(
+        "[launcher] OTel dashboard:"
+        " https://console.cloud.google.com/monitoring/dashboards/builder/shared-42"
+        ";filters=type:mlabel,key:tunix_run_id,val:run_auto_1?project=proj-auto",
+        res.stderr,
+    )
+    self.assertNotIn("otel_config.dashboard_id=", kubectl_log.read_text())
+
+    # 3. A failing gcloud call warns without blocking job launch.
+    fail_env = {**base_env, "FAKE_GCLOUD_FAIL": "1"}
+    res = self._run_launch(start_args, extra_env=fail_env)
+    self.assertEqual(res.returncode, 0, msg=res.stderr)
+    self.assertIn("could not ensure Cloud Monitoring dashboard", res.stderr)
+
+    # 4. Explicit dashboard_id + dashboard_project prints URL without gcloud.
+    res = self._run_launch(
+        [
+            *start_args,
+            "otel_config.dashboard_id=dash-manual",
+            "otel_config.dashboard_project=proj-manual",
+        ],
+        extra_env=fail_env,
+    )
+    self.assertEqual(res.returncode, 0, msg=res.stderr)
+    self.assertIn(
+        "[launcher] OTel dashboard:"
+        " https://console.cloud.google.com/monitoring/dashboards/builder/dash-manual"
+        ";filters=type:mlabel,key:tunix_run_id,val:run_auto_1?project=proj-manual",
+        res.stderr,
+    )
 
   def test_role_env_and_sandbox_settings_render_into_processes(self):
     role_args = [

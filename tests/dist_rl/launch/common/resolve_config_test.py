@@ -1952,10 +1952,11 @@ weight_sync_config:
     # without requiring `otel_config.enable=true`.
     no_gc = resolve_config.initialize(["otel_config.googlecloud=false"])
     self.assertFalse(no_gc.config["otel_config"]["googlecloud"])
-    self.assertIn(
-        "export OTEL_GOOGLECLOUD=false\n",
-        resolve_config.render_bash_exports(no_gc),
-    )
+    exports = resolve_config.render_bash_exports(no_gc)
+    self.assertIn("export OTEL_ENABLE=false\n", exports)
+    self.assertIn("export OTEL_GOOGLECLOUD=false\n", exports)
+    self.assertIn("export OTEL_DASHBOARD_ID=''\n", exports)
+    self.assertIn("export OTEL_DASHBOARD_PROJECT=''\n", exports)
 
     local_hp = resolve_config.initialize(
         ["otel_config.enable=true", "cluster_config.ports.otel=4318"]

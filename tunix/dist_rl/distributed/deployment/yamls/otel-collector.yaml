@@ -54,7 +54,9 @@
 # attributes every node sets (`tunix.role`, `tunix.worker_id`, `tunix.run_id`)
 # into metric labels, so Cloud Monitoring can aggregate across the fleet at
 # query time (`sum` of counters, merged `DISTRIBUTION` percentiles of
-# histograms) and still slice by run, role, or worker.
+# histograms) and still slice by run, role, or worker. See
+# `tunix/dist_rl/distributed/deployment/otel_dashboard.py` for a dashboard
+# that applies those aggregations.
 
 extensions:
   # Durable sending queue: data received by the collector survives a backend

@@ -2293,7 +2293,10 @@ def render_bash_exports(hp: DistHyperParameters) -> str:
       "ROLLOUT_PORT": roles["rollout"]["port"],
       "INFERENCE_PORT": roles["inference"]["port"],
       "OTEL_PORT": cluster["ports"]["otel"],
+      "OTEL_ENABLE": otel["enable"],
       "OTEL_GOOGLECLOUD": otel["googlecloud"],
+      "OTEL_DASHBOARD_ID": otel["dashboard_id"],
+      "OTEL_DASHBOARD_PROJECT": otel["dashboard_project"],
       "ACTOR_MAXTEXT_MODEL_NAME": (
           actor["kwargs"]["maxtext_model_name"]
           if actor["model_source"] == "maxtext"

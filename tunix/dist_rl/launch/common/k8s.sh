@@ -31,6 +31,7 @@ require_cluster_target k8s
 
 YAML_GEN="${YAML_GEN:-${REPO_ROOT}/tunix/dist_rl/distributed/deployment/yaml_generator.py}"
 YAML_DIR="${YAML_DIR:-${REPO_ROOT}/tunix/dist_rl/distributed/deployment/yamls}"
+OTEL_DASHBOARD="${OTEL_DASHBOARD:-${REPO_ROOT}/tunix/dist_rl/distributed/deployment/otel_dashboard.py}"
 
 COMMAND="$1"
 shift
@@ -41,6 +42,36 @@ run_yaml_gen() {
     "${YAML_GEN_BIN}" "$@"
   else
     "$PYTHON_BIN" "$YAML_GEN" "$@"
+  fi
+}
+
+run_otel_dashboard() {
+  if [[ -n "${OTEL_DASHBOARD_BIN:-}" ]]; then
+    "${OTEL_DASHBOARD_BIN}" "$@"
+  else
+    "$PYTHON_BIN" "$OTEL_DASHBOARD" "$@"
+  fi
+}
+
+# Ensures the shared Cloud Monitoring template dashboard exists in the caller's
+# GCP project and logs its URL to stderr (filtered to `$1` when non-empty).
+# Runs only on the launcher host without mutating `CONTAINER_CONFIG_ARGS`, so
+# every pod keeps the exact same `config_sha256` even across worker restarts.
+ensure_otel_dashboard() {
+  local filter_run_id="$1"
+  if is_true "${DRY_RUN}" || ! is_true "${OTEL_GOOGLECLOUD}"; then
+    return 0
+  fi
+  local url
+  if url="$(run_otel_dashboard --ensure \
+      --dashboard_id="${OTEL_DASHBOARD_ID}" \
+      --project="${OTEL_DASHBOARD_PROJECT}" \
+      --run_id="${filter_run_id}")"; then
+    if [[ -n "${url}" ]]; then
+      echo "[launcher] OTel dashboard: ${url}" >&2
+    fi
+  else
+    echo "[launcher] Warning: could not ensure Cloud Monitoring dashboard; continuing without dashboard URL." >&2
   fi
 }
 
@@ -461,6 +492,7 @@ start_otel() {
     --worker_container_port="${OTEL_PORT}" \
     "${otel_gc_flag}" \
     | apply_manifest
+  ensure_otel_dashboard ""
 }
 
 if ! is_true "${DRY_RUN}"; then
@@ -546,6 +578,9 @@ case "${COMMAND}" in
     start_orchestrator
     start_trainer
     start_rollout
+    if is_true "${OTEL_ENABLE}"; then
+      ensure_otel_dashboard "${RUN_ID}"
+    fi
     ;;
   stop)
     stop_orchestrator
@@ -555,6 +590,9 @@ case "${COMMAND}" in
   orchestrator)
     stop_orchestrator
     start_orchestrator
+    if is_true "${OTEL_ENABLE}"; then
+      ensure_otel_dashboard "${RUN_ID}"
+    fi
     ;;
   trainer)
     stop_trainer
