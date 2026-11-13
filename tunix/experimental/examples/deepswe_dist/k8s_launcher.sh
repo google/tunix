@@ -80,6 +80,7 @@ export IN_FLIGHT_WEIGHT_UPDATES=${IN_FLIGHT_WEIGHT_UPDATES:-false}
 export RETURN_ROUTED_EXPERTS=${RETURN_ROUTED_EXPERTS:-false}
 export ROUTED_EXPERTS_ENCODE_MODE=${ROUTED_EXPERTS_ENCODE_MODE:-auto}
 export ROUTED_EXPERTS_NUM_EXPERTS=${ROUTED_EXPERTS_NUM_EXPERTS:-}
+export FREEZE_ROUTER=${FREEZE_ROUTER:-false}
 export EOS_TOKENS=${EOS_TOKENS:-}
 
 # DeepSWE dataset and environment configuration
@@ -347,8 +348,19 @@ fi
 
 case "${RETURN_ROUTED_EXPERTS}" in
   1|[tT][rR][uU][eE]|[yY][eE][sS]|[yY]|[tT])
-    if [[ "${TRAINER_BACKEND}" != "maxtext" ]]; then
-      echo "Error: RETURN_ROUTED_EXPERTS needs TRAINER_BACKEND=maxtext; only the MaxText trainer replays routed experts."
+    if [[ "${TRAINER_BACKEND}" != "maxtext" ]] && \
+       [[ ! "${MODEL_NAME,,} ${MODEL_ID,,}" =~ gemma[-_]?4 ]]; then
+      echo "Error: RETURN_ROUTED_EXPERTS requires TRAINER_BACKEND=maxtext or a Gemma 4 model on TRAINER_BACKEND=tunix."
+      exit 1
+    fi
+    ;;
+esac
+
+case "${FREEZE_ROUTER}" in
+  1|[tT][rR][uU][eE]|[yY][eE][sS]|[yY]|[tT])
+    if [[ "${TRAINER_BACKEND}" != "tunix" ]] || \
+       [[ ! "${MODEL_NAME,,} ${MODEL_ID,,}" =~ gemma[-_]?4 ]]; then
+      echo "Error: FREEZE_ROUTER requires a Gemma 4 model on TRAINER_BACKEND=tunix."
       exit 1
     fi
     ;;
@@ -645,6 +657,8 @@ start_trainer() {
         --checkpoint_root_directory=${CHECKPOINT_ROOT_DIRECTORY} \
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
+        --freeze_router=${FREEZE_ROUTER} \
+        --return_routed_experts=${RETURN_ROUTED_EXPERTS} \
         --sampler_type=${SAMPLER} \
         ${lora_args} \
         ${maxtext_args} \

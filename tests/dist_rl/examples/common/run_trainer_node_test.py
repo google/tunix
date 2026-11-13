@@ -197,6 +197,79 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         self.assertEqual(
             load.call_args.kwargs["load_dtype"], expected_load_dtype
         )
+        self.assertFalse(load.call_args.kwargs["freeze_router"])
+
+  def test_freeze_router_flag_and_validation(self):
+    for flag_argv, expected in (
+        ([], False),
+        (["--freeze_router"], True),
+        (["--no-freeze_router"], False),
+    ):
+      args = run_trainer_node._parse_args(["--model_dir=/tmp/m", *flag_argv])
+      loaded = mock.Mock(config=mock.Mock(freeze_router=expected))
+      with mock.patch.object(
+          run_trainer_node.automodel.AutoModel,
+          "from_pretrained",
+          return_value=(loaded, "/tmp/m"),
+      ) as load:
+        run_trainer_node._load_actor_model(
+            args, mock.sentinel.mesh, lora=False
+        )
+      self.assertEqual(load.call_args.kwargs["freeze_router"], expected)
+
+    args = run_trainer_node._parse_args(
+        ["--model_dir=/tmp/m", "--model_name=Qwen3-1.7B", "--freeze_router"]
+    )
+    with mock.patch.object(
+        run_trainer_node.automodel.AutoModel,
+        "from_pretrained",
+        return_value=(mock.Mock(config=object()), "/tmp/m"),
+    ):
+      with self.assertRaisesRegex(ValueError, "not supported by model"):
+        run_trainer_node._load_actor_model(
+            args, mock.sentinel.mesh, lora=False
+        )
+    with self.assertRaisesRegex(ValueError, "trainer_backend=maxtext"):
+      run_trainer_node._create_maxtext_trainer_factory(args)
+
+  def test_return_routed_experts_requires_replay_capable_model(self):
+
+    class _ReplayModel:
+
+      def __call__(self, x, forced_routed_experts=None):
+        del x, forced_routed_experts
+
+    class _NoReplayModel:
+
+      def __call__(self, x):
+        del x
+
+    default_args = run_trainer_node._parse_args(["--model_dir=/tmp/m"])
+    self.assertFalse(default_args.return_routed_experts)
+    args = run_trainer_node._parse_args(
+        ["--model_dir=/tmp/m", "--return_routed_experts"]
+    )
+    replay_model = _ReplayModel()
+    with mock.patch.object(
+        run_trainer_node.automodel.AutoModel,
+        "from_pretrained",
+        return_value=(replay_model, "/tmp/m"),
+    ):
+      self.assertIs(
+          run_trainer_node._load_actor_model(
+              args, mock.sentinel.mesh, lora=False
+          ),
+          replay_model,
+      )
+    with mock.patch.object(
+        run_trainer_node.automodel.AutoModel,
+        "from_pretrained",
+        return_value=(_NoReplayModel(), "/tmp/m"),
+    ):
+      with self.assertRaisesRegex(ValueError, "forced_routed_experts"):
+        run_trainer_node._load_actor_model(
+            args, mock.sentinel.mesh, lora=False
+        )
 
   def setUp(self):
     super().setUp()

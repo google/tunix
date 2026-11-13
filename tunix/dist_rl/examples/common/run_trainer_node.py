@@ -39,6 +39,7 @@ from tunix.dist_rl.weight_sync import raiden_preload
 from tunix.dist_rl.worker import remote_execution
 from tunix.dist_rl.worker import trainer_worker
 from tunix.models import automodel
+from tunix.rl import common as rl_common
 from tunix.utils import maxtext_utils
 
 # Import Raiden before any other libraries to ensure correct JAX compilation.
@@ -201,6 +202,41 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           "Qwen flash-attention block size. Defaults to the value defined by"
           " the Qwen3 ModelConfig when unset."
       ),
+  )
+  parser.add_argument(
+      "--freeze_router",
+      type=_str2bool,
+      default=False,
+      nargs="?",
+      const=True,
+      help=(
+          "Freeze MoE router gate parameters (router_logits and router_scale)"
+          " during training by applying stop_gradient in the MoE block."
+      ),
+  )
+  parser.add_argument(
+      "--no-freeze_router",
+      dest="freeze_router",
+      action="store_false",
+      help=argparse.SUPPRESS,
+  )
+  parser.add_argument(
+      "--return_routed_experts",
+      type=_str2bool,
+      default=False,
+      nargs="?",
+      const=True,
+      help=(
+          "Whether the rollout returns MoE routed experts for the trainer to"
+          " replay. With the Tunix backend, the actor model's __call__ must"
+          " accept forced_routed_experts."
+      ),
+  )
+  parser.add_argument(
+      "--no-return_routed_experts",
+      dest="return_routed_experts",
+      action="store_false",
+      help=argparse.SUPPRESS,
   )
   parser.add_argument("--mesh_fsdp", type=int, default=2)
   parser.add_argument("--mesh_tp", type=int, default=1)
@@ -673,7 +709,29 @@ def _load_actor_model(args, mesh: Mesh, *, lora: bool):
       remat_config=args.remat_config,
       use_flash_attention=args.use_flash_attention,
       flash_attention_block_size=args.flash_attention_block_size,
+      freeze_router=args.freeze_router,
   )
+  if args.freeze_router:
+    model_config = model.config  # pyrefly: ignore[missing-attribute]
+    try:
+      router_frozen = model_config.freeze_router
+    except AttributeError as exc:
+      raise ValueError(
+          f"--freeze_router is not supported by model {args.model_name!r} "
+          f"({type(model_config).__name__} has no freeze_router field)."
+      ) from exc
+    if not router_frozen:
+      raise ValueError(
+          f"--freeze_router was not applied to model {args.model_name!r}."
+      )
+  if args.return_routed_experts and not rl_common.model_call_contains(
+      model, "forced_routed_experts"
+  ):
+    raise ValueError(
+        f"--return_routed_experts is not supported by model {args.model_name!r}"
+        f" ({type(model).__name__}.__call__ has no forced_routed_experts"
+        " parameter)."
+    )
   if not lora:
     return model
   lora_config = {
@@ -789,6 +847,10 @@ def _maxtext_adamw_options(
 def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
   """Creates the trainer factory function and mesh for MaxText's MaxTextTrainingEngine."""
   logging.info("Trainer backend: MaxText's MaxTextTrainingEngine.")
+  if args.freeze_router:
+    raise ValueError(
+        "--freeze_router is not supported by --trainer_backend=maxtext."
+    )
   adamw_options = _maxtext_adamw_options(args)
   pad_id = maxtext_utils.get_tokenizer_pad_id(
       args.model_id, args.tokenizer_path, args.model_dir
