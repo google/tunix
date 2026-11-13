@@ -314,34 +314,55 @@ class DPOTrainerTest(parameterized.TestCase):
     )
     out = dpo_trainer._prepare_inputs(training_input)
 
+    # Only the prompt starts with a BOS (id 1); the responses do not.
     expected_input_ids = np.array([
-        [0, 1, 14, 1, 16, 0],
-        [0, 1, 15, 1, 18, 19],
-        [0, 1, 14, 1, 20, 17],
-        [0, 1, 15, 1, 21, 0],
+        [0, 1, 14, 16, 0, 0],
+        [0, 1, 15, 18, 19, 0],
+        [0, 1, 14, 20, 17, 0],
+        [0, 1, 15, 21, 0, 0],
     ])
     np.testing.assert_array_equal(out.input_ids, expected_input_ids)
-    self.assertEqual(np.sum(out.attention_mask[0]), 14)
-    self.assertEqual(np.sum(out.attention_mask[1]), 15)
-    self.assertEqual(np.sum(out.attention_mask[2]), 15)
-    self.assertEqual(np.sum(out.attention_mask[3]), 14)
+    self.assertEqual(np.sum(out.attention_mask[0]), 12)
+    self.assertEqual(np.sum(out.attention_mask[1]), 14)
+    self.assertEqual(np.sum(out.attention_mask[2]), 14)
+    self.assertEqual(np.sum(out.attention_mask[3]), 12)
     np.testing.assert_allclose(
         out.ref_chosen_logps,
-        np.array([-11.21106, -5.985622]),
+        np.array([-7.468917, -3.878757]),
         atol=1e-1,
         rtol=1e-2,
     )
     np.testing.assert_allclose(
         out.ref_rejected_logps,
-        np.array([-13.020714, -5.95595]),
+        np.array([-9.389367, -2.037687]),
         atol=1e-1,
         rtol=1e-2,
     )
     expected_completion_mask = np.array(
-        [[1, 1, 0], [1, 1, 1], [1, 1, 1], [1, 1, 0]]
+        [[1, 0, 0], [1, 1, 0], [1, 1, 0], [1, 0, 0]]
     )
     np.testing.assert_array_equal(out.completion_mask, expected_completion_mask)
     self.assertEqual(out.logits_to_keep, 3)
+
+  def test_tokenize_without_bos_drops_tokenizer_added_bos(self):
+    class _BosTokenizer:
+      """Encodes with a leading BOS, like Hugging Face tokenizers."""
+
+      def encode(self, text):
+        return [1, 5, 6]
+
+      def bos_id(self):
+        return 1
+
+      def dedup_bos_ids(self, ids):
+        return ids
+
+    np.testing.assert_array_equal(
+        dpo_lib._tokenize("x", _BosTokenizer(), add_bos=False), [5, 6]
+    )
+    np.testing.assert_array_equal(
+        dpo_lib._tokenize("x", _BosTokenizer()), [1, 1, 5, 6]
+    )
 
   def test_dpo_prepare_inputs(self):
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
