@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from concurrent import futures
 import functools
 import os
@@ -31,13 +31,15 @@ import transformers
 from tunix.common import configs
 from tunix.dist_rl.rollout import sampler as base_sampler_lib
 from tunix.dist_rl.rollout.raiden_weight_sync_mixin import (
-    RaidenDestinationWeightSyncMixin,
+    DestinationWeightSyncMixin,
 )
 from tunix.dist_rl.weight_sync import raiden_weight_sync_delegate
+from tunix.dist_rl.weight_sync import tcp_delegate
 from tunix.dist_rl.weight_sync import weight_sync
 from tunix.generate import mappings
 from tunix.generate import tokenizer_adapter as tok_adapter
 from tunix.generate import utils as generate_utils
+from tunix.models import hf_mapping
 
 import sentencepiece as spm
 
@@ -58,7 +60,7 @@ def _get_vllm_sampler_cls():
   return generate_vllm_lib
 
 
-class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
+class InprocessVllmSampler(DestinationWeightSyncMixin, Sampler):
   """Rollout sampler that runs the vLLM engine inside the rollout process.
 
   This is the default rollout sampler for RL training with the Tunix trainer.
@@ -86,6 +88,7 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
       raiden_sync_delegate: (
           raiden_weight_sync_delegate.RaidenWeightSyncDelegate | None
       ) = None,
+      tcp_sync_delegate: tcp_delegate.TcpDestinationDelegate | None = None,
   ):
     """Initializes the sampler.
 
@@ -100,6 +103,8 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
         engine.
       raiden_sync_delegate: Raiden delegate to use instead of building one when
         `config.weight_sync_mode` is RAIDEN.
+      tcp_sync_delegate: TCP delegate to use when `config.weight_sync_mode` is
+        TCP.
     """
     self.server_id = server_id
     self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
@@ -117,26 +122,35 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
     self.enable_raiden = (
         self.weight_sync_mode == weight_sync.WeightSyncMode.RAIDEN
     )
+    self.raiden_sync_delegate = None
+    self._sync_delegate = None
 
-    if self.enable_raiden and raiden_sync_delegate is None:
-      logging.info(
-          "InprocessVllmSampler [%s] weight_sync: initializing Raiden delegate",
-          self.server_id,
-      )
-      raiden_sync_delegate = (
-          raiden_weight_sync_delegate.RaidenWeightSyncDelegate(
-              server_id=self.server_id,
-              partial_rollout=self.config.partial_rollout,
-          )
-      )
-
-    if not self.enable_raiden and raiden_sync_delegate is not None:
-      logging.warning(
-          "InprocessVllmSampler [%s] raiden_sync_delegate is set but"
-          " enable_raiden is False.",
-          self.server_id,
-      )
-    self.raiden_sync_delegate = raiden_sync_delegate
+    if self.enable_raiden:
+      if raiden_sync_delegate is None:
+        logging.info(
+            "InprocessVllmSampler [%s] weight_sync: initializing Raiden"
+            " delegate",
+            self.server_id,
+        )
+        raiden_sync_delegate = (
+            raiden_weight_sync_delegate.RaidenWeightSyncDelegate(
+                server_id=self.server_id,
+                partial_rollout=self.config.partial_rollout,
+            )
+        )
+      self.raiden_sync_delegate = raiden_sync_delegate
+      self._sync_delegate = self.raiden_sync_delegate
+    elif self.weight_sync_mode == weight_sync.WeightSyncMode.TCP:
+      if tcp_sync_delegate is None:
+        logging.info(
+            "InprocessVllmSampler [%s] weight_sync: initializing TCP delegate",
+            self.server_id,
+        )
+        tcp_sync_delegate = tcp_delegate.TcpDestinationDelegate(
+            server_id=self.server_id,
+            partial_rollout=self.config.partial_rollout,
+        )
+      self._sync_delegate = tcp_sync_delegate
 
   def initialize(self) -> None:
     """Builds the vLLM engine from `config` on the first call."""
@@ -280,6 +294,16 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
         updated_weights, filter_types=filter_types
     )
 
+  def from_hf_manifest(self) -> hf_mapping.WeightMappingSpec:
+    """Returns the declarative HF-to-vLLM-JAX weight-mapping manifest."""
+    return self._require_vllm_sampler().from_hf_manifest()
+
+  def update_params_from_hf(
+      self, hf_weights: Mapping[str, jax.Array | np.ndarray]
+  ) -> None:
+    """Updates model parameters on the underlying sampler from HF weights."""
+    self._require_vllm_sampler().update_params_from_hf(hf_weights)
+
   def delete_cache(self) -> None:
     """Deletes KV cache on the underlying vLLM sampler before weight sync."""
     self._require_vllm_sampler().delete_cache()
@@ -336,6 +360,8 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
       self._executor.shutdown(wait=False, cancel_futures=True)
     if self.vllm_sampler is not None:
       self.vllm_sampler.stop()
+    if self._sync_delegate is not None:
+      self._sync_delegate.close()
     return True
 
   async def pause(
