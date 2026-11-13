@@ -290,7 +290,7 @@ class ToolCallsTest(absltest.TestCase):
 
 
 class OutcomeTest(parameterized.TestCase):
-  """Tests for `status` and `total_reward`, which are not base ATIF fields."""
+  """Tests for `status` and `total_reward` on `TrajectoryStats`."""
 
   @parameterized.named_parameters(
       ("status_name", "SUCCEEDED"),
@@ -307,7 +307,15 @@ class OutcomeTest(parameterized.TestCase):
     self.assertEqual(stats.status, "SUCCEEDED")
     self.assertEqual(stats.total_reward, 0.5)
 
-  def test_schemas_that_do_not_declare_the_fields_report_neither(self) -> None:
+  def test_base_trajectory_reports_status_and_total_reward(self) -> None:
+    trajectory = _trajectory(status=" succeeded\n", total_reward=1.25)
+
+    stats = stats_lib.TrajectoryStats.from_trajectory(trajectory)
+
+    self.assertEqual(stats.status, "SUCCEEDED")
+    self.assertEqual(stats.total_reward, 1.25)
+
+  def test_extra_values_are_ignored_when_fields_are_unset(self) -> None:
     trajectory = _trajectory(extra={"status": "SUCCEEDED", "reward": 1.0})
 
     stats = stats_lib.TrajectoryStats.from_trajectory(trajectory)

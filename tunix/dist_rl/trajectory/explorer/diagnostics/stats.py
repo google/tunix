@@ -31,7 +31,7 @@ from collections.abc import Iterable, Mapping, Sequence
 import dataclasses
 import math
 import types
-from typing import NamedTuple, Protocol, TypedDict, runtime_checkable
+from typing import NamedTuple, TypedDict
 
 import pandas as pd
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
@@ -91,14 +91,6 @@ class RunStatsJson(TypedDict):
   tool_counts: dict[str, int]
   # Each active schema diagnostics' `summarize()` result, by `NAMESPACE`.
   schema_stats: dict[str, dict[str, schema_diagnostics.JsonValue]]
-
-
-@runtime_checkable
-class _ReportsOutcome(Protocol):
-  """A trajectory whose schema declares a status and a total reward."""
-
-  status: str | None
-  total_reward: float | None
 
 
 class StepCounts(NamedTuple):
@@ -285,9 +277,8 @@ class TrajectoryStats:
   Only the root trajectory is summarized; embedded `subagent_trajectories` are
   not traversed (call `from_trajectory` on each subagent for its figures).
 
-  `status` and `total_reward` are read from trajectories whose schema declares
-  them and are None for trajectories whose schema does not (values packed in
-  `extra` are not read).
+  `status` and `total_reward` are read directly from `trajectory.status` and
+  `trajectory.total_reward` (values packed in `extra` are not read).
 
   Attributes:
     trajectory_id: The trajectory's ID, or None if unset.
@@ -336,15 +327,12 @@ class TrajectoryStats:
     """
     _check_unique_namespaces(diagnostics)
     status: str | None = None
-    total_reward: float | None = None
-
-    if isinstance(trajectory, _ReportsOutcome):
-      raw_status = trajectory.status
-      if raw_status is not None:
-        # Stripping and upper-casing merge spellings such as " succeeded" and
-        # "SUCCEEDED"; a blank status counts as unreported.
-        status = raw_status.strip().upper() or None
-      total_reward = trajectory.total_reward
+    raw_status = trajectory.status
+    if raw_status is not None:
+      # Stripping and upper-casing merge spellings such as " succeeded" and
+      # "SUCCEEDED"; a blank status counts as unreported.
+      status = raw_status.strip().upper() or None
+    total_reward = trajectory.total_reward
     if total_reward is not None and not math.isfinite(total_reward):
       total_reward = None
     tool_call_names = []

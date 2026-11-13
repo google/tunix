@@ -23,7 +23,7 @@ Nested dictionaries and models are flattened into dot-separated columns:
 * `trajectory_id`, then every other metadata field in declaration order, e.g.
   `session_id`, `agent.name`, `final_metrics.total_steps`,
   `final_metrics.extra.<key>`, `extra.<key>` (and, for metadata subclasses,
-  their extension fields such as `status` or `total_reward`).
+  their extension fields such as `prompt_id` or `gamma`).
 * `metrics.<key>` for every key in `TrajectoryMetrics.extra`.
 
 Trajectories without recorded metrics keep their row, with null `metrics.*`

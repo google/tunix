@@ -14,13 +14,17 @@
 
 """Converter for translating between Tunix RL Step and Trajectory Step representations."""
 
-from typing import Any
+from typing import Any, Final
 
 import numpy as np
 from tunix.dist_rl.trajectory import action_converter
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.rl import packing
 from tunix.rl.agentic.agents import agent_types
+
+_TUNIX_ONLY_METADATA_FIELDS: Final[frozenset[str]] = frozenset(
+    trajectory_lib.TunixTrajectoryMetadata.model_fields
+) - frozenset(trajectory_lib.TrajectoryMetadata.model_fields)
 
 
 def _extract_metrics(assistant_tokens: Any) -> trajectory_lib.Metrics | None:
@@ -359,14 +363,10 @@ def to_tunix_trajectory(
   """
   if isinstance(traj, dict):
     if (
-        "prompt_id" in traj
-        or "status" in traj
-        or "total_reward" in traj
-        or "gamma" in traj
+        bool(_TUNIX_ONLY_METADATA_FIELDS.intersection(traj))
         or traj.get("schema_version", "").startswith("Tunix")
         or any(
-            step.get("step_id") == 0
-            or "reward" in step
+            step.get("step_id") == 0 or "reward" in step
             for step in traj.get("steps", [])
             if isinstance(step, dict)
         )

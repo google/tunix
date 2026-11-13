@@ -165,7 +165,8 @@ class SummaryTest(absltest.TestCase):
     self.assertEqual(data["run"]["steps"]["total"], 4)
     self.assertEqual(data["run"]["tokens"]["total"], 150)
     self.assertEqual(data["run"]["num_with_tokens"], 1)
-    self.assertEqual(data["run"]["status_counts"], {})
+    self.assertEqual(data["run"]["status_counts"], {"SUCCEEDED": 1})
+    self.assertEqual(data["run"]["mean_reward"], 3.5)
     self.assertEqual(data["run"]["tool_counts"], {"search": 1})
     # One flat record per trajectory, the columns of `RunStats.df`, with
     # unreported quantities as null.

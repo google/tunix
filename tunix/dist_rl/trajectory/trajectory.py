@@ -345,6 +345,13 @@ def deep_copy(model: _ModelT) -> _ModelT:
 
 _EXTRA_FIELD: Final[str] = "extra"
 
+# Subclass fields promoted onto TrajectoryMetadata whose legacy packed entries
+# inside `extra[EXTENSIONS_KEY]` remain valid for backward compatibility when
+# the top-level canonical field is unset.
+_PROMOTED_METADATA_EXTENSION_FIELDS: Final[frozenset[str]] = frozenset(
+    {"status", "total_reward"}
+)
+
 
 @functools.lru_cache(maxsize=None)
 def _get_field_names(model_cls: type[pydantic.BaseModel]) -> set[str]:
@@ -486,9 +493,16 @@ def _unpack_subclass_values_from_extra(
       atif_model, (base_field_names & subclass_all_fields) - {_EXTRA_FIELD}
   )
 
-  # Promote only fields declared on `subclass_cls` from `extra[extensions_key]`,
-  # leaving any unrecognized keys in place so `extra="forbid"` is not tripped.
-  for field in packed_extensions.keys() & extension_field_names:
+  # Promote fields declared on `subclass_cls` (plus legacy promoted metadata
+  # fields when unset at the top level), leaving unrecognized keys in `extra`.
+  promoted_fallbacks = (
+      _PROMOTED_METADATA_EXTENSION_FIELDS - values_by_field.keys()
+      if isinstance(atif_model, TrajectoryMetadata)
+      else frozenset()
+  )
+  for field in packed_extensions.keys() & (
+      extension_field_names | promoted_fallbacks
+  ):
     values_by_field[field] = packed_extensions.pop(field)
   if packed_extensions and extensions_key:
     extra[extensions_key] = packed_extensions
@@ -1269,6 +1283,17 @@ class TrajectoryMetadata(pydantic.BaseModel):
       ge=1,
       description="1-based retry attempt counter for this trajectory.",
   )
+  status: str | None = pydantic.Field(
+      default=None,
+      description=(
+          "Execution outcome or lifecycle status of the trajectory, or None"
+          " if not stated."
+      ),
+  )
+  total_reward: float | None = pydantic.Field(
+      default=None,
+      description="Total cumulative reward, or None if unreported.",
+  )
   extra: MetadataDict = pydantic.Field(
       default=None,
       description="Custom root-level metadata.",
@@ -1360,10 +1385,16 @@ class TrajectoryMetadata(pydantic.BaseModel):
       packed_extensions = metadata.extra.get(subclass.EXTENSIONS_KEY)
       if not isinstance(packed_extensions, Mapping) or not packed_extensions:
         continue
-      extension_keys = packed_extensions.keys()
-      if extension_keys <= subclass_fields:
+      unpromoted_keys = (
+          packed_extensions.keys() - _PROMOTED_METADATA_EXTENSION_FIELDS
+      )
+      if not unpromoted_keys and all(
+          getattr(metadata, key) is not None for key in packed_extensions
+      ):
+        continue
+      if unpromoted_keys <= subclass_fields:
         subset_matches.append(subclass)
-      elif subclass_fields <= extension_keys:
+      elif subclass_fields <= unpromoted_keys:
         superset_matches.append(subclass)
     # In Python, `False < True` (0 < 1). To break equal-length ties in favor of
     # `cls`, `min()` uses `candidate is not cls` (False=0 for `cls`) and `max()`
@@ -1403,6 +1434,7 @@ class TrajectoryMetadata(pydantic.BaseModel):
       step_rehydrator: Callable[[Any], Any] | None = None,
       subagent_rehydrator: Callable[..., Any] | None = None,
       strict: bool = True,
+      is_incomplete: bool = False,
   ) -> TrajectoryT:
     """Constructs `trajectory_cls` from this metadata, steps, and subagents.
 
@@ -1418,8 +1450,11 @@ class TrajectoryMetadata(pydantic.BaseModel):
       subagent_rehydrator: Optional callable applied to each subagent trajectory
         before validation.
       strict: Whether to raise on validation or step-sequence errors. When
-        False, skips corrupt items and retains the longest contiguous step
-        prefix starting from `trajectory_cls.STEP_ID_START`.
+        False, skips corrupt items, retains the longest contiguous step prefix
+        starting from `trajectory_cls.STEP_ID_START`, and resets `status` and
+        `total_reward` to `None` when incomplete.
+      is_incomplete: Whether any step was already skipped as corrupted before
+        calling this method.
 
     Returns:
       The constructed paired trajectory instance.
@@ -1509,7 +1544,36 @@ class TrajectoryMetadata(pydantic.BaseModel):
               exc_info=True,
           )
       data["subagent_trajectories"] = valid_subagents
-    return trajectory_cls(**data)
+    trajectory = trajectory_cls(**data)
+    if not strict:
+      self._reset_incomplete_outcome(
+          trajectory,
+          num_input_steps=len(steps) if steps is not None else 0,
+          is_incomplete=is_incomplete,
+      )
+    return trajectory
+
+  def _reset_incomplete_outcome(
+      self,
+      trajectory: Trajectory[Any],
+      *,
+      num_input_steps: int,
+      is_incomplete: bool,
+  ) -> None:
+    """Clears completion fields on `trajectory` when steps are incomplete."""
+    num_valid_steps = len(trajectory.steps)
+    expected_total = (
+        self.final_metrics.total_steps
+        if self.final_metrics is not None
+        else None
+    )
+    tail_mismatch = self.status in ("COMPLETED", "SUCCEEDED") and (
+        (expected_total is not None and num_valid_steps < expected_total)
+        or (expected_total is None and num_valid_steps == 0)
+    )
+    if is_incomplete or num_valid_steps < num_input_steps or tail_mismatch:
+      trajectory.status = None
+      trajectory.total_reward = None
 
   @classmethod
   def _get_or_create_paired_trajectory_cls(cls) -> type[Trajectory[Any]]:
@@ -1567,21 +1631,22 @@ class TrajectoryMetadata(pydantic.BaseModel):
       steps: Sequence of step instances, or None.
       subagent_trajectories: Sequence of subagent trajectory instances, or None.
       strict: Whether to enforce strict sequential step IDs and raise on step
-        validation errors. When False, skips corrupted steps and retains the
-        longest contiguous prefix starting from `STEP_ID_START`.
+        validation errors. When False, skips corrupted steps, retains the
+        longest contiguous prefix starting from `STEP_ID_START`, and resets
+        `status` and `total_reward` to `None` when incomplete.
       is_incomplete: Whether any step was already skipped as corrupted before
         calling this method.
 
     Returns:
       The constructed trajectory instance.
     """
-    del is_incomplete
     trajectory_cls = self._get_or_create_paired_trajectory_cls()
     return self._create_paired_trajectory(
         trajectory_cls,
         steps,
         subagent_trajectories,
         strict=strict,
+        is_incomplete=is_incomplete,
     )
 
 
@@ -1992,17 +2057,6 @@ class TunixTrajectoryMetadata(TrajectoryMetadata):
       default=None,
       description="List of policy versions for each step in the trajectory.",
   )
-  status: str | None = pydantic.Field(
-      default=None,
-      description=(
-          "Trajectory status as an `agent_types.TrajectoryStatus` name (e.g."
-          ' "RUNNING", "SUCCEEDED", "FAILED"), or None if not stated.'
-      ),
-  )
-  total_reward: float | None = pydantic.Field(
-      default=None,
-      description="Total cumulative reward.",
-  )
   gamma: float | None = pydantic.Field(
       default=None,
       description="Discount factor for Monte Carlo return calculation.",
@@ -2052,30 +2106,15 @@ class TunixTrajectoryMetadata(TrajectoryMetadata):
     Returns:
       The constructed TunixTrajectory.
     """
-    trajectory = self._create_paired_trajectory(
+    return self._create_paired_trajectory(
         TunixTrajectory,
         steps,
         subagent_trajectories,
         step_rehydrator=_upcast_atif_step,
         subagent_rehydrator=TunixTrajectory.from_atif_trajectory,
         strict=strict,
+        is_incomplete=is_incomplete,
     )
-    if not strict:
-      num_input_steps = len(steps) if steps is not None else 0
-      num_valid_steps = len(trajectory.steps)
-      expected_total = (
-          self.final_metrics.total_steps
-          if self.final_metrics is not None
-          else None
-      )
-      tail_mismatch = self.status in ("COMPLETED", "SUCCEEDED") and (
-          (expected_total is not None and num_valid_steps < expected_total)
-          or (expected_total is None and num_valid_steps == 0)
-      )
-      if is_incomplete or num_valid_steps < num_input_steps or tail_mismatch:
-        trajectory.status = None
-        trajectory.total_reward = None
-    return trajectory
 
 
 class TunixTrajectory(

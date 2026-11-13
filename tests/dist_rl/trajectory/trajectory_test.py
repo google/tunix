@@ -2138,6 +2138,8 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
     self.assertEqual(atif_metadata.session_id, "sess_01")
     self.assertEqual(atif_metadata.notes, "Metadata projection test")
     self.assertEqual(atif_metadata.attempt, 1)
+    self.assertEqual(atif_metadata.status, "SUCCEEDED")
+    self.assertEqual(atif_metadata.total_reward, 3.5)
     self.assertEqual(
         atif_metadata.extra,
         {
@@ -2146,8 +2148,6 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
                 "prompt_id": "p_1",
                 "group_index": 2,
                 "target_policy_versions": [2, 3],
-                "status": "SUCCEEDED",
-                "total_reward": 3.5,
                 "gamma": 0.9,
                 "masked_out": False,
                 "hyperparams": {"temperature": 0.7},
@@ -2236,6 +2236,8 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
     self.assertIs(type(atif_metadata), trajectory.TrajectoryMetadata)
     self.assertEqual(atif_metadata.trajectory_id, "t_atif")
     self.assertEqual(atif_metadata.attempt, 1)
+    self.assertEqual(atif_metadata.status, "SUCCEEDED")
+    self.assertEqual(atif_metadata.total_reward, 3.5)
     self.assertEqual(
         atif_metadata.extra,
         {
@@ -2244,8 +2246,6 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
                 "prompt_id": "p_1",
                 "group_index": 2,
                 "target_policy_versions": [2, 3],
-                "status": "SUCCEEDED",
-                "total_reward": 3.5,
                 "gamma": 0.9,
                 "masked_out": False,
                 "hyperparams": {"temperature": 0.7},
@@ -2270,8 +2270,6 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
             "prompt_id": "p_1",
             "group_index": 2,
             "target_policy_versions": [2, 3],
-            "status": "SUCCEEDED",
-            "total_reward": 3.5,
             "gamma": 0.9,
             "masked_out": False,
             "hyperparams": {"temperature": 0.7},
@@ -2519,8 +2517,6 @@ class AtifRehydrationTest(trajectory_testing.TrajectoryTestCase):
             "prompt_id",
             "group_index",
             "target_policy_versions",
-            "status",
-            "total_reward",
             "gamma",
             "masked_out",
             "hyperparams",
@@ -2902,23 +2898,24 @@ class AtifRehydrationTest(trajectory_testing.TrajectoryTestCase):
       atif_a = orig_a.to_atif_metadata()
       atif_b = orig_b.to_atif_metadata()
 
+      self.assertEqual(atif_a.status, "RUNNING")
+      self.assertEqual(atif_b.status, "SUCCEEDED")
       self.assertEqual(
           atif_a.extra,
           {
               "user_meta": "keep_me",
               "_client_a_extensions": {
                   "shared_field": "val_a",
-                  "status": "RUNNING",
               },
           },
       )
       self.assertEqual(
           atif_a.get_extensions(),
-          {"shared_field": "val_a", "status": "RUNNING"},
+          {"shared_field": "val_a"},
       )
       self.assertEqual(
           atif_b.get_extensions(),
-          {"shared_field": "val_b", "status": "SUCCEEDED"},
+          {"shared_field": "val_b"},
       )
       self.assertIs(
           trajectory.TrajectoryMetadata.resolve_subclass(atif_a),
@@ -4091,21 +4088,29 @@ class TolerantCreateTrajectoryTest(absltest.TestCase):
     self.assertEqual(agent_step.step_id, 1)
     self.assertEqual([s.step_id for s in traj.steps], [0, 1])
 
-  def test_canonical_metadata_attempt_defaults_and_round_trips(self) -> None:
+  def test_canonical_metadata_fields_default_and_round_trip(self) -> None:
     default_meta = trajectory.TrajectoryMetadata(
         trajectory_id="canon_default",
         agent=trajectory.Agent(name="agent", version="1.0"),
     )
     self.assertEqual(default_meta.attempt, 1)
+    self.assertIsNone(default_meta.status)
+    self.assertIsNone(default_meta.total_reward)
 
     populated_meta = trajectory.TunixTrajectoryMetadata(
         trajectory_id="canon_populated",
         agent=trajectory.Agent(name="agent", version="1.0"),
         attempt=3,
+        status="SUCCEEDED",
+        total_reward=4.25,
         prompt_id="p_canon",
     )
     atif_meta = populated_meta.to_atif_metadata()
     self.assertEqual(atif_meta.attempt, 3)
+    self.assertEqual(atif_meta.status, "SUCCEEDED")
+    self.assertEqual(atif_meta.total_reward, 4.25)
+    self.assertNotIn("status", atif_meta.get_extensions())
+    self.assertNotIn("total_reward", atif_meta.get_extensions())
     self.assertNotIn("attempt", atif_meta.get_extensions())
 
     restored = trajectory.TunixTrajectoryMetadata.from_atif_metadata(
@@ -4124,6 +4129,98 @@ class TolerantCreateTrajectoryTest(absltest.TestCase):
               agent=trajectory.Agent(name="agent", version="1.0"),
               attempt=invalid_attempt,
           )
+
+  def test_legacy_packed_status_and_total_reward_rehydrate_without_shadowing(
+      self,
+  ) -> None:
+    legacy_atif = trajectory.TrajectoryMetadata.model_validate({
+        "trajectory_id": "legacy_tunix",
+        "agent": {"name": "agent", "version": "1.0"},
+        "extra": {
+            trajectory.TUNIX_EXTENSIONS_KEY: {
+                "group_index": 1,
+                "status": "SUCCEEDED",
+                "total_reward": 2.5,
+            }
+        },
+    })
+    self.assertIs(
+        trajectory.TrajectoryMetadata.resolve_subclass(legacy_atif),
+        trajectory.TunixTrajectoryMetadata,
+    )
+    rehydrated = trajectory.TunixTrajectoryMetadata.from_atif_metadata(
+        legacy_atif
+    )
+    self.assertEqual(rehydrated.attempt, 1)
+    self.assertEqual(rehydrated.group_index, 1)
+    self.assertEqual(rehydrated.status, "SUCCEEDED")
+    self.assertEqual(rehydrated.total_reward, 2.5)
+    self.assertIsNone(rehydrated.extra)
+
+    # Canonical top-level fields take precedence over foreign keys in extra.
+    spoofed_base = trajectory.TrajectoryMetadata(
+        trajectory_id="spoofed_base",
+        agent=trajectory.Agent(name="agent", version="1.0"),
+        status="SUCCEEDED",
+        total_reward=1.0,
+        extra={
+            trajectory.TUNIX_EXTENSIONS_KEY: {
+                "status": "FAILED",
+                "total_reward": -9.0,
+            }
+        },
+    )
+    self.assertIs(
+        trajectory.TrajectoryMetadata.resolve_subclass(spoofed_base),
+        trajectory.TrajectoryMetadata,
+    )
+    unpacked = trajectory.TunixTrajectoryMetadata.from_atif_metadata(
+        spoofed_base
+    )
+    self.assertEqual(unpacked.status, "SUCCEEDED")
+    self.assertEqual(unpacked.total_reward, 1.0)
+    self.assertEqual(
+        unpacked.extra,
+        {
+            trajectory.TUNIX_EXTENSIONS_KEY: {
+                "status": "FAILED",
+                "total_reward": -9.0,
+            }
+        },
+    )
+
+  def test_base_metadata_create_trajectory_strict_false_resets_completion(
+      self,
+  ) -> None:
+    base_meta = trajectory.TrajectoryMetadata(
+        trajectory_id="base_incomplete",
+        agent=trajectory.Agent(name="agent", version="1.0"),
+        attempt=2,
+        status="SUCCEEDED",
+        total_reward=7.5,
+        final_metrics=trajectory.FinalMetrics(total_steps=3),
+    )
+    step1 = trajectory_testing.make_step(step_id=1, message="step 1")
+    step2 = trajectory_testing.make_step(step_id=2, message="step 2")
+    step4 = trajectory_testing.make_step(step_id=4, message="step 4")
+
+    gap_traj = base_meta.create_trajectory(
+        steps=[step1, step2, step4], strict=False
+    )
+    self.assertEqual([s.step_id for s in gap_traj.steps], [1, 2])
+    self.assertEqual(gap_traj.attempt, 2)
+    self.assertIsNone(gap_traj.status)
+    self.assertIsNone(gap_traj.total_reward)
+
+    tail_traj = base_meta.create_trajectory(steps=[step1, step2], strict=False)
+    self.assertEqual([s.step_id for s in tail_traj.steps], [1, 2])
+    self.assertEqual(tail_traj.attempt, 2)
+    self.assertIsNone(tail_traj.status)
+    self.assertIsNone(tail_traj.total_reward)
+
+    strict_traj = base_meta.create_trajectory(steps=[step1, step2], strict=True)
+    self.assertEqual(strict_traj.status, "SUCCEEDED")
+    self.assertEqual(strict_traj.total_reward, 7.5)
 
 
 if __name__ == "__main__":
