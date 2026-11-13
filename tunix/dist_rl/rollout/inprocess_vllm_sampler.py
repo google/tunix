@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Mapping, MutableMapping, Sequence
 from concurrent import futures
 import functools
 import os
@@ -25,14 +25,17 @@ from typing import Any, TYPE_CHECKING
 
 from absl import logging
 import jax
+import jax.numpy as jnp
 import jaxtyping
 import numpy as np
 import transformers
 from tunix.common import configs
 from tunix.dist_rl.rollout import sampler as base_sampler_lib
 from tunix.dist_rl.rollout.raiden_weight_sync_mixin import (
-    RaidenDestinationWeightSyncMixin,
+    DestinationWeightSyncMixin,
 )
+from tunix.dist_rl.weight_sync import basic_delegate
+from tunix.dist_rl.weight_sync import basic_handler
 from tunix.dist_rl.weight_sync import raiden_weight_sync_delegate
 from tunix.dist_rl.weight_sync import weight_sync
 from tunix.generate import mappings
@@ -58,7 +61,7 @@ def _get_vllm_sampler_cls():
   return generate_vllm_lib
 
 
-class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
+class InprocessVllmSampler(DestinationWeightSyncMixin, Sampler):
   """Rollout sampler that runs the vLLM engine inside the rollout process.
 
   This is the default rollout sampler for RL training with the Tunix trainer.
@@ -117,16 +120,31 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
     self.enable_raiden = (
         self.weight_sync_mode == weight_sync.WeightSyncMode.RAIDEN
     )
+    self.raiden_sync_delegate = None
+    self._sync_delegate = None
 
-    if self.enable_raiden and raiden_sync_delegate is None:
+    if self.enable_raiden:
+      if raiden_sync_delegate is None:
+        logging.info(
+            "InprocessVllmSampler [%s] weight_sync: initializing Raiden"
+            " delegate",
+            self.server_id,
+        )
+        raiden_sync_delegate = (
+            raiden_weight_sync_delegate.RaidenWeightSyncDelegate(
+                server_id=self.server_id,
+            )
+        )
+      self.raiden_sync_delegate = raiden_sync_delegate
+      self._sync_delegate = self.raiden_sync_delegate
+    elif self.weight_sync_mode == weight_sync.WeightSyncMode.BASIC:
       logging.info(
-          "InprocessVllmSampler [%s] weight_sync: initializing Raiden delegate",
+          "InprocessVllmSampler [%s] weight_sync: initializing basic delegate",
           self.server_id,
       )
-      raiden_sync_delegate = (
-          raiden_weight_sync_delegate.RaidenWeightSyncDelegate(
-              server_id=self.server_id,
-          )
+      self._sync_delegate = basic_delegate.BasicDestinationDelegate(
+          server_id=self.server_id,
+          partial_rollout=self.config.partial_rollout,
       )
 
     if not self.enable_raiden and raiden_sync_delegate is not None:
@@ -135,7 +153,7 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
           " enable_raiden is False.",
           self.server_id,
       )
-    self.raiden_sync_delegate = raiden_sync_delegate
+      self.raiden_sync_delegate = raiden_sync_delegate
 
   def initialize(self) -> None:
     """Builds the vLLM engine from `config` on the first call."""
@@ -271,6 +289,55 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
         updated_weights, filter_types=filter_types
     )
 
+  def from_hf_manifest(self) -> dict[str, Any]:
+    """Returns the declarative HF-to-vLLM-JAX weight-mapping manifest."""
+    return self._require_vllm_sampler().from_hf_manifest()
+
+  def expected_hf_variables(self) -> tuple[weight_sync.TensorMetadata, ...]:
+    """Returns canonical HF TensorMetadata expected by the underlying sampler."""
+    return self._require_vllm_sampler().expected_hf_variables()
+
+  def update_params_from_hf(
+      self,
+      hf_weights: Mapping[
+          str, basic_handler.RawTensorPayload | jax.Array | np.ndarray
+      ],
+      *,
+      preserve_active_kv_cache: bool | None = None,
+  ) -> None:
+    """Updates model parameters on the underlying sampler from HF weights."""
+    unpacked: dict[str, jax.Array | np.ndarray] = {}
+    cpu_device = None
+
+    def _unpack_one(
+        value: basic_handler.RawTensorPayload | jax.Array | np.ndarray,
+    ) -> jax.Array | np.ndarray:
+      nonlocal cpu_device
+      if isinstance(value, basic_handler.RawTensorPayload):
+        if cpu_device is None:
+          local_cpus = jax.local_devices(backend="cpu")
+          cpu_device = local_cpus[0] if local_cpus else jax.devices("cpu")[0]
+        with jax.default_device(cpu_device):
+          if value.dtype in ("bf16", "bfloat16"):
+            return jax.lax.bitcast_convert_type(
+                jnp.asarray(value.buffer), jnp.bfloat16
+            )
+          return jnp.asarray(value.buffer)
+      return value
+
+    if isinstance(hf_weights, MutableMapping):
+      while hf_weights:
+        name, value = hf_weights.popitem()
+        unpacked[name] = _unpack_one(value)
+        del value
+    else:
+      for name, value in hf_weights.items():
+        unpacked[name] = _unpack_one(value)
+    self._require_vllm_sampler().update_params_from_hf(
+        unpacked,
+        preserve_active_kv_cache=preserve_active_kv_cache,
+    )
+
   def delete_cache(self) -> None:
     """Deletes KV cache on the underlying vLLM sampler before weight sync."""
     self._require_vllm_sampler().delete_cache()
@@ -325,6 +392,8 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
     del kwargs
     if self._executor is not None:
       self._executor.shutdown(wait=False, cancel_futures=True)
+    if self._sync_delegate is not None:
+      await asyncio.to_thread(self._sync_delegate.close)
     if self.vllm_sampler is not None:
       self.vllm_sampler.stop()
     return True

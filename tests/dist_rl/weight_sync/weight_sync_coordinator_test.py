@@ -39,10 +39,11 @@ from absl.testing import absltest
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.orchestrator import worker_registry
 from tunix.dist_rl.testing import worker_registry_testing
+from tunix.dist_rl.weight_sync import basic_handler
 
 try:
-  from tunix.dist_rl.weight_sync import weight_sync
-  from tunix.dist_rl.weight_sync import weight_sync_coordinator
+  from tunix.dist_rl.weight_sync import weight_sync  # pylint: disable=g-import-not-at-top
+  from tunix.dist_rl.weight_sync import weight_sync_coordinator  # pylint: disable=g-import-not-at-top
 except ImportError:
   raise unittest.SkipTest("tpu_raiden is required")
 
@@ -754,8 +755,8 @@ class ManifestPreflightTest(CoordinatorTestBase):
     # Source staging is still released on this exit path.
     self.assertEqual(self.sources[0].release_calls, 1)
 
-  def test_asymmetric_transport_mode_ffi_to_tcp_succeeds(self):
-    dest = FakeDestination("sampler", [], transport_mode="tcp")
+  def test_asymmetric_transport_mode_ffi_to_basic_succeeds(self):
+    dest = FakeDestination("sampler", [], transport_mode="basic")
     source = FakeSource("trainer", Wire(), [], transport_mode="ffi")
     self.make(dest, sources=[source])
 
@@ -2082,6 +2083,19 @@ class DestinationStatusFilterTest(CoordinatorTestBase):
             "s-pending": self.registry.handle("s-pending"),
         },
     )
+
+  def test_create_default_handler_returns_basic_handler_for_basic_mode(self):
+    for mode in (
+        weight_sync.WeightSyncMode.BASIC,
+        "basic",
+        "BASIC",
+    ):
+      with self.subTest(mode=mode):
+        handler = weight_sync_coordinator.create_default_handler(mode)
+        self.assertIsInstance(
+            handler,
+            basic_handler.BasicWeightSyncHandler,
+        )
 
   def test_create_default_handler_returns_null_handler_for_none_and_rejects_invalid_modes(
       self,

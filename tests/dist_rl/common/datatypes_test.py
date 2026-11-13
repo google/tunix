@@ -660,6 +660,10 @@ class IsValidTrajectoryTest(absltest.TestCase):
     with self.assertRaises(TypeError):
       datatypes.WeightSyncRequest(min_retained_policy_version=True)  # pyrefly: ignore[bad-argument-type]
 
+  def test_weight_sync_mode_basic(self):
+    self.assertEqual(common_datatypes.WeightSyncMode.BASIC, "basic")
+    self.assertEqual(common_datatypes.WeightSyncMode.BASIC.value, "basic")
+
 
 if __name__ == "__main__":
   absltest.main()
