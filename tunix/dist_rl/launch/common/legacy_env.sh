@@ -285,9 +285,9 @@ fail_on_maxtext_env_overrides() {
     echo "Error: MaxText config overrides are set in the environment:" \
       "${found[*]}." >&2
     echo "Unset them and pass them as" \
-      "dist_training_config.maxtext_extra_flags=\"key=value ...\" instead" \
+      "dist_training_config.maxtext_extra_config.<key>=<value> instead" \
       "(e.g. M_REMAT_POLICY=full becomes" \
-      "dist_training_config.maxtext_extra_flags=remat_policy=full)." >&2
+      "dist_training_config.maxtext_extra_config.remat_policy=full)." >&2
     exit 1
   fi
 }

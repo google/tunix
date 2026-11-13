@@ -29,14 +29,16 @@ from collections.abc import Callable, Mapping
 import dataclasses
 import logging
 import os
+import re
 import sys
-from typing import TypeVar
+from typing import Final, TypeVar
 
 from flax import nnx
 import jax
 from jax.sharding import Mesh
 import optax
 from orbax import checkpoint as ocp
+from tunix.cli import config as cli_config
 from tunix.cli.utils import model as model_utils
 from tunix.dist_rl.distributed.runtime import context as context_lib
 from tunix.dist_rl.launch.common import resolve_config
@@ -429,8 +431,8 @@ def _maxtext_adamw_options(
   prefix = f"{_RL_TRAINING_KEY}.{_ACTOR_OPTIMIZER_KEY}"
   hint = (
       " For other MaxText optimizer settings, drop this setting and set them in"
-      " dist_training_config.maxtext_extra_flags instead (e.g."
-      ' dist_training_config.maxtext_extra_flags="opt_type=sgd").'
+      " dist_training_config.maxtext_extra_config instead (e.g."
+      " dist_training_config.maxtext_extra_config.opt_type=sgd)."
   )
   opt_type = str(opt["opt_type"])
   if opt_type.lower() != "adamw":
@@ -509,6 +511,56 @@ def _maxtext_profiling_options(
           kwargs, "upload_all_profiler_results", False
       ),
   )
+
+
+# Strings that YAML reads back unchanged without quotes: a word that is not a
+# YAML boolean or null keyword (numbers and `${...}` start with another
+# character). The checked keywords are lowercased, so some casings are quoted
+# needlessly.
+_PLAIN_YAML_STRING_RE: Final[re.Pattern[str]] = re.compile(
+    r"[A-Za-z_][A-Za-z0-9_./-]*"
+)
+_YAML_KEYWORDS: Final[frozenset[str]] = frozenset(
+    {"true", "false", "yes", "no", "on", "off", "null"}
+)
+
+
+def _maxtext_extra_flag(key: str, value: str | int | float | bool) -> str:
+  """Returns the MaxText `key=value` argument for one extra config entry.
+
+  MaxText reads its arguments with `OmegaConf.from_cli`, which parses each value
+  as YAML. A string YAML would read as something else (`""`, `"0"`, `"true"`,
+  `"a: b"`, ...) is written double-quoted by `cli_config.format_cli_arg`. Plain
+  words such as `custom` stay unquoted, so the logged flags read like the
+  hand-written `MAXTEXT_EXTRA_FLAGS` of the old launchers.
+
+  Args:
+    key: MaxText config name.
+    value: The value; `DistHyperParameters` checked its type.
+  """
+  if isinstance(value, str) and (
+      not _PLAIN_YAML_STRING_RE.fullmatch(value)
+      or value.lower() in _YAML_KEYWORDS
+  ):
+    return cli_config.format_cli_arg(key, value)
+  return f"{key}={value}"
+
+
+def _maxtext_extra_flags(hp: resolve_config.DistHyperParameters) -> list[str]:
+  """Formats `dist_training_config.maxtext_extra_config` as `key=value` args.
+
+  `DistHyperParameters` checked that each key is a MaxText config name the
+  trainer does not build from the config, and that each value is a str, int,
+  float or bool.
+
+  Args:
+    hp: Validated distributed RL configuration.
+
+  Returns:
+    One MaxText config argument per entry, in config order.
+  """
+  extra = hp.config_mapping("dist_training_config")["maxtext_extra_config"]
+  return [_maxtext_extra_flag(key, value) for key, value in extra.items()]
 
 
 # `actor_model_config.kwargs` is an open dict of optional MaxText overrides; an
@@ -596,10 +648,7 @@ def _create_maxtext_trainer_factory(
       weight_dtype=str(actor["load_dtype"]),
       attention=_kwarg(kwargs, "attention", ""),
       device_host_concurrent_gb=_ckpt_d2h_concurrent_gb(hp),
-      # `DistHyperParameters` checked that each entry is `key=value`.
-      extra_flags=str(
-          hp.config_mapping("dist_training_config")["maxtext_extra_flags"]
-      ).split(),
+      extra_flags=_maxtext_extra_flags(hp),
   )
   logging.info("Creating MaxText device mesh...")
   mesh = maxtext_utils.create_maxtext_mesh(maxtext_config)

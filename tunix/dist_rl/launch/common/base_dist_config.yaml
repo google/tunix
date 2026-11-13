@@ -308,15 +308,16 @@ dist_training_config:
   # (`checkpoint_storage_device_host_concurrent_gb`, 8 GB). Only the MaxText
   # trainer takes a value; the Tunix trainer rejects one for now.
   ckpt_d2h_concurrent_gb: null
-  # Extra MaxText config arguments for a MaxText trainer
-  # (`actor_model_config.model_source: maxtext`), as space-separated
-  # `key=value` pairs, e.g. "remat_policy=custom opt_type=sgd". The trainer
-  # appends them to the MaxText config it builds. Keys it builds from this
-  # config (e.g. `learning_rate`, `per_device_batch_size`,
-  # `ici_fsdp_parallelism`) are rejected; set the config keys instead. Set the
-  # flags here, not in the `MAXTEXT_EXTRA_FLAGS` or `M_<KEY>` environment
-  # variables, which `launch.sh` rejects.
-  maxtext_extra_flags: ""
+  # Extra MaxText config keys for a MaxText trainer
+  # (`actor_model_config.model_source: maxtext`): a mapping of MaxText key to a
+  # str, int, float or bool, e.g. `{remat_policy: custom, sa_block_q: 1024}`,
+  # or `dist_training_config.maxtext_extra_config.remat_policy=custom` on the
+  # command line. The trainer appends them to the MaxText config it builds.
+  # Keys it builds from this config (e.g. `learning_rate`,
+  # `per_device_batch_size`, `ici_fsdp_parallelism`) are rejected; set the
+  # config keys instead. Set them here, not in the `MAXTEXT_EXTRA_FLAGS` or
+  # `M_<KEY>` environment variables, which `launch.sh` rejects.
+  maxtext_extra_config: {}
   profiler_period: -1
   segment_alignment_boundary: 1
   # Precompile the trainer step before the first rollout batch arrives.

@@ -357,7 +357,7 @@ class LaunchScriptsTest(absltest.TestCase):
         "MaxText config overrides are set in the environment: M_REMAT_POLICY",
         res.stderr,
     )
-    self.assertIn("dist_training_config.maxtext_extra_flags", res.stderr)
+    self.assertIn("dist_training_config.maxtext_extra_config.", res.stderr)
     self.assertNotIn("Trainer command:", res.stdout)
     # MaxText reads an empty variable too: it would set `remat_policy` to "".
     res = self._run_launch(args, extra_env={"M_REMAT_POLICY": ""})
@@ -377,19 +377,17 @@ class LaunchScriptsTest(absltest.TestCase):
         "model_config.model_path=/ckpt/qwen3-1.7b/0/items",
         "model_config.kwargs.maxtext_model_name=qwen3-1.7b",
         "weight_sync_config.mode=raiden",
-        (
-            "dist_training_config.maxtext_extra_flags="
-            "remat_policy=custom opt_type=sgd"
-        ),
+        "dist_training_config.maxtext_extra_config.remat_policy=custom",
+        "dist_training_config.maxtext_extra_config.opt_type=sgd",
         "weight_sync_config.verify_weights=true",
     ])
     self.assertEqual(res.returncode, 0, msg=res.stderr)
     # The pods get the settings with the config arguments ...
-    self.assertRegex(
-        res.stdout,
-        r"dist_training_config\.maxtext_extra_flags=remat_policy=custom\\+"
-        r" opt_type=sgd",
-    )
+    for arg in (
+        "dist_training_config.maxtext_extra_config.remat_policy=custom",
+        "dist_training_config.maxtext_extra_config.opt_type=sgd",
+    ):
+      self.assertIn(arg, res.stdout)
     # ... and the nodes set what the libraries read from the environment
     # (`node_utils.apply_library_env`).
     for name in (

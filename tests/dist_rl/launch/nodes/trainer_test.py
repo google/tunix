@@ -16,11 +16,13 @@
 
 import contextlib
 import importlib
+import json
 import os
 from unittest import mock
 
 from absl.testing import absltest
 from jax.sharding import Mesh
+import omegaconf
 from orbax.checkpoint import v1 as ocp_v1
 from tunix.cli import config as cli_config
 from tunix.dist_rl.common import otel_setup
@@ -762,15 +764,45 @@ class MaxTextTrainerFactoryTest(absltest.TestCase):
     kwargs = self._build_kwargs(
         mock_build_cfg,
         "dist_training_config.ckpt_d2h_concurrent_gb=16",
-        (
-            "dist_training_config.maxtext_extra_flags="
-            "remat_policy=full opt_type=sgd"
-        ),
+        "dist_training_config.maxtext_extra_config.remat_policy=full",
+        "dist_training_config.maxtext_extra_config.sa_block_q=512",
+        "dist_training_config.maxtext_extra_config.packing=true",
     )
     self.assertEqual(kwargs["device_host_concurrent_gb"], 16)
     self.assertEqual(
-        kwargs["extra_flags"], ["remat_policy=full", "opt_type=sgd"]
+        kwargs["extra_flags"],
+        ["remat_policy=full", "sa_block_q=512", "packing=True"],
     )
+
+  def test_extra_config_strings_reach_maxtext_unchanged(self, *_):
+    # MaxText parses each argument with `OmegaConf.from_cli`, as YAML.
+    extra = {
+        "a": "",
+        "b": "0",
+        "c": "1e-5",
+        "d": "true",
+        "e": "On",
+        "f": "null",
+        "g": "x: y",
+        "h": "x # y",
+        "i": "two words",
+        "j": "gs://bucket/dir",
+        "plain": "custom",
+        "path_like": "a-b.c/d",
+    }
+    flags = trainer._maxtext_extra_flags(
+        _hp(
+            *_MAXTEXT_ARGV,
+            "dist_training_config.maxtext_extra_config=" + json.dumps(extra),
+        )
+    )
+    self.assertEqual(
+        omegaconf.OmegaConf.to_container(omegaconf.OmegaConf.from_cli(flags)),
+        extra,
+    )
+    # Plain words stay unquoted, like hand-written MaxText flags.
+    self.assertIn("plain=custom", flags)
+    self.assertIn("path_like=a-b.c/d", flags)
 
 
 class MaxTextOptionsTest(absltest.TestCase):
@@ -839,11 +871,11 @@ class MaxTextOptionsTest(absltest.TestCase):
     for argv, error in (
         (
             [f"{_OPT}.opt_type=sgd"],
-            "maps only adamw.*maxtext_extra_flags",
+            "maps only adamw.*maxtext_extra_config",
         ),
         (
             [f"{_OPT}.opt_chain_type=clip"],
-            "maps only clip_by_global_norm.*maxtext_extra_flags",
+            "maps only clip_by_global_norm.*maxtext_extra_config",
         ),
         ([f"{_OPT}.chain_kwargs.max_norm=null"], "needs a max_norm"),
         ([f"{_OPT}.chain_kwargs.max_norm=0"], "must be positive"),
@@ -853,8 +885,8 @@ class MaxTextOptionsTest(absltest.TestCase):
           trainer._maxtext_adamw_options(_hp(*argv))
 
 
-class MaxTextExtraFlagsTest(absltest.TestCase):
-  """Keeps the resolver's `maxtext_extra_flags` check in sync with the builder.
+class MaxTextExtraConfigTest(absltest.TestCase):
+  """Keeps the resolver's `maxtext_extra_config` check in sync with the builder.
 
   The resolver rejects a flag for any key the trainer builds from the config.
   Every other key `build_maxtext_config` emits is one of `_FIXED_KEYS`, which
@@ -924,24 +956,26 @@ class MaxTextExtraFlagsTest(absltest.TestCase):
     )
     self.assertLessEqual(self._FIXED_KEYS, built)
 
-  def test_flags_for_keys_built_from_the_config_are_rejected(self):
+  def _extra_config_args(self, keys: list[str]) -> list[str]:
+    return [
+        f"dist_training_config.maxtext_extra_config.{key}=1" for key in keys
+    ]
+
+  def test_keys_built_from_the_config_are_rejected(self):
     from_config = sorted(self._built_keys() - self._FIXED_KEYS)
-    flags = " ".join(f"{key}=1" for key in from_config)
     with self.assertRaisesRegex(
         ValueError, "must not set MaxText keys"
     ) as raised:
-      _hp(*_MAXTEXT_ARGV, f"dist_training_config.maxtext_extra_flags={flags}")
+      _hp(*_MAXTEXT_ARGV, *self._extra_config_args(from_config))
     for key in from_config:
       self.assertIn(f" {key} (set ", str(raised.exception))
 
-  def test_flags_for_fixed_settings_are_accepted(self):
+  def test_fixed_settings_are_accepted(self):
     fixed = sorted(self._built_keys() & self._FIXED_KEYS)
-    flags = " ".join(f"{key}=1" for key in fixed)
-    hp = _hp(
-        *_MAXTEXT_ARGV, f"dist_training_config.maxtext_extra_flags={flags}"
-    )
+    hp = _hp(*_MAXTEXT_ARGV, *self._extra_config_args(fixed))
     self.assertEqual(
-        hp.config_mapping("dist_training_config")["maxtext_extra_flags"], flags
+        hp.config_mapping("dist_training_config")["maxtext_extra_config"],
+        dict.fromkeys(fixed, 1),
     )
 
 

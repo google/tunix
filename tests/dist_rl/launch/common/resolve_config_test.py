@@ -1231,85 +1231,99 @@ weight_sync_config:
         resolve_config.render_bash_exports(resolve_config.initialize([])),
     )
 
-  def test_maxtext_extra_flags_need_a_maxtext_trainer(self):
-    maxtext = [
-        "model_config.model_source=maxtext",
-        "model_config.model_path=/ckpt/qwen3-1.7b/0/items",
-        "model_config.kwargs.maxtext_model_name=qwen3-1.7b",
-        "weight_sync_config.mode=raiden",
-    ]
-    flags = (
-        "dist_training_config.maxtext_extra_flags="
-        "remat_policy=custom opt_type=sgd"
+  _MAXTEXT_TRAINER = (
+      "model_config.model_source=maxtext",
+      "model_config.model_path=/ckpt/qwen3-1.7b/0/items",
+      "model_config.kwargs.maxtext_model_name=qwen3-1.7b",
+      "weight_sync_config.mode=raiden",
+  )
+  _EXTRA = "dist_training_config.maxtext_extra_config"
+
+  def test_maxtext_extra_config_needs_a_maxtext_trainer(self):
+    entries = (
+        f"{self._EXTRA}.remat_policy=custom",
+        f"{self._EXTRA}.sa_block_q=1024",
+        f"{self._EXTRA}.packing=true",
     )
     # A Tunix trainer would silently ignore them.
     with self.assertRaisesRegex(
-        ValueError, "maxtext_extra_flags configures a MaxText trainer"
+        ValueError, "maxtext_extra_config configures a MaxText trainer"
     ):
-      resolve_config.initialize([flags])
-    with self.assertRaisesRegex(TypeError, "must be a string"):
-      resolve_config.initialize(
-          [*maxtext, "dist_training_config.maxtext_extra_flags=3"]
-      )
-    # A malformed entry fails here, before any job is submitted.
-    for malformed in ("remat_policy custom", "=custom"):
-      with self.subTest(malformed=malformed):
-        with self.assertRaisesRegex(ValueError, "must be key=value pairs"):
-          resolve_config.initialize([
-              *maxtext,
-              f"dist_training_config.maxtext_extra_flags={malformed}",
-          ])
-    hp = resolve_config.initialize([*maxtext, flags])
+      resolve_config.initialize(list(entries))
+    hp = resolve_config.initialize([*self._MAXTEXT_TRAINER, *entries])
+    # The values keep their YAML types.
     self.assertEqual(
-        hp.config_mapping("dist_training_config")["maxtext_extra_flags"],
-        "remat_policy=custom opt_type=sgd",
+        hp.config_mapping("dist_training_config")["maxtext_extra_config"],
+        {"remat_policy": "custom", "sa_block_q": 1024, "packing": True},
     )
 
-  def test_maxtext_extra_flags_reject_keys_built_from_the_config(self):
-    maxtext = [
-        "model_config.model_source=maxtext",
-        "model_config.model_path=/ckpt/qwen3-1.7b/0/items",
-        "model_config.kwargs.maxtext_model_name=qwen3-1.7b",
-        "weight_sync_config.mode=raiden",
-    ]
+  def test_maxtext_extra_config_rejects_non_scalar_values(self):
+    with self.assertRaisesRegex(TypeError, "must be a mapping"):
+      resolve_config.initialize([*self._MAXTEXT_TRAINER, f"{self._EXTRA}=3"])
+    # Each value becomes one MaxText `key=value` argument.
+    for entry in (
+        f"{self._EXTRA}.remat_policy=null",
+        f"{self._EXTRA}.remat_policy=[full]",
+        f"{self._EXTRA}.remat_policy.decoder=full",
+    ):
+      with self.subTest(entry=entry):
+        with self.assertRaisesRegex(
+            TypeError, "values must be a str, int, float or bool"
+        ):
+          resolve_config.initialize([*self._MAXTEXT_TRAINER, entry])
+
+  def test_maxtext_extra_config_rejects_keys_that_are_not_config_names(self):
+    # "learning_rate=1e-6" would reach MaxText as `learning_rate=1e-6=1`.
+    for key in ("learning_rate=1e-6", "remat policy", ""):
+      with self.subTest(key=key):
+        with self.assertRaisesRegex(
+            ValueError, "keys must be MaxText config names"
+        ):
+          resolve_config.initialize([
+              *self._MAXTEXT_TRAINER,
+              f"{self._EXTRA}={{{json.dumps(key)}: 1}}",
+          ])
+
+  def test_maxtext_extra_flags_is_removed(self):
+    with self.assertRaisesRegex(
+        ValueError,
+        "Unknown configuration key 'dist_training_config.maxtext_extra_flags'",
+    ):
+      resolve_config.initialize([
+          *self._MAXTEXT_TRAINER,
+          "dist_training_config.maxtext_extra_flags=remat_policy=custom",
+      ])
+
+  def test_maxtext_extra_config_rejects_keys_built_from_the_config(self):
     # Appended last, these would silently override the config values.
     with self.assertRaisesRegex(
         ValueError,
-        r"maxtext_extra_flags must not set MaxText keys that the trainer builds"
-        r" from the config: learning_rate \(set"
+        r"maxtext_extra_config must not set MaxText keys that the trainer"
+        r" builds from the config: learning_rate \(set"
         r" rl_training_config\.actor_optimizer_config\.learning_rate instead\),"
         r" ici_fsdp_parallelism \(set the 'fsdp' axis of"
         r" actor_model_config\.mesh instead\)\.",
     ):
       resolve_config.initialize([
-          *maxtext,
-          (
-              "dist_training_config.maxtext_extra_flags=remat_policy=custom"
-              " learning_rate=1e-6 ici_fsdp_parallelism=4"
-          ),
+          *self._MAXTEXT_TRAINER,
+          f"{self._EXTRA}.remat_policy=custom",
+          f"{self._EXTRA}.learning_rate=1e-6",
+          f"{self._EXTRA}.ici_fsdp_parallelism=4",
       ])
-    # A repeated key is named once.
-    with self.assertRaisesRegex(
-        ValueError, "must not set MaxText keys"
-    ) as raised:
-      resolve_config.initialize([
-          *maxtext,
-          (
-              "dist_training_config.maxtext_extra_flags=learning_rate=1e-5"
-              " learning_rate=1e-6"
-          ),
-      ])
-    self.assertEqual(str(raised.exception).count("learning_rate (set"), 1)
     # Fixed builder settings, which have no config key, stay overridable.
-    flags = (
-        "use_tokamax_gmm=true grad_dtype=float32"
-        " context_parallel_load_balance=false"
-    )
-    hp = resolve_config.initialize(
-        [*maxtext, f"dist_training_config.maxtext_extra_flags={flags}"]
-    )
+    hp = resolve_config.initialize([
+        *self._MAXTEXT_TRAINER,
+        f"{self._EXTRA}.use_tokamax_gmm=true",
+        f"{self._EXTRA}.grad_dtype=float32",
+        f"{self._EXTRA}.context_parallel_load_balance=false",
+    ])
     self.assertEqual(
-        hp.config_mapping("dist_training_config")["maxtext_extra_flags"], flags
+        hp.config_mapping("dist_training_config")["maxtext_extra_config"],
+        {
+            "use_tokamax_gmm": True,
+            "grad_dtype": "float32",
+            "context_parallel_load_balance": False,
+        },
     )
 
   def test_library_settings(self):

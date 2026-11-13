@@ -791,7 +791,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   )
   _validate_maxtext_pairing(hp)
   _validate_maxtext_model_names(hp)
-  _validate_maxtext_extra_flags(hp)
+  _validate_maxtext_extra_config(hp)
   _validate_rollout_weights(hp)
   _validate_library_settings(hp)
   if grpo["reward_mode"] == "reward_fn" and not hp.config["reward_functions"]:
@@ -1048,18 +1048,15 @@ def _validate_maxtext_model_names(hp: cli_config.HyperParameters) -> None:
     )
 
 
-# TODO(noghabi): Replace the free-form `maxtext_extra_flags` string with typed
-# config (config keys for the MaxText settings recipes need, or a typed mapping),
-# then drop the flag and this table.
 # MaxText config keys that the trainer builds from this config, mapped to a
 # hint naming the config keys they come from. Only the error message below uses
 # the hints; the values themselves are computed in
 # `trainer._create_maxtext_trainer_factory` and
-# `maxtext_utils.build_maxtext_config`. `maxtext_extra_flags` are appended last,
-# so a flag for one of these keys would silently override the config value.
+# `maxtext_utils.build_maxtext_config`. `maxtext_extra_config` is appended last,
+# so an entry for one of these keys would silently override the config value.
 # The fixed settings the builder adds (e.g. `scan_layers`, `grad_dtype`,
 # `use_tokamax_gmm`) have no config key and may still be overridden.
-# `trainer_test.MaxTextExtraFlagsTest` checks this key set against the builder.
+# `trainer_test.MaxTextExtraConfigTest` checks this key set against the builder.
 _MAXTEXT_KEYS_FROM_CONFIG: Final[Mapping[str, str]] = {
     "model_name": "actor_model_config.kwargs.maxtext_model_name",
     "load_parameters_path": "actor_model_config.model_path",
@@ -1142,55 +1139,77 @@ _MAXTEXT_KEYS_FROM_CONFIG: Final[Mapping[str, str]] = {
 }
 
 
-def _validate_maxtext_extra_flags(hp: cli_config.HyperParameters) -> None:
-  """Checks `dist_training_config.maxtext_extra_flags` before any job starts.
+# MaxText config names are Python identifiers (fields of its config class).
+_MAXTEXT_CONFIG_NAME_RE: Final[re.Pattern[str]] = re.compile(
+    r"[A-Za-z_][A-Za-z0-9_]*"
+)
 
-  The flags are extra MaxText config arguments, which only a MaxText trainer
+
+def _validate_maxtext_extra_config(hp: cli_config.HyperParameters) -> None:
+  """Checks `dist_training_config.maxtext_extra_config` before any job starts.
+
+  The entries are extra MaxText config keys, which only a MaxText trainer
   reads (`maxtext_utils.build_maxtext_config`); a Tunix trainer would silently
-  ignore them. A malformed entry would otherwise fail only inside the trainer,
-  after the launcher has submitted the jobs. A flag for a key the trainer builds
-  from this config would silently override that config value.
+  ignore them. The trainer passes each one to MaxText as `key=value`, so a
+  value must be a scalar; anything else would otherwise fail only inside the
+  trainer, after the launcher has submitted the jobs. An entry for a key the
+  trainer builds from this config would silently override that config value.
 
   Args:
     hp: Loaded configuration.
 
   Raises:
-    TypeError: If the flags are not a string.
-    ValueError: If the flags are set and `actor_model_config.model_source` is
-      not "maxtext", an entry is not a `key=value` pair, or an entry sets a key
-      in `_MAXTEXT_KEYS_FROM_CONFIG`.
+    TypeError: If the section is not a mapping, or a value is not a str, int,
+      float or bool.
+    ValueError: If entries are set and `actor_model_config.model_source` is not
+      "maxtext", a key is not a MaxText config name, or an entry sets a key in
+      `_MAXTEXT_KEYS_FROM_CONFIG`.
   """
-  flags = hp.config_mapping("dist_training_config")["maxtext_extra_flags"]
-  if not isinstance(flags, str):
+  extra = hp.config_mapping("dist_training_config")["maxtext_extra_config"]
+  if not isinstance(extra, Mapping):
     raise TypeError(
-        "dist_training_config.maxtext_extra_flags must be a string of"
-        f" space-separated key=value pairs, got {flags!r}."
+        "dist_training_config.maxtext_extra_config must be a mapping of"
+        f" MaxText config keys to values, got {extra!r}."
     )
-  entries = flags.split()
-  if not entries:
+  if not extra:
     return
   actor_source = hp.config_mapping("actor_model_config")["model_source"]
   if actor_source != "maxtext":
     raise ValueError(
-        "dist_training_config.maxtext_extra_flags configures a MaxText trainer,"
-        f" but actor_model_config.model_source is {actor_source!r}. Set"
-        " model_config.model_source=maxtext or drop the flags."
+        "dist_training_config.maxtext_extra_config configures a MaxText"
+        f" trainer, but actor_model_config.model_source is {actor_source!r}."
+        " Set model_config.model_source=maxtext or drop the entries."
     )
-  malformed = [e for e in entries if "=" not in e or e.startswith("=")]
-  if malformed:
+  # A key such as "learning_rate=1e-6" would become the MaxText argument
+  # `learning_rate=1e-6=1` and slip past `_MAXTEXT_KEYS_FROM_CONFIG`.
+  bad_keys = [
+      key
+      for key in extra
+      if not isinstance(key, str) or not _MAXTEXT_CONFIG_NAME_RE.fullmatch(key)
+  ]
+  if bad_keys:
     raise ValueError(
-        "dist_training_config.maxtext_extra_flags entries must be key=value"
-        f" pairs, got {malformed!r}."
+        "dist_training_config.maxtext_extra_config keys must be MaxText config"
+        f" names (letters, digits and underscores), got {bad_keys!r}."
     )
-  # `dict.fromkeys` names a repeated key once, in flag order.
+  not_scalar = {
+      key: value
+      for key, value in extra.items()
+      if not isinstance(value, (str, int, float, bool))
+  }
+  if not_scalar:
+    raise TypeError(
+        "dist_training_config.maxtext_extra_config values must be a str, int,"
+        f" float or bool, got {not_scalar!r}."
+    )
   from_config = [
       f"{key} (set {_MAXTEXT_KEYS_FROM_CONFIG[key]} instead)"
-      for key in dict.fromkeys(entry.split("=", 1)[0] for entry in entries)
+      for key in extra
       if key in _MAXTEXT_KEYS_FROM_CONFIG
   ]
   if from_config:
     raise ValueError(
-        "dist_training_config.maxtext_extra_flags must not set MaxText keys"
+        "dist_training_config.maxtext_extra_config must not set MaxText keys"
         " that the trainer builds from the config: "
         + ", ".join(from_config)
         + "."
