@@ -367,8 +367,6 @@ class DeepSWEDistTest(parameterized.TestCase):
         "data_config.shuffle=true",
         "data_config.seed=7",
         "agentic_grpo_config.max_turns=5",
-        "agentic_grpo_config.episode_timeout=900.0",
-        "agentic_grpo_config.overlong_filter=true",
     ])
 
     items = orchestrator.load_prompt_items(hp)
@@ -379,8 +377,6 @@ class DeepSWEDistTest(parameterized.TestCase):
     metadata = first["metadata"]
     assert isinstance(metadata, Mapping)
     self.assertNotIn("agent_config", metadata)
-    self.assertEqual(metadata["episode_timeout"], 900.0)
-    self.assertTrue(metadata["overlong_filter"])
     self.assertEqual([items[0], items[1]], [items[2], items[3]])
 
   def test_rollout_env_and_agent_from_deepswe_yaml(self):
@@ -395,8 +391,6 @@ class DeepSWEDistTest(parameterized.TestCase):
     metadata = item["metadata"]
     assert isinstance(metadata, Mapping)
     self.assertNotIn("agent_config", metadata)
-    self.assertEqual(metadata["episode_timeout"], 4800.0)
-    self.assertFalse(metadata["overlong_filter"])
     env_config = metadata["env_config"]
     assert isinstance(env_config, Mapping)
 

@@ -73,6 +73,7 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
         num_rollout_workers=2,
         enable_bulk_transport=True,
         routed_experts_shape_spec=(4, 8),
+        return_routed_experts=True,
         routed_experts_encode_mode="uint8",
         routed_experts_num_experts=64,
         rollout_max_prompt_length=192,
@@ -87,9 +88,6 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
       inline_items = asyncio.run(
           engine.generate(
               harness.build_prompts(num_prompts=2),
-              generation_args=datatypes.GenerationArgs(
-                  temperature=1.0, return_routed_experts=True
-              ),
           )
       )
       self.assertLen(inline_items, 2)
@@ -112,9 +110,6 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
           mini_batch_size=1,
           max_staleness=2,
           assembler_type=assembler_type,
-          generation_args=datatypes.GenerationArgs(
-              temperature=1.0, return_routed_experts=True
-          ),
       )
       orig_raw_put = prog_max_steps.raw_q.put
       orig_scored_put = prog_max_steps.scored_q.put
@@ -161,9 +156,6 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
           num_generations=2,
           mini_batch_size=1,
           assembler_type=assembler_type,
-          generation_args=datatypes.GenerationArgs(
-              temperature=1.0, return_routed_experts=True
-          ),
       )
       prog_eof.policy_version = engine._policy_version
       try:
@@ -190,9 +182,6 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
                   : len(prompts)
               ]
           ],
-          generation_args=datatypes.GenerationArgs(
-              temperature=1.0, return_routed_experts=True
-          ),
       )
       prog_degen.policy_version = engine._policy_version
       try:
@@ -215,9 +204,6 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
           mini_batch_size=1,
           max_staleness=2,
           assembler_type=assembler_type,
-          generation_args=datatypes.GenerationArgs(
-              temperature=1.0, return_routed_experts=True
-          ),
           on_step_end=_boom_on_step_end,
       )
       prog_abort.policy_version = engine._policy_version
@@ -263,9 +249,6 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
           max_staleness=2,
           assembler_type=assembler_type,
           reward_fns=[_drop_staged_in_critique],
-          generation_args=datatypes.GenerationArgs(
-              temperature=1.0, return_routed_experts=True
-          ),
       )
       prog_missing.policy_version = engine._policy_version
       try:
@@ -289,9 +272,6 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
           mini_batch_size=1,
           max_staleness=2,
           assembler_type=assembler_type,
-          generation_args=datatypes.GenerationArgs(
-              temperature=1.0, return_routed_experts=True
-          ),
       )
       prog_retry.policy_version = engine._policy_version
       try:
@@ -313,6 +293,7 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
         enable_bulk_transport=True,
         partial_rollout=True,
         routed_experts_shape_spec=(4, 8),
+        return_routed_experts=True,
         routed_experts_encode_mode="uint8",
         routed_experts_num_experts=64,
         rollout_max_prompt_length=256,
@@ -409,10 +390,15 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
           if step == 6:
             critique_gate.set()
 
-        prompts = harness.build_prompts(num_prompts=12, min_turns=0)
+        prompts = harness.build_prompts(num_prompts=12)
         for idx, p in enumerate(prompts):
           p["metadata"] = {"test_prompt_id": f"prompt_{idx}"}
-        prompts[0]["generation_kwargs"]["min_turns"] = 1
+        # `prompt_0` takes 2 turns; the others finish in 1.
+        for sampler in harness.samplers.values():
+          sampler.min_turns_by_request_id = {
+              "traj_prompt_0_g0": 1,
+              "traj_prompt_0_g1": 1,
+          }
         program = harness.build_program(
             prompts=prompts,
             max_steps=11,
@@ -422,9 +408,6 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
             max_staleness=4,
             assembler_type="packed",
             reward_fns=[_gated_reward_fn],
-            generation_args=datatypes.GenerationArgs(
-                temperature=1.0, return_routed_experts=True
-            ),
             on_step_end=_on_step_end,
         )
         program_ref.append(program)
@@ -473,6 +456,8 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
         num_rollout_workers=2,
         enable_bulk_transport=True,
         routed_experts_shape_spec=(4, 8),
+        return_routed_experts=True,
+        min_turns=1,
         routed_experts_encode_mode="uint8",
         routed_experts_num_experts=64,
         rollout_max_prompt_length=192,
@@ -482,7 +467,7 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
         ),
     ) as harness:
       program = harness.build_program(
-          prompts=harness.build_prompts(num_prompts=4, min_turns=1),
+          prompts=harness.build_prompts(num_prompts=4),
           max_steps=4,
           mini_batch_size=1,
           batch_size=1,
@@ -493,9 +478,6 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
                   1.0 if g % 2 == 0 else -1.0 for g in group_index
               ]
           ],
-          generation_args=datatypes.GenerationArgs(
-              temperature=1.0, return_routed_experts=True
-          ),
       )
       orig_fetch = (
           distributed_rl_engine.DistributedRLEngine.fetch_routed_experts
@@ -528,6 +510,8 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
         num_rollout_workers=2,
         enable_bulk_transport=True,
         routed_experts_shape_spec=(4, 8),
+        return_routed_experts=True,
+        min_turns=1,
         routed_experts_encode_mode="uint8",
         routed_experts_num_experts=64,
         rollout_max_prompt_length=192,
@@ -567,7 +551,7 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
             time.sleep(0.02)
 
       program = harness.build_program(
-          prompts=harness.build_prompts(num_prompts=6, min_turns=1),
+          prompts=harness.build_prompts(num_prompts=6),
           max_steps=3,
           mini_batch_size=2,
           batch_size=2,
@@ -579,9 +563,6 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
                   1.0 if g % 2 == 0 else -1.0 for g in group_index
               ]
           ],
-          generation_args=datatypes.GenerationArgs(
-              temperature=1.0, return_routed_experts=True
-          ),
           on_step_end=_on_step_end,
       )
       future = harness.start_program(program)
@@ -619,6 +600,8 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
         num_rollout_workers=2,
         enable_bulk_transport=True,
         routed_experts_shape_spec=(4, 8),
+        return_routed_experts=True,
+        min_turns=1,
         routed_experts_encode_mode="uint8",
         routed_experts_num_experts=64,
         rollout_max_prompt_length=192,
@@ -709,7 +692,7 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
             time.sleep(0.02)
 
       program = harness.build_program(
-          prompts=harness.build_prompts(num_prompts=4, min_turns=1),
+          prompts=harness.build_prompts(num_prompts=4),
           max_steps=2,
           mini_batch_size=2,
           batch_size=2,
@@ -720,9 +703,6 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
                   1.0 if g % 2 == 0 else -1.0 for g in group_index
               ]
           ],
-          generation_args=datatypes.GenerationArgs(
-              temperature=1.0, return_routed_experts=True
-          ),
           on_step_end=_release_compile_after_step0,
       )
       try:
@@ -754,6 +734,8 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
         num_rollout_workers=2,
         enable_bulk_transport=True,
         routed_experts_shape_spec=(4, 8),
+        return_routed_experts=True,
+        min_turns=1,
         routed_experts_encode_mode="uint8",
         routed_experts_num_experts=64,
         rollout_max_prompt_length=192,
@@ -780,7 +762,7 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
       # flushes mb0's accumulated gradients through `train_step(mb1,
       # apply_optimizer=True)` without dilution.
       program = harness.build_program(
-          prompts=harness.build_prompts(num_prompts=2, min_turns=1),
+          prompts=harness.build_prompts(num_prompts=2),
           max_steps=2,
           mini_batch_size=1,
           batch_size=1,
@@ -792,9 +774,6 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
                   1.0 if g % 2 == 0 else -1.0 for g in group_index
               ]
           ],
-          generation_args=datatypes.GenerationArgs(
-              temperature=1.0, return_routed_experts=True
-          ),
       )
       future = harness.start_program(program)
       try:
