@@ -407,6 +407,7 @@ Common fields in `training_config` / `rl_training_config`:
 * **`checkpointing_options`**:
   * `max_to_keep`: Number of recent checkpoints to retain.
   * `save_interval_steps`: How often to save a checkpoint.
+  * `keep_every_nth_step`: Preserve a checkpoint every `n` steps, useful for extended rollout evaluation beyond the latest window.
   * `enable_async_checkpointing`: Boolean to toggle asynchronous checkpointing execution.
   * `timeout_secs`: Maximum time permitted for asynchronous writes natively.
 
