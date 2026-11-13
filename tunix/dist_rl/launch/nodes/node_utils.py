@@ -319,6 +319,19 @@ def trajectory_store_config(
   return config
 
 
+def rollout_top_k(hp: resolve_config.DistHyperParameters) -> int:
+  """Returns `rollout_config.top_k`, with 0 meaning top-k filtering is off.
+
+  The config turns top-k off with any negative value (the base config's -1).
+  The orchestrator's `GenerationArgs` and the rollout node's `RolloutConfig`
+  both get 0 instead, which the vanilla and vLLM samplers read as off.
+
+  Args:
+    hp: Validated distributed RL configuration.
+  """
+  return max(int(hp.config_mapping("rollout_config")["top_k"]), 0)
+
+
 def require_discovery_context(
     context: context_lib.ProcessContext | None,
 ) -> context_lib.ProcessContext:

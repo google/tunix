@@ -158,7 +158,7 @@ def build_mock_rollout_worker(
       kv_cache_size=max_prompt_len + max_gen_steps,
       temperature=float(rollout_cfg["temperature"]),
       top_p=float(rollout_cfg["top_p"]),
-      top_k=int(rollout_cfg["top_k"]),
+      top_k=node_utils.rollout_top_k(hp),
       return_logprobs=True,
       eos_tokens=_resolve_eos_token_ids(rollout_cfg["eos_tokens"], tokenizer),
       partial_rollout=bool(ws_cfg["in_flight_weight_updates"]),

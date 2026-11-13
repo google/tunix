@@ -318,6 +318,19 @@ class TrajectoryStoreConfigTest(absltest.TestCase):
     )
 
 
+class RolloutTopKTest(absltest.TestCase):
+
+  def test_positive_top_k_passes_through(self):
+    hp = resolve_config.initialize(["rollout_config.top_k=20"])
+    self.assertEqual(node_utils.rollout_top_k(hp), 20)
+
+  def test_negative_or_zero_top_k_turns_top_k_off_with_zero(self):
+    for top_k in (-1, -5, 0):
+      with self.subTest(top_k=top_k):
+        hp = resolve_config.initialize([f"rollout_config.top_k={top_k}"])
+        self.assertEqual(node_utils.rollout_top_k(hp), 0)
+
+
 class WorkerIdAndPortTest(absltest.TestCase):
 
   def test_local_target_uses_fixed_local_worker_id(self):
