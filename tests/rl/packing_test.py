@@ -728,6 +728,29 @@ class PackSegmentAlignmentTest(absltest.TestCase):
     finally:
       packing._packing_ext = orig_ext
 
+  def test_validate_routed_experts_range(self):
+    raw = np.array([[[[0, 3], [-1, -1]]]], dtype=np.int16)
+    packing.validate_routed_experts_range(raw, 4, batched=True)
+    packing.validate_routed_experts_range(
+        packing.encode_routed_experts(raw, mode="uint8", batched=True),
+        4,
+        batched=True,
+    )
+    raw_u10 = np.array([[[[0, 1, 2, 299]]]], dtype=np.int16)
+    enc_u10 = packing.encode_routed_experts(
+        raw_u10, mode="uint10", batched=True
+    )
+    packing.validate_routed_experts_range(enc_u10, 300, batched=True)
+
+    for bad, num_experts in (
+        (raw + 1, 4),  # mis-decoded +1 shift leaks ID == num_experts
+        (np.array([[[[-2, 0]]]], dtype=np.int16), 4),
+        (packing.encode_routed_experts(raw, mode="uint8", batched=True), 3),
+        (enc_u10, 299),
+    ):
+      with self.assertRaisesRegex(ValueError, "routed_experts"):
+        packing.validate_routed_experts_range(bad, num_experts, batched=True)
+
   def test_pack_chunk_preserves_uint8_uint10_and_widens_mixed_encodings(self):
     raw1_u8 = np.array(
         [[[0, 5, 10, 15]], [[20, 25, 30, 35]], [[-1, -1, -1, -1]]],

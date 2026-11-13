@@ -494,6 +494,67 @@ def decode_routed_experts(
   return arr.astype(np.int16) - np.int16(1)
 
 
+def validate_routed_experts_range(
+    routed: np.ndarray | None,
+    num_experts: int | None,
+    *,
+    batched: bool = True,
+) -> None:
+  """Validates on the host that all set expert IDs fall in `[0, num_experts)`.
+
+  `-1` marks an unset slot left to the model's own router; any ID `< -1` or
+  `>= num_experts` (such as a mis-decoded `+1` shift or a rollout/trainer
+  expert-count mismatch) raises `ValueError` before entering jitted execution.
+
+  Args:
+    routed: Host `routed_experts` array (`int16`/`int32`, `+1`-shifted `uint8`,
+      or `+1`-shifted `uint10`), or `None`.
+    num_experts: Model's expert count; when `None`, only checks `>= -1`.
+    batched: Whether `routed` has a leading batch dimension.
+
+  Raises:
+    TypeError: If `routed` is neither `uint8` nor a signed integer array.
+    ValueError: If `num_experts` is invalid or any expert ID is out of range.
+  """
+  if routed is None:
+    return
+  if num_experts is not None and (
+      isinstance(num_experts, bool)
+      or not isinstance(num_experts, (int, np.integer))
+      or int(num_experts) <= 0
+  ):
+    raise ValueError(
+        f"num_experts must be a positive int or None, got {num_experts!r}."
+    )
+  arr = np.asarray(routed)
+  if arr.size == 0:
+    return
+  if arr.dtype == np.uint8:
+    enc = routed_experts_encoding(arr, batched=batched)
+    min_val = -1
+    max_val = (
+        int(arr.max()) - 1
+        if enc == "uint8"
+        else int(decode_routed_experts(arr, batched=batched).max())
+    )
+  elif np.issubdtype(arr.dtype, np.signedinteger):
+    min_val, max_val = int(arr.min()), int(arr.max())
+  else:
+    raise TypeError(
+        "routed_experts must have uint8 or signed integer dtype, got"
+        f" {arr.dtype}."
+    )
+  if min_val < -1:
+    raise ValueError(
+        f"routed_experts contains invalid expert ID < -1: {min_val}."
+    )
+  if num_experts is not None and max_val >= int(num_experts):
+    raise ValueError(
+        f"routed_experts contains expert ID {max_val} >= num_experts"
+        f" ({int(num_experts)})."
+    )
+
+
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class PackItem:
   """A single unpadded item to be packed into a PackedRow."""
