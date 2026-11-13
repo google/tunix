@@ -153,7 +153,6 @@ def request_fields(args: argparse.Namespace, entry: dict, index: int) -> dict:
           "return_logprobs": False,
       },
       "metadata": {
-          "episode_timeout": args.timeout,
           "record_episode_summary": True,
           "env_config": {
               "entry": entry,

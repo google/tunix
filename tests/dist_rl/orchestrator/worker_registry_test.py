@@ -520,6 +520,29 @@ class WorkerRegistryTest(absltest.TestCase):
     with self.assertRaisesRegex(RuntimeError, "unknown service type unknown"):
       registry.register_from_hostname("host", 0, meta)
 
+  @mock.patch.object(remote_execution.ActorHandle, "from_address")
+  def test_register_from_hostname_keeps_rollout_settings(
+      self, mock_from_address
+  ):
+    mock_from_address.return_value = mock.MagicMock(
+        spec=remote_execution.ActorHandle
+    )
+    registry = worker_registry.WorkerRegistry()
+    registry.register_from_hostname(
+        "host",
+        0,
+        pickle.dumps({
+            "service_type": "rollout",
+            "service_port": 5001,
+            "worker_id": "rollout-0",
+            "temperature": 0.7,
+            "return_routed_experts": True,
+        }),
+    )
+    resources = registry.info("rollout-0").resources
+    self.assertEqual(resources["temperature"], 0.7)
+    self.assertIs(resources["return_routed_experts"], True)
+
   def test_wait_for_workers_already_available(self):
     mock_actor = mock.MagicMock(spec=remote_execution.ActorHandle)
     mock_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
