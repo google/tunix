@@ -1209,12 +1209,16 @@ class SqlStoreWriterTest(parameterized.TestCase):
     (
         run_call,
         traj_call,
+        attempt_check_call,
         step_call,
         metrics_null_call,
         metrics_merge_call,
     ) = mock_conn.execute.call_args_list
     run_sql = str(run_call.args[0].compile(dialect=pg_dialect))
     traj_sql = str(traj_call.args[0].compile(dialect=pg_dialect))
+    attempt_check_sql = str(
+        attempt_check_call.args[0].compile(dialect=pg_dialect)
+    )
     step_sql = str(step_call.args[0].compile(dialect=pg_dialect))
     metrics_null_sql = str(
         metrics_null_call.args[0].compile(dialect=pg_dialect)
@@ -1227,7 +1231,11 @@ class SqlStoreWriterTest(parameterized.TestCase):
     self.assertIn("WHERE runs.agent_name =", run_sql)
     self.assertIn("INSERT INTO trajectories", traj_sql)
     self.assertIn("ON CONFLICT (run_id, trajectory_id) DO UPDATE SET", traj_sql)
+    self.assertIn("coalesce(CAST(", traj_sql)
     self.assertIn("IS DISTINCT FROM", traj_sql)
+    self.assertIn("FROM trajectories", attempt_check_sql)
+    self.assertIn("coalesce(CAST(", attempt_check_sql)
+    self.assertIn("FOR SHARE", attempt_check_sql)
     self.assertIn("INSERT INTO steps", step_sql)
     self.assertIn(
         "ON CONFLICT (run_id, trajectory_id, step_id) DO UPDATE SET",
@@ -1593,6 +1601,7 @@ class SqlStoreWriterTest(parameterized.TestCase):
         saved_step["payload"]["message"],
         "stdoutclean and " + r"literal\u0000text",
     )
+
 
 class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
   """Unit tests for SqlTrajectoryStore initialization and lifecycle behavior."""
@@ -2514,6 +2523,432 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
           {"reward": 1.0, "step": 2, "eval.score": 98.5},
       )
     store_inst.close()
+
+  def test_resume_attempt_fences_stale_cached_other_writer(self) -> None:
+    """Verifies cross-writer retry fencing even when the zombie caches attempt=1."""
+    db_file = os.path.join(self.create_tempdir().full_path, "shared_retry.db")
+    db_url = f"sqlite:///{db_file}"
+    writer_1 = sql_store.SqlTrajectoryStore(run_id="r_shared", db_url=db_url)
+    writer_2 = sql_store.SqlTrajectoryStore(run_id="r_shared", db_url=db_url)
+    self.addCleanup(writer_1.close)
+    self.addCleanup(writer_2.close)
+
+    meta_a1 = trajectory_testing.METADATA_2.model_copy(
+        update={"attempt": 1, "status": "FAILED", "notes": "worker_1"}
+    )
+    for step in (
+        trajectory_testing.STEP_2_1,
+        trajectory_testing.STEP_2_2,
+        trajectory_testing.STEP_2_3,
+        trajectory_testing.STEP_2_4,
+    ):
+      writer_1.add_step(step, meta_a1)
+    writer_1.flush()
+
+    # Worker 2 takes over at attempt=2 and clears status back to None.
+    meta_a2 = trajectory_testing.METADATA_2.model_copy(
+        update={"attempt": 2, "status": None, "notes": "worker_2"}
+    )
+    writer_2.resume_attempt(meta_a2, keep_steps=2)
+
+    # Zombie Worker 1 still has attempt=1 cached in _trajectories_by_run.
+    writer_1.add_step(
+        trajectory_testing.STEP_2_1.model_copy(update={"message": "zombie_1"}),
+        meta_a1,
+    )
+    writer_1.add_step(
+        trajectory_testing.STEP_2_3.model_copy(update={"message": "zombie_3"}),
+        meta_a1,
+    )
+    writer_1.add_step(
+        trajectory_testing.STEP_2_5.model_copy(
+            update={"step_id": 99, "message": "zombie_99"}
+        ),
+        meta_a1,
+    )
+    writer_1.update_metadata(meta_a1.model_copy(update={"status": "FAILED"}))
+    writer_1.flush()
+
+    retry_step_3 = trajectory_testing.STEP_2_3.model_copy(
+        update={"message": "retry_3"}
+    )
+    writer_2.add_step(retry_step_3, meta_a2)
+    writer_2.flush()
+
+    traj = writer_2.get_trajectories([trajectory_testing.TRAJECTORY_ID_2])[
+        trajectory_testing.TRAJECTORY_ID_2
+    ]
+    self.assertEqual(traj.attempt, 2)
+    self.assertIsNone(traj.status)
+    self.assertEqual(traj.notes, "worker_2")
+    self.assertEqual(
+        traj.steps,
+        [
+            trajectory_testing.STEP_2_1,
+            trajectory_testing.STEP_2_2,
+            retry_step_3,
+        ],
+    )
+    with writer_2.engine.connect() as conn:
+      db_status = conn.execute(
+          sa.select(schema.TRAJECTORIES_TABLE.c.status).where(
+              schema.TRAJECTORIES_TABLE.c.run_id == "r_shared",
+              schema.TRAJECTORIES_TABLE.c.trajectory_id
+              == trajectory_testing.TRAJECTORY_ID_2,
+          )
+      ).scalar_one()
+    self.assertEqual(db_status, schema.Status.UNKNOWN)
+
+  def test_resume_attempt_legacy_row_without_attempt_key(self) -> None:
+    """Verifies COALESCE(..., 1) handles legacy JSON rows missing `attempt`."""
+    store_inst = self._create_store(run_id="legacy_attempt_run")
+    now_dt = datetime.datetime.now(datetime.timezone.utc)
+    legacy_meta = trajectory_testing.METADATA_2.model_dump(
+        mode="json", exclude_none=True
+    )
+    legacy_meta.pop("attempt", None)
+    with store_inst.engine.begin() as conn:
+      conn.execute(
+          sa.insert(schema.RUNS_TABLE).values(
+              run_id="legacy_attempt_run",
+              agent_name="agent_2",
+              status=schema.Status.RUNNING,
+              created_at=now_dt,
+              config={},
+          )
+      )
+      conn.execute(
+          sa.insert(schema.TRAJECTORIES_TABLE).values(
+              run_id="legacy_attempt_run",
+              trajectory_id=trajectory_testing.TRAJECTORY_ID_2,
+              status=schema.Status.RUNNING,
+              created_at=now_dt,
+              updated_at=now_dt,
+              trajectory_metadata=legacy_meta,
+          )
+      )
+      conn.execute(
+          sa.insert(schema.STEPS_TABLE).values([
+              {
+                  "run_id": "legacy_attempt_run",
+                  "trajectory_id": trajectory_testing.TRAJECTORY_ID_2,
+                  "step_id": s.step_id,
+                  "created_at": now_dt,
+                  "payload": s.model_dump(mode="json", exclude_none=True),
+              }
+              for s in (
+                  trajectory_testing.STEP_2_1,
+                  trajectory_testing.STEP_2_2,
+                  trajectory_testing.STEP_2_3,
+              )
+          ])
+      )
+
+    meta_a2 = trajectory_testing.METADATA_2.model_copy(update={"attempt": 2})
+    store_inst.resume_attempt(meta_a2, keep_steps=1)
+    self.assertEqual(
+        store_inst.get_trajectories([trajectory_testing.TRAJECTORY_ID_2])[
+            trajectory_testing.TRAJECTORY_ID_2
+        ].steps,
+        [trajectory_testing.STEP_2_1],
+    )
+    with self.assertRaises(store.StaleAttemptError):
+      store_inst.resume_attempt(trajectory_testing.METADATA_2)
+
+  def test_resume_attempt_closed_store_raises_runtime_error(self) -> None:
+    """Verifies resume_attempt on a closed SqlTrajectoryStore raises RuntimeError."""
+    store_inst = self._create_store(run_id="closed_resume_run")
+    store_inst.close()
+    with self.assertRaises(RuntimeError):
+      store_inst.resume_attempt(trajectory_testing.METADATA_1)
+
+  def test_resume_attempt_compiles_postgresql_row_lock_and_trim(self) -> None:
+    """Verifies resume_attempt emits PostgreSQL JSONB cast, FOR UPDATE, and trim."""
+    mock_engine = mock.MagicMock()
+    mock_engine.dialect.name = db_engine.Dialect.POSTGRESQL
+    mock_conn = mock.create_autospec(
+        sa.Connection, instance=True, spec_set=True
+    )
+    select_result = mock.MagicMock()
+    select_result.scalar_one_or_none.return_value = 1
+    upsert_result = mock.MagicMock()
+    upsert_result.rowcount = 1
+    delete_result = mock.MagicMock()
+    mock_conn.execute.side_effect = [
+        mock.MagicMock(),
+        select_result,
+        upsert_result,
+        delete_result,
+    ]
+    mock_engine.begin.return_value.__enter__.return_value = mock_conn
+    mock_handle = mock.MagicMock()
+    mock_handle.engine = mock_engine
+    with mock.patch.object(
+        db_engine, "acquire_engine", return_value=mock_handle
+    ):
+      pg_store = sql_store.SqlTrajectoryStore(
+          run_id="pg_run",
+          db_url="postgresql+psycopg2://user@host/db",
+          auto_init=False,
+      )
+      self.addCleanup(pg_store.close)
+      pg_store.resume_attempt(
+          trajectory_testing.METADATA_2.model_copy(update={"attempt": 2}),
+          keep_steps=2,
+      )
+
+    pg_dialect = postgresql.dialect()
+    run_upsert_call, select_call, traj_upsert_call, delete_call = (
+        mock_conn.execute.call_args_list
+    )
+    run_upsert_sql = str(run_upsert_call.args[0].compile(dialect=pg_dialect))
+    select_sql = str(select_call.args[0].compile(dialect=pg_dialect))
+    traj_upsert_sql = str(traj_upsert_call.args[0].compile(dialect=pg_dialect))
+    delete_sql = str(delete_call.args[0].compile(dialect=pg_dialect))
+    self.assertIn("INSERT INTO runs", run_upsert_sql)
+    self.assertIn("coalesce(CAST(", select_sql)
+    self.assertIn("FOR UPDATE", select_sql)
+    self.assertIn(
+        "ON CONFLICT (run_id, trajectory_id) DO UPDATE SET", traj_upsert_sql
+    )
+    self.assertIn("coalesce(CAST(", traj_upsert_sql)
+    self.assertIn("DELETE FROM steps", delete_sql)
+    self.assertIn("steps.step_id >", delete_sql)
+
+  def test_resume_attempt_postgresql_concurrent_loser_raises_stale_attempt(
+      self,
+  ) -> None:
+    """Verifies concurrent insert race raises StaleAttemptError before DELETE."""
+    mock_engine = mock.MagicMock()
+    mock_engine.dialect.name = db_engine.Dialect.POSTGRESQL
+    mock_conn = mock.create_autospec(
+        sa.Connection, instance=True, spec_set=True
+    )
+    initial_select = mock.MagicMock()
+    initial_select.scalar_one_or_none.return_value = None
+    lost_upsert = mock.MagicMock()
+    lost_upsert.rowcount = 0
+    recheck_select = mock.MagicMock()
+    recheck_select.scalar_one_or_none.return_value = 3
+    mock_conn.execute.side_effect = [
+        mock.MagicMock(),
+        initial_select,
+        lost_upsert,
+        recheck_select,
+    ]
+    mock_engine.begin.return_value.__enter__.return_value = mock_conn
+    mock_handle = mock.MagicMock()
+    mock_handle.engine = mock_engine
+    with mock.patch.object(
+        db_engine, "acquire_engine", return_value=mock_handle
+    ):
+      pg_store = sql_store.SqlTrajectoryStore(
+          run_id="pg_race_run",
+          db_url="postgresql+psycopg2://user@host/db",
+          auto_init=False,
+      )
+      self.addCleanup(pg_store.close)
+      with self.assertRaises(store.StaleAttemptError) as ctx:
+        pg_store.resume_attempt(
+            trajectory_testing.METADATA_2.model_copy(update={"attempt": 2}),
+            keep_steps=0,
+        )
+    self.assertEqual(ctx.exception.attempted, 2)
+    self.assertEqual(ctx.exception.current_attempt, 3)
+    self.assertLen(mock_conn.execute.call_args_list, 4)
+
+  def test_process_batch_fallback_end_to_end_drops_stale_step_and_keeps_metrics(
+      self,
+  ) -> None:
+    store_inst = self._create_store(run_id="fallback_e2e_run")
+    meta_a1 = trajectory_testing.METADATA_2.model_copy(
+        update={"attempt": 1, "notes": "stale"}
+    )
+    meta_a2 = trajectory_testing.METADATA_2.model_copy(
+        update={"attempt": 2, "notes": "active"}
+    )
+    stale_step_task = async_writer.WriteTask(
+        run_id="fallback_e2e_run",
+        metadata=meta_a1,
+        step=trajectory_testing.STEP_2_5.model_copy(
+            update={"step_id": 99, "message": "stale_99"}
+        ),
+        metrics=trajectory_lib.TrajectoryMetrics(extra={"kept_metric": True}),
+    )
+    active_step_task = async_writer.WriteTask(
+        run_id="fallback_e2e_run",
+        metadata=meta_a2,
+        step=trajectory_testing.STEP_2_1,
+    )
+    # Trigger a non-batchable IntegrityError on another trajectory
+    # (step_id=None violates NOT NULL on steps.step_id) so bulk transaction
+    # falls back.
+    bad_other_task = async_writer.WriteTask(
+        run_id="fallback_e2e_run",
+        metadata=trajectory_testing.METADATA_1,
+        step=trajectory_testing.STEP_1_1.model_copy(update={"step_id": None}),
+    )
+    tasks = [stale_step_task, active_step_task, bad_other_task]
+    for task in tasks:
+      task.to_atif()
+    with self.assertLogs(level="WARNING"):
+      store_inst._writer._process_batch(tasks)
+
+    traj = store_inst.get_trajectories([trajectory_testing.TRAJECTORY_ID_2])[
+        trajectory_testing.TRAJECTORY_ID_2
+    ]
+    self.assertEqual(traj.attempt, 2)
+    self.assertEqual(traj.notes, "active")
+    self.assertEqual(traj.steps, [trajectory_testing.STEP_2_1])
+    metrics = store_inst.get_trajectories_metrics(
+        [trajectory_testing.TRAJECTORY_ID_2]
+    )
+    self.assertEqual(
+        metrics[trajectory_testing.TRAJECTORY_ID_2].extra,
+        {"kept_metric": True},
+    )
+
+  def test_stale_cache_update_does_not_downgrade_higher_attempt(self) -> None:
+    store_inst = self._create_store(run_id="cache_monotonic_run")
+    meta_a2 = trajectory_testing.METADATA_2.model_copy(
+        update={"attempt": 2, "notes": "active_2"}
+    )
+    meta_a1 = trajectory_testing.METADATA_2.model_copy(
+        update={"attempt": 1, "notes": "stale_1"}
+    )
+    store_inst.resume_attempt(meta_a2, keep_steps=0)
+    store_inst._writer._cache_committed_state(
+        "cache_monotonic_run",
+        trajectory_testing.TRAJECTORY_ID_2,
+        meta_a1.to_atif_metadata().model_dump(mode="json", exclude_none=True),
+    )
+    cached = store_inst._writer._trajectories_by_run["cache_monotonic_run"][
+        trajectory_testing.TRAJECTORY_ID_2
+    ]
+    self.assertEqual(cached["attempt"], 2)
+    self.assertEqual(cached["notes"], "active_2")
+
+  def test_stale_metadata_only_update_evicts_and_skips_cache(self) -> None:
+    db_file = os.path.join(self.create_tempdir().full_path, "meta_stale.db")
+    db_url = f"sqlite:///{db_file}"
+    cached_zombie = sql_store.SqlTrajectoryStore(
+        run_id="r_meta_stale", db_url=db_url
+    )
+    unseen_zombie = sql_store.SqlTrajectoryStore(
+        run_id="r_meta_stale", db_url=db_url
+    )
+    active_writer = sql_store.SqlTrajectoryStore(
+        run_id="r_meta_stale", db_url=db_url
+    )
+    self.addCleanup(cached_zombie.close)
+    self.addCleanup(unseen_zombie.close)
+    self.addCleanup(active_writer.close)
+
+    meta_a1 = trajectory_testing.METADATA_2.model_copy(
+        update={"attempt": 1, "status": "RUNNING", "notes": "zombie_init"}
+    )
+    cached_zombie.update_metadata(meta_a1)
+    cached_zombie.flush()
+    self.assertIn(
+        trajectory_testing.TRAJECTORY_ID_2,
+        cached_zombie._writer._trajectories_by_run["r_meta_stale"],
+    )
+
+    meta_a2 = trajectory_testing.METADATA_2.model_copy(
+        update={"attempt": 2, "status": "COMPLETED", "notes": "active_2"}
+    )
+    active_writer.resume_attempt(meta_a2, keep_steps=0)
+
+    with self.assertLogs(level="WARNING") as cached_logs:
+      cached_zombie.update_metadata(
+          meta_a1.model_copy(
+              update={"status": "FAILED", "notes": "zombie_failed"}
+          )
+      )
+      cached_zombie.flush()
+    self.assertIn("Ignoring stale writes", "\n".join(cached_logs.output))
+    self.assertNotIn(
+        trajectory_testing.TRAJECTORY_ID_2,
+        cached_zombie._writer._trajectories_by_run.get("r_meta_stale", {}),
+    )
+
+    with self.assertLogs(level="WARNING") as unseen_logs:
+      unseen_zombie.update_metadata(
+          meta_a1.model_copy(
+              update={"status": "FAILED", "notes": "unseen_failed"}
+          )
+      )
+      unseen_zombie.flush()
+    self.assertIn("Ignoring stale writes", "\n".join(unseen_logs.output))
+    self.assertNotIn(
+        trajectory_testing.TRAJECTORY_ID_2,
+        unseen_zombie._writer._trajectories_by_run.get("r_meta_stale", {}),
+    )
+
+    persisted = active_writer.get_trajectories_metadata(
+        [trajectory_testing.TRAJECTORY_ID_2]
+    )[trajectory_testing.TRAJECTORY_ID_2]
+    self.assertEqual(persisted.attempt, 2)
+    self.assertEqual(persisted.status, "COMPLETED")
+    self.assertEqual(persisted.notes, "active_2")
+
+  def test_unchanged_completed_metadata_skips_redundant_upsert(self) -> None:
+    db_file = os.path.join(self.create_tempdir().full_path, "dedup_status.db")
+    db_url = f"sqlite:///{db_file}"
+    meta = trajectory_testing.METADATA_2.model_copy(
+        update={"status": "COMPLETED", "total_reward": 1.0}
+    )
+    store1 = sql_store.SqlTrajectoryStore(
+        run_id="dedup_status_run", db_url=db_url
+    )
+    store2 = sql_store.SqlTrajectoryStore(
+        run_id="dedup_status_run", db_url=db_url
+    )
+    store3 = sql_store.SqlTrajectoryStore(
+        run_id="dedup_status_run", db_url=db_url
+    )
+    self.addCleanup(store1.close)
+    self.addCleanup(store2.close)
+    self.addCleanup(store3.close)
+
+    store1.update_metadata(meta)
+    store1.flush()
+
+    old_ts = datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc)
+    with store1._engine.begin() as conn:
+      conn.execute(
+          sa.update(schema.TRAJECTORIES_TABLE).values(updated_at=old_ts)
+      )
+
+    store2.update_metadata(meta)
+    store2.flush()
+    with store2._engine.connect() as conn:
+      updated_at_after = conn.execute(
+          sa.select(schema.TRAJECTORIES_TABLE.c.updated_at)
+      ).scalar_one()
+    self.assertEqual(
+        updated_at_after.replace(tzinfo=None), old_ts.replace(tzinfo=None)
+    )
+
+    with store1._engine.begin() as conn:
+      conn.execute(
+          sa.update(schema.TRAJECTORIES_TABLE).values(
+              status=schema.Status.UNKNOWN, updated_at=old_ts
+          )
+      )
+    store3.update_metadata(meta)
+    store3.flush()
+    with store3._engine.connect() as conn:
+      row = conn.execute(
+          sa.select(
+              schema.TRAJECTORIES_TABLE.c.status,
+              schema.TRAJECTORIES_TABLE.c.updated_at,
+          )
+      ).one()
+    self.assertEqual(row.status, schema.Status.COMPLETED)
+    self.assertNotEqual(
+        row.updated_at.replace(tzinfo=None), old_ts.replace(tzinfo=None)
+    )
 
 
 class SqlTrajectoryReaderContractTest(store_testing.TrajectoryReaderTestCase):

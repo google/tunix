@@ -3183,6 +3183,21 @@ class AtifRehydrationTest(trajectory_testing.TrajectoryTestCase):
 
     self.assertEqual(rehydrated_step.step_id, tunix_step.step_id)
 
+  def test_to_atif_step_uses_atif_step_id_offset_by_default(self):
+    class OffsetStep(trajectory.Step):
+      EXTENSIONS_KEY = "_offset_ext"
+      ATIF_STEP_ID_OFFSET = 1
+
+    custom_step = OffsetStep(
+        step_id=0,
+        source=trajectory.Source.USER,
+        message="hello",
+    )
+    projected = custom_step.to_atif_step()
+    self.assertIs(type(projected), trajectory.Step)
+    self.assertEqual(projected.step_id, 1)
+    self.assertEqual(custom_step.to_atif_step(step_id_offset=0).step_id, 0)
+
   def test_from_atif_step_on_zero_indexed_step_raises_value_error(self):
     # `from_atif_step` assumes the 1-indexed ATIF numbering. An already
     # 0-indexed step is rejected instead of silently underflowing to -1.

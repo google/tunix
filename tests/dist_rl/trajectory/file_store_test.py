@@ -2,6 +2,7 @@
 
 from collections.abc import Callable, Iterator, Sequence
 import contextlib
+import json
 import tempfile
 import threading
 import time
@@ -2595,6 +2596,707 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
             step_5.message,
         ],
     )
+
+  @parameterized.named_parameters(
+      dict(testcase_name="local_posix", is_local=True),
+      dict(testcase_name="remote_object_store", is_local=False),
+  )
+  def test_resume_attempt_zero_copy_layout_and_strips_internal_caps(
+      self, is_local: bool
+  ) -> None:
+    """Verifies resume_attempt writes 1 attempt_N metadata file with 0 copies."""
+    traj_id = trajectory_testing.TRAJECTORY_ID_2
+    meta_a1 = trajectory_testing.METADATA_2.model_copy(
+        update={"attempt": 1, "extra": {"run": "v1"}}
+    )
+    steps = trajectory_testing.TRAJECTORY_2.steps[:4]
+    with self._hold_batch():
+      for step in steps:
+        self.file_s.add_step(step, meta_a1)
+
+    meta_a2 = meta_a1.model_copy(update={"attempt": 2, "extra": None})
+    written_paths: list[epath.Path] = []
+    orig_write_text = file_store._write_text
+
+    def record_write(path: epath.Path, content: str) -> None:
+      written_paths.append(path)
+      orig_write_text(path, content)
+
+    with (
+        mock.patch.object(
+            file_store, "_is_local_filesystem", return_value=is_local
+        ),
+        mock.patch.object(
+            file_store, "_write_text", side_effect=record_write
+        ),
+    ):
+      if not is_local:
+        self.file_s.get_trajectory_dir(traj_id, attempt=2).mkdir(
+            parents=True, exist_ok=True
+        )
+      self.file_s.resume_attempt(meta_a2, keep_steps=2)
+
+    expected_a2_meta = self.file_s.get_trajectory_metadata_path(
+        traj_id, attempt=2
+    )
+    self.assertEqual(written_paths, [expected_a2_meta])
+    self.assertTrue(
+        self.file_s.get_steps_chunk_path(traj_id, 1, 4, attempt=1).exists()
+    )
+    self.assertIn("_file_store_attempt_step_caps", expected_a2_meta.read_text())
+
+    self.assertEqual(
+        self.file_s.get_trajectories_metadata([traj_id]),
+        {traj_id: meta_a2},
+    )
+    retry_step_3 = steps[2].model_copy(update={"message": "retry step 3"})
+    self.file_s.add_step(retry_step_3, meta_a2)
+    self.file_s.flush()
+    traj = self.file_s.get_trajectories([traj_id])[traj_id]
+    self.assertIsNone(traj.extra)
+    self.assertEqual(traj.steps, [steps[0], steps[1], retry_step_3])
+
+  def test_resume_attempt_reopened_writer_preserves_caps_and_fences_zombie(
+      self,
+  ) -> None:
+    """Verifies restarted attempt=2 writer preserves caps while zombie attempt=1 is ignored."""
+    traj_id = trajectory_testing.TRAJECTORY_ID_2
+    meta_a1 = trajectory_testing.METADATA_2.model_copy(
+        update={"attempt": 1, "notes": "worker_1"}
+    )
+    for step in trajectory_testing.TRAJECTORY_2.steps[:4]:
+      self.file_s.add_step(step, meta_a1)
+    self.file_s.flush()
+
+    claim_store = file_store.FileTrajectoryStore(root_dir=self.tmp_dir)
+    self.addCleanup(claim_store.close)
+    meta_a2 = meta_a1.model_copy(
+        update={"attempt": 2, "status": None, "notes": "worker_2"}
+    )
+    claim_store.resume_attempt(meta_a2, keep_steps=2)
+
+    # Simulate another process opening the store mid-attempt-2 to write step 3
+    # and mark completion without overwriting attempt 1's cap map.
+    resumed_store = file_store.FileTrajectoryStore(root_dir=self.tmp_dir)
+    self.addCleanup(resumed_store.close)
+    meta_a2_done = meta_a2.model_copy(update={"status": "COMPLETED"})
+    retry_step_3 = trajectory_testing.STEP_2_3.model_copy(
+        update={"message": "worker_2 step 3"}
+    )
+    resumed_store.add_step(retry_step_3, meta_a2_done)
+    resumed_store.flush()
+
+    # Stale zombie writer 1 writes extra step 99 and metadata into top-level
+    # attempt 1 directory, plus metrics.
+    self.file_s.add_step(
+        trajectory_testing.STEP_2_5.model_copy(
+            update={"step_id": 99, "message": "zombie 99"}
+        ),
+        meta_a1.model_copy(update={"status": "FAILED", "notes": "zombie"}),
+    )
+    self.file_s.update_metrics(
+        traj_id, trajectory_lib.TrajectoryMetrics(extra={"from_zombie": True})
+    )
+    self.file_s.flush()
+
+    self.assertEqual(
+        resumed_store.get_trajectories_metadata([traj_id]),
+        {traj_id: meta_a2_done},
+    )
+    traj = resumed_store.get_trajectories([traj_id])[traj_id]
+    self.assertEqual(traj.status, "COMPLETED")
+    self.assertEqual(traj.notes, "worker_2")
+    self.assertEqual(
+        traj.steps,
+        [
+            trajectory_testing.STEP_2_1,
+            trajectory_testing.STEP_2_2,
+            retry_step_3,
+        ],
+    )
+    self.assertEqual(
+        resumed_store.get_trajectories_metrics([traj_id])[traj_id].extra,
+        {"from_zombie": True},
+    )
+
+  def test_resume_attempt_sequential_retries_preserve_monotonic_caps(
+      self,
+  ) -> None:
+    """Verifies widening keep_steps in attempt 3 never resurrects discarded attempt 1 steps."""
+    traj_id = trajectory_testing.TRAJECTORY_ID_2
+    meta_a1 = trajectory_testing.METADATA_2.model_copy(update={"attempt": 1})
+    s1, s2, s3, s4, s5 = trajectory_testing.TRAJECTORY_2.steps
+    for step in (s1, s2, s3, s4, s5):
+      self.file_s.add_step(step, meta_a1)
+    self.file_s.flush()
+
+    meta_a2 = meta_a1.model_copy(update={"attempt": 2})
+    self.file_s.resume_attempt(meta_a2, keep_steps=3)
+    s4_a2 = s4.model_copy(update={"message": "attempt 2 step 4"})
+    s5_a2 = s5.model_copy(update={"message": "attempt 2 step 5"})
+    self.file_s.add_step(s4_a2, meta_a2)
+    self.file_s.add_step(s5_a2, meta_a2)
+    self.file_s.flush()
+
+    # Claim attempt 3 keeping up through step 4 (tighter than attempt 2's 5,
+    # wider than attempt 1's cap of 3): must keep s1..s3 from attempt 1 and
+    # s4_a2 from attempt 2, never s4 from attempt 1 or s5_a2.
+    meta_a3 = meta_a1.model_copy(update={"attempt": 3})
+    self.file_s.resume_attempt(meta_a3, keep_steps=4)
+    s5_a3 = s5.model_copy(update={"message": "attempt 3 step 5"})
+    self.file_s.add_step(s5_a3, meta_a3)
+    self.file_s.flush()
+    traj_a3 = self.file_s.get_trajectories([traj_id])[traj_id]
+    self.assertEqual(traj_a3.steps, [s1, s2, s3, s4_a2, s5_a3])
+
+    # Tightening attempt 4 to keep_steps=2 caps all prior attempts down to 2.
+    meta_a4 = meta_a1.model_copy(update={"attempt": 4})
+    self.file_s.resume_attempt(meta_a4, keep_steps=2)
+    traj_a4 = self.file_s.get_trajectories([traj_id])[traj_id]
+    self.assertEqual(traj_a4.steps, [s1, s2])
+
+  def test_resume_attempt_same_attempt_truncates_overlapping_jsonl_chunk(
+      self,
+  ) -> None:
+    """Verifies re-trimming the active attempt splits/unlinks .jsonl step chunks."""
+    traj_id = trajectory_testing.TRAJECTORY_ID_2
+    meta_a2 = trajectory_testing.METADATA_2.model_copy(update={"attempt": 2})
+    s1, s2, s3, s4, _ = trajectory_testing.TRAJECTORY_2.steps
+    with self._hold_batch():
+      for step in (s1, s2, s3, s4):
+        self.file_s.add_step(step, meta_a2)
+    self.assertTrue(
+        self.file_s.get_steps_chunk_path(traj_id, 1, 4, attempt=2).exists()
+    )
+
+    self.file_s.resume_attempt(meta_a2, keep_steps=2)
+    self.assertFalse(
+        self.file_s.get_steps_chunk_path(traj_id, 1, 4, attempt=2).exists()
+    )
+    self.assertTrue(
+        self.file_s.get_steps_chunk_path(traj_id, 1, 2, attempt=2).exists()
+    )
+    self.assertEqual(
+        self.file_s.get_trajectories([traj_id])[traj_id].steps,
+        [s1, s2],
+    )
+
+    # Tightening chunk down to 1 converts it to single-step step_000001.json.
+    self.file_s.resume_attempt(meta_a2, keep_steps=1)
+    self.assertFalse(
+        self.file_s.get_steps_chunk_path(traj_id, 1, 2, attempt=2).exists()
+    )
+    self.assertTrue(self.file_s.get_step_path(traj_id, 1, attempt=2).exists())
+    self.assertEqual(
+        self.file_s.get_trajectories([traj_id])[traj_id].steps,
+        [s1],
+    )
+
+  def test_resume_attempt_excludes_discarded_corrupt_tail_and_preserves_strict_false(
+      self,
+  ) -> None:
+    """Verifies discarded corrupt steps in attempt 1 do not break strict=True on attempt 2."""
+    traj_id = "corrupt_tail_retry"
+    meta_a1 = trajectory_testing.METADATA_2.model_copy(
+        update={
+            "trajectory_id": traj_id,
+            "attempt": 1,
+            "status": "FAILED",
+            "total_reward": 0.0,
+        }
+    )
+    s1, s2, s3, *_ = trajectory_testing.TRAJECTORY_2.steps
+    for step in (s1, s2, s3):
+      self.file_s.add_step(step, meta_a1)
+    self.file_s.flush()
+    self.file_s.get_step_path(traj_id, 2, attempt=1).write_text("{")
+    self.file_s.get_step_path(traj_id, 3, attempt=1).write_text("{")
+
+    meta_a2 = meta_a1.model_copy(
+        update={"attempt": 2, "status": "SUCCEEDED", "total_reward": 1.0}
+    )
+    self.file_s.resume_attempt(meta_a2, keep_steps=1)
+    s2_clean = s2.model_copy(update={"message": "clean retry 2"})
+    self.file_s.add_step(s2_clean, meta_a2)
+    self.file_s.flush()
+
+    traj_strict = self.file_s.get_trajectories([traj_id], strict=True)[traj_id]
+    self.assertEqual(traj_strict.steps, [s1, s2_clean])
+    self.assertEqual(traj_strict.status, "SUCCEEDED")
+
+    # Resuming attempt 3 retaining step 2 after corrupting attempt 2 step 2
+    # still clips cleanly under strict=False.
+    self.file_s.get_step_path(traj_id, 2, attempt=2).write_text("{")
+    meta_a3 = meta_a2.model_copy(update={"attempt": 3})
+    self.file_s.resume_attempt(meta_a3, keep_steps=2)
+    with self.assertRaises(pydantic.ValidationError):
+      self.file_s.get_trajectories([traj_id], strict=True)
+    traj_clipped = self.file_s.get_trajectories([traj_id], strict=False)[
+        traj_id
+    ]
+    self.assertEqual(traj_clipped.steps, [s1])
+    self.assertIsNone(traj_clipped.status)
+    self.assertIsNone(traj_clipped.total_reward)
+
+  def test_resume_attempt_closed_store_and_discovery(self) -> None:
+    """Verifies discovery of attempt_2-only trajectories and closed-store error."""
+    meta_only_a2 = trajectory_testing.METADATA_1.model_copy(
+        update={"trajectory_id": "attempt2_only", "attempt": 2}
+    )
+    self.file_s.resume_attempt(meta_only_a2)
+    self.assertEqual(
+        self.file_s.get_trajectories_metadata(),
+        {"attempt2_only": meta_only_a2},
+    )
+    self.file_s.close()
+    with self.assertRaises(RuntimeError):
+      self.file_s.resume_attempt(trajectory_testing.METADATA_1)
+
+  def test_resume_attempt_unseen_and_direct_attempt2_block_zombie_attempt1(
+      self,
+  ) -> None:
+    """Verifies unseen or direct attempt=2 resumes never inherit late attempt=1 steps."""
+    traj_unseen = "unseen_a2_keep3"
+    meta_a2_unseen = trajectory_testing.METADATA_1.model_copy(
+        update={"trajectory_id": traj_unseen, "attempt": 2}
+    )
+    self.file_s.resume_attempt(meta_a2_unseen, keep_steps=3)
+
+    zombie_store = file_store.FileTrajectoryStore(root_dir=self.tmp_dir)
+    self.addCleanup(zombie_store.close)
+    meta_a1_unseen = trajectory_testing.METADATA_1.model_copy(
+        update={"trajectory_id": traj_unseen, "attempt": 1}
+    )
+    zombie_store.add_step(trajectory_testing.STEP_1_1, meta_a1_unseen)
+    zombie_store.flush()
+    self.assertEmpty(
+        self.file_s.get_trajectories([traj_unseen])[traj_unseen].steps
+    )
+
+    # Direct attempt=2 write (no attempt=1 on disk) followed by re-trim.
+    traj_direct = "direct_a2_retrim"
+    meta_a2_direct = trajectory_testing.METADATA_2.model_copy(
+        update={"trajectory_id": traj_direct, "attempt": 2}
+    )
+    self.file_s.add_step(trajectory_testing.STEP_2_1, meta_a2_direct)
+    self.file_s.flush()
+    self.file_s.resume_attempt(meta_a2_direct, keep_steps=2)
+    meta_a1_direct = trajectory_testing.METADATA_2.model_copy(
+        update={"trajectory_id": traj_direct, "attempt": 1}
+    )
+    zombie_store.add_step(
+        trajectory_testing.STEP_2_2.model_copy(update={"message": "zombie 2"}),
+        meta_a1_direct,
+    )
+    zombie_store.flush()
+    self.assertEqual(
+        self.file_s.get_trajectories([traj_direct])[traj_direct].steps,
+        [trajectory_testing.STEP_2_1],
+    )
+
+  def test_resume_attempt_same_attempt_chunk_trim_preserves_revised_step(
+      self,
+  ) -> None:
+    """Verifies single-step chunk trim does not overwrite a newer step_XXXXXX.json."""
+    traj_id = trajectory_testing.TRAJECTORY_ID_2
+    meta_a2 = trajectory_testing.METADATA_2.model_copy(update={"attempt": 2})
+    s1, s2, s3, s4, _ = trajectory_testing.TRAJECTORY_2.steps
+    with self._hold_batch():
+      for step in (s1, s2, s3, s4):
+        self.file_s.add_step(step, meta_a2)
+
+    revised_s1 = s1.model_copy(update={"message": "revised step 1"})
+    self.file_s.add_step(revised_s1, meta_a2)
+    self.file_s.flush()
+
+    self.file_s.resume_attempt(meta_a2, keep_steps=1)
+    self.assertFalse(
+        self.file_s.get_steps_chunk_path(traj_id, 1, 4, attempt=2).exists()
+    )
+    self.assertEqual(
+        self.file_s.get_trajectories([traj_id])[traj_id].steps,
+        [revised_s1],
+    )
+
+  def test_resume_attempt_ignores_corrupt_tail_inside_prior_jsonl_chunk(
+      self,
+  ) -> None:
+    """Verifies corrupt lines past keep_steps inside a capped .jsonl chunk are ignored."""
+    traj_id = "corrupt_chunk_tail_retry"
+    meta_a1 = trajectory_testing.METADATA_2.model_copy(
+        update={
+            "trajectory_id": traj_id,
+            "attempt": 1,
+            "status": "FAILED",
+            "total_reward": 0.0,
+        }
+    )
+    s1, s2, s3, s4, _ = trajectory_testing.TRAJECTORY_2.steps
+    with self._hold_batch():
+      for step in (s1, s2, s3, s4):
+        self.file_s.add_step(step, meta_a1)
+    chunk_path = self.file_s.get_steps_chunk_path(traj_id, 1, 4, attempt=1)
+    good_lines = chunk_path.read_text().splitlines()[:2]
+    chunk_path.write_text(
+        "\n".join([*good_lines, "{corrupt line 3", "{line 4"])
+    )
+
+    meta_a2 = meta_a1.model_copy(
+        update={"attempt": 2, "status": "SUCCEEDED", "total_reward": 5.0}
+    )
+    self.file_s.resume_attempt(meta_a2, keep_steps=2)
+    clean_s3 = s3.model_copy(update={"message": "clean retry 3"})
+    self.file_s.add_step(clean_s3, meta_a2)
+    self.file_s.flush()
+
+    for strict in (True, False):
+      traj = self.file_s.get_trajectories([traj_id], strict=strict)[traj_id]
+      self.assertEqual(traj.steps, [s1, s2, clean_s3])
+      self.assertEqual(traj.status, "SUCCEEDED")
+      self.assertEqual(traj.total_reward, 5.0)
+
+  def test_resume_attempt_trims_partial_attempt_dir_missing_metadata(
+      self,
+  ) -> None:
+    """Verifies crashed partial attempt_N steps without metadata.json are trimmed."""
+    traj_id = trajectory_testing.TRAJECTORY_ID_2
+    meta_a1 = trajectory_testing.METADATA_2.model_copy(update={"attempt": 1})
+    s1, s2, s3, *_ = trajectory_testing.TRAJECTORY_2.steps
+    self.file_s.add_step(s1, meta_a1)
+    self.file_s.add_step(s2, meta_a1)
+    self.file_s.flush()
+
+    orphan_dir = self.file_s.get_trajectory_dir(traj_id, attempt=2)
+    orphan_dir.mkdir(parents=True, exist_ok=True)
+    self.file_s.get_step_path(traj_id, 3, attempt=2).write_text(
+        s3.model_copy(update={"message": "orphan step 3"}).model_dump_json(
+            exclude_none=True
+        )
+    )
+
+    meta_a2 = meta_a1.model_copy(update={"attempt": 2})
+    self.file_s.resume_attempt(meta_a2, keep_steps=1)
+    self.assertFalse(self.file_s.get_step_path(traj_id, 3, attempt=2).exists())
+    self.assertEqual(
+        self.file_s.get_trajectories([traj_id])[traj_id].steps,
+        [s1],
+    )
+
+  @parameterized.named_parameters(
+      ("trailing_corrupt_line", True, ["attempt2 revised step 1"]),
+      ("leading_corrupt_line", False, []),
+  )
+  def test_corrupt_jsonl_chunk_evicts_prior_attempt_kept_steps(
+      self, first_line_valid: bool, expected_messages: list[str]
+  ) -> None:
+    """Verifies a corrupt attempt chunk evicts prior kept steps in its range."""
+    traj_id = trajectory_testing.TRAJECTORY_ID_2
+    meta1 = trajectory_testing.METADATA_2.model_copy(
+        update={"status": None, "total_reward": None}
+    )
+    self.file_s.add_step(trajectory_testing.STEP_2_1, meta1)
+    self.file_s.add_step(trajectory_testing.STEP_2_2, meta1)
+    self.file_s.flush()
+
+    meta2 = meta1.model_copy(
+        update={"attempt": 2, "status": "completed", "total_reward": 1.0}
+    )
+    self.file_s.resume_attempt(meta2, keep_steps=2)
+    step1_v2 = trajectory_testing.STEP_2_1.model_copy(
+        update={"message": "attempt2 revised step 1"}
+    )
+    step2_v2 = trajectory_testing.STEP_2_2.model_copy(
+        update={"message": "attempt2 revised step 2"}
+    )
+    lines = (
+        [step1_v2.model_dump_json(exclude_none=True), "{not valid json"]
+        if first_line_valid
+        else ["{not valid json", step2_v2.model_dump_json(exclude_none=True)]
+    )
+    self.file_s.get_steps_chunk_path(traj_id, 1, 2, attempt=2).write_text(
+        "\n".join(lines)
+    )
+
+    recovered = self.file_s.get_trajectories([traj_id], strict=False)[traj_id]
+
+    self.assertIsNone(recovered.status)
+    self.assertIsNone(recovered.total_reward)
+    self.assertEqual(
+        [step.message for step in recovered.steps], expected_messages
+    )
+
+  def test_resume_attempt_omits_zero_caps_across_retries(self) -> None:
+    """Verifies keep_steps=0 omits zero entries in attempt step caps."""
+    traj_id = trajectory_testing.TRAJECTORY_ID_2
+    meta1 = trajectory_testing.METADATA_2.model_copy(
+        update={"status": None, "total_reward": None, "extra": None}
+    )
+    self.file_s.add_step(trajectory_testing.STEP_2_1, meta1)
+    self.file_s.add_step(trajectory_testing.STEP_2_2, meta1)
+    self.file_s.flush()
+
+    meta2 = meta1.model_copy(update={"attempt": 2})
+    self.file_s.resume_attempt(meta2, keep_steps=0)
+    raw_meta2 = json.loads(
+        self.file_s.get_trajectory_metadata_path(traj_id, attempt=2).read_text()
+    )
+    self.assertNotIn("extra", raw_meta2)
+    self.assertEqual(self.file_s.get_trajectories([traj_id])[traj_id].steps, [])
+
+    self.file_s.add_step(trajectory_testing.STEP_2_1, meta2)
+    self.file_s.add_step(trajectory_testing.STEP_2_2, meta2)
+    self.file_s.add_step(trajectory_testing.STEP_2_3, meta2)
+    self.file_s.flush()
+
+    meta3 = meta2.model_copy(update={"attempt": 3})
+    self.file_s.resume_attempt(meta3, keep_steps=2)
+    raw_meta3 = json.loads(
+        self.file_s.get_trajectory_metadata_path(traj_id, attempt=3).read_text()
+    )
+    self.assertEqual(
+        raw_meta3["extra"][file_store._ATTEMPT_CAPS_KEY], {"2": 2}
+    )
+    self.file_s.add_step(
+        trajectory_testing.STEP_2_3.model_copy(
+            update={"message": "attempt3 step 3"}
+        ),
+        meta3,
+    )
+    self.file_s.flush()
+
+    recovered = self.file_s.get_trajectories([traj_id])[traj_id]
+    self.assertEqual(recovered.attempt, 3)
+    self.assertLen(recovered.steps, 3)
+    self.assertEqual(recovered.steps[-1].message, "attempt3 step 3")
+
+    meta4 = meta3.model_copy(update={"attempt": 4})
+    self.file_s.resume_attempt(meta4, keep_steps=0)
+    raw_meta4 = json.loads(
+        self.file_s.get_trajectory_metadata_path(traj_id, attempt=4).read_text()
+    )
+    self.assertNotIn("extra", raw_meta4)
+
+  def test_concurrent_writes_and_resume_attempt_across_trajectories(
+      self,
+  ) -> None:
+    """Verifies concurrent resume_attempt and async writes are thread-safe."""
+    num_trajectories = 8
+    errors: list[BaseException] = []
+    start_barrier = threading.Barrier(
+        num_trajectories, timeout=_CONCURRENT_READ_TIMEOUT_SECONDS
+    )
+
+    def _worker(idx: int) -> None:
+      traj_id = f"concurrent_traj_{idx}"
+      try:
+        meta1 = trajectory_testing.METADATA_2.model_copy(
+            update={
+                "trajectory_id": traj_id,
+                "status": None,
+                "total_reward": None,
+            }
+        )
+        start_barrier.wait()
+        self.file_s.add_step(trajectory_testing.STEP_2_1, meta1)
+        self.file_s.add_step(trajectory_testing.STEP_2_2, meta1)
+        meta2 = meta1.model_copy(update={"attempt": 2})
+        self.file_s.resume_attempt(meta2, keep_steps=1)
+        self.file_s.add_step(
+            trajectory_testing.STEP_2_2.model_copy(
+                update={"message": f"a2_{idx}"}
+            ),
+            meta2,
+        )
+        meta3 = meta2.model_copy(update={"attempt": 3})
+        self.file_s.resume_attempt(meta3, keep_steps=0)
+        self.file_s.add_step(
+            trajectory_testing.STEP_2_1.model_copy(
+                update={"message": f"a3_{idx}"}
+            ),
+            meta3,
+        )
+      except BaseException as exc:  # pylint: disable=broad-exception-caught
+        errors.append(exc)
+
+    threads = [
+        threading.Thread(target=_worker, args=(i,))
+        for i in range(num_trajectories)
+    ]
+    for thread in threads:
+      thread.start()
+    for thread in threads:
+      thread.join(timeout=_CONCURRENT_READ_TIMEOUT_SECONDS)
+
+    self.assertEqual(errors, [])
+    self.file_s.flush()
+    traj_ids = [f"concurrent_traj_{i}" for i in range(num_trajectories)]
+    recovered = self.file_s.get_trajectories(traj_ids)
+    for i, traj_id in enumerate(traj_ids):
+      self.assertEqual(recovered[traj_id].attempt, 3)
+      self.assertLen(recovered[traj_id].steps, 1)
+      self.assertEqual(recovered[traj_id].steps[0].message, f"a3_{i}")
+
+  def test_get_trajectories_lists_attempt_subdirs_in_parallel(self) -> None:
+    """Verifies get_trajectories lists attempt subdirectories concurrently."""
+    traj_id = trajectory_testing.TRAJECTORY_ID_2
+    meta1 = trajectory_testing.METADATA_2.model_copy(
+        update={"status": None, "total_reward": None}
+    )
+    self.file_s.add_step(trajectory_testing.STEP_2_1, meta1)
+    self.file_s.flush()
+
+    meta2 = meta1.model_copy(update={"attempt": 2})
+    self.file_s.resume_attempt(meta2, keep_steps=1)
+    self.file_s.add_step(trajectory_testing.STEP_2_2, meta2)
+    self.file_s.flush()
+
+    meta3 = meta2.model_copy(update={"attempt": 3})
+    self.file_s.resume_attempt(meta3, keep_steps=2)
+    self.file_s.add_step(trajectory_testing.STEP_2_3, meta3)
+    self.file_s.flush()
+
+    path_cls = type(self.file_s.root_dir)
+    orig_iterdir = path_cls.iterdir
+    attempt_dir_barrier = threading.Barrier(
+        2, timeout=_CONCURRENT_READ_TIMEOUT_SECONDS
+    )
+
+    def _blocking_iterdir(path: epath.Path) -> Iterator[epath.Path]:
+      entries = list(orig_iterdir(path))
+      if path.name in ("attempt_2", "attempt_3"):
+        attempt_dir_barrier.wait()
+      return iter(entries)
+
+    with mock.patch.object(
+        path_cls, "iterdir", autospec=True, side_effect=_blocking_iterdir
+    ):
+      recovered = self.file_s.get_trajectories([traj_id])[traj_id]
+
+    self.assertEqual(recovered.attempt, 3)
+    self.assertEqual([s.step_id for s in recovered.steps], [1, 2, 3])
+
+  def test_per_attempt_step_cache_and_metrics_only_batch(self) -> None:
+    """Verifies attempt-scoped step caching, batch fencing, and metrics."""
+    traj_id = trajectory_testing.TRAJECTORY_ID_2
+    meta1 = trajectory_testing.METADATA_2.model_copy(
+        update={"status": None, "total_reward": None}
+    )
+    self.file_s.add_step(trajectory_testing.STEP_2_1, meta1)
+    self.file_s.add_step(trajectory_testing.STEP_2_2, meta1)
+    self.file_s.add_step(trajectory_testing.STEP_2_3, meta1)
+    self.file_s.flush()
+
+    meta2 = meta1.model_copy(update={"attempt": 2})
+    self.file_s.resume_attempt(meta2, keep_steps=1)
+
+    traj_dir = self.file_s.get_trajectory_dir(traj_id)
+    attempt2_dir = self.file_s.get_trajectory_dir(traj_id, attempt=2)
+    a2_step2 = file_store._FileWriteTask(
+        traj_dir=traj_dir,
+        attempt_dir=attempt2_dir,
+        metadata=meta2,
+        step=trajectory_testing.STEP_2_2,
+    )
+    a2_step3 = file_store._FileWriteTask(
+        traj_dir=traj_dir,
+        attempt_dir=attempt2_dir,
+        metadata=meta2,
+        step=trajectory_testing.STEP_2_3,
+    )
+    stale_a1_step2 = file_store._FileWriteTask(
+        traj_dir=traj_dir,
+        attempt_dir=traj_dir,
+        metadata=meta1,
+        step=trajectory_testing.STEP_2_2.model_copy(
+            update={"message": "stale_a1"}
+        ),
+    )
+    batch_tasks = [a2_step2, stale_a1_step2, a2_step3]
+    for task in batch_tasks:
+      task.to_atif()
+    with self.assertLogs(level="WARNING"):
+      self.file_s._writer._process_batch(batch_tasks)
+
+    # `(traj_id, 2)` starts at max_persisted_step_id=0 rather than reusing
+    # `(traj_id, 1) == 3`, so steps 2..3 write as one `.jsonl` chunk.
+    self.assertTrue(
+        self.file_s.get_steps_chunk_path(traj_id, 2, 3, attempt=2).exists()
+    )
+    self.assertFalse(self.file_s.get_step_path(traj_id, 2, attempt=2).exists())
+
+    metrics_tasks = [
+        file_store._FileWriteTask(
+            traj_dir=traj_dir,
+            attempt_dir=traj_dir,
+            trajectory_id=traj_id,
+            metrics=trajectory_lib.TrajectoryMetrics(extra={"m1": 1}),
+        ),
+        file_store._FileWriteTask(
+            traj_dir=traj_dir,
+            attempt_dir=traj_dir,
+            trajectory_id=traj_id,
+            metrics=trajectory_lib.TrajectoryMetrics(extra={"m2": 2}),
+        ),
+    ]
+    self.file_s._writer._process_batch(metrics_tasks)
+    self.assertEqual(
+        self.file_s.get_trajectories_metrics([traj_id])[traj_id].extra,
+        {"m1": 1, "m2": 2},
+    )
+
+  def test_to_atif_failure_on_attempt_logs_attempt_dir(self) -> None:
+    """Verifies failed step projection logs attempt_dir and keeps working."""
+
+    class _FailingAtifStep(trajectory_lib.Step):
+      EXTENSIONS_KEY: ClassVar[str] = "failing_atif_test"
+
+      def to_atif_step(
+          self, step_id_offset: int | None = None
+      ) -> trajectory_lib.Step:
+        del step_id_offset
+        raise ValueError("projection failed")
+
+    traj_id = trajectory_testing.TRAJECTORY_ID_2
+    meta2 = trajectory_testing.METADATA_2.model_copy(
+        update={"attempt": 2, "status": None, "total_reward": None}
+    )
+    self.file_s.resume_attempt(meta2, keep_steps=0)
+    failing_step = _FailingAtifStep(
+        step_id=1,
+        source=trajectory_lib.Source.AGENT,
+        message="bad step",
+    )
+    with self.assertLogs(level="ERROR") as logs:
+      self.file_s.add_step(failing_step, meta2)
+      self.file_s.flush()
+    self.assertIn("attempt_2", "\n".join(logs.output))
+
+    self.file_s.add_step(trajectory_testing.STEP_2_1, meta2)
+    self.file_s.flush()
+    self.assertEqual(
+        self.file_s.get_trajectories([traj_id])[traj_id].steps,
+        [trajectory_testing.STEP_2_1],
+    )
+
+  def test_resume_attempt_zero_caps_strips_stale_caps_from_extra(
+      self,
+  ) -> None:
+    """Verifies keep_steps=0 strips reserved caps and keeps user extra."""
+    traj_id = trajectory_testing.TRAJECTORY_ID_2
+    meta2 = trajectory_testing.METADATA_2.model_copy(
+        update={
+            "attempt": 2,
+            "extra": {
+                "user_key": "keep",
+                file_store._ATTEMPT_CAPS_KEY: {"1": 9},
+            },
+        }
+    )
+    self.file_s.resume_attempt(meta2, keep_steps=0)
+    raw_meta2 = json.loads(
+        self.file_s.get_trajectory_metadata_path(traj_id, attempt=2).read_text()
+    )
+    self.assertEqual(raw_meta2["extra"], {"user_key": "keep"})
 
 
 class FileTrajectoryStoreMetadataClsTest(

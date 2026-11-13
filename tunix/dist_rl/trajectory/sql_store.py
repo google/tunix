@@ -106,6 +106,14 @@ def _build_postgres_metrics_merge_payload(
   )
 
 
+# SQL expression reading stored attempt from trajectories.trajectory_metadata,
+# defaulting legacy or null payloads to attempt 1.
+_STORED_ATTEMPT_EXPR: Final[sa.ColumnElement[int]] = sa.func.coalesce(
+    schema.TRAJECTORIES_TABLE.c.trajectory_metadata["attempt"].as_integer(),
+    1,
+)
+
+
 class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
   """Asynchronously writes trajectory metadata, step, and metrics records.
 
@@ -186,6 +194,7 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
     # Bounded post-commit LRU cache of {trajectory_id: metadata_payload} per
     # run to skip repeat `trajectories` upserts.
     self._max_cached_trajectories = max_cached_trajectories
+    self._cache_lock = threading.Lock()
     self._trajectories_by_run: dict[
         str, collections.OrderedDict[str, dict[str, Any]]
     ] = {}
@@ -280,34 +289,43 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
       self,
       run_id: str,
       traj_id: str,
-      metadata_payload: dict[str, Any],
+      metadata_payload: dict[str, Any] | None,
   ) -> None:
-    """Caches a committed trajectory metadata payload in the per-run LRU cache.
+    """Caches or evicts a committed trajectory metadata payload in the LRU cache.
 
-    Updates `traj_id` as the most recently used entry for `run_id`. When
-    inserting a new `traj_id` at capacity, evicts the oldest 50% of least
-    recently used entries in a single batch.
+    Updates `traj_id` as the most recently used entry for `run_id`, or evicts it
+    when `metadata_payload` is None. When inserting a new `traj_id` at capacity,
+    evicts the oldest 50% of least recently used entries in a single batch.
 
     Args:
       run_id: Committed run identifier.
       traj_id: Committed trajectory identifier.
-      metadata_payload: Serialized JSON-compatible trajectory metadata dict.
+      metadata_payload: Serialized JSON-compatible trajectory metadata dict, or
+        None to evict any cached entry.
     """
-    if self._max_cached_trajectories <= 0:
-      return
-    metadata_by_traj = self._trajectories_by_run.setdefault(
-        run_id, collections.OrderedDict()
-    )
+    with self._cache_lock:
+      if metadata_payload is None:
+        self._trajectories_by_run.get(run_id, {}).pop(traj_id, None)
+        return
+      if self._max_cached_trajectories <= 0:
+        return
+      metadata_by_traj = self._trajectories_by_run.setdefault(
+          run_id, collections.OrderedDict()
+      )
 
-    if (
-        traj_id not in metadata_by_traj
-        and len(metadata_by_traj) >= self._max_cached_trajectories
-    ):
-      for _ in range(max(1, len(metadata_by_traj) // 2)):
-        metadata_by_traj.popitem(last=False)
+      cached = metadata_by_traj.get(traj_id)
+      if cached is not None and cached["attempt"] > metadata_payload["attempt"]:
+        return
 
-    metadata_by_traj[traj_id] = metadata_payload
-    metadata_by_traj.move_to_end(traj_id)
+      if (
+          traj_id not in metadata_by_traj
+          and len(metadata_by_traj) >= self._max_cached_trajectories
+      ):
+        for _ in range(max(1, len(metadata_by_traj) // 2)):
+          metadata_by_traj.popitem(last=False)
+
+      metadata_by_traj[traj_id] = metadata_payload
+      metadata_by_traj.move_to_end(traj_id)
 
   def _should_batch_on_error(self, exc: BaseException) -> bool:
     """Returns True for database lock contention or pool timeout errors."""
@@ -341,7 +359,7 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
       self._decrease_batch_wait()
       return
 
-    super()._process_batch(tasks)
+    super()._process_batch(async_writer.fence_stale_write_tasks(tasks))
 
   def _process_task(self, task: async_writer.WriteTask) -> None:
     """Persists a single write task through the unified transaction pipeline."""
@@ -377,20 +395,26 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
           async_writer.TrajectoryBatch[async_writer.WriteTask]
       ],
       now_dt: datetime.datetime,
-  ) -> tuple[list[dict[str, Any]], dict[tuple[str, str], dict[str, Any]]]:
-    """Returns deduplicated trajectory rows and post-commit cache entries."""
-    latest_status_by_key: dict[tuple[str, str], str] = {}
+  ) -> tuple[
+      list[dict[str, Any]],
+      dict[tuple[str, str], dict[str, Any]],
+      dict[tuple[str, str], int],
+  ]:
+    """Returns deduplicated trajectory rows, cache entries, and attempt map."""
+    latest_status_by_key: dict[tuple[str, str], tuple[int, str]] = {}
     for task in tasks:
-      if (
-          task.run_id
-          and task.metadata is not None
-          and (status := _resolve_status(task.metadata))
-          != schema.Status.UNKNOWN
-      ):
-        latest_status_by_key[(task.run_id, task.trajectory_id)] = status
+      meta = task.metadata
+      if not task.run_id or meta is None:
+        continue
+      if (status := _resolve_status(meta)) == schema.Status.UNKNOWN:
+        continue
+      key = (task.run_id, task.trajectory_id)
+      if meta.attempt >= latest_status_by_key.get(key, (0, ""))[0]:
+        latest_status_by_key[key] = (meta.attempt, status)
 
     trajectory_rows: list[dict[str, Any]] = []
     committed_metadata_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    traj_attempts_by_key: dict[tuple[str, str], int] = {}
     for batch in trajectory_batches:
       meta_task = batch.latest_metadata_task
       if (
@@ -404,16 +428,22 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
           mode="json", exclude_none=True
       )
       committed_metadata_by_key[traj_key] = metadata_payload
-      resolved_status = latest_status_by_key.get(
-          traj_key, schema.Status.UNKNOWN
-      )
+      resolved_status = schema.Status.UNKNOWN
+      status_entry = latest_status_by_key.get(traj_key)
+      if (
+          status_entry is not None
+          and status_entry[0] >= meta_task.metadata.attempt
+      ):
+        resolved_status = status_entry[1]
       has_earlier_batch_status = resolved_status != _resolve_status(
           meta_task.metadata
       )
-      cached_payload = self._trajectories_by_run.get(batch.run_id, {}).get(
-          batch.trajectory_id
-      )
+      with self._cache_lock:
+        cached_payload = self._trajectories_by_run.get(batch.run_id, {}).get(
+            batch.trajectory_id
+        )
       if cached_payload != metadata_payload or has_earlier_batch_status:
+        traj_attempts_by_key[traj_key] = meta_task.metadata.attempt
         trajectory_rows.append({
             "run_id": batch.run_id,
             "trajectory_id": batch.trajectory_id,
@@ -422,7 +452,7 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
             "updated_at": now_dt,
             "trajectory_metadata": metadata_payload,
         })
-    return trajectory_rows, committed_metadata_by_key
+    return trajectory_rows, committed_metadata_by_key, traj_attempts_by_key
 
   def _collect_step_and_metrics_rows(
       self,
@@ -430,10 +460,15 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
           async_writer.TrajectoryBatch[async_writer.WriteTask]
       ],
       now_dt: datetime.datetime,
-  ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Returns deduplicated step and metrics row dicts across trajectories."""
+  ) -> tuple[
+      list[dict[str, Any]],
+      list[dict[str, Any]],
+      dict[tuple[str, str], int],
+  ]:
+    """Returns deduplicated step rows, metrics rows, and batch attempt map."""
     step_rows: list[dict[str, Any]] = []
     metrics_rows: list[dict[str, Any]] = []
+    step_attempts_by_key: dict[tuple[str, str], int] = {}
     for batch in trajectory_batches:
       if batch.run_id is None:
         continue
@@ -442,6 +477,13 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
           for step_task in batch.step_tasks
           if step_task.step is not None and step_task.step.step_id is not None
       }
+      if latest_step_by_id and (
+          batch.latest_metadata_task is not None
+          and batch.latest_metadata_task.metadata is not None
+      ):
+        step_attempts_by_key[(batch.run_id, batch.trajectory_id)] = (
+            batch.latest_metadata_task.metadata.attempt
+        )
       for step in latest_step_by_id.values():
         step_rows.append({
             "run_id": batch.run_id,
@@ -462,7 +504,55 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
             "created_at": now_dt,
             "updated_at": now_dt,
         })
-    return step_rows, metrics_rows
+    return step_rows, metrics_rows, step_attempts_by_key
+
+  def _filter_stale_writes(
+      self,
+      conn: sa.Connection,
+      step_rows: list[dict[str, Any]],
+      attempts_by_key: Mapping[tuple[str, str], int],
+  ) -> tuple[list[dict[str, Any]], set[tuple[str, str]]]:
+    """Drops step rows and marks stale keys whose stored attempt is newer."""
+    if not attempts_by_key:
+      return step_rows, set()
+    key_filters = [
+        sa.and_(
+            schema.TRAJECTORIES_TABLE.c.run_id == run_id,
+            schema.TRAJECTORIES_TABLE.c.trajectory_id == traj_id,
+        )
+        for run_id, traj_id in attempts_by_key
+    ]
+    rows = conn.execute(
+        sa.select(
+            schema.TRAJECTORIES_TABLE.c.run_id,
+            schema.TRAJECTORIES_TABLE.c.trajectory_id,
+            _STORED_ATTEMPT_EXPR.label("stored_attempt"),
+        )
+        .where(sa.or_(*key_filters))
+        .with_for_update(read=True)
+    )
+    stale_keys: set[tuple[str, str]] = set()
+    for row in rows:
+      key = (row.run_id, row.trajectory_id)
+      incoming_attempt = attempts_by_key.get(key)
+      if incoming_attempt is not None and row.stored_attempt > incoming_attempt:
+        logging.warning(
+            "Ignoring stale writes for trajectory '%s' (run_id=%s): "
+            "incoming attempt %d < stored attempt %d.",
+            row.trajectory_id,
+            row.run_id,
+            incoming_attempt,
+            row.stored_attempt,
+        )
+        stale_keys.add(key)
+    if not stale_keys or not step_rows:
+      return step_rows, stale_keys
+    filtered_rows = [
+        row
+        for row in step_rows
+        if (row["run_id"], row["trajectory_id"]) not in stale_keys
+    ]
+    return filtered_rows, stale_keys
 
   def _execute_batch_transaction(
       self, tasks: Sequence[async_writer.WriteTask]
@@ -481,17 +571,33 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
         for run_id, agent_name in run_agent_by_id.items()
     ]
     trajectory_batches = async_writer.group_tasks_by_trajectory(tasks)
-    trajectory_rows, committed_metadata_by_key = (
-        self._collect_trajectory_updates(tasks, trajectory_batches, now_dt)
-    )
-    step_rows, metrics_rows = self._collect_step_and_metrics_rows(
-        trajectory_batches, now_dt
+    (
+        trajectory_rows,
+        committed_metadata_by_key,
+        traj_attempts_by_key,
+    ) = self._collect_trajectory_updates(tasks, trajectory_batches, now_dt)
+    step_rows, metrics_rows, step_attempts_by_key = (
+        self._collect_step_and_metrics_rows(trajectory_batches, now_dt)
     )
 
+    stale_keys: set[tuple[str, str]] = set()
     if any((run_rows, trajectory_rows, step_rows, metrics_rows)):
       with self._engine.begin() as conn:
         self._upsert_run_rows(conn, run_rows)
-        self._upsert_trajectory_rows(conn, trajectory_rows)
+        upserted_traj_count = self._upsert_trajectory_rows(
+            conn, trajectory_rows
+        )
+        # Skip an extra SELECT on metadata-only batches when every row in
+        # `trajectory_rows` was inserted or updated by the upsert above.
+        has_skipped_traj_rows = upserted_traj_count != len(trajectory_rows)
+        attempts_to_check = (
+            {**traj_attempts_by_key, **step_attempts_by_key}
+            if has_skipped_traj_rows
+            else (step_attempts_by_key if step_rows else {})
+        )
+        step_rows, stale_keys = self._filter_stale_writes(
+            conn, step_rows, attempts_to_check
+        )
         self._upsert_step_rows(conn, step_rows)
         self._upsert_metrics_rows(conn, metrics_rows, now_dt)
 
@@ -500,7 +606,10 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
         run_id,
         traj_id,
     ), metadata_payload in committed_metadata_by_key.items():
-      self._cache_committed_state(run_id, traj_id, metadata_payload)
+      cached_payload = (
+          None if (run_id, traj_id) in stale_keys else metadata_payload
+      )
+      self._cache_committed_state(run_id, traj_id, cached_payload)
 
   def _upsert_run_rows(
       self, conn: sa.Connection, run_rows: Sequence[dict[str, Any]]
@@ -526,18 +635,22 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
 
   def _upsert_trajectory_rows(
       self, conn: sa.Connection, trajectory_rows: Sequence[dict[str, Any]]
-  ) -> None:
-    """Executes a multi-row trajectory upsert in the open transaction."""
+  ) -> int:
+    """Executes a multi-row trajectory upsert and returns affected row count."""
     if not trajectory_rows:
-      return
+      return 0
     trajectory_insert = self._insert_fn(schema.TRAJECTORIES_TABLE).values(
         trajectory_rows
     )
     stored_metadata = schema.TRAJECTORIES_TABLE.c.trajectory_metadata
     stored_status = schema.TRAJECTORIES_TABLE.c.status
     incoming = trajectory_insert.excluded
+    incoming_attempt = sa.func.coalesce(
+        incoming.trajectory_metadata["attempt"].as_integer(),
+        1,
+    )
     has_incoming_status = incoming.status != schema.Status.UNKNOWN
-    conn.execute(
+    return conn.execute(
         trajectory_insert.on_conflict_do_update(
             index_elements=["run_id", "trajectory_id"],
             set_={
@@ -548,12 +661,19 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
                     else_=stored_status,
                 ),
             },
-            where=sa.or_(
-                stored_metadata.is_distinct_from(incoming.trajectory_metadata),
-                sa.and_(has_incoming_status, stored_status != incoming.status),
+            where=sa.and_(
+                _STORED_ATTEMPT_EXPR <= incoming_attempt,
+                sa.or_(
+                    stored_metadata.is_distinct_from(
+                        incoming.trajectory_metadata
+                    ),
+                    sa.and_(
+                        has_incoming_status, stored_status != incoming.status
+                    ),
+                ),
             ),
         )
-    )
+    ).rowcount
 
   def _upsert_step_rows(
       self, conn: sa.Connection, step_rows: Sequence[dict[str, Any]]
@@ -656,6 +776,88 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
             updated_at=now_dt,
         )
     )
+
+  def resume_attempt_sync(
+      self,
+      *,
+      run_id: str,
+      traj_id: str,
+      metadata: trajectory_lib.TrajectoryMetadata,
+      keep_steps: int,
+  ) -> None:
+    """Atomically claims `metadata.attempt`, updates metadata, and trims steps."""
+    now_dt = datetime.datetime.now(datetime.timezone.utc)
+    meta_payload = metadata.to_atif_metadata().model_dump(
+        mode="json", exclude_none=True
+    )
+    resolved_status = _resolve_status(metadata)
+
+    with self._engine.begin() as conn:
+      if self._engine.dialect.name == db_engine.Dialect.SQLITE:
+        conn.exec_driver_sql("BEGIN IMMEDIATE")
+      self._upsert_run_rows(
+          conn,
+          [{
+              "run_id": run_id,
+              "agent_name": metadata.agent.name,
+              "status": schema.Status.PENDING,
+              "created_at": now_dt,
+              "config": {},
+          }],
+      )
+      stored_attempt = conn.execute(
+          sa.select(_STORED_ATTEMPT_EXPR)
+          .where(
+              schema.TRAJECTORIES_TABLE.c.run_id == run_id,
+              schema.TRAJECTORIES_TABLE.c.trajectory_id == traj_id,
+          )
+          .with_for_update()
+      ).scalar_one_or_none()
+      if stored_attempt is not None and metadata.attempt < stored_attempt:
+        raise store.StaleAttemptError(traj_id, metadata.attempt, stored_attempt)
+      traj_insert = self._insert_fn(schema.TRAJECTORIES_TABLE).values(
+          run_id=run_id,
+          trajectory_id=traj_id,
+          status=resolved_status,
+          created_at=now_dt,
+          updated_at=now_dt,
+          trajectory_metadata=meta_payload,
+      )
+      incoming = traj_insert.excluded
+      upsert_result = conn.execute(
+          traj_insert.on_conflict_do_update(
+              index_elements=["run_id", "trajectory_id"],
+              set_={
+                  "updated_at": incoming.updated_at,
+                  "trajectory_metadata": incoming.trajectory_metadata,
+                  "status": incoming.status,
+              },
+              where=_STORED_ATTEMPT_EXPR <= metadata.attempt,
+          )
+      )
+      if upsert_result.rowcount == 0:
+        concurrent_attempt = conn.execute(
+            sa.select(_STORED_ATTEMPT_EXPR).where(
+                schema.TRAJECTORIES_TABLE.c.run_id == run_id,
+                schema.TRAJECTORIES_TABLE.c.trajectory_id == traj_id,
+            )
+        ).scalar_one_or_none()
+        if (
+            concurrent_attempt is not None
+            and metadata.attempt < concurrent_attempt
+        ):
+          raise store.StaleAttemptError(
+              traj_id, metadata.attempt, concurrent_attempt
+          )
+      conn.execute(
+          sa.delete(schema.STEPS_TABLE).where(
+              schema.STEPS_TABLE.c.run_id == run_id,
+              schema.STEPS_TABLE.c.trajectory_id == traj_id,
+              schema.STEPS_TABLE.c.step_id > keep_steps,
+          )
+      )
+
+    self._cache_committed_state(run_id, traj_id, meta_payload)
 
   def _log_task_error(self, task: async_writer.WriteTask) -> None:
     """Logs detailed task error with trajectory and run context.
@@ -985,6 +1187,27 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
         run_id=self._run_id,
         trajectory_id=trajectory_id,
         metrics=metrics,
+    )
+
+  def resume_attempt(
+      self,
+      metadata: MetadataT,
+      *,
+      keep_steps: int = 0,
+  ) -> None:
+    """Transactionally claims a retry attempt and trims trailing steps."""
+    store.validate_keep_steps(keep_steps)
+    self._validate_and_bind_metadata(metadata)
+    traj_id = _validate_non_empty_str(metadata.trajectory_id, "trajectory_id")
+    if self._writer.is_closed:
+      raise RuntimeError("SqlTrajectoryStore is closed.")
+    # Drain local queued writes from this writer before fencing/trimming in SQL.
+    self.flush()
+    self._writer.resume_attempt_sync(
+        run_id=self._run_id,
+        traj_id=traj_id,
+        metadata=metadata,
+        keep_steps=keep_steps,
     )
 
   def flush(self) -> None:
