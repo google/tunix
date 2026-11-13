@@ -14,6 +14,8 @@
 
 """Utils for loading and converting Qwen3 PT weights."""
 
+from collections.abc import Mapping, Sequence
+import time
 from typing import Any
 
 import jax
@@ -197,32 +199,143 @@ def create_model_from_safe_tensors(
   )
 
 
+_make_tensor_spec = safetensors_saver.make_tensor_export_spec
+_QWEN3_TO_HF_MANIFEST_CACHE: dict[Any, Mapping[str, Any]] = {}
+
+
+def build_qwen3_export_specs(
+    model: model_lib.Qwen3,
+    *,
+    rank: int = 1,
+    alpha: float = 1.0,
+    output_dtype: jnp.dtype | None = None,
+) -> tuple[
+    dict[str, jax.Array],
+    list[safetensors_saver.TensorExportSpec],
+    dict[str, int],
+]:
+  """Builds flat state and Subtree all-to-all TensorExportSpecs for Qwen3."""
+  flat_state = safetensors_saver.extract_flat_state_dict(model)
+  cfg_key = repr(model.config)
+  if cfg_key not in _QWEN3_TO_HF_MANIFEST_CACHE:
+    _QWEN3_TO_HF_MANIFEST_CACHE[cfg_key] = build_to_hf_manifest(model.config)
+  specs, unstack_counts = safetensors_saver.build_export_specs_from_manifest(
+      flat_state,
+      _QWEN3_TO_HF_MANIFEST_CACHE[cfg_key],
+      lora_scaling=float(alpha) / float(rank),
+      output_dtype=output_dtype,
+  )
+  return flat_state, specs, unstack_counts
+
+
+def export_qwen3_as_safetensors(
+    model: model_lib.Qwen3,
+    output_dir: str,
+    *,
+    local_model_path: str | None = None,
+    rank: int = 1,
+    alpha: float = 1.0,
+    num_ranks: int = 1,
+    max_bucket_bytes: int | None = None,
+    output_dtype: jnp.dtype | None = None,
+    devices: Sequence[jax.Device] | None = None,
+    async_write: bool = False,
+    per_wave_shards: bool | None = None,
+    write_buffer_bytes: int | None = None,
+    max_write_threads: int | None = None,
+    defer_contiguous: bool = True,
+) -> safetensors_saver.SaveMetrics:
+  """Exports Qwen3 (Dense or MoE, base or LoRA) via Subtree all-to-all plan."""
+  t_plan = time.perf_counter()
+  backend = safetensors_saver.resolve_storage_backend(output_dir)
+  use_wave_shards = (
+      backend.default_per_wave_shards
+      if per_wave_shards is None
+      else per_wave_shards
+  )
+  flat_state, specs, unstack_counts = build_qwen3_export_specs(
+      model, rank=rank, alpha=alpha, output_dtype=output_dtype
+  )
+  plan = safetensors_saver.build_save_plan(
+      specs,
+      num_ranks=num_ranks,
+      max_bucket_bytes=max_bucket_bytes,
+      unstack_counts=unstack_counts,
+      per_wave_shards=use_wave_shards,
+  )
+  plan_sec = time.perf_counter() - t_plan
+  return safetensors_saver.export_safetensors_with_plan(
+      flat_state,
+      plan,
+      output_dir,
+      local_model_path=local_model_path,
+      output_dtype=output_dtype,
+      devices=devices,
+      plan_time_sec=plan_sec,
+      async_write=async_write,
+      write_buffer_bytes=write_buffer_bytes,
+      max_write_threads=max_write_threads,
+      defer_contiguous=defer_contiguous,
+  )
+
+
 def save_lora_merged_model_as_safetensors(
-    local_model_path: str,
+    local_model_path: str | None,
     output_dir: str,
     lora_model: model_lib.Qwen3,
-    rank: int,
-    alpha: float,
-):
-  """Saves a Qwen3 model with LoRA weights merged in safetensors format.
+    rank: int = 1,
+    alpha: float = 1.0,
+    *,
+    num_ranks: int = 1,
+    max_bucket_bytes: int | None = None,
+    output_dtype: jnp.dtype | None = None,
+    devices: Sequence[jax.Device] | None = None,
+    async_write: bool = False,
+    per_wave_shards: bool | None = None,
+    write_buffer_bytes: int | None = None,
+    max_write_threads: int | None = None,
+    defer_contiguous: bool = True,
+) -> safetensors_saver.SaveMetrics:
+  """Saves in-memory Qwen3 weights (with optional LoRA merged) as safetensors.
+
+  Exports `lora_model` directly via `export_qwen3_as_safetensors` in model dtype
+  or `output_dtype`; `local_model_path`, when set, is only read on process 0 to
+  copy non-safetensors metadata/tokenizer files rather than loading base weights
+  from disk.
 
   Args:
-    local_model_path: Path to the base model safetensors checkpoint directory.
-    output_dir: Directory where the merged model will be saved.
-    lora_model: Qwen3 model instance with LoRA weights.
-    rank: LoRA rank used during training.
-    alpha: LoRA alpha used during training.
+    local_model_path: Optional source checkpoint dir for metadata/tokenizer
+      files.
+    output_dir: Destination checkpoint directory (local, `gs://`, or remote).
+    lora_model: Qwen3 model instance (base or LoRA-adapted).
+    rank: LoRA rank used to compute `alpha / rank` scaling.
+    alpha: LoRA alpha used to compute `alpha / rank` scaling.
+    num_ranks: Number of output writer ranks.
+    max_bucket_bytes: Optional per-wave byte cap per rank.
+    output_dtype: Optional cast dtype for exported tensors.
+    devices: Optional explicit device sequence (defaults to `jax.devices()`).
+    async_write: Whether to overlap wave host writes asynchronously.
+    per_wave_shards: Whether to emit one shard per `(wave, rank)`.
+    write_buffer_bytes: Optional per-writer byte buffer size (`0` unbuffered).
+    max_write_threads: Optional cap on concurrent shard writer threads.
+    defer_contiguous: Whether to defer contiguous host copies until write time.
+
+  Returns:
+    `SaveMetrics` describing exported byte volume, timings, and shard paths.
   """
-  local_dir = safetensors_loader.resolve_checkpoint_dir(local_model_path)
-  key_map, transpose_rules = hf_mapping.lora_mapping_from_manifest(
-      build_to_hf_manifest(lora_model.config)
-  )
-  safetensors_saver.save_lora_merged_model_as_safetensors(
-      local_model_path=local_dir,
-      output_dir=output_dir,
-      lora_model=lora_model,
+  return export_qwen3_as_safetensors(
+      lora_model,
+      output_dir,
+      local_model_path=local_model_path,
       rank=rank,
       alpha=alpha,
-      state_key_transform_fn=key_map.__getitem__,
-      transpose_rules=transpose_rules,
+      num_ranks=num_ranks,
+      max_bucket_bytes=max_bucket_bytes,
+      output_dtype=output_dtype,
+      devices=devices,
+      async_write=async_write,
+      per_wave_shards=per_wave_shards,
+      write_buffer_bytes=write_buffer_bytes,
+      max_write_threads=max_write_threads,
+      defer_contiguous=defer_contiguous,
   )

@@ -177,12 +177,12 @@ vllm_config:
   hbm_utilization: null
   tpu_backend_type: "jax"
   # Start the rollout from random weights instead of loading the checkpoint.
-  # Null means true exactly when `weight_sync_config.mode` is "raiden", whose
-  # bootstrap sync loads the trainer's weights before step 0; otherwise a
-  # non-MaxText rollout loads the checkpoint. An explicit true requires
-  # "raiden"; only `rollout_engine: inprocess_vllm` reads it. A MaxText rollout
-  # (`rollout_model_config.model_source: maxtext`) never loads the checkpoint,
-  # so it always needs "raiden".
+  # Null means true when `weight_sync_config.mode` is "raiden", "fs", or alias
+  # "gcs", whose bootstrap sync loads the trainer's weights before step 0;
+  # otherwise a non-MaxText rollout loads the checkpoint. An explicit true
+  # requires "raiden", "fs", or "gcs"; only `rollout_engine: inprocess_vllm`
+  # reads it. A MaxText rollout (`rollout_model_config.model_source: maxtext`)
+  # never loads the checkpoint, so it always needs "raiden".
   init_with_random_weights: null
   enable_prefix_caching: false
   async_scheduling: false
@@ -321,9 +321,10 @@ dist_training_config:
 
 weight_sync_config:
   # Weight synchronization transport mode ("none", "in_memory", "raiden", "fs",
-  # or "nccl"). "fs" selects disaggregated file/object-store staged weight sync,
-  # orthogonal to checkpoint serialization format ("orbax" vs "safetensors") and
-  # storage backend ("gcs" gs://, "GOOGLE_INTERNAL_STOAGE_PATH" /GOOGLE_INTERNAL_STOAGE_PATH/, or "local" POSIX paths via epath).
+  # "gcs", or "nccl"). "fs" (with "gcs" as a backward-compatible alias) selects
+  # disaggregated file/object-store staged weight sync under `staging_dir`
+  # (gs://, /GOOGLE_INTERNAL_STOAGE_PATH/, or local paths via epath; needs
+  # `rollout_engine: inprocess_vllm`).
   mode: "none"
   use_weight_converter: true
   prefuse_moe_weights: true
@@ -349,6 +350,10 @@ weight_sync_config:
     # applies them.
     broadcast_k: 64
     multi_numa: false
+  # Staging directory (gs://, /GOOGLE_INTERNAL_STOAGE_PATH/, or local path) the trainer writes each
+  # round's safetensors to when `mode` is "fs" (or alias "gcs"); must be empty
+  # for other modes.
+  staging_dir: ""
 
 trajectory_store_config:
   enable: false
