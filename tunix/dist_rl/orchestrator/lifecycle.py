@@ -40,6 +40,9 @@ _INIT_METADATA_KEYS = (
     "partial_rollout",
     "routed_experts_shape",
     "staging_max_bytes",
+    "accepts_callable_loss",
+    "requires_target_state",
+    "needs_aot_compile",
 )
 
 
