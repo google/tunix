@@ -28,6 +28,7 @@ Provides:
 from __future__ import annotations
 
 from collections.abc import Mapping, MutableMapping, Sequence
+import dataclasses
 import datetime
 import getpass
 import hashlib
@@ -47,6 +48,7 @@ from tunix.common import datatypes as common_datatypes
 from tunix.dist_rl.common import datatypes as dist_rl_datatypes
 from tunix.dist_rl.common import gcs_cache
 from tunix.dist_rl.distributed.deployment import yaml_generator
+from tunix.rl import algorithm_config
 
 LAUNCH_DIR = pathlib.Path(__file__).parent
 REPO_ROOT = LAUNCH_DIR.parents[3]
@@ -690,6 +692,62 @@ def _validate_local_settings(hp: cli_config.HyperParameters) -> None:
     )
 
 
+def build_grpo_config(
+    hp: cli_config.HyperParameters,
+) -> algorithm_config.GRPOConfig:
+  """Builds `GRPOConfig` from `agentic_grpo_config` and `vllm_config`.
+
+  Every `agentic_grpo_config` key that is a `GRPOConfig` field is forwarded, as
+  in `tunix.cli.grpo_main`; the other keys (e.g. `max_turns`,
+  `off_policy_steps`) configure the program and the rollout workers. The
+  routing-replay encoding comes from the typed `vllm_config` keys shared with
+  the rollout node.
+
+  The resolver builds it once while it validates the config
+  (`_validate_grpo_config`), so `GRPOConfig`'s own checks fail before any job
+  starts; the orchestrator builds it again for the program.
+
+  Args:
+    hp: Resolved distributed RL configuration.
+
+  Returns:
+    The validated `GRPOConfig`.
+  """
+  init_fields = {
+      field.name
+      for field in dataclasses.fields(algorithm_config.GRPOConfig)
+      if field.init
+  }
+  grpo = hp.config_mapping("agentic_grpo_config")
+  vllm = hp.config_mapping("vllm_config")
+  return algorithm_config.GRPOConfig(
+      **{key: grpo[key] for key in init_fields & grpo.keys()},
+      routed_experts_encode_mode=vllm["routed_experts_encode_mode"],
+      routed_experts_num_experts=vllm["routed_experts_num_experts"],
+  )
+
+
+def _validate_grpo_config(hp: cli_config.HyperParameters) -> None:
+  """Builds `GRPOConfig` so that its checks fail before any job starts.
+
+  `GRPOConfig` checks the algorithm settings (e.g. `loss_algo`,
+  `advantage_estimator`, and the sampler IS and RS options) when it is built;
+  otherwise only the orchestrator would build it, after the launcher has
+  deployed the jobs. Custom estimators, losses or reward managers must be
+  registered in `function_registry` before the config is resolved.
+
+  Args:
+    hp: Loaded configuration.
+
+  Raises:
+    ValueError: If `GRPOConfig` rejects the settings.
+  """
+  try:
+    build_grpo_config(hp)
+  except ValueError as e:
+    raise ValueError(f"agentic_grpo_config: {e}") from e
+
+
 def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   """Validates cross-field invariants across trainer and rollout configs."""
   # TODO(noghabi): Check which of these checks can be consolidated with the
@@ -834,6 +892,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
           f" ({trajectories}) must be divisible by"
           f" rl_training_config.train_micro_batch_size ({micro_batch})."
       )
+  _validate_grpo_config(hp)
 
 
 def _validate_maxtext_pairing(hp: cli_config.HyperParameters) -> None:

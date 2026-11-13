@@ -253,9 +253,9 @@ class BuildersTest(absltest.TestCase):
   def test_grpo_config_forwards_agentic_grpo_config(self):
     # The base config scores with the environment rewards.
     self.assertEqual(
-        orchestrator.build_grpo_config(_config()).reward_mode, "env"
+        resolve_config.build_grpo_config(_config()).reward_mode, "env"
     )
-    config = orchestrator.build_grpo_config(
+    config = resolve_config.build_grpo_config(
         _config(
             "agentic_grpo_config.num_generations=4",
             "agentic_grpo_config.beta=0.0",
@@ -288,12 +288,12 @@ class BuildersTest(absltest.TestCase):
   def test_grpo_config_forwards_rejection_sampling_settings(self):
     # The base config leaves rejection sampling and the sequence error gate
     # off, as `GRPOConfig` does.
-    config = orchestrator.build_grpo_config(_config())
+    config = resolve_config.build_grpo_config(_config())
     self.assertIsNone(config.sampler_rs)
     self.assertIsNone(config.sampler_rs_min)
     self.assertIsNone(config.sampler_rs_max)
     self.assertIsNone(config.seq_logprob_error_threshold)
-    config = orchestrator.build_grpo_config(
+    config = resolve_config.build_grpo_config(
         _config(
             "agentic_grpo_config.sampler_rs=geometric",
             "agentic_grpo_config.sampler_rs_min=0.999",
@@ -307,7 +307,7 @@ class BuildersTest(absltest.TestCase):
     self.assertEqual(config.seq_logprob_error_threshold, 2.0)
 
   def test_grpo_config_forwards_typed_routed_experts_settings(self):
-    config = orchestrator.build_grpo_config(
+    config = resolve_config.build_grpo_config(
         _config(
             "vllm_config.routed_experts_encode_mode=uint10",
             "vllm_config.routed_experts_num_experts=256",
@@ -1006,7 +1006,7 @@ class ProgramTest(absltest.TestCase):
   ) -> rl_program.StandardRLProgram:
     return orchestrator.build_program(
         hp,
-        algo_config=orchestrator.build_grpo_config(hp),
+        algo_config=resolve_config.build_grpo_config(hp),
         reward_fns=reward_fns,
         pad_id=0,
         eos_id=1,

@@ -1326,6 +1326,44 @@ weight_sync_config:
         },
     )
 
+  def test_grpo_config_checks_run_before_any_job_starts(self):
+    # `GRPOConfig` checks these when it is built; the orchestrator would
+    # otherwise build it only after the jobs are deployed.
+    for argv, error in (
+        (
+            ["agentic_grpo_config.loss_algo=ppo"],
+            (
+                "agentic_grpo_config: loss_algo should be either grpo or"
+                " gspo-token"
+            ),
+        ),
+        (
+            ["agentic_grpo_config.advantage_estimator=not_an_estimator"],
+            "agentic_grpo_config: advantage_estimator must be one of",
+        ),
+        (
+            ["agentic_grpo_config.sampler_is=sequence"],
+            "agentic_grpo_config: sampler_is should be either None or 'token'",
+        ),
+        (
+            [
+                "agentic_grpo_config.use_rollout_logps=true",
+                "agentic_grpo_config.sampler_rs=geometric",
+                "agentic_grpo_config.sampler_rs_min=1.1",
+                "agentic_grpo_config.sampler_rs_max=0.9",
+            ],
+            (
+                "agentic_grpo_config: sampler_rs_min must not exceed"
+                " sampler_rs_max"
+            ),
+        ),
+    ):
+      with self.subTest(argv=argv):
+        with self.assertRaisesRegex(ValueError, error):
+          resolve_config.initialize(argv)
+    grpo = resolve_config.build_grpo_config(resolve_config.initialize([]))
+    self.assertEqual(grpo.loss_algo, "grpo")
+
   def test_library_settings(self):
     hp = resolve_config.initialize([])
     vllm = hp.config_mapping("vllm_config")

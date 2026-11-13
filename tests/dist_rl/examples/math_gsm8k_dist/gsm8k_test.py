@@ -310,7 +310,7 @@ class ExampleConfigTest(absltest.TestCase):
     self.assertEqual(rpc_timeout_s, 1800.0)
 
   def test_grpo_config_matches_reference_grpo_defaults(self):
-    config = orchestrator.build_grpo_config(_hp())
+    config = resolve_config.build_grpo_config(_hp())
     self.assertEqual(config.num_generations, 8)
     self.assertEqual(config.beta, 0.0)
     self.assertEqual(config.epsilon, 0.2)
@@ -457,7 +457,7 @@ class RewardFunctionsTest(absltest.TestCase):
     )
     self.assertEqual(hp.obtain_reward_fn(), [gsm8k_rewards.reward_fn])
     self.assertEqual(
-        orchestrator.build_grpo_config(hp).reward_mode, "reward_fn"
+        resolve_config.build_grpo_config(hp).reward_mode, "reward_fn"
     )
 
   def test_reward_fn_mode_needs_reward_functions(self):

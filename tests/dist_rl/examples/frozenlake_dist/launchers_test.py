@@ -109,7 +109,7 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
       self, hp: resolve_config.DistHyperParameters
   ) -> None:
     """Checks the orchestrator's algorithm and sampling settings."""
-    grpo = orchestrator.build_grpo_config(hp)
+    grpo = resolve_config.build_grpo_config(hp)
     self.assertEqual(grpo.num_generations, 8)
     self.assertEqual(grpo.num_iterations, 1)
     self.assertEqual(grpo.beta, 0.0)

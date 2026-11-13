@@ -404,7 +404,7 @@ class DataPlaneBenchmarkTest(parameterized.TestCase):
 
       program = orchestrator.build_program(
           hp,
-          algo_config=orchestrator.build_grpo_config(hp),
+          algo_config=resolve_config.build_grpo_config(hp),
           reward_fns=hp.obtain_reward_fn(),
           pad_id=pad_id,
           eos_id=eos_id,

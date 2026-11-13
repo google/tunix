@@ -1,6 +1,31 @@
 {
   "calls": [
     {
+      "tunix.rl.algorithm_config.GRPOConfig": {
+        "kwargs": {
+          "advantage_estimator": "grpo",
+          "beta": 0.04,
+          "epsilon": 0.2,
+          "epsilon_high": 0.28,
+          "kl_loss_mode": "low_var_kl",
+          "loss_agg_mode": "sequence-mean-token-mean",
+          "loss_algo": "grpo",
+          "num_generations": 8,
+          "num_iterations": 1,
+          "reward_mode": "env",
+          "routed_experts_encode_mode": "auto",
+          "routed_experts_num_experts": null,
+          "sampler_is": "token",
+          "sampler_is_threshold": 2.0,
+          "sampler_rs": null,
+          "sampler_rs_max": null,
+          "sampler_rs_min": null,
+          "seq_logprob_error_threshold": null,
+          "use_rollout_logps": true
+        }
+      }
+    },
+    {
       "context.jax.initialize": {}
     },
     {

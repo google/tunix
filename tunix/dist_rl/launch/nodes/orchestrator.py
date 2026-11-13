@@ -81,37 +81,6 @@ _RECORD_KEYS = frozenset({"prompt", "metadata", "task_name"})
 _RUN_WIDE_METADATA_KEYS = frozenset({"episode_timeout", "overlong_filter"})
 
 
-def build_grpo_config(
-    hp: resolve_config.DistHyperParameters,
-) -> algorithm_config.GRPOConfig:
-  """Builds `GRPOConfig` from `agentic_grpo_config` and `vllm_config`.
-
-  Every `agentic_grpo_config` key that is a `GRPOConfig` field is forwarded, as
-  in `tunix.cli.grpo_main`; the other keys (e.g. `max_turns`,
-  `off_policy_steps`) configure the program and the rollout workers. The
-  routing-replay encoding comes from the typed `vllm_config` keys shared with
-  the rollout node.
-
-  Args:
-    hp: Resolved distributed RL configuration.
-
-  Returns:
-    The validated `GRPOConfig`.
-  """
-  init_fields = {
-      field.name
-      for field in dataclasses.fields(algorithm_config.GRPOConfig)
-      if field.init
-  }
-  grpo = hp.config_mapping("agentic_grpo_config")
-  vllm = hp.config_mapping("vllm_config")
-  return algorithm_config.GRPOConfig(
-      **{key: grpo[key] for key in init_fields & grpo.keys()},
-      routed_experts_encode_mode=vllm["routed_experts_encode_mode"],
-      routed_experts_num_experts=vllm["routed_experts_num_experts"],
-  )
-
-
 def _num_data_shards(hp: resolve_config.DistHyperParameters) -> int:
   """Returns the trainer's data-parallel shard count, `fsdp * dp * expert`.
 
@@ -605,7 +574,8 @@ def build_program(
 
   Args:
     hp: Resolved distributed RL configuration.
-    algo_config: Algorithm configuration (see `build_grpo_config`).
+    algo_config: Algorithm configuration (see
+      `resolve_config.build_grpo_config`).
     reward_fns: Orchestrator-side reward functions (`reward_functions`).
     pad_id: Tokenizer padding id for batch assembly.
     eos_id: Tokenizer end-of-sequence id for the trainer loss and actor
@@ -751,7 +721,7 @@ def main(
   # workers: the checks that need no download first, then the dataset and the
   # tokenizer, then the program itself.
   weight_sync_timeouts, rpc_timeout_s = resolve_weight_sync_timeouts(hp)
-  algo_config = build_grpo_config(hp)
+  algo_config = resolve_config.build_grpo_config(hp)
   reward_fns = hp.obtain_reward_fn()
   node_utils.setup_otel_metrics(hp, "orchestrator", worker_id_str=None)
   metrics_logging_options = build_metrics_logging_options(hp)

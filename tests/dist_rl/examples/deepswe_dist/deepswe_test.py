@@ -589,7 +589,7 @@ class DeepSWEDistTest(parameterized.TestCase):
     self.assertEqual(optimizer["chain_kwargs"], {"max_norm": 1.0})
 
     self.assertEqual(grpo_map["epsilon_high"], 0.28)
-    grpo = orchestrator.build_grpo_config(hp)
+    grpo = resolve_config.build_grpo_config(hp)
     self.assertEqual(grpo.num_generations, 8)
     self.assertEqual(grpo.beta, 0.0)
     self.assertEqual(grpo.epsilon, 0.2)
