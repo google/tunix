@@ -1023,7 +1023,6 @@ weight_sync_config:
     self.assertEqual(vllm["routed_experts_encode_mode"], "auto")
     self.assertIsNone(vllm["routed_experts_num_experts"])
     self.assertTrue(vllm["detokenize"])
-    self.assertEqual(vllm["kwargs"], {})
 
     vllm = resolve_config.initialize([
         "vllm_config.return_routed_experts=true",
@@ -1035,8 +1034,6 @@ weight_sync_config:
     self.assertEqual(vllm["routed_experts_encode_mode"], "uint10")
     self.assertEqual(vllm["routed_experts_num_experts"], 256)
     self.assertIs(vllm["detokenize"], False)
-    # The typed settings stay out of the free-form vLLM engine arguments.
-    self.assertEqual(vllm["kwargs"], {})
 
   def test_invalid_vllm_rollout_settings_fail_loud(self):
     with self.assertRaisesRegex(ValueError, "routed_experts_encode_mode"):
@@ -1155,19 +1152,12 @@ weight_sync_config:
         with self.assertRaisesRegex(ValueError, re.escape(key)):
           resolve_config.initialize([arg])
 
-  def test_typed_vllm_keys_rejected_in_free_form_kwargs(self):
+  def test_vllm_config_kwargs_is_removed(self):
+    # Nothing read it; vLLM engine arguments go in `vllm_config.engine_kwargs`.
     with self.assertRaisesRegex(
-        ValueError, r"\['detokenize', 'return_routed_experts'\].*typed keys"
+        ValueError, "Unknown configuration key 'vllm_config.kwargs'"
     ):
-      resolve_config.initialize([
-          "vllm_config.kwargs.return_routed_experts=true",
-          "vllm_config.kwargs.detokenize=true",
-      ])
-    # Other free-form engine arguments are still accepted.
-    vllm = resolve_config.initialize(
-        ["vllm_config.kwargs.attention=flash"]
-    ).config["vllm_config"]
-    self.assertEqual(vllm["kwargs"], {"attention": "flash"})
+      resolve_config.initialize(["vllm_config.kwargs.attention=flash"])
 
   def test_maxtext_roles_require_one_maxtext_model_name(self):
     maxtext = [

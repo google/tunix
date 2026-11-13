@@ -495,9 +495,6 @@ echo "Trainer pid=$TRAINER_PID log=$TRAINER_LOG"
 echo "Launching rollout node (${ROLLOUT_FRAMEWORK}:${ROLLOUT_ACCELERATOR}) on devices ${LOCAL_ROLLOUT_DEVICES}..."
 (
   configure_local_worker_env "${ROLLOUT_FRAMEWORK}" "${ROLLOUT_ACCELERATOR}" "${LOCAL_ROLLOUT_DEVICES}" "false"
-  if [[ -n "${VLLM_ADDITIONAL_CONFIG_JSON}" ]]; then
-    export VLLM_ADDITIONAL_CONFIG_JSON
-  fi
   if [[ -n "${SANDBOX_NAMESPACE}" ]]; then
     export NAMESPACE="${SANDBOX_NAMESPACE}"
     if [[ -n "${SANDBOX_NODE_SELECTOR_KEY}" && -n "${SANDBOX_NODE_SELECTOR_VAL}" ]]; then

@@ -1035,25 +1035,9 @@ def _validate_rollout_weights(hp: cli_config.HyperParameters) -> None:
     )
 
 
-# Rollout settings promoted from the free-form `vllm_config.kwargs` to typed
-# `vllm_config` keys.
-_TYPED_VLLM_KEYS = (
-    "return_routed_experts",
-    "routed_experts_encode_mode",
-    "routed_experts_num_experts",
-    "detokenize",
-)
-
-
 def _validate_typed_vllm_settings(hp: cli_config.HyperParameters) -> None:
   """Validates the typed `vllm_config` rollout settings."""
   vllm = hp.config_mapping("vllm_config")
-  promoted = sorted(set(_TYPED_VLLM_KEYS) & set(vllm["kwargs"]))
-  if promoted:
-    raise ValueError(
-        f"vllm_config.kwargs sets {promoted}, which are typed keys now; set"
-        f" vllm_config.<key> instead (e.g. vllm_config.{promoted[0]})."
-    )
   for key in ("return_routed_experts", "detokenize"):
     if not isinstance(vllm[key], bool):
       raise TypeError(f"vllm_config.{key} must be a bool, got {vllm[key]!r}.")
@@ -1515,7 +1499,6 @@ def render_bash_exports(hp: DistHyperParameters) -> str:
   actor = hp.config_mapping("actor_model_config")
   rollout_model = hp.config_mapping("rollout_model_config")
   ws = hp.config_mapping("weight_sync_config")
-  vllm = hp.config_mapping("vllm_config")
   sandbox_k8s = (
       hp.config["kubernetes_config"]
       if isinstance(hp.config["kubernetes_config"], Mapping)
@@ -1578,9 +1561,6 @@ def render_bash_exports(hp: DistHyperParameters) -> str:
       "WEIGHT_SYNC_MODE": ws["mode"],
       "WEIGHT_SYNC_RAIDEN_USE_FFI": (
           "" if ws["raiden_use_ffi"] is None else ws["raiden_use_ffi"]
-      ),
-      "VLLM_ADDITIONAL_CONFIG_JSON": (
-          json.dumps(vllm["kwargs"], sort_keys=True) if vllm["kwargs"] else ""
       ),
       "LOCAL_AUTO_DETECT_DEVICES": local["auto_detect_devices"],
       "LOCAL_DOWNLOAD_MODEL_WEIGHTS": local["download_model_weights"],
