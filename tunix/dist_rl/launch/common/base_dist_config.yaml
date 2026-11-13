@@ -232,8 +232,8 @@ vllm_config:
   # each shape then compiles on first use. The rollout node sets
   # `SKIP_JAX_PRECOMPILE` from it.
   skip_jax_precompile: true
-  # Extra `vllm.AsyncEngineArgs` kwargs, for `rollout_engine: vllm` only. Keys
-  # owned by other config fields are rejected; `additional_config` (and its
+  # Extra vLLM engine arguments for `rollout_engine: vllm` or `inprocess_vllm`.
+  # Keys owned by other config fields are rejected; `additional_config` (and its
   # `maxtext_config`) is deep-merged onto what the rollout node builds.
   engine_kwargs: {}
 

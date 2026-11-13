@@ -71,8 +71,10 @@ ChatParser = (
 Tokenizer = node_utils.HfTokenizer
 
 # Keep in sync with every vLLM kwarg set from other config fields or rollout
-# invariants in `_rollout_config` and `VllmSampler` (`hbm_utilization` is an
-# alias guard for `gpu_memory_utilization`).
+# invariants in `_rollout_config`, `VllmSampler` and `InprocessVllmSampler`
+# (`hbm_utilization` is an alias guard for `gpu_memory_utilization`;
+# `server_mode` is `vllm_config.server_mode`, which the in-process sampler would
+# otherwise drop).
 _FORBIDDEN_ROLLOUT_KWARGS = frozenset({
     "model",
     "tokenizer",
@@ -94,6 +96,7 @@ _FORBIDDEN_ROLLOUT_KWARGS = frozenset({
     "max_logprobs",
     "logprobs_mode",
     "trust_remote_code",
+    "server_mode",
 })
 
 # Keep in sync with config-owned keys and rollout invariants in
@@ -210,7 +213,10 @@ def _lora_rank(hp: resolve_config.DistHyperParameters) -> int | None:
 def _vllm_engine_kwargs(
     hp: resolve_config.DistHyperParameters,
 ) -> dict[str, Any]:
-  """Returns validated `vllm_config.engine_kwargs` for `AsyncEngineArgs`.
+  """Returns validated `vllm_config.engine_kwargs` for the vLLM engine args.
+
+  `rollout_engine: vllm` passes them to `AsyncEngineArgs` (`VllmSampler`),
+  `rollout_engine: inprocess_vllm` to `EngineArgs` (`InprocessVllmSampler`).
 
   Args:
     hp: Validated distributed RL configuration.
@@ -219,9 +225,10 @@ def _vllm_engine_kwargs(
     A copy of the validated overrides (empty when unset).
 
   Raises:
-    ValueError: If the overrides are set without `rollout_engine: vllm`, are not
+    ValueError: If the overrides are set with `rollout_engine: vanilla`, are not
       a mapping, contain keys owned by other config fields or rollout
-      invariants, or carry a malformed `additional_config` /
+      invariants, set `load_format` for an `inprocess_vllm` rollout that starts
+      from random weights, or carry a malformed `additional_config` /
       `additional_config.maxtext_config` (the latter also needs a MaxText
       rollout model).
   """
@@ -234,16 +241,30 @@ def _vllm_engine_kwargs(
   if not engine_kwargs:
     return {}
   rollout_engine = hp.config["rollout_engine"]
-  if rollout_engine != "vllm":
+  if rollout_engine not in ("vllm", "inprocess_vllm"):
     raise ValueError(
-        "vllm_config.engine_kwargs is only supported with rollout_engine:"
-        f" vllm; got rollout_engine: {rollout_engine!r}."
+        "vllm_config.engine_kwargs needs a vLLM rollout_engine (vllm or"
+        f" inprocess_vllm); got rollout_engine: {rollout_engine!r}."
     )
   forbidden = sorted(set(engine_kwargs) & _FORBIDDEN_ROLLOUT_KWARGS)
   if forbidden:
     raise ValueError(
         "vllm_config.engine_kwargs contains keys managed by other config"
         f" fields or rollout invariants: {forbidden}"
+    )
+  if (
+      "load_format" in engine_kwargs
+      and rollout_engine == "inprocess_vllm"
+      and resolve_config.rollout_init_with_random_weights(hp)
+  ):
+    # `tunix.generate.vllm_sampler` sets `load_format="dummy"` over it.
+    raise ValueError(
+        "vllm_config.engine_kwargs.load_format has no effect with"
+        " rollout_engine: inprocess_vllm while vllm_config."
+        "init_with_random_weights is true (the default with"
+        " weight_sync_config.mode: raiden): the rollout starts from random"
+        " weights. Set vllm_config.init_with_random_weights: false to load the"
+        " checkpoint instead."
     )
   if "additional_config" in engine_kwargs:
     additional = engine_kwargs["additional_config"]

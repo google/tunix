@@ -14,8 +14,8 @@
 
 """Unit tests for the distributed RL rollout worker node."""
 
-from collections.abc import Mapping
 import asyncio
+from collections.abc import Mapping
 import contextlib
 import functools
 import json
@@ -739,20 +739,63 @@ class EngineKwargsTest(absltest.TestCase):
     self.assertIs(overridden["kv_cache_metrics"], False)
     self.assertIs(overridden["disable_log_stats"], True)
 
-  def test_engine_kwargs_rejected_for_non_vllm_rollout_engine(self):
-    for rollout_engine in ("inprocess_vllm", "vanilla"):
-      with self.subTest(rollout_engine=rollout_engine):
-        with self.assertRaisesRegex(
-            ValueError,
-            "vllm_config.engine_kwargs is only supported with rollout_engine:"
-            " vllm",
-        ):
-          rollout._validate_rollout_config(
-              _hp(
-                  f"rollout_engine={rollout_engine}",
-                  "vllm_config.engine_kwargs.enable_expert_parallel=true",
-              )
+  def test_engine_kwargs_reach_the_inprocess_vllm_engine(self):
+    # `InprocessVllmSampler` forwards `rollout_vllm_kwargs` to vLLM's
+    # `EngineArgs`, merging `additional_config` with the MaxText one.
+    kwargs = _inprocess_vllm_rollout_config(
+        "vllm_config.engine_kwargs.enable_expert_parallel=true",
+        "vllm_config.engine_kwargs.additional_config.sharding"
+        ".sharding_strategy.attn_dp_size=2",
+    ).rollout_vllm_kwargs
+    self.assertIs(kwargs["enable_expert_parallel"], True)
+    self.assertEqual(
+        kwargs["additional_config"],
+        {"sharding": {"sharding_strategy": {"attn_dp_size": 2}}},
+    )
+
+  def test_engine_kwargs_load_format_rejected_when_inprocess_starts_random(
+      self,
+  ):
+    # The in-process sampler sets `load_format="dummy"` over it when the
+    # rollout starts from random weights (the default with Raiden).
+    load_format = "vllm_config.engine_kwargs.load_format=safetensors"
+    with self.assertRaisesRegex(
+        ValueError, r"vllm_config\.engine_kwargs\.load_format has no effect"
+    ):
+      rollout._vllm_engine_kwargs(
+          _hp(
+              "rollout_engine=inprocess_vllm",
+              "weight_sync_config.mode=raiden",
+              load_format,
           )
+      )
+    # Loading the checkpoint, or the `vllm` engine, keeps it.
+    for argv in (
+        (
+            "rollout_engine=inprocess_vllm",
+            "weight_sync_config.mode=raiden",
+            "vllm_config.init_with_random_weights=false",
+        ),
+        ("rollout_engine=vllm", "weight_sync_config.mode=raiden"),
+    ):
+      with self.subTest(argv=argv):
+        self.assertEqual(
+            rollout._vllm_engine_kwargs(_hp(*argv, load_format)),
+            {"load_format": "safetensors"},
+        )
+
+  def test_engine_kwargs_rejected_for_vanilla_rollout_engine(self):
+    with self.assertRaisesRegex(
+        ValueError,
+        r"vllm_config\.engine_kwargs needs a vLLM rollout_engine \(vllm or"
+        r" inprocess_vllm\); got rollout_engine: 'vanilla'",
+    ):
+      rollout._validate_rollout_config(
+          _hp(
+              "rollout_engine=vanilla",
+              "vllm_config.engine_kwargs.enable_expert_parallel=true",
+          )
+      )
 
   def test_engine_kwargs_rejects_forbidden_keys_and_malformed_inputs(self):
     with self.assertRaisesRegex(
@@ -788,16 +831,20 @@ class EngineKwargsTest(absltest.TestCase):
           )
       )
 
-    for key in rollout._FORBIDDEN_ROLLOUT_KWARGS:
-      with self.subTest(top_level_key=key):
-        with self.assertRaisesRegex(
-            ValueError,
-            r"vllm_config\.engine_kwargs contains keys managed by other"
-            rf" config fields or rollout invariants: \['{key}'\]",
-        ):
-          rollout._vllm_engine_kwargs(
-              _hp("rollout_engine=vllm", f"vllm_config.engine_kwargs.{key}=1")
-          )
+    for rollout_engine in ("vllm", "inprocess_vllm"):
+      for key in rollout._FORBIDDEN_ROLLOUT_KWARGS:
+        with self.subTest(rollout_engine=rollout_engine, top_level_key=key):
+          with self.assertRaisesRegex(
+              ValueError,
+              r"vllm_config\.engine_kwargs contains keys managed by other"
+              rf" config fields or rollout invariants: \['{key}'\]",
+          ):
+            rollout._vllm_engine_kwargs(
+                _hp(
+                    f"rollout_engine={rollout_engine}",
+                    f"vllm_config.engine_kwargs.{key}=1",
+                )
+            )
 
     for mt_key in rollout._FORBIDDEN_MAXTEXT_CONFIG_KEYS:
       with self.subTest(maxtext_key=mt_key):
