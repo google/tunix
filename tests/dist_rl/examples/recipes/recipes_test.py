@@ -115,9 +115,9 @@ class RecipesTest(launcher_testing.LauncherTestCase):
     cluster = hp.config_mapping("cluster_config")
     self.assertEqual(cluster["wait_timeout_secs"], 900)
     expected_local = {
-        "auto_detect_pci_tpus": True,
-        "trainer_tpu_chips": "0,1,2,3",
-        "rollout_tpu_chips": "4,5,6,7",
+        "auto_detect_devices": True,
+        "trainer_devices": "0,1,2,3",
+        "rollout_devices": "4,5,6,7",
         "tpu_chips_per_host_bounds": "2,2,1",
         "tpu_host_bounds": "1,1,1",
         "allow_multiple_libtpu_load": True,
@@ -197,8 +197,8 @@ class RecipesTest(launcher_testing.LauncherTestCase):
         )
     )
     local = cluster["local"]
-    self.assertEqual(local["trainer_tpu_chips"], "0,1")
-    self.assertEqual(local["rollout_tpu_chips"], "2,3")
+    self.assertEqual(local["trainer_devices"], "0,1")
+    self.assertEqual(local["rollout_devices"], "2,3")
     self.assertEqual(local["tpu_chips_per_host_bounds"], "1,2,1")
     # The rest comes from `frozenlake.yaml` (see `frozenlake_dist/README.md`).
     actor = hp.config_mapping("actor_model_config")

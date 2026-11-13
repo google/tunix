@@ -21,7 +21,7 @@ Provides:
    directly by the bash launchers, worker nodes, and orchestrator
    (lightweight; no training imports).
 2. `render_bash_exports(hp)`: Emits shell environment variables for `local.sh`
-   and `k8s.sh` (ports, TPU chip IDs, K8s JobSet parameters, and artifact/model
+   and `k8s.sh` (ports, device IDs, K8s JobSet parameters, and artifact/model
    paths).
 """
 
@@ -102,7 +102,16 @@ def finalize_dist_config(
   _finalize_dist_defaults(hp)
   _validate_local_settings(hp)
   _validate_dist_invariants(hp)
-  return resolve_cluster_targets(hp)
+  cluster_targets = resolve_cluster_targets(hp)
+  cluster = _mutable_section(hp, "cluster_config")
+  local = cluster["local"]
+  if (
+      cluster["target"] == "local"
+      and cluster_targets.placement == execution_target.Placement.COLOCATED
+  ):
+    local["rollout_devices"] = local["trainer_devices"]
+    local["inference_devices"] = local["trainer_devices"]
+  return cluster_targets
 
 
 class DistHyperParameters(cli_config.HyperParameters):
@@ -732,13 +741,39 @@ def _validate_fault_tolerance(hp: cli_config.HyperParameters) -> None:
 
 
 def _validate_local_settings(hp: cli_config.HyperParameters) -> None:
-  """Validates `cluster_config.local.download_model_weights`."""
-  local = hp.config_mapping("cluster_config")["local"]
-  if not isinstance(local["download_model_weights"], bool):
+  """Validates and normalizes `cluster_config.local` settings."""
+  local = _mutable_section(hp, "cluster_config")["local"]
+  if not isinstance(local, MutableMapping):
     raise TypeError(
-        "cluster_config.local.download_model_weights must be a bool, got"
-        f" {local['download_model_weights']!r}."
+        f"cluster_config.local must be a mapping, got {type(local).__name__}."
     )
+  for bool_key in (
+      "auto_detect_devices",
+      "download_model_weights",
+  ):
+    if not isinstance(local[bool_key], bool):
+      raise TypeError(
+          f"cluster_config.local.{bool_key} must be a bool, got"
+          f" {local[bool_key]!r}."
+      )
+  for device_key in ("trainer_devices", "rollout_devices", "inference_devices"):
+    val = local[device_key]
+    if val is None:
+      local[device_key] = ""
+    elif not isinstance(val, bool) and isinstance(val, int):
+      if val < 0:
+        raise ValueError(
+            f"cluster_config.local.{device_key} must be non-negative, got"
+            f" {val}."
+        )
+      local[device_key] = str(val)
+    elif isinstance(val, str):
+      local[device_key] = val.strip()
+    else:
+      raise TypeError(
+          f"cluster_config.local.{device_key} must be a str or non-negative"
+          f" int, got {val!r}."
+      )
 
 
 def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
@@ -1468,7 +1503,7 @@ def _bash_quote(val: object) -> str:
 # TODO(noghabi): Consider auto-flattening `cluster_config.{local,k8s}` into
 # `UPPER_SNAKE_CASE` exports (and mapping only the non-cluster keys by hand),
 # which would shrink this list and the drift check in `launch_test.py`.
-def render_bash_exports(hp: cli_config.HyperParameters) -> str:
+def render_bash_exports(hp: DistHyperParameters) -> str:
   """Renders cluster/deployment shell exports for `local.sh` and `k8s.sh`."""
   cluster = hp.config_mapping("cluster_config")
   ports = cli_config.to_str_dict(cluster["ports"])
@@ -1487,6 +1522,7 @@ def render_bash_exports(hp: cli_config.HyperParameters) -> str:
       else {}
   )
   trainer_backend = "maxtext" if actor["model_source"] == "maxtext" else "tunix"
+  cluster_targets = hp.cluster_targets
   # The rollout pods' GCS compilation-cache URI, from the config alone and never
   # the launcher's environment: `gcs_cache` reads the settings from this
   # mapping, in its usual order (`rollout_gcs_dir`, then `gcs_dir`, `bucket`).
@@ -1503,6 +1539,13 @@ def render_bash_exports(hp: cli_config.HyperParameters) -> str:
 
   exports: dict[str, object] = {
       "CLUSTER_TARGET": cluster["target"],
+      "EXECUTION_PLACEMENT": cluster_targets.placement.value,
+      "TRAINER_FRAMEWORK": cluster_targets.trainer.framework.value,
+      "TRAINER_ACCELERATOR": cluster_targets.trainer.accelerator.value,
+      "ROLLOUT_FRAMEWORK": cluster_targets.rollout.framework.value,
+      "ROLLOUT_ACCELERATOR": cluster_targets.rollout.accelerator.value,
+      "INFERENCE_FRAMEWORK": cluster_targets.inference.framework.value,
+      "INFERENCE_ACCELERATOR": cluster_targets.inference.accelerator.value,
       "ORCHESTRATOR_MAIN": cluster["orchestrator_main"],
       "TRAINER_MAIN": cluster["trainer_main"],
       "ROLLOUT_MAIN": cluster["rollout_main"],
@@ -1539,11 +1582,11 @@ def render_bash_exports(hp: cli_config.HyperParameters) -> str:
       "VLLM_ADDITIONAL_CONFIG_JSON": (
           json.dumps(vllm["kwargs"], sort_keys=True) if vllm["kwargs"] else ""
       ),
-      "LOCAL_AUTO_DETECT_PCI_TPUS": local["auto_detect_pci_tpus"],
+      "LOCAL_AUTO_DETECT_DEVICES": local["auto_detect_devices"],
       "LOCAL_DOWNLOAD_MODEL_WEIGHTS": local["download_model_weights"],
-      "LOCAL_TRAINER_TPU_CHIPS": local["trainer_tpu_chips"],
-      "LOCAL_ROLLOUT_TPU_CHIPS": local["rollout_tpu_chips"],
-      "LOCAL_INFERENCE_TPU_CHIPS": local["inference_tpu_chips"],
+      "LOCAL_TRAINER_DEVICES": local["trainer_devices"],
+      "LOCAL_ROLLOUT_DEVICES": local["rollout_devices"],
+      "LOCAL_INFERENCE_DEVICES": local["inference_devices"],
       "LOCAL_TPU_CHIPS_PER_HOST_BOUNDS": local["tpu_chips_per_host_bounds"],
       "LOCAL_TPU_HOST_BOUNDS": local["tpu_host_bounds"],
       "LOCAL_ALLOW_MULTIPLE_LIBTPU_LOAD": local["allow_multiple_libtpu_load"],

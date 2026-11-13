@@ -193,7 +193,7 @@ class LaunchScriptsTest(absltest.TestCase):
         ],
     )
     self.assertNotEqual(res.returncode, 0)
-    self.assertIn("cluster_config.local.inference_tpu_chips", res.stderr)
+    self.assertIn("cluster_config.local.inference_devices", res.stderr)
 
   def test_local_dry_run_includes_inference_node_when_chips_set(self):
     res = self._run_launch(
@@ -201,7 +201,7 @@ class LaunchScriptsTest(absltest.TestCase):
             "--dry-run",
             "cluster_config.target=local",
             "agentic_grpo_config.beta=0.04",
-            "cluster_config.local.inference_tpu_chips=4,5",
+            "cluster_config.local.inference_devices=4,5",
         ],
     )
     self.assertEqual(res.returncode, 0, msg=res.stderr)
@@ -320,7 +320,18 @@ class LaunchScriptsTest(absltest.TestCase):
     # The old launchers' settings the config replaced: the resolver's own
     # `WEIGHT_SYNC_MODE` export would overwrite a caller's value unseen.
     self.assertContainsSubset(
-        {"KUEUE_QUEUE", "TRAINER_EXPERT", "WEIGHT_SYNC_MODE"}, legacy
+        {
+            "INFERENCE_DEVICES",
+            "INFERENCE_TPU_CHIPS",
+            "KUEUE_QUEUE",
+            "ROLLOUT_DEVICES",
+            "ROLLOUT_TPU_CHIPS",
+            "TRAINER_DEVICES",
+            "TRAINER_EXPERT",
+            "TRAINER_TPU_CHIPS",
+            "WEIGHT_SYNC_MODE",
+        },
+        legacy,
     )
     # `launch.sh` would ignore these, silently dropping the old launchers'
     # rejection sampling or logging the trajectories they turned off.
@@ -1008,6 +1019,207 @@ class LaunchScriptsTest(absltest.TestCase):
         "Distributed RL pipeline finished successfully.", skipped.stdout
     )
 
+  def test_local_auto_detect_devices_gpu(self):
+    tempdir = pathlib.Path(self.create_tempdir().full_path)
+    dev_dir = tempdir / "dev"
+    dev_dir.mkdir()
+    for name in (
+        "nvidia0",
+        "nvidia1",
+        "nvidia2",
+        "nvidia3",
+        "nvidia0_cap",
+        "nvidiactl",
+    ):
+      (dev_dir / name).write_text("", encoding="utf-8")
+
+    # Test `/dev/nvidia[0-9]*` node detection when `nvidia-smi` is unavailable.
+    common_sh = LAUNCH_DIR / "common.sh"
+    res_dev = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'PATH=/nonexistent; source "{common_sh}" &&'
+            f' detect_gpu_count "{dev_dir}"',
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    self.assertEqual(res_dev.stdout.strip(), "4")
+
+    # When `nvidia-smi` exits non-zero with an error message on stdout,
+    # `detect_gpu_count` ignores its stdout and falls back to `/dev`.
+    fail_bin_dir = tempdir / "fail_bin"
+    fail_bin_dir.mkdir()
+    fail_smi = fail_bin_dir / "nvidia-smi"
+    fail_smi.write_text(
+        "#!/bin/bash\n"
+        "printf 'NVIDIA-SMI has failed because it could not communicate\\n'\n"
+        "exit 9\n",
+        encoding="utf-8",
+    )
+    fail_smi.chmod(0o755)
+    empty_dev = tempdir / "empty_dev"
+    empty_dev.mkdir()
+    res_fail_smi = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'PATH="{fail_bin_dir}:/usr/bin:/bin"; source "{common_sh}" &&'
+            f' detect_gpu_count "{empty_dev}"',
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    self.assertEqual(res_fail_smi.stdout.strip(), "0")
+
+    # Test `nvidia-smi` detection in `local.sh` across disaggregated and
+    # colocated GPU runs.
+    bin_dir = tempdir / "bin"
+    bin_dir.mkdir()
+    fake_smi = bin_dir / "nvidia-smi"
+    fake_smi.write_text(
+        "#!/bin/bash\n"
+        "printf 'GPU 0\\nGPU 1\\nGPU 2\\nGPU 3\\n'\n",
+        encoding="utf-8",
+    )
+    fake_smi.chmod(0o755)
+    path_with_smi = f"{bin_dir}:{os.environ.get('PATH', '')}"
+
+    res_disagg = self._run_launch(
+        [
+            "--dry-run",
+            "cluster_config.target=local",
+            "execution_targets.target=jax:gpu",
+            "agentic_grpo_config.beta=0.0",
+            "cluster_config.local.auto_detect_devices=true",
+        ],
+        extra_env={"PATH": path_with_smi},
+    )
+    self.assertEqual(res_disagg.returncode, 0, msg=res_disagg.stderr)
+    self.assertIn(
+        "Discovered GPU devices: Trainer=[0,1], Rollout=[2,3], Inference=[]",
+        res_disagg.stdout,
+    )
+
+    res_coloc = self._run_launch(
+        [
+            "--dry-run",
+            "cluster_config.target=local",
+            "execution_targets.target=jax:gpu",
+            "execution_targets.placement=colocated",
+            "agentic_grpo_config.beta=0.04",
+            "cluster_config.local.auto_detect_devices=true",
+        ],
+        extra_env={"PATH": path_with_smi},
+    )
+    self.assertEqual(res_coloc.returncode, 0, msg=res_coloc.stderr)
+    self.assertIn(
+        "Discovered GPU devices: Trainer=[0,1,2,3], Rollout=[0,1,2,3],"
+        " Inference=[0,1,2,3]",
+        res_coloc.stdout,
+    )
+
+  def test_configure_local_worker_env(self):
+    local_sh = (LAUNCH_DIR / "local.sh").read_text()
+    fn_match = re.search(
+        r"(?ms)^configure_local_worker_env\(\) \{.*?^\}", local_sh
+    )
+    self.assertIsNotNone(fn_match)
+    fn_src = fn_match.group(0)
+    common_sh = LAUNCH_DIR / "common.sh"
+    tracked_keys = (
+        "CUDA_VISIBLE_DEVICES",
+        "TPU_VISIBLE_DEVICES",
+        "TPU_VISIBLE_CHIPS",
+        "TPU_CHIPS_PER_HOST_BOUNDS",
+        "TPU_HOST_BOUNDS",
+        "LIBTPU_INIT_ARGS",
+        "JAX_PLATFORMS",
+        "JAX_BACKEND_TARGET",
+        "TRAINER_PATHWAYS_LOCAL_INIT",
+        "ALLOW_MULTIPLE_LIBTPU_LOAD",
+    )
+
+    def run_worker_env(
+        framework: str, accelerator: str, devices: str, use_pathways: str
+    ) -> dict[str, str | None]:
+      script = (
+          f'source "{common_sh}"\n'
+          "export LOCAL_TPU_CHIPS_PER_HOST_BOUNDS=1,2,1\n"
+          "export LOCAL_TPU_HOST_BOUNDS=1,1,1\n"
+          "export LOCAL_JAX_BACKEND_TARGET=grpc://127.0.0.1:29000\n"
+          "export LOCAL_ALLOW_MULTIPLE_LIBTPU_LOAD=true\n"
+          "export CUDA_VISIBLE_DEVICES=stale_gpu\n"
+          "export TPU_VISIBLE_DEVICES=stale_tpu\n"
+          "export TPU_VISIBLE_CHIPS=stale_tpu\n"
+          "export TPU_CHIPS_PER_HOST_BOUNDS=stale_bounds\n"
+          "export TPU_HOST_BOUNDS=stale_hosts\n"
+          "export LIBTPU_INIT_ARGS=stale_args\n"
+          "export JAX_PLATFORMS=stale_plat\n"
+          f"{fn_src}\n"
+          f'configure_local_worker_env "{framework}" "{accelerator}"'
+          f' "{devices}" "{use_pathways}"\n'
+          "env -0\n"
+      )
+      res = subprocess.run(
+          ["bash", "-c", script], capture_output=True, text=True, check=True
+      )
+      env_map = dict(
+          item.split("=", 1) for item in res.stdout.split("\0") if "=" in item
+      )
+      return {k: env_map.get(k) for k in tracked_keys}
+
+    gpu_env = run_worker_env("jax", "gpu", "0,1", "false")
+    self.assertEqual(gpu_env["CUDA_VISIBLE_DEVICES"], "0,1")
+    self.assertEqual(gpu_env["JAX_PLATFORMS"], "cuda,cpu")
+    for tpu_key in (
+        "TPU_VISIBLE_DEVICES",
+        "TPU_VISIBLE_CHIPS",
+        "TPU_CHIPS_PER_HOST_BOUNDS",
+        "TPU_HOST_BOUNDS",
+        "LIBTPU_INIT_ARGS",
+    ):
+      self.assertIsNone(gpu_env[tpu_key], msg=tpu_key)
+
+    gpu_empty_env = run_worker_env("jax", "gpu", "", "false")
+    self.assertIsNone(gpu_empty_env["CUDA_VISIBLE_DEVICES"])
+    self.assertEqual(gpu_empty_env["JAX_PLATFORMS"], "cuda,cpu")
+
+    jax_tpu_env = run_worker_env("jax", "tpu", "2,3", "false")
+    self.assertIsNone(jax_tpu_env["CUDA_VISIBLE_DEVICES"])
+    self.assertEqual(jax_tpu_env["JAX_PLATFORMS"], "tpu,cpu")
+    self.assertEqual(jax_tpu_env["TPU_VISIBLE_DEVICES"], "2,3")
+    self.assertEqual(jax_tpu_env["TPU_VISIBLE_CHIPS"], "2,3")
+    self.assertEqual(jax_tpu_env["TPU_CHIPS_PER_HOST_BOUNDS"], "1,2,1")
+    self.assertEqual(jax_tpu_env["TPU_HOST_BOUNDS"], "1,1,1")
+    self.assertEqual(
+        jax_tpu_env["LIBTPU_INIT_ARGS"],
+        "--deepsea_chips_per_host_bounds=1,2,1 --deepsea_host_bounds=1,1,1",
+    )
+    self.assertEqual(jax_tpu_env["ALLOW_MULTIPLE_LIBTPU_LOAD"], "1")
+
+    torch_tpu_env = run_worker_env("torch", "tpu", "0,1", "false")
+    self.assertIsNone(torch_tpu_env["CUDA_VISIBLE_DEVICES"])
+    self.assertIsNone(torch_tpu_env["JAX_PLATFORMS"])
+    self.assertEqual(torch_tpu_env["TPU_VISIBLE_DEVICES"], "0,1")
+    self.assertEqual(torch_tpu_env["TPU_VISIBLE_CHIPS"], "0,1")
+
+    pathways_tpu_env = run_worker_env("jax", "tpu", "0,1", "true")
+    self.assertIsNone(pathways_tpu_env["CUDA_VISIBLE_DEVICES"])
+    self.assertEqual(pathways_tpu_env["JAX_PLATFORMS"], "proxy,cpu")
+    self.assertEqual(
+        pathways_tpu_env["JAX_BACKEND_TARGET"], "grpc://127.0.0.1:29000"
+    )
+    self.assertEqual(pathways_tpu_env["TRAINER_PATHWAYS_LOCAL_INIT"], "1")
+    for tpu_key in (
+        "TPU_VISIBLE_DEVICES",
+        "TPU_VISIBLE_CHIPS",
+        "LIBTPU_INIT_ARGS",
+    ):
+      self.assertIsNone(pathways_tpu_env[tpu_key], msg=tpu_key)
 
 if __name__ == "__main__":
   absltest.main()

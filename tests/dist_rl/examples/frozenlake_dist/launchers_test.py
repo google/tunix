@@ -162,8 +162,8 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
     cluster = hp.config_mapping("cluster_config")
     self.assertTrue(cluster["artifact_root"].endswith("/artifacts/frozenlake"))
     local = cluster["local"]
-    self.assertEqual(local["trainer_tpu_chips"], "0,1,2,3")
-    self.assertEqual(local["rollout_tpu_chips"], "4,5,6,7")
+    self.assertEqual(local["trainer_devices"], "0,1,2,3")
+    self.assertEqual(local["rollout_devices"], "4,5,6,7")
     self.assertEqual(local["tpu_chips_per_host_bounds"], "1,4,1")
     self.assertEqual(local["tpu_host_bounds"], "1,1,1")
     batch_config = orchestrator.build_batch_config(hp, pad_id=0, eos_id=1)
@@ -185,8 +185,8 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
     run = self.dry_run(
         _QWEN3.script,
         "rl_training_config.checkpoint_root_directory=/tmp/frozenlake_ckpt",
-        "cluster_config.local.trainer_tpu_chips=4,5,6,7",
-        "cluster_config.local.rollout_tpu_chips=0,1,2,3",
+        "cluster_config.local.trainer_devices=4,5,6,7",
+        "cluster_config.local.rollout_devices=0,1,2,3",
     )
     config = run.resolve().config
     self.assertEqual(
@@ -195,7 +195,7 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
     )
     local = config["cluster_config"]["local"]
     self.assertEqual(
-        (local["trainer_tpu_chips"], local["rollout_tpu_chips"]),
+        (local["trainer_devices"], local["rollout_devices"]),
         ("4,5,6,7", "0,1,2,3"),
     )
 

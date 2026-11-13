@@ -292,8 +292,8 @@ class ExampleConfigTest(absltest.TestCase):
     )
     self.assertEqual(cluster["registry_module"], _GSM8K_MODULE)
     self.assertTrue(cluster["artifact_root"].endswith("artifacts/math_gsm8k"))
-    self.assertEqual(cluster["local"]["trainer_tpu_chips"], "0,1")
-    self.assertEqual(cluster["local"]["rollout_tpu_chips"], "2,3")
+    self.assertEqual(cluster["local"]["trainer_devices"], "0,1")
+    self.assertEqual(cluster["local"]["rollout_devices"], "2,3")
     # `beta == 0.0` disables the reference inference worker.
     self.assertFalse(cluster["run_inference_node"])
     traj_store = config["trajectory_store_config"]

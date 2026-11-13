@@ -29,6 +29,27 @@ is_true() {
   [[ "$1" == "1" || "$1" == "true" || "$1" == "True" || "$1" == "yes" || "$1" == "YES" ]]
 }
 
+# Returns the number of visible local NVIDIA GPUs via `nvidia-smi` or
+# `/dev/nvidia[0-9]*` device nodes, or 0 when neither finds any.
+detect_gpu_count() {
+  local dev_dir="${1:-/dev}"
+  if command -v nvidia-smi &>/dev/null; then
+    local smi_out
+    if smi_out="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null)" && [[ -n "${smi_out}" ]]; then
+      grep -c . <<<"${smi_out}"
+      return 0
+    fi
+  fi
+  local -a dev_nodes=()
+  local dev_node
+  for dev_node in "${dev_dir}"/nvidia[0-9]*; do
+    if [[ -e "$dev_node" && "$dev_node" =~ /nvidia[0-9]+$ ]]; then
+      dev_nodes+=("$dev_node")
+    fi
+  done
+  echo "${#dev_nodes[@]}"
+}
+
 # Resolves YAML + `key=value` arguments via `resolve_config` and evaluates the
 # rendered `export` lines. Exits with the resolver's status (its error is on
 # stderr) instead of continuing with unset variables.

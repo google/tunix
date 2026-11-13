@@ -365,7 +365,7 @@ trajectory_store_config:
   dir: ""
 
 cluster_config:
-  # Where the processes run and what starts them: "local" (one TPU host,
+  # Where the processes run and what starts them: "local" (one host,
   # `local.sh`) or "k8s" (GKE, `k8s.sh`), both through `launch.sh`; or
   # "external", processes started by another launcher (e.g. a job scheduler
   # that starts each process separately), which `launch.sh` rejects.
@@ -442,11 +442,11 @@ cluster_config:
     # deploys on k8s.
     otel: 4317
   local:
-    auto_detect_pci_tpus: false
+    auto_detect_devices: false
     download_model_weights: true
-    trainer_tpu_chips: "0,1"
-    rollout_tpu_chips: "2,3"
-    inference_tpu_chips: ""
+    trainer_devices: "0,1"
+    rollout_devices: "2,3"
+    inference_devices: ""
     tpu_chips_per_host_bounds: "1,2,1"
     tpu_host_bounds: "1,1,1"
     allow_multiple_libtpu_load: true

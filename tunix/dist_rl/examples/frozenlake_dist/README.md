@@ -49,8 +49,8 @@ bash tunix/dist_rl/examples/frozenlake_dist/launcher.sh \
   model_config.model_name=Qwen3-1.7B model_config.model_id=Qwen/Qwen3-1.7B \
   tokenizer_config.tokenizer_path=Qwen/Qwen3-1.7B \
   model_config.mesh.shape="(1,2)" \
-  cluster_config.local.trainer_tpu_chips=0,1 \
-  cluster_config.local.rollout_tpu_chips=2,3 \
+  cluster_config.local.trainer_devices=0,1 \
+  cluster_config.local.rollout_devices=2,3 \
   cluster_config.local.tpu_chips_per_host_bounds=1,2,1 \
   batch_size=1 rl_training_config.mini_batch_size=1 \
   rl_training_config.train_micro_batch_size=1 \
@@ -71,7 +71,7 @@ tests, also needs `vllm_config.init_with_random_weights=false`. Keep
 
 `agentic_grpo_config.beta` stays zero: a nonzero KL coefficient needs a
 reference inference worker, which needs chips of its own
-(`cluster_config.local.inference_tpu_chips`). FrozenLake is deterministic by
+(`cluster_config.local.inference_devices`). FrozenLake is deterministic by
 default, matching the reference recipe's environment construction; set
 `env_kwargs.is_slippery=true` to enable Gymnasium's slippery transitions.
 

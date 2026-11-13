@@ -41,7 +41,7 @@ exec "${DIR}/../frozenlake_dist/launcher.sh" \
   rl_training_config.compute_logps_chunk_size=2048 \
   agentic_grpo_config.max_concurrency=512 \
   cluster_config.artifact_root="artifacts/gemma4_e2b_dist_frozenlake" \
-  cluster_config.local.trainer_tpu_chips="0,1" \
-  cluster_config.local.rollout_tpu_chips="2,3" \
+  cluster_config.local.trainer_devices="0,1" \
+  cluster_config.local.rollout_devices="2,3" \
   cluster_config.local.tpu_chips_per_host_bounds="1,2,1" \
   "$@"

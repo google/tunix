@@ -69,9 +69,9 @@ exec "${DIR}/../math_gsm8k_dist/launcher.sh" \
   cluster_config.artifact_root="${artifact_root}" \
   cluster_config.target="local" \
   cluster_config.wait_timeout_secs=900 \
-  cluster_config.local.auto_detect_pci_tpus=true \
-  cluster_config.local.trainer_tpu_chips="0,1,2,3" \
-  cluster_config.local.rollout_tpu_chips="4,5,6,7" \
+  cluster_config.local.auto_detect_devices=true \
+  cluster_config.local.trainer_devices="0,1,2,3" \
+  cluster_config.local.rollout_devices="4,5,6,7" \
   cluster_config.local.tpu_chips_per_host_bounds="2,2,1" \
   cluster_config.local.tpu_host_bounds="1,1,1" \
   cluster_config.local.allow_multiple_libtpu_load=true \

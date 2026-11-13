@@ -81,10 +81,10 @@ class ResolveConfigTest(absltest.TestCase):
     self.assertEqual(hp.config["agentic_grpo_config"]["epsilon"], 0.2)
     self.assertEqual(hp.config["weight_sync_config"]["mode"], "none")
     self.assertEqual(
-        hp.config["cluster_config"]["local"]["trainer_tpu_chips"], "0,1"
+        hp.config["cluster_config"]["local"]["trainer_devices"], "0,1"
     )
     self.assertEqual(
-        hp.config["cluster_config"]["local"]["rollout_tpu_chips"], "2,3"
+        hp.config["cluster_config"]["local"]["rollout_devices"], "2,3"
     )
     # Since default beta=0.04 > 0, inference node is automatically enabled.
     self.assertTrue(hp.config["cluster_config"]["run_inference_node"])
@@ -1699,15 +1699,105 @@ weight_sync_config:
     self.assertEqual(
         hp_override.cluster_targets.inference, execution_target.JAX_GPU
     )
+    self.assertEqual(
+        hp_override.config["cluster_config"]["local"]["trainer_devices"], "0,1"
+    )
+    self.assertEqual(
+        hp_override.config["cluster_config"]["local"]["rollout_devices"], "2,3"
+    )
+    self.assertEqual(
+        hp_override.config["cluster_config"]["local"]["inference_devices"], ""
+    )
 
     hp_colocated = resolve_config.initialize([
         "execution_targets.target=jax:gpu",
         "execution_targets.placement=colocated",
+        "cluster_config.local.trainer_devices=0,1,2,3",
     ])
     self.assertEqual(
-        hp_colocated.cluster_targets.placement,
-        execution_target.Placement.COLOCATED,
+        hp_colocated.config["cluster_config"]["local"]["rollout_devices"],
+        "0,1,2,3",
     )
+    self.assertEqual(
+        hp_colocated.config["cluster_config"]["local"]["inference_devices"],
+        "0,1,2,3",
+    )
+
+    hp_single_zero = resolve_config.initialize([
+        "execution_targets.target=jax:gpu",
+        "execution_targets.placement=colocated",
+        "cluster_config.local.trainer_devices=0",
+    ])
+    self.assertEqual(
+        hp_single_zero.config["cluster_config"]["local"]["trainer_devices"], "0"
+    )
+    self.assertEqual(
+        hp_single_zero.config["cluster_config"]["local"]["rollout_devices"], "0"
+    )
+    self.assertEqual(
+        hp_single_zero.config["cluster_config"]["local"]["inference_devices"],
+        "0",
+    )
+
+    hp_disagg_ints = resolve_config.initialize([
+        "execution_targets.target=jax:gpu",
+        "cluster_config.local.trainer_devices=0",
+        "cluster_config.local.rollout_devices=1",
+        "cluster_config.local.inference_devices=0",
+    ])
+    self.assertEqual(
+        hp_disagg_ints.config["cluster_config"]["local"]["trainer_devices"], "0"
+    )
+    self.assertEqual(
+        hp_disagg_ints.config["cluster_config"]["local"]["rollout_devices"], "1"
+    )
+    self.assertEqual(
+        hp_disagg_ints.config["cluster_config"]["local"]["inference_devices"],
+        "0",
+    )
+
+  def test_local_auto_detect_devices_and_device_validation(self):
+    hp_default = resolve_config.initialize([])
+    self.assertFalse(
+        hp_default.config["cluster_config"]["local"]["auto_detect_devices"]
+    )
+    self.assertIn(
+        "export LOCAL_AUTO_DETECT_DEVICES=false\n",
+        resolve_config.render_bash_exports(hp_default),
+    )
+
+    hp = resolve_config.initialize([
+        "cluster_config.local.auto_detect_devices=true",
+        "cluster_config.local.trainer_devices= 0,1 ",
+        "cluster_config.local.inference_devices=   ",
+    ])
+    local = hp.config["cluster_config"]["local"]
+    self.assertTrue(local["auto_detect_devices"])
+    self.assertEqual(local["trainer_devices"], "0,1")
+    self.assertEqual(local["inference_devices"], "")
+    exports = resolve_config.render_bash_exports(hp)
+    self.assertIn("export LOCAL_AUTO_DETECT_DEVICES=true\n", exports)
+    self.assertIn("export LOCAL_TRAINER_DEVICES=0,1\n", exports)
+    self.assertIn("export LOCAL_ROLLOUT_DEVICES=2,3\n", exports)
+    self.assertIn("export LOCAL_INFERENCE_DEVICES=''\n", exports)
+
+    with self.assertRaisesRegex(
+        TypeError, r"cluster_config\.local\.auto_detect_devices must be a bool"
+    ):
+      resolve_config.initialize(
+          ["cluster_config.local.auto_detect_devices=maybe"]
+      )
+    with self.assertRaisesRegex(
+        TypeError,
+        r"cluster_config\.local\.trainer_devices must be a str or non-negative"
+        r" int",
+    ):
+      resolve_config.initialize(["cluster_config.local.trainer_devices=true"])
+    with self.assertRaisesRegex(
+        ValueError,
+        r"cluster_config\.local\.trainer_devices must be non-negative",
+    ):
+      resolve_config.initialize(["cluster_config.local.trainer_devices=-1"])
 
   def test_execution_targets_validation_errors(self):
     for overrides, exc_type, pattern in (
