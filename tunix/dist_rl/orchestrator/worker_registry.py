@@ -260,6 +260,10 @@ class WorkerRegistry:
     resources: dict[str, Any] = {"remote": True, "address": service_address}
     if "trajectory_store_config" in md:
       resources["trajectory_store_config"] = md["trajectory_store_config"]
+    if "temperature" in md:
+      resources["temperature"] = md["temperature"]
+    if "return_routed_experts" in md:
+      resources["return_routed_experts"] = md["return_routed_experts"]
     info = datatypes.WorkerInfo(
         worker_id=worker_id,
         roles=frozenset({role.value}),

@@ -16,11 +16,10 @@
 
 import asyncio
 import time
-from typing import Any, Callable, Collection, List, Mapping, Optional, Sequence
+from typing import Any, Callable, Collection, List, Mapping, Optional, Sequence, cast
 from absl import logging
 import numpy as np
 from tunix.dist_rl.common import datatypes
-from tunix.dist_rl.common import timeouts
 from tunix.dist_rl.rollout import sampler as sampler_lib
 from tunix.dist_rl.trajectory import base_store as store
 from tunix.dist_rl.trajectory import converter as converter_lib
@@ -42,10 +41,8 @@ def _validate_max_prompt_length(value: int | None) -> int | None:
   """Validates optional positive `max_prompt_length` bound."""
   if value is None:
     return None
-  if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-    raise ValueError(
-        f"max_prompt_length must be a positive int or None, got {value!r}."
-    )
+  if value <= 0:
+    raise ValueError(f"max_prompt_length must be positive, got {value!r}.")
   return value
 
 
@@ -99,13 +96,9 @@ class TrajectoryCollectorEngine:
       agent: Any,
       tokenizer: Any,
       chat_parser: Any,
-      eos_ids: Collection[int] | None = None,
-      partial_rollout: bool = False,
+      config: base_rollout.RolloutConfig,
       policy_version_fn: Callable[[], int] | None = None,
       trajectory_store: Optional[store.TrajectoryWriter] = None,
-      store_routed_experts: bool = False,
-      routed_experts_encode_mode: datatypes.RoutedExpertsEncodeMode = "auto",
-      routed_experts_num_experts: int | None = None,
       max_prompt_length: int | None = None,
   ):
     if (
@@ -120,8 +113,8 @@ class TrajectoryCollectorEngine:
           " tokenizer, and chat_parser arguments (none can be None)."
       )
     datatypes.validate_routed_experts_encode_config(
-        routed_experts_encode_mode,
-        routed_experts_num_experts,
+        config.routed_experts_encode_mode,
+        config.routed_experts_num_experts,
     )
     self.traj_id = traj_id
     self.request = request
@@ -131,18 +124,13 @@ class TrajectoryCollectorEngine:
     self.tokenizer = tokenizer
     self.chat_parser = chat_parser
     self.trajectory_store = trajectory_store
-    self.store_routed_experts: bool = bool(store_routed_experts)
-    self.routed_experts_encode_mode: datatypes.RoutedExpertsEncodeMode = (
-        routed_experts_encode_mode
-    )
-    self.routed_experts_num_experts: int | None = routed_experts_num_experts
+    self.config: base_rollout.RolloutConfig = config
     self.max_prompt_length: int | None = _validate_max_prompt_length(
         max_prompt_length
     )
     self.is_paused: bool = False
     self.is_cancelled: bool = False
     self.is_done: bool = False
-    self.partial_rollout: bool = bool(partial_rollout)
     self._policy_version_fn: Callable[[], int] | None = policy_version_fn
     self._unpaused = asyncio.Event()
     self._unpaused.set()
@@ -155,24 +143,11 @@ class TrajectoryCollectorEngine:
     # whether a rollout ended on its own. Defined at the recipe level via
     # `RolloutConfig.eos_tokens` (e.g. `<|im_end|>` for Qwen chat models) rather
     # than forced from the base tokenizer.
-    self.eos_ids = frozenset(int(token_id) for token_id in eos_ids or ())
-    metadata = request.metadata or {}
-    timeout = metadata.get("episode_timeout")
-    self.episode_timeout = float(
-        timeout if timeout is not None else timeouts.DEFAULT_EPISODE_TIMEOUT_S
+    self.eos_ids = frozenset(
+        int(token_id) for token_id in config.eos_tokens or ()
     )
-    if self.episode_timeout <= 0:
-      raise ValueError("episode_timeout must be positive.")
-    overlong_filter = metadata.get("overlong_filter")
-    if overlong_filter is None:
-      self.overlong_filter = False
-    elif isinstance(overlong_filter, bool):
-      self.overlong_filter = overlong_filter
-    else:
-      raise TypeError(
-          "overlong_filter must be a boolean, got"
-          f" {type(overlong_filter).__name__}: {overlong_filter!r}."
-      )
+    if config.episode_timeout <= 0:
+      raise ValueError("RolloutConfig.episode_timeout must be positive.")
     self.metadata = None
     if self.trajectory_store is not None:
       try:
@@ -234,8 +209,6 @@ class TrajectoryCollectorEngine:
 
       generation_kwargs["max_tokens"] = effective_max_tokens
 
-      seed = generation_kwargs.get("seed", None)
-
       req_policy_version = int(self.request.target_policy_version or 0)
       turn_policy_version = (
           max(req_policy_version, int(self._policy_version_fn()))
@@ -246,7 +219,7 @@ class TrajectoryCollectorEngine:
         self._inner_engine.policy_version = turn_policy_version
 
       cache_salt = generation_kwargs.pop("cache_salt", None)
-      if self.partial_rollout:
+      if self.config.partial_rollout:
         if self._episode_cache_salt is None:
           self._episode_cache_salt = f"policy_v{turn_policy_version}"
         if cache_salt is None:
@@ -257,7 +230,7 @@ class TrajectoryCollectorEngine:
           temperature=generation_kwargs.get("temperature", 0.0),
           top_p=generation_kwargs.get("top_p", None),
           top_k=generation_kwargs.get("top_k", None),
-          seed=seed,
+          seed=generation_kwargs.get("seed", None),
           return_logprobs=generation_kwargs.get("return_logprobs", False),
           return_routed_experts=generation_kwargs.get(
               "return_routed_experts", False
@@ -275,22 +248,30 @@ class TrajectoryCollectorEngine:
       sampling_req = sampler_lib.SamplingRequest(
           request_id=self.traj_id,
           prompt=prompt_payload,
+          max_tokens=effective_max_tokens,
+          cache_salt=cache_salt,
+          routed_experts_prompt_start=generation_kwargs.pop(
+              "routed_experts_prompt_start", 0
+          ),
           sampling_params=sampling_params,
+          # TODO(tunix-dev): Drop with `RolloutRequest.generation_kwargs`.
+          metadata=generation_kwargs,
       )
       sample_start = time.perf_counter()
       try:
-        res = await self.sampler.sample(sampling_req, **generation_kwargs)
+        res = cast(
+            sampler_lib.SamplingResponse,
+            await self.sampler.sample(sampling_req),
+        )
       finally:
         sampler_time_s += time.perf_counter() - sample_start
-      text = res if isinstance(res, str) else getattr(res, "text", str(res))
-      tokens = getattr(res, "token_ids", np.array([], dtype=np.int32))
-      logprobs = getattr(res, "logprobs", None)
-      routed_experts = getattr(res, "routed_experts", None)
-      raw_prompt_tokens = getattr(res, "prompt_token_ids", None)
-      prompt_tokens = np.asarray(
-          raw_prompt_tokens if raw_prompt_tokens is not None else [],
-          dtype=np.int32,
-      ).reshape(-1)
+      text = res.text
+      tokens = res.token_ids
+      logprobs = res.logprobs
+      routed_experts = res.routed_experts
+      prompt_tokens = np.asarray(res.prompt_token_ids, dtype=np.int32).reshape(
+          -1
+      )
       prompt_len = int(prompt_tokens.size)
       if (
           self.max_prompt_length is not None
@@ -313,7 +294,7 @@ class TrajectoryCollectorEngine:
           left_padded_prompt_tokens=prompt_tokens,
           prompt_lengths=np.asarray([prompt_len], dtype=np.int32),
           logprobs=[logprobs] if logprobs is not None else None,
-          routed_experts=[routed_experts]
+          routed_experts=[np.asarray(routed_experts)]
           if routed_experts is not None
           else None,
       )
@@ -330,14 +311,14 @@ class TrajectoryCollectorEngine:
         tokenizer=self.tokenizer,
         chat_parser=self.chat_parser,
         max_response_length=self.max_response_length,
-        timeout=self.episode_timeout,
-        overlong_filter=self.overlong_filter,
+        timeout=self.config.episode_timeout,
+        overlong_filter=self.config.overlong_filter,
         policy_version=self.request.target_policy_version,
         trajectory_store=self.trajectory_store,
         metadata=self.metadata,
-        store_routed_experts=self.store_routed_experts,
-        routed_experts_encode_mode=self.routed_experts_encode_mode,
-        routed_experts_num_experts=self.routed_experts_num_experts,
+        store_routed_experts=self.config.store_routed_experts,
+        routed_experts_encode_mode=self.config.routed_experts_encode_mode,
+        routed_experts_num_experts=self.config.routed_experts_num_experts,
     )
     self._inner_engine = inner_engine
     rl_traj = await inner_engine.collect(mode="Token")
