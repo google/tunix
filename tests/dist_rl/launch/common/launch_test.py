@@ -345,6 +345,68 @@ class LaunchScriptsTest(absltest.TestCase):
         },
         legacy,
     )
+    # Settings of the old mlperf recipe that only its launcher and the old
+    # example mains read: `launch.sh` would silently ignore them.
+    self.assertContainsSubset(
+        {
+            "FLOAT32_GATE_LOGITS",
+            "FLOAT32_LOGITS",
+            "INIT_TIMEOUT_S",
+            "MAX_CONCURRENCY",
+            "MAX_VERSION_SPAN",
+            "MAX_WARMPOOL_REPLICAS",
+            "ORCHESTRATOR_EXTRA_ENV",
+            "OVERLONG_FILTER",
+            "REMAT_POLICY",
+            "ROLLOUT_EXTRA_ENV",
+            "ROLLOUT_MESH_EXPERT",
+            "RPC_TIMEOUT_S",
+            "TRAINER_BASE_NUM_KV_HEADS",
+            "TRAINER_LIBTPU_INIT_ARGS",
+            "TRAINER_MAXTEXT_ATTENTION",
+            "TRAINER_MESH_CONTEXT",
+            "VLLM_ASYNC_SCHEDULING",
+            "VLLM_CONFIG_JSON",
+            "VLLM_DATA_PARALLEL_SIZE",
+            "WARMUP_STEPS_FRACTION",
+        },
+        legacy,
+    )
+    # The sandbox placement: the sandbox code reads these, but `k8s.sh` and
+    # `local.sh` set them from `kubernetes_config`, so the pods would drop a
+    # caller's value, and `local.sh` would overwrite it whenever the config
+    # sets them.
+    self.assertContainsSubset(
+        {
+            "NAMESPACE",
+            "NODE_SELECTOR_KEY",
+            "NODE_SELECTOR_VAL",
+            "SANDBOX_NAMESPACE",
+            "SANDBOX_NODE_SELECTOR_KEY",
+            "SANDBOX_NODE_SELECTOR_VAL",
+        },
+        legacy,
+    )
+    # The recipe's other variables are left alone: the processes read them (the
+    # experimental DeepSWE environment, Raiden, vLLM, W&B), or the v2 recipe
+    # and `yaml_generator.py` do. `local.sh`'s processes inherit them from the
+    # caller's environment; the GKE pods don't, so there they only arrive
+    # through the config (e.g. `cluster_config.k8s.trainer_extra_env`).
+    self.assertEmpty(
+        set(legacy)
+        & {
+            "IMAGE_REWRITE_PREFIX",
+            "JOB_PREFIX",
+            "OPENHANDS_MULTI_TOOL_CALLS",
+            "OPENHANDS_SERVER_IMAGE",
+            "RAIDEN_BROADCAST_HOST_RATIO",
+            "RAIDEN_BROADCAST_PIPELINE_STAGES",
+            "TUNIX_IMAGE",
+            "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
+            "WANDB_ENTITY",
+            "WANDB_PROJECT",
+        }
+    )
     # Libraries read it; the nodes set it from the config and reject another
     # value in the environment (`node_utils.apply_library_env`).
     self.assertNotIn("VERIFY_WEIGHTS", legacy)
