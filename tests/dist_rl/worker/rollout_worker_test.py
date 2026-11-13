@@ -382,7 +382,9 @@ class RolloutWorkerTest(absltest.TestCase):
               request, extra_config={"req_id": "wsync-v0-r0", "uuid": 0}
           )
       )
-      await self.worker.abort_weight_sync(None)
+      await self.worker.abort_weight_sync(
+          dataclasses.replace(request, extra_config={})
+      )
       return await self.worker.get_weight_sync_status()
 
     status = asyncio.run(_run())

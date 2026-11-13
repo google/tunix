@@ -572,59 +572,6 @@ class WeightSyncRequest(Request):
       )
 
 
-@dataclasses.dataclass
-class WeightSyncMetadata:
-  """Metadata passed by Orchestrator during Phase 3 decentralized weight synchronization.
-
-  Used to coordinate peer-to-peer (P2P) or broadcast weight transfers between
-  TPU Trainer slices and RolloutWorker inference pods without routing large
-  model weights through the central orchestrator.
-
-  Attributes:
-    worker_ips: List of target rollout worker IP addresses participating in
-      sync.
-    data_ports: Corresponding list of high-speed data transfer ports for each
-      worker.
-    ctrl_ports: List of control plane ports for coordination.
-    mesh: Optional device mesh object for sharded tensor transfer.
-    layout: Optional tensor memory sharding layout dimensions.
-    new_policy_version: The updated policy weight version index being
-      synchronized.
-    transfer_mode: Transport mechanism option for decentralized weight sync: -
-      "p2p" (default): Direct peer-to-peer transfer (e.g., direct RPC, Ray, or
-      Raiden KV/weight streaming between source Trainer pods and target
-      RolloutWorker pods using P2P DMA). - "broadcast" (Not implemented):
-      Collective/tree broadcast (e.g., distributing weights across a pod mesh
-      via collective communication like NCCL or Gloo over DMA links). - "fs"
-      (Not implemented): Shared filesystem checkpoint transfer (where trainers
-      save checkpoint weights to a shared filesystem like CNS/POSIX and rollout
-      workers reload from disk).
-    source_endpoints: Host/port endpoints of the source trainer pods serving the
-      weights.
-    sharding_topology: Optional device mesh sharding layout (e.g., {"mesh": [2,
-      2]}).
-  """
-
-  worker_ips: list[str] = dataclasses.field(default_factory=list)
-  data_ports: list[str] = dataclasses.field(default_factory=list)
-  ctrl_ports: list[str] = dataclasses.field(default_factory=list)
-  mesh: Any = None
-  layout: list[int] = dataclasses.field(default_factory=list)
-  new_policy_version: int = 0
-  transfer_mode: str = "p2p"
-  source_endpoints: list[str] = dataclasses.field(default_factory=list)
-  sharding_topology: Dict[str, Any] = dataclasses.field(default_factory=dict)
-
-  def __post_init__(self):
-    if self.transfer_mode in ("broadcast", "fs"):
-      raise NotImplementedError(
-          f"transfer_mode='{self.transfer_mode}' is not implemented yet."
-          " Currently only 'p2p' is supported."
-      )
-    elif self.transfer_mode != "p2p":
-      raise ValueError(f"Unknown transfer_mode: '{self.transfer_mode}'")
-
-
 ##### Training DTOs #####
 #
 # Trainer payloads are plain frozen dataclasses so this module stays free of

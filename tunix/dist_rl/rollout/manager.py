@@ -480,7 +480,9 @@ class RolloutManager:
       task.cancel()
 
   async def pre_weight_sync(
-      self, sync_request: sampler_lib.WeightSyncRequest | Any = None, **kwargs
+      self,
+      sync_request: sampler_lib.WeightSyncRequest,
+      **kwargs,
   ) -> Any:
     """Phase 3 Barrier 1: Closes admission and drains or pauses in-flight work."""
     t0 = time.monotonic()
@@ -489,14 +491,7 @@ class RolloutManager:
     if not self._partial_rollout:
       await self._traffic.drain(self._drain_timeout_s)
     self.pause_all()
-    res = None
-    if self.sampler:
-      if self._partial_rollout:
-        res = await self.sampler.pre_weight_sync(
-            sync_request, partial_rollout=True, **kwargs
-        )
-      else:
-        res = await self.sampler.pre_weight_sync(sync_request, **kwargs)
+    res = await self.sampler.pre_weight_sync(sync_request, **kwargs)
     elapsed_ms = (time.monotonic() - t0) * 1000.0
     logging.info(
         "[RolloutManager] pre_weight_sync(partial_rollout=%s,"
@@ -509,47 +504,33 @@ class RolloutManager:
     return res
 
   async def weight_sync(
-      self, sync_request: sampler_lib.WeightSyncRequest | Any = None, **kwargs
-  ) -> Any:
-    """Phase 3 Barrier 2: Executes weight synchronization and updates policy version."""
-    req_version = getattr(sync_request, "policy_version", None)
-    if req_version is None:
-      req_version = getattr(sync_request, "version", None)
-    completed_version = int(req_version) if req_version is not None else 0
-    if self.sampler:
-      res = await self.sampler.weight_sync(sync_request, **kwargs)
-      if res is not None:
-        completed_version = res
-    if isinstance(completed_version, int) and not isinstance(
-        completed_version, bool
-    ):
-      self._policy_version = completed_version
-    elif req_version is not None:
-      self._policy_version = int(req_version)
-    return completed_version
+      self,
+      sync_request: sampler_lib.WeightSyncRequest,
+      **kwargs,
+  ) -> int:
+    """Phase 3 Barrier 2: Installs the staged weights.
+
+    Returns the round's policy version. `post_weight_sync` records it once the
+    weights go live.
+    """
+    await self.sampler.weight_sync(sync_request, **kwargs)
+    return sync_request.policy_version
 
   async def post_weight_sync(
-      self, sync_request: sampler_lib.WeightSyncRequest | Any = None, **kwargs
+      self,
+      sync_request: sampler_lib.WeightSyncRequest,
+      **kwargs,
   ) -> Any:
     """Phase 3 Barrier 3: Finalizes policy weight update and resumes collectors."""
-    req_version = getattr(sync_request, "policy_version", None)
-    if req_version is None:
-      req_version = getattr(sync_request, "version", None)
-    if isinstance(req_version, int) and not isinstance(req_version, bool):
-      if req_version > 0 or self._policy_version == 0:
-        self._policy_version = req_version
-    elif req_version is not None:
-      self._policy_version = int(req_version)
-    res = None
-    if self.sampler:
-      res = await self.sampler.post_weight_sync(sync_request, **kwargs)
+    self._policy_version = sync_request.policy_version
+
+    res = await self.sampler.post_weight_sync(sync_request, **kwargs)
     if self._staging_buffer is not None:
-      min_retained = getattr(
-          sync_request, "min_retained_policy_version", None
-      )
       self._staging_buffer.on_post_weight_sync(
-          self._policy_version, min_retained_policy_version=min_retained
+          self._policy_version,
+          min_retained_policy_version=sync_request.min_retained_policy_version,
       )
+
     self.resume_all()
     self._traffic.reopen()
     logging.info(
@@ -561,12 +542,12 @@ class RolloutManager:
     return res
 
   async def abort_weight_sync(
-      self, sync_request: sampler_lib.WeightSyncRequest | Any = None, **kwargs
+      self,
+      sync_request: sampler_lib.WeightSyncRequest,
+      **kwargs,
   ) -> Any:
-    """Discards the round, delegates to sampler if available, and resumes serving."""
-    res = None
-    if self.sampler:
-      res = await self.sampler.abort_weight_sync(sync_request, **kwargs)
+    """Discards the round, delegates to the sampler, and resumes serving."""
+    res = await self.sampler.abort_weight_sync(sync_request, **kwargs)
     # TODO(tunix-dev): It might be better to fail hard if weight sync failed
     # right now instead of letting it proceed silently, otherwise it may mess
     # up with the policy version.

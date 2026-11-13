@@ -68,11 +68,9 @@ def _get_val(obj: Any, key: str, default: Any = None) -> Any:
 
 
 def _sync_request_id(
-    sync_request: base_sampler_lib.WeightSyncRequest | None,
+    sync_request: base_sampler_lib.WeightSyncRequest,
 ) -> Any | None:
   """Extracts the transfer request ID from `sync_request`, if present."""
-  if sync_request is None:
-    return None
   if sync_request.extra_config:
     rid = sync_request.extra_config.get("req_id")
     if rid:
@@ -331,25 +329,9 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
     self._is_running = False
     logger.info("VllmSampler stopped.")
 
-  def _check_partial_rollout_kwarg(self, kwargs: Mapping[str, Any]) -> None:
-    """Rejects a per-call `partial_rollout` kwarg that disagrees with config."""
-    # TODO(yatlas): Stop passing `partial_rollout` from
-    # `RolloutManager.pre_weight_sync` and remove `**kwargs` on `pause` /
-    # `pre_weight_sync`.
-    partial_rollout = kwargs.get("partial_rollout")
-    if (
-        partial_rollout is not None
-        and bool(partial_rollout) != self.config.partial_rollout
-    ):
-      raise ValueError(
-          f"VllmSampler [{self.server_id}] received"
-          f" partial_rollout={partial_rollout!r}, which disagrees with"
-          f" config.partial_rollout={self.config.partial_rollout}."
-      )
-
   async def pause(self, **kwargs: Any) -> None:
     """Pauses request intake and drains or freezes active batch iterations during weight updates."""
-    self._check_partial_rollout_kwarg(kwargs)
+    del kwargs
     if self._is_paused:
       return
     self._is_paused = True
@@ -886,7 +868,7 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
 
   async def pre_weight_sync(
       self,
-      sync_request: base_sampler_lib.WeightSyncRequest | None = None,
+      sync_request: base_sampler_lib.WeightSyncRequest,
       free_kv_cache: bool = False,
       **kwargs: Any,
   ) -> Any:
@@ -900,7 +882,7 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
     per-step latency overhead of deallocating (`delete_kv_cache`) and
     reallocating (`reinitialize_kv_cache`) the HBM KV buffer pool.
     """
-    self._check_partial_rollout_kwarg(kwargs)
+    del kwargs
     if not self.enable_raiden:
       return True
     async with self._sync_lock:
@@ -938,9 +920,9 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
 
   async def weight_sync(
       self,
-      sync_request: base_sampler_lib.WeightSyncRequest | None = None,
+      sync_request: base_sampler_lib.WeightSyncRequest,
       **kwargs: Any,
-  ) -> Any:
+  ) -> None:
     """Phase 2: Flushes/awaits H2D transfers across TPU workers and refreshes state_leaves."""
     del kwargs
     if not self.enable_raiden:
@@ -953,7 +935,7 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
       )
     async with self._sync_lock:
       if not self._tracker.admit(sync_request, "h2d_done"):
-        return True
+        return None
 
       logger.info("Executing weight_sync barrier on Raiden synchronizers...")
       checksums = await self.raiden_h2d(
@@ -969,11 +951,11 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
       await self.refresh_model_state_leaves()
 
       self._tracker.complete(sync_request, "h2d_done")
-      return True
+      return None
 
   async def post_weight_sync(
       self,
-      sync_request: base_sampler_lib.WeightSyncRequest | None = None,
+      sync_request: base_sampler_lib.WeightSyncRequest,
       **kwargs: Any,
   ) -> Any:
     """Phase 3: Closes weight update session (reinitializes KV cache if freed), restores request intake, and bumps active policy version."""
@@ -994,10 +976,7 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
         self._transfer_statuses[str(rid)] = "SUCCESS"
       await self.resume()
 
-      if sync_request is not None and sync_request.policy_version is not None:
-        self._policy_version = sync_request.policy_version
-      else:
-        self._policy_version += 1
+      self._policy_version = sync_request.policy_version
 
       if os.environ.get("VERIFY_WEIGHTS", "").lower() == "true":
         logger.info("Raiden transfer metrics: %s", await self.raiden_metrics())
@@ -1007,7 +986,7 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
 
   async def abort_weight_sync(
       self,
-      sync_request: base_sampler_lib.WeightSyncRequest | None = None,
+      sync_request: base_sampler_lib.WeightSyncRequest,
       **kwargs: Any,
   ) -> Any:
     """Safely rolls back to serving previous policy version without publishing staging."""

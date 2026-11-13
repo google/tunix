@@ -310,7 +310,7 @@ class VllmSamplerTest(absltest.TestCase):
     )
 
     res_sync = asyncio.run(self.sampler.weight_sync(sync_req))
-    self.assertTrue(res_sync)
+    self.assertIsNone(res_sync)
     self.mock_engine.collective_rpc.assert_any_call(
         "raiden_h2d", args=(), kwargs={"uuid": 1}
     )
@@ -522,15 +522,27 @@ class VllmSamplerTest(absltest.TestCase):
         server_id="uninit_no_raiden", config=_config(weight_sync_mode="none")
     )
     self.assertIsNone(asyncio.run(uninit.bind_weight_sync()))
-    self.assertTrue(asyncio.run(uninit.pre_weight_sync(None)))
-    self.assertTrue(asyncio.run(uninit.post_weight_sync(None)))
-    self.assertTrue(asyncio.run(uninit.abort_weight_sync(None)))
+    self.assertTrue(
+        asyncio.run(
+            uninit.pre_weight_sync(base_sampler_lib.WeightSyncRequest())
+        )
+    )
+    self.assertTrue(
+        asyncio.run(
+            uninit.post_weight_sync(base_sampler_lib.WeightSyncRequest())
+        )
+    )
+    self.assertTrue(
+        asyncio.run(
+            uninit.abort_weight_sync(base_sampler_lib.WeightSyncRequest())
+        )
+    )
     with self.assertRaises(NotImplementedError):
       asyncio.run(uninit.get_weight_sync_metadata())
     with self.assertRaisesRegex(
         RuntimeError, "supports Raiden weight sync only"
     ):
-      asyncio.run(uninit.weight_sync(None))
+      asyncio.run(uninit.weight_sync(base_sampler_lib.WeightSyncRequest()))
 
   def test_raiden_job_name_derived_from_server_id(self):
     sampler = vllm_sampler.VllmSampler(server_id="worker-42", config=_config())
@@ -614,11 +626,6 @@ class VllmSamplerTest(absltest.TestCase):
     asyncio.run(sampler.post_weight_sync(req))
     self.mock_engine.reset_prefix_cache.assert_not_awaited()
     self.mock_engine.resume_generation.assert_awaited_once()
-
-    with self.assertRaisesRegex(ValueError, "disagrees with"):
-      asyncio.run(sampler.pause(partial_rollout=False))
-    with self.assertRaisesRegex(ValueError, "disagrees with"):
-      asyncio.run(sampler.pre_weight_sync(req, partial_rollout=False))
 
   def test_build_vllm_params_forwards_cache_salt(self):
     sampler = vllm_sampler.VllmSampler(
@@ -877,11 +884,23 @@ class VllmSamplerTest(absltest.TestCase):
     self.assertIsNone(asyncio.run(sampler.bind_weight_sync()))
     with self.assertRaises(NotImplementedError):
       asyncio.run(sampler.get_weight_sync_metadata())
-    self.assertTrue(asyncio.run(sampler.pre_weight_sync()))
+    self.assertTrue(
+        asyncio.run(
+            sampler.pre_weight_sync(base_sampler_lib.WeightSyncRequest())
+        )
+    )
     with self.assertRaises(RuntimeError):
-      asyncio.run(sampler.weight_sync())
-    self.assertTrue(asyncio.run(sampler.post_weight_sync()))
-    self.assertTrue(asyncio.run(sampler.abort_weight_sync()))
+      asyncio.run(sampler.weight_sync(base_sampler_lib.WeightSyncRequest()))
+    self.assertTrue(
+        asyncio.run(
+            sampler.post_weight_sync(base_sampler_lib.WeightSyncRequest())
+        )
+    )
+    self.assertTrue(
+        asyncio.run(
+            sampler.abort_weight_sync(base_sampler_lib.WeightSyncRequest())
+        )
+    )
 
     invalid_cfg = _config()
     invalid_cfg.weight_sync_mode = "invalid"  # type: ignore[assignment]

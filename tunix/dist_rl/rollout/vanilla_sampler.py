@@ -255,7 +255,6 @@ class VanillaSampler(
       self.raiden_sync_delegate = (
           raiden_weight_sync_delegate.RaidenWeightSyncDelegate(
               server_id=self.server_id,
-              partial_rollout=self.config.partial_rollout,
           )
       )
 

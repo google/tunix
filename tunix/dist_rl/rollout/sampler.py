@@ -205,25 +205,25 @@ class Sampler(Protocol):
     ...
 
   async def pre_weight_sync(
-      self, sync_request: WeightSyncRequest | Any = None, **kwargs
+      self, sync_request: WeightSyncRequest, **kwargs
   ) -> str | None | Any:
     """Prepares staging handshake prior to policy weight update from the specified controller."""
     ...
 
   async def weight_sync(
-      self, sync_request: WeightSyncRequest | Any = None, **kwargs
-  ) -> str | None | Any:
+      self, sync_request: WeightSyncRequest, **kwargs
+  ) -> int | None:
     """Updates model weights in-place from the specified controller."""
     ...
 
   async def post_weight_sync(
-      self, sync_request: WeightSyncRequest | Any = None, **kwargs
+      self, sync_request: WeightSyncRequest, **kwargs
   ) -> str | None | Any:
     """Finalizes and switches active policy weights after transfer completion."""
     ...
 
   async def abort_weight_sync(
-      self, sync_request: WeightSyncRequest | Any = None, **kwargs
+      self, sync_request: WeightSyncRequest, **kwargs
   ) -> str | None | Any:
     """Discards staging and restores serving the previous policy weights."""
     ...
