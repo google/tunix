@@ -71,12 +71,23 @@ class SamplingRequest(datatypes.Request):
   Attributes:
     prompt: The source prompt to sample from (formatted string, token array, or
       chat dictionary).
+    max_tokens: Maximum number of tokens to generate, or None for
+      `RolloutConfig.max_tokens_to_generate`.
+    cache_salt: Optional salt string for isolating KV prefix cache entries
+      (e.g., pinned to Turn-1 policy version during partial rollout).
+    routed_experts_prompt_start: Token index in prompt from which to start
+      returning routing data. In multi-turn rollouts, set to the cumulative
+      length of previously processed tokens to return only newly prefilled
+      environment tokens and completion.
     sampling_params: Optional per-request sampling configuration.
     images: Optional image input(s) associated with this prompt.
     audios: Optional audio waveform input(s) associated with this prompt.
   """
 
   prompt: Any
+  max_tokens: int | None = None
+  cache_salt: str | None = None
+  routed_experts_prompt_start: int = 0
   sampling_params: SamplingParams | None = None
   images: Any = None
   audios: Any = None
@@ -176,14 +187,8 @@ class Sampler(Protocol):
   # --- Inference ---
   async def sample(
       self,
-      sampling_requests: (
-          SamplingRequest
-          | Sequence[SamplingRequest]
-          | Any
-          | Sequence[Any]
-      ),
-      **kwargs,
-  ) -> list[SamplingResponse] | Any:
+      sampling_requests: SamplingRequest | Sequence[SamplingRequest],
+  ) -> SamplingResponse | Sequence[SamplingResponse]:
     """Generates completions for a batch of prompt conversations concurrently."""
     ...
 

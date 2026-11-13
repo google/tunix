@@ -43,6 +43,7 @@ def _make_rollout_worker(
     jax_cache_config: gcs_cache.JaxCacheConfig | None = None,
 ) -> rollout_worker.RolloutWorker:
   return rollout_worker.RolloutWorker(
+      config=rollout_worker.RolloutConfig(),
       worker_id=worker_id,
       sampler=mocks.MockBaseSamplerImpl(
           sampler_name="test_sampler", default_delay=0.0

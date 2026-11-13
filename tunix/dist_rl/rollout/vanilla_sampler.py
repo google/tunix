@@ -854,10 +854,9 @@ class VanillaSampler(
       ) = None,
       max_audio_length: int | None = None,
       max_audio_clips: int | None = None,
-      **kwargs,
   ) -> (
       base_sampler_lib.SamplingResponse
-      | list[base_sampler_lib.SamplingResponse]
+      | Sequence[base_sampler_lib.SamplingResponse]
   ):
     """Generates completions for a single SamplingRequest or a batch.
 
@@ -887,12 +886,10 @@ class VanillaSampler(
       max_audio_clips: Maximum number of audio clips in a sample. If specified,
         audio input to the model will be padded upto this count. Specify to
         avoid recompilation on different number of clips across calls.
-      **kwargs: Additional unused keyword arguments.
 
     Returns:
       A single SamplingResponse or a list of SamplingResponse objects.
     """
-    del kwargs
     is_sequence = not isinstance(
         sampling_requests, base_sampler_lib.SamplingRequest
     )
@@ -916,8 +913,8 @@ class VanillaSampler(
         prompt_token_ids_batch.append(prompt)
 
       max_tokens = (
-          req.sampling_params.max_tokens
-          if req.sampling_params is not None
+          req.max_tokens
+          if req.max_tokens is not None
           else self.config.max_tokens_to_generate
       )
       max_gen_steps_list.append(max_tokens)
