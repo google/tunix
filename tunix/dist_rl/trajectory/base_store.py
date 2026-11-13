@@ -99,6 +99,35 @@ class TrajectoryMetricsNotFoundError(KeyError):
     self.trajectory_id = trajectory_id
 
 
+class StaleAttemptError(ValueError):
+  """Raised when a retry attempt is older than the stored attempt."""
+
+  def __init__(
+      self,
+      trajectory_id: str,
+      attempted: int,
+      current_attempt: int,
+  ) -> None:
+    super().__init__(
+        f"Stale retry attempt {attempted} for trajectory '{trajectory_id}'; "
+        f"current attempt is {current_attempt}."
+    )
+    self.trajectory_id = trajectory_id
+    self.attempted = attempted
+    self.current_attempt = current_attempt
+
+
+def validate_keep_steps(keep_steps: int) -> int:
+  """Validates that keep_steps is a non-negative non-bool integer."""
+  if isinstance(keep_steps, bool) or not isinstance(keep_steps, int):
+    raise ValueError(
+        f"keep_steps must be an int, got {type(keep_steps).__name__}."
+    )
+  if keep_steps < 0:
+    raise ValueError(f"keep_steps must be non-negative, got {keep_steps}.")
+  return keep_steps
+
+
 # ==============================================================================
 # Protocols (Structural Interfaces)
 # ==============================================================================
@@ -248,6 +277,34 @@ class TrajectoryWriter(Protocol[MetadataT]):
     Args:
       trajectory_id: Unique identifier for the trajectory.
       metrics: TrajectoryMetrics containing the metrics data to record.
+    """
+    ...
+
+  def resume_attempt(
+      self,
+      metadata: MetadataT,
+      *,
+      keep_steps: int = 0,
+  ) -> None:
+    """Fences prior retry attempts and trims retained trailing steps.
+
+    Executes synchronously after flushing any buffered local writes for this
+    writer. If ``metadata.attempt`` is strictly less than the currently stored
+    attempt, raises ``StaleAttemptError`` without mutating stored state. When
+    ``metadata.attempt`` is equal to or newer than the stored attempt, stores
+    ``metadata``, retains only leading 1-based ordinal steps ``1..keep_steps``,
+    and fences older attempts from subsequent mutations.
+
+    Args:
+      metadata: Authoritative trajectory metadata for the claiming attempt.
+      keep_steps: Number of leading 1-based ordinal steps to preserve (defaults
+        to ``0``, discarding all previously recorded steps).
+
+    Raises:
+      StaleAttemptError: If ``metadata.attempt`` is less than the stored
+        attempt for this trajectory.
+      ValueError: If ``keep_steps`` is negative, not an int, or ``metadata`` is
+        invalid for this store.
     """
     ...
 
@@ -514,6 +571,22 @@ class TrajectoryStore(
     """
     raise NotImplementedError(
         f"{type(self).__name__} does not implement get_trajectories_metrics."
+    )
+
+  def resume_attempt(
+      self,
+      metadata: MetadataT,
+      *,
+      keep_steps: int = 0,
+  ) -> None:
+    """Fences prior retry attempts and trims retained trailing steps.
+
+    Args:
+      metadata: Authoritative trajectory metadata for the claiming attempt.
+      keep_steps: Number of leading 1-based ordinal steps to preserve.
+    """
+    raise NotImplementedError(
+        f"{type(self).__name__} does not implement resume_attempt."
     )
 
   @classmethod

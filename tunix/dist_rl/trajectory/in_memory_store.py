@@ -4,6 +4,7 @@ import collections
 from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar, TypeVar
 
+from absl import logging
 from tunix.dist_rl.trajectory import base_store as store
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 
@@ -173,6 +174,40 @@ class InMemoryTrajectoryStore(store.TrajectoryStore[MetadataT]):
       )
     return result
 
+  def _upsert_metadata_if_current(
+      self,
+      metadata: MetadataT,
+      *,
+      step_id: int | None = None,
+  ) -> str | None:
+    """Validates `metadata`, fencing stale attempts; returns traj_id or None."""
+    self._validate_and_bind_metadata(metadata)
+    traj_id = _validate_trajectory_id(metadata.trajectory_id)
+    existing = self._metadata_by_trajectory_id.get(traj_id)
+    if existing is not None and metadata.attempt < existing.attempt:
+      if step_id is not None:
+        logging.warning(
+            "Ignoring stale add_step (step_id=%s) for trajectory '%s': "
+            "incoming attempt %d < stored attempt %d.",
+            step_id,
+            traj_id,
+            metadata.attempt,
+            existing.attempt,
+        )
+      else:
+        logging.warning(
+            "Ignoring stale update_metadata for trajectory '%s': "
+            "incoming attempt %d < stored attempt %d.",
+            traj_id,
+            metadata.attempt,
+            existing.attempt,
+        )
+      return None
+    self._metadata_by_trajectory_id[traj_id] = trajectory_lib.deep_copy(
+        metadata
+    )
+    return traj_id
+
   def add_step(
       self,
       step: trajectory_lib.Step,
@@ -193,8 +228,9 @@ class InMemoryTrajectoryStore(store.TrajectoryStore[MetadataT]):
         conflicts with the store's bound metadata type.
       ValueError: If metadata.trajectory_id is empty or None.
     """
-    self.update_metadata(metadata)
-    traj_id = _validate_trajectory_id(metadata.trajectory_id)
+    traj_id = self._upsert_metadata_if_current(metadata, step_id=step.step_id)
+    if traj_id is None:
+      return
     step_copy = trajectory_lib.deep_copy(step)
     steps = self._steps_by_trajectory_id[traj_id]
     for idx, s in enumerate(steps):
@@ -221,11 +257,32 @@ class InMemoryTrajectoryStore(store.TrajectoryStore[MetadataT]):
         conflicts with the store's bound metadata type.
       ValueError: If metadata.trajectory_id is empty or None.
     """
+    self._upsert_metadata_if_current(metadata)
+
+  def resume_attempt(
+      self,
+      metadata: MetadataT,
+      *,
+      keep_steps: int = 0,
+  ) -> None:
+    """Fences prior retry attempts and trims retained trailing steps."""
+    store.validate_keep_steps(keep_steps)
     self._validate_and_bind_metadata(metadata)
     traj_id = _validate_trajectory_id(metadata.trajectory_id)
+    existing = self._metadata_by_trajectory_id.get(traj_id)
+    if existing is not None and metadata.attempt < existing.attempt:
+      raise store.StaleAttemptError(traj_id, metadata.attempt, existing.attempt)
     self._metadata_by_trajectory_id[traj_id] = trajectory_lib.deep_copy(
         metadata
     )
+    if keep_steps == 0:
+      self._steps_by_trajectory_id.pop(traj_id, None)
+    elif traj_id in self._steps_by_trajectory_id:
+      self._steps_by_trajectory_id[traj_id] = [
+          s
+          for s in self._steps_by_trajectory_id[traj_id]
+          if s.step_id + type(s).ATIF_STEP_ID_OFFSET <= keep_steps
+      ]
 
   def update_metrics(
       self,
