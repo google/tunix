@@ -311,12 +311,12 @@ class MockBaseSamplerImpl(base_sampler_lib.Sampler):
       turn: int,
       prompt_len: int,
       gen_len: int,
-      sp: base_sampler_lib.SamplingParams | None,
+      return_routed_experts: bool,
+      prompt_start: int,
   ) -> np.ndarray | None:
     slab = self._routed_slab
-    if slab is None or sp is None or not sp.return_routed_experts:
+    if slab is None or not return_routed_experts:
       return None
-    prompt_start = int(sp.routed_experts_prompt_start)
     if prompt_start < 0 or prompt_start > prompt_len:
       raise ValueError(
           "routed_experts_prompt_start must satisfy"
@@ -352,7 +352,6 @@ class MockBaseSamplerImpl(base_sampler_lib.Sampler):
     if req_id_str in self.fail_request_ids:
       raise RuntimeError(f"Simulated failure for request_id={req_id_str}")
 
-    sp = req.sampling_params if is_req else None
     prompt_ids = self._resolve_prompt_ids(req)
     self.sample_calls += 1
     turn = self._turn_counters.pop(req_id_str, 0)
@@ -369,7 +368,7 @@ class MockBaseSamplerImpl(base_sampler_lib.Sampler):
         else f"TOOL_CALL: search(query='turn {turn} for {req_id_str}')"
     )
     tokens = self._build_turn_tokens(
-        max_tokens=sp.max_tokens if sp is not None else None,
+        max_tokens=req.max_tokens if is_req else None,
         is_final_turn=is_final,
     )
     routed_experts = self._maybe_build_routed(
@@ -377,7 +376,8 @@ class MockBaseSamplerImpl(base_sampler_lib.Sampler):
         turn=turn,
         prompt_len=int(prompt_ids.size),
         gen_len=int(tokens.size),
-        sp=sp,
+        return_routed_experts=bool(request_kwargs.get("return_routed_experts")),
+        prompt_start=req.routed_experts_prompt_start if is_req else 0,
     )
     return base_sampler_lib.SamplingResponse(
         request_id=req_id_str,
@@ -400,12 +400,20 @@ class MockBaseSamplerImpl(base_sampler_lib.Sampler):
     """Simulates LLM inference latency and agentic turn responses."""
     if sampling_requests is None:
       raise ValueError("sampling_requests cannot be None.")
-    delay = kwargs.get("delay_seconds", self.default_delay)
-    if delay > 0:
-      await asyncio.sleep(delay)
-
     is_sequence = isinstance(sampling_requests, (list, tuple))
     requests = list(sampling_requests) if is_sequence else [sampling_requests]
+    req0_meta = (
+        requests[0].metadata
+        if requests
+        and isinstance(requests[0], base_sampler_lib.SamplingRequest)
+        and requests[0].metadata
+        else {}
+    )
+    delay = kwargs.get(
+        "delay_seconds", req0_meta.get("delay_seconds", self.default_delay)
+    )
+    if delay > 0:
+      await asyncio.sleep(delay)
     responses = [self._sample_single(req, kwargs) for req in requests]
     return responses if is_sequence else responses[0]
 

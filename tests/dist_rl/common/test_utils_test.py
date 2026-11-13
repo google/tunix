@@ -55,13 +55,9 @@ class MockBaseSamplerImplTest(absltest.TestCase):
     req0 = sampler_lib.SamplingRequest(
         request_id="traj-1",
         prompt=prompt_turn0,
-        metadata={"min_turns": 1},
-        sampling_params=sampler_lib.SamplingParams(
-            max_tokens=32,
-            return_logprobs=True,
-            return_routed_experts=True,
-            routed_experts_prompt_start=0,
-        ),
+        metadata={"min_turns": 1, "return_routed_experts": True},
+        max_tokens=32,
+        routed_experts_prompt_start=0,
     )
     resp0 = asyncio.run(sampler.sample(req0))
     np.testing.assert_array_equal(resp0.prompt_token_ids, prompt_turn0)
@@ -77,13 +73,9 @@ class MockBaseSamplerImplTest(absltest.TestCase):
     req1 = sampler_lib.SamplingRequest(
         request_id="traj-1",
         prompt=prompt_turn1,
-        metadata={"min_turns": 1},
-        sampling_params=sampler_lib.SamplingParams(
-            max_tokens=10,  # caps response_tokens_per_turn=16 to 10
-            return_logprobs=True,
-            return_routed_experts=True,
-            routed_experts_prompt_start=28,
-        ),
+        metadata={"min_turns": 1, "return_routed_experts": True},
+        max_tokens=10,
+        routed_experts_prompt_start=28,
     )
     resp1 = asyncio.run(sampler.sample(req1))
     np.testing.assert_array_equal(resp1.prompt_token_ids, prompt_turn1)
@@ -100,13 +92,13 @@ class MockBaseSamplerImplTest(absltest.TestCase):
         num_experts=128,
     )
     prompt = np.arange(100, dtype=np.int32)
-    sp = sampler_lib.SamplingParams(
-        max_tokens=4500, return_routed_experts=True
-    )
     resp_a = asyncio.run(
         sampler.sample(
             sampler_lib.SamplingRequest(
-                request_id="long-traj", prompt=prompt, sampling_params=sp
+                request_id="long-traj",
+                prompt=prompt,
+                max_tokens=4500,
+                metadata={"return_routed_experts": True},
             )
         )
     )
@@ -119,7 +111,10 @@ class MockBaseSamplerImplTest(absltest.TestCase):
     resp_b = asyncio.run(
         sampler_b.sample(
             sampler_lib.SamplingRequest(
-                request_id="long-traj", prompt=prompt, sampling_params=sp
+                request_id="long-traj",
+                prompt=prompt,
+                max_tokens=4500,
+                metadata={"return_routed_experts": True},
             )
         )
     )
@@ -144,11 +139,9 @@ class MockBaseSamplerImplTest(absltest.TestCase):
               sampler_lib.SamplingRequest(
                   request_id="bad-start",
                   prompt=np.arange(4, dtype=np.int32),
-                  sampling_params=sampler_lib.SamplingParams(
-                      max_tokens=4,
-                      return_routed_experts=True,
-                      routed_experts_prompt_start=5,
-                  ),
+                  max_tokens=4,
+                  routed_experts_prompt_start=5,
+                  metadata={"return_routed_experts": True},
               )
           )
       )
@@ -163,7 +156,7 @@ class MockBaseSamplerImplTest(absltest.TestCase):
                 request_id="traj-0",
                 prompt=np.array([1, 2], dtype=np.int32),
                 metadata={"min_turns": 1},
-                sampling_params=sampler_lib.SamplingParams(max_tokens=2),
+                max_tokens=2,
             )
         )
     )
@@ -176,7 +169,7 @@ class MockBaseSamplerImplTest(absltest.TestCase):
                   request_id=f"traj-{i}",
                   prompt=np.array([1, 2], dtype=np.int32),
                   metadata={"min_turns": 1},
-                  sampling_params=sampler_lib.SamplingParams(max_tokens=2),
+                  max_tokens=2,
               )
           )
       )
@@ -187,7 +180,7 @@ class MockBaseSamplerImplTest(absltest.TestCase):
                 request_id="traj-4096",
                 prompt=np.array([1, 2], dtype=np.int32),
                 metadata={"min_turns": 1},
-                sampling_params=sampler_lib.SamplingParams(max_tokens=2),
+                max_tokens=2,
             )
         )
     )
@@ -201,7 +194,7 @@ class MockBaseSamplerImplTest(absltest.TestCase):
                 request_id="traj-4096",
                 prompt=np.array([1, 2], dtype=np.int32),
                 metadata={"min_turns": 1},
-                sampling_params=sampler_lib.SamplingParams(max_tokens=2),
+                max_tokens=2,
             )
         )
     )
@@ -223,7 +216,7 @@ class MockBaseSamplerImplTest(absltest.TestCase):
                 request_id="traj-0",
                 prompt=np.array([1, 2], dtype=np.int32),
                 metadata={"min_turns": 1},
-                sampling_params=sampler_lib.SamplingParams(max_tokens=2),
+                max_tokens=2,
             )
         )
     )
@@ -244,9 +237,8 @@ class MockBaseSamplerImplTest(absltest.TestCase):
     req = sampler_lib.SamplingRequest(
         request_id="traj-words",
         prompt="prompt 1 tok tok tok",
-        sampling_params=sampler_lib.SamplingParams(
-            max_tokens=4, return_routed_experts=True
-        ),
+        max_tokens=4,
+        metadata={"return_routed_experts": True},
     )
     resp = asyncio.run(sampler.sample(req))
     self.assertEqual(resp.prompt_token_ids.shape, (5,))
