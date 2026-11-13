@@ -64,6 +64,9 @@ spec:
               emptyDir:
                 medium: Memory
                 sizeLimit: ${USER_CONTAINER_MEMORY_LIMIT}
+            - name: dshm
+              emptyDir:
+                medium: Memory
             initContainers:
             - name: pathways-rm
               image: ${SERVER_IMAGE}
@@ -247,6 +250,8 @@ spec:
               volumeMounts:
               - name: ifrt-proxy-large-transfer
                 mountPath: /ifrt_proxy_large_transfer
+              - name: dshm
+                mountPath: /dev/shm
   - name: pw-node
     replicas: ${REPLICAS}
     template:
