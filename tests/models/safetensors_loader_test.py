@@ -726,6 +726,36 @@ class SafetensorsLoaderTest(parameterized.TestCase):
         np.testing.assert_array_equal, self.state, nnx.state(mh_loaded)
     )
 
+  def test_original_loader_chunks_placement_batches(self):
+    stnp.save_file(
+        self.tensors, os.path.join(self.st_dir, 'model.safetensors')
+    )
+    with (
+        mock.patch.object(
+            safetensors_loader.env_utils,
+            'is_pathways_initialized',
+            return_value=True,
+        ),
+        mock.patch.object(
+            safetensors_loader, '_PATHWAYS_PLACEMENT_BATCH_SIZE', 1
+        ),
+        mock.patch.object(
+            safetensors_loader.sharding_utils,
+            'place_arrays_on_targets',
+            wraps=safetensors_loader.sharding_utils.place_arrays_on_targets,
+        ) as mock_place,
+    ):
+      loaded = safetensors_loader.load_and_create_model(
+          self.st_dir,
+          test_common.ToyTransformer,
+          self.model.config,
+          key_mapping,
+          dtype=jnp.float32,
+          mode='original',
+      )
+    self.assertLen(mock_place.call_args_list, len(self.tensors))
+    jax.tree.map(np.testing.assert_array_equal, self.state, nnx.state(loaded))
+
 
 if __name__ == '__main__':
   absltest.main()

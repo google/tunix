@@ -22,6 +22,7 @@ from examples.swarm_math import drmas_reward
 from examples.swarm_math import prompts
 from tunix.dist_rl.swarm import runtime as runtime_lib
 from tunix.dist_rl.swarm import trace
+from tunix.utils import token_sanitization
 
 SOLVER = "Solver Agent"
 VERIFIER = "Verifier Agent"
@@ -81,11 +82,14 @@ class SolverVerifierWorkflow:
   ) -> trace.SwarmEpisode:
     context, final = "", ""
     calls = []
+    env_prompt = prompts.MATH_MULTIAGENT_TEMPLATE.format(
+        task_description=task.problem
+    )
     for turn in range(self.max_solver_turns):
       solver = await runtime.generate(
           SOLVER,
           prompts.SOLVER_PROMPT.format(
-              env_prompt=task.problem,
+              env_prompt=env_prompt,
               team_context=context,
           ),
       )
@@ -101,7 +105,7 @@ class SolverVerifierWorkflow:
       verifier = await runtime.generate(
           VERIFIER,
           prompts.VERIFIER_PROMPT.format(
-              env_prompt=task.problem,
+              env_prompt=env_prompt,
               team_context=context,
           ),
       )
@@ -127,15 +131,17 @@ def chat_encoder(tokenizer, max_prompt_length: int):
   """
 
   def encode(prompt):
+    clean = token_sanitization.sanitize_control_tokens(prompt)
     ids = tokenizer.apply_chat_template(
         [
             {
                 "role": "system",
                 "content": "You are a helpful and harmless assistant.",
             },
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": clean},
         ],
         tokenize=True,
+        return_dict=False,
         add_generation_prompt=True,
         enable_thinking=False,
     )

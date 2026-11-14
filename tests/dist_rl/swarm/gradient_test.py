@@ -83,6 +83,74 @@ def test_native_loss_and_every_parameter_gradient_match_source():
     )
 
 
+ROW_FIELDS = (
+    "prompt_ids",
+    "prompt_mask",
+    "completion_ids",
+    "completion_mask",
+    "completion_attention_mask",
+    "advantages",
+    "old_per_token_logps",
+)
+
+
+def test_microbatch_weights_reproduce_upstream_microbatch_token_means():
+  """verl `dp_actor`: mean over microbatches of each microbatch's token-mean."""
+  payload, weights = payload_and_weights()
+  rows = dataclasses.replace(
+      payload,
+      **{
+          f: np.concatenate([np.asarray(getattr(payload, f))] * 3)[:7]
+          for f in ROW_FIELDS
+      },
+  )
+  rows = dataclasses.replace(
+      rows,
+      advantages=np.random.default_rng(5)
+      .normal(size=rows.advantages.shape)
+      .astype(np.float32),
+  )
+  groups = swarm_program.microbatch_groups(7, 3, seed=11)
+  assert sorted(np.bincount(groups).tolist()) == [1, 3, 3]
+  parts = [
+      reference.loss_and_gradient(
+          weights,
+          dataclasses.replace(
+              rows,
+              **{
+                  f: np.asarray(getattr(rows, f))[groups == g]
+                  for f in ROW_FIELDS
+              },
+          ),
+      )
+      for g in range(3)
+  ]
+  (weighted,) = swarm_program.weight_microbatches([rows], 3, seed=11)
+  loss, gradient = reference.loss_and_gradient(weights, weighted)
+  np.testing.assert_allclose(
+      loss, np.mean([p[0] for p in parts]), rtol=1e-5, atol=1e-6
+  )
+  np.testing.assert_allclose(
+      gradient, np.mean([p[1] for p in parts], axis=0), rtol=1e-5, atol=1e-6
+  )
+  # Rows without active tokens keep zero weight and do not change the groups.
+  padded = dataclasses.replace(
+      weighted,
+      **{
+          f: np.concatenate([
+              np.asarray(getattr(rows, f)),
+              np.zeros_like(getattr(rows, f)[:1]),
+          ])
+          for f in ROW_FIELDS
+      },
+  )
+  (padded_weighted,) = swarm_program.weight_microbatches([padded], 3, seed=11)
+  np.testing.assert_array_equal(padded_weighted.advantages[-1], 0.0)
+  np.testing.assert_allclose(
+      padded_weighted.advantages[:-1], weighted.advantages, rtol=1e-6
+  )
+
+
 def test_masked_values_do_not_change_loss_or_gradient():
   payload, weights = payload_and_weights()
   config = swarm_program.shared_grpo_config()

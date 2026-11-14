@@ -151,6 +151,7 @@ _SAFETENSORS_DTYPES: Mapping[str, np.dtype] = {
 # queue; `readinto` fills preallocated host buffers with the GIL released.
 _READ_WORKERS = 16
 _READ_CHUNK_BYTES = 32 * 1024 * 1024
+_PATHWAYS_PLACEMENT_BATCH_SIZE = 4
 
 
 class _HostTensor(NamedTuple):
@@ -350,6 +351,30 @@ def _match_params(
   return matches
 
 
+def _place_matched_tensors(
+    params: list[jax.ShapeDtypeStruct | jax.Array],
+    matches: Sequence[tuple[int, np.ndarray | jax.Array]],
+    shardings: Sequence[Any],
+) -> None:
+  """Places matched tensors on target shardings, bounded under Pathways."""
+  if not matches:
+    return
+  # Under Pathways, chunk placements so the IFRT proxy host-buffer work queue
+  # stays below container pthread limits across multi-host meshes.
+  is_pathways = env_utils.is_pathways_initialized()
+  batch_size = _PATHWAYS_PLACEMENT_BATCH_SIZE if is_pathways else len(matches)
+  for start in range(0, len(matches), batch_size):
+    chunk = matches[start : start + batch_size]
+    placed = sharding_utils.place_arrays_on_targets(
+        jax.device_get([tensor for _, tensor in chunk]),
+        [shardings[i] for i, _ in chunk],
+    )
+    if is_pathways:
+      jax.block_until_ready(placed)
+    for (i, _), arr in zip(chunk, placed, strict=True):
+      params[i] = arr
+
+
 def load_and_create_model_orig(
     file_dir: str,
     model_class,
@@ -430,16 +455,7 @@ def load_and_create_model_orig(
       )
 
     matches = _match_params(keys, params, tensors)
-    if matches:
-      # `device_get` turns any `jax.Array` returned by `preprocess_fn` into a
-      # host array, so placement is a host-to-device copy, not a D2D program.
-      placed = sharding_utils.place_arrays_on_targets(
-          jax.device_get([tensor for _, tensor in matches]),
-          [shardings[i] for i, _ in matches],
-      )
-      for (i, _), arr in zip(matches, placed, strict=True):
-        params[i] = arr
-      del placed
+    _place_matched_tensors(params, matches, shardings)
     logging.info(
         'Loaded %s: %d tensors in %.2fs.',
         f.name,

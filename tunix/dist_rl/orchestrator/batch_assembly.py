@@ -1437,8 +1437,10 @@ class PaddedBatchAssembler:
         prompt_mask=batched_prompt_mask,
         completion_ids=batched_completion_ids,
         completion_mask=batched_completion_mask,
-        completion_attention_mask=stacked_optional.get(
-            "completion_attention_mask"
+        completion_attention_mask=(
+            stacked_optional["completion_attention_mask"]
+            if "completion_attention_mask" in stacked_optional
+            else None
         ),
         ref_per_token_logps=(
             stacked_optional["ref_per_token_logps"]

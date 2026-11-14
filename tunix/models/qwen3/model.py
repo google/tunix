@@ -16,6 +16,7 @@
 
 import dataclasses
 import enum
+from functools import lru_cache
 from functools import partial
 from typing import Tuple
 
@@ -354,6 +355,37 @@ class ModelConfig:
         num_experts=512,
         num_experts_per_tok=10,
     )
+
+
+@lru_cache(maxsize=16)
+def _init_sharded_cache(
+    num_layers: int,
+    shape: tuple[int, int, int, int],
+    dtype: jnp.dtype,
+    kv_sharding: shd.NamedSharding,
+    idx_sharding: shd.NamedSharding,
+):
+  """Compiles and caches an on-device KV-cache allocator with explicit shardings."""
+  out_shardings = {
+      f'layer_{i}': {
+          'k': kv_sharding,
+          'v': kv_sharding,
+          'end_index': idx_sharding,
+      }
+      for i in range(num_layers)
+  }
+  batch_size = shape[0]
+  return jax.jit(
+      lambda: {
+          f'layer_{i}': {
+              'k': jnp.zeros(shape, dtype=dtype),
+              'v': jnp.zeros(shape, dtype=dtype),
+              'end_index': jnp.zeros((batch_size,), dtype=jnp.int32),
+          }
+          for i in range(num_layers)
+      },
+      out_shardings=out_shardings,
+  )
 
 
 def shard(x: jnp.ndarray, s: Tuple[str, ...]):
@@ -1364,8 +1396,16 @@ class Qwen3(BackendMappingMixin, nnx.Module):
       self, batch_size: int, cache_size: int, dtype: jnp.dtype
   ) -> Cache:
     """Initializes the cache for the model."""
+    del dtype
     config = self.config
     shape = (batch_size, cache_size, config.num_kv_heads, config.head_dim)
+    mesh = pxla.thread_resources.env.physical_mesh
+    if not mesh.empty and jax.devices()[0].platform != 'cpu':
+      kv_sharding = shd.NamedSharding(mesh, P(*config.shd_config.act_btnh))
+      idx_sharding = shd.NamedSharding(mesh, P())
+      return _init_sharded_cache(
+          config.num_layers, shape, config.dtype, kv_sharding, idx_sharding
+      )()
     # Jax array is immutable, so updates to each layer creates new arrays.
     return {
         f'layer_{i}': {

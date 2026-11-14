@@ -4,12 +4,14 @@ Uses random tiny weights and a fixture vocabulary, not the pretrained 4B model.
 The categorical policy tests provide the independent upstream gradient oracle.
 """
 
+import asyncio
 import json
 
 from flax import nnx
 import jax
 import numpy as np
 import optax
+import pytest
 from tokenizers import models
 from tokenizers import Tokenizer
 from transformers import PreTrainedTokenizerFast
@@ -23,7 +25,8 @@ from tunix.dist_rl.worker import trainer_worker
 from tunix.models.qwen3 import model as qwen3_model
 
 
-def test_native_qwen_sampler_and_trainer_two_rounds():
+@pytest.mark.parametrize("batch_size", [1, 3])
+def test_native_qwen_sampler_and_trainer_two_rounds(batch_size):
   vocab = {text: i for i, text in enumerate(cpu_fixture.VOCAB)}
   del vocab[""]
   vocab["[EOS]"] = 0
@@ -65,6 +68,7 @@ def test_native_qwen_sampler_and_trainer_two_rounds():
             return_logprobs=True,
         ),
         "train",
+        batch_size=batch_size,
     )
     native = peft_trainer_v2.PeftTrainer(
         actor,
@@ -115,6 +119,11 @@ def test_native_qwen_sampler_and_trainer_two_rounds():
           for a, b in zip(snapshots[:-1], snapshots[1:], strict=True)
       )
       assert all(h["max_logprob_error"] < 1e-5 for h in program.history)
+      assert all(
+          "[EOS]" not in c.text
+          for e in asyncio.run(collector(program.policy_version, program.step))
+          for c in e.calls
+      )
       print({
           "tiny_qwen_history": program.history,
           "parameter_deltas": [

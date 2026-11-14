@@ -37,9 +37,16 @@ def concatenate(payloads):
   )
 
 
-@pytest.mark.parametrize("normalization", ["role", "episode"])
+@pytest.mark.parametrize(
+    "normalization,loss_reduction",
+    [
+        ("role", "global_token_mean"),
+        ("episode", "global_token_mean"),
+        ("role", "microbatch_token_mean"),
+    ],
+)
 def test_two_updates_match_original_gradient_and_publish_shared_weights(
-    normalization,
+    normalization, loss_reduction
 ):
   config = json.loads((train.ROOT / "configs/cpu_smoke.json").read_text())
   config["normalization"] = normalization
@@ -83,6 +90,8 @@ def test_two_updates_match_original_gradient_and_publish_shared_weights(
         if not apply_optimizer:
           np.testing.assert_array_equal(before, after)
         else:
+          # Microbatch weights live in the payload advantages, so the native
+          # update must equal the upstream objective on the weighted rows.
           all_rows = concatenate(self.pending)
           old_loss, gradient = reference.loss_and_gradient(before, all_rows)
           expected = before - config["learning_rate"] * gradient
@@ -113,6 +122,7 @@ def test_two_updates_match_original_gradient_and_publish_shared_weights(
             max_prompt_length=16,
             max_response_length=3,
             normalization=normalization,
+            loss_reduction=loss_reduction,
         ),
     )
     try:
@@ -134,8 +144,13 @@ def test_two_updates_match_original_gradient_and_publish_shared_weights(
       ] == [{0}, {1}]
       # Unequal microbatch token counts and a partial final batch are covered.
       assert program.history[0]["calls"] % 4 != 0
+      tm = program.history[0]["trainer_metrics"]
+      assert {"loss", "grad_norm", "entropy", "ppo_kl"} <= set(tm)
+      assert tm["grad_norm"] > 0 and tm["entropy"] > 0
+      json.dumps(program.history)
       print({
           "normalization": normalization,
+          "loss_reduction": loss_reduction,
           "max_parameter_errors": errors,
           "loss_before_after": losses,
       })
@@ -220,3 +235,92 @@ def test_zero_signal_does_not_decay_weights_or_advance_policy():
   program.run(Engine(), num_steps=1)
   assert program.step == 1 and program.policy_version == 0
   assert program.history[0]["skip_reason"] == "zero_signal"
+
+
+def test_rejects_unknown_loss_reduction():
+  with pytest.raises(ValueError, match="loss_reduction"):
+    swarm_program.SwarmConfig(loss_reduction="sequence_mean")
+  with pytest.raises(ValueError, match="sampler_is"):
+    swarm_program.SwarmConfig(sampler_is="geometric")
+  with pytest.raises(ValueError, match="sampler_is_threshold"):
+    swarm_program.SwarmConfig(sampler_is_threshold=0.0)
+
+
+def test_sampler_is_token_uses_on_policy_ratio_and_downweights_outlier():
+  config = json.loads((train.ROOT / "configs/cpu_smoke.json").read_text())
+  task = train.load_tasks(train.ROOT / "data/cpu_train.jsonl")
+  mesh = jax.sharding.Mesh(np.asarray(jax.devices("cpu")[:1]), ("fsdp",))
+  with mesh, jax.default_device(jax.devices("cpu")[0]):
+    actor = cpu_fixture.TinyPolicy()
+    rollout = nnx.clone(actor)
+    native = peft_trainer_v2.PeftTrainer(
+        actor,
+        optax.sgd(config["learning_rate"]),
+        peft_trainer_v2.TrainingConfig(
+            eval_every_n_steps=100,
+            max_steps=1,
+            gradient_accumulation_steps=2,
+            resume_from_checkpoint_on_init=False,
+        ),
+        sampler_type="vanilla",
+    )
+    worker = trainer_worker.TrainerWorker(
+        lambda: native, execution_context=mesh
+    )
+    worker.initialize()
+    collector = train.MathCollector(
+        cpu_fixture.TinySampler(rollout), cpu_fixture.encode, task, config
+    )
+
+    async def collect_with_outlier(version, step):
+      episodes = list(await collector(version, step))
+      c0, c1 = episodes[0].calls[0], episodes[0].calls[1]
+      expected_min_weight["val"] = float(np.exp(c0.rollout_logprobs[0] + 1e-4))
+      bad_c0 = dataclasses.replace(
+          c0,
+          rollout_logprobs=(-1e-4,) + tuple(c0.rollout_logprobs[1:]),
+      )
+      bad_c1 = dataclasses.replace(
+          c1,
+          rollout_logprobs=(float(c1.rollout_logprobs[0]) - 10.0,)
+          + tuple(c1.rollout_logprobs[1:]),
+      )
+      episodes[0] = dataclasses.replace(
+          episodes[0],
+          calls=(bad_c0, bad_c1) + episodes[0].calls[2:],
+      )
+      return episodes
+
+    expected_min_weight = {}
+    program = swarm_program.SwarmRLProgram(
+        collect_with_outlier,
+        swarm_program.SwarmConfig(
+            group_size=8,
+            micro_batch_size=4,
+            max_prompt_length=16,
+            max_response_length=3,
+            max_logprob_error=20.0,
+            sampler_is="token",
+            sampler_is_threshold=2.0,
+        ),
+    )
+    try:
+      program.run(
+          local_engine.LocalSwarmEngine(
+              worker, lambda: nnx.update(rollout, nnx.state(actor))
+          ),
+          num_steps=1,
+      )
+      tm = program.history[0]["trainer_metrics"]
+      assert tm["is_ratio/max"] == pytest.approx(1.0)
+      assert tm["pg_clipfrac"] == pytest.approx(0.0)
+      assert tm["ppo_kl"] == pytest.approx(0.0, abs=1e-6)
+      assert tm["sampler_is/weight_min"] == pytest.approx(
+          expected_min_weight["val"], abs=1e-4
+      )
+      assert tm["sampler_is/frac_clipped_at_threshold"] > 0.0
+      assert tm["sampler_trainer/logp_diff_max"] == pytest.approx(
+          10.0, abs=1e-4
+      )
+    finally:
+      native.close()

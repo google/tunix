@@ -50,12 +50,12 @@ tests execute those functions instead of reimplementing a second NumPy formula.
 The port preserves `ddof=1`, epsilon `1e-6`, singleton mean/std `0/1`, and the
 source's distinction between per-role call normalization and per-task episode
 normalization. The shared variant is explicitly enabled; the original launcher
-defaults to separate models. The native loss matches the full-batch token-mean
-objective, including positive/negative clipping and negative dual clipping.
-Upstream microbatch averaging may weight unequal token counts differently; the
-native trainer intentionally normalizes one accumulated numerator by one global
-active-token denominator. This is not a bitwise reproduction of the upstream
-distributed optimizer schedule.
+defaults to separate models. The native loss supports both `global_token_mean`
+(one accumulated numerator divided by one global active-token denominator) and
+`microbatch_token_mean` (`loss_microbatch_rows=4` in the Qwen3-4B profile,
+matching upstream `verl`'s `ppo_micro_batch_size_per_gpu=4` equal-microbatch
+weighting via per-call advantage weights and verified against the upstream
+PyTorch per-microbatch loss and gradient oracle).
 
 One explicit numerical correction is applied: repeated equal float32 decimal
 scores can have a rounded mean and nonzero computed standard deviation. For
@@ -124,14 +124,126 @@ records excluded problem hashes and SHA-256 hashes for both split files.
 This development split is an explicit adaptation; it does not consume the
 original recipe's published benchmark validation questions.
 
+## TPU v5p-256 bring-up validation
+
+On November 11, 2026 (`hy-swarm-4b-1111k`), the two-step `examples/swarm_math`
+recipe ran end-to-end on one TPU `v5p-256` slice (128 chips under Pathways on
+GKE) with pinned `Qwen/Qwen3-4B` (`1cfa9a7208912126459214e8b04321603b3df60c`)
+and `aaabiao/dapo_filter` (`0b10fea35812902fe4f6985f2064424ec460f9c0`):
+
+- **Resource layout**: 64 rollout chips (`dp=8, tp=8`, `InprocessVllmSampler`,
+  `bfloat16`, `hbm_utilization=0.7`, `max_num_seqs=64`,
+  `max_num_batched_tokens=16384`, `reshard_chunk_size=1`) + 64 training chips
+  (`fsdp=8, tp=8`, `bfloat16` compute with `float32` master parameters,
+  `use_flash_attention=True` (later found to give wrong gradients; see
+  "Gradient correctness"), `flash_attention_block_size=1024`,
+  `logps_chunk_size=1024`, `remat_config=decoder`, `micro_batch_size=16`).
+- **In-container CPU regression suite before TPU execution**:
+  `123 passed` across `tests/dist_rl/swarm`,
+  `tests/dist_rl/rollout/vanilla_sampler_test.py`,
+  `tests/models/safetensors_loader_test.py`, and
+  `tests/sft/sharding_utils_test.py` with `TUNIX_SWARM_QWEN_TOKENIZER` set to
+  the pinned `Qwen/Qwen3-4B` snapshot.
+- **End-to-end 2-step metrics** (`train.py` completed in `3672.5s`, exit `0`):
+  - `initial_team_eval`: accuracy `0.515625` (256 attempts, `2.2109375` mean
+    calls, `2443.13671875` mean generated tokens)
+  - Step 1 (`policy_version=1`, `optimizer_applied=true`): `256` episodes, `556`
+    calls, `576,722` active tokens, `reward_mean=0.53125`,
+    `max_logprob_error=1.42315`, `mean_logprob_error=0.00887857`, training loss
+    `0.088701`
+  - Step 2 (`policy_version=2`, `optimizer_applied=true`): `256` episodes, `546`
+    calls, `536,813` active tokens, `reward_mean=0.5703125`,
+    `max_logprob_error=1.29769`, `mean_logprob_error=0.00974538`, training loss
+    `0.002437`
+  - `final_team_eval`: accuracy `0.51171875` (256 attempts, `2.1875` mean
+    calls, `2362.47265625` mean generated tokens)
+  - `final_single_solver_eval`: accuracy `0.55859375` (256 attempts, `1.0` mean
+    call, `1592.6953125` mean generated tokens)
+  - Artifacts: `512` recorded training episodes in `train_traces.jsonl`
+    (verified trailing `<|im_end|>` token `151645` kept in `completion_ids` and
+    stripped from decoded prompt text) and Orbax checkpoint committed at step
+    `2` on GCS.
+
+### Fixes from TPU integration
+
+1. `workflow.chat_encoder` passed `return_dict=False` to
+   `apply_chat_template` and sanitized control tokens before encoding, fixing a
+   `BatchEncoding` list-concatenation error with `transformers >= 4.57`.
+2. `Qwen3._init_sharded_cache` and `safetensors_loader` chunked Pathways tensor
+   placement (`_PATHWAYS_PLACEMENT_BATCH_SIZE = 4` + `block_until_ready`)
+   fixed unsharded KV cache allocation and Pathways host-buffer thread limits
+   when loading `Qwen3-4B` across multi-host meshes.
+3. `examples/swarm_math` adopted split rollout/train meshes with
+   `InprocessVllmSampler` (`tpu_inference` JAX backend), `VllmMathSampler`
+   clearing per-request `seed` and normalizing `top_k=None -> 0`, and
+   `bfloat16` SplashAttention training.
+4. Diagnostics (`hy-swarm-diag-1111i` vs `hy-swarm-diag-1111j`) showed that
+   enabling `prefix_caching` / `async_scheduling` with DP=8 + RPA v2 caused
+   rare ~43-nat first-token (`</think>`) logprob spikes on repeated concurrent
+   prompts. Setting `enable_prefix_caching=False` and
+   `rollout_vllm_async_scheduling=False` eliminated the spikes (`max` dropped
+   from `43.63` to `0.907` across `39,046` diagnostic tokens, `c0_mean` from
+   `2.50` to `0.068`). Over longer runs (~600k–900k tokens/step), normal per-step
+   maxima are 1.5–6.0 nats with rare single-token `bfloat16` TPU vLLM glitches
+   of 10–25 nats while the step mean stays around 0.006–0.008.
+   `max_logprob_error` in `configs/qwen3_4b.json` is therefore `100.0` (still
+   catching systemic alignment failures while `sampler_is: "token"` downweights
+   rare sampler-disagreement tokens via `min(exp(logp_trainer - logp_vllm), 2.0)`).
+
 ## Next acceptance gate
 
-1. Run the pinned 4B profile on accelerators; measure memory/throughput and
-   sampler/actor logprob error before longer training.
-2. Add worker-side episode collection and the distributed engine adapter; verify
+1. Add worker-side episode collection and the distributed engine adapter; verify
    the same loss/gradient invariants with actual transport and weight sync.
-3. Implement committed round/data-cursor resume and failure recovery, including
-   failures between optimizer update and policy publication.
-4. Run role/global normalization, untrained-team and matched-budget single-agent
-   baselines on locked tests with multiple seeds. Report accuracy, tokens, calls
-   and uncertainty before drafting a performance claim.
+2. Extend the committed round-boundary resume (implemented for the local
+   engine and validated on TPU) to failures between optimizer update and policy
+   publication in a distributed deployment.
+3. Run role/global normalization, untrained-team and matched-budget single-agent
+   baselines over multi-epoch budgets on locked tests with multiple seeds before
+   drafting a performance claim.
+
+## Gradient correctness
+
+Runs 1–3 of the Qwen3-4B reproduction lost training reward and validation
+accuracy within 25–50 steps. A diagnostic JobSet then computed the token-mean
+policy gradient of 32 real calls (Run 2's step-0 trace, two 16-row
+microbatches padded to 8192 + 4096 tokens) through `PeftTrainer.fwd_bwd` in
+four configurations on the production mesh (`fsdp=8, tp=8`):
+
+| Configuration | Cosine vs. float32 reference | Norm |
+| --- | --- | --- |
+| splash attention, log-prob chunk 1024 (production) | 0.155 | 5.27 |
+| splash attention, no chunking | 0.158 | 5.21 |
+| XLA reference attention, bfloat16 | 0.971 | 1.11 |
+| XLA reference attention, float32, highest matmul precision | 1 | 1.08 |
+
+Per layer, the splash gradient matched the reference in layers 16–35
+(cosine 0.93–0.999) and was wrong below layer 15 (cosine mostly between −0.1
+and +0.2, norm 2–23 times too large), so the error enters the backward pass in
+the middle of the stack and grows toward the input. Forward log-probs were correct: the same job
+measured a mean absolute sampler/trainer difference of 0.0095 nats, and the
+mean sampled negative log-prob (0.2350) equals the mean policy entropy
+(0.2373), so rollouts are sampled from the current policy. `swarm_math` now
+uses `dtype: float32` XLA reference attention for training (preventing both
+the splash backward corruption and `bfloat16` early-layer `RMSNorm` /
+`q_norm` / `k_norm` / RoPE gradient drift on long multi-turn contexts, where
+layer-7 `input_layernorm` cosine fell to −0.09 and `k_norm` to +0.13 in
+`bfloat16`) together with `sampler_is: token` truncated importance weights on
+an exact on-policy PPO ratio baseline (`is_ratio = 1.0`), and rejects
+`use_flash_attention: true` or `dtype != "float32"`.
+
+With all recipe fixes enabled on TPU `v5p-256` (`dtype: "float32"`,
+`use_flash_attention: false`, `sampler_is: "token"`,
+`loss_reduction: "microbatch_token_mean"` with `loss_microbatch_rows: 4`, and
+`MATH_MULTIAGENT_TEMPLATE`), the shared `Qwen/Qwen3-4B` Solver-Verifier run
+(`hy-swarm-run5-1112a`, 32 tasks x 8 attempts/step) climbs steadily without
+entropy or length collapse on `test_sampled` (`110` questions x `4` samples at
+`T=0.6, top_p=0.95`):
+
+| Step | AIME'24 avg@4 / pass@4 | AIME'25 avg@4 / pass@4 | MATH500[:50] avg@4 / pass@4 | Overall avg@4 | Macro avg@4 / pass@4 | Mean tokens / episode |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0 (base) | 20.0 / 26.7 | 18.3 / 26.7 | 83.0 / 90.0 | 48.2 | 40.4 / 47.8 | 2,176 |
+| 75 | 22.5 / 36.7 | 21.7 / 36.7 | 85.5 / 96.0 | 50.9 | 43.2 / 56.4 | 2,764 |
+| 125 | 29.2 / 46.7 | 21.7 / 36.7 | 83.5 / 90.0 | 51.8 | 44.8 / 57.8 | 2,765 |
+| 200 | 38.3 / 60.0 | 29.2 / 46.7 | 86.5 / 90.0 | 57.7 | 51.3 / 65.6 | 3,592 |
+| 250 | 38.3 / 63.3 | 31.7 / 46.7 | 87.0 / 92.0 | 58.6 | 52.3 / 67.3 | 3,906 |
+| 275 | 44.2 / 63.3 | 32.5 / 53.3 | 88.0 / 94.0 | 60.9 | 54.9 / 70.2 | 4,393 |

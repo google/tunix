@@ -13,10 +13,21 @@ from tunix.dist_rl.rollout import sampler
 from tunix.dist_rl.swarm import runtime
 
 
+# Verbatim from agent_system/environments/prompts/math.py at the pinned commit.
+UPSTREAM_MULTIAGENT_TEMPLATE = (
+    "You are a member of an expert multi-agent team tasked with solving the"
+    " math problem.\nThe team's math problem is: {task_description}\n"
+)
+
+
 def source_run(texts, turns):
   env = reference.namespace()
   pending = iter(texts)
   observed = []
+  # MathEnvironmentManager.build_text_obs in multi-agent mode.
+  env_text = UPSTREAM_MULTIAGENT_TEMPLATE.format(
+      task_description="Compute 1 + 1."
+  )
 
   class Agent:
 
@@ -29,7 +40,7 @@ def source_run(texts, turns):
           prompts.SOLVER_PROMPT
           if self.role == workflow.SOLVER
           else prompts.VERIFIER_PROMPT
-      ).format(env_prompt="Compute 1 + 1.", team_context=team_context[0])
+      ).format(env_prompt=env_text, team_context=team_context[0])
       observed.append((self.role, prompt))
       raw = next(pending)
       if self.role == workflow.VERIFIER:
@@ -60,7 +71,7 @@ def source_run(texts, turns):
   final, calls = env["run"](
       obj,
       [None],
-      {"text": ["Compute 1 + 1."]},
+      {"text": [env_text]},
       {"shared": object()},
       np.array([True]),
       1,
@@ -179,3 +190,7 @@ def test_runtime_rejects_unusable_response(failure):
   )
   with pytest.raises((ValueError, RuntimeError)):
     asyncio.run(rt.generate("role", "prompt"))
+
+
+def test_environment_template_matches_source():
+  assert prompts.MATH_MULTIAGENT_TEMPLATE == UPSTREAM_MULTIAGENT_TEMPLATE

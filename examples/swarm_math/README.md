@@ -5,11 +5,7 @@ This is the first local-transport implementation of the
 Solver–Verifier workflow through the native `dist_rl` loss, batch assembler,
 TrainerWorker, gradient accumulation, optimizer and checkpoint writer.
 
-**Current acceptance:** CPU numerical comparisons, two real optimizer updates,
-and a small random Qwen3 Transformer with native KV-cache sampling. Pretrained
-Qwen3-4B accelerator training, distributed episode RPC/Raiden, recovery and
-benchmark quality are not yet accepted. See the
-[validation record](../../docs/swarm_training_validation.md).
+**Current acceptance:** CPU numerical comparisons, two real optimizer updates, a small random Qwen3 Transformer with native KV-cache sampling, a verified 2-step `Qwen/Qwen3-4B` bring-up on TPU `v5p-256` (`128` chips via Pathways with `64+64` rollout/train split using `vLLM` + `float32` XLA reference attention), and multi-hundred-step Dr. MAS benchmark progression on TPU `v5p-256` (`test_sampled` rising from `48.2%` at step 0 to `60.9%` by step 275, with `AIME'24` `20.0 -> 44.2 avg@4 / 63.3 pass@4` and `AIME'25` `18.3 -> 32.5 avg@4 / 53.3 pass@4`). Distributed episode RPC/Raiden and multi-service recovery are not yet accepted. See the [validation record](../../docs/swarm_training_validation.md).
 
 ## Placement and extension boundary
 
@@ -84,10 +80,20 @@ then normalizes those attempt means within the task and broadcasts to its calls.
 
 Both roles update **one model and one optimizer**. Native dual-clip GRPO uses
 clip `0.2`, negative-advantage dual clip `3`, token-mean reduction, KL `0`, and no
-entropy bonus. Old actor logprobs are recomputed for every microbatch before any
-update; disagreement with recorded sampler scores above `0.005` aborts the
-round. The native trainer divides the summed gradient numerator by the total
-active-token denominator across all microbatches, including a partial last one.
+entropy bonus. Actor logprobs are scored for every microbatch before any update;
+disagreement with recorded sampler scores above `max_logprob_error` (`0.005` on
+the float32 CPU smoke profile; `100.0` on the Qwen3-4B profile, where rare
+single tokens in `bfloat16` TPU vLLM rollout can differ by 10–25 nats while the
+step mean stays below `0.01`) aborts the round. When `sampler_is` is `null`
+(CPU profile), the loss uses the recomputed actor `old_per_token_logps`; when
+`sampler_is` is `"token"` (Qwen3-4B profile), `grpo_loss_fn` fuses detached
+truncated importance weights `min(exp(logp_trainer - logp_vllm), 2.0)` on an
+exact 1-epoch on-policy PPO ratio baseline (`is_ratio = 1.0`).
+With `loss_reduction: global_token_mean` the native trainer divides the summed
+gradient numerator by the total active-token denominator across all
+microbatches, including a partial last one; with `microbatch_token_mean` each
+group of `loss_microbatch_rows` calls contributes its token-mean with equal
+weight, through per-call advantage weights.
 
 ## Reference fidelity and explicit differences
 
@@ -97,18 +103,20 @@ Reference commit: `c2f724e7358e7dc5bf2ea792ab07a3b5d90290c9`.
 | Item | Implemented behavior |
 | --- | --- |
 | Topology | Solver → Verifier → optional Solver; no final Verifier |
-| Prompts and grader | Original role prompts, original answer checker and environment reward, including `</think>` handling |
+| Prompts and grader | Original role prompts filled with the original multi-agent environment observation (`MATH_MULTIAGENT_TEMPLATE` around the question), original answer checker and environment reward, including `</think>` handling |
 | Verifier projection | Source strips text inside the first tag pair; validity and control-flow decisions stay separate |
 | Missing/unknown verdict | Source defaults to approval; missing tags incur a per-call format penalty. A tagged unknown verdict is valid under the source projection. Tests preserve these unusual semantics |
 | Sharing | Explicitly enabled; the upstream launcher defaults to separate policies |
 | Credit and objective | Executable upstream PyTorch functions are the offline test oracle |
-| Accumulation | One global active-token mean. Upstream microbatch means can differ when token counts differ; this is full-batch objective parity, not bitwise reproduction of every upstream distributed batching schedule |
+| Accumulation | `loss_reduction: microbatch_token_mean` (Qwen profile) averages the token-mean of every group of `loss_microbatch_rows: 4` calls, as the pinned verl `dp_actor` does with `ppo_micro_batch_size_per_gpu=4`. Calls are assigned to groups by a permutation seeded by the round (verl's balanced data-parallel split also mixes tasks), and each call's advantage is scaled by `N / (G * N_g)`; every PPO-clip and dual-clip branch is linear in the advantage, so the native batch token-mean then equals the mean of group token-means for any device `micro_batch_size`. `global_token_mean` (CPU profile) divides the batch-wide token sum by the batch-wide token count. On Qwen3-4B the global mean let long, wrong or truncated calls dominate and the run collapsed within 50 steps (see the validation record) |
 | Zero signal | Skip optimizer and policy-version advance, so AdamW does not decay parameters on a no-signal round |
 | Constant decimal rewards | Explicitly return zero for equal-score multi-call groups and accumulate episode means in float64. Upstream float32 mean/std reductions can amplify rounding error for repeated `-0.1`/`0.9` into false advantages |
 | Numerical guard | Native Tunix clamps log ratios to `[-20, 20]`; upstream exponentiates directly. Comparisons exercise finite unclamped ratios and all clipping branches |
-| Backend | Native Tunix sampler instead of SGLang; local weight copies instead of RPC/Raiden |
-| Run length | Qwen profile starts with two rounds for bring-up; it is not the original two-epoch training run |
-| Development data | Hold out training-corpus questions; reserve published test benchmarks for later locked evaluation |
+| Backend | Supports `InprocessVllmSampler` (split mesh, `tpu_inference` JAX backend) and native Tunix `vanilla` sampler; local weight copies/reshards instead of SGLang/RPC/Raiden. `vllm_async_scheduling` and `vllm_enable_prefix_caching` default to `false`: with them on, rare sampler/actor logprob disagreements reached about 5 and 44 nats |
+| Run length | The Qwen profile runs the source's 2 epochs: 772 steps over the 12,357-question deduplicated split (the source's 13,044 rows give 814) |
+| Development and test data | 256 training-corpus questions are held out for development. The six source benchmarks are prepared at pinned revisions: `test.jsonl` (1,547 questions) and the source's 110-question validation subset `test_sampled.jsonl`. As in the source, test questions are not removed from training; the 7 verbatim overlaps are reported as `eval_training_overlap` |
+| Evaluation | avg@k and pass@k per benchmark (task-ID prefix) and their unweighted mean over benchmarks, as in the source; validation runs every `val_every_steps` with `eval_attempts` samples |
+| Recovery | Checkpoints at round boundaries every `checkpoint_every_steps` hold weights, optimizer state, program step, history and validations; `--resume` replays the same deterministic task window from the newest one |
 
 ## Run locally
 
@@ -128,27 +136,56 @@ JAX_PLATFORMS=cpu python -m examples.swarm_math.train \
 ```
 
 Use a fresh output directory. Each run writes resolved config, exact training
-traces, a JSON report, and a native model/optimizer checkpoint. The CPU run also
-saves initial/final parameters. Checkpoint writing is covered; resuming a swarm
-data cursor and policy publication after failure remains a later integration
-gate. A failed run must be restarted from a known state, not retried in-place.
+traces (every `trace_every_steps`), `metrics.jsonl`, a JSON report, and native
+model/optimizer checkpoints. The CPU run also saves initial/final parameters.
+With `--resume`, a run continues from the newest checkpoint in
+`--checkpoint-dir`; a test checks that a resumed CPU run ends with parameters
+bit-identical to an uninterrupted one.
 
-## Qwen3-4B bring-up
+## Qwen3-4B Dr. MAS reproduction
 
-The profile fixes `Qwen/Qwen3-4B` revision
+The `configs/qwen3_4b.json` profile fixes `Qwen/Qwen3-4B` revision
 `1cfa9a7208912126459214e8b04321603b3df60c`, with thinking disabled. It uses
 32 tasks × 8 attempts, at most 2 Solver calls, prompt/response limits
-8192/4096, microbatch size 4, learning rate `1e-6`, AdamW weight decay `0.01`
-and gradient clipping `1.0`. Training samples at temperature/top-p `1.0/1.0`;
-evaluation uses `0.6/0.95`.
+8192/4096, `rollout_engine: vllm` (`rollout_split_fraction: 0.5`,
+`rollout_batch_size: 64`), `tp_size: 8`, `micro_batch_size: 16`,
+`remat_config: decoder`, `dtype: float32`, `load_dtype: float32`,
+`use_flash_attention: false` (XLA reference attention; see below),
+`logps_chunk_size: 1024`, `max_logprob_error: 100.0`, `sampler_is: token`,
+`loss_reduction: microbatch_token_mean` (`loss_microbatch_rows: 4`), learning
+rate `1e-6`,
+AdamW weight decay `0.01`, and gradient clipping `1.0`. Training samples at
+temperature/top-p `1.0/1.0`; evaluation uses `0.6/0.95`. It runs 772 steps
+(2 epochs), checkpoints every 25 steps, validates every 50 steps with 4
+samples per question, and writes traces every 50 steps.
+
+`train.py` rejects `use_flash_attention: true` and `dtype != "float32"`. On
+this recipe's batches
+(prompts left-padded to 8192 tokens, responses right-padded to 4096, padding
+masked through per-token segment IDs), the TPU splash-attention backward pass
+returned wrong gradients even though its forward log-probs matched vLLM: on
+32 real calls the production gradient had cosine similarity 0.16 with a
+float32 reference and 4.9 times its norm. Layers 16–35 matched; below layer
+15 the per-tensor cosine was mostly between −0.1 and +0.2 and the norm 2–23
+times too large. Switching to XLA reference attention raised the global
+bfloat16 cosine to 0.97, but early-layer `RMSNorm`, `q_norm`/`k_norm`, and
+RoPE attention projections still dropped to cosine −0.09 to +0.52 on long
+multi-turn contexts, while separate `fwd_only` vs. `fwd_bwd` bfloat16 XLA
+graphs introduced single-token log-ratio spikes before any weight update.
+Running the trainer in `dtype: float32` (with `bfloat16` vLLM rollout and
+`sampler_is: token` truncated importance weights on an exact on-policy PPO
+baseline) eliminates both sources of drift.
 
 The data preparation script uses the source recipe's `aaabiao/dapo_filter`
 corpus at a fixed revision. It removes the source instruction suffix, groups
 duplicate questions before splitting, and reserves 256 questions for development.
 Questions with conflicting reference answers are excluded as a whole and listed
 by hash in the manifest, so no conflicting duplicate can cross the split.
-The manifest records retained counts, exclusions and file hashes. The test set
-is not loaded by this entry point.
+It also writes the source's six benchmarks at pinned Hugging Face revisions:
+`test.jsonl` (1,547 questions in source order, task IDs `<benchmark>/<index>`)
+and `test_sampled.jsonl` (first 50 MATH500 questions, AIME'24 and AIME'25).
+The manifest records retained counts, exclusions, test sources, verbatim
+test/training overlaps and file hashes.
 
 ```bash
 python -m examples.swarm_math.prepare_data --output /tmp/swarm-math-data
@@ -157,23 +194,36 @@ hf download Qwen/Qwen3-4B \
   --revision 1cfa9a7208912126459214e8b04321603b3df60c
 
 # Pass the HF cache snapshot directory printed by hf download.
+# On TPU/Pathways (128 chips / v5p-256), splits into 64 rollout + 64 train
+# devices ((fsdp=8, tp=8) each) and writes Orbax checkpoints to --checkpoint-dir.
+# Rerunning the same command with --resume continues from the newest checkpoint.
 python -m examples.swarm_math.train --backend qwen \
   --model-path /path/to/snapshots/1cfa9a7208912126459214e8b04321603b3df60c \
   --train-data /tmp/swarm-math-data/train.jsonl \
-  --eval-data /tmp/swarm-math-data/dev.jsonl \
-  --output /path/to/new-run
+  --eval-data /tmp/swarm-math-data/test_sampled.jsonl \
+  --output /path/to/new-run \
+  --checkpoint-dir gs://your-bucket/swarm-runs/qwen3-4b/checkpoints --resume
+
+# Full test suite with 16 samples per question, from checkpoint 772. A --config
+# with a larger vllm_max_num_seqs (e.g. 256) raises evaluation throughput.
+python -m examples.swarm_math.train --backend qwen --mode eval \
+  --model-path /path/to/snapshots/1cfa9a7208912126459214e8b04321603b3df60c \
+  --train-data /tmp/swarm-math-data/train.jsonl \
+  --eval-data /tmp/swarm-math-data/test.jsonl --eval-attempts 16 \
+  --checkpoint-dir gs://your-bucket/swarm-runs/qwen3-4b/checkpoints \
+  --restore-step 772 --output /path/to/new-eval
 ```
 
-This launch currently uses one process with an `(fsdp, tp=1)` JAX mesh. Both
-serving roles use the shared checkpoint. The local transport copies buffers
-before serving so optimizer buffer donation cannot invalidate a rollout model.
-Capacity, precision, rematerialization and throughput need accelerator profiling
-before a full 4B run. No accelerator result is implied by the CPU tests.
+When `rollout_engine=vllm` and `rollout_split_fraction=0.5`, `train.py` builds
+two `(fsdp, tp)` meshes sized by `--tp-size` and synchronizes actor `float32`
+weights onto the `bfloat16` vLLM rollout engine. On `--backend cpu` or
+`--rollout-engine vanilla`, local copies prevent optimizer buffer donation from
+invalidating inference buffers. Recovery across separate rollout and trainer
+services is not covered yet.
 
 For user-provided data, each JSONL row is
-`{"task_id":"unique-id","problem":"...","answer":"..."}`. Train and eval
-IDs and problem text must be disjoint. Evaluation records answer accuracy,
-generated tokens and call counts, with team and single-Solver diagnostics.
-The single-Solver diagnostic is not yet a matched-compute trained baseline.
-Benchmark reporting still requires locked tests, multiple seeds and matched
-training/inference budgets.
+`{"task_id":"unique-id","problem":"...","answer":"..."}`. Train and eval task
+IDs must be disjoint; identical problem text is allowed and listed in the report
+as `eval_training_overlap`. Evaluation records answer accuracy, generated tokens
+and call counts, with team and single-Solver diagnostics. The single-Solver
+diagnostic is not a matched-compute trained baseline.

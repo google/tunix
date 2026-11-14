@@ -9,10 +9,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Prepare the reference training corpus with a disjoint development holdout.
+"""Prepare the reference training corpus and the reference math test suite.
 
-This intentionally does not use MATH-500/AIME test questions for development.
-Deduplication and split membership are deterministic and recorded in a manifest.
+Training questions keep a disjoint development holdout. Benchmark questions are
+written as separate evaluation files and never enter the train/dev split.
+Deduplication, split membership and source revisions are recorded in a manifest.
 """
 
 import argparse
@@ -26,6 +27,46 @@ REVISION = "0b10fea35812902fe4f6985f2064424ec460f9c0"
 _SUFFIX = re.compile(
     r"(\r?\n|\\n)*\s*Let'?s\s+think\s+step\s+by\s+step\s+and\s+output\s+the\s+final\s+answer\s+within\s*\\boxed\{\}\.\s*$",
     re.IGNORECASE,
+)
+# Upstream examples/data_preprocess/drmas_math.py test sources, in upstream
+# test.parquet order. Revisions are the Hub commits holding that unchanged data.
+TEST_SETS = (
+    (
+        "math500",
+        "HuggingFaceH4/MATH-500",
+        "6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be",
+        "test",
+    ),
+    (
+        "aime24",
+        "HuggingFaceH4/aime_2024",
+        "2fe88a2f1091d5048c0f36abc874fb997b3dd99a",
+        "train",
+    ),
+    (
+        "aime25",
+        "MathArena/aime_2025",
+        "c94da77eb22bbd6439e62a323bec18493a421302",
+        "train",
+    ),
+    (
+        "olympiadbench",
+        "realtreetune/olympiadbench",
+        "ba3660e5eb252709639dfff5b6f16d2c482fce7b",
+        "test",
+    ),
+    (
+        "amc23",
+        "knoveleng/AMC-23",
+        "55c4747921a0971a18408979dcc2bc85af98f136",
+        "train",
+    ),
+    (
+        "minerva",
+        "zwhe99/simplerl-minerva-math",
+        "647bd705ccd4bde066950b8c4afcaae5cfe73620",
+        "test",
+    ),
 )
 
 
@@ -67,6 +108,46 @@ def convert_and_split(rows, *, dev_size=256, seed=42, stats=None):
   return ordered[dev_size:], ordered[:dev_size]
 
 
+def build_test_suites(sources, training_problems):
+  """Upstream test.parquet, its 110-question training-time sample and overlap.
+
+  Like upstream `make_map_fn_test`, problem text is unchanged and answers are
+  stringified. Upstream does not decontaminate; exact matches with the training
+  corpus are listed so reports can also exclude them.
+
+  Args:
+    sources: Mapping from upstream test-set name to its rows.
+    training_problems: Problem texts of the reference training corpus.
+
+  Returns:
+    `(suites, overlap)`: the `test` and `test_sampled` task lists, and sorted
+    task IDs whose problem text also occurs in the training corpus.
+  """
+  converted = {
+      name: [
+          {
+              "task_id": f"{name}/{index}",
+              "problem": row["problem"],
+              "answer": str(row["answer"]),
+          }
+          for index, row in enumerate(sources[name])
+      ]
+      for name, *_ in TEST_SETS
+  }
+  suites = {
+      "test": [row for name, *_ in TEST_SETS for row in converted[name]],
+      "test_sampled": (
+          converted["math500"][:50] + converted["aime24"] + converted["aime25"]
+      ),
+  }
+  overlap = sorted(
+      row["task_id"]
+      for row in suites["test"]
+      if row["problem"].strip() in training_problems
+  )
+  return suites, overlap
+
+
 def main():
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument("--output", type=Path, required=True)
@@ -83,14 +164,26 @@ def main():
   train, dev = convert_and_split(
       rows, dev_size=args.dev_size, seed=args.seed, stats=stats
   )
+  suites, overlap = build_test_suites(
+      {
+          name: load_dataset(dataset, revision=revision, split=split)
+          for name, dataset, revision, split in TEST_SETS
+      },
+      {row["problem"] for row in train + dev},
+  )
   manifest = {
       "dataset": DATASET,
       "revision": REVISION,
       "seed": args.seed,
       **stats,
+      "test_sources": [
+          {"name": name, "dataset": dataset, "revision": revision, "split": s}
+          for name, dataset, revision, s in TEST_SETS
+      ],
+      "test_training_overlap": overlap,
       "splits": {},
   }
-  for name, items in (("train", train), ("dev", dev)):
+  for name, items in {"train": train, "dev": dev, **suites}.items():
     content = "".join(json.dumps(row) + "\n" for row in items)
     (args.output / f"{name}.jsonl").write_text(content)
     manifest["splits"][name] = {

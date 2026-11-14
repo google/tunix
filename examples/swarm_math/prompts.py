@@ -16,6 +16,14 @@
 
 """Unchanged prompts from the pinned DrMAS source; see THIRD_PARTY.md."""
 
+# `agent_system/environments/prompts/math.py`. In multi-agent mode the math
+# environment manager (`build_text_obs`) wraps every question with this template
+# and the result fills the role prompts' `{env_prompt}`.
+MATH_MULTIAGENT_TEMPLATE = (
+    "You are a member of an expert multi-agent team tasked with solving the"
+    " math problem.\nThe team's math problem is: {task_description}\n"
+)
+
 SOLVER_PROMPT = """
 # Task Introduction
 {env_prompt}

@@ -161,6 +161,28 @@ def sample_best(
   return next_token, logp_sampled
 
 
+def _decode_unpadded_outputs(
+    tokenizer: tok_adapter.TokenizerAdapter,
+    out_tokens: Sequence[np.ndarray],
+    eos_ids: jax.Array,
+    *,
+    include_eos: bool,
+) -> list[str]:
+  """Decodes completion tokens while omitting a trailing EOS from text."""
+  if not include_eos:
+    return [tokenizer.decode(tokens.tolist()) for tokens in out_tokens]
+  eos_set = frozenset(np.asarray(eos_ids).tolist())
+  texts = []
+  for tokens in out_tokens:
+    visible = (
+        tokens[:-1]
+        if len(tokens) > 0 and int(tokens[-1]) in eos_set
+        else tokens
+    )
+    texts.append(tokenizer.decode(visible.tolist()))
+  return texts
+
+
 def _init_cache(
     n_layers: int,
     cache_size: int,
@@ -1158,9 +1180,9 @@ class VanillaSampler(
               final_logprobs_buffer[i][start_idx:end_idx].tolist()
           )
 
-      decoded_outputs = [
-          self.tokenizer.decode(tokens.tolist()) for tokens in out_tokens
-      ]
+      decoded_outputs = _decode_unpadded_outputs(
+          self.tokenizer, out_tokens, self.eos_ids, include_eos=include_eos
+      )
 
     responses: list[base_sampler_lib.SamplingResponse] = []
     pad_id = self.tokenizer.pad_id()

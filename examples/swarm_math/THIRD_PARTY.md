@@ -12,6 +12,9 @@ The Apache 2.0 license is included in `LICENSE.DrMAS`.
 - `prompts.py` contains unchanged `SOLVER_PROMPT` and `VERIFIER_PROMPT`
   text values from `agent_system/agent/agents/math/`; one trailing prompt space
   is encoded as `\x20` in the Python source without changing the string value.
+  It also contains the unchanged `MATH_MULTIAGENT_TEMPLATE` from
+  `agent_system/environments/prompts/math.py`, which the multi-agent math
+  environment manager wraps around every question to form `{env_prompt}`.
 - `workflow.py` adapts the orchestration and projection to async Tunix calls,
   retaining the original semantics and copyright notices.
 - `tests/dist_rl/swarm/reference/drmas.json` contains exact extracted source
