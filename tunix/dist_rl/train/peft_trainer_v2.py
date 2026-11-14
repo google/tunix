@@ -46,6 +46,7 @@ from tunix.sft import hooks
 from tunix.sft import inflight_throttler
 from tunix.sft import metrics_logger as sft_metrics_logger
 from tunix.sft import profiler
+from tunix.sft import profiler_jax
 from tunix.sft import progress_bar
 from tunix.sft import sharding_utils
 from tunix.sft import utils
@@ -551,6 +552,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         initial_step=self._iter_steps,
         max_step=max_step,
         profiler_options=self.config.profiler_options,
+        backend=profiler_jax.JaxProfilerBackend(),
     )
 
   def with_training_hooks(self, training_hooks: hooks.TrainingHooks):
