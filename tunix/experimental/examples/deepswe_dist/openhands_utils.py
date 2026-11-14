@@ -27,6 +27,7 @@ from typing import Any, Optional
 import uuid
 
 from tunix.experimental.examples.deepswe_dist import opencode_fuzzy
+from tunix.experimental.examples.deepswe_dist import sandbox_utils
 from tunix.rl.agentic.environments.base_environment import EnvStepResult
 
 fuzzy_find_match = opencode_fuzzy.fuzzy_find_match
@@ -952,117 +953,108 @@ def evaluate_patch_in_fresh_container(
   if eval_env is None:
     return 0.0
 
-  from tunix.experimental.examples.deepswe_dist import sandbox_utils  # pylint: disable=g-import-not-at-top
-
-  original_container = sandbox_utils.RUNTIME_CONTAINER_NAME
-  runtime_obj = getattr(eval_env, "runtime", None) or eval_env
-  if runtime_obj is not None:
-    original_container = getattr(
-        runtime_obj, "_target_container", sandbox_utils.RUNTIME_CONTAINER_NAME
-    )
-
-  sandbox_utils.set_runtime_container(
+  with sandbox_utils.runtime_container_scope(
       eval_env, sandbox_utils.EVAL_CONTAINER_NAME
-  )
-  try:
-    runtime = getattr(eval_env, "runtime", None)
-    if runtime is None or not hasattr(runtime, "run"):
-      if orig_compute_reward is not None:
-        return float(orig_compute_reward(*args, **kwargs))
-      return 0.0
+  ):
+    try:
+      runtime = getattr(eval_env, "runtime", None)
+      if runtime is None or not hasattr(runtime, "run"):
+        if orig_compute_reward is not None:
+          return float(orig_compute_reward(*args, **kwargs))
+        return 0.0
 
-    repo_path = getattr(runtime, "repo_path", "/testbed") or "/testbed"
-    git_ls_res = runtime.run(
-        "git ls-files --others --exclude-standard",
-        timeout=30,
-    )
-    git_ls_output, git_ls_exit = _unpack_exec_output(git_ls_res)
-    if git_ls_exit != 0:
-      logging.warning(
-          "[SWEEnv] Failed to list untracked files in eval container: %s",
-          git_ls_output,
+      repo_path = getattr(runtime, "repo_path", "/testbed") or "/testbed"
+      git_ls_res = runtime.run(
+          "git ls-files --others --exclude-standard",
+          timeout=30,
       )
-      return 0.0
-
-    untracked_files = [
-        f.strip() for f in git_ls_output.splitlines() if f.strip()
-    ]
-    exclude_str = " ".join(
-        shlex.quote(f"--exclude={f}") for f in untracked_files
-    )
-
-    patch_path = "/tmp/model.patch"
-    b64_patch = base64.b64encode(patch.encode("utf-8")).decode("ascii")
-    if len(b64_patch) <= 65536:
-      inner_apply = (
-          f"printf '%s' {shlex.quote(b64_patch)} | base64 -d > {patch_path} && "
-          f"cd {shlex.quote(repo_path)} && "
-          f"git apply --whitespace=fix {exclude_str} {patch_path}; "
-          f"_rc=$?; rm -f {patch_path}; exit $_rc"
-      )
-      apply_cmd = f"/bin/sh -c {shlex.quote(inner_apply)}"
-    else:
-      b64_tmp_path = f"{patch_path}.b64"
-      chunk_size = 49152
-      for idx in range(0, len(b64_patch), chunk_size):
-        chunk = b64_patch[idx : idx + chunk_size]
-        redir = ">" if idx == 0 else ">>"
-        inner_chunk = f"printf '%s' {shlex.quote(chunk)} {redir} {b64_tmp_path}"
-        chunk_res = runtime.run(
-            f"/bin/sh -c {shlex.quote(inner_chunk)}", timeout=30
+      git_ls_output, git_ls_exit = _unpack_exec_output(git_ls_res)
+      if git_ls_exit != 0:
+        logging.warning(
+            "[SWEEnv] Failed to list untracked files in eval container: %s",
+            git_ls_output,
         )
-        chunk_out, chunk_exit = _unpack_exec_output(chunk_res)
-        if chunk_exit != 0:
-          logging.warning(
-              "[SWEEnv] Failed to write patch chunk in eval container: %s",
-              chunk_out,
-          )
-          runtime.run(f"rm -f {shlex.quote(b64_tmp_path)}", timeout=15)
-          return 0.0
-      inner_apply = (
-          f"base64 -d {b64_tmp_path} > {patch_path} && "
-          f"rm -f {b64_tmp_path} && "
-          f"cd {shlex.quote(repo_path)} && "
-          f"git apply --whitespace=fix {exclude_str} {patch_path}; "
-          f"_rc=$?; rm -f {b64_tmp_path} {patch_path}; exit $_rc"
-      )
-      apply_cmd = f"/bin/sh -c {shlex.quote(inner_apply)}"
+        return 0.0
 
-    apply_res = runtime.run(apply_cmd, timeout=60)
-    apply_output, apply_exit = _unpack_exec_output(apply_res)
-    if apply_exit != 0:
+      untracked_files = [
+          f.strip() for f in git_ls_output.splitlines() if f.strip()
+      ]
+      exclude_str = " ".join(
+          shlex.quote(f"--exclude={f}") for f in untracked_files
+      )
+
+      patch_path = "/tmp/model.patch"
+      b64_patch = base64.b64encode(patch.encode("utf-8")).decode("ascii")
+      if len(b64_patch) <= 65536:
+        inner_apply = (
+            f"printf '%s' {shlex.quote(b64_patch)} | base64 -d > {patch_path}"
+            f" && cd {shlex.quote(repo_path)} && git apply --whitespace=fix"
+            f" {exclude_str} {patch_path}; _rc=$?; rm -f {patch_path}; exit"
+            " $_rc"
+        )
+        apply_cmd = f"/bin/sh -c {shlex.quote(inner_apply)}"
+      else:
+        b64_tmp_path = f"{patch_path}.b64"
+        chunk_size = 49152
+        for idx in range(0, len(b64_patch), chunk_size):
+          chunk = b64_patch[idx : idx + chunk_size]
+          redir = ">" if idx == 0 else ">>"
+          inner_chunk = (
+              f"printf '%s' {shlex.quote(chunk)} {redir} {b64_tmp_path}"
+          )
+          chunk_res = runtime.run(
+              f"/bin/sh -c {shlex.quote(inner_chunk)}", timeout=30
+          )
+          chunk_out, chunk_exit = _unpack_exec_output(chunk_res)
+          if chunk_exit != 0:
+            logging.warning(
+                "[SWEEnv] Failed to write patch chunk in eval container: %s",
+                chunk_out,
+            )
+            runtime.run(f"rm -f {shlex.quote(b64_tmp_path)}", timeout=15)
+            return 0.0
+        inner_apply = (
+            f"base64 -d {b64_tmp_path} > {patch_path} && "
+            f"rm -f {b64_tmp_path} && "
+            f"cd {shlex.quote(repo_path)} && "
+            f"git apply --whitespace=fix {exclude_str} {patch_path}; "
+            f"_rc=$?; rm -f {b64_tmp_path} {patch_path}; exit $_rc"
+        )
+        apply_cmd = f"/bin/sh -c {shlex.quote(inner_apply)}"
+
+      apply_res = runtime.run(apply_cmd, timeout=60)
+      apply_output, apply_exit = _unpack_exec_output(apply_res)
+      if apply_exit != 0:
+        logging.warning(
+            "[SWEEnv] Failed to apply patch in eval container: %s",
+            apply_output,
+        )
+        return 0.0
+
+      runtime._defer_setup_env = False  # pylint: disable=protected-access
+      if getattr(runtime, "_handle", None) is not None:
+        runtime._handle._defer_setup_env = False  # pylint: disable=protected-access
+      if hasattr(runtime, "setup_env"):
+        runtime.setup_env()
+
+      if orig_compute_reward is not None:
+        reward = float(orig_compute_reward(*args, **kwargs))
+      elif hasattr(runtime, "_calculate_reward"):
+        reward = float(runtime._calculate_reward(*args, **kwargs))  # pylint: disable=protected-access
+      else:
+        reward = 0.0
+      logging.info(
+          "[SWEEnv] Evaluated agent patch in fresh eval container: reward=%.1f"
+          " (patch_bytes=%d)",
+          reward,
+          len(patch),
+      )
+      return reward
+    except Exception as e:  # pylint: disable=broad-exception-caught
       logging.warning(
-          "[SWEEnv] Failed to apply patch in eval container: %s",
-          apply_output,
+          "[SWEEnv] Exception during fresh container evaluation: %s", e
       )
       return 0.0
-
-    runtime._defer_setup_env = False  # pylint: disable=protected-access
-    if getattr(runtime, "_handle", None) is not None:
-      runtime._handle._defer_setup_env = False  # pylint: disable=protected-access
-    if hasattr(runtime, "setup_env"):
-      runtime.setup_env()
-
-    if orig_compute_reward is not None:
-      reward = float(orig_compute_reward(*args, **kwargs))
-    elif hasattr(runtime, "_calculate_reward"):
-      reward = float(runtime._calculate_reward(*args, **kwargs))  # pylint: disable=protected-access
-    else:
-      reward = 0.0
-    logging.info(
-        "[SWEEnv] Evaluated agent patch in fresh eval container: reward=%.1f"
-        " (patch_bytes=%d)",
-        reward,
-        len(patch),
-    )
-    return reward
-  except Exception as e:  # pylint: disable=broad-exception-caught
-    logging.warning(
-        "[SWEEnv] Exception during fresh container evaluation: %s", e
-    )
-    return 0.0
-  finally:
-    sandbox_utils.set_runtime_container(eval_env, original_container)
 
 
 def _command_timed_out(result: Any, timeout: float, elapsed: float) -> bool:
