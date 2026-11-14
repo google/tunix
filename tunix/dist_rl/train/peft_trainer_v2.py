@@ -1720,7 +1720,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     """Runs evaluation loop."""
     eval_iterator = iter(eval_ds)
     with self.eval_context():
-      eval_loss, eval_steps = 0, 0
+      eval_steps = 0
       while True:
         if self.data_hooks:
           eval_example = self.data_hooks.load_next_eval_batch(self)
@@ -1734,7 +1734,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         if self.training_hooks:
           self.training_hooks.on_eval_step_start(self)
         self.eval_step(eval_example)
-        eval_loss += self._last_eval_loss
         eval_steps += 1
 
       if eval_steps == 0:
@@ -1746,16 +1745,8 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         return
 
       assert self._buffered_eval_metrics is not None
-      uses_weighted_loss = utils.is_weighted_metric(
-          self._buffered_eval_metrics.losses[-1]
-      )
-      if uses_weighted_loss:
-        eval_loss = self._buffered_eval_metrics.loss
-      logging.info(
-          "Train step %d eval loss: %f",
-          self._train_steps,
-          eval_loss if uses_weighted_loss else eval_loss / eval_steps,
-      )
+      eval_loss = self._buffered_eval_metrics.loss
+      logging.info("Train step %d eval loss: %f", self._train_steps, eval_loss)
       if self.training_hooks:
         self.training_hooks.on_eval_step_end(self, eval_loss)
 
