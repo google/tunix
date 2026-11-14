@@ -50,6 +50,7 @@ from tunix.dist_rl.worker import trainer_worker
 from tunix.rl import algorithm_config
 from tunix.rl import common as rl_common
 from tunix.tests import test_common as tc
+from tunix.utils import maxtext_utils as tunix_maxtext_utils
 
 try:
   from maxtext.configs import pyconfig  # pylint: disable=g-import-not-at-top
@@ -291,11 +292,12 @@ class TrainerPrecompileE2ETest(parameterized.TestCase):
     mesh = jax.sharding.Mesh(
         maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes
     )
-    engine = maxtext_engine.MaxTextTrainingEngine(
+    engine = tunix_maxtext_utils.create_maxtext_engine(
         cfg,
         mesh=mesh,
         wrap_with_tunix_adapter=True,
         tokenizer_pad_id=0,
+        log_shapes=False,
     )
     trace_counts = {"fwd_bwd": 0, "accumulate": 0, "update": 0}
     orig_fwd_bwd = engine._fwd_bwd_kernel
@@ -540,12 +542,7 @@ class TrainerPrecompileE2ETest(parameterized.TestCase):
     self.assertEqual(trace_counts, traces_after_configure)
     self.assertEmpty(self._compiled_step_executables(_MAXTEXT_STEP_EXECUTABLES))
 
-  @absltest.skipUnless(
-      MAXTEXT_AVAILABLE
-      # TODO(igorts): Drop hasattr guard once cl/1015725345 lands.
-      and hasattr(maxtext_engine.MaxTextTrainingEngine, "with_fwd_only_fn"),
-      "requires MaxText with with_fwd_only_fn",
-  )
+  @absltest.skipUnless(MAXTEXT_AVAILABLE, "requires MaxText")
   @parameterized.named_parameters(
       ("padded", "padded"),
       ("packed", "packed"),
@@ -554,6 +551,7 @@ class TrainerPrecompileE2ETest(parameterized.TestCase):
       self, assembler_kind
   ):
     engine, _ = self._build_maxtext_trainer()
+    self.assertIsInstance(engine, maxtext_engine.MaxTextTrainingEngine)
     worker = trainer_worker.TrainerWorker(
         trainer_factory=lambda: engine,
         worker_id="trainer-0",

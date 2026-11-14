@@ -12,11 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import dataclasses
+import types
 from unittest import mock
 
 from absl.testing import absltest
+from flax import nnx
 import jax
 from jax import numpy as jnp
+import numpy as np
+from tunix.dist_rl.common import datatypes
+from tunix.dist_rl.train import abstract_trainer
+from tunix.dist_rl.worker import trainer_worker
+from tunix.rl import common as rl_common
+from tunix.tests import test_common as tc
 from tunix.utils import maxtext_utils
 
 # MaxText optimizer config keys. `AdamWOptions` sets all but opt_type, which
@@ -1161,6 +1170,141 @@ class MaxTextUtilsTest(absltest.TestCase):
     self.assertIn(
         "no callable '_execute_group_target_free'", "\n".join(warn_logs.output)
     )
+
+  def test_create_maxtext_engine_binds_abstract_trainer_logps(
+      self,
+  ):
+    base_toy = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=16), rngs=nnx.Rngs(0)
+    )
+
+    class TunixMaxTextAdapter(nnx.Module):
+
+      def __init__(self, inner: nnx.Module):
+        self._inner = inner
+
+      def __call__(self, *args, **kwargs):
+        return self._inner(*args, **kwargs)
+
+    dummy_state_dict = {
+        "params": {
+            "token_embedder": {
+                "embedding": jnp.ones((16, 8), dtype=jnp.float32)
+            }
+        }
+    }
+
+    class FakeMaxTextEngine:
+
+      def __init__(
+          self, cfg, *, mesh, wrap_with_tunix_adapter, tokenizer_pad_id
+      ):
+        del mesh, wrap_with_tunix_adapter, tokenizer_pad_id
+        self.cfg = cfg
+        self.model = TunixMaxTextAdapter(base_toy)
+        self.state_dict = dummy_state_dict
+        self.policy_version = 5
+        self.fwd_only_calls = 0
+        self._fwd_only_fn = None
+
+      def with_fwd_only_fn(self, fn):
+        self._fwd_only_fn = fn
+        return self
+
+      def fwd_only(self, payload):
+        if self._fwd_only_fn is None:
+          raise ValueError(
+              "MaxTextTrainingEngine.fwd_only needs a callback: call"
+              " with_fwd_only_fn() first."
+          )
+        self.fwd_only_calls += 1
+        return self._fwd_only_fn(self.model, payload)
+
+      def close(self):
+        return None
+
+    @dataclasses.dataclass(frozen=True)
+    class DummyMaxTextConfig:
+      logical_axis_rules: tuple[()] = ()
+      rollout_weight_dtype: str = "bfloat16"
+
+    class DummyMesh:
+
+      def __enter__(self):
+        return self
+
+      def __exit__(self, *args):
+        return None
+
+    dummy_cfg = DummyMaxTextConfig()
+    dummy_mesh = DummyMesh()
+    fake_engine_module = types.SimpleNamespace(
+        MaxTextTrainingEngine=FakeMaxTextEngine
+    )
+
+    with mock.patch.object(
+        maxtext_utils,
+        "maxtext_modules",
+        return_value=(
+            types.SimpleNamespace(),
+            fake_engine_module,
+            types.SimpleNamespace(),
+        ),
+    ):
+      engine = maxtext_utils.create_maxtext_engine(
+          dummy_cfg,
+          dummy_mesh,
+          wrap_with_tunix_adapter=True,
+          log_shapes=False,
+      )
+
+    worker = trainer_worker.TrainerWorker(
+        trainer_factory=lambda: engine,
+        worker_id="maxtext_trainer_0",
+    )
+    worker.initialize()
+
+    packed_req = datatypes.LogprobsRequest(
+        request_id="req-maxtext-packed",
+        prompt_tokens=np.zeros((2, 0), dtype=np.int32),
+        completion_tokens=np.array([[3, 4, 5], [3, 4, 0]], dtype=np.int32),
+        temperature=0.8,
+        pad_id=0,
+        eos_id=0,
+        segment_ids=np.array([[1, 1, 1], [1, 1, 0]], dtype=np.int32),
+        segment_positions=np.array([[0, 1, 2], [0, 1, 0]], dtype=np.int32),
+    )
+    resp = worker.per_token_logps(items=packed_req)
+    graphdef, state = nnx.split(engine.model)
+    expected = np.asarray(
+        rl_common.compute_per_token_logps(
+            graphdef,
+            state,
+            prompt_tokens=jnp.asarray(packed_req.prompt_tokens),
+            completion_tokens=jnp.asarray(packed_req.completion_tokens),
+            pad_id=0,
+            eos_id=0,
+            stop_gradient=True,
+            temperature=0.8,
+            chunk_size=0,
+            segment_ids=jnp.asarray(packed_req.segment_ids),
+            segment_positions=jnp.asarray(packed_req.segment_positions),
+        ),
+        dtype=np.float32,
+    )
+    self.assertEqual(resp.model_version, 5)
+    self.assertEqual(engine.fwd_only_calls, 1)
+    self.assertTrue(
+        issubclass(FakeMaxTextEngine, abstract_trainer.AbstractTrainer)
+    )
+    self.assertFalse(
+        issubclass(mock.MagicMock, abstract_trainer.AbstractTrainer)
+    )
+    self.assertIsInstance(engine, abstract_trainer.AbstractTrainer)
+    np.testing.assert_allclose(
+        resp.per_token_logps, expected, rtol=1e-4, atol=1e-4
+    )
+    worker.stop()
 
 
 if __name__ == "__main__":

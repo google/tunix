@@ -21,15 +21,11 @@ import contextlib
 import functools
 from typing import Any, ContextManager, TYPE_CHECKING, cast
 
-from flax import nnx
-import jax
-import jax.numpy as jnp
 import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.train import abstract_trainer
 from tunix.dist_rl.worker import abstract_worker
 from tunix.dist_rl.worker import otel_metrics
-from tunix.rl import common as rl_common
 from tunix.rl import packing
 
 if TYPE_CHECKING:
@@ -38,69 +34,60 @@ if TYPE_CHECKING:
 WorkerState = datatypes.WorkerState
 
 
-def _compute_per_token_logps(
-    model: nnx.Module,
-    payload: datatypes.LogprobsScoringPayload,
+def _score_chunked_logps(
+    trainer: abstract_trainer.AbstractTrainer,
+    prompt: np.ndarray,
+    completion: np.ndarray,
     *,
+    pad_id: int,
+    eos_id: int,
+    temperature: float,
     chunk_size: int,
-) -> jax.Array:
-  """Computes per-token log-probabilities on the read-only model copy.
+    micro_batch_size: int,
+    seg_ids: np.ndarray | None,
+    seg_pos: np.ndarray | None,
+    routed: np.ndarray | None,
+) -> np.ndarray:
+  """Scores per-token log-probabilities across micro-batch slices.
+
+  Dispatches all micro-batch slices before calling `np.asarray` so accelerator
+  backends can pipeline asynchronous device execution across slices.
 
   Args:
-    model: The NNX Module instance to score with.
-    payload: The `LogprobsScoringPayload` micro-batch containing prompt,
-      completion, static scoring parameters (`pad_id`, `eos_id`, `temperature`),
-      and optional packing/routing arrays.
-    chunk_size: Sequence chunk size for computing log-probabilities (0 computes
-      all at once).
+    trainer: The initialized `AbstractTrainer` instance.
+    prompt: Int32 prompt token array `[B, P]`.
+    completion: Int32 completion token array `[B, C]`.
+    pad_id: Padding token ID.
+    eos_id: End-of-sequence token ID.
+    temperature: Sampling softmax temperature.
+    chunk_size: Vocabulary chunk size for log-prob computation.
+    micro_batch_size: Row slice size per forward call.
+    seg_ids: Optional packed sequence segment IDs.
+    seg_pos: Optional packed sequence segment positions.
+    routed: Optional MoE routed expert indices.
 
   Returns:
-    A JAX Array containing the computed per-token log-probabilities.
+    Concatenated float32 NumPy array of per-token log-probabilities `[B, C]`.
   """
-  graphdef, state = nnx.split(model)
-  logps = rl_common.compute_per_token_logps(
-      graphdef,
-      state,
-      prompt_tokens=jnp.asarray(payload.prompt_ids),
-      completion_tokens=jnp.asarray(payload.completion_ids),
-      pad_id=payload.pad_id,
-      eos_id=payload.eos_id,
-      stop_gradient=True,
-      return_entropy=False,
-      segment_ids=(
-          None
-          if payload.segment_ids is None
-          else jnp.asarray(payload.segment_ids)
-      ),
-      segment_positions=(
-          None
-          if payload.segment_positions is None
-          else jnp.asarray(payload.segment_positions)
-      ),
-      temperature=payload.temperature,
-      chunk_size=chunk_size,
-      routed_experts=(
-          None
-          if payload.routed_experts is None
-          else jnp.asarray(payload.routed_experts)
-      ),
-  )
-  return cast(jax.Array, logps)
-
-
-# TODO(igorts): Drop legacy callback once cl/1015725345 lands and
-# requirements/maxtext_requirements.txt advances.
-def _compute_per_token_logps_legacy(
-    model: nnx.Module, *args: Any, **kwargs: Any
-) -> jax.Array:
-  """Legacy variadic callback for trainers without `with_fwd_only_fn`."""
-  graphdef, state = nnx.split(model)
-  return cast(
-      jax.Array,
-      rl_common.compute_per_token_logps(
-          graphdef, state, *args, stop_gradient=True, **kwargs
-      ),
-  )
+  raw_outs = []
+  batch_size = prompt.shape[0]
+  for start in range(0, batch_size, micro_batch_size):
+    sl = slice(start, start + micro_batch_size)
+    raw_outs.append(
+        trainer.compute_per_token_logps(
+            prompt[sl],
+            completion[sl],
+            pad_id=pad_id,
+            eos_id=eos_id,
+            temperature=temperature,
+            chunk_size=chunk_size,
+            segment_ids=None if seg_ids is None else seg_ids[sl],
+            segment_positions=None if seg_pos is None else seg_pos[sl],
+            routed_experts=None if routed is None else routed[sl],
+        )
+    )
+  outs = [np.asarray(out, dtype=np.float32) for out in raw_outs]
+  return np.concatenate(outs, axis=0).astype(np.float32, copy=False)
 
 
 class TrainerWorker(abstract_worker.Worker):
@@ -187,14 +174,6 @@ class TrainerWorker(abstract_worker.Worker):
       if self._trainer is None:
         with self.execution_context():
           trainer = self._trainer_factory()
-          # TODO(igorts): Drop hasattr guard once cl/1015725345 lands and
-          # requirements/maxtext_requirements.txt advances.
-          if hasattr(trainer, "with_fwd_only_fn"):
-            trainer.with_fwd_only_fn(
-                functools.partial(
-                    _compute_per_token_logps, chunk_size=self._logps_chunk_size
-                )
-            )
           if self._pending_loss_fn is not None:
             trainer.with_loss_fn(*self._pending_loss_fn)
             self._pending_loss_fn = None
@@ -502,40 +481,19 @@ class TrainerWorker(abstract_worker.Worker):
         )
       with self._otel.track_rpc(phase="per_token_logps"):
         micro_batch_size = self._logps_micro_batch_size or batch_size
-        use_callback_fwd_only = hasattr(trainer, "with_fwd_only_fn")
-        outs = []
-        for start in range(0, batch_size, micro_batch_size):
-          sl = slice(start, start + micro_batch_size)
-          if use_callback_fwd_only:
-            payload = datatypes.LogprobsScoringPayload(
-                prompt_ids=prompt[sl],
-                completion_ids=completion[sl],
-                pad_id=int(items.pad_id),
-                eos_id=int(items.eos_id),
-                temperature=temperature,
-                segment_ids=None if seg_ids is None else seg_ids[sl],
-                segment_positions=None if seg_pos is None else seg_pos[sl],
-                routed_experts=None if routed is None else routed[sl],
-            )
-            outs.append(trainer.fwd_only(payload))
-          else:
-            # TODO(igorts): Drop legacy fallback once cl/1015725345 lands and
-            # requirements/maxtext_requirements.txt advances.
-            outs.append(
-                cast(Any, trainer).fwd_only(
-                    _compute_per_token_logps_legacy,
-                    prompt[sl],
-                    completion[sl],
-                    pad_id=items.pad_id,
-                    eos_id=items.eos_id,
-                    temperature=temperature,
-                    chunk_size=self._logps_chunk_size,
-                    segment_ids=None if seg_ids is None else seg_ids[sl],
-                    segment_positions=None if seg_pos is None else seg_pos[sl],
-                    routed_experts=None if routed is None else routed[sl],
-                )
-            )
-        result = np.asarray(jnp.concatenate(outs, axis=0), dtype=np.float32)
+        result = _score_chunked_logps(
+            trainer,
+            prompt,
+            completion,
+            pad_id=items.pad_id,
+            eos_id=items.eos_id,
+            temperature=temperature,
+            chunk_size=self._logps_chunk_size,
+            micro_batch_size=micro_batch_size,
+            seg_ids=seg_ids,
+            seg_pos=seg_pos,
+            routed=routed,
+        )
       self._last_error = None
       return datatypes.LogprobsResponse(
           request_id=items.request_id,

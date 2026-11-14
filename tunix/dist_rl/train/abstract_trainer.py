@@ -19,20 +19,12 @@ Defines the pure ML algorithmic core of a trainer.
 
 import abc
 import dataclasses
-from typing import Any, Callable, Protocol, TypeVar, cast
+from typing import Any, Callable, TypeVar, cast
 
 import numpy as np
 from tunix.dist_rl.common import datatypes
 
 _PayloadT = TypeVar("_PayloadT")
-
-
-class _TrainerWithModel(Protocol):
-  """Structural protocol for trainer engines exposing a `.model` attribute."""
-
-  @property
-  def model(self) -> Any:
-    ...
 
 
 class AbstractTrainer(abc.ABC):
@@ -282,6 +274,45 @@ class AbstractTrainer(abc.ABC):
         f"{type(self).__name__} does not implement get_metrics."
     )
 
+  def compute_per_token_logps(
+      self,
+      prompt_tokens: np.ndarray,
+      completion_tokens: np.ndarray,
+      *,
+      pad_id: int,
+      eos_id: int,
+      temperature: float = 1.0,
+      chunk_size: int = 0,
+      segment_ids: np.ndarray | None = None,
+      segment_positions: np.ndarray | None = None,
+      routed_experts: np.ndarray | None = None,
+  ) -> Any:
+    """Computes per-token log-probabilities under live trainer weights.
+
+    Inputs cross the worker boundary as NumPy arrays; implementations may return
+    a NumPy array or a device array convertible via `np.asarray` so
+    `TrainerWorker` stays framework-neutral across JAX and PyTorch trainers.
+
+    Args:
+      prompt_tokens: Int32 prompt token array `[B, P]`.
+      completion_tokens: Int32 completion token array `[B, C]`.
+      pad_id: Padding token ID.
+      eos_id: End-of-sequence token ID.
+      temperature: Sampling softmax temperature.
+      chunk_size: Optional vocabulary chunk size for memory-bounded log-probs.
+      segment_ids: Optional packed sequence segment IDs `[B, P + C]`.
+      segment_positions: Optional packed sequence positions `[B, P + C]`.
+      routed_experts: Optional MoE router replay tensor.
+
+    Returns:
+      Float32 array-like of completion per-token log-probabilities.
+    """
+    del prompt_tokens, completion_tokens, pad_id, eos_id, temperature
+    del chunk_size, segment_ids, segment_positions, routed_experts
+    raise NotImplementedError(
+        f"{type(self).__name__} does not implement compute_per_token_logps."
+    )
+
   @abc.abstractmethod
   def close(self) -> None:
     """Releases resources held by the trainer. Default: no-op."""
@@ -289,7 +320,7 @@ class AbstractTrainer(abc.ABC):
 
 
 def resolve_dummy_routed_experts(
-    trainer: AbstractTrainer | _TrainerWithModel,
+    trainer: AbstractTrainer,
     data: _PayloadT,
 ) -> _PayloadT:
   """Expands `(B, S, 0, 0)` precompile `routed_experts` placeholders.
