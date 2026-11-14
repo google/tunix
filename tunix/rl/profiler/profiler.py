@@ -15,10 +15,11 @@
 """RL Profiler abstraction supporting standard JAX and ML Diagnostics backends for Pathways setup."""
 
 import collections
+from collections.abc import Iterator
 import contextlib
 import logging
 import threading
-from typing import Any, Optional
+from typing import Any
 import jax
 from tunix.common import configs
 
@@ -41,14 +42,22 @@ except ImportError:
 class _JAXProfilerBackend:
   """Duck-typed wrapper for JAX tracing with Pathways session ID plumbing."""
 
-  def __init__(self, output_dir: str):
-    self._output_dir = output_dir
+  def __init__(
+      self,
+      output_dir: str,
+      config: configs.RLProfileConfig | None = None,
+  ):
+    self._output_dir: str = output_dir
+    self._config: configs.RLProfileConfig | None = config
 
-  def start(self, session_id: Optional[str] = None) -> None:
+  def start(self, session_id: str | None = None) -> None:
+    """Starts a JAX profiler trace with configured session options."""
     options = jax.profiler.ProfileOptions()
     if session_id:
       # Plumb session_id so PathwaysUtils intercepts it for separated profiles
       options.session_id = session_id
+    if self._config is not None and self._config.enable_continuous_profiling:
+      options.advanced_configuration = {"enable_continuous_profiling": True}
     jax.profiler.start_trace(self._output_dir, profiler_options=options)
 
   def stop(self) -> None:
@@ -74,7 +83,7 @@ class RLProfiler:
     self.config = config
     self._call_counts: dict[str, int] = collections.defaultdict(int)
 
-    if getattr(config, "managed_mldiagnostics", False):
+    if config.managed_mldiagnostics:
       if not _HAS_MLDIAG or mldiag_xprof is None:
         raise RuntimeError(
             "RLProfileConfig.managed_mldiagnostics is True, but "
@@ -92,12 +101,12 @@ class RLProfiler:
         self._profiler._ensure_initialized()
     else:
       # Fallback chain: Explicit diagnostics dir -> Standard output dir
-      output_dir = getattr(config, "mldiagnostics_dir", "") or config.output_dir
-      self._profiler = _JAXProfilerBackend(output_dir)
+      output_dir = config.mldiagnostics_dir or config.output_dir
+      self._profiler = _JAXProfilerBackend(output_dir, config=config)
 
     self._is_active: bool = False
-    self._active_role: Optional[str] = None
-    self._stop_thread: Optional[threading.Thread] = None
+    self._active_role: str | None = None
+    self._stop_thread: threading.Thread | None = None
     self._lock: threading.Lock = threading.Lock()
 
   def should_profile(self, role: str) -> bool:
@@ -108,7 +117,9 @@ class RLProfiler:
     )
 
   @contextlib.contextmanager
-  def profile(self, role: str, future_output: Any = None):
+  def profile(
+      self, role: str, future_output: Any = None
+  ) -> Iterator[ProfileScope]:
     """Context manager to activate and deactivate targeted profiling.
 
     Args:
@@ -142,7 +153,7 @@ class RLProfiler:
 
     # If a previous background stop thread is still finishing, wait for it so
     # that the trace cleanly ends before starting a new one.
-    thread_to_join = None
+    thread_to_join: threading.Thread | None = None
     with self._lock:
       if self._stop_thread is not None and self._stop_thread.is_alive():
         thread_to_join = self._stop_thread
@@ -195,7 +206,7 @@ class RLProfiler:
           target_future_output = future_output
           future_output = None
 
-          def _async_stop():
+          def _async_stop() -> None:
             nonlocal target_future_output
             try:
               try:
@@ -228,7 +239,7 @@ class RLProfiler:
 
   def close(self) -> None:
     """Joins any active background stop thread and stops any trace still active."""
-    thread_to_join = None
+    thread_to_join: threading.Thread | None = None
     with self._lock:
       if self._stop_thread is not None and self._stop_thread.is_alive():
         thread_to_join = self._stop_thread

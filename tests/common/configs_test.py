@@ -209,9 +209,14 @@ class ConfigsTest(absltest.TestCase):
     self.assertEqual(cfg.start_invocation, 2)
     self.assertEqual(cfg.num_invocations, 1)
     self.assertEqual(cfg.timeout_secs, 60.0)
+    self.assertFalse(cfg.enable_continuous_profiling)
 
-    cfg_custom = configs.RLProfileConfig(timeout_secs=45.0)
+    cfg_custom = configs.RLProfileConfig(
+        timeout_secs=45.0,
+        enable_continuous_profiling=True,
+    )
     self.assertEqual(cfg_custom.timeout_secs, 45.0)
+    self.assertTrue(cfg_custom.enable_continuous_profiling)
 
     with self.assertRaisesRegex(ValueError, "start_invocation must be >= 0"):
       configs.RLProfileConfig(start_invocation=-1)
