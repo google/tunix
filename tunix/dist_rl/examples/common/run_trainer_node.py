@@ -459,6 +459,41 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--maxtext_skip_step_on_spikes",
+      type=_str2bool,
+      default=False,
+      nargs="?",
+      const=True,
+      help=(
+          "If True, skips the training step in MaxText when a loss/grad spike"
+          " is detected."
+      ),
+  )
+  parser.add_argument(
+      "--skip_step_on_nan",
+      dest="skip_step_on_nan",
+      type=_str2bool,
+      default=False,
+      nargs="?",
+      const=True,
+      help=(
+          "If True, skips the training step when the gradient norm is NaN or"
+          " Inf."
+      ),
+  )
+  parser.add_argument(
+      "--maxtext_skip_step_interval",
+      type=int,
+      default=128,
+      help="Rolling window interval for MaxText skip_step_on_spikes.",
+  )
+  parser.add_argument(
+      "--maxtext_skip_step_scaling_factor",
+      type=float,
+      default=6.0,
+      help="Scaling factor for MaxText skip_step_on_spikes.",
+  )
+  parser.add_argument(
       "--prefuse_moe_weights",
       type=_str2bool,
       default=False,
@@ -849,6 +884,10 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
       attention=args.maxtext_attention,
       device_host_concurrent_gb=int(d2h_gb) if d2h_gb else None,
       extra_flags=extra_flags,
+      skip_step_on_spikes=args.maxtext_skip_step_on_spikes,
+      skip_step_on_nan=args.skip_step_on_nan,
+      skip_step_interval=args.maxtext_skip_step_interval,
+      skip_step_scaling_factor=args.maxtext_skip_step_scaling_factor,
   )
   logging.info("Creating MaxText device mesh...")
   mesh = maxtext_utils.create_maxtext_mesh(maxtext_config)
