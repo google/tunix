@@ -706,43 +706,6 @@ class TrainerWorkerTest(absltest.TestCase):
     self.assertFalse(hasattr(payload, "completion_mask"))
     self.assertFalse(hasattr(payload, "advantages"))
 
-  def test_per_token_logps_falls_back_to_legacy_trainer_without_with_fwd_only_fn(
-      self,
-  ):
-    class _LegacyFakeTrainer:
-
-      def __init__(self):
-        self.model = tc.ToyTransformer(
-            config=tc.ModelConfig(), rngs=nnx.Rngs(0)
-        )
-        self.policy_version = 3
-        self.step_count = 10
-        self.fwd_only_calls = []
-
-      def fwd_only(self, fn, *args, **kwargs):
-        self.fwd_only_calls.append((fn, args, kwargs))
-        return fn(self.model, *args, **kwargs)
-
-    legacy_trainer = _LegacyFakeTrainer()
-    worker = trainer_worker.TrainerWorker(
-        trainer_factory=lambda: legacy_trainer,
-        worker_id="legacy_trainer",
-        logps_micro_batch_size=2,
-        logps_chunk_size=3,
-    )
-    worker.initialize()
-    request = self._unpacked_request(temperature=0.7)
-
-    result = worker.per_token_logps(items=request)
-
-    self.assertLen(legacy_trainer.fwd_only_calls, 2)
-    np.testing.assert_allclose(
-        result.per_token_logps,
-        self._expected_logps(request),
-        rtol=1e-4,
-        atol=1e-4,
-    )
-
   def test_per_token_logps_forwards_routed_experts_per_micro_batch(self):
     worker = trainer_worker.TrainerWorker(
         trainer_factory=lambda: self.fake_trainer,

@@ -88,21 +88,6 @@ def _compute_per_token_logps(
   return cast(jax.Array, logps)
 
 
-# TODO(igorts): Drop legacy callback once cl/1015725345 lands and
-# requirements/maxtext_requirements.txt advances.
-def _compute_per_token_logps_legacy(
-    model: nnx.Module, *args: Any, **kwargs: Any
-) -> jax.Array:
-  """Legacy variadic callback for trainers without `with_fwd_only_fn`."""
-  graphdef, state = nnx.split(model)
-  return cast(
-      jax.Array,
-      rl_common.compute_per_token_logps(
-          graphdef, state, *args, stop_gradient=True, **kwargs
-      ),
-  )
-
-
 class TrainerWorker(abstract_worker.Worker):
   """Worker wrapper for a Trainer.
 
@@ -187,14 +172,11 @@ class TrainerWorker(abstract_worker.Worker):
       if self._trainer is None:
         with self.execution_context():
           trainer = self._trainer_factory()
-          # TODO(igorts): Drop hasattr guard once cl/1015725345 lands and
-          # requirements/maxtext_requirements.txt advances.
-          if hasattr(trainer, "with_fwd_only_fn"):
-            trainer.with_fwd_only_fn(
-                functools.partial(
-                    _compute_per_token_logps, chunk_size=self._logps_chunk_size
-                )
-            )
+          trainer.with_fwd_only_fn(
+              functools.partial(
+                  _compute_per_token_logps, chunk_size=self._logps_chunk_size
+              )
+          )
           if self._pending_loss_fn is not None:
             trainer.with_loss_fn(*self._pending_loss_fn)
             self._pending_loss_fn = None
@@ -502,39 +484,20 @@ class TrainerWorker(abstract_worker.Worker):
         )
       with self._otel.track_rpc(phase="per_token_logps"):
         micro_batch_size = self._logps_micro_batch_size or batch_size
-        use_callback_fwd_only = hasattr(trainer, "with_fwd_only_fn")
         outs = []
         for start in range(0, batch_size, micro_batch_size):
           sl = slice(start, start + micro_batch_size)
-          if use_callback_fwd_only:
-            payload = datatypes.LogprobsScoringPayload(
-                prompt_ids=prompt[sl],
-                completion_ids=completion[sl],
-                pad_id=int(items.pad_id),
-                eos_id=int(items.eos_id),
-                temperature=temperature,
-                segment_ids=None if seg_ids is None else seg_ids[sl],
-                segment_positions=None if seg_pos is None else seg_pos[sl],
-                routed_experts=None if routed is None else routed[sl],
-            )
-            outs.append(trainer.fwd_only(payload))
-          else:
-            # TODO(igorts): Drop legacy fallback once cl/1015725345 lands and
-            # requirements/maxtext_requirements.txt advances.
-            outs.append(
-                cast(Any, trainer).fwd_only(
-                    _compute_per_token_logps_legacy,
-                    prompt[sl],
-                    completion[sl],
-                    pad_id=items.pad_id,
-                    eos_id=items.eos_id,
-                    temperature=temperature,
-                    chunk_size=self._logps_chunk_size,
-                    segment_ids=None if seg_ids is None else seg_ids[sl],
-                    segment_positions=None if seg_pos is None else seg_pos[sl],
-                    routed_experts=None if routed is None else routed[sl],
-                )
-            )
+          payload = datatypes.LogprobsScoringPayload(
+              prompt_ids=prompt[sl],
+              completion_ids=completion[sl],
+              pad_id=int(items.pad_id),
+              eos_id=int(items.eos_id),
+              temperature=temperature,
+              segment_ids=None if seg_ids is None else seg_ids[sl],
+              segment_positions=None if seg_pos is None else seg_pos[sl],
+              routed_experts=None if routed is None else routed[sl],
+          )
+          outs.append(trainer.fwd_only(payload))
         result = np.asarray(jnp.concatenate(outs, axis=0), dtype=np.float32)
       self._last_error = None
       return datatypes.LogprobsResponse(
