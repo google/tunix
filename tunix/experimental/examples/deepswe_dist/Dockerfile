@@ -58,6 +58,7 @@ ARG NUMPY_VERSION=2.3.5
 ARG JAX_VERSION=0.11.0
 ARG FLAX_VERSION=0.12.7
 # Keep in sync with requirements/maxtext_requirements.txt.
+ARG MAXTEXT_REPO=https://github.com/AI-Hypercomputer/maxtext.git
 ARG DEFAULT_MAXTEXT_COMMIT=aee266d4007149667819c46d0a76edcb18622faf
 
 # Install SFT/MaxText dependencies (unconditional) in one constrained resolution
@@ -73,7 +74,7 @@ RUN printf 'numpy==%s\njax==%s\njaxlib==%s\nflax==%s\n' \
       "flax==${FLAX_VERSION}" \
       torchax aqtp tokamax math_verify drjax && \
     uv pip install --no-deps \
-      "git+https://github.com/AI-Hypercomputer/maxtext.git@${DEFAULT_MAXTEXT_COMMIT}"
+      "git+${MAXTEXT_REPO}@${DEFAULT_MAXTEXT_COMMIT}"
 
 # Build argument to conditionally install Kubernetes tools
 ARG INSTALL_K8S_TOOLS=false
@@ -94,9 +95,10 @@ ARG INSTALL_DEEPSWE_DEPS=false
 
 # Install DeepSWE specific dependencies and apply runtime patches conditionally
 RUN if [ "$INSTALL_DEEPSWE_DEPS" = "true" ]; then \
-      uv pip install -c /opt/venv/constraints.txt kubernetes gym swebench==3.0.2 && \
+      uv pip install -c /opt/venv/constraints.txt kubernetes gym swebench==3.0.2 'openhands-sdk>=1.44.1' 'k8s-agent-sandbox>=0.5.1' httpx && \
       uv pip install --no-deps git+https://github.com/kubernetes-sigs/agent-sandbox.git@9afee7039342f18fa9ad402929cabf8b66eebaa7#subdirectory=clients/python/agentic-sandbox-client && \
       uv pip install --no-deps git+https://github.com/kubernetes-sigs/agent-sandbox.git@9afee7039342f18fa9ad402929cabf8b66eebaa7#subdirectory=examples/agent-sandbox-rl && \
+      uv pip install --no-deps git+https://github.com/kubernetes-sigs/agent-sandbox.git@9afee7039342f18fa9ad402929cabf8b66eebaa7#subdirectory=clients/integrations/openhands && \
       uv pip install --no-deps git+https://github.com/r2e-gym/r2e-gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735 && \
       sed -i 's/create_repo, upload_folder, HfFolder/create_repo, upload_folder/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/utils/utils.py && \
       sed -i 's/self.commit = ParsedCommit(\*\*json.loads(self.commit_json))/self.commit = ParsedCommit(\*\*(json.loads(self.commit_json) if isinstance(self.commit_json, str) else self.commit_json))/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/runtime/docker.py; \
@@ -117,8 +119,8 @@ RUN if [ "$INSTALL_MAXTEXT" = "true" ]; then \
     fi && \
     if [ -n "$MAXTEXT_COMMIT" ]; then \
       uv pip install --no-deps --force-reinstall \
-        "git+https://github.com/AI-Hypercomputer/maxtext.git@${MAXTEXT_COMMIT}" \
-        "git+https://github.com/AI-Hypercomputer/maxtext.git@${MAXTEXT_COMMIT}#subdirectory=src/maxtext/integration/vllm"; \
+        "git+${MAXTEXT_REPO}@${MAXTEXT_COMMIT}" \
+        "git+${MAXTEXT_REPO}@${MAXTEXT_COMMIT}#subdirectory=src/maxtext/integration/vllm"; \
     fi && \
     if [ -n "$TPU_INFERENCE_COMMIT" ]; then \
       uv pip install --no-deps --force-reinstall \
@@ -150,6 +152,18 @@ RUN uv pip install -c /opt/venv/constraints.txt \
 
 # Copy the rest of the project files
 COPY . .
+
+# Optional local MaxText source directory (relative to /app) for testing
+# unpushed local MaxText commits without fetching from a remote Git server.
+ARG LOCAL_MAXTEXT_DIR=""
+RUN if [ -n "$LOCAL_MAXTEXT_DIR" ]; then \
+      uv pip install --no-deps --force-reinstall \
+        "/app/${LOCAL_MAXTEXT_DIR}" \
+        "/app/${LOCAL_MAXTEXT_DIR}/src/maxtext/integration/vllm" && \
+      rm -rf "/app/${LOCAL_MAXTEXT_DIR}" && \
+      NUMPY_VERSION="${NUMPY_VERSION}" JAX_VERSION="${JAX_VERSION}" FLAX_VERSION="${FLAX_VERSION}" \
+      python -c 'import os, flax, jax, jaxlib, numpy; exp = (os.environ["NUMPY_VERSION"], os.environ["JAX_VERSION"], os.environ["JAX_VERSION"], os.environ["FLAX_VERSION"]); got = (numpy.__version__, jax.__version__, jaxlib.__version__, flax.__version__); assert got == exp, (exp, got)'; \
+    fi
 
 # Compile proto buffer for discovery service, this has to be the last step.
 RUN uv pip install grpcio-tools

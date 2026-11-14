@@ -923,8 +923,9 @@ fi
 
 if [[ "$COMMAND" == "start" ]]; then
   if [[ "$DRY_RUN" != "true" ]] && [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
-    kubectl create rolebinding xpk-sa-default-pod-exec -n "${SANDBOX_NAMESPACE:-trellis}" --role=pod-exec --serviceaccount=default:xpk-sa --dry-run=client -o yaml | kubectl apply -f - 2>/dev/null || true
-    kubectl create rolebinding xpk-sa-default-power-users -n "${SANDBOX_NAMESPACE:-trellis}" --clusterrole=power-users --serviceaccount=default:xpk-sa --dry-run=client -o yaml | kubectl apply -f - 2>/dev/null || true
+    _rb_ns="${SANDBOX_NAMESPACE:-${K8S_NAMESPACE}}"
+    kubectl create rolebinding "xpk-sa-${K8S_NAMESPACE}-pod-exec" -n "${_rb_ns}" --role=pod-exec --serviceaccount="${K8S_NAMESPACE}:${SERVICE_ACCOUNT}" --dry-run=client -o yaml | kubectl apply -f - 2>/dev/null || true
+    kubectl create rolebinding "xpk-sa-${K8S_NAMESPACE}-power-users" -n "${_rb_ns}" --clusterrole=power-users --serviceaccount="${K8S_NAMESPACE}:${SERVICE_ACCOUNT}" --dry-run=client -o yaml | kubectl apply -f - 2>/dev/null || true
   fi
   stop_orchestrator
   stop_trainer

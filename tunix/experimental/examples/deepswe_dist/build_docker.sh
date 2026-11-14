@@ -37,11 +37,13 @@ INSTALL_RAIDEN=false
 RAIDEN_WHEEL_DIR=/app/raiden_wheels
 INSTALL_DEEPSWE_DEPS=false
 TPU_INFERENCE_COMMIT=""
+MAXTEXT_REPO="https://github.com/AI-Hypercomputer/maxtext.git"
 MAXTEXT_COMMIT=""
+LOCAL_MAXTEXT_DIR=""
 
 usage() {
     cat <<'MSG'
-Usage: bash tunix/experimental/examples/deepswe_dist/build_docker.sh [--maxtext] [--raiden] [--raiden-wheel-dir PATH] [--deepswe] [--tpu-inference-commit SHA] [--maxtext-commit SHA]
+Usage: bash tunix/experimental/examples/deepswe_dist/build_docker.sh [--maxtext] [--raiden] [--raiden-wheel-dir PATH] [--deepswe] [--tpu-inference-commit SHA] [--maxtext-repo URL] [--maxtext-commit SHA] [--local-maxtext-dir RELPATH]
 
 Options:
   --maxtext                   Install MaxText-specific dependencies.
@@ -51,9 +53,13 @@ Options:
   --tpu-inference-commit SHA  Reinstall tpu-inference at a 7-40 hex commit SHA with --no-deps
                               (also accepts --tpu-inference-commit=SHA; full 40-char SHA recommended;
                               commit must be compatible with the pinned vLLM/JAX/libtpu stack).
+  --maxtext-repo URL          Git repository URL used for --maxtext-commit / DEFAULT_MAXTEXT_COMMIT
+                              (also accepts --maxtext-repo=URL; defaults to upstream AI-Hypercomputer/maxtext).
   --maxtext-commit SHA        Reinstall maxtext and maxtext-vllm-adapter at a 7-40 hex commit SHA
                               with --no-deps, even without --maxtext (also accepts --maxtext-commit=SHA;
                               full 40-char SHA recommended; maxtext-vllm-adapter registers a vLLM plugin).
+  --local-maxtext-dir RELPATH Reinstall maxtext and maxtext-vllm-adapter from RELPATH inside the
+                              Tunix build context (also accepts --local-maxtext-dir=RELPATH).
 MSG
 }
 
@@ -106,6 +112,17 @@ while [[ "$#" -gt 0 ]]; do
             require_commit_arg "--tpu-inference-commit" "$TPU_INFERENCE_COMMIT"
             shift
             ;;
+        --maxtext-repo)
+            [[ $# -ge 2 ]] || die_usage "--maxtext-repo requires a non-empty URL"
+            require_path_arg "--maxtext-repo" "$2"
+            MAXTEXT_REPO="$2"
+            shift 2
+            ;;
+        --maxtext-repo=*)
+            MAXTEXT_REPO="${1#*=}"
+            require_path_arg "--maxtext-repo" "$MAXTEXT_REPO"
+            shift
+            ;;
         --maxtext-commit)
             [[ $# -ge 2 ]] || die_usage "--maxtext-commit requires a 7-40 character hex commit SHA"
             require_commit_arg "--maxtext-commit" "$2"
@@ -115,6 +132,17 @@ while [[ "$#" -gt 0 ]]; do
         --maxtext-commit=*)
             MAXTEXT_COMMIT="${1#*=}"
             require_commit_arg "--maxtext-commit" "$MAXTEXT_COMMIT"
+            shift
+            ;;
+        --local-maxtext-dir)
+            [[ $# -ge 2 ]] || die_usage "--local-maxtext-dir requires a non-empty path"
+            require_path_arg "--local-maxtext-dir" "$2"
+            LOCAL_MAXTEXT_DIR="$2"
+            shift 2
+            ;;
+        --local-maxtext-dir=*)
+            LOCAL_MAXTEXT_DIR="${1#*=}"
+            require_path_arg "--local-maxtext-dir" "$LOCAL_MAXTEXT_DIR"
             shift
             ;;
         --help|-h)
@@ -179,7 +207,9 @@ MSG
         --build-arg RAIDEN_WHEEL_DIR="${RAIDEN_WHEEL_DIR}" \
         --build-arg INSTALL_DEEPSWE_DEPS="${INSTALL_DEEPSWE_DEPS}" \
         --build-arg TPU_INFERENCE_COMMIT="${TPU_INFERENCE_COMMIT}" \
+        --build-arg MAXTEXT_REPO="${MAXTEXT_REPO}" \
         --build-arg MAXTEXT_COMMIT="${MAXTEXT_COMMIT}" \
+        --build-arg LOCAL_MAXTEXT_DIR="${LOCAL_MAXTEXT_DIR}" \
         -t "${LOCAL_IMAGE_NAME}" \
         -f "${DOCKERFILE}" "${REPO_ROOT}"
 }

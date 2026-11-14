@@ -71,6 +71,12 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
     metadata = dict(resp.metadata) if resp.metadata else {}
     prompt_id = metadata.get("prompt_id", "")
     group_index = metadata.get("group_index", 0)
+    logging.warning(
+        "Rollout response returned error (prompt_id=%s, group_index=%s): %s",
+        prompt_id,
+        group_index,
+        resp.error,
+    )
     metadata["error"] = str(resp.error)
     return datatypes.TrajectoryItem(
         prompt_id=prompt_id,

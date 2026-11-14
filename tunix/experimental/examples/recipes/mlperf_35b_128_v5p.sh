@@ -261,8 +261,8 @@ _trainer_xla_flags=""
 for _f in ${TRAINER_LIBTPU_INIT_ARGS}; do [[ "${_f}" == --xla_* ]] && _trainer_xla_flags+="${_f} "; done
 export PATHWAYS_PROXY_EXTRA_ARGS="${PATHWAYS_PROXY_EXTRA_ARGS:-${_trainer_xla_flags% }}"
 
-export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:-remat_policy=custom use_gdn_kernel=true gdn_cp_mode=head gdn_chunk_size=64 \
-decoder_layer_input=offload context=remat gdn=remat gdn_conv=remat gdn_states=remat \
+export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:-remat_policy=custom gdn_cp_mode=head gdn_chunk_size=64 \
+decoder_layer_input=offload context=remat gdn=remat gdn_states=remat \
 megablox=true sparse_matmul=true use_tokamax_gmm=true use_gmm_v2=true \
 use_gmm_v2_heuristic_tiling=true merge_gating_gmm=false \
 use_ragged_sort=false use_custom_sort_vjp=false \
@@ -275,7 +275,7 @@ context_parallel_attention_load_balance=true \
 num_vocab_tiling=16 use_iota_embed=false mu_dtype=float32 grad_dtype=float32 \
 checkpoint_storage_concurrent_gb=96 \
 checkpoint_storage_use_ocdbt=false checkpoint_storage_use_zarr3=false \
-packing=True optimizer_memory_host_offload=true}"
+packing=True optimizer_memory_host_offload=true skip_step_on_nan=true}"
 export DEBUG="${DEBUG:-0}"
 
 if [[ $# -eq 0 ]]; then

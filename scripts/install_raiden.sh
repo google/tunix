@@ -67,6 +67,10 @@ compile_protos() {
   if [[ ! -d "${proto_dir}" ]]; then
     proto_dir="${ROOT_DIR}/../tunix/dist_rl/distributed"
   fi
+  if [[ ! -d "${proto_dir}" ]]; then
+    echo "Proto directory not found, skipping proto compilation (handled in full build)."
+    return 0
+  fi
   local base_dir
   base_dir=$(cd "${proto_dir}/../../.." && pwd)
 
