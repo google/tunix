@@ -14,6 +14,7 @@
 
 """Tests verifying destination-side Raiden weight sync delegation."""
 
+import threading
 import unittest
 from unittest import mock
 
@@ -46,8 +47,15 @@ class _FakeWorker:
   def work_unit_metadata(self):
     return {"unit": self.job_name}
 
-  def h2d(self):
+  def h2d(self, sync_request=None):
     self.h2d_calls += 1
+    self.last_h2d_request = sync_request
+
+  def apply_to_sampler(self, sampler):
+    self.applied_to = sampler
+
+  def abort(self, sync_request=None):
+    self.aborted = sync_request
 
   def metrics(self):
     return {}
@@ -234,6 +242,93 @@ class RaidenWeightSyncDelegateTest(unittest.IsolatedAsyncioTestCase):
     req = _request(policy_version=1, req_id="req-1")
     res = await delegate.abort_weight_sync(sync_request=req)
     self.assertTrue(res)
+    self.assertIs(delegate._synchronizers[0].aborted, req)
+
+  async def test_injected_synchronizer_runs_full_destination_contract(self):
+    sync = _FakeWorker("gcs_rollout")
+    built = []
+    delegate = raiden_weight_sync_delegate.RaidenWeightSyncDelegate(
+        synchronizer_factory=lambda state: built.append(state) or sync
+    )
+    self.assertEqual(delegate._synchronizers, [])
+    self.assertFalse(delegate.is_bounded())
+    with self.assertRaisesRegex(RuntimeError, "bind_weight_sync must run"):
+      await delegate.weight_sync(_request(policy_version=3))
+    sampler = _sampler()
+    req = _request(policy_version=3, req_id="req-3")
+    await delegate.bind_weight_sync(state={"w": 1}, sampler=sampler)
+    self.assertTrue(delegate.is_bounded())
+    self.assertEqual(
+        await delegate.get_weight_sync_metadata(), [{"unit": "gcs_rollout"}]
+    )
+    await delegate.pre_weight_sync(sync_request=req)
+    self.assertEqual(await delegate.weight_sync(sync_request=req), 3)
+    self.assertTrue(await delegate.post_weight_sync(sync_request=req))
+    self.assertEqual(delegate._synchronizers, [sync])
+    self.assertEqual(built, [{"w": 1}])
+    self.assertIs(sync.last_h2d_request, req)
+    self.assertIs(sync.applied_to, sampler)
+
+
+  async def test_abort_after_pre_reinitializes_freed_kv_cache_and_keeps_version(
+      self,
+  ):
+    sampler = _sampler(rollout_vllm_free_kv_cache_during_weight_sync=True)
+    delegate = self._delegate()
+    await delegate.bind_weight_sync(state={"w": 1}, sampler=sampler)
+
+    # Commit version 1 first.
+    req1 = _request(policy_version=1, req_id="req-1")
+    req1.extra_config["uuid"] = 1
+    await delegate.pre_weight_sync(sync_request=req1)
+    await delegate.weight_sync(sync_request=req1)
+    self.assertEqual(delegate._version, 0)
+    await delegate.post_weight_sync(sync_request=req1)
+    self.assertEqual(delegate._version, 1)
+    self.assertEqual(sampler.reinitialize_cache.call_count, 1)
+
+    # Stage version 2 then abort: KV cache must be reinitialized once and
+    # committed version must stay at 1.
+    req2 = _request(policy_version=2, req_id="req-2")
+    req2.extra_config["uuid"] = 2
+    await delegate.pre_weight_sync(sync_request=req2)
+    self.assertEqual(await delegate.weight_sync(sync_request=req2), 2)
+    self.assertEqual(delegate._version, 1)
+    self.assertTrue(await delegate.abort_weight_sync(sync_request=req2))
+    self.assertEqual(sampler.reinitialize_cache.call_count, 2)
+    self.assertEqual(delegate._version, 1)
+    # Duplicate abort is a no-op and does not double-reinitialize KV cache.
+    self.assertFalse(await delegate.abort_weight_sync(sync_request=req2))
+    self.assertEqual(sampler.reinitialize_cache.call_count, 2)
+
+  async def test_h2d_and_apply_to_sampler_run_off_event_loop_thread(self):
+    loop_thread_id = threading.get_ident()
+    observed_threads: dict[str, int] = {}
+
+    class _ThreadRecordingWorker(_FakeWorker):
+
+      def h2d(self, sync_request=None):
+        observed_threads["h2d"] = threading.get_ident()
+        super().h2d(sync_request=sync_request)
+
+      def apply_to_sampler(self, sampler):
+        observed_threads["apply"] = threading.get_ident()
+        super().apply_to_sampler(sampler)
+
+    worker = _ThreadRecordingWorker("gcs_rollout")
+    delegate = raiden_weight_sync_delegate.RaidenWeightSyncDelegate(
+        synchronizer_factory=lambda _state: worker
+    )
+    sampler = _sampler()
+    req = _request(policy_version=4, req_id="req-4")
+    req.extra_config["uuid"] = 4
+    await delegate.bind_weight_sync(state={"w": 1}, sampler=sampler)
+    await delegate.pre_weight_sync(sync_request=req)
+    await delegate.weight_sync(sync_request=req)
+    await delegate.post_weight_sync(sync_request=req)
+    self.assertNotEqual(observed_threads["h2d"], loop_thread_id)
+    self.assertNotEqual(observed_threads["apply"], loop_thread_id)
+    self.assertEqual(delegate._version, 4)
 
 
 if __name__ == "__main__":

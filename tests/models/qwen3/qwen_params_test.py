@@ -16,12 +16,15 @@
 
 import os
 import unittest
+from unittest import mock
 
 from absl.testing import absltest
+from flax import nnx
+import jax
 import jax.numpy as jnp
 import numpy as np
 import safetensors.numpy as safe_np
-from flax import nnx
+from tunix.models import safetensors_saver
 from tunix.models.qwen3 import model as qwen3_model
 from tunix.models.qwen3 import params as qwen3_params
 from tunix.tests import lora_params_test_base
@@ -306,7 +309,6 @@ class Qwen3ModelConfigTest(absltest.TestCase):
         hasattr(untied_model, "lm_head"),
         "Model must have a separate lm_head when use_tied_embedding is False",
     )
-
 
 if __name__ == "__main__":
   # Check if running in Jupyter/IPython environment
