@@ -375,6 +375,14 @@ class RolloutConfig:
       )
     if self.num_logprobs < 1:
       raise ValueError(f"num_logprobs must be >= 1, got {self.num_logprobs}.")
+    if not math.isfinite(self.temperature) or self.temperature < 0:
+      raise ValueError(
+          f"temperature must be a finite number >= 0, got {self.temperature!r}."
+      )
+    if self.top_p is not None and not 0 < self.top_p <= 1:
+      raise ValueError(f"top_p must be in (0, 1], got {self.top_p!r}.")
+    if self.top_k is not None and self.top_k < -1:
+      raise ValueError(f"top_k must be >= -1, got {self.top_k!r}.")
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)

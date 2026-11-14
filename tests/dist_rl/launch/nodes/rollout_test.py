@@ -208,8 +208,10 @@ class RolloutConfigTest(absltest.TestCase):
     )
     self.assertEqual(config.max_prompt_length, 128)
     self.assertEqual(config.max_tokens_to_generate, 64)
+    self.assertEqual(config.max_response_length, 64)
     self.assertEqual(config.temperature, 0.7)
     self.assertEqual(config.top_p, 0.95)
+    self.assertFalse(config.overlong_filter)
     self.assertTrue(config.return_logprobs)
     self.assertEqual(config.eos_tokens, [151645, 151643])
     self.assertIsNone(config.trajectory_store_config)
@@ -279,13 +281,12 @@ class RolloutConfigTest(absltest.TestCase):
     )
 
   def test_episode_timeout_derives_drain_timeout_in_rollout_config(self):
-    self.assertEqual(_rollout_config().drain_timeout_s, 660.0)
-    self.assertEqual(
-        _rollout_config(
-            "agentic_grpo_config.episode_timeout=1800"
-        ).drain_timeout_s,
-        1860.0,
-    )
+    defaults = _rollout_config()
+    self.assertEqual(defaults.episode_timeout, 600.0)
+    self.assertEqual(defaults.drain_timeout_s, 660.0)
+    custom = _rollout_config("agentic_grpo_config.episode_timeout=1800")
+    self.assertEqual(custom.episode_timeout, 1800.0)
+    self.assertEqual(custom.drain_timeout_s, 1860.0)
     with self.assertRaisesRegex(
         ValueError, "episode_timeout_secs must be a positive finite number"
     ):
@@ -298,6 +299,13 @@ class RolloutConfigPlumbingTest(absltest.TestCase):
 
   def test_top_k_reaches_rollout_config(self):
     self.assertEqual(_rollout_config("rollout_config.top_k=20").top_k, 20)
+
+  def test_overlong_filter_reaches_rollout_config(self):
+    self.assertTrue(
+        _rollout_config(
+            "agentic_grpo_config.overlong_filter=true"
+        ).overlong_filter
+    )
 
   def test_defaults_disable_top_k(self):
     config = _rollout_config()

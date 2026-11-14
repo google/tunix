@@ -54,9 +54,12 @@
             151645,
             151643
           ],
+          "episode_timeout": 600.0,
           "kv_cache_size": 2048,
           "max_prompt_length": 1024,
+          "max_response_length": 1024,
           "max_tokens_to_generate": 1024,
+          "overlong_filter": false,
           "partial_rollout": false,
           "return_logprobs": true,
           "return_routed_experts": false,
