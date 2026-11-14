@@ -30,6 +30,7 @@ from tunix.dist_rl.orchestrator import dataset_utils
 from tunix.experimental.examples.deepswe_dist import openhands_template
 from tunix.experimental.examples.deepswe_dist import openhands_utils
 from tunix.experimental.examples.deepswe_dist import sandbox_utils
+from tunix.experimental.examples.deepswe_dist import swegym_utils
 from examples.deepswe import deepswe_data
 from examples.deepswe import swe_agent
 from examples.deepswe import swe_env
@@ -417,6 +418,7 @@ class DeepSWEEnv(swe_env.SWEEnv):
     entry = dict(entry or kwargs.pop("task", {}) or {})
     if prompt_id and "instance_id" not in entry:
       entry["instance_id"] = prompt_id
+    swegym_utils.normalize_swe_entry(entry)
     if group_id is None:
       group_id = prompt_id or None
     if pair_index is None:
