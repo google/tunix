@@ -259,6 +259,10 @@ def build_maxtext_config(
     attention: str = "",
     device_host_concurrent_gb: int | None = None,
     extra_flags: Sequence[str] = (),
+    skip_step_on_spikes: bool = False,
+    skip_step_on_nan: bool | None = None,
+    skip_step_interval: int = 128,
+    skip_step_scaling_factor: float = 6.0,
 ) -> Any:
   """Builds the MaxText HyperParameters the training engine runs on.
 
@@ -621,6 +625,18 @@ def build_maxtext_config(
           else []
       ),
   ])
+  if skip_step_on_spikes:
+    argv.extend([
+        "skip_step_on_spikes=True",
+        f"skip_step_interval={skip_step_interval}",
+        f"skip_step_scaling_factor={skip_step_scaling_factor}",
+    ])
+  if skip_step_on_nan is not None:
+    argv.append(
+        "skip_step_on_nan=True"
+        if skip_step_on_nan
+        else "skip_step_on_nan=False"
+    )
   # Pathways persistence: let the TPU workers write the checkpoint themselves
   # The persistence handler rejects the OCDBT/zarr3 layout MaxText writes by
   # default (see maxtext/common/checkpoint_context.py), so both must be off
