@@ -26,7 +26,8 @@ import contextvars
 import functools
 import inspect
 import threading
-from typing import Any, TypeVar, cast
+from typing import Any, Self, TypeVar, cast
+import uuid
 
 from absl import logging
 from tunix.dist_rl.common import datatypes
@@ -123,9 +124,16 @@ class Worker(abc.ABC):
 
   # Default initial state for a worker
   _state: datatypes.WorkerState = datatypes.WorkerState.PENDING
+  _instance_id: str
   _execution_context: Any = None
   _on_stop: Callable[[bool], None] | None = None
   _stop_abort: bool = False
+
+  def __new__(cls, *args: Any, **kwargs: Any) -> Self:
+    del args, kwargs
+    instance = super().__new__(cls)
+    instance._instance_id = uuid.uuid4().hex
+    return instance
 
   def __init_subclass__(cls, **kwargs: Any) -> None:
     super().__init_subclass__(**kwargs)
@@ -188,6 +196,11 @@ class Worker(abc.ABC):
         yield
       finally:
         _ACTIVE_WORKERS.reset(token)
+
+  @property
+  def instance_id(self) -> str:
+    """Per-process-incarnation UUID4 hex identifier for this Worker."""
+    return self._instance_id
 
   @property
   def state(self) -> datatypes.WorkerState:

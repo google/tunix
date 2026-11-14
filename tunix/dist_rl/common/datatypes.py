@@ -239,7 +239,10 @@ class WorkerInfo:
   """Static metadata describing a worker's identity and capabilities.
 
   Attributes:
-    worker_id: The unique identifier for this worker.
+    worker_id: The logical slot identifier for this worker (e.g., "rollout-0").
+    instance_id: Per-process-incarnation identifier generated at worker startup
+      so orchestrator-side caches and registration can distinguish restarts of
+      the same logical `worker_id`. Defaults to `""` when unspecified.
     roles: The orchestrator roles this worker can serve (e.g., "trainer",
       "rollout").
     resources: Unstructured dictionary of hardware or configuration details
@@ -247,6 +250,7 @@ class WorkerInfo:
   """
 
   worker_id: str
+  instance_id: str = ""
   roles: frozenset[str] = frozenset()
   resources: dict[str, Any] = dataclasses.field(default_factory=dict)
 

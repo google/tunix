@@ -538,14 +538,21 @@ class IsValidTrajectoryTest(absltest.TestCase):
     self.assertTrue(item.is_valid)
 
   def test_routed_experts_ref_and_static_wire_encoding_helpers(self):
-    ref = datatypes.RoutedExpertsRef(worker_id="w0", ref_id=(5 << 32) | 9)
+    ref = datatypes.RoutedExpertsRef(
+        worker_id="w0", instance_id="inst0", ref_id=(5 << 32) | 9
+    )
     self.assertEqual(ref.worker_id, "w0")
+    self.assertEqual(ref.instance_id, "inst0")
     with self.assertRaises(ValueError):
-      datatypes.RoutedExpertsRef(worker_id="", ref_id=1)
+      datatypes.RoutedExpertsRef(worker_id="", instance_id="inst0", ref_id=1)
     with self.assertRaises(ValueError):
-      datatypes.RoutedExpertsRef(worker_id="w0", ref_id=-1)
+      datatypes.RoutedExpertsRef(worker_id="w0", instance_id="", ref_id=1)
     with self.assertRaises(ValueError):
-      datatypes.RoutedExpertsRef(worker_id="w0", ref_id=1 << 63)
+      datatypes.RoutedExpertsRef(worker_id="w0", instance_id="inst0", ref_id=-1)
+    with self.assertRaises(ValueError):
+      datatypes.RoutedExpertsRef(
+          worker_id="w0", instance_id="inst0", ref_id=1 << 63
+      )
     with self.assertRaises(ValueError):
       datatypes.routed_experts_bytes_per_token(4.0, 8, "uint10")  # pyrefly: ignore[bad-argument-type]
     with self.assertRaises(ValueError):

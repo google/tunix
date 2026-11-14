@@ -1014,7 +1014,11 @@ async def serve_worker(
   server = GrpcRemoteExecutionServer(worker_service)
   await server.start_serving_async(port)
   try:
-    discovery.register(metadata=pickle.dumps(dict(metadata)))
+    discovery.register(
+        metadata=pickle.dumps(
+            {"instance_id": worker_service.instance_id, **metadata}
+        )
+    )
     for sig in (signal.SIGINT, signal.SIGTERM):
       with contextlib.suppress(NotImplementedError):
         loop.add_signal_handler(sig, stop_event.set)

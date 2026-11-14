@@ -224,7 +224,11 @@ class FakeClusterHarness:
     self.servers[wid] = running_server
     if re_register:
       self.register_worker_from_discovery(
-          wid, "trainer", bound_port, override=override
+          wid,
+          self.trainer_worker.instance_id,
+          "trainer",
+          bound_port,
+          override=override,
       )
     return bound_port
 
@@ -277,13 +281,18 @@ class FakeClusterHarness:
     self.servers[wid] = running_server
     if re_register:
       self.register_worker_from_discovery(
-          wid, "rollout", bound_port, override=override
+          wid,
+          worker.instance_id,
+          "rollout",
+          bound_port,
+          override=override,
       )
     return bound_port
 
   def register_worker_from_discovery(
       self,
       worker_id: str,
+      instance_id: str,
       service_type: str,
       port: int,
       override: bool = False,
@@ -293,6 +302,7 @@ class FakeClusterHarness:
         "service_type": service_type,
         "service_port": port,
         "worker_id": worker_id,
+        "instance_id": instance_id,
     })
     if override:
       role = (
@@ -307,6 +317,7 @@ class FakeClusterHarness:
               f"grpc://localhost:{port}",
               rpc_timeout_s=self.rpc_timeout_s,
           ),
+          instance_id=instance_id,
           resources={"address": f"localhost:{port}"},
           override=True,
       )
