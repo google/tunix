@@ -1932,6 +1932,148 @@ class V1ParityTest(parameterized.TestCase):
     self.assertEqual(prepared[0].metadata['keep_key'], 42)
     self.assertIn('routed_experts_encode_fn', dummy.metadata)
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='nan',
+          skip_step_on_nan=True,
+          max_grad_norm_spike=None,
+          grad_fill=jnp.nan,
+          expect_nan=True,
+      ),
+      dict(
+          testcase_name='inf',
+          skip_step_on_nan=True,
+          max_grad_norm_spike=None,
+          grad_fill=jnp.inf,
+          expect_nan=False,
+      ),
+      dict(
+          testcase_name='spike',
+          skip_step_on_nan=False,
+          max_grad_norm_spike=10.0,
+          grad_fill=1000.0,
+          expect_nan=False,
+      ),
+  )
+  def test_bad_gradient_skipped_and_state_preserved(
+      self,
+      skip_step_on_nan,
+      max_grad_norm_spike,
+      grad_fill,
+      expect_nan,
+  ):
+    model, _ = self._two_identical_models()
+    config = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=1,
+        max_steps=2,
+        gradient_accumulation_steps=2,
+        skip_step_on_nan=skip_step_on_nan,
+        max_grad_norm_spike=max_grad_norm_spike,
+    )
+    trainer = peft_trainer_v2.PeftTrainer(
+        model, optax.adamw(TEST_LEARNING_RATE), config
+    ).with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+    initial_weights = jax.tree.map(jnp.copy, nnx.state(model, nnx.Param))
+    initial_opt_state = jax.tree.map(jnp.copy, nnx.state(trainer.optimizer))
+    initial_step = int(trainer.optimizer.step[...])
+
+    bad_grads = jax.tree.map(
+        lambda p: jnp.full_like(p, grad_fill), nnx.state(model, nnx.Param)
+    )
+    trainer.grad_accumulator.add(bad_grads)
+    trainer.update()
+
+    self.assertIsNotNone(trainer._last_update_grad_norm)
+    norm_val = float(np.asarray(trainer._last_update_grad_norm).item())
+    if expect_nan:
+      self.assertTrue(np.isnan(norm_val))
+    elif max_grad_norm_spike is not None:
+      self.assertGreater(norm_val, max_grad_norm_spike)
+    else:
+      self.assertTrue(np.isinf(norm_val))
+
+    self.assertEqual(int(trainer.optimizer.step[...]), initial_step)
+    for i, c in zip(
+        jax.tree_util.tree_leaves(jax.device_get(initial_weights)),
+        jax.tree_util.tree_leaves(jax.device_get(nnx.state(model, nnx.Param))),
+    ):
+      np.testing.assert_allclose(np.asarray(i), np.asarray(c))
+    for i, c in zip(
+        jax.tree_util.tree_leaves(jax.device_get(initial_opt_state)),
+        jax.tree_util.tree_leaves(jax.device_get(nnx.state(trainer.optimizer))),
+    ):
+      np.testing.assert_allclose(np.asarray(i), np.asarray(c))
+
+    # A subsequent finite step still succeeds and advances optimizer state.
+    batch = dummy_datasets(batch_size=4)[0]
+    trainer.fwd_bwd(batch)
+    trainer.update()
+    self.assertEqual(int(trainer.optimizer.step[...]), initial_step + 1)
+    for leaf in jax.tree_util.tree_leaves(
+        jax.device_get(nnx.state(model, nnx.Param))
+    ):
+      self.assertTrue(np.all(np.isfinite(np.asarray(leaf))))
+
+  def test_fused_train_step_skips_nan_then_recovers(self):
+    model, _ = self._two_identical_models()
+    config = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=1,
+        max_steps=2,
+        gradient_accumulation_steps=1,
+        skip_step_on_nan=True,
+    )
+
+    def _nan_then_finite_loss(
+        m: nnx.Module,
+        input_tokens: jax.Array,
+        input_mask: jax.Array,
+        positions: jax.Array,
+        attention_mask: jax.Array,
+    ) -> jax.Array:
+      del input_mask
+      logits, _ = m(
+          input_tokens, positions=positions, attention_mask=attention_mask
+      )
+      loss = jnp.mean(logits**2)
+      # Use input_tokens[0, 0] == 0 to trigger NaN on the first batch only.
+      return jax.lax.cond(
+          input_tokens[0, 0] == 0, lambda l: l * jnp.nan, lambda l: l, loss
+      )
+
+    trainer = (
+        peft_trainer_v2.PeftTrainer(
+            model, optax.adamw(TEST_LEARNING_RATE), config
+        )
+        .with_gen_model_input_fn(dummy_gen_model_input_fn)
+        .with_loss_fn(_nan_then_finite_loss)
+    )
+
+    initial_weights = jax.tree.map(jnp.copy, nnx.state(model, nnx.Param))
+    initial_opt_state = jax.tree.map(jnp.copy, nnx.state(trainer.optimizer))
+    initial_step = int(trainer.optimizer.step[...])
+
+    batches = dummy_datasets(batch_size=4)[:2]
+    trainer.train_step(batches[0])
+    self.assertEqual(int(trainer.optimizer.step[...]), initial_step)
+    for i, c in zip(
+        jax.tree_util.tree_leaves(jax.device_get(initial_weights)),
+        jax.tree_util.tree_leaves(jax.device_get(nnx.state(model, nnx.Param))),
+    ):
+      np.testing.assert_allclose(np.asarray(i), np.asarray(c))
+    for i, c in zip(
+        jax.tree_util.tree_leaves(jax.device_get(initial_opt_state)),
+        jax.tree_util.tree_leaves(jax.device_get(nnx.state(trainer.optimizer))),
+    ):
+      np.testing.assert_allclose(np.asarray(i), np.asarray(c))
+
+    trainer.train_step(batches[1])
+    self.assertEqual(int(trainer.optimizer.step[...]), initial_step + 1)
+    for leaf in jax.tree_util.tree_leaves(
+        jax.device_get(nnx.state(model, nnx.Param))
+    ):
+      self.assertTrue(np.all(np.isfinite(np.asarray(leaf))))
+
 
 class GradientAccumulatorTest(parameterized.TestCase):
 
