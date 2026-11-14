@@ -346,6 +346,147 @@ class SandboxUtilsTest(absltest.TestCase):
     self.assertEqual(fleet.active_pools.get("nested_img_B"), 3)
     iterator.close()
 
+  def test_set_runtime_container_updates_container_without_mutating_handle(
+      self,
+  ):
+    shared_handle = type(
+        "FakeHandle",
+        (),
+        {
+            "target_container": sandbox_utils.RUNTIME_CONTAINER_NAME,
+            "_target_container": sandbox_utils.RUNTIME_CONTAINER_NAME,
+        },
+    )()
+    client = type(
+        "FakeClient",
+        (),
+        {"_default_container": sandbox_utils.RUNTIME_CONTAINER_NAME},
+    )()
+    runtime = type(
+        "FakeRuntime",
+        (),
+        {
+            "_container": sandbox_utils.RUNTIME_CONTAINER_NAME,
+            "_target_container": sandbox_utils.RUNTIME_CONTAINER_NAME,
+            "_handle": shared_handle,
+            "client": client,
+        },
+    )()
+
+    sandbox_utils.set_runtime_container(runtime, sandbox_utils.EVAL_CONTAINER_NAME)
+
+    self.assertEqual(runtime._container, sandbox_utils.EVAL_CONTAINER_NAME)
+    self.assertEqual(
+        runtime._target_container, sandbox_utils.EVAL_CONTAINER_NAME
+    )
+    self.assertEqual(
+        client._default_container, sandbox_utils.EVAL_CONTAINER_NAME
+    )
+    self.assertEqual(
+        shared_handle.target_container, sandbox_utils.RUNTIME_CONTAINER_NAME
+    )
+    self.assertEqual(
+        shared_handle._target_container, sandbox_utils.RUNTIME_CONTAINER_NAME
+    )
+
+  def test_evaluate_patch_in_fresh_container_uses_eval_container(self):
+    from tunix.experimental.examples.deepswe_dist import openhands_utils  # pylint: disable=g-import-not-at-top
+
+    containers_seen = []
+
+    class FakeRuntime:
+
+      def __init__(self):
+        self._container = sandbox_utils.RUNTIME_CONTAINER_NAME
+        self._target_container = sandbox_utils.RUNTIME_CONTAINER_NAME
+        self.repo_path = "/testbed"
+        self.setup_env_calls = []
+
+      def run(self, code, timeout=60):
+        del code, timeout
+        containers_seen.append(self._container)
+        return ("", "0")
+
+      def setup_env(self):
+        self.setup_env_calls.append(self._container)
+
+    class FakeEnv:
+
+      def __init__(self):
+        self.runtime = FakeRuntime()
+
+    env = FakeEnv()
+
+    def fake_reward():
+      containers_seen.append(env.runtime._container)
+      return 1.0
+
+    reward = openhands_utils.evaluate_patch_in_fresh_container(
+        env,
+        "diff --git a/foo.py b/foo.py\n--- a/foo.py\n+++ b/foo.py\n",
+        fake_reward,
+    )
+    self.assertEqual(reward, 1.0)
+    self.assertTrue(containers_seen)
+    self.assertTrue(
+        all(c == sandbox_utils.EVAL_CONTAINER_NAME for c in containers_seen)
+    )
+    self.assertEqual(
+        env.runtime.setup_env_calls, [sandbox_utils.EVAL_CONTAINER_NAME]
+    )
+    self.assertEqual(env.runtime._container, sandbox_utils.RUNTIME_CONTAINER_NAME)
+    self.assertEqual(
+        env.runtime._target_container, sandbox_utils.RUNTIME_CONTAINER_NAME
+    )
+
+  def test_patch_agent_sandbox_rl_templates_configures_eval_sidecar(self):
+    class FakeResources:
+
+      def _template_manifest(self, image, template_name, template):
+        del image, template_name, template
+        return {
+            "spec": {
+                "podTemplate": {
+                    "spec": {
+                        "volumes": [{"name": "oh", "emptyDir": {}}],
+                        "containers": [{"name": "default", "image": "img"}],
+                    }
+                }
+            }
+        }
+
+    fake_resources_mod = type("FakeResourcesMod", (), {"Resources": FakeResources})
+    fake_pkg = type("FakePkg", (), {"resources": fake_resources_mod})
+    fake_template = type("FakeTemplate", (), {"image_pull_policy": "IfNotPresent"})()
+    with mock.patch.dict(
+        "sys.modules",
+        {
+            "agent_sandbox_rl": fake_pkg,
+            "agent_sandbox_rl.resources": fake_resources_mod,
+        },
+    ):
+      sandbox_utils.patch_agent_sandbox_rl_templates()
+      manifest = FakeResources()._template_manifest(
+          "my-img:latest", "tpl", fake_template
+      )
+
+    containers = manifest["spec"]["podTemplate"]["spec"]["containers"]
+    self.assertEqual(containers[0]["name"], sandbox_utils.RUNTIME_CONTAINER_NAME)
+    self.assertEqual(len(containers), 2)
+    eval_ctr = containers[1]
+    self.assertEqual(eval_ctr["name"], sandbox_utils.EVAL_CONTAINER_NAME)
+    self.assertEqual(
+        eval_ctr["command"],
+        ["sh", "-c", sandbox_utils._EVAL_CONTAINER_STARTUP_SCRIPT],
+    )
+    self.assertEqual(
+        eval_ctr["env"],
+        [{"name": "PATH", "value": sandbox_utils._EVAL_CONTAINER_PATH}],
+    )
+    self.assertEqual(
+        eval_ctr["volumeMounts"], [{"name": "oh", "mountPath": "/oh"}]
+    )
+
 
 if __name__ == "__main__":
   absltest.main()

@@ -957,8 +957,10 @@ def evaluate_patch_in_fresh_container(
   original_container = sandbox_utils.RUNTIME_CONTAINER_NAME
   runtime_obj = getattr(eval_env, "runtime", None) or eval_env
   if runtime_obj is not None:
-    original_container = getattr(
-        runtime_obj, "_target_container", sandbox_utils.RUNTIME_CONTAINER_NAME
+    original_container = (
+        getattr(runtime_obj, "_container", None)
+        or getattr(runtime_obj, "_target_container", None)
+        or sandbox_utils.RUNTIME_CONTAINER_NAME
     )
 
   sandbox_utils.set_runtime_container(
@@ -972,8 +974,12 @@ def evaluate_patch_in_fresh_container(
       return 0.0
 
     repo_path = getattr(runtime, "repo_path", "/testbed") or "/testbed"
+    git_ls_cmd = (
+        "git config --global --add safe.directory '*' 2>/dev/null || true; "
+        "git ls-files --others --exclude-standard"
+    )
     git_ls_res = runtime.run(
-        "git ls-files --others --exclude-standard",
+        f"/bin/sh -c {shlex.quote(git_ls_cmd)}",
         timeout=30,
     )
     git_ls_output, git_ls_exit = _unpack_exec_output(git_ls_res)

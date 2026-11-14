@@ -25,6 +25,7 @@ import hashlib
 import logging
 import os
 import re
+import shlex
 import threading
 from typing import Any, Protocol, runtime_checkable
 
@@ -33,6 +34,21 @@ from tunix.experimental.examples.deepswe_dist import openhands_template
 
 RUNTIME_CONTAINER_NAME = "agent-runtime"
 EVAL_CONTAINER_NAME = "eval"
+_EVAL_CONTAINER_PATH = (
+    "/testbed/.venv/bin:/root/.venv/bin:/root/.local/bin:/root/.cargo/bin:"
+    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+)
+_EVAL_CONTAINER_STARTUP_SCRIPT = (
+    "mkdir -p /root/.local/bin 2>/dev/null || true; "
+    "if [ -d /oh/pkgs ]; then for sp in"
+    " /testbed/.venv/lib/python*/site-packages"
+    " /root/.venv/lib/python*/site-packages"
+    ' /usr/local/lib/python*/site-packages; do if [ -d "$sp" ] && [ ! -d'
+    ' "$sp/chardet" ]; then cp -a /oh/pkgs/. "$sp/"'
+    " 2>/dev/null || true; fi; done; fi; "
+    "git config --global --add safe.directory '*' 2>/dev/null || true; "
+    "exec sleep infinity"
+)
 _LEGACY_ACQUIRE_RETRIES = 5
 
 
@@ -43,6 +59,7 @@ def set_runtime_container(target: Any, container_name: str) -> None:
   runtime = getattr(target, "runtime", None) or target
   try:
     runtime._target_container = container_name
+    runtime._container = container_name
     client = getattr(runtime, "client", None)
     if client is not None:
       client._default_container = container_name
@@ -255,16 +272,16 @@ def patch_r2egym_for_agent_sandbox() -> None:
             hasattr(self, "backend") and self.backend == "kubernetes-sandbox"
         ):
           res = self._start_kubernetes_sandbox()
+          handle = getattr(self, "_handle", None)
           target_ctr = (
-              getattr(self, "_target_container", None)
-              or getattr(
-                  getattr(self, "_handle", None),
-                  "_target_container",
-                  None,
-              )
+              getattr(self, "_container", None)
+              or getattr(self, "_target_container", None)
+              or getattr(handle, "target_container", None)
+              or getattr(handle, "_target_container", None)
               or RUNTIME_CONTAINER_NAME
           )
           self._target_container = target_ctr
+          self._container = target_ctr
           if getattr(self, "client", None) is not None:
             self.client._default_container = target_ctr
           return res
@@ -273,6 +290,26 @@ def patch_r2egym_for_agent_sandbox() -> None:
         )
 
       docker_mod.DockerRuntime.start_container = _patched_start_container
+
+    if not hasattr(docker_mod.DockerRuntime, "_orig_run") and hasattr(
+        docker_mod.DockerRuntime, "run"
+    ):
+      docker_mod.DockerRuntime._orig_run = docker_mod.DockerRuntime.run
+
+      def _patched_run(self, code, *args, **kwargs):
+        if isinstance(code, str) and code.strip() in (
+            "uv pip install chardet",
+            "python -m pip install chardet",
+        ):
+          check_cmd = (
+              "(if [ -x /testbed/.venv/bin/python ]; then"
+              " /testbed/.venv/bin/python -c 'import chardet'; else"
+              f" python3 -c 'import chardet'; fi) 2>/dev/null || {code}"
+          )
+          code = f"/bin/sh -c {shlex.quote(check_cmd)}"
+        return self._orig_run(code, *args, **kwargs)
+
+      docker_mod.DockerRuntime.run = _patched_run
 
     orig_setup_env = getattr(
         docker_mod.DockerRuntime, "_orig_setup_env", None
@@ -292,7 +329,11 @@ def patch_r2egym_for_agent_sandbox() -> None:
           logging.debug(
               "[SandboxFleet] Deferring setup_env on container '%s' until"
               " evaluation",
-              getattr(self, "_target_container", EVAL_CONTAINER_NAME),
+              getattr(
+                  self,
+                  "_container",
+                  getattr(self, "_target_container", EVAL_CONTAINER_NAME),
+              ),
           )
           return None
         self._needs_deferred_setup_env = False
@@ -336,11 +377,16 @@ def patch_agent_sandbox_rl_templates() -> None:
               if template is not None and template.image_pull_policy
               else "IfNotPresent"
           )
-          containers.append({
+          has_oh_vol = any(
+              isinstance(v, dict) and v.get("name") == "oh"
+              for v in pod_spec.get("volumes", [])
+          )
+          eval_container = {
               "name": EVAL_CONTAINER_NAME,
               "image": image,
               "imagePullPolicy": pull_policy,
-              "command": ["sleep", "infinity"],
+              "command": ["sh", "-c", _EVAL_CONTAINER_STARTUP_SCRIPT],
+              "env": [{"name": "PATH", "value": _EVAL_CONTAINER_PATH}],
               "stdin": True,
               "tty": True,
               "resources": {
@@ -353,7 +399,12 @@ def patch_agent_sandbox_rl_templates() -> None:
                       "memory": os.getenv("SANDBOX_MEM_LIMIT", "4Gi"),
                   },
               },
-          })
+          }
+          if has_oh_vol:
+            eval_container["volumeMounts"] = [
+                {"name": "oh", "mountPath": "/oh"}
+            ]
+          containers.append(eval_container)
         return manifest
 
       asrl_resources.Resources._template_manifest = _patched_template_manifest
