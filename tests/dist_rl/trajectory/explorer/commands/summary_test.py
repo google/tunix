@@ -68,6 +68,7 @@ class SummaryTest(absltest.TestCase):
   def setUp(self) -> None:
     super().setUp()
     self.cmd = summary.SummaryCommand()
+    self.table_cmd = summary.SummaryCommand(show_trajectory_table=True)
 
   def test_empty_store(self) -> None:
     mem_store = testing.create_store(prefill=False)
@@ -89,7 +90,7 @@ class SummaryTest(absltest.TestCase):
     mem_store = testing.create_store(
         trajectories=[_NO_OUTCOME_TRAJECTORY_1, _NO_OUTCOME_TRAJECTORY_2]
     )
-    exit_code, out = testing.execute_command(self.cmd, mem_store)
+    exit_code, out = testing.execute_command(self.table_cmd, mem_store)
     self.assertEqual(exit_code, 0)
     lines = out.splitlines()
     # Header plus one row per trajectory; the fixtures report no status,
@@ -112,10 +113,22 @@ class SummaryTest(absltest.TestCase):
     self.assertIn("Mean reward: - reported by 0/2", out)
     self.assertNotIn("Tool calls:", out)
 
+  def test_human_readable_prints_only_the_totals_by_default(self) -> None:
+    mem_store = testing.create_store(
+        trajectories=[_NO_OUTCOME_TRAJECTORY_1, _NO_OUTCOME_TRAJECTORY_2]
+    )
+    exit_code, out = testing.execute_command(self.cmd, mem_store)
+    self.assertEqual(exit_code, 0)
+    self.assertStartsWith(out, "Trajectories: 2\n")
+    self.assertNotIn(_NO_OUTCOME_TRAJECTORY_1.trajectory_id, out)
+    # The flag only adds the table, and a blank line, above the same totals.
+    _, with_table = testing.execute_command(self.table_cmd, mem_store)
+    self.assertEndsWith(with_table, f"\n\n{out}")
+
   def test_human_readable_with_tokens_tools_and_status(self) -> None:
     # The Tunix schema declares `status` and `total_reward`.
     mem_store = testing.create_store(trajectories=[_SUCCEEDED_TRAJECTORY])
-    exit_code, out = testing.execute_command(self.cmd, mem_store)
+    exit_code, out = testing.execute_command(self.table_cmd, mem_store)
     self.assertEqual(exit_code, 0)
     self.assertRegex(
         out.splitlines()[1],
@@ -134,7 +147,7 @@ class SummaryTest(absltest.TestCase):
     self.assertIn("Tool calls: search x1", out)
     # A rollout reports only completion tokens, so no prompt count is shown.
     rollout_store = testing.create_store(trajectories=[_ROLLOUT_TRAJECTORY])
-    _, rollout_out = testing.execute_command(self.cmd, rollout_store)
+    _, rollout_out = testing.execute_command(self.table_cmd, rollout_store)
     self.assertRegex(
         rollout_out.splitlines()[1],
         rf"^\s*{_ROLLOUT_TRAJECTORY.trajectory_id}"
@@ -194,6 +207,17 @@ class SummaryTest(absltest.TestCase):
         },
     )
     self.assertEqual(data["trajectories"][1]["tokens_prompt"], 100)
+
+  def test_json_output_ignores_the_trajectory_table_flag(self) -> None:
+    mem_store = testing.create_store(
+        trajectories=[_NO_OUTCOME_TRAJECTORY_1, _TOOL_CALLING_TRAJECTORY]
+    )
+    _, out = testing.execute_command(self.cmd, mem_store, output_json=True)
+    _, table_out = testing.execute_command(
+        self.table_cmd, mem_store, output_json=True
+    )
+    self.assertEqual(table_out, out)
+    self.assertLen(json.loads(out)["trajectories"], 2)
 
   def test_json_output_with_status_and_reward(self) -> None:
     mem_store = testing.create_store(trajectories=[_SUCCEEDED_TRAJECTORY])
@@ -255,7 +279,7 @@ class SummaryTest(absltest.TestCase):
         trajectories=[_SUCCEEDED_TRAJECTORY, _ROLLOUT_TRAJECTORY]
     )
     exit_code, out = testing.execute_command(
-        self.cmd, mem_store, diagnostics=_TUNIX_DIAGNOSTICS
+        self.table_cmd, mem_store, diagnostics=_TUNIX_DIAGNOSTICS
     )
     self.assertEqual(exit_code, 0)
     lines = out.splitlines()
@@ -279,9 +303,9 @@ class SummaryTest(absltest.TestCase):
         trajectories=[_NO_OUTCOME_TRAJECTORY_1, _TOOL_CALLING_TRAJECTORY]
     )
     _, with_diagnostics = testing.execute_command(
-        self.cmd, mem_store, diagnostics=_TUNIX_DIAGNOSTICS
+        self.table_cmd, mem_store, diagnostics=_TUNIX_DIAGNOSTICS
     )
-    _, without_diagnostics = testing.execute_command(self.cmd, mem_store)
+    _, without_diagnostics = testing.execute_command(self.table_cmd, mem_store)
     self.assertMultiLineEqual(with_diagnostics, without_diagnostics)
 
   def test_schema_columns_must_not_reuse_a_table_header(self) -> None:
@@ -295,7 +319,7 @@ class SummaryTest(absltest.TestCase):
     mem_store = testing.create_store(trajectories=[_SUCCEEDED_TRAJECTORY])
     with self.assertRaisesRegex(ValueError, "'status' is already in the table"):
       testing.execute_command(
-          self.cmd, mem_store, diagnostics=(StatusDiagnostics(),)
+          self.table_cmd, mem_store, diagnostics=(StatusDiagnostics(),)
       )
 
   def test_limit_truncates_loaded_trajectories_and_updates_totals(self) -> None:
@@ -306,7 +330,7 @@ class SummaryTest(absltest.TestCase):
             _TOOL_CALLING_TRAJECTORY,
         ]
     )
-    cmd = summary.SummaryCommand(limit=2)
+    cmd = summary.SummaryCommand(limit=2, show_trajectory_table=True)
     exit_code, out = testing.execute_command(cmd, mem_store)
     self.assertEqual(exit_code, 0)
     self.assertIn(_NO_OUTCOME_TRAJECTORY_1.trajectory_id, out)
