@@ -34,7 +34,7 @@
 | Command | What it prints |
 |---|---|
 | `ping` | Store connectivity and the number of trajectories. |
-| `summary [--limit=<N>] [--show_trajectory_table]` | Run totals: steps, tokens, status counts, mean reward, the totals of each schema diagnostics that applies, and per-tool call counts. `--show_trajectory_table` also prints one row per trajectory above them (status, steps by source, tokens, tool calls, reward, then the columns of each schema diagnostics that applies). Optional `--limit` bounds trajectory loading and table size. Under `--json`, the rows are always included, as the records of `RunStats.df`. |
+| `summary [--limit=<N>] [--show_trajectory_table]` | Run totals: steps, tokens, status counts, the reward signs of each status, mean reward, the totals of each schema diagnostics that applies, and per-tool call counts. `--show_trajectory_table` also prints one row per trajectory above them (status, steps by source, tokens, tool calls, reward, then the columns of each schema diagnostics that applies). Optional `--limit` bounds trajectory loading and table size. Under `--json`, the rows are always included, as the records of `RunStats.df`. |
 | `show --trajectory_id=<id> [<id> ...]` | Each trajectory's header (status, reward, steps, tokens, subagents, then one line per value of each schema diagnostics that applies), every step with its message, reasoning, tool calls and observations (truncated to `--max_chars`, `0` for no truncation), and the tool-call sequence. Accepts space- or comma-separated IDs; multiple trajectories are separated by an `====` rule (`--json` emits a list when 2+ IDs are given). |
 
 ---
@@ -59,11 +59,13 @@ Trajectories: 2
 Steps: 5 (agent 2, user 3, system 0, other 0)
 Tokens: 300 (200+100) reported by 2/2
 Statuses: SUCCEEDED x2 reported by 2/2
+Rewards by status:
+  SUCCEEDED: 2 r>0, 0 r<=0, 0 unscored
 Mean reward: 3.5 reported by 2/2
 Tool calls: search x2
 ```
 
-Without `--show_trajectory_table`, `summary` prints only the totals, from `Trajectories:` on. Schema diagnostics that apply to the run (see *Schema Diagnostics* below) add their columns after `reward` and their totals after `Mean reward:`.
+Without `--show_trajectory_table`, `summary` prints only the totals, from `Trajectories:` on. `Rewards by status:` counts the trajectories of each status by the sign of their reward: above 0 (`r>0`), at most 0 (`r<=0`) or unreported (`unscored`), most frequent status first. It states signs only: whether a positive reward means a solved task depends on the reward function. Trajectories that report no status are not counted, and the lines are left out when no trajectory reports one. Schema diagnostics that apply to the run (see *Schema Diagnostics* below) add their columns after `reward` and their totals after `Mean reward:`.
 
 ### Machine-Readable JSON Output
 ```bash

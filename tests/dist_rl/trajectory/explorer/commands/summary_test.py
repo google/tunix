@@ -110,6 +110,7 @@ class SummaryTest(absltest.TestCase):
     self.assertIn("Steps: 6 (agent 4, user 2, system 0, other 0)", out)
     self.assertIn("Tokens: - reported by 0/2", out)
     self.assertIn("Statuses: - reported by 0/2", out)
+    self.assertNotIn("Rewards by status:", out)
     self.assertIn("Mean reward: - reported by 0/2", out)
     self.assertNotIn("Tool calls:", out)
 
@@ -155,6 +156,32 @@ class SummaryTest(absltest.TestCase):
     )
     self.assertIn("Tokens: 8 completion reported by 1/1", rollout_out)
 
+  def test_human_readable_rewards_by_status_follow_the_statuses(self) -> None:
+    truncated = _SUCCEEDED_TRAJECTORY.model_copy(
+        update={
+            "trajectory_id": "t_truncated",
+            "status": "MAX_STEPS_REACHED",
+            "total_reward": 0.0,
+        }
+    )
+    unscored = _SUCCEEDED_TRAJECTORY.model_copy(
+        update={"trajectory_id": "t_unscored", "total_reward": None}
+    )
+    mem_store = testing.create_store(
+        trajectories=[truncated, _SUCCEEDED_TRAJECTORY, unscored]
+    )
+    exit_code, out = testing.execute_command(self.cmd, mem_store)
+    self.assertEqual(exit_code, 0)
+    # The most frequent status comes first, as on the `Statuses:` line.
+    self.assertIn(
+        "Statuses: SUCCEEDED x2, MAX_STEPS_REACHED x1 reported by 3/3\n"
+        "Rewards by status:\n"
+        "  SUCCEEDED:         1 r>0, 0 r<=0, 1 unscored\n"
+        "  MAX_STEPS_REACHED: 0 r>0, 1 r<=0, 0 unscored\n"
+        "Mean reward: 1.75 reported by 2/3\n",
+        out,
+    )
+
   def test_any_status_is_counted_upper_cased(self) -> None:
     # A status outside `TrajectoryStatus` used to make the whole run fail.
     trajectory = _SUCCEEDED_TRAJECTORY.model_copy(
@@ -179,6 +206,17 @@ class SummaryTest(absltest.TestCase):
     self.assertEqual(data["run"]["tokens"]["total"], 150)
     self.assertEqual(data["run"]["num_with_tokens"], 1)
     self.assertEqual(data["run"]["status_counts"], {"SUCCEEDED": 1})
+    self.assertEqual(
+        data["run"]["reward_signs_by_status"],
+        {
+            "SUCCEEDED": {
+                "positive": 1,
+                "non_positive": 0,
+                "unscored": 0,
+                "total": 1,
+            }
+        },
+    )
     self.assertEqual(data["run"]["mean_reward"], 3.5)
     self.assertEqual(data["run"]["tool_counts"], {"search": 1})
     # One flat record per trajectory, the columns of `RunStats.df`, with
@@ -228,6 +266,17 @@ class SummaryTest(absltest.TestCase):
     data = json.loads(out)
     self.assertEqual(
         data["run"]["status_counts"], {_SUCCEEDED_TRAJECTORY.status: 1}
+    )
+    self.assertEqual(
+        data["run"]["reward_signs_by_status"],
+        {
+            _SUCCEEDED_TRAJECTORY.status: {
+                "positive": 1,
+                "non_positive": 0,
+                "unscored": 0,
+                "total": 1,
+            }
+        },
     )
     self.assertEqual(
         data["run"]["mean_reward"], _SUCCEEDED_TRAJECTORY.total_reward
