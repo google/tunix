@@ -18,11 +18,12 @@
 sampling on device.
 """
 
-from collections.abc import Sequence
+from collections.abc import Callable, Hashable, Mapping, Sequence
 import dataclasses
 import functools
 import math
 import operator
+import threading
 from typing import Any, TypeVar
 
 from flax import nnx
@@ -31,6 +32,7 @@ from flax.nnx import filterlib
 from flax.nnx import graph
 from flax.nnx import statelib
 import jax
+from jax.experimental.shard_map import shard_map
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
@@ -41,11 +43,41 @@ from tunix.models import paged_attention
 from tunix.rl import reshard
 from tunix.rl import utils as rl_utils
 
-
 _HIERARCHICAL_BLOCK_SIZE = 256
 _HIERARCHICAL_MIN_VOCAB_SIZE = 4096
+_TOPK_BLOCK_SIZE = 4096
 _MIN_SAFE_TEMP = float(np.finfo(np.float32).tiny)
 _MAX_SAFE_TEMP = 1.0 / _MIN_SAFE_TEMP
+
+_StepResultT = TypeVar('_StepResultT')
+_MeshType = jax.sharding.Mesh | jax.sharding.AbstractMesh
+_TRACE_WARMUP_LOCK = threading.Lock()
+_TRACE_KEY_LOCKS: dict[Hashable, threading.Lock] = {}
+_WARMED_TRACE_KEYS: set[Hashable] = set()
+
+
+def _run_with_trace_warmup_guard(
+    trace_key: Hashable,
+    fn: Callable[[], _StepResultT],
+) -> _StepResultT:
+  """Serializes cold-start tracing/lowering across threads for identical JIT keys."""
+  if trace_key in _WARMED_TRACE_KEYS:
+    return fn()
+  with _TRACE_WARMUP_LOCK:
+    if trace_key in _WARMED_TRACE_KEYS:
+      return fn()
+    if trace_key not in _TRACE_KEY_LOCKS:
+      _TRACE_KEY_LOCKS[trace_key] = threading.Lock()
+    key_lock = _TRACE_KEY_LOCKS[trace_key]
+  with key_lock:
+    if trace_key not in _WARMED_TRACE_KEYS:
+      result = fn()
+      with _TRACE_WARMUP_LOCK:
+        _WARMED_TRACE_KEYS.add(trace_key)
+        if trace_key in _TRACE_KEY_LOCKS:
+          del _TRACE_KEY_LOCKS[trace_key]
+      return result
+  return fn()
 
 
 @struct.dataclass
@@ -60,9 +92,9 @@ class SamplingMetadata:
   temperature: jax.Array | np.ndarray  # `[num_rows]` float32
   # Samples only from the smallest set of most likely tokens whose probability
   # reaches this value.
-  top_p: jax.Array | np.ndarray        # `[num_rows]` float32, in (0, 1].
+  top_p: jax.Array | np.ndarray  # `[num_rows]` float32, in (0, 1].
   # Samples only from the `top_k` most likely tokens. <= 0 means no limit.
-  top_k: jax.Array | np.ndarray        # `[num_rows]` int32, in [1, max_top_k].
+  top_k: jax.Array | np.ndarray  # `[num_rows]` int32, in [1, max_top_k].
   # Whether every request samples from the full vocabulary without `top_k` or
   # `top_p` truncation.
   unconstrained: bool = struct.field(pytree_node=False, default=False)
@@ -84,8 +116,8 @@ class SamplingMetadata:
       num_rows: The row capacity of the batch.
       max_top_k: The maximum `top_k` value allowed.
       distribution: `[num_groups, 3]` row layout of each DP group. Group `i`'s
-        `distribution[i, 2]` requests are packed starting at row
-        `i * (num_rows // num_groups)`.
+        `distribution[i, 2]` requests are packed starting at row `i * (num_rows
+        // num_groups)`.
 
     Returns:
       The metadata, padded out to `num_rows` rows.
@@ -185,12 +217,99 @@ def _sample_hierarchical_256(
   return next_tokens, chosen_logit - jax.nn.logsumexp(block_lse, axis=-1)
 
 
+def _tpu_topk_custom_call_profitable(
+    rows: int, vocab_size: int, k: int
+) -> bool:
+  """Returns True when XLA `TpuTopkRewriter` lowers `top_k` to `TopK`."""
+  if k > _TOPK_BLOCK_SIZE or vocab_size <= 1:
+    return False
+  eff_rows = max(1, rows)
+  log2_n = (vocab_size - 1).bit_length()
+  sublane_tiles = (eff_rows + 7) // 8
+  sort_cycles = int(
+      (0.1 * vocab_size * log2_n * log2_n + 1500.0) * sublane_tiles
+  )
+  topk_cycles = int(
+      0.0028 * vocab_size * k * eff_rows + 750.0 * k * sublane_tiles
+  )
+  return topk_cycles <= int(0.8 * sort_cycles)
+
+
+def _blocked_local_top_k(
+    logits: jax.Array,
+    k: int,
+) -> tuple[jax.Array, jax.Array]:
+  """Exact local top-k, using direct `jax.lax.top_k` when TPU `TopK` wins."""
+  rows, vocab_size = logits.shape
+  if (
+      vocab_size < 2 * _TOPK_BLOCK_SIZE
+      or vocab_size % _TOPK_BLOCK_SIZE != 0
+      or k > _TOPK_BLOCK_SIZE
+      or _tpu_topk_custom_call_profitable(rows, vocab_size, k)
+  ):
+    return jax.lax.top_k(logits, k)
+  num_blocks = vocab_size // _TOPK_BLOCK_SIZE
+  blk_vals, blk_idxs = jax.lax.top_k(
+      logits.reshape((rows * num_blocks, _TOPK_BLOCK_SIZE)), k
+  )
+  blk_offsets = jnp.arange(num_blocks, dtype=jnp.int32)[
+      None, :, None
+  ] * jnp.int32(_TOPK_BLOCK_SIZE)
+  cand_vals = blk_vals.reshape((rows, num_blocks * k))
+  cand_idxs = (
+      blk_idxs.astype(jnp.int32).reshape((rows, num_blocks, k)) + blk_offsets
+  ).reshape((rows, num_blocks * k))
+  top_vals, pick = jax.lax.top_k(cand_vals, k)
+  return top_vals, jnp.take_along_axis(cand_idxs, pick, axis=-1)
+
+
+def _distributed_top_k(
+    logits: jax.Array,
+    k: int,
+    *,
+    mesh: _MeshType,
+) -> tuple[jax.Array, jax.Array]:
+  """Exact two-stage top-k over `'tp'`-sharded logits without full-vocab sort."""
+  tp_size = int(mesh.shape['tp'])
+  vocab_size = logits.shape[-1]
+  local_vocab = vocab_size // tp_size
+  local_k = min(k, local_vocab)
+  dp_axes = utils.kv_cache_dp_axes(mesh)
+  num_dp = math.prod(mesh.shape[axis] for axis in dp_axes)
+  row_spec = dp_axes if (num_dp > 1 and logits.shape[0] % num_dp == 0) else None
+  in_spec = jax.sharding.PartitionSpec(row_spec, 'tp')
+  out_spec = jax.sharding.PartitionSpec(row_spec, None)
+
+  def _shard_fn(local_logits: jax.Array) -> tuple[jax.Array, jax.Array]:
+    local_vals, local_idxs = _blocked_local_top_k(local_logits, local_k)
+    tp_rank = jax.lax.axis_index('tp').astype(jnp.int32)
+    global_idxs = local_idxs.astype(jnp.int32) + tp_rank * jnp.int32(
+        local_vocab
+    )
+    # Gather only `[rows, local_k]` per TP rank in ascending rank order so
+    # equal-logit ties break identically to ascending global token IDs.
+    all_vals = jax.lax.all_gather(local_vals, 'tp', axis=-1, tiled=True)
+    all_idxs = jax.lax.all_gather(global_idxs, 'tp', axis=-1, tiled=True)
+    top_vals, pick = jax.lax.top_k(all_vals, k)
+    top_idxs = jnp.take_along_axis(all_idxs, pick, axis=-1)
+    return top_vals, top_idxs
+
+  return shard_map(
+      _shard_fn,
+      mesh=mesh,
+      in_specs=in_spec,
+      out_specs=(out_spec, out_spec),
+      check_rep=False,
+  )(logits)
+
+
 def sample(
     logits: jax.Array,
     key: jax.Array,
     metadata: SamplingMetadata,
     max_top_k: int,
     return_logprobs: bool = False,
+    mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh | None = None,
 ) -> tuple[jax.Array, jax.Array | None]:
   """Samples one token per row, under each row's own sampling settings.
 
@@ -206,6 +325,7 @@ def sample(
     max_top_k: How many candidate tokens to draw for every row. Each row's
       `top_k` must not exceed it. -1 draws every token in the vocabulary.
     return_logprobs: Whether to return the sampled tokens' logprobs.
+    mesh: Optional device mesh used for distributed top-k sharding.
 
   Returns:
     A tuple of
@@ -246,7 +366,18 @@ def sample(
 
   k = vocab_size if max_top_k <= 0 else min(max_top_k, vocab_size)
 
-  candidate_logits, candidate_tokens = jax.lax.top_k(logits, k)
+  if (
+      isinstance(mesh, (jax.sharding.Mesh, jax.sharding.AbstractMesh))
+      and 'tp' in mesh.axis_names
+      and int(mesh.shape['tp']) > 1
+      and vocab_size % int(mesh.shape['tp']) == 0
+      and k < vocab_size
+  ):
+    candidate_logits, candidate_tokens = _distributed_top_k(
+        logits, k, mesh=mesh
+    )
+  else:
+    candidate_logits, candidate_tokens = _blocked_local_top_k(logits, k)
   scaled_logits = candidate_logits.astype(jnp.float32) / temperature[:, None]
 
   ranks = jnp.arange(k)
@@ -285,34 +416,703 @@ Cache = dict[str, jax.Array]
 _PyTree = TypeVar('_PyTree')
 
 
-@functools.partial(jax.jit, static_argnames=['num_steps'])
-def _stack_steps(
-    first_step: jax.Array,
-    decode_steps: jax.Array | None,
-    num_steps: int,
-) -> jax.Array:
-  """Packs per-step outputs into a `[num_rows, num_steps, ...]` device array.
+@struct.dataclass
+class _PackedPagedMetadata:
+  """Compact `PagedAttnMetadata` storing one page table per shared KV group."""
 
-  Args:
-    first_step: The `[num_rows, ...]` output of the scheduled batch's step.
-    decode_steps: The `[num_scheduler_steps - 1, num_rows, ...]` output of the
-      decode loop, or None when the loop did not run.
-    num_steps: The step capacity to pad out to.
+  packed_page_indices: jax.Array | np.ndarray  # `[num_groups, rows, pages]`
+  kv_lens: jax.Array | np.ndarray
+  query_lens: jax.Array | np.ndarray
+  distribution: jax.Array | np.ndarray
+  cache_group_map: tuple[tuple[str, int], ...] = struct.field(pytree_node=False)
+  decode_only: bool = struct.field(pytree_node=False, default=False)
 
-  Returns:
-    The outputs indexed by `[row, step, ...]`.
-  """
-  if decode_steps is not None:
-    return jnp.concatenate(
-        [first_step[:, None], jnp.swapaxes(decode_steps, 0, 1)], axis=1
+  def unpack(self) -> paged_attention.PagedAttnMetadata:
+    group_tables = [
+        self.packed_page_indices[idx]
+        for idx in range(self.packed_page_indices.shape[0])
+    ]
+    return paged_attention.PagedAttnMetadata(
+        page_indices={
+            cache_name: group_tables[group_idx]
+            for cache_name, group_idx in self.cache_group_map
+        },
+        kv_lens=self.kv_lens,
+        query_lens=self.query_lens,
+        distribution=self.distribution,
+        decode_only=self.decode_only,
     )
+
+
+def _pack_paged_metadata(
+    metadata: paged_attention.PagedAttnMetadata,
+) -> _PackedPagedMetadata:
+  """Deduplicates identical page tables into a `[num_groups, rows, pages]` array."""
+  unique_tables: list[jax.Array | np.ndarray] = []
+  table_id_to_group: dict[int, int] = {}
+  cache_group_map: list[tuple[str, int]] = []
+  for cache_name, table in metadata.page_indices.items():
+    obj_id = id(table)
+    group_idx = table_id_to_group.get(obj_id)
+    if group_idx is None:
+      group_idx = len(unique_tables)
+      table_id_to_group[obj_id] = group_idx
+      unique_tables.append(table)
+    cache_group_map.append((cache_name, group_idx))
+  num_rows = metadata.query_lens.shape[0]
+  if not unique_tables:
+    packed: jax.Array | np.ndarray = np.zeros((0, num_rows, 0), dtype=np.int32)
+  elif all(isinstance(t, np.ndarray) for t in unique_tables):
+    packed = np.stack(unique_tables, axis=0)
+  else:
+    packed = jnp.stack(
+        [jnp.asarray(t, dtype=jnp.int32) for t in unique_tables], axis=0
+    )
+  return _PackedPagedMetadata(
+      packed_page_indices=packed,
+      kv_lens=metadata.kv_lens,
+      query_lens=metadata.query_lens,
+      distribution=metadata.distribution,
+      cache_group_map=tuple(cache_group_map),
+      decode_only=metadata.decode_only,
+  )
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class _StepInputLayout:
+  """Static shapes and flags for packing all step inputs into one `int32` H2D."""
+
+  tokens_shape: tuple[int, int]
+  page_indices_shape: tuple[int, int, int]
+  num_rows: int
+  num_groups: int
+  has_target_idxs: bool
+  cache_group_map: tuple[tuple[str, int], ...]
+  decode_only: bool
+  unconstrained: bool
+
+
+def _pack_step_inputs(
+    tokens: jax.Array | np.ndarray,
+    packed_metadata: _PackedPagedMetadata,
+    sampling_metadata: SamplingMetadata,
+    target_idxs: jax.Array | np.ndarray | None,
+) -> tuple[np.ndarray | jax.Array, _StepInputLayout]:
+  """Packs all 32-bit step metadata and tokens into a single 1D `int32` buffer."""
+  num_rows = packed_metadata.query_lens.shape[0]
+  num_groups = packed_metadata.distribution.shape[0]
+  page_shape = packed_metadata.packed_page_indices.shape
+  layout = _StepInputLayout(
+      tokens_shape=(int(tokens.shape[0]), int(tokens.shape[1])),
+      page_indices_shape=(
+          int(page_shape[0]),
+          int(page_shape[1]),
+          int(page_shape[2]),
+      ),
+      num_rows=int(num_rows),
+      num_groups=int(num_groups),
+      has_target_idxs=target_idxs is not None,
+      cache_group_map=packed_metadata.cache_group_map,
+      decode_only=packed_metadata.decode_only,
+      unconstrained=sampling_metadata.unconstrained,
+  )
+  all_host_numpy = (
+      isinstance(tokens, np.ndarray)
+      and isinstance(packed_metadata.packed_page_indices, np.ndarray)
+      and isinstance(packed_metadata.kv_lens, np.ndarray)
+      and isinstance(packed_metadata.query_lens, np.ndarray)
+      and isinstance(packed_metadata.distribution, np.ndarray)
+      and isinstance(sampling_metadata.temperature, np.ndarray)
+      and isinstance(sampling_metadata.top_p, np.ndarray)
+      and isinstance(sampling_metadata.top_k, np.ndarray)
+      and (target_idxs is None or isinstance(target_idxs, np.ndarray))
+  )
+  if all_host_numpy:
+    parts_np = [
+        np.asarray(tokens, dtype=np.int32).reshape(-1),
+        np.asarray(packed_metadata.packed_page_indices, dtype=np.int32).reshape(
+            -1
+        ),
+        np.asarray(packed_metadata.kv_lens, dtype=np.int32).reshape(-1),
+        np.asarray(packed_metadata.query_lens, dtype=np.int32).reshape(-1),
+        np.asarray(packed_metadata.distribution, dtype=np.int32).reshape(-1),
+        np.ascontiguousarray(
+            sampling_metadata.temperature, dtype=np.float32
+        ).view(np.int32),
+        np.ascontiguousarray(sampling_metadata.top_p, dtype=np.float32).view(
+            np.int32
+        ),
+        np.asarray(sampling_metadata.top_k, dtype=np.int32).reshape(-1),
+    ]
+    if target_idxs is not None:
+      parts_np.append(np.asarray(target_idxs, dtype=np.int32).reshape(-1))
+    return np.concatenate(parts_np, axis=0), layout
+
+  parts_jax = [
+      jnp.asarray(tokens, dtype=jnp.int32).reshape(-1),
+      jnp.asarray(packed_metadata.packed_page_indices, dtype=jnp.int32).reshape(
+          -1
+      ),
+      jnp.asarray(packed_metadata.kv_lens, dtype=jnp.int32).reshape(-1),
+      jnp.asarray(packed_metadata.query_lens, dtype=jnp.int32).reshape(-1),
+      jnp.asarray(packed_metadata.distribution, dtype=jnp.int32).reshape(-1),
+      jax.lax.bitcast_convert_type(
+          jnp.asarray(sampling_metadata.temperature, dtype=jnp.float32).reshape(
+              -1
+          ),
+          jnp.int32,
+      ),
+      jax.lax.bitcast_convert_type(
+          jnp.asarray(sampling_metadata.top_p, dtype=jnp.float32).reshape(-1),
+          jnp.int32,
+      ),
+      jnp.asarray(sampling_metadata.top_k, dtype=jnp.int32).reshape(-1),
+  ]
+  if target_idxs is not None:
+    parts_jax.append(jnp.asarray(target_idxs, dtype=jnp.int32).reshape(-1))
+  return jnp.concatenate(parts_jax, axis=0), layout
+
+
+def _unpack_step_inputs(
+    packed: jax.Array,
+    layout: _StepInputLayout,
+) -> tuple[jax.Array, jax.Array | None, _PackedPagedMetadata, SamplingMetadata]:
+  """Slices a flat 1D `int32` device buffer back into typed step inputs."""
+  off = 0
+  tok_n = math.prod(layout.tokens_shape)
+  tokens = packed[off : off + tok_n].reshape(layout.tokens_shape)
+  off += tok_n
+
+  page_n = math.prod(layout.page_indices_shape)
+  page_indices = packed[off : off + page_n].reshape(layout.page_indices_shape)
+  off += page_n
+
+  r = layout.num_rows
+  kv_lens = packed[off : off + r]
+  off += r
+  query_lens = packed[off : off + r]
+  off += r
+
+  dist_n = layout.num_groups * 3
+  distribution = packed[off : off + dist_n].reshape((layout.num_groups, 3))
+  off += dist_n
+
+  temperature = jax.lax.bitcast_convert_type(packed[off : off + r], jnp.float32)
+  off += r
+  top_p = jax.lax.bitcast_convert_type(packed[off : off + r], jnp.float32)
+  off += r
+  top_k = packed[off : off + r]
+  off += r
+
+  target_idxs = packed[off : off + r] if layout.has_target_idxs else None
+  packed_metadata = _PackedPagedMetadata(
+      packed_page_indices=page_indices,
+      kv_lens=kv_lens,
+      query_lens=query_lens,
+      distribution=distribution,
+      cache_group_map=layout.cache_group_map,
+      decode_only=layout.decode_only,
+  )
+  sampling_metadata = SamplingMetadata(
+      temperature=temperature,
+      top_p=top_p,
+      top_k=top_k,
+      unconstrained=layout.unconstrained,
+  )
+  return tokens, target_idxs, packed_metadata, sampling_metadata
+
+
+def _pad_single_step_output(
+    first_step: jax.Array,
+    num_steps: int,
+    repeat_first: bool | jax.Array = False,
+) -> jax.Array:
+  """Pads a `[num_rows, ...]` step-0 output to `[num_rows, num_steps, ...]`."""
   if num_steps == 1:
     return first_step[:, None]
-  out = jnp.zeros(
-      (first_step.shape[0], num_steps, *first_step.shape[1:]),
-      dtype=first_step.dtype,
+  shape = (first_step.shape[0], num_steps, *first_step.shape[1:])
+  if isinstance(repeat_first, bool):
+    if repeat_first:
+      return jnp.broadcast_to(first_step[:, None], shape)
+    return jnp.zeros(shape, dtype=first_step.dtype).at[:, 0].set(first_step)
+  repeated = jnp.broadcast_to(first_step[:, None], shape)
+  step_mask = (jnp.arange(num_steps) == 0).reshape(
+      (1, num_steps, *((1,) * (first_step.ndim - 1)))
   )
-  return out.at[:, 0].set(first_step)
+  return jnp.where(
+      step_mask | repeat_first, repeated, jnp.zeros((), dtype=first_step.dtype)
+  )
+
+
+def _freeze_for_hash(value: Any) -> Hashable:
+  """Converts nested GraphDef metadata into a hashable key."""
+  if isinstance(value, (type(None), bool, int, float, str, bytes, type)):
+    return value
+  if isinstance(value, np.dtype):
+    return value
+  if isinstance(value, np.ndarray):
+    return ('ndarray', value.shape, str(value.dtype), value.tobytes())
+  if isinstance(value, Mapping):
+    return (
+        'mapping',
+        tuple(
+            (_freeze_for_hash(k), _freeze_for_hash(v))
+            for k, v in sorted(value.items(), key=lambda kv: repr(kv[0]))
+        ),
+    )
+  if isinstance(value, (list, tuple)):
+    return (type(value), tuple(_freeze_for_hash(v) for v in value))
+  if isinstance(value, (set, frozenset)):
+    return (type(value), frozenset(_freeze_for_hash(v) for v in value))
+  if dataclasses.is_dataclass(value) and not isinstance(value, type):
+    return (
+        type(value),
+        tuple(
+            (f.name, _freeze_for_hash(operator.attrgetter(f.name)(value)))
+            for f in dataclasses.fields(value)
+        ),
+    )
+  if isinstance(value, Hashable):
+    return value
+  return repr(value)
+
+
+class _StaticGraphDef:
+  """Hashable static wrapper around an `nnx.GraphDef` for `@jax.jit` caching."""
+
+  __slots__ = ('graphdef', '_key')
+
+  def __init__(self, graphdef: graph.GraphDef[nnx.Module]) -> None:
+    self.graphdef = graphdef
+    self._key: Hashable = _freeze_for_hash(graphdef)
+
+  def __hash__(self) -> int:
+    return hash(self._key)
+
+  def __eq__(self, other: object) -> bool:
+    if not isinstance(other, _StaticGraphDef):
+      return NotImplemented
+    return self._key == other._key and self.graphdef == other.graphdef
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class _RunnerCompileKey:
+  """Static compilation key shared across `ModelRunner` instances."""
+
+  max_top_k: int
+  mesh: jax.sharding.AbstractMesh
+  return_logprobs: bool
+  return_logits: bool
+
+
+def _split_rows(x: jax.Array, mesh: _MeshType) -> jax.Array:
+  """Splits row axis 0 of `x` across KV-cache DP axes when divisible."""
+  dp_axes = utils.kv_cache_dp_axes(mesh)
+  num_shards = math.prod(mesh.shape[axis] for axis in dp_axes)
+  if num_shards == 1 or x.shape[0] % num_shards:
+    return x
+  return jax.lax.with_sharding_constraint(
+      x,
+      jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(dp_axes)),
+  )
+
+
+def _get_token_positions(
+    tokens: jax.Array,
+    metadata: paged_attention.PagedAttnMetadata,
+) -> jax.Array:
+  """Returns the `[num_groups, tokens_per_group]` positions of each token."""
+  num_groups = metadata.distribution.shape[0]
+  group_query_lens = jnp.asarray(metadata.query_lens).reshape(num_groups, -1)
+  group_kv_lens = jnp.asarray(metadata.kv_lens).reshape(num_groups, -1)
+
+  def _group_positions(toks, q_lens, kv_lens):
+    total_capacity = toks.shape[0]
+    n_rows = q_lens.shape[0]
+    row_idxs = jnp.repeat(
+        jnp.arange(n_rows),
+        q_lens,
+        total_repeat_length=total_capacity,
+    )
+    local_positions = jnp.arange(total_capacity)
+    starts = jnp.zeros_like(q_lens)
+    if len(q_lens) > 0:
+      starts = starts.at[1:].set(jnp.cumsum(q_lens)[:-1])
+    intra_offsets = local_positions - starts[row_idxs]
+    curr_seq_lens = kv_lens - q_lens
+    return intra_offsets + curr_seq_lens[row_idxs]
+
+  return jax.vmap(_group_positions)(tokens, group_query_lens, group_kv_lens)
+
+
+def _model_step_impl(
+    graphdef: _StaticGraphDef,
+    compile_key: _RunnerCompileKey,
+    params: list[nnx.Variable],
+    cache: Cache,
+    tokens: jax.Array,
+    metadata: paged_attention.PagedAttnMetadata,
+    sampling_metadata: SamplingMetadata,
+    rng: jax.Array,
+) -> tuple[jax.Array, jax.Array | None, jax.Array | None, Cache, jax.Array]:
+  """Runs one transformer forward pass over a ragged batch and samples tokens."""
+  mesh = compile_key.mesh
+  transformer = nnx.merge(graphdef.graphdef, params)
+  positions = _get_token_positions(tokens, metadata)
+
+  num_groups = metadata.distribution.shape[0]
+  group_query_lens = jnp.asarray(metadata.query_lens).reshape(num_groups, -1)
+  last_token_idxs = jnp.maximum(0, jnp.cumsum(group_query_lens, axis=-1) - 1)
+
+  tokens, positions, last_token_idxs = (
+      _split_rows(x, mesh) for x in (tokens, positions, last_token_idxs)
+  )
+  metadata = jax.tree.map(lambda x: _split_rows(x, mesh), metadata)
+  sampling_metadata = jax.tree.map(
+      lambda x: _split_rows(x, mesh), sampling_metadata
+  )
+
+  logits, updated_cache = transformer(
+      tokens,
+      positions,
+      cache=cache,
+      metadata=metadata,
+      mesh=mesh,
+      logits_idxs=last_token_idxs,
+  )
+  logits = _split_rows(logits, mesh)
+
+  rng, step_rng = jax.random.split(rng)
+  next_tokens, logp = sample(
+      logits,
+      step_rng,
+      sampling_metadata,
+      max_top_k=compile_key.max_top_k,
+      return_logprobs=compile_key.return_logprobs,
+      mesh=mesh,
+  )
+
+  res_logits = logits if compile_key.return_logits else None
+  return next_tokens, res_logits, logp, updated_cache, rng
+
+
+def _run_decode_scan(
+    graphdef: _StaticGraphDef,
+    compile_key: _RunnerCompileKey,
+    params: list[nnx.Variable],
+    cache: Cache,
+    decode_tokens: jax.Array,
+    decode_metadata: paged_attention.PagedAttnMetadata,
+    sampling_metadata: SamplingMetadata,
+    rng: jax.Array,
+    num_steps: int,
+    num_groups: int,
+    rows_per_group: int,
+):
+  """Scans `num_steps` autoregressive decode steps over compacted rows."""
+  query_lens = decode_metadata.query_lens
+
+  def decode_step(carry, _):
+    step_cache, tokens, kv_lens, step_rng = carry
+    step_metadata = dataclasses.replace(decode_metadata, kv_lens=kv_lens)
+    next_tokens, logits, logp, step_cache, step_rng = _model_step_impl(
+        graphdef,
+        compile_key,
+        params,
+        step_cache,
+        tokens,
+        step_metadata,
+        sampling_metadata,
+        step_rng,
+    )
+    carry = (
+        step_cache,
+        next_tokens.reshape(num_groups, rows_per_group),
+        kv_lens + query_lens,
+        step_rng,
+    )
+    return carry, (next_tokens, logits, logp)
+
+  return jax.lax.scan(
+      decode_step,
+      (cache, decode_tokens, decode_metadata.kv_lens, rng),
+      xs=None,
+      length=num_steps,
+  )
+
+
+@functools.partial(
+    jax.jit,
+    static_argnames=['graphdef', 'compile_key', 'layout', 'num_steps'],
+    donate_argnames=['cache'],
+)
+def _jit_packed_model_step(
+    graphdef: _StaticGraphDef,
+    compile_key: _RunnerCompileKey,
+    params: list[nnx.Variable],
+    cache: Cache,
+    packed_step_inputs: jax.Array,
+    layout: _StepInputLayout,
+    rng: jax.Array,
+    num_steps: int = 1,
+    prev_generated_tokens: jax.Array | None = None,
+) -> tuple[jax.Array, jax.Array | None, jax.Array | None, Cache, jax.Array]:
+  """Unpacks flat inputs, runs step 0, and pads outputs to `num_steps`."""
+  tokens, target_idxs, packed_metadata, sampling_metadata = _unpack_step_inputs(
+      packed_step_inputs, layout
+  )
+  if prev_generated_tokens is not None and target_idxs is not None:
+    tokens = utils.scatter_last_column(
+        tokens, prev_generated_tokens, target_idxs
+    )
+  metadata = packed_metadata.unpack()
+  next_tokens, logits, logp, cache, rng = _model_step_impl(
+      graphdef,
+      compile_key,
+      params,
+      cache,
+      tokens,
+      metadata,
+      sampling_metadata,
+      rng,
+  )
+  mesh = compile_key.mesh
+  distribution = jnp.asarray(packed_metadata.distribution, dtype=jnp.int32)
+  repeat_first = (
+      jnp.sum(distribution[:, 0] + distribution[:, 2] - distribution[:, 1]) > 0
+  )
+  out_tokens = _split_rows(
+      _pad_single_step_output(next_tokens, num_steps, repeat_first), mesh
+  )
+  out_logits = (
+      _split_rows(_pad_single_step_output(logits, num_steps), mesh)
+      if logits is not None
+      else None
+  )
+  out_logp = (
+      _split_rows(_pad_single_step_output(logp, num_steps), mesh)
+      if logp is not None
+      else None
+  )
+  return out_tokens, out_logits, out_logp, cache, rng
+
+
+@functools.partial(
+    jax.jit,
+    static_argnames=['graphdef', 'compile_key', 'layout', 'num_decode_steps'],
+    donate_argnames=['cache'],
+)
+def _jit_prefill_and_decode_loop(
+    graphdef: _StaticGraphDef,
+    compile_key: _RunnerCompileKey,
+    params: list[nnx.Variable],
+    cache: Cache,
+    packed_step_inputs: jax.Array,
+    layout: _StepInputLayout,
+    rng: jax.Array,
+    num_decode_steps: int,
+    prev_generated_tokens: jax.Array | None = None,
+) -> tuple[jax.Array, jax.Array | None, jax.Array | None, Cache, jax.Array]:
+  """Runs scheduled step 0 and `num_decode_steps` survivor decodes in one JIT."""
+  mesh = compile_key.mesh
+  tokens, target_idxs, packed_metadata, sampling_metadata = _unpack_step_inputs(
+      packed_step_inputs, layout
+  )
+  if prev_generated_tokens is not None and target_idxs is not None:
+    tokens = utils.scatter_last_column(
+        tokens, prev_generated_tokens, target_idxs
+    )
+  next_tokens, first_logits, first_logp, cache, rng = _model_step_impl(
+      graphdef,
+      compile_key,
+      params,
+      cache,
+      tokens,
+      packed_metadata.unpack(),
+      sampling_metadata,
+      rng,
+  )
+
+  num_rows = packed_metadata.query_lens.shape[0]
+  distribution = jnp.asarray(packed_metadata.distribution, dtype=jnp.int32)
+  num_groups = distribution.shape[0]
+  rows_per_group = num_rows // num_groups
+
+  group_rows = jnp.arange(rows_per_group, dtype=jnp.int32)[None, :]
+  is_chunked_prefill = (group_rows >= distribution[:, 0:1]) & (
+      group_rows < distribution[:, 1:2]
+  )
+  is_surviving = (group_rows < distribution[:, 2:3]) & ~is_chunked_prefill
+  num_surviving_per_group = (
+      distribution[:, 0] + distribution[:, 2] - distribution[:, 1]
+  )
+  local_order = jnp.argsort(~is_surviving, axis=1)
+  group_row_offsets = (
+      jnp.arange(num_groups, dtype=local_order.dtype)[:, None] * rows_per_group
+  )
+  order = (local_order + group_row_offsets).reshape(-1)
+  is_active_decode = (group_rows < num_surviving_per_group[:, None]).reshape(-1)
+
+  query_lens = jnp.where(is_active_decode, jnp.int32(1), jnp.int32(0))
+  kv_lens = (
+      jnp.where(
+          is_active_decode,
+          jnp.asarray(packed_metadata.kv_lens, dtype=jnp.int32)[order],
+          jnp.int32(0),
+      )
+      + query_lens
+  )
+  compacted_tables = jnp.asarray(
+      packed_metadata.packed_page_indices, dtype=jnp.int32
+  )[:, order, :]
+  group_slices = [
+      compacted_tables[idx] for idx in range(compacted_tables.shape[0])
+  ]
+  decode_metadata = paged_attention.PagedAttnMetadata(
+      page_indices={
+          cache_name: group_slices[group_idx]
+          for cache_name, group_idx in packed_metadata.cache_group_map
+      },
+      kv_lens=kv_lens,
+      query_lens=query_lens,
+      distribution=jnp.stack([num_surviving_per_group] * 3, axis=1),
+      decode_only=True,
+  )
+
+  decode_sampling_metadata = SamplingMetadata(
+      temperature=jnp.where(
+          is_active_decode,
+          jnp.asarray(sampling_metadata.temperature)[order],
+          jnp.float32(0.0),
+      ),
+      top_p=jnp.where(
+          is_active_decode,
+          jnp.asarray(sampling_metadata.top_p)[order],
+          jnp.float32(1.0),
+      ),
+      top_k=jnp.where(
+          is_active_decode,
+          jnp.asarray(sampling_metadata.top_k)[order],
+          jnp.int32(1),
+      ),
+      unconstrained=sampling_metadata.unconstrained,
+  )
+
+  decode_tokens = next_tokens[order].reshape(num_groups, rows_per_group)
+  inverse_order = (
+      jnp.argsort(local_order, axis=1) + group_row_offsets
+  ).reshape(-1)
+
+  carry, outputs = _run_decode_scan(
+      graphdef,
+      compile_key,
+      params,
+      cache,
+      decode_tokens,
+      decode_metadata,
+      decode_sampling_metadata,
+      rng,
+      num_decode_steps,
+      num_groups,
+      rows_per_group,
+  )
+  cache, _, _, rng = carry
+  scan_tokens, scan_logits, scan_logp = outputs
+  out_tokens = _split_rows(
+      jnp.concatenate(
+          [
+              next_tokens[:, None],
+              jnp.swapaxes(scan_tokens[:, inverse_order], 0, 1),
+          ],
+          axis=1,
+      ),
+      mesh,
+  )
+  if scan_logits is not None and first_logits is not None:
+    out_logits = _split_rows(
+        jnp.concatenate(
+            [
+                first_logits[:, None],
+                jnp.swapaxes(scan_logits[:, inverse_order], 0, 1),
+            ],
+            axis=1,
+        ),
+        mesh,
+    )
+  else:
+    out_logits = None
+  if scan_logp is not None and first_logp is not None:
+    out_logp = _split_rows(
+        jnp.concatenate(
+            [
+                first_logp[:, None],
+                jnp.swapaxes(scan_logp[:, inverse_order], 0, 1),
+            ],
+            axis=1,
+        ),
+        mesh,
+    )
+  else:
+    out_logp = None
+  return out_tokens, out_logits, out_logp, cache, rng
+
+
+@functools.partial(
+    jax.jit,
+    static_argnames=['graphdef', 'compile_key', 'layout', 'num_steps'],
+    donate_argnames=['cache'],
+)
+def _jit_decode_only_loop(
+    graphdef: _StaticGraphDef,
+    compile_key: _RunnerCompileKey,
+    params: list[nnx.Variable],
+    cache: Cache,
+    packed_step_inputs: jax.Array,
+    layout: _StepInputLayout,
+    rng: jax.Array,
+    num_steps: int,
+    prev_generated_tokens: jax.Array | None = None,
+) -> tuple[jax.Array, jax.Array | None, jax.Array | None, Cache, jax.Array]:
+  """Runs all `num_steps` pure-decode passes in a single compiled `lax.scan`."""
+  tokens, target_idxs, packed_metadata, sampling_metadata = _unpack_step_inputs(
+      packed_step_inputs, layout
+  )
+  if prev_generated_tokens is not None and target_idxs is not None:
+    tokens = utils.scatter_last_column(
+        tokens, prev_generated_tokens, target_idxs
+    )
+  num_rows = packed_metadata.query_lens.shape[0]
+  num_groups = packed_metadata.distribution.shape[0]
+  rows_per_group = num_rows // num_groups
+  decode_metadata = packed_metadata.unpack()
+  carry, outputs = _run_decode_scan(
+      graphdef,
+      compile_key,
+      params,
+      cache,
+      tokens,
+      decode_metadata,
+      sampling_metadata,
+      rng,
+      num_steps,
+      num_groups,
+      rows_per_group,
+  )
+  cache, _, _, rng = carry
+  out_tokens, out_logits, out_logp = outputs
+  mesh = compile_key.mesh
+  return (
+      _split_rows(jnp.swapaxes(out_tokens, 0, 1), mesh),
+      _split_rows(jnp.swapaxes(out_logits, 0, 1), mesh)
+      if out_logits is not None
+      else None,
+      _split_rows(jnp.swapaxes(out_logp, 0, 1), mesh)
+      if out_logp is not None
+      else None,
+      cache,
+      rng,
+  )
+
 
 class ModelRunner:
   """Runs the transformer forward pass and samples tokens."""
@@ -331,6 +1131,7 @@ class ModelRunner:
     self._transformer_graphdef: graph.GraphDef[nnx.Module] = nnx.graphdef(
         transformer
     )
+    self._static_graphdef = _StaticGraphDef(self._transformer_graphdef)
     self._transformer_state: statelib.State = nnx.variables(transformer)
     self._flattened_transformer_state: list[nnx.Variable] = jax.tree.leaves(
         self._transformer_state,
@@ -338,17 +1139,13 @@ class ModelRunner:
     )
 
     self._config = config
+    self._compile_key = _RunnerCompileKey(
+        max_top_k=config.max_top_k,
+        mesh=config.mesh.abstract_mesh,
+        return_logprobs=config.return_logprobs,
+        return_logits=config.return_logits,
+    )
     self._rng = self._to_device(jax.random.PRNGKey(config.seed))
-
-    self._compiled_model_step_fn = jax.jit(
-        self._model_step_fn,
-        donate_argnames=['cache'],
-    )
-    self._compiled_decode_loop_fn = jax.jit(
-        self._decode_loop_fn,
-        donate_argnames=['cache'],
-        static_argnames=['num_steps'],
-    )
 
   @property
   def config(self) -> configs.ModelRunnerConfig:
@@ -487,9 +1284,7 @@ class ModelRunner:
       flat_new_params = jax.tree.map(
           lambda x: x.astype(rollout_precision), flat_new_params
       )
-    flat_old_params, tree_def = rl_utils.to_flat_dict(
-        self.transformer_state
-    )
+    flat_old_params, tree_def = rl_utils.to_flat_dict(self.transformer_state)
     merged_params = functools.reduce(
         operator.ior, [flat_old_params, flat_new_params], {}
     )
@@ -506,282 +1301,6 @@ class ModelRunner:
       return self.transformer.config.dtype
     return self._flattened_transformer_state[0].dtype
 
-  def _get_token_positions(
-      self,
-      tokens: jax.Array,
-      metadata: paged_attention.PagedAttnMetadata,
-  ) -> jax.Array:
-    """Returns the `[num_groups, tokens_per_group]` positions of each token."""
-    num_groups = metadata.distribution.shape[0]
-    group_query_lens = jnp.asarray(metadata.query_lens).reshape(num_groups, -1)
-    group_kv_lens = jnp.asarray(metadata.kv_lens).reshape(num_groups, -1)
-
-    def _group_positions(toks, q_lens, kv_lens):
-      total_capacity = toks.shape[0]
-      n_rows = q_lens.shape[0]
-
-      # Example:
-      # tokens: [a, b, c, d, e, f, PAD, PAD]
-      # query_lens: [2, 1, 3]
-      # row_idxs: [0, 0, 1, 2, 2, 2, 2, 2]
-      row_idxs = jnp.repeat(
-          jnp.arange(n_rows),
-          q_lens,
-          total_repeat_length=total_capacity,
-      )
-
-      # Example:
-      # tokens: [a, b, c, d, e, f, PAD, PAD]
-      # query_lens: [2, 1, 3]
-      # intra_offsets: [0, 1, 0, 0, 1, 2, 3, 4]
-      local_positions = jnp.arange(total_capacity)
-      starts = jnp.zeros_like(q_lens)
-      if len(q_lens) > 0:
-        starts = starts.at[1:].set(jnp.cumsum(q_lens)[:-1])
-      intra_offsets = local_positions - starts[row_idxs]
-
-      # KV lens includes the query tokens. This yields the length of the
-      # sequences before appending the query tokens.
-      curr_seq_lens = kv_lens - q_lens
-
-      return intra_offsets + curr_seq_lens[row_idxs]
-
-    return jax.vmap(_group_positions)(tokens, group_query_lens, group_kv_lens)
-
-  def _model_step_fn(
-      self,
-      params: list[nnx.Variable],
-      cache: Cache,
-      tokens: jax.Array,
-      metadata: paged_attention.PagedAttnMetadata,
-      sampling_metadata: SamplingMetadata,
-      rng: jax.Array,
-  ) -> tuple[jax.Array, jax.Array | None, jax.Array | None, Cache, jax.Array]:
-    """Runs the model over a mixed batch and samples the next tokens.
-
-    Args:
-      params: The flattened transformer state to run with.
-      cache: The physical KV cache pages to read and write.
-      tokens: `[num_groups, tokens_per_group]` array of tokens for the batch,
-        where each row is a DP group's padded ragged token array.
-      metadata: Ragged execution metadata for the attention kernel.
-      sampling_metadata: Each row's sampling settings.
-      rng: PRNG key to split for sampling this step.
-
-    Returns:
-      A tuple of
-      - next_tokens: `[num_rows]` array of sampled tokens.
-      - logits: `[num_rows, vocab_size]` array of logits, or None.
-      - logprobs: `[num_rows]` array of logprobs, or None.
-      - updated_cache: The updated KV cache pages.
-      - rng: The updated PRNG key for subsequent steps.
-    """
-    config = self._config
-
-    transformer = nnx.merge(self._transformer_graphdef, params)
-    positions = self._get_token_positions(tokens, metadata)
-
-    num_groups = metadata.distribution.shape[0]
-    group_query_lens = jnp.asarray(metadata.query_lens).reshape(num_groups, -1)
-    last_token_idxs = jnp.maximum(0, jnp.cumsum(group_query_lens, axis=-1) - 1)
-
-    tokens, positions, last_token_idxs = (
-        self._split_rows(x) for x in (tokens, positions, last_token_idxs)
-    )
-    metadata = jax.tree.map(self._split_rows, metadata)
-    sampling_metadata = jax.tree.map(self._split_rows, sampling_metadata)
-
-    # Each row samples from the logits of its last token, so the model only
-    # computes those.
-    logits, updated_cache = transformer(
-        tokens,
-        positions,
-        cache=cache,
-        metadata=metadata,
-        mesh=config.mesh,
-        logits_idxs=last_token_idxs,
-    )
-    # Sampling sorts every row's logits over the whole vocabulary, so each
-    # device samples only its share of the rows rather than all of them.
-    logits = self._split_rows(logits)
-
-    rng, step_rng = jax.random.split(rng)
-    next_tokens, logp = sample(
-        logits,
-        step_rng,
-        sampling_metadata,
-        max_top_k=config.max_top_k,
-        return_logprobs=config.return_logprobs,
-    )
-
-    res_logits = logits if config.return_logits else None
-    return next_tokens, res_logits, logp, updated_cache, rng
-
-  def _split_rows(self, x: jax.Array) -> jax.Array:
-    """Splits the rows of `x` across the mesh's DP axes, if they divide evenly.
-
-    The `"dp"` and `"fsdp"` axes index the DP groups, as in `kv_cache_manager`.
-
-    Args:
-      x: An array with one row per scheduled row of the batch.
-
-    Returns:
-      `x` constrained to shard axis 0 across the DP axes, or `x` unchanged when
-      there is only one DP shard or `x.shape[0]` is not divisible by it.
-    """
-    mesh = self._config.mesh
-    dp_axes = utils.kv_cache_dp_axes(mesh)
-    num_shards = math.prod(mesh.shape[axis] for axis in dp_axes)
-    if num_shards == 1 or x.shape[0] % num_shards:
-      return x
-    return jax.lax.with_sharding_constraint(
-        x,
-        jax.sharding.NamedSharding(
-            mesh, jax.sharding.PartitionSpec(dp_axes)
-        ),
-    )
-
-  def _decode_loop_fn(
-      self,
-      params: list[nnx.Variable],
-      cache: Cache,
-      next_tokens: jax.Array,
-      metadata: paged_attention.PagedAttnMetadata,
-      sampling_metadata: SamplingMetadata,
-      rng: jax.Array,
-      num_steps: int,
-  ) -> tuple[jax.Array, jax.Array | None, jax.Array | None, Cache, jax.Array]:
-    """Decodes `num_steps` tokens from the batch `metadata` just ran.
-
-    Args:
-      params: The flattened transformer state to run with.
-      cache: The physical KV cache pages to read and write.
-      next_tokens: The tokens sampled by the step that just ran, indexed by the
-        row of the scheduled batch.
-      metadata: The metadata of the step that just ran.
-      sampling_metadata: The sampling settings of the step that just ran,
-        indexed by the row of the scheduled batch.
-      rng: PRNG key to split across decode steps.
-      num_steps: How many decode steps to run.
-
-    Returns:
-      A tuple of
-      - tokens: `[num_steps, num_rows]` array of sampled tokens.
-      - logits: `[num_steps, num_rows, vocab_size]` array of logits, or None.
-      - logprobs: `[num_steps, num_rows]` array of logprobs, or None.
-      - updated cache: The updated KV cache pages.
-      - rng: The updated PRNG key for subsequent steps.
-    """
-    num_rows = metadata.query_lens.shape[0]
-    distribution = jnp.asarray(metadata.distribution, dtype=jnp.int32)
-    num_groups = distribution.shape[0]
-    rows_per_group = num_rows // num_groups
-
-    # Each DP group's slice of `rows_per_group` rows is ordered `[decodes,
-    # chunked prefills, full prefills, padding]`. A chunked prefill still has
-    # prompt left to process, so its sampled token is discarded and it leaves
-    # the batch for the decode loop.
-    group_rows = jnp.arange(rows_per_group, dtype=jnp.int32)[None, :]
-    is_chunked_prefill = (group_rows >= distribution[:, 0:1]) & (
-        group_rows < distribution[:, 1:2]
-    )
-    is_surviving = (group_rows < distribution[:, 2:3]) & ~is_chunked_prefill
-    # Each group's surviving rows are its decodes and full prefills.
-    num_surviving_per_group = (
-        distribution[:, 0] + distribution[:, 2] - distribution[:, 1]
-    )
-    # Move each group's surviving rows to the front of its own slice.
-    local_order = jnp.argsort(~is_surviving, axis=1)
-    group_row_offsets = (
-        jnp.arange(num_groups, dtype=local_order.dtype)[:, None]
-        * rows_per_group
-    )
-    order = (local_order + group_row_offsets).reshape(-1)
-    is_active_decode = (group_rows < num_surviving_per_group[:, None]).reshape(
-        -1
-    )
-
-    query_lens = jnp.where(is_active_decode, jnp.int32(1), jnp.int32(0))
-    kv_lens = (
-        jnp.where(
-            is_active_decode,
-            jnp.asarray(metadata.kv_lens, dtype=jnp.int32)[order],
-            jnp.int32(0),
-        )
-        + query_lens
-    )
-    decode_metadata = paged_attention.PagedAttnMetadata(
-        page_indices={
-            cache_name: jnp.asarray(idxs, dtype=jnp.int32)[order]
-            for cache_name, idxs in metadata.page_indices.items()
-        },
-        kv_lens=kv_lens,
-        query_lens=query_lens,
-        distribution=jnp.stack([num_surviving_per_group] * 3, axis=1),
-        decode_only=True,
-    )
-
-    # Each surviving request's sampling settings move along with its row. The
-    # rows past `num_surviving_per_group` in each group's slice become padding.
-    def compact(values, padding):
-      arr = jnp.asarray(values)
-      return jnp.where(
-          is_active_decode,
-          arr[order],
-          jnp.asarray(padding, dtype=arr.dtype),
-      )
-
-    decode_sampling_metadata = SamplingMetadata(
-        temperature=compact(sampling_metadata.temperature, jnp.float32(0.0)),
-        top_p=compact(sampling_metadata.top_p, jnp.float32(1.0)),
-        top_k=compact(sampling_metadata.top_k, jnp.int32(1)),
-        unconstrained=sampling_metadata.unconstrained,
-    )
-
-    # Each surviving sequence feeds the token it just sampled back in, packed
-    # into the leading rows of its group's slice to match the compacted
-    # metadata.
-    decode_tokens = next_tokens[order].reshape(num_groups, rows_per_group)
-    inverse_order = (
-        jnp.argsort(local_order, axis=1) + group_row_offsets
-    ).reshape(-1)
-
-    def decode_step(carry, _):
-      cache, tokens, kv_lens, rng = carry
-      step_metadata = dataclasses.replace(decode_metadata, kv_lens=kv_lens)
-      next_tokens, logits, logp, cache, rng = self._model_step_fn(
-          params,
-          cache,
-          tokens,
-          step_metadata,
-          decode_sampling_metadata,
-          rng,
-      )
-      carry = (
-          cache,
-          next_tokens.reshape(num_groups, rows_per_group),
-          kv_lens + query_lens,
-          rng,
-      )
-      return carry, (next_tokens, logits, logp)
-
-    carry, outputs = jax.lax.scan(
-        decode_step,
-        (cache, decode_tokens, decode_metadata.kv_lens, rng),
-        xs=None,
-        length=num_steps,
-    )
-    cache, _, _, rng = carry
-    tokens, logits, logp = outputs
-    # Send each output row back to the scheduled row it came from.
-    return (
-        tokens[:, inverse_order],
-        logits[:, inverse_order] if logits is not None else None,
-        logp[:, inverse_order] if logp is not None else None,
-        cache,
-        rng,
-    )
-
   def _to_device(self, tree: _PyTree) -> _PyTree:
     """Moves host arrays onto the device, replicated across the mesh."""
     return jax.device_put(
@@ -794,14 +1313,18 @@ class ModelRunner:
   def execute_step(
       self,
       cache: Cache,
-      tokens: jax.Array,
+      tokens: jax.Array | np.ndarray,
       metadata: paged_attention.PagedAttnMetadata,
       sampling_params: Sequence[request_lib.SamplingParams],
+      *,
+      prev_generated_tokens: jax.Array | None = None,
+      target_idxs: jax.Array | np.ndarray | None = None,
+      max_steps: int | None = None,
   ) -> tuple[jax.Array, jax.Array | None, jax.Array | None, Cache]:
     """Runs model forward passes on a batch of requests, and samples tokens.
 
-    Note: This function runs `num_scheduler_steps` forward passes, and samples
-    `num_scheduler_steps` tokens.
+    Note: This function runs up to `num_scheduler_steps` forward passes, and
+    pads outputs to `num_scheduler_steps` columns.
 
     Args:
       cache: The physical KV cache pages to read and write.
@@ -810,6 +1333,15 @@ class ModelRunner:
       metadata: Ragged execution metadata for the attention kernel.
       sampling_params: The sampling settings of each scheduled request, in row
         order.
+      prev_generated_tokens: Optional `[num_rows, prev_steps]` device tokens
+        from the previous in-flight step, whose last column is scattered into
+        `tokens` at `target_idxs` inside the compiled step.
+      target_idxs: Optional `[num_rows]` scatter indices into flattened `tokens`
+        for `prev_generated_tokens`.
+      max_steps: Optional override for forward passes to execute in this step
+        (must be `None`, `1`, or `config.num_scheduler_steps`). Passing `1` runs
+        a single forward pass so active chunked prefills drain without stalling
+        behind multi-step decode scans.
 
     Returns:
       A tuple of:
@@ -822,9 +1354,15 @@ class ModelRunner:
 
     Raises:
       ValueError: If `sampling_params` does not hold one entry per scheduled
-        request.
+        request, or if `max_steps` is invalid.
     """
     config = self._config
+    num_steps = config.num_scheduler_steps
+    if max_steps is not None and max_steps not in (1, num_steps):
+      raise ValueError(
+          f'max_steps must be None, 1, or {num_steps}, got {max_steps}.'
+      )
+    active_steps = num_steps if max_steps is None else max_steps
     num_rows = metadata.query_lens.shape[0]
     distribution = np.asarray(metadata.distribution)
     num_scheduled = int(np.sum(distribution[:, 2]))
@@ -834,59 +1372,113 @@ class ModelRunner:
           ' scheduled requests.'
       )
 
-    device_metadata, sampling_metadata = self._to_device((
-        metadata,
-        SamplingMetadata.from_sampling_params(
-            sampling_params,
-            num_rows,
-            self._config.max_top_k,
-            distribution=distribution,
-        ),
-    ))
-
-    next_tokens, logits, logp, cache, self._rng = self._compiled_model_step_fn(
-        self._flattened_transformer_state,
-        cache,
-        tokens,
-        device_metadata,
-        sampling_metadata,
-        self._rng,
+    packed_metadata = _pack_paged_metadata(metadata)
+    sampling_metadata = SamplingMetadata.from_sampling_params(
+        sampling_params,
+        num_rows,
+        self._config.max_top_k,
+        distribution=distribution,
     )
-    num_steps = config.num_scheduler_steps
-
+    packed_inputs, layout = _pack_step_inputs(
+        tokens, packed_metadata, sampling_metadata, target_idxs
+    )
+    device_inputs = self._to_device(packed_inputs)
     # Chunked prefills drop out, but the rest of the batch carries on.
     # Each DP group's distribution is [i, j, k]:
-    # i: num decodes
-    # j: i + num chunked prefills
-    # k: j + num full prefills
-    # num_surviving: num decodes + num full prefills = i + k - j
+    # i: num decodes, j: i + num chunked prefills, k: j + num full prefills.
     num_surviving = int(
         np.sum(distribution[:, 0] + distribution[:, 2] - distribution[:, 1])
     )
-
-    num_decode_steps = num_steps - 1 if num_surviving else 0
-
-    decode_tokens = decode_logits = decode_logp = None
-    if num_decode_steps:
-      decode_tokens, decode_logits, decode_logp, cache, self._rng = (
-          self._compiled_decode_loop_fn(
-              self._flattened_transformer_state,
-              cache,
-              next_tokens,
-              dataclasses.replace(device_metadata, decode_only=True),
-              sampling_metadata,
-              self._rng,
-              num_steps=num_decode_steps,
+    num_decode_steps = active_steps - 1 if num_surviving else 0
+    rows_per_group = num_rows // distribution.shape[0]
+    is_pure_decode = (
+        packed_metadata.decode_only
+        and num_decode_steps > 0
+        and int(np.sum(distribution[:, 0])) == num_scheduled
+        and tokens.shape == (distribution.shape[0], rows_per_group)
+        and bool(np.all(np.asarray(metadata.query_lens) <= 1))
+    )
+    prev_tokens_shape = (
+        None
+        if prev_generated_tokens is None
+        else tuple(prev_generated_tokens.shape)
+    )
+    if is_pure_decode:
+      trace_key = (
+          'decode_loop',
+          self._static_graphdef,
+          self._compile_key,
+          layout,
+          num_steps,
+          prev_tokens_shape,
+      )
+      out_tokens, out_logits, out_logp, cache, self._rng = (
+          _run_with_trace_warmup_guard(
+              trace_key,
+              lambda: _jit_decode_only_loop(
+                  self._static_graphdef,
+                  self._compile_key,
+                  self._flattened_transformer_state,
+                  cache,
+                  device_inputs,
+                  layout,
+                  self._rng,
+                  num_steps=num_steps,
+                  prev_generated_tokens=prev_generated_tokens,
+              ),
           )
       )
+      return out_tokens, out_logits, out_logp, cache
 
-    out_tokens = _stack_steps(next_tokens, decode_tokens, num_steps)
-    out_logits = (
-        _stack_steps(logits, decode_logits, num_steps)
-        if logits is not None
-        else None
+    if num_decode_steps:
+      trace_key = (
+          'prefill_decode_loop',
+          self._static_graphdef,
+          self._compile_key,
+          layout,
+          num_decode_steps,
+          prev_tokens_shape,
+      )
+      out_tokens, out_logits, out_logp, cache, self._rng = (
+          _run_with_trace_warmup_guard(
+              trace_key,
+              lambda: _jit_prefill_and_decode_loop(
+                  self._static_graphdef,
+                  self._compile_key,
+                  self._flattened_transformer_state,
+                  cache,
+                  device_inputs,
+                  layout,
+                  self._rng,
+                  num_decode_steps=num_decode_steps,
+                  prev_generated_tokens=prev_generated_tokens,
+              ),
+          )
+      )
+      return out_tokens, out_logits, out_logp, cache
+
+    trace_key = (
+        'packed_step',
+        self._static_graphdef,
+        self._compile_key,
+        layout,
+        num_steps,
+        prev_tokens_shape,
     )
-    out_logp = (
-        _stack_steps(logp, decode_logp, num_steps) if logp is not None else None
+    out_tokens, out_logits, out_logp, cache, self._rng = (
+        _run_with_trace_warmup_guard(
+            trace_key,
+            lambda: _jit_packed_model_step(
+                self._static_graphdef,
+                self._compile_key,
+                self._flattened_transformer_state,
+                cache,
+                device_inputs,
+                layout,
+                self._rng,
+                num_steps=num_steps,
+                prev_generated_tokens=prev_generated_tokens,
+            ),
+        )
     )
     return out_tokens, out_logits, out_logp, cache

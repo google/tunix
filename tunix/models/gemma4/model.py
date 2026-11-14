@@ -353,7 +353,7 @@ class DecoderLayer(nnx.Module):
       mapped = self.post_per_layer_input_norm(mapped)
       ffw += mapped
 
-    return ffw * self.skip_scale.value
+    return jax.lax.optimization_barrier(ffw * self.skip_scale.value)
 
   def __call__(
       self,

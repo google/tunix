@@ -131,7 +131,13 @@ def paged_attention(
     # axis 0 across `meta_spec = P(dp_spec)` without squeezing it, so each DP
     # group receives its own `[1, 3]` slice here.
     return _paged_attention(
-        q, k, v, cache, kv_lens, page_indices.reshape(-1), cu_q_lens,
+        q,
+        k,
+        v,
+        cache,
+        kv_lens,
+        page_indices.reshape(-1),
+        cu_q_lens,
         jnp.squeeze(distribution, axis=0),
         decode_only=decode_only,
         max_q_len=max_q_len,
@@ -270,8 +276,16 @@ def _paged_attention(
   """
   backend = backend or jax.default_backend()
   page_indices = jnp.maximum(page_indices, 0)
-  args = (queries, keys, values, kv_cache, kv_lens, page_indices, cu_q_lens,
-          distribution)
+  args = (
+      queries,
+      keys,
+      values,
+      kv_cache,
+      kv_lens,
+      page_indices,
+      cu_q_lens,
+      distribution,
+  )
   common = dict(
       use_causal_mask=use_causal_mask,
       sm_scale=sm_scale,
@@ -287,16 +301,17 @@ def _paged_attention(
   # Backends are imported lazily so the TPU path only loads Pallas/Mosaic on
   # TPU and the GPU path only loads triton and jax_triton on GPU.
   # pylint: disable=g-import-not-at-top
-  if backend == "tpu":
+  if backend == 'tpu':
     from tokamax import ops as tokamax_ops
 
     return tokamax_ops.ragged_paged_attention(
         *args,
         **common,
         skip_kv_update=not update_kv_cache,
-        implementation="mosaic_tpu",
+        decode_only=decode_only,
+        implementation='mosaic_tpu',
     )
-  if backend == "gpu":
+  if backend == 'gpu':
     from tunix.models import paged_attention_vllm_gpu
 
     return paged_attention_vllm_gpu.paged_attention(

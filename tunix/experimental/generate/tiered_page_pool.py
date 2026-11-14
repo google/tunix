@@ -358,6 +358,16 @@ class TieredPagePoolManager:
           )
 
   @property
+  def num_device_pages(self) -> int:
+    return self._device_pool.num_pages
+
+  @property
+  def num_host_pages(self) -> int:
+    if self._host_pool:
+      return self._host_pool.num_pages
+    return 0
+
+  @property
   def num_free_device_pages(self) -> int:
     return self._device_pool.num_free_pages
 
@@ -377,6 +387,29 @@ class TieredPagePoolManager:
 
   def page_idx(self, page_id: int) -> int | None:
     return self._page_id_to_idx.get(page_id)
+
+  def resolve_device_page_indices(
+      self, page_ids: Sequence[int | None]
+  ) -> list[int]:
+    """Resolves logical page IDs (`None` -> `-1`) to physical device indices."""
+    id_to_idx = self._page_id_to_idx
+    locs = self._page_location
+    device_loc = PageLocation.DEVICE
+    result: list[int] = []
+    for pid in page_ids:
+      if pid is None:
+        result.append(-1)
+        continue
+      if pid not in id_to_idx:
+        raise ValueError(f"Page {pid} not found in page manager.")
+      loc = locs[pid]
+      if loc != device_loc:
+        raise ValueError(
+            f"Page {pid} is not resident on device (location: {loc}). "
+            "Pages must be loaded onto device before use."
+        )
+      result.append(id_to_idx[pid])
+    return result
 
   def allocate_device_pages(self, num_pages: int) -> list[int]:
     """Allocate logical device pages."""

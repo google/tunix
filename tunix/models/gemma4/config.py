@@ -125,7 +125,7 @@ class ShardingConfig:
         o_weight_nhd=P('tp', None, fsdp),
         ffw_weight_df=P(fsdp, 'tp'),
         ffw_weight_fd=P('tp', fsdp),
-        rms_norm_weight=P('tp'),
+        rms_norm_weight=P(None) if is_sampling else P('tp'),
         act_btd=P('fsdp', None, None if is_sampling else 'tp'),
         act_btf=P('fsdp', None, 'tp'),
         act_btnh=P('fsdp', None, 'tp', None),

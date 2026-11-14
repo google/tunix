@@ -100,6 +100,14 @@ class SingleTypeKVCacheManager:
   def window_size(self) -> int | None:
     return self._window_size
 
+  @property
+  def num_device_pages(self) -> int:
+    return self._page_manager.num_device_pages
+
+  @property
+  def num_host_pages(self) -> int:
+    return self._page_manager.num_host_pages
+
   def get_physical_pages(self) -> dict[str, jax.Array]:
     """Returns a mapping of cache ID to physical page arrays."""
     return self._page_manager.physical_device_pages
@@ -120,29 +128,12 @@ class SingleTypeKVCacheManager:
       ValueError: If a page is unknown to the page manager or is not resident
         on device.
     """
-    pages = self._request_to_pages.get(request_id, [])
-
-    result: list[int] = []
-    for page in pages:
-      if page is None:
-        result.append(-1)
-        continue
-
-      idx = self._page_manager.page_idx(page.page_id)
-      if idx is None:
-        raise ValueError(f"Page {page.page_id} not found in page manager.")
-
-      # page_idx() returns the index within whichever tier the page lives in,
-      # so a host-resident page would yield a host pool index here.
-      loc = self._page_manager.page_location(page.page_id)
-      if loc != page_pool_lib.PageLocation.DEVICE:
-        raise ValueError(
-            f"Page {page.page_id} is not resident on device (location:"
-            f" {loc}). Pages must be loaded onto device before use."
-        )
-      result.append(idx)
-
-    return result
+    pages = self._request_to_pages.get(request_id)
+    if not pages:
+      return []
+    return self._page_manager.resolve_device_page_indices(
+        [None if page is None else page.page_id for page in pages]
+    )
 
   def update_device_pool(self, new_pages: Mapping[str, jax.Array]) -> None:
     """Updates the device pool in the page manager with new pages."""
