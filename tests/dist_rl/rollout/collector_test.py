@@ -894,7 +894,11 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
     request = datatypes.RolloutRequest(
         prompt="test",
         prompt_id="p_budget",
-        generation_kwargs={"max_tokens": 4, "max_response_length": 16},
+        generation_kwargs={
+            "max_tokens": 4,
+            "max_response_length": 16,
+            "routed_experts_prompt_start": 3,
+        },
     )
     engine = collector.TrajectoryCollectorEngine(
         traj_id=request.traj_id,
@@ -926,10 +930,13 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
     # Remaining budget 12 > request max_tokens 4 -> should use 4
     asyncio.run(captured_model_call("prompt", max_generation_steps=12))
     self.assertEqual(sampler.calls[-1][0].sampling_params.max_tokens, 4)
+    self.assertEqual(sampler.calls[-1][0].max_tokens, 4)
+    self.assertEqual(sampler.calls[-1][0].routed_experts_prompt_start, 3)
 
     # Remaining budget 2 < request max_tokens 4 -> should use 2
     asyncio.run(captured_model_call("prompt", max_generation_steps=2))
     self.assertEqual(sampler.calls[-1][0].sampling_params.max_tokens, 2)
+    self.assertEqual(sampler.calls[-1][0].max_tokens, 2)
 
 
 class ResponseBudgetAnnotationTest(absltest.TestCase):
@@ -1382,6 +1389,8 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
     self.assertEqual(
         sampler.requests[1].sampling_params.cache_salt, "policy_v2"
     )
+    self.assertEqual(sampler.requests[0].cache_salt, "policy_v2")
+    self.assertEqual(sampler.requests[1].cache_salt, "policy_v2")
     # Per-turn history is recorded in policy_versions on item.traj (SSOT).
     self.assertEqual(item.policy_versions, [2, 3])
     self.assertNotIn("policy_version", item.traj)

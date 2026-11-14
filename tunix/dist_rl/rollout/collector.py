@@ -275,6 +275,9 @@ class TrajectoryCollectorEngine:
       sampling_req = sampler_lib.SamplingRequest(
           request_id=self.traj_id,
           prompt=prompt_payload,
+          max_tokens=sampling_params.max_tokens,
+          cache_salt=sampling_params.cache_salt,
+          routed_experts_prompt_start=sampling_params.routed_experts_prompt_start,
           sampling_params=sampling_params,
       )
       sample_start = time.perf_counter()
