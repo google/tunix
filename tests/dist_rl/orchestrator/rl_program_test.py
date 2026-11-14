@@ -7459,8 +7459,12 @@ class RLProgramTest(absltest.TestCase):
       self.mock_create_trainer_payloads.side_effect = (
           self._orig_create_trainer_payloads
       )
-      ref0 = datatypes.RoutedExpertsRef(worker_id="w0", ref_id=11)
-      ref1 = datatypes.RoutedExpertsRef(worker_id="w1", ref_id=22)
+      ref0 = datatypes.RoutedExpertsRef(
+          worker_id="w0", instance_id="inst0", ref_id=11
+      )
+      ref1 = datatypes.RoutedExpertsRef(
+          worker_id="w1", instance_id="inst1", ref_id=22
+      )
       arr0 = np.full((6, 2, 2), 3, dtype=np.uint8)
       arr1 = np.full((6, 2, 2), 5, dtype=np.uint8)
       self.mock_engine.fetch_routed_experts.return_value = {
@@ -7616,7 +7620,7 @@ class RLProgramTest(absltest.TestCase):
             prompt_tokens=np.array([1, 2], dtype=np.int32),
             completion_tokens=np.array([3, 4], dtype=np.int32),
             routed_experts_ref=datatypes.RoutedExpertsRef(
-                worker_id="w0", ref_id=ref_id
+                worker_id="w0", instance_id="inst0", ref_id=ref_id
             ),
             metadata={
                 "prompt_idx": batch_idx,
@@ -7652,8 +7656,12 @@ class RLProgramTest(absltest.TestCase):
         await program.raw_q.put(_make_item("stale_p", 1, 101, 0, 0))
         await program._relay.flush_releases()
         self.mock_engine.release_routed_experts.assert_awaited_once_with((
-            datatypes.RoutedExpertsRef(worker_id="w0", ref_id=100),
-            datatypes.RoutedExpertsRef(worker_id="w0", ref_id=101),
+            datatypes.RoutedExpertsRef(
+                worker_id="w0", instance_id="inst0", ref_id=100
+            ),
+            datatypes.RoutedExpertsRef(
+                worker_id="w0", instance_id="inst0", ref_id=101
+            ),
         ))
         self.mock_engine.release_routed_experts.reset_mock()
 
@@ -7683,7 +7691,9 @@ class RLProgramTest(absltest.TestCase):
         await program.critique_stage()
         await program._relay.flush_releases()
         self.mock_engine.release_routed_experts.assert_awaited_once_with((
-            datatypes.RoutedExpertsRef(worker_id="w0", ref_id=200),
+            datatypes.RoutedExpertsRef(
+                worker_id="w0", instance_id="inst0", ref_id=200
+            ),
         ))
       finally:
         program.close()
@@ -7724,8 +7734,12 @@ class RLProgramTest(absltest.TestCase):
         await ordered_prog.scored_q.put(late_group)
         await ordered_prog._relay.flush_releases()
         self.mock_engine.release_routed_experts.assert_awaited_once_with((
-            datatypes.RoutedExpertsRef(worker_id="w0", ref_id=300),
-            datatypes.RoutedExpertsRef(worker_id="w0", ref_id=301),
+            datatypes.RoutedExpertsRef(
+                worker_id="w0", instance_id="inst0", ref_id=300
+            ),
+            datatypes.RoutedExpertsRef(
+                worker_id="w0", instance_id="inst0", ref_id=301
+            ),
         ))
       finally:
         ordered_prog.close()
@@ -7763,8 +7777,12 @@ class RLProgramTest(absltest.TestCase):
           await put_fail_prog.critique_stage()
         await put_fail_prog._relay.flush_releases()
         self.mock_engine.release_routed_experts.assert_awaited_once_with((
-            datatypes.RoutedExpertsRef(worker_id="w0", ref_id=400),
-            datatypes.RoutedExpertsRef(worker_id="w0", ref_id=401),
+            datatypes.RoutedExpertsRef(
+                worker_id="w0", instance_id="inst0", ref_id=400
+            ),
+            datatypes.RoutedExpertsRef(
+                worker_id="w0", instance_id="inst0", ref_id=401
+            ),
         ))
       finally:
         put_fail_prog.close()
@@ -7777,8 +7795,12 @@ class RLProgramTest(absltest.TestCase):
       self.mock_create_trainer_payloads.side_effect = (
           self._orig_create_trainer_payloads
       )
-      ref0 = datatypes.RoutedExpertsRef(worker_id="w0", ref_id=1)
-      ref1 = datatypes.RoutedExpertsRef(worker_id="w0", ref_id=2)
+      ref0 = datatypes.RoutedExpertsRef(
+          worker_id="w0", instance_id="inst0", ref_id=1
+      )
+      ref1 = datatypes.RoutedExpertsRef(
+          worker_id="w0", instance_id="inst0", ref_id=2
+      )
       arr = np.ones((4, 2, 2), dtype=np.uint8)
       self.mock_engine.fetch_routed_experts.return_value = {
           ref0: arr,
@@ -7888,8 +7910,12 @@ class RLProgramTest(absltest.TestCase):
           full_batch_size=2,
           num_generations=2,
       )
-      ref0 = datatypes.RoutedExpertsRef(worker_id="w0", ref_id=1)
-      ref1 = datatypes.RoutedExpertsRef(worker_id="w0", ref_id=2)
+      ref0 = datatypes.RoutedExpertsRef(
+          worker_id="w0", instance_id="inst0", ref_id=1
+      )
+      ref1 = datatypes.RoutedExpertsRef(
+          worker_id="w0", instance_id="inst0", ref_id=2
+      )
       self.mock_engine.fetch_routed_experts.return_value = {
           ref0: np.ones((4, 2, 2), dtype=np.uint8),
           ref1: np.ones((4, 2, 2), dtype=np.uint8),
@@ -7939,8 +7965,12 @@ class RLProgramTest(absltest.TestCase):
 
   def test_iter_planned_microbatches_releases_refs_when_fetch_fails(self):
     async def _run():
-      ref0 = datatypes.RoutedExpertsRef(worker_id="w0", ref_id=1)
-      ref1 = datatypes.RoutedExpertsRef(worker_id="w1", ref_id=2)
+      ref0 = datatypes.RoutedExpertsRef(
+          worker_id="w0", instance_id="inst0", ref_id=1
+      )
+      ref1 = datatypes.RoutedExpertsRef(
+          worker_id="w1", instance_id="inst1", ref_id=2
+      )
       released: list[tuple[datatypes.RoutedExpertsRef, ...]] = []
 
       class _FailingFetchEngine:

@@ -465,6 +465,7 @@ class OrchestratorFaultToleranceTest(absltest.TestCase):
       with self.assertRaisesRegex(ValueError, "duplicate worker_id"):
         harness.register_worker_from_discovery(
             "rollout_0",
+            "collision-inst-r",
             "rollout",
             port=harness.servers["rollout_1"].bound_port,
             override=False,
@@ -472,6 +473,7 @@ class OrchestratorFaultToleranceTest(absltest.TestCase):
       with self.assertRaisesRegex(ValueError, "duplicate worker_id"):
         harness.register_worker_from_discovery(
             "trainer_0",
+            "collision-inst-t",
             "trainer",
             port=harness.servers["rollout_1"].bound_port,
             override=False,
@@ -497,6 +499,7 @@ class OrchestratorFaultToleranceTest(absltest.TestCase):
       with self.assertRaisesRegex(ValueError, "duplicate worker_id"):
         harness.register_worker_from_discovery(
             "trainer_0",
+            "collision-inst-t2",
             "trainer",
             port=trainer_0_port,
             override=False,

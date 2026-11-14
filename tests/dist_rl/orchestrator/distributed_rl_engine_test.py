@@ -3618,7 +3618,9 @@ class DistributedRLEngineTest(absltest.TestCase):
       # Drive `rollout-0` to 3/4 unreleased staged refs via real `poll_rollouts`
       # (`_unreleased_staged_refs["rollout-0"] += 1` per received ref).
       seed_refs = [
-          datatypes.RoutedExpertsRef(worker_id="rollout-0", ref_id=10 + g)
+          datatypes.RoutedExpertsRef(
+              worker_id="rollout-0", instance_id="inst-0", ref_id=10 + g
+          )
           for g in range(3)
       ]
       w0.poll_responses.return_value = [
@@ -3722,8 +3724,12 @@ class DistributedRLEngineTest(absltest.TestCase):
           ),
       )
 
-      ref0 = datatypes.RoutedExpertsRef(worker_id="rollout-0", ref_id=101)
-      ref1 = datatypes.RoutedExpertsRef(worker_id="rollout-1", ref_id=202)
+      ref0 = datatypes.RoutedExpertsRef(
+          worker_id="rollout-0", instance_id="inst-0", ref_id=101
+      )
+      ref1 = datatypes.RoutedExpertsRef(
+          worker_id="rollout-1", instance_id="inst-1", ref_id=202
+      )
       arr0 = np.ones((4, 2, 2), dtype=np.uint8)
       arr1 = np.full((4, 2, 2), 2, dtype=np.uint8)
       w0.fetch_staged.return_value = {101: arr0}
@@ -3857,9 +3863,11 @@ class DistributedRLEngineTest(absltest.TestCase):
       )
       engine._unreleased_staged_refs["rollout-0"] = 1
       w0.release_staged.side_effect = ConnectionError("worker died mid-release")
-      await engine.release_routed_experts(
-          [datatypes.RoutedExpertsRef(worker_id="rollout-0", ref_id=1)]
-      )
+      await engine.release_routed_experts([
+          datatypes.RoutedExpertsRef(
+              worker_id="rollout-0", instance_id="inst-0", ref_id=1
+          )
+      ])
       self.assertEqual(engine.evicted_release_skips_total, 1)
       self.assertEqual(
           engine.fault_tolerance_metrics()[

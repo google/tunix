@@ -956,6 +956,82 @@ class WorkerRegistryTest(absltest.TestCase):
       registry.register(mock_worker.MockWorker("t0", roles={"trainer"}))
     self.assertEmpty(registry)
 
+  @mock.patch.object(
+      remote_execution.ActorHandle, "from_address", autospec=True
+  )
+  def test_register_from_hostname_duplicate_instance_id_is_noop_across_roles(
+      self, mock_from_address
+  ):
+    registry = worker_registry.WorkerRegistry()
+    h_rollout_1 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    h_rollout_dup = mock.MagicMock(spec=remote_execution.ActorHandle)
+    h_rollout_2 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    h_trainer_1 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    h_trainer_dup = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_from_address.side_effect = [
+        h_rollout_1,
+        h_rollout_dup,
+        h_rollout_2,
+        h_trainer_1,
+        h_trainer_dup,
+    ]
+
+    meta_r_a = pickle.dumps({
+        "service_type": "rollout",
+        "service_port": 5001,
+        "worker_id": "rollout-0",
+        "instance_id": "inst-a",
+    })
+    info_1 = registry.register_from_hostname("host", 0, meta_r_a)
+    self.assertEqual(info_1.instance_id, "inst-a")
+    worker_registry_testing.set_status(
+        registry, "rollout-0", worker_registry.AdmissionStatus.ACTIVE
+    )
+
+    # Same `(address, instance_id)` retry after promotion is an idempotent no-op
+    # that closes only the unused duplicate handle and keeps ACTIVE status.
+    info_dup = registry.register_from_hostname("host", 0, meta_r_a)
+    self.assertEqual(info_dup, info_1)
+    self.assertIs(registry.handle("rollout-0"), h_rollout_1)
+    self.assertEqual(
+        registry.status("rollout-0"), worker_registry.AdmissionStatus.ACTIVE
+    )
+    h_rollout_1.sync_close.assert_not_called()
+    h_rollout_dup.sync_close.assert_called_once()
+
+    # Different `instance_id` on the same address is an in-place restart:
+    # displaces `h_rollout_1` and stages `h_rollout_2` in REGISTERED.
+    meta_r_b = pickle.dumps({
+        "service_type": "rollout",
+        "service_port": 5001,
+        "worker_id": "rollout-0",
+        "instance_id": "inst-b",
+    })
+    info_2 = registry.register_from_hostname("host", 0, meta_r_b)
+    self.assertEqual(info_2.instance_id, "inst-b")
+    h_rollout_1.sync_close.assert_called_once()
+    self.assertIs(registry.handle("rollout-0"), h_rollout_2)
+    self.assertEqual(
+        registry.status("rollout-0"),
+        worker_registry.AdmissionStatus.REGISTERED,
+    )
+
+    # Also covers non-rollout roles (e.g. ACTIVE trainer retrying discovery).
+    meta_t = pickle.dumps({
+        "service_type": "trainer",
+        "service_port": 5000,
+        "worker_id": "trainer-0",
+        "instance_id": "trainer-inst-1",
+    })
+    registry.register_from_hostname("host", 0, meta_t)
+    worker_registry_testing.set_status(
+        registry, "trainer-0", worker_registry.AdmissionStatus.ACTIVE
+    )
+    registry.register_from_hostname("host", 0, meta_t)
+    self.assertIs(registry.handle("trainer-0"), h_trainer_1)
+    h_trainer_1.sync_close.assert_not_called()
+    h_trainer_dup.sync_close.assert_called_once()
+
 
 if __name__ == "__main__":
   absltest.main()

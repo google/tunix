@@ -151,6 +151,7 @@ class RolloutStagingBuffer:
   def __init__(
       self,
       worker_id: str,
+      instance_id: str,
       *,
       max_bytes: int | None = None,
       stall_timeout_s: float = DEFAULT_STALL_TIMEOUT_S,
@@ -158,12 +159,15 @@ class RolloutStagingBuffer:
   ) -> None:
     if not isinstance(worker_id, str) or not worker_id:
       raise ValueError("worker_id must be a non-empty str.")
+    if not isinstance(instance_id, str) or not instance_id:
+      raise ValueError("instance_id must be a non-empty str.")
     resolved_max = (
         default_staging_max_bytes()
         if max_bytes is None
         else _require_non_bool_int(max_bytes, "max_bytes", min_value=1)
     )
     self._worker_id = worker_id
+    self._instance_id = instance_id
     self._max_bytes = resolved_max
     self._stall_timeout_s = timeouts.validate_positive_finite(
         stall_timeout_s, "stall_timeout_s"
@@ -192,6 +196,10 @@ class RolloutStagingBuffer:
     self._slots: weakref.WeakKeyDictionary[
         StagingReservation, _ReservationSlot
     ] = weakref.WeakKeyDictionary()
+
+  @property
+  def instance_id(self) -> str:
+    return self._instance_id
 
   @property
   def max_bytes(self) -> int:
@@ -470,7 +478,11 @@ class RolloutStagingBuffer:
     self._wake_waiters(to_wake)
     if err is not None:
       raise err
-    return datatypes.RoutedExpertsRef(worker_id=self._worker_id, ref_id=ref_id)
+    return datatypes.RoutedExpertsRef(
+        worker_id=self._worker_id,
+        instance_id=self._instance_id,
+        ref_id=ref_id,
+    )
 
   def stage_trajectory_item(
       self,

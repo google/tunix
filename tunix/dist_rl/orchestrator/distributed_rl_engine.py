@@ -1174,6 +1174,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         self._invoke_worker(handle, "fetch_staged", ref_ids=ref_ids)
         for _, handle, ref_ids in worker_calls
     ))
+    ref_by_key = {(r.worker_id, r.ref_id): r for r in refs}
     fetched: dict[datatypes.RoutedExpertsRef, np.ndarray] = {}
     for (wid, _, ref_ids), worker_map in zip(
         worker_calls, responses, strict=True
@@ -1183,9 +1184,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           raise KeyError(
               f"Rollout worker {wid!r} fetch_staged omitted ref_id={rid}."
           )
-        fetched[datatypes.RoutedExpertsRef(worker_id=wid, ref_id=rid)] = (
-            worker_map[rid]
-        )
+        fetched[ref_by_key[(wid, rid)]] = worker_map[rid]
     return fetched
 
   async def _invoke_worker_ft_tolerant(

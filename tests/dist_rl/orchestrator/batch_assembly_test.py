@@ -4073,7 +4073,9 @@ class TwoPhaseRelayBatchAssemblerGoldenTest(parameterized.TestCase):
         )
         assert encoded_full is not None
         ref = datatypes.RoutedExpertsRef(
-            worker_id=f"rollout-{i % 2}", ref_id=(1 << 32) | i
+            worker_id=f"rollout-{i % 2}",
+            instance_id=f"inst-{i % 2}",
+            ref_id=(1 << 32) | i,
         )
         staged_map[ref] = encoded_full
         inline_routed = encoded_full[:seq_len]
@@ -4441,7 +4443,9 @@ class TwoPhaseRelayBatchAssemblerGoldenTest(parameterized.TestCase):
         asm.set_routed_experts_spec(cast(Any, (2, 4)))
 
   def test_pack_planned_batch_requires_spec_when_plan_has_refs(self):
-    ref = datatypes.RoutedExpertsRef(worker_id="w0", ref_id=99)
+    ref = datatypes.RoutedExpertsRef(
+        worker_id="w0", instance_id="inst0", ref_id=99
+    )
     item = dataclasses.replace(_make_payload(2, 3), routed_experts_ref=ref)
     fetched = {ref: np.zeros((5, 2, 4), dtype=np.uint8)}
 
@@ -4473,7 +4477,9 @@ class TwoPhaseRelayBatchAssemblerGoldenTest(parameterized.TestCase):
       pad_asm.pack_planned_batch(pad_plan, fetched)
 
   def test_pack_planned_batch_fetched_validation_errors_include_ref(self):
-    ref = datatypes.RoutedExpertsRef(worker_id="w0", ref_id=99)
+    ref = datatypes.RoutedExpertsRef(
+        worker_id="w0", instance_id="inst0", ref_id=99
+    )
     item = dataclasses.replace(_make_payload(2, 3), routed_experts_ref=ref)
 
     def _new_plan(
@@ -4596,7 +4602,9 @@ class TwoPhaseRelayBatchAssemblerGoldenTest(parameterized.TestCase):
       pad_a.pack_planned_batch(p_plan2, {})
 
   def test_sync_entrypoints_reject_unresolved_routed_experts_ref(self):
-    ref = datatypes.RoutedExpertsRef(worker_id="w0", ref_id=99)
+    ref = datatypes.RoutedExpertsRef(
+        worker_id="w0", instance_id="inst0", ref_id=99
+    )
     item = dataclasses.replace(_make_payload(2, 3), routed_experts_ref=ref)
     seq_asm = batch_assembly.SequencePackedBatchAssembler(
         batch_size=1, num_generations=2, mini_batch_size=1, max_packed_len=8

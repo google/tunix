@@ -573,6 +573,7 @@ async def serve_worker(
         "service_type": role,
         "service_port": port,
         "worker_id": worker_id_str,
+        "instance_id": worker_service.instance_id,
         CONFIG_SHA256_METADATA_KEY: config_sha256,
     }
     if extra_metadata:
