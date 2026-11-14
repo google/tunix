@@ -41,6 +41,7 @@ from tunix.dist_rl.orchestrator import health_monitor
 from tunix.dist_rl.orchestrator import orchestrator as cluster_orchestrator
 from tunix.dist_rl.orchestrator import rl_program
 from tunix.dist_rl.orchestrator import worker_registry
+from tunix.dist_rl.trajectory import store as trajectory_store_lib
 from tunix.dist_rl.weight_sync import weight_sync_coordinator
 from tunix.dist_rl.worker import remote_execution
 from tunix.rl import reward_manager
@@ -1003,6 +1004,8 @@ class ProgramTest(absltest.TestCase):
       self,
       hp: resolve_config.DistHyperParameters,
       reward_fns: Sequence[reward_manager.RewardFn],
+      *,
+      trajectory_store: trajectory_store_lib.TrajectoryStore | None = None,
   ) -> rl_program.StandardRLProgram:
     return orchestrator.build_program(
         hp,
@@ -1011,7 +1014,7 @@ class ProgramTest(absltest.TestCase):
         pad_id=0,
         eos_id=1,
         prompt_items=grain.MapDataset.source([]),
-        trajectory_store=None,
+        trajectory_store=trajectory_store,
         metrics_logging_options=orchestrator.build_metrics_logging_options(hp),
     )
 
@@ -1052,34 +1055,32 @@ class ProgramTest(absltest.TestCase):
         program_span.group_order, rl_program.GroupOrder.TRAJECTORY_COMPLETION
     )
 
-  def test_trajectory_logs_follow_the_metrics_logging_options(self):
+  def test_trajectory_store_is_independent_of_metrics_logging_options(self):
     artifact_root = self.create_tempdir().full_path
-    # By default, the metrics and the trajectories go under the artifact root.
+    # By default, metrics go under the artifact root while trajectory persistence
+    # is governed solely by the cluster's `trajectory_store`.
     hp = _config(f"cluster_config.artifact_root={artifact_root}")
     options = orchestrator.build_metrics_logging_options(hp)
     assert options is not None  # Narrows the type for pytype.
     self.assertEqual(options.log_dir, f"{artifact_root}/metrics")
     program = self._build_program(hp, reward_fns=[])
     self.addCleanup(program.close)
-    self.assertIsNotNone(program.trajectory_logger)
-    # Null metrics logging options log neither, ...
+    self.assertIsNone(program.trajectory_store)
+
     no_metrics = (
         f"cluster_config.artifact_root={artifact_root}",
         "rl_training_config.metrics_logging_options=null",
     )
     hp = _config(*no_metrics)
     self.assertIsNone(orchestrator.build_metrics_logging_options(hp))
-    program = self._build_program(hp, reward_fns=[])
-    self.addCleanup(program.close)
-    self.assertIsNone(program.trajectory_logger)
-    # ... unless a trajectory directory is set.
-    hp = _config(
-        *no_metrics,
-        f"dist_training_config.trajectory_log_dir={artifact_root}/trajectories",
+    cluster = _FakeCluster(trajectory_store_config={"backend": "memory"})
+    assert cluster.trajectory_store is not None
+    self.addCleanup(cluster.trajectory_store.close)
+    program = self._build_program(
+        hp, reward_fns=[], trajectory_store=cluster.trajectory_store
     )
-    program = self._build_program(hp, reward_fns=[])
     self.addCleanup(program.close)
-    self.assertIsNotNone(program.trajectory_logger)
+    self.assertIs(program.trajectory_store, cluster.trajectory_store)
 
   def test_trajectory_logging_false_logs_no_trajectories(self):
     artifact_root = self.create_tempdir().full_path
