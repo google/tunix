@@ -16,10 +16,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 import contextlib
 import dataclasses
 import importlib
+import inspect
 import pickle
 import signal
 import sys
@@ -246,6 +247,47 @@ def _close_keeping_workers(
   cluster.monitor.close()
   if cluster.trajectory_store is not None:
     cluster.trajectory_store.close()
+
+
+class _PromptItemsWrapperSpy:
+  """`PromptItemsWrapper` test spy recording calls and context lifecycle."""
+
+  def __init__(
+      self, log: list[str], *, on_enter: Callable[[], object] | None = None
+  ) -> None:
+    self.log = log
+    self.calls: list[dict[str, object]] = []
+    self.items: list[dict[str, object]] = [{"prompt": "wrapped"}]
+    self._on_enter = on_enter
+
+  @contextlib.contextmanager
+  def __call__(
+      self,
+      prompt_items: grain.MapDataset[dict[str, object]],
+      *,
+      batch_size: int,
+      num_generations: int,
+      max_staleness: int,
+      env_kwargs: Mapping[str, object],
+      **kwargs: object,
+  ) -> Iterator[Iterable[dict[str, object]]]:
+    self.calls.append({
+        "prompt_items": prompt_items,
+        "shape": (batch_size, num_generations, max_staleness),
+        "env_kwargs": dict(env_kwargs),
+        "kwargs": kwargs,
+    })
+    self.log.append("wrapper.enter")
+    if self._on_enter is not None:
+      self._on_enter()
+    try:
+      yield self.items
+    finally:
+      self.log.append("wrapper.exit")
+
+
+_prompt_items_wrapper: _PromptItemsWrapperSpy | None = None
+_PROMPT_ITEMS_WRAPPER_PATH = f"{__name__}._prompt_items_wrapper"
 
 
 class BuildersTest(absltest.TestCase):
@@ -718,6 +760,42 @@ class LoadPromptItemsTest(absltest.TestCase):
           orchestrator.load_prompt_items(
               _config(f"data_module={data_module}", task_override)
           )
+
+
+class LoadPromptItemsWrapperTest(absltest.TestCase):
+
+  def test_empty_path_wraps_nothing(self):
+    self.assertIsNone(orchestrator.load_prompt_items_wrapper(_config()))
+
+  def test_bad_wrappers_fail_loud(self):
+    # The resolver already rejects a malformed path.
+    module = orchestrator.__name__
+    for path, error, regex in (
+        (
+            f"{module}.MIN_DERIVED_RPC_TIMEOUT_S",
+            TypeError,
+            "is a float, which is not callable",
+        ),
+        (f"{module}.no_such_wrapper", AttributeError, "no_such_wrapper"),
+        ("no_such_module.prewarm", ImportError, "no_such_module"),
+    ):
+      with self.subTest(path=path):
+        hp = _config(f"prompt_items_wrapper={path}")
+        with self.assertRaisesRegex(error, regex):
+          orchestrator.load_prompt_items_wrapper(hp)
+
+  def test_resolver_reserves_the_arguments_main_passes(self):
+    parameters = inspect.signature(
+        orchestrator.PromptItemsWrapper.__call__
+    ).parameters.values()
+    self.assertEqual(
+        tuple(
+            p.name
+            for p in parameters
+            if p.name != "self" and p.kind is not p.VAR_KEYWORD
+        ),
+        resolve_config.PROMPT_ITEMS_WRAPPER_ARGS,
+    )
 
 
 class ClusterTest(absltest.TestCase):
@@ -1285,14 +1363,133 @@ rl_training_config:
         ["train-0", "train-1", "train-2", "train-0"],
     )
 
+  def _run_with_wrapper(
+      self,
+      cluster: _FakeCluster,
+      *,
+      on_enter: Callable[[], object] | None = None,
+  ) -> _PromptItemsWrapperSpy:
+    argv = [
+        f"override_config_file={self._recipe()}",
+        "cluster_config.run_id=run_1",
+        "batch_size=2",
+        "agentic_grpo_config.num_generations=4",
+        "agentic_grpo_config.off_policy_steps=1",
+        "env_kwargs.use_agent_sandbox=true",
+        f"prompt_items_wrapper={_PROMPT_ITEMS_WRAPPER_PATH}",
+        "prompt_items_wrapper_kwargs.scaffold=r2egym",
+        "prompt_items_wrapper_kwargs.pool.replicas=3",
+    ]
+    sha = resolve_config.config_fingerprint(resolve_config.initialize(argv))
+    wrapper = _PromptItemsWrapperSpy(cluster.calls, on_enter=on_enter)
+    orig_close = rl_program.StandardRLProgram.close
+
+    def logged_close(program: rl_program.StandardRLProgram) -> None:
+      cluster.calls.append("program.close")
+      orig_close(program)
+
+    with (
+        mock.patch.object(
+            node_utils,
+            "load_hf_tokenizer",
+            return_value=_FakeTokenizer(pad_token_id=0, eos_token_id=1),
+        ),
+        mock.patch.object(orchestrator, "create_cluster", return_value=cluster),
+        mock.patch.object(otel_setup, "setup_metrics", return_value=False),
+        mock.patch.object(rl_program.StandardRLProgram, "close", logged_close),
+        mock.patch(_PROMPT_ITEMS_WRAPPER_PATH, wrapper),
+    ):
+      orchestrator.main(
+          argv,
+          _FakeProcessContext(
+              _FakeDiscovery(["trainer", "rollout"], config_sha256=sha)
+          ),
+      )
+    return wrapper
+
+  def test_prompt_items_wrapper_lifecycle_and_sigterm(self):
+    cluster = _FakeCluster()
+    wrapper = self._run_with_wrapper(cluster)
+    self.assertLen(wrapper.calls, 1)
+    call = wrapper.calls[0]
+    prompt_items = call["prompt_items"]
+    assert isinstance(prompt_items, grain.MapDataset)
+    self.assertEqual(
+        [_prompt(prompt_items, i) for i in range(4)],
+        ["train-0", "train-1", "train-2", "train-0"],
+    )
+    self.assertEqual(call["shape"], (2, 4, 1))
+    self.assertEqual(call["env_kwargs"], {"use_agent_sandbox": True})
+    self.assertEqual(
+        call["kwargs"], {"scaffold": "r2egym", "pool": {"replicas": 3}}
+    )
+    program = cluster.programs[0]
+    assert isinstance(program, rl_program.StandardRLProgram)
+    self.assertIs(program.dataset, wrapper.items)
+    self.assertEqual(
+        cluster.calls,
+        [
+            "wrapper.enter",
+            "bring_up_workers",
+            "run",
+            "program.close",
+            "wrapper.exit",
+            "shutdown",
+            "monitor.close",
+        ],
+    )
+
+    prev_sigterm = signal.getsignal(signal.SIGTERM)
+    abort_cluster = _FakeCluster(
+        on_run=lambda: signal.raise_signal(signal.SIGTERM)
+    )
+    with self.assertRaises(SystemExit) as cm:
+      self._run_with_wrapper(
+          abort_cluster,
+          on_enter=lambda: signal.signal(signal.SIGTERM, lambda *_: None),
+      )
+    self.assertEqual(cm.exception.code, 128 + signal.SIGTERM)
+    self.assertEqual(
+        abort_cluster.calls,
+        [
+            "wrapper.enter",
+            "bring_up_workers",
+            "run",
+            "program.close",
+            "wrapper.exit",
+            "shutdown(abort=True)",
+            "monitor.close",
+        ],
+    )
+    self.assertEqual(signal.getsignal(signal.SIGTERM), prev_sigterm)
+
   def test_config_errors_fail_before_the_tokenizer_and_the_cluster(self):
     flat_records = self.create_tempfile(
         "flat_records.py",
         content=_records_module("[{'prompts': 'q', 'answer': 'a'}]"),
     )
-    for argv, regex in (
-        ([], "data_module must name"),
-        ([f"data_module={flat_records.full_path}"], "unexpected keys"),
+    task_data = self.create_tempfile("task_data.py", content=_DATA_MODULE)
+    task = (f"data_module={task_data.full_path}", "task_name=gsm8k")
+    not_callable = f"{orchestrator.__name__}.MIN_DERIVED_RPC_TIMEOUT_S"
+    for argv, error, regex in (
+        ([], ValueError, "data_module must name"),
+        (
+            [f"data_module={flat_records.full_path}"],
+            ValueError,
+            "unexpected keys",
+        ),
+        # The resolver rejects a malformed wrapper path, and the wrapper is
+        # imported before the tokenizer.
+        (
+            [*task, "prompt_items_wrapper=prewarm"],
+            ValueError,
+            "dotted 'module.function' path",
+        ),
+        (
+            [*task, f"prompt_items_wrapper={not_callable}"],
+            TypeError,
+            "not callable",
+        ),
     ):
       with self.subTest(argv=argv):
         with (
@@ -1300,7 +1497,7 @@ rl_training_config:
                 node_utils, "load_hf_tokenizer"
             ) as load_tokenizer,
             mock.patch.object(orchestrator, "create_cluster") as create_cluster,
-            self.assertRaisesRegex(ValueError, regex),
+            self.assertRaisesRegex(error, regex),
         ):
           orchestrator.main(argv, _FakeProcessContext(_FakeDiscovery()))
         load_tokenizer.assert_not_called()
@@ -1468,9 +1665,7 @@ rl_training_config:
     sha = resolve_config.config_fingerprint(resolve_config.initialize(argv))
     prev_sigint = signal.getsignal(signal.SIGINT)
     prev_sigterm = signal.getsignal(signal.SIGTERM)
-    cluster = _FakeCluster(
-        on_run=lambda: signal.raise_signal(signal.SIGTERM)
-    )
+    cluster = _FakeCluster(on_run=lambda: signal.raise_signal(signal.SIGTERM))
     with (
         mock.patch.object(
             node_utils,
