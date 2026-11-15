@@ -527,6 +527,7 @@ def to_pack_item(item: datatypes.RLTrainerPayload) -> packing.PackItem:
   if (
       item.action_support_ids is not None
       or item.reference_support_logps is not None
+      or item.reference_kl_weights is not None
   ):
     raise ValueError("Binary action supports require padded batch assembly.")
   ext = packing._packing_ext  # pylint: disable=protected-access
@@ -915,6 +916,7 @@ class SequencePackedBatchAssembler:
     if any(
         item.action_support_ids is not None
         or item.reference_support_logps is not None
+        or item.reference_kl_weights is not None
         for item in items
     ):
       raise ValueError("Binary action supports require padded batch assembly.")
@@ -1216,6 +1218,7 @@ class PaddedBatchAssembler:
         "returns",
         "old_values",
         "sampler_is_weights",
+        "reference_kl_weights",
     )
     present_fields = []
     partially_present_fields = []
@@ -1484,6 +1487,7 @@ class PaddedBatchAssembler:
         advantages=batched_advantages,
         action_support_ids=support_ids,
         reference_support_logps=reference_support,
+        reference_kl_weights=stacked_optional.get("reference_kl_weights"),
         prompt_ids=batched_prompt_ids,
         prompt_mask=batched_prompt_mask,
         completion_ids=batched_completion_ids,

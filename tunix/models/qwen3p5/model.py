@@ -249,6 +249,31 @@ class ModelConfig:
     )
 
   @classmethod
+  def qwen3p5_9b(cls) -> 'ModelConfig':  # Qwen/Qwen3.5-9B
+    """Text backbone from the official Qwen3.5-9B Hugging Face configuration."""
+    return cls(
+        num_layers=32,
+        vocab_size=248320,
+        embed_dim=4096,
+        hidden_dim=12288,
+        num_heads=16,
+        head_dim=256,
+        num_kv_heads=4,
+        norm_eps=1e-06,
+        rope_theta=10_000_000,
+        use_tied_embedding=False,
+        use_norm_offset=True,
+        attn_output_gate=True,
+        partial_rotary_factor=0.25,
+        full_attention_interval=4,
+        linear_num_key_heads=16,
+        linear_num_value_heads=32,
+        linear_key_head_dim=128,
+        linear_value_head_dim=128,
+        linear_conv_kernel_dim=4,
+    )
+
+  @classmethod
   def qwen3p5_35b_a3b(cls) -> 'ModelConfig':  # Qwen/Qwen3.5-35B-A3B
     return cls(
         num_layers=40,

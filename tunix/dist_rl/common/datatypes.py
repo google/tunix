@@ -644,6 +644,8 @@ class RLTrainerPayload(TrainerPayload):
       pairs restrict a one-token response; [-1, -1] denotes ordinary generation.
     reference_support_logps: Optional [B, 2] normalized frozen reference logps
       over action_support_ids, for exact categorical KL on binary actions.
+    reference_kl_weights: Optional [B, C] fixed weights for reference-KL
+      subsampling. They affect the KL anchor only, not policy advantages or TIS.
     routed_experts: Optional MoE expert ids captured during rollout. May be
       encoded in one of three wire representations: (1) raw `int16` of shape
       `[T, num_layers, top_k]` (unbatched) or `[B, T, num_layers, top_k]`
@@ -679,6 +681,7 @@ class RLTrainerPayload(TrainerPayload):
   sampler_is_weights: np.ndarray | None = None
   action_support_ids: np.ndarray | None = None
   reference_support_logps: np.ndarray | None = None
+  reference_kl_weights: np.ndarray | None = None
   routed_experts: np.ndarray | None = None
   returns: np.ndarray | None = None
   old_values: np.ndarray | None = None
