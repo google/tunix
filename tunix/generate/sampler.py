@@ -61,6 +61,22 @@ LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]
 
 
+def _make_sampling_seed(seed: int | jax.Array | None) -> jax.Array:
+  """Returns a JAX key, generating and broadcasting one when omitted."""
+  if seed is None:
+    if jax.process_count() > 1:
+      raw_seed = secrets.randbits(32) if jax.process_index() == 0 else 0
+      raw_seed = multihost_utils.broadcast_one_to_all(
+          jnp.asarray(raw_seed, dtype=jnp.uint32)
+      )
+    else:
+      raw_seed = secrets.randbits(32)
+    return jax.random.PRNGKey(raw_seed)
+  if isinstance(seed, int):
+    return jax.random.PRNGKey(seed)
+  return seed
+
+
 @flax.struct.dataclass
 class _SamplingState:
   """Internal sampling state."""
@@ -936,18 +952,7 @@ class Sampler(base_sampler.BaseSampler):
           f' cache size {self.cache_config.cache_size}.'
       )
 
-    if seed is None:
-      # Use system entropy only when the caller does not request
-      # reproducibility with an explicit seed. Generate on process 0 and
-      # broadcast so all hosts use the same key for distributed inference.
-      raw_seed = secrets.randbits(32) if jax.process_index() == 0 else 0
-      if jax.process_count() > 1:
-        raw_seed = multihost_utils.broadcast_one_to_all(
-            jnp.asarray(raw_seed, dtype=jnp.uint32)
-        )
-      seed = jax.random.PRNGKey(raw_seed)  # pyrefly: ignore[bad-assignment]
-    elif isinstance(seed, int):
-      seed = jax.random.PRNGKey(seed)  # pyrefly: ignore[bad-assignment]
+    seed = _make_sampling_seed(seed)
     sampling_state = self.init_sample_state(
         jnp.array(all_input_ids),
         include_logits=return_logits,
