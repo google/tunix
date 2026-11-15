@@ -34,6 +34,7 @@ class CallTrace:
   loss_mask: tuple[int, ...]
   text: str
   valid_action: bool = True
+  action_support_ids: tuple[int, ...] | None = None
 
   def __post_init__(self):
     for name in (
@@ -63,6 +64,19 @@ class CallTrace:
       raise ValueError("Loss mask must be binary and contain an active token.")
     if any(not math.isfinite(x) or x > 1e-5 for x in self.rollout_logprobs):
       raise ValueError("Rollout logprobs must be finite log probabilities.")
+    if self.action_support_ids is not None:
+      support = tuple(self.action_support_ids)
+      object.__setattr__(self, "action_support_ids", support)
+      if (
+          len(support) != 2
+          or len(set(support)) != 2
+          or any(type(x) is not int or x < 0 for x in support)
+          or len(self.completion_ids) != 1
+          or self.completion_ids[0] not in support
+      ):
+        raise ValueError(
+            "A binary action needs two distinct IDs and one supported token."
+        )
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -74,6 +88,8 @@ class SwarmEpisode:
   calls: tuple[CallTrace, ...]
   reward: float
   final_text: str
+  scaffold_condition: str = "none"
+  worker_cost: float = 0.0
 
   def __post_init__(self):
     object.__setattr__(self, "calls", tuple(self.calls))
@@ -81,7 +97,17 @@ class SwarmEpisode:
       raise ValueError("An episode needs IDs and at least one recorded call.")
     if not math.isfinite(self.reward):
       raise ValueError("Episode reward must be finite.")
+    if not self.scaffold_condition:
+      raise ValueError("An episode needs a scaffold condition.")
+    if not math.isfinite(self.worker_cost) or self.worker_cost < 0:
+      raise ValueError("Worker cost must be finite and nonnegative.")
     if len({c.call_id for c in self.calls}) != len(self.calls):
       raise ValueError("Call IDs must be unique within an episode.")
-    if len({c.policy_version for c in self.calls}) != 1:
-      raise ValueError("A synchronous episode cannot mix policy versions.")
+    for policy_id in {c.policy_id for c in self.calls}:
+      if (
+          len(
+              {c.policy_version for c in self.calls if c.policy_id == policy_id}
+          )
+          != 1
+      ):
+        raise ValueError("An episode cannot mix versions of the same policy.")

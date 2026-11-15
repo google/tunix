@@ -171,9 +171,7 @@ class AssembledBatch(NamedTuple):
   trajectory_ids: tuple[str, ...] = ()
 
 
-def _zeros_or_none(
-    enabled: bool, shape: tuple[int, ...]
-) -> np.ndarray | None:
+def _zeros_or_none(enabled: bool, shape: tuple[int, ...]) -> np.ndarray | None:
   return np.zeros(shape, dtype=np.float32) if enabled else None
 
 
@@ -526,6 +524,11 @@ def _require_unbatched(item: datatypes.RLTrainerPayload) -> None:
 
 def to_pack_item(item: datatypes.RLTrainerPayload) -> packing.PackItem:
   """Converts an RLTrainerPayload to a packing.PackItem."""
+  if (
+      item.action_support_ids is not None
+      or item.reference_support_logps is not None
+  ):
+    raise ValueError("Binary action supports require padded batch assembly.")
   ext = packing._packing_ext  # pylint: disable=protected-access
   if ext is not None:
     return ext.to_pack_item_fast(item, packing.PackItem)
@@ -688,7 +691,9 @@ class SequencePackedBatchAssembler:
     if batch_size <= 0:
       raise ValueError(f"batch_size must be positive, got {batch_size}.")
     if num_generations <= 0:
-      raise ValueError(f"num_generations must be positive, got {num_generations}.")
+      raise ValueError(
+          f"num_generations must be positive, got {num_generations}."
+      )
     if mini_batch_size <= 0:
       raise ValueError(
           f"mini_batch_size must be positive, got {mini_batch_size}."
@@ -907,6 +912,12 @@ class SequencePackedBatchAssembler:
   ) -> Iterator[AssembledBatch]:
     """Ingests items and yields microbatches, flushing at the update boundary."""
     ext = packing._packing_ext  # pylint: disable=protected-access
+    if any(
+        item.action_support_ids is not None
+        or item.reference_support_logps is not None
+        for item in items
+    ):
+      raise ValueError("Binary action supports require padded batch assembly.")
     if ext is not None:
       ext.ingest_payloads_fast(
           items, self.max_packed_len, packing.PackItem, self._buffer
@@ -1031,7 +1042,9 @@ class PaddedBatchAssembler:
           f"max_response_length must be positive, got {max_response_length}."
       )
     if num_generations <= 0:
-      raise ValueError(f"num_generations must be positive, got {num_generations}.")
+      raise ValueError(
+          f"num_generations must be positive, got {num_generations}."
+      )
     if mini_batch_size <= 0:
       raise ValueError(
           f"mini_batch_size must be positive, got {mini_batch_size}."
@@ -1431,8 +1444,46 @@ class PaddedBatchAssembler:
     if merged_lineage:
       payload_metadata["lineage"] = merged_lineage
 
+    support_ids = reference_support = None
+    if any(it.action_support_ids is not None for it in chunk):
+      support_ids = np.full((self.batch_size, 2), -1, np.int32)
+      if any(it.reference_support_logps is not None for it in chunk):
+        reference_support = np.zeros((self.batch_size, 2), np.float32)
+      for row_index, item in enumerate(chunk):
+        if item.action_support_ids is None:
+          if item.reference_support_logps is not None:
+            raise ValueError("Reference support requires action support IDs.")
+          continue
+        pair = np.asarray(item.action_support_ids).reshape(-1)
+        completion = np.asarray(item.completion_ids).reshape(-1)
+        if (
+            pair.shape != (2,)
+            or not np.issubdtype(pair.dtype, np.integer)
+            or np.any(pair < 0)
+            or pair[0] == pair[1]
+            or completion.size != 1
+            or completion[0] not in pair
+        ):
+          raise ValueError("Invalid binary action support or sampled token.")
+        support_ids[row_index] = pair
+        if reference_support is not None:
+          values = np.asarray(item.reference_support_logps)
+          if (
+              values.size != 2
+              or not np.isfinite(values).all()
+              or not np.isclose(np.exp(values).sum(), 1, atol=1e-5)
+          ):
+            raise ValueError(
+                "Binary reference probabilities must normalize over support."
+            )
+          reference_support[row_index] = values.reshape(2)
+    elif any(it.reference_support_logps is not None for it in chunk):
+      raise ValueError("Reference support requires action support IDs.")
+
     payload = datatypes.RLTrainerPayload(
         advantages=batched_advantages,
+        action_support_ids=support_ids,
+        reference_support_logps=reference_support,
         prompt_ids=batched_prompt_ids,
         prompt_mask=batched_prompt_mask,
         completion_ids=batched_completion_ids,

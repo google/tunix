@@ -295,6 +295,11 @@ class NativeMathSampler:
     while self._queue:
       chunk = self._queue[: self.batch_size]
       del self._queue[: self.batch_size]
+      # A collective deadline can cancel an awaiting agent while its request
+      # is queued or in flight. Never deliver to an already completed Future.
+      chunk = [(req, fut) for req, fut in chunk if not fut.done()]
+      if not chunk:
+        continue
       requests = [req for req, _ in chunk]
       if len(requests) < self.batch_size:
         pad_req = dataclasses.replace(requests[0], request_id="__pad__")
@@ -309,10 +314,15 @@ class NativeMathSampler:
         pending = [fut for _, fut in chunk + self._queue]
         self._queue.clear()
         for fut in pending:
-          fut.set_exception(exc)
+          if not fut.done():
+            if isinstance(exc, asyncio.CancelledError):
+              fut.cancel()
+            else:
+              fut.set_exception(exc)
         return
       for (_, fut), resp in zip(chunk, responses[: len(chunk)], strict=True):
-        fut.set_result(resp)
+        if not fut.done():
+          fut.set_result(resp)
 
   def sync(self):
     # Some CPU leaves start SingleDeviceSharding and become NamedSharding in

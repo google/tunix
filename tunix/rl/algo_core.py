@@ -427,6 +427,8 @@ def grpo_loss_fn(
   Returns:
     A LossOutput containing the loss and an aux dictionary.
   """
+  if getattr(train_example, "action_support_ids", None) is not None:
+    raise ValueError("Binary action supports require a support-aware policy loss.")
   beta = algo_config.beta
   epsilon = algo_config.epsilon
   loss_algo = algo_config.loss_algo

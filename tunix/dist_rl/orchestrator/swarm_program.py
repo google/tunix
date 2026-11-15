@@ -28,10 +28,17 @@ from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.orchestrator import rl_program
 from tunix.dist_rl.swarm import credit
+from tunix.dist_rl.swarm import policy
 from tunix.dist_rl.swarm import trace
 from tunix.rl import algorithm_config
 
 LOSS_REDUCTIONS = ("global_token_mean", "microbatch_token_mean")
+
+
+@dataclasses.dataclass(frozen=True)
+class ReferenceLogprobs:
+  per_token_logps: np.ndarray
+  support_logps: np.ndarray | None = None
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -207,6 +214,8 @@ _TRAINER_METRIC_KEYS = (
     "ppo_kl",
     "pg_clipfrac",
     "pg_clipfrac_lower",
+    "cispo/weight_mean",
+    "cispo/capped_fraction",
     "is_ratio/max",
     "log_ratio/abs_mean",
     "sampler_is/weight_mean",
@@ -263,6 +272,8 @@ async def _score_microbatches(
     batches: Sequence[batch_assembly.AssembledBatch],
     config: SwarmConfig,
     step: int,
+    *,
+    precompute_sampler_is: bool = False,
 ) -> tuple[list[datatypes.RLTrainerPayload], float, float]:
   """Validates sampler/actor logprob agreement and prepares training payloads."""
   scored = []
@@ -288,11 +299,31 @@ async def _score_microbatches(
           f"Sampler/actor logprob mismatch: max={error:.6g},"
           f" mean={diff_sum / max(diff_count, 1):.6g}"
       )
-    scored.append(
-        payload
-        if config.sampler_is is not None
-        else dataclasses.replace(payload, old_per_token_logps=old)
-    )
+    if precompute_sampler_is:
+      # Both the PPO baseline and the sampler correction remain fixed across
+      # every optimizer update in this round. Fused in-loss IS would otherwise
+      # recompute its baseline from the changing current policy.
+      weights = None
+      if config.sampler_is == "token":
+        weights = np.zeros_like(old)
+        difference = old[active] - payload.old_per_token_logps[active]
+        weights[active] = np.exp(
+            np.minimum(difference, np.log(config.sampler_is_threshold))
+        )
+      scored.append(
+          dataclasses.replace(
+              payload,
+              old_per_token_logps=old,
+              sampler_is_weights=weights,
+              sampler_agreement_applied=True,
+          )
+      )
+    else:
+      scored.append(
+          payload
+          if config.sampler_is is not None
+          else dataclasses.replace(payload, old_per_token_logps=old)
+      )
   mean_error = diff_sum / max(diff_count, 1)
   logging.info(
       "Step %d scored %d microbatches: max_logprob_error=%.6g,"
@@ -312,10 +343,37 @@ class SwarmRLProgram(rl_program.RLProgram):
       self,
       collect: Callable[[int, int], Awaitable[Sequence[trace.SwarmEpisode]]],
       config: SwarmConfig,
+      *,
+      learning_plan: policy.LearningPlan | None = None,
+      credit_builder: (
+          Callable[[Sequence[trace.SwarmEpisode]], credit.CreditBatch] | None
+      ) = None,
+      algo_config: algorithm_config.GRPOConfig | None = None,
+      reference_scorer: (
+          Callable[[datatypes.RLTrainerPayload], Awaitable[np.ndarray]] | None
+      ) = None,
+      num_policy_minibatches: int = 1,
+      precompute_sampler_is: bool = False,
   ):
     super().__init__()
     self.collect = collect
     self.config = config
+    if num_policy_minibatches < 1:
+      raise ValueError("num_policy_minibatches must be positive.")
+    if (
+        num_policy_minibatches > 1
+        and config.sampler_is is not None
+        and not precompute_sampler_is
+    ):
+      raise ValueError(
+          "Multiple policy updates require fixed sampler IS weights."
+      )
+    self.learning_plan = learning_plan
+    self.credit_builder = credit_builder
+    self.algo_config = algo_config
+    self.reference_scorer = reference_scorer
+    self.num_policy_minibatches = num_policy_minibatches
+    self.precompute_sampler_is = precompute_sampler_is
     self.history: list[dict] = []
     self._failed = False
 
@@ -349,14 +407,16 @@ class SwarmRLProgram(rl_program.RLProgram):
     self._is_running = True
     try:
       config = self.config
-      engine.configure(
-          shared_grpo_config(
-              config.group_size,
-              sampler_is=config.sampler_is,
-              sampler_is_threshold=config.sampler_is_threshold,
-          ),
-          config,
+      algo_config = self.algo_config or shared_grpo_config(
+          config.group_size,
+          sampler_is=config.sampler_is,
+          sampler_is_threshold=config.sampler_is_threshold,
       )
+      if algo_config.requires_reference_kl and self.reference_scorer is None:
+        raise ValueError(
+            "Reference KL requires an explicit frozen reference scorer."
+        )
+      engine.configure(algo_config, config)
       self.policy_version = await engine.prepare()
       for _ in range(num_steps):
         episodes = tuple(await self.collect(self.policy_version, self.step))
@@ -365,17 +425,67 @@ class SwarmRLProgram(rl_program.RLProgram):
           raise ValueError(
               "Collect complete groups before computing advantages."
           )
-        if any(
+        if self.learning_plan is not None:
+          self.learning_plan.validate(episodes, self.policy_version)
+        elif any(
             c.policy_version != self.policy_version
             for e in episodes
             for c in e.calls
         ):
           raise ValueError("Collection returned a stale policy version.")
-        credited = credit.build_credit(
-            episodes,
-            normalization=config.normalization,
-            invalid_action_penalty=config.invalid_action_penalty,
+        credited = (
+            self.credit_builder(episodes)
+            if self.credit_builder
+            else credit.build_credit(
+                episodes,
+                normalization=config.normalization,
+                invalid_action_penalty=config.invalid_action_penalty,
+            )
         )
+        if self.learning_plan is not None:
+          selected = {
+              c.call_id: c
+              for e in episodes
+              for c in self.learning_plan.select_calls(e)
+          }
+          emitted = set()
+          for row in credited.payloads:
+            original = selected.get(row.metadata.get("call_id"))
+            if (
+                original is None
+                or original.call_id in emitted
+                or row.metadata.get("policy_id")
+                != self.learning_plan.learner_policy_id
+                or row.metadata.get("policy_version") != self.policy_version
+                or not np.array_equal(
+                    row.prompt_ids, np.asarray(original.prompt_ids)[None, :]
+                )
+                or not np.array_equal(
+                    row.completion_ids,
+                    np.asarray(original.completion_ids)[None, :],
+                )
+                or (original.action_support_ids is None)
+                != (row.action_support_ids is None)
+                or (
+                    original.action_support_ids is not None
+                    and not np.array_equal(
+                        row.action_support_ids,
+                        np.asarray(original.action_support_ids)[None, :],
+                    )
+                )
+                or row.completion_mask.shape != row.completion_ids.shape
+                or not np.isin(row.completion_mask, (0, 1)).all()
+                or not np.any(row.completion_mask)
+                or np.any(
+                    row.completion_mask
+                    > np.asarray(original.loss_mask)[None, :]
+                )
+            ):
+              raise ValueError(
+                  "Credit builder returned tokens outside the learner's"
+                  " recorded calls."
+              )
+            emitted.add(original.call_id)
         for row in credited.payloads:
           if (
               row.prompt_ids.shape[-1] > config.max_prompt_length
@@ -384,7 +494,9 @@ class SwarmRLProgram(rl_program.RLProgram):
             raise ValueError(
                 "A call exceeds the configured training token budget."
             )
-        if not any(credited.advantages):
+        if not credited.payloads or (
+            not any(credited.advantages) and algo_config.beta == 0.0
+        ):
           # AdamW can change parameters even with zero gradients. A no-signal
           # round consumes data without advancing optimizer or policy version.
           self._step += 1
@@ -408,17 +520,31 @@ class SwarmRLProgram(rl_program.RLProgram):
               "skip_reason": "zero_signal",
           })
           continue
-        # All variable call rows belong to ONE optimizer boundary. Do not use
-        # group_size here: a team attempt may contain two or three calls.
-        assembler = batch_assembly.PaddedBatchAssembler(
-            batch_size=config.micro_batch_size,
-            max_prompt_length=config.max_prompt_length,
-            max_response_length=config.max_response_length,
-            pad_id=config.pad_id,
-            num_generations=len(credited.payloads),
-            mini_batch_size=1,
+        # Keep every call of an episode in one policy minibatch. The default
+        # remains one optimizer update for Dr. MAS. R²Orch partitions episodes
+        # into two contiguous near-equal windows, each with its own token mean.
+        by_episode = collections.OrderedDict()
+        for payload in credited.payloads:
+          by_episode.setdefault(payload.metadata["episode_id"], []).append(
+              payload
+          )
+        groups = list(by_episode.values())
+        windows = np.array_split(
+            np.arange(len(groups)),
+            min(self.num_policy_minibatches, len(groups)),
         )
-        batches = list(assembler.feed(credited.payloads))
+        batches = []
+        for window in windows:
+          rows = [row for index in window for row in groups[index]]
+          assembler = batch_assembly.PaddedBatchAssembler(
+              batch_size=config.micro_batch_size,
+              max_prompt_length=config.max_prompt_length,
+              max_response_length=config.max_response_length,
+              pad_id=config.pad_id,
+              num_generations=len(rows),
+              mini_batch_size=1,
+          )
+          batches.extend(assembler.feed(rows))
         logging.info(
             "Step %d collected %d episodes (%d calls, %d microbatches).",
             self.step + 1,
@@ -429,12 +555,66 @@ class SwarmRLProgram(rl_program.RLProgram):
         # Snapshot the actor's old logps for ALL batches before any update,
         # following upstream's actor recomputation, not a changing PPO baseline.
         scored, max_error, mean_error = await _score_microbatches(
-            engine, batches, config, self.step + 1
+            engine,
+            batches,
+            config,
+            self.step + 1,
+            precompute_sampler_is=self.precompute_sampler_is,
         )
+        if algo_config.requires_reference_kl:
+          for index, payload in enumerate(scored):
+            result = await self.reference_scorer(payload)
+            support = (
+                result.support_logps
+                if isinstance(result, ReferenceLogprobs)
+                else None
+            )
+            reference = np.asarray(
+                result.per_token_logps
+                if isinstance(result, ReferenceLogprobs)
+                else result,
+                dtype=np.float32,
+            )
+            active = payload.completion_mask > 0
+            if (
+                reference.shape != payload.completion_ids.shape
+                or not np.isfinite(reference[active]).all()
+                or np.any(reference[active] > 1e-5)
+            ):
+              raise ValueError(
+                  "Frozen reference returned invalid or misaligned logprobs."
+              )
+            if payload.action_support_ids is not None:
+              restricted = np.all(payload.action_support_ids >= 0, axis=-1)
+              if (
+                  support is None
+                  or np.asarray(support).shape
+                  != payload.action_support_ids.shape
+              ):
+                raise ValueError(
+                    "Binary actions require the complete frozen reference"
+                    " distribution."
+                )
+              support = np.asarray(support, np.float32)
+              if not np.isfinite(support[restricted]).all() or not np.allclose(
+                  np.exp(support[restricted]).sum(-1), 1, atol=1e-5
+              ):
+                raise ValueError("Binary reference distribution is invalid.")
+            scored[index] = dataclasses.replace(
+                payload,
+                ref_per_token_logps=reference,
+                reference_support_logps=support,
+            )
         if config.loss_reduction == "microbatch_token_mean":
-          scored = weight_microbatches(
-              scored, config.loss_microbatch_rows, seed=self.step
-          )
+          start = 0
+          for index, batch in enumerate(batches):
+            if batch.is_final_batch:
+              scored[start : index + 1] = weight_microbatches(
+                  scored[start : index + 1],
+                  config.loss_microbatch_rows,
+                  seed=self.step,
+              )
+              start = index + 1
         result = None
         for payload, batch in zip(scored, batches, strict=True):
           result = await engine.train(
@@ -462,6 +642,7 @@ class SwarmRLProgram(rl_program.RLProgram):
             "step": self.step,
             "policy_version": version,
             "optimizer_applied": True,
+            "optimizer_steps": len(windows),
             "episodes": len(episodes),
             "calls": len(credited.payloads),
             "active_tokens": int(

@@ -27,12 +27,17 @@ from tunix.rl import function_registry
 class LocalSwarmEngine:
 
   def __init__(
-      self, worker: trainer_worker.TrainerWorker, sync: Callable[[], None]
+      self,
+      worker: trainer_worker.TrainerWorker,
+      sync: Callable[[], None],
+      *,
+      actor_scorer=None,
   ):
     self.worker = worker
     self.sync = sync
     self.version = 0
     self.config = None
+    self.actor_scorer = actor_scorer
 
   def configure(self, algo_config, config):
     self.config = config
@@ -51,6 +56,8 @@ class LocalSwarmEngine:
     return self.version
 
   async def score(self, payload):
+    if self.actor_scorer is not None:
+      return self.actor_scorer(payload)
     response = self.worker.per_token_logps(
         datatypes.LogprobsRequest(
             prompt_tokens=payload.prompt_ids,

@@ -60,6 +60,9 @@ class RecordingRuntime:
         if self.params.seed is None
         else self.params.seed + self._calls,
     )
+    # Reserve identity and seed before yielding. Parallel calls through one
+    # runtime must never reuse an ID, including after a failed request.
+    self._calls += 1
     response = await self.sampler.sample(
         sampler_lib.SamplingRequest(
             request_id=call_id,
@@ -89,7 +92,6 @@ class RecordingRuntime:
       raise ValueError(
           "Sampler must return unpadded completion IDs and logprobs."
       )
-    self._calls += 1
     return trace.CallTrace(
         call_id=call_id,
         role=role,
