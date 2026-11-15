@@ -2,15 +2,31 @@
 
 | Item | Decision |
 | --- | --- |
-| Status | Local shared-policy slice implemented and CPU-validated; distributed transport and 4B results pending |
-| Version | 2.1 |
-| Updated | November 11, 2026 |
+| Status | Dr. MAS TPU record available; Director, RSI and collective repair implemented for local acceptance; distributed episode RPC remains pending |
+| Version | 2.2 |
+| Updated | November 15, 2026 |
 | Implementation scope | Extend `tunix/dist_rl` |
 | First recipe | Dr. MAS shared-policy math with Qwen3-4B |
-| Later recipe | Avalon-inspired dynamic parallel Swarm-Repair |
+| Additional recipes | R²Orch-inspired Director/RSI math and Avalon-inspired collective repair |
 | Review entry points | [One-pager](swarm_training_onepager.md), [English overview](swarm_training_overview.md), [Chinese overview](swarm_training_overview_zh.md) |
 
-This document is authoritative for the common framework and first recipe. The [Swarm-Repair design](swarm_rlcr_design.md) specifies an optional later specialization. The first implementation is a local-transport slice: immutable call traces, Solver–Verifier execution, role/episode credit, native training and weight publication. The broader contracts and distributed lifecycle below remain target design unless listed as implemented. See the [recipe and directory rationale](../examples/swarm_math/README.md) and [validation evidence](swarm_training_validation.md). Recipe values copied from references are distinguished from deployment settings that require measurement.
+This document is authoritative for the common framework and first recipe. The
+[R²Orch design](r2orch_design.md) specifies selected-policy and alternating
+learning; the [repair recipe](../examples/swarm_repair/README.md) specifies the
+implemented local collective environment and CISPO objective. The broader
+[Swarm-Repair design](swarm_rlcr_design.md) remains a production target,
+including remote streaming cancellation. Its proposed Team-GRPO/fixed-capacity
+reduction is not the current CISPO/token-mean profile. The distributed lifecycle
+below is a target unless listed as implemented. See the
+[Dr. MAS recipe](../examples/swarm_math/README.md) and
+[validation evidence](swarm_training_validation.md) for its existing TPU results.
+
+The public customization surface is `SwarmSpec`/`SwarmSession`: users provide an
+async workflow, role-to-policy bindings and a private terminal grader. Exact
+token traces feed `SwarmRLProgram` with an explicit credit builder and learning
+plan. Dynamic spawning, mailboxes, workspace and anytime commitment use
+`CollectiveRuntime`. RSI owns an outer cycle over two native trainers. These
+capabilities share `dist_rl` rather than introducing a second training stack.
 
 ## 1. Goals and Scope
 

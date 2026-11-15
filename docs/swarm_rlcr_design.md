@@ -2,7 +2,7 @@
 
 | Item | Decision |
 | --- | --- |
-| Status | Engineering design draft for review; implementation has not started |
+| Status | Production target; a bounded local CISPO repair adaptation is implemented separately |
 | Version | 1.3 |
 | Audience | Engineering leads, implementers, and reviewers |
 | Parent design | [Distributed Swarm Training](swarm_training_design.md) |
@@ -11,9 +11,17 @@
 | Implementation scope | Extend `tunix/dist_rl` |
 | Target recipe | Swarm-Repair: shared-policy, time-budgeted collaborative code repair |
 
-**Implementation context:** the first local shared-policy math slice is now [CPU-validated](swarm_training_validation.md). Swarm-Repair itself remains unimplemented; the system below is its target design.
+**Implementation context:** shared-policy math has a [TPU validation record](swarm_training_validation.md). A bounded local collective repair recipe is implemented and CPU-validated; the full production system below remains a target design.
 
-**Document authority:** the [common system design](swarm_training_design.md) defines framework interfaces and the first Dr. MAS math recipe. This document defines the later Swarm-Repair specialization. Shared weights, collective credit, workspace tools, dynamic membership, physical deadlines, and fixed team-capacity reduction below apply to this recipe only. New interfaces are proposed additions; implementation and accelerator acceptance remain pending.
+**Implementation boundary:** the [runnable repair recipe](../examples/swarm_repair/README.md)
+uses a safe JSON-module environment, shared-policy dynamic teams, mailboxes,
+anytime snapshots and CISPO with token-mean reduction. It has local native
+training and recovery checks. The full repository sandbox, remote episode
+transport and partial-token streaming cancellation below remain targets.
+The Team-GRPO/fixed-capacity objective specified below is a distinct proposed
+profile, not the implemented CISPO profile.
+
+**Document authority:** the [common system design](swarm_training_design.md) defines framework interfaces and the first Dr. MAS math recipe. This document defines the production Swarm-Repair specialization. Shared weights, collective credit, workspace tools, dynamic membership, physical deadlines, and fixed team-capacity reduction below apply to that proposed profile only. Accelerator acceptance remains pending for the new collective recipe.
 
 **Delivery order:** shared-policy math correctness and held-out results → frozen-worker orchestration → this dynamic parallel recipe → optional independent-policy, distillation, counterfactual, and RSI extensions. The [internal overview](swarm_training_overview.md) summarizes the complete program.
 

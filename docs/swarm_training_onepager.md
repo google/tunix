@@ -1,6 +1,15 @@
 # Tunix Swarm Training: Lead Review One-Pager
 
-**Status:** local shared-policy slice implemented and CPU-validated; distributed transport and pretrained 4B results pending. **Updated:** November 11, 2026.
+**Status:** Dr. MAS has a Qwen3-4B TPU training record. Director/RSI math and
+collective repair now have runnable local implementations; their pretrained
+experiments and distributed episode transport remain pending.
+**Updated:** November 15, 2026.
+
+**Recipe series:** [Dr. MAS](../examples/swarm_math/README.md) →
+[Director and RSI](../examples/r2orch_math/README.md) →
+[collective repair](../examples/swarm_repair/README.md).
+These exercise shared roles, frozen Workers with selected learners, alternating
+learners, and dynamic shared-policy teams on the same native training stack.
 
 **Implementation checkpoint:** reusable trace/runtime/credit code is under `dist_rl/swarm/`; the sibling `SwarmRLProgram` reuses native batching and training. The first recipe includes pinned prompts/grader, role/global credit comparisons and two-round local training. The diagram below remains the distributed target. [Recipe](../examples/swarm_math/README.md) · [Validation](swarm_training_validation.md).
 
@@ -35,7 +44,7 @@ flowchart TD
 The numbered path is one training round. Sampling is a runtime service; scoring and call traces feed learning, and the next round starts only after durable commit and weight-sync acknowledgment. Fully zero-signal rounds reuse the prior checkpoint and commit only data consumption, as shown in the formal flowchart.
 
 - **Execution:** `SwarmProgram` defines roles and conditional/asynchronous control flow; `SwarmRuntime` supplies model/tool calls, lifecycle, and budgets. Fixed workflows and dynamic teams share these contracts.
-- **Policy binding:** separate agent instance, semantic role, and parameter identity. V0 has one shared trainable policy. Frozen workers and independently trained policies are separate extensions; the latter require policy version/checkpoint bundles.
+- **Policy binding:** separate agent instance, semantic role, and parameter identity. Shared policies and selected learners with frozen Workers are implemented; RSI commits two alternating learners in one cycle. Arbitrary asynchronous independent-policy updates remain a separate extension.
 - **Learning:** immutable call traces preserve actual visible contexts, token IDs, behavior logprobs, policy versions, and action ownership. `CreditAssigner` and `LearningPlan` specify comparison groups, reward statistics, loss masks, and reduction; the trainer does not interpret communication topology.
 
 **Tunix changes.** Add collector selection to `RolloutManager` and a `SwarmRLProgram` that expands one episode into multiple call payloads. Reuse existing padded batching and trainer machinery, extending payloads where required. Current engine versioning and synchronization assume one trainable policy; heterogeneous co-training requires explicit routing, per-policy versions, and checkpoint bundles. Reference [MARTI][marti] for workflow separation and [Agent Lightning][lightning] for harness integration.

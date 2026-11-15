@@ -1,6 +1,14 @@
 # Tunix Swarm Training: English Quick Overview
 
-**Status:** local shared-policy implementation and CPU validation complete; distributed transport and pretrained 4B results pending. **Updated:** November 11, 2026.
+**Status:** Dr. MAS Qwen3-4B TPU results are recorded. Director/RSI math and
+collective repair have runnable local implementations; their pretrained
+experiments and remote episode transport are pending. **Updated:** November 15, 2026.
+
+Current entry points: [shared math](../examples/swarm_math/README.md),
+[Director and alternating RSI](../examples/r2orch_math/README.md), and
+[collective repair with CISPO](../examples/swarm_repair/README.md).
+Use `SwarmSpec` for user-defined async workflows and `CollectiveRuntime` for
+dynamic teams; both produce exact traces consumed by native `dist_rl` training.
 
 The first slice lives in `dist_rl/swarm/`, with a sibling `SwarmRLProgram` and the task-specific `examples/swarm_math/` recipe. It has passed upstream numerical comparisons and local training loops, including a small random Qwen3 Transformer. The diagrams below show the target distributed architecture. [Runnable recipe](../examples/swarm_math/README.md) · [Validation record](swarm_training_validation.md).
 

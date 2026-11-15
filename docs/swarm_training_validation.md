@@ -247,3 +247,78 @@ entropy or length collapse on `test_sampled` (`110` questions x `4` samples at
 | 200 | 38.3 / 60.0 | 29.2 / 46.7 | 86.5 / 90.0 | 57.7 | 51.3 / 65.6 | 3,592 |
 | 250 | 38.3 / 63.3 | 31.7 / 46.7 | 87.0 / 92.0 | 58.6 | 52.3 / 67.3 | 3,906 |
 | 275 | 44.2 / 63.3 | 32.5 / 53.3 | 88.0 / 94.0 | 60.9 | 54.9 / 70.2 | 4,393 |
+
+## Recipe series local validation: November 15, 2026
+
+This acceptance record covers the new [Director and alternating RSI
+recipes](../examples/r2orch_math/README.md), the [collective RLCR validation
+recipe](../examples/swarm_repair/README.md), and their shared `dist_rl` contracts.
+The Dr. MAS TPU results above are a separate experiment; they do not establish
+TPU correctness or benchmark performance for these new recipes.
+
+The combined regression run passed **450 tests and 116 subtests**, with **one
+explicit skip** for real Docker tool execution. The original R²Orch source and
+real Qwen3 tokenizer checks were enabled:
+
+```bash
+TUNIX_R2ORCH_SOURCE=/tmp/tunix-r2orch-recipe-review-20261114 \
+TUNIX_SWARM_QWEN_TOKENIZER=/tmp/tunix-qwen3-4b-tokenizer \
+  /tmp/tunix-series-venv/bin/python -m pytest \
+  tests/dist_rl/swarm \
+  tests/dist_rl/orchestrator/batch_assembly_test.py \
+  tests/dist_rl/orchestrator/opd_program_test.py \
+  tests/dist_rl/distillation/opd_gradient_test.py \
+  tests/rl/algo_core_test.py -q --disable-warnings --tb=short
+```
+
+After adding the ordinary-token KL cap/reference-stride regression, the complete
+`director_binary_test.py` file passed **10 tests**. This follow-up is reported
+separately from the preceding aggregate. The existing
+`tests/dist_rl/distillation/opd_training_test.py` passed **three tests** in a
+separate run with localhost binding permitted. The broader
+`rl_program_test.py` was not included in this acceptance because its generated
+`discovery_service_pb2` dependency was unavailable in the local environment.
+
+| Area | Executed validation |
+| --- | --- |
+| Source fidelity | Pinned R²Orch commit `12ceb7563aa50439687f21ba5da60ad74a75eb89`: actual Canvas/controller flow, constrained relation calls, AIME scorer, committed data hashes, optimizer schedule and recursive-learnability reference comparisons |
+| Director gradients | Ordinary-token sampled KL with the paper launcher's cap and reference cadence; exact two-action categorical KL for relation choices; fixed old/reference scores, masks, sampler importance weights, finite differences and independent gradient checks |
+| Proposer gradients | Finite-label pair distribution, reference-relative odds-gap clipping, exact categorical KL and independent gradient checks |
+| Native Qwen integration | Random tiny-Qwen adapter-only updates, unchanged frozen base, serving synchronization and chunked versus unchunked loss/gradient agreement |
+| RSI state | Learned Proposer and Director updates; skill visibility, review/retirement bookkeeping, exact greedy review transport and committed two-learner cycle recovery |
+| Collective RLCR | CISPO loss and every-parameter gradient agreement with Torch, team credit/masks, dynamic spawning, concurrent calls, anytime settlement, deadlines and cancellation |
+| Recovery | Full versus resumed training, zero-update rounds, partial model-save failures and interruption before the atomic manifest commit |
+
+All three CPU entry points completed real forward/backward and optimizer
+updates with their default fixture configurations:
+
+```bash
+python -m examples.r2orch_math.train --backend cpu \
+  --output /tmp/tunix-series-director-acceptance-20261115
+python -m examples.r2orch_math.selfplay --backend cpu \
+  --output /tmp/tunix-series-rsi-acceptance-20261115
+python -m examples.swarm_repair.train --backend cpu \
+  --output /tmp/tunix-series-rlcr-acceptance-20261115
+```
+
+| Entry point | Observed result | Output artifact |
+| --- | --- | --- |
+| Director | Two collection rounds, four optimizer updates; parameter L2 change `0.03142165392637253`; frozen parameters unchanged; maximum per-round sampler/actor logprob error at most `5.960464477539063e-8` | `report.json` |
+| Alternating RSI | Two cycles, four Director and two Proposer optimizer updates; frozen parameters unchanged; zero-skill evaluation and cycle checkpoints emitted | `selfplay_report.json` |
+| Collective RLCR | Two CISPO updates; parameter L2 change `0.008736768737435341`; observed peak concurrent calls of two; single, independent, fixed-team and dynamic-team evaluations emitted | `report.json` |
+
+The short RSI CLI run did not accumulate enough evidence to invoke PATS review;
+the review protocol is exercised by dedicated tests. Fixture accuracy and CPU
+latency are not pretrained-model or collaboration-gain results. The repair task
+is a public, safe JSON DSL validation environment, not Avalon's original internal
+training environment or a software-repair benchmark.
+
+These runs did not load pretrained 4B/9B weights, execute the real tool container,
+or validate these new recipes on TPU. Container argument/lifecycle tests passed;
+the real-tool check requires an installed immutable image supplied through
+`TUNIX_R2ORCH_TOOL_IMAGE`. Remote episode transport, large-mesh throughput,
+streaming device cancellation, six-domain R²Orch reproduction and Avalon
+benchmark reproduction remain outside this local acceptance. A first TPU run
+must separately verify model loading, tools, exact action/logprob alignment,
+finite gradients, frozen-policy integrity, checkpoint recovery and held-out
+evaluation before a longer training run.
