@@ -15,7 +15,7 @@
 """CPU-only benchmark regression tests; runnable without TPU/JAX/pytest.
 
 Run directly:
-python3 tests/dist_rl/examples/rl_efficiency_benchmark/benchmark_test.py
+python3 tests/dist_rl/benchmarks/rl_efficiency/benchmark_test.py
 """
 
 import argparse
@@ -37,7 +37,7 @@ from unittest import mock
 def load_module(name):
   path = (
       Path(__file__).resolve().parents[4]
-      / "tunix/dist_rl/examples/rl_efficiency_benchmark"
+      / "tunix/dist_rl/benchmarks/rl_efficiency"
       / (name + ".py")
   )
   spec = importlib.util.spec_from_file_location(name, path)

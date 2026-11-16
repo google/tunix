@@ -17,6 +17,7 @@ import shutil
 import tempfile
 import types
 from typing import Any, Dict, Optional
+from unittest import mock
 import uuid
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -112,7 +113,9 @@ def setup(kwargs: Optional[Dict[str, Any]] = None):
           train_micro_batch_size=1
           if kwargs.get('gradient_accumulation_steps', None)
           else None,
-          max_seq_token_per_tpu=kwargs.get('max_seq_token_per_tpu', None),
+          max_seq_tokens_per_device=kwargs.get(
+              'max_seq_tokens_per_device', None
+          ),
           rollout_micro_batch_size=kwargs.get('rollout_micro_batch_size', None),
       ),
       rollout_config=base_rollout.RolloutConfig(
@@ -805,7 +808,7 @@ class GRPOLearnerTest(parameterized.TestCase):
     # Train with sequence packing
     kwargs_packed = {
         'eval_every_n_steps': 2,
-        'max_seq_token_per_tpu': max_token_len,
+        'max_seq_tokens_per_device': max_token_len,
     }
     rl_engine_packed, model_packed, _ = setup(kwargs_packed)
     grpo_config_packed = grpo_lib.GRPOConfig(
@@ -1358,6 +1361,52 @@ class GRPOLearnerTest(parameterized.TestCase):
         mode=rl_engine_lib.Mode.TRAIN,
     )
     self.assertLen(rewards, len(prompts))
+
+  def test_score_centering_validation_and_topk_padding(self):
+    rl_engine, _, _ = setup()
+    with self.assertRaisesRegex(ValueError, 'vLLM rollout'):
+      grpo_lib.GRPOLearner(
+          rl_engine=rl_engine,
+          reward_fns=reward_1,
+          algo_config=grpo_lib.GRPOConfig(
+              num_generations=2,
+              num_iterations=1,
+              score_centering=True,
+              score_centering_top_k=2,
+          ),
+      )
+    vllm_engine = mock.MagicMock()
+    vllm_engine.cluster_config.rollout_engine = 'vllm'
+    vllm_engine.get_rollout_config.return_value = base_rollout.RolloutConfig(
+        return_logprobs=True, num_logprobs=1
+    )
+    with self.assertRaisesRegex(
+        ValueError, r'max\(2, score_centering_top_k\)'
+    ):
+      grpo_lib._validate_score_centering_rollout(
+          grpo_lib.GRPOConfig(
+              num_generations=2,
+              num_iterations=1,
+              score_centering=True,
+              score_centering_top_k=1,
+          ),
+          vllm_engine,
+          packing_enabled=False,
+      )
+    rollout_out = base_rollout.RolloutOutput(
+        text=['x'],
+        logits=None,
+        tokens=[np.array([4, 5], dtype=np.int32)],
+        left_padded_prompt_tokens=np.array([[1, 2]], dtype=np.int32),
+        logprobs=[np.array([-0.2, -0.4], dtype=np.float32)],
+        topk_token_ids=[np.array([[4, 6, 7], [5, 8, 9]], dtype=np.int32)],
+        topk_logprobs=[
+            np.array([[-0.2, -1.0, -2.0], [-0.4, -1.2, -2.2]], dtype=np.float32)
+        ],
+    )
+    ids, logps = grpo_lib._pad_rollout_topk(rollout_out, max_length=4, k=2)
+    np.testing.assert_array_equal(ids, [[[4, 6], [5, 8], [0, 0], [0, 0]]])
+    self.assertTrue(np.isneginf(logps[0, 2:]).all())
 
 
 if __name__ == '__main__':

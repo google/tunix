@@ -52,6 +52,7 @@ import contextlib
 import dataclasses
 import difflib
 import enum
+import functools
 import importlib
 import inspect
 import json
@@ -90,6 +91,7 @@ from tunix.dist_rl.rollout import inprocess_vllm_sampler
 from tunix.dist_rl.rollout import vanilla_sampler
 from tunix.dist_rl.rollout import vllm_sampler
 from tunix.dist_rl.train import peft_trainer_v2
+from tunix.dist_rl.weight_sync import raiden_preload
 from tunix.dist_rl.weight_sync import weight_sync_coordinator
 from tunix.dist_rl.worker import inference_worker as exp_inference_worker
 from tunix.dist_rl.worker import rollout_worker
@@ -549,6 +551,9 @@ def _run_rollout(
 ) -> None:
   """Runs the rollout node's `main` up to serving, then initializes its sampler."""
   _patch_model_loading(recorder)
+  recorder.stack.enter_context(
+      mock.patch.object(raiden_preload, "import_raiden")
+  )
   recorder.patch(importlib, "import_module")
   recorder.patch(gcs_cache, "restore_jax_cache")
   vllm_sampler_module = types.SimpleNamespace(
@@ -769,6 +774,9 @@ def _capture(role: node_utils.ProcessRole, case: str) -> str:
       recorder.record_init(cls)
     context = _named_mock("context")
     context.jax.initialize = recorder.record("context.jax.initialize")
+    context.initialize_runtime.side_effect = functools.partial(
+        node_utils.context_lib.ProcessContext.initialize_runtime, context
+    )
     recorder.patch(_AUTO_TOKENIZER, "from_pretrained", returns=_FakeTokenizer())
     if role != "orchestrator":
       axes = hp.mesh_axes(_MESH_KEYS[role])

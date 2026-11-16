@@ -40,11 +40,17 @@ TrajectoryStatus = agent_types.TrajectoryStatus
 TrajectoryItem = agent_types.TrajectoryItem
 format_traj_id = agent_types.format_traj_id
 Role = common_datatypes.Role
+RoutedExpertsRef = common_datatypes.RoutedExpertsRef
 ROUTED_EXPERTS_ENCODE_MODES = common_datatypes.ROUTED_EXPERTS_ENCODE_MODES
 RoutedExpertsEncodeMode = common_datatypes.RoutedExpertsEncodeMode
+RoutedExpertsWireEncoding = common_datatypes.RoutedExpertsWireEncoding
 validate_routed_experts_encode_config = (
     common_configs.validate_routed_experts_encode_config
 )
+resolve_routed_experts_wire_encoding = (
+    common_datatypes.resolve_routed_experts_wire_encoding
+)
+routed_experts_bytes_per_token = common_datatypes.routed_experts_bytes_per_token
 
 # Marks a router-replay slot the trainer must not replay, so the model falls
 # back to its own gate there. Matches what MaxText's replay path expects.
@@ -426,6 +432,9 @@ class RolloutRequest(Request):
       turns of the rollout episode.
     target_policy_version: Policy model version identifier to use for rollout
       generation.
+    stage_routed_experts: When True, stages encoded `routed_experts` in the
+      worker's `RolloutStagingBuffer` and returns a `RoutedExpertsRef` on
+      `TrajectoryItem.routed_experts_ref` instead of inline bytes.
   """
 
   prompt: Any = ""
@@ -435,6 +444,14 @@ class RolloutRequest(Request):
   max_turns: int = 10
   max_response_length: int | None = None
   target_policy_version: int = 0
+  stage_routed_experts: bool = False
+
+  def __post_init__(self) -> None:
+    if not isinstance(self.stage_routed_experts, bool):
+      raise TypeError(
+          "RolloutRequest.stage_routed_experts must be a bool, got"
+          f" {type(self.stage_routed_experts).__name__}."
+      )
 
   @property
   def traj_id(self) -> str:
@@ -524,6 +541,9 @@ class WeightSyncRequest(Request):
     weights: Optional source weights payload for non-Raiden / in-memory sync.
     source_metadata: Optional transport/layout metadata describing source
       weights.
+    min_retained_policy_version: Optional lower bound on policy version retained
+      in `RolloutStagingBuffer`; entries staged strictly below this version are
+      evicted as zombies on `post_weight_sync`.
     extra_config: Optional backend-specific configuration parameters.
   """
 
@@ -531,7 +551,25 @@ class WeightSyncRequest(Request):
   policy_version: int = 0
   weights: Any = None
   source_metadata: Any = None
+  min_retained_policy_version: int | None = None
   extra_config: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+  def __post_init__(self) -> None:
+    if isinstance(self.policy_version, bool) or not isinstance(
+        self.policy_version, int
+    ):
+      raise TypeError(
+          "WeightSyncRequest.policy_version must be an int (not bool), got"
+          f" {self.policy_version!r}."
+      )
+    if self.min_retained_policy_version is not None and (
+        isinstance(self.min_retained_policy_version, bool)
+        or not isinstance(self.min_retained_policy_version, int)
+    ):
+      raise TypeError(
+          "WeightSyncRequest.min_retained_policy_version must be an int or"
+          f" None, got {self.min_retained_policy_version!r}."
+      )
 
 
 @dataclasses.dataclass
@@ -663,6 +701,9 @@ class RLTrainerPayload(TrainerPayload):
       `tunix.rl.packing.decode_routed_experts` (on CPU) or
       `tunix.rl.common.decode_routed_experts_jax` (on device/XLA) rather than
       indexing raw bytes directly.
+    routed_experts_ref: Optional unbatched `RoutedExpertsRef` handle pointing to
+      worker-staged `routed_experts` (static field, mutually exclusive with
+      inline `routed_experts`; always None on packed microbatches).
     returns: Optional [B, C] value baseline returns (for PPO / Critic).
     old_values: Optional [B, C] critic value estimates (for PPO / Critic).
     num_segments: Optional static upper bound on number of segments in packed
@@ -683,6 +724,9 @@ class RLTrainerPayload(TrainerPayload):
   old_per_token_logps: np.ndarray | None = None
   sampler_is_weights: np.ndarray | None = None
   routed_experts: np.ndarray | None = None
+  routed_experts_ref: RoutedExpertsRef | None = dataclasses.field(
+      default=None, metadata=STATIC_FIELD_METADATA
+  )
   returns: np.ndarray | None = None
   old_values: np.ndarray | None = None
   num_segments: int | None = dataclasses.field(
@@ -695,6 +739,19 @@ class RLTrainerPayload(TrainerPayload):
       default_factory=dict, metadata=STATIC_FIELD_METADATA
   )
   # TODO(tunix-dev): add ppo specific fields in PPORLTrainerPayload.
+
+  def __post_init__(self) -> None:
+    if self.routed_experts_ref is not None:
+      if not isinstance(self.routed_experts_ref, RoutedExpertsRef):
+        raise TypeError(
+            "RLTrainerPayload.routed_experts_ref must be a RoutedExpertsRef"
+            f" or None, got {type(self.routed_experts_ref).__name__}."
+        )
+      if self.routed_experts is not None:
+        raise ValueError(
+            "RLTrainerPayload cannot hold both inline routed_experts and"
+            " routed_experts_ref."
+        )
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)

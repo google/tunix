@@ -25,6 +25,7 @@ from unittest import mock
 from absl.testing import absltest
 import omegaconf
 from tunix.cli import config as cli_config
+from tunix.dist_rl.common import execution_target
 from tunix.dist_rl.common import gcs_cache
 from tunix.dist_rl.launch.common import resolve_config
 
@@ -80,10 +81,10 @@ class ResolveConfigTest(absltest.TestCase):
     self.assertEqual(hp.config["agentic_grpo_config"]["epsilon"], 0.2)
     self.assertEqual(hp.config["weight_sync_config"]["mode"], "none")
     self.assertEqual(
-        hp.config["cluster_config"]["local"]["trainer_tpu_chips"], "0,1"
+        hp.config["cluster_config"]["local"]["trainer_devices"], "0,1"
     )
     self.assertEqual(
-        hp.config["cluster_config"]["local"]["rollout_tpu_chips"], "2,3"
+        hp.config["cluster_config"]["local"]["rollout_devices"], "2,3"
     )
     # Since default beta=0.04 > 0, inference node is automatically enabled.
     self.assertTrue(hp.config["cluster_config"]["run_inference_node"])
@@ -1110,7 +1111,6 @@ weight_sync_config:
     self.assertEqual(vllm["routed_experts_encode_mode"], "auto")
     self.assertIsNone(vllm["routed_experts_num_experts"])
     self.assertTrue(vllm["detokenize"])
-    self.assertEqual(vllm["kwargs"], {})
 
     vllm = resolve_config.initialize([
         "vllm_config.return_routed_experts=true",
@@ -1122,8 +1122,6 @@ weight_sync_config:
     self.assertEqual(vllm["routed_experts_encode_mode"], "uint10")
     self.assertEqual(vllm["routed_experts_num_experts"], 256)
     self.assertIs(vllm["detokenize"], False)
-    # The typed settings stay out of the free-form vLLM engine arguments.
-    self.assertEqual(vllm["kwargs"], {})
 
   def test_invalid_vllm_rollout_settings_fail_loud(self):
     with self.assertRaisesRegex(ValueError, "routed_experts_encode_mode"):
@@ -1242,19 +1240,12 @@ weight_sync_config:
         with self.assertRaisesRegex(ValueError, re.escape(key)):
           resolve_config.initialize([arg])
 
-  def test_typed_vllm_keys_rejected_in_free_form_kwargs(self):
+  def test_vllm_config_kwargs_is_removed(self):
+    # Nothing read it; vLLM engine arguments go in `vllm_config.engine_kwargs`.
     with self.assertRaisesRegex(
-        ValueError, r"\['detokenize', 'return_routed_experts'\].*typed keys"
+        ValueError, "Unknown configuration key 'vllm_config.kwargs'"
     ):
-      resolve_config.initialize([
-          "vllm_config.kwargs.return_routed_experts=true",
-          "vllm_config.kwargs.detokenize=true",
-      ])
-    # Other free-form engine arguments are still accepted.
-    vllm = resolve_config.initialize(
-        ["vllm_config.kwargs.attention=flash"]
-    ).config["vllm_config"]
-    self.assertEqual(vllm["kwargs"], {"attention": "flash"})
+      resolve_config.initialize(["vllm_config.kwargs.attention=flash"])
 
   def test_maxtext_roles_require_one_maxtext_model_name(self):
     maxtext = [
@@ -1319,38 +1310,99 @@ weight_sync_config:
         resolve_config.render_bash_exports(resolve_config.initialize([])),
     )
 
-  def test_maxtext_extra_flags_need_a_maxtext_trainer(self):
-    maxtext = [
-        "model_config.model_source=maxtext",
-        "model_config.model_path=/ckpt/qwen3-1.7b/0/items",
-        "model_config.kwargs.maxtext_model_name=qwen3-1.7b",
-        "weight_sync_config.mode=raiden",
-    ]
-    flags = (
-        "dist_training_config.maxtext_extra_flags="
-        "remat_policy=custom opt_type=sgd"
+  _MAXTEXT_TRAINER = (
+      "model_config.model_source=maxtext",
+      "model_config.model_path=/ckpt/qwen3-1.7b/0/items",
+      "model_config.kwargs.maxtext_model_name=qwen3-1.7b",
+      "weight_sync_config.mode=raiden",
+  )
+  _EXTRA = "dist_training_config.maxtext_extra_config"
+
+  def test_maxtext_extra_config_needs_a_maxtext_trainer(self):
+    entries = (
+        f"{self._EXTRA}.remat_policy=custom",
+        f"{self._EXTRA}.sa_block_q=1024",
+        f"{self._EXTRA}.packing=true",
     )
     # A Tunix trainer would silently ignore them.
     with self.assertRaisesRegex(
-        ValueError, "maxtext_extra_flags configures a MaxText trainer"
+        ValueError, "maxtext_extra_config configures a MaxText trainer"
     ):
-      resolve_config.initialize([flags])
-    with self.assertRaisesRegex(TypeError, "must be a string"):
-      resolve_config.initialize(
-          [*maxtext, "dist_training_config.maxtext_extra_flags=3"]
-      )
-    # A malformed entry fails here, before any job is submitted.
-    for malformed in ("remat_policy custom", "=custom"):
-      with self.subTest(malformed=malformed):
-        with self.assertRaisesRegex(ValueError, "must be key=value pairs"):
-          resolve_config.initialize([
-              *maxtext,
-              f"dist_training_config.maxtext_extra_flags={malformed}",
-          ])
-    hp = resolve_config.initialize([*maxtext, flags])
+      resolve_config.initialize(list(entries))
+    hp = resolve_config.initialize([*self._MAXTEXT_TRAINER, *entries])
+    # The values keep their YAML types.
     self.assertEqual(
-        hp.config_mapping("dist_training_config")["maxtext_extra_flags"],
-        "remat_policy=custom opt_type=sgd",
+        hp.config_mapping("dist_training_config")["maxtext_extra_config"],
+        {"remat_policy": "custom", "sa_block_q": 1024, "packing": True},
+    )
+
+  def test_maxtext_extra_config_rejects_non_scalar_values(self):
+    with self.assertRaisesRegex(TypeError, "must be a mapping"):
+      resolve_config.initialize([*self._MAXTEXT_TRAINER, f"{self._EXTRA}=3"])
+    # Each value becomes one MaxText `key=value` argument.
+    for entry in (
+        f"{self._EXTRA}.remat_policy=null",
+        f"{self._EXTRA}.remat_policy=[full]",
+        f"{self._EXTRA}.remat_policy.decoder=full",
+    ):
+      with self.subTest(entry=entry):
+        with self.assertRaisesRegex(
+            TypeError, "values must be a str, int, float or bool"
+        ):
+          resolve_config.initialize([*self._MAXTEXT_TRAINER, entry])
+
+  def test_maxtext_extra_config_rejects_keys_that_are_not_config_names(self):
+    # "learning_rate=1e-6" would reach MaxText as `learning_rate=1e-6=1`.
+    for key in ("learning_rate=1e-6", "remat policy", ""):
+      with self.subTest(key=key):
+        with self.assertRaisesRegex(
+            ValueError, "keys must be MaxText config names"
+        ):
+          resolve_config.initialize([
+              *self._MAXTEXT_TRAINER,
+              f"{self._EXTRA}={{{json.dumps(key)}: 1}}",
+          ])
+
+  def test_maxtext_extra_flags_is_removed(self):
+    with self.assertRaisesRegex(
+        ValueError,
+        "Unknown configuration key 'dist_training_config.maxtext_extra_flags'",
+    ):
+      resolve_config.initialize([
+          *self._MAXTEXT_TRAINER,
+          "dist_training_config.maxtext_extra_flags=remat_policy=custom",
+      ])
+
+  def test_maxtext_extra_config_rejects_keys_built_from_the_config(self):
+    # Appended last, these would silently override the config values.
+    with self.assertRaisesRegex(
+        ValueError,
+        r"maxtext_extra_config must not set MaxText keys that the trainer"
+        r" builds from the config: learning_rate \(set"
+        r" rl_training_config\.actor_optimizer_config\.learning_rate instead\),"
+        r" ici_fsdp_parallelism \(set the 'fsdp' axis of"
+        r" actor_model_config\.mesh instead\)\.",
+    ):
+      resolve_config.initialize([
+          *self._MAXTEXT_TRAINER,
+          f"{self._EXTRA}.remat_policy=custom",
+          f"{self._EXTRA}.learning_rate=1e-6",
+          f"{self._EXTRA}.ici_fsdp_parallelism=4",
+      ])
+    # Fixed builder settings, which have no config key, stay overridable.
+    hp = resolve_config.initialize([
+        *self._MAXTEXT_TRAINER,
+        f"{self._EXTRA}.use_tokamax_gmm=true",
+        f"{self._EXTRA}.grad_dtype=float32",
+        f"{self._EXTRA}.context_parallel_load_balance=false",
+    ])
+    self.assertEqual(
+        hp.config_mapping("dist_training_config")["maxtext_extra_config"],
+        {
+            "use_tokamax_gmm": True,
+            "grad_dtype": "float32",
+            "context_parallel_load_balance": False,
+        },
     )
 
   def test_library_settings(self):
@@ -1696,6 +1748,182 @@ weight_sync_config:
         "local|qwen3-0.6b|raiden|swe-ns|"
         "tunix.dist_rl.launch.nodes.trainer.main|false",
     )
+
+  def test_execution_targets_default_and_per_role_overrides(self):
+    hp = resolve_config.initialize([])
+    self.assertEqual(
+        hp.cluster_targets,
+        execution_target.ClusterTargets(
+            trainer=execution_target.JAX_TPU,
+            rollout=execution_target.JAX_TPU,
+            inference=execution_target.JAX_TPU,
+            placement=execution_target.Placement.DISAGGREGATED,
+        ),
+    )
+
+    hp_override = resolve_config.initialize([
+        "cluster_config.target=external",
+        "cluster_config.artifact_root=/artifacts/run",
+        "execution_targets.target=jax:gpu",
+        "execution_targets.trainer=torch:tpu",
+        "execution_targets.placement=disaggregated",
+    ])
+    self.assertEqual(
+        hp_override.cluster_targets.trainer, execution_target.TORCH_TPU
+    )
+    self.assertEqual(
+        hp_override.cluster_targets.rollout, execution_target.JAX_GPU
+    )
+    self.assertEqual(
+        hp_override.cluster_targets.inference, execution_target.JAX_GPU
+    )
+    self.assertEqual(
+        hp_override.config["cluster_config"]["local"]["trainer_devices"], "0,1"
+    )
+    self.assertEqual(
+        hp_override.config["cluster_config"]["local"]["rollout_devices"], "2,3"
+    )
+    self.assertEqual(
+        hp_override.config["cluster_config"]["local"]["inference_devices"], ""
+    )
+
+    hp_colocated = resolve_config.initialize([
+        "execution_targets.target=jax:gpu",
+        "execution_targets.placement=colocated",
+        "cluster_config.local.trainer_devices=0,1,2,3",
+    ])
+    self.assertEqual(
+        hp_colocated.config["cluster_config"]["local"]["rollout_devices"],
+        "0,1,2,3",
+    )
+    self.assertEqual(
+        hp_colocated.config["cluster_config"]["local"]["inference_devices"],
+        "0,1,2,3",
+    )
+
+    hp_single_zero = resolve_config.initialize([
+        "execution_targets.target=jax:gpu",
+        "execution_targets.placement=colocated",
+        "cluster_config.local.trainer_devices=0",
+    ])
+    self.assertEqual(
+        hp_single_zero.config["cluster_config"]["local"]["trainer_devices"], "0"
+    )
+    self.assertEqual(
+        hp_single_zero.config["cluster_config"]["local"]["rollout_devices"], "0"
+    )
+    self.assertEqual(
+        hp_single_zero.config["cluster_config"]["local"]["inference_devices"],
+        "0",
+    )
+
+    hp_disagg_ints = resolve_config.initialize([
+        "execution_targets.target=jax:gpu",
+        "cluster_config.local.trainer_devices=0",
+        "cluster_config.local.rollout_devices=1",
+        "cluster_config.local.inference_devices=0",
+    ])
+    self.assertEqual(
+        hp_disagg_ints.config["cluster_config"]["local"]["trainer_devices"], "0"
+    )
+    self.assertEqual(
+        hp_disagg_ints.config["cluster_config"]["local"]["rollout_devices"], "1"
+    )
+    self.assertEqual(
+        hp_disagg_ints.config["cluster_config"]["local"]["inference_devices"],
+        "0",
+    )
+
+  def test_local_auto_detect_devices_and_device_validation(self):
+    hp_default = resolve_config.initialize([])
+    self.assertFalse(
+        hp_default.config["cluster_config"]["local"]["auto_detect_devices"]
+    )
+    self.assertIn(
+        "export LOCAL_AUTO_DETECT_DEVICES=false\n",
+        resolve_config.render_bash_exports(hp_default),
+    )
+
+    hp = resolve_config.initialize([
+        "cluster_config.local.auto_detect_devices=true",
+        "cluster_config.local.trainer_devices= 0,1 ",
+        "cluster_config.local.inference_devices=   ",
+    ])
+    local = hp.config["cluster_config"]["local"]
+    self.assertTrue(local["auto_detect_devices"])
+    self.assertEqual(local["trainer_devices"], "0,1")
+    self.assertEqual(local["inference_devices"], "")
+    exports = resolve_config.render_bash_exports(hp)
+    self.assertIn("export LOCAL_AUTO_DETECT_DEVICES=true\n", exports)
+    self.assertIn("export LOCAL_TRAINER_DEVICES=0,1\n", exports)
+    self.assertIn("export LOCAL_ROLLOUT_DEVICES=2,3\n", exports)
+    self.assertIn("export LOCAL_INFERENCE_DEVICES=''\n", exports)
+
+    with self.assertRaisesRegex(
+        TypeError, r"cluster_config\.local\.auto_detect_devices must be a bool"
+    ):
+      resolve_config.initialize(
+          ["cluster_config.local.auto_detect_devices=maybe"]
+      )
+    with self.assertRaisesRegex(
+        TypeError,
+        r"cluster_config\.local\.trainer_devices must be a str or non-negative"
+        r" int",
+    ):
+      resolve_config.initialize(["cluster_config.local.trainer_devices=true"])
+    with self.assertRaisesRegex(
+        ValueError,
+        r"cluster_config\.local\.trainer_devices must be non-negative",
+    ):
+      resolve_config.initialize(["cluster_config.local.trainer_devices=-1"])
+
+  def test_execution_targets_validation_errors(self):
+    for overrides, exc_type, pattern in (
+        (
+            ["execution_targets.target=123"],
+            TypeError,
+            "execution_targets.target must be a str",
+        ),
+        (
+            ["execution_targets.placement=invalid_mode"],
+            ValueError,
+            "execution_targets.placement must be one of",
+        ),
+        (
+            ["execution_targets.trainer=torch:gpu"],
+            ValueError,
+            "Unsupported execution target 'torch:gpu'",
+        ),
+        (
+            [
+                "cluster_config.target=external",
+                "cluster_config.artifact_root=/artifacts/run",
+                "execution_targets.trainer=jax:tpu",
+                "execution_targets.rollout=jax:gpu",
+                "execution_targets.placement=colocated",
+            ],
+            ValueError,
+            "Placement 'colocated' requires identical execution targets",
+        ),
+        (
+            [
+                "execution_targets.trainer=torch:tpu",
+                "execution_targets.rollout=jax:tpu",
+                "execution_targets.placement=colocated",
+            ],
+            ValueError,
+            "Placement 'colocated' requires identical execution targets",
+        ),
+        (
+            ["weight_sync_config.mode=nccl"],
+            ValueError,
+            "weight_sync_mode='nccl' requires GPU accelerators on both trainer"
+            " and rollout",
+        ),
+    ):
+      with self.subTest(overrides=overrides):
+        with self.assertRaisesRegex(exc_type, pattern):
+          resolve_config.initialize(overrides)
 
 
 if __name__ == "__main__":

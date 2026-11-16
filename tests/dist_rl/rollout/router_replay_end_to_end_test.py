@@ -30,6 +30,7 @@ it therefore does NOT cover is tpu-inference's own capture kernel, which fills
 """
 
 import asyncio
+import os
 from unittest import mock
 
 from absl.testing import absltest
@@ -117,6 +118,12 @@ def _request_output(routed_experts):
 class VllmSamplerRoutingTest(absltest.TestCase):
   """`VllmSampler` must surface what vLLM put on the CompletionOutput."""
 
+  def setUp(self):
+    super().setUp()
+    # `VllmSampler` sets process-wide variables (e.g. `JAX_RANDOM_WEIGHTS`);
+    # restore the environment after each test.
+    self.enter_context(mock.patch.dict(os.environ))
+
   def _sampler(self, routed_experts, return_routed_experts=True):
     config = vllm_sampler.VllmConfig(
         return_logprobs=False,
@@ -160,6 +167,12 @@ class VllmSamplerRoutingTest(absltest.TestCase):
 
 class SamplerToPayloadTest(absltest.TestCase):
   """Routing must reach a batched RLTrainerPayload with its layout intact."""
+
+  def setUp(self):
+    super().setUp()
+    # `VllmSampler` sets process-wide variables (e.g. `JAX_RANDOM_WEIGHTS`);
+    # restore the environment after each test.
+    self.enter_context(mock.patch.dict(os.environ))
 
   def _sampling_response(self, fill):
     stub = mock.MagicMock()

@@ -261,10 +261,26 @@ class SqlStoreWriterTest(parameterized.TestCase):
   def test_resolve_status_strips_whitespace_and_ignores_blank_or_non_string_values(
       self, raw_status: Any, expected: str
   ) -> None:
-    metadata = trajectory_testing.TUNIX_METADATA_1.model_copy(
+    metadata = trajectory_testing.METADATA_1.model_copy(
         update={"status": raw_status}
-    ).to_atif_metadata()
+    )
     self.assertEqual(sql_store._resolve_status(metadata), expected)
+
+  def test_resolve_status_reads_canonical_base_metadata_status(self) -> None:
+    metadata = trajectory_testing.METADATA_1.model_copy(
+        update={"status": "  SUCCEEDED  "}
+    )
+    self.assertEqual(sql_store._resolve_status(metadata), "SUCCEEDED")
+
+  def test_resolve_status_reads_legacy_packed_extension_status(self) -> None:
+    metadata = trajectory_testing.METADATA_1.model_copy(
+        update={
+            "extra": {
+                trajectory_lib.TUNIX_EXTENSIONS_KEY: {"status": "  SUCCEEDED  "}
+            }
+        }
+    )
+    self.assertEqual(sql_store._resolve_status(metadata), "SUCCEEDED")
 
   def test_resolve_status_with_final_metrics_returns_unknown(self) -> None:
     metadata = trajectory_testing.METADATA_1.model_copy(

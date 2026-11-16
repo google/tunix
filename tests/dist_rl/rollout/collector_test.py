@@ -894,7 +894,11 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
     request = datatypes.RolloutRequest(
         prompt="test",
         prompt_id="p_budget",
-        generation_kwargs={"max_tokens": 4, "max_response_length": 16},
+        generation_kwargs={
+            "max_tokens": 4,
+            "max_response_length": 16,
+            "routed_experts_prompt_start": 3,
+        },
     )
     engine = collector.TrajectoryCollectorEngine(
         traj_id=request.traj_id,
@@ -926,10 +930,13 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
     # Remaining budget 12 > request max_tokens 4 -> should use 4
     asyncio.run(captured_model_call("prompt", max_generation_steps=12))
     self.assertEqual(sampler.calls[-1][0].sampling_params.max_tokens, 4)
+    self.assertEqual(sampler.calls[-1][0].max_tokens, 4)
+    self.assertEqual(sampler.calls[-1][0].routed_experts_prompt_start, 3)
 
     # Remaining budget 2 < request max_tokens 4 -> should use 2
     asyncio.run(captured_model_call("prompt", max_generation_steps=2))
     self.assertEqual(sampler.calls[-1][0].sampling_params.max_tokens, 2)
+    self.assertEqual(sampler.calls[-1][0].max_tokens, 2)
 
 
 class ResponseBudgetAnnotationTest(absltest.TestCase):
@@ -1382,6 +1389,8 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
     self.assertEqual(
         sampler.requests[1].sampling_params.cache_salt, "policy_v2"
     )
+    self.assertEqual(sampler.requests[0].cache_salt, "policy_v2")
+    self.assertEqual(sampler.requests[1].cache_salt, "policy_v2")
     # Per-turn history is recorded in policy_versions on item.traj (SSOT).
     self.assertEqual(item.policy_versions, [2, 3])
     self.assertNotIn("policy_version", item.traj)
@@ -2354,6 +2363,48 @@ class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
         np.testing.assert_array_equal(
             jax_promo_cmp[0, : len(raw_promo_all)], raw_promo_all
         )
+
+  def test_turn0_overlong_prompt_aborts_immediately_when_max_prompt_length_set(
+      self,
+  ):
+    sample_calls = 0
+
+    class _CountingPromptSampler:
+
+      async def sample(self, sampling_requests, **kwargs):
+        del kwargs
+        nonlocal sample_calls
+        sample_calls += 1
+        return sampler_lib.SamplingResponse(
+            request_id=sampling_requests.request_id,
+            text="TOOL_CALL: step1",
+            prompt_token_ids=np.arange(12, dtype=np.int32),
+            token_ids=np.array([101, 102], dtype=np.int32),
+            logprobs=np.zeros(2, dtype=np.float32),
+            routed_experts=np.zeros((14, 2, 4), dtype=np.int16),
+        )
+
+    engine = collector.TrajectoryCollectorEngine(
+        traj_id="traj_overlong_prompt",
+        request=datatypes.RolloutRequest(
+            prompt="overlong",
+            prompt_id="p_over",
+            max_turns=3,
+            max_response_length=32,
+            stage_routed_experts=True,
+            generation_kwargs={"return_routed_experts": True},
+        ),
+        sampler=_CountingPromptSampler(),
+        env_client=self._make_single_turn_env(),
+        agent=model_agent.ModelAgent("sys"),
+        tokenizer=_MockTokenizer(),
+        chat_parser=_RecordingParser(),
+        routed_experts_encode_mode="uint10",
+        max_prompt_length=8,
+    )
+    with self.assertRaisesRegex(ValueError, "Turn-0 prompt length"):
+      asyncio.run(engine.run_episode())
+    self.assertEqual(sample_calls, 1)
 
 
 if __name__ == "__main__":

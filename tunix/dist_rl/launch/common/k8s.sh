@@ -284,9 +284,6 @@ start_rollout_instance() {
   if [[ "${WEIGHT_SYNC_MODE}" == "raiden" ]]; then
     env_prefix+=" RAIDEN_USE_FFI=0"
   fi
-  if [[ -n "${VLLM_ADDITIONAL_CONFIG_JSON}" ]]; then
-    env_prefix+=" VLLM_ADDITIONAL_CONFIG_JSON=$(printf '%q' "${VLLM_ADDITIONAL_CONFIG_JSON}")"
-  fi
   if [[ -n "${SANDBOX_NAMESPACE}" ]]; then
     env_prefix+=" NAMESPACE=$(printf '%q' "${SANDBOX_NAMESPACE}")"
     if [[ -n "${SANDBOX_NODE_SELECTOR_KEY}" && -n "${SANDBOX_NODE_SELECTOR_VAL}" ]]; then

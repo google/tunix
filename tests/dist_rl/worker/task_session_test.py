@@ -2817,6 +2817,145 @@ class TaskSessionTest(parameterized.TestCase):
 
     asyncio.run(_run())
 
+  def test_abandon_in_flight_drains_queued_responses_and_preserves_reuse(self):
+    """Verifies cross-run isolation of `abandon_in_flight()` without closing."""
+
+    async def _run():
+      eng1 = GatedEngine("w1")
+      eng1.gates["run_a_slow"] = asyncio.Event()
+      w1 = BlipHandle(eng1, quick_poll=True)
+      live: list[remote_lib.ActorHandle] = [w1]
+      unreachable: list[remote_lib.ActorHandle] = []
+
+      session = ft_session(
+          live,
+          unreachable=unreachable,
+          poll_retry_budget_s=0.5,
+      )
+      # Run A: "run_a_fast" finishes and sits unpolled in `_response_queue`
+      # while "run_a_slow" stays in flight on `w1`.
+      await session.submit("req_fast", "compute", "run_a_fast")
+      await session.submit("req_slow", "compute", "run_a_slow")
+      await wait_until(lambda: not session._response_queue.empty())
+
+      await session.abandon_in_flight()
+      eng1.gates["run_a_slow"].set()
+      await asyncio.sleep(0.02)
+
+      self.assertFalse(session._closed)
+      self.assertEqual(session._in_flight, 0)
+      self.assertEmpty(unreachable)
+      self.assertGreaterEqual(session.stale_responses_total, 1)
+      self.assertEqual(await session.poll_completed(timeout_s=0.05), [])
+
+      # Run B on the same TaskSession must see zero Run A leftovers.
+      await session.submit("req_b", "compute", "run_b_clean")
+      batch = await session.poll_completed(timeout_s=1.0)
+      self.assertEqual(batch, [("[w1] run_b_clean", None)])
+      self.assertEmpty(unreachable)
+      await session.abandon_in_flight()
+      return session, live
+
+    reused_session, live_handles = asyncio.run(_run())
+
+    async def _run_on_fresh_event_loop():
+      # Run C on a brand-new `asyncio.run()` event loop (with a fresh actor
+      # handle bound to the new loop) must not raise "Queue is bound to a
+      # different event loop" on the reused `TaskSession`.
+      live_handles[:] = [BlipHandle(GatedEngine("w1_loop2"), quick_poll=True)]
+      await reused_session.submit("req_c", "compute", "run_c_new_loop")
+      batch = await reused_session.poll_completed(timeout_s=1.0)
+      self.assertEqual(batch, [("[w1_loop2] run_c_new_loop", None)])
+      await reused_session.close()
+
+    asyncio.run(_run_on_fresh_event_loop())
+
+  def test_abandon_in_flight_cancels_poller_spawned_during_gather(self):
+    """Cancels and drains any poller spawned concurrently during `gather()`."""
+    in_poll = asyncio.Event()
+    submitted_during_gather = False
+
+    class YieldOnCancelHandle(remote_lib.ActorHandle):
+
+      def __init__(self):
+        self.session: task_session.TaskSession | None = None
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, args, kwargs
+        return request_id or ""
+
+      async def poll_responses(self, timeout_s=50.0):
+        nonlocal submitted_during_gather
+        del timeout_s
+        in_poll.set()
+        try:
+          await asyncio.Future()
+        except asyncio.CancelledError:
+          if not submitted_during_gather and self.session is not None:
+            submitted_during_gather = True
+            await self.session.submit("req_concurrent", "generate")
+          raise
+
+    async def _run():
+      w0 = YieldOnCancelHandle()
+      w1 = BlipHandle(GatedEngine("w1"), quick_poll=True)
+      session = task_session.TaskSession([w0, w1])
+      w0.session = session
+      await session.submit("req_0", "generate", preferred_actor=w0)
+      await asyncio.wait_for(in_poll.wait(), timeout=1.0)
+
+      await session.abandon_in_flight()
+      self.assertTrue(submitted_during_gather)
+      self.assertEmpty(session._poll_tasks)
+      self.assertEqual(session._in_flight, 0)
+      await session.close()
+
+    asyncio.run(_run())
+
+  def test_abandon_in_flight_wakes_parked_poller_and_leaves_new_queue_empty(
+      self,
+  ):
+    class HangingPollHandle(remote_lib.ActorHandle):
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, args, kwargs
+        return request_id or ""
+
+      async def poll_responses(self, timeout_s=50.0):
+        del timeout_s
+        await asyncio.Future()
+
+    async def _run():
+      w0 = HangingPollHandle()
+      session = task_session.TaskSession([w0])
+      await session.submit("req_0", "generate", preferred_actor=w0)
+      parked_poll = asyncio.create_task(session.poll_completed())
+      await asyncio.sleep(0)
+
+      await session.abandon_in_flight()
+      res = await asyncio.wait_for(parked_poll, timeout=1.0)
+      self.assertEqual(res, [])
+      self.assertTrue(session._response_queue.empty())
+      await session.close()
+
+    asyncio.run(_run())
+
 
 if __name__ == "__main__":
   absltest.main()

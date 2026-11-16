@@ -67,6 +67,8 @@ class StepTimes:
       off device); the write itself runs in the background, uncounted. About 0
       on steps the save policy skips.
     weight_sync_time: Syncing the new policy to the rollout workers.
+    routed_experts_fetch_time: Pulling staged MoE `routed_experts` arrays from
+      rollout workers prior to microbatch packing.
   """
 
   exposed_generation_time: float = 0.0
@@ -75,6 +77,7 @@ class StepTimes:
   sampler_agreement_time: float = 0.0
   checkpoint_time: float = 0.0
   weight_sync_time: float = 0.0
+  routed_experts_fetch_time: float = 0.0
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)

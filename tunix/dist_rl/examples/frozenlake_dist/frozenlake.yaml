@@ -16,9 +16,10 @@
 # 8-chip TPU host).
 #
 # Layered on top of `launch/common/base_dist_config.yaml`, with the settings of
-# the previous FrozenLake launcher. `run_gemma4_e2b.sh` adds the Gemma4 E2B
-# model and placement. Later `override_config_file=` arguments and
-# `section.key=value` overrides win.
+# the previous FrozenLake launcher.
+# `../recipes/benchmark_frozenlake_gemma4_e2b.sh` adds the Gemma4 E2B model and
+# placement. Later `override_config_file=` arguments and `section.key=value`
+# overrides win.
 
 model_config:
   model_name: "Qwen3-8B"
@@ -164,9 +165,9 @@ cluster_config:
   # Null derives the worker RPC deadline from the weight-sync phase timeouts,
   # which scale with `agentic_grpo_config.episode_timeout` (base: 1800).
   rpc_timeout_s: null
-  # One 8-chip host: trainer chips 0-3, rollout chips 4-7.
+  # One 8-device host: trainer devices 0-3, rollout devices 4-7.
   local:
-    trainer_tpu_chips: "0,1,2,3"
-    rollout_tpu_chips: "4,5,6,7"
+    trainer_devices: "0,1,2,3"
+    rollout_devices: "4,5,6,7"
     tpu_chips_per_host_bounds: "1,4,1"
     tpu_host_bounds: "1,1,1"

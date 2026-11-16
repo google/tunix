@@ -72,11 +72,11 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
         "math_gsm8k_dist/launcher.sh", "agentic_grpo_config.beta=0.04"
     )
     self.assertNotEqual(run.returncode, 0)
-    self.assertIn("cluster_config.local.inference_tpu_chips", run.stderr)
+    self.assertIn("cluster_config.local.inference_devices", run.stderr)
     with_chips = self.dry_run(
         "math_gsm8k_dist/launcher.sh",
         "agentic_grpo_config.beta=0.04",
-        "cluster_config.local.inference_tpu_chips=4,5",
+        "cluster_config.local.inference_devices=4,5",
     )
     self.assertIn("Inference command:", with_chips.stdout)
 

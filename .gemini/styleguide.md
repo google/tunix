@@ -106,43 +106,35 @@ If the formatting is off, please instruct the user to run the linter/formatter. 
 * **Use specific exceptions:** Avoid catching or raising overly broad
   exceptions like bare `Exception` to swallow errors.
 
-### CL Complexity Gate
+### CL Complexity Advisory (Control Flow & Call Indirection)
 
-* **Enforce the Complexity Budget (`[tool.cl_complexity_gate]`):** Every PR
-  is checked by `python3 scripts/check_cl_complexity.py --strict` across
-  orthogonal dimensions:
-  * **Dim 1 (Soft AST-Statement Scope Budget):** Tracks formatting-invariant net
-    executable AST statements (`net_stmts`, excluding tests, comments, and
-    docstrings) as a continuous soft budget inside `Score <= 100` with no
-    standalone line-count hard cliff—modular CLs with clean Dim 2/3/4 structure
-    are never blocked by line or file count.
-  * **Dim 2 (Local Control Flow & Legacy Ratchet):** Per-function
-    `cognitive <= 15` (target `<= 12`), `cyclomatic <= 15` (target `<= 10`),
-    `max_nesting <= 4` (target `<= 3`), flat `+1` early-exit guard relief,
-    bounded legacy delta (`+5` Cog / `+5` Cyc) on existing high-complexity
-    functions, and 1-to-1 cross-file move matching.
-  * **Dim 3 (Structural Layering & Anti-Sprawl):** Per-file single-caller
-    chain depth `max_call_depth_hops <= 2` (target `<= 2`), newly added
-    `trivial_single_call_helpers < 3` (target `0`: `stmts <= 4` and
-    `cognitive <= 1`; exempting pure cohesive leaf helpers and semantic runtime
-    decorators), `pass_through_ratio <= 0.25` (target `<= 0.15`),
-    `nested_closures <= 4` (target `<= 2`), and anti-sprawl budget (`>= 5` new
-    private helpers with `file_cog_delta > +40`). When collapsing a 1-to-1
-    single-caller chain `outer -> inner`, preserve the outer domain function
-    name and inline the inner callee upward; follow the Closure Elimination
-    Hierarchy (`Stdlib/Builtin > Inline > Hoist Last`); and enforce the
-    Verb–Execution Semantics Contract (lazy `yield` generators use
-    `_iter_*`/`_stream_*`/`_generate_*`, never eager
-    `_drain_*`/`_flush_*`/`_collect_*`/`_materialize_*`/`_gather_*`/`_load_all_*`).
-  * **Dim 4 (Duplicate Logic & Intentional Forks):** AST statement 2-gram
-    multiset Jaccard clone detection (`>= 0.60` for `stmts >= 7`,
-    `cognitive >= 4`) catching intra-file and cross-file copy-pasted logic
-    while honoring configured `intentional_forks`.
-* **Implementation Priority Over Test Coupling:** Never compromise production
-  code quality with pass-through wrappers, `functools.partial` aliases, or
-  `lambda` shims just to keep existing clear-box test mocks on private
-  `_helper` symbols unchanged; update the tests to assert on public contracts
-  and boundaries instead.
-* **Escape Hatch (`SKIP_CL_COMPLEXITY=<reason>`):** Maintainers can bypass the
-  Complexity Gate for mechanical migrations or false positives by adding
-  `SKIP_CL_COMPLEXITY=<reason>` to the PR/CL description.
+* **Advisory Complexity Check (`[tool.cl_complexity_gate]`):**
+  `scripts/check_cl_complexity.py` is a **soft warning / advisory signal**
+  (`continue-on-error` in CI)—never a hard blocking gate on normal PRs.
+* **Control Flow Advisory:** Tracks per-function cognitive (`<= 15`, target
+  `<= 12`), cyclomatic (`<= 15`, target `<= 10`), and nesting (`<= 4`, target
+  `<= 3`) complexity on newly added or modified functions (`delta > 0`). Prefer
+  flat early-exit guard clauses (`if not cond: return`) and flat linear
+  `if/elif` or `match/case` dispatch tables over deeply nested branching.
+* **Call Indirection Advisory:** Tracks intra-file single-caller private chain
+  hops (`max_call_depth_hops <= 2`), trivial single-caller pass-through
+  wrappers, and nested closures. When collapsing a 1-to-1 single-caller chain
+  `outer -> _inner`, preserve the outer domain function name and inline `_inner`
+  upward; keep cohesive multi-statement pipeline stages and shared helpers
+  (`in_degree >= 2`) intact.
+* **Change Scope & Code Duplication Signals:** Change scope (`net_stmts`) is a
+  formatting-invariant AST statement delta (never a reason to compress lines),
+  and code duplication highlights intra-file or cross-file AST statement 2-gram
+  clones (`Jaccard >= 0.60`) outside sanctioned
+  `[tool.cl_complexity_gate].intentional_forks`.
+* **Preserve Readability (Do Not Game Metrics):** Never degrade code clarity to
+  lower a complexity or scope number:
+  * Never replace `if/else` branches with boolean multiplication (`x * bool(c)`)
+    or tuple indexing (`(a, b)[cond]`).
+  * Never replace `for` loops with side-effect list comprehensions
+    (`[fn(x) for x in items]` for mutation/IO).
+  * Never strip leading `_` prefixes from internal helpers to make them appear
+    public, or inline distinct logical stages into an unreadable monolith.
+* **Escape Hatch (`SKIP_CL_COMPLEXITY=<reason>`):** Maintainers can bypass
+  strict complexity checks for mechanical migrations or false positives by
+  adding `SKIP_CL_COMPLEXITY=<reason>` to the PR/CL description.

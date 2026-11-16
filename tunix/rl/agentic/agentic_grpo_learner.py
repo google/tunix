@@ -50,7 +50,6 @@ from tunix.rl.agentic.agents import model_agent
 from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.environments import task_environment
 from tunix.utils import compat
-from tunix.utils import trajectory_logger
 
 TrainingInputT = agentic_rl_learner.TrainingInputT
 RewardFn = agentic_rl_learner.RewardFn
@@ -204,21 +203,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         env_class=env_class,
         env_kwargs=env_kwargs,
     )
-
-    self._trajectory_logger = None
-    metrics_logger_options = (
-        self.rl_engine.cluster_config.training_config.metrics_logging_options
-    )
-    metrics_log_dir = (
-        metrics_logger_options.log_dir if metrics_logger_options else None
-    )
-
-    if metrics_log_dir:
-      self._trajectory_logger = trajectory_logger.AsyncTrajectoryLogger(
-          metrics_log_dir
-      )
-    else:
-      logging.warning("Metrics log dir is None, skipping trajectory logging.")
 
     self.algo_config.temperature = (
         self.rl_engine.get_rollout_config(
@@ -488,10 +472,11 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     policy_versions_list: List[int] = []
     trajectory_rewards_list: List[float] = []
     raw_completion_lengths: List[int] = []
-    trajectories_to_log = []
+    # (index, trajectory_id, metrics) of the trajectories whose metrics are
+    # persisted to the trajectory store.
+    trajectory_metrics: List[tuple[int, str, Dict[str, Any]]] = []
 
-    for item in trajectories:
-      trajectories_to_log.append(item.traj)
+    for index, item in enumerate(trajectories):
       conversation = item.traj.get("conversation_text") or []
       assistant_text = next(
           (
@@ -519,12 +504,32 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       if not policy_versions:
         raise ValueError("policy_versions is missing from trajectory task.")
       policy_versions_list.append(policy_versions[-1])
-      trajectory_rewards_list.append(item.traj.get("trajectory_reward"))
+      trajectory_reward = item.traj.get("trajectory_reward")
+      trajectory_rewards_list.append(trajectory_reward)
 
-    # Log trajectory.
-    if self._trajectory_logger and trajectories_to_log:
-      for traj in trajectories_to_log:
-        self._trajectory_logger.log_item_async(traj)
+      traj_id = getattr(item, "traj_id", None)
+      if traj_id is None:
+        continue
+      if mode == rl_engine_lib.Mode.EVAL and expected_step is not None:
+        # Every eval round derives its group ids from the current global step,
+        # so ids of consecutive rounds can overlap; scope them by step.
+        traj_id = f"{traj_id}_step{expected_step}"
+      trajectory_metrics.append((
+          index,
+          traj_id,
+          {
+              "rollout_policy_version": int(policy_versions[-1]),
+              "status": item.traj.get("status"),
+              "trajectory_reward": (
+                  float(trajectory_reward)
+                  if trajectory_reward is not None
+                  else None
+              ),
+              "env_time": item.traj.get("env_time"),
+              "reward_time": item.traj.get("reward_time"),
+              "conversation_text": conversation,
+          },
+      ))
 
     # Pad all prompts and completions to consistent lengths.
     rollout_config = self.rl_engine.cluster_config.rollout_config
@@ -788,6 +793,24 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       )
 
     logging.debug("Advantages computed: %s", advantages)
+
+    rewards_np = np.asarray(rewards)
+    advantages_np = np.asarray(advantages)
+    self.rl_engine.log_trajectory_metrics(
+        [
+            (
+                traj_id,
+                {
+                    **metrics,
+                    "reward": float(rewards_np[index]),
+                    "advantage": float(advantages_np[index]),
+                },
+            )
+            for index, traj_id, metrics in trajectory_metrics
+        ],
+        mode=mode,
+        step=expected_step,
+    )
 
     policy_versions = np.array(policy_versions_list, dtype=np.int32)
 

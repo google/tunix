@@ -34,22 +34,19 @@ import types
 from typing import Any, cast
 
 from tunix.common import datatypes as common_datatypes
+from tunix.dist_rl.common import execution_target
 from tunix.dist_rl.common import gcs_cache
 from tunix.dist_rl.common import timeouts
 from tunix.dist_rl.distributed.runtime import context as context_lib
 from tunix.dist_rl.launch.common import resolve_config
 from tunix.dist_rl.launch.nodes import node_utils
 from tunix.dist_rl.rollout import sampler as sampler_lib
-from tunix.dist_rl.weight_sync import raiden_preload
 from tunix.dist_rl.weight_sync import weight_sync as weight_sync_lib
 from tunix.dist_rl.worker import rollout_worker
 from tunix.generate import mappings as mappings_lib
 from tunix.models import automodel
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
 from tunix.utils import maxtext_utils
-
-# Import Raiden before any other libraries to ensure correct JAX compilation.
-raiden_preload.import_raiden()
 
 LOCAL_WORKER_ID = "rollout-0"
 
@@ -74,8 +71,10 @@ ChatParser = (
 Tokenizer = node_utils.HfTokenizer
 
 # Keep in sync with every vLLM kwarg set from other config fields or rollout
-# invariants in `_rollout_config` and `VllmSampler` (`hbm_utilization` is an
-# alias guard for `gpu_memory_utilization`).
+# invariants in `_rollout_config`, `VllmSampler` and `InprocessVllmSampler`
+# (`hbm_utilization` is an alias guard for `gpu_memory_utilization`;
+# `server_mode` is `vllm_config.server_mode`, which the in-process sampler would
+# otherwise drop).
 _FORBIDDEN_ROLLOUT_KWARGS = frozenset({
     "model",
     "tokenizer",
@@ -97,6 +96,7 @@ _FORBIDDEN_ROLLOUT_KWARGS = frozenset({
     "max_logprobs",
     "logprobs_mode",
     "trust_remote_code",
+    "server_mode",
 })
 
 # Keep in sync with config-owned keys and rollout invariants in
@@ -213,7 +213,10 @@ def _lora_rank(hp: resolve_config.DistHyperParameters) -> int | None:
 def _vllm_engine_kwargs(
     hp: resolve_config.DistHyperParameters,
 ) -> dict[str, Any]:
-  """Returns validated `vllm_config.engine_kwargs` for `AsyncEngineArgs`.
+  """Returns validated `vllm_config.engine_kwargs` for the vLLM engine args.
+
+  `rollout_engine: vllm` passes them to `AsyncEngineArgs` (`VllmSampler`),
+  `rollout_engine: inprocess_vllm` to `EngineArgs` (`InprocessVllmSampler`).
 
   Args:
     hp: Validated distributed RL configuration.
@@ -222,9 +225,10 @@ def _vllm_engine_kwargs(
     A copy of the validated overrides (empty when unset).
 
   Raises:
-    ValueError: If the overrides are set without `rollout_engine: vllm`, are not
+    ValueError: If the overrides are set with `rollout_engine: vanilla`, are not
       a mapping, contain keys owned by other config fields or rollout
-      invariants, or carry a malformed `additional_config` /
+      invariants, set `load_format` for an `inprocess_vllm` rollout that starts
+      from random weights, or carry a malformed `additional_config` /
       `additional_config.maxtext_config` (the latter also needs a MaxText
       rollout model).
   """
@@ -237,16 +241,30 @@ def _vllm_engine_kwargs(
   if not engine_kwargs:
     return {}
   rollout_engine = hp.config["rollout_engine"]
-  if rollout_engine != "vllm":
+  if rollout_engine not in ("vllm", "inprocess_vllm"):
     raise ValueError(
-        "vllm_config.engine_kwargs is only supported with rollout_engine:"
-        f" vllm; got rollout_engine: {rollout_engine!r}."
+        "vllm_config.engine_kwargs needs a vLLM rollout_engine (vllm or"
+        f" inprocess_vllm); got rollout_engine: {rollout_engine!r}."
     )
   forbidden = sorted(set(engine_kwargs) & _FORBIDDEN_ROLLOUT_KWARGS)
   if forbidden:
     raise ValueError(
         "vllm_config.engine_kwargs contains keys managed by other config"
         f" fields or rollout invariants: {forbidden}"
+    )
+  if (
+      "load_format" in engine_kwargs
+      and rollout_engine == "inprocess_vllm"
+      and resolve_config.rollout_init_with_random_weights(hp)
+  ):
+    # `tunix.generate.vllm_sampler` sets `load_format="dummy"` over it.
+    raise ValueError(
+        "vllm_config.engine_kwargs.load_format has no effect with"
+        " rollout_engine: inprocess_vllm while vllm_config."
+        "init_with_random_weights is true (the default with"
+        " weight_sync_config.mode: raiden): the rollout starts from random"
+        " weights. Set vllm_config.init_with_random_weights: false to load the"
+        " checkpoint instead."
     )
   if "additional_config" in engine_kwargs:
     additional = engine_kwargs["additional_config"]
@@ -506,23 +524,28 @@ def _rollout_config(
   rollout = hp.config_mapping("rollout_config")
   ws = hp.config_mapping("weight_sync_config")
   vllm = hp.config_mapping("vllm_config")
+  grpo = hp.config_mapping("agentic_grpo_config")
   num_experts = vllm["routed_experts_num_experts"]
   max_prompt_length = int(rollout["max_prompt_length"])
   max_tokens_to_generate = int(rollout["total_generation_steps"])
+  episode_timeout_secs = _episode_timeout_secs(hp)
   config = rollout_worker.RolloutConfig(
       weight_sync_mode=weight_sync_lib.WeightSyncMode(str(ws["mode"])),
       max_prompt_length=max_prompt_length,
       max_tokens_to_generate=max_tokens_to_generate,
+      max_response_length=max_tokens_to_generate,
       kv_cache_size=max_prompt_length + max_tokens_to_generate,
       temperature=float(rollout["temperature"]),
       top_p=float(rollout["top_p"]),
       # <= 0 disables top-k filtering in both the vanilla and vLLM samplers.
       top_k=int(rollout["top_k"]),
+      overlong_filter=bool(grpo["overlong_filter"]),
+      episode_timeout=episode_timeout_secs,
       # Required by the trainer; `_validate_rollout_config` rejects `false`.
       return_logprobs=True,
       eos_tokens=_eos_token_ids(hp, tokenizer),
       partial_rollout=bool(ws["in_flight_weight_updates"]),
-      drain_timeout_s=timeouts.drain_timeout_for(_episode_timeout_secs(hp)),
+      drain_timeout_s=timeouts.drain_timeout_for(episode_timeout_secs),
       trajectory_store_config=node_utils.trajectory_store_config(hp),
       return_routed_experts=bool(vllm["return_routed_experts"]),
       routed_experts_encode_mode=cast(
@@ -830,11 +853,14 @@ def main(
   logging.info("Importing rollout registry module: %s", registry_module)
   importlib.import_module(registry_module)
 
-  gcs_cache.restore_jax_cache(params=resolve_config.rollout_cache_params(hp))
+  rollout_target = hp.cluster_targets.rollout
+  if rollout_target.framework == execution_target.Framework.JAX:
+    gcs_cache.restore_jax_cache(params=resolve_config.rollout_cache_params(hp))
 
   os.environ.setdefault("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
-  os.environ.setdefault("VLLM_TPU_RPA_VERSION", "2")
-  os.environ.setdefault("DISABLE_MOSAIC_ATTN", "1")
+  if rollout_target.accelerator == execution_target.Accelerator.TPU:
+    os.environ.setdefault("VLLM_TPU_RPA_VERSION", "2")
+    os.environ.setdefault("DISABLE_MOSAIC_ATTN", "1")
   os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
   # `AsyncLLMEngine` (`rollout_engine: vllm`) still launches an `EngineCore`
   # child process; default to `spawn` (`vllm.envs` reads this lazily) rather
@@ -847,8 +873,14 @@ def main(
   config_sha256 = node_utils.log_resolved_config(hp, "rollout")
 
   sampler_type = str(hp.config["rollout_engine"])
-  if sampler_type == "vanilla":
-    process_context.jax.initialize()
+  # On JAX, vLLM samplers (`inprocess_vllm`, `vllm`) initialize the JAX/Ray
+  # distributed runtime internally; vanilla JAX and non-JAX (e.g. `torch:tpu`)
+  # rollouts initialize their runtime here.
+  if (
+      sampler_type == "vanilla"
+      or rollout_target.framework != execution_target.Framework.JAX
+  ):
+    process_context.initialize_runtime(rollout_target)
 
   tokenizer = node_utils.load_hf_tokenizer(hp)
 

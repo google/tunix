@@ -198,6 +198,12 @@ class ConfigsTest(absltest.TestCase):
           max_seq_token_per_tpu=4096,
       )
 
+  def test_rollout_config_num_logprobs_validation(self):
+    self.assertEqual(configs.RolloutConfig().num_logprobs, 1)
+    self.assertEqual(configs.RolloutConfig(num_logprobs=32).num_logprobs, 32)
+    with self.assertRaisesRegex(ValueError, "num_logprobs must be >= 1"):
+      configs.RolloutConfig(num_logprobs=0)
+
   def test_rl_profile_config_defaults_and_validation(self):
     cfg = configs.RLProfileConfig()
     self.assertEqual(cfg.start_invocation, 2)
@@ -278,6 +284,18 @@ class ConfigsTest(absltest.TestCase):
           ValueError, "weight_sync_mode must be one of"
       ):
         configs.RolloutConfig(weight_sync_mode=bad_mode)
+
+  def test_rollout_config_validates_sampling_settings(self):
+    configs.RolloutConfig(temperature=0.0, top_p=None, top_k=-1)
+    configs.RolloutConfig(temperature=1.5, top_p=1.0, top_k=0)
+    for bad_temperature in (-0.1, float("nan"), float("inf")):
+      with self.assertRaisesRegex(ValueError, "temperature must be"):
+        configs.RolloutConfig(temperature=bad_temperature)
+    for bad_top_p in (0.0, -0.5, 1.1):
+      with self.assertRaisesRegex(ValueError, "top_p must be"):
+        configs.RolloutConfig(top_p=bad_top_p)
+    with self.assertRaisesRegex(ValueError, "top_k must be"):
+      configs.RolloutConfig(top_k=-2)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@
 
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol, runtime_checkable
+import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.worker import remote_execution
@@ -56,6 +57,8 @@ class AbstractRLEngine(Protocol):
       policy_version: int = 0,
       generation_args: datatypes.GenerationArgs | None = None,
       route_metadata: Mapping[str, Any] | None = None,
+      stage_routed_experts: bool = False,
+      max_response_length: int | None = None,
       **kwargs: Any,
   ) -> list[str]:
     """High-level convenience: Expands prompts by num_generations and dispatches rollouts.
@@ -67,8 +70,9 @@ class AbstractRLEngine(Protocol):
          `ValueError` immediately.
       2. The engine expands each prompt into `num_generations` independent
          rollout requests with deterministic IDs
-         `req_{prompt_id}_g{g_idx}_v{version}` and sets `group_index = g_idx`
-         (0..G-1).
+         `req_{prompt_id}_g{g_idx}_v{version}` (appending `_e{epoch}` after
+         `clear_all_staged_routed_experts()` resets the rollout epoch) and sets
+         `group_index = g_idx` (0..G-1).
 
     Args:
       prompts: Sequence of prompt items (dicts, objects, or RolloutRequests).
@@ -79,13 +83,20 @@ class AbstractRLEngine(Protocol):
       generation_args: Optional generation parameters (temperature, max steps).
       route_metadata: Optional routing metadata merged into each request's
         metadata.
+      stage_routed_experts: Whether rollout workers stage MoE `routed_experts`
+        arrays locally and return lightweight `RoutedExpertsRef` handles.
+      max_response_length: Default response token budget stamped onto requests
+        that omit `max_response_length`, and upper bound when
+        `stage_routed_experts=True`.
       **kwargs: Optional additional metadata.
 
     Returns:
       List of dispatched `request_id` strings.
 
     Raises:
-      ValueError: If any item in `prompts` lacks a `prompt_id`.
+      ValueError: If any item in `prompts` lacks a `prompt_id`, or if
+        `stage_routed_experts=True` and a request's `max_response_length` is not
+        in `(0, max_response_length]`.
     """
     ...
 
@@ -190,9 +201,117 @@ class AbstractRLEngine(Protocol):
       role: datatypes.Role = datatypes.Role.ACTOR,
       target_roles: Sequence[datatypes.Role] | None = None,
       policy_version: int | None = None,
+      *,
+      min_retained_policy_version: int | None = None,
       **kwargs: Any,
   ) -> int:
-    """Coordinates decentralized peer-to-peer weight sync across worker roles."""
+    """Coordinates decentralized peer-to-peer weight sync across worker roles.
+
+    Args:
+      role: Source trainer role publishing updated weights.
+      target_roles: Optional destination worker roles to synchronize.
+      policy_version: Optional explicit target policy version.
+      min_retained_policy_version: Optional zombie-eviction floor forwarded to
+        rollout workers during `post_weight_sync`.
+      **kwargs: Additional engine-specific sync options.
+
+    Returns:
+      The committed `policy_version`.
+    """
+    ...
+
+  def routed_experts_spec(
+      self,
+      *,
+      encode_mode: datatypes.RoutedExpertsEncodeMode = "auto",
+      num_experts: int | None = None,
+  ) -> batch_assembly.RoutedExpertsSpec:
+    """Resolves unified MoE routing spec across active rollout workers.
+
+    Pure query without mutating engine state.
+
+    Args:
+      encode_mode: Requested MoE routing wire encoding mode.
+      num_experts: Total routed experts per layer when `encode_mode="auto"`.
+
+    Returns:
+      Resolved `RoutedExpertsSpec` shared across all active rollout workers.
+
+    Raises:
+      ValueError: If no rollout workers are active, or any worker omits or
+        disagrees on `routed_experts_shape`.
+    """
+    ...
+
+  def configure_staging_liveness(
+      self,
+      *,
+      worst_case_bytes: int,
+      required_slots: int,
+      overcommit_factor: float = 1.0,
+  ) -> None:
+    """Validates and installs cluster-wide Relay staging slot liveness bounds.
+
+    Validates active rollout workers before updating internal state so failed
+    checks leave previous bounds intact. Reset by
+    `clear_all_staged_routed_experts()`.
+
+    Args:
+      worst_case_bytes: Worst-case staged bytes reserved per rollout trajectory.
+      required_slots: Minimum cluster-wide worst-case staging slots required to
+        guarantee deadlock-free cohort progress.
+      overcommit_factor: Soft orchestrator-side slot multiplier (`>= 1.0`).
+        Values `> 1.0` relax the strict deadlock-free guarantee under the
+        assumption that average trajectories are shorter than
+        `max_response_length`.
+
+    Raises:
+      ValueError: If `worst_case_bytes <= 0`, `required_slots < 0`,
+        `overcommit_factor` is not a finite float `>= 1.0`, or any active
+        rollout worker omits `staging_max_bytes`.
+      RuntimeError: If any active rollout worker has 0 physical staging slots
+        (`staging_max_bytes < worst_case_bytes`), or if cluster-wide scaled
+        staging slots are below `required_slots`.
+    """
+    ...
+
+  async def fetch_routed_experts(
+      self,
+      refs: Sequence[datatypes.RoutedExpertsRef],
+  ) -> dict[datatypes.RoutedExpertsRef, np.ndarray]:
+    """Fetches worker-staged `routed_experts` arrays grouped by `worker_id`.
+
+    Args:
+      refs: Staged `RoutedExpertsRef` handles to materialize.
+
+    Returns:
+      Mapping from each requested `RoutedExpertsRef` to its wire-encoded array.
+
+    Raises:
+      RuntimeError: If a referenced rollout worker was evicted before fetch.
+      KeyError: If a rollout worker omits any requested `ref_id`.
+    """
+    ...
+
+  async def release_routed_experts(
+      self,
+      refs: Sequence[datatypes.RoutedExpertsRef],
+  ) -> None:
+    """Releases worker-staged `routed_experts` entries grouped by `worker_id`.
+
+    Args:
+      refs: Staged `RoutedExpertsRef` handles to free (evicted workers—and
+        unreachable workers when fault tolerance is enabled—are logged and
+        skipped).
+
+    Raises:
+      RuntimeError: If releasing more refs for a worker than currently tracked
+        as unreleased.
+    """
+    ...
+
+  async def clear_all_staged_routed_experts(self) -> None:
+    """Abandons in-flight rollouts and clears staged routing on workers."""
     ...
 
   def fault_tolerance_metrics(self) -> Mapping[str, float]:

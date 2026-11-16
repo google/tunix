@@ -695,6 +695,11 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       skip_jit: bool,
   ) -> None:
     """Run one global step."""
+    if self.algo_config.score_centering and mini_batch_size < full_batch_size:
+      raise ValueError(
+          "score_centering needs one on-policy update per batch:"
+          " num_iterations=1 and mini_batch_size >= the batch size."
+      )
     for _ in range(full_batch_size // mini_batch_size):
       initial_steps = self._iter_steps
 

@@ -1741,8 +1741,8 @@ class V1ParityTest(parameterized.TestCase):
         model_accum, accum_steps=2, max_steps=1
     )
     # Distributed RL with sequence packing sets gradient_accumulation_steps=1
-    # and max_seq_token_per_tpu=None on TrainingConfig while invoking fwd_bwd()
-    # a dynamic number of times per update().
+    # and max_seq_tokens_per_device=None on TrainingConfig while invoking
+    # fwd_bwd() a dynamic number of times per update().
     trainer_dynamic = self._make_trainer_v2(
         model_dynamic, accum_steps=1, max_steps=1
     )

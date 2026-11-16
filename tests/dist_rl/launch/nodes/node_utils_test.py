@@ -126,12 +126,16 @@ _LIBRARY_ENV_VARS = (
     "VERIFY_WEIGHTS",
     "TPU_RAIDEN_DATA_NICS",
     "SKIP_JAX_PRECOMPILE",
+    "JAX_PLATFORMS",
+    "XLA_PYTHON_CLIENT_PREALLOCATE",
+    "XLA_PYTHON_CLIENT_MEM_FRACTION",
+    "PJRT_DEVICE",
 )
 
 
 def _apply_library_env(
     argv: Sequence[str],
-    role: Literal["trainer", "rollout"],
+    role: node_utils.NodeRole,
     env: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
   """Runs `apply_library_env` and returns the library variables it leaves.
@@ -242,6 +246,29 @@ class ApplyLibraryEnvTest(absltest.TestCase):
       with self.assertRaisesRegex(ValueError, "SKIP_JAX_PRECOMPILE"):
         node_utils.apply_library_env(hp, "rollout")
       self.assertNotIn("VERIFY_WEIGHTS", os.environ)
+
+  def test_prepares_runtime_env_for_gpu_and_torch_tpu_targets(self):
+    self.assertEqual(
+        _apply_library_env(
+            [*_EXTERNAL, "execution_targets.inference=jax:gpu"], "inference"
+        ),
+        {
+            "JAX_PLATFORMS": "cuda,cpu",
+            "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
+            "XLA_PYTHON_CLIENT_MEM_FRACTION": "0.85",
+        },
+    )
+    self.assertEqual(
+        _apply_library_env(
+            [*_EXTERNAL, "execution_targets.trainer=torch:tpu"], "trainer"
+        ),
+        {
+            "VERIFY_WEIGHTS": "false",
+            "TPU_RAIDEN_DATA_NICS": "eth0",
+            "JAX_PLATFORMS": "cpu",
+            "PJRT_DEVICE": "TPU",
+        },
+    )
 
 
 class PadAndEosIdsTest(absltest.TestCase):

@@ -322,7 +322,32 @@ class BasePipeline(abc.ABC, config.HyperParameters):
         role_to_mesh=role_to_mesh,
     )
     filtered.update({k: v for k, v in extra.items() if k in valid_fields})
+    self._apply_score_centering_rollout_defaults(mode, filtered)
     return base_rollout.RolloutConfig(**filtered)
+
+  def _apply_score_centering_rollout_defaults(
+      self, mode: str, rollout_fields: MutableMapping[str, Any]
+  ) -> None:
+    """Auto-derives or validates `num_logprobs` when `score_centering` is on."""
+    algo_key = (
+        "agentic_grpo_config" if self._is_agentic_mode(mode) else "grpo_config"
+    )
+    algo_cfg = self.config.get(algo_key)
+    if not isinstance(algo_cfg, MutableMapping) or not algo_cfg.get(
+        "score_centering"
+    ):
+      return
+    top_k = int(algo_cfg.get("score_centering_top_k", 128))
+    min_num_logprobs = max(2, top_k)
+    num_logprobs = int(rollout_fields.get("num_logprobs", 1))
+    if num_logprobs == 1:
+      rollout_fields["num_logprobs"] = min_num_logprobs
+    elif num_logprobs < min_num_logprobs:
+      raise ValueError(
+          f"rollout_config.num_logprobs ({num_logprobs}) must be >="
+          f" max(2, {algo_key}.score_centering_top_k) ({min_num_logprobs}) when"
+          " score_centering=True."
+      )
 
   def _rollout_engine_extra(
       self,

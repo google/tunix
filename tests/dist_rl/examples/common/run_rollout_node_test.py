@@ -76,6 +76,13 @@ def _inprocess_vllm_rollout_config(
 
 class RunRolloutNodeTest(absltest.TestCase):
 
+  def setUp(self):
+    super().setUp()
+    # `run_rollout_node.main` sets process-wide defaults such as
+    # `VLLM_TPU_RPA_VERSION`. Restore the environment after each test, so they
+    # don't leak into other tests that share the process (pytest workers).
+    self.enter_context(mock.patch.dict(os.environ))
+
   def test_gemma4_uses_gemma4_chat_parser(self):
     parser_factory = mock.Mock(return_value=mock.sentinel.chat_parser)
     with mock.patch.dict(
@@ -180,6 +187,28 @@ class RunRolloutNodeTest(absltest.TestCase):
         ).rollout_vllm_sampling_kwargs["detokenize"],
         False,
     )
+
+  def test_sampling_flags_reach_rollout_config(self):
+    defaults = run_rollout_node._rollout_config(
+        run_rollout_node._parse_args([])
+    )
+    self.assertEqual(defaults.temperature, 1.0)
+    self.assertEqual(defaults.top_p, 1.0)
+    self.assertIsNone(defaults.top_k)
+    self.assertFalse(defaults.overlong_filter)
+
+    custom = run_rollout_node._rollout_config(
+        run_rollout_node._parse_args([
+            "--temperature=0.7",
+            "--top_p=0.9",
+            "--top_k=20",
+            "--overlong_filter",
+        ])
+    )
+    self.assertEqual(custom.temperature, 0.7)
+    self.assertEqual(custom.top_p, 0.9)
+    self.assertEqual(custom.top_k, 20)
+    self.assertTrue(custom.overlong_filter)
 
   def test_routed_experts_flags_reach_rollout_config(self):
     defaults = run_rollout_node._rollout_config(
@@ -352,11 +381,13 @@ class RunRolloutNodeTest(absltest.TestCase):
           run_rollout_node._parse_args([])
       )
     self.assertEqual(defaults.drain_timeout_s, 660.0)
+    self.assertEqual(defaults.episode_timeout, 600.0)
 
     deepswe_cfg = run_rollout_node._rollout_config(
         run_rollout_node._parse_args(["--episode_timeout_secs=1800"])
     )
     self.assertEqual(deepswe_cfg.drain_timeout_s, 1860.0)
+    self.assertEqual(deepswe_cfg.episode_timeout, 1800.0)
 
     stderr = io.StringIO()
     with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):

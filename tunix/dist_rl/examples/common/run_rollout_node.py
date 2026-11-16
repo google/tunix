@@ -292,6 +292,26 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--max_prompt_length", type=int, default=1024)
   parser.add_argument("--max_response_length", type=int, default=1024)
   parser.add_argument(
+      "--temperature", type=float, default=1.0, help="Sampling temperature."
+  )
+  parser.add_argument("--top_p", type=float, default=1.0)
+  parser.add_argument(
+      "--top_k",
+      type=int,
+      default=None,
+      help="Top-k cutoff. Unset, 0 or -1 disables top-k filtering.",
+  )
+  parser.add_argument(
+      "--overlong_filter",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help=(
+          "Zero out the policy loss mask, final reward, and advantage inclusion"
+          " of overlong (max-steps or max-context-limit) trajectories, rather"
+          " than training on them."
+      ),
+  )
+  parser.add_argument(
       "--eos_tokens",
       type=str,
       default="",
@@ -702,9 +722,13 @@ def _rollout_config(
       weight_sync_mode=args.weight_sync_mode,
       max_prompt_length=args.max_prompt_length,
       max_tokens_to_generate=args.max_response_length,
+      max_response_length=args.max_response_length,
       kv_cache_size=args.max_prompt_length + args.max_response_length,
-      temperature=1.0,
-      top_p=1.0,
+      temperature=args.temperature,
+      top_p=args.top_p,
+      top_k=args.top_k,
+      overlong_filter=args.overlong_filter,
+      episode_timeout=args.episode_timeout_secs,
       return_logprobs=True,
       eos_tokens=_eos_token_ids(args, tokenizer),
       partial_rollout=bool(args.in_flight_weight_updates),

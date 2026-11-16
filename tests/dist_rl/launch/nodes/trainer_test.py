@@ -15,14 +15,18 @@
 """Unit tests for the distributed RL trainer worker node."""
 
 import contextlib
+import functools
 import importlib
+import json
 import os
 from unittest import mock
 
 from absl.testing import absltest
 from jax.sharding import Mesh
+import omegaconf
 from orbax.checkpoint import v1 as ocp_v1
 from tunix.cli import config as cli_config
+from tunix.dist_rl.common import execution_target
 from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.launch.common import resolve_config
 from tunix.dist_rl.launch.nodes import node_utils
@@ -60,6 +64,10 @@ class TrainerMainTest(absltest.TestCase):
     env = {k: v for k, v in os.environ.items() if k not in _LIBRARY_ENV_VARS}
     self.enter_context(mock.patch.dict(os.environ, env, clear=True))
     self.mock_context = mock.MagicMock()
+    self.mock_context.initialize_runtime.side_effect = functools.partial(
+        node_utils.context_lib.ProcessContext.initialize_runtime,
+        self.mock_context,
+    )
     self.mock_worker_service = mock.MagicMock(spec=trainer_worker.TrainerWorker)
     self.mock_mesh = mock.MagicMock(spec=Mesh)
     self.mock_create_trainer_factory = self.enter_context(
@@ -98,6 +106,9 @@ class TrainerMainTest(absltest.TestCase):
         },
     )
 
+    self.mock_context.initialize_runtime.assert_called_once_with(
+        execution_target.JAX_TPU
+    )
     self.mock_context.jax.initialize.assert_called_once()
     self.mock_create_trainer_factory.assert_called_once()
     worker_kwargs = self.mock_trainer_worker_cls.call_args.kwargs
@@ -762,15 +773,45 @@ class MaxTextTrainerFactoryTest(absltest.TestCase):
     kwargs = self._build_kwargs(
         mock_build_cfg,
         "dist_training_config.ckpt_d2h_concurrent_gb=16",
-        (
-            "dist_training_config.maxtext_extra_flags="
-            "remat_policy=full opt_type=sgd"
-        ),
+        "dist_training_config.maxtext_extra_config.remat_policy=full",
+        "dist_training_config.maxtext_extra_config.sa_block_q=512",
+        "dist_training_config.maxtext_extra_config.packing=true",
     )
     self.assertEqual(kwargs["device_host_concurrent_gb"], 16)
     self.assertEqual(
-        kwargs["extra_flags"], ["remat_policy=full", "opt_type=sgd"]
+        kwargs["extra_flags"],
+        ["remat_policy=full", "sa_block_q=512", "packing=True"],
     )
+
+  def test_extra_config_strings_reach_maxtext_unchanged(self, *_):
+    # MaxText parses each argument with `OmegaConf.from_cli`, as YAML.
+    extra = {
+        "a": "",
+        "b": "0",
+        "c": "1e-5",
+        "d": "true",
+        "e": "On",
+        "f": "null",
+        "g": "x: y",
+        "h": "x # y",
+        "i": "two words",
+        "j": "gs://bucket/dir",
+        "plain": "custom",
+        "path_like": "a-b.c/d",
+    }
+    flags = trainer._maxtext_extra_flags(
+        _hp(
+            *_MAXTEXT_ARGV,
+            "dist_training_config.maxtext_extra_config=" + json.dumps(extra),
+        )
+    )
+    self.assertEqual(
+        omegaconf.OmegaConf.to_container(omegaconf.OmegaConf.from_cli(flags)),
+        extra,
+    )
+    # Plain words stay unquoted, like hand-written MaxText flags.
+    self.assertIn("plain=custom", flags)
+    self.assertIn("path_like=a-b.c/d", flags)
 
 
 class MaxTextOptionsTest(absltest.TestCase):
@@ -839,11 +880,11 @@ class MaxTextOptionsTest(absltest.TestCase):
     for argv, error in (
         (
             [f"{_OPT}.opt_type=sgd"],
-            "maps only adamw.*maxtext_extra_flags",
+            "maps only adamw.*maxtext_extra_config",
         ),
         (
             [f"{_OPT}.opt_chain_type=clip"],
-            "maps only clip_by_global_norm.*maxtext_extra_flags",
+            "maps only clip_by_global_norm.*maxtext_extra_config",
         ),
         ([f"{_OPT}.chain_kwargs.max_norm=null"], "needs a max_norm"),
         ([f"{_OPT}.chain_kwargs.max_norm=0"], "must be positive"),
@@ -851,6 +892,100 @@ class MaxTextOptionsTest(absltest.TestCase):
       with self.subTest(argv=argv):
         with self.assertRaisesRegex(ValueError, error):
           trainer._maxtext_adamw_options(_hp(*argv))
+
+
+class MaxTextExtraConfigTest(absltest.TestCase):
+  """Keeps the resolver's `maxtext_extra_config` check in sync with the builder.
+
+  The resolver rejects a flag for any key the trainer builds from the config.
+  Every other key `build_maxtext_config` emits is one of `_FIXED_KEYS`, which
+  have no config key and may be overridden. A key added to the builder must
+  join one of the two groups.
+  """
+
+  _FIXED_KEYS = frozenset({
+      "allow_split_physical_axes",
+      "checkpoint_storage_use_ocdbt",
+      "checkpoint_storage_use_zarr3",
+      "context_parallel_load_balance",
+      "convert_checkpoint_if_possible",
+      "dtype",
+      "enable_tensorboard",
+      "grad_dtype",
+      "init_weights_seed",
+      "override_model_config",
+      "record_internal_nn_metrics",
+      "rollout_weight_dtype",
+      "run_name",
+      "scan_layers",
+      "skip_jax_distributed_system",
+      "use_gmm_v2",
+      "use_tokamax_gmm",
+  })
+
+  def _built_keys(self) -> set[str]:
+    """Returns the keys of a MaxText config with every optional setting on."""
+    hp = _hp(
+        *_MAXTEXT_ARGV, "rl_training_config.profiler_options.profiler_steps=1"
+    )
+    pyconfig = mock.MagicMock()
+    pyconfig.__file__ = "/fake/maxtext/configs/pyconfig.py"
+    with (
+        mock.patch.object(
+            maxtext_utils,
+            "maxtext_modules",
+            return_value=(pyconfig, mock.MagicMock(), mock.MagicMock()),
+        ),
+        # The MaxText `base.yml` next to the fake `pyconfig`.
+        mock.patch.object(os.path, "exists", return_value=True),
+        mock.patch.dict(os.environ, {"ENABLE_PATHWAYS_PERSISTENCE": "1"}),
+    ):
+      maxtext_utils.build_maxtext_config(
+          model_name="qwen3-0.6b",
+          load_parameters_path="/ckpt/qwen3-0.6b/0/items",
+          padded_moe_mlp_dim=64,
+          checkpointing_options=trainer._maxtext_checkpointing_options(hp),
+          profiling_options=trainer._maxtext_profiling_options(hp),
+          mesh_context=2,
+          base_num_kv_heads=8,
+          rollout_mesh_tp=1,
+          adamw_options=trainer._maxtext_adamw_options(hp),
+          device_host_concurrent_gb=8,
+      )
+    argv = pyconfig.initialize.call_args.args[0]
+    return {arg.split("=", 1)[0] for arg in argv if "=" in arg}
+
+  def test_key_groups_match_the_builder(self):
+    built = self._built_keys()
+    # Every key the builder emits is in exactly one group, and neither group
+    # keeps a key the builder no longer emits.
+    self.assertEqual(
+        built - self._FIXED_KEYS,
+        set(resolve_config._MAXTEXT_KEYS_FROM_CONFIG),
+    )
+    self.assertLessEqual(self._FIXED_KEYS, built)
+
+  def _extra_config_args(self, keys: list[str]) -> list[str]:
+    return [
+        f"dist_training_config.maxtext_extra_config.{key}=1" for key in keys
+    ]
+
+  def test_keys_built_from_the_config_are_rejected(self):
+    from_config = sorted(self._built_keys() - self._FIXED_KEYS)
+    with self.assertRaisesRegex(
+        ValueError, "must not set MaxText keys"
+    ) as raised:
+      _hp(*_MAXTEXT_ARGV, *self._extra_config_args(from_config))
+    for key in from_config:
+      self.assertIn(f" {key} (set ", str(raised.exception))
+
+  def test_fixed_settings_are_accepted(self):
+    fixed = sorted(self._built_keys() & self._FIXED_KEYS)
+    hp = _hp(*_MAXTEXT_ARGV, *self._extra_config_args(fixed))
+    self.assertEqual(
+        hp.config_mapping("dist_training_config")["maxtext_extra_config"],
+        dict.fromkeys(fixed, 1),
+    )
 
 
 if __name__ == "__main__":

@@ -505,7 +505,7 @@ def pack_sequences(
 
   Args:
     item_iterator: Stream of lists of TrainExamples (any granularity).
-    max_token_budget: Max tokens per packed row (= max_seq_token_per_tpu).
+    max_token_budget: Max tokens per packed row (= max_seq_tokens_per_device).
     sequences_per_update: Sequences per mini-batch/update (= mini_batch_size *
       num_generations). Required: the update boundary is a mini-batch property,
       and the producer's list granularity does not carry it (a colocated

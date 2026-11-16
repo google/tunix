@@ -78,6 +78,7 @@ _LOGGED_ENV_VARS = frozenset({
     "ENABLE_PATHWAYS_PERSISTENCE",
     "LOCAL_JAX_CACHE_DIR",
     "NEW_MODEL_DESIGN",
+    "PJRT_DEVICE",
     "ROLLOUT_JAX_CACHE_GCS_DIR",
     "SAVE_JAX_CACHE",
     "SKIP_JAX_PRECOMPILE",
@@ -87,9 +88,14 @@ _LOGGED_ENV_VARS = frozenset({
     "VERIFY_WEIGHTS",
 })
 _LOGGED_ENV_PREFIXES = (
+    "CUDA_",
     "JAX_",
     "LIBTPU_",
+    "NCCL_",
+    "NVTE_",
+    "PJRT_",
     "RAIDEN_",
+    "TORCH_",
     "TPU_",
     "TUNIX_",
     "VLLM_",
@@ -135,9 +141,11 @@ LIBRARY_ENV_CONFIG_KEYS: Final[Mapping[str, str]] = types.MappingProxyType({
 
 
 def _library_env(
-    hp: resolve_config.DistHyperParameters, role: Literal["trainer", "rollout"]
+    hp: resolve_config.DistHyperParameters, role: NodeRole
 ) -> dict[str, tuple[str | None, str]]:
   """Returns `{variable: (value, config key)}`; a None value leaves it unset."""
+  if role == "inference":
+    return {}
   ws = hp.config_mapping("weight_sync_config")
   values: dict[str, str | None] = {
       "VERIFY_WEIGHTS": "true" if ws["verify_weights"] else "false",
@@ -153,7 +161,7 @@ def _library_env(
 
 
 def apply_library_env(
-    hp: resolve_config.DistHyperParameters, role: Literal["trainer", "rollout"]
+    hp: resolve_config.DistHyperParameters, role: NodeRole
 ) -> None:
   """Sets the environment variables that libraries read, from the config.
 
@@ -192,6 +200,15 @@ def apply_library_env(
   for name, (value, _) in env.items():
     if value is not None:
       os.environ[name] = value
+  role_target = {
+      "trainer": hp.cluster_targets.trainer,
+      "rollout": hp.cluster_targets.rollout,
+      "inference": hp.cluster_targets.inference,
+  }[role]
+  context_lib.ProcessContext().prepare_env(
+      role_target,
+      weight_sync_mode=hp.cluster_targets.weight_sync_mode,
+  )
 
 
 class ResolvedConfigRecord(TypedDict):

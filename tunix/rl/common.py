@@ -15,7 +15,7 @@
 
 import functools
 import inspect
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from absl import logging
 import flax
@@ -26,6 +26,7 @@ import jax.tree_util as jtu
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
 from tunix.rl import packing
+from tunix.rl import score_centering
 from tunix.sft import utils
 
 make_causal_attn_mask = utils.make_causal_attn_mask
@@ -126,6 +127,10 @@ class TrainExample:
   # to dampen positions where the trainer's recomputed log-probability
   # diverges from the rollout sampler's. ``None`` disables the correction.
   sampler_is_weights: ArrayType | None = None
+  # The rollout sampler's `[B, C, k]` top-k token ids and log probs at each
+  # completion position, used by Score Centering (arXiv:2609.20807).
+  old_topk_token_ids: ArrayType | None = None
+  old_topk_logps: ArrayType | None = None
   # `[B, P + C, num_layers, top_k]` MoE experts the rollout routed through,
   # laid out over the same `[prompt | completion]` padding as the token ids.
   # When set, a model that accepts `forced_routed_experts` replays these
@@ -205,6 +210,15 @@ def compute_kl_divergence(
   return kl
 
 
+def _sanitize_logits_f32(logits: jax.Array) -> jax.Array:
+  """Casts logits to float32, mapping NaN to -1e9 and clipping to +/-1e9."""
+  return jnp.where(
+      jnp.isnan(logits),
+      -1e9,
+      jnp.clip(logits.astype(jnp.float32), min=-1e9, max=1e9),
+  )
+
+
 def selective_log_softmax(logits: jax.Array, input_ids: jax.Array) -> jax.Array:
   """Compute the log probablity based on the input ids.
 
@@ -215,16 +229,149 @@ def selective_log_softmax(logits: jax.Array, input_ids: jax.Array) -> jax.Array:
   Returns:
     Selected log probabilities.
   """
-  logits_f32 = jnp.where(
-      jnp.isnan(logits),
-      -1e9,
-      jnp.clip(logits.astype(jnp.float32), min=-1e9, max=1e9),
-  )
+  logits_f32 = _sanitize_logits_f32(logits)
   target_logits = jnp.take_along_axis(
       logits_f32, input_ids[..., None], axis=-1
   ).squeeze(-1)
   normalizer = jax.nn.logsumexp(logits_f32, axis=-1)
   return target_logits - normalizer
+
+
+def selective_topk_log_softmax(
+    logits: jax.Array,
+    input_ids: jax.Array,
+    topk_ids: jax.Array | None = None,
+) -> tuple[jax.Array, jax.Array | None]:
+  """Like `selective_log_softmax`, also returning the `topk_ids` log probs."""
+  if topk_ids is None:
+    return selective_log_softmax(logits, input_ids), None
+  logits_f32 = _sanitize_logits_f32(logits)
+  ids = jnp.concatenate([input_ids[..., None], topk_ids], axis=-1)
+  logps = jnp.take_along_axis(logits_f32, ids, axis=-1) - jax.nn.logsumexp(
+      logits_f32, axis=-1, keepdims=True
+  )
+  return logps[..., 0], logps[..., 1:]
+
+
+def _reduce_score_centering_stats(
+    token_stats: Mapping[str, jax.Array],
+    completion_mask: jax.Array,
+    has_valid_topk: jax.Array,
+) -> dict[str, jax.Array | utils.WeightedMetric]:
+  """Reduces `[B, L]` Score Centering diagnostics over active valid tokens."""
+  valid_pos = (completion_mask > 0) & has_valid_topk
+  mask_f = valid_pos.astype(jnp.float32)
+  denom = jnp.sum(mask_f)
+  any_valid = jnp.any(valid_pos)
+
+  def _wmean(arr: jax.Array) -> utils.WeightedMetric:
+    return utils.WeightedMetric(
+        jnp.sum(arr * mask_f), denom, min_denom=1.0
+    )
+
+  stats: dict[str, jax.Array | utils.WeightedMetric] = {
+      "score_centering/head_mass_q_mean": _wmean(token_stats["head_mass_q"]),
+      "score_centering/head_mass_q_min": jnp.where(
+          any_valid,
+          jnp.min(jnp.where(valid_pos, token_stats["head_mass_q"], jnp.inf)),
+          0.0,
+      ),
+      "score_centering/head_mass_p_mean": _wmean(token_stats["head_mass_p"]),
+      "score_centering/tail_ratio_rho_mean": _wmean(
+          token_stats["tail_ratio_rho"]
+      ),
+      "score_centering/tail_ratio_rho_max": jnp.where(
+          any_valid,
+          jnp.max(jnp.where(valid_pos, token_stats["tail_ratio_rho"], 0.0)),
+          0.0,
+      ),
+      "score_centering/abs_coeff_sum_mean": _wmean(
+          token_stats["abs_coeff_sum"]
+      ),
+      "score_centering/abs_coeff_sum_max": jnp.where(
+          any_valid,
+          jnp.max(jnp.where(valid_pos, token_stats["abs_coeff_sum"], 0.0)),
+          0.0,
+      ),
+      "score_centering/tail_eps_clamped_frac": _wmean(
+          token_stats["tail_eps_clamped"]
+      ),
+      "score_centering/tv_distance_mean": _wmean(token_stats["tv_distance"]),
+  }
+  if "tail_is_clipped" in token_stats:
+    stats["score_centering/tail_is_clipped_frac"] = _wmean(
+        token_stats["tail_is_clipped"]
+    )
+  if "sampled_in_topk" in token_stats:
+    stats["score_centering/sampled_in_topk_frac"] = _wmean(
+        token_stats["sampled_in_topk"]
+    )
+  return stats
+
+
+def compute_score_centering_correction(
+    trainer_topk_logps: jax.Array,
+    sampler_topk_logps: jax.Array,
+    sampler_is: str | None,
+    sampler_is_threshold: float | None,
+    eps: float,
+    completion_mask: jax.Array | None = None,
+    has_sampler_is_weights: bool = True,
+    completion_ids: jax.Array | None = None,
+    topk_token_ids: jax.Array | None = None,
+) -> tuple[jax.Array, dict[str, jax.Array | utils.WeightedMetric]]:
+  """Score Centering correction to the policy loss (arXiv:2609.20807).
+
+  Delegates detached coefficient and diagnostic math to
+  `score_centering.compute_score_centering_coefficients` and wraps only the
+  zero-value gradient surrogate `raw - stop_gradient(raw)` in JAX.
+
+  Args:
+    trainer_topk_logps: `[B, L, K]` trainer log probs of the top-k tokens.
+    sampler_topk_logps: `[B, L, K]` sampler log probs, `-inf` for padding.
+    sampler_is: `None` or `"token"`.
+    sampler_is_threshold: The token IS clip `c`.
+    eps: Floor for the tail probability masses.
+    completion_mask: Optional `[B, L]` active token mask. When set, returned
+      diagnostics are reduced over `(completion_mask > 0) & any_valid_topk` as
+      `WeightedMetric` means/fractions and scalar min/max values.
+    has_sampler_is_weights: Whether token IS weights are active on this batch.
+    completion_ids: Optional `[B, L]` sampled token IDs for
+      `score_centering/sampled_in_topk_frac`.
+    topk_token_ids: Optional `[B, L, K]` top-k token IDs for
+      `score_centering/sampled_in_topk_frac`.
+
+  Returns:
+    The `[B, L]` zero-value gradient correction and a dict of diagnostics.
+  """
+  coeff, token_stats, has_valid_topk = (
+      score_centering.compute_score_centering_coefficients(
+          jax.lax.stop_gradient(trainer_topk_logps),
+          jax.lax.stop_gradient(sampler_topk_logps),
+          sampler_is=sampler_is,
+          sampler_is_threshold=sampler_is_threshold,
+          eps=eps,
+          has_sampler_is_weights=has_sampler_is_weights,
+          completion_ids=completion_ids,
+          topk_token_ids=topk_token_ids,
+          xp=jnp,
+      )
+  )
+  stats: dict[str, jax.Array | utils.WeightedMetric]
+  if completion_mask is not None:
+    stats = _reduce_score_centering_stats(
+        token_stats, completion_mask, has_valid_topk
+    )
+  else:
+    stats = dict(token_stats)
+  safe_trainer_logps = jnp.where(
+      jnp.isfinite(sampler_topk_logps),
+      trainer_topk_logps.astype(jnp.float32),
+      0.0,
+  )
+  # `x - sg(x)` is zero in value and has the gradient of `x`.
+  raw = jnp.sum(jax.lax.stop_gradient(coeff) * safe_trainer_logps, axis=-1)
+  return raw - jax.lax.stop_gradient(raw), stats
 
 
 # TODO(tsbao): remove this once old callsite is cleaned up.
@@ -467,6 +614,19 @@ def decode_routed_experts_jax(routed_experts: jax.Array) -> jax.Array:
   return arr.astype(jnp.int32)
 
 
+def _with_topk(
+    result: jax.Array | tuple[jax.Array, jax.Array],
+    topk_logps: jax.Array | None,
+    stop_gradient: bool,
+) -> jax.Array | tuple[jax.Array | tuple[jax.Array, jax.Array], jax.Array]:
+  """Pairs a `compute_per_token_logps` result with its optional top-k logps."""
+  if topk_logps is None:
+    return result
+  if stop_gradient:
+    topk_logps = jax.lax.stop_gradient(topk_logps)
+  return result, topk_logps
+
+
 @functools.partial(
     jax.jit,
     static_argnames=(
@@ -494,7 +654,12 @@ def compute_per_token_logps(
     chunk_size: int = 0,
     routed_experts: jax.Array | None = None,
     token_mask: jax.Array | None = None,
-) -> jax.Array | tuple[jax.Array, jax.Array]:
+    topk_token_ids: jax.Array | None = None,
+) -> (
+    jax.Array
+    | tuple[jax.Array, jax.Array]
+    | tuple[jax.Array | tuple[jax.Array, jax.Array], jax.Array]
+):
   """Computes the per-token log probabilities.
 
   Args:
@@ -525,6 +690,8 @@ def compute_per_token_logps(
       replays this routing instead of re-running its router. Ignored by models
       that do not accept the kwarg.
     token_mask: Optional explicit valid positions for prompt plus completion.
+    topk_token_ids: Optional `[B, L, K]` token ids (e.g. the rollout sampler's
+      top-k) whose log probs are also returned. Not supported with packing.
 
   Returns:
     per_token_logps: jax.Array token-level logarithmic values.
@@ -536,6 +703,8 @@ def compute_per_token_logps(
     entropy: optional per-token entropy jax.Array of shape matches
     per_token_logps,
       returned if return_entropy is True.
+    With `topk_token_ids`, returns `(result, topk_logps)`: the value above and
+    the `[B, L, K]` log probs of `topk_token_ids`.
   """
   model = nnx.merge(graphdef, state)
 
@@ -606,16 +775,20 @@ def compute_per_token_logps(
     logits_to_keep = completion_tokens.shape[1]
 
   input_tokens_to_keep = input_tokens[:, -logits_to_keep:]
+  if topk_token_ids is not None and segment_ids is not None:
+    raise ValueError("topk_token_ids is not supported with sequence packing.")
 
   if chunk_size > 0:
     hidden_state = outputs[:, -logits_to_keep - 1 : -1, :]
-    out = compute_chunked_logps(
+    out, topk_logps = compute_chunked_logps(
         model,
         hidden_state,
         input_tokens_to_keep,
         temperature,
         chunk_size,
         return_entropy,
+        topk_token_ids=topk_token_ids,
+        always_return_topk_tuple=True,
     )
     if return_entropy:
       per_token_logps, per_token_entropy = out
@@ -637,14 +810,20 @@ def compute_per_token_logps(
         per_token_entropy = jax.lax.stop_gradient(per_token_entropy)  # pyrefly: ignore[unbound-name]
 
     if return_entropy:
-      return per_token_logps, per_token_entropy  # pyrefly: ignore[unbound-name]
-    return per_token_logps
+      return _with_topk(
+          (per_token_logps, per_token_entropy),  # pyrefly: ignore[unbound-name]
+          topk_logps,
+          stop_gradient,
+      )
+    return _with_topk(per_token_logps, topk_logps, stop_gradient)
   else:
     logits = outputs[:, -logits_to_keep - 1 : -1, :]
     if temperature != 0.0 and temperature != 1.0:
       logits /= temperature
 
-    per_token_logps = selective_log_softmax(logits, input_tokens_to_keep)
+    per_token_logps, topk_logps = selective_topk_log_softmax(
+        logits, input_tokens_to_keep, topk_token_ids
+    )
 
     if segment_ids is not None:
       # Pad the front with 0.0 to make shape back to [Batch, FullSeqLen]. This
@@ -660,8 +839,8 @@ def compute_per_token_logps(
 
     if return_entropy:
       entropy = compute_entropy_from_logits(logits)
-      return per_token_logps, entropy
-    return per_token_logps
+      return _with_topk((per_token_logps, entropy), topk_logps, stop_gradient)
+    return _with_topk(per_token_logps, topk_logps, stop_gradient)
 
 
 @flax.struct.dataclass
@@ -1275,6 +1454,8 @@ def compute_chunked_logps(
     temperature,
     chunk_size,
     return_entropy,
+    topk_token_ids: jax.Array | None = None,
+    always_return_topk_tuple: bool = False,
 ):
   """Computes per-token log probabilities in sequence chunks to save VRAM.
 
@@ -1283,6 +1464,8 @@ def compute_chunked_logps(
       hidden_states: [Batch, SeqLen, HiddenDim]
       target_ids:    [Batch, SeqLen]
       chunk_size:    Number of tokens to process at a time per sequence.
+      topk_token_ids: Optional [Batch, SeqLen, K] ids whose log probs are also
+        returned, as in `compute_per_token_logps`.
 
   Returns:
      per_token_logps: [Batch, SeqLen]
@@ -1295,6 +1478,8 @@ def compute_chunked_logps(
     # Pad sequence dimension (axis 1)
     hidden_states = jnp.pad(hidden_states, ((0, 0), (0, pad_len), (0, 0)))
     target_ids = jnp.pad(target_ids, ((0, 0), (0, pad_len)))
+    if topk_token_ids is not None:
+      topk_token_ids = jnp.pad(topk_token_ids, ((0, 0), (0, pad_len), (0, 0)))
 
   padded_seq_len = seq_len + pad_len
   num_chunks = padded_seq_len // chunk_size
@@ -1308,10 +1493,15 @@ def compute_chunked_logps(
   # 3. Swap B, T axes to make it time-major for jax.lax.scan
   hs_scannable = jnp.swapaxes(hs_reshaped, 0, 1)
   ids_scannable = jnp.swapaxes(ids_reshaped, 0, 1)
+  topk_scannable = None
+  if topk_token_ids is not None:
+    topk_scannable = jnp.swapaxes(
+        topk_token_ids.reshape(batch_size, num_chunks, chunk_size, -1), 0, 1
+    )
 
   @nnx.remat
   def logp_step(carry, xs):
-    hs_chunk, ids_chunk = xs
+    hs_chunk, ids_chunk, topk_chunk = xs
     hs_chunk = jnp.where(jnp.isfinite(hs_chunk), hs_chunk, 0.0)
 
     # Project to vocabulary for just this chunk
@@ -1321,17 +1511,19 @@ def compute_chunked_logps(
     if temperature != 0.0 and temperature != 1.0:
       logits_chunk /= temperature
 
-    logps_chunk = selective_log_softmax(logits_chunk, ids_chunk)
+    logps_chunk, topk_logps_chunk = selective_topk_log_softmax(
+        logits_chunk, ids_chunk, topk_chunk
+    )
 
     if return_entropy:
       entropy_chunk = compute_entropy_from_logits(logits_chunk)
-      return None, (logps_chunk, entropy_chunk)
+      return None, ((logps_chunk, entropy_chunk), topk_logps_chunk)
     else:
-      return None, logps_chunk
+      return None, (logps_chunk, topk_logps_chunk)
 
   # 4. Scan over the NumChunks dimension
-  _, scanned_out = jax.lax.scan(
-      logp_step, init=None, xs=(hs_scannable, ids_scannable)
+  _, (scanned_out, topk_scanned) = jax.lax.scan(
+      logp_step, init=None, xs=(hs_scannable, ids_scannable, topk_scannable)
   )
 
   if return_entropy:
@@ -1346,7 +1538,7 @@ def compute_chunked_logps(
     per_token_entropy = entropy_reshaped.reshape(batch_size, padded_seq_len)[
         :, :seq_len
     ]
-    return per_token_logps, per_token_entropy
+    result = per_token_logps, per_token_entropy
   else:
     logps_chunked = scanned_out
     # 5. Swap back to batch-major and flatten the sequence dimension
@@ -1355,7 +1547,14 @@ def compute_chunked_logps(
     per_token_logps = logps_reshaped.reshape(batch_size, padded_seq_len)[
         :, :seq_len
     ]
-    return per_token_logps
+    result = per_token_logps
+
+  if topk_scanned is None:
+    return (result, None) if always_return_topk_tuple else result
+  topk_logps = jnp.swapaxes(topk_scanned, 0, 1).reshape(
+      batch_size, padded_seq_len, -1
+  )[:, :seq_len]
+  return result, topk_logps
 
 
 @nnx.jit(static_argnames=("pad_id", "eos_id", "stop_gradient"))
@@ -1922,6 +2121,21 @@ def global_weighted_mean(values: Iterable[utils.WeightedMetric]) -> float:
   covariance/variance reduction for Pearson correlation metrics.
   """
   return utils.weighted_metric_mean(values)
+
+
+SCORE_CENTERING_METRICS: Mapping[str, Callable[[Any], Any]] = {
+    "score_centering/head_mass_q_mean": global_weighted_mean,
+    "score_centering/head_mass_q_min": np.min,
+    "score_centering/head_mass_p_mean": global_weighted_mean,
+    "score_centering/tail_ratio_rho_mean": global_weighted_mean,
+    "score_centering/tail_ratio_rho_max": np.max,
+    "score_centering/abs_coeff_sum_mean": global_weighted_mean,
+    "score_centering/abs_coeff_sum_max": np.max,
+    "score_centering/tail_eps_clamped_frac": global_weighted_mean,
+    "score_centering/tv_distance_mean": global_weighted_mean,
+    "score_centering/tail_is_clipped_frac": global_weighted_mean,
+    "score_centering/sampled_in_topk_frac": global_weighted_mean,
+}
 
 
 def compute_entropy_from_logits(logits: jax.Array) -> jax.Array:

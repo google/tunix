@@ -38,6 +38,8 @@ _INIT_METADATA_KEYS = (
     "trajectory_store_config",
     "drain_timeout_s",
     "partial_rollout",
+    "routed_experts_shape",
+    "staging_max_bytes",
 )
 
 

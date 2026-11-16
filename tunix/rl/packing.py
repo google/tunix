@@ -28,7 +28,7 @@ wakes only the active worker slots (can also be overridden programmatically via
 from __future__ import annotations
 
 import dataclasses
-from typing import Iterable, Literal, Mapping, Sequence, overload
+from typing import Iterable, Mapping, Sequence, overload
 
 import numpy as np
 from numpy import typing as npt
@@ -43,10 +43,15 @@ except ModuleNotFoundError:
 
 ROUTED_EXPERTS_ENCODE_MODES = common_datatypes.ROUTED_EXPERTS_ENCODE_MODES
 RoutedExpertsEncodeMode = common_datatypes.RoutedExpertsEncodeMode
-RoutedExpertsWireEncoding = Literal["int16", "uint8", "uint10"]
+RoutedExpertsWireEncoding = common_datatypes.RoutedExpertsWireEncoding
 validate_routed_experts_encode_config = (
     common_configs.validate_routed_experts_encode_config
 )
+resolve_routed_experts_wire_encoding = (
+    common_datatypes.resolve_routed_experts_wire_encoding
+)
+routed_experts_bytes_per_token = common_datatypes.routed_experts_bytes_per_token
+uint10_trailing_shape = common_datatypes.uint10_trailing_shape
 _ROUTED_EXPERTS_TIER_ORDER: Mapping[RoutedExpertsWireEncoding, int] = {
     "uint8": 0,
     "uint10": 1,
@@ -118,13 +123,6 @@ def unpad_prompt(padded_tokens: npt.ArrayLike, length: int) -> np.ndarray:
   if length <= 0:
     return np.zeros(0, dtype=np.int32)
   return arr[-int(length) :]
-
-
-def uint10_trailing_shape(top_k: int) -> tuple[int, int]:
-  """Returns the 2D trailing shape `(G, 5)` or `(1, ceil(10 * K / 8))` for `uint10`."""
-  if top_k % 4 == 0:
-    return (top_k // 4, 5)
-  return (1, (10 * top_k + 7) // 8)
 
 
 def uint10_logical_k(d_penult: int, d_last: int) -> int | None:
@@ -386,16 +384,11 @@ def encode_routed_experts(
         f"routed_experts contains expert ID {max_val} >= num_experts"
         f" ({int(num_experts)})."
     )
-  effective_max = (
-      max(max_val, int(num_experts) - 1) if num_experts is not None else max_val
-  )
   if mode == "auto":
-    if effective_max <= 254:
-      target = "uint8"
-    elif effective_max <= 1022:
-      target = "uint10"
-    else:
-      target = "int16"
+    target = resolve_routed_experts_wire_encoding(
+        "auto",
+        int(num_experts) if num_experts is not None else max(1, max_val + 1),
+    )
   elif mode in ("uint8", "uint10", "int16"):
     target = mode
   else:

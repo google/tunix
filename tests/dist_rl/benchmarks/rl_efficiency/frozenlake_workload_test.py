@@ -15,7 +15,7 @@
 """CPU-only tests of the FrozenLake benchmark workload; no TPU/JAX/pytest.
 
 They read the YAML configs with PyYAML. Run directly:
-python3 tests/dist_rl/examples/frozenlake_dist/frozenlake_benchmark_test.py
+python3 tests/dist_rl/benchmarks/rl_efficiency/frozenlake_workload_test.py
 """
 
 import argparse
@@ -43,10 +43,13 @@ def load_module(path):
 
 
 benchmark = load_module(
-    ROOT / "tunix/dist_rl/examples/rl_efficiency_benchmark/benchmark.py"
+    ROOT / "tunix/dist_rl/benchmarks/rl_efficiency/benchmark.py"
 )
 workload = benchmark.load_workload()
-RECIPE = Path(workload.__file__).parent
+EXAMPLE = ROOT / "tunix/dist_rl/examples/frozenlake_dist"
+RECIPE = (
+    ROOT / "tunix/dist_rl/examples/recipes/benchmark_frozenlake_gemma4_e2b.sh"
+)
 LAUNCH = ROOT / "tunix/dist_rl/launch"
 _ROLES = (
     "actor_model_config",
@@ -79,7 +82,7 @@ def _flatten(mapping, prefix=""):
 def yaml_defaults():
   """Returns the flattened `base_dist_config.yaml` + `frozenlake.yaml`."""
   base = yaml.safe_load((LAUNCH / "common/base_dist_config.yaml").read_text())
-  task = yaml.safe_load((RECIPE / "frozenlake.yaml").read_text())
+  task = yaml.safe_load((EXAMPLE / "frozenlake.yaml").read_text())
   config = _deep_merge(base, task)
   # Role configs inherit the task's `model_config`.
   for role in _ROLES:
@@ -97,15 +100,15 @@ def parse_overrides(args):
 
 
 def recipe_overrides():
-  """Returns the `section.key=value` arguments of run_gemma4_e2b.sh."""
-  text = (RECIPE / "run_gemma4_e2b.sh").read_text()
+  """Returns the `section.key=value` arguments of the recipe script."""
+  text = RECIPE.read_text()
   args = re.findall(r"^\s+([a-z_][a-z0-9_.]*=\S*?)\s*\\$", text, re.MULTILINE)
   # Fails loud if a formatting change makes the pattern above miss one.
   assignments = re.findall(r"^\s+[a-z_][a-z0-9_.]*=", text, re.MULTILINE)
   if len(args) != len(assignments):
     raise ValueError(
         f"Parsed {len(args)} of the {len(assignments)} `section.key=value`"
-        " lines in run_gemma4_e2b.sh; keep one override per line, with no"
+        f" lines in {RECIPE.name}; keep one override per line, with no"
         " spaces in its value, each ending in ` \\`."
     )
   return parse_overrides(args)
@@ -156,7 +159,7 @@ class FrozenLakeBenchmarkTest(unittest.TestCase):
   def dist_settings(self):
     """Returns the overrides, the environment, and the effective settings."""
     command, env = workload.dist_launch(self.w, self.path, self.path)
-    self.assertEqual(command[:2], ["bash", str(RECIPE / "run_gemma4_e2b.sh")])
+    self.assertEqual(command[:2], ["bash", str(RECIPE)])
     overrides = parse_overrides(command[2:])
     explicit = {**recipe_overrides(), **overrides}
     settings = {**yaml_defaults(), **explicit}
@@ -404,9 +407,7 @@ class FrozenLakeBenchmarkTest(unittest.TestCase):
       manifests[mode] = json.loads((output / "manifest.json").read_text())
     dist, agentic = manifests["dist"], manifests["agentic"]
     self.assertEqual(dist["training_contract"], agentic["training_contract"])
-    self.assertEqual(
-        dist["command"][:2], ["bash", str(RECIPE / "run_gemma4_e2b.sh")]
-    )
+    self.assertEqual(dist["command"][:2], ["bash", str(RECIPE)])
     self.assertEqual(
         agentic["command"][:3], [sys.executable, "-m", workload.MODULE]
     )

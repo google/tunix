@@ -12,20 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Dry-runs the FrozenLake `launcher.sh` and `run_gemma4_e2b.sh`.
+"""Dry-runs the FrozenLake `launcher.sh`.
 
-`run_gemma4_e2b.sh` is also dry-run with the benchmark's overrides
-(`frozenlake_benchmark.dist_launch`).
+`recipes/recipes_test.py` checks the Gemma4 E2B recipe layered on it.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import pathlib
-import types
 
 from absl.testing import absltest
-from absl.testing import parameterized
 from tunix.cli import config as cli_config
 from tunix.dist_rl.launch.common import launcher_testing
 from tunix.dist_rl.launch.common import resolve_config
@@ -45,43 +41,12 @@ _QWEN3 = launcher_testing.Expected(
     rollout_mesh=(1, 4),
     model_id="Qwen/Qwen3-8B",
 )
-_GEMMA4 = launcher_testing.Expected(
-    name="gemma4_e2b",
-    script="frozenlake_dist/run_gemma4_e2b.sh",
-    example="frozenlake_dist",
-    module="frozenlake",
-    target="local",
-    batch_size=64,
-    mini_batch_size=64,
-    num_generations=8,
-    max_steps=450,
-    actor_mesh=(2, 1),
-    rollout_mesh=(1, 2),
-    model_id="google/gemma-4-E2B-it",
-)
-
-
-def _load_benchmark_workload() -> types.ModuleType:
-  """Loads `frozenlake_benchmark.py` by path, as the benchmark harness does."""
-  path = (
-      launcher_testing.EXAMPLES_DIR / "frozenlake_dist/frozenlake_benchmark.py"
-  )
-  spec = importlib.util.spec_from_file_location("frozenlake_benchmark", path)
-  assert spec is not None and spec.loader is not None
-  module = importlib.util.module_from_spec(spec)
-  spec.loader.exec_module(module)
-  return module
 
 
 class LaunchersTest(launcher_testing.LauncherTestCase):
 
-  @parameterized.named_parameters(
-      (expected.name, expected) for expected in (_QWEN3, _GEMMA4)
-  )
-  def test_recipe_keeps_the_previous_launcher_settings(
-      self, expected: launcher_testing.Expected
-  ):
-    run, hp = self.assert_launcher(expected)
+  def test_keeps_the_previous_launcher_settings(self):
+    run, hp = self.assert_launcher(_QWEN3)
     # `agentic_grpo_config.beta: 0.0`: no reference inference worker.
     self.assertNotIn("Inference command:", run.stdout)
     self.assertFalse(hp.config_mapping("cluster_config")["run_inference_node"])
@@ -164,7 +129,7 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
     batch_config = orchestrator.build_batch_config(hp, pad_id=0, eos_id=1)
     self.assertEqual(batch_config.max_prompt_length, 2048)
     self.assertEqual(batch_config.max_response_length, 2048)
-    self.assertIsNone(batch_config.max_seq_token_per_tpu)
+    self.assertIsNone(batch_config.max_seq_tokens_per_device)
     options = orchestrator.build_metrics_logging_options(hp)
     assert options is not None  # Narrows the type for pytype.
     self.assertEqual(options.project_name, "tunix-frozenlake")
@@ -197,38 +162,12 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
     cluster = hp.config_mapping("cluster_config")
     self.assertTrue(cluster["artifact_root"].endswith("/artifacts/frozenlake"))
     local = cluster["local"]
-    self.assertEqual(local["trainer_tpu_chips"], "0,1,2,3")
-    self.assertEqual(local["rollout_tpu_chips"], "4,5,6,7")
+    self.assertEqual(local["trainer_devices"], "0,1,2,3")
+    self.assertEqual(local["rollout_devices"], "4,5,6,7")
     self.assertEqual(local["tpu_chips_per_host_bounds"], "1,4,1")
     self.assertEqual(local["tpu_host_bounds"], "1,1,1")
     batch_config = orchestrator.build_batch_config(hp, pad_id=0, eos_id=1)
     self.assertEqual(batch_config.num_data_shards, 1)
-
-  def test_gemma4_e2b(self):
-    _, hp = self.assert_launcher(_GEMMA4)
-    for role in ("actor_model_config", "rollout_model_config"):
-      self.assertEqual(hp.config_mapping(role)["model_name"], "gemma-4-e2b")
-    rl_train = hp.config_mapping("rl_training_config")
-    self.assertEqual(rl_train["train_micro_batch_size"], 2)
-    self.assertEqual(rl_train["compute_logps_micro_batch_size"], 2)
-    self.assertEqual(rl_train["compute_logps_chunk_size"], 2048)
-    self.assertEqual(
-        hp.config_mapping("agentic_grpo_config")["max_concurrency"], 512
-    )
-    cluster = hp.config_mapping("cluster_config")
-    self.assertTrue(
-        cluster["artifact_root"].endswith(
-            "/artifacts/gemma4_e2b_dist_frozenlake"
-        )
-    )
-    local = cluster["local"]
-    self.assertEqual(local["trainer_tpu_chips"], "0,1")
-    self.assertEqual(local["rollout_tpu_chips"], "2,3")
-    self.assertEqual(local["tpu_chips_per_host_bounds"], "1,2,1")
-    batch_config = orchestrator.build_batch_config(hp, pad_id=0, eos_id=1)
-    self.assertEqual(batch_config.train_micro_batch_size, 2)
-    # The trainer's FSDP 2 shards each batch two ways.
-    self.assertEqual(batch_config.num_data_shards, 2)
 
   def test_rpc_deadline_follows_the_episode_timeout(self):
     # As in the previous launcher: at least 1800s, longer when the weight-sync
@@ -244,64 +183,21 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
 
   def test_user_args_override_launcher_values(self):
     run = self.dry_run(
-        _GEMMA4.script,
+        _QWEN3.script,
         "rl_training_config.checkpoint_root_directory=/tmp/frozenlake_ckpt",
-        "cluster_config.local.trainer_tpu_chips=4,5",
+        "cluster_config.local.trainer_devices=4,5,6,7",
+        "cluster_config.local.rollout_devices=0,1,2,3",
     )
     config = run.resolve().config
     self.assertEqual(
         config["rl_training_config"]["checkpoint_root_directory"],
         "/tmp/frozenlake_ckpt",
     )
+    local = config["cluster_config"]["local"]
     self.assertEqual(
-        config["cluster_config"]["local"]["trainer_tpu_chips"], "4,5"
+        (local["trainer_devices"], local["rollout_devices"]),
+        ("4,5,6,7", "0,1,2,3"),
     )
-
-  def test_benchmark_launch_resolves(self):
-    workload = _load_benchmark_workload()
-    output = pathlib.Path(self.create_tempdir().full_path)
-    model_dir = output / "model"
-    command, env = workload.dist_launch(workload.DEFAULTS, output, model_dir)
-    self.assertEqual(
-        pathlib.Path(command[1]).resolve(),
-        (launcher_testing.EXAMPLES_DIR / _GEMMA4.script).resolve(),
-    )
-    # `launch.sh` would reject the old launchers' environment variables.
-    self.assertEqual(env, {"LOG_ROOT": str(output)})
-    hp = self.dry_run(_GEMMA4.script, *command[2:]).resolve()
-    config = hp.config
-    cluster = config["cluster_config"]
-    self.assertEqual(
-        cluster["orchestrator_main"], f"{workload.MODULE}.dist_main"
-    )
-    runtime = "tunix.dist_rl.examples.rl_efficiency_benchmark.runtime"
-    self.assertEqual(cluster["trainer_main"], f"{runtime}.trainer_main")
-    self.assertEqual(cluster["rollout_main"], f"{runtime}.rollout_main")
-    self.assertEqual(
-        config["tokenizer_config"]["tokenizer_path"], str(model_dir)
-    )
-    for role in ("actor_model_config", "rollout_model_config"):
-      self.assertEqual(config[role]["model_download_path"], str(model_dir))
-      self.assertEqual(config[role]["dtype"], "bfloat16")
-      self.assertEqual(config[role]["load_dtype"], "float32")
-    rl_train = config["rl_training_config"]
-    self.assertEqual(
-        rl_train["checkpointing_options"]["save_interval_steps"], 0
-    )
-    # No metrics backends and no trajectory logs.
-    self.assertIsNone(rl_train["metrics_logging_options"])
-    self.assertIsNone(orchestrator.build_metrics_logging_options(hp))
-    self.assertEqual(config["dist_training_config"]["trajectory_log_dir"], "")
-    self.assertEqual(
-        config["env_kwargs"]["max_steps"],
-        config["agentic_grpo_config"]["max_turns"],
-    )
-    vllm = config["vllm_config"]
-    self.assertEqual(
-        (vllm["max_num_seqs"], vllm["max_num_batched_tokens"]), (32, 8192)
-    )
-    self.assertEqual(vllm["max_model_len"], 2048 + 2048 + 256)
-    self.assertEqual(config["data_config"]["limit"], 150 * 64)
 
 
 if __name__ == "__main__":

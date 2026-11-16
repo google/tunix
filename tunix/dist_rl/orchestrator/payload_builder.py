@@ -100,6 +100,8 @@ def _extract_old_logps(
   """Extracts old_per_token_logps from TrajectoryItem."""
   old_lp = item.traj.get("old_logprobs")
   if old_lp is None:
+    if completion_len == 0:
+      return np.zeros(0, dtype=np.float32)
     return None
   old_lp = np.asarray(old_lp, dtype=np.float32).reshape(-1)
   if len(old_lp) != completion_len:
@@ -215,6 +217,9 @@ def create_trainer_payloads(
                 len(p_arr) + len(c_arr),
                 encode_mode=algo_config.routed_experts_encode_mode,
                 num_experts=algo_config.routed_experts_num_experts,
+            ),
+            routed_experts_ref=(
+                item.routed_experts_ref if valid_mask[i] else None
             ),
         )
     )

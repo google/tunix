@@ -23,7 +23,7 @@ tensors (`routed_experts`) without model weight loading or XLA compilation.
 bash tunix/dist_rl/benchmarks/data_plane/launcher.sh \
   batch_size=2 \
   rl_training_config.mini_batch_size=2 \
-  rl_training_config.max_seq_token_per_tpu=4096 \
+  rl_training_config.max_seq_tokens_per_device=4096 \
   rollout_config.total_generation_steps=2048
 ```
 

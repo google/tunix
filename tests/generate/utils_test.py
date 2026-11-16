@@ -197,6 +197,30 @@ class UtilsTest(parameterized.TestCase):
         [],
     )
 
+  def test_topk_logprobs_sorts_truncates_and_pads(self):
+    # vLLM lists the sampled token first; here it is outside the top-2 at
+    # position 0, position 1 has fewer than 2 candidates, and position 2 breaks
+    # equal-logprob ties deterministically by ascending token id.
+    logprobs = [
+        {5: Logprob(-3.0), 7: Logprob(-0.1), 8: Logprob(-1.5)},
+        {6: Logprob(-0.2)},
+        {9: Logprob(-0.5), 3: Logprob(-0.5), 4: Logprob(-0.5)},
+    ]
+    ids, logps = utils.get_topk_logprobs_from_vllm_output(logprobs, 2)
+    self.assertEqual((ids.dtype, logps.dtype), (np.int32, np.float32))
+    np.testing.assert_array_equal(ids, [[7, 8], [6, 0], [3, 4]])
+    np.testing.assert_allclose(
+        logps, [[-0.1, -1.5], [-0.2, -np.inf], [-0.5, -0.5]]
+    )
+    for empty in (None, []):
+      empty_ids, empty_logps = utils.get_topk_logprobs_from_vllm_output(
+          empty, 3
+      )
+      self.assertEqual(empty_ids.shape, (0, 3))
+      self.assertEqual(empty_logps.shape, (0, 3))
+    with self.assertRaisesRegex(ValueError, "Missing vLLM logprobs"):
+      utils.get_topk_logprobs_from_vllm_output([None], 2)
+
   def test_transfer_state_with_mappings_tranpose_and_sharding_device(self):
     device_count = len(jax.devices())
     if device_count < 2 or device_count % 2 != 0:
