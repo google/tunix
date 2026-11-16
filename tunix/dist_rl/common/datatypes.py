@@ -213,6 +213,18 @@ class GroupOrder(enum.Enum):
   PROMPT_ARRIVAL = "prompt_arrival"
 
 
+class DropReason(enum.Enum):
+  """Why a complete trajectory group was dropped instead of trained on.
+
+  Attributes:
+    STALE: The group's rollouts fall outside the policy-version window.
+    TIED_REWARDS: Dynamic sampling found the group's rewards tied.
+  """
+
+  STALE = "stale"
+  TIED_REWARDS = "tied_rewards"
+
+
 @dataclasses.dataclass(kw_only=True)
 class HealthReport:
   """A snapshot of a worker's health and readiness state.

@@ -159,8 +159,6 @@ def _generation_metrics(
 
 # Rollouts named per step in the `[rollout] ... slowest` log line.
 _NUM_SLOWEST_ROLLOUTS_LOGGED = 3
-# Drop reason of the groups `algo_config.dynamic_sampling` filters out.
-_TIED_REWARDS_DROP_REASON = "tied_rewards"
 
 # Trajectory metadata that `_score_group` does not forward to reward functions:
 # keys it already passes explicitly, plus orchestration plumbing that the engine
@@ -1053,8 +1051,8 @@ class StandardRLProgram(RLProgram):
   ) -> None:
     """Drops a tied-reward group so a replacement prompt can be dispatched.
 
-    The group is recorded with `raw_q`'s filtered groups, so it frees its
-    dispatch slot and is counted like a group dropped for staleness.
+    The group is recorded with `raw_q`'s filtered groups and frees its dispatch
+    slot, so it is handled and counted like a group dropped for staleness.
 
     Args:
       group: Raw trajectory items of the dropped prompt group.
@@ -1065,10 +1063,13 @@ class StandardRLProgram(RLProgram):
     """
     logging.info(
         "[pipeline] DROP reason=%s prompt_id=%s",
-        _TIED_REWARDS_DROP_REASON,
+        datatypes.DropReason.TIED_REWARDS.value,
         group[0].prompt_id,
     )
-    await self.raw_q.add_filtered_group(group, reason=_TIED_REWARDS_DROP_REASON)
+    await self.raw_q.add_filtered_group(
+        group, reason=datatypes.DropReason.TIED_REWARDS
+    )
+    self._on_raw_group_filtered(group)
     self._consecutive_tied_groups += 1
     limit = self.algo_config.max_consecutive_filtered_groups
     if limit is not None and self._consecutive_tied_groups >= limit:
@@ -2009,7 +2010,8 @@ class StandardRLProgram(RLProgram):
               "rollout/tied_rewards_dropped_groups_count",
               float(
                   trajectory_queue_manager.count_filtered_groups(
-                      filtered_groups, reason=_TIED_REWARDS_DROP_REASON
+                      filtered_groups,
+                      reason=datatypes.DropReason.TIED_REWARDS,
                   )
               ),
               current_step,

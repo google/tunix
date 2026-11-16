@@ -46,19 +46,28 @@ GroupOrder = datatypes.GroupOrder
 GroupFn = group_queue_manager.GroupFn
 FilterFn = group_queue_manager.FilterFn
 
-# `TrajectoryItem.metadata` key naming why a filtered group was dropped.
+DropReason = datatypes.DropReason
+
+# `TrajectoryItem.metadata` key holding the `DropReason` value of a filtered
+# group.
 DROP_REASON_KEY = "drop_reason"
-# Drop reason of groups outside the policy-version window.
-STALE_DROP_REASON = "stale"
+
+
+def _set_drop_reason(
+    group: Sequence[TrajectoryItem], reason: DropReason
+) -> None:
+  """Stores `reason` under `DROP_REASON_KEY` in each item's metadata."""
+  for item in group:
+    item.metadata[DROP_REASON_KEY] = reason.value
 
 
 def count_filtered_groups(
-    filtered_groups: Sequence[Sequence[TrajectoryItem]], *, reason: str
+    filtered_groups: Sequence[Sequence[TrajectoryItem]], *, reason: DropReason
 ) -> int:
   """Returns how many of `filtered_groups` were dropped for `reason`."""
   # Groups dropped by a caller-supplied `filter_fn` carry no reason.
   return sum(
-      group[0].metadata.get(DROP_REASON_KEY) == reason
+      group[0].metadata.get(DROP_REASON_KEY) == reason.value
       for group in filtered_groups
   )
 
@@ -237,8 +246,7 @@ class TrajectoryQueueManager(
             policy_version_fn=policy_version_fn,
             span_limit=span_limit,
         ):
-          for item in group:
-            item.metadata[DROP_REASON_KEY] = STALE_DROP_REASON
+          _set_drop_reason(group, DropReason.STALE)
           return [], list(group)
         if filter_fn is not None:
           res = filter_fn(group)
@@ -295,24 +303,22 @@ class TrajectoryQueueManager(
     return await super().get_batch(batch_size=actual_batch_size)
 
   async def add_filtered_group(
-      self, group: list[TrajectoryItem], *, reason: str
+      self, group: list[TrajectoryItem], *, reason: DropReason
   ) -> None:
     """Records a group dropped after it left the queue.
 
-    The group joins the groups dropped by the queue's own filter: it is
-    returned by `get_filtered_groups` and reported to `on_group_filtered`.
+    The group joins the groups dropped by the queue's own filter and is
+    returned by `get_filtered_groups`. `on_group_filtered` is not invoked; the
+    caller that dropped the group handles its side effects.
 
     Args:
       group: The dropped trajectory group.
-      reason: Why the group was dropped, stored under `DROP_REASON_KEY` in each
-        item's metadata.
+      reason: Why the group was dropped; its value is stored under
+        `DROP_REASON_KEY` in each item's metadata.
     """
-    for item in group:
-      item.metadata[DROP_REASON_KEY] = reason
+    _set_drop_reason(group, reason)
     async with self._lock:
       self._filtered_groups.append(group)
-    if self.on_group_filtered is not None:
-      self.on_group_filtered(group)
 
   def commit(self, step: int, groups: Sequence[Any] | None = None) -> None:
     """Commits in-flight groups after a successful global step boundary."""

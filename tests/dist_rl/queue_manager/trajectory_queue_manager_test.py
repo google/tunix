@@ -268,21 +268,24 @@ class QueueManagerTest(absltest.TestCase):
           _create_item("g_tied", group_index=1, policy_version=5),
       ]
 
-      await manager.add_filtered_group(tied, reason="tied_rewards")
+      await manager.add_filtered_group(
+          tied, reason=datatypes.DropReason.TIED_REWARDS
+      )
 
-      self.assertEqual(dropped_groups, [stale, tied])
+      # Only the queue's own filter reports to `on_group_filtered`.
+      self.assertEqual(dropped_groups, [stale])
       filtered = await manager.get_filtered_groups()
       self.assertEqual(filtered, [stale, tied])
       self.assertEqual(manager.filtered_groups_count, 0)
       self.assertEqual(
           trajectory_queue_manager.count_filtered_groups(
-              filtered, reason=trajectory_queue_manager.STALE_DROP_REASON
+              filtered, reason=datatypes.DropReason.STALE
           ),
           1,
       )
       self.assertEqual(
           trajectory_queue_manager.count_filtered_groups(
-              filtered, reason="tied_rewards"
+              filtered, reason=datatypes.DropReason.TIED_REWARDS
           ),
           1,
       )
