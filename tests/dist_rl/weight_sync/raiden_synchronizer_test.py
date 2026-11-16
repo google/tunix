@@ -1503,6 +1503,60 @@ class RaidenSynchronizerTest(absltest.TestCase):
         ],
     )
 
+  def test_resolve_device_host_keys_uses_logical_task_id(self):
+    # Single-controller Pathways IFRT: every device reports `process_index` 0,
+    # and only `logical_task_id` tells the hosts of a slice apart.
+    fake_devices = [
+        types.SimpleNamespace(
+            id=idx,
+            platform="tpu",
+            process_index=0,
+            slice_index=idx // 4,
+            logical_task_id=(idx % 2),
+        )
+        for idx in range(8)
+    ]
+    with mock.patch.object(
+        raiden_synchronizer.mesh,
+        "device_host_key",
+        return_value=(0, 0),
+    ):
+      self.assertEqual(
+          raiden_synchronizer._resolve_device_host_keys(fake_devices),
+          [(idx // 4, idx % 2) for idx in range(8)],
+      )
+
+  def test_work_unit_metadata_use_ffi_skips_addressable_shards(self):
+    mesh = jax.sharding.Mesh(np.array(jax.devices()[:4]), ("data",))
+    sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec("data")
+    )
+
+    class _NoDisassembleArray:
+      shape = (8, 2)
+      ndim = 2
+      dtype = np.dtype(np.float32)
+
+      def __init__(self, arr_sharding):
+        self.sharding = arr_sharding
+
+      @property
+      def addressable_shards(self):
+        raise AssertionError(
+            "addressable_shards must not be accessed when use_ffi=True"
+        )
+
+    with mock.patch.dict(
+        "os.environ", {"RAIDEN_USE_FFI": "1"}, clear=True
+    ):
+      sync = raiden_synchronizer.RaidenSynchronizer("trainer")
+    sync.names = ["w"]
+    sync.arrays = [_NoDisassembleArray(sharding)]
+    sync._ips = [f"10.0.0.1:{5000 + i}" for i in range(4)]
+    sync._control_addr = "10.0.0.1:6000"
+    meta = sync.work_unit_metadata()
+    self.assertEqual(meta.variables[0].global_shard_indices, (0, 1, 2, 3))
+
 
 if __name__ == "__main__":
   absltest.main()
