@@ -740,6 +740,55 @@ def _validate_fault_tolerance(hp: cli_config.HyperParameters) -> None:
     )
 
 
+# The arguments the orchestrator passes to `prompt_items_wrapper` itself, which
+# its kwargs must not set.
+PROMPT_ITEMS_WRAPPER_ARGS: Final[tuple[str, ...]] = (
+    "prompt_items",
+    "batch_size",
+    "num_generations",
+    "max_staleness",
+    "env_kwargs",
+)
+
+
+def prompt_items_wrapper_parts(
+    hp: cli_config.HyperParameters,
+) -> tuple[str, str] | None:
+  """Returns the `(module, function)` parts of `prompt_items_wrapper`."""
+  raw = hp.config["prompt_items_wrapper"]
+  if raw is None:
+    return None
+  if not isinstance(raw, str):
+    raise TypeError(f"prompt_items_wrapper must be a str or null, got {raw!r}.")
+  if not raw:
+    return None
+  module_name, _, function_name = raw.rpartition(".")
+  if not module_name or not function_name:
+    raise ValueError(
+        "prompt_items_wrapper must be a dotted 'module.function' path, got"
+        f" {raw!r}."
+    )
+  return module_name, function_name
+
+
+def _validate_prompt_items_wrapper(hp: cli_config.HyperParameters) -> None:
+  """Checks `prompt_items_wrapper` and its kwargs without importing it."""
+  parts = prompt_items_wrapper_parts(hp)
+  kwargs = hp.config_mapping("prompt_items_wrapper_kwargs")
+  if kwargs and parts is None:
+    raise ValueError(
+        "prompt_items_wrapper_kwargs is set but prompt_items_wrapper is empty;"
+        " set prompt_items_wrapper to the 'module.function' that takes them,"
+        " or drop the kwargs."
+    )
+  reserved = sorted(set(PROMPT_ITEMS_WRAPPER_ARGS) & set(kwargs))
+  if reserved:
+    raise ValueError(
+        f"prompt_items_wrapper_kwargs sets {reserved}, which the orchestrator"
+        " passes to prompt_items_wrapper itself."
+    )
+
+
 def _validate_local_settings(hp: cli_config.HyperParameters) -> None:
   """Validates and normalizes `cluster_config.local` settings."""
   local = _mutable_section(hp, "cluster_config")["local"]
@@ -785,6 +834,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   _validate_k8s_scalars(hp)
   _validate_k8s_worker_jobsets(hp)
   _validate_rollout_replicas(hp)
+  _validate_prompt_items_wrapper(hp)
   _validate_trajectory_logging(hp)
   _validate_rollout_logps_settings(hp)
   _validate_fault_tolerance(hp)

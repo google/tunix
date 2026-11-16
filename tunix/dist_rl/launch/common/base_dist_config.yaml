@@ -75,6 +75,11 @@ data_config:
   split: "train"
   shuffle: true
   seed: 42
+# Optional dotted `module.function` path of a context manager the orchestrator
+# enters around the run to wrap the prompt items, and extra keyword arguments
+# for it.
+prompt_items_wrapper: ""
+prompt_items_wrapper_kwargs: {}
 dataset_name: "gsm8k"
 batch_size: 4
 prompt_key: "prompts"

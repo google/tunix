@@ -1631,6 +1631,45 @@ weight_sync_config:
               ),
           )
 
+  def test_prompt_items_wrapper_validation(self):
+    for empty in ([], ["prompt_items_wrapper=null"]):
+      self.assertIsNone(
+          resolve_config.prompt_items_wrapper_parts(
+              resolve_config.initialize(empty)
+          )
+      )
+    hp_direct = resolve_config.initialize([])
+    hp_direct.config["prompt_items_wrapper"] = None
+    self.assertIsNone(resolve_config.prompt_items_wrapper_parts(hp_direct))
+    hp_direct.config["prompt_items_wrapper"] = 123
+    with self.assertRaisesRegex(
+        TypeError, "prompt_items_wrapper must be a str or null"
+    ):
+      resolve_config.prompt_items_wrapper_parts(hp_direct)
+    hp = resolve_config.initialize([
+        "prompt_items_wrapper=pkg.mod.wrap_fn",
+        "prompt_items_wrapper_kwargs.max_concurrency=1024",
+    ])
+    self.assertEqual(
+        resolve_config.prompt_items_wrapper_parts(hp), ("pkg.mod", "wrap_fn")
+    )
+    for overrides, regex in (
+        (["prompt_items_wrapper=wrap_fn"], "dotted 'module.function' path"),
+        (
+            ["prompt_items_wrapper_kwargs.foo=1"],
+            "prompt_items_wrapper is empty",
+        ),
+        (
+            [
+                "prompt_items_wrapper=pkg.mod.wrap_fn",
+                "prompt_items_wrapper_kwargs.batch_size=8",
+            ],
+            "passes to prompt_items_wrapper",
+        ),
+    ):
+      with self.assertRaisesRegex(ValueError, regex):
+        resolve_config.initialize(overrides)
+
   def test_render_bash_exports_evaluates_in_bash(self):
     hp = resolve_config.initialize([
         "model_config.model_name=Qwen3-0.6B",
