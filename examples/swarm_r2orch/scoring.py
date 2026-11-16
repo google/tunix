@@ -37,6 +37,14 @@ REFERENCE_TOKENS: dict[str, tuple[int, int]] = {
 DEFAULT_REFERENCE_TOKENS = (5000, 1000)
 COST_WEIGHT_IN = 0.25
 COST_WEIGHT_OUT = 1.0
+DATASET_SCOPES: dict[str, str] = {
+    "aime": "math",
+    "math_hard": "math",
+    "hotpotqa": "multi_hop_qa",
+    "musique": "multi_hop_qa",
+    "medqa": "medical_mcq",
+    "mbppplus": "code_function",
+}
 
 _NUMBER_RE = re.compile(r"-?\d+(?:,\d{3})*(?:\.\d+)?|-?\.\d+")
 _BOXED_RE = re.compile(r"\\boxed\s*\{\s*([^{}]+?)\s*\}")
@@ -86,6 +94,14 @@ class R2OrchTask:
   def __post_init__(self):
     object.__setattr__(self, "answers", tuple(str(x) for x in self.answers))
     object.__setattr__(self, "options", tuple(str(x) for x in self.options))
+
+
+def task_scope(task: R2OrchTask) -> str:
+  """Resolves the canonical R2Orch skill-scaffold scope of `task`."""
+  explicit = task.curriculum.get("task_type")
+  if isinstance(explicit, str) and explicit:
+    return explicit
+  return DATASET_SCOPES.get(task.dataset, task.dataset)
 
 
 def compute_worker_cost(token_in: int, token_out: int, dataset: str) -> float:

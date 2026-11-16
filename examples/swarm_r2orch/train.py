@@ -37,7 +37,10 @@ import numpy as np
 import optax
 from examples.swarm_math import train as math_train
 from examples.swarm_r2orch import cpu_fixture
+from examples.swarm_r2orch import pats
+from examples.swarm_r2orch import proposer
 from examples.swarm_r2orch import scoring
+from examples.swarm_r2orch import skill_ledger
 from examples.swarm_r2orch import workflow
 from tunix.common import configs
 from tunix.dist_rl.orchestrator import swarm_program
@@ -67,6 +70,19 @@ class PolicyBundle:
   sync_director: Callable[[], None]
   worker_state_fn: Callable[[], object]
   close_fn: Callable[[], None]
+  tokenizer: object = None
+
+
+@dataclasses.dataclass(frozen=True)
+class FullR2OrchComponents:
+  """Outer-loop Proposer, SkillScaffold, and PATS reviewer for Full R2Orch."""
+
+  proposer_model: nnx.Module
+  proposer_trainer: peft_trainer_v2.PeftTrainer
+  proposer_rt: proposer.ProposerRuntime
+  scaffold: skill_ledger.SkillScaffold
+  pats_reviewer: pats.PatsOuterReviewer
+  initial_proposer_norms: np.ndarray
 
 
 def load_tasks(path: str | Path) -> list[scoring.R2OrchTask]:
@@ -364,6 +380,7 @@ def create_policy_bundle(
         sync_director=sync_vllm,
         worker_state_fn=lambda: worker_raw.transformer_state,
         close_fn=close_vllm,
+        tokenizer=tokenizer,
     )
 
   frozen_model = nnx.clone(actor)
@@ -430,6 +447,7 @@ def create_policy_bundle(
       sync_director=sync_native,
       worker_state_fn=lambda: worker_native.sampler.transformer_state,
       close_fn=lambda: None,
+      tokenizer=tokenizer,
   )
 
 
@@ -476,7 +494,8 @@ def summarize_outcomes(
       collections.defaultdict(list)
   )
   for out in outcomes:
-    per_task_hits[f"{out.dataset}::{out.episode.task_id}"].append(out.correctness)
+    tid = out.task_id or out.episode.task_id
+    per_task_hits[f"{out.dataset}::{tid}"].append(out.correctness)
     per_domain_outcomes[out.dataset].append(out)
   domain_tasks: dict[str, list[list[float]]] = collections.defaultdict(list)
   for key, hits in per_task_hits.items():
@@ -542,11 +561,13 @@ class R2OrchCollector:
       config: dict[str, object],
       *,
       trace_path: Path | None = None,
+      full_components: FullR2OrchComponents | None = None,
   ):
     self.bundle = bundle
     self.tasks = list(tasks)
     self.config = config
     self.trace_path = trace_path
+    self.full_components = full_components
     self.last_round_summary: dict[str, object] = {}
     self.flow = workflow.GraphDirectorWorkflow(
         max_rounds=int(config["max_rounds"]),
@@ -554,6 +575,96 @@ class R2OrchCollector:
         relay_max_chars=int(config["relay_max_chars"]),
         cost_lambda=float(config["cost_lambda"]),
     )
+
+  def make_episode_runtime(
+      self,
+      task_id: str,
+      version: int,
+      step: int,
+      index: int,
+      attempt: int,
+      *,
+      evaluate: bool,
+  ) -> runtime_lib.RecordingRuntime:
+    """Creates a `RecordingRuntime` binding Director (`trainable`) + Worker."""
+    cfg = self.config
+    stage = "eval" if evaluate else "train"
+    d_sampler = (
+        self.bundle.director_eval_sampler
+        if evaluate
+        else self.bundle.director_train_sampler
+    )
+    seed = int(
+        np.random.SeedSequence(
+            [int(cfg["seed"]), step, index, attempt, int(evaluate)]
+        ).generate_state(1)[0]
+    )
+    director_binding = runtime_lib.PolicyBinding(
+        policy_id=str(cfg["director_policy_id"]),
+        policy_version=version,
+        sampler=d_sampler,
+        encode=self.bundle.encode_director,
+        sampling_params=sampler_lib.SamplingParams(
+            max_tokens=int(cfg["max_response_length"]),
+            seed=seed,
+            temperature=float(cfg[f"director_{stage}_temperature"]),
+            top_p=float(cfg[f"director_{stage}_top_p"]),
+            return_logprobs=True,
+        ),
+        max_prompt_length=int(cfg["max_prompt_length"]),
+        trainable=True,
+    )
+    worker_binding = runtime_lib.PolicyBinding(
+        policy_id=str(cfg["worker_policy_id"]),
+        policy_version=0,
+        sampler=self.bundle.worker_sampler,
+        encode=self.bundle.encode_worker,
+        sampling_params=sampler_lib.SamplingParams(
+            max_tokens=int(cfg["worker_max_response_length"]),
+            seed=seed + 100_000,
+            temperature=float(cfg["worker_temperature"]),
+            top_p=float(cfg["worker_top_p"]),
+            return_logprobs=False,
+        ),
+        max_prompt_length=int(cfg["worker_max_prompt_length"]),
+        trainable=False,
+    )
+    return runtime_lib.RecordingRuntime.from_bindings(
+        {
+            workflow.DIRECTOR_ROLE: director_binding,
+            workflow.WORKER_ROLE: worker_binding,
+        },
+        episode_id=f"{stage}/{step}/{task_id}/{attempt}",
+    )
+
+  def write_traces(
+      self, step: int, outcomes: Sequence[workflow.R2OrchOutcome]
+  ) -> None:
+    """Appends periodic JSONL trajectory records when `trace_path` is set."""
+    if (
+        self.trace_path is None
+        or step % int(self.config["trace_every_steps"]) != 0
+    ):
+      return
+    with Path(self.trace_path).open("a", encoding="utf-8") as stream:
+      for out in outcomes:
+        stream.write(
+            json.dumps({
+                "step": step,
+                "dataset": out.dataset,
+                "correctness": out.correctness,
+                "worker_cost": out.worker_cost,
+                "finished": out.finished,
+                "director_turns": out.director_turns,
+                "worker_calls": out.worker_calls,
+                "num_nodes": out.num_nodes,
+                "max_layer": out.max_layer,
+                "scaffold_condition": out.scaffold_condition,
+                "arm_card_key": out.arm_card_key,
+                "episode": dataclasses.asdict(out.episode),
+            })
+            + "\n"
+        )
 
   async def collect_outcomes(
       self,
@@ -563,63 +674,85 @@ class R2OrchCollector:
       *,
       evaluate: bool,
   ) -> list[workflow.R2OrchOutcome]:
-    cfg = self.config
-    attempts = int(cfg["eval_attempts"] if evaluate else cfg["group_size"])
-    stage = "eval" if evaluate else "train"
-    d_sampler = (
-        self.bundle.director_eval_sampler
-        if evaluate
-        else self.bundle.director_train_sampler
+    attempts = int(
+        self.config["eval_attempts" if evaluate else "group_size"]
     )
-    coros = []
-    for index, task in enumerate(tasks):
-      for attempt in range(attempts):
-        seed = int(
-            np.random.SeedSequence(
-                [int(cfg["seed"]), step, index, attempt, int(evaluate)]
-            ).generate_state(1)[0]
-        )
-        director_binding = runtime_lib.PolicyBinding(
-            policy_id=str(cfg["director_policy_id"]),
-            policy_version=version,
-            sampler=d_sampler,
-            encode=self.bundle.encode_director,
-            sampling_params=sampler_lib.SamplingParams(
-                max_tokens=int(cfg["max_response_length"]),
-                seed=seed,
-                temperature=float(cfg[f"director_{stage}_temperature"]),
-                top_p=float(cfg[f"director_{stage}_top_p"]),
-                return_logprobs=True,
+    coros = [
+        self.flow.run_detailed(
+            task,
+            self.make_episode_runtime(
+                task.task_id, version, step, idx, att, evaluate=evaluate
             ),
-            max_prompt_length=int(cfg["max_prompt_length"]),
-            trainable=True,
+            evaluate=evaluate,
         )
-        worker_binding = runtime_lib.PolicyBinding(
-            policy_id=str(cfg["worker_policy_id"]),
-            policy_version=0,
-            sampler=self.bundle.worker_sampler,
-            encode=self.bundle.encode_worker,
-            sampling_params=sampler_lib.SamplingParams(
-                max_tokens=int(cfg["worker_max_response_length"]),
-                seed=seed + 100_000,
-                temperature=float(cfg["worker_temperature"]),
-                top_p=float(cfg["worker_top_p"]),
-                return_logprobs=False,
-            ),
-            max_prompt_length=int(cfg["worker_max_prompt_length"]),
-            trainable=False,
-        )
-        rt = runtime_lib.RecordingRuntime.from_bindings(
-            {
-                workflow.DIRECTOR_ROLE: director_binding,
-                workflow.WORKER_ROLE: worker_binding,
-            },
-            episode_id=f"{stage}/{step}/{task.task_id}/{attempt}",
-        )
-        coros.append(self.flow.run_detailed(task, rt, evaluate=evaluate))
+        for idx, task in enumerate(tasks)
+        for att in range(attempts)
+    ]
     return list(await asyncio.gather(*coros))
 
+  async def collect_full_cycle(self, version: int, step: int):
+    """Executes one full R2Orch two-timescale cycle (Proposer + Arms + PATS)."""
+    comp = self.full_components
+    assert comp is not None
+    cycle = step + 1
+    n_h = int(self.config.get("arms_hidden", 3))
+    n_v = int(self.config.get("arms_visible", 2))
+    chosen, selections, fwd_payload = comp.proposer_rt.select_cycle_tasks(
+        cycle, comp.scaffold
+    )
+    plans = [
+        comp.scaffold.plan_task_arms(cycle, t, n_hidden=n_h, n_visible=n_v)
+        for t in chosen
+    ]
+    coros = []
+    for idx, (task, plan) in enumerate(zip(chosen, plans, strict=True)):
+      for att, arm in enumerate(plan.arms):
+        ctx = plan.visible_context if arm == "visible" else plan.hidden_context
+        rt = self.make_episode_runtime(
+            task.task_id, version, step, idx, att, evaluate=False
+        )
+        coros.append(
+            self.flow.run_detailed(
+                task,
+                rt,
+                evaluate=False,
+                skill_context=ctx,
+                episode_task_id=f"{task.task_id}::{arm}",
+                scaffold_condition=arm,
+                skill_arm=arm if arm in ("hidden", "visible") else "",
+                arm_card_key=plan.arm_card_key,
+            )
+        )
+    outcomes = list(await asyncio.gather(*coros))
+    by_slot: dict[str, list[workflow.R2OrchOutcome]] = collections.defaultdict(list)
+    for out in outcomes:
+      by_slot[out.task_id].append(out)
+    task_groups = [(t, p, by_slot[t.task_id]) for t, p in zip(chosen, plans, strict=True)]
+    prior_snapshot = dict(comp.scaffold.scope_priors)
+    ledger_stats = comp.scaffold.record_cycle(cycle, task_groups)
+    prop_stats = comp.proposer_rt.update_from_cycle(
+        selections, fwd_payload, by_slot, prior_snapshot, comp.scaffold
+    )
+    comp.pats_reviewer.ingest_cycle(cycle, task_groups)
+    pats_stats = await comp.pats_reviewer.maybe_review(
+        cycle,
+        comp.scaffold,
+        self.bundle.worker_sampler,
+        self.bundle.encode_worker,
+        self.config,
+    )
+    self.last_round_summary = {
+        **summarize_outcomes(outcomes, k=n_h + n_v),
+        "skill_ledger": ledger_stats,
+        "proposer": prop_stats,
+        "pats": pats_stats,
+    }
+    self.write_traces(step, outcomes)
+    return [o.episode for o in outcomes]
+
   async def __call__(self, version: int, step: int):
+    if self.full_components is not None:
+      return await self.collect_full_cycle(version, step)
     chosen = select_stratified_tasks(
         self.tasks,
         step=step,
@@ -630,29 +763,8 @@ class R2OrchCollector:
     self.last_round_summary = summarize_outcomes(
         outcomes, k=int(self.config["group_size"])
     )
-    episodes = [o.episode for o in outcomes]
-    if (
-        self.trace_path is not None
-        and step % int(self.config["trace_every_steps"]) == 0
-    ):
-      with Path(self.trace_path).open("a", encoding="utf-8") as stream:
-        for out in outcomes:
-          stream.write(
-              json.dumps({
-                  "step": step,
-                  "dataset": out.dataset,
-                  "correctness": out.correctness,
-                  "worker_cost": out.worker_cost,
-                  "finished": out.finished,
-                  "director_turns": out.director_turns,
-                  "worker_calls": out.worker_calls,
-                  "num_nodes": out.num_nodes,
-                  "max_layer": out.max_layer,
-                  "episode": dataclasses.asdict(out.episode),
-              })
-              + "\n"
-          )
-    return episodes
+    self.write_traces(step, outcomes)
+    return [o.episode for o in outcomes]
 
 
 async def evaluate_suite(
@@ -708,13 +820,32 @@ class R2OrchRoundHooks:
 
   def checkpoint_metadata(self, version: int) -> dict[str, object]:
     assert self.program is not None
+    extra = {}
+    comp = self.collector.full_components
+    if comp is not None:
+      extra = {
+          "skill_scaffold": comp.scaffold.state_dict(),
+          "ads_scheduler": comp.proposer_rt.scheduler.state_dict(),
+          "pats_reviewer": comp.pats_reviewer.state_dict(),
+      }
     return {
         "swarm_step": self.program.step,
         "swarm_policy_version": version,
         "history": self.program.history,
         "recipe": self.config,
+        **extra,
         **self.state,
     }
+
+  def save_all_checkpoints(self, version: int, step: int) -> None:
+    """Persists Director, Proposer, and Ledger/ADS/PATS state at `step`."""
+    self.worker.save_checkpoint(
+        self.checkpoint_metadata(version), step=step, force=True
+    )
+    if self.collector.full_components is not None:
+      self.collector.full_components.proposer_trainer.save_checkpoint(
+          {"step": step}, step=step, force=True
+      )
 
   def resume_from(self, engine, *, step: int | None, latest: bool) -> int:
     if step is None and not latest:
@@ -728,6 +859,15 @@ class R2OrchRoundHooks:
       engine.version = meta["swarm_policy_version"]
       self.start_step = meta["swarm_step"]
       self.state = {k: meta[k] for k in self.state if k in meta}
+    comp = self.collector.full_components
+    if comp is not None and meta.get("step"):
+      comp.proposer_trainer.restore_checkpoint(step=int(meta["step"]))
+      if "skill_scaffold" in meta:
+        comp.scaffold.load_state_dict(meta["skill_scaffold"])
+      if "ads_scheduler" in meta:
+        comp.proposer_rt.scheduler.load_state_dict(meta["ads_scheduler"])
+      if "pats_reviewer" in meta:
+        comp.pats_reviewer.load_state_dict(meta["pats_reviewer"])
     if meta["step"]:
       engine.sync()
     return int(meta["step"])
@@ -754,9 +894,7 @@ class R2OrchRoundHooks:
           self.checkpointing
           and step % int(self.config["checkpoint_every_steps"]) == 0
       ):
-        self.worker.save_checkpoint(
-            self.checkpoint_metadata(version), step=step, force=True
-        )
+        self.save_all_checkpoints(version, step)
     return await self.collector(version, step)
 
 
@@ -831,6 +969,16 @@ def _execute_r2orch_loop(
     director_delta_l2 = float(
         np.linalg.norm(final_director_norms - initial_director_norms)
     )
+    full_extra: dict[str, object] = {}
+    comp = collector.full_components
+    if comp is not None:
+      prop_norms = pytree_leaf_norms(nnx.state(comp.proposer_model, nnx.Param))
+      full_extra = {
+          "proposer_norm_delta_l2": float(
+              np.linalg.norm(prop_norms - comp.initial_proposer_norms)
+          ),
+          "skill_ledger_final": comp.scaffold.summary(),
+      }
     report: dict[str, object] = {
         "backend": backend,
         "mode": mode,
@@ -840,6 +988,7 @@ def _execute_r2orch_loop(
         ),
         "director_norm_delta_l2": director_delta_l2,
         "frozen_worker_max_norm_drift": final_drift,
+        **full_extra,
         **hooks.state,
         "history": program.history,
         "final_eval": asyncio.run(
@@ -850,18 +999,94 @@ def _execute_r2orch_loop(
         ),
     }
     if hooks.checkpointing:
-      t_worker.save_checkpoint(
-          hooks.checkpoint_metadata(program.policy_version),
-          step=program.step,
-          force=True,
-      )
+      hooks.save_all_checkpoints(program.policy_version, program.step)
     (output_dir / "report.json").write_text(
         json.dumps(report, indent=2) + "\n", encoding="utf-8"
     )
     return report
   finally:
     bundle.close_fn()
+    if collector.full_components is not None:
+      collector.full_components.proposer_trainer.close()
     trainer.close()
+
+
+def build_full_r2orch_components(
+    backend: str,
+    config: dict[str, object],
+    bundle: PolicyBundle,
+    train_tasks: Sequence[scoring.R2OrchTask],
+    train_mesh: jax.sharding.Mesh,
+    resolved_ckpt: str | None,
+    *,
+    mode: str,
+) -> FullR2OrchComponents | None:
+  """Initializes Proposer, SkillScaffold, and PATS reviewer when enabled."""
+  if mode != "train" or not config.get("full_r2orch", False):
+    return None
+  prop_lr = float(config.get("proposer_learning_rate", config["learning_rate"]))
+  if backend == "cpu":
+    prop_model = cpu_fixture.make_proposer_policy()
+    encode_prop = cpu_fixture.encode_proposer
+    label_ids = dict(cpu_fixture.PROPOSER_LABEL_IDS)
+    prop_opt = optax.sgd(prop_lr)
+  else:
+    prop_model = nnx.clone(bundle.actor)
+    nnx.update(prop_model, jax.tree.map(lambda x: x.copy(), nnx.state(bundle.actor)))
+    encode_prop = workflow.role_chat_encoder(
+        bundle.tokenizer,
+        proposer.PROPOSER_SYSTEM_PROMPT,
+        int(config["proposer_max_prompt_length"]),
+    )
+    label_ids = {
+        lbl: int(bundle.tokenizer.encode(lbl, add_special_tokens=False)[0])  # pytype: disable=attribute-error
+        for lbl in "ABCDEFGH"
+    }
+    prop_opt = optax.chain(
+        optax.clip_by_global_norm(1.0),
+        optax.adamw(prop_lr, b1=0.9, b2=0.999, weight_decay=0.01),
+    )
+  prop_ckpt = None if resolved_ckpt is None else f"{resolved_ckpt}_proposer"
+  prop_trainer = peft_trainer_v2.PeftTrainer(
+      prop_model,
+      prop_opt,
+      peft_trainer_v2.TrainingConfig(
+          eval_every_n_steps=int(config["num_steps"]) + 1,
+          max_steps=int(config["num_steps"]),
+          gradient_accumulation_steps=1,
+          checkpoint_root_directory=prop_ckpt,
+          resume_from_checkpoint_on_init=False,
+      ),
+      sampler_type="vanilla",
+  )
+  init_prop_norms = pytree_leaf_norms(nnx.state(prop_model, nnx.Param))
+  batch_mult = int(train_mesh.shape.get("fsdp", 1))
+  prop_rt = proposer.ProposerRuntime(
+      train_tasks,
+      prop_model,
+      prop_trainer,
+      encode_prop,
+      label_ids,
+      pad_id=bundle.pad_id,
+      batch_multiple=batch_mult,
+      config=config,
+  )
+  scaffold = skill_ledger.SkillScaffold.from_seed_file(
+      ROOT / "configs/seed_cards.json",
+      base_seed=int(config["seed"]),
+      min_tasks=int(config.get("arms_min_tasks", 12)),
+      epsilon=float(config.get("arms_epsilon", 0.02)),
+      window_cycles=int(config.get("arms_window_cycles", 30)),
+      audit_share=float(config.get("arms_audit_share", 0.30)),
+  )
+  return FullR2OrchComponents(
+      proposer_model=prop_model,
+      proposer_trainer=prop_trainer,
+      proposer_rt=prop_rt,
+      scaffold=scaffold,
+      pats_reviewer=pats.PatsOuterReviewer(),
+      initial_proposer_norms=init_prop_norms,
+  )
 
 
 def _sync_barrier_mesh(backend: str, train_mesh: jax.sharding.Mesh) -> None:
@@ -956,8 +1181,21 @@ def run(
     )
     t_worker.initialize()
     engine = local_engine.LocalSwarmEngine(t_worker, bundle.sync_director)
+    full_comp = build_full_r2orch_components(
+        backend,
+        config,
+        bundle,
+        train_tasks,
+        train_mesh,
+        resolved_ckpt,
+        mode=mode,
+    )
     collector = R2OrchCollector(
-        bundle, train_tasks, config, trace_path=output_dir / "train_traces.jsonl"
+        bundle,
+        train_tasks,
+        config,
+        trace_path=output_dir / "train_traces.jsonl",
+        full_components=full_comp,
     )
     eval_collector = R2OrchCollector(bundle, eval_tasks, config)
     hooks = R2OrchRoundHooks(
@@ -988,6 +1226,7 @@ def run(
                 None if config["sampler_is"] is None else str(config["sampler_is"])
             ),
             epsilon_high=float(config["epsilon_high"]),
+            allow_variable_group_sizes=bool(config.get("full_r2orch", False)),
         ),
     )
     hooks.program = program

@@ -60,6 +60,7 @@ class SwarmConfig:
   sampler_is: str | None = None
   sampler_is_threshold: float = 2.0
   epsilon_high: float = 0.2
+  allow_variable_group_sizes: bool = False
 
   def __post_init__(self):
     if (
@@ -366,7 +367,12 @@ class SwarmRLProgram(rl_program.RLProgram):
       for _ in range(num_steps):
         episodes = tuple(await self.collect(self.policy_version, self.step))
         counts = collections.Counter(e.task_id for e in episodes)
-        if not counts or any(n != config.group_size for n in counts.values()):
+        bad_group = (
+            any(n < 2 for n in counts.values())
+            if config.allow_variable_group_sizes
+            else any(n != config.group_size for n in counts.values())
+        )
+        if not counts or bad_group:
           raise ValueError(
               "Collect complete groups before computing advantages."
           )

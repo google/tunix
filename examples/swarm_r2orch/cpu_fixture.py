@@ -9,20 +9,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Separate trainable Director and frozen Worker categorical fixtures for CPU.
+"""Separate trainable Director, Proposer, and frozen Worker fixtures for CPU.
 
-Prompt state tokens (1..5) are disjoint from generated action/answer tokens
-(6..12), so every sampled action token immediately transitions to EOS (token 0).
-On canvas state 1 (empty), the Director adds `agent_1` (Solver, layer 0).
-On canvas state 2 (`agent_1` ready), the Director mixes prematurely finishing
-`agent_1` (wrong draft `0`) vs adding `agent_2` (Verifier, layer 1, fed by
-`agent_1`, which produces `42`), giving genuine GRPO group variance.
+Prompt state tokens (1..5, 13..14) are disjoint from generated action/answer
+tokens (6..12, 15), so every sampled action token immediately transitions to EOS
+(token 0). Without skill cards (state 2), the Director mixes prematurely
+finishing `agent_1` (wrong draft `0`) vs adding `agent_2` (Verifier `42`).
+With skill cards (state 13), adding `agent_2` is up-weighted so visible/hidden
+arms exhibit positive contrast while preserving mixed group rewards.
 """
 
 from flax import nnx
 import jax.numpy as jnp
 import numpy as np
 from tunix.dist_rl.rollout import sampler as sampler_lib
+
+PROPOSER_LABEL_IDS = {"A": 1, "B": 2, "C": 3, "D": 4}
 
 VOCAB = (
     "",
@@ -38,6 +40,9 @@ VOCAB = (
     '{"action":"invalid"}',
     r"Draft derivation. \boxed{0}",
     r"Verified derivation. \boxed{42}",
+    "<state_agent1_scaffolded>",
+    "<pats_review_prompt>",
+    '{"operations":[{"op":"ADD","evidence_ids":["E1","E2"],"card":{"name":"Peer audit","description":"Cross-check draft before submission.","trigger":"When a single solver draft may fail.","plan":"Add a layer-1 task_result Verifier fed by agent_1 before finish.","pitfall":"Submitting an unverified draft early.","constraint":"Ensure every retained node reaches the target.","kind":"verification"}}]}',
 )
 
 
@@ -45,7 +50,7 @@ class CategoricalPolicy(nnx.Module):
   """Minimal bigram logit table compatible with `TrainerWorker`."""
 
   def __init__(self, logits: np.ndarray):
-    self.logits = nnx.Param(jnp.asarray(logits, dtype=jnp.float32))
+    self.logits = nnx.Param(jnp.asarray(logits, dtype=np.float32))
 
   def __call__(
       self, tokens, positions, cache=None, attention_mask=None, segment_ids=None
@@ -57,52 +62,71 @@ class CategoricalPolicy(nnx.Module):
 def make_director_policy() -> CategoricalPolicy:
   """Trainable Director policy over JSON canvas actions (tokens 6..10)."""
   n = len(VOCAB)
-  logits = np.full((n, n), -6.0, dtype=np.float32)
-  logits[:, 0] = 6.0  # All action tokens (6..12) immediately emit EOS (0).
-  # Prompt state 1 (empty canvas) -> add Layer-0 Solver (token 6).
-  logits[1, 0] = -6.0
+  logits = np.full((n, n), -8.0, dtype=np.float32)
+  logits[:, 0] = 6.0
+  logits[1, 0] = -8.0
   logits[1, 6] = 5.0
-  # Prompt state 2 (agent_1 ready) -> mix add Verifier (7), early finish (8),
-  # and invalid JSON (10) so each group of 4 rollouts has mixed rewards.
-  logits[2, 0] = -6.0
+  logits[2, 0] = -8.0
   logits[2, 7] = 1.2
   logits[2, 8] = 1.0
   logits[2, 10] = 0.0
-  # Prompt state 3 (agent_2 ready) -> finish agent_2 (token 9).
-  logits[3, 0] = -6.0
+  logits[13, 0] = -8.0
+  logits[13, 7] = 2.4
+  logits[13, 8] = 0.6
+  logits[3, 0] = -8.0
   logits[3, 9] = 5.0
   return CategoricalPolicy(logits)
 
 
 def make_frozen_worker_policy() -> CategoricalPolicy:
-  """Frozen Worker policy: solo Solver errs (`0`), Layer-1 Verifier solves (`42`)."""
+  """Frozen Worker policy serving both canvas execution and PATS distillation."""
   n = len(VOCAB)
   logits = np.full((n, n), -8.0, dtype=np.float32)
   logits[:, 0] = 6.0
-  # Prompt state 4 (entry-layer Solver) -> emits wrong draft (token 11).
   logits[4, 0] = -8.0
   logits[4, 11] = 6.0
-  # Prompt state 5 (downstream Verifier seeing `[agent_1 output]`) -> emits 42 (token 12).
   logits[5, 0] = -8.0
   logits[5, 12] = 6.0
+  logits[14, 0] = -8.0
+  logits[14, 15] = 8.0
+  return CategoricalPolicy(logits)
+
+
+def make_proposer_policy() -> CategoricalPolicy:
+  """Trainable CPU Proposer policy over candidate labels `A..D` (tokens 1..4)."""
+  size = 12
+  logits = np.full((size, size), -6.0, dtype=np.float32)
+  for state in range(5, size):
+    logits[state, 1:5] = np.asarray([1.1, 1.0, 0.9, 0.8], dtype=np.float32)
   return CategoricalPolicy(logits)
 
 
 def encode_director(prompt: str) -> list[int]:
-  """Maps Canvas snapshot state to conditioning token IDs (with pad/eos ID 0)."""
+  """Maps Canvas snapshot and scaffold presence to conditioning token IDs."""
   if '"id":"agent_2"' in prompt:
     state = 3
   elif '"id":"agent_1"' in prompt:
-    state = 2
+    state = 13 if "Optional Orchestration Knowledge:" in prompt else 2
   else:
     state = 1
   return [1, 0, state]
 
 
 def encode_worker(prompt: str) -> list[int]:
-  """Maps Worker upstream context to entry-layer (4) or downstream (5) state."""
-  state = 5 if "[agent_1 output]" in prompt else 4
+  """Maps Worker prompt or PATS review payload to conditioning token IDs."""
+  if "Review Payload:" in prompt:
+    state = 14
+  elif "[agent_1 output]" in prompt:
+    state = 5
+  else:
+    state = 4
   return [1, 0, state]
+
+
+def encode_proposer(prompt_text: str) -> list[int]:
+  """Maps Proposer candidate-list JSON to a deterministic state token."""
+  bucket = 6 + (sum(ord(ch) for ch in prompt_text) % 6)
+  return [5, 0, bucket]
 
 
 class CategoricalSampler:

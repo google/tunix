@@ -13,6 +13,7 @@
 
 import dataclasses
 import json
+import time
 
 from examples.swarm_r2orch import canvas as canvas_lib
 from examples.swarm_r2orch import scoring
@@ -31,12 +32,13 @@ Available JSON actions:
 1. Add and run a Worker:
    {"action":"add_agent","role":"...","objective":"...","layer":0,"inputs":[],"result_scope":"subtask"|"task_result","defer_execution":false}
    - Set "defer_execution":true when staging multiple parallel Workers in the same layer, then run them together on the final node or with {"action":"run_graph"}.
-   - Every edge u -> v requires layer(u) < layer(v).
+   - Directed edges u -> v require layer(u) < layer(v); same-layer peer cross-checks use {"action":"consider_relation","source":"agent_1","target":"agent_2"}.
 2. Revise a Worker's responsibility:
    {"action":"set_prompt","target":"agent_1","role":"...","objective":"...","result_scope":"subtask"|"task_result"}
 3. Move a Worker's layer or connect nodes:
    {"action":"set_layer","target":"agent_2","layer":1}
    {"action":"add_edge","source":"agent_1","target":"agent_2"}
+   {"action":"consider_relation","source":"agent_1","target":"agent_2"}
 4. Prune an unhelpful or disconnected Worker:
    {"action":"delete_agent","target":"agent_1"}
 5. Execute deferred dirty Workers:
@@ -44,7 +46,7 @@ Available JSON actions:
 6. Submit a completed task_result Worker (all retained nodes must reach target):
    {"action":"finish","target":"agent_1"}
 
-Match graph topology to task complexity: use a single task_result Worker on straightforward problems, or compose decomposition / parallel verification / synthesis layers when cross-checking or multi-hop evidence aggregation improves reliability. Always reserve your final turn for {"action":"finish","target":"..."}."""
+Match graph topology to task complexity: use a single task_result Worker on straightforward problems, or compose decomposition / parallel peer verification / synthesis layers when cross-checking or multi-hop evidence aggregation improves reliability. Always reserve your final turn for {"action":"finish","target":"..."}."""
 
 DOMAIN_DIRECTOR_HINTS = {
     "aime": (
@@ -111,6 +113,12 @@ class R2OrchOutcome:
   num_nodes: int
   max_layer: int
   parallel_wave: bool
+  task_id: str = ""
+  duration_s: float = 0.0
+  scaffold_condition: str = "off"
+  skill_arm: str = ""
+  arm_card_key: str = ""
+  action_log: tuple[str, ...] = ()
 
 
 def _summarize_worker_output(text: str, limit: int) -> str:
@@ -217,8 +225,13 @@ class GraphDirectorWorkflow:
       *,
       evaluate: bool = False,
       skill_context: str = "",
+      episode_task_id: str | None = None,
+      scaffold_condition: str = "off",
+      skill_arm: str = "",
+      arm_card_key: str = "",
   ) -> R2OrchOutcome:
     """Runs one Director+Frozen-Workers episode and returns full telemetry."""
+    t0 = time.perf_counter()
     canvas = canvas_lib.GraphCanvas(
         max_agents=self.max_agents,
         relay_max_chars=self.relay_max_chars,
@@ -272,7 +285,7 @@ class GraphDirectorWorkflow:
         else correctness - self.cost_lambda * w_cost
     )
     episode = trace.SwarmEpisode(
-        task_id=task.task_id,
+        task_id=episode_task_id or task.task_id,
         episode_id=rt.episode_id,
         calls=tuple(recorded_calls),
         reward=float(reward),
@@ -290,6 +303,12 @@ class GraphDirectorWorkflow:
         num_nodes=len(canvas.nodes),
         max_layer=max_layer,
         parallel_wave=canvas.had_parallel_wave,
+        task_id=task.task_id,
+        duration_s=max(time.perf_counter() - t0, 1e-4),
+        scaffold_condition=scaffold_condition,
+        skill_arm=skill_arm,
+        arm_card_key=arm_card_key,
+        action_log=tuple(f"{act} -> {fb[:120]}" for act, fb in history[:6]),
     )
 
 

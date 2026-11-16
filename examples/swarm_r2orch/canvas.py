@@ -116,6 +116,7 @@ class GraphCanvas:
     self.relay_max_chars = relay_max_chars
     self.nodes: dict[str, AgentNode] = {}
     self.edges: set[tuple[str, str]] = set()
+    self.peer_edges: set[frozenset[str]] = set()
     self.artifacts: dict[str, WorkerArtifact] = {}
     self.output_agent: str | None = None
     self.version = 0
@@ -128,6 +129,16 @@ class GraphCanvas:
   def predecessors(self, agent_id: str) -> list[str]:
     """Sorted upstream agent IDs feeding `agent_id`."""
     return sorted(src for src, dst in self.edges if dst == agent_id)
+
+  def peers(self, agent_id: str) -> list[str]:
+    """Sorted same-layer peer agent IDs linked with `agent_id`."""
+    return sorted(
+        other
+        for pair in self.peer_edges
+        if agent_id in pair
+        for other in pair
+        if other != agent_id and other in self.nodes
+    )
 
   def _mark_downstream_dirty(self, seeds: set[str]) -> None:
     queue = collections.deque(a for a in seeds if a in self.nodes)
@@ -143,10 +154,14 @@ class GraphCanvas:
           queue.append(dst)
 
   def _all_reach_target(self, target_id: str) -> list[str]:
-    """Returns retained agent IDs that have no directed path to `target_id`."""
+    """Returns retained agent IDs that have no directed/peer path to `target_id`."""
     reverse_adj: dict[str, list[str]] = collections.defaultdict(list)
     for src, dst in self.edges:
       reverse_adj[dst].append(src)
+    for pair in self.peer_edges:
+      left, right = tuple(pair)
+      reverse_adj[left].append(right)
+      reverse_adj[right].append(left)
     reachable = {target_id}
     queue = collections.deque([target_id])
     while queue:
@@ -247,6 +262,8 @@ class GraphCanvas:
             f"Layer {layer} violates directed edge {src} -> {dst}.",
             False,
         )
+    if any(self.nodes[p].layer != layer for p in self.peers(target)):
+      return False, f"Layer {layer} breaks a same-layer peer link.", False
     self.nodes[target].layer = layer
     self._mark_downstream_dirty({target})
     self.version += 1
@@ -257,16 +274,21 @@ class GraphCanvas:
     dst = str(cmd.get("target", ""))
     if src not in self.nodes or dst not in self.nodes or src == dst:
       return False, "Edge requires two distinct existing agents.", False
-    if self.nodes[src].layer >= self.nodes[dst].layer:
+    defer = bool(cmd.get("defer_execution", False))
+    if self.nodes[src].layer == self.nodes[dst].layer:
+      self.peer_edges.add(frozenset({src, dst}))
+      self._mark_downstream_dirty({src, dst})
+      self.version += 1
+      return True, f"Linked peer block {src} <-> {dst}.", not defer
+    if self.nodes[src].layer > self.nodes[dst].layer:
       return (
           False,
-          f"Directed edge {src} -> {dst} requires layer({src}) < layer({dst}).",
+          f"Directed edge {src} -> {dst} requires layer({src}) <= layer({dst}).",
           False,
       )
     self.edges.add((src, dst))
     self._mark_downstream_dirty({dst})
     self.version += 1
-    defer = bool(cmd.get("defer_execution", False))
     return True, f"Connected {src} -> {dst}.", not defer
 
   def _apply_delete_agent(
@@ -275,8 +297,11 @@ class GraphCanvas:
     target = str(cmd.get("target", ""))
     if target not in self.nodes:
       return False, f"Unknown target agent {target!r}.", False
-    downstream = {dst for src, dst in self.edges if src == target}
+    downstream = {dst for src, dst in self.edges if src == target} | set(
+        self.peers(target)
+    )
     self.edges = {edge for edge in self.edges if target not in edge}
+    self.peer_edges = {pair for pair in self.peer_edges if target not in pair}
     del self.nodes[target]
     self.artifacts.pop(target, None)
     if self.output_agent == target:
@@ -352,6 +377,49 @@ class GraphCanvas:
       msg = f"{msg} Executed: {', '.join(executed)}."
     return CanvasStepResult(True, False, msg, executed)
 
+  async def run_layer_wave(
+      self,
+      nodes: list[AgentNode],
+      worker_fn: Callable[
+          [AgentNode, list[WorkerArtifact]], Awaitable[WorkerArtifact]
+      ],
+      *,
+      include_peers: bool,
+  ) -> list[str]:
+    """Runs one concurrent Worker wave and records bounded artifacts."""
+    if not nodes:
+      return []
+    if len(nodes) > 1:
+      self.had_parallel_wave = True
+    results = await asyncio.gather(
+        *(
+            worker_fn(
+                node,
+                [
+                    self.artifacts[p]
+                    for p in (
+                        *self.predecessors(node.agent_id),
+                        *(self.peers(node.agent_id) if include_peers else ()),
+                    )
+                ],
+            )
+            for node in nodes
+        )
+    )
+    ran: list[str] = []
+    for node, artifact in zip(nodes, results, strict=True):
+      trimmed = dataclasses.replace(
+          artifact, summary=artifact.summary[: self.relay_max_chars]
+      )
+      self.artifacts[node.agent_id] = trimmed
+      if include_peers or not self.peers(node.agent_id):
+        node.dirty = False
+      self.worker_token_in += trimmed.token_in
+      self.worker_token_out += trimmed.token_out
+      self.worker_calls += 1
+      ran.append(node.agent_id)
+    return ran
+
   async def execute_dirty(
       self,
       worker_fn: Callable[
@@ -372,28 +440,24 @@ class GraphCanvas:
               for p in self.predecessors(aid)
           )
       ]
-      if not ready:
-        continue
-      if len(ready) > 1:
-        self.had_parallel_wave = True
-      results = await asyncio.gather(
-          *(
-              worker_fn(
-                  node, [self.artifacts[p] for p in self.predecessors(node.agent_id)]
-              )
-              for node in ready
-          )
+      solo = [
+          n
+          for n in ready
+          if not self.peers(n.agent_id) or n.agent_id not in self.artifacts
+      ]
+      executed.extend(
+          await self.run_layer_wave(solo, worker_fn, include_peers=False)
       )
-      for node, artifact in zip(ready, results, strict=True):
-        trimmed = dataclasses.replace(
-            artifact, summary=artifact.summary[: self.relay_max_chars]
-        )
-        self.artifacts[node.agent_id] = trimmed
-        node.dirty = False
-        self.worker_token_in += trimmed.token_in
-        self.worker_token_out += trimmed.token_out
-        self.worker_calls += 1
-        executed.append(node.agent_id)
+      peer_ready = [
+          n
+          for n in ready
+          if n.dirty
+          and self.peers(n.agent_id)
+          and all(p in self.artifacts for p in self.peers(n.agent_id))
+      ]
+      executed.extend(
+          await self.run_layer_wave(peer_ready, worker_fn, include_peers=True)
+      )
     return tuple(executed)
 
   def is_submit_ready(self, agent_id: str) -> bool:
@@ -434,17 +498,21 @@ class GraphCanvas:
     if self.nodes:
       allowed.extend(["set_prompt", "set_layer", "delete_agent"])
     if len(self.nodes) >= 2:
-      allowed.append("add_edge")
+      allowed.extend(["add_edge", "consider_relation"])
     if any(n.configured and n.dirty for n in self.nodes.values()):
       allowed.append("run_graph")
     if submit_ready:
       allowed.append("finish")
+    peers_fmt = [
+        f"{a}<->{b}" for a, b in sorted(tuple(sorted(p)) for p in self.peer_edges)
+    ]
     return {
         "version": self.version,
         "remaining_rounds": remaining_rounds,
         "max_agents": self.max_agents,
         "nodes": nodes_view,
         "edges": [f"{u}->{v}" for u, v in sorted(self.edges)],
+        "peer_edges": peers_fmt,
         "submit_ready": submit_ready,
         "allowed_actions": allowed,
     }

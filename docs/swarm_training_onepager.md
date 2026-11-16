@@ -1,60 +1,42 @@
 # Tunix Swarm Training: Lead Review One-Pager
 
-**Status:** local shared-policy slice implemented and CPU-validated; distributed transport and pretrained 4B results pending. **Updated:** November 11, 2026.
+**Status:** Core swarm contracts, Dr. MAS (`SW1–SW2`), and R²Orch (`SW3` + Full `R²Orch`) implemented and TPU-verified on `v5p` (128-chip 500-step Dr. MAS, 32-chip 100-step SW3, and 128-chip 100-cycle Full `R²Orch`). **Updated:** November 16, 2026.
 
-**Implementation checkpoint:** reusable trace/runtime/credit code is under `dist_rl/swarm/`; the sibling `SwarmRLProgram` reuses native batching and training. The first recipe includes pinned prompts/grader, role/global credit comparisons and two-round local training. The diagram below remains the distributed target. [Recipe](../examples/swarm_math/README.md) · [Validation](swarm_training_validation.md).
+[English quick overview](swarm_training_overview.md) · [Chinese quick overview](swarm_training_overview_zh.md) · [Formal system design](swarm_training_design.md) · [Validation record](swarm_training_validation.md)
 
-[English quick overview](swarm_training_overview.md) · [Chinese quick overview](swarm_training_overview_zh.md) · [Formal system design](swarm_training_design.md)
+**Decision & delivered scope.** `tunix/dist_rl` now provides reusable multi-agent execution, role-to-policy binding, and credit-assignment contracts (`tunix/dist_rl/swarm/` + `SwarmRLProgram`). Two complete recipes are implemented on `origin/haoyu-next`: **Dr. MAS shared-policy math** ([`examples/swarm_math`](../examples/swarm_math/README.md)) and **R²Orch heterogeneous Graph Director + frozen Workers + recursive self-play** ([`examples/swarm_r2orch`](../examples/swarm_r2orch/README.md)). [Swarm-Repair](swarm_rlcr_design.md) remains the planned deadline-bounded parallel specialization.
 
-**Proposed decision.** Extend `tunix/dist_rl` with reusable multi-agent execution and learning contracts. Deliver **Dr. MAS shared-policy math** as the first reproducible recipe, then extend to Avalon-style dynamic parallel teams. The [formal system design](swarm_training_design.md) defines the common contracts and first recipe; [Swarm-Repair](swarm_rlcr_design.md) is the later parallel specialization.
+**Verified TPU `v5p` results (`Qwen/Qwen3-4B`).**
+1. **Dr. MAS (`SW1–SW2`, 128-chip `v5p-256`, 500 steps):** Shared `Solver → Verifier → Solver` reaches **`60.8 / 77.8` macro `avg@16 / pass@16`** (`60.7 / 77.7` decontaminated; `61.1 / 78.2` at Step 475) across all `1,547` Table 1 math problems, exceeding the published Dr. MAS baseline (`59.0 / 73.2`) by `+1.8 / +4.6` pp.
+2. **R²Orch Inner-Loop (`SW3`, 32-chip `v5p`, 100 steps) & Full `R²Orch` (`4x4x8` = 128 chips, active):** Trainable `GraphDirectorWorkflow` over frozen Workers (`frozen_worker_max_norm_drift == 0.0`) lifts 4-domain Heldout `avg@2 / pass@2` from `53.96 / 57.55` to **`58.39 / 64.06`**, Locked Test IID to **`47.03 / 48.79`**, and OOD `MATH-Hard` by **`+6.64 / +10.16` pp** while cutting Worker cost `13–23%`. Full `R²Orch` adds `ProposerRuntime` (`ADS+TSDS` + `arms_bell_reward` + pairwise RL+KL), Bayesian `SkillScaffold` withdrawal/admission/audit, and frozen-base `PatsOuterReviewer` distillation under strict zero-skill evaluation.
 
-**First result.** Train one shared **Qwen3-4B** as two logical roles: **Solver → Verifier → Solver if rejected**, with at most three model calls. An external rule-based verifier scores the final answer. Start from the [official Dr. MAS recipe][drmas-script]: K=8 independent team episodes per problem, learning rate `1e-6`, thinking disabled, and shared parameters explicitly enabled. Pin model, data, prompts, and source revisions. This establishes conditional multi-agent learning; dynamic parallelism and latency improvements require later experiments.
-
-Dr. MAS provides public training/evaluation code and supports model sharing. Its reported shared-4B run uses approximately **4×H100 for 35 hours**. Measure Tunix memory and throughput before setting its resource budget. [Source][drmas]
-
-**System boundary.** Reuse the existing distributed execution, model training, checkpoint, and weight-sync infrastructure:
+**System boundary.** Reuse existing `tunix/dist_rl` sampling, `PeftTrainer`, checkpointing, and weight sync:
 
 ```mermaid
 flowchart TD
-    P["1. SwarmRLProgram<br/>Task groups + PolicyBinding"]
-    E["2. DistributedRLEngine<br/>Route complete episodes"]
-    R["3. RolloutWorker + SwarmRuntime<br/>Execute Solver / Verifier workflow"]
-    S["Existing sampler<br/>Tokens + behavior logprobs"]
-    G["4. Rule scorer + CallTrace<br/>Scores + immutable per-call records"]
-    L["5. CreditAssigner + LearningPlan<br/>Credit statistics, token selection, objective and reduction"]
-    D["6. Batch assembler + existing trainer<br/>Call rows, gradient accumulation, optimizer update"]
-    C["7. Checkpoint + durable commit<br/>Model / optimizer + consumed task cursor"]
-    SYNC["8. Weight sync / Raiden<br/>Confirm serving policy before next round"]
-    P --> E --> R
-    R -->|model calls| S
-    S -->|exact token records| R
-    R --> G --> L --> D --> C --> SYNC
-    SYNC -->|next round| P
+    P["1. SwarmRLProgram + Proposer / SkillScaffold"] --> R["2. RecordingRuntime (Dr. MAS or R2Orch GraphCanvas)"]
+    R <-->|"trainable calls"| SD["Trainable vLLM Sub-Mesh"]
+    R <-->|"frozen calls (loss_mask=0)"| SW["Frozen Worker vLLM Sub-Mesh"]
+    R --> G["3. Domain Verifiers + Immutable CallTrace"]
+    G --> L["4. credit.build_credit (role or condition GRPO)"]
+    L --> D["5. PaddedBatchAssembler + PeftTrainer V2 (float32)"]
+    D --> C["6. Atomic Checkpoint + Trainable Weight Sync"]
+    C --> SD
 ```
 
-The numbered path is one training round. Sampling is a runtime service; scoring and call traces feed learning, and the next round starts only after durable commit and weight-sync acknowledgment. Fully zero-signal rounds reuse the prior checkpoint and commit only data consumption, as shown in the formal flowchart.
+The numbered path is one training round. Sampling runs over isolated role sub-meshes; immutable `CallTrace` records feed detached credit assignment, and the next round starts only after checkpoint/weight-sync completion (skipping optimizer steps on all-zero-signal rounds).
 
-- **Execution:** `SwarmProgram` defines roles and conditional/asynchronous control flow; `SwarmRuntime` supplies model/tool calls, lifecycle, and budgets. Fixed workflows and dynamic teams share these contracts.
-- **Policy binding:** separate agent instance, semantic role, and parameter identity. V0 has one shared trainable policy. Frozen workers and independently trained policies are separate extensions; the latter require policy version/checkpoint bundles.
-- **Learning:** immutable call traces preserve actual visible contexts, token IDs, behavior logprobs, policy versions, and action ownership. `CreditAssigner` and `LearningPlan` specify comparison groups, reward statistics, loss masks, and reduction; the trainer does not interpret communication topology.
+- **Execution:** Async episode coroutines (`SolverVerifierWorkflow`, `GraphDirectorWorkflow` + `GraphCanvas` with directed layers and same-layer `consider_relation` peer waves) run over `RecordingRuntime`.
+- **Policy binding:** `PolicyBinding` and `RecordingRuntime.from_bindings` separate semantic `role` from `policy_id` and `trainable` status, supporting shared policies, frozen Workers (`loss_mask=0`), and `train_mesh` Proposer scoring (`skip_lm_head=True`).
+- **Learning & TPU stability:** `credit.build_credit` filters `c.trainable` calls for `(task, role)` or `(task, condition)` normalization (`microbatch_token_mean`, `sampler_is="token"`, `dtype="float32"`, `use_flash_attention=False`).
 
-**Tunix changes.** Add collector selection to `RolloutManager` and a `SwarmRLProgram` that expands one episode into multiple call payloads. Reuse existing padded batching and trainer machinery, extending payloads where required. Current engine versioning and synchronization assume one trainable policy; heterogeneous co-training requires explicit routing, per-policy versions, and checkpoint bundles. Reference [MARTI][marti] for workflow separation and [Agent Lightning][lightning] for harness integration.
+**Delivery and acceptance status.**
 
-**Delivery and acceptance.**
-
-| Gate | Deliverable | Required evidence |
+| **Gate** | **Deliverable** | **Status & Evidence** |
 | --- | --- | --- |
-| 1 — Correctness | Shared-policy conditional workflow and Dr. MAS adapter | Reference-aligned advantages/loss/gradients; exact token ownership; real rollout → train → sync → resume |
-| 2 — First result | Pinned math train/eval recipe and saved artifacts | Held-out avg@16/pass@16 and cost: untrained teams at initialization, global-normalization RL, Dr. MAS, and single-agent RL |
-| 3 — Generality | Trainable orchestrator with frozen workers | Change bindings and workflow without rewriting the trainer; verify frozen parameters stay unchanged |
-| 4 — Parallel swarm | Avalon-inspired Swarm-Repair | Dynamic membership, workspace, anytime scoring, deadline cancellation preserving token prefixes; quality/latency evaluation at matched budgets |
+| 1 — Correctness | Shared/heterogeneous runtime, `CallTrace`, Dr. MAS & episode credit | **Completed.** PyTorch oracle parity ≤ `2e-6`; `67/67` `tests/dist_rl/swarm` tests green |
+| 2 — First result | Pinned `Qwen3-4B` Dr. MAS math reproduction (`SW2`) | **Completed.** `60.8 / 77.8` Table 1 `avg@16 / pass@16` (`1,547 × 16`) vs paper `59.0 / 73.2` |
+| 3 — Generality | Trainable `R²Orch` Director + frozen Workers (`SW3`) & Full `R²Orch` self-play | **SW3 TPU-verified (`drift == 0.0`, IID/OOD gains); Full `R²Orch` CPU-verified & 128-chip `v5p` run active** |
+| 4 — Parallel swarm | Avalon-inspired Swarm-Repair & remote RPC `swarm_collector` | **Planned.** Dynamic membership, workspace, physical deadlines, prefix-preserving abort |
 
-**Main risks and controls.** Dr. MAS normalizes over active calls grouped by task and role; porting only role labels into existing Team-GRPO changes the algorithm. Match the [reference statistics][drmas-algo] and loss reduction numerically: the global baseline averages calls per episode, whereas role normalization counts active calls. Conditional missing roles are not zero-reward samples. Episode/call/token weighting remains explicit in the learning plan. Reserve development data separately from final benchmarks. Compare matched token budgets, report latency/cost and uncertainty across seeds, and retain unsuccessful results. Improved quality or stability is an experimental outcome, not an acceptance assumption.
-
-**Deferred scope.** Multiple independently trained policies, counterfactual environment forks, swarm OPD, and RSI curricula follow the first result. Deadline/workspace semantics belong to the Avalon recipe; task generation and skill evolution belong to an outer curriculum controller.
-
-[drmas]: https://github.com/langfengQ/DrMAS
-[drmas-script]: https://github.com/langfengQ/DrMAS/blob/master/examples/drmas_trainer/run_math.sh
-[drmas-algo]: https://github.com/langfengQ/DrMAS/blob/master/verl/trainer/ppo/core_algos.py
-[marti]: https://github.com/TsinghuaC3I/MARTI
-[lightning]: https://github.com/microsoft/agent-lightning/blob/main/docs/05-basics.md
+**Key lessons & controls.** SplashAttention on TPU `v5p` corrupts backward gradients below layer 15 (cosine `0.155`); `float32` XLA reference attention + `sampler_is="token"` + `microbatch_token_mean` (`rows=4`) are mandatory for stable multi-turn learning. All `R²Orch` evaluations enforce zero-skill deployment (`skill_context=""`) and zero gold-answer leakage into PATS distillation.

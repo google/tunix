@@ -1,101 +1,67 @@
 # Tunix Swarm 训练：内部速览
 
-**状态：**共享模型的本机实现与 CPU 验证已完成；分布式 transport 与预训练 Qwen3-4B 实验待验收。**更新日期：**2026 年 11 月 11 日。
+**状态：**核心 Swarm 契约、Dr. MAS（`SW1–SW2`）及 R²Orch（`SW3` 冻结 Worker 编排 + 完整版双时间尺度自博弈 `Full R²Orch`）均已完成代码落地与 TPU `v5p` 全量评测验收。**更新日期：**2026 年 11 月 16 日。
 
-代码放在 `dist_rl/swarm/`，训练调度用同级的 `SwarmRLProgram`，数学任务的 prompt、判题、数据和配置放在 `examples/swarm_math/`。已对照原作验证数值，并跑通真实优化器的两轮训练，也覆盖了随机小型 Qwen3 Transformer 的原生采样与训练。下方组件图仍描述完整分布式目标。[运行说明](../examples/swarm_math/README.md) · [验证记录](swarm_training_validation.md)。
+[英文速览](swarm_training_overview.md) · [Lead review one-pager](swarm_training_onepager.md) · [正式系统设计（英文）](swarm_training_design.md) · [验证记录](swarm_training_validation.md)
 
-[英文速览](swarm_training_overview.md) · [Lead review one-pager](swarm_training_onepager.md) · [正式系统设计（英文）](swarm_training_design.md)
+## 目标与已交付成果
 
-## 目标与首个结果
+在 `tunix/dist_rl/swarm/` 与同级 `SwarmRLProgram` 上构建统一的多 Agent 采样、异构角色绑定与归因学习契约，目前已在 `origin/haoyu-next` 交付两套完整 `Qwen/Qwen3-4B` recipe：
+1. **Dr. MAS 共享模型数学协作（[`examples/swarm_math`](../examples/swarm_math/README.md)，`SW1–SW2`）：**`Solver → Verifier → 必要时 Solver 修订` 共享同一 `Qwen3-4B` 策略，在 TPU `v5p-256` 训练 500 步后于论文 Table 1 全部 `1,547` 道题上取得 **`60.8 / 77.8` 宏平均 `avg@16 / pass@16`**（去污染 `60.7 / 77.7`，Step 475 达 `61.1 / 78.2`），全面超越原论文共享模型基线（`59.0 / 73.2`）。
+2. **R²Orch 异构图编排与递归自博弈（[`examples/swarm_r2orch`](../examples/swarm_r2orch/README.md)，`SW3` + `Full R²Orch`）：**可训练 `GraphDirectorWorkflow` 在分层 DAG + 同层互评 `GraphCanvas` 上调度冻结的 `Qwen3-4B` Worker（全程 `frozen_worker_max_norm_drift == 0.0`）。`SW3` 100 步训练使四域 Heldout `avg@2 / pass@2` 由 `53.96 / 57.55` 升至 **`58.39 / 64.06`**，Locked Test IID 升至 **`47.03 / 48.79`**，OOD `MATH-Hard` 跃升 **`+6.64 / +10.16` pp**，同时降低 `13–23%` Worker 开销。完整版 `R²Orch` 进一步集成 `ProposerRuntime`（`ADS+TSDS` 候选表 + `arms_bell_reward` 递归可学性奖励 + `train_mesh` 成对策略梯度与参考 KL 更新）、贝叶斯自举 `SkillScaffold`（技能内化撤回、准入与审计恢复）及基于冻结底座的 `PatsOuterReviewer` 零泄漏技能蒸馏，并在全部评测集上严格执行**零技能卡部署**（`skill_context=""`）。
 
-在 `tunix/dist_rl` 上补齐可复用的多 Agent 执行与学习契约。首先完成 **Dr. MAS 共享模型数学 recipe**：Solver 和 Verifier 使用同一个 Qwen3-4B，最终答案由外部规则验证器评分。随后用“只训练 orchestrator、冻结 workers”检验框架通用性，再扩展 Avalon 风格的动态并行 Swarm-Repair。
-
-正式系统设计定义通用契约；[Swarm-Repair 专项设计](swarm_rlcr_design.md)定义后续 recipe。共享文件系统、动态成员、物理截止时间和固定团队容量分母都属于该 recipe，不是所有 swarm 的前提。
+[Swarm-Repair 专项设计](swarm_rlcr_design.md)定义后续带物理截止时间与共享工作区的动态并行特化版本。
 
 ```mermaid
 flowchart LR
-    Q[数学题] --> S[Solver 解题]
-    S --> V[Verifier 检查]
-    V -->|接受| F[最终答案]
-    V -->|拒绝| S2[Solver 修改一次]
-    S2 --> F
-    F --> G[外部规则验证器评分]
+    Q["任务输入"] --> D["Graph Director (可训练)"]
+    D -->|"JSON 画布编辑 / run_graph"| W["分层 DAG + 同层互评冻结 Workers"]
+    W -->|"摘要观测"| D
+    D -->|"finish"| G["四域验证器与成本计费"]
 ```
-
-参考初值：共享 Qwen3-4B；每题 K=8 次独立团队执行；学习率 `1e-6`；关闭 thinking；不加额外 KL/entropy。原流程最多三次模型调用，最后一次 Solver 后不再调用 Verifier。公开脚本默认不共享模型，需要显式启用其支持的共享模式。固定代码、模型、数据和模板版本，再实测 Tunix 的硬件配置。[参考脚本](https://github.com/langfengQ/DrMAS/blob/master/examples/drmas_trainer/run_math.sh)
-
-首个结果验证条件式多 Agent 学习。动态并行与延迟收益由后续 recipe 单独验收。
 
 ## 通用系统
 
 ```mermaid
 flowchart TD
-    C[任务来源 / Curriculum] --> P[SwarmProgram：交互逻辑]
-    B[PolicyBinding：角色到参数] --> R[Rollout worker 内的 SwarmRuntime]
+    C["任务池 / ProposerRuntime (ADS + TSDS)"] --> P["SwarmRLProgram + SkillScaffold (双臂条件)"]
+    B["PolicyBinding (共享或冻结绑定)"] --> R["RecordingRuntime"]
     P --> R
-    R <--> S[现有 sampler / 环境]
-    R --> T[Episode 与逐调用不可变轨迹]
-    T --> L[CreditAssigner 与 LearningPlan]
-    L --> D[现有 batching 与 trainer]
-    D --> K[Checkpoint / 提交 / 权重同步]
+    R <--> S["隔离 vLLM 推理子网格"]
+    R --> T["SwarmEpisode 与不可变 CallTrace"]
+    T --> L["credit.build_credit (角色或条件内 GRPO)"]
+    L --> D["PaddedBatchAssembler + PeftTrainer V2"]
+    D --> K["原子级 Checkpoint 与可训练权重同步"]
     K --> S
 ```
 
-| 契约 | 职责 |
+| **契约模块** | **已实现职责（`tunix/dist_rl/swarm/`）** |
 | --- | --- |
-| `SwarmProgram` | 表达条件、顺序、并发与动态交互；固定 DAG 只是其中一种写法 |
-| `SwarmRuntime` | 模型与工具调用、可选消息和成员管理、预算、取消、生命周期 |
-| `PolicyBinding` | 区分成员 `agent_id`、语义角色 `role_id`、参数 `policy_id`；声明共享关系与训练范围 |
-| `SwarmEpisode / CallTrace` | 保存真实可见上下文、采样 token/logprob、动作归属、策略版本、因果关系和结果 |
-| `CreditAssigner` | 明确比较组、奖励聚合、统计单位与归一化范围 |
-| `LearningPlan` | 选择训练调用、policy、目标和 loss 分母，再生成现有 trainer 的输入 |
+| 异步工作流（`SwarmProgram`） | 支持条件流水线（`SolverVerifierWorkflow`）与动态分层 DAG / 同层 `consider_relation` 互评波次（`GraphCanvas`） |
+| `RecordingRuntime` | 基于 `from_bindings` 按角色路由采样器，并发预留唯一 `call_id` 与确定性随机种子，校验未填充 token 归属 |
+| `PolicyBinding` | 解耦语义 `role`、`policy_id`、`policy_version` 与 `trainable: bool`（统一支持共享策略与冻结 Worker） |
+| `SwarmEpisode / CallTrace` | 不可变保存真实可见 `prompt_ids`、`completion_ids`、行为 `logprobs` 与 `loss_mask`（冻结调用强制全 0 掩码） |
+| `credit.build_credit` | 自动过滤 `c.trainable` 调用，支持 `(task, role)` 活跃调用归一化与 `float64` 累加的 `(task, condition)` 分组优势 |
+| `SwarmRLProgram` | 支持固定 `group_size` 或非对称条件分组（`allow_variable_group_sizes`）、`microbatch_token_mean`、`sampler_is="token"`、零信号跳步与 `restore_state` |
 
-初期一个 rollout owner 管理完整 episode，控制平面派发团队，Agent 调度留在本地。V0 使用一个共享可训练 policy。多个独立模型联合训练后续需要真正补齐按 policy 路由、版本、optimizer、同步和 checkpoint 集合。
-
-不能把私人历史拼成无人真正看到的全局对话。收到的消息、工具输出和重复历史在接收方调用中不产生直接动作 loss。冻结 Agent 的调用保留在轨迹中，但不为其 policy 生成更新。Teacher 专属反馈也不能改写学生原本看到的上下文。
+系统严禁拼接无人真正观察到的全局合成对话：上游输出仅作为下游 `prompt_ids` 输入（直接动作 loss 为 0）；冻结 Worker 调用保留在轨迹中用于成本与拓扑统计，绝不进入优化器 payload。
 
 ## 一轮端到端流程
 
-```mermaid
-flowchart TD
-    P["1. SwarmRLProgram 与任务源<br/>恢复提交状态；选择 B 道题，每题 K 次团队执行"]
-    E["2. DistributedRLEngine<br/>按准确策略版本 v 派发 episode"]
-    subgraph W["RolloutWorker / SwarmRuntime"]
-        R["3. SwarmProgram<br/>Solver → Verifier → 必要时 Solver 修改"]
-        S["现有 sampler<br/>生成 token 与行为策略 logprob"]
-        G["4. 规则评分器与 CallTrace<br/>最终得分、调用处罚、原始 token 和上下文"]
-    end
-    L["5. CreditAssigner 与 LearningPlan<br/>检查分组；计算 credit；选择动作 token 与归一化规则"]
-    B["Batch assembler<br/>将 episode 展开为补齐后的逐调用训练行"]
-    A{"存在学习信号？"}
-    T["6. 现有 trainer<br/>累积梯度，更新一次，持久化 checkpoint"]
-    C["7. 提交存储<br/>发布 checkpoint 引用与已消费任务游标"]
-    SYNC["8. 权重同步 / Raiden<br/>确认 rollout replicas 已加载提交的策略"]
-    P --> E --> R
-    R -->|模型调用| S
-    S -->|采样 token 与分数| R
-    R --> G --> L --> B --> A
-    A -->|有| T --> C
-    A -->|无：复用原 checkpoint| C
-    C --> SYNC -->|下一轮| E
-```
+每轮支持对 Director、Proposer 以及 `SkillScaffold`/`ADS`/`PATS` 状态字典的原子级保存与恢复；全轮零方差时只推进轮次而不触发权重衰减；每次发布后仅同步可训练 mesh 并在线强校验 `frozen_worker_max_norm_drift == 0.0`。
 
-恢复时使用准确配对的模型、optimizer 和任务游标。区分 collection round、optimizer step 与 policy version。全轮学习信号为零时，只提交数据消费，不执行 optimizer。更新结果不明时恢复已提交状态。基础设施故障使用新 attempt 有限重试；答错与正常条件终止属于有效策略结果。
+## 学习稳定性与评估关键结论
 
-## 学习与评估
+TPU `v5p` 诊断实验证实 SplashAttention 反向传播在第 15 层以下会出现梯度方向崩坏（余弦仅 `0.155`），因此训练侧强制启用 `dtype="float32"` + XLA 参考注意力（`use_flash_attention=False`）+ `sampler_is="token"` 截断重要性权重 + `microbatch_token_mean`（`rows=4`）。所有评测均在锁定的开发/测试集及零技能卡条件下独立完成。
 
-Dr. MAS 按任务和角色，对活跃调用的奖励计算统计量；同一 Solver 再调用一次，就再贡献一个观测。原 global baseline 则先对 episode 内调用奖励求均值。仅给现有 GRPO 分组加 role 字段不能保证算法一致。需要对齐奖励处罚、标准差、epsilon、mask 和 loss reduction。[参考实现](https://github.com/langfengQ/DrMAS/blob/master/verl/trainer/ppo/core_algos.py)
+## 推进状态
 
-从训练数据单独留开发集，锁定最终测试集，不照抄原脚本中来自 benchmark 的验证子集用于选 checkpoint。对照初始未训练团队、global normalization RL、Dr. MAS RL，以及相同预算单 Agent RL。报告 avg@16/pass@16、成本、耗时、改对/改错率、失败率与多 seed 不确定性。一次评估采样指完整团队执行。质量和稳定性是否提高，需要实验回答。
-
-## 实现顺序
-
-| 阶段 | 交付与验收 |
+| **阶段** | **交付内容与当前状态** |
 | --- | --- |
-| 1. 正确性 | 共享模型条件式 runtime；对齐参考 credit/loss/梯度；验证 token 归属与 microbatch 等价 |
-| 2. 首个结果 | 两轮真实加速器训练、同步和恢复；完整数学 recipe 与独立测试对照 |
-| 3. 通用性 | 同一 runtime/trainer 接入可训练 orchestrator 与冻结 workers；验证更新范围 |
-| 4. 并行 swarm | Avalon 风格 Swarm-Repair：动态成员、消息/工作区、anytime 评分、物理截止与保留前缀的取消 |
-| 5. 扩展 | 独立 policies、角色 OPD、反事实分支、外层 RSI curriculum，各自验收 |
+| 1. 数值与契约正确性 | **已完成。** 对齐上游 PyTorch 优势/损失/梯度（误差 `≤ 2e-6`），`tests/dist_rl/swarm` 共 `67/67` 单测与集成测试全绿 |
+| 2. 首个完整结果（`SW2`） | **已完成。** `Qwen3-4B` Dr. MAS 500 步 TPU 复现，Table 1 `1,547` 题达 `60.8 / 77.8`（超越原论文 `59.0 / 73.2`） |
+| 3. 异构编排与自博弈（`SW3` + `Full R²Orch`） | **`SW3` 已完成 TPU 验收（Worker 零漂移 + 四域 IID/OOD 提升）；完整版 `R²Orch`（Proposer + 技能撤回 + PATS）已通过 CPU 验证并在 128 颗 `v5p` 上运行真实训练** |
+| 4. 动态并行 Swarm | **规划中。** Avalon 风格 Swarm-Repair：动态成员、共享工作区、物理截止与保留前缀流式取消 |
+| 5. 后续扩展 | **规划中。** 跨进程 RPC `swarm_collector`、Swarm OPD 及反事实分支恢复 |
 
-复用 `ClusterOrchestrator`、workers、sampler、trainer、Raiden 和 checkpoint 基础。新增 collector 选择、带类型的 episode 传输、支持一对多调用展开的 `SwarmRLProgram`、明确的学习与归一化契约。系统分层参考 [MARTI](https://github.com/TsinghuaC3I/MARTI) 和 [Agent Lightning](https://github.com/microsoft/agent-lightning/blob/main/docs/05-basics.md)。详细接口与待实测项见[正式设计](swarm_training_design.md)。
+完整接口契约与实验数据见[正式系统设计](swarm_training_design.md)。

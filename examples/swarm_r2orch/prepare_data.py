@@ -110,9 +110,13 @@ def normalize_iid_row(row: dict) -> dict:
           "difficulty_score",
           "rank_in_cluster",
           "cluster_size",
+          "task_type",
       )
       if key in row
   }
+  curriculum["source_id"] = str(row.get("source_id") or row["id"])
+  if "embedding" in row:
+    curriculum["embedding"] = [round(float(x), 6) for x in row["embedding"]]
   return {
       "task_id": str(row["id"]),
       "dataset": dataset,
