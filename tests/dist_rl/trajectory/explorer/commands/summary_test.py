@@ -371,6 +371,30 @@ class SummaryTest(absltest.TestCase):
           self.table_cmd, mem_store, diagnostics=(StatusDiagnostics(),)
       )
 
+  def test_hidden_schema_columns_are_only_in_json(self) -> None:
+    class HidingDiagnostics(
+        schema_diagnostics.SchemaDiagnostics[
+            trajectory_lib.TunixTrajectoryMetadata
+        ]
+    ):
+      COLUMN_DTYPES = {"masked_out": "boolean", "prompt_id": "string"}
+      HIDDEN_COLUMNS = frozenset({"prompt_id"})
+
+    mem_store = testing.create_store(trajectories=[_SUCCEEDED_TRAJECTORY])
+    diagnostics = (HidingDiagnostics(),)
+    _, out = testing.execute_command(
+        self.table_cmd, mem_store, diagnostics=diagnostics
+    )
+    _, json_out = testing.execute_command(
+        self.cmd, mem_store, output_json=True, diagnostics=diagnostics
+    )
+    self.assertRegex(out.splitlines()[0], r"\s+reward\s+masked_out$")
+    self.assertNotIn(_SUCCEEDED_TRAJECTORY.prompt_id, out)
+    self.assertEqual(
+        json.loads(json_out)["trajectories"][0]["tunix__prompt_id"],
+        _SUCCEEDED_TRAJECTORY.prompt_id,
+    )
+
   def test_limit_truncates_loaded_trajectories_and_updates_totals(self) -> None:
     mem_store = testing.create_store(
         trajectories=[
