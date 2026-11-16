@@ -1351,9 +1351,12 @@ class RLProgramTest(absltest.TestCase):
       self.assertEqual(program.step, 1)
       self.mock_engine.train_step.assert_called_once()
       self.assertEqual(program.last_step_result.reward_mean, 0.5)
+      # The dropped group is counted with the step's other filtered groups.
       self.assertEqual(
           logged[("rollout/tied_rewards_dropped_groups_count", 0)], 1.0
       )
+      self.assertEqual(logged[("rollout/filtered_groups_count", 0)], 1.0)
+      self.assertEqual(logged[("rollout/filtered_trajectories_count", 0)], 2.0)
       # A resumed run skips the dropped prompt as well as the trained one.
       metadata = self.mock_engine.save_checkpoint.call_args.kwargs["metadata"]
       self.assertEqual(metadata["skipped_prompt_ids"], ["prompt_0"])

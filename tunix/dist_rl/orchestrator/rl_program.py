@@ -292,12 +292,16 @@ class ScoredGroup:
       stamped into each `item.traj["trajectory_reward"]` for downstream logging.
     reward_log_metrics: Per-group reward manager log metrics (`name -> (values,
       agg_fn)`) to be aggregated across the step in `train_stage`.
+    has_tied_rewards: Whether `algo_config.dynamic_sampling` found the group's
+      rewards tied (`advantages.tied_rewards`), so `critique_stage` drops it.
+      Always `False` when dynamic sampling is off.
   """
 
   payloads: tuple[datatypes.RLTrainerPayload, ...]
   items: tuple[datatypes.TrajectoryItem, ...]
   rewards: tuple[float, ...]
   reward_log_metrics: RewardLogMetrics = dataclasses.field(default_factory=dict)
+  has_tied_rewards: bool = False
 
   def __post_init__(self) -> None:
     if not (len(self.payloads) == len(self.items) == len(self.rewards)):
@@ -584,9 +588,10 @@ class StandardRLProgram(RLProgram):
       )
     self.max_staleness = max_staleness
     self.max_version_span = max_version_span
-    # Tied-reward groups dropped by `algo_config.dynamic_sampling`: since the
-    # last train step, and in a row.
-    self._tied_groups_dropped = 0
+    # Tied-reward groups dropped by `algo_config.dynamic_sampling`: those not
+    # yet drained into a train step's `filtered_groups`, and the current run of
+    # consecutive drops.
+    self._tied_reward_groups: list[list[datatypes.TrajectoryItem]] = []
     self._consecutive_tied_groups = 0
     self.sync_weights = sync_weights
     self.precompile_trainer = precompile_trainer
@@ -998,21 +1003,12 @@ class StandardRLProgram(RLProgram):
   def _critique_group(
       self,
       group: Sequence[datatypes.TrajectoryItem],
-  ) -> ScoredGroup | None:
-    """Scores a trajectory group and builds its RLTrainerPayloads and ScoredGroup off-loop.
-
-    Args:
-      group: Raw trajectory items of one prompt group.
-
-    Returns:
-      The `ScoredGroup`, or `None` when `algo_config.dynamic_sampling` is on
-      and the group's rewards tie, so the group carries no training signal.
-    """
+  ) -> ScoredGroup:
+    """Scores a trajectory group and builds its RLTrainerPayloads and ScoredGroup off-loop."""
     rewards, group_reward_log_metrics = self._score_group(group)
-    if self.algo_config.dynamic_sampling and advantages.tied_rewards(
-        rewards, [item.is_valid for item in group]
-    ):
-      return None
+    has_tied_rewards = self.algo_config.dynamic_sampling and (
+        advantages.tied_rewards(rewards, [item.is_valid for item in group])
+    )
     payloads = payload_builder.create_trainer_payloads(
         group,
         rewards=rewards,
@@ -1032,6 +1028,7 @@ class StandardRLProgram(RLProgram):
         items=tuple(items),
         rewards=tuple(rewards),
         reward_log_metrics=group_reward_log_metrics,
+        has_tied_rewards=has_tied_rewards,
     )
 
   def _drop_tied_group(self, group: list[datatypes.TrajectoryItem]) -> None:
@@ -1048,7 +1045,7 @@ class StandardRLProgram(RLProgram):
         "[pipeline] DROP reason=tied_rewards prompt_id=%s", group[0].prompt_id
     )
     self._on_raw_group_filtered(group)
-    self._tied_groups_dropped += 1
+    self._tied_reward_groups.append(group)
     self._consecutive_tied_groups += 1
     limit = self.algo_config.max_consecutive_filtered_groups
     if limit is not None and self._consecutive_tied_groups >= limit:
@@ -1075,7 +1072,7 @@ class StandardRLProgram(RLProgram):
           )
 
         scored_group = await asyncio.to_thread(self._critique_group, group)
-        if scored_group is None:
+        if scored_group.has_tied_rewards:
           self._drop_tied_group(group)
           continue
         self._consecutive_tied_groups = 0
@@ -1127,8 +1124,11 @@ class StandardRLProgram(RLProgram):
   async def _drain_filtered_groups(
       self,
   ) -> list[list[datatypes.TrajectoryItem]]:
-    """Drains and returns all filtered groups from the raw trajectory queue."""
-    return await self.raw_q.get_filtered_groups()
+    """Drains the groups dropped by `raw_q` and by dynamic sampling."""
+    # Taken before the `await` so the caller's tied-group count matches.
+    tied_reward_groups = self._tied_reward_groups
+    self._tied_reward_groups = []
+    return [*await self.raw_q.get_filtered_groups(), *tied_reward_groups]
 
   def _collect_and_log_step_metrics(
       self,
@@ -1986,10 +1986,9 @@ class StandardRLProgram(RLProgram):
         if self.algo_config.dynamic_sampling:
           self._log_metric(
               "rollout/tied_rewards_dropped_groups_count",
-              float(self._tied_groups_dropped),
+              float(len(self._tied_reward_groups)),
               current_step,
           )
-          self._tied_groups_dropped = 0
         filtered_groups = await self._drain_filtered_groups()
         if self._relay is not None:
           await self._relay.flush_releases()
