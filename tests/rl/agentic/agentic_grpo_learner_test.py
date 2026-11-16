@@ -2555,7 +2555,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       self.assertIsNone(train_example.sampler_is_weights)
 
 
-class ExactTokenContinuityBatchTest(absltest.TestCase):
+class ExactTokenContinuityBatchTest(parameterized.TestCase):
   """Real batch construction on a recorded exact trajectory; no model training."""
 
   @staticmethod
@@ -2583,6 +2583,9 @@ class ExactTokenContinuityBatchTest(absltest.TestCase):
       *,
       packed=False,
       raw=None,
+      raws=None,
+      rewards=(0.0, 1.0),
+      num_generations=None,
       trajectory_store=None,
       mode=rl_engine_lib.Mode.TRAIN,
       expected_step=None,
@@ -2591,15 +2594,18 @@ class ExactTokenContinuityBatchTest(absltest.TestCase):
     from tunix.perf.experimental import tracer  # pylint: disable=g-import-not-at-top
     from tunix.rl.agentic.agents import agent_types  # pylint: disable=g-import-not-at-top
 
+    record = self._raw_trajectory() if raw is None else raw
+    records = raws or [record, record]
     obj = object.__new__(agentic_grpo_learner.GRPOLearner)
     obj.algo_config = agentic_grpo_learner.GRPOConfig(
         max_response_length=20,
         beta=0.0,
         use_rollout_logps=True,
+        num_generations=num_generations or len(records),
     )
     obj._full_batch_size = 0
     obj.metric_fns = []
-    obj._compute_rewards = lambda **kw: jnp.array([0.0, 1.0])
+    obj._compute_rewards = lambda **kw: jnp.array(rewards)
     obj.rl_engine = types.SimpleNamespace(
         rollout=types.SimpleNamespace(pad_id=lambda: 0, eos_id=lambda: 255),
         r2m={rl_engine_lib.Role.ACTOR: None},
@@ -2620,12 +2626,11 @@ class ExactTokenContinuityBatchTest(absltest.TestCase):
             ),
         ),
     )
-    record = self._raw_trajectory() if raw is None else raw
     items = [
         agent_types.TrajectoryItem(
             prompt_id=7, group_index=i, traj=copy.deepcopy(record)
         )
-        for i in range(2)
+        for i, record in enumerate(records)
     ]
     return obj._process_results(items, mode=mode, expected_step=expected_step)[
         0
@@ -2693,6 +2698,78 @@ class ExactTokenContinuityBatchTest(absltest.TestCase):
             "Failed to log metrics for trajectory" in line
             for line in logs.output
         )
+    )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="overlong_filtered",
+          rewards=[1.0, 1.0, 0.0, 0.0],
+          overlong=[3],
+          env_timeout=[],
+          expected_advantages=[0.57735, 0.57735, -1.1547, 0.0],
+          expected_mask_sums=[5, 5, 5, 0],
+      ),
+      dict(
+          testcase_name="no_spread_among_valid",
+          rewards=[1.0, 1.0, 1.0, 0.0],
+          overlong=[3],
+          env_timeout=[],
+          expected_advantages=[0.0, 0.0, 0.0, 0.0],
+          expected_mask_sums=[5, 5, 5, 0],
+      ),
+      dict(
+          testcase_name="single_valid_rollout",
+          rewards=[1.0, 0.0, 0.0, 0.0],
+          overlong=[1, 2, 3],
+          env_timeout=[],
+          expected_advantages=[0.0, 0.0, 0.0, 0.0],
+          expected_mask_sums=[0, 0, 0, 0],
+      ),
+      dict(
+          testcase_name="env_timeout",
+          rewards=[1.0, 0.0, 1.0, 0.0],
+          overlong=[],
+          env_timeout=[3],
+          expected_advantages=[0.57735, -1.1547, 0.57735, 0.0],
+          expected_mask_sums=[5, 5, 5, 0],
+      ),
+      dict(
+          # Two groups of two, as processed in the consumer: the second group
+          # keeps a single valid rollout and must not train.
+          testcase_name="two_groups_one_degenerate",
+          rewards=[1.0, 0.0, 1.0, 0.0],
+          overlong=[3],
+          env_timeout=[],
+          expected_advantages=[0.70711, -0.70711, 0.0, 0.0],
+          expected_mask_sums=[5, 5, 0, 0],
+          num_generations=2,
+      ),
+  )
+  def test_invalid_rollouts_do_not_shape_group_baseline(
+      self,
+      rewards,
+      overlong,
+      env_timeout,
+      expected_advantages,
+      expected_mask_sums,
+      num_generations=None,
+  ):
+    raws = []
+    for i in range(len(rewards)):
+      raw = self._raw_trajectory()
+      if i in overlong:
+        # What `TrajectoryCollectEngine(overlong_filter=True)` emits.
+        raw["status"] = "MAX_CONTEXT_LIMIT_REACHED"
+        raw["conversation_masks"] = np.zeros_like(raw["conversation_masks"])
+      if i in env_timeout:
+        raw["status"] = "ENV_TIMEOUT"
+      raws.append(raw)
+    batch = self._make_batch(
+        raws=raws, rewards=rewards, num_generations=num_generations
+    )
+    np.testing.assert_allclose(batch.advantages, expected_advantages, atol=1e-4)
+    np.testing.assert_array_equal(
+        batch.completion_mask.sum(axis=-1), expected_mask_sums
     )
 
   def test_exact_batch_keeps_recorded_ids_masks_and_logprobs(self):
