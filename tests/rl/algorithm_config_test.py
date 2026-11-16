@@ -387,20 +387,22 @@ class AlgorithmConfigTest(parameterized.TestCase):
     with self.assertRaisesRegex(ValueError, "value_loss_fn must be one of"):
       algorithm_config.PPOConfig(value_loss_fn="bad_value_loss")
 
-  def test_dynamic_sampling_validation(self):
-    self.assertFalse(algorithm_config.GRPOConfig().dynamic_sampling)
+  def test_drop_zero_variance_groups_validation(self):
+    self.assertFalse(algorithm_config.GRPOConfig().drop_zero_variance_groups)
     cfg = algorithm_config.GRPOConfig(
-        dynamic_sampling=True, max_consecutive_filtered_groups=32
+        drop_zero_variance_groups=True, max_consecutive_filtered_groups=32
     )
-    self.assertTrue(cfg.dynamic_sampling)
+    self.assertTrue(cfg.drop_zero_variance_groups)
     self.assertEqual(cfg.max_consecutive_filtered_groups, 32)
 
     with self.assertRaisesRegex(ValueError, "not 'gae'"):
       algorithm_config.GRPOConfig(
-          advantage_estimator="gae", dynamic_sampling=True
+          advantage_estimator="gae", drop_zero_variance_groups=True
       )
     with self.assertRaisesRegex(ValueError, "num_generations >= 2"):
-      algorithm_config.AlgorithmConfig(num_generations=1, dynamic_sampling=True)
+      algorithm_config.AlgorithmConfig(
+          num_generations=1, drop_zero_variance_groups=True
+      )
     for bad_limit in (0, True):
       with self.assertRaisesRegex(ValueError, "positive int or None"):
         algorithm_config.GRPOConfig(max_consecutive_filtered_groups=bad_limit)

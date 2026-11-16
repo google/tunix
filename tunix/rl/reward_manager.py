@@ -151,8 +151,8 @@ class AbstractRewardManager(abc.ABC):
 
     Returns:
         A dictionary of rewards information, including the final rewards for
-        advantage computation and intermediate rewards for logging. Dynamic
-        sampling (`algo_config.dynamic_sampling`) also requires
+        advantage computation and intermediate rewards for logging.
+        `algo_config.drop_zero_variance_groups` also requires
         `"primary_rewards"`, the per-trajectory task rewards before shaping
         rewards are summed in.
     """

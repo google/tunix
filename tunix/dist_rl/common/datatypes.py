@@ -218,7 +218,7 @@ class DropReason(enum.Enum):
 
   Attributes:
     STALE: The group's rollouts fall outside the policy-version window.
-    TIED_REWARDS: Dynamic sampling found the group's rewards tied.
+    TIED_REWARDS: The group's rewards tie, so it has no training signal.
   """
 
   STALE = "stale"

@@ -883,10 +883,11 @@ weight_sync_config:
           "agentic_grpo_config.trajectory_group_order=prompt_arrival",
       ])
     with self.assertRaisesRegex(
-        ValueError, "agentic_grpo_config.dynamic_sampling is only supported"
+        ValueError,
+        "agentic_grpo_config.drop_zero_variance_groups is only supported",
     ):
       resolve_config.initialize([
-          "agentic_grpo_config.dynamic_sampling=true",
+          "agentic_grpo_config.drop_zero_variance_groups=true",
           "agentic_grpo_config.trajectory_group_order=prompt_arrival",
       ])
 

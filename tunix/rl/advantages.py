@@ -245,12 +245,13 @@ def compute_drgrpo_advantages(
 
 
 def tied_rewards(rewards: npt.ArrayLike, valid_mask: npt.ArrayLike) -> bool:
-  """Returns whether DAPO dynamic sampling should drop a tied-reward group.
+  """Returns whether a prompt group's rewards tie, i.e. have zero variance.
 
   A group whose valid trajectories all earn the same reward, or that has a
-  single valid trajectory, has zero group-relative advantage, so dynamic
-  sampling drops it and samples a replacement prompt. A group with no valid
-  finite reward at all (e.g. a worker or sandbox outage) is kept so the failure
+  single valid trajectory, has zero group-relative advantage, so
+  `AlgorithmConfig.drop_zero_variance_groups` drops it and samples a
+  replacement prompt (DAPO's dynamic sampling). A group with no valid finite
+  reward at all (e.g. a worker or sandbox outage) is kept so the failure
   reaches step telemetry instead of being resampled silently.
 
   Args:

@@ -12,7 +12,7 @@
         "kwargs": {
           "advantage_estimator": "grpo",
           "beta": 0.04,
-          "dynamic_sampling": false,
+          "drop_zero_variance_groups": false,
           "epsilon": 0.2,
           "epsilon_high": 0.28,
           "kl_loss_mode": "low_var_kl",

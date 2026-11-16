@@ -292,9 +292,9 @@ class ScoredGroup:
       stamped into each `item.traj["trajectory_reward"]` for downstream logging.
     reward_log_metrics: Per-group reward manager log metrics (`name -> (values,
       agg_fn)`) to be aggregated across the step in `train_stage`.
-    has_tied_rewards: Whether `algo_config.dynamic_sampling` found the group's
-      task rewards or total rewards tied (`advantages.tied_rewards`), so
-      `critique_stage` drops it. Always `False` when dynamic sampling is off.
+    has_tied_rewards: Whether `algo_config.drop_zero_variance_groups` found the
+      group's task rewards or total rewards tied (`advantages.tied_rewards`), so
+      `critique_stage` drops it. Always `False` when that option is off.
   """
 
   payloads: tuple[datatypes.RLTrainerPayload, ...]
@@ -588,7 +588,8 @@ class StandardRLProgram(RLProgram):
       )
     self.max_staleness = max_staleness
     self.max_version_span = max_version_span
-    # Tied-reward groups `algo_config.dynamic_sampling` dropped in a row.
+    # Tied-reward groups dropped in a row by
+    # `algo_config.drop_zero_variance_groups`.
     self._consecutive_tied_groups = 0
     self.sync_weights = sync_weights
     self.precompile_trainer = precompile_trainer
@@ -624,12 +625,12 @@ class StandardRLProgram(RLProgram):
         if isinstance(group_order, GroupOrder)
         else GroupOrder(group_order)
     )
-    if self.algo_config.dynamic_sampling and (
+    if self.algo_config.drop_zero_variance_groups and (
         self.group_order,
         self.mode,
     ) != (GroupOrder.TRAJECTORY_COMPLETION, Mode.TRAIN):
       raise ValueError(
-          "algo_config.dynamic_sampling requires"
+          "algo_config.drop_zero_variance_groups requires"
           " GroupOrder.TRAJECTORY_COMPLETION and Mode.TRAIN."
       )
     self.on_step_begin = on_step_begin
@@ -894,8 +895,8 @@ class StandardRLProgram(RLProgram):
       A `(rewards, log_metrics, primary_rewards)` tuple. `rewards` are the
       total rewards and `primary_rewards` the task rewards before shaping
       rewards are summed in (the same as `rewards` unless
-      `algo_config.dynamic_sampling` is on); both are aligned with `group`
-      (`0.0` for invalid items).
+      `algo_config.drop_zero_variance_groups` is on); both are aligned with
+      `group` (`0.0` for invalid items).
 
     Raises:
       KeyError: If any valid item's `traj` is missing `"conversation_text"` or
@@ -942,9 +943,9 @@ class StandardRLProgram(RLProgram):
         float(next(valid_rewards)) if item.is_valid else 0.0 for item in group
     ]
     primary_rewards = rewards
-    # Only dynamic sampling needs the task rewards, so reward managers that do
-    # not report them keep working without it.
-    if self.algo_config.dynamic_sampling:
+    # Only dropping zero-variance groups needs the task rewards, so reward
+    # managers that do not report them keep working without it.
+    if self.algo_config.drop_zero_variance_groups:
       valid_primary_rewards = iter(rewards_info["primary_rewards"])
       primary_rewards = [
           float(next(valid_primary_rewards)) if item.is_valid else 0.0
@@ -1020,7 +1021,7 @@ class StandardRLProgram(RLProgram):
     # A group carries no signal when its task rewards tie, even if shaping
     # rewards (e.g. a length penalty) make the totals differ.
     valid_mask = [item.is_valid for item in group]
-    has_tied_rewards = self.algo_config.dynamic_sampling and (
+    has_tied_rewards = self.algo_config.drop_zero_variance_groups and (
         advantages.tied_rewards(primary_rewards, valid_mask)
         or advantages.tied_rewards(rewards, valid_mask)
     )
@@ -1073,9 +1074,7 @@ class StandardRLProgram(RLProgram):
     self._consecutive_tied_groups += 1
     limit = self.algo_config.max_consecutive_filtered_groups
     if limit is not None and self._consecutive_tied_groups >= limit:
-      raise RuntimeError(
-          f"Dynamic sampling dropped {limit} tied-reward groups in a row."
-      )
+      raise RuntimeError(f"Dropped {limit} zero-variance groups in a row.")
 
   async def critique_stage(self) -> None:
     """Stage 2: Scores rewards, PRMs, and reference KL logprobs."""
@@ -2005,7 +2004,7 @@ class StandardRLProgram(RLProgram):
         step_time_sec = time.monotonic() - step_start_time
 
         filtered_groups = await self._drain_filtered_groups()
-        if self.algo_config.dynamic_sampling:
+        if self.algo_config.drop_zero_variance_groups:
           self._log_metric(
               "rollout/tied_rewards_dropped_groups_count",
               float(

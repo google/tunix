@@ -1286,7 +1286,7 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def _dynamic_sampling_program(self, group_rewards, **kwargs):
+  def _zero_variance_program(self, group_rewards, **kwargs):
     """Builds a program whose i-th dispatched prompt gets `group_rewards[i]`."""
     dispatched: list[str] = []
     ready: list[list[datatypes.TrajectoryItem]] = []
@@ -1314,7 +1314,7 @@ class RLProgramTest(absltest.TestCase):
     program = rl_program.StandardRLProgram(
         algo_config=dataclasses.replace(
             self.algo_config,
-            dynamic_sampling=True,
+            drop_zero_variance_groups=True,
             max_consecutive_filtered_groups=kwargs.pop(
                 "max_consecutive_filtered_groups", None
             ),
@@ -1330,9 +1330,9 @@ class RLProgramTest(absltest.TestCase):
     self.addCleanup(program.close)
     return program, dispatched
 
-  def test_dynamic_sampling_drops_tied_group_and_samples_replacement(self):
+  def test_zero_variance_group_is_dropped_and_replaced(self):
     async def _run():
-      program, dispatched = self._dynamic_sampling_program(
+      program, dispatched = self._zero_variance_program(
           [[1.0, 1.0], [0.0, 1.0]],
           dataset=["prompt_0", "prompt_1"],
           max_steps=1,
@@ -1367,7 +1367,7 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_dynamic_sampling_drops_tied_task_reward_despite_shaping(self):
+  def test_zero_variance_task_reward_is_dropped_despite_shaping(self):
     async def _run():
       # Both `prompt_0` answers are wrong, but a length penalty makes their
       # total rewards differ.
@@ -1382,7 +1382,7 @@ class RLProgramTest(absltest.TestCase):
         del prompts, completions
         return next(penalty_scores)
 
-      program, dispatched = self._dynamic_sampling_program(
+      program, dispatched = self._zero_variance_program(
           [],
           dataset=["prompt_0", "prompt_1"],
           max_steps=1,
@@ -1397,23 +1397,23 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_dynamic_sampling_raises_after_max_consecutive_tied_groups(self):
+  def test_raises_after_max_consecutive_zero_variance_groups(self):
     async def _run():
-      program_fail, _ = self._dynamic_sampling_program(
+      program_fail, _ = self._zero_variance_program(
           [[1.0, 1.0]] * 5,
           dataset=[f"prompt_{i}" for i in range(5)],
           max_steps=1,
           max_consecutive_filtered_groups=2,
       )
       with self.assertRaisesRegex(
-          RuntimeError, "dropped 2 tied-reward groups in a row"
+          RuntimeError, "Dropped 2 zero-variance groups in a row"
       ):
         await asyncio.wait_for(
             program_fail.run_async(self.mock_engine), timeout=10.0
         )
 
       # A kept group in between resets the count.
-      program_ok, dispatched = self._dynamic_sampling_program(
+      program_ok, dispatched = self._zero_variance_program(
           [[1.0, 1.0], [0.0, 1.0], [0.0, 0.0], [1.0, 0.0]],
           dataset=[f"prompt_{i}" for i in range(4)],
           max_steps=2,
@@ -1429,13 +1429,17 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_dynamic_sampling_requires_train_mode_and_completion_order(self):
-    algo_cfg = dataclasses.replace(self.algo_config, dynamic_sampling=True)
+  def test_drop_zero_variance_groups_requires_train_and_completion_order(self):
+    algo_cfg = dataclasses.replace(
+        self.algo_config, drop_zero_variance_groups=True
+    )
     for kwargs in (
         {"group_order": rl_program.GroupOrder.PROMPT_ARRIVAL},
         {"mode": rl_program.Mode.EVAL},
     ):
-      with self.assertRaisesRegex(ValueError, "dynamic_sampling requires"):
+      with self.assertRaisesRegex(
+          ValueError, "drop_zero_variance_groups requires"
+      ):
         rl_program.StandardRLProgram(
             dataset=["p0"],
             algo_config=algo_cfg,
