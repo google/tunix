@@ -31,8 +31,6 @@ from collections.abc import (
 )
 import contextlib
 import dataclasses
-import inspect
-import itertools
 import os
 import sys
 import threading
@@ -53,6 +51,7 @@ from tunix.dist_rl.orchestrator import rl_engine_interface
 from tunix.dist_rl.orchestrator import step_telemetry
 from tunix.dist_rl.queue_manager import trajectory_queue_manager
 from tunix.dist_rl.trajectory import store as trajectory_store_lib
+from tunix.rl import advantages
 from tunix.rl import algorithm_config
 from tunix.rl import common as rl_common
 from tunix.rl import function_registry
@@ -274,58 +273,6 @@ def _format_rollout_completion(conversation: Any) -> str:
   return "\n".join(lines)
 
 
-def resolve_program_filters_and_window(
-    entries: Sequence[str | Callable[..., bool]],
-    *,
-    mode: Mode,
-    group_order: GroupOrder,
-    max_in_flight_groups: int | None,
-    full_batch_size: int,
-    max_staleness: int,
-) -> list[tuple[str, Callable[..., bool], bool]]:
-  """Resolves `group_filters` and validates dispatch-window invariants."""
-  if entries and (group_order, mode) != (
-      GroupOrder.TRAJECTORY_COMPLETION,
-      Mode.TRAIN,
-  ):
-    raise ValueError(
-        "algo_config.group_filters require GroupOrder.TRAJECTORY_COMPLETION"
-        " and Mode.TRAIN."
-    )
-  if max_in_flight_groups is not None:
-    if isinstance(max_in_flight_groups, bool) or not isinstance(
-        max_in_flight_groups, int
-    ):
-      raise TypeError(
-          "max_in_flight_groups must be an int or None, got"
-          f" {max_in_flight_groups!r}."
-      )
-    max_allowed = (
-        (max_staleness + 1) * full_batch_size
-        if group_order == GroupOrder.PROMPT_ARRIVAL
-        else max_in_flight_groups
-    )
-    if not full_batch_size <= max_in_flight_groups <= max_allowed:
-      raise ValueError(
-          f"Invalid max_in_flight_groups={max_in_flight_groups} for"
-          f" batch_size={full_batch_size}, max_staleness={max_staleness},"
-          f" group_order={group_order}."
-      )
-  resolved: list[tuple[str, Callable[..., bool], bool]] = []
-  for entry in entries:
-    if isinstance(entry, str):
-      name, fn = entry, function_registry.get_group_filter(entry)
-    else:
-      name, fn = getattr(entry, "__name__", type(entry).__name__), entry
-    params = inspect.signature(fn).parameters.values()
-    accepts = any(
-        p.name == "reward_components" or p.kind == inspect.Parameter.VAR_KEYWORD
-        for p in params
-    )
-    resolved.append((name, fn, accepts))
-  return resolved
-
-
 @dataclasses.dataclass(frozen=True, kw_only=True, eq=False)
 class ScoredGroup:
   """A scored prompt group of rollouts with group-relative advantages computed.
@@ -492,7 +439,6 @@ class StandardRLProgram(RLProgram):
       batch_size: int | None = None,
       max_staleness: int = 0,
       max_version_span: int | None = None,
-      max_in_flight_groups: int | None = None,
       sync_weights: bool = True,
       precompile_trainer: bool = True,
       metrics_logging_options: MetricsLoggerOptions | None = None,
@@ -601,18 +547,6 @@ class StandardRLProgram(RLProgram):
           f"batch_size={self.full_batch_size}, "
           f"mini_batch_size={self.mini_batch_size}."
       )
-    self._group_filters = resolve_program_filters_and_window(
-        self.algo_config.group_filters,
-        mode=mode if isinstance(mode, Mode) else Mode(mode),
-        group_order=(
-            group_order
-            if isinstance(group_order, GroupOrder)
-            else GroupOrder(group_order)
-        ),
-        max_in_flight_groups=max_in_flight_groups,
-        full_batch_size=self.full_batch_size,
-        max_staleness=max_staleness,
-    )
     self.can_fuse_agreement_in_loss = (
         self.algo_config.policy_loss_fn == "grpo"
         and self.algo_config.num_iterations == 1
@@ -650,12 +584,10 @@ class StandardRLProgram(RLProgram):
       )
     self.max_staleness = max_staleness
     self.max_version_span = max_version_span
-    self.max_in_flight_groups = max_in_flight_groups
-    self._consecutive_filtered_groups = 0
-    self._last_reward_components: dict[str, np.ndarray] = {}
-    self._post_raw_filtered_groups: collections.deque[
-        list[datatypes.TrajectoryItem]
-    ] = collections.deque()
+    # Tied-reward groups dropped by `algo_config.dynamic_sampling`: since the
+    # last train step, and in a row.
+    self._tied_groups_dropped = 0
+    self._consecutive_tied_groups = 0
     self.sync_weights = sync_weights
     self.precompile_trainer = precompile_trainer
     self.metrics_logger: MetricsLogger = MetricsLogger(metrics_logging_options)
@@ -690,6 +622,14 @@ class StandardRLProgram(RLProgram):
         if isinstance(group_order, GroupOrder)
         else GroupOrder(group_order)
     )
+    if self.algo_config.dynamic_sampling and (
+        self.group_order,
+        self.mode,
+    ) != (GroupOrder.TRAJECTORY_COMPLETION, Mode.TRAIN):
+      raise ValueError(
+          "algo_config.dynamic_sampling requires"
+          " GroupOrder.TRAJECTORY_COMPLETION and Mode.TRAIN."
+      )
     self.on_step_begin = on_step_begin
     self.on_step_end = on_step_end
     self._in_flight_rollouts = 0
@@ -723,7 +663,6 @@ class StandardRLProgram(RLProgram):
           max_staleness=max_staleness,
           next_batch_fn=lambda: ordered_q.next_batch_idx,
           full_batch_size=self.full_batch_size,
-          max_in_flight_groups=max_in_flight_groups,
       )
     else:
       self.scored_q = FifoGroupQueue.create(
@@ -736,7 +675,6 @@ class StandardRLProgram(RLProgram):
           max_staleness=max_staleness,
           next_batch_fn=lambda: self._step,
           full_batch_size=self.full_batch_size,
-          max_in_flight_groups=max_in_flight_groups,
           out_of_order_resume=True,
       )
       self.raw_q = TrajectoryQueueManager.create(
@@ -760,7 +698,6 @@ class StandardRLProgram(RLProgram):
       self, group: list[datatypes.TrajectoryItem]
   ) -> None:
     """Notifies `dispatch_window` and frees staged refs of filtered groups."""
-    step_telemetry.strip_routed_experts_in_place(group, reason="stale")
     self.dispatch_window.on_group_filtered(group)
     if self._relay is not None:
       self._relay.release_dropped_refs(group)
@@ -822,11 +759,11 @@ class StandardRLProgram(RLProgram):
     if off_policy_resume:
       logging.info(
           "Resuming from off-policy checkpoint: step=%d policy_version=%d"
-          " (min_unsettled_prompt_idx=%d, settled_offsets=%s).",
+          " (committed=%d, skipped=%d).",
           restored_step,
           self.policy_version,
-          self.dispatch_window.min_unsettled_prompt_idx,
-          self.dispatch_window.settled_offsets,
+          len(self.dispatch_window.committed_prompt_ids),
+          len(self.dispatch_window.skipped_prompt_ids),
       )
       return
     logging.info(
@@ -882,9 +819,7 @@ class StandardRLProgram(RLProgram):
           if self.max_response_length is not None:
             prompt_item["max_response_length"] = self.max_response_length
 
-        if not await self.dispatch_window.admit(
-            prompt_id, prompt_idx=prompt_idx
-        ):
+        if not await self.dispatch_window.admit(prompt_id):
           continue
         coordinates = tagging.prompt_coordinates(
             prompt_idx, self.full_batch_size
@@ -965,7 +900,6 @@ class StandardRLProgram(RLProgram):
       ValueError: If `conversation_text` contains no `"user"` message.
     """
     valid_items = [item for item in group if item.is_valid]
-    self._last_reward_components: dict[str, np.ndarray] = {}
     if not valid_items:
       return [0.0] * len(group), {}
     prompts = [
@@ -1002,13 +936,6 @@ class StandardRLProgram(RLProgram):
     rewards = [
         float(next(valid_rewards)) if item.is_valid else 0.0 for item in group
     ]
-    raw_components = rewards_info.get("reward_components") or {}
-    for comp_name, comp_vals in raw_components.items():
-      it = iter(comp_vals)
-      self._last_reward_components[comp_name] = np.array(
-          [float(next(it)) if item.is_valid else 0.0 for item in group],
-          dtype=np.float64,
-      )
     return rewards, log_metrics
 
   def _build_scored_item(
@@ -1068,83 +995,24 @@ class StandardRLProgram(RLProgram):
         # RolloutFacts).
     )
 
-  def _is_group_stale(self, group: Sequence[datatypes.TrajectoryItem]) -> bool:
-    """Returns whether an over-provisioned `group` aged past `max_staleness`.
-
-    `raw_q` admission plus the default `(max_staleness + 1) * full_batch_size`
-    dispatch window already bound how far an admitted group can age, so groups
-    are only re-checked after `raw_q` when `max_in_flight_groups`
-    over-provisions the window (`GroupOrder.TRAJECTORY_COMPLETION` only) and
-    surplus groups can queue across weight syncs.
-
-    Args:
-      group: Raw or scored trajectory items of one prompt group.
-    """
-    staleness_window = (self.max_staleness + 1) * self.full_batch_size
-    if self.dispatch_window.window_capacity <= staleness_window:
-      return False
-    valid_items = [item for item in group if item.is_valid]
-    if not valid_items:
-      return False
-    return not trajectory_queue_manager.is_group_within_version_window(
-        valid_items,
-        max_staleness=self.max_staleness,
-        policy_version_fn=lambda: self.policy_version,
-        span_limit=self.max_version_span,
-    )
-
-  def _drop_group(
-      self,
-      group: Sequence[datatypes.TrajectoryItem],
-      *,
-      reason: str,
-      rewards: Sequence[float] | None = None,
-      filter_name: str | None = None,
-  ) -> None:
-    """Records a dropped group for step telemetry and frees its dispatch slot."""
-    logging.info(
-        "[pipeline] DROP reason=%s prompt_id=%s rollout_version=%s"
-        " policy_version=%d",
-        reason,
-        group[0].prompt_id if group else None,
-        _group_latest_policy_version(group),
-        self.policy_version,
-    )
-    self._post_raw_filtered_groups.append(
-        step_telemetry.sanitize_filtered_group(
-            group, reason=reason, rewards=rewards
-        )
-    )
-    self.dispatch_window.on_group_filtered(group)
-    if self._relay is not None:
-      self._relay.release_dropped_refs(group)
-    if filter_name is not None:
-      self._consecutive_filtered_groups += 1
-      limit = self.algo_config.max_consecutive_filtered_groups
-      if limit is not None and self._consecutive_filtered_groups >= limit:
-        raise RuntimeError(
-            f"Group filters dropped {limit} groups in a row (last:"
-            f" {filter_name!r})."
-        )
-
   def _critique_group(
       self,
       group: Sequence[datatypes.TrajectoryItem],
-  ) -> ScoredGroup | tuple[str, list[float]]:
-    """Scores a trajectory group and builds its RLTrainerPayloads and ScoredGroup off-loop."""
-    self._last_reward_components = {}
+  ) -> ScoredGroup | None:
+    """Scores a trajectory group and builds its RLTrainerPayloads and ScoredGroup off-loop.
+
+    Args:
+      group: Raw trajectory items of one prompt group.
+
+    Returns:
+      The `ScoredGroup`, or `None` when `algo_config.dynamic_sampling` is on
+      and the group's rewards tie, so the group carries no training signal.
+    """
     rewards, group_reward_log_metrics = self._score_group(group)
-    reward_components = dict(self._last_reward_components)
-    if self._group_filters:
-      valid_mask = np.array([item.is_valid for item in group], dtype=bool)
-      for filter_name, filter_fn, accepts_components in self._group_filters:
-        dropped = (
-            filter_fn(rewards, valid_mask, reward_components=reward_components)
-            if accepts_components
-            else filter_fn(rewards, valid_mask)
-        )
-        if dropped:
-          return filter_name, rewards
+    if self.algo_config.dynamic_sampling and advantages.tied_rewards(
+        rewards, [item.is_valid for item in group]
+    ):
+      return None
     payloads = payload_builder.create_trainer_payloads(
         group,
         rewards=rewards,
@@ -1166,21 +1034,27 @@ class StandardRLProgram(RLProgram):
         reward_log_metrics=group_reward_log_metrics,
     )
 
-  async def _put_scored_group(
-      self,
-      group: Sequence[datatypes.TrajectoryItem],
-      scored_group: ScoredGroup,
-  ) -> None:
-    """Enqueues `scored_group`, releasing staged refs it no longer references."""
-    if self._relay is not None:
-      self._relay.release_unreferenced_critique_refs(
-          group, scored_group.payloads
+  def _drop_tied_group(self, group: list[datatypes.TrajectoryItem]) -> None:
+    """Drops a tied-reward group so a replacement prompt can be dispatched.
+
+    Args:
+      group: Raw trajectory items of the dropped prompt group.
+
+    Raises:
+      RuntimeError: If `algo_config.max_consecutive_filtered_groups` groups in
+        a row were dropped.
+    """
+    logging.info(
+        "[pipeline] DROP reason=tied_rewards prompt_id=%s", group[0].prompt_id
+    )
+    self._on_raw_group_filtered(group)
+    self._tied_groups_dropped += 1
+    self._consecutive_tied_groups += 1
+    limit = self.algo_config.max_consecutive_filtered_groups
+    if limit is not None and self._consecutive_tied_groups >= limit:
+      raise RuntimeError(
+          f"Dynamic sampling dropped {limit} tied-reward groups in a row."
       )
-    try:
-      await self.scored_q.put(scored_group)
-    except BaseException:
-      self._on_scored_group_dropped(scored_group)
-      raise
 
   async def critique_stage(self) -> None:
     """Stage 2: Scores rewards, PRMs, and reference KL logprobs."""
@@ -1200,23 +1074,20 @@ class StandardRLProgram(RLProgram):
               f" num_generations={self.num_generations}."
           )
 
-        if self._is_group_stale(group):
-          self._drop_group(group, reason="stale")
-          del group
-          continue
-
         scored_group = await asyncio.to_thread(self._critique_group, group)
-        if isinstance(scored_group, tuple):
-          self._drop_group(
-              group,
-              reason=f"group_filter:{scored_group[0]}",
-              rewards=scored_group[1],
-              filter_name=scored_group[0],
-          )
-          del scored_group, group
+        if scored_group is None:
+          self._drop_tied_group(group)
           continue
-        self._consecutive_filtered_groups = 0
-        await self._put_scored_group(group, scored_group)
+        self._consecutive_tied_groups = 0
+        if self._relay is not None:
+          self._relay.release_unreferenced_critique_refs(
+              group, scored_group.payloads
+          )
+        try:
+          await self.scored_q.put(scored_group)
+        except BaseException:
+          self._on_scored_group_dropped(scored_group)
+          raise
         del scored_group
         if group:
           first_meta = group[0].metadata
@@ -1256,64 +1127,8 @@ class StandardRLProgram(RLProgram):
   async def _drain_filtered_groups(
       self,
   ) -> list[list[datatypes.TrajectoryItem]]:
-    """Drains filtered groups from `raw_q` and post-`raw_q` stage drops."""
-    filtered = await self.raw_q.get_filtered_groups()
-    if self._post_raw_filtered_groups:
-      filtered = [*filtered, *self._post_raw_filtered_groups]
-      self._post_raw_filtered_groups.clear()
-    return filtered
-
-  def _log_filtered_groups_metrics(
-      self,
-      filtered_groups: Sequence[Sequence[datatypes.TrajectoryItem]],
-      log_step: int,
-  ) -> tuple[int, int]:
-    """Logs counts, tokens, and dropped-group rewards for `filtered_groups`."""
-    filtered_groups_count = len(filtered_groups)
-    filtered_trajectories_count = sum(len(g) for g in filtered_groups)
-    self._log_metric(
-        "rollout/filtered_groups_count", float(filtered_groups_count), log_step
-    )
-    self._log_metric(
-        "rollout/filtered_trajectories_count",
-        float(filtered_trajectories_count),
-        log_step,
-    )
-    if filtered_groups:
-      filtered_tokens = step_telemetry.filtered_groups_token_count(
-          filtered_groups
-      )
-      self._log_metric(
-          "rollout/filtered_tokens_count", float(filtered_tokens), log_step
-      )
-    if self._group_filters:
-      gf_groups = [
-          g
-          for g in filtered_groups
-          if g
-          and str((g[0].metadata or {}).get("drop_reason", "")).startswith(
-              "group_filter:"
-          )
-      ]
-      self._log_metric(
-          "rollout/group_filter_dropped_groups_count",
-          float(len(gf_groups)),
-          log_step,
-      )
-      gf_rewards = [
-          float(it.traj["trajectory_reward"])
-          for it in itertools.chain.from_iterable(gf_groups)
-          if it.is_valid
-          and isinstance(it.traj, dict)
-          and np.isfinite(it.traj.get("trajectory_reward", np.nan))
-      ]
-      if gf_rewards:
-        self._log_metric(
-            "rollout/group_filter_dropped_reward_mean",
-            float(np.mean(gf_rewards)),
-            log_step,
-        )
-    return filtered_groups_count, filtered_trajectories_count
+    """Drains and returns all filtered groups from the raw trajectory queue."""
+    return await self.raw_q.get_filtered_groups()
 
   def _collect_and_log_step_metrics(
       self,
@@ -1455,8 +1270,17 @@ class StandardRLProgram(RLProgram):
           tag = "rollout/" + tag.removeprefix("generation/")
         self._log_metric(tag, val, log_step)
 
-    filtered_groups_count, filtered_trajectories_count = (
-        self._log_filtered_groups_metrics(filtered_groups, log_step)
+    filtered_groups_count = len(filtered_groups)
+    filtered_trajectories_count = sum(len(g) for g in filtered_groups)
+    self._log_metric(
+        "rollout/filtered_groups_count",
+        float(filtered_groups_count),
+        log_step,
+    )
+    self._log_metric(
+        "rollout/filtered_trajectories_count",
+        float(filtered_trajectories_count),
+        log_step,
     )
 
     # --- 2. Reward Metrics ---
@@ -1743,18 +1567,11 @@ class StandardRLProgram(RLProgram):
       *,
       log_step: int,
       consumed_policy_version: int,
-      filtered_groups: Sequence[Sequence[datatypes.TrajectoryItem]] = (),
   ) -> None:
-    """Persists one row per consumed or filtered rollout when enabled."""
+    """Persists one row per consumed rollout when trajectory logging is enabled."""
     if self.trajectory_logger is None:
       return
-    logged_items: list[tuple[datatypes.TrajectoryItem, bool]] = [
-        (item, False) for item in all_step_items
-    ]
-    for group in filtered_groups:
-      for item in group:
-        logged_items.append((item, True))
-    for item, is_filtered in logged_items:
+    for item in all_step_items:
       metadata = dict(getattr(item, "metadata", None) or {})
       metadata.pop("routed_experts", None)
       metadata.pop("env_config", None)
@@ -1769,7 +1586,6 @@ class StandardRLProgram(RLProgram):
       row = {
           "global_step": log_step,
           "consumed_policy_version": consumed_policy_version,
-          "filtered": is_filtered,
           "prompt_id": getattr(item, "prompt_id", ""),
           "group_index": getattr(item, "group_index", 0),
           "rollout_policy_version": (
@@ -1917,7 +1733,6 @@ class StandardRLProgram(RLProgram):
         consumed_policy_version = self.policy_version
 
         uncommitted_groups: list[list[datatypes.TrajectoryItem]] = []
-        filtered_groups: list[list[datatypes.TrajectoryItem]] = []
         step_reward_log_metrics: list[RewardLogMetrics] = []
         step_result = None
         trainer_metrics = None
@@ -2034,17 +1849,6 @@ class StandardRLProgram(RLProgram):
           scored_group = await _next_scored_group()
           step_times.exposed_generation_time += time.monotonic() - wait_start
           had_scored_items = scored_group is not None
-          if scored_group is not None and self._is_group_stale(
-              scored_group.items
-          ):
-            self._on_scored_group_dropped(scored_group)
-            self._drop_group(
-                scored_group.items,
-                reason="stale",
-                rewards=scored_group.rewards,
-            )
-            del scored_group
-            continue
           payloads: list[datatypes.RLTrainerPayload] | None = None
           if scored_group is not None:
             if groups_consumed == 0 and self.on_step_begin:
@@ -2085,7 +1889,6 @@ class StandardRLProgram(RLProgram):
             num_rollouts += len(group_items)
             del group_items
 
-          filtered_groups.extend(await self._drain_filtered_groups())
           mb_iter = self._iter_group_microbatches(payloads, step_times)
           payloads = None
           async for mb, pack_dt in mb_iter:
@@ -2129,12 +1932,6 @@ class StandardRLProgram(RLProgram):
           await _maybe_save_checkpoint()
 
         if not all_step_items:
-          self._log_consumed_trajectories(
-              (),
-              log_step=current_step,
-              consumed_policy_version=consumed_policy_version,
-              filtered_groups=filtered_groups,
-          )
           logging.info(
               "Dataset exhausted at step %d before max_steps.", current_step
           )
@@ -2186,6 +1983,14 @@ class StandardRLProgram(RLProgram):
 
         step_time_sec = time.monotonic() - step_start_time
 
+        if self.algo_config.dynamic_sampling:
+          self._log_metric(
+              "rollout/tied_rewards_dropped_groups_count",
+              float(self._tied_groups_dropped),
+              current_step,
+          )
+          self._tied_groups_dropped = 0
+        filtered_groups = await self._drain_filtered_groups()
         if self._relay is not None:
           await self._relay.flush_releases()
           await self._relay.log_staging_metrics(current_step, self._log_metric)
@@ -2210,13 +2015,12 @@ class StandardRLProgram(RLProgram):
             step_times=step_times,
             reward_log_metrics=step_reward_log_metrics,
         )
+        del filtered_groups
         self._log_consumed_trajectories(
             all_step_items,
             log_step=current_step,
             consumed_policy_version=consumed_policy_version,
-            filtered_groups=filtered_groups,
         )
-        del filtered_groups
 
         self.last_step_result = RLStepResult(
             step=current_step,

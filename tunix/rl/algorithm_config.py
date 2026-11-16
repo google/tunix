@@ -12,12 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 import dataclasses
 from absl import logging
 from tunix.common import configs as common_configs
 from tunix.common import datatypes as common_datatypes
-from tunix.rl import advantages as _rl_advantages
 from tunix.rl import function_registry
 
 
@@ -117,13 +116,12 @@ class AlgorithmConfig:
   # IDs happen to be `< 255` do not flip between 4D `uint8` and 5D `uint10`
   # across steps and trigger an extra XLA compilation.
   routed_experts_num_experts: int | None = None
-  # Dynamic-sampling group filter predicates (registered names such as
-  # `"tied_rewards"` in `function_registry` or callables
-  # `(rewards, valid_mask, *, reward_components=None) -> bool`). Rejected groups
-  # are dropped before policy training so replacement prompts can fill the step.
-  group_filters: Sequence[str | Callable[..., bool]] = ()
-  # Raise `RuntimeError` after this many consecutive groups are rejected by
-  # `group_filters`. `None` disables the guard.
+  # DAPO dynamic sampling: drops prompt groups whose rewards tie
+  # (`advantages.tied_rewards`) before policy training so replacement prompts
+  # can fill the step.
+  dynamic_sampling: bool = False
+  # Raise `RuntimeError` after this many consecutive groups are dropped by
+  # `dynamic_sampling`. `None` disables the guard.
   max_consecutive_filtered_groups: int | None = None
 
   def __post_init__(self):
@@ -187,7 +185,7 @@ class AlgorithmConfig:
         self.routed_experts_encode_mode,
         self.routed_experts_num_experts,
     )
-    self._validate_group_filters()
+    self._validate_dynamic_sampling()
     self._validate_sampler_is_and_rs_options()
 
     # Automatically prints configuration upon initialization.
@@ -198,60 +196,26 @@ class AlgorithmConfig:
     """Whether reference-model KL log-probabilities must be computed."""
     return self.beta != 0.0 or self.force_compute_kl
 
-  def _validate_group_filter_entry(self, entry: object) -> bool:
-    """Validates one `group_filters` entry; returns True for `tied_rewards`."""
-    if isinstance(entry, str):
-      registered = function_registry.list_group_filters()
-      if entry not in registered:
+  def _validate_dynamic_sampling(self) -> None:
+    """Validates `dynamic_sampling` and `max_consecutive_filtered_groups`."""
+    if self.dynamic_sampling:
+      if self.advantage_estimator == "gae":
         raise ValueError(
-            f"group_filters entry {entry!r} is not registered in"
-            f" function_registry; available: {sorted(registered)}."
+            "dynamic_sampling requires a group-relative advantage_estimator,"
+            " not 'gae'."
         )
-      return entry == "tied_rewards"
-    if not callable(entry):
-      raise TypeError(
-          f"Each group_filters entry must be a str or callable, got {entry!r}."
-      )
-    return entry is _rl_advantages.tied_rewards
-
-  def _validate_tied_rewards_compatibility(self) -> None:
-    """Checks `advantage_estimator` and `num_generations` for `tied_rewards`."""
-    if self.advantage_estimator == "gae":
-      raise ValueError(
-          "group_filters='tied_rewards' requires a group-relative"
-          " advantage_estimator, not 'gae'."
-      )
-    min_gen = _rl_advantages.MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE
-    if self.num_generations < min_gen:
-      raise ValueError(
-          f"group_filters='tied_rewards' requires num_generations >= {min_gen};"
-          f" got {self.num_generations}."
-      )
-
-  def _validate_group_filters(self) -> None:
-    """Validates `group_filters` and `max_consecutive_filtered_groups`."""
-    if isinstance(self.group_filters, (str, bytes)) or not isinstance(
-        self.group_filters, Sequence
-    ):
-      raise TypeError(
-          "group_filters must be a sequence of registered filter names or"
-          f" callables, got {self.group_filters!r}."
-      )
-    self.group_filters = tuple(self.group_filters)
-    if any([self._validate_group_filter_entry(e) for e in self.group_filters]):
-      self._validate_tied_rewards_compatibility()
+      if self.num_generations < 2:
+        raise ValueError(
+            "dynamic_sampling requires num_generations >= 2; got"
+            f" {self.num_generations}."
+        )
     limit = self.max_consecutive_filtered_groups
-    if limit is None:
-      return
-    if isinstance(limit, bool) or not isinstance(limit, int):
-      raise TypeError(
-          "max_consecutive_filtered_groups must be an int or None, got"
-          f" {limit!r}."
-      )
-    if limit <= 0:
+    if limit is not None and (
+        isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
+    ):
       raise ValueError(
-          "max_consecutive_filtered_groups must be positive when set, got"
-          f" {limit}."
+          "max_consecutive_filtered_groups must be a positive int or None,"
+          f" got {limit!r}."
       )
 
   def _validate_sampler_is_and_rs_options(self):
