@@ -54,7 +54,10 @@ class MockWorker(abstract_worker.Worker):
         called to simulate a failure during shutdown.
     """
     self._info = datatypes.WorkerInfo(
-        worker_id=worker_id, roles=frozenset(roles), resources=resources or {}
+        worker_id=worker_id,
+        instance_id=self.instance_id,
+        roles=frozenset(roles),
+        resources=resources or {},
     )
     # Tracks how many times each method was called
     self.call_counts = collections.Counter()

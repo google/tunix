@@ -30,10 +30,10 @@ class RolloutStagingBufferTest(absltest.TestCase):
 
   def test_commit_fetch_release_and_incarnation_isolation(self):
     buf_a = sb_lib.RolloutStagingBuffer(
-        "rollout-0", max_bytes=1024, incarnation=7
+        "rollout-0", "inst-a", max_bytes=1024, incarnation=7
     )
     buf_b = sb_lib.RolloutStagingBuffer(
-        "rollout-0", max_bytes=1024, incarnation=8
+        "rollout-0", "inst-b", max_bytes=1024, incarnation=8
     )
 
     async def _stage(buf: sb_lib.RolloutStagingBuffer, val: int):
@@ -44,6 +44,8 @@ class RolloutStagingBufferTest(absltest.TestCase):
     ref_a = asyncio.run(_stage(buf_a, 11))
     ref_b = asyncio.run(_stage(buf_b, 22))
     self.assertEqual(ref_a.worker_id, "rollout-0")
+    self.assertEqual(ref_a.instance_id, "inst-a")
+    self.assertEqual(ref_b.instance_id, "inst-b")
     # Same sequence #1 on both buffers, but distinct 63-bit ref_ids.
     self.assertEqual(ref_a.ref_id & 0xFFFFFFFF, 1)
     self.assertEqual(ref_b.ref_id & 0xFFFFFFFF, 1)
@@ -69,8 +71,11 @@ class RolloutStagingBufferTest(absltest.TestCase):
     with self.assertRaisesRegex(KeyError, "Missing or already-released"):
       buf_a.fetch_staged([ref_a.ref_id])
 
+    with self.assertRaises(ValueError):
+      sb_lib.RolloutStagingBuffer("rollout-0", "")
+
   def test_strict_fifo_order_and_cross_thread_release_wakeup(self):
-    buf = sb_lib.RolloutStagingBuffer("rollout-0", max_bytes=100)
+    buf = sb_lib.RolloutStagingBuffer("rollout-0", "inst-0", max_bytes=100)
     granted_order: list[str] = []
 
     async def _run():
@@ -104,7 +109,7 @@ class RolloutStagingBufferTest(absltest.TestCase):
     self.assertEqual(buf.reserved_bytes, 0)
 
   def test_cancel_after_grant_refunds_and_cascades_to_next_fifo_waiter(self):
-    buf = sb_lib.RolloutStagingBuffer("rollout-0", max_bytes=100)
+    buf = sb_lib.RolloutStagingBuffer("rollout-0", "inst-0", max_bytes=100)
 
     async def _run():
       r0 = await buf.reserve(80)
@@ -131,7 +136,7 @@ class RolloutStagingBufferTest(absltest.TestCase):
     asyncio.run(_run())
 
   def test_oversized_request_and_oversized_commit_fail_fast(self):
-    buf = sb_lib.RolloutStagingBuffer("rollout-0", max_bytes=64)
+    buf = sb_lib.RolloutStagingBuffer("rollout-0", "inst-0", max_bytes=64)
 
     async def _run():
       with self.assertRaisesRegex(
@@ -153,7 +158,7 @@ class RolloutStagingBufferTest(absltest.TestCase):
     asyncio.run(_run())
 
   def test_policy_version_type_safety_and_zombie_eviction(self):
-    buf = sb_lib.RolloutStagingBuffer("rollout-0", max_bytes=1024)
+    buf = sb_lib.RolloutStagingBuffer("rollout-0", "inst-0", max_bytes=1024)
 
     with self.assertRaises(TypeError):
       buf.on_post_weight_sync(True)  # pyrefly: ignore[bad-argument-type]
@@ -187,7 +192,7 @@ class RolloutStagingBufferTest(absltest.TestCase):
       self,
   ):
     buf = sb_lib.RolloutStagingBuffer(
-        "rollout-0", max_bytes=64, stall_timeout_s=0.08
+        "rollout-0", "inst-0", max_bytes=64, stall_timeout_s=0.08
     )
     paused = True
 
@@ -214,7 +219,7 @@ class RolloutStagingBufferTest(absltest.TestCase):
     asyncio.run(_run())
 
   def test_begin_and_finish_clear_revokes_pre_task_grants_and_zeros_bytes(self):
-    buf = sb_lib.RolloutStagingBuffer("rollout-0", max_bytes=256)
+    buf = sb_lib.RolloutStagingBuffer("rollout-0", "inst-0", max_bytes=256)
 
     async def _run():
       r_committed = await buf.reserve(64)
@@ -246,7 +251,7 @@ class RolloutStagingBufferTest(absltest.TestCase):
     asyncio.run(_run())
 
   def test_grant_revoked_by_begin_clear_before_delivery_wakes_with_error(self):
-    buf = sb_lib.RolloutStagingBuffer("rollout-0", max_bytes=100)
+    buf = sb_lib.RolloutStagingBuffer("rollout-0", "inst-0", max_bytes=100)
 
     async def _run():
       r0 = await buf.reserve(80)
@@ -267,7 +272,7 @@ class RolloutStagingBufferTest(absltest.TestCase):
   def test_stale_clear_epoch_rejected_on_commit_and_release_validates_upfront(
       self,
   ):
-    buf = sb_lib.RolloutStagingBuffer("rollout-0", max_bytes=256)
+    buf = sb_lib.RolloutStagingBuffer("rollout-0", "inst-0", max_bytes=256)
 
     async def _run():
       r_attached = await buf.reserve(64)
@@ -304,7 +309,7 @@ class RolloutStagingBufferTest(absltest.TestCase):
       self.assertGreater(sb_lib.default_staging_max_bytes(), 0)
 
   def test_close_wakes_waiters_and_stage_trajectory_item_cleans_metadata(self):
-    buf = sb_lib.RolloutStagingBuffer("rollout-0", max_bytes=128)
+    buf = sb_lib.RolloutStagingBuffer("rollout-0", "inst-0", max_bytes=128)
 
     async def _run():
       r0 = await buf.reserve(64)

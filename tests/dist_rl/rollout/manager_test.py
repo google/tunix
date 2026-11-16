@@ -1199,7 +1199,9 @@ class StagingReservationManagerTest(unittest.IsolatedAsyncioTestCase):
         routed_experts_encode_mode="uint10",
         routed_experts_num_experts=384,
     )
-    buf = sb_lib.RolloutStagingBuffer("rollout-0", max_bytes=max_bytes)
+    buf = sb_lib.RolloutStagingBuffer(
+        "rollout-0", "inst-0", max_bytes=max_bytes
+    )
     active_sampler = sampler or test_utils.MockBaseSamplerImpl(
         default_delay=0.0,
         response_tokens_per_turn=8,

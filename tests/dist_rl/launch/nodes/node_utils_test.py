@@ -696,10 +696,12 @@ class ServeWorkerTest(absltest.TestCase):
             "service_type": "rollout",
             "service_port": 20001,
             "worker_id": "rollout-0",
+            "instance_id": self.worker.instance_id,
             node_utils.CONFIG_SHA256_METADATA_KEY: "config-sha",
             "trajectory_store_config": {"backend": "file"},
         },
     )
+    self.assertLen(self.worker.instance_id, 32)
     self.assertEqual(drained, ["drained"])
     self.server.stop_serving.assert_called_once()
     self.assertIsNone(self.worker.on_stop_callbacks[-1])

@@ -662,7 +662,10 @@ class RunRolloutNodeTest(absltest.TestCase):
   ):
     context = mock.MagicMock()
     mock_tokenizer = mock.MagicMock(pad_token_id=0, eos_token="<eos>")
-    mock_worker_service = mock.MagicMock(spec=rollout_worker.RolloutWorker)
+    mock_worker_service = mock.MagicMock(
+        spec=rollout_worker.RolloutWorker,
+        instance_id="rollout-worker-instance-0",
+    )
     mock_worker_service.trajectory_store = None
     mock_sampler = mock.MagicMock()
     mock_sampler.stop = mock.AsyncMock()

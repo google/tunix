@@ -39,7 +39,8 @@ class RunInferenceNodeTest(absltest.TestCase):
     )
     mock_mesh = mock.MagicMock()
     mock_worker_service = mock.MagicMock(
-        spec=exp_inference_worker.InferenceWorker
+        spec=exp_inference_worker.InferenceWorker,
+        instance_id="inference-worker-instance-0",
     )
     registered_callbacks = []
     mock_worker_service.set_on_stop.side_effect = registered_callbacks.append

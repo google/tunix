@@ -720,10 +720,18 @@ class ExcludeMaskedFromAdvantageTest(absltest.TestCase):
     )
 
   def test_routed_experts_ref_propagated_only_for_valid_trajectories(self):
-    ref0 = datatypes.RoutedExpertsRef(worker_id="w0", ref_id=10)
-    ref1 = datatypes.RoutedExpertsRef(worker_id="w0", ref_id=11)
-    ref2 = datatypes.RoutedExpertsRef(worker_id="w1", ref_id=12)
-    ref3 = datatypes.RoutedExpertsRef(worker_id="w1", ref_id=13)
+    ref0 = datatypes.RoutedExpertsRef(
+        worker_id="w0", instance_id="inst0", ref_id=10
+    )
+    ref1 = datatypes.RoutedExpertsRef(
+        worker_id="w0", instance_id="inst0", ref_id=11
+    )
+    ref2 = datatypes.RoutedExpertsRef(
+        worker_id="w1", instance_id="inst1", ref_id=12
+    )
+    ref3 = datatypes.RoutedExpertsRef(
+        worker_id="w1", instance_id="inst1", ref_id=13
+    )
 
     items = [
         dataclasses.replace(self._item(0), routed_experts_ref=ref0),

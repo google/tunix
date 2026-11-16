@@ -164,6 +164,7 @@ class RolloutWorker(abstract_worker.Worker):
     drain_timeout_s = config.drain_timeout_s
     self._staging_buffer = staging_buffer_lib.RolloutStagingBuffer(
         worker_id=worker_id,
+        instance_id=self.instance_id,
         max_bytes=config.staging_max_bytes,
     )
     self._clear_staged_lock = asyncio.Lock()
@@ -204,6 +205,7 @@ class RolloutWorker(abstract_worker.Worker):
   def info(self) -> datatypes.WorkerInfo:
     return datatypes.WorkerInfo(
         worker_id=self.worker_id,
+        instance_id=self.instance_id,
         roles=frozenset({"rollout"}),
         resources={
             "sampler": type(self.sampler).__name__,

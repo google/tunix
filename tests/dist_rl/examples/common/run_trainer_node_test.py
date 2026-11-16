@@ -204,7 +204,10 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.mock_context.ipc.discovery.register = mock.MagicMock()
     self.mock_context.jax.initialize = mock.MagicMock()
 
-    self.mock_worker_service = mock.MagicMock(spec=trainer_worker.TrainerWorker)
+    self.mock_worker_service = mock.MagicMock(
+        spec=trainer_worker.TrainerWorker,
+        instance_id="trainer-worker-instance-0",
+    )
     self.mock_server = mock.MagicMock(
         spec=remote_execution.GrpcRemoteExecutionServer
     )

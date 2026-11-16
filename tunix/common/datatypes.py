@@ -71,11 +71,14 @@ class RoutedExpertsRef:
   """Opaque handle referencing a staged routed_experts array on a RolloutWorker."""
 
   worker_id: str
+  instance_id: str
   ref_id: int
 
   def __post_init__(self) -> None:
     if not isinstance(self.worker_id, str) or not self.worker_id:
       raise ValueError("RoutedExpertsRef.worker_id must be a non-empty str.")
+    if not isinstance(self.instance_id, str) or not self.instance_id:
+      raise ValueError("RoutedExpertsRef.instance_id must be a non-empty str.")
     if (
         isinstance(self.ref_id, bool)
         or not isinstance(self.ref_id, int)

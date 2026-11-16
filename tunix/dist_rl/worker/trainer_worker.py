@@ -272,6 +272,7 @@ class TrainerWorker(abstract_worker.Worker):
     trainer = self._trainer
     return datatypes.WorkerInfo(
         worker_id=self._worker_id,
+        instance_id=self.instance_id,
         roles=frozenset({"trainer", "weight_sync"}),
         resources={
             "trainer": (
