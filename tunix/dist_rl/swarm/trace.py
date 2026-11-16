@@ -15,6 +15,25 @@ import dataclasses
 import math
 
 
+def _validate_alignment(call: "CallTrace") -> None:
+  """Validates loss mask and logprob invariants for trainable or frozen calls."""
+  n_tokens = len(call.completion_ids)
+  if len(call.loss_mask) != n_tokens:
+    raise ValueError("Completion IDs and loss mask must align.")
+  if call.trainable:
+    if len(call.rollout_logprobs) != n_tokens:
+      raise ValueError("Completion IDs, logprobs and loss mask must align.")
+    if any(x not in (0, 1) for x in call.loss_mask) or not any(call.loss_mask):
+      raise ValueError("Loss mask must be binary and contain an active token.")
+  else:
+    if any(x != 0 for x in call.loss_mask):
+      raise ValueError("Frozen calls must use an all-zero loss mask.")
+    if call.rollout_logprobs and len(call.rollout_logprobs) != n_tokens:
+      raise ValueError("Recorded frozen logprobs must align with completion IDs.")
+  if any(not math.isfinite(x) or x > 1e-5 for x in call.rollout_logprobs):
+    raise ValueError("Rollout logprobs must be finite log probabilities.")
+
+
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class CallTrace:
   """One sampled response with the exact context used to generate it.
@@ -34,6 +53,7 @@ class CallTrace:
   loss_mask: tuple[int, ...]
   text: str
   valid_action: bool = True
+  trainable: bool = True
 
   def __post_init__(self):
     for name in (
@@ -53,16 +73,7 @@ class CallTrace:
       raise ValueError("A call needs nonempty token sequences and a version.")
     if any(x < 0 or int(x) != x for x in self.prompt_ids + self.completion_ids):
       raise ValueError("Token IDs must be nonnegative integers.")
-    if not (
-        len(self.completion_ids)
-        == len(self.rollout_logprobs)
-        == len(self.loss_mask)
-    ):
-      raise ValueError("Completion IDs, logprobs and loss mask must align.")
-    if any(x not in (0, 1) for x in self.loss_mask) or not any(self.loss_mask):
-      raise ValueError("Loss mask must be binary and contain an active token.")
-    if any(not math.isfinite(x) or x > 1e-5 for x in self.rollout_logprobs):
-      raise ValueError("Rollout logprobs must be finite log probabilities.")
+    _validate_alignment(self)
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -83,5 +94,10 @@ class SwarmEpisode:
       raise ValueError("Episode reward must be finite.")
     if len({c.call_id for c in self.calls}) != len(self.calls):
       raise ValueError("Call IDs must be unique within an episode.")
-    if len({c.policy_version for c in self.calls}) != 1:
+    versions_by_policy: dict[str, set[int]] = {}
+    for call in self.calls:
+      versions_by_policy.setdefault(call.policy_id, set()).add(
+          call.policy_version
+      )
+    if any(len(vs) != 1 for vs in versions_by_policy.values()):
       raise ValueError("A synchronous episode cannot mix policy versions.")

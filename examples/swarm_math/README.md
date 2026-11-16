@@ -5,7 +5,7 @@ This is the first local-transport implementation of the
 Solver–Verifier workflow through the native `dist_rl` loss, batch assembler,
 TrainerWorker, gradient accumulation, optimizer and checkpoint writer.
 
-**Current acceptance:** CPU numerical comparisons, two real optimizer updates, a small random Qwen3 Transformer with native KV-cache sampling, a verified 2-step `Qwen/Qwen3-4B` bring-up on TPU `v5p-256` (`128` chips via Pathways with `64+64` rollout/train split using `vLLM` + `float32` XLA reference attention), and multi-hundred-step Dr. MAS benchmark progression on TPU `v5p-256` (`test_sampled` rising from `48.2%` at step 0 to `60.9%` by step 275, with `AIME'24` `20.0 -> 44.2 avg@4 / 63.3 pass@4` and `AIME'25` `18.3 -> 32.5 avg@4 / 53.3 pass@4`). Distributed episode RPC/Raiden and multi-service recovery are not yet accepted. See the [validation record](../../docs/swarm_training_validation.md).
+**Current acceptance:** CPU numerical comparisons, two real optimizer updates, a small random Qwen3 Transformer with native KV-cache sampling, a verified 2-step `Qwen/Qwen3-4B` bring-up on TPU `v5p-256` (`128` chips via Pathways with `64+64` rollout/train split using `vLLM` + `float32` XLA reference attention), and full 500-step Dr. MAS Paper Table 1 reproduction on TPU `v5p-256` (`1,547` questions × `16` samples: macro **`61.1 avg@16 / 78.2 pass@16`** at Step 475 and **`60.8 avg@16 / 77.8 pass@16`** at Step 500 vs. Paper Sharing target **`59.0 / 73.2`** and untrained base **`43.4 / 64.0`**). Distributed episode RPC/Raiden and multi-service recovery are not yet accepted. See the [validation record](../../docs/swarm_training_validation.md).
 
 ## Placement and extension boundary
 

@@ -59,6 +59,7 @@ class SwarmConfig:
   loss_microbatch_rows: int = 4
   sampler_is: str | None = None
   sampler_is_threshold: float = 2.0
+  epsilon_high: float = 0.2
 
   def __post_init__(self):
     if (
@@ -87,6 +88,8 @@ class SwarmConfig:
         or self.sampler_is_threshold <= 0
     ):
       raise ValueError("sampler_is_threshold must be finite and positive.")
+    if not np.isfinite(self.epsilon_high) or self.epsilon_high <= 0:
+      raise ValueError("epsilon_high must be finite and positive.")
 
 
 def shared_grpo_config(
@@ -94,13 +97,14 @@ def shared_grpo_config(
     *,
     sampler_is: str | None = None,
     sampler_is_threshold: float = 2.0,
+    epsilon_high: float = 0.2,
 ) -> algorithm_config.GRPOConfig:
-  """Dr. MAS token-mean dual-clip objective; no reference KL or entropy term."""
+  """Dr. MAS / R2Orch token-mean dual-clip objective; no reference KL term."""
   config = algorithm_config.GRPOConfig(
       num_generations=group_size,
       beta=0.0,
       epsilon=0.2,
-      epsilon_high=0.2,
+      epsilon_high=epsilon_high,
       epsilon_c=3.0,
       loss_agg_mode="token-mean",
       use_rollout_logps=True,
@@ -354,6 +358,7 @@ class SwarmRLProgram(rl_program.RLProgram):
               config.group_size,
               sampler_is=config.sampler_is,
               sampler_is_threshold=config.sampler_is_threshold,
+              epsilon_high=config.epsilon_high,
           ),
           config,
       )
@@ -369,8 +374,12 @@ class SwarmRLProgram(rl_program.RLProgram):
             c.policy_version != self.policy_version
             for e in episodes
             for c in e.calls
+            if c.trainable
         ):
           raise ValueError("Collection returned a stale policy version.")
+        frozen_calls = sum(
+            not c.trainable for e in episodes for c in e.calls
+        )
         credited = credit.build_credit(
             episodes,
             normalization=config.normalization,
@@ -403,6 +412,7 @@ class SwarmRLProgram(rl_program.RLProgram):
               "policy_version": self.policy_version,
               "episodes": len(episodes),
               "calls": len(credited.payloads),
+              "frozen_calls": frozen_calls,
               "reward_mean": float(np.mean(rewards)),
               "optimizer_applied": False,
               "skip_reason": "zero_signal",
@@ -464,6 +474,7 @@ class SwarmRLProgram(rl_program.RLProgram):
             "optimizer_applied": True,
             "episodes": len(episodes),
             "calls": len(credited.payloads),
+            "frozen_calls": frozen_calls,
             "active_tokens": int(
                 sum(np.sum(p.completion_mask) for p in scored)
             ),

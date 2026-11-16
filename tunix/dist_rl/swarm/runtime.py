@@ -11,7 +11,7 @@
 
 """Topology-independent recording over the existing dist_rl sampler API."""
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 import dataclasses
 
 import numpy as np
@@ -19,8 +19,33 @@ from tunix.dist_rl.rollout import sampler as sampler_lib
 from tunix.dist_rl.swarm import trace
 
 
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class PolicyBinding:
+  """Binds a logical role (or '*' fallback) to a trainable or frozen policy."""
+
+  policy_id: str
+  policy_version: int
+  sampler: sampler_lib.Sampler
+  encode: Callable[[str], Sequence[int]]
+  sampling_params: sampler_lib.SamplingParams
+  max_prompt_length: int
+  trainable: bool = True
+
+  def __post_init__(self):
+    if not self.policy_id or self.policy_version < 0:
+      raise ValueError("PolicyBinding needs a policy_id and version >= 0.")
+    if self.max_prompt_length <= 0:
+      raise ValueError("max_prompt_length must be positive.")
+    if self.trainable:
+      object.__setattr__(
+          self,
+          "sampling_params",
+          dataclasses.replace(self.sampling_params, return_logprobs=True),
+      )
+
+
 class RecordingRuntime:
-  """One policy snapshot shared by all logical roles in an episode.
+  """Role-routed policy runtime over one or more bound policies in an episode.
 
   The workflow owns role prompts and control flow. The runtime owns sampling
   and exact token provenance. No ground-truth answers enter this interface.
@@ -37,38 +62,80 @@ class RecordingRuntime:
       episode_id: str,
       max_prompt_length: int,
   ):
-    if max_prompt_length <= 0:
-      raise ValueError("max_prompt_length must be positive.")
+    default_binding = PolicyBinding(
+        policy_id=policy_id,
+        policy_version=policy_version,
+        sampler=sampler,
+        encode=encode,
+        sampling_params=sampling_params,
+        max_prompt_length=max_prompt_length,
+        trainable=True,
+    )
     self.sampler = sampler
     self.encode = encode
-    self.params = dataclasses.replace(sampling_params, return_logprobs=True)
+    self.params = default_binding.sampling_params
     self.policy_id = policy_id
     self.policy_version = policy_version
     self.episode_id = episode_id
     self.max_prompt_length = max_prompt_length
+    self._bindings: dict[str, PolicyBinding] = {"*": default_binding}
     self._calls = 0
 
-  async def generate(self, role: str, prompt: str) -> trace.CallTrace:
-    ids = np.asarray(self.encode(prompt), dtype=np.int32)
-    if ids.ndim != 1 or not 0 < len(ids) <= self.max_prompt_length:
-      raise ValueError("Encoded prompt is empty or exceeds the context budget.")
-    call_id = f"{self.episode_id}/{self._calls}"
-    # Distinct deterministic request seeds; never reset all calls to one draw.
-    params = dataclasses.replace(
-        self.params,
-        seed=None
-        if self.params.seed is None
-        else self.params.seed + self._calls,
+  @classmethod
+  def from_bindings(
+      cls,
+      bindings: Mapping[str, PolicyBinding],
+      *,
+      episode_id: str,
+  ) -> "RecordingRuntime":
+    """Constructs a runtime routing each role to its configured PolicyBinding."""
+    if not episode_id or not bindings:
+      raise ValueError("from_bindings requires episode_id and nonempty bindings.")
+    first = next(iter(bindings.values()))
+    instance = cls(
+        first.sampler,
+        first.encode,
+        first.sampling_params,
+        policy_id=first.policy_id,
+        policy_version=first.policy_version,
+        episode_id=episode_id,
+        max_prompt_length=first.max_prompt_length,
     )
-    response = await self.sampler.sample(
+    instance._bindings = dict(bindings)
+    return instance
+
+  def _resolve_binding(self, role: str) -> PolicyBinding:
+    binding = self._bindings.get(role) or self._bindings.get("*")
+    if binding is None:
+      raise KeyError(f"Unbound swarm role: {role!r}.")
+    return binding
+
+  async def generate(self, role: str, prompt: str) -> trace.CallTrace:
+    binding = self._resolve_binding(role)
+    ids = np.asarray(binding.encode(prompt), dtype=np.int32)
+    if ids.ndim != 1 or not 0 < len(ids) <= binding.max_prompt_length:
+      raise ValueError("Encoded prompt is empty or exceeds the context budget.")
+    call_index = self._calls
+    self._calls += 1
+    call_id = f"{self.episode_id}/{call_index}"
+    # Distinct deterministic request seeds; reserve index before await so
+    # concurrent same-layer worker calls never collide.
+    params = dataclasses.replace(
+        binding.sampling_params,
+        seed=None
+        if binding.sampling_params.seed is None
+        else binding.sampling_params.seed + call_index,
+    )
+    response = await binding.sampler.sample(
         sampler_lib.SamplingRequest(
             request_id=call_id,
             prompt=ids,
             sampling_params=params,
             metadata={
                 "role": role,
-                "policy_id": self.policy_id,
-                "policy_version": self.policy_version,
+                "policy_id": binding.policy_id,
+                "policy_version": binding.policy_version,
+                "trainable": binding.trainable,
             },
         )
     )
@@ -85,19 +152,25 @@ class RecordingRuntime:
         response.prompt_token_ids, ids
     ):
       raise ValueError("Sampler changed the request identity or prompt tokens.")
-    if response.logprobs is None or len(response.token_ids) > params.max_tokens:
+    if len(response.token_ids) > params.max_tokens or (
+        binding.trainable and response.logprobs is None
+    ):
       raise ValueError(
           "Sampler must return unpadded completion IDs and logprobs."
       )
-    self._calls += 1
+    n_out = len(response.token_ids)
+    logprobs = (
+        () if response.logprobs is None else tuple(response.logprobs.tolist())
+    )
     return trace.CallTrace(
         call_id=call_id,
         role=role,
-        policy_id=self.policy_id,
-        policy_version=self.policy_version,
+        policy_id=binding.policy_id,
+        policy_version=binding.policy_version,
         prompt_ids=tuple(ids.tolist()),
         completion_ids=tuple(response.token_ids.tolist()),
-        rollout_logprobs=tuple(response.logprobs.tolist()),
-        loss_mask=(1,) * len(response.token_ids),
+        rollout_logprobs=logprobs,
+        loss_mask=(1,) * n_out if binding.trainable else (0,) * n_out,
         text=response.text,
+        trainable=binding.trainable,
     )

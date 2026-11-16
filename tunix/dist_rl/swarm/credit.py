@@ -60,21 +60,29 @@ def build_credit(
   calls = [c for e in episodes for c in e.calls]
   if len({c.call_id for c in calls}) != len(calls):
     raise ValueError("Call IDs must be unique across the collection round.")
-  if len({(c.policy_id, c.policy_version) for c in calls}) != 1:
-    raise ValueError("V0 supports one shared policy and one version per round.")
+  trainable_calls = [c for c in calls if c.trainable]
+  if not trainable_calls:
+    raise ValueError("Credit batch requires at least one trainable call.")
+  if len({(c.policy_id, c.policy_version) for c in trainable_calls}) != 1:
+    raise ValueError(
+        "Trainable calls must share one policy_id and policy_version per round."
+    )
   groups = collections.defaultdict(list)
   rows = []
   for episode in episodes:
+    ep_calls = [c for c in episode.calls if c.trainable]
+    if not ep_calls:
+      raise ValueError("Every episode must record at least one trainable call.")
     call_rewards = [
         episode.reward - invalid_action_penalty * (not c.valid_action)
-        for c in episode.calls
+        for c in ep_calls
     ]
     if normalization == "episode":
       # Accumulate in float64 before casting to the score dtype. Otherwise
       # identical rewards with different call counts can gain fake variance.
       episode_mean = float(np.float32(np.mean(call_rewards, dtype=np.float64)))
       groups[(episode.task_id,)].append(episode_mean)
-    for call, reward in zip(episode.calls, call_rewards, strict=True):
+    for call, reward in zip(ep_calls, call_rewards, strict=True):
       key = (
           (episode.task_id, call.role)
           if normalization == "role"

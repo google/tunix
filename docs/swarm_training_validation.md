@@ -247,3 +247,31 @@ entropy or length collapse on `test_sampled` (`110` questions x `4` samples at
 | 200 | 38.3 / 60.0 | 29.2 / 46.7 | 86.5 / 90.0 | 57.7 | 51.3 / 65.6 | 3,592 |
 | 250 | 38.3 / 63.3 | 31.7 / 46.7 | 87.0 / 92.0 | 58.6 | 52.3 / 67.3 | 3,906 |
 | 275 | 44.2 / 63.3 | 32.5 / 53.3 | 88.0 / 94.0 | 60.9 | 54.9 / 70.2 | 4,393 |
+| 350 | 47.5 / 63.3 | 34.2 / 50.0 | 87.5 / 94.0 | 62.0 | 56.4 / 69.1 | 3,235 |
+| 400 | 42.5 / 66.7 | 37.5 / 56.7 | 89.5 / 96.0 | 62.5 | 56.5 / 73.1 | 4,594 |
+| 475 | 48.3 / 66.7 | 39.2 / 60.0 | 90.0 / 92.0 | 64.8 | 59.2 / 72.9 | 4,672 |
+| 500 | 42.5 / 60.0 | 41.7 / 63.3 | 89.5 / 96.0 | 63.6 | 57.9 / 73.1 | 5,139 |
+
+### Full Paper Table 1 Evaluation (`1,547` questions × `16` samples = `24,752` episodes)
+
+Evaluated at `T=0.6, top_p=0.95` across all six published benchmarks (`AIME'24`, `AIME'25`, `AMC'23`, `MATH500`, `Minerva`, `OlympiadBench`):
+
+| Benchmark (`n`) | Untrained Base | Paper MA-GRPO (Sharing) | Paper Dr. MAS (Sharing) | **Tunix Step 475** | **Tunix Step 500** | **Step 500 Decontam.** |
+| --- | --- | --- | --- | --- | --- | --- |
+| AIME'24 (30) | 19.6 / 43.3 | 39.3 / 64.0 | 39.3 / 63.3 | **46.2 / 80.0** | **45.0 / 80.0** | 45.0 / 80.0 |
+| AIME'25 (30) | 18.8 / 43.3 | 31.4 / 53.3 | 38.1 / 63.3 | **41.5 / 73.3** | **39.8 / 70.0** | 39.8 / 70.0 |
+| AMC'23 (40) | 63.7 / 90.0 | 85.6 / 95.0 | 87.3 / 95.0 | **88.9 / 97.5** | **90.3 / 97.5** | 89.8 / 97.1 |
+| MATH500 (500) | 81.4 / 95.4 | 89.5 / 96.2 | 90.5 / 96.0 | **92.2 / 97.2** | **92.2 / 97.2** | 92.1 / 97.2 |
+| Minerva (272) | 31.8 / 44.1 | 37.5 / 50.0 | 40.9 / 53.3 | 38.4 / 49.3 | 37.8 / 49.3 | 37.8 / 49.3 |
+| OlympiadBench (675) | 45.2 / 67.7 | 57.6 / 65.6 | 58.2 / 68.6 | **59.2 / 72.1** | **59.5 / 72.7** | 59.5 / 72.7 |
+| **Macro Average (1,547)** | **43.4 / 64.0** | **56.8 / 70.7** | **59.0 / 73.2** | **61.1 / 78.2** | **60.8 / 77.8** | **60.7 / 77.7** |
+
+## Milestone SW3 Validation: Trainable R²Orch Graph Director + Frozen Workers
+
+On November 16, 2026 (`hy-swarm-r2o-run1` + paired `hy-swarm-r2o-ev0`), `examples/swarm_r2orch` validated `PolicyBinding`, `RecordingRuntime.from_bindings`, and frozen-call payload isolation (`trainable=False`, `loss_mask=0`) on a 32-chip TPU `v5p` slice (`16` fp32 trainer chips + `8` trainable Director vLLM chips + `8` frozen `Qwen/Qwen3-4B` Worker vLLM chips) over 100 optimizer steps across the four self-contained `beita6969/R2Orch@12ceb7563` domains (`aime`, `hotpotqa`, `medqa`, `mbppplus`, `3,658` train tasks):
+
+- **Bit-exact Worker isolation:** `frozen_worker_max_norm_drift == 0.0` verified online across all 100 optimizer steps and final evaluations while `director_norm_delta_l2 = 1.04e-3`.
+- **Benchmark gains with frozen Workers (`k=2` at `T=0.3, top_p=0.95`):**
+  - **Heldout (`126` tasks):** macro `avg@2 / pass@2` rose from `53.96 / 57.55` (`initial_eval`: `54.71 / 59.17`) to **`59.24 / 63.28` at Step 60** and **`58.39 / 64.06` at Step 100** (`AIME` `28.33/33.33 -> 36.67/50.00`, `HotpotQA` `50.00/56.25 -> 68.75/71.88`, `finish_rate` `90.5% -> 98.8%`, `worker_cost` `-13.2%`).
+  - **Locked Test IID (`414` tasks):** macro `avg@2 / pass@2` rose from `44.30 / 47.47` to **`47.03 / 48.79`** (micro accuracy `52.42% -> 55.80%`, `HotpotQA` `+8.59 pp`, `MBPP+` `+3.12 pp`, `worker_cost` `-22.5%`).
+  - **Locked Test OOD (`256` tasks — `MATH-Hard` + `MuSiQue`):** macro `avg@2 / pass@2` rose from `42.77 / 48.05` to **`44.53 / 50.78`**, with **`MATH-Hard` (`128`) jumping `+6.64 / +10.16` pp (`54.30 / 59.38 -> 60.94 / 69.53`)** and multi-agent graph construction rising `11.8×` (`0.4% -> 4.7%`).
