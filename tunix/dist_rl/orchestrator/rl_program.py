@@ -159,6 +159,8 @@ def _generation_metrics(
 
 # Rollouts named per step in the `[rollout] ... slowest` log line.
 _NUM_SLOWEST_ROLLOUTS_LOGGED = 3
+# Drop reason of the groups `algo_config.dynamic_sampling` filters out.
+_TIED_REWARDS_DROP_REASON = "tied_rewards"
 
 # Trajectory metadata that `_score_group` does not forward to reward functions:
 # keys it already passes explicitly, plus orchestration plumbing that the engine
@@ -293,8 +295,8 @@ class ScoredGroup:
     reward_log_metrics: Per-group reward manager log metrics (`name -> (values,
       agg_fn)`) to be aggregated across the step in `train_stage`.
     has_tied_rewards: Whether `algo_config.dynamic_sampling` found the group's
-      rewards tied (`advantages.tied_rewards`), so `critique_stage` drops it.
-      Always `False` when dynamic sampling is off.
+      task rewards or total rewards tied (`advantages.tied_rewards`), so
+      `critique_stage` drops it. Always `False` when dynamic sampling is off.
   """
 
   payloads: tuple[datatypes.RLTrainerPayload, ...]
@@ -588,10 +590,7 @@ class StandardRLProgram(RLProgram):
       )
     self.max_staleness = max_staleness
     self.max_version_span = max_version_span
-    # Tied-reward groups dropped by `algo_config.dynamic_sampling`: those not
-    # yet drained into a train step's `filtered_groups`, and the current run of
-    # consecutive drops.
-    self._tied_reward_groups: list[list[datatypes.TrajectoryItem]] = []
+    # Tied-reward groups `algo_config.dynamic_sampling` dropped in a row.
     self._consecutive_tied_groups = 0
     self.sync_weights = sync_weights
     self.precompile_trainer = precompile_trainer
@@ -874,7 +873,7 @@ class StandardRLProgram(RLProgram):
   def _score_group(
       self,
       group: Sequence[datatypes.TrajectoryItem],
-  ) -> tuple[list[float], RewardLogMetrics]:
+  ) -> tuple[list[float], RewardLogMetrics, list[float]]:
     """Scores a trajectory group via `self.reward_manager`.
 
     Skips reward evaluation or extraction for failed, timed-out, or masked-out
@@ -894,8 +893,11 @@ class StandardRLProgram(RLProgram):
       group: Sequence of `TrajectoryItem`s in the group.
 
     Returns:
-      A `(rewards, log_metrics)` tuple aligned with `group` (`0.0` for invalid
-      items).
+      A `(rewards, log_metrics, primary_rewards)` tuple. `rewards` are the
+      total rewards and `primary_rewards` the task rewards before shaping
+      rewards are summed in (the same as `rewards` unless
+      `algo_config.dynamic_sampling` is on); both are aligned with `group`
+      (`0.0` for invalid items).
 
     Raises:
       KeyError: If any valid item's `traj` is missing `"conversation_text"` or
@@ -906,7 +908,7 @@ class StandardRLProgram(RLProgram):
     """
     valid_items = [item for item in group if item.is_valid]
     if not valid_items:
-      return [0.0] * len(group), {}
+      return [0.0] * len(group), {}, [0.0] * len(group)
     prompts = [
         datatypes.prompt_text(item.traj["conversation_text"])
         for item in valid_items
@@ -941,7 +943,16 @@ class StandardRLProgram(RLProgram):
     rewards = [
         float(next(valid_rewards)) if item.is_valid else 0.0 for item in group
     ]
-    return rewards, log_metrics
+    primary_rewards = rewards
+    # Only dynamic sampling needs the task rewards, so reward managers that do
+    # not report them keep working without it.
+    if self.algo_config.dynamic_sampling:
+      valid_primary_rewards = iter(rewards_info["primary_rewards"])
+      primary_rewards = [
+          float(next(valid_primary_rewards)) if item.is_valid else 0.0
+          for item in group
+      ]
+    return rewards, log_metrics, primary_rewards
 
   def _build_scored_item(
       self,
@@ -1005,9 +1016,15 @@ class StandardRLProgram(RLProgram):
       group: Sequence[datatypes.TrajectoryItem],
   ) -> ScoredGroup:
     """Scores a trajectory group and builds its RLTrainerPayloads and ScoredGroup off-loop."""
-    rewards, group_reward_log_metrics = self._score_group(group)
+    rewards, group_reward_log_metrics, primary_rewards = self._score_group(
+        group
+    )
+    # A group carries no signal when its task rewards tie, even if shaping
+    # rewards (e.g. a length penalty) make the totals differ.
+    valid_mask = [item.is_valid for item in group]
     has_tied_rewards = self.algo_config.dynamic_sampling and (
-        advantages.tied_rewards(rewards, [item.is_valid for item in group])
+        advantages.tied_rewards(primary_rewards, valid_mask)
+        or advantages.tied_rewards(rewards, valid_mask)
     )
     payloads = payload_builder.create_trainer_payloads(
         group,
@@ -1031,8 +1048,13 @@ class StandardRLProgram(RLProgram):
         has_tied_rewards=has_tied_rewards,
     )
 
-  def _drop_tied_group(self, group: list[datatypes.TrajectoryItem]) -> None:
+  async def _drop_tied_group(
+      self, group: list[datatypes.TrajectoryItem]
+  ) -> None:
     """Drops a tied-reward group so a replacement prompt can be dispatched.
+
+    The group is recorded with `raw_q`'s filtered groups, so it frees its
+    dispatch slot and is counted like a group dropped for staleness.
 
     Args:
       group: Raw trajectory items of the dropped prompt group.
@@ -1042,10 +1064,11 @@ class StandardRLProgram(RLProgram):
         a row were dropped.
     """
     logging.info(
-        "[pipeline] DROP reason=tied_rewards prompt_id=%s", group[0].prompt_id
+        "[pipeline] DROP reason=%s prompt_id=%s",
+        _TIED_REWARDS_DROP_REASON,
+        group[0].prompt_id,
     )
-    self._on_raw_group_filtered(group)
-    self._tied_reward_groups.append(group)
+    await self.raw_q.add_filtered_group(group, reason=_TIED_REWARDS_DROP_REASON)
     self._consecutive_tied_groups += 1
     limit = self.algo_config.max_consecutive_filtered_groups
     if limit is not None and self._consecutive_tied_groups >= limit:
@@ -1073,7 +1096,7 @@ class StandardRLProgram(RLProgram):
 
         scored_group = await asyncio.to_thread(self._critique_group, group)
         if scored_group.has_tied_rewards:
-          self._drop_tied_group(group)
+          await self._drop_tied_group(group)
           continue
         self._consecutive_tied_groups = 0
         if self._relay is not None:
@@ -1124,11 +1147,8 @@ class StandardRLProgram(RLProgram):
   async def _drain_filtered_groups(
       self,
   ) -> list[list[datatypes.TrajectoryItem]]:
-    """Drains the groups dropped by `raw_q` and by dynamic sampling."""
-    # Taken before the `await` so the caller's tied-group count matches.
-    tied_reward_groups = self._tied_reward_groups
-    self._tied_reward_groups = []
-    return [*await self.raw_q.get_filtered_groups(), *tied_reward_groups]
+    """Drains and returns all filtered groups from the raw trajectory queue."""
+    return await self.raw_q.get_filtered_groups()
 
   def _collect_and_log_step_metrics(
       self,
@@ -1983,13 +2003,17 @@ class StandardRLProgram(RLProgram):
 
         step_time_sec = time.monotonic() - step_start_time
 
+        filtered_groups = await self._drain_filtered_groups()
         if self.algo_config.dynamic_sampling:
           self._log_metric(
               "rollout/tied_rewards_dropped_groups_count",
-              float(len(self._tied_reward_groups)),
+              float(
+                  trajectory_queue_manager.count_filtered_groups(
+                      filtered_groups, reason=_TIED_REWARDS_DROP_REASON
+                  )
+              ),
               current_step,
           )
-        filtered_groups = await self._drain_filtered_groups()
         if self._relay is not None:
           await self._relay.flush_releases()
           await self._relay.log_staging_metrics(current_step, self._log_metric)

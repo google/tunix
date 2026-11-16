@@ -282,9 +282,11 @@ agentic_grpo_config:
   off_policy_steps: 0
   max_version_span: null
   trajectory_group_order: "trajectory_completion"
-  # DAPO dynamic sampling: drop prompt groups whose rewards tie and sample
-  # replacement prompts. Requires `trajectory_group_order:
-  # "trajectory_completion"`.
+  # DAPO dynamic sampling: drop prompt groups whose task rewards tie and sample
+  # replacement prompts. The task reward is the environment reward in
+  # `reward_mode: "env"` and the first entry of `reward_functions` in
+  # `reward_mode: "reward_fn"`, so list shaping rewards (e.g. a length penalty)
+  # after it. Requires `trajectory_group_order: "trajectory_completion"`.
   dynamic_sampling: false
   # Fail after this many consecutive groups are dropped by `dynamic_sampling`.
   # Null disables the guard.

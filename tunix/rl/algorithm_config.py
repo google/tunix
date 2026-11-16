@@ -116,9 +116,10 @@ class AlgorithmConfig:
   # IDs happen to be `< 255` do not flip between 4D `uint8` and 5D `uint10`
   # across steps and trigger an extra XLA compilation.
   routed_experts_num_experts: int | None = None
-  # DAPO dynamic sampling: drops prompt groups whose rewards tie
+  # DAPO dynamic sampling: drops prompt groups whose task rewards tie
   # (`advantages.tied_rewards`) before policy training so replacement prompts
-  # can fill the step.
+  # can fill the step. The task reward is the environment reward, or the first
+  # reward function when there is none.
   dynamic_sampling: bool = False
   # Raise `RuntimeError` after this many consecutive groups are dropped by
   # `dynamic_sampling`. `None` disables the guard.

@@ -151,7 +151,10 @@ class AbstractRewardManager(abc.ABC):
 
     Returns:
         A dictionary of rewards information, including the final rewards for
-        advantage computation and intermediate rewards for logging.
+        advantage computation and intermediate rewards for logging. Dynamic
+        sampling (`algo_config.dynamic_sampling`) also requires
+        `"primary_rewards"`, the per-trajectory task rewards before shaping
+        rewards are summed in.
     """
     pass
 
@@ -352,8 +355,11 @@ class SequenceRewardManager(AbstractRewardManager):
           to `reward_fns`.
 
     Returns:
-        A dictionary with `"rewards"` (1D per-trajectory total rewards) and
-        `"log_metrics"` (metric tuples `(values, agg_fn)`).
+        A dictionary with `"rewards"` (1D per-trajectory total rewards),
+        `"primary_rewards"` (1D per-trajectory task rewards before any other
+        reward is summed in: `env_rewards` when given, otherwise the first
+        reward function's scores) and `"log_metrics"` (metric tuples
+        `(values, agg_fn)`).
 
     Raises:
         ValueError: If `prompts` is empty.
@@ -427,6 +433,9 @@ class SequenceRewardManager(AbstractRewardManager):
     )
     rewards_info = {
         "rewards": sum_rewards,
+        "primary_rewards": (
+            rewards[:, 0] if env_rewards is None else env_rewards
+        ),
         "log_metrics": log_metrics,
     }
 

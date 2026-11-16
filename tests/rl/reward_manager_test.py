@@ -376,6 +376,33 @@ class AgenticSequenceRewardManagerTest(parameterized.TestCase):
     self.assertEqual(_step_value(log_metrics, "rewards/len_reward"), 4.5)
     manager.close()
 
+  def test_primary_rewards_are_task_rewards_before_shaping(self):
+    def penalty(prompts, completions, **kwargs):
+      del completions, kwargs
+      return [-1.0] * len(prompts)
+
+    # With environment rewards, those are the task rewards.
+    env_manager = reward_manager.AgenticSequenceRewardManager(
+        reward_fns=[penalty],
+        algo_config=self.test_algo_config,
+    )
+    env_info = env_manager(
+        self.prompts, self.completions, trajectory_rewards=[10.0, 20.0]
+    )
+    npt.assert_allclose(env_info["rewards"], [9.0, 19.0])
+    npt.assert_allclose(env_info["primary_rewards"], [10.0, 20.0])
+    env_manager.close()
+
+    # Without them, the first reward function is the task reward.
+    fn_manager = reward_manager.SequenceRewardManager(
+        reward_fns=[len_reward, penalty],
+        algo_config=self.test_algo_config,
+    )
+    fn_info = fn_manager(self.prompts, self.completions)
+    npt.assert_allclose(fn_info["rewards"], [6.0, 1.0])
+    npt.assert_allclose(fn_info["primary_rewards"], [7.0, 2.0])
+    fn_manager.close()
+
   def test_log_metrics_non_interference_no_reward_fns(self):
     manager = reward_manager.AgenticSequenceRewardManager(
         reward_fns=None,

@@ -1320,7 +1320,10 @@ class RLProgramTest(absltest.TestCase):
             ),
         ),
         batch_config=self.batch_config,
-        reward_fns=[lambda prompts, completions, **_: next(rewards_iter)],
+        reward_fns=kwargs.pop(
+            "reward_fns",
+            [lambda prompts, completions, **_: next(rewards_iter)],
+        ),
         assembler=self.assembler,
         **kwargs,
     )
@@ -1351,7 +1354,7 @@ class RLProgramTest(absltest.TestCase):
       self.assertEqual(program.step, 1)
       self.mock_engine.train_step.assert_called_once()
       self.assertEqual(program.last_step_result.reward_mean, 0.5)
-      # The dropped group is counted with the step's other filtered groups.
+      # The dropped group joins the step's filtered groups with its reason.
       self.assertEqual(
           logged[("rollout/tied_rewards_dropped_groups_count", 0)], 1.0
       )
@@ -1361,6 +1364,36 @@ class RLProgramTest(absltest.TestCase):
       metadata = self.mock_engine.save_checkpoint.call_args.kwargs["metadata"]
       self.assertEqual(metadata["skipped_prompt_ids"], ["prompt_0"])
       self.assertEqual(metadata["committed_prompt_ids"], ["prompt_1"])
+
+    asyncio.run(_run())
+
+  def test_dynamic_sampling_drops_tied_task_reward_despite_shaping(self):
+    async def _run():
+      # Both `prompt_0` answers are wrong, but a length penalty makes their
+      # total rewards differ.
+      accuracy_scores = iter([[0.0, 0.0], [0.0, 1.0]])
+      penalty_scores = iter([[-0.1, -0.4], [-0.2, -0.2]])
+
+      def accuracy(prompts, completions, **_):
+        del prompts, completions
+        return next(accuracy_scores)
+
+      def length_penalty(prompts, completions, **_):
+        del prompts, completions
+        return next(penalty_scores)
+
+      program, dispatched = self._dynamic_sampling_program(
+          [],
+          dataset=["prompt_0", "prompt_1"],
+          max_steps=1,
+          reward_fns=[accuracy, length_penalty],
+      )
+
+      await asyncio.wait_for(program.run_async(self.mock_engine), timeout=10.0)
+
+      self.assertEqual(dispatched, ["prompt_0", "prompt_1"])
+      self.assertEqual(program.step, 1)
+      self.mock_engine.train_step.assert_called_once()
 
     asyncio.run(_run())
 
@@ -6751,7 +6784,7 @@ class RLProgramTest(absltest.TestCase):
   def test_collect_and_log_step_metrics_logs_invalid_trajectory_frac(self):
     program = self._create_program()
     items = self._masked_metrics_items()
-    _, reward_log_metrics = program._score_group(items)
+    _, reward_log_metrics, _ = program._score_group(items)
 
     program._collect_and_log_step_metrics(
         all_step_items=items,
