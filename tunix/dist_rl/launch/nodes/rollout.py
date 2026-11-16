@@ -26,9 +26,11 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping
 import dataclasses
+import functools
 import importlib
 import logging
 import os
+import re
 import sys
 import types
 from typing import Any, cast
@@ -41,10 +43,14 @@ from tunix.dist_rl.distributed.runtime import context as context_lib
 from tunix.dist_rl.launch.common import resolve_config
 from tunix.dist_rl.launch.nodes import node_utils
 from tunix.dist_rl.rollout import sampler as sampler_lib
+from tunix.dist_rl.weight_sync import raiden_weight_sync_delegate
 from tunix.dist_rl.weight_sync import weight_sync as weight_sync_lib
+from tunix.dist_rl.weight_sync import weight_utils
 from tunix.dist_rl.worker import rollout_worker
+from tunix.experimental.weight_sync import gcs_synchronizer
 from tunix.generate import vllm_model_config
 from tunix.models import automodel
+from tunix.models import hf_mapping
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
 from tunix.utils import maxtext_utils
 
@@ -238,9 +244,9 @@ def _vllm_engine_kwargs(
         "vllm_config.engine_kwargs.load_format has no effect with"
         " rollout_engine: inprocess_vllm while vllm_config."
         "init_with_random_weights is true (the default with"
-        " weight_sync_config.mode: raiden): the rollout starts from random"
-        " weights. Set vllm_config.init_with_random_weights: false to load the"
-        " checkpoint instead."
+        " weight_sync_config.mode: raiden or fs): the rollout starts from"
+        " random weights. Set vllm_config.init_with_random_weights: false to"
+        " load the checkpoint instead."
     )
   if "additional_config" in engine_kwargs:
     additional = engine_kwargs["additional_config"]
@@ -692,6 +698,7 @@ def _create_inprocess_vllm_sampler(
 ) -> sampler_lib.Sampler:
   """Creates the in-process vLLM sampler."""
   _validate_vllm_model_config(hp)
+  sync_delegate = _fs_sync_delegate(hp, worker_id, config)
   _import_vllm_sampler()
   from tunix.dist_rl.rollout import (  # pylint: disable=g-import-not-at-top
       inprocess_vllm_sampler,
@@ -712,6 +719,185 @@ def _create_inprocess_vllm_sampler(
       config=config,
       mesh=rollout_mesh,
       max_concurrency=max_concurrency,
+      raiden_sync_delegate=sync_delegate,
+  )
+
+
+def _validate_fs_mapping_config(
+    mapping_config: Any,
+    *,
+    model_name: str,
+    mode: str,
+) -> dict[str, tuple[str, Any]]:
+  """Validates `mapping_config` for manifest-composed FS/GCS weight sync."""
+  key_mappings = mapping_config.to_hf_mappings if mapping_config else None
+  if not key_mappings:
+    raise ValueError(
+        f"weight_sync_config.mode={mode!r} needs the rollout family's Tunix ->"
+        f" vLLM to_hf_mappings; {model_name} has none."
+    )
+  if mapping_config.preprocess_src_state is not None:
+    raise ValueError(
+        f"weight_sync_config.mode={mode!r} does not support {model_name!r}:"
+        " rollout_mapping_config defines preprocess_src_state."
+    )
+  if mapping_config.to_hf_hook_fns:
+    raise ValueError(
+        f"weight_sync_config.mode={mode!r} does not support {model_name!r}:"
+        " rollout_mapping_config defines to_hf_hook_fns."
+    )
+  transpose_keys = mapping_config.to_hf_transpose_keys or {}
+  active_transpose: list[str] = []
+  for pattern in transpose_keys:
+    if "*" in pattern:
+      regex = re.compile("^" + re.escape(pattern).replace(r"\*", ".*") + "$")
+      matched = any(regex.match(k) for k in key_mappings)
+    else:
+      matched = any(
+          k == pattern or k.split(".")[-1] == pattern for k in key_mappings
+      )
+    if matched:
+      active_transpose.append(pattern)
+  if active_transpose:
+    raise ValueError(
+        f"weight_sync_config.mode={mode!r} does not support {model_name!r}:"
+        f" rollout_mapping_config has active to_hf_transpose_keys"
+        f" {sorted(active_transpose)!r}."
+    )
+  # The synchronizer pairs bound arrays by `param_key`, which drops the
+  # `model.` prefix the vLLM patterns carry; `*` survives as its own segment.
+  return {
+      src: (weight_utils.param_key(dst), sharding)
+      for src, (dst, sharding) in key_mappings.items()
+  }
+
+
+def _build_fs_synchronizer(
+    state: Any,
+    *,
+    worker_id: str,
+    gcs_config: gcs_synchronizer.GCSSynchronizerConfig,
+    from_hf_manifest: Mapping[str, Any],
+    key_mappings: Mapping[str, tuple[str, Any]],
+) -> gcs_synchronizer.GCSSynchronizer:
+  """Builds a destination `GCSSynchronizer` bound to `state`'s live shapes."""
+  raw_names, raw_arrays = weight_utils.flatten_weights(state)
+  names, arrays = weight_utils.filter_bindable(
+      raw_names, raw_arrays, allow_proxy=True, label="fs"
+  )
+  if not arrays:
+    raise ValueError(
+        f"{worker_id}: no bindable weight arrays found in rollout state."
+    )
+  dst_shapes: dict[str, tuple[int, ...]] = {}
+  for name, arr in zip(names, arrays, strict=True):
+    key = weight_utils.param_key(name)
+    if not key or key in dst_shapes:
+      raise ValueError(
+          f"{worker_id}: rollout parameter {name!r} produced an empty or"
+          f" duplicate canonical key {key!r}."
+      )
+    dst_shapes[key] = tuple(arr.shape)
+  return gcs_synchronizer.GCSSynchronizer(
+      worker_id,
+      gcs_config,
+      from_hf_manifest=hf_mapping.compose_backend_manifest(
+          from_hf_manifest, key_mappings, dst_shapes
+      ),
+  )
+
+
+def _fs_sync_delegate(
+    hp: resolve_config.DistHyperParameters,
+    worker_id: str,
+    config: rollout_worker.RolloutConfig,
+) -> raiden_weight_sync_delegate.RaidenWeightSyncDelegate | None:
+  """Returns the FS/GCS destination delegate, or None for other modes.
+
+  The rollout reads canonical HF safetensors: at first bind, the rollout
+  family's `HF -> Tunix` manifest is retargeted onto the live vLLM state through
+  `config.rollout_mapping_config`'s Tunix -> vLLM key patterns.
+
+  Args:
+    hp: Validated distributed RL configuration.
+    worker_id: Rollout worker id, used as the synchronizer job name.
+    config: Resolved rollout config carrying the vLLM mapping config.
+
+  Raises:
+    ValueError: If mode is "fs"/"gcs" but preconditions are not met (Ray
+      multihost backend, non-JAX vLLM backend, unsupported mapping hooks or
+      variant manifest builder, or unmapped manifest targets such as MoE).
+  """
+  ws = hp.config_mapping("weight_sync_config")
+  mode = str(ws["mode"])
+  if not common_datatypes.is_fs_weight_sync_mode(mode):
+    return None
+  multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "")
+  if multihost_backend:
+    raise ValueError(
+        f"weight_sync_config.mode={mode!r} does not support"
+        f" TPU_MULTIHOST_BACKEND={multihost_backend!r}: inprocess_vllm cannot"
+        " bind live local model weights through the external executor."
+    )
+  if config.rollout_vllm_tpu_backend_type != "jax":
+    raise ValueError(
+        f"weight_sync_config.mode={mode!r} requires"
+        " vllm_config.tpu_backend_type='jax', got"
+        f" {config.rollout_vllm_tpu_backend_type!r}."
+    )
+  model_name = str(hp.config_mapping(_ROLLOUT_KEY)["model_name"])
+  key_mappings = _validate_fs_mapping_config(
+      config.rollout_mapping_config, model_name=model_name, mode=mode
+  )
+  params_lib = automodel.get_model_module(
+      model_name, automodel.ModelModule.PARAMS
+  )
+  from_hf_manifest = node_utils.build_single_arg_hf_manifest(
+      params_lib,
+      "build_from_hf_manifest",
+      automodel.call_model_config(model_name),
+      model_name=model_name,
+      mode=mode,
+  )
+  key_patterns = [
+      re.compile("^" + re.escape(p).replace(r"\*", r"(\d+)") + "$")
+      for p in key_mappings
+  ]
+  dropped = frozenset(from_hf_manifest.get("dropped_keys", ()))
+  manifest_targets = (
+      *(
+          k
+          for rule in from_hf_manifest["rules"]
+          for k in rule["target_keys"]
+          if k not in dropped
+      ),
+      *(
+          dst
+          for _, dst in from_hf_manifest.get("tied_keys", ())
+          if dst not in dropped
+      ),
+  )
+  unmapped = [
+      t for t in manifest_targets if not any(p.match(t) for p in key_patterns)
+  ]
+  if unmapped:
+    raise ValueError(
+        f"weight_sync_config.mode={mode!r} does not support {model_name!r}:"
+        f" {len(unmapped)} manifest target(s) have no vLLM mapping"
+        f" (e.g. {unmapped[:5]!r})."
+    )
+  gcs_config = gcs_synchronizer.GCSSynchronizerConfig(
+      staging_dir=str(ws["staging_dir"])
+  )
+  return raiden_weight_sync_delegate.RaidenWeightSyncDelegate(
+      server_id=worker_id,
+      synchronizer_factory=functools.partial(
+          _build_fs_synchronizer,
+          worker_id=worker_id,
+          gcs_config=gcs_config,
+          from_hf_manifest=from_hf_manifest,
+          key_mappings=key_mappings,
+      ),
   )
 
 

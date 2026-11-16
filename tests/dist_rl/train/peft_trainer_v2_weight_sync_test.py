@@ -23,8 +23,10 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 
+from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.train import peft_trainer_v2
 from tunix.dist_rl.weight_sync import raiden_synchronizer
+from tunix.experimental.weight_sync import gcs_synchronizer
 from tunix.generate import mappings as mappings_lib
 
 
@@ -38,13 +40,21 @@ class _FakeSynchronizer:
     self.bound_state = None
     self.d2h_calls = 0
     self.bound = False
+    self.closed = False
 
   def bind(self, state):
     self.bound_state = state
     self.bound = True
 
-  def d2h(self):
+  def d2h(self, sync_request=None):
     self.d2h_calls += 1
+    self.d2h_request = sync_request
+
+  def release(self, sync_request=None):
+    self.released = sync_request
+
+  def close(self):
+    self.closed = True
 
   def work_unit_metadata(self):
     return {"unit": self.job_name}
@@ -72,6 +82,9 @@ class WeightSyncStagingTest(absltest.TestCase):
         _sampler_type="inprocess_vllm",
         _rollout_tp_size=1,
         _weight_sync_worker=None,
+        _weight_sync_worker_factory=lambda: (
+            raiden_synchronizer.RaidenSynchronizer("trainer")
+        ),
     )
 
   def test_prepare_stages_and_returns_metadata(self):
@@ -82,6 +95,102 @@ class WeightSyncStagingTest(absltest.TestCase):
     self.assertEqual(md, [{"unit": "trainer"}])
     self.assertEqual(worker.d2h_calls, 1)
     self.assertIsNotNone(worker.bound_state)
+
+  def test_prepare_gcs_binds_native_state_cast_to_rollout_dtype(self):
+    fake = self._fake_trainer()
+    worker = mock.create_autospec(
+        gcs_synchronizer.GCSSynchronizer, instance=True
+    )
+    worker.bound = False
+    worker.work_unit_metadata.return_value = "md"
+    fake._weight_sync_worker_factory = lambda: worker
+    fake._target_state = {"x": jnp.zeros((1,), jnp.bfloat16)}
+    req = object()
+    md = peft_trainer_v2.PeftTrainer.prepare_weight_sync(fake, sync_request=req)
+    self.assertEqual(md, ["md"])
+    (bound,), _ = worker.bind.call_args
+    self.assertEqual(bound["w"][...].dtype, jnp.bfloat16)
+    worker.d2h.assert_called_once_with(sync_request=req)
+
+  def test_prepare_gcs_restages_current_weights_each_round(self):
+    fake = self._fake_trainer()
+    fake._target_state = {"x": jnp.zeros((1,), jnp.float32)}
+    worker = gcs_synchronizer.GCSSynchronizer(
+        "trainer",
+        gcs_synchronizer.GCSSynchronizerConfig(
+            staging_dir=self.create_tempdir().full_path
+        ),
+    )
+    fake._weight_sync_worker_factory = lambda: worker
+    for version in (1, 2):
+      # An optimizer step replaces the parameter array between rounds.
+      fake.model.w.set_value(jnp.full((2, 2), float(version)))
+      peft_trainer_v2.PeftTrainer.prepare_weight_sync(
+          fake,
+          sync_request=datatypes.WeightSyncRequest(
+              policy_version=version,
+              extra_config={"req_id": f"r{version}", "uuid": version},
+          ),
+      )
+      self.assertTrue(
+          jnp.array_equal(worker.arrays[0], fake.model.w.get_value())
+      )
+
+  def test_prepare_gcs_requires_target_state(self):
+    fake = self._fake_trainer()
+    worker = mock.create_autospec(
+        gcs_synchronizer.GCSSynchronizer, instance=True
+    )
+    worker.bound = False
+    fake._weight_sync_worker_factory = lambda: worker
+    with self.assertRaisesRegex(RuntimeError, "set_target_state"):
+      peft_trainer_v2.PeftTrainer.prepare_weight_sync(fake)
+    fake._target_state = {"step": jnp.zeros((1,), jnp.int32)}
+    with self.assertRaisesRegex(ValueError, "no floating leaves"):
+      peft_trainer_v2.PeftTrainer.prepare_weight_sync(fake)
+
+  def test_prepare_gcs_ignores_inference_only_buffers_and_rejects_mixed_dtypes(
+      self,
+  ):
+    fake = self._fake_trainer()
+    worker = mock.create_autospec(
+        gcs_synchronizer.GCSSynchronizer, instance=True
+    )
+    worker.bound = False
+    worker.work_unit_metadata.return_value = "md"
+    fake._weight_sync_worker_factory = lambda: worker
+    # ShapeDtypeStruct mirrors InprocessVllmSampler.get_target_state():
+    # cos_sin_cache is float32 while model weights are bfloat16.
+    fake._target_state = {
+        "cos_sin_cache": jax.ShapeDtypeStruct((16,), jnp.float32),
+        "model": {"w": jax.ShapeDtypeStruct((2, 2), jnp.bfloat16)},
+    }
+    peft_trainer_v2.PeftTrainer.prepare_weight_sync(fake)
+    (bound,), _ = worker.bind.call_args
+    self.assertEqual(bound["w"][...].dtype, jnp.bfloat16)
+
+    fake._target_state = {
+        "w1": jax.ShapeDtypeStruct((2, 2), jnp.bfloat16),
+        "w2": jax.ShapeDtypeStruct((2, 2), jnp.float32),
+    }
+    with self.assertRaisesRegex(ValueError, "mixed floating dtypes"):
+      peft_trainer_v2.PeftTrainer.prepare_weight_sync(fake)
+
+  def test_close_closes_weight_sync_worker(self):
+    worker = _FakeSynchronizer("fs")
+    fake = types.SimpleNamespace(
+        _write_train_metrics=mock.Mock(),
+        _save_last_checkpoint=mock.Mock(),
+        checkpoint_manager=mock.Mock(),
+        metrics_logger=mock.Mock(),
+        _pbar=None,
+        _weight_sync_worker=worker,
+    )
+    peft_trainer_v2.PeftTrainer.close(fake)
+    self.assertTrue(worker.closed)
+    self.assertIsNone(fake._weight_sync_worker)
+    fake.checkpoint_manager.close.assert_called_once_with()
+    fake.metrics_logger.close.assert_called_once_with()
 
   def test_prepare_reuses_the_worker(self):
     fake = self._fake_trainer()
@@ -136,6 +245,19 @@ class WeightSyncStagingTest(absltest.TestCase):
     self.assertIs(
         fake._weight_sync_worker.bound_state, mock.sentinel.converted_state
     )
+
+  def test_injected_factory_stages_and_releases_the_round(self):
+    fake = self._fake_trainer()
+    fake._weight_sync_worker_factory = lambda: _FakeSynchronizer("gcs")
+    req = mock.sentinel.sync_request
+    md = peft_trainer_v2.PeftTrainer.prepare_weight_sync(fake, sync_request=req)
+    worker = fake._weight_sync_worker
+    self.assertEqual(md, [{"unit": "gcs"}])
+    self.assertIs(worker.d2h_request, req)
+    self.assertTrue(
+        peft_trainer_v2.PeftTrainer.release_weight_sync(fake, sync_request=req)
+    )
+    self.assertIs(worker.released, req)
 
   def test_release_without_prepare_is_a_no_op(self):
     fake = self._fake_trainer()

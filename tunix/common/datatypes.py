@@ -235,13 +235,13 @@ class WeightSyncMode(str, enum.Enum):
       when trainer and rollout samplers share a Python process (used by
       in-process `VanillaSampler` / `InprocessVllmSampler` sync; not used by the
       multi-process `WeightSyncCoordinator`).
-    FS: Shared-filesystem / checkpoint-staged weight transfer (schema value
-      accepted by config resolution; coordinator handler not yet wired).
+    FS: Canonical shared-filesystem / object-store checkpoint-staged weight
+      transfer (`gs://` or filesystem staging directory, wired via
+      `tunix.experimental.weight_sync`).
     NCCL: GPU collective / NCCL broadcast weight transfer (schema value accepted
       by config resolution; coordinator handler not yet wired).
-    GCS: Experimental Orbax checkpoint-staged transfer through a shared
-      `gs://` or filesystem staging directory (wired via
-      `tunix.experimental.weight_sync`).
+    GCS: Backward-compatible alias for `FS` routing to the same checkpoint-
+      staged weight transfer.
   """
 
   NONE = "none"
@@ -254,3 +254,11 @@ class WeightSyncMode(str, enum.Enum):
 
 
 DEFAULT_WEIGHT_SYNC_MODE = WeightSyncMode.NONE
+
+
+def is_fs_weight_sync_mode(mode: WeightSyncMode | str) -> bool:
+  """Returns True when `mode` selects file/object-store staged weight sync."""
+  return isinstance(mode, str) and mode in (
+      WeightSyncMode.FS,
+      WeightSyncMode.GCS,
+  )
