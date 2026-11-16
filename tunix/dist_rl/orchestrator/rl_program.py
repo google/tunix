@@ -1069,8 +1069,19 @@ class StandardRLProgram(RLProgram):
     )
 
   def _is_group_stale(self, group: Sequence[datatypes.TrajectoryItem]) -> bool:
-    """Returns whether `group` has aged outside the policy-version window."""
-    if self.group_order != GroupOrder.TRAJECTORY_COMPLETION:
+    """Returns whether an over-provisioned `group` aged past `max_staleness`.
+
+    `raw_q` admission plus the default `(max_staleness + 1) * full_batch_size`
+    dispatch window already bound how far an admitted group can age, so groups
+    are only re-checked after `raw_q` when `max_in_flight_groups`
+    over-provisions the window (`GroupOrder.TRAJECTORY_COMPLETION` only) and
+    surplus groups can queue across weight syncs.
+
+    Args:
+      group: Raw or scored trajectory items of one prompt group.
+    """
+    staleness_window = (self.max_staleness + 1) * self.full_batch_size
+    if self.dispatch_window.window_capacity <= staleness_window:
       return False
     valid_items = [item for item in group if item.is_valid]
     if not valid_items:

@@ -1538,32 +1538,39 @@ class RLProgramTest(absltest.TestCase):
       self.assertEqual(metadata["min_unsettled_prompt_idx"], 3)
       self.assertEqual(logged[("rollout/filtered_groups_count", 1)], 1.0)
 
-      # Also verify critique_stage skips `_critique_group` altogether when a
-      # group sitting in `raw_q` is already stale before critique picks it up.
-      program2 = rl_program.StandardRLProgram(
-          dataset=["p0"],
-          max_steps=1,
-          algo_config=self.algo_config,
-          batch_config=self.batch_config,
-          reward_fns=[_reward],
-          assembler=self.assembler,
-          max_staleness=0,
-      )
-      self.addCleanup(program2.close)
-      program2.engine = self.mock_engine
-      program2.policy_version = 0
-      for it in _make_trajectory_group(
-          prompt_id="stale_in_raw", policy_version=0
-      ):
-        await program2.raw_q.put(it)
-      await program2.raw_q.close()
-      program2.policy_version = 1  # Sync happened while sitting in raw_q!
-      scored_before = list(scored_prompts)
-      await program2.critique_stage()
-      self.assertEqual(scored_prompts, scored_before)
-      drained = await program2._drain_filtered_groups()
-      self.assertLen(drained, 1)
-      self.assertEqual(drained[0][0].metadata["drop_reason"], "stale")
+      # Also verify an over-provisioned critique_stage skips `_critique_group`
+      # altogether when a group sitting in `raw_q` is already stale before
+      # critique picks it up, while the default window keeps the admitted group.
+      for max_in_flight_groups, expect_drop in ((2, True), (None, False)):
+        program2 = rl_program.StandardRLProgram(
+            dataset=["p0"],
+            max_steps=1,
+            algo_config=self.algo_config,
+            batch_config=self.batch_config,
+            reward_fns=[_reward],
+            assembler=self.assembler,
+            max_staleness=0,
+            max_in_flight_groups=max_in_flight_groups,
+        )
+        self.addCleanup(program2.close)
+        program2.engine = self.mock_engine
+        program2.policy_version = 0
+        for it in _make_trajectory_group(
+            prompt_id="stale_in_raw", policy_version=0
+        ):
+          await program2.raw_q.put(it)
+        await program2.raw_q.close()
+        program2.policy_version = 1  # Sync happened while sitting in raw_q!
+        scored_before = list(scored_prompts)
+        await program2.critique_stage()
+        drained = await program2._drain_filtered_groups()
+        if expect_drop:
+          self.assertEqual(scored_prompts, scored_before)
+          self.assertLen(drained, 1)
+          self.assertEqual(drained[0][0].metadata["drop_reason"], "stale")
+        else:
+          self.assertLen(scored_prompts, len(scored_before) + 1)
+          self.assertEmpty(drained)
 
     asyncio.run(_run())
 

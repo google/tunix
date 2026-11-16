@@ -340,7 +340,9 @@ dist_training_config:
   # Maximum prompt groups admitted by the orchestrator ahead of training. Null
   # keeps `(agentic_grpo_config.off_policy_steps + 1) * batch_size`. Must be at
   # least `batch_size`, and with `trajectory_group_order: "prompt_arrival"` at
-  # most that default.
+  # most that default. Values above that default over-provision rollouts:
+  # surplus groups older than `off_policy_steps` when dequeued for scoring or
+  # training are dropped instead of trained.
   max_in_flight_groups: null
   # Whether the orchestrator logs the trajectories of each step, to
   # `trajectory_log_dir` or, when that is empty, under <log_dir>/trajectories
