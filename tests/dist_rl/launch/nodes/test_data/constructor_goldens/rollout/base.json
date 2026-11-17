@@ -93,7 +93,9 @@
           "return_logits": false,
           "return_logprobs": true,
           "return_routed_experts": false,
-          "rollout_mapping_config": "<MappingConfig(**tunix.models.qwen3.mapping_vllm_jax.VLLM_JAX_MAPPING)>",
+          "rollout_mapping_config": {
+            "__type__": "MappingConfig"
+          },
           "rollout_vanilla_v2_chunked_prefill_length": 512,
           "rollout_vanilla_v2_enable_prefix_caching": true,
           "rollout_vanilla_v2_hbm_utilization": 0.2,
@@ -276,7 +278,9 @@
           "hbm_utilization": 0.5,
           "init_with_random_weights": false,
           "lora_config": null,
-          "mapping_config": "<MappingConfig(**tunix.models.qwen3.mapping_vllm_jax.VLLM_JAX_MAPPING)>",
+          "mapping_config": {
+            "__type__": "MappingConfig"
+          },
           "mesh": "<tunix.dist_rl.launch.nodes.node_utils.Mesh()>",
           "overlap_postprocessing": true,
           "partial_rollout": false,

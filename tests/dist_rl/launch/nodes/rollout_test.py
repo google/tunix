@@ -34,6 +34,7 @@ from tunix.dist_rl.rollout import inprocess_vllm_sampler
 from tunix.dist_rl.rollout import vanilla_sampler
 from tunix.dist_rl.rollout import vllm_sampler
 from tunix.dist_rl.weight_sync import weight_sync as weight_sync_lib
+from tunix.generate import mappings as mappings_lib
 from tunix.models import automodel
 from tunix.rl.agentic.parser.chat_template_parser import parser
 from tunix.utils import maxtext_utils
@@ -100,6 +101,7 @@ class ModelFamilyTest(absltest.TestCase):
         ("gemma4_e2b", parser.Gemma4ChatTemplateParser),
         ("google/gemma-2-2b-it", parser.GemmaChatTemplateParser),
         ("Qwen/Qwen3-1.7B", parser.QwenChatTemplateParser),
+        ("Qwen/Qwen3.5-0.8B", parser.QwenChatTemplateParser),
     ):
       with self.subTest(model_id=model_id):
         result = rollout._chat_parser_for(
@@ -116,29 +118,151 @@ class ModelFamilyTest(absltest.TestCase):
         rollout._create_chat_parser(hp, mock.Mock()), parser.RawTextParser
     )
 
-  def test_gemma4_mapping_includes_preprocessing_and_fused_projections(self):
-    config = rollout._mapping_config_for("google/gemma-4-E2B-it")
+  def test_validate_rollout_config_rejects_qwen3p5_unsupported_weight_sync(
+      self,
+  ):
+    with self.subTest("oop_vllm_with_raiden"):
+      oop_hp = _hp(
+          "rollout_engine=vllm",
+          "model_config.model_id=Qwen/Qwen3.5-0.8B",
+          "weight_sync_config.mode=raiden",
+          "rollout_model_config.mesh.shape=(1,1)",
+          "vllm_config.tensor_parallel_size=1",
+      )
+      with self.assertRaisesRegex(ValueError, "use inprocess_vllm instead"):
+        rollout._validate_rollout_config(oop_hp)
+      oop_config = rollout._rollout_config(
+          oop_hp, mock.Mock(), sampler_type="vllm"
+      )
+      with mock.patch.object(
+          vllm_sampler, "VllmSampler", autospec=True
+      ) as mock_sampler_cls:
+        with self.assertRaisesRegex(ValueError, "use inprocess_vllm instead"):
+          rollout._create_vllm_sampler(
+              oop_hp, "rollout-0", mock.Mock(), oop_config
+          )
+        mock_sampler_cls.assert_not_called()
 
-    # Gemma4 fuses gate/up on the source state before transfer and maps
-    # separate q/k/v projections.
-    self.assertIsNotNone(config.preprocess_src_state)
-    to_hf_mappings = config.to_hf_mappings
-    if to_hf_mappings is None:
-      self.fail("Gemma4 mapping has no to_hf_mappings.")
-    self.assertIn("layers.*.mlp.gate_up_proj.kernel", to_hf_mappings)
-    self.assertIn("layers.*.attn.q_einsum.w", to_hf_mappings)
-    self.assertIn("layers.*.attn.k_einsum.w", to_hf_mappings)
-    self.assertIn("layers.*.attn.v_einsum.w", to_hf_mappings)
+    for name, overrides, exc_type, regex in (
+        (
+            "inprocess_tp_gt_1",
+            (
+                "model_config.model_id=Qwen/Qwen3.5-2B",
+                "weight_sync_config.mode=raiden",
+                "rollout_model_config.mesh.shape=(1,2)",
+                "vllm_config.tensor_parallel_size=2",
+            ),
+            NotImplementedError,
+            "tensor_parallel_size=1 only",
+        ),
+        (
+            "inprocess_lora",
+            (
+                "model_config.model_id=Qwen/Qwen3.5-0.8B",
+                "weight_sync_config.mode=raiden",
+                "rollout_model_config.mesh.shape=(1,1)",
+                "vllm_config.tensor_parallel_size=1",
+                "rollout_model_config.lora_config={'rank': 8, 'alpha': 16.0}",
+            ),
+            NotImplementedError,
+            "Qwen3.5 LoRA",
+        ),
+        (
+            "inprocess_real_weights_raiden",
+            (
+                "model_config.model_id=Qwen/Qwen3.5-0.8B",
+                "weight_sync_config.mode=raiden",
+                "vllm_config.init_with_random_weights=false",
+                "rollout_model_config.mesh.shape=(1,1)",
+                "vllm_config.tensor_parallel_size=1",
+            ),
+            ValueError,
+            "requires init_with_random_weights=True",
+        ),
+        (
+            "inprocess_fs_default_real_weights",
+            (
+                "model_config.model_id=Qwen/Qwen3.5-0.8B",
+                "weight_sync_config.mode=fs",
+                "rollout_model_config.mesh.shape=(1,1)",
+                "vllm_config.tensor_parallel_size=1",
+            ),
+            ValueError,
+            "requires init_with_random_weights=True",
+        ),
+    ):
+      with self.subTest(name):
+        with self.assertRaisesRegex(exc_type, regex):
+          rollout._validate_rollout_config(
+              _hp("rollout_engine=inprocess_vllm", *overrides)
+          )
 
-  def test_qwen3_mapping_is_selected_for_qwen3(self):
-    config = rollout._mapping_config_for("Qwen/Qwen3-8B")
+  def test_qwen3p5_samplers_plumb_mapping_config_and_hf_overrides(self):
+    with self.subTest("dense_inproc_raiden"):
+      dense_inproc = _inprocess_vllm_rollout_config(
+          "rollout_engine=inprocess_vllm",
+          "model_config.model_id=Qwen/Qwen3.5-0.8B",
+          "weight_sync_config.mode=raiden",
+          "rollout_model_config.mesh.shape=(1,1)",
+          "vllm_config.tensor_parallel_size=1",
+      )
+      self.assertIsNotNone(dense_inproc.rollout_mapping_config)
+      self.assertIsNotNone(
+          dense_inproc.rollout_mapping_config.preprocess_src_state
+      )
+      self.assertIn(
+          "layers.*.linear_attn.in_proj_qkvz.kernel",
+          dense_inproc.rollout_mapping_config.to_hf_mappings,
+      )
+      self.assertEqual(
+          dense_inproc.rollout_vllm_kwargs["hf_overrides"],
+          {"architectures": ["Qwen3_5ForCausalLM"]},
+      )
+      raiden_hp = _hp(
+          "model_config.model_id=Qwen/Qwen3.5-0.8B",
+          "weight_sync_config.mode=raiden",
+      )
+      self.assertEmpty(
+          rollout._vllm_hf_overrides(raiden_hp, sampler_type="vllm")
+      )
 
-    self.assertTrue(config.to_hf_mappings)
-    self.assertIsNone(config.preprocess_src_state)
+    with self.subTest("static_oop"):
+      static_oop = _vllm_engine_kwargs(
+          "model_config.model_id=Qwen/Qwen3.5-35B-A3B",
+          "weight_sync_config.mode=none",
+      )
+      self.assertNotIn("hf_overrides", static_oop)
 
-  def test_unsupported_family_raises(self):
-    with self.assertRaisesRegex(ValueError, "supports Qwen3 and Gemma4"):
-      rollout._mapping_config_for("meta-llama/Llama-3-8B")
+    with self.subTest("maxtext_moe_inproc"):
+      maxtext_moe_inproc = _inprocess_vllm_rollout_config(
+          "rollout_engine=inprocess_vllm",
+          "model_config.model_id=Qwen/Qwen3.5-35B-A3B",
+          "model_config.model_source=maxtext",
+          "model_config.model_path=/ckpt/qwen3.5-35b-a3b",
+          "model_config.model_name=qwen3.5-35b-a3b",
+          "model_config.kwargs.maxtext_model_name=qwen3.5-35b-a3b",
+          "weight_sync_config.mode=raiden",
+      )
+      self.assertEqual(
+          maxtext_moe_inproc.rollout_mapping_config,
+          mappings_lib.MappingConfig(),
+      )
+      self.assertEqual(
+          maxtext_moe_inproc.rollout_vllm_kwargs["hf_overrides"],
+          dict(maxtext_utils.VLLM_MAXTEXT_HF_OVERRIDES),
+      )
+
+    with self.subTest("static_moe_inproc"):
+      static_moe_inproc = _inprocess_vllm_rollout_config(
+          "rollout_engine=inprocess_vllm",
+          "rollout_model_config.model_id=Qwen/Qwen3.5-35B-A3B",
+          "weight_sync_config.mode=none",
+      )
+      self.assertEqual(
+          static_moe_inproc.rollout_mapping_config,
+          mappings_lib.MappingConfig(),
+      )
+      self.assertNotIn("hf_overrides", static_moe_inproc.rollout_vllm_kwargs)
 
   def test_gemma4_vllm_overrides_match_text_only_reference(self):
     overrides = rollout._vllm_hf_overrides(
