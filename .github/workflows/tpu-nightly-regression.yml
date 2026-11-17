@@ -26,12 +26,24 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  HF_HOME: ~/.cache/huggingface
+  # Store caches on the 300 GiB /__w workspace PVC instead of the container
+  # rootfs / node boot disk; leave TMPDIR unset (/tmp) so AF_UNIX socket paths
+  # stay short.
+  HF_HOME: /__w/.cache/huggingface
   HF_HUB_ENABLE_HF_TRANSFER: "1"
+  TFDS_DATA_DIR: /__w/.cache/tensorflow_datasets
+  KAGGLEHUB_CACHE: /__w/.cache/kagglehub
+  VLLM_XLA_CACHE_PATH: /__w/.cache/vllm_xla
+  PIP_NO_CACHE_DIR: "1"
 
 jobs:
   run_prod:
     runs-on: [linux-x86-ct6e-180-8tpu]
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [sft, rl, regression]
     container:
       image: vllm/vllm-tpu:nightly-20260911-4b80060-51da0ca # zizmor: ignore[unpinned-images]
       options: --privileged
@@ -40,20 +52,20 @@ jobs:
         JAX_PLATFORMS: tpu,cpu
     steps:
 
-    # Cache Hugging Face hub
-    - name: Cache HF hub
-      uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
-      with:
-        path: ~/.cache/huggingface
-        key: hf-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
-        restore-keys: |
-          hf-${{ runner.os }}-
-
     - name: Checkout code
       uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       with:
         fetch-depth: 0
         persist-credentials: false
+
+    - name: Prepare workspace scratch directories
+      run: |
+        # Symlink /tmp/models onto /__w so hf_pipeline / safe_download hard-link
+        # weights in O(1) without EXDEV copies onto container rootfs, and GCS
+        # model downloads land on /__w while TMPDIR stays /tmp.
+        mkdir -p /__w/scratch/models
+        rm -rf /tmp/models
+        ln -sfn /__w/scratch/models /tmp/models
 
     - name: Install tunix dependencies
       run: |
@@ -86,6 +98,7 @@ jobs:
 
     - name: Run SFT shell scripts
       id: sft_tests
+      if: matrix.suite == 'sft'
       shell: bash
       run: |
         SCRIPT_DIR="./examples/sft/mtnt"
@@ -129,6 +142,8 @@ jobs:
               FINAL_EXIT_CODE=1
               FAILED_SCRIPTS+=("$script")
             fi
+            rm -rf /__w/scratch/models /tmp/intermediate_ckpt /tmp/*ckpt* /tmp/*checkpoint* /tmp/tensorboard /tmp/logging /tmp/profiling /tmp/perf_traces /tmp/tokenizers
+            mkdir -p /__w/scratch/models && ln -sfn /__w/scratch/models /tmp/models
             echo "::endgroup::"
           fi
         done
@@ -145,7 +160,7 @@ jobs:
 
     - name: Run RL shell scripts
       id: rl_tests
-      if: success() || failure()
+      if: matrix.suite == 'rl'
       shell: bash
       run: |
         SCRIPT_DIRS=(
@@ -208,6 +223,9 @@ jobs:
                 FINAL_EXIT_CODE=1
                 FAILED_SCRIPTS+=("$script")
               fi
+              pkill -9 -f "vllm" || true
+              rm -rf /__w/scratch/models /tmp/intermediate_ckpt /tmp/*ckpt* /tmp/*checkpoint* /tmp/tensorboard /tmp/logging /tmp/profiling /tmp/perf_traces /tmp/jax_cache /tmp/tokenizers
+              mkdir -p /__w/scratch/models && ln -sfn /__w/scratch/models /tmp/models
               echo "::endgroup::"
             fi
           done < <(find "$SCRIPT_DIR" -name "*.sh" -type f | grep -v "$SCRIPT_DIR/$EXCLUDE_DIR/" | grep -E -v "7b|8b|12b")
@@ -224,7 +242,7 @@ jobs:
 
 
     - name: Run regression scripts
-      if: success() || failure()
+      if: matrix.suite == 'regression'
       shell: bash
       id: regression_tests
       run: |
@@ -248,15 +266,18 @@ jobs:
             FAILED=1
             FAILED_SCRIPTS+=("$name")
           fi
+          rm -rf /__w/scratch/models /tmp/intermediate_ckpt /tmp/*ckpt* /tmp/*checkpoint* /tmp/tensorboard /tmp/logging /tmp/profiling /tmp/perf_traces /tmp/tokenizers
+          mkdir -p /__w/scratch/models && ln -sfn /__w/scratch/models /tmp/models
           echo "::endgroup::"
         }
 
         # Download GSM8K dataset
-        mkdir -p /tmp/grpo_test/rl/grpo/data
+        mkdir -p /__w/scratch/grpo_test/rl/grpo/data
 
-        run_and_log "grpo_demo_llama3_qwen2.py (colocated)" python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20
-        run_and_log "grpo_demo_llama3_qwen2.py (disaggregated-2-way)" python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --cluster-setup=disaggregated-2-way
-        run_and_log "grpo_demo_llama3_qwen2.py (disaggregated-3-way)" python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --cluster-setup=disaggregated-3-way
+        run_and_log "grpo_demo_llama3_qwen2.py (colocated)" python scripts/grpo_demo_llama3_qwen2.py --root-dir=/__w/scratch/grpo_test --num-batches=20
+        run_and_log "grpo_demo_llama3_qwen2.py (disaggregated-2-way)" python scripts/grpo_demo_llama3_qwen2.py --root-dir=/__w/scratch/grpo_test --num-batches=20 --cluster-setup=disaggregated-2-way
+        run_and_log "grpo_demo_llama3_qwen2.py (disaggregated-3-way)" python scripts/grpo_demo_llama3_qwen2.py --root-dir=/__w/scratch/grpo_test --num-batches=20 --cluster-setup=disaggregated-3-way
+        rm -rf /__w/scratch/grpo_test
 
         pip install 'jax[tpu]<0.11.0'
         run_and_log "math_eval_nb.py" bash -c "NUM_BATCHES=1 python examples/deepscaler/math_eval_nb.py"
@@ -265,15 +286,15 @@ jobs:
         # vLLM Tests
 
         # run_and_log "vllm grpo_demo_llama3_qwen2.py colocated mode" \
-        #   python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm
+        #   python scripts/grpo_demo_llama3_qwen2.py --root-dir=/__w/scratch/grpo_test  --num-batches=20 --rollout-engine=vllm
         # run_and_log "vllm grpo_demo_llama3_qwen2.py 2 way disaggregated mode" \
-        #   python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm --cluster-setup=disaggregated-2-way
+        #   python scripts/grpo_demo_llama3_qwen2.py --root-dir=/__w/scratch/grpo_test  --num-batches=20 --rollout-engine=vllm --cluster-setup=disaggregated-2-way
         # run_and_log "vllm grpo_demo_llama3_qwen2.py 3 way disaggregated mode" \
-        #   python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm --cluster-setup=disaggregated-3-way
+        #   python scripts/grpo_demo_llama3_qwen2.py --root-dir=/__w/scratch/grpo_test  --num-batches=20 --rollout-engine=vllm --cluster-setup=disaggregated-3-way
         # run_and_log "vllm grpo_demo_llama3_qwen2.py vllm server mode in 2 way disaggregated mode" \
-        #   python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm --rollout-server-mode=True --cluster-setup=disaggregated-2-way
+        #   python scripts/grpo_demo_llama3_qwen2.py --root-dir=/__w/scratch/grpo_test  --num-batches=20 --rollout-engine=vllm --rollout-server-mode=True --cluster-setup=disaggregated-2-way
         # run_and_log "vllm grpo_demo_llama3_qwen2.py with vllm server mode in 3 way disaggregated mode" \
-        #   python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm --rollout-server-mode=True --cluster-setup=disaggregated-3-way
+        #   python scripts/grpo_demo_llama3_qwen2.py --root-dir=/__w/scratch/grpo_test  --num-batches=20 --rollout-engine=vllm --rollout-server-mode=True --cluster-setup=disaggregated-3-way
 
         if [ "$FAILED" -ne 0 ]; then
           echo "🚫 One or more regression scripts failed:" >&2
@@ -288,6 +309,7 @@ jobs:
 
   run_latest:
     runs-on: [linux-x86-ct6e-180-8tpu]
+    timeout-minutes: 90
     container:
       image: vllm/vllm-tpu:nightly # zizmor: ignore[unpinned-images]
       options: --privileged
@@ -296,25 +318,22 @@ jobs:
         JAX_PLATFORMS: tpu,cpu
     steps:
 
-    # Cache Hugging Face hub
-    - name: Cache HF hub
-      uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
-      with:
-        path: ~/.cache/huggingface
-        key: hf-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
-        restore-keys: |
-          hf-${{ runner.os }}-
-
     - name: Checkout code
       uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       with:
         fetch-depth: 0
         persist-credentials: false
 
+    - name: Prepare workspace scratch directories
+      run: |
+        mkdir -p /__w/scratch/models
+        rm -rf /tmp/models
+        ln -sfn /__w/scratch/models /tmp/models
+
     - name: Install tunix dependencies and latest LKG vLLM
       run: |
         # Install compiler and build dependencies for compiling vLLM from source
-        apt-get update && apt-get install -y build-essential cmake ninja-build
+        apt-get update && apt-get install -y build-essential cmake ninja-build && rm -rf /var/lib/apt/lists/*
 
         # Ensure build requirements are upgraded and present
         pip install packaging setuptools wheel setuptools-rust kagglehub kagglesdk --upgrade
@@ -362,25 +381,34 @@ jobs:
     - name: Run latest tests
       shell: bash
       run: |
-        mkdir -p /tmp/grpo_test/rl/grpo/data
+        mkdir -p /__w/scratch/grpo_test/rl/grpo/data
         FAILED=0
         FAILED_SCRIPTS=()
 
-        echo "📦 Executing Non-Agentic CLI (vLLM Batch Mode, Colocated) ..."
-        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=2 --rollout-engine=vllm || { FAILED=1; FAILED_SCRIPTS+=("Non-Agentic CLI (vLLM Batch Mode, Colocated)"); }
+        function cleanup_after_test() {
+          pkill -9 -f "vllm" || true
+          rm -rf /__w/scratch/models /__w/scratch/qwen3_ckpts_server* /tmp/intermediate_ckpt /tmp/*ckpt* /tmp/*checkpoint* /tmp/tensorboard /tmp/logging /tmp/profiling /tmp/perf_traces /tmp/tokenizers
+          mkdir -p /__w/scratch/models && ln -sfn /__w/scratch/models /tmp/models
+        }
 
-        pkill -9 -f "vllm" || true
+        echo "📦 Executing Non-Agentic CLI (vLLM Batch Mode, Colocated) ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/__w/scratch/grpo_test --num-batches=2 --rollout-engine=vllm || { FAILED=1; FAILED_SCRIPTS+=("Non-Agentic CLI (vLLM Batch Mode, Colocated)"); }
+
+        cleanup_after_test
         sleep 5
 
         echo "📦 Executing Non-Agentic CLI (vLLM Server Mode, Disaggregated 2-way) ..."
-        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=2 --rollout-engine=vllm --rollout-server-mode=True --cluster-setup=disaggregated-2-way || { FAILED=1; FAILED_SCRIPTS+=("Non-Agentic CLI (vLLM Server Mode, Disaggregated 2-way)"); }
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/__w/scratch/grpo_test --num-batches=2 --rollout-engine=vllm --rollout-server-mode=True --cluster-setup=disaggregated-2-way || { FAILED=1; FAILED_SCRIPTS+=("Non-Agentic CLI (vLLM Server Mode, Disaggregated 2-way)"); }
 
-        pkill -9 -f "vllm" || true
+        cleanup_after_test
+        rm -rf /__w/scratch/grpo_test
         sleep 5
 
         echo "📦 Executing Agentic CLI (Qwen2.5 0.5B, vLLM Server Mode, Disaggregated 4:4) ..."
-        model_name="qwen2.5-0.5b" model_id="Qwen/Qwen2.5-0.5B-Instruct" checkpoint_dir="/tmp/qwen3_ckpts_server" num_batches=2 num_train_epochs=1 total_tpus=8 train_mesh="(4,1)" rollout_mesh="(4,1)" \
+        model_name="qwen2.5-0.5b" model_id="Qwen/Qwen2.5-0.5B-Instruct" checkpoint_dir="/__w/scratch/qwen3_ckpts_server" num_batches=2 num_train_epochs=1 total_tpus=8 train_mesh="(4,1)" rollout_mesh="(4,1)" \
           bash examples/rl/grpo/gsm8k/run_qwen3_8b_disagg.sh || { FAILED=1; FAILED_SCRIPTS+=("Agentic CLI (Qwen2.5 0.5B, vLLM Server Mode, Disaggregated 4:4)"); }
+
+        cleanup_after_test
 
         if [ "$FAILED" -ne 0 ]; then
           echo "❌ One or more run_latest tests failed:" >&2
