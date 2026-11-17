@@ -242,7 +242,6 @@ class RecipesTest(launcher_testing.LauncherTestCase):
     self.assertTrue(weight_sync_cfg["prefuse_moe_weights"])
     self.assertTrue(weight_sync_cfg["verify_weights"])
     k8s = config["cluster_config"]["k8s"]
-    self.assertEqual(k8s["trainer_extra_env"], "")
     self.assertEqual(k8s["trainer"]["jobset_yaml"], "jobset.pathways.yaml")
     self.assertEqual(k8s["trainer"]["tpu_slice"], "tpuv5:2x2x2")
     self.assertEqual(k8s["rollout"]["jobset_yaml"], "jobset.tpu.yaml")

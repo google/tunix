@@ -31,7 +31,6 @@ import pathlib
 import pickle
 import signal
 import sys
-import types
 from typing import Final, Literal, TypeAlias, TypedDict, cast
 
 import jax
@@ -46,7 +45,7 @@ from tunix.dist_rl.worker import remote_execution
 
 NodeRole = Literal["trainer", "rollout", "inference"]
 # Every process of a run: the orchestrator and the worker nodes.
-ProcessRole = Literal["orchestrator", "trainer", "rollout", "inference"]
+ProcessRole = resolve_config.ProcessRole
 
 # Environment variable that `k8s.sh` or an external launcher
 # (`cluster_config.target: external`) sets to each rollout replica's index
@@ -130,16 +129,6 @@ def ensure_repo_root_on_path() -> None:
   logging.info("Repo root inserted into sys.path: %s", repo_root)
 
 
-# Environment variables `apply_library_env` sets from the config, and the
-# config key each comes from. Launchers reject them in user-supplied
-# environments so a value can only come from the config.
-LIBRARY_ENV_CONFIG_KEYS: Final[Mapping[str, str]] = types.MappingProxyType({
-    "SKIP_JAX_PRECOMPILE": "vllm_config.skip_jax_precompile",
-    "TPU_RAIDEN_DATA_NICS": "weight_sync_config.raiden_data_nics",
-    "VERIFY_WEIGHTS": "weight_sync_config.verify_weights",
-})
-
-
 def _library_env(
     hp: resolve_config.DistHyperParameters, role: NodeRole
 ) -> dict[str, tuple[str | None, str]]:
@@ -155,7 +144,7 @@ def _library_env(
     skip = hp.config_mapping("vllm_config")["skip_jax_precompile"]
     values["SKIP_JAX_PRECOMPILE"] = "1" if skip else "0"
   return {
-      name: (value, LIBRARY_ENV_CONFIG_KEYS[name])
+      name: (value, resolve_config.LIBRARY_ENV_CONFIG_KEYS[name])
       for name, value in values.items()
   }
 
