@@ -35,6 +35,7 @@ from tunix.sft import checkpoint_options
 from tunix.sft import hooks
 from tunix.sft import peft_trainer
 from tunix.sft import profiler
+from tunix.sft import profiler_jax
 from tunix.sft import utils
 from tunix.tests import test_common as tc
 from tunix.utils import compat
@@ -351,7 +352,7 @@ class PeftTrainerTest(parameterized.TestCase):
     self.assertIsNotNone(curr_jit_func)
     self.assertIsNot(previous_jit_func, curr_jit_func)
 
-  @mock.patch.object(profiler, 'Profiler')
+  @mock.patch.object(profiler, 'Profiler', autospec=True)
   def test_basic_training_with_profiler(self, mock_profiler_init):
     mock_profiler_instance = mock.MagicMock()
     mock_profiler_init.return_value = mock_profiler_instance
@@ -384,6 +385,11 @@ class PeftTrainerTest(parameterized.TestCase):
         initial_step=0,
         max_step=config.max_steps,
         profiler_options=profiler_options,
+        backend=mock.ANY,
+    )
+    self.assertIsInstance(
+        mock_profiler_init.call_args.kwargs['backend'],
+        profiler_jax.JaxProfilerBackend,
     )
     expected_calls = (
         # steps 0 through 8.

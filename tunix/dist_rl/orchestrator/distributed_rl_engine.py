@@ -89,22 +89,69 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
   raise ValueError("RolloutResponse payload is None.")
 
 
-_UNREACHABLE_WORKER_ERRORS = (
-    remote_execution.TransientTransportError,
-    ConnectionError,
-    TimeoutError,
-    KeyError,
-)
-
-
-def _group_refs_by_worker(
+def _group_refs_by_worker_instance(
     refs: Iterable[datatypes.RoutedExpertsRef],
-) -> dict[str, list[int]]:
-  """Groups `RoutedExpertsRef`s into `worker_id -> [ref_id, ...]`."""
-  by_worker: dict[str, list[int]] = {}
+) -> dict[tuple[str, str], list[datatypes.RoutedExpertsRef]]:
+  """Groups `RoutedExpertsRef`s into `(worker_id, instance_id) -> [ref, ...]`."""
+  by_instance: dict[tuple[str, str], list[datatypes.RoutedExpertsRef]] = {}
   for ref in refs:
-    by_worker.setdefault(ref.worker_id, []).append(ref.ref_id)
-  return by_worker
+    by_instance.setdefault((ref.worker_id, ref.instance_id), []).append(ref)
+  return by_instance
+
+
+_RolloutTargetEntry = tuple[
+    datatypes.WorkerInfo,
+    remote_execution.ActorHandle,
+    worker_registry.AdmissionStatus,
+]
+
+
+def _resolve_active_staging_handle(
+    wid: str,
+    ref_instance_id: str,
+    targets_by_wid: Mapping[str, _RolloutTargetEntry],
+) -> tuple[remote_execution.ActorHandle | None, str]:
+  """Resolves an `ACTIVE` rollout handle matching `ref_instance_id`.
+
+  Args:
+    wid: Logical rollout worker identifier.
+    ref_instance_id: Process `instance_id` stamped on the staged reference.
+    targets_by_wid: Registry snapshot keyed by `worker_id`.
+
+  Returns:
+    `(handle, "")` when `wid` is currently `ACTIVE` with `instance_id ==
+    ref_instance_id`, or `(None, reason)` explaining why `wid` cannot serve
+    staged references from `ref_instance_id`.
+  """
+  entry = targets_by_wid.get(wid)
+  if entry is None:
+    return (
+        None,
+        (
+            f"Rollout worker {wid!r} was evicted before staged routed_experts"
+            " could be fetched."
+        ),
+    )
+  info, handle, status = entry
+  if status is not worker_registry.AdmissionStatus.ACTIVE:
+    return (
+        None,
+        (
+            f"Rollout worker {wid!r} is in status {status.value!r} (not"
+            " ACTIVE); staged routed_experts from its prior instance are"
+            " unavailable."
+        ),
+    )
+  if info.instance_id != ref_instance_id:
+    return (
+        None,
+        (
+            f"Rollout worker {wid!r} restarted with"
+            f" instance_id={info.instance_id!r} != {ref_instance_id!r} before"
+            " staged routed_experts could be fetched."
+        ),
+    )
+  return handle, ""
 
 
 def _validate_staging_overcommit_factor(factor: float) -> float:
@@ -314,7 +361,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     self._inflight_fwd_bwd: dict[
         datatypes.Role | str, set[asyncio.Future[None]]
     ] = collections.defaultdict(set)
-    self._unreleased_staged_refs: collections.Counter[str] = (
+    self._unreleased_staged_refs: collections.Counter[tuple[str, str]] = (
         collections.Counter()
     )
     self._staging_worst_case_bytes: int | None = None
@@ -325,6 +372,14 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
 
   def _rollout_handles(self) -> list[remote_execution.ActorHandle]:
     return self._registry.handles(datatypes.Role.ROLLOUT)
+
+  def _rollout_targets_by_wid(self) -> dict[str, _RolloutTargetEntry]:
+    return {
+        info.worker_id: (info, handle, status)
+        for info, handle, status in self._registry.targets_with_status(
+            datatypes.Role.ROLLOUT, statuses=None
+        )
+    }
 
   def _role_handle(
       self, role: datatypes.Role | str
@@ -416,7 +471,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     for info, handle in targets:
       inflight = inflight_by_actor.get(handle, 0)
       occupied = inflight + (
-          self._unreleased_staged_refs[info.worker_id] if stage_any else 0
+          self._unreleased_staged_refs[(info.worker_id, info.instance_id)]
+          if stage_any
+          else 0
       )
       worker_loads.append(occupied)
       if stage_any and self._staging_worst_case_bytes is not None:
@@ -664,10 +721,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         if isinstance(it, dict):
           it = datatypes.RolloutResponse(**it)
         traj_item = _response_to_trajectory_item(it)
-        if traj_item.routed_experts_ref is not None:
-          self._unreleased_staged_refs[
-              traj_item.routed_experts_ref.worker_id
-          ] += 1
+        ref = traj_item.routed_experts_ref
+        if ref is not None:
+          self._unreleased_staged_refs[(ref.worker_id, ref.instance_id)] += 1
         logging.debug(
             "Received rollout response (prompt_id=%s, group_index=%d).",
             traj_item.prompt_id,
@@ -675,7 +731,6 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         )
         completed.append(traj_item)
     self._fault_tolerance_manager.check_rollout_capacity()
-    self._check_staging_liveness()
     return completed
 
   async def generate(
@@ -858,19 +913,41 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       | dict[str, Any]
       | None
   ):
-    """Retrieves step metrics from the worker(s) registered for the specified role."""
+    """Retrieves step metrics from the worker(s) registered for `role`.
+
+    For `Role.ROLLOUT`, returns `[]` under `FaultToleranceConfig.enabled=True`
+    when zero rollout workers are currently `ACTIVE` mid-run, skips rollout
+    workers failing with transport or closed-handle errors, and propagates
+    `RemoteCallError` application errors (when `enabled=False`, worker and
+    transport errors fail fast).
+
+    Args:
+      role: Worker role whose metrics should be queried.
+      **kwargs: Additional keyword arguments forwarded to worker `get_metrics`.
+
+    Returns:
+      Aggregated list of per-worker metric payloads for `Role.ROLLOUT`, or the
+      single worker's metric payload for singleton roles.
+    """
     if role == datatypes.Role.ROLLOUT:
       rollout_handles = self._rollout_handles()
       if not rollout_handles:
+        if self._fault_tolerance_manager.config.enabled and (
+            self._fault_tolerance_manager.peak_active_rollout_workers > 0
+            or self._registry.handles(datatypes.Role.ROLLOUT, statuses=None)
+        ):
+          return []
         raise ValueError(f"No rollout workers registered for role {role}")
-      tasks = [
-          self._invoke_worker(w, "get_metrics", **kwargs)
+      results = await asyncio.gather(*(
+          self._invoke_worker_ft_tolerant(
+              w,
+              "get_metrics",
+              skip_msg="Skipping get_metrics on unreachable rollout worker",
+              **kwargs,
+          )
           for w in rollout_handles
-      ]
-      results = await asyncio.gather(*tasks, return_exceptions=True)
-      return [  # pyrefly: ignore[bad-return]
-          r for r in results if not isinstance(r, Exception) and r is not None
-      ]
+      ))
+      return [r for ok, r in results if ok and r is not None]
     else:
       worker = self._role_handle(role)
       if worker is None:
@@ -1048,24 +1125,6 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         role=role, policy_version=target_policy_version
     )
 
-  def _check_staging_liveness(self) -> None:
-    """Verifies active rollout workers satisfy the installed staging bound."""
-    if (
-        self._staging_worst_case_bytes is None
-        or self._required_staging_slots <= 0
-    ):
-      return
-    targets = self._registry.targets(
-        datatypes.Role.ROLLOUT,
-        statuses=(worker_registry.AdmissionStatus.ACTIVE,),
-    )
-    _validate_staging_slots(
-        targets,
-        worst_case_bytes=self._staging_worst_case_bytes,
-        required_slots=self._required_staging_slots,
-        overcommit_factor=self._staging_overcommit_factor,
-    )
-
   def routed_experts_spec(
       self,
       *,
@@ -1127,12 +1186,6 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           f"required_slots must be a non-negative int, got {required_slots!r}."
       )
     factor = _validate_staging_overcommit_factor(overcommit_factor)
-    if self._fault_tolerance_manager.config.enabled:
-      logging.warning(
-          "Orchestrator Relay does not preserve rollout-worker fault tolerance:"
-          " staged routed_experts reside in rollout worker RAM, so evicting a"
-          " rollout worker with pending refs will fail fetch_routed_experts."
-      )
     if required_slots > 0:
       targets = self._registry.targets(
           datatypes.Role.ROLLOUT,
@@ -1144,48 +1197,138 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           required_slots=required_slots,
           overcommit_factor=factor,
       )
+      if self._fault_tolerance_manager.config.enabled and targets:
+        slot_counts = sorted(
+            _worker_staging_slots(info, worst_case_bytes, factor)
+            for info, _ in targets
+        )
+        ratio = self._fault_tolerance_manager.config.min_active_rollout_ratio
+        n_workers = len(slot_counts)
+        if ratio is None:
+          k_min = 1
+        else:
+          k_min = next(
+              (k for k in range(1, n_workers + 1) if k / n_workers >= ratio),
+              n_workers,
+          )
+        min_surviving_slots = sum(slot_counts[:k_min])
+        if min_surviving_slots < required_slots:
+          logging.warning(
+              "Fault tolerance allows shrinking to %d/%d active rollout"
+              " worker(s), which provides at most %d worst-case staging slots"
+              " (< required %d). Surviving workers may block in"
+              " RolloutStagingBuffer.reserve() until replacement workers rejoin"
+              " or min_active_rollout_grace_s (%.1fs) elapses; consider"
+              " increasing RolloutConfig.staging_max_bytes or"
+              " staging_overcommit_factor.",
+              k_min,
+              n_workers,
+              min_surviving_slots,
+              required_slots,
+              self._fault_tolerance_manager.config.min_active_rollout_grace_s,
+          )
     self._staging_worst_case_bytes = worst_case_bytes
     self._required_staging_slots = required_slots
     self._staging_overcommit_factor = factor
 
+    def _count_staging_slots(
+        active_targets: Sequence[
+            tuple[datatypes.WorkerInfo, remote_execution.ActorHandle]
+        ],
+    ) -> int:
+      return sum(
+          _worker_staging_slots(info, worst_case_bytes, factor)
+          for info, _ in active_targets
+      )
+
+    self._fault_tolerance_manager.set_staging_slot_floor(
+        _count_staging_slots if required_slots > 0 else None,
+        required_slots,
+    )
+
   async def fetch_routed_experts(
       self,
       refs: Sequence[datatypes.RoutedExpertsRef],
-  ) -> dict[datatypes.RoutedExpertsRef, np.ndarray]:
-    """Pulls staged `routed_experts` arrays concurrently per `worker_id`.
-
-    Note: Staged entries reside in rollout worker RAM; if a worker is evicted
-    before its refs are fetched, this fails fast with `RuntimeError`.
-    """
+  ) -> rl_engine_interface.RoutedExpertsFetchResult:
+    """Pulls staged `routed_experts` arrays concurrently per worker instance."""
     if not refs:
-      return {}
-    by_worker = _group_refs_by_worker(dict.fromkeys(refs))
-    worker_calls: list[tuple[str, remote_execution.ActorHandle, list[int]]] = []
-    for wid, ref_ids in by_worker.items():
-      try:
-        handle = self._registry.handle(wid)
-      except KeyError as exc:
-        raise RuntimeError(
-            f"Rollout worker {wid!r} was evicted before staged routed_experts"
-            " could be fetched."
-        ) from exc
-      worker_calls.append((wid, handle, ref_ids))
-    responses = await asyncio.gather(*(
-        self._invoke_worker(handle, "fetch_staged", ref_ids=ref_ids)
-        for _, handle, ref_ids in worker_calls
-    ))
-    ref_by_key = {(r.worker_id, r.ref_id): r for r in refs}
+      return rl_engine_interface.RoutedExpertsFetchResult(
+          fetched={}, failed_refs=frozenset()
+      )
+    ft_enabled = self._fault_tolerance_manager.config.enabled
+    by_instance = _group_refs_by_worker_instance(dict.fromkeys(refs))
+    targets_by_wid = self._rollout_targets_by_wid()
+    failed: list[datatypes.RoutedExpertsRef] = []
+    worker_calls: list[
+        tuple[
+            str,
+            str,
+            remote_execution.ActorHandle,
+            list[datatypes.RoutedExpertsRef],
+        ]
+    ] = []
+    for (wid, ref_inst), group_refs in by_instance.items():
+      handle, err_msg = _resolve_active_staging_handle(
+          wid, ref_inst, targets_by_wid
+      )
+      if handle is None:
+        if not ft_enabled:
+          raise RuntimeError(err_msg)
+        logging.warning(
+            "%s Marking %d staged ref(s) failed.", err_msg, len(group_refs)
+        )
+        failed.extend(group_refs)
+        continue
+      worker_calls.append((wid, ref_inst, handle, group_refs))
+
     fetched: dict[datatypes.RoutedExpertsRef, np.ndarray] = {}
-    for (wid, _, ref_ids), worker_map in zip(
-        worker_calls, responses, strict=True
-    ):
-      for rid in ref_ids:
-        if rid not in worker_map:
-          raise KeyError(
-              f"Rollout worker {wid!r} fetch_staged omitted ref_id={rid}."
+    if worker_calls:
+      results = await asyncio.gather(*(
+          self._invoke_worker_ft_tolerant(
+              handle,
+              "fetch_staged",
+              skip_msg=(
+                  f"Rollout worker {wid!r} failed during fetch_staged;"
+                  f" marking {len(group_refs)} ref(s) failed"
+              ),
+              ref_ids=[r.ref_id for r in group_refs],
+              expected_instance_id=ref_inst,
           )
-        fetched[ref_by_key[(wid, rid)]] = worker_map[rid]
-    return fetched
+          for wid, ref_inst, handle, group_refs in worker_calls
+      ))
+      for (wid, ref_inst, _, group_refs), (ok, worker_map) in zip(
+          worker_calls, results, strict=True
+      ):
+        if not ok:
+          failed.extend(group_refs)
+          continue
+        if worker_map is None:
+          if not ft_enabled:
+            raise RuntimeError(
+                f"Rollout worker {wid!r} rejected stale instance_id for"
+                f" {len(group_refs)} staged ref(s)."
+            )
+          logging.warning(
+              "Rollout worker %r (expected instance_id=%r) rejected stale"
+              " instance_id; marking %d staged ref(s) failed.",
+              wid,
+              ref_inst,
+              len(group_refs),
+          )
+          failed.extend(group_refs)
+          continue
+        for ref in group_refs:
+          if ref.ref_id not in worker_map:
+            raise KeyError(
+                f"Rollout worker {wid!r} fetch_staged omitted"
+                f" ref_id={ref.ref_id}."
+            )
+          fetched[ref] = worker_map[ref.ref_id]
+
+    return rl_engine_interface.RoutedExpertsFetchResult(
+        fetched=fetched,
+        failed_refs=frozenset(failed),
+    )
 
   async def _invoke_worker_ft_tolerant(
       self,
@@ -1194,54 +1337,61 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       *,
       skip_msg: str,
       **kwargs: Any,
-  ) -> bool:
-    """Invokes `method_name`, skipping unreachable workers when FT is enabled."""
+  ) -> tuple[bool, Any]:
+    """Invokes `method_name`, returning `(False, None)` on FT transport faults."""
     try:
-      await self._invoke_worker(handle, method_name, **kwargs)
-      return True
-    except _UNREACHABLE_WORKER_ERRORS as exc:
-      if not self._fault_tolerance_manager.config.enabled:
+      return True, await self._invoke_worker(handle, method_name, **kwargs)
+    except BaseException as exc:  # pylint: disable=broad-exception-caught
+      if not self._fault_tolerance_manager.config.enabled or not (
+          remote_execution.is_transport_error(exc, handle=handle)
+      ):
         raise
       logging.warning("%s (%s)", skip_msg, exc)
-      return False
+      return False, None
 
   async def release_routed_experts(
       self,
       refs: Sequence[datatypes.RoutedExpertsRef],
   ) -> None:
-    """Releases staged `routed_experts` entries grouped by `worker_id`."""
+    """Releases staged `routed_experts` entries grouped by worker instance."""
     if not refs:
       return
-    by_worker = _group_refs_by_worker(dict.fromkeys(refs))
-    for wid, ref_ids in by_worker.items():
-      held = self._unreleased_staged_refs[wid]
-      if held < len(ref_ids):
+    by_instance = _group_refs_by_worker_instance(dict.fromkeys(refs))
+    for (wid, ref_inst), group_refs in by_instance.items():
+      held = self._unreleased_staged_refs[(wid, ref_inst)]
+      if held < len(group_refs):
         raise RuntimeError(
-            f"Cannot release {len(ref_ids)} staged routed_experts ref(s) on"
-            f" worker {wid!r} (e.g. ref_id={ref_ids[0]}): only {held}"
-            " unreleased ref(s) tracked."
+            f"Cannot release {len(group_refs)} staged routed_experts ref(s)"
+            f" on worker {wid!r} (instance_id={ref_inst!r}, e.g."
+            f" ref_id={group_refs[0].ref_id}): only {held} unreleased ref(s)"
+            " tracked."
         )
-    for wid, ref_ids in by_worker.items():
-      remaining = self._unreleased_staged_refs[wid] - len(ref_ids)
+    for key, group_refs in by_instance.items():
+      remaining = self._unreleased_staged_refs[key] - len(group_refs)
       if remaining > 0:
-        self._unreleased_staged_refs[wid] = remaining
+        self._unreleased_staged_refs[key] = remaining
       else:
-        del self._unreleased_staged_refs[wid]
+        del self._unreleased_staged_refs[key]
+
+    targets_by_wid = self._rollout_targets_by_wid()
     calls: list[tuple[str, remote_execution.ActorHandle, list[int]]] = []
-    for wid, ref_ids in by_worker.items():
-      try:
-        handle = self._registry.handle(wid)
-      except KeyError:
+    for (wid, ref_inst), group_refs in by_instance.items():
+      ref_ids = [r.ref_id for r in group_refs]
+      handle, _ = _resolve_active_staging_handle(wid, ref_inst, targets_by_wid)
+      if handle is None:
         self._evicted_release_skips_total += len(ref_ids)
         logging.warning(
-            "Skipping release_staged for %d ref(s) on evicted rollout worker"
-            " %r (evicted_release_skips_total=%d).",
+            "Skipping release_staged for %d ref(s) on evicted or replaced"
+            " rollout worker %r (instance_id=%r,"
+            " evicted_release_skips_total=%d).",
             len(ref_ids),
             wid,
+            ref_inst,
             self._evicted_release_skips_total,
         )
         continue
       calls.append((wid, handle, ref_ids))
+
     if calls:
       results = await asyncio.gather(*(
           self._invoke_worker_ft_tolerant(
@@ -1255,7 +1405,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           )
           for wid, handle, ref_ids in calls
       ))
-      for (_, _, ref_ids), ok in zip(calls, results, strict=True):
+      for (_, _, ref_ids), (ok, _) in zip(calls, results, strict=True):
         if not ok:
           self._evicted_release_skips_total += len(ref_ids)
 
@@ -1267,17 +1417,21 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     self._staging_worst_case_bytes = None
     self._required_staging_slots = 0
     self._staging_overcommit_factor = 1.0
-    handles = self._registry.handles(
+    self._fault_tolerance_manager.set_staging_slot_floor(None, 0)
+    targets = self._registry.targets(
         datatypes.Role.ROLLOUT, statuses=_WEIGHT_SYNC_DESTINATION_STATUSES
     )
-    if handles:
+    if targets:
       await asyncio.gather(*(
           self._invoke_worker_ft_tolerant(
               handle,
               "clear_staged",
-              skip_msg="Skipping clear_staged on unreachable rollout worker",
+              skip_msg=(
+                  "Skipping clear_staged on unreachable rollout worker"
+                  f" {info.worker_id!r}"
+              ),
           )
-          for handle in handles
+          for info, handle in targets
       ))
 
   async def sync_weights(  # pyrefly: ignore[bad-override]
@@ -1298,6 +1452,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     next_policy_version = (
         self._policy_version + 1 if policy_version is None else policy_version
     )
+    # TODO(b/577214994): Wait up to min_active_rollout_grace_s when fault
+    # tolerance is enabled and zero rollout destinations are currently in
+    # ACTIVE or PENDING_WEIGHT_SYNC.
     logging.info(
         "Synchronizing weights (target policy_version=%d)...",
         next_policy_version,
@@ -1323,7 +1480,6 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
             worker_registry.AdmissionStatus.ACTIVE.value,
         )
     self._fault_tolerance_manager.check_rollout_capacity()
-    self._check_staging_liveness()
     self._policy_version = result.policy_version
     logging.info(
         "Weight synchronization complete (policy_version=%d).",
@@ -1447,4 +1603,5 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
   async def close(self) -> None:
     """Closes the rollout execution session and cancels any pending polling tasks."""
     self._inflight_fwd_bwd.clear()
+    self._fault_tolerance_manager.set_staging_slot_floor(None, 0)
     await self._rollout_session.close()

@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 import contextlib
 import dataclasses
 import importlib
@@ -24,6 +24,7 @@ import pickle
 import signal
 import sys
 import threading
+import types
 from unittest import mock
 
 from absl.testing import absltest
@@ -246,6 +247,31 @@ def _close_keeping_workers(
   cluster.monitor.close()
   if cluster.trajectory_store is not None:
     cluster.trajectory_store.close()
+
+
+class _PromptItemsWrapperSpy:
+  """`PromptItemsContext` test spy recording calls and context lifecycle."""
+
+  def __init__(self, log: list[str]) -> None:
+    self.log = log
+    self.calls: list[dict[str, object]] = []
+    self.items: list[dict[str, object]] = [{"prompt": "wrapped"}]
+
+  @contextlib.contextmanager
+  def __call__(
+      self,
+      hp: resolve_config.DistHyperParameters,
+      prompt_items: grain.MapDataset[dict[str, object]],
+  ) -> Iterator[Iterable[dict[str, object]]]:
+    self.calls.append({
+        "prompt_items": prompt_items,
+        "batch_size": hp.config["batch_size"],
+    })
+    self.log.append("wrapper.enter")
+    try:
+      yield self.items
+    finally:
+      self.log.append("wrapper.exit")
 
 
 class BuildersTest(absltest.TestCase):
@@ -718,6 +744,64 @@ class LoadPromptItemsTest(absltest.TestCase):
           orchestrator.load_prompt_items(
               _config(f"data_module={data_module}", task_override)
           )
+
+
+class LoadPromptItemsContextTest(absltest.TestCase):
+
+  def _data_module(self, **attrs: object) -> str:
+    """Registers a dotted `data_module` with `attrs`; returns its name."""
+    module = types.ModuleType("fake_task_data")
+    module.__dict__.update(attrs)
+    self.enter_context(mock.patch.dict(sys.modules, {"fake_task_data": module}))
+    return "fake_task_data"
+
+  def test_finds_the_data_modules_optional_context(self):
+    def prompt_items_context(hp, prompt_items):
+      del hp
+      return contextlib.nullcontext(prompt_items)
+
+    self.assertIsNone(
+        orchestrator.load_prompt_items_context(
+            _config(f"data_module={self._data_module()}")
+        )
+    )
+    name = self._data_module(prompt_items_context=prompt_items_context)
+    with self.assertLogs(level="INFO") as logs:
+      loaded = orchestrator.load_prompt_items_context(
+          _config(f"data_module={name}:create_dataset('a:b')")
+      )
+    self.assertIs(loaded, prompt_items_context)
+    self.assertTrue(
+        any(
+            f"Wrapping the prompt items with {name}.prompt_items_context."
+            in msg
+            for msg in logs.output
+        ),
+        msg=logs.output,
+    )
+
+  def test_file_path_data_modules_reject_context_and_ignore_plain_files(self):
+    plain = self.create_tempfile(
+        "job:0/task_data.py", content="def create_dataset():\n  return []\n"
+    ).full_path
+    for spec in (plain, f"{plain}:create_dataset(n=1)"):
+      self.assertIsNone(
+          orchestrator.load_prompt_items_context(_config(f"data_module={spec}"))
+      )
+
+    for filename, src in (
+        ("def_ctx.py", "def prompt_items_context(hp, items):\n  return hp\n"),
+        ("import_ctx.py", "from pkg import prompt_items_context\n"),
+    ):
+      path = self.create_tempfile(filename, content=src).full_path
+      for spec in (path, f"{path}:create_dataset"):
+        with self.assertRaisesRegex(ValueError, "dotted Python module name"):
+          orchestrator.load_prompt_items_context(_config(f"data_module={spec}"))
+
+  def test_non_callable_context_fails_loud(self):
+    name = self._data_module(prompt_items_context=3)
+    with self.assertRaisesRegex(TypeError, "int, which is not callable"):
+      orchestrator.load_prompt_items_context(_config(f"data_module={name}"))
 
 
 class ClusterTest(absltest.TestCase):
@@ -1284,6 +1368,102 @@ rl_training_config:
         [_prompt(program.dataset, i) for i in range(4)],
         ["train-0", "train-1", "train-2", "train-0"],
     )
+
+  def _run_with_wrapper(self, cluster: _FakeCluster) -> _PromptItemsWrapperSpy:
+    # A dotted-module `data_module` whose `prompt_items_context` calls the spy.
+    tmp_dir = self.create_tempdir()
+    tmp_dir.create_file(
+        "context_task_data.py",
+        content=_DATA_MODULE
+        + "\ndef prompt_items_context(hp, prompt_items):\n"
+        + "  return spy(hp, prompt_items)\n",
+    )
+    self.enter_context(
+        mock.patch.object(sys, "path", [tmp_dir.full_path, *sys.path])
+    )
+    self.enter_context(mock.patch.dict(sys.modules))
+    argv = [
+        f"override_config_file={self._recipe()}",
+        "data_module=context_task_data",
+        "cluster_config.run_id=run_1",
+        "batch_size=2",
+    ]
+    sha = resolve_config.config_fingerprint(resolve_config.initialize(argv))
+    wrapper = _PromptItemsWrapperSpy(cluster.calls)
+    # `main` imports the same module, so it sees the spy.
+    importlib.import_module("context_task_data").__dict__["spy"] = wrapper
+    orig_close = rl_program.StandardRLProgram.close
+
+    def logged_close(program: rl_program.StandardRLProgram) -> None:
+      cluster.calls.append("program.close")
+      orig_close(program)
+
+    with (
+        mock.patch.object(
+            node_utils,
+            "load_hf_tokenizer",
+            return_value=_FakeTokenizer(pad_token_id=0, eos_token_id=1),
+        ),
+        mock.patch.object(orchestrator, "create_cluster", return_value=cluster),
+        mock.patch.object(otel_setup, "setup_metrics", return_value=False),
+        mock.patch.object(rl_program.StandardRLProgram, "close", logged_close),
+    ):
+      orchestrator.main(
+          argv,
+          _FakeProcessContext(
+              _FakeDiscovery(["trainer", "rollout"], config_sha256=sha)
+          ),
+      )
+    return wrapper
+
+  def test_prompt_items_context_lifecycle_and_sigterm(self):
+    cluster = _FakeCluster()
+    wrapper = self._run_with_wrapper(cluster)
+    self.assertLen(wrapper.calls, 1)
+    call = wrapper.calls[0]
+    prompt_items = call["prompt_items"]
+    assert isinstance(prompt_items, grain.MapDataset)
+    self.assertEqual(
+        [_prompt(prompt_items, i) for i in range(4)],
+        ["train-0", "train-1", "train-2", "train-0"],
+    )
+    self.assertEqual(call["batch_size"], 2)
+    program = cluster.programs[0]
+    assert isinstance(program, rl_program.StandardRLProgram)
+    self.assertIs(program.dataset, wrapper.items)
+    self.assertEqual(
+        cluster.calls,
+        [
+            "wrapper.enter",
+            "bring_up_workers",
+            "run",
+            "program.close",
+            "wrapper.exit",
+            "shutdown",
+            "monitor.close",
+        ],
+    )
+
+    prev_sigterm = signal.getsignal(signal.SIGTERM)
+    abort_cluster = _FakeCluster(
+        on_run=lambda: signal.raise_signal(signal.SIGTERM)
+    )
+    with self.assertRaises(SystemExit) as cm:
+      self._run_with_wrapper(abort_cluster)
+    self.assertEqual(cm.exception.code, 128 + signal.SIGTERM)
+    self.assertEqual(
+        abort_cluster.calls,
+        [
+            "wrapper.enter",
+            "bring_up_workers",
+            "run",
+            "program.close",
+            "wrapper.exit",
+            "shutdown(abort=True)",
+            "monitor.close",
+        ],
+    )
+    self.assertEqual(signal.getsignal(signal.SIGTERM), prev_sigterm)
 
   def test_config_errors_fail_before_the_tokenizer_and_the_cluster(self):
     flat_records = self.create_tempfile(

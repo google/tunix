@@ -21,6 +21,7 @@ import gc
 import math
 import numbers
 import re
+import threading
 from typing import (
     Any,
     Callable,
@@ -34,6 +35,7 @@ from typing import (
     Tuple,
     Union,
 )
+import weakref
 
 from absl import logging
 from flax import nnx
@@ -1097,9 +1099,18 @@ def transfer_state_with_mappings(
           delete_spec_buffers=kwargs.get('delete_dst_buffers', False),
       )
     else:
+      prev_tgt_refs = _RESHARD_ORIGINS.capture_refs(orig_tgt_buffers.values())
       if kwargs.get('delete_dst_buffers', False):
         _delete_target_buffers(orig_tgt_buffers, tgt_flat_dict)
       resharded_values_flat_dict = reshard_fn(tgt_flat_dict, sharding_dict)
+      _RESHARD_ORIGINS.record(
+          tgt_flat_dict,
+          {
+              key: _lookup_resharded_value(resharded_values_flat_dict, key)
+              for key in tgt_flat_dict
+          },
+          prev_tgt_refs,
+      )
 
     for idx, (tgt_key, tgt_param) in enumerate(tgt_flat_list):
       if _flat_key_to_path(tgt_key) not in transferred_target_keys:
@@ -1660,6 +1671,152 @@ def _collect_src_buffer_ids(
   return ids
 
 
+class _ReshardOriginTracker:
+  """Tracks weakref-bound source origins for resharded target arrays.
+
+  Used as a fallback by `_delete_target_buffers` when the backend (e.g.
+  Pathways) does not expose PjRt `unsafe_buffer_pointer()` and a zero-copy
+  reshard can return a distinct `jax.Array` wrapper backed by the same IFRT
+  device buffer as its source array. Weakrefs + finalizers prune entries
+  automatically on GC and prevent Python `id()`-reuse collisions. Uses an
+  `RLock` because synchronous GC finalizers can re-enter on the holding thread.
+  """
+
+  def __init__(self) -> None:
+    self.lock = threading.RLock()
+    self.origins: dict[
+        int, tuple[weakref.ReferenceType[Any], weakref.ReferenceType[Any]]
+    ] = {}
+
+  def _discard(
+      self, arr_id: int, expected_ref: weakref.ReferenceType[Any]
+  ) -> None:
+    """Finalizer callback removing a GC'd target entry if still owned by it."""
+    with self.lock:
+      entry = self.origins.get(arr_id)
+      if entry is not None and entry[0] is expected_ref:
+        self.origins.pop(arr_id, None)
+
+  def _live_origin_locked(self, arr: Any) -> Any:
+    """Returns the live origin array recorded for `arr`, or None."""
+    arr_id = id(arr)
+    entry = self.origins.get(arr_id)
+    if entry is None:
+      return None
+    tgt_ref, origin_ref = entry
+    tgt = tgt_ref()
+    origin = origin_ref() if tgt is arr else None
+    if tgt is None or (tgt is arr and origin is None):
+      self.origins.pop(arr_id, None)
+    return origin
+
+  def capture_refs(self, values: Any) -> list[weakref.ReferenceType[Any]]:
+    """Captures weakrefs to unwrapped leaves in `values`."""
+    refs: list[weakref.ReferenceType[Any]] = []
+    for v in values:
+      try:
+        refs.append(weakref.ref(getattr(v, 'value', v)))
+      except TypeError:
+        continue
+    return refs
+
+  def drop(self, arr: Any) -> None:
+    """Removes a target entry if still owned by `arr` or already dead."""
+    arr_id = id(arr)
+    with self.lock:
+      entry = self.origins.get(arr_id)
+      if entry is not None and (entry[0]() is arr or entry[0]() is None):
+        self.origins.pop(arr_id, None)
+
+  def prune(
+      self,
+      prev_spec_refs: Sequence[weakref.ReferenceType[Any]],
+      kept_out_ids: set[int],
+  ) -> None:
+    """Prunes origin entries for replaced spec arrays outside `kept_out_ids`."""
+    with self.lock:
+      for ref in prev_spec_refs:
+        prev_arr = ref()
+        if prev_arr is None or id(prev_arr) in kept_out_ids:
+          continue
+        self.drop(prev_arr)
+
+  def record(
+      self,
+      src_flat: Mapping[Any, Any],
+      resharded_flat: Mapping[Any, Any],
+      prev_spec_refs: Optional[Sequence[weakref.ReferenceType[Any]]] = None,
+  ) -> set[int]:
+    """Tracks weakref-bound source origins and returns the output object IDs."""
+    new_out_ids = {
+        id(getattr(v, 'value', v)) for v in resharded_flat.values()
+    }
+    with self.lock:
+      if prev_spec_refs is not None:
+        self.prune(prev_spec_refs, new_out_ids)
+      for key, out_val in resharded_flat.items():
+        if key not in src_flat:
+          continue
+        src_arr = getattr(src_flat[key], 'value', src_flat[key])
+        out_arr = getattr(out_val, 'value', out_val)
+        origin_arr = self._live_origin_locked(src_arr)
+        if origin_arr is None:
+          origin_arr = src_arr
+        if out_arr is origin_arr:
+          continue
+        try:
+          tgt_ref = weakref.ref(out_arr)
+          origin_ref = weakref.ref(origin_arr)
+          out_id = id(out_arr)
+          weakref.finalize(out_arr, self._discard, out_id, tgt_ref)
+        except TypeError:
+          continue
+        self.origins[out_id] = (tgt_ref, origin_ref)
+    return new_out_ids
+
+  def collect_live_sources(
+      self, src_flat: Mapping[Any, Any], *, include_origins: bool
+  ) -> dict[int, Any]:
+    """Collects strong refs to source arrays and optionally their origins."""
+    live_by_id: dict[int, Any] = {}
+    for v in src_flat.values():
+      arr = getattr(v, 'value', v)
+      live_by_id[id(arr)] = arr
+    if not include_origins:
+      return live_by_id
+    with self.lock:
+      for arr in list(live_by_id.values()):
+        origin = self._live_origin_locked(arr)
+        if origin is not None:
+          live_by_id[id(origin)] = origin
+    return live_by_id
+
+  def aliases_live_source(
+      self, tgt_arr: Any, src_live_by_id: Mapping[int, Any]
+  ) -> bool:
+    """Returns True if `tgt_arr`'s recorded origin is in `src_live_by_id`."""
+    with self.lock:
+      origin = self._live_origin_locked(tgt_arr)
+    return origin is not None and src_live_by_id.get(id(origin)) is origin
+
+  def merge_live_sources(
+      self,
+      remaining_src: Mapping[Any, Any],
+      chunk_src: Mapping[Any, Any],
+      processed_refs: Sequence[weakref.ReferenceType[Any]],
+  ) -> dict[Any, Any]:
+    """Combines unprocessed, active, and still-live processed chunk sources."""
+    live_src: dict[Any, Any] = {**remaining_src, **chunk_src}
+    for ref_idx, ref in enumerate(processed_refs):
+      live_arr = ref()
+      if live_arr is not None:
+        live_src[('_processed_src', ref_idx)] = live_arr
+    return live_src
+
+
+_RESHARD_ORIGINS = _ReshardOriginTracker()
+
+
 def _delete_target_buffers(
     spec_flat: Mapping[Any, Any],
     src_flat: Mapping[Any, Any],
@@ -1667,15 +1824,17 @@ def _delete_target_buffers(
   """Deletes target arrays in spec_flat that don't alias any source shard."""
   # This will be a set() of IDs, or None if we are on Pathways
   src_buffer_ids = _collect_src_buffer_ids(src_flat)
-  src_obj_ids = {
-      id(v.value if hasattr(v, 'value') else v) for v in src_flat.values()
-  }
+  # Hold strong refs to source arrays and their live origins for this call so
+  # Python object identities cannot be reused mid-check.
+  src_live_by_id = _RESHARD_ORIGINS.collect_live_sources(
+      src_flat, include_origins=src_buffer_ids is None
+  )
 
   for tgt_val in spec_flat.values():
-    tgt_arr = tgt_val.value if hasattr(tgt_val, 'value') else tgt_val
+    tgt_arr = getattr(tgt_val, 'value', tgt_val)
 
     # Skip if the target array is the same object as a source array.
-    if id(tgt_arr) in src_obj_ids:
+    if src_live_by_id.get(id(tgt_arr)) is tgt_arr:
       continue
 
     # Skip if the array cannot be deleted or is already deleted
@@ -1692,7 +1851,9 @@ def _delete_target_buffers(
     ):
       continue
 
-    # Check for aliasing only if the backend supports buffer pointer tracking
+    # Check for aliasing using physical buffer pointers when supported, or fall
+    # back to recorded reshard origins when unsafe_buffer_pointer() is
+    # unavailable (e.g. Pathways).
     if src_buffer_ids is not None and hasattr(tgt_arr, 'addressable_shards'):
       aliases_source = any(
           shard.data.unsafe_buffer_pointer() in src_buffer_ids
@@ -1700,6 +1861,11 @@ def _delete_target_buffers(
       )
       if aliases_source:
         continue
+    elif src_buffer_ids is None and _RESHARD_ORIGINS.aliases_live_source(
+        tgt_arr, src_live_by_id
+    ):
+      continue
+    _RESHARD_ORIGINS.drop(tgt_arr)
     tgt_arr.delete()
 
 
@@ -1856,6 +2022,9 @@ def _reshard_in_chunks(
     A flat dict with the same keys as src_flat, containing resharded arrays.
   """
   keys = list(src_flat.keys())
+  all_prev_spec_refs = _RESHARD_ORIGINS.capture_refs(spec_flat.values())
+  processed_src_refs: list[weakref.ReferenceType[Any]] = []
+  all_new_out_ids: set[int] = set()
   resharded: Dict[Any, jax.Array | np.ndarray] = {}
   for start in range(0, len(keys), chunk_size):
     chunk_keys = keys[start : start + chunk_size]
@@ -1871,7 +2040,13 @@ def _reshard_in_chunks(
       chunk_dst_shardings_flat[k] = _snapshot_dst_sharding(tgt_arr)
 
     if delete_spec_buffers:
-      _delete_target_buffers(chunk_spec_flat, chunk_src_flat)
+      # Include remaining unprocessed sources plus still-live processed sources
+      # (via weakrefs so temporary chunk slices can still be reclaimed).
+      live_src_flat = _RESHARD_ORIGINS.merge_live_sources(
+          src_flat, chunk_src_flat, processed_src_refs
+      )
+      _delete_target_buffers(chunk_spec_flat, live_src_flat)
+      del live_src_flat
 
     def _to_tuple_key(k):
       return tuple(k.split('.')) if isinstance(k, str) else k
@@ -1884,7 +2059,14 @@ def _reshard_in_chunks(
     chunk_dst_shardings = traverse_util.unflatten_dict(chunk_spec_tuples)
     chunk_resharded = reshard_fn(source=chunk_src, target=chunk_dst_shardings)
     jax.block_until_ready(chunk_resharded)
-    for k, v in traverse_util.flatten_dict(chunk_resharded).items():
+    chunk_resharded_flat = traverse_util.flatten_dict(chunk_resharded)
+    all_new_out_ids.update(
+        _RESHARD_ORIGINS.record(chunk_src_tuples, chunk_resharded_flat)
+    )
+    processed_src_refs.extend(
+        _RESHARD_ORIGINS.capture_refs(chunk_src_flat.values())
+    )
+    for k, v in chunk_resharded_flat.items():
       resharded[k] = v
       resharded['.'.join(str(p) for p in k)] = v
 
@@ -1896,6 +2078,7 @@ def _reshard_in_chunks(
         chunk_spec_flat,
         chunk_dst_shardings_flat,
     )
+  _RESHARD_ORIGINS.prune(all_prev_spec_refs, all_new_out_ids)
   return resharded
 
 
@@ -2214,13 +2397,19 @@ def transfer_state_directly(
         for k, tgt_val in spec_flat.items()
     }
 
+    prev_spec_refs = _RESHARD_ORIGINS.capture_refs(spec_flat.values())
     if delete_dst_buffers:
       _delete_target_buffers(spec_flat, src_flat)
 
-    del final_spec
+    del spec_flat, final_spec
     resharded_weights = reshard_fn(
         source=final_source,
         target=traverse_util.unflatten_dict(dst_shardings_flat),
+    )
+    _RESHARD_ORIGINS.record(
+        src_flat,
+        traverse_util.flatten_dict(resharded_weights),
+        prev_spec_refs,
     )
   nnx.update(dst_state, resharded_weights)
 

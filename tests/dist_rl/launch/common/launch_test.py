@@ -391,7 +391,7 @@ class LaunchScriptsTest(absltest.TestCase):
     # experimental DeepSWE environment, Raiden, vLLM, W&B), or the v2 recipe
     # and `yaml_generator.py` do. `local.sh`'s processes inherit them from the
     # caller's environment; the GKE pods don't, so there they only arrive
-    # through the config (e.g. `cluster_config.k8s.trainer_extra_env`).
+    # through the config (e.g. `cluster_config.role_env.trainer`).
     self.assertEmpty(
         set(legacy)
         & {
@@ -983,6 +983,66 @@ class LaunchScriptsTest(absltest.TestCase):
     )
     self.assertNotEqual(res.returncode, 0)
     self.assertIn("OTEL_PORT", res.stderr)
+
+  def test_role_env_and_sandbox_settings_render_into_processes(self):
+    role_args = [
+        "agentic_grpo_config.beta=0.0",
+        "cluster_config.role_env.orchestrator.ORCH_FLAG=x",
+        "cluster_config.role_env.trainer.TRAIN_FLAG='a b'",
+        "cluster_config.role_env.rollout.ROLL_FLAG='0'",
+    ]
+    local_res = self._run_launch(
+        ["--dry-run", "cluster_config.target=local", *role_args]
+    )
+    self.assertEqual(local_res.returncode, 0, msg=local_res.stderr)
+    for expected in (
+        "Trainer environment: TRAIN_FLAG='a b'",
+        "Rollout environment: ROLL_FLAG=0",
+        "Orchestrator environment: ORCH_FLAG=x",
+    ):
+      self.assertIn(expected, local_res.stdout)
+    inference_res = self._run_launch([
+        "--dry-run",
+        "cluster_config.target=local",
+        "agentic_grpo_config.beta=0.04",
+        "cluster_config.local.inference_devices=4,5",
+        "cluster_config.role_env.inference.INF_FLAG=y",
+    ])
+    self.assertEqual(inference_res.returncode, 0, msg=inference_res.stderr)
+    self.assertIn("Inference environment: INF_FLAG=y", inference_res.stdout)
+
+    k8s_res = self._run_launch([
+        "start",
+        "--dry-run",
+        "cluster_config.target=k8s",
+        "cluster_config.k8s.tunix_image=test-image",
+        "cluster_config.k8s.orchestrator_id=custom-orch",
+        "kubernetes_config.namespace=swe-ns",
+        "kubernetes_config.node_selector_key=cloud.google.com/gke-nodepool",
+        "kubernetes_config.node_selector_val=swe-pool",
+        "cluster_config.k8s.rollout.jobset_yaml=jobset.mcjax.ray.yaml",
+        *role_args,
+    ])
+    self.assertEqual(k8s_res.returncode, 0, msg=k8s_res.stderr)
+    # Multi-host Ray rollouts export the role env on the head and worker hosts
+    # before starting Ray.
+    self.assertEqual(k8s_res.stdout.count(" && export ROLL_FLAG=0"), 2)
+    for expected in ("ORCH_FLAG=x ", "TRAIN_FLAG='a b' ", "ROLL_FLAG=0 "):
+      self.assertIn(f"{expected}python -m", k8s_res.stdout)
+    self.assertEqual(
+        set(
+            re.findall(
+                r"ORCHESTRATOR_ID=custom-orch NAMESPACE=swe-ns "
+                r"NODE_SELECTOR_KEY=cloud\.google\.com/gke-nodepool "
+                r"NODE_SELECTOR_VAL=swe-pool .*--process_main=(\S+)",
+                k8s_res.stdout,
+            )
+        ),
+        {
+            "tunix.dist_rl.launch.nodes.orchestrator.main",
+            "tunix.dist_rl.launch.nodes.rollout.main",
+        },
+    )
 
   def test_drivers_only_read_exported_or_known_variables(self):
     exported = set(

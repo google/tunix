@@ -1631,6 +1631,71 @@ weight_sync_config:
               ),
           )
 
+  def test_role_env(self):
+    hp = resolve_config.initialize([
+        "cluster_config.role_env.orchestrator.ORCH_FLAG=x",
+        "cluster_config.role_env.trainer.XLA_FLAGS='--xla_a --xla_b'",
+        "cluster_config.role_env.trainer.TPU_STDERR_LOG_LEVEL='0'",
+        "cluster_config.role_env.rollout.VLLM_LOGGING_LEVEL=DEBUG",
+        "agentic_grpo_config.beta=0.0",
+    ])
+    self.assertEqual(
+        resolve_config.role_env(hp),
+        {
+            "orchestrator": {"ORCH_FLAG": "x"},
+            "trainer": {
+                "XLA_FLAGS": "--xla_a --xla_b",
+                "TPU_STDERR_LOG_LEVEL": "0",
+            },
+            "rollout": {"VLLM_LOGGING_LEVEL": "DEBUG"},
+            "inference": {},
+        },
+    )
+    proc = subprocess.run(
+        [
+            "bash",
+            "-c",
+            resolve_config.render_bash_exports(hp)
+            + 'eval "w=(${ROLE_ENV_TRAINER})"; printf "%s\\n" "${w[@]}"',
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    self.assertEqual(
+        proc.stdout.splitlines(),
+        ["XLA_FLAGS=--xla_a --xla_b", "TPU_STDERR_LOG_LEVEL=0"],
+    )
+
+    trainer = "cluster_config.role_env.trainer"
+    with self.assertRaisesRegex(TypeError, "keys and values must be strings"):
+      resolve_config.initialize([f"{trainer}.FOO=1"])
+    with self.assertRaisesRegex(TypeError, f"{trainer} must be a mapping"):
+      resolve_config.initialize([f"{trainer}=null"])
+    for name, error in (
+        ("T_BATCH_SIZE", "Tunix config override"),
+        ("M_REMAT_POLICY", "MaxText config override"),
+        ("VERIFY_WEIGHTS", "weight_sync_config.verify_weights"),
+        ("DIST_RL_WORKER_PORT", "launcher-managed"),
+    ):
+      with self.assertRaisesRegex(ValueError, f"{trainer}.*{error}"):
+        resolve_config.initialize([f"{trainer}.{name}=x"])
+    with self.assertRaisesRegex(
+        ValueError, "run_inference_node resolved to false"
+    ):
+      resolve_config.initialize([
+          "agentic_grpo_config.beta=0.0",
+          "cluster_config.role_env.inference.FOO=x",
+      ])
+    with self.assertRaisesRegex(
+        ValueError, "target=external runs the processes"
+    ):
+      resolve_config.initialize([
+          "cluster_config.target=external",
+          "cluster_config.artifact_root=/artifacts/run",
+          f"{trainer}.FOO=x",
+      ])
+
   def test_render_bash_exports_evaluates_in_bash(self):
     hp = resolve_config.initialize([
         "model_config.model_name=Qwen3-0.6B",

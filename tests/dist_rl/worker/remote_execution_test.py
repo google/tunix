@@ -4833,6 +4833,144 @@ class RemoteExecutionTest(parameterized.TestCase):
 
     asyncio.run(_run())
 
+  def test_is_transport_error_and_remote_call_error_classification(self):
+    async def _run():
+      resp_err = remote_lib.ExecutionResponse(
+          error_message="bad key",
+          error_type="KeyError",
+          traceback="line 1",
+      )
+      with self.assertRaisesRegex(
+          remote_lib.RemoteCallError,
+          r"RemoteExecutionError \[KeyError\]: bad key",
+      ) as ctx:
+        resp_err.unwrap()
+      self.assertFalse(remote_lib.is_transport_error(ctx.exception))
+      self.assertTrue(
+          remote_lib.is_transport_error(remote_lib.ClosedActorError("closed"))
+      )
+
+      handle = remote_lib.RemoteActorHandle("grpc://127.0.0.1:9999")
+      self.assertFalse(handle.is_closed)
+      self.assertFalse(
+          remote_lib.is_transport_error(asyncio.CancelledError(), handle=None)
+      )
+      self.assertFalse(
+          remote_lib.is_transport_error(asyncio.CancelledError(), handle=handle)
+      )
+      if remote_lib._grpc_aio_lib is not None:
+        self.assertFalse(
+            remote_lib.is_transport_error(
+                remote_lib._grpc_aio_lib.UsageError("Channel is closed."),
+                handle=handle,
+            )
+        )
+
+      handle.sync_close()
+      self.assertTrue(handle.is_closed)
+      self.assertTrue(
+          remote_lib.is_transport_error(asyncio.CancelledError(), handle=handle)
+      )
+      if remote_lib._grpc_aio_lib is not None:
+        self.assertTrue(
+            remote_lib.is_transport_error(
+                remote_lib._grpc_aio_lib.UsageError("Channel is closed."),
+                handle=handle,
+            )
+        )
+
+      # When the current task itself is being cancelled (`cancelling() > 0`),
+      # `CancelledError` must NOT be classified as a closed-handle fault.
+      async def _cancelled_caller() -> bool:
+        try:
+          await asyncio.sleep(10.0)
+        except asyncio.CancelledError as exc:
+          return remote_lib.is_transport_error(exc, handle=handle)
+        return True
+
+      task = asyncio.create_task(_cancelled_caller())
+      await asyncio.sleep(0)
+      task.cancel()
+      self.assertFalse(await task)
+
+    asyncio.run(_run())
+
+  def test_grpc_handle_post_await_concurrent_close_raises_closed_actor_error(
+      self,
+  ):
+    if not remote_lib._GRPC_AVAILABLE:
+      self.skipTest("grpc not available")
+
+    async def _run():
+      engine = StubWorkerEngine("close_race_worker", latency=0.0)
+      async with running_grpc_server(engine) as (_, server_handle):
+        addr = server_handle.target_address
+
+        # 1. Close racing during `_prepare_request_chunks` in `asubmit` and
+        # `dispatch_task` raises `ClosedActorError` (not `UsageError`).
+        for invoke_fn in (
+            lambda h: h.asubmit("get_status"),
+            lambda h: h.dispatch_task("r1", "compute_trajectory", "p1"),
+        ):
+          h = remote_lib.GrpcRemoteActorHandle(addr)
+          real_prep = h._prepare_request_chunks
+
+          async def _close_during_prep(
+              *args, _h=h, _real=real_prep, **kwargs
+          ):
+            res = await _real(*args, **kwargs)
+            await _h.close()
+            return res
+
+          with mock.patch.object(
+              h, "_prepare_request_chunks", side_effect=_close_during_prep
+          ):
+            with self.assertRaises(remote_lib.ClosedActorError) as ctx:
+              await invoke_fn(h)
+            self.assertTrue(
+                remote_lib.is_transport_error(ctx.exception, handle=h)
+            )
+
+        # 2. Close racing during `_ensure_bulk_port` in `poll_responses` raises
+        # `ClosedActorError`.
+        h_poll = remote_lib.GrpcRemoteActorHandle(addr)
+        real_ensure_port = h_poll._ensure_bulk_port
+
+        async def _close_during_port(*args, **kwargs):
+          port = await real_ensure_port(*args, **kwargs)
+          await h_poll.close()
+          return port
+
+        with mock.patch.object(
+            h_poll, "_ensure_bulk_port", side_effect=_close_during_port
+        ):
+          with self.assertRaises(remote_lib.ClosedActorError):
+            await h_poll.poll_responses(timeout_s=0.1)
+
+        # 3. Close racing during `old_channel.close()` in
+        # `_ensure_async_channel` raises `ClosedActorError` (never `TypeError`
+        # or `AssertionError` on `None` stubs).
+        h_reopen = remote_lib.GrpcRemoteActorHandle(addr)
+        await h_reopen._ensure_async_channel()
+        fake_old_loop = mock.MagicMock()
+        fake_old_loop.is_closed.return_value = True
+        h_reopen._channel_loop = fake_old_loop
+        old_chan = h_reopen._channel
+        assert old_chan is not None
+        real_chan_close = old_chan.close
+
+        async def _close_handle_during_old_chan_close():
+          await real_chan_close()
+          await h_reopen.close()
+
+        with mock.patch.object(
+            old_chan, "close", side_effect=_close_handle_during_old_chan_close
+        ):
+          with self.assertRaises(remote_lib.ClosedActorError):
+            await h_reopen.asubmit("get_status")
+
+    asyncio.run(_run())
+
 
 if __name__ == "__main__":
   absltest.main()

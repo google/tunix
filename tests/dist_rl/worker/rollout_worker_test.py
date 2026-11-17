@@ -1366,7 +1366,11 @@ class RolloutWorkerStagingRpcTest(absltest.TestCase):
     self.assertNotIn("routed_experts", staged_resp.payload.traj)
     self.assertGreater(worker.get_metrics()["staging/used_bytes"], 0)
 
-    fetched = worker.fetch_staged([ref.ref_id])[ref.ref_id]
+    fetched_map = worker.fetch_staged(
+        [ref.ref_id], expected_instance_id=ref.instance_id
+    )
+    assert fetched_map is not None
+    fetched = fetched_map[ref.ref_id]
     self.assertEqual(fetched.shape[1:], (4, 2, 5))
     freed = worker.release_staged([ref.ref_id])
     self.assertEqual(freed, fetched.nbytes)
@@ -1494,7 +1498,9 @@ class RolloutWorkerStagingRpcTest(absltest.TestCase):
         self.assertIsNotNone(ref)
         assert ref is not None
 
-        fetched_map = await handle.asubmit("fetch_staged", [ref.ref_id])
+        fetched_map = await handle.asubmit(
+            "fetch_staged", [ref.ref_id], expected_instance_id=ref.instance_id
+        )
         arr = fetched_map[ref.ref_id]
         self.assertGreater(arr.nbytes, 512 * 1024)
         self.assertEqual(arr.shape[1:], (61, 2, 5))
@@ -1703,6 +1709,25 @@ class RolloutWorkerStagingRpcTest(absltest.TestCase):
       del res
 
     asyncio.run(_run())
+
+  def test_fetch_staged_returns_none_on_mismatched_instance_before_initialize(
+      self,
+  ):
+    restarted = rollout_worker.RolloutWorker(
+        worker_id="rollout-0",
+        sampler=mocks.MockBaseSamplerImpl(
+            sampler_name="moe_restarted", routed_experts_shape_spec=(4, 8)
+        ),
+        env_name="mock_env",
+        agent_name="mock_agent",
+        tokenizer=mocks.MockTokenizer(),
+        chat_parser=mocks.MockChatParser(),
+        config=rollout_worker.RolloutConfig(max_prompt_length=32),
+    )
+    self.assertIsNone(
+        restarted.fetch_staged([1], expected_instance_id="stale-instance")
+    )
+    self.assertEqual(restarted.state, datatypes.WorkerState.PENDING)
 
 
 if __name__ == "__main__":

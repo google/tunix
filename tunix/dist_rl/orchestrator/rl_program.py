@@ -417,9 +417,9 @@ class StandardRLProgram(RLProgram):
   `BatchConfig.max_response_length` and a finite
   `staging_overcommit_factor >= 1.0` (values `> 1.0` relax the strict
   deadlock-free worst-case bound assuming average trajectories are shorter
-  than `max_response_length`). Note that Relay does not preserve
-  rollout-worker fault tolerance: evicting a rollout worker with pending
-  staged refs will fail `fetch_routed_experts`.
+  than `max_response_length`). When worker fault tolerance is enabled, any
+  staged refs whose rollout worker was evicted or restarted before fetch are
+  masked in place (`completion_mask=0`, `advantages=0`, `routed_experts=None`).
   """
 
   def __init__(
