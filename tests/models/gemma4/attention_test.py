@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import dataclasses
+import os
 from unittest import mock
 
 from absl.testing import absltest
@@ -286,13 +287,9 @@ class AttentionTest(parameterized.TestCase):
         attn, '_make_splash_kernel'
     ) as mock_kernel:
 
-      mock_flash.return_value = (
-          jnp.zeros((b, t, h, d)),
-          jnp.zeros((b, t, config.num_kv_heads, d)),
-          jnp.zeros((b, t, config.num_kv_heads, d)),
-      )
+      mock_flash.return_value = jnp.zeros((b, t, h, d))
       mock_eager.return_value = jnp.zeros((b, t, h, d))
-      mock_sharding.return_value = (None,) * 4 + (1, 1) + (None,) * 3
+      mock_sharding.return_value = (None,) * 4 + (1, 1) + (None,)
       mock_kernel.return_value = (None, None)
 
       segment_ids = jnp.zeros((b, t), dtype=jnp.int32)
@@ -320,11 +317,7 @@ class AttentionTest(parameterized.TestCase):
         attn, '_flash_attention_single'
     ) as mock_flash, mock.patch.object(attn, '_eager_attention') as mock_eager:
 
-      mock_flash.return_value = (
-          jnp.zeros((b, t, h, d)),
-          jnp.zeros((b, kv_len, config.num_kv_heads, d)),
-          jnp.zeros((b, kv_len, config.num_kv_heads, d)),
-      )
+      mock_flash.return_value = jnp.zeros((b, t, h, d))
       mock_eager.return_value = jnp.zeros((b, t, h, d))
 
       segment_ids = jnp.zeros((b, t), dtype=jnp.int32)
@@ -428,12 +421,12 @@ class AttentionTest(parameterized.TestCase):
         rngs=nnx.Rngs(0),
     )
     b = 1
-    kh = config.num_kv_heads
     mesh = mock.MagicMock(shape=mesh_shape) if mesh_shape is not None else None
     if mesh is not None and 'fsdp' in mesh.shape:
       self.assertEqual(b % mesh.shape['fsdp'], 0)
 
-    specs = attn._make_sharding_specs(b, kh, mesh)
+    q_shape = (b, 16, config.num_heads, config.head_dim)
+    specs = attn._make_sharding_specs(q_shape, mesh)
     # Return tuple index 4 is head_shards, index 5 is q_seq_shards.
     head_shards = specs[4]
     q_seq_shards = specs[5]
@@ -472,12 +465,8 @@ class AttentionTest(parameterized.TestCase):
         attn, '_make_splash_kernel'
     ) as mock_kernel:
 
-      mock_flash.return_value = (
-          jnp.zeros((b, q_len, h, d)),
-          jnp.zeros((b, kv_len, config.num_kv_heads, d)),
-          jnp.zeros((b, kv_len, config.num_kv_heads, d)),
-      )
-      mock_sharding.return_value = (None,) * 4 + (1, 1) + (None,) * 3
+      mock_flash.return_value = jnp.zeros((b, q_len, h, d))
+      mock_sharding.return_value = (None,) * 4 + (1, 1) + (None,)
       mock_kernel.return_value = (None, None)
 
       attn.block(
@@ -1219,6 +1208,381 @@ class AttentionTest(parameterized.TestCase):
         jax.sharding.NamedSharding(mesh, P(None, None, None, None)),
     )
 
+  def _require_devices(self, min_devices: int) -> None:
+    num_devices = len(jax.devices())
+    if num_devices < min_devices:
+      self.skipTest(
+          f'Requires at least {min_devices} JAX devices, got {num_devices}.'
+      )
+
+  def _make_compact_config(
+      self, base_config: model_lib.ModelConfig
+  ) -> model_lib.ModelConfig:
+    return dataclasses.replace(
+        base_config,
+        num_layers=1,
+        num_embed=64,
+        embed_dim=32,
+        hidden_dim=64,
+        num_heads=8,
+        head_dim=16,
+        global_key_size=16,
+        sliding_window_size=8,
+    )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='e2b_local_mesh_ctx_1x4',
+          config_factory=model_lib.ModelConfig.gemma4_e2b,
+          attn_type=model_lib.AttentionType.LOCAL_SLIDING,
+          mesh_shape=(1, 4),
+          axis_names=('fsdp', 'tp'),
+          use_set_mesh=False,
+          expected_kv_spec=P('fsdp', None, None, None),
+          expected_idx_spec=P('fsdp'),
+      ),
+      dict(
+          testcase_name='e2b_local_set_mesh_1x4',
+          config_factory=model_lib.ModelConfig.gemma4_e2b,
+          attn_type=model_lib.AttentionType.LOCAL_SLIDING,
+          mesh_shape=(1, 4),
+          axis_names=('fsdp', 'tp'),
+          use_set_mesh=True,
+          expected_kv_spec=P('fsdp', None, None, None),
+          expected_idx_spec=P('fsdp'),
+      ),
+      dict(
+          testcase_name='e2b_global_set_mesh_2x2',
+          config_factory=model_lib.ModelConfig.gemma4_e2b,
+          attn_type=model_lib.AttentionType.GLOBAL,
+          mesh_shape=(2, 2),
+          axis_names=('fsdp', 'tp'),
+          use_set_mesh=True,
+          expected_kv_spec=P('fsdp', None, None, None),
+          expected_idx_spec=P('fsdp'),
+      ),
+      dict(
+          testcase_name='e4b_local_mesh_ctx_1x4_indivisible',
+          config_factory=model_lib.ModelConfig.gemma4_e4b,
+          attn_type=model_lib.AttentionType.LOCAL_SLIDING,
+          mesh_shape=(1, 4),
+          axis_names=('fsdp', 'tp'),
+          use_set_mesh=False,
+          expected_kv_spec=P('fsdp', None, None, None),
+          expected_idx_spec=P('fsdp'),
+      ),
+      dict(
+          testcase_name='e4b_local_mesh_ctx_2x2_divisible',
+          config_factory=model_lib.ModelConfig.gemma4_e4b,
+          attn_type=model_lib.AttentionType.LOCAL_SLIDING,
+          mesh_shape=(2, 2),
+          axis_names=('fsdp', 'tp'),
+          use_set_mesh=False,
+          expected_kv_spec=P('fsdp', None, 'tp', None),
+          expected_idx_spec=P('fsdp'),
+      ),
+      dict(
+          testcase_name='e2b_dp_tp_mesh_missing_fsdp',
+          config_factory=model_lib.ModelConfig.gemma4_e2b,
+          attn_type=model_lib.AttentionType.LOCAL_SLIDING,
+          mesh_shape=(1, 4),
+          axis_names=('dp', 'tp'),
+          use_set_mesh=False,
+          expected_kv_spec=P(None, None, None, None),
+          expected_idx_spec=P(None),
+      ),
+  )
+  def test_init_cache_replicates_indivisible_kv_head_axis_on_tp_mesh(
+      self,
+      config_factory,
+      attn_type: model_lib.AttentionType,
+      mesh_shape: tuple[int, int],
+      axis_names: tuple[str, str],
+      use_set_mesh: bool,
+      expected_kv_spec: P,
+      expected_idx_spec: P,
+  ):
+    num_devices = mesh_shape[0] * mesh_shape[1]
+    self._require_devices(num_devices)
+    config = self._make_compact_config(config_factory())
+    attn = nnx.eval_shape(
+        lambda: attention_lib.Attention(
+            config=config,
+            attn_type=attn_type,
+            rngs=nnx.Rngs(0),
+        )
+    )
+    b, max_seq_len = 2, 16
+    devices = jax.devices()[:num_devices]
+    if use_set_mesh:
+      mesh = jax.make_mesh(mesh_shape, axis_names, devices=devices)
+      ctx = jax.set_mesh(mesh)
+    else:
+      mesh = jax.sharding.Mesh(
+          np.array(devices).reshape(mesh_shape), axis_names
+      )
+      ctx = mesh
+
+    with ctx:
+      cache = attn.init_cache(
+          batch_size=b, max_seq_len=max_seq_len, dtype=jnp.bfloat16
+      )
+
+    self.assertEqual(
+        cache['k'].shape, (b, max_seq_len, attn.num_kv_heads, attn.head_dim)
+    )
+    self.assertEqual(
+        cache['v'].shape, (b, max_seq_len, attn.num_kv_heads, attn.head_dim)
+    )
+    self.assertEqual(cache['end_index'].shape, (b,))
+    self.assertEqual(cache['k'].sharding.spec, expected_kv_spec)
+    self.assertEqual(cache['v'].sharding.spec, expected_kv_spec)
+    self.assertEqual(cache['end_index'].sharding.spec, expected_idx_spec)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='12b_global_k_eq_v_single_kv_head_outside_mesh',
+          config_factory=model_lib.ModelConfig.gemma4_12b,
+          attn_type=model_lib.AttentionType.GLOBAL,
+          mesh_shape=(2, 4),
+          init_in_mesh=False,
+          is_k_eq_v=True,
+          expected_spec=P(None, 'fsdp', None),
+      ),
+      dict(
+          testcase_name='26b_global_k_eq_v_two_kv_heads_tp4_indivisible',
+          config_factory=model_lib.ModelConfig.gemma4_26b_a4b,
+          attn_type=model_lib.AttentionType.GLOBAL,
+          mesh_shape=(2, 4),
+          init_in_mesh=True,
+          is_k_eq_v=True,
+          expected_spec=P(None, 'fsdp', None),
+      ),
+      dict(
+          testcase_name='26b_global_k_eq_v_two_kv_heads_tp2_divisible',
+          config_factory=model_lib.ModelConfig.gemma4_26b_a4b,
+          attn_type=model_lib.AttentionType.GLOBAL,
+          mesh_shape=(4, 2),
+          init_in_mesh=True,
+          is_k_eq_v=True,
+          expected_spec=P('tp', 'fsdp', None),
+      ),
+      dict(
+          testcase_name='e4b_local_kv_einsum_two_kv_heads_tp4_indivisible',
+          config_factory=model_lib.ModelConfig.gemma4_e4b,
+          attn_type=model_lib.AttentionType.LOCAL_SLIDING,
+          mesh_shape=(2, 4),
+          init_in_mesh=True,
+          is_k_eq_v=False,
+          expected_spec=P(None, None, 'fsdp', None),
+      ),
+      dict(
+          testcase_name='e4b_local_kv_einsum_two_kv_heads_tp2_divisible',
+          config_factory=model_lib.ModelConfig.gemma4_e4b,
+          attn_type=model_lib.AttentionType.LOCAL_SLIDING,
+          mesh_shape=(4, 2),
+          init_in_mesh=True,
+          is_k_eq_v=False,
+          expected_spec=P(None, 'tp', 'fsdp', None),
+      ),
+  )
+  def test_kv_weight_sharding_when_tp_exceeds_num_kv_heads(
+      self,
+      config_factory,
+      attn_type: model_lib.AttentionType,
+      mesh_shape: tuple[int, int],
+      init_in_mesh: bool,
+      is_k_eq_v: bool,
+      expected_spec: P,
+  ):
+    config = config_factory()
+    abstract_mesh = jax.sharding.AbstractMesh(mesh_shape, ('fsdp', 'tp'))
+    if init_in_mesh:
+      with jax.sharding.use_abstract_mesh(abstract_mesh):
+        abs_attn = nnx.eval_shape(
+            lambda: attention_lib.Attention(
+                config=config,
+                attn_type=attn_type,
+                rngs=nnx.Rngs(0),
+            )
+        )
+    else:
+      abs_attn = nnx.eval_shape(
+          lambda: attention_lib.Attention(
+              config=config,
+              attn_type=attn_type,
+              rngs=nnx.Rngs(0),
+          )
+      )
+
+    pspecs = nnx.get_partition_spec(nnx.state(abs_attn))
+    einsum_state = pspecs.k_einsum if is_k_eq_v else pspecs.kv_einsum
+    self.assertEqual(einsum_state.w.get_value(), expected_spec)
+
+    sharding = jax.sharding.NamedSharding(abstract_mesh, expected_spec)
+    weight_shape = (
+        abs_attn.k_einsum.w.shape if is_k_eq_v else abs_attn.kv_einsum.w.shape
+    )
+    shard_shape = sharding.shard_shape(weight_shape)
+    self.assertTrue(all(dim >= 1 for dim in shard_shape))
+
+  @parameterized.named_parameters(
+      dict(testcase_name='kv_heads_1_kv_einsum', num_kv_heads=1, k_eq_v=False),
+      dict(testcase_name='kv_heads_2_kv_einsum', num_kv_heads=2, k_eq_v=False),
+      dict(testcase_name='kv_heads_1_k_einsum', num_kv_heads=1, k_eq_v=True),
+      dict(testcase_name='kv_heads_2_k_einsum', num_kv_heads=2, k_eq_v=True),
+  )
+  def test_attention_forward_with_tp_greater_than_num_kv_heads(
+      self, num_kv_heads: int, k_eq_v: bool
+  ):
+    self._require_devices(4)
+    config = model_lib.ModelConfig(
+        num_layers=1,
+        num_embed=64,
+        embed_dim=32,
+        hidden_dim=64,
+        num_heads=8,
+        head_dim=16,
+        global_key_size=16,
+        num_kv_heads=num_kv_heads,
+        k_eq_v_global=k_eq_v,
+        sliding_window_size=8,
+    )
+    attn_type = (
+        model_lib.AttentionType.GLOBAL
+        if k_eq_v
+        else model_lib.AttentionType.LOCAL_SLIDING
+    )
+    ref_attn = attention_lib.Attention(
+        config=config, attn_type=attn_type, rngs=nnx.Rngs(0)
+    )
+
+    devices = np.array(jax.devices()[:4]).reshape(1, 4)
+    mesh = jax.sharding.Mesh(devices, ('fsdp', 'tp'))
+    with mesh:
+      abs_sharded = nnx.eval_shape(
+          lambda: attention_lib.Attention(
+              config=config, attn_type=attn_type, rngs=nnx.Rngs(0)
+          )
+      )
+    graphdef, abs_state = nnx.split(abs_sharded)
+    named_shardings = nnx.get_named_sharding(abs_state, mesh)
+    sharded_state = jax.tree.map(
+        lambda v, s: nnx.Param(jax.device_put(v.get_value(), s.get_value())),
+        nnx.state(ref_attn),
+        named_shardings,
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    )
+    sharded_attn = nnx.merge(graphdef, sharded_state)
+
+    b, prefill_len, max_seq_len = 2, 4, 8
+    x_prefill = jax.random.normal(
+        jax.random.PRNGKey(1), (b, prefill_len, config.embed_dim)
+    )
+    pos_prefill = jnp.broadcast_to(
+        jnp.arange(prefill_len, dtype=jnp.int32)[None, :], (b, prefill_len)
+    )
+    mask_prefill = jnp.tril(
+        jnp.ones((b, prefill_len, prefill_len), dtype=jnp.bool_)
+    )
+    x_decode = jax.random.normal(
+        jax.random.PRNGKey(2), (b, 1, config.embed_dim)
+    )
+    pos_decode = jnp.full((b, 1), prefill_len, dtype=jnp.int32)
+    mask_decode = jnp.broadcast_to(
+        jnp.arange(max_seq_len)[None, None, :] <= prefill_len,
+        (b, 1, max_seq_len),
+    )
+
+    ref_cache = ref_attn.init_cache(b, max_seq_len, jnp.float32)
+    ref_cache, ref_prefill_out, _ = ref_attn(
+        x_prefill, pos_prefill, ref_cache, mask_prefill
+    )
+    _, ref_decode_out, _ = ref_attn(
+        x_decode, pos_decode, ref_cache, mask_decode
+    )
+
+    def _strict_shard(x, spec, eager=False):
+      del eager
+      sharding = jax.sharding.NamedSharding(mesh, P(*spec))
+      return jax.lax.with_sharding_constraint(jnp.asarray(x), sharding)
+
+    with mesh, mock.patch.object(
+        attention_lib, 'shard', side_effect=_strict_shard
+    ):
+      sharded_cache = sharded_attn.init_cache(b, max_seq_len, jnp.float32)
+      x_shd = jax.sharding.NamedSharding(mesh, P('fsdp', None, None))
+      sharded_cache, sharded_prefill_out, _ = sharded_attn(
+          jax.device_put(x_prefill, x_shd),
+          pos_prefill,
+          sharded_cache,
+          mask_prefill,
+      )
+      _, sharded_decode_out, _ = sharded_attn(
+          jax.device_put(x_decode, x_shd),
+          pos_decode,
+          sharded_cache,
+          mask_decode,
+      )
+
+    np.testing.assert_allclose(
+        sharded_prefill_out, ref_prefill_out, atol=1e-5, rtol=1e-5
+    )
+    np.testing.assert_allclose(
+        sharded_decode_out, ref_decode_out, atol=1e-5, rtol=1e-5
+    )
+
+  def test_splash_attention_with_tp_greater_than_num_kv_heads(self):
+    self._require_devices(4)
+    config = model_lib.ModelConfig(
+        num_layers=1,
+        num_embed=64,
+        embed_dim=32,
+        hidden_dim=64,
+        num_heads=8,
+        head_dim=16,
+        global_key_size=16,
+        num_kv_heads=2,
+        k_eq_v_global=False,
+        sliding_window_size=8,
+        use_flash_attention=True,
+        flash_attention_block_size=128,
+    )
+    attn = attention_lib.Attention(
+        config=config,
+        attn_type=model_lib.AttentionType.GLOBAL,
+        rngs=nnx.Rngs(0),
+    )
+    b, t = 2, config.flash_attention_block_size
+    x = jax.random.normal(jax.random.PRNGKey(1), (b, t, config.embed_dim))
+    segment_pos = jnp.broadcast_to(jnp.arange(t, dtype=jnp.int32), (b, t))
+    attn_mask = jnp.tril(jnp.ones((b, t, t), dtype=jnp.bool_))
+
+    _, ref_out, (ref_k, ref_v, *_) = attn.block(
+        x, segment_pos, None, attn_mask, force_eager=True
+    )
+
+    mesh = jax.sharding.Mesh(
+        np.array(jax.devices()[:4]).reshape(1, 4), ('fsdp', 'tp')
+    )
+    make_splash_mha = attention_lib.splash.make_splash_mha
+    with mesh, mock.patch.object(
+        attention_lib.splash,
+        'make_splash_mha',
+        side_effect=lambda *a, **kw: make_splash_mha(*a, **kw, interpret=True),
+    ):
+      _, out, (k, v, *_) = attn.block(x, segment_pos, None, attn_mask)
+
+    np.testing.assert_allclose(out, ref_out, atol=1e-5, rtol=1e-5)
+    # KV-sharing layers consume the unrepeated KV heads.
+    self.assertEqual(k.shape, (b, t, attn.num_kv_heads, attn.head_dim))
+    np.testing.assert_allclose(k, ref_k, atol=1e-6)
+    np.testing.assert_allclose(v, ref_v, atol=1e-6)
+
 
 if __name__ == '__main__':
+  if '--xla_force_host_platform_device_count' not in os.environ.get(
+      'XLA_FLAGS', ''
+  ):
+    jax.config.update('jax_num_cpu_devices', 4)
   absltest.main()
