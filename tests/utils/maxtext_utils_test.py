@@ -12,9 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import types
+from typing import NamedTuple
 from unittest import mock
 
 from absl.testing import absltest
+from flax import nnx
+from flax import traverse_util
 import jax
 from jax import numpy as jnp
 from tunix.utils import maxtext_utils
@@ -1161,6 +1165,244 @@ class MaxTextUtilsTest(absltest.TestCase):
     self.assertIn(
         "no callable '_execute_group_target_free'", "\n".join(warn_logs.output)
     )
+
+
+if __name__ == "__main__":
+  absltest.main()
+
+
+class _Group(NamedTuple):
+  op: str
+  source_keys: tuple[tuple[str, ...], ...]
+  targets: tuple[tuple[str, ...], ...]
+
+
+_WO_GROUP = _Group(
+    "slice", (("layers", "wo"),), (("layers_0", "wo"), ("layers_1", "wo"))
+)
+_WI_GROUP = _Group(
+    "fuse_moe",
+    (("layers", "wi_0"), ("layers", "wi_1")),
+    (("layers_0", "wi"), ("layers_1", "wi")),
+)
+
+
+class _FakeConverter:
+  """Stands in for MaxText's `MaxTextToMaxTextConverter`.
+
+  `convert` plans with `_build_plan` and runs each group through
+  `_execute_group`, the two hooks the loader wraps.
+  """
+
+  instances: list["_FakeConverter"] = []
+  groups: tuple[_Group, ...] = (_WO_GROUP, _WI_GROUP)
+  # A source array whose liveness is recorded when a fuse group runs.
+  watched: jax.Array | None = None
+
+  def __init__(self, **kwargs):
+    self.kwargs = kwargs
+    self.planned_sources = []
+    self.watched_alive_during_fuse = None
+    _FakeConverter.instances.append(self)
+
+  def _build_plan(self, src_flat, tgt_flat, skip_paths):
+    del tgt_flat, skip_paths
+    self.planned_sources = sorted(src_flat)
+    return self.groups
+
+  def _execute_group(self, group, src_flat, tgt_flat):
+    del tgt_flat
+    sources = [src_flat[key] for key in group.source_keys]
+    if group.op == "fuse_moe":
+      if self.watched is not None:
+        self.watched_alive_during_fuse = not self.watched.is_deleted()
+      fused = jnp.concatenate(sources, axis=-1)
+      return [(key, fused[i]) for i, key in enumerate(group.targets)]
+    if group.op == "raise":
+      raise ValueError("conversion failed")
+    return [(key, sources[0][i]) for i, key in enumerate(group.targets)]
+
+  def convert(self, src_pytree, target_state):
+    src_flat = traverse_util.flatten_dict(src_pytree.to_pure_dict())
+    tgt_flat = traverse_util.flatten_dict(target_state.to_pure_dict())
+    result = {}
+    for group in self._build_plan(src_flat, tgt_flat, frozenset()):
+      result.update(self._execute_group(group, src_flat, tgt_flat))
+    nested = traverse_util.unflatten_dict(result)
+    return {"model": jax.tree_util.tree_map(nnx.Param, nested)}
+
+
+class _ScannedLayers(nnx.Module):
+
+  def __init__(self, prefused: bool):
+    if prefused:
+      self.wi = nnx.Param(jnp.arange(64.0).reshape(2, 4, 8))
+    else:
+      self.wi_0 = nnx.Param(jnp.full((2, 4, 4), 1.0))
+      self.wi_1 = nnx.Param(jnp.full((2, 4, 4), 2.0))
+    self.wo = nnx.Param(jnp.arange(32.0).reshape(2, 4, 4))
+
+
+class _ScannedModel(nnx.Module):
+
+  def __init__(self, prefused: bool):
+    self.layers = _ScannedLayers(prefused)
+
+
+class _FakeTarget:
+  """In-process vLLM weights with one non-parameter leaf."""
+
+  def __init__(self, free_on_update: bool = False):
+    layer = lambda: {
+        "wi": nnx.Param(jnp.zeros((4, 8))),
+        "wo": nnx.Param(jnp.zeros((4, 4))),
+    }
+    self.state = nnx.State({
+        "layers_0": layer(),
+        "layers_1": layer(),
+        "stat": nnx.BatchStat(jnp.zeros((3,))),
+    })
+    self.free_on_update = free_on_update
+    self.calls = []
+
+  @property
+  def transformer_state(self):
+    return self.state
+
+  def delete_cache(self):
+    self.calls.append("delete_cache")
+
+  def update_params(self, updated_weights):
+    self.calls.append("update_params")
+    self.state = nnx.State({**updated_weights, "stat": self.state["stat"]})
+    if self.free_on_update:
+      jax.tree_util.tree_leaves(updated_weights["layers_0"]["wo"])[0].delete()
+
+
+class LoadAndConvertScannedCheckpointTest(absltest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    _FakeConverter.instances = []
+
+  def _load(self, model, target, **kwargs):
+    pyconfig = mock.MagicMock()
+    pyconfig.initialize.return_value = mock.sentinel.scanned_cfg
+    creation = mock.MagicMock()
+    creation.from_pretrained.return_value = (model, mock.sentinel.mesh)
+    modules = {
+        "common.common_types": types.SimpleNamespace(
+            MODEL_MODE_AUTOREGRESSIVE="autoregressive"
+        ),
+        "configs": types.SimpleNamespace(pyconfig=pyconfig),
+        "integration.vllm.weight_converter": types.SimpleNamespace(
+            MaxTextToMaxTextConverter=_FakeConverter
+        ),
+        "utils": types.SimpleNamespace(model_creation_utils=creation),
+        "utils.globals": types.SimpleNamespace(
+            MAXTEXT_CONFIGS_DIR="/maxtext/configs"
+        ),
+    }
+    args = dict(
+        mesh_tp=2,
+        ckpt_prefuse_moe=False,
+        fp8_moe=False,
+        maxtext_config_overrides={"model_name": "qwen3-test"},
+    )
+    args.update(kwargs)
+    with mock.patch.dict(
+        "sys.modules",
+        {
+            prefix + name: module
+            for prefix in ("maxtext.", "maxtext.src.maxtext.")
+            for name, module in modules.items()
+        },
+    ):
+      maxtext_utils.load_and_convert_scanned_checkpoint(
+          "/ckpt/items", target, **args
+      )
+    return pyconfig, creation
+
+  def test_loads_scanned_checkpoint_and_frees_sources(self):
+    model = _ScannedModel(prefused=False)
+    scanned_wo = nnx.state(model).to_pure_dict()["layers"]["wo"]
+    target = _FakeTarget()
+    placeholder = target.state.to_pure_dict()["layers_0"]["wo"]
+    stat = target.state.to_pure_dict()["stat"]
+
+    pyconfig, creation = self._load(model, target)
+
+    init_args, init_kwargs = pyconfig.initialize.call_args
+    self.assertEqual(init_args, (["", "/maxtext/configs/base.yml"],))
+    self.assertEqual(init_kwargs["model_name"], "qwen3-test")
+    self.assertEqual(init_kwargs["load_parameters_path"], "/ckpt/items")
+    self.assertTrue(init_kwargs["scan_layers"])
+    self.assertFalse(init_kwargs["prefuse_moe_weights"])
+    creation.from_pretrained.assert_called_once_with(
+        mock.sentinel.scanned_cfg,
+        devices=jax.devices(),
+        model_mode="autoregressive",
+    )
+    (converter,) = _FakeConverter.instances
+    self.assertEqual(
+        converter.kwargs,
+        dict(
+            config=mock.sentinel.scanned_cfg,
+            tp=2,
+            prefuse_moe_weights=True,
+            target_dtype=None,
+            fp8_moe=False,
+        ),
+    )
+    self.assertIn(("layers", "wi_0"), converter.planned_sources)
+    self.assertEqual(target.calls, ["delete_cache", "update_params"])
+    self.assertTrue(placeholder.is_deleted())
+    self.assertTrue(scanned_wo.is_deleted())
+    self.assertFalse(stat.is_deleted())
+    loaded = target.state.to_pure_dict()
+    self.assertEqual(loaded["layers_1"]["wo"][0, 0], 16.0)
+    self.assertEqual(loaded["layers_0"]["wi"][0, 7], 2.0)
+
+  def test_prefused_moe_wi_stays_alive_until_its_group_ran(self):
+    model = _ScannedModel(prefused=True)
+    prefused_wi = nnx.state(model).to_pure_dict()["layers"]["wi"]
+    target = _FakeTarget()
+    with mock.patch.object(_FakeConverter, "watched", prefused_wi):
+      self._load(model, target, ckpt_prefuse_moe=True)
+
+    (converter,) = _FakeConverter.instances
+    self.assertNotIn(("layers", "wi"), converter.planned_sources)
+    self.assertTrue(converter.watched_alive_during_fuse)
+    self.assertTrue(prefused_wi.is_deleted())
+    loaded = target.state.to_pure_dict()
+    # Halves [0:4] and [4:8] of layer 1 are re-fused in order.
+    self.assertEqual(loaded["layers_1"]["wi"][0, 0], 32.0)
+    self.assertEqual(loaded["layers_1"]["wi"][0, 4], 36.0)
+
+  def test_fp8_moe_reaches_the_converter(self):
+    self._load(_ScannedModel(prefused=False), _FakeTarget(), fp8_moe=True)
+    self.assertTrue(_FakeConverter.instances[0].kwargs["fp8_moe"])
+
+  def test_freed_vllm_weight_fails_the_load(self):
+    target = _FakeTarget(free_on_update=True)
+    with self.assertRaisesRegex(RuntimeError, "1 vLLM weight"):
+      self._load(_ScannedModel(prefused=False), target)
+
+  def test_converter_hooks_are_restored_when_conversion_fails(self):
+    target = _FakeTarget()
+    with mock.patch.object(
+        _FakeConverter,
+        "groups",
+        (_Group("raise", (("layers", "wo"),), (("layers_0", "wo"),)),),
+    ):
+      with self.assertRaisesRegex(ValueError, "conversion failed"):
+        self._load(_ScannedModel(prefused=True), target, ckpt_prefuse_moe=True)
+    (converter,) = _FakeConverter.instances
+    self.assertIs(
+        converter._execute_group.__func__, _FakeConverter._execute_group
+    )
+    self.assertIs(converter._build_plan.__func__, _FakeConverter._build_plan)
+    self.assertEqual(target.calls, ["delete_cache"])
 
 
 if __name__ == "__main__":

@@ -16,12 +16,18 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 import dataclasses
+import functools
 import logging
 import os
 import types
-from typing import Any
+from typing import Any, Protocol, TYPE_CHECKING
+
+if TYPE_CHECKING:
+  from flax import nnx  # pylint: disable=g-import-not-at-top
+  import jax  # pylint: disable=g-import-not-at-top
+  import jaxtyping  # pylint: disable=g-import-not-at-top
 
 
 @dataclasses.dataclass(frozen=True)
@@ -866,3 +872,249 @@ def create_maxtext_engine(
     log_param_shapes(engine.model)
 
   return engine
+
+
+class ScannedCheckpointTarget(Protocol):
+  """In-process vLLM weights that a scanned MaxText checkpoint is loaded into.
+
+  `tunix.generate.vllm_sampler.VllmSampler` satisfies it, as does an
+  initialized `InprocessVllmSampler` (`tunix.dist_rl.rollout`).
+  `update_params` re-allocates the KV cache that `delete_cache` freed, and
+  reshards in chunks of `RolloutConfig.rollout_vllm_reshard_chunk_size`.
+  """
+
+  @property
+  def transformer_state(self) -> nnx.State:
+    ...
+
+  def update_params(self, updated_weights: jaxtyping.PyTree) -> None:
+    ...
+
+  def delete_cache(self) -> None:
+    ...
+
+
+def _delete_arrays(
+    tree: jaxtyping.PyTree, keep: jaxtyping.PyTree = None
+) -> None:
+  """Frees the live `jax.Array` leaves of `tree` that are not in `keep`."""
+  import jax  # pylint: disable=g-import-not-at-top
+
+  keep_ids = {id(leaf) for leaf in jax.tree_util.tree_leaves(keep)}
+  for leaf in jax.tree_util.tree_leaves(tree):
+    if (
+        isinstance(leaf, jax.Array)
+        and id(leaf) not in keep_ids
+        and not leaf.is_deleted()
+    ):
+      leaf.delete()
+
+
+def _place_on(out: jax.Array, sharding: jax.sharding.Sharding) -> jax.Array:
+  """Moves `out` onto `sharding`, freeing its old buffer unless it is reused."""
+  import jax  # pylint: disable=g-import-not-at-top
+
+  if out.sharding == sharding:
+    return out
+  placed = jax.device_put(out, sharding)
+  jax.block_until_ready(placed)
+  # An equivalent sharding can hand back the same buffer.
+  if not out.sharding.is_equivalent_to(sharding, out.ndim):
+    _delete_arrays(out, keep=placed)
+  return placed
+
+
+def _split_prefused_wi_then_build_plan(
+    build_plan: Callable[..., Any],
+    prefused_wi: dict[tuple[str, ...], jax.Array],
+    src_flat: dict[tuple[str, ...], jax.Array],
+    tgt_flat: Mapping[tuple[str, ...], jax.Array],
+    skip_paths: frozenset[tuple[str, ...]] = frozenset(),
+) -> Any:
+  """Exposes each scanned pre-fused MoE `wi` as `wi_0`/`wi_1` to the planner.
+
+  The checkpoint stores `[gate | up]` concatenated, while a rollout with
+  tensor parallelism wants them interleaved per shard, so the converter must
+  re-fuse them. `_execute_group_and_free_sources` slices the halves only when
+  their group runs, so the halves never coexist for every layer at once.
+
+  Args:
+    build_plan: The converter's `_build_plan`.
+    prefused_wi: Filled with the pre-fused `wi` arrays, keyed by their parent
+      path.
+    src_flat: Flattened source state; `wi` keys are replaced in place.
+    tgt_flat: Flattened target state.
+    skip_paths: Target paths the converter skips.
+
+  Returns:
+    The plan from `build_plan`.
+  """
+  for key in [k for k in src_flat if "layers" in k and k[-1] == "wi"]:
+    wi = src_flat.pop(key)
+    prefused_wi[key[:-1]] = wi
+    src_flat[key[:-1] + ("wi_0",)] = wi
+    src_flat[key[:-1] + ("wi_1",)] = wi
+  return build_plan(src_flat, tgt_flat, skip_paths)
+
+
+def _execute_group_and_free_sources(
+    execute_group: Callable[..., list[tuple[tuple[str, ...], jax.Array]]],
+    prefused_wi: dict[tuple[str, ...], jax.Array],
+    group: Any,
+    src_flat: dict[tuple[str, ...], jax.Array],
+    tgt_flat: Mapping[tuple[str, ...], jax.Array],
+) -> list[tuple[tuple[str, ...], jax.Array]]:
+  """Runs one conversion group, frees its sources, and places its outputs.
+
+  Freeing each scanned source as soon as its group is done keeps peak HBM near
+  one copy of the weights instead of two.
+
+  Args:
+    execute_group: The converter's `_execute_group`.
+    prefused_wi: Pre-fused `wi` arrays, filled by
+      `_split_prefused_wi_then_build_plan`.
+    group: The converter's plan group (`op`, `source_keys`).
+    src_flat: Flattened source state.
+    tgt_flat: Flattened target state.
+
+  Returns:
+    `(target_key, array)` pairs, each on its target's sharding.
+  """
+  import jax  # pylint: disable=g-import-not-at-top
+
+  prefused = None
+  parent = group.source_keys[0][:-1]
+  if group.op == "fuse_moe" and parent in prefused_wi:
+    prefused = prefused_wi.pop(parent)
+    half = prefused.shape[-1] // 2
+    src_flat[group.source_keys[0]] = prefused[..., :half]
+    src_flat[group.source_keys[1]] = prefused[..., half:]
+  sources = [src_flat[key] for key in group.source_keys]
+  outs = execute_group(group, src_flat, tgt_flat)
+  out_arrays = [out for _, out in outs]
+  jax.block_until_ready(out_arrays)
+  # An identity group's output can be its source buffer.
+  if group.op != "identity":
+    _delete_arrays([prefused, sources], keep=out_arrays)
+  return [
+      (tgt_key, _place_on(out, tgt_flat[tgt_key].sharding))
+      for tgt_key, out in outs
+  ]
+
+
+def load_and_convert_scanned_checkpoint(
+    path: str | os.PathLike[str],
+    target: ScannedCheckpointTarget,
+    *,
+    mesh_tp: int,
+    ckpt_prefuse_moe: bool,
+    fp8_moe: bool,
+    maxtext_config_overrides: Mapping[str, object],
+    base_config_path: str | os.PathLike[str] | None = None,
+) -> None:
+  """Loads a scanned MaxText checkpoint into `target`'s unscanned vLLM weights.
+
+  Restores the checkpoint with `scan_layers=True`, converts it in memory with
+  MaxText's `MaxTextToMaxTextConverter`, and passes the result to
+  `target.update_params`. The KV cache and `target`'s placeholder parameters
+  are freed first, and each scanned source is freed once converted, so the
+  checkpoint fits next to the rollout on large MoE models. A failure leaves
+  `target` without weights; the caller should not serve from it.
+
+  Args:
+    path: Orbax checkpoint directory of the scanned parameters.
+    target: Initialized in-process vLLM weights to load into.
+    mesh_tp: Tensor-parallel degree of the rollout.
+    ckpt_prefuse_moe: Whether the checkpoint stores MoE gate/up as one `wi`.
+    fp8_moe: Whether to quantize the MoE expert weights to FP8.
+    maxtext_config_overrides: MaxText config of the model (`model_name`,
+      checkpoint storage settings, ...). Scan, attention, and checkpoint path
+      settings are overridden for the restore.
+    base_config_path: MaxText base config; defaults to MaxText's `base.yml`.
+
+  Raises:
+    RuntimeError: If a weight `target` serves was freed during the load.
+  """
+  # pylint: disable=g-import-not-at-top
+  import gc
+
+  from flax import nnx
+  import jax
+  from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE
+  from maxtext.configs import pyconfig
+  from maxtext.integration.vllm.weight_converter import MaxTextToMaxTextConverter
+  from maxtext.utils import model_creation_utils
+  from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
+
+  # pylint: enable=g-import-not-at-top
+
+  logging.info("Loading scanned MaxText checkpoint %s into vLLM.", path)
+  target.delete_cache()
+  _delete_arrays(target.transformer_state.filter(nnx.Param))
+
+  if base_config_path is None:
+    base_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")
+  scanned_cfg = pyconfig.initialize(
+      ["", str(base_config_path)],
+      **{
+          **maxtext_config_overrides,
+          "load_parameters_path": str(path),
+          "scan_layers": True,
+          "prefuse_moe_weights": ckpt_prefuse_moe,
+          "attention": "dot_product",
+          "model_call_mode": "",
+      },
+  )
+  scanned_model, _ = model_creation_utils.from_pretrained(
+      scanned_cfg, devices=jax.devices(), model_mode=MODEL_MODE_AUTOREGRESSIVE
+  )
+  scanned_state = nnx.state(scanned_model, nnx.Param)
+  del scanned_model
+  gc.collect()
+
+  converter = MaxTextToMaxTextConverter(
+      config=scanned_cfg,
+      tp=mesh_tp,
+      prefuse_moe_weights=True,
+      target_dtype=None,
+      fp8_moe=fp8_moe,
+  )
+  prefused_wi: dict[tuple[str, ...], jax.Array] = {}
+  # pylint: disable=protected-access
+  build_plan, execute_group = converter._build_plan, converter._execute_group
+  if ckpt_prefuse_moe and mesh_tp > 1:
+    converter._build_plan = functools.partial(
+        _split_prefused_wi_then_build_plan, build_plan, prefused_wi
+    )
+  converter._execute_group = functools.partial(
+      _execute_group_and_free_sources, execute_group, prefused_wi
+  )
+  try:
+    converted = converter.convert(
+        scanned_state, target_state=target.transformer_state
+    )
+  finally:
+    converter._build_plan, converter._execute_group = build_plan, execute_group
+  # pylint: enable=protected-access
+  del scanned_state
+  gc.collect()
+
+  while isinstance(converted, dict) and "model" in converted:
+    converted = converted["model"]
+  target.update_params(converted)
+  del converted
+  gc.collect()
+  jax.clear_caches()
+  jax.effects_barrier()
+
+  freed = [
+      leaf.shape
+      for leaf in jax.tree_util.tree_leaves(target.transformer_state)
+      if isinstance(leaf, jax.Array) and leaf.is_deleted()
+  ]
+  if freed:
+    raise RuntimeError(
+        f"{len(freed)} vLLM weight(s) were freed while loading {path}; first"
+        f" shapes: {freed[:10]}"
+    )
+  logging.info("Loaded scanned MaxText checkpoint %s into vLLM.", path)
