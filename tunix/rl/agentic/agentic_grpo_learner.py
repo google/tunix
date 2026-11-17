@@ -792,7 +792,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       # too few valid rollouts trains on nothing. `trajectories` may hold
       # several groups when they are processed in the consumer.
       valid_mask = np.array(
-          [getattr(item, "is_valid", True) for item in trajectories],
+          [item.is_valid for item in trajectories],
           dtype=bool,
       ) & np.isfinite(np.asarray(rewards, dtype=np.float32))
       group_valid = valid_mask.reshape(-1, self.algo_config.num_generations)

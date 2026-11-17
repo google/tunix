@@ -794,6 +794,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
 
   def test_process_results_extracts_assistant_text(self):
     class MockTraj:
+      is_valid = True
 
       def __init__(self, index):
         self.traj = {
@@ -1041,6 +1042,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
 
   def test_process_results_zero_advantage_group(self):
     class MockTraj:
+      is_valid = True
 
       def __init__(
           self,
@@ -1534,6 +1536,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
 
     # Mock trajectories to pass into _process_results
     class MockTraj:
+      is_valid = True
 
       def __init__(self, index):
         self.traj = {
@@ -1653,6 +1656,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
 
     # Mock trajectories to pass into _process_results
     class MockTraj:
+      is_valid = True
 
       def __init__(self, index):
         self.traj = {
@@ -2517,6 +2521,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     )
 
     class MockTraj:
+      is_valid = True
 
       def __init__(self, index):
         self.traj = {
