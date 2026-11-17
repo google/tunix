@@ -80,9 +80,18 @@ bash tunix/dist_rl/examples/deepswe_dist/k8s_launcher_v2.sh start \
 
 The trainer and rollout pods download the Qwen3-32B checkpoint (65.5 GB) to
 `model_download_path`, which by default is in the container's ephemeral
-storage. The launcher has no volume option: on node pools with less ephemeral
-storage than that, add a volume to the JobSets that `--dry-run` prints and
-point the `*model_config.model_download_path` keys at it.
+storage. On node pools with less ephemeral storage than that (~47 GB on
+standard GKE nodes), cache it in the pods' memory-backed `/dev/shm` and raise
+the trainer container's memory limit to cover the cached weights:
+
+```bash
+bash tunix/dist_rl/examples/deepswe_dist/k8s_launcher_v2.sh start \
+  cluster_config.k8s.tunix_image=<IMAGE> \
+  model_config.model_download_path=/dev/shm/models \
+  cluster_config.role_env.trainer.HF_HOME=/dev/shm/hf \
+  cluster_config.role_env.rollout.HF_HOME=/dev/shm/hf \
+  cluster_config.k8s.user_container_memory_limit=340G
+```
 
 Run with `SandboxFleet` enabled on GKE. The sandboxes run in the run's GKE
 namespace (`cluster_config.k8s.namespace`, default `default`) unless
