@@ -645,6 +645,12 @@ def _create_maxtext_trainer_factory(
       attention=_kwarg(kwargs, "attention", ""),
       device_host_concurrent_gb=_ckpt_d2h_concurrent_gb(hp),
       extra_flags=_maxtext_extra_flags(hp),
+      skip_step_on_spikes=bool(
+          node_utils.optional_bool(kwargs, "skip_step_on_spikes")
+      ),
+      skip_step_on_nan=node_utils.optional_bool(kwargs, "skip_step_on_nan"),
+      skip_step_interval=_kwarg(kwargs, "skip_step_interval", 128),
+      skip_step_scaling_factor=_kwarg(kwargs, "skip_step_scaling_factor", 6.0),
   )
   logging.info("Creating MaxText device mesh...")
   mesh = maxtext_utils.create_maxtext_mesh(maxtext_config)

@@ -974,6 +974,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   _validate_maxtext_pairing(hp)
   _validate_maxtext_model_names(hp)
   _validate_maxtext_extra_config(hp)
+  _validate_maxtext_skip_step_kwargs(hp)
   _validate_rollout_weights(hp)
   _validate_library_settings(hp)
   if grpo["reward_mode"] == "reward_fn" and not hp.config["reward_functions"]:
@@ -1302,6 +1303,12 @@ _MAXTEXT_KEYS_FROM_CONFIG: Final[Mapping[str, str]] = {
     "tpu_num_sparse_core_tiles_to_trace": (
         "actor_model_config.kwargs.tpu_num_sparse_core_tiles_to_trace"
     ),
+    "skip_step_on_spikes": "actor_model_config.kwargs.skip_step_on_spikes",
+    "skip_step_on_nan": "actor_model_config.kwargs.skip_step_on_nan",
+    "skip_step_interval": "actor_model_config.kwargs.skip_step_interval",
+    "skip_step_scaling_factor": (
+        "actor_model_config.kwargs.skip_step_scaling_factor"
+    ),
 }
 
 
@@ -1309,6 +1316,62 @@ _MAXTEXT_KEYS_FROM_CONFIG: Final[Mapping[str, str]] = {
 _MAXTEXT_CONFIG_NAME_RE: Final[re.Pattern[str]] = re.compile(
     r"[A-Za-z_][A-Za-z0-9_]*"
 )
+
+
+def _validate_maxtext_skip_step_kwargs(hp: cli_config.HyperParameters) -> None:
+  """Validates `actor_model_config.kwargs.skip_step_*` types and backend."""
+  actor = hp.config_mapping("actor_model_config")
+  kwargs = actor["kwargs"]
+  if not isinstance(kwargs, Mapping):
+    return
+  keys = (
+      "skip_step_on_spikes",
+      "skip_step_on_nan",
+      "skip_step_interval",
+      "skip_step_scaling_factor",
+  )
+  present = [k for k in keys if k in kwargs and kwargs[k] is not None]
+  if not present:
+    return
+  if actor["model_source"] != "maxtext":
+    raise ValueError(
+        "actor_model_config.kwargs."
+        + ", actor_model_config.kwargs.".join(present)
+        + " require actor_model_config.model_source='maxtext', got"
+        f" {actor['model_source']!r}."
+    )
+  for bool_key in ("skip_step_on_spikes", "skip_step_on_nan"):
+    if bool_key in kwargs and kwargs[bool_key] is not None:
+      if not isinstance(kwargs[bool_key], bool):
+        raise ValueError(
+            f"actor_model_config.kwargs.{bool_key} must be a bool, got"
+            f" {kwargs[bool_key]!r}."
+        )
+  if "skip_step_interval" in kwargs and kwargs["skip_step_interval"] is not None:
+    interval = kwargs["skip_step_interval"]
+    if (
+        isinstance(interval, bool)
+        or not isinstance(interval, int)
+        or interval <= 0
+    ):
+      raise ValueError(
+          "actor_model_config.kwargs.skip_step_interval must be a positive int,"
+          f" got {interval!r}."
+      )
+  if (
+      "skip_step_scaling_factor" in kwargs
+      and kwargs["skip_step_scaling_factor"] is not None
+  ):
+    factor = kwargs["skip_step_scaling_factor"]
+    if (
+        isinstance(factor, bool)
+        or not isinstance(factor, (int, float))
+        or not (0 < factor < float("inf"))
+    ):
+      raise ValueError(
+          "actor_model_config.kwargs.skip_step_scaling_factor must be a"
+          f" positive finite number, got {factor!r}."
+      )
 
 
 def _validate_maxtext_extra_config(hp: cli_config.HyperParameters) -> None:

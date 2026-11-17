@@ -1057,6 +1057,35 @@ weight_sync_config:
             [f"cluster_config.rollout_fault_tolerance={bad_ft}"]
         )
 
+  def test_maxtext_skip_step_kwargs_validation(self):
+    with self.assertRaisesRegex(
+        ValueError, "require actor_model_config.model_source='maxtext'"
+    ):
+      resolve_config.initialize(
+          ["actor_model_config.kwargs.skip_step_on_nan=false"]
+      )
+    maxtext_base = [
+        "actor_model_config.model_source=maxtext",
+        "actor_model_config.model_path=/ckpt/qwen3-0.6b/0/items",
+        "actor_model_config.kwargs.maxtext_model_name=qwen3-0.6b",
+        "rollout_model_config.model_source=maxtext",
+        "rollout_model_config.kwargs.maxtext_model_name=qwen3-0.6b",
+        "weight_sync_config.mode=raiden",
+    ]
+    with self.assertRaisesRegex(ValueError, "must be a bool"):
+      resolve_config.initialize(
+          [*maxtext_base, 'actor_model_config.kwargs.skip_step_on_nan="false"']
+      )
+    with self.assertRaisesRegex(ValueError, "must be a positive int"):
+      resolve_config.initialize(
+          [*maxtext_base, "actor_model_config.kwargs.skip_step_interval=0"]
+      )
+    with self.assertRaisesRegex(ValueError, "must be a positive finite number"):
+      resolve_config.initialize([
+          *maxtext_base,
+          "actor_model_config.kwargs.skip_step_scaling_factor=-1.0",
+      ])
+
   def test_rollout_fault_tolerance_settings_and_validation(self):
     ft_keys = (
         "rollout_fault_tolerance",

@@ -40,8 +40,10 @@ model_config: &base_model_config
     axis_names: "('fsdp','tp')"
     allocation_policy: "COMPACT"
   # Architecture / MaxText overrides (e.g. maxtext_model_name, maxtext_output_dir,
-  # padded_moe_mlp_dim, warmup_steps_fraction, attention). `maxtext_model_name`
-  # (e.g. "qwen3-0.6b") is required when `model_source` is "maxtext".
+  # padded_moe_mlp_dim, warmup_steps_fraction, attention, skip_step_on_spikes,
+  # skip_step_on_nan, skip_step_interval, skip_step_scaling_factor).
+  # `maxtext_model_name` (e.g. "qwen3-0.6b") is required when `model_source` is
+  # "maxtext".
   kwargs: {}
 
 actor_model_config:

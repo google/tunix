@@ -635,6 +635,19 @@ class MaxTextTrainerFactoryTest(absltest.TestCase):
     self.assertEqual(kwargs["max_seq_token_per_tpu"], 0)
     self.assertIsNone(kwargs["profiling_options"])
 
+  def test_skip_step_kwargs_reach_build_maxtext_config(self, mock_build_cfg, *_):
+    kwargs = self._build_kwargs(
+        mock_build_cfg,
+        "actor_model_config.kwargs.skip_step_on_spikes=true",
+        "actor_model_config.kwargs.skip_step_on_nan=false",
+        "actor_model_config.kwargs.skip_step_interval=64",
+        "actor_model_config.kwargs.skip_step_scaling_factor=4.5",
+    )
+    self.assertTrue(kwargs["skip_step_on_spikes"])
+    self.assertFalse(kwargs["skip_step_on_nan"])
+    self.assertEqual(kwargs["skip_step_interval"], 64)
+    self.assertEqual(kwargs["skip_step_scaling_factor"], 4.5)
+
   def test_plumbs_max_seq_tokens_per_device(self, mock_build_cfg, *_):
     kwargs = self._build_kwargs(
         mock_build_cfg, "rl_training_config.max_seq_tokens_per_device=4096"
@@ -951,6 +964,8 @@ class MaxTextExtraConfigTest(absltest.TestCase):
           rollout_mesh_tp=1,
           adamw_options=trainer._maxtext_adamw_options(hp),
           device_host_concurrent_gb=8,
+          skip_step_on_spikes=True,
+          skip_step_on_nan=True,
       )
     argv = pyconfig.initialize.call_args.args[0]
     return {arg.split("=", 1)[0] for arg in argv if "=" in arg}
