@@ -325,10 +325,15 @@ class FaultToleranceConfig:
       `min_active_rollout_grace_s` seconds after the first rollout worker has
       reached `ACTIVE`. Ignored when `enabled=False`.
     min_active_rollout_grace_s: Wall-clock grace period in seconds (`>= 0.0`,
-      default `900.0`) that the active rollout ratio may remain strictly below
-      `min_active_rollout_ratio` before `RolloutCapacityError` is raised,
-      allowing crashed workers time to be restarted and rejoin. The grace timer
-      starts on worker eviction, while the floor is checked at
+      default `900.0`) that active rollout capacity may remain below its floor
+      before `RolloutCapacityError` is raised, allowing crashed workers time to
+      restart and rejoin. When `enabled=True`, this grace applies both to
+      `min_active_rollout_ratio` and to any Relay staging-slot floor installed
+      via `DistributedRLEngine.configure_staging_liveness` (during a staging
+      shortfall, surviving rollout workers may block in
+      `RolloutStagingBuffer.reserve()` until capacity recovers or grace
+      elapses; when `enabled=False`, staging-slot shortfalls fail fast). Both
+      timers start immediately on worker eviction and are checked at
       `DistributedRLEngine` construction, after each `poll_rollouts()`, and
       after `sync_weights()` promotion, so `RolloutCapacityError` surfaces on
       the first poll or weight-sync boundary once `min_active_rollout_grace_s`

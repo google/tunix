@@ -97,9 +97,10 @@ def min_retained_policy_version(
 class RelayCoordinator:
   """Manages staged `RoutedExpertsRef` fetch, packing, release, and teardown.
 
-  Note: Because staged `routed_experts` arrays live in rollout worker RAM,
-  Orchestrator Relay does not preserve rollout-worker fault tolerance: evicting
-  a rollout worker with pending refs will fail `fetch_routed_experts`.
+  Note: Staged `routed_experts` arrays reside in rollout worker RAM. Under fault
+  tolerance, `fetch_routed_experts` partitions unavailable references into
+  `failed_refs`, and `RelayCoordinator` currently raises `RuntimeError` when
+  `failed_refs` is non-empty.
   """
 
   def __init__(self, *, staging_overcommit_factor: float = 1.0) -> None:
@@ -268,8 +269,19 @@ class RelayCoordinator:
       try:
         if plan.refs:
           fetch_start = time.monotonic()
-          fetched = await self._engine.fetch_routed_experts(plan.refs)
+          fetch_result = await self._engine.fetch_routed_experts(plan.refs)
           step_times.routed_experts_fetch_time += time.monotonic() - fetch_start
+          if fetch_result.failed_refs:
+            failed_wids = sorted(
+                {r.worker_id for r in fetch_result.failed_refs}
+            )
+            raise RuntimeError(
+                f"Rollout worker {failed_wids[0]!r} was evicted before staged"
+                " routed_experts could be fetched"
+                f" ({len(fetch_result.failed_refs)} failed ref(s) across"
+                f" {failed_wids})."
+            )
+          fetched = fetch_result.fetched
         pack_start = time.perf_counter()
 
         def _pack(

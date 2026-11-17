@@ -32,6 +32,7 @@ from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.orchestrator import distributed_rl_engine
 from tunix.dist_rl.orchestrator import payload_builder
 from tunix.dist_rl.orchestrator import relay_coordinator
+from tunix.dist_rl.orchestrator import rl_engine_interface
 from tunix.dist_rl.orchestrator import rl_program
 from tunix.dist_rl.orchestrator import step_telemetry
 from tunix.dist_rl.orchestrator import worker_registry
@@ -312,7 +313,11 @@ class RLProgramTest(absltest.TestCase):
         )
     )
     self.mock_engine.configure_staging_liveness = mock.MagicMock()
-    self.mock_engine.fetch_routed_experts = mock.AsyncMock(return_value={})
+    self.mock_engine.fetch_routed_experts = mock.AsyncMock(
+        return_value=rl_engine_interface.RoutedExpertsFetchResult(
+            fetched={}, failed_refs=frozenset()
+        )
+    )
     self.mock_engine.release_routed_experts = mock.AsyncMock(return_value=None)
     self.mock_engine.clear_all_staged_routed_experts = mock.AsyncMock(
         return_value=None
@@ -7467,10 +7472,11 @@ class RLProgramTest(absltest.TestCase):
       )
       arr0 = np.full((6, 2, 2), 3, dtype=np.uint8)
       arr1 = np.full((6, 2, 2), 5, dtype=np.uint8)
-      self.mock_engine.fetch_routed_experts.return_value = {
-          ref0: arr0,
-          ref1: arr1,
-      }
+      self.mock_engine.fetch_routed_experts.return_value = (
+          rl_engine_interface.RoutedExpertsFetchResult(
+              fetched={ref0: arr0, ref1: arr1}, failed_refs=frozenset()
+          )
+      )
       self.mock_engine.get_metrics = mock.AsyncMock(
           return_value=[{
               "staging/used_bytes": 0,
@@ -7802,10 +7808,11 @@ class RLProgramTest(absltest.TestCase):
           worker_id="w0", instance_id="inst0", ref_id=2
       )
       arr = np.ones((4, 2, 2), dtype=np.uint8)
-      self.mock_engine.fetch_routed_experts.return_value = {
-          ref0: arr,
-          ref1: arr,
-      }
+      self.mock_engine.fetch_routed_experts.return_value = (
+          rl_engine_interface.RoutedExpertsFetchResult(
+              fetched={ref0: arr, ref1: arr}, failed_refs=frozenset()
+          )
+      )
       batch_cfg = batch_assembly.BatchConfig(
           mini_batch_size=1,
           train_micro_batch_size=1,
@@ -7916,10 +7923,15 @@ class RLProgramTest(absltest.TestCase):
       ref1 = datatypes.RoutedExpertsRef(
           worker_id="w0", instance_id="inst0", ref_id=2
       )
-      self.mock_engine.fetch_routed_experts.return_value = {
-          ref0: np.ones((4, 2, 2), dtype=np.uint8),
-          ref1: np.ones((4, 2, 2), dtype=np.uint8),
-      }
+      self.mock_engine.fetch_routed_experts.return_value = (
+          rl_engine_interface.RoutedExpertsFetchResult(
+              fetched={
+                  ref0: np.ones((4, 2, 2), dtype=np.uint8),
+                  ref1: np.ones((4, 2, 2), dtype=np.uint8),
+              },
+              failed_refs=frozenset(),
+          )
+      )
       lock = threading.Lock()
       step_times = step_telemetry.StepTimes()
 
@@ -8009,6 +8021,70 @@ class RLProgramTest(absltest.TestCase):
         )
 
       with self.assertRaisesRegex(RuntimeError, "boom during fetch"):
+        async for _ in relay.iter_planned_microbatches(
+            assembler=asm,
+            lock=threading.Lock(),
+            payloads=[_item(ref0), _item(ref1)],
+            step_times=step_telemetry.StepTimes(),
+        ):
+          pass
+      await relay.flush_releases()
+      self.assertEqual(released, [(ref0, ref1)])
+
+    asyncio.run(_run())
+
+  def test_iter_planned_microbatches_raises_and_releases_on_failed_refs(self):
+    async def _run():
+      ref0 = datatypes.RoutedExpertsRef(
+          worker_id="w0", instance_id="inst0", ref_id=1
+      )
+      ref1 = datatypes.RoutedExpertsRef(
+          worker_id="w1", instance_id="inst1", ref_id=2
+      )
+      released: list[tuple[datatypes.RoutedExpertsRef, ...]] = []
+
+      class _PartialFailedEngine:
+
+        async def fetch_routed_experts(self, refs):
+          del refs
+          return rl_engine_interface.RoutedExpertsFetchResult(
+              fetched={ref0: np.ones((4, 1, 1), dtype=np.int16)},
+              failed_refs=frozenset({ref1}),
+          )
+
+        async def release_routed_experts(self, refs):
+          released.append(tuple(refs))
+
+      relay = relay_coordinator.RelayCoordinator()
+      relay._engine = _PartialFailedEngine()  # type: ignore[assignment]
+      asm = batch_assembly.PaddedBatchAssembler(
+          batch_size=2,
+          max_prompt_length=4,
+          max_response_length=4,
+          pad_id=0,
+          num_generations=2,
+          mini_batch_size=1,
+      )
+      asm.set_routed_experts_spec(
+          batch_assembly.RoutedExpertsSpec(
+              num_layers=1, top_k=1, encoding="int16"
+          )
+      )
+
+      def _item(ref):
+        return datatypes.RLTrainerPayload(
+            prompt_ids=np.array([1, 2], dtype=np.int32),
+            prompt_mask=np.array([1.0, 1.0], dtype=np.float32),
+            completion_ids=np.array([3, 4], dtype=np.int32),
+            completion_mask=np.array([1.0, 1.0], dtype=np.float32),
+            advantages=np.array([1.0, 1.0], dtype=np.float32),
+            routed_experts_ref=ref,
+        )
+
+      with self.assertRaisesRegex(
+          RuntimeError,
+          r"Rollout worker 'w1' was evicted before staged routed_experts",
+      ):
         async for _ in relay.iter_planned_microbatches(
             assembler=asm,
             lock=threading.Lock(),

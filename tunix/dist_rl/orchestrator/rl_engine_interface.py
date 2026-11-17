@@ -15,12 +15,28 @@
 """The RL engine interface (Layer 1 Compute Routing Protocol) following Orchestrator V2."""
 
 from collections.abc import Mapping, Sequence
+import dataclasses
 from typing import Any, Protocol, runtime_checkable
 import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.worker import remote_execution
 from tunix.rl import algorithm_config
+
+
+@dataclasses.dataclass(frozen=True)
+class RoutedExpertsFetchResult:
+  """Materialized staged `routed_experts` arrays plus unrecoverable refs.
+
+  Attributes:
+    fetched: Mapping from resolved `RoutedExpertsRef` handles to materialized
+      wire-encoded `routed_experts` arrays.
+    failed_refs: Set of `RoutedExpertsRef` handles whose rollout worker was
+      evicted, non-`ACTIVE`, restarted, or unreachable under fault tolerance.
+  """
+
+  fetched: dict[datatypes.RoutedExpertsRef, np.ndarray]
+  failed_refs: frozenset[datatypes.RoutedExpertsRef]
 
 
 @runtime_checkable
@@ -172,7 +188,21 @@ class AbstractRLEngine(Protocol):
       | dict[str, Any]
       | None
   ):
-    """Retrieves step metrics from the worker for the specified role."""
+    """Retrieves step metrics from the worker(s) for the specified role.
+
+    For `Role.ROLLOUT`, returns `[]` under fault tolerance when zero rollout
+    workers are currently `ACTIVE` mid-run, skips workers failing with transport
+    or closed-handle faults, and propagates `RemoteCallError` application
+    exceptions (failing fast on all errors when fault tolerance is disabled).
+
+    Args:
+      role: Worker role whose metrics should be queried.
+      **kwargs: Additional engine- or worker-specific metric query options.
+
+    Returns:
+      Sequence of per-worker metric payloads for `Role.ROLLOUT`, or the single
+      worker's metric payload for singleton roles.
+    """
     ...
 
   def configure_worker(
@@ -278,18 +308,22 @@ class AbstractRLEngine(Protocol):
   async def fetch_routed_experts(
       self,
       refs: Sequence[datatypes.RoutedExpertsRef],
-  ) -> dict[datatypes.RoutedExpertsRef, np.ndarray]:
-    """Fetches worker-staged `routed_experts` arrays grouped by `worker_id`.
+  ) -> RoutedExpertsFetchResult:
+    """Fetches worker-staged `routed_experts` arrays grouped by worker instance.
 
     Args:
       refs: Staged `RoutedExpertsRef` handles to materialize.
 
     Returns:
-      Mapping from each requested `RoutedExpertsRef` to its wire-encoded array.
+      `RoutedExpertsFetchResult` with materialized arrays in `fetched` and, when
+      fault tolerance is enabled, any refs from evicted, non-`ACTIVE`,
+      restarted, or unreachable rollout workers in `failed_refs`.
 
     Raises:
-      RuntimeError: If a referenced rollout worker was evicted before fetch.
-      KeyError: If a rollout worker omits any requested `ref_id`.
+      RuntimeError: If fault tolerance is disabled and a referenced rollout
+        worker was evicted, non-`ACTIVE`, or restarted, or if an application
+        error occurs on `fetch_staged`.
+      KeyError: If an active matching rollout worker omits a requested `ref_id`.
     """
     ...
 
@@ -297,16 +331,16 @@ class AbstractRLEngine(Protocol):
       self,
       refs: Sequence[datatypes.RoutedExpertsRef],
   ) -> None:
-    """Releases worker-staged `routed_experts` entries grouped by `worker_id`.
+    """Releases worker-staged `routed_experts` entries grouped by worker instance.
 
     Args:
-      refs: Staged `RoutedExpertsRef` handles to free (evicted workers—and
-        unreachable workers when fault tolerance is enabled—are logged and
-        skipped).
+      refs: Staged `RoutedExpertsRef` handles to free (evicted, non-`ACTIVE`, or
+        instance-mismatched workers—and unreachable workers when fault tolerance
+        is enabled—are logged and skipped).
 
     Raises:
-      RuntimeError: If releasing more refs for a worker than currently tracked
-        as unreleased.
+      RuntimeError: If releasing more refs for a `(worker_id, instance_id)` than
+        currently tracked as unreleased.
     """
     ...
 
