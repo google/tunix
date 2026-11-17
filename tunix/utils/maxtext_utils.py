@@ -895,7 +895,7 @@ class ScannedCheckpointTarget(Protocol):
 
 
 def _delete_arrays(
-    tree: jaxtyping.PyTree, keep: jaxtyping.PyTree = None
+    tree: jaxtyping.PyTree, keep: jaxtyping.PyTree | None = None
 ) -> None:
   """Frees the live `jax.Array` leaves of `tree` that are not in `keep`."""
   import jax  # pylint: disable=g-import-not-at-top
