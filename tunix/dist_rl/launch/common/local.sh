@@ -128,12 +128,41 @@ print_command() {
   echo
 }
 
+print_env() {
+  if [[ -n "$2" ]]; then
+    echo "$1 environment: $2"
+  fi
+}
+
+export_env() {
+  if [[ -n "$1" ]]; then
+    eval "export $1"
+  fi
+}
+
+export_sandbox_env() {
+  if [[ -n "${SANDBOX_NAMESPACE}" ]]; then
+    export NAMESPACE="${SANDBOX_NAMESPACE}"
+    if [[ -n "${SANDBOX_NODE_SELECTOR_KEY}" && -n "${SANDBOX_NODE_SELECTOR_VAL}" ]]; then
+      export NODE_SELECTOR_KEY="${SANDBOX_NODE_SELECTOR_KEY}"
+      export NODE_SELECTOR_VAL="${SANDBOX_NODE_SELECTOR_VAL}"
+    fi
+  fi
+  # Keys the job-scoped `SandboxFleet` the orchestrator and rollout share; the
+  # run id keeps concurrent local runs on one sandbox namespace apart.
+  export ORCHESTRATOR_ID="${RUN_ID}"
+}
+
 if is_true "${DRY_RUN}"; then
+  print_env "Trainer" "${ROLE_ENV_TRAINER}"
   print_command "Trainer command" "${TRAINER_CMD[@]}"
+  print_env "Rollout" "${ROLE_ENV_ROLLOUT}"
   print_command "Rollout command" "${ROLLOUT_CMD[@]}"
   if is_true "${RUN_INFERENCE_NODE}"; then
+    print_env "Inference" "${ROLE_ENV_INFERENCE}"
     print_command "Inference command" "${INFERENCE_CMD[@]}"
   fi
+  print_env "Orchestrator" "${ROLE_ENV_ORCHESTRATOR}"
   print_command "Orchestrator command" "${ORCHESTRATOR_CMD[@]}"
   exit 0
 fi
@@ -486,6 +515,8 @@ echo "Launching trainer node (${TRAINER_FRAMEWORK}:${TRAINER_ACCELERATOR}) on de
 (
   configure_local_worker_env "${TRAINER_FRAMEWORK}" "${TRAINER_ACCELERATOR}" "${LOCAL_TRAINER_DEVICES}" "${LOCAL_TRAINER_PATHWAYS}"
   export PYTHONUNBUFFERED=1
+  export_env "${ROLE_ENV_TRAINER}"
+  print_env "Trainer" "${ROLE_ENV_TRAINER}"
   print_command "Trainer command" "${TRAINER_CMD[@]}"
   exec "${TRAINER_CMD[@]}" > "$TRAINER_LOG" 2>&1
 ) &
@@ -495,14 +526,10 @@ echo "Trainer pid=$TRAINER_PID log=$TRAINER_LOG"
 echo "Launching rollout node (${ROLLOUT_FRAMEWORK}:${ROLLOUT_ACCELERATOR}) on devices ${LOCAL_ROLLOUT_DEVICES}..."
 (
   configure_local_worker_env "${ROLLOUT_FRAMEWORK}" "${ROLLOUT_ACCELERATOR}" "${LOCAL_ROLLOUT_DEVICES}" "false"
-  if [[ -n "${SANDBOX_NAMESPACE}" ]]; then
-    export NAMESPACE="${SANDBOX_NAMESPACE}"
-    if [[ -n "${SANDBOX_NODE_SELECTOR_KEY}" && -n "${SANDBOX_NODE_SELECTOR_VAL}" ]]; then
-      export NODE_SELECTOR_KEY="${SANDBOX_NODE_SELECTOR_KEY}"
-      export NODE_SELECTOR_VAL="${SANDBOX_NODE_SELECTOR_VAL}"
-    fi
-  fi
+  export_sandbox_env
   export PYTHONUNBUFFERED=1
+  export_env "${ROLE_ENV_ROLLOUT}"
+  print_env "Rollout" "${ROLE_ENV_ROLLOUT}"
   print_command "Rollout command" "${ROLLOUT_CMD[@]}"
   exec "${ROLLOUT_CMD[@]}" > "$ROLLOUT_LOG" 2>&1
 ) &
@@ -514,6 +541,8 @@ if is_true "${RUN_INFERENCE_NODE}"; then
   (
     configure_local_worker_env "${INFERENCE_FRAMEWORK}" "${INFERENCE_ACCELERATOR}" "${LOCAL_INFERENCE_DEVICES}" "false"
     export PYTHONUNBUFFERED=1
+    export_env "${ROLE_ENV_INFERENCE}"
+    print_env "Inference" "${ROLE_ENV_INFERENCE}"
     print_command "Inference command" "${INFERENCE_CMD[@]}"
     exec "${INFERENCE_CMD[@]}" > "$INFERENCE_LOG" 2>&1
   ) &
@@ -532,6 +561,9 @@ echo "Launching CPU orchestrator..."
 (
   export JAX_PLATFORMS=cpu
   export PYTHONUNBUFFERED=1
+  export_sandbox_env
+  export_env "${ROLE_ENV_ORCHESTRATOR}"
+  print_env "Orchestrator" "${ROLE_ENV_ORCHESTRATOR}"
   print_command "Orchestrator command" "${ORCHESTRATOR_CMD[@]}"
   "${ORCHESTRATOR_CMD[@]}" > "$ORCHESTRATOR_LOG" 2>&1
 )

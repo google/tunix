@@ -105,6 +105,18 @@ for otel_var in OTEL_EXPORTER_OTLP_ENDPOINT OTEL_METRIC_EXPORT_INTERVAL \
   fi
 done
 
+# Sandbox environment of the orchestrator and rollout processes: the
+# `kubernetes_config` placement and `ORCHESTRATOR_ID`, which keys the job-scoped
+# `SandboxFleet` they share. Placed before `ROLE_ENV_*` so role overrides take
+# precedence.
+SANDBOX_ENV_PREFIX="ORCHESTRATOR_ID=$(printf '%q' "${K8S_ORCHESTRATOR_ID}") "
+if [[ -n "${SANDBOX_NAMESPACE}" ]]; then
+  SANDBOX_ENV_PREFIX+="NAMESPACE=$(printf '%q' "${SANDBOX_NAMESPACE}") "
+  if [[ -n "${SANDBOX_NODE_SELECTOR_KEY}" && -n "${SANDBOX_NODE_SELECTOR_VAL}" ]]; then
+    SANDBOX_ENV_PREFIX+="NODE_SELECTOR_KEY=$(printf '%q' "${SANDBOX_NODE_SELECTOR_KEY}") NODE_SELECTOR_VAL=$(printf '%q' "${SANDBOX_NODE_SELECTOR_VAL}") "
+  fi
+fi
+
 is_jax_cache_disabled() {
   is_true "${K8S_JAX_CACHE_DISABLE:-false}"
 }
@@ -141,8 +153,12 @@ start_orchestrator() {
   if [[ -n "${WANDB_API_KEY:-}" ]]; then
     env_prefix+="WANDB_API_KEY=$(printf '%q' "${WANDB_API_KEY}") "
   fi
+  env_prefix+="${OTEL_ENV_PREFIX}${SANDBOX_ENV_PREFIX}"
+  if [[ -n "${ROLE_ENV_ORCHESTRATOR}" ]]; then
+    env_prefix+="${ROLE_ENV_ORCHESTRATOR} "
+  fi
 
-  local startup_cmd="${env_prefix}${OTEL_ENV_PREFIX}python -m tunix.dist_rl.distributed.runtime.main --discovery_id=${K8S_ORCHESTRATOR_ID} --discovery_port=${ORCHESTRATOR_PORT} --process_main=${ORCHESTRATOR_MAIN} ${CONTAINER_ARGS_STR}"
+  local startup_cmd="${env_prefix}python -m tunix.dist_rl.distributed.runtime.main --discovery_id=${K8S_ORCHESTRATOR_ID} --discovery_port=${ORCHESTRATOR_PORT} --process_main=${ORCHESTRATOR_MAIN} ${CONTAINER_ARGS_STR}"
 
   run_yaml_gen \
     "${YAML_DIR}/jobset.cpu.yaml" \
@@ -199,8 +215,8 @@ start_trainer() {
       env_prefix+=" RAIDEN_USE_FFI=1"
     fi
   fi
-  if [[ -n "${K8S_TRAINER_EXTRA_ENV}" ]]; then
-    env_prefix+=" ${K8S_TRAINER_EXTRA_ENV}"
+  if [[ -n "${ROLE_ENV_TRAINER}" ]]; then
+    env_prefix+=" ${ROLE_ENV_TRAINER}"
   fi
 
   local startup_cmd="${OTEL_ENV_PREFIX}${env_prefix} python -m tunix.dist_rl.distributed.runtime.main --discovery_addrs=${K8S_ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} --process_executor=tunix.dist_rl.distributed.runtime.executor.K8sExecutor --process_main=${TRAINER_MAIN} ${CONTAINER_ARGS_STR}"
@@ -284,12 +300,7 @@ start_rollout_instance() {
   if [[ "${WEIGHT_SYNC_MODE}" == "raiden" ]]; then
     env_prefix+=" RAIDEN_USE_FFI=0"
   fi
-  if [[ -n "${SANDBOX_NAMESPACE}" ]]; then
-    env_prefix+=" NAMESPACE=$(printf '%q' "${SANDBOX_NAMESPACE}")"
-    if [[ -n "${SANDBOX_NODE_SELECTOR_KEY}" && -n "${SANDBOX_NODE_SELECTOR_VAL}" ]]; then
-      env_prefix+=" NODE_SELECTOR_KEY=$(printf '%q' "${SANDBOX_NODE_SELECTOR_KEY}") NODE_SELECTOR_VAL=$(printf '%q' "${SANDBOX_NODE_SELECTOR_VAL}")"
-    fi
-  fi
+  env_prefix+=" ${SANDBOX_ENV_PREFIX% }"
 
   if is_jax_cache_disabled; then
     env_prefix+=" DISABLE_JAX_CACHE=1 VLLM_DISABLE_COMPILE_CACHE=1"
@@ -303,6 +314,9 @@ start_rollout_instance() {
     if [[ -n "${K8S_JAX_CACHE_SAVE}" ]]; then
       env_prefix+=" SAVE_JAX_CACHE=$(printf '%q' "${K8S_JAX_CACHE_SAVE}")"
     fi
+  fi
+  if [[ -n "${ROLE_ENV_ROLLOUT}" ]]; then
+    env_prefix+=" ${ROLE_ENV_ROLLOUT}"
   fi
 
   local ray_head_pre_init_cmd=""
@@ -318,6 +332,14 @@ start_rollout_instance() {
     if [[ -n "${K8S_JAX_CACHE_ROLLOUT_GCS_DIR}" ]]; then
       ray_worker_pre_init_cmd+=" && (python3 -m tunix.dist_rl.common.gcs_cache download ${local_dir} $(printf '%q' "${K8S_JAX_CACHE_ROLLOUT_GCS_DIR}") || true)"
     fi
+  fi
+
+  # Multi-host Ray rollouts start Ray on every host with these commands before
+  # `startup_cmd`, so the Ray actors inherit the role env from them. It comes
+  # last, as in `startup_cmd`, so it overrides the JAX cache settings above.
+  if [[ -n "${ROLE_ENV_ROLLOUT}" ]]; then
+    ray_head_pre_init_cmd+=" && export ${ROLE_ENV_ROLLOUT}"
+    ray_worker_pre_init_cmd+=" && export ${ROLE_ENV_ROLLOUT}"
   fi
 
   env_prefix="${env_prefix# }"

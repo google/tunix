@@ -15,9 +15,10 @@
 """Control-plane fault-tolerance policy for distributed RL workers."""
 
 import collections
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 import threading
 import time
+from typing import Literal
 
 from absl import logging
 from tunix.dist_rl.common import datatypes
@@ -28,6 +29,26 @@ from tunix.dist_rl.worker import task_session
 
 
 _monotonic: Callable[[], float] = time.monotonic
+_GraceTransition = Literal["recovered", "dropped"]
+
+StagingSlotsFn = Callable[
+    [Sequence[tuple[datatypes.WorkerInfo, remote_execution.ActorHandle]]],
+    int,
+]
+
+
+def _advance_grace_timer(
+    is_below: bool,
+    since: float | None,
+    now_fn: Callable[[], float],
+) -> tuple[float | None, _GraceTransition | None, float | None]:
+  """Advances one grace timer, returning `(since, transition, elapsed_s)`."""
+  if not is_below:
+    return None, ("recovered" if since is not None else None), None
+  now = now_fn()
+  if since is None:
+    return now, "dropped", 0.0
+  return since, None, now - since
 
 
 class RolloutCapacityError(RuntimeError):
@@ -69,16 +90,51 @@ class FaultToleranceManager:
     self._promoted_total = 0
     self._peak_active_rollout_workers = 0
     self._below_min_active_since: float | None = None
+    self._staging_slots_fn: StagingSlotsFn | None = None
+    self._required_staging_slots: int = 0
+    self._below_staging_slots_since: float | None = None
 
   @property
   def config(self) -> datatypes.FaultToleranceConfig:
     """Returns the active `FaultToleranceConfig`."""
     return self._config
 
+  @property
+  def peak_active_rollout_workers(self) -> int:
+    """Returns the highest `ACTIVE` rollout worker count observed so far."""
+    with self._lock:
+      return self._peak_active_rollout_workers
+
   def record_rejoin_promoted(self) -> None:
     """Counts a late-arriving or rejoined rollout worker promoted to ACTIVE."""
     with self._lock:
       self._promoted_total += 1
+
+  def set_staging_slot_floor(
+      self,
+      slots_fn: StagingSlotsFn | None,
+      required_slots: int = 0,
+  ) -> None:
+    """Installs or clears the cluster-wide Relay staging-slot capacity floor.
+
+    Args:
+      slots_fn: Callback receiving the current `ACTIVE` rollout `(WorkerInfo,
+        ActorHandle)` sequence (invoked outside `FaultToleranceManager`'s lock)
+        and returning total cluster-wide staging slots, or `None` to clear the
+        floor. Any `ValueError` or `RuntimeError` raised by `slots_fn` (such as
+        missing worker metadata or 0 physical slots) is surfaced immediately by
+        `check_rollout_capacity()` without a grace window.
+      required_slots: Minimum cluster-wide staging slots required (`<= 0`
+        disables the floor).
+    """
+    with self._lock:
+      if slots_fn is None or required_slots <= 0:
+        self._staging_slots_fn = None
+        self._required_staging_slots = 0
+      else:
+        self._staging_slots_fn = slots_fn
+        self._required_staging_slots = required_slots
+      self._below_staging_slots_since = None
 
   def metrics(
       self,
@@ -143,39 +199,127 @@ class FaultToleranceManager:
         ),
     }
 
-  def _update_rollout_capacity_state(self) -> RolloutCapacityError | None:
-    """Updates rollout capacity watermarks/timers and returns any floor error."""
+  def _evaluate_ratio_floor_locked(
+      self,
+      active: int,
+      peak: int,
+      now_fn: Callable[[], float],
+  ) -> tuple[
+      float,
+      float | None,
+      _GraceTransition | None,
+      RolloutCapacityError | None,
+  ]:
+    """Evaluates the active-worker ratio floor under `self._lock`."""
     threshold = (
         self._config.min_active_rollout_ratio if self._config.enabled else None
     )
-    log_recovered = False
-    log_dropped = False
-    error: RolloutCapacityError | None = None
+    if threshold is None or peak == 0:
+      return 1.0, threshold, None, None
+    ratio = active / peak
+    grace_s = self._config.min_active_rollout_grace_s
+    self._below_min_active_since, event, elapsed_s = _advance_grace_timer(
+        ratio < threshold, self._below_min_active_since, now_fn
+    )
+    error = None
+    if elapsed_s is not None and elapsed_s >= grace_s:
+      error = RolloutCapacityError(
+          "Active rollout workers remained below minimum ratio for"
+          f" {elapsed_s:.1f}s (grace {grace_s:.1f}s):"
+          f" {active}/{peak} active ({ratio:.3f} < {threshold:.3f})."
+      )
+    return ratio, threshold, event, error
+
+  def _evaluate_staging_floor_locked(
+      self,
+      active: int,
+      total_slots: int,
+      required_slots: int,
+      slots_exc: Exception | None,
+      now_fn: Callable[[], float],
+  ) -> tuple[_GraceTransition | None, Exception | None]:
+    """Evaluates a pre-sampled Relay staging-slot count under `self._lock`."""
+    if slots_exc is not None:
+      return None, slots_exc
+    if not self._config.enabled:
+      if total_slots < required_slots:
+        return (
+            None,
+            RolloutCapacityError(
+                f"Active rollout pool has only {total_slots} staging slots"
+                f" across {active} worker(s), below required deadlock-free"
+                f" lower bound {required_slots}. Increase"
+                " RolloutConfig.staging_max_bytes, rollout_replicas, or"
+                " staging_overcommit_factor."
+            ),
+        )
+      return None, None
+    grace_s = self._config.min_active_rollout_grace_s
+    self._below_staging_slots_since, event, elapsed_s = _advance_grace_timer(
+        total_slots < required_slots,
+        self._below_staging_slots_since,
+        now_fn,
+    )
+    error = None
+    if elapsed_s is not None and elapsed_s >= grace_s:
+      error = RolloutCapacityError(
+          "Active rollout staging slots remained below required bound for"
+          f" {elapsed_s:.1f}s (grace {grace_s:.1f}s): {total_slots} <"
+          f" {required_slots} across {active} worker(s)."
+      )
+    return event, error
+
+  def _update_rollout_capacity_state(self) -> Exception | None:
+    """Updates rollout capacity watermarks/timers and returns any floor error."""
+    # Invoked exclusively on the orchestrator's single event-loop thread.
+    grace_s = self._config.min_active_rollout_grace_s
+    now: float | None = None
+
+    def _now() -> float:
+      nonlocal now
+      if now is None:
+        now = _monotonic()
+      return now
+
+    targets = self._registry.targets(
+        datatypes.Role.ROLLOUT,
+        statuses=(worker_registry.AdmissionStatus.ACTIVE,),
+    )
     with self._lock:
-      active = len(self._registry.handles(datatypes.Role.ROLLOUT))
+      slots_fn = self._staging_slots_fn
+      required_slots = self._required_staging_slots
+
+    total_slots = 0
+    slots_exc: Exception | None = None
+    if slots_fn is not None and required_slots > 0:
+      try:
+        total_slots = slots_fn(targets)
+      except (ValueError, RuntimeError) as exc:
+        slots_exc = exc
+
+    active = len(targets)
+    slots_event: _GraceTransition | None = None
+    slots_err: Exception | None = None
+    with self._lock:
       if active > self._peak_active_rollout_workers:
         self._peak_active_rollout_workers = active
       peak = self._peak_active_rollout_workers
-      if threshold is None or peak == 0:
-        return None
-      ratio = active / peak
-      if ratio >= threshold:
-        log_recovered = self._below_min_active_since is not None
-        self._below_min_active_since = None
-      else:
-        now = _monotonic()
-        if self._below_min_active_since is None:
-          self._below_min_active_since = now
-          log_dropped = True
-        elapsed_s = now - self._below_min_active_since
-        if elapsed_s >= self._config.min_active_rollout_grace_s:
-          error = RolloutCapacityError(
-              "Active rollout workers remained below minimum ratio for"
-              f" {elapsed_s:.1f}s (grace"
-              f" {self._config.min_active_rollout_grace_s:.1f}s):"
-              f" {active}/{peak} active ({ratio:.3f} < {threshold:.3f})."
-          )
-    if log_recovered:
+      ratio, threshold, ratio_event, ratio_err = (
+          self._evaluate_ratio_floor_locked(active, peak, _now)
+      )
+      if (
+          slots_fn is not None
+          and required_slots > 0
+          and self._staging_slots_fn is slots_fn
+          and self._required_staging_slots == required_slots
+      ):
+        slots_event, slots_err = self._evaluate_staging_floor_locked(
+            active, total_slots, required_slots, slots_exc, _now
+        )
+      error: Exception | None = ratio_err or slots_err
+
+    if ratio_event == "recovered":
+      assert threshold is not None
       logging.info(
           "Rollout active capacity recovered to %d/%d (%.1f%% >= %.1f%%).",
           active,
@@ -183,7 +327,8 @@ class FaultToleranceManager:
           ratio * 100.0,
           threshold * 100.0,
       )
-    elif log_dropped:
+    elif ratio_event == "dropped":
+      assert threshold is not None
       logging.warning(
           "Rollout active capacity dropped below minimum: %d/%d (%.1f%% <"
           " %.1f%%); will abort if not recovered within %.1fs.",
@@ -191,26 +336,43 @@ class FaultToleranceManager:
           peak,
           ratio * 100.0,
           threshold * 100.0,
-          self._config.min_active_rollout_grace_s,
+          grace_s,
+      )
+    if slots_event == "recovered":
+      logging.info(
+          "Active rollout staging slots recovered to %d >= %d across %d"
+          " worker(s).",
+          total_slots,
+          required_slots,
+          active,
+      )
+    elif slots_event == "dropped":
+      logging.warning(
+          "Active rollout staging slots dropped below required bound: %d < %d"
+          " across %d worker(s); will abort if not recovered within %.1fs.",
+          total_slots,
+          required_slots,
+          active,
+          grace_s,
       )
     return error
 
   def check_rollout_capacity(self) -> None:
-    """Updates the peak active rollout count and enforces the capacity floor.
+    """Updates the peak active rollout count and enforces capacity floors.
 
-    The guardrail is armed once at least one rollout worker has reached
-    `AdmissionStatus.ACTIVE`. When `config.enabled` is True and
-    `config.min_active_rollout_ratio` is set, starts a monotonic timer the first
-    time `active / peak_active < min_active_rollout_ratio` (including on worker
-    eviction via `on_worker_unreachable()`), resets the timer whenever the ratio
-    recovers to `>= min_active_rollout_ratio`, and raises `RolloutCapacityError`
-    once the elapsed time below threshold reaches
-    `config.min_active_rollout_grace_s`.
+    Enforces both the active-worker ratio floor (armed once at least one rollout
+    worker has reached `AdmissionStatus.ACTIVE`) and any Relay staging-slot
+    floor installed via `set_staging_slot_floor`. Under `config.enabled=True`,
+    starts monotonic grace timers on shortfall (including at worker eviction via
+    `on_worker_unreachable()`), resets them on recovery, and raises
+    `RolloutCapacityError` once `config.min_active_rollout_grace_s` elapses.
 
     Raises:
-      RolloutCapacityError: If the active rollout ratio remains strictly below
-        `config.min_active_rollout_ratio` for at least
-        `config.min_active_rollout_grace_s` seconds.
+      RolloutCapacityError: If the active rollout ratio or staging-slot count
+        remains below its floor for at least `config.min_active_rollout_grace_s`
+        seconds (or immediately when `config.enabled=False`).
+      ValueError: If an active worker is missing required staging metadata.
+      RuntimeError: If an active worker has 0 physical staging slots.
     """
     error = self._update_rollout_capacity_state()
     if error is not None:

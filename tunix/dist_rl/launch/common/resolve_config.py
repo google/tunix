@@ -38,7 +38,8 @@ import pathlib
 import re
 import shlex
 import sys
-from typing import Any, Final
+import types
+from typing import Any, Final, Literal
 
 import omegaconf
 from tunix.cli import config as cli_config
@@ -740,6 +741,100 @@ def _validate_fault_tolerance(hp: cli_config.HyperParameters) -> None:
     )
 
 
+ProcessRole = Literal["orchestrator", "trainer", "rollout", "inference"]
+PROCESS_ROLES: Final[tuple[ProcessRole, ...]] = (
+    "orchestrator",
+    "trainer",
+    "rollout",
+    "inference",
+)
+# Environment variables `node_utils.apply_library_env` sets from the config,
+# and the config key each comes from. Launchers reject them in user-supplied
+# environments so a value can only come from the config.
+LIBRARY_ENV_CONFIG_KEYS: Final[Mapping[str, str]] = types.MappingProxyType({
+    "SKIP_JAX_PRECOMPILE": "vllm_config.skip_jax_precompile",
+    "TPU_RAIDEN_DATA_NICS": "weight_sync_config.raiden_data_nics",
+    "VERIFY_WEIGHTS": "weight_sync_config.verify_weights",
+})
+_FORBIDDEN_ROLE_ENVS: Final[Mapping[str, str]] = types.MappingProxyType({
+    **{k: f"set {v} instead" for k, v in LIBRARY_ENV_CONFIG_KEYS.items()},
+    "ENABLE_PATHWAYS_PERSISTENCE": (
+        "set cluster_config.k8s.enable_pathways_persistence instead"
+    ),
+    "DIST_RL_WORKER_PORT": "launcher-managed worker identity",
+    "DIST_RL_ROLLOUT_REPLICA": "launcher-managed worker identity",
+})
+_ROLE_ENV_PREFIX_REASONS: Final[tuple[tuple[str, str], ...]] = (
+    ("T_", "Tunix config override"),
+    ("M_", "MaxText config override"),
+)
+_ENV_VAR_NAME_RE: Final[re.Pattern[str]] = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_]*\Z"
+)
+
+
+def role_env(
+    hp: cli_config.HyperParameters,
+) -> dict[ProcessRole, dict[str, str]]:
+  """Validates and returns `cluster_config.role_env` per process."""
+  raw = hp.config_mapping("cluster_config")["role_env"]
+  if not isinstance(raw, Mapping) or set(raw) != set(PROCESS_ROLES):
+    raise ValueError(
+        f"cluster_config.role_env must map {PROCESS_ROLES}, got {raw!r}."
+    )
+  result: dict[ProcessRole, dict[str, str]] = {}
+  for role in PROCESS_ROLES:
+    env = raw[role]
+    if not isinstance(env, Mapping):
+      raise TypeError(
+          f"cluster_config.role_env.{role} must be a mapping, got {env!r}."
+      )
+    if not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in env.items()
+    ):
+      raise TypeError(
+          f"cluster_config.role_env.{role} keys and values must be strings,"
+          f" got {dict(env)!r}."
+      )
+    result[role] = dict(env)
+  return result
+
+
+def _validate_role_env(hp: cli_config.HyperParameters) -> None:
+  """Checks `cluster_config.role_env` names and active roles."""
+  parsed = role_env(hp)
+  cluster = hp.config_mapping("cluster_config")
+  if cluster["target"] == "external" and any(parsed.values()):
+    raise ValueError(
+        "cluster_config.role_env is set, but cluster_config.target=external"
+        " runs the processes outside local.sh and k8s.sh, which apply it."
+    )
+  if (
+      parsed["inference"]
+      and not hp.config_mapping("cluster_config")["run_inference_node"]
+  ):
+    raise ValueError(
+        "cluster_config.role_env.inference is set, but"
+        " cluster_config.run_inference_node resolved to false."
+    )
+  pairs: list[tuple[str, str]] = []
+  for role, env in parsed.items():
+    pairs.extend((role, k) for k in env)
+  for role, name in pairs:
+    default_reason = (
+        _FORBIDDEN_ROLE_ENVS[name] if name in _FORBIDDEN_ROLE_ENVS else ""
+    )
+    reason = next(
+        (msg for pfx, msg in _ROLE_ENV_PREFIX_REASONS if name.startswith(pfx)),
+        default_reason,
+    )
+    if reason or not _ENV_VAR_NAME_RE.match(name):
+      raise ValueError(
+          f"cluster_config.role_env.{role} rejects {name!r}"
+          f" ({reason or 'invalid variable name'})."
+      )
+
+
 def _validate_local_settings(hp: cli_config.HyperParameters) -> None:
   """Validates and normalizes `cluster_config.local` settings."""
   local = _mutable_section(hp, "cluster_config")["local"]
@@ -785,6 +880,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   _validate_k8s_scalars(hp)
   _validate_k8s_worker_jobsets(hp)
   _validate_rollout_replicas(hp)
+  _validate_role_env(hp)
   _validate_trajectory_logging(hp)
   _validate_rollout_logps_settings(hp)
   _validate_fault_tolerance(hp)
@@ -1484,6 +1580,11 @@ def _bash_quote(val: object) -> str:
   return shlex.quote(str(val))
 
 
+def _shell_env_words(env: Mapping[str, str]) -> str:
+  """Renders `env` as space-separated `KEY=VALUE` words, each value quoted."""
+  return " ".join(f"{name}={shlex.quote(value)}" for name, value in env.items())
+
+
 # TODO(noghabi): Consider auto-flattening `cluster_config.{local,k8s}` into
 # `UPPER_SNAKE_CASE` exports (and mapping only the non-cluster keys by hand),
 # which would shrink this list and the drift check in `launch_test.py`.
@@ -1591,7 +1692,6 @@ def render_bash_exports(hp: DistHyperParameters) -> str:
       "K8S_CPU_MEMORY": k8s["cpu_memory"],
       "K8S_GCS_SCRATCH_LOCATION": k8s["gcs_scratch_location"],
       "K8S_ENABLE_PATHWAYS_PERSISTENCE": k8s["enable_pathways_persistence"],
-      "K8S_TRAINER_EXTRA_ENV": k8s["trainer_extra_env"],
       "K8S_TUNIX_IMAGE": k8s["tunix_image"],
       "K8S_PATHWAYS_SERVER_IMAGE": k8s["pathways_server_image"],
       "K8S_PATHWAYS_PROXY_IMAGE": k8s["pathways_proxy_image"],
@@ -1616,6 +1716,10 @@ def render_bash_exports(hp: DistHyperParameters) -> str:
       # Empty without a GCS cache.
       "K8S_JAX_CACHE_ROLLOUT_GCS_DIR": rollout_cache_uri or "",
       "K8S_JAX_CACHE_SAVE": jax_cache["save"],
+      **{
+          f"ROLE_ENV_{role.upper()}": _shell_env_words(env)
+          for role, env in role_env(hp).items()
+      },
       "SANDBOX_NAMESPACE": (
           sandbox_k8s["namespace"] if "namespace" in sandbox_k8s else ""
       ),

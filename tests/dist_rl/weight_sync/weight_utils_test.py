@@ -60,20 +60,113 @@ class WeightUtilsTest(absltest.TestCase):
     )
     self.assertEqual(weight_utils.param_key("base"), "")
 
-  def test_filter_bindable_drops_kv_cache_and_non_floating(self):
+  def test_is_inference_only_buffer_matches_exact_segments(self):
+    cases = (
+        ("['base']['decoder']['layers']['attention']['cache']['k']", True),
+        ("['layers']['cached_prefill_key']", True),
+        ("['layers']['cached_prefill_value']", True),
+        (
+            "['vllm_model.model.layers.3.self_attn.rotary_emb.cos_sin_cache']",
+            True,
+        ),
+        ("['vllm_model.model.layers.0.hash_indices_table']", True),
+        (
+            "['vllm_model.model.layers.0.routed_experts"
+            + ".tpu_hash_indices_table']",
+            True,
+        ),
+        ("['vllm_model.model.embed_tokens.weight']", False),
+        ("['vllm_model.model.layers.0.cache_proj.weight']", False),
+    )
+    for name, expected in cases:
+      with self.subTest(name=name):
+        self.assertEqual(weight_utils.is_inference_only_buffer(name), expected)
+        self.assertEqual(weight_utils.is_kv_cache(name), expected)
+
+  def test_filter_bindable_drops_inference_only_buffers_and_non_floating(self):
     names = [
         "layers.0.attention.cache.cached_prefill_key",
+        "['vllm_model.model.layers.3.self_attn.rotary_emb.cos_sin_cache']",
+        "['vllm_model.model.layers.0.hash_indices_table']",
+        "['vllm_model.model.layers.0.routed_experts.tpu_hash_indices_table']",
+        "['vllm_model.model.layers.0.cache_proj.weight']",
         "layers.0.weight",
         "step_counter",
     ]
     arrays = [
         jnp.ones((2, 4), dtype=jnp.float32),
+        jnp.ones((8, 4), dtype=jnp.float32),
+        jnp.ones((4,), dtype=jnp.float32),
+        jnp.ones((4,), dtype=jnp.float32),
+        jnp.ones((2, 4), dtype=jnp.bfloat16),
         jnp.ones((2, 4), dtype=jnp.bfloat16),
         jnp.array([1], dtype=jnp.int32),
     ]
     kept_names, kept_arrays = weight_utils.filter_bindable(names, arrays)
-    self.assertEqual(kept_names, ["layers.0.weight"])
-    self.assertLen(kept_arrays, 1)
+    self.assertEqual(
+        kept_names,
+        [
+            "['vllm_model.model.layers.0.cache_proj.weight']",
+            "layers.0.weight",
+        ],
+    )
+    self.assertLen(kept_arrays, 2)
+
+  def test_filter_bindable_and_apply_to_runner_preserve_vllm_lookup_buffers(
+      self,
+  ):
+    old_embed = jnp.zeros((4, 2), dtype=jnp.float32)
+    old_lm_head = jnp.zeros((4, 2), dtype=jnp.float32)
+    cos_sin_cache = jnp.full((8, 4), 3.0, dtype=jnp.float32)
+    hash_table = jnp.ones((4,), dtype=jnp.int32)
+    state = {
+        "vllm_model.model.embed_tokens.weight": old_embed,
+        "vllm_model.lm_head.weight": old_lm_head,
+        "vllm_model.model.layers.3.self_attn.rotary_emb.cos_sin_cache": (
+            cos_sin_cache
+        ),
+        "vllm_model.model.layers.0.hash_indices_table": hash_table,
+    }
+    runner = _DummyRunner(state)
+    kept_names, _ = weight_utils.filter_bindable(
+        *weight_utils.flatten_weights(runner.state)
+    )
+    self.assertEqual(
+        kept_names,
+        [
+            "['vllm_model.lm_head.weight']",
+            "['vllm_model.model.embed_tokens.weight']",
+        ],
+    )
+
+    new_lm_head = jnp.full((4, 2), 13.0, dtype=jnp.float32)
+    new_embed = jnp.full((4, 2), 11.0, dtype=jnp.float32)
+    weight_utils.apply_to_runner(
+        "rollout",
+        kept_names,
+        [new_lm_head, new_embed],
+        runner,
+        delete_replaced_buffers=True,
+    )
+    self.assertIs(runner.state, state)
+    self.assertIs(runner.state_leaves, state)
+    self.assertIs(runner.state["vllm_model.lm_head.weight"], new_lm_head)
+    self.assertIs(
+        runner.state["vllm_model.model.embed_tokens.weight"], new_embed
+    )
+    self.assertIs(
+        runner.state[
+            "vllm_model.model.layers.3.self_attn.rotary_emb.cos_sin_cache"
+        ],
+        cos_sin_cache,
+    )
+    self.assertFalse(cos_sin_cache.is_deleted())
+    self.assertIs(
+        runner.state["vllm_model.model.layers.0.hash_indices_table"], hash_table
+    )
+    self.assertFalse(hash_table.is_deleted())
+    self.assertTrue(old_embed.is_deleted())
+    self.assertTrue(old_lm_head.is_deleted())
 
   def test_apply_to_state_updates_nnx_variables_and_deletes_old_buffers(self):
     class _Model(nnx.Module):

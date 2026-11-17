@@ -25,7 +25,7 @@ potentially move to a common library.
 """
 
 import collections
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence, Set as AbstractSet
 import dataclasses
 import functools
 import itertools
@@ -600,17 +600,23 @@ class BatchAssembler(Generic[T], Protocol):
       self,
       plan: BatchPlan,
       fetched: Mapping[datatypes.RoutedExpertsRef, np.ndarray],
+      *,
+      failed_refs: AbstractSet[datatypes.RoutedExpertsRef] = frozenset(),
   ) -> AssembledBatch:
     """Materializes a single-use `BatchPlan` with `fetched` routing arrays.
 
     Args:
       plan: Unconsumed `BatchPlan` previously emitted by `plan_next_batch` on
         this same assembler instance during the current `reset()` epoch.
-      fetched: Mapping containing every `RoutedExpertsRef` in `plan.refs`. Each
-        array must match the configured `RoutedExpertsSpec` `(num_layers,
-        top_k)` and wire encoding (`dtype=int16` for `"int16"`, `uint8` for
-        `"uint8"`/`"uint10"`) with logical token length `>= seq_len - 1`, and
-        is sliced to `[:seq_len]`. Extra keys are ignored.
+      fetched: Mapping containing every healthy `RoutedExpertsRef` in `plan.refs
+        - failed_refs`. Each array must match the configured `RoutedExpertsSpec`
+        `(num_layers, top_k)` and wire encoding (`dtype=int16` for `"int16"`,
+        `uint8` for `"uint8"`/`"uint10"`) with logical token length `>= seq_len
+        - 1`, and is sliced to `[:seq_len]`. Extra keys are ignored.
+      failed_refs: Optional set of unrecoverable `RoutedExpertsRef`s whose
+        owning trajectories are masked in place (`completion_mask = 0`,
+        `advantages = 0`, `routed_experts = None` filled with
+        `UNSET_ROUTED_EXPERT`).
 
     Returns:
       Packed `AssembledBatch` with `routed_experts_ref` cleared on the output
@@ -1056,6 +1062,29 @@ def _merge_batch_lineage(
   )
 
 
+def _mask_failed_payload(
+    payload: datatypes.RLTrainerPayload,
+) -> datatypes.RLTrainerPayload:
+  """Zeros completion_mask and advantages and clears routing on `payload`."""
+  mask_src = (
+      payload.completion_mask
+      if payload.completion_mask is not None
+      else payload.completion_ids
+  )
+  adv_src = (
+      payload.advantages
+      if payload.advantages is not None
+      else payload.completion_ids
+  )
+  return dataclasses.replace(
+      payload,
+      completion_mask=np.zeros_like(np.asarray(mask_src, dtype=np.float32)),
+      advantages=np.zeros_like(np.asarray(adv_src, dtype=np.float32)),
+      routed_experts=None,
+      routed_experts_ref=None,
+  )
+
+
 class SequencePackedBatchAssembler:
   """Sequence Packing: Concatenates items into dense `[B, max_packed_len]` buffers."""
 
@@ -1279,6 +1308,8 @@ class SequencePackedBatchAssembler:
       self,
       plan: BatchPlan,
       fetched: Mapping[datatypes.RoutedExpertsRef, np.ndarray],
+      *,
+      failed_refs: AbstractSet[datatypes.RoutedExpertsRef] = frozenset(),
   ) -> AssembledBatch:
     """Materializes a planned chunk; see `BatchAssembler.pack_planned_batch`."""
     state = plan.placement_state
@@ -1306,10 +1337,19 @@ class SequencePackedBatchAssembler:
         ref = payload.routed_experts_ref
         if ref is not None:
           assert spec is not None
-          sliced = _resolve_fetched_routed_experts(
-              ref, fetched, seq_len=pack_item.num_tokens, spec=spec
-          )
-          pack_item = dataclasses.replace(pack_item, routed_experts=sliced)
+          if ref in failed_refs:
+            pack_item = dataclasses.replace(
+                pack_item,
+                completion_mask=np.zeros_like(pack_item.completion_mask),
+                advantages=np.zeros_like(pack_item.advantages),
+                routed_experts=None,
+            )
+            payload = _mask_failed_payload(payload)
+          else:
+            sliced = _resolve_fetched_routed_experts(
+                ref, fetched, seq_len=pack_item.num_tokens, spec=spec
+            )
+            pack_item = dataclasses.replace(pack_item, routed_experts=sliced)
         row_items.append(pack_item)
         placed.append(pack_item)
         traj_ids.append(traj_id)
@@ -1539,6 +1579,8 @@ class PaddedBatchAssembler:
       self,
       plan: BatchPlan,
       fetched: Mapping[datatypes.RoutedExpertsRef, np.ndarray],
+      *,
+      failed_refs: AbstractSet[datatypes.RoutedExpertsRef] = frozenset(),
   ) -> AssembledBatch:
     """Pads a planned chunk; see `BatchAssembler.pack_planned_batch`."""
     state = plan.placement_state
@@ -1561,13 +1603,16 @@ class PaddedBatchAssembler:
       ref = item.routed_experts_ref
       if ref is not None:
         assert spec is not None
-        seq_len = len(item.prompt_ids) + len(item.completion_ids)
-        sliced = _resolve_fetched_routed_experts(
-            ref, fetched, seq_len=seq_len, spec=spec
-        )
-        item = dataclasses.replace(
-            item, routed_experts=sliced, routed_experts_ref=None
-        )
+        if ref in failed_refs:
+          item = _mask_failed_payload(item)
+        else:
+          seq_len = len(item.prompt_ids) + len(item.completion_ids)
+          sliced = _resolve_fetched_routed_experts(
+              ref, fetched, seq_len=seq_len, spec=spec
+          )
+          item = dataclasses.replace(
+              item, routed_experts=sliced, routed_experts_ref=None
+          )
       chunk.append(item)
     state.consumed = True
     payload, padding_stats = self._pack_chunk(chunk)

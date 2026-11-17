@@ -540,8 +540,22 @@ class RolloutWorker(abstract_worker.Worker):
     self._record_round(sync_request, "committed")
     return result
 
-  def fetch_staged(self, ref_ids: Sequence[int]) -> dict[int, np.ndarray]:
-    """Returns staged `routed_experts` arrays for `ref_ids` (Bulk TCP pull)."""
+  def fetch_staged(
+      self,
+      ref_ids: Sequence[int],
+      *,
+      expected_instance_id: str,
+  ) -> dict[int, np.ndarray] | None:
+    """Returns staged `routed_experts` arrays, or `None` on instance mismatch.
+
+    Args:
+      ref_ids: Staged reference IDs requested by the orchestrator.
+      expected_instance_id: Expected `RolloutWorker.instance_id`. When
+        mismatched, returns `None` without forcing initialization so same-port
+        restarts fail over cleanly.
+    """
+    if expected_instance_id != self.instance_id:
+      return None
     self._ensure_initialized()
     return self._staging_buffer.fetch_staged(ref_ids)
 

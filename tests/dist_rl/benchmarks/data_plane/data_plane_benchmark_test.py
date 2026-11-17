@@ -372,6 +372,7 @@ class DataPlaneBenchmarkTest(parameterized.TestCase):
               "service_type": "trainer",
               "service_port": t_port,
               "worker_id": "trainer-0",
+              "instance_id": t_worker.instance_id,
           }),
           rpc_timeout_s=rpc_timeout_s,
       )
@@ -398,6 +399,7 @@ class DataPlaneBenchmarkTest(parameterized.TestCase):
                 "service_type": "rollout",
                 "service_port": r_port,
                 "worker_id": wid,
+                "instance_id": r_worker.instance_id,
             }),
             rpc_timeout_s=rpc_timeout_s,
         )
