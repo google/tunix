@@ -12,17 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for tunix.experimental.examples.deepswe_dist.sandbox_utils."""
+"""Unit tests for DeepSWE Agent Sandbox templates, runtime routing, and fleet."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 import dataclasses
 import hashlib
+import types
 from unittest import mock
 
 from absl.testing import absltest
+from absl.testing import parameterized
 import numpy as np
+from tunix.experimental.examples.deepswe_dist import deepswe
+from tunix.experimental.examples.deepswe_dist import openhands_template
+from tunix.experimental.examples.deepswe_dist import openhands_utils
 from tunix.experimental.examples.deepswe_dist import sandbox_utils
 
 
@@ -50,6 +55,33 @@ class FakeFleetPlan:
 
 
 @dataclasses.dataclass
+class FakeResourceSpec:
+  cpu: str = "250m"
+  memory: str = "512Mi"
+  cpu_limit: str | None = None
+  memory_limit: str | None = None
+
+
+@dataclasses.dataclass
+class FakeTemplateSpec:
+  resources: FakeResourceSpec = dataclasses.field(
+      default_factory=FakeResourceSpec
+  )
+  keepalive_command: list[str] = dataclasses.field(
+      default_factory=lambda: ["sleep", "infinity"]
+  )
+  runtime_class: str | None = None
+  node_selector: dict[str, str] | None = None
+  image_pull_secret: str | None = None
+  image_pull_policy: str = "IfNotPresent"
+  colocate_replicas: bool = False
+  extra_pod_spec: dict[str, object] = dataclasses.field(default_factory=dict)
+  network_policy_management: str | None = None
+  automount_service_account_token: bool = False
+  share_process_namespace: bool = False
+
+
+@dataclasses.dataclass
 class FakeFleetConfig:
   clusters: list[object] = dataclasses.field(default_factory=list)
   max_concurrent: int = 1
@@ -62,7 +94,8 @@ class FakeFleetConfig:
   labels: dict[str, str] = dataclasses.field(
       default_factory=lambda: {"app": "agent-sandbox-rl"}
   )
-  pod_template: dict[str, object] | None = None
+  template: FakeTemplateSpec | None = None
+  ready_timeout: int | None = None
 
 
 @dataclasses.dataclass
@@ -72,6 +105,66 @@ class FakeClusterConfig:
   node_selector: dict[str, str] | None = None
   tolerations: list[dict[str, object]] | None = None
   in_cluster: bool = False
+
+
+@dataclasses.dataclass
+class FakeSandboxHandle:
+  task: FakeTask
+  pod_name: str = "sandbox-pod-0"
+  runtime_container: str = "agent-runtime"
+  target_container: str | None = None
+  _defer_setup_env: bool = False
+
+
+class FakeRuntime:
+  """Typed fake runtime recording container routing per command."""
+
+  def __init__(self, container: str = "agent-runtime"):
+    self._container: str | None = container
+    self._defer_setup_env = False
+    self._handle: FakeSandboxHandle | None = None
+    self.repo_path = "/testbed"
+    self.executed_commands: list[tuple[str | None, str]] = []
+    self.setup_env_containers: list[str | None] = []
+
+  def run(self, cmd: str, timeout: float = 30.0) -> tuple[str, str]:
+    del timeout
+    self.executed_commands.append((self._container, cmd))
+    if "git diff --no-color --cached" in cmd:
+      return (
+          "diff --git a/app.py b/app.py\n"
+          "--- a/app.py\n"
+          "+++ b/app.py\n"
+          "@@ -1 +1 @@\n"
+          "-old\n"
+          "+new\n"
+      ), "0"
+    if "rev-parse HEAD" in cmd:
+      return "deadbeef1234567\n", "0"
+    return "", "0"
+
+  def setup_env(self) -> None:
+    self.setup_env_containers.append(self._container)
+
+
+class FakeRepoEnv:
+  """Typed fake RepoEnv wrapping `FakeRuntime`."""
+
+  def __init__(self, runtime: FakeRuntime):
+    self.runtime = runtime
+    self.entry: dict[str, object] = {}
+
+  def get_task_instruction(self) -> str:
+    return "Fix bug in app.py"
+
+  def reset(self) -> str:
+    return "Environment reset"
+
+  def close(self) -> None:
+    pass
+
+  def compute_reward(self) -> float:
+    return 1.0
 
 
 class FakeSandboxFleet:
@@ -89,6 +182,7 @@ class FakeSandboxFleet:
     self.active_pools: dict[str, int] = {}
     self.preflight_called = False
     self.teardown_hooks_installed = False
+    self.acquired_handles: list[FakeSandboxHandle] = []
 
   def load_tasks(
       self,
@@ -116,6 +210,14 @@ class FakeSandboxFleet:
     ]
     self.plan_ = FakeFleetPlan(entries)
     return self.plan_
+
+  def acquire(self, task: FakeTask) -> FakeSandboxHandle:
+    handle = FakeSandboxHandle(task=task)
+    self.acquired_handles.append(handle)
+    return handle
+
+  def release(self, handle: FakeSandboxHandle) -> None:
+    del handle
 
   def warm_images(
       self,
@@ -165,19 +267,30 @@ class FakeSandboxFleet:
     self.teardown_hooks_installed = True
 
 
+class FakeConstantsModule:
+  TASK_IMAGE_PLACEHOLDER = "{task_image}"
+
+
 class FakeAgentSandboxRLModule:
   Task = FakeTask  # pylint: disable=invalid-name
+  ResourceSpec = FakeResourceSpec  # pylint: disable=invalid-name
+  TemplateSpec = FakeTemplateSpec  # pylint: disable=invalid-name
   FleetConfig = FakeFleetConfig  # pylint: disable=invalid-name
   ClusterConfig = FakeClusterConfig  # pylint: disable=invalid-name
   SandboxFleet = FakeSandboxFleet  # pylint: disable=invalid-name
+  constants = FakeConstantsModule
 
 
-class SandboxUtilsTest(absltest.TestCase):
+class SandboxUtilsTest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
     self._modules_patch = mock.patch.dict(
-        "sys.modules", {"agent_sandbox_rl": FakeAgentSandboxRLModule}
+        "sys.modules",
+        {
+            "agent_sandbox_rl": FakeAgentSandboxRLModule,
+            "agent_sandbox_rl.constants": FakeConstantsModule,
+        },
     )
     self._modules_patch.start()
     self.addCleanup(self._modules_patch.stop)
@@ -209,12 +322,9 @@ class SandboxUtilsTest(absltest.TestCase):
     )
     self.assertEqual(fleet.active_pools, {"img_A": 8, "img_B": 8})
 
-    # Consume batch 0 (p0, p1)
     self.assertEqual(next(iterator)["prompt"], "p0")
     self.assertEqual(next(iterator)["prompt"], "p1")
 
-    # Step 2 transitions batch 0 -> previous, batch 1 -> current,
-    # and batch 2 (img_C: 4) -> next.
     self.assertEqual(next(iterator)["prompt"], "p2")
     self.assertIsNotNone(fleet.plan_.for_image("img_C"))
     self.assertEqual(
@@ -226,7 +336,6 @@ class SandboxUtilsTest(absltest.TestCase):
     )
     self.assertEqual(next(iterator)["prompt"], "p3")
 
-    # Step 4 retires img_A (since max_staleness=0 retains 1 previous batch)
     self.assertEqual(next(iterator)["prompt"], "p4")
     self.assertIn("img_A", fleet.unwarm_calls)
     self.assertEqual(fleet.active_pools, {"img_B": 8, "img_C": 4})
@@ -268,16 +377,16 @@ class SandboxUtilsTest(absltest.TestCase):
     fleet1 = sandbox_utils.init_global_fleet(
         tasks=[{"instance_id": "id_1", "docker_image": "img_1"}],
         num_generations=16,
-        job_id="tsbao-mlperf-35b-orch",
+        job_id="jdoe-mlperf-35b-orch",
         warm_on_init=False,
         teardown_on_exit=False,
     )
-    expected_run_id = hashlib.sha256(
-        b"tsbao-mlperf-35b-orch"
-    ).hexdigest()[:8]
+    expected_run_id = hashlib.sha256(b"jdoe-mlperf-35b-orch").hexdigest()[:8]
     self.assertEqual(fleet1.run_id, expected_run_id)
+    self.assertEqual(fleet1.config.template_name_prefix, "r2e-jdoe-mlperf-35b-")
+    self.assertIsNotNone(fleet1.config.template)
     self.assertEqual(
-        fleet1.config.template_name_prefix, "r2e-tsbao-mlperf-35b-"
+        fleet1.config.template.network_policy_management, "Unmanaged"
     )
     self.assertEqual(
         fleet1.config.labels["agent-sandbox-rl-run"],
@@ -285,7 +394,7 @@ class SandboxUtilsTest(absltest.TestCase):
     )
     self.assertEqual(
         fleet1.config.labels["app.kubernetes.io/created-by"],
-        "tsbao-mlperf-35b-orch",
+        "jdoe-mlperf-35b-orch",
     )
     self.assertIsNotNone(fleet1.plan_)
     self.assertIsNotNone(fleet1.plan_.for_image("img_1"))
@@ -294,12 +403,10 @@ class SandboxUtilsTest(absltest.TestCase):
     self.assertFalse(getattr(fleet1, "_torndown", True))
     self.assertFalse(fleet1.teardown_hooks_installed)
 
-    # Episode 2+ reuses the singleton and registers the new task image in plan_
-    # via load_tasks + plan().
     fleet2 = sandbox_utils.init_global_fleet(
         tasks=[{"instance_id": "id_2", "docker_image": "img_2"}],
         num_generations=16,
-        job_id="tsbao-mlperf-35b-orch",
+        job_id="jdoe-mlperf-35b-orch",
         warm_on_init=False,
         teardown_on_exit=False,
     )
@@ -322,7 +429,7 @@ class SandboxUtilsTest(absltest.TestCase):
       ):
         sandbox_utils.init_global_fleet(
             tasks=[{"instance_id": "id_1", "docker_image": "img_1"}],
-            job_id="tsbao-mlperf-35b-orch",
+            job_id="jdoe-mlperf-35b-orch",
         )
 
   def test_numpy_array_and_nested_metadata_extraction(self):
@@ -345,6 +452,317 @@ class SandboxUtilsTest(absltest.TestCase):
     self.assertEqual(fleet.active_pools.get("array_img_A"), 6)
     self.assertEqual(fleet.active_pools.get("nested_img_B"), 3)
     iterator.close()
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="openhands",
+          scaffold="openhands",
+          expected_container_names=["agent-runtime", "eval"],
+          expect_init_container=True,
+      ),
+      dict(
+          testcase_name="r2egym",
+          scaffold="r2egym",
+          expected_container_names=["agent-runtime", "eval"],
+          expect_init_container=False,
+      ),
+      dict(
+          testcase_name="sweagent",
+          scaffold="sweagent",
+          expected_container_names=["agent-runtime", "eval"],
+          expect_init_container=False,
+      ),
+  )
+  def test_get_template_uses_direct_sdk_fields_and_task_image_sidecar(
+      self,
+      scaffold: str,
+      expected_container_names: list[str],
+      expect_init_container: bool,
+  ):
+    with mock.patch.dict(
+        "os.environ",
+        {"SANDBOX_IMAGE_PULL_POLICY": "Always"},
+        clear=False,
+    ):
+      tmpl = openhands_template.get_template(
+          scaffold,
+          node_selector={"cloud.google.com/gke-nodepool": "sandbox-np"},
+      )
+
+    self.assertIsInstance(tmpl, FakeTemplateSpec)
+    self.assertEqual(tmpl.image_pull_policy, "Always")
+    self.assertEqual(tmpl.network_policy_management, "Unmanaged")
+    self.assertFalse(tmpl.automount_service_account_token)
+    self.assertFalse(tmpl.share_process_namespace)
+    self.assertEqual(tmpl.resources.cpu, "500m")
+    self.assertEqual(tmpl.resources.memory, "1Gi")
+    self.assertEqual(tmpl.resources.cpu_limit, "2")
+    self.assertEqual(tmpl.resources.memory_limit, "4Gi")
+    self.assertNotIn("automountServiceAccountToken", tmpl.extra_pod_spec)
+    self.assertNotIn("shareProcessNamespace", tmpl.extra_pod_spec)
+    self.assertEqual(
+        tmpl.extra_pod_spec["tolerations"],
+        [{
+            "key": "workload",
+            "operator": "Equal",
+            "value": "sandbox",
+            "effect": "NoSchedule",
+        }],
+    )
+
+    containers = tmpl.extra_pod_spec["containers"]
+    self.assertIsInstance(containers, list)
+    self.assertEqual([c["name"] for c in containers], expected_container_names)
+    self.assertEqual(containers[0]["imagePullPolicy"], "Always")
+    self.assertNotIn("resources", containers[0])
+
+    eval_ctr = containers[-1]
+    self.assertEqual(eval_ctr["name"], "eval")
+    self.assertEqual(eval_ctr["image"], "{task_image}")
+    self.assertEqual(eval_ctr["imagePullPolicy"], "Always")
+    self.assertEqual(eval_ctr["command"], ["sleep", "infinity"])
+    self.assertNotIn("volumeMounts", eval_ctr)
+
+    if expect_init_container:
+      init_ctrs = tmpl.extra_pod_spec["initContainers"]
+      self.assertLen(init_ctrs, 1)
+      self.assertEqual(init_ctrs[0]["imagePullPolicy"], "Always")
+    else:
+      self.assertNotIn("initContainers", tmpl.extra_pod_spec)
+
+  def test_get_template_fails_fast_when_sdk_lacks_task_image_placeholder(self):
+    empty_constants = types.ModuleType("agent_sandbox_rl.constants")
+    with mock.patch.dict(
+        "sys.modules", {"agent_sandbox_rl.constants": empty_constants}
+    ):
+      with self.assertRaisesRegex(ImportError, "9afee7039342"):
+        openhands_template.get_template("openhands")
+
+  def test_runtime_container_scope_switches_and_restores_on_error(self):
+    self.assertFalse(hasattr(sandbox_utils, "patch_agent_sandbox_rl_templates"))
+    runtime = FakeRuntime(container=sandbox_utils.RUNTIME_CONTAINER_NAME)
+    env = FakeRepoEnv(runtime=runtime)
+
+    observed_inside: str | None = None
+    with self.assertRaisesRegex(ValueError, "grading error"):
+      with sandbox_utils.runtime_container_scope(
+          env, sandbox_utils.EVAL_CONTAINER_NAME
+      ):
+        observed_inside = runtime._container
+        raise ValueError("grading error")
+
+    self.assertEqual(observed_inside, sandbox_utils.EVAL_CONTAINER_NAME)
+    self.assertEqual(runtime._container, sandbox_utils.RUNTIME_CONTAINER_NAME)
+
+  def test_patch_r2egym_for_agent_sandbox_routes_container_and_defers_setup_env(
+      self,
+  ):
+    class _StubDockerRuntime:
+
+      def __init__(self, backend: str = "docker"):
+        self.backend = backend
+        self.setup_calls = 0
+
+      def _start_kubernetes_sandbox(self) -> str:
+        return "bound-pod"
+
+      def start_container(
+          self, docker_image: str, command: object, ctr_name: str
+      ) -> str:
+        del docker_image, command, ctr_name
+        return "local-docker"
+
+      def setup_env(self) -> str:
+        self.setup_calls += 1
+        return "setup-ok"
+
+    r2egym_pkg = types.ModuleType("r2egym")
+    agenthub_pkg = types.ModuleType("r2egym.agenthub")
+    runtime_pkg = types.ModuleType("r2egym.agenthub.runtime")
+    docker_mod = types.ModuleType("r2egym.agenthub.runtime.docker")
+    docker_mod.DockerRuntime = _StubDockerRuntime
+
+    with mock.patch.dict(
+        "sys.modules",
+        {
+            "r2egym": r2egym_pkg,
+            "r2egym.agenthub": agenthub_pkg,
+            "r2egym.agenthub.runtime": runtime_pkg,
+            "r2egym.agenthub.runtime.docker": docker_mod,
+        },
+    ):
+      sandbox_utils._R2EGYM_PATCHED = False
+      sandbox_utils.patch_r2egym_for_agent_sandbox()
+
+      rt = _StubDockerRuntime(backend="kubernetes-sandbox")
+      self.assertEqual(rt.backend, "kubernetes")
+      handle = FakeSandboxHandle(
+          task=FakeTask(id="t1", image="img:v1", metadata={}),
+          target_container=sandbox_utils.EVAL_CONTAINER_NAME,
+          _defer_setup_env=True,
+      )
+      rt._handle = handle
+      self.assertEqual(
+          rt.start_container("img:v1", ["/bin/bash"], "pod-0"), "bound-pod"
+      )
+      self.assertEqual(rt._container, sandbox_utils.EVAL_CONTAINER_NAME)
+      self.assertIsNone(rt.setup_env())
+      self.assertEqual(rt.setup_calls, 0)
+
+      handle._defer_setup_env = False
+      self.assertEqual(rt.setup_env(), "setup-ok")
+      self.assertEqual(rt.setup_calls, 1)
+
+  def test_evaluate_patch_in_fresh_container_runs_in_eval_and_restores(self):
+    runtime = FakeRuntime(container=sandbox_utils.RUNTIME_CONTAINER_NAME)
+    env = FakeRepoEnv(runtime=runtime)
+    observed_reward_containers: list[str | None] = []
+
+    def _orig_reward() -> float:
+      observed_reward_containers.append(runtime._container)
+      return 1.0
+
+    patch_text = (
+        "diff --git a/app.py b/app.py\n"
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+    reward = openhands_utils.evaluate_patch_in_fresh_container(
+        env, patch_text, _orig_reward
+    )
+
+    self.assertEqual(reward, 1.0)
+    self.assertTrue(
+        all(
+            ctr == sandbox_utils.EVAL_CONTAINER_NAME
+            for ctr, _ in runtime.executed_commands
+        )
+    )
+    self.assertEqual(
+        runtime.setup_env_containers, [sandbox_utils.EVAL_CONTAINER_NAME]
+    )
+    self.assertEqual(
+        observed_reward_containers, [sandbox_utils.EVAL_CONTAINER_NAME]
+    )
+    self.assertEqual(runtime._container, sandbox_utils.RUNTIME_CONTAINER_NAME)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="openhands",
+          scaffold="openhands",
+          expected_env_container="eval",
+          expected_defer_during_init=True,
+      ),
+      dict(
+          testcase_name="r2egym",
+          scaffold="r2egym",
+          expected_env_container="agent-runtime",
+          expected_defer_during_init=False,
+      ),
+  )
+  def test_deepswe_env_agent_sandbox_passes_direct_container_and_grades_in_eval(
+      self,
+      scaffold: str,
+      expected_env_container: str,
+      expected_defer_during_init: bool,
+  ):
+    fleet = FakeSandboxFleet(FakeFleetConfig(max_warmpool_size=2))
+    captured_init: dict[str, object] = {}
+
+    def _fake_make_fleet_repo_env(
+        handle: FakeSandboxHandle,
+        *,
+        command_files: list[str] | None = None,
+        step_timeout: int = 90,
+        reward_timeout: int = 300,
+        verbose: bool = False,
+        container: str | None = None,
+    ) -> FakeRepoEnv:
+      del command_files, step_timeout, reward_timeout, verbose
+      captured_init["container"] = container
+      captured_init["handle_target_container"] = handle.target_container
+      captured_init["defer_setup_env"] = handle._defer_setup_env
+      rt = FakeRuntime(container=container or "agent-runtime")
+      rt._handle = handle
+      return FakeRepoEnv(runtime=rt)
+
+    class _FakeWorkspace:
+
+      def execute_command(
+          self, cmd: str, timeout: float = 60.0
+      ) -> types.SimpleNamespace:
+        del timeout
+        if "git diff --no-color --cached" in cmd:
+          return types.SimpleNamespace(
+              exit_code=0,
+              stdout=(
+                  "diff --git a/app.py b/app.py\n"
+                  "--- a/app.py\n"
+                  "+++ b/app.py\n"
+                  "@@ -1 +1 @@\n"
+                  "-old\n"
+                  "+new\n"
+              ),
+              stderr="",
+          )
+        return types.SimpleNamespace(
+            exit_code=0, stdout="deadbeef1234567\n", stderr=""
+        )
+
+    r2egym_adapter = types.ModuleType("agent_sandbox_rl.adapters.r2egym")
+    r2egym_adapter.make_fleet_repo_env = _fake_make_fleet_repo_env
+    r2egym_adapter.r2egym_command_files = lambda: ["/tools/finish.py"]
+    oh_adapter = types.ModuleType("agent_sandbox_rl.adapters.openhands")
+    oh_adapter.make_handle_workspace = lambda handle, **kw: _FakeWorkspace()
+    adapters_pkg = types.ModuleType("agent_sandbox_rl.adapters")
+    adapters_pkg.r2egym = r2egym_adapter
+    adapters_pkg.openhands = oh_adapter
+
+    with mock.patch.dict(
+        "sys.modules",
+        {
+            "agent_sandbox_rl.adapters": adapters_pkg,
+            "agent_sandbox_rl.adapters.r2egym": r2egym_adapter,
+            "agent_sandbox_rl.adapters.openhands": oh_adapter,
+        },
+    ):
+      env = deepswe.DeepSWEEnv(
+          entry={
+              "instance_id": "inst-1",
+              "docker_image": "repo-img:v1",
+              "problem_statement": "Fix bug in app.py",
+          },
+          scaffold=scaffold,
+          use_agent_sandbox=True,
+          fleet=fleet,
+      )
+      obs, info = env.reset()
+      self.assertEqual(obs, "Fix bug in app.py")
+      if scaffold == "openhands":
+        self.assertEqual(info["base_commit"], "deadbeef1234567")
+
+      self.assertEqual(captured_init["container"], expected_env_container)
+      self.assertEqual(
+          captured_init["handle_target_container"], "agent-runtime"
+      )
+      self.assertEqual(
+          captured_init["defer_setup_env"], expected_defer_during_init
+      )
+      self.assertEqual(env.handle.target_container, "agent-runtime")
+      self.assertFalse(env.handle._defer_setup_env)
+      self.assertEqual(env.env.runtime._container, expected_env_container)
+
+      reward = env.env.compute_reward()
+      self.assertEqual(reward, 1.0)
+      self.assertEqual(
+          env.env.runtime.setup_env_containers,
+          [sandbox_utils.EVAL_CONTAINER_NAME],
+      )
+      self.assertEqual(env.env.runtime._container, expected_env_container)
+      env.close()
 
 
 if __name__ == "__main__":
