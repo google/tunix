@@ -210,6 +210,26 @@ class RaidenSynchronizerTest(absltest.TestCase):
         "w2": jnp.arange(3, dtype=jnp.float32),
     }
 
+  def _flat_vllm_state(self) -> dict[str, jax.Array]:
+    # Hash-table fixtures use float32 so _bindable does not mask the segment
+    # filter (real hash_indices_table buffers are int32).
+    return {
+        "vllm_model.model.embed_tokens.weight": jnp.zeros((4, 2), jnp.float32),
+        "vllm_model.lm_head.weight": jnp.zeros((4, 2), jnp.float32),
+        "vllm_model.model.layers.0.cache_proj.weight": jnp.zeros(
+            (2, 2), jnp.float32
+        ),
+        "vllm_model.model.layers.3.self_attn.rotary_emb.cos_sin_cache": (
+            jnp.full((8, 4), 3.0, dtype=jnp.float32)
+        ),
+        "vllm_model.model.layers.0.hash_indices_table": jnp.ones(
+            (4,), dtype=jnp.float32
+        ),
+        "vllm_model.model.layers.0.routed_experts.tpu_hash_indices_table": (
+            jnp.ones((4, 2), dtype=jnp.float32)
+        ),
+    }
+
   def test_ctor_passes_safety_kwargs(self):
     sync = raiden_synchronizer.RaidenSynchronizer("rollout", self._state())
     ws = self.ws_lib.instances[0]
@@ -1409,6 +1429,19 @@ class RaidenSynchronizerTest(absltest.TestCase):
       raiden_synchronizer._global_shard_indices(
           arr, sharding, devices=[mesh.devices.flat[0], other_dev]
       )
+
+  def test_bind_flat_vllm_dict_drops_inference_only_buffers(self):
+    sync = raiden_synchronizer.RaidenSynchronizer(
+        "rollout", self._flat_vllm_state()
+    )
+    self.assertEqual(
+        sync.names,
+        [
+            "['vllm_model.lm_head.weight']",
+            "['vllm_model.model.embed_tokens.weight']",
+            "['vllm_model.model.layers.0.cache_proj.weight']",
+        ],
+    )
 
 
 if __name__ == "__main__":
