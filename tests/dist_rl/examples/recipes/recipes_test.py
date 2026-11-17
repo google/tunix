@@ -62,6 +62,20 @@ _BENCHMARK_FROZENLAKE_GEMMA4 = launcher_testing.Expected(
     rollout_mesh=(1, 2),
     model_id="google/gemma-4-E2B-it",
 )
+_FROZENLAKE_QWEN3P5 = launcher_testing.Expected(
+    name="frozenlake_qwen3p5_0p8b",
+    script="recipes/frozenlake_qwen3p5_0p8b.sh",
+    example="frozenlake_dist",
+    module="frozenlake",
+    target="local",
+    batch_size=64,
+    mini_batch_size=64,
+    num_generations=8,
+    max_steps=450,
+    actor_mesh=(1, 1),
+    rollout_mesh=(1, 1),
+    model_id="Qwen/Qwen3.5-0.8B",
+)
 # Copybara replaces `k8s_launcher.sh`'s internal default image with
 # `$TUNIX_IMAGE` (`copy.bara.sky`), so the GKE dry runs set one.
 _K8S_IMAGE = "cluster_config.k8s.tunix_image=test-image"
@@ -90,6 +104,7 @@ class RecipesTest(launcher_testing.LauncherTestCase):
           _CI_SMOKE,
           _CI_SMOKE_MAXTEXT,
           _BENCHMARK_FROZENLAKE_GEMMA4,
+          _FROZENLAKE_QWEN3P5,
           _TRELLIS,
       )
   )
@@ -216,6 +231,44 @@ class RecipesTest(launcher_testing.LauncherTestCase):
     self.assertEqual(
         (vllm["max_num_seqs"], vllm["max_num_batched_tokens"]), (512, 32768)
     )
+
+  def test_frozenlake_qwen3p5_0p8b(self):
+    _, hp = self.assert_launcher(_FROZENLAKE_QWEN3P5)
+    for role in ("actor_model_config", "rollout_model_config"):
+      role_cfg = hp.config_mapping(role)
+      self.assertEqual(role_cfg["model_name"], "Qwen3.5-0.8B")
+      self.assertEqual(
+          (role_cfg["dtype"], role_cfg["load_dtype"]),
+          ("bfloat16", "float32"),
+      )
+      self.assertEqual(
+          hp.mesh_axes(role),
+          {"fsdp": 1, "tp": 1, "expert": 1, "dp": 1},
+      )
+    self.assertEqual(hp.config["rollout_engine"], "inprocess_vllm")
+    self.assertEqual(hp.config_mapping("weight_sync_config")["mode"], "raiden")
+    self.assertEqual(hp.config_mapping("vllm_config")["hbm_utilization"], 0.5)
+    rl_train = hp.config_mapping("rl_training_config")
+    self.assertEqual(rl_train["train_micro_batch_size"], 2)
+    self.assertEqual(rl_train["compute_logps_micro_batch_size"], 2)
+    self.assertEqual(rl_train["compute_logps_chunk_size"], 2048)
+    self.assertEqual(
+        rl_train["actor_optimizer_config"]["chain_kwargs"]["max_norm"], 1.0
+    )
+    self.assertEqual(
+        hp.config_mapping("chat_parser_config"),
+        {"type": "auto", "enable_thinking": False},
+    )
+    cluster = hp.config_mapping("cluster_config")
+    self.assertTrue(
+        cluster["artifact_root"].endswith(
+            "/artifacts/qwen3p5_0p8b_dist_frozenlake"
+        )
+    )
+    local = cluster["local"]
+    self.assertEqual(local["trainer_devices"], "0")
+    self.assertEqual(local["rollout_devices"], "1")
+    self.assertEqual(local["tpu_chips_per_host_bounds"], "1,1,1")
 
   def test_trellis(self):
     run, hp = self.assert_launcher(_TRELLIS)

@@ -285,6 +285,7 @@ training_mode: "grpo"
 
 chat_parser_config:
   type: "default"
+  enable_thinking: null
 
 agent_class_path: null
 agent_kwargs: {}
