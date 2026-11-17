@@ -506,6 +506,13 @@ def _run_orchestrator(
       "get_dataset_from_module",
       returns=grain.MapDataset.source([_RECORD]),
   )
+  # The golden data module defines no `prompt_items_context`.
+  recorder.stack.enter_context(
+      mock.patch.dict(
+          sys.modules,
+          {"golden_data_module": types.ModuleType("golden_data_module")},
+      )
+  )
   recorder.patch(
       orchestrator, "run_program", forward_to=orchestrator.run_program
   )
