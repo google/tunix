@@ -38,6 +38,7 @@ dependencies = [
   "pillow",  # Image processing
   "pydantic",  # data modeling and serialization for agent trajectories
   "pylatexenc",  # Eval result parsing
+  "pyarrow>=14.0.0",  # GIL-free GCS I/O for FileTrajectoryStore
   "python-dotenv",  # Huggingface API key
   "perfetto",  # Perfetto trace writer for metrics export
   "qwix>=0.1.6",
