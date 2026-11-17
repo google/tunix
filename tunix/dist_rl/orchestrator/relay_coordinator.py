@@ -95,13 +95,7 @@ def min_retained_policy_version(
 
 
 class RelayCoordinator:
-  """Manages staged `RoutedExpertsRef` fetch, packing, release, and teardown.
-
-  Note: Staged `routed_experts` arrays reside in rollout worker RAM. Under fault
-  tolerance, `fetch_routed_experts` partitions unavailable references into
-  `failed_refs`, and `RelayCoordinator` currently raises `RuntimeError` when
-  `failed_refs` is non-empty.
-  """
+  """Manages staged `RoutedExpertsRef` fetch, masking, packing, and release."""
 
   def __init__(self, *, staging_overcommit_factor: float = 1.0) -> None:
     if (
@@ -117,6 +111,12 @@ class RelayCoordinator:
     self._engine: rl_engine_interface.AbstractRLEngine | None = None
     self._staging_overcommit_factor = float(staging_overcommit_factor)
     self._pending_releases: set[asyncio.Task[None]] = set()
+    self._masked_trajectories_total = 0
+
+  @property
+  def masked_trajectories_total(self) -> int:
+    """Returns cumulative staged trajectories masked in place after worker faults."""
+    return self._masked_trajectories_total
 
   def bind_engine(
       self,
@@ -266,34 +266,38 @@ class RelayCoordinator:
       if plan is None:
         break
       fetched: dict[datatypes.RoutedExpertsRef, np.ndarray] = {}
+      failed_refs: frozenset[datatypes.RoutedExpertsRef] = frozenset()
       try:
         if plan.refs:
           fetch_start = time.monotonic()
           fetch_result = await self._engine.fetch_routed_experts(plan.refs)
           step_times.routed_experts_fetch_time += time.monotonic() - fetch_start
-          if fetch_result.failed_refs:
-            failed_wids = sorted(
-                {r.worker_id for r in fetch_result.failed_refs}
-            )
-            raise RuntimeError(
-                f"Rollout worker {failed_wids[0]!r} was evicted before staged"
-                " routed_experts could be fetched"
-                f" ({len(fetch_result.failed_refs)} failed ref(s) across"
-                f" {failed_wids})."
-            )
           fetched = fetch_result.fetched
+          failed_refs = fetch_result.failed_refs
+          if failed_refs:
+            self._masked_trajectories_total += len(failed_refs)
+            failed_wids = sorted({r.worker_id for r in failed_refs})
+            logging.warning(
+                "Masking %d staged routed_experts ref(s) from evicted or"
+                " restarted rollout worker(s) %s"
+                " (masked_trajectories_total=%d).",
+                len(failed_refs),
+                failed_wids,
+                self._masked_trajectories_total,
+            )
         pack_start = time.perf_counter()
 
         def _pack(
             p: batch_assembly.BatchPlan = plan,
             f: dict[datatypes.RoutedExpertsRef, np.ndarray] = fetched,
+            failed: frozenset[datatypes.RoutedExpertsRef] = failed_refs,
         ) -> batch_assembly.AssembledBatch:
           with lock:
-            return assembler.pack_planned_batch(p, f)
+            return assembler.pack_planned_batch(p, f, failed_refs=failed)
 
         ready = [await asyncio.to_thread(_pack)]
         pack_dt = plan_dt + (time.perf_counter() - pack_start)
-        del fetched, _pack
+        del fetched, failed_refs, _pack
       finally:
         if plan.refs:
           self.enqueue_release(plan.refs)
@@ -308,6 +312,11 @@ class RelayCoordinator:
     """Queries RolloutWorkers and logs aggregated staging buffer watermarks."""
     if self._engine is None:
       return
+    log_fn(
+        "ft/relay/masked_trajectories_total",
+        float(self._masked_trajectories_total),
+        log_step,
+    )
     worker_metrics = await self._engine.get_metrics(role=datatypes.Role.ROLLOUT)
     if not worker_metrics:
       return

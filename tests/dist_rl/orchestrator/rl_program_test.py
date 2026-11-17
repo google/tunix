@@ -8033,7 +8033,7 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_iter_planned_microbatches_raises_and_releases_on_failed_refs(self):
+  def test_iter_planned_microbatches_masks_and_releases_on_failed_refs(self):
     async def _run():
       ref0 = datatypes.RoutedExpertsRef(
           worker_id="w0", instance_id="inst0", ref_id=1
@@ -8081,17 +8081,20 @@ class RLProgramTest(absltest.TestCase):
             routed_experts_ref=ref,
         )
 
-      with self.assertRaisesRegex(
-          RuntimeError,
-          r"Rollout worker 'w1' was evicted before staged routed_experts",
-      ):
-        async for _ in relay.iter_planned_microbatches(
-            assembler=asm,
-            lock=threading.Lock(),
-            payloads=[_item(ref0), _item(ref1)],
-            step_times=step_telemetry.StepTimes(),
-        ):
-          pass
+      emitted = [
+          mb
+          async for mb, _ in relay.iter_planned_microbatches(
+              assembler=asm,
+              lock=threading.Lock(),
+              payloads=[_item(ref0), _item(ref1)],
+              step_times=step_telemetry.StepTimes(),
+          )
+      ]
+      self.assertLen(emitted, 1)
+      self.assertEqual(relay.masked_trajectories_total, 1)
+      np.testing.assert_array_equal(
+          emitted[0].payload.completion_mask[1], np.zeros(4, dtype=np.float32)
+      )
       await relay.flush_releases()
       self.assertEqual(released, [(ref0, ref1)])
 
@@ -8204,6 +8207,140 @@ class RLProgramTest(absltest.TestCase):
           generation_args=datatypes.GenerationArgs(return_routed_experts=True),
           use_routed_experts_relay=True,
       )
+
+  def test_relay_masks_failed_refs_in_place_and_logs_counter(self):
+    async def _run():
+      self.algo_config.routed_experts_encode_mode = "uint8"
+      self.mock_create_trainer_payloads.side_effect = (
+          self._orig_create_trainer_payloads
+      )
+      self.mock_engine.per_token_logps = mock.AsyncMock(
+          return_value=datatypes.LogprobsResponse(
+              per_token_logps=np.full((1, 4), -0.2, dtype=np.float32)
+          )
+      )
+
+      def _make_group(
+          pid: str,
+          batch_idx: int,
+          ref_a: datatypes.RoutedExpertsRef,
+          ref_b: datatypes.RoutedExpertsRef,
+      ) -> list[datatypes.TrajectoryItem]:
+        return [
+            datatypes.TrajectoryItem(
+                prompt_id=pid,
+                group_index=g,
+                traj={
+                    "conversation_text": [
+                        {"role": "user", "content": "q"},
+                        {"role": "assistant", "content": f"a{g}"},
+                    ],
+                    "prompt_tokens": np.array([1, 2], dtype=np.int32),
+                    "conversation_tokens": np.array([3, 4], dtype=np.int32),
+                    "conversation_masks": np.array([1, 1], dtype=np.int32),
+                    "old_logprobs": np.array([-0.2, -0.3], dtype=np.float32),
+                    "trajectory_reward": 2.0 if g == 0 else -2.0,
+                    "status": datatypes.TrajectoryStatus.SUCCEEDED,
+                    "policy_versions": [0],
+                },
+                prompt_tokens=np.array([1, 2], dtype=np.int32),
+                completion_tokens=np.array([3, 4], dtype=np.int32),
+                routed_experts_ref=ref_a if g == 0 else ref_b,
+                metadata={
+                    "prompt_idx": batch_idx,
+                    "batch_idx": batch_idx,
+                    "intra_batch_idx": 0,
+                },
+            )
+            for g in range(2)
+        ]
+
+      arr = np.full((4, 2, 2), 5, dtype=np.uint8)
+      r0_ok = datatypes.RoutedExpertsRef(
+          worker_id="w0", ref_id=10, instance_id="alive"
+      )
+      r0_fail = datatypes.RoutedExpertsRef(
+          worker_id="w1", ref_id=11, instance_id="dead"
+      )
+      r1_fail_a = datatypes.RoutedExpertsRef(
+          worker_id="w1", ref_id=20, instance_id="dead"
+      )
+      r1_fail_b = datatypes.RoutedExpertsRef(
+          worker_id="w1", ref_id=21, instance_id="dead"
+      )
+
+      async def _fetch_side_effect(refs):
+        fetched = {r: arr for r in refs if r == r0_ok}
+        failed = frozenset(r for r in refs if r != r0_ok)
+        return rl_engine_interface.RoutedExpertsFetchResult(
+            fetched=fetched, failed_refs=failed
+        )
+
+      self.mock_engine.fetch_routed_experts.side_effect = _fetch_side_effect
+      _set_mock_poll_batches(
+          self.mock_engine,
+          _make_group("p0", 0, r0_ok, r0_fail),
+          _make_group("p1", 1, r1_fail_a, r1_fail_b),
+          [],
+      )
+
+      batch_cfg = batch_assembly.BatchConfig(
+          mini_batch_size=1,
+          train_micro_batch_size=1,
+          max_seq_tokens_per_device=0,
+          max_prompt_length=4,
+          max_response_length=4,
+      )
+      assembler = batch_assembly.PaddedBatchAssembler(
+          batch_size=1,
+          max_prompt_length=4,
+          max_response_length=4,
+          pad_id=0,
+          num_generations=2,
+          mini_batch_size=1,
+      )
+      program = self._create_program(
+          dataset=["d0", "d1"],
+          max_steps=2,
+          batch_size=1,
+          assembler=assembler,
+          batch_config=batch_cfg,
+          reward_fns=[
+              lambda prompts, completions, **_: [2.0, -2.0][: len(prompts)]
+          ],
+          generation_args=datatypes.GenerationArgs(return_routed_experts=True),
+      )
+      try:
+        await program.run_async(self.mock_engine)
+        self.assertEqual(program.step, 2)
+        self.assertEqual(self.mock_engine.train_step.await_count, 4)
+        mbs = [
+            call.args[0] for call in self.mock_engine.train_step.call_args_list
+        ]
+        # mb0 (`r0_ok`) keeps valid mask/routing; mb1..mb3 are masked in place
+        # with static `(1, 8, 2, 2)` uint8 fallback `routed_experts`!
+        self.assertTrue(np.any(mbs[0].completion_mask > 0))
+        self.assertEqual(mbs[0].routed_experts.shape, (1, 8, 2, 2))
+        for masked_mb in mbs[1:]:
+          np.testing.assert_array_equal(
+              masked_mb.completion_mask, np.zeros((1, 4), dtype=np.float32)
+          )
+          np.testing.assert_array_equal(
+              masked_mb.advantages, np.zeros((1, 4), dtype=np.float32)
+          )
+          np.testing.assert_array_equal(
+              masked_mb.routed_experts, np.zeros((1, 8, 2, 2), dtype=np.uint8)
+          )
+        self.assertEqual(
+            program.metrics_logger.get_metric_history(
+                "ft", "relay/masked_trajectories_total", "train"
+            ).tolist(),
+            [1.0, 3.0],
+        )
+      finally:
+        program.close()
+
+    asyncio.run(_run())
 
 
 def _traj_item(tokens, clipped=None, raw_length=None):

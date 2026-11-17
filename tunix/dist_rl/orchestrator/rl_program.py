@@ -417,10 +417,9 @@ class StandardRLProgram(RLProgram):
   `BatchConfig.max_response_length` and a finite
   `staging_overcommit_factor >= 1.0` (values `> 1.0` relax the strict
   deadlock-free worst-case bound assuming average trajectories are shorter
-  than `max_response_length`). Note that staged refs whose rollout worker is
-  evicted, restarted, or unreachable before fetch are returned in `failed_refs`
-  by `fetch_routed_experts`, which currently causes `RelayCoordinator` to raise
-  `RuntimeError`.
+  than `max_response_length`). When worker fault tolerance is enabled, any
+  staged refs whose rollout worker was evicted or restarted before fetch are
+  masked in place (`completion_mask=0`, `advantages=0`, `routed_experts=None`).
   """
 
   def __init__(

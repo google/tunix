@@ -1452,6 +1452,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     next_policy_version = (
         self._policy_version + 1 if policy_version is None else policy_version
     )
+    # TODO(b/577214994): Wait up to min_active_rollout_grace_s when fault
+    # tolerance is enabled and zero rollout destinations are currently in
+    # ACTIVE or PENDING_WEIGHT_SYNC.
     logging.info(
         "Synchronizing weights (target policy_version=%d)...",
         next_policy_version,
