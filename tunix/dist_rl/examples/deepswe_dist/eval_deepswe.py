@@ -228,7 +228,7 @@ def compact_result(response) -> dict:
   }
 
 
-def summarize(rows: list[dict], expected: int, attempts: int = 1) -> dict:
+def summarize(rows: list[dict[str, object]], expected: int, attempts: int = 1) -> dict[str, object]:
   """Summarizes `expected` tasks with `attempts` attempts each.
 
   Failed and missing attempts count as unresolved. `pass_at_1` is the resolved
