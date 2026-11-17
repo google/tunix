@@ -160,8 +160,11 @@ def _request_id(args: argparse.Namespace, index: int, attempt: int) -> str:
 
 
 def request_fields(
-    args: argparse.Namespace, entry: dict, index: int, attempt: int = 0
-) -> dict:
+    args: argparse.Namespace,
+    entry: dict[str, object],
+    index: int,
+    attempt: int = 0,
+) -> dict[str, object]:
   """Use the same per-trajectory limits as agentic eval; greedy by default."""
   generation_kwargs = {
       "max_generation_steps": args.max_response_length,
@@ -263,8 +266,9 @@ def summarize(rows: list[dict], expected: int, attempts: int = 1) -> dict:
   }
   if attempts > 1:
     # For k equal to the attempts per task, the unbiased Pass@k estimate is the
-    # fraction of tasks with at least one resolved attempt.
-    resolved_tasks = {row["instance_id"] for row in rows if row["reward"] > 0}
+    # fraction of tasks with at least one resolved attempt. Tasks are keyed by
+    # their dataset index, which is unique even when instance ids are not.
+    resolved_tasks = {row["pair_index"] for row in rows if row["reward"] > 0}
     summary["pass_at_k"] = {str(attempts): len(resolved_tasks) / expected}
   return summary
 
@@ -292,7 +296,7 @@ class ResultWriter:
       if self._is_local:
         # Object stores have no directories; creating a bucket path can fail.
         self._fs.makedirs(path.rsplit("/", 1)[0], exist_ok=True)
-      with self._fs.open(path, "w") as stream:
+      with self._fs.open(path, "w", encoding="utf-8") as stream:
         stream.write(text)
 
   def write_json(self, name: str, value: object) -> None:
@@ -302,10 +306,12 @@ class ResultWriter:
         json.dumps(value, ensure_ascii=False, allow_nan=False, indent=2),
     )
 
-  def write_attempt(self, row: dict) -> None:
+  def write_attempt(self, row: dict[str, object]) -> None:
     self.write_json(f"attempts/{row['request_id']}.json", row)
 
-  def write_results(self, rows: list[dict], summary: dict) -> None:
+  def write_results(
+      self, rows: list[dict[str, object]], summary: dict[str, object]
+  ) -> None:
     self._write(f"{self.prefix}.jsonl", "".join(
         json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n"
         for row in rows
@@ -315,8 +321,8 @@ class ResultWriter:
 
 
 def _attempts(
-    jobs: Iterator[tuple[int, dict]], attempts: int
-) -> Iterator[tuple[int, dict, int]]:
+    jobs: Iterator[tuple[int, dict[str, object]]], attempts: int
+) -> Iterator[tuple[int, dict[str, object], int]]:
   """Expands each `(index, entry)` task taken from `jobs` into its attempts."""
   for index, entry in jobs:
     for attempt in range(attempts):
@@ -374,7 +380,7 @@ async def collect_worker(handle, jobs, limit, args, on_result):
       raise TimeoutError("A rollout exceeded its episode and cleanup deadline")
 
 
-async def run_controller(args: argparse.Namespace) -> dict:
+async def run_controller(args: argparse.Namespace) -> dict[str, object]:
   from tunix.dist_rl.worker import remote_execution
 
   entries = load_entries(args)

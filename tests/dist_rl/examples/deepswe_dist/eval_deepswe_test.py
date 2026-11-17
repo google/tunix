@@ -230,16 +230,17 @@ class EvalDeepSWETest(unittest.TestCase):
         eval_deepswe.parse_args(bad)
 
   def test_pass_at_k_counts_failed_and_missing_attempts(self):
-    def row(instance_id, reward, error=None):
+    def row(pair_index, reward, error=None):
       return {
-          "instance_id": instance_id, "reward": reward, "num_steps": 1,
-          "status": "ERROR" if error else "SUCCEEDED",
+          "pair_index": pair_index, "instance_id": "same-id", "reward": reward,
+          "num_steps": 1, "status": "ERROR" if error else "SUCCEEDED",
           "guard_blocked_steps": 0, "guard_reasons": [], "error": error,
       }
 
-    # task-a: 1 of 2 resolved; task-b: 0 of 2 (one failed); task-c: missing.
-    rows = [row("task-a", 1.0), row("task-a", 0.0), row("task-b", 0.0),
-            row("task-b", 0.0, error="sandbox failed")]
+    # Task 0: 1 of 2 resolved; task 1: 0 of 2 (one failed); task 2: missing.
+    # Duplicate instance ids must not merge tasks.
+    rows = [row(0, 1.0), row(0, 0.0), row(1, 0.0),
+            row(1, 0.0, error="sandbox failed")]
 
     summary = eval_deepswe.summarize(rows, 3, attempts=2)
 
@@ -330,7 +331,7 @@ class EvalDeepSWETest(unittest.TestCase):
 
     fake_fs.makedirs.assert_not_called()
     fake_fs.open.assert_called_once_with(
-        "bkt/out/run/attempts/eval_0.json", "w"
+        "bkt/out/run/attempts/eval_0.json", "w", encoding="utf-8"
     )
 
 
