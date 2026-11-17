@@ -204,6 +204,135 @@ class EvalDeepSWETest(unittest.TestCase):
       self.assertEqual(summary["pass_at_1"], 1.0)
       self.assertTrue(results[0].with_suffix(".summary.json").exists())
 
+  def test_sampling_flags_and_validation(self):
+    args = eval_deepswe.parse_args([
+        "--num_rollouts_per_instance", "4", "--temperature", "0.6",
+        "--top_p", "0.95", "--top_k", "20",
+    ])
+    entry = {"instance_id": "task-1", "docker_image": "image-1"}
+
+    request = eval_deepswe.request_fields(args, entry, 3, 2)
+
+    self.assertEqual(request["request_id"], "eval_3_2")
+    self.assertEqual(request["prompt_id"], "eval_3")
+    self.assertEqual(request["group_index"], 2)
+    self.assertEqual(request["generation_kwargs"], {
+        "max_generation_steps": 8192,
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "top_k": 20,
+        "return_logprobs": False,
+    })
+    self.assertEqual(eval_deepswe.model_profile(args)["top_k"], 20)
+    for bad in (["--num_rollouts_per_instance", "0"], ["--temperature", "-1"],
+                ["--top_p", "0"], ["--top_k", "0"]):
+      with self.subTest(bad=bad), self.assertRaises(SystemExit):
+        eval_deepswe.parse_args(bad)
+
+  def test_pass_at_k_counts_failed_and_missing_attempts(self):
+    def row(instance_id, reward, error=None):
+      return {
+          "instance_id": instance_id, "reward": reward, "num_steps": 1,
+          "status": "ERROR" if error else "SUCCEEDED",
+          "guard_blocked_steps": 0, "guard_reasons": [], "error": error,
+      }
+
+    # task-a: 1 of 2 resolved; task-b: 0 of 2 (one failed); task-c: missing.
+    rows = [row("task-a", 1.0), row("task-a", 0.0), row("task-b", 0.0),
+            row("task-b", 0.0, error="sandbox failed")]
+
+    summary = eval_deepswe.summarize(rows, 3, attempts=2)
+
+    self.assertEqual(summary["total_attempts"], 6)
+    self.assertEqual(summary["completed_attempts"], 4)
+    self.assertEqual(summary["pass_at_1"], 1 / 6)
+    self.assertEqual(summary["pass_at_k"], {"2": 1 / 3})
+    self.assertEqual(summary["errors"], 1)
+    self.assertNotIn("pass_at_k", eval_deepswe.summarize(rows, 3))
+
+  def test_each_task_dispatches_all_attempts(self):
+    args = eval_deepswe.parse_args([
+        "--num_rollouts_per_instance", "2", "--max_concurrent", "3",
+    ])
+    entries = [
+        {"instance_id": f"task-{i}", "docker_image": f"image-{i}"}
+        for i in range(2)
+    ]
+
+    class FakeHandle:
+
+      def __init__(self):
+        self.pending = []
+        self.dispatched = []
+
+      async def dispatch_task(self, request_id, method, fields):
+        del method
+        self.pending.append(request_id)
+        self.dispatched.append((request_id, fields["group_index"]))
+        return request_id
+
+      async def poll_responses(self, timeout_s):
+        del timeout_s
+        request_id = self.pending.pop()
+        return SimpleNamespace(
+            request_id=request_id,
+            unwrap=lambda: {
+                "reward": 1.0, "num_steps": 1, "status": "SUCCEEDED",
+                "guard_blocked_steps": 0, "guard_reasons": [], "error": None,
+            },
+        )
+
+    handle = FakeHandle()
+    rows = []
+    asyncio.run(eval_deepswe.collect_worker(
+        handle, iter(enumerate(entries)), 3, args, rows.append
+    ))
+
+    self.assertEqual(sorted(handle.dispatched), [
+        ("eval_0_0", 0), ("eval_0_1", 1), ("eval_1_0", 0), ("eval_1_1", 1),
+    ])
+    self.assertEqual(
+        sorted((row["instance_id"], row["attempt"]) for row in rows),
+        [("task-0", 0), ("task-0", 1), ("task-1", 0), ("task-1", 1)],
+    )
+    self.assertEqual(
+        eval_deepswe.summarize(rows, 2, 2)["pass_at_k"], {"2": 1.0}
+    )
+
+  def test_result_writer_persists_attempts_config_and_summary(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      writer = eval_deepswe.ResultWriter(f"{temp_dir}/out", "run")
+      row = {"request_id": "eval_0_1", "instance_id": "task-0", "reward": 1.0}
+
+      writer.write_json("config.json", {"num_rollouts_per_instance": 2})
+      writer.write_attempt(row)
+      writer.write_results([row], {"pass_at_1": 1.0})
+
+      out = Path(temp_dir) / "out"
+      self.assertEqual(
+          json.loads((out / "run/attempts/eval_0_1.json").read_text()), row
+      )
+      self.assertEqual(
+          json.loads((out / "run/config.json").read_text()),
+          {"num_rollouts_per_instance": 2},
+      )
+      self.assertEqual(json.loads((out / "run.jsonl").read_text()), row)
+      self.assertEqual(
+          json.loads((out / "run.summary.json").read_text()),
+          {"pass_at_1": 1.0},
+      )
+
+  def test_result_writer_skips_makedirs_on_object_stores(self):
+    fake_fs = mock.MagicMock()
+    with mock.patch("fsspec.core.url_to_fs", return_value=(fake_fs, "bkt/out")):
+      writer = eval_deepswe.ResultWriter("gs://bkt/out", "run")
+      writer.write_attempt({"request_id": "eval_0", "reward": 0.0})
+
+    fake_fs.makedirs.assert_not_called()
+    fake_fs.open.assert_called_once_with(
+        "bkt/out/run/attempts/eval_0.json", "w"
+    )
+
 
 if __name__ == "__main__":
   unittest.main()
