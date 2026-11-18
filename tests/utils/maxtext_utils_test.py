@@ -612,7 +612,7 @@ class MaxTextUtilsTest(absltest.TestCase):
     # still works with `enable_checkpointing=False`.
     argv = self._build_config_argv(
         load_parameters_path="gs://bucket/ckpt",
-        checkpointing_options=mock.MagicMock(
+        checkpointing_options=maxtext_utils.CheckpointOptions(
             save_interval_steps=0, max_to_keep=10
         ),
     )
@@ -623,7 +623,7 @@ class MaxTextUtilsTest(absltest.TestCase):
   def test_checkpoint_save_interval_zero_without_restore_disables_saving(self):
     argv = self._build_config_argv(
         load_parameters_path=None,
-        checkpointing_options=mock.MagicMock(
+        checkpointing_options=maxtext_utils.CheckpointOptions(
             save_interval_steps=0, max_to_keep=10
         ),
     )
@@ -648,7 +648,7 @@ class MaxTextUtilsTest(absltest.TestCase):
 
   def test_checkpoint_save_interval_positive_enables_saving(self):
     argv = self._build_config_argv(
-        checkpointing_options=mock.MagicMock(
+        checkpointing_options=maxtext_utils.CheckpointOptions(
             save_interval_steps=5, max_to_keep=3
         ),
     )
@@ -659,7 +659,7 @@ class MaxTextUtilsTest(absltest.TestCase):
   def test_checkpoint_save_interval_negative_raises(self):
     with self.assertRaisesRegex(ValueError, "must be non-negative"):
       self._build_config_argv(
-          checkpointing_options=mock.MagicMock(
+          checkpointing_options=maxtext_utils.CheckpointOptions(
               save_interval_steps=-1, max_to_keep=3
           ),
       )

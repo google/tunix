@@ -723,6 +723,27 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
   @mock.patch.object(
       run_trainer_node.maxtext_utils, "build_maxtext_config", autospec=True
   )
+  def test_create_maxtext_trainer_factory_plumbs_checkpointing_options(
+      self, mock_build_cfg, mock_create_mesh, mock_get_pad_id
+  ):
+    del mock_create_mesh, mock_get_pad_id  # Unused.
+    args = run_trainer_node._parse_args([
+        "--checkpoint_save_interval_steps=5",
+        "--checkpoint_max_to_keep=3",
+    ])
+    run_trainer_node._create_maxtext_trainer_factory(args)
+    self.assertEqual(
+        mock_build_cfg.call_args.kwargs["checkpointing_options"],
+        maxtext_utils.CheckpointOptions(save_interval_steps=5, max_to_keep=3),
+    )
+
+  @mock.patch.object(
+      run_trainer_node.maxtext_utils, "get_tokenizer_pad_id", return_value=0
+  )
+  @mock.patch.object(run_trainer_node.maxtext_utils, "create_maxtext_mesh")
+  @mock.patch.object(
+      run_trainer_node.maxtext_utils, "build_maxtext_config", autospec=True
+  )
   def test_create_maxtext_trainer_factory_plumbs_weight_dtype(
       self, mock_build_cfg, mock_create_mesh, mock_get_pad_id
   ):
