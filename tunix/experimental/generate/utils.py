@@ -16,6 +16,7 @@
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
+import dataclasses
 import math
 from typing import Any
 
@@ -567,3 +568,245 @@ def compute_page_limits(
   max_host_bytes = math.floor(config.max_host_size_gib * _GIB)
   num_host_pages = max_host_bytes // bytes_per_page
   return num_device_pages, num_host_pages
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class CacheGroupSpec:
+  """Per-geometry KV cache group specification for page-budget allocation."""
+
+  element_shape: tuple[int, int, int]
+  num_caches: int
+  window_size: int | None = None
+
+
+def local_window_active_pages_per_seq(
+    *,
+    window_size: int,
+    page_size: int,
+    max_chunked_prefill_length: int = 0,
+    num_scheduler_steps: int = 1,
+) -> int:
+  """Returns the maximum active device pages one sequence holds in a window."""
+  if window_size <= 0:
+    raise ValueError(f"window_size must be positive, got {window_size}.")
+  if page_size <= 0:
+    raise ValueError(f"page_size must be positive, got {page_size}.")
+  if max_chunked_prefill_length < 0:
+    raise ValueError(
+        "max_chunked_prefill_length must be non-negative, got "
+        f"{max_chunked_prefill_length}."
+    )
+  if num_scheduler_steps <= 0:
+    raise ValueError(
+        f"num_scheduler_steps must be positive, got {num_scheduler_steps}."
+    )
+  step_alloc_tokens = max(
+      max_chunked_prefill_length + num_scheduler_steps - 1,
+      2 * num_scheduler_steps - 1,
+  )
+  return cdiv(window_size + step_alloc_tokens, page_size) + 1
+
+
+def local_window_active_pages(
+    *,
+    window_size: int,
+    page_size: int,
+    max_num_seqs: int,
+    max_chunked_prefill_length: int = 0,
+    num_scheduler_steps: int = 1,
+    max_num_batched_tokens: int | None = None,
+) -> int:
+  """Returns worst-case active device pages for a sliding-window group."""
+  if max_num_seqs <= 0:
+    raise ValueError(f"max_num_seqs must be positive, got {max_num_seqs}.")
+  if max_num_batched_tokens is not None and max_num_batched_tokens <= 0:
+    raise ValueError(
+        "max_num_batched_tokens must be positive when set, got "
+        f"{max_num_batched_tokens}."
+    )
+  per_seq = local_window_active_pages_per_seq(
+      window_size=window_size,
+      page_size=page_size,
+      max_chunked_prefill_length=max_chunked_prefill_length,
+      num_scheduler_steps=num_scheduler_steps,
+  )
+  if max_num_batched_tokens is None or max_chunked_prefill_length < 2:
+    return max_num_seqs * per_seq
+
+  decode_pages = cdiv(window_size + 2 * num_scheduler_steps - 1, page_size) + 1
+  max_extra = per_seq - decode_pages
+  if max_extra == 0:
+    return max_num_seqs * decode_pages
+
+  first_extra_tokens = (
+      (decode_pages - 1) * page_size + 2 - window_size - num_scheduler_steps
+  )
+  k_max = min(max_num_seqs, max_num_batched_tokens // first_extra_tokens)
+  if k_max == 0:
+    return max(per_seq, max_num_seqs * decode_pages)
+  k_full = max_num_batched_tokens // (
+      first_extra_tokens + (max_extra - 1) * page_size
+  )
+  candidates = {k for k in (1, k_full, k_full + 1, k_max) if 1 <= k <= k_max}
+  extra = max(
+      k
+      + min(
+          k * (max_extra - 1),
+          (max_num_batched_tokens - k * first_extra_tokens) // page_size,
+      )
+      for k in candidates
+  )
+  return max(
+      per_seq,
+      min(max_num_seqs * per_seq, max_num_seqs * decode_pages + extra),
+  )
+
+
+def compute_group_page_limits(
+    config: configs.CacheConfig,
+    group_specs: Sequence[CacheGroupSpec],
+    sharding: jax.sharding.NamedSharding,
+    *,
+    max_num_seqs: int | None = None,
+    max_chunked_prefill_length: int = 0,
+    num_scheduler_steps: int = 1,
+    max_num_batched_tokens: int | None = None,
+) -> list[tuple[int, int]]:
+  """Calculates per-group `(num_device_pages, num_host_pages)` capacities.
+
+  When `group_specs` mixes global (`window_size is None`) and sliding-window
+  (`window_size is not None`) groups and `max_num_seqs` is set, each
+  sliding-window group is capped at its active-window demand across
+  `max_num_seqs` concurrent sequences and the remaining device and host budget
+  is assigned to global-attention groups. Otherwise all groups share the
+  uniform limit from `compute_page_limits`.
+
+  Args:
+    config: Cache capacity configuration.
+    group_specs: One `CacheGroupSpec` per distinct cache geometry group.
+    sharding: The device sharding shared by every cache group.
+    max_num_seqs: Maximum concurrent running sequences, or `None` for uniform
+      limits across all groups.
+    max_chunked_prefill_length: Maximum chunked prefill length per sequence.
+    num_scheduler_steps: Number of forward steps executed per scheduler step.
+    max_num_batched_tokens: Optional total token budget scheduled per step.
+
+  Returns:
+    A list of `(num_device_pages, num_host_pages)` tuples aligned with
+    `group_specs`.
+
+  Raises:
+    ValueError: If inputs are invalid or `config.max_device_size_gib` cannot
+      hold at least one page per data-parallel replica across all caches.
+  """
+  if not group_specs:
+    raise ValueError("group_specs must not be empty.")
+  for idx, spec in enumerate(group_specs):
+    if spec.num_caches <= 0:
+      raise ValueError(
+          f"group_specs[{idx}].num_caches must be positive, got "
+          f"{spec.num_caches}."
+      )
+    if spec.window_size is not None and spec.window_size <= 0:
+      raise ValueError(
+          f"group_specs[{idx}].window_size must be positive when set, got "
+          f"{spec.window_size}."
+      )
+  if max_num_seqs is not None and max_num_seqs <= 0:
+    raise ValueError(f"max_num_seqs must be positive, got {max_num_seqs}.")
+  if max_chunked_prefill_length < 0:
+    raise ValueError(
+        "max_chunked_prefill_length must be non-negative, got "
+        f"{max_chunked_prefill_length}."
+    )
+  if num_scheduler_steps <= 0:
+    raise ValueError(
+        f"num_scheduler_steps must be positive, got {num_scheduler_steps}."
+    )
+  if max_num_batched_tokens is not None and max_num_batched_tokens <= 0:
+    raise ValueError(
+        "max_num_batched_tokens must be positive when set, got "
+        f"{max_num_batched_tokens}."
+    )
+
+  element_shapes: list[tuple[int, int, int]] = []
+  for spec in group_specs:
+    element_shapes.extend([spec.element_shape] * spec.num_caches)
+  uniform_device_pages, uniform_host_pages = compute_page_limits(
+      config=config, element_shapes=element_shapes, sharding=sharding
+  )
+  global_indices = [
+      i for i, spec in enumerate(group_specs) if spec.window_size is None
+  ]
+  local_indices = [
+      i for i, spec in enumerate(group_specs) if spec.window_size is not None
+  ]
+  if not global_indices or not local_indices or max_num_seqs is None:
+    return [(uniform_device_pages, uniform_host_pages) for _ in group_specs]
+
+  dtype_bytes = jnp.dtype(config.dtype).itemsize
+  dp_axes = kv_cache_dp_axes(sharding.mesh)
+  dp_size = math.prod(sharding.mesh.shape[axis] for axis in dp_axes)
+  uniform_dp_groups = uniform_device_pages // dp_size
+
+  dev_bytes_per_dp_group = [
+      dtype_bytes
+      * spec.num_caches
+      * math.prod(
+          sharding.shard_shape((dp_size, config.page_size, *spec.element_shape))
+      )
+      for spec in group_specs
+  ]
+  host_bytes_per_page = [
+      dtype_bytes
+      * spec.num_caches
+      * config.page_size
+      * math.prod(spec.element_shape)
+      for spec in group_specs
+  ]
+
+  local_dp_groups: dict[int, int] = {}
+  local_host_pages: dict[int, int] = {}
+  for idx in local_indices:
+    window_size = group_specs[idx].window_size
+    assert window_size is not None
+    needed_pages = local_window_active_pages(
+        window_size=window_size,
+        page_size=config.page_size,
+        max_num_seqs=max_num_seqs,
+        max_chunked_prefill_length=max_chunked_prefill_length,
+        num_scheduler_steps=num_scheduler_steps,
+        max_num_batched_tokens=max_num_batched_tokens,
+    )
+    local_dp_groups[idx] = min(cdiv(needed_pages, dp_size), uniform_dp_groups)
+    local_host_pages[idx] = min(needed_pages, uniform_host_pages)
+
+  max_device_bytes = math.floor(config.max_device_size_gib * _GIB)
+  used_local_dev_bytes = sum(
+      local_dp_groups[idx] * dev_bytes_per_dp_group[idx]
+      for idx in local_indices
+  )
+  global_dev_bytes_per_dp_group = sum(
+      dev_bytes_per_dp_group[idx] for idx in global_indices
+  )
+  global_device_pages = (
+      (max_device_bytes - used_local_dev_bytes) // global_dev_bytes_per_dp_group
+  ) * dp_size
+
+  max_host_bytes = math.floor(config.max_host_size_gib * _GIB)
+  used_local_host_bytes = sum(
+      local_host_pages[idx] * host_bytes_per_page[idx] for idx in local_indices
+  )
+  global_host_bytes_per_page = sum(
+      host_bytes_per_page[idx] for idx in global_indices
+  )
+  global_host_pages = (
+      max_host_bytes - used_local_host_bytes
+  ) // global_host_bytes_per_page
+
+  return [
+      (global_device_pages, global_host_pages)
+      if group_specs[idx].window_size is None
+      else (local_dp_groups[idx] * dp_size, local_host_pages[idx])
+      for idx in range(len(group_specs))
+  ]

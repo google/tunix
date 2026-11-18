@@ -49,6 +49,11 @@ Page = single_type_kv_cache_manager.Page
 def _create_kv_cache_group_managers(
     config: configs.CacheConfig,
     cache_geometries: Mapping[str, datatypes.CacheGeometry],
+    *,
+    max_num_seqs: int | None = None,
+    max_chunked_prefill_length: int = 0,
+    num_scheduler_steps: int = 1,
+    max_num_batched_tokens: int | None = None,
 ) -> tuple[Sequence[single_type_kv_cache_manager.SingleTypeKVCacheManager], int]:
   """Creates one `SingleTypeKVCacheManager` per unique cache geometry."""
   if not cache_geometries:
@@ -67,14 +72,27 @@ def _create_kv_cache_group_managers(
       for geometry in caches_by_geometry
   }
   sharding = utils.derive_cache_sharding()
-  num_device_pages, num_host_pages = utils.compute_page_limits(
+  group_page_limits = utils.compute_group_page_limits(
       config=config,
-      element_shapes=[kv_shapes[g] for g in cache_geometries.values()],
+      group_specs=[
+          utils.CacheGroupSpec(
+              element_shape=kv_shapes[geometry],
+              num_caches=len(caches),
+              window_size=geometry.window_size,
+          )
+          for geometry, caches in caches_by_geometry.items()
+      ],
       sharding=sharding,
+      max_num_seqs=max_num_seqs,
+      max_chunked_prefill_length=max_chunked_prefill_length,
+      num_scheduler_steps=num_scheduler_steps,
+      max_num_batched_tokens=max_num_batched_tokens,
   )
 
   managers: list[single_type_kv_cache_manager.SingleTypeKVCacheManager] = []
-  for geometry, caches in caches_by_geometry.items():
+  for (geometry, caches), (num_device_pages, num_host_pages) in zip(
+      caches_by_geometry.items(), group_page_limits, strict=True
+  ):
     page_pool_config = page_pool_lib.TieredPagePoolConfig(
         page_size=config.page_size,
         element_shape=kv_shapes[geometry],
@@ -90,7 +108,15 @@ def _create_kv_cache_group_managers(
             window_size=geometry.window_size,
         )
     )
-  return managers, num_device_pages
+  full_attention_pages = [
+      m.num_device_pages for m in managers if m.window_size is None
+  ]
+  reported_num_device_pages = (
+      min(full_attention_pages)
+      if full_attention_pages
+      else min(m.num_device_pages for m in managers)
+  )
+  return managers, reported_num_device_pages
 
 
 class KVCacheManager:
@@ -100,12 +126,21 @@ class KVCacheManager:
       self,
       config: configs.CacheConfig,
       cache_geometries: Mapping[str, datatypes.CacheGeometry],
+      *,
+      max_num_seqs: int | None = None,
+      max_chunked_prefill_length: int = 0,
+      num_scheduler_steps: int = 1,
+      max_num_batched_tokens: int | None = None,
   ):
     """Initializes the cache.
 
     Args:
       config: Cache configuration.
       cache_geometries: The geometry of each named cache.
+      max_num_seqs: Maximum concurrent running sequences for per-group sizing.
+      max_chunked_prefill_length: Maximum chunked prefill length per sequence.
+      num_scheduler_steps: Number of forward steps executed per scheduler step.
+      max_num_batched_tokens: Optional per-step total token budget.
     """
     self._cache_names = tuple(cache_geometries.keys())
 
@@ -113,7 +148,14 @@ class KVCacheManager:
     self._enable_prefix_caching = config.enable_prefix_caching
     self._request_to_prefix_hashes: dict[str, list[int]] = {}
     self._kv_cache_group_managers, self._num_device_pages = (
-        _create_kv_cache_group_managers(config, cache_geometries)
+        _create_kv_cache_group_managers(
+            config,
+            cache_geometries,
+            max_num_seqs=max_num_seqs,
+            max_chunked_prefill_length=max_chunked_prefill_length,
+            num_scheduler_steps=num_scheduler_steps,
+            max_num_batched_tokens=max_num_batched_tokens,
+        )
     )
 
   @property
@@ -122,8 +164,16 @@ class KVCacheManager:
 
   @property
   def num_device_pages(self) -> int:
-    """The number of device pages per cache."""
+    """The number of device pages per full-attention cache."""
     return self._num_device_pages
+
+  @property
+  def group_device_page_counts(self) -> tuple[tuple[int | None, int, int], ...]:
+    """Per-group `(window_size, num_caches, num_device_pages)` summary."""
+    return tuple(
+        (m.window_size, len(m.cache_names), m.num_device_pages)
+        for m in self._kv_cache_group_managers
+    )
 
   @property
   def cache_names(self) -> tuple[str, ...]:

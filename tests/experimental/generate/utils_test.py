@@ -461,6 +461,297 @@ class CacheSizingTest(parameterized.TestCase):
     # 0.5 * 32 GiB - 4 GiB (deduplicated across shards sharing buf_id) = 12 GiB.
     self.assertEqual(size_gib, 12.0)
 
+  def test_compute_group_page_limits_asymmetric_local_and_global(self):
+    budget_bytes = 59_592_687_616
+    cfg = configs.CacheConfig(
+        max_device_size_gib=budget_bytes / _GIB,
+        max_host_size_gib=0.0,
+        dtype=jnp.bfloat16,
+        page_size=256,
+        enable_prefix_caching=True,
+    )
+    with jax.set_mesh(_create_mesh((4,), ("tp",))):
+      local_shape = utils.derive_kv_geometry(cfg, num_kv_heads=16, head_dim=256)
+      global_shape = utils.derive_kv_geometry(cfg, num_kv_heads=4, head_dim=512)
+      sharding = utils.derive_cache_sharding()
+      specs = (
+          utils.CacheGroupSpec(
+              element_shape=local_shape, num_caches=50, window_size=1024
+          ),
+          utils.CacheGroupSpec(
+              element_shape=global_shape, num_caches=10, window_size=None
+          ),
+      )
+      (local_dev, local_host), (global_dev, global_host) = (
+          utils.compute_group_page_limits(
+              config=cfg,
+              group_specs=specs,
+              sharding=sharding,
+              max_num_seqs=32,
+              max_chunked_prefill_length=1024,
+              num_scheduler_steps=8,
+          )
+      )
+    # Per-sequence active bound = cdiv(1024 + 1024 + 7, 256) + 1 = 10 pages ->
+    # 32 * 10 = 320 local pages, leaving remaining HBM for global attention.
+    self.assertEqual(local_dev, 320)
+    self.assertEqual(local_host, 0)
+    self.assertEqual(global_dev, 8166)
+    self.assertEqual(global_host, 0)
+    total_used_bytes = (
+        local_dev * 50 * 256 * (2 * 16 // 4) * 256 * 2
+        + global_dev * 10 * 256 * (2 * 4 // 4) * 512 * 2
+    )
+    self.assertLessEqual(total_used_bytes, budget_bytes)
+
+  def test_compute_group_page_limits_batched_token_bound(self):
+    cfg = configs.CacheConfig(
+        max_device_size_gib=64.0,
+        max_host_size_gib=0.0,
+        dtype=jnp.bfloat16,
+        page_size=512,
+    )
+    with jax.set_mesh(_create_mesh((4,), ("tp",))):
+      local_shape = utils.derive_kv_geometry(cfg, num_kv_heads=16, head_dim=256)
+      global_shape = utils.derive_kv_geometry(cfg, num_kv_heads=4, head_dim=512)
+      sharding = utils.derive_cache_sharding()
+      specs = (
+          utils.CacheGroupSpec(
+              element_shape=local_shape, num_caches=50, window_size=1024
+          ),
+          utils.CacheGroupSpec(
+              element_shape=global_shape, num_caches=10, window_size=None
+          ),
+      )
+      (local_tight, _), (global_tight, _) = utils.compute_group_page_limits(
+          config=cfg,
+          group_specs=specs,
+          sharding=sharding,
+          max_num_seqs=64,
+          max_chunked_prefill_length=1024,
+          num_scheduler_steps=16,
+          max_num_batched_tokens=4096,
+      )
+      (local_unbounded, _), (global_unbounded, _) = (
+          utils.compute_group_page_limits(
+              config=cfg,
+              group_specs=specs,
+              sharding=sharding,
+              max_num_seqs=64,
+              max_chunked_prefill_length=1024,
+              num_scheduler_steps=16,
+          )
+      )
+    self.assertEqual(local_tight, 264)
+    self.assertEqual(local_unbounded, 384)
+    self.assertGreater(global_tight, global_unbounded)
+
+  def test_local_window_active_pages_zero_extra_and_subthreshold_budget(self):
+    # decode_pages = cdiv(65, 256) + 1 = 2; prefill_pages = cdiv(127, 256) + 1
+    # = 2 -> max_extra == 0.
+    self.assertEqual(
+        utils.local_window_active_pages(
+            window_size=64,
+            page_size=256,
+            max_num_seqs=4,
+            max_chunked_prefill_length=64,
+            num_scheduler_steps=1,
+            max_num_batched_tokens=128,
+        ),
+        8,
+    )
+    # prefill_pages = cdiv(320, 256) + 1 = 3 (max_extra == 1), while
+    # first_extra_tokens = 193 > max_num_batched_tokens = 64 -> k_max == 0.
+    self.assertEqual(
+        utils.local_window_active_pages(
+            window_size=64,
+            page_size=256,
+            max_num_seqs=4,
+            max_chunked_prefill_length=256,
+            num_scheduler_steps=1,
+            max_num_batched_tokens=64,
+        ),
+        8,
+    )
+    self.assertEqual(
+        utils.local_window_active_pages(
+            window_size=64,
+            page_size=256,
+            max_num_seqs=1,
+            max_chunked_prefill_length=256,
+            num_scheduler_steps=1,
+            max_num_batched_tokens=64,
+        ),
+        3,
+    )
+    # Boundary case where per_seq (6) exceeds decode_pages (5) at chunk size 2.
+    self.assertEqual(
+        utils.local_window_active_pages(
+            window_size=15,
+            page_size=4,
+            max_num_seqs=1,
+            max_chunked_prefill_length=2,
+            num_scheduler_steps=1,
+            max_num_batched_tokens=100,
+        ),
+        utils.local_window_active_pages_per_seq(
+            window_size=15,
+            page_size=4,
+            max_chunked_prefill_length=2,
+            num_scheduler_steps=1,
+        ),
+    )
+    # Exact threshold where two 2-token prefills fit in a 4-token budget.
+    self.assertEqual(
+        utils.local_window_active_pages(
+            window_size=15,
+            page_size=4,
+            max_num_seqs=2,
+            max_chunked_prefill_length=2,
+            num_scheduler_steps=1,
+            max_num_batched_tokens=4,
+        ),
+        12,
+    )
+    # Multi-step decode dominates when chunked prefill is disabled (7 > 3).
+    self.assertEqual(
+        utils.local_window_active_pages_per_seq(
+            window_size=8,
+            page_size=4,
+            max_chunked_prefill_length=0,
+            num_scheduler_steps=4,
+        ),
+        5,
+    )
+
+  def test_compute_group_page_limits_uniform_fallbacks_and_dp_alignment(self):
+    page_bytes = 32 * 1024
+    dp_group_bytes = 16 * 1024
+    with jax.set_mesh(_create_mesh((2, 2), ("dp", "tp"))):
+      cfg = configs.CacheConfig(
+          max_device_size_gib=(40 * page_bytes) / _GIB,
+          max_host_size_gib=(20 * page_bytes) / _GIB,
+          dtype=jnp.bfloat16,
+          page_size=16,
+      )
+      elem = utils.derive_kv_geometry(cfg, num_kv_heads=8, head_dim=64)
+      sharding = utils.derive_cache_sharding()
+      specs = (
+          utils.CacheGroupSpec(
+              element_shape=elem, num_caches=1, window_size=16
+          ),
+          utils.CacheGroupSpec(
+              element_shape=elem, num_caches=1, window_size=None
+          ),
+      )
+      tight_budget_bytes = 40 * dp_group_bytes - 1
+      tight_cfg = configs.CacheConfig(
+          max_device_size_gib=tight_budget_bytes / _GIB,
+          max_host_size_gib=0.0,
+          dtype=jnp.bfloat16,
+          page_size=16,
+      )
+      (tight_local, _), (tight_global, _) = utils.compute_group_page_limits(
+          config=tight_cfg,
+          group_specs=specs,
+          sharding=sharding,
+          max_num_seqs=2,
+          max_chunked_prefill_length=16,
+          num_scheduler_steps=1,
+      )
+      self.assertEqual((tight_local + tight_global) // 2, 39)
+      self.assertLessEqual(
+          ((tight_local + tight_global) // 2) * dp_group_bytes,
+          tight_budget_bytes,
+      )
+      uniform_dev, uniform_host = utils.compute_page_limits(
+          config=cfg, element_shapes=(elem, elem), sharding=sharding
+      )
+      self.assertEqual(
+          utils.compute_group_page_limits(
+              config=cfg, group_specs=specs, sharding=sharding
+          ),
+          [(uniform_dev, uniform_host), (uniform_dev, uniform_host)],
+      )
+      (local_dev, local_host), (global_dev, global_host) = (
+          utils.compute_group_page_limits(
+              config=cfg,
+              group_specs=specs,
+              sharding=sharding,
+              max_num_seqs=2,
+              max_chunked_prefill_length=16,
+              num_scheduler_steps=1,
+          )
+      )
+      self.assertEqual(local_dev % 2, 0)
+      self.assertEqual(global_dev % 2, 0)
+      self.assertLess(local_dev, uniform_dev)
+      self.assertGreater(global_dev, uniform_dev)
+      self.assertLessEqual(local_host, uniform_host)
+      self.assertGreaterEqual(global_host, uniform_host)
+      self.assertEqual(
+          utils.compute_group_page_limits(
+              config=cfg,
+              group_specs=specs,
+              sharding=sharding,
+              max_num_seqs=1000,
+              max_chunked_prefill_length=16,
+              num_scheduler_steps=1,
+          ),
+          [(uniform_dev, uniform_host), (uniform_dev, uniform_host)],
+      )
+
+  def test_compute_group_page_limits_invalid_inputs_raises(self):
+    cfg = configs.CacheConfig(
+        max_device_size_gib=1.0, dtype=jnp.bfloat16, page_size=16
+    )
+    with jax.set_mesh(_create_mesh()):
+      elem = utils.derive_kv_geometry(cfg, num_kv_heads=8, head_dim=64)
+      sharding = utils.derive_cache_sharding()
+      with self.assertRaisesRegex(ValueError, "group_specs must not be empty"):
+        utils.compute_group_page_limits(
+            config=cfg, group_specs=(), sharding=sharding
+        )
+      with self.assertRaisesRegex(ValueError, "num_caches must be positive"):
+        utils.compute_group_page_limits(
+            config=cfg,
+            group_specs=(
+                utils.CacheGroupSpec(element_shape=elem, num_caches=0),
+            ),
+            sharding=sharding,
+        )
+      with self.assertRaisesRegex(ValueError, "window_size must be positive"):
+        utils.compute_group_page_limits(
+            config=cfg,
+            group_specs=(
+                utils.CacheGroupSpec(
+                    element_shape=elem, num_caches=1, window_size=0
+                ),
+            ),
+            sharding=sharding,
+        )
+      with self.assertRaisesRegex(ValueError, "max_num_seqs must be positive"):
+        utils.compute_group_page_limits(
+            config=cfg,
+            group_specs=(
+                utils.CacheGroupSpec(element_shape=elem, num_caches=1),
+            ),
+            sharding=sharding,
+            max_num_seqs=0,
+        )
+      with self.assertRaisesRegex(
+          ValueError, "max_num_batched_tokens must be positive"
+      ):
+        utils.compute_group_page_limits(
+            config=cfg,
+            group_specs=(
+                utils.CacheGroupSpec(element_shape=elem, num_caches=1),
+            ),
+            sharding=sharding,
+            max_num_seqs=4,
+            max_num_batched_tokens=0,
+        )
+
 
 class ConfigAndSamplingParamsTest(parameterized.TestCase):
 
