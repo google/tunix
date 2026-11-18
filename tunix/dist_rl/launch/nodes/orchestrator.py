@@ -50,6 +50,7 @@ import contextlib
 import dataclasses
 import importlib
 import logging
+import os
 import pickle
 import signal
 import symtable
@@ -822,6 +823,10 @@ def main(
   prompt_items_context = load_prompt_items_context(hp)
   pad_id, eos_id = node_utils.pad_and_eos_ids(node_utils.load_hf_tokenizer(hp))
 
+  if _weight_sync_mode(hp) == weight_sync.WeightSyncMode.ICI:
+    # Read by `weight_sync_coordinator.create_default_handler`.
+    chunk_gb = hp.config_mapping("weight_sync_config")["ici_chunk_gb"]
+    os.environ["ICI_CHUNK_BYTES"] = str(int(float(chunk_gb) * 2**30))
   cluster = create_cluster(hp, weight_sync_timeouts=weight_sync_timeouts)
   stop_workers_on_exit = bool(
       hp.config_mapping("cluster_config")["stop_workers_on_exit"]

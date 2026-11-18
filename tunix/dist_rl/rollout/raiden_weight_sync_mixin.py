@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -26,11 +27,26 @@ from tunix.dist_rl.weight_sync import weight_sync
 
 
 class RaidenDestinationWeightSyncMixin:
-  """Mixin providing destination-side weight sync hooks for samplers."""
+  """Mixin providing destination-side weight sync hooks for samplers.
+
+  Drives whichever transport delegate the sampler enabled: Raiden
+  (`enable_raiden` / `raiden_sync_delegate`) or ICI (`enable_ici` /
+  `ici_sync_delegate`). The two delegates expose the same phase methods.
+  """
 
   server_id: str
   enable_raiden: bool
   raiden_sync_delegate: Any
+  enable_ici: bool = False
+  ici_sync_delegate: Any = None
+
+  def _transport_delegate(self) -> Any:
+    """The enabled transport delegate, or None for the in-memory fallback."""
+    if self.enable_ici:
+      return self.ici_sync_delegate
+    if self.enable_raiden:
+      return self.raiden_sync_delegate
+    return None
 
   def _get_underlying_sampler(self) -> Any:
     return (
@@ -40,11 +56,12 @@ class RaidenDestinationWeightSyncMixin:
     )
 
   def _check_weight_sync_boundness(self) -> None:
-    """Verifies that the Raiden delegate has been bound before executing sync phases."""
-    if not self.enable_raiden:
+    """Verifies that the transport delegate has been bound before executing sync phases."""
+    delegate = self._transport_delegate()
+    if delegate is None:
       return
 
-    if not self.raiden_sync_delegate.is_bounded():
+    if not delegate.is_bounded():
       raise RuntimeError(
           f"{self.__class__.__name__} [{self.server_id}] weight sync delegate"
           " is not bounded."
@@ -54,12 +71,13 @@ class RaidenDestinationWeightSyncMixin:
     """Returns sharding specs and layout metadata across devices for weights."""
     self._check_weight_sync_boundness()
 
-    if self.enable_raiden:
-      return await self.raiden_sync_delegate.get_weight_sync_metadata(**kwargs)
+    delegate = self._transport_delegate()
+    if delegate is not None:
+      return await delegate.get_weight_sync_metadata(**kwargs)
 
     raise NotImplementedError(
         f"{self.__class__.__name__} [{self.server_id}] does not support"
-        " get_weight_sync_metadata when Raiden is disabled."
+        " get_weight_sync_metadata without a Raiden or ICI transport."
     )
 
   async def bind_weight_sync(
@@ -68,22 +86,41 @@ class RaidenDestinationWeightSyncMixin:
       **kwargs,
   ) -> Any:
     """Binds destination-side transport resources for weight transfer."""
-    if self.enable_raiden:
+    delegate = self._transport_delegate()
+    if delegate is not None:
       sampler = self._get_underlying_sampler()
       if sampler is None or not hasattr(sampler, "transformer_state"):
         raise RuntimeError(
             f"{self.__class__.__name__} [{self.server_id}] sampler does not"
-            " expose transformer_state for Raiden weight sync."
+            " expose transformer_state for weight sync."
         )
 
-      if self.raiden_sync_delegate.is_bounded():
+      if delegate.is_bounded():
         return True
 
       state = sampler.transformer_state
-      return await self.raiden_sync_delegate.bind_weight_sync(
+      return await delegate.bind_weight_sync(
           sync_request=sync_request, state=state, sampler=sampler, **kwargs
       )
     return None
+
+  def _require_ici_delegate(self) -> Any:
+    if not self.enable_ici or self.ici_sync_delegate is None:
+      raise RuntimeError(
+          f"{self.__class__.__name__} [{self.server_id}] is not running ICI"
+          " weight sync (weight_sync_config.mode: ici)."
+      )
+    return self.ici_sync_delegate
+
+  async def ici_check(self, request: Any) -> Any:
+    """Validates this sampler's part of an ICI transfer plan (no collectives)."""
+    return await asyncio.to_thread(self._require_ici_delegate().check, request)
+
+  async def ici_transfer(self, request: Any) -> Any:
+    """Enters the ICI transfer collectives; blocks until the plan is done."""
+    return await asyncio.to_thread(
+        self._require_ici_delegate().transfer, request
+    )
 
   def get_target_state(self) -> Any:
     """Returns target state shape/dtype pytree for weight conversion."""
@@ -142,10 +179,9 @@ class RaidenDestinationWeightSyncMixin:
     if partial_rollout:
       kwargs.setdefault("partial_rollout", True)
 
-    if self.enable_raiden:
-      return await self.raiden_sync_delegate.pre_weight_sync(
-          sync_request=sync_request, **kwargs
-      )
+    delegate = self._transport_delegate()
+    if delegate is not None:
+      return await delegate.pre_weight_sync(sync_request=sync_request, **kwargs)
     return True
 
   async def weight_sync(
@@ -156,10 +192,9 @@ class RaidenDestinationWeightSyncMixin:
     """Updates model weights in-place from the specified controller or request."""
     self._check_weight_sync_boundness()
 
-    if self.enable_raiden:
-      return await self.raiden_sync_delegate.weight_sync(
-          sync_request=sync_request, **kwargs
-      )
+    delegate = self._transport_delegate()
+    if delegate is not None:
+      return await delegate.weight_sync(sync_request=sync_request, **kwargs)
     else:
       if sync_request is None:
         raise ValueError(
@@ -190,8 +225,9 @@ class RaidenDestinationWeightSyncMixin:
   ) -> str | None | Any:
     """Finalizes and switches active policy weights after transfer completion."""
     try:
-      if self.enable_raiden:
-        return await self.raiden_sync_delegate.post_weight_sync(
+      delegate = self._transport_delegate()
+      if delegate is not None:
+        return await delegate.post_weight_sync(
             sync_request=sync_request, **kwargs
         )
       return True
@@ -205,8 +241,9 @@ class RaidenDestinationWeightSyncMixin:
   ) -> str | None | Any:
     """Safely aborts weight sync round."""
     try:
-      if self.enable_raiden and self.raiden_sync_delegate is not None:
-        return await self.raiden_sync_delegate.abort_weight_sync(
+      delegate = self._transport_delegate()
+      if delegate is not None:
+        return await delegate.abort_weight_sync(
             sync_request=sync_request, **kwargs
         )
       return True
@@ -215,6 +252,7 @@ class RaidenDestinationWeightSyncMixin:
 
   async def get_weight_sync_status(self) -> Any:
     """Reports worker-side round status for coordinator recovery checks."""
-    if self.enable_raiden and self.raiden_sync_delegate is not None:
-      return self.raiden_sync_delegate.get_weight_sync_status()
+    delegate = self._transport_delegate()
+    if delegate is not None:
+      return delegate.get_weight_sync_status()
     return {}

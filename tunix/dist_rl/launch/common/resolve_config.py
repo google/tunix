@@ -752,6 +752,7 @@ PROCESS_ROLES: Final[tuple[ProcessRole, ...]] = (
 # and the config key each comes from. Launchers reject them in user-supplied
 # environments so a value can only come from the config.
 LIBRARY_ENV_CONFIG_KEYS: Final[Mapping[str, str]] = types.MappingProxyType({
+    "ICI_DROP_OLD_WEIGHTS": "weight_sync_config.ici_drop_old_weights",
     "SKIP_JAX_PRECOMPILE": "vllm_config.skip_jax_precompile",
     "TPU_RAIDEN_DATA_NICS": "weight_sync_config.raiden_data_nics",
     "VERIFY_WEIGHTS": "weight_sync_config.verify_weights",
@@ -976,6 +977,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   _validate_maxtext_extra_config(hp)
   _validate_maxtext_skip_step_kwargs(hp)
   _validate_rollout_weights(hp)
+  _validate_ici_weight_sync(hp)
   _validate_library_settings(hp)
   if grpo["reward_mode"] == "reward_fn" and not hp.config["reward_functions"]:
     raise ValueError(
@@ -1056,6 +1058,58 @@ def _validate_maxtext_pairing(hp: cli_config.HyperParameters) -> None:
     )
 
 
+# Modes that move the trainer's weights into the rollout over a transport the
+# coordinator drives, so a rollout may start without real weights.
+_TRANSPORT_WEIGHT_SYNC_MODES: Final[frozenset[str]] = frozenset({
+    common_datatypes.WeightSyncMode.RAIDEN.value,
+    common_datatypes.WeightSyncMode.ICI.value,
+})
+
+
+def _validate_ici_weight_sync(hp: cli_config.HyperParameters) -> None:
+  """Rejects configurations ICI weight sync cannot serve.
+
+  ICI weight sync moves device arrays between processes of one JAX world with
+  collectives, so both ends must hold their weights in a JAX process the
+  coordinator can call: the Tunix trainer and an in-process rollout engine.
+
+  Args:
+    hp: Loaded configuration.
+
+  Raises:
+    TypeError: If `weight_sync_config.ici_chunk_gb` is not a number.
+    ValueError: If `weight_sync_config.mode` is "ici" with a MaxText trainer,
+      with `rollout_engine: vllm`, or with a non-positive
+      `weight_sync_config.ici_chunk_gb`.
+  """
+  ws = hp.config_mapping("weight_sync_config")
+  chunk_gb = ws["ici_chunk_gb"]
+  if isinstance(chunk_gb, bool) or not isinstance(chunk_gb, (int, float)):
+    raise TypeError(
+        f"weight_sync_config.ici_chunk_gb must be a number, got {chunk_gb!r}."
+    )
+  if chunk_gb <= 0:
+    raise ValueError(
+        f"weight_sync_config.ici_chunk_gb must be positive, got {chunk_gb!r}."
+    )
+  if ws["mode"] != common_datatypes.WeightSyncMode.ICI.value:
+    return
+  if hp.config_mapping("actor_model_config")["model_source"] == "maxtext":
+    raise ValueError(
+        "weight_sync_config.mode=ici is not supported with a MaxText trainer"
+        " (actor_model_config.model_source='maxtext') yet: the MaxText"
+        " training engine has no ICI source. Use the Tunix trainer or"
+        " weight_sync_config.mode=raiden."
+    )
+  rollout_engine = hp.config["rollout_engine"]
+  if rollout_engine not in ("inprocess_vllm", "vanilla"):
+    raise ValueError(
+        "weight_sync_config.mode=ici needs the rollout weights in the rollout"
+        " worker's own JAX process (rollout_engine 'inprocess_vllm' or"
+        f" 'vanilla'), got rollout_engine={rollout_engine!r}."
+    )
+
+
 def rollout_init_with_random_weights(hp: cli_config.HyperParameters) -> bool:
   """Returns the effective `vllm_config.init_with_random_weights`.
 
@@ -1069,7 +1123,7 @@ def rollout_init_with_random_weights(hp: cli_config.HyperParameters) -> bool:
 
   Returns:
     `vllm_config.init_with_random_weights`, or, when it is null, whether
-    `weight_sync_config.mode` is "raiden".
+    `weight_sync_config.mode` is "raiden" or "ici".
 
   Raises:
     TypeError: If `vllm_config.init_with_random_weights` is not a bool or null.
@@ -1077,7 +1131,7 @@ def rollout_init_with_random_weights(hp: cli_config.HyperParameters) -> bool:
   value = hp.config_mapping("vllm_config")["init_with_random_weights"]
   if value is None:
     mode = hp.config_mapping("weight_sync_config")["mode"]
-    return mode == common_datatypes.WeightSyncMode.RAIDEN.value
+    return mode in _TRANSPORT_WEIGHT_SYNC_MODES
   if not isinstance(value, bool):
     raise TypeError(
         "vllm_config.init_with_random_weights must be a bool or null, got"
@@ -1106,7 +1160,7 @@ def _validate_rollout_weights(hp: cli_config.HyperParameters) -> None:
   """
   random_init = rollout_init_with_random_weights(hp)
   mode = hp.config_mapping("weight_sync_config")["mode"]
-  if mode == common_datatypes.WeightSyncMode.RAIDEN.value:
+  if mode in _TRANSPORT_WEIGHT_SYNC_MODES:
     return
   rollout_engine = hp.config["rollout_engine"]
   rollout_source = hp.config_mapping("rollout_model_config")["model_source"]
@@ -1465,6 +1519,7 @@ def _check_choice(key: str, value: object, choices: Sequence[str]) -> None:
 # (`node_utils.apply_library_env`), as (section, key).
 _LIBRARY_BOOL_SETTINGS = (
     ("weight_sync_config", "verify_weights"),
+    ("weight_sync_config", "ici_drop_old_weights"),
     ("vllm_config", "skip_jax_precompile"),
 )
 

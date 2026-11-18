@@ -339,8 +339,13 @@ dist_training_config:
   trajectory_log_dir: ""
 
 weight_sync_config:
-  # Weight synchronization transport mode ("none", "in_memory", "raiden", "fs",
-  # or "nccl"). "fs" selects disaggregated file/object-store staged weight sync,
+  # Weight synchronization transport mode ("none", "in_memory", "raiden", "ici",
+  # "fs", or "nccl"). "ici" moves weights device-to-device with JAX collectives
+  # over the TPU interconnect; it needs the trainer and every rollout replica
+  # to be processes of ONE multi-process JAX world on one TPU slice, each
+  # owning the same number of chips, the Tunix trainer, and `rollout_engine`
+  # "inprocess_vllm" or "vanilla" (see `weight_sync/ici_transport.py`).
+  # "fs" selects disaggregated file/object-store staged weight sync,
   # orthogonal to checkpoint serialization format ("orbax" vs "safetensors") and
   # storage backend ("gcs" gs://, "GOOGLE_INTERNAL_STOAGE_PATH" /GOOGLE_INTERNAL_STOAGE_PATH/, or "local" POSIX paths via epath).
   mode: "none"
@@ -356,6 +361,17 @@ weight_sync_config:
   # The trainer and rollout nodes set `TPU_RAIDEN_DATA_NICS` from it when it is
   # not empty.
   raiden_data_nics: "eth0"
+  # `mode: "ici"` only. False keeps the serving weights until the new ones have
+  # fully arrived, so a failed round rolls back; it needs device memory for two
+  # copies of the rollout weights. True frees each chunk of serving weights
+  # right before its replacement arrives (peak: one copy plus one chunk), at
+  # the price that a round failing mid-transfer leaves the rollout without
+  # usable weights until it restarts. The rollout nodes set
+  # `ICI_DROP_OLD_WEIGHTS` from it.
+  ici_drop_old_weights: false
+  # `mode: "ici"` only. Upper bound, in GiB of weights, on what one collective
+  # moves; it bounds the scratch device memory of a sync on every process.
+  ici_chunk_gb: 2
 
 trajectory_store_config:
   enable: false

@@ -249,7 +249,7 @@ class ClusterOrchestrator:
           self._weight_sync_handler
           if self._weight_sync_handler is not None
           else weight_sync_coordinator.create_default_handler(
-              mode=self._weight_sync_mode
+              mode=self._weight_sync_mode, registry=self.registry
           )
       )
       coordinator = weight_sync_coordinator.WeightSyncCoordinator(

@@ -275,6 +275,28 @@ class AbstractTrainer(abc.ABC):
     del sync_request
     return None
 
+  def ici_check(self, request: Any) -> Any:
+    """Validates this trainer's part of an ICI weight transfer plan.
+
+    Called on every candidate participant before any of them enters a
+    collective. Must not run collectives itself.
+
+    Args:
+      request: `{"plan": ici_transport.TransferPlan, "req_id", "generation"}`.
+
+    Returns:
+      `{"process": jax.process_index(), "participant": bool}`.
+    """
+    raise NotImplementedError(
+        f"{type(self).__name__} does not implement ICI weight sync."
+    )
+
+  def ici_transfer(self, request: Any) -> Any:
+    """Runs this trainer's part of an ICI weight transfer; returns timings."""
+    raise NotImplementedError(
+        f"{type(self).__name__} does not implement ICI weight sync."
+    )
+
   @abc.abstractmethod
   def get_metrics(self) -> datatypes.MetricsBuffer:
     """Returns and clears the recently collected step metric records."""

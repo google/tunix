@@ -596,6 +596,16 @@ class RolloutWorker(abstract_worker.Worker):
     self._ensure_initialized()
     return await self.manager.get_weight_sync_metadata(**kwargs)
 
+  async def ici_check(self, request: Any) -> Any:
+    """Validates this worker's part of an ICI transfer plan (no collectives)."""
+    self._ensure_initialized()
+    return await self.manager.ici_check(request)
+
+  async def ici_transfer(self, request: Any) -> Any:
+    """Enters the ICI transfer collectives as a destination."""
+    self._ensure_initialized()
+    return await self.manager.ici_transfer(request)
+
   async def abort_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Discards the round and resumes serving the previous weights."""
     res = await self.manager.abort_weight_sync(sync_request, **kwargs)

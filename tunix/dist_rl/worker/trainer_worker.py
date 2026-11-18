@@ -556,6 +556,22 @@ class TrainerWorker(abstract_worker.Worker):
       raise
 
   @abstract_worker.offload_to_thread
+  def ici_check(self, request: Any) -> Any:
+    """Validates this trainer's part of an ICI transfer plan (no collectives)."""
+    # Not `_ensure_ready()`: this runs between `prepare_weight_sync` and
+    # `release_weight_sync`, while the state is SYNCING.
+    if self._trainer is None:
+      raise RuntimeError("TrainerWorker is not initialized.")
+    return self._trainer.ici_check(request)
+
+  @abstract_worker.offload_to_thread
+  def ici_transfer(self, request: Any) -> Any:
+    """Enters the ICI transfer collectives as the source."""
+    if self._trainer is None:
+      raise RuntimeError("TrainerWorker is not initialized.")
+    return self._trainer.ici_transfer(request)
+
+  @abstract_worker.offload_to_thread
   def release_weight_sync(self, sync_request: Any = None) -> Any:
     """Releases this round's staging and restores READY."""
     # Not `_ensure_ready()`: `prepare_weight_sync` left the state at SYNCING,

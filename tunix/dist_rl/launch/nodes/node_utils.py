@@ -143,6 +143,10 @@ def _library_env(
   if role == "rollout":
     skip = hp.config_mapping("vllm_config")["skip_jax_precompile"]
     values["SKIP_JAX_PRECOMPILE"] = "1" if skip else "0"
+    if str(ws["mode"]) == "ici":
+      values["ICI_DROP_OLD_WEIGHTS"] = (
+          "true" if ws["ici_drop_old_weights"] else "false"
+      )
   return {
       name: (value, resolve_config.LIBRARY_ENV_CONFIG_KEYS[name])
       for name, value in values.items()
@@ -167,6 +171,8 @@ def apply_library_env(
     its NICs itself.
   * `SKIP_JAX_PRECOMPILE` (rollout): `vllm_config.skip_jax_precompile` as "1"
     or "0".
+  * `ICI_DROP_OLD_WEIGHTS` (rollout, `weight_sync_config.mode: ici` only):
+    `weight_sync_config.ici_drop_old_weights` as "true" or "false".
 
   Args:
     hp: Validated distributed RL configuration.
@@ -651,15 +657,21 @@ def create_mesh(
         f" expert=1), got {model_key}.mesh axes={axes}."
     )
   shape = (axes["fsdp"], axes["tp"])
-  if shape[0] * shape[1] != jax.device_count():
+  # A node is a single-controller JAX program over its own devices. When it
+  # shares a multi-process JAX world with the other nodes
+  # (`weight_sync_config.mode: ici`), `jax.devices()` also lists their chips.
+  local_devices = (
+      jax.local_devices() if jax.process_count() > 1 else jax.devices()
+  )
+  if shape[0] * shape[1] != len(local_devices):
     raise ValueError(
         f"{label} mesh dimensions must multiply to visible JAX device count. "
-        f"Got {model_key}.mesh shape={shape}, devices={jax.device_count()}."
+        f"Got {model_key}.mesh shape={shape}, devices={len(local_devices)}."
     )
   # Shapes that already factor into whole physical axes get the same device
   # order; shapes like (8, 8) on a 4x4x4 slice need a split physical axis.
   devices = mesh_utils.create_device_mesh(
-      shape, jax.devices(), allow_split_physical_axes=True
+      shape, local_devices, allow_split_physical_axes=True
   )
   return Mesh(devices, axis_names=MESH_AXIS_NAMES)
 

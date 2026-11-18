@@ -33,6 +33,7 @@ from tunix.dist_rl.rollout import sampler as base_sampler_lib
 from tunix.dist_rl.rollout.raiden_weight_sync_mixin import (
     RaidenDestinationWeightSyncMixin,
 )
+from tunix.dist_rl.weight_sync import ici_weight_sync_delegate
 from tunix.dist_rl.weight_sync import raiden_weight_sync_delegate
 from tunix.dist_rl.weight_sync import weight_sync
 from tunix.generate import mappings
@@ -137,6 +138,16 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
           self.server_id,
       )
     self.raiden_sync_delegate = raiden_sync_delegate
+    self.enable_ici = self.weight_sync_mode == weight_sync.WeightSyncMode.ICI
+    if self.enable_ici:
+      logging.info(
+          "InprocessVllmSampler [%s] weight_sync: initializing ICI delegate",
+          self.server_id,
+      )
+      self.ici_sync_delegate = ici_weight_sync_delegate.IciWeightSyncDelegate(
+          server_id=self.server_id,
+          partial_rollout=self.config.partial_rollout,
+      )
 
   def initialize(self) -> None:
     """Builds the vLLM engine from `config` on the first call."""

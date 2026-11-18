@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping
 import dataclasses
+import functools
 import logging
 import os
 import re
@@ -40,6 +41,7 @@ import optax
 from orbax import checkpoint as ocp
 from tunix.cli import config as cli_config
 from tunix.cli.utils import model as model_utils
+from tunix.common import datatypes as common_datatypes
 from tunix.dist_rl.distributed.runtime import context as context_lib
 from tunix.dist_rl.launch.common import resolve_config
 from tunix.dist_rl.launch.nodes import node_utils
@@ -359,6 +361,18 @@ def _create_tunix_trainer_factory(
   sampler_type = str(hp.config["rollout_engine"])
   rollout_tp_size = hp.mesh_axes("rollout_model_config")["tp"]
 
+  # Raiden is the trainer's default source transport; ICI swaps in its own.
+  transport_kwargs = {}
+  if (
+      hp.cluster_targets.weight_sync_mode
+      == common_datatypes.WeightSyncMode.ICI
+  ):
+    from tunix.dist_rl.weight_sync import ici_weight_sync_delegate  # pylint: disable=g-import-not-at-top
+
+    transport_kwargs["weight_sync_worker_factory"] = functools.partial(
+        ici_weight_sync_delegate.IciSourceSynchronizer, "trainer"
+    )
+
   def _factory() -> abstract_trainer.AbstractTrainer:
     logging.info("Loading actor model...")
     actor_model = _load_actor_model(hp, model_dir, mesh)
@@ -368,6 +382,7 @@ def _create_tunix_trainer_factory(
         training_config,
         sampler_type=sampler_type,
         rollout_tp_size=rollout_tp_size,
+        **transport_kwargs,
     )
 
   return _factory, mesh

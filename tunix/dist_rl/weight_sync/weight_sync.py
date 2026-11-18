@@ -89,6 +89,9 @@ class TensorMetadata:
       published from, in shard order. Lets a transport pair source and
       destination shards explicitly instead of inferring them from mesh
       geometry, which expert parallelism breaks. Empty means unreported.
+    dtype: Element dtype name, e.g. "bfloat16". Empty means unreported.
+      `item_size` cannot tell apart two dtypes of the same width, which a
+      transport that moves typed device arrays (rather than bytes) must.
   """
 
   name: str
@@ -99,6 +102,7 @@ class TensorMetadata:
   layer_idx: int = 0
   sharding_spec: tuple[str, ...] = ()
   global_shard_indices: tuple[int, ...] = ()
+  dtype: str = ""
 
   def __post_init__(self) -> None:
     rank = len(self.shape)
@@ -164,6 +168,7 @@ def _parse_tensor_metadata(variables_raw: Any) -> tuple[TensorMetadata, ...]:
               layer_idx=int(v.get("layer_idx", 0)),
               sharding_spec=tuple(v.get("sharding_spec", ())),
               global_shard_indices=tuple(v.get("global_shard_indices", ())),
+              dtype=str(v.get("dtype", "")),
           )
       )
     elif hasattr(v, "name"):
@@ -179,6 +184,7 @@ def _parse_tensor_metadata(variables_raw: Any) -> tuple[TensorMetadata, ...]:
               global_shard_indices=tuple(
                   getattr(v, "global_shard_indices", ())
               ),
+              dtype=str(getattr(v, "dtype", "")),
           )
       )
   return tuple(variables)
@@ -231,6 +237,11 @@ class WorkUnitMetadata:
       artifact staged by a file/object-store source for this round.
     checksums: Optional wire-safe per-tensor/aggregate L1 checksum dictionary
       computed by the source when weight verification is enabled.
+    process_indices: `jax.process_index()` of every process whose devices hold
+      this unit, for transports that move weights with JAX collectives inside
+      one multi-process JAX world (see `ici_handler`). Empty means unreported.
+    devices_per_process: Local device count of each of those processes. None
+      means unreported.
   """
 
   unit: WorkUnitId
@@ -251,6 +262,8 @@ class WorkUnitMetadata:
   checksums: Optional[dict[str, float | int]] = dataclasses.field(
       default=None, hash=False
   )
+  process_indices: tuple[int, ...] = ()
+  devices_per_process: Optional[int] = None
 
   def __post_init__(self) -> None:
     if self.artifact_uri is not None and not self.artifact_uri.strip():
@@ -303,6 +316,12 @@ class WorkUnitMetadata:
         ),
         checksums=(
             dict(d["checksums"]) if d.get("checksums") is not None else None
+        ),
+        process_indices=tuple(int(p) for p in d.get("process_indices", ())),
+        devices_per_process=(
+            int(d["devices_per_process"])
+            if d.get("devices_per_process") is not None
+            else None
         ),
     )
 

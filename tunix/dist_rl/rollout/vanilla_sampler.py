@@ -266,6 +266,15 @@ class VanillaSampler(
           self.server_id,
       )
 
+    self.enable_ici = self.weight_sync_mode == weight_sync.WeightSyncMode.ICI
+    if self.enable_ici:
+      from tunix.dist_rl.weight_sync import ici_weight_sync_delegate  # pylint: disable=g-import-not-at-top
+
+      self.ici_sync_delegate = ici_weight_sync_delegate.IciWeightSyncDelegate(
+          server_id=self.server_id,
+          partial_rollout=self.config.partial_rollout,
+      )
+
     self._transformer_graphdef: graph.NodeDef = nnx.graphdef(transformer)  # pyrefly: ignore[bad-assignment]
     self._transformer_state: statelib.State = nnx.variables(transformer)
     self._flattened_transformer_state: list[statelib.State] = jax.tree.leaves(
