@@ -63,6 +63,9 @@ _ENV_PASSTHROUGH = frozenset({
 # Environment variables read by `yaml_generator.py` that intentionally pass
 # through from the caller's environment (not configured via `base_dist_config`).
 _YAML_GEN_ENV_PASSTHROUGH = frozenset({
+    "CKPT_GCSFUSE_BUCKET",
+    "CKPT_GCSFUSE_MOUNT_OPTIONS",
+    "CKPT_GCSFUSE_MOUNT_PATH",
     "COLOCATED_PYTHON_SIDECAR_IMAGE",
     "COLOCATED_PYTHON_SIDECAR_MEMORY",
     "COLOCATED_PYTHON_SIDECAR_SHM",

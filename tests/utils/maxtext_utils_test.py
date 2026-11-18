@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from unittest import mock
 
 from absl.testing import absltest
@@ -201,6 +202,36 @@ class MaxTextUtilsTest(absltest.TestCase):
       mock_compute.assert_called_once_with(2048, 4)
       argv = mock_pyconfig.initialize.call_args[0][0]
       self.assertIn("padded_base_moe_mlp_dim=2304", argv)
+
+  def test_checkpoint_dir_follows_maxtext_checkpoint_dir(self):
+    mock_pyconfig = mock.MagicMock()
+    mock_pyconfig.initialize.return_value.raw_data_dict = {}
+    mock_pyconfig.__file__ = "/fake/maxtext/configs/pyconfig.py"
+    cases = (
+        ({}, None),
+        ({"MAXTEXT_CHECKPOINT_DIR": "  "}, None),
+        (
+            {"MAXTEXT_CHECKPOINT_DIR": "/gcs/ckpt/maxtext"},
+            "checkpoint_dir=/gcs/ckpt/maxtext/worker-0/checkpoints/",
+        ),
+    )
+    for env, expected in cases:
+      with self.subTest(env=env), mock.patch.object(
+          maxtext_utils,
+          "maxtext_modules",
+          return_value=(mock_pyconfig, mock.MagicMock(), mock.MagicMock()),
+      ), mock.patch("os.path.exists", return_value=True), mock.patch.dict(
+          os.environ, env, clear=True
+      ):
+        maxtext_utils.build_maxtext_config(
+            model_name="gemma2-9b",
+            worker_id="worker-0",
+            base_output_directory="gs://bucket/out",
+        )
+        argv = mock_pyconfig.initialize.call_args[0][0]
+        checkpoint_args = [a for a in argv if a.startswith("checkpoint_dir=")]
+        self.assertEqual(checkpoint_args, [expected] if expected else [])
+        self.assertIn("base_output_directory=gs://bucket/out", argv)
 
   def test_derived_quantities_matrix(self):
     cases = [
