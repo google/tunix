@@ -71,7 +71,6 @@ from absl.testing import parameterized
 import grain
 import jax
 from jax.experimental import mesh_utils
-from orbax import checkpoint as ocp
 import transformers
 from tunix.cli import config as cli_config
 from tunix.cli.utils import data as data_lib
@@ -320,9 +319,9 @@ _RECORDED_INITS: tuple[type[object], ...] = (
     dist_datatypes.GenerationArgs,
     gcs_cache.RolloutCacheKeyParams,
     maxtext_utils.AdamWOptions,
+    maxtext_utils.CheckpointOptions,
     maxtext_utils.ProfilerOptions,
     metrics_logger.MetricsLoggerOptions,
-    ocp.CheckpointManagerOptions,
     peft_trainer_v2.TrainingConfig,
     rollout_worker.RolloutConfig,
     weight_sync_coordinator.PhaseTimeouts,

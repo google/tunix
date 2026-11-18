@@ -56,6 +56,16 @@ class AdamWOptions:
   gradient_clipping_threshold: float
 
 
+@dataclasses.dataclass(frozen=True)
+class CheckpointOptions:
+  """Checkpoint saving options for MaxText's training engine."""
+  # Save every N steps; 0 disables saving (restoring `load_parameters_path` is
+  # unaffected).
+  save_interval_steps: int
+  # Number of checkpoints MaxText keeps.
+  max_to_keep: int
+
+
 def maxtext_modules():
   """Imports MaxText lazily; some installs nest it under maxtext.src.maxtext."""
   from maxtext.configs import pyconfig  # pylint: disable=g-import-not-at-top
@@ -243,7 +253,7 @@ def build_maxtext_config(
     padded_moe_mlp_dim: int = 0,
     base_output_directory: str = "",
     gradient_accumulation_steps: int = 1,
-    checkpointing_options: Any = None,
+    checkpointing_options: CheckpointOptions | None = None,
     profiling_options: ProfilerOptions | None = None,
     *,
     mesh_context: int = 1,
@@ -469,8 +479,10 @@ def build_maxtext_config(
   if load_parameters_path:
     argv.append(f"load_parameters_path={load_parameters_path}")
   # Checkpointing configs. `save_interval_steps=0` means "never save"
-  save_interval_steps = int(
-      getattr(checkpointing_options, "save_interval_steps", 0) or 0
+  save_interval_steps = (
+      checkpointing_options.save_interval_steps
+      if checkpointing_options is not None
+      else 0
   )
   if checkpointing_options is not None and save_interval_steps < 0:
     raise ValueError(

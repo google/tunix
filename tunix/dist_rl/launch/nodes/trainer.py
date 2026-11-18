@@ -37,7 +37,6 @@ from flax import nnx
 import jax
 from jax.sharding import Mesh
 import optax
-from orbax import checkpoint as ocp
 from tunix.cli import config as cli_config
 from tunix.cli.utils import model as model_utils
 from tunix.dist_rl.distributed.runtime import context as context_lib
@@ -375,31 +374,24 @@ def _create_tunix_trainer_factory(
 
 def _maxtext_checkpointing_options(
     hp: resolve_config.DistHyperParameters,
-) -> ocp.CheckpointManagerOptions:
-  """Builds the Orbax v0 options `maxtext_utils.build_maxtext_config` reads.
+) -> maxtext_utils.CheckpointOptions:
+  """Builds the checkpoint options `maxtext_utils.build_maxtext_config` reads.
 
   The shared `checkpointing_options_from_dict` builder returns
   `TunixCheckpointingOptions`, which has no `save_interval_steps` /
-  `max_to_keep`; MaxText reads exactly those, so the v0 options are built here.
+  `max_to_keep`; MaxText reads exactly those.
 
   Args:
     hp: Validated distributed RL configuration.
 
   Returns:
-    Read-only options when `save_interval_steps=0` (MaxText then disables
-    saving but still restores `load_parameters_path`), otherwise interval and
-    retention options.
+    The interval and retention options. `save_interval_steps=0` disables saving
+    (MaxText still restores `load_parameters_path`).
   """
-  interval = _save_interval_steps(hp)
-  if interval == 0:
-    logging.info(
-        "save_interval_steps=0; checkpoint saving is disabled (restore is"
-        " unaffected)."
-    )
-    return ocp.CheckpointManagerOptions(read_only=True)
   ckpt = hp.config_mapping(_RL_TRAINING_KEY)["checkpointing_options"]
-  return ocp.CheckpointManagerOptions(
-      save_interval_steps=interval, max_to_keep=int(ckpt["max_to_keep"])
+  return maxtext_utils.CheckpointOptions(
+      save_interval_steps=_save_interval_steps(hp),
+      max_to_keep=int(ckpt["max_to_keep"]),
   )
 
 

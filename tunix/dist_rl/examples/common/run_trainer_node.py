@@ -829,7 +829,10 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
   pad_id = maxtext_utils.get_tokenizer_pad_id(
       args.model_id, args.tokenizer_path, args.model_dir
   )
-  checkpointing_options = _checkpointing_options(args)
+  checkpointing_options = maxtext_utils.CheckpointOptions(
+      save_interval_steps=args.checkpoint_save_interval_steps,
+      max_to_keep=args.checkpoint_max_to_keep,
+  )
   grad_accumulation_steps = _gradient_accumulation_steps(args)
   if args.optimizer_schedule_type:
     logging.warning(

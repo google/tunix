@@ -829,12 +829,14 @@ class MaxTextTrainerFactoryTest(absltest.TestCase):
 
 class MaxTextOptionsTest(absltest.TestCase):
 
-  def test_checkpointing_options_zero_is_read_only(self):
+  def test_checkpointing_options_zero_disables_saving(self):
     opts = trainer._maxtext_checkpointing_options(
         _hp("rl_training_config.checkpointing_options.save_interval_steps=0")
     )
-    self.assertTrue(opts.read_only)
-    self.assertEqual(opts.save_interval_steps, 0)
+    self.assertEqual(
+        opts,
+        maxtext_utils.CheckpointOptions(save_interval_steps=0, max_to_keep=10),
+    )
 
   def test_profiling_options_accepts_null_metrics_logging_options(self):
     self.assertIsNone(
