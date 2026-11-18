@@ -46,30 +46,6 @@ GroupOrder = datatypes.GroupOrder
 GroupFn = group_queue_manager.GroupFn
 FilterFn = group_queue_manager.FilterFn
 
-DropReason = datatypes.DropReason
-
-# `TrajectoryItem.metadata` key holding the `DropReason` value of a filtered
-# group.
-DROP_REASON_KEY = "drop_reason"
-
-
-def _set_drop_reason(
-    group: Sequence[TrajectoryItem], reason: DropReason
-) -> None:
-  """Stores `reason` under `DROP_REASON_KEY` in each item's metadata."""
-  for item in group:
-    item.metadata[DROP_REASON_KEY] = reason.value
-
-
-def count_filtered_groups(
-    filtered_groups: Sequence[Sequence[TrajectoryItem]], *, reason: DropReason
-) -> int:
-  """Returns how many of `filtered_groups` were dropped for `reason`."""
-  # Groups dropped by a caller-supplied `filter_fn` carry no reason.
-  return sum(
-      group[0].metadata.get(DROP_REASON_KEY) == reason.value
-      for group in filtered_groups
-  )
 
 
 def has_policy_version(item: TrajectoryItem) -> bool:
@@ -246,7 +222,6 @@ class TrajectoryQueueManager(
             policy_version_fn=policy_version_fn,
             span_limit=span_limit,
         ):
-          _set_drop_reason(group, DropReason.STALE)
           return [], list(group)
         if filter_fn is not None:
           res = filter_fn(group)
@@ -301,24 +276,6 @@ class TrajectoryQueueManager(
           "batch_size must be provided when num_generations is None."
       )
     return await super().get_batch(batch_size=actual_batch_size)
-
-  async def add_filtered_group(
-      self, group: list[TrajectoryItem], *, reason: DropReason
-  ) -> None:
-    """Records a group dropped after it left the queue.
-
-    The group joins the groups dropped by the queue's own filter and is
-    returned by `get_filtered_groups`. `on_group_filtered` is not invoked; the
-    caller that dropped the group handles its side effects.
-
-    Args:
-      group: The dropped trajectory group.
-      reason: Why the group was dropped; its value is stored under
-        `DROP_REASON_KEY` in each item's metadata.
-    """
-    _set_drop_reason(group, reason)
-    async with self._lock:
-      self._filtered_groups.append(group)
 
   def commit(self, step: int, groups: Sequence[Any] | None = None) -> None:
     """Commits in-flight groups after a successful global step boundary."""

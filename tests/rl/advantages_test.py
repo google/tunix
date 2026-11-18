@@ -106,9 +106,9 @@ class AdvantagesTest(parameterized.TestCase):
     self.assertTrue(
         advantages.tied_rewards([1.0, 1.0, float("nan")], [True, True, True])
     )
-    # A single usable trajectory has no peer baseline.
-    self.assertTrue(advantages.tied_rewards([1.0, 0.0], [True, False]))
-    # A group with no usable trajectory is kept so the outage stays visible.
+    # Fewer than two usable trajectories is an outage, not a tie, so the group
+    # is kept and stays visible in rollout-health metrics.
+    self.assertFalse(advantages.tied_rewards([1.0, 0.0], [True, False]))
     self.assertFalse(advantages.tied_rewards([0.0, 0.0], [False, False]))
     self.assertFalse(
         advantages.tied_rewards([float("nan"), float("nan")], [True, True])

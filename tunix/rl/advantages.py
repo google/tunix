@@ -247,12 +247,12 @@ def compute_drgrpo_advantages(
 def tied_rewards(rewards: npt.ArrayLike, valid_mask: npt.ArrayLike) -> bool:
   """Returns whether a prompt group's rewards tie, i.e. have zero variance.
 
-  A group whose valid trajectories all earn the same reward, or that has a
-  single valid trajectory, has zero group-relative advantage, so
-  `AlgorithmConfig.drop_zero_variance_groups` drops it and samples a
-  replacement prompt (DAPO's dynamic sampling). A group with no valid finite
-  reward at all (e.g. a worker or sandbox outage) is kept so the failure
-  reaches step telemetry instead of being resampled silently.
+  A group whose valid trajectories all earn the same reward has zero
+  group-relative advantage, so `AlgorithmConfig.drop_zero_variance_groups`
+  drops it and samples a replacement prompt (DAPO's dynamic sampling). A group
+  with fewer than `MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE` valid finite rewards
+  (e.g. a worker or sandbox outage) has no variance to judge and is kept, so
+  the failure reaches step telemetry instead of being resampled silently.
 
   Args:
     rewards: Per-trajectory rewards for one prompt group.
@@ -264,9 +264,6 @@ def tied_rewards(rewards: npt.ArrayLike, valid_mask: npt.ArrayLike) -> bool:
   """
   group_rewards = np.asarray(rewards, dtype=np.float64)
   usable = np.asarray(valid_mask, dtype=bool) & np.isfinite(group_rewards)
-  num_usable = int(np.sum(usable))
-  if num_usable == 0:
+  if int(np.sum(usable)) < MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE:
     return False
-  if num_usable < MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE:
-    return True
   return float(np.ptp(group_rewards[usable])) <= _REWARD_TIE_ATOL

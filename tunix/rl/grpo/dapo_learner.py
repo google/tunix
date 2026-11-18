@@ -47,7 +47,7 @@ class DAPOConfig(grpo_learner_lib.GRPOConfig):
    epsilon: Epsilon value for clipping (𝜀 in GRPO loss in paper). Similar to
      PPO, it ensures stable updates.
    epsilon_high: Epsilon value for upper bound clipping.
-   drop_zero_variance_groups: Whether to drop prompt groups whose task rewards
+   drop_zero_variance_groups: Whether to drop prompt groups whose rewards
      tie and sample replacement prompts (DAPO's dynamic sampling). On by
      default for DAPO. Applied by the distributed `StandardRLProgram`;
      `DAPOLearner` does not apply it yet.

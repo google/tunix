@@ -248,50 +248,6 @@ class QueueManagerTest(absltest.TestCase):
 
     asyncio.run(_run_test())
 
-  def test_add_filtered_group_joins_filter_drops_with_its_reason(self):
-    async def _run_test():
-      dropped_groups = []
-      manager = trajectory_queue_manager.TrajectoryQueueManager.create(
-          num_generations=2,
-          max_staleness=1,
-          current_policy_version=lambda: 5,
-          on_group_filtered=dropped_groups.append,
-      )
-      stale = [
-          _create_item("g_stale", group_index=0, policy_version=3),
-          _create_item("g_stale", group_index=1, policy_version=3),
-      ]
-      for item in stale:
-        await manager.put(item)
-      tied = [
-          _create_item("g_tied", group_index=0, policy_version=5),
-          _create_item("g_tied", group_index=1, policy_version=5),
-      ]
-
-      await manager.add_filtered_group(
-          tied, reason=datatypes.DropReason.TIED_REWARDS
-      )
-
-      # Only the queue's own filter reports to `on_group_filtered`.
-      self.assertEqual(dropped_groups, [stale])
-      filtered = await manager.get_filtered_groups()
-      self.assertEqual(filtered, [stale, tied])
-      self.assertEqual(manager.filtered_groups_count, 0)
-      self.assertEqual(
-          trajectory_queue_manager.count_filtered_groups(
-              filtered, reason=datatypes.DropReason.STALE
-          ),
-          1,
-      )
-      self.assertEqual(
-          trajectory_queue_manager.count_filtered_groups(
-              filtered, reason=datatypes.DropReason.TIED_REWARDS
-          ),
-          1,
-      )
-
-    asyncio.run(_run_test())
-
   def test_staleness_filter_drops_partially_stale_group(self):
     """Tests a group with mixed stale and fresh items is dropped as a whole."""
 
