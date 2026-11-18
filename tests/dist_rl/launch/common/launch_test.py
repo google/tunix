@@ -539,10 +539,9 @@ class LaunchScriptsTest(absltest.TestCase):
     self.assertIn("kubectl delete jobset testuser-orch -n default", res.stdout)
     self.assertIn("kubectl delete jobset testuser-train -n default", res.stdout)
     self.assertIn(
-        "kubectl delete leaderworkerset testuser-roll-0 -n default", res.stdout
-    )
-    self.assertIn(
-        "kubectl delete leaderworkerset testuser-roll-1 -n default", res.stdout
+        "kubectl delete leaderworkerset testuser-roll-0 testuser-roll-1 -n"
+        " default",
+        res.stdout,
     )
     self.assertIn("RAIDEN_USE_FFI=1", res.stdout)
     self.assertIn("RAIDEN_USE_FFI=0", res.stdout)
@@ -612,6 +611,60 @@ class LaunchScriptsTest(absltest.TestCase):
     self.assertEqual(res.returncode, 0, msg=res.stderr)
     self.assertIn("kubectl delete jobset testuser-orch -n default", res.stdout)
     self.assertNotIn("apiVersion:", res.stdout)
+
+  def test_k8s_rollout_batches_manifests_and_deletes(self):
+    tempdir = self.create_tempdir().full_path
+    kubectl_log = os.path.join(tempdir, "kubectl_calls.log")
+    applied_manifest = os.path.join(tempdir, "applied.yaml")
+    kubectl_bin = os.path.join(tempdir, "kubectl")
+    with open(kubectl_bin, "w") as f:
+      f.write(
+          "#!/bin/bash\n"
+          f'echo "$*" >> "{kubectl_log}"\n'
+          'if [[ "$*" == *"apply -f -"* ]]; then\n'
+          f'  cat > "{applied_manifest}"\n'
+          "fi\n"
+      )
+    os.chmod(kubectl_bin, 0o755)
+
+    res = self._run_launch(
+        [
+            "rollout",
+            "cluster_config.target=k8s",
+            "cluster_config.k8s.tunix_image=test-image",
+            "cluster_config.rollout_replicas=4",
+            "agentic_grpo_config.beta=0.0",
+        ],
+        extra_env={
+            "PATH": f"{tempdir}:{os.environ.get('PATH', '')}",
+            "ENTER_KUBE_CONTEXT": "/dev/null",
+        },
+    )
+    self.assertEqual(res.returncode, 0, msg=res.stderr)
+
+    with open(kubectl_log) as f:
+      calls = [line.strip() for line in f if line.strip()]
+    self.assertEqual(
+        calls,
+        [
+            (
+                "delete leaderworkerset testuser-roll-0 testuser-roll-1"
+                " testuser-roll-2 testuser-roll-3 -n default --ignore-not-found"
+                " --wait=true"
+            ),
+            "apply -f -",
+        ],
+    )
+
+    with open(applied_manifest) as f:
+      docs = list(yaml.safe_load_all(f.read()))
+    self.assertLen(docs, 4)
+    self.assertEqual(
+        [doc["metadata"]["name"] for doc in docs],
+        [f"testuser-roll-{i}" for i in range(4)],
+    )
+    for i, doc in enumerate(docs):
+      self.assertIn(f"DIST_RL_ROLLOUT_REPLICA={i}", yaml.safe_dump(doc))
 
   def test_k8s_rollout_compilation_cache_comes_from_the_config(self):
     args = [

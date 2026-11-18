@@ -254,39 +254,34 @@ start_trainer() {
     | apply_manifest
 }
 
-stop_rollout_instance() {
-  local target_id="$1"
+stop_rollout() {
+  local replicas=${ROLLOUT_REPLICAS:-1}
+  if (( replicas <= 0 )); then
+    return 0
+  fi
+  local target_ids=()
+  local i
+  for ((i = 0; i < replicas; i++)); do
+    if (( replicas > 1 )); then
+      target_ids+=("${K8S_ROLLOUT_ID}-${i}")
+    else
+      target_ids+=("${K8S_ROLLOUT_ID}")
+    fi
+  done
   local resource_kind="jobset"
   if [[ "${K8S_ROLLOUT_JOBSET_YAML}" =~ ^leaderworkerset ]]; then
     resource_kind="leaderworkerset"
   fi
   if is_true "${DRY_RUN}"; then
-    echo "kubectl delete ${resource_kind} ${target_id} -n ${K8S_NAMESPACE}"
+    echo "kubectl delete ${resource_kind} ${target_ids[*]} -n ${K8S_NAMESPACE}"
   else
-    kubectl delete "${resource_kind}" "${target_id}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=true
-    while kubectl get "${resource_kind}" "${target_id}" -n "${K8S_NAMESPACE}" &>/dev/null; do
-      sleep 2
-    done
+    kubectl delete "${resource_kind}" "${target_ids[@]}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=true
   fi
 }
 
-stop_rollout() {
-  local i
-  for ((i = 0; i < ROLLOUT_REPLICAS; i++)); do
-    local target_id="${K8S_ROLLOUT_ID}"
-    if (( ROLLOUT_REPLICAS > 1 )); then
-      target_id="${K8S_ROLLOUT_ID}-${i}"
-    fi
-    stop_rollout_instance "${target_id}"
-  done
-}
-
-start_rollout_instance() {
+render_rollout_yaml() {
   local target_id="$1"
   local replica="$2"
-  if [[ "${K8S_ROLLOUT_JOBSET_YAML}" == "jobset.pathways.yaml" ]]; then
-    echo "Rollout Pathways images: server=${K8S_PATHWAYS_SERVER_IMAGE} proxy=${K8S_PATHWAYS_PROXY_IMAGE}" >&2
-  fi
 
   local env_prefix=""
   if (( ROLLOUT_REPLICAS > 1 )); then
@@ -375,22 +370,38 @@ start_rollout_instance() {
     --worker_container_port="${ROLLOUT_PORT}" \
     --ray_head_pre_init_command="${ray_head_pre_init_cmd}" \
     --ray_worker_pre_init_command="${ray_worker_pre_init_cmd}" \
-    --worker_startup_command="${startup_cmd}" \
-    | apply_manifest
+    --worker_startup_command="${startup_cmd}"
 }
 
 start_rollout() {
+  local replicas=${ROLLOUT_REPLICAS:-1}
+  if (( replicas <= 0 )); then
+    return 0
+  fi
+  if [[ "${K8S_ROLLOUT_JOBSET_YAML}" == "jobset.pathways.yaml" ]]; then
+    echo "Rollout Pathways images: server=${K8S_PATHWAYS_SERVER_IMAGE} proxy=${K8S_PATHWAYS_PROXY_IMAGE}" >&2
+  fi
   if ! is_jax_cache_disabled && [[ -n "${K8S_JAX_CACHE_ROLLOUT_GCS_DIR}" ]]; then
     echo "[launcher] Rollout JAX cache GCS: ${K8S_JAX_CACHE_ROLLOUT_GCS_DIR} (save=${K8S_JAX_CACHE_SAVE:-true})" >&2
   fi
+
+  local placeholder_id="__TUNIX_ROLLOUT_ID__"
+  local placeholder_replica="__TUNIX_ROLLOUT_REPLICA__"
+  local manifest_template
+  manifest_template="$(render_rollout_yaml "${placeholder_id}" "${placeholder_replica}")" || return $?
+
   local i
-  for ((i = 0; i < ROLLOUT_REPLICAS; i++)); do
+  for ((i = 0; i < replicas; i++)); do
     local target_id="${K8S_ROLLOUT_ID}"
-    if (( ROLLOUT_REPLICAS > 1 )); then
+    if (( replicas > 1 )); then
       target_id="${K8S_ROLLOUT_ID}-${i}"
     fi
-    start_rollout_instance "${target_id}" "${i}"
-  done
+    if (( i > 0 )); then
+      echo "---"
+    fi
+    local rendered="${manifest_template//${placeholder_id}/${target_id}}"
+    printf '%s\n' "${rendered//${placeholder_replica}/${i}}"
+  done | apply_manifest
 }
 
 stop_otel() {
