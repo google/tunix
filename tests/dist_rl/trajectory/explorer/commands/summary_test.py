@@ -14,6 +14,7 @@
 
 """Unit tests for SummaryCommand execution."""
 
+from collections.abc import Sequence
 import contextlib
 import io
 import json
@@ -45,20 +46,29 @@ class TrackingReader(store.TrajectoryReader[trajectory_lib.TrajectoryMetadata]):
 
   def get_trajectories_metadata(
       self,
-      trajectory_ids: list[str] | None = None,
-  ) -> list[trajectory_lib.TrajectoryMetadata]:
-    return self._delegate.get_trajectories_metadata(trajectory_ids)
+      trajectory_ids: Sequence[str] | None = None,
+      *,
+      ignore_missing: bool = False,
+  ) -> dict[str, trajectory_lib.TrajectoryMetadata]:
+    return self._delegate.get_trajectories_metadata(
+        trajectory_ids, ignore_missing=ignore_missing
+    )
 
   def get_trajectories(
       self,
-      trajectory_ids: list[str],
-  ) -> list[trajectory_lib.Trajectory[Any]]:
-    self.requested_ids.append(trajectory_ids)
-    return self._delegate.get_trajectories(trajectory_ids)
+      trajectory_ids: Sequence[str],
+      *,
+      ignore_missing: bool = False,
+      strict: bool = True,
+  ) -> dict[str, trajectory_lib.Trajectory[Any]]:
+    self.requested_ids.append(list(trajectory_ids))
+    return self._delegate.get_trajectories(
+        trajectory_ids, ignore_missing=ignore_missing, strict=strict
+    )
 
   def get_trajectories_metrics(
       self,
-      trajectory_ids: list[str] | None = None,
+      trajectory_ids: Sequence[str] | None = None,
   ) -> dict[str, trajectory_lib.TrajectoryMetrics]:
     return self._delegate.get_trajectories_metrics(trajectory_ids)
 
