@@ -149,8 +149,11 @@ jobs:
           python -m pytest tests/generate/ -v --tb=short \
             --ignore=tests/generate/beam_search_test.py \
             --ignore=tests/generate/mappings_config_test.py \
+            --ignore=tests/generate/vllm_hf_manifest_test.py \
+            --ignore=tests/generate/vllm_hf_manifests/qwen3_test.py \
             --ignore=tests/generate/utils_test.py \
             --ignore=tests/generate/vllm_sampler_test.py \
+            --ignore=tests/generate/vllm_sampler_hf_test.py \
             --ignore=tests/generate/vllm_sampler_qwen_test.py \
             --ignore=tests/generate/vllm_driver_test.py \
             --ignore=tests/generate/tokenizer_adapter_test.py \
@@ -178,7 +181,7 @@ jobs:
       - name: Run tunix tests not covered by the above categories
         run: |
           # This category is to catch tests added but not covered by CI yet. Whenever you add new folders under tests/, please add a new category above and skip those tests here.
-          # CPU-offloaded directories (perf, utils, common, diffusion, examples, processors, tests, sft, distillation, rl) are run in cpu-tests.yml.
+          # CPU-offloaded directories (perf, utils, common, diffusion, examples, processors, tests, sft, distillation, rl) and CPU generate tests (beam_search_test.py, mappings_config_test.py, vllm_hf_manifest_test.py, vllm_hf_manifests/qwen3_test.py, utils_test.py) are run in cpu-tests.yml.
           python -m pytest tests/ -v --tb=short --ignore=tests/perf/ --ignore=tests/model_alignment/ --ignore=tests/models/ --ignore=tests/cli/ --ignore=tests/utils/ --ignore=tests/common/ --ignore=tests/diffusion/ --ignore=tests/examples/ --ignore=tests/processors/ --ignore=tests/tests/ --ignore=tests/generate/ --ignore=tests/sft/ --ignore=tests/distillation/ --ignore=tests/rl/ --ignore=tests/smoke_tests/ --ignore=tests/dist_rl/ --ignore=tests/experimental/ --ignore=tests/zero_tim_kernel/ || code=$?
           if [ "${code:-0}" = "5" ]; then
             echo "No tests collected (expected)."
