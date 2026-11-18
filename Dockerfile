@@ -64,6 +64,8 @@ RUN if [ "$INSTALL_K8S_TOOLS" = "true" ]; then \
 
 # Build argument to conditionally install DeepSWE evaluation dependencies
 ARG INSTALL_DEEPSWE_DEPS=false
+# Agent scaffold to install: r2egym (default) or openhands
+ARG SCAFFOLD=r2egym
 
 # Install DeepSWE specific dependencies and apply runtime patches conditionally
 RUN if [ "$INSTALL_DEEPSWE_DEPS" = "true" ]; then \
@@ -73,6 +75,9 @@ RUN if [ "$INSTALL_DEEPSWE_DEPS" = "true" ]; then \
       uv pip install --no-deps git+https://github.com/r2e-gym/r2e-gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735 && \
       sed -i 's/create_repo, upload_folder, HfFolder/create_repo, upload_folder/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/utils/utils.py && \
       sed -i 's/self.commit = ParsedCommit(\*\*json.loads(self.commit_json))/self.commit = ParsedCommit(\*\*(json.loads(self.commit_json) if isinstance(self.commit_json, str) else self.commit_json))/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/runtime/docker.py; \
+    fi && \
+    if [ "$SCAFFOLD" = "openhands" ]; then \
+      uv pip install git+https://github.com/kubernetes-sigs/agent-sandbox.git@9afee7039342f18fa9ad402929cabf8b66eebaa7#subdirectory=clients/integrations/openhands; \
     fi
 
 # Build argument to conditionally install MaxText dependencies
