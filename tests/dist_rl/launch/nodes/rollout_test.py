@@ -39,7 +39,7 @@ from tunix.models import automodel
 from tunix.rl.agentic.parser.chat_template_parser import parser
 from tunix.utils import maxtext_utils
 
-# A MaxText rollout gets real weights only from a MaxText trainer over Raiden.
+# MaxText rollout paired with a MaxText trainer over Raiden.
 _MAXTEXT_ROLLOUT_ARGV = (
     "model_config.model_source=maxtext",
     "model_config.model_name=qwen3-30b-a3b",
@@ -82,6 +82,33 @@ def _inprocess_vllm_rollout_config(*argv: str):
   """Returns the RolloutConfig built for the `inprocess_vllm` worker."""
   hp = _hp(*argv)
   return rollout._rollout_config(hp, mock.Mock(), sampler_type="inprocess_vllm")
+
+
+def _orbax_tree_metadata(*keys: str) -> Mapping[str, Any]:
+  """Returns an Orbax `_METADATA` `tree_metadata` with one leaf key path."""
+  return {str(keys): {"key_metadata": [{"key": key} for key in keys]}}
+
+
+@contextlib.contextmanager
+def _patch_scanned_checkpoint_loader():
+  """Stubs `maxtext.integration.vllm.scanned_checkpoint_loader` in `sys.modules`."""
+  load = mock.MagicMock()
+  loader = mock.MagicMock(load_and_convert_scanned_checkpoint=load)
+  vllm_pkg = mock.MagicMock(scanned_checkpoint_loader=loader)
+  with mock.patch.dict(
+      "sys.modules",
+      {
+          "maxtext": mock.MagicMock(),
+          "maxtext.integration": mock.MagicMock(),
+          "maxtext.integration.vllm": vllm_pkg,
+          "maxtext.integration.vllm.scanned_checkpoint_loader": loader,
+          "maxtext.src.maxtext.integration.vllm": vllm_pkg,
+          "maxtext.src.maxtext.integration.vllm.scanned_checkpoint_loader": (
+              loader
+          ),
+      },
+  ):
+    yield load
 
 
 def _rollout_config(*argv: str):
@@ -614,6 +641,216 @@ class CreateRolloutWorkerTest(absltest.TestCase):
       )
     worker_kwargs = self._worker_kwargs()
     self.assertIs(worker_kwargs["sampler"], sampler_cls.return_value)
+    sampler_cls.return_value.initialize.assert_not_called()
+
+  def test_inprocess_vllm_loads_scanned_checkpoint_before_serving(self):
+    hp = _hp(
+        *_MAXTEXT_ROLLOUT_ARGV,
+        "weight_sync_config.mode=none",
+        "rollout_model_config.scanned_checkpoint_path=/ckpt/scanned/0",
+        "rollout_model_config.mesh.shape=(1,4)",
+        "vllm_config.engine_kwargs={'additional_config': {'maxtext_config':"
+        " {'fp8_moe': True}}}",
+    )
+    calls = mock.Mock()
+    with (
+        mock.patch.object(
+            rollout, "_import_vllm_sampler", return_value=mock.Mock()
+        ),
+        mock.patch.object(node_utils, "create_mesh"),
+        mock.patch.object(
+            inprocess_vllm_sampler, "InprocessVllmSampler", autospec=True
+        ) as sampler_cls,
+        mock.patch.object(
+            rollout,
+            "_scanned_checkpoint_layout",
+            autospec=True,
+            return_value=(
+                "/ckpt/scanned/0/items",
+                {"checkpoint_storage_use_ocdbt": False},
+                True,
+            ),
+        ) as layout,
+        _patch_scanned_checkpoint_loader() as load,
+    ):
+      sampler = sampler_cls.return_value
+
+      def mutate_additional_config() -> None:
+        cfg = sampler_cls.call_args.kwargs["config"]
+        cfg.rollout_vllm_additional_config["maxtext_config"][
+            "padded_base_moe_mlp_dim"
+        ] = 2048
+
+      sampler.initialize.side_effect = mutate_additional_config
+      calls.attach_mock(layout, "layout")
+      calls.attach_mock(sampler.initialize, "initialize")
+      calls.attach_mock(load, "load")
+      rollout._create_rollout_worker(hp, "rollout-0", self.tokenizer)
+    self.assertIs(self._worker_kwargs()["sampler"], sampler)
+    layout.assert_called_once_with("/ckpt/scanned/0")
+    # Layout is checked before building the engine; the load then replaces its
+    # random weights before serving.
+    self.assertEqual(
+        [name for name, _, _ in calls.mock_calls],
+        ["layout", "initialize", "load"],
+    )
+    load.assert_called_once()
+    args, kwargs = load.call_args
+    self.assertEqual(args, ("/ckpt/scanned/0/items", sampler))
+    self.assertEqual(kwargs["mesh_tp"], 4)
+    self.assertIs(kwargs["ckpt_prefuse_moe"], True)
+    self.assertIs(kwargs["fp8_moe"], True)
+    overrides = kwargs["maxtext_config_overrides"]
+    # `fp8_moe` is forwarded to the converter, not `scanned_cfg` overrides, and
+    # `MaxTextForCausalLM` in-place padding during `initialize()` does not leak.
+    self.assertEqual(overrides["model_name"], "qwen3-30b-a3b")
+    self.assertNotIn("fp8_moe", overrides)
+    self.assertNotIn("padded_base_moe_mlp_dim", overrides)
+    self.assertIs(overrides["checkpoint_storage_use_ocdbt"], False)
+
+  def test_scanned_checkpoint_fails_fast_and_resolves_dp_attention_tp(self):
+    base_argv = (
+        *_MAXTEXT_ROLLOUT_ARGV,
+        "weight_sync_config.mode=none",
+        "rollout_model_config.scanned_checkpoint_path=/ckpt/missing",
+    )
+    with (
+        mock.patch.object(
+            inprocess_vllm_sampler, "InprocessVllmSampler", autospec=True
+        ) as sampler_cls,
+        mock.patch.object(
+            rollout,
+            "_scanned_checkpoint_layout",
+            autospec=True,
+            side_effect=FileNotFoundError("missing _METADATA"),
+        ),
+    ):
+      with self.assertRaisesRegex(FileNotFoundError, "missing _METADATA"):
+        rollout._create_rollout_worker(
+            _hp(*base_argv), "rollout-0", self.tokenizer
+        )
+      sampler_cls.assert_not_called()
+
+    for mesh_shape, sharding_cfg, expected_tp in (
+        ("(4,1)", {}, 1),
+        (
+            "(1,4)",
+            {
+                "sharding_strategy": {
+                    "tensor_parallelism": 1,
+                    "expert_parallelism": 4,
+                    "enable_dp_attention": True,
+                }
+            },
+            1,
+        ),
+        (
+            "(4,1)",
+            {"sharding_strategy": {"tensor_parallelism": 4, "enable_dp_attention": True}},
+            4,
+        ),
+        (
+            "(1,4)",
+            {"sharding_strategy": {"enable_dp_attention": True, "attn_dp_size": 2}},
+            4,
+        ),
+    ):
+      with self.subTest(mesh_shape=mesh_shape, sharding_cfg=sharding_cfg):
+        self.mock_worker_cls.reset_mock()
+        hp = _hp(
+            *base_argv,
+            f"rollout_model_config.mesh.shape={mesh_shape}",
+            f"vllm_config.engine_kwargs={json.dumps({'additional_config': {'sharding': sharding_cfg}})}",
+        )
+        with (
+            mock.patch.object(
+                rollout, "_import_vllm_sampler", return_value=mock.Mock()
+            ),
+            mock.patch.object(node_utils, "create_mesh"),
+            mock.patch.object(
+                inprocess_vllm_sampler, "InprocessVllmSampler", autospec=True
+            ),
+            mock.patch.object(
+                rollout,
+                "_scanned_checkpoint_layout",
+                autospec=True,
+                return_value=("/ckpt/s/items", {}, False),
+            ),
+            _patch_scanned_checkpoint_loader() as load,
+        ):
+          rollout._create_rollout_worker(hp, "rollout-0", self.tokenizer)
+        self.assertEqual(load.call_args.kwargs["mesh_tp"], expected_tp)
+        self.assertIs(load.call_args.kwargs["fp8_moe"], False)
+
+  def test_scanned_checkpoint_layout_reads_orbax_metadata(self):
+    step_dir = self.create_tempdir()
+    with self.assertRaisesRegex(FileNotFoundError, "No Orbax _METADATA"):
+      rollout._scanned_checkpoint_layout(step_dir.full_path)
+    for metadata, storage, prefused in (
+        (
+            {
+                "tree_metadata": _orbax_tree_metadata(
+                    "params", "decoder", "layers", "moe_block", "wi"
+                ),
+                "use_zarr3": True,
+            },
+            {"checkpoint_storage_use_zarr3": True},
+            True,
+        ),
+        (
+            {
+                "tree_metadata": _orbax_tree_metadata(
+                    "decoder", "local_layers", "routed_experts", "wi", "value"
+                ),
+                "use_ocdbt": None,
+                "use_zarr3": False,
+            },
+            {"checkpoint_storage_use_zarr3": False},
+            True,
+        ),
+        (
+            {
+                "tree_metadata": _orbax_tree_metadata(
+                    "params", "decoder", "layers", "moe_block", "wi_0"
+                ),
+                "use_ocdbt": False,
+            },
+            {"checkpoint_storage_use_ocdbt": False},
+            False,
+        ),
+        (
+            {
+                "tree_metadata": _orbax_tree_metadata(
+                    "params", "decoder", "layers", "mlp", "wi", "kernel"
+                ),
+                "use_ocdbt": None,
+                "custom_metadata": {"note": "wi"},
+            },
+            {},
+            False,
+        ),
+    ):
+      with self.subTest(storage=storage, prefused=prefused):
+        params_dir = step_dir.mkdir()
+        params_dir.mkdir("items").create_file("_METADATA", json.dumps(metadata))
+        self.assertEqual(
+            rollout._scanned_checkpoint_layout(params_dir.full_path),
+            (os.path.join(params_dir.full_path, "items"), storage, prefused),
+        )
+    # Direct parameter directory and subdir precedence (`root` > `model_params`
+    # > `items` > `default`).
+    precedence_dir = step_dir.mkdir()
+    for subdir in ("default", "items", "model_params"):
+      precedence_dir.mkdir(subdir).create_file("_METADATA", "{}")
+      self.assertEqual(
+          rollout._scanned_checkpoint_layout(precedence_dir.full_path)[0],
+          os.path.join(precedence_dir.full_path, subdir),
+      )
+    precedence_dir.create_file("_METADATA", "{}")
+    self.assertEqual(
+        rollout._scanned_checkpoint_layout(precedence_dir.full_path)[0],
+        precedence_dir.full_path,
+    )
 
 
 class SamplerTest(absltest.TestCase):

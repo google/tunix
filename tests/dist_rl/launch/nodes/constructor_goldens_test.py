@@ -209,8 +209,8 @@ GOLDEN_CASES: Mapping[str, GoldenCase] = {
         "rollout_engine=vllm",
         "rollout_model_config.mesh.shape=(1,4)",
     )),
-    # MaxText trainer and rollout with profiling and custom MaxText knobs, and
-    # Raiden weight sync (the only source of a MaxText rollout's weights).
+    # MaxText trainer and rollout with profiling, custom MaxText knobs, and
+    # Raiden weight sync.
     "maxtext": GoldenCase((
         "model_config.model_source=maxtext",
         "model_config.model_path=/ckpt/qwen3-1.7b/0/items",
@@ -274,6 +274,15 @@ GOLDEN_CASES: Mapping[str, GoldenCase] = {
             " 'allow_split_physical_axes': False}}}"
         ),
     )),
+    # MaxText `inprocess_vllm` rollout without weight sync that loads a scanned
+    # checkpoint over its random weights before it serves.
+    "maxtext_scanned_eval": GoldenCase((
+        "model_config.model_source=maxtext",
+        "model_config.model_path=/ckpt/qwen3-1.7b/0/items",
+        "model_config.kwargs.maxtext_model_name=qwen3-1.7b",
+        "weight_sync_config.mode=none",
+        "rollout_model_config.scanned_checkpoint_path=/ckpt/scanned/0",
+    )),
 }
 
 # The cases each role's goldens cover.
@@ -290,6 +299,7 @@ GOLDEN_CASES_BY_ROLE: Mapping[node_utils.ProcessRole, tuple[str, ...]] = {
         "vanilla",
         "gemma4",
         "vllm_engine_kwargs",
+        "maxtext_scanned_eval",
     ),
 }
 
@@ -589,6 +599,49 @@ def _run_rollout(
       mock.patch.dict(sys.modules, {"vllm.engine.arg_utils": arg_utils})
   )
   recorder.patch(vanilla_sampler, "VanillaSampler")
+  recorder.patch(
+      rollout,
+      "_scanned_checkpoint_layout",
+      returns=(
+          "/ckpt/scanned/0/items",
+          {"checkpoint_storage_use_ocdbt": True},
+          False,
+      ),
+  )
+  scanned_loader = types.ModuleType(
+      "maxtext.integration.vllm.scanned_checkpoint_loader"
+  )
+  setattr(
+      scanned_loader,
+      "load_and_convert_scanned_checkpoint",
+      recorder.record(
+          "maxtext.integration.vllm.scanned_checkpoint_loader"
+          ".load_and_convert_scanned_checkpoint"
+      ),
+  )
+  maxtext_vllm = types.ModuleType("maxtext.integration.vllm")
+  setattr(maxtext_vllm, "scanned_checkpoint_loader", scanned_loader)
+  maxtext_integration = types.ModuleType("maxtext.integration")
+  setattr(maxtext_integration, "vllm", maxtext_vllm)
+  maxtext_pkg = types.ModuleType("maxtext")
+  setattr(maxtext_pkg, "integration", maxtext_integration)
+  recorder.stack.enter_context(
+      mock.patch.dict(
+          sys.modules,
+          {
+              "maxtext": maxtext_pkg,
+              "maxtext.integration": maxtext_integration,
+              "maxtext.integration.vllm": maxtext_vllm,
+              "maxtext.integration.vllm.scanned_checkpoint_loader": (
+                  scanned_loader
+              ),
+              "maxtext.src.maxtext.integration.vllm": maxtext_vllm,
+              "maxtext.src.maxtext.integration.vllm.scanned_checkpoint_loader": (
+                  scanned_loader
+              ),
+          },
+      )
+  )
   recorder.record_init(inprocess_vllm_sampler.InprocessVllmSampler)
   recorder.record_init(vllm_sampler.VllmSampler)
   recorder.patch(tokenizer_adapter, "TokenizerAdapter")

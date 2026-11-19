@@ -656,7 +656,8 @@ weight_sync_config:
         "model_config.kwargs.maxtext_model_name=qwen3-1.7b",
     ]
     for rollout_engine in ("inprocess_vllm", "vllm"):
-      # vLLM's `MaxTextForCausalLM` never loads the checkpoint itself.
+      # Without a checkpoint path, `MaxTextForCausalLM` starts from random
+      # weights.
       for mode in ("none", "in_memory"):
         with self.subTest(rollout_engine=rollout_engine, mode=mode):
           with self.assertRaisesRegex(
@@ -678,6 +679,148 @@ weight_sync_config:
         self.assertEqual(
             hp.config["rollout_model_config"]["model_source"], "maxtext"
         )
+
+  def test_maxtext_rollout_loads_a_checkpoint_without_weight_sync(self):
+    maxtext = [
+        "model_config.model_source=maxtext",
+        "model_config.model_path=/ckpt/qwen3-1.7b/0/items",
+        "model_config.kwargs.maxtext_model_name=qwen3-1.7b",
+        "weight_sync_config.mode=none",
+    ]
+    unscanned = (
+        "vllm_config.engine_kwargs={'additional_config': {'maxtext_config':"
+        " {'load_parameters_path': '/ckpt/unscanned/0/items'}}}"
+    )
+    unscanned_null = (
+        "vllm_config.engine_kwargs={'additional_config': {'maxtext_config':"
+        " {'load_parameters_path': null}}}"
+    )
+    scanned = "rollout_model_config.scanned_checkpoint_path=/ckpt/scanned/0"
+    # vLLM's MaxTextForCausalLM loads an unscanned checkpoint itself with
+    # `mode=none`, and rejects non-`none` weight-sync modes.
+    for rollout_engine in ("inprocess_vllm", "vllm"):
+      with self.subTest(rollout_engine=rollout_engine):
+        hp = resolve_config.initialize(
+            [*maxtext, f"rollout_engine={rollout_engine}", unscanned]
+        )
+        self.assertEqual(resolve_config.rollout_scanned_checkpoint_path(hp), "")
+      for bad_mode, error in (
+          ("raiden", "load_parameters_path has no effect"),
+          ("in_memory", "needs weight_sync_config.mode=raiden"),
+          ("fs", "needs weight_sync_config.mode=raiden"),
+      ):
+        with self.subTest(rollout_engine=rollout_engine, bad_mode=bad_mode):
+          with self.assertRaisesRegex(ValueError, error):
+            resolve_config.initialize([
+                *maxtext,
+                f"rollout_engine={rollout_engine}",
+                f"weight_sync_config.mode={bad_mode}",
+                unscanned,
+            ])
+    # A null `load_parameters_path` is unset, not the string `'None'`.
+    with self.assertRaisesRegex(
+        ValueError, "needs weight_sync_config.mode=raiden"
+    ):
+      resolve_config.initialize([*maxtext, unscanned_null])
+    # Role-only rollout MaxText eval needs no trainer `actor_model_config.model_path`.
+    role_only_hp = resolve_config.initialize([
+        "rollout_model_config.model_source=maxtext",
+        "rollout_model_config.kwargs.maxtext_model_name=qwen3-1.7b",
+        "weight_sync_config.mode=none",
+        scanned,
+    ])
+    self.assertEqual(
+        resolve_config.rollout_scanned_checkpoint_path(role_only_hp),
+        "/ckpt/scanned/0",
+    )
+    # The rollout node loads a scanned one over random weights (including when
+    # `load_parameters_path` is explicitly null).
+    hp = resolve_config.initialize(
+        [*maxtext, "rollout_model_config.scanned_checkpoint_path= /ckpt/s/0 ", unscanned_null]
+    )
+    self.assertEqual(
+        resolve_config.rollout_scanned_checkpoint_path(hp), "/ckpt/s/0"
+    )
+    self.assertIs(resolve_config.rollout_init_with_random_weights(hp), True)
+    hp = resolve_config.initialize(
+        [*maxtext, scanned, "vllm_config.init_with_random_weights=true"]
+    )
+    self.assertIs(resolve_config.rollout_init_with_random_weights(hp), True)
+    # Null `scanned_checkpoint_path` resolves as unset.
+    self.assertEqual(
+        resolve_config.rollout_scanned_checkpoint_path(
+            resolve_config.initialize(
+                ["rollout_model_config.scanned_checkpoint_path=null"]
+            )
+        ),
+        "",
+    )
+    for bad_path_argv, exc_type, error in (
+        (
+            ("rollout_model_config.scanned_checkpoint_path=false",),
+            TypeError,
+            "scanned_checkpoint_path must be a str or null",
+        ),
+        (
+            ("rollout_model_config.scanned_checkpoint_path='   '",),
+            ValueError,
+            "scanned_checkpoint_path must not be whitespace-only",
+        ),
+        (
+            (
+                "vllm_config.engine_kwargs={'additional_config':"
+                " {'maxtext_config': {'load_parameters_path': False}}}",
+            ),
+            TypeError,
+            "load_parameters_path must be a str or null",
+        ),
+        (
+            (
+                "vllm_config.engine_kwargs={'additional_config':"
+                " {'maxtext_config': {'load_parameters_path': '   '}}}",
+            ),
+            ValueError,
+            "load_parameters_path must not be whitespace-only",
+        ),
+    ):
+      with self.subTest(bad_path_argv=bad_path_argv):
+        with self.assertRaisesRegex(exc_type, error):
+          resolve_config.initialize([*maxtext, *bad_path_argv])
+    for argv, error in (
+        (
+            ("weight_sync_config.mode=raiden",),
+            "weight_sync_config.mode=raiden replaces the loaded weights",
+        ),
+        (
+            ("weight_sync_config.mode=in_memory",),
+            "needs weight_sync_config.mode: none, got 'in_memory'",
+        ),
+        (
+            ("weight_sync_config.mode=fs",),
+            "needs weight_sync_config.mode: none, got 'fs'",
+        ),
+        (
+            ("weight_sync_config.in_flight_weight_updates=true",),
+            "in_flight_weight_updates must be false",
+        ),
+        (
+            ("rollout_model_config.model_source=huggingface",),
+            "needs rollout_model_config.model_source: maxtext",
+        ),
+        (("rollout_engine=vllm",), "needs rollout_engine: inprocess_vllm"),
+        (("rollout_engine=vanilla",), "needs rollout_engine: inprocess_vllm"),
+        (
+            ("vllm_config.init_with_random_weights=false",),
+            "init_with_random_weights must be true or null",
+        ),
+        ((unscanned,), "set either it or maxtext_config.load_parameters_path"),
+    ):
+      with self.subTest(argv=argv):
+        with self.assertRaisesRegex(
+            ValueError,
+            f"rollout_model_config.scanned_checkpoint_path: .*{error}",
+        ):
+          resolve_config.initialize([*maxtext, scanned, *argv])
 
   def test_k8s_target_resolves_reference_worker(self):
     # `k8s.sh` rejects the reference worker only for the commands that start
