@@ -16,7 +16,7 @@
 #
 # Layered on top of `launch/common/base_dist_config.yaml`; cluster, mesh, and
 # chip placement default to `base_dist_config.yaml` (target local) unless set
-# below; `k8s_launcher_v2.sh` adds the GKE overrides as `section.key=value`
+# below; `k8s_launcher.sh` adds the GKE overrides as `section.key=value`
 # arguments. Later `override_config_file=` arguments and `section.key=value`
 # overrides win.
 
@@ -153,7 +153,7 @@ agent_kwargs:
 
 # Forwarded to the rollout worker as `NAMESPACE`, `NODE_SELECTOR_KEY`, and
 # `NODE_SELECTOR_VAL` for `SWEEnv` / `SandboxFleet` Kubernetes pods. On
-# `cluster_config.target=k8s`, `namespace: null` (what `k8s_launcher_v2.sh`
+# `cluster_config.target=k8s`, `namespace: null` (what `k8s_launcher.sh`
 # sets) follows `cluster_config.k8s.namespace`.
 kubernetes_config:
   namespace: "rl-tunix-swebench"

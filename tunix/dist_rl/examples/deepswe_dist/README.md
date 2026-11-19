@@ -1,18 +1,11 @@
 # Distributed DeepSWE GRPO Recipe
 
-This directory runs the DeepSWE R2E-Gym recipe (`examples/deepswe/`) with two
-sets of launchers:
+This directory runs the DeepSWE R2E-Gym recipe (`examples/deepswe/`) on the
+shared distributed RL launcher and node mains in `tunix/dist_rl/launch/`:
+`launcher.sh` (one TPU host) and `k8s_launcher.sh` (GKE), configured by
+`deepswe.yaml`.
 
-*   `launcher_v2.sh` (one TPU host) and `k8s_launcher_v2.sh` (GKE) run it on the
-    shared distributed RL launcher and node mains in `tunix/dist_rl/launch/`,
-    configured by `deepswe.yaml`. They are described below.
-*   `launcher.sh` and `k8s_launcher.sh` are the earlier launchers. They run
-    `run_deepswe_dist.py` with the `examples/common` node mains and are
-    configured through environment variables; see
-    [Earlier launchers](#earlier-launchers). They stay until the MLPerf DeepSWE
-    recipe reaches parity on the v2 launchers.
-
-The v2 launchers run these node mains:
+The launchers run these node mains:
 
 1. `tunix.dist_rl.launch.nodes.orchestrator` runs the CPU control plane and
    loads task records via `deepswe.create_dataset(**data_config)`.
@@ -38,7 +31,7 @@ Because `deepswe.yaml` defaults to `Qwen/Qwen3-32B` in `float32`, a single
 overrides:
 
 ```bash
-bash tunix/dist_rl/examples/deepswe_dist/launcher_v2.sh \
+bash tunix/dist_rl/examples/deepswe_dist/launcher.sh \
   model_config.model_name=Qwen3-1.7B model_config.model_id=Qwen/Qwen3-1.7B \
   tokenizer_config.tokenizer_path=Qwen/Qwen3-1.7B \
   rollout_config.max_prompt_length=1024 \
@@ -55,7 +48,7 @@ Enable `SandboxFleet` inside the rollout worker process and customize sandbox
 pod placement via `section.key=value` overrides:
 
 ```bash
-bash tunix/dist_rl/examples/deepswe_dist/launcher_v2.sh \
+bash tunix/dist_rl/examples/deepswe_dist/launcher.sh \
   env_kwargs.use_agent_sandbox=true \
   kubernetes_config.namespace=rl-tunix-swebench \
   kubernetes_config.node_selector_key=cloud.google.com/gke-nodepool \
@@ -63,8 +56,8 @@ bash tunix/dist_rl/examples/deepswe_dist/launcher_v2.sh \
 ```
 
 Pass `--dry-run` to print the resolved node commands without starting workers.
-`launch.sh` rejects the earlier launchers' environment variables (such as
-`BATCH_SIZE`, `MAX_STEPS`, `WEIGHT_SYNC_MODE`, or `USE_AGENT_SANDBOX`): unset
+`launch.sh` rejects the removed environment-variable launchers' settings (such
+as `BATCH_SIZE`, `MAX_STEPS`, `WEIGHT_SYNC_MODE`, or `USE_AGENT_SANDBOX`): unset
 them and pass `section.key=value` arguments instead. Keep
 `env_kwargs.max_steps` equal to `agentic_grpo_config.max_turns`.
 
@@ -74,7 +67,7 @@ Deploy the orchestrator, Pathways trainer (`tpuv5:4x4x4`, `8x8` mesh), and 16
 rollout (`tpuv5:2x2x1`, `TP=4` vLLM engine each) JobSets on GKE:
 
 ```bash
-bash tunix/dist_rl/examples/deepswe_dist/k8s_launcher_v2.sh start \
+bash tunix/dist_rl/examples/deepswe_dist/k8s_launcher.sh start \
   cluster_config.k8s.tunix_image=<IMAGE>
 ```
 
@@ -85,7 +78,7 @@ standard GKE nodes), cache it in the pods' memory-backed `/dev/shm` and raise
 the trainer container's memory limit to cover the cached weights:
 
 ```bash
-bash tunix/dist_rl/examples/deepswe_dist/k8s_launcher_v2.sh start \
+bash tunix/dist_rl/examples/deepswe_dist/k8s_launcher.sh start \
   cluster_config.k8s.tunix_image=<IMAGE> \
   model_config.model_download_path=/dev/shm/models \
   cluster_config.role_env.trainer.HF_HOME=/dev/shm/hf \
@@ -98,7 +91,7 @@ namespace (`cluster_config.k8s.namespace`, default `default`) unless
 `kubernetes_config.namespace` names another one:
 
 ```bash
-bash tunix/dist_rl/examples/deepswe_dist/k8s_launcher_v2.sh start \
+bash tunix/dist_rl/examples/deepswe_dist/k8s_launcher.sh start \
   cluster_config.k8s.tunix_image=<IMAGE> \
   env_kwargs.use_agent_sandbox=true
 ```
@@ -107,34 +100,7 @@ Deploy or remove the in-cluster OpenTelemetry collector, or tear down all
 JobSets:
 
 ```bash
-bash tunix/dist_rl/examples/deepswe_dist/k8s_launcher_v2.sh otel
-bash tunix/dist_rl/examples/deepswe_dist/k8s_launcher_v2.sh stop-otel
-bash tunix/dist_rl/examples/deepswe_dist/k8s_launcher_v2.sh stop
-```
-
-## Earlier launchers
-
-`launcher.sh` and `k8s_launcher.sh` run `run_deepswe_dist.py` (the CPU
-orchestrator) with `../common/run_rollout_node.py` (configured with DeepSWE's
-`SWEEnv` and `SWEAgent`) and `../common/run_trainer_node.py`. They read their
-settings from environment variables. Set `USE_AGENT_SANDBOX=1` to construct
-`SWEEnv` with `SandboxFleet` inside the rollout worker process.
-
-Their defaults are the same converging Qwen3-32B recipe as `deepswe.yaml`
-(`k8s_launcher.sh`: `tpuv5:4x4x4` trainer with an `(8, 8)` mesh and
-`ROLLOUT_REPLICAS=16` single-host `tpuv5:2x2x1` rollouts).
-
-```bash
-cd tunix/dist_rl/examples/deepswe_dist
-BETA=0.0 WEIGHT_SYNC_MODE=none MAX_STEPS=1 BATCH_SIZE=1 NUM_GENERATIONS=2 ./launcher.sh
-```
-
-For sandbox placement, set `SANDBOX_NAMESPACE`, `SANDBOX_NODE_SELECTOR_KEY`, and
-`SANDBOX_NODE_SELECTOR_VAL` before launching. To deploy on GKE, or to stop all
-JobSets:
-
-```bash
-cd tunix/dist_rl/examples/deepswe_dist
-USE_AGENT_SANDBOX=1 ./k8s_launcher.sh --command start
-./k8s_launcher.sh --command stop
+bash tunix/dist_rl/examples/deepswe_dist/k8s_launcher.sh otel
+bash tunix/dist_rl/examples/deepswe_dist/k8s_launcher.sh stop-otel
+bash tunix/dist_rl/examples/deepswe_dist/k8s_launcher.sh stop
 ```
