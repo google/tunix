@@ -82,7 +82,7 @@ class ShowCommand(base.BaseCommand):
       )
       return 2
     try:
-      trajectories = reader.get_trajectories(self.trajectory_id)
+      trajectories = reader.get_trajectories(self.trajectory_id).values()
     except store.TrajectoryNotFoundError as error:
       print(
           "trajectory-explore: error: trajectory not found:"

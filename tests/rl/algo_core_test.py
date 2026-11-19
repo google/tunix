@@ -484,6 +484,7 @@ class AlgoCoreTest(absltest.TestCase):
           sampler_rs_max=None,
           seq_logprob_error_threshold=None,
           use_rollout_logps=True,
+          score_centering=False,
       )
       lp = float(
           algo_core.grpo_loss_fn(
@@ -580,6 +581,7 @@ class AlgoCoreTest(absltest.TestCase):
             sampler_rs_min=rs_min,
             sampler_rs_max=rs_max,
             seq_logprob_error_threshold=seq_err_thresh,
+            score_centering=False,
         )
         # 1. Fused single-pass example (raw rollout_logps)
         ex_fused = common.TrainExample(
@@ -676,6 +678,9 @@ class GrpoLossSequenceLevelControlsTest(absltest.TestCase):
         self.vocab = vocab
         self.bias = nnx.Param(jnp.zeros((vocab,), dtype=jnp.float32))
 
+      def compute_final_logits(self, h):
+        return h
+
       def __call__(
           self,
           x,
@@ -683,8 +688,9 @@ class GrpoLossSequenceLevelControlsTest(absltest.TestCase):
           positions=None,
           cache=None,
           attention_mask=None,
+          skip_lm_head=False,
       ):
-        del segment_ids, positions, attention_mask
+        del segment_ids, positions, attention_mask, skip_lm_head
         logits = jnp.broadcast_to(self.bias[...], x.shape + (self.vocab,))
         return logits, cache
 
@@ -715,6 +721,8 @@ class GrpoLossSequenceLevelControlsTest(absltest.TestCase):
         sampler_rs_max=None,
         seq_logprob_error_threshold=None,
         use_rollout_logps=True,
+        score_centering=False,
+        score_centering_eps=1e-6,
     )
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -733,6 +741,147 @@ class GrpoLossSequenceLevelControlsTest(absltest.TestCase):
     )
     defaults.update(overrides)
     return common.TrainExample(**defaults)
+
+  def test_score_centering_requires_sampler_topk_and_fused_agreement(self):
+    topk_ids = jnp.zeros((2, 3, 2), jnp.int32)
+    topk_logps = jnp.zeros((2, 3, 2), jnp.float32)
+    for ex in (self._example(), self._example(old_topk_token_ids=topk_ids)):
+      with self.assertRaisesRegex(ValueError, 'top-k logprobs'):
+        algo_core.grpo_loss_fn(
+            self.model, ex, self._config(score_centering=True), 0, -1
+        )
+    for bad_ids, bad_logps in (
+        (jnp.zeros((2, 3, 4), jnp.int32), topk_logps),
+        (jnp.zeros((2, 2, 2), jnp.int32), jnp.zeros((2, 2, 2), jnp.float32)),
+        (jnp.zeros((2, 3), jnp.int32), jnp.zeros((2, 3), jnp.float32)),
+    ):
+      with self.assertRaisesRegex(ValueError, 'matching \\[B, C, K\\]'):
+        algo_core.grpo_loss_fn(
+            self.model,
+            self._example(old_topk_token_ids=bad_ids, old_topk_logps=bad_logps),
+            self._config(score_centering=True),
+            0,
+            -1,
+        )
+    ex_old = self._example(
+        old_per_token_logps=jnp.zeros((2, 3), jnp.float32),
+        old_topk_token_ids=topk_ids,
+        old_topk_logps=topk_logps,
+    )
+    for ex_bad, cfg_bad in (
+        (
+            ex_old.replace(sampler_agreement_applied=True),
+            self._config(score_centering=True),
+        ),
+        (ex_old, self._config(score_centering=True, use_rollout_logps=False)),
+    ):
+      with self.assertRaisesRegex(ValueError, 'fused single-step'):
+        algo_core.grpo_loss_fn(self.model, ex_bad, cfg_bad, 0, -1)
+
+  def test_score_centering_on_policy_ratio_and_gradient(self):
+    from flax import nnx  # pylint: disable=g-import-not-at-top
+
+    q = np.array([0.05, 0.65], dtype=np.float32)
+    topk_ids = jnp.broadcast_to(jnp.array([1, 2], jnp.int32), (2, 3, 2))
+    topk_logps = jnp.broadcast_to(jnp.log(q), (2, 3, 2)).at[1, 2].set(-jnp.inf)
+
+    # 1. Even with drifted rollout logps and sampler_is=None, Score Centering
+    # keeps the PPO ratio on-policy and matches chunked logp computation.
+    drifted_ex = self._example(
+        old_per_token_logps=jnp.full((2, 3), np.log(0.05), jnp.float32),
+        old_topk_token_ids=topk_ids,
+        old_topk_logps=topk_logps,
+    )
+    sc_cfg = self._config(score_centering=True)
+    out = algo_core.grpo_loss_fn(self.model, drifted_ex, sc_cfg, 0, -1)
+    chunked = algo_core.grpo_loss_fn(
+        self.model, drifted_ex, sc_cfg, 0, -1, compute_logps_chunk_size=2
+    )
+    self.assertAlmostEqual(float(out.aux_metrics['is_ratio/mean']), 1.0)
+    self.assertAlmostEqual(float(out.aux_metrics['ppo_kl'].compute()), 0.0)
+    self.assertGreater(
+        float(out.aux_metrics['score_centering/abs_coeff_sum_mean'].compute()),
+        0.0,
+    )
+    for name in (
+        'head_mass_q_mean',
+        'head_mass_q_min',
+        'head_mass_p_mean',
+        'tail_ratio_rho_mean',
+        'tail_ratio_rho_max',
+        'abs_coeff_sum_max',
+        'tail_eps_clamped_frac',
+        'tv_distance_mean',
+        'sampled_in_topk_frac',
+    ):
+      self.assertIn(f'score_centering/{name}', out.aux_metrics)
+    self.assertAlmostEqual(
+        float(out.primary_loss.compute()), float(chunked.primary_loss.compute())
+    )
+    np.testing.assert_allclose(
+        nnx.grad(
+            lambda m: algo_core.grpo_loss_fn(
+                m, drifted_ex, sc_cfg, 0, -1, compute_logps_chunk_size=2
+            ).primary_loss.compute()
+        )(self.model).bias[...],
+        nnx.grad(
+            lambda m: algo_core.grpo_loss_fn(
+                m, drifted_ex, sc_cfg, 0, -1
+            ).primary_loss.compute()
+        )(self.model).bias[...],
+        rtol=1e-5,
+        atol=1e-6,
+    )
+
+    # 2. Value is unchanged and gradient adds exact expected score under q_hat.
+    p = np.full(self.vocab, 1.0 / self.vocab, dtype=np.float32)
+    p_head = p[1:3]
+    rho = (1.0 - q.sum()) / (1.0 - p_head.sum())
+    ex = self._example(
+        old_per_token_logps=jnp.full((2, 3), self.trainer_logp, jnp.float32),
+        old_topk_token_ids=topk_ids,
+        old_topk_logps=topk_logps,
+    )
+    def loss_fn(m, sc, sis):
+      return algo_core.grpo_loss_fn(
+          m,
+          ex,
+          self._config(
+              loss_agg_mode='token-mean',
+              sampler_is=sis,
+              sampler_is_threshold=2.0,
+              score_centering=sc,
+          ),
+          0,
+          -1,
+      ).primary_loss.compute()
+
+    for sampler_is in (None, 'token'):
+      with self.subTest(sampler_is=sampler_is):
+        self.assertAlmostEqual(
+            float(loss_fn(self.model, True, sampler_is)),
+            float(loss_fn(self.model, False, sampler_is)),
+        )
+        grad_diff = (
+            nnx.grad(lambda m, sis=sampler_is: loss_fn(m, True, sis))(
+                self.model
+            ).bias[...]
+            - nnx.grad(lambda m, sis=sampler_is: loss_fn(m, False, sis))(
+                self.model
+            ).bias[...]
+        )
+        coeff = (
+            q * np.minimum(p_head / q, 2.0) - min(1.0, 2.0 * rho) * p_head
+            if sampler_is == 'token'
+            else q - rho * p_head
+        )
+        # 5 active tokens: 3 with advantage 2.0 and 2 with advantage 4.0 -> 2.8.
+        np.testing.assert_allclose(
+            grad_diff,
+            2.8 * (coeff @ (np.eye(self.vocab)[1:3] - p)),
+            rtol=1e-5,
+            atol=1e-6,
+        )
 
   def test_seq_logprob_error_threshold_masks_drifted_sequence_in_loss(self):
     lp = self.trainer_logp

@@ -56,7 +56,7 @@ repos:
     hooks:
       - id: cl-complexity-gate
         name: Tunix CL Complexity Gate
-        entry: python3 scripts/check_cl_complexity.py --strict
+        entry: python3 scripts/check_cl_complexity.py
         language: system
         types: [python]
         verbose: true

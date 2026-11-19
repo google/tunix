@@ -58,7 +58,7 @@ ARG NUMPY_VERSION=2.3.5
 ARG JAX_VERSION=0.11.0
 ARG FLAX_VERSION=0.12.7
 # Keep in sync with requirements/maxtext_requirements.txt.
-ARG DEFAULT_MAXTEXT_COMMIT=bc35b839da747ffbce998eb8da5354e5367f7d66
+ARG DEFAULT_MAXTEXT_COMMIT=aee266d4007149667819c46d0a76edcb18622faf
 
 # Install SFT/MaxText dependencies (unconditional) in one constrained resolution
 # so unpinned packages (e.g. tokamax) backtrack to versions compatible with the

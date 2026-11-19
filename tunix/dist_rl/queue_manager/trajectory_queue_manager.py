@@ -32,7 +32,6 @@ from __future__ import annotations
 import asyncio
 import collections
 from collections.abc import Callable, Hashable, Sequence
-import enum
 import heapq
 import itertools
 import logging
@@ -43,43 +42,10 @@ from tunix.rl.agentic.queue_manager import group_queue_manager
 
 _T = TypeVar("_T")
 TrajectoryItem = datatypes.TrajectoryItem
+GroupOrder = datatypes.GroupOrder
 GroupFn = group_queue_manager.GroupFn
 FilterFn = group_queue_manager.FilterFn
 
-
-class GroupOrder(enum.Enum):
-  """Order in which the scored group queue yields ready groups to the trainer.
-
-  Attributes:
-    TRAJECTORY_COMPLETION: Yields completed groups as soon as they finish
-      scoring via `FifoGroupQueue`, regardless of which dataset prompt batch
-      they originated from. When `priority_fn` is wired on `FifoGroupQueue`,
-      simultaneously buffered groups are served in oldest-valid-first
-      (Earliest-Deadline-First) policy-version order with FIFO tie-breaking to
-      reduce the risk of older valid groups aging past `max_staleness` behind
-      newer arrivals. Raw groups whose valid items fall outside the policy
-      window `[current - max_staleness, current]` or whose cross-turn/cross-item
-      version span exceeds `max_version_span` are dropped at `raw_q` via
-      `TrajectoryQueueManager.create` (enforcing group-wide span `max - min <=
-      max_version_span` and group completion window `max in [current -
-      max_staleness, current]` across valid items when `max_version_span` is
-      set, or per-item `item_policy_version(item) in [current - max_staleness,
-      current]` when `max_version_span` is `None`).
-    PROMPT_ARRIVAL: Partitions scored groups by dataset prompt batch (`batch_idx
-      = prompt_idx // full_batch_size`) via `BatchOrderedGroupQueue` and serves
-      only groups belonging to the current batch cursor (`next_batch_idx`),
-      withholding groups from later batches until the current batch commits.
-      Because `DispatchWindow` bounds in-flight batches to `next_batch +
-      max_staleness` and `pre_weight_sync` synchronizes in-flight rollouts at
-      each step boundary, every batch delivers all `full_batch_size` groups
-      within the staleness window without dropping groups or creating short
-      batches.
-  """
-
-  # Completion order: any ready group, as soon as it exists.
-  TRAJECTORY_COMPLETION = "trajectory_completion"
-  # Prompt-arrival order: only groups of the batch the cursor points at.
-  PROMPT_ARRIVAL = "prompt_arrival"
 
 
 def has_policy_version(item: TrajectoryItem) -> bool:
@@ -370,10 +336,20 @@ class FifoGroupQueue(Generic[_T]):
   def __init__(
       self,
       priority_fn: Callable[[_T], int] | None = None,
+      *,
+      on_group_dropped: Callable[[_T], None] | None = None,
   ) -> None:
+    """Initializes FifoGroupQueue.
+
+    Args:
+      priority_fn: Optional smallest-key-first priority function.
+      on_group_dropped: Optional callback invoked for groups discarded on
+        `put()` while clearing/aborting or during `clear()`.
+    """
     self._ready: list[tuple[int, int, _T]] = []
     self._seq = itertools.count()
     self._priority_fn = priority_fn
+    self._on_group_dropped = on_group_dropped
     self._clearing = False
     self._closed = False
     self._exc: Optional[BaseException] = None
@@ -384,9 +360,11 @@ class FifoGroupQueue(Generic[_T]):
   def create(
       cls,
       priority_fn: Callable[[_T], int] | None = None,
+      *,
+      on_group_dropped: Callable[[_T], None] | None = None,
   ) -> "FifoGroupQueue[_T]":
     """Creates a FIFO group queue with optional smallest-key-first priority ordering and FIFO tie-breaking."""
-    return cls(priority_fn=priority_fn)
+    return cls(priority_fn=priority_fn, on_group_dropped=on_group_dropped)
 
   async def put(self, group: _T) -> None:
     """Enqueues a completed group.
@@ -401,6 +379,8 @@ class FifoGroupQueue(Generic[_T]):
     if self._closed:
       raise RuntimeError("Cannot put into a closed FifoGroupQueue.")
     if self._clearing:
+      if self._on_group_dropped is not None:
+        self._on_group_dropped(group)
       return
     if self._exc is not None:
       raise self._exc
@@ -409,6 +389,8 @@ class FifoGroupQueue(Generic[_T]):
       if self._closed:
         raise RuntimeError("Cannot put into a closed FifoGroupQueue.")
       if self._clearing:
+        if self._on_group_dropped is not None:
+          self._on_group_dropped(group)
         return
       if self._exc is not None:
         raise self._exc
@@ -460,12 +442,16 @@ class FifoGroupQueue(Generic[_T]):
   async def clear(self) -> None:
     """Clears all queued groups and resets close/abort flags."""
     async with self._lock:
+      dropped = [group for _, _, group in self._ready]
       self._ready.clear()
       self._seq = itertools.count()
       self._exc = None
       self._clearing = False
       self._closed = False
       self._have_ready.clear()
+    if self._on_group_dropped is not None:
+      for group in dropped:
+        self._on_group_dropped(group)
 
   def commit(self, step: int = 0, groups: Sequence[Any] | None = None) -> None:
     """No-op commit hook matching `BatchOrderedGroupQueue.commit`."""
@@ -499,12 +485,15 @@ class BatchOrderedGroupQueue(Generic[_T]):
       *,
       full_batch_size: int,
       batch_idx_fn: Callable[[_T], int],
+      on_group_dropped: Callable[[_T], None] | None = None,
   ) -> None:
     """Initializes BatchOrderedGroupQueue.
 
     Args:
       full_batch_size: Groups per prompt batch.
       batch_idx_fn: Function to read a group's prompt-batch index.
+      on_group_dropped: Optional callback invoked for groups discarded on late
+        arrival (`batch_idx < next_batch_idx`), `skip()`, or `clear()`.
 
     Raises:
       ValueError: If `full_batch_size` is not positive.
@@ -515,6 +504,7 @@ class BatchOrderedGroupQueue(Generic[_T]):
       )
     self.full_batch_size = full_batch_size
     self._batch_idx_fn = batch_idx_fn
+    self._on_group_dropped = on_group_dropped
     self._pending: Dict[int, Deque[_T]] = collections.defaultdict(
         collections.deque
     )
@@ -533,11 +523,13 @@ class BatchOrderedGroupQueue(Generic[_T]):
       full_batch_size: int = 1,
       *,
       batch_idx_fn: Callable[[_T], int],
+      on_group_dropped: Callable[[_T], None] | None = None,
   ) -> "BatchOrderedGroupQueue[_T]":
     """Creates a prompt-batch-ordered group queue."""
     return cls(
         full_batch_size=full_batch_size,
         batch_idx_fn=batch_idx_fn,
+        on_group_dropped=on_group_dropped,
     )
 
   async def put(self, group: _T) -> None:
@@ -554,6 +546,8 @@ class BatchOrderedGroupQueue(Generic[_T]):
     if self._closed:
       raise RuntimeError("Cannot put into a closed BatchOrderedGroupQueue.")
     if self._clearing:
+      if self._on_group_dropped is not None:
+        self._on_group_dropped(group)
       return
     if self._exc is not None:
       raise self._exc
@@ -564,6 +558,8 @@ class BatchOrderedGroupQueue(Generic[_T]):
       if self._closed:
         raise RuntimeError("Cannot put into a closed BatchOrderedGroupQueue.")
       if self._clearing:
+        if self._on_group_dropped is not None:
+          self._on_group_dropped(group)
         return
       if self._exc is not None:
         raise self._exc
@@ -577,6 +573,8 @@ class BatchOrderedGroupQueue(Generic[_T]):
             self._next_batch_idx,
             self._dropped_late_groups,
         )
+        if self._on_group_dropped is not None:
+          self._on_group_dropped(group)
         return
 
       self._pending[batch_idx].append(group)
@@ -639,12 +637,18 @@ class BatchOrderedGroupQueue(Generic[_T]):
       begin: First batch to pass over.
       end: One past the last batch to pass over.
     """
+    dropped: list[_T] = []
     for batch_idx in range(begin, end):
-      self._pending.pop(batch_idx, None)
+      popped = self._pending.pop(batch_idx, None)
+      if popped:
+        dropped.extend(popped)
     if end > self._next_batch_idx:
       self._next_batch_idx = end
       self._served_in_batch = 0
     self._have_ready.set()
+    if self._on_group_dropped is not None:
+      for group in dropped:
+        self._on_group_dropped(group)
 
   def commit_batch(self, batch_idx: int) -> None:
     """Releases a batch's state after its optimizer step.
@@ -669,6 +673,9 @@ class BatchOrderedGroupQueue(Generic[_T]):
   async def clear(self) -> None:
     """Clears all staged batches and resets the batch cursor."""
     async with self._lock:
+      dropped: list[_T] = []
+      for pending in self._pending.values():
+        dropped.extend(pending)
       self._pending.clear()
       self._served_in_batch = 0
       self._next_batch_idx = 0
@@ -677,6 +684,9 @@ class BatchOrderedGroupQueue(Generic[_T]):
       self._clearing = False
       self._closed = False
       self._have_ready.clear()
+    if self._on_group_dropped is not None:
+      for group in dropped:
+        self._on_group_dropped(group)
 
   @property
   def pending_groups_count(self) -> int:

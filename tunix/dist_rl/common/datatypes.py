@@ -24,9 +24,10 @@ import dataclasses
 import enum
 import math
 import time
-from typing import Any, Dict, Protocol
+from typing import Any, Dict, Protocol, TypeVar, runtime_checkable
 import uuid
 import numpy as np
+from tunix.common import configs as common_configs
 from tunix.common import datatypes as common_datatypes
 from tunix.rl.agentic.agents import agent_types
 
@@ -39,11 +40,17 @@ TrajectoryStatus = agent_types.TrajectoryStatus
 TrajectoryItem = agent_types.TrajectoryItem
 format_traj_id = agent_types.format_traj_id
 Role = common_datatypes.Role
+RoutedExpertsRef = common_datatypes.RoutedExpertsRef
 ROUTED_EXPERTS_ENCODE_MODES = common_datatypes.ROUTED_EXPERTS_ENCODE_MODES
 RoutedExpertsEncodeMode = common_datatypes.RoutedExpertsEncodeMode
+RoutedExpertsWireEncoding = common_datatypes.RoutedExpertsWireEncoding
 validate_routed_experts_encode_config = (
-    common_datatypes.validate_routed_experts_encode_config
+    common_configs.validate_routed_experts_encode_config
 )
+resolve_routed_experts_wire_encoding = (
+    common_datatypes.resolve_routed_experts_wire_encoding
+)
+routed_experts_bytes_per_token = common_datatypes.routed_experts_bytes_per_token
 
 # Marks a router-replay slot the trainer must not replay, so the model falls
 # back to its own gate there. Matches what MaxText's replay path expects.
@@ -190,6 +197,22 @@ class AdmissionStatus(enum.Enum):
   ACTIVE = "active"
 
 
+class GroupOrder(enum.Enum):
+  """Order in which the scored group queue yields ready groups to the trainer.
+
+  Attributes:
+    TRAJECTORY_COMPLETION: Yields completed groups as soon as they finish
+      scoring via `FifoGroupQueue`, regardless of which dataset prompt batch
+      they originated from.
+    PROMPT_ARRIVAL: Partitions scored groups by dataset prompt batch (`batch_idx
+      = prompt_idx // full_batch_size`) via `BatchOrderedGroupQueue` and serves
+      only groups belonging to the current batch cursor.
+  """
+
+  TRAJECTORY_COMPLETION = "trajectory_completion"
+  PROMPT_ARRIVAL = "prompt_arrival"
+
+
 @dataclasses.dataclass(kw_only=True)
 class HealthReport:
   """A snapshot of a worker's health and readiness state.
@@ -216,7 +239,10 @@ class WorkerInfo:
   """Static metadata describing a worker's identity and capabilities.
 
   Attributes:
-    worker_id: The unique identifier for this worker.
+    worker_id: The logical slot identifier for this worker (e.g., "rollout-0").
+    instance_id: Per-process-incarnation identifier generated at worker startup
+      so orchestrator-side caches and registration can distinguish restarts of
+      the same logical `worker_id`. Defaults to `""` when unspecified.
     roles: The orchestrator roles this worker can serve (e.g., "trainer",
       "rollout").
     resources: Unstructured dictionary of hardware or configuration details
@@ -224,6 +250,7 @@ class WorkerInfo:
   """
 
   worker_id: str
+  instance_id: str = ""
   roles: frozenset[str] = frozenset()
   resources: dict[str, Any] = dataclasses.field(default_factory=dict)
 
@@ -298,10 +325,15 @@ class FaultToleranceConfig:
       `min_active_rollout_grace_s` seconds after the first rollout worker has
       reached `ACTIVE`. Ignored when `enabled=False`.
     min_active_rollout_grace_s: Wall-clock grace period in seconds (`>= 0.0`,
-      default `900.0`) that the active rollout ratio may remain strictly below
-      `min_active_rollout_ratio` before `RolloutCapacityError` is raised,
-      allowing crashed workers time to be restarted and rejoin. The grace timer
-      starts on worker eviction, while the floor is checked at
+      default `900.0`) that active rollout capacity may remain below its floor
+      before `RolloutCapacityError` is raised, allowing crashed workers time to
+      restart and rejoin. When `enabled=True`, this grace applies both to
+      `min_active_rollout_ratio` and to any Relay staging-slot floor installed
+      via `DistributedRLEngine.configure_staging_liveness` (during a staging
+      shortfall, surviving rollout workers may block in
+      `RolloutStagingBuffer.reserve()` until capacity recovers or grace
+      elapses; when `enabled=False`, staging-slot shortfalls fail fast). Both
+      timers start immediately on worker eviction and are checked at
       `DistributedRLEngine` construction, after each `poll_rollouts()`, and
       after `sync_weights()` promotion, so `RolloutCapacityError` surfaces on
       the first poll or weight-sync boundary once `min_active_rollout_grace_s`
@@ -413,6 +445,9 @@ class RolloutRequest(Request):
       turns of the rollout episode.
     target_policy_version: Policy model version identifier to use for rollout
       generation.
+    stage_routed_experts: When True, stages encoded `routed_experts` in the
+      worker's `RolloutStagingBuffer` and returns a `RoutedExpertsRef` on
+      `TrajectoryItem.routed_experts_ref` instead of inline bytes.
   """
 
   prompt: Any = ""
@@ -422,6 +457,14 @@ class RolloutRequest(Request):
   max_turns: int = 10
   max_response_length: int | None = None
   target_policy_version: int = 0
+  stage_routed_experts: bool = False
+
+  def __post_init__(self) -> None:
+    if not isinstance(self.stage_routed_experts, bool):
+      raise TypeError(
+          "RolloutRequest.stage_routed_experts must be a bool, got"
+          f" {type(self.stage_routed_experts).__name__}."
+      )
 
   @property
   def traj_id(self) -> str:
@@ -508,9 +551,12 @@ class WeightSyncRequest(Request):
     controller_id: Optional identifier for transport controllers (e.g., TPU
       Raiden).
     policy_version: Target policy version identifier of the weights to sync.
-    weights: Optional source weights payload for non-Raiden / fallback sync.
+    weights: Optional source weights payload for non-Raiden / in-memory sync.
     source_metadata: Optional transport/layout metadata describing source
       weights.
+    min_retained_policy_version: Optional lower bound on policy version retained
+      in `RolloutStagingBuffer`; entries staged strictly below this version are
+      evicted as zombies on `post_weight_sync`.
     extra_config: Optional backend-specific configuration parameters.
   """
 
@@ -518,7 +564,25 @@ class WeightSyncRequest(Request):
   policy_version: int = 0
   weights: Any = None
   source_metadata: Any = None
+  min_retained_policy_version: int | None = None
   extra_config: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+  def __post_init__(self) -> None:
+    if isinstance(self.policy_version, bool) or not isinstance(
+        self.policy_version, int
+    ):
+      raise TypeError(
+          "WeightSyncRequest.policy_version must be an int (not bool), got"
+          f" {self.policy_version!r}."
+      )
+    if self.min_retained_policy_version is not None and (
+        isinstance(self.min_retained_policy_version, bool)
+        or not isinstance(self.min_retained_policy_version, int)
+    ):
+      raise TypeError(
+          "WeightSyncRequest.min_retained_policy_version must be an int or"
+          f" None, got {self.min_retained_policy_version!r}."
+      )
 
 
 @dataclasses.dataclass
@@ -659,6 +723,9 @@ class RLTrainerPayload(TrainerPayload):
       `tunix.rl.packing.decode_routed_experts` (on CPU) or
       `tunix.rl.common.decode_routed_experts_jax` (on device/XLA) rather than
       indexing raw bytes directly.
+    routed_experts_ref: Optional unbatched `RoutedExpertsRef` handle pointing to
+      worker-staged `routed_experts` (static field, mutually exclusive with
+      inline `routed_experts`; always None on packed microbatches).
     returns: Optional [B, C] value baseline returns (for PPO / Critic).
     old_values: Optional [B, C] critic value estimates (for PPO / Critic).
     num_segments: Optional static upper bound on number of segments in packed
@@ -683,6 +750,9 @@ class RLTrainerPayload(TrainerPayload):
   reference_support_logps: np.ndarray | None = None
   reference_kl_weights: np.ndarray | None = None
   routed_experts: np.ndarray | None = None
+  routed_experts_ref: RoutedExpertsRef | None = dataclasses.field(
+      default=None, metadata=STATIC_FIELD_METADATA
+  )
   returns: np.ndarray | None = None
   old_values: np.ndarray | None = None
   num_segments: int | None = dataclasses.field(
@@ -695,6 +765,19 @@ class RLTrainerPayload(TrainerPayload):
       default_factory=dict, metadata=STATIC_FIELD_METADATA
   )
   # TODO(tunix-dev): add ppo specific fields in PPORLTrainerPayload.
+
+  def __post_init__(self) -> None:
+    if self.routed_experts_ref is not None:
+      if not isinstance(self.routed_experts_ref, RoutedExpertsRef):
+        raise TypeError(
+            "RLTrainerPayload.routed_experts_ref must be a RoutedExpertsRef"
+            f" or None, got {type(self.routed_experts_ref).__name__}."
+        )
+      if self.routed_experts is not None:
+        raise ValueError(
+            "RLTrainerPayload cannot hold both inline routed_experts and"
+            " routed_experts_ref."
+        )
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -740,25 +823,35 @@ class TrainRequest(Request):
   target_policy_version: int = 0
 
 
-class WeightedMetricLike(Protocol):
-  """An unreduced weighted metric transported across the wire.
+_MetricValueT_co = TypeVar(
+    "_MetricValueT_co",
+    bound=common_datatypes.ArrayLike,
+    covariant=True,
+)
+
+
+class WeightedMetricLike(Protocol[_MetricValueT_co]):
+  """Structural read-only contract for an unreduced weighted metric.
 
   Trainers accumulate some metrics as a running `unreduced_sum` and a
   `denominator` so the orchestrator can reduce them correctly across
-  micro-batches and workers. This is the structural wire contract; readers match
-  on these read-only attributes rather than a concrete class so the wire format
-  stays framework-neutral. `tunix.sft.utils.WeightedMetric` is the on-device JAX
-  counterpart whose `jax.Array` fields must be converted to host numpy/float
-  values before crossing the wire (`rpc_utils.validate_wire_safe` rejects
-  `jax.Array`).
+  micro-batches and workers. Readers match on these read-only attributes rather
+  than a concrete class so both accelerator-resident metrics (such as
+  `tunix.sft.utils.WeightedMetric`) and host wire metrics conform without
+  importing ML frameworks. Parameterize by `_MetricValueT_co` to narrow the
+  allowed value type (`WeightedMetricLike[np.ndarray | np.number | float]` on
+  the host wire DTO `MetricsBuffer` versus
+  `WeightedMetricLike[common_datatypes.ArrayLike]` on `MetricsBufferLike`;
+  `rpc_utils.validate_wire_safe` enforces the host-only wire invariant at
+  runtime).
   """
 
   @property
-  def unreduced_sum(self) -> np.ndarray | np.number | float:
+  def unreduced_sum(self) -> _MetricValueT_co:
     ...
 
   @property
-  def denominator(self) -> np.ndarray | np.number | float:
+  def denominator(self) -> _MetricValueT_co:
     ...
 
   @property
@@ -767,6 +860,38 @@ class WeightedMetricLike(Protocol):
 
   @property
   def min_denom(self) -> float | None:
+    ...
+
+
+@runtime_checkable
+class MetricsBufferLike(Protocol):
+  """Structural read-only contract for step metric buffers returned by trainers.
+
+  Satisfied both by `datatypes.MetricsBuffer` (host numpy/float wire DTO) and by
+  accelerator-resident buffers such as MaxText's
+  `abstract_engine.MetricsBuffer` without importing device frameworks.
+  """
+
+  @property
+  def id(self) -> Any:
+    ...
+
+  @property
+  def weighted_metrics(
+      self,
+  ) -> Mapping[str, WeightedMetricLike[common_datatypes.ArrayLike]]:
+    ...
+
+  @property
+  def scalar_metrics(self) -> Mapping[str, common_datatypes.ArrayLike]:
+    ...
+
+  @property
+  def aggregation_fns(self) -> Mapping[str, Callable[..., Any]]:
+    ...
+
+  @property
+  def mode(self) -> str:
     ...
 
 
@@ -790,9 +915,9 @@ class MetricsBuffer:
   """
 
   id: int | str
-  weighted_metrics: Mapping[str, WeightedMetricLike] = dataclasses.field(
-      default_factory=dict
-  )
+  weighted_metrics: Mapping[
+      str, WeightedMetricLike[np.ndarray | np.number | float]
+  ] = dataclasses.field(default_factory=dict)
   scalar_metrics: Mapping[str, np.ndarray | np.number | float] = (
       dataclasses.field(default_factory=dict)
   )

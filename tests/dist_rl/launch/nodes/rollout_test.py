@@ -14,15 +14,17 @@
 
 """Unit tests for the distributed RL rollout worker node."""
 
-from collections.abc import Mapping
 import asyncio
+from collections.abc import Mapping
 import contextlib
+import functools
 import json
 import os
 from typing import Any
 from unittest import mock
 
 from absl.testing import absltest
+from tunix.dist_rl.common import execution_target
 from tunix.dist_rl.common import gcs_cache
 from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.launch.common import resolve_config
@@ -32,6 +34,7 @@ from tunix.dist_rl.rollout import inprocess_vllm_sampler
 from tunix.dist_rl.rollout import vanilla_sampler
 from tunix.dist_rl.rollout import vllm_sampler
 from tunix.dist_rl.weight_sync import weight_sync as weight_sync_lib
+from tunix.generate import mappings as mappings_lib
 from tunix.models import automodel
 from tunix.rl.agentic.parser.chat_template_parser import parser
 from tunix.utils import maxtext_utils
@@ -98,6 +101,7 @@ class ModelFamilyTest(absltest.TestCase):
         ("gemma4_e2b", parser.Gemma4ChatTemplateParser),
         ("google/gemma-2-2b-it", parser.GemmaChatTemplateParser),
         ("Qwen/Qwen3-1.7B", parser.QwenChatTemplateParser),
+        ("Qwen/Qwen3.5-0.8B", parser.QwenChatTemplateParser),
     ):
       with self.subTest(model_id=model_id):
         result = rollout._chat_parser_for(
@@ -114,29 +118,151 @@ class ModelFamilyTest(absltest.TestCase):
         rollout._create_chat_parser(hp, mock.Mock()), parser.RawTextParser
     )
 
-  def test_gemma4_mapping_includes_preprocessing_and_fused_projections(self):
-    config = rollout._mapping_config_for("google/gemma-4-E2B-it")
+  def test_validate_rollout_config_rejects_qwen3p5_unsupported_weight_sync(
+      self,
+  ):
+    with self.subTest("oop_vllm_with_raiden"):
+      oop_hp = _hp(
+          "rollout_engine=vllm",
+          "model_config.model_id=Qwen/Qwen3.5-0.8B",
+          "weight_sync_config.mode=raiden",
+          "rollout_model_config.mesh.shape=(1,1)",
+          "vllm_config.tensor_parallel_size=1",
+      )
+      with self.assertRaisesRegex(ValueError, "use inprocess_vllm instead"):
+        rollout._validate_rollout_config(oop_hp)
+      oop_config = rollout._rollout_config(
+          oop_hp, mock.Mock(), sampler_type="vllm"
+      )
+      with mock.patch.object(
+          vllm_sampler, "VllmSampler", autospec=True
+      ) as mock_sampler_cls:
+        with self.assertRaisesRegex(ValueError, "use inprocess_vllm instead"):
+          rollout._create_vllm_sampler(
+              oop_hp, "rollout-0", mock.Mock(), oop_config
+          )
+        mock_sampler_cls.assert_not_called()
 
-    # Gemma4 fuses gate/up on the source state before transfer and maps
-    # separate q/k/v projections.
-    self.assertIsNotNone(config.preprocess_src_state)
-    to_hf_mappings = config.to_hf_mappings
-    if to_hf_mappings is None:
-      self.fail("Gemma4 mapping has no to_hf_mappings.")
-    self.assertIn("layers.*.mlp.gate_up_proj.kernel", to_hf_mappings)
-    self.assertIn("layers.*.attn.q_einsum.w", to_hf_mappings)
-    self.assertIn("layers.*.attn.k_einsum.w", to_hf_mappings)
-    self.assertIn("layers.*.attn.v_einsum.w", to_hf_mappings)
+    for name, overrides, exc_type, regex in (
+        (
+            "inprocess_tp_gt_1",
+            (
+                "model_config.model_id=Qwen/Qwen3.5-2B",
+                "weight_sync_config.mode=raiden",
+                "rollout_model_config.mesh.shape=(1,2)",
+                "vllm_config.tensor_parallel_size=2",
+            ),
+            NotImplementedError,
+            "tensor_parallel_size=1 only",
+        ),
+        (
+            "inprocess_lora",
+            (
+                "model_config.model_id=Qwen/Qwen3.5-0.8B",
+                "weight_sync_config.mode=raiden",
+                "rollout_model_config.mesh.shape=(1,1)",
+                "vllm_config.tensor_parallel_size=1",
+                "rollout_model_config.lora_config={'rank': 8, 'alpha': 16.0}",
+            ),
+            NotImplementedError,
+            "Qwen3.5 LoRA",
+        ),
+        (
+            "inprocess_real_weights_raiden",
+            (
+                "model_config.model_id=Qwen/Qwen3.5-0.8B",
+                "weight_sync_config.mode=raiden",
+                "vllm_config.init_with_random_weights=false",
+                "rollout_model_config.mesh.shape=(1,1)",
+                "vllm_config.tensor_parallel_size=1",
+            ),
+            ValueError,
+            "requires init_with_random_weights=True",
+        ),
+        (
+            "inprocess_fs_default_real_weights",
+            (
+                "model_config.model_id=Qwen/Qwen3.5-0.8B",
+                "weight_sync_config.mode=fs",
+                "rollout_model_config.mesh.shape=(1,1)",
+                "vllm_config.tensor_parallel_size=1",
+            ),
+            ValueError,
+            "requires init_with_random_weights=True",
+        ),
+    ):
+      with self.subTest(name):
+        with self.assertRaisesRegex(exc_type, regex):
+          rollout._validate_rollout_config(
+              _hp("rollout_engine=inprocess_vllm", *overrides)
+          )
 
-  def test_qwen3_mapping_is_selected_for_qwen3(self):
-    config = rollout._mapping_config_for("Qwen/Qwen3-8B")
+  def test_qwen3p5_samplers_plumb_mapping_config_and_hf_overrides(self):
+    with self.subTest("dense_inproc_raiden"):
+      dense_inproc = _inprocess_vllm_rollout_config(
+          "rollout_engine=inprocess_vllm",
+          "model_config.model_id=Qwen/Qwen3.5-0.8B",
+          "weight_sync_config.mode=raiden",
+          "rollout_model_config.mesh.shape=(1,1)",
+          "vllm_config.tensor_parallel_size=1",
+      )
+      self.assertIsNotNone(dense_inproc.rollout_mapping_config)
+      self.assertIsNotNone(
+          dense_inproc.rollout_mapping_config.preprocess_src_state
+      )
+      self.assertIn(
+          "layers.*.linear_attn.in_proj_qkvz.kernel",
+          dense_inproc.rollout_mapping_config.to_hf_mappings,
+      )
+      self.assertEqual(
+          dense_inproc.rollout_vllm_kwargs["hf_overrides"],
+          {"architectures": ["Qwen3_5ForCausalLM"]},
+      )
+      raiden_hp = _hp(
+          "model_config.model_id=Qwen/Qwen3.5-0.8B",
+          "weight_sync_config.mode=raiden",
+      )
+      self.assertEmpty(
+          rollout._vllm_hf_overrides(raiden_hp, sampler_type="vllm")
+      )
 
-    self.assertTrue(config.to_hf_mappings)
-    self.assertIsNone(config.preprocess_src_state)
+    with self.subTest("static_oop"):
+      static_oop = _vllm_engine_kwargs(
+          "model_config.model_id=Qwen/Qwen3.5-35B-A3B",
+          "weight_sync_config.mode=none",
+      )
+      self.assertNotIn("hf_overrides", static_oop)
 
-  def test_unsupported_family_raises(self):
-    with self.assertRaisesRegex(ValueError, "supports Qwen3 and Gemma4"):
-      rollout._mapping_config_for("meta-llama/Llama-3-8B")
+    with self.subTest("maxtext_moe_inproc"):
+      maxtext_moe_inproc = _inprocess_vllm_rollout_config(
+          "rollout_engine=inprocess_vllm",
+          "model_config.model_id=Qwen/Qwen3.5-35B-A3B",
+          "model_config.model_source=maxtext",
+          "model_config.model_path=/ckpt/qwen3.5-35b-a3b",
+          "model_config.model_name=qwen3.5-35b-a3b",
+          "model_config.kwargs.maxtext_model_name=qwen3.5-35b-a3b",
+          "weight_sync_config.mode=raiden",
+      )
+      self.assertEqual(
+          maxtext_moe_inproc.rollout_mapping_config,
+          mappings_lib.MappingConfig(),
+      )
+      self.assertEqual(
+          maxtext_moe_inproc.rollout_vllm_kwargs["hf_overrides"],
+          dict(maxtext_utils.VLLM_MAXTEXT_HF_OVERRIDES),
+      )
+
+    with self.subTest("static_moe_inproc"):
+      static_moe_inproc = _inprocess_vllm_rollout_config(
+          "rollout_engine=inprocess_vllm",
+          "rollout_model_config.model_id=Qwen/Qwen3.5-35B-A3B",
+          "weight_sync_config.mode=none",
+      )
+      self.assertEqual(
+          static_moe_inproc.rollout_mapping_config,
+          mappings_lib.MappingConfig(),
+      )
+      self.assertNotIn("hf_overrides", static_moe_inproc.rollout_vllm_kwargs)
 
   def test_gemma4_vllm_overrides_match_text_only_reference(self):
     overrides = rollout._vllm_hf_overrides(
@@ -206,8 +332,10 @@ class RolloutConfigTest(absltest.TestCase):
     )
     self.assertEqual(config.max_prompt_length, 128)
     self.assertEqual(config.max_tokens_to_generate, 64)
+    self.assertEqual(config.max_response_length, 64)
     self.assertEqual(config.temperature, 0.7)
     self.assertEqual(config.top_p, 0.95)
+    self.assertFalse(config.overlong_filter)
     self.assertTrue(config.return_logprobs)
     self.assertEqual(config.eos_tokens, [151645, 151643])
     self.assertIsNone(config.trajectory_store_config)
@@ -277,13 +405,12 @@ class RolloutConfigTest(absltest.TestCase):
     )
 
   def test_episode_timeout_derives_drain_timeout_in_rollout_config(self):
-    self.assertEqual(_rollout_config().drain_timeout_s, 660.0)
-    self.assertEqual(
-        _rollout_config(
-            "agentic_grpo_config.episode_timeout=1800"
-        ).drain_timeout_s,
-        1860.0,
-    )
+    defaults = _rollout_config()
+    self.assertEqual(defaults.episode_timeout, 600.0)
+    self.assertEqual(defaults.drain_timeout_s, 660.0)
+    custom = _rollout_config("agentic_grpo_config.episode_timeout=1800")
+    self.assertEqual(custom.episode_timeout, 1800.0)
+    self.assertEqual(custom.drain_timeout_s, 1860.0)
     with self.assertRaisesRegex(
         ValueError, "episode_timeout_secs must be a positive finite number"
     ):
@@ -296,6 +423,13 @@ class RolloutConfigPlumbingTest(absltest.TestCase):
 
   def test_top_k_reaches_rollout_config(self):
     self.assertEqual(_rollout_config("rollout_config.top_k=20").top_k, 20)
+
+  def test_overlong_filter_reaches_rollout_config(self):
+    self.assertTrue(
+        _rollout_config(
+            "agentic_grpo_config.overlong_filter=true"
+        ).overlong_filter
+    )
 
   def test_defaults_disable_top_k(self):
     config = _rollout_config()
@@ -737,20 +871,63 @@ class EngineKwargsTest(absltest.TestCase):
     self.assertIs(overridden["kv_cache_metrics"], False)
     self.assertIs(overridden["disable_log_stats"], True)
 
-  def test_engine_kwargs_rejected_for_non_vllm_rollout_engine(self):
-    for rollout_engine in ("inprocess_vllm", "vanilla"):
-      with self.subTest(rollout_engine=rollout_engine):
-        with self.assertRaisesRegex(
-            ValueError,
-            "vllm_config.engine_kwargs is only supported with rollout_engine:"
-            " vllm",
-        ):
-          rollout._validate_rollout_config(
-              _hp(
-                  f"rollout_engine={rollout_engine}",
-                  "vllm_config.engine_kwargs.enable_expert_parallel=true",
-              )
+  def test_engine_kwargs_reach_the_inprocess_vllm_engine(self):
+    # `InprocessVllmSampler` forwards `rollout_vllm_kwargs` to vLLM's
+    # `EngineArgs`, merging `additional_config` with the MaxText one.
+    kwargs = _inprocess_vllm_rollout_config(
+        "vllm_config.engine_kwargs.enable_expert_parallel=true",
+        "vllm_config.engine_kwargs.additional_config.sharding"
+        ".sharding_strategy.attn_dp_size=2",
+    ).rollout_vllm_kwargs
+    self.assertIs(kwargs["enable_expert_parallel"], True)
+    self.assertEqual(
+        kwargs["additional_config"],
+        {"sharding": {"sharding_strategy": {"attn_dp_size": 2}}},
+    )
+
+  def test_engine_kwargs_load_format_rejected_when_inprocess_starts_random(
+      self,
+  ):
+    # The in-process sampler sets `load_format="dummy"` over it when the
+    # rollout starts from random weights (the default with Raiden).
+    load_format = "vllm_config.engine_kwargs.load_format=safetensors"
+    with self.assertRaisesRegex(
+        ValueError, r"vllm_config\.engine_kwargs\.load_format has no effect"
+    ):
+      rollout._vllm_engine_kwargs(
+          _hp(
+              "rollout_engine=inprocess_vllm",
+              "weight_sync_config.mode=raiden",
+              load_format,
           )
+      )
+    # Loading the checkpoint, or the `vllm` engine, keeps it.
+    for argv in (
+        (
+            "rollout_engine=inprocess_vllm",
+            "weight_sync_config.mode=raiden",
+            "vllm_config.init_with_random_weights=false",
+        ),
+        ("rollout_engine=vllm", "weight_sync_config.mode=raiden"),
+    ):
+      with self.subTest(argv=argv):
+        self.assertEqual(
+            rollout._vllm_engine_kwargs(_hp(*argv, load_format)),
+            {"load_format": "safetensors"},
+        )
+
+  def test_engine_kwargs_rejected_for_vanilla_rollout_engine(self):
+    with self.assertRaisesRegex(
+        ValueError,
+        r"vllm_config\.engine_kwargs needs a vLLM rollout_engine \(vllm or"
+        r" inprocess_vllm\); got rollout_engine: 'vanilla'",
+    ):
+      rollout._validate_rollout_config(
+          _hp(
+              "rollout_engine=vanilla",
+              "vllm_config.engine_kwargs.enable_expert_parallel=true",
+          )
+      )
 
   def test_engine_kwargs_rejects_forbidden_keys_and_malformed_inputs(self):
     with self.assertRaisesRegex(
@@ -786,16 +963,20 @@ class EngineKwargsTest(absltest.TestCase):
           )
       )
 
-    for key in rollout._FORBIDDEN_ROLLOUT_KWARGS:
-      with self.subTest(top_level_key=key):
-        with self.assertRaisesRegex(
-            ValueError,
-            r"vllm_config\.engine_kwargs contains keys managed by other"
-            rf" config fields or rollout invariants: \['{key}'\]",
-        ):
-          rollout._vllm_engine_kwargs(
-              _hp("rollout_engine=vllm", f"vllm_config.engine_kwargs.{key}=1")
-          )
+    for rollout_engine in ("vllm", "inprocess_vllm"):
+      for key in rollout._FORBIDDEN_ROLLOUT_KWARGS:
+        with self.subTest(rollout_engine=rollout_engine, top_level_key=key):
+          with self.assertRaisesRegex(
+              ValueError,
+              r"vllm_config\.engine_kwargs contains keys managed by other"
+              rf" config fields or rollout invariants: \['{key}'\]",
+          ):
+            rollout._vllm_engine_kwargs(
+                _hp(
+                    f"rollout_engine={rollout_engine}",
+                    f"vllm_config.engine_kwargs.{key}=1",
+                )
+            )
 
     for mt_key in rollout._FORBIDDEN_MAXTEXT_CONFIG_KEYS:
       with self.subTest(maxtext_key=mt_key):
@@ -862,6 +1043,9 @@ class RolloutMainTest(absltest.TestCase):
   def test_main_restores_jax_cache_before_jax_init(self):
     events: list[str] = []
     context = mock.Mock()
+    context.initialize_runtime.side_effect = functools.partial(
+        node_utils.context_lib.ProcessContext.initialize_runtime, context
+    )
 
     def _fake_jax_init() -> None:
       events.append("jax_init")
@@ -1063,6 +1247,78 @@ class RolloutMainTest(absltest.TestCase):
   def test_main_raises_without_discovery_context(self):
     with self.assertRaisesRegex(RuntimeError, "Require discovery API"):
       rollout.main([], context=None)
+
+  def test_main_gpu_and_torch_tpu_targets_gate_tpu_env_and_jax_cache(self):
+    worker_service = mock.MagicMock(trajectory_store=None)
+    ctx_gpu = mock.Mock()
+    ctx_gpu.initialize_runtime.side_effect = functools.partial(
+        node_utils.context_lib.ProcessContext.initialize_runtime, ctx_gpu
+    )
+    with contextlib.ExitStack() as stack:
+      stack.enter_context(
+          mock.patch.dict(os.environ, {"DIST_RL_WORKER_PORT": "41234"})
+      )
+      stack.enter_context(mock.patch.object(rollout.importlib, "import_module"))
+      mock_restore = stack.enter_context(
+          mock.patch.object(gcs_cache, "restore_jax_cache")
+      )
+      stack.enter_context(mock.patch.object(node_utils, "load_hf_tokenizer"))
+      stack.enter_context(
+          mock.patch.object(
+              rollout, "_create_rollout_worker", return_value=worker_service
+          )
+      )
+      stack.enter_context(
+          mock.patch.object(
+              node_utils, "serve_worker", new_callable=mock.AsyncMock
+          )
+      )
+      rollout.main(
+          [
+              "cluster_config.target=external",
+              "cluster_config.artifact_root=/artifacts/run",
+              "execution_targets.rollout=jax:gpu",
+          ],
+          context=ctx_gpu,
+      )
+      self.assertNotIn("VLLM_TPU_RPA_VERSION", os.environ)
+      self.assertNotIn("DISABLE_MOSAIC_ATTN", os.environ)
+    mock_restore.assert_called_once()
+    ctx_gpu.initialize_runtime.assert_not_called()
+
+    ctx_torch = mock.Mock()
+    with contextlib.ExitStack() as stack:
+      stack.enter_context(
+          mock.patch.dict(os.environ, {"DIST_RL_WORKER_PORT": "41234"})
+      )
+      stack.enter_context(mock.patch.object(rollout.importlib, "import_module"))
+      mock_restore_torch = stack.enter_context(
+          mock.patch.object(gcs_cache, "restore_jax_cache")
+      )
+      stack.enter_context(mock.patch.object(node_utils, "load_hf_tokenizer"))
+      stack.enter_context(
+          mock.patch.object(
+              rollout, "_create_rollout_worker", return_value=worker_service
+          )
+      )
+      stack.enter_context(
+          mock.patch.object(
+              node_utils, "serve_worker", new_callable=mock.AsyncMock
+          )
+      )
+      rollout.main(
+          [
+              "cluster_config.target=external",
+              "cluster_config.artifact_root=/artifacts/run",
+              "execution_targets.rollout=torch:tpu",
+          ],
+          context=ctx_torch,
+      )
+      self.assertEqual(os.environ["VLLM_TPU_RPA_VERSION"], "2")
+    mock_restore_torch.assert_not_called()
+    ctx_torch.initialize_runtime.assert_called_once_with(
+        execution_target.TORCH_TPU
+    )
 
 
 if __name__ == "__main__":

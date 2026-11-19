@@ -290,7 +290,7 @@ class ToolCallsTest(absltest.TestCase):
 
 
 class OutcomeTest(parameterized.TestCase):
-  """Tests for `status` and `total_reward`, which are not base ATIF fields."""
+  """Tests for `status` and `total_reward` on `TrajectoryStats`."""
 
   @parameterized.named_parameters(
       ("status_name", "SUCCEEDED"),
@@ -307,7 +307,15 @@ class OutcomeTest(parameterized.TestCase):
     self.assertEqual(stats.status, "SUCCEEDED")
     self.assertEqual(stats.total_reward, 0.5)
 
-  def test_schemas_that_do_not_declare_the_fields_report_neither(self) -> None:
+  def test_base_trajectory_reports_status_and_total_reward(self) -> None:
+    trajectory = _trajectory(status=" succeeded\n", total_reward=1.25)
+
+    stats = stats_lib.TrajectoryStats.from_trajectory(trajectory)
+
+    self.assertEqual(stats.status, "SUCCEEDED")
+    self.assertEqual(stats.total_reward, 1.25)
+
+  def test_extra_values_are_ignored_when_fields_are_unset(self) -> None:
     trajectory = _trajectory(extra={"status": "SUCCEEDED", "reward": 1.0})
 
     stats = stats_lib.TrajectoryStats.from_trajectory(trajectory)
@@ -347,6 +355,19 @@ class OutcomeTest(parameterized.TestCase):
 
     self.assertIsNone(
         stats_lib.TrajectoryStats.from_trajectory(trajectory).total_reward
+    )
+
+
+class RewardSignCountsTest(absltest.TestCase):
+
+  def test_counts_default_to_zero_and_sum_to_the_total(self) -> None:
+    counts = stats_lib.RewardSignCounts(positive=3, unscored=1)
+
+    self.assertEqual(counts.non_positive, 0)
+    self.assertEqual(counts.total, 4)
+    self.assertEqual(
+        counts.to_json_dict(),
+        {"positive": 3, "non_positive": 0, "unscored": 1, "total": 4},
     )
 
 
@@ -489,6 +510,7 @@ class RunStatsTest(parameterized.TestCase):
     self.assertEqual(run.num_with_reward, 0)
     self.assertEmpty(run.status_counts)
     self.assertEqual(run.num_with_status, 0)
+    self.assertEmpty(run.reward_signs_by_status)
     self.assertEmpty(run.tool_counts)
 
   def test_status_counts_tally_only_reporting_trajectories(self) -> None:
@@ -511,6 +533,54 @@ class RunStatsTest(parameterized.TestCase):
     )
     self.assertEqual(
         list(run.to_json_dict()["status_counts"]), ["SUCCEEDED", "TIMEOUT"]
+    )
+
+  def test_reward_signs_are_counted_per_status(self) -> None:
+    run = stats_lib.RunStats.from_trajectories([
+        _tunix_trajectory(status="MAX_STEPS_REACHED", total_reward=1.0),
+        _tunix_trajectory(status="SUCCEEDED", total_reward=1.0),
+        _tunix_trajectory(status=" succeeded", total_reward=0.25),
+        _tunix_trajectory(status="SUCCEEDED", total_reward=0.0),
+        _tunix_trajectory(status="SUCCEEDED", total_reward=-1.0),
+        _tunix_trajectory(status="SUCCEEDED"),
+        _tunix_trajectory(status="SUCCEEDED", total_reward=float("nan")),
+        # Trajectories that report no status are not counted.
+        _tunix_trajectory(total_reward=1.0),
+    ])
+
+    self.assertEqual(
+        run.reward_signs_by_status,
+        {
+            "MAX_STEPS_REACHED": stats_lib.RewardSignCounts(positive=1),
+            "SUCCEEDED": stats_lib.RewardSignCounts(
+                positive=2, non_positive=2, unscored=2
+            ),
+        },
+    )
+    self.assertEqual(
+        list(run.reward_signs_by_status), ["MAX_STEPS_REACHED", "SUCCEEDED"]
+    )
+    # The JSON keeps the order of its `status_counts`, most frequent first.
+    self.assertEqual(
+        run.to_json_dict()["reward_signs_by_status"],
+        {
+            "SUCCEEDED": {
+                "positive": 2,
+                "non_positive": 2,
+                "unscored": 2,
+                "total": 6,
+            },
+            "MAX_STEPS_REACHED": {
+                "positive": 1,
+                "non_positive": 0,
+                "unscored": 0,
+                "total": 1,
+            },
+        },
+    )
+    self.assertEqual(
+        list(run.to_json_dict()["reward_signs_by_status"]),
+        ["SUCCEEDED", "MAX_STEPS_REACHED"],
     )
 
   def test_tool_counts_are_summed_across_the_run(self) -> None:
@@ -574,6 +644,14 @@ class RunStatsTest(parameterized.TestCase):
             "num_with_tokens": 1,
             "status_counts": {"SUCCEEDED": 1},
             "num_with_status": 1,
+            "reward_signs_by_status": {
+                "SUCCEEDED": {
+                    "positive": 1,
+                    "non_positive": 0,
+                    "unscored": 0,
+                    "total": 1,
+                }
+            },
             "mean_reward": 1.0,
             "num_with_reward": 1,
             "tool_counts": {},

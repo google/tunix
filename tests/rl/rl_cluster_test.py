@@ -29,6 +29,8 @@ import numpy as np
 import optax
 from transformers import tokenization_utils_base
 from tunix.dist_rl.orchestrator import rl_engine_interface
+from tunix.dist_rl.trajectory import file_store
+from tunix.dist_rl.trajectory import in_memory_store
 from tunix.generate import mappings
 from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl import utils
@@ -1450,6 +1452,72 @@ class RlEngineTokenInputTest(parameterized.TestCase):
         self.assertEqual(mock_sampler.call_count, 1)
         vllm_config = mock_sampler.call_args.kwargs['config']
         self.assertEqual(vllm_config.eos_tokens, [151645, 151643])
+
+
+class RlEngineTrajectoryStoreTest(absltest.TestCase):
+  """Tests the per-trajectory metrics store owned by RLEngine."""
+
+  def _engine(self, log_dir=None):
+    engine = object.__new__(rl_engine_lib.RLEngine)
+    engine.cluster_config = mock.Mock()
+    engine.cluster_config.training_config.metrics_logging_options = (
+        mock.Mock(log_dir=log_dir) if log_dir else None
+    )
+    engine._trajectory_store = engine._create_trajectory_store()
+    return engine
+
+  def test_creates_file_store_under_log_dir(self):
+    log_dir = self.create_tempdir().full_path
+    engine = self._engine(log_dir)
+    self.addCleanup(engine.trajectory_store.close)
+    self.assertIsInstance(
+        engine.trajectory_store, file_store.FileTrajectoryStore
+    )
+    engine.log_trajectory_metrics(
+        [('traj_0_g0', {'reward': 1.0})], mode=rl_engine_lib.Mode.EVAL, step=5
+    )
+    engine.trajectory_store.flush()
+    self.assertEqual(
+        engine.trajectory_store.get_trajectories_metrics()['traj_0_g0'].extra,
+        {'reward': 1.0, 'mode': 'eval', 'global_step': 5},
+    )
+    self.assertTrue(os.path.isdir(os.path.join(log_dir, 'trajectories')))
+
+  def test_no_store_without_log_dir(self):
+    engine = self._engine()
+    self.assertIsNone(engine.trajectory_store)
+    # Without a store, recording trajectory metrics is a no-op.
+    engine.log_trajectory_metrics(
+        [('traj_0_g0', {'reward': 1.0})], mode=rl_engine_lib.Mode.TRAIN, step=0
+    )
+
+  def test_close_closes_trajectory_store(self):
+    engine = object.__new__(rl_engine_lib.RLEngine)
+    engine._buffered_train_metrics = []
+    engine._buffered_eval_metrics = []
+    engine._actor_trainer = mock.Mock()
+    engine.profiler = None
+    store = mock.create_autospec(
+        in_memory_store.InMemoryTrajectoryStore, instance=True
+    )
+    engine._trajectory_store = store
+    engine.close()
+    store.close.assert_called_once()
+
+  def test_log_trajectory_metrics_failure_is_not_fatal(self):
+    engine = object.__new__(rl_engine_lib.RLEngine)
+    store = mock.create_autospec(
+        in_memory_store.InMemoryTrajectoryStore, instance=True
+    )
+    store.update_metrics.side_effect = RuntimeError('store is down')
+    engine._trajectory_store = store
+    with self.assertLogs(level='WARNING'):
+      engine.log_trajectory_metrics(
+          [('traj_0_g0', {}), ('traj_0_g1', {})],
+          mode=rl_engine_lib.Mode.TRAIN,
+          step=0,
+      )
+    self.assertEqual(store.update_metrics.call_count, 2)
 
 
 if __name__ == '__main__':

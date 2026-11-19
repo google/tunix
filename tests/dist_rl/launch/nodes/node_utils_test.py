@@ -16,6 +16,8 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+import dataclasses
+import itertools
 import json
 import os
 import pathlib
@@ -124,12 +126,16 @@ _LIBRARY_ENV_VARS = (
     "VERIFY_WEIGHTS",
     "TPU_RAIDEN_DATA_NICS",
     "SKIP_JAX_PRECOMPILE",
+    "JAX_PLATFORMS",
+    "XLA_PYTHON_CLIENT_PREALLOCATE",
+    "XLA_PYTHON_CLIENT_MEM_FRACTION",
+    "PJRT_DEVICE",
 )
 
 
 def _apply_library_env(
     argv: Sequence[str],
-    role: Literal["trainer", "rollout"],
+    role: node_utils.NodeRole,
     env: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
   """Runs `apply_library_env` and returns the library variables it leaves.
@@ -240,6 +246,29 @@ class ApplyLibraryEnvTest(absltest.TestCase):
       with self.assertRaisesRegex(ValueError, "SKIP_JAX_PRECOMPILE"):
         node_utils.apply_library_env(hp, "rollout")
       self.assertNotIn("VERIFY_WEIGHTS", os.environ)
+
+  def test_prepares_runtime_env_for_gpu_and_torch_tpu_targets(self):
+    self.assertEqual(
+        _apply_library_env(
+            [*_EXTERNAL, "execution_targets.inference=jax:gpu"], "inference"
+        ),
+        {
+            "JAX_PLATFORMS": "cuda,cpu",
+            "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
+            "XLA_PYTHON_CLIENT_MEM_FRACTION": "0.85",
+        },
+    )
+    self.assertEqual(
+        _apply_library_env(
+            [*_EXTERNAL, "execution_targets.trainer=torch:tpu"], "trainer"
+        ),
+        {
+            "VERIFY_WEIGHTS": "false",
+            "TPU_RAIDEN_DATA_NICS": "eth0",
+            "JAX_PLATFORMS": "cpu",
+            "PJRT_DEVICE": "TPU",
+        },
+    )
 
 
 class PadAndEosIdsTest(absltest.TestCase):
@@ -667,10 +696,12 @@ class ServeWorkerTest(absltest.TestCase):
             "service_type": "rollout",
             "service_port": 20001,
             "worker_id": "rollout-0",
+            "instance_id": self.worker.instance_id,
             node_utils.CONFIG_SHA256_METADATA_KEY: "config-sha",
             "trajectory_store_config": {"backend": "file"},
         },
     )
+    self.assertLen(self.worker.instance_id, 32)
     self.assertEqual(drained, ["drained"])
     self.server.stop_serving.assert_called_once()
     self.assertIsNone(self.worker.on_stop_callbacks[-1])
@@ -913,6 +944,38 @@ class CreateMeshTest(absltest.TestCase):
     mesh = node_utils.create_mesh(hp, "actor_model_config", "Trainer")
     self.assertEqual(mesh.axis_names, ("fsdp", "tp"))
     self.assertEqual(mesh.devices.shape, (num_devices, 1))
+
+  def test_splits_physical_axes_when_the_shape_needs_it(self):
+    # An (8, 8) mesh on a 4x4x4 v5p slice, where no product of whole physical
+    # axes (4, 4, 4) equals 8.
+    devices = [
+        _FakeTpuDevice(id=i, coords=coords)
+        for i, coords in enumerate(
+            itertools.product(range(4), range(4), range(4))
+        )
+    ]
+    hp = resolve_config.initialize(["actor_model_config.mesh.shape=(8,8)"])
+    with (
+        mock.patch.object(jax, "devices", return_value=devices),
+        mock.patch.object(jax, "device_count", return_value=len(devices)),
+        mock.patch.object(node_utils, "Mesh", autospec=True) as mesh_cls,
+    ):
+      node_utils.create_mesh(hp, "actor_model_config", "Trainer")
+    device_mesh = mesh_cls.call_args.args[0]
+    self.assertEqual(device_mesh.shape, (8, 8))
+    self.assertCountEqual([d.id for d in device_mesh.flat], range(64))
+
+
+@dataclasses.dataclass(frozen=True)
+class _FakeTpuDevice:
+  """The device attributes `mesh_utils.create_device_mesh` reads on TPU."""
+
+  id: int
+  coords: tuple[int, int, int]
+  platform: str = "tpu"
+  device_kind: str = "TPU v5p"
+  core_on_chip: int = 0
+  process_index: int = 0
 
 
 class EnsureLocalSafetensorsTest(absltest.TestCase):

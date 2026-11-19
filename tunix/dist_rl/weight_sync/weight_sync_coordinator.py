@@ -166,12 +166,24 @@ class NullHandler(weight_sync.WeightSyncHandler):
 def create_default_handler(
     mode: str | weight_sync.WeightSyncMode | None = None,
 ) -> weight_sync.WeightSyncHandler:
-  """Creates the default weight sync handler based on options or env vars."""
-  mode_name = mode or os.getenv("WEIGHT_SYNC_MODE", "raiden")
-  if isinstance(mode_name, weight_sync.WeightSyncMode):
-    mode_name = mode_name.value
-  mode_name = str(mode_name).lower()
-  if mode_name == weight_sync.WeightSyncMode.RAIDEN.value:
+  """Creates the default coordinator weight sync handler.
+
+  Supports `WeightSyncMode.RAIDEN` for production TPU RMA weight sync and
+  `WeightSyncMode.NOOP` / `WeightSyncMode.NONE` for protocol-only no-op
+  transfers (`NullHandler`).
+  Raises `NotImplementedError` for valid modes without a coordinator transport
+  handler yet, and `ValueError` for unknown mode strings.
+  """
+  raw_mode = mode or os.getenv("WEIGHT_SYNC_MODE", "raiden")
+  try:
+    resolved_mode = (
+        raw_mode
+        if isinstance(raw_mode, weight_sync.WeightSyncMode)
+        else weight_sync.WeightSyncMode(str(raw_mode).lower())
+    )
+  except ValueError as exc:
+    raise ValueError(f"Unknown weight sync mode: {raw_mode!r}") from exc
+  if resolved_mode == weight_sync.WeightSyncMode.RAIDEN:
     from tunix.dist_rl.weight_sync import raiden_handler
 
     handler = raiden_handler.RaidenHandler(
@@ -179,18 +191,18 @@ def create_default_handler(
     )
     logging.info("Built RaidenHandler natively; port %d", handler.port)
     return handler
-  elif mode_name in (weight_sync.WeightSyncMode.FALLBACK.value, "noop", "no-op"):
+  if resolved_mode in (
+      weight_sync.WeightSyncMode.NONE,
+      weight_sync.WeightSyncMode.NOOP,
+  ):
     logging.info(
-        "Built fallback NullHandler; weight sync running protocol-only."
+        "Built protocol-only NullHandler; weight sync running protocol-only."
     )
     return NullHandler()
-  elif mode_name == weight_sync.WeightSyncMode.NONE.value:
-    raise ValueError(
-        "WEIGHT_SYNC_MODE=none disables weight sync; no handler should be"
-        " constructed."
-    )
-  else:
-    raise ValueError(f"Unknown weight sync mode: {mode_name!r}")
+  raise NotImplementedError(
+      f"Weight sync handler for mode={resolved_mode.value!r} is not"
+      " implemented in WeightSyncCoordinator yet."
+  )
 
 
 _Participant = tuple[str, remote_execution.ActorHandle]
@@ -692,6 +704,7 @@ class WeightSyncCoordinator:
       uuid: int = 0,
       round_index: int = 0,
       source_metadata: Any = None,
+      min_retained_policy_version: int | None = None,
       **extra_config,
   ) -> datatypes.WeightSyncRequest:
     """Builds the request carried through every phase of one round.
@@ -703,6 +716,7 @@ class WeightSyncCoordinator:
         controller_id=self._controller_id,
         policy_version=policy_version,
         source_metadata=source_metadata,
+        min_retained_policy_version=min_retained_policy_version,
         extra_config=dict(
             req_id=req_id, uuid=uuid, round_index=round_index, **extra_config
         ),
@@ -819,6 +833,7 @@ class WeightSyncCoordinator:
       destination_statuses: Collection[datatypes.AdmissionStatus] = (
           datatypes.AdmissionStatus.ACTIVE,
       ),
+      min_retained_policy_version: int | None = None,
       **extra_config,
   ) -> WeightSyncResult:
     """Runs one full round; returns only if it committed.
@@ -833,6 +848,8 @@ class WeightSyncCoordinator:
         allowed (it is how a failed round is retried).
       destination_statuses: `AdmissionStatus` values of the destination workers
         to include. Defaults to `(ACTIVE,)`.
+      min_retained_policy_version: Optional zombie-eviction floor forwarded on
+        `WeightSyncRequest` to rollout workers during `post_weight_sync`.
       **extra_config: Carried to the workers in the request.
     """
     if self._poisoned:
@@ -860,6 +877,7 @@ class WeightSyncCoordinator:
           policy_version,
           extra_config,
           destination_statuses=destination_statuses,
+          min_retained_policy_version=min_retained_policy_version,
       )
     finally:
       elapsed_time = time.monotonic() - start_time
@@ -872,6 +890,7 @@ class WeightSyncCoordinator:
       extra_config: dict[str, Any],
       *,
       destination_statuses: Collection[datatypes.AdmissionStatus],
+      min_retained_policy_version: int | None = None,
   ) -> WeightSyncResult:
     round_index = self._round_index
     self._round_index += 1
@@ -943,6 +962,7 @@ class WeightSyncCoordinator:
         req_id=req_id,
         uuid=uuid,
         round_index=round_index,
+        min_retained_policy_version=min_retained_policy_version,
         **extra_config,
     )
     prepared_request: Optional[datatypes.WeightSyncRequest] = None
@@ -1140,6 +1160,7 @@ class WeightSyncCoordinator:
           uuid=uuid,
           round_index=round_index,
           source_metadata=tuple(src_metadata),
+          min_retained_policy_version=min_retained_policy_version,
           **extra_config,
       )
 

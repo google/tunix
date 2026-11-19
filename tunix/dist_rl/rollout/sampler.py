@@ -16,12 +16,9 @@
 
 import dataclasses
 from typing import Any, Protocol, Sequence, runtime_checkable
-from jax import typing
 import numpy as np
 
 from tunix.dist_rl.common import datatypes
-
-ArrayLike = typing.ArrayLike
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -71,12 +68,23 @@ class SamplingRequest(datatypes.Request):
   Attributes:
     prompt: The source prompt to sample from (formatted string, token array, or
       chat dictionary).
+    max_tokens: Maximum number of tokens to generate, or None for
+      `RolloutConfig.max_tokens_to_generate`.
+    cache_salt: Optional salt string for isolating KV prefix cache entries
+      (e.g., pinned to Turn-1 policy version during partial rollout).
+    routed_experts_prompt_start: Token index in prompt from which to start
+      returning routing data. In multi-turn rollouts, set to the cumulative
+      length of previously processed tokens to return only newly prefilled
+      environment tokens and completion.
     sampling_params: Optional per-request sampling configuration.
     images: Optional image input(s) associated with this prompt.
     audios: Optional audio waveform input(s) associated with this prompt.
   """
 
   prompt: Any
+  max_tokens: int | None = None
+  cache_salt: str | None = None
+  routed_experts_prompt_start: int = 0
   sampling_params: SamplingParams | None = None
   images: Any = None
   audios: Any = None
@@ -115,7 +123,7 @@ class SamplingResponse(datatypes.Response):
   logprobs: np.ndarray | None = None
   logits: np.ndarray | None = None
   finish_reason: str = "stop"
-  routed_experts: ArrayLike | None = None
+  routed_experts: np.ndarray | None = None
 
   def __post_init__(self):
     if (
@@ -167,6 +175,10 @@ class Sampler(Protocol):
 
   async def get_mesh(self, **kwargs) -> Any:
     """Returns the underlying device mesh topology."""
+    ...
+
+  def routed_experts_shape(self) -> tuple[int, int] | None:
+    """Returns `(num_layers, top_k)` when MoE routing capture is enabled, else None."""
     ...
 
   # --- Inference ---

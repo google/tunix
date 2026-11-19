@@ -155,9 +155,7 @@ class OrchestratorFaultToleranceTest(absltest.TestCase):
       )
       for wid in ("rollout_0", "rollout_1"):
         self.assertEqual(harness.samplers[wid].policy_version, 2)
-        self.assertNotEmpty(
-            harness.samplers[wid]._turn_counters  # pylint: disable=protected-access
-        )
+        self.assertGreater(harness.samplers[wid].sample_calls, 0)
       final_metrics = harness.orchestrator.fault_tolerance_manager.metrics()
       self.assertEqual(final_metrics["ft/fleet/rollout_active"], 2.0)
       self.assertEqual(final_metrics["ft/fleet/rollout_active_ratio"], 1.0)
@@ -467,6 +465,7 @@ class OrchestratorFaultToleranceTest(absltest.TestCase):
       with self.assertRaisesRegex(ValueError, "duplicate worker_id"):
         harness.register_worker_from_discovery(
             "rollout_0",
+            "collision-inst-r",
             "rollout",
             port=harness.servers["rollout_1"].bound_port,
             override=False,
@@ -474,6 +473,7 @@ class OrchestratorFaultToleranceTest(absltest.TestCase):
       with self.assertRaisesRegex(ValueError, "duplicate worker_id"):
         harness.register_worker_from_discovery(
             "trainer_0",
+            "collision-inst-t",
             "trainer",
             port=harness.servers["rollout_1"].bound_port,
             override=False,
@@ -499,6 +499,7 @@ class OrchestratorFaultToleranceTest(absltest.TestCase):
       with self.assertRaisesRegex(ValueError, "duplicate worker_id"):
         harness.register_worker_from_discovery(
             "trainer_0",
+            "collision-inst-t2",
             "trainer",
             port=trainer_0_port,
             override=False,

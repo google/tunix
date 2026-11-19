@@ -34,6 +34,7 @@ from tunix.dist_rl.common import timeouts
 from tunix.dist_rl.weight_sync import raiden_preload
 from tunix.dist_rl.weight_sync import weight_sync as weight_sync_lib
 from tunix.dist_rl.worker import rollout_worker
+from tunix.generate import vllm_model_config
 from tunix.models import automodel
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
 from tunix.utils import maxtext_utils
@@ -174,21 +175,17 @@ def _import_vllm_sampler():
   return vllm_sampler
 
 
-def _is_gemma4_model(model_name: str) -> bool:
-  """Returns whether `model_name` names a Gemma4 variant.
-
-  Model construction goes through `automodel`, but the rollout node still needs
-  the family up front to pick the vLLM weight mapping and `hf_overrides`, before
-  any model or tokenizer exists.
-
-  Args:
-    model_name: Model id or demo selector, e.g. "gemma-4-e2b" or "gemma4-e2b".
-
-  Returns:
-    True when the name refers to a Gemma4 model.
-  """
-  normalized = model_name.lower().replace("_", "-")
-  return "gemma-4" in normalized or "gemma4" in normalized
+def _validate_vllm_model_config(args: argparse.Namespace) -> None:
+  """Validates model-family vLLM rollout constraints for `args`."""
+  vllm_model_config.validate_vllm_rollout_config(
+      args.model_id or args.model_name,
+      sampler_type=args.sampler,
+      tp_size=_get_tensor_parallel_size(args),
+      weight_sync_mode=args.weight_sync_mode,
+      maxtext_model_name=args.maxtext_model_name or "",
+      use_lora=bool(args.use_lora),
+      init_with_random_weights=bool(args.vllm_init_with_random_weights),
+  )
 
 
 def _chat_parser_for(
@@ -220,50 +217,17 @@ def _chat_parser_for(
   )
 
 
-def _mapping_config_for(model_name: str):
-  """Returns the Tunix-to-vLLM JAX mapping for a supported model family."""
-  from tunix.generate import (  # pylint: disable=g-import-not-at-top
-      mappings as mappings_lib,
+def _vllm_hf_overrides(
+    args: argparse.Namespace, sampler_type: str | None = None
+) -> dict[str, Any]:
+  """Returns the vLLM `hf_overrides` to apply for the rollout model."""
+  return vllm_model_config.vllm_hf_overrides_for_model(
+      args.model_id or args.model_name,
+      sampler_type=sampler_type or args.sampler,
+      maxtext_model_name=args.maxtext_model_name or "",
+      weight_sync_mode=args.weight_sync_mode,
+      init_with_random_weights=bool(args.vllm_init_with_random_weights),
   )
-
-  if _is_gemma4_model(model_name):
-    from tunix.models.gemma4 import (  # pylint: disable=g-import-not-at-top
-        mapping_vllm_jax,
-    )
-  elif "qwen3" in model_name.lower().replace("_", "-"):
-    from tunix.models.qwen3 import (  # pylint: disable=g-import-not-at-top
-        mapping_vllm_jax,
-    )
-  else:
-    raise ValueError(
-        "The in-process distributed rollout supports Qwen3 and Gemma4 "
-        f"mappings; got model {model_name!r}."
-    )
-
-  return mappings_lib.MappingConfig(**mapping_vllm_jax.VLLM_JAX_MAPPING)
-
-
-def _vllm_hf_overrides(args: argparse.Namespace) -> dict[str, Any]:
-  """Returns the vLLM `hf_overrides` to apply for the rollout model.
-
-  Args:
-    args: Parsed rollout worker arguments.
-
-  Returns:
-    The overrides dict, empty when the model needs no override.
-  """
-  if args.maxtext_model_name:
-    # MaxText serves the model natively, so its architecture override takes the
-    # place of any per-model-family one.
-    return dict(maxtext_utils.VLLM_MAXTEXT_HF_OVERRIDES)
-  if _is_gemma4_model(args.model_id or args.model_name):
-    # Matches the text-only Gemma4 rollout configuration in FrozenLake.
-    return {
-        "final_logit_softcapping": 30.0,
-        "text_config": {"final_logit_softcapping": 30.0},
-        "architectures": ["Gemma4ForCausalLM"],
-    }
-  return {}
 
 
 def _str2bool(v: str | bool) -> bool:
@@ -291,6 +255,26 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--mesh_tp", type=int, default=2)
   parser.add_argument("--max_prompt_length", type=int, default=1024)
   parser.add_argument("--max_response_length", type=int, default=1024)
+  parser.add_argument(
+      "--temperature", type=float, default=1.0, help="Sampling temperature."
+  )
+  parser.add_argument("--top_p", type=float, default=1.0)
+  parser.add_argument(
+      "--top_k",
+      type=int,
+      default=None,
+      help="Top-k cutoff. Unset, 0 or -1 disables top-k filtering.",
+  )
+  parser.add_argument(
+      "--overlong_filter",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help=(
+          "Zero out the policy loss mask, final reward, and advantage inclusion"
+          " of overlong (max-steps or max-context-limit) trajectories, rather"
+          " than training on them."
+      ),
+  )
   parser.add_argument(
       "--eos_tokens",
       type=str,
@@ -439,7 +423,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           os.getenv("WEIGHT_SYNC_MODE", "none")
       ),
       choices=list(weight_sync_lib.WeightSyncMode),
-      help="Weight sync mode (none, fallback, or raiden).",
+      help="Weight sync mode (none, raiden, in_memory, fs, or nccl).",
   )
   parser.add_argument(
       "--prefuse_moe_weights",
@@ -702,9 +686,13 @@ def _rollout_config(
       weight_sync_mode=args.weight_sync_mode,
       max_prompt_length=args.max_prompt_length,
       max_tokens_to_generate=args.max_response_length,
+      max_response_length=args.max_response_length,
       kv_cache_size=args.max_prompt_length + args.max_response_length,
-      temperature=1.0,
-      top_p=1.0,
+      temperature=args.temperature,
+      top_p=args.top_p,
+      top_k=args.top_k,
+      overlong_filter=args.overlong_filter,
+      episode_timeout=args.episode_timeout_secs,
       return_logprobs=True,
       eos_tokens=_eos_token_ids(args, tokenizer),
       partial_rollout=bool(args.in_flight_weight_updates),
@@ -827,7 +815,10 @@ def _vllm_model(args: argparse.Namespace) -> str:
 
 # TODO(yatlas): Remove Gemma4-specific model handling.
 def _vllm_passthrough_kwargs(
-    args: argparse.Namespace, vllm_model: str, is_gemma4: bool
+    args: argparse.Namespace,
+    vllm_model: str,
+    is_gemma4: bool,
+    sampler_type: str,
 ) -> dict[str, Any]:
   """Builds the pass-through `rollout_vllm_kwargs` for vLLM rollout samplers."""
   # vLLM settings without a dedicated `RolloutConfig` field.
@@ -838,7 +829,7 @@ def _vllm_passthrough_kwargs(
       ),
       "dtype": args.vllm_dtype,
   }
-  hf_overrides = _vllm_hf_overrides(args)
+  hf_overrides = _vllm_hf_overrides(args, sampler_type=sampler_type)
   if hf_overrides:
     kwargs["hf_overrides"] = hf_overrides
   if is_gemma4:
@@ -899,23 +890,26 @@ def _vllm_rollout_config(
       args.max_prompt_length + args.max_response_length
   )
   family_name = args.model_id or args.model_name
-  is_gemma4 = _is_gemma4_model(family_name)
+  is_gemma4 = vllm_model_config.is_gemma4_model(family_name)
   sampling_kwargs: dict[str, Any] = (
       {"skip_special_tokens": False} if is_gemma4 else {}
   )
   if sampler_type == "vllm":
     sampling_kwargs["detokenize"] = args.detokenize
+  mapping_config = None
+  if sampler_type == "inprocess_vllm":
+    mapping_config = vllm_model_config.vllm_mapping_config_for_model(
+        family_name,
+        maxtext_model_name=args.maxtext_model_name or "",
+        weight_sync_mode=args.weight_sync_mode,
+    )
 
   return dataclasses.replace(
       _rollout_config(args, tokenizer),
       kv_cache_size=max_model_len,
       tensor_parallel_size=_get_tensor_parallel_size(args),
       data_parallel_size=max(1, int(args.mesh_fsdp)),
-      rollout_mapping_config=(
-          _mapping_config_for(family_name)
-          if sampler_type == "inprocess_vllm"
-          else None
-      ),
+      rollout_mapping_config=mapping_config,
       rollout_vllm_model_version=vllm_model,
       # Both vLLM samplers always run in server mode.
       rollout_vllm_server_mode=True,
@@ -932,13 +926,16 @@ def _vllm_rollout_config(
       rollout_vllm_max_num_seqs=args.vllm_max_num_seqs,
       rollout_vllm_max_num_batched_tokens=args.vllm_max_num_batched_tokens,
       rollout_vllm_logprobs_mode="processed_logprobs",
-      rollout_vllm_kwargs=_vllm_passthrough_kwargs(args, vllm_model, is_gemma4),
+      rollout_vllm_kwargs=_vllm_passthrough_kwargs(
+          args, vllm_model, is_gemma4, sampler_type=sampler_type
+      ),
       rollout_vllm_sampling_kwargs=sampling_kwargs,
   )
 
 
 def _create_inprocess_vllm_sampler(args, tokenizer):
   """Creates an in-process vLLM sampler rollout worker instance."""
+  _validate_vllm_model_config(args)
   _import_vllm_sampler()
   from tunix.dist_rl.rollout import (  # pylint: disable=g-import-not-at-top
       inprocess_vllm_sampler,
@@ -962,6 +959,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
 
 def _create_vllm_sampler(args, tokenizer):
   """Creates a vLLM sampler rollout worker instance."""
+  _validate_vllm_model_config(args)
   from tunix.dist_rl.rollout import (  # pylint: disable=g-import-not-at-top
       vllm_sampler,
   )
@@ -1010,6 +1008,7 @@ def main(argv: list[str], context: Any = None) -> None:
   )
 
   args = _parse_args(argv)
+  _validate_vllm_model_config(args)
   if args.debug:
     logging.getLogger().setLevel(logging.DEBUG)
     os.environ["TUNIX_LOG_ROLLOUT_TEXT"] = "1"

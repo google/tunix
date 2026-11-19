@@ -21,6 +21,7 @@ Tunix NNX implementation.
 """
 
 from collections.abc import Mapping
+import contextlib
 import itertools
 import re
 from typing import Any
@@ -33,6 +34,7 @@ import jax
 from jax import numpy as jnp
 from orbax import checkpoint as ocp
 from tunix.models.gemma4 import model as model_lib
+from tunix.utils import compat
 
 import sentencepiece as spm
 
@@ -69,11 +71,14 @@ def create_model_from_checkpoint(
   Returns:
     A Gemma4 model instance with loaded weights.
   """
-  abs_model = nnx.eval_shape(
-      lambda: model_lib.Gemma4(
-          model_config, rngs=nnx.Rngs(0), text_only=text_only
-      )
-  )
+  # Resolve mesh-dependent param shardings (e.g. indivisible KV heads) against
+  # `mesh`, matching `safetensors_loader.load_and_create_model`.
+  with compat.set_mesh(mesh) if mesh is not None else contextlib.nullcontext():
+    abs_model = nnx.eval_shape(
+        lambda: model_lib.Gemma4(
+            model_config, rngs=nnx.Rngs(0), text_only=text_only
+        )
+    )
   raw_params = ocp.StandardCheckpointer().restore(checkpoint_path)
   mapped_params = map_from_upstream_checkpoint(raw_params)
   model_state = nnx.state(abs_model)

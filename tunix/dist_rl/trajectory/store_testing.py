@@ -1,7 +1,6 @@
 """Abstract test cases defining contract tests for TrajectoryStore implementations."""
 
 import abc
-from collections.abc import Sequence
 import random
 from typing import Any, ClassVar, cast
 
@@ -95,13 +94,16 @@ class TrajectoryReaderTestCase(
       (
           "all_trajectory_ids",
           None,
-          [trajectory_testing.METADATA_1, trajectory_testing.METADATA_2],
+          {
+              trajectory_testing.TRAJECTORY_ID_1: trajectory_testing.METADATA_1,
+              trajectory_testing.TRAJECTORY_ID_2: trajectory_testing.METADATA_2,
+          },
       ),
-      ("empty_list", [], []),
+      ("empty_list", [], {}),
       (
           "single_trajectory",
           [trajectory_testing.TRAJECTORY_ID_1],
-          [trajectory_testing.METADATA_1],
+          {trajectory_testing.TRAJECTORY_ID_1: trajectory_testing.METADATA_1},
       ),
       (
           "multiple_trajectories",
@@ -109,7 +111,10 @@ class TrajectoryReaderTestCase(
               trajectory_testing.TRAJECTORY_ID_1,
               trajectory_testing.TRAJECTORY_ID_2,
           ],
-          [trajectory_testing.METADATA_1, trajectory_testing.METADATA_2],
+          {
+              trajectory_testing.TRAJECTORY_ID_1: trajectory_testing.METADATA_1,
+              trajectory_testing.TRAJECTORY_ID_2: trajectory_testing.METADATA_2,
+          },
       ),
       (
           "multiple_trajectories_reverse_order",
@@ -117,20 +122,22 @@ class TrajectoryReaderTestCase(
               trajectory_testing.TRAJECTORY_ID_2,
               trajectory_testing.TRAJECTORY_ID_1,
           ],
-          [trajectory_testing.METADATA_2, trajectory_testing.METADATA_1],
+          {
+              trajectory_testing.TRAJECTORY_ID_2: trajectory_testing.METADATA_2,
+              trajectory_testing.TRAJECTORY_ID_1: trajectory_testing.METADATA_1,
+          },
       ),
   )
   def test_get_trajectories_metadata(
       self,
       trajectory_ids: list[str] | None,
-      expected_metas: list[trajectory_lib.TrajectoryMetadata],
+      expected_metas: dict[str, trajectory_lib.TrajectoryMetadata],
   ) -> None:
     """Tests that metadata for trajectories is retrieved."""
     metas = self.reader.get_trajectories_metadata(trajectory_ids)
-    if trajectory_ids is None:
-      self.assertCountEqual(metas, expected_metas)
-    else:
-      self.assertEqual(metas, expected_metas)
+    self.assertEqual(metas, expected_metas)
+    if trajectory_ids is not None:
+      self.assertEqual(list(metas.keys()), list(expected_metas.keys()))
 
   @parameterized.named_parameters(
       ("all_trajectory_ids", None),
@@ -186,11 +193,11 @@ class TrajectoryReaderTestCase(
       self.reader.get_trajectories_metadata(trajectory_ids)
 
   @parameterized.named_parameters(
-      ("empty_list", [], []),
+      ("empty_list", [], {}),
       (
           "single_trajectory",
           [trajectory_testing.TRAJECTORY_ID_1],
-          [trajectory_testing.TRAJECTORY_1],
+          {trajectory_testing.TRAJECTORY_ID_1: trajectory_testing.TRAJECTORY_1},
       ),
       (
           "multiple_trajectories",
@@ -198,7 +205,14 @@ class TrajectoryReaderTestCase(
               trajectory_testing.TRAJECTORY_ID_1,
               trajectory_testing.TRAJECTORY_ID_2,
           ],
-          [trajectory_testing.TRAJECTORY_1, trajectory_testing.TRAJECTORY_2],
+          {
+              trajectory_testing.TRAJECTORY_ID_1: (
+                  trajectory_testing.TRAJECTORY_1
+              ),
+              trajectory_testing.TRAJECTORY_ID_2: (
+                  trajectory_testing.TRAJECTORY_2
+              ),
+          },
       ),
       (
           "multiple_trajectories_reverse_order",
@@ -206,17 +220,25 @@ class TrajectoryReaderTestCase(
               trajectory_testing.TRAJECTORY_ID_2,
               trajectory_testing.TRAJECTORY_ID_1,
           ],
-          [trajectory_testing.TRAJECTORY_2, trajectory_testing.TRAJECTORY_1],
+          {
+              trajectory_testing.TRAJECTORY_ID_2: (
+                  trajectory_testing.TRAJECTORY_2
+              ),
+              trajectory_testing.TRAJECTORY_ID_1: (
+                  trajectory_testing.TRAJECTORY_1
+              ),
+          },
       ),
   )
   def test_get_trajectories(
       self,
       trajectory_ids: list[str],
-      expected_trajs: list[trajectory_lib.Trajectory],
+      expected_trajs: dict[str, trajectory_lib.Trajectory],
   ) -> None:
     """Tests that full trajectories are retrieved in requested ID order."""
     trajs = self.reader.get_trajectories(trajectory_ids)
     self.assertEqual(trajs, expected_trajs)
+    self.assertEqual(list(trajs.keys()), list(expected_trajs.keys()))
 
   @parameterized.named_parameters(
       ("single_missing_id", ["non_existent_id"]),
@@ -232,6 +254,236 @@ class TrajectoryReaderTestCase(
         "Trajectory with ID 'non_existent_id' not found.",
     ):
       self.reader.get_trajectories(trajectory_ids)
+
+  def test_get_trajectories_metadata_ignore_missing(self) -> None:
+    """Tests that ignore_missing=True omits missing IDs while keeping order."""
+    metas = self.reader.get_trajectories_metadata(
+        [
+            trajectory_testing.TRAJECTORY_ID_2,
+            "missing_trajectory_id",
+            trajectory_testing.TRAJECTORY_ID_1,
+        ],
+        ignore_missing=True,
+    )
+    self.assertEqual(
+        metas,
+        {
+            trajectory_testing.TRAJECTORY_ID_2: trajectory_testing.METADATA_2,
+            trajectory_testing.TRAJECTORY_ID_1: trajectory_testing.METADATA_1,
+        },
+    )
+    self.assertEqual(
+        list(metas.keys()),
+        [
+            trajectory_testing.TRAJECTORY_ID_2,
+            trajectory_testing.TRAJECTORY_ID_1,
+        ],
+    )
+
+  def test_get_trajectories_metadata_ignore_missing_all_missing(self) -> None:
+    """Tests that ignore_missing=True returns empty dict when all IDs miss."""
+    metas = self.reader.get_trajectories_metadata(
+        ["missing_id_1", "missing_id_2"],
+        ignore_missing=True,
+    )
+    self.assertEqual(metas, {})
+
+  def test_get_trajectories_ignore_missing(self) -> None:
+    """Tests that ignore_missing=True omits missing IDs while keeping order."""
+    trajs = self.reader.get_trajectories(
+        [
+            trajectory_testing.TRAJECTORY_ID_2,
+            "missing_trajectory_id",
+            trajectory_testing.TRAJECTORY_ID_1,
+        ],
+        ignore_missing=True,
+    )
+    self.assertEqual(
+        trajs,
+        {
+            trajectory_testing.TRAJECTORY_ID_2: trajectory_testing.TRAJECTORY_2,
+            trajectory_testing.TRAJECTORY_ID_1: trajectory_testing.TRAJECTORY_1,
+        },
+    )
+    self.assertEqual(
+        list(trajs.keys()),
+        [
+            trajectory_testing.TRAJECTORY_ID_2,
+            trajectory_testing.TRAJECTORY_ID_1,
+        ],
+    )
+
+  def test_get_trajectories_ignore_missing_all_missing(self) -> None:
+    """Tests that ignore_missing=True returns empty dict when all IDs miss."""
+    trajs = self.reader.get_trajectories(
+        ["missing_id_1", "missing_id_2"],
+        ignore_missing=True,
+    )
+    self.assertEqual(trajs, {})
+
+  @parameterized.named_parameters(
+      (
+          "tunix_metadata",
+          trajectory_lib.TunixTrajectoryMetadata,
+          trajectory_lib.TunixTrajectory,
+          [0, 1],
+      ),
+      (
+          "base_metadata",
+          trajectory_lib.TrajectoryMetadata,
+          trajectory_lib.Trajectory,
+          [1, 2],
+      ),
+  )
+  def test_get_trajectories_strict_false_retains_prefix_before_gap(
+      self,
+      metadata_cls: type[trajectory_lib.TrajectoryMetadata],
+      expected_traj_cls: type[trajectory_lib.Trajectory[Any]],
+      expected_step_ids: list[int],
+  ) -> None:
+    """Tests that strict=False clips steps at a gap and clears completion."""
+    meta = metadata_cls(
+        trajectory_id="gap_traj",
+        session_id="sess_gap",
+        agent=trajectory_lib.Agent(name="test_agent", version="1.0"),
+        status="SUCCEEDED",
+        total_reward=10.0,
+        final_metrics=trajectory_lib.FinalMetrics(total_steps=3),
+        extra={"lineage_key": "keep"},
+    )
+    step1 = trajectory_testing.make_step(step_id=1, message="step 1")
+    step2 = trajectory_testing.make_step(step_id=2, message="step 2")
+    step4 = trajectory_testing.make_step(step_id=4, message="step 4")
+    reader = self._create_reader(initial_data=[(meta, [step1, step2, step4])])
+
+    with self.assertRaisesRegex(ValueError, "Expected step_id"):
+      reader.get_trajectories(["gap_traj"], strict=True)
+
+    trajs = reader.get_trajectories(["gap_traj"], strict=False)
+    self.assertEqual(list(trajs.keys()), ["gap_traj"])
+    traj = trajs["gap_traj"]
+    self.assertIsInstance(traj, expected_traj_cls)
+    self.assertEqual([s.message for s in traj.steps], ["step 1", "step 2"])
+    self.assertEqual([s.step_id for s in traj.steps], expected_step_ids)
+    self.assertIsNone(traj.status)
+    self.assertIsNone(traj.total_reward)
+    self.assertEqual(traj.trajectory_id, "gap_traj")
+    self.assertEqual(traj.session_id, "sess_gap")
+    self.assertEqual(traj.extra, {"lineage_key": "keep"})
+    self.assertEqual(
+        reader.get_trajectories_metadata(["gap_traj"])["gap_traj"].status,
+        "SUCCEEDED",
+    )
+
+  def test_get_trajectories_strict_false_missing_first_step_returns_empty(
+      self,
+  ) -> None:
+    """Tests that strict=False returns empty steps when initial step misses."""
+    meta = trajectory_lib.TunixTrajectoryMetadata(
+        trajectory_id="head_truncated_traj",
+        agent=trajectory_lib.Agent(name="test_agent", version="1.0"),
+        status="COMPLETED",
+        total_reward=10.0,
+        final_metrics=trajectory_lib.FinalMetrics(total_steps=2),
+    )
+    step2 = trajectory_testing.make_step(step_id=2, message="step 2")
+    step3 = trajectory_testing.make_step(step_id=3, message="step 3")
+    reader = self._create_reader(initial_data=[(meta, [step2, step3])])
+
+    with self.assertRaisesRegex(ValueError, "Expected step_id"):
+      reader.get_trajectories(["head_truncated_traj"], strict=True)
+
+    trajs = reader.get_trajectories(["head_truncated_traj"], strict=False)
+    traj = trajs["head_truncated_traj"]
+    self.assertIsInstance(traj, trajectory_lib.TunixTrajectory)
+    self.assertEmpty(traj.steps)
+    self.assertIsNone(traj.status)
+    self.assertIsNone(traj.total_reward)
+
+  def test_get_trajectories_strict_false_resets_completion_on_tail_mismatch(
+      self,
+  ) -> None:
+    """Tests that strict=False resets completion when len(steps) < total_steps."""
+    meta = trajectory_lib.TunixTrajectoryMetadata(
+        trajectory_id="tail_truncated_traj",
+        agent=trajectory_lib.Agent(name="test_agent", version="1.0"),
+        status="SUCCEEDED",
+        total_reward=10.0,
+        final_metrics=trajectory_lib.FinalMetrics(total_steps=3),
+    )
+    step1 = trajectory_testing.make_step(step_id=1, message="step 1")
+    step2 = trajectory_testing.make_step(step_id=2, message="step 2")
+    reader = self._create_reader(initial_data=[(meta, [step1, step2])])
+
+    trajs = reader.get_trajectories(["tail_truncated_traj"], strict=False)
+    traj = trajs["tail_truncated_traj"]
+    self.assertIsInstance(traj, trajectory_lib.TunixTrajectory)
+    self.assertEqual([s.step_id for s in traj.steps], [0, 1])
+    self.assertIsNone(traj.status)
+    self.assertIsNone(traj.total_reward)
+
+  def test_get_trajectories_strict_false_resets_completion_when_all_steps_missing(
+      self,
+  ) -> None:
+    """Tests that strict=False resets completion when all steps are missing."""
+    meta = trajectory_lib.TunixTrajectoryMetadata(
+        trajectory_id="zero_steps_traj",
+        agent=trajectory_lib.Agent(name="test_agent", version="1.0"),
+        status="SUCCEEDED",
+        total_reward=10.0,
+        final_metrics=trajectory_lib.FinalMetrics(total_steps=2),
+    )
+    reader = self._create_reader(initial_data=[(meta, [])])
+
+    trajs = reader.get_trajectories(["zero_steps_traj"], strict=False)
+    traj = trajs["zero_steps_traj"]
+    self.assertIsInstance(traj, trajectory_lib.TunixTrajectory)
+    self.assertEmpty(traj.steps)
+    self.assertIsNone(traj.status)
+    self.assertIsNone(traj.total_reward)
+
+  def test_get_trajectories_strict_false_skips_corrupt_subclass_step(
+      self,
+  ) -> None:
+    """Tests that strict=False skips steps with corrupt Tunix extensions."""
+    meta = trajectory_lib.TunixTrajectoryMetadata(
+        trajectory_id="corrupt_ext_traj",
+        agent=trajectory_lib.Agent(name="test_agent", version="1.0"),
+        status="SUCCEEDED",
+        total_reward=10.0,
+    )
+    step1 = trajectory_testing.make_step(step_id=1, message="step 1")
+    step2_corrupt = trajectory_lib.Step(
+        step_id=2,
+        source=trajectory_lib.Source.AGENT,
+        message="step 2",
+        extra={
+            "_tunix_extensions": {
+                "prefill_start": -5,
+                "prefill_num_context": 0,
+                "prefill_routed_experts": {
+                    "shape": [1, 1, 1],
+                    "dtype": "int16",
+                    "data": "AAAA",
+                },
+            }
+        },
+    )
+    step3 = trajectory_testing.make_step(step_id=3, message="step 3")
+    reader = self._create_reader(
+        initial_data=[(meta, [step1, step2_corrupt, step3])]
+    )
+
+    with self.assertRaisesRegex(ValueError, "Decoded Int3DArray byte length"):
+      reader.get_trajectories(["corrupt_ext_traj"], strict=True)
+
+    trajs = reader.get_trajectories(["corrupt_ext_traj"], strict=False)
+    traj = trajs["corrupt_ext_traj"]
+    self.assertIsInstance(traj, trajectory_lib.TunixTrajectory)
+    self.assertEqual([s.step_id for s in traj.steps], [0])
+    self.assertEqual([s.message for s in traj.steps], ["step 1"])
+    self.assertIsNone(traj.status)
+    self.assertIsNone(traj.total_reward)
 
   def _create_reader_with_many_trajectories(
       self,
@@ -280,11 +532,16 @@ class TrajectoryReaderTestCase(
 
     trajs = reader.get_trajectories(requested_ids)
 
-    expected_trajs = []
-    for trajectory_id in requested_ids:
-      metadata, steps = data_by_id[trajectory_id]
-      expected_trajs.append(metadata.create_trajectory(steps=steps))
+    expected_trajs = {
+        trajectory_id: (
+            data_by_id[trajectory_id][0].create_trajectory(
+                steps=data_by_id[trajectory_id][1]
+            )
+        )
+        for trajectory_id in requested_ids
+    }
     self.assertEqual(trajs, expected_trajs)
+    self.assertEqual(list(trajs.keys()), requested_ids)
 
   def test_get_trajectories_metadata_of_many_trajectories_keeps_request_order(
       self,
@@ -298,8 +555,12 @@ class TrajectoryReaderTestCase(
 
     self.assertEqual(
         metas,
-        [data_by_id[trajectory_id][0] for trajectory_id in requested_ids],
+        {
+            trajectory_id: data_by_id[trajectory_id][0]
+            for trajectory_id in requested_ids
+        },
     )
+    self.assertEqual(list(metas.keys()), requested_ids)
 
 
 class TrajectoryWriterTestCase(
@@ -329,10 +590,16 @@ class TrajectoryWriterTestCase(
     self.writer.flush()
 
     metas = self.reader.get_trajectories_metadata()
-    self.assertEqual(metas, [trajectory_testing.METADATA_1])
+    self.assertEqual(
+        metas,
+        {trajectory_testing.TRAJECTORY_ID_1: trajectory_testing.METADATA_1},
+    )
 
     trajs = self.reader.get_trajectories([trajectory_testing.TRAJECTORY_ID_1])
-    self.assertEqual(trajs, [trajectory_testing.TRAJECTORY_1])
+    self.assertEqual(
+        trajs,
+        {trajectory_testing.TRAJECTORY_ID_1: trajectory_testing.TRAJECTORY_1},
+    )
 
   def test_add_step_multiple_steps(self) -> None:
     """Tests that sequential steps are correctly appended to a trajectory."""
@@ -354,7 +621,10 @@ class TrajectoryWriterTestCase(
     self.writer.flush()
 
     trajs = self.reader.get_trajectories([trajectory_testing.TRAJECTORY_ID_2])
-    self.assertEqual(trajs, [trajectory_testing.TRAJECTORY_2])
+    self.assertEqual(
+        trajs,
+        {trajectory_testing.TRAJECTORY_ID_2: trajectory_testing.TRAJECTORY_2},
+    )
 
   @parameterized.named_parameters(
       ("empty", ""),
@@ -384,18 +654,18 @@ class TrajectoryWriterTestCase(
     metas = self.reader.get_trajectories_metadata()
     self.assertLen(metas, 2)
 
-    (traj_1,) = self.reader.get_trajectories(
-        [trajectory_testing.TRAJECTORY_ID_1]
-    )
+    traj_1 = self.reader.get_trajectories([trajectory_testing.TRAJECTORY_ID_1])[
+        trajectory_testing.TRAJECTORY_ID_1
+    ]
     self.assertEqual(traj_1, trajectory_testing.TRAJECTORY_1)
 
     expected_traj_2_partial = trajectory_lib.Trajectory(
         **trajectory_testing.METADATA_2.model_dump(),
         steps=[trajectory_testing.STEP_2_1],
     )
-    (traj_2,) = self.reader.get_trajectories(
-        [trajectory_testing.TRAJECTORY_ID_2]
-    )
+    traj_2 = self.reader.get_trajectories([trajectory_testing.TRAJECTORY_ID_2])[
+        trajectory_testing.TRAJECTORY_ID_2
+    ]
     self.assertEqual(traj_2, expected_traj_2_partial)
 
     self.writer.add_step(
@@ -415,9 +685,12 @@ class TrajectoryWriterTestCase(
     trajs = self.reader.get_trajectories(
         [trajectory_testing.TRAJECTORY_ID_1, trajectory_testing.TRAJECTORY_ID_2]
     )
-    self.assertCountEqual(
+    self.assertEqual(
         trajs,
-        [trajectory_testing.TRAJECTORY_1, trajectory_testing.TRAJECTORY_2],
+        {
+            trajectory_testing.TRAJECTORY_ID_1: trajectory_testing.TRAJECTORY_1,
+            trajectory_testing.TRAJECTORY_ID_2: trajectory_testing.TRAJECTORY_2,
+        },
     )
 
   def test_add_step_overwrite_existing_step(self) -> None:
@@ -432,9 +705,9 @@ class TrajectoryWriterTestCase(
     self.writer.add_step(updated_step, trajectory_testing.METADATA_1)
     self.writer.flush()
 
-    (traj_1,) = self.reader.get_trajectories(
-        [trajectory_testing.TRAJECTORY_ID_1]
-    )
+    traj_1 = self.reader.get_trajectories([trajectory_testing.TRAJECTORY_ID_1])[
+        trajectory_testing.TRAJECTORY_ID_1
+    ]
     self.assertLen(traj_1.steps, 1)
     self.assertEqual(traj_1.steps[0].message, "updated message")
 
@@ -452,10 +725,16 @@ class TrajectoryWriterTestCase(
     self.writer.flush()
 
     metas = self.reader.get_trajectories_metadata()
-    self.assertEqual(metas, [trajectory_testing.METADATA_1])
+    self.assertEqual(
+        metas,
+        {trajectory_testing.TRAJECTORY_ID_1: trajectory_testing.METADATA_1},
+    )
 
     trajs = self.reader.get_trajectories([trajectory_testing.TRAJECTORY_ID_1])
-    self.assertEqual(trajs, [trajectory_testing.TRAJECTORY_1])
+    self.assertEqual(
+        trajs,
+        {trajectory_testing.TRAJECTORY_ID_1: trajectory_testing.TRAJECTORY_1},
+    )
 
   def test_update_metadata(self) -> None:
     """Tests updating metadata for a trajectory."""
@@ -473,11 +752,11 @@ class TrajectoryWriterTestCase(
     self.writer.flush()
 
     metas = self.reader.get_trajectories_metadata()
-    self.assertEqual(metas, [updated_meta])
+    self.assertEqual(metas, {trajectory_testing.TRAJECTORY_ID_1: updated_meta})
 
-    (traj_1,) = self.reader.get_trajectories(
-        [trajectory_testing.TRAJECTORY_ID_1]
-    )
+    traj_1 = self.reader.get_trajectories([trajectory_testing.TRAJECTORY_ID_1])[
+        trajectory_testing.TRAJECTORY_ID_1
+    ]
     expected_traj_1 = trajectory_lib.Trajectory(
         **updated_meta.model_dump(),
         steps=[trajectory_testing.STEP_1_1],
@@ -494,10 +773,16 @@ class TrajectoryWriterTestCase(
     self.writer.flush()
 
     metas = self.reader.get_trajectories_metadata()
-    self.assertEqual(metas, [trajectory_testing.METADATA_1])
+    self.assertEqual(
+        metas,
+        {trajectory_testing.TRAJECTORY_ID_1: trajectory_testing.METADATA_1},
+    )
 
     trajs = self.reader.get_trajectories([trajectory_testing.TRAJECTORY_ID_1])
-    self.assertEqual(trajs, [trajectory_testing.TRAJECTORY_1])
+    self.assertEqual(
+        trajs,
+        {trajectory_testing.TRAJECTORY_ID_1: trajectory_testing.TRAJECTORY_1},
+    )
 
   def test_update_metadata_snapshots_metadata(self) -> None:
     """Tests that mutating metadata after update_metadata does not alter the store."""
@@ -508,7 +793,10 @@ class TrajectoryWriterTestCase(
     self.writer.flush()
 
     metas = self.reader.get_trajectories_metadata()
-    self.assertEqual(metas, [trajectory_testing.METADATA_1])
+    self.assertEqual(
+        metas,
+        {trajectory_testing.TRAJECTORY_ID_1: trajectory_testing.METADATA_1},
+    )
 
   def test_close_persists_pending_writes(self) -> None:
     """Tests that close() drains pending writes and allows subsequent reads."""
@@ -519,10 +807,13 @@ class TrajectoryWriterTestCase(
 
     self.assertEqual(
         self.reader.get_trajectories_metadata(),
-        [trajectory_testing.METADATA_1],
+        {trajectory_testing.TRAJECTORY_ID_1: trajectory_testing.METADATA_1},
     )
     trajs = self.reader.get_trajectories([trajectory_testing.TRAJECTORY_ID_1])
-    self.assertEqual(trajs, [trajectory_testing.TRAJECTORY_1])
+    self.assertEqual(
+        trajs,
+        {trajectory_testing.TRAJECTORY_ID_1: trajectory_testing.TRAJECTORY_1},
+    )
 
   def test_close_is_idempotent(self) -> None:
     """Tests that closing an already closed writer is a no-op."""
@@ -533,7 +824,10 @@ class TrajectoryWriterTestCase(
     self.writer.close()
 
     trajs = self.reader.get_trajectories([trajectory_testing.TRAJECTORY_ID_1])
-    self.assertEqual(trajs, [trajectory_testing.TRAJECTORY_1])
+    self.assertEqual(
+        trajs,
+        {trajectory_testing.TRAJECTORY_ID_1: trajectory_testing.TRAJECTORY_1},
+    )
 
   def test_update_metadata_standalone(self) -> None:
     """Tests updating metadata prior to adding any steps."""
@@ -541,11 +835,14 @@ class TrajectoryWriterTestCase(
     self.writer.flush()
 
     metas = self.reader.get_trajectories_metadata()
-    self.assertEqual(metas, [trajectory_testing.METADATA_1])
-
-    (traj_1,) = self.reader.get_trajectories(
-        [trajectory_testing.TRAJECTORY_ID_1]
+    self.assertEqual(
+        metas,
+        {trajectory_testing.TRAJECTORY_ID_1: trajectory_testing.METADATA_1},
     )
+
+    traj_1 = self.reader.get_trajectories([trajectory_testing.TRAJECTORY_ID_1])[
+        trajectory_testing.TRAJECTORY_ID_1
+    ]
     expected_traj_1 = trajectory_lib.Trajectory(
         **trajectory_testing.METADATA_1.model_dump(),
         steps=[],
@@ -748,7 +1045,7 @@ class TrajectoryWriterTestCase(
 
     # Metadata reader should return empty (or not include metrics_only_traj)
     metas = self.reader.get_trajectories_metadata()
-    self.assertNotIn("metrics_only_traj", [m.trajectory_id for m in metas])
+    self.assertNotIn("metrics_only_traj", metas)
 
     # Reading metrics alone should succeed
     retrieved = self.reader.get_trajectories_metrics(["metrics_only_traj"])
@@ -788,16 +1085,22 @@ class TrajectoryStoreMetadataClsTestCase(
 
     metas = tunix_store.get_trajectories_metadata(["tunix_1"])
     self.assertLen(metas, 1)
-    self.assertIsInstance(metas[0], trajectory_lib.TunixTrajectoryMetadata)
-    self.assertEqual(metas[0].status, "RUNNING")
+    self.assertIsInstance(
+        metas["tunix_1"], trajectory_lib.TunixTrajectoryMetadata
+    )
+    self.assertEqual(metas["tunix_1"].status, "RUNNING")
 
     trajs = tunix_store.get_trajectories(["tunix_1"])
     self.assertLen(trajs, 1)
-    self.assertIsInstance(trajs[0], trajectory_lib.TunixTrajectory)
-    self.assertEqual(trajs[0].steps[0].step_id, 0)
-    self.assertEqual(trajs[0].steps[1].step_id, 1)
-    self.assertIsInstance(trajs[0].steps[0], trajectory_lib.TunixEnvStep)
-    self.assertIsInstance(trajs[0].steps[1], trajectory_lib.TunixAgentStep)
+    self.assertIsInstance(trajs["tunix_1"], trajectory_lib.TunixTrajectory)
+    self.assertEqual(trajs["tunix_1"].steps[0].step_id, 0)
+    self.assertEqual(trajs["tunix_1"].steps[1].step_id, 1)
+    self.assertIsInstance(
+        trajs["tunix_1"].steps[0], trajectory_lib.TunixEnvStep
+    )
+    self.assertIsInstance(
+        trajs["tunix_1"].steps[1], trajectory_lib.TunixAgentStep
+    )
 
   def test_custom_metadata_and_trajectory_subclass(self) -> None:
     """Verifies the store supports custom metadata and trajectory types."""
@@ -815,16 +1118,16 @@ class TrajectoryStoreMetadataClsTestCase(
 
     metas = custom_store.get_trajectories_metadata(["custom_1"])
     self.assertLen(metas, 1)
-    self.assertIsInstance(metas[0], CustomMetadata)
-    self.assertEqual(metas[0].custom_tag, "experiment_42")
+    self.assertIsInstance(metas["custom_1"], CustomMetadata)
+    self.assertEqual(metas["custom_1"].custom_tag, "experiment_42")
 
     trajs = custom_store.get_trajectories(["custom_1"])
     self.assertLen(trajs, 1)
-    self.assertIsInstance(trajs[0], CustomMetadata)
-    self.assertIsInstance(trajs[0], trajectory_lib.Trajectory)
-    self.assertEqual(trajs[0].custom_tag, "experiment_42")
-    self.assertLen(trajs[0].steps, 1)
-    self.assertEqual(trajs[0].steps[0].message, "custom step")
+    self.assertIsInstance(trajs["custom_1"], CustomMetadata)
+    self.assertIsInstance(trajs["custom_1"], trajectory_lib.Trajectory)
+    self.assertEqual(trajs["custom_1"].custom_tag, "experiment_42")
+    self.assertLen(trajs["custom_1"].steps, 1)
+    self.assertEqual(trajs["custom_1"].steps[0].message, "custom step")
 
   def test_hierarchical_custom_metadata_subclasses(self) -> None:
     """Verifies the store supports multi-level metadata and trajectory hierarchies."""
@@ -843,19 +1146,19 @@ class TrajectoryStoreMetadataClsTestCase(
 
     metas = ext_store.get_trajectories_metadata(["ext_custom_1"])
     self.assertLen(metas, 1)
-    self.assertIsInstance(metas[0], ExtendedCustomMetadata)
-    self.assertIs(type(metas[0]), ExtendedCustomMetadata)
-    self.assertEqual(metas[0].custom_tag, "inherited_tag")
-    self.assertEqual(metas[0].priority, 5)
+    self.assertIsInstance(metas["ext_custom_1"], ExtendedCustomMetadata)
+    self.assertIs(type(metas["ext_custom_1"]), ExtendedCustomMetadata)
+    self.assertEqual(metas["ext_custom_1"].custom_tag, "inherited_tag")
+    self.assertEqual(metas["ext_custom_1"].priority, 5)
 
     trajs = ext_store.get_trajectories(["ext_custom_1"])
     self.assertLen(trajs, 1)
-    self.assertIsInstance(trajs[0], ExtendedCustomMetadata)
-    self.assertIsInstance(trajs[0], trajectory_lib.Trajectory)
-    self.assertEqual(trajs[0].custom_tag, "inherited_tag")
-    self.assertEqual(trajs[0].priority, 5)
-    self.assertLen(trajs[0].steps, 1)
-    self.assertEqual(trajs[0].steps[0].message, "ext step")
+    self.assertIsInstance(trajs["ext_custom_1"], ExtendedCustomMetadata)
+    self.assertIsInstance(trajs["ext_custom_1"], trajectory_lib.Trajectory)
+    self.assertEqual(trajs["ext_custom_1"].custom_tag, "inherited_tag")
+    self.assertEqual(trajs["ext_custom_1"].priority, 5)
+    self.assertLen(trajs["ext_custom_1"].steps, 1)
+    self.assertEqual(trajs["ext_custom_1"].steps[0].message, "ext step")
 
   @parameterized.named_parameters(
       (
@@ -954,9 +1257,9 @@ class PersistentTrajectoryStoreMetadataClsTestCase(
 
     reader = self._create_store()
     base_id = trajectory_testing.TRAJECTORY_ID_1
-    (read_meta,) = reader.get_trajectories_metadata(["t_atif"])
+    read_meta = reader.get_trajectories_metadata(["t_atif"])["t_atif"]
     self.assertEqual(read_meta, trajectory_testing.TUNIX_METADATA_1)
-    (read_traj,) = reader.get_trajectories(["t_atif"])
+    read_traj = reader.get_trajectories(["t_atif"])["t_atif"]
     self.assertIsInstance(read_traj, trajectory_lib.TunixTrajectory)
 
     with self.assertRaisesRegex(TypeError, "is bound to metadata type"):
@@ -981,10 +1284,14 @@ class PersistentTrajectoryStoreMetadataClsTestCase(
     writer.flush()
 
     reader = self._create_store()
-    (read_meta,) = reader.get_trajectories_metadata(["persisted_opt_none"])
+    read_meta = reader.get_trajectories_metadata(["persisted_opt_none"])[
+        "persisted_opt_none"
+    ]
     self.assertIs(type(read_meta), OptionalOnlyMetadata)
     self.assertIsNone(read_meta.opt_tag)
-    (read_traj,) = reader.get_trajectories(["persisted_opt_none"])
+    read_traj = reader.get_trajectories(["persisted_opt_none"])[
+        "persisted_opt_none"
+    ]
     self.assertIsInstance(read_traj, OptionalOnlyMetadata)
     self.assertIsInstance(read_traj, trajectory_lib.Trajectory)
 
@@ -1051,7 +1358,7 @@ class TrajectoryStoreConfigTestCase(
         ),
     )
     rebuilt.flush()
-    (meta,) = rebuilt.get_trajectories_metadata(["config_meta_1"])
+    meta = rebuilt.get_trajectories_metadata(["config_meta_1"])["config_meta_1"]
     self.assertIs(type(meta), metadata_cls)
 
   def test_tunix_trajectory_store_from_config_binds_tunix_metadata(

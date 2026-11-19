@@ -111,6 +111,53 @@ class TransientTransportError(ConnectionError):
   """Raised when a remote transport operation fails with a retryable status."""
 
 
+class ClosedActorError(RuntimeError):
+  """Raised when an operation is attempted on a closed ActorHandle."""
+
+
+class RemoteCallError(RuntimeError):
+  """Raised when a remote worker method raises an application exception."""
+
+
+def is_transport_error(
+    exc: BaseException,
+    *,
+    handle: Optional["ActorHandle"] = None,
+) -> bool:
+  """Returns whether `exc` indicates a transport or closed-handle fault.
+
+  Args:
+    exc: Exception caught while invoking a remote worker RPC.
+    handle: Optional `ActorHandle` used for the call. Required to classify
+      `asyncio.CancelledError` (when the current task is not itself being
+      cancelled) and `grpc.aio.UsageError` as closed-handle faults via
+      `handle.is_closed`.
+
+  Returns:
+    `True` if `exc` represents a retryable transport error or an operation
+    aborted because `handle` was closed; `False` for caller cancellation,
+    application `RemoteCallError`s, and open-handle API errors.
+  """
+  if isinstance(exc, asyncio.CancelledError):
+    cur_task = asyncio.current_task()
+    if cur_task is not None and cur_task.cancelling() > 0:
+      return False
+    return handle is not None and handle.is_closed
+  if _grpc_aio_lib is not None and isinstance(exc, _grpc_aio_lib.UsageError):
+    return handle is not None and handle.is_closed
+  if isinstance(
+      exc,
+      (
+          TransientTransportError,
+          ClosedActorError,
+          ConnectionError,
+          TimeoutError,
+      ),
+  ):
+    return True
+  return GrpcRemoteActorHandle._is_retryable_transport_error(exc, None)  # pylint: disable=protected-access
+
+
 def _running_loop() -> Optional["asyncio.AbstractEventLoop"]:
   """Returns the currently running event loop, or None if there is none."""
   try:
@@ -361,14 +408,14 @@ class ExecutionResponse:
     return None if unpacked is None else cls(*unpacked)
 
   def unwrap(self) -> Any:
-    """Returns the result, or raises RuntimeError if the remote call failed."""
+    """Returns the result, or raises RemoteCallError if the call failed."""
     if self.error_message is not None:
       message = (
           f"RemoteExecutionError [{self.error_type}]: {self.error_message}"
       )
       if self.traceback:
         message = f"{message}\nRemote traceback:\n{self.traceback}"
-      raise RuntimeError(message)
+      raise RemoteCallError(message)
     return self.result
 
 
@@ -991,7 +1038,8 @@ async def serve_worker(
   `SystemExit(1)` if an abort stop was requested.
 
   Args:
-    worker_service: Bound worker instance exposing `set_on_stop` and `stop`.
+    worker_service: Bound worker instance exposing `instance_id`, `set_on_stop`,
+      and `stop`.
     port: TCP port for `GrpcRemoteExecutionServer`.
     discovery: Discovery client exposing `register(metadata=...)`.
     metadata: Registration metadata mapping to pickle and publish.
@@ -1014,7 +1062,11 @@ async def serve_worker(
   server = GrpcRemoteExecutionServer(worker_service)
   await server.start_serving_async(port)
   try:
-    discovery.register(metadata=pickle.dumps(dict(metadata)))
+    discovery.register(
+        metadata=pickle.dumps(
+            {"instance_id": worker_service.instance_id, **metadata}
+        )
+    )
     for sig in (signal.SIGINT, signal.SIGTERM):
       with contextlib.suppress(NotImplementedError):
         loop.add_signal_handler(sig, stop_event.set)
@@ -1044,6 +1096,8 @@ async def serve_worker(
 
 class ActorHandle(abc.ABC):
   """Stateful 1-to-1 routing handle targeting a specific remote worker instance."""
+
+  _closed: bool = False
 
   @classmethod
   def from_address(
@@ -1117,9 +1171,14 @@ class ActorHandle(abc.ABC):
     """Long-polls remote server response queue for completed result."""
     pass
 
+  @property
+  def is_closed(self) -> bool:
+    """Returns whether `close()` or `sync_close()` has been invoked."""
+    return self._closed
+
   async def close(self) -> None:
     """Releases any underlying transport resources held by this handle."""
-    pass
+    self._closed = True
 
   def sync_close(self) -> None:
     """Releases transport resources from either sync or running-loop context.
@@ -1129,6 +1188,7 @@ class ActorHandle(abc.ABC):
     background task: this method returns before it finishes, and failures are
     logged at WARNING instead of raised.
     """
+    self._closed = True
     coro = self.close()
     try:
       loop = asyncio.get_running_loop()
@@ -1303,7 +1363,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
 
   def _raise_if_closed(self) -> None:
     if self._closed:
-      raise RuntimeError(
+      raise ClosedActorError(
           f"GrpcRemoteActorHandle to {self._host_port} is closed."
       )
 
@@ -1751,6 +1811,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
           await old_channel.close()
         except Exception:  # pylint: disable=broad-exception-caught
           pass
+      self._raise_if_closed()
     return self._channel
 
   async def _execute_rpc(
@@ -1778,6 +1839,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
 
     raw_chunks: Optional[AsyncIterator[bytes]] = None
     try:
+      self._raise_if_closed()
       bulk_port, raw_chunks = await self._prepare_request_chunks(
           request,
           get_bulk_port_rpc,
@@ -1801,6 +1863,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       metadata = self._call_metadata(bulk=bulk_port > 0)
       if metadata:
         call_kwargs["metadata"] = metadata
+      self._raise_if_closed()
       call = rpc(_locked_chunks(), **call_kwargs)
       try:
         response = await ExecutionResponse.deserialize_async_chunks(
@@ -1886,8 +1949,14 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
   ) -> Any:
     """Asynchronously invokes remote method over gRPC."""
     await self._ensure_async_channel()
+    rpc = self._rpc
+    get_bulk_port_rpc = self._get_bulk_port_rpc
+    if rpc is None:
+      raise ClosedActorError(
+          f"GrpcRemoteActorHandle to {self._host_port} is closed."
+      )
     return await self._execute_rpc(
-        self._rpc, self._get_bulk_port_rpc, method_name, args, kwargs
+        rpc, get_bulk_port_rpc, method_name, args, kwargs
     )
 
   async def dispatch_task(
@@ -1904,7 +1973,10 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     # `TypeError` that `TaskSession` treats as a non-retryable caller error.
     dispatch_rpc = self._dispatch_rpc
     get_bulk_port_rpc = self._get_bulk_port_rpc
-    assert dispatch_rpc is not None
+    if dispatch_rpc is None:
+      raise ClosedActorError(
+          f"GrpcRemoteActorHandle to {self._host_port} is closed."
+      )
     request = ExecutionRequest(
         request_id=request_id, method_name=method_name, args=args, kwargs=kwargs
     )
@@ -1921,6 +1993,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       call_kwargs["metadata"] = metadata
     call: Any = None
     try:
+      self._raise_if_closed()
       call = dispatch_rpc(chunks, **call_kwargs)
       result = await call
     except BaseException as exc:  # pylint: disable=broad-exception-caught
@@ -1939,13 +2012,18 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
   ) -> Optional[ExecutionResponse]:
     """Long-polls the server for the next completed response (with poll ACK)."""
     await self._ensure_async_channel()
-    # Bind the stub before the next `await`; see `dispatch_task`.
+    # Bind the stubs before the next `await`; see `dispatch_task`.
     poll_rpc = self._poll_rpc
-    assert poll_rpc is not None
-    bulk_port = await self._ensure_bulk_port(self._get_bulk_port_rpc)
+    get_bulk_port_rpc = self._get_bulk_port_rpc
+    if poll_rpc is None:
+      raise ClosedActorError(
+          f"GrpcRemoteActorHandle to {self._host_port} is closed."
+      )
+    bulk_port = await self._ensure_bulk_port(get_bulk_port_rpc)
     call_kwargs: Dict[str, Any] = {"timeout": self._rpc_timeout_s}
     if bulk_port > 0:
       call_kwargs["metadata"] = _BULK_CAPABILITY_METADATA
+    self._raise_if_closed()
     call = poll_rpc(
         (timeout_s, self._client_id, self._last_ack_id), **call_kwargs
     )

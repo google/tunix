@@ -540,12 +540,7 @@ class TrainerPrecompileE2ETest(parameterized.TestCase):
     self.assertEqual(trace_counts, traces_after_configure)
     self.assertEmpty(self._compiled_step_executables(_MAXTEXT_STEP_EXECUTABLES))
 
-  @absltest.skipUnless(
-      MAXTEXT_AVAILABLE
-      # TODO(igorts): Drop hasattr guard once cl/1015725345 lands.
-      and hasattr(maxtext_engine.MaxTextTrainingEngine, "with_fwd_only_fn"),
-      "requires MaxText with with_fwd_only_fn",
-  )
+  @absltest.skipUnless(MAXTEXT_AVAILABLE, "requires MaxText")
   @parameterized.named_parameters(
       ("padded", "padded"),
       ("packed", "packed"),
@@ -591,7 +586,11 @@ class TrainerPrecompileE2ETest(parameterized.TestCase):
     else:
       raise ValueError(f"Unknown assembler_kind: {assembler_kind}")
 
+    self.compiled_fns.clear()
     resp = worker.per_token_logps(items=req)
+    self.assertLen(
+        [name for name in self.compiled_fns if "fwd_only" in name], 1
+    )
 
     graphdef, state = nnx.split(engine.model)
     with engine._sharding_ctx():

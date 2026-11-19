@@ -778,6 +778,31 @@ class LifecycleDriverTest(absltest.TestCase):
     self.assertIsNone(closed_driver._reconciler_thread)
     self.assertIsNone(closed_driver._late_executor)
 
+  def test_bring_up_propagates_routed_experts_staging_metadata_into_resources(
+      self,
+  ):
+    registry = worker_registry.WorkerRegistry()
+    remote_handle = mock.MagicMock(spec=remote_execution.ActorHandle)
+
+    def _submit(method_name, *args, **kwargs):
+      del args, kwargs
+      if method_name == "initialize":
+        return datatypes.Response(
+            metadata={
+                "routed_experts_shape": (61, 8),
+                "staging_max_bytes": 16 * 1024 * 1024,
+            }
+        )
+      return datatypes.Response()
+
+    remote_handle.submit.side_effect = _submit
+    registry.register_handle("r-moe", [datatypes.Role.ROLLOUT], remote_handle)
+    lifecycle.LifecycleDriver(registry).bring_up(_DUMMY_DATA)
+
+    info = registry.info("r-moe")
+    self.assertEqual(info.resources["routed_experts_shape"], (61, 8))
+    self.assertEqual(info.resources["staging_max_bytes"], 16 * 1024 * 1024)
+
 
 if __name__ == "__main__":
   absltest.main()

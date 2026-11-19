@@ -1,6 +1,6 @@
 # Distributed FrozenLake GRPO Recipe
 
-This directory ports the Qwen3 and Gemma4 E2B FrozenLake recipes under
+This directory ports the Qwen3, Qwen3.5, and Gemma4 E2B FrozenLake recipes under
 `examples/frozenlake/` to the distributed RL stack. It runs on the shared
 launcher and node mains in `tunix/dist_rl/launch/`: the control plane runs on
 CPU, while the generic distributed trainer and rollout workers own model
@@ -49,8 +49,8 @@ bash tunix/dist_rl/examples/frozenlake_dist/launcher.sh \
   model_config.model_name=Qwen3-1.7B model_config.model_id=Qwen/Qwen3-1.7B \
   tokenizer_config.tokenizer_path=Qwen/Qwen3-1.7B \
   model_config.mesh.shape="(1,2)" \
-  cluster_config.local.trainer_tpu_chips=0,1 \
-  cluster_config.local.rollout_tpu_chips=2,3 \
+  cluster_config.local.trainer_devices=0,1 \
+  cluster_config.local.rollout_devices=2,3 \
   cluster_config.local.tpu_chips_per_host_bounds=1,2,1 \
   batch_size=1 rl_training_config.mini_batch_size=1 \
   rl_training_config.train_micro_batch_size=1 \
@@ -71,22 +71,22 @@ tests, also needs `vllm_config.init_with_random_weights=false`. Keep
 
 `agentic_grpo_config.beta` stays zero: a nonzero KL coefficient needs a
 reference inference worker, which needs chips of its own
-(`cluster_config.local.inference_tpu_chips`). FrozenLake is deterministic by
+(`cluster_config.local.inference_devices`). FrozenLake is deterministic by
 default, matching the reference recipe's environment construction; set
 `env_kwargs.is_slippery=true` to enable Gymnasium's slippery transitions.
 
 ## Gemma4 E2B
 
-`run_gemma4_e2b.sh` runs the Gemma4 E2B recipe of
+`../recipes/benchmark_frozenlake_gemma4_e2b.sh` runs the Gemma4 E2B recipe of
 `examples/frozenlake/train_frozenlake.py` through `launcher.sh`. On a 4-chip
 host it assigns chips 0-1 to a two-way FSDP trainer and chips 2-3 to a two-way
 TP rollout worker:
 
 ```bash
-bash tunix/dist_rl/examples/frozenlake_dist/run_gemma4_e2b.sh
+bash tunix/dist_rl/examples/recipes/benchmark_frozenlake_gemma4_e2b.sh
 ```
 
-The wrapper selects `google/gemma-4-E2B-it` (also as the tokenizer),
+The recipe selects `google/gemma-4-E2B-it` (also as the tokenizer),
 two-trajectory trainer/logp micro-batches, `compute_logps_chunk_size=2048`, and
 `max_concurrency=512`, and writes its artifacts to
 `artifacts/gemma4_e2b_dist_frozenlake`. The rest comes from `frozenlake.yaml`:
@@ -95,52 +95,37 @@ block size 256, the Gemma4 non-thinking chat template, and the vLLM limits
 (`max_num_seqs=512`, `max_num_batched_tokens=32768`). Later
 `section.key=value` arguments override any of them.
 
-## Distributed vs. agentic benchmark
+## Qwen3.5 0.8B / 2B (TP=1)
 
-`../rl_efficiency_benchmark/benchmark.py` runs the Gemma4 E2B recipe on the
-distributed stack (`run_gemma4_e2b.sh`) or the agentic stack
-(`tunix.cli.grpo_main`), then compares recorded timings.
-`frozenlake_benchmark.py` generates matched configs for both stacks; for the
-distributed stack, they are `section.key=value` arguments of
-`run_gemma4_e2b.sh`, including the benchmark's own vLLM limits
-(`max_num_seqs=32`, `max_num_batched_tokens=8192`).
-`frozenlake_benchmark_test.py` checks them against `frozenlake.yaml` and the
-wrapper. Both stacks use BF16 compute, FP32 loading, exact token continuity,
-separate two-chip actor and rollout meshes, and one prompt group (8
-trajectories) per microbatch. The benchmark injects timing hooks through
-`cluster_config.trainer_main`, `cluster_config.rollout_main`, and
-`cluster_config.orchestrator_main`, which wrap the node mains in
-`launch/nodes/`.
-
-Use one dedicated four-chip TPU host with a pre-downloaded model. Keep
-code, dependencies, and flags fixed across the runs you compare, and use a new
-`--output` for every run. Without `--execute`, `run` only writes the plan.
+`../recipes/frozenlake_qwen3p5_0p8b.sh` runs `Qwen/Qwen3.5-0.8B` on any TPU host
+with at least two chips, assigning chip 0 to a `1x1` trainer and chip 1 to a
+`TP=1` in-process vLLM rollout worker (`tpu_chips_per_host_bounds="1,1,1"`):
 
 ```bash
-BENCH=(python3 tunix/dist_rl/examples/rl_efficiency_benchmark/benchmark.py)
-TIMING=stages  # Module timings; use pipeline for end-to-end step time.
-runs=()
-for repeat in 1 2 3; do
-  order=(agentic dist); (( repeat % 2 )) || order=(dist agentic)
-  for stack in "${order[@]}"; do
-    out="$PWD/artifacts/rl_efficiency/$TIMING-$repeat-$stack"
-    "${BENCH[@]}" run --mode "$stack" --timing-mode "$TIMING" --output "$out" \
-      --model-dir /path/to/gemma-4-E2B-it --cache-root "$PWD/artifacts/cache" \
-      --hardware v5p-4 --execute
-    runs+=("$out")
-  done
-done
-"${BENCH[@]}" report "${runs[@]}" > "$TIMING-comparison.json"
+bash tunix/dist_rl/examples/recipes/frozenlake_qwen3p5_0p8b.sh
 ```
 
-Defaults run 150 steps (5 warmup) with 64 prompt groups × 8 generations;
-`run --help` lists all flags. `stages` waits for device completion after
-training, log-probs, and weight sync (compare
-`api_calls.<module>.host_time_per_step_seconds`). `pipeline` keeps intra-step
-overlap (compare `step_time_seconds.mean`). Do not mix modes in one report.
+To run `Qwen3.5-2B` on the same `TP=1` rollout topology, override the model and
+tokenizer keys:
 
-The report gives, for every numeric summary field, each stack's median across
-runs, `dist_minus_agentic`, and `dist_relative_to_agentic_percent`. Positive
-time differences mean distributed is slower. It rejects failed or incomplete
-runs, timed-out trajectories, missing worker hooks, and mismatched workload,
-hardware, model, dataset, dtype, timing mode, or per-step training work.
+```bash
+bash tunix/dist_rl/examples/recipes/frozenlake_qwen3p5_0p8b.sh \
+  model_config.model_name=Qwen3.5-2B \
+  model_config.model_id=Qwen/Qwen3.5-2B \
+  tokenizer_config.tokenizer_path=Qwen/Qwen3.5-2B
+```
+
+The recipe configures `float32` parameter loading
+(`model_config.load_dtype=float32`) to preserve Gated DeltaNet's `A_log`
+precision and avoid `bfloat16` AdamW update underflow, `bfloat16` compute and
+rollout, `vllm_config.hbm_utilization=0.5`, two-trajectory trainer/logp
+micro-batches, `compute_logps_chunk_size=2048`, and gradient clipping at `1.0`,
+writing artifacts to `artifacts/qwen3p5_0p8b_dist_frozenlake`. Non-thinking chat
+parsing (`chat_parser_config.enable_thinking=false`) and Raiden weight sync come
+from `frozenlake.yaml`.
+
+## Distributed vs. agentic benchmark
+
+`../../benchmarks/rl_efficiency/` runs this recipe on the distributed stack
+and the matching `tunix.cli.grpo_main` config on the agentic stack, and
+compares their recorded timings; see its `README.md`.

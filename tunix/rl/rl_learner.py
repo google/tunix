@@ -20,12 +20,12 @@ import abc
 from concurrent import futures
 import itertools
 import math
-from typing import Any, Callable, Dict, Generic, Iterable, Iterator, List, Sequence, TypeVar
+from typing import Any, Callable, Dict, Generic, Iterable, Iterator, List, Sequence, TypeAlias, TypeVar
 
 from absl import logging
 import jax
-from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
+from tunix.common import datatypes
 from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import common
@@ -41,6 +41,7 @@ from tunix.utils import compat
 ABC = abc.ABC
 abstractmethod = abc.abstractmethod
 
+ArrayLike: TypeAlias = datatypes.ArrayLike
 TrainingInputT = Dict[str, List[str] | ArrayLike]
 
 # prompts, completions, **kargs -> rewards
@@ -123,7 +124,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
     )
 
     if self._packing_enabled:
-      assert self._training_config.max_seq_token_per_tpu is not None
+      assert self._training_config.max_seq_tokens_per_device is not None
       # Fail now rather than mid-run: a maximal sequence must fit one packed
       # row. `max_response_length` lives on the algo config for agentic
       # learners and on the rollout config elsewhere.
@@ -137,7 +138,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         r_config = rollout_config
 
       packing.validate_packing_budget(
-          self._training_config.max_seq_token_per_tpu,
+          self._training_config.max_seq_tokens_per_device,
           getattr(r_config, "max_prompt_length", 1000000),
           getattr(algo_config, "max_response_length", None)
           or r_config.max_tokens_to_generate,
@@ -545,8 +546,8 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         if key not in buffer:
           buffer[key] = []
 
-        if isinstance(values, (np.ndarray, jax.Array)):
-          buffer[key].extend(list(values.flatten()))
+        if isinstance(values, datatypes.TensorLike):
+          buffer[key].extend(list(np.asarray(values).flatten()))
         elif isinstance(values, (list, tuple)):
           buffer[key].extend(values)
         else:
@@ -695,6 +696,11 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       skip_jit: bool,
   ) -> None:
     """Run one global step."""
+    if self.algo_config.score_centering and mini_batch_size < full_batch_size:
+      raise ValueError(
+          "score_centering needs one on-policy update per batch:"
+          " num_iterations=1 and mini_batch_size >= the batch size."
+      )
     for _ in range(full_batch_size // mini_batch_size):
       initial_steps = self._iter_steps
 
@@ -777,7 +783,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
 
     train_data_gen = queue_iterator()
     if self._packing_enabled:
-      assert self._training_config.max_seq_token_per_tpu is not None
+      assert self._training_config.max_seq_tokens_per_device is not None
       mesh = self.rl_engine.cluster_config.role_to_mesh[
           rl_engine_lib.Role.ACTOR
       ]
@@ -786,16 +792,16 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       pack_size = rl_utils.compute_pack_size(mesh)
 
       logging.info(
-          "Using sequence packing with max_seq_token_per_tpu: %d, "
+          "Using sequence packing with max_seq_tokens_per_device: %d, "
           " pack_size: %d",
-          self._training_config.max_seq_token_per_tpu,
+          self._training_config.max_seq_tokens_per_device,
           pack_size,
       )
       # Update boundary in sequences (mini-batch semantics): packing is
       # independent of any micro-batch/streaming granularity.
       train_data_gen = rl_utils.pack_sequences(
           train_data_gen,
-          self._training_config.max_seq_token_per_tpu,
+          self._training_config.max_seq_tokens_per_device,
           sequences_per_update=mini_batch_size * self._num_generations(),
           pack_size=pack_size,
           max_segments_per_packed_row=getattr(

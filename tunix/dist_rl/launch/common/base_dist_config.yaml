@@ -40,8 +40,10 @@ model_config: &base_model_config
     axis_names: "('fsdp','tp')"
     allocation_policy: "COMPACT"
   # Architecture / MaxText overrides (e.g. maxtext_model_name, maxtext_output_dir,
-  # padded_moe_mlp_dim, warmup_steps_fraction, attention). `maxtext_model_name`
-  # (e.g. "qwen3-0.6b") is required when `model_source` is "maxtext".
+  # padded_moe_mlp_dim, warmup_steps_fraction, attention, skip_step_on_spikes,
+  # skip_step_on_nan, skip_step_interval, skip_step_scaling_factor).
+  # `maxtext_model_name` (e.g. "qwen3-0.6b") is required when `model_source` is
+  # "maxtext".
   kwargs: {}
 
 actor_model_config:
@@ -139,6 +141,9 @@ training_config: &base_training_config
     profiler_steps: 0
   data_sharding_axis: ["fsdp"]
   max_inflight_computations: 2
+  max_seq_tokens_per_device: null
+  # TODO(b/583675740): Deprecate max_seq_token_per_tpu in favor of
+  # max_seq_tokens_per_device.
   max_seq_token_per_tpu: null
   max_segments_per_packed_row: null
 
@@ -229,11 +234,8 @@ vllm_config:
   # each shape then compiles on first use. The rollout node sets
   # `SKIP_JAX_PRECOMPILE` from it.
   skip_jax_precompile: true
-  # Free-form vLLM engine arguments (`VLLM_ADDITIONAL_CONFIG_JSON`). The typed
-  # keys above are rejected here.
-  kwargs: {}
-  # Extra `vllm.AsyncEngineArgs` kwargs, for `rollout_engine: vllm` only. Keys
-  # owned by other config fields are rejected; `additional_config` (and its
+  # Extra vLLM engine arguments for `rollout_engine: vllm` or `inprocess_vllm`.
+  # Keys owned by other config fields are rejected; `additional_config` (and its
   # `maxtext_config`) is deep-merged onto what the rollout node builds.
   engine_kwargs: {}
 
@@ -296,6 +298,16 @@ verl_compatible: false
 reward_functions: []
 
 ######################## Distributed RL Extensions ########################
+# Per-role `<framework>:<accelerator>` execution target contract
+# (e.g. "jax:tpu", "jax:gpu", "torch:tpu"). Role-specific keys (`trainer`,
+# `rollout`, `inference`) inherit from `target` when left empty.
+execution_targets:
+  target: "jax:tpu"
+  trainer: ""
+  rollout: ""
+  inference: ""
+  placement: "disaggregated" # "colocated" or "disaggregated"
+
 # Trainer/orchestrator knobs that are not part of the `tunix.cli` training
 # config. Kept out of `rl_training_config` so the shared
 # `BasePipeline.create_rl_training_config()` builder accepts it unchanged.
@@ -305,13 +317,16 @@ dist_training_config:
   # (`checkpoint_storage_device_host_concurrent_gb`, 8 GB). Only the MaxText
   # trainer takes a value; the Tunix trainer rejects one for now.
   ckpt_d2h_concurrent_gb: null
-  # Extra MaxText config arguments for a MaxText trainer
-  # (`actor_model_config.model_source: maxtext`), as space-separated
-  # `key=value` pairs, e.g. "remat_policy=custom opt_type=sgd". The trainer
-  # appends them to the MaxText config it builds. Set them here, not in the
-  # `MAXTEXT_EXTRA_FLAGS` or `M_<KEY>` environment variables, which `launch.sh`
-  # rejects.
-  maxtext_extra_flags: ""
+  # Extra MaxText config keys for a MaxText trainer
+  # (`actor_model_config.model_source: maxtext`): a mapping of MaxText key to a
+  # str, int, float or bool, e.g. `{remat_policy: custom, sa_block_q: 1024}`,
+  # or `dist_training_config.maxtext_extra_config.remat_policy=custom` on the
+  # command line. The trainer appends them to the MaxText config it builds.
+  # Keys it builds from this config (e.g. `learning_rate`,
+  # `per_device_batch_size`, `ici_fsdp_parallelism`) are rejected; set the
+  # config keys instead. Set them here, not in the `MAXTEXT_EXTRA_FLAGS` or
+  # `M_<KEY>` environment variables, which `launch.sh` rejects.
+  maxtext_extra_config: {}
   profiler_period: -1
   segment_alignment_boundary: 1
   # Precompile the trainer step before the first rollout batch arrives.
@@ -324,6 +339,10 @@ dist_training_config:
   trajectory_log_dir: ""
 
 weight_sync_config:
+  # Weight synchronization transport mode ("none", "in_memory", "raiden", "fs",
+  # or "nccl"). "fs" selects disaggregated file/object-store staged weight sync,
+  # orthogonal to checkpoint serialization format ("orbax" vs "safetensors") and
+  # storage backend ("gcs" gs://, "GOOGLE_INTERNAL_STOAGE_PATH" /GOOGLE_INTERNAL_STOAGE_PATH/, or "local" POSIX paths via epath).
   mode: "none"
   raiden_use_ffi: null
   use_weight_converter: true
@@ -345,7 +364,7 @@ trajectory_store_config:
   dir: ""
 
 cluster_config:
-  # Where the processes run and what starts them: "local" (one TPU host,
+  # Where the processes run and what starts them: "local" (one host,
   # `local.sh`) or "k8s" (GKE, `k8s.sh`), both through `launch.sh`; or
   # "external", processes started by another launcher (e.g. a job scheduler
   # that starts each process separately), which `launch.sh` rejects.
@@ -362,9 +381,11 @@ cluster_config:
   registry_module: "tunix.dist_rl.examples.math_gsm8k_dist.gsm8k"
   # Relative paths are resolved against the repo root on `target: local` and
   # against the container working directory (repo root) on `target: k8s`;
-  # `target: external` requires an absolute filesystem path. The models,
-  # checkpoints, and metrics default to subdirectories of it. Each task recipe
-  # sets its own value.
+  # `target: external` requires an absolute filesystem path. URIs such as
+  # `gs://...` are rejected; set the output paths themselves (checkpoints,
+  # metrics, trajectory store) to URIs instead. The models, checkpoints, and
+  # metrics default to subdirectories of it. Each task recipe sets its own
+  # value.
   artifact_root: "artifacts/dist_rl"
   run_id: ""
   # Print the commands (local) or manifests (k8s) instead of launching.
@@ -419,11 +440,20 @@ cluster_config:
     # OTLP gRPC port of the OpenTelemetry collector that `launch.sh otel`
     # deploys on k8s.
     otel: 4317
+  # Extra `KEY: "VALUE"` string environment variables per process (`local.sh`
+  # and `k8s.sh`). Rejects config-backed library vars, `T_*`/`M_*` overrides,
+  # and worker identity vars; logged in resolved configs, so omit credentials.
+  role_env:
+    orchestrator: {}
+    trainer: {}
+    rollout: {}
+    inference: {}
   local:
-    auto_detect_pci_tpus: false
-    trainer_tpu_chips: "0,1"
-    rollout_tpu_chips: "2,3"
-    inference_tpu_chips: ""
+    auto_detect_devices: false
+    download_model_weights: true
+    trainer_devices: "0,1"
+    rollout_devices: "2,3"
+    inference_devices: ""
     tpu_chips_per_host_bounds: "1,2,1"
     tpu_host_bounds: "1,1,1"
     allow_multiple_libtpu_load: true
@@ -459,7 +489,6 @@ cluster_config:
     cpu_memory: ""
     gcs_scratch_location: "gs://cloud-pathways-staging/tmp"
     enable_pathways_persistence: false
-    trainer_extra_env: ""
     # Container image for the trainer/rollout pods; required for target=k8s
     # (`k8s.sh` fails fast when empty). Example launchers set it.
     tunix_image: ""
@@ -491,6 +520,12 @@ cluster_config:
     # `use_dynamic_slicing`) pins the Pathways head pod to a node pool.
     use_dynamic_slicing: false
     head_nodepool: ""
+    # Without `use_dynamic_slicing`, the Pathways head pod runs on a pw-node
+    # host and requests no TPUs. List here the node pools of any Kueue CPU
+    # ResourceFlavors that come before the TPU flavor in the ClusterQueue, so
+    # Kueue does not admit the head pod to them (see
+    # `yaml_generator.render_colocated_head_affinity`).
+    head_excluded_nodepools: []
     # Rollout JAX compilation cache. Unless `disable`, the rollout pods cache in
     # `local_dir` and use a GCS cache: `rollout_gcs_dir`, or else a directory
     # under `gcs_dir` (or `gs://<bucket>/jax_cache`) named by the rollout config

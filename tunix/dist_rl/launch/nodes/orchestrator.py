@@ -26,7 +26,8 @@ the agentic `tunix.cli` path:
   `create_dataset(**data_config) -> grain.MapDataset` as in `tunix.cli`. The
   record format is specific to this path (`{"prompt", "metadata", "task_name"}`
   with optional `metadata` and `task_name`, not `tunix.cli`'s flat columns);
-  see `load_prompt_items`.
+  see `load_prompt_items`. The module may also define `prompt_items_context`
+  to wrap the prompt items for the run; see `PromptItemsContext`.
 * `reward_functions` and `agentic_grpo_config.reward_mode`: `reward_fn` scores
   completions with `reward_functions`; `env` uses the environment rewards, plus
   any `reward_functions`.
@@ -44,13 +45,18 @@ Run via the distributed runtime, e.g.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
+import contextlib
 import dataclasses
+import importlib
 import logging
 import pickle
 import signal
+import symtable
 import threading
 import time
+import tokenize
+from typing import TypeAlias
 
 import grain
 import jax
@@ -134,15 +140,15 @@ def build_batch_config(
   # `create_rollout_config()` needs worker meshes for `rollout_engine=vllm`; the
   # CPU orchestrator only needs the length budgets.
   rollout = hp.config_mapping("rollout_config")
-  max_seq_token_per_tpu = rl_train["max_seq_token_per_tpu"]
+  max_seq_tokens_per_device = rl_train["max_seq_tokens_per_device"]
   max_segments_per_packed_row = rl_train["max_segments_per_packed_row"]
   return batch_assembly.BatchConfig(
       pad_id=pad_id,
       eos_id=eos_id,
       max_prompt_length=int(rollout["max_prompt_length"]),
       max_response_length=int(rollout["total_generation_steps"]),
-      max_seq_token_per_tpu=(
-          None if max_seq_token_per_tpu is None else int(max_seq_token_per_tpu)
+      max_seq_tokens_per_device=(
+          int(max_seq_tokens_per_device) if max_seq_tokens_per_device else None
       ),
       max_segments_per_packed_row=(
           None
@@ -420,6 +426,62 @@ def load_prompt_items(
   return prompt_items.repeat()
 
 
+# Optional `prompt_items_context(hp, prompt_items)` that a task's dotted-module
+# `data_module` defines next to `create_dataset` to wrap the prompt items for
+# the run, e.g. to prepare per-task resources for upcoming batches and release
+# them when the run ends (defining it in a `.py` file path raises `ValueError`).
+# It returns a context manager that yields the items the program reads; `main`
+# enters it around the program, and it exits after the program closes and before
+# the cluster teardown. It must not install signal handlers:
+# `managed_cluster_teardown` owns SIGTERM and unwinds it on abort.
+PromptItemsContext: TypeAlias = Callable[
+    [resolve_config.DistHyperParameters, grain.MapDataset[dict[str, object]]],
+    contextlib.AbstractContextManager[Iterable[dict[str, object]]],
+]
+
+
+def load_prompt_items_context(
+    hp: resolve_config.DistHyperParameters,
+) -> PromptItemsContext | None:
+  """Returns `data_module`'s `prompt_items_context`, or None if it has none."""
+  data_module = str(hp.config["data_module"])
+  module_name = data_module
+  if (
+      not module_name.endswith(".py")
+      and "(" in module_name
+      and ":" in module_name
+  ):
+    module_name, _ = module_name.rsplit("(", 1)
+  if not module_name.endswith(".py") and ":" in module_name:
+    module_name, _ = module_name.rsplit(":", 1)
+  if module_name.endswith(".py"):
+    with tokenize.open(module_name) as f:
+      table = symtable.symtable(f.read(), module_name, "exec")
+    if "prompt_items_context" in table.get_identifiers():
+      symbol = table.lookup("prompt_items_context")
+      if symbol.is_assigned() or symbol.is_imported():
+        raise ValueError(
+            f"data_module {data_module!r} defines prompt_items_context in a .py"
+            " file; pass a dotted Python module name instead."
+        )
+    return None
+  # Already imported by `load_prompt_items`, so this returns the same module.
+  module = importlib.import_module(module_name)
+  if not hasattr(module, "prompt_items_context"):
+    return None
+  context = module.prompt_items_context
+  if not callable(context):
+    raise TypeError(
+        f"data_module {data_module!r} defines prompt_items_context as a"
+        f" {type(context).__name__}, which is not callable."
+    )
+  logging.info(
+      "Wrapping the prompt items with %s.prompt_items_context.",
+      module.__name__,
+  )
+  return context
+
+
 def required_workers(
     hp: resolve_config.DistHyperParameters,
 ) -> dict[datatypes.Role | str, int]:
@@ -597,7 +659,7 @@ def build_program(
     reward_fns: Sequence[reward_manager.RewardFn],
     pad_id: int,
     eos_id: int,
-    prompt_items: grain.MapDataset[dict[str, object]],
+    prompt_items: Iterable[dict[str, object]],
     trajectory_store: trajectory_store_lib.TrajectoryStore | None,
     metrics_logging_options: metrics_logger_lib.MetricsLoggerOptions | None,
 ) -> rl_program.StandardRLProgram:
@@ -610,7 +672,8 @@ def build_program(
     pad_id: Tokenizer padding id for batch assembly.
     eos_id: Tokenizer end-of-sequence id for the trainer loss and actor
       re-scoring.
-    prompt_items: Prompt items to dispatch (see `load_prompt_items`).
+    prompt_items: Prompt items to dispatch (see `load_prompt_items` and
+      `PromptItemsContext`).
     trajectory_store: The cluster's trajectory store, if enabled.
     metrics_logging_options: Metrics logging (see
       `build_metrics_logging_options`), or None to log no metrics.
@@ -748,14 +811,15 @@ def main(
   logging.info("Control-plane JAX backend: %s", jax.default_backend())
 
   # Everything that can fail on the config runs before waiting for the
-  # workers: the checks that need no download first, then the dataset and the
-  # tokenizer, then the program itself.
+  # workers: the checks that need no download first, then the dataset, its
+  # context and the tokenizer, then the program itself.
   weight_sync_timeouts, rpc_timeout_s = resolve_weight_sync_timeouts(hp)
   algo_config = build_grpo_config(hp)
   reward_fns = hp.obtain_reward_fn()
   node_utils.setup_otel_metrics(hp, "orchestrator", worker_id_str=None)
   metrics_logging_options = build_metrics_logging_options(hp)
   prompt_items = load_prompt_items(hp)
+  prompt_items_context = load_prompt_items_context(hp)
   pad_id, eos_id = node_utils.pad_and_eos_ids(node_utils.load_hf_tokenizer(hp))
 
   cluster = create_cluster(hp, weight_sync_timeouts=weight_sync_timeouts)
@@ -765,24 +829,30 @@ def main(
   with cluster_orchestrator.managed_cluster_teardown(
       cluster, stop_workers_on_exit=stop_workers_on_exit
   ):
-    program = build_program(
-        hp,
-        algo_config=algo_config,
-        reward_fns=reward_fns,
-        pad_id=pad_id,
-        eos_id=eos_id,
-        prompt_items=prompt_items,
-        trajectory_store=cluster.trajectory_store,
-        metrics_logging_options=metrics_logging_options,
-    )
-    result = run_program(
-        hp,
-        cluster,
-        program,
-        discovery=discovery,
-        rpc_timeout_s=rpc_timeout_s,
-        config_sha256=config_sha256,
-    )
+    # Exits after `run_program` closes the program, before the teardown.
+    with (
+        contextlib.nullcontext(prompt_items)
+        if prompt_items_context is None
+        else prompt_items_context(hp, prompt_items)
+    ) as items:
+      program = build_program(
+          hp,
+          algo_config=algo_config,
+          reward_fns=reward_fns,
+          pad_id=pad_id,
+          eos_id=eos_id,
+          prompt_items=items,
+          trajectory_store=cluster.trajectory_store,
+          metrics_logging_options=metrics_logging_options,
+      )
+      result = run_program(
+          hp,
+          cluster,
+          program,
+          discovery=discovery,
+          rpc_timeout_s=rpc_timeout_s,
+          config_sha256=config_sha256,
+      )
 
   if result is None:
     logging.info("=== GRPO run finished without a completed step ===")

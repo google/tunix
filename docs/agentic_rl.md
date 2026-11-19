@@ -23,6 +23,10 @@ The framework consists of several key components:
     agent-environment pair to produce a complete trajectory.
 *   **RolloutOrchestrator**: Manages multiple `TrajectoryCollectEngine`
     instances for parallel trajectory collection.
+*   **AgenticRLLearner / AgenticGRPOLearner**: Coordinates asynchronous
+    producer-consumer trajectory collection, group-wise reward/advantage
+    computation, and policy updates (`tunix.AgenticGRPOLearner` and
+    `tunix.AgenticGRPOConfig`).
 
 ### Agents
 
@@ -116,13 +120,52 @@ generating trajectories with stale parameters.
 
 ### Trajectory Batching and Grouping
 
-Tunix supports batching of agentic trajectories through the `GroupQueueManager`.
-This component, used within the `RolloutOrchestrator`, collects `TrajectoryItem`
-instances into buckets based on a configurable `group_key` (e.g., prompt ID via
-`env.task["group_id"]`) and `episode_id`. Once a bucket reaches a predefined
-`num_generations` (as in GRPO), it is marked as a "ready group"
-and made available for downstream processing by `yield_batches`. This mechanism
-is essential for algorithms like GRPO which require multiple trajectory samples
-for each prompt, and improves efficiency by yielding full groups of trajectories
-in batches. The `max_open_buckets` parameter can be used to limit memory usage
-by controlling the number of groups that can be populated simultaneously.
+Tunix supports batching of agentic trajectories through `GroupQueueManager`
+(`tunix.rl.agentic.queue_manager.group_queue_manager.GroupQueueManager`). Used
+within `RolloutOrchestrator`, it collects `TrajectoryItem` instances into
+buckets using a configurable `key_fn` (defaulting in `RolloutOrchestrator` to
+`item.prompt_id`) or a custom `group_fn(buckets, item)`. In
+`RolloutOrchestrator.run_producers_from_stream`, each collected episode is
+assigned a `prompt_id` via `group_key_fn(pair_index, env, trajectory)` (which
+defaults to `pair_index` from `env.extra_kwargs["pair_index"]`, or can read
+custom task metadata such as `env.extra_kwargs["group_id"]`).
+
+Once a bucket reaches `num_generations` trajectories (as required by GRPO), it
+is optionally validated through `filter_fn` (invoking `on_group_filtered` if an
+entire group is rejected) and moved into ready groups for downstream consumption
+by `yield_batches`.
+
+### Training with `AgenticGRPOLearner`
+
+`AgenticGRPOLearner` (`tunix.AgenticGRPOLearner`, configured via
+`tunix.AgenticGRPOConfig`) connects `RolloutOrchestrator` and `RLEngine` in an
+asynchronous producer-consumer loop: background workers collect multi-turn
+trajectories with `agent_class` and `env_class`, group them by prompt, compute
+environment and/or function rewards (`reward_mode="env"` by default), and feed
+completed groups into the actor trainer.
+
+```python
+from tunix import AgenticGRPOConfig, AgenticGRPOLearner
+from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
+
+algo_config = AgenticGRPOConfig(
+    num_generations=4,
+    max_response_length=1024,
+    max_concurrency=16,
+    beta=0.04,
+    epsilon=0.2,
+)
+
+chat_parser = chat_parser_lib.QwenChatTemplateParser(tokenizer)
+
+learner = AgenticGRPOLearner(
+    rl_engine=rl_engine,
+    algo_config=algo_config,
+    chat_parser=chat_parser,
+    agent_class=MyToolAgent,
+    agent_kwargs={"max_turns": 5},
+    env_class=MyToolEnvironment,
+    env_kwargs={"max_steps": 5},
+)
+learner.train(train_ds=train_dataset, eval_ds=eval_dataset)
+```

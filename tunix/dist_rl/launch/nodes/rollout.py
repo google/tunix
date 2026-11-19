@@ -34,22 +34,19 @@ import types
 from typing import Any, cast
 
 from tunix.common import datatypes as common_datatypes
+from tunix.dist_rl.common import execution_target
 from tunix.dist_rl.common import gcs_cache
 from tunix.dist_rl.common import timeouts
 from tunix.dist_rl.distributed.runtime import context as context_lib
 from tunix.dist_rl.launch.common import resolve_config
 from tunix.dist_rl.launch.nodes import node_utils
 from tunix.dist_rl.rollout import sampler as sampler_lib
-from tunix.dist_rl.weight_sync import raiden_preload
 from tunix.dist_rl.weight_sync import weight_sync as weight_sync_lib
 from tunix.dist_rl.worker import rollout_worker
-from tunix.generate import mappings as mappings_lib
+from tunix.generate import vllm_model_config
 from tunix.models import automodel
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
 from tunix.utils import maxtext_utils
-
-# Import Raiden before any other libraries to ensure correct JAX compilation.
-raiden_preload.import_raiden()
 
 LOCAL_WORKER_ID = "rollout-0"
 
@@ -74,8 +71,10 @@ ChatParser = (
 Tokenizer = node_utils.HfTokenizer
 
 # Keep in sync with every vLLM kwarg set from other config fields or rollout
-# invariants in `_rollout_config` and `VllmSampler` (`hbm_utilization` is an
-# alias guard for `gpu_memory_utilization`).
+# invariants in `_rollout_config`, `VllmSampler` and `InprocessVllmSampler`
+# (`hbm_utilization` is an alias guard for `gpu_memory_utilization`;
+# `server_mode` is `vllm_config.server_mode`, which the in-process sampler would
+# otherwise drop).
 _FORBIDDEN_ROLLOUT_KWARGS = frozenset({
     "model",
     "tokenizer",
@@ -97,6 +96,7 @@ _FORBIDDEN_ROLLOUT_KWARGS = frozenset({
     "max_logprobs",
     "logprobs_mode",
     "trust_remote_code",
+    "server_mode",
 })
 
 # Keep in sync with config-owned keys and rollout invariants in
@@ -120,23 +120,6 @@ def _import_vllm_sampler() -> types.ModuleType:
   vllm_sampler = importlib.import_module("tunix.generate.vllm_sampler")
   logging.info("Finished importing tunix.generate.vllm_sampler.")
   return vllm_sampler
-
-
-def _is_gemma4_model(model_name: str) -> bool:
-  """Returns whether `model_name` names a Gemma4 variant.
-
-  Model construction goes through `automodel`, but the rollout node still needs
-  the family up front to pick the vLLM weight mapping and `hf_overrides`, before
-  any model or tokenizer exists.
-
-  Args:
-    model_name: Model id or demo selector, e.g. "gemma-4-e2b" or "gemma4-e2b".
-
-  Returns:
-    True when the name refers to a Gemma4 model.
-  """
-  normalized = model_name.lower().replace("_", "-")
-  return "gemma-4" in normalized or "gemma4" in normalized
 
 
 def _rollout_model_family_name(hp: resolve_config.DistHyperParameters) -> str:
@@ -213,7 +196,10 @@ def _lora_rank(hp: resolve_config.DistHyperParameters) -> int | None:
 def _vllm_engine_kwargs(
     hp: resolve_config.DistHyperParameters,
 ) -> dict[str, Any]:
-  """Returns validated `vllm_config.engine_kwargs` for `AsyncEngineArgs`.
+  """Returns validated `vllm_config.engine_kwargs` for the vLLM engine args.
+
+  `rollout_engine: vllm` passes them to `AsyncEngineArgs` (`VllmSampler`),
+  `rollout_engine: inprocess_vllm` to `EngineArgs` (`InprocessVllmSampler`).
 
   Args:
     hp: Validated distributed RL configuration.
@@ -222,9 +208,10 @@ def _vllm_engine_kwargs(
     A copy of the validated overrides (empty when unset).
 
   Raises:
-    ValueError: If the overrides are set without `rollout_engine: vllm`, are not
+    ValueError: If the overrides are set with `rollout_engine: vanilla`, are not
       a mapping, contain keys owned by other config fields or rollout
-      invariants, or carry a malformed `additional_config` /
+      invariants, set `load_format` for an `inprocess_vllm` rollout that starts
+      from random weights, or carry a malformed `additional_config` /
       `additional_config.maxtext_config` (the latter also needs a MaxText
       rollout model).
   """
@@ -237,16 +224,30 @@ def _vllm_engine_kwargs(
   if not engine_kwargs:
     return {}
   rollout_engine = hp.config["rollout_engine"]
-  if rollout_engine != "vllm":
+  if rollout_engine not in ("vllm", "inprocess_vllm"):
     raise ValueError(
-        "vllm_config.engine_kwargs is only supported with rollout_engine:"
-        f" vllm; got rollout_engine: {rollout_engine!r}."
+        "vllm_config.engine_kwargs needs a vLLM rollout_engine (vllm or"
+        f" inprocess_vllm); got rollout_engine: {rollout_engine!r}."
     )
   forbidden = sorted(set(engine_kwargs) & _FORBIDDEN_ROLLOUT_KWARGS)
   if forbidden:
     raise ValueError(
         "vllm_config.engine_kwargs contains keys managed by other config"
         f" fields or rollout invariants: {forbidden}"
+    )
+  if (
+      "load_format" in engine_kwargs
+      and rollout_engine == "inprocess_vllm"
+      and resolve_config.rollout_init_with_random_weights(hp)
+  ):
+    # `tunix.generate.vllm_sampler` sets `load_format="dummy"` over it.
+    raise ValueError(
+        "vllm_config.engine_kwargs.load_format has no effect with"
+        " rollout_engine: inprocess_vllm while vllm_config."
+        "init_with_random_weights is true (the default with"
+        " weight_sync_config.mode: raiden): the rollout starts from random"
+        " weights. Set vllm_config.init_with_random_weights: false to load the"
+        " checkpoint instead."
     )
   if "additional_config" in engine_kwargs:
     additional = engine_kwargs["additional_config"]
@@ -277,6 +278,21 @@ def _vllm_engine_kwargs(
   return dict(engine_kwargs)
 
 
+def _validate_vllm_model_config(hp: resolve_config.DistHyperParameters) -> None:
+  """Validates model-family vLLM rollout constraints for `hp`."""
+  vllm_model_config.validate_vllm_rollout_config(
+      _rollout_model_family_name(hp),
+      sampler_type=str(hp.config["rollout_engine"]),
+      tp_size=_tensor_parallel_size(hp),
+      weight_sync_mode=str(hp.config_mapping("weight_sync_config")["mode"]),
+      maxtext_model_name=_maxtext_model_name(hp),
+      use_lora=_lora_rank(hp) is not None,
+      init_with_random_weights=resolve_config.rollout_init_with_random_weights(
+          hp
+      ),
+  )
+
+
 def _validate_rollout_config(hp: resolve_config.DistHyperParameters) -> None:
   """Validates rollout-only settings before any heavy import or JAX init.
 
@@ -285,10 +301,12 @@ def _validate_rollout_config(hp: resolve_config.DistHyperParameters) -> None:
 
   Raises:
     ValueError: On a non-positive episode timeout, a `lora_config` without
-      `rank`, invalid `vllm_config.engine_kwargs`, or a setting the configured
-      `rollout_engine` would silently ignore. The typed `vllm_config`
-      routed-experts and detokenize settings are validated by
-      `DistHyperParameters`.
+      `rank`, invalid `vllm_config.engine_kwargs`, an unsupported model-family
+      vLLM sampler combination, or a setting the configured `rollout_engine`
+      would silently ignore. The typed `vllm_config` routed-experts and
+      detokenize settings are validated by `DistHyperParameters`.
+    NotImplementedError: On model-family or tensor-parallel rollout weight-sync
+      combinations that are not yet implemented.
   """
   _episode_timeout_secs(hp)
   lora_rank = _lora_rank(hp)
@@ -317,6 +335,7 @@ def _validate_rollout_config(hp: resolve_config.DistHyperParameters) -> None:
         f" inprocess_vllm; got tpu_backend_type={tpu_backend_type!r} with"
         f" rollout_engine: {rollout_engine!r}."
     )
+  _validate_vllm_model_config(hp)
 
 
 def _chat_parser_for(
@@ -364,48 +383,20 @@ def _create_chat_parser(
   )
 
 
-def _mapping_config_for(model_name: str) -> mappings_lib.MappingConfig:
-  """Returns the Tunix-to-vLLM JAX mapping for a supported model family."""
-  if _is_gemma4_model(model_name):
-    from tunix.models.gemma4 import (  # pylint: disable=g-import-not-at-top
-        mapping_vllm_jax,
-    )
-  elif "qwen3" in model_name.lower().replace("_", "-"):
-    from tunix.models.qwen3 import (  # pylint: disable=g-import-not-at-top
-        mapping_vllm_jax,
-    )
-  else:
-    raise ValueError(
-        "The in-process distributed rollout supports Qwen3 and Gemma4 "
-        f"mappings; got model {model_name!r}."
-    )
-
-  return mappings_lib.MappingConfig(**mapping_vllm_jax.VLLM_JAX_MAPPING)
-
-
 def _vllm_hf_overrides(
     hp: resolve_config.DistHyperParameters,
+    sampler_type: str | None = None,
 ) -> dict[str, Any]:
-  """Returns the vLLM `hf_overrides` to apply for the rollout model.
-
-  Args:
-    hp: Validated distributed RL configuration.
-
-  Returns:
-    The overrides dict, empty when the model needs no override.
-  """
-  if _maxtext_model_name(hp):
-    # MaxText serves the model natively, so its architecture override takes the
-    # place of any per-model-family one.
-    return dict(maxtext_utils.VLLM_MAXTEXT_HF_OVERRIDES)
-  if _is_gemma4_model(_rollout_model_family_name(hp)):
-    # Matches the text-only Gemma4 rollout configuration in FrozenLake.
-    return {
-        "final_logit_softcapping": 30.0,
-        "text_config": {"final_logit_softcapping": 30.0},
-        "architectures": ["Gemma4ForCausalLM"],
-    }
-  return {}
+  """Returns the vLLM `hf_overrides` to apply for the rollout model."""
+  return vllm_model_config.vllm_hf_overrides_for_model(
+      _rollout_model_family_name(hp),
+      sampler_type=sampler_type or str(hp.config["rollout_engine"]),
+      maxtext_model_name=_maxtext_model_name(hp),
+      weight_sync_mode=str(hp.config_mapping("weight_sync_config")["mode"]),
+      init_with_random_weights=resolve_config.rollout_init_with_random_weights(
+          hp
+      ),
+  )
 
 
 def _maxtext_additional_config(
@@ -506,23 +497,28 @@ def _rollout_config(
   rollout = hp.config_mapping("rollout_config")
   ws = hp.config_mapping("weight_sync_config")
   vllm = hp.config_mapping("vllm_config")
+  grpo = hp.config_mapping("agentic_grpo_config")
   num_experts = vllm["routed_experts_num_experts"]
   max_prompt_length = int(rollout["max_prompt_length"])
   max_tokens_to_generate = int(rollout["total_generation_steps"])
+  episode_timeout_secs = _episode_timeout_secs(hp)
   config = rollout_worker.RolloutConfig(
       weight_sync_mode=weight_sync_lib.WeightSyncMode(str(ws["mode"])),
       max_prompt_length=max_prompt_length,
       max_tokens_to_generate=max_tokens_to_generate,
+      max_response_length=max_tokens_to_generate,
       kv_cache_size=max_prompt_length + max_tokens_to_generate,
       temperature=float(rollout["temperature"]),
       top_p=float(rollout["top_p"]),
       # <= 0 disables top-k filtering in both the vanilla and vLLM samplers.
       top_k=int(rollout["top_k"]),
+      overlong_filter=bool(grpo["overlong_filter"]),
+      episode_timeout=episode_timeout_secs,
       # Required by the trainer; `_validate_rollout_config` rejects `false`.
       return_logprobs=True,
       eos_tokens=_eos_token_ids(hp, tokenizer),
       partial_rollout=bool(ws["in_flight_weight_updates"]),
-      drain_timeout_s=timeouts.drain_timeout_for(_episode_timeout_secs(hp)),
+      drain_timeout_s=timeouts.drain_timeout_for(episode_timeout_secs),
       trajectory_store_config=node_utils.trajectory_store_config(hp),
       return_routed_experts=bool(vllm["return_routed_experts"]),
       routed_experts_encode_mode=cast(
@@ -551,8 +547,9 @@ def _with_vllm_settings(
     sampler_type: vLLM sampler the worker runs ("inprocess_vllm" or "vllm").
   """
   vllm = hp.config_mapping("vllm_config")
+  ws = hp.config_mapping("weight_sync_config")
   family_name = _rollout_model_family_name(hp)
-  is_gemma4 = _is_gemma4_model(family_name)
+  is_gemma4 = vllm_model_config.is_gemma4_model(family_name)
   vllm_model = _vllm_model(hp)
   lora_rank = _lora_rank(hp)
   lora_config = (
@@ -565,23 +562,27 @@ def _with_vllm_settings(
       vllm_model=vllm_model,
       partial_rollout=config.partial_rollout,
       is_gemma4=is_gemma4,
+      sampler_type=sampler_type,
   )
   sampling_kwargs: dict[str, Any] = (
       {"skip_special_tokens": False} if is_gemma4 else {}
   )
   if sampler_type == "vllm":
     sampling_kwargs["detokenize"] = bool(vllm["detokenize"])
+  mapping_config = None
+  if sampler_type == "inprocess_vllm":
+    mapping_config = vllm_model_config.vllm_mapping_config_for_model(
+        family_name,
+        maxtext_model_name=_maxtext_model_name(hp),
+        weight_sync_mode=str(ws["mode"]),
+    )
 
   return dataclasses.replace(
       config,
       kv_cache_size=_max_model_len(hp),
       tensor_parallel_size=_tensor_parallel_size(hp),
       data_parallel_size=max(1, _data_parallel_size(hp)),
-      rollout_mapping_config=(
-          _mapping_config_for(family_name)
-          if sampler_type == "inprocess_vllm"
-          else None
-      ),
+      rollout_mapping_config=mapping_config,
       rollout_vllm_model_version=vllm_model,
       # Both vLLM samplers always run in server mode;
       # `_validate_rollout_config` rejects `vllm_config.server_mode: false`.
@@ -639,6 +640,7 @@ def _vllm_passthrough_kwargs(
     vllm_model: str,
     partial_rollout: bool,
     is_gemma4: bool,
+    sampler_type: str,
 ) -> dict[str, Any]:
   """Builds the pass-through `rollout_vllm_kwargs` for vLLM rollout samplers."""
   vllm = hp.config_mapping("vllm_config")
@@ -650,7 +652,7 @@ def _vllm_passthrough_kwargs(
       ),
       "dtype": str(vllm["dtype"]),
   }
-  hf_overrides = _vllm_hf_overrides(hp)
+  hf_overrides = _vllm_hf_overrides(hp, sampler_type=sampler_type)
   if hf_overrides:
     kwargs["hf_overrides"] = hf_overrides
   if is_gemma4:
@@ -707,6 +709,7 @@ def _create_inprocess_vllm_sampler(
     config: rollout_worker.RolloutConfig,
 ) -> sampler_lib.Sampler:
   """Creates the in-process vLLM sampler."""
+  _validate_vllm_model_config(hp)
   _import_vllm_sampler()
   from tunix.dist_rl.rollout import (  # pylint: disable=g-import-not-at-top
       inprocess_vllm_sampler,
@@ -737,7 +740,8 @@ def _create_vllm_sampler(
     config: rollout_worker.RolloutConfig,
 ) -> sampler_lib.Sampler:
   """Creates the vLLM `AsyncLLM` sampler."""
-  del hp, tokenizer
+  del tokenizer
+  _validate_vllm_model_config(hp)
   from tunix.dist_rl.rollout import (  # pylint: disable=g-import-not-at-top
       vllm_sampler,
   )
@@ -830,11 +834,14 @@ def main(
   logging.info("Importing rollout registry module: %s", registry_module)
   importlib.import_module(registry_module)
 
-  gcs_cache.restore_jax_cache(params=resolve_config.rollout_cache_params(hp))
+  rollout_target = hp.cluster_targets.rollout
+  if rollout_target.framework == execution_target.Framework.JAX:
+    gcs_cache.restore_jax_cache(params=resolve_config.rollout_cache_params(hp))
 
   os.environ.setdefault("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
-  os.environ.setdefault("VLLM_TPU_RPA_VERSION", "2")
-  os.environ.setdefault("DISABLE_MOSAIC_ATTN", "1")
+  if rollout_target.accelerator == execution_target.Accelerator.TPU:
+    os.environ.setdefault("VLLM_TPU_RPA_VERSION", "2")
+    os.environ.setdefault("DISABLE_MOSAIC_ATTN", "1")
   os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
   # `AsyncLLMEngine` (`rollout_engine: vllm`) still launches an `EngineCore`
   # child process; default to `spawn` (`vllm.envs` reads this lazily) rather
@@ -847,8 +854,14 @@ def main(
   config_sha256 = node_utils.log_resolved_config(hp, "rollout")
 
   sampler_type = str(hp.config["rollout_engine"])
-  if sampler_type == "vanilla":
-    process_context.jax.initialize()
+  # On JAX, vLLM samplers (`inprocess_vllm`, `vllm`) initialize the JAX/Ray
+  # distributed runtime internally; vanilla JAX and non-JAX (e.g. `torch:tpu`)
+  # rollouts initialize their runtime here.
+  if (
+      sampler_type == "vanilla"
+      or rollout_target.framework != execution_target.Framework.JAX
+  ):
+    process_context.initialize_runtime(rollout_target)
 
   tokenizer = node_utils.load_hf_tokenizer(hp)
 

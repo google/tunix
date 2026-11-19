@@ -14,12 +14,16 @@
 
 """Serialization-discipline tests for the common wire DTOs."""
 
+from collections.abc import Callable
 import dataclasses
 import time
+from typing import Any
 
 from absl.testing import absltest
 import cloudpickle
 import numpy as np
+from tunix.common import datatypes as common_datatypes
+from tunix.common import test_utils as common_test_utils
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import rpc_utils
 
@@ -32,6 +36,29 @@ class _HostWeightedMetric:
   denominator: float
   eps: float | None = None
   min_denom: float | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class _TensorWeightedMetric:
+  unreduced_sum: common_test_utils.CustomTensor
+  denominator: common_test_utils.CustomTensor
+  eps: float | None = None
+  min_denom: float | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class _TensorMetricsBuffer:
+  id: Any
+  weighted_metrics: dict[str, _TensorWeightedMetric] = dataclasses.field(
+      default_factory=dict
+  )
+  scalar_metrics: dict[str, common_test_utils.CustomTensor] = dataclasses.field(
+      default_factory=dict
+  )
+  aggregation_fns: dict[
+      str, Callable[[common_test_utils.CustomTensor], Any]
+  ] = dataclasses.field(default_factory=dict)
+  mode: str = "train"
 
 
 def _rollout_response_dto() -> datatypes.RolloutResponse:
@@ -122,6 +149,7 @@ class WireSerializationTest(absltest.TestCase):
     self.assertEqual(restored.metadata, original.metadata)
     self.assertIsNone(restored.error)
     self.assertIsNotNone(restored.payload)
+    assert original.payload is not None
     self.assertEqual(restored.payload.prompt_id, original.payload.prompt_id)
     self.assertEqual(restored.payload.group_index, original.payload.group_index)
     self.assertEqual(
@@ -158,6 +186,8 @@ class WireSerializationTest(absltest.TestCase):
 
   def test_metrics_buffer_defaults_and_wire_round_trip(self):
     empty = datatypes.MetricsBuffer(id=-1)
+    empty_like: datatypes.MetricsBufferLike = empty
+    self.assertIsInstance(empty_like, datatypes.MetricsBufferLike)
     self.assertEqual(empty.id, -1)
     self.assertEqual(empty.weighted_metrics, {})
     self.assertEqual(empty.scalar_metrics, {})
@@ -198,6 +228,52 @@ class WireSerializationTest(absltest.TestCase):
     self.assertEqual(restored.scalar_metrics["lr"], 1e-4)
     self.assertAlmostEqual(
         float(restored.aggregation_fns["grad_norm"](np.array([1.0, 2.0]))), 1.5
+    )
+
+  def test_weighted_metric_like_covariance_and_metrics_buffer_like(self):
+    host_metric = _HostWeightedMetric(unreduced_sum=3.0, denominator=2.0)
+    host_proto: datatypes.WeightedMetricLike[np.ndarray | np.number | float] = (
+        host_metric
+    )
+    array_proto_from_host: datatypes.WeightedMetricLike[
+        common_datatypes.ArrayLike
+    ] = host_proto
+    self.assertEqual(array_proto_from_host.unreduced_sum, 3.0)
+    self.assertEqual(array_proto_from_host.denominator, 2.0)
+
+    tensor_metric = _TensorWeightedMetric(
+        unreduced_sum=common_test_utils.CustomTensor(np.array(4.0)),
+        denominator=common_test_utils.CustomTensor(np.array(2.0)),
+        eps=1e-6,
+    )
+    array_proto_from_tensor: datatypes.WeightedMetricLike[
+        common_datatypes.ArrayLike
+    ] = tensor_metric
+    self.assertEqual(array_proto_from_tensor.eps, 1e-6)
+
+    host_buf = datatypes.MetricsBuffer(
+        id=1,
+        weighted_metrics={"kl": host_metric},
+        scalar_metrics={"loss": np.float32(0.5)},
+    )
+    host_buf_like: datatypes.MetricsBufferLike = host_buf
+    self.assertIsInstance(host_buf_like, datatypes.MetricsBufferLike)
+
+    tensor_buf = _TensorMetricsBuffer(
+        id="step-1",
+        weighted_metrics={"kl": tensor_metric},
+        scalar_metrics={
+            "loss": common_test_utils.CustomTensor(np.array(0.25))
+        },
+        aggregation_fns={"loss": lambda arr: float(np.asarray(arr))},
+    )
+    tensor_buf_like: datatypes.MetricsBufferLike = tensor_buf
+    self.assertIsInstance(tensor_buf_like, datatypes.MetricsBufferLike)
+    self.assertAlmostEqual(
+        tensor_buf_like.aggregation_fns["loss"](
+            tensor_buf_like.scalar_metrics["loss"]
+        ),
+        0.25,
     )
 
   def test_token_segment_enforces_shapes(self):
@@ -388,7 +464,12 @@ class RLTrainerPayloadTest(absltest.TestCase):
     }
     self.assertEqual(
         static,
-        {"num_segments", "sampler_agreement_applied", "metadata"},
+        {
+            "num_segments",
+            "sampler_agreement_applied",
+            "routed_experts_ref",
+            "metadata",
+        },
     )
     self.assertEmpty([
         f.name
@@ -552,6 +633,75 @@ class IsValidTrajectoryTest(absltest.TestCase):
         },
     )
     self.assertTrue(item.is_valid)
+
+  def test_routed_experts_ref_and_static_wire_encoding_helpers(self):
+    ref = datatypes.RoutedExpertsRef(
+        worker_id="w0", instance_id="inst0", ref_id=(5 << 32) | 9
+    )
+    self.assertEqual(ref.worker_id, "w0")
+    self.assertEqual(ref.instance_id, "inst0")
+    with self.assertRaises(ValueError):
+      datatypes.RoutedExpertsRef(worker_id="", instance_id="inst0", ref_id=1)
+    with self.assertRaises(ValueError):
+      datatypes.RoutedExpertsRef(worker_id="w0", instance_id="", ref_id=1)
+    with self.assertRaises(ValueError):
+      datatypes.RoutedExpertsRef(worker_id="w0", instance_id="inst0", ref_id=-1)
+    with self.assertRaises(ValueError):
+      datatypes.RoutedExpertsRef(
+          worker_id="w0", instance_id="inst0", ref_id=1 << 63
+      )
+    with self.assertRaises(ValueError):
+      datatypes.routed_experts_bytes_per_token(4.0, 8, "uint10")  # pyrefly: ignore[bad-argument-type]
+    with self.assertRaises(ValueError):
+      datatypes.routed_experts_bytes_per_token(4, "8", "uint10")  # pyrefly: ignore[bad-argument-type]
+
+    self.assertEqual(
+        datatypes.resolve_routed_experts_wire_encoding("auto", 128), "uint8"
+    )
+    self.assertEqual(
+        datatypes.resolve_routed_experts_wire_encoding("auto", 384), "uint10"
+    )
+    self.assertEqual(
+        datatypes.resolve_routed_experts_wire_encoding("auto", 2048), "int16"
+    )
+    with self.assertRaisesRegex(ValueError, "auto"):
+      datatypes.resolve_routed_experts_wire_encoding("auto", None)
+
+    self.assertEqual(
+        datatypes.routed_experts_bytes_per_token(61, 8, "uint10"), 610
+    )
+    self.assertEqual(
+        datatypes.routed_experts_bytes_per_token(61, 8, "uint8"), 488
+    )
+    self.assertEqual(
+        datatypes.routed_experts_bytes_per_token(61, 8, "int16"), 976
+    )
+
+    zeros_i = np.zeros((2,), dtype=np.int32)
+    zeros_f = np.zeros((2,), dtype=np.float32)
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=zeros_i,
+        prompt_mask=zeros_f,
+        completion_ids=zeros_i,
+        completion_mask=zeros_f,
+        advantages=zeros_f,
+        routed_experts_ref=ref,
+    )
+    self.assertEqual(payload.routed_experts_ref, ref)
+    with self.assertRaisesRegex(ValueError, "cannot hold both"):
+      datatypes.RLTrainerPayload(
+          prompt_ids=zeros_i,
+          prompt_mask=zeros_f,
+          completion_ids=zeros_i,
+          completion_mask=zeros_f,
+          advantages=zeros_f,
+          routed_experts=np.zeros((4, 2, 2), dtype=np.int16),
+          routed_experts_ref=ref,
+      )
+    with self.assertRaises(TypeError):
+      datatypes.WeightSyncRequest(policy_version=True)  # pyrefly: ignore[bad-argument-type]
+    with self.assertRaises(TypeError):
+      datatypes.WeightSyncRequest(min_retained_policy_version=True)  # pyrefly: ignore[bad-argument-type]
 
 
 if __name__ == "__main__":

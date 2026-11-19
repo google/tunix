@@ -15,6 +15,7 @@
 from collections.abc import Sequence
 import dataclasses
 from absl import logging
+from tunix.common import configs as common_configs
 from tunix.common import datatypes as common_datatypes
 from tunix.rl import function_registry
 
@@ -39,6 +40,16 @@ class AlgorithmConfig:
       disables the penalty.
     force_compute_kl: Compute reference KL for logging even when `beta` is
       `0.0`. See `requires_reference_kl`.
+    score_centering: Adds Score Centering (arXiv:2609.20807) to the GRPO policy
+      loss, using the rollout sampler's top-k log probabilities. Requires a
+      vLLM rollout returning `num_logprobs >= score_centering_top_k` logprobs
+      per token, one on-policy update per batch (`num_iterations=1` and a
+      single mini-batch) and no sequence packing. The PPO ratio is then taken
+      against the trainer's own log probabilities, as with sampler IS, so SC
+      rather than the ratio corrects for the sampler. Composes with clipped
+      `sampler_is="token"`.
+    score_centering_top_k: Number of sampler top-k tokens used per position.
+    score_centering_eps: Floor for the tail probability masses.
   """
 
   algo_variant: str = "grpo"
@@ -91,6 +102,10 @@ class AlgorithmConfig:
   sampler_rs_min: float | None = None
   sampler_rs_max: float | None = None
   seq_logprob_error_threshold: float | None = None
+  # Optional Score Centering correction; see the class docstring.
+  score_centering: bool = False
+  score_centering_top_k: int = 128
+  score_centering_eps: float = 1e-6
   # Compact encoding mode for captured MoE routed_experts ("auto", "uint8",
   # "uint10", or "int16").
   routed_experts_encode_mode: common_datatypes.RoutedExpertsEncodeMode = "auto"
@@ -159,7 +174,7 @@ class AlgorithmConfig:
           "reward_worker_timeout_seconds must be > 0."
           f" Received: {self.reward_worker_timeout_seconds}"
       )
-    common_datatypes.validate_routed_experts_encode_config(
+    common_configs.validate_routed_experts_encode_config(
         self.routed_experts_encode_mode,
         self.routed_experts_num_experts,
     )
@@ -174,7 +189,7 @@ class AlgorithmConfig:
     return self.beta != 0.0 or self.force_compute_kl
 
   def _validate_sampler_is_and_rs_options(self):
-    """Checks sampler-vs-trainer error masking, IS, and RS options.
+    """Checks sampler-vs-trainer error masking, IS and RS.
 
     Raises:
       ValueError: If an option is unsupported, incomplete, or out of order.
@@ -226,6 +241,7 @@ class AlgorithmConfig:
           "sampler_rs requires a keep-band. Set sampler_rs_min and"
           " sampler_rs_max."
       )
+    validate_score_centering_options(self)
 
   def print_config(self):
     """Prints all configuration fields, working dynamically for child classes."""
@@ -233,6 +249,29 @@ class AlgorithmConfig:
     for field in dataclasses.fields(self):
       value = getattr(self, field.name)
       logging.info(f"  {field.name}: {value}")
+
+
+def validate_score_centering_options(config: AlgorithmConfig) -> None:
+  """Validates `score_centering*` options on `config`."""
+  if config.score_centering_top_k < 1 or config.score_centering_eps <= 0:
+    raise ValueError(
+        "score_centering_top_k must be >= 1 and score_centering_eps > 0."
+    )
+  if not config.score_centering:
+    return
+  if config.policy_loss_fn != "grpo":
+    raise ValueError(
+        "score_centering is only implemented by the 'grpo' policy loss."
+    )
+  if config.num_iterations != 1:
+    raise ValueError("score_centering requires num_iterations == 1.")
+  if config.sampler_rs is not None:
+    raise ValueError("score_centering does not support sampler_rs.")
+  if config.sampler_is == "token" and config.sampler_is_threshold is None:
+    raise ValueError(
+        "score_centering is a no-op with unclipped token IS"
+        " (sampler_is_threshold=None)."
+    )
 
 
 @dataclasses.dataclass(kw_only=True)

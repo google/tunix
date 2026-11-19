@@ -114,7 +114,7 @@ class FakeClusterHarness:
       self,
       *,
       num_rollout_workers: int = 2,
-      weight_sync_mode: str = "fallback",
+      weight_sync_mode: str | None = None,
       weight_sync_handler: weight_sync.WeightSyncHandler | None = None,
       weight_sync_timeouts: weight_sync_coordinator.PhaseTimeouts | None = None,
       rpc_timeout_s: float = 30.0,
@@ -125,9 +125,19 @@ class FakeClusterHarness:
       drain_timeout_s: float = 5.0,
       max_concurrency: int = 8,
       compile_error_workers: set[str] | None = None,
+      routed_experts_shape_spec: tuple[int, int] | None = None,
+      routed_experts_encode_mode: datatypes.RoutedExpertsEncodeMode = "auto",
+      routed_experts_num_experts: int | None = None,
+      rollout_max_prompt_length: int = 32,
+      response_tokens_per_turn: int | None = None,
   ) -> None:
     self.num_rollout_workers = num_rollout_workers
     self.weight_sync_mode = weight_sync_mode
+    if (
+        weight_sync_handler is None
+        and weight_sync_mode != weight_sync.WeightSyncMode.NONE.value
+    ):
+      weight_sync_handler = weight_sync_coordinator.NullHandler()
     self.weight_sync_handler = weight_sync_handler
     self.weight_sync_timeouts = weight_sync_timeouts
     self.rpc_timeout_s = rpc_timeout_s
@@ -149,6 +159,13 @@ class FakeClusterHarness:
     self.drain_timeout_s = drain_timeout_s
     self.max_concurrency = max_concurrency
     self.compile_error_workers = compile_error_workers or set()
+    self.routed_experts_shape_spec = routed_experts_shape_spec
+    self.routed_experts_encode_mode: datatypes.RoutedExpertsEncodeMode = (
+        routed_experts_encode_mode
+    )
+    self.routed_experts_num_experts = routed_experts_num_experts
+    self.rollout_max_prompt_length = rollout_max_prompt_length
+    self.response_tokens_per_turn = response_tokens_per_turn
 
     self.injector = fault_injection.FaultInjector()
     self.orchestrator = orchestrator.ClusterOrchestrator(
@@ -189,6 +206,8 @@ class FakeClusterHarness:
             if wid in self.compile_error_workers
             else None
         ),
+        routed_experts_shape_spec=self.routed_experts_shape_spec,
+        num_experts=self.routed_experts_num_experts or 64,
     )
     self.trainer_worker = trainer_worker_lib.TrainerWorker(
         lambda: self.fake_trainer,
@@ -205,7 +224,11 @@ class FakeClusterHarness:
     self.servers[wid] = running_server
     if re_register:
       self.register_worker_from_discovery(
-          wid, "trainer", bound_port, override=override
+          wid,
+          self.trainer_worker.instance_id,
+          "trainer",
+          bound_port,
+          override=override,
       )
     return bound_port
 
@@ -218,7 +241,16 @@ class FakeClusterHarness:
       re_register: bool = True,
   ) -> int:
     sampler = test_utils.MockBaseSamplerImpl(
-        sampler_name=wid, default_delay=0.0, server_id=wid
+        sampler_name=wid,
+        default_delay=0.0,
+        server_id=wid,
+        routed_experts_shape_spec=self.routed_experts_shape_spec,
+        num_experts=self.routed_experts_num_experts or 64,
+        response_tokens_per_turn=(
+            self.response_tokens_per_turn
+            if self.response_tokens_per_turn is not None
+            else 2
+        ),
     )
     self.samplers[wid] = sampler
     worker = rollout_worker_lib.RolloutWorker(
@@ -231,6 +263,9 @@ class FakeClusterHarness:
         config=rollout_worker_lib.RolloutConfig(
             partial_rollout=self.partial_rollout,
             drain_timeout_s=self.drain_timeout_s,
+            max_prompt_length=self.rollout_max_prompt_length,
+            routed_experts_encode_mode=self.routed_experts_encode_mode,
+            routed_experts_num_experts=self.routed_experts_num_experts,
         ),
         max_concurrency=self.max_concurrency,
     )
@@ -246,13 +281,18 @@ class FakeClusterHarness:
     self.servers[wid] = running_server
     if re_register:
       self.register_worker_from_discovery(
-          wid, "rollout", bound_port, override=override
+          wid,
+          worker.instance_id,
+          "rollout",
+          bound_port,
+          override=override,
       )
     return bound_port
 
   def register_worker_from_discovery(
       self,
       worker_id: str,
+      instance_id: str,
       service_type: str,
       port: int,
       override: bool = False,
@@ -262,6 +302,7 @@ class FakeClusterHarness:
         "service_type": service_type,
         "service_port": port,
         "worker_id": worker_id,
+        "instance_id": instance_id,
     })
     if override:
       role = (
@@ -276,6 +317,7 @@ class FakeClusterHarness:
               f"grpc://localhost:{port}",
               rpc_timeout_s=self.rpc_timeout_s,
           ),
+          instance_id=instance_id,
           resources={"address": f"localhost:{port}"},
           override=True,
       )
@@ -357,12 +399,18 @@ class FakeClusterHarness:
   ) -> rl_program.StandardRLProgram:
     """Builds a StandardRLProgram wired to GRPO and batch assemblers."""
     algo_cfg = algorithm_config.GRPOConfig(
-        num_generations=num_generations, epsilon=0.2, beta=0.0
+        num_generations=num_generations,
+        epsilon=0.2,
+        beta=0.0,
+        routed_experts_encode_mode=self.routed_experts_encode_mode,
+        routed_experts_num_experts=self.routed_experts_num_experts,
     )
+    max_packed_len = max(64, self.rollout_max_prompt_length + 32)
     batch_cfg = batch_assembly.BatchConfig(
         mini_batch_size=mini_batch_size,
         train_micro_batch_size=1,
-        max_seq_token_per_tpu=64,
+        max_seq_tokens_per_device=max_packed_len,
+        max_prompt_length=self.rollout_max_prompt_length,
         max_response_length=32,
     )
     effective_batch_size = (
@@ -374,14 +422,14 @@ class FakeClusterHarness:
               batch_size=effective_batch_size,
               num_generations=num_generations,
               mini_batch_size=mini_batch_size,
-              max_packed_len=64,
+              max_packed_len=max_packed_len,
               pad_id=0,
           )
       )
     else:
       assembler = batch_assembly.PaddedBatchAssembler(
           batch_size=effective_batch_size,
-          max_prompt_length=32,
+          max_prompt_length=self.rollout_max_prompt_length,
           max_response_length=32,
           pad_id=0,
           num_generations=num_generations,

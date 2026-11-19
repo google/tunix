@@ -5,7 +5,9 @@ from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
+import numpy as np
 import optax
+from tunix.common import test_utils
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl import rl_learner
@@ -105,7 +107,7 @@ class RLLearnerTest(parameterized.TestCase):
         train_micro_batch_size=3,
         rollout_micro_batch_size=None,
         compute_logps_micro_batch_size=None,
-        max_seq_token_per_tpu=128,
+        max_seq_tokens_per_device=128,
         eval_every_n_steps=1,
         max_steps=1,
     )
@@ -242,6 +244,46 @@ class RLLearnerTest(parameterized.TestCase):
           completions=['c'],
           mode=rl_engine_lib.Mode.TRAIN,
       )
+
+  def test_create_micro_batch_iterator_flattens_tensor_like(self):
+    learner = DummyLearner.__new__(DummyLearner)
+    values = np.arange(4, dtype=np.float32)
+    batch = {
+        'prompts': ['a', 'b', 'c', 'd'],
+        'vector': test_utils.CustomTensor(values),
+        'column': test_utils.CustomTensor(values.reshape(4, 1)),
+    }
+    micro_batches = list(
+        learner._create_micro_batch_iterator(iter([batch]), 2)
+    )
+    self.assertLen(micro_batches, 2)
+    self.assertEqual(list(micro_batches[1]['prompts']), ['c', 'd'])
+    for key in ('vector', 'column'):
+      flattened = np.concatenate([mb[key] for mb in micro_batches])
+      np.testing.assert_array_equal(flattened, [0.0, 1.0, 2.0, 3.0])
+      self.assertEqual(micro_batches[0][key].shape, (2,))
+      self.assertEqual(micro_batches[0][key].dtype, np.float32)
+
+    scalar_batches = [
+        {
+            'prompts': 'p0',
+            'weight': test_utils.CustomTensor(np.array(0.5, dtype=np.float32)),
+            'step': test_utils.CustomTensor(np.array(3, dtype=np.int32)),
+        },
+        {
+            'prompts': 'p1',
+            'weight': test_utils.CustomTensor(np.array(1.5, dtype=np.float32)),
+            'step': test_utils.CustomTensor(np.array(4, dtype=np.int32)),
+        },
+    ]
+    scalar_out = list(
+        learner._create_micro_batch_iterator(iter(scalar_batches), 2)
+    )
+    self.assertLen(scalar_out, 1)
+    np.testing.assert_array_equal(scalar_out[0]['weight'], [0.5, 1.5])
+    self.assertEqual(scalar_out[0]['weight'].dtype, np.float32)
+    np.testing.assert_array_equal(scalar_out[0]['step'], [3, 4])
+    self.assertEqual(scalar_out[0]['step'].dtype, np.int32)
 
 
 if __name__ == '__main__':

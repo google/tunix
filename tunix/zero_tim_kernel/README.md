@@ -365,14 +365,16 @@ implementation and unit tests.
     produces unaligned row counts `B * (T - 1)`.
 *   **Implementation (`canonical_logsoftmax.py`)**:
     *   **Two-stage compact Pallas normalizer + flag-proof subtraction**:
-        1.  `partial_kernel`: partitions the vocabulary into fixed
+        1.  `_tile_stage` (Stage 1): partitions the vocabulary into fixed
             `VOCAB_TILE = 1024` tiles (padding tail columns beyond `V` with
-            `jnp.finfo(jnp.float32).min` in-kernel) and computes compact
-            `[mp, total_tiles]` per-tile `(tile_max, tile_sum)` summaries in
-            `f32`;
-        2.  `combine_kernel`: combines all compact tile summaries strictly left
-            to right into each row's scalar normalizer
-            `global_max + log(global_sum)`;
+            `jnp.finfo(jnp.float32).min` in-kernel) and accumulates compact
+            `[rows, total_tiles]` per-tile `(tile_max, tile_sum)` summaries in
+            `f32` VMEM scratch;
+        2.  `_combine_rows` (Stage 2): combines all compact tile summaries
+            strictly left to right into each row's scalar normalizer
+            `global_max + log(global_sum)`. On a single device this runs in
+            the last vocab step of the same launch; under TP the per-rank
+            summaries are all-gathered and combined by `combine_kernel`;
         3.  `log_softmax` / `token_logprobs` / `gathered_logprobs`:
             `log_softmax` subtracts `normalizer[:, None]` from
             `hard_upcast(logits)`, whereas `token_logprobs` and
@@ -437,7 +439,8 @@ implementation and unit tests.
 *   `fixed_lm_head.py`: Local LM-head Pallas program (`fixed_m_lm_head_local`)
     with adaptive small-`M` row buckets (`{8..128, 256}`), learner chunk mapping
     (`M > 256`), and ordered `lax.scan` weight-gradient accumulation.
-*   `canonical_logsoftmax.py`: Fixed two-stage Pallas normalizer,
+*   `canonical_logsoftmax.py`: Fixed two-stage normalizer (both stages fused
+    into one Pallas launch on a single device, tile summaries kept in VMEM),
     `log_softmax`, `token_logprobs`, `gathered_logprobs`, and halo-aligned
     TP `vocab_parallel_*` scoring (`VOCAB_TILE = 1024`) over arbitrary `M >= 1`
     in `bf16` or `f32`.

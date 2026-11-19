@@ -27,7 +27,7 @@ from typing import Any, Callable
 import numpy as np
 
 _GLOBAL_FLEET = None
-_FLEET_LOCK = threading.Lock()
+_FLEET_LOCK = threading.RLock()
 _PATCH_LOCK = threading.Lock()
 _R2EGYM_PATCHED = False
 
@@ -193,6 +193,77 @@ def normalize_tasks_for_fleet(
   return normalized
 
 
+def ensure_tasks_in_fleet_plan(
+    fleet: Any,
+    tasks: list[Any] | None,
+    *,
+    scaffold: str = "r2egym",
+    image_rewrite: Callable[[str], str] | None = None,
+) -> None:
+  """Registers `tasks` in `fleet.plan_` so `acquire()` hits warm pools (`on_demand=False`)."""
+  if fleet is None or not tasks:
+    return
+  with _FLEET_LOCK:
+    image_rewrite_fn = get_image_rewrite_fn(
+        image_rewrite or fleet._image_rewrite_fn
+    )
+    normalized_tasks = normalize_tasks_for_fleet(
+        tasks, scaffold=scaffold, image_rewrite=image_rewrite_fn
+    )
+    if not normalized_tasks:
+      return
+
+    plan = fleet.plan_
+    if plan is not None:
+      missing = [
+          t for t in normalized_tasks if plan.for_image(t.image) is None
+      ]
+      if not missing:
+        return
+    else:
+      missing = list(normalized_tasks)
+
+    existing_tasks = list(fleet.tasks) if fleet.tasks else []
+    existing_images = {t.image for t in existing_tasks}
+    new_tasks = []
+    for t in missing:
+      if t.image not in existing_images:
+        new_tasks.append(t)
+        existing_images.add(t.image)
+    if not new_tasks and plan is not None:
+      return
+
+    fleet.load_tasks(existing_tasks + new_tasks)
+    fleet.plan()
+
+
+def _build_template_spec() -> Any:
+  """Builds the SandboxFleet TemplateSpec for R2E-Gym / SWE-agent sandboxes."""
+  from agent_sandbox_rl import ResourceSpec  # pyrefly: ignore[missing-import]
+  from agent_sandbox_rl import TemplateSpec  # pyrefly: ignore[missing-import]
+
+  extra_pod_spec: dict[str, Any] = {
+      # Prevent untrusted task code from accessing the K8s ServiceAccount token.
+      "automountServiceAccountToken": False,
+      # Isolate container PID namespaces within the pod.
+      "shareProcessNamespace": False,
+  }
+
+  return TemplateSpec(
+      resources=ResourceSpec(
+          cpu=os.getenv("SANDBOX_CPU", "500m"),
+          memory=os.getenv("SANDBOX_MEM", "1Gi"),
+          cpu_limit=os.getenv("SANDBOX_CPU_LIMIT", "2"),
+          memory_limit=os.getenv("SANDBOX_MEM_LIMIT", "4Gi"),
+      ),
+      extra_pod_spec=extra_pod_spec,
+      # Prevent the agent-sandbox controller from creating a per-template
+      # NetworkPolicy CR for every task image, which bottlenecks GKE
+      # Dataplane V2 (Cilium eBPF policy compilation) at scale.
+      network_policy_management="Unmanaged",
+  )
+
+
 def init_global_fleet(
     tasks: list[Any] | None = None,
     max_concurrency: int = 128,
@@ -208,6 +279,13 @@ def init_global_fleet(
   global _GLOBAL_FLEET
   with _FLEET_LOCK:
     if _GLOBAL_FLEET is not None:
+      if tasks is not None:
+        ensure_tasks_in_fleet_plan(
+            _GLOBAL_FLEET,
+            tasks,
+            scaffold=scaffold,
+            image_rewrite=image_rewrite,
+        )
       return _GLOBAL_FLEET
 
     patch_r2egym_for_agent_sandbox()
@@ -252,6 +330,7 @@ def init_global_fleet(
                 in_cluster=in_cluster,
             )
         ],
+        "template": _build_template_spec(),
         "max_concurrent": effective_max_concurrent,
         "window_size": batch_size,
         "max_warmpool_size": (
@@ -333,7 +412,9 @@ def teardown_global_fleet() -> None:
         "[SandboxFleet] Automatically tearing down warm pools on exit..."
     )
     try:
-      _GLOBAL_FLEET.teardown()
+      # verify=True runs the run-scoped reaper after teardown to force-delete
+      # any lingering pods belonging to this fleet's run_id.
+      _GLOBAL_FLEET.teardown(verify=True)
     except Exception as e:  # pylint: disable=broad-exception-caught
       logging.warning("[SandboxFleet] Teardown note: %s", e)
     _GLOBAL_FLEET = None

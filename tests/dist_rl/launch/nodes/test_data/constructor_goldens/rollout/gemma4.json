@@ -51,9 +51,12 @@
             151645,
             151643
           ],
+          "episode_timeout": 600.0,
           "kv_cache_size": 2048,
           "max_prompt_length": 1024,
+          "max_response_length": 1024,
           "max_tokens_to_generate": 1024,
+          "overlong_filter": false,
           "partial_rollout": true,
           "return_logprobs": true,
           "return_routed_experts": false,
@@ -82,14 +85,17 @@
           "expert_parallel_size": 1,
           "kv_cache_size": 2048,
           "max_prompt_length": 1024,
-          "max_response_length": null,
+          "max_response_length": 1024,
           "max_tokens_to_generate": 1024,
+          "num_logprobs": 1,
           "overlong_filter": false,
           "partial_rollout": true,
           "return_logits": false,
           "return_logprobs": true,
           "return_routed_experts": false,
-          "rollout_mapping_config": "<MappingConfig(**tunix.models.gemma4.mapping_vllm_jax.VLLM_JAX_MAPPING)>",
+          "rollout_mapping_config": {
+            "__type__": "MappingConfig"
+          },
           "rollout_vanilla_v2_chunked_prefill_length": 512,
           "rollout_vanilla_v2_enable_prefix_caching": true,
           "rollout_vanilla_v2_hbm_utilization": 0.2,
@@ -145,6 +151,7 @@
           "routed_experts_encode_mode": "auto",
           "routed_experts_num_experts": null,
           "seed": null,
+          "staging_max_bytes": null,
           "store_routed_experts": false,
           "temperature": 1.0,
           "tensor_parallel_size": 2,
@@ -169,7 +176,10 @@
             "<jax.devices()[0]>",
             "<jax.devices()[1]>"
           ]
-        ]
+        ],
+        "kwargs": {
+          "allow_split_physical_axes": true
+        }
       }
     },
     {
@@ -301,7 +311,9 @@
             "max_lora_rank": 8,
             "max_loras": 1
           },
-          "mapping_config": "<MappingConfig(**tunix.models.gemma4.mapping_vllm_jax.VLLM_JAX_MAPPING)>",
+          "mapping_config": {
+            "__type__": "MappingConfig"
+          },
           "mesh": "<tunix.dist_rl.launch.nodes.node_utils.Mesh()>",
           "overlap_postprocessing": true,
           "partial_rollout": true,

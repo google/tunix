@@ -58,6 +58,7 @@ class VllmConfig:
       default_factory=MappingConfig
   )
   return_logprobs: bool = False
+  num_logprobs: int = 1
   # Capture the MoE expert ids the rollout actually routed through, so training
   # can replay them. Sets vLLM's `enable_return_routed_experts` engine arg.
   return_routed_experts: bool = False
@@ -133,6 +134,8 @@ class VllmConfig:
           "postprocessing_threads must be >= 1, got"
           f" {self.postprocessing_threads}"
       )
+    if isinstance(self.num_logprobs, bool) or self.num_logprobs < 1:
+      raise ValueError(f"num_logprobs must be >= 1, got {self.num_logprobs}")
     if engine_kwargs:
       for key, value in engine_kwargs.items():
         logging.info(
@@ -496,7 +499,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       args["gpu_memory_utilization"] = 0.2
 
     if config.return_logprobs:
-      args.setdefault("max_logprobs", 1)
+      args.setdefault("max_logprobs", config.num_logprobs)
       args.setdefault("logprobs_mode", "processed_logprobs")
 
     if config.return_routed_experts:
@@ -581,6 +584,11 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     raise RuntimeError("vLLM engine is not initialized.")
 
   @property
+  def model_runner(self) -> Any:
+    """Public accessor for the active vLLM worker's model runner."""
+    return self._model_runner
+
+  @property
   def transformer(self):
     # vLLM doesn't expose the underlying model
     return None
@@ -592,26 +600,77 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     else:
       raise AttributeError("vLLM model runner doesn't have state.")
 
+  def routed_experts_shape(self) -> tuple[int, int] | None:
+    """Returns `(num_layers, top_k)` when MoE routing capture is enabled, else None."""
+    if not self.config.return_routed_experts:
+      return None
+    llm_engine = None
+    if self.llm is not None:
+      llm_engine = self.llm.llm_engine
+    elif self._driver is not None:
+      llm_engine = self._driver.llm_engine
+    if llm_engine is None:
+      return None
+    model_cfg = llm_engine.vllm_config.model_config
+    num_layers = int(model_cfg.get_total_num_hidden_layers())
+    top_k = int(model_cfg.get_num_experts_per_tok())
+    if num_layers <= 0 or top_k <= 0:
+      return None
+    return (num_layers, top_k)
+
   def tokenize(self, input_string: str) -> np.ndarray | list[int]:
     """Tokenizes the input string."""
     input_ids = self.tokenizer.encode(input_string)
     bos_tok = [self.tokenizer.bos_id()] if self.tokenizer.bos_id() else []
     return self.tokenizer.dedup_bos_ids(bos_tok + input_ids)
 
+  def _resolve_logprob_options(
+      self,
+      return_logprobs: bool | None,
+      num_logprobs: int | None,
+  ) -> Tuple[bool, int]:
+    """Resolves per-call logprob options against `self.config` and `self.args`."""
+    eff_return = (
+        self.config.return_logprobs
+        if return_logprobs is None
+        else return_logprobs
+    )
+    eff_num = (
+        self.config.num_logprobs if num_logprobs is None else num_logprobs
+    )
+    if isinstance(eff_num, bool) or eff_num < 1:
+      raise ValueError(f"num_logprobs must be >= 1, got {eff_num!r}.")
+    if "max_logprobs" in self.args and eff_num > self.args["max_logprobs"]:
+      raise ValueError(
+          f"num_logprobs ({eff_num}) exceeds engine max_logprobs"
+          f" ({self.args['max_logprobs']})."
+      )
+    return eff_return, eff_num
+
   def detokenize(
-      self, input_strings: List[str], request_outputs: List[RequestOutput]
+      self,
+      input_strings: List[str],
+      request_outputs: List[RequestOutput],
+      *,
+      return_logprobs: bool | None = None,
+      num_logprobs: int | None = None,
   ) -> Tuple[
       List[List[str]],
       List[List[List[float] | None]],
       List[List[np.ndarray]],
       List[List[np.ndarray | None]],
+      List[List[np.ndarray]] | None,
+      List[List[np.ndarray]] | None,
   ]:
     """Detokenize the vllm outputs."""
+    _, eff_num = self._resolve_logprob_options(return_logprobs, num_logprobs)
     generations = len(request_outputs[0].outputs)
     decoded_outputs = [[] for _ in range(generations)]
     out_logprobs = [[] for _ in range(generations)]
     out_tokens = [[] for _ in range(generations)]
     out_routed_experts = [[] for _ in range(generations)]
+    out_topk_ids = [[] for _ in range(generations)]
+    out_topk_logprobs = [[] for _ in range(generations)]
     precomputed = self._postprocessed or {}
     self._postprocessed = None
     for input_string, multi_sampling_output in zip(
@@ -631,11 +690,18 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
             np.array(single_output.token_ids, dtype=np.int32)
         )
         if ready is not None:
-          text, logprobs = ready[idx]
+          text, logprobs, topk = ready[idx]
         else:
-          text, logprobs = self._decode_single_output(single_output)
+          text, logprobs, topk = self._decode_single_output(
+              single_output,
+              return_logprobs=return_logprobs,
+              num_logprobs=num_logprobs,
+          )
         decoded_outputs[idx].append(text)
         out_logprobs[idx].append(logprobs)
+        if topk is not None:
+          out_topk_ids[idx].append(topk[0])
+          out_topk_logprobs[idx].append(topk[1])
         # `[length, num_layers, top_k]`, or None when capture is disabled.
         out_routed_experts[idx].append(
             getattr(single_output, "routed_experts", None)
@@ -645,25 +711,65 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
             input_string,
             decoded_outputs[idx][-1],
         )
-    return decoded_outputs, out_logprobs, out_tokens, out_routed_experts
+    return (
+        decoded_outputs,
+        out_logprobs,
+        out_tokens,
+        out_routed_experts,
+        out_topk_ids if eff_num > 1 else None,
+        out_topk_logprobs if eff_num > 1 else None,
+    )
 
   def _decode_single_output(
-      self, single_output: Any
-  ) -> Tuple[str, List[float] | None]:
-    """Text and per-token logprobs of one sampled completion."""
-    text = self.tokenizer.decode(single_output.token_ids)
-    logprobs = utils.get_logprobs_from_vllm_output(
-        list(single_output.token_ids),
-        single_output.logprobs,
-        required=self.config.return_logprobs,
+      self,
+      single_output: Any,
+      *,
+      return_logprobs: bool | None = None,
+      num_logprobs: int | None = None,
+  ) -> Tuple[str, List[float] | None, Tuple[np.ndarray, np.ndarray] | None]:
+    """Text, per-token logprobs, and optional top-k of one sampled completion."""
+    eff_return, eff_num = self._resolve_logprob_options(
+        return_logprobs, num_logprobs
     )
-    return text, logprobs
+    token_ids = list(single_output.token_ids)
+    text = self.tokenizer.decode(single_output.token_ids)
+    logprobs = (
+        utils.get_logprobs_from_vllm_output(
+            token_ids, single_output.logprobs, required=eff_return
+        )
+        if eff_return or single_output.logprobs is None
+        else None
+    )
+    topk = None
+    if eff_num > 1:
+      if token_ids and not single_output.logprobs:
+        raise ValueError("Top-k logprobs are not returned from the vLLM.")
+      topk = utils.get_topk_logprobs_from_vllm_output(
+          single_output.logprobs, eff_num
+      )
+      if topk[0].shape[0] != len(token_ids):
+        raise ValueError(
+            f"Top-k logprobs length {topk[0].shape[0]} != {len(token_ids)}"
+            " token ids."
+        )
+    return text, logprobs, topk
 
   def _postprocess_request_output(
-      self, request_output: RequestOutput
-  ) -> List[Tuple[str, List[float] | None]]:
+      self,
+      request_output: RequestOutput,
+      *,
+      return_logprobs: bool | None = None,
+      num_logprobs: int | None = None,
+  ) -> List[
+      Tuple[str, List[float] | None, Tuple[np.ndarray, np.ndarray] | None]
+  ]:
     """Decodes every sample of a finished request (runs in the thread pool)."""
-    return [self._decode_single_output(o) for o in request_output.outputs]
+    return [
+        self._decode_single_output(
+            o, return_logprobs=return_logprobs, num_logprobs=num_logprobs
+        )
+        for o in request_output.outputs
+    ]
 
   def _get_postprocess_pool(self) -> concurrent.futures.ThreadPoolExecutor:
     if self._postprocess_pool is None:
@@ -676,7 +782,11 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     return self._postprocess_pool
 
   def _postprocess_as_completed(
-      self, futures: List[concurrent.futures.Future[Any]]
+      self,
+      futures: List[concurrent.futures.Future[Any]],
+      *,
+      return_logprobs: bool | None = None,
+      num_logprobs: int | None = None,
   ) -> None:
     """Server mode: decodes each request as its driver future resolves."""
     pool = self._get_postprocess_pool()
@@ -686,7 +796,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       result = future.result()
       if isinstance(result, RequestOutput):
         pending[result.request_id] = pool.submit(
-            self._postprocess_request_output, result
+            self._postprocess_request_output,
+            result,
+            return_logprobs=return_logprobs,
+            num_logprobs=num_logprobs,
         )
     self._postprocessed = {rid: f.result() for rid, f in pending.items()}
 
@@ -696,6 +809,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       sampling_params: Union[
           SamplingParams, BeamSearchParams, List[SamplingParams]
       ],
+      *,
+      return_logprobs: bool | None = None,
+      num_logprobs: int | None = None,
   ) -> List[RequestOutput]:
     """Offline generation; overlaps post-processing with decode when enabled.
 
@@ -739,7 +855,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           if output.finished:
             outputs.append(output)
             futures[output.request_id] = pool.submit(
-                self._postprocess_request_output, output
+                self._postprocess_request_output,
+                output,
+                return_logprobs=return_logprobs,
+                num_logprobs=num_logprobs,
             )
             progress.update(1)
     finally:
@@ -754,6 +873,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       sampling_params: Union[
           SamplingParams, BeamSearchParams, List[SamplingParams]
       ],
+      *,
+      return_logprobs: bool | None = None,
+      num_logprobs: int | None = None,
   ) -> List[RequestOutput]:
     """Generate the response in server mode."""
     if self._driver is None:
@@ -776,7 +898,11 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
     futures = self._driver.submit_requests(requests)
     if self.config.overlap_postprocessing:
-      self._postprocess_as_completed(futures)
+      self._postprocess_as_completed(
+          futures,
+          return_logprobs=return_logprobs,
+          num_logprobs=num_logprobs,
+      )
 
     outputs: List[RequestOutput] = []
     for future in futures:
@@ -827,9 +953,14 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       *,
       prompt_token_ids: Sequence[Sequence[int] | np.ndarray] | None = None,
       require_unfiltered: bool = False,
+      return_logprobs: bool | None = None,
+      num_logprobs: int | None = None,
       **kwargs,
   ) -> base_sampler.SamplerOutput:
     """The entry point API for vLLM Sampler"""
+    eff_return_logprobs, eff_num_logprobs = self._resolve_logprob_options(
+        return_logprobs, num_logprobs
+    )
     if require_unfiltered and self.args.get("logits_processors"):
       raise ValueError(
           "Unfiltered OPD sampling does not support engine logits_processors."
@@ -892,8 +1023,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       sampling_params.max_tokens = max_generation_steps
       sampling_params.n = multi_sampling
       sampling_params.temperature = temperature
-      if self.config.return_logprobs:
-        sampling_params.logprobs = 1  # b/428730696
+      if eff_return_logprobs or eff_num_logprobs > 1:
+        sampling_params.logprobs = eff_num_logprobs
         sampling_params.prompt_logprobs = None  # b/428730696
       else:
         sampling_params.logprobs = 0
@@ -1031,16 +1162,34 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
     if self._driver is not None:
       outputs = self._generate_server_mode(
-          prompt_objects, target_sampling_params
+          prompt_objects,
+          target_sampling_params,
+          return_logprobs=eff_return_logprobs,
+          num_logprobs=eff_num_logprobs,
       )
     else:
-      outputs = self._generate_offline(prompt_objects, target_sampling_params)
+      outputs = self._generate_offline(
+          prompt_objects,
+          target_sampling_params,
+          return_logprobs=eff_return_logprobs,
+          num_logprobs=eff_num_logprobs,
+      )
     if exact_input:
       utils.check_prompt_echo(prompt_ids, outputs, backend_name="vLLM")
-    decoded_outputs, out_logprobs, out_tokens, out_routed_experts = (
-        self.detokenize(input_strings, outputs)
+    (
+        decoded_outputs,
+        out_logprobs,
+        out_tokens,
+        out_routed_experts,
+        out_topk_ids,
+        out_topk_logprobs,
+    ) = self.detokenize(
+        input_strings,
+        outputs,
+        return_logprobs=eff_return_logprobs,
+        num_logprobs=eff_num_logprobs,
     )
-    if self.config.return_logprobs and (
+    if eff_return_logprobs and (
         out_logprobs is None or out_logprobs[0] is None
     ):
       raise ValueError("Logprobs are not returned from the vLLM.")
@@ -1059,9 +1208,11 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         logits=None,
         tokens=out_tokens[0],
         padded_prompt_tokens=all_input_ids,
-        logprobs=out_logprobs[0]
-        if self.config.return_logprobs
-        else None,  # pyrefly: ignore[bad-argument-type]
+        logprobs=out_logprobs[0] if eff_return_logprobs else None,  # pyrefly: ignore[bad-argument-type]
+        topk_token_ids=out_topk_ids[0] if out_topk_ids is not None else None,
+        topk_logprobs=(
+            out_topk_logprobs[0] if out_topk_logprobs is not None else None
+        ),
         routed_experts=(
             out_routed_experts[0] if self.config.return_routed_experts else None
         ),

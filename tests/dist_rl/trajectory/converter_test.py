@@ -1585,6 +1585,65 @@ class ToTunixTrajectoryTest(trajectory_testing.TrajectoryTestCase):
         paired_step.env_tokens, trailing_env_step.env_tokens
     )
 
+  def test_to_tunix_trajectory_on_base_atif_json_dict_rehydrates_steps_and_metadata(
+      self,
+  ) -> None:
+    prompt_step, agent_step, trailing_env_step = (
+        trajectory_testing.PAIRED_TUNIX_TRAJECTORY.steps
+    )
+
+    rl_trajectory = converter.to_tunix_trajectory(
+        trajectory_testing.PAIRED_ATIF_TRAJECTORY.to_json_dict()
+    )
+
+    self.assertEqual(
+        rl_trajectory.reward,
+        trajectory_testing.PAIRED_TUNIX_TRAJECTORY.total_reward,
+    )
+    self.assertEqual(
+        rl_trajectory.status, agent_types.TrajectoryStatus.SUCCEEDED
+    )
+    self.assertEqual(
+        rl_trajectory.env_time,
+        trajectory_testing.PAIRED_TUNIX_TRAJECTORY.env_time,
+    )
+    self.assertEqual(
+        rl_trajectory.reward_time,
+        trajectory_testing.PAIRED_TUNIX_TRAJECTORY.reward_time,
+    )
+    self.assertEqual(rl_trajectory.task, {"prompts": [prompt_step.message]})
+    (paired_step,) = rl_trajectory.steps
+    self.assertEqual(paired_step.mc_return, trailing_env_step.reward)
+    self.assertEqual(paired_step.reward, trailing_env_step.reward)
+    self.assertTrue(paired_step.done)
+    np.testing.assert_array_equal(
+        paired_step.assistant_tokens, agent_step.assistant_tokens
+    )
+    np.testing.assert_array_equal(
+        paired_step.env_tokens, trailing_env_step.env_tokens
+    )
+
+  def test_to_tunix_trajectory_on_empty_steps_atif_json_dict_unpacks_extensions(
+      self,
+  ) -> None:
+    empty_tunix = trajectory_testing.PAIRED_TUNIX_TRAJECTORY.model_copy(
+        update={"steps": [], "masked_out": True}
+    )
+    atif_dict = trajectory_testing.to_atif_trajectory(
+        empty_tunix
+    ).to_json_dict()
+
+    rl_trajectory = converter.to_tunix_trajectory(atif_dict)
+
+    self.assertEqual(
+        rl_trajectory.status, agent_types.TrajectoryStatus.SUCCEEDED
+    )
+    self.assertEqual(rl_trajectory.reward, empty_tunix.total_reward)
+    self.assertTrue(rl_trajectory.masked_out)
+    self.assertEqual(rl_trajectory.env_time, empty_tunix.env_time)
+    self.assertEqual(rl_trajectory.reward_time, empty_tunix.reward_time)
+    self.assertEmpty(rl_trajectory.steps)
+
   def test_to_tunix_trajectory_computes_discounted_mc_return(self):
     traj = trajectory_lib.TunixTrajectory(
         trajectory_id="t_discounted",

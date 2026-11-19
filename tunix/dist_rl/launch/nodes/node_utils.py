@@ -31,7 +31,6 @@ import pathlib
 import pickle
 import signal
 import sys
-import types
 from typing import Final, Literal, TypeAlias, TypedDict, cast
 
 import jax
@@ -46,7 +45,7 @@ from tunix.dist_rl.worker import remote_execution
 
 NodeRole = Literal["trainer", "rollout", "inference"]
 # Every process of a run: the orchestrator and the worker nodes.
-ProcessRole = Literal["orchestrator", "trainer", "rollout", "inference"]
+ProcessRole = resolve_config.ProcessRole
 
 # Environment variable that `k8s.sh` or an external launcher
 # (`cluster_config.target: external`) sets to each rollout replica's index
@@ -78,6 +77,7 @@ _LOGGED_ENV_VARS = frozenset({
     "ENABLE_PATHWAYS_PERSISTENCE",
     "LOCAL_JAX_CACHE_DIR",
     "NEW_MODEL_DESIGN",
+    "PJRT_DEVICE",
     "ROLLOUT_JAX_CACHE_GCS_DIR",
     "SAVE_JAX_CACHE",
     "SKIP_JAX_PRECOMPILE",
@@ -87,9 +87,14 @@ _LOGGED_ENV_VARS = frozenset({
     "VERIFY_WEIGHTS",
 })
 _LOGGED_ENV_PREFIXES = (
+    "CUDA_",
     "JAX_",
     "LIBTPU_",
+    "NCCL_",
+    "NVTE_",
+    "PJRT_",
     "RAIDEN_",
+    "TORCH_",
     "TPU_",
     "TUNIX_",
     "VLLM_",
@@ -124,20 +129,12 @@ def ensure_repo_root_on_path() -> None:
   logging.info("Repo root inserted into sys.path: %s", repo_root)
 
 
-# Environment variables `apply_library_env` sets from the config, and the
-# config key each comes from. Launchers reject them in user-supplied
-# environments so a value can only come from the config.
-LIBRARY_ENV_CONFIG_KEYS: Final[Mapping[str, str]] = types.MappingProxyType({
-    "SKIP_JAX_PRECOMPILE": "vllm_config.skip_jax_precompile",
-    "TPU_RAIDEN_DATA_NICS": "weight_sync_config.raiden_data_nics",
-    "VERIFY_WEIGHTS": "weight_sync_config.verify_weights",
-})
-
-
 def _library_env(
-    hp: resolve_config.DistHyperParameters, role: Literal["trainer", "rollout"]
+    hp: resolve_config.DistHyperParameters, role: NodeRole
 ) -> dict[str, tuple[str | None, str]]:
   """Returns `{variable: (value, config key)}`; a None value leaves it unset."""
+  if role == "inference":
+    return {}
   ws = hp.config_mapping("weight_sync_config")
   values: dict[str, str | None] = {
       "VERIFY_WEIGHTS": "true" if ws["verify_weights"] else "false",
@@ -147,13 +144,13 @@ def _library_env(
     skip = hp.config_mapping("vllm_config")["skip_jax_precompile"]
     values["SKIP_JAX_PRECOMPILE"] = "1" if skip else "0"
   return {
-      name: (value, LIBRARY_ENV_CONFIG_KEYS[name])
+      name: (value, resolve_config.LIBRARY_ENV_CONFIG_KEYS[name])
       for name, value in values.items()
   }
 
 
 def apply_library_env(
-    hp: resolve_config.DistHyperParameters, role: Literal["trainer", "rollout"]
+    hp: resolve_config.DistHyperParameters, role: NodeRole
 ) -> None:
   """Sets the environment variables that libraries read, from the config.
 
@@ -192,6 +189,15 @@ def apply_library_env(
   for name, (value, _) in env.items():
     if value is not None:
       os.environ[name] = value
+  role_target = {
+      "trainer": hp.cluster_targets.trainer,
+      "rollout": hp.cluster_targets.rollout,
+      "inference": hp.cluster_targets.inference,
+  }[role]
+  context_lib.ProcessContext().prepare_env(
+      role_target,
+      weight_sync_mode=hp.cluster_targets.weight_sync_mode,
+  )
 
 
 class ResolvedConfigRecord(TypedDict):
@@ -556,6 +562,7 @@ async def serve_worker(
         "service_type": role,
         "service_port": port,
         "worker_id": worker_id_str,
+        "instance_id": worker_service.instance_id,
         CONFIG_SHA256_METADATA_KEY: config_sha256,
     }
     if extra_metadata:
@@ -649,7 +656,11 @@ def create_mesh(
         f"{label} mesh dimensions must multiply to visible JAX device count. "
         f"Got {model_key}.mesh shape={shape}, devices={jax.device_count()}."
     )
-  devices = mesh_utils.create_device_mesh(shape, jax.devices())
+  # Shapes that already factor into whole physical axes get the same device
+  # order; shapes like (8, 8) on a 4x4x4 slice need a split physical axis.
+  devices = mesh_utils.create_device_mesh(
+      shape, jax.devices(), allow_split_physical_axes=True
+  )
   return Mesh(devices, axis_names=MESH_AXIS_NAMES)
 
 

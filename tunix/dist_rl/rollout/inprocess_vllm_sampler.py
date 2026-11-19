@@ -367,6 +367,12 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
       return self.vllm_sampler.mesh
     return None
 
+  def routed_experts_shape(self) -> tuple[int, int] | None:
+    """Returns `(num_layers, top_k)` when MoE routing capture is enabled, else None."""
+    if not self.config.return_routed_experts or self.vllm_sampler is None:
+      return None
+    return self.vllm_sampler.routed_experts_shape()
+
   # --- Inference ---
   async def sample(
       self,

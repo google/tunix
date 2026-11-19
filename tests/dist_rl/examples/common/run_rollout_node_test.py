@@ -29,6 +29,7 @@ from tunix.dist_rl.rollout import inprocess_vllm_sampler
 from tunix.dist_rl.rollout import vllm_sampler
 from tunix.dist_rl.worker import remote_execution
 from tunix.dist_rl.worker import rollout_worker
+from tunix.generate import mappings as mappings_lib
 from tunix.rl.agentic.parser.chat_template_parser import parser
 from tunix.utils import maxtext_utils
 
@@ -76,6 +77,13 @@ def _inprocess_vllm_rollout_config(
 
 class RunRolloutNodeTest(absltest.TestCase):
 
+  def setUp(self):
+    super().setUp()
+    # `run_rollout_node.main` sets process-wide defaults such as
+    # `VLLM_TPU_RPA_VERSION`. Restore the environment after each test, so they
+    # don't leak into other tests that share the process (pytest workers).
+    self.enter_context(mock.patch.dict(os.environ))
+
   def test_gemma4_uses_gemma4_chat_parser(self):
     parser_factory = mock.Mock(return_value=mock.sentinel.chat_parser)
     with mock.patch.dict(
@@ -94,26 +102,134 @@ class RunRolloutNodeTest(absltest.TestCase):
         mock.sentinel.tokenizer, enable_thinking=False
     )
 
-  def test_gemma4_mapping_includes_preprocessing_and_fused_projections(self):
-    config = run_rollout_node._mapping_config_for("google/gemma-4-E2B-it")
+  def test_qwen3p5_rejects_unsupported_weight_sync_configs(self):
+    with self.subTest("oop_vllm_with_raiden"):
+      with self.assertRaisesRegex(ValueError, "use inprocess_vllm instead"):
+        _vllm_engine_kwargs([
+            "--sampler=vllm",
+            "--model_id=Qwen/Qwen3.5-0.8B",
+            "--weight_sync_mode=raiden",
+            "--mesh_tp=1",
+        ])
 
-    # Gemma4 fuses gate/up on the source state before transfer and maps
-    # separate q/k/v projections.
-    self.assertIsNotNone(config.preprocess_src_state)
-    self.assertIn("layers.*.mlp.gate_up_proj.kernel", config.to_hf_mappings)
-    self.assertIn("layers.*.attn.q_einsum.w", config.to_hf_mappings)
-    self.assertIn("layers.*.attn.k_einsum.w", config.to_hf_mappings)
-    self.assertIn("layers.*.attn.v_einsum.w", config.to_hf_mappings)
+    with mock.patch.object(
+        run_rollout_node, "_import_vllm_sampler"
+    ) as mock_import_vllm:
+      for name, extra_flags, exc_type, regex in (
+          (
+              "inprocess_tp_gt_1",
+              ["--mesh_tp=2"],
+              NotImplementedError,
+              "tensor_parallel_size=1 only",
+          ),
+          (
+              "inprocess_lora",
+              ["--mesh_tp=1", "--use_lora"],
+              NotImplementedError,
+              "Qwen3.5 LoRA",
+          ),
+          (
+              "inprocess_real_weights_with_sync",
+              ["--mesh_tp=1", "--no-vllm_init_with_random_weights"],
+              ValueError,
+              "requires init_with_random_weights=True",
+          ),
+      ):
+        with self.subTest(name):
+          args = run_rollout_node._parse_args([
+              "--sampler=inprocess_vllm",
+              "--model_id=Qwen/Qwen3.5-0.8B",
+              "--weight_sync_mode=raiden",
+              *extra_flags,
+          ])
+          with self.assertRaisesRegex(exc_type, regex):
+            run_rollout_node._create_inprocess_vllm_sampler(
+                args, tokenizer=None
+            )
+      mock_import_vllm.assert_not_called()
 
-  def test_qwen3_mapping_is_selected_for_qwen3(self):
-    config = run_rollout_node._mapping_config_for("Qwen/Qwen3-8B")
+  def test_qwen3p5_inprocess_vllm_plumbs_mapping_and_allows_maxtext_or_none(
+      self,
+  ):
+    with self.subTest("dense_raiden"):
+      dense_cfg = _inprocess_vllm_rollout_config([
+          "--sampler=inprocess_vllm",
+          "--model_id=Qwen/Qwen3.5-0.8B",
+          "--weight_sync_mode=raiden",
+          "--mesh_tp=1",
+      ])
+      self.assertEqual(
+          dense_cfg.rollout_vllm_kwargs["hf_overrides"],
+          {"architectures": ["Qwen3_5ForCausalLM"]},
+      )
+      self.assertIsNotNone(dense_cfg.rollout_mapping_config)
+      self.assertIsNotNone(
+          dense_cfg.rollout_mapping_config.preprocess_src_state
+      )
+      raiden_args = run_rollout_node._parse_args([
+          "--model_id=Qwen/Qwen3.5-0.8B",
+          "--weight_sync_mode=raiden",
+      ])
+      self.assertEmpty(
+          run_rollout_node._vllm_hf_overrides(raiden_args, sampler_type="vllm")
+      )
 
-    self.assertTrue(config.to_hf_mappings)
-    self.assertIsNone(config.preprocess_src_state)
+    with self.subTest("maxtext_moe"):
+      maxtext_moe_cfg = _inprocess_vllm_rollout_config([
+          "--sampler=inprocess_vllm",
+          "--model_id=Qwen/Qwen3.5-35B-A3B",
+          "--maxtext_model_name=qwen3.5-35b-a3b",
+          "--weight_sync_mode=raiden",
+          "--mesh_tp=2",
+      ])
+      self.assertEqual(
+          maxtext_moe_cfg.rollout_mapping_config,
+          mappings_lib.MappingConfig(),
+      )
+      self.assertEqual(
+          maxtext_moe_cfg.rollout_vllm_kwargs["hf_overrides"],
+          dict(maxtext_utils.VLLM_MAXTEXT_HF_OVERRIDES),
+      )
 
-  def test_unsupported_family_raises(self):
-    with self.assertRaisesRegex(ValueError, "supports Qwen3 and Gemma4"):
-      run_rollout_node._mapping_config_for("meta-llama/Llama-3-8B")
+    with self.subTest("static_moe"):
+      static_moe_cfg = _inprocess_vllm_rollout_config([
+          "--sampler=inprocess_vllm",
+          "--model_id=Qwen/Qwen3.5-35B-A3B",
+          "--weight_sync_mode=none",
+          "--mesh_tp=2",
+      ])
+      self.assertEqual(
+          static_moe_cfg.rollout_mapping_config,
+          mappings_lib.MappingConfig(),
+      )
+      self.assertNotIn("hf_overrides", static_moe_cfg.rollout_vllm_kwargs)
+
+  def test_main_fails_fast_before_otel_registry_cache_and_tokenizer(self):
+    with (
+        mock.patch.object(otel_setup, "setup_metrics") as mock_otel_setup,
+        mock.patch.object(
+            transformers.AutoTokenizer, "from_pretrained"
+        ) as mock_tokenizer,
+        mock.patch.object(
+            run_rollout_node.importlib, "import_module"
+        ) as mock_import_module,
+        mock.patch.object(gcs_cache, "restore_jax_cache") as mock_restore_cache,
+    ):
+      with self.assertRaisesRegex(ValueError, "use inprocess_vllm instead"):
+        run_rollout_node.main(
+            [
+                "--sampler=vllm",
+                "--model_id=Qwen/Qwen3.5-0.8B",
+                "--weight_sync_mode=raiden",
+                "--mesh_tp=1",
+            ],
+            context=mock.Mock(),
+        )
+
+    mock_otel_setup.assert_not_called()
+    mock_import_module.assert_not_called()
+    mock_restore_cache.assert_not_called()
+    mock_tokenizer.assert_not_called()
 
   def test_gemma4_vllm_overrides_match_text_only_reference(self):
     args = run_rollout_node._parse_args(["--model_id=google/gemma-4-E2B-it"])
@@ -180,6 +296,28 @@ class RunRolloutNodeTest(absltest.TestCase):
         ).rollout_vllm_sampling_kwargs["detokenize"],
         False,
     )
+
+  def test_sampling_flags_reach_rollout_config(self):
+    defaults = run_rollout_node._rollout_config(
+        run_rollout_node._parse_args([])
+    )
+    self.assertEqual(defaults.temperature, 1.0)
+    self.assertEqual(defaults.top_p, 1.0)
+    self.assertIsNone(defaults.top_k)
+    self.assertFalse(defaults.overlong_filter)
+
+    custom = run_rollout_node._rollout_config(
+        run_rollout_node._parse_args([
+            "--temperature=0.7",
+            "--top_p=0.9",
+            "--top_k=20",
+            "--overlong_filter",
+        ])
+    )
+    self.assertEqual(custom.temperature, 0.7)
+    self.assertEqual(custom.top_p, 0.9)
+    self.assertEqual(custom.top_k, 20)
+    self.assertTrue(custom.overlong_filter)
 
   def test_routed_experts_flags_reach_rollout_config(self):
     defaults = run_rollout_node._rollout_config(
@@ -352,11 +490,13 @@ class RunRolloutNodeTest(absltest.TestCase):
           run_rollout_node._parse_args([])
       )
     self.assertEqual(defaults.drain_timeout_s, 660.0)
+    self.assertEqual(defaults.episode_timeout, 600.0)
 
     deepswe_cfg = run_rollout_node._rollout_config(
         run_rollout_node._parse_args(["--episode_timeout_secs=1800"])
     )
     self.assertEqual(deepswe_cfg.drain_timeout_s, 1860.0)
+    self.assertEqual(deepswe_cfg.episode_timeout, 1800.0)
 
     stderr = io.StringIO()
     with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
@@ -631,7 +771,10 @@ class RunRolloutNodeTest(absltest.TestCase):
   ):
     context = mock.MagicMock()
     mock_tokenizer = mock.MagicMock(pad_token_id=0, eos_token="<eos>")
-    mock_worker_service = mock.MagicMock(spec=rollout_worker.RolloutWorker)
+    mock_worker_service = mock.MagicMock(
+        spec=rollout_worker.RolloutWorker,
+        instance_id="rollout-worker-instance-0",
+    )
     mock_worker_service.trajectory_store = None
     mock_sampler = mock.MagicMock()
     mock_sampler.stop = mock.AsyncMock()

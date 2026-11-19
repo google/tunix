@@ -193,9 +193,31 @@ class NeutralContractTest(absltest.TestCase):
     self.assertFalse(hasattr(weight_sync, "raiden_controller"))
     self.assertFalse(hasattr(weight_sync, "create_weight_synchronizer"))
 
+  def test_gcs_mode_and_artifact_metadata_roundtrip(self):
+    self.assertEqual(weight_sync.WeightSyncMode.GCS.value, "gcs")
+    with self.assertRaisesRegex(ValueError, "artifact_uri"):
+      weight_sync.WorkUnitMetadata(
+          unit=weight_sync.WorkUnitId("trainer"), artifact_uri="   "
+      )
+
+    meta = weight_sync.dict_to_metadata({
+        "unit": {"job_name": "trainer"},
+        "artifact_uri": "gs://bucket/step_1_r1",
+        "checksums": {"w": 2.0, "__grand_total__": 2.0, "__tensor_count__": 1},
+    })
+    self.assertEqual(meta.artifact_uri, "gs://bucket/step_1_r1")
+    self.assertEqual(meta.checksums["__tensor_count__"], 1)
+    self.assertIsInstance(hash(meta), int)
+    # A dict-valued `checksums` must not make the frozen metadata unhashable.
+    without_checksums = dataclasses.replace(meta, checksums=None)
+    self.assertEqual(hash(meta), hash(without_checksums))
+    self.assertNotEqual(meta, without_checksums)
+
 
 class MockVllmSampler(base_sampler.BaseSampler):
   """Mock vLLM sampler exposing VllmToyTransformer state and update_params."""
+
+  model_runner = None
 
   def __init__(self, config: test_common.ModelConfig, *, rngs: nnx.Rngs):
     self._transformer = test_common.VllmToyTransformer(config, rngs=rngs)
@@ -719,17 +741,17 @@ class WeightSyncE2ETest(absltest.TestCase):
         self.model_config, rngs=nnx.Rngs(1)
     )
 
-  def test_fallback_mode_weight_sync_with_vanilla_adapter(self):
-    """Verifies Fallback mode weight transfer from PeftTrainer to VanillaSampler."""
+  def test_in_memory_mode_weight_sync_with_vanilla_adapter(self):
+    """Verifies IN_MEMORY mode weight transfer from PeftTrainer to VanillaSampler."""
     adapter_config = RolloutConfig(
         kv_cache_size=64,
-        weight_sync_mode=WeightSyncMode.FALLBACK,
+        weight_sync_mode=WeightSyncMode.IN_MEMORY,
     )
     vanilla_model = test_common.ToyTransformer(
         self.model_config, rngs=nnx.Rngs(2)
     )
     adapter = vanilla_sampler.VanillaSampler(
-        server_id="vanilla_sampler_fallback_0",
+        server_id="vanilla_sampler_in_memory_0",
         config=adapter_config,
         transformer=vanilla_model,
         tokenizer=test_common.MockVocab(),
@@ -750,7 +772,7 @@ class WeightSyncE2ETest(absltest.TestCase):
     new_embedding = jnp.ones_like(self.toy_trainer_model.emb.embedding.value) * 99.0
     self.toy_trainer_model.emb.embedding.value = new_embedding
 
-    # Execute weight sync in fallback mode
+    # Execute weight sync in IN_MEMORY mode
     sync_request = base_sampler_lib.WeightSyncRequest(
         weights=nnx.state(trainer.model),
     )
@@ -764,13 +786,13 @@ class WeightSyncE2ETest(absltest.TestCase):
         np.array(new_embedding),
     )
 
-  def test_fallback_mode_weight_sync_with_vllm_adapter(self):
-    """Verifies Fallback mode weight transfer from PeftTrainer to InprocessVllmSampler."""
+  def test_in_memory_mode_weight_sync_with_vllm_adapter(self):
+    """Verifies IN_MEMORY mode weight transfer from PeftTrainer to InprocessVllmSampler."""
     adapter_config = RolloutConfig(
-        weight_sync_mode=WeightSyncMode.FALLBACK,
+        weight_sync_mode=WeightSyncMode.IN_MEMORY,
     )
     adapter = inprocess_vllm_sampler.InprocessVllmSampler(
-        server_id="vllm_sampler_fallback_0",
+        server_id="vllm_sampler_in_memory_0",
         tokenizer=test_common.MockVocab(),
         config=adapter_config,
     )
@@ -791,7 +813,7 @@ class WeightSyncE2ETest(absltest.TestCase):
     new_embedding = jnp.ones_like(self.toy_trainer_model.emb.embedding.value) * 42.0
     self.toy_trainer_model.emb.embedding.value = new_embedding
 
-    # Execute weight sync in fallback mode
+    # Execute weight sync in IN_MEMORY mode
     sync_request = base_sampler_lib.WeightSyncRequest(
         weights=nnx.state(trainer.model),
     )

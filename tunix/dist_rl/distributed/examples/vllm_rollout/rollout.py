@@ -66,7 +66,7 @@ def main(argv: Sequence[str], context: ProcessContext | None) -> None:
   if tokenizer is None:
     raise ValueError(f"No tokenizer found for {args.model_name!r}.")
   config = rollout_worker.RolloutConfig(
-      weight_sync_mode=weight_sync.WeightSyncMode.FALLBACK,
+      weight_sync_mode=weight_sync.WeightSyncMode.IN_MEMORY,
       max_tokens_to_generate=128,
       temperature=0.0,
       # Serve the model's full context, as vLLM does when `max_model_len` is

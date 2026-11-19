@@ -434,9 +434,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
-      "--max_seq_token_per_tpu",
+      "--max_seq_tokens_per_device",
       type=int,
-      default=0,
+      default=None,
       help=(
           "Token budget per packed row, as configured on the orchestrator's"
           " SequencePackedBatchAssembler. MaxText backend only: it becomes"
@@ -446,6 +446,53 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " orchestrator owns packing there. 0 keeps max_target_length at"
           " max_prompt_length + max_response_length."
       ),
+  )
+  # TODO(b/583675740): Deprecate --max_seq_token_per_tpu in favor of
+  # --max_seq_tokens_per_device.
+  parser.add_argument(
+      "--max_seq_token_per_tpu",
+      type=int,
+      default=None,
+      help=(
+          "Deprecated alias for --max_seq_tokens_per_device; kept for legacy"
+          " launcher scripts."
+      ),
+  )
+  parser.add_argument(
+      "--maxtext_skip_step_on_spikes",
+      type=_str2bool,
+      default=False,
+      nargs="?",
+      const=True,
+      help=(
+          "If True, skips the training step in MaxText when a loss/grad spike"
+          " is detected."
+      ),
+  )
+  # TODO(niting): Wire --skip_step_on_nan into PeftTrainer (tunix backend).
+  parser.add_argument(
+      "--skip_step_on_nan",
+      dest="skip_step_on_nan",
+      type=_str2bool,
+      default=None,
+      nargs="?",
+      const=True,
+      help=(
+          "If True, skips the training step when the gradient norm is NaN or"
+          " Inf. MaxText backend only."
+      ),
+  )
+  parser.add_argument(
+      "--maxtext_skip_step_interval",
+      type=int,
+      default=128,
+      help="Rolling window interval for MaxText skip_step_on_spikes.",
+  )
+  parser.add_argument(
+      "--maxtext_skip_step_scaling_factor",
+      type=float,
+      default=6.0,
+      help="Scaling factor for MaxText skip_step_on_spikes.",
   )
   parser.add_argument(
       "--prefuse_moe_weights",
@@ -550,7 +597,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default=os.getenv("RUN_ID", ""),
       help="Run identifier shared between orchestrator and trainer workers.",
   )
-  return parser.parse_args(argv)
+  args = parser.parse_args(argv)
+  try:
+    budget = common_configs.resolve_seq_tokens_budget(
+        args.max_seq_tokens_per_device,
+        args.max_seq_token_per_tpu,
+    )
+  except ValueError as e:
+    parser.error(str(e))
+  resolved_budget = 0 if budget is None else budget
+  args.max_seq_tokens_per_device = resolved_budget
+  args.max_seq_token_per_tpu = resolved_budget
+  return args
 
 
 def _nested_safetensors_dirs(model_dir: Path) -> list[str]:
@@ -621,13 +679,18 @@ def _ensure_model_dir_for_trainer(model_dir: str, model_id: str) -> str:
 
 
 def _create_mesh(args) -> Mesh:
+  """Builds the trainer's `(fsdp, tp)` mesh over all visible devices."""
   shape = (args.mesh_fsdp, args.mesh_tp)
   if args.mesh_fsdp * args.mesh_tp != jax.device_count():
     raise ValueError(
         "Trainer mesh dimensions must multiply to visible JAX device count. "
         f"Got shape={shape}, devices={jax.device_count()}."
     )
-  devices = mesh_utils.create_device_mesh(shape, jax.devices())
+  # Same as `launch/nodes/node_utils.create_mesh`: shapes such as (8, 8) on a
+  # 4x4x4 slice need a split physical axis.
+  devices = mesh_utils.create_device_mesh(
+      shape, jax.devices(), allow_split_physical_axes=True
+  )
   return Mesh(devices, axis_names=("fsdp", "tp"))
 
 
@@ -817,11 +880,15 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
       rollout_mesh_tp=args.rollout_mesh_tp,
       prefuse_moe_weights=args.prefuse_moe_weights,
       use_weight_converter=args.use_weight_converter,
-      max_seq_token_per_tpu=args.max_seq_token_per_tpu,
+      max_seq_token_per_tpu=args.max_seq_tokens_per_device,
       weight_dtype=args.model_load_dtype,
       attention=args.maxtext_attention,
       device_host_concurrent_gb=int(d2h_gb) if d2h_gb else None,
       extra_flags=extra_flags,
+      skip_step_on_spikes=args.maxtext_skip_step_on_spikes,
+      skip_step_on_nan=args.skip_step_on_nan,
+      skip_step_interval=args.maxtext_skip_step_interval,
+      skip_step_scaling_factor=args.maxtext_skip_step_scaling_factor,
   )
   logging.info("Creating MaxText device mesh...")
   mesh = maxtext_utils.create_maxtext_mesh(maxtext_config)
@@ -863,6 +930,10 @@ def _gradient_accumulation_steps(args: argparse.Namespace) -> int:
 
 def _create_tunix_trainer_factory(args) -> tuple[Any, Mesh]:
   """Creates the trainer factory function and mesh for Tunix's PeftTrainer."""
+  if args.skip_step_on_nan is not None:
+    raise ValueError(
+        "--skip_step_on_nan is only supported with --trainer_backend=maxtext."
+    )
   logging.info("Trainer backend: Tunix's PeftTrainer.")
   grad_accumulation_steps = _gradient_accumulation_steps(args)
   update_trajectories = args.mini_batch_size * args.num_generations
@@ -884,23 +955,23 @@ def _create_tunix_trainer_factory(args) -> tuple[Any, Mesh]:
       data_sharding_axis=("fsdp",),
       checkpointing_options=checkpointing_options,
       checkpoint_root_directory=_checkpoint_root_directory(args),
-      # No max_seq_token_per_tpu here. Under the orchestrator the trainer never
-      # packs: the SequencePackedBatchAssembler does, and the weighting that
-      # packing needs rides in on the payload (`_fwd_bwd_step` accumulates with
-      # `denom=aux.primary_loss.denominator`). The only thing the field would
-      # change on this path is `_is_single_microstep()`, and the orchestrator
-      # drives `fwd_bwd` + `update` rather than the fused step it gates.
-      # The orchestrator owns resume: it calls restore_checkpoint() explicitly.
-      # Orchestrator needs to realign its step/policy_version from the returned
-      # metadata.
+      # No max_seq_tokens_per_device here. Under the orchestrator the trainer
+      # never packs: the SequencePackedBatchAssembler does, and the weighting
+      # that packing needs rides in on the payload (`_fwd_bwd_step` accumulates
+      # with `denom=aux.primary_loss.denominator`). The only thing the field
+      # would change on this path is `_is_single_microstep()`, and the
+      # orchestrator drives `fwd_bwd` + `update` rather than the fused step it
+      # gates. The orchestrator owns resume: it calls restore_checkpoint()
+      # explicitly. Orchestrator needs to realign its step/policy_version from
+      # the returned metadata.
       resume_from_checkpoint_on_init=False,
   )
   if common_configs.is_sequence_packing_enabled(args):
     logging.info(
         "Trainer gradient accumulation is dynamic via sequence packing "
-        "(max_seq_token_per_tpu=%d, mini_batch_size=%d prompt groups, "
+        "(max_seq_tokens_per_device=%d, mini_batch_size=%d prompt groups, "
         "num_generations=%d, update_trajectories=%d).",
-        args.max_seq_token_per_tpu,
+        args.max_seq_tokens_per_device,
         args.mini_batch_size,
         args.num_generations,
         update_trajectories,

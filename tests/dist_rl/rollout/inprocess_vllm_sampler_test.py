@@ -53,7 +53,7 @@ class InprocessVllmSamplerTest(absltest.TestCase):
 
     self.mock_tokenizer = mock.MagicMock()
     self.config = configs.RolloutConfig(
-        weight_sync_mode=weight_sync.WeightSyncMode.FALLBACK,
+        weight_sync_mode=weight_sync.WeightSyncMode.IN_MEMORY,
         tensor_parallel_size=1,
         data_parallel_size=1,
         temperature=0.7,
@@ -675,7 +675,7 @@ class RoutedExpertsTest(absltest.TestCase):
         server_id="rollout",
         tokenizer=mock.MagicMock(),
         config=configs.RolloutConfig(
-            weight_sync_mode=weight_sync.WeightSyncMode.FALLBACK,
+            weight_sync_mode=weight_sync.WeightSyncMode.IN_MEMORY,
             return_routed_experts=engine_captures,
         ),
     )
@@ -926,6 +926,36 @@ class RoutedExpertsTest(absltest.TestCase):
     inner_sampler.pause.assert_called_once_with(mode="keep", clear_cache=False)
     asyncio.run(sampler.abort_weight_sync(sync_req))
     inner_sampler.resume.assert_called_once()
+
+  def test_routed_experts_shape_delegation_and_none_paths(self):
+    inner_sampler = mock.MagicMock()
+    inner_sampler.routed_experts_shape.return_value = (61, 8)
+    dense_sampler = inprocess_vllm_sampler.InprocessVllmSampler(
+        server_id="dense_inproc",
+        tokenizer=mock.MagicMock(),
+        config=configs.RolloutConfig(
+            weight_sync_mode=weight_sync.WeightSyncMode.NONE,
+            return_routed_experts=False,
+        ),
+    )
+    dense_sampler.vllm_sampler = inner_sampler
+    self.assertIsNone(dense_sampler.routed_experts_shape())
+    inner_sampler.routed_experts_shape.assert_not_called()
+
+    moe_sampler = inprocess_vllm_sampler.InprocessVllmSampler(
+        server_id="moe_inproc",
+        tokenizer=mock.MagicMock(),
+        config=configs.RolloutConfig(
+            weight_sync_mode=weight_sync.WeightSyncMode.NONE,
+            return_routed_experts=True,
+        ),
+    )
+    # Before initialize(), vllm_sampler is None -> None.
+    self.assertIsNone(moe_sampler.routed_experts_shape())
+
+    moe_sampler.vllm_sampler = inner_sampler
+    self.assertEqual(moe_sampler.routed_experts_shape(), (61, 8))
+    inner_sampler.routed_experts_shape.assert_called_once_with()
 
 
 if __name__ == "__main__":

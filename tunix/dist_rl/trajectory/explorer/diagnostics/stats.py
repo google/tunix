@@ -31,7 +31,7 @@ from collections.abc import Iterable, Mapping, Sequence
 import dataclasses
 import math
 import types
-from typing import NamedTuple, Protocol, TypedDict, runtime_checkable
+from typing import NamedTuple, TypedDict
 
 import pandas as pd
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
@@ -63,6 +63,15 @@ class TokenCountsJson(TypedDict):
   total: int | None
 
 
+class RewardSignCountsJson(TypedDict):
+  """JSON form of `RewardSignCounts`, plus the derived `total`."""
+
+  positive: int
+  non_positive: int
+  unscored: int
+  total: int
+
+
 class TrajectoryStatsJson(TypedDict):
   """JSON form of `TrajectoryStats`."""
 
@@ -86,19 +95,13 @@ class RunStatsJson(TypedDict):
   num_with_tokens: int
   status_counts: dict[str, int]
   num_with_status: int
+  # Keyed in the order of `status_counts`.
+  reward_signs_by_status: dict[str, RewardSignCountsJson]
   mean_reward: float | None
   num_with_reward: int
   tool_counts: dict[str, int]
   # Each active schema diagnostics' `summarize()` result, by `NAMESPACE`.
   schema_stats: dict[str, dict[str, schema_diagnostics.JsonValue]]
-
-
-@runtime_checkable
-class _ReportsOutcome(Protocol):
-  """A trajectory whose schema declares a status and a total reward."""
-
-  status: str | None
-  total_reward: float | None
 
 
 class StepCounts(NamedTuple):
@@ -278,6 +281,37 @@ def _sum_reported(values: Iterable[int | None]) -> int | None:
   return sum(reported) if reported else None
 
 
+class RewardSignCounts(NamedTuple):
+  """How many trajectories scored above 0, at most 0, or not at all.
+
+  The counts state the sign of `total_reward` and nothing more: whether a
+  positive reward means a solved task depends on the reward function.
+
+  Attributes:
+    positive: Number of trajectories whose `total_reward` is above 0.
+    non_positive: Number of trajectories whose `total_reward` is 0 or less.
+    unscored: Number of trajectories that report no `total_reward`.
+  """
+
+  positive: int = 0
+  non_positive: int = 0
+  unscored: int = 0
+
+  @property
+  def total(self) -> int:
+    """Returns the number of trajectories counted."""
+    return sum(self)
+
+  def to_json_dict(self) -> RewardSignCountsJson:
+    """Returns the counts as a plain JSON-serializable dict."""
+    return RewardSignCountsJson(
+        positive=self.positive,
+        non_positive=self.non_positive,
+        unscored=self.unscored,
+        total=self.total,
+    )
+
+
 @dataclasses.dataclass(frozen=True)
 class TrajectoryStats:
   """Derived summary statistics of a single trajectory.
@@ -285,9 +319,8 @@ class TrajectoryStats:
   Only the root trajectory is summarized; embedded `subagent_trajectories` are
   not traversed (call `from_trajectory` on each subagent for its figures).
 
-  `status` and `total_reward` are read from trajectories whose schema declares
-  them and are None for trajectories whose schema does not (values packed in
-  `extra` are not read).
+  `status` and `total_reward` are read directly from `trajectory.status` and
+  `trajectory.total_reward` (values packed in `extra` are not read).
 
   Attributes:
     trajectory_id: The trajectory's ID, or None if unset.
@@ -336,15 +369,12 @@ class TrajectoryStats:
     """
     _check_unique_namespaces(diagnostics)
     status: str | None = None
-    total_reward: float | None = None
-
-    if isinstance(trajectory, _ReportsOutcome):
-      raw_status = trajectory.status
-      if raw_status is not None:
-        # Stripping and upper-casing merge spellings such as " succeeded" and
-        # "SUCCEEDED"; a blank status counts as unreported.
-        status = raw_status.strip().upper() or None
-      total_reward = trajectory.total_reward
+    raw_status = trajectory.status
+    if raw_status is not None:
+      # Stripping and upper-casing merge spellings such as " succeeded" and
+      # "SUCCEEDED"; a blank status counts as unreported.
+      status = raw_status.strip().upper() or None
+    total_reward = trajectory.total_reward
     if total_reward is not None and not math.isfinite(total_reward):
       total_reward = None
     tool_call_names = []
@@ -607,6 +637,30 @@ class RunStats:
       return None
     return float(self.df["total_reward"].mean())
 
+  @property
+  def reward_signs_by_status(self) -> Mapping[str, RewardSignCounts]:
+    """Returns a read-only mapping from status to its reward sign counts.
+
+    Statuses are keyed in first-seen order, like `status_counts`. Trajectories
+    that report no status are not counted.
+    """
+    reported = self.df[self.df["status"].notna()]
+    reward = reported["total_reward"]
+    # The columns follow the order of the `RewardSignCounts` fields.
+    counts = (
+        pd.DataFrame({
+            "positive": reward.gt(0),
+            "non_positive": reward.le(0),
+            "unscored": reward.isna(),
+        })
+        .groupby(reported["status"], sort=False)
+        .sum()
+    )
+    return types.MappingProxyType({
+        str(status): RewardSignCounts(*map(int, row))
+        for status, *row in counts.itertuples()
+    })
+
   def columns_of(
       self, diagnostics: schema_diagnostics.SchemaDiagnostics
   ) -> pd.DataFrame:
@@ -629,6 +683,7 @@ class RunStats:
     """Returns the totals as a plain JSON-serializable dict."""
     status_counts = collections.Counter(self.status_counts).most_common()
     tool_counts = collections.Counter(self.tool_counts).most_common()
+    reward_signs = self.reward_signs_by_status
     return RunStatsJson(
         num_trajectories=self.num_trajectories,
         num_total_trajectories=(
@@ -641,6 +696,10 @@ class RunStats:
         num_with_tokens=self.num_with_tokens,
         status_counts=dict(status_counts),
         num_with_status=self.num_with_status,
+        reward_signs_by_status={
+            status: reward_signs[status].to_json_dict()
+            for status, _ in status_counts
+        },
         mean_reward=self.mean_reward,
         num_with_reward=self.num_with_reward,
         tool_counts=dict(tool_counts),

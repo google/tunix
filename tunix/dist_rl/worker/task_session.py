@@ -610,7 +610,7 @@ class TaskSession:
       WorkerUnreachableError: If `actor` was evicted or removed from the live
         actors.
     """
-    if self._dispatched_tasks[actor].get(task.request_id) is not task:
+    if self._dispatched_tasks.get(actor, {}).get(task.request_id) is not task:
       return True
     if self._closed:
       raise RuntimeError("TaskSession is closed.")
@@ -990,6 +990,44 @@ class TaskSession:
         continue
       result, exc = item
       yield result, exc
+
+  async def abandon_in_flight(self) -> None:
+    """Abandons in-flight tasks and drains buffered responses without closing.
+
+    Unlike `close()`, leaves `_closed == False` and does not invoke
+    `_handle_worker_failure` or evict workers, so an engine reused across
+    multiple program runs starts the next run with a clean `_response_queue`.
+    Callers should stop submitting new tasks before calling `abandon_in_flight`;
+    any poller or retry task spawned during cancellation is also cancelled and
+    drained before returning.
+    """
+    while True:
+      for dispatched_map in self._dispatched_tasks.values():
+        dispatched_map.clear()
+      self._dispatched_tasks.clear()
+      self._in_flight = 0
+      for state in self._retry_states.values():
+        state.wake_waiters()
+      self._retry_states.clear()
+      tasks = [
+          t
+          for t in (*self._poll_tasks.values(), *self._retry_tasks)
+          if not t.done()
+      ]
+      if not tasks:
+        break
+      for t in tasks:
+        t.cancel()
+      await asyncio.gather(*tasks, return_exceptions=True)
+    self._poll_tasks.clear()
+    self._retry_tasks.clear()
+    old_queue = self._response_queue
+    while not old_queue.empty():
+      queued = old_queue.get_nowait()
+      if queued is not self._sentinel:
+        self._stale_responses_total += 1
+    self._response_queue = asyncio.Queue()
+    old_queue.put_nowait(self._sentinel)
 
   async def close(self) -> None:
     """Closes the session and cancels all background polling and retry tasks."""

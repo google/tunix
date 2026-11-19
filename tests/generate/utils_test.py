@@ -13,6 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import gc
+import weakref
+
 from absl.testing import parameterized
 from absl.testing import absltest
 from flax import nnx
@@ -230,6 +233,30 @@ class UtilsTest(parameterized.TestCase):
       with self.subTest(logprobs=logprobs):
         with self.assertRaises(ValueError):
           utils.get_logprobs_from_vllm_output([7], logprobs, required=True)
+
+  def test_topk_logprobs_sorts_truncates_and_pads(self):
+    # vLLM lists the sampled token first; here it is outside the top-2 at
+    # position 0, position 1 has fewer than 2 candidates, and position 2 breaks
+    # equal-logprob ties deterministically by ascending token id.
+    logprobs = [
+        {5: Logprob(-3.0), 7: Logprob(-0.1), 8: Logprob(-1.5)},
+        {6: Logprob(-0.2)},
+        {9: Logprob(-0.5), 3: Logprob(-0.5), 4: Logprob(-0.5)},
+    ]
+    ids, logps = utils.get_topk_logprobs_from_vllm_output(logprobs, 2)
+    self.assertEqual((ids.dtype, logps.dtype), (np.int32, np.float32))
+    np.testing.assert_array_equal(ids, [[7, 8], [6, 0], [3, 4]])
+    np.testing.assert_allclose(
+        logps, [[-0.1, -1.5], [-0.2, -np.inf], [-0.5, -0.5]]
+    )
+    for empty in (None, []):
+      empty_ids, empty_logps = utils.get_topk_logprobs_from_vllm_output(
+          empty, 3
+      )
+      self.assertEqual(empty_ids.shape, (0, 3))
+      self.assertEqual(empty_logps.shape, (0, 3))
+    with self.assertRaisesRegex(ValueError, "Missing vLLM logprobs"):
+      utils.get_topk_logprobs_from_vllm_output([None], 2)
 
   def test_transfer_state_with_mappings_tranpose_and_sharding_device(self):
     device_count = len(jax.devices())
@@ -3202,6 +3229,330 @@ class TokenIdsTest(parameterized.TestCase):
     self.assertFalse(base_w.is_deleted())
     self.assertFalse(shared_w.is_deleted())
     self.assertFalse(rng_arr.is_deleted())
+
+  @parameterized.parameters((None,), (1,))
+  def test_transfer_state_directly_preserves_pathways_aliased_wrapper(
+      self, chunk_size
+  ):
+    """On Pathways (no buffer pointers), resharded wrappers preserve live sources."""
+    src_w0 = jax.device_put(np.array([1.0, 2.0, 3.0], dtype=np.float32))
+    dst_init = jax.device_put(np.zeros(3, dtype=np.float32))
+    src_state = nnx.Dict(decoder=nnx.Dict(weight=nnx.Param(src_w0)))
+    dst_state = nnx.Dict(decoder=nnx.Dict(weight=nnx.Param(dst_init)))
+
+    def wrapper_reshard(source, target):
+      del target
+      return jax.tree.map(
+          lambda v: jax.device_put(np.asarray(v, dtype=np.float32)),
+          source,
+      )
+
+    with mock.patch.object(utils, "_collect_src_buffer_ids", return_value=None):
+      utils.transfer_state_directly(
+          src_state,
+          dst_state,
+          reshard_fn=wrapper_reshard,
+          delete_dst_buffers=True,
+          reshard_chunk_size=chunk_size,
+      )
+      self.assertTrue(dst_init.is_deleted())
+      out_w0 = dst_state["decoder"]["weight"][...]
+      self.assertIsNot(out_w0, src_w0)
+
+      # Second sync with unchanged source (e.g. Pre-RL eval): must not delete
+      # out_w0 because it may alias src_w0's underlying IFRT buffer.
+      utils.transfer_state_directly(
+          src_state,
+          dst_state,
+          reshard_fn=wrapper_reshard,
+          delete_dst_buffers=True,
+          reshard_chunk_size=chunk_size,
+      )
+      self.assertFalse(out_w0.is_deleted())
+      out_w0_second = dst_state["decoder"]["weight"][...]
+      self.assertNotIn(id(out_w0), utils._RESHARD_ORIGINS.origins)
+
+      # Third sync with updated source (after optimizer step): previous target
+      # no longer aliases live source and must be deleted to reclaim HBM.
+      src_w1 = jax.device_put(np.array([4.0, 5.0, 6.0], dtype=np.float32))
+      src_state_updated = nnx.Dict(decoder=nnx.Dict(weight=nnx.Param(src_w1)))
+      utils.transfer_state_directly(
+          src_state_updated,
+          dst_state,
+          reshard_fn=wrapper_reshard,
+          delete_dst_buffers=True,
+          reshard_chunk_size=chunk_size,
+      )
+      self.assertTrue(out_w0_second.is_deleted())
+      self.assertNotIn(id(out_w0_second), utils._RESHARD_ORIGINS.origins)
+      np.testing.assert_array_equal(
+          dst_state["decoder"]["weight"][...], [4.0, 5.0, 6.0]
+      )
+
+  def test_delete_state_buffers_and_chained_transfers_on_pathways(self):
+    """Covers delete_state_buffers, chained transfers, shared chunks, and GC."""
+    src_w0 = jax.device_put(np.array([1.0, 2.0, 3.0], dtype=np.float32))
+    mid_init = jax.device_put(np.zeros(3, dtype=np.float32))
+    dst_init = jax.device_put(np.zeros(3, dtype=np.float32))
+    src_state = nnx.Dict(decoder=nnx.Dict(weight=nnx.Param(src_w0)))
+    mid_state = nnx.Dict(decoder=nnx.Dict(weight=nnx.Param(mid_init)))
+    dst_state = nnx.Dict(decoder=nnx.Dict(weight=nnx.Param(dst_init)))
+
+    def wrapper_reshard(source, target):
+      del target
+      return jax.tree.map(
+          lambda v: jax.device_put(np.asarray(v, dtype=np.float32)),
+          source,
+      )
+
+    with mock.patch.object(utils, "_collect_src_buffer_ids", return_value=None):
+      # Multi-hop chain: src -> mid -> dst.
+      utils.transfer_state_directly(
+          src_state,
+          mid_state,
+          reshard_fn=wrapper_reshard,
+          delete_dst_buffers=True,
+      )
+      utils.transfer_state_directly(
+          mid_state,
+          dst_state,
+          reshard_fn=wrapper_reshard,
+          delete_dst_buffers=True,
+      )
+      dst_w = dst_state["decoder"]["weight"][...]
+      mid_w = mid_state["decoder"]["weight"][...]
+
+      # Both src_state and mid_state share dst_w's origin, so
+      # delete_state_buffers protects dst_w against either source.
+      dst_dict = {"decoder": {"weight": dst_w}}
+      utils.delete_state_buffers(
+          dst_dict, src_state={"decoder": {"weight": src_w0}}
+      )
+      self.assertFalse(dst_w.is_deleted())
+      utils.delete_state_buffers(
+          dst_dict, src_state={"decoder": {"weight": mid_w}}
+      )
+      self.assertFalse(dst_w.is_deleted())
+
+      # Mapped delete_state_buffers (used by vllm_sampler.release_for_training)
+      # also protects aliased target buffers when src_state matches origin.
+      mapped_src = MockState({"layer.0.weight": MockParam(src_w0)})
+      mapped_dst = MockState({"layer.0.weight": MockParam(dst_w)})
+      utils.delete_state_buffers(
+          mapped_dst,
+          src_state=mapped_src,
+          key_mappings={"layer.0.weight": ("layer.0.weight", None)},
+      )
+      self.assertFalse(dst_w.is_deleted())
+
+      # Once source changes, delete_state_buffers frees dst_w.
+      new_src = {
+          "decoder": {
+              "weight": jax.device_put(
+                  np.array([9.0, 9.0, 9.0], dtype=np.float32)
+              )
+          }
+      }
+      utils.delete_state_buffers(dst_dict, src_state=new_src)
+      self.assertTrue(dst_w.is_deleted())
+      self.assertFalse(mid_w.is_deleted())
+
+      # Dropping a resharded target without delete_dst_buffers prunes its
+      # weakref-bound origin entry automatically on GC.
+      ephemeral_dst = nnx.Dict(
+          decoder=nnx.Dict(
+              weight=nnx.Param(jax.device_put(np.zeros(3, dtype=np.float32)))
+          )
+      )
+      utils.transfer_state_directly(
+          src_state,
+          ephemeral_dst,
+          reshard_fn=wrapper_reshard,
+          delete_dst_buffers=False,
+      )
+      ephemeral_id = id(ephemeral_dst["decoder"]["weight"][...])
+      self.assertIn(ephemeral_id, utils._RESHARD_ORIGINS.origins)
+      del ephemeral_dst
+      gc.collect()
+      self.assertNotIn(ephemeral_id, utils._RESHARD_ORIGINS.origins)
+
+  def test_chunked_reshard_preserves_shared_target_across_chunks_on_pathways(
+      self,
+  ):
+    """Shared target arrays keep their origin until all chunks finish."""
+    src_shared = jax.device_put(np.array([1.0, 2.0], dtype=np.float32))
+    src_state = nnx.Dict(
+        a=nnx.Param(src_shared),
+        b=nnx.Param(src_shared),
+    )
+    dst_init = jax.device_put(np.zeros(2, dtype=np.float32))
+    dst_state = nnx.Dict(
+        a=nnx.Param(dst_init),
+        b=nnx.Param(dst_init),
+    )
+
+    def wrapper_reshard(source, target):
+      del target
+      return jax.tree.map(
+          lambda v: jax.device_put(np.asarray(v, dtype=np.float32)),
+          source,
+      )
+
+    with mock.patch.object(utils, "_collect_src_buffer_ids", return_value=None):
+      # Seed a shared resharded wrapper across both target leaves.
+      utils.transfer_state_directly(
+          src_state,
+          dst_state,
+          reshard_fn=wrapper_reshard,
+          delete_dst_buffers=False,
+      )
+      shared_tgt = dst_state["a"][...]
+      dst_state["b"][...] = shared_tgt
+
+      # Chunk size 1 processes 'a' in chunk 0 and 'b' in chunk 1; pruning must
+      # be deferred so chunk 1 still sees shared_tgt's recorded origin.
+      utils.transfer_state_directly(
+          src_state,
+          dst_state,
+          reshard_fn=wrapper_reshard,
+          delete_dst_buffers=True,
+          reshard_chunk_size=1,
+      )
+      self.assertFalse(shared_tgt.is_deleted())
+      self.assertNotIn(id(shared_tgt), utils._RESHARD_ORIGINS.origins)
+
+  @parameterized.parameters((None,), (1,))
+  def test_transfer_state_with_mappings_preserves_pathways_aliased_wrapper(
+      self, chunk_size
+  ):
+    """Mapped sync preserves resharded targets when source is unchanged."""
+    src_w0 = jax.device_put(np.ones((2, 2), dtype=np.float32) * 3.0)
+    dst_init = jax.device_put(np.zeros((2, 2), dtype=np.float32))
+    src0 = MockState({"layer.0.weight": MockParam(src_w0)})
+    dst = MockState({"layer.0.weight": MockParam(dst_init)})
+    mappings = {"layer.0.weight": ("layer.0.weight", None)}
+
+    def wrapper_reshard(source, target):
+      del target
+      return jax.tree.map(
+          lambda v: jax.device_put(np.asarray(v, dtype=np.float32)),
+          source,
+      )
+
+    with mock.patch.object(utils, "_collect_src_buffer_ids", return_value=None):
+      res1 = utils.transfer_state_with_mappings(
+          src0,
+          dst,
+          mappings,
+          reshard_fn=wrapper_reshard,
+          delete_dst_buffers=True,
+          reshard_chunk_size=chunk_size,
+      )
+      self.assertTrue(dst_init.is_deleted())
+      out_w0 = res1.params["layer.0.weight"].value
+
+      res2 = utils.transfer_state_with_mappings(
+          src0,
+          res1,
+          mappings,
+          reshard_fn=wrapper_reshard,
+          delete_dst_buffers=True,
+          reshard_chunk_size=chunk_size,
+      )
+      self.assertFalse(out_w0.is_deleted())
+      out_w0_second = res2.params["layer.0.weight"].value
+
+      src_w1 = jax.device_put(np.ones((2, 2), dtype=np.float32) * 7.0)
+      src1 = MockState({"layer.0.weight": MockParam(src_w1)})
+      res3 = utils.transfer_state_with_mappings(
+          src1,
+          res2,
+          mappings,
+          reshard_fn=wrapper_reshard,
+          delete_dst_buffers=True,
+          reshard_chunk_size=chunk_size,
+      )
+      self.assertTrue(out_w0_second.is_deleted())
+      np.testing.assert_allclose(res3.params["layer.0.weight"].value, 7.0)
+
+  def test_transfer_state_directly_deletes_distinct_pjrt_buffers_when_unchanged(
+      self,
+  ):
+    """On PjRt (where unsafe_buffer_pointer works), distinct buffers are freed."""
+    src_w0 = jax.device_put(np.array([1.0, 2.0, 3.0], dtype=np.float32))
+    dst_init = jax.device_put(np.zeros(3, dtype=np.float32))
+    src_state = nnx.Dict(decoder=nnx.Dict(weight=nnx.Param(src_w0)))
+    dst_state = nnx.Dict(decoder=nnx.Dict(weight=nnx.Param(dst_init)))
+
+    def fresh_copy_reshard(source, target):
+      del target
+      # Force a genuinely distinct physical allocation (not a zero-copy NumPy
+      # buffer view, which JAX CPU's device_put can alias directly).
+      return jax.tree.map(lambda v: v + jnp.zeros_like(v), source)
+
+    utils.transfer_state_directly(
+        src_state,
+        dst_state,
+        reshard_fn=fresh_copy_reshard,
+        delete_dst_buffers=True,
+    )
+    out_w0 = dst_state["decoder"]["weight"][...]
+    src_ptrs = {
+        s.data.unsafe_buffer_pointer() for s in src_w0.addressable_shards
+    }
+    out_ptrs = {
+        s.data.unsafe_buffer_pointer() for s in out_w0.addressable_shards
+    }
+    self.assertTrue(src_ptrs.isdisjoint(out_ptrs))
+    # On PjRt, out_w0 has a distinct physical buffer pointer from src_w0, so a
+    # second transfer should still delete out_w0 to reclaim HBM immediately.
+    utils.transfer_state_directly(
+        src_state,
+        dst_state,
+        reshard_fn=fresh_copy_reshard,
+        delete_dst_buffers=True,
+    )
+    self.assertTrue(out_w0.is_deleted())
+    self.assertFalse(src_w0.is_deleted())
+
+  def test_reshard_origin_tracker_reentrant_lock_and_dead_weakref_pruning(self):
+    """Tracker handles same-thread finalizer re-entry and prunes stale refs."""
+    tracker = utils._ReshardOriginTracker()
+    src = jax.device_put(np.array([1.0, 2.0], dtype=np.float32))
+    tgt = jax.device_put(np.array([3.0, 4.0], dtype=np.float32))
+    tracker.record({("w",): src}, {("w",): tgt})
+    self.assertIn(id(tgt), tracker.origins)
+
+    # Holding tracker.lock while a weakref finalizer fires on the same thread
+    # must not deadlock (uses threading.RLock).
+    tgt_id = id(tgt)
+    with tracker.lock:
+      del tgt
+      gc.collect()
+    self.assertNotIn(tgt_id, tracker.origins)
+
+    # Dead origin weakref and dead target weakref entries are pruned on lookup.
+    ephemeral_src = jax.device_put(np.array([5.0, 6.0], dtype=np.float32))
+    live_tgt = jax.device_put(np.array([7.0, 8.0], dtype=np.float32))
+    tracker.record({("w",): ephemeral_src}, {("w",): live_tgt})
+    del ephemeral_src
+    gc.collect()
+    with tracker.lock:
+      self.assertIsNone(tracker._live_origin_locked(live_tgt))
+    self.assertNotIn(id(live_tgt), tracker.origins)
+
+    # Simulate an unfinalized dead target weakref colliding with a reused id.
+    class _Dummy:
+      pass
+
+    stale_obj = _Dummy()
+    stale_ref = weakref.ref(stale_obj)
+    del stale_obj
+    gc.collect()
+    tracker.origins[id(live_tgt)] = (stale_ref, weakref.ref(src))
+    with tracker.lock:
+      self.assertIsNone(tracker._live_origin_locked(live_tgt))
+    self.assertNotIn(id(live_tgt), tracker.origins)
 
   def test_apply_transpose_skips_lora_keys(self):
     val = jnp.arange(6, dtype=jnp.float32).reshape(2, 3)

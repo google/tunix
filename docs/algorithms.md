@@ -9,19 +9,25 @@ further below.
 
 * **Supervised Fine-Tuning (SFT) & Preference**
 
-  * **[PEFT](performance.md#peft-with-lora)** (Parameter-Efficient Fine-Tuning)
+  * **Full-Weight SFT** (`PeftTrainer`) and **Diffusion LLM SFT** (`tunix.sft.diffusion`)
+  * **[PEFT](performance.md#peft-with-lora)** (Parameter-Efficient Fine-Tuning with LoRA / QLoRA)
+  * **[DPO](https://arxiv.org/abs/2305.18290)** (Direct Preference Optimization, `DPOTrainer`)
+  * **[ORPO](https://arxiv.org/abs/2403.07691)** (Odds Ratio Preference Optimization, `ORPOTrainer` with `ORPOTrainingConfig(algorithm="orpo", ...)`)
 
-  * **[DPO](https://arxiv.org/abs/2305.18290)** (Direct Preference Optimization)
-      * **[ORPO](https://arxiv.org/abs/2403.07691)** (Odds ratio Preference Optimization)
+* **Knowledge Distillation** (`DistillationTrainer` in `tunix.distillation`)
+
+  * **Logit Distillation**: `LogitStrategy`
+  * **Feature Distillation**: `FeatureProjectionStrategy`, `FeaturePoolingStrategy`
+  * **Attention Distillation**: `AttentionTransferStrategy`, `AttentionProjectionStrategy`
 
 * **Reinforcement Learning (RL)**
 
-  * **[PPO](https://arxiv.org/abs/1707.06347)** (Proximal Policy Optimization)
-  * **[GRPO](https://arxiv.org/abs/2402.03300)** (Group Relative Policy Optimization)
-      * **[GSPO-Token](https://arxiv.org/abs/2507.18071)** (Token-level Group Sequence Policy Optimization)
-      * **[DAPO](https://arxiv.org/abs/2503.14476)** (Direct Alignment via Preference Optimization)
-      * **[Dr.GRPO](https://arxiv.org/abs/2503.14476)** (Distributionally Robust GRPO)
-
+  * **[PPO](https://arxiv.org/abs/1707.06347)** (Proximal Policy Optimization, `PPOLearner` / `PPOConfig`)
+  * **[GRPO](https://arxiv.org/abs/2402.03300)** (Group Relative Policy Optimization, `GRPOLearner` / `GRPOConfig`)
+  * **[GSPO-Token](https://arxiv.org/abs/2507.18071)** (Token-level Group Sequence Policy Optimization, configured via `GRPOConfig(loss_algo="gspo-token")`)
+  * **[DAPO](https://arxiv.org/abs/2503.14476)** (Decoupled Clip and Dynamic sAmpling Policy Optimization, `DAPOLearner` / `DAPOConfig`)
+  * **[Dr.GRPO](https://arxiv.org/abs/2503.20783)** (Dr. GRPO: GRPO Done Right, `DrGRPOLearner` / `DrGRPOConfig`)
+  * **[Agentic RL](agentic_rl.md)** (`AgenticGRPOLearner` / `AgenticRLLearner` for multi-turn tool-using and asynchronous RL rollouts)
 
 ## Add a New RL Algorithm
 
@@ -33,8 +39,6 @@ The system uses a **parallel inheritance** pattern: extending a Configuration
 often requires extending a Learner to consume it.
 
 ### Class Hierarchy & Interaction Diagram
-
-<!-- TODO(b/475597805): Add better formatted diagram. -->
 
 ```text
        CONFIGURATION                            LEARNER (The Engine)
@@ -119,19 +123,43 @@ without changing the Learner code.
 it with `@register_policy_loss_fn`.
 
 ```python
-from tunix.registry import register_policy_loss_fn
+from flax import nnx
+import jax.numpy as jnp
+from tunix.rl import common
+from tunix.rl.function_registry import register_policy_loss_fn
+from tunix.sft import utils as sft_utils
+
 
 @register_policy_loss_fn("my_custom_loss")
-def compute_my_custom_loss(log_probs, advantages, **kwargs):
-    """
-    Args:
-        log_probs: Tensor of log probabilities.
-        advantages: Tensor of calculated advantages.
-    Returns:
-        Scalar loss tensor.
-    """
-    return -torch.mean(log_probs * advantages)
+def compute_my_custom_loss(
+    model: nnx.Module,
+    train_example,
+    algo_config,
+    pad_id: int,
+    eos_id: int,
+    **kwargs,
+) -> sft_utils.LossOutput:
+    """Computes a custom policy gradient loss for Tunix RL learners."""
+    graphdef, state = nnx.split(model)
+    per_token_logps, _ = common.compute_per_token_logps(
+        graphdef,
+        state,
+        prompt_tokens=train_example.prompt_ids,
+        completion_tokens=train_example.completion_ids,
+        pad_id=pad_id,
+        eos_id=eos_id,
+        stop_gradient=False,
+        compute_logps_chunk_size=kwargs.get("compute_logps_chunk_size", 0),
+    )
+    mask = jnp.astype(train_example.completion_mask, jnp.float32)
+    advantages = train_example.advantages
+    if advantages.ndim == 1:
+        advantages = advantages[:, None]
 
+    token_loss = -(per_token_logps * advantages) * mask
+    denom = jnp.maximum(jnp.sum(mask), 1.0)
+    primary_loss = sft_utils.WeightedMetric(jnp.sum(token_loss), denom)
+    return sft_utils.LossOutput(primary_loss=primary_loss, aux_metrics={})
 ```
 
 **Usage:** Once registered, simply reference it in your config: `policy_loss_fn:
@@ -153,33 +181,55 @@ Manager to compute rewards from model output and log the results.
 **When to use what?**
 
 *   **Simple Case:** Just add a new function to the `reward_fns` list.
-*   **Complex Case:** Subclass `AbstractRewardManager` if you need custom
+*   **Complex Case:** Subclass `SequenceRewardManager` (or
+    `AbstractRewardManager` for a completely custom contract) if you need custom
     aggregation (e.g., weighted sums) or specialized logging strategies.
 
 **Example: Custom Manager**
 
-Below is an example of a manager that performs custom aggregation and injects
-specific intermediate logs.
+Below is an example of a manager that subclasses `SequenceRewardManager`,
+performs custom weighted aggregation over a 2D `(num_prompts, num_reward_fns)`
+`np.ndarray`, and registers itself with `@register_reward_manager`.
 
 ```python
-class MyCustomRewardManager(AbstractRewardManager):
-    def __call__(self, prompts: List[str], completions: List[str], **kwargs) -> Dict[str, Any]:
-        """
-        Orchestrates reward calculation.
-        """
-        # 1. Run all reward functions
-        raw_scores = [fn(prompts, completions) for fn in self.reward_fns]
+from typing import Any, Dict, List
+import numpy as np
+from tunix.rl import function_registry
+from tunix.rl import reward_manager
 
-        # 2. Custom Aggregation (e.g., Multi-objective weighted sum)
-        final_rewards = self.aggregate_logic(raw_scores)
 
-        # 3. Calculate log metrics
-        log_metrics = self._prepare_log_metrics(prompts, completions, raw_scores, final_rewards)
+@function_registry.register_reward_manager("my_custom_manager")
+class MyCustomRewardManager(reward_manager.SequenceRewardManager):
+    def __call__(
+        self,
+        prompts: List[str],
+        completions: List[str],
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """Orchestrates reward calculation with custom weighted aggregation."""
+        num_prompts = len(prompts)
+        num_fns = len(self.reward_fns)
+        rewards = np.zeros((num_prompts, num_fns), dtype=np.float64)
+        for i, fn in enumerate(self.reward_fns):
+            rewards[:, i] = np.asarray(
+                fn(prompts=prompts, completions=completions, **kwargs),
+                dtype=np.float64,
+            )
 
-        # 4. Return format required by Learner
+        # Custom aggregation (e.g., equal or weighted sum across reward functions)
+        weights = np.ones(num_fns, dtype=np.float64)
+        sum_rewards = rewards @ weights
+
+        # _prepare_log_metrics expects 2D `rewards` and keyword-only `sum_rewards`
+        log_metrics = self._prepare_log_metrics(
+            prompts,
+            completions,
+            rewards,
+            sum_rewards=sum_rewards,
+        )
         return {
-            "rewards": final_rewards,
-            "log_metrics": log_metrics
+            "rewards": sum_rewards,
+            "log_metrics": log_metrics,
         }
 
     def _prepare_log_metrics(
@@ -187,23 +237,21 @@ class MyCustomRewardManager(AbstractRewardManager):
         prompts: List[str],
         completions: List[str],
         rewards: np.ndarray,
+        *,
         sum_rewards: np.ndarray,
+        env_rewards: np.ndarray | None = None,
     ) -> Dict[str, Any]:
-        """
-        Logs individual and summed rewards.
-        """
-        # 1. Standard Logs (prompts, completions, sum, min, max)
-        metrics_to_log = super()._prepare_log_metrics(prompts, completions, rewards, sum_rewards)
-
-        # 2. Custom Intermediate Logging
-        # User may freely add intermediate reward logging results here.
-        # Example: Logging specific components of the reward signal separately
-        if hasattr(self, "reward_fns"):
-             for i, fn in enumerate(self.reward_fns):
-                # Log the specific contribution of each function (e.g. rewards/grammar_score)
-                name = getattr(fn, "__name__", f"fn_{i}")
-                metrics_to_log[f"rewards/{name}"] = (rewards[:, i], np.mean)
-
+        """Logs standard summary rewards plus custom intermediate metrics."""
+        metrics_to_log = super()._prepare_log_metrics(
+            prompts,
+            completions,
+            rewards,
+            sum_rewards=sum_rewards,
+            env_rewards=env_rewards,
+        )
+        metrics_to_log["rewards/score_spread"] = (
+            np.ptp(rewards, axis=1) if rewards.shape[1] > 0 else np.zeros(len(prompts)),
+            np.mean,
+        )
         return metrics_to_log
-
 ```

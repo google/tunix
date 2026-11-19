@@ -21,7 +21,7 @@ import dataclasses
 import functools
 import os
 import time
-from typing import Any, Callable, Concatenate, Dict, List, ParamSpec, Tuple
+from typing import Any, Callable, Concatenate, Dict, List, ParamSpec, Tuple, TypeAlias
 
 from absl import logging
 import flax
@@ -30,11 +30,11 @@ import jax
 from jax.interpreters import pxla
 import jax.numpy as jnp
 import jax.sharding as shd
-from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 from jax.typing import DTypeLike  # pylint: disable=g-importing-member
 import numpy as np
 import optax
 from tunix.common import configs
+from tunix.common import datatypes as common_datatypes
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.train import abstract_trainer
 from tunix.dist_rl.train import jax_pytrees  # pylint: disable=unused-import
@@ -47,11 +47,13 @@ from tunix.sft import hooks
 from tunix.sft import inflight_throttler
 from tunix.sft import metrics_logger as sft_metrics_logger
 from tunix.sft import profiler
+from tunix.sft import profiler_jax
 from tunix.sft import progress_bar
 from tunix.sft import sharding_utils
 from tunix.sft import utils
 from typing_extensions import override
 
+ArrayLike: TypeAlias = common_datatypes.ArrayLike
 _ModelInputT = dict[str, ArrayLike]
 P = ParamSpec("P")
 MetricsLogger = sft_metrics_logger.MetricsLogger
@@ -447,7 +449,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
   ):
     # TODO(noghabi): Implement sequence packing for SFT and remove this check.
     if (
-        training_config.max_seq_token_per_tpu is not None
+        configs.is_sequence_packing_enabled(training_config)
         and not self.supports_sequence_packing
     ):
       raise ValueError(
@@ -463,8 +465,12 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         self.model, wrt_target, allocate_grads=not self._is_single_microstep()
     )
 
-    self.loss_fn = _default_loss_fn
-    self.eval_loss_fn = _default_loss_fn
+    self.loss_fn: Callable[
+        ..., jax.Array | Tuple[jax.Array, Any] | utils.LossOutput
+    ] = _default_loss_fn
+    self.eval_loss_fn: Callable[
+        ..., jax.Array | Tuple[jax.Array, Any] | utils.LossOutput
+    ] = _default_loss_fn
     self.gen_model_input_fn = lambda x: x
     self.checkpoint_manager = checkpoint_manager.CheckpointManager(
         root_directory=self.config.checkpoint_root_directory,
@@ -497,9 +503,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._mode: sft_metrics_logger.Mode = sft_metrics_logger.Mode.TRAIN
     self._has_aux = False
     self._pbar = None
-    self._last_fwd_bwd_loss: ArrayLike | None = None
-    self._last_eval_loss: ArrayLike = 0.0
-    self._last_update_grad_norm: ArrayLike | None = None
+    self._last_fwd_bwd_loss: jax.Array | None = None
+    self._last_eval_loss: jax.Array | float = 0.0
+    self._last_update_grad_norm: jax.Array | None = None
     self._restored_custom_metadata: Mapping[str, Any] = {}
     if self.config.get_with_default("resume_from_checkpoint_on_init", True):
       self._train_steps, self._restored_custom_metadata = (
@@ -557,6 +563,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         initial_step=self._iter_steps,
         max_step=max_step,
         profiler_options=self.config.profiler_options,
+        backend=profiler_jax.JaxProfilerBackend(),
     )
 
   def with_training_hooks(self, training_hooks: hooks.TrainingHooks):
@@ -585,13 +592,13 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       self,
       loss_fn: Callable[
           Concatenate[nnx.Module, P],
-          ArrayLike | Tuple[ArrayLike, Any] | utils.LossOutput,
+          jax.Array | Tuple[jax.Array, Any] | utils.LossOutput,
       ],
       has_aux: bool = False,
   ) -> "PeftTrainer":
     self.clear_jit_cache()
-    self.loss_fn = loss_fn  # pyrefly: ignore[bad-assignment]
-    self.eval_loss_fn = loss_fn  # pyrefly: ignore[bad-assignment]
+    self.loss_fn = loss_fn
+    self.eval_loss_fn = loss_fn
     self._has_aux = has_aux
     return self
 
@@ -618,17 +625,16 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     return self
 
   def _is_single_microstep(self) -> bool:
-    return (
-        self.config.get_with_default("gradient_accumulation_steps", 1) == 1
-        and self.config.max_seq_token_per_tpu is None
-    )
+    return self.config.get_with_default(
+        "gradient_accumulation_steps", 1
+    ) == 1 and not configs.is_sequence_packing_enabled(self.config)
 
   def _fwd_bwd_step(
       self,
       model: nnx.Module,
       grad_accumulator: GradientAccumulator,
       inputs: Any,
-  ) -> Tuple[ArrayLike, Any | None]:
+  ) -> Tuple[jax.Array, Any | None]:
     """Forward and backward passes through grad_fn.
 
     Args:
@@ -648,7 +654,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       if isinstance(out, utils.LossOutput):
         return out.primary_loss.unreduced_sum, out
       elif self._has_aux:
-        return out[0], out[1]  # pyrefly: ignore[bad-index]
+        return out[0], out[1]
       else:
         return out, None
 
@@ -680,7 +686,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       model: nnx.Module,
       optimizer: nnx.Optimizer,
       grad_accumulator: GradientAccumulator,
-  ) -> ArrayLike:
+  ) -> jax.Array:
     """Updates the model weights.
 
     Args:
@@ -710,7 +716,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       optimizer: nnx.Optimizer,
       grad_accumulator: GradientAccumulator,
       inputs: Any,
-  ) -> Tuple[ArrayLike, Any | None, ArrayLike]:
+  ) -> Tuple[jax.Array, Any | None, jax.Array]:
     """`_fwd_bwd_step` followed by `_update_step`, in one traced function.
 
     Only valid when `_is_single_microstep()`: there is exactly one micro-batch
@@ -722,44 +728,54 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
     The bodies are reused verbatim, so the fused and split paths are the same
     arithmetic in the same order; only XLA's buffer assignment differs.
+
+    Args:
+      model: The model to train.
+      optimizer: The optimizer to use.
+      grad_accumulator: The gradient accumulator to use.
+      inputs: The training input.
+
+    Returns:
+      A tuple containing the loss, auxiliary data (or None if has_aux is False),
+      and the gradient norm.
     """
     loss, aux = self._fwd_bwd_step(model, grad_accumulator, inputs)
     return loss, aux, self._update_step(model, optimizer, grad_accumulator)
 
   def _eval_step(
       self, model: nnx.Module, inputs: Any
-  ) -> ArrayLike | Tuple[ArrayLike, Any]:
+  ) -> Tuple[jax.Array, Any | None]:
     inputs = self.gen_model_input_fn(inputs)
     out = self.eval_loss_fn(model, **inputs)
     if isinstance(out, utils.LossOutput):
       return out.primary_loss.compute(), out
     elif self._has_aux:
-      loss, aux = out  # pyrefly: ignore[not-iterable]
+      loss, aux = out
       return loss, aux
     else:
-      return out, None
+      return out, None  # pyrefly: ignore[bad-return]
 
   def create_fwd_bwd_step_fn(
       self,
-  ) -> Callable[..., Tuple[ArrayLike, Any | None]]:
+  ) -> Callable[..., Tuple[jax.Array, Any | None]]:
     """Creates the forward and backward step function."""
     return self._fwd_bwd_step
 
   def create_update_step_fn(
       self,
-  ) -> Callable[..., ArrayLike]:
+  ) -> Callable[..., jax.Array]:
     """Creates the update step function."""
     return self._update_step
 
   def create_train_step_fn(
       self,
-  ) -> Callable[..., Tuple[ArrayLike, Any | None, ArrayLike]]:
+  ) -> Callable[..., Tuple[jax.Array, Any | None, jax.Array]]:
     """Creates the fused forward/backward/update step function."""
     return self._train_step
 
   def create_eval_step_fn(
       self,
-  ) -> Callable[..., ArrayLike | Tuple[ArrayLike, Any]]:
+  ) -> Callable[..., Tuple[jax.Array, Any | None]]:
     """Creates the eval step function."""
     return self._eval_step
 
@@ -1111,7 +1127,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       payload = dataclasses.replace(payload, metadata={})
     return sharding_utils.shard_input(payload, self.config.data_sharding_axis)
 
-  def _record_fwd_bwd(self, train_loss: ArrayLike, aux: Any) -> None:
+  def _record_fwd_bwd(self, train_loss: jax.Array, aux: Any) -> None:
     """Bookkeeping for one forward/backward pass, independent of how it ran."""
     self._last_fwd_bwd_loss = train_loss
     buffered_loss = (
@@ -1127,7 +1143,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     )
     self._post_process_train_step(post_process_aux)
 
-  def _record_update(self, grad_norm: ArrayLike) -> int:
+  def _record_update(self, grad_norm: jax.Array) -> int:
     """Bookkeeping for one optimizer update, independent of how it ran."""
     self._last_update_grad_norm = grad_norm
     if self._buffered_train_metrics is not None:
@@ -1682,9 +1698,8 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
           span.device_end([computation_to_track])
           span_v2.async_end([computation_to_track])
 
-        self._throttler.add_computation(
-            computation_to_track
-        )  # pyrefly: ignore[bad-argument-type]
+        assert computation_to_track is not None
+        self._throttler.add_computation(computation_to_track)
         if is_update_step_val:
           self.save_checkpoint()
           if (
@@ -1823,7 +1838,7 @@ def _default_loss_fn(
     positions: jax.Array,
     attention_mask: jax.Array,
     images: jax.Array | None = None,
-) -> utils.LossOutput | ArrayLike:
+) -> utils.LossOutput:
   """Default loss function for PEFT training."""
   # Weird kwargs workaround because not all models support `images` right now.
   kwargs = {} if images is None else {"images": images}

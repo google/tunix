@@ -14,7 +14,30 @@
 
 """The context API provides a platform-agnostic way for a process to interact with its runtime environment."""
 
-from typing import Any, Callable
+from collections.abc import Callable
+import importlib
+import os
+import sys
+from typing import Any
+
+from tunix.common import datatypes as common_datatypes
+from tunix.dist_rl.common import env_utils
+from tunix.dist_rl.common import execution_target
+
+_TARGET_ENV_DEFAULTS: dict[
+    execution_target.ExecutionTarget, tuple[tuple[str, str], ...]
+] = {
+    execution_target.JAX_TPU: (),
+    execution_target.JAX_GPU: (
+        ("JAX_PLATFORMS", "cuda,cpu"),
+        ("XLA_PYTHON_CLIENT_PREALLOCATE", "false"),
+        ("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.85"),
+    ),
+    execution_target.TORCH_TPU: (
+        ("JAX_PLATFORMS", "cpu"),
+        ("PJRT_DEVICE", "TPU"),
+    ),
+}
 
 
 class JaxContext:
@@ -80,3 +103,46 @@ class ProcessContext:
   def ipc(self) -> IpcContext:
     """Returns the IPC context for this process."""
     return IpcContext()
+
+  def prepare_env(
+      self,
+      target: execution_target.ExecutionTarget,
+      *,
+      weight_sync_mode: common_datatypes.WeightSyncMode = (
+          common_datatypes.WeightSyncMode.NONE
+      ),
+  ) -> None:
+    """Applies pre-import runtime environment defaults for `target`."""
+    if target not in _TARGET_ENV_DEFAULTS:
+      raise ValueError(
+          f"Unsupported execution target '{target}' for runtime"
+          " environment preparation."
+      )
+    for key, default in _TARGET_ENV_DEFAULTS[target]:
+      if key not in os.environ:
+        os.environ[key] = default
+    if target == execution_target.JAX_TPU and (
+        env_utils.parse_env_bool("USE_RAIDEN")
+        or weight_sync_mode == common_datatypes.WeightSyncMode.RAIDEN
+    ):
+      mod_name = "tunix.dist_rl.weight_sync.raiden_preload"
+      preload = (
+          sys.modules[mod_name]
+          if mod_name in sys.modules
+          else importlib.import_module(mod_name)
+      )
+      preload.import_raiden()
+
+  def initialize_runtime(
+      self, target: execution_target.ExecutionTarget
+  ) -> None:
+    """Initializes the runtime backend for `target`."""
+    if target not in execution_target.SUPPORTED_EXECUTION_TARGETS:
+      raise ValueError(
+          f"Unsupported execution target '{target}' for runtime"
+          " initialization."
+      )
+    if target.framework == execution_target.Framework.JAX:
+      self.jax.initialize()
+      return
+    importlib.import_module("torch")

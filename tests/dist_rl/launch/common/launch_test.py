@@ -19,7 +19,9 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import subprocess
+import sys
 from typing import Any
 
 from absl.testing import absltest
@@ -110,8 +112,8 @@ def _yaml_generator_env_vars() -> set[str]:
       ):
         env_vars.add(node.args[0].value)
       elif (
-          isinstance(node.func, ast.Name)
-          and node.func.id == "_env_bool"
+          isinstance(node.func, ast.Attribute)
+          and node.func.attr == "parse_env_bool"
           and node.args
           and isinstance(node.args[0], ast.Constant)
           and isinstance(node.args[0].value, str)
@@ -191,7 +193,7 @@ class LaunchScriptsTest(absltest.TestCase):
         ],
     )
     self.assertNotEqual(res.returncode, 0)
-    self.assertIn("cluster_config.local.inference_tpu_chips", res.stderr)
+    self.assertIn("cluster_config.local.inference_devices", res.stderr)
 
   def test_local_dry_run_includes_inference_node_when_chips_set(self):
     res = self._run_launch(
@@ -199,7 +201,7 @@ class LaunchScriptsTest(absltest.TestCase):
             "--dry-run",
             "cluster_config.target=local",
             "agentic_grpo_config.beta=0.04",
-            "cluster_config.local.inference_tpu_chips=4,5",
+            "cluster_config.local.inference_devices=4,5",
         ],
     )
     self.assertEqual(res.returncode, 0, msg=res.stderr)
@@ -318,7 +320,18 @@ class LaunchScriptsTest(absltest.TestCase):
     # The old launchers' settings the config replaced: the resolver's own
     # `WEIGHT_SYNC_MODE` export would overwrite a caller's value unseen.
     self.assertContainsSubset(
-        {"KUEUE_QUEUE", "TRAINER_EXPERT", "WEIGHT_SYNC_MODE"}, legacy
+        {
+            "INFERENCE_DEVICES",
+            "INFERENCE_TPU_CHIPS",
+            "KUEUE_QUEUE",
+            "ROLLOUT_DEVICES",
+            "ROLLOUT_TPU_CHIPS",
+            "TRAINER_DEVICES",
+            "TRAINER_EXPERT",
+            "TRAINER_TPU_CHIPS",
+            "WEIGHT_SYNC_MODE",
+        },
+        legacy,
     )
     # `launch.sh` would ignore these, silently dropping the old launchers'
     # rejection sampling or logging the trajectories they turned off.
@@ -331,6 +344,68 @@ class LaunchScriptsTest(absltest.TestCase):
             "TRAJECTORY_LOGGING",
         },
         legacy,
+    )
+    # Settings of the old mlperf recipe that only its launcher and the old
+    # example mains read: `launch.sh` would silently ignore them.
+    self.assertContainsSubset(
+        {
+            "FLOAT32_GATE_LOGITS",
+            "FLOAT32_LOGITS",
+            "INIT_TIMEOUT_S",
+            "MAX_CONCURRENCY",
+            "MAX_VERSION_SPAN",
+            "MAX_WARMPOOL_REPLICAS",
+            "ORCHESTRATOR_EXTRA_ENV",
+            "OVERLONG_FILTER",
+            "REMAT_POLICY",
+            "ROLLOUT_EXTRA_ENV",
+            "ROLLOUT_MESH_EXPERT",
+            "RPC_TIMEOUT_S",
+            "TRAINER_BASE_NUM_KV_HEADS",
+            "TRAINER_LIBTPU_INIT_ARGS",
+            "TRAINER_MAXTEXT_ATTENTION",
+            "TRAINER_MESH_CONTEXT",
+            "VLLM_ASYNC_SCHEDULING",
+            "VLLM_CONFIG_JSON",
+            "VLLM_DATA_PARALLEL_SIZE",
+            "WARMUP_STEPS_FRACTION",
+        },
+        legacy,
+    )
+    # The sandbox placement: the sandbox code reads these, but `k8s.sh` and
+    # `local.sh` set them from `kubernetes_config`, so the pods would drop a
+    # caller's value, and `local.sh` would overwrite it whenever the config
+    # sets them.
+    self.assertContainsSubset(
+        {
+            "NAMESPACE",
+            "NODE_SELECTOR_KEY",
+            "NODE_SELECTOR_VAL",
+            "SANDBOX_NAMESPACE",
+            "SANDBOX_NODE_SELECTOR_KEY",
+            "SANDBOX_NODE_SELECTOR_VAL",
+        },
+        legacy,
+    )
+    # The recipe's other variables are left alone: the processes read them (the
+    # experimental DeepSWE environment, Raiden, vLLM, W&B), or the v2 recipe
+    # and `yaml_generator.py` do. `local.sh`'s processes inherit them from the
+    # caller's environment; the GKE pods don't, so there they only arrive
+    # through the config (e.g. `cluster_config.role_env.trainer`).
+    self.assertEmpty(
+        set(legacy)
+        & {
+            "IMAGE_REWRITE_PREFIX",
+            "JOB_PREFIX",
+            "OPENHANDS_MULTI_TOOL_CALLS",
+            "OPENHANDS_SERVER_IMAGE",
+            "RAIDEN_BROADCAST_HOST_RATIO",
+            "RAIDEN_BROADCAST_PIPELINE_STAGES",
+            "TUNIX_IMAGE",
+            "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
+            "WANDB_ENTITY",
+            "WANDB_PROJECT",
+        }
     )
     # Libraries read it; the nodes set it from the config and reject another
     # value in the environment (`node_utils.apply_library_env`).
@@ -355,7 +430,7 @@ class LaunchScriptsTest(absltest.TestCase):
         "MaxText config overrides are set in the environment: M_REMAT_POLICY",
         res.stderr,
     )
-    self.assertIn("dist_training_config.maxtext_extra_flags", res.stderr)
+    self.assertIn("dist_training_config.maxtext_extra_config.", res.stderr)
     self.assertNotIn("Trainer command:", res.stdout)
     # MaxText reads an empty variable too: it would set `remat_policy` to "".
     res = self._run_launch(args, extra_env={"M_REMAT_POLICY": ""})
@@ -375,19 +450,17 @@ class LaunchScriptsTest(absltest.TestCase):
         "model_config.model_path=/ckpt/qwen3-1.7b/0/items",
         "model_config.kwargs.maxtext_model_name=qwen3-1.7b",
         "weight_sync_config.mode=raiden",
-        (
-            "dist_training_config.maxtext_extra_flags="
-            "remat_policy=custom opt_type=sgd"
-        ),
+        "dist_training_config.maxtext_extra_config.remat_policy=custom",
+        "dist_training_config.maxtext_extra_config.opt_type=sgd",
         "weight_sync_config.verify_weights=true",
     ])
     self.assertEqual(res.returncode, 0, msg=res.stderr)
     # The pods get the settings with the config arguments ...
-    self.assertRegex(
-        res.stdout,
-        r"dist_training_config\.maxtext_extra_flags=remat_policy=custom\\+"
-        r" opt_type=sgd",
-    )
+    for arg in (
+        "dist_training_config.maxtext_extra_config.remat_policy=custom",
+        "dist_training_config.maxtext_extra_config.opt_type=sgd",
+    ):
+      self.assertIn(arg, res.stdout)
     # ... and the nodes set what the libraries read from the environment
     # (`node_utils.apply_library_env`).
     for name in (
@@ -466,10 +539,9 @@ class LaunchScriptsTest(absltest.TestCase):
     self.assertIn("kubectl delete jobset testuser-orch -n default", res.stdout)
     self.assertIn("kubectl delete jobset testuser-train -n default", res.stdout)
     self.assertIn(
-        "kubectl delete leaderworkerset testuser-roll-0 -n default", res.stdout
-    )
-    self.assertIn(
-        "kubectl delete leaderworkerset testuser-roll-1 -n default", res.stdout
+        "kubectl delete leaderworkerset testuser-roll-0 testuser-roll-1 -n"
+        " default",
+        res.stdout,
     )
     self.assertIn("RAIDEN_USE_FFI=1", res.stdout)
     self.assertIn("RAIDEN_USE_FFI=0", res.stdout)
@@ -539,6 +611,60 @@ class LaunchScriptsTest(absltest.TestCase):
     self.assertEqual(res.returncode, 0, msg=res.stderr)
     self.assertIn("kubectl delete jobset testuser-orch -n default", res.stdout)
     self.assertNotIn("apiVersion:", res.stdout)
+
+  def test_k8s_rollout_batches_manifests_and_deletes(self):
+    tempdir = self.create_tempdir().full_path
+    kubectl_log = os.path.join(tempdir, "kubectl_calls.log")
+    applied_manifest = os.path.join(tempdir, "applied.yaml")
+    kubectl_bin = os.path.join(tempdir, "kubectl")
+    with open(kubectl_bin, "w") as f:
+      f.write(
+          "#!/bin/bash\n"
+          f'echo "$*" >> "{kubectl_log}"\n'
+          'if [[ "$*" == *"apply -f -"* ]]; then\n'
+          f'  cat > "{applied_manifest}"\n'
+          "fi\n"
+      )
+    os.chmod(kubectl_bin, 0o755)
+
+    res = self._run_launch(
+        [
+            "rollout",
+            "cluster_config.target=k8s",
+            "cluster_config.k8s.tunix_image=test-image",
+            "cluster_config.rollout_replicas=4",
+            "agentic_grpo_config.beta=0.0",
+        ],
+        extra_env={
+            "PATH": f"{tempdir}:{os.environ.get('PATH', '')}",
+            "ENTER_KUBE_CONTEXT": "/dev/null",
+        },
+    )
+    self.assertEqual(res.returncode, 0, msg=res.stderr)
+
+    with open(kubectl_log) as f:
+      calls = [line.strip() for line in f if line.strip()]
+    self.assertEqual(
+        calls,
+        [
+            (
+                "delete leaderworkerset testuser-roll-0 testuser-roll-1"
+                " testuser-roll-2 testuser-roll-3 -n default --ignore-not-found"
+                " --wait=true"
+            ),
+            "apply -f -",
+        ],
+    )
+
+    with open(applied_manifest) as f:
+      docs = list(yaml.safe_load_all(f.read()))
+    self.assertLen(docs, 4)
+    self.assertEqual(
+        [doc["metadata"]["name"] for doc in docs],
+        [f"testuser-roll-{i}" for i in range(4)],
+    )
+    for i, doc in enumerate(docs):
+      self.assertIn(f"DIST_RL_ROLLOUT_REPLICA={i}", yaml.safe_dump(doc))
 
   def test_k8s_rollout_compilation_cache_comes_from_the_config(self):
     args = [
@@ -695,6 +821,7 @@ class LaunchScriptsTest(absltest.TestCase):
         "cluster_config.k8s.kueue_queue_name=rl-queue",
         "cluster_config.k8s.cpu_nodepool=cpu-np",
         "cluster_config.k8s.cpu_memory=64Gi",
+        "cluster_config.k8s.head_excluded_nodepools=[cpu-np,sandbox-pool]",
     ])
     self.assertEqual(res.returncode, 0, msg=res.stderr)
     jobsets = _dry_run_jobsets(res.stdout)
@@ -737,6 +864,21 @@ class LaunchScriptsTest(absltest.TestCase):
         ' --field-selector="metadata.name!=testuser-orch"',
         orch_container["command"][2],
     )
+    # The Pathways trainer head pod, on a pw-node host, keeps out of the listed
+    # node pools.
+    train_head_pod = _pod_specs(jobsets["testuser-train"])[0]
+    self.assertEqual(
+        train_head_pod["affinity"]["nodeAffinity"][
+            "requiredDuringSchedulingIgnoredDuringExecution"
+        ]["nodeSelectorTerms"],
+        [{
+            "matchExpressions": [{
+                "key": "cloud.google.com/gke-nodepool",
+                "operator": "NotIn",
+                "values": ["cpu-np", "sandbox-pool"],
+            }]
+        }],
+    )
 
     # Unset, the settings keep the template defaults.
     res = self._run_launch(args)
@@ -754,6 +896,8 @@ class LaunchScriptsTest(absltest.TestCase):
     self.assertEqual(rollout_pod["restartPolicy"], "OnFailure")
     (orch_pod,) = _pod_specs(jobsets["testuser-orch"])
     self.assertNotIn("kubectl delete", orch_pod["containers"][0]["command"][2])
+    train_head_pod = _pod_specs(jobsets["testuser-train"])[0]
+    self.assertEqual(list(train_head_pod["affinity"]), ["podAffinity"])
 
   def test_k8s_pathways_rollout_gets_cpu_machine_and_memory_settings(self):
     args = [
@@ -893,6 +1037,66 @@ class LaunchScriptsTest(absltest.TestCase):
     self.assertNotEqual(res.returncode, 0)
     self.assertIn("OTEL_PORT", res.stderr)
 
+  def test_role_env_and_sandbox_settings_render_into_processes(self):
+    role_args = [
+        "agentic_grpo_config.beta=0.0",
+        "cluster_config.role_env.orchestrator.ORCH_FLAG=x",
+        "cluster_config.role_env.trainer.TRAIN_FLAG='a b'",
+        "cluster_config.role_env.rollout.ROLL_FLAG='0'",
+    ]
+    local_res = self._run_launch(
+        ["--dry-run", "cluster_config.target=local", *role_args]
+    )
+    self.assertEqual(local_res.returncode, 0, msg=local_res.stderr)
+    for expected in (
+        "Trainer environment: TRAIN_FLAG='a b'",
+        "Rollout environment: ROLL_FLAG=0",
+        "Orchestrator environment: ORCH_FLAG=x",
+    ):
+      self.assertIn(expected, local_res.stdout)
+    inference_res = self._run_launch([
+        "--dry-run",
+        "cluster_config.target=local",
+        "agentic_grpo_config.beta=0.04",
+        "cluster_config.local.inference_devices=4,5",
+        "cluster_config.role_env.inference.INF_FLAG=y",
+    ])
+    self.assertEqual(inference_res.returncode, 0, msg=inference_res.stderr)
+    self.assertIn("Inference environment: INF_FLAG=y", inference_res.stdout)
+
+    k8s_res = self._run_launch([
+        "start",
+        "--dry-run",
+        "cluster_config.target=k8s",
+        "cluster_config.k8s.tunix_image=test-image",
+        "cluster_config.k8s.orchestrator_id=custom-orch",
+        "kubernetes_config.namespace=swe-ns",
+        "kubernetes_config.node_selector_key=cloud.google.com/gke-nodepool",
+        "kubernetes_config.node_selector_val=swe-pool",
+        "cluster_config.k8s.rollout.jobset_yaml=jobset.mcjax.ray.yaml",
+        *role_args,
+    ])
+    self.assertEqual(k8s_res.returncode, 0, msg=k8s_res.stderr)
+    # Multi-host Ray rollouts export the role env on the head and worker hosts
+    # before starting Ray.
+    self.assertEqual(k8s_res.stdout.count(" && export ROLL_FLAG=0"), 2)
+    for expected in ("ORCH_FLAG=x ", "TRAIN_FLAG='a b' ", "ROLL_FLAG=0 "):
+      self.assertIn(f"{expected}python -m", k8s_res.stdout)
+    self.assertEqual(
+        set(
+            re.findall(
+                r"ORCHESTRATOR_ID=custom-orch NAMESPACE=swe-ns "
+                r"NODE_SELECTOR_KEY=cloud\.google\.com/gke-nodepool "
+                r"NODE_SELECTOR_VAL=swe-pool .*--process_main=(\S+)",
+                k8s_res.stdout,
+            )
+        ),
+        {
+            "tunix.dist_rl.launch.nodes.orchestrator.main",
+            "tunix.dist_rl.launch.nodes.rollout.main",
+        },
+    )
+
   def test_drivers_only_read_exported_or_known_variables(self):
     exported = set(
         re.findall(
@@ -920,6 +1124,277 @@ class LaunchScriptsTest(absltest.TestCase):
         unused, msg="Exports not read by any bash driver."
     )
 
+  def test_local_live_download_model_weights_knob(self):
+    with self.assertRaisesRegex(
+        TypeError, "cluster_config.local.download_model_weights must be a bool"
+    ):
+      resolve_config.initialize(
+          ["cluster_config.local.download_model_weights=maybe"]
+      )
+
+    tempdir = pathlib.Path(self.create_tempdir().full_path)
+    real_py = shlex.quote(sys.executable or "python3")
+    stub_py = tempdir / "stub_python.sh"
+    stub_py.write_text(
+        "#!/bin/bash\n"
+        "set -e\n"
+        'if [[ "$1" == */resolve_config.py ]]; then\n'
+        f'  exec {real_py} "$@"\n'
+        "fi\n"
+        'if [[ "$1" == "-" ]]; then\n'
+        "  script=$(cat)\n"
+        '  if [[ "$script" == *"hf_pipeline"* ]]; then\n'
+        "    exit 99\n"
+        "  fi\n"
+        "  exit 0\n"
+        "fi\n"
+        'if [[ "$*" == *"--discovery_addrs="* ]]; then\n'
+        "  exec sleep 30\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    stub_py.chmod(0o755)
+    artifact_root = tempdir / "artifacts"
+    base_args = [
+        "cluster_config.target=local",
+        f"cluster_config.artifact_root={artifact_root}",
+        "model_config.model_id=local/non_hf_tokenizer_dir",
+        "agentic_grpo_config.beta=0.0",
+        "cluster_config.local.worker_shutdown_grace_secs=0",
+        "cluster_config.local.trainer_shutdown_grace_secs=0",
+    ]
+    # Default download_model_weights=true runs pre-download even when custom
+    # wrapper mains (e.g. benchmarks/rl_efficiency) are configured.
+    wrapped_default = self._run_launch(
+        [
+            *base_args,
+            "cluster_config.trainer_main=custom.wrapper.trainer_main",
+        ],
+        extra_env={"PYTHON_BIN": str(stub_py)},
+    )
+    self.assertEqual(
+        wrapped_default.returncode,
+        99,
+        msg=wrapped_default.stdout + wrapped_default.stderr,
+    )
+
+    skipped = self._run_launch(
+        [
+            *base_args,
+            "cluster_config.local.download_model_weights=false",
+            "cluster_config.trainer_main=custom.mock.trainer_main",
+            "cluster_config.rollout_main=custom.mock.rollout_main",
+            "weight_sync_config.mode=noop",
+        ],
+        extra_env={"PYTHON_BIN": str(stub_py)},
+    )
+    self.assertEqual(skipped.returncode, 0, msg=skipped.stdout + skipped.stderr)
+    self.assertIn(
+        "Distributed RL pipeline finished successfully.", skipped.stdout
+    )
+
+  def test_local_auto_detect_devices_gpu(self):
+    tempdir = pathlib.Path(self.create_tempdir().full_path)
+    dev_dir = tempdir / "dev"
+    dev_dir.mkdir()
+    for name in (
+        "nvidia0",
+        "nvidia1",
+        "nvidia2",
+        "nvidia3",
+        "nvidia0_cap",
+        "nvidiactl",
+    ):
+      (dev_dir / name).write_text("", encoding="utf-8")
+
+    # Test `/dev/nvidia[0-9]*` node detection when `nvidia-smi` is unavailable.
+    common_sh = LAUNCH_DIR / "common.sh"
+    res_dev = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'PATH=/nonexistent; source "{common_sh}" &&'
+            f' detect_gpu_count "{dev_dir}"',
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    self.assertEqual(res_dev.stdout.strip(), "4")
+
+    # When `nvidia-smi` exits non-zero with an error message on stdout,
+    # `detect_gpu_count` ignores its stdout and falls back to `/dev`.
+    fail_bin_dir = tempdir / "fail_bin"
+    fail_bin_dir.mkdir()
+    fail_smi = fail_bin_dir / "nvidia-smi"
+    fail_smi.write_text(
+        "#!/bin/bash\n"
+        "printf 'NVIDIA-SMI has failed because it could not communicate\\n'\n"
+        "exit 9\n",
+        encoding="utf-8",
+    )
+    fail_smi.chmod(0o755)
+    empty_dev = tempdir / "empty_dev"
+    empty_dev.mkdir()
+    res_fail_smi = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'PATH="{fail_bin_dir}:/usr/bin:/bin"; source "{common_sh}" &&'
+            f' detect_gpu_count "{empty_dev}"',
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    self.assertEqual(res_fail_smi.stdout.strip(), "0")
+
+    # Test `nvidia-smi` detection in `local.sh` across disaggregated and
+    # colocated GPU runs.
+    bin_dir = tempdir / "bin"
+    bin_dir.mkdir()
+    fake_smi = bin_dir / "nvidia-smi"
+    fake_smi.write_text(
+        "#!/bin/bash\n"
+        "printf 'GPU 0\\nGPU 1\\nGPU 2\\nGPU 3\\n'\n",
+        encoding="utf-8",
+    )
+    fake_smi.chmod(0o755)
+    path_with_smi = f"{bin_dir}:{os.environ.get('PATH', '')}"
+
+    res_disagg = self._run_launch(
+        [
+            "--dry-run",
+            "cluster_config.target=local",
+            "execution_targets.target=jax:gpu",
+            "agentic_grpo_config.beta=0.0",
+            "cluster_config.local.auto_detect_devices=true",
+        ],
+        extra_env={"PATH": path_with_smi},
+    )
+    self.assertEqual(res_disagg.returncode, 0, msg=res_disagg.stderr)
+    self.assertIn(
+        "Discovered GPU devices: Trainer=[0,1], Rollout=[2,3], Inference=[]",
+        res_disagg.stdout,
+    )
+
+    res_coloc = self._run_launch(
+        [
+            "--dry-run",
+            "cluster_config.target=local",
+            "execution_targets.target=jax:gpu",
+            "execution_targets.placement=colocated",
+            "agentic_grpo_config.beta=0.04",
+            "cluster_config.local.auto_detect_devices=true",
+        ],
+        extra_env={"PATH": path_with_smi},
+    )
+    self.assertEqual(res_coloc.returncode, 0, msg=res_coloc.stderr)
+    self.assertIn(
+        "Discovered GPU devices: Trainer=[0,1,2,3], Rollout=[0,1,2,3],"
+        " Inference=[0,1,2,3]",
+        res_coloc.stdout,
+    )
+
+  def test_configure_local_worker_env(self):
+    local_sh = (LAUNCH_DIR / "local.sh").read_text()
+    fn_match = re.search(
+        r"(?ms)^configure_local_worker_env\(\) \{.*?^\}", local_sh
+    )
+    self.assertIsNotNone(fn_match)
+    fn_src = fn_match.group(0)
+    common_sh = LAUNCH_DIR / "common.sh"
+    tracked_keys = (
+        "CUDA_VISIBLE_DEVICES",
+        "TPU_VISIBLE_DEVICES",
+        "TPU_VISIBLE_CHIPS",
+        "TPU_CHIPS_PER_HOST_BOUNDS",
+        "TPU_HOST_BOUNDS",
+        "LIBTPU_INIT_ARGS",
+        "JAX_PLATFORMS",
+        "JAX_BACKEND_TARGET",
+        "TRAINER_PATHWAYS_LOCAL_INIT",
+        "ALLOW_MULTIPLE_LIBTPU_LOAD",
+    )
+
+    def run_worker_env(
+        framework: str, accelerator: str, devices: str, use_pathways: str
+    ) -> dict[str, str | None]:
+      script = (
+          f'source "{common_sh}"\n'
+          "export LOCAL_TPU_CHIPS_PER_HOST_BOUNDS=1,2,1\n"
+          "export LOCAL_TPU_HOST_BOUNDS=1,1,1\n"
+          "export LOCAL_JAX_BACKEND_TARGET=grpc://127.0.0.1:29000\n"
+          "export LOCAL_ALLOW_MULTIPLE_LIBTPU_LOAD=true\n"
+          "export CUDA_VISIBLE_DEVICES=stale_gpu\n"
+          "export TPU_VISIBLE_DEVICES=stale_tpu\n"
+          "export TPU_VISIBLE_CHIPS=stale_tpu\n"
+          "export TPU_CHIPS_PER_HOST_BOUNDS=stale_bounds\n"
+          "export TPU_HOST_BOUNDS=stale_hosts\n"
+          "export LIBTPU_INIT_ARGS=stale_args\n"
+          "export JAX_PLATFORMS=stale_plat\n"
+          f"{fn_src}\n"
+          f'configure_local_worker_env "{framework}" "{accelerator}"'
+          f' "{devices}" "{use_pathways}"\n'
+          "env -0\n"
+      )
+      res = subprocess.run(
+          ["bash", "-c", script], capture_output=True, text=True, check=True
+      )
+      env_map = dict(
+          item.split("=", 1) for item in res.stdout.split("\0") if "=" in item
+      )
+      return {k: env_map.get(k) for k in tracked_keys}
+
+    gpu_env = run_worker_env("jax", "gpu", "0,1", "false")
+    self.assertEqual(gpu_env["CUDA_VISIBLE_DEVICES"], "0,1")
+    self.assertEqual(gpu_env["JAX_PLATFORMS"], "cuda,cpu")
+    for tpu_key in (
+        "TPU_VISIBLE_DEVICES",
+        "TPU_VISIBLE_CHIPS",
+        "TPU_CHIPS_PER_HOST_BOUNDS",
+        "TPU_HOST_BOUNDS",
+        "LIBTPU_INIT_ARGS",
+    ):
+      self.assertIsNone(gpu_env[tpu_key], msg=tpu_key)
+
+    gpu_empty_env = run_worker_env("jax", "gpu", "", "false")
+    self.assertIsNone(gpu_empty_env["CUDA_VISIBLE_DEVICES"])
+    self.assertEqual(gpu_empty_env["JAX_PLATFORMS"], "cuda,cpu")
+
+    jax_tpu_env = run_worker_env("jax", "tpu", "2,3", "false")
+    self.assertIsNone(jax_tpu_env["CUDA_VISIBLE_DEVICES"])
+    self.assertEqual(jax_tpu_env["JAX_PLATFORMS"], "tpu,cpu")
+    self.assertEqual(jax_tpu_env["TPU_VISIBLE_DEVICES"], "2,3")
+    self.assertEqual(jax_tpu_env["TPU_VISIBLE_CHIPS"], "2,3")
+    self.assertEqual(jax_tpu_env["TPU_CHIPS_PER_HOST_BOUNDS"], "1,2,1")
+    self.assertEqual(jax_tpu_env["TPU_HOST_BOUNDS"], "1,1,1")
+    self.assertEqual(
+        jax_tpu_env["LIBTPU_INIT_ARGS"],
+        "--deepsea_chips_per_host_bounds=1,2,1 --deepsea_host_bounds=1,1,1",
+    )
+    self.assertEqual(jax_tpu_env["ALLOW_MULTIPLE_LIBTPU_LOAD"], "1")
+
+    torch_tpu_env = run_worker_env("torch", "tpu", "0,1", "false")
+    self.assertIsNone(torch_tpu_env["CUDA_VISIBLE_DEVICES"])
+    self.assertIsNone(torch_tpu_env["JAX_PLATFORMS"])
+    self.assertEqual(torch_tpu_env["TPU_VISIBLE_DEVICES"], "0,1")
+    self.assertEqual(torch_tpu_env["TPU_VISIBLE_CHIPS"], "0,1")
+
+    pathways_tpu_env = run_worker_env("jax", "tpu", "0,1", "true")
+    self.assertIsNone(pathways_tpu_env["CUDA_VISIBLE_DEVICES"])
+    self.assertEqual(pathways_tpu_env["JAX_PLATFORMS"], "proxy,cpu")
+    self.assertEqual(
+        pathways_tpu_env["JAX_BACKEND_TARGET"], "grpc://127.0.0.1:29000"
+    )
+    self.assertEqual(pathways_tpu_env["TRAINER_PATHWAYS_LOCAL_INIT"], "1")
+    for tpu_key in (
+        "TPU_VISIBLE_DEVICES",
+        "TPU_VISIBLE_CHIPS",
+        "LIBTPU_INIT_ARGS",
+    ):
+      self.assertIsNone(pathways_tpu_env[tpu_key], msg=tpu_key)
 
 if __name__ == "__main__":
   absltest.main()

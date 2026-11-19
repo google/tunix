@@ -204,7 +204,10 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.mock_context.ipc.discovery.register = mock.MagicMock()
     self.mock_context.jax.initialize = mock.MagicMock()
 
-    self.mock_worker_service = mock.MagicMock(spec=trainer_worker.TrainerWorker)
+    self.mock_worker_service = mock.MagicMock(
+        spec=trainer_worker.TrainerWorker,
+        instance_id="trainer-worker-instance-0",
+    )
     self.mock_server = mock.MagicMock(
         spec=remote_execution.GrpcRemoteExecutionServer
     )
@@ -632,11 +635,12 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
   @mock.patch.object(
       run_trainer_node.maxtext_utils, "build_maxtext_config", autospec=True
   )
-  def test_create_maxtext_trainer_factory_plumbs_max_seq_token_per_tpu(
+  def test_create_maxtext_trainer_factory_plumbs_max_seq_tokens_per_device(
       self, mock_build_cfg, mock_create_mesh, mock_get_pad_id
   ):
+    del mock_create_mesh, mock_get_pad_id
     args = run_trainer_node._parse_args([
-        "--max_seq_token_per_tpu",
+        "--max_seq_tokens_per_device",
         "4096",
     ])
     run_trainer_node._create_maxtext_trainer_factory(args)
@@ -853,22 +857,26 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
   @mock.patch.object(run_trainer_node, "_create_mesh")
   @mock.patch.object(run_trainer_node, "_load_actor_model")
   @mock.patch.object(run_trainer_node.peft_trainer_v2, "TrainingConfig")
-  def test_create_tunix_trainer_factory_ignores_max_seq_token_per_tpu(
+  def test_create_tunix_trainer_factory_ignores_max_seq_tokens_per_device(
       self,
       mock_training_config,
       mock_load_model,
       mock_create_mesh,
       mock_ensure_dir,
   ):
+    del mock_load_model, mock_create_mesh, mock_ensure_dir
     # The flag is for MaxText's max_target_length. Under the orchestrator the
     # PeftTrainer never packs -- the SequencePackedBatchAssembler does, and the
     # packing weights arrive on the payload -- so it stays off TrainingConfig.
     args = run_trainer_node._parse_args([
-        "--max_seq_token_per_tpu",
+        "--max_seq_tokens_per_device",
         "4096",
     ])
     run_trainer_node._create_tunix_trainer_factory(args)
     mock_training_config.assert_called_once()
+    self.assertNotIn(
+        "max_seq_tokens_per_device", mock_training_config.call_args.kwargs
+    )
     self.assertNotIn(
         "max_seq_token_per_tpu", mock_training_config.call_args.kwargs
     )
@@ -883,7 +891,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         "4",
         "--mesh_fsdp",
         "4",
-        "--max_seq_token_per_tpu",
+        "--max_seq_tokens_per_device",
         "4096",
     ])
     self.assertEqual(run_trainer_node._gradient_accumulation_steps(args), 1)
@@ -1454,6 +1462,84 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertTrue(args.prefuse_moe_weights)
     self.assertTrue(args.use_weight_converter)
 
+  def test_parse_args_maxtext_skip_step_flags(self):
+    argv = [
+        "--maxtext_skip_step_on_spikes",
+        "--skip_step_on_nan",
+        "--maxtext_skip_step_interval=64",
+        "--maxtext_skip_step_scaling_factor=4.5",
+    ]
+    args = run_trainer_node._parse_args(argv)
+    self.assertTrue(args.maxtext_skip_step_on_spikes)
+    self.assertTrue(args.skip_step_on_nan)
+    self.assertEqual(args.maxtext_skip_step_interval, 64)
+    self.assertEqual(args.maxtext_skip_step_scaling_factor, 4.5)
+
+  def test_parse_args_default_omits_skip_step_on_nan(self):
+    def _build_maxtext_kwargs(argv):
+      args = run_trainer_node._parse_args(argv)
+      args.maxtext_model_name = "qwen3-0.6b"
+      args.maxtext_output_directory = "/tmp/maxtext"
+      args.maxtext_ckpt_path = ""
+      args.maxtext_padded_moe_mlp_dim = 0
+      args.maxtext_base_num_kv_heads = 0
+      args.maxtext_mesh_context = 1
+      args.maxtext_attention = ""
+      args.maxtext_warmup_steps_fraction = 0.0
+      args.worker_id = "trainer-0"
+      with (
+          mock.patch.object(
+              run_trainer_node.maxtext_utils,
+              "build_maxtext_config",
+              autospec=True,
+              return_value=mock.MagicMock(),
+          ) as mock_build,
+          mock.patch.object(
+              run_trainer_node.maxtext_utils,
+              "create_maxtext_mesh",
+              autospec=True,
+              return_value=mock.MagicMock(),
+          ),
+          mock.patch.object(
+              run_trainer_node.jax,
+              "device_count",
+              autospec=True,
+              return_value=1,
+          ),
+          mock.patch.object(
+              run_trainer_node.maxtext_utils,
+              "get_tokenizer_pad_id",
+              autospec=True,
+              return_value=0,
+          ),
+      ):
+        run_trainer_node._create_maxtext_trainer_factory(args)
+      return args, mock_build.call_args.kwargs
+
+    default_args, default_kwargs = _build_maxtext_kwargs([])
+    self.assertIsNone(default_args.skip_step_on_nan)
+    self.assertFalse(default_args.maxtext_skip_step_on_spikes)
+    self.assertIsNone(default_kwargs["skip_step_on_nan"])
+    self.assertFalse(default_kwargs["skip_step_on_spikes"])
+
+    _, non_default_kwargs = _build_maxtext_kwargs([
+        "--maxtext_skip_step_on_spikes",
+        "--skip_step_on_nan=false",
+        "--maxtext_skip_step_interval=64",
+        "--maxtext_skip_step_scaling_factor=4.5",
+    ])
+    self.assertTrue(non_default_kwargs["skip_step_on_spikes"])
+    self.assertFalse(non_default_kwargs["skip_step_on_nan"])
+    self.assertEqual(non_default_kwargs["skip_step_interval"], 64)
+    self.assertEqual(non_default_kwargs["skip_step_scaling_factor"], 4.5)
+
+  def test_skip_step_on_nan_rejects_tunix_backend(self):
+    args = run_trainer_node._parse_args(
+        ["--trainer_backend=tunix", "--skip_step_on_nan"]
+    )
+    with self.assertRaisesRegex(ValueError, "--trainer_backend=maxtext"):
+      run_trainer_node._create_tunix_trainer_factory(args)
+
   def test_create_mesh_validates_device_count(self):
     args = mock.MagicMock(mesh_fsdp=2, mesh_tp=2)
     with mock.patch.object(jax, "device_count", return_value=2):
@@ -1480,6 +1566,25 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         run_trainer_node._ensure_model_dir_for_trainer(
             tmp_file.name, "Qwen/Qwen3-1.7B"
         )
+
+
+  def test_parse_args_syncs_max_seq_tokens_per_device_and_rejects_mismatch(
+      self,
+  ):
+    args_device = run_trainer_node._parse_args(
+        ["--max_seq_tokens_per_device=8192"]
+    )
+    self.assertEqual(args_device.max_seq_tokens_per_device, 8192)
+    self.assertEqual(args_device.max_seq_token_per_tpu, 8192)
+    self.assertEqual(
+        run_trainer_node._gradient_accumulation_steps(args_device), 1
+    )
+
+    with self.assertRaises(SystemExit):
+      run_trainer_node._parse_args([
+          "--max_seq_tokens_per_device=8192",
+          "--max_seq_token_per_tpu=4096",
+      ])
 
 
 if __name__ == "__main__":

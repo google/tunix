@@ -14,9 +14,12 @@
 
 """TrainerWorker implementation for role-based isolation."""
 
+from __future__ import annotations
+
+from collections.abc import Callable
 import contextlib
 import functools
-from typing import Any, Callable, ContextManager, cast
+from typing import Any, ContextManager, TYPE_CHECKING, cast
 
 from flax import nnx
 import jax
@@ -25,8 +28,12 @@ import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.train import abstract_trainer
 from tunix.dist_rl.worker import abstract_worker
+from tunix.dist_rl.worker import otel_metrics
 from tunix.rl import common as rl_common
 from tunix.rl import packing
+
+if TYPE_CHECKING:
+  from opentelemetry import metrics as otel_api_types  # pylint: disable=g-bad-import-order,g-import-not-at-top
 
 WorkerState = datatypes.WorkerState
 
@@ -86,21 +93,6 @@ def _compute_per_token_logps(
   return cast(jax.Array, logps)
 
 
-# TODO(igorts): Drop legacy callback once cl/1015725345 lands and
-# requirements/maxtext_requirements.txt advances.
-def _compute_per_token_logps_legacy(
-    model: nnx.Module, *args: Any, **kwargs: Any
-) -> jax.Array:
-  """Legacy variadic callback for trainers without `with_fwd_only_fn`."""
-  graphdef, state = nnx.split(model)
-  return cast(
-      jax.Array,
-      rl_common.compute_per_token_logps(
-          graphdef, state, *args, stop_gradient=True, **kwargs
-      ),
-  )
-
-
 class TrainerWorker(abstract_worker.Worker):
   """Worker wrapper for a Trainer.
 
@@ -117,6 +109,7 @@ class TrainerWorker(abstract_worker.Worker):
       logps_chunk_size: int = 0,
       logps_micro_batch_size: int | None = None,
       execution_context: Any = None,
+      otel_meter_provider: otel_api_types.MeterProvider | None = None,
   ):
     """Initializes the TrainerWorker.
 
@@ -129,6 +122,8 @@ class TrainerWorker(abstract_worker.Worker):
       logps_chunk_size: Optionally chunk the vocab (final-logits) computation.
       logps_micro_batch_size: Row chunk size for `per_token_logps`. If `None`,
         the whole request is scored in one forward.
+      otel_meter_provider: Optional OpenTelemetry MeterProvider override for
+        testing; defaults to the global MeterProvider when None.
     """
     self._execution_context = execution_context
     self._trainer_factory = trainer_factory
@@ -145,6 +140,9 @@ class TrainerWorker(abstract_worker.Worker):
     self._last_error: str | None = None
     # Set when `stop()` failed to close the trainer; later stops re-raise it.
     self._stop_error: str | None = None
+    self._otel = otel_metrics.TrainerWorkerOtelMetrics(
+        worker_id=worker_id, meter_provider=otel_meter_provider
+    )
 
   def _policy_version(self) -> int:
     trainer = self._trainer
@@ -181,14 +179,11 @@ class TrainerWorker(abstract_worker.Worker):
           trainer = self._trainer_factory()
           if hasattr(trainer, "is_managed_externally"):
             trainer.is_managed_externally = True
-          # TODO(igorts): Drop hasattr guard once cl/1015725345 lands and
-          # requirements/maxtext_requirements.txt advances.
-          if hasattr(trainer, "with_fwd_only_fn"):
-            trainer.with_fwd_only_fn(
-                functools.partial(
-                    _compute_per_token_logps, chunk_size=self._logps_chunk_size
-                )
-            )
+          trainer.with_fwd_only_fn(
+              functools.partial(
+                  _compute_per_token_logps, chunk_size=self._logps_chunk_size
+              )
+          )
           if self._pending_loss_fn is not None:
             trainer.with_loss_fn(*self._pending_loss_fn)
             self._pending_loss_fn = None
@@ -212,10 +207,11 @@ class TrainerWorker(abstract_worker.Worker):
     trainer = self._ensure_ready()
     self.state = WorkerState.COMPILING
     try:
-      dummy_data = abstract_trainer.resolve_dummy_routed_experts(
-          trainer, dummy_data
-      )
-      trainer.compile(dummy_data)
+      with self._otel.track_rpc():
+        dummy_data = abstract_trainer.resolve_dummy_routed_experts(
+            trainer, dummy_data
+        )
+        trainer.compile(dummy_data)
       return self._response(compiled=True)
     except Exception as exc:
       self._last_error = str(exc)
@@ -283,6 +279,7 @@ class TrainerWorker(abstract_worker.Worker):
     trainer = self._trainer
     return datatypes.WorkerInfo(
         worker_id=self._worker_id,
+        instance_id=self.instance_id,
         roles=frozenset({"trainer", "weight_sync"}),
         resources={
             "trainer": (
@@ -351,10 +348,19 @@ class TrainerWorker(abstract_worker.Worker):
   @abstract_worker.offload_to_thread
   def fwd_bwd(self, request: datatypes.TrainRequest) -> datatypes.Response:
     """Executes one forward/backward pass."""
-    trainer = self._ensure_ready()
+    token_counts = otel_metrics.extract_payload_tokens(request.payload)
     req_metadata = dict(request.metadata) if request.metadata else {}
+    mb_ready_s = otel_metrics.extract_mb_ready_time_s(req_metadata)
+    trainer = self._ensure_ready()
+    self._otel.record_starvation(mb_ready_s)
     try:
-      trainer.fwd_bwd(request.payload)
+      # TODO(b/579110728): `fwd_bwd` records host dispatch duration under JAX
+      # async dispatch; queued device time surfaces in the next synchronizing
+      # RPC (`update`, `prepare_weight_sync`, or `per_token_logps`).
+      with self._otel.track_rpc(
+          phase="fwd_bwd", token_counts=token_counts, arm=True
+      ):
+        trainer.fwd_bwd(request.payload)
       self._last_error = None
       resp = self._response(queued=True, **req_metadata)
       resp.request_id = request.request_id
@@ -369,8 +375,9 @@ class TrainerWorker(abstract_worker.Worker):
     """Applies the accumulated (mean) gradients and returns `(train_step, metrics)`."""
     trainer = self._ensure_ready()
     try:
-      train_step = trainer.update()
-      metrics = trainer.get_metrics()
+      with self._otel.track_rpc(phase="optimizer_step"):
+        train_step = trainer.update()
+        metrics = trainer.get_metrics()
       self._last_error = None
       return train_step, metrics
     except Exception as exc:
@@ -384,7 +391,8 @@ class TrainerWorker(abstract_worker.Worker):
     trainer = self._ensure_ready()
     req_metadata = dict(request.metadata) if request.metadata else {}
     try:
-      trainer.eval_step(request.payload)
+      with self._otel.track_rpc(phase="eval_step"):
+        trainer.eval_step(request.payload)
       self._last_error = None
       resp = self._response(evaluated=True, **req_metadata)
       resp.request_id = request.request_id
@@ -403,7 +411,8 @@ class TrainerWorker(abstract_worker.Worker):
     try:
       run_eval = getattr(trainer, "run_eval", None)
       if callable(run_eval):
-        run_eval(eval_ds)
+        with self._otel.track_rpc():
+          run_eval(eval_ds)
         self._last_error = None
         return self._response(evaluated=True)
 
@@ -416,7 +425,8 @@ class TrainerWorker(abstract_worker.Worker):
       eval_batches = 0
       with context:
         for payload in eval_ds:
-          trainer.eval_step(payload)
+          with self._otel.track_rpc(phase="eval_step"):
+            trainer.eval_step(payload)
           eval_batches += 1
       self._last_error = None
       return self._response(evaluated=True, eval_batches=eval_batches)
@@ -494,12 +504,11 @@ class TrainerWorker(abstract_worker.Worker):
             if routed_enc in ("uint8", "uint10")
             else np.asarray(routed_raw, dtype=np.int16)
         )
-      micro_batch_size = self._logps_micro_batch_size or batch_size
-      use_callback_fwd_only = hasattr(trainer, "with_fwd_only_fn")
-      outs = []
-      for start in range(0, batch_size, micro_batch_size):
-        sl = slice(start, start + micro_batch_size)
-        if use_callback_fwd_only:
+      with self._otel.track_rpc(phase="per_token_logps"):
+        micro_batch_size = self._logps_micro_batch_size or batch_size
+        outs = []
+        for start in range(0, batch_size, micro_batch_size):
+          sl = slice(start, start + micro_batch_size)
           payload = datatypes.LogprobsScoringPayload(
               prompt_ids=prompt[sl],
               completion_ids=completion[sl],
@@ -512,25 +521,7 @@ class TrainerWorker(abstract_worker.Worker):
               token_mask=None if token_mask is None else token_mask[sl],
           )
           outs.append(trainer.fwd_only(payload))
-        else:
-          # TODO(igorts): Drop legacy fallback once cl/1015725345 lands and
-          # requirements/maxtext_requirements.txt advances.
-          outs.append(
-              cast(Any, trainer).fwd_only(
-                  _compute_per_token_logps_legacy,
-                  prompt[sl],
-                  completion[sl],
-                  pad_id=items.pad_id,
-                  eos_id=items.eos_id,
-                  temperature=temperature,
-                  chunk_size=self._logps_chunk_size,
-                  segment_ids=None if seg_ids is None else seg_ids[sl],
-                  segment_positions=None if seg_pos is None else seg_pos[sl],
-                  routed_experts=None if routed is None else routed[sl],
-                  token_mask=None if token_mask is None else token_mask[sl],
-              )
-          )
-      result = np.asarray(jnp.concatenate(outs, axis=0), dtype=np.float32)
+        result = np.asarray(jnp.concatenate(outs, axis=0), dtype=np.float32)
       self._last_error = None
       return datatypes.LogprobsResponse(
           request_id=items.request_id,
@@ -553,7 +544,8 @@ class TrainerWorker(abstract_worker.Worker):
     """Force the trainer to serialize its state (model + optimizer)."""
     trainer = self._ensure_ready()
     try:
-      trainer.save_checkpoint(metadata, step=step, force=force)
+      with self._otel.track_rpc(phase="checkpoint_save"):
+        trainer.save_checkpoint(metadata, step=step, force=force)
       self._last_error = None
       return self._response(checkpoint_saved=True)
     except Exception as exc:
@@ -564,7 +556,9 @@ class TrainerWorker(abstract_worker.Worker):
   @abstract_worker.offload_to_thread
   def restore_checkpoint(self, step: int | None = None) -> Any:
     """Restore state from a checkpoint and return the metadata pytree."""
-    return self._ensure_ready().restore_checkpoint(step=step)
+    trainer = self._ensure_ready()
+    with self._otel.track_rpc():
+      return trainer.restore_checkpoint(step=step)
 
   @abstract_worker.offload_to_thread
   def prepare_weight_sync(self, sync_request: Any = None) -> Any:
@@ -572,7 +566,8 @@ class TrainerWorker(abstract_worker.Worker):
     trainer = self._ensure_ready()
     self.state = WorkerState.SYNCING
     try:
-      metadata = trainer.prepare_weight_sync(sync_request=sync_request)
+      with self._otel.track_rpc(weight_sync_direction="send"):
+        metadata = trainer.prepare_weight_sync(sync_request=sync_request)
       self._last_error = None
       if metadata is not None:
         return metadata
@@ -587,11 +582,11 @@ class TrainerWorker(abstract_worker.Worker):
     """Releases this round's staging and restores READY."""
     # Not `_ensure_ready()`: `prepare_weight_sync` left the state at SYNCING,
     # and `_ensure_ready()` raises unless the state is READY.
-    result = (
-        self._trainer.release_weight_sync(sync_request=sync_request)
-        if self._trainer is not None
-        else None
-    )
+    if self._trainer is None:
+      result = None
+    else:
+      with self._otel.track_rpc(weight_sync_direction="release"):
+        result = self._trainer.release_weight_sync(sync_request=sync_request)
     if self.state == WorkerState.SYNCING:
       self.state = WorkerState.READY
     return result

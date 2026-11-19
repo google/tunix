@@ -19,7 +19,7 @@ import contextlib
 import dataclasses
 import functools
 import time
-from typing import Any, Callable, Concatenate, Dict, List, ParamSpec, Tuple, cast
+from typing import Any, Callable, Concatenate, Dict, List, ParamSpec, Tuple, TypeAlias, cast
 
 from absl import logging
 import flax
@@ -28,11 +28,11 @@ import jax
 from jax.interpreters import pxla
 import jax.numpy as jnp
 import jax.sharding as shd
-from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 from jax.typing import DTypeLike  # pylint: disable=g-importing-member
 import numpy as np
 import optax
 from tunix.common import configs
+from tunix.common import datatypes
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
@@ -43,10 +43,12 @@ from tunix.sft import hooks
 from tunix.sft import inflight_throttler
 from tunix.sft import metrics_logger as sft_metrics_logger
 from tunix.sft import profiler
+from tunix.sft import profiler_jax
 from tunix.sft import progress_bar
 from tunix.sft import sharding_utils
 from tunix.sft import utils
 
+ArrayLike: TypeAlias = datatypes.ArrayLike
 TrainingConfig = configs.TrainingConfig
 
 _ModelInputT = Dict[str, ArrayLike]
@@ -318,7 +320,7 @@ class PeftTrainer:
   ):
     # TODO(noghabi): Implement sequence packing for SFT and remove this check.
     if (
-        training_config.max_seq_token_per_tpu is not None
+        configs.is_sequence_packing_enabled(training_config)
         and not self.supports_sequence_packing
     ):
       raise ValueError(
@@ -346,14 +348,18 @@ class PeftTrainer:
     # model-sized grad-tree allocation there.
     _uses_cond_path = not (
         self.config.get_with_default("gradient_accumulation_steps", 1) == 1
-        and self.config.max_seq_token_per_tpu is None
+        and not configs.is_sequence_packing_enabled(self.config)
     )
     self.grad_accumulator = GradientAccumulator(
         self.model, wrt_target, allocate_grads=_uses_cond_path
     )
 
-    self.loss_fn = _default_loss_fn
-    self.eval_loss_fn = _default_loss_fn
+    self.loss_fn: Callable[
+        ..., jax.Array | Tuple[jax.Array, Any] | utils.LossOutput
+    ] = _default_loss_fn
+    self.eval_loss_fn: Callable[
+        ..., jax.Array | Tuple[jax.Array, Any] | utils.LossOutput
+    ] = _default_loss_fn
     self.gen_model_input_fn = lambda x: x
     self.checkpoint_manager = checkpoint_manager.CheckpointManager(
         root_directory=self.config.checkpoint_root_directory,
@@ -406,6 +412,7 @@ class PeftTrainer:
         initial_step=self._iter_steps,
         max_step=max_step,
         profiler_options=self.config.profiler_options,
+        backend=profiler_jax.JaxProfilerBackend(),
     )
     self._buffered_train_metrics: MetricsBuffer | None = None
     self._prev_buffered_train_metrics: MetricsBuffer | None = None
@@ -434,13 +441,13 @@ class PeftTrainer:
       self,
       loss_fn: Callable[
           Concatenate[nnx.Module, P],
-          ArrayLike | Tuple[ArrayLike, Any] | utils.LossOutput,
+          jax.Array | Tuple[jax.Array, Any] | utils.LossOutput,
       ],
       has_aux: bool = False,
   ):
     self.clear_jit_cache()
-    self.loss_fn = loss_fn  # pyrefly: ignore[bad-assignment]
-    self.eval_loss_fn = loss_fn  # pyrefly: ignore[bad-assignment]
+    self.loss_fn = loss_fn
+    self.eval_loss_fn = loss_fn
     self._has_aux = has_aux
     return self
 
@@ -470,7 +477,7 @@ class PeftTrainer:
       grad_accumulator: GradientAccumulator,
       inputs: Any,
       is_update_step: jax.Array,
-  ) -> Tuple[ArrayLike, Any | None, ArrayLike]:
+  ) -> Tuple[jax.Array, Any | None, jax.Array]:
     """Main body for one train step.
 
     Args:
@@ -532,7 +539,7 @@ class PeftTrainer:
     # keeps the cond path since its cadence comes from `is_update_step`.
     if (
         self.config.get_with_default("gradient_accumulation_steps", 1) == 1
-        and self.config.max_seq_token_per_tpu is None
+        and not configs.is_sequence_packing_enabled(self.config)
     ):
       if isinstance(aux, utils.LossOutput):
         denom = jnp.asarray(aux.primary_loss.denominator, dtype=jnp.float32)
@@ -583,26 +590,26 @@ class PeftTrainer:
 
   def _eval_step(
       self, model: nnx.Module, inputs: Any
-  ) -> ArrayLike | Tuple[ArrayLike, Any]:
+  ) -> Tuple[jax.Array, Any | None]:
     inputs = self.gen_model_input_fn(inputs)
     out = self.eval_loss_fn(model, **inputs)
     if isinstance(out, utils.LossOutput):
       return out.primary_loss.compute(), out
     elif self._has_aux:
-      loss, aux = out  # pyrefly: ignore[not-iterable]
+      loss, aux = out
       return loss, aux
     else:
-      return out, None
+      return out, None  # pyrefly: ignore[bad-return]
 
   def create_train_step_fn(
       self,
-  ) -> Callable[..., Tuple[ArrayLike, Any | None, ArrayLike]]:
+  ) -> Callable[..., Tuple[jax.Array, Any | None, jax.Array]]:
     """Creates the train step function."""
     return self._train_step
 
   def create_eval_step_fn(
       self,
-  ) -> Callable[..., ArrayLike | Tuple[ArrayLike, Any]]:
+  ) -> Callable[..., Tuple[jax.Array, Any | None]]:
     """Creates the eval step function."""
     return self._eval_step
 
@@ -734,7 +741,12 @@ class PeftTrainer:
           perplexity,
       )
     for k, v in (additional_metrics or {}).items():
-      if k.startswith(("sampler_trainer/", "sampler_is/", "sampler_rs/")):
+      if k.startswith((
+          "sampler_trainer/",
+          "sampler_is/",
+          "sampler_rs/",
+          "score_centering/",
+      )):
         prefix, metric_name = k.split("/", maxsplit=1)
         self.metrics_logger.log(prefix, metric_name, v, self._mode, step)  # pyrefly: ignore[missing-attribute]
       else:
@@ -992,14 +1004,14 @@ class PeftTrainer:
             not is_update_step_val
             and self.config.get_with_default("gradient_accumulation_steps", 1)
             == 1
-            and self.config.max_seq_token_per_tpu is None
+            and not configs.is_sequence_packing_enabled(self.config)
         ):
           # The depth-1 direct-update path in `_train_step` updates on every
           # step; a data-driven skip flag would be silently ignored there.
           raise ValueError(
               "data-driven is_update_step=False conflicts with the depth-1"
               " direct-update path; set gradient_accumulation_steps>1 or"
-              " max_seq_token_per_tpu."
+              " max_seq_tokens_per_device."
           )
 
         with self._perf_tracer.span(
@@ -1196,7 +1208,7 @@ def _default_loss_fn(
     positions: jax.Array,
     attention_mask: jax.Array,
     images: jax.Array | None = None,
-) -> utils.LossOutput | ArrayLike:
+) -> utils.LossOutput:
   """Default loss function for PEFT training."""
   # Weird kwargs workaround because not all models support `images` right now.
   kwargs = {} if images is None else {"images": images}

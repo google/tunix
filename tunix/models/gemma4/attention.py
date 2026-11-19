@@ -16,6 +16,7 @@
 
 import functools
 from functools import partial
+import math
 import typing
 from flax import nnx
 import jax
@@ -79,16 +80,73 @@ def _resolve_active_mesh() -> MeshType | None:
   mesh = pxla.thread_resources.env.physical_mesh
   if not mesh.empty:
     return mesh
+  abs_mesh = shd.get_abstract_mesh()
+  return None if abs_mesh.empty else abs_mesh
 
-  for getter_name in ('get_abstract_mesh', 'get_mesh'):
-    getter = getattr(jax.sharding, getter_name, None)
-    if getter is None:
-      continue
-    ctx_mesh = getter()
-    if ctx_mesh is not None and not ctx_mesh.empty:
-      return ctx_mesh
 
-  return None
+def _num_shards(axis: AxisSpec, mesh: MeshType) -> int:
+  """Returns the number of shards `axis` splits a dimension into on `mesh`."""
+  names = (axis,) if isinstance(axis, str) else axis or ()
+  return math.prod(mesh.shape[n] for n in names)
+
+
+def _resolve_axis(axis: AxisSpec, dim: int, mesh: MeshType) -> AxisSpec:
+  """Returns `axis` if in `mesh` and evenly dividing `dim`, else None."""
+  if axis is None:
+    return None
+  names = (axis,) if isinstance(axis, str) else axis
+  if any(name not in mesh.shape for name in names):
+    return None
+  return axis if dim % _num_shards(axis, mesh) == 0 else None
+
+
+def _resolve_kv_head_axis(
+    axis: AxisSpec, num_kv_heads: int, mesh: MeshType | None
+) -> AxisSpec:
+  if num_kv_heads == 1:
+    return None
+  return axis if mesh is None else _resolve_axis(axis, num_kv_heads, mesh)
+
+
+def _resolve_sharding_spec(
+    spec: tuple[AxisSpec, ...] | P,
+    shape: tuple[int, ...],
+    mesh: MeshType | None,
+) -> P:
+  if mesh is None:
+    return P(*spec)
+  return P(*(_resolve_axis(ax, dim, mesh) for ax, dim in zip(spec, shape)))
+
+
+def _align_kv_heads_for_splash(
+    key_proj: jaxtyping.Array,
+    value_proj: jaxtyping.Array,
+    num_q_heads: int,
+    head_shards: int,
+) -> tuple[jaxtyping.Array, jaxtyping.Array]:
+  """Repeats `(B, K, T, H)` KV heads to `num_q_heads` for Splash GQA sharding.
+
+  Splash Attention infers the GQA group size from per-shard head counts, so
+  replicating `1 < num_kv_heads` KV heads that `head_shards` does not divide
+  would pair query heads on each shard with the wrong KV heads.
+
+  Args:
+    key_proj: Key tensor of shape `(B, K, T, H)`.
+    value_proj: Value tensor of shape `(B, K, T, H)`.
+    num_q_heads: Total number of query heads `N`.
+    head_shards: Number of shards along the head dimension.
+
+  Returns:
+    Tuple of `(key_proj, value_proj)` with heads aligned to `head_shards`.
+  """
+  num_kv_heads = key_proj.shape[1]
+  if num_kv_heads == 1 or num_kv_heads % head_shards == 0:
+    return key_proj, value_proj
+  repeats = num_q_heads // num_kv_heads
+  return (
+      jnp.repeat(key_proj, repeats, axis=1),
+      jnp.repeat(value_proj, repeats, axis=1),
+  )
 
 
 def _tokamax_splash_libs():
@@ -187,10 +245,13 @@ class Attention(nnx.Module):
         param_dtype=config.param_dtype,
     )
 
+    mesh = _resolve_active_mesh()
     k_eq_v = (
         config.k_eq_v_global if attn_type == AttentionType.GLOBAL else False
     )
     if k_eq_v:
+      shd_n, shd_d, shd_h = config.shd_config.q_weight_ndh
+      shd_n_kv = _resolve_kv_head_axis(shd_n, self.num_kv_heads, mesh)
       self.k_einsum = Einsum(
           einsum_str='BSD,KDH->BSKH',
           shape=(
@@ -199,15 +260,14 @@ class Attention(nnx.Module):
               self.head_dim,
           ),
           rngs=rngs,
-          sharding=config.shd_config.q_weight_ndh,
+          sharding=P(shd_n_kv, shd_d, shd_h),
           dtype=config.dtype,
           param_dtype=config.param_dtype,
       )
     else:
-      if self.num_kv_heads == 1:
-        kv_sharding = (None, None, 'fsdp', None)
-      else:
-        kv_sharding = config.shd_config.kv_weight_cndh
+      shd_c, shd_n, shd_d, shd_h = config.shd_config.kv_weight_cndh
+      shd_n_kv = _resolve_kv_head_axis(shd_n, self.num_kv_heads, mesh)
+      kv_sharding = P(shd_c, shd_n_kv, shd_d, shd_h)
 
       self.kv_einsum = Einsum(
           einsum_str='BSD,CKDH->CBSKH',
@@ -257,8 +317,13 @@ class Attention(nnx.Module):
       else:
         key_proj, value_proj = self.kv_einsum(x)
 
-      key_proj = shard(key_proj, self.config.shd_config.act_btnh)
-      value_proj = shard(value_proj, self.config.shd_config.act_btnh)
+      kv_spec = _resolve_sharding_spec(
+          self.config.shd_config.act_btnh,
+          key_proj.shape,
+          _resolve_active_mesh(),
+      )
+      key_proj = shard(key_proj, kv_spec)
+      value_proj = shard(value_proj, kv_spec)
 
       # Apply norms to computed KV
       value_var = jnp.mean(jnp.square(value_proj), axis=-1, keepdims=True)
@@ -333,40 +398,25 @@ class Attention(nnx.Module):
         use_fused_bwd_kernel=use_fused,
     )
 
-  def _make_sharding_specs(self, b: int, kh: int, mesh: MeshType | None):
-    """Computes mesh/shard-axis specs for splash attention."""
-    shd_b, shd_t, shd_n, shd_h = self.config.shd_config.act_btnh
-    if mesh is None or not mesh.shape:
+  def _make_sharding_specs(
+      self, q_shape: tuple[int, ...], mesh: MeshType | None
+  ):
+    """Computes mesh/shard-axis specs for splash attention.
+
+    Args:
+      q_shape: `(B, T, N, H)` query shape, matching `act_btnh`.
+      mesh: The active mesh, if any.
+    """
+    if mesh is None:
       shd_b = shd_t = shd_n = shd_h = None
+      head_shards = q_seq_shards = 1
     else:
-      if shd_b is not None and (
-          shd_b not in mesh.shape or b % mesh.shape[shd_b] != 0
-      ):
-        shd_b = None
-      shd_t, shd_n, shd_h = [
-          axis if axis in mesh.shape else None
-          for axis in (shd_t, shd_n, shd_h)
-      ]
-    head_shards = (
-        mesh.shape[shd_n]
-        if mesh is not None and shd_n is not None and shd_n in mesh.shape
-        else 1
-    )
-    q_seq_shards = (
-        mesh.shape[shd_t]
-        if mesh is not None and shd_t is not None and shd_t in mesh.shape
-        else 1
-    )
+      shd_b, shd_t, shd_n, shd_h = _resolve_sharding_spec(
+          self.config.shd_config.act_btnh, q_shape, mesh
+      )
+      head_shards = _num_shards(shd_n, mesh)
+      q_seq_shards = _num_shards(shd_t, mesh)
     shd_spec = P(shd_b, shd_n, shd_t, shd_h)
-    shd_n_kv = (
-        shd_n
-        if mesh is not None
-        and shd_n is not None
-        and shd_n in mesh.shape
-        and kh % mesh.shape[shd_n] == 0
-        else None
-    )
-    unsharded_seq_kv = P(shd_b, shd_n_kv, None, shd_h)
     return (
         shd_b,
         shd_n,
@@ -374,9 +424,7 @@ class Attention(nnx.Module):
         shd_h,
         head_shards,
         q_seq_shards,
-        shd_n_kv,
         shd_spec,
-        unsharded_seq_kv,
     )
 
   def _make_splash_kernel(
@@ -489,8 +537,7 @@ class Attention(nnx.Module):
           'k': key_proj,
       }
 
-    b, _, qh, _ = query_proj.shape
-    _, _, kh, _ = key_proj.shape
+    _, _, qh, _ = query_proj.shape
 
     # Determine if we can use flash attention for this call.
     q_len = query_proj.shape[1]
@@ -521,10 +568,6 @@ class Attention(nnx.Module):
           query_sharding_spec=self.config.shd_config.act_btnh,
       )
     elif use_flash and jax.default_backend() != 'gpu':
-      query_proj = query_proj.transpose(0, 2, 1, 3)
-      key_proj = key_proj.transpose(0, 2, 1, 3)
-      value_proj = value_proj.transpose(0, 2, 1, 3)
-
       mesh = _resolve_active_mesh()
 
       # Offset: shifts Q positions so q[0] aligns with kv[prefix_len].
@@ -537,10 +580,19 @@ class Attention(nnx.Module):
           shd_h,
           head_shards,
           q_seq_shards,
-          shd_n_kv,
           shd_spec,
-          unsharded_seq_kv,
-      ) = self._make_sharding_specs(b, kh, mesh)
+      ) = self._make_sharding_specs(query_proj.shape, mesh)
+
+      query_proj = query_proj.transpose(0, 2, 1, 3)
+      # Keep the unrepeated `key_proj`/`value_proj` for `layers_kvs`.
+      splash_key, splash_value = _align_kv_heads_for_splash(
+          key_proj.transpose(0, 2, 1, 3),
+          value_proj.transpose(0, 2, 1, 3),
+          qh,
+          head_shards,
+      )
+      shd_n_kv = _resolve_kv_head_axis(shd_n, splash_key.shape[1], mesh)
+      unsharded_seq_kv = P(shd_b, shd_n_kv, None, shd_h)
 
       if self.config.splash_attention_impl == SplashAttentionImpl.TOKAMAX:
         splash_attn_kernel, kernel_spec = self._make_tokamax_splash_kernel(
@@ -568,10 +620,10 @@ class Attention(nnx.Module):
             shd_t,
         )
 
-      encoded, key_proj, value_proj = self._flash_attention_single(
+      encoded = self._flash_attention_single(
           query_proj,
-          key_proj,
-          value_proj,
+          splash_key,
+          splash_value,
           segment_ids,
           splash_attn_kernel,
           kernel_spec,
@@ -662,7 +714,7 @@ class Attention(nnx.Module):
       mesh: MeshType | None,
       shd_b: AxisSpec,
       shd_t: AxisSpec,
-  ) -> tuple[jaxtyping.Array, jaxtyping.Array, jaxtyping.Array]:
+  ) -> jaxtyping.Array:
     """Single-kernel flash attention over concatenated (or plain) KV."""
     # Original single-kernel attention path.
     if segment_ids is not None:
@@ -724,12 +776,7 @@ class Attention(nnx.Module):
           key_proj,
           value_proj,
       )
-    encoded = qkv.transpose(0, 2, 1, 3)
-    # Transpose KV back to (B, S, K, H); consumed by KV-sharing layers via
-    # layers_kvs.
-    key_proj = key_proj.transpose(0, 2, 1, 3)
-    value_proj = value_proj.transpose(0, 2, 1, 3)
-    return encoded, key_proj, value_proj
+    return qkv.transpose(0, 2, 1, 3)
 
   def _eager_attention(
       self,
@@ -999,8 +1046,9 @@ class Attention(nnx.Module):
     act_btnh = getattr(shd_config, 'act_btnh', None) if shd_config else None
 
     if mesh is not None and act_btnh is not None:
-      k_sharding = shd.NamedSharding(mesh, shd.PartitionSpec(*act_btnh))
-      idx_sharding = shd.NamedSharding(mesh, shd.PartitionSpec(*act_btnh[:1]))
+      cache_spec = _resolve_sharding_spec(act_btnh, cache_shape, mesh)
+      k_sharding = shd.NamedSharding(mesh, cache_spec)
+      idx_sharding = shd.NamedSharding(mesh, P(*cache_spec[:1]))
 
       k = _zeros(cache_shape, dtype, k_sharding)()
       v = _zeros(cache_shape, dtype, k_sharding)()

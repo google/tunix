@@ -21,7 +21,7 @@ Provides:
    directly by the bash launchers, worker nodes, and orchestrator
    (lightweight; no training imports).
 2. `render_bash_exports(hp)`: Emits shell environment variables for `local.sh`
-   and `k8s.sh` (ports, TPU chip IDs, K8s JobSet parameters, and artifact/model
+   and `k8s.sh` (ports, device IDs, K8s JobSet parameters, and artifact/model
    paths).
 """
 
@@ -38,15 +38,17 @@ import pathlib
 import re
 import shlex
 import sys
-from typing import Any, Final
+import types
+from typing import Any, Final, Literal
 
 import omegaconf
 from tunix.cli import config as cli_config
+from tunix.common import configs as common_configs
 from tunix.common import datatypes as common_datatypes
+from tunix.dist_rl.common import datatypes as dist_rl_datatypes
+from tunix.dist_rl.common import execution_target
 from tunix.dist_rl.common import gcs_cache
 from tunix.dist_rl.distributed.deployment import yaml_generator
-from tunix.dist_rl.queue_manager import trajectory_queue_manager
-from tunix.dist_rl.weight_sync import weight_sync
 
 LAUNCH_DIR = pathlib.Path(__file__).parent
 REPO_ROOT = LAUNCH_DIR.parents[3]
@@ -84,7 +86,9 @@ def _dist_argv(overrides: Sequence[str]) -> list[str]:
   return [_DIST_PROG, str(DEFAULT_BASE_CONFIG_PATH), *overrides]
 
 
-def finalize_dist_config(hp: cli_config.HyperParameters) -> None:
+def finalize_dist_config(
+    hp: cli_config.HyperParameters,
+) -> execution_target.ClusterTargets:
   """Applies the distributed RL derived defaults, then validates invariants.
 
   Called at the end of `DistHyperParameters.__init__`, after
@@ -92,9 +96,23 @@ def finalize_dist_config(hp: cli_config.HyperParameters) -> None:
 
   Args:
     hp: Loaded configuration; updated in place.
+
+  Returns:
+    Resolved `ClusterTargets` for the cluster run.
   """
   _finalize_dist_defaults(hp)
+  _validate_local_settings(hp)
   _validate_dist_invariants(hp)
+  cluster_targets = resolve_cluster_targets(hp)
+  cluster = _mutable_section(hp, "cluster_config")
+  local = cluster["local"]
+  if (
+      cluster["target"] == "local"
+      and cluster_targets.placement == execution_target.Placement.COLOCATED
+  ):
+    local["rollout_devices"] = local["trainer_devices"]
+    local["inference_devices"] = local["trainer_devices"]
+  return cluster_targets
 
 
 class DistHyperParameters(cli_config.HyperParameters):
@@ -105,11 +123,65 @@ class DistHyperParameters(cli_config.HyperParameters):
   in the base schema (`validate_nested`).
   """
 
+  cluster_targets: execution_target.ClusterTargets
+
   def __init__(self, overrides: Sequence[str]) -> None:
     super().__init__(
         _dist_argv(overrides), merge_replace_keys=True, validate_nested=True
     )
-    finalize_dist_config(self)
+    self.cluster_targets = finalize_dist_config(self)
+
+
+def resolve_cluster_targets(
+    hp: cli_config.HyperParameters,
+) -> execution_target.ClusterTargets:
+  """Resolves `execution_targets` and returns validated `ClusterTargets`."""
+  exec_section = _mutable_section(hp, "execution_targets")
+  for key in ("target", "trainer", "rollout", "inference", "placement"):
+    if not isinstance(exec_section[key], str):
+      raise TypeError(
+          f"execution_targets.{key} must be a str, got {exec_section[key]!r}."
+      )
+  default_target = execution_target.ExecutionTarget.parse(
+      exec_section["target"] or str(execution_target.JAX_TPU)
+  )
+  exec_section["target"] = str(default_target)
+  for role in ("trainer", "rollout", "inference"):
+    raw = exec_section[role].strip()
+    exec_section[role] = str(
+        execution_target.ExecutionTarget.parse(raw) if raw else default_target
+    )
+  placement_raw = (
+      exec_section["placement"].strip().lower()
+      or execution_target.Placement.DISAGGREGATED.value
+  )
+  _check_choice(
+      "execution_targets.placement",
+      placement_raw,
+      tuple(p.value for p in execution_target.Placement),
+  )
+  exec_section["placement"] = placement_raw
+  return execution_target.ClusterTargets(
+      trainer=execution_target.ExecutionTarget.parse(exec_section["trainer"]),
+      rollout=execution_target.ExecutionTarget.parse(exec_section["rollout"]),
+      inference=execution_target.ExecutionTarget.parse(
+          exec_section["inference"]
+      ),
+      placement=execution_target.Placement(placement_raw),
+      weight_sync_mode=common_datatypes.WeightSyncMode(
+          str(hp.config_mapping("weight_sync_config")["mode"])
+      ),
+  )
+
+
+def _sync_packed_token_budget(section: MutableMapping[str, Any]) -> None:
+  """Validates and syncs `max_seq_tokens_per_device` and `max_seq_token_per_tpu`."""
+  resolved = common_configs.resolve_seq_tokens_budget(
+      section["max_seq_tokens_per_device"],
+      section["max_seq_token_per_tpu"],
+  )
+  section["max_seq_tokens_per_device"] = resolved
+  section["max_seq_token_per_tpu"] = resolved
 
 
 def _mutable_section(
@@ -173,6 +245,17 @@ def _finalize_dist_defaults(hp: cli_config.HyperParameters) -> None:
 
   if not cluster["artifact_root"]:
     raise ValueError("cluster_config.artifact_root must not be empty.")
+  # `pathlib` turns `gs://bucket/run` into the relative path `gs:/bucket/run`,
+  # so the derived output paths would silently land on local disk.
+  if "://" in str(cluster["artifact_root"]):
+    raise ValueError(
+        "cluster_config.artifact_root must be a filesystem path, got"
+        f" {str(cluster['artifact_root'])!r}. To write the outputs to a URI,"
+        " set rl_training_config.checkpoint_root_directory,"
+        " rl_training_config.metrics_logging_options.log_dir,"
+        " trajectory_store_config.dir and (for a MaxText trainer)"
+        " actor_model_config.kwargs.maxtext_output_dir instead."
+    )
   artifact_root = pathlib.Path(str(cluster["artifact_root"]))
   if target == "external" and not artifact_root.is_absolute():
     raise ValueError(
@@ -203,7 +286,9 @@ def _finalize_dist_defaults(hp: cli_config.HyperParameters) -> None:
           artifact_root / "models" / str(role_cfg["model_name"])
       )
 
+  _sync_packed_token_budget(_mutable_section(hp, "training_config"))
   rl_train = _mutable_section(hp, "rl_training_config")
+  _sync_packed_token_budget(rl_train)
   if rl_train["mini_batch_size"] is None:
     rl_train["mini_batch_size"] = int(hp.config["batch_size"])
   if not rl_train["checkpoint_root_directory"]:
@@ -393,6 +478,32 @@ def _validate_k8s_scalars(hp: cli_config.HyperParameters) -> None:
     )
 
 
+def _head_excluded_nodepools(k8s: Mapping[str, object]) -> str:
+  """Returns `cluster_config.k8s.head_excluded_nodepools` as a flag value.
+
+  Args:
+    k8s: The `cluster_config.k8s` mapping.
+
+  Returns:
+    The node pools joined with commas, as `--head_excluded_nodepools` of the
+    YAML generator takes them.
+
+  Raises:
+    TypeError: If the setting is not a list of str.
+  """
+  pools = k8s["head_excluded_nodepools"]
+  if (
+      isinstance(pools, str)
+      or not isinstance(pools, Sequence)
+      or not all(isinstance(pool, str) for pool in pools)
+  ):
+    raise TypeError(
+        "cluster_config.k8s.head_excluded_nodepools must be a list of str, got"
+        f" {pools!r}."
+    )
+  return ",".join(pools)
+
+
 def _validate_k8s_worker_jobsets(hp: cli_config.HyperParameters) -> None:
   """Rejects `cluster_config.k8s` settings the worker templates cannot render.
 
@@ -404,10 +515,12 @@ def _validate_k8s_worker_jobsets(hp: cli_config.HyperParameters) -> None:
     hp: Loaded configuration.
 
   Raises:
+    TypeError: If `head_excluded_nodepools` is not a list of str.
     ValueError: If `target` is "k8s" and `run_id` is not a valid K8s label
       value when `teardown_gang_on_exit` is enabled, `head_nodepool` is set
-      without `use_dynamic_slicing`, or a JobSet-only setting is enabled with a
-      `leaderworkerset.*.yaml` worker template.
+      without `use_dynamic_slicing`, `head_excluded_nodepools` is set with
+      `use_dynamic_slicing` or names an invalid node pool, or a JobSet-only
+      setting is enabled with a `leaderworkerset.*.yaml` worker template.
   """
   cluster = hp.config_mapping("cluster_config")
   if cluster["target"] != "k8s":
@@ -426,6 +539,17 @@ def _validate_k8s_worker_jobsets(hp: cli_config.HyperParameters) -> None:
         "cluster_config.k8s.head_nodepool requires"
         " cluster_config.k8s.use_dynamic_slicing=true."
     )
+  excluded = _head_excluded_nodepools(k8s)
+  if excluded and k8s["use_dynamic_slicing"]:
+    raise ValueError(
+        "cluster_config.k8s.head_excluded_nodepools requires"
+        " cluster_config.k8s.use_dynamic_slicing=false; with it, set"
+        " cluster_config.k8s.head_nodepool."
+    )
+  try:
+    yaml_generator.parse_head_excluded_nodepools(excluded)
+  except ValueError as e:
+    raise ValueError(f"cluster_config.k8s.head_excluded_nodepools: {e}") from e
   enabled_jobset_keys = [
       f"cluster_config.k8s.{k}" for k in _K8S_JOBSET_ONLY_KEYS if k8s[k]
   ]
@@ -617,6 +741,136 @@ def _validate_fault_tolerance(hp: cli_config.HyperParameters) -> None:
     )
 
 
+ProcessRole = Literal["orchestrator", "trainer", "rollout", "inference"]
+PROCESS_ROLES: Final[tuple[ProcessRole, ...]] = (
+    "orchestrator",
+    "trainer",
+    "rollout",
+    "inference",
+)
+# Environment variables `node_utils.apply_library_env` sets from the config,
+# and the config key each comes from. Launchers reject them in user-supplied
+# environments so a value can only come from the config.
+LIBRARY_ENV_CONFIG_KEYS: Final[Mapping[str, str]] = types.MappingProxyType({
+    "SKIP_JAX_PRECOMPILE": "vllm_config.skip_jax_precompile",
+    "TPU_RAIDEN_DATA_NICS": "weight_sync_config.raiden_data_nics",
+    "VERIFY_WEIGHTS": "weight_sync_config.verify_weights",
+})
+_FORBIDDEN_ROLE_ENVS: Final[Mapping[str, str]] = types.MappingProxyType({
+    **{k: f"set {v} instead" for k, v in LIBRARY_ENV_CONFIG_KEYS.items()},
+    "ENABLE_PATHWAYS_PERSISTENCE": (
+        "set cluster_config.k8s.enable_pathways_persistence instead"
+    ),
+    "DIST_RL_WORKER_PORT": "launcher-managed worker identity",
+    "DIST_RL_ROLLOUT_REPLICA": "launcher-managed worker identity",
+})
+_ROLE_ENV_PREFIX_REASONS: Final[tuple[tuple[str, str], ...]] = (
+    ("T_", "Tunix config override"),
+    ("M_", "MaxText config override"),
+)
+_ENV_VAR_NAME_RE: Final[re.Pattern[str]] = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_]*\Z"
+)
+
+
+def role_env(
+    hp: cli_config.HyperParameters,
+) -> dict[ProcessRole, dict[str, str]]:
+  """Validates and returns `cluster_config.role_env` per process."""
+  raw = hp.config_mapping("cluster_config")["role_env"]
+  if not isinstance(raw, Mapping) or set(raw) != set(PROCESS_ROLES):
+    raise ValueError(
+        f"cluster_config.role_env must map {PROCESS_ROLES}, got {raw!r}."
+    )
+  result: dict[ProcessRole, dict[str, str]] = {}
+  for role in PROCESS_ROLES:
+    env = raw[role]
+    if not isinstance(env, Mapping):
+      raise TypeError(
+          f"cluster_config.role_env.{role} must be a mapping, got {env!r}."
+      )
+    if not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in env.items()
+    ):
+      raise TypeError(
+          f"cluster_config.role_env.{role} keys and values must be strings,"
+          f" got {dict(env)!r}."
+      )
+    result[role] = dict(env)
+  return result
+
+
+def _validate_role_env(hp: cli_config.HyperParameters) -> None:
+  """Checks `cluster_config.role_env` names and active roles."""
+  parsed = role_env(hp)
+  cluster = hp.config_mapping("cluster_config")
+  if cluster["target"] == "external" and any(parsed.values()):
+    raise ValueError(
+        "cluster_config.role_env is set, but cluster_config.target=external"
+        " runs the processes outside local.sh and k8s.sh, which apply it."
+    )
+  if (
+      parsed["inference"]
+      and not hp.config_mapping("cluster_config")["run_inference_node"]
+  ):
+    raise ValueError(
+        "cluster_config.role_env.inference is set, but"
+        " cluster_config.run_inference_node resolved to false."
+    )
+  pairs: list[tuple[str, str]] = []
+  for role, env in parsed.items():
+    pairs.extend((role, k) for k in env)
+  for role, name in pairs:
+    default_reason = (
+        _FORBIDDEN_ROLE_ENVS[name] if name in _FORBIDDEN_ROLE_ENVS else ""
+    )
+    reason = next(
+        (msg for pfx, msg in _ROLE_ENV_PREFIX_REASONS if name.startswith(pfx)),
+        default_reason,
+    )
+    if reason or not _ENV_VAR_NAME_RE.match(name):
+      raise ValueError(
+          f"cluster_config.role_env.{role} rejects {name!r}"
+          f" ({reason or 'invalid variable name'})."
+      )
+
+
+def _validate_local_settings(hp: cli_config.HyperParameters) -> None:
+  """Validates and normalizes `cluster_config.local` settings."""
+  local = _mutable_section(hp, "cluster_config")["local"]
+  if not isinstance(local, MutableMapping):
+    raise TypeError(
+        f"cluster_config.local must be a mapping, got {type(local).__name__}."
+    )
+  for bool_key in (
+      "auto_detect_devices",
+      "download_model_weights",
+  ):
+    if not isinstance(local[bool_key], bool):
+      raise TypeError(
+          f"cluster_config.local.{bool_key} must be a bool, got"
+          f" {local[bool_key]!r}."
+      )
+  for device_key in ("trainer_devices", "rollout_devices", "inference_devices"):
+    val = local[device_key]
+    if val is None:
+      local[device_key] = ""
+    elif not isinstance(val, bool) and isinstance(val, int):
+      if val < 0:
+        raise ValueError(
+            f"cluster_config.local.{device_key} must be non-negative, got"
+            f" {val}."
+        )
+      local[device_key] = str(val)
+    elif isinstance(val, str):
+      local[device_key] = val.strip()
+    else:
+      raise TypeError(
+          f"cluster_config.local.{device_key} must be a str or non-negative"
+          f" int, got {val!r}."
+      )
+
+
 def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   """Validates cross-field invariants across trainer and rollout configs."""
   # TODO(noghabi): Check which of these checks can be consolidated with the
@@ -626,6 +880,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   _validate_k8s_scalars(hp)
   _validate_k8s_worker_jobsets(hp)
   _validate_rollout_replicas(hp)
+  _validate_role_env(hp)
   _validate_trajectory_logging(hp)
   _validate_rollout_logps_settings(hp)
   _validate_fault_tolerance(hp)
@@ -651,7 +906,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
           "actor_model_config.model_source='maxtext' requires"
           " actor_model_config.model_path (or model_config.model_path)."
       )
-    if rl_train["max_seq_token_per_tpu"] is None:
+    if not rl_train["max_seq_tokens_per_device"]:
       micro_batch = int(rl_train["train_micro_batch_size"])
       if micro_batch % actor_axes["fsdp"] != 0:
         raise ValueError(
@@ -691,13 +946,10 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
       _CHAT_PARSER_TYPES,
   )
   grpo = hp.config_mapping("agentic_grpo_config")
-  # TODO(noghabi): Move `GroupOrder` into a dependency-free module (e.g. under
-  # `dist_rl/common/`) so the resolver doesn't depend on `queue_manager`, and
-  # through it on flax and the agentic types. (`weight_sync.py` has no deps.)
   _check_choice(
       "agentic_grpo_config.trajectory_group_order",
       grpo["trajectory_group_order"],
-      tuple(order.value for order in trajectory_queue_manager.GroupOrder),
+      tuple(order.value for order in dist_rl_datatypes.GroupOrder),
   )
   max_version_span = grpo["max_version_span"]
   if max_version_span is not None:
@@ -708,7 +960,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
       )
     if (
         grpo["trajectory_group_order"]
-        == trajectory_queue_manager.GroupOrder.PROMPT_ARRIVAL.value
+        == dist_rl_datatypes.GroupOrder.PROMPT_ARRIVAL.value
     ):
       raise ValueError(
           "agentic_grpo_config.max_version_span is only supported with"
@@ -717,11 +969,12 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   _check_choice(
       "weight_sync_config.mode",
       hp.config_mapping("weight_sync_config")["mode"],
-      tuple(mode.value for mode in weight_sync.WeightSyncMode),
+      tuple(mode.value for mode in common_datatypes.WeightSyncMode),
   )
   _validate_maxtext_pairing(hp)
   _validate_maxtext_model_names(hp)
-  _validate_maxtext_extra_flags(hp)
+  _validate_maxtext_extra_config(hp)
+  _validate_maxtext_skip_step_kwargs(hp)
   _validate_rollout_weights(hp)
   _validate_library_settings(hp)
   if grpo["reward_mode"] == "reward_fn" and not hp.config["reward_functions"]:
@@ -755,7 +1008,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   # `train_micro_batch_size` counts trajectories in the distributed trainer:
   # gradient accumulation = mini_batch_size * num_generations /
   # train_micro_batch_size (not applicable with sequence packing).
-  if not rl_train["max_seq_token_per_tpu"]:
+  if not rl_train["max_seq_tokens_per_device"]:
     trajectories = mini_batch_size * num_generations
     if trajectories % micro_batch != 0:
       raise ValueError(
@@ -786,7 +1039,10 @@ def _validate_maxtext_pairing(hp: cli_config.HyperParameters) -> None:
       is "maxtext".
   """
   mode = hp.config_mapping("weight_sync_config")["mode"]
-  if mode == weight_sync.WeightSyncMode.NONE.value:
+  if mode in (
+      common_datatypes.WeightSyncMode.NONE.value,
+      common_datatypes.WeightSyncMode.NOOP.value,
+  ):
     return
   actor_source = hp.config_mapping("actor_model_config")["model_source"]
   rollout_source = hp.config_mapping("rollout_model_config")["model_source"]
@@ -806,7 +1062,7 @@ def rollout_init_with_random_weights(hp: cli_config.HyperParameters) -> bool:
   True makes the `inprocess_vllm` rollout start from random weights (vLLM's
   `load_format="dummy"`) instead of loading the checkpoint. Only Raiden weight
   sync replaces them: its bootstrap sync loads the trainer's weights before
-  step 0. `fallback` moves no weights, and `none` skips the sync.
+  step 0, whereas `none` skips the sync.
 
   Args:
     hp: Loaded configuration.
@@ -821,7 +1077,7 @@ def rollout_init_with_random_weights(hp: cli_config.HyperParameters) -> bool:
   value = hp.config_mapping("vllm_config")["init_with_random_weights"]
   if value is None:
     mode = hp.config_mapping("weight_sync_config")["mode"]
-    return mode == weight_sync.WeightSyncMode.RAIDEN.value
+    return mode == common_datatypes.WeightSyncMode.RAIDEN.value
   if not isinstance(value, bool):
     raise TypeError(
         "vllm_config.init_with_random_weights must be a bool or null, got"
@@ -850,7 +1106,7 @@ def _validate_rollout_weights(hp: cli_config.HyperParameters) -> None:
   """
   random_init = rollout_init_with_random_weights(hp)
   mode = hp.config_mapping("weight_sync_config")["mode"]
-  if mode == weight_sync.WeightSyncMode.RAIDEN.value:
+  if mode == common_datatypes.WeightSyncMode.RAIDEN.value:
     return
   rollout_engine = hp.config["rollout_engine"]
   rollout_source = hp.config_mapping("rollout_model_config")["model_source"]
@@ -876,25 +1132,9 @@ def _validate_rollout_weights(hp: cli_config.HyperParameters) -> None:
     )
 
 
-# Rollout settings promoted from the free-form `vllm_config.kwargs` to typed
-# `vllm_config` keys.
-_TYPED_VLLM_KEYS = (
-    "return_routed_experts",
-    "routed_experts_encode_mode",
-    "routed_experts_num_experts",
-    "detokenize",
-)
-
-
 def _validate_typed_vllm_settings(hp: cli_config.HyperParameters) -> None:
   """Validates the typed `vllm_config` rollout settings."""
   vllm = hp.config_mapping("vllm_config")
-  promoted = sorted(set(_TYPED_VLLM_KEYS) & set(vllm["kwargs"]))
-  if promoted:
-    raise ValueError(
-        f"vllm_config.kwargs sets {promoted}, which are typed keys now; set"
-        f" vllm_config.<key> instead (e.g. vllm_config.{promoted[0]})."
-    )
   for key in ("return_routed_experts", "detokenize"):
     if not isinstance(vllm[key], bool):
       raise TypeError(f"vllm_config.{key} must be a bool, got {vllm[key]!r}.")
@@ -905,7 +1145,7 @@ def _validate_typed_vllm_settings(hp: cli_config.HyperParameters) -> None:
         "vllm_config.server_mode must be a bool or null, got"
         f" {vllm['server_mode']!r}."
     )
-  common_datatypes.validate_routed_experts_encode_config(
+  common_configs.validate_routed_experts_encode_config(
       vllm["routed_experts_encode_mode"], vllm["routed_experts_num_experts"]
   )
   if vllm["return_routed_experts"] and hp.config["rollout_engine"] == "vanilla":
@@ -958,7 +1198,11 @@ def _validate_maxtext_model_names(hp: cli_config.HyperParameters) -> None:
     names[role_key] = name
   mode = hp.config_mapping("weight_sync_config")["mode"]
   if (
-      mode != weight_sync.WeightSyncMode.NONE.value
+      mode
+      not in (
+          common_datatypes.WeightSyncMode.NONE.value,
+          common_datatypes.WeightSyncMode.NOOP.value,
+      )
       and len(names) == 2
       and names["actor_model_config"] != names["rollout_model_config"]
   ):
@@ -971,43 +1215,233 @@ def _validate_maxtext_model_names(hp: cli_config.HyperParameters) -> None:
     )
 
 
-def _validate_maxtext_extra_flags(hp: cli_config.HyperParameters) -> None:
-  """Checks `dist_training_config.maxtext_extra_flags` before any job starts.
+# MaxText config keys that the trainer builds from this config, mapped to a
+# hint naming the config keys they come from. Only the error message below uses
+# the hints; the values themselves are computed in
+# `trainer._create_maxtext_trainer_factory` and
+# `maxtext_utils.build_maxtext_config`. `maxtext_extra_config` is appended last,
+# so an entry for one of these keys would silently override the config value.
+# The fixed settings the builder adds (e.g. `scan_layers`, `grad_dtype`,
+# `use_tokamax_gmm`) have no config key and may still be overridden.
+# `trainer_test.MaxTextExtraConfigTest` checks this key set against the builder.
+_MAXTEXT_KEYS_FROM_CONFIG: Final[Mapping[str, str]] = {
+    "model_name": "actor_model_config.kwargs.maxtext_model_name",
+    "load_parameters_path": "actor_model_config.model_path",
+    "base_output_directory": (
+        "actor_model_config.kwargs.maxtext_output_dir (default:"
+        " <cluster_config.artifact_root>/maxtext)"
+    ),
+    "weight_dtype": "actor_model_config.load_dtype",
+    "attention": "actor_model_config.kwargs.attention",
+    "padded_base_moe_mlp_dim": (
+        "actor_model_config.kwargs.padded_moe_mlp_dim (when 0, derived from"
+        " the 'tp' axis of rollout_model_config.mesh)"
+    ),
+    "base_num_kv_heads": (
+        "actor_model_config.kwargs.base_num_kv_heads (replicated up to the"
+        " 'tp' axis of rollout_model_config.mesh)"
+    ),
+    "prefuse_moe_weights": "actor_model_config.kwargs.prefuse_moe_weights",
+    "ici_fsdp_parallelism": "the 'fsdp' axis of actor_model_config.mesh",
+    "ici_tensor_parallelism": "the 'tp' axis of actor_model_config.mesh",
+    "ici_expert_parallelism": "the 'expert' axis of actor_model_config.mesh",
+    "ici_context_parallelism": "actor_model_config.kwargs.mesh_context",
+    "rollout_tensor_parallelism": "the 'tp' axis of rollout_model_config.mesh",
+    "per_device_batch_size": (
+        "rl_training_config.train_micro_batch_size, or with sequence packing"
+        " the 'fsdp' and 'expert' axes of actor_model_config.mesh, per device"
+    ),
+    "gradient_accumulation_steps": (
+        "rl_training_config.mini_batch_size,"
+        " agentic_grpo_config.num_generations and"
+        " rl_training_config.train_micro_batch_size (1 with sequence packing)"
+    ),
+    "max_target_length": (
+        "rollout_config.max_prompt_length and total_generation_steps, or"
+        " rl_training_config.max_seq_tokens_per_device"
+    ),
+    "learning_rate": "rl_training_config.actor_optimizer_config.learning_rate",
+    "warmup_steps_fraction": "actor_model_config.kwargs.warmup_steps_fraction",
+    "adam_b1": "rl_training_config.actor_optimizer_config.b1",
+    "adam_b2": "rl_training_config.actor_optimizer_config.b2",
+    "adam_eps": "rl_training_config.actor_optimizer_config.eps",
+    "adam_weight_decay": (
+        "rl_training_config.actor_optimizer_config.weight_decay"
+    ),
+    "gradient_clipping_threshold": (
+        "rl_training_config.actor_optimizer_config.chain_kwargs.max_norm"
+    ),
+    "enable_checkpointing": (
+        "rl_training_config.checkpointing_options.save_interval_steps"
+    ),
+    "checkpoint_period": (
+        "rl_training_config.checkpointing_options.save_interval_steps"
+    ),
+    "max_num_checkpoints_to_keep": (
+        "rl_training_config.checkpointing_options.max_to_keep"
+    ),
+    "checkpoint_storage_device_host_concurrent_gb": (
+        "dist_training_config.ckpt_d2h_concurrent_gb"
+    ),
+    "use_weight_converter": "weight_sync_config.use_weight_converter",
+    "profiler": "rl_training_config.profiler_options",
+    "profiler_steps": "rl_training_config.profiler_options",
+    "skip_first_n_steps_for_profiler": "rl_training_config.profiler_options",
+    "profile_periodically_period": "dist_training_config.profiler_period",
+    "upload_all_profiler_results": (
+        "actor_model_config.kwargs.upload_all_profiler_results"
+    ),
+    "enable_tpu_profiling_options": (
+        "actor_model_config.kwargs.enable_tpu_profiling_options"
+    ),
+    "tpu_num_chips_to_profile_per_task": (
+        "actor_model_config.kwargs.tpu_num_chips_to_profile_per_task"
+    ),
+    "tpu_num_sparse_cores_to_trace": (
+        "actor_model_config.kwargs.tpu_num_sparse_cores_to_trace"
+    ),
+    "tpu_num_sparse_core_tiles_to_trace": (
+        "actor_model_config.kwargs.tpu_num_sparse_core_tiles_to_trace"
+    ),
+    "skip_step_on_spikes": "actor_model_config.kwargs.skip_step_on_spikes",
+    "skip_step_on_nan": "actor_model_config.kwargs.skip_step_on_nan",
+    "skip_step_interval": "actor_model_config.kwargs.skip_step_interval",
+    "skip_step_scaling_factor": (
+        "actor_model_config.kwargs.skip_step_scaling_factor"
+    ),
+}
 
-  The flags are extra MaxText config arguments, which only a MaxText trainer
+
+# MaxText config names are Python identifiers (fields of its config class).
+_MAXTEXT_CONFIG_NAME_RE: Final[re.Pattern[str]] = re.compile(
+    r"[A-Za-z_][A-Za-z0-9_]*"
+)
+
+
+def _validate_maxtext_skip_step_kwargs(hp: cli_config.HyperParameters) -> None:
+  """Validates `actor_model_config.kwargs.skip_step_*` types and backend."""
+  actor = hp.config_mapping("actor_model_config")
+  kwargs = actor["kwargs"]
+  if not isinstance(kwargs, Mapping):
+    return
+  keys = (
+      "skip_step_on_spikes",
+      "skip_step_on_nan",
+      "skip_step_interval",
+      "skip_step_scaling_factor",
+  )
+  present = [k for k in keys if k in kwargs and kwargs[k] is not None]
+  if not present:
+    return
+  if actor["model_source"] != "maxtext":
+    raise ValueError(
+        "actor_model_config.kwargs."
+        + ", actor_model_config.kwargs.".join(present)
+        + " require actor_model_config.model_source='maxtext', got"
+        f" {actor['model_source']!r}."
+    )
+  for bool_key in ("skip_step_on_spikes", "skip_step_on_nan"):
+    if bool_key in kwargs and kwargs[bool_key] is not None:
+      if not isinstance(kwargs[bool_key], bool):
+        raise ValueError(
+            f"actor_model_config.kwargs.{bool_key} must be a bool, got"
+            f" {kwargs[bool_key]!r}."
+        )
+  if "skip_step_interval" in kwargs and kwargs["skip_step_interval"] is not None:
+    interval = kwargs["skip_step_interval"]
+    if (
+        isinstance(interval, bool)
+        or not isinstance(interval, int)
+        or interval <= 0
+    ):
+      raise ValueError(
+          "actor_model_config.kwargs.skip_step_interval must be a positive int,"
+          f" got {interval!r}."
+      )
+  if (
+      "skip_step_scaling_factor" in kwargs
+      and kwargs["skip_step_scaling_factor"] is not None
+  ):
+    factor = kwargs["skip_step_scaling_factor"]
+    if (
+        isinstance(factor, bool)
+        or not isinstance(factor, (int, float))
+        or not (0 < factor < float("inf"))
+    ):
+      raise ValueError(
+          "actor_model_config.kwargs.skip_step_scaling_factor must be a"
+          f" positive finite number, got {factor!r}."
+      )
+
+
+def _validate_maxtext_extra_config(hp: cli_config.HyperParameters) -> None:
+  """Checks `dist_training_config.maxtext_extra_config` before any job starts.
+
+  The entries are extra MaxText config keys, which only a MaxText trainer
   reads (`maxtext_utils.build_maxtext_config`); a Tunix trainer would silently
-  ignore them. A malformed entry would otherwise fail only inside the trainer,
-  after the launcher has submitted the jobs.
+  ignore them. The trainer passes each one to MaxText as `key=value`, so a
+  value must be a scalar; anything else would otherwise fail only inside the
+  trainer, after the launcher has submitted the jobs. An entry for a key the
+  trainer builds from this config would silently override that config value.
 
   Args:
     hp: Loaded configuration.
 
   Raises:
-    TypeError: If the flags are not a string.
-    ValueError: If the flags are set and `actor_model_config.model_source` is
-      not "maxtext", or an entry is not a `key=value` pair.
+    TypeError: If the section is not a mapping, or a value is not a str, int,
+      float or bool.
+    ValueError: If entries are set and `actor_model_config.model_source` is not
+      "maxtext", a key is not a MaxText config name, or an entry sets a key in
+      `_MAXTEXT_KEYS_FROM_CONFIG`.
   """
-  flags = hp.config_mapping("dist_training_config")["maxtext_extra_flags"]
-  if not isinstance(flags, str):
+  extra = hp.config_mapping("dist_training_config")["maxtext_extra_config"]
+  if not isinstance(extra, Mapping):
     raise TypeError(
-        "dist_training_config.maxtext_extra_flags must be a string of"
-        f" space-separated key=value pairs, got {flags!r}."
+        "dist_training_config.maxtext_extra_config must be a mapping of"
+        f" MaxText config keys to values, got {extra!r}."
     )
-  entries = flags.split()
-  if not entries:
+  if not extra:
     return
   actor_source = hp.config_mapping("actor_model_config")["model_source"]
   if actor_source != "maxtext":
     raise ValueError(
-        "dist_training_config.maxtext_extra_flags configures a MaxText trainer,"
-        f" but actor_model_config.model_source is {actor_source!r}. Set"
-        " model_config.model_source=maxtext or drop the flags."
+        "dist_training_config.maxtext_extra_config configures a MaxText"
+        f" trainer, but actor_model_config.model_source is {actor_source!r}."
+        " Set model_config.model_source=maxtext or drop the entries."
     )
-  malformed = [e for e in entries if "=" not in e or e.startswith("=")]
-  if malformed:
+  # A key such as "learning_rate=1e-6" would become the MaxText argument
+  # `learning_rate=1e-6=1` and slip past `_MAXTEXT_KEYS_FROM_CONFIG`.
+  bad_keys = [
+      key
+      for key in extra
+      if not isinstance(key, str) or not _MAXTEXT_CONFIG_NAME_RE.fullmatch(key)
+  ]
+  if bad_keys:
     raise ValueError(
-        "dist_training_config.maxtext_extra_flags entries must be key=value"
-        f" pairs, got {malformed!r}."
+        "dist_training_config.maxtext_extra_config keys must be MaxText config"
+        f" names (letters, digits and underscores), got {bad_keys!r}."
+    )
+  not_scalar = {
+      key: value
+      for key, value in extra.items()
+      if not isinstance(value, (str, int, float, bool))
+  }
+  if not_scalar:
+    raise TypeError(
+        "dist_training_config.maxtext_extra_config values must be a str, int,"
+        f" float or bool, got {not_scalar!r}."
+    )
+  from_config = [
+      f"{key} (set {_MAXTEXT_KEYS_FROM_CONFIG[key]} instead)"
+      for key in extra
+      if key in _MAXTEXT_KEYS_FROM_CONFIG
+  ]
+  if from_config:
+    raise ValueError(
+        "dist_training_config.maxtext_extra_config must not set MaxText keys"
+        " that the trainer builds from the config: "
+        + ", ".join(from_config)
+        + "."
     )
 
 
@@ -1209,10 +1643,15 @@ def _bash_quote(val: object) -> str:
   return shlex.quote(str(val))
 
 
+def _shell_env_words(env: Mapping[str, str]) -> str:
+  """Renders `env` as space-separated `KEY=VALUE` words, each value quoted."""
+  return " ".join(f"{name}={shlex.quote(value)}" for name, value in env.items())
+
+
 # TODO(noghabi): Consider auto-flattening `cluster_config.{local,k8s}` into
 # `UPPER_SNAKE_CASE` exports (and mapping only the non-cluster keys by hand),
 # which would shrink this list and the drift check in `launch_test.py`.
-def render_bash_exports(hp: cli_config.HyperParameters) -> str:
+def render_bash_exports(hp: DistHyperParameters) -> str:
   """Renders cluster/deployment shell exports for `local.sh` and `k8s.sh`."""
   cluster = hp.config_mapping("cluster_config")
   ports = cli_config.to_str_dict(cluster["ports"])
@@ -1224,13 +1663,13 @@ def render_bash_exports(hp: cli_config.HyperParameters) -> str:
   actor = hp.config_mapping("actor_model_config")
   rollout_model = hp.config_mapping("rollout_model_config")
   ws = hp.config_mapping("weight_sync_config")
-  vllm = hp.config_mapping("vllm_config")
   sandbox_k8s = (
       hp.config["kubernetes_config"]
       if isinstance(hp.config["kubernetes_config"], Mapping)
       else {}
   )
   trainer_backend = "maxtext" if actor["model_source"] == "maxtext" else "tunix"
+  cluster_targets = hp.cluster_targets
   # The rollout pods' GCS compilation-cache URI, from the config alone and never
   # the launcher's environment: `gcs_cache` reads the settings from this
   # mapping, in its usual order (`rollout_gcs_dir`, then `gcs_dir`, `bucket`).
@@ -1247,6 +1686,13 @@ def render_bash_exports(hp: cli_config.HyperParameters) -> str:
 
   exports: dict[str, object] = {
       "CLUSTER_TARGET": cluster["target"],
+      "EXECUTION_PLACEMENT": cluster_targets.placement.value,
+      "TRAINER_FRAMEWORK": cluster_targets.trainer.framework.value,
+      "TRAINER_ACCELERATOR": cluster_targets.trainer.accelerator.value,
+      "ROLLOUT_FRAMEWORK": cluster_targets.rollout.framework.value,
+      "ROLLOUT_ACCELERATOR": cluster_targets.rollout.accelerator.value,
+      "INFERENCE_FRAMEWORK": cluster_targets.inference.framework.value,
+      "INFERENCE_ACCELERATOR": cluster_targets.inference.accelerator.value,
       "ORCHESTRATOR_MAIN": cluster["orchestrator_main"],
       "TRAINER_MAIN": cluster["trainer_main"],
       "ROLLOUT_MAIN": cluster["rollout_main"],
@@ -1280,13 +1726,11 @@ def render_bash_exports(hp: cli_config.HyperParameters) -> str:
       "WEIGHT_SYNC_RAIDEN_USE_FFI": (
           "" if ws["raiden_use_ffi"] is None else ws["raiden_use_ffi"]
       ),
-      "VLLM_ADDITIONAL_CONFIG_JSON": (
-          json.dumps(vllm["kwargs"], sort_keys=True) if vllm["kwargs"] else ""
-      ),
-      "LOCAL_AUTO_DETECT_PCI_TPUS": local["auto_detect_pci_tpus"],
-      "LOCAL_TRAINER_TPU_CHIPS": local["trainer_tpu_chips"],
-      "LOCAL_ROLLOUT_TPU_CHIPS": local["rollout_tpu_chips"],
-      "LOCAL_INFERENCE_TPU_CHIPS": local["inference_tpu_chips"],
+      "LOCAL_AUTO_DETECT_DEVICES": local["auto_detect_devices"],
+      "LOCAL_DOWNLOAD_MODEL_WEIGHTS": local["download_model_weights"],
+      "LOCAL_TRAINER_DEVICES": local["trainer_devices"],
+      "LOCAL_ROLLOUT_DEVICES": local["rollout_devices"],
+      "LOCAL_INFERENCE_DEVICES": local["inference_devices"],
       "LOCAL_TPU_CHIPS_PER_HOST_BOUNDS": local["tpu_chips_per_host_bounds"],
       "LOCAL_TPU_HOST_BOUNDS": local["tpu_host_bounds"],
       "LOCAL_ALLOW_MULTIPLE_LIBTPU_LOAD": local["allow_multiple_libtpu_load"],
@@ -1311,7 +1755,6 @@ def render_bash_exports(hp: cli_config.HyperParameters) -> str:
       "K8S_CPU_MEMORY": k8s["cpu_memory"],
       "K8S_GCS_SCRATCH_LOCATION": k8s["gcs_scratch_location"],
       "K8S_ENABLE_PATHWAYS_PERSISTENCE": k8s["enable_pathways_persistence"],
-      "K8S_TRAINER_EXTRA_ENV": k8s["trainer_extra_env"],
       "K8S_TUNIX_IMAGE": k8s["tunix_image"],
       "K8S_PATHWAYS_SERVER_IMAGE": k8s["pathways_server_image"],
       "K8S_PATHWAYS_PROXY_IMAGE": k8s["pathways_proxy_image"],
@@ -1326,6 +1769,7 @@ def render_bash_exports(hp: cli_config.HyperParameters) -> str:
       "K8S_TEARDOWN_GANG_ON_EXIT": k8s["teardown_gang_on_exit"],
       "K8S_USE_DYNAMIC_SLICING": k8s["use_dynamic_slicing"],
       "K8S_HEAD_NODEPOOL": k8s["head_nodepool"],
+      "K8S_HEAD_EXCLUDED_NODEPOOLS": _head_excluded_nodepools(k8s),
       "K8S_TRAINER_JOBSET_YAML": k8s_trainer["jobset_yaml"],
       "K8S_TRAINER_TPU_SLICE": k8s_trainer["tpu_slice"],
       "K8S_ROLLOUT_JOBSET_YAML": k8s_rollout["jobset_yaml"],
@@ -1335,6 +1779,10 @@ def render_bash_exports(hp: cli_config.HyperParameters) -> str:
       # Empty without a GCS cache.
       "K8S_JAX_CACHE_ROLLOUT_GCS_DIR": rollout_cache_uri or "",
       "K8S_JAX_CACHE_SAVE": jax_cache["save"],
+      **{
+          f"ROLE_ENV_{role.upper()}": _shell_env_words(env)
+          for role, env in role_env(hp).items()
+      },
       "SANDBOX_NAMESPACE": (
           sandbox_k8s["namespace"] if "namespace" in sandbox_k8s else ""
       ),

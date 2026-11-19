@@ -56,8 +56,9 @@ FAKE_HF_TOKEN = "test_token"
 # wherever the OSS export puts the test code.
 _COMMON_DIR = pathlib.Path(resolve_config.__file__).parent
 _DIST_RL_DIR = _COMMON_DIR.parents[1]
-# Example launchers and recipes live under `dist_rl/examples/`.
+# Example and benchmark launchers live under `dist_rl/<root>/`.
 EXAMPLES_DIR = _DIST_RL_DIR / "examples"
+LauncherRoot = Literal["examples", "benchmarks"]
 _RESOLVE_CONFIG_BIN = _COMMON_DIR / "resolve_config"
 _YAML_GEN_BIN = _DIST_RL_DIR / "distributed" / "deployment" / "yaml_generator"
 # `tunix.cli.config` reads `T_<KEY>` environment variables as config overrides.
@@ -230,11 +231,12 @@ class Expected:
 
   Attributes:
     name: Test case name.
-    script: Launcher script path relative to `EXAMPLES_DIR`.
-    example: Example package (`examples/<example>`) the script launches.
-    module: Example module (`examples/<example>/<module>.py`), named by both
+    script: Launcher script path relative to `dist_rl/<root>/` (where `<root>`
+      is `LauncherTestCase.root`).
+    example: Package directory (`<root>/<example>`) the script launches.
+    module: Entry module (`<root>/<example>/<module>.py`), named by both
       `data_module` and `cluster_config.registry_module`; the script layers its
-      config `examples/<example>/<module>.yaml`.
+      config `<root>/<example>/<module>.yaml`.
     target: Expected `cluster_config.target`.
     batch_size: Expected `batch_size`.
     mini_batch_size: Expected `rl_training_config.mini_batch_size`.
@@ -265,16 +267,23 @@ class Expected:
 class LauncherTestCase(parameterized.TestCase):
   """Base class for launcher dry-run tests."""
 
+  root: LauncherRoot = "examples"
+
+  @property
+  def base_dir(self) -> pathlib.Path:
+    """Directory `dist_rl/<self.root>` containing the launcher scripts."""
+    return _DIST_RL_DIR / self.root
+
   def run_launcher(self, script: str, *args: str) -> DryRun:
-    """Dry-runs `EXAMPLES_DIR / script` without checking its exit status."""
+    """Dry-runs `self.base_dir / script` without checking exit."""
     return dry_run(
-        EXAMPLES_DIR / script,
+        self.base_dir / script,
         args,
         tmp_dir=pathlib.Path(self.create_tempdir().full_path),
     )
 
   def dry_run(self, script: str, *args: str) -> DryRun:
-    """Dry-runs `EXAMPLES_DIR / script` and asserts that it succeeds."""
+    """Dry-runs `self.base_dir / script` and asserts exit 0."""
     run = self.run_launcher(script, *args)
     self.assertEqual(run.returncode, 0, msg=run.stderr)
     return run
@@ -284,9 +293,9 @@ class LauncherTestCase(parameterized.TestCase):
   ) -> tuple[DryRun, resolve_config.DistHyperParameters]:
     """Dry-runs `expected.script` and checks the shared launcher contract.
 
-    The example config `<example>/<module>.yaml` must be the only YAML
-    layered on the shared base, user arguments (`"$@"`) must come last, and
-    the resolved entry points, example module, batch geometry, meshes, and
+    The config `<example>/<module>.yaml` under `dist_rl/<self.root>/` must be
+    the only YAML layered on the shared base, user arguments (`"$@"`) must come
+    last, and the resolved entry points, module, batch geometry, meshes, and
     model (whose hub id is also the tokenizer path) must match `expected`.
 
     Args:
@@ -317,7 +326,9 @@ class LauncherTestCase(parameterized.TestCase):
     cluster = config["cluster_config"]
     self.assertEqual(cluster["target"], expected.target)
     self.assertEqual(cluster["orchestrator_main"], ORCHESTRATOR_MAIN)
-    module = f"tunix.dist_rl.examples.{expected.example}.{expected.module}"
+    module = (
+        f"tunix.dist_rl.{self.root}.{expected.example}.{expected.module}"
+    )
     self.assertEqual(config["data_module"], module)
     self.assertEqual(cluster["registry_module"], module)
     self.assertEqual(config["batch_size"], expected.batch_size)
@@ -354,7 +365,7 @@ class LauncherTestCase(parameterized.TestCase):
       self.assertIn("kubectl delete jobset testuser-orch", run.stdout)
       # The container commands resolve the repo-relative example config.
       self.assertIn(
-          f"override_config_file=tunix/dist_rl/examples/{config_file}",
+          f"override_config_file=tunix/dist_rl/{self.root}/{config_file}",
           run.stdout,
       )
       yaml_sections = run.stdout.split("\n---\n")[1:]

@@ -151,9 +151,9 @@ class DeepSWEDistTest(parameterized.TestCase):
     ).save_to_disk(dataset_dir)
     expected_ids = [
         row["instance_id"]
-        for row in datasets.Dataset.from_list(rows)
-        .shuffle(seed=17)
-        .to_list()[:4]
+        for row in (
+            datasets.Dataset.from_list(rows).shuffle(seed=17).to_list()[:4]
+        )
     ]
 
     with self.assertLogs(level="INFO") as logs:
@@ -230,13 +230,11 @@ class DeepSWEDistTest(parameterized.TestCase):
     self.assertEqual(actual, expected)
 
   def test_create_dataset_forwards_hub_arguments_and_normalizes_cache_dir(self):
-    hub_source = grain.MapDataset.source([
-        {
-            "instance_id": np.bytes_(b"hub__0"),
-            "problem_statement": "Hub issue",
-            "modified_files": ["lib/core.py"],
-        }
-    ])
+    hub_source = grain.MapDataset.source([{
+        "instance_id": np.bytes_(b"hub__0"),
+        "problem_statement": "Hub issue",
+        "modified_files": ["lib/core.py"],
+    }])
     mock_create = self.enter_context(
         mock.patch.object(
             deepswe.deepswe_data,
@@ -482,7 +480,7 @@ class DeepSWEDistTest(parameterized.TestCase):
     metadata = item["metadata"]
     assert isinstance(metadata, Mapping)
     self.assertNotIn("agent_config", metadata)
-    self.assertEqual(metadata["episode_timeout"], 1800.0)
+    self.assertEqual(metadata["episode_timeout"], 4800.0)
     self.assertFalse(metadata["overlong_filter"])
     env_config = metadata["env_config"]
     assert isinstance(env_config, Mapping)
@@ -492,10 +490,10 @@ class DeepSWEDistTest(parameterized.TestCase):
         **hp.config_mapping("env_kwargs"),
         **env_config,
         "group_index": 1,
-        "num_generations": 2,
+        "num_generations": 8,
         "policy_version": 4,
     })
-    self.assertEqual(env.max_steps, 3)
+    self.assertEqual(env.max_steps, 50)
     self.assertEqual(env.step_timeout, 1800)
     self.assertEqual(env.reward_timeout, 1800)
     self.assertEqual(env.backend, "kubernetes")
@@ -506,7 +504,7 @@ class DeepSWEDistTest(parameterized.TestCase):
     self.assertEqual(env.extra_kwargs["pair_index"], 1)
     self.assertEqual(env.task["prompt_id"], "repo__0")
     self.assertEqual(env.task["group_index"], 1)
-    self.assertEqual(env.task["num_generations"], 2)
+    self.assertEqual(env.task["num_generations"], 8)
     self.assertEqual(env.task["policy_version"], 4)
 
     agent_cls = registry.AGENT_REGISTRY.get(hp.config["agent_class_path"])
@@ -524,42 +522,90 @@ class DeepSWEDistTest(parameterized.TestCase):
         ),
     )
 
+  def test_deep_swe_env_initializes_on_demand_fleet_without_planning(self):
+    sentinel_fleet = object()
+    mock_init = self.enter_context(
+        mock.patch.object(
+            deepswe.sandbox_utils,
+            "init_global_fleet",
+            autospec=True,
+            spec_set=True,
+            return_value=sentinel_fleet,
+        )
+    )
+    env = deepswe.DeepSWEEnv(
+        entry={"instance_id": "repo__0", "docker_image": "img:v1"},
+        prompt_id="repo__0",
+        group_index=1,
+        num_generations=8,
+        use_agent_sandbox=True,
+    )
+    mock_init.assert_called_once_with(
+        tasks=None,
+        max_concurrency=8,
+        num_generations=8,
+        max_warmpool_replicas=8,
+    )
+    self.assertIs(env.fleet, sentinel_fleet)
+
   def test_deepswe_yaml_preserves_recipe_defaults(self):
     hp = _hp()
+    actor = hp.config_mapping("actor_model_config")
+    self.assertEqual(actor["model_name"], "Qwen3-32B")
+    self.assertEqual(actor["model_id"], "Qwen/Qwen3-32B")
+    self.assertEqual(actor["remat_config"], "decoder")
+    self.assertTrue(actor["use_flash_attention"])
+    self.assertIsNone(actor["flash_attention_block_size"])
     self.assertEqual(
         hp.config_mapping("chat_parser_config"),
         {"type": "auto", "enable_thinking": False},
     )
+    self.assertEqual(hp.config["rollout_engine"], "inprocess_vllm")
     rollout_cfg = hp.config_mapping("rollout_config")
-    self.assertEqual(rollout_cfg["eos_tokens"], "")
+    self.assertEqual(rollout_cfg["max_prompt_length"], 4096)
+    self.assertEqual(rollout_cfg["total_generation_steps"], 28672)
+    self.assertEqual(rollout_cfg["eos_tokens"], "151645")
+    vllm_cfg = hp.config_mapping("vllm_config")
+    self.assertEqual(vllm_cfg["hbm_utilization"], 0.7)
+    self.assertEqual(vllm_cfg["max_num_batched_tokens"], 16384)
+    self.assertEqual(hp.config_mapping("weight_sync_config")["mode"], "raiden")
     grpo_map = hp.config_mapping("agentic_grpo_config")
     env_kwargs = hp.config_mapping("env_kwargs")
     self.assertEqual(env_kwargs["max_steps"], grpo_map["max_turns"])
-    self.assertEqual(grpo_map["max_turns"], 3)
-    self.assertEqual(grpo_map["max_concurrency"], 64)
+    self.assertEqual(grpo_map["max_turns"], 50)
+    self.assertEqual(grpo_map["max_concurrency"], 256)
 
+    self.assertEqual(hp.config["batch_size"], 8)
     rl_train = hp.config_mapping("rl_training_config")
+    self.assertEqual(rl_train["mini_batch_size"], 8)
+    self.assertEqual(rl_train["train_micro_batch_size"], 8)
+    self.assertEqual(rl_train["compute_logps_micro_batch_size"], 8)
+    self.assertEqual(rl_train["max_steps"], 201)
+    self.assertEqual(rl_train["checkpointing_options"]["max_to_keep"], 2)
     optimizer = rl_train["actor_optimizer_config"]
     self.assertEqual(cli_config.create_learning_rate(optimizer), 1e-6)
-    self.assertEqual((optimizer["b1"], optimizer["b2"]), (0.9, 0.999))
-    self.assertEqual(optimizer["weight_decay"], 0.0)
+    self.assertEqual((optimizer["b1"], optimizer["b2"]), (0.9, 0.99))
+    self.assertEqual(optimizer["weight_decay"], 0.01)
     self.assertEqual(optimizer["chain_kwargs"], {"max_norm": 1.0})
 
-    self.assertIsNone(grpo_map["epsilon_high"])
+    self.assertEqual(grpo_map["epsilon_high"], 0.28)
     grpo = orchestrator.build_grpo_config(hp)
-    self.assertEqual(grpo.num_generations, 2)
+    self.assertEqual(grpo.num_generations, 8)
     self.assertEqual(grpo.beta, 0.0)
     self.assertEqual(grpo.epsilon, 0.2)
-    self.assertEqual(grpo.epsilon_high, 0.2)
+    self.assertEqual(grpo.epsilon_high, 0.28)
     self.assertEqual(grpo.loss_algo, "grpo")
+    self.assertEqual(grpo.loss_agg_mode, "sequence-mean-token-scale")
     self.assertEqual(grpo.kl_loss_mode, "kl")
-    self.assertEqual(grpo.advantage_estimator, "grpo")
-    self.assertIsNone(grpo.sampler_is)
+    self.assertEqual(grpo.advantage_estimator, "rloo")
+    self.assertEqual(grpo.sampler_is, "token")
+    self.assertEqual(grpo.sampler_is_threshold, 2.0)
+    self.assertIsNone(grpo.sampler_rs)
     self.assertEqual(grpo.reward_mode, "env")
     self.assertTrue(grpo.use_rollout_logps)
 
     _, derived_rpc_timeout = orchestrator.resolve_weight_sync_timeouts(hp)
-    self.assertEqual(derived_rpc_timeout, 2100.0)
+    self.assertEqual(derived_rpc_timeout, 5100.0)
     cluster = hp.config_mapping("cluster_config")
     self.assertEqual(cluster["local"]["worker_shutdown_grace_secs"], 60)
 
@@ -586,7 +632,7 @@ class DeepSWEDistTest(parameterized.TestCase):
     assert first is not None
     self.assertEqual(first["prompt"], "Fix bug 0")
     self.assertEqual(first["task_name"], "deepswe")
-    self.assertEqual(first["max_turns"], 3)
+    self.assertEqual(first["max_turns"], 50)
 
 
 if __name__ == "__main__":

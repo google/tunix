@@ -29,27 +29,25 @@ from collections.abc import Callable, Mapping
 import dataclasses
 import logging
 import os
+import re
 import sys
-from typing import TypeVar
+from typing import Final, TypeVar
 
 from flax import nnx
 import jax
 from jax.sharding import Mesh
 import optax
 from orbax import checkpoint as ocp
+from tunix.cli import config as cli_config
 from tunix.cli.utils import model as model_utils
 from tunix.dist_rl.distributed.runtime import context as context_lib
 from tunix.dist_rl.launch.common import resolve_config
 from tunix.dist_rl.launch.nodes import node_utils
 from tunix.dist_rl.train import abstract_trainer
 from tunix.dist_rl.train import peft_trainer_v2
-from tunix.dist_rl.weight_sync import raiden_preload
 from tunix.dist_rl.worker import trainer_worker
 from tunix.models import automodel
 from tunix.utils import maxtext_utils
-
-# Import Raiden before any other libraries to ensure correct JAX compilation.
-raiden_preload.import_raiden()
 
 LOCAL_WORKER_ID = "trainer-0"
 
@@ -69,18 +67,20 @@ KwargValue = int | float | str | bool
 _T = TypeVar("_T", int, float, str, bool)
 
 
-def _sequence_packing_enabled(hp: resolve_config.DistHyperParameters) -> bool:
-  """Returns whether `rl_training_config.max_seq_token_per_tpu > 0`.
+def _sequence_packing_enabled(
+    hp: resolve_config.DistHyperParameters,
+) -> bool:
+  """Returns whether `rl_training_config.max_seq_tokens_per_device > 0`.
 
   `common_configs.is_sequence_packing_enabled` needs a built TrainingConfig:
   `RLTrainingConfig` cannot be built for dist configs (its micro-batch is
   prompt-level, the dist one is trajectory-level), and the trainer's
-  `TrainingConfig` deliberately leaves `max_seq_token_per_tpu` unset.
+  `TrainingConfig` deliberately leaves `max_seq_tokens_per_device` unset.
 
   Args:
     hp: Validated distributed RL configuration.
   """
-  budget = hp.config_mapping(_RL_TRAINING_KEY)["max_seq_token_per_tpu"]
+  budget = hp.config_mapping(_RL_TRAINING_KEY)["max_seq_tokens_per_device"]
   return budget is not None and int(budget) > 0
 
 
@@ -203,14 +203,15 @@ def _tunix_training_config(
           device_host_concurrent_gb=_ckpt_d2h_concurrent_gb(hp),
       ),
       checkpoint_root_directory=_checkpoint_root_directory(hp),
-      # No max_seq_token_per_tpu here. Under the orchestrator the trainer never
-      # packs: the SequencePackedBatchAssembler does, and the weighting that
-      # packing needs rides in on the payload (`_fwd_bwd_step` accumulates with
-      # `denom=aux.primary_loss.denominator`). The only thing the field would
-      # change on this path is `_is_single_microstep()`, and the orchestrator
-      # drives `fwd_bwd` + `update` rather than the fused step it gates.
-      # The orchestrator owns resume: it calls restore_checkpoint() explicitly
-      # and realigns its step/policy_version from the returned metadata.
+      # No max_seq_tokens_per_device here. Under the orchestrator the trainer
+      # never packs: the SequencePackedBatchAssembler does, and the weighting
+      # that packing needs rides in on the payload (`_fwd_bwd_step` accumulates
+      # with `denom=aux.primary_loss.denominator`). The only thing the field
+      # would change on this path is `_is_single_microstep()`, and the
+      # orchestrator drives `fwd_bwd` + `update` rather than the fused step it
+      # gates. The orchestrator owns resume: it calls restore_checkpoint()
+      # explicitly and realigns its step/policy_version from the returned
+      # metadata.
       resume_from_checkpoint_on_init=False,
   )
 
@@ -337,9 +338,9 @@ def _create_tunix_trainer_factory(
   if _sequence_packing_enabled(hp):
     logging.info(
         "Trainer gradient accumulation is dynamic via sequence packing"
-        " (max_seq_token_per_tpu=%s, mini_batch_size=%s prompt groups,"
+        " (max_seq_tokens_per_device=%s, mini_batch_size=%s prompt groups,"
         " num_generations=%d).",
-        rl_train["max_seq_token_per_tpu"],
+        rl_train["max_seq_tokens_per_device"],
         rl_train["mini_batch_size"],
         num_generations,
     )
@@ -426,8 +427,8 @@ def _maxtext_adamw_options(
   prefix = f"{_RL_TRAINING_KEY}.{_ACTOR_OPTIMIZER_KEY}"
   hint = (
       " For other MaxText optimizer settings, drop this setting and set them in"
-      " dist_training_config.maxtext_extra_flags instead (e.g."
-      ' dist_training_config.maxtext_extra_flags="opt_type=sgd").'
+      " dist_training_config.maxtext_extra_config instead (e.g."
+      " dist_training_config.maxtext_extra_config.opt_type=sgd)."
   )
   opt_type = str(opt["opt_type"])
   if opt_type.lower() != "adamw":
@@ -508,6 +509,56 @@ def _maxtext_profiling_options(
   )
 
 
+# Strings that YAML reads back unchanged without quotes: a word that is not a
+# YAML boolean or null keyword (numbers and `${...}` start with another
+# character). The checked keywords are lowercased, so some casings are quoted
+# needlessly.
+_PLAIN_YAML_STRING_RE: Final[re.Pattern[str]] = re.compile(
+    r"[A-Za-z_][A-Za-z0-9_./-]*"
+)
+_YAML_KEYWORDS: Final[frozenset[str]] = frozenset(
+    {"true", "false", "yes", "no", "on", "off", "null"}
+)
+
+
+def _maxtext_extra_flag(key: str, value: str | int | float | bool) -> str:
+  """Returns the MaxText `key=value` argument for one extra config entry.
+
+  MaxText reads its arguments with `OmegaConf.from_cli`, which parses each value
+  as YAML. A string YAML would read as something else (`""`, `"0"`, `"true"`,
+  `"a: b"`, ...) is written double-quoted by `cli_config.format_cli_arg`. Plain
+  words such as `custom` stay unquoted, so the logged flags read like the
+  hand-written `MAXTEXT_EXTRA_FLAGS` of the old launchers.
+
+  Args:
+    key: MaxText config name.
+    value: The value; `DistHyperParameters` checked its type.
+  """
+  if isinstance(value, str) and (
+      not _PLAIN_YAML_STRING_RE.fullmatch(value)
+      or value.lower() in _YAML_KEYWORDS
+  ):
+    return cli_config.format_cli_arg(key, value)
+  return f"{key}={value}"
+
+
+def _maxtext_extra_flags(hp: resolve_config.DistHyperParameters) -> list[str]:
+  """Formats `dist_training_config.maxtext_extra_config` as `key=value` args.
+
+  `DistHyperParameters` checked that each key is a MaxText config name the
+  trainer does not build from the config, and that each value is a str, int,
+  float or bool.
+
+  Args:
+    hp: Validated distributed RL configuration.
+
+  Returns:
+    One MaxText config argument per entry, in config order.
+  """
+  extra = hp.config_mapping("dist_training_config")["maxtext_extra_config"]
+  return [_maxtext_extra_flag(key, value) for key, value in extra.items()]
+
+
 # `actor_model_config.kwargs` is an open dict of optional MaxText overrides; an
 # absent or `null` key keeps the `maxtext_utils.build_maxtext_config` default
 # passed here as `unset`, whose type is also the type the value is converted to.
@@ -549,7 +600,7 @@ def _create_maxtext_trainer_factory(
         _ACTOR_OPTIMIZER_KEY,
         opt["schedule_type"],
     )
-  max_seq_token_per_tpu = rl_train["max_seq_token_per_tpu"]
+  max_seq_tokens_per_device = rl_train["max_seq_tokens_per_device"]
   maxtext_config = maxtext_utils.build_maxtext_config(
       model_name=maxtext_model_name,
       worker_id=worker_id,
@@ -586,15 +637,20 @@ def _create_maxtext_trainer_factory(
           hp.config_mapping("weight_sync_config")["use_weight_converter"]
       ),
       max_seq_token_per_tpu=(
-          int(max_seq_token_per_tpu) if max_seq_token_per_tpu is not None else 0
+          int(max_seq_tokens_per_device)
+          if max_seq_tokens_per_device is not None
+          else 0
       ),
       weight_dtype=str(actor["load_dtype"]),
       attention=_kwarg(kwargs, "attention", ""),
       device_host_concurrent_gb=_ckpt_d2h_concurrent_gb(hp),
-      # `DistHyperParameters` checked that each entry is `key=value`.
-      extra_flags=str(
-          hp.config_mapping("dist_training_config")["maxtext_extra_flags"]
-      ).split(),
+      extra_flags=_maxtext_extra_flags(hp),
+      skip_step_on_spikes=bool(
+          node_utils.optional_bool(kwargs, "skip_step_on_spikes")
+      ),
+      skip_step_on_nan=node_utils.optional_bool(kwargs, "skip_step_on_nan"),
+      skip_step_interval=_kwarg(kwargs, "skip_step_interval", 128),
+      skip_step_scaling_factor=_kwarg(kwargs, "skip_step_scaling_factor", 6.0),
   )
   logging.info("Creating MaxText device mesh...")
   mesh = maxtext_utils.create_maxtext_mesh(maxtext_config)
@@ -644,7 +700,7 @@ def main(
   # a malformed port or OpenTelemetry setting fails fast.
   node_utils.setup_otel_metrics(hp, "trainer", worker_id)
 
-  process_context.jax.initialize()
+  process_context.initialize_runtime(hp.cluster_targets.trainer)
 
   rl_train = hp.config_mapping(_RL_TRAINING_KEY)
 

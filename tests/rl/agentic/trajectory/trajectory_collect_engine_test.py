@@ -1255,6 +1255,88 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     np.testing.assert_array_equal(routed[3], agent_types.UNSET_ROUTED_EXPERT)
 
   @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_token_mode_aligns_topk_with_conversation_tokens(self, mock_convert):
+    # The parser appends end token 999 to every assistant turn.
+    self.mock_chat_parser.update_assistant_end_tokens.side_effect = (
+        lambda tokens: (np.append(tokens, 999), 1)
+    )
+
+    def _output(prompt, tokens, topk_ids, topk_logprobs='auto'):
+      if topk_logprobs in ('auto', 'ok') and topk_ids is not None:
+        lps = [np.tile(np.float32([-0.1, -2.0]), (len(tokens), 1))]
+      elif topk_logprobs is None or topk_ids is None:
+        lps = None
+      else:
+        lps = [np.array(topk_logprobs, np.float32)]
+      return RolloutOutput(
+          text=['resp'],
+          logits=None,
+          tokens=[np.array(tokens, dtype=np.int32)],
+          left_padded_prompt_tokens=np.array([prompt], dtype=np.int32),
+          prompt_lengths=np.array([len(prompt)], dtype=np.int32),
+          logprobs=[np.full(len(tokens), -0.1, dtype=np.float32)],
+          topk_token_ids=(
+              None if topk_ids is None else [np.array(topk_ids, np.int32)]
+          ),
+          topk_logprobs=lps,
+      )
+
+    for bad_second in (
+        None,
+        ([[203, 7, 8]], 'auto'),  # intra-step ids vs logprobs mismatch
+        ([[203, 7, 8]], [[-0.1, -2.0, -3.0]]),  # cross-step k=2 vs k=3 mismatch
+        ([[203, 7]], None),  # missing topk_logprobs
+        ([[203, 7]], 'ok'),
+    ):
+      with self.subTest(bad_second=bad_second):
+        mock_convert.side_effect = [
+            ([301, 302], [0, 0]),  # env tokens after turn 1
+        ]
+        self.mock_env.step.side_effect = [
+            ('obs1', 1.0, False, {}),
+            ('obs2', 2.0, True, {}),
+        ]
+        second_ids, second_lps = (
+            (None, None) if bad_second is None else bad_second
+        )
+        self.mock_model_call.side_effect = [
+            _output([101], [201, 202], [[201, 5], [202, 6]]),
+            _output(
+                [101, 201, 202, 999, 301, 302],
+                [203],
+                second_ids,
+                second_lps,
+            ),
+        ]
+        engine = trajectory_collect_engine.TrajectoryCollectEngine(
+            agent=self.mock_agent,
+            env=self.mock_env,
+            model_call=self.mock_model_call,
+            tokenizer=self.mock_tokenizer,
+            chat_parser=self.mock_chat_parser,
+        )
+        if second_lps != 'ok':
+          with self.assertRaisesRegex(ValueError, 'top-k|topk'):
+            asyncio.run(self._run_collect(engine, mode='Token'))
+          continue
+        token_data = asyncio.run(self._run_collect(engine, mode='Token'))
+
+        np.testing.assert_array_equal(
+            token_data['conversation_tokens'],
+            [201, 202, 999, 301, 302, 203, 999],
+        )
+        ids = token_data['old_topk_token_ids']
+        logps = token_data['old_topk_logprobs']
+        sampled = np.array([1, 1, 0, 0, 0, 1, 0], dtype=bool)
+        np.testing.assert_array_equal(
+            ids[sampled], [[201, 5], [202, 6], [203, 7]]
+        )
+        np.testing.assert_allclose(logps[sampled], [[-0.1, -2.0]] * 3)
+        # Parser-suffix and environment tokens were not sampled.
+        np.testing.assert_array_equal(ids[~sampled], 0)
+        np.testing.assert_array_equal(logps[~sampled], -np.inf)
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
   def test_env_routed_experts_length_mismatch_raises_error(self, mock_convert):
     mock_convert.side_effect = [
         ([301, 302, 303], [1, 1, 1]),  # env tokens len 3
@@ -1471,7 +1553,9 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.assertIsNotNone(traj.steps[0].env_routed_experts)
 
     # Store omits prefill_routed_experts when store_routed_experts is False.
-    (stored,) = store.get_trajectories(['traj_default_no_routed'])
+    stored = store.get_trajectories(['traj_default_no_routed'])[
+        'traj_default_no_routed'
+    ]
     agent_0, agent_1 = stored.steps[1], stored.steps[3]
     self.assertIsNone(agent_0.prefill_routed_experts)
     self.assertIsNone(agent_0.prefill_start)
@@ -1512,7 +1596,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     ]
     self.assertEqual(agent_step_ids, [1, 3])
 
-    (stored,) = store.get_trajectories(['traj_routed'])
+    stored = store.get_trajectories(['traj_routed'])['traj_routed']
     agent_0, agent_1 = stored.steps[1], stored.steps[3]
     np.testing.assert_array_equal(agent_0.prefill_routed_experts, turn0)
     self.assertEqual(
@@ -1643,7 +1727,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
             expected_full,
         )
 
-        (stored,) = store.get_trajectories([traj_id])
+        stored = store.get_trajectories([traj_id])[traj_id]
         agent_0, agent_1 = stored.steps[1], stored.steps[3]
         self.assertEqual(agent_0.prefill_routed_experts.dtype, np.uint8)
         self.assertEqual(
@@ -1748,7 +1832,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
             ),
             expected_full,
         )
-        (stored,) = store.get_trajectories([traj_id])
+        stored = store.get_trajectories([traj_id])[traj_id]
         prefill_arr = stored.steps[1].prefill_routed_experts
         self.assertEqual(prefill_arr.dtype, expected_dtype)
         self.assertEqual(prefill_arr.shape, expected_shape)
@@ -1940,7 +2024,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
               packing.routed_experts_encoding(arr, batched=False),
               expected_tier,
           )
-        (stored,) = store.get_trajectories([traj_id])
+        stored = store.get_trajectories([traj_id])[traj_id]
         agent_steps = [s for s in stored.steps if s.source.value == 'agent']
         self.assertEqual(
             [
@@ -2384,7 +2468,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     # Verify trajectory store contains the written steps via public API
     trajs = store.get_trajectories(['traj_test_123'])
     self.assertLen(trajs, 1)
-    stored_traj = trajs[0]
+    stored_traj = trajs['traj_test_123']
     self.assertLen(stored_traj.steps, 5)
     self.assertEqual(stored_traj.steps[0].step_id, 0)
     self.assertEqual(stored_traj.steps[0].message, 'Solve math')
@@ -2409,15 +2493,16 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.assertTrue(stored_traj.steps[4].done)
     metas = store.get_trajectories_metadata()
     self.assertLen(metas, 1)
-    self.assertEqual(metas[0].trajectory_id, 'traj_test_123')
-    self.assertEqual(metas[0].status, 'SUCCEEDED')
-    self.assertEqual(metas[0].total_reward, 3.5)
-    self.assertFalse(metas[0].masked_out)
-    self.assertEqual(metas[0].target_policy_versions, [42])
-    self.assertLen(metas[0].env_time['step_latency'], 2)
-    self.assertIn('reward_latency', metas[0].reward_time)
+    meta = metas['traj_test_123']
+    self.assertEqual(meta.trajectory_id, 'traj_test_123')
+    self.assertEqual(meta.status, 'SUCCEEDED')
+    self.assertEqual(meta.total_reward, 3.5)
+    self.assertFalse(meta.masked_out)
+    self.assertEqual(meta.target_policy_versions, [42])
+    self.assertLen(meta.env_time['step_latency'], 2)
+    self.assertIn('reward_latency', meta.reward_time)
     # final_metrics is populated once at episode end (not during add_step).
-    final_metrics = metas[0].final_metrics
+    final_metrics = meta.final_metrics
     self.assertIsNotNone(final_metrics)
     self.assertEqual(final_metrics.total_prompt_tokens, 1)
     self.assertEqual(
@@ -2496,10 +2581,14 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
             (4, [42, 43]),  # turn 1 env step (written in finally block)
         ],
     )
-    (stored_traj,) = store.get_trajectories(['traj_policy_advance'])
+    stored_traj = store.get_trajectories(['traj_policy_advance'])[
+        'traj_policy_advance'
+    ]
     self.assertEqual(stored_traj.steps[1].policy_version, 42)
     self.assertEqual(stored_traj.steps[3].policy_version, 43)
-    (stored_meta,) = store.get_trajectories_metadata(['traj_policy_advance'])
+    stored_meta = store.get_trajectories_metadata(['traj_policy_advance'])[
+        'traj_policy_advance'
+    ]
     self.assertEqual(stored_meta.target_policy_versions, [42, 43])
     self.assertEqual(stored_meta.status, 'FAILED')
 
@@ -2548,11 +2637,15 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     )
     self.assertTrue(traj.masked_out)
     self.mock_final_reward_fn.assert_not_called()
-    (meta,) = store.get_trajectories_metadata(['traj_masked_out'])
+    meta = store.get_trajectories_metadata(['traj_masked_out'])[
+        'traj_masked_out'
+    ]
     self.assertEqual(meta.status, 'MAX_STEPS_REACHED')
     self.assertEqual(meta.total_reward, 1.0)
     self.assertTrue(meta.masked_out)
-    (stored_masked,) = store.get_trajectories(['traj_masked_out'])
+    stored_masked = store.get_trajectories(['traj_masked_out'])[
+        'traj_masked_out'
+    ]
     self.assertTrue(converter_lib.to_tunix_trajectory(stored_masked).masked_out)
 
   @mock.patch.object(utils, 'tokenize_and_generate_masks')
@@ -2579,8 +2672,8 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     asyncio.run(self._run_collect(engine, mode='Trajectory'))
     trajs = store.get_trajectories(['traj_fallback_0'])
     self.assertLen(trajs, 1)
-    self.assertEqual(trajs[0].steps[0].step_id, 0)
-    self.assertLen(trajs[0].steps, 5)
+    self.assertEqual(trajs['traj_fallback_0'].steps[0].step_id, 0)
+    self.assertLen(trajs['traj_fallback_0'].steps, 5)
 
   @mock.patch.object(utils, 'tokenize_and_generate_masks')
   def test_close_called_when_one_step_raises_exception(self, mock_convert):
@@ -2604,10 +2697,10 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
 
     self.mock_env.close.assert_called_once()
     metas = store.get_trajectories_metadata(['traj_err_close'])
-    self.assertEqual(metas[0].status, 'FAILED')
+    self.assertEqual(metas['traj_err_close'].status, 'FAILED')
     trajs = store.get_trajectories(['traj_err_close'])
-    self.assertLen(trajs[0].steps, 3)
-    self.assertTrue(trajs[0].steps[2].done)
+    self.assertLen(trajs['traj_err_close'].steps, 3)
+    self.assertTrue(trajs['traj_err_close'].steps[2].done)
 
   @mock.patch.object(utils, 'tokenize_and_generate_masks')
   def test_close_called_when_collect_cancelled_sets_cancelled_status(
@@ -2644,7 +2737,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
 
     self.mock_env.close.assert_called_once()
     metas = store.get_trajectories_metadata(['traj_cancel_close'])
-    self.assertEqual(metas[0].status, 'CANCELLED')
+    self.assertEqual(metas['traj_cancel_close'].status, 'CANCELLED')
 
   @mock.patch.object(utils, 'tokenize_and_generate_masks')
   def test_trajectory_store_errors_do_not_terminate_collect(self, mock_convert):
@@ -3026,7 +3119,6 @@ class ExactTokenContinuityCollectTest(absltest.TestCase):
         beta=0.0,
         use_rollout_logps=True,
     )
-    learner._trajectory_logger = None
     learner._full_batch_size = 0
     learner.metric_fns = []
     learner._compute_rewards = lambda **kw: np.array([0.0, 1.0])
@@ -3035,10 +3127,11 @@ class ExactTokenContinuityCollectTest(absltest.TestCase):
         r2m={rl_cluster.Role.ACTOR: None},
         perf_v2=perf_tracer_v2.NoopTracer(),
         buffer_metrics_async=mock.Mock(),
+        log_trajectory_metrics=mock.Mock(),
         cluster_config=SimpleNamespace(
             rollout_config=base_rollout.RolloutConfig(max_prompt_length=5),
             training_config=SimpleNamespace(
-                max_seq_token_per_tpu=64,
+                max_seq_tokens_per_device=64,
                 compute_logps_micro_batch_size=1,
                 mini_batch_size=None,
             ),
@@ -3127,7 +3220,7 @@ class ExactTokenContinuityCollectTest(absltest.TestCase):
     # Written once at reset (ids unknown), then upserted after the first call.
     self.assertLen(step_zero_writes, 2)
     self.assertIsNone(step_zero_writes[0].env_tokens)
-    (stored,) = store.get_trajectories(['traj_exact_prompt'])
+    stored = store.get_trajectories(['traj_exact_prompt'])['traj_exact_prompt']
     expected = result['prompt_tokens'][-result['prompt_length'] :]
     np.testing.assert_array_equal(stored.steps[0].env_tokens, expected)
     self.assertIsNone(stored.steps[0].env_masks)

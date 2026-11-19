@@ -14,17 +14,17 @@
 
 """FrozenLake workload for the distributed-vs-agentic RL benchmark.
 
-The distributed stack runs `run_gemma4_e2b.sh` with `section.key=value`
-overrides; the agentic stack runs the same Gemma4 E2B recipe through
-`tunix.cli.grpo_main`. The harness in `rl_efficiency_benchmark/benchmark.py`
-loads this file by path, so the module level imports only the standard library.
+The distributed stack runs `examples/recipes/benchmark_frozenlake_gemma4_e2b.sh`
+with `section.key=value` overrides; the agentic stack runs the same Gemma4 E2B
+recipe through `tunix.cli.grpo_main`. The harness in `benchmark.py` loads this
+file by path, so the module level imports only the standard library.
 """
 
 import functools
 from pathlib import Path
 
-MODULE = "tunix.dist_rl.examples.frozenlake_dist.frozenlake_benchmark"
-_RUNTIME = "tunix.dist_rl.examples.rl_efficiency_benchmark.runtime"
+MODULE = "tunix.dist_rl.benchmarks.rl_efficiency.frozenlake_workload"
+_RUNTIME = "tunix.dist_rl.benchmarks.rl_efficiency.runtime"
 MODEL_ID = "google/gemma-4-E2B-it"
 # Room for the final FrozenLake observation and chat-template boundary.
 RESPONSE_RESERVE = 512
@@ -67,10 +67,10 @@ def validate(workload):
 def dist_launch(workload, output, model_dir):
   """Returns the distributed recipe command and the variables it sets.
 
-  The command passes the benchmark settings to run_gemma4_e2b.sh as
-  `section.key=value` overrides. Every other setting keeps its
-  run_gemma4_e2b.sh, frozenlake.yaml or launch/common/base_dist_config.yaml
-  value.
+  The command passes the benchmark settings to
+  examples/recipes/benchmark_frozenlake_gemma4_e2b.sh as `section.key=value`
+  overrides. Every other setting keeps its recipe, frozenlake.yaml or
+  launch/common/base_dist_config.yaml value.
 
   Args:
     workload: Workload flag values.
@@ -123,7 +123,12 @@ def dist_launch(workload, output, model_dir):
   }
   command = [
       "bash",
-      str(Path(__file__).with_name("run_gemma4_e2b.sh")),
+      str(
+          Path(__file__).parents[2]
+          / "examples"
+          / "recipes"
+          / "benchmark_frozenlake_gemma4_e2b.sh"
+      ),
       *(f"{key}={value}" for key, value in overrides.items()),
   ]
   # launch/common/local.sh writes the node logs to LOG_ROOT.
@@ -272,8 +277,8 @@ def agentic_config(workload, model_dir):
 def create_dataset(size, seed, limit=None, **unused_kwargs):
   """Agentic data_module: the same ordered maps as the distributed run."""
   import grain
+  from tunix.dist_rl.benchmarks.rl_efficiency import runtime
   from tunix.dist_rl.examples.frozenlake_dist import frozenlake
-  from tunix.dist_rl.examples.rl_efficiency_benchmark import runtime
 
   rows = frozenlake.generate_entries(
       size=size, seed=seed, shuffle_seed=seed, limit=limit
@@ -284,8 +289,8 @@ def create_dataset(size, seed, limit=None, **unused_kwargs):
 
 def dist_main(*args, **kwargs):
   """Distributed orchestrator entry point with benchmark hooks."""
+  from tunix.dist_rl.benchmarks.rl_efficiency import runtime
   from tunix.dist_rl.examples.frozenlake_dist import frozenlake
-  from tunix.dist_rl.examples.rl_efficiency_benchmark import runtime
   from tunix.dist_rl.launch.nodes import orchestrator  # pylint: disable=g-import-not-at-top
 
   generate = frozenlake.generate_entries
@@ -307,7 +312,7 @@ def agentic_main():
   """Agentic entry point with benchmark hooks."""
   from absl import app
   from tunix.cli import grpo_main
-  from tunix.dist_rl.examples.rl_efficiency_benchmark import runtime
+  from tunix.dist_rl.benchmarks.rl_efficiency import runtime
 
   runtime.install("agentic")
   app.run(grpo_main.main)

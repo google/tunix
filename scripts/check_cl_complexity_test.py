@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Unit tests for the Tunix CL Complexity Gate."""
+"""Unit tests for the Tunix CL Complexity Check."""
 
 from __future__ import annotations
 
@@ -22,20 +22,62 @@ import dataclasses
 import io
 import os
 import pathlib
+import sys
+import tempfile
 import textwrap
+import types
+import unittest
 from unittest import mock
 
-from absl.testing import absltest
-from scripts import check_cl_complexity
+if str(pathlib.Path(__file__).resolve().parent) not in sys.path:
+  sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-_CONFIG = pathlib.Path(__file__).parent.parent / "pyproject.toml"
+try:
+  from absl.testing import absltest  # pylint: disable=g-import-not-at-top
+except ImportError:
+
+  class _FallbackTestCase(unittest.TestCase):
+
+    def create_tempdir(self) -> types.SimpleNamespace:
+      d = self.enterContext(tempfile.TemporaryDirectory())
+      return types.SimpleNamespace(full_path=d)
+
+    def assertLen(self, container, expected_len: int, msg=None) -> None:
+      self.assertEqual(len(container), expected_len, msg)
+
+    def assertEmpty(self, container, msg=None) -> None:
+      self.assertEqual(len(container), 0, msg)
+
+    def assertNotEmpty(self, container, msg=None) -> None:
+      self.assertGreater(len(container), 0, msg)
+
+  absltest = types.SimpleNamespace(  # pylint: disable=invalid-name
+      TestCase=_FallbackTestCase, main=unittest.main
+  )
+
+try:
+  from scripts import ast_gate_lib  # pylint: disable=g-import-not-at-top
+  from scripts import check_cl_complexity  # pylint: disable=g-import-not-at-top
+except ImportError:
+  import ast_gate_lib  # pylint: disable=g-import-not-at-top  # pyrefly: ignore[missing-import]
+  import check_cl_complexity  # pylint: disable=g-import-not-at-top  # pyrefly: ignore[missing-import]
+
+_CAND_CFG = pathlib.Path(__file__).parent.parent / "pyproject.toml"
+_CONFIG = (
+    _CAND_CFG
+    if _CAND_CFG.is_file()
+    else pathlib.Path(__file__).with_name("cl_complexity_config.toml")
+)
 
 
 class CheckClComplexityTest(absltest.TestCase):
 
   def test_load_config_reads_canonical_toml_thresholds(self):
     cfg = check_cl_complexity.load_config(_CONFIG)
-    self.assertEqual(cfg.enabled_dimensions, (1, 2, 3, 4))
+    self.assertEqual(
+        cfg.enabled_checks,
+        ("scope", "control_flow", "indirection", "duplication"),
+    )
     self.assertEqual(cfg.max_cognitive_fail, 15)
     self.assertEqual(cfg.max_call_depth_fail, 2)
     self.assertEqual(cfg.max_trivial_helpers_fail, 3)
@@ -75,8 +117,21 @@ class CheckClComplexityTest(absltest.TestCase):
         encoding="utf-8",
     )
     fallback_cfg = check_cl_complexity.load_config(tmp_cfg)
-    self.assertEqual(fallback_cfg.enabled_dimensions, (1, 2, 3, 4))
+    self.assertEqual(
+        fallback_cfg.enabled_checks,
+        ("scope", "control_flow", "indirection", "duplication"),
+    )
     self.assertEqual(fallback_cfg.intentional_forks, ())
+    empty_cwd = pathlib.Path(self.create_tempdir().full_path)
+    prev_cwd = pathlib.Path.cwd()
+    os.chdir(empty_cwd)
+    try:
+      pkg_cfg = check_cl_complexity.load_config()
+    finally:
+      os.chdir(prev_cwd)
+    self.assertEqual(pkg_cfg.max_cognitive_fail, 15)
+    with self.assertRaises(FileNotFoundError):
+      check_cl_complexity.load_config(empty_cwd / "nonexistent.toml")
 
   def test_count_code_loc_and_decorator_info(self):
     src = textwrap.dedent('''\
@@ -193,9 +248,7 @@ class CheckClComplexityTest(absltest.TestCase):
         funcs, cfg
     )
     self.assertEqual(hops, 4)
-    self.assertEqual(
-        chain, ["entry", "_step1", "_step2", "_step3", "_step4"]
-    )
+    self.assertEqual(chain, ["entry", "_step1", "_step2", "_step3", "_step4"])
     self.assertEqual(trivial, ["_step1", "_step2", "_step3"])
 
   def test_evaluate_gate_passes_clean_module_and_fails_ravioli_module(self):
@@ -265,7 +318,7 @@ class CheckClComplexityTest(absltest.TestCase):
           check_cl_complexity.resolve_skip_reason(tmp_dir), "mechanical_rename"
       )
 
-  def test_dimensions_filter_isolates_dim3_only(self):
+  def test_checks_filter_isolates_indirection_only(self):
     tmp_dir = pathlib.Path(self.create_tempdir().full_path)
     (tmp_dir / "ravioli.py").write_text(
         textwrap.dedent("""\
@@ -288,8 +341,8 @@ class CheckClComplexityTest(absltest.TestCase):
             str(tmp_dir),
             "--config",
             str(_CONFIG),
-            "--dimensions",
-            "3",
+            "--checks",
+            "indirection",
             "--files",
             "ravioli.py",
             "--strict",
@@ -302,8 +355,8 @@ class CheckClComplexityTest(absltest.TestCase):
             str(tmp_dir),
             "--config",
             str(_CONFIG),
-            "--dimensions",
-            "2",
+            "--checks",
+            "control_flow",
             "--files",
             "ravioli.py",
             "--strict",
@@ -446,16 +499,14 @@ class CheckClComplexityTest(absltest.TestCase):
         ["stream_mismatch.py"],
         collections.defaultdict(
             str,
-            {
-                "stream_mismatch.py": textwrap.dedent("""\
+            {"stream_mismatch.py": textwrap.dedent("""\
                     def _iter_data_queue(q):
                       while True:
                         item = q.get(block=True)
                         if item is None:
                           break
                         yield item
-                """)
-            },
+                """)},
         ),
         cfg,
     )
@@ -475,6 +526,7 @@ class CheckClComplexityTest(absltest.TestCase):
         DOC_HINT = "Avoid using lambda functions or partial(f) in hot loops."
         @dataclasses.dataclass
         class TrainerConfig:
+          batch_size: int = 8
           sorted_keys: list[str] = dataclasses.field(
               default_factory=functools.partial(
                   sorted, ["b", "a"], key=lambda s: s
@@ -707,21 +759,25 @@ class CheckClComplexityTest(absltest.TestCase):
     self.assertEqual(hops, 1)
     self.assertEqual(triv, ["_pt_ext", "_triv_body"])
 
-    for field, delta_field, val in [
-        ("ast_digest", None, "diff"),
-        ("cognitive", "delta_cognitive", 5),
-        ("cyclomatic", "delta_cyclomatic", 5),
-        ("max_nesting", "delta_nesting", 3),
+    bf = check_cl_complexity.analyze_functions("def f(x):\n  return x\n")[0]
+    for mod_src, exp_dcog, exp_dcyc, exp_dnest in [
+        ("def f(x):\n  return x + 1\n", 0, 0, 0),
+        (
+            (
+                "def f(x):\n  if x > 0:\n    for i in range(x):\n"
+                "      if i % 2 == 0:\n        return i\n  return 0\n"
+            ),
+            6,
+            3,
+            3,
+        ),
     ]:
-      nf = check_cl_complexity.analyze_functions("def f(x):\n  return x\n")[0]
-      bf = check_cl_complexity.analyze_functions("def f(x):\n  return x\n")[0]
-      setattr(nf, field, val)
+      nf = check_cl_complexity.analyze_functions(mod_src)[0]
       check_cl_complexity.assign_baseline(nf, bf)
-      self.assertTrue(nf.is_new_or_modified, field)
-      if delta_field:
-        self.assertEqual(
-            getattr(nf, delta_field), val - getattr(bf, field), delta_field
-        )
+      self.assertTrue(nf.is_new_or_modified)
+      self.assertEqual(nf.delta_cognitive, exp_dcog)
+      self.assertEqual(nf.delta_cyclomatic, exp_dcyc)
+      self.assertEqual(nf.delta_nesting, exp_dnest)
     self.assertLen(
         check_cl_complexity.stmt_shingles(ast.parse("a = 1\nb = 2\n").body), 1
     )
@@ -833,62 +889,17 @@ class CheckClComplexityTest(absltest.TestCase):
         "  else:\n    if xs:\n      return 5\n"
     )[0]
     self.assertEqual(guard_blocks.cognitive, 26)
-    dec_node = ast.fix_missing_locations(
-        ast.FunctionDef(
-            name="p",
-            args=ast.arguments(
-                posonlyargs=[],
-                args=[],
-                kwonlyargs=[],
-                kw_defaults=[],
-                defaults=[],
-            ),
-            body=[ast.Pass()],
-            decorator_list=[],
-        )
-    )
-    nested_bool = ast.BoolOp(
-        op=ast.And(),
-        values=[
-            ast.BoolOp(
-                op=ast.And(),
-                values=[
-                    ast.Name(id="a", ctx=ast.Load()),
-                    ast.Name(id="b", ctx=ast.Load()),
-                ],
-            ),
-            ast.Name(id="c", ctx=ast.Load()),
-        ],
-    )
-    v_bool = check_cl_complexity._ComplexityVisitor(dec_node, "p", [], set())
-    v_bool.visit_BoolOp(nested_bool)
-    self.assertEqual(v_bool.cognitive, 1)
-    v_mut = check_cl_complexity._ComplexityVisitor(dec_node, "p", [], set())
-    v_mut.arg_lambdas.add(id(dec_node))
-    v_mut.visit_FunctionDef(dec_node)
-    self.assertEqual(v_mut.closures, ["p.p"])
+    bool_fn = check_cl_complexity.analyze_functions(
+        "def p(a, b, c):\n  return a and b and c\n"
+    )[0]
+    self.assertEqual(bool_fn.cognitive, 1)
     ws_doc_fn = check_cl_complexity.analyze_functions(
         'def f():\n  "   "\n  return 1\n'
     )[0]
     self.assertEqual(ws_doc_fn.stmts, 1)
-    fake_assign = ast.Assign(
-        targets=[ast.Name(id="f", ctx=ast.Store())],
-        value=ast.Lambda(
-            args=ast.arguments(
-                posonlyargs=[],
-                args=[],
-                kwonlyargs=[],
-                kw_defaults=[],
-                defaults=[],
-            ),
-            body=ast.Constant(value=1),
-        ),
-    )
-    setattr(fake_assign, "targets", [*fake_assign.targets, dec_node])
-    ast.fix_missing_locations(fake_assign)
     self.assertLen(
-        check_cl_complexity.iter_scope_defs(
-            ast.Module(body=[fake_assign], type_ignores=[])
+        ast_gate_lib.iter_scope_defs(
+            ast.parse("f: object = lambda: 1\n", mode="exec")
         ),
         1,
     )
@@ -933,34 +944,30 @@ class CheckClComplexityTest(absltest.TestCase):
     f1_copy = dataclasses.replace(f1)
     check_cl_complexity.assign_baseline(f1_copy, f1)
     self.assertFalse(f1_copy.is_new_or_modified)
-    f_empty1 = dataclasses.replace(
-        f1, ast_digest="", shingles=collections.Counter()
-    )
-    f_empty2 = dataclasses.replace(
-        f1, ast_digest="", shingles=collections.Counter()
-    )
+    f_empty1 = check_cl_complexity.analyze_functions(
+        'def empty_a(x):\n  """doc"""\n'
+    )[0]
+    f_empty2 = check_cl_complexity.analyze_functions(
+        'def empty_b(x):\n  """doc"""\n'
+    )[0]
     self.assertEqual(
         check_cl_complexity.pair_move_score(f_empty1, f_empty2), 0.0
     )
-    f_dig1 = dataclasses.replace(
-        f1, ast_digest="same_dig", shingles=collections.Counter()
-    )
-    f_dig2 = dataclasses.replace(
-        f1, ast_digest="same_dig", shingles=collections.Counter()
-    )
+    f_dig1 = check_cl_complexity.analyze_functions(
+        "def alpha(x):\n  a = x + 1\n  return a * 2\n"
+    )[0]
+    f_dig2 = check_cl_complexity.analyze_functions(
+        "def beta(y):\n  b = y + 1\n  return b * 2\n"
+    )[0]
     self.assertEqual(check_cl_complexity.pair_move_score(f_dig1, f_dig2), 2.0)
-    f_hi1 = dataclasses.replace(
-        f1,
-        stripped_name="alpha",
-        ast_digest="d1",
-        shingles=collections.Counter(("a", "b", "c", "d", "e")),
-    )
-    f_hi2 = dataclasses.replace(
-        f1,
-        stripped_name="beta",
-        ast_digest="d2",
-        shingles=collections.Counter(("a", "b", "c", "d")),
-    )
+    f_hi1 = check_cl_complexity.analyze_functions(
+        "def alpha(x):\n  a = x + 1\n  b = a + 2\n  c = b + 3\n"
+        "  d = c + 4\n  e = d + 5\n  return e\n"
+    )[0]
+    f_hi2 = check_cl_complexity.analyze_functions(
+        "def beta(x):\n  a = x + 1\n  b = a + 2\n  c = b + 3\n"
+        "  d = c + 4\n  return d\n"
+    )[0]
     self.assertEqual(check_cl_complexity.pair_move_score(f_hi1, f_hi2), 0.8)
     f2_diff = check_cl_complexity.analyze_functions(
         "def unrelated(x):\n  for i in x:\n    if i:\n      yield i\n"
@@ -1063,35 +1070,46 @@ class CheckClComplexityTest(absltest.TestCase):
     self.assertEqual(
         check_cl_complexity.run_cmd_stdout(["echo", "ok"], tmp_dir), "ok\n"
     )
-    fn_cyc = check_cl_complexity.analyze_functions("def f(x):\n  return x\n")[0]
-    fn_cyc.cyclomatic = 16
-    fn_cyc.base_cyclomatic = 12
-    fn_cyc.delta_cyclomatic = 4
-    self.assertNotEmpty(
-        check_cl_complexity.func_local_violations("a.py", fn_cyc, cfg)
+    small_cfg = dataclasses.replace(
+        cfg,
+        max_cognitive_fail=2,
+        max_cyclomatic_fail=2,
+        max_legacy_cog_delta_fail=1,
+        max_legacy_cyc_delta_fail=1,
     )
-    fn_cyc.base_cyclomatic = 16
-    fn_cyc.cyclomatic = 21
-    fn_cyc.delta_cyclomatic = 5
-    fn_cyc.base_cognitive = 20
-    fn_cyc.cognitive = 25
-    fn_cyc.delta_cognitive = 5
+    bf_small = check_cl_complexity.analyze_functions(
+        "def f(a):\n  return 1 if a else 0\n"
+    )[0]
+    bf_leg = check_cl_complexity.analyze_functions(
+        "def f(a, b, c):\n  return (1 if a else 0) + (2 if b else 0) +"
+        " (3 if c else 0)\n"
+    )[0]
+    nf_over = check_cl_complexity.analyze_functions(
+        "def f(a, b, c):\n  return (1 if a else 0) + (2 if b else 0) +"
+        " (3 if c else 0)\n"
+    )[0]
+    check_cl_complexity.assign_baseline(nf_over, bf_small)
+    self.assertNotEmpty(
+        check_cl_complexity.func_local_violations("a.py", nf_over, small_cfg)
+    )
+    nf_leg_ok = check_cl_complexity.analyze_functions(
+        "def f(a, b, c, d):\n  return (1 if a else 0) + (2 if b else 0) +"
+        " (3 if c else 0) + (4 if d else 0)\n"
+    )[0]
+    check_cl_complexity.assign_baseline(nf_leg_ok, bf_leg)
     self.assertEmpty(
-        check_cl_complexity.func_local_violations("a.py", fn_cyc, cfg)
+        check_cl_complexity.func_local_violations("a.py", nf_leg_ok, small_cfg)
     )
-    fn_cyc.cognitive = 26
-    fn_cyc.delta_cognitive = 6
-    self.assertNotEmpty(
-        check_cl_complexity.func_local_violations("a.py", fn_cyc, cfg)
-    )
-    fn_cyc.delta_cognitive = 0
-    self.assertEmpty(
-        check_cl_complexity.func_local_violations("a.py", fn_cyc, cfg)
-    )
-    fn_cyc.cyclomatic = 22
-    fn_cyc.delta_cyclomatic = 6
-    self.assertNotEmpty(
-        check_cl_complexity.func_local_violations("a.py", fn_cyc, cfg)
+    nf_leg_bad = check_cl_complexity.analyze_functions(
+        "def f(a, b, c, d, e):\n  return (1 if a else 0) + (2 if b else 0) +"
+        " (3 if c else 0) + (4 if d else 0) + (5 if e else 0)\n"
+    )[0]
+    check_cl_complexity.assign_baseline(nf_leg_bad, bf_leg)
+    self.assertLen(
+        check_cl_complexity.func_local_violations(
+            "a.py", nf_leg_bad, small_cfg
+        ),
+        2,
     )
     gen_fn = check_cl_complexity.analyze_functions(
         "def _drain_items(q):\n  yield from q\n", "a.py"
@@ -1274,41 +1292,7 @@ class CheckClComplexityTest(absltest.TestCase):
       )
       self.assertEqual(v_files, ["vcs.py"])
       self.assertEqual(v_bases["vcs.py"], "vcs.py\n")
-      self.assertEqual(v_nsrc["vcs.py"], "vcs.py\n")
-
-    pdir = tmp_dir / "piper_mut"
-    (pdir / "client/GOOGLE_INTERNAL_PACKAGE_PATH").mkdir(parents=True)
-    (pdir / "baseline/GOOGLE_INTERNAL_PACKAGE_PATH").mkdir(parents=True)
-    (pdir / "request").write_text(
-        'depot_path: "//depot/GOOGLE_INTERNAL_PACKAGE_PATH/m.py"\nSKIP_CL_COMPLEXITY=req_reason\n'
-    )
-    (pdir / "baseline/GOOGLE_INTERNAL_PACKAGE_PATH/m.py").write_text("def f(x):\n  return x\n")
-    with mock.patch.dict(
-        os.environ,
-        {
-            "SKIP_CL_COMPLEXITY": "env_reason",
-            "PR_BODY": "SKIP_CL_COMPLEXITY=pr_reason",
-        },
-        clear=True,
-    ):
-      self.assertEqual(
-          check_cl_complexity.resolve_skip_reason(pdir / "client/GOOGLE_INTERNAL_PACKAGE_PATH"),
-          "env_reason",
-      )
-    with mock.patch.dict(
-        os.environ,
-        {"SKIP_CL_COMPLEXITY": "", "PR_BODY": "SKIP_CL_COMPLEXITY=pr_reason"},
-        clear=True,
-    ):
-      self.assertEqual(
-          check_cl_complexity.resolve_skip_reason(pdir / "client/GOOGLE_INTERNAL_PACKAGE_PATH"),
-          "pr_reason",
-      )
-    with mock.patch.dict(os.environ, {}, clear=True):
-      self.assertEqual(
-          check_cl_complexity.resolve_skip_reason(pdir / "client/GOOGLE_INTERNAL_PACKAGE_PATH"),
-          "req_reason",
-      )
+      self.assertEqual(v_nsrc, {})
     with mock.patch.dict(
         os.environ, {"SKIP_CL_COMPLEXITY": "12345"}, clear=True
     ):
@@ -1317,11 +1301,25 @@ class CheckClComplexityTest(absltest.TestCase):
         os.environ, {"SKIP_CL_COMPLEXITY": "true"}, clear=True
     ):
       self.assertEqual(check_cl_complexity.resolve_skip_reason(tmp_dir), "")
-    p_files, p_bases = check_cl_complexity.resolve_changed_files(
-        pdir / "client/GOOGLE_INTERNAL_PACKAGE_PATH", None, None
-    )
-    self.assertEqual(p_files, ["m.py"])
-    self.assertEqual(p_bases["m.py"], "def f(x):\n  return x\n")
+    for vcs_dir, vcs_reason in (
+        (".git", "git_skip_reason"),
+    ):
+      vcs_ws = tmp_dir / f"ws_{vcs_dir.lstrip('.')}"
+      (vcs_ws / vcs_dir).mkdir(parents=True)
+      with (
+          mock.patch.dict(os.environ, {}, clear=True),
+          mock.patch.object(
+              check_cl_complexity,
+              "run_cmd_stdout",
+              return_value=f"Commit\nSKIP_CL_COMPLEXITY={vcs_reason}\n",
+          ),
+      ):
+        self.assertEqual(
+            check_cl_complexity.resolve_skip_reason(vcs_ws, "HEAD"),
+            vcs_reason,
+        )
+    self.assertNotEmpty(check_cl_complexity._vcs_diff_specs(tmp_dir, None))
+    self.assertNotEmpty(check_cl_complexity._vcs_diff_specs(tmp_dir, "main"))
 
     (tmp_dir / "leak.py").write_text("x = 1\n")
     sub = tmp_dir / "ws"
@@ -1436,6 +1434,70 @@ class CheckClComplexityTest(absltest.TestCase):
         ),
         0,
     )
+
+    # Async/await, vararg/kwarg, multiline assign-return, and lambda shims.
+    shim_fns = check_cl_complexity.analyze_functions(
+        "async def _async_pt(x):\n  return await ext(x)\n"
+        "def _vararg_pt(*args, **kwargs):\n  return ext(*args, **kwargs)\n"
+        'def _multiline_pt(x):\n  r = ext(x, "a\\nb")\n  return r\n'
+        "_lam_pt = lambda x: ext(x)\n"
+        "_lam_expr = lambda x: x + 1\n"
+    )
+    self.assertEqual(
+        [fn.is_pass_through for fn in shim_fns],
+        [True, True, True, True, False],
+    )
+    self.assertEqual([fn.cognitive for fn in shim_fns], [0, 0, 0, 0, 0])
+
+    # Clone baseline-pair lookup preserves f1/f2 order when f1 > f2 lexically.
+    z_moved = dataclasses.replace(
+        cf1,
+        file_path="z.py",
+        matched_base_key="a_old.py:f1",
+        is_new_or_modified=True,
+    )
+    a_old_base = dataclasses.replace(cf1, file_path="a_old.py")
+    b_ref = dataclasses.replace(
+        cf2, file_path="b.py", matched_base_key="", is_new_or_modified=False
+    )
+    self.assertEmpty(
+        check_cl_complexity.detect_clones(
+            {"z.py": [z_moved]},
+            {"a_old.py": [a_old_base], "b.py": [cf2]},
+            {"b.py": [b_ref]},
+            cfg,
+        )
+    )
+
+    # Syntax errors fail fast as control_flow violations without crashing.
+    self.assertEqual(check_cl_complexity.count_code_loc("def broken(\n"), set())
+    self.assertEqual(check_cl_complexity.count_ast_stmts("def broken(\n"), 0)
+    self.assertEmpty(check_cl_complexity.analyze_functions("def broken(\n"))
+    syn_rep = check_cl_complexity.evaluate_gate(
+        sub,
+        ["broken.py"],
+        collections.defaultdict(str),
+        cfg,
+        ref_sources={},
+        new_sources={"broken.py": "def broken(\n"},
+    )
+    self.assertFalse(syn_rep.passed)
+    self.assertTrue(
+        any(
+            "[control_flow] broken.py syntax_error" in v
+            for v in syn_rep.violations
+        ),
+        syn_rep.violations,
+    )
+
+    # `/testdata/` fixtures are excluded from ref discovery and prod scope.
+    (sub / "testdata").mkdir()
+    (sub / "testdata/fixture.py").write_text(clone_src)
+    self.assertEqual(
+        list(check_cl_complexity.discover_ref_sources(sub, ["ok.py"])),
+        ["bad.py", "ref_prod.py"],
+    )
+
     self.assertEqual(
         check_cl_complexity.main([
             "--cwd",
@@ -1448,6 +1510,221 @@ class CheckClComplexityTest(absltest.TestCase):
         ]),
         1,
     )
+
+  def test_portable_config_and_cli_help_and_out_file(self):
+    root = pathlib.Path(self.create_tempdir().full_path)
+    other_repo = root / "other_repo"
+    (other_repo / "sub").mkdir(parents=True)
+    (other_repo / "pyproject.toml").write_text(
+        '[project]\nname = "unrelated"\n[tool.pytest]\naddopts = "-q"\n',
+        encoding="utf-8",
+    )
+    missing = other_repo / "missing.toml"
+    prev_cwd = pathlib.Path.cwd()
+    os.chdir(_CONFIG.parent)
+    try:
+      with (
+          mock.patch.object(check_cl_complexity, "_PKG_CONFIG", missing),
+          mock.patch.object(check_cl_complexity, "_FALLBACK_CFG", missing),
+          self.assertRaises(KeyError),
+      ):
+        check_cl_complexity.load_config(cwd=other_repo / "sub")
+    finally:
+      os.chdir(prev_cwd)
+    default_cfg = check_cl_complexity.load_config(cwd=other_repo / "sub")
+    self.assertEqual(
+        default_cfg.enabled_checks,
+        ("scope", "control_flow", "indirection", "duplication"),
+    )
+    self.assertEqual(default_cfg.max_cognitive_fail, 15)
+
+    anc_repo = root / "anc_repo"
+    (anc_repo / "pkg/deep").mkdir(parents=True)
+    (anc_repo / "pyproject.toml").write_text(
+        _CONFIG.read_text(encoding="utf-8").replace(
+            "max_cognitive_fail = 15", "max_cognitive_fail = 19"
+        ),
+        encoding="utf-8",
+    )
+    anc_cfg = check_cl_complexity.load_config(cwd=anc_repo / "pkg/deep")
+    self.assertEqual(anc_cfg.max_cognitive_fail, 19)
+
+    out_path = root / "out/report.txt"
+    (root / "clean.py").write_text(
+        "def f(x: int) -> int:\n  return x + 1\n", encoding="utf-8"
+    )
+    with contextlib.redirect_stdout(io.StringIO()):
+      rc = check_cl_complexity.main([
+          "--cwd",
+          str(root),
+          "--config",
+          str(_CONFIG),
+          "--files",
+          "clean.py",
+          "--out",
+          str(out_path),
+      ])
+    self.assertEqual(rc, 0)
+    self.assertIn("PASS", out_path.read_text(encoding="utf-8"))
+
+    buf = io.StringIO()
+    with (
+        contextlib.redirect_stdout(buf),
+        self.assertRaises(SystemExit) as ctx,
+    ):
+      check_cl_complexity.main(["--help"])
+    self.assertEqual(ctx.exception.code, 0)
+    self.assertIn("--strict", buf.getvalue())
+
+  def test_v2_linear_router_cohesive_pipeline_and_sprawl_warning(self):
+    cfg = check_cl_complexity.load_config(_CONFIG)
+    tmp_dir = pathlib.Path(self.create_tempdir().full_path)
+
+    # 1. Comprehension filter parity (`_comp` counts +1 cog per `if` clause).
+    comp_src = (
+        "def filtered(xs: list[int]) -> list[int]:\n"
+        "  return [x for x in xs if x > 0 if x % 2 == 0]\n"
+    )
+    comp_fn = check_cl_complexity.analyze_functions(comp_src, "comp.py")[0]
+    self.assertEqual(comp_fn.cognitive, 2)
+    self.assertEqual(comp_fn.cyclomatic, 3)
+
+    # 2. Flat linear dispatch tables (>= 5 branches, <= 2 simple stmts/branch).
+    elif_arms = "\n".join(
+        f"  {'if' if i == 0 else 'elif'} op == {i}:\n    res = x + {i}\n   "
+        " return res"
+        for i in range(16)
+    )
+    match_arms = "\n".join(
+        f"    case {i}:\n      return x + {i}" for i in range(16)
+    )
+    router_src = (
+        f"def route_elif(op: int, x: int) -> int:\n{elif_arms}\n  else:\n   "
+        " return x\n\ndef route_match(op: int, x: int) -> int:\n  match"
+        f" op:\n{match_arms}\n"
+    )
+    (tmp_dir / "router.py").write_text(router_src, encoding="utf-8")
+    router_rep = check_cl_complexity.evaluate_gate(
+        tmp_dir, ["router.py"], collections.defaultdict(str), cfg
+    )
+    self.assertTrue(router_rep.passed, router_rep.violations)
+    self.assertLessEqual(router_rep.max_cyclomatic, 5)
+    self.assertLessEqual(router_rep.max_cognitive, 5)
+
+    # Non-flat 16-branch router with nested `if` still fails cyclomatic > 15.
+    nested_router = router_src.replace(
+        "    case 15:\n      return x + 15",
+        "    case 15:\n      if x > 0:\n        return x + 15\n      return 0",
+    )
+    (tmp_dir / "bad_router.py").write_text(nested_router, encoding="utf-8")
+    bad_router_rep = check_cl_complexity.evaluate_gate(
+        tmp_dir, ["bad_router.py"], collections.defaultdict(str), cfg
+    )
+    self.assertFalse(bad_router_rep.passed)
+    self.assertGreater(bad_router_rep.max_cyclomatic, 15)
+
+    # 3. Cohesive pure stage pipeline exemption (stmts >= 8, 4 <= cog <= 12).
+    pipeline_src = textwrap.dedent("""\
+        def run_pipeline(xs: list[int]) -> int:
+          return _parse_stage(xs)
+
+        def _parse_stage(xs: list[int]) -> int:
+          if not xs:
+            return 0
+          out: list[int] = []
+          step = len(xs)
+          for val in xs:
+            if val > 0:
+              out.append(val + step)
+          return _lower_stage(out)
+
+        def _lower_stage(items: list[int]) -> int:
+          if len(items) == 1:
+            return items[0]
+          scaled: dict[int, int] = {}
+          idx = 0
+          while idx < len(items):
+            if items[idx] % 2 == 0:
+              scaled[idx] = items[idx] * 3
+            idx += 1
+          return _compile_stage(scaled)
+
+        def _compile_stage(table: dict[int, int]) -> int:
+          if not table:
+            return -1
+          total = 1
+          for key, weight in table.items():
+            if weight > key:
+              total = total * weight - key
+            else:
+              total += key
+          return total
+    """)
+    (tmp_dir / "pipeline.py").write_text(pipeline_src, encoding="utf-8")
+    pipe_rep = check_cl_complexity.evaluate_gate(
+        tmp_dir, ["pipeline.py"], collections.defaultdict(str), cfg
+    )
+    self.assertTrue(pipe_rep.passed, pipe_rep.violations)
+    self.assertEqual(pipe_rep.max_call_depth_hops, 0)
+
+    # 4. Bounded helper sprawl & soft scope emit warnings, not hard violations.
+    sprawl_helpers = "\n\n".join(textwrap.dedent(f"""\
+            def _helper_{i}(xs: list[int], d: dict[str, int]) -> int:
+              total = d.get("k_{i}", 0) + getattr(xs, "bias_{i}", 0)
+              for idx, val in enumerate(xs):
+                if (val > {i} and idx % 2 == 0) or idx < 0:
+                  if val < 100 or hasattr(xs, "cap_{i}"):
+                    total += val
+              return total""") for i in range(1, 6))
+    sprawl_src = (
+        "def pub_entry(xs: list[int], d: dict[str, int]) -> int:\n"
+        "  return (\n"
+        "      _helper_1(xs, d)\n"
+        "      + _helper_2(xs, d)\n"
+        "      + _helper_3(xs, d)\n"
+        "      + _helper_4(xs, d)\n"
+        "      + _helper_5(xs, d)\n"
+        "  )\n\n"
+        + sprawl_helpers
+        + "\n"
+    )
+    base_sprawl = (
+        "def pub_entry(xs: list[int], d: dict[str, int]) -> int:\n  return 0\n"
+    )
+    (tmp_dir / "sprawl.py").write_text(sprawl_src, encoding="utf-8")
+    sprawl_rep = check_cl_complexity.evaluate_gate(
+        tmp_dir,
+        ["sprawl.py"],
+        collections.defaultdict(str, {"sprawl.py": base_sprawl}),
+        dataclasses.replace(cfg, weight_prod_loc=4.0, base_score=100.0),
+    )
+    self.assertTrue(sprawl_rep.passed, sprawl_rep.violations)
+    self.assertTrue(
+        any("complexity_sprawl=5" in w for w in sprawl_rep.warnings),
+        sprawl_rep.warnings,
+    )
+    self.assertTrue(
+        any("[scope] score=" in w for w in sprawl_rep.warnings),
+        sprawl_rep.warnings,
+    )
+    self.assertIn("[WARNING]", check_cl_complexity.format_report(sprawl_rep))
+
+    # Unbounded sprawl (when a function exceeds Cog > 15) stays a hard violation.
+    fn_over = dataclasses.replace(
+        check_cl_complexity.analyze_functions(sprawl_src, "sprawl.py")[0],
+        cognitive=16,
+    )
+    kept_v, kept_w = check_cl_complexity.partition_warnings(
+        ["[indirection] sprawl.py complexity_sprawl=5 (+45 Cog)"],
+        [fn_over],
+        0,
+        50.0,
+        cfg,
+    )
+    self.assertEqual(
+        kept_v, ["[indirection] sprawl.py complexity_sprawl=5 (+45 Cog)"]
+    )
+    self.assertEmpty(kept_w)
 
 
 if __name__ == "__main__":
