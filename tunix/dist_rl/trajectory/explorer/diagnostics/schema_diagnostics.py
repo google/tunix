@@ -69,10 +69,11 @@ class SchemaDiagnostics(Generic[MetadataT]):
   final. Instances hold no state.
 
   `compute_columns` and `format_show_header` are called only for trajectories
-  that are instances of the schema. `compute_run_summary` and
-  `format_summary_columns` receive this class's columns, under their own names
-  (e.g. `df["masked_out"]`), with one row per trajectory of the run; the rows of
-  trajectories of other schemas are null.
+  that are instances of the schema, and `compute_run_summary` and
+  `format_summary_columns` receive only their rows of the run: the core columns
+  of `RunStats.df` (`stats.COLUMN_DTYPES`, e.g. `df["total_reward"]`), then
+  this class's columns under their own names (e.g. `df["masked_out"]`). A
+  column must therefore not have the name of a core column.
 
   Attributes:
     SCHEMA: The generic parameter of the class's `SchemaDiagnostics[X]` base.
@@ -194,7 +195,8 @@ class SchemaDiagnostics(Generic[MetadataT]):
     JSON serializable.
 
     Args:
-      df: This class's columns, one row per trajectory of the run.
+      df: The run's core columns, then this class's columns, one row per
+        trajectory of the schema.
 
     Raises:
       TypeError: If `compute_run_summary` returns a value that is not JSON
@@ -224,7 +226,8 @@ class SchemaDiagnostics(Generic[MetadataT]):
     mapping.
 
     Args:
-      df: This class's columns, one row per trajectory of the run.
+      df: The run's core columns, then this class's columns, one row per
+        trajectory of the schema.
     """
     del df  # Unused.
     return {}
@@ -257,7 +260,8 @@ class SchemaDiagnostics(Generic[MetadataT]):
     own name.
 
     Args:
-      df: This class's columns, one row per trajectory of the run.
+      df: The run's core columns, then this class's columns, one row per
+        trajectory of the schema.
     """
     return {
         column: df[column]

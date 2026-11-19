@@ -83,7 +83,8 @@ class TunixDiagnostics(
     `num_masked_out` is None when no trajectory reports `masked_out`.
 
     Args:
-      df: This class's columns, one row per trajectory of the run.
+      df: The run's core columns, then this class's columns, one row per Tunix
+        trajectory.
     """
     masked_out = df["masked_out"]
     num_reported = int(masked_out.notna().sum())

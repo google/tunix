@@ -20,6 +20,7 @@ from typing import Any, ClassVar
 
 from absl.testing import absltest
 from absl.testing import parameterized
+import pandas as pd
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.dist_rl.trajectory import trajectory_testing
 from tunix.dist_rl.trajectory.explorer.diagnostics import schema_diagnostics
@@ -810,7 +811,7 @@ class SchemaDiagnosticsTest(parameterized.TestCase):
     self.assertEqual(masked_out.dropna().tolist(), [True, False])
     self.assertEqual(
         run.columns_of(_TUNIX_DIAGNOSTICS).columns.tolist(),
-        list(_TUNIX_DIAGNOSTICS.COLUMN_DTYPES),
+        [*stats_lib.COLUMN_DTYPES, *_TUNIX_DIAGNOSTICS.COLUMN_DTYPES],
     )
     self.assertEqual(
         run.schema_stats,
@@ -886,7 +887,7 @@ class SchemaDiagnosticsTest(parameterized.TestCase):
         diagnostics=(diagnostics,),
     )
 
-    columns = run.columns_of(diagnostics)
+    columns = run.columns_of(diagnostics)[list(diagnostics.COLUMN_DTYPES)]
     self.assertEqual(
         columns.dtypes.astype(str).tolist(), ["string", "Int64", "Float64"]
     )
@@ -909,6 +910,84 @@ class SchemaDiagnosticsTest(parameterized.TestCase):
     self.assertEqual(num_retries.isna().tolist(), [False, True])
     # 2**53 + 1 is the smallest int a float64 cannot hold exactly.
     self.assertEqual(num_retries.iloc[0], 2**53 + 1)
+
+  def test_run_level_hooks_see_the_core_columns(self) -> None:
+    class Reporting(schema_diagnostics.SchemaDiagnostics[_EvalMetadata]):
+      COLUMN_DTYPES = {"verdict": "string"}
+
+      def compute_run_summary(
+          self, df: pd.DataFrame
+      ) -> Mapping[str, schema_diagnostics.JsonValue]:
+        return {"columns": df.columns.tolist()}
+
+    diagnostics = Reporting()
+    run = stats_lib.RunStats.from_trajectories(
+        [
+            _EvalMetadata(agent=_AGENT, verdict="pass").create_trajectory(
+                steps=[]
+            )
+        ],
+        diagnostics=(diagnostics,),
+    )
+
+    columns = [*stats_lib.COLUMN_DTYPES, "verdict"]
+    self.assertEqual(run.schema_stats["acme_eval"], {"columns": columns})
+    self.assertEqual(run.columns_of(diagnostics).columns.tolist(), columns)
+
+  def test_run_level_hooks_see_only_the_trajectories_of_their_schema(
+      self,
+  ) -> None:
+    class Reporting(
+        schema_diagnostics.SchemaDiagnostics[
+            trajectory_lib.TunixTrajectoryMetadata
+        ]
+    ):
+      COLUMN_DTYPES = {"masked_out": "boolean"}
+
+      def compute_run_summary(
+          self, df: pd.DataFrame
+      ) -> Mapping[str, schema_diagnostics.JsonValue]:
+        return {"trajectory_ids": df["trajectory_id"].tolist()}
+
+    diagnostics = Reporting()
+    run = stats_lib.RunStats.from_trajectories(
+        [
+            _tunix_trajectory("traj_1", masked_out=True),
+            _trajectory(),
+            # Its only column is null, yet it is a trajectory of the schema.
+            _tunix_trajectory("traj_3"),
+        ],
+        diagnostics=(diagnostics,),
+    )
+
+    self.assertEqual(
+        run.schema_stats["tunix"], {"trajectory_ids": ["traj_1", "traj_3"]}
+    )
+    # The rows keep their labels in `df`, which `summary` matches them by.
+    self.assertEqual(run.columns_of(diagnostics).index.tolist(), [0, 2])
+
+  def test_columns_must_not_have_the_names_of_core_columns(self) -> None:
+    class Shadowing(
+        schema_diagnostics.SchemaDiagnostics[
+            trajectory_lib.TunixTrajectoryMetadata
+        ]
+    ):
+      COLUMN_DTYPES = {"status": "string"}
+
+    diagnostics = (Shadowing(),)
+    error = r"Shadowing: columns \['status'\] have the names of core columns"
+    with self.assertRaisesRegex(ValueError, error):
+      stats_lib.RunStats.from_trajectories(
+          [_tunix_trajectory(status="SUCCEEDED")], diagnostics=diagnostics
+      )
+    # Like the namespace check, it runs up front, whatever the trajectories: a
+    # trajectory of another schema or an empty run fails too.
+    with self.assertRaisesRegex(ValueError, error):
+      stats_lib.TrajectoryStats.from_trajectory(
+          _trajectory(), diagnostics=diagnostics
+      )
+    with self.assertRaisesRegex(ValueError, error):
+      stats_lib.RunStats.from_trajectories([], diagnostics=diagnostics)
 
   @parameterized.named_parameters(
       ("run_of_another_schema", 2),

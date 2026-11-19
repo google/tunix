@@ -14,7 +14,7 @@
 
 """Unit tests for SummaryCommand execution."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 import contextlib
 import io
 import json
@@ -71,6 +71,51 @@ class TrackingReader(store.TrajectoryReader[trajectory_lib.TrajectoryMetadata]):
       trajectory_ids: Sequence[str] | None = None,
   ) -> dict[str, trajectory_lib.TrajectoryMetrics]:
     return self._delegate.get_trajectories_metrics(trajectory_ids)
+
+
+class MixedSchemaReader(
+    store.TrajectoryReader[trajectory_lib.TrajectoryMetadata]
+):
+  """Reads the given trajectories, which may be of several schemas.
+
+  No store can serve such a run, since a store holds a single metadata type.
+  """
+
+  def __init__(
+      self, trajectories: Sequence[trajectory_lib.Trajectory[Any]]
+  ) -> None:
+    self._trajectories: dict[str, trajectory_lib.Trajectory[Any]] = {}
+    for t in trajectories:
+      assert t.trajectory_id is not None
+      self._trajectories[t.trajectory_id] = t
+
+  def get_trajectories_metadata(
+      self,
+      trajectory_ids: Sequence[str] | None = None,
+      *,
+      ignore_missing: bool = False,
+  ) -> dict[str, trajectory_lib.TrajectoryMetadata]:
+    del ignore_missing  # Unused: `summary` requests only present IDs.
+    if trajectory_ids is None:
+      return {i: t.get_metadata() for i, t in self._trajectories.items()}
+    return {i: self._trajectories[i].get_metadata() for i in trajectory_ids}
+
+  def get_trajectories(
+      self,
+      trajectory_ids: Sequence[str],
+      *,
+      ignore_missing: bool = False,
+      strict: bool = True,
+  ) -> dict[str, trajectory_lib.Trajectory[Any]]:
+    del ignore_missing, strict  # Unused: the trajectories are all complete.
+    return {i: self._trajectories[i] for i in trajectory_ids}
+
+  def get_trajectories_metrics(
+      self,
+      trajectory_ids: Sequence[str] | None = None,
+  ) -> dict[str, trajectory_lib.TrajectoryMetrics]:
+    del trajectory_ids  # Unused.
+    raise NotImplementedError("`summary` does not read metrics.")
 
 
 class SummaryTest(absltest.TestCase):
@@ -374,18 +419,60 @@ class SummaryTest(absltest.TestCase):
     _, without_diagnostics = testing.execute_command(self.table_cmd, mem_store)
     self.assertMultiLineEqual(with_diagnostics, without_diagnostics)
 
-  def test_schema_columns_must_not_reuse_a_table_header(self) -> None:
-    class StatusDiagnostics(
+  def test_schema_columns_show_dash_in_rows_of_other_schemas(self) -> None:
+    class PromptDiagnostics(
         schema_diagnostics.SchemaDiagnostics[
             trajectory_lib.TunixTrajectoryMetadata
         ]
     ):
-      COLUMN_DTYPES = {"status": "string"}
+      COLUMN_DTYPES = {"prompt_id": "string"}
+
+    other_prompt = _SUCCEEDED_TRAJECTORY.model_copy(
+        update={"trajectory_id": "t_other_prompt", "prompt_id": "p_2"}
+    )
+    # The diagnostics apply to rows 0 and 2 only, which `columns_of()` returns
+    # under their labels in `RunStats.df`, so each value lands on its own row.
+    reader = MixedSchemaReader(
+        [_SUCCEEDED_TRAJECTORY, _NO_OUTCOME_TRAJECTORY_1, other_prompt]
+    )
+    exit_code, out = testing.execute_command(
+        self.table_cmd, reader, diagnostics=(PromptDiagnostics(),)
+    )
+    self.assertEqual(exit_code, 0)
+    lines = out.splitlines()
+    self.assertRegex(lines[0], r"\s+reward\s+prompt_id$")
+    self.assertRegex(
+        lines[1],
+        rf"^\s*{_SUCCEEDED_TRAJECTORY.trajectory_id}\s.*"
+        rf"\s{_SUCCEEDED_TRAJECTORY.prompt_id}$",
+    )
+    self.assertRegex(
+        lines[2], rf"^\s*{_NO_OUTCOME_TRAJECTORY_1.trajectory_id}\s.*\s-$"
+    )
+    self.assertRegex(
+        lines[3],
+        rf"^\s*{other_prompt.trajectory_id}\s.*\s{other_prompt.prompt_id}$",
+    )
+
+  def test_schema_columns_must_not_reuse_a_table_header(self) -> None:
+    # `reward` is a header of the table but not a core column of `RunStats.df`
+    # (that is `total_reward`), which a schema column may not shadow either.
+    class RewardDiagnostics(
+        schema_diagnostics.SchemaDiagnostics[
+            trajectory_lib.TunixTrajectoryMetadata
+        ]
+    ):
+      COLUMN_DTYPES = {"reward": "Float64"}
+
+      def compute_columns(
+          self, record: trajectory_lib.TunixTrajectoryMetadata
+      ) -> Mapping[str, schema_diagnostics.JsonScalar]:
+        return {"reward": record.total_reward}
 
     mem_store = testing.create_store(trajectories=[_SUCCEEDED_TRAJECTORY])
-    with self.assertRaisesRegex(ValueError, "'status' is already in the table"):
+    with self.assertRaisesRegex(ValueError, "'reward' is already in the table"):
       testing.execute_command(
-          self.table_cmd, mem_store, diagnostics=(StatusDiagnostics(),)
+          self.table_cmd, mem_store, diagnostics=(RewardDiagnostics(),)
       )
 
   def test_hidden_schema_columns_are_only_in_json(self) -> None:
