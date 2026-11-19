@@ -43,6 +43,10 @@ def set_runtime_container(target: Any, container_name: str) -> None:
   runtime = getattr(target, "runtime", None) or target
   try:
     runtime._target_container = container_name
+    # agent_sandbox_rl's FleetRuntime._run_kubernetes passes `self._container`
+    # to `exec_container_kwargs`, so update `_container` as well.
+    if hasattr(runtime, "_container"):
+      runtime._container = container_name
     client = getattr(runtime, "client", None)
     if client is not None:
       client._default_container = container_name

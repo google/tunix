@@ -15,6 +15,7 @@
 """Utility functions for OpenHands workspace and environment setup."""
 
 import base64
+import codecs
 import hashlib
 import json
 import logging
@@ -937,6 +938,157 @@ def cleanup_rollout_container_processes(
     logging.debug("[SWEEnv] Rollout container process cleanup note: %s", e)
 
 
+def _unescape_git_path(raw: str) -> str:
+  """Unescapes a git diff path, decoding C-style escapes when quoted."""
+  if len(raw) >= 2 and raw.startswith('"') and raw.endswith('"'):
+    try:
+      return (
+          codecs.decode(raw[1:-1], "unicode_escape")
+          .encode("latin1")
+          .decode("utf-8", errors="surrogateescape")
+      )
+    except (UnicodeDecodeError, UnicodeEncodeError):
+      return raw[1:-1]
+  return raw
+
+
+_UNQUOTED_DIFF_GIT_RE = re.compile(r"^diff --git a/(.+) b/\1$")
+_QUOTED_DIFF_GIT_RE = re.compile(r'^diff --git "a/(.+)" "b/\1"$')
+
+
+def _parse_diff_git_b_path(line: str) -> Optional[str]:
+  """Extracts the destination `b/` path from a `diff --git` header line."""
+  if m := _UNQUOTED_DIFF_GIT_RE.match(line):
+    return m.group(1)
+  if m := _QUOTED_DIFF_GIT_RE.match(line):
+    return _unescape_git_path(f'"{m.group(1)}"')
+  return None
+
+
+def _parse_patch_sections(patch: str) -> list[tuple[str, Optional[str]]]:
+  """Splits `patch` into `(section_text, new_file_path_or_none)` entries."""
+  sections: list[tuple[str, Optional[str]]] = []
+  current_lines: list[str] = []
+  saw_new_file = False
+  new_path: Optional[str] = None
+
+  def _flush() -> None:
+    if current_lines:
+      sections.append(("".join(current_lines), new_path if saw_new_file else None))
+
+  for line in patch.splitlines(keepends=True):
+    if line.startswith("diff --git "):
+      _flush()
+      current_lines = [line]
+      saw_new_file = False
+      new_path = _parse_diff_git_b_path(line.rstrip("\r\n"))
+    else:
+      current_lines.append(line)
+      if line.startswith("new file mode "):
+        saw_new_file = True
+      elif saw_new_file and line.startswith("+++ "):
+        target = _unescape_git_path(line[4:].strip())
+        if target.startswith("b/"):
+          target = target[2:]
+        if target and target != "/dev/null":
+          new_path = target
+  _flush()
+  return sections
+
+
+def _new_file_paths_in_patch(patch: str) -> list[str]:
+  """Extracts destination paths for `new file mode` entries in a unified diff."""
+  return [p for _, p in _parse_patch_sections(patch) if p is not None]
+
+
+def _find_existing_paths_in_container(
+    runtime: Any,
+    repo_path: str,
+    paths: list[str],
+    chunk_max_bytes: int = 49152,
+) -> Optional[list[str]]:
+  """Returns sorted subset of `paths` that already exist in `runtime`."""
+  if not paths:
+    return []
+  excluded_set: set[str] = set()
+  idx = 0
+  while idx < len(paths):
+    chunk_quoted: list[str] = []
+    chunk_bytes = 0
+    while idx < len(paths):
+      quoted = shlex.quote(paths[idx])
+      added = len(quoted) + (1 if chunk_quoted else 0)
+      if chunk_quoted and chunk_bytes + added > chunk_max_bytes:
+        break
+      chunk_quoted.append(quoted)
+      chunk_bytes += added
+      idx += 1
+
+    check_cmd = (
+        f"cd {shlex.quote(repo_path)} && "
+        f"for p in {' '.join(chunk_quoted)}; do "
+        'if [ -e "$p" ] || [ -L "$p" ]; then printf \'%s\\n\' "$p"; fi; '
+        "done"
+    )
+    check_res = runtime.run(f"/bin/sh -c {shlex.quote(check_cmd)}", timeout=30)
+    check_output, check_exit = _unpack_exec_output(check_res)
+    if check_exit != 0:
+      logging.warning(
+          "[SWEEnv] Failed to check existing patch paths in eval container: %s",
+          check_output,
+      )
+      return None
+    excluded_set.update(
+        f.strip() for f in check_output.splitlines() if f.strip()
+    )
+  return sorted(excluded_set)
+
+
+def _write_file_in_chunks(
+    runtime: Any,
+    dest_path: str,
+    content: str,
+    chunk_size: int = 49152,
+) -> bool:
+  """Writes `content` to `dest_path` in `runtime` via chunked base64 writes."""
+  b64_content = base64.b64encode(content.encode("utf-8")).decode("ascii")
+  b64_tmp_path = f"{dest_path}.b64"
+  for idx in range(0, len(b64_content), chunk_size):
+    chunk = b64_content[idx : idx + chunk_size]
+    redir = ">" if idx == 0 else ">>"
+    inner_chunk = (
+        f"printf '%s' {shlex.quote(chunk)} {redir} {shlex.quote(b64_tmp_path)}"
+    )
+    chunk_res = runtime.run(f"/bin/sh -c {shlex.quote(inner_chunk)}", timeout=30)
+    chunk_out, chunk_exit = _unpack_exec_output(chunk_res)
+    if chunk_exit != 0:
+      logging.warning(
+          "[SWEEnv] Failed to write %s chunk in eval container: %s",
+          dest_path,
+          chunk_out,
+      )
+      runtime.run(f"rm -f {shlex.quote(b64_tmp_path)}", timeout=15)
+      return False
+  decode_cmd = (
+      f"base64 -d {shlex.quote(b64_tmp_path)} > {shlex.quote(dest_path)} && "
+      f"rm -f {shlex.quote(b64_tmp_path)}"
+  )
+  decode_res = runtime.run(f"/bin/sh -c {shlex.quote(decode_cmd)}", timeout=30)
+  decode_out, decode_exit = _unpack_exec_output(decode_res)
+  if decode_exit != 0:
+    logging.warning(
+        "[SWEEnv] Failed to decode %s in eval container: %s",
+        dest_path,
+        decode_out,
+    )
+    runtime.run(
+        f"rm -f {shlex.quote(b64_tmp_path)} {shlex.quote(dest_path)}",
+        timeout=15,
+    )
+    return False
+  return True
+
+
 def evaluate_patch_in_fresh_container(
     eval_env: Any,
     patch: str,
@@ -972,70 +1124,50 @@ def evaluate_patch_in_fresh_container(
       return 0.0
 
     repo_path = getattr(runtime, "repo_path", "/testbed") or "/testbed"
-    git_ls_res = runtime.run(
-        "git ls-files --others --exclude-standard",
-        timeout=30,
+    sections = _parse_patch_sections(patch)
+    new_file_paths = [p for _, p in sections if p is not None]
+    # Drop `new file mode` sections for paths that already exist in `eval`
+    # (checked in chunks to stay below `/bin/sh -c`'s 128 KiB MAX_ARG_STRLEN
+    # limit) rather than passing `--exclude` or running `git ls-files --others`.
+    excluded_files = _find_existing_paths_in_container(
+        runtime, repo_path, new_file_paths
     )
-    git_ls_output, git_ls_exit = _unpack_exec_output(git_ls_res)
-    if git_ls_exit != 0:
-      logging.warning(
-          "[SWEEnv] Failed to list untracked files in eval container: %s",
-          git_ls_output,
-      )
+    if excluded_files is None:
       return 0.0
-
-    untracked_files = [
-        f.strip() for f in git_ls_output.splitlines() if f.strip()
-    ]
-    exclude_str = " ".join(
-        shlex.quote(f"--exclude={f}") for f in untracked_files
-    )
-
-    patch_path = "/tmp/model.patch"
-    b64_patch = base64.b64encode(patch.encode("utf-8")).decode("ascii")
-    if len(b64_patch) <= 65536:
-      inner_apply = (
-          f"printf '%s' {shlex.quote(b64_patch)} | base64 -d > {patch_path} && "
-          f"cd {shlex.quote(repo_path)} && "
-          f"git apply --whitespace=fix {exclude_str} {patch_path}; "
-          f"_rc=$?; rm -f {patch_path}; exit $_rc"
+    if excluded_files:
+      excluded_set = set(excluded_files)
+      patch = "".join(
+          text for text, new_path in sections if new_path not in excluded_set
       )
-      apply_cmd = f"/bin/sh -c {shlex.quote(inner_apply)}"
-    else:
-      b64_tmp_path = f"{patch_path}.b64"
-      chunk_size = 49152
-      for idx in range(0, len(b64_patch), chunk_size):
-        chunk = b64_patch[idx : idx + chunk_size]
-        redir = ">" if idx == 0 else ">>"
-        inner_chunk = f"printf '%s' {shlex.quote(chunk)} {redir} {b64_tmp_path}"
-        chunk_res = runtime.run(
-            f"/bin/sh -c {shlex.quote(inner_chunk)}", timeout=30
+
+    if patch.strip():
+      patch_path = "/tmp/model.patch"
+      b64_patch = base64.b64encode(patch.encode("utf-8")).decode("ascii")
+      if len(b64_patch) <= 65536:
+        inner_apply = (
+            f"printf '%s' {shlex.quote(b64_patch)} | base64 -d > {patch_path}"
+            f" && cd {shlex.quote(repo_path)} && "
+            f"git apply --whitespace=fix {patch_path}; "
+            f"_rc=$?; rm -f {patch_path}; exit $_rc"
         )
-        chunk_out, chunk_exit = _unpack_exec_output(chunk_res)
-        if chunk_exit != 0:
-          logging.warning(
-              "[SWEEnv] Failed to write patch chunk in eval container: %s",
-              chunk_out,
-          )
-          runtime.run(f"rm -f {shlex.quote(b64_tmp_path)}", timeout=15)
+      else:
+        if not _write_file_in_chunks(runtime, patch_path, patch):
           return 0.0
-      inner_apply = (
-          f"base64 -d {b64_tmp_path} > {patch_path} && "
-          f"rm -f {b64_tmp_path} && "
-          f"cd {shlex.quote(repo_path)} && "
-          f"git apply --whitespace=fix {exclude_str} {patch_path}; "
-          f"_rc=$?; rm -f {b64_tmp_path} {patch_path}; exit $_rc"
-      )
+        inner_apply = (
+            f"cd {shlex.quote(repo_path)} && "
+            f"git apply --whitespace=fix {patch_path}; "
+            f"_rc=$?; rm -f {patch_path}; exit $_rc"
+        )
       apply_cmd = f"/bin/sh -c {shlex.quote(inner_apply)}"
 
-    apply_res = runtime.run(apply_cmd, timeout=60)
-    apply_output, apply_exit = _unpack_exec_output(apply_res)
-    if apply_exit != 0:
-      logging.warning(
-          "[SWEEnv] Failed to apply patch in eval container: %s",
-          apply_output,
-      )
-      return 0.0
+      apply_res = runtime.run(apply_cmd, timeout=60)
+      apply_output, apply_exit = _unpack_exec_output(apply_res)
+      if apply_exit != 0:
+        logging.warning(
+            "[SWEEnv] Failed to apply patch in eval container: %s",
+            apply_output,
+        )
+        return 0.0
 
     runtime._defer_setup_env = False  # pylint: disable=protected-access
     if getattr(runtime, "_handle", None) is not None:
