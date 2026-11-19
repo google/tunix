@@ -127,3 +127,6 @@ class BaseRollout(ABC):
 
   def restore_after_training(self) -> None:
     """Restores rollout HBM resources after training when colocated."""
+
+  def close(self) -> None:
+    """Releases background rollout resources when shutting down."""
