@@ -240,16 +240,21 @@ class SchemaDiagnostics(Generic[MetadataT]):
     """Returns the lines this class adds to a trajectory's header in `show`.
 
     The default returns one `column: value` line per column that is not in
-    `HIDDEN_COLUMNS`, with `-` for None.
+    `HIDDEN_COLUMNS`, with `-` for None and Float64 values to 3 significant
+    digits.
 
     Args:
       values: This class's `extract()` result for the trajectory.
     """
-    return [
-        f"{column}: {formatting.format_optional(values[column])}"
-        for column in self.COLUMN_DTYPES
-        if column not in self.HIDDEN_COLUMNS
-    ]
+    lines = []
+    for column, dtype in self.COLUMN_DTYPES.items():
+      if column in self.HIDDEN_COLUMNS:
+        continue
+      spec = formatting.FLOAT_SPEC if dtype == "Float64" else ""
+      lines.append(
+          f"{column}: {formatting.format_optional(values[column], spec)}"
+      )
+    return lines
 
   def format_summary_columns(
       self, df: pd.DataFrame
@@ -257,17 +262,24 @@ class SchemaDiagnostics(Generic[MetadataT]):
     """Returns the columns this class adds to the `summary` table, by header.
 
     The default returns each column that is not in `HIDDEN_COLUMNS` under its
-    own name.
+    own name, with Float64 values formatted to 3 significant digits.
 
     Args:
       df: The run's core columns, then this class's columns, one row per
         trajectory of the schema.
     """
-    return {
-        column: df[column]
-        for column in self.COLUMN_DTYPES
-        if column not in self.HIDDEN_COLUMNS
-    }
+    columns = {}
+    for column, dtype in self.COLUMN_DTYPES.items():
+      if column in self.HIDDEN_COLUMNS:
+        continue
+      if dtype == "Float64":
+        columns[column] = df[column].map(
+            lambda value: format(value, formatting.FLOAT_SPEC),
+            na_action="ignore",
+        )
+      else:
+        columns[column] = df[column]
+    return columns
 
   def format_summary_totals(
       self, run_summary: Mapping[str, JsonValue], num_trajectories: int

@@ -348,33 +348,38 @@ class DefaultHooksTest(absltest.TestCase):
     lines = self.diagnostics.format_show_header({
         "verdict": "pass",
         "num_retries": None,
-        "latency_ms": 12.5,
+        "latency_ms": 12.3456,
         "passed": False,
     })
 
+    # Float64 values print with 3 significant digits.
     self.assertEqual(
         list(lines),
         [
             "verdict: pass",
             "num_retries: -",
-            "latency_ms: 12.5",
+            "latency_ms: 12.3",
             "passed: False",
         ],
     )
 
   def test_summary_columns_are_the_columns_under_their_own_names(self) -> None:
     df = pd.DataFrame({
-        "verdict": ["pass"],
-        "num_retries": [1],
-        "latency_ms": [2.5],
-        "passed": [True],
+        "verdict": ["pass", "fail"],
+        "num_retries": [1, 123456],
+        "latency_ms": pd.array([12.3456, None], dtype="Float64"),
+        "passed": [True, False],
     })
 
     columns = self.diagnostics.format_summary_columns(df)
 
     self.assertEqual(list(columns), list(df.columns))
-    for name, column in columns.items():
-      pd.testing.assert_series_equal(column, df[name])
+    for name in ("verdict", "num_retries", "passed"):
+      pd.testing.assert_series_equal(columns[name], df[name])
+    # Float64 values print with 3 significant digits; nulls stay null.
+    latency_ms = columns["latency_ms"]
+    self.assertEqual(latency_ms.iloc[0], "12.3")
+    self.assertEqual(latency_ms.isna().tolist(), [False, True])
 
   def test_hidden_columns_are_extracted_but_not_printed(self) -> None:
     class Hiding(schema_diagnostics.SchemaDiagnostics[_EvalMetadata]):

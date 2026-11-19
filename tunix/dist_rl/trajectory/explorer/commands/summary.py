@@ -137,7 +137,10 @@ def _table(
       "env": df["steps_user"] + df["steps_system"],
       "tokens": tokens,
       "tool calls": df["num_tool_calls"],
-      "reward": df["total_reward"].map("{:.3g}".format, na_action="ignore"),
+      "reward": df["total_reward"].map(
+          lambda value: format(value, formatting.FLOAT_SPEC),
+          na_action="ignore",
+      ),
   })
   for d in diagnostics:
     if d.NAMESPACE not in run_stats.schema_stats:
@@ -183,10 +186,11 @@ def _totals(
       ),
   ]
   lines.extend(_format_reward_signs(run_stats.reward_signs_by_status))
+  mean_reward = formatting.format_optional(
+      run_stats.mean_reward, formatting.FLOAT_SPEC
+  )
   lines.append(
-      "Mean reward:"
-      f" {formatting.format_optional(run_stats.mean_reward, '.3g')}"
-      f" reported by {run_stats.num_with_reward}/{n}"
+      f"Mean reward: {mean_reward} reported by {run_stats.num_with_reward}/{n}"
   )
   for d in diagnostics:
     if d.NAMESPACE in run_stats.schema_stats:
