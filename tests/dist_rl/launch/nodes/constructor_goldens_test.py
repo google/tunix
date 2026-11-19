@@ -274,6 +274,15 @@ GOLDEN_CASES: Mapping[str, GoldenCase] = {
             " 'allow_split_physical_axes': False}}}"
         ),
     )),
+    # MaxText `inprocess_vllm` rollout without weight sync that loads a scanned
+    # checkpoint over its random weights before it serves.
+    "maxtext_scanned_eval": GoldenCase((
+        "model_config.model_source=maxtext",
+        "model_config.model_path=/ckpt/qwen3-1.7b/0/items",
+        "model_config.kwargs.maxtext_model_name=qwen3-1.7b",
+        "weight_sync_config.mode=none",
+        "rollout_model_config.scanned_checkpoint_path=/ckpt/scanned/0",
+    )),
 }
 
 # The cases each role's goldens cover.
@@ -290,6 +299,7 @@ GOLDEN_CASES_BY_ROLE: Mapping[node_utils.ProcessRole, tuple[str, ...]] = {
         "vanilla",
         "gemma4",
         "vllm_engine_kwargs",
+        "maxtext_scanned_eval",
     ),
 }
 
@@ -589,6 +599,16 @@ def _run_rollout(
       mock.patch.dict(sys.modules, {"vllm.engine.arg_utils": arg_utils})
   )
   recorder.patch(vanilla_sampler, "VanillaSampler")
+  recorder.patch(
+      rollout,
+      "_scanned_checkpoint_layout",
+      returns=(
+          "/ckpt/scanned/0/items",
+          {"checkpoint_storage_use_ocdbt": True},
+          False,
+      ),
+  )
+  recorder.patch(maxtext_utils, "load_and_convert_scanned_checkpoint")
   recorder.record_init(inprocess_vllm_sampler.InprocessVllmSampler)
   recorder.record_init(vllm_sampler.VllmSampler)
   recorder.patch(tokenizer_adapter, "TokenizerAdapter")

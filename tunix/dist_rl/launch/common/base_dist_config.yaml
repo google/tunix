@@ -54,6 +54,11 @@ reference_model_config:
 
 rollout_model_config:
   <<: *base_model_config
+  # Scanned MaxText checkpoint (an Orbax parameter directory, or a checkpoint
+  # step directory holding `model_params`, `items` or `default`) that an
+  # `inprocess_vllm` MaxText rollout with `weight_sync_config.mode: none` loads
+  # at startup, converted in memory to vLLM's unscanned layout. Empty: none.
+  scanned_checkpoint_path: ""
 
 ################################## Tokenizer ##################################
 tokenizer_config:

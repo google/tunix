@@ -84,6 +84,12 @@ def _inprocess_vllm_rollout_config(*argv: str):
   return rollout._rollout_config(hp, mock.Mock(), sampler_type="inprocess_vllm")
 
 
+def _orbax_tree_metadata(moe_key: str) -> Mapping[str, Any]:
+  """Returns an Orbax `_METADATA` `tree_metadata` with one MoE weight."""
+  keys = ("params", "decoder", "layers", "moe_block", moe_key)
+  return {str(keys): {"key_metadata": [{"key": key} for key in keys]}}
+
+
 def _rollout_config(*argv: str):
   return rollout._rollout_config(
       _hp(*argv), mock.Mock(), sampler_type="inprocess_vllm"
@@ -614,6 +620,87 @@ class CreateRolloutWorkerTest(absltest.TestCase):
       )
     worker_kwargs = self._worker_kwargs()
     self.assertIs(worker_kwargs["sampler"], sampler_cls.return_value)
+    sampler_cls.return_value.initialize.assert_not_called()
+
+  def test_inprocess_vllm_loads_scanned_checkpoint_before_serving(self):
+    hp = _hp(
+        *_MAXTEXT_ROLLOUT_ARGV,
+        "weight_sync_config.mode=none",
+        "rollout_model_config.scanned_checkpoint_path=/ckpt/scanned/0",
+        "rollout_model_config.mesh.shape=(1,4)",
+        "vllm_config.engine_kwargs={'additional_config': {'maxtext_config':"
+        " {'fp8_moe': True}}}",
+    )
+    calls = mock.Mock()
+    with (
+        mock.patch.object(
+            rollout, "_import_vllm_sampler", return_value=mock.Mock()
+        ),
+        mock.patch.object(node_utils, "create_mesh"),
+        mock.patch.object(
+            inprocess_vllm_sampler, "InprocessVllmSampler"
+        ) as sampler_cls,
+        mock.patch.object(
+            rollout,
+            "_scanned_checkpoint_layout",
+            return_value=(
+                "/ckpt/scanned/0/items",
+                {"checkpoint_storage_use_ocdbt": False},
+                True,
+            ),
+        ) as layout,
+        mock.patch.object(
+            maxtext_utils, "load_and_convert_scanned_checkpoint"
+        ) as load,
+    ):
+      sampler = sampler_cls.return_value
+      calls.attach_mock(sampler.initialize, "initialize")
+      calls.attach_mock(load, "load")
+      rollout._create_rollout_worker(hp, "rollout-0", self.tokenizer)
+    self.assertIs(self._worker_kwargs()["sampler"], sampler)
+    layout.assert_called_once_with("/ckpt/scanned/0")
+    # The engine is built first, so the load replaces its random weights.
+    self.assertEqual(
+        [name for name, _, _ in calls.mock_calls], ["initialize", "load"]
+    )
+    load.assert_called_once()
+    args, kwargs = load.call_args
+    self.assertEqual(args, ("/ckpt/scanned/0/items", sampler))
+    self.assertEqual(kwargs["mesh_tp"], 4)
+    self.assertIs(kwargs["ckpt_prefuse_moe"], True)
+    self.assertIs(kwargs["fp8_moe"], True)
+    overrides = kwargs["maxtext_config_overrides"]
+    # The rollout's MaxText config, the user's keys, and the storage layout.
+    self.assertEqual(overrides["model_name"], "qwen3-30b-a3b")
+    self.assertIs(overrides["fp8_moe"], True)
+    self.assertIs(overrides["checkpoint_storage_use_ocdbt"], False)
+
+  def test_scanned_checkpoint_layout_reads_orbax_metadata(self):
+    step_dir = self.create_tempdir()
+    with self.assertRaisesRegex(FileNotFoundError, "No Orbax _METADATA"):
+      rollout._scanned_checkpoint_layout(step_dir.full_path)
+    for metadata, storage, prefused in (
+        (
+            {"tree_metadata": _orbax_tree_metadata("wi"), "use_zarr3": True},
+            {"checkpoint_storage_use_zarr3": True},
+            True,
+        ),
+        (
+            {
+                "tree_metadata": _orbax_tree_metadata("wi_0"),
+                "use_ocdbt": False,
+            },
+            {"checkpoint_storage_use_ocdbt": False},
+            False,
+        ),
+    ):
+      with self.subTest(storage=storage):
+        params_dir = step_dir.mkdir()
+        params_dir.mkdir("items").create_file("_METADATA", json.dumps(metadata))
+        self.assertEqual(
+            rollout._scanned_checkpoint_layout(params_dir.full_path),
+            (os.path.join(params_dir.full_path, "items"), storage, prefused),
+        )
 
 
 class SamplerTest(absltest.TestCase):

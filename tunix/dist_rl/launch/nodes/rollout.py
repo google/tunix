@@ -27,6 +27,7 @@ import asyncio
 from collections.abc import Callable, Mapping
 import dataclasses
 import importlib
+import json
 import logging
 import os
 import sys
@@ -43,6 +44,7 @@ from tunix.dist_rl.launch.nodes import node_utils
 from tunix.dist_rl.rollout import sampler as sampler_lib
 from tunix.dist_rl.weight_sync import weight_sync as weight_sync_lib
 from tunix.dist_rl.worker import rollout_worker
+from tunix.generate import utils as generate_utils
 from tunix.generate import vllm_model_config
 from tunix.models import automodel
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
@@ -724,12 +726,95 @@ def _create_inprocess_vllm_sampler(
   max_concurrency = int(
       hp.config_mapping("agentic_grpo_config")["max_concurrency"]
   )
-  return inprocess_vllm_sampler.InprocessVllmSampler(
+  sampler = inprocess_vllm_sampler.InprocessVllmSampler(
       server_id=worker_id,
       tokenizer=tokenizer,
       config=config,
       mesh=rollout_mesh,
       max_concurrency=max_concurrency,
+  )
+  if resolve_config.rollout_scanned_checkpoint_path(hp):
+    # Build the engine on random weights now and load the checkpoint over them,
+    # so the worker registers only once it serves the real weights.
+    sampler.initialize()
+    _load_scanned_checkpoint(hp, sampler, config)
+  return sampler
+
+
+# Orbax parameter subdirectories of a checkpoint step directory.
+_CHECKPOINT_PARAM_SUBDIRS = ("model_params", "items", "default")
+
+
+def _scanned_checkpoint_layout(path: str) -> tuple[str, dict[str, bool], bool]:
+  """Reads where and how a scanned MaxText checkpoint stores its parameters.
+
+  Args:
+    path: Orbax parameter directory, or a checkpoint step directory holding one
+      in `model_params`, `items` or `default`.
+
+  Returns:
+    The parameter directory; the MaxText checkpoint storage settings its Orbax
+    `_METADATA` records (`checkpoint_storage_use_ocdbt` / `_use_zarr3`); and
+    whether it stores the MoE gate/up projections pre-fused as `wi`.
+
+  Raises:
+    FileNotFoundError: If neither `path` nor one of those subdirectories holds
+      an Orbax `_METADATA` file.
+  """
+  from etils import epath  # pylint: disable=g-import-not-at-top
+
+  root = epath.Path(path)
+  candidates = [root] + [root / sub for sub in _CHECKPOINT_PARAM_SUBDIRS]
+  params_dir = next((c for c in candidates if (c / "_METADATA").exists()), None)
+  if params_dir is None:
+    raise FileNotFoundError(
+        f"No Orbax _METADATA in {path} or its {_CHECKPOINT_PARAM_SUBDIRS}"
+        " subdirectories."
+    )
+  metadata_text = (params_dir / "_METADATA").read_text()
+  metadata = json.loads(metadata_text)
+  storage = {
+      f"checkpoint_storage_{key}": bool(metadata[key])
+      for key in ("use_ocdbt", "use_zarr3")
+      if key in metadata
+  }
+  return str(params_dir), storage, '"wi"' in metadata_text
+
+
+def _load_scanned_checkpoint(
+    hp: resolve_config.DistHyperParameters,
+    sampler: maxtext_utils.ScannedCheckpointTarget,
+    config: rollout_worker.RolloutConfig,
+) -> None:
+  """Loads `rollout_model_config.scanned_checkpoint_path` into `sampler`.
+
+  Args:
+    hp: Validated distributed RL configuration.
+    sampler: The initialized in-process vLLM sampler.
+    config: The sampler's rollout config; its MaxText settings (with the
+      `vllm_config.engine_kwargs` overrides) describe the checkpoint's model.
+  """
+  params_dir, storage, prefused_moe = _scanned_checkpoint_layout(
+      resolve_config.rollout_scanned_checkpoint_path(hp)
+  )
+  vllm_kwargs = config.rollout_vllm_kwargs
+  additional = generate_utils.merge_additional_config(
+      config.rollout_vllm_additional_config,
+      vllm_kwargs["additional_config"]
+      if "additional_config" in vllm_kwargs
+      else None,
+  )
+  maxtext_config = {**additional["maxtext_config"], **storage}
+  logging.info("Loading scanned MaxText checkpoint %s.", params_dir)
+  maxtext_utils.load_and_convert_scanned_checkpoint(
+      params_dir,
+      sampler,
+      mesh_tp=_tensor_parallel_size(hp),
+      ckpt_prefuse_moe=prefused_moe,
+      fp8_moe=bool(maxtext_config["fp8_moe"])
+      if "fp8_moe" in maxtext_config
+      else False,
+      maxtext_config_overrides=maxtext_config,
   )
 
 
