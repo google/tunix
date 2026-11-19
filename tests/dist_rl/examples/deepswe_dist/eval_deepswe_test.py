@@ -24,6 +24,7 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
+from etils import epath
 from tunix.dist_rl.examples.deepswe_dist import eval_deepswe
 
 
@@ -338,38 +339,88 @@ class EvalDeepSWETest(unittest.TestCase):
         eval_deepswe.summarize(rows, 2, 2)["pass_at_k"], {"2": 1.0}
     )
 
-  def test_result_writer_persists_attempts_config_and_summary(self):
+  def test_write_helpers_persist_attempts_config_and_summary(self):
     with tempfile.TemporaryDirectory() as temp_dir:
-      writer = eval_deepswe.ResultWriter(f"{temp_dir}/out", "run")
+      run_dir = epath.Path(temp_dir) / "out" / "run"
       row = {"request_id": "eval_0_1", "instance_id": "task-0", "reward": 1.0}
 
-      writer.write_json("config.json", {"num_rollouts_per_instance": 2})
-      writer.write_attempt(row)
-      writer.write_results([row], {"pass_at_1": 1.0})
+      eval_deepswe.write_json(
+          run_dir / "config.json", {"num_rollouts_per_instance": 2}
+      )
+      eval_deepswe.write_json(run_dir / "attempts" / "eval_0_1.json", row)
+      eval_deepswe.write_results(run_dir, [row], {"pass_at_1": 1.0})
 
       out = Path(temp_dir) / "out"
       self.assertEqual(
-          json.loads((out / "run/attempts/eval_0_1.json").read_text()), row
+          json.loads(
+              (out / "run/attempts/eval_0_1.json").read_text(encoding="utf-8")
+          ),
+          row,
       )
       self.assertEqual(
-          json.loads((out / "run/config.json").read_text()),
+          json.loads((out / "run/config.json").read_text(encoding="utf-8")),
           {"num_rollouts_per_instance": 2},
       )
-      self.assertEqual(json.loads((out / "run.jsonl").read_text()), row)
       self.assertEqual(
-          json.loads((out / "run.summary.json").read_text()),
+          json.loads((out / "run.jsonl").read_text(encoding="utf-8")), row
+      )
+      self.assertEqual(
+          json.loads((out / "run.summary.json").read_text(encoding="utf-8")),
           {"pass_at_1": 1.0},
       )
 
-  def test_result_writer_skips_makedirs_on_object_stores(self):
-    fake_fs = mock.MagicMock()
-    with mock.patch("fsspec.core.url_to_fs", return_value=(fake_fs, "bkt/out")):
-      writer = eval_deepswe.ResultWriter("gs://bkt/out", "run")
-      writer.write_attempt({"request_id": "eval_0", "reward": 0.0})
+  def test_write_helpers_support_gcs_epath(self):
+    run_dir = epath.Path("gs://bkt/out") / "run"
+    row = {"request_id": "eval_0", "reward": 0.0}
+    summary = {"pass_at_1": 0.0}
+    path_cls = type(run_dir)
 
-    fake_fs.makedirs.assert_not_called()
-    fake_fs.open.assert_called_once_with(
-        "bkt/out/run/attempts/eval_0.json", "w", encoding="utf-8"
+    with (
+        mock.patch.object(path_cls, "mkdir", autospec=True) as mock_mkdir,
+        mock.patch.object(path_cls, "write_text", autospec=True) as mock_write,
+    ):
+      eval_deepswe.write_json(run_dir / "attempts" / "eval_0.json", row)
+      eval_deepswe.write_results(run_dir, [row], summary)
+
+    self.assertEqual(
+        mock_mkdir.call_args_list,
+        [
+            mock.call(
+                epath.Path("gs://bkt/out/run/attempts"),
+                parents=True,
+                exist_ok=True,
+            ),
+            mock.call(
+                epath.Path("gs://bkt/out"),
+                parents=True,
+                exist_ok=True,
+            ),
+            mock.call(
+                epath.Path("gs://bkt/out"),
+                parents=True,
+                exist_ok=True,
+            ),
+        ],
+    )
+    self.assertEqual(
+        mock_write.call_args_list,
+        [
+            mock.call(
+                epath.Path("gs://bkt/out/run/attempts/eval_0.json"),
+                json.dumps(row, indent=2) + "\n",
+                encoding="utf-8",
+            ),
+            mock.call(
+                epath.Path("gs://bkt/out/run.jsonl"),
+                json.dumps(row) + "\n",
+                encoding="utf-8",
+            ),
+            mock.call(
+                epath.Path("gs://bkt/out/run.summary.json"),
+                json.dumps(summary, indent=2) + "\n",
+                encoding="utf-8",
+            ),
+        ],
     )
 
   def test_controller_survives_attempt_write_oserror(self) -> None:
@@ -408,14 +459,12 @@ class EvalDeepSWETest(unittest.TestCase):
         lambda request_id, method, fields: request_id
     )
     handle.poll_responses.side_effect = lambda timeout_s: next(replies)
-    real_write_attempt = eval_deepswe.ResultWriter.write_attempt
+    real_write_json = eval_deepswe.write_json
 
-    def flaky_write_attempt(
-        writer: eval_deepswe.ResultWriter, row: dict[str, object]
-    ) -> None:
-      if row["request_id"] == "eval_0":
+    def flaky_write_json(path: epath.PathLike, value: object) -> None:
+      if epath.Path(path).name == "eval_0.json":
         raise OSError("transient GCS error")
-      real_write_attempt(writer, row)
+      real_write_json(path, value)
 
     with tempfile.TemporaryDirectory() as temp_dir:
       args.output_dir = temp_dir
@@ -426,10 +475,10 @@ class EvalDeepSWETest(unittest.TestCase):
               return_value=handle,
           ),
           mock.patch.object(
-              eval_deepswe.ResultWriter,
-              "write_attempt",
+              eval_deepswe,
+              "write_json",
               autospec=True,
-              side_effect=flaky_write_attempt,
+              side_effect=flaky_write_json,
           ),
           self.assertLogs(level="INFO") as logs,
       ):
@@ -445,6 +494,10 @@ class EvalDeepSWETest(unittest.TestCase):
       )
       results = list(Path(temp_dir).glob("*.jsonl"))
       self.assertEqual(len(results), 1)
+      run_dir = Path(temp_dir) / results[0].stem
+      self.assertTrue((run_dir / "config.json").exists())
+      self.assertFalse((run_dir / "attempts" / "eval_0.json").exists())
+      self.assertTrue((run_dir / "attempts" / "eval_1.json").exists())
       written_rows = [
           json.loads(line)
           for line in results[0].read_text(encoding="utf-8").splitlines()

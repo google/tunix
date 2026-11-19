@@ -18,7 +18,7 @@ The defaults match examples/deepswe/eval_deepswe.py: one greedy Qwen3-32B
 trajectory per SWE-Bench Verified task, a 30-turn limit, and Pass@1 reporting.
 `--num_rollouts_per_instance` samples several attempts per task and adds
 Pass@k. Run locally on one TPU host, or run worker and controller roles
-separately. Results go to a local or fsspec (e.g. `gs://`) `--output_dir`.
+separately. Results go to a local or remote (e.g. `gs://`) `--output_dir`.
 """
 
 from __future__ import annotations
@@ -37,6 +37,8 @@ import subprocess
 import sys
 import threading
 import time
+
+from etils import epath
 
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -275,51 +277,32 @@ def summarize(rows: list[dict[str, object]], expected: int, attempts: int = 1) -
   return summary
 
 
-class ResultWriter:
-  """Writes one evaluation run to a local or fsspec (e.g. `gs://`) directory.
+def write_json(path: epath.PathLike, value: object) -> None:
+  """Writes `value` as UTF-8 JSON to a local or remote (e.g. `gs://`) file."""
+  target = epath.Path(path)
+  target.parent.mkdir(parents=True, exist_ok=True)
+  target.write_text(
+      json.dumps(value, ensure_ascii=False, allow_nan=False, indent=2) + "\n",
+      encoding="utf-8",
+  )
 
-  Each finished attempt is written as `<run>/attempts/<request_id>.json` as soon
-  as it completes, so partial results survive a failure. The run config goes to
-  `<run>/config.json`, and the final rows and summary to `<run>.jsonl` and
-  `<run>.summary.json`.
-  """
 
-  def __init__(self, output_dir: str, run_name: str):
-    import fsspec  # pylint: disable=g-import-not-at-top
-    from fsspec.implementations import local as fsspec_local  # pylint: disable=g-import-not-at-top
-
-    self._fs, root = fsspec.core.url_to_fs(output_dir)
-    self._is_local = isinstance(self._fs, fsspec_local.LocalFileSystem)
-    self.prefix = f"{root.rstrip('/')}/{run_name}"
-    self._lock = threading.Lock()
-
-  def _write(self, path: str, text: str) -> None:
-    with self._lock:
-      if self._is_local:
-        # Object stores have no directories; creating a bucket path can fail.
-        self._fs.makedirs(path.rsplit("/", 1)[0], exist_ok=True)
-      with self._fs.open(path, "w", encoding="utf-8") as stream:
-        stream.write(text)
-
-  def write_json(self, name: str, value: object) -> None:
-    """Writes `value` to `<run>/<name>`."""
-    self._write(
-        f"{self.prefix}/{name}",
-        json.dumps(value, ensure_ascii=False, allow_nan=False, indent=2),
-    )
-
-  def write_attempt(self, row: dict[str, object]) -> None:
-    self.write_json(f"attempts/{row['request_id']}.json", row)
-
-  def write_results(
-      self, rows: list[dict[str, object]], summary: dict[str, object]
-  ) -> None:
-    self._write(f"{self.prefix}.jsonl", "".join(
-        json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n"
-        for row in rows
-    ))
-    self._write(f"{self.prefix}.summary.json",
-                json.dumps(summary, indent=2) + "\n")
+def write_results(
+    run_dir: epath.PathLike,
+    rows: list[dict[str, object]],
+    summary: dict[str, object],
+) -> None:
+  """Writes `<run>.jsonl` and `<run>.summary.json` next to `run_dir`."""
+  target = epath.Path(run_dir)
+  target.parent.mkdir(parents=True, exist_ok=True)
+  (target.parent / f"{target.name}.jsonl").write_text(
+      "".join(
+          json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n"
+          for row in rows
+      ),
+      encoding="utf-8",
+  )
+  write_json(target.parent / f"{target.name}.summary.json", summary)
 
 
 def _attempts(
@@ -387,10 +370,11 @@ async def run_controller(args: argparse.Namespace) -> dict[str, object]:
 
   entries = load_entries(args)
   attempts = args.num_rollouts_per_instance
-  writer = ResultWriter(
-      args.output_dir, f"eval_deepswe_{time.strftime('%Y%m%d_%H%M%S')}"
+  run_dir = (
+      epath.Path(args.output_dir)
+      / f"eval_deepswe_{time.strftime('%Y%m%d_%H%M%S')}"
   )
-  writer.write_json("config.json", {
+  write_json(run_dir / "config.json", {
       **vars(args),
       "instance_ids": [entry.get("instance_id", index)
                        for index, entry in enumerate(entries)],
@@ -424,7 +408,7 @@ async def run_controller(args: argparse.Namespace) -> dict[str, object]:
         rows.append(row)
         done = len(rows)
       try:
-        writer.write_attempt(row)
+        write_json(run_dir / "attempts" / f"{row['request_id']}.json", row)
       except OSError as exc:
         logging.warning(
             "Failed to write attempt %s: %s", row["request_id"], exc
@@ -453,16 +437,16 @@ async def run_controller(args: argparse.Namespace) -> dict[str, object]:
                          return_exceptions=True)
     summary = summarize(rows, len(entries), attempts)
     summary["fatal_error"] = failure
-    writer.write_results(rows, summary)
+    write_results(run_dir, rows, summary)
 
-  logging.info("Evaluation results: %s.jsonl", writer.prefix)
+  logging.info("Evaluation results: %s.jsonl", run_dir)
   logging.info("Pass@1: %.4f (%d/%d)", summary["pass_at_1"],
                summary["resolved"], summary["total_attempts"])
   if attempts > 1:
     logging.info("Pass@%d: %.4f", attempts, summary["pass_at_k"][str(attempts)])
   if (summary["errors"]
       or summary["completed_attempts"] != summary["total_attempts"]):
-    raise RuntimeError(f"Evaluation contains failures; inspect {writer.prefix}")
+    raise RuntimeError(f"Evaluation contains failures; inspect {run_dir}")
   return summary
 
 
