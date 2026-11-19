@@ -484,6 +484,7 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
       synthetic_fwd_only: bool = False,
   ) -> None:
     self.config = config
+    self.model: Any = None
     # Feeds the `trainer._config` fallback in
     # `abstract_trainer.resolve_dummy_routed_experts`.
     self._config: FakeMoeModelConfig | None = None
@@ -627,9 +628,7 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
     del step
     return {}
 
-  # Return type kept as `Any` for Pyrefly override compatibility with
-  # `AbstractTrainer.get_metrics() -> datatypes.MetricsBuffer`.
-  def get_metrics(self) -> Any:
+  def get_metrics(self) -> dict[str, int | float]:
     return {
         "loss": 0.25,
         "mock_trainer/fwd_bwd_calls": self.fwd_bwd_calls,
