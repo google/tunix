@@ -15,7 +15,7 @@
 
 import functools
 import inspect
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence, TypeAlias
 
 from absl import logging
 import flax
@@ -23,12 +23,13 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 import jax.tree_util as jtu
-from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
+from tunix.common import datatypes
 from tunix.rl import packing
 from tunix.rl import score_centering
 from tunix.sft import utils
 
+ArrayLike: TypeAlias = datatypes.ArrayLike
 make_causal_attn_mask = utils.make_causal_attn_mask
 build_positions_from_mask = utils.build_positions_from_mask
 

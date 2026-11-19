@@ -16,7 +16,35 @@
 
 import dataclasses
 import enum
-from typing import Literal
+from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
+
+import numpy as np
+
+
+@runtime_checkable
+class TensorLike(Protocol):
+  """Framework-neutral NumPy-array-protocol structural type for tensors.
+
+  Statically matches `np.ndarray`, `np.generic`, `jax.Array`, and `torch.Tensor`
+  without importing any ML framework. Callers converting values via `np.asarray`
+  require concrete host-accessible tensors (e.g., detached CPU non-`bfloat16`
+  `torch.Tensor`s and non-traced `jax.Array`s).
+  """
+
+  @property
+  def shape(self) -> tuple[int, ...]:
+    ...
+
+  @property
+  def dtype(self) -> Any:
+    ...
+
+  def __array__(self) -> np.ndarray[Any, np.dtype[Any]]:
+    ...
+
+
+ScalarLike: TypeAlias = np.bool_ | np.number | bool | int | float | complex
+ArrayLike: TypeAlias = TensorLike | ScalarLike
 
 
 @dataclasses.dataclass(frozen=True)
