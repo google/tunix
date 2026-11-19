@@ -1,0 +1,140 @@
+# Tunix Code Review Style Guide
+
+This guide defines the architectural standards and review criteria for Tunix. **Gemini Code Assist must use this guide to provide high-level, context-aware reviews.**
+
+---
+
+## 1. Core Philosophy: JAX-Native & NNX-First
+
+Tunix is a JAX-native post-training library for LLMs. Tunix principally uses NNX, a neural network library built on top of JAX. Please follow all common JAX and NNX patterns.
+
+*   **Readability:** Code should be easy to understand for all maintainers and users.
+*   **Maintainability:** Code should be easy to modify and extend.
+*   **Modularity**
+*   **Consistency**: Adherence to a consistent style across all projects. For example, adherence to naming and file structure conventions is crucial for predictability and maintainability.
+*   **Reusability**: Try re-using components instead of re-writing.
+
+---
+
+## 2. Reference Documentation (Read First)
+
+**Gemini:** Before reviewing any code, **read the following files** to understand the architectural context. Your review should be grounded in these documents.
+
+*   **Contributing guidelines**: [`contributing.md`](https://raw.githubusercontent.com/google/tunix/refs/heads/main/docs/contributing.md)
+*   **Models**: [`models.md`](https://raw.githubusercontent.com/google/tunix/refs/heads/main/docs/models.md) - `AutoModel` patterns and naming.
+*   **RL Algorithms**: [`algorithms.md`](https://raw.githubusercontent.com/google/tunix/refs/heads/main/docs/algorithms.md) - Registry and Config patterns for RL.
+*   **Agentic RL**: [`agentic_rl.md`](https://raw.githubusercontent.com/google/tunix/refs/heads/main/docs/agentic_rl.md)
+*   [**JAX**](https://docs.jax.dev/en/latest/notebooks/thinking_in_jax.html)
+*   [**NNX**](https://flax.readthedocs.io/en/latest/nnx_basics.html)
+
+In general, you can look into the [documentation files](https://raw.githubusercontent.com/google/tunix/refs/heads/main/docs/).
+
+---
+
+## 3. Review Categories
+
+Identify the type of contribution and apply the corresponding checklist.
+
+### A. Model Contributions (`tunix/models/`)
+*   **Naming:** Must follow the strict pattern `<family><ver>p<min>_<size>` (e.g., `gemma2p0_9b`, `qwen2p5_1p5b`).
+*   **AutoModel:** New models must be integrated into `AutoModel.from_pretrained` and support all sources (`HUGGINGFACE`, `KAGGLE`, `GCS`).
+*   **Pattern:**
+    *   `ModelConfig`: Dataclass for architecture params.
+    *   `ShardingConfig`: separate Dataclass for partition specs.
+    *   `Module`: Pure NNX module implementation.
+
+### B. RL Algorithms (`tunix/rl/`)
+*   **Pattern:** Logic must be split between a **Configuration** and a **Learner**.
+    *   **Config:** Must inherit from `AlgorithmConfig` (e.g., `class PPOConfig(AlgorithmConfig)`).
+    *   **Learner:** Must inherit from `RLLearner` (e.g., `class PPOLearner(RLLearner)`).
+*   **Registry:** Loss functions and advantage estimators *must* be registered (e.g., `@register_policy_loss_fn`) to allow hot-swapping via config.
+*   **Reward Managers:** Complex reward logic should live in a `RewardManager`, not the Learner loop.
+
+### C. Stand-alone Algorithms (`tunix/sft/`)
+For non-RL algorithms, you can follow a pattern similar to `PeftTrainer` or `DpoTrainer`.
+
+*   **Pattern:** SFT uses `TrainingConfig` (not `AlgorithmConfig`) and `PeftTrainer`.
+*   **Trainer:** `PeftTrainer`
+
+### D. Bug Fixes
+*   **Reproduction:** Critical bug fixes should include a reproduction script or a link to a Colab notebook demonstrating the issue.
+*   **Regression Test:** A matching test case in `_test.py` is mandatory.
+
+### E. Notebooks & Examples
+Prioritise readability. Have explanatory text cells to explain the code. Mention the hardware/accelerator on which the example will run.
+
+---
+
+## 4. Formatting & Linting
+
+**Instructions for Contributors:**
+If the formatting is off, please instruct the user to run the linter/formatter. You can pull instructions from [contributing.md](https://raw.githubusercontent.com/google/tunix/refs/heads/main/docs/contributing.md).
+
+## 5. Other generic advice
+
+### Type hints & Strict Typing
+
+* **Use strict, specific type hints:** Always annotate function signatures,
+  attributes, and data structures with concrete, specific types (dataclasses,
+  `TypedDict`, `Protocol`, `jax.Array`, `jaxtyping`) rather than `Any` or
+  untyped `dict`/`object`. Avoid `Any` whenever a specific type can be
+  expressed.
+
+### Comments
+
+* **Write clear and concise comments:** Explain the "why" behind the code, not just the "what".
+* **Comment sparingly:** Well-written code should be self-documenting where possible.
+* **Use complete sentences:** Start comments with a capital letter and use proper punctuation.
+
+### Logging
+* **Use absl for logging**
+* **Log at appropriate levels:** DEBUG, INFO, WARNING, ERROR, CRITICAL
+* **Provide context:** Include relevant information in log messages to aid debugging.
+
+### Error Handling & One Well-Lit Path (Fail Loud)
+
+* **One well-lit path (No defensive fallbacks):** Never use speculative
+  `getattr(obj, "field", default)`, `dict.get("key", default)` on structured
+  schemas, `dict(getattr(obj, "metadata", None) or {})`, `.setdefault(...)`
+  with fabricated defaults (`""`, `0`, `False`), or
+  `isinstance(..., Mapping)` duck-typing branches. Access attributes and keys
+  directly (`obj.field`) on a single, strictly typed contract.
+* **Fail loud and fast:** Never mask missing attributes, invalid types, or
+  broken invariants with silent default values. Let Python raise
+  `AttributeError`, `KeyError`, `TypeError`, or raise an explicit `ValueError`
+  / specific exception immediately.
+* **Use specific exceptions:** Avoid catching or raising overly broad
+  exceptions like bare `Exception` to swallow errors.
+
+### CL Complexity Advisory (Control Flow & Call Indirection)
+
+* **Advisory Complexity Check (`[tool.cl_complexity_gate]`):**
+  `scripts/check_cl_complexity.py` is a **soft warning / advisory signal**
+  (`continue-on-error` in CI)—never a hard blocking gate on normal PRs.
+* **Control Flow Advisory:** Tracks per-function cognitive (`<= 15`, target
+  `<= 12`), cyclomatic (`<= 15`, target `<= 10`), and nesting (`<= 4`, target
+  `<= 3`) complexity on newly added or modified functions (`delta > 0`). Prefer
+  flat early-exit guard clauses (`if not cond: return`) and flat linear
+  `if/elif` or `match/case` dispatch tables over deeply nested branching.
+* **Call Indirection Advisory:** Tracks intra-file single-caller private chain
+  hops (`max_call_depth_hops <= 2`), trivial single-caller pass-through
+  wrappers, and nested closures. When collapsing a 1-to-1 single-caller chain
+  `outer -> _inner`, preserve the outer domain function name and inline `_inner`
+  upward; keep cohesive multi-statement pipeline stages and shared helpers
+  (`in_degree >= 2`) intact.
+* **Change Scope & Code Duplication Signals:** Change scope (`net_stmts`) is a
+  formatting-invariant AST statement delta (never a reason to compress lines),
+  and code duplication highlights intra-file or cross-file AST statement 2-gram
+  clones (`Jaccard >= 0.60`) outside sanctioned
+  `[tool.cl_complexity_gate].intentional_forks`.
+* **Preserve Readability (Do Not Game Metrics):** Never degrade code clarity to
+  lower a complexity or scope number:
+  * Never replace `if/else` branches with boolean multiplication (`x * bool(c)`)
+    or tuple indexing (`(a, b)[cond]`).
+  * Never replace `for` loops with side-effect list comprehensions
+    (`[fn(x) for x in items]` for mutation/IO).
+  * Never strip leading `_` prefixes from internal helpers to make them appear
+    public, or inline distinct logical stages into an unreadable monolith.
+* **Escape Hatch (`SKIP_CL_COMPLEXITY=<reason>`):** Maintainers can bypass
+  strict complexity checks for mechanical migrations or false positives by
+  adding `SKIP_CL_COMPLEXITY=<reason>` to the PR/CL description.

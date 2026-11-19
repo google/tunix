@@ -3,16 +3,18 @@
 import collections
 import dataclasses
 import enum
-import logging
-from typing import Callable
+from typing import Any, Callable
 
+from absl import logging
 import jax
 from metrax import logging as metrax_logging
 import numpy as np
+from tunix.utils import env_utils
 
 LoggingBackend = metrax_logging.LoggingBackend
 TensorboardBackend = metrax_logging.TensorboardBackend
 WandbBackend = metrax_logging.WandbBackend
+CluBackend = getattr(metrax_logging, "CluBackend", None)
 
 # User backends MUST be factories (callables) to keep Options pure and copyable.
 BackendFactory = Callable[[], LoggingBackend]
@@ -23,8 +25,29 @@ class MetricsLoggerOptions:
   """Metrics Logger options."""
 
   log_dir: str
+  project_name: str = "tunix"
+  run_name: str = ""
   flush_every_n_steps: int = 100
-  backend_factories: list[BackendFactory] | None = None
+  # Keyword arguments for backend initialization. The key is the backend name
+  # (e.g., 'wandb', 'clu', 'tensorboard' or 'custom_backend' which uses custom
+  # LoggingBackend factories) and the value is a dictionary of
+  # keyword arguments to be passed to the backend's constructor.
+  # For example:
+  # backend_kwargs={
+  #   'wandb': {
+  #     'resume': 'must',
+  #     'id': '12345',
+  #     'project': 'my-project',
+  #     'name': 'my-run',
+  #   },
+  #   'tensorboard': {
+  #      'log_dir': '/path/to/log',
+  #      'flush_every_n_steps': 100,
+  #   }
+  # }
+  backend_kwargs: dict[str, dict[str, Any] | list[BackendFactory]] = (
+      dataclasses.field(default_factory=dict)
+  )
 
   def create_backends(self) -> list[LoggingBackend]:
     """Factory method to create a fresh set of live backends."""
@@ -33,20 +56,43 @@ class MetricsLoggerOptions:
       return []
 
     # Case 1: Override. Use user-provided factories.
-    if self.backend_factories:
-      return [factory() for factory in self.backend_factories]
+    if (
+        "custom_backend" in self.backend_kwargs
+        and self.backend_kwargs["custom_backend"]
+    ):
+      return [factory() for factory in self.backend_kwargs["custom_backend"]]  # pyrefly: ignore[not-callable]
 
     # Case 2: Defaults.
-    active_backends = [
-        TensorboardBackend(
-            log_dir=self.log_dir,
-            flush_every_n_steps=self.flush_every_n_steps,
+    active_backends = []
+    kwargs_dict = self.backend_kwargs or {}
+
+    if env_utils.is_internal_env():
+      if CluBackend is None:
+        raise ImportError(
+            "Internal environment detected, but CluBackend not available."
         )
-    ]
-    try:
-      active_backends.append(WandbBackend(project="tunix"))
-    except ImportError:
-      logging.info("WandbBackend skipped: 'wandb' library not installed.")
+      clu_kwargs = kwargs_dict.get("clu", {})
+      active_backends.append(CluBackend(log_dir=self.log_dir, **clu_kwargs))
+    else:
+      tb_kwargs = kwargs_dict.get("tensorboard", {})
+      active_backends.append(
+          TensorboardBackend(
+              log_dir=self.log_dir,
+              flush_every_n_steps=self.flush_every_n_steps,
+              **tb_kwargs,  # pyrefly: ignore[bad-unpacking]
+          )
+      )
+      try:
+        wandb_kwargs = kwargs_dict.get("wandb", {})
+        active_backends.append(
+            WandbBackend(
+                project=self.project_name,
+                name=self.run_name,
+                **wandb_kwargs,  # pyrefly: ignore[bad-unpacking]
+            )
+        )
+      except (ImportError, Exception) as e:
+        logging.info("WandbBackend skipped: %s", e)
     return active_backends
 
 
@@ -63,8 +109,42 @@ def _calculate_geometric_mean(x: np.ndarray) -> np.ndarray:
   return np.exp(np.mean(np.log(x)))
 
 
+def extract_scalar(val: Any) -> float | None:
+  """Safely extracts a scalar float from arrays, tensors, or WeightedMetrics."""
+  if val is None:
+    return None
+  if hasattr(val, "compute") and callable(val.compute):
+    try:
+      val = val.compute()
+    except Exception:  # pylint: disable=broad-exception-caught
+      return None
+  if hasattr(val, "unreduced_sum") and hasattr(val, "denominator"):
+    try:
+      denom = float(np.sum(np.asarray(val.denominator)))
+      return (
+          float(np.sum(np.asarray(val.unreduced_sum)) / denom)
+          if denom > 0
+          else 0.0
+      )
+    except Exception:  # pylint: disable=broad-exception-caught
+      return None
+  try:
+    arr = np.asarray(val)
+    if arr.size == 1:
+      return float(arr.item())
+    elif arr.size > 1:
+      return float(np.mean(arr))
+  except Exception:  # pylint: disable=broad-exception-caught
+    return None
+  return None
+
+
 class MetricsLogger:
-  """Simple Metrics logger."""
+  """Simple Metrics logger.
+
+  Log metrics to multiple backends. If no backends are specified, it will log to
+  the default backends.
+  """
 
   def __init__(
       self,
@@ -96,7 +176,7 @@ class MetricsLogger:
     mode_metrics[metric_name].append(scalar_value)
 
     jax.monitoring.record_scalar(
-        f"{metrics_prefix}/{mode}/{metric_name}", scalar_value, step=step
+        f"{metrics_prefix}/{mode}/{metric_name}", scalar_value, step=step  # pyrefly: ignore[bad-argument-type]
     )
 
   def metric_exists(

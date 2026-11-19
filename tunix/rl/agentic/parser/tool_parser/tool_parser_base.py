@@ -15,19 +15,15 @@
 """Base classes for parsing tool calls and generating tool prompts."""
 
 import abc
-import dataclasses
 import json
 from typing import Any, List, Literal
 
 from tunix.rl.agentic.tools import base_tool
 
-BaseTool = base_tool.BaseTool
 abstractmethod = abc.abstractmethod
-dataclass = dataclasses.dataclass
-ABC = abc.ABC
 
 
-class ToolParser(ABC):
+class ToolParser(abc.ABC):
   """Abstract base class for all tool parsers.
 
   A ToolParser defines how to: 1. Extract structured tool calls from raw model
@@ -50,7 +46,7 @@ class ToolParser(ABC):
   @abstractmethod
   def get_tool_prompt(
       self,
-      tools: List[BaseTool],
+      tools: List[base_tool.BaseTool],
       *,
       schema_style: Literal["openai", "mcp", "gemini"] = "openai",
   ) -> str:
@@ -69,7 +65,7 @@ class ToolParser(ABC):
 
   def _tools_schema_dump(
       self,
-      tools: List[BaseTool],
+      tools: List[base_tool.BaseTool],
       schema_style: str,
   ) -> str:
     """Dumps a list of tool schemas to a JSON string.

@@ -13,166 +13,29 @@
 # limitations under the License.
 """Utilities for creating and managing models in Tunix CLI."""
 
-import enum
-import gc
-import importlib
 import os
 from typing import Any, Tuple
+
 from absl import logging
-import flax
 from flax import nnx
 import jax
-import jax.numpy as jnp
-from orbax import checkpoint as ocp
 import qwix
 from tunix.generate import tokenizer_adapter as tokenizer_lib
+from tunix.models import automodel
 from tunix.models import naming
 from tunix.rl import reshard
 
-
-_BASE_MODULE_PATH = 'tunix.models'  # pylint: disable=invalid-name
-
-# TODO(b/462808330): Handle shading overrides better.
-if hasattr(flax.config, 'flax_always_shard_variable'):
-  flax.config.update('flax_always_shard_variable', False)
-
-
-class ModelModule(enum.Enum):
-  """Specifies the type of model module to import."""
-
-  MODEL = 'model'
-  PARAMS = 'params'
+_DEFAULT_TOKENIZER_PATH = 'meta-llama/Llama-3.1-8B'
+_GCS_DEFAULT_TOKENIZER_PATHS = {
+    'gemma': 'gs://gemma-data/tokenizers/tokenizer_gemma2.model',
+    'gemma1p1': 'gs://gemma-data/tokenizers/tokenizer_gemma2.model',
+    'gemma2': 'gs://gemma-data/tokenizers/tokenizer_gemma2.model',
+    'gemma3': 'gs://gemma-data/tokenizers/tokenizer_gemma3.model',
+    'gemma4': 'gs://gemma-data/tokenizers/tokenizer_gemma4.model',
+}
 
 
-def get_model_module(model_name: str, module_type: ModelModule) -> Any:
-  """Dynamically imports a model module (e.g., 'model' or 'params')."""
-  model_config_category = naming.get_model_config_category(model_name)
-  module_path = (
-      f'{_BASE_MODULE_PATH}.{model_config_category}.{module_type.value}'
-  )
-  try:
-    logging.info('Attempting to import: %s', module_path)
-    model_lib_module = importlib.import_module(module_path)
-    return model_lib_module
-  except ImportError as exc:
-    raise ImportError(
-        'Could not import module for model config category: '
-        f'{model_config_category} at path: {module_path}. Please check '
-        'BASE_MODULE_PATH and ensure the module exists and is a dependency.'
-    ) from exc
-
-
-def create_model_dynamically(
-    model_name: str, file_dir: str, model_config: Any, mesh: jax.sharding.Mesh
-) -> Any:
-  """Dynamically imports the correct module and calls `create_model_from_safe_tensors` based on the model_name.
-
-  Args:
-      model_name: The name of the model (e.g., "qwen2.5-0.5b", "llama3.2-3b").
-      file_dir: Directory containing the safe tensors.
-      model_config: Model configuration object.
-      mesh: Mesh object for device layout.
-
-  Returns:
-      The result of the create_model_from_safe_tensors call.
-
-  Raises:
-      ValueError: If the model_name is invalid.
-      ImportError: If the required model module cannot be found.
-      AttributeError: If create_model_from_safe_tensors is not in the module.
-  """
-  params_module = get_model_module(model_name, ModelModule.PARAMS)
-
-  try:
-    create_fn = getattr(params_module, 'create_model_from_safe_tensors')
-  except AttributeError as exc:
-    raise AttributeError(
-        "'create_model_from_safe_tensors' not found in module "
-        f'{params_module.__name__} for model {model_name}'
-    ) from exc
-
-  logging.info(
-      'Calling %s.create_model_from_safe_tensors', params_module.__name__
-  )
-  return create_fn(file_dir=file_dir, config=model_config, mesh=mesh)
-
-
-def obtain_model_params(model_name: str) -> Any:
-  """Dynamically calls a configuration function based on the model_string.
-
-  The routing to the correct module/class instance is based on the longest
-  matching prefix of model_name found in CONFIG_MAP.
-  Hyphens and dots in the model_name are converted to underscores
-  to form the function name.
-
-  Args:
-      model_name: The string indicating which model config function to call
-        (e.g., "gemma-2b", "llama3.1-8b", "qwen2.5-0.5b").
-
-  Returns:
-      The result from calling the dynamically determined function.
-
-  Raises:
-      ValueError: If the model_string doesn't match any known prefix.
-      AttributeError: If the derived function name does not exist in the target
-      object.
-      TypeError: If the attribute found on the target object is not callable.
-  """
-  config_id = naming.get_model_config_id(model_name)
-  model_lib_module = get_model_module(model_name, ModelModule.MODEL)
-  target_obj = model_lib_module.ModelConfig
-
-  if not hasattr(target_obj, config_id):
-    raise AttributeError(
-        f"Error: Function '{config_id}' not found on the target object "
-        f"for model '{model_name}'. Target object type: {type(target_obj)}"
-    )
-
-  method_to_call = getattr(target_obj, config_id)
-
-  if not callable(method_to_call):
-    raise TypeError(
-        f"Error: Attribute '{config_id}' on the target object is not callable."
-    )
-
-  logging.info(
-      'Attempting to call: %s() on object of type %s',
-      config_id,
-      type(target_obj),
-  )
-  return method_to_call()
-
-
-def _get_base_model(model_config: dict[str, Any], mesh: jax.sharding.Mesh):
-  """Get the base model from the intermediate checkpoint."""
-  model_params = obtain_model_params(model_config['model_name'])
-  model_lib_module = get_model_module(
-      model_config['model_name'], ModelModule.MODEL
-  )
-  # TODO(noghabi): Refactor Transformer class name to Gemma in in gemma.py.
-  abs_model: nnx.Module = nnx.eval_shape(
-      lambda: model_lib_module.Transformer(
-          model_params, rngs=nnx.Rngs(model_config.get('rng_seed', 0))
-      )
-  )
-  abs_state = nnx.state(abs_model)
-  abs_state = jax.tree.map(
-      lambda a, s: jax.ShapeDtypeStruct(a.shape, jnp.bfloat16, sharding=s),
-      abs_state,
-      nnx.get_named_sharding(abs_state, mesh),
-  )
-  checkpointer = ocp.StandardCheckpointer()
-  restored_params = checkpointer.restore(
-      os.path.join(model_config['intermediate_ckpt_dir'], 'state'),
-      target=abs_state,
-  )
-
-  graph_def, _ = nnx.split(abs_model)
-  model = nnx.merge(graph_def, restored_params)
-  return model, model_params
-
-
-def apply_lora_to_model(base_model, mesh, lora_config):
+def apply_lora_to_model(base_model, mesh, lora_config, rng_seed=0):
   """Apply Lora to the base model if given lora config."""
   logging.info('lora_config %r', lora_config)
   # Basic keyword arguments for LoraProvider
@@ -201,97 +64,101 @@ def apply_lora_to_model(base_model, mesh, lora_config):
     raise
 
   model_input = base_model.get_model_input()
+
+  # Disable remat during dummy forward pass for LoRA initialization
+  original_remat = None
+  if hasattr(base_model, 'config'):
+    original_remat = getattr(base_model.config, 'remat_config', None)
+    if original_remat is not None:
+      base_model.config.remat_config = 1  # RematConfig.NONE
+
   lora_model = qwix.apply_lora_to_model(
-      base_model, lora_provider, **model_input
+      base_model, lora_provider, rngs=nnx.Rngs(rng_seed), **model_input
   )
+
+  if original_remat is not None:
+    lora_model.config.remat_config = original_remat  # pyrefly: ignore[missing-attribute]
+
   if mesh is not None:
-    lora_model = reshard.reshard_model_to_mesh(lora_model, mesh)
+    lora_model = reshard.reshard_model_to_mesh(lora_model, mesh)  # pyrefly: ignore[bad-argument-type]
   return lora_model
 
 
-def _gemma_conversion(
-    model_config: dict[str, Any], gemma: nnx.Module, params, mesh
-):
-  """Convert the Gemma model to NNX format."""
-  checkpointer = ocp.StandardCheckpointer()
-  _, state = nnx.split(gemma)
-  checkpointer.save(
-      os.path.join(model_config['intermediate_ckpt_dir'], 'state'),
-      state,
-      force=True,
+def resolve_tokenizer_path(
+    model_config: dict[str, Any],
+    tokenizer_path: str,
+) -> str:
+  """Resolves the tokenizer path dynamically based on model config."""
+  model_source_str = model_config.get('model_source')
+  if not model_source_str:
+    return tokenizer_path
+
+  is_default_tokenizer = (
+      not tokenizer_path or tokenizer_path == _DEFAULT_TOKENIZER_PATH
   )
-  checkpointer.wait_until_finished()
-  # Delete the intermediate model to save memory
-  del params
-  del gemma
-  del state
-  gc.collect()
+  model_family = naming.ModelNaming(
+      model_name=model_config['model_name']
+  ).model_family
 
-  # Reload the model
-  return _get_base_model(model_config, mesh)
+  if (
+      model_source_str == 'gcs'
+      and is_default_tokenizer
+      and model_family in _GCS_DEFAULT_TOKENIZER_PATHS
+  ):
+    return _GCS_DEFAULT_TOKENIZER_PATHS[model_family]
+
+  if (
+      model_family in ('gemma', 'gemma1p1', 'gemma2')
+      and model_source_str == 'kaggle'
+  ):
+    model_source = automodel.ModelSource(model_source_str)
+    model_path = model_config.get('model_path')
+    if not model_path:
+      raise ValueError('model_path is required for kaggle source')
+    resolved_model_path = automodel.download_model(
+        model_path, model_config.get('model_download_path'), model_source
+    )
+    if is_default_tokenizer:
+      return os.path.join(resolved_model_path, 'tokenizer.model')
+
+  return tokenizer_path
 
 
-# TODO(b/451662153): make gemma3 and gemma2 loading logic more consistent.
-# Currently, gemma2 uses _create_gemma_model_from_params while gemma3 uses
-# _create_gemma3_model_from_checkpoint.
-def _create_gemma3_model_from_checkpoint(
-    ckpt_path: str, model_name: str, mesh: jax.sharding.Mesh
-) -> Tuple[nnx.Module, Any]:
-  """Creates a Gemma3 model from a checkpoint.
+def create_tokenizer(
+    tokenizer_config: dict[str, Any],
+    tokenizer_path: str | None,
+    model_config: dict[str, Any] | None = None,
+):
+  """Creates a tokenizer from the given configuration.
 
   Args:
-      ckpt_path: The path to the checkpoint.
-      model_name: The name of the model (e.g., "qwen2.5-0.5b", "llama3.2-3b").
-      mesh: Mesh object for device layout.
+      tokenizer_config: Configuration dictionary for the tokenizer.
+      tokenizer_path: Optional path to the tokenizer.
+      model_config: Optional model configuration dictionary used to resolve
+        paths.
 
   Returns:
-      A tuple containing:
-          - model: The loaded and potentially LoRA-applied nnx.Module.
-          - model_params: The model parameters.
+      A configured Tokenizer object.
   """
-  model_params = obtain_model_params(model_name)
-  params_lib = get_model_module(model_name, ModelModule.PARAMS)
-  model = params_lib.create_model_from_checkpoint(ckpt_path, model_params, mesh)
-  return model, model_params
-
-
-def _create_gemma_model_from_params(
-    params_path: str, model_name: str
-) -> Tuple[nnx.Module, Any]:
-  """Loads Gemma params and creates a model.
-
-  This function is used to create a model from a params path. It is used for
-  models that have support for `from_params` in their Transformer module,
-  such as Gemma and Gemma2.
-  """
-  params_lib = get_model_module(model_name, ModelModule.PARAMS)
-  model_params = params_lib.load_and_format_params(params_path)
-  model_module_lib = get_model_module(model_name, ModelModule.MODEL)
-  model_family, version = naming.split(model_name)
-  # TODO(b/451662153): have gemma2 version handling done better in naming.py
-  if model_family == 'gemma2':
-    version = f'2-{version}'
-  model = model_module_lib.Transformer.from_params(
-      model_params, version=version
-  )
-  return model, model_params
-
-
-def create_tokenizer(tokenizer_config, tokenizer_path: str | None):
   if not tokenizer_path:
-    tokenizer_path = tokenizer_config['toknenizer_path']
+    tokenizer_path = tokenizer_config['tokenizer_path']
+
+  if model_config is not None:
+    tokenizer_path = resolve_tokenizer_path(model_config, tokenizer_path)
+
   tokenizer_type, add_bos, add_eos = (
       tokenizer_config['tokenizer_type'],
       tokenizer_config['add_bos'],
       tokenizer_config['add_eos'],
   )
 
+  hf_access_token = os.getenv('HF_TOKEN', '').strip() or None
   return tokenizer_lib.Tokenizer(
       tokenizer_type,
       tokenizer_path,
       add_bos,
       add_eos,
-      os.environ.get('HF_TOKEN'),
+      hf_access_token,
   )
 
 
@@ -318,87 +185,56 @@ def create_model(
           - model: The loaded and potentially LoRA-applied nnx.Module.
           - tokenizer_path: The determined path to the tokenizer model.
   """
-  model: nnx.Module = None
-  model_params: Any = None
   tokenizer_path: str = tokenizer_config['tokenizer_path']
-  model_name = model_config['model_name']
-  model_source = model_config['model_source']
+  tokenizer_path = resolve_tokenizer_path(model_config, tokenizer_path)
+  model_source_str = model_config['model_source']
 
-  if model_name.startswith('gemma3') and model_source == 'gcs':
+  # Create Model
+  try:
+    model_source = automodel.ModelSource(model_source_str)
+  except ValueError as exc:
+    raise ValueError(
+        f'Unsupported model source: {model_source_str}. '
+        f'Available sources: {[s.value for s in automodel.ModelSource]}'
+    ) from exc
 
-    ckpt_path = model_config['model_id']
-    model, model_params = _create_gemma3_model_from_checkpoint(
-        ckpt_path, model_name, mesh
-    )
-    tokenizer_path = 'gs://gemma-data/tokenizers/tokenizer_gemma3.model'
-
-  # TODO(sizhi): Remove gemma conversion logic once load safetensors for
-  # gemma is ready.
-  elif model_name.startswith('gemma') and model_source == 'kaggle':
-    from tunix.oss import utils as oss_utils
-
-    # Download model from Kaggle requires NNX conversion and can takes long
-    # time. It is recommended to save the NNX converted model for later runs.
-    ckpt_path = oss_utils.kaggle_pipeline(model_config)
-    intermediate_ckpt_dir = model_config['intermediate_ckpt_dir']
-    skip_nnx_conversion: bool = os.path.exists(intermediate_ckpt_dir)
-
-    def nnx_conversion():
-      # Load the model and save to checkpoint locally, then reload the model
-      # sharded. This is a workaround, as the checkpoints on Kaggle don't
-      # work with NNX. This takes a long time. Skip if conversion is not
-      # needed.
-      if model_name.startswith('gemma2'):
-        params_path = os.path.join(ckpt_path, model_name)
-      else:  # gemma
-        suffix = '-'.join(model_name.split('-')[1:])
-        params_path = os.path.join(ckpt_path, suffix)
-
-      model, params = _create_gemma_model_from_params(params_path, model_name)
-      return _gemma_conversion(model_config, model, params, mesh)
-
-    if skip_nnx_conversion:
-      try:
-        model, model_params = _get_base_model(model_config, mesh)
-      except (FileNotFoundError, ValueError, RuntimeError) as e:
-        logging.warning(
-            'Failed to load from intermediate_ckpt_dir %s: %s. '
-            'Falling back to NNX conversion.',
-            intermediate_ckpt_dir,
-            e,
-        )
-        model, model_params = nnx_conversion()
-
-    else:
-      model, model_params = nnx_conversion()
-    tokenizer_path = os.path.join(ckpt_path, 'tokenizer.model')
-
-  elif model_source == 'huggingface':
-    from tunix.oss import utils as oss_utils
-    # for all other model
-    oss_utils.hf_pipeline(model_config)
-  else:
-    logging.error(
-        'Unsupported workflow: from %s to download %s.',
-        model_source,
-        model_name,
-    )
-
-  if not model_params:
-    # pick corresponding config based on model version
-    model_params = obtain_model_params(model_name)
-
-    with mesh:
-      model = create_model_dynamically(
-          model_name,
-          model_config['model_download_path'],
-          model_params,
-          mesh,
-      )
+  model, _ = automodel.AutoModel.from_pretrained(
+      model_id=model_config['model_id'],
+      mesh=mesh,
+      model_source=model_source,
+      model_download_path=model_config.get('model_download_path'),
+      intermediate_ckpt_dir=model_config.get('intermediate_ckpt_dir'),
+      rng_seed=model_config.get('rng_seed', 0),
+      model_path=model_config.get('model_path'),
+      use_flash_attention=model_config.get('use_flash_attention', False),
+      flash_attention_block_size=model_config.get(
+          'flash_attention_block_size', 1024
+      ),
+      remat_config=model_config.get('remat_config', 1),
+      dtype=model_config.get('dtype'),
+      load_dtype=model_config.get('load_dtype'),
+      use_sliding_window_kv_cache=model_config.get(
+          'use_sliding_window_kv_cache'
+      ),
+      remat_policy=model_config.get('remat_policy', 'nothing_saveable'),
+      flash_attention_use_fused_bwd=model_config.get(
+          'flash_attention_use_fused_bwd', False
+      ),
+      flash_attention_compute_block_size=model_config.get(
+          'flash_attention_compute_block_size', 256
+      ),
+      flash_attention_bwd_block_size=model_config.get(
+          'flash_attention_bwd_block_size', 256
+      ),
+      use_split_attention=model_config.get('use_split_attention', False),
+  )
 
   if model_config.get('lora_config'):
     # Apply Lora to model if given lora config
-    model = apply_lora_to_model(model, mesh, model_config['lora_config'])
+    model = apply_lora_to_model(
+        model, mesh, model_config['lora_config'],
+        rng_seed=model_config.get('rng_seed', 0)
+    )
   else:
     logging.info('Training with Full Weight')
 

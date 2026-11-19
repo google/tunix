@@ -42,8 +42,29 @@ with cm:
 # %%
 from typing import Any, Dict, Optional
 import jax
+from jax import numpy as jnp
+from flax import nnx
+import orbax.checkpoint as ocp
 from tqdm.auto import tqdm
 import re
+
+
+def has_safetensors(path):
+  if NOTEBOOK_ENV == "g3":
+    for _, _, filenames in gfile.Walk(path):
+      for filename in filenames:
+        if filename.endswith(".safetensors"):
+          return True
+    return False
+  else:
+    # fsspec for gs:// paths
+    fs, _, _ = fsspec.core.get_fs_token_paths(path)
+    for _, _, filenames in fs.walk(path):
+      for filename in filenames:
+        if filename.endswith(".safetensors"):
+          return True
+    return False
+
 
 # Only used for Math500
 def extract_answer_robust(passage: str) -> str:
@@ -152,9 +173,11 @@ def evaluate_correctness(response: Any, ground_truths: Any) -> bool:
     return False
   # Check against all possible correct answers
   for ground_truth in processed_ground_truths:
-    is_correct = math_utils.grade_answer_mathd(
-        model_answer, ground_truth
-    ) or math_utils.grade_answer_sympy(model_answer, ground_truth)
+    is_correct = (
+        math_utils.grade_answer_mathd(model_answer, ground_truth)
+        or math_utils.grade_answer_sympy(model_answer, ground_truth)
+        or math_utils.grade_answer_special_handling(model_answer, ground_truth)
+    )
     if is_correct:
       print(f" {model_answer=} {ground_truth=} IS CORRECT")
       return True
@@ -173,7 +196,7 @@ class Qwen25MathEvaluator:
       mesh_config=None,
       max_prompt_length: int = 1024,  # Increased from 512
       max_generation_steps: int = 1024,  # Increased from 512
-      sampler_type: str = "vanilla",  # vanilla, vllm, or sglang-jax
+      sampler_type: str = "vanilla",  # vanilla or vllm
   ):
     self.model_config = model_config
     self.model_version = model_version
@@ -186,7 +209,7 @@ class Qwen25MathEvaluator:
     if mesh_config is None:
       # Default: 4-way tensor parallelism
       mesh_config = [[1, 4], ["fsdp", "tp"]]
-    self.mesh = jax.make_mesh(*mesh_config, axis_types=(jax.sharding.AxisType.Auto,) * len(mesh_config[0]))
+    self.mesh = jax.make_mesh(*mesh_config, axis_types=(jax.sharding.AxisType.Auto,) * len(mesh_config[0]))  # pyrefly: ignore[bad-argument-type]
     self.tokenizer = None
     self.model = None
     self.sampler = None
@@ -196,26 +219,68 @@ class Qwen25MathEvaluator:
     print(f"Mesh config: {mesh_config}")
     print(f"Available devices: {jax.devices()}")
 
-  def load_model(self):
-    print("Loading model components...")
-
-    print("Loading tokenizer...")
-
-    # Huggingface API doesn't work with gcs, OSS loads from model directly
-    tokenizer_source = self.model_version if NOTEBOOK_ENV != "g3" else self.model_path
-    self.tokenizer = AutoTokenizer.from_pretrained(
-        tokenizer_source, trust_remote_code=True
-    )
-
-    print("Setting up model config...")
-
-
+  def model_from_safe_tensors(self):
     print("Loading model from safe tensors...")
     with self.mesh:
       self.model = qwen2_params_lib.create_model_from_safe_tensors(
           file_dir=self.model_path, config=self.model_config, mesh=self.mesh
       )
 
+  def model_from_orbax_ckpt(self):
+    print(f"Loading model from orbax checkpoint {self.model_path}...")
+    with self.mesh:
+      abs_model: nnx.Module = nnx.eval_shape(
+          lambda: qwen2_lib.Qwen2(self.model_config, rngs=nnx.Rngs(params=0))
+      )
+      abs_state = nnx.state(abs_model)
+      abs_state = jax.tree.map(
+          lambda a, s: jax.ShapeDtypeStruct(a.shape, jnp.bfloat16, sharding=s),
+          abs_state,
+          nnx.get_named_sharding(abs_state, self.mesh),
+      )
+      item_handlers = {
+          "model_params": ocp.PyTreeCheckpointHandler(),
+          "optimizer_state": ocp.PyTreeCheckpointHandler(),
+      }
+      checkpointer = ocp.CheckpointManager(
+          self.model_path,
+          item_handlers=item_handlers,
+      )
+      model_cp_args = ocp.args.PyTreeRestore(
+          item=abs_state,
+          restore_args=ocp.checkpoint_utils.construct_restore_args(
+              target=abs_state
+          ),
+      )
+      ckpt = checkpointer.restore(
+          160,
+          args=ocp.args.Composite(
+              model_params=model_cp_args,
+          ),
+      )
+      graphdef, _ = nnx.split(abs_model)
+      new_state = nnx.State(ckpt.model_params)  # pyrefly: ignore[missing-attribute]
+      self.model = nnx.merge(graphdef, new_state)
+
+  def load_model(self):
+    print("Loading model components...")
+
+    print("Loading tokenizer...")
+
+    # Huggingface API doesn't work with gcs, OSS loads from model directly
+    tokenizer_source = (
+        self.model_version if NOTEBOOK_ENV != "g3" else self.model_path
+    )
+    self.tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer_source, trust_remote_code=True
+    )
+
+    print("Setting up model config...")
+
+    if has_safetensors(self.model_path):
+      self.model_from_safe_tensors()
+    else:
+      self.model_from_orbax_ckpt()
     print("Model loaded successfully!")
     print("Creating sampler...")
     cache_config = sampler_lib.CacheConfig(
@@ -227,33 +292,38 @@ class Qwen25MathEvaluator:
 
     if self.sampler_type == "vanilla":
       self.sampler_vanilla = sampler_lib.Sampler(
-          transformer=self.model,
+          transformer=self.model,  # pyrefly: ignore[bad-argument-type]
           tokenizer=self.tokenizer,
           cache_config=cache_config,
       )
-    elif self.sampler_type == "sglang-jax":
-      from tunix.google.stubs import sglang_jax_sampler_stub as sglang_jax_sampler  # pylint: disable=g-import-not-at-top
+    elif self.sampler_type == "vllm":
+      from tunix.generate import vllm_sampler  # pylint: disable=g-import-not-at-top
 
       mapping_config = mappings.MappingConfig.build(
           mapping_obj=None,
           model=self.model,
-          backend="sglang_jax",
+          backend="vllm_jax",
       )
-      self.sampler_sglang = sglang_jax_sampler.SglangJaxSampler(
+      self.sampler_vllm = vllm_sampler.VllmSampler(
           tokenizer=self.tokenizer,
-          config=sglang_jax_sampler.SglangJaxConfig(
+          config=vllm_sampler.VllmConfig(
               mesh=self.mesh,
-              context_length=self.max_prompt_length
-              + self.max_generation_steps
-              + 100,
-              model_version=self.model_version,
-              mem_fraction_static=0.4,
+              hbm_utilization=0.8,
               init_with_random_weights=False,
-              disable_radix_cache=True,
-              enable_deterministic_sampling=False,
               mapping_config=mapping_config,
+              engine_kwargs={
+                  "model": self.model_version,
+                  "max_model_len": (
+                      self.max_prompt_length + self.max_generation_steps + 100
+                  ),
+                  "max_num_seqs": 30,
+                  "max_num_batched_tokens": 30 * 10 * 1024 // 8,
+              },
           ),
       )
+      # sync weights from self.model to the sampler's internal model
+      print("Syncing model weights to VLLM sampler...")
+      self.sampler_vllm.update_params(nnx.state(self.model))
     else:
       raise ValueError(f"Unsupported sampler type: {self.sampler_type}")
 
@@ -286,7 +356,6 @@ class Qwen25MathEvaluator:
 
     test_ds = Dataset.from_pandas(test_df).map(preprocess_fn, with_indices=True)
 
-
     print(f"Loaded {len(test_ds)} examples")
     print("Example data:")
     pprint(test_ds[0])
@@ -301,7 +370,7 @@ class Qwen25MathEvaluator:
       else:
         instruction = "Please reason step by step. Your final answer must appear inside \\boxed{...} and nothing else."
         prompt = f"{instruction} {question}"
-      prompt = self.tokenizer.apply_chat_template(
+      prompt = self.tokenizer.apply_chat_template(  # pyrefly: ignore[missing-attribute]
           [{"role": "user", "content": prompt}],
           tokenize=False, add_generation_prompt=True)
 
@@ -315,7 +384,7 @@ class Qwen25MathEvaluator:
     print("\n" + "=" * 60)
     print("DEBUG: First formatted prompt:")
     first_item = dataset[0]
-    print(first_item["prompt"])
+    print(first_item["prompt"])  # pyrefly: ignore[unsupported-operation]
     print("=" * 60 + "\n")
 
     return dataset
@@ -356,17 +425,17 @@ class Qwen25MathEvaluator:
           top_p=top_p,
           echo=False,
           eos_tokens=[stop_token_id],
-          seed=jax.random.PRNGKey(seed) if seed is not None else None,
+          seed=jax.random.PRNGKey(seed) if seed is not None else None,  # pyrefly: ignore[bad-argument-type]
       )
-    elif self.sampler_type == "sglang-jax":
-      out_data = self.sampler_sglang(
+    elif self.sampler_type == "vllm":
+      out_data = self.sampler_vllm(
           input_strings=prompts,
           max_generation_steps=safe_gen_length,
           max_prompt_length=self.max_prompt_length,
           temperature=temperature,
           top_p=top_p,
           top_k=top_k,
-          seed=seed,
+          seed=None,
           echo=False,
           pad_output=True,
       )
@@ -423,9 +492,11 @@ class Qwen25MathEvaluator:
         batch_response = self.generate(
             prompts=prompts,
             temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
-            seed=pass_idx,
+            top_k=top_k,  # pyrefly: ignore[bad-argument-type]
+            top_p=top_p,  # pyrefly: ignore[bad-argument-type]
+            seed=pass_idx
+            if self.sampler_type != "vllm"
+            else None,  # vllm handles seeding differently
         )
         for i, r in enumerate(batch_response):
           responses_collection[i].append(r)
@@ -528,17 +599,18 @@ else:
 
 MATH_500_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "MATH-500/test.jsonl")
 AIME_2024_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "HuggingFaceH4/aime_2024/train-00000-of-00001.parquet")
+
 MODEL_MAPPING = {
     "Qwen/Qwen2.5-1.5B-Instruct": (
-        qwen2_lib.ModelConfig.qwen2_5_1_5b(),
+        qwen2_lib.ModelConfig.qwen2p5_1p5b(),
         os.path.join(MODEL_PATH_PREFIX, "qwen2_5/torch/1.5b-it"),
     ),
-    "DeepSeek-R1-Distill-Qwen-1.5B": (
-        qwen2_lib.ModelConfig.deepseek_r1_distill_qwen_1_5b(),
+    "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B": (
+        qwen2_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b(),
         os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B"),
     ),
-    "DeepScaleR-1.5B-Preview": (
-        qwen2_lib.ModelConfig.deepseek_r1_distill_qwen_1_5b(),
+    "agentica-org/DeepScaleR-1.5B-Preview": (
+        qwen2_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b(),
         os.path.join(MODEL_PATH_PREFIX, "DeepScaleR-1.5B-Preview"),
     ),
 }
@@ -546,7 +618,11 @@ MODEL_MAPPING = {
 mesh_config = [[1, 2], ["fsdp", "tp"]]  # 2-way tensor parallelism
 # %%
 # MATH-500
-model_version = "Qwen/Qwen2.5-1.5B-Instruct"
+num_batches_env = os.environ.get("NUM_BATCHES")
+num_batches = int(num_batches_env) if num_batches_env and int(num_batches_env) > 0 else None
+
+# model_version = "Qwen/Qwen2.5-1.5B-Instruct"
+model_version = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 dataset = MATH_500_DATA_PATH
 model_config, model_path = MODEL_MAPPING[model_version]
 
@@ -565,7 +641,7 @@ evaluator.load_model()
 print("\nStarting evaluation...")
 results = evaluator.evaluate(
     batch_size=8,
-    num_batches=None,
+    num_batches=num_batches,
     temperature=0.6,
     top_k=50,
     top_p=0.95,
@@ -585,8 +661,10 @@ print("=" * 60)
 # %%
 # AIME-2024
 model_version = "agentica-org/DeepScaleR-1.5B-Preview"
+# model_version = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 dataset = AIME_2024_DATA_PATH
 model_config, model_path = MODEL_MAPPING[model_version]
+
 
 evaluator = Qwen25MathEvaluator(
     model_config=model_config,
@@ -604,7 +682,7 @@ print("\nStarting evaluation...")
 
 results = evaluator.evaluate(
     batch_size=1,
-    num_batches=None,
+    num_batches=num_batches,
     temperature=0.6,
     top_k=None,
     top_p=0.95,

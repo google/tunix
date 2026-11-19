@@ -1,0 +1,281 @@
+"""In-memory implementation for Trajectory Store."""
+
+import collections
+from collections.abc import Mapping, Sequence
+from typing import Any, ClassVar, TypeVar
+
+from tunix.dist_rl.trajectory import base_store as store
+from tunix.dist_rl.trajectory import trajectory as trajectory_lib
+
+MetadataT = TypeVar("MetadataT", bound=trajectory_lib.TrajectoryMetadata)
+
+
+def _validate_trajectory_id(trajectory_id: str | None) -> str:
+  """Validates that trajectory_id is non-empty.
+
+  Args:
+    trajectory_id: The trajectory identifier to validate.
+
+  Returns:
+    The validated trajectory_id string.
+
+  Raises:
+    ValueError: If trajectory_id is None or empty.
+  """
+  if not trajectory_id:
+    raise ValueError("TrajectoryMetadata must have a non-empty trajectory_id.")
+  return trajectory_id
+
+
+class InMemoryTrajectoryStore(store.TrajectoryStore[MetadataT]):
+  """In-memory implementation satisfying TrajectoryReader and TrajectoryWriter.
+
+  Process-local: the steps written here are visible only to the process that
+  wrote them. Configuring this backend for a run whose reader and writer live
+  in different processes gives the reader an empty store.
+  """
+
+  BACKEND: ClassVar[str] = "memory"
+
+  def __init__(self) -> None:
+    """Initializes the InMemoryTrajectoryStore."""
+    super().__init__()
+    self._metadata_by_trajectory_id: dict[str, MetadataT] = {}
+    self._steps_by_trajectory_id: dict[str, list[trajectory_lib.Step]] = (
+        collections.defaultdict(list)
+    )
+    self._metrics_by_trajectory_id: dict[
+        str, trajectory_lib.TrajectoryMetrics
+    ] = {}
+
+  @classmethod
+  def _from_config(
+      cls, config: Mapping[str, Any]
+  ) -> "InMemoryTrajectoryStore[MetadataT]":
+    """Builds an in-memory store; this backend takes no other configuration."""
+    del config
+    return cls()
+
+  def to_config(self) -> dict[str, Any]:
+    """Returns the config dict that rebuilds an equivalent store."""
+    return {
+        "backend": self.BACKEND,
+    }
+
+  def get_trajectories_metadata(
+      self,
+      trajectory_ids: Sequence[str] | None = None,
+      *,
+      ignore_missing: bool = False,
+  ) -> dict[str, MetadataT]:
+    """Retrieves metadata for trajectories in the run.
+
+    Args:
+      trajectory_ids: Optional sequence of unique trajectory identifiers. If
+        specified, only metadata for these IDs is returned. If None, metadata
+        for all trajectories in the run is returned.
+      ignore_missing: If True, trajectory IDs with no stored metadata are
+        omitted from the returned dictionary instead of raising
+        TrajectoryMetadataNotFoundError.
+
+    Returns:
+      A dictionary mapping trajectory IDs to TrajectoryMetadata objects for the
+      present trajectories, in the order of `trajectory_ids` if specified.
+
+    Raises:
+      store.TrajectoryMetadataNotFoundError: If `ignore_missing` is False and
+        any requested trajectory ID does not exist.
+    """
+    if trajectory_ids is None:
+      return {
+          traj_id: trajectory_lib.deep_copy(meta)
+          for traj_id, meta in self._metadata_by_trajectory_id.items()
+      }
+    metas: dict[str, MetadataT] = {}
+    for traj_id in trajectory_ids:
+      if traj_id not in self._metadata_by_trajectory_id:
+        if ignore_missing:
+          continue
+        raise store.TrajectoryMetadataNotFoundError(traj_id)
+      metas[traj_id] = trajectory_lib.deep_copy(
+          self._metadata_by_trajectory_id[traj_id]
+      )
+    return metas
+
+  def get_trajectories(
+      self,
+      trajectory_ids: Sequence[str],
+      *,
+      ignore_missing: bool = False,
+      strict: bool = True,
+  ) -> dict[str, trajectory_lib.Trajectory[Any]]:
+    """Retrieves full trajectories for a sequence of trajectory IDs.
+
+    Args:
+      trajectory_ids: Sequence of unique trajectory identifiers to load.
+      ignore_missing: If True, trajectory IDs with no stored records are omitted
+        from the returned dictionary instead of raising TrajectoryNotFoundError.
+      strict: If False, retains the longest contiguous valid prefix [1..k] for
+        any trajectory with a corrupt step, step-ID gap, or step-count mismatch
+        instead of raising ValidationError, and resets completion fields
+        (`status = None`, `total_reward = None`) on the returned Trajectory
+        while preserving lineage metadata.
+
+    Returns:
+      A dictionary mapping trajectory IDs to full Trajectory objects for the
+      present trajectories, in the order of `trajectory_ids`.
+
+    Raises:
+      store.TrajectoryNotFoundError: If `ignore_missing` is False and any
+        requested trajectory ID does not exist.
+      pydantic.ValidationError: If `strict` is True and steps contain gaps or
+        fail model validation.
+    """
+    result: dict[str, trajectory_lib.Trajectory[Any]] = {}
+    for traj_id in trajectory_ids:
+      if traj_id not in self._metadata_by_trajectory_id:
+        if ignore_missing:
+          continue
+        raise store.TrajectoryNotFoundError(traj_id)
+      meta = self._metadata_by_trajectory_id[traj_id]
+      steps = [
+          trajectory_lib.deep_copy(s)
+          for s in self._steps_by_trajectory_id.get(traj_id, [])
+      ]
+      result[traj_id] = meta.create_trajectory(steps=steps, strict=strict)
+    return result
+
+  def get_trajectories_metrics(
+      self, trajectory_ids: Sequence[str] | None = None
+  ) -> dict[str, trajectory_lib.TrajectoryMetrics]:
+    """Retrieves trajectory metrics for the requested or all trajectories.
+
+    Args:
+      trajectory_ids: Optional list of unique trajectory identifiers. If
+        specified, only metrics for these IDs is returned. If None, metrics for
+        all trajectories with recorded metrics is returned.
+
+    Returns:
+      A mapping from trajectory_id to TrajectoryMetrics.
+
+    Raises:
+      store.TrajectoryMetricsNotFoundError: If any requested trajectory ID does
+        not exist in the store.
+    """
+    if trajectory_ids is None:
+      trajectory_ids = list(self._metrics_by_trajectory_id.keys())
+    result: dict[str, trajectory_lib.TrajectoryMetrics] = {}
+    for traj_id in trajectory_ids:
+      if traj_id not in self._metrics_by_trajectory_id:
+        raise store.TrajectoryMetricsNotFoundError(traj_id)
+      result[traj_id] = trajectory_lib.deep_copy(
+          self._metrics_by_trajectory_id[traj_id]
+      )
+    return result
+
+  def add_step(
+      self,
+      step: trajectory_lib.Step,
+      metadata: MetadataT,
+  ) -> None:
+    """Atomically logs a turn step and its trajectory metadata.
+
+    Both `step` and `metadata` are deep copied in memory, so the stored
+    trajectory reflects the step as it was at call time and is unaffected by
+    later mutations of the caller's object.
+
+    Args:
+      step: Step object to log.
+      metadata: TrajectoryMetadata containing trajectory_id and run metadata.
+
+    Raises:
+      TypeError: If metadata is not a TrajectoryMetadata instance or its type
+        conflicts with the store's bound metadata type.
+      ValueError: If metadata.trajectory_id is empty or None.
+    """
+    self.update_metadata(metadata)
+    traj_id = _validate_trajectory_id(metadata.trajectory_id)
+    step_copy = trajectory_lib.deep_copy(step)
+    steps = self._steps_by_trajectory_id[traj_id]
+    for idx, s in enumerate(steps):
+      if s.step_id == step_copy.step_id:
+        steps[idx] = step_copy
+        break
+    else:
+      steps.append(step_copy)
+
+  def update_metadata(
+      self,
+      metadata: MetadataT,
+  ) -> None:
+    """Updates (or creates) trajectory metadata.
+
+    The metadata is deep copied, so later mutations of the caller's object do
+    not retroactively change what this store reports.
+
+    Args:
+      metadata: TrajectoryMetadata containing trajectory_id and run metadata.
+
+    Raises:
+      TypeError: If metadata is not a TrajectoryMetadata instance or its type
+        conflicts with the store's bound metadata type.
+      ValueError: If metadata.trajectory_id is empty or None.
+    """
+    self._validate_and_bind_metadata(metadata)
+    traj_id = _validate_trajectory_id(metadata.trajectory_id)
+    self._metadata_by_trajectory_id[traj_id] = trajectory_lib.deep_copy(
+        metadata
+    )
+
+  def update_metrics(
+      self,
+      trajectory_id: str,
+      metrics: trajectory_lib.TrajectoryMetrics,
+  ) -> None:
+    """Updates (or creates) trajectory metrics for a trajectory.
+
+    The metrics object is deep copied, so later mutations of the caller's
+    object do not retroactively change what this store reports.
+
+    Args:
+      trajectory_id: Unique identifier of the trajectory.
+      metrics: TrajectoryMetrics containing trajectory-level metrics.
+
+    Raises:
+      TypeError: If metrics is not a TrajectoryMetrics instance.
+      ValueError: If trajectory_id is empty or whitespace.
+    """
+    if not isinstance(metrics, trajectory_lib.TrajectoryMetrics):
+      raise TypeError(
+          f"Expected TrajectoryMetrics instance, got {type(metrics).__name__}."
+      )
+    if not trajectory_id or not trajectory_id.strip():
+      raise ValueError("trajectory_id must be non-empty.")
+
+    copied = trajectory_lib.deep_copy(metrics)
+    if trajectory_id in self._metrics_by_trajectory_id:
+      existing = self._metrics_by_trajectory_id[trajectory_id]
+      if existing.extra is None and copied.extra is None:
+        merged_extra = None
+      else:
+        merged_extra = {
+            **(existing.extra or {}),
+            **(copied.extra or {}),
+        }
+      self._metrics_by_trajectory_id[trajectory_id] = existing.model_copy(
+          update={"extra": merged_extra}
+      )
+    else:
+      self._metrics_by_trajectory_id[trajectory_id] = copied
+
+  def flush(self) -> None:
+    """Flushes any pending or asynchronous writes to persistent storage."""
+    pass
+
+  def close(self) -> None:
+    """No-op: this store holds no background thread or file handle.
+
+    Provided so that callers can treat every TrajectoryWriter uniformly. Data
+    stays readable after closing.
+    """
+    pass

@@ -18,7 +18,7 @@ from absl.testing import parameterized
 import jax
 import jax.numpy as jnp
 import numpy as np
-from tunix.rl.ppo import ppo_helpers
+from tunix.rl import algo_core as ppo_helpers
 
 
 def _ref_compute_gae_advantages(

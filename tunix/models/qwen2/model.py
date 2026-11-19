@@ -16,16 +16,22 @@
 
 import dataclasses
 import enum
+from functools import partial
 from typing import Tuple
-
 import flax
 from flax import nnx
 import jax
 from jax import numpy as jnp
+from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel as splash
+from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask as mask_lib
+from jax.experimental.shard_map import shard_map
 from jax.interpreters import pxla
 import jax.sharding as shd
+from jax.sharding import PartitionSpec as P
 import jaxtyping
 from tunix.generate.mappings import BackendMappingMixin
+from tunix.models import gpu_kernels as kernels_lib
+from tunix.models import reference_attention as reference_attention_lib
 from tunix.utils import compat
 from tunix.utils import env_utils
 
@@ -40,6 +46,7 @@ Cache = dict[str, LayerCache]
 class RematConfig(enum.Enum):
   NONE = enum.auto()  #  No remat, all activations will be stored in HBM.
   BLOCK = enum.auto()  # Remat the entire attn block.
+  DECODER = enum.auto()  # Remat the entire decoder layer.
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -60,32 +67,36 @@ class ShardingConfig:
   exp_weight_cdf: Tuple[str | None, ...]
   exp_weight_cfd: Tuple[str | None, ...]
   qkv_bias: Tuple[str | None, ...]
+  score_weight_d1: Tuple[str | None, ...] | None = None
 
   @staticmethod
-  def get_default_sharding(is_sampling: bool = False):
+  def get_default_sharding(is_sampling: bool = False, enable_sp: bool = False):
     fsdp = 'fsdp' if not is_sampling else None
+    sp = 'sp' if (not is_sampling and enable_sp) else None
+    fsdp = (fsdp, sp) if fsdp and sp else fsdp
 
     return ShardingConfig(
-        emb_vd=('tp', fsdp),
-        emb_dv=(fsdp, 'tp'),
-        q_weight_dnh=(fsdp, 'tp', None),
-        kv_weight_dnh=(fsdp, 'tp', None),
-        o_weight_nhd=('tp', None, fsdp),
-        ffw_weight_df=(fsdp, 'tp'),
-        ffw_weight_fd=('tp', fsdp),
-        rms_norm_weight=('tp',),
-        act_btd=('fsdp', None, None if is_sampling else 'tp'),
-        act_btf=('fsdp', None, 'tp'),
-        act_btnh=('fsdp', None, 'tp', None),
-        exp_weight_cdf=('fsdp', None, 'tp'),
-        exp_weight_cfd=('fsdp', 'tp', None),
-        qkv_bias=('tp',),
+        emb_vd=P('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
+        emb_dv=P(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        q_weight_dnh=P(fsdp, 'tp', None),  # pyrefly: ignore[bad-argument-type]
+        kv_weight_dnh=P(fsdp, 'tp', None),  # pyrefly: ignore[bad-argument-type]
+        o_weight_nhd=P('tp', None, fsdp),  # pyrefly: ignore[bad-argument-type]
+        ffw_weight_df=P(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        ffw_weight_fd=P('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
+        rms_norm_weight=P('tp',),  # pyrefly: ignore[bad-argument-type]
+        act_btd=P('fsdp', sp, None if is_sampling else 'tp'),  # pyrefly: ignore[bad-argument-type]
+        act_btf=P('fsdp', sp, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        act_btnh=P('fsdp', sp, 'tp', None),  # pyrefly: ignore[bad-argument-type]
+        score_weight_d1=P(fsdp, None),  # pyrefly: ignore[bad-argument-type]
+        exp_weight_cdf=P('fsdp', None, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        exp_weight_cfd=P('fsdp', 'tp', None),  # pyrefly: ignore[bad-argument-type]
+        qkv_bias=P('tp',),  # pyrefly: ignore[bad-argument-type]
     )
 
 
 @dataclasses.dataclass(slots=True)
 class ModelConfig:
-  """Configuration for the Qwen3 model."""
+  """Configuration for the Qwen2 model."""
 
   num_layers: int
   vocab_size: int
@@ -99,10 +110,14 @@ class ModelConfig:
   use_tied_embedding: bool = False
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
   remat_config: RematConfig = RematConfig.NONE
+  dtype: jnp.dtype = jnp.float32  # pyrefly: ignore[bad-assignment]
+  param_dtype: jnp.dtype = jnp.float32  # pyrefly: ignore[bad-assignment]
+  use_flash_attention: bool = False
+  flash_attention_block_size: int = 1024
 
   # qwen2.5-0.5B and qwen2.5-coder-0.5B share the same config.
   @classmethod
-  def qwen2_5_0_5b(cls):  # qwen2.5-0.5B
+  def qwen2p5_0p5b(cls):  # qwen2.5-0.5B
     return cls(
         num_layers=24,
         vocab_size=151936,
@@ -116,9 +131,17 @@ class ModelConfig:
         use_tied_embedding=True,
     )
 
+  @classmethod
+  def qwen2p5_0p5b_instruct(cls):
+    return cls.qwen2p5_0p5b()
+
+  @classmethod
+  def qwen2p5_coder_0p5b(cls):
+    return cls.qwen2p5_0p5b()
+
   # DeepSeek-R1-Distill-Qwen-1.5B
   @classmethod
-  def deepseek_r1_distill_qwen_1_5b(cls):
+  def deepseek_r1_distill_qwen_1p5b(cls):
     return cls(
         num_layers=28,
         vocab_size=151936,
@@ -133,7 +156,7 @@ class ModelConfig:
     )
 
   @classmethod
-  def qwen2_5_1_5b(cls):  # qwen2.5-1.5B
+  def qwen2p5_1p5b(cls):  # qwen2.5-1.5B
     return cls(
         num_layers=28,
         vocab_size=151936,
@@ -148,7 +171,11 @@ class ModelConfig:
     )
 
   @classmethod
-  def qwen2_5_math_1_5b(cls):  # qwen2.5-math-1.5B
+  def qwen2p5_1p5b_instruct(cls):
+    return cls.qwen2p5_1p5b()
+
+  @classmethod
+  def qwen2p5_math_1p5b(cls):  # qwen2.5-math-1.5B
     return cls(
         num_layers=28,
         vocab_size=151936,
@@ -164,7 +191,7 @@ class ModelConfig:
 
   # qwen2.5-coder-3B and qwen2.5-3B share the same config.
   @classmethod
-  def qwen2_5_3b(cls):
+  def qwen2p5_3b(cls):
     return cls(
         num_layers=36,
         vocab_size=151936,
@@ -178,9 +205,17 @@ class ModelConfig:
         use_tied_embedding=True,
     )
 
+  @classmethod
+  def qwen2p5_3b_instruct(cls):
+    return cls.qwen2p5_3b()
+
+  @classmethod
+  def qwen2p5_coder_3b(cls):
+    return cls.qwen2p5_3b()
+
   # qwen2.5-7B and qwen2.5-coder-7B share the same config.
   @classmethod
-  def qwen2_5_7b(cls):
+  def qwen2p5_7b(cls):
     return cls(
         num_layers=28,
         vocab_size=152064,
@@ -193,6 +228,14 @@ class ModelConfig:
         rope_theta=1_000_000,
         use_tied_embedding=False,
     )
+
+  @classmethod
+  def qwen2p5_7b_instruct(cls):
+    return cls.qwen2p5_7b()
+
+  @classmethod
+  def qwen2p5_coder_7b(cls):
+    return cls.qwen2p5_7b()
 
   # TODO(linchai): add other qwen2.5 model configs.
 
@@ -216,16 +259,25 @@ class Einsum(nnx.Module):
       *,
       rngs: nnx.Rngs,
       sharding: Tuple[str | None, ...],
+      dtype: jnp.dtype,
+      param_dtype: jnp.dtype,
   ):
     self.einsum_str = einsum_str
     self.shape = shape
+    self.dtype = dtype
+    self.param_dtype = param_dtype
     self.w = nnx.Param(
-        nnx.initializers.normal()(rngs.params(), shape), sharding=sharding
+        nnx.initializers.glorot_uniform()(
+            rngs.params(), shape, dtype=param_dtype
+        ),
+        sharding=sharding,
     )
 
   @jax.named_scope('einsum')
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    return jnp.einsum(self.einsum_str, x, self.w.value)
+    x = jnp.astype(x, self.dtype)
+    w = jnp.astype(self.w.value, self.dtype)
+    return jnp.einsum(self.einsum_str, x, w)
 
 
 class Embedder(nnx.Module):
@@ -238,22 +290,28 @@ class Embedder(nnx.Module):
       *,
       rngs: nnx.Rngs,
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+      dtype: jnp.dtype,
+      param_dtype: jnp.dtype,
   ):
     self.input_embedding = nnx.Param(
-        nnx.initializers.normal()(rngs.params(), (vocab_size, embed_dim)),
-        sharding=shd_config.emb_vd,
+        rngs.params.normal((vocab_size, embed_dim), dtype=param_dtype),
+        out_sharding=shd_config.emb_vd,
     )
     self.shd_config = shd_config
+    self.dtype = dtype
 
   @jax.named_scope('embedder_encode')
   def encode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     x = self.input_embedding[(x,)]
-    x = shard(x, self.shd_config.act_btd)
+    x = jnp.astype(x, self.dtype)
+    x = shard(x, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
     return x
 
   @jax.named_scope('embedder_decode')
   def decode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    return jnp.dot(x, self.input_embedding.value.T)
+    x = jnp.astype(x, self.dtype)
+    w = jnp.astype(self.input_embedding.value, self.dtype)
+    return jnp.dot(x, w.T)
 
 
 def _generate_pos_embeddings(
@@ -318,23 +376,25 @@ class RMSNorm(nnx.Module):
       dim: int,
       *,
       norm_eps: float = 1e-06,
-      rngs: nnx.Rngs,
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+      dtype: jnp.dtype,
+      param_dtype: jnp.dtype,
   ):
     self.w = nnx.Param(
-        nnx.initializers.ones_init()(rngs.params(), dim),
-        sharding=shd_config.rms_norm_weight,
+        jnp.ones(dim, param_dtype),
+        out_sharding=shd_config.rms_norm_weight,
     )
     self.norm_eps = norm_eps
+    self.dtype = dtype
 
   @jax.named_scope('rms_norm')
   def __call__(self, x: jaxtyping.Array) -> jaxtyping.Array:
-    dtype = x.dtype
-    rms = jnp.sqrt(
-        jnp.mean(jnp.astype(x, jnp.float32) ** 2, axis=-1, keepdims=True)
-        + self.norm_eps
+    x = jnp.astype(x, jnp.float32)
+    rms = jnp.sqrt(jnp.mean(x**2, axis=-1, keepdims=True) + self.norm_eps)
+    return jnp.astype(
+        jnp.astype(self.w.value, jnp.float32) * (x / rms),
+        self.dtype,
     )
-    return self.w * jnp.astype(x / rms, dtype)
 
 
 class Attention(nnx.Module):
@@ -353,44 +413,50 @@ class Attention(nnx.Module):
         shape=(config.embed_dim, config.num_heads, config.head_dim),
         rngs=rngs,
         sharding=self.shd_config.q_weight_dnh,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.k_proj = Einsum(
         einsum_str='BSD,DKH->BSKH',
         shape=(config.embed_dim, config.num_kv_heads, config.head_dim),
         rngs=rngs,
         sharding=self.shd_config.kv_weight_dnh,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.v_proj = Einsum(
         einsum_str='BSD,DKH->BSKH',
         shape=(config.embed_dim, config.num_kv_heads, config.head_dim),
         rngs=rngs,
         sharding=self.shd_config.kv_weight_dnh,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.o_proj = Einsum(
         einsum_str='BTNH,NHD->BTD',
         shape=(config.num_heads, config.head_dim, config.embed_dim),
         rngs=rngs,
         sharding=self.shd_config.o_weight_nhd,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.n_rep = config.num_heads // config.num_kv_heads
     self.scale = self.head_dim**-0.5
     self.q_bias = nnx.Param(
-        nnx.initializers.zeros_init()(
-            rngs.params(), config.num_heads * config.head_dim
-        ),
-        sharding=self.shd_config.qkv_bias,
+        jnp.zeros(config.num_heads * config.head_dim, dtype=config.param_dtype),
+        out_sharding=self.shd_config.qkv_bias,
     )
     self.k_bias = nnx.Param(
-        nnx.initializers.zeros_init()(
-            rngs.params(), config.num_kv_heads * config.head_dim
+        jnp.zeros(
+            config.num_kv_heads * config.head_dim, dtype=config.param_dtype
         ),
-        sharding=self.shd_config.qkv_bias,
+        out_sharding=self.shd_config.qkv_bias,
     )
     self.v_bias = nnx.Param(
-        nnx.initializers.zeros_init()(
-            rngs.params(), config.num_kv_heads * config.head_dim
+        jnp.zeros(
+            config.num_kv_heads * config.head_dim, dtype=config.param_dtype
         ),
-        sharding=self.shd_config.qkv_bias,
+        out_sharding=self.shd_config.qkv_bias,
     )
 
   def block(
@@ -400,25 +466,32 @@ class Attention(nnx.Module):
       attn_mask: jaxtyping.Array | None,
       sin: jaxtyping.Array,
       cos: jaxtyping.Array,
+      segment_ids: jaxtyping.Array | None = None,
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
     """Attention block."""
     seq_len = x.shape[1]
 
     query_proj = self.q_proj(x)
     b, t, n, h = query_proj.shape
-    query_proj = jnp.reshape(query_proj, (b, t, n * h)) + self.q_bias
+    query_proj = jnp.reshape(query_proj, (b, t, n * h)) + self.q_bias.astype(
+        self.config.dtype
+    )
     query_proj = jnp.reshape(query_proj, (b, t, n, h))
     key_proj = self.k_proj(x)
     _, s, k, h = key_proj.shape
-    key_proj = jnp.reshape(key_proj, (b, s, k * h)) + self.k_bias
+    key_proj = jnp.reshape(key_proj, (b, s, k * h)) + self.k_bias.astype(
+        self.config.dtype
+    )
     key_proj = jnp.reshape(key_proj, (b, s, k, h))
     value_proj = self.v_proj(x)
-    value_proj = jnp.reshape(value_proj, (b, s, k * h)) + self.v_bias
+    value_proj = jnp.reshape(value_proj, (b, s, k * h)) + self.v_bias.astype(
+        self.config.dtype
+    )
     value_proj = jnp.reshape(value_proj, (b, s, k, h))
 
-    query_proj = shard(query_proj, self.shd_config.act_btnh)
-    key_proj = shard(key_proj, self.shd_config.act_btnh)
-    value_proj = shard(value_proj, self.shd_config.act_btnh)
+    query_proj = shard(query_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
+    key_proj = shard(key_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
+    value_proj = shard(value_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
 
     query_proj = apply_rotary_embedding(
         query_proj,
@@ -442,33 +515,160 @@ class Attention(nnx.Module):
       key_proj = jax.lax.dynamic_update_slice(
           cache['k'], key_proj, slice_indices
       )
+      cache_value_proj = value_proj
+      cache_key_proj = key_proj
+    else:
+      cache_value_proj = value_proj
+      cache_key_proj = key_proj
 
-    b, t, qh, d = query_proj.shape
-    _, s, kh, _ = key_proj.shape
+    b, t, qh, _ = query_proj.shape
+    _, _, kh, _ = key_proj.shape
 
-    # GQA
-    query_proj = query_proj.reshape((b, t, kh, qh // kh, d))
-    attn = jnp.einsum('BTHGD,BSHD->BHGTS', query_proj, key_proj) * self.scale
-    attn = attn.reshape((b, qh, t, s))
+    # NB: flash attention doesn't work for decoding step or non-zero cache
+    # offset.
+    if (
+        self.config.use_flash_attention
+        and seq_len > 1
+        and cache is None
+        and jax.default_backend() == 'gpu'
+    ):
+      qkv = kernels_lib.gpu_flash_attention(
+          query_proj,
+          key_proj,
+          value_proj,
+          scale=self.scale,
+          is_causal=attn_mask is None,
+          mask=attn_mask,
+          segment_ids=segment_ids,
+          query_sharding_spec=self.shd_config.act_btnh,
+      )
+    elif (
+        self.config.use_flash_attention
+        and seq_len > 1
+        and cache is None
+        and jax.default_backend() != 'gpu'
+    ):
+      query_proj = query_proj.transpose(0, 2, 1, 3)
+      key_proj = key_proj.transpose(0, 2, 1, 3)
+      value_proj = value_proj.transpose(0, 2, 1, 3)
 
-    if attn_mask is not None:
-      attn = jnp.where((jnp.expand_dims(attn_mask, -3)), attn, K_MASK)
+      query_proj = query_proj * self.scale
 
-    attn = jax.nn.softmax(attn.astype(jnp.float32), axis=-1).astype(
-        key_proj.dtype
-    )
+      effective_segment_ids = reference_attention_lib.extract_token_mask(
+          attn_mask, seq_len, segment_ids=segment_ids, dtype=jnp.int32
+      )
+      (
+          mesh,
+          shd_b,
+          shd_t,
+          shd_n,
+          shd_h,
+          shd_n_kv,
+          head_shards,
+          q_seq_shards,
+      ) = reference_attention_lib.resolve_splash_sharding(
+          self.shd_config.act_btnh, b, kh
+      )
+      causal_mask = mask_lib.CausalMask((seq_len, seq_len))
+      multi_head_mask = mask_lib.MultiHeadMask([causal_mask for _ in range(qh)])
 
-    attn = attn.reshape((b, kh, qh // kh, t, s))
-    qkv = jnp.einsum('BHGTS,BSHD->BTHGD', attn, value_proj)
-    qkv = qkv.reshape((b, t, qh, d))
+      block_sizes = splash.BlockSizes(
+          block_q=self.config.flash_attention_block_size,
+          block_kv=self.config.flash_attention_block_size,
+          block_q_dkv=self.config.flash_attention_block_size,
+          block_kv_dkv=self.config.flash_attention_block_size,
+          block_kv_dkv_compute=self.config.flash_attention_block_size,
+          block_q_dq=self.config.flash_attention_block_size,
+          block_kv_dq=self.config.flash_attention_block_size,
+      )
+
+      splash_attn_kernel = splash.make_splash_mha(
+          multi_head_mask,
+          block_sizes=block_sizes,
+          head_shards=head_shards,
+          q_seq_shards=q_seq_shards,
+      )
+
+      shd_spec = P(shd_b, shd_n, shd_t, shd_h)
+      unsharded_seq = P(shd_b, shd_n_kv, None, shd_h)
+      kernel_spec = splash_attn_kernel.manual_sharding_spec(
+          shd.NamedSharding(mesh, P(shd_n, shd_t))
+      )
+
+      # Segment IDs are used to implement sequence packing
+      if effective_segment_ids is not None:
+        seg_spec = P(shd_b, shd_t)
+        unsharded_seg_spec = P(shd_b, None)
+        splash_segment_ids = splash.SegmentIds(
+            q=effective_segment_ids, kv=effective_segment_ids
+        )
+
+        @partial(
+            shard_map,
+            mesh=mesh,
+            in_specs=(
+                kernel_spec,
+                shd_spec,
+                unsharded_seq,
+                unsharded_seq,
+                seg_spec,
+                unsharded_seg_spec,
+            ),
+            out_specs=shd_spec,
+            check_rep=False,
+        )
+        def sharded_splash_attn(
+            kernel, q_block, k_block, v_block, q_seg_block, kv_seg_block
+        ):
+          seg_ids = splash.SegmentIds(q=q_seg_block, kv=kv_seg_block)
+          return jax.vmap(kernel)(
+              q_block, k_block, v_block, segment_ids=seg_ids
+          )
+
+        qkv = sharded_splash_attn(
+            splash_attn_kernel,
+            query_proj,
+            key_proj,
+            value_proj,
+            splash_segment_ids.q,
+            splash_segment_ids.kv,
+        )
+      else:
+
+        @partial(
+            shard_map,
+            mesh=mesh,
+            in_specs=(kernel_spec, shd_spec, unsharded_seq, unsharded_seq),
+            out_specs=shd_spec,
+            check_rep=False,
+        )
+        def sharded_splash_attn(kernel, q_block, k_block, v_block):
+          return jax.vmap(kernel)(q_block, k_block, v_block)
+
+        qkv = sharded_splash_attn(
+            splash_attn_kernel, query_proj, key_proj, value_proj
+        )
+
+      # Transpose back
+      qkv = qkv.transpose(0, 2, 1, 3)
+    else:
+      qkv = reference_attention_lib.reference_attention(
+          query_proj,
+          key_proj,
+          value_proj,
+          scale=self.scale,
+          attn_mask=attn_mask,
+          segment_ids=segment_ids,
+          mask_value=K_MASK,
+      )
 
     outputs = self.o_proj(qkv)
-    outputs = shard(outputs, self.shd_config.act_btd)
+    outputs = shard(outputs, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
 
     if cache is not None:
       new_cache = {
-          'v': value_proj,
-          'k': key_proj,
+          'v': cache_value_proj,
+          'k': cache_key_proj,
           'end_index': cache['end_index'] + seq_len,
       }
     else:
@@ -484,13 +684,23 @@ class Attention(nnx.Module):
       attn_mask: jaxtyping.Array | None,
       sin: jaxtyping.Array,
       cos: jaxtyping.Array,
+      segment_ids: jaxtyping.Array | None = None,
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
-    if self.config.remat_config == RematConfig.BLOCK:
-      # nnx.remat needs to be applied to the unbound function and take self
-      # as the first argument.
-      return nnx.remat(self.block.__func__)(self, x, cache, attn_mask, sin, cos)
+    if (
+        self.config.remat_config == RematConfig.BLOCK
+        or self.config.remat_config == RematConfig.BLOCK.value
+    ):
+      graphdef, state = nnx.split(self)
+
+      def _checkpointed_block(state, *args, **kwargs):
+        module = nnx.merge(graphdef, state)
+        return module.block(*args, **kwargs)
+
+      return jax.checkpoint(_checkpointed_block)(
+          state, x, cache, attn_mask, sin, cos, segment_ids
+      )
     else:
-      return self.block(x, cache, attn_mask, sin, cos)
+      return self.block(x, cache, attn_mask, sin, cos, segment_ids)
 
   @property
   def head_dim(self):
@@ -514,6 +724,7 @@ class MLP(nnx.Module):
       *,
       rngs: nnx.Rngs,
   ):
+    self.config = config
     self.shd_config = config.shd_config
     kernel_init_fn = nnx.initializers.zeros_init()
     self.gate_proj = nnx.Linear(
@@ -521,6 +732,8 @@ class MLP(nnx.Module):
         out_features=config.hidden_dim,
         use_bias=False,
         rngs=rngs,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
         kernel_init=nnx.with_partitioning(
             kernel_init_fn, self.shd_config.ffw_weight_df
         ),
@@ -530,6 +743,8 @@ class MLP(nnx.Module):
         out_features=config.hidden_dim,
         use_bias=False,
         rngs=rngs,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
         kernel_init=nnx.with_partitioning(
             kernel_init_fn, self.shd_config.ffw_weight_df
         ),
@@ -539,17 +754,37 @@ class MLP(nnx.Module):
         out_features=config.embed_dim,
         use_bias=False,
         rngs=rngs,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
         kernel_init=nnx.with_partitioning(
             kernel_init_fn, self.shd_config.ffw_weight_fd
         ),
     )
 
-  @jax.named_scope('feed_forward')
-  def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
+  def block(
+      self,
+      x: jaxtyping.Array,
+  ) -> jaxtyping.Array:
     activations = nnx.silu(self.gate_proj(x)) * self.up_proj(x)
-    activations = shard(activations, self.shd_config.act_btf)
+    activations = shard(activations, self.shd_config.act_btf)  # pyrefly: ignore[bad-argument-type]
     outputs = self.down_proj(activations)
     return outputs
+
+  @jax.named_scope('feed_forward')
+  def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
+    if (
+        self.config.remat_config == RematConfig.BLOCK
+        or self.config.remat_config == RematConfig.BLOCK.value
+    ):
+      graphdef, state = nnx.split(self)
+
+      def _checkpointed_block(state, *args, **kwargs):
+        module = nnx.merge(graphdef, state)
+        return module.block(*args, **kwargs)
+
+      return jax.checkpoint(_checkpointed_block)(state, x)
+    else:
+      return self.block(x)  # pyrefly: ignore[bad-argument-type]
 
 
 class DecoderLayer(nnx.Module):
@@ -561,11 +796,13 @@ class DecoderLayer(nnx.Module):
       *,
       rngs: nnx.Rngs,
   ):
+    self.config = config
     self.input_layernorm = RMSNorm(
         config.embed_dim,
         norm_eps=config.norm_eps,
-        rngs=rngs,
         shd_config=config.shd_config,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.attn = Attention(
         config=config,
@@ -574,29 +811,32 @@ class DecoderLayer(nnx.Module):
     self.post_attention_layernorm = RMSNorm(
         config.embed_dim,
         norm_eps=config.norm_eps,
-        rngs=rngs,
         shd_config=config.shd_config,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.mlp = MLP(
         config=config,
         rngs=rngs,
     )
 
-  def __call__(
+  def block(
       self,
       x: jaxtyping.Array,
       cache: LayerCache | None,
-      attn_mask: jaxtyping.Array,
+      attn_mask: jaxtyping.Array | None,
       sin,
       cos,
+      segment_ids: jaxtyping.Array | None = None,
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
     inputs_normalized = self.input_layernorm(x)
     cache, attn_output = self.attn(
         inputs_normalized,
         cache,
-        attn_mask,
-        sin,
-        cos,
+        attn_mask=attn_mask,
+        sin=sin,
+        cos=cos,
+        segment_ids=segment_ids,
     )
     attn_output += x
     residual = attn_output
@@ -605,39 +845,83 @@ class DecoderLayer(nnx.Module):
     outputs = residual + outputs
     return cache, outputs
 
+  def __call__(
+      self,
+      x: jaxtyping.Array,
+      cache: LayerCache | None,
+      attn_mask: jaxtyping.Array,
+      sin,
+      cos,
+      segment_ids: jaxtyping.Array | None = None,
+  ) -> tuple[LayerCache | None, jaxtyping.Array]:
+    if (
+        self.config.remat_config == RematConfig.DECODER
+        or self.config.remat_config == RematConfig.DECODER.value
+    ):
+      graphdef, state = nnx.split(self)
+
+      def _checkpointed_block(state, *args, **kwargs):
+        module = nnx.merge(graphdef, state)
+        return module.block(*args, **kwargs)
+
+      return jax.checkpoint(_checkpointed_block)(
+          state,
+          x,
+          cache,
+          attn_mask=attn_mask,
+          sin=sin,
+          cos=cos,
+          segment_ids=segment_ids,
+      )
+    else:
+      return self.block(
+          x,
+          cache,
+          attn_mask=attn_mask,
+          sin=sin,
+          cos=cos,
+          segment_ids=segment_ids,
+      )
+
 
 class Qwen2(BackendMappingMixin, nnx.Module):
   """Qwen2.5 model."""
+
+  BACKEND_PACKAGE_PATH = __name__
 
   def __init__(
       self,
       config: ModelConfig,
       *,
       rngs: nnx.Rngs,
-      shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
   ):
     self.config = config
     self.embedder = Embedder(
         vocab_size=config.vocab_size,
         embed_dim=config.embed_dim,
         rngs=rngs,
-        shd_config=shd_config,
+        shd_config=config.shd_config,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.layers = compat.ModuleList([
         DecoderLayer(config=config, rngs=rngs) for _ in range(config.num_layers)
     ])
     self.final_norm = RMSNorm(
         config.embed_dim,
-        rngs=rngs,
         norm_eps=config.norm_eps,
-        shd_config=shd_config,
+        shd_config=config.shd_config,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     if not self.config.use_tied_embedding:
       self.lm_head = Einsum(
           einsum_str='BTD,DV->BTV',
           shape=(config.embed_dim, config.vocab_size),
           rngs=rngs,
-          sharding=shd_config.emb_dv,
+          sharding=config.shd_config.emb_dv,
+          dtype=config.dtype,
+          param_dtype=config.param_dtype,
       )
 
   def __call__(
@@ -645,8 +929,10 @@ class Qwen2(BackendMappingMixin, nnx.Module):
       input_tokens: jaxtyping.Array,  # [B, L]
       positions: jaxtyping.Array,  # [B, L]
       cache: Cache | None,  # (sequence length L')
-      attention_mask: jaxtyping.Array,  # [B, L, L']
+      attention_mask: jaxtyping.Array | None = None,  # [B, L, L']
       output_hidden_states: bool = False,
+      segment_ids: jaxtyping.Array | None = None,  # [B, L]
+      skip_lm_head: bool = False,
   ) -> tuple[jaxtyping.Array, Cache | None]:
     """Qwen2 model.
 
@@ -656,6 +942,8 @@ class Qwen2(BackendMappingMixin, nnx.Module):
       cache: Attention KV cache or None.
       attention_mask: transformer input mask.
       output_hidden_states: whether to output the hidden states.
+      segment_ids: segment ids for each token in the input sequence.
+      skip_lm_head: whether to skip the final lm head.
 
     Returns:
       predicted_logits, new_cache
@@ -676,23 +964,35 @@ class Qwen2(BackendMappingMixin, nnx.Module):
       layer_cache, x = layer(
           x,
           layer_cache,
-          attention_mask,
+          attention_mask,  # pyrefly: ignore[bad-argument-type]
           sin,
           cos,
+          segment_ids=segment_ids,
       )
       if cache is not None:
-        new_cache[layer_name] = layer_cache  # pytype: disable=container-type-mismatch
+        new_cache[layer_name] = layer_cache  # pyrefly: ignore[unsupported-operation]
 
     x = self.final_norm(x)
+
     if output_hidden_states:
       self.sow(nnx.Intermediate, 'all_hidden_states', x)
-    # Qwen2.5 0.5B-3B uses tied embedding, sharing weights for input and output.
+
+    if skip_lm_head:
+      return x, new_cache
+
+    logits = self.compute_final_logits(x)
+    return logits, new_cache
+
+  def compute_final_logits(
+      self,
+      x: jaxtyping.Array,
+  ) -> jaxtyping.Array:
+    """Computes the final logits from the model output."""
     if self.config.use_tied_embedding:
       logits = self.embedder.decode(x)
     else:
       logits = self.lm_head(x)
-
-    return logits, new_cache  # pytype: disable=bad-return-type
+    return jnp.astype(logits, jnp.float32)
 
   def get_model_input(self):
     """Returns a dummy model input for the transformer.

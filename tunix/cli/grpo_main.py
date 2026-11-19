@@ -12,124 +12,189 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Main entry point for GRPO training."""
+"""Main entry point for GRPO training (standard and agentic).
+
+Set ``training_mode: "grpo"`` (default) for standard single-turn GRPO, or
+``training_mode: "agentic_grpo"`` for agentic multi-turn GRPO (DeepScaleR,
+DeepSWE, etc.).
+
+Usage::
+
+    # Standard GRPO
+    bash examples/rl/grpo/gsm8k/run_gemma2_2b.sh
+
+    # Agentic GRPO — DeepScaleR
+    bash examples/deepscaler/run_deepscaler_disagg.sh
+
+    # Agentic GRPO — DeepSWE
+    python -m tunix.cli.grpo_main examples/deepswe/configs/qwen3_32b.yaml
+"""
+import dataclasses
+import os
+from typing import Any
+
 from absl import app
-from tunix.cli import config
-from tunix.cli.utils import model as model_lib
-from tunix.examples.data import math_dataset as data_lib
-from tunix.rl import rl_cluster as rl_cluster_lib
-from tunix.rl.grpo import grpo_learner
-from tunix.rl.grpo.grpo_learner import GrpoConfig
-from tunix.rl.rollout import base_rollout
+from absl import flags
+from absl import logging
+from tunix.cli import base_rl_pipeline
+from tunix.cli.utils import data as data_lib
 
 
-class GrpoPipeline(config.HyperParameters):
-  """Class for running the GRPO trainer."""
+class GrpoPipeline(base_rl_pipeline.BasePipeline):
+  """Runs standard GRPO or agentic GRPO depending on ``training_mode``.
 
-  def create_rollout_config(self):
-    rollout_config = self.config["rollout_config"]
-    return base_rollout.RolloutConfig(
-        max_tokens_to_generate=rollout_config["total_generation_steps"],
-        max_prompt_length=rollout_config["max_prompt_length"],
-        kv_cache_size=rollout_config["max_prompt_length"]
-        + rollout_config["total_generation_steps"]
-        + 256,
-        temperature=rollout_config["temperature"],
-        top_p=rollout_config["top_p"],
-        top_k=rollout_config["top_k"],
-    )
+  ``training_mode: "grpo"`` (default) — standard single-turn GRPO using
+  GrpoLearner.  All existing YAML configs continue to work unchanged.
 
-  def create_role_to_mesh(self):
-    default_mesh = self.create_mesh("actor_model_config")
-    actor_mesh = reference_mesh = rollout_mesh = default_mesh
-    if "reference_model_config" in self.config:
-      reference_mesh = self.create_mesh("reference_model_config")
-    if "rollout_model_config" in self.config:
-      rollout_mesh = self.create_mesh("rollout_model_config")
-    return {
-        rl_cluster_lib.Role.ACTOR: actor_mesh,
-        rl_cluster_lib.Role.REFERENCE: reference_mesh,
-        rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
-    }
+  ``training_mode: "agentic_grpo"`` — multi-turn agentic GRPO using
+  GRPOLearner.  Additional config sections are recognised:
 
-  def create_cluster_config(self):
-    return rl_cluster_lib.ClusterConfig(
-        role_to_mesh=self.create_role_to_mesh(),
-        rollout_engine=self.config["rollout_engine"],
-        offload_to_cpu=self.config["offload_to_cpu"],
-        training_config=self.create_rl_training_config(),
-        rollout_config=self.create_rollout_config(),
-    )
+  * ``agentic_grpo_config``: GRPOConfig fields (num_generations, beta, …)
+    plus ``max_turns``, ``per_turn_timeout_secs``.
+  * role-specific ``*_model_config.mesh``: any role with an explicit mesh gets
+    its own device slice; omitted meshes share the actor mesh by default.
+  * role-specific ``same_mesh_as``: optional mesh sharing like
+    ``reference_model_config.same_mesh_as: actor``.
+  * ``vllm_config``: engine-specific rollout params.
+  * ``chat_parser_config.type``: ``"default"`` or ``"qwen"``.
+  * ``agent_class_path`` / ``env_class_path``: dotted Python paths to load
+    agent and env classes dynamically.
+  * ``data_module``: dotted module path; the module must expose
+    ``create_dataset(**data_config) -> grain.MapDataset`` and optionally a
+    ``batch_fn`` used as ``custom_batch_fn`` in post_init_dataset.
+  * ``kubernetes_config``: optional Kubernetes env-var and kube-config setup.
+  """
 
-  def create_rl_training_config(self):
-    base_key = "rl_training_config"
-    constructed_rl_training_config = self.obtain_training_config_dict(base_key)
+  @property
+  def _default_training_mode(self):
+    return "grpo"
 
-    base_config = self.config[base_key]
-    if base_config.get("actor_optimizer_config"):
-      constructed_rl_training_config["actor_optimizer"] = self.create_optimizer(
-          base_key, "actor_optimizer_config"
-      )
-    if base_config.get("critic_optimizer_config"):
-      constructed_rl_training_config["critic_optimizer"] = (
-          self.create_optimizer(base_key, "critic_optimizer_config")
+  # ------------------------------------------------------------------
+  # Agentic GRPO helpers
+  # ------------------------------------------------------------------
+
+  def _create_agentic_grpo_config(self):
+    """Build GRPOConfig (agentic) from the agentic_grpo_config YAML section."""
+    from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig  # pylint: disable=g-import-not-at-top
+
+    cfg = dict(self._config_mapping("agentic_grpo_config"))
+
+    # episode_timeout = per_turn_timeout_secs * max_turns when not explicit
+    if "episode_timeout" not in cfg:
+      per_turn = cfg.pop("per_turn_timeout_secs", None)
+      max_turns = cfg.get("max_turns", 1)
+      if per_turn is not None:
+        cfg["episode_timeout"] = per_turn * max_turns
+
+    # max_response_length mirrors rollout_config.total_generation_steps
+    if "max_response_length" not in cfg:
+      cfg["max_response_length"] = self._config_mapping("rollout_config").get(
+          "total_generation_steps", 8192
       )
 
-    return rl_cluster_lib.RLTrainingConfig(**constructed_rl_training_config)
+    # Strip helper keys that are not GRPOConfig fields
+    valid = {f.name for f in dataclasses.fields(GRPOConfig) if f.init}
+    cfg.pop("max_turns", None)
+    return GRPOConfig(**{k: v for k, v in cfg.items() if k in valid})
 
-  def create_rl_cluster(self):
-    reference_model, tokenizer_path = model_lib.create_model(
-        self.config["reference_model_config"],
-        self.config["tokenizer_config"],
-        self.create_mesh("reference_model_config"),
+  # ------------------------------------------------------------------
+  # Agentic GRPO training
+  # ------------------------------------------------------------------
+
+  def _run(self, mode: str = "grpo"):
+    """Execute agentic GRPO training (DeepScaleR, DeepSWE, etc.)."""
+    self._setup_kubernetes()
+
+    tokenizer = self._get_tokenizer()
+
+    chat_parser = self._create_chat_parser(tokenizer)
+
+    raw_dataset, custom_batch_fn = self._load_raw_dataset(tokenizer)
+
+    self.compute_params(raw_dataset)
+
+    dataset, _ = data_lib.post_init_dataset(
+        raw_dataset,
+        tokenizer,
+        batch_size=self.config.get("batch_size", 1),
+        num_batches=self.config.get("num_batches"),
+        max_prompt_length=self._config_mapping("rollout_config").get(
+            "max_prompt_length"
+        ),
+        fraction=self.config.get("train_fraction", 1.0),
+        num_epochs=self.config.get("num_train_epochs", 1),
+        prompt_key=self.config.get("prompt_key", "prompts"),
+        custom_batch_fn=custom_batch_fn,
     )
-    if self.config["actor_model_config"]["lora_config"]:
-      actor_model = model_lib.apply_lora_to_model(
-          reference_model,
-          self.create_mesh("actor_model_config"),
-          self.config["actor_model_config"]["lora_config"],
+
+    rl_engine = self.create_rl_engine(tokenizer)
+
+    if mode == "grpo":
+      from tunix.rl.grpo import grpo_learner  # pylint: disable=g-import-not-at-top
+
+      grpo_trainer = grpo_learner.GrpoLearner(
+          rl_engine=rl_engine,
+          reward_fns=self.obtain_reward_fn(),
+          algo_config=grpo_learner.GrpoConfig(
+              **self._config_mapping("grpo_config")
+          ),
       )
-    else:
-      actor_model = reference_model
-
-    tokenizer = model_lib.create_tokenizer(
-        self.config["tokenizer_config"], tokenizer_path
-    )
-
-    return rl_cluster_lib.RLCluster(
-        actor=actor_model,
-        reference=reference_model,
-        tokenizer=tokenizer,
-        cluster_config=self.create_cluster_config(),
-    )
-
-  def run_grpo_trainer(self):
-    grpo_trainer = grpo_learner.GrpoLearner(
-        rl_cluster=self.create_rl_cluster(),
-        reward_fns=self.obtain_reward_fn(),
-        algo_config=GrpoConfig(**self.config["grpo_config"]),
-    )
-
-    if self.config["data_source"] == "local":
-      dataset = data_lib.get_dataset_from_parquet(
-          self.config["data_directory"],
-          grpo_trainer.rl_cluster.tokenizer.tokenizer,
-      ).batch(self.config["batch_size"])
-    else:
-      dataset = data_lib.create_dataset(
-          self.config["dataset_name"],
-          self.config["batch_size"],
-          self.config["num_batches"],
-      )
-
-    mesh = self.create_mesh("actor_model_config")
-    with mesh:
       grpo_trainer.train(dataset)
+      return
+
+    # agentic GRPO
+    if mode != "agentic_grpo":
+      raise ValueError(f"Unsupported training_mode {mode!r}")
+
+    from tunix.rl.agentic.agentic_grpo_learner import GRPOLearner  # pylint: disable=g-import-not-at-top
+
+    algo_config = self._create_agentic_grpo_config()
+
+    reward_fns = (
+        self.obtain_reward_fn() if self.config.get("reward_functions") else None
+    )
+
+    learner_kwargs: dict[str, Any] = dict(
+        rl_engine=rl_engine,
+        algo_config=algo_config,
+        reward_fns=reward_fns,
+        chat_parser=chat_parser,
+    )
+
+    agent_class_path = self._config_string("agent_class_path")
+    if agent_class_path:
+      learner_kwargs["agent_class"] = self._load_class_from_path(
+          agent_class_path
+      )
+      learner_kwargs["agent_kwargs"] = dict(
+          self.config.get("agent_kwargs") or {}
+      )
+
+    env_class_path = self._config_string("env_class_path")
+    if env_class_path:
+      learner_kwargs["env_class"] = self._load_class_from_path(env_class_path)
+      learner_kwargs["env_kwargs"] = dict(self.config.get("env_kwargs") or {})
+
+    logging.info("Starting agentic GRPO training...")
+    GRPOLearner(**learner_kwargs).train(dataset)
 
 
 def main(argv, **kwargs):
+  pathways_bns = flags.FLAGS.pathways_bns
+  if pathways_bns:
+    base_rl_pipeline.setup_jax_pathways(pathways_bns)
+
+  if os.getenv("JAX_PLATFORMS") == "proxy":
+    base_rl_pipeline.setup_pathways_on_cloud()
+
   pipeline = GrpoPipeline(argv, **kwargs)
-  pipeline.run_grpo_trainer()
+  logging.info(
+      "--- Launching GRPO pipeline with following config ---\n"
+      "%r\n--------------------------",
+      pipeline.config,
+  )
+  pipeline.run_trainer()
+  return
 
 
 if __name__ == "__main__":

@@ -1,0 +1,18 @@
+# TODO(maxtext-dev): Update the commits after all code changes land.
+maxtext @ git+https://github.com/AI-Hypercomputer/maxtext.git@aee266d4007149667819c46d0a76edcb18622faf
+maxtext-vllm-adapter @ git+https://github.com/AI-Hypercomputer/maxtext.git@aee266d4007149667819c46d0a76edcb18622faf#subdirectory=src/maxtext/integration/vllm
+aqtp
+cheroot
+cloud-accelerator-diagnostics
+cloud-tpu-diagnostics
+drjax>=0.1.4
+einshape
+google-cloud-mldiagnostics>=0.5.10
+google-cloud-monitoring
+ml-goodput-measurement
+# MaxText's `common/snapshotting.py` uses `ocp.training.pathways.Snapshotter`,
+# added in orbax-checkpoint 0.12.6.
+orbax-checkpoint>=0.12.6
+tokamax>=0.0.4
+typeguard
+xprof

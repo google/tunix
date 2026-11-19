@@ -19,16 +19,16 @@ batch_size=${batch_size:-12}
 num_batches=${num_batches:-8192}
 num_train_epochs=${num_train_epochs:-1}
 warmup_ratio=${warmup_ratio:-0.1}
-train_fraction=${train_fraction:-1.0} 
+train_fraction=${train_fraction:-1.0}
 
 echo "Using parameters:"
 echo "  Batch Size: $batch_size"
 echo "  Num Batches: $num_batches"
 echo "  Num Epochs: $num_train_epochs"
-echo "  Warmup Ratio: $warmup_ratio" 
+echo "  Warmup Ratio: $warmup_ratio"
 echo "  Train Fraction: $train_fraction"
 
-max_steps_float=$(awk "BEGIN {print $batch_size * $num_batches * $num_train_epochs * $train_fraction}")
+max_steps_float=$(awk "BEGIN {print $num_batches * $num_train_epochs * $train_fraction}")
 
 max_steps=$(printf "%.0f" "$max_steps_float")
 
@@ -40,19 +40,22 @@ echo "Rounded warmup steps: $warmup_steps"
 
 python3 -m tunix.cli.grpo_main \
   base_config.yaml \
-  reference_model_config.model_name="llama3.2-1b" \
-  reference_model_config.model_id="meta-llama/Llama-3.2-1B-Instruct" \
-  reference_model_config.model_source="huggingface" \
-  reference_model_config.intermediate_ckpt_dir="/tmp/tunix/experiments/grpo/llama3p2_1b_gsm8k" \
-  reference_model_config.mesh.shape="(4,1)" \
-  reference_model_config.mesh.axis_names="('fsdp','tp')" \
-  reference_model_config.rng_seed=42 \
+  model_config.model_name="llama-3.2-1b" \
+  model_config.model_id="unsloth/Llama-3.2-1B-Instruct" \
+  model_config.model_source="huggingface" \
+  model_config.intermediate_ckpt_dir="/tmp/tunix/experiments/grpo/llama3p2_1b_gsm8k" \
+  model_config.model_download_path="/tmp/models/llama3.2-1b" \
+  model_config.mesh.shape="(4,1)" \
+  model_config.mesh.axis_names="('fsdp','tp')" \
+  model_config.rng_seed=42 \
   actor_model_config.mesh.shape="(4,1)" \
   actor_model_config.mesh.axis_names="('fsdp','tp')" \
   actor_model_config.lora_config={} \
-  rollout_model_config.mesh.shape="(4,1)" \
-  rollout_model_config.mesh.axis_names="('fsdp','tp')" \
-  tokenizer_config.tokenizer_path="meta-llama/Llama-3.2-1B-Instruct" \
+  reference_model_config.mesh=null \
+  reference_model_config.same_mesh_as="actor" \
+  rollout_model_config.mesh=null \
+  rollout_model_config.same_mesh_as="actor" \
+  tokenizer_config.tokenizer_path="unsloth/Llama-3.2-1B-Instruct" \
   tokenizer_config.tokenizer_type="huggingface" \
   tokenizer_config.add_bos=false \
   data_source="local" \
@@ -61,6 +64,7 @@ python3 -m tunix.cli.grpo_main \
   num_batches=$num_batches \
   num_test_batches=100 \
   num_train_epochs=$num_train_epochs \
+  train_fraction=$train_fraction \
   rl_training_config.actor_optimizer_config.opt_type="adamw" \
   rl_training_config.actor_optimizer_config.peak_value=3e-6 \
   rl_training_config.actor_optimizer_config.schedule_type="warmup_cosine_decay_schedule" \
@@ -79,7 +83,6 @@ python3 -m tunix.cli.grpo_main \
   rl_training_config.metrics_logging_options.flush_every_n_steps=1 \
   rl_training_config.checkpointing_options.save_interval_steps=500 \
   rl_training_config.checkpointing_options.max_to_keep=4 \
-  rl_training_config.gradient_accumulation_steps=1 \
   rl_training_config.profiler_options={} \
   rollout_config.total_generation_steps=768 \
   rollout_config.max_prompt_length=256 \
@@ -93,4 +96,4 @@ python3 -m tunix.cli.grpo_main \
   grpo_config.beta=0.08 \
   grpo_config.epsilon=0.2 \
   reward_functions="['tunix/cli/reward_fn/gsm8k_verl.py']" \
-  verl_compatible=true \
+  verl_compatible=true

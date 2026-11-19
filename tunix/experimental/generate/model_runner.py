@@ -1,0 +1,892 @@
+# Copyright 2026 The Tunix Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Model runner for token generation.
+
+`ModelRunner` owns the transformer weights and runs the forward pass and token
+sampling on device.
+"""
+
+from collections.abc import Sequence
+import dataclasses
+import functools
+import math
+import operator
+from typing import Any, TypeVar
+
+from flax import nnx
+from flax import struct
+from flax.nnx import filterlib
+from flax.nnx import graph
+from flax.nnx import statelib
+import jax
+import jax.numpy as jnp
+import jaxtyping
+import numpy as np
+from tunix.experimental.generate import configs
+from tunix.experimental.generate import request as request_lib
+from tunix.experimental.generate import utils
+from tunix.models import paged_attention
+from tunix.rl import reshard
+from tunix.rl import utils as rl_utils
+
+
+_HIERARCHICAL_BLOCK_SIZE = 256
+_HIERARCHICAL_MIN_VOCAB_SIZE = 4096
+_MIN_SAFE_TEMP = float(np.finfo(np.float32).tiny)
+_MAX_SAFE_TEMP = 1.0 / _MIN_SAFE_TEMP
+
+
+@struct.dataclass
+class SamplingMetadata:
+  """The sampling settings of each request in a batch.
+
+  Each array has one entry per request in the batch. Rows past the scheduled
+  requests are padding, and sample greedily.
+  """
+
+  # Zero samples greedily.
+  temperature: jax.Array | np.ndarray  # `[num_rows]` float32
+  # Samples only from the smallest set of most likely tokens whose probability
+  # reaches this value.
+  top_p: jax.Array | np.ndarray        # `[num_rows]` float32, in (0, 1].
+  # Samples only from the `top_k` most likely tokens. <= 0 means no limit.
+  top_k: jax.Array | np.ndarray        # `[num_rows]` int32, in [1, max_top_k].
+  # Whether every request samples from the full vocabulary without `top_k` or
+  # `top_p` truncation.
+  unconstrained: bool = struct.field(pytree_node=False, default=False)
+
+  # TODO(yatlas): Remove sampling_params. It is being deprecated.
+  @classmethod
+  def from_sampling_params(
+      cls,
+      sampling_params: Sequence[request_lib.SamplingParams],
+      num_rows: int,
+      max_top_k: int,
+      distribution: jax.Array | np.ndarray,
+  ) -> 'SamplingMetadata':
+    """Packs the scheduled requests' sampling settings into host arrays.
+
+    Args:
+      sampling_params: The sampling settings of each scheduled request, in row
+        order.
+      num_rows: The row capacity of the batch.
+      max_top_k: The maximum `top_k` value allowed.
+      distribution: `[num_groups, 3]` row layout of each DP group. Group `i`'s
+        `distribution[i, 2]` requests are packed starting at row
+        `i * (num_rows // num_groups)`.
+
+    Returns:
+      The metadata, padded out to `num_rows` rows.
+    """
+    if len(sampling_params) > num_rows:
+      raise ValueError(
+          f'Got {len(sampling_params)} sampling params for {num_rows} rows.'
+      )
+
+    temperature = np.zeros((num_rows,), dtype=np.float32)
+    top_p = np.ones((num_rows,), dtype=np.float32)
+    top_k = np.ones((num_rows,), dtype=np.int32)
+    unconstrained = bool(max_top_k <= 0)
+
+    dists = np.asarray(distribution)
+    rows_per_group = num_rows // dists.shape[0]
+    n_tokens = dists[:, 2]
+    row_indices = []
+    for i, n in enumerate(n_tokens):
+      start = i * rows_per_group
+      row_indices.extend(range(start, start + int(n)))
+
+    for row, params in zip(row_indices, sampling_params):
+      if (
+          max_top_k > 0
+          and params.top_k is not None
+          and params.top_k > max_top_k
+      ):
+        raise ValueError(
+            f'top_k={params.top_k} exceeds the engine max_top_k={max_top_k}.'
+        )
+      temperature[row] = params.temperature
+
+      # No `top_p` keeps every token.
+      top_p[row] = 1.0 if params.top_p is None else params.top_p
+      top_k[row] = max_top_k if params.top_k is None else params.top_k
+      if temperature[row] > 0.0 and (top_k[row] > 0 or top_p[row] < 1.0):
+        unconstrained = False
+
+    return cls(
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        unconstrained=unconstrained,
+    )
+
+
+def _finite_or_zero(x: jax.Array) -> jax.Array:
+  return jnp.where(jnp.isfinite(x), x, 0.0)
+
+
+def _sample_hierarchical_256(
+    logits: jax.Array,
+    key: jax.Array,
+    is_greedy: jax.Array,
+    inv_temp: jax.Array,
+    *,
+    return_logprobs: bool = False,
+) -> tuple[jax.Array, jax.Array | None]:
+  """Samples tokens in two 256-wide stages without full-vocab fp32 buffers."""
+  logits_3d = logits.reshape(logits.shape[0], -1, _HIERARCHICAL_BLOCK_SIZE)
+  block_max = jnp.max(logits_3d, axis=-1)
+  bmax_f32 = block_max.astype(jnp.float32)
+  shifted = (
+      logits_3d.astype(jnp.float32) - _finite_or_zero(bmax_f32)[:, :, None]
+  ) * inv_temp[:, None, None]
+  safe_rmax = _finite_or_zero(jnp.max(bmax_f32, axis=-1))
+  block_lse = (bmax_f32 - safe_rmax[:, None]) * inv_temp[:, None] + jnp.log(
+      jnp.sum(jnp.exp(shifted), axis=-1)
+  )
+
+  k_block, k_within = jax.random.split(key)
+  block_idx = jnp.where(
+      is_greedy,
+      jnp.argmax(block_max, axis=-1),
+      jax.random.categorical(k_block, block_lse, axis=-1),
+  )
+  chosen_raw = jnp.take_along_axis(logits_3d, block_idx[:, None, None], axis=1)[
+      :, 0, :
+  ]
+  chosen_scaled = (
+      chosen_raw.astype(jnp.float32) - safe_rmax[:, None]
+  ) * inv_temp[:, None]
+  within_idx = jnp.where(
+      is_greedy,
+      jnp.argmax(chosen_raw, axis=-1),
+      jax.random.categorical(k_within, chosen_scaled, axis=-1),
+  )
+  next_tokens = (block_idx * _HIERARCHICAL_BLOCK_SIZE + within_idx).astype(
+      jnp.int32
+  )
+  if not return_logprobs:
+    return next_tokens, None
+  chosen_logit = jnp.take_along_axis(
+      chosen_scaled, within_idx[:, None], axis=-1
+  )[:, 0]
+  return next_tokens, chosen_logit - jax.nn.logsumexp(block_lse, axis=-1)
+
+
+def sample(
+    logits: jax.Array,
+    key: jax.Array,
+    metadata: SamplingMetadata,
+    max_top_k: int,
+    return_logprobs: bool = False,
+) -> tuple[jax.Array, jax.Array | None]:
+  """Samples one token per row, under each row's own sampling settings.
+
+  A row with zero temperature takes its most likely token. Every other row
+  samples from its `top_k` most likely tokens, cut down further to the smallest
+  prefix whose probability reaches its `top_p`, at its own temperature.
+
+  Args:
+    logits: The `[num_rows, vocab_size]` next-token logits.
+    key: The step's PRNG key, derived from the engine seed. Every row samples
+      independently under it.
+    metadata: Each row's sampling settings.
+    max_top_k: How many candidate tokens to draw for every row. Each row's
+      `top_k` must not exceed it. -1 draws every token in the vocabulary.
+    return_logprobs: Whether to return the sampled tokens' logprobs.
+
+  Returns:
+    A tuple of
+    - `next_tokens`: The `[num_rows]` sampled tokens.
+    - `logprobs`: The `[num_rows]` logprobs, or None if `return_logprobs` is
+      False.
+  """
+  # For most current use cases of Tunix, k does not vary across rows. If this
+  # changes, this function should be updated to sample individually per row so
+  # that performance is not dependent on max_top_k.
+  temp = jnp.asarray(metadata.temperature, dtype=jnp.float32)
+  is_greedy = temp <= 0.0
+  temperature = jnp.where(
+      is_greedy, 1.0, jnp.clip(temp, _MIN_SAFE_TEMP, _MAX_SAFE_TEMP)
+  )
+  vocab_size = logits.shape[-1]
+  if metadata.unconstrained and max_top_k <= 0:
+    inv_temp = 1.0 / temperature
+    if (
+        vocab_size >= _HIERARCHICAL_MIN_VOCAB_SIZE
+        and vocab_size % _HIERARCHICAL_BLOCK_SIZE == 0
+    ):
+      return _sample_hierarchical_256(
+          logits, key, is_greedy, inv_temp, return_logprobs=return_logprobs
+      )
+    logits_f32 = logits.astype(jnp.float32)
+    rmax = _finite_or_zero(jnp.max(logits_f32, axis=-1, keepdims=True))
+    scaled = (logits_f32 - rmax) * inv_temp[:, None]
+    next_tokens = jnp.where(
+        is_greedy,
+        jnp.argmax(logits, axis=-1),
+        jax.random.categorical(key, scaled, axis=-1),
+    ).astype(jnp.int32)
+    if not return_logprobs:
+      return next_tokens, None
+    chosen = jnp.take_along_axis(scaled, next_tokens[:, None], axis=-1)[:, 0]
+    return next_tokens, chosen - jax.nn.logsumexp(scaled, axis=-1)
+
+  k = vocab_size if max_top_k <= 0 else min(max_top_k, vocab_size)
+
+  candidate_logits, candidate_tokens = jax.lax.top_k(logits, k)
+  scaled_logits = candidate_logits.astype(jnp.float32) / temperature[:, None]
+
+  ranks = jnp.arange(k)
+  top_k = jnp.where(metadata.top_k <= 0, k, metadata.top_k)
+  scaled_logits = jnp.where(
+      ranks[None, :] < top_k[:, None], scaled_logits, -jnp.inf
+  )
+
+  # Keep each token whose predecessors have not yet reached `top_p`, which
+  # always keeps the most likely token.
+  probs = jax.nn.softmax(scaled_logits, axis=-1)
+  probs_before = jnp.cumsum(probs, axis=-1) - probs
+  scaled_logits = jnp.where(
+      probs_before > metadata.top_p[:, None], -jnp.inf, scaled_logits
+  )
+
+  sampled = jax.random.categorical(key, scaled_logits, axis=-1)
+  sampled_tokens = jnp.take_along_axis(
+      candidate_tokens, sampled[:, None], axis=-1
+  )[:, 0]
+  # The candidates are sorted, so the first one is the most likely token.
+  next_tokens = jnp.where(is_greedy, candidate_tokens[:, 0], sampled_tokens)
+
+  if not return_logprobs:
+    return next_tokens, None
+
+  # Upscale logits before computing logprobs to preserve precision.
+  scaled_full_logits = logits.astype(jnp.float32) / temperature[:, None]
+
+  logp = jax.nn.log_softmax(scaled_full_logits, axis=-1)
+  logp_sampled = jnp.take_along_axis(logp, next_tokens[:, None], axis=-1)
+  return next_tokens, logp_sampled[:, 0]
+
+
+Cache = dict[str, jax.Array]
+_PyTree = TypeVar('_PyTree')
+
+
+@functools.partial(jax.jit, static_argnames=['num_steps'])
+def _stack_steps(
+    first_step: jax.Array,
+    decode_steps: jax.Array | None,
+    num_steps: int,
+) -> jax.Array:
+  """Packs per-step outputs into a `[num_rows, num_steps, ...]` device array.
+
+  Args:
+    first_step: The `[num_rows, ...]` output of the scheduled batch's step.
+    decode_steps: The `[num_scheduler_steps - 1, num_rows, ...]` output of the
+      decode loop, or None when the loop did not run.
+    num_steps: The step capacity to pad out to.
+
+  Returns:
+    The outputs indexed by `[row, step, ...]`.
+  """
+  if decode_steps is not None:
+    return jnp.concatenate(
+        [first_step[:, None], jnp.swapaxes(decode_steps, 0, 1)], axis=1
+    )
+  if num_steps == 1:
+    return first_step[:, None]
+  out = jnp.zeros(
+      (first_step.shape[0], num_steps, *first_step.shape[1:]),
+      dtype=first_step.dtype,
+  )
+  return out.at[:, 0].set(first_step)
+
+class ModelRunner:
+  """Runs the transformer forward pass and samples tokens."""
+
+  def __init__(
+      self,
+      transformer: nnx.Module,
+      config: configs.ModelRunnerConfig,
+  ):
+    """Initializes the runner.
+
+    Args:
+      transformer: An instance of the transformer to run.
+      config: The runner's configuration.
+    """
+    self._transformer_graphdef: graph.GraphDef[nnx.Module] = nnx.graphdef(
+        transformer
+    )
+    self._transformer_state: statelib.State = nnx.variables(transformer)
+    self._flattened_transformer_state: list[nnx.Variable] = jax.tree.leaves(
+        self._transformer_state,
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    )
+
+    self._config = config
+    self._rng = self._to_device(jax.random.PRNGKey(config.seed))
+
+    self._compiled_model_step_fn = jax.jit(
+        self._model_step_fn,
+        donate_argnames=['cache'],
+    )
+    self._compiled_decode_loop_fn = jax.jit(
+        self._decode_loop_fn,
+        donate_argnames=['cache'],
+        static_argnames=['num_steps'],
+    )
+
+  @property
+  def config(self) -> configs.ModelRunnerConfig:
+    return self._config
+
+  def model_def_and_state(
+      self,
+  ) -> tuple[graph.GraphDef[nnx.Module], list[nnx.Variable]]:
+    """Returns the transformer graphdef and state."""
+    return self._transformer_graphdef, self._flattened_transformer_state
+
+  @property
+  def transformer(self) -> nnx.Module:
+    return nnx.merge(
+        self._transformer_graphdef, self._flattened_transformer_state
+    )
+
+  @property
+  def transformer_state(self) -> statelib.State:
+    return self._transformer_state
+
+  @transformer_state.setter
+  def transformer_state(self, state: statelib.State) -> None:
+    def get_all_param_types(tree):
+      param_types = set()
+      jax.tree_util.tree_map(
+          lambda x: param_types.add(type(x)),
+          tree,
+          is_leaf=lambda x: isinstance(x, nnx.Variable),
+      )
+      return param_types
+
+    def check_tree_structure(tree1, tree2):
+      if jax.tree_util.tree_structure(tree1) != jax.tree_util.tree_structure(
+          tree2
+      ):
+        raise ValueError(
+            'New state must have the same structure as the old state.'
+            f' {jax.tree_util.tree_structure(tree1)} vs'
+            f' {jax.tree_util.tree_structure(tree2)}'
+        )
+
+      def check_shape_dtype_sharding(x, y):
+
+        def equivalent_sharding(x, y):
+          # Lift the condition on memory_kind due to offloading.
+          # Besides it seems jax.jit might change some shardings of the params
+          # to equivalent representation so here we check if the specs are
+          # equivalent instead of checking the identity.
+          if isinstance(
+              x.sharding, jax.sharding.SingleDeviceSharding
+          ) and isinstance(y.sharding, jax.sharding.SingleDeviceSharding):
+            return x.sharding.device_set == y.sharding.device_set
+          if not (
+              isinstance(x.sharding, jax.sharding.NamedSharding)
+              and isinstance(y.sharding, jax.sharding.NamedSharding)
+          ):
+            return False
+          if x.sharding.mesh != y.sharding.mesh:
+            return False
+          mesh = x.sharding.mesh
+          diff_spec = list(set(x.sharding.spec) - set(y.sharding.spec))
+          for spec in diff_spec:
+            if spec and mesh.shape[spec] != 1:
+              return False
+          return True
+
+        return (
+            jnp.shape(x) == jnp.shape(y)
+            and x.dtype == y.dtype
+            and equivalent_sharding(x, y)
+        )
+
+      if not all(
+          jax.tree_util.tree_leaves(
+              jax.tree_util.tree_map(check_shape_dtype_sharding, tree1, tree2)
+          )
+      ):
+        raise ValueError(
+            'New state must have the same shape, dtype and sharding as the old'
+            f' state. {tree1} vs {tree2}'
+        )
+
+    param_types = get_all_param_types(state)
+
+    if nnx.Param in param_types:
+      # Full state replacement.
+      check_tree_structure(self._transformer_state, state)
+      self._transformer_state = state
+    else:
+      # LoRA state replacement.
+      if not (len(param_types) == 1 and nnx.LoRAParam in param_types):
+        raise ValueError(
+            'Only LoRAParam is supported. Received invalid `param_types`: '
+            f'{param_types}'
+        )
+      original_lora_params = statelib.filter_state(
+          self._transformer_state, nnx.LoRAParam
+      )
+      check_tree_structure(original_lora_params, state)
+      base_state = statelib.filter_state(
+          self._transformer_state, filterlib.Not(nnx.LoRAParam)
+      )
+      self._transformer_state = statelib.merge_state(base_state, state)
+
+    self._flattened_transformer_state = jax.tree.leaves(
+        self._transformer_state,
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    )
+
+  def update_params(
+      self,
+      updated_weights: jaxtyping.PyTree,
+      filter_types: tuple[Any, ...] | None = None,
+  ) -> None:
+    """Updates model parameters in the sampler."""
+    if filter_types is not None:
+      dst_params = nnx.state(self.transformer, filter_types)
+      dst_leaves = jax.tree.leaves(dst_params)
+      if dst_leaves and all(
+          isinstance(x, jax.Array)
+          and isinstance(x.sharding, jax.sharding.NamedSharding)
+          for x in dst_leaves
+      ):
+        resharded_params = reshard.reshard_pytree(updated_weights, dst_params)
+      else:
+        resharded_params = updated_weights
+    else:
+      resharded_params = updated_weights
+    flat_new_params, _ = rl_utils.to_flat_dict(resharded_params)
+    # TODO(linchai): Cast on rollout devices when from lower precision to
+    # higher precision.
+    new_params_precision = jax.tree.leaves(flat_new_params)[0].dtype
+    rollout_precision = jax.tree.leaves(self.transformer_state)[0].dtype
+    if new_params_precision != rollout_precision:
+      flat_new_params = jax.tree.map(
+          lambda x: x.astype(rollout_precision), flat_new_params
+      )
+    flat_old_params, tree_def = rl_utils.to_flat_dict(
+        self.transformer_state
+    )
+    merged_params = functools.reduce(
+        operator.ior, [flat_old_params, flat_new_params], {}
+    )
+    merged_params = jax.tree.unflatten(tree_def, merged_params.values())
+    new_model = nnx.merge(self._transformer_graphdef, merged_params)  # pyrefly: ignore[no-matching-overload]
+    self.transformer_state = nnx.variables(new_model, nnx.Param)
+
+  # TODO(yatlas): dtype should have one source of truth.
+  @property
+  def dtype(self) -> jnp.dtype:
+    if hasattr(self.transformer, 'config') and (
+        hasattr(self.transformer.config, 'dtype')
+    ):
+      return self.transformer.config.dtype
+    return self._flattened_transformer_state[0].dtype
+
+  def _get_token_positions(
+      self,
+      tokens: jax.Array,
+      metadata: paged_attention.PagedAttnMetadata,
+  ) -> jax.Array:
+    """Returns the `[num_groups, tokens_per_group]` positions of each token."""
+    num_groups = metadata.distribution.shape[0]
+    group_query_lens = jnp.asarray(metadata.query_lens).reshape(num_groups, -1)
+    group_kv_lens = jnp.asarray(metadata.kv_lens).reshape(num_groups, -1)
+
+    def _group_positions(toks, q_lens, kv_lens):
+      total_capacity = toks.shape[0]
+      n_rows = q_lens.shape[0]
+
+      # Example:
+      # tokens: [a, b, c, d, e, f, PAD, PAD]
+      # query_lens: [2, 1, 3]
+      # row_idxs: [0, 0, 1, 2, 2, 2, 2, 2]
+      row_idxs = jnp.repeat(
+          jnp.arange(n_rows),
+          q_lens,
+          total_repeat_length=total_capacity,
+      )
+
+      # Example:
+      # tokens: [a, b, c, d, e, f, PAD, PAD]
+      # query_lens: [2, 1, 3]
+      # intra_offsets: [0, 1, 0, 0, 1, 2, 3, 4]
+      local_positions = jnp.arange(total_capacity)
+      starts = jnp.zeros_like(q_lens)
+      if len(q_lens) > 0:
+        starts = starts.at[1:].set(jnp.cumsum(q_lens)[:-1])
+      intra_offsets = local_positions - starts[row_idxs]
+
+      # KV lens includes the query tokens. This yields the length of the
+      # sequences before appending the query tokens.
+      curr_seq_lens = kv_lens - q_lens
+
+      return intra_offsets + curr_seq_lens[row_idxs]
+
+    return jax.vmap(_group_positions)(tokens, group_query_lens, group_kv_lens)
+
+  def _model_step_fn(
+      self,
+      params: list[nnx.Variable],
+      cache: Cache,
+      tokens: jax.Array,
+      metadata: paged_attention.PagedAttnMetadata,
+      sampling_metadata: SamplingMetadata,
+      rng: jax.Array,
+  ) -> tuple[jax.Array, jax.Array | None, jax.Array | None, Cache, jax.Array]:
+    """Runs the model over a mixed batch and samples the next tokens.
+
+    Args:
+      params: The flattened transformer state to run with.
+      cache: The physical KV cache pages to read and write.
+      tokens: `[num_groups, tokens_per_group]` array of tokens for the batch,
+        where each row is a DP group's padded ragged token array.
+      metadata: Ragged execution metadata for the attention kernel.
+      sampling_metadata: Each row's sampling settings.
+      rng: PRNG key to split for sampling this step.
+
+    Returns:
+      A tuple of
+      - next_tokens: `[num_rows]` array of sampled tokens.
+      - logits: `[num_rows, vocab_size]` array of logits, or None.
+      - logprobs: `[num_rows]` array of logprobs, or None.
+      - updated_cache: The updated KV cache pages.
+      - rng: The updated PRNG key for subsequent steps.
+    """
+    config = self._config
+
+    transformer = nnx.merge(self._transformer_graphdef, params)
+    positions = self._get_token_positions(tokens, metadata)
+
+    num_groups = metadata.distribution.shape[0]
+    group_query_lens = jnp.asarray(metadata.query_lens).reshape(num_groups, -1)
+    last_token_idxs = jnp.maximum(0, jnp.cumsum(group_query_lens, axis=-1) - 1)
+
+    tokens, positions, last_token_idxs = (
+        self._split_rows(x) for x in (tokens, positions, last_token_idxs)
+    )
+    metadata = jax.tree.map(self._split_rows, metadata)
+    sampling_metadata = jax.tree.map(self._split_rows, sampling_metadata)
+
+    # Each row samples from the logits of its last token, so the model only
+    # computes those.
+    logits, updated_cache = transformer(
+        tokens,
+        positions,
+        cache=cache,
+        metadata=metadata,
+        mesh=config.mesh,
+        logits_idxs=last_token_idxs,
+    )
+    # Sampling sorts every row's logits over the whole vocabulary, so each
+    # device samples only its share of the rows rather than all of them.
+    logits = self._split_rows(logits)
+
+    rng, step_rng = jax.random.split(rng)
+    next_tokens, logp = sample(
+        logits,
+        step_rng,
+        sampling_metadata,
+        max_top_k=config.max_top_k,
+        return_logprobs=config.return_logprobs,
+    )
+
+    res_logits = logits if config.return_logits else None
+    return next_tokens, res_logits, logp, updated_cache, rng
+
+  def _split_rows(self, x: jax.Array) -> jax.Array:
+    """Splits the rows of `x` across the mesh's DP axes, if they divide evenly.
+
+    The `"dp"` and `"fsdp"` axes index the DP groups, as in `kv_cache_manager`.
+
+    Args:
+      x: An array with one row per scheduled row of the batch.
+
+    Returns:
+      `x` constrained to shard axis 0 across the DP axes, or `x` unchanged when
+      there is only one DP shard or `x.shape[0]` is not divisible by it.
+    """
+    mesh = self._config.mesh
+    dp_axes = utils.kv_cache_dp_axes(mesh)
+    num_shards = math.prod(mesh.shape[axis] for axis in dp_axes)
+    if num_shards == 1 or x.shape[0] % num_shards:
+      return x
+    return jax.lax.with_sharding_constraint(
+        x,
+        jax.sharding.NamedSharding(
+            mesh, jax.sharding.PartitionSpec(dp_axes)
+        ),
+    )
+
+  def _decode_loop_fn(
+      self,
+      params: list[nnx.Variable],
+      cache: Cache,
+      next_tokens: jax.Array,
+      metadata: paged_attention.PagedAttnMetadata,
+      sampling_metadata: SamplingMetadata,
+      rng: jax.Array,
+      num_steps: int,
+  ) -> tuple[jax.Array, jax.Array | None, jax.Array | None, Cache, jax.Array]:
+    """Decodes `num_steps` tokens from the batch `metadata` just ran.
+
+    Args:
+      params: The flattened transformer state to run with.
+      cache: The physical KV cache pages to read and write.
+      next_tokens: The tokens sampled by the step that just ran, indexed by the
+        row of the scheduled batch.
+      metadata: The metadata of the step that just ran.
+      sampling_metadata: The sampling settings of the step that just ran,
+        indexed by the row of the scheduled batch.
+      rng: PRNG key to split across decode steps.
+      num_steps: How many decode steps to run.
+
+    Returns:
+      A tuple of
+      - tokens: `[num_steps, num_rows]` array of sampled tokens.
+      - logits: `[num_steps, num_rows, vocab_size]` array of logits, or None.
+      - logprobs: `[num_steps, num_rows]` array of logprobs, or None.
+      - updated cache: The updated KV cache pages.
+      - rng: The updated PRNG key for subsequent steps.
+    """
+    num_rows = metadata.query_lens.shape[0]
+    distribution = jnp.asarray(metadata.distribution, dtype=jnp.int32)
+    num_groups = distribution.shape[0]
+    rows_per_group = num_rows // num_groups
+
+    # Each DP group's slice of `rows_per_group` rows is ordered `[decodes,
+    # chunked prefills, full prefills, padding]`. A chunked prefill still has
+    # prompt left to process, so its sampled token is discarded and it leaves
+    # the batch for the decode loop.
+    group_rows = jnp.arange(rows_per_group, dtype=jnp.int32)[None, :]
+    is_chunked_prefill = (group_rows >= distribution[:, 0:1]) & (
+        group_rows < distribution[:, 1:2]
+    )
+    is_surviving = (group_rows < distribution[:, 2:3]) & ~is_chunked_prefill
+    # Each group's surviving rows are its decodes and full prefills.
+    num_surviving_per_group = (
+        distribution[:, 0] + distribution[:, 2] - distribution[:, 1]
+    )
+    # Move each group's surviving rows to the front of its own slice.
+    local_order = jnp.argsort(~is_surviving, axis=1)
+    group_row_offsets = (
+        jnp.arange(num_groups, dtype=local_order.dtype)[:, None]
+        * rows_per_group
+    )
+    order = (local_order + group_row_offsets).reshape(-1)
+    is_active_decode = (group_rows < num_surviving_per_group[:, None]).reshape(
+        -1
+    )
+
+    query_lens = jnp.where(is_active_decode, jnp.int32(1), jnp.int32(0))
+    kv_lens = (
+        jnp.where(
+            is_active_decode,
+            jnp.asarray(metadata.kv_lens, dtype=jnp.int32)[order],
+            jnp.int32(0),
+        )
+        + query_lens
+    )
+    decode_metadata = paged_attention.PagedAttnMetadata(
+        page_indices={
+            cache_name: jnp.asarray(idxs, dtype=jnp.int32)[order]
+            for cache_name, idxs in metadata.page_indices.items()
+        },
+        kv_lens=kv_lens,
+        query_lens=query_lens,
+        distribution=jnp.stack([num_surviving_per_group] * 3, axis=1),
+        decode_only=True,
+    )
+
+    # Each surviving request's sampling settings move along with its row. The
+    # rows past `num_surviving_per_group` in each group's slice become padding.
+    def compact(values, padding):
+      arr = jnp.asarray(values)
+      return jnp.where(
+          is_active_decode,
+          arr[order],
+          jnp.asarray(padding, dtype=arr.dtype),
+      )
+
+    decode_sampling_metadata = SamplingMetadata(
+        temperature=compact(sampling_metadata.temperature, jnp.float32(0.0)),
+        top_p=compact(sampling_metadata.top_p, jnp.float32(1.0)),
+        top_k=compact(sampling_metadata.top_k, jnp.int32(1)),
+        unconstrained=sampling_metadata.unconstrained,
+    )
+
+    # Each surviving sequence feeds the token it just sampled back in, packed
+    # into the leading rows of its group's slice to match the compacted
+    # metadata.
+    decode_tokens = next_tokens[order].reshape(num_groups, rows_per_group)
+    inverse_order = (
+        jnp.argsort(local_order, axis=1) + group_row_offsets
+    ).reshape(-1)
+
+    def decode_step(carry, _):
+      cache, tokens, kv_lens, rng = carry
+      step_metadata = dataclasses.replace(decode_metadata, kv_lens=kv_lens)
+      next_tokens, logits, logp, cache, rng = self._model_step_fn(
+          params,
+          cache,
+          tokens,
+          step_metadata,
+          decode_sampling_metadata,
+          rng,
+      )
+      carry = (
+          cache,
+          next_tokens.reshape(num_groups, rows_per_group),
+          kv_lens + query_lens,
+          rng,
+      )
+      return carry, (next_tokens, logits, logp)
+
+    carry, outputs = jax.lax.scan(
+        decode_step,
+        (cache, decode_tokens, decode_metadata.kv_lens, rng),
+        xs=None,
+        length=num_steps,
+    )
+    cache, _, _, rng = carry
+    tokens, logits, logp = outputs
+    # Send each output row back to the scheduled row it came from.
+    return (
+        tokens[:, inverse_order],
+        logits[:, inverse_order] if logits is not None else None,
+        logp[:, inverse_order] if logp is not None else None,
+        cache,
+        rng,
+    )
+
+  def _to_device(self, tree: _PyTree) -> _PyTree:
+    """Moves host arrays onto the device, replicated across the mesh."""
+    return jax.device_put(
+        tree,
+        jax.sharding.NamedSharding(
+            self._config.mesh, jax.sharding.PartitionSpec()
+        ),
+    )
+
+  def execute_step(
+      self,
+      cache: Cache,
+      tokens: jax.Array,
+      metadata: paged_attention.PagedAttnMetadata,
+      sampling_params: Sequence[request_lib.SamplingParams],
+  ) -> tuple[jax.Array, jax.Array | None, jax.Array | None, Cache]:
+    """Runs model forward passes on a batch of requests, and samples tokens.
+
+    Note: This function runs `num_scheduler_steps` forward passes, and samples
+    `num_scheduler_steps` tokens.
+
+    Args:
+      cache: The physical KV cache pages to read and write.
+      tokens: `[num_groups, tokens_per_group]` array of tokens for the batch,
+        where each row is a DP group's padded ragged token array.
+      metadata: Ragged execution metadata for the attention kernel.
+      sampling_params: The sampling settings of each scheduled request, in row
+        order.
+
+    Returns:
+      A tuple of:
+        - tokens: `[num_rows, num_scheduler_steps]` array of sampled tokens.
+        - logits: `[num_rows, num_scheduler_steps, vocab_size]` array of
+          logits, or None.
+        - logprobs: `[num_rows, num_scheduler_steps]` array of logprobs, or
+          None.
+        - updated cache: The updated KV cache pages.
+
+    Raises:
+      ValueError: If `sampling_params` does not hold one entry per scheduled
+        request.
+    """
+    config = self._config
+    num_rows = metadata.query_lens.shape[0]
+    distribution = np.asarray(metadata.distribution)
+    num_scheduled = int(np.sum(distribution[:, 2]))
+    if len(sampling_params) != num_scheduled:
+      raise ValueError(
+          f'Got {len(sampling_params)} sampling params for {num_scheduled}'
+          ' scheduled requests.'
+      )
+
+    device_metadata, sampling_metadata = self._to_device((
+        metadata,
+        SamplingMetadata.from_sampling_params(
+            sampling_params,
+            num_rows,
+            self._config.max_top_k,
+            distribution=distribution,
+        ),
+    ))
+
+    next_tokens, logits, logp, cache, self._rng = self._compiled_model_step_fn(
+        self._flattened_transformer_state,
+        cache,
+        tokens,
+        device_metadata,
+        sampling_metadata,
+        self._rng,
+    )
+    num_steps = config.num_scheduler_steps
+
+    # Chunked prefills drop out, but the rest of the batch carries on.
+    # Each DP group's distribution is [i, j, k]:
+    # i: num decodes
+    # j: i + num chunked prefills
+    # k: j + num full prefills
+    # num_surviving: num decodes + num full prefills = i + k - j
+    num_surviving = int(
+        np.sum(distribution[:, 0] + distribution[:, 2] - distribution[:, 1])
+    )
+
+    num_decode_steps = num_steps - 1 if num_surviving else 0
+
+    decode_tokens = decode_logits = decode_logp = None
+    if num_decode_steps:
+      decode_tokens, decode_logits, decode_logp, cache, self._rng = (
+          self._compiled_decode_loop_fn(
+              self._flattened_transformer_state,
+              cache,
+              next_tokens,
+              dataclasses.replace(device_metadata, decode_only=True),
+              sampling_metadata,
+              self._rng,
+              num_steps=num_decode_steps,
+          )
+      )
+
+    out_tokens = _stack_steps(next_tokens, decode_tokens, num_steps)
+    out_logits = (
+        _stack_steps(logits, decode_logits, num_steps)
+        if logits is not None
+        else None
+    )
+    out_logp = (
+        _stack_steps(logp, decode_logp, num_steps) if logp is not None else None
+    )
+    return out_tokens, out_logits, out_logp, cache

@@ -14,13 +14,19 @@
 
 # Forked from flax/examples/gemma/sampler_test.py
 
+import dataclasses
+from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
 import jax
+import jax.numpy as jnp
 import numpy as np
+from tunix.generate import base_sampler
 from tunix.generate import sampler as sampler_lib
 from tunix.generate import utils
+from tunix.models.gemma3 import model as gemma3_model_lib
+from tunix.models.gemma4 import model as gemma4_model_lib
 from tunix.tests import test_common as tc
 
 
@@ -30,6 +36,35 @@ class SamplerTest(parameterized.TestCase):
     self.assertIsNotNone(array)
     if expected_shape is not None:
       self.assertEqual(array.shape, expected_shape)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='default_float32',
+          model_dtype=jax.numpy.float32,
+      ),
+      dict(
+          testcase_name='bfloat16',
+          model_dtype=jax.numpy.bfloat16,
+      ),
+  )
+  def test_dtype(self, model_dtype):
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize(), dtype=model_dtype),
+        rngs=nnx.Rngs(42),
+    )
+
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+    self.assertEqual(sampler.dtype, model_dtype)
 
   @parameterized.named_parameters(
       dict(
@@ -99,8 +134,8 @@ class SamplerTest(parameterized.TestCase):
             + 1
         )
         np.testing.assert_allclose(
-            result_not_padded.logits[i],
-            result_padded.logits[i][:valid_length],
+            result_not_padded.logits[i],  # pyrefly: ignore[unsupported-operation]
+            result_padded.logits[i][:valid_length],  # pyrefly: ignore[unsupported-operation]
         )
         np.testing.assert_allclose(
             result_not_padded.tokens[i],
@@ -110,6 +145,66 @@ class SamplerTest(parameterized.TestCase):
           np.testing.assert_equal(
               result_padded.tokens[i].shape[0], max_generation_steps
           )
+
+  def test_multimodal_samples(self):
+    vocab = tc.MockVocab(is_multimodal=True)
+    transformer = tc.ToyTransformer(
+        config=tc.ModelConfig(
+            vocab_size=vocab.GetPieceSize(), vision_config=tc.VisionConfig()
+        ),
+        rngs=nnx.Rngs(42),
+    )
+
+    class DummyImageProcessor:
+
+      def __call__(self, images):
+        # returns dummy processed images
+        return np.ones((len(images), 1, 32, 32, 3), dtype=np.float32)
+
+    image_processor = DummyImageProcessor()
+
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+        image_processor=image_processor,  # pyrefly: ignore[bad-argument-type]
+    )
+
+    max_generation_steps = 8
+
+    # We pass in 2 strings and 2 corresponding dummy images
+    images = [
+        np.zeros((32, 32, 3)),
+        np.zeros((32, 32, 3)),
+    ]
+
+    result = sampler(
+        [
+            'quantization <soi> <img> <img> Tunix',
+            '<soi> <img> <img> Parallax distributed',
+        ],
+        max_generation_steps=max_generation_steps,
+        return_logits=True,
+        max_prompt_length=8,
+        echo=True,
+        images=images,  # pyrefly: ignore[bad-argument-type]
+    )
+
+    self.assertIsNotNone(result)
+    self.assertReasonableTensor(result.tokens)
+    self.assertReasonableTensor(result.logits)
+    np.testing.assert_allclose(
+        result.tokens,
+        np.array([
+            [1, 21, 23, 22, 22, 14, 8, 25, 8, 25, 8, 25, 8, 25],
+            [1, 23, 22, 22, 15, 18, 8, 25, 8, 25, 8, 25, 8, 25],
+        ]),
+    )
 
   @parameterized.named_parameters(
       dict(
@@ -159,9 +254,9 @@ class SamplerTest(parameterized.TestCase):
     self.assertIsNotNone(result)
     self.assertLen(result.logits, 2)
     if echo:
-      self.assertEqual(result.logits[0].shape, (13, vocab.GetPieceSize()))
+      self.assertEqual(result.logits[0].shape, (13, vocab.GetPieceSize()))  # pyrefly: ignore[unsupported-operation]
     else:
-      self.assertEqual(result.logits[0].shape, (10, vocab.GetPieceSize()))
+      self.assertEqual(result.logits[0].shape, (10, vocab.GetPieceSize()))  # pyrefly: ignore[unsupported-operation]
 
     # With 1 beam, the beam search result should be the
     # same as the greedy output
@@ -220,6 +315,146 @@ class SamplerTest(parameterized.TestCase):
     self.assertIsNotNone(top_k_result)
     self.assertNotEqual(top_p_result_2.text, top_k_result.text)
 
+  def test_logprobs(self):
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(42),
+    )
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+    # Test greedy logprobs
+    result = sampler(
+        ['input string', 'hello world'],
+        max_generation_steps=10,
+        return_logprobs=True,
+    )
+    self.assertIsNotNone(result.logprobs)
+    self.assertLen(result.logprobs, 2)
+    for logprobs, tokens in zip(result.logprobs, result.tokens):
+      self.assertNotEmpty(logprobs)
+      self.assertLen(logprobs, tokens.shape[0])
+
+    # Test top_p logprobs
+    top_p_result = sampler(
+        ['input string', 'hello world'],
+        max_generation_steps=10,
+        return_logprobs=True,
+        temperature=1.0,
+        top_p=0.9,
+    )
+    self.assertIsNotNone(top_p_result.logprobs)
+    self.assertLen(top_p_result.logprobs, 2)
+    for logprobs, tokens in zip(top_p_result.logprobs, top_p_result.tokens):
+      self.assertNotEmpty(logprobs)
+      self.assertLen(logprobs, tokens.shape[0])
+
+    # Test beam search logprobs
+    beam_result = sampler(
+        ['input string', 'hello world'],
+        max_generation_steps=10,
+        return_logprobs=True,
+        beam_size=2,
+    )
+    self.assertIsNotNone(beam_result.logprobs)
+    self.assertLen(beam_result.logprobs, 2)
+    for logprobs, tokens in zip(beam_result.logprobs, beam_result.tokens):
+      self.assertNotEmpty(logprobs)
+      self.assertLen(logprobs, tokens.shape[0])
+
+  def test_temperature_validation_with_top_p(self):
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(42),
+    )
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+
+    # temperature=0.0 with top_p should raise ValueError
+    with self.assertRaisesRegex(
+        ValueError, 'Temperature must be a positive number'
+    ):
+      sampler(
+          ['input string'],
+          max_generation_steps=10,
+          temperature=0.0,
+          top_p=0.9,
+      )
+
+    # default temperature (0.0) with top_p should raise ValueError
+    with self.assertRaisesRegex(
+        ValueError, 'Temperature must be a positive number'
+    ):
+      sampler(
+          ['input string'],
+          max_generation_steps=10,
+          top_p=0.9,
+      )
+
+    # negative temperature with top_p should raise ValueError
+    with self.assertRaisesRegex(
+        ValueError, 'Temperature must be a positive number'
+    ):
+      sampler(
+          ['input string'],
+          max_generation_steps=10,
+          temperature=-0.5,
+          top_p=0.9,
+      )
+
+    # Positive integer temperature should succeed
+    res_int = sampler(
+        ['input string'],
+        max_generation_steps=10,
+        temperature=1,
+        top_p=0.9,
+    )
+    self.assertIsNotNone(res_int)
+
+    # Positive float temperature should succeed
+    res_float = sampler(
+        ['input string'],
+        max_generation_steps=10,
+        temperature=0.8,
+        top_p=0.9,
+    )
+    self.assertIsNotNone(res_float)
+
+    # Positive numpy float temperature should succeed
+    res_np_float = sampler(
+        ['input string'],
+        max_generation_steps=10,
+        temperature=np.float32(0.8),  # pyrefly: ignore[bad-argument-type]
+        top_p=0.9,
+    )
+    self.assertIsNotNone(res_np_float)
+
+    # temperature=0.0 with top_p=None (greedy) should succeed
+    res_greedy = sampler(
+        ['input string'],
+        max_generation_steps=10,
+        temperature=0.0,
+        top_p=None,
+    )
+    self.assertIsNotNone(res_greedy)
+
   def test_prompt_padding_bucketization(self):
     vocab = tc.MockVocab()
     transformer = tc.ToyTransformer(
@@ -236,12 +471,12 @@ class SamplerTest(parameterized.TestCase):
             head_dim=16,
         ),
     )
-    self.assertEqual(sampler._compiled_prefill_fn._cache_size(), 0)  # pytype: disable=attribute-error
+    self.assertEqual(sampler._compiled_prefill_fn._cache_size(), 0)  # pyrefly: ignore[missing-attribute]
     sampler(
         ['input', 'hello'],
         max_generation_steps=10,
     )
-    self.assertEqual(sampler._compiled_prefill_fn._cache_size(), 1)  # pytype: disable=attribute-error
+    self.assertEqual(sampler._compiled_prefill_fn._cache_size(), 1)  # pyrefly: ignore[missing-attribute]
 
     sampler(
         ['input input input input input', 'hello hello'],
@@ -252,7 +487,63 @@ class SamplerTest(parameterized.TestCase):
         ['input input input input input input', 'hello hello'],
         max_generation_steps=10,
     )
-    self.assertEqual(sampler._compiled_prefill_fn._cache_size(), 2)  # pytype: disable=attribute-error
+    self.assertEqual(sampler._compiled_prefill_fn._cache_size(), 2)  # pyrefly: ignore[missing-attribute]
+
+  def test_decode_stops_after_prefill_for_single_generation_step(self):
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(42),
+    )
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+    sampler.eos_ids = jnp.array([vocab.eos_id()])
+    max_prompt_length = 4
+    max_generation_steps = 1
+    prompt_tokens = sampler.tokenize('input string')
+    all_input_ids = jnp.array([
+        utils.pad_to_length(
+            prompt_tokens,  # pyrefly: ignore[bad-argument-type]
+            target_length=max_prompt_length,
+            pad_value=vocab.pad_id(),
+            left=True,
+        )
+    ])
+    total_sampling_steps = max_prompt_length + max_generation_steps
+    sampling_state = sampler.init_sample_state(
+        all_input_ids=all_input_ids,
+        total_sampling_steps=total_sampling_steps,
+        include_logits=False,
+        forbidden_token_ids=None,
+        temperature=0.0,
+        top_p=None,
+        top_k=None,
+        seed=jax.random.PRNGKey(0),
+        beam_size=None,
+        include_logprobs=False,
+    )
+
+    after_prefill = sampler._prefill_fn(
+        sampler._flattened_transformer_state, sampling_state, None, echo=False
+    )
+    self.assertEqual(after_prefill.decoding_step, total_sampling_steps - 1)
+
+    after_decode = sampler._decode_fn(
+        sampler._flattened_transformer_state, after_prefill
+    )
+    self.assertEqual(after_decode.decoding_step, total_sampling_steps - 1)
+    np.testing.assert_array_equal(
+        np.asarray(after_decode.token_buffer),
+        np.asarray(after_prefill.token_buffer),
+    )
 
   def test_state_update(self):
     vocab = tc.MockVocab()
@@ -283,7 +574,7 @@ class SamplerTest(parameterized.TestCase):
         input_strings, max_generation_steps=10, return_logits=True
     ).logits
     with self.assertRaises(AssertionError):
-      for orig, new in zip(original_logits, new_logits):
+      for orig, new in zip(original_logits, new_logits):  # pyrefly: ignore[bad-argument-type]
         np.testing.assert_allclose(orig, new, atol=1e-1, rtol=1e-1)
 
   def test_lora_state_update(self):
@@ -327,7 +618,7 @@ class SamplerTest(parameterized.TestCase):
         input_strings, max_generation_steps=10, return_logits=True
     ).logits
     with self.assertRaises(AssertionError):
-      for orig, new in zip(original_logits, new_logits):
+      for orig, new in zip(original_logits, new_logits):  # pyrefly: ignore[bad-argument-type]
         np.testing.assert_allclose(orig, new, atol=1e-1, rtol=1e-1)
 
   def test_invalid_state_update(self):
@@ -412,11 +703,665 @@ class SamplerTest(parameterized.TestCase):
         eos_tokens=[7, 21],
         temperature=0.9,
         top_p=1.0,
-        seed=42,
+        seed=0,
     )
     np.testing.assert_equal(
-        result.tokens, [np.array([8, 14, 5]), np.array([14])]
+        result.tokens, [np.array([14]), np.array([12, 1, 17])]
     )
+
+  def test_forbidden_token_ids(self):
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(42),
+    )
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=128,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+
+    vocab_size = vocab.GetPieceSize()
+    num_allowed_tokens = vocab_size // 4
+    forbidden_tokens = set(range(num_allowed_tokens, vocab_size))
+    # EOS is forbidden so we are sure to get a full length generation.
+    forbidden_tokens.add(vocab.eos_id())
+    max_generation_steps = 100
+
+    result = sampler(
+        ['input string'],
+        max_generation_steps=max_generation_steps,
+        return_logits=False,
+        forbidden_tokens=forbidden_tokens,
+        temperature=1.0,  # Ensure some randomness
+        seed=123,
+    )
+    self.assertLen(result.tokens[0], max_generation_steps)
+    self.assertNoCommonElements(result.tokens[0], forbidden_tokens)
+
+  def test_gemma4_smoke_test(self):
+    """Runs a sampling call with a dummy Gemma4 config.
+
+    Useful to catch JAX compilation and model implementation errors early.
+    """
+    config = gemma4_model_lib.ModelConfig(
+        num_layers=2,
+        num_embed=32,
+        embed_dim=16,
+        hidden_dim=16,
+        num_heads=4,
+        head_dim=16,
+        num_kv_heads=1,
+        per_layer_input_dim=16,
+        sliding_window_size=4,
+        param_dtype=jnp.bfloat16,  # pyrefly: ignore[bad-argument-type]
+        attention_pattern=(
+            gemma4_model_lib.AttentionType.LOCAL_SLIDING,
+            gemma4_model_lib.AttentionType.GLOBAL,
+        ),
+        final_logit_softcap=30.0,
+        local_rope_proportion=1.0,
+        global_rope_proportion=0.25,
+        global_key_size=16,
+        k_eq_v_global=False,
+        local_base_frequency=10000,
+        global_base_frequency=1000000,
+        local_scale_factor=1.0,
+        global_scale_factor=1.0,
+    )
+    rngs = nnx.Rngs(0)
+    model = gemma4_model_lib.Gemma4(config, rngs=rngs)
+    cache_config = sampler_lib.CacheConfig(
+        cache_size=32,
+        num_layers=config.num_layers,
+        num_kv_heads=config.num_kv_heads,
+        head_dim=config.head_dim,
+    )
+    mock_tokenizer = tc.MockVocab()
+    mock_tokenizer.DecodeIds = mock.MagicMock()
+    mock_tokenizer.DecodeIds.return_value = 'decoded_string'
+    sampler = sampler_lib.Sampler(model, mock_tokenizer, cache_config)
+    sampler(
+        ['input string', 'hello world'],
+        max_generation_steps=10,
+        max_prompt_length=10,
+    )
+
+  def test_gemma3_decode_only_last_token_consistency(self):
+    """Verifies that decode_only_last_token yields identical generated tokens and logits."""
+    config = gemma3_model_lib.ModelConfig(
+        num_layers=2,
+        num_embed=32,
+        embed_dim=16,
+        hidden_dim=16,
+        num_heads=4,
+        head_dim=16,
+        num_kv_heads=1,
+        sliding_window_size=4,
+        local_base_frequency=10_000,
+        global_base_frequency=1_000_000,
+    )
+    rngs = nnx.Rngs(42)
+    model = gemma3_model_lib.Gemma3(config, rngs=rngs)
+    cache_config = sampler_lib.CacheConfig(
+        cache_size=32,
+        num_layers=config.num_layers,
+        num_kv_heads=config.num_kv_heads,
+        head_dim=config.head_dim,
+    )
+    mock_tokenizer = tc.MockVocab()
+    mock_tokenizer.DecodeIds = mock.MagicMock()
+    mock_tokenizer.DecodeIds.return_value = 'decoded_string'
+
+    # Run 1: Optimized (decode_only_last_token = True)
+    sampler_opt = sampler_lib.Sampler(model, mock_tokenizer, cache_config)
+    self.assertTrue(sampler_opt._supports_decode_only_last_token)
+    res_opt = sampler_opt(
+        ['input string', 'hello world'],
+        max_generation_steps=10,
+        max_prompt_length=10,
+        return_logits=True,
+        echo=False,
+    )
+
+    # Run 2: Unoptimized (force decode_only_last_token = False)
+    sampler_unopt = sampler_lib.Sampler(model, mock_tokenizer, cache_config)
+    sampler_unopt._supports_decode_only_last_token = False
+    res_unopt = sampler_unopt(
+        ['input string', 'hello world'],
+        max_generation_steps=10,
+        max_prompt_length=10,
+        return_logits=True,
+        echo=False,
+    )
+
+    # Verify tokens and generated logits are identical
+    self.assertEqual(len(res_opt.tokens), len(res_unopt.tokens))
+    for t_opt, t_unopt in zip(res_opt.tokens, res_unopt.tokens):
+      np.testing.assert_array_equal(t_opt, t_unopt)
+    self.assertEqual(len(res_opt.logits), len(res_unopt.logits))  # pyrefly: ignore[bad-argument-type]
+    for l_opt, l_unopt in zip(res_opt.logits, res_unopt.logits):  # pyrefly: ignore[bad-argument-type]
+      self.assertEqual(l_opt.shape, l_unopt.shape)
+      np.testing.assert_allclose(l_opt, l_unopt, atol=1e-5, rtol=1e-5)
+
+  def test_gemma4_decode_only_last_token_consistency(self):
+    """Verifies that decode_only_last_token yields identical generated tokens and logits."""
+    config = gemma4_model_lib.ModelConfig(
+        num_layers=2,
+        num_embed=32,
+        embed_dim=16,
+        hidden_dim=16,
+        num_heads=4,
+        head_dim=16,
+        num_kv_heads=1,
+        per_layer_input_dim=16,
+        sliding_window_size=4,
+        param_dtype=jnp.bfloat16,  # pyrefly: ignore[bad-argument-type]
+        attention_pattern=(
+            gemma4_model_lib.AttentionType.LOCAL_SLIDING,
+            gemma4_model_lib.AttentionType.GLOBAL,
+        ),
+        final_logit_softcap=30.0,
+        local_rope_proportion=1.0,
+        global_rope_proportion=0.25,
+        global_key_size=16,
+        k_eq_v_global=False,
+        local_base_frequency=10000,
+        global_base_frequency=1000000,
+        local_scale_factor=1.0,
+        global_scale_factor=1.0,
+    )
+    rngs = nnx.Rngs(42)
+    model = gemma4_model_lib.Gemma4(config, rngs=rngs)
+    cache_config = sampler_lib.CacheConfig(
+        cache_size=32,
+        num_layers=config.num_layers,
+        num_kv_heads=config.num_kv_heads,
+        head_dim=config.head_dim,
+    )
+    mock_tokenizer = tc.MockVocab()
+    mock_tokenizer.DecodeIds = mock.MagicMock()
+    mock_tokenizer.DecodeIds.return_value = 'decoded_string'
+
+    # Run 1: Optimized (decode_only_last_token = True)
+    sampler_opt = sampler_lib.Sampler(model, mock_tokenizer, cache_config)
+    self.assertTrue(sampler_opt._supports_decode_only_last_token)
+    res_opt = sampler_opt(
+        ['input string', 'hello world'],
+        max_generation_steps=10,
+        max_prompt_length=10,
+        return_logits=True,
+        echo=False,
+    )
+
+    # Run 2: Unoptimized (force decode_only_last_token = False)
+    sampler_unopt = sampler_lib.Sampler(model, mock_tokenizer, cache_config)
+    sampler_unopt._supports_decode_only_last_token = False
+    res_unopt = sampler_unopt(
+        ['input string', 'hello world'],
+        max_generation_steps=10,
+        max_prompt_length=10,
+        return_logits=True,
+        echo=False,
+    )
+
+    # Verify tokens and generated logits are identical
+    self.assertEqual(len(res_opt.tokens), len(res_unopt.tokens))
+    for t_opt, t_unopt in zip(res_opt.tokens, res_unopt.tokens):
+      np.testing.assert_array_equal(t_opt, t_unopt)
+    self.assertEqual(len(res_opt.logits), len(res_unopt.logits))  # pyrefly: ignore[bad-argument-type]
+    for l_opt, l_unopt in zip(res_opt.logits, res_unopt.logits):  # pyrefly: ignore[bad-argument-type]
+      self.assertEqual(l_opt.shape, l_unopt.shape)
+      np.testing.assert_allclose(l_opt, l_unopt, atol=1e-5, rtol=1e-5)
+
+  def test_sampler_gemma4_multimodal(self):
+    vocab = tc.MockVocab(
+        mapping_text_to_id={
+            '<pad>': 0,
+            '<s>': 1,
+            '</s>': 2,
+            'Describe:': 3,
+            '<img>': 258880,
+            '<soi>': 255999,
+            '<eoi>': 258882,
+            '<audio>': 258881,
+            '<soa>': 256000,
+            '<eoa>': 258883,
+        }
+    )
+    # Since there are a lot of holes (missing ids) in our vocab.
+    vocab.DecodeIds = mock.MagicMock()
+    vocab.DecodeIds.return_value = 'decoded_string'
+
+    config = gemma4_model_lib.ModelConfig.gemma4_e2b()
+    config = dataclasses.replace(
+        config,
+        num_layers=1,
+        num_heads=2,
+        head_dim=16,
+        embed_dim=32,
+        hidden_dim=64,
+        num_embed=vocab.GetPieceSize(),
+        frac_shared_layers=0.0,
+    )
+    config.vision_encoder = gemma4_model_lib.vision.VisionEncoderConfig(
+        d_model=16,
+        num_layers=1,
+        num_heads=2,
+        ffw_hidden=32,
+        patch_size=4,
+        output_length=5,
+    )
+    config.audio_encoder = gemma4_model_lib.audio.ConformerConfig(
+        num_layers=1,
+        model_dims=16,
+        atten_num_heads=2,
+        lm_model_dims=32,
+    )
+
+    rngs = nnx.Rngs(42)
+    transformer = gemma4_model_lib.Gemma4(config, rngs=rngs, text_only=False)
+
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=128,
+            num_layers=1,
+            num_kv_heads=1,
+            head_dim=16,
+        ),
+    )
+
+    # Let prompt contain image placeholder tag
+    prompt = "Describe: <img> <audio>"
+    dummy_image = np.ones((16, 16, 3), dtype=np.uint8)
+    dummy_audio = np.zeros(16000, dtype=np.float32)
+
+    result = sampler(
+        [prompt],
+        images=[dummy_image],
+        audios=[dummy_audio],
+        max_prompt_length=32,
+        max_generation_steps=5,
+    )
+
+    self.assertIsNotNone(result)
+    self.assertIsNotNone(result.tokens)
+    self.assertGreater(len(result.tokens[0]), 0)
+
+  def test_update_params(self):
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+
+    # Create a source model with modified weights
+    source_model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(1),
+    )
+    new_embedding = jnp.ones_like(source_model.emb.embedding.value) * 123.0
+    source_model.emb.embedding.value = new_embedding
+    new_state = nnx.state(source_model)
+
+    # Execute update_params
+    sampler.update_params(new_state)
+
+    # Verify that the sampler's transformer state and module received the updated parameters
+    state_dict = {
+        ".".join(str(p) for p in path): var
+        for path, var in sampler.transformer_state.flat_state()
+    }
+    np.testing.assert_allclose(
+        np.array(state_dict["emb.embedding"].value),
+        np.array(new_embedding),
+    )
+
+  def test_update_params_with_filter_types(self):
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+
+    # Source model with new weights
+    source_model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(2),
+    )
+    new_embedding = jnp.ones_like(source_model.emb.embedding.value) * 77.0
+    source_model.emb.embedding.value = new_embedding
+    new_state = nnx.state(source_model, nnx.Param)
+
+    # Execute update_params with explicit filter_types
+    sampler.update_params(new_state, filter_types=(nnx.Param,))
+
+    state_dict = {
+        ".".join(str(p) for p in path): var
+        for path, var in sampler.transformer_state.flat_state()
+    }
+    np.testing.assert_allclose(
+        np.array(state_dict["emb.embedding"].value),
+        np.array(new_embedding),
+    )
+
+  def test_update_params_with_filter_types_mixed_sharding_and_non_jax_leaves(
+      self,
+  ):
+    vocab = tc.MockVocab()
+    mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ("data",))
+    named_sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec()
+    )
+
+    transformer = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    # Place only one parameter on NamedSharding while leaving the rest on
+    # SingleDeviceSharding so `any(...)` would trigger `reshard_pytree` and
+    # fail with AttributeError on `SingleDeviceSharding.mesh`.
+    transformer.emb.embedding.value = jax.device_put(
+        transformer.emb.embedding.value, named_sharding
+    )
+
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+
+    source_model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    new_embedding = jax.device_put(
+        jnp.ones_like(source_model.emb.embedding.value) * 55.0,
+        named_sharding,
+    )
+    source_model.emb.embedding.value = new_embedding
+    new_state = nnx.state(source_model, nnx.Param)
+
+    sampler.update_params(new_state, filter_types=(nnx.Param,))
+
+    state_dict = {
+        ".".join(str(p) for p in path): var
+        for path, var in sampler.transformer_state.flat_state()
+    }
+    np.testing.assert_allclose(
+        np.array(state_dict["emb.embedding"].value),
+        np.array(new_embedding),
+    )
+
+    # Also verify non-jax.Array leaves (no `.sharding` attribute) in dst_params
+    # do not raise AttributeError when checking shardings.
+    with mock.patch.object(
+        nnx,
+        "state",
+        return_value={"non_jax_leaf": np.zeros((2, 2), dtype=np.float32)},
+    ):
+      sampler.update_params(new_state, filter_types=(nnx.Param,))
+
+  def test_update_params_precision_conversion(self):
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize(), dtype=jnp.float32),  # pyrefly: ignore[bad-argument-type]
+        rngs=nnx.Rngs(0),
+    )
+
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+
+    # Source model configured with bfloat16 parameters
+    source_model = tc.ToyTransformer(
+        config=tc.ModelConfig(
+            vocab_size=vocab.GetPieceSize(), dtype=jnp.bfloat16  # pyrefly: ignore[bad-argument-type]
+        ),
+        rngs=nnx.Rngs(1),
+    )
+    new_embedding = jnp.ones_like(source_model.emb.embedding.value) * 42.0
+    source_model.emb.embedding.value = new_embedding
+    new_state = nnx.state(source_model)
+
+    # Execute update_params with bfloat16 params into float32 sampler
+    sampler.update_params(new_state)
+
+    # Verify that updated weights were cast to float32 (sampler rollout precision)
+    state_dict = {
+        ".".join(str(p) for p in path): var
+        for path, var in sampler.transformer_state.flat_state()
+    }
+    self.assertEqual(state_dict["emb.embedding"].value.dtype, jnp.float32)
+    np.testing.assert_allclose(
+        np.array(state_dict["emb.embedding"].value),
+        np.array(jnp.ones_like(state_dict["emb.embedding"].value) * 42.0),
+    )
+
+  def test_base_sampler_update_params_raises_not_implemented(self):
+    class _DummySampler(base_sampler.BaseSampler):
+
+      @property
+      def transformer(self):
+        return None
+
+      @property
+      def transformer_state(self):
+        return None
+
+      def tokenize(self, input_string: str):
+        return []
+
+      def __call__(self, input_strings, **kwargs):
+        return base_sampler.SamplerOutput(
+            text=[], logits=None, tokens=[], padded_prompt_tokens=np.array([]), logprobs=None
+        )
+
+    dummy = _DummySampler()
+    with self.assertRaises(NotImplementedError):
+      dummy.update_params({})
+
+
+class SamplerTokenInputTest(absltest.TestCase):
+
+  def _make_sampler(self, cache_size: int = 16):
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(42),
+    )
+    return sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=cache_size,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+
+  def test_prompt_token_ids_bypasses_tokenize_and_returns_exact_padded_ids(
+      self,
+  ):
+    sampler = self._make_sampler(cache_size=16)
+    with mock.patch.object(
+        sampler,
+        'tokenize',
+        side_effect=AssertionError('tokenize must not be called'),
+    ):
+      out = sampler(
+          prompt_token_ids=[[0, 3], [4, 0, 5]],
+          max_generation_steps=2,
+          max_prompt_length=4,
+          echo=True,
+          pad_output=True,
+      )
+
+    np.testing.assert_array_equal(
+        out.padded_prompt_tokens,
+        np.array([[0, 0, 0, 3], [0, 4, 0, 5]], dtype=np.int32),
+    )
+    np.testing.assert_array_equal(
+        out.prompt_lengths, np.array([2, 3], dtype=np.int32)
+    )
+    # With echo=True, the leading 0 in [0, 3] and middle 0 in [4, 0, 5] must be
+    # preserved in the output tokens rather than stripped as pad_id=0.
+    np.testing.assert_array_equal(
+        out.tokens[0][:2], np.array([0, 3], dtype=np.int32)
+    )
+    np.testing.assert_array_equal(
+        out.tokens[1][:3], np.array([4, 0, 5], dtype=np.int32)
+    )
+
+    # Also verify init_sample_state builds input_mask and positions from
+    # prompt_lengths so valid token 0 is not masked out as padding.
+    state = sampler.init_sample_state(
+        jnp.array([[0, 0, 0, 3], [0, 4, 0, 5]], dtype=jnp.int32),
+        total_sampling_steps=6,
+        include_logits=False,
+        forbidden_token_ids=None,
+        temperature=0.0,
+        top_p=None,
+        top_k=1,
+        seed=jax.random.PRNGKey(0),
+        beam_size=None,
+        prompt_lengths=jnp.array([2, 3], dtype=jnp.int32),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(state.input_mask[:, :4]),
+        np.array([[False, False, True, True], [False, True, True, True]]),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(state.positions[:, :4]),
+        np.array([[0, 0, 0, 1], [0, 0, 1, 2]], dtype=np.int32),
+    )
+
+  def test_input_strings_populates_prompt_lengths(self):
+    sampler = self._make_sampler(cache_size=16)
+    out = sampler(
+        input_strings=['input string', 'hello world'],
+        max_generation_steps=2,
+        max_prompt_length=4,
+    )
+    expected_lengths = np.array(
+        [
+            len(sampler.tokenize('input string')),
+            len(sampler.tokenize('hello world')),
+        ],
+        dtype=np.int32,
+    )
+    np.testing.assert_array_equal(out.prompt_lengths, expected_lengths)
+
+  def test_rejects_invalid_inputs(self):
+    sampler = self._make_sampler(cache_size=5)
+    with self.assertRaisesRegex(ValueError, 'exactly one'):
+      sampler(
+          input_strings=['hi'], prompt_token_ids=[[1]], max_generation_steps=1
+      )
+    with self.assertRaisesRegex(ValueError, 'exactly one'):
+      sampler(max_generation_steps=1)
+    with self.assertRaisesRegex(ValueError, 'one output per row'):
+      sampler(prompt_token_ids=[[1]], max_generation_steps=1, beam_size=2)
+    with self.assertRaisesRegex(ValueError, 'exceeds cache_size'):
+      sampler(prompt_token_ids=[[1, 2, 3, 4]], max_generation_steps=2)
+    with self.assertRaisesRegex(ValueError, 'must not be empty'):
+      sampler(input_strings=[], max_generation_steps=1)
+    with self.assertRaisesRegex(ValueError, 'must not be empty'):
+      sampler(prompt_token_ids=[], max_generation_steps=1)
+    with self.assertRaisesRegex(ValueError, '1-D'):
+      sampler(
+          prompt_token_ids=[np.zeros((1, 2), dtype=np.int32)],
+          max_generation_steps=1,
+      )
+
+  def test_check_prompt_echo(self):
+    expected = [np.array([1, 2], dtype=np.int32), np.array([3], dtype=np.int32)]
+    utils.check_prompt_echo(
+        expected,
+        [
+            {
+                'prompt_token_ids': [1, 2],
+                'meta_info': {'id': '0', 'prompt_tokens': 2},
+            },
+            {'meta_info': {'id': '1', 'prompt_tokens': 1}},
+        ],
+    )
+    with self.assertRaisesRegex(ValueError, 'Expected 2 outputs, got 1'):
+      utils.check_prompt_echo(expected, [{'meta_info': {'id': '0'}}])
+    with self.assertRaisesRegex(ValueError, 'Duplicate request_id'):
+      utils.check_prompt_echo(
+          expected,
+          [
+              {'meta_info': {'id': 'dup', 'prompt_tokens': 2}},
+              {'meta_info': {'id': 'dup', 'prompt_tokens': 1}},
+          ],
+      )
+    with self.assertRaisesRegex(ValueError, 'missing request_id'):
+      utils.check_prompt_echo(
+          [np.array([1, 2], dtype=np.int32)],
+          [{'prompt_token_ids': [1, 2]}],
+      )
+    with self.assertRaisesRegex(ValueError, 'missing prompt echo'):
+      utils.check_prompt_echo(
+          [np.array([1, 2], dtype=np.int32)],
+          [{'meta_info': {'id': '0'}}],
+      )
+    with self.assertRaisesRegex(
+        ValueError, 'prompt_token_ids differed from input'
+    ):
+      utils.check_prompt_echo(
+          [np.array([1, 2], dtype=np.int32)],
+          [{'request_id': '0', 'prompt_token_ids': [1, 999]}],
+      )
+    with self.assertRaisesRegex(
+        ValueError, 'prompt_token_ids differed from input'
+    ):
+      utils.check_prompt_echo(
+          [np.array([1, 2], dtype=np.int32)],
+          [{'meta_info': {'id': '0', 'prompt_tokens': 3}}],
+      )
 
 
 if __name__ == '__main__':

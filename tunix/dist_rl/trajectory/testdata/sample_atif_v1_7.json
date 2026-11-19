@@ -1,0 +1,70 @@
+{
+  "schema_version": "ATIF-v1.7",
+  "session_id": "session-123",
+  "trajectory_id": "traj-456",
+  "agent": {
+    "name": "test-agent",
+    "version": "1.0.0",
+    "model_name": "gemini-1.5-pro",
+    "tool_definitions": [
+      {
+        "name": "bash",
+        "description": "Run shell commands"
+      }
+    ],
+    "extra": {
+      "framework": "tunix"
+    }
+  },
+  "steps": [
+    {
+      "step_id": 1,
+      "source": "user",
+      "message": "List directory contents"
+    },
+    {
+      "step_id": 2,
+      "source": "agent",
+      "model_name": "gemini-1.5-pro",
+      "reasoning_effort": 1.0,
+      "message": "Running ls command",
+      "reasoning_content": "User wants to list files",
+      "tool_calls": [
+        {
+          "tool_call_id": "call-1",
+          "function_name": "bash",
+          "arguments": {
+            "command": "ls -la"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "source_call_id": "call-1",
+            "content": "file1.txt\nfile2.txt"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 100,
+        "completion_tokens": 20,
+        "cached_tokens": 10,
+        "cost_usd": 0.001
+      },
+      "llm_call_count": 1
+    }
+  ],
+  "notes": "ATIF test notes",
+  "final_metrics": {
+    "total_prompt_tokens": 100,
+    "total_completion_tokens": 20,
+    "total_cached_tokens": 10,
+    "total_cost_usd": 0.001,
+    "total_steps": 2
+  },
+  "continued_trajectory_ref": "traj-455",
+  "extra": {
+    "environment": "production"
+  }
+}

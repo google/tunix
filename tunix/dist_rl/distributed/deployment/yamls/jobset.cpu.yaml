@@ -1,0 +1,121 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: ${JOBSET_NAME}
+  namespace: ${NAMESPACE}
+  ${QUEUE_LABEL}
+spec:
+  failurePolicy:
+    maxRestarts: 0
+    restartStrategy: Recreate
+  network:
+    enableDNSHostnames: true
+    # publishNotReadyAddresses: true
+  replicatedJobs:
+  - name: proc
+    replicas: ${REPLICAS}
+    template:
+      metadata:
+        annotations:
+          cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+      spec:
+        backoffLimit: 0
+        completionMode: Indexed
+        completions: 1
+        parallelism: 1
+        template:
+          metadata:
+            annotations:
+              # ensure exclusive access to the node
+              alpha.jobset.sigs.k8s.io/exclusive-topology: kubernetes.io/hostname
+              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+          spec:
+            ${PRIORITY_CLASS_LINE}
+            ${SERVICE_ACCOUNT_LINE}
+            dnsPolicy: ClusterFirstWithHostNet
+            hostNetwork: true
+            restartPolicy: Never
+            terminationGracePeriodSeconds: ${TERMINATION_GRACE_SECONDS}
+            nodeSelector:
+              ${CPU_NODE_SELECTOR}
+            tolerations:
+            - key: "cloud.google.com/gke-nodepool"
+              operator: "Exists"
+              effect: "NoSchedule"
+            containers:
+            - name: ${USER_CONTAINER}
+              image: ${USER_CONTAINER_IMAGE}
+              imagePullPolicy: Always
+              securityContext:
+                privileged: true
+              ${CPU_RESOURCES}
+              command:
+                - bash
+                - -c
+                - |
+                  # PID 1 wrapper: forwards SIGTERM to background child process so K8s
+                  # termination grace period shuts down workload cleanly without SIGKILL.
+                  # Wait loop wakes up immediately on SIGTERM to run trap handler and wait for
+                  # the subshell's direct foreground child to drain (STARTUP_COMMAND should
+                  # launch the workload directly or via `exec`).
+
+                  echo "Program Start: $$(date)"
+                  _sigterm() {
+                    pkill -SIGTERM -P "$$PID" 2>/dev/null || kill -SIGTERM $$(cat /proc/$$PID/task/$$PID/children 2>/dev/null) 2>/dev/null || true
+                    kill -SIGTERM "$$PID" 2>/dev/null || true
+                  }
+                  trap _sigterm SIGTERM
+
+                  (
+                    trap 'exit 143' SIGTERM
+                    ${STARTUP_COMMAND}
+                  ) & PID=$$!
+
+                  while kill -0 $$PID 2>/dev/null; do
+                    wait $$PID 2>/dev/null || true
+                  done
+                  wait $$PID
+                  EXIT_CODE=$$?
+                  ${TEARDOWN_ON_EXIT}
+
+                  echo "Program End: $$(date)"
+                  echo "EXIT_CODE=$$EXIT_CODE"
+                  exit $$EXIT_CODE
+              env:
+              # Injects the JobSet Name
+              - name: JOBSET_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/jobset-name']
+              # Injects the Replicated Job Name
+              - name: REPLICATED_JOB_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/replicatedjob-name']
+              # Injects the Job Index (which replica group)
+              - name: JOB_INDEX
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/job-index']
+              # Injects the local Pod Index (if you have multiple completions per job)
+              - name: POD_INDEX
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['batch.kubernetes.io/job-completion-index']
+              ports:
+              - containerPort: ${USER_CONTAINER_PORT}
+                name: grpc # Naming it 'grpc' tells GKE to optimize for HTTP/2

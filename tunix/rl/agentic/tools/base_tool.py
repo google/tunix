@@ -26,9 +26,10 @@ import dataclasses
 import json
 from typing import Any, Optional
 
+from tunix.utils import immutable
+
 abstractmethod = abc.abstractmethod
 dataclass = dataclasses.dataclass
-ABC = abc.ABC
 
 
 @dataclass
@@ -90,8 +91,8 @@ class ToolOutput:
     return str(self.output)
 
 
-class BaseTool(ABC):
-  """Abstract base class defining the interface for all agent tools.
+class BaseTool(abc.ABC, metaclass=immutable.ImmutableMeta):
+  """Abstract stateless base class defining the interface for all agent tools.
 
   Tools are reusable components that extend agent capabilities by providing
   access to external systems, computations, or data sources. This base class
@@ -101,6 +102,8 @@ class BaseTool(ABC):
   Subclasses must implement the tool's specific functionality through either
   synchronous or asynchronous execution methods, along with JSON schema
   definitions for parameter validation and documentation.
+
+  All implementations are immutable after initialization.
   """
 
   def __init__(self, name: str, description: str):
@@ -114,6 +117,15 @@ class BaseTool(ABC):
     """
     self.name = name
     self.description = description
+
+  def __setattr__(self, name: str, value: Any):
+    """Prevents post-init modification. See `ImmutableMeta` for details."""
+    if getattr(self, "_locked", False):
+      raise AttributeError(
+          f"Cannot modify immutable {self.__class__.__name__} instance "
+          f"after initialization (attempted to set '{name}')"
+      )
+    super().__setattr__(name, value)
 
   @abstractmethod
   def get_json_schema(self) -> dict[str, Any]:

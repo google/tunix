@@ -1,43 +1,54 @@
 [project]
 name = "google-tunix"
-version = "0.1.6"
+version = "0.1.8"
 authors = [
   { name = "Tunix Developers", email = "tunix-dev@google.com" },
 ]
 description = "A lightweight JAX-native LLM post-training framework."
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
   "Intended Audience :: Science/Research",
-  "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-  "datasets",
-  "flax>=0.11.1",
+  "datasets>=4.0.0",  # Avoid pip backtracking to legacy datasets/pyarrow sdist on Python 3.12+
+  "flax>=0.12.5",
   "fsspec",  # notebook dependency
   "google-metrax>=0.2.3",
   "grain",
+  "hf_transfer",  # Huggingface caching in CI
   "huggingface_hub",
+  "importlib_resources",
+  # Jax 0.7.2 has performance regression on OSS
+  # Jax 0.11.1 removed jax.experimental.hijax.MutableHiType, which flax (through 0.12.8, the newest release) still subclasses
+  "jax>=0.6.0,!=0.7.2,<0.11.1",
   "jaxtyping",
   "jinja2",  # Huggingface chat template
   "kagglehub",
   "numba",
   "omegaconf", # CLI config
+  "orbax-checkpoint>=0.12.0",
+  "pillow",  # Image processing
+  "pydantic",  # data modeling and serialization for agent trajectories
   "pylatexenc",  # Eval result parsing
   "python-dotenv",  # Huggingface API key
-  "qwix",
+  "perfetto",  # Perfetto trace writer for metrics export
+  "qwix>=0.1.6",
   "sentencepiece",
+  "safetensors<0.8", # higher versions breaks with jax >=0.9
+  "sqlalchemy",
   "sympy",  # Eval result parsing
   "tensorflow_datasets",
   "tqdm",
-  "transformers<=4.57.1", # Note: transformers==4.57.2 has a bug, see more information at https://github.com/google/tunix/issues/794
-  "hf_transfer",  # Huggingface caching in CI
+  "transformers!=4.57.2", # Issue: https://github.com/google/tunix/pull/795
+  "tenacity",
 ]
 
 [project.optional-dependencies]
@@ -53,21 +64,78 @@ docs = [
     "sphinx_contributors",
 ]
 prod = [
-  "jax[tpu]>=0.6.0,!=0.7.2", # Jax 0.7.2 has performance regression on OSS
+  "jax[tpu]>=0.6.0,!=0.7.2,<0.11.1",
+  "tokamax>=0.0.4",
+]
+tpu = [
+  "jax[tpu]>=0.6.0,!=0.7.2,<0.11.1",
+  "tokamax>=0.0.4",
+]
+gpu = [
+  "jax[cuda12]>=0.6.0,!=0.7.2,<0.11.1",
+  "tokamax>=0.0.4",
+  "triton",
+  "jax-triton",  # vLLM Triton GPU paged attention (not yet supported by Tokamax)
+]
+cuda13 = [
+  "jax[cuda13]>=0.6.0,!=0.7.2,<0.11.1",
+  "tokamax>=0.0.4",
+  "triton",
+  "jax-triton",  # vLLM Triton GPU paged attention (not yet supported by Tokamax)
 ]
 dev = [
   # Manully install vLLM & tpu-inferece, which depends on jax[tpu]==0.7.2
+]
+test = [
+  "pytest",
+  "pytest-xdist",
+  "gcsfs",
+  "chex",
+  "opentelemetry-exporter-otlp-proto-grpc>=1.25.0",
+  "opentelemetry-sdk>=1.25.0",
+]
+cli = [
+  "tensorflow",
+]
+otel = [
+  # OpenTelemetry metrics export for dist_rl.
+  "opentelemetry-api>=1.25.0",
+  "opentelemetry-sdk>=1.25.0",
+  # OTLP/gRPC exporter so the SDK can reach a collector.
+  "opentelemetry-exporter-otlp-proto-grpc>=1.25.0",
+]
+frozenlake = [
+  "gymnasium",
+]
+experimental = [
+  "absl-py",
+  "cloudpickle",  # serialization envelope for the remote-execution actor protocol
+  "etils[epath]",  # path abstraction for local and GCS trajectory stores
+  "grpcio",  # transport for cross-process worker execution
+  "grpcio-tools",
+  "pandas",  # tabular run statistics for the trajectory explorer
+  "simple_parsing",  # Argument parsing for CLI
+  "termcolor",  # terminal formatting for CLI subcommands
 ]
 
 [project.urls]
 Source = "https://github.com/google/tunix"
 
 [build-system]
-requires = ["setuptools >= 77.0.3"]
-build-backend = "setuptools.build_meta"
+requires = [
+  "scikit-build-core >= 0.10",
+  "nanobind >= 2.5.0",
+  "cmake >= 3.19",
+  "ninja",
+]
+build-backend = "scikit_build_core.build"
 
-[tool.setuptools.packages.find]
-include = ["tunix*"]
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+build-dir = "build/{wheel_tag}"
+wheel.packages = ["tunix"]
+wheel.py-api = "cp312"
+editable.mode = "inplace"
 
 [tool.pyink]
 line-length = 80
@@ -90,8 +158,29 @@ pyink-annotation-pragmas = [
   "@test",
 ]
 pyink-ipynb-indentation = 2
-pyink-ipynb-unicode-escape = true
 
 [tool.isort]
 profile = "google"       # or "black", etc.
 known_third_party = ["tunix"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+addopts = ["--import-mode=importlib"]
+
+[tool.cl_complexity_gate]
+# CL Complexity Check configuration:
+# - enabled_checks: active checks (subset of ["scope", "control_flow", "indirection", "duplication"]; e.g., ["indirection"] isolates Call Indirection only)
+# - scope (Change Scope): formatting-invariant AST statement delta weighted into continuous Score (no standalone LOC hard cliff)
+# - control_flow (Control Flow): per-function cognitive (12/15), cyclomatic (10/15), nesting (3/4), legacy delta budget (+5)
+# - indirection (Call Indirection): per-file single-caller chains, trivial wrapper additions, inner closures, and sprawl
+# - duplication (Code Duplication): position-independent AST 2-gram Multiset Jaccard + sanctioned forks
+enabled_checks = ["scope", "control_flow", "indirection", "duplication"]
+weights = { prod_loc = 0.15, cognitive_excess = 2.0, call_depth_excess = 15.0, trivial_helper = 10.0, pass_through_func = 10.0, nested_closure = 5.0, duplicate_clone = 20.0 }
+thresholds = { max_cognitive_warn = 12, max_cognitive_fail = 15, max_cyclomatic_fail = 15, max_nesting_fail = 4, max_legacy_cog_delta_fail = 5, max_legacy_cyc_delta_fail = 5, max_call_depth_warn = 2, max_call_depth_fail = 2, max_trivial_helpers_fail = 3, max_pass_through_ratio_fail = 0.25, max_nested_closures_warn = 2, max_nested_closures_fail = 4, trivial_helper_max_stmts = 4, trivial_helper_max_cognitive = 1, max_sprawl_helpers_fail = 5, max_file_cog_delta_sprawl = 40, min_clone_stmts = 7, min_clone_cognitive = 4, min_clone_jaccard = 0.60 }
+intentional_forks = [
+  ["sft/peft_trainer.py", "dist_rl/train/peft_trainer_v2.py"],
+  ["generate/sampler.py", "dist_rl/rollout/vanilla_sampler.py"],
+  ["models/*/model.py", "models/*/model.py"],
+  ["models/*/params*.py", "models/*/params*.py"],
+  ["dist_rl/examples/*", "experimental/examples/*"],
+]

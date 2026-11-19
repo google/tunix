@@ -1,0 +1,977 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Gemma4 model."""
+
+from __future__ import annotations
+
+import dataclasses
+from functools import partial
+import itertools
+from flax import nnx
+import jax
+from jax import numpy as jnp
+import jaxtyping
+from tunix.common import datatypes
+from tunix.generate.mappings import BackendMappingMixin
+from tunix.models import paged_attention
+from tunix.utils import compat
+
+# Re-export symbols to preserve public API paths after module decomposition.
+# pylint: disable=g-multiple-import,unused-import
+
+from tunix.models import cache_utils
+from tunix.models.gemma4 import audio
+from tunix.models.gemma4 import moe
+from tunix.models.gemma4 import vision
+
+from tunix.models.gemma4.config import (
+    AUDIO_SOFT_TOKEN_PLACEHOLDER,
+    IMAGE_SOFT_TOKEN_PLACEHOLDER,
+    AttentionType,
+    Cache,
+    GEMMA4_ATTENTION_PATTERN,
+    K_MASK,
+    LayerCache,
+    ModelConfig,
+    PreprocessedAudioInput,
+    PreprocessedVisionInput,
+    RematConfig,
+    ShardingConfig,
+    SplashAttentionImpl,
+    create_kv_cache_sharing_patterns,
+)
+from tunix.models.gemma4.layers import (
+    Einsum,
+    Embedder,
+    RMSNorm,
+    _add_bidirectional_mask,
+    _make_block_mask_indices,
+    _make_dummy_images,
+    _merge_flat_embeddings_inner,
+    apply_rope,
+    merge_flat_embeddings,
+)
+from tunix.models.gemma4.attention import Attention, MeshType
+
+# pylint: enable=g-multiple-import,unused-import
+
+# Paged KV caches in `paged_attention`'s layout, keyed by
+# cache name (see `Gemma4.cache_geometries`).
+PagedCache = dict[str, jax.Array]
+
+
+class FeedForward(nnx.Module):
+  """Feed forward module."""
+
+  def __init__(
+      self,
+      config: ModelConfig,
+      *,
+      hidden_dim: int | None = None,
+      rngs: nnx.Rngs,
+  ):
+    self.config = config
+    h_dim = hidden_dim if hidden_dim is not None else config.hidden_dim
+    self.gate_proj = nnx.Linear(
+        config.embed_dim,
+        h_dim,
+        use_bias=False,
+        rngs=rngs,
+        kernel_init=nnx.with_partitioning(
+            nnx.initializers.zeros_init(),
+            tuple(config.shd_config.ffw_weight_df),
+        ),
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
+    )
+
+    self.up_proj = nnx.Linear(
+        config.embed_dim,
+        h_dim,
+        use_bias=False,
+        rngs=rngs,
+        kernel_init=nnx.with_partitioning(
+            nnx.initializers.zeros_init(),
+            tuple(config.shd_config.ffw_weight_df),
+        ),
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
+    )
+    self.down_proj = nnx.Linear(
+        h_dim,
+        config.embed_dim,
+        use_bias=False,
+        rngs=rngs,
+        kernel_init=nnx.with_partitioning(
+            nnx.initializers.zeros_init(),
+            tuple(config.shd_config.ffw_weight_fd),
+        ),
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
+    )
+
+  def block(self, x):
+    return self.down_proj(nnx.gelu(self.gate_proj(x)) * self.up_proj(x))
+
+  def __call__(self, x):
+    remat_config = getattr(self.config, 'remat_config', RematConfig.NONE)
+    if (
+        remat_config == RematConfig.BLOCK
+        or remat_config == RematConfig.BLOCK.value
+    ):
+      policy = getattr(jax.checkpoint_policies, self.config.remat_policy)
+      graphdef, state = nnx.split(self)
+
+      def _checkpointed_block(state, *args, **kwargs):
+        module = nnx.merge(graphdef, state)
+        return module.block(*args, **kwargs)
+
+      return jax.checkpoint(_checkpointed_block, policy=policy)(state, x)
+    else:
+      return self.block(x)
+
+
+class DecoderLayer(nnx.Module):
+  """Decoder layer."""
+
+  def __init__(
+      self,
+      config: ModelConfig,
+      attn_type: AttentionType,
+      *,
+      hidden_dim: int | None = None,
+      rngs: nnx.Rngs,
+  ):
+
+    self.config = config
+    self.pre_attention_norm = RMSNorm(
+        config.embed_dim,
+        rngs=rngs,
+        sharding=config.shd_config,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
+    )
+
+    self.attn = Attention(
+        config=config,
+        attn_type=attn_type,
+        rngs=rngs,
+    )
+    self.post_attention_norm = RMSNorm(
+        config.embed_dim,
+        rngs=rngs,
+        sharding=config.shd_config,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
+    )
+    self.pre_ffw_norm = RMSNorm(
+        config.embed_dim,
+        rngs=rngs,
+        sharding=config.shd_config,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
+    )
+    self.mlp = FeedForward(config=config, hidden_dim=hidden_dim, rngs=rngs)
+
+    if config.enable_moe:
+      self.moe_pre_ffw_norm = RMSNorm(
+          config.embed_dim,
+          rngs=rngs,
+          sharding=config.shd_config,
+          dtype=config.dtype,
+          param_dtype=config.param_dtype,
+      )
+      self.moe = moe.MoERagged(
+          config=config,
+          rngs=rngs,
+      )
+      self.moe_post_ffw_norm = RMSNorm(
+          config.embed_dim,
+          rngs=rngs,
+          sharding=config.shd_config,
+          dtype=config.dtype,
+          param_dtype=config.param_dtype,
+      )
+      self.dense_post_ffw_norm = RMSNorm(
+          config.embed_dim,
+          rngs=rngs,
+          sharding=config.shd_config,
+          dtype=config.dtype,
+          param_dtype=config.param_dtype,
+      )
+    self.post_ffw_norm = RMSNorm(
+        config.embed_dim,
+        rngs=rngs,
+        sharding=config.shd_config,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
+    )
+
+    if config.per_layer_input_dim > 0:
+
+      self.per_layer_input_gate = Einsum(
+          einsum_str='BTD,DP->BTP',
+          shape=(config.embed_dim, config.per_layer_input_dim),
+          sharding=config.shd_config.per_layer_input_gate,
+          rngs=rngs,
+          dtype=config.dtype,
+          param_dtype=config.param_dtype,
+      )
+
+      self.per_layer_projection = Einsum(
+          einsum_str='BTP,PD->BTD',
+          shape=(config.per_layer_input_dim, config.embed_dim),
+          sharding=config.shd_config.per_layer_projection,
+          rngs=rngs,
+          dtype=config.dtype,
+          param_dtype=config.param_dtype,
+      )
+
+      self.post_per_layer_input_norm = RMSNorm(
+          config.embed_dim,
+          rngs=rngs,
+          sharding=config.shd_config,
+          dtype=config.dtype,
+          param_dtype=config.param_dtype,
+      )
+
+    self.skip_scale = nnx.Param(jnp.ones((1,), dtype=config.param_dtype))
+
+  def block(
+      self,
+      x: jaxtyping.Array,
+      segment_pos: jaxtyping.Array,
+      cache: LayerCache | None,
+      attn_mask: jaxtyping.Array,
+      per_layer_input: jaxtyping.Array | None = None,
+      kv_shared_cache: LayerCache | None = None,
+      segment_ids: jaxtyping.Array | None = None,
+      is_chunked_prefill: bool = False,
+      prefix_length: int = 0,
+      input_mask: jaxtyping.Array | None = None,
+      force_eager: bool = False,
+      forced_routed_experts: jaxtyping.Array | None = None,
+  ) -> tuple[
+      LayerCache | None,
+      jaxtyping.Array,
+      tuple[
+          jaxtyping.Array,
+          jaxtyping.Array,
+          jaxtyping.Array | None,
+          jaxtyping.Array | None,
+      ],
+  ]:
+    norm = self.pre_attention_norm(x)
+    cache, attn, kv = self.attn(
+        norm,
+        segment_pos,
+        cache,
+        attn_mask,
+        kv_shared_cache=kv_shared_cache,
+        segment_ids=segment_ids,
+        is_chunked_prefill=is_chunked_prefill,
+        prefix_length=prefix_length,
+        input_mask=input_mask,
+        force_eager=force_eager,
+    )
+    return (
+        cache,
+        self._post_attention(x, attn, per_layer_input, forced_routed_experts),
+        kv,
+    )
+
+  def paged_block(
+      self,
+      x: jaxtyping.Array,
+      segment_pos: jaxtyping.Array,
+      kv_cache: jax.Array,
+      metadata: paged_attention.PagedAttnMetadata,
+      per_layer_input: jaxtyping.Array | None,
+      *,
+      cache_name: str,
+      update_kv_cache: bool,
+      mesh: MeshType,
+  ) -> tuple[jax.Array, jaxtyping.Array]:
+    """Runs the layer over a ragged batch; see `Attention.paged_block`."""
+    kv_cache, attn = self.attn.paged_block(
+        self.pre_attention_norm(x),
+        segment_pos,
+        kv_cache,
+        metadata,
+        cache_name=cache_name,
+        update_kv_cache=update_kv_cache,
+        mesh=mesh,
+    )
+    return kv_cache, self._post_attention(
+        x, attn, per_layer_input, forced_routed_experts=None
+    )
+
+  def _post_attention(
+      self,
+      x: jaxtyping.Array,
+      attn: jaxtyping.Array,
+      per_layer_input: jaxtyping.Array | None,
+      forced_routed_experts: jaxtyping.Array | None,
+  ) -> jaxtyping.Array:
+    """Applies the residuals, FFW and per-layer input after attention."""
+    attn = self.post_attention_norm(attn)
+    attn += x
+
+    norm_ffw = self.pre_ffw_norm(attn)
+    ffw = self.mlp(norm_ffw)
+    if self.config.enable_moe:
+      ffw = self.dense_post_ffw_norm(ffw)
+      moe_norm_ffw = self.moe_pre_ffw_norm(attn)
+      moe_out = self.moe(
+          moe_norm_ffw,
+          router_input=attn,
+          forced_routed_experts=forced_routed_experts,
+      )
+      moe_out = self.moe_post_ffw_norm(moe_out)
+      ffw += moe_out
+    ffw = self.post_ffw_norm(ffw)
+
+    ffw += attn
+
+    if self.config.per_layer_input_dim > 0 and per_layer_input is not None:
+      gating_input = ffw
+      mapped = self.per_layer_input_gate(gating_input)
+      mapped = jax.nn.gelu(mapped) * per_layer_input
+      mapped = self.per_layer_projection(mapped)
+      mapped = self.post_per_layer_input_norm(mapped)
+      ffw += mapped
+
+    return ffw * self.skip_scale.value
+
+  def __call__(
+      self,
+      x: jaxtyping.Array,
+      segment_pos: jaxtyping.Array,
+      cache: LayerCache | None,
+      attn_mask: jaxtyping.Array,
+      per_layer_input: jaxtyping.Array | None = None,
+      kv_shared_cache: LayerCache | None = None,
+      segment_ids: jaxtyping.Array | None = None,
+      is_chunked_prefill: bool = False,
+      prefix_length: int = 0,
+      input_mask: jaxtyping.Array | None = None,
+      forced_routed_experts: jaxtyping.Array | None = None,
+  ) -> tuple[
+      LayerCache | None,
+      jaxtyping.Array,
+      tuple[
+          jaxtyping.Array,
+          jaxtyping.Array,
+          jaxtyping.Array | None,
+          jaxtyping.Array | None,
+      ],
+  ]:
+    force_eager = (
+        is_chunked_prefill
+        and self.attn.attn_type == AttentionType.LOCAL_SLIDING
+        and self.config.sliding_window_size is not None
+        and 0 < prefix_length < self.config.sliding_window_size
+    )
+    active_cache = cache if cache is not None else kv_shared_cache
+    # Bucket prefix_length to prevent a recompilation storm.
+    bucketed_prefix = cache_utils.maybe_bucket_prefix_length(
+        prefix_length,
+        active_cache,
+        is_chunked_prefill,
+        self.config.prefix_bucket_boundaries,
+    )
+    # If bucket padding was introduced, force eager attention to prevent
+    # Flash Attention static masks from attending to zeroed ghost slots.
+    if is_chunked_prefill and bucketed_prefix != prefix_length:
+      force_eager = True
+
+    remat_config = getattr(self.config, 'remat_config', RematConfig.NONE)
+    if (
+        remat_config == RematConfig.DECODER
+        or remat_config == RematConfig.DECODER.value
+    ):
+      policy = getattr(jax.checkpoint_policies, self.config.remat_policy)
+      graphdef, state = nnx.split(self)
+
+      def _checkpointed_block(state, *args):
+        module = nnx.merge(graphdef, state)
+        return module.block(
+            *args,
+            segment_ids=segment_ids,
+            is_chunked_prefill=is_chunked_prefill,
+            prefix_length=bucketed_prefix,
+            input_mask=input_mask,
+            force_eager=force_eager,
+            forced_routed_experts=forced_routed_experts,
+        )
+
+      return jax.checkpoint(_checkpointed_block, policy=policy)(
+          state,
+          x,
+          segment_pos,
+          cache,
+          attn_mask,
+          per_layer_input,
+          kv_shared_cache,
+      )
+    else:
+      return self.block(
+          x,
+          segment_pos,
+          cache,
+          attn_mask,
+          per_layer_input,
+          kv_shared_cache,
+          segment_ids=segment_ids,
+          is_chunked_prefill=is_chunked_prefill,
+          prefix_length=bucketed_prefix,
+          input_mask=input_mask,
+          force_eager=force_eager,
+          forced_routed_experts=forced_routed_experts,
+      )
+
+  def init_cache(self, batch_size, max_seq_len, dtype):
+    return self.attn.init_cache(batch_size, max_seq_len, dtype)
+
+
+GemmaDecoderLayer = DecoderLayer
+
+
+def _check_forced_routed_experts(
+    forced_routed_experts: jaxtyping.Array,
+    tokens: jaxtyping.Array,
+    config: ModelConfig,
+) -> None:
+  """Raises if `forced_routed_experts` cannot be replayed on `tokens`."""
+  if not config.enable_moe:
+    raise ValueError(
+        '`forced_routed_experts` requires an MoE model (enable_moe=True).'
+    )
+  expected_shape = (
+      *tokens.shape,
+      config.num_layers,
+      config.num_experts_per_tok,
+  )
+  if forced_routed_experts.shape != expected_shape:
+    raise ValueError(
+        '`forced_routed_experts` must be [batch, seq, num_layers,'
+        f' num_experts_per_tok] = {expected_shape}, got'
+        f' {forced_routed_experts.shape}.'
+    )
+  if not jnp.issubdtype(forced_routed_experts.dtype, jnp.signedinteger):
+    raise TypeError(
+        '`forced_routed_experts` must hold signed integer expert ids, got'
+        f' dtype {forced_routed_experts.dtype}.'
+    )
+
+
+class Gemma4(BackendMappingMixin, nnx.Module):
+  """Gemma4 model."""
+  BACKEND_PACKAGE_PATH = __name__
+
+  def __init__(
+      self, config: ModelConfig, *, rngs: nnx.Rngs, text_only: bool = True
+  ):
+    self.text_only = text_only
+    if text_only:
+      config = dataclasses.replace(
+          config, vision_encoder=None, audio_encoder=None
+      )
+    self.config = config
+    self.embedder = Embedder(config, rngs=rngs)
+
+    if config.vision_encoder is not None:
+      self.vision_encoder = vision.VisionEncoder(
+          rngs=rngs,
+          config=config.vision_encoder,
+          param_dtype=config.param_dtype,
+          shd_config=config.shd_config.vision_shd,
+      )
+
+    if config.audio_encoder is not None:
+      self.audio_encoder = audio.AudioTokenizer(
+          rngs=rngs,
+          config=config.audio_encoder,
+      )
+
+    pattern = (
+        config.attention_pattern
+        if config.attention_pattern
+        else GEMMA4_ATTENTION_PATTERN
+    )
+    attention_types = [
+        attn_type
+        for _, attn_type in zip(
+            range(config.num_layers), itertools.cycle(pattern)
+        )
+    ]
+    self.kv_cache_sharing_patterns = create_kv_cache_sharing_patterns(
+        num_layers=config.num_layers,
+        frac_shared_layers=config.frac_shared_layers,
+        share_global=True,
+        share_local=True,
+        attention_types=tuple(attention_types),
+    )
+    # Layers that shared layers depend on.
+    self.shared_layer_origins = {
+        j for i, j in enumerate(self.kv_cache_sharing_patterns) if i != j
+    }
+
+    self.layers = compat.ModuleList()
+    for i in range(config.num_layers):
+      attn_type = attention_types[i]
+      h_dim = config.hidden_dim
+      if (
+          self.kv_cache_sharing_patterns[i] != i
+          and config.override_kv_shared_ffw_hidden is not None
+      ):
+        h_dim = config.override_kv_shared_ffw_hidden
+      self.layers.append(
+          DecoderLayer(
+              config=config, attn_type=attn_type, hidden_dim=h_dim, rngs=rngs
+          )
+      )
+
+    self.final_norm = RMSNorm(
+        config.embed_dim,
+        rngs=rngs,
+        sharding=config.shd_config,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
+    )
+
+  def __call__(
+      self,
+      tokens: jaxtyping.Array,
+      positions: jaxtyping.Array | None = None,
+      cache: Cache | PagedCache | None = None,
+      attention_mask: jaxtyping.Array | None = None,
+      segment_ids: jaxtyping.Array | None = None,
+      decode_only_last_token: bool = False,
+      images: PreprocessedVisionInput | None = None,
+      audios: PreprocessedAudioInput | None = None,
+      skip_lm_head: bool = False,
+      is_chunked_prefill: bool = False,
+      prefix_length: int = 0,
+      input_mask: jaxtyping.Array | None = None,
+      metadata: paged_attention.PagedAttnMetadata | None = None,
+      mesh: MeshType | None = None,
+      logits_idxs: jaxtyping.Array | None = None,
+      forced_routed_experts: jaxtyping.Array | None = None,
+  ) -> tuple[jaxtyping.Array, Cache | PagedCache | None]:
+    if metadata is not None:
+      if forced_routed_experts is not None:
+        raise ValueError(
+            '`forced_routed_experts` is not supported with `metadata`.'
+        )
+      if cache is None or positions is None or mesh is None:
+        raise ValueError(
+            '`metadata` requires `cache`, `positions`, and `mesh`.'
+        )
+      paged_cache: PagedCache = {}
+      for k, v in cache.items():
+        if not isinstance(v, jax.Array):
+          raise TypeError(
+              '`metadata` requires a `PagedCache` (`dict[str, jax.Array]`).'
+          )
+        paged_cache[k] = v
+      return self._paged_call(
+          tokens, positions, paged_cache, metadata, mesh, logits_idxs
+      )
+    if cache is not None and not all(
+        isinstance(v, dict) for v in cache.values()
+    ):
+      raise TypeError(
+          'Without `metadata`, `cache` must be a `Cache`'
+          ' (`dict[str, LayerCache]`).'
+      )
+    if prefix_length < 0:
+      raise ValueError(
+          f'`prefix_length` must be non-negative, got {prefix_length}.'
+      )
+    if is_chunked_prefill:
+      if cache is None:
+        raise ValueError(
+            '`cache` is required when `is_chunked_prefill` is True.'
+        )
+    elif prefix_length > 0:
+      raise ValueError(
+          f'`prefix_length` was set to {prefix_length} > 0, but'
+          ' `is_chunked_prefill` is False.'
+      )
+    # Router replay: `forced_routed_experts` holds the experts each token was
+    # routed to at rollout, `[B, T, num_layers, num_experts_per_tok]` (the
+    # name `tunix.rl.common.compute_per_token_logps` forwards them under).
+    # Layer `i` routes to `[:, :, i]` instead of its own top-k; see
+    # `moe._replay_choices` for unset (-1) ids.
+    if forced_routed_experts is not None:
+      _check_forced_routed_experts(forced_routed_experts, tokens, self.config)
+
+    if is_chunked_prefill and input_mask is None:
+      input_mask = jnp.ones_like(tokens, dtype=jnp.bool_)
+
+    if input_mask is not None and input_mask.ndim == 3:
+      input_mask = jnp.squeeze(input_mask, axis=1)
+
+    if positions is None:
+      B, T = tokens.shape  # pylint: disable=invalid-name
+      base_positions = jnp.broadcast_to(jnp.arange(T)[None, :], (B, T))
+      positions = base_positions + (prefix_length if is_chunked_prefill else 0)
+
+    return_cache = cache is not None
+    new_cache = {}
+    is_prefill = tokens.shape[1] > 1
+
+    x = self.embedder.encode(tokens)
+    if self.config.vision_encoder is not None and images is not None:
+      soft_embeddings = self._encode_vision(images)
+      mask = tokens == IMAGE_SOFT_TOKEN_PLACEHOLDER
+      x = merge_flat_embeddings(
+          text_embeddings=x,
+          multimodal_embeddings=soft_embeddings,
+          mask=mask,
+      )
+
+    if self.config.audio_encoder is not None and audios is not None:
+      soft_embeddings = self._encode_audio(audios)
+      mask = tokens == AUDIO_SOFT_TOKEN_PLACEHOLDER
+      x = merge_flat_embeddings(
+          text_embeddings=x,
+          multimodal_embeddings=soft_embeddings,
+          mask=mask,
+      )
+
+    sliding_attention_mask = None
+    if (
+        is_prefill
+        and self.config.use_bidirectional_attention == 'vision'
+        and images is not None
+        and attention_mask is not None
+    ):
+      bidirectional_mask = tokens == IMAGE_SOFT_TOKEN_PLACEHOLDER
+      sliding_attention_mask = _add_bidirectional_mask(
+          attention_mask, bidirectional_mask
+      )
+
+    per_layer_inputs = None
+    if self.config.per_layer_input_dim > 0:
+      per_layer_inputs = self.embedder.encode_per_layer_input(x, tokens)
+
+    # Stores the raw KV projections for the current forward pass. Used for
+    # KV cache sharing during prefill.
+    transient_kvs = {}
+
+    for i, layer in enumerate(self.layers):
+      layer_name = f'layer_{i}'
+
+      shared_idx = self.kv_cache_sharing_patterns[i]
+      is_shared = shared_idx != i
+      if is_shared:
+        assert shared_idx in self.shared_layer_origins
+        layer_cache = None
+        shared_layer_name = f'layer_{shared_idx}'
+        if is_prefill:
+          # During prefill, use full KV projections from the shared layer.
+          shared_k, shared_v, shared_valid_mask, origin_prior_end_index = (
+              transient_kvs[shared_layer_name]
+          )
+          kv_shared_cache = {'k': shared_k, 'v': shared_v}
+          if shared_valid_mask is not None:
+            kv_shared_cache['valid_mask'] = shared_valid_mask
+          # Propagate origin layer's prior_end_index so shared GLOBAL
+          # layers can mask uninitialized prefix cache positions.
+          if origin_prior_end_index is not None:
+            kv_shared_cache['prior_end_index'] = origin_prior_end_index
+        else:
+          # During decoding, use the shared layer's cache (which may be
+          # an optimized sliding window ring cache).
+          kv_shared_cache = new_cache.get(shared_layer_name)
+      else:
+        layer_cache = cache[layer_name] if cache else None
+        kv_shared_cache = None
+
+      layer_attn_mask = attention_mask
+      if (
+          sliding_attention_mask is not None
+          and layer.attn.attn_type == AttentionType.LOCAL_SLIDING
+      ):
+        layer_attn_mask = sliding_attention_mask
+
+      layer_cache, x, layers_kvs = layer(
+          x,
+          positions,
+          layer_cache,
+          layer_attn_mask,
+          per_layer_input=per_layer_inputs[:, :, i, :]
+          if per_layer_inputs is not None
+          else None,
+          kv_shared_cache=kv_shared_cache,
+          segment_ids=segment_ids,
+          is_chunked_prefill=is_chunked_prefill,
+          prefix_length=prefix_length,
+          input_mask=input_mask,
+          forced_routed_experts=forced_routed_experts[:, :, i]
+          if forced_routed_experts is not None
+          else None,
+      )
+      if is_prefill and i in self.shared_layer_origins:
+        transient_kvs[layer_name] = layers_kvs
+      if not is_shared:
+        new_cache[layer_name] = layer_cache
+
+    x = self.final_norm(x)
+    if skip_lm_head:
+      return x, (new_cache if return_cache else None)
+
+    if decode_only_last_token:
+      # Only compute logits for the last token. This can significantly reduce
+      # memory requirements during prefill (when sampling), since we only need
+      # the logits for the last token to sample from.
+      x = x[:, -1:, :]
+
+    logits = self.compute_final_logits(x)
+
+    return logits, (new_cache if return_cache else None)
+
+  def _paged_call(
+      self,
+      tokens: jaxtyping.Array,
+      positions: jaxtyping.Array,
+      cache: PagedCache,
+      metadata: paged_attention.PagedAttnMetadata,
+      mesh: MeshType,
+      logits_idxs: jaxtyping.Array | None = None,
+  ) -> tuple[jaxtyping.Array, PagedCache]:
+    """Runs a ragged batch through the paged KV cache.
+
+    Args:
+      tokens: `[num_groups, tokens_per_group]` each DP group's padded ragged
+        tokens.
+      positions: `[num_groups, tokens_per_group]` each token's position in its
+        sequence.
+      cache: the paged KV caches, keyed by `cache_geometries` name.
+      metadata: the batch's ragged layout and page tables.
+      mesh: the mesh to shard attention over.
+      logits_idxs: `[num_groups, logits_per_group]` per-group token indices to
+        compute logits for, or None for every token.
+
+    Returns:
+      A tuple of (`[num_logits, vocab_size]` logits, updated cache).
+    """
+    # Each DP group runs as one row of the batch axis `B = num_groups`, so
+    # every layer keeps its `[B, T, ...]` shapes and shards `B` across the DP
+    # axes; only attention sees the ragged layout within each group.
+    x = self.embedder.encode(tokens)
+    per_layer_inputs = None
+    if self.config.per_layer_input_dim > 0:
+      per_layer_inputs = self.embedder.encode_per_layer_input(x, tokens)
+
+    cache = dict(cache)
+    for i, layer in enumerate(self.layers):
+      lender = self.kv_cache_sharing_patterns[i]
+      cache_name = f'layer_{lender}'
+      cache[cache_name], x = layer.paged_block(
+          x,
+          positions,
+          cache[cache_name],
+          metadata,
+          per_layer_inputs[:, :, i, :] if per_layer_inputs is not None else None,
+          cache_name=cache_name,
+          update_kv_cache=lender == i,
+          mesh=mesh,
+      )
+
+    if logits_idxs is not None:
+      # Skips unembedding the other tokens, whose logits are the largest
+      # activation of a long batch.
+      x = jnp.take_along_axis(x, logits_idxs[..., None], axis=1)
+    logits = self.compute_final_logits(self.final_norm(x))
+    return logits.reshape(-1, logits.shape[-1]), cache
+
+  def cache_geometries(self) -> dict[str, datatypes.CacheGeometry]:
+    """Returns the geometry of each paged KV cache `_paged_call` reads.
+
+    Gemma 4's global layers project a different number of KV heads at a
+    different head dim than its local ones, so caches differ in geometry.
+    KV-shared layers get no cache of their own; they read their lender's.
+
+    Returns:
+      A mapping from cache name (`layer_{i}`) to its `CacheGeometry` for each
+      unshared layer.
+    """
+    cache_geometries = {}
+    for i, layer in enumerate(self.layers):
+      if self.kv_cache_sharing_patterns[i] != i:
+        continue
+      # `attn.num_kv_heads` / `attn.head_dim` are already resolved per
+      # attention type; the raw config values are the local-layer ones.
+      cache_geometries[f'layer_{i}'] = datatypes.CacheGeometry(
+          num_kv_heads=layer.attn.num_kv_heads,
+          head_dim=layer.attn.head_dim,
+          window_size=(
+              self.config.sliding_window_size
+              if layer.attn.attn_type == AttentionType.LOCAL_SLIDING
+              else None
+          ),
+      )
+    return cache_geometries
+
+  def _encode_vision(self, vision_input: PreprocessedVisionInput):
+    """Encode images into the same space as the text embeddings."""
+    assert self.vision_encoder is not None
+
+    batch_size = vision_input.patches.shape[0]
+
+    if len(vision_input.soft_token_counts) > 0 and isinstance(
+        vision_input.soft_token_counts[0], int
+    ):
+      soft_token_counts = (vision_input.soft_token_counts,)
+    else:
+      soft_token_counts = vision_input.soft_token_counts
+
+    max_n_images = max((len(counts) for counts in soft_token_counts), default=0)  # pyrefly: ignore[bad-argument-type]
+    if max_n_images == 0:
+      return jnp.zeros((batch_size, 0, self.config.embed_dim))
+
+    patches = vision_input.patches
+    positions_xy = vision_input.positions_xy
+    max_patches = patches.shape[1] // max_n_images
+
+    patches = jnp.reshape(
+        patches, (batch_size * max_n_images, max_patches, patches.shape[2])
+    )
+    positions_xy = jnp.reshape(
+        positions_xy,
+        (batch_size * max_n_images, max_patches, positions_xy.shape[2]),
+    )
+
+    encoder_outputs = self.vision_encoder(patches, positions_xy)
+
+    embeddings, mask = encoder_outputs[0]
+
+    batch_tokens = []
+    max_tokens_per_batch = 0
+    for b in range(batch_size):
+      per_image_tokens = []
+      counts = soft_token_counts[b] if b < len(soft_token_counts) else ()
+      for i in range(len(counts)):  # pyrefly: ignore[bad-argument-type]
+        idx = b * max_n_images + i
+        expected_count = counts[i]  # pyrefly: ignore[bad-index]
+        if mask is not None:
+          valid_indices = jnp.nonzero(mask[idx], size=expected_count)[0]
+          real_tokens = embeddings[idx][valid_indices]
+        else:
+          real_tokens = embeddings[idx][:expected_count]
+        per_image_tokens.append(real_tokens)
+
+      if per_image_tokens:
+        b_tokens = jnp.concatenate(per_image_tokens, axis=0)
+      else:
+        b_tokens = jnp.zeros((0, embeddings.shape[-1]))
+      batch_tokens.append(b_tokens)
+      max_tokens_per_batch = max(max_tokens_per_batch, b_tokens.shape[0])
+
+    padded_batch_tokens = []
+    for b_tokens in batch_tokens:
+      pad_len = max_tokens_per_batch - b_tokens.shape[0]
+      if pad_len > 0:
+        b_tokens = jnp.pad(b_tokens, ((0, pad_len), (0, 0)))
+      padded_batch_tokens.append(b_tokens)
+
+    all_tokens = jnp.stack(padded_batch_tokens, axis=0)
+    all_tokens = self.embedder.encode_vision(all_tokens[:, None, :, :])
+    all_tokens = all_tokens[:, 0, :, :]
+    return all_tokens
+
+  def _encode_audio(self, audio_input: PreprocessedAudioInput):
+    """Encode audio.
+
+    Args:
+      audio_input: The audio input.
+
+    Returns:
+      Padded audio embeddings as a tensor of shape, with padding
+      at the end of the sequences. (batch_size, max_tokens)
+    """
+    batch_size, num_clips = audio_input.audios.shape[:2]
+
+    # Encode audio clips.
+    clips = audio_input.audios.reshape(batch_size * num_clips, -1)
+    clip_lengths = audio_input.sequence_lengths.reshape(batch_size * num_clips)
+    embeddings, pad_mask = self.audio_encoder(clips, clip_lengths)
+
+    flat_embeddings = embeddings.reshape(batch_size, -1, embeddings.shape[-1])
+    flat_pad_mask = pad_mask.reshape(batch_size, -1)  # True => Pad.
+
+    # Handle padding in the embeddings.
+    # To avoid JIT recompilation, we want to keep the output shape consistent
+    # across invocations with differring values of audio_input.sequence_lengths
+    # (of course, as long as audio_input.audios is padded to the same shape).
+    # Thus, we don't simply truncate each clip's embeddings as that would create
+    # variable length output. We keep the length of embeddings the same, but
+    # move valid (non-padding) embeddings to the beginning of sequence
+    # (i.e. pack valid embeddings into one contiguous sequence).
+    max_tokens = flat_pad_mask.shape[-1]
+    indices = jnp.arange(max_tokens)
+    indices = jnp.where(flat_pad_mask, max_tokens, indices)
+    sorted_indices = jnp.argsort(indices, axis=-1)
+    packed_embeddings = jnp.take_along_axis(
+        flat_embeddings, sorted_indices[..., None], axis=1
+    )
+
+    result = self.embedder.encode_audio(packed_embeddings)
+    return result
+
+  def compute_final_logits(
+      self,
+      x: jaxtyping.Array,
+  ) -> jaxtyping.Array:
+    """Computes the final logits from the model output."""
+    logits = self.embedder.decode(x).astype(jnp.float32)
+    if self.config.final_logit_softcap is not None:
+      logits /= self.config.final_logit_softcap
+      logits = jnp.tanh(logits) * self.config.final_logit_softcap
+    return logits
+
+  def init_cache(self, batch_size, max_seq_len, dtype):
+    cache = {}
+    for i, layer in enumerate(self.layers):
+      if self.kv_cache_sharing_patterns[i] != i:
+        continue  # Skip shared layers.
+      cache[f'layer_{i}'] = layer.init_cache(batch_size, max_seq_len, dtype)
+    return cache
+
+  def get_model_input(self):
+    """Returns a dummy model input for the transformer.
+
+    This dummy input has a batch size compatible with FSDP sharding on a
+    2-device axis.
+    """
+    dummy_batch_size = 2
+    dummy_seq_len = 2
+    return {
+        'tokens': jnp.ones((dummy_batch_size, dummy_seq_len), dtype=jnp.int32),
+        'positions': jnp.ones(
+            (dummy_batch_size, dummy_seq_len), dtype=jnp.int32
+        ),
+        'cache': None,
+        'attention_mask': jnp.ones(
+            (dummy_batch_size, 1, dummy_seq_len), dtype=jnp.bool
+        ),
+    }
+
+  @property
+  def num_embed(self) -> int:
+    return self.config.num_embed

@@ -17,6 +17,7 @@
 from unittest import mock
 
 from absl.testing import absltest
+import numpy as np
 
 from tunix.rl.agentic.parser.chat_template_parser import parser
 
@@ -44,31 +45,38 @@ class QwenChatTemplateParserTest(absltest.TestCase):
     self.mock_tokenizer.eos_token = '<eos>'
 
   def test_parse_with_system_message(self):
+    # ``is_first_msg=False`` (default) renders a continuation chunk: leading
+    # separator, no trailing separator. eot_token is ``<|im_end|>`` (no
+    # trailing ``\n``); the inter-message ``\n`` is emitted by joining the
+    # separator between parts.
     p = parser.QwenChatTemplateParser(self.mock_tokenizer)
     messages = [
         {'role': 'system', 'content': 'You are Qwen.'},
         {'role': 'user', 'content': 'Hello'},
     ]
     result = p.parse(messages)
-    expected = ('<|im_start|>system\nYou are Qwen.<|im_end|>\n'
-                '<|im_start|>user\nHello<|im_end|>\n')
+    expected = ('\n<|im_start|>system\nYou are Qwen.<|im_end|>\n'
+                '<|im_start|>user\nHello<|im_end|>')
     self.assertEqual(result, expected)
 
   def test_parse_without_system_message_and_is_first_msg(self):
+    # ``is_first_msg=True`` is the opening of a conversation: no leading
+    # separator. Default system prompt is prepended because the first
+    # message is not a system message.
     p = parser.QwenChatTemplateParser(self.mock_tokenizer)
     messages = [{'role': 'user', 'content': 'Hello'}]
     result = p.parse(messages, is_first_msg=True)
     expected = ('<|im_start|>system\n'
                 'You are Qwen, created by Alibaba Cloud. You are a helpful'
                 ' assistant.<|im_end|>\n'
-                '<|im_start|>user\nHello<|im_end|>\n')
+                '<|im_start|>user\nHello<|im_end|>')
     self.assertEqual(result, expected)
 
   def test_parse_with_add_generation_prompt(self):
     p = parser.QwenChatTemplateParser(self.mock_tokenizer)
     messages = [{'role': 'user', 'content': 'Hello'}]
     result = p.parse(messages, add_generation_prompt=True)
-    expected = ('<|im_start|>user\nHello<|im_end|>\n'
+    expected = ('\n<|im_start|>user\nHello<|im_end|>\n'
                 '<|im_start|>assistant\n')
     self.assertEqual(result, expected)
 
@@ -76,22 +84,145 @@ class QwenChatTemplateParserTest(absltest.TestCase):
     p = parser.QwenChatTemplateParser(self.mock_tokenizer)
     messages = [{'role': 'tool', 'content': 'Tool output'}]
     result = p.parse(messages)
-    expected = ('<|im_start|>user\n'
+    expected = ('\n<|im_start|>user\n'
                 '<tool_response>\nTool output\n</tool_response>'
-                '<|im_end|>\n')
+                '<|im_end|>')
     self.assertEqual(result, expected)
+
+  def test_parse_renders_consecutive_tool_messages_as_one_user_turn(self):
+    # Qwen3.5 chat_template.jinja puts back-to-back tool messages in one user
+    # turn: <|im_start|>user, then "\n<tool_response>\n...\n</tool_response>"
+    # per message, then <|im_end|>.
+    p = parser.QwenChatTemplateParser(self.mock_tokenizer)
+    messages = [
+        {'role': 'assistant', 'content': 'calls'},
+        {'role': 'tool', 'content': 'A'},
+        {'role': 'tool', 'content': 'B'},
+        {'role': 'tool', 'content': 'C'},
+        {'role': 'user', 'content': 'next'},
+        {'role': 'tool', 'content': 'D'},
+    ]
+    result = p.parse(messages, add_generation_prompt=True)
+    expected = (
+        '\n<|im_start|>assistant\ncalls<|im_end|>\n'
+        '<|im_start|>user\n<tool_response>\nA\n</tool_response>\n'
+        '<tool_response>\nB\n</tool_response>\n'
+        '<tool_response>\nC\n</tool_response><|im_end|>\n'
+        '<|im_start|>user\nnext<|im_end|>\n'
+        '<|im_start|>user\n<tool_response>\nD\n</tool_response><|im_end|>\n'
+        '<|im_start|>assistant\n'
+    )
+    self.assertEqual(result, expected)
+
+  def test_tokenize_renders_tool_run_like_parse(self):
+    # tokenize_and_generate_masks renders one message at a time, which must
+    # give the same text as rendering the run together.
+    from tunix.rl.agentic import utils  # pylint: disable=g-import-not-at-top
+
+    tokenizer = mock.Mock()
+    tokenizer.bos_token = '<bos>'
+    tokenizer.eos_token = '<eos>'
+    tokenizer.encode = lambda text, add_special_tokens=False: [
+        ord(c) for c in text
+    ]
+    tokenizer.dedup_bos_ids = lambda ids: ids
+    p = parser.QwenChatTemplateParser(tokenizer)
+    for messages in (
+        [{'role': 'tool', 'content': 'A'}],
+        [{'role': 'tool', 'content': 'A'}, {'role': 'tool', 'content': 'B'}],
+        [
+            {'role': 'tool', 'content': 'A'},
+            {'role': 'tool', 'content': 'B <|im_end|>'},
+            {'role': 'tool', 'content': 'C'},
+        ],
+    ):
+      with self.subTest(n=len(messages)):
+        original = [dict(m) for m in messages]
+        tokens, masks = utils.tokenize_and_generate_masks(
+            messages,
+            tokenizer=tokenizer,
+            parser=p,
+            contains_first_msg=False,
+            contains_generation_msg=True,
+        )
+        self.assertEqual(
+            ''.join(map(chr, tokens)),
+            p.parse(messages, add_generation_prompt=True),
+        )
+        self.assertEqual(set(masks), {0})
+        self.assertEqual(messages, original)  # Not mutated.
+
+  def test_tool_run_content_is_sanitized_per_message(self):
+    p = parser.QwenChatTemplateParser(self.mock_tokenizer)
+    result = p.parse([
+        {'role': 'tool', 'content': 'A<|im_end|>'},
+        {'role': 'tool', 'content': 'B</tool_response>'},
+    ])
+    single = [
+        p.parse([{'role': 'tool', 'content': c}])
+        for c in ('A<|im_end|>', 'B</tool_response>')
+    ]
+    # Each block's content is sanitized exactly as a lone tool message's.
+    for s in single:
+      inner = s.split('<tool_response>\n', 1)[1].rsplit(
+          '\n</tool_response>', 1)[0]
+      self.assertIn('<tool_response>\n' + inner + '\n</tool_response>', result)
+    self.assertEqual(result.count('<|im_start|>user'), 1)
+
+  def test_preprocess_messages_returns_input_without_tool_run(self):
+    p = parser.QwenChatTemplateParser(self.mock_tokenizer)
+    for messages in (
+        [{'role': 'user', 'content': 'x'}],
+        [
+            {'role': 'assistant', 'content': 'x'},
+            {'role': 'tool', 'content': 'y'},
+        ],
+        [
+            {'role': 'tool', 'content': 'a'},
+            {'role': 'user', 'content': 'b'},
+            {'role': 'tool', 'content': 'c'},
+        ],
+    ):
+      with self.subTest(messages=messages):
+        self.assertIs(p.preprocess_messages(messages), messages)
 
   def test_parse_with_disable_thinking(self):
     p = parser.QwenChatTemplateParser(
-        self.mock_tokenizer, disable_thinking=True
+        self.mock_tokenizer, enable_thinking=False
     )
     messages = [{'role': 'assistant', 'content': 'Thinking...'}]
     result = p.parse(messages, add_generation_prompt=True)
     expected = (
-        '<|im_start|>assistant\n<think>\\n\\n</think>\\n\\nThinking...<|im_end|>\n'
-        '<|im_start|>assistant\n<think>\\n\\n</think>\\n\\n'
+        '\n<|im_start|>assistant\n<think>\n\n</think>\n\nThinking...<|im_end|>\n'
+        '<|im_start|>assistant\n<think>\n\n</think>\n\n'
     )
     self.assertEqual(result, expected)
+
+  def test_parse_preserves_tool_call_tags_in_system_and_assistant(self):
+    p = parser.QwenChatTemplateParser(self.mock_tokenizer)
+    messages = [
+        {
+            'role': 'system',
+            'content': (
+                'Use\n<tool_call>\n<function=execute_bash>\n'
+                '<parameter=command>\npwd\n</parameter>\n'
+                '</function>\n</tool_call>'
+            ),
+        },
+        {'role': 'user', 'content': 'Run pwd'},
+        {
+            'role': 'assistant',
+            'content': (
+                '<think>\nChecking pwd.\n</think>\n\n'
+                '<tool_call>\n<function=execute_bash>\n'
+                '<parameter=command>\npwd\n</parameter>\n'
+                '</function>\n</tool_call>'
+            ),
+        },
+    ]
+    result = p.parse(messages, is_first_msg=True)
+    self.assertIn('\n<tool_call>\n<function=execute_bash>', result)
+    self.assertIn('</function>\n</tool_call><|im_end|>', result)
 
 
 class LlamaChatTemplateParserTest(absltest.TestCase):
@@ -165,6 +296,13 @@ class GemmaChatTemplateParserTest(absltest.TestCase):
     self.assertEqual(
         processed[0]['content'], 'System prompt.\nUser prompt.'
     )
+    self.assertEqual(
+        messages,
+        [
+            {'role': 'system', 'content': 'System prompt.'},
+            {'role': 'user', 'content': 'User prompt.'},
+        ],
+    )
 
   def test_preprocess_with_system_only(self):
     messages = [{'role': 'system', 'content': 'System prompt.'}]
@@ -188,6 +326,134 @@ class GemmaChatTemplateParserTest(absltest.TestCase):
       # that might bypass the preprocessing in parse().
       self.parser._parse_message(message)
 
+
+class Gemma4ChatTemplateParserTest(absltest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.mock_tokenizer = mock.Mock()
+    self.mock_tokenizer.bos_token = '<bos>'
+    self.mock_tokenizer.eos_token = '<eos>'
+
+  def test_parse_with_enable_thinking_true(self):
+    p = parser.Gemma4ChatTemplateParser(
+        self.mock_tokenizer, enable_thinking=True
+    )
+    messages = [{'role': 'user', 'content': 'Hello'}]
+    result = p.parse(messages, is_first_msg=True, add_generation_prompt=True)
+    expected = (
+        '<bos><|turn>system\n<|think|><turn|>\n'
+        '<|turn>user\nHello<turn|>\n'
+        '<|turn>model\n'
+    )
+    self.assertEqual(result, expected)
+
+  def test_parse_with_enable_thinking_false(self):
+    p = parser.Gemma4ChatTemplateParser(
+        self.mock_tokenizer, enable_thinking=False
+    )
+    messages = [{'role': 'user', 'content': 'Hello'}]
+    result = p.parse(messages, is_first_msg=True, add_generation_prompt=True)
+    expected = (
+        '<bos>'
+        '<|turn>user\nHello<turn|>\n'
+        '<|turn>model\n<|channel>thought\n<channel|>'
+    )
+    self.assertEqual(result, expected)
+
+  def test_parse_with_system_prompt_and_thinking_true(self):
+    p = parser.Gemma4ChatTemplateParser(
+        self.mock_tokenizer, enable_thinking=True
+    )
+    messages = [
+        {'role': 'system', 'content': 'System instruction'},
+        {'role': 'user', 'content': 'Hello'},
+    ]
+    result = p.parse(messages, is_first_msg=True, add_generation_prompt=True)
+    expected = (
+        '<bos><|turn>system\n<|think|>System instruction<turn|>\n'
+        '<|turn>user\nHello<turn|>\n'
+        '<|turn>model\n'
+    )
+    self.assertEqual(result, expected)
+
+  def test_parse_with_system_prompt_and_thinking_false(self):
+    p = parser.Gemma4ChatTemplateParser(
+        self.mock_tokenizer, enable_thinking=False
+    )
+    messages = [
+        {'role': 'system', 'content': 'System instruction'},
+        {'role': 'user', 'content': 'Hello'},
+    ]
+    result = p.parse(messages, is_first_msg=True, add_generation_prompt=True)
+    expected = (
+        '<bos><|turn>system\nSystem instruction<turn|>\n'
+        '<|turn>user\nHello<turn|>\n'
+        '<|turn>model\n<|channel>thought\n<channel|>'
+    )
+    self.assertEqual(result, expected)
+
+  def test_parse_with_tool_message(self):
+    p = parser.Gemma4ChatTemplateParser(self.mock_tokenizer)
+    messages = [{'role': 'tool', 'content': 'Tool result'}]
+    result = p.parse(messages)
+    expected = '<|tool_response>Tool result<tool_response|>'
+    self.assertEqual(result, expected)
+
+  def test_parse_with_trailing_turn_in_content_gets_sanitized(self):
+    p = parser.Gemma4ChatTemplateParser(self.mock_tokenizer)
+    messages = [{'role': 'assistant', 'content': 'Action: Right.<turn|>'}]
+    # The input "<turn|>" is a control token and should be stripped before formatting.
+    result = p.parse(messages)
+    expected = '<|turn>model\nAction: Right.<turn|>\n'
+    self.assertEqual(result, expected)
+
+  def test_parse_assistant_in_history_has_thought_block(self):
+    p = parser.Gemma4ChatTemplateParser(
+        self.mock_tokenizer, enable_thinking=False
+    )
+    messages = [
+        {'role': 'user', 'content': 'Hello'},
+        {'role': 'assistant', 'content': 'Action: Right.'},
+    ]
+    # In history (messages), assistant turn should get
+    # `<|channel>thought\n<channel|>`.
+    result = p.parse(messages, is_first_msg=True, add_generation_prompt=True)
+    expected = (
+        '<bos><|turn>user\nHello<turn|>\n'
+        '<|turn>model\n<|channel>thought\n<channel|>Action: Right.<turn|>\n'
+        '<|turn>model\n<|channel>thought\n<channel|>'
+    )
+    self.assertEqual(result, expected)
+
+  def test_parse_assistant_keeps_private_thought_channel(self):
+    p = parser.Gemma4ChatTemplateParser(self.mock_tokenizer)
+    content = (
+        '<|channel>thought\nThinking and reasoning...<channel|>Action: Right.'
+    )
+    messages = [{'role': 'assistant', 'content': content}]
+    result = p.parse(messages)
+    expected = f'<|turn>model\n{content}<turn|>\n'
+    self.assertEqual(result, expected)
+
+  def test_update_assistant_end_tokens(self):
+    self.mock_tokenizer.encode.return_value = [99]
+    self.mock_tokenizer.bos_id = None
+    self.mock_tokenizer.eos_id = None
+    p = parser.Gemma4ChatTemplateParser(self.mock_tokenizer)
+    tokens = np.array([1, 2, 3], dtype=np.int32)
+    updated_tokens, n_append = p.update_assistant_end_tokens(tokens)
+    np.testing.assert_array_equal(
+        updated_tokens, np.array([1, 2, 3, 99], dtype=np.int32)
+    )
+    self.assertEqual(n_append, 1)
+
+  def test_base_parser_update_assistant_end_tokens_default(self):
+    p = parser.DefaultChatTemplateParser(self.mock_tokenizer)
+    tokens = np.array([1, 2, 3], dtype=np.int32)
+    updated_tokens, n_append = p.update_assistant_end_tokens(tokens)
+    np.testing.assert_array_equal(updated_tokens, tokens)
+    self.assertEqual(n_append, 0)
 
 if __name__ == '__main__':
   absltest.main()

@@ -18,4 +18,6 @@ Resolves #\<issue_number_goes_here\>
 - [ ] I have added all appropriate doc-strings/documentation.
 - [ ] My PR is based on the latest changes of the main branch (if unsure, rebase the code).
 - [ ] I have signed the [Contributor License Agreement](https://cla.developers.google.com/about).
-- [ ] I have followed [Contribution Guidelines](https://github.com/google/tunix/blob/main/CONTRIBUTING.md).
+- [ ] I have followed [Contribution Guidelines](https://github.com/google/tunix/blob/main/docs/contributing.md).
+
+> **Note**: Standard CPU unit tests, package builds, and documentation checks run automatically on all pull requests. Multi-device TPU integration tests (`tunix_tpu_unit_tests`) run automatically on Copybara-synced pull requests and pull requests targeting `atwigg/mlperf` (and are triggered by maintainers after review for external fork pull requests).

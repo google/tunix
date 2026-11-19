@@ -48,7 +48,9 @@ def create_dummy_model(
     Model instance with randomly initialized weights (sharded if a mesh is provided).
 
   """
-  context_manager = mesh if mesh is not None else contextlib.nullcontext()
+  context_manager = (
+      jax.set_mesh(mesh) if mesh is not None else contextlib.nullcontext()
+  )
 
   with context_manager:
     # Build abstract model to obtain param shapes without allocating full tensors.
@@ -66,7 +68,9 @@ def create_dummy_model(
 
   @partial(nnx.jit, static_argnums=(2, 3,))
   def make_param(rngs, scale, shape, dt):
-    return scale * rngs.params.normal(shape, dt)
+    # Call the stream to get a unique JAX key, then use jax.random
+    key = rngs.params() 
+    return scale * jax.random.normal(key, shape, dtype=dt)
 
   def make_random_tensor(path, param, shard=None):
     shape = param.shape

@@ -14,13 +14,73 @@
 
 """Utilities for sharding tensors."""
 
+from typing import Tuple
+
 import jax
+from jax.interpreters import pxla
 import jax.sharding as shd
 import numpy as np
+from tunix.utils import sharding_utils as common_sharding_utils
+
+place_array_on_target = common_sharding_utils.place_array_on_target
+place_arrays_on_targets = common_sharding_utils.place_arrays_on_targets
 
 
-def get_sharding(x, mesh, pspec):
-  """Get a sharding for an tensor given a mesh and partition spec."""
+def shard_input(
+    input_data: jax.Array, data_sharding_axis: Tuple[str, ...]
+) -> jax.Array:
+  """Shards the input data across the available devices.
+
+  Args:
+    input_data: The input data to be sharded, expected to be a TrainingInput
+      dataclass.
+    data_sharding_axis: The sharding axis for the input data, e.g. ("fsdp",).
+
+  Returns:
+    The sharded TrainingInput.
+  """
+  mesh = pxla.thread_resources.env.physical_mesh
+  if mesh.empty:
+    return input_data
+
+  pspec = shd.PartitionSpec(*data_sharding_axis)
+  # Check if the input is already sharded with the target mesh to avoid
+  # re-sharding.
+  is_sharded = jax.tree.map(
+      lambda x: isinstance(x, jax.Array)
+      and hasattr(x, "sharding")
+      and hasattr(x.sharding, "mesh")
+      and x.sharding.mesh == mesh
+      and hasattr(x.sharding, "spec")
+      and x.sharding.spec == pspec,
+      input_data,
+  )
+  if all(jax.tree.leaves(is_sharded)):
+    return input_data
+
+  # Skip sharding if the input contains globally distributed arrays that are
+  # not fully addressable by the local process. Attempting to recreate them via
+  # `jax.make_array_from_process_local_data` would fail with a ValueError.
+  is_global = jax.tree.map(
+      lambda x: isinstance(x, jax.Array) and not x.is_fully_addressable,
+      input_data,
+  )
+  if any(jax.tree.leaves(is_global)):
+    return input_data
+
+  with jax.transfer_guard("allow"):
+    return jax.tree.map(
+        lambda x: jax.make_array_from_process_local_data(
+            get_sharding(x, mesh=mesh, pspec=pspec), x
+        ),
+        input_data,
+    )
+
+
+def get_sharding(
+    x: jax.Array | np.ndarray, mesh: shd.Mesh, pspec: shd.PartitionSpec
+) -> shd.NamedSharding:
+  """Get a sharding for a tensor given a mesh and partition spec."""
   # Only shard arrays with rank > 0.
   if not isinstance(x, (np.ndarray, jax.Array)) or x.ndim == 0:
     return shd.NamedSharding(mesh, shd.PartitionSpec())  # Replicated
@@ -34,6 +94,8 @@ def get_sharding(x, mesh, pspec):
     if axis_name is not None:
       axis_names = axis_name if isinstance(axis_name, tuple) else (axis_name,)
       for name in axis_names:
+        if name is not None and name not in mesh.shape:
+          return shd.NamedSharding(mesh, shd.PartitionSpec())
         axis_size = mesh.shape[name]
         if x.shape[i] % axis_size != 0:
           # Replicate if not evenly divisible.

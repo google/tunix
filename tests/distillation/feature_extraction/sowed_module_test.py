@@ -87,7 +87,7 @@ class SowedModuleTest(absltest.TestCase):
 
     # Target SimpleLayer for wrapping
     target_types = [SimpleLayer]
-    sowed_module.wrap_model_with_sowed_modules(model, target_types)
+    sowed_module.wrap_model_with_sowed_modules(model, target_types)  # pyrefly: ignore[bad-argument-type]
 
     # Assert all SimpleLayers are wrapped
     self.assertIsInstance(
@@ -166,39 +166,39 @@ class SowedModuleTest(absltest.TestCase):
 
     # Target SimpleLayer for wrapping
     target_types = [SimpleLayer, Block]
-    sowed_module.wrap_model_with_sowed_modules(model, target_types)
+    sowed_module.wrap_model_with_sowed_modules(model, target_types)  # pyrefly: ignore[bad-argument-type]
 
     # Assert all SimpleLayers are wrapped
     self.assertIsInstance(
-        model.block1.wrapped_model.layer1,
+        model.block1.wrapped_model.layer1,  # pyrefly: ignore[missing-attribute]
         sowed_module.SowedModule,
     )
     self.assertIsInstance(
-        model.block1.wrapped_model.layer2,
+        model.block1.wrapped_model.layer2,  # pyrefly: ignore[missing-attribute]
         sowed_module.SowedModule,
     )
     self.assertIsInstance(
-        model.block1.wrapped_model.other_layers[0],
+        model.block1.wrapped_model.other_layers[0],  # pyrefly: ignore[missing-attribute]
         sowed_module.SowedModule,
     )
     self.assertIsInstance(
-        model.block1.wrapped_model.other_layers[1],
+        model.block1.wrapped_model.other_layers[1],  # pyrefly: ignore[missing-attribute]
         sowed_module.SowedModule,
     )
     self.assertIsInstance(
-        model.block2.wrapped_model.layer1,
+        model.block2.wrapped_model.layer1,  # pyrefly: ignore[missing-attribute]
         sowed_module.SowedModule,
     )
     self.assertIsInstance(
-        model.block2.wrapped_model.layer2,
+        model.block2.wrapped_model.layer2,  # pyrefly: ignore[missing-attribute]
         sowed_module.SowedModule,
     )
     self.assertIsInstance(
-        model.block2.wrapped_model.other_layers[0],
+        model.block2.wrapped_model.other_layers[0],  # pyrefly: ignore[missing-attribute]
         sowed_module.SowedModule,
     )
     self.assertIsInstance(
-        model.block2.wrapped_model.other_layers[1],
+        model.block2.wrapped_model.other_layers[1],  # pyrefly: ignore[missing-attribute]
         sowed_module.SowedModule,
     )
     self.assertIsInstance(
@@ -215,11 +215,11 @@ class SowedModuleTest(absltest.TestCase):
         model.block1.wrapped_model.layer2.wrapped_model, original_b1_l2
     )
     self.assertIs(
-        model.block1.wrapped_model.other_layers[0].wrapped_model,
+        model.block1.wrapped_model.other_layers[0].wrapped_model,  # pyrefly: ignore[missing-attribute]
         original_b1_other_layers_0,
     )
     self.assertIs(
-        model.block1.wrapped_model.other_layers[1].wrapped_model,
+        model.block1.wrapped_model.other_layers[1].wrapped_model,  # pyrefly: ignore[missing-attribute]
         original_b1_other_layers_1,
     )
     self.assertIs(
@@ -229,11 +229,11 @@ class SowedModuleTest(absltest.TestCase):
         model.block2.wrapped_model.layer2.wrapped_model, original_b2_l2
     )
     self.assertIs(
-        model.block2.wrapped_model.other_layers[0].wrapped_model,
+        model.block2.wrapped_model.other_layers[0].wrapped_model,  # pyrefly: ignore[missing-attribute]
         original_b2_other_layers_0,
     )
     self.assertIs(
-        model.block2.wrapped_model.other_layers[1].wrapped_model,
+        model.block2.wrapped_model.other_layers[1].wrapped_model,  # pyrefly: ignore[missing-attribute]
         original_b2_other_layers_1,
     )
     self.assertIs(model.final_layer.wrapped_model, original_final)
@@ -316,11 +316,11 @@ class SowedModuleTest(absltest.TestCase):
     original_l2 = model.layer2
     # Manually wrap one layer first
     manual_wrapper = sowed_module.SowedModule(original_l1)
-    model.layer1 = manual_wrapper
+    model.layer1 = manual_wrapper  # pyrefly: ignore[bad-assignment]
 
     # Run the utility function
     target_types = [SimpleLayer]
-    sowed_module.wrap_model_with_sowed_modules(model, target_types)
+    sowed_module.wrap_model_with_sowed_modules(model, target_types)  # pyrefly: ignore[bad-argument-type]
 
     # Assert manually wrapped layer wasn't re-wrapped
     self.assertIs(model.layer1, manual_wrapper)
@@ -347,7 +347,7 @@ class SowedModuleTest(absltest.TestCase):
 
     # Wrap the model (all SimpleLayers)
     target_types = [SimpleLayer]
-    sowed_module.wrap_model_with_sowed_modules(model, target_types)
+    sowed_module.wrap_model_with_sowed_modules(model, target_types)  # pyrefly: ignore[bad-argument-type]
 
     # Unwrap the sowed modules
     sowed_module.unwrap_sowed_modules(model)

@@ -20,14 +20,15 @@ from typing import Any
 
 from etils import epath
 import numpy as np
+from tunix.utils import token_sanitization
 
 import sentencepiece as spm
 
 
 class TokenizerType(enum.Enum):
-  SP: str = 'sp'  # sentencepiece tokenizer
-  HF: str = 'hf'  # huggingface tokenizer
-  NONE: str = 'none'  # Represents no tokenizer
+  SP: str = 'sp'  # sentencepiece tokenizer  # pyrefly: ignore[invalid-annotation]
+  HF: str = 'hf'  # huggingface tokenizer  # pyrefly: ignore[invalid-annotation]
+  NONE: str = 'none'  # Represents no tokenizer  # pyrefly: ignore[invalid-annotation]
 
 
 class TokenizerAdapter:
@@ -97,9 +98,16 @@ class TokenizerAdapter:
       # e.g. llama3 HF tokenizers do not have pad_id
       if self._tokenizer.pad_token_id is None:
         self._tokenizer.pad_token = self._tokenizer.eos_token
-      return self._tokenizer.pad_token_id
+      return self._tokenizer.pad_token_id  # pyrefly: ignore[bad-return]
     else:
       return self._tokenizer.pad_id()
+
+  def dedup_bos_ids(self, ids: list[int]) -> list[int]:
+    """Deduplicates the bos_id at the beginning of the list."""
+    i = 0
+    while i < len(ids) - 1 and ids[i] == ids[i + 1] == self.bos_id():
+      i += 1
+    return ids[i:]
 
   def _missing_methods(self) -> list[str]:
     """Checks if the tokenizer has any missing methods."""
@@ -128,6 +136,15 @@ class TokenizerAdapter:
   def tokenizer(self) -> Any:
     return self._tokenizer
 
+  def __getattr__(self, name: str) -> Any:
+    """Delegate unknown attributes to the wrapped tokenizer.
+
+    This keeps the adapter compatible with callers that expect Hugging Face
+    tokenizer attributes such as bos_token/eos_token while still using the
+    normalized adapter interface for encode/decode/id helpers.
+    """
+    return getattr(self._tokenizer, name)
+
   def apply_chat_template(
       self,
       messages: list[dict[str, str]],
@@ -152,6 +169,13 @@ class TokenizerAdapter:
     Raises:
       NotImplementedError: If chat templating is not supported by the tokenizer.
     """
+    messages = [
+        {
+            **m,
+            'content': token_sanitization.sanitize_control_tokens(m['content']),
+        }
+        for m in messages
+    ]
     if self._tokenizer_type == TokenizerType.HF:
       return self._tokenizer.apply_chat_template(
           messages,
@@ -216,27 +240,34 @@ class Tokenizer(TokenizerAdapter):
 
     self.tokenizer_type = tokenizer_type
     if tokenizer_type == 'huggingface':
-      import transformers  # pylint: disable=g-import-not-at-top
+      import transformers  # pylint: disable=g-import-not-at-top  # pyrefly: ignore[missing-import]
 
       tokenizer = transformers.AutoTokenizer.from_pretrained(
           pretrained_model_name_or_path=tokenizer_path,
           add_bos_token=add_bos,
           add_eos_token=add_eos,
           token=hf_access_token,
+          extra_special_tokens={},
       )
     elif tokenizer_type == 'sentencepiece':
       model_proto = epath.Path(tokenizer_path).read_bytes()
-      tokenizer = spm.SentencePieceProcessor()
-      tokenizer.LoadFromSerializedProto(model_proto)
-      options = []
-      if add_bos:
-        options.append('bos')
-      if add_eos:
-        options.append('eos')
-
-      extra_options_str = ':'.join(options)
-      if extra_options_str:
-        tokenizer.SetEncodeExtraOptions(extra_options_str)
+      try:
+        tokenizer = spm.SentencePieceProcessor(
+            model_proto=model_proto,  # pyrefly: ignore[unexpected-keyword]
+            add_bos=bool(add_bos),  # pyrefly: ignore[unexpected-keyword]
+            add_eos=bool(add_eos),  # pyrefly: ignore[unexpected-keyword]
+        )
+      except TypeError:
+        tokenizer = spm.SentencePieceProcessor()
+        tokenizer.LoadFromSerializedProto(model_proto)
+        options = []
+        if add_bos:
+          options.append('bos')
+        if add_eos:
+          options.append('eos')
+        extra_options_str = ':'.join(options)
+        if extra_options_str:
+          tokenizer.SetEncodeExtraOptions(extra_options_str)
     else:
       raise ValueError(f'Unsupported tokenizer_type: {tokenizer_type}')
     super().__init__(tokenizer)
@@ -260,6 +291,7 @@ class Tokenizer(TokenizerAdapter):
     Returns:
       Tokens corresponding to the input string.
     """
+    example = token_sanitization.sanitize_control_tokens(example)
     int_list = []
     if self.bos_id():
       int_list.append(self.bos_id())

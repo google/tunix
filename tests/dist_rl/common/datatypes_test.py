@@ -1,0 +1,611 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Serialization-discipline tests for the common wire DTOs."""
+
+import dataclasses
+import time
+
+from absl.testing import absltest
+import cloudpickle
+import numpy as np
+from tunix.dist_rl.common import datatypes
+from tunix.dist_rl.common import rpc_utils
+
+WorkerState = datatypes.WorkerState
+
+
+@dataclasses.dataclass(frozen=True)
+class _HostWeightedMetric:
+  unreduced_sum: float
+  denominator: float
+  eps: float | None = None
+  min_denom: float | None = None
+
+
+def _rollout_response_dto() -> datatypes.RolloutResponse:
+  traj_item = datatypes.TrajectoryItem(
+      prompt_id="req-rollout-42",
+      group_index=1,
+      start_step=0,
+      traj=datatypes.Trajectory(
+          reward=1.25,
+          status=datatypes.TrajectoryStatus.SUCCEEDED,
+      ),
+      prompt_tokens=np.array([10, 11, 12], dtype=np.int32),
+      completion_tokens=np.array([20, 21], dtype=np.int32),
+      action_mask=np.array([1, 1], dtype=np.float32),
+      policy_version=7,
+      metadata={"response_time": 0.5},
+  )
+  return datatypes.RolloutResponse(
+      request_id="req-1",
+      status="SUCCEEDED",
+      payload=traj_item,
+      metadata={"response_time": 0.5},
+  )
+
+
+def _rollout_request_dto() -> datatypes.RolloutRequest:
+  return datatypes.RolloutRequest(
+      request_id="req-123",
+      prompt="Solve 2+2",
+      prompt_id="req-rollout-42",
+      group_index=1,
+      generation_kwargs={"max_tokens": 128, "temperature": 0.5},
+      max_turns=5,
+      target_policy_version=3,
+      metadata={"env": "math"},
+  )
+
+
+class WireSerializationTest(absltest.TestCase):
+
+  def test_rollout_request_round_trips_through_cloudpickle(self):
+    original = _rollout_request_dto()
+
+    restored = cloudpickle.loads(cloudpickle.dumps(original))
+
+    self.assertEqual(restored.request_id, original.request_id)
+    self.assertEqual(restored.prompt, original.prompt)
+    self.assertEqual(restored.prompt_id, original.prompt_id)
+    self.assertEqual(restored.group_index, original.group_index)
+    self.assertEqual(restored.generation_kwargs, original.generation_kwargs)
+    self.assertEqual(restored.max_turns, original.max_turns)
+    self.assertEqual(
+        restored.target_policy_version, original.target_policy_version
+    )
+    self.assertEqual(restored.metadata, original.metadata)
+
+  def test_train_request_round_trips_through_cloudpickle(self):
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([[1], [2]], dtype=np.int32),
+        prompt_mask=np.ones((2, 1), dtype=np.float32),
+        completion_ids=np.array([[3], [4]], dtype=np.int32),
+        completion_mask=np.ones((2, 1), dtype=np.float32),
+        advantages=np.array([1.0, 2.0], dtype=np.float32),
+        metadata={"step": 42},
+    )
+    original = datatypes.TrainRequest(
+        request_id="train-req-1",
+        payload=payload,
+        target_policy_version=2,
+        metadata={"lineage_id": "batch_0"},
+    )
+
+    restored = cloudpickle.loads(cloudpickle.dumps(original))
+
+    self.assertEqual(restored.request_id, "train-req-1")
+    self.assertEqual(restored.target_policy_version, 2)
+    self.assertEqual(restored.metadata, {"lineage_id": "batch_0"})
+    np.testing.assert_allclose(restored.payload.advantages, [1.0, 2.0])
+    np.testing.assert_array_equal(restored.payload.completion_mask, [[1], [1]])
+
+  def test_trajectory_response_round_trips_through_cloudpickle(self):
+    original = _rollout_response_dto()
+
+    restored = cloudpickle.loads(cloudpickle.dumps(original))
+
+    self.assertEqual(restored.request_id, original.request_id)
+    self.assertEqual(restored.status, original.status)
+    self.assertEqual(restored.metadata, original.metadata)
+    self.assertIsNone(restored.error)
+    self.assertIsNotNone(restored.payload)
+    self.assertEqual(restored.payload.prompt_id, original.payload.prompt_id)
+    self.assertEqual(restored.payload.group_index, original.payload.group_index)
+    self.assertEqual(
+        restored.payload.policy_version, original.payload.policy_version
+    )
+    self.assertEqual(restored.payload.traj.reward, original.payload.traj.reward)
+    np.testing.assert_array_equal(
+        restored.payload.prompt_tokens, original.payload.prompt_tokens
+    )
+    np.testing.assert_array_equal(
+        restored.payload.completion_tokens, original.payload.completion_tokens
+    )
+    np.testing.assert_array_equal(
+        restored.payload.action_mask, original.payload.action_mask
+    )
+
+  def test_error_result_round_trips(self):
+    result = datatypes.RolloutResponse(
+        request_id="req-2",
+        status="TIMEOUT",
+        error=datatypes.ErrorInfo(
+            error_type="TimeoutError",
+            message="deadline exceeded",
+            retryable=True,
+        ),
+    )
+
+    restored = cloudpickle.loads(cloudpickle.dumps(result))
+
+    self.assertEqual(restored.status, "TIMEOUT")
+    self.assertEqual(restored.error.error_type, "TimeoutError")
+    self.assertTrue(restored.error.retryable)
+    self.assertIsNone(restored.payload)
+
+  def test_metrics_buffer_defaults_and_wire_round_trip(self):
+    empty = datatypes.MetricsBuffer(id=-1)
+    self.assertEqual(empty.id, -1)
+    self.assertEqual(empty.weighted_metrics, {})
+    self.assertEqual(empty.scalar_metrics, {})
+    self.assertEqual(empty.aggregation_fns, {})
+    self.assertEqual(empty.mode, "train")
+    rpc_utils.validate_wire_safe(empty)
+    with self.assertRaises(dataclasses.FrozenInstanceError):
+      setattr(empty, "mode", "eval")
+
+    weighted: dict[str, _HostWeightedMetric] = {
+        "kl": _HostWeightedMetric(unreduced_sum=3.0, denominator=2.0, eps=1e-8)
+    }
+    scalars: dict[str, np.ndarray | np.number | float] = {
+        "loss": np.float32(0.25),
+        "grad_norm": np.array(1.5, dtype=np.float32),
+        "lr": 1e-4,
+    }
+    original = datatypes.MetricsBuffer(
+        id=7,
+        weighted_metrics=weighted,
+        scalar_metrics=scalars,
+        aggregation_fns={"grad_norm": np.mean},
+        mode="eval",
+    )
+    rpc_utils.validate_wire_safe(original)
+
+    restored = cloudpickle.loads(  # pylint: disable=g-unsafe-pickle-load
+        cloudpickle.dumps(original)
+    )
+
+    rpc_utils.validate_wire_safe(restored)
+    self.assertEqual(restored.id, 7)
+    self.assertEqual(restored.mode, "eval")
+    self.assertEqual(restored.weighted_metrics["kl"].unreduced_sum, 3.0)
+    self.assertEqual(restored.weighted_metrics["kl"].denominator, 2.0)
+    self.assertAlmostEqual(float(restored.scalar_metrics["loss"]), 0.25)
+    np.testing.assert_allclose(restored.scalar_metrics["grad_norm"], 1.5)
+    self.assertEqual(restored.scalar_metrics["lr"], 1e-4)
+    self.assertAlmostEqual(
+        float(restored.aggregation_fns["grad_norm"](np.array([1.0, 2.0]))), 1.5
+    )
+
+  def test_token_segment_enforces_shapes(self):
+    with self.assertRaisesRegex(
+        ValueError, "loss_mask shape .* != tokens shape"
+    ):
+      datatypes.TokenSegment(
+          source="env",
+          tokens=np.array([1, 2]),
+          loss_mask=np.array([1]),
+      )
+
+    with self.assertRaisesRegex(ValueError, "logps shape .* != tokens shape"):
+      datatypes.TokenSegment(
+          source="assistant",
+          tokens=np.array([1, 2]),
+          loss_mask=np.array([1, 1]),
+          logps=np.array([0.5]),
+      )
+
+  def test_trajectory_item_to_and_from_dict(self):
+    traj = {
+        "reward": 2.5,
+        "status": datatypes.TrajectoryStatus.SUCCEEDED,
+        "prompt_tokens": np.array([1, 2], dtype=np.int32),
+        "completion_tokens": np.array([3, 4], dtype=np.int32),
+        "action_mask": np.array([1.0, 1.0], dtype=np.float32),
+        "policy_version": 3,
+    }
+    item = datatypes.TrajectoryItem(
+        prompt_id="task_42",
+        group_index=1,
+        start_step=0,
+        traj=traj,
+        metadata={"key": "val"},
+    )
+    d = item.to_dict()
+    self.assertEqual(d["prompt_id"], "task_42")
+    self.assertEqual(d["group_index"], 1)
+    self.assertEqual(d["traj"]["policy_version"], 3)
+    self.assertEqual(d["metadata"], {"key": "val"})
+
+    restored = datatypes.TrajectoryItem.from_dict(d)
+    self.assertEqual(restored.prompt_id, "task_42")
+    self.assertEqual(restored.group_index, 1)
+    self.assertEqual(restored.policy_version, 3)
+    self.assertEqual(restored.metadata, {"key": "val"})
+    np.testing.assert_array_equal(restored.prompt_tokens, item.prompt_tokens)
+    np.testing.assert_array_equal(
+        restored.completion_tokens, item.completion_tokens
+    )
+
+  def test_health_report_defaults_heartbeat_unix_s_to_current_time(self):
+    before = time.time()
+    report = datatypes.HealthReport(state=WorkerState.READY)
+    after = time.time()
+    self.assertGreaterEqual(report.heartbeat_unix_s, before)
+    self.assertLessEqual(report.heartbeat_unix_s, after)
+
+  def test_request_defaults_request_id_to_uuid(self):
+    req1 = datatypes.Request()
+    req2 = datatypes.Request()
+    self.assertTrue(req1.request_id.startswith("req_"))
+    self.assertTrue(req2.request_id.startswith("req_"))
+    self.assertNotEqual(req1.request_id, req2.request_id)
+
+  def test_rollout_request_traj_id_formatting(self):
+    # Default group_index is 0
+    r_default = datatypes.RolloutRequest(prompt_id="42")
+    self.assertEqual(r_default.traj_id, "traj_42_g0")
+
+    # String prompt ID
+    r_str = datatypes.RolloutRequest(prompt_id="math_101")
+    self.assertEqual(r_str.traj_id, "traj_math_101_g0")
+
+    # Grouped at index 1
+    r_grouped_1 = datatypes.RolloutRequest(prompt_id="42", group_index=1)
+    self.assertEqual(r_grouped_1.traj_id, "traj_42_g1")
+
+    # TrajectoryItem traj_id
+    item = datatypes.TrajectoryItem(prompt_id="42", group_index=2, traj={})
+    self.assertEqual(item.traj_id, "traj_42_g2")
+
+  def test_trajectory_item_fields(self):
+    item = datatypes.TrajectoryItem(
+        prompt_id="prompt_88", group_index=4, traj={}
+    )
+    self.assertEqual(item.prompt_id, "prompt_88")
+    self.assertEqual(item.group_index, 4)
+
+    item_default = datatypes.TrajectoryItem(prompt_id="prompt_99", traj={})
+    self.assertEqual(item_default.prompt_id, "prompt_99")
+    self.assertEqual(item_default.group_index, 0)
+
+  def test_fault_tolerance_config_defaults_and_disabled_override(self):
+    cfg = datatypes.FaultToleranceConfig()
+    self.assertTrue(cfg.enabled)
+    self.assertEqual(cfg.max_task_retries, 1)
+    self.assertIsNone(cfg.poll_retry_budget_s)
+    self.assertEqual(cfg.min_active_rollout_ratio, 0.5)
+    self.assertEqual(cfg.min_active_rollout_grace_s, 900.0)
+    self.assertEqual(cfg.effective_max_task_retries, 1)
+    self.assertEqual(cfg.effective_poll_retry_budget_s, 60.0)
+
+    custom_enabled_cfg = datatypes.FaultToleranceConfig(
+        enabled=True,
+        min_active_rollout_ratio=0.75,
+        min_active_rollout_grace_s=0.0,
+    )
+    self.assertTrue(custom_enabled_cfg.enabled)
+    self.assertEqual(custom_enabled_cfg.effective_max_task_retries, 1)
+    self.assertEqual(custom_enabled_cfg.effective_poll_retry_budget_s, 60.0)
+    self.assertEqual(custom_enabled_cfg.min_active_rollout_ratio, 0.75)
+    self.assertEqual(custom_enabled_cfg.min_active_rollout_grace_s, 0.0)
+
+    no_guardrail_cfg = datatypes.FaultToleranceConfig(
+        min_active_rollout_ratio=None
+    )
+    self.assertIsNone(no_guardrail_cfg.min_active_rollout_ratio)
+
+    full_ratio_cfg = datatypes.FaultToleranceConfig(
+        min_active_rollout_ratio=1.0
+    )
+    self.assertEqual(full_ratio_cfg.min_active_rollout_ratio, 1.0)
+
+    disabled_default_budget = dataclasses.replace(cfg, enabled=False)
+    self.assertFalse(disabled_default_budget.enabled)
+    self.assertEqual(disabled_default_budget.effective_max_task_retries, 0)
+    self.assertEqual(
+        disabled_default_budget.effective_poll_retry_budget_s, 300.0
+    )
+
+    disabled_cfg = datatypes.FaultToleranceConfig(
+        enabled=False, max_task_retries=5, poll_retry_budget_s=15.0
+    )
+    self.assertFalse(disabled_cfg.enabled)
+    self.assertEqual(disabled_cfg.effective_max_task_retries, 0)
+    self.assertEqual(disabled_cfg.effective_poll_retry_budget_s, 15.0)
+
+    zero_budget_cfg = datatypes.FaultToleranceConfig(poll_retry_budget_s=0.0)
+    self.assertEqual(zero_budget_cfg.effective_poll_retry_budget_s, 0.0)
+
+    with self.assertRaisesRegex(ValueError, "max_task_retries must be >= 0"):
+      datatypes.FaultToleranceConfig(max_task_retries=-1)
+
+    with self.assertRaisesRegex(ValueError, "poll_retry_budget_s must be >= 0"):
+      datatypes.FaultToleranceConfig(poll_retry_budget_s=-5.0)
+
+    for bad_ratio in (0.0, -0.1, 1.01, float("nan"), float("inf")):
+      with self.subTest(bad_ratio=bad_ratio):
+        with self.assertRaisesRegex(
+            ValueError, r"min_active_rollout_ratio must be in \(0\.0, 1\.0\]"
+        ):
+          datatypes.FaultToleranceConfig(min_active_rollout_ratio=bad_ratio)
+
+    for bad_grace in (-0.1, float("-inf"), float("nan")):
+      with self.subTest(bad_grace=bad_grace):
+        with self.assertRaisesRegex(
+            ValueError, "min_active_rollout_grace_s must be >= 0"
+        ):
+          datatypes.FaultToleranceConfig(min_active_rollout_grace_s=bad_grace)
+
+
+class RLTrainerPayloadTest(absltest.TestCase):
+
+  def test_rl_trainer_payload_fields_and_replace(self):
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([1, 2], dtype=np.int32),
+        prompt_mask=np.ones(2, dtype=np.float32),
+        completion_ids=np.array([3, 4], dtype=np.int32),
+        completion_mask=np.ones(2, dtype=np.float32),
+        advantages=np.array([1.5, 1.5], dtype=np.float32),
+        num_segments=3,
+        metadata={"step": 1},
+    )
+    self.assertEqual(payload.num_segments, 3)
+    self.assertEqual(payload.metadata, {"step": 1})
+
+    replaced = dataclasses.replace(payload, num_segments=4)
+    self.assertEqual(replaced.num_segments, 4)
+    np.testing.assert_array_equal(replaced.prompt_ids, payload.prompt_ids)
+
+  def test_rl_trainer_payload_static_field_metadata(self):
+    static = {
+        f.name
+        for f in dataclasses.fields(datatypes.RLTrainerPayload)
+        if f.metadata == datatypes.STATIC_FIELD_METADATA
+    }
+    self.assertEqual(
+        static,
+        {
+            "num_segments",
+            "sampler_agreement_applied",
+            "routed_experts_ref",
+            "metadata",
+        },
+    )
+    self.assertEmpty([
+        f.name
+        for f in dataclasses.fields(datatypes.SFTTrainerPayload)
+        if f.metadata
+    ])
+
+  def test_logprobs_scoring_payload_static_field_metadata(self):
+    static = {
+        f.name
+        for f in dataclasses.fields(datatypes.LogprobsScoringPayload)
+        if f.metadata == datatypes.STATIC_FIELD_METADATA
+    }
+    self.assertEqual(static, {"pad_id", "eos_id", "temperature"})
+    payload = datatypes.LogprobsScoringPayload(
+        prompt_ids=np.array([[1, 2]], dtype=np.int32),
+        completion_ids=np.array([[3, 4]], dtype=np.int32),
+        pad_id=0,
+        eos_id=2,
+        temperature=0.8,
+    )
+    self.assertEqual(payload.pad_id, 0)
+    self.assertEqual(payload.eos_id, 2)
+    self.assertEqual(payload.temperature, 0.8)
+    self.assertIsNone(payload.segment_ids)
+
+  def test_rl_trainer_payload_cloudpickle_roundtrip(self):
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([10, 20], dtype=np.int32),
+        prompt_mask=np.ones(2, dtype=np.float32),
+        completion_ids=np.array([30, 40], dtype=np.int32),
+        completion_mask=np.ones(2, dtype=np.float32),
+        advantages=np.array([0.5, -0.5], dtype=np.float32),
+        segment_ids=np.array([1, 1], dtype=np.int32),
+        segment_positions=np.array([0, 1], dtype=np.int32),
+        num_segments=2,
+        metadata={"tag": "eval"},
+    )
+    restored = cloudpickle.loads(cloudpickle.dumps(payload))
+    self.assertEqual(restored.num_segments, 2)
+    self.assertEqual(restored.metadata, {"tag": "eval"})
+    np.testing.assert_array_equal(restored.prompt_ids, payload.prompt_ids)
+    np.testing.assert_allclose(restored.advantages, payload.advantages)
+
+
+class TokenSegmentRoutingTest(absltest.TestCase):
+  """`routed_experts` must line up with the tokens it describes."""
+
+  def test_rejects_length_mismatch(self):
+    """Only the per-token axis is checked; trailing axes are model-specific."""
+    tokens = np.arange(4, dtype=np.int32)
+    with self.assertRaisesRegex(ValueError, "routed_experts shape"):
+      datatypes.TokenSegment(
+          source="assistant",
+          tokens=tokens,
+          loss_mask=np.ones_like(tokens),
+          routed_experts=np.zeros((3, 2, 2), dtype=np.int32),
+      )
+
+
+class GenerationArgsTest(absltest.TestCase):
+
+  def test_generation_args_as_kwargs(self):
+    args = datatypes.GenerationArgs(
+        max_generation_steps=128,
+        temperature=0.7,
+        top_p=0.95,
+        return_logprobs=True,
+        return_routed_experts=True,
+    )
+    expected = {
+        "max_generation_steps": 128,
+        "temperature": 0.7,
+        "top_p": 0.95,
+        "return_logprobs": True,
+        "return_routed_experts": True,
+    }
+    self.assertEqual(args.as_kwargs(), expected)
+
+
+class IsValidTrajectoryTest(absltest.TestCase):
+  """Tests for datatypes.is_valid_trajectory and TrajectoryItem.is_valid."""
+
+  def _item(
+      self,
+      *,
+      status=datatypes.TrajectoryStatus.SUCCEEDED,
+      reward=1.0,
+      tokens=(3, 4),
+      masks=(1.0, 1.0),
+  ):
+    return datatypes.TrajectoryItem(
+        prompt_id="p0",
+        group_index=0,
+        traj={
+            "status": status,
+            "trajectory_reward": reward,
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array(tokens, dtype=np.int32),
+            "conversation_masks": np.array(masks, dtype=np.float32),
+        },
+    )
+
+  def test_valid_succeeded_and_max_steps_items(self):
+    self.assertTrue(self._item().is_valid)
+    self.assertTrue(
+        self._item(status=datatypes.TrajectoryStatus.MAX_STEPS_REACHED).is_valid
+    )
+
+  def test_rejects_failed_and_timeout_status(self):
+    for bad_status in (
+        datatypes.TrajectoryStatus.FAILED,
+        datatypes.TrajectoryStatus.TIMEOUT,
+        datatypes.TrajectoryStatus.ENV_TIMEOUT,
+        datatypes.TrajectoryStatus.CANCELLED,
+        "FAILED",
+        "TIMEOUT",
+        "ENV_TIMEOUT",
+        "CANCELLED",
+    ):
+      with self.subTest(status=bad_status):
+        self.assertFalse(self._item(status=bad_status).is_valid)
+
+  def test_rejects_empty_completion_or_all_zero_mask(self):
+    self.assertFalse(self._item(tokens=(), masks=()).is_valid)
+    self.assertFalse(self._item(tokens=(3, 4), masks=(0.0, 0.0)).is_valid)
+
+  def test_rejects_missing_traj_dict(self):
+    item = datatypes.TrajectoryItem(prompt_id="p0", group_index=0, traj=None)
+    self.assertFalse(item.is_valid)
+
+  def test_missing_status_defaults_to_valid_when_tokens_and_mask_present(self):
+    item = datatypes.TrajectoryItem(
+        prompt_id="p0",
+        group_index=0,
+        traj={
+            "prompt_tokens": np.array([1], dtype=np.int32),
+            "conversation_tokens": np.array([2], dtype=np.int32),
+            "conversation_masks": np.array([1.0], dtype=np.float32),
+        },
+    )
+    self.assertTrue(item.is_valid)
+
+  def test_routed_experts_ref_and_static_wire_encoding_helpers(self):
+    ref = datatypes.RoutedExpertsRef(
+        worker_id="w0", instance_id="inst0", ref_id=(5 << 32) | 9
+    )
+    self.assertEqual(ref.worker_id, "w0")
+    self.assertEqual(ref.instance_id, "inst0")
+    with self.assertRaises(ValueError):
+      datatypes.RoutedExpertsRef(worker_id="", instance_id="inst0", ref_id=1)
+    with self.assertRaises(ValueError):
+      datatypes.RoutedExpertsRef(worker_id="w0", instance_id="", ref_id=1)
+    with self.assertRaises(ValueError):
+      datatypes.RoutedExpertsRef(worker_id="w0", instance_id="inst0", ref_id=-1)
+    with self.assertRaises(ValueError):
+      datatypes.RoutedExpertsRef(
+          worker_id="w0", instance_id="inst0", ref_id=1 << 63
+      )
+    with self.assertRaises(ValueError):
+      datatypes.routed_experts_bytes_per_token(4.0, 8, "uint10")  # pyrefly: ignore[bad-argument-type]
+    with self.assertRaises(ValueError):
+      datatypes.routed_experts_bytes_per_token(4, "8", "uint10")  # pyrefly: ignore[bad-argument-type]
+
+    self.assertEqual(
+        datatypes.resolve_routed_experts_wire_encoding("auto", 128), "uint8"
+    )
+    self.assertEqual(
+        datatypes.resolve_routed_experts_wire_encoding("auto", 384), "uint10"
+    )
+    self.assertEqual(
+        datatypes.resolve_routed_experts_wire_encoding("auto", 2048), "int16"
+    )
+    with self.assertRaisesRegex(ValueError, "auto"):
+      datatypes.resolve_routed_experts_wire_encoding("auto", None)
+
+    self.assertEqual(
+        datatypes.routed_experts_bytes_per_token(61, 8, "uint10"), 610
+    )
+    self.assertEqual(
+        datatypes.routed_experts_bytes_per_token(61, 8, "uint8"), 488
+    )
+    self.assertEqual(
+        datatypes.routed_experts_bytes_per_token(61, 8, "int16"), 976
+    )
+
+    zeros_i = np.zeros((2,), dtype=np.int32)
+    zeros_f = np.zeros((2,), dtype=np.float32)
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=zeros_i,
+        prompt_mask=zeros_f,
+        completion_ids=zeros_i,
+        completion_mask=zeros_f,
+        advantages=zeros_f,
+        routed_experts_ref=ref,
+    )
+    self.assertEqual(payload.routed_experts_ref, ref)
+    with self.assertRaisesRegex(ValueError, "cannot hold both"):
+      datatypes.RLTrainerPayload(
+          prompt_ids=zeros_i,
+          prompt_mask=zeros_f,
+          completion_ids=zeros_i,
+          completion_mask=zeros_f,
+          advantages=zeros_f,
+          routed_experts=np.zeros((4, 2, 2), dtype=np.int16),
+          routed_experts_ref=ref,
+      )
+    with self.assertRaises(TypeError):
+      datatypes.WeightSyncRequest(policy_version=True)  # pyrefly: ignore[bad-argument-type]
+    with self.assertRaises(TypeError):
+      datatypes.WeightSyncRequest(min_retained_policy_version=True)  # pyrefly: ignore[bad-argument-type]
+
+
+if __name__ == "__main__":
+  absltest.main()

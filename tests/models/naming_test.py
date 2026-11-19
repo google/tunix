@@ -12,364 +12,344 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import dataclasses
-import inspect
 from absl.testing import absltest
 from absl.testing import parameterized
+import requests
+import tenacity
 from tunix.models import naming
-from tunix.models.gemma import model as gemma_model
-from tunix.models.gemma3 import model as gemma3_model
-from tunix.models.llama3 import model as llama3_model
-from tunix.models.qwen2 import model as qwen2_model
-from tunix.models.qwen3 import model as qwen3_model
+from tunix.models import registry
+from tunix.utils import env_utils
 
 
-@dataclasses.dataclass(frozen=True)
-class ModelTestInfo:
-  family: str
-  version: str
-  id: str
-  category: str
-
-
-_MODEL_INFO_MAP = {
-    'gemma-2b': ModelTestInfo(
-        family='gemma',
-        version='2b',
-        id='gemma_2b',
-        category='gemma',
-    ),
-    'gemma-2b-it': ModelTestInfo(
-        family='gemma',
-        version='2b_it',
-        id='gemma_2b_it',
-        category='gemma',
-    ),
-    'gemma1.1-2b-it': ModelTestInfo(
-        family='gemma1_1',
-        version='2b_it',
-        id='gemma1_1_2b_it',
-        category='gemma',
-    ),
-    'gemma-7b': ModelTestInfo(
-        family='gemma',
-        version='7b',
-        id='gemma_7b',
-        category='gemma',
-    ),
-    'gemma-7b-it': ModelTestInfo(
-        family='gemma',
-        version='7b_it',
-        id='gemma_7b_it',
-        category='gemma',
-    ),
-    'gemma1.1-7b-it': ModelTestInfo(
-        family='gemma1_1',
-        version='7b_it',
-        id='gemma1_1_7b_it',
-        category='gemma',
-    ),
-    'gemma2-2b': ModelTestInfo(
-        family='gemma2',
-        version='2b',
-        id='gemma2_2b',
-        category='gemma',
-    ),
-    'gemma2-2b-it': ModelTestInfo(
-        family='gemma2',
-        version='2b_it',
-        id='gemma2_2b_it',
-        category='gemma',
-    ),
-    'gemma2-9b': ModelTestInfo(
-        family='gemma2',
-        version='9b',
-        id='gemma2_9b',
-        category='gemma',
-    ),
-    'gemma2-9b-it': ModelTestInfo(
-        family='gemma2',
-        version='9b_it',
-        id='gemma2_9b_it',
-        category='gemma',
-    ),
-    'gemma-3-270m': ModelTestInfo(
-        family='gemma3',
-        version='270m',
-        id='gemma3_270m',
-        category='gemma3',
-    ),
-    'gemma-3-270m-it': ModelTestInfo(
-        family='gemma3',
-        version='270m_it',
-        id='gemma3_270m_it',
-        category='gemma3',
-    ),
-    'gemma-3-1b': ModelTestInfo(
-        family='gemma3',
-        version='1b',
-        id='gemma3_1b',
-        category='gemma3',
-    ),
-    'gemma-3-1b-it': ModelTestInfo(
-        family='gemma3',
-        version='1b_it',
-        id='gemma3_1b_it',
-        category='gemma3',
-    ),
-    'gemma-3-4b': ModelTestInfo(
-        family='gemma3',
-        version='4b',
-        id='gemma3_4b',
-        category='gemma3',
-    ),
-    'gemma-3-4b-it': ModelTestInfo(
-        family='gemma3',
-        version='4b_it',
-        id='gemma3_4b_it',
-        category='gemma3',
-    ),
-    'gemma-3-12b': ModelTestInfo(
-        family='gemma3',
-        version='12b',
-        id='gemma3_12b',
-        category='gemma3',
-    ),
-    'gemma-3-12b-it': ModelTestInfo(
-        family='gemma3',
-        version='12b_it',
-        id='gemma3_12b_it',
-        category='gemma3',
-    ),
-    'gemma-3-27b': ModelTestInfo(
-        family='gemma3',
-        version='27b',
-        id='gemma3_27b',
-        category='gemma3',
-    ),
-    'gemma-3-27b-it': ModelTestInfo(
-        family='gemma3',
-        version='27b_it',
-        id='gemma3_27b_it',
-        category='gemma3',
-    ),
-    'llama3-70b': ModelTestInfo(
-        family='llama3',
-        version='70b',
-        id='llama3_70b',
-        category='llama3',
-    ),
-    'llama3-405b': ModelTestInfo(
-        family='llama3',
-        version='405b',
-        id='llama3_405b',
-        category='llama3',
-    ),
-    'llama3.1-8b': ModelTestInfo(
-        family='llama3_1',
-        version='8b',
-        id='llama3_1_8b',
-        category='llama3',
-    ),
-    'llama3.2-1b': ModelTestInfo(
-        family='llama3_2',
-        version='1b',
-        id='llama3_2_1b',
-        category='llama3',
-    ),
-    'llama3.2-3b': ModelTestInfo(
-        family='llama3_2',
-        version='3b',
-        id='llama3_2_3b',
-        category='llama3',
-    ),
-    'qwen2.5-0.5b': ModelTestInfo(
-        family='qwen2_5',
-        version='0_5b',
-        id='qwen2_5_0_5b',
-        category='qwen2',
-    ),
-    'qwen2.5-1.5b': ModelTestInfo(
-        family='qwen2_5',
-        version='1_5b',
-        id='qwen2_5_1_5b',
-        category='qwen2',
-    ),
-    'qwen2.5-3b': ModelTestInfo(
-        family='qwen2_5',
-        version='3b',
-        id='qwen2_5_3b',
-        category='qwen2',
-    ),
-    'qwen2.5-7b': ModelTestInfo(
-        family='qwen2_5',
-        version='7b',
-        id='qwen2_5_7b',
-        category='qwen2',
-    ),
-    'qwen2.5-math-1.5b': ModelTestInfo(
-        family='qwen2_5',
-        version='math_1_5b',
-        id='qwen2_5_math_1_5b',
-        category='qwen2',
-    ),
-    'deepseek-r1-distill-qwen-1.5b': ModelTestInfo(
-        family='deepseek_r1_distill_qwen',
-        version='1_5b',
-        id='deepseek_r1_distill_qwen_1_5b',
-        category='qwen2',
-    ),
-    'qwen3-0.6b': ModelTestInfo(
-        family='qwen3',
-        version='0_6b',
-        id='qwen3_0_6b',
-        category='qwen3',
-    ),
-    'qwen3-1.7b': ModelTestInfo(
-        family='qwen3',
-        version='1_7b',
-        id='qwen3_1_7b',
-        category='qwen3',
-    ),
-    'qwen3-8b': ModelTestInfo(
-        family='qwen3',
-        version='8b',
-        id='qwen3_8b',
-        category='qwen3',
-    ),
-    'qwen3-14b': ModelTestInfo(
-        family='qwen3',
-        version='14b',
-        id='qwen3_14b',
-        category='qwen3',
-    ),
-    'qwen3-30b': ModelTestInfo(
-        family='qwen3',
-        version='30b',
-        id='qwen3_30b',
-        category='qwen3',
-    ),
-}
-_ALL_MODEL_MODULES = [
-    gemma_model,
-    gemma3_model,
-    llama3_model,
-    qwen2_model,
-    qwen3_model,
-]
-
-
-def _validate_full_model_coverage():
-  config_ids = []
-  all_model_ids = {k.id for k in _MODEL_INFO_MAP.values()}
-  # Check that all model configs in ModelConfig class are in _MODEL_INFO_MAP.
-  for model_module in _ALL_MODEL_MODULES:
-    if hasattr(model_module, 'ModelConfig'):
-      for name, member in inspect.getmembers(model_module.ModelConfig):
-        if (
-            name.startswith('_')
-            or name == 'get_default_sharding'
-            or not inspect.ismethod(member)
-            or member.__self__ is not model_module.ModelConfig
-        ):
-          continue
-        if name not in all_model_ids:
-          raise ValueError(
-              f'Model id {name} not found in _MODEL_INFO_MAP. Make sure the'
-              ' model is added to the map for full test coverage.'
-          )
-        config_ids.append(name)
-
-  # Check each item in _MODEL_INFO_MAP maps to a valid config id.This is to
-  # prevent deprecated models from lingering in the map.
-  for model_info in _MODEL_INFO_MAP.values():
-    if model_info.id not in config_ids:
-      raise ValueError(
-          f'Model name {model_info.id} not found in config_ids {config_ids}.'
-          ' Seems to be an oboslete/deprecated model. Remove from'
-          ' _MODEL_INFO_MAP.'
-      )
-
-
-def _get_test_cases_for_get_model_config_id():
+def _get_test_cases_for_get_model_config_id() -> list[dict[str, str]]:
   test_cases = []
-  _validate_full_model_coverage()
-  for name, model_info in _MODEL_INFO_MAP.items():
+  for model_info in registry.MODEL_CATALOG:
     test_cases.append({
-        'testcase_name': model_info.id,
-        'model_name': name,
-        'expected_config_id': model_info.id,
+        'testcase_name': model_info.model_config_id,
+        'model_name': model_info.model_name,
+        'expected_config_id': model_info.model_config_id,
     })
   return test_cases
 
 
-def _get_test_cases_for_get_model_family_and_version():
+def _get_test_cases_for_get_model_family_and_version() -> list[dict[str, str]]:
   test_cases = []
-  _validate_full_model_coverage()
-  for name, model_info in _MODEL_INFO_MAP.items():
+  for model_info in registry.MODEL_CATALOG:
     test_cases.append({
-        'testcase_name': model_info.id,
-        'model_name': name,
-        'expected_family': model_info.family,
-        'expected_version': model_info.version,
+        'testcase_name': model_info.model_config_id,
+        'model_name': model_info.model_name,
+        'expected_family': model_info.model_family,
+        'expected_version': model_info.model_version,
     })
-  test_cases.append({
-      'testcase_name': 'family_only',
-      'model_name': 'gemma1.1',
-      'expected_family': 'gemma1_1',
-      'expected_version': '',
-  })
   return test_cases
 
 
-def _get_test_cases_for_get_model_config_category():
+def _get_test_cases_for_get_model_config_category() -> list[dict[str, str]]:
   test_cases_dict = {}
-  _validate_full_model_coverage()
-  for name, model_info in _MODEL_INFO_MAP.items():
-    if model_info.family not in test_cases_dict:
-      test_cases_dict[model_info.family] = {
-          'testcase_name': model_info.family,
-          'model_name': name,
-          'expected_category': model_info.category,
+  for model_info in registry.MODEL_CATALOG:
+    if model_info.model_family not in test_cases_dict:
+      test_cases_dict[model_info.model_family] = {
+          'testcase_name': model_info.model_family,
+          'model_name': model_info.model_name,
+          'expected_category': model_info.model_config_category,
       }
   return list(test_cases_dict.values())
 
 
+def _get_test_cases_for_get_model_name_from_model_id() -> list[dict[str, str]]:
+  test_cases = []
+  for model_info in registry.MODEL_CATALOG:
+    test_cases.append({
+        'testcase_name': model_info.model_config_id,
+        'model_id': model_info.model_id,
+        'expected_name': model_info.model_name,
+    })
+  return test_cases
+
+
+def _get_test_cases_for_model_id_exists() -> list[dict[str, str]]:
+  return [
+      {
+          'testcase_name': model_info.model_config_id,
+          'model_id': model_info.model_id,
+      }
+      for model_info in registry.MODEL_CATALOG
+  ]
+
+
+def _get_test_cases_for_auto_population_with_HF_model_id() -> (
+    list[dict[str, str]]
+):
+  test_cases = []
+  for model_info in registry.MODEL_CATALOG:
+    test_cases.append({
+        'testcase_name': model_info.model_config_id,
+        'model_id': model_info.model_id,
+        'expected_name': model_info.model_name,
+        'expected_family': model_info.model_family,
+        'expected_version': model_info.model_version,
+        'expected_category': model_info.model_config_category,
+        'expected_config_id': model_info.model_config_id,
+    })
+  return test_cases
+
+
+def _get_test_cases_for_auto_population_with_config_id() -> (
+    list[dict[str, str]]
+):
+  test_cases = []
+  for model_info in registry.MODEL_CATALOG:
+    test_cases.append({
+        'testcase_name': model_info.model_config_id,
+        'model_id': model_info.model_config_id,
+        'expected_family': model_info.model_family,
+        'expected_version': model_info.model_version,
+        'expected_category': model_info.model_config_category,
+        'expected_config_id': model_info.model_config_id,
+    })
+  return test_cases
+
+
 class TestNaming(parameterized.TestCase):
 
-  def test_get_model_name_from_model_id(self):
+  @parameterized.named_parameters(
+      _get_test_cases_for_get_model_name_from_model_id()
+  )
+  def test_get_model_name_from_model_id(
+      self, model_id: str, expected_name: str
+  ):
     self.assertEqual(
-        naming.get_model_name_from_model_id('meta-llama/Llama-3.1-8B'),
-        'llama-3.1-8b',
+        naming.get_model_name_from_model_id(model_id),
+        expected_name,
     )
+
+  def test_get_model_name_from_model_id_no_slash_succeeds(self):
     self.assertEqual(
-        naming.get_model_name_from_model_id('Qwen/Qwen2.5-0.5B'), 'qwen2.5-0.5b'
+        naming.get_model_name_from_model_id('Llama-3.1-8B'), 'llama-3.1-8b'
     )
-    with self.assertRaises(ValueError):
-      naming.get_model_name_from_model_id('Llama-3.1-8B')
+
+  def test_get_model_name_from_model_id_config_id(self):
+    self.assertEqual(
+        naming.get_model_name_from_model_id('llama3p1_8b'), 'llama3p1_8b'
+    )
+
+  def test_get_model_name_from_model_id_nested_path(self):
+    self.assertEqual(
+        naming.get_model_name_from_model_id('google/gemma-2/flax/gemma-2-2b-it'),
+        'gemma-2-2b-it',
+    )
+
+  def test_get_model_name_from_model_id_empty_model_name(self):
+    with self.assertRaisesRegex(
+        ValueError, 'Invalid model ID format: .*. Model name cannot be empty.'
+    ):
+      naming.get_model_name_from_model_id('google/')
+
+  @tenacity.retry(
+      stop=tenacity.stop_after_attempt(3),
+      wait=tenacity.wait_exponential(multiplier=1, min=2, max=10),
+      retry=(
+          tenacity.retry_if_exception_type((
+              requests.exceptions.ConnectionError,
+              requests.exceptions.Timeout,
+          ))
+          | tenacity.retry_if_result(
+              lambda response: response.status_code >= 500
+          )
+      ),
+      reraise=True,
+  )
+  def _head_huggingface_model(self, model_id: str) -> requests.Response:
+    return requests.head(
+        f'https://huggingface.co/{model_id}',
+        allow_redirects=True,
+        timeout=10,
+    )
+
+  @parameterized.named_parameters(_get_test_cases_for_model_id_exists())
+  def test_model_id_exists_on_huggingface(self, model_id: str):
+    if env_utils.is_internal_env():
+      self.skipTest('Skipping Hugging Face check in internal environment')
+
+    response = self._head_huggingface_model(model_id)
+    self.assertEqual(
+        response.status_code,
+        200,
+        f'Model {model_id!r} not found on Hugging Face (status code:'
+        f' {response.status_code}). Please ensure that the model config added'
+        ' matches exaclty to a valid model id on Hugging Face.',
+    )
 
   @parameterized.named_parameters(
       _get_test_cases_for_get_model_family_and_version()
   )
   def test_get_model_family_and_version(
-      self, model_name, expected_family, expected_version
+      self, model_name: str, expected_family: str, expected_version: str
   ):
     self.assertEqual(
         naming.get_model_family_and_version(model_name),
         (expected_family, expected_version),
     )
 
+  def test_get_model_family_and_version_format_agnostic(self):
+    self.assertEqual(
+        naming.get_model_family_and_version('gemma-2-2b-it'),
+        naming.get_model_family_and_version('gemma2_2b_it'),
+    )
+
+  def test_get_model_family_and_version_invalid_fails(self):
+    with self.assertRaisesRegex(
+        ValueError, 'Could not determine model family for: foo-bar.'
+    ):
+      naming.get_model_family_and_version('foo-bar')
+
+  def test_get_model_family_and_version_invalid_format_fails(self):
+    with self.assertRaisesRegex(
+        ValueError,
+        'Invalid model ID format: .* Expected a Huggingface model ID or a'
+        ' ConfigId.',
+    ):
+      naming.get_model_family_and_version('foobar')
+
+  def test_get_model_family_and_version_invalid_version_fails(self):
+    with self.assertRaisesRegex(ValueError, 'Invalid model version format'):
+      naming.get_model_family_and_version('gemma-@b')
+
+  def test_split(self):
+    self.assertEqual(naming.split('gemma-7b'), ('gemma-', '7b'))
+    self.assertEqual(naming.split('gemma-1.1-7b'), ('gemma-1.1-', '7b'))
+    self.assertEqual(naming.split('gemma_7b'), ('gemma_', '7b'))
+    self.assertEqual(naming.split('gemma1p1_7b'), ('gemma1p1_', '7b'))
+
   @parameterized.named_parameters(_get_test_cases_for_get_model_config_id())
-  def test_get_model_config_id(self, model_name, expected_config_id):
+  def test_get_model_config_id(self, model_name: str, expected_config_id: str):
     self.assertEqual(naming.get_model_config_id(model_name), expected_config_id)
 
   @parameterized.named_parameters(
       _get_test_cases_for_get_model_config_category()
   )
-  def test_get_model_config_category(self, model_name, expected_category):
+  def test_get_model_config_category(
+      self, model_name: str, expected_category: str
+  ):
     self.assertEqual(
         naming.get_model_config_category(model_name), expected_category
     )
+
+  @parameterized.named_parameters(
+      _get_test_cases_for_auto_population_with_HF_model_id()
+  )
+  def test_model_naming_auto_population_with_HF_model_id(
+      self,
+      *,
+      model_id: str,
+      expected_name: str,
+      expected_family: str,
+      expected_version: str,
+      expected_category: str,
+      expected_config_id: str,
+  ):
+    with self.subTest(name='Test Model naming creation with HFModelId'):
+      naming_info = naming.ModelNaming(model_id=naming.HFModelId(model_id))
+      self.assertEqual(naming_info.model_id, model_id)
+      self.assertEqual(naming_info.model_name, expected_name)
+      self.assertEqual(naming_info.model_family, expected_family)
+      self.assertEqual(naming_info.model_version, expected_version)
+      self.assertEqual(naming_info.model_config_category, expected_category)
+      self.assertEqual(naming_info.model_config_id, expected_config_id)
+
+    with self.subTest(name='Test Model id type detection'):
+      self.assertTrue(naming._is_hf_model_id_type(naming_info.model_id))
+      self.assertFalse(naming._is_config_id_type(naming_info.model_id))
+      self.assertTrue(naming._is_hf_model_id_type(naming_info.model_name))
+      self.assertFalse(naming._is_config_id_type(naming_info.model_name))
+
+  @parameterized.named_parameters(
+      _get_test_cases_for_auto_population_with_config_id()
+  )
+  def test_model_naming_auto_population_with_config_id_model_id(
+      self,
+      *,
+      model_id: str,
+      expected_family: str,
+      expected_version: str,
+      expected_category: str,
+      expected_config_id: str,
+  ):
+    with self.subTest(name='Test Model naming creation with ConfigId'):
+      naming_info = naming.ModelNaming(model_id=naming.ConfigId(model_id))
+      self.assertEqual(naming_info.model_id, model_id)
+      self.assertEqual(naming_info.model_name, model_id)
+      self.assertEqual(naming_info.model_family, expected_family)
+      self.assertEqual(naming_info.model_version, expected_version)
+      self.assertEqual(naming_info.model_config_category, expected_category)
+      self.assertEqual(naming_info.model_config_id, expected_config_id)
+
+    with self.subTest(name='Test Model id type detection'):
+      self.assertFalse(naming._is_hf_model_id_type(naming_info.model_id))
+      self.assertTrue(naming._is_config_id_type(naming_info.model_id))
+      self.assertFalse(naming._is_hf_model_id_type(naming_info.model_name))
+      self.assertTrue(naming._is_config_id_type(naming_info.model_name))
+
+  def test_model_naming_no_model_id(self):
+    model_name = 'gemma-2b'
+    naming_info = naming.ModelNaming(model_name=model_name)
+    self.assertIsNone(naming_info.model_id)
+    self.assertEqual(naming_info.model_name, 'gemma-2b')
+    self.assertEqual(naming_info.model_family, 'gemma')
+    self.assertEqual(naming_info.model_version, '2b')
+    self.assertEqual(naming_info.model_config_category, 'gemma')
+    self.assertEqual(naming_info.model_config_id, 'gemma_2b')
+
+  def test_model_naming_missing_args(self):
+    with self.assertRaisesRegex(
+        ValueError, 'Either model_name or model_id must be provided'
+    ):
+      naming.ModelNaming()
+
+  def test_model_naming_invalid_model_name(self):
+    with self.assertRaisesRegex(
+        ValueError, 'Could not determine model family for: invalid-model'
+    ):
+      naming.ModelNaming(model_name='invalid-model')
+
+  def test_model_naming_mismatch(self):
+    with self.assertRaisesRegex(
+        ValueError,
+        'model_name set in ModelNaming and one inferred from model_id do not'
+        ' match',
+    ):
+      naming.ModelNaming(
+          model_name='gemma-7b', model_id=naming.HFModelId('google/gemma-2b')
+      )
+
+  def test_model_naming_family_mismatch(self):
+    with self.assertRaisesRegex(
+        ValueError,
+        'model_family mismatch:',
+    ):
+      naming.ModelNaming(model_name='gemma-2b', model_family='llama3')
+
+  def test_model_naming_version_mismatch(self):
+    with self.assertRaisesRegex(
+        ValueError,
+        'model_version mismatch:',
+    ):
+      naming.ModelNaming(model_name='gemma-2b', model_version='7b')
+
+  def test_model_naming_category_mismatch(self):
+    with self.assertRaisesRegex(
+        ValueError,
+        'model_config_category mismatch:',
+    ):
+      naming.ModelNaming(model_name='gemma-2b', model_config_category='llama3')
+
+  def test_model_naming_config_id_mismatch(self):
+    with self.assertRaisesRegex(
+        ValueError,
+        'model_config_id mismatch:',
+    ):
+      naming.ModelNaming(model_name='gemma-2b', model_config_id='gemma_7b')
+
 
 if __name__ == '__main__':
   absltest.main()

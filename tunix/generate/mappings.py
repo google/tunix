@@ -4,19 +4,24 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import importlib
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 
 class BackendMappingMixin:
   """Provides helper methods to retrieve backend-specific weight mappings."""
 
   DEFAULT_BACKEND = 'vllm_jax'
+  # Subclasses can override this to explicitly set the path
+  BACKEND_PACKAGE_PATH = None
 
   @classmethod
   def _backend_registry(cls) -> Dict[str, Any]:
-    module = cls.__module__
+    # Use the explicit path if provided, otherwise fallback to the module path
+    module = cls.BACKEND_PACKAGE_PATH or cls.__module__
+
     package_name = module.rsplit('.', 1)[0] if '.' in module else module
     package = importlib.import_module(package_name)
+
     return getattr(package, 'BACKEND_MAPPINGS', {})
 
   @classmethod
@@ -51,6 +56,10 @@ class BackendMappingMixin:
   def to_hf_hook_fns(cls, backend: str | None = None):
     return cls.mapping_for(backend).get('to_hf_hook_fns')
 
+  @classmethod
+  def preprocess_src_state(cls, backend: str | None = None):
+    return cls.mapping_for(backend).get('preprocess_src_state')
+
 
 @dataclass
 class MappingConfig:
@@ -66,6 +75,7 @@ class MappingConfig:
   lora_to_hf_mappings: Optional[Dict[str, Any]] = None
   to_hf_hook_fns: Optional[Dict[str, Any]] = None
   to_hf_transpose_keys: Optional[Dict[str, Tuple[int, ...]]] = None
+  preprocess_src_state: Optional[Callable[..., Any]] = None
 
   @classmethod
   def build(
@@ -83,13 +93,14 @@ class MappingConfig:
       return mapping_obj
 
     if mapping_obj is None:
-      return cls.from_model(model, backend)
+      return cls.from_model(model, backend)  # pyrefly: ignore[bad-argument-type]
 
     keys = (
         'to_hf_mappings',
         'lora_to_hf_mappings',
         'to_hf_hook_fns',
         'to_hf_transpose_keys',
+        'preprocess_src_state',
     )
 
     values: Dict[str, Any] = {}
@@ -116,6 +127,7 @@ class MappingConfig:
         lora_to_hf_mappings=resolved.get('lora_to_hf_mappings'),
         to_hf_hook_fns=resolved.get('to_hf_hook_fns'),
         to_hf_transpose_keys=resolved.get('to_hf_transpose_keys'),
+        preprocess_src_state=resolved.get('preprocess_src_state'),
     )
 
   @classmethod
@@ -143,6 +155,7 @@ class MappingConfig:
         lora_to_hf_mappings=maybe_call('lora_to_hf_mappings'),
         to_hf_hook_fns=maybe_call('to_hf_hook_fns'),
         to_hf_transpose_keys=maybe_call('to_hf_transpose_keys'),
+        preprocess_src_state=maybe_call('preprocess_src_state'),
     )
 
     for key, value in overrides.items():

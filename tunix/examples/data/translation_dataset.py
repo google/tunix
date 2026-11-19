@@ -43,6 +43,7 @@ def create_datasets(
     num_train_epochs: int | None,
     tokenizer: tokenizer_lib.Tokenizer,
     instruct_tuned: bool = False,
+    tfds_download: bool = True,
     input_template: dict[str, str] | None = None,
 ) -> tuple[Iterable[TrainingInput], Iterable[TrainingInput]]:
   """Creates train and eval data iterator.
@@ -55,6 +56,7 @@ def create_datasets(
       dataset will be repeated indefinitely.
     tokenizer: The tokenizer to use for tokenizing the dataset.
     instruct_tuned: Whether the dataset should be instruct tuned.
+    tfds_download: the download flag when using TFDS datasets.
     input_template: The input template to use for the dataset.
 
   Returns:
@@ -63,9 +65,11 @@ def create_datasets(
   if dataset_name == "mtnt/en-fr":
     import tensorflow_datasets.translate.mtnt
 
-    train_ds, eval_ds = tfds.data_source(dataset_name, split=("train", "valid"))
+    train_ds, eval_ds = tfds.data_source(
+        dataset_name, split=("train", "valid"), download=tfds_download
+    )
   elif dataset_name == "Helsinki-NLP/opus-100":  # Hugging Face dataloader
-    train_ds, eval_ds = datasets.load_dataset(
+    train_ds, eval_ds = datasets.load_dataset(  # pyrefly: ignore[no-matching-overload]
         dataset_name, data_dir="en-fr", split=("train", "validation")
     )
   else:
@@ -164,7 +168,7 @@ class _BuildTrainInput(grain.MapTransform):
 
     # The input sequence fed to the model is simply the concatenation of the
     # source and the destination.
-    tokens = np.concat([src_tokens, dst_tokens], axis=0)
+    tokens = np.concat([src_tokens, dst_tokens], axis=0)  # pyrefly: ignore[bad-assignment]
 
     # To prevent the model from updating based on the source (input)
     # tokens, add a target mask to each input.
@@ -174,12 +178,12 @@ class _BuildTrainInput(grain.MapTransform):
 
     # If the input tokens sequence is smaller than the target sequence size,
     # then pad it with pad tokens.
-    tokens = self._pad_up_to_max_len(tokens, self._pad_value)
+    tokens = self._pad_up_to_max_len(tokens, self._pad_value)  # pyrefly: ignore[bad-argument-type, bad-assignment]
 
     # Don't want to perform the backward pass on the pad tokens.
     mask = self._pad_up_to_max_len(mask, 0)
 
-    return TrainingInput(input_tokens=tokens, input_mask=mask)
+    return TrainingInput(input_tokens=tokens, input_mask=mask)  # pyrefly: ignore[bad-argument-type]
 
   def _pad_up_to_max_len(
       self, input_tensor: np.ndarray, pad_value: int

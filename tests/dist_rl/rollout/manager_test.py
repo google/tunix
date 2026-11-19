@@ -1,0 +1,1519 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import asyncio
+import types
+from typing import Any
+import unittest
+from unittest import mock
+
+from absl.testing import absltest
+import numpy as np
+from tunix.dist_rl.common import datatypes
+from tunix.dist_rl.common import test_utils
+from tunix.dist_rl.rollout import manager as manager_lib
+from tunix.dist_rl.rollout import sampler as sampler_lib
+from tunix.dist_rl.trajectory import trajectory as trajectory_lib
+from tunix.dist_rl.worker import rollout_worker
+from tunix.dist_rl.worker import staging_buffer as sb_lib
+
+
+class _FakeSampler(sampler_lib.Sampler):
+
+  def __init__(self, metadata):
+    self._metadata = metadata
+    self.calls = []
+
+  async def get_weight_sync_metadata(self, **kwargs):
+    self.calls.append(kwargs)
+    return self._metadata
+
+  async def bind_weight_sync(self, **kwargs):
+    self.calls.append("bind")
+    return None
+
+  async def pre_weight_sync(self, sync_request=None, **kwargs):
+    return "ok"
+
+
+class GetWeightSyncMetadataTest(unittest.IsolatedAsyncioTestCase):
+
+  async def test_delegates_to_sampler(self):
+    sampler = _FakeSampler([{"unit": "sampler0"}])
+    manager = manager_lib.RolloutManager(
+        config=rollout_worker.RolloutConfig(),
+        sampler=sampler,
+        tokenizer="mock",
+        chat_parser="mock",
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
+    )
+    result = await manager.get_weight_sync_metadata()
+    self.assertEqual(result, [{"unit": "sampler0"}])
+
+  async def test_forwards_kwargs(self):
+    sampler = _FakeSampler([])
+    manager = manager_lib.RolloutManager(
+        config=rollout_worker.RolloutConfig(),
+        sampler=sampler,
+        tokenizer="mock",
+        chat_parser="mock",
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
+    )
+    await manager.get_weight_sync_metadata(timeout_s=5)
+    self.assertEqual(sampler.calls, [{"timeout_s": 5}])
+
+  async def test_missing_sampler_raises(self):
+    with self.assertRaises(TypeError):
+      manager_lib.RolloutManager(
+          config=rollout_worker.RolloutConfig(),  # pyrefly: ignore[missing-argument]
+          tokenizer="mock",
+          chat_parser="mock",
+          env_factory=_CaptureEnv,
+          agent_factory=test_utils.MockAgent,
+      )
+
+  async def test_missing_tokenizer_raises(self):
+    with self.assertRaises(TypeError):
+      manager_lib.RolloutManager(
+          config=rollout_worker.RolloutConfig(),  # pyrefly: ignore[missing-argument]
+          sampler=_FakeSampler([]),
+          chat_parser="mock",
+          env_factory=_CaptureEnv,
+          agent_factory=test_utils.MockAgent,
+      )
+
+
+class _FakeSyncSampler(_FakeSampler):
+
+  async def pre_weight_sync(self, sync_request=None, **kwargs):
+    return "ok"
+
+  async def post_weight_sync(self, sync_request=None, **kwargs):
+    return "ok"
+
+
+class _CaptureEnv(test_utils.MockEnvironment):
+
+  last_init_kwargs = None
+
+  def __init__(self, **kwargs):
+    super().__init__()
+    self.init_kwargs = dict(kwargs)
+    _CaptureEnv.last_init_kwargs = self.init_kwargs
+
+
+class _NoopCollector:
+
+  def __init__(
+      self,
+      traj_id,
+      request,
+      sampler,
+      env_client,
+      agent,
+      tokenizer,
+      chat_parser,
+      eos_ids=None,
+      partial_rollout=False,
+      policy_version_fn=None,
+      routed_experts_encode_mode="auto",
+      routed_experts_num_experts=None,
+  ):
+    del (
+        request,
+        sampler,
+        agent,
+        tokenizer,
+        chat_parser,
+        eos_ids,
+        partial_rollout,
+        policy_version_fn,
+        routed_experts_encode_mode,
+        routed_experts_num_experts,
+    )
+    self.traj_id = traj_id
+    self.env = env_client
+
+  async def run_episode(self):
+    return datatypes.TrajectoryItem(
+        prompt_id=self.traj_id,
+        group_index=0,
+        traj={},
+    )
+
+
+class RegisteredEnvMetadataTest(unittest.IsolatedAsyncioTestCase):
+
+  async def test_generate_forwards_request_metadata_to_registered_env(self):
+    _CaptureEnv.last_init_kwargs = None
+    manager = manager_lib.RolloutManager(
+        config=rollout_worker.RolloutConfig(),
+        sampler=_FakeSyncSampler([]),
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    request = datatypes.RolloutRequest(
+        request_id="req_1",
+        prompt="prompt text",
+        prompt_id="prompt_1",
+        group_index=2,
+        target_policy_version=7,
+        metadata={
+            "question": "ignored top level",
+            "answer": "ignored top level",
+            "gold_answer": "ignored top level",
+            "env_config": {
+                "prompt": "prompt text",
+                "prompt_id": "prompt_1",
+                "question": "How many?",
+                "answer": "42",
+                "gold_answer": "42",
+                "max_steps": 3,
+            },
+        },
+    )
+
+    with mock.patch.object(
+        manager_lib.collector_lib,
+        "TrajectoryCollectorEngine",
+        _NoopCollector,
+    ):
+      await manager.generate(request)
+
+    self.assertIsNotNone(_CaptureEnv.last_init_kwargs)
+    self.assertEqual(_CaptureEnv.last_init_kwargs["prompt"], "prompt text")
+    self.assertEqual(_CaptureEnv.last_init_kwargs["prompt_id"], "prompt_1")
+    self.assertEqual(_CaptureEnv.last_init_kwargs["group_index"], 2)
+    self.assertEqual(_CaptureEnv.last_init_kwargs["policy_version"], 7)
+    self.assertEqual(_CaptureEnv.last_init_kwargs["question"], "How many?")
+    self.assertEqual(_CaptureEnv.last_init_kwargs["answer"], "42")
+    self.assertEqual(_CaptureEnv.last_init_kwargs["gold_answer"], "42")
+    self.assertEqual(_CaptureEnv.last_init_kwargs["max_steps"], 3)
+
+  async def test_worker_env_config_shallow_merged_with_request_and_overrides_defaults(
+      self,
+  ):
+    _CaptureEnv.last_init_kwargs = None
+    manager = manager_lib.RolloutManager(
+        config=rollout_worker.RolloutConfig(),
+        sampler=_FakeSyncSampler([]),
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
+        env_config={
+            "backend": "k8s",
+            "max_steps": 10,
+            "group_index": 99,
+        },
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    request = datatypes.RolloutRequest(
+        request_id="req_merge",
+        prompt="prompt text",
+        prompt_id="prompt_merge",
+        group_index=2,
+        target_policy_version=7,
+        metadata={
+            "env_config": {
+                "max_steps": 3,
+            },
+        },
+    )
+
+    with mock.patch.object(
+        manager_lib.collector_lib,
+        "TrajectoryCollectorEngine",
+        _NoopCollector,
+    ):
+      await manager.generate(request)
+
+    self.assertEqual(
+        _CaptureEnv.last_init_kwargs,
+        {
+            "backend": "k8s",
+            "max_steps": 3,
+            "group_index": 99,
+            "policy_version": 7,
+        },
+    )
+
+  async def test_failed_episode_strips_env_config_from_trajectory_error(self):
+    class _FailingCollector(_NoopCollector):
+
+      async def run_episode(self):
+        raise RuntimeError("sandbox boom")
+
+    manager = manager_lib.RolloutManager(
+        config=rollout_worker.RolloutConfig(),
+        sampler=_FakeSyncSampler([]),
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    request = datatypes.RolloutRequest(
+        request_id="req_err",
+        prompt="",
+        prompt_id="prompt_err",
+        group_index=1,
+        target_policy_version=3,
+        metadata={
+            "question": "Q0",
+            "env_config": {"verifier_bytes": b"\x80\xff"},
+        },
+    )
+
+    with mock.patch.object(
+        manager_lib.collector_lib,
+        "TrajectoryCollectorEngine",
+        _FailingCollector,
+    ):
+      err = await manager.generate(request)
+
+    self.assertNotIn("env_config", err.metadata)
+    self.assertEqual(err.metadata["question"], "Q0")
+    self.assertIn("env_config", request.metadata)
+
+
+class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
+
+  def _manager(self, **kwargs):
+    return manager_lib.RolloutManager(
+        config=rollout_worker.RolloutConfig(),
+        sampler=_FakeSyncSampler([]),
+        tokenizer="mock",
+        chat_parser="mock",
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
+        **kwargs,
+    )
+
+  async def test_pre_closes_admission(self):
+    manager = self._manager()
+    await manager.pre_weight_sync()
+    self.assertFalse(manager._traffic.is_admission_open())
+
+  async def test_post_reopens_admission(self):
+    manager = self._manager()
+    await manager.pre_weight_sync()
+    await manager.post_weight_sync()
+    self.assertTrue(manager._traffic.is_admission_open())
+
+  async def test_reopen_admission_after_abort(self):
+    manager = self._manager()
+    await manager.pre_weight_sync()
+    self.assertTrue(manager.reopen_admission())
+    self.assertTrue(manager._traffic.is_admission_open())
+
+  async def test_bind_delegates_to_sampler(self):
+    sampler = _FakeSyncSampler([])
+    manager = manager_lib.RolloutManager(
+        config=rollout_worker.RolloutConfig(),
+        sampler=sampler,
+        tokenizer="mock",
+        chat_parser="mock",
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
+    )
+    await manager.bind_weight_sync()
+
+  async def test_abort_weight_sync_delegates_and_reopens_admission(self):
+    sampler = mock.AsyncMock(spec=sampler_lib.Sampler)
+    sampler.abort_weight_sync.return_value = "aborted"
+    manager = manager_lib.RolloutManager(
+        config=rollout_worker.RolloutConfig(),
+        sampler=sampler,
+        tokenizer="mock",
+        chat_parser="mock",
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
+    )
+    manager._traffic.transition_to_syncing()
+    res = await manager.abort_weight_sync()
+    self.assertEqual(res, "aborted")
+    sampler.abort_weight_sync.assert_awaited_once()
+    self.assertTrue(manager._traffic.is_admission_open())
+
+  async def test_repeated_pre_is_allowed(self):
+    manager = self._manager()
+    await manager.pre_weight_sync()
+    await manager.pre_weight_sync()
+    self.assertFalse(manager._traffic.is_admission_open())
+
+  async def test_pre_waits_for_inflight_work(self):
+    manager = self._manager()
+    done = asyncio.Event()
+
+    async def work():
+      await done.wait()
+
+    task = asyncio.create_task(work())
+    manager._active_tasks["t0"] = task
+    manager._traffic.track(task)
+    pre = asyncio.create_task(manager.pre_weight_sync())
+    await asyncio.sleep(0.01)
+    self.assertFalse(pre.done())
+    done.set()
+    await task
+    manager._active_tasks.pop("t0", None)
+    await pre
+
+  async def test_drain_timeout_returns(self):
+    manager = self._manager(drain_timeout_s=0.05)
+    task = asyncio.create_task(asyncio.Event().wait())
+    manager._active_tasks["t0"] = task
+    manager._traffic.track(task)
+    await manager.pre_weight_sync()
+    task.cancel()
+    manager._active_tasks.pop("t0", None)
+
+
+class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
+
+  async def test_request_agent_config_overrides_worker_config(self):
+    created_configs = []
+
+    class FakeAgent(test_utils.MockAgent):
+
+      def __init__(self, **kwargs):
+        super().__init__()
+        created_configs.append(kwargs)
+
+    manager = manager_lib.RolloutManager(
+        config=rollout_worker.RolloutConfig(),
+        sampler=_FakeSyncSampler([]),
+        env_factory=_CaptureEnv,
+        agent_factory=FakeAgent,
+        agent_config={"source": "worker", "worker_only": True},
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    request = datatypes.RolloutRequest(
+        prompt="prompt",
+        prompt_id="p0",
+        metadata={
+            "agent_config": {"source": "request", "scaffold": "r2egym"},
+        },
+    )
+
+    expected_item = datatypes.TrajectoryItem(prompt_id="p0")
+    with mock.patch.object(
+        manager_lib.collector_lib, "TrajectoryCollectorEngine"
+    ) as collector_cls:
+      collector = collector_cls.return_value
+      collector.traj_id = request.traj_id
+      collector.env = None
+      collector.run_episode = mock.AsyncMock(return_value=expected_item)
+
+      result = await manager._generate_one(request)
+
+    self.assertIs(result, expected_item)
+    self.assertEqual(
+        created_configs, [{"source": "request", "scaffold": "r2egym"}]
+    )
+
+  async def test_worker_agent_config_is_fallback(self):
+    created_configs = []
+
+    class FakeAgent(test_utils.MockAgent):
+
+      def __init__(self, **kwargs):
+        super().__init__()
+        created_configs.append(kwargs)
+
+    manager = manager_lib.RolloutManager(
+        config=rollout_worker.RolloutConfig(),
+        sampler=_FakeSyncSampler([]),
+        env_factory=_CaptureEnv,
+        agent_factory=FakeAgent,
+        agent_config={"source": "worker"},
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    request = datatypes.RolloutRequest(prompt="prompt", prompt_id="p0")
+
+    expected_item = datatypes.TrajectoryItem(prompt_id="p0")
+    with mock.patch.object(
+        manager_lib.collector_lib, "TrajectoryCollectorEngine"
+    ) as collector_cls:
+      collector = collector_cls.return_value
+      collector.traj_id = request.traj_id
+      collector.env = None
+      collector.run_episode = mock.AsyncMock(return_value=expected_item)
+
+      result = await manager._generate_one(request)
+
+    self.assertIs(result, expected_item)
+    self.assertEqual(created_configs, [{"source": "worker"}])
+
+  async def test_configured_eos_tokens_reach_the_collector(self):
+    # The collector scores truncation against this set. If it stops arriving,
+    # the collector silently falls back to the tokenizer's own EOS and
+    # clip_ratio starts counting normal terminations as truncations.
+    config = rollout_worker.RolloutConfig(eos_tokens=[151643, 151645])
+    manager = manager_lib.RolloutManager(
+        config=config,
+        sampler=_FakeSyncSampler([]),
+        tokenizer="mock",
+        chat_parser="mock",
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
+    )
+    request = datatypes.RolloutRequest(prompt="prompt", prompt_id="p0")
+
+    with mock.patch.object(
+        manager_lib.collector_lib, "TrajectoryCollectorEngine"
+    ) as collector_cls:
+      collector = collector_cls.return_value
+      collector.traj_id = request.traj_id
+      collector.env = None
+      collector.run_episode = mock.AsyncMock(
+          return_value=datatypes.TrajectoryItem(prompt_id="p0")
+      )
+
+      await manager._generate_one(request)
+
+    self.assertEqual(
+        collector_cls.call_args.kwargs["eos_ids"], [151643, 151645]
+    )
+
+  async def test_unset_eos_tokens_leave_the_collector_on_its_default(self):
+    manager = manager_lib.RolloutManager(
+        config=rollout_worker.RolloutConfig(),
+        sampler=_FakeSyncSampler([]),
+        tokenizer="mock",
+        chat_parser="mock",
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
+    )
+    request = datatypes.RolloutRequest(prompt="prompt", prompt_id="p0")
+
+    with mock.patch.object(
+        manager_lib.collector_lib, "TrajectoryCollectorEngine"
+    ) as collector_cls:
+      collector = collector_cls.return_value
+      collector.traj_id = request.traj_id
+      collector.env = None
+      collector.run_episode = mock.AsyncMock(
+          return_value=datatypes.TrajectoryItem(prompt_id="p0")
+      )
+
+      await manager._generate_one(request)
+
+    self.assertIsNone(collector_cls.call_args.kwargs["eos_ids"])
+
+  async def test_generate_stamps_request_metadata_on_trajectory_error(self):
+    manager = manager_lib.RolloutManager(
+        config=rollout_worker.RolloutConfig(),
+        sampler=_FakeSyncSampler([]),
+        tokenizer="mock",
+        chat_parser="mock",
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
+    )
+    request = datatypes.RolloutRequest(
+        prompt="prompt",
+        prompt_id="prompt_7",
+        group_index=3,
+        target_policy_version=5,
+        metadata={
+            "batch_idx": 1,
+            "prompt_idx": 7,
+            "intra_batch_idx": 3,
+        },
+    )
+
+    with mock.patch.object(
+        manager_lib.collector_lib, "TrajectoryCollectorEngine"
+    ) as collector_cls:
+      collector = collector_cls.return_value
+      collector.traj_id = request.traj_id
+      collector.env = None
+      collector.run_episode = mock.AsyncMock(
+          side_effect=RuntimeError("sandbox crashed")
+      )
+
+      result = await manager._generate_one(request)
+
+    self.assertEqual(result.prompt_id, "prompt_7")
+    self.assertEqual(result.error_message, "sandbox crashed")
+    self.assertEqual(result.error_type, "RuntimeError")
+    self.assertEqual(
+        result.metadata,
+        {
+            "batch_idx": 1,
+            "prompt_idx": 7,
+            "intra_batch_idx": 3,
+            "prompt_id": "prompt_7",
+            "group_index": 3,
+            "policy_version": 5,
+        },
+    )
+
+
+class PartialRolloutTest(unittest.IsolatedAsyncioTestCase):
+
+  async def test_pre_weight_sync_skips_drain_when_partial_rollout_enabled(self):
+    sampler = mock.AsyncMock(spec=sampler_lib.Sampler)
+    sampler.pre_weight_sync.return_value = "ok"
+    sampler.weight_sync.return_value = 3
+    sampler.post_weight_sync.return_value = 3
+    config = rollout_worker.RolloutConfig(partial_rollout=True)
+    manager = manager_lib.RolloutManager(
+        config=config,
+        sampler=sampler,
+        tokenizer="mock",
+        chat_parser="mock",
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
+        drain_timeout_s=10.0,
+    )
+
+    never_done = asyncio.Event()
+    task = asyncio.create_task(never_done.wait())
+    manager._active_tasks["t0"] = task
+    manager._traffic.track(task)
+    fake_collector = mock.MagicMock()
+    manager._active_collectors["t0"] = fake_collector
+
+    try:
+      await asyncio.wait_for(manager.pre_weight_sync(), timeout=0.5)
+      fake_collector.pause.assert_called_once()
+      sampler.pre_weight_sync.assert_awaited_once_with(
+          None, partial_rollout=True
+      )
+
+      sync_req = sampler_lib.WeightSyncRequest(policy_version=3)
+      await manager.weight_sync(sync_req)
+      self.assertEqual(manager._policy_version, 3)
+
+      await manager.post_weight_sync(sync_req)
+      fake_collector.resume.assert_called_once()
+      self.assertEqual(manager._policy_version, 3)
+    finally:
+      task.cancel()
+      manager._active_tasks.pop("t0", None)
+      manager._active_collectors.pop("t0", None)
+
+
+class _PauseTrackingSampler(_FakeSyncSampler):
+
+  def __init__(self):
+    super().__init__([])
+    self.policy_version = 0
+    self.pause_calls = []
+    self.resume_calls = 0
+    self.pre_kwargs = []
+    self.sync_kwargs = []
+    self.post_kwargs = []
+    self._unpaused = asyncio.Event()
+    self._unpaused.set()
+
+  async def pause(
+      self, mode: str = "keep", *, clear_cache: bool = False, **kwargs
+  ):
+    del kwargs
+    self.pause_calls.append((mode, clear_cache))
+    self._unpaused.clear()
+
+  async def resume(self, **kwargs):
+    del kwargs
+    self.resume_calls += 1
+    self._unpaused.set()
+
+  async def pre_weight_sync(self, sync_request=None, **kwargs):
+    del sync_request
+    use_partial = bool(kwargs.get("partial_rollout", False))
+    await self.pause(
+        mode="keep" if use_partial else "wait",
+        clear_cache=not use_partial,
+    )
+    self.pre_kwargs.append(dict(kwargs))
+    return "ok"
+
+  async def weight_sync(self, sync_request=None, **kwargs):
+    self.sync_kwargs.append(dict(kwargs))
+    new_v = getattr(sync_request, "version", None)
+    if new_v is None:
+      new_v = getattr(sync_request, "policy_version", self.policy_version + 1)
+    self.policy_version = int(new_v)
+    return self.policy_version
+
+  async def post_weight_sync(self, sync_request=None, **kwargs):
+    del sync_request
+    self.post_kwargs.append(dict(kwargs))
+    await self.resume()
+    return "ok"
+
+
+class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
+
+  async def test_queued_admission_during_syncing_does_not_raise(self):
+    sampler = _PauseTrackingSampler()
+    manager = manager_lib.RolloutManager(
+        config=rollout_worker.RolloutConfig(partial_rollout=True),
+        sampler=sampler,
+        tokenizer="mock",
+        chat_parser="mock",
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
+    )
+
+    await manager.pre_weight_sync()
+    self.assertFalse(manager._traffic.is_admission_open())
+
+    entered_episode = asyncio.Event()
+    observed_target_versions = []
+
+    class _RecordingCollector(_NoopCollector):
+
+      def __init__(self, traj_id, request, *args, **kwargs):
+        super().__init__(traj_id, request, *args, **kwargs)
+        self.request = request
+
+      async def run_episode(self):
+        observed_target_versions.append(self.request.target_policy_version)
+        entered_episode.set()
+        return datatypes.TrajectoryItem(
+            prompt_id=self.request.prompt_id,
+            group_index=self.request.group_index,
+            traj={},
+            policy_version=self.request.target_policy_version,
+        )
+
+    req = datatypes.RolloutRequest(
+        prompt="queued prompt",
+        prompt_id="p_queued",
+        group_index=0,
+        target_policy_version=0,
+    )
+    with mock.patch.object(
+        manager_lib.collector_lib,
+        "TrajectoryCollectorEngine",
+        _RecordingCollector,
+    ):
+      gen_task = asyncio.create_task(manager.generate(req))
+      await asyncio.sleep(0.02)
+      # Must stay queued on wait_for_admission() without raising
+      # AdmissionClosedError.
+      self.assertFalse(gen_task.done())
+      self.assertFalse(entered_episode.is_set())
+
+      await manager.weight_sync(types.SimpleNamespace(version=2))
+      await manager.post_weight_sync()
+      result = await asyncio.wait_for(gen_task, timeout=2.0)
+
+    self.assertTrue(entered_episode.is_set())
+    self.assertEqual(observed_target_versions, [2])
+    self.assertEqual(result.policy_version, 2)
+
+  async def test_case1_single_turn_partial_rollout_off_drains_and_pauses_wait(
+      self,
+  ):
+    sampler = _PauseTrackingSampler()
+    manager = manager_lib.RolloutManager(
+        config=rollout_worker.RolloutConfig(partial_rollout=False),
+        sampler=sampler,
+        tokenizer="mock",
+        chat_parser="mock",
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
+    )
+    finish_turn = asyncio.Event()
+
+    class _SlowTurnCollector(_NoopCollector):
+
+      def __init__(self, traj_id, request, *args, **kwargs):
+        super().__init__(traj_id, request, *args, **kwargs)
+        self.paused = False
+
+      def pause(self):
+        self.paused = True
+
+      def resume(self):
+        self.paused = False
+
+      async def run_episode(self):
+        await finish_turn.wait()
+        return datatypes.TrajectoryItem(
+            prompt_id="p0", group_index=0, traj={}, policy_version=0
+        )
+
+    with mock.patch.object(
+        manager_lib.collector_lib,
+        "TrajectoryCollectorEngine",
+        _SlowTurnCollector,
+    ):
+      gen_task = asyncio.create_task(
+          manager.generate(datatypes.RolloutRequest(prompt="p", prompt_id="p0"))
+      )
+      await asyncio.sleep(0.01)
+
+      pre_task = asyncio.create_task(manager.pre_weight_sync())
+      await asyncio.sleep(0.02)
+      # Case 1 must wait for the in-flight turn to drain before pausing sampler.
+      self.assertFalse(pre_task.done())
+      self.assertEqual(sampler.pause_calls, [])
+
+      finish_turn.set()
+      await asyncio.wait_for(pre_task, timeout=2.0)
+      traj = await asyncio.wait_for(gen_task, timeout=2.0)
+
+    self.assertEqual(traj.policy_version, 0)
+    self.assertEqual(sampler.pause_calls, [("wait", True)])
+    await manager.post_weight_sync()
+    self.assertEqual(sampler.resume_calls, 1)
+
+  async def test_case2_single_turn_partial_rollout_on_skips_drain_and_preserves_kv(
+      self,
+  ):
+    sampler = _PauseTrackingSampler()
+    manager = manager_lib.RolloutManager(
+        config=rollout_worker.RolloutConfig(partial_rollout=True),
+        sampler=sampler,
+        tokenizer="mock",
+        chat_parser="mock",
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
+    )
+    turn_started = asyncio.Event()
+
+    class _StitchedSingleTurnCollector(_NoopCollector):
+
+      def __init__(self, traj_id, request, *args, **kwargs):
+        super().__init__(traj_id, request, *args, **kwargs)
+        self.paused = False
+
+      def pause(self):
+        self.paused = True
+
+      def resume(self):
+        self.paused = False
+
+      async def run_episode(self):
+        start_v = sampler.policy_version
+        turn_started.set()
+        # Simulate mid-decode pause/resume across weight sync: waits until
+        # weight_sync + post_weight_sync have updated weights and resumed.
+        while (
+            sampler.policy_version == start_v or not sampler._unpaused.is_set()
+        ):
+          await asyncio.sleep(0.005)
+        return datatypes.TrajectoryItem(
+            prompt_id="p0",
+            group_index=0,
+            traj={},
+            policy_version=start_v,
+        )
+
+    with mock.patch.object(
+        manager_lib.collector_lib,
+        "TrajectoryCollectorEngine",
+        _StitchedSingleTurnCollector,
+    ):
+      gen_task = asyncio.create_task(
+          manager.generate(datatypes.RolloutRequest(prompt="p", prompt_id="p0"))
+      )
+      await asyncio.wait_for(turn_started.wait(), timeout=2.0)
+
+      # Case 2: pre_weight_sync returns immediately without draining in-flight
+      # turn.
+      await asyncio.wait_for(manager.pre_weight_sync(), timeout=0.5)
+      self.assertEqual(sampler.pause_calls, [("keep", False)])
+      self.assertEqual(sampler.pre_kwargs, [{"partial_rollout": True}])
+      self.assertFalse(gen_task.done())
+
+      await manager.weight_sync(types.SimpleNamespace(version=1))
+      await manager.post_weight_sync()
+      self.assertEqual(sampler.resume_calls, 1)
+
+      traj = await asyncio.wait_for(gen_task, timeout=2.0)
+      # Start-of-turn stamping: started under v0, resumed under v1 -> v0.
+      self.assertEqual(traj.policy_version, 0)
+
+  async def test_case3_multi_turn_partial_rollout_off_drains_full_episode(self):
+    sampler = _PauseTrackingSampler()
+    manager = manager_lib.RolloutManager(
+        config=rollout_worker.RolloutConfig(partial_rollout=False),
+        sampler=sampler,
+        tokenizer="mock",
+        chat_parser="mock",
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
+    )
+    in_env_step = asyncio.Event()
+    finish_turn2 = asyncio.Event()
+
+    class _MultiTurnCollector(_NoopCollector):
+
+      def pause(self):
+        pass
+
+      def resume(self):
+        pass
+
+      async def run_episode(self):
+        v1 = sampler.policy_version
+        in_env_step.set()
+        await finish_turn2.wait()
+        v2 = sampler.policy_version
+        return datatypes.TrajectoryItem(
+            prompt_id="p0",
+            group_index=0,
+            traj={},
+            policy_version=min(v1, v2),
+        )
+
+    with mock.patch.object(
+        manager_lib.collector_lib,
+        "TrajectoryCollectorEngine",
+        _MultiTurnCollector,
+    ):
+      gen_task = asyncio.create_task(
+          manager.generate(datatypes.RolloutRequest(prompt="p", prompt_id="p0"))
+      )
+      await asyncio.wait_for(in_env_step.wait(), timeout=2.0)
+
+      pre_task = asyncio.create_task(manager.pre_weight_sync())
+      await asyncio.sleep(0.02)
+      self.assertFalse(pre_task.done())
+
+      finish_turn2.set()
+      await asyncio.wait_for(pre_task, timeout=2.0)
+      await manager.weight_sync(types.SimpleNamespace(version=1))
+      await manager.post_weight_sync()
+      traj = await asyncio.wait_for(gen_task, timeout=2.0)
+
+    self.assertEqual(traj.policy_version, 0)
+    self.assertEqual(sampler.pause_calls, [("wait", True)])
+
+  async def test_case4_multi_turn_partial_rollout_on_parks_mid_env_at_turn_boundary(
+      self,
+  ):
+    sampler = _PauseTrackingSampler()
+    in_env_step = asyncio.Event()
+    release_env_step = asyncio.Event()
+    turn2_called_sampler = asyncio.Event()
+    turn_versions_seen = []
+
+    async def _sample_fn(req, **kwargs):
+      del req, kwargs
+      v = sampler.policy_version
+      turn_versions_seen.append(v)
+      if len(turn_versions_seen) == 2:
+        turn2_called_sampler.set()
+      return "ans"
+
+    sampler.sample = _sample_fn
+
+    class _FakeInnerCollectEngine:
+
+      def __init__(self, *, model_call, policy_version=0, **kwargs):
+        del kwargs
+        self._model_call = model_call
+        self.policy_version = policy_version
+        self._policy_versions = []
+
+      async def collect(self, mode="Token"):
+        del mode
+        # Turn 1 under v0
+        await self._model_call([{"role": "user", "content": "q1"}])
+        self._policy_versions.append(self.policy_version)
+        # Environment step in progress when weight sync begins
+        in_env_step.set()
+        await release_env_step.wait()
+        # Turn 2 must block on collector._unpaused until post_weight_sync
+        await self._model_call([{"role": "user", "content": "q2"}])
+        self._policy_versions.append(self.policy_version)
+        return {
+            "conversation_tokens": [1, 2, 3, 4],
+            "status": "DONE",
+            "policy_versions": self._policy_versions,
+        }
+
+    manager = manager_lib.RolloutManager(
+        config=rollout_worker.RolloutConfig(partial_rollout=True),
+        sampler=sampler,
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
+        tokenizer=types.SimpleNamespace(eos_token_id=2),
+        chat_parser=types.SimpleNamespace(
+            parse=lambda msgs, **kw: "prompt_str"
+        ),
+    )
+
+    with mock.patch.object(
+        manager_lib.collector_lib.rl_collect_engine,
+        "TrajectoryCollectEngine",
+        _FakeInnerCollectEngine,
+    ), mock.patch.object(
+        manager_lib.collector_lib,
+        "_build_prompt",
+        return_value=[1, 2],
+    ):
+      req = datatypes.RolloutRequest(
+          prompt="multi-turn q",
+          prompt_id="p_case4",
+          group_index=0,
+          max_response_length=32,
+          generation_kwargs={"max_generation_steps": 32},
+      )
+      gen_task = asyncio.create_task(manager.generate(req))
+      await asyncio.wait_for(in_env_step.wait(), timeout=2.0)
+
+      # Trigger pre_weight_sync while episode is inside env.step().
+      await asyncio.wait_for(manager.pre_weight_sync(), timeout=0.5)
+      self.assertEqual(sampler.pause_calls, [("keep", False)])
+
+      # Let env.step() finish while still in SYNCING; Turn 2 must park at
+      # collector._unpaused before calling sampler.sample().
+      release_env_step.set()
+      await asyncio.sleep(0.02)
+      self.assertFalse(turn2_called_sampler.is_set())
+
+      # Complete weight sync to v1 and resume.
+      await manager.weight_sync(types.SimpleNamespace(version=1))
+      await manager.post_weight_sync()
+
+      traj = await asyncio.wait_for(gen_task, timeout=2.0)
+
+    self.assertTrue(turn2_called_sampler.is_set())
+    self.assertEqual(turn_versions_seen, [0, 1])
+    self.assertEqual(traj.policy_versions, [0, 1])
+
+  async def test_fr1_synthetic_straggler_ab_benchmark(self):
+
+    async def _run_scenario(partial_rollout: bool) -> list[int]:
+      straggler_entered = asyncio.Event()
+      release_straggler = asyncio.Event()
+
+      sampler = _PauseTrackingSampler()
+      manager = manager_lib.RolloutManager(
+          config=rollout_worker.RolloutConfig(partial_rollout=partial_rollout),
+          sampler=sampler,
+          tokenizer="mock",
+          chat_parser="mock",
+          env_factory=_CaptureEnv,
+          agent_factory=test_utils.MockAgent,
+      )
+
+      class _StragglerCollector(_NoopCollector):
+
+        def __init__(self, traj_id, request, *args, **kwargs):
+          super().__init__(traj_id, request, *args, **kwargs)
+          self.request = request
+
+        def pause(self):
+          pass
+
+        def resume(self):
+          pass
+
+        async def run_episode(self):
+          start_v = sampler.policy_version
+          if self.request.metadata.get("is_straggler", False):
+            straggler_entered.set()
+            await release_straggler.wait()
+          while not sampler._unpaused.is_set():
+            await asyncio.sleep(0.001)
+          return datatypes.TrajectoryItem(
+              prompt_id=self.request.prompt_id,
+              group_index=self.request.group_index,
+              traj={},
+              policy_version=start_v,
+          )
+
+      requests = []
+      # Group 0: 4 fast rollouts
+      for g_idx in range(4):
+        requests.append(
+            datatypes.RolloutRequest(
+                prompt="g0",
+                prompt_id="group_0",
+                group_index=g_idx,
+                metadata={},
+            )
+        )
+      # Group 1: 3 fast rollouts + 1 straggler rollout
+      for g_idx in range(4):
+        requests.append(
+            datatypes.RolloutRequest(
+                prompt="g1",
+                prompt_id="group_1",
+                group_index=g_idx,
+                metadata={"is_straggler": True} if g_idx == 3 else {},
+            )
+        )
+
+      with mock.patch.object(
+          manager_lib.collector_lib,
+          "TrajectoryCollectorEngine",
+          _StragglerCollector,
+      ):
+        tasks = [asyncio.create_task(manager.generate(r)) for r in requests]
+        # Wait for the 7 fast tasks to complete and the straggler to enter.
+        await asyncio.gather(*tasks[:7])
+        await straggler_entered.wait()
+
+        if not partial_rollout:
+          # Wait mode (partial_rollout=False): pre_weight_sync drains all
+          # in-flight work before returning.
+          pre_sync_task = asyncio.create_task(manager.pre_weight_sync())
+          for _ in range(3):
+            await asyncio.sleep(0)
+          self.assertFalse(pre_sync_task.done())
+          release_straggler.set()
+          await asyncio.wait_for(pre_sync_task, timeout=5.0)
+          self.assertTrue(tasks[7].done())
+          self.assertEqual(sampler.pause_calls, [("wait", True)])
+          await manager.weight_sync(types.SimpleNamespace(version=1))
+          await manager.post_weight_sync()
+          self.assertEqual(sampler.resume_calls, 1)
+        else:
+          # Keep mode (partial_rollout=True): pre_weight_sync completes
+          # immediately while the straggler stays in-flight and is held by
+          # the paused sampler until post_weight_sync resumes it.
+          pre_sync_task = asyncio.create_task(manager.pre_weight_sync())
+          for _ in range(3):
+            await asyncio.sleep(0)
+          self.assertTrue(pre_sync_task.done())
+          await pre_sync_task
+          self.assertEqual(sampler.pause_calls, [("keep", False)])
+          self.assertFalse(sampler._unpaused.is_set())
+          release_straggler.set()
+          for _ in range(3):
+            await asyncio.sleep(0.002)
+          self.assertFalse(tasks[7].done())
+          await manager.weight_sync(types.SimpleNamespace(version=1))
+          await manager.post_weight_sync()
+          self.assertEqual(sampler.resume_calls, 1)
+
+        results = await asyncio.gather(*tasks)
+        return [r.policy_version for r in results]
+
+    wait_versions = await _run_scenario(partial_rollout=False)
+    keep_versions = await _run_scenario(partial_rollout=True)
+
+    self.assertEqual(wait_versions, [0] * 8)
+    self.assertEqual(keep_versions, [0] * 8)
+
+  async def test_routed_experts_encode_config_plumbed_to_collector(self):
+    with self.assertRaisesRegex(
+        ValueError, "routed_experts_encode_mode must be one of"
+    ):
+      rollout_worker.RolloutConfig(routed_experts_encode_mode="bad")
+
+    for bad_num in (0, -3, True, False):
+      with self.assertRaisesRegex(
+          ValueError, "routed_experts_num_experts must be a positive int"
+      ):
+        rollout_worker.RolloutConfig(routed_experts_num_experts=bad_num)
+
+    cfg = rollout_worker.RolloutConfig(
+        routed_experts_encode_mode="uint10",
+        routed_experts_num_experts=384,
+    )
+    manager = manager_lib.RolloutManager(
+        config=cfg,
+        sampler=_PauseTrackingSampler(),
+        tokenizer="mock",
+        chat_parser="mock",
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
+    )
+    captured_kwargs = {}
+
+    class _CapturingCollector(_NoopCollector):
+
+      def __init__(self, traj_id, request, *args, **kwargs):
+        super().__init__(traj_id, request, *args, **kwargs)
+        captured_kwargs.update(kwargs)
+
+    with mock.patch.object(
+        manager_lib.collector_lib,
+        "TrajectoryCollectorEngine",
+        _CapturingCollector,
+    ):
+      await manager.generate(
+          datatypes.RolloutRequest(prompt="p", prompt_id="p0", group_index=0)
+      )
+
+    self.assertEqual(captured_kwargs["routed_experts_encode_mode"], "uint10")
+    self.assertEqual(captured_kwargs["routed_experts_num_experts"], 384)
+
+  async def test_drain_timeout_default_and_validation(self):
+    manager = manager_lib.RolloutManager(
+        config=rollout_worker.RolloutConfig(),
+        sampler=_PauseTrackingSampler(),
+        tokenizer="mock",
+        chat_parser="mock",
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
+    )
+    self.assertEqual(manager.drain_timeout_s, 660.0)
+    self.assertFalse(manager.partial_rollout)
+
+    for invalid in (0, -5.0, float("nan"), float("inf"), True, False):
+      with self.assertRaisesRegex(
+          ValueError, "drain_timeout_s must be a positive finite number"
+      ):
+        manager_lib.RolloutManager(
+            config=rollout_worker.RolloutConfig(),
+            sampler=_PauseTrackingSampler(),
+            tokenizer="mock",
+            chat_parser="mock",
+            env_factory=_CaptureEnv,
+            agent_factory=test_utils.MockAgent,
+            drain_timeout_s=invalid,
+        )
+
+
+class StagingReservationManagerTest(unittest.IsolatedAsyncioTestCase):
+
+  def _make_staged_manager(
+      self,
+      *,
+      max_bytes: int = 1024,
+      sampler: Any = None,
+      max_prompt_length: int = 16,
+  ):
+    cfg = rollout_worker.RolloutConfig(
+        max_prompt_length=max_prompt_length,
+        max_tokens_to_generate=16,
+        return_routed_experts=True,
+        routed_experts_encode_mode="uint10",
+        routed_experts_num_experts=384,
+    )
+    buf = sb_lib.RolloutStagingBuffer(
+        "rollout-0", "inst-0", max_bytes=max_bytes
+    )
+    active_sampler = sampler or test_utils.MockBaseSamplerImpl(
+        default_delay=0.0,
+        response_tokens_per_turn=8,
+        routed_experts_shape_spec=(2, 4),
+        num_experts=384,
+    )
+    mgr = manager_lib.RolloutManager(
+        config=cfg,
+        sampler=active_sampler,
+        tokenizer=test_utils.MockTokenizer(),
+        chat_parser=test_utils.MockChatParser(),
+        env_factory=test_utils.MockEnvironment,
+        agent_factory=test_utils.MockAgent,
+        staging_buffer=buf,
+    )
+    return mgr, buf
+
+  async def test_missing_max_response_length_fails_fast(self):
+    mgr, buf = self._make_staged_manager()
+    with self.assertRaisesRegex(ValueError, "max_response_length"):
+      await mgr.generate(
+          datatypes.RolloutRequest(
+              prompt="hi",
+              prompt_id="p0",
+              max_response_length=None,
+              stage_routed_experts=True,
+          )
+      )
+    self.assertEqual(buf.reserved_bytes, 0)
+
+  async def test_done_callback_reclaims_reservation_on_pre_step_and_mid_cancel(
+      self,
+  ):
+    entered = asyncio.Event()
+    unblock = asyncio.Event()
+
+    class _BlockingSampler(test_utils.MockBaseSamplerImpl):
+
+      async def sample(self, sampling_requests, **kwargs):
+        entered.set()
+        await unblock.wait()
+        return await super().sample(sampling_requests, **kwargs)
+
+    mgr, buf = self._make_staged_manager(
+        sampler=_BlockingSampler(
+            default_delay=0.0, routed_experts_shape_spec=(2, 4)
+        )
+    )
+    req = datatypes.RolloutRequest(
+        prompt="hi",
+        prompt_id="p_cancel",
+        max_turns=1,
+        max_response_length=16,
+        stage_routed_experts=True,
+        generation_kwargs={"return_routed_experts": True, "force_finish": True},
+    )
+
+    # 1. Cancel mid-sampling after `sample()` has started.
+    gen_mid = asyncio.create_task(mgr.generate(req))
+    await entered.wait()
+    self.assertEqual(buf.reserved_bytes, (16 + 16) * 10)
+    mgr.cancel_all()
+    with self.assertRaises(asyncio.CancelledError):
+      await gen_mid
+    self.assertEqual(buf.reserved_bytes, 0)
+
+    # 2. Cancel BEFORE `_run_and_enqueue` executes its first coroutine step!
+    entered.clear()
+    gen_pre = asyncio.create_task(mgr.generate(req))
+    # One event-loop turn lets `_generate_one` pass `reserve()` and
+    # `wait_for_admission()` and schedule `task`, then cancel immediately.
+    await asyncio.sleep(0)
+    mgr.cancel_all()
+    with self.assertRaises(asyncio.CancelledError):
+      await gen_pre
+    self.assertEqual(buf.reserved_bytes, 0)
+    self.assertEqual(mgr.active_tasks, ())
+
+  async def test_holding_reservation_across_sync_preserves_fifo_order(self):
+    admitted: list[str] = []
+
+    class _OrderRecordingCollector:
+
+      def __init__(self, traj_id, request, **kwargs):
+        del kwargs
+        self.traj_id = traj_id
+        self.request = request
+        self.is_done = False
+        self.is_paused = False
+
+      def pause(self):
+        self.is_paused = True
+
+      def resume(self):
+        self.is_paused = False
+
+      def cancel(self):
+        self.is_done = True
+
+      async def run_episode(self):
+        admitted.append(self.request.prompt_id)
+        return datatypes.TrajectoryItem(
+            prompt_id=self.request.prompt_id,
+            group_index=0,
+            traj={
+                "status": "SUCCEEDED",
+                "prompt_tokens": np.array([1, 2], dtype=np.int32),
+                "conversation_tokens": np.array([3, 4], dtype=np.int32),
+                "conversation_masks": np.array([1.0, 1.0], dtype=np.float32),
+                "routed_experts": np.ones((4, 2, 1, 5), dtype=np.uint8),
+            },
+        )
+
+    # Capacity 320 bytes = exactly 1 slot of (16 + 16) * 10 = 320 bytes.
+    mgr, buf = self._make_staged_manager(max_bytes=320)
+    await mgr.pre_weight_sync()  # Close admission (SYNCING).
+
+    with mock.patch.object(
+        manager_lib.collector_lib,
+        "TrajectoryCollectorEngine",
+        _OrderRecordingCollector,
+    ):
+      t_first = asyncio.create_task(
+          mgr.generate(
+              datatypes.RolloutRequest(
+                  prompt="p",
+                  prompt_id="first",
+                  max_response_length=16,
+                  stage_routed_experts=True,
+              )
+          )
+      )
+      await asyncio.sleep(0.01)
+      # `t_first` holds the sole 320B reservation across SYNCING without
+      # blocking `drain()`, while `t_second` queues behind it in `reserve()`.
+      self.assertEqual(buf.reserved_bytes, 320)
+      t_second = asyncio.create_task(
+          mgr.generate(
+              datatypes.RolloutRequest(
+                  prompt="p",
+                  prompt_id="second",
+                  max_response_length=16,
+                  stage_routed_experts=True,
+              )
+          )
+      )
+      await asyncio.sleep(0.01)
+
+      await mgr.post_weight_sync(datatypes.WeightSyncRequest(policy_version=1))
+      item_first = await t_first
+      assert isinstance(item_first, datatypes.TrajectoryItem)
+      assert item_first.routed_experts_ref is not None
+      buf.release_staged([item_first.routed_experts_ref.ref_id])
+      item_second = await t_second
+      assert isinstance(item_second, datatypes.TrajectoryItem)
+      assert item_second.routed_experts_ref is not None
+      buf.release_staged([item_second.routed_experts_ref.ref_id])
+
+    self.assertEqual(admitted, ["first", "second"])
+    self.assertEqual(buf.used_bytes, 0)
+    self.assertEqual(buf.reserved_bytes, 0)
+
+  async def test_invalid_zero_mask_trajectory_skips_staging_and_cancels_quota(
+      self,
+  ):
+    class _ZeroMaskCollector:
+
+      def __init__(self, traj_id, request, **kwargs):
+        del kwargs
+        self.traj_id = traj_id
+        self.request = request
+        self.is_done = False
+        self.is_paused = False
+
+      async def run_episode(self):
+        return datatypes.TrajectoryItem(
+            prompt_id=self.request.prompt_id,
+            group_index=0,
+            traj={
+                "status": "MAX_CONTEXT_LIMIT_REACHED",
+                "prompt_tokens": np.array([1, 2], dtype=np.int32),
+                "conversation_tokens": np.array([3, 4], dtype=np.int32),
+                "conversation_masks": np.zeros(2, dtype=np.float32),
+                "routed_experts": np.ones((4, 2, 1, 5), dtype=np.uint8),
+            },
+        )
+
+    mgr, buf = self._make_staged_manager(max_bytes=640)
+    with mock.patch.object(
+        manager_lib.collector_lib,
+        "TrajectoryCollectorEngine",
+        _ZeroMaskCollector,
+    ):
+      item = await mgr.generate(
+          datatypes.RolloutRequest(
+              prompt="p",
+              prompt_id="overlong",
+              max_response_length=16,
+              stage_routed_experts=True,
+          )
+      )
+    assert isinstance(item, datatypes.TrajectoryItem)
+    self.assertFalse(item.is_valid)
+    self.assertIsNone(item.routed_experts_ref)
+    self.assertNotIn("routed_experts", item.traj)
+    self.assertEqual(buf.used_bytes, 0)
+    self.assertEqual(buf.reserved_bytes, 0)
+
+  async def test_stage_routed_experts_without_routed_output_returns_tombstone(
+      self,
+  ):
+    mgr, buf = self._make_staged_manager(max_bytes=2048, max_prompt_length=128)
+    res = await mgr.generate(
+        datatypes.RolloutRequest(
+            prompt="p",
+            prompt_id="missing_routed",
+            max_turns=1,
+            max_response_length=16,
+            stage_routed_experts=True,
+            generation_kwargs={
+                "return_routed_experts": False,
+                "force_finish": True,
+            },
+        )
+    )
+    self.assertIsInstance(res, trajectory_lib.TrajectoryError)
+    assert isinstance(res, trajectory_lib.TrajectoryError)
+    self.assertIn("produced no routed_experts", res.error_message)
+    self.assertEqual(buf.used_bytes, 0)
+    self.assertEqual(buf.reserved_bytes, 0)
+
+  async def test_cancellation_duplicate_traj_id_and_post_weight_sync_order(
+      self,
+  ):
+    mgr, buf = self._make_staged_manager(max_bytes=4096, max_prompt_length=128)
+    gate = asyncio.Event()
+    orig_sample = mgr.sampler.sample
+
+    async def _gated_sample(req, **kwargs):
+      if getattr(req, "request_id", None) == "traj_dup_g0":
+        await gate.wait()
+      return await orig_sample(req, **kwargs)
+
+    mgr.sampler.sample = _gated_sample
+
+    # Duplicate traj_id ("traj_dup_g0") requests remain independently tracked.
+    req_dup = datatypes.RolloutRequest(
+        prompt="p",
+        prompt_id="dup",
+        group_index=0,
+        max_turns=1,
+        max_response_length=16,
+        stage_routed_experts=True,
+        generation_kwargs={
+            "return_routed_experts": True,
+            "force_finish": True,
+        },
+    )
+    t1 = asyncio.create_task(mgr.generate(req_dup))
+    t2 = asyncio.create_task(mgr.generate(req_dup))
+    await asyncio.sleep(0.02)
+    self.assertEqual(len(mgr.active_tasks), 2)
+    gate.set()
+    r1, r2 = await asyncio.gather(t1, t2)
+    self.assertEqual(mgr.active_tasks, ())
+    buf.release_staged(
+        [r1.routed_experts_ref.ref_id, r2.routed_experts_ref.ref_id]
+    )
+    self.assertEqual(buf.used_bytes, 0)
+
+    # Batch generate failure cancels siblings and reclaims completed refs.
+    req_ok = datatypes.RolloutRequest(
+        prompt="p",
+        prompt_id="ok_sib",
+        group_index=0,
+        max_turns=1,
+        max_response_length=16,
+        stage_routed_experts=True,
+        generation_kwargs={
+            "return_routed_experts": True,
+            "force_finish": True,
+        },
+    )
+    req_bad = datatypes.RolloutRequest(
+        prompt="p",
+        prompt_id="bad_sib",
+        group_index=0,
+        max_turns=1,
+        max_response_length=0,
+        stage_routed_experts=True,
+    )
+    with self.assertRaisesRegex(ValueError, "max_response_length"):
+      await mgr.generate([req_ok, req_bad])
+    self.assertEqual(buf.used_bytes, 0)
+    self.assertEqual(buf.reserved_bytes, 0)
+
+    # RolloutManager.post_weight_sync updates staging buffer version before
+    # reopening admission and preserves positive version on default 0 request.
+    await mgr.pre_weight_sync()
+    await mgr.weight_sync(
+        datatypes.WeightSyncRequest(controller_id="c", policy_version=2)
+    )
+    await mgr.post_weight_sync(
+        datatypes.WeightSyncRequest(controller_id="c", policy_version=0)
+    )
+    self.assertEqual(mgr._policy_version, 2)
+    item = await mgr.generate(req_ok)
+    assert isinstance(item, datatypes.TrajectoryItem)
+    assert item.routed_experts_ref is not None
+    evicted = buf.on_post_weight_sync(3, min_retained_policy_version=3)
+    self.assertEqual(evicted, 1)
+
+
+if __name__ == "__main__":
+  absltest.main()

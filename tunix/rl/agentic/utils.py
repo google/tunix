@@ -14,11 +14,30 @@
 
 """Utility functions for agentic models."""
 
+import asyncio
 import threading
 from typing import Any, Optional
 
 import numpy as np
+import tunix.generate.tokenizer_adapter as tok_adapter
+from tunix.rl import packing
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_template_parser
+
+
+def left_pad(x, length, pad, dtype=np.int32):
+  x = np.asarray(x, dtype=dtype)
+  if x.size >= length:
+    return x[-length:]
+  pad_part = np.full(length - x.size, pad, dtype)
+  return np.concatenate([pad_part, x], axis=0)
+
+
+def right_pad(x, length, pad, dtype=np.int32):
+  x = np.asarray(x, dtype=dtype)
+  if x.size >= length:
+    return x[:length]
+  pad_part = np.full(length - x.size, pad, dtype)
+  return np.concatenate([x, pad_part], axis=0)
 
 
 def pad_prompt_and_completion(
@@ -29,21 +48,6 @@ def pad_prompt_and_completion(
     pad_id: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
   """Pads prompt tokens to the left and completion tokens to the right."""
-
-  def left_pad(x, length, pad):
-    x = np.asarray(x, dtype=np.int32)
-    if x.size >= length:
-      return x[-length:]
-    pad_part = np.full(length - x.size, pad, np.int32)
-    return np.concatenate([pad_part, x], axis=0)
-
-  def right_pad(x, length, pad):
-    x = np.asarray(x, dtype=np.int32)
-    if x.size >= length:
-      return x[:length]
-    pad_part = np.full(length - x.size, pad, np.int32)
-    return np.concatenate([x, pad_part], axis=0)
-
   left_padded_prompt_tokens = left_pad(prompt_tokens, max_prompt_length, pad_id)
   right_padded_completion_tokens = right_pad(
       completion_tokens, max_generation_steps, pad_id
@@ -55,8 +59,32 @@ def pad_prompt_and_completion(
   return left_padded_prompt_tokens, right_padded_completion_tokens, tokens
 
 
+def get_recent_assistant_message(
+    chat_completions_messages: list[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+  """Extracts the most recent assistant message from a chat completions list."""
+  for message in reversed(chat_completions_messages):
+    if message.get("role", None) == "assistant":
+      return message
+  return None
+
+
+def get_recent_env_messages(
+    chat_completions_messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+  """Extracts environment messages (user/tool) after the last assistant message."""
+  env_messages = []
+  for message in reversed(chat_completions_messages):
+    role = message.get("role", None)
+    if role == "assistant":
+      break
+    elif role in ["user", "tool"]:
+      env_messages.append(message)
+  return list(reversed(env_messages))
+
+
 def get_recent_assistant_user_messages(
-    chat_completions_messages: list[dict[str, Any]]
+    chat_completions_messages: list[dict[str, Any]],
 ) -> tuple[Optional[dict[str, Any]], list[dict[str, Any]]]:
   """Extracts the most recent assistant message and environment messages (user/tool) from a chat completions list.
 
@@ -70,20 +98,45 @@ def get_recent_assistant_user_messages(
           - A list of environment messages (user/tool) that occurred after the
           last assistant message, in chronological order.
   """
-  # Loop backwards to get the last assistant message and environment messages
-  env_messages = []
-  assistant_message = None
-  for message in reversed(chat_completions_messages):
-    role = message.get("role", None)
-    if role == "assistant":
-      assistant_message = message
-      break
-    elif role in ["user", "tool"] and assistant_message is None:
-      env_messages.append(message)
-  # Reverse the env_messages to maintain chronological order
-  env_messages = list(reversed(env_messages))
+  return (
+      get_recent_assistant_message(chat_completions_messages),
+      get_recent_env_messages(chat_completions_messages),
+  )
 
-  return assistant_message, env_messages
+
+def convert_messages_to_string(
+    message: dict[str, Any],
+) -> dict[str, str]:
+  """Converts non-string message values to strings.
+
+  Specifically, numpy array values are converted to their item representation.
+  Raises an error if, after processing, any value is not a string.
+
+  Args:
+    message: A dictionary representing a message.
+
+  Returns:
+    A new dictionary with all values ensured to be strings.
+
+  Raises:
+    ValueError: If any message field is not a string after preprocessing.
+  """
+  # Parse message to text
+  processed_messages = {}
+  for k, v in message.items():
+    if isinstance(v, np.ndarray):
+      processed_messages[k] = v.item()
+    elif k == "content" and v is None:
+      processed_messages[k] = ""
+    else:
+      processed_messages[k] = v
+
+    if not isinstance(processed_messages[k], str):
+      raise ValueError(
+          f"Message field {k} must be a string after preprocessing, got"
+          f" {type(processed_messages[k])}."
+      )
+  return processed_messages
 
 
 def convert_single_message(
@@ -105,9 +158,9 @@ def convert_single_message(
   Returns:
     A tuple containing (tokens, mask).
   """
-  # Parse message to text
+  processed_messages = convert_messages_to_string(msg)
   msg_text = parser.parse(
-      messages=[msg],
+      messages=[processed_messages],
       add_generation_prompt=is_generation,
       is_first_msg=is_first,
   )
@@ -135,7 +188,7 @@ def convert_single_message(
 
 def tokenize_and_generate_masks(
     messages: list[dict[str, str]],
-    tokenizer: Any,
+    tokenizer: tok_adapter.TokenizerAdapter,
     parser: chat_template_parser.BaseChatTemplateParser,
     contains_first_msg: bool = False,
     contains_generation_msg: bool = False,
@@ -174,6 +227,11 @@ def tokenize_and_generate_masks(
     all_tokens.extend(tokens)
     all_masks.extend(masks)
 
+  deduped_tokens = tokenizer.dedup_bos_ids(all_tokens)
+  n_removed = len(all_tokens) - len(deduped_tokens)
+  if n_removed > 0:
+    all_masks = all_masks[n_removed:]
+  all_tokens = deduped_tokens
   return all_tokens, all_masks
 
 
@@ -223,3 +281,55 @@ class RolloutSyncLock:
       # Notify waiting sync first, then all rollouts
       self._can_weight_sync.notify()
       self._can_rollout.notify_all()
+
+
+def get_or_create_loop():
+  """Returns the current event loop or creates a new one if needed."""
+  try:
+    loop = asyncio.get_event_loop()
+  except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+  return loop
+
+
+# ---- Multi-turn token continuity -------------------------------------------
+# A later turn is prompted with the ids the engine actually consumed so far,
+# never with re-encoded chat text:
+#
+#     prompt_k = prompt_0 + sum_{i<k} (assistant_tokens_i + env_tokens_i)
+#
+# prompt_0 is the row rollout tokenized on the first turn (kept as
+# `prompt_tokens[-prompt_length:]`); it is adopted, not re-tokenized.
+
+
+def assistant_with_suffix(
+    sampled_tokens, assistant_tokens, n_append: int
+) -> np.ndarray:
+  """Returns assistant IDs after checking the parser only appended `n_append`.
+
+  Raises:
+    ValueError: the parser changed the sampled prefix or appended a different
+      number of tokens than it reported.
+  """
+  sampled = packing.as_token_ids(sampled_tokens)
+  assistant = packing.as_token_ids(assistant_tokens)
+  if assistant.size != sampled.size + n_append or not np.array_equal(
+      assistant[: sampled.size], sampled
+  ):
+    raise ValueError("chat parser must only append tokens to the sampled ids")
+  return assistant
+
+
+def continuation_prompt_tokens(trajectory) -> np.ndarray:
+  """Builds the later-turn prompt: owned first prompt + every recorded turn."""
+  segments = [
+      packing.unpad_prompt(
+          trajectory.prompt_tokens, trajectory.prompt_length
+      )
+  ]
+  for step in trajectory.steps:
+    segments.append(packing.as_token_ids(step.assistant_tokens))
+    if step.env_tokens is not None:
+      segments.append(packing.as_token_ids(step.env_tokens))
+  return np.concatenate(segments)

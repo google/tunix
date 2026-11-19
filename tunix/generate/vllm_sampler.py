@@ -15,17 +15,19 @@
 """Sampler for vLLM-style autoregressive decoding using JAX and NNX models."""
 
 import atexit
+import concurrent.futures
+import copy
 import dataclasses
 from itertools import count
-import math
 import os
-from typing import Any, Dict, List, Optional, Tuple, Union
+import threading
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, cast
 
 from absl import logging
 import jax
-import jax.numpy as jnp
-from flax import nnx
 import jaxtyping
+import numpy as np
+import tqdm
 from tunix.generate import base_sampler
 from tunix.generate import tokenizer_adapter as tok_adapter
 from tunix.generate import utils
@@ -37,6 +39,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import TokensPrompt
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
+from vllm.sampling_params import RequestOutputKind
 from vllm.sampling_params import SamplingParams
 
 # Colocate vllm engine and worker in the main process
@@ -47,28 +50,102 @@ os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 class VllmConfig:
   """Vllm rollout configuations."""
 
-  model_version: str
-  max_model_len: int
-  mesh: jax.sharding.Mesh
-  hbm_utilization: float
-  init_with_random_weights: bool
-  tpu_backend_type: str
-  mapping_config: MappingConfig
-  # The size of the CPU swap space to use for the KV cache, in GiB.
-  # This allows vLLM to offload KV cache blocks from TPU/GPU memory (HBM) to
-  # CPU memory (RAM) when HBM is full.
-  # A larger swap space allows for larger batch sizes and longer sequences
-  # than what can fit in HBM alone, potentially increasing throughput.
-  # However, frequent swapping can increase latency due to the overhead of
-  # transferring data between CPU and TPU/GPU memory.
-  swap_space: float = 4.0  # in GiB
-  lora_config: Optional[Dict[str, Any]] = None
+  # Sampler related
   server_mode: bool = False
-  async_scheduling: bool = False
-  tensor_parallel_size: int = -1
-  data_parallel_size: int = -1
-  hf_config_path: Optional[Dict[str, Any]] = None
+  server_mode_submission_threshold: int = 0
+  server_mode_submission_timeout_s: float = 0.0
+  mapping_config: MappingConfig = dataclasses.field(
+      default_factory=MappingConfig
+  )
+  return_logprobs: bool = False
+  num_logprobs: int = 1
+  # Capture the MoE expert ids the rollout actually routed through, so training
+  # can replay them. Sets vLLM's `enable_return_routed_experts` engine arg.
+  return_routed_experts: bool = False
+  # Token ids that terminate a generation. Defaults to the tokenizer's single
+  # `eos_id()`, which for a chat model is only the chat-turn terminator.
+  eos_tokens: Optional[List[int]] = None
+
+  # vLLM Env vars
+  init_with_random_weights: bool = True
+  tpu_backend_type: str = "jax"
+
+  # vLLM engine arg related, requires additional processing before passing into engine
   additional_config: Optional[Dict[str, Any]] = None
+  enable_dp_attention: bool = False
+  # `None` currently falls back to 0.2 (see the TODO in `_vllm_config`).
+  hbm_utilization: Optional[float] = 0.5
+  lora_config: Optional[Dict[str, Any]] = None
+  mesh: Optional[jax.sharding.Mesh] = None
+  data_parallel_size: int = -1
+  tensor_parallel_size: int = -1
+  expert_parallel_size: int = 1
+  # Default to True to ensure old weights are deleted to free up HBM memory
+  delete_dst_buffers: bool = True
+  reshard_chunk_size: Optional[int] = None
+  # The weight sync materializes a second copy of the sampler weights on HBM
+  # while the new values are resharded in; freeing the KV cache first makes
+  # room for that copy. When the copy fits next to the KV pool anyway (small
+  # model, large pool) set False to skip the two collective RPCs and the
+  # re-allocation (~2 s per RL step on Qwen3-0.6B with a 57 GB pool).
+  free_kv_cache_during_weight_sync: bool = True
+  partial_rollout: bool = False
+  # Decode the text and extract the logprobs of each request as soon as it
+  # finishes, in a thread pool, while the engine keeps decoding the rest of
+  # the batch. Otherwise all of that runs serially after the last request
+  # finishes. Outputs are identical either way; False keeps the plain
+  # `LLM.generate` call (offline mode) / post-processing after all driver
+  # futures resolved (server mode).
+  overlap_postprocessing: bool = True
+  # Threads decoding finished requests when `overlap_postprocessing` is on.
+  postprocessing_threads: int = 4
+
+  # vLLM engine args that can be directly passed in without additional processing, e.g. max_model_len, async_scheduling, etc.
+  engine_kwargs: dataclasses.InitVar[Optional[Dict[str, Any]]] = None
+  _processed_engine_kwargs: Dict[str, Any] = dataclasses.field(
+      init=False, default_factory=dict
+  )
+
+  # VllmConfig fields that require special processing before being passed to
+  # vLLM and must not be passed via engine_kwargs, which is a raw pass-through
+  # to vLLM EngineArgs.
+  _RESERVED_KEYS: frozenset[str] = dataclasses.field(
+      default=frozenset(
+          {"tensor_parallel_size", "data_parallel_size", "expert_parallel_size"}
+      ),
+      init=False,
+      repr=False,
+      compare=False,
+  )
+  # vLLM sampling args that can be directly passed in without additional processing, e.g. temperature, stop etc.
+  sampling_kwargs: Dict[str, Any] = dataclasses.field(default_factory=dict)
+
+  def __post_init__(self, engine_kwargs: Optional[Dict[str, Any]]):
+    engine_kwargs = dict(engine_kwargs) if engine_kwargs else {}
+    illegal = self._RESERVED_KEYS & engine_kwargs.keys()
+    if illegal:
+      raise ValueError(
+          "VllmConfig fields must be set directly on VllmConfig, not passed"
+          f" via engine_kwargs: {sorted(illegal)}"
+      )
+    if "additional_config" in engine_kwargs:
+      self.additional_config = utils.merge_additional_config(
+          self.additional_config, engine_kwargs.pop("additional_config")
+      )
+    self._processed_engine_kwargs = engine_kwargs
+    if self.postprocessing_threads < 1:
+      raise ValueError(
+          "postprocessing_threads must be >= 1, got"
+          f" {self.postprocessing_threads}"
+      )
+    if isinstance(self.num_logprobs, bool) or self.num_logprobs < 1:
+      raise ValueError(f"num_logprobs must be >= 1, got {self.num_logprobs}")
+    if engine_kwargs:
+      for key, value in engine_kwargs.items():
+        logging.info(
+            "Engine kwargs setting key '%s' with value '%s'.", key, value
+        )
+        setattr(self, key, value)
 
 
 class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
@@ -80,6 +157,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
   Inherits from:
       base_sampler.BaseSampler
   """
+
+  _kv_cache_deleted: bool = False
 
   def __init__(
       self,
@@ -99,25 +178,35 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
     # vLLM DP only works with the new model design
     if config.data_parallel_size > 1:
-      os.environ["NEW_MODEL_DESIGN"] = "True"
+      os.environ["NEW_MODEL_DESIGN"] = "1"
 
     # tpu-inference backend recently removed this environment variable, however
     # still set it here for backward compatibility.
     if config.init_with_random_weights:
-      os.environ["JAX_RANDOM_WEIGHTS"] = "True"
+      os.environ["JAX_RANDOM_WEIGHTS"] = "1"
 
-    self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
+    self.tokenizer = tokenizer
+    if not isinstance(tokenizer, tok_adapter.TokenizerAdapter):
+      self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
     self.config = config
     self.args = self._vllm_config(config)
+    self._postprocess_pool: Optional[concurrent.futures.ThreadPoolExecutor] = (
+        None
+    )
+    self._postprocess_pool_lock = threading.Lock()
+    self._thread_local = threading.local()
     self._driver: VLLMInProcessDriver | None = None
     self.llm: LLM | None = None
+    self._kv_cache_deleted = False
     self._request_counter = count()
 
     if config.server_mode:
       self._driver = self._create_driver()
+      utils.detach_incompatible_vllm_cleanup_finalizer(self._driver.llm_engine)
       atexit.register(self.stop)
     else:
       self.llm = LLM(**self.args)
+      utils.detach_incompatible_vllm_cleanup_finalizer(self.llm.llm_engine)
 
     self.to_hf_key_mappings = dict(config.mapping_config.to_hf_mappings or {})
     self.to_hf_transpose_keys = config.mapping_config.to_hf_transpose_keys
@@ -128,34 +217,174 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     if config.lora_config and config.mapping_config.lora_to_hf_mappings:
       self.to_hf_key_mappings |= config.mapping_config.lora_to_hf_mappings
 
+  @property
+  def _postprocessed(self) -> Optional[Dict[str, list[Any]]]:
+    return getattr(self._thread_local, "postprocessed", None)
+
+  @_postprocessed.setter
+  def _postprocessed(self, value: Optional[Dict[str, list[Any]]]) -> None:
+    self._thread_local.postprocessed = value
+
+  @property
+  def mesh(self) -> jax.sharding.Mesh:
+    if hasattr(self._model_runner, "mesh") and isinstance(
+        self._model_runner.mesh, jax.sharding.Mesh
+    ):
+      return self._model_runner.mesh
+    else:
+      raise AttributeError(
+          "vLLM model runner doesn't have mesh or mesh is not a"
+          " jax.sharding.Mesh."
+      )
+
+  def pause(
+      self,
+      mode: str = "keep",
+      *,
+      clear_cache: bool = False,
+      timeout_s: float = 300.0,
+  ) -> None:
+    """Pauses the in-process driver loop (no-op in offline LLM mode)."""
+    if self._driver is not None:
+      self._driver.pause(
+          mode=mode, clear_cache=clear_cache, timeout_s=timeout_s
+      )
+
+  def resume(self) -> None:
+    """Resumes the in-process driver loop (no-op in offline LLM mode)."""
+    if self._driver is not None:
+      self._driver.resume()
+
+  @property
+  def is_paused(self) -> bool:
+    return bool(self._driver is not None and self._driver.is_paused)
+
+  def delete_cache(self) -> None:
+    if self._kv_cache_deleted:
+      return
+    if self.llm is not None:
+      self.llm.reset_prefix_cache()
+      self.llm.collective_rpc("delete_kv_cache")  # will free hbm
+    elif self._driver is not None:
+      self._driver.llm_engine.reset_prefix_cache()
+      self._driver.llm_engine.collective_rpc("delete_kv_cache")
+    self._kv_cache_deleted = True
+
+  def reset_prefix_cache(self) -> None:
+    if self.llm is not None:
+      self.llm.reset_prefix_cache()
+    elif self._driver is not None:
+      self._driver.llm_engine.reset_prefix_cache()
+
+  def refresh_state_leaves(self) -> None:
+    """Re-reads the runner's state leaves after its params were updated."""
+    runner = self._model_runner
+    if hasattr(runner, "refresh_state_leaves"):
+      runner.refresh_state_leaves()
+      return
+    state = runner.state
+    runner.state_leaves = (
+        state
+        if isinstance(state, dict)
+        else tuple(jax.tree_util.tree_leaves(state))
+    )
+
+  def reinitialize_cache(self) -> None:
+    self.refresh_state_leaves()
+
+    if self.llm is not None:
+      self.llm.collective_rpc("reinitialize_kv_cache")
+    elif self._driver is not None:
+      self._driver.llm_engine.collective_rpc("reinitialize_kv_cache")
+    self._kv_cache_deleted = False
+
+  def release_for_training(
+      self,
+      free_weights: bool = True,
+      src_state: jaxtyping.PyTree | None = None,
+  ) -> None:
+    """Releases rollout HBM (KV cache and optionally model weights) before training."""
+    if self.config.partial_rollout:
+      return
+    if self.config.free_kv_cache_during_weight_sync:
+      self.delete_cache()
+    if (
+        free_weights
+        and self.config.delete_dst_buffers
+        and not self._is_torchax_backend()
+    ):
+      jax.effects_barrier()
+      utils.delete_state_buffers(
+          self.transformer_state,
+          src_state=src_state,
+          key_mappings=self.to_hf_key_mappings or None,
+      )
+      self._model_runner.state_leaves = ()
+
+  def restore_after_training(self) -> None:
+    """Reallocates the KV cache if it was deleted before training."""
+    if self._kv_cache_deleted:
+      self.reinitialize_cache()
+    else:
+      self.refresh_state_leaves()
+
   # TODO(b/434969743): Optimize weight sharing between trainer and vllm sampler.
-  # TODO(b/434975493): Consider Release KV cache on the fly
   def update_params(
       self,
       updated_weights: jaxtyping.PyTree,
       filter_types: Optional[Tuple[Any, ...]] = None,
+      *,
+      preserve_active_kv_cache: Optional[bool] = None,
   ):
     del filter_types
+    cfg_partial = getattr(self.config, "partial_rollout", False)
+    keep_active_kv = (
+        bool(isinstance(cfg_partial, bool) and cfg_partial)
+        if preserve_active_kv_cache is None
+        else bool(preserve_active_kv_cache)
+    )
+
+    if keep_active_kv:
+      # Partial-rollout mode: keep active KV cache blocks intact for in-flight
+      # requests; prefix cache isolation across policy versions is enforced via
+      # per-request cache_salt.
+      pass
+    elif self.config.free_kv_cache_during_weight_sync:
+      self.delete_cache()
+    else:
+      # Keep the KV pool allocated; only its (stale) prefix entries go.
+      self.reset_prefix_cache()
+
+    # Synchronization point before weight sync
+    jax.effects_barrier()
 
     if self.to_hf_key_mappings:
-      # Mapped Weight Sync (e.g. HF -> MaxText)
-      utils.transfer_state_with_mappings(
-          src_state=updated_weights,
-          dst_state=self.transformer_state,
-          key_mappings=self.to_hf_key_mappings,
-          key_mapping_hook_fns=self.to_hf_hook_fns,
-          transpose_keys=self.to_hf_transpose_keys,
-          reshard_fn=reshard.reshard_pytree,
-      )
+      preprocess_fn = self.config.mapping_config.preprocess_src_state
+      if preprocess_fn:
+        tp_size = (
+            1
+            if self._is_torchax_backend()
+            else self.args.get("tensor_parallel_size", 1)
+        )
+        try:
+          updated_weights = preprocess_fn(updated_weights, tp_size=tp_size)
+        except TypeError:
+          updated_weights = preprocess_fn(updated_weights)
+
+      if self._is_torchax_backend():
+        self._update_params_torchax(updated_weights)
+      else:
+        self._update_params_jax(updated_weights)
     else:
       # Direct Weight Sync (e.g. MaxText -> MaxText)
-      logging.info(
-          "No key mappings configuration found. Proceeding with direct structural "
-          "weight synchronization (assuming matching source/target structures)."
+      logging.debug(
+          "No key mappings configuration found. Proceeding with direct"
+          " structural weight synchronization (assuming matching source/target"
+          " structures)."
       )
 
       additional_config = self.config.additional_config or {}
-      if 'maxtext_config' not in additional_config:
+      if "maxtext_config" not in additional_config:
         raise ValueError(
             "Direct weight synchronization is currently supported only for "
             "MaxText models. The required 'maxtext_config' key is missing "
@@ -166,8 +395,84 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           src_state=updated_weights,
           dst_state=self.transformer_state,
           reshard_fn=reshard.reshard_pytree,
+          delete_dst_buffers=self.config.delete_dst_buffers,
+          reshard_chunk_size=self.config.reshard_chunk_size,
       )
 
+    if (
+        self.config.free_kv_cache_during_weight_sync or self._kv_cache_deleted
+    ) and not keep_active_kv:
+      self.reinitialize_cache()
+    else:
+      self.refresh_state_leaves()
+
+  def _is_torchax_backend(self) -> bool:
+    """True when tpu-inference runs the vLLM (torchax) model implementation.
+
+    That path keeps the weights in a flat ``{name: jax.Array}`` dict in an
+    internal, tp-dependent layout and exposes `load_canonical_weights` on the
+    model wrapper to accept weights in vLLM's canonical (TP=1) layout.
+    """
+    runner = self._model_runner
+    return isinstance(getattr(runner, "state", None), dict) and hasattr(
+        getattr(runner, "model", None), "load_canonical_weights"
+    )
+
+  def _update_params_torchax(self, updated_weights: jaxtyping.PyTree) -> None:
+    """Mapped weight sync into the tpu-inference torchax model.
+
+    The mapping targets are the canonical vLLM parameter names/shapes
+    (`canonical_weight_specs`), not the runner's internal layout, so the
+    mapping stays independent of tensor parallelism and MoE backend. The
+    resharding and layout processing is delegated to tpu-inference.
+    """
+    runner = self._model_runner
+    specs = runner.model.canonical_weight_specs(runner.state)
+    mapped = utils.transfer_state_with_mappings(
+        src_state=updated_weights,
+        dst_state=specs,
+        key_mappings=self.to_hf_key_mappings,
+        key_mapping_hook_fns=self.to_hf_hook_fns,
+        transpose_keys=self.to_hf_transpose_keys,
+        reshard_fn=None,
+        num_kv_heads=runner.model_config.get_total_num_kv_heads(),
+        head_dim=runner.model_config.get_head_size(),
+        tp_size=self.args.get("tensor_parallel_size", 1),
+    )
+    # Untouched targets are still their ShapeDtypeStruct placeholders.
+    canonical = {
+        k: v
+        for k, v in mapped.items()
+        if not isinstance(v, jax.ShapeDtypeStruct)
+    }
+    runner.model.load_canonical_weights(canonical, runner.state)
+
+  def _update_params_jax(self, updated_weights: jaxtyping.PyTree) -> None:
+    """Mapped weight sync into the tpu-inference flax/nnx or flat dict state."""
+    updated_dst = utils.transfer_state_with_mappings(
+        src_state=updated_weights,
+        dst_state=self.transformer_state,
+        key_mappings=self.to_hf_key_mappings,
+        key_mapping_hook_fns=self.to_hf_hook_fns,
+        transpose_keys=self.to_hf_transpose_keys,
+        reshard_fn=reshard.reshard_pytree,
+        delete_dst_buffers=self.config.delete_dst_buffers,
+        reshard_chunk_size=self.config.reshard_chunk_size,
+        num_kv_heads=(
+            None
+            if not self._model_runner
+            else self._model_runner.model_config.get_total_num_kv_heads()
+        ),
+        head_dim=(
+            None
+            if not self._model_runner
+            else self._model_runner.model_config.get_head_size()
+        ),
+        tp_size=self.args.get("tensor_parallel_size", 1),
+    )
+    if isinstance(self.transformer_state, dict):
+      # Mutate in place to preserve `runner.state` dict identity for aliases.
+      self.transformer_state.update(updated_dst)
 
   def load_checkpoint(self, path_or_weights: str | jaxtyping.PyTree):
     # TODO(b/434741253): Consider support orbax checkpoint loading
@@ -176,58 +481,78 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     else:
       raise NotImplementedError("Only support in memory weight sync as of now.")
 
-  def _find_total_size(self, mesh: jax.sharding.Mesh) -> int:
-    """Finds the tensor parallel size from the mesh."""
-    # since vllm doesn't support DP yet, simply return the total rank size.
-    return math.prod(mesh.shape.values())
-
   def _vllm_config(self, config: VllmConfig):
     """Setup vllm config from Tunix Vllm config."""
-    tensor_parallel_size = config.tensor_parallel_size
-    data_parallel_size = config.data_parallel_size
-    total_mesh_devices = self._find_total_size(config.mesh)
+    args = config._processed_engine_kwargs.copy()
 
-    if config.tensor_parallel_size == -1 and config.data_parallel_size == -1:
-      tensor_parallel_size = total_mesh_devices
-      data_parallel_size = 1
-    elif config.tensor_parallel_size == -1:
-      tensor_parallel_size = total_mesh_devices // data_parallel_size
-    elif config.data_parallel_size == -1:
-      data_parallel_size = total_mesh_devices // tensor_parallel_size
+    # Skip unused multimodal vision towers by default during text-only RL
+    # rollouts; vLLM only evaluates this option for multimodal checkpoints and
+    # callers can override it via `engine_kwargs={"language_model_only": ...}`.
+    args.setdefault("language_model_only", True)
 
-    args = {}
     # Init vLLM model with random weights to speed up bootstrap time, because
     # model weights are synced from trainer later on
     if config.init_with_random_weights:
       args["load_format"] = "dummy"
 
-    args["model"] = config.model_version
-    args["max_model_len"] = config.max_model_len
-    args["gpu_memory_utilization"] = config.hbm_utilization
-    args["swap_space"] = config.swap_space
+    # TODO(yatlas): Remove default hbm_utilization once colocated hbm fixes are
+    # landed.
+    if config.hbm_utilization is not None:
+      args["gpu_memory_utilization"] = config.hbm_utilization
+    else:
+      args["gpu_memory_utilization"] = 0.2
 
-    args["data_parallel_size"] = data_parallel_size
-    args["tensor_parallel_size"] = tensor_parallel_size
-    args["async_scheduling"] = config.async_scheduling
+    if config.return_logprobs:
+      args.setdefault("max_logprobs", config.num_logprobs)
+      args.setdefault("logprobs_mode", "processed_logprobs")
 
-    args["additional_config"] = {}
+    if config.return_routed_experts:
+      args["enable_return_routed_experts"] = True
+
+    args["additional_config"] = dict(config.additional_config or {})
+
     if config.lora_config is not None:
       args["additional_config"]["lora_config"] = config.lora_config
-    device_indexes = config.mesh.device_ids.flatten().tolist()
-    args["additional_config"]["sharding"] = {
-        "sharding_strategy": {
-            "device_indexes": device_indexes,
-        }
-    }
 
-    # Add support for hf_config_path
-    if config.hf_config_path:
-      args["hf_config_path"] = config.hf_config_path
+    if config.mesh:
+      tp, dp, ep = utils.resolve_parallelism_sizes(
+          mesh=config.mesh,
+          tensor_parallel_size=config.tensor_parallel_size,
+          data_parallel_size=config.data_parallel_size,
+          expert_parallel_size=config.expert_parallel_size,
+      )
+      args["tensor_parallel_size"] = tp
+      args["data_parallel_size"] = dp
 
-    # Merge additional_config
-    args["additional_config"] = {}
-    if config.additional_config:
-      args["additional_config"].update(config.additional_config)
+      assert config.mesh is not None
+      device_indexes = config.mesh.device_ids.flatten().tolist()
+      # Merge with any sharding settings the caller put in `additional_config`
+      # (e.g. tpu-inference's `attn_dp_size`) instead of dropping them.
+      sharding = dict(args["additional_config"].get("sharding") or {})
+      strategy = dict(sharding.get("sharding_strategy") or {})
+      strategy.setdefault("expert_parallelism", ep)
+      strategy.setdefault("enable_dp_attention", config.enable_dp_attention)
+      if config.enable_dp_attention:
+        strategy["enable_dp_attention"] = True
+      strategy["device_indexes"] = device_indexes
+      sharding["sharding_strategy"] = strategy
+      args["additional_config"] = dict(args["additional_config"])
+      args["additional_config"]["sharding"] = sharding
+    else:
+      # In distributed setting, JAX backend is not initialized at this point, so
+      # we can't use mesh to resolve parallelism sizes and device indexes.
+      args["tensor_parallel_size"] = config.tensor_parallel_size
+      args["data_parallel_size"] = config.data_parallel_size
+
+      sharding = dict(args["additional_config"].get("sharding") or {})
+      strategy = dict(sharding.get("sharding_strategy") or {})
+      strategy.setdefault("expert_parallelism", config.expert_parallel_size)
+      strategy.setdefault("enable_dp_attention", config.enable_dp_attention)
+      if config.enable_dp_attention:
+        strategy["enable_dp_attention"] = True
+      sharding["sharding_strategy"] = strategy
+      args["additional_config"] = dict(args["additional_config"])
+      args["additional_config"]["sharding"] = sharding
 
     return args
 
@@ -240,6 +565,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     engine_args = self._build_engine_args()
     return VLLMInProcessDriver.from_engine_args(
         engine_args,
+        submission_threshold=self.config.server_mode_submission_threshold,
+        submission_timeout_s=self.config.server_mode_submission_timeout_s,
     )
 
   def stop(self):
@@ -247,6 +574,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     if self._driver is not None:
       self._driver.shutdown()
       self._driver = None
+    with self._postprocess_pool_lock:
+      if self._postprocess_pool is not None:
+        self._postprocess_pool.shutdown(wait=False)
+        self._postprocess_pool = None
 
   @property
   def _model_runner(self):
@@ -255,6 +586,11 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     if self._driver is not None:
       return self._driver.llm_engine.model_executor.driver_worker.model_runner
     raise RuntimeError("vLLM engine is not initialized.")
+
+  @property
+  def model_runner(self) -> Any:
+    """Public accessor for the active vLLM worker's model runner."""
+    return self._model_runner
 
   @property
   def transformer(self):
@@ -268,74 +604,307 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     else:
       raise AttributeError("vLLM model runner doesn't have state.")
 
-  def tokenize(self, input_string: str) -> jax.Array | list[int]:
+  def routed_experts_shape(self) -> tuple[int, int] | None:
+    """Returns `(num_layers, top_k)` when MoE routing capture is enabled, else None."""
+    if not self.config.return_routed_experts:
+      return None
+    llm_engine = None
+    if self.llm is not None:
+      llm_engine = self.llm.llm_engine
+    elif self._driver is not None:
+      llm_engine = self._driver.llm_engine
+    if llm_engine is None:
+      return None
+    model_cfg = llm_engine.vllm_config.model_config
+    num_layers = int(model_cfg.get_total_num_hidden_layers())
+    top_k = int(model_cfg.get_num_experts_per_tok())
+    if num_layers <= 0 or top_k <= 0:
+      return None
+    return (num_layers, top_k)
+
+  def tokenize(self, input_string: str) -> np.ndarray | list[int]:
     """Tokenizes the input string."""
     input_ids = self.tokenizer.encode(input_string)
-    bos_tok = (
-        [self.tokenizer.bos_id()]
-        if (self.tokenizer.bos_id() and input_ids[0] != self.tokenizer.bos_id())
-        else []
+    bos_tok = [self.tokenizer.bos_id()] if self.tokenizer.bos_id() else []
+    return self.tokenizer.dedup_bos_ids(bos_tok + input_ids)
+
+  def _resolve_logprob_options(
+      self,
+      return_logprobs: bool | None,
+      num_logprobs: int | None,
+  ) -> Tuple[bool, int]:
+    """Resolves per-call logprob options against `self.config` and `self.args`."""
+    eff_return = (
+        self.config.return_logprobs
+        if return_logprobs is None
+        else return_logprobs
     )
-    eos_tok = (
-        [self.tokenizer.eos_id()]
-        if input_ids[-1] != self.tokenizer.eos_id()
-        else []
+    eff_num = (
+        self.config.num_logprobs if num_logprobs is None else num_logprobs
     )
-    return bos_tok + input_ids + eos_tok
+    if isinstance(eff_num, bool) or eff_num < 1:
+      raise ValueError(f"num_logprobs must be >= 1, got {eff_num!r}.")
+    if "max_logprobs" in self.args and eff_num > self.args["max_logprobs"]:
+      raise ValueError(
+          f"num_logprobs ({eff_num}) exceeds engine max_logprobs"
+          f" ({self.args['max_logprobs']})."
+      )
+    return eff_return, eff_num
 
   def detokenize(
-      self, input_strings: List[str], request_outputs: List[RequestOutput]
-  ) -> Tuple[List[str], List[float], List[int]]:
+      self,
+      input_strings: List[str],
+      request_outputs: List[RequestOutput],
+      *,
+      return_logprobs: bool | None = None,
+      num_logprobs: int | None = None,
+  ) -> Tuple[
+      List[List[str]],
+      List[List[List[float] | None]],
+      List[List[np.ndarray]],
+      List[List[np.ndarray | None]],
+      List[List[np.ndarray]] | None,
+      List[List[np.ndarray]] | None,
+  ]:
     """Detokenize the vllm outputs."""
+    _, eff_num = self._resolve_logprob_options(return_logprobs, num_logprobs)
     generations = len(request_outputs[0].outputs)
     decoded_outputs = [[] for _ in range(generations)]
     out_logprobs = [[] for _ in range(generations)]
     out_tokens = [[] for _ in range(generations)]
+    out_routed_experts = [[] for _ in range(generations)]
+    out_topk_ids = [[] for _ in range(generations)]
+    out_topk_logprobs = [[] for _ in range(generations)]
+    precomputed = self._postprocessed or {}
+    self._postprocessed = None
     for input_string, multi_sampling_output in zip(
         input_strings, request_outputs
     ):
+      ready = precomputed.get(multi_sampling_output.request_id)
       for idx, single_output in enumerate(multi_sampling_output.outputs):
-        # vLLM still returns 1 eos id even if we ask it to stop at eos.
-        if single_output.token_ids[-1] == self.tokenizer.eos_id():
-          single_output.token_ids = single_output.token_ids[:-1]
-          single_output.logprobs = single_output.logprobs[:-1]
+        # KEEP the eos token in the returned token_ids — needed so multi-turn
+        # consumers (agentic engine) can reconstruct the exact sequence the
+        # next turn's prompt was rendered from. Combined with
+        # `include_stop_str_in_output=True`, vLLM emits one eos at the end of
+        # each generation. Stripping it (the previous behavior) made
+        # trainer-side concatenation miss `<|im_end|>` at every turn boundary
+        # and produced 30+ nat sampler-trainer logp diffs.
 
-        out_tokens[idx].append(single_output.token_ids)
-        decoded_outputs[idx].append(
-            self.tokenizer.decode(single_output.token_ids)
+        out_tokens[idx].append(
+            np.array(single_output.token_ids, dtype=np.int32)
         )
-        logprobs = utils.get_logprobs_from_vllm_output(
-            single_output.token_ids, single_output.logprobs
-        )
+        if ready is not None:
+          text, logprobs, topk = ready[idx]
+        else:
+          text, logprobs, topk = self._decode_single_output(
+              single_output,
+              return_logprobs=return_logprobs,
+              num_logprobs=num_logprobs,
+          )
+        decoded_outputs[idx].append(text)
         out_logprobs[idx].append(logprobs)
+        if topk is not None:
+          out_topk_ids[idx].append(topk[0])
+          out_topk_logprobs[idx].append(topk[1])
+        # `[length, num_layers, top_k]`, or None when capture is disabled.
+        out_routed_experts[idx].append(
+            getattr(single_output, "routed_experts", None)
+        )
         logging.debug(
             "Prompt: %r\n\nGenerated text: %r\n\n ",
             input_string,
             decoded_outputs[idx][-1],
         )
-    return decoded_outputs, out_logprobs, out_tokens
+    return (
+        decoded_outputs,
+        out_logprobs,
+        out_tokens,
+        out_routed_experts,
+        out_topk_ids if eff_num > 1 else None,
+        out_topk_logprobs if eff_num > 1 else None,
+    )
+
+  def _decode_single_output(
+      self,
+      single_output: Any,
+      *,
+      return_logprobs: bool | None = None,
+      num_logprobs: int | None = None,
+  ) -> Tuple[str, List[float] | None, Tuple[np.ndarray, np.ndarray] | None]:
+    """Text, per-token logprobs, and optional top-k of one sampled completion."""
+    eff_return, eff_num = self._resolve_logprob_options(
+        return_logprobs, num_logprobs
+    )
+    token_ids = list(single_output.token_ids)
+    text = self.tokenizer.decode(single_output.token_ids)
+    logprobs = (
+        utils.get_logprobs_from_vllm_output(token_ids, single_output.logprobs)
+        if eff_return or single_output.logprobs is None
+        else None
+    )
+    topk = None
+    if eff_num > 1:
+      if token_ids and not single_output.logprobs:
+        raise ValueError("Top-k logprobs are not returned from the vLLM.")
+      topk = utils.get_topk_logprobs_from_vllm_output(
+          single_output.logprobs, eff_num
+      )
+      if topk[0].shape[0] != len(token_ids):
+        raise ValueError(
+            f"Top-k logprobs length {topk[0].shape[0]} != {len(token_ids)}"
+            " token ids."
+        )
+    return text, logprobs, topk
+
+  def _postprocess_request_output(
+      self,
+      request_output: RequestOutput,
+      *,
+      return_logprobs: bool | None = None,
+      num_logprobs: int | None = None,
+  ) -> List[
+      Tuple[str, List[float] | None, Tuple[np.ndarray, np.ndarray] | None]
+  ]:
+    """Decodes every sample of a finished request (runs in the thread pool)."""
+    return [
+        self._decode_single_output(
+            o, return_logprobs=return_logprobs, num_logprobs=num_logprobs
+        )
+        for o in request_output.outputs
+    ]
+
+  def _get_postprocess_pool(self) -> concurrent.futures.ThreadPoolExecutor:
+    if self._postprocess_pool is None:
+      with self._postprocess_pool_lock:
+        if self._postprocess_pool is None:
+          self._postprocess_pool = concurrent.futures.ThreadPoolExecutor(
+              max_workers=self.config.postprocessing_threads,
+              thread_name_prefix="vllm-postprocess",
+          )
+    return self._postprocess_pool
+
+  def _postprocess_as_completed(
+      self,
+      futures: List[concurrent.futures.Future[Any]],
+      *,
+      return_logprobs: bool | None = None,
+      num_logprobs: int | None = None,
+  ) -> None:
+    """Server mode: decodes each request as its driver future resolves."""
+    pool = self._get_postprocess_pool()
+    self._postprocessed = None
+    pending: Dict[str, concurrent.futures.Future[Any]] = {}
+    for future in concurrent.futures.as_completed(futures):
+      result = future.result()
+      if isinstance(result, RequestOutput):
+        pending[result.request_id] = pool.submit(
+            self._postprocess_request_output,
+            result,
+            return_logprobs=return_logprobs,
+            num_logprobs=num_logprobs,
+        )
+    self._postprocessed = {rid: f.result() for rid, f in pending.items()}
+
+  def _generate_offline(
+      self,
+      prompts: List[TokensPrompt],
+      sampling_params: Union[
+          SamplingParams, BeamSearchParams, List[SamplingParams]
+      ],
+      *,
+      return_logprobs: bool | None = None,
+      num_logprobs: int | None = None,
+  ) -> List[RequestOutput]:
+    """Offline generation; overlaps post-processing with decode when enabled.
+
+    Beam search keeps the plain `LLM.generate` path: `BeamSearchParams` are
+    expanded by vLLM itself and never reach the engine as one request.
+    """
+    if not self.config.overlap_postprocessing or isinstance(
+        sampling_params, BeamSearchParams
+    ):
+      return self.llm.generate(  # pyrefly: ignore[missing-attribute]
+          prompts=prompts,
+          sampling_params=sampling_params,
+          use_tqdm=True,
+      )
+    # Same loop as vllm's LLM.generate -> _run_engine, except that every
+    # finished request is handed to the thread pool right away, so decoding
+    # its text and extracting its logprobs overlap with the remaining decode
+    # steps instead of running serially after the last one. Request ids come
+    # from the LLM's own counter so they stay unique alongside any
+    # `LLM.generate` call on the same engine.
+    pool = self._get_postprocess_pool()
+    self._postprocessed = None
+    engine = self.llm.llm_engine  # pyrefly: ignore[missing-attribute]
+    counter = self.llm.request_counter  # pyrefly: ignore[missing-attribute]
+    for idx, prompt in enumerate(prompts):
+      params = (
+          sampling_params[idx]
+          if isinstance(sampling_params, list)
+          else sampling_params
+      )
+      params.output_kind = RequestOutputKind.FINAL_ONLY
+      engine.add_request(str(next(counter)), prompt, params)
+    outputs: List[RequestOutput] = []
+    futures: Dict[str, concurrent.futures.Future[Any]] = {}
+    progress = tqdm.tqdm(
+        total=len(prompts), desc="Processed prompts", dynamic_ncols=True
+    )
+    try:
+      while engine.has_unfinished_requests():
+        for output in engine.step():
+          if output.finished:
+            outputs.append(output)
+            futures[output.request_id] = pool.submit(
+                self._postprocess_request_output,
+                output,
+                return_logprobs=return_logprobs,
+                num_logprobs=num_logprobs,
+            )
+            progress.update(1)
+    finally:
+      progress.close()
+    self._postprocessed = {rid: f.result() for rid, f in futures.items()}
+    # vLLM's LLM.generate returns outputs sorted by request id as well.
+    return sorted(outputs, key=lambda o: int(o.request_id))
 
   def _generate_server_mode(
       self,
       prompts: List[TokensPrompt],
-      sampling_params: Union[SamplingParams, BeamSearchParams],
+      sampling_params: Union[
+          SamplingParams, BeamSearchParams, List[SamplingParams]
+      ],
+      *,
+      return_logprobs: bool | None = None,
+      num_logprobs: int | None = None,
   ) -> List[RequestOutput]:
     """Generate the response in server mode."""
     if self._driver is None:
       raise RuntimeError("vLLM in-process driver is not initialized.")
 
-    futures = []
+    requests = []
     for idx, prompt in enumerate(prompts):
       request_id = str(next(self._request_counter))
-      params = sampling_params
-      if idx > 0 and hasattr(sampling_params, "clone"):
-        params = sampling_params.clone()
-      future = self._driver.submit_request(
-          request_id=request_id,
-          prompt=prompt,
-          params=params,
+      if isinstance(sampling_params, list):
+        params = sampling_params[idx]
+      else:
+        params = sampling_params
+        if idx > 0 and hasattr(sampling_params, "clone"):
+          params = sampling_params.clone()
+      requests.append({
+          "request_id": request_id,
+          "prompt": prompt,
+          "params": params,
+      })
+
+    futures = self._driver.submit_requests(requests)
+    if self.config.overlap_postprocessing:
+      self._postprocess_as_completed(
+          futures,
+          return_logprobs=return_logprobs,
+          num_logprobs=num_logprobs,
       )
-      futures.append(future)
 
     outputs: List[RequestOutput] = []
     for future in futures:
@@ -347,22 +916,68 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       outputs.append(result)
     return outputs
 
+  def _eos_token_ids(self) -> List[int]:
+    """Returns the token ids that terminate a generation.
+
+    A tokenizer exposes a single `eos_id()`, but a model may declare several
+    terminators and use a different one depending on how it was prompted. Qwen3,
+    for instance, lists both `<|im_end|>` and `<|endoftext|>` in its generation
+    config: a chat-formatted turn ends with the former, a raw completion with
+    the latter, and the tokenizer only reports the former. Stopping solely on
+    `eos_id()` therefore leaves completion-mode rollouts running until they hit
+    `max_tokens`.
+
+    Returns:
+      The union of `VllmConfig.eos_tokens` and the tokenizer's single
+      end-of-sequence id.
+    """
+    eos_ids = set(self.config.eos_tokens or [])
+    if self.tokenizer is not None and self.tokenizer.eos_id() is not None:
+      eos_ids.add(self.tokenizer.eos_id())
+    return list(eos_ids)
   def __call__(
       self,
-      input_strings: List[str],
-      max_generation_steps: int,
-      max_prompt_length: int = None,
+      input_strings: str | List[str] | None = None,
+      max_generation_steps: int = 0,
+      max_prompt_length: Optional[int] = None,
       temperature: float = 0.0,
-      top_p: float = None,
-      top_k: int = None,
-      beam_size: int = None,
-      seed: int = None,  # vLLM Jax backend doesn't support per request seed.
+      top_p: Optional[float] = None,
+      top_k: Optional[int] = None,
+      beam_size: Optional[int] = None,
+      seed: Optional[
+          int
+      ] = None,  # vLLM Jax backend doesn't support per request seed.
       multi_sampling: int = 1,
       return_logits: bool = True,
       echo: bool = False,
       pad_output: bool = False,
+      *,
+      prompt_token_ids: Sequence[Sequence[int] | np.ndarray] | None = None,
+      return_logprobs: bool | None = None,
+      num_logprobs: int | None = None,
+      **kwargs,
   ) -> base_sampler.SamplerOutput:
     """The entry point API for vLLM Sampler"""
+    eff_return_logprobs, eff_num_logprobs = self._resolve_logprob_options(
+        return_logprobs, num_logprobs
+    )
+    exact_input = prompt_token_ids is not None
+    prompt_ids = utils.resolve_prompt_tokens(
+        input_strings,
+        prompt_token_ids,
+        self.tokenize,
+        max_generation_steps=max_generation_steps,
+        max_total_length=self.args["max_model_len"],
+        max_length_name="max_model_len",
+    )
+    if exact_input:
+      # TODO(b/399000000): Clean up detokenize() so dummy input_strings are not needed.
+      input_strings = [""] * len(prompt_ids)
+    else:
+      assert input_strings is not None
+      if isinstance(input_strings, str):
+        input_strings = [input_strings]
+
     # max_tokens: maximum number of tokens to generate
     if max_generation_steps > self.args["max_model_len"]:
       raise ValueError(
@@ -371,8 +986,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           f"{max_generation_steps} and `max_model_len`="
           f"{self.args['max_model_len']}."
       )
+    raw_prompt_start = None
+    raw_cache_salt = None
     if beam_size is not None:
-      self.sampling_params = BeamSearchParams(
+      sampling_params = BeamSearchParams(
           beam_width=beam_size,
           max_tokens=max_generation_steps,
           ignore_eos=False,
@@ -388,67 +1005,198 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         else:
           sampling_params = SamplingParams()
       else:
-        sampling_params = self.llm.get_default_sampling_params()
+        sampling_params = self.llm.get_default_sampling_params()  # pyrefly: ignore[missing-attribute]
       sampling_params.detokenize = False
       sampling_params.max_tokens = max_generation_steps
       sampling_params.n = multi_sampling
       sampling_params.temperature = temperature
-      sampling_params.logprobs = 1  # b/428730696
-      sampling_params.prompt_logprobs = 1  # b/428730696
-      sampling_params.stop_token_ids = [self.tokenizer.eos_id()]
+      if eff_return_logprobs or eff_num_logprobs > 1:
+        sampling_params.logprobs = eff_num_logprobs
+        sampling_params.prompt_logprobs = None  # b/428730696
+      else:
+        sampling_params.logprobs = 0
+        sampling_params.prompt_logprobs = None
+      sampling_params.stop_token_ids = self._eos_token_ids()
       sampling_params.skip_special_tokens = True
+      # Keep the stop token in the returned ``token_ids`` so multi-turn
+      # consumers can reconstruct the exact sequence the model was sampled
+      # on. This makes the trainer-side concatenation align with what
+      # ``apply_chat_template`` produces for the next turn's prompt; without
+      # it, the trailing ``<|im_end|>`` (or equivalent eos token) is missing
+      # at every turn boundary in the recorded sequence, biasing logp
+      # recomputation against the model's actual sampling context.
+      sampling_params.include_stop_str_in_output = True
 
       if top_p is not None:
         sampling_params.top_p = top_p
       if top_k is not None:
         sampling_params.top_k = top_k
+      if seed is not None:
+        sampling_params.seed = seed
 
-      self.sampling_params = sampling_params
-
-    prompt_ids = [self.tokenize(x) for x in input_strings]
-    prompt_objects = [TokensPrompt(prompt_token_ids=ids) for ids in prompt_ids]
-    if self._driver is not None:
-      outputs = self._generate_server_mode(prompt_objects, self.sampling_params)
-    else:
-      outputs = self.llm.generate(
-          prompts=prompt_objects,
-          sampling_params=self.sampling_params,
-          use_tqdm=True,
+      sampling_kwargs = self.config.sampling_kwargs.copy()
+      sampling_kwargs.update(kwargs)
+      raw_prompt_start = sampling_kwargs.pop(
+          "routed_experts_prompt_start", None
       )
-    decoded_outputs, out_logprobs, out_tokens = self.detokenize(
-        input_strings, outputs
+      if raw_prompt_start is not None and not isinstance(
+          raw_prompt_start, (list, tuple)
+      ):
+        setattr(
+            sampling_params, "routed_experts_prompt_start", raw_prompt_start
+        )
+        raw_prompt_start = None
+
+      raw_cache_salt = sampling_kwargs.pop("cache_salt", None)
+      if raw_cache_salt is not None and not isinstance(
+          raw_cache_salt, (list, tuple)
+      ):
+        setattr(sampling_params, "cache_salt", raw_cache_salt)
+
+      if sampling_kwargs:
+        try:
+          logging.log_first_n(
+              logging.INFO,
+              "Received additional kwargs that are not explicitly defined in"
+              f" the method signature: {sampling_kwargs}. These will be"
+              " forwarded to the underlying sampler, but please ensure that"
+              " they are valid.",
+              1,
+          )
+          for key, value in sampling_kwargs.items():
+            logging.log_first_n(
+                logging.DEBUG,
+                f"Sampler kwargs setting key {key} with value {value}.",
+                len(sampling_kwargs),
+            )
+            setattr(sampling_params, key, value)
+        except (AttributeError, TypeError) as e:
+          logging.info(
+              "Failed to update sampling_params with kwargs:"
+              f" {sampling_kwargs}. Error: {e}",
+          )
+
+      # vLLM must decode incrementally to recognize string stops (for example
+      # DeepSWE's </function>); token-only decoding cannot enforce them.
+      if sampling_params.stop:
+        sampling_params.detokenize = True
+
+    if exact_input and (
+        isinstance(sampling_params, BeamSearchParams)
+        or getattr(sampling_params, "n", 1) != 1
+        or getattr(sampling_params, "truncate_prompt_tokens", None) is not None
+    ):
+      # One sampled row per submitted row, no truncation: the echo check and
+      # the recorded history assume the engine consumed exactly these ids.
+      raise ValueError("prompt_token_ids requires exactly one output per row")
+    prompt_objects = cast(
+        List[TokensPrompt],
+        [{"prompt_token_ids": list(ids)} for ids in prompt_ids],
+    )
+    if (
+        raw_cache_salt is not None
+        and not isinstance(raw_cache_salt, (list, tuple))
+        and str(raw_cache_salt)
+    ):
+      for prompt_obj in prompt_objects:
+        prompt_obj["cache_salt"] = str(raw_cache_salt)
+    target_sampling_params: Union[
+        SamplingParams, BeamSearchParams, List[SamplingParams]
+    ] = sampling_params
+    per_prompt_starts = (
+        raw_prompt_start
+        if isinstance(raw_prompt_start, (list, tuple))
+        else None
+    )
+    per_prompt_salts = (
+        raw_cache_salt
+        if isinstance(raw_cache_salt, (list, tuple))
+        else None
+    )
+    if per_prompt_starts is not None or per_prompt_salts is not None:
+      if per_prompt_starts is not None:
+        assert len(per_prompt_starts) == len(prompt_objects), (
+            f"Length of routed_experts_prompt_start ({len(per_prompt_starts)}) "
+            f"does not match number of prompts ({len(prompt_objects)})."
+        )
+      if per_prompt_salts is not None and len(per_prompt_salts) != len(
+          prompt_objects
+      ):
+        raise ValueError(
+            f"Length of cache_salt ({len(per_prompt_salts)}) does not match"
+            f" number of prompts ({len(prompt_objects)})."
+        )
+      prompt_params_list: List[SamplingParams] = []
+      for idx in range(len(prompt_objects)):
+        p = cast(
+            SamplingParams,
+            sampling_params.clone()
+            if hasattr(sampling_params, "clone")
+            else copy.deepcopy(sampling_params),
+        )
+        if per_prompt_starts is not None:
+          setattr(p, "routed_experts_prompt_start", per_prompt_starts[idx])
+        if per_prompt_salts is not None and per_prompt_salts[idx]:
+          setattr(p, "cache_salt", per_prompt_salts[idx])
+          prompt_objects[idx]["cache_salt"] = str(per_prompt_salts[idx])
+        prompt_params_list.append(p)
+      target_sampling_params = prompt_params_list
+
+    if self._driver is not None:
+      outputs = self._generate_server_mode(
+          prompt_objects,
+          target_sampling_params,
+          return_logprobs=eff_return_logprobs,
+          num_logprobs=eff_num_logprobs,
+      )
+    else:
+      outputs = self._generate_offline(
+          prompt_objects,
+          target_sampling_params,
+          return_logprobs=eff_return_logprobs,
+          num_logprobs=eff_num_logprobs,
+      )
+    if exact_input:
+      utils.check_prompt_echo(prompt_ids, outputs, backend_name="vLLM")
+    (
+        decoded_outputs,
+        out_logprobs,
+        out_tokens,
+        out_routed_experts,
+        out_topk_ids,
+        out_topk_logprobs,
+    ) = self.detokenize(
+        input_strings,
+        outputs,
+        return_logprobs=eff_return_logprobs,
+        num_logprobs=eff_num_logprobs,
+    )
+    if eff_return_logprobs and (
+        out_logprobs is None or out_logprobs[0] is None
+    ):
+      raise ValueError("Logprobs are not returned from the vLLM.")
+
+    all_input_ids, prompt_lengths, max_prompt_length = (
+        utils.left_pad_prompt_tokens(
+            prompt_ids,
+            max_prompt_length,
+            self.tokenizer.pad_id(),
+        )
     )
 
-    max_tokens_length = max(len(x) for x in prompt_ids)
-
-    if max_prompt_length is None or max_prompt_length < max_tokens_length:
-      max_prompt_length = utils.next_power_of_2(max_tokens_length)
-    all_input_ids = [
-        utils.pad_to_length(
-            jnp.array(x),
-            target_length=max_prompt_length,
-            pad_value=self.tokenizer.pad_id(),
-            left=True,
-        )
-        for x in prompt_ids
-    ]
-    all_input_ids = jnp.array(all_input_ids)
-
-    all_output_ids = [
-        utils.pad_to_length(
-            jnp.array(x),
-            target_length=max_generation_steps,
-            pad_value=self.tokenizer.pad_id(),
-            left=False,
-        )
-        for x in out_tokens[0]
-    ]
-    all_output_ids = jnp.array(all_output_ids)
     # To support multisampling, just return the whole list of SamplerOutput
     return base_sampler.SamplerOutput(
         text=decoded_outputs[0],
         logits=None,
-        tokens=all_output_ids,
+        tokens=out_tokens[0],
         padded_prompt_tokens=all_input_ids,
-        logprobs=out_logprobs[0],
+        logprobs=out_logprobs[0] if eff_return_logprobs else None,  # pyrefly: ignore[bad-argument-type]
+        topk_token_ids=out_topk_ids[0] if out_topk_ids is not None else None,
+        topk_logprobs=(
+            out_topk_logprobs[0] if out_topk_logprobs is not None else None
+        ),
+        routed_experts=(
+            out_routed_experts[0] if self.config.return_routed_experts else None
+        ),
+        prompt_lengths=prompt_lengths,
     )

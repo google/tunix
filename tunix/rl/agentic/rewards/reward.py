@@ -16,15 +16,20 @@
 
 This module provides a mechanism to register, retrieve, and combine various
 reward functions. Reward functions take a task context and an agent's action
-as input and return a `RewardOutput` containing a scalar reward and metadata.
+as input and return a `reward_types.RewardOutput` containing a scalar reward and
+metadata.
 """
 
+import ast
+import logging
+import operator
 from typing import Any, Callable, Dict
 
 from tunix.rl.agentic.rewards import reward_types
 
-RewardOutput = reward_types.RewardOutput
-_REGISTRY: Dict[str, Callable[[Dict[str, Any], str], RewardOutput]] = {}
+_REGISTRY: Dict[
+    str, Callable[[Dict[str, Any], str], reward_types.RewardOutput]
+] = {}
 
 
 def register(name: str):
@@ -83,7 +88,7 @@ def get_reward_fn(name: str):
 
 
 @register("exact_match")
-def exact_match(task: Dict[str, Any], action: str) -> RewardOutput:
+def exact_match(task: Dict[str, Any], action: str) -> reward_types.RewardOutput:
   """Binary reward based on exact string matching with ground truth.
 
   Returns 1.0 for perfect matches after whitespace normalization,
@@ -98,12 +103,12 @@ def exact_match(task: Dict[str, Any], action: str) -> RewardOutput:
   """
   truth = str(task.get("ground_truth", "")).strip()
   score = 1.0 if action.strip() == truth else 0.0
-  return RewardOutput(score, {"exact_match": score})
+  return reward_types.RewardOutput(score, {"exact_match": score})
 
 
 def combine_rewards(
     weights: Dict[str, float],
-) -> Callable[[Dict[str, Any], str], RewardOutput]:
+) -> Callable[[Dict[str, Any], str], reward_types.RewardOutput]:
   """Create a composite reward function from multiple registered functions.
 
   Performs weighted linear combination of multiple reward components,
@@ -125,14 +130,16 @@ def combine_rewards(
       out = get_reward_fn(name)(task, action)
       total += w * out.reward
       meta.update(out.metadata)
-    return RewardOutput(total, meta)
+    return reward_types.RewardOutput(total, meta)
 
   return _fn
 
 
 # -------- Example Reward Function --------
 @register("is_two")
-def is_two_reward(task: Dict[str, Any], action: str) -> RewardOutput:
+def is_two_reward(
+    task: Dict[str, Any], action: str
+) -> reward_types.RewardOutput:
   """Specialized reward function that checks if action represents the number 2.
 
   Attempts to parse the action as numeric value and returns 1.0 if it equals
@@ -150,21 +157,55 @@ def is_two_reward(task: Dict[str, Any], action: str) -> RewardOutput:
     score = 1.0 if value == 2.0 else 0.0
   except ValueError:
     score = 0.0
-  return RewardOutput(score, {"is_two": score})
+  return reward_types.RewardOutput(score, {"is_two": score})
 
 
 @register("dummy")
-def dummy_reward(task: Dict[str, Any], action: str) -> RewardOutput:
+def dummy_reward(
+    task: Dict[str, Any], action: str
+) -> reward_types.RewardOutput:
   """A dummy reward function that always returns zero."""
-  return RewardOutput(0.0, {})
+  return reward_types.RewardOutput(0.0, {})
+
+
+_OP_MAP = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.USub: operator.neg,
+    ast.UAdd: operator.pos,
+    ast.Pow: operator.pow,
+}
+
+
+def _safe_eval(expr_str: str) -> float:
+  def _eval(node):
+    if isinstance(node, ast.Constant):
+      return node.value
+    elif isinstance(node, ast.BinOp):
+      op_type = type(node.op)
+      if op_type not in _OP_MAP:
+        raise ValueError(f"Unsupported operator: {op_type}")
+      return _OP_MAP[op_type](_eval(node.left), _eval(node.right))  # pyrefly: ignore[bad-argument-count]
+    elif isinstance(node, ast.UnaryOp):
+      op_type = type(node.op)
+      if op_type not in _OP_MAP:
+        raise ValueError(f"Unsupported operator: {op_type}")
+      return _OP_MAP[op_type](_eval(node.operand))  # pyrefly: ignore[bad-argument-count, no-matching-overload]
+    raise ValueError(f"Unsupported node: {type(node)}")
+
+  tree = ast.parse(expr_str, mode="eval")
+  return float(_eval(tree.body))
 
 
 @register("calculate")
-def calculate_reward(task: Dict[str, Any], action: str) -> RewardOutput:
+def calculate_reward(
+    task: Dict[str, Any], action: str
+) -> reward_types.RewardOutput:
   """Calculates the reward for a math expression based on answer correctness.
 
-  WARNING: Uses eval(), which is NOT SAFE for untrusted input. This is only for
-  feature testing.
+  Safely evaluates the expression using AST parsing.
 
   Args:
     task: The task context containing the 'question' field.
@@ -178,17 +219,21 @@ def calculate_reward(task: Dict[str, Any], action: str) -> RewardOutput:
   expression = question_str.replace("= ?", "").replace("=", "").strip()
 
   try:
-    answer_str = (
-        action.replace("The answer is ", "").strip().rstrip(".")
-    )
+    answer_str = action.replace("The answer is ", "").strip().rstrip(".")
     answer = float(answer_str)
-    correct_value = eval(expression)
+    correct_value = _safe_eval(expression)
     tolerance = 1e-6
     if abs(correct_value - answer) < tolerance:
       score = 1.0
     else:
       score = 0.0
 
-  except Exception:
+  except Exception as e:
+    logging.warning(
+        "Failed to calculate reward for task %s and action %s: %s",
+        task,
+        action,
+        e,
+    )
     score = 0.0
-  return RewardOutput(score, {"calculate_correct": score})
+  return reward_types.RewardOutput(score, {"calculate_correct": score})
