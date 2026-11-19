@@ -411,7 +411,7 @@ class MappingVllmJaxTest(parameterized.TestCase):
 
     hf = {
         'model.language_model.embed_tokens.weight': rand(v, d),
-        'model.language_model.lm_head.weight': rand(v, d),
+        'lm_head.weight': rand(v, d),
         'model.language_model.norm.weight': rand(d),
         # Layer 0: Gated DeltaNet + MLP in HF (out_features, in_features) layout
         'model.language_model.layers.0.input_layernorm.weight': rand(d),
@@ -496,7 +496,7 @@ class MappingVllmJaxTest(parameterized.TestCase):
     )
     np.testing.assert_allclose(
         transferred['vllm_model.lm_head.weight'],
-        hf['model.language_model.lm_head.weight'],
+        hf['lm_head.weight'],
     )
     np.testing.assert_allclose(
         transferred['vllm_model.model.norm.weight'],

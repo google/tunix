@@ -20,8 +20,18 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import orbax.checkpoint as ocp
+from tunix.models.gemma import params_safetensors
 
 Params = Mapping[str, Any]
+
+from_hf_impl = params_safetensors.from_hf_impl
+to_hf_impl = params_safetensors.to_hf_impl
+build_from_hf_manifest = params_safetensors.build_from_hf_manifest
+build_to_hf_manifest = params_safetensors.build_to_hf_manifest
+export_to_hf_state_dict = params_safetensors.export_to_hf_state_dict
+create_model_from_safe_tensors = (
+    params_safetensors.create_model_from_safe_tensors
+)
 
 
 def load_and_format_host_params(path: str) -> Params:

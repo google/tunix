@@ -89,11 +89,15 @@ class Qwen3ParamsTest(lora_params_test_base.LoraParamsTestBase):
         dtype=jnp.float32,
     )
 
+  # DEPRECATED (testing-only): Legacy hand-written HF checkpoint fixture builder
+  # is deprecated, retained strictly for bit-by-bit parity testing during
+  # migration to `hf_mapping`, and will be removed in a follow-up cleanup CL.
   def create_checkpoint(self, model) -> str:
     """Extract model weights and save in safetensors format.
 
-    Uses the model's actual weights and applies inverse transformations
-    (from _get_key_and_transform_mapping) to create a valid safetensors file.
+    DEPRECATED (testing-only): This hand-written legacy conversion fixture is
+    deprecated, retained strictly for bit-by-bit parity testing during migration
+    to `hf_mapping`, and will be removed in a follow-up cleanup CL.
 
     Args:
       model: Base model to extract weights from.
@@ -111,7 +115,7 @@ class Qwen3ParamsTest(lora_params_test_base.LoraParamsTestBase):
     base_state["lm_head.weight"] = np.array(model.lm_head.w.value).T
 
     # Extract and transform weights for all layers
-    # Based on inverse of _get_key_and_transform_mapping in qwen3/params.py
+    # Based on `qwen3.params.build_to_hf_manifest` in qwen3/params.py
     for layer_idx, layer in enumerate(model.layers):
       prefix = f"model.layers.{layer_idx}"
 
@@ -181,6 +185,19 @@ class Qwen3ParamsTest(lora_params_test_base.LoraParamsTestBase):
       f.write('{"model_type": "qwen3"}')
 
     return self.base_checkpoint_dir
+
+  def test_export_to_hf_state_dict_matches_hand_written_fixture(self):
+    """Verifies `export_to_hf_state_dict` matches the hand-written HF fixture."""
+    base_model = self._create_base_model()
+    self.create_checkpoint(base_model)
+    expected = safe_np.load_file(
+        os.path.join(self.base_checkpoint_dir, "model.safetensors")
+    )
+    loaded = self.create_model_from_checkpoint(self.base_checkpoint_dir)
+    actual = qwen3_params.export_to_hf_state_dict(loaded, self.config)
+    self.assertEqual(set(actual.keys()), set(expected.keys()))
+    for k, v in expected.items():
+      np.testing.assert_array_equal(np.asarray(actual[k]), v, err_msg=k)
 
 
 class Qwen3ModelConfigTest(absltest.TestCase):
