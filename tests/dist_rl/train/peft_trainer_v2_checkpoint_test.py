@@ -197,7 +197,9 @@ class ExternalCheckpointTest(unittest.TestCase):
     resumed_worker.stop()
 
   def test_worker_accepts_trainer_without_management_flag(self):
-    trainer = types.SimpleNamespace(close=mock.Mock())
+    trainer = types.SimpleNamespace(
+        with_fwd_only_fn=mock.Mock(), close=mock.Mock()
+    )
     worker = trainer_worker.TrainerWorker(lambda: trainer)
     worker.initialize()
     self.assertFalse(hasattr(trainer, "is_managed_externally"))
