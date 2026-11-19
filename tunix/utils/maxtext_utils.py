@@ -19,6 +19,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 import dataclasses
 import functools
+import inspect
 import logging
 import os
 import types
@@ -927,52 +928,73 @@ def _place_on(out: jax.Array, sharding: jax.sharding.Sharding) -> jax.Array:
 def _split_prefused_wi_then_build_plan(
     build_plan: Callable[..., Any],
     prefused_wi: dict[tuple[str, ...], jax.Array],
+    remaining_reads: dict[tuple[str, ...], int],
+    split_prefused_wi: bool,
     src_flat: dict[tuple[str, ...], jax.Array],
     tgt_flat: Mapping[tuple[str, ...], jax.Array],
     skip_paths: frozenset[tuple[str, ...]] = frozenset(),
 ) -> Any:
-  """Exposes each scanned pre-fused MoE `wi` as `wi_0`/`wi_1` to the planner.
+  """Plans conversion, splitting pre-fused `wi` if needed, and counts reads.
 
-  The checkpoint stores `[gate | up]` concatenated, while a rollout with
-  tensor parallelism wants them interleaved per shard, so the converter must
-  re-fuse them. `_execute_group_and_free_sources` slices the halves only when
-  their group runs, so the halves never coexist for every layer at once.
+  When `split_prefused_wi` is true, exposes each scanned pre-fused MoE `wi` as
+  `wi_0`/`wi_1` so the converter re-fuses `[gate | up]` into the rollout's
+  per-shard interleaved layout. `_execute_group_and_free_sources` slices the
+  halves lazily and frees each source only after its last group finishes.
 
   Args:
     build_plan: The converter's `_build_plan`.
     prefused_wi: Filled with the pre-fused `wi` arrays, keyed by their parent
-      path.
-    src_flat: Flattened source state; `wi` keys are replaced in place.
+      path, when `split_prefused_wi` is true.
+    remaining_reads: Filled with the number of distinct groups reading each
+      source key.
+    split_prefused_wi: Whether to split pre-fused `wi` keys into `wi_0`/`wi_1`.
+    src_flat: Flattened source state; `wi` keys are replaced in place when
+      `split_prefused_wi` is true.
     tgt_flat: Flattened target state.
     skip_paths: Target paths the converter skips.
 
   Returns:
     The plan from `build_plan`.
   """
-  for key in [k for k in src_flat if "layers" in k and k[-1] == "wi"]:
-    wi = src_flat.pop(key)
-    prefused_wi[key[:-1]] = wi
-    src_flat[key[:-1] + ("wi_0",)] = wi
-    src_flat[key[:-1] + ("wi_1",)] = wi
-  return build_plan(src_flat, tgt_flat, skip_paths)
+  if split_prefused_wi:
+    for key in [k for k in src_flat if "layers" in k and k[-1] == "wi"]:
+      wi = src_flat.pop(key)
+      prefused_wi[key[:-1]] = wi
+      src_flat[key[:-1] + ("wi_0",)] = wi
+      src_flat[key[:-1] + ("wi_1",)] = wi
+  plan = build_plan(src_flat, tgt_flat, skip_paths)
+  remaining_reads.clear()
+  distinct_groups = dict.fromkeys(
+      (entry.source_keys, entry.op, getattr(entry, "local_index", None))
+      for entry in plan
+  )
+  for source_keys, _, _ in distinct_groups:
+    for key in dict.fromkeys(source_keys):
+      remaining_reads[key] = remaining_reads.get(key, 0) + 1
+  return plan
 
 
 def _execute_group_and_free_sources(
     execute_group: Callable[..., list[tuple[tuple[str, ...], jax.Array]]],
     prefused_wi: dict[tuple[str, ...], jax.Array],
+    sliced_wi: dict[tuple[str, ...], jax.Array],
+    remaining_reads: dict[tuple[str, ...], int],
     group: Any,
-    src_flat: dict[tuple[str, ...], jax.Array],
+    src_flat: Mapping[tuple[str, ...], jax.Array],
     tgt_flat: Mapping[tuple[str, ...], jax.Array],
 ) -> list[tuple[tuple[str, ...], jax.Array]]:
-  """Runs one conversion group, frees its sources, and places its outputs.
+  """Runs one conversion group, frees exhausted sources, and places its outputs.
 
-  Freeing each scanned source as soon as its group is done keeps peak HBM near
-  one copy of the weights instead of two.
+  Freeing each scanned source once its last group finishes keeps peak HBM near
+  one copy of the weights instead of two, while keeping shared `local_layers`
+  sources alive across all cycle slots.
 
   Args:
     execute_group: The converter's `_execute_group`.
     prefused_wi: Pre-fused `wi` arrays, filled by
       `_split_prefused_wi_then_build_plan`.
+    sliced_wi: Cached `wi_0`/`wi_1` slices for active pre-fused `wi` sources.
+    remaining_reads: Remaining group reads per source key.
     group: The converter's plan group (`op`, `source_keys`).
     src_flat: Flattened source state.
     tgt_flat: Flattened target state.
@@ -982,20 +1004,40 @@ def _execute_group_and_free_sources(
   """
   import jax  # pylint: disable=g-import-not-at-top
 
-  prefused = None
   parent = group.source_keys[0][:-1]
   if group.op == "fuse_moe" and parent in prefused_wi:
-    prefused = prefused_wi.pop(parent)
-    half = prefused.shape[-1] // 2
-    src_flat[group.source_keys[0]] = prefused[..., :half]
-    src_flat[group.source_keys[1]] = prefused[..., half:]
-  sources = [src_flat[key] for key in group.source_keys]
+    k0, k1 = group.source_keys
+    if k0 not in sliced_wi or k1 not in sliced_wi:
+      prefused = prefused_wi[parent]
+      half = prefused.shape[-1] // 2
+      sliced_wi[k0] = prefused[..., :half]
+      sliced_wi[k1] = prefused[..., half:]
+    src_flat = {**src_flat, k0: sliced_wi[k0], k1: sliced_wi[k1]}
+  sources = {key: src_flat[key] for key in group.source_keys}
   outs = execute_group(group, src_flat, tgt_flat)
   out_arrays = [out for _, out in outs]
   jax.block_until_ready(out_arrays)
+
+  exhausted: list[jax.Array] = []
+  for key, source in sources.items():
+    remaining = remaining_reads.get(key, 1) - 1
+    remaining_reads[key] = remaining
+    if remaining <= 0:
+      exhausted.append(source)
+      sliced = sliced_wi.pop(key, None)
+      if sliced is not None:
+        exhausted.append(sliced)
+  if (
+      group.op == "fuse_moe"
+      and parent in prefused_wi
+      and remaining_reads.get(parent + ("wi_0",), 0) <= 0
+      and remaining_reads.get(parent + ("wi_1",), 0) <= 0
+  ):
+    exhausted.append(prefused_wi.pop(parent))
+
   # An identity group's output can be its source buffer.
-  if group.op != "identity":
-    _delete_arrays([prefused, sources], keep=out_arrays)
+  if group.op != "identity" and exhausted:
+    _delete_arrays(exhausted, keep=out_arrays)
   return [
       (tgt_key, _place_on(out, tgt_flat[tgt_key].sharding))
       for tgt_key, out in outs
@@ -1079,23 +1121,45 @@ def load_and_convert_scanned_checkpoint(
       target_dtype=None,
       fp8_moe=fp8_moe,
   )
-  prefused_wi: dict[tuple[str, ...], jax.Array] = {}
-  # pylint: disable=protected-access
-  build_plan, execute_group = converter._build_plan, converter._execute_group
-  if ckpt_prefuse_moe and mesh_tp > 1:
-    converter._build_plan = functools.partial(
-        _split_prefused_wi_then_build_plan, build_plan, prefused_wi
-    )
-  converter._execute_group = functools.partial(
-      _execute_group_and_free_sources, execute_group, prefused_wi
-  )
-  try:
+  if "free_sources" in inspect.signature(converter.convert).parameters:
     converted = converter.convert(
-        scanned_state, target_state=target.transformer_state
+        scanned_state,
+        target_state=target.transformer_state,
+        free_sources=True,
     )
-  finally:
-    converter._build_plan, converter._execute_group = build_plan, execute_group
-  # pylint: enable=protected-access
+  else:
+    # TODO(maxtext-dev): Drop the `_build_plan`/`_execute_group` hooks once
+    # pinned MaxText supports `convert(..., free_sources=True)` and native
+    # pre-fused `wi` handling in `_build_plan`.
+    prefused_wi: dict[tuple[str, ...], jax.Array] = {}
+    sliced_wi: dict[tuple[str, ...], jax.Array] = {}
+    remaining_reads: dict[tuple[str, ...], int] = {}
+    # pylint: disable=protected-access
+    build_plan, execute_group = converter._build_plan, converter._execute_group
+    converter._build_plan = functools.partial(
+        _split_prefused_wi_then_build_plan,
+        build_plan,
+        prefused_wi,
+        remaining_reads,
+        ckpt_prefuse_moe and mesh_tp > 1,
+    )
+    converter._execute_group = functools.partial(
+        _execute_group_and_free_sources,
+        execute_group,
+        prefused_wi,
+        sliced_wi,
+        remaining_reads,
+    )
+    try:
+      converted = converter.convert(
+          scanned_state, target_state=target.transformer_state
+      )
+    finally:
+      converter._build_plan, converter._execute_group = (
+          build_plan,
+          execute_group,
+      )
+    # pylint: enable=protected-access
   del scanned_state
   gc.collect()
 
@@ -1104,7 +1168,6 @@ def load_and_convert_scanned_checkpoint(
   target.update_params(converted)
   del converted
   gc.collect()
-  jax.clear_caches()
   jax.effects_barrier()
 
   freed = [

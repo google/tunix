@@ -21,6 +21,7 @@ from flax import nnx
 from flax import traverse_util
 import jax
 from jax import numpy as jnp
+import numpy as np
 from tunix.utils import maxtext_utils
 
 # MaxText optimizer config keys. `AdamWOptions` sets all but opt_type, which
@@ -1167,14 +1168,11 @@ class MaxTextUtilsTest(absltest.TestCase):
     )
 
 
-if __name__ == "__main__":
-  absltest.main()
-
-
 class _Group(NamedTuple):
   op: str
   source_keys: tuple[tuple[str, ...], ...]
   targets: tuple[tuple[str, ...], ...]
+  local_index: int | None = None
 
 
 _WO_GROUP = _Group(
@@ -1184,6 +1182,38 @@ _WI_GROUP = _Group(
     "fuse_moe",
     (("layers", "wi_0"), ("layers", "wi_1")),
     (("layers_0", "wi"), ("layers_1", "wi")),
+)
+_SHARED_LOCAL_GROUPS = (
+    _Group(
+        "slice",
+        (("layers", "local_layers", "wo"),),
+        (("layers_0", "wo"), ("layers_2", "wo")),
+        local_index=0,
+    ),
+    _Group(
+        "slice",
+        (("layers", "local_layers", "wo"),),
+        (("layers_1", "wo"), ("layers_3", "wo")),
+        local_index=1,
+    ),
+    _Group(
+        "fuse_moe",
+        (
+            ("layers", "local_layers", "wi_0"),
+            ("layers", "local_layers", "wi_1"),
+        ),
+        (("layers_0", "wi"), ("layers_2", "wi")),
+        local_index=0,
+    ),
+    _Group(
+        "fuse_moe",
+        (
+            ("layers", "local_layers", "wi_0"),
+            ("layers", "local_layers", "wi_1"),
+        ),
+        (("layers_1", "wi"), ("layers_3", "wi")),
+        local_index=1,
+    ),
 )
 
 
@@ -1203,6 +1233,7 @@ class _FakeConverter:
     self.kwargs = kwargs
     self.planned_sources = []
     self.watched_alive_during_fuse = None
+    self.fuse_inputs = []
     _FakeConverter.instances.append(self)
 
   def _build_plan(self, src_flat, tgt_flat, skip_paths):
@@ -1212,10 +1243,22 @@ class _FakeConverter:
 
   def _execute_group(self, group, src_flat, tgt_flat):
     del tgt_flat
-    sources = [src_flat[key] for key in group.source_keys]
+    raw_sources = [src_flat[key] for key in group.source_keys]
     if group.op == "fuse_moe":
+      self.fuse_inputs.append(tuple(raw_sources))
       if self.watched is not None:
-        self.watched_alive_during_fuse = not self.watched.is_deleted()
+        alive = not self.watched.is_deleted()
+        self.watched_alive_during_fuse = (
+            alive
+            if self.watched_alive_during_fuse is None
+            else self.watched_alive_during_fuse and alive
+        )
+    sources = (
+        [arr[:, group.local_index] for arr in raw_sources]
+        if group.local_index is not None
+        else raw_sources
+    )
+    if group.op == "fuse_moe":
       fused = jnp.concatenate(sources, axis=-1)
       return [(key, fused[i]) for i, key in enumerate(group.targets)]
     if group.op == "raise":
@@ -1227,39 +1270,58 @@ class _FakeConverter:
     tgt_flat = traverse_util.flatten_dict(target_state.to_pure_dict())
     result = {}
     for group in self._build_plan(src_flat, tgt_flat, frozenset()):
-      result.update(self._execute_group(group, src_flat, tgt_flat))
+      result.update(self._execute_group(group, dict(src_flat), tgt_flat))
     nested = traverse_util.unflatten_dict(result)
     return {"model": jax.tree_util.tree_map(nnx.Param, nested)}
 
 
 class _ScannedLayers(nnx.Module):
 
-  def __init__(self, prefused: bool):
+  def __init__(self, prefused: bool, shape_prefix: tuple[int, ...] = (2,)):
+    n = 2 if shape_prefix == (2,) else shape_prefix[0] * shape_prefix[1]
     if prefused:
-      self.wi = nnx.Param(jnp.arange(64.0).reshape(2, 4, 8))
-    else:
+      self.wi = nnx.Param(
+          jnp.arange(float(n * 32)).reshape(*shape_prefix, 4, 8)
+      )
+    elif shape_prefix == (2,):
       self.wi_0 = nnx.Param(jnp.full((2, 4, 4), 1.0))
       self.wi_1 = nnx.Param(jnp.full((2, 4, 4), 2.0))
-    self.wo = nnx.Param(jnp.arange(32.0).reshape(2, 4, 4))
+    else:
+      self.wi_0 = nnx.Param(
+          jnp.arange(float(n * 16)).reshape(*shape_prefix, 4, 4)
+      )
+      self.wi_1 = nnx.Param(
+          (100.0 + jnp.arange(float(n * 16))).reshape(*shape_prefix, 4, 4)
+      )
+    self.wo = nnx.Param(jnp.arange(float(n * 16)).reshape(*shape_prefix, 4, 4))
+
+
+class _InhomogeneousLayers(nnx.Module):
+
+  def __init__(self, prefused: bool, num_slots: int = 2):
+    self.local_layers = _ScannedLayers(prefused, shape_prefix=(2, num_slots))
 
 
 class _ScannedModel(nnx.Module):
 
-  def __init__(self, prefused: bool):
-    self.layers = _ScannedLayers(prefused)
+  def __init__(self, prefused: bool, num_slots: int | None = None):
+    self.layers = (
+        _ScannedLayers(prefused)
+        if num_slots is None
+        else _InhomogeneousLayers(prefused, num_slots)
+    )
 
 
 class _FakeTarget:
   """In-process vLLM weights with one non-parameter leaf."""
 
-  def __init__(self, free_on_update: bool = False):
+  def __init__(self, free_on_update: bool = False, num_layers: int = 2):
     layer = lambda: {
         "wi": nnx.Param(jnp.zeros((4, 8))),
         "wo": nnx.Param(jnp.zeros((4, 4))),
     }
     self.state = nnx.State({
-        "layers_0": layer(),
-        "layers_1": layer(),
+        **{f"layers_{i}": layer() for i in range(num_layers)},
         "stat": nnx.BatchStat(jnp.zeros((3,))),
     })
     self.free_on_update = free_on_update
@@ -1285,7 +1347,7 @@ class LoadAndConvertScannedCheckpointTest(absltest.TestCase):
     super().setUp()
     _FakeConverter.instances = []
 
-  def _load(self, model, target, **kwargs):
+  def _load(self, model, target, converter_cls=_FakeConverter, **kwargs):
     pyconfig = mock.MagicMock()
     pyconfig.initialize.return_value = mock.sentinel.scanned_cfg
     creation = mock.MagicMock()
@@ -1296,7 +1358,7 @@ class LoadAndConvertScannedCheckpointTest(absltest.TestCase):
         ),
         "configs": types.SimpleNamespace(pyconfig=pyconfig),
         "integration.vllm.weight_converter": types.SimpleNamespace(
-            MaxTextToMaxTextConverter=_FakeConverter
+            MaxTextToMaxTextConverter=converter_cls
         ),
         "utils": types.SimpleNamespace(model_creation_utils=creation),
         "utils.globals": types.SimpleNamespace(
@@ -1330,8 +1392,10 @@ class LoadAndConvertScannedCheckpointTest(absltest.TestCase):
     placeholder = target.state.to_pure_dict()["layers_0"]["wo"]
     stat = target.state.to_pure_dict()["stat"]
 
-    pyconfig, creation = self._load(model, target)
+    with mock.patch.object(jax, "clear_caches") as clear_caches:
+      pyconfig, creation = self._load(model, target)
 
+    clear_caches.assert_not_called()
     init_args, init_kwargs = pyconfig.initialize.call_args
     self.assertEqual(init_args, (["", "/maxtext/configs/base.yml"],))
     self.assertEqual(init_kwargs["model_name"], "qwen3-test")
@@ -1378,6 +1442,105 @@ class LoadAndConvertScannedCheckpointTest(absltest.TestCase):
     # Halves [0:4] and [4:8] of layer 1 are re-fused in order.
     self.assertEqual(loaded["layers_1"]["wi"][0, 0], 32.0)
     self.assertEqual(loaded["layers_1"]["wi"][0, 4], 36.0)
+
+  def test_shared_local_layers_sources_stay_alive_across_local_indices(self):
+    model = _ScannedModel(prefused=False, num_slots=2)
+    local = nnx.state(model).to_pure_dict()["layers"]["local_layers"]
+    scanned_wo = local["wo"]
+    scanned_wi_0, scanned_wi_1 = local["wi_0"], local["wi_1"]
+    expected_wo = jax.device_get(scanned_wo)
+    expected_wi = np.concatenate(
+        [jax.device_get(scanned_wi_0), jax.device_get(scanned_wi_1)], axis=-1
+    )
+    target = _FakeTarget(num_layers=4)
+
+    with (
+        mock.patch.object(_FakeConverter, "groups", _SHARED_LOCAL_GROUPS),
+        mock.patch.object(_FakeConverter, "watched", scanned_wi_0),
+    ):
+      self._load(model, target, ckpt_prefuse_moe=False)
+
+    (converter,) = _FakeConverter.instances
+    self.assertTrue(converter.watched_alive_during_fuse)
+    self.assertTrue(scanned_wo.is_deleted())
+    self.assertTrue(scanned_wi_0.is_deleted())
+    self.assertTrue(scanned_wi_1.is_deleted())
+    loaded = target.state.to_pure_dict()
+    for block in range(2):
+      for slot in range(2):
+        layer = loaded[f"layers_{block * 2 + slot}"]
+        np.testing.assert_array_equal(layer["wo"], expected_wo[block, slot])
+        np.testing.assert_array_equal(layer["wi"], expected_wi[block, slot])
+
+  def test_prefused_moe_wi_shared_across_local_indices(self):
+    model = _ScannedModel(prefused=True, num_slots=2)
+    local = nnx.state(model).to_pure_dict()["layers"]["local_layers"]
+    prefused_wi, scanned_wo = local["wi"], local["wo"]
+    expected_wi = jax.device_get(prefused_wi)
+    expected_wo = jax.device_get(scanned_wo)
+    target = _FakeTarget(num_layers=4)
+
+    with (
+        mock.patch.object(_FakeConverter, "groups", _SHARED_LOCAL_GROUPS),
+        mock.patch.object(_FakeConverter, "watched", prefused_wi),
+    ):
+      self._load(model, target, ckpt_prefuse_moe=True)
+
+    (converter,) = _FakeConverter.instances
+    self.assertNotIn(
+        ("layers", "local_layers", "wi"), converter.planned_sources
+    )
+    self.assertTrue(converter.watched_alive_during_fuse)
+    self.assertLen(converter.fuse_inputs, 2)
+    self.assertTrue(prefused_wi.is_deleted())
+    self.assertTrue(scanned_wo.is_deleted())
+    for sliced_pair in converter.fuse_inputs:
+      for sliced_half in sliced_pair:
+        self.assertTrue(sliced_half.is_deleted())
+    loaded = target.state.to_pure_dict()
+    for block in range(2):
+      for slot in range(2):
+        layer = loaded[f"layers_{block * 2 + slot}"]
+        np.testing.assert_array_equal(layer["wo"], expected_wo[block, slot])
+        np.testing.assert_array_equal(layer["wi"], expected_wi[block, slot])
+
+  def test_uses_native_free_sources_when_converter_supports_it(self):
+    class _NativeFreeConverter(_FakeConverter):
+
+      def convert(self, src_pytree, target_state=None, *, free_sources=False):
+        self.free_sources = free_sources
+        self.hooks_unpatched = (
+            "_build_plan" not in self.__dict__
+            and "_execute_group" not in self.__dict__
+        )
+        out = super().convert(src_pytree, target_state)
+        if free_sources:
+          for leaf in jax.tree_util.tree_leaves(src_pytree):
+            if isinstance(leaf, jax.Array) and not leaf.is_deleted():
+              leaf.delete()
+        return out
+
+    model = _ScannedModel(prefused=True)
+    prefused_wi = nnx.state(model).to_pure_dict()["layers"]["wi"]
+    target = _FakeTarget()
+    native_wi_group = _Group(
+        "slice", (("layers", "wi"),), (("layers_0", "wi"), ("layers_1", "wi"))
+    )
+    with mock.patch.object(
+        _NativeFreeConverter, "groups", (_WO_GROUP, native_wi_group)
+    ):
+      self._load(
+          model,
+          target,
+          converter_cls=_NativeFreeConverter,
+          ckpt_prefuse_moe=True,
+      )
+
+    (converter,) = _FakeConverter.instances
+    self.assertTrue(converter.free_sources)
+    self.assertTrue(converter.hooks_unpatched)
+    self.assertIn(("layers", "wi"), converter.planned_sources)
+    self.assertTrue(prefused_wi.is_deleted())
 
   def test_fp8_moe_reaches_the_converter(self):
     self._load(_ScannedModel(prefused=False), _FakeTarget(), fp8_moe=True)
