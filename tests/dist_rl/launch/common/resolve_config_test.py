@@ -1931,6 +1931,19 @@ weight_sync_config:
         with self.assertRaisesRegex(exc_type, pattern):
           resolve_config.initialize(overrides)
 
+  def test_tcp_weight_sync_mode_validation(self):
+    hp = resolve_config.initialize(["weight_sync_config.mode=tcp"])
+    self.assertEqual(hp.config_mapping("weight_sync_config")["mode"], "tcp")
+
+    with self.assertRaisesRegex(
+        ValueError,
+        r"weight_sync_config\.mode='tcp' requires"
+        r" rollout_engine='inprocess_vllm'",
+    ):
+      resolve_config.initialize([
+          "weight_sync_config.mode=tcp",
+          "rollout_engine=vanilla",
+      ])
 
 if __name__ == "__main__":
   absltest.main()

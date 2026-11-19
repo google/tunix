@@ -397,11 +397,35 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     """Returns staged refs skipped during release due to worker eviction."""
     return self._evicted_release_skips_total
 
+  def _worker_bool_capability(
+      self,
+      role: datatypes.Role,
+      key: str,
+      *,
+      default: bool = True,
+  ) -> bool:
+    """Returns a boolean worker capability if consistent across all workers."""
+    declared = [
+        bool(info.resources[key])
+        for info in self._registry.infos(role)
+        if key in info.resources
+    ]
+    if not declared:
+      return default
+    if len(set(declared)) > 1:
+      raise ValueError(
+          f"Inconsistent worker capability {key!r} for role {role}: {declared}"
+      )
+    return declared[0]
+
   async def _maybe_configure_trainer_target_state(
       self,
       role: datatypes.Role,
   ) -> None:
     """Seeds trainer-side weight sync with the rollout target-state skeleton."""
+    if not self._worker_bool_capability(role, "requires_target_state"):
+      return
+
     trainer = self._role_handle(role)
     # Match the weight sync destinations: a rejoined rollout worker still in
     # PENDING_WEIGHT_SYNC can seed the trainer before its first sync.
@@ -1007,56 +1031,90 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         )
         precompile = bool(kwargs.get("precompile", True))
         return_routed_experts = bool(kwargs.get("return_routed_experts", False))
-        if role == datatypes.Role.CRITIC:
-          # TODO(sizhi): The PPO critic is not supported end to end yet:
-          # `create_trainer_payloads` never fills `old_values` and
-          # `build_dummy_payload` carries no `returns` / `old_values`, so the
-          # value loss cannot be precompiled or trained. This branch only wires
-          # the loss and model-input functions.
-          if not isinstance(algo_config, algorithm_config.PPOConfig):
-            raise ValueError(
-                "Configuring a CRITIC trainer worker requires a PPOConfig"
-                f" (with value_loss_fn), got {type(algo_config).__name__}."
+
+        accepts_callable_loss = self._worker_bool_capability(
+            role, "accepts_callable_loss"
+        )
+        needs_aot_compile = self._worker_bool_capability(
+            role, "needs_aot_compile"
+        )
+
+        loss_fn = None
+        gen_fn = None
+        if accepts_callable_loss:
+          if role == datatypes.Role.CRITIC:
+            # TODO(sizhi): The PPO critic is not supported end to end yet:
+            # `create_trainer_payloads` never fills `old_values` and
+            # `build_dummy_payload` carries no `returns` / `old_values`, so
+            # the value loss cannot be precompiled or trained. This branch only
+            # wires the loss and model-input functions.
+            if not isinstance(algo_config, algorithm_config.PPOConfig):
+              raise ValueError(
+                  "Configuring a CRITIC trainer worker requires a PPOConfig"
+                  f" (with value_loss_fn), got {type(algo_config).__name__}."
+              )
+            loss_fn = function_registry.get_value_loss_fn(
+                algo_config.value_loss_fn
             )
-          loss_fn = function_registry.get_value_loss_fn(
-              algo_config.value_loss_fn
+            gen_fn = algo_core.build_critic_model_input_fn(
+                algo_config,
+                pad_id=pad_id,
+                eos_id=eos_id,
+            )
+          else:
+            loss_fn = function_registry.get_policy_loss_fn(
+                algo_config.policy_loss_fn
+            )
+            gen_fn = algo_core.build_gen_model_input_fn(
+                algo_config,
+                pad_id=pad_id,
+                eos_id=eos_id,
+            )
+        elif role == datatypes.Role.CRITIC or not isinstance(
+            algo_config, algorithm_config.GRPOConfig
+        ):
+          raise ValueError(
+              "Data-only configure_algorithm currently requires Role.ACTOR"
+              f" with GRPOConfig, got {role=} and"
+              f" {type(algo_config).__name__}."
           )
-          gen_fn = algo_core.build_critic_model_input_fn(
-              algo_config,
-              pad_id=pad_id,
-              eos_id=eos_id,
-          )
-        else:
-          loss_fn = function_registry.get_policy_loss_fn(
-              algo_config.policy_loss_fn
-          )
-          gen_fn = algo_core.build_gen_model_input_fn(
-              algo_config,
-              pad_id=pad_id,
-              eos_id=eos_id,
-          )
-        use_rollout_logps = algo_config.use_rollout_logps
+
+        use_rollout_logps = bool(algo_config.use_rollout_logps)
         sampler_agreement_applied = (
             use_rollout_logps and not can_fuse_agreement_in_loss
         )
-        with_sampler_is_weights = sampler_agreement_applied and (
-            algo_config.sampler_is is not None
-            or algo_config.sampler_rs is not None
+        with_sampler_is_weights = (
+            accepts_callable_loss
+            and sampler_agreement_applied
+            and (
+                algo_config.sampler_is is not None
+                or algo_config.sampler_rs is not None
+            )
+        )
+        routed_experts_encode_mode = (
+            algo_config.routed_experts_encode_mode
+            if return_routed_experts
+            else "auto"
         )
 
         def _configure():
           assert worker is not None
-          # Both setters clear the trainer's JIT cache, so the ahead-of-time
-          # compile must run strictly after them.
-          worker.submit("with_loss_fn", loss_fn, has_aux=True)
-          worker.submit("with_gen_model_input_fn", gen_fn)
-          if not precompile:
+          if accepts_callable_loss:
+            # Both setters clear the trainer's JIT cache, so the ahead-of-time
+            # compile must run strictly after them.
+            worker.submit("with_loss_fn", loss_fn, has_aux=True)
+            worker.submit("with_gen_model_input_fn", gen_fn)
+          else:
+            worker.submit(
+                "configure_algorithm",
+                algo_config,
+                pad_id=int(pad_id),
+                eos_id=int(eos_id),
+                fuse_agreement_in_loss=bool(can_fuse_agreement_in_loss),
+                return_routed_experts=bool(return_routed_experts),
+            )
+          if not (precompile and needs_aot_compile):
             return
-          routed_experts_encode_mode = (
-              algo_config.routed_experts_encode_mode
-              if return_routed_experts
-              else "auto"
-          )
           dummy_payload = assembler.build_dummy_payload(
               with_old_per_token_logps=use_rollout_logps,
               with_ref_per_token_logps=algo_config.requires_reference_kl,

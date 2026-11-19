@@ -163,6 +163,8 @@ class RaidenWeightSyncDelegate:
   abort after a partial weight_sync cannot restore the previous weights.
   """
 
+  serving_corrupted: bool = False
+
   def __init__(
       self,
       *args,
@@ -185,6 +187,10 @@ class RaidenWeightSyncDelegate:
     ]
     self._version = 0
     self._tracker = weight_sync_coordinator.WorkerRoundTracker()
+    self.serving_corrupted: bool = False
+
+  def close(self) -> None:
+    pass
 
   def is_bounded(
       self,
