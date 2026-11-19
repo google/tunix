@@ -971,6 +971,16 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
       hp.config_mapping("weight_sync_config")["mode"],
       tuple(mode.value for mode in common_datatypes.WeightSyncMode),
   )
+  if (
+      hp.config_mapping("weight_sync_config")["mode"]
+      == common_datatypes.WeightSyncMode.TCP.value
+  ):
+    rollout_engine = hp.config["rollout_engine"]
+    if rollout_engine != "inprocess_vllm":
+      raise ValueError(
+          "weight_sync_config.mode='tcp' requires"
+          f" rollout_engine='inprocess_vllm', got {rollout_engine!r}."
+      )
   _validate_maxtext_pairing(hp)
   _validate_maxtext_model_names(hp)
   _validate_maxtext_extra_config(hp)
@@ -1069,7 +1079,7 @@ def rollout_init_with_random_weights(hp: cli_config.HyperParameters) -> bool:
 
   Returns:
     `vllm_config.init_with_random_weights`, or, when it is null, whether
-    `weight_sync_config.mode` is "raiden".
+    `weight_sync_config.mode` is "raiden" or "tcp".
 
   Raises:
     TypeError: If `vllm_config.init_with_random_weights` is not a bool or null.
@@ -1077,7 +1087,10 @@ def rollout_init_with_random_weights(hp: cli_config.HyperParameters) -> bool:
   value = hp.config_mapping("vllm_config")["init_with_random_weights"]
   if value is None:
     mode = hp.config_mapping("weight_sync_config")["mode"]
-    return mode == common_datatypes.WeightSyncMode.RAIDEN.value
+    return mode in (
+        common_datatypes.WeightSyncMode.RAIDEN.value,
+        common_datatypes.WeightSyncMode.TCP.value,
+    )
   if not isinstance(value, bool):
     raise TypeError(
         "vllm_config.init_with_random_weights must be a bool or null, got"
@@ -1089,24 +1102,28 @@ def rollout_init_with_random_weights(hp: cli_config.HyperParameters) -> bool:
 def _validate_rollout_weights(hp: cli_config.HyperParameters) -> None:
   """Rejects a vLLM rollout that would never get real weights.
 
-  Without Raiden weight sync, the rollout keeps the weights it starts from for
-  the whole run. vLLM's `MaxTextForCausalLM` always starts from random weights:
-  it loads weights only from `maxtext_config.load_parameters_path`, which the
-  rollout does not set (`maxtext_utils.build_vllm_maxtext_additional_config`).
+  Without Raiden or TCP weight sync, the rollout keeps the weights it
+  starts from for the whole run. vLLM's `MaxTextForCausalLM` always starts
+  from random weights: it loads weights only from
+  `maxtext_config.load_parameters_path`, which the rollout does not set
+  (`maxtext_utils.build_vllm_maxtext_additional_config`).
 
   Args:
     hp: Loaded configuration.
 
   Raises:
     TypeError: If `vllm_config.init_with_random_weights` is not a bool or null.
-    ValueError: If `weight_sync_config.mode` is not "raiden" and either a vLLM
-      `rollout_engine` serves `rollout_model_config.model_source: maxtext`, or
-      `rollout_engine` is "inprocess_vllm" with
-      `vllm_config.init_with_random_weights` true.
+    ValueError: If `weight_sync_config.mode` is not "raiden" or "tcp" and
+      either a vLLM `rollout_engine` serves
+      `rollout_model_config.model_source: maxtext`, or `rollout_engine` is
+      "inprocess_vllm" with `vllm_config.init_with_random_weights` true.
   """
   random_init = rollout_init_with_random_weights(hp)
   mode = hp.config_mapping("weight_sync_config")["mode"]
-  if mode == common_datatypes.WeightSyncMode.RAIDEN.value:
+  if mode in (
+      common_datatypes.WeightSyncMode.RAIDEN.value,
+      common_datatypes.WeightSyncMode.TCP.value,
+  ):
     return
   rollout_engine = hp.config["rollout_engine"]
   rollout_source = hp.config_mapping("rollout_model_config")["model_source"]
@@ -1128,7 +1145,7 @@ def _validate_rollout_weights(hp: cli_config.HyperParameters) -> None:
         " never loads the trainer's weights into it, so the rollout would"
         " sample from random weights for the whole run. Set"
         " vllm_config.init_with_random_weights to false or null to load the"
-        " checkpoint, or use weight_sync_config.mode=raiden."
+        " checkpoint, or use weight_sync_config.mode=raiden or tcp."
     )
 
 

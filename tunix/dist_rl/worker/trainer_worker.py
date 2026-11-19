@@ -166,7 +166,13 @@ class TrainerWorker(abstract_worker.Worker):
   def initialize(self) -> datatypes.Response:
     """Initializes the worker and the underlying trainer."""
     if self.state == WorkerState.READY:
-      return self._response(initialized=True, ready=True)
+      return self._response(
+          initialized=True,
+          ready=True,
+          accepts_callable_loss=True,
+          requires_target_state=True,
+          needs_aot_compile=True,
+      )
     self.state = WorkerState.INITIALIZING
     try:
       if self._trainer is None:
@@ -185,7 +191,12 @@ class TrainerWorker(abstract_worker.Worker):
             self._pending_gen_model_input_fn = None
           self._trainer = trainer
       self._last_error = None
-      return self._response(initialized=True)
+      return self._response(
+          initialized=True,
+          accepts_callable_loss=True,
+          requires_target_state=True,
+          needs_aot_compile=True,
+      )
     except Exception as exc:
       self._last_error = str(exc)
       self.state = WorkerState.ERROR
@@ -281,6 +292,9 @@ class TrainerWorker(abstract_worker.Worker):
                 else "UninitializedTrainer"
             ),
             "policy_version": self._policy_version(),
+            "accepts_callable_loss": True,
+            "requires_target_state": True,
+            "needs_aot_compile": True,
         },
     )
 
