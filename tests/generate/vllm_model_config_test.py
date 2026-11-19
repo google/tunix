@@ -124,6 +124,29 @@ class VllmModelConfigTest(parameterized.TestCase):
         vllm_model_config.vllm_hf_overrides_for_model("Qwen/Qwen3.5-35B-A3B")
     )
 
+  def test_tcp_weight_sync_selects_hf_mapping_for_qwen3_only(self):
+    qwen3_tcp_cfg = vllm_model_config.vllm_mapping_config_for_model(
+        "Qwen/Qwen3-1.7B",
+        weight_sync_mode="tcp",
+    )
+    self.assertEqual(qwen3_tcp_cfg, mappings_lib.MappingConfig())
+
+  @parameterized.parameters(
+      ("google/gemma-4-E2B-it",),
+      ("Qwen/Qwen3.5-0.8B",),
+      ("Qwen/Qwen3.5-35B-A3B",),
+  )
+  def test_tcp_weight_sync_raises_not_implemented_for_unsupported_families(
+      self, model_name: str
+  ):
+    with self.assertRaisesRegex(
+        NotImplementedError, "Hugging Face-to-vLLM JAX mapping"
+    ):
+      vllm_model_config.vllm_mapping_config_for_model(
+          model_name,
+          weight_sync_mode="tcp",
+      )
+
   @parameterized.parameters(
       ("Qwen/Qwen3.5-0.8B", "", common_datatypes.WeightSyncMode.NONE),
       ("Qwen/Qwen3.5-35B-A3B", "", common_datatypes.WeightSyncMode.NOOP),
@@ -242,6 +265,56 @@ class VllmModelConfigTest(parameterized.TestCase):
           ValueError,
           "not a valid WeightSyncMode",
       ),
+      (
+          "Qwen/Qwen3-1.7B",
+          "vllm",
+          1,
+          "tcp",
+          False,
+          True,
+          ValueError,
+          "use inprocess_vllm instead",
+      ),
+      (
+          "Qwen/Qwen3-1.7B",
+          "inprocess_vllm",
+          1,
+          "tcp",
+          True,
+          True,
+          NotImplementedError,
+          "LoRA rollout weight sync",
+      ),
+      (
+          "Qwen/Qwen3.5-0.8B",
+          "inprocess_vllm",
+          1,
+          "tcp",
+          False,
+          True,
+          NotImplementedError,
+          "Hugging Face-to-vLLM JAX mapping",
+      ),
+      (
+          "google/gemma-4-E2B-it",
+          "inprocess_vllm",
+          1,
+          "tcp",
+          False,
+          True,
+          NotImplementedError,
+          "Hugging Face-to-vLLM JAX mapping",
+      ),
+      (
+          "meta-llama/Llama-3.1-8B",
+          "inprocess_vllm",
+          1,
+          "tcp",
+          False,
+          True,
+          ValueError,
+          "supports Qwen3",
+      ),
   )
   def test_validate_rejects_invalid_or_unsupported_configs(
       self,
@@ -302,6 +375,15 @@ class VllmModelConfigTest(parameterized.TestCase):
           True,
           True,
       ),
+      (
+          "Qwen/Qwen3-1.7B",
+          "inprocess_vllm",
+          2,
+          "tcp",
+          "",
+          False,
+          True,
+      ),
   )
   def test_validate_allows_supported_and_no_sync_or_maxtext_configs(
       self,
@@ -322,6 +404,26 @@ class VllmModelConfigTest(parameterized.TestCase):
         use_lora=use_lora,
         init_with_random_weights=init_with_random_weights,
     )
+
+  def test_tcp_weight_sync_rejects_maxtext_rollout(self):
+    with self.assertRaisesRegex(
+        NotImplementedError, "MaxText rollout with weight_sync_mode='tcp'"
+    ):
+      vllm_model_config.validate_vllm_rollout_config(
+          "Qwen/Qwen3-1.7B",
+          sampler_type="inprocess_vllm",
+          tp_size=4,
+          weight_sync_mode="tcp",
+          maxtext_model_name="qwen3-1.7b",
+      )
+    with self.assertRaisesRegex(
+        NotImplementedError, "MaxText rollout with weight_sync_mode='tcp'"
+    ):
+      vllm_model_config.vllm_mapping_config_for_model(
+          "Qwen/Qwen3-1.7B",
+          maxtext_model_name="qwen3-1.7b",
+          weight_sync_mode="tcp",
+      )
 
 
 if __name__ == "__main__":

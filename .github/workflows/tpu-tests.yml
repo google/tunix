@@ -151,6 +151,7 @@ jobs:
             --ignore=tests/generate/mappings_config_test.py \
             --ignore=tests/generate/utils_test.py \
             --ignore=tests/generate/vllm_sampler_test.py \
+            --ignore=tests/generate/vllm_sampler_hf_test.py \
             --ignore=tests/generate/vllm_sampler_qwen_test.py \
             --ignore=tests/generate/vllm_driver_test.py \
             --ignore=tests/generate/tokenizer_adapter_test.py \
