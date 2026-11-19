@@ -15,6 +15,8 @@
 """Tests for standalone distributed DeepSWE evaluation."""
 
 import asyncio
+import contextlib
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -229,6 +231,37 @@ class EvalDeepSWETest(unittest.TestCase):
       with self.subTest(bad=bad), self.assertRaises(SystemExit):
         eval_deepswe.parse_args(bad)
 
+  def test_multiple_rollouts_require_positive_temperature(self) -> None:
+    greedy = eval_deepswe.parse_args(["--num_rollouts_per_instance", "1"])
+    self.assertEqual(greedy.num_rollouts_per_instance, 1)
+    self.assertEqual(greedy.temperature, 0.0)
+
+    sampled = eval_deepswe.parse_args([
+        "--num_rollouts_per_instance",
+        "2",
+        "--temperature",
+        "0.6",
+    ])
+    self.assertEqual(sampled.num_rollouts_per_instance, 2)
+    self.assertEqual(sampled.temperature, 0.6)
+
+    for bad in (
+        ["--num_rollouts_per_instance", "2"],
+        ["--num_rollouts_per_instance", "2", "--temperature", "0"],
+    ):
+      stderr = io.StringIO()
+      with (
+          self.subTest(bad=bad),
+          contextlib.redirect_stderr(stderr),
+          self.assertRaises(SystemExit) as ctx,
+      ):
+        eval_deepswe.parse_args(bad)
+      self.assertEqual(ctx.exception.code, 2)
+      self.assertIn(
+          "--num_rollouts_per_instance > 1 requires --temperature > 0",
+          stderr.getvalue(),
+      )
+
   def test_pass_at_k_counts_failed_and_missing_attempts(self):
     def row(pair_index, reward, error=None):
       return {
@@ -253,7 +286,12 @@ class EvalDeepSWETest(unittest.TestCase):
 
   def test_each_task_dispatches_all_attempts(self):
     args = eval_deepswe.parse_args([
-        "--num_rollouts_per_instance", "2", "--max_concurrent", "3",
+        "--num_rollouts_per_instance",
+        "2",
+        "--temperature",
+        "0.6",
+        "--max_concurrent",
+        "3",
     ])
     entries = [
         {"instance_id": f"task-{i}", "docker_image": f"image-{i}"}
@@ -333,6 +371,95 @@ class EvalDeepSWETest(unittest.TestCase):
     fake_fs.open.assert_called_once_with(
         "bkt/out/run/attempts/eval_0.json", "w", encoding="utf-8"
     )
+
+  def test_controller_survives_attempt_write_oserror(self) -> None:
+    args = eval_deepswe.parse_args(["--tasks_limit", "2"])
+    entries: list[dict[str, object]] = [
+        {"instance_id": "task-0", "docker_image": "image-0"},
+        {"instance_id": "task-1", "docker_image": "image-1"},
+    ]
+    replies = iter([
+        SimpleNamespace(
+            request_id="eval_0",
+            unwrap=lambda: {
+                "reward": 1.0,
+                "num_steps": 2,
+                "status": "SUCCEEDED",
+                "guard_blocked_steps": 0,
+                "guard_reasons": [],
+                "error": None,
+            },
+        ),
+        SimpleNamespace(
+            request_id="eval_1",
+            unwrap=lambda: {
+                "reward": 0.0,
+                "num_steps": 3,
+                "status": "SUCCEEDED",
+                "guard_blocked_steps": 0,
+                "guard_reasons": [],
+                "error": None,
+            },
+        ),
+    ])
+    handle = mock.AsyncMock()
+    handle.asubmit.return_value = eval_deepswe.model_profile(args)
+    handle.dispatch_task.side_effect = (
+        lambda request_id, method, fields: request_id
+    )
+    handle.poll_responses.side_effect = lambda timeout_s: next(replies)
+    real_write_attempt = eval_deepswe.ResultWriter.write_attempt
+
+    def flaky_write_attempt(
+        writer: eval_deepswe.ResultWriter, row: dict[str, object]
+    ) -> None:
+      if row["request_id"] == "eval_0":
+        raise OSError("transient GCS error")
+      real_write_attempt(writer, row)
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+      args.output_dir = temp_dir
+      with (
+          mock.patch.object(eval_deepswe, "load_entries", return_value=entries),
+          mock.patch(
+              "tunix.dist_rl.worker.remote_execution.ActorHandle.from_address",
+              return_value=handle,
+          ),
+          mock.patch.object(
+              eval_deepswe.ResultWriter,
+              "write_attempt",
+              autospec=True,
+              side_effect=flaky_write_attempt,
+          ),
+          self.assertLogs(level="INFO") as logs,
+      ):
+        summary = asyncio.run(eval_deepswe.run_controller(args))
+
+      self.assertTrue(
+          any(
+              record.levelname == "WARNING"
+              and "eval_0" in record.getMessage()
+              and "transient GCS error" in record.getMessage()
+              for record in logs.records
+          )
+      )
+      results = list(Path(temp_dir).glob("*.jsonl"))
+      self.assertEqual(len(results), 1)
+      written_rows = [
+          json.loads(line)
+          for line in results[0].read_text(encoding="utf-8").splitlines()
+      ]
+      self.assertEqual(
+          [row["instance_id"] for row in written_rows], ["task-0", "task-1"]
+      )
+      saved_summary = json.loads(
+          results[0].with_suffix(".summary.json").read_text(encoding="utf-8")
+      )
+      self.assertEqual(summary["completed_attempts"], 2)
+      self.assertEqual(summary["resolved"], 1)
+      self.assertEqual(summary["pass_at_1"], 0.5)
+      self.assertIsNone(summary["fatal_error"])
+      self.assertEqual(saved_summary, summary)
 
 
 if __name__ == "__main__":

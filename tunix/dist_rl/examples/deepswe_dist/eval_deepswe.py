@@ -109,6 +109,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
   if args.temperature < 0 or not 0 < args.top_p <= 1:
     parser.error("--temperature must be nonnegative and --top_p in (0, 1]")
+  if args.num_rollouts_per_instance > 1 and args.temperature == 0:
+    parser.error("--num_rollouts_per_instance > 1 requires --temperature > 0")
   if args.top_k != -1 and args.top_k <= 0:
     parser.error("--top_k must be positive, or -1 to disable it")
   if args.max_response_length > args.max_model_len - _CONTEXT_HEADROOM_TOKENS:
@@ -417,11 +419,16 @@ async def run_controller(args: argparse.Namespace) -> dict[str, object]:
     await asyncio.gather(*(wait_ready(handle) for handle in handles))
     jobs = iter(enumerate(entries))
 
-    def record(row):
-      writer.write_attempt(row)
+    def record(row: dict[str, object]) -> None:
       with rows_lock:
         rows.append(row)
         done = len(rows)
+      try:
+        writer.write_attempt(row)
+      except OSError as exc:
+        logging.warning(
+            "Failed to write attempt %s: %s", row["request_id"], exc
+        )
       logging.info(
           "[%d/%d] %s reward=%.1f steps=%d status=%s",
           done, len(entries) * attempts, row["request_id"], row["reward"],
