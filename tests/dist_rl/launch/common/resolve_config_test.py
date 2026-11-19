@@ -679,6 +679,59 @@ weight_sync_config:
             hp.config["rollout_model_config"]["model_source"], "maxtext"
         )
 
+  def test_maxtext_rollout_loads_a_checkpoint_without_weight_sync(self):
+    maxtext = [
+        "model_config.model_source=maxtext",
+        "model_config.model_path=/ckpt/qwen3-1.7b/0/items",
+        "model_config.kwargs.maxtext_model_name=qwen3-1.7b",
+        "weight_sync_config.mode=none",
+    ]
+    unscanned = (
+        "vllm_config.engine_kwargs={'additional_config': {'maxtext_config':"
+        " {'load_parameters_path': '/ckpt/unscanned/0/items'}}}"
+    )
+    scanned = "rollout_model_config.scanned_checkpoint_path=/ckpt/scanned/0"
+    # vLLM's MaxTextForCausalLM loads an unscanned checkpoint itself.
+    for rollout_engine in ("inprocess_vllm", "vllm"):
+      with self.subTest(rollout_engine=rollout_engine):
+        hp = resolve_config.initialize(
+            [*maxtext, f"rollout_engine={rollout_engine}", unscanned]
+        )
+        self.assertEqual(resolve_config.rollout_scanned_checkpoint_path(hp), "")
+    # The rollout node loads a scanned one over random weights.
+    hp = resolve_config.initialize([*maxtext, scanned])
+    self.assertEqual(
+        resolve_config.rollout_scanned_checkpoint_path(hp), "/ckpt/scanned/0"
+    )
+    self.assertIs(resolve_config.rollout_init_with_random_weights(hp), True)
+    hp = resolve_config.initialize(
+        [*maxtext, scanned, "vllm_config.init_with_random_weights=true"]
+    )
+    self.assertIs(resolve_config.rollout_init_with_random_weights(hp), True)
+    for argv, error in (
+        (
+            ("weight_sync_config.mode=raiden",),
+            "weight_sync_config.mode=raiden replaces the loaded weights",
+        ),
+        (
+            ("rollout_model_config.model_source=huggingface",),
+            "needs rollout_model_config.model_source: maxtext",
+        ),
+        (("rollout_engine=vllm",), "needs rollout_engine: inprocess_vllm"),
+        (("rollout_engine=vanilla",), "needs rollout_engine: inprocess_vllm"),
+        (
+            ("vllm_config.init_with_random_weights=false",),
+            "init_with_random_weights must be true or null",
+        ),
+        ((unscanned,), "set either it or maxtext_config.load_parameters_path"),
+    ):
+      with self.subTest(argv=argv):
+        with self.assertRaisesRegex(
+            ValueError,
+            f"rollout_model_config.scanned_checkpoint_path: .*{error}",
+        ):
+          resolve_config.initialize([*maxtext, scanned, *argv])
+
   def test_k8s_target_resolves_reference_worker(self):
     # `k8s.sh` rejects the reference worker only for the commands that start
     # nodes, so `stop` and `otel` resolve the default beta (0.04) on k8s too.

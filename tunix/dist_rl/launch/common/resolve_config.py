@@ -1068,7 +1068,9 @@ def rollout_init_with_random_weights(hp: cli_config.HyperParameters) -> bool:
 
   Returns:
     `vllm_config.init_with_random_weights`, or, when it is null, whether
-    `weight_sync_config.mode` is "raiden".
+    `weight_sync_config.mode` is "raiden" or
+    `rollout_model_config.scanned_checkpoint_path` is set (the rollout node
+    loads that checkpoint over the random weights).
 
   Raises:
     TypeError: If `vllm_config.init_with_random_weights` is not a bool or null.
@@ -1076,7 +1078,9 @@ def rollout_init_with_random_weights(hp: cli_config.HyperParameters) -> bool:
   value = hp.config_mapping("vllm_config")["init_with_random_weights"]
   if value is None:
     mode = hp.config_mapping("weight_sync_config")["mode"]
-    return mode == common_datatypes.WeightSyncMode.RAIDEN.value
+    return mode == common_datatypes.WeightSyncMode.RAIDEN.value or bool(
+        rollout_scanned_checkpoint_path(hp)
+    )
   if not isinstance(value, bool):
     raise TypeError(
         "vllm_config.init_with_random_weights must be a bool or null, got"
@@ -1085,40 +1089,119 @@ def rollout_init_with_random_weights(hp: cli_config.HyperParameters) -> bool:
   return value
 
 
+def rollout_scanned_checkpoint_path(hp: cli_config.HyperParameters) -> str:
+  """Returns `rollout_model_config.scanned_checkpoint_path`, "" when unset."""
+  return str(
+      hp.config_mapping("rollout_model_config")["scanned_checkpoint_path"]
+  )
+
+
+def _rollout_maxtext_load_parameters_path(
+    hp: cli_config.HyperParameters,
+) -> str:
+  """Returns the unscanned checkpoint a MaxText vLLM rollout loads, or "".
+
+  That is `vllm_config.engine_kwargs.additional_config.maxtext_config.
+  load_parameters_path`; `engine_kwargs` is free-form, so any level may be
+  missing.
+
+  Args:
+    hp: Loaded configuration.
+  """
+  node = hp.config_mapping("vllm_config")["engine_kwargs"]
+  for key in ("additional_config", "maxtext_config", "load_parameters_path"):
+    if not isinstance(node, Mapping) or key not in node:
+      return ""
+    node = node[key]
+  return str(node)
+
+
+def _validate_scanned_checkpoint(hp: cli_config.HyperParameters) -> None:
+  """Rejects a `rollout_model_config.scanned_checkpoint_path` it cannot load.
+
+  The rollout node loads the scanned checkpoint once at startup into an
+  `inprocess_vllm` MaxText rollout that starts from random weights.
+
+  Args:
+    hp: Loaded configuration.
+
+  Raises:
+    ValueError: If Raiden weight sync would replace the loaded weights, the
+      rollout is not an `inprocess_vllm` MaxText rollout, it does not start
+      from random weights, or it also sets
+      `maxtext_config.load_parameters_path`.
+  """
+  problems = []
+  mode = hp.config_mapping("weight_sync_config")["mode"]
+  if mode == common_datatypes.WeightSyncMode.RAIDEN.value:
+    problems.append(
+        "weight_sync_config.mode=raiden replaces the loaded weights with the"
+        " trainer's; use mode none"
+    )
+  if hp.config_mapping("rollout_model_config")["model_source"] != "maxtext":
+    problems.append("it needs rollout_model_config.model_source: maxtext")
+  if hp.config["rollout_engine"] != "inprocess_vllm":
+    problems.append("it needs rollout_engine: inprocess_vllm")
+  if not rollout_init_with_random_weights(hp):
+    problems.append(
+        "vllm_config.init_with_random_weights must be true or null (the"
+        " checkpoint is loaded over the random weights)"
+    )
+  if _rollout_maxtext_load_parameters_path(hp):
+    problems.append(
+        "set either it or maxtext_config.load_parameters_path, not both"
+    )
+  if problems:
+    raise ValueError(
+        "rollout_model_config.scanned_checkpoint_path: " + "; ".join(problems)
+    )
+
+
 def _validate_rollout_weights(hp: cli_config.HyperParameters) -> None:
   """Rejects a vLLM rollout that would never get real weights.
 
   Without Raiden weight sync, the rollout keeps the weights it starts from for
-  the whole run. vLLM's `MaxTextForCausalLM` always starts from random weights:
-  it loads weights only from `maxtext_config.load_parameters_path`, which the
-  rollout does not set (`maxtext_utils.build_vllm_maxtext_additional_config`).
+  the whole run. vLLM's `MaxTextForCausalLM` starts from random weights unless
+  `maxtext_config.load_parameters_path` names an unscanned checkpoint; the
+  rollout node can instead load `rollout_model_config.scanned_checkpoint_path`
+  over them.
 
   Args:
     hp: Loaded configuration.
 
   Raises:
     TypeError: If `vllm_config.init_with_random_weights` is not a bool or null.
-    ValueError: If `weight_sync_config.mode` is not "raiden" and either a vLLM
-      `rollout_engine` serves `rollout_model_config.model_source: maxtext`, or
-      `rollout_engine` is "inprocess_vllm" with
+    ValueError: If `rollout_model_config.scanned_checkpoint_path` cannot be
+      loaded, or `weight_sync_config.mode` is not "raiden" and either a vLLM
+      `rollout_engine` serves `rollout_model_config.model_source: maxtext`
+      with no checkpoint to load, or `rollout_engine` is "inprocess_vllm" with
       `vllm_config.init_with_random_weights` true.
   """
+  if rollout_scanned_checkpoint_path(hp):
+    _validate_scanned_checkpoint(hp)
+    return
   random_init = rollout_init_with_random_weights(hp)
   mode = hp.config_mapping("weight_sync_config")["mode"]
   if mode == common_datatypes.WeightSyncMode.RAIDEN.value:
     return
   rollout_engine = hp.config["rollout_engine"]
   rollout_source = hp.config_mapping("rollout_model_config")["model_source"]
-  if rollout_source == "maxtext" and rollout_engine != "vanilla":
+  if (
+      rollout_source == "maxtext"
+      and rollout_engine != "vanilla"
+      and not _rollout_maxtext_load_parameters_path(hp)
+  ):
     raise ValueError(
         f"A MaxText {rollout_engine} rollout"
         " (rollout_model_config.model_source='maxtext') needs"
-        f" weight_sync_config.mode=raiden, got {mode!r}. vLLM's"
-        " MaxTextForCausalLM loads weights only from"
-        " maxtext_config.load_parameters_path, which the rollout does not set,"
-        " so the rollout would sample from random weights for the whole run."
-        " Use weight_sync_config.mode=raiden with a MaxText trainer"
-        " (model_config.model_source=maxtext sets both roles)."
+        f" weight_sync_config.mode=raiden, got {mode!r}, or a checkpoint to"
+        " load. vLLM's MaxTextForCausalLM starts from random weights, so the"
+        " rollout would sample from them for the whole run. Use"
+        " weight_sync_config.mode=raiden with a MaxText trainer"
+        " (model_config.model_source=maxtext sets both roles), or set"
+        " vllm_config.engine_kwargs.additional_config.maxtext_config."
+        "load_parameters_path (unscanned) or"
+        " rollout_model_config.scanned_checkpoint_path (scanned)."
     )
   if random_init and rollout_engine == "inprocess_vllm":
     raise ValueError(
