@@ -17,10 +17,12 @@
 A `SchemaDiagnostics` subclass declares the columns, run summary and output
 lines that one `TrajectoryMetadata` subclass contributes to the explorer:
 
-  class TunixDiagnostics(SchemaDiagnostics[TunixTrajectoryMetadata]):
-    COLUMN_DTYPES = {"masked_out": "boolean"}
+  class AcmeEvalDiagnostics(SchemaDiagnostics[EvalTrajectoryMetadata]):
+    COLUMN_DTYPES = {"verdict": "string", "latency_ms": "Float64"}
 
-Diagnostics are not registered; callers pass instances explicitly.
+The schema may also be a `Trajectory` subclass, so that `compute_columns` can
+read the steps, as `TunixDiagnostics` does with `TunixTrajectory`. Diagnostics
+are not registered; callers pass instances explicitly.
 """
 
 from __future__ import annotations

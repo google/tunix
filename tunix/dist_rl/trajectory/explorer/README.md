@@ -80,7 +80,7 @@ python3 -m tunix.dist_rl.trajectory.explorer.run_explorer \
 
 ## Schema Diagnostics
 
-`diagnostics/stats.py` only computes what every ATIF trajectory reports. Statistics for fields that only one schema stores come from a `SchemaDiagnostics` subclass (`diagnostics/schema_diagnostics.py`), whose generic parameter is the schema's `TrajectoryMetadata` subclass:
+`diagnostics/stats.py` only computes what every ATIF trajectory reports. Statistics for fields that only one schema stores come from a `SchemaDiagnostics` subclass (`diagnostics/schema_diagnostics.py`), whose generic parameter is the schema's `TrajectoryMetadata` subclass, or its `Trajectory` subclass when `compute_columns()` reads the steps (as `TunixDiagnostics` does with `TunixTrajectory`):
 
 ```python
 class AcmeEvalDiagnostics(

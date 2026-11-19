@@ -332,6 +332,13 @@ class SummaryTest(absltest.TestCase):
     self.assertEqual(
         [t["tunix__masked_out"] for t in data["trajectories"]], [False, None]
     )
+    # Hidden columns are reported too; the rollout has no status.
+    self.assertEqual(
+        [t["tunix__trainable_tokens"] for t in data["trajectories"]], [2, None]
+    )
+    self.assertEqual(
+        [t["tunix__valid"] for t in data["trajectories"]], [True, False]
+    )
 
   def test_human_readable_with_schema_diagnostics(self) -> None:
     mem_store = testing.create_store(

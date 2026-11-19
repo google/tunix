@@ -28,6 +28,8 @@ from tunix.dist_rl.trajectory.explorer.diagnostics import tunix_diagnostics
 
 _AGENT = trajectory_lib.Agent(name="a", version="1.0")
 _TUNIX_DIAGNOSTICS = tunix_diagnostics.TunixDiagnostics()
+# The `RunStats.df` names of the Tunix columns, which the Tunix diagnostics own.
+_TUNIX_DF_COLUMNS = [f"tunix__{c}" for c in _TUNIX_DIAGNOSTICS.COLUMN_DTYPES]
 
 
 def _trajectory(
@@ -767,14 +769,14 @@ class SchemaDiagnosticsTest(parameterized.TestCase):
   def test_trajectory_stats_carry_the_values_of_active_diagnostics(
       self,
   ) -> None:
+    trajectory = _tunix_trajectory(masked_out=True)
     stats = stats_lib.TrajectoryStats.from_trajectory(
-        _tunix_trajectory(masked_out=True), diagnostics=(_TUNIX_DIAGNOSTICS,)
+        trajectory, diagnostics=(_TUNIX_DIAGNOSTICS,)
     )
 
-    self.assertEqual(stats.schema_stats, {"tunix": {"masked_out": True}})
-    self.assertEqual(
-        stats.to_json_dict()["schema_stats"], {"tunix": {"masked_out": True}}
-    )
+    values = _TUNIX_DIAGNOSTICS.extract(trajectory)
+    self.assertEqual(stats.schema_stats, {"tunix": values})
+    self.assertEqual(stats.to_json_dict()["schema_stats"], {"tunix": values})
     self.assertIs(stats.to_row()["tunix__masked_out"], True)
 
   def test_diagnostics_skip_trajectories_of_other_schemas(self) -> None:
@@ -798,8 +800,7 @@ class SchemaDiagnosticsTest(parameterized.TestCase):
     )
 
     self.assertEqual(
-        run.df.columns.tolist(),
-        [*stats_lib.COLUMN_DTYPES, "tunix__masked_out"],
+        run.df.columns.tolist(), [*stats_lib.COLUMN_DTYPES, *_TUNIX_DF_COLUMNS]
     )
     masked_out = run.df["tunix__masked_out"]
     self.assertEqual(str(masked_out.dtype), "boolean")
@@ -808,7 +809,8 @@ class SchemaDiagnosticsTest(parameterized.TestCase):
     self.assertEqual(masked_out.isna().tolist(), [False, False, True, True])
     self.assertEqual(masked_out.dropna().tolist(), [True, False])
     self.assertEqual(
-        run.columns_of(_TUNIX_DIAGNOSTICS).columns.tolist(), ["masked_out"]
+        run.columns_of(_TUNIX_DIAGNOSTICS).columns.tolist(),
+        list(_TUNIX_DIAGNOSTICS.COLUMN_DTYPES),
     )
     self.assertEqual(
         run.schema_stats,
@@ -841,7 +843,7 @@ class SchemaDiagnosticsTest(parameterized.TestCase):
     self.assertEqual(
         run.df.columns.tolist()[len(stats_lib.COLUMN_DTYPES) :],
         [
-            "tunix__masked_out",
+            *_TUNIX_DF_COLUMNS,
             "acme_eval__verdict",
             "acme_eval__num_retries",
             "acme_eval__latency_ms",
