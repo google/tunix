@@ -232,6 +232,42 @@ class SequenceRewardManagerTest(parameterized.TestCase):
     self.assertEqual(_step_value(log_metrics, "rewards/partial_nan"), 1.0)
     manager.close()
 
+  def test_mask_nan_rewards_propagates_reward_fn_nan(self):
+    def partial_nan(prompts: List[str], completions: List[str]) -> List[float]:
+      del prompts, completions
+      return [1.0, np.nan]
+
+    manager = reward_manager.SequenceRewardManager(
+        reward_fns=[len_reward, partial_nan],
+        algo_config=TestAlgoConfig(mask_nan_rewards=True),
+    )
+    rewards_info = manager(self.prompts, self.completions)
+    rewards = rewards_info["rewards"]
+    log_metrics = rewards_info["log_metrics"]
+    # The NaN score makes the second total NaN, so the advantage estimator
+    # excludes that trajectory.
+    self.assertEqual(rewards[0], len(self.completions[0]) + 1.0)
+    self.assertTrue(np.isnan(rewards[1]))
+    self.assertEqual(_step_value(log_metrics, "rewards/nonfinite_frac"), 0.5)
+    # Step metrics are computed over the finite trajectory only.
+    self.assertEqual(_step_value(log_metrics, "rewards/min"), 8.0)
+    self.assertEqual(_step_value(log_metrics, "rewards/max"), 8.0)
+    manager.close()
+
+  def test_mask_nan_rewards_off_keeps_nansum(self):
+    def partial_nan(prompts: List[str], completions: List[str]) -> List[float]:
+      del prompts, completions
+      return [1.0, np.nan]
+
+    self.assertFalse(self.test_algo_config.mask_nan_rewards)
+    manager = reward_manager.SequenceRewardManager(
+        reward_fns=[len_reward, partial_nan],
+        algo_config=self.test_algo_config,
+    )
+    rewards = manager(self.prompts, self.completions)["rewards"]
+    npt.assert_allclose(rewards, [8.0, 2.0])
+    manager.close()
+
   @parameterized.named_parameters(
       dict(
           testcase_name="reward_fn_returns_none",
