@@ -14,7 +14,7 @@
 
 """Unit tests for the Tunix schema diagnostics."""
 
-from collections.abc import Mapping
+import json
 from typing import Any
 
 from absl.testing import absltest
@@ -28,6 +28,10 @@ from tunix.dist_rl.trajectory.explorer.diagnostics import tunix_diagnostics
 
 # Succeeded with reward 3.5, was not masked out, and trains on 2 tokens.
 _VALID_TRAJECTORY = trajectory_testing.PAIRED_TUNIX_TRAJECTORY
+_NO_SAMPLE_GROUPS: dict[str, schema_diagnostics.JsonValue] = {
+    "contrastive": [],
+    "dead_or_degenerate": [],
+}
 
 
 def _rollout(
@@ -39,14 +43,20 @@ def _rollout(
   )
 
 
-def _run_summary(
-    *trajectories: trajectory_lib.Trajectory[Any],
-) -> Mapping[str, schema_diagnostics.JsonValue]:
-  """Returns the Tunix run summary of a run of `trajectories`."""
+def _agent_steps(count: int) -> list[trajectory_lib.TunixAgentStep]:
+  """Returns `count` agent steps, each training on 2 tokens."""
+  return [
+      trajectory_testing.TUNIX_AGENT_STEP_1.model_copy(update={"step_id": i})
+      for i in range(count)
+  ]
+
+
+def _run_summary(*trajectories: trajectory_lib.Trajectory[Any]) -> Any:
+  """Returns the Tunix run summary of a run of `trajectories`, as JSON."""
   run = stats.RunStats.from_trajectories(
       trajectories, diagnostics=(tunix_diagnostics.TunixDiagnostics(),)
   )
-  return run.schema_stats["tunix"]
+  return json.loads(json.dumps(run.to_json_dict()["schema_stats"]["tunix"]))
 
 
 class TunixDiagnosticsTest(parameterized.TestCase):
@@ -231,9 +241,19 @@ class TunixDiagnosticsTest(parameterized.TestCase):
         },
     )
 
-  def test_rollouts_without_prompt_ids_form_no_groups(self) -> None:
-    run_summary = _run_summary(_rollout(None, 1.0), _rollout(None, 0.0))
+  @parameterized.named_parameters(
+      ("unset", None),
+      # `RolloutRequest.prompt_id` defaults to "", which the trainer treats as
+      # unset too.
+      ("empty", ""),
+  )
+  def test_rollouts_without_prompt_ids_form_no_groups(
+      self, prompt_id: str | None
+  ) -> None:
+    rollout = _rollout(prompt_id, 1.0)
+    run_summary = _run_summary(rollout, _rollout(prompt_id, 0.0))
 
+    self.assertIsNone(self.diagnostics.extract(rollout)["prompt_id"])
     self.assertEqual(
         run_summary["prompt_groups"],
         {
@@ -247,6 +267,125 @@ class TunixDiagnosticsTest(parameterized.TestCase):
                 "degenerate": 0,
             },
         },
+    )
+
+  def test_sample_groups_list_the_most_telling_groups(self) -> None:
+    # Contrastive groups whose rewards spread more as the name grows; the
+    # rewards of c0 and c1 spread equally.
+    contrastive: list[trajectory_lib.TunixTrajectory] = []
+    for prompt_id, reward in (
+        ("c0", 1.0),
+        ("c1", 1.0),
+        ("c2", 2.0),
+        ("c3", 3.0),
+        ("c4", 4.0),
+        ("c5", 5.0),
+    ):
+      contrastive += [_rollout(prompt_id, 0.0), _rollout(prompt_id, reward)]
+    samples = _run_summary(
+        *contrastive,
+        # Dead groups, out of `prompt_id` order, that tie on invalid and
+        # masked-out rollouts, as a rollout that was not post-processed is
+        # neither.
+        _rollout("dead1", 0.0, masked_out=None),
+        _rollout("dead1", 0.0, steps=_agent_steps(3)),
+        _rollout("dead0", 0.0),
+        _rollout("dead0", 0.0),
+        _rollout("degenerate", 1.0),
+        _rollout(
+            "degenerate", 0.0, status="MAX_STEPS_REACHED", masked_out=True
+        ),
+        _rollout(
+            "degenerate", 0.0, status="MAX_STEPS_REACHED", masked_out=True
+        ),
+        # Rollouts without a status are invalid, but not running: their group
+        # is complete, with no valid rollout.
+        _rollout("no_status", None, status=None),
+        _rollout("no_status", None, status=None),
+        # Neither saturated nor incomplete groups are sampled.
+        _rollout("saturated", 1.0),
+        _rollout("saturated", 1.0),
+        _rollout("incomplete", None, status="RUNNING"),
+    )["sample_groups"]
+
+    # By decreasing `valid_std`, then `prompt_id`, and at most 5 of them.
+    self.assertEqual(
+        [group["prompt_id"] for group in samples["contrastive"]],
+        ["c5", "c4", "c3", "c2", "c0"],
+    )
+    # By decreasing number of invalid rollouts, then of masked-out ones, then
+    # `prompt_id`. Rollouts without a status are not counted in `statuses`.
+    self.assertEqual(
+        samples["dead_or_degenerate"],
+        [
+            {
+                "prompt_id": "degenerate",
+                "valid": 1,
+                "masked": 2,
+                "valid_mean": 1.0,
+                "valid_std": None,
+                "agent_steps": {"min": 1, "mean": 1.0, "max": 1},
+                "statuses": {"MAX_STEPS_REACHED": 2, "SUCCEEDED": 1},
+            },
+            {
+                "prompt_id": "no_status",
+                "valid": 0,
+                "masked": 0,
+                "valid_mean": None,
+                "valid_std": None,
+                "agent_steps": {"min": 1, "mean": 1.0, "max": 1},
+                "statuses": {},
+            },
+            {
+                "prompt_id": "dead0",
+                "valid": 2,
+                "masked": 0,
+                "valid_mean": 0.0,
+                "valid_std": 0.0,
+                "agent_steps": {"min": 1, "mean": 1.0, "max": 1},
+                "statuses": {"SUCCEEDED": 2},
+            },
+            {
+                "prompt_id": "dead1",
+                "valid": 2,
+                "masked": 0,
+                "valid_mean": 0.0,
+                "valid_std": 0.0,
+                "agent_steps": {"min": 1, "mean": 2.0, "max": 3},
+                "statuses": {"SUCCEEDED": 2},
+            },
+        ],
+    )
+    # The most frequent status comes first.
+    self.assertEqual(
+        list(samples["dead_or_degenerate"][0]["statuses"]),
+        ["MAX_STEPS_REACHED", "SUCCEEDED"],
+    )
+
+  def test_dead_or_degenerate_groups_come_by_invalid_rollouts(self) -> None:
+    samples = _run_summary(
+        # Valid rollouts only.
+        _rollout("dead", 0.0),
+        _rollout("dead", 0.0),
+        # 2 invalid rollouts, masked out by the overlong filter.
+        _rollout("overlong", 1.0),
+        _rollout("overlong", 0.0, status="MAX_STEPS_REACHED", masked_out=True),
+        _rollout("overlong", 0.0, status="MAX_STEPS_REACHED", masked_out=True),
+        # 2 invalid rollouts, neither masked out (the overlong filter was off).
+        _rollout("env_timeout", 1.0),
+        _rollout("env_timeout", 0.0, status="ENV_TIMEOUT"),
+        _rollout("env_timeout", 0.0, status="ENV_TIMEOUT"),
+        # 3 invalid rollouts, none masked out, as an episode that FAILED is
+        # not post-processed.
+        _rollout("failed", None, status="FAILED", masked_out=None),
+        _rollout("failed", None, status="FAILED", masked_out=None),
+        _rollout("failed", None, status="FAILED", masked_out=None),
+    )["sample_groups"]
+
+    # By decreasing number of invalid rollouts, then of masked-out ones.
+    self.assertEqual(
+        [group["prompt_id"] for group in samples["dead_or_degenerate"]],
+        ["failed", "overlong", "env_timeout", "dead"],
     )
 
   def test_format_summary_totals(self) -> None:
@@ -265,11 +404,13 @@ class TunixDiagnosticsTest(parameterized.TestCase):
                     "degenerate": 2,
                 },
             },
+            "sample_groups": _NO_SAMPLE_GROUPS,
         },
         num_trajectories=512,
     )
 
-    # The shares are of the 64 complete groups.
+    # The shares are of the 64 complete groups, and sample tables without
+    # groups are left out.
     self.assertEqual(
         list(lines),
         [
@@ -298,6 +439,7 @@ class TunixDiagnosticsTest(parameterized.TestCase):
                     "degenerate": 0,
                 },
             },
+            "sample_groups": _NO_SAMPLE_GROUPS,
         },
         num_trajectories=4,
     )
@@ -307,6 +449,89 @@ class TunixDiagnosticsTest(parameterized.TestCase):
         [
             "Masked out: - reported by 0/4",
             "Prompt Groups: 1 (1 incomplete, 2 ungrouped trajectories)",
+        ],
+    )
+
+  def test_format_summary_totals_prints_the_sample_tables(self) -> None:
+    lines = self.diagnostics.format_summary_totals(
+        {
+            "num_masked_out": 9,
+            "num_with_masked_out": 24,
+            "prompt_groups": {
+                "num_groups": 3,
+                "num_incomplete": 0,
+                "num_ungrouped": 0,
+                "regimes": {
+                    "contrastive": 2,
+                    "zero_std_dead": 0,
+                    "zero_std_saturated": 0,
+                    "degenerate": 1,
+                },
+            },
+            "sample_groups": {
+                "contrastive": [
+                    {
+                        "prompt_id": "astropy__astropy-12907",
+                        "valid": 7,
+                        "masked": 1,
+                        "valid_mean": 0.4286,
+                        "valid_std": 0.5352,
+                        "agent_steps": {"min": 2, "mean": 4.625, "max": 30},
+                        "statuses": {"SUCCEEDED": 7, "MAX_STEPS_REACHED": 1},
+                    },
+                    {
+                        "prompt_id": "django__django-11099",
+                        "valid": 8,
+                        "masked": 0,
+                        "valid_mean": 0.25,
+                        "valid_std": 0.4629,
+                        "agent_steps": {"min": 2, "mean": 5.125, "max": 8},
+                        "statuses": {"SUCCEEDED": 8},
+                    },
+                ],
+                "dead_or_degenerate": [
+                    {
+                        "prompt_id": "sympy__sympy-18057",
+                        "valid": 1,
+                        "masked": 7,
+                        "valid_mean": 0.0,
+                        "valid_std": None,
+                        "agent_steps": {"min": 12, "mean": 28.375, "max": 30},
+                        "statuses": {"MAX_STEPS_REACHED": 7, "SUCCEEDED": 1},
+                    },
+                ],
+            },
+        },
+        num_trajectories=24,
+    )
+
+    self.assertEqual(
+        list(lines)[6:],
+        [
+            "Sample Contrastive Groups:",
+            (
+                "  prompt_id               valid  masked  valid_mean  valid_std"
+                "  agent steps (min/mean/max)  statuses"
+            ),
+            (
+                "  astropy__astropy-12907  7      1       0.429       0.535"
+                "      2 / 4.6 / 30"
+                "                SUCCEEDED x7, MAX_STEPS_REACHED x1"
+            ),
+            (
+                "  django__django-11099    8      0       0.250       0.463"
+                "      2 / 5.1 / 8                 SUCCEEDED x8"
+            ),
+            "Sample Dead / Degenerate Groups:",
+            (
+                "  prompt_id           valid  masked  valid_mean  valid_std"
+                "  agent steps (min/mean/max)  statuses"
+            ),
+            (
+                "  sympy__sympy-18057  1      7       0.000       -"
+                "          12 / 28.4 / 30"
+                "              MAX_STEPS_REACHED x7, SUCCEEDED x1"
+            ),
         ],
     )
 

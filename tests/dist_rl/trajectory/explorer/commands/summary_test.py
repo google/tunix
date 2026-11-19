@@ -387,6 +387,18 @@ class SummaryTest(absltest.TestCase):
                         "degenerate": 1,
                     },
                 },
+                "sample_groups": {
+                    "contrastive": [],
+                    "dead_or_degenerate": [{
+                        "prompt_id": "p_1",
+                        "valid": 1,
+                        "masked": 0,
+                        "valid_mean": 3.5,
+                        "valid_std": None,
+                        "agent_steps": {"min": 1, "mean": 1.0, "max": 1},
+                        "statuses": {"SUCCEEDED": 1},
+                    }],
+                },
             }
         },
     )
@@ -427,6 +439,11 @@ class SummaryTest(absltest.TestCase):
         "  zero_std_dead (valid>=2, std=0, mean<=0): 0 ( 0.0%)\n"
         "  zero_std_saturated (std=0, mean>0):       0 ( 0.0%)\n"
         "  degenerate (valid<2):                     1 (100.0%)\n"
+        "Sample Dead / Degenerate Groups:\n"
+        "  prompt_id  valid  masked  valid_mean  valid_std"
+        "  agent steps (min/mean/max)  statuses\n"
+        "  p_1        1      0       3.500       -          1 / 1.0 / 1"
+        "                 SUCCEEDED x1\n"
         "Tool calls: search x1\n",
         out,
     )

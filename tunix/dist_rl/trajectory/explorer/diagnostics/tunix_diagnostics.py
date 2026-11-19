@@ -44,6 +44,22 @@ _REGIME_LABELS = types.MappingProxyType({
     "zero_std_saturated": "zero_std_saturated (std=0, mean>0)",
     "degenerate": f"degenerate (valid<{_MIN_VALID})",
 })
+# How many groups each sample table lists.
+_NUM_SAMPLE_GROUPS = 5
+# The sample tables' run summary keys, in display order, with their titles.
+_SAMPLE_TITLES = types.MappingProxyType({
+    "contrastive": "Sample Contrastive Groups:",
+    "dead_or_degenerate": "Sample Dead / Degenerate Groups:",
+})
+_SAMPLE_HEADERS = (
+    "prompt_id",
+    "valid",
+    "masked",
+    "valid_mean",
+    "valid_std",
+    "agent steps (min/mean/max)",
+    "statuses",
+)
 
 
 class TunixDiagnostics(
@@ -55,7 +71,9 @@ class TunixDiagnostics(
     masked_out: Whether the overlong filter zeroed the trajectory's training
       masks; null until the episode is post-processed.
     prompt_id: The prompt the rollout answered; the rollouts of a prompt form
-      its group, whose rewards set their advantages.
+      its group, whose rewards set their advantages. Null if unset or empty
+      (`RolloutRequest`'s default): such a rollout is ungrouped, as in the
+      trainer's `trajectory_queue_manager.default_key_fn`.
     trainable_tokens: The number of tokens the policy sampled (mask 1), the
       sum of the agent steps' `assistant_masks`: 0 if the rollout has no agent
       step, and null if it has some but none reports masks. The overlong
@@ -85,7 +103,7 @@ class TunixDiagnostics(
     trainable_tokens = _trainable_tokens(record)
     return {
         "masked_out": record.masked_out,
-        "prompt_id": record.prompt_id,
+        "prompt_id": record.prompt_id or None,
         "trainable_tokens": trainable_tokens,
         "valid": _is_valid(record, trainable_tokens),
     }
@@ -96,8 +114,8 @@ class TunixDiagnostics(
     """Returns the masked-out counts and the prompt groups of the run.
 
     The keys are `num_masked_out` (None when no trajectory reports
-    `masked_out`), `num_with_masked_out`, and `prompt_groups` (see
-    `_prompt_groups`).
+    `masked_out`), `num_with_masked_out`, `prompt_groups` (see
+    `_prompt_groups`) and `sample_groups` (see `_sample_groups`).
 
     Args:
       df: The run's core columns, then this class's columns, one row per Tunix
@@ -105,10 +123,13 @@ class TunixDiagnostics(
     """
     masked_out = df["masked_out"]
     num_reported = int(masked_out.notna().sum())
+    rollouts = df[df["prompt_id"].notna()]
+    groups = _groups(rollouts)
     return {
         "num_masked_out": int(masked_out.sum()) if num_reported else None,
         "num_with_masked_out": num_reported,
-        "prompt_groups": _prompt_groups(df),
+        "prompt_groups": _prompt_groups(groups, len(df) - len(rollouts)),
+        "sample_groups": _sample_groups(groups, rollouts),
     }
 
   def format_summary_totals(
@@ -116,7 +137,7 @@ class TunixDiagnostics(
       run_summary: Mapping[str, schema_diagnostics.JsonValue],
       num_trajectories: int,
   ) -> Sequence[str]:
-    """Returns the `Masked out:` and `Prompt Groups:` lines of the run totals."""
+    """Returns the masked-out line, the prompt groups and the sample tables."""
     return (
         (
             "Masked out:"
@@ -124,7 +145,8 @@ class TunixDiagnostics(
             f" reported by {run_summary['num_with_masked_out']}"
             f"/{num_trajectories}"
         ),
-        *_format_prompt_groups(_json_dict(run_summary, "prompt_groups")),
+        *_format_prompt_groups(_as_dict(run_summary["prompt_groups"])),
+        *_format_sample_groups(_as_dict(run_summary["sample_groups"])),
     )
 
 
@@ -177,8 +199,8 @@ def _is_valid(
   )
 
 
-def _prompt_groups(df: pd.DataFrame) -> dict[str, schema_diagnostics.JsonValue]:
-  """Groups the run's Tunix rollouts by prompt, and counts groups by regime.
+def _groups(rollouts: pd.DataFrame) -> pd.DataFrame:
+  """Returns the prompt groups of `rollouts`, one row each, in first-seen order.
 
   A group with a RUNNING rollout is incomplete. A complete group gets the first
   regime that applies, from the rewards of its valid rollouts:
@@ -189,52 +211,148 @@ def _prompt_groups(df: pd.DataFrame) -> dict[str, schema_diagnostics.JsonValue]:
     zero_std_dead: equal rewards of 0 or less.
 
   Args:
-    df: The run's core columns, then the Tunix columns, one row per Tunix
-      trajectory.
+    rollouts: The run's Tunix rows that have a `prompt_id`: the core columns,
+      then the Tunix columns.
 
   Returns:
-    `num_groups`; `num_incomplete`, the number of incomplete groups;
-    `num_ungrouped`, the number of Tunix rollouts without a `prompt_id`; and
-    `regimes`, the number of complete groups in each regime.
+    One row per `prompt_id` (the index): `rollouts`, `valid` and `masked`, the
+    numbers of rollouts, of valid ones and of masked-out ones; `valid_mean` and
+    `valid_std`, the mean and sample standard deviation of the valid rollouts'
+    rewards; `steps_min`, `steps_mean` and `steps_max`, over the agent steps of
+    every rollout; and `regime`, which is "incomplete" for an incomplete group.
   """
-  grouped = df[df["prompt_id"].notna()]
-  valid = grouped["valid"].astype(bool)
-  running = grouped["status"].eq(_RUNNING_STATUS).fillna(False).astype(bool)
+  valid = rollouts["valid"].astype(bool)
+  running = rollouts["status"].eq(_RUNNING_STATUS).fillna(False).astype(bool)
   groups = (
       pd.DataFrame({
-          "prompt_id": grouped["prompt_id"],
+          "prompt_id": rollouts["prompt_id"],
           "running": running,
           "valid": valid,
+          "masked": rollouts["masked_out"].fillna(False).astype(bool),
           # Only the rewards of valid rollouts count.
-          "reward": grouped["total_reward"].where(valid),
+          "reward": rollouts["total_reward"].where(valid),
+          "steps": rollouts["steps_agent"],
       })
       .groupby("prompt_id", sort=False)
       .agg(
           running=("running", "any"),
-          num_valid=("valid", "sum"),
-          mean=("reward", "mean"),
-          std=("reward", "std"),
+          rollouts=("valid", "size"),
+          valid=("valid", "sum"),
+          masked=("masked", "sum"),
+          valid_mean=("reward", "mean"),
+          valid_std=("reward", "std"),
+          steps_min=("steps", "min"),
+          steps_mean=("steps", "mean"),
+          steps_max=("steps", "max"),
       )
   )
-  regimes = np.select(
+  groups["regime"] = np.select(
       [
           groups["running"].to_numpy(dtype=bool),
-          (groups["num_valid"] < _MIN_VALID).to_numpy(dtype=bool),
-          (groups["std"] > _ZERO_STD_TOLERANCE).to_numpy(dtype=bool),
-          (groups["mean"] > 0).to_numpy(dtype=bool),
+          (groups["valid"] < _MIN_VALID).to_numpy(dtype=bool),
+          (groups["valid_std"] > _ZERO_STD_TOLERANCE).to_numpy(dtype=bool),
+          (groups["valid_mean"] > 0).to_numpy(dtype=bool),
       ],
       ["incomplete", "degenerate", "contrastive", "zero_std_saturated"],
       default="zero_std_dead",
   )
+  return groups
+
+
+def _prompt_groups(
+    groups: pd.DataFrame, num_ungrouped: int
+) -> dict[str, schema_diagnostics.JsonValue]:
+  """Counts the run's prompt groups by regime.
+
+  Args:
+    groups: The run's prompt groups, from `_groups`.
+    num_ungrouped: The number of the run's Tunix rollouts without a `prompt_id`.
+
+  Returns:
+    `num_groups`; `num_incomplete`, the number of incomplete groups;
+    `num_ungrouped`; and `regimes`, the number of complete groups in each
+    regime.
+  """
+  regimes = groups["regime"]
   regime_counts: dict[str, schema_diagnostics.JsonValue] = {
       regime: int((regimes == regime).sum()) for regime in _REGIME_LABELS
   }
   return {
       "num_groups": len(groups),
       "num_incomplete": int((regimes == "incomplete").sum()),
-      "num_ungrouped": len(df) - len(grouped),
+      "num_ungrouped": num_ungrouped,
       "regimes": regime_counts,
   }
+
+
+def _sample_groups(
+    groups: pd.DataFrame, rollouts: pd.DataFrame
+) -> dict[str, schema_diagnostics.JsonValue]:
+  """Returns up to 5 contrastive groups and 5 dead or degenerate ones.
+
+  Contrastive groups come by decreasing `valid_std`, dead and degenerate ones
+  by decreasing number of invalid rollouts, then of masked-out ones, and ties
+  by `prompt_id`.
+
+  Args:
+    groups: The run's prompt groups, from `_groups`.
+    rollouts: The run's Tunix rows that have a `prompt_id`.
+
+  Returns:
+    `contrastive` and `dead_or_degenerate`, each a list of groups with their
+    `prompt_id`, `valid`, `masked`, `valid_mean`, `valid_std` (None without
+    enough valid rollouts), `agent_steps` (`min`, `mean` and `max`), and
+    `statuses`, the number of rollouts per status, most frequent first.
+  """
+  table = groups.reset_index()
+  # Rollouts can be invalid without being masked out, e.g. FAILED ones.
+  table["invalid"] = table["rollouts"] - table["valid"]
+  contrastive = table[table["regime"] == "contrastive"].sort_values(
+      ["valid_std", "prompt_id"], ascending=[False, True]
+  )
+  dead_or_degenerate = table[
+      table["regime"].isin(["zero_std_dead", "degenerate"])
+  ].sort_values(
+      ["invalid", "masked", "prompt_id"], ascending=[False, False, True]
+  )
+  return {
+      "contrastive": _sample_rows(
+          contrastive.head(_NUM_SAMPLE_GROUPS), rollouts
+      ),
+      "dead_or_degenerate": _sample_rows(
+          dead_or_degenerate.head(_NUM_SAMPLE_GROUPS), rollouts
+      ),
+  }
+
+
+def _sample_rows(
+    groups: pd.DataFrame, rollouts: pd.DataFrame
+) -> list[schema_diagnostics.JsonValue]:
+  """Returns the run summary rows of a few groups; see `_sample_groups`."""
+  rows: list[schema_diagnostics.JsonValue] = []
+  for group in groups.to_dict(orient="records"):
+    statuses = (
+        rollouts.loc[rollouts["prompt_id"] == group["prompt_id"], "status"]
+        .value_counts()
+        .sort_index()
+        .sort_values(ascending=False, kind="stable")
+    )
+    # Without enough valid rollouts, the mean or standard deviation is NaN.
+    mean, std = group["valid_mean"], group["valid_std"]
+    rows.append({
+        "prompt_id": str(group["prompt_id"]),
+        "valid": int(group["valid"]),
+        "masked": int(group["masked"]),
+        "valid_mean": None if math.isnan(mean) else float(mean),
+        "valid_std": None if math.isnan(std) else float(std),
+        "agent_steps": {
+            "min": int(group["steps_min"]),
+            "mean": float(group["steps_mean"]),
+            "max": int(group["steps_max"]),
+        },
+        "statuses": {str(s): int(n) for s, n in statuses.items()},
+    })
+  return rows
 
 
 def _format_prompt_groups(
@@ -248,8 +366,8 @@ def _format_prompt_groups(
   Args:
     groups: The `prompt_groups` of the run summary.
   """
-  num_groups = _json_int(groups, "num_groups")
-  num_incomplete = _json_int(groups, "num_incomplete")
+  num_groups = _as_int(groups["num_groups"])
+  num_incomplete = _as_int(groups["num_incomplete"])
   lines = [
       f"Prompt Groups: {num_groups} ({num_incomplete} incomplete,"
       f" {groups['num_ungrouped']} ungrouped trajectories)"
@@ -257,11 +375,11 @@ def _format_prompt_groups(
   num_complete = num_groups - num_incomplete
   if not num_complete:
     return lines
-  regimes = _json_dict(groups, "regimes")
+  regimes = _as_dict(groups["regimes"])
   label_width = max(map(len, _REGIME_LABELS.values())) + 1
   count_width = len(str(num_complete))
   for regime, label in _REGIME_LABELS.items():
-    count = _json_int(regimes, regime)
+    count = _as_int(regimes[regime])
     lines.append(
         f"  {label + ':':<{label_width}} {count:>{count_width}}"
         f" ({100 * count / num_complete:4.1f}%)"
@@ -269,21 +387,75 @@ def _format_prompt_groups(
   return lines
 
 
-def _json_dict(
-    summary: Mapping[str, schema_diagnostics.JsonValue], key: str
+def _format_sample_groups(
+    samples: Mapping[str, schema_diagnostics.JsonValue],
+) -> list[str]:
+  """Returns a titled table for each non-empty list of sample groups.
+
+  Args:
+    samples: The `sample_groups` of the run summary.
+  """
+  lines = []
+  for key, title in _SAMPLE_TITLES.items():
+    rows = []
+    for row in _as_list(samples[key]):
+      group = _as_dict(row)
+      steps = _as_dict(group["agent_steps"])
+      statuses = _as_dict(group["statuses"])
+      rows.append([
+          str(group["prompt_id"]),
+          str(group["valid"]),
+          str(group["masked"]),
+          formatting.format_optional(group["valid_mean"], ".3f"),
+          formatting.format_optional(group["valid_std"], ".3f"),
+          (
+              f"{steps['min']} /"
+              f" {formatting.format_optional(steps['mean'], '.1f')} /"
+              f" {steps['max']}"
+          ),
+          formatting.format_counts(
+              {s: _as_int(n) for s, n in statuses.items()}
+          ),
+      ])
+    if rows:
+      lines.extend([title, *_format_table(_SAMPLE_HEADERS, rows)])
+  return lines
+
+
+def _format_table(
+    headers: Sequence[str], rows: Sequence[Sequence[str]]
+) -> list[str]:
+  """Returns `headers`, then `rows`, in left-aligned columns indented by 2."""
+  widths = [max(map(len, column)) for column in zip(headers, *rows)]
+  return [
+      "  "
+      + "  ".join(
+          cell.ljust(width) for cell, width in zip(row, widths)
+      ).rstrip()
+      for row in (headers, *rows)
+  ]
+
+
+def _as_dict(
+    value: schema_diagnostics.JsonValue,
 ) -> Mapping[str, schema_diagnostics.JsonValue]:
-  """Returns `summary[key]`, a mapping that `compute_run_summary` built."""
-  value = summary[key]
+  """Returns `value`, a mapping of the run summary, or raises TypeError."""
   if not isinstance(value, dict):
-    raise TypeError(f"Run summary value {key!r} is {value!r}, not a dict.")
+    raise TypeError(f"Expected a dict in the run summary, got {value!r}.")
   return value
 
 
-def _json_int(
-    summary: Mapping[str, schema_diagnostics.JsonValue], key: str
-) -> int:
-  """Returns `summary[key]`, a count that `compute_run_summary` built."""
-  value = summary[key]
+def _as_list(
+    value: schema_diagnostics.JsonValue,
+) -> list[schema_diagnostics.JsonValue]:
+  """Returns `value`, a list of the run summary, or raises TypeError."""
+  if not isinstance(value, list):
+    raise TypeError(f"Expected a list in the run summary, got {value!r}.")
+  return value
+
+
+def _as_int(value: schema_diagnostics.JsonValue) -> int:
+  """Returns `value`, a count of the run summary, or raises TypeError."""
   if not isinstance(value, int):
-    raise TypeError(f"Run summary value {key!r} is {value!r}, not an int.")
+    raise TypeError(f"Expected an int in the run summary, got {value!r}.")
   return value
