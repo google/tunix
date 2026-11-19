@@ -148,6 +148,22 @@ class VanillaRolloutTest(parameterized.TestCase):
     self.assertEqual(output.logprobs[0].shape, output.tokens[0].shape)
 
   @parameterized.parameters(False, True)
+  def test_generate_returns_the_engine_top_logprobs(self, server_mode):
+    rollout = self.make_rollout(
+        server_mode, return_logprobs=True, rollout_vanilla_v2_max_logprobs=4
+    )
+
+    output = rollout.generate(['1 2 3'], _rollout_config(return_logprobs=True))
+
+    assert output.topk_token_ids is not None
+    assert output.topk_logprobs is not None
+    num_tokens = output.tokens[0].shape[0]
+    self.assertEqual(output.topk_token_ids[0].shape, (num_tokens, 4))
+    self.assertEqual(output.topk_logprobs[0].shape, (num_tokens, 4))
+    for token_id, ids in zip(output.tokens[0], output.topk_token_ids[0]):
+      self.assertIn(token_id, ids)
+
+  @parameterized.parameters(False, True)
   def test_generate_returns_logits_when_asked(self, server_mode):
     rollout = self.make_rollout(server_mode, return_logits=True)
 

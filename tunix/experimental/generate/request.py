@@ -133,6 +133,11 @@ class EngineResponse:
   logits: np.ndarray | None
   # Why the request finished.
   finish_reason: FinishReason
+  # `[num_tokens, max_logprobs]` most likely tokens at each generated position,
+  # if the engine returns them.
+  top_token_ids: np.ndarray | None = None
+  # `[num_tokens, max_logprobs]` log probabilities of `top_token_ids`.
+  top_logprobs: np.ndarray | None = None
 
 
 # TODO(yatlas): Rename RequestState to TaskState.
@@ -158,6 +163,10 @@ class RequestState:
     self.logprobs: list[SupportsFloat] = []
     # Token logits, if requested.
     self.logits: list[np.ndarray] = []
+    # The most likely tokens at each generated position, and their log
+    # probabilities, if the engine returns them.
+    self.top_token_ids: list[np.ndarray] = []
+    self.top_logprobs: list[np.ndarray] = []
 
     # Number of tokens whose KV cache is computed. This includes tokens that
     # were speculatively scheduled and are in flight.
@@ -210,4 +219,14 @@ class RequestState:
             else None
         ),
         finish_reason=_FINISH_REASONS[self.status],
+        top_token_ids=(
+            np.asarray(self.top_token_ids, dtype=np.int32)
+            if self.top_token_ids
+            else None
+        ),
+        top_logprobs=(
+            np.asarray(self.top_logprobs, dtype=np.float32)
+            if self.top_logprobs
+            else None
+        ),
     )

@@ -100,6 +100,9 @@ class ModelRunnerConfig:
     max_top_k: The maximum `top_k` value allowed in `SamplingParams`.
       <= 0 to set no limit.
     mesh: The device mesh the transformer runs on.
+    max_logprobs: How many of the most likely tokens to return logprobs for,
+      besides the sampled token. At most the vocabulary size, and 0 unless
+      `return_logprobs` is set.
     return_logprobs: Whether to return logprobs.
     return_logits: Whether to return logits.
     num_scheduler_steps: The number of model forward passes to execute per
@@ -110,6 +113,7 @@ class ModelRunnerConfig:
 
   max_top_k: int
   mesh: jax.sharding.Mesh
+  max_logprobs: int = 0
   return_logprobs: bool = False
   return_logits: bool = False
   num_scheduler_steps: int = 1
@@ -121,3 +125,7 @@ class ModelRunnerConfig:
           "num_scheduler_steps must be positive, got"
           f" {self.num_scheduler_steps}."
       )
+    if self.max_logprobs < 0:
+      raise ValueError(f"max_logprobs must be >= 0, got {self.max_logprobs}.")
+    if self.max_logprobs and not self.return_logprobs:
+      raise ValueError("max_logprobs requires return_logprobs.")
