@@ -14,17 +14,39 @@
 
 """Unit tests for the Tunix schema diagnostics."""
 
+from collections.abc import Mapping
 from typing import Any
 
 from absl.testing import absltest
 from absl.testing import parameterized
 import numpy as np
-import pandas as pd
+from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.dist_rl.trajectory import trajectory_testing
+from tunix.dist_rl.trajectory.explorer.diagnostics import schema_diagnostics
+from tunix.dist_rl.trajectory.explorer.diagnostics import stats
 from tunix.dist_rl.trajectory.explorer.diagnostics import tunix_diagnostics
 
 # Succeeded with reward 3.5, was not masked out, and trains on 2 tokens.
 _VALID_TRAJECTORY = trajectory_testing.PAIRED_TUNIX_TRAJECTORY
+
+
+def _rollout(
+    prompt_id: str | None, reward: float | None, **update: Any
+) -> trajectory_lib.TunixTrajectory:
+  """Returns a rollout of `prompt_id`, valid unless `update` says otherwise."""
+  return _VALID_TRAJECTORY.model_copy(
+      update={"prompt_id": prompt_id, "total_reward": reward, **update}
+  )
+
+
+def _run_summary(
+    *trajectories: trajectory_lib.Trajectory[Any],
+) -> Mapping[str, schema_diagnostics.JsonValue]:
+  """Returns the Tunix run summary of a run of `trajectories`."""
+  run = stats.RunStats.from_trajectories(
+      trajectories, diagnostics=(tunix_diagnostics.TunixDiagnostics(),)
+  )
+  return run.schema_stats["tunix"]
 
 
 class TunixDiagnosticsTest(parameterized.TestCase):
@@ -39,13 +61,23 @@ class TunixDiagnosticsTest(parameterized.TestCase):
   def test_extract_reports_each_column(self) -> None:
     self.assertEqual(
         self.diagnostics.extract(_VALID_TRAJECTORY),
-        {"masked_out": False, "trainable_tokens": 2, "valid": True},
+        {
+            "masked_out": False,
+            "prompt_id": "p_1",
+            "trainable_tokens": 2,
+            "valid": True,
+        },
     )
     # A rollout that was not post-processed reports neither `masked_out` nor a
     # status, and its steps report no masks.
     self.assertEqual(
         self.diagnostics.extract(trajectory_testing.TUNIX_ROLLOUT_TRAJECTORY),
-        {"masked_out": None, "trainable_tokens": None, "valid": False},
+        {
+            "masked_out": None,
+            "prompt_id": None,
+            "trainable_tokens": None,
+            "valid": False,
+        },
     )
 
   def test_only_masked_out_is_printed(self) -> None:
@@ -118,14 +150,9 @@ class TunixDiagnosticsTest(parameterized.TestCase):
     )
     trajectory = _VALID_TRAJECTORY.model_copy(update={"steps": [agent_step]})
 
-    self.assertEqual(
-        self.diagnostics.extract(trajectory),
-        {
-            "masked_out": False,
-            "trainable_tokens": trainable_tokens,
-            "valid": valid,
-        },
-    )
+    values = self.diagnostics.extract(trajectory)
+    self.assertEqual(values["trainable_tokens"], trainable_tokens)
+    self.assertEqual(values["valid"], valid)
 
   @parameterized.named_parameters(
       ("max_steps_reached", "MAX_STEPS_REACHED"),
@@ -146,39 +173,142 @@ class TunixDiagnosticsTest(parameterized.TestCase):
     self.assertEqual(values["trainable_tokens"], 0)
     self.assertIs(values["valid"], False)
 
-  def test_summarize_counts_masked_out_trajectories(self) -> None:
-    df = pd.DataFrame(
-        {"masked_out": pd.array([True, False, None, True], dtype="boolean")}
+  def test_run_summary_counts_masked_out_trajectories(self) -> None:
+    run_summary = _run_summary(
+        _rollout("p", 1.0, masked_out=True),
+        _rollout("p", 1.0, masked_out=False),
+        _rollout("p", 1.0, masked_out=None),
+        _rollout("p", 1.0, masked_out=True),
     )
 
-    self.assertEqual(
-        self.diagnostics.summarize(df),
-        {"num_masked_out": 2, "num_with_masked_out": 3},
-    )
+    self.assertEqual(run_summary["num_masked_out"], 2)
+    self.assertEqual(run_summary["num_with_masked_out"], 3)
 
-  def test_summarize_without_reports_leaves_masked_out_count_unset(
+  def test_run_summary_without_reports_leaves_masked_out_count_unset(
       self,
   ) -> None:
-    df = pd.DataFrame({"masked_out": pd.array([None, None], dtype="boolean")})
+    run_summary = _run_summary(
+        _rollout("p", 1.0, masked_out=None),
+        _rollout("p", 1.0, masked_out=None),
+    )
+
+    self.assertIsNone(run_summary["num_masked_out"])
+    self.assertEqual(run_summary["num_with_masked_out"], 0)
+
+  def test_prompt_groups_are_classified_by_their_valid_rewards(self) -> None:
+    run_summary = _run_summary(
+        _rollout("contrastive", 1.0),
+        _rollout("contrastive", 0.0),
+        _rollout("dead", 0.0),
+        _rollout("dead", 0.0),
+        # Rewards within the tolerance count as equal.
+        _rollout("saturated", 1.0),
+        _rollout("saturated", 1.0 + 1e-9),
+        # The masked-out rollout doesn't count, which leaves 1 valid rollout.
+        _rollout("degenerate", 1.0),
+        _rollout("degenerate", 0.0, masked_out=True),
+        # A RUNNING rollout makes its group incomplete, whatever the others.
+        _rollout("incomplete", 1.0),
+        _rollout("incomplete", 0.0),
+        _rollout("incomplete", None, status="RUNNING"),
+        _rollout(None, 1.0),
+        # Trajectories of other schemas are not counted as ungrouped.
+        trajectory_testing.TRAJECTORY_1,
+    )
 
     self.assertEqual(
-        self.diagnostics.summarize(df),
-        {"num_masked_out": None, "num_with_masked_out": 0},
+        run_summary["prompt_groups"],
+        {
+            "num_groups": 5,
+            "num_incomplete": 1,
+            "num_ungrouped": 1,
+            "regimes": {
+                "contrastive": 1,
+                "zero_std_dead": 1,
+                "zero_std_saturated": 1,
+                "degenerate": 1,
+            },
+        },
     )
 
-  def test_format_summary_totals_reports_the_masked_out_count(self) -> None:
+  def test_rollouts_without_prompt_ids_form_no_groups(self) -> None:
+    run_summary = _run_summary(_rollout(None, 1.0), _rollout(None, 0.0))
+
+    self.assertEqual(
+        run_summary["prompt_groups"],
+        {
+            "num_groups": 0,
+            "num_incomplete": 0,
+            "num_ungrouped": 2,
+            "regimes": {
+                "contrastive": 0,
+                "zero_std_dead": 0,
+                "zero_std_saturated": 0,
+                "degenerate": 0,
+            },
+        },
+    )
+
+  def test_format_summary_totals(self) -> None:
     lines = self.diagnostics.format_summary_totals(
-        {"num_masked_out": 2, "num_with_masked_out": 3}, num_trajectories=4
+        {
+            "num_masked_out": 127,
+            "num_with_masked_out": 512,
+            "prompt_groups": {
+                "num_groups": 65,
+                "num_incomplete": 1,
+                "num_ungrouped": 0,
+                "regimes": {
+                    "contrastive": 18,
+                    "zero_std_dead": 40,
+                    "zero_std_saturated": 4,
+                    "degenerate": 2,
+                },
+            },
+        },
+        num_trajectories=512,
     )
 
-    self.assertEqual(list(lines), ["Masked out: 2 reported by 3/4"])
+    # The shares are of the 64 complete groups.
+    self.assertEqual(
+        list(lines),
+        [
+            "Masked out: 127 reported by 512/512",
+            "Prompt Groups: 65 (1 incomplete, 0 ungrouped trajectories)",
+            "  contrastive (valid>=2, std>0):            18 (28.1%)",
+            "  zero_std_dead (valid>=2, std=0, mean<=0): 40 (62.5%)",
+            "  zero_std_saturated (std=0, mean>0):        4 ( 6.2%)",
+            "  degenerate (valid<2):                      2 ( 3.1%)",
+        ],
+    )
 
-  def test_format_summary_totals_without_reports(self) -> None:
+  def test_format_summary_totals_without_complete_groups(self) -> None:
     lines = self.diagnostics.format_summary_totals(
-        {"num_masked_out": None, "num_with_masked_out": 0}, num_trajectories=2
+        {
+            "num_masked_out": None,
+            "num_with_masked_out": 0,
+            "prompt_groups": {
+                "num_groups": 1,
+                "num_incomplete": 1,
+                "num_ungrouped": 2,
+                "regimes": {
+                    "contrastive": 0,
+                    "zero_std_dead": 0,
+                    "zero_std_saturated": 0,
+                    "degenerate": 0,
+                },
+            },
+        },
+        num_trajectories=4,
     )
 
-    self.assertEqual(list(lines), ["Masked out: - reported by 0/2"])
+    self.assertEqual(
+        list(lines),
+        [
+            "Masked out: - reported by 0/4",
+            "Prompt Groups: 1 (1 incomplete, 2 ungrouped trajectories)",
+        ],
+    )
 
 
 if __name__ == "__main__":

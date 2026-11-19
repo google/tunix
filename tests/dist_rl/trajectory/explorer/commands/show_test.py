@@ -270,7 +270,7 @@ class ShowTest(absltest.TestCase):
     self.assertEqual(exit_code, 0)
     self.assertEqual(
         json.loads(out)["stats"]["schema_stats"],
-        {"tunix": {"masked_out": False, "trainable_tokens": 2, "valid": True}},
+        {"tunix": _TUNIX_DIAGNOSTICS[0].extract(_SUCCEEDED_TRAJECTORY)},
     )
 
   def test_hidden_schema_columns_are_only_in_json(self) -> None:

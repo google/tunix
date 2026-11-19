@@ -369,9 +369,26 @@ class SummaryTest(absltest.TestCase):
     )
     self.assertEqual(exit_code, 0)
     data = json.loads(out)
+    # The rollout has no `prompt_id`: its only group has 1 valid rollout.
     self.assertEqual(
         data["run"]["schema_stats"],
-        {"tunix": {"num_masked_out": 0, "num_with_masked_out": 1}},
+        {
+            "tunix": {
+                "num_masked_out": 0,
+                "num_with_masked_out": 1,
+                "prompt_groups": {
+                    "num_groups": 1,
+                    "num_incomplete": 0,
+                    "num_ungrouped": 1,
+                    "regimes": {
+                        "contrastive": 0,
+                        "zero_std_dead": 0,
+                        "zero_std_saturated": 0,
+                        "degenerate": 1,
+                    },
+                },
+            }
+        },
     )
     # The rollout was not post-processed, so it does not report the value.
     self.assertEqual(
@@ -405,6 +422,11 @@ class SummaryTest(absltest.TestCase):
     self.assertIn(
         "Mean reward: 3.5 reported by 1/2\n"
         "Masked out: 0 reported by 1/2\n"
+        "Prompt Groups: 1 (0 incomplete, 1 ungrouped trajectories)\n"
+        "  contrastive (valid>=2, std>0):            0 ( 0.0%)\n"
+        "  zero_std_dead (valid>=2, std=0, mean<=0): 0 ( 0.0%)\n"
+        "  zero_std_saturated (std=0, mean>0):       0 ( 0.0%)\n"
+        "  degenerate (valid<2):                     1 (100.0%)\n"
         "Tool calls: search x1\n",
         out,
     )
