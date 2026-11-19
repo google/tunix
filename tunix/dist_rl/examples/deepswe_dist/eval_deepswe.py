@@ -26,7 +26,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Mapping
+import importlib
 import json
 import logging
 import math
@@ -37,8 +38,14 @@ import subprocess
 import sys
 import threading
 import time
+from typing import TYPE_CHECKING
 
 from etils import epath
+
+if TYPE_CHECKING:
+  from tunix.dist_rl.distributed.runtime import context as runtime_context
+  from tunix.dist_rl.launch.common import resolve_config
+  from tunix.dist_rl.worker import remote_execution
 
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -213,7 +220,6 @@ def request_fields(
               "group_id": index,
               "pair_index": index,
           },
-          "agent_config": {"scaffold": "r2egym"},
       },
   }
 
@@ -335,13 +341,26 @@ def _attempts(
       yield index, entry, attempt
 
 
-async def collect_worker(handle, jobs, limit, args, on_result):
+def _unwrap(reply, rpc: str) -> dict[str, object]:
+  """Returns a reply's compact result, compacting `generate` responses."""
+  result = reply.unwrap()
+  return compact_result(result) if rpc == "generate" else result
+
+
+async def collect_worker(handle, jobs, limit, args, on_result, *,
+                         rpc: str = "evaluate"):
   """Bound in-flight work without applying the RPC deadline to episodes.
 
   Each task taken from the shared `jobs` iterator is dispatched as
   `--num_rollouts_per_instance` attempts to this worker. `on_result` runs in a
   thread so that remote result writes do not block the event loop.
+
+  `rpc="evaluate"` targets this script's `--role worker`, which returns compact
+  results. `rpc="generate"` targets a stock dist_rl rollout worker: each attempt
+  is sent as a `RolloutRequest` and its `RolloutResponse` is compacted here.
   """
+  from tunix.dist_rl.common import datatypes  # pylint: disable=g-import-not-at-top
+
   requests = _attempts(jobs, args.num_rollouts_per_instance)
   pending = {}
   exhausted = False
@@ -354,7 +373,10 @@ async def collect_worker(handle, jobs, limit, args, on_result):
         break
       fields = request_fields(args, entry, index, attempt)
       request_id = fields["request_id"]
-      ack = await handle.dispatch_task(request_id, "evaluate", fields)
+      payload = (
+          fields if rpc == "evaluate" else datatypes.RolloutRequest(**fields)
+      )
+      ack = await handle.dispatch_task(request_id, rpc, payload)
       if ack != request_id:
         raise RuntimeError(f"Unexpected dispatch acknowledgement: {ack}")
       pending[request_id] = (index, entry, attempt, time.monotonic())
@@ -366,7 +388,7 @@ async def collect_worker(handle, jobs, limit, args, on_result):
         raise RuntimeError(f"Unexpected evaluation result: {reply.request_id}")
       index, entry, attempt, started = pending.pop(reply.request_id)
       try:
-        result = reply.unwrap()
+        result = _unwrap(reply, rpc)
       except Exception as exc:  # A task failure must remain in Pass@1's denominator.
         result = {
             "reward": 0.0, "num_steps": 0, "status": "ERROR",
@@ -392,28 +414,10 @@ async def run_controller(args: argparse.Namespace) -> dict[str, object]:
   from tunix.dist_rl.worker import remote_execution
 
   entries = load_entries(args)
-  attempts = args.num_rollouts_per_instance
-  run_dir = (
-      epath.Path(args.output_dir)
-      / f"eval_deepswe_{time.strftime('%Y%m%d_%H%M%S')}"
-  )
-  write_json(
-      run_dir / "config.json",
-      {
-          **vars(args),
-          "instance_ids": [
-              entry.get("instance_id", index)
-              for index, entry in enumerate(entries)
-          ],
-      },
-  )
   handles = [remote_execution.ActorHandle.from_address(
       address if address.startswith("grpc://") else f"grpc://{address}",
       rpc_timeout_s=60,
   ) for address in args.worker_addresses]
-  rows = []
-  rows_lock = threading.Lock()
-  failure = None
   try:
     async def wait_ready(handle):
       deadline = time.monotonic() + args.startup_timeout
@@ -429,6 +433,52 @@ async def run_controller(args: argparse.Namespace) -> dict[str, object]:
         raise ValueError(f"Worker model settings differ: {actual}")
 
     await asyncio.gather(*(wait_ready(handle) for handle in handles))
+    return await _evaluate(args, entries, handles, rpc="evaluate")
+  finally:
+    await asyncio.gather(*(handle.close() for handle in handles),
+                         return_exceptions=True)
+
+
+async def _evaluate(
+    args: argparse.Namespace,
+    entries: list[dict[str, object]],
+    handles: list[remote_execution.ActorHandle],
+    *,
+    rpc: str,
+) -> dict[str, object]:
+  """Runs every attempt of `entries` on `handles` and writes the results.
+
+  Args:
+    args: Evaluation flags (`parse_args`).
+    entries: Raw task entries, each with a `docker_image`.
+    handles: Ready workers to spread the attempts over.
+    rpc: Worker method to dispatch (`collect_worker`).
+
+  Returns:
+    The summary (`summarize`).
+
+  Raises:
+    RuntimeError: If any attempt failed or is missing.
+  """
+  attempts = args.num_rollouts_per_instance
+  run_dir = (
+      epath.Path(args.output_dir)
+      / f"eval_deepswe_{time.strftime('%Y%m%d_%H%M%S')}"
+  )
+  write_json(
+      run_dir / "config.json",
+      {
+          **vars(args),
+          "instance_ids": [
+              entry.get("instance_id", index)
+              for index, entry in enumerate(entries)
+          ],
+      },
+  )
+  rows = []
+  rows_lock = threading.Lock()
+  failure = None
+  try:
     jobs = iter(enumerate(entries))
 
     def record(row: dict[str, object]) -> None:
@@ -460,6 +510,7 @@ async def run_controller(args: argparse.Namespace) -> dict[str, object]:
             + (index < args.max_concurrent % workers),
             args,
             record,
+            rpc=rpc,
         )
         for index, handle in enumerate(handles)
     ))
@@ -467,8 +518,6 @@ async def run_controller(args: argparse.Namespace) -> dict[str, object]:
     failure = f"{type(exc).__name__}: {exc}"
     raise
   finally:
-    await asyncio.gather(*(handle.close() for handle in handles),
-                         return_exceptions=True)
     summary = summarize(rows, len(entries), attempts)
     summary["fatal_error"] = failure
     write_results(run_dir, rows, summary)
@@ -488,6 +537,188 @@ async def run_controller(args: argparse.Namespace) -> dict[str, object]:
   ):
     raise RuntimeError(f"Evaluation contains failures; inspect {run_dir}")
   return summary
+
+
+def config_args(hp: resolve_config.DistHyperParameters) -> argparse.Namespace:
+  """Maps the resolved dist_rl config onto this script's evaluation flags.
+
+  The controller and the rollout workers resolve the same config, so the
+  evaluation reuses its settings: `agentic_grpo_config.num_generations`
+  attempts per task, `max_turns` turns, `episode_timeout`, `max_concurrency`,
+  and the `rollout_config` sampling settings. Results go to
+  `<cluster_config.artifact_root>/eval`. `data_config.limit` caps the tasks.
+
+  Args:
+    hp: Resolved dist_rl configuration.
+
+  Returns:
+    The flags, validated by `parse_args`.
+  """
+  grpo = hp.config_mapping("agentic_grpo_config")
+  rollout = hp.config_mapping("rollout_config")
+  cluster = hp.config_mapping("cluster_config")
+  generation_steps = int(rollout["total_generation_steps"])
+  max_model_len = hp.config_mapping("vllm_config")["max_model_len"] or (
+      int(rollout["max_prompt_length"]) + generation_steps
+  )
+  top_k = int(rollout["top_k"])
+  argv = [
+      "--role", "controller",
+      "--max_steps", str(grpo["max_turns"]),
+      "--timeout", str(grpo["episode_timeout"]),
+      "--max_concurrent", str(grpo["max_concurrency"]),
+      "--num_rollouts_per_instance", str(grpo["num_generations"]),
+      "--max_model_len", str(max_model_len),
+      "--max_response_length", str(generation_steps),
+      "--temperature", str(rollout["temperature"]),
+      "--top_p", str(rollout["top_p"]),
+      "--top_k", str(top_k if top_k > 0 else -1),
+      "--output_dir", f"{str(cluster['artifact_root']).rstrip('/')}/eval",
+  ]
+  if cluster["init_timeout_s"] is not None:
+    argv += ["--startup_timeout", str(cluster["init_timeout_s"])]
+  return parse_args(argv)
+
+
+def config_entries(
+    hp: resolve_config.DistHyperParameters,
+) -> list[dict[str, object]]:
+  """Returns the raw task entries of `data_module.create_dataset`.
+
+  The dataset is created from `data_config`, and its records follow
+  `deepswe.create_dataset`: each holds its raw entry in
+  `metadata.env_config.entry`.
+
+  Args:
+    hp: Resolved dist_rl configuration.
+  """
+  module = importlib.import_module(str(hp.config["data_module"]))
+  records = module.create_dataset(**hp.config_mapping("data_config"))
+  return [
+      records[index]["metadata"]["env_config"]["entry"]
+      for index in range(len(records))
+  ]
+
+
+async def evaluate_on_rollout_workers(
+    args: argparse.Namespace,
+    entries: list[dict[str, object]],
+    handles: list[remote_execution.ActorHandle],
+) -> dict[str, object]:
+  """Starts stock rollout workers, evaluates on them, and stops them.
+
+  Args:
+    args: Evaluation flags (`config_args`).
+    entries: Raw task entries.
+    handles: Registered rollout workers.
+
+  Returns:
+    The summary (`summarize`).
+  """
+  try:
+    for method in ("initialize", "start"):
+      await asyncio.gather(*(handle.asubmit(method) for handle in handles))
+    return await _evaluate(args, entries, handles, rpc="generate")
+  finally:
+    results = await asyncio.gather(
+        *(handle.asubmit("stop") for handle in handles), return_exceptions=True
+    )
+    for handle, result in zip(handles, results):
+      if isinstance(result, BaseException):
+        logging.warning("Failed to stop worker %s: %s", handle, result)
+    await asyncio.gather(*(handle.close() for handle in handles),
+                         return_exceptions=True)
+
+
+def _start_sandbox_fleet(
+    env_kwargs: Mapping[str, object],
+    entries: list[dict[str, object]],
+    args: argparse.Namespace,
+) -> Callable[[], None] | None:
+  """Warms the tasks' sandbox pools up front when `use_agent_sandbox` is set.
+
+  Args:
+    env_kwargs: The run's `env_kwargs`, free-form environment settings.
+    entries: Raw task entries.
+    args: Evaluation flags.
+
+  Returns:
+    The fleet teardown, or None when sandboxes are off.
+  """
+  if not env_kwargs.get("use_agent_sandbox", False):
+    return None
+  from examples.deepswe import sandbox_utils  # pylint: disable=g-import-not-at-top
+
+  sandbox_utils.init_global_fleet(
+      tasks=entries,
+      max_concurrency=args.max_concurrent,
+      num_generations=args.num_rollouts_per_instance,
+      scaffold=str(env_kwargs["scaffold"]),
+  )
+  sandbox_utils.warm_global_fleet()
+  return sandbox_utils.teardown_global_fleet
+
+
+def controller_main(
+    argv: list[str], context: runtime_context.ProcessContext | None = None
+) -> None:
+  """Runs the evaluation controller as a dist_rl launch process main.
+
+  Use as `--process_main=tunix.dist_rl.examples.deepswe_dist.eval_deepswe.
+  controller_main` next to stock rollout nodes that resolved the same config
+  (`weight_sync_config.mode: none`). The controller waits for
+  `cluster_config.rollout_replicas` workers, starts them, dispatches every
+  attempt as a `generate` request, writes the results (`write_results`), and
+  stops the workers.
+
+  Args:
+    argv: `override_config_file=...` and `section.key=value` overrides.
+    context: Runtime process context providing the discovery API.
+  """
+  # pylint: disable=g-import-not-at-top
+  from tunix.dist_rl.common import datatypes
+  from tunix.dist_rl.launch.common import resolve_config as resolve_config_lib
+  from tunix.dist_rl.launch.nodes import node_utils
+  from tunix.dist_rl.launch.nodes import orchestrator
+  from tunix.dist_rl.orchestrator import worker_registry as registry_lib
+  # pylint: enable=g-import-not-at-top
+
+  discovery = node_utils.require_discovery_context(context).ipc.discovery
+  logging.basicConfig(
+      level=logging.INFO,
+      format="%(asctime)s - [EvalController] %(message)s",
+      force=True,
+  )
+  hp = resolve_config_lib.initialize(argv)
+  config_sha256 = node_utils.log_resolved_config(hp, "orchestrator")
+  args = config_args(hp)
+  cluster = hp.config_mapping("cluster_config")
+  replicas = int(cluster["rollout_replicas"])
+  if args.max_concurrent < replicas:
+    raise ValueError(
+        f"agentic_grpo_config.max_concurrency ({args.max_concurrent}) must"
+        f" cover every rollout replica ({replicas})."
+    )
+  entries = config_entries(hp)
+  _, rpc_timeout_s = orchestrator.resolve_weight_sync_timeouts(hp)
+  teardown_fleet = _start_sandbox_fleet(
+      hp.config_mapping("env_kwargs"), entries, args
+  )
+  try:
+    registry = registry_lib.WorkerRegistry()
+    node_utils.wait_for_workers(
+        registry,
+        discovery,
+        {datatypes.Role.ROLLOUT: replicas},
+        init_timeout_s=cluster["init_timeout_s"],
+        rpc_timeout_s=rpc_timeout_s,
+        config_sha256=config_sha256,
+    )
+    handles = registry.handles(datatypes.Role.ROLLOUT, statuses=None)
+    asyncio.run(evaluate_on_rollout_workers(args, entries, handles))
+  finally:
+    if teardown_fleet is not None:
+      teardown_fleet()
 
 
 def register_guarded_env(deepswe_module) -> str:
@@ -627,6 +858,7 @@ async def run_worker(args: argparse.Namespace):
       sampler=sampler,
       env_name=env_name,
       agent_name=deepswe.DEEPSWE_AGENT_NAME,
+      agent_config={"scaffold": "r2egym"},
       tokenizer=tokenizer_adapter.TokenizerAdapter(tokenizer),
       chat_parser=parser.QwenChatTemplateParser(
           tokenizer, enable_thinking=not args.disable_thinking
