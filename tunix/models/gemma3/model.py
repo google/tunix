@@ -33,10 +33,9 @@ from tunix.models.gemma3 import merge_embeddings as merge_embeddings_lib
 from tunix.models.gemma3 import utils
 from tunix.models.gemma3 import vision
 from tunix.utils import compat
-from tunix.utils import env_utils
 from tunix.utils import sharding_utils
 
-env_utils.setup_sharding_environment()
+sharding_utils.setup_sharding_environment()
 
 
 LayerCache = dict[str, jaxtyping.Array]

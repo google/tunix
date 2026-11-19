@@ -243,25 +243,30 @@ class TopologyTest(absltest.TestCase):
 
     jax.config.update("jax_platforms", None)
     with mock.patch.dict("os.environ", {}, clear=True):
-      self.assertFalse(topology._is_pathways_backend_used())
+      self.assertFalse(topology.is_pathways_backend_used())
 
     jax.config.update("jax_platforms", "cpu")
     with mock.patch.dict("os.environ", {"JAX_PLATFORMS": "cpu"}, clear=True):
-      self.assertFalse(topology._is_pathways_backend_used())
+      self.assertFalse(topology.is_pathways_backend_used())
 
     jax.config.update("jax_platforms", "pathways")
     with mock.patch.dict("os.environ", {}, clear=True):
-      self.assertTrue(topology._is_pathways_backend_used())
+      self.assertTrue(topology.is_pathways_backend_used())
 
     jax.config.update("jax_platforms", "proxy,cpu")
     with mock.patch.dict("os.environ", {}, clear=True):
-      self.assertTrue(topology._is_pathways_backend_used())
+      self.assertTrue(topology.is_pathways_backend_used())
 
     jax.config.update("jax_platforms", None)
     with mock.patch.dict(
         "os.environ", {"JAX_PLATFORMS": "pathways"}, clear=True
     ):
-      self.assertTrue(topology._is_pathways_backend_used())
+      self.assertTrue(topology.is_pathways_backend_used())
+
+    with mock.patch.dict(
+        "os.environ", {"JAX_PLATFORMS": "proxy,cpu"}, clear=True
+    ):
+      self.assertTrue(topology.is_pathways_backend_used())
 
   def test_gpu_device_families_normalize_and_never_apply_fish_cube_rules(self):
     expected_families = (

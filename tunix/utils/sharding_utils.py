@@ -17,11 +17,18 @@
 from collections.abc import Sequence
 from typing import Tuple
 
+import flax
 import jax
 from jax import numpy as jnp
 from jax.interpreters import pxla
 import jax.sharding as shd
 import numpy as np
+
+
+def setup_sharding_environment() -> None:
+  """Sets up the Flax sharding environment."""
+  if hasattr(flax.config, 'flax_always_shard_variable'):
+    flax.config.update('flax_always_shard_variable', False)
 
 
 def place_array_on_target(

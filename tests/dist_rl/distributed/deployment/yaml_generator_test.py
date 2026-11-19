@@ -1321,6 +1321,71 @@ class YamlGeneratorTest(parameterized.TestCase):
               )
           )
 
+    with mock.patch.dict(
+        os.environ,
+        {
+            "COLOCATED_PYTHON_SIDECAR_IMAGE": "test-sidecar-img:v1",
+            "COLOCATED_PYTHON_SIDECAR_SHM": "off",
+        },
+    ):
+      with mock.patch.object(
+          sys,
+          "argv",
+          [
+              "yaml_generator.py",
+              pw_template,
+              "--jobset_name=test-pw-sidecar-tmp",
+              "--tpu_slice=tpuv5e:4x4",
+          ],
+      ):
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+          yaml_generator.main()
+          doc = yaml.safe_load(mock_stdout.getvalue())
+          pw_spec = doc["spec"]["replicatedJobs"][1]["template"]["spec"][
+              "template"
+          ]["spec"]
+          self.assertNotIn(
+              "--cloud_pathways_sidecar_shm_directory=/tmp/sidecar",
+              pw_spec["containers"][0]["args"],
+          )
+          sidecar = next(
+              c
+              for c in pw_spec["initContainers"]
+              if c["name"] == "colocated-python-sidecar"
+          )
+          self.assertIn(
+              {"mountPath": "/tmp", "name": "shared-tmp"},
+              sidecar["volumeMounts"],
+          )
+          self.assertNotIn(
+              "CLOUD_PATHWAYS_SIDECAR_SHM_DIRECTORY",
+              {e["name"] for e in sidecar["env"]},
+          )
+          volume_names = {v["name"] for v in pw_spec["volumes"]}
+          self.assertNotIn("sidecar-shared-memory", volume_names)
+
+    with mock.patch.dict(
+        os.environ,
+        {
+            "COLOCATED_PYTHON_SIDECAR_IMAGE": "test-sidecar-img:v1",
+            "COLOCATED_PYTHON_SIDECAR_SHM": "invalid",
+        },
+    ):
+      with mock.patch.object(
+          sys,
+          "argv",
+          [
+              "yaml_generator.py",
+              pw_template,
+              "--jobset_name=test-pw-sidecar-bad",
+              "--tpu_slice=tpuv5e:4x4",
+          ],
+      ):
+        with self.assertRaisesRegex(
+            ValueError, "Unsupported COLOCATED_PYTHON_SIDECAR_SHM='invalid'"
+        ):
+          yaml_generator.main()
+
   def test_pathways_extra_env_and_proxy_args(self):
     pw_template = _get_template_path("jobset.pathways.yaml")
     with mock.patch.dict(

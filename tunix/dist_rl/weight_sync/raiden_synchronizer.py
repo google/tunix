@@ -28,9 +28,9 @@ from absl import logging
 import jax
 import jax.numpy as jnp
 import numpy as np
-from tunix.dist_rl.common import env_utils
 from tunix.dist_rl.weight_sync import weight_sync
 from tunix.dist_rl.weight_sync import weight_utils
+from tunix.utils import env_utils
 from tunix.utils import mesh
 
 # Serializes FFI transport initialization across threads because
@@ -407,8 +407,8 @@ def _use_ffi_transport() -> bool:
   """Returns whether Raiden should use the XLA FFI (Pathways/proxy) transport."""
   for env_key in ("RAIDEN_USE_FFI", "USE_RAIDEN_FFI"):
     if env_key in os.environ and os.environ[env_key].strip():
-      return env_utils.parse_env_bool(env_key, strict=True)
-  return mesh.topology._is_pathways_backend_used()  # pylint: disable=protected-access
+      return env_utils.parse_env_bool(env_key)
+  return mesh.topology.is_pathways_backend_used()
 
 
 class RaidenSynchronizer:

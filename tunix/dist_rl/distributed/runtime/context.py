@@ -21,8 +21,8 @@ import sys
 from typing import Any
 
 from tunix.common import datatypes as common_datatypes
-from tunix.dist_rl.common import env_utils
 from tunix.dist_rl.common import execution_target
+from tunix.utils import env_utils
 
 _TARGET_ENV_DEFAULTS: dict[
     execution_target.ExecutionTarget, tuple[tuple[str, str], ...]

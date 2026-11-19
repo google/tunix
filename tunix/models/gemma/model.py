@@ -32,14 +32,14 @@ from tunix.models import gpu_kernels as kernels_lib
 from tunix.models import reference_attention as reference_attention_lib
 from tunix.models.gemma import params as params_lib
 from tunix.utils import compat
-from tunix.utils import env_utils
+from tunix.utils import sharding_utils
 
 
 LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]
 
 
-env_utils.setup_sharding_environment()
+sharding_utils.setup_sharding_environment()
 
 
 class AttentionType(enum.Enum):

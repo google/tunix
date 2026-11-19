@@ -32,11 +32,11 @@ import tenacity
 from tunix.models.gemma3 import merge_embeddings as merge_embeddings_lib
 from tunix.models.gemma3 import utils as gemma_utils
 from tunix.rl import reshard
-from tunix.utils import env_utils
+from tunix.utils import sharding_utils
 
 import sentencepiece as spm
 
-env_utils.setup_sharding_environment()
+sharding_utils.setup_sharding_environment()
 
 
 def _convert_leaf_to_nparray(leaf):

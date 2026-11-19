@@ -24,7 +24,7 @@ import jaxtyping
 from tunix.models import cache_utils
 from tunix.models.gemma4 import audio
 from tunix.models.gemma4 import vision
-from tunix.utils import env_utils
+from tunix.utils import sharding_utils
 
 IMAGE_SOFT_TOKEN_PLACEHOLDER = -2
 AUDIO_SOFT_TOKEN_PLACEHOLDER = -4
@@ -59,7 +59,7 @@ class PreprocessedAudioInput:
 
 jax.tree_util.register_dataclass(PreprocessedAudioInput)
 
-env_utils.setup_sharding_environment()
+sharding_utils.setup_sharding_environment()
 
 
 LayerCache = dict[str, jaxtyping.Array]
