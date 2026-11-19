@@ -44,14 +44,15 @@ Config API:
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, Callable, Dict, Mapping, Tuple, TypeAlias
+from typing import Any
+from typing import Callable, Dict, Mapping, Tuple
 
 from absl import logging
-from tunix.common import datatypes
+from jax import typing
 from tunix.perf import span
 
 
-ArrayLike: TypeAlias = datatypes.ArrayLike
+ArrayLike = typing.ArrayLike
 Timeline = Any  # tunix.perf.span.Timeline
 Span = span.Span
 SpanGroup = span.SpanGroup
