@@ -19,7 +19,7 @@ import contextlib
 import dataclasses
 import functools
 import time
-from typing import Any, Callable, Concatenate, Dict, List, ParamSpec, Tuple, TypeAlias, cast
+from typing import Any, Callable, Concatenate, Dict, List, ParamSpec, Tuple, TypeAlias, TypeVar, cast
 
 from absl import logging
 import flax
@@ -53,6 +53,7 @@ TrainingConfig = configs.TrainingConfig
 
 _ModelInputT = Dict[str, ArrayLike]
 P = ParamSpec("P")
+_ExportResultT = TypeVar("_ExportResultT")
 MetricsLogger = sft_metrics_logger.MetricsLogger
 MetricsLoggerOptions = sft_metrics_logger.MetricsLoggerOptions
 _MetricValue = ArrayLike | utils.WeightedMetric | Any
@@ -1123,6 +1124,26 @@ class PeftTrainer:
     if self._pbar is not None:
       self._pbar.close()
       self._pbar = None
+
+  def export_safetensors(
+      self,
+      export_fn: Callable[..., _ExportResultT],
+      *,
+      output_dir: str | None = None,
+      local_model_path: str | None = None,
+      num_ranks: int = 1,
+      max_bucket_bytes: int | None = None,
+  ) -> _ExportResultT | None:
+    """Exports the trained model as safetensors via CheckpointManager."""
+    return self.checkpoint_manager.export_safetensors(
+        self._train_steps,
+        self.model,
+        export_fn,
+        output_dir=output_dir,
+        local_model_path=local_model_path,
+        num_ranks=num_ranks,
+        max_bucket_bytes=max_bucket_bytes,
+    )
 
   def _run_eval(
       self,
