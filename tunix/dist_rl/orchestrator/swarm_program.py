@@ -66,6 +66,8 @@ class SwarmConfig:
   loss_microbatch_rows: int = 4
   sampler_is: str | None = None
   sampler_is_threshold: float = 2.0
+  epsilon_high: float = 0.2
+  allow_variable_group_sizes: bool = False
 
   def __post_init__(self):
     if (
@@ -94,6 +96,8 @@ class SwarmConfig:
         or self.sampler_is_threshold <= 0
     ):
       raise ValueError("sampler_is_threshold must be finite and positive.")
+    if not np.isfinite(self.epsilon_high) or self.epsilon_high <= 0:
+      raise ValueError("epsilon_high must be finite and positive.")
 
 
 def shared_grpo_config(
@@ -101,13 +105,14 @@ def shared_grpo_config(
     *,
     sampler_is: str | None = None,
     sampler_is_threshold: float = 2.0,
+    epsilon_high: float = 0.2,
 ) -> algorithm_config.GRPOConfig:
-  """Dr. MAS token-mean dual-clip objective; no reference KL or entropy term."""
+  """Dr. MAS / R2Orch token-mean dual-clip objective; no reference KL term."""
   config = algorithm_config.GRPOConfig(
       num_generations=group_size,
       beta=0.0,
       epsilon=0.2,
-      epsilon_high=0.2,
+      epsilon_high=epsilon_high,
       epsilon_c=3.0,
       loss_agg_mode="token-mean",
       use_rollout_logps=True,
@@ -411,6 +416,7 @@ class SwarmRLProgram(rl_program.RLProgram):
           config.group_size,
           sampler_is=config.sampler_is,
           sampler_is_threshold=config.sampler_is_threshold,
+          epsilon_high=config.epsilon_high,
       )
       if algo_config.requires_reference_kl and self.reference_scorer is None:
         raise ValueError(
@@ -421,7 +427,12 @@ class SwarmRLProgram(rl_program.RLProgram):
       for _ in range(num_steps):
         episodes = tuple(await self.collect(self.policy_version, self.step))
         counts = collections.Counter(e.task_id for e in episodes)
-        if not counts or any(n != config.group_size for n in counts.values()):
+        bad_group = (
+            any(n < 2 for n in counts.values())
+            if config.allow_variable_group_sizes
+            else any(n != config.group_size for n in counts.values())
+        )
+        if not counts or bad_group:
           raise ValueError(
               "Collect complete groups before computing advantages."
           )
@@ -431,8 +442,18 @@ class SwarmRLProgram(rl_program.RLProgram):
             c.policy_version != self.policy_version
             for e in episodes
             for c in e.calls
+            if c.trainable
         ):
           raise ValueError("Collection returned a stale policy version.")
+        frozen_calls = sum(
+            not c.trainable
+            or (
+                self.learning_plan is not None
+                and c.policy_id != self.learning_plan.learner_policy_id
+            )
+            for e in episodes
+            for c in e.calls
+        )
         credited = (
             self.credit_builder(episodes)
             if self.credit_builder
@@ -515,6 +536,7 @@ class SwarmRLProgram(rl_program.RLProgram):
               "policy_version": self.policy_version,
               "episodes": len(episodes),
               "calls": len(credited.payloads),
+              "frozen_calls": frozen_calls,
               "reward_mean": float(np.mean(rewards)),
               "optimizer_applied": False,
               "skip_reason": "zero_signal",
@@ -645,6 +667,7 @@ class SwarmRLProgram(rl_program.RLProgram):
             "optimizer_steps": len(windows),
             "episodes": len(episodes),
             "calls": len(credited.payloads),
+            "frozen_calls": frozen_calls,
             "active_tokens": int(
                 sum(np.sum(p.completion_mask) for p in scored)
             ),

@@ -1,0 +1,2 @@
+{"task_id": "aime/cpu_1", "dataset": "aime", "verifier": "integer_answer", "prompt": "Compute 6 * 7 and put the answer in \\boxed{}.", "answers": ["42"], "options": [], "code_spec": {}}
+{"task_id": "aime/cpu_2", "dataset": "aime", "verifier": "integer_answer", "prompt": "Compute 40 + 2 and put the answer in \\boxed{}.", "answers": ["42"], "options": [], "code_spec": {}}

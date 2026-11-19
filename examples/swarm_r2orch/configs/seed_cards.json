@@ -1,0 +1,506 @@
+[
+  {
+    "card": {
+      "skill_id": "seed_aime_topology",
+      "name": "AIME graph: one solver, then an independent peer when risky",
+      "description": "Graph shape for AIME integer-answer competition math: one complete solver first; a same-layer independent peer block for casework, geometry, counting or a shaky first result; a downstream judge only for a split.",
+      "trigger": "Building or extending the graph for an AIME problem (one integer 0-999), before the first solver runs or right after its result arrives.",
+      "plan": "Add one task_result solver and let it run. If its result is shaky (tool errors, open issues, no clear integer) or the problem is heavy casework, counting or geometry, add a second task_result solver at layer 0 that confirms numerically on small or edge cases; CONSIDER_RELATION the pair, choose on.",
+      "pitfall": "Two Agents with the same role and objective add no information. A layer-1 checker that sees only one solution tends to copy it, so prefer two independent solutions. Beyond three Agents the edits are better kept for FINISH.",
+      "constraint": "Workers already see the full problem and can run Python and exact symbolic math with a few tool calls each. A peer block runs each member alone, then once more after reading the other's proposal.",
+      "kind": "orchestration",
+      "task_types": [
+        "math"
+      ],
+      "evidence": [
+        "R2Orch human-authored seed"
+      ],
+      "stats": {
+        "usage_count": 0,
+        "helpful_count": 0,
+        "hurt_count": 0,
+        "last_used_step": -1,
+        "creation_step": 0,
+        "is_seed": true
+      }
+    },
+    "required_tools": [],
+    "excluded_task_types": []
+  },
+  {
+    "card": {
+      "skill_id": "seed_aime_delegation",
+      "name": "AIME delegation: name the exact requested quantity",
+      "description": "How to write role, objective, scope, expected_output and result_scope for an AIME solver or peer without leaking a method or value.",
+      "trigger": "Writing SET_PROMPT for any Agent on an AIME problem.",
+      "plan": "role: a short title naming the math area. objective: determine the exact quantity the problem asks for, in its own words (remainder, m+n, count). scope: the conditions and edge cases that matter, or the peer's distinct check. expected_output: one integer 0-999 with the key justification.",
+      "pitfall": "Canvas rejects a field that states a value ('answer is', 'answer:'), says 'candidate answer' or 'solution steps', or names a Worker tool. Pairing first/then/next or use/apply with compute/derive/solve is also rejected. Write what to determine, one sentence per field.",
+      "constraint": "Never put a guessed value, formula or intermediate result in any field. Restating the public target (a remainder, an m+n form) is allowed. Use result_scope task_result for every solver.",
+      "kind": "communication",
+      "task_types": [
+        "math"
+      ],
+      "evidence": [
+        "R2Orch human-authored seed"
+      ],
+      "stats": {
+        "usage_count": 0,
+        "helpful_count": 0,
+        "hurt_count": 0,
+        "last_used_step": -1,
+        "creation_step": 0,
+        "is_seed": true
+      }
+    },
+    "required_tools": [],
+    "excluded_task_types": []
+  },
+  {
+    "card": {
+      "skill_id": "seed_aime_finish",
+      "name": "AIME results: compare integers, then FINISH",
+      "description": "Deciding between another edit and FINISH on AIME: accept a clean single result or agreeing peers, add a judge only for a persistent split.",
+      "trigger": "AIME solver results are back and you are choosing between another edit and FINISH.",
+      "plan": "Read each summary for one integer in 0-999. One clean solver or peers that agree after revision: FINISH that task_result node. Peers still split: add a task_result judge (SET_LAYER 1), turn on directed relations from both peers, let it rerun, then FINISH the judge.",
+      "pitfall": "A summary with no integer or an out-of-range value is worth one revision naming the requested quantity while edits remain. Re-prompting agreeing results only reruns the node and its downstream nodes.",
+      "constraint": "FINISH needs a submit_ready task_result target that every retained node reaches through actual edges; delete or connect leftovers first. A wrong integer is still a legal submission; keep a turn for FINISH.",
+      "kind": "verification",
+      "task_types": [
+        "math"
+      ],
+      "evidence": [
+        "R2Orch human-authored seed"
+      ],
+      "stats": {
+        "usage_count": 0,
+        "helpful_count": 0,
+        "hurt_count": 0,
+        "last_used_step": -1,
+        "creation_step": 0,
+        "is_seed": true
+      }
+    },
+    "required_tools": [],
+    "excluded_task_types": []
+  },
+  {
+    "card": {
+      "skill_id": "seed_hotpotqa_topology",
+      "name": "HotpotQA graph: one reader, split only real hops",
+      "description": "Graph shape for HotpotQA multi-hop questions with supplied passages: one reader by default; per-entity readers for comparisons; a downstream answerer when the first reader confuses the bridge entity.",
+      "trigger": "Building or extending the graph for a HotpotQA question that comes with supplied passages.",
+      "plan": "Bridge or single-fact question: one task_result reader. Comparison of two named items: one subtask reader per item at layer 0 and a task_result comparer at layer 1 with directed relations on. If a reader mixes up the bridge entity, add a layer-1 task_result answerer fed by it and FINISH that.",
+      "pitfall": "Splitting a single-hop question only adds cost and copying errors. Evidence Agents that are not connected to the answer owner cannot influence it and block FINISH.",
+      "constraint": "Workers see every supplied passage and may search a Wikipedia snapshot with a few searches each, worth it only when a needed fact is missing from the passages.",
+      "kind": "decomposition",
+      "task_types": [
+        "multi_hop_qa"
+      ],
+      "evidence": [
+        "R2Orch human-authored seed"
+      ],
+      "stats": {
+        "usage_count": 0,
+        "helpful_count": 0,
+        "hurt_count": 0,
+        "last_used_step": -1,
+        "creation_step": 0,
+        "is_seed": true
+      }
+    },
+    "required_tools": [],
+    "excluded_task_types": []
+  },
+  {
+    "card": {
+      "skill_id": "seed_hotpotqa_delegation",
+      "name": "HotpotQA delegation: fix the hop and the answer form",
+      "description": "How to write the four delegation fields and result_scope for HotpotQA readers, comparers and answer owners.",
+      "trigger": "Writing SET_PROMPT for any Agent on a HotpotQA question.",
+      "plan": "objective: the one fact this Agent must establish (the bridge entity, an attribute of a named entity, or which named item meets the comparison). scope: the entities named in the question. expected_output: the shortest span in passage wording, or yes/no, plus the supporting passage title.",
+      "pitfall": "Usual misses: answering the bridge entity instead of the asked attribute, a full sentence, or a same-name distractor passage. Canvas rejects a field that states a value ('answer is', 'answer:'), says 'candidate answer' or 'solution steps', or names a Worker tool.",
+      "constraint": "Restate entities from the question only; never insert a guessed answer or a conclusion drawn from the passages. Evidence readers use result_scope subtask, the answer owner task_result.",
+      "kind": "communication",
+      "task_types": [
+        "multi_hop_qa"
+      ],
+      "evidence": [
+        "R2Orch human-authored seed"
+      ],
+      "stats": {
+        "usage_count": 0,
+        "helpful_count": 0,
+        "hurt_count": 0,
+        "last_used_step": -1,
+        "creation_step": 0,
+        "is_seed": true
+      }
+    },
+    "required_tools": [],
+    "excluded_task_types": []
+  },
+  {
+    "card": {
+      "skill_id": "seed_hotpotqa_finish",
+      "name": "HotpotQA results: check the answer form, then FINISH",
+      "description": "Deciding between revision and FINISH on HotpotQA by checking the answer form against the question type.",
+      "trigger": "A HotpotQA answer owner has a result and you are choosing between revision and FINISH.",
+      "plan": "Match the summary to the question: a yes/no question needs yes or no; 'which/who of A or B' needs one of the named options; else a short span. If it fits and no issue is open, FINISH the owner. If it answers the wrong hop, revise its objective once to name the asked attribute.",
+      "pitfall": "A reviewer rereading the same passages seldom adds evidence; one targeted revision is cheaper. Do not loop on low confidence: an unsubmitted task scores zero, a submitted wrong one is just graded.",
+      "constraint": "FINISH targets the task_result owner that all retained nodes reach. Exact match grading: extra words, explanations or two alternatives in the answer fail.",
+      "kind": "verification",
+      "task_types": [
+        "multi_hop_qa"
+      ],
+      "evidence": [
+        "R2Orch human-authored seed"
+      ],
+      "stats": {
+        "usage_count": 0,
+        "helpful_count": 0,
+        "hurt_count": 0,
+        "last_used_step": -1,
+        "creation_step": 0,
+        "is_seed": true
+      }
+    },
+    "required_tools": [],
+    "excluded_task_types": []
+  },
+  {
+    "card": {
+      "skill_id": "seed_nq_open_topology",
+      "name": "NQ-Open graph: one researcher is the default",
+      "description": "Graph shape for NQ-Open short factual questions answered with Wikipedia search: one researcher owns search and answer; a downstream checker only for a concrete ambiguity.",
+      "trigger": "Building or extending the graph for a short NQ-Open factual question that has no supplied passages.",
+      "plan": "Add one task_result researcher that searches and answers. Add a second Agent only for a named ambiguity (which person, year or version): a task_result checker at layer 1 (SET_LAYER), with the directed relation from the researcher on so it sees that evidence; FINISH the checker.",
+      "pitfall": "In past runs multi-Agent NQ graphs rarely fixed answers and multiplied cost. A new Agent with no relation from the researcher starts without its evidence; Agents added after searches run out rarely help.",
+      "constraint": "Each Agent can search a Wikipedia snapshot a few times (a few passages per search). Evidence passes between Agents only through actual relations.",
+      "kind": "orchestration",
+      "task_types": [
+        "factual_qa"
+      ],
+      "evidence": [
+        "R2Orch human-authored seed"
+      ],
+      "stats": {
+        "usage_count": 0,
+        "helpful_count": 0,
+        "hurt_count": 0,
+        "last_used_step": -1,
+        "creation_step": 0,
+        "is_seed": true
+      }
+    },
+    "required_tools": [],
+    "excluded_task_types": []
+  },
+  {
+    "card": {
+      "skill_id": "seed_nq_open_delegation",
+      "name": "NQ-Open delegation: state the relation and answer type",
+      "description": "How to write the four delegation fields for an NQ-Open researcher so the answer has the asked type and granularity.",
+      "trigger": "Writing SET_PROMPT for any Agent on an NQ-Open question.",
+      "plan": "objective: find the specific fact asked, restating the question's entity, relation and any time or place limit. scope: that entity and relation only. expected_output: the shortest complete span of the asked type (a name for who, a date or year for when, a number for how many) and its passage.",
+      "pitfall": "Typical misses: a passage names the right entity in a different role or year; the reply is a sentence or lists several options. Canvas rejects a field that states a value ('answer is', 'answer:'), says 'candidate answer' or 'solution steps', or names a Worker tool.",
+      "constraint": "Take entities and limits only from the question; never add a guessed name, date or alias. Use result_scope task_result for the researcher.",
+      "kind": "communication",
+      "task_types": [
+        "factual_qa"
+      ],
+      "evidence": [
+        "R2Orch human-authored seed"
+      ],
+      "stats": {
+        "usage_count": 0,
+        "helpful_count": 0,
+        "hurt_count": 0,
+        "last_used_step": -1,
+        "creation_step": 0,
+        "is_seed": true
+      }
+    },
+    "required_tools": [],
+    "excluded_task_types": []
+  },
+  {
+    "card": {
+      "skill_id": "seed_nq_open_finish",
+      "name": "NQ-Open results: verify the relation, then FINISH",
+      "description": "Deciding between one targeted revision and FINISH for an NQ-Open researcher, avoiding repeated searches and fresh evidence-less Agents.",
+      "trigger": "An NQ-Open researcher has a result and you are choosing between another edit and FINISH.",
+      "plan": "FINISH the researcher when its summary gives one short span of the asked type tied to a passage. If the entity is in the wrong role, year or scope, revise its objective once to name that constraint, so its extra search targets the missing entity, year or relation.",
+      "pitfall": "Near-identical searches return nothing new and burn the budget. Swapping to a fresh Agent after searches are spent leaves it without evidence. If no edit can help, FINISH anyway: an unsubmitted task scores zero.",
+      "constraint": "Exact match grading against short aliases: a longer or multi-option span scores zero even when it contains the right words.",
+      "kind": "verification",
+      "task_types": [
+        "factual_qa"
+      ],
+      "evidence": [
+        "R2Orch human-authored seed"
+      ],
+      "stats": {
+        "usage_count": 0,
+        "helpful_count": 0,
+        "hurt_count": 0,
+        "last_used_step": -1,
+        "creation_step": 0,
+        "is_seed": true
+      }
+    },
+    "required_tools": [],
+    "excluded_task_types": []
+  },
+  {
+    "card": {
+      "skill_id": "seed_medqa_topology",
+      "name": "MedQA graph: one clinician, an independent peer for hard vignettes",
+      "description": "Graph shape for MedQA four-option USMLE questions: one clinician for direct recall; two independent clinicians in a peer block for multi-step vignettes; a judge only for a persistent split.",
+      "trigger": "Building or extending the graph for a MedQA multiple-choice question with options A-D.",
+      "plan": "Short recall question: one task_result clinician. Long vignette needing a diagnosis and then a further step (mechanism, next test, treatment): add a second task_result clinician at layer 0 with a distinct focus, CONSIDER_RELATION the pair and choose on.",
+      "pitfall": "A chain where a later Agent only restates the first one's letter adds cost but no independent check. Three or more readers rarely beat two.",
+      "constraint": "Workers see the full vignette and options and can search a general Wikipedia snapshot a few times, useful for named drugs, syndromes or mechanisms, not for vignette reasoning.",
+      "kind": "orchestration",
+      "task_types": [
+        "medical_mcq"
+      ],
+      "evidence": [
+        "R2Orch human-authored seed"
+      ],
+      "stats": {
+        "usage_count": 0,
+        "helpful_count": 0,
+        "hurt_count": 0,
+        "last_used_step": -1,
+        "creation_step": 0,
+        "is_seed": true
+      }
+    },
+    "required_tools": [],
+    "excluded_task_types": []
+  },
+  {
+    "card": {
+      "skill_id": "seed_medqa_delegation",
+      "name": "MedQA delegation: separate the diagnosis from the asked item",
+      "description": "How to write the four delegation fields for MedQA clinicians so they answer the item the final sentence asks for, as one option letter.",
+      "trigger": "Writing SET_PROMPT for any Agent on a MedQA question.",
+      "plan": "objective: determine which option best answers the final sentence (diagnosis, next step, mechanism, finding). scope: the key vignette findings; a peer gets a distinct focus such as ruling out each option. expected_output: the chosen letter A-D, its option text and a one-line reason.",
+      "pitfall": "Agents often answer the underlying diagnosis when the question asks for its treatment, mechanism or complication. Canvas rejects a field that states a value ('answer is', 'answer:'), says 'candidate answer' or 'solution steps', or names a Worker tool.",
+      "constraint": "Never name a preferred option or a suspected diagnosis in any field; vignette findings may be restated. Use result_scope task_result for each clinician.",
+      "kind": "communication",
+      "task_types": [
+        "medical_mcq"
+      ],
+      "evidence": [
+        "R2Orch human-authored seed"
+      ],
+      "stats": {
+        "usage_count": 0,
+        "helpful_count": 0,
+        "hurt_count": 0,
+        "last_used_step": -1,
+        "creation_step": 0,
+        "is_seed": true
+      }
+    },
+    "required_tools": [],
+    "excluded_task_types": []
+  },
+  {
+    "card": {
+      "skill_id": "seed_medqa_finish",
+      "name": "MedQA results: settle the letter, then FINISH",
+      "description": "Deciding between revision, a judge and FINISH on MedQA when one or two clinicians have returned option letters.",
+      "trigger": "MedQA results are back and you are choosing between another edit and FINISH.",
+      "plan": "A single clinician with one letter and no open issue, or peers agreeing after revision: FINISH that node. Peers still split: add a layer-1 task_result judge, turn on directed relations from both, let it weigh their reasons against the final sentence, then FINISH the judge.",
+      "pitfall": "Peer revision can flip a correct reader to a confident wrong one, so agreement is evidence, not proof. Summaries should name both letter and option text; they drift apart. Do not loop on a split.",
+      "constraint": "FINISH needs one task_result target that every retained node reaches; nothing is graded until FINISH is accepted.",
+      "kind": "verification",
+      "task_types": [
+        "medical_mcq"
+      ],
+      "evidence": [
+        "R2Orch human-authored seed"
+      ],
+      "stats": {
+        "usage_count": 0,
+        "helpful_count": 0,
+        "hurt_count": 0,
+        "last_used_step": -1,
+        "creation_step": 0,
+        "is_seed": true
+      }
+    },
+    "required_tools": [],
+    "excluded_task_types": []
+  },
+  {
+    "card": {
+      "skill_id": "seed_mbppplus_topology",
+      "name": "MBPP+ graph: implementer, then a tester when edge cases matter",
+      "description": "Graph shape for MBPP+ Python function tasks: one implementer owns the function; a downstream tester runs extra inputs and returns a corrected full function when the spec has edge-case risk.",
+      "trigger": "Building or extending the graph for an MBPP+ task: one Python function that must match a public example assert.",
+      "plan": "Add one task_result implementer. If the spec has edge-case risk (empty or single inputs, negatives, floats, ties, ordering, return container, large inputs), add a task_result tester at layer 1 (SET_LAYER), turn on the directed relation from the implementer, and FINISH the tester after it reruns.",
+      "pitfall": "Two implementers in a peer block often merge into a worse hybrid. A tester whose relation is off writes its own unchecked version. Hidden tests are far stricter than the one public assert.",
+      "constraint": "Workers see the task and its example assert and can execute Python to run tests; the hidden tests are never visible to them.",
+      "kind": "orchestration",
+      "task_types": [
+        "code_function"
+      ],
+      "evidence": [
+        "R2Orch human-authored seed"
+      ],
+      "stats": {
+        "usage_count": 0,
+        "helpful_count": 0,
+        "hurt_count": 0,
+        "last_used_step": -1,
+        "creation_step": 0,
+        "is_seed": true
+      }
+    },
+    "required_tools": [],
+    "excluded_task_types": []
+  },
+  {
+    "card": {
+      "skill_id": "seed_mbppplus_delegation",
+      "name": "MBPP+ delegation: pin the signature and return type",
+      "description": "How to write the four delegation fields for an MBPP+ implementer or tester: exact function name, argument order, return type and edge cases.",
+      "trigger": "Writing SET_PROMPT for an implementer or tester on an MBPP+ task.",
+      "plan": "objective: a Python function with the exact name and argument order of the public example that meets the description. scope: input types and edge cases it implies. expected_output: the complete function in one python code block, returning the type the example expects.",
+      "pitfall": "Hidden tests fail on a renamed function, list instead of tuple, int vs float, mutated inputs, print instead of return, module-level asserts, or brute force on large inputs. Canvas rejects fields that name a Worker tool or say 'solution steps'.",
+      "constraint": "Describe required behavior only; never write code, an algorithm choice or outputs beyond the public example. A tester's expected_output is the full corrected function, result_scope task_result.",
+      "kind": "communication",
+      "task_types": [
+        "code_function"
+      ],
+      "evidence": [
+        "R2Orch human-authored seed"
+      ],
+      "stats": {
+        "usage_count": 0,
+        "helpful_count": 0,
+        "hurt_count": 0,
+        "last_used_step": -1,
+        "creation_step": 0,
+        "is_seed": true
+      }
+    },
+    "required_tools": [],
+    "excluded_task_types": []
+  },
+  {
+    "card": {
+      "skill_id": "seed_mbppplus_finish",
+      "name": "MBPP+ results: trust executed tests, then FINISH",
+      "description": "Deciding between revision and FINISH for MBPP+ code using executed test evidence, and recovering when a tester breaks working code.",
+      "trigger": "An MBPP+ implementer or tester has returned code and you are choosing between revision and FINISH.",
+      "plan": "FINISH the last-layer task_result node when its summary reports the public example passing on its final code. On tool errors or a failing example, revise that node once naming the failing behavior. If a tester broke passing code, delete it and FINISH the implementer.",
+      "pitfall": "A claim of passing without an executed run is not evidence. A tester that rewrites working code from scratch often regresses; scope it to keep the implementation and fix only failing cases.",
+      "constraint": "FINISH submits the target's current code without rerunning it; every retained node must reach the target, so remove a detached tester before finishing an upstream node.",
+      "kind": "verification",
+      "task_types": [
+        "code_function"
+      ],
+      "evidence": [
+        "R2Orch human-authored seed"
+      ],
+      "stats": {
+        "usage_count": 0,
+        "helpful_count": 0,
+        "hurt_count": 0,
+        "last_used_step": -1,
+        "creation_step": 0,
+        "is_seed": true
+      }
+    },
+    "required_tools": [],
+    "excluded_task_types": []
+  },
+  {
+    "card": {
+      "skill_id": "seed_alfworld_topology",
+      "name": "ALFWorld graph: exactly one episode owner",
+      "description": "Graph shape for ALFWorld household tasks: one task_result Agent owns the single environment episode; extra Agents or peer blocks open separate episodes and multiply cost.",
+      "trigger": "Building the graph for an ALFWorld household task (place, clean, heat, cool, examine under a lamp, or two objects).",
+      "plan": "Add one task_result Agent as the episode owner at layer 0 and let it act. Keep the graph to this single node; put any help into the owner's own prompt or RUN_AGENT, not into new Agents.",
+      "pitfall": "Every new Agent starts its own fresh episode; its progress never transfers to the owner. Peer blocks rerun episodes and in past runs pushed tasks over the token budget before any FINISH. A planner adds little: the owner sees the same goal.",
+      "constraint": "Only official environment feedback establishes success, never a Worker's text claim. Each Agent acts through environment steps with a fixed step cap.",
+      "kind": "orchestration",
+      "task_types": [
+        "alfworld"
+      ],
+      "evidence": [
+        "R2Orch human-authored seed"
+      ],
+      "stats": {
+        "usage_count": 0,
+        "helpful_count": 0,
+        "hurt_count": 0,
+        "last_used_step": -1,
+        "creation_step": 0,
+        "is_seed": true
+      }
+    },
+    "required_tools": [],
+    "excluded_task_types": []
+  },
+  {
+    "card": {
+      "skill_id": "seed_alfworld_delegation",
+      "name": "ALFWorld delegation: object, state change, count, destination",
+      "description": "How to write the four delegation fields for the ALFWorld episode owner by restating the goal's object type, required state change, count and destination.",
+      "trigger": "Writing SET_PROMPT for the ALFWorld episode owner.",
+      "plan": "objective: complete the goal as stated, naming the object type, any required state (clean, hot, cool, or examined under a lamp), the count if two, and the destination receptacle. scope: this episode only. expected_output: the official outcome and where each object ended up.",
+      "pitfall": "Owners fail by placing an object without the required state change, using a look-alike object type, placing one of two objects, or looping between the same receptacles. Canvas rejects fields that name a Worker tool.",
+      "constraint": "Use the goal's own words for object and receptacle types; never invent locations, object IDs or command lists. The Worker chooses every environment action.",
+      "kind": "communication",
+      "task_types": [
+        "alfworld"
+      ],
+      "evidence": [
+        "R2Orch human-authored seed"
+      ],
+      "stats": {
+        "usage_count": 0,
+        "helpful_count": 0,
+        "hurt_count": 0,
+        "last_used_step": -1,
+        "creation_step": 0,
+        "is_seed": true
+      }
+    },
+    "required_tools": [],
+    "excluded_task_types": []
+  },
+  {
+    "card": {
+      "skill_id": "seed_alfworld_finish",
+      "name": "ALFWorld results: FINISH on official completion, else continue the owner",
+      "description": "Choosing between FINISH, RUN_AGENT and a prompt revision for the ALFWorld episode owner, and protecting an official success.",
+      "trigger": "The ALFWorld owner has run and you are choosing between RUN_AGENT, a revision and FINISH.",
+      "plan": "If the owner's result_assessment is submit_ready (official completion recorded), FINISH it at once. If it stopped early and Canvas exposes RUN_AGENT for it, RUN_AGENT continues the same episode. Revise its prompt only when the summary shows it misread the goal.",
+      "pitfall": "Extra edits after an official success have lost that success in past runs. Deleting or replacing the owner discards its episode; a new Agent restarts from scratch with less budget left.",
+      "constraint": "FINISH(target) never continues navigation; it records the owner's trusted outcome. When steps or tokens run out, FINISH the owner with that outcome rather than adding Agents.",
+      "kind": "bug-repair",
+      "task_types": [
+        "alfworld"
+      ],
+      "evidence": [
+        "R2Orch human-authored seed"
+      ],
+      "stats": {
+        "usage_count": 0,
+        "helpful_count": 0,
+        "hurt_count": 0,
+        "last_used_step": -1,
+        "creation_step": 0,
+        "is_seed": true
+      }
+    },
+    "required_tools": [],
+    "excluded_task_types": []
+  }
+]
