@@ -15,11 +15,13 @@
 """Vanilla rollout worker with Tunix sampler."""
 
 import dataclasses
+import itertools
 from typing import Any, Optional, Tuple
 
 from flax import nnx
 import jax
 import jaxtyping
+import numpy as np
 from tunix.generate import sampler
 from tunix.rl import common
 from tunix.rl.rollout import base_rollout
@@ -39,6 +41,38 @@ class VanillaRollout(base_rollout.BaseRollout):
         tokenizer,
         sampler.CacheConfig(**dataclasses.asdict(cache_config_or_size)),
     )
+    # Counts generate() calls so that every call gets its own PRNG key.
+    self._generate_calls = itertools.count()
+
+  def _next_seed(self, seed: int | jax.Array | None) -> jax.Array:
+    """Returns a fresh PRNG key for this generate() call.
+
+    The sampler maps `seed=None` to `PRNGKey(0)`, so passing the config seed
+    through unchanged gives every call the same key. Agentic RL calls
+    generate() once per trajectory turn with a single prompt, so all
+    `num_generations` rollouts of a group sampled identically. Folding a
+    per-call counter into the key keeps runs reproducible for a fixed seed
+    while making successive calls differ.
+
+    Args:
+      seed: The seed from the rollout config: an integer (Python, NumPy or JAX
+        scalar), a PRNG key (raw `jax.random.PRNGKey` data or a typed
+        `jax.random.key`), or None (treated as 0).
+
+    Returns:
+      A PRNG key unique to this call.
+    """
+    if seed is None:
+      seed = 0
+    if hasattr(seed, 'dtype') and jax.dtypes.issubdtype(
+        seed.dtype, jax.dtypes.prng_key
+    ):
+      key = seed  # Typed key from jax.random.key().
+    elif np.ndim(seed) == 0:
+      key = jax.random.PRNGKey(seed)  # Integer seed of any scalar type.
+    else:
+      key = seed  # Raw key data from jax.random.PRNGKey().
+    return jax.random.fold_in(key, next(self._generate_calls))
 
   def generate(
       self,
@@ -57,7 +91,7 @@ class VanillaRollout(base_rollout.BaseRollout):
         temperature=rollout_config.temperature,
         top_p=rollout_config.top_p,
         top_k=rollout_config.top_k,
-        seed=rollout_config.seed,  # pyrefly: ignore[bad-argument-type]
+        seed=self._next_seed(rollout_config.seed),
         pad_output=False,
         eos_tokens=rollout_config.eos_tokens,
         return_logprobs=rollout_config.return_logprobs,
