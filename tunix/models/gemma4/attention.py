@@ -315,7 +315,8 @@ class Attention(nnx.Module):
         key_proj = self.k_einsum(x)
         value_proj = key_proj
       else:
-        key_proj, value_proj = self.kv_einsum(x)
+        kv_proj = self.kv_einsum(x)
+        key_proj, value_proj = kv_proj[0], kv_proj[1]
 
       kv_spec = _resolve_sharding_spec(
           self.config.shd_config.act_btnh,
