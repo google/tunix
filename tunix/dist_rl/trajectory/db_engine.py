@@ -38,6 +38,35 @@ class Dialect(enum.StrEnum):
   SQLITE = enum.auto()
 
 
+class PoolKind(enum.StrEnum):
+  """How an engine pools its database connections.
+
+  Running behind an external pooler on PostgreSQL (PgBouncer, or Cloud SQL
+  managed connection pooling) keeps a large fleet of worker processes under the
+  server's `max_connections`. Use `NULL` there, so the external pooler alone
+  decides how many server connections are open. Transaction pooling mode is
+  compatible with the SQL Trajectory Store:
+
+  - Every read and write runs in a short transaction, and the store sets no
+    session state (no `SET`, `LISTEN`, temporary tables, or session locks).
+  - Schema initialization serializes with `pg_advisory_xact_lock`, which is
+    released when its transaction ends, not when the session ends.
+  - The psycopg2 driver interpolates parameters on the client and never creates
+    server-side prepared statements. (psycopg 3 does, after 5 executions of a
+    query; with it, pass `prepare_threshold=None` in the connect args or use a
+    PgBouncer version that supports prepared statements in transaction mode.)
+
+  Attributes:
+    QUEUE: SQLAlchemy's default `QueuePool`, sized by `EngineConfig.pool_size`
+      and `EngineConfig.max_overflow`, with a liveness ping on checkout.
+    NULL: `NullPool`, which opens a connection on each checkout and closes it on
+      return. Use behind an external pooler, which makes connecting cheap.
+  """
+
+  QUEUE = enum.auto()
+  NULL = enum.auto()
+
+
 def _set_sqlite_pragmas(
     dbapi_connection: sqlite3.Connection,
     unused_connection_record: sa.pool.ConnectionPoolEntry,
@@ -80,6 +109,9 @@ class EngineConfig:
     url: Database connection URL (e.g. 'sqlite:///:memory:' or
       'postgresql+psycopg2://user:pass@host/db').
     echo: If True, log SQL queries emitted by the engine.
+    pool_kind: How the engine pools connections; see `PoolKind`. A string value
+      (e.g. "null" from an untyped config) is converted to `PoolKind`. With
+      `PoolKind.NULL` the sizing fields below are ignored.
     pool_size: Number of persistent connections kept open in the pool. Defaults
       to 1 per process to prevent connection exhaustion across distributed
       workers.
@@ -92,9 +124,48 @@ class EngineConfig:
 
   url: str
   echo: bool = False
+  pool_kind: PoolKind = PoolKind.QUEUE
   pool_size: int = 1
   max_overflow: int = 1
   pool_timeout_s: float = 10.0
+
+  def __post_init__(self) -> None:
+    """Normalizes `pool_kind` to `PoolKind` and rejects unknown values.
+
+    Raises:
+      ValueError: If `pool_kind` is not a `PoolKind` value.
+    """
+    try:
+      pool_kind = PoolKind(self.pool_kind)
+    except ValueError:
+      raise ValueError(
+          f"Unsupported pool_kind {self.pool_kind!r}; expected one of"
+          f" {', '.join(repr(kind.value) for kind in PoolKind)}."
+      ) from None
+    object.__setattr__(self, "pool_kind", pool_kind)
+
+
+def _pool_kwargs(config: EngineConfig) -> dict[str, Any]:
+  """Returns the `sa.create_engine` pooling arguments for `config`.
+
+  Args:
+    config: Engine settings whose `pool_kind` selects the pool class.
+
+  Raises:
+    ValueError: If `config.pool_kind` is not a known `PoolKind`.
+  """
+  if config.pool_kind == PoolKind.NULL:
+    # No pre-ping: every checkout opens a fresh connection, so there is no
+    # stale pooled connection to detect.
+    return {"poolclass": sa.pool.NullPool}
+  if config.pool_kind == PoolKind.QUEUE:
+    return {
+        "pool_pre_ping": True,
+        "pool_size": config.pool_size,
+        "max_overflow": config.max_overflow,
+        "pool_timeout": config.pool_timeout_s,
+    }
+  raise ValueError(f"Unsupported pool_kind {config.pool_kind!r}.")
 
 
 def create_trajectory_engine(config: EngineConfig) -> sa.Engine:
@@ -108,7 +179,8 @@ def create_trajectory_engine(config: EngineConfig) -> sa.Engine:
 
   Raises:
     ValueError: If `config.url` is empty/whitespace or specifies an unsupported
-      database dialect.
+      database dialect, or if `config.pool_kind` is `PoolKind.NULL` for an
+      in-memory SQLite URL.
   """
   url = config.url
   if not url or not url.strip():
@@ -125,15 +197,19 @@ def create_trajectory_engine(config: EngineConfig) -> sa.Engine:
         url,
         echo=config.echo,
         json_serializer=_serialize_json,
-        pool_pre_ping=True,
-        pool_size=config.pool_size,
-        max_overflow=config.max_overflow,
-        pool_timeout=config.pool_timeout_s,
+        **_pool_kwargs(config),
     )
 
   if backend == Dialect.SQLITE:
     is_in_memory = _is_in_memory_sqlite(parsed_url)
     if is_in_memory:
+      if config.pool_kind == PoolKind.NULL:
+        # The database lives only as long as its one connection, so closing
+        # each connection on return would discard it.
+        raise ValueError(
+            "PoolKind.NULL is not supported for in-memory SQLite, which keeps"
+            " its data in a single shared connection."
+        )
       engine = sa.create_engine(
           url,
           echo=config.echo,
@@ -146,11 +222,8 @@ def create_trajectory_engine(config: EngineConfig) -> sa.Engine:
           url,
           echo=config.echo,
           json_serializer=_serialize_json,
-          pool_pre_ping=True,
-          pool_size=config.pool_size,
-          max_overflow=config.max_overflow,
-          pool_timeout=config.pool_timeout_s,
           connect_args={"check_same_thread": False},
+          **_pool_kwargs(config),
       )
     sa.event.listen(engine, "connect", _set_sqlite_pragmas)
     if not is_in_memory:

@@ -117,6 +117,99 @@ class DbEngineTest(parameterized.TestCase):
           pool_timeout=3.0,
       )
 
+  def test_create_trajectory_engine_postgresql_null_pool_disables_pooling(
+      self,
+  ) -> None:
+    url = "postgresql+psycopg2://user:pass@pgbouncer:6432/testdb"
+    with mock.patch.object(
+        db_engine.sa, "create_engine", autospec=True, spec_set=True
+    ) as mock_create:
+      db_engine.create_trajectory_engine(
+          db_engine.EngineConfig(
+              url=url, pool_kind=db_engine.PoolKind.NULL, pool_size=10
+          )
+      )
+      # Sizing and pre-ping arguments are dropped: NullPool rejects them.
+      mock_create.assert_called_once_with(
+          url,
+          echo=False,
+          json_serializer=db_engine._serialize_json,
+          poolclass=sa.pool.NullPool,
+      )
+
+  def test_create_trajectory_engine_file_sqlite_null_pool_round_trips(
+      self,
+  ) -> None:
+    db_path = os.path.join(self.create_tempdir().full_path, "null_pool.db")
+    engine = db_engine.create_trajectory_engine(
+        db_engine.EngineConfig(
+            url=f"sqlite:///{db_path}", pool_kind=db_engine.PoolKind.NULL
+        )
+    )
+    self.addCleanup(engine.dispose)
+
+    with engine.begin() as conn:
+      conn.execute(sa.text("CREATE TABLE items (item_id TEXT PRIMARY KEY)"))
+      conn.execute(sa.text("INSERT INTO items VALUES ('row1')"))
+    with engine.connect() as conn:
+      rows = conn.execute(sa.text("SELECT item_id FROM items")).scalars().all()
+
+    self.assertIsInstance(engine.pool, sa.pool.NullPool)
+    self.assertEqual(rows, ["row1"])
+    self.assertEqual(_query_pragma(engine, "foreign_keys"), 1)
+    self.assertEqual(str(_query_pragma(engine, "journal_mode")).lower(), "wal")
+
+  def test_create_trajectory_engine_in_memory_sqlite_null_pool_raises(
+      self,
+  ) -> None:
+    with self.assertRaisesRegex(ValueError, r"not supported for in-memory"):
+      db_engine.create_trajectory_engine(
+          db_engine.EngineConfig(
+              url="sqlite:///:memory:", pool_kind=db_engine.PoolKind.NULL
+          )
+      )
+
+  def test_engine_config_converts_pool_kind_string(self) -> None:
+    # Simulates an untyped config value, e.g. parsed from YAML.
+    untyped_pool_kind: Any = "null"
+    config = db_engine.EngineConfig(
+        url="sqlite:///:memory:", pool_kind=untyped_pool_kind
+    )
+
+    self.assertIs(config.pool_kind, db_engine.PoolKind.NULL)
+    self.assertEqual(
+        config,
+        db_engine.EngineConfig(
+            url="sqlite:///:memory:", pool_kind=db_engine.PoolKind.NULL
+        ),
+    )
+
+  def test_engine_config_unknown_pool_kind_raises(self) -> None:
+    bad_pool_kinds: tuple[Any, ...] = ("NULL", "none", "", None)
+    for pool_kind in bad_pool_kinds:
+      with self.subTest(pool_kind=pool_kind):
+        with self.assertRaisesRegex(ValueError, r"Unsupported pool_kind"):
+          db_engine.EngineConfig(url="sqlite:///:memory:", pool_kind=pool_kind)
+
+  def test_acquire_engine_shared_different_pool_kind_returns_distinct_engines(
+      self,
+  ) -> None:
+    db_path = os.path.join(self.create_tempdir().full_path, "shared.db")
+    url = f"sqlite:///{db_path}"
+
+    queue_handle = db_engine.acquire_engine(
+        db_engine.EngineConfig(url=url), shared=True
+    )
+    self.addCleanup(queue_handle.release)
+    null_handle = db_engine.acquire_engine(
+        db_engine.EngineConfig(url=url, pool_kind=db_engine.PoolKind.NULL),
+        shared=True,
+    )
+    self.addCleanup(null_handle.release)
+
+    self.assertIsNot(queue_handle.engine, null_handle.engine)
+    self.assertIsInstance(null_handle.engine.pool, sa.pool.NullPool)
+
   def test_serialize_json_strips_null_byte_escapes(self) -> None:
     engine = db_engine.create_trajectory_engine(
         db_engine.EngineConfig(url="sqlite:///:memory:")
@@ -164,6 +257,7 @@ class DbEngineTest(parameterized.TestCase):
   def test_engine_config_defaults_match_single_writer_budget(self) -> None:
     config = db_engine.EngineConfig(url="sqlite:///:memory:")
 
+    self.assertEqual(config.pool_kind, db_engine.PoolKind.QUEUE)
     self.assertEqual(config.pool_size, 1)
     self.assertEqual(config.max_overflow, 1)
     self.assertEqual(config.pool_timeout_s, 10.0)
