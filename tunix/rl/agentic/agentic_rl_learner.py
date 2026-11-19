@@ -32,10 +32,10 @@ from typing import Any, AsyncIterator, Callable, Dict, Generic, Iterable, Iterat
 from absl import logging
 import flax
 import jax
+from jax import typing
 import jax.numpy as jnp
 import numpy as np
 from orbax.checkpoint import v1 as ocp
-from tunix.common import datatypes as common_datatypes
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import common
 from tunix.perf.experimental import constants as perf_constants
@@ -60,7 +60,7 @@ from tunix.rl.queue import data_queue as queue_lib
 from tunix.sft import checkpoint_options
 from tunix.sft import utils as sft_utils
 
-ArrayLike: TypeAlias = common_datatypes.ArrayLike
+ArrayLike = typing.ArrayLike
 TrainingInputT = Dict[str, List[str] | ArrayLike]
 RewardFn = Callable[..., List[float]]
 MetricFn = Callable[..., rl_engine_lib.MetricsT]
@@ -506,8 +506,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         if key not in buffer:
           buffer[key] = []
 
-        if isinstance(values, common_datatypes.TensorLike):
-          buffer[key].extend(list(np.asarray(values).flatten()))
+        if isinstance(values, (np.ndarray, jax.Array)):
+          buffer[key].extend(list(values.flatten()))
         elif isinstance(values, (list, tuple)):
           buffer[key].extend(values)
         else:

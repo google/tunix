@@ -14,10 +14,6 @@
 
 """Tests for Sampler requests and responses in rollout/sampler.py."""
 
-import importlib
-import sys
-from unittest import mock
-
 from absl.testing import absltest
 import cloudpickle
 import numpy as np
@@ -91,8 +87,6 @@ class SamplerTest(absltest.TestCase):
     self.assertEqual(restored.prompt, original.prompt)
     self.assertEqual(restored.metadata, original.metadata)
     self.assertIsNotNone(restored.sampling_params)
-    assert restored.sampling_params is not None
-    assert original.sampling_params is not None
     self.assertEqual(
         restored.sampling_params.max_tokens, original.sampling_params.max_tokens
     )
@@ -114,11 +108,7 @@ class SamplerTest(absltest.TestCase):
     np.testing.assert_array_equal(
         restored.prompt_token_ids, original.prompt_token_ids
     )
-    assert restored.logprobs is not None
-    assert original.logprobs is not None
     np.testing.assert_allclose(restored.logprobs, original.logprobs)
-    assert restored.routed_experts is not None
-    assert original.routed_experts is not None
     np.testing.assert_array_equal(
         restored.routed_experts, original.routed_experts
     )
@@ -131,34 +121,8 @@ class SamplerTest(absltest.TestCase):
     response = base_sampler_lib.SamplingResponse(
         routed_experts=routed_experts
     )
-    assert response.routed_experts is not None
     self.assertEqual(response.routed_experts.shape, (2, 4, 10, 2))
     np.testing.assert_array_equal(response.routed_experts, routed_experts)
-
-  def test_module_imports_without_ml_frameworks(self):
-    orig = sys.modules["tunix.dist_rl.rollout.sampler"]
-    roots = (
-        "jax",
-        "flax",
-        "optax",
-        "torch",
-        "jaxtyping",
-        "vllm",
-        "pathwaysutils",
-        "tpu_sync",
-    )
-    prefixes = tuple(f"{r}." for r in roots)
-    blocked = dict.fromkeys(
-        (*roots, *(k for k in sys.modules if k.startswith(prefixes))),
-        None,
-    )
-    try:
-      with mock.patch.dict(sys.modules, blocked):
-        sys.modules.pop("tunix.dist_rl.rollout.sampler", None)
-        reloaded = importlib.import_module("tunix.dist_rl.rollout.sampler")
-        self.assertIsNone(reloaded.SamplingResponse().routed_experts)
-    finally:
-      setattr(sys.modules["tunix.dist_rl.rollout"], "sampler", orig)
 
   def test_sampling_response_enforces_shapes(self):
     with self.assertRaisesRegex(

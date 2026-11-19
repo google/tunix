@@ -16,9 +16,12 @@
 
 import dataclasses
 from typing import Any, Protocol, Sequence, runtime_checkable
+from jax import typing
 import numpy as np
 
 from tunix.dist_rl.common import datatypes
+
+ArrayLike = typing.ArrayLike
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -123,7 +126,7 @@ class SamplingResponse(datatypes.Response):
   logprobs: np.ndarray | None = None
   logits: np.ndarray | None = None
   finish_reason: str = "stop"
-  routed_experts: np.ndarray | None = None
+  routed_experts: ArrayLike | None = None
 
   def __post_init__(self):
     if (

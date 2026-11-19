@@ -20,12 +20,12 @@ import abc
 from concurrent import futures
 import itertools
 import math
-from typing import Any, Callable, Dict, Generic, Iterable, Iterator, List, Sequence, TypeAlias, TypeVar
+from typing import Any, Callable, Dict, Generic, Iterable, Iterator, List, Sequence, TypeVar
 
 from absl import logging
 import jax
+from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
-from tunix.common import datatypes
 from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import common
@@ -41,7 +41,6 @@ from tunix.utils import compat
 ABC = abc.ABC
 abstractmethod = abc.abstractmethod
 
-ArrayLike: TypeAlias = datatypes.ArrayLike
 TrainingInputT = Dict[str, List[str] | ArrayLike]
 
 # prompts, completions, **kargs -> rewards
@@ -546,8 +545,8 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         if key not in buffer:
           buffer[key] = []
 
-        if isinstance(values, datatypes.TensorLike):
-          buffer[key].extend(list(np.asarray(values).flatten()))
+        if isinstance(values, (np.ndarray, jax.Array)):
+          buffer[key].extend(list(values.flatten()))
         elif isinstance(values, (list, tuple)):
           buffer[key].extend(values)
         else:
