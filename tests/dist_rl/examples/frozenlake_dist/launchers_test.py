@@ -22,7 +22,7 @@ from __future__ import annotations
 import pathlib
 
 from absl.testing import absltest
-from tunix.cli import config as cli_config
+from tunix.cli import optimizer_jax
 from tunix.dist_rl.launch.common import launcher_testing
 from tunix.dist_rl.launch.common import resolve_config
 from tunix.dist_rl.launch.nodes import orchestrator
@@ -77,7 +77,7 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
     rl_train = hp.config_mapping("rl_training_config")
     optimizer = rl_train["actor_optimizer_config"]
     # A constant learning rate, not a schedule.
-    self.assertEqual(cli_config.create_learning_rate(optimizer), 1e-6)
+    self.assertEqual(optimizer_jax.create_learning_rate(optimizer), 1e-6)
     self.assertEqual((optimizer["b1"], optimizer["b2"]), (0.9, 0.95))
     self.assertEqual(optimizer["weight_decay"], 0.0)
     self.assertEqual(optimizer["chain_kwargs"], {"max_norm": 100.0})

@@ -28,6 +28,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from tunix.cli import config
+from tunix.cli import optimizer_jax
 from tunix.cli.utils import data as data_lib
 from tunix.cli.utils import model as model_lib
 from tunix.examples.data import math_dataset as example_data
@@ -551,12 +552,18 @@ class BasePipeline(abc.ABC, config.HyperParameters):
 
     base_config = self._config_mapping(base_key)
     if base_config.get("actor_optimizer_config"):
-      constructed_rl_training_config["actor_optimizer"] = self.create_optimizer(
-          base_key, "actor_optimizer_config"
+      constructed_rl_training_config["actor_optimizer"] = (
+          optimizer_jax.create_optimizer(
+              base_config["actor_optimizer_config"],
+              f"{base_key} -> actor_optimizer_config",
+          )
       )
     if base_config.get("critic_optimizer_config"):
       constructed_rl_training_config["critic_optimizer"] = (
-          self.create_optimizer(base_key, "critic_optimizer_config")
+          optimizer_jax.create_optimizer(
+              base_config["critic_optimizer_config"],
+              f"{base_key} -> critic_optimizer_config",
+          )
       )
 
     return rl_engine_lib.RLTrainingConfig(**constructed_rl_training_config)

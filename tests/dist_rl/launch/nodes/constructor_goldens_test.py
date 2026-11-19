@@ -73,7 +73,7 @@ import jax
 from jax.experimental import mesh_utils
 from orbax import checkpoint as ocp
 import transformers
-from tunix.cli import config as cli_config
+from tunix.cli import optimizer_jax
 from tunix.cli.utils import data as data_lib
 from tunix.cli.utils import model as model_utils
 from tunix.dist_rl.common import datatypes as dist_datatypes
@@ -534,7 +534,7 @@ def _run_trainer(
 ) -> None:
   """Runs the trainer's `main` up to serving, then its trainer factory."""
   _patch_model_loading(recorder)
-  recorder.patch(cli_config, "create_optimizer")
+  recorder.patch(optimizer_jax, "create_optimizer")
   recorder.patch(model_utils, "apply_lora_to_model")
   recorder.patch(peft_trainer_v2, "PeftTrainer")
   recorder.patch(maxtext_utils, "build_maxtext_config")

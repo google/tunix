@@ -21,6 +21,7 @@ from absl import logging
 from flax import nnx
 import jax
 from tunix.cli import config
+from tunix.cli import optimizer_jax
 from tunix.cli.utils import model as model_lib
 from tunix.examples.data import translation_dataset as data_lib
 from tunix.sft import peft_trainer
@@ -52,7 +53,9 @@ class PeftPipeline(config.HyperParameters):
     tokenizer = model_lib.create_tokenizer(
         self.config['tokenizer_config'], tokenizer_path
     )
-    optimizer = self.create_optimizer('optimizer_config')
+    optimizer = optimizer_jax.create_optimizer(
+        self.config['optimizer_config'], 'optimizer_config'
+    )
     trainer = peft_trainer.PeftTrainer(
         model,
         optimizer,

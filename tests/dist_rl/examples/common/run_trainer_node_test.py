@@ -792,7 +792,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertEqual(kwargs["extra_flags"], [])
 
   def test_maxtext_adamw_options_follow_optimizer_flags(self):
-    # Names are case-insensitive, as cli.config.create_optimizer reads them.
+    # Names are case-insensitive, as optimizer_jax.create_optimizer reads them.
     args = run_trainer_node._parse_args([
         "--optimizer_opt_type=AdamW",
         "--optimizer_b1=0.8",
@@ -1408,9 +1408,9 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         "--optimizer_opt_chain_type=clip_by_global_norm",
         "--optimizer_chain_kwargs={'max_norm': 1.0}",
     ])
-    create_optimizer = run_trainer_node.cli_config.create_optimizer
+    create_optimizer = run_trainer_node.optimizer_jax.create_optimizer
     with mock.patch.object(
-        run_trainer_node.cli_config,
+        run_trainer_node.optimizer_jax,
         "create_optimizer",
         side_effect=create_optimizer,
     ) as mock_create:
@@ -1428,9 +1428,9 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     args = run_trainer_node._parse_args(  # pylint: disable=protected-access
         ["--learning_rate=1e-6"]
     )
-    create_optimizer = run_trainer_node.cli_config.create_optimizer
+    create_optimizer = run_trainer_node.optimizer_jax.create_optimizer
     with mock.patch.object(
-        run_trainer_node.cli_config,
+        run_trainer_node.optimizer_jax,
         "create_optimizer",
         side_effect=create_optimizer,
     ) as mock_create:
