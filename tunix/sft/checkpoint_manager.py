@@ -243,6 +243,7 @@ class CheckpointManager:
       save_only_lora_params: bool = False,
       force: bool = False,
       custom_metadata: Mapping[str, Any] | None = None,
+      param_type: Any | None = None,
   ) -> bool:
     """Saves the params for the given step.
 
@@ -255,6 +256,7 @@ class CheckpointManager:
       force: Whether to save the checkpoint regardless of the save decision
         policy.
       custom_metadata: Custom metadata to save with the checkpoint.
+      param_type: Specific parameter variable type to save (e.g. BEFTParam, LoRAParam).
 
     Returns:
       Whether the checkpoint save operation was successful if synchronous,
@@ -262,7 +264,9 @@ class CheckpointManager:
     """
     if self._checkpointer is None:
       return False
-    if save_only_lora_params:
+    if param_type is not None:
+      params = nnx.state(model, param_type)
+    elif save_only_lora_params:
       params = nnx.state(model, nnx.LoRAParam)
     else:
       params = nnx.state(model)
@@ -290,6 +294,7 @@ class CheckpointManager:
       optimizer: nnx.Optimizer | None = None,
       step: int | None = None,
       restore_only_lora_params: bool = False,
+      param_type: Any | None = None,
   ) -> tuple[int, Any]:
     """Restores the params from the latest checkpoint if available and updates the model provided.
 
@@ -301,6 +306,7 @@ class CheckpointManager:
       step: The step to restore the params from. If None, the latest step will
         be used.
       restore_only_lora_params: Whether to restore only the LoRA params.
+      param_type: Specific parameter variable type to restore (e.g. BEFTParam, LoRAParam).
 
     Returns:
       A tuple (step, custom_metadata), where step is the step of the restored
@@ -320,7 +326,11 @@ class CheckpointManager:
 
     metadata = self._checkpointer.checkpointables_metadata(step)
 
-    if restore_only_lora_params:
+    if param_type is not None:
+      model_params_state = nnx.state(model, param_type)
+      load_ctx = ocp.Context(self._context)
+      load_ctx.pytree.loading.partial_load = True
+    elif restore_only_lora_params:
       model_params_state = nnx.state(model, nnx.LoRAParam)
       # Partial (LoRA) restore is the one path that overrides the persistent
       # context to enable partial loading.
