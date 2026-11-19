@@ -1,12 +1,19 @@
 <!-- DO NOT REMOVE! Placeholder for TOC. -->
 
 # Metrics
-Tunix provides a comprehensive observability stack for training LLMs. It
-automatically collects a rich set of system and model performance metrics
-out-of-the-box, covering everything from basic loss and perplexity to advanced
-RL-specific signals. Furthermore, Tunix offers a flexible, protocol-based
-logging system that allows you to seamlessly integrate with your preferred
-logging service or library.
+Tunix provides a comprehensive observability stack for training LLMs,
+encompassing everything from basic training metrics to detailed execution
+traces. This section is composed of three main pillars:
+
+*   **[Collected Metrics](#collected-metrics)**: Describes a rich
+    set of system, model, and RL-specific performance metrics out of the box.
+*   **[Metric Loggers](#metric-loggers)**: Describes a flexible,
+    protocol-based logging system that allows you to seamlessly integrate with
+    your preferred logging service (e.g., TensorBoard, Wandb, CLU) or create
+    custom backends.
+*   **[Performance Metric Tracing](#performance-metric-tracing)**: Describes a
+    built-in, lightweight tracing system that generates detailed execution
+    timelines for deep performance analysis and visualization in Perfetto.
 
 ## Collected Metrics
 
@@ -15,50 +22,121 @@ monitor performance, convergence, and resource utilization.
 
 ### Common Metrics (SFT & RL)
 
-These metrics are collected for both Supervised Fine-Tuning (SFT) and Reinforcement Learning (RL) jobs:
+`MetricsLogger` records scalar events using the format
+`<prefix>/<mode>/<metric_name>`, where `<mode>` is `train` or `eval` and
+`<prefix>` defaults to `""` in standalone SFT (e.g., `/train/loss` unless
+`TrainingConfig.metrics_prefix` is set) and `"actor"` / `"critic"` in RL
+trainers (e.g., `actor/train/loss`):
 
-*   **`loss`**: The training loss for the current step.
-*   **`perplexity`**: The perplexity of the model on the training batch (exp(loss)).
-*   **`learning_rate`**: The current learning rate from the optimizer.
-*   **`step_time_sec`**: The time taken to execute a single training step (in seconds).
-*   **`steps_per_sec`**: The training speed, measured in steps per second.
-*   **`tflops_per_step`**: The estimated Trillion Floating Point Operations (TFLOPs) performed per step (if supported by the hardware/backend).
+*   **`<prefix>/<mode>/loss`**: The training or evaluation loss for the current
+    step.
+*   **`<prefix>/<mode>/perplexity`**: The perplexity of the model on the batch
+    (`exp(loss)`).
+*   **`<prefix>/<mode>/learning_rate`**: The current learning rate extracted
+    from the optimizer state (logged when the optimizer is wrapped with
+    `optax.inject_hyperparams`).
+*   **`<prefix>/<mode>/grad_norm`**: The global gradient norm computed during
+    `train_step` (`train` mode).
+
+### DPO & ORPO-Specific Metrics
+
+For Direct Preference Optimization (DPO) and Odds Ratio Preference Optimization
+(ORPO) training, Tunix collects preference-specific alignment and loss metrics
+under `<prefix>/<mode>/<metric_name>` (`<mode>` is `train` or `eval`):
+
+*   **`rewards/<mode>/chosen`**: The average implicit reward for the chosen responses (calculated using policy and reference log probs for DPO, or using length-averaged policy log probs for ORPO).
+*   **`rewards/<mode>/rejected`**: The average implicit reward for the rejected responses.
+*   **`rewards/<mode>/margin`**: The difference between chosen and rejected rewards (`rewards/chosen - rewards/rejected`). A positive margin indicates the model prefers the chosen responses.
+*   **`rewards/<mode>/accuracy`**: The frequency with which the chosen response has a higher reward than the rejected response (should approach 1.0 as training converges).
+*   **`log_probs/<mode>/chosen`**: The average log probability of the chosen responses under the policy model.
+*   **`log_probs/<mode>/rejected`**: The average log probability of the rejected responses under the policy model.
+*   **`<prefix>/<mode>/odds_ratio`** *(ORPO only)*: The average odds ratio between the chosen and rejected responses.
+*   **`<prefix>/<mode>/sft_loss`** *(ORPO only)*: The supervised fine-tuning loss component (NLL) of the ORPO loss.
+*   **`<prefix>/<mode>/or_loss`** *(ORPO only)*: The odds ratio preference loss component of the ORPO loss.
 
 ### RL-Specific Metrics (PPO/GRPO)
 
-For Reinforcement Learning jobs, Tunix collects additional metrics related to the
-RL algorithm (e.g., PPO), reward modeling, and generation.
+For Reinforcement Learning jobs, `RLEngine` logs buffered scalar metrics using
+the first `/` segment as the category prefix and inserting `<mode>` (`train` or
+`eval`): `<category>/<mode>/<name>` (metrics without a `/` use
+`global/<mode>/<name>`).
 
 #### Rewards & Scores
-*   **`rewards/sum`**: The sum of rewards for a trajectory.
-*   **`rewards/mean`**, **`rewards/max`**, **`rewards/min`**: Statistics of the rewards across the batch.
-*   **`score/mean`**, **`score/max`**, **`score/min`**: Statistics of the raw scores from the reward model (before any algorithm-specific modifications like KL penalty).
-*   **`reward_kl_penalty`**: The KL divergence penalty applied to the reward (if applicable).
-*   **`rewards/<reward_fn_name>`**: If using multiple reward functions, individual reward components are logged by name.
 
-#### Policy & Value (PPO)
-*   **`advantages/mean`**, **`advantages/max`**, **`advantages/min`**: Statistics of the advantages.
-*   **`returns/mean`**, **`returns/max`**, **`returns/min`**: Statistics of the returns.
-*   **`values/mean`**, **`values/max`**, **`values/min`**: Statistics of the value function estimates.
-*   **`pg_clipfrac`**: The fraction of the batch where the policy gradient was clipped.
-*   **`vf_clipfrac`**: The fraction of the batch where the value function update was clipped.
-*   **`loss/entropy`**: The entropy of the policy (if entropy regularization is enabled).
+*   **`rewards/<mode>/mean`**, **`rewards/<mode>/std`**,
+    **`rewards/<mode>/max`**, **`rewards/<mode>/min`**,
+    **`rewards/<mode>/sum`**: Statistics of the per-trajectory total reward over
+    the step's scored trajectories (`rewards/<mode>/sum` is the step total; PPO
+    also logs KL-adjusted sequence totals under
+    `rewards/<mode>/reward/{mean,max,min}`). Trajectories whose total reward is
+    not finite (for example a `NaN` environment reward) are excluded from
+    training and from these statistics.
+*   **`rewards/<mode>/nonfinite_frac`**: Fraction of scored trajectories
+    excluded because their total reward is not finite.
+*   **`rewards/<mode>/score/mean`**, **`rewards/<mode>/score/max`**,
+    **`rewards/<mode>/score/min`**: Statistics of the raw scores from the reward
+    model or reward functions (before algorithm-specific modifications like KL
+    penalty).
+*   **`rewards/<mode>/reward_kl_penalty`**: The KL divergence penalty applied to
+    the reward (if applicable in PPO).
+*   **`rewards/<mode>/<reward_fn_name>`**: If using multiple reward functions,
+    individual reward components are logged by name (mean over trajectories
+    with a finite total, skipping `NaN` scores). Reward functions may not be
+    named after the summary metrics above.
+*   **`rewards/<mode>/env`**: When `reward_mode="env"` is combined with
+    additional `reward_fns`, the environment trajectory reward component is
+    logged alongside each `rewards/<mode>/<reward_fn_name>` (omitted when
+    `reward_fns` is empty so pure environment rewards are not duplicated under
+    `rewards/*`).
+
+#### Policy & Value (GRPO & PPO)
+
+*   **`advantages/<mode>/mean`**, **`advantages/<mode>/max`**,
+    **`advantages/<mode>/min`**: Statistics of the advantages.
+*   **`advantages/<mode>/returns/mean`**, **`advantages/<mode>/returns/max`**,
+    **`advantages/<mode>/returns/min`** *(PPO)*: Statistics of the GAE returns.
+*   **`advantages/<mode>/old_values/mean`**,
+    **`advantages/<mode>/old_values/max`**,
+    **`advantages/<mode>/old_values/min`** *(PPO)*: Statistics of the value
+    function estimates from rollout/inference.
+*   **`actor/<mode>/kl`** *(GRPO)*: Mean KL divergence between the actor and
+    reference policies.
+*   **`actor/<mode>/pg_clipfrac`**: The fraction of the batch where the policy
+    gradient ratio was clipped.
+*   **`critic/<mode>/vf_clipfrac`** and **`critic/<mode>/vpred_mean`** *(PPO)*:
+    Critic value clipping fraction and mean predicted value.
+*   **`loss/<mode>/entropy`** *(PPO)*: The entropy of the policy (when
+    `entropy_coef > 0`).
 
 #### Generation & Data
-*   **`prompts`**: The input prompts used for generation.
-*   **`completions`**: The text completions generated by the model.
-*   **`completions/mean_length`**, **`completions/max_length`**, **`completions/min_length`**: Statistics on the length of generated completions.
-*   **`trajectory_ids`**: Unique identifiers for the trajectories.
-*   **`actor_dequeue_time`**: Time spent waiting for data from the rollout workers (if async rollout is enabled).
+
+*   **`completions/<mode>/mean_length`**, **`completions/<mode>/max_length`**,
+    **`completions/<mode>/min_length`** *(GRPO)*: Statistics on the token length
+    of generated completions.
+*   **`generation/<mode>/completions/mean_length`**,
+    **`generation/<mode>/completions/max_length`**,
+    **`generation/<mode>/completions/min_length`** *(PPO & Agentic GRPO)*:
+    Statistics on the token length of generated completions.
+*   **`global/<mode>/actor_dequeue_time`**: Time spent waiting to dequeue
+    rollout batches when asynchronous rollout is enabled.
+
+> **Note:** String fields buffered during reward evaluation (such as `prompts`,
+> `completions`, and `trajectory_ids`) are intentionally skipped by scalar
+> `MetricsLogger` backends (`RLEngine._log_metrics`). To persist full text
+> prompts, responses, and rewards per episode, configure `log_dir` to use
+> `AsyncTrajectoryLogger`.
 
 ## Metric Loggers
 
 Tunix provides a flexible, protocol-based logging system that allows you to
 integrate any logging service or library.
 
-The primary interface for logging is the `MetricsLogger`. It is configured using `MetricsLoggerOptions`.
-Below is an example of how to configure the `MetricsLogger`. **Note**: The exact fields that need to be configured depend on the backends, which typically default based on the execution environment. See [Logging Backends Supported](#logging-backends-supported) for details on backend-specific configurations.
-
+The primary interface for logging is the `MetricsLogger`. It is configured
+using `MetricsLoggerOptions`. Below is an example of how to configure the
+`MetricsLogger`. **Note**: The exact fields that need to be configured depend
+on the backend, which typically defaults based on the execution environment. See
+[Logging Backends Supported](#logging-backends-supported) for details on
+backend-specific configurations.
 
 ```python
 from tunix.sft import metrics_logger
@@ -71,10 +149,14 @@ options = metrics_logger.MetricsLoggerOptions(
 logger = metrics_logger.MetricsLogger(metrics_logger_options=options)
 ```
 
+With the above, agentic_grpo_learner will by default start an async trajectory
+logger which logs the trajectories including prompts, responses, etc. to the
+specified `log_dir`.
+
 ### Enabling Metrics in Jobs
 
-Once you have your `MetricsLoggerOptions` configured, you can pass it to your SFT
-or RL job via the training configuration.
+Once you have your `MetricsLoggerOptions` configured, you can pass it to your
+SFT or RL job via the training configuration.
 
 #### Supervised Fine-Tuning (SFT)
 
@@ -104,10 +186,11 @@ trainer = peft_trainer.PeftTrainer(
 
 #### Reinforcement Learning (RL)
 
-For RL, pass the `metrics_logging_options` to the `RLTrainingConfig`, which is then used in `ClusterConfig`.
+For RL, pass the `metrics_logging_options` to the `RLTrainingConfig`, which is
+then used in `ClusterConfig`.
 
 ```python
-from tunix.rl import rl_cluster
+from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.sft import metrics_logger
 
 options = metrics_logger.MetricsLoggerOptions(
@@ -115,20 +198,20 @@ options = metrics_logger.MetricsLoggerOptions(
     project_name="my-rl-project",
 )
 
-training_config = rl_cluster.RLTrainingConfig(
+training_config = rl_engine_lib.RLTrainingConfig(
     actor_optimizer=optimizer,
     metrics_logging_options=options,
     # ... other configurations
 )
 
-cluster_config = rl_cluster.ClusterConfig(
+cluster_config = rl_engine_lib.ClusterConfig(
     role_to_mesh=role_to_mesh,
     training_config=training_config,
     rollout_config=rollout_config,
     # ... other configurations
 )
 
-cluster = rl_cluster.RLCluster(
+engine = rl_engine_lib.RLEngine(
     actor=actor_model,
     tokenizer=tokenizer,
     cluster_config=cluster_config,
@@ -137,20 +220,22 @@ cluster = rl_cluster.RLCluster(
 
 ### Logging Backends Supported
 
-Tunix supports several logging backends out of the box, powered by `metrax` [link](https://github.com/google/metrax/ ). The
-default backend selection depends on the execution environment.
+Tunix supports several logging backends out of the box, powered by `metrax`
+[link](https://github.com/google/metrax/). The default backend selection
+depends on the execution environment.
 
 #### Wandb
 
 [Weights & Biases](https://wandb.ai/) is a supported backend for experiment tracking. ([Backend Code](https://github.com/google/metrax/blob/main/src/metrax/logging/wandb_backend.py))
 
-*   **Availability**: *Enabled by default* in external environments (if `wandb` is installed).
+*   **Availability**: *Enabled by default* in external environments (if `wandb`
+    is installed).
 *   **Configuration**:
     *   `project_name`: Sets the Wandb project name (default: "tunix").
     *   `run_name`: Sets the specific run name. If not provided, it defaults to
         a timestamp (e.g., `2025-01-14_08-40-01`). **Note:** Wandb distinguishes
         between a run name and a run id. Runs with the same name are tracked as
-        separate entities differentiated by thier run id.
+        separate entities differentiated by their run id.
 
 #### TensorBoard
 
@@ -161,6 +246,13 @@ default backend selection depends on the execution environment.
     *   `log_dir`: Directory where event files are written.
     *   `flush_every_n_steps`: Frequency of flushing logs to disk (default: 100).
 
+#### Google Cloud ML Diagnostics
+
+[Google Cloud ML Diagnostics](https://github.com/AI-Hypercomputer/google-cloud-mldiagnostics)
+(`tunix.rl.metrics.mldiag_backend.MLDiagScalarBackend`) streams RL training and
+evaluation scalars to Google Cloud Logging alongside TensorBoard. See
+[RL Monitoring and Profiling with Google Cloud ML Diagnostics](https://github.com/google/tunix/blob/main/docs/ml_diagnostics.md)
+for setup and per-role profiling instructions.
 ### Custom metric logger
 
 You can integrate any logging service by creating a custom backend that conforms
@@ -168,9 +260,9 @@ to the `metrax.logging.LoggingBackend` protocol.
 
 #### 1. The Protocol
 
-Your custom backend class need only needs to implement `log_scalar` and `close`.
-Explicit inheritance from a base class is not required since Metrax uses Python's
-structural typing (duck typing).
+Your custom backend class only needs to implement `log_scalar` and `close`.
+Explicit inheritance from a base class is not required since Metrax uses
+Python's structural typing (duck typing).
 
 ```python
 from typing import Protocol
@@ -207,16 +299,26 @@ class SimplePrintBackend:
 
 #### 3. Using Your Custom Backend
 
-To use your custom backend, you must pass a **factory** (a callable that returns an instance) to `MetricsLoggerOptions`. This ensures configuration objects remain serializable and safe to copy.
+To use your custom backend, pass a list of **factories** (callables that each
+return a `LoggingBackend` instance) under
+`backend_kwargs={"custom_backend": [...]}` in `MetricsLoggerOptions`. This
+ensures configuration objects remain serializable and safe to copy.
+
+> **Note:** Providing `backend_kwargs={"custom_backend": [...]}` overrides the
+> default TensorBoard and Weights & Biases backends. Include
+> `functools.partial(metrics_logger.TensorboardBackend, log_dir=...)` or
+> `metrics_logger.WandbBackend` in the `"custom_backend"` list if you want to
+> keep them active alongside your custom backend.
 
 ##### Case A: Simple Backend (No Arguments)
 
-If your backend class requires no arguments in its `__init__`, you can simply pass the class itself.
+If your backend class requires no arguments in its `__init__`, you can simply
+pass the class itself.
 
 ```python
 options = metrics_logger.MetricsLoggerOptions(
     log_dir="/tmp/logs",
-    backend_factories=[SimplePrintBackend],
+    backend_kwargs={"custom_backend": [SimplePrintBackend]},
 )
 
 logger = metrics_logger.MetricsLogger(metrics_logger_options=options)
@@ -224,7 +326,8 @@ logger = metrics_logger.MetricsLogger(metrics_logger_options=options)
 
 ##### Case B: Backend with Arguments
 
-If your backend requires arguments, use a `lambda` to create a factory.
+If your backend requires arguments, use `functools.partial` or a `lambda` to
+create a zero-argument factory.
 
 ```python
 class FileBackend:
@@ -242,8 +345,232 @@ my_file_factory = lambda: FileBackend(filename="/tmp/metrics.csv")
 
 options = metrics_logger.MetricsLoggerOptions(
     log_dir="/tmp/logs",
-    backend_factories=[my_file_factory]
+    backend_kwargs={"custom_backend": [my_file_factory]},
 )
 
 logger = metrics_logger.MetricsLogger(metrics_logger_options=options)
 ```
+
+## Performance Metric Tracing
+
+Tunix provides a highly lightweight performance tracing and metrics collection
+system designed specifically for RL workflows. Unlike detailed profiling tools
+(e.g., xprof or standard JAX profiling), which collect exhaustive low-level
+details but incur significant overhead and are typically only used for short
+debugging intervals (e.g., 10s of seconds), this tracing system is designed
+with minimal overhead. It can safely be left enabled for the entire duration
+of your training run. It allows you to monitor the execution time of different
+stages (e.g., rollout, actor training, reference inference) across both host
+and device timelines.
+
+> **Note:** In the CLI, performance metric tracing is supported across RL entry
+> points (`grpo_main.py`, `grpo_vllm_main.py`, and `ppo_main.py`) via
+> `rl_training_config.perf_metrics_options`.
+
+There are currently two versions of the performance metrics system:
+
+*   **Original Version (v1)** ([Code](https://github.com/google/tunix/blob/main/tunix/perf/export.py)):
+    Uses `PerfSpanQuery` to extract spans and compute metrics (e.g., rollout
+    time, wait time).
+*   **Experimental Version (v2)** ([Code](https://github.com/google/tunix/blob/main/tunix/perf/experimental/export.py)):
+    A more flexible version that tracks `Timeline` objects and is planned to
+    replace v1.
+
+Both versions can export metrics to your custom export function and write
+detailed Perfetto trace files that can be visualized at
+[ui.perfetto.dev](https://ui.perfetto.dev/).
+
+### Using Performance Metrics via CLI
+
+When running Tunix via the CLI, you can configure performance metrics by
+providing a `perf_metrics_options` dictionary inside your `rl_training_config`.
+
+```yaml
+rl_training_config:
+  perf_metrics_options:
+    enable_perf_v1: true         # Enable v1 (default: true)
+    enable_perf_v2: false        # Enable v2 (default: false)
+    enable_trace_writer: true    # Enable writing Perfetto trace files (default: true)
+    trace_dir: "/tmp/perf_trace" # Directory to write the trace files to
+    custom_export_fn_path: "path.to.my.custom_fn"       # Optional path to a custom v1 export function
+    custom_export_fn_path_v2: "path.to.my.custom_fn_v2" # Optional path to a custom v2 export function
+```
+
+The CLI automatically parses these options, initializes the appropriate export
+functions, and registers them with the training cluster.
+
+Note that `enable_perf_v1` and `enable_perf_v2` can be toggled independently,
+allowing you to use one or both systems simultaneously. If you wish to use a
+custom export function instead of the defaults, you must provide the fully
+qualified import path to your function via `custom_export_fn_path` (for v1) and
+`custom_export_fn_path_v2` (for v2).
+
+### Using Performance Metrics via Code
+
+If you are initializing the `RLEngine` programmatically, you must construct a
+`PerfMetricsConfig` and pass it to the engine manually.
+
+#### Original Version (v1)
+
+In v1, use `PerfMetricsExport.from_cluster_config()` to generate a default
+export function. This function automatically computes various duration metrics
+based on the cluster's mesh topology (e.g., whether the rollout and actor models
+are collocated or on different TPU meshes; see
+[code](https://github.com/google/tunix/blob/main/tunix/perf/export.py#L127)).
+The metrics are aggregated per `global_step` and use the
+[Metric Logger](#metric-loggers) to log to the desired output. For example,
+if TensorBoard is activated:
+
+![Perf Metrics TensorBoard](images/perf_metrics_TB.png)
+
+By default, v1 also writes detailed execution traces to Perfetto Proto formatted
+file. It reads `perf_metrics_options` from the cluster configuration to
+initialize the trace writer. You can specify the output directory by configuring
+`trace_dir` within `PerfMetricsOptions` inside your `RLTrainingConfig`.
+
+```python
+from tunix.perf import metrics as perf_metrics
+from tunix.perf import export as perf_export
+from tunix.rl import rl_cluster as rl_engine_lib
+from tunix.sft import metrics_logger
+
+# 1. Define metric logger and perf metrics options on RLTrainingConfig.
+metric_logger_options = metrics_logger.MetricsLoggerOptions(
+    log_dir="/tmp/tensorboard/grpo",
+    project_name="my-rl-project",
+)
+perf_options = perf_metrics.PerfMetricsOptions(
+    enable_perf_v1=True,
+    enable_trace_writer=True,
+    trace_dir="/tmp/perf_traces",
+)
+
+training_config = rl_engine_lib.RLTrainingConfig(
+    actor_optimizer=optimizer,
+    metrics_logging_options=metric_logger_options,
+    perf_metrics_options=perf_options,
+    # ... other configurations
+)
+
+cluster_config = rl_engine_lib.ClusterConfig(
+    role_to_mesh=role_to_mesh,
+    training_config=training_config,
+    rollout_config=rollout_config,
+)
+
+# 2. Create a PerfMetricsConfig object.
+perf_config = perf_metrics.PerfMetricsConfig()
+perf_config.custom_export_fn = (
+    perf_export.PerfMetricsExport.from_cluster_config(cluster_config)
+)
+
+# 3. Pass the config to the RLEngine.
+engine = rl_engine_lib.RLEngine(
+    actor=actor_model,
+    tokenizer=tokenizer,
+    cluster_config=cluster_config,
+    perf_config=perf_config,
+)
+```
+
+#### Experimental Version (v2)
+
+For the experimental version, you can use the default export function, which
+writes the raw timelines to a Perfetto trace file by using the
+`PerfMetricsExport` class. The trace files can be written to a directory
+by defining `trace_dir`. If `trace_dir` is not provided, it defaults to
+`/tmp/perf_traces`. The v2 version supports local files and remote endpoints
+supported by `etils.epath` including GCS such as `gs://your-bucket/path/`.
+
+Note that v2 is still experimental and additional
+capabilities, such as exporting aggregated metrics to TensorBoard, are WIP. Once
+the functionality is complete, v2 will be replacing the original version.
+
+```python
+from tunix import PerfMetricsConfig
+from tunix.perf.experimental.export import PerfMetricsExport
+from tunix.rl import rl_cluster as rl_engine_lib
+
+
+# 1. Define cluster_config (as you would for your RL job)
+cluster_config = rl_engine_lib.ClusterConfig(
+    role_to_mesh=role_to_mesh,
+    training_config=training_config,
+    rollout_config=rollout_config,
+)
+
+# 2. Create a PerfMetricsConfig with custom_export_fn_v2 defined.
+perf_metrics_config = PerfMetricsConfig(
+    custom_export_fn_v2=PerfMetricsExport.from_cluster_config(
+        cluster_config=cluster_config,
+        trace_dir="/tmp/agentic_perf",
+    ).export_metrics
+)
+
+# 3. Pass the config to the RLEngine.
+engine = rl_engine_lib.RLEngine(
+    actor=actor_model,
+    tokenizer=tokenizer,
+    cluster_config=cluster_config,
+    perf_config=perf_metrics_config,
+)
+```
+
+### Custom Export Functions
+
+If you want to compute custom metrics from the collected spans instead of using
+the defaults, you can define and provide your own export function.
+
+**Custom Export Function for v1:**
+A v1 export function takes a `PerfSpanQuery` and returns a dictionary of
+metrics.
+
+```python
+from tunix.perf import metrics as perf_metrics
+
+def my_custom_export_fn(query: perf_metrics.PerfSpanQuery) -> perf_metrics.MetricsT:
+    # Example: query main thread for the latest 'global_step' group
+    global_steps = query().main().last_group("global_step").get()
+    if global_steps:
+        # MetricsT maps metric names to (value, optional_aggregation_fn)
+        return {"perf/custom_step_time": (global_steps[0].duration, None)}
+    return {}
+
+perf_config.custom_export_fn = my_custom_export_fn
+```
+
+**Custom Export Function for v2:**
+A v2 export function takes a mapping of timeline IDs to their respective
+`Timeline` objects.
+
+```python
+from tunix.perf import metrics as perf_metrics
+from tunix.perf.experimental import tracer
+
+def my_custom_export_fn_v2(timelines: dict[str, tracer.Timeline]) -> perf_metrics.MetricsT:
+    # Example: iterate over committed steps across host and device timelines
+    durations = []
+    for tl_id, timeline in timelines.items():
+        for step_spans in timeline.committed_steps:
+            for span in step_spans.values():
+                if span.name == "peft_train":
+                    durations.append(span.end - span.begin)
+    if durations:
+        return {"perf/custom_peft_train_time": (durations[-1], None)}
+    return {}
+
+perf_config.custom_export_fn_v2 = my_custom_export_fn_v2
+```
+
+### Visualizing with Perfetto
+
+If you have enabled the trace writer (by setting `enable_trace_writer: true` via
+the CLI or by specifying `trace_dir` in your configuration), a proto-formatted
+file (e.g., `perfetto_trace_1771973518.pb`) containing the raw spans and
+timelines will be saved to the specified directory (which defaults to
+`/tmp/perf_traces`). To view the trace, download the file to your local
+machine and drag-and-drop it into the
+[Perfetto UI](https://ui.perfetto.dev/). The interface allows you to
+interactively zoom, pan, and query the execution trace, as shown below:
+
+![Perf Metrics Perfetto](images/perf_metrics_perfetto.png)

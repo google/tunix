@@ -50,8 +50,8 @@ jobs:
       - name: Install built package
         run: |
           python -m pip install --upgrade pip
-          python -m pip install dist/*.whl
-          python -m pip install pytest
+          WHEEL=$(ls -1 dist/google_tunix-*.whl | head -n1)
+          python -m pip install "${WHEEL}[test]"
       - name: Run smoke tests
         run: |
           python3 -c "

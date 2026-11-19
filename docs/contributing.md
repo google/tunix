@@ -32,6 +32,22 @@ that clearly reproduces the error.
 
 To begin coding, fork the repository and create a new branch from main.
 
+#### Setting up a development environment
+
+We recommend creating an isolated virtual environment before installing Tunix's
+development dependencies. From the repository root you can run:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -e .[dev]
+```
+
+The `dev` extra pulls in the bleeding-edge dependencies we rely on during local
+development. If you prefer to stick with released packages, skip the extra and
+run `pip install -e .` instead.
+
 ### 3. Create a pull request
 
 Once your changes are ready, open a pull request from your branch to the main
@@ -50,25 +66,29 @@ A project maintainer will review your pull request. Be prepared for one or more
 rounds of comments and requested changes as we work with you to refine the
 contribution.
 
-### Setting up a development environment
+During review and development, standard CPU unit tests, package builds, and
+documentation checks run automatically on every pull request push.
 
-We recommend creating an isolated virtual environment before installing Tunix's
-development dependencies. From the repository root you can run:
+### 6. TPU CI Validation
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
-pip install -e .[dev]
-```
+Multi-device TPU integration tests (`tunix_tpu_unit_tests`) run **automatically**
+on Copybara-synced pull requests and pull requests targeting `atwigg/mlperf`. For
+other pull requests (such as external forks), a project maintainer will trigger
+TPU testing once the pull request has completed code review.
 
-The `dev` extra pulls in the bleeding-edge dependencies we rely on during local
-development. If you prefer to stick with released packages, skip the extra and
-run `pip install -e .` instead.
+### 7. Internal Import and Merging
 
-### 6. Merging
+Once the pull request has been approved and all CI checks (including the TPU test
+suite) have passed:
+1. The PR will be converted/imported into Google's internal repository.
+2. The change is verified and approved from the internal review workflow.
+3. The change is submitted internally, which automatically syncs to GitHub and
+   resolves the pull request.
 
-Once the pull request is approved, a team member will take care of merging.
+**Important Note for Maintainers & Reviewers**: Do **not** click the "Merge" button
+directly on the GitHub pull request UI. All PR merges must go through the internal
+import and sync pipeline to keep internal and open-source repositories consistent.
+
 Thank you for your contribution!
 
 ## Formatting and linting

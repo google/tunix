@@ -69,7 +69,7 @@ def create_datasets(
         dataset_name, split=("train", "valid"), download=tfds_download
     )
   elif dataset_name == "Helsinki-NLP/opus-100":  # Hugging Face dataloader
-    train_ds, eval_ds = datasets.load_dataset(
+    train_ds, eval_ds = datasets.load_dataset(  # pyrefly: ignore[no-matching-overload]
         dataset_name, data_dir="en-fr", split=("train", "validation")
     )
   else:
@@ -168,7 +168,7 @@ class _BuildTrainInput(grain.MapTransform):
 
     # The input sequence fed to the model is simply the concatenation of the
     # source and the destination.
-    tokens = np.concat([src_tokens, dst_tokens], axis=0)
+    tokens = np.concat([src_tokens, dst_tokens], axis=0)  # pyrefly: ignore[bad-assignment]
 
     # To prevent the model from updating based on the source (input)
     # tokens, add a target mask to each input.
@@ -178,12 +178,12 @@ class _BuildTrainInput(grain.MapTransform):
 
     # If the input tokens sequence is smaller than the target sequence size,
     # then pad it with pad tokens.
-    tokens = self._pad_up_to_max_len(tokens, self._pad_value)
+    tokens = self._pad_up_to_max_len(tokens, self._pad_value)  # pyrefly: ignore[bad-argument-type, bad-assignment]
 
     # Don't want to perform the backward pass on the pad tokens.
     mask = self._pad_up_to_max_len(mask, 0)
 
-    return TrainingInput(input_tokens=tokens, input_mask=mask)
+    return TrainingInput(input_tokens=tokens, input_mask=mask)  # pyrefly: ignore[bad-argument-type]
 
   def _pad_up_to_max_len(
       self, input_tensor: np.ndarray, pad_value: int

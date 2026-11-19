@@ -15,18 +15,18 @@
 import asyncio
 import concurrent.futures
 import functools
+import itertools
+
 import os
-import re
-import socket
 import tempfile
 import threading
 import time
+import types
 from unittest import mock
 from absl.testing import absltest
 from flax import nnx
 import jax
 import numpy as np
-import qwix
 import transformers
 from tunix.generate import mappings
 from tunix.generate import sampler as vanilla_sampler
@@ -35,19 +35,22 @@ from tunix.models.llama3 import model as llama_lib
 from tunix.models.llama3 import params as llama_params
 from tunix.sft import utils as base_utils
 from tunix.tests import test_common as tc
-from vllm.inputs import TokensPrompt
-from vllm.sampling_params import SamplingParams
 import asyncio
 
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 
 
 class VllmSamplerTest(absltest.TestCase):
+  # Cache at most one active VllmSampler engine at a time because TPU HBM cannot
+  # hold multiple vLLM engines concurrently. Tests with matching
+  # (server_mode, data_parallel_size) reuse the active engine.
+  _cached_sampler: vllm_sampler.VllmSampler | None = None
+  _cached_sampler_key: tuple[bool, int] | None = None
 
   @classmethod
   def setUpClass(cls) -> None:
     super().setUpClass()
-    cls.repo_id = "meta-llama/Llama-3.2-1B-Instruct"
+    cls.repo_id = "unsloth/Llama-3.2-1B-Instruct"
     temp_dir = tempfile.gettempdir()
     cls.model_path = os.path.join(temp_dir, "models", cls.repo_id)
 
@@ -65,8 +68,54 @@ class VllmSamplerTest(absltest.TestCase):
         axis_types=(jax.sharding.AxisType.Auto,) * len(axis_names),
     )
 
-  def load_llama3_model(self, model_version: str, enable_lora: bool = False):
+  @classmethod
+  def tearDownClass(cls) -> None:
+    cls.close_cached_sampler()
+    super().tearDownClass()
+
+  @classmethod
+  def close_cached_sampler(cls) -> None:
+    if cls._cached_sampler is not None:
+      cls._cached_sampler.delete_cache()
+      if cls._cached_sampler.config.server_mode:
+        try:
+          cls._cached_sampler.stop()
+        except Exception:  # pylint: disable=broad-exception-caught
+          pass
+      cls._cached_sampler = None
+      cls._cached_sampler_key = None
+
+  @classmethod
+  def get_vllm_sampler(
+      cls,
+      vllm_config: vllm_sampler.VllmConfig,
+      tokenizer: transformers.PreTrainedTokenizerBase,
+      state: nnx.State,
+  ) -> vllm_sampler.VllmSampler:
+    key = (vllm_config.server_mode, vllm_config.data_parallel_size)
+    if cls._cached_sampler is not None and cls._cached_sampler_key == key:
+      cls._cached_sampler.config = vllm_config
+      return cls._cached_sampler
+
+    cls.close_cached_sampler()
+    sampler = vllm_sampler.VllmSampler(tokenizer=tokenizer, config=vllm_config)
+    mock_llm = (
+        sampler._driver.llm_engine if vllm_config.server_mode else sampler.llm
+    )
+    with (
+        mock.patch.object(mock_llm, "reset_prefix_cache"),
+        mock.patch.object(mock_llm, "collective_rpc"),
+    ):
+      sampler.load_checkpoint(state)
+    cls._cached_sampler = sampler
+    cls._cached_sampler_key = key
+    return sampler
+
+  @classmethod
+  @functools.lru_cache(maxsize=1)
+  def load_llama3_model(cls, model_version: str, enable_lora: bool = False):
     model_config = {
+        "unsloth/Llama-3.2-1B-Instruct": llama_lib.ModelConfig.llama3p2_1b,
         "meta-llama/Llama-3.2-1B-Instruct": llama_lib.ModelConfig.llama3p2_1b,
         "meta-llama/Llama-3.1-8B-Instruct": llama_lib.ModelConfig.llama3p1_8b,
     }
@@ -76,7 +125,7 @@ class VllmSamplerTest(absltest.TestCase):
     model_config = model_config[model_version]()
 
     llama3 = llama_params.create_model_from_safe_tensors(
-        self.model_path, model_config, self.mesh
+        cls.model_path, model_config, cls.mesh
     )
     if enable_lora:
       llama3 = tc.get_lora_model(
@@ -84,11 +133,40 @@ class VllmSamplerTest(absltest.TestCase):
           model_path=".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*down_proj|.*up_proj",
           rank=64,
           alpha=64.0,
-          mesh=self.mesh,
+          mesh=cls.mesh,
       )
       print(f"Loaded LoRA model: {model_version} with LoRA enabled")
     # nnx.display(llama3)
     return llama3, model_config
+
+  @classmethod
+  @functools.lru_cache(maxsize=1)
+  def run_vanilla_sampler(cls, inputs: tuple[str, ...]):
+    tunix_model, model_config = cls.load_llama3_model(
+        cls.repo_id, enable_lora=cls.enable_lora
+    )
+    model_tokenizer = transformers.AutoTokenizer.from_pretrained(cls.model_path)
+    vn_sampler = vanilla_sampler.Sampler(
+        transformer=tunix_model,
+        tokenizer=model_tokenizer,
+        cache_config=vanilla_sampler.CacheConfig(
+            cache_size=512,
+            num_layers=model_config.num_layers,
+            num_kv_heads=model_config.num_kv_heads,
+            head_dim=model_config.head_dim,
+        ),
+    )
+    return vn_sampler(
+        input_strings=list(inputs),
+        max_generation_steps=128,  # Changed from 768 to 128 for vLLM
+        max_prompt_length=None,  # Use default max prompt length
+        temperature=0.0,
+        # top_p=0.9,
+        top_k=1,
+        seed=0,
+        echo=False,
+        pad_output=True,  # Use padding for output
+    )
 
   # Parametized test always fails on vLLM HBM usage exceeding limit, no matter how much HBM we allocated to it, and no matter how we clear the Jax cache (delete all the live arrays, gc collect, clear cache, clear test cache). vLLM will allocate all the assigned HBM to weights + KV cache. The conclusion is parametized test doesn't reset Jax properly, therefore the 2nd test adds on top of the previous HBM usage. This is the workaround for that.
   def test_vllm_sampler_batch_mode(self):
@@ -96,13 +174,12 @@ class VllmSamplerTest(absltest.TestCase):
 
   def test_vllm_sampler_batch_mode_with_data_parallel(self):
     self._run_vllm_sampler(server_mode=False, data_parallel_size=2)
-    os.environ["NEW_MODEL_DESIGN"] = "False"
 
   def test_vllm_sampler_server_mode(self):
     self._run_vllm_sampler(server_mode=True)
 
   def _run_vllm_sampler(self, server_mode, data_parallel_size: int = -1):
-    tunix_model, model_config = self.load_llama3_model(
+    tunix_model, _ = self.load_llama3_model(
         self.repo_id, enable_lora=self.enable_lora
     )
 
@@ -136,34 +213,11 @@ class VllmSamplerTest(absltest.TestCase):
     ]
 
     inputs = tc.batch_templatize(prompts, model_tokenizer)
-
-    vn_sampler = vanilla_sampler.Sampler(
-        transformer=tunix_model,
-        tokenizer=model_tokenizer,
-        cache_config=vanilla_sampler.CacheConfig(
-            cache_size=512,
-            num_layers=model_config.num_layers,
-            num_kv_heads=model_config.num_kv_heads,
-            head_dim=model_config.head_dim,
-        ),
-    )
-    vanilla_output = vn_sampler(
-        input_strings=inputs,
-        max_generation_steps=128,  # Changed from 768 to 128 for vLLM
-        max_prompt_length=None,  # Use default max prompt length
-        temperature=0.0,
-        # top_p=0.9,
-        top_k=1,
-        seed=0,
-        echo=False,
-        pad_output=True,  # Use padding for output
-    )
+    vanilla_output = self.run_vanilla_sampler(tuple(inputs))
 
     mapping_config = mappings.MappingConfig.build(tunix_model)
 
     vllm_config = vllm_sampler.VllmConfig(
-        model_version=self.model_path,
-        max_model_len=512,
         mesh=self.mesh,
         hbm_utilization=0.2,
         init_with_random_weights=True,
@@ -172,16 +226,17 @@ class VllmSamplerTest(absltest.TestCase):
         lora_config=lora_config,
         server_mode=server_mode,
         data_parallel_size=data_parallel_size,
+        engine_kwargs={
+            "model": self.model_path,
+            "max_model_len": 512,
+            "enable_prefix_caching": True,
+        },  # Test kwargs forwarding
     )
 
-    vl_sampler = vllm_sampler.VllmSampler(
-        tokenizer=model_tokenizer,
-        config=vllm_config,
-    )
+    state = nnx.state(tunix_model)
+    vl_sampler = self.get_vllm_sampler(vllm_config, model_tokenizer, state)
     # vLLM construct its own mesh
     self.assertNotEqual(vl_sampler.mesh, self.mesh)
-    state = nnx.state(tunix_model)
-    vl_sampler.load_checkpoint(state)
 
     base_utils.show_hbm_usage("After loading vLLM sampler")
 
@@ -198,7 +253,7 @@ class VllmSamplerTest(absltest.TestCase):
     )
 
     expected_output_pattern = [
-        (prompts[0], ["Tom", "help"]),
+        (prompts[0], ["Tom", "Hello"]),
         (prompts[1], ["Paris"]),
         (prompts[2], ["Rayleigh", "scattering"]),
     ]
@@ -222,8 +277,6 @@ class VllmSamplerTest(absltest.TestCase):
             vllm_state["model"]["embed"]["embedding"].value,
         )
     )
-    if vllm_config.server_mode:
-      vl_sampler.stop()
 
   def test_vllm_sampler_run_in_executor_concurrency(self):
     tunix_model, _ = self.load_llama3_model(
@@ -234,24 +287,21 @@ class VllmSamplerTest(absltest.TestCase):
 
     mapping_config = mappings.MappingConfig.build(tunix_model)
     vllm_config = vllm_sampler.VllmConfig(
-        model_version=self.model_path,
-        max_model_len=512,
         mesh=self.mesh,
         hbm_utilization=0.2,
         init_with_random_weights=True,
         tpu_backend_type="jax",
         mapping_config=mapping_config,
         server_mode=True,
+        engine_kwargs={
+            "model": self.model_path,
+            "max_model_len": 512,
+            "enable_prefix_caching": True,
+        },  # Test kwargs forwarding
     )
-
-    vl_sampler = vllm_sampler.VllmSampler(
-        tokenizer=tokenizer,
-        config=vllm_config,
-    )
-    self.addCleanup(vl_sampler.stop)
 
     state = nnx.state(tunix_model)
-    vl_sampler.load_checkpoint(state)
+    vl_sampler = self.get_vllm_sampler(vllm_config, tokenizer, state)
 
     base_prompts = [
         "Hello, my name is Tom.",
@@ -263,7 +313,7 @@ class VllmSamplerTest(absltest.TestCase):
         "Summarize the plot of Romeo and Juliet.",
         "Give me a recipe for pancakes.",
         "What is the boiling point of water at sea level?",
-        "Share a motivational quote about perseverance.",
+        "What is the largest planet in our solar system?",
     ]
     prompts = list(base_prompts)
     templated_prompts = tc.batch_templatize(prompts, tokenizer)
@@ -272,13 +322,13 @@ class VllmSamplerTest(absltest.TestCase):
         base_prompts[0]: ["Tom", "help"],
         base_prompts[1]: ["Paris"],
         base_prompts[2]: ["Rayleigh", "scattering"],
-        base_prompts[3]: ["relativity", "einstein"],
-        base_prompts[4]: ["health", "energy"],
+        base_prompts[3]: ["relativity", "physics"],
+        base_prompts[4]: ["health", "can", "regular"],
         base_prompts[5]: ["winter"],
         base_prompts[6]: ["romeo", "juliet"],
         base_prompts[7]: ["pancake"],
-        base_prompts[8]: ["100", "celsius"],
-        base_prompts[9]: ["seven", "eight"],
+        base_prompts[8]: ["100", "212"],
+        base_prompts[9]: ["Jupiter"],
     }
     prompt_expectations = [
         (prompt, expected_keywords.get(prompt, [])) for prompt in prompts
@@ -350,6 +400,912 @@ class VllmSamplerTest(absltest.TestCase):
             "expected out-of-order completions."
         ),
     )
+
+  def test_vllm_sampler_sampling_kwargs(self):
+    """Test that sampling kwargs are correctly applied to sampling_params."""
+    tunix_model, _ = self.load_llama3_model(
+        self.repo_id, enable_lora=self.enable_lora
+    )
+
+    model_tokenizer = transformers.AutoTokenizer.from_pretrained(
+        self.model_path
+    )
+
+    prompts = ["Hello, my name is Tom."]
+    inputs = tc.batch_templatize(prompts, model_tokenizer)
+
+    mapping_config = mappings.MappingConfig.build(tunix_model)
+
+    # Test 1: Config sampling_kwargs are applied
+    config_sampling_kwargs = {
+        "frequency_penalty": 0.5,
+        "presence_penalty": 0.3,
+    }
+
+    vllm_config = vllm_sampler.VllmConfig(
+        mesh=self.mesh,
+        hbm_utilization=0.2,
+        init_with_random_weights=True,
+        tpu_backend_type="jax",
+        mapping_config=mapping_config,
+        server_mode=False,
+        sampling_kwargs=config_sampling_kwargs,
+        engine_kwargs={
+            "model": self.model_path,
+            "max_model_len": 512,
+            "enable_prefix_caching": True,
+        },
+    )
+
+    state = nnx.state(tunix_model)
+    vl_sampler = self.get_vllm_sampler(vllm_config, model_tokenizer, state)
+
+    # Mock add_request on the engine to capture sampling_params
+    original_add_request = vl_sampler.llm.llm_engine.add_request
+    captured_sampling_params = []
+
+    def mock_add_request(request_id, prompt, sampling_params, *args, **kwargs):
+      captured_sampling_params.append(sampling_params)
+      return original_add_request(
+          request_id, prompt, sampling_params, *args, **kwargs
+      )
+
+    with mock.patch.object(
+        vl_sampler.llm.llm_engine, "add_request", side_effect=mock_add_request
+    ):
+      # Call with additional method kwargs
+      method_sampling_kwargs = {"min_tokens": 10}
+      vl_sampler(
+          input_strings=inputs,
+          max_generation_steps=128,
+          max_prompt_length=None,
+          temperature=0.0,
+          top_k=1,
+          seed=0,
+          echo=False,
+          pad_output=True,
+          **method_sampling_kwargs,
+      )
+
+    # Verify that both config and method kwargs were applied
+    self.assertLen(captured_sampling_params, 1)
+    sampling_params = captured_sampling_params[0]
+
+    # Check config kwargs
+    self.assertEqual(sampling_params.frequency_penalty, 0.5)
+    self.assertEqual(sampling_params.presence_penalty, 0.3)
+
+    # Check method kwargs
+    self.assertEqual(sampling_params.min_tokens, 10)
+
+  def test_vllm_sampler_sampling_kwargs_override(self):
+    """Test that method kwargs override config sampling_kwargs."""
+    tunix_model, _ = self.load_llama3_model(
+        self.repo_id, enable_lora=self.enable_lora
+    )
+
+    model_tokenizer = transformers.AutoTokenizer.from_pretrained(
+        self.model_path
+    )
+
+    prompts = ["Hello, my name is Tom."]
+    inputs = tc.batch_templatize(prompts, model_tokenizer)
+
+    mapping_config = mappings.MappingConfig.build(tunix_model)
+
+    # Config has frequency_penalty = 0.5
+    config_sampling_kwargs = {
+        "frequency_penalty": 0.5,
+        "presence_penalty": 0.3,
+    }
+
+    vllm_config = vllm_sampler.VllmConfig(
+        mesh=self.mesh,
+        hbm_utilization=0.2,
+        init_with_random_weights=True,
+        tpu_backend_type="jax",
+        mapping_config=mapping_config,
+        server_mode=False,
+        sampling_kwargs=config_sampling_kwargs,
+        engine_kwargs={
+            "model": self.model_path,
+            "max_model_len": 512,
+            "enable_prefix_caching": True,
+        },
+    )
+
+    state = nnx.state(tunix_model)
+    vl_sampler = self.get_vllm_sampler(vllm_config, model_tokenizer, state)
+
+    # Mock add_request on the engine to capture sampling_params
+    original_add_request = vl_sampler.llm.llm_engine.add_request
+    captured_sampling_params = []
+
+    def mock_add_request(request_id, prompt, sampling_params, *args, **kwargs):
+      captured_sampling_params.append(sampling_params)
+      return original_add_request(
+          request_id, prompt, sampling_params, *args, **kwargs
+      )
+
+    with mock.patch.object(
+        vl_sampler.llm.llm_engine, "add_request", side_effect=mock_add_request
+    ):
+      # Call with method kwargs that override config kwargs (0.5 -> 0.8)
+      method_sampling_kwargs = {"frequency_penalty": 0.8}
+      vl_sampler(
+          input_strings=inputs,
+          max_generation_steps=128,
+          max_prompt_length=None,
+          temperature=0.0,
+          top_k=1,
+          seed=0,
+          echo=False,
+          pad_output=True,
+          **method_sampling_kwargs,
+      )
+
+    # Verify that method kwargs override config kwargs
+    self.assertLen(captured_sampling_params, 1)
+    sampling_params = captured_sampling_params[0]
+
+    # Check that method kwarg overrides config kwarg
+    self.assertEqual(sampling_params.frequency_penalty, 0.8)
+
+    # Check that other config kwargs are still applied
+    self.assertEqual(sampling_params.presence_penalty, 0.3)
+
+
+class VllmSamplerConfigTest(absltest.TestCase):
+  """Unit tests for VllmSampler config plumbing (no hardware required)."""
+
+  def setUp(self):
+    super().setUp()
+    # `VllmSampler` sets process-wide variables (`TPU_BACKEND_TYPE`, and
+    # `NEW_MODEL_DESIGN` with data parallelism); restore the environment after
+    # each test, so they don't reach the engines of later tests in the process.
+    self.enter_context(mock.patch.dict(os.environ))
+
+  def _make_mock_mesh(self, total_devices):
+    mesh = mock.MagicMock()
+    mesh.shape = {"axis": total_devices}
+    mesh.device_ids.flatten.return_value.tolist.return_value = list(
+        range(total_devices)
+    )
+    return mesh
+
+  def _make_sampler(self, config):
+    with mock.patch("tunix.generate.vllm_sampler.LLM"):
+      return vllm_sampler.VllmSampler(
+          tokenizer=mock.MagicMock(
+              spec=vllm_sampler.tok_adapter.TokenizerAdapter
+          ),
+          config=config,
+      )
+
+  def test_stop_token_ids_falls_back_to_tokenizer_eos(self):
+    config = vllm_sampler.VllmConfig(
+        init_with_random_weights=False,
+        additional_config={"maxtext_config": {}},
+    )
+    sampler = self._make_sampler(config)
+    sampler.tokenizer.eos_id.return_value = 151645
+
+    self.assertEqual(sampler._eos_token_ids(), [151645])
+
+  def test_stop_token_ids_uses_configured_eos_tokens(self):
+    # Qwen3 declares both `<|im_end|>` and `<|endoftext|>`; a raw completion
+    # ends on the latter, which the tokenizer never reports.
+    config = vllm_sampler.VllmConfig(
+        init_with_random_weights=False,
+        additional_config={"maxtext_config": {}},
+        eos_tokens=[151645, 151643],
+    )
+    sampler = self._make_sampler(config)
+    sampler.tokenizer.eos_id.return_value = 151645
+
+    self.assertCountEqual(sampler._eos_token_ids(), [151645, 151643])
+
+  def test_stop_token_ids_combines_configured_and_tokenizer_eos(self):
+    config = vllm_sampler.VllmConfig(
+        init_with_random_weights=False,
+        additional_config={"maxtext_config": {}},
+        eos_tokens=[151643],
+    )
+    sampler = self._make_sampler(config)
+    sampler.tokenizer.eos_id.return_value = 151645
+
+    self.assertCountEqual(sampler._eos_token_ids(), [151643, 151645])
+
+  def test_weight_sync_keeps_kv_cache_when_configured(self):
+    config = vllm_sampler.VllmConfig(
+        init_with_random_weights=False,
+        free_kv_cache_during_weight_sync=False,
+        additional_config={"maxtext_config": {}},
+    )
+    sampler = self._make_sampler(config)
+    sampler.to_hf_key_mappings = None
+    with mock.patch.object(
+        vllm_sampler.utils, "transfer_state_directly"
+    ), mock.patch.object(vllm_sampler.jax, "effects_barrier"):
+      sampler.update_params({})
+
+    rpcs = [c.args[0] for c in sampler.llm.collective_rpc.call_args_list]
+    self.assertNotIn("delete_kv_cache", rpcs)
+    self.assertNotIn("reinitialize_kv_cache", rpcs)
+    sampler.llm.reset_prefix_cache.assert_called_once()
+
+  def test_weight_sync_frees_kv_cache_by_default(self):
+    config = vllm_sampler.VllmConfig(
+        init_with_random_weights=False,
+        additional_config={"maxtext_config": {}},
+    )
+    sampler = self._make_sampler(config)
+    sampler.to_hf_key_mappings = None
+    with mock.patch.object(
+        vllm_sampler.utils, "transfer_state_directly"
+    ), mock.patch.object(vllm_sampler.jax, "effects_barrier"):
+      sampler.update_params({})
+
+    rpcs = [c.args[0] for c in sampler.llm.collective_rpc.call_args_list]
+    self.assertEqual(rpcs, ["delete_kv_cache", "reinitialize_kv_cache"])
+
+  def test_overlap_postprocessing_decodes_finished_requests_early(self):
+    config = vllm_sampler.VllmConfig(init_with_random_weights=False)
+    sampler = self._make_sampler(config)
+    sampler.tokenizer = mock.MagicMock()
+    sampler.tokenizer.decode.side_effect = lambda ids: "t" + "".join(
+        str(i) for i in ids
+    )
+    sampler.llm.request_counter = itertools.count()
+    engine = sampler.llm.llm_engine
+
+    def output(rid, finished):
+      out = mock.MagicMock()
+      out.request_id = rid
+      out.finished = finished
+      sample = mock.MagicMock()
+      sample.token_ids = [int(rid), int(rid) + 1]
+      sample.logprobs = None
+      out.outputs = [sample]
+      return out
+
+    engine.has_unfinished_requests.side_effect = [True, True, False]
+    engine.step.side_effect = [
+        [output("1", True), output("0", False)],
+        [output("0", True)],
+    ]
+    prompts = [{"prompt_token_ids": [1]}, {"prompt_token_ids": [2]}]
+    outputs = sampler._generate_offline(prompts, vllm_sampler.SamplingParams())
+
+    sampler.llm.generate.assert_not_called()
+    self.assertEqual(engine.add_request.call_count, 2)
+    self.assertEqual([o.request_id for o in outputs], ["0", "1"])
+    texts, logprobs, tokens, _, topk_ids, topk_logps = sampler.detokenize(
+        ["a", "b"], outputs
+    )
+    self.assertIsNone(topk_ids)
+    self.assertIsNone(topk_logps)
+    self.assertEqual(texts, [["t01", "t12"]])
+    self.assertEqual(logprobs, [[[], []]])
+    self.assertEqual([t.tolist() for t in tokens[0]], [[0, 1], [1, 2]])
+    # Each finished request was decoded once, in the pool, not in detokenize.
+    self.assertEqual(sampler.tokenizer.decode.call_count, 2)
+
+  def test_overlap_postprocessing_off_uses_llm_generate(self):
+    config = vllm_sampler.VllmConfig(
+        init_with_random_weights=False, overlap_postprocessing=False
+    )
+    sampler = self._make_sampler(config)
+    prompts = [{"prompt_token_ids": [1]}]
+    params = vllm_sampler.SamplingParams()
+
+    outputs = sampler._generate_offline(prompts, params)
+
+    sampler.llm.generate.assert_called_once_with(
+        prompts=prompts, sampling_params=params, use_tqdm=True
+    )
+    sampler.llm.llm_engine.add_request.assert_not_called()
+    self.assertIs(outputs, sampler.llm.generate.return_value)
+
+  def test_beam_search_keeps_llm_generate_path(self):
+    config = vllm_sampler.VllmConfig(init_with_random_weights=False)
+    sampler = self._make_sampler(config)
+    params = vllm_sampler.BeamSearchParams(beam_width=2, max_tokens=4)
+
+    sampler._generate_offline([{"prompt_token_ids": [1]}], params)
+
+    sampler.llm.generate.assert_called_once()
+    sampler.llm.llm_engine.add_request.assert_not_called()
+
+  def test_detokenize_without_precomputed_results_decodes_inline(self):
+    config = vllm_sampler.VllmConfig(init_with_random_weights=False)
+    sampler = self._make_sampler(config)
+    sampler.tokenizer = mock.MagicMock()
+    sampler.tokenizer.decode.return_value = "text"
+    sample = mock.MagicMock()
+    sample.token_ids = [4, 5]
+    sample.logprobs = None
+    output = mock.MagicMock()
+    output.request_id = "7"
+    output.outputs = [sample]
+
+    texts, logprobs, tokens, _, _, _ = sampler.detokenize(["a"], [output])
+
+    self.assertEqual(texts, [["text"]])
+    self.assertEqual(logprobs, [[[]]])
+    self.assertEqual([t.tolist() for t in tokens[0]], [[4, 5]])
+    sampler.tokenizer.decode.assert_called_once_with([4, 5])
+
+  def test_server_mode_overlap_decodes_as_futures_resolve(self):
+    config = vllm_sampler.VllmConfig(init_with_random_weights=False)
+    sampler = self._make_sampler(config)
+    sampler.tokenizer = mock.MagicMock()
+    sampler.tokenizer.decode.side_effect = lambda ids: "t" + "".join(
+        str(i) for i in ids
+    )
+
+    def request_output(rid):
+      out = mock.MagicMock(spec=vllm_sampler.RequestOutput)
+      out.request_id = rid
+      sample = mock.MagicMock()
+      sample.token_ids = [int(rid), int(rid) + 1]
+      sample.logprobs = None
+      out.outputs = [sample]
+      return out
+
+    futures = []
+    for rid in ("0", "1"):
+      future = concurrent.futures.Future()
+      future.set_result(request_output(rid))
+      futures.append(future)
+    sampler._driver = mock.MagicMock()
+    sampler._driver.submit_requests.return_value = futures
+
+    prompts = [{"prompt_token_ids": [1]}, {"prompt_token_ids": [2]}]
+    outputs = sampler._generate_server_mode(
+        prompts, vllm_sampler.SamplingParams()
+    )
+
+    self.assertEqual([o.request_id for o in outputs], ["0", "1"])
+    texts, logprobs, _, _, _, _ = sampler.detokenize(["a", "b"], outputs)
+    self.assertEqual(texts, [["t01", "t12"]])
+    self.assertEqual(logprobs, [[[], []]])
+    self.assertEqual(sampler.tokenizer.decode.call_count, 2)
+
+  def test_postprocessing_threads_must_be_positive(self):
+    with self.assertRaisesRegex(ValueError, "postprocessing_threads"):
+      vllm_sampler.VllmConfig(postprocessing_threads=0)
+
+  def test_stop_shuts_down_postprocess_pool(self):
+    config = vllm_sampler.VllmConfig(init_with_random_weights=False)
+    sampler = self._make_sampler(config)
+    pool = sampler._get_postprocess_pool()
+    sampler.stop()
+    self.assertIsNone(sampler._postprocess_pool)
+    with self.assertRaises(RuntimeError):
+      pool.submit(lambda: None)
+
+  def test_expert_parallel_size_plumbed_to_sharding(self):
+    mesh = self._make_mock_mesh(8)
+    config = vllm_sampler.VllmConfig(
+        mesh=mesh,
+        expert_parallel_size=2,
+        init_with_random_weights=False,
+    )
+    sampler = self._make_sampler(config)
+
+    sharding_strategy = sampler.args["additional_config"]["sharding"][
+        "sharding_strategy"
+    ]
+    # EP=2 should appear in the sharding strategy passed to vLLM.
+    self.assertEqual(sharding_strategy["expert_parallelism"], 2)
+    # With 8 total devices and EP=2, TP should be inferred as 4 and DP as 1.
+    self.assertEqual(sampler.args["tensor_parallel_size"], 4)
+    self.assertEqual(sampler.args["data_parallel_size"], 1)
+
+  def test_reserved_keys_in_engine_kwargs_raise_value_error(self):
+    # Reserved VllmConfig fields (e.g. tp, dp, ep) must be set directly on
+    # VllmConfig, not smuggled through engine_kwargs. Passing them via
+    # engine_kwargs should raise a ValueError at config construction time
+    # before any vLLM engine args are assembled.
+    mesh = self._make_mock_mesh(8)
+    for key in ("expert_parallel_size", "tensor_parallel_size", "data_parallel_size"):
+      with self.subTest(key=key):
+        with self.assertRaisesRegex(ValueError, key):
+          vllm_sampler.VllmConfig(
+              mesh=mesh,
+              init_with_random_weights=False,
+              engine_kwargs={key: 2},
+          )
+
+  def test_default_expert_parallel_size_is_one(self):
+    mesh = self._make_mock_mesh(8)
+    config = vllm_sampler.VllmConfig(
+        mesh=mesh,
+        init_with_random_weights=False,
+    )
+    sampler = self._make_sampler(config)
+
+    sharding_strategy = sampler.args["additional_config"]["sharding"][
+        "sharding_strategy"
+    ]
+    self.assertEqual(sharding_strategy["expert_parallelism"], 1)
+    self.assertEqual(sampler.args["tensor_parallel_size"], 8)
+    self.assertEqual(sampler.args["data_parallel_size"], 1)
+
+  def test_no_mesh_parallel_sizes_and_sharding_strategy(self):
+    # In distributed settings, mesh is None during initial config assembly.
+    config = vllm_sampler.VllmConfig(
+        mesh=None,
+        tensor_parallel_size=4,
+        data_parallel_size=2,
+        expert_parallel_size=2,
+        enable_dp_attention=True,
+        init_with_random_weights=False,
+    )
+    sampler = self._make_sampler(config)
+
+    self.assertEqual(sampler.args["tensor_parallel_size"], 4)
+    self.assertEqual(sampler.args["data_parallel_size"], 2)
+    sharding_strategy = sampler.args["additional_config"]["sharding"][
+        "sharding_strategy"
+    ]
+    self.assertEqual(sharding_strategy["expert_parallelism"], 2)
+    self.assertTrue(sharding_strategy["enable_dp_attention"])
+    self.assertNotIn("device_indexes", sharding_strategy)
+
+  def test_no_mesh_default_parallel_sizes(self):
+    config = vllm_sampler.VllmConfig(
+        mesh=None,
+        init_with_random_weights=False,
+    )
+    sampler = self._make_sampler(config)
+
+    self.assertEqual(sampler.args["tensor_parallel_size"], -1)
+    self.assertEqual(sampler.args["data_parallel_size"], -1)
+    sharding_strategy = sampler.args["additional_config"]["sharding"][
+        "sharding_strategy"
+    ]
+    self.assertEqual(sharding_strategy["expert_parallelism"], 1)
+    self.assertFalse(sharding_strategy["enable_dp_attention"])
+    self.assertNotIn("device_indexes", sharding_strategy)
+
+  def test_no_mesh_preserves_additional_config_sharding(self):
+    config = vllm_sampler.VllmConfig(
+        mesh=None,
+        additional_config={
+            "sharding": {
+                "attn_dp_size": 2,
+                "sharding_strategy": {"custom_param": "foo"},
+            }
+        },
+        expert_parallel_size=4,
+        init_with_random_weights=False,
+    )
+    sampler = self._make_sampler(config)
+
+    sharding = sampler.args["additional_config"]["sharding"]
+    self.assertEqual(sharding["attn_dp_size"], 2)
+    self.assertEqual(sharding["sharding_strategy"]["custom_param"], "foo")
+    self.assertEqual(sharding["sharding_strategy"]["expert_parallelism"], 4)
+    self.assertNotIn("device_indexes", sharding["sharding_strategy"])
+
+  def test_language_model_only_defaults_true_and_allows_override(self):
+    default_sampler = self._make_sampler(
+        vllm_sampler.VllmConfig(init_with_random_weights=False)
+    )
+    self.assertTrue(default_sampler.args["language_model_only"])
+
+    override_sampler = self._make_sampler(
+        vllm_sampler.VllmConfig(
+            init_with_random_weights=False,
+            engine_kwargs={"language_model_only": False},
+        )
+    )
+    self.assertFalse(override_sampler.args["language_model_only"])
+
+
+class VllmSamplerTokenInputTest(absltest.TestCase):
+  """Explicit token-ID prompts through the real sampler with a fake engine."""
+
+  @staticmethod
+  def _result(request_id, prompt):
+    from types import SimpleNamespace  # pylint: disable=g-import-not-at-top
+    from vllm.outputs import CompletionOutput, RequestOutput  # pylint: disable=g-import-not-at-top
+
+    return RequestOutput(
+        request_id=request_id,
+        prompt=None,
+        prompt_token_ids=list(prompt),
+        prompt_logprobs=None,
+        finished=True,
+        outputs=[
+            CompletionOutput(
+                index=0,
+                text="",
+                token_ids=[7, 0],
+                cumulative_logprob=-1.0,
+                logprobs=[
+                    {7: SimpleNamespace(logprob=-0.25)},
+                    {0: SimpleNamespace(logprob=-0.75)},
+                ],
+                finish_reason="stop",
+            )
+        ],
+    )
+
+  def _sampler(self):
+    import itertools  # pylint: disable=g-import-not-at-top
+    from types import SimpleNamespace  # pylint: disable=g-import-not-at-top
+    from vllm.sampling_params import SamplingParams  # pylint: disable=g-import-not-at-top
+
+    obj = object.__new__(vllm_sampler.VllmSampler)
+    obj.args = {"max_model_len": 64}
+    obj._thread_local = threading.local()
+    obj._postprocessed = None  # set by __init__ upstream; fixture bypasses it
+    obj.config = SimpleNamespace(
+        return_logprobs=True,
+        return_routed_experts=False,
+        eos_tokens=None,
+        sampling_kwargs={},
+        overlap_postprocessing=False,  # upstream 323946941 added this field
+        num_logprobs=1,
+    )
+    obj._driver = None
+    obj._request_counter = itertools.count()
+    obj.tokenizer = SimpleNamespace(
+        encode=mock.Mock(side_effect=AssertionError("history was re-encoded")),
+        decode=mock.Mock(return_value="decoded"),
+        eos_id=lambda: 0,
+        bos_id=lambda: None,
+        pad_id=lambda: 0,
+        dedup_bos_ids=lambda ids: ids,
+    )
+    obj.llm = SimpleNamespace(
+        get_default_sampling_params=SamplingParams,
+        generate=mock.Mock(
+            side_effect=lambda **kw: [
+                self._result(str(i), prompt["prompt_token_ids"])
+                for i, prompt in enumerate(kw["prompts"])
+            ]
+        ),
+    )
+    return obj
+
+  def test_token_ids_are_submitted_without_re_encoding(self):
+    obj = self._sampler()
+    out = obj(
+        None, 4, max_prompt_length=5, prompt_token_ids=[[0, 3], [4, 0, 5]]
+    )
+    submitted = obj.llm.generate.call_args.kwargs
+    self.assertEqual(
+        submitted["prompts"],
+        [{"prompt_token_ids": [0, 3]}, {"prompt_token_ids": [4, 0, 5]}],
+    )
+    obj.tokenizer.encode.assert_not_called()
+    np.testing.assert_array_equal(out.prompt_lengths, [2, 3])
+    np.testing.assert_array_equal(
+        out.padded_prompt_tokens, [[0, 0, 0, 0, 3], [0, 0, 4, 0, 5]]
+    )
+    np.testing.assert_array_equal(out.logprobs, [[-0.25, -0.75]] * 2)
+
+  def test_num_logprobs_returns_topk_per_prompt(self):
+    for bad in (0, -1, False, True):
+      with self.assertRaisesRegex(ValueError, "num_logprobs must be >= 1"):
+        vllm_sampler.VllmConfig(num_logprobs=bad)
+    obj = self._sampler()
+    cfg = vllm_sampler.VllmConfig(return_logprobs=True, num_logprobs=4)
+    self.assertEqual(obj._vllm_config(cfg)["max_logprobs"], 4)
+    obj.config.num_logprobs = 2
+    out = obj(None, 4, prompt_token_ids=[[1, 2], [3, 4]])
+    params = obj.llm.generate.call_args.kwargs["sampling_params"]
+    self.assertEqual(params.logprobs, 2)
+    self.assertLen(out.topk_token_ids, 2)
+    for ids, logps in zip(out.topk_token_ids, out.topk_logprobs):
+      # The fake engine returns one candidate per position; the rest is
+      # padding.
+      np.testing.assert_array_equal(ids, [[7, 0], [0, 0]])
+      np.testing.assert_array_equal(
+          logps, [[-0.25, -np.inf], [-0.75, -np.inf]]
+      )
+
+    # return_logprobs=False still returns top-k when num_logprobs > 1, while
+    # per-call num_logprobs=1 skips top-k (e.g. eval rollouts).
+    obj.config.return_logprobs = False
+    out_no_sampled = obj(None, 4, prompt_token_ids=[[1, 2]])
+    self.assertIsNone(out_no_sampled.logprobs)
+    self.assertLen(out_no_sampled.topk_token_ids, 1)
+    np.testing.assert_array_equal(
+        out_no_sampled.topk_token_ids[0], [[7, 0], [0, 0]]
+    )
+
+    out_eval = obj(
+        None,
+        4,
+        prompt_token_ids=[[1, 2]],
+        return_logprobs=False,
+        num_logprobs=1,
+    )
+    eval_params = obj.llm.generate.call_args.kwargs["sampling_params"]
+    self.assertEqual(eval_params.logprobs, 0)
+    self.assertIsNone(out_eval.logprobs)
+    self.assertIsNone(out_eval.topk_token_ids)
+    self.assertIsNone(out_eval.topk_logprobs)
+
+  def test_invalid_token_inputs_fail_before_submission(self):
+    for kwargs in (
+        {"input_strings": "text", "prompt_token_ids": [[1]]},
+        {"input_strings": None},
+        {"input_strings": None, "prompt_token_ids": [[1]], "n": 2},
+        {"input_strings": None, "prompt_token_ids": [[1] * 62]},
+    ):
+      obj = self._sampler()
+      with self.assertRaises(ValueError):
+        obj(max_generation_steps=4, **kwargs)
+      obj.llm.generate.assert_not_called()
+
+  def test_string_stops_enable_engine_detokenization_before_clone(self):
+    for config_stop in (False, True):
+      with self.subTest(config_stop=config_stop):
+        obj = self._sampler()
+        stop_kwargs = {"stop": ["</function>"]}
+        if config_stop:
+          obj.config.sampling_kwargs = stop_kwargs
+        obj(
+            None,
+            4,
+            prompt_token_ids=[[1, 2]],
+            routed_experts_prompt_start=[0],
+            **({} if config_stop else stop_kwargs),
+        )
+        params = obj.llm.generate.call_args.kwargs["sampling_params"][0]
+        # clone() runs vLLM's real validation and used to reject this request.
+        self.assertTrue(params.clone().detokenize)
+        self.assertEqual(params.stop, ["</function>"])
+        self.assertTrue(params.include_stop_str_in_output)
+
+  def test_token_stops_do_not_require_engine_detokenization(self):
+    obj = self._sampler()
+    obj(None, 4, prompt_token_ids=[[1, 2]])
+    params = obj.llm.generate.call_args.kwargs["sampling_params"]
+    self.assertFalse(params.detokenize)
+
+  def test_engine_echo_count_and_duplicate_ids_are_checked(self):
+    for outputs, message in (
+        ([self._result("0", [2, 2]), self._result("1", [1, 1])], "prompt echo"),
+        ([self._result("0", [1, 1])], "result count"),
+        (
+            [self._result("s", [1, 1]), self._result("s", [2, 2])],
+            "duplicate request",
+        ),
+    ):
+      obj = self._sampler()
+      obj.llm.generate = mock.Mock(return_value=outputs)
+      with self.assertRaisesRegex(ValueError, message):
+        obj(None, 4, prompt_token_ids=[[1, 1], [2, 2]])
+
+  def test_text_path_still_encodes(self):
+    obj = self._sampler()
+    obj.tokenizer.encode.side_effect = None
+    obj.tokenizer.encode.return_value = [4, 0, 5]
+    out = obj("ordinary text", 4)
+    obj.tokenizer.encode.assert_called_once_with("ordinary text")
+    np.testing.assert_array_equal(out.prompt_lengths, [3])
+
+  def test_cache_salt_forwarded_in_tokens_prompt(self):
+    obj = self._sampler()
+    obj(
+        None,
+        4,
+        prompt_token_ids=[[1, 2], [3, 4]],
+        cache_salt="policy-v7",
+    )
+    submitted = obj.llm.generate.call_args.kwargs
+    self.assertEqual(
+        submitted["prompts"],
+        [
+            {"prompt_token_ids": [1, 2], "cache_salt": "policy-v7"},
+            {"prompt_token_ids": [3, 4], "cache_salt": "policy-v7"},
+        ],
+    )
+
+  def test_per_prompt_cache_salt_list_forwarded(self):
+    obj = self._sampler()
+    obj(
+        None,
+        4,
+        prompt_token_ids=[[1, 2], [3, 4]],
+        cache_salt=["policy-v1", "policy-v2"],
+    )
+    submitted = obj.llm.generate.call_args.kwargs
+    self.assertEqual(
+        submitted["prompts"],
+        [
+            {"prompt_token_ids": [1, 2], "cache_salt": "policy-v1"},
+            {"prompt_token_ids": [3, 4], "cache_salt": "policy-v2"},
+        ],
+    )
+
+  def test_pause_resume_and_update_params_preserve_active_kv_cache(self):
+    obj = self._sampler()
+    obj._driver = mock.MagicMock()
+    obj._driver.is_paused = False
+    obj._driver.pause_mode = None
+
+    obj.pause(mode="keep", clear_cache=False)
+    obj._driver.pause.assert_called_once_with(
+        mode="keep", clear_cache=False, timeout_s=300.0
+    )
+
+    obj.resume()
+    obj._driver.resume.assert_called_once()
+
+  def test_release_for_training_and_idempotent_delete_cache(self):
+    obj = self._sampler()
+    obj.config.free_kv_cache_during_weight_sync = True
+    obj.config.delete_dst_buffers = True
+    obj.config.partial_rollout = False
+    obj.config.reshard_chunk_size = None
+    obj.config.mapping_config = types.SimpleNamespace(preprocess_src_state=None)
+    obj.to_hf_key_mappings = {"w": ("w", None)}
+    obj.to_hf_transpose_keys = None
+    obj.to_hf_hook_fns = None
+    obj.llm.reset_prefix_cache = mock.Mock()
+    obj.llm.collective_rpc = mock.Mock()
+
+    dst_arr = jax.numpy.ones((2, 2), dtype=jax.numpy.float32)
+    runner = types.SimpleNamespace(
+        state=nnx.State({"w": nnx.Param(dst_arr)}),
+        state_leaves=(dst_arr,),
+        model_config=types.SimpleNamespace(
+            get_total_num_kv_heads=lambda: 1,
+            get_head_size=lambda: 2,
+        ),
+    )
+    obj.llm.llm_engine = types.SimpleNamespace(
+        model_executor=types.SimpleNamespace(
+            driver_worker=types.SimpleNamespace(model_runner=runner)
+        )
+    )
+
+    obj.release_for_training(free_weights=True)
+    self.assertTrue(obj._kv_cache_deleted)
+    self.assertEqual(obj.llm.reset_prefix_cache.call_count, 1)
+    obj.llm.collective_rpc.assert_called_once_with("delete_kv_cache")
+    self.assertTrue(dst_arr.is_deleted())
+    self.assertEqual(obj._model_runner.state_leaves, ())
+
+    # Second delete_cache call is a no-op while _kv_cache_deleted is True.
+    obj.delete_cache()
+    self.assertEqual(obj.llm.collective_rpc.call_count, 1)
+
+    # Restore reallocates KV cache and resets _kv_cache_deleted.
+    new_arr = jax.numpy.ones((2, 2), dtype=jax.numpy.float32) * 2.0
+    obj._model_runner.state = nnx.State({"w": nnx.Param(new_arr)})
+    obj.restore_after_training()
+    self.assertFalse(obj._kv_cache_deleted)
+    obj.llm.collective_rpc.assert_called_with("reinitialize_kv_cache")
+    self.assertEqual(obj._model_runner.state_leaves, (new_arr,))
+
+  def test_flat_dict_runner_state_preserved_on_update_and_refresh(self):
+    obj = self._sampler()
+    obj.to_hf_key_mappings = {"src.w": ("dst.w", None)}
+    obj.to_hf_hook_fns = {}
+    obj.to_hf_transpose_keys = {}
+    obj.config.free_kv_cache_during_weight_sync = False
+    obj.config.partial_rollout = False
+    obj.config.delete_dst_buffers = True
+    obj.config.reshard_chunk_size = None
+    old_dst_w = jax.device_put(np.zeros((2, 2), dtype=np.float32))
+    untouched_cache = jax.device_put(np.ones((3,), dtype=np.float32))
+    non_jax_meta = np.array([1, 2], dtype=np.int32)
+    runner_state = {
+        "dst.w": old_dst_w,
+        "untouched.cache": untouched_cache,
+        "non_jax.meta": non_jax_meta,
+    }
+    runner = types.SimpleNamespace(
+        state=runner_state,
+        state_leaves=runner_state,
+        model=types.SimpleNamespace(),
+        model_config=types.SimpleNamespace(
+            get_total_num_kv_heads=lambda: 1,
+            get_head_size=lambda: 2,
+        ),
+    )
+    obj.llm = types.SimpleNamespace(
+        llm_engine=types.SimpleNamespace(
+            model_executor=types.SimpleNamespace(
+                driver_worker=types.SimpleNamespace(model_runner=runner)
+            )
+        )
+    )
+
+    obj.release_for_training(free_weights=True)
+    self.assertTrue(old_dst_w.is_deleted())
+    self.assertFalse(untouched_cache.is_deleted())
+    self.assertEqual(runner.state_leaves, ())
+
+    obj._update_params_jax(
+        {"src.w": jax.device_put(np.full((2, 2), 5.0, dtype=np.float32))}
+    )
+    obj.restore_after_training()
+
+    self.assertFalse(untouched_cache.is_deleted())
+    self.assertFalse(runner.state["dst.w"].is_deleted())
+    self.assertIsInstance(runner.state_leaves, dict)
+    self.assertIs(runner.state_leaves, runner.state)
+    self.assertIs(runner.state["untouched.cache"], untouched_cache)
+    self.assertIs(runner.state["non_jax.meta"], non_jax_meta)
+    np.testing.assert_allclose(runner.state["dst.w"], 5.0)
+    np.testing.assert_allclose(runner.state["untouched.cache"], 1.0)
+
+  def test_refresh_state_leaves_delegates_to_runner_when_present(self):
+    obj = self._sampler()
+    runner = types.SimpleNamespace(
+        state={"dst.w": jax.numpy.zeros((2, 2), dtype=jax.numpy.float32)},
+        refresh_state_leaves=mock.Mock(),
+    )
+    obj.llm = types.SimpleNamespace(
+        llm_engine=types.SimpleNamespace(
+            model_executor=types.SimpleNamespace(
+                driver_worker=types.SimpleNamespace(model_runner=runner)
+            )
+        )
+    )
+
+    obj.refresh_state_leaves()
+
+    runner.refresh_state_leaves.assert_called_once_with()
+
+  def test_routed_experts_shape_llm_and_driver_paths(self):
+    obj = self._sampler()
+    # return_routed_experts=False -> None.
+    self.assertIsNone(obj.routed_experts_shape())
+
+    obj.config.return_routed_experts = True
+    obj.llm = None
+    obj._driver = None
+    self.assertIsNone(obj.routed_experts_shape())
+
+    # llm.llm_engine path + non-positive top_k -> None.
+    obj.llm = types.SimpleNamespace(
+        llm_engine=types.SimpleNamespace(
+            vllm_config=types.SimpleNamespace(
+                model_config=types.SimpleNamespace(
+                    get_total_num_hidden_layers=lambda: 32,
+                    get_num_experts_per_tok=lambda: 0,
+                )
+            )
+        )
+    )
+    self.assertIsNone(obj.routed_experts_shape())
+
+    obj.llm = types.SimpleNamespace(
+        llm_engine=types.SimpleNamespace(
+            vllm_config=types.SimpleNamespace(
+                model_config=types.SimpleNamespace(
+                    get_total_num_hidden_layers=lambda: 61,
+                    get_num_experts_per_tok=lambda: 8,
+                )
+            )
+        )
+    )
+    self.assertEqual(obj.routed_experts_shape(), (61, 8))
+
+    # _driver.llm_engine path when llm is None (server_mode=True).
+    obj.llm = None
+    obj._driver = types.SimpleNamespace(
+        llm_engine=types.SimpleNamespace(
+            vllm_config=types.SimpleNamespace(
+                model_config=types.SimpleNamespace(
+                    get_total_num_hidden_layers=lambda: 40,
+                    get_num_experts_per_tok=lambda: 6,
+                )
+            )
+        )
+    )
+    self.assertEqual(obj.routed_experts_shape(), (40, 6))
 
 
 if __name__ == "__main__":

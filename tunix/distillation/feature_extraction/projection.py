@@ -52,7 +52,7 @@ class ModelWithFeatureProjection(nnx.Module):
     self.projection_layer = nnx.LinearGeneral(
         feature_shape,
         feature_target_shape,
-        axis=np.arange(len(feature_shape)),
+        axis=np.arange(len(feature_shape)),  # pyrefly: ignore[bad-argument-type]
         rngs=rngs,
     )
 

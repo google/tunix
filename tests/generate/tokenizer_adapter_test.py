@@ -15,6 +15,7 @@
 #
 
 from absl.testing import absltest
+from unittest import mock
 import transformers
 from tunix.generate import tokenizer_adapter as adapter
 
@@ -23,6 +24,21 @@ AutoTokenizer = transformers.AutoTokenizer
 
 
 class TokenizerAdapterTest(absltest.TestCase):
+
+  def test_forwards_wrapped_tokenizer_attributes(self):
+    tokenizer = mock.Mock()
+    tokenizer.encode.return_value = [1, 2, 3]
+    tokenizer.decode.return_value = 'decoded'
+    tokenizer.bos_id.return_value = 11
+    tokenizer.eos_id.return_value = 12
+    tokenizer.pad_id.return_value = 0
+    tokenizer.bos_token = '<bos>'
+    tokenizer.eos_token = '<eos>'
+
+    tokenizer_adapter = adapter.TokenizerAdapter(tokenizer)
+
+    self.assertEqual(tokenizer_adapter.bos_token, '<bos>')
+    self.assertEqual(tokenizer_adapter.eos_token, '<eos>')
 
   def test_hf_tokenizer_adapter(self):
     # Additional assignment to handle google internal logics.

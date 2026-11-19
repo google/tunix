@@ -17,9 +17,8 @@ Tunix supports multiple rollout engines (selected by `rollout_engine`):
 
 - `vanilla`: Tunix-native generation. This option provides the basic inference engine without advanced features.
 - `vllm`: vLLM-backed generation. The vLLM engine is backed by `vllm` and Google supported `tpu-inference` backend.
-- `sglang_jax`: SG-Lang JAX rollout. This is another advanced inference backend from the sglang OSS community.
 
-`vllm` and `sglang` provide better performance with large batch size and agentic RL.
+`vllm` provides better performance with large batch size and agentic RL.
 
 ## Sampling Knobs
 
@@ -29,7 +28,7 @@ These are used by all the rollout engines:
 -   `max_prompt_length`: prompts are padded/truncated to this length.
 -   `temperature`, `top_p`, `top_k`: sampling knobs.
 
-The rollout interface and config live in [Base Rollout](https://github.com/google/tunix/blob/main/rl/rollout/base_rollout.py).
+The rollout interface and config live in [Base Rollout](https://github.com/google/tunix/blob/main/tunix/rl/rollout/base_rollout.py).
 
 This doc focuses on the basic rollout. For tool calling enabled rollout or multi
 turn rollout, please refer to [Agentic RL](agentic_rl.md).
@@ -46,9 +45,9 @@ At a high level:
     (completions) for prompts.
 -   When `rollout_engine="vllm"`, Tunix creates a vLLM-based rollout worker:
     -   Implementation:
-        [vllm_rollout.py](https://github.com/google/tunix/blob/main/rl/rollout/vllm_rollout.py)
+        [vllm_rollout.py](https://github.com/google/tunix/blob/main/tunix/rl/rollout/vllm_rollout.py)
     -   vLLM sampler wrapper:
-        [vllm_sampler.py](https://github.com/google/tunix/blob/main/generate/vllm_sampler.py)
+        [vllm_sampler.py](https://github.com/google/tunix/blob/main/tunix/generate/vllm_sampler.py)
 -   The vLLM engine is initialized (optionally with **dummy/random weights**)
     and then Tunix **synchronizes weights in-memory** from the trainer to vLLM.
     -   Today, vLLM rollout in Tunix supports **in-memory weight sync** (not
@@ -63,15 +62,15 @@ At a high level:
 #### TPU (JAX backend)
 
 1. Direct install from pypi
-```
+```sh
 VLLM_TARGET_DEVICE="tpu" pip install vllm
 pip install tpu-inference
 ```
 
 2. Install and run the docker image
-```
+```sh
 docker pull vllm/vllm-tpu:nightly
-docker run -it local_vllm vllm/vllm-tpu:nightly /bin/bash
+docker run -it --name local_vllm vllm/vllm-tpu:nightly /bin/bash
 ```
 
 #### GPU
@@ -83,7 +82,7 @@ the backend you intend to run.
 ### Choosing vLLM as the Rollout
 
 In the code, rollout engine selection happens in
-[rl_cluster.py](https://github.com/google/tunix/blob/main/rl/rl_cluster.py).
+[rl_cluster.py](https://github.com/google/tunix/blob/main/tunix/rl/rl_cluster.py).
 Setting `cluster_config.rollout_engine="vllm"` enables the vllm rollout/sampler.
 
 ### Configuration knobs
@@ -115,16 +114,32 @@ settings are specific to vLLM:
         coordinate with the other models. For disaggregated setup, users can set
         it to a number close to 1 to make full utilization of the HBM.
 
--   `rollout_vllm_swap_space_size_gb`
-
-    -   CPU swap space (GiB) for KV cache spilling.
-
 -   `rollout_vllm_server_mode`
 
     -   `False`: batch inference mode (`vllm.LLM(...)`).
     -   `True`: in-process engine + driver loop (`VLLMInProcessDriver`). Useful
         for higher-throughput request scheduling leveraging the vLLM continuous
         batching capabilities.
+
+-   `rollout_vllm_server_mode_submission_threshold`
+
+    -   Only applies when `rollout_vllm_server_mode=True`.
+    -   `0`: drain the submission queue immediately when requests arrive.
+    -   `N > 0`: hold queued requests in the in-process driver until at least
+        `N` requests have accumulated, then release them to the vLLM engine in
+        one drain cycle.
+
+-   `rollout_vllm_server_mode_submission_timeout_s`
+
+    -   Only applies when `rollout_vllm_server_mode=True` and used together with
+        `rollout_vllm_server_mode_submission_threshold > 0`.
+    -   Flush timeout (seconds) that bounds how long queued requests wait when
+        **fewer** than `submission_threshold` accumulate. The clock starts when
+        the **first** request of the current window arrives; once it elapses the
+        partial batch is drained even though the threshold was not reached. The
+        clock resets after each drain.
+    -   `0` (default): no timeout — below-threshold requests wait until the
+        threshold is met (previous behavior).
 
 -   `rollout_vllm_async_scheduling`
 
@@ -158,7 +173,7 @@ settings are specific to vLLM:
 #### LoRA
 
 There is a `rollout_vllm_lora_config` field, but note that LoRA support for
-Tunix + vLLM is WIP. Check [vLLM Sampler](https://github.com/google/tunix/blob/main/generate/vllm_sampler.py)
+Tunix + vLLM is WIP. Check [vLLM Sampler](https://github.com/google/tunix/blob/main/tunix/generate/vllm_sampler.py)
 for the latest status.
 
 ### Example: using vLLM rollout in a Python entrypoint
@@ -169,7 +184,7 @@ constructs a `RolloutConfig` with the vLLM fields set.
 Pseudocode (simplified):
 
 ```python
-from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl.rollout import base_rollout
 
 rollout_config = base_rollout.RolloutConfig(
@@ -184,9 +199,11 @@ rollout_config = base_rollout.RolloutConfig(
     rollout_vllm_hbm_utilization=0.2,
     rollout_vllm_tpu_backend_type="jax",
     rollout_vllm_server_mode=False,
+    rollout_vllm_server_mode_submission_threshold=0,
+    rollout_vllm_server_mode_submission_timeout_s=0.0,
 )
 
-cluster_config = rl_cluster_lib.ClusterConfig(
+cluster_config = rl_engine_lib.ClusterConfig(
     role_to_mesh=role_to_mesh,
     rollout_engine="vllm",
     offload_to_cpu=False,
@@ -194,7 +211,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
     rollout_config=rollout_config,
 )
 
-rl_cluster = rl_cluster_lib.RLCluster(
+rl_engine = rl_engine_lib.RLEngine(
     actor=actor_model,
     reference=reference_model,
     tokenizer=tokenizer,
@@ -219,7 +236,6 @@ The CLI support for vLLM rollout engine is WIP.
 
 - Lower `rollout_vllm_hbm_utilization`.
 - Reduce `max_prompt_length` and/or `max_tokens_to_generate`.
-- Increase `rollout_vllm_swap_space_size_gb` (trade-off: may increase latency if swapping occurs).
 
 #### Data parallel issues
 
@@ -230,180 +246,6 @@ The CLI support for vLLM rollout engine is WIP.
 
 - If you see errors about missing key mappings, provide a `rollout_mapping_config` or use a model implementation that exposes mapping helpers.
 - For MaxText-style models, provide `rollout_vllm_additional_config` including a `maxtext_config` entry (required for direct sync).
-
-
-## SGLang
-
-This section explains how Tunix integrates **SGLang-Jax** as the rollout
-(sampling) engine during RL (e.g. GRPO), and how to configure and run it.
-
-### How the integration works
-
-At a high level:
-
--   When `rollout_engine="sglang_jax"`, Tunix creates an SGLang-Jax rollout worker:
-    -   Rollout worker: `tunix/rl/rollout/sglang_jax_rollout.py`
-    -   Sampler wrapper: `tunix/generate/sglang_jax_sampler.py`
--   Tunix initializes an in-process SGLang-Jax `Engine` (`sgl_jax.srt.entrypoints.engine.Engine`).
--   Like the vLLM integration, **SGLang-Jax rollout currently relies on in-memory weight sync**
-    from the trainer to the rollout engine.
-    -   `SglangJaxSampler.load_checkpoint(...)` only supports passing a PyTree of weights; loading
-        rollout weights from a checkpoint path is not implemented yet.
--   Parallelism:
-    -   SGLang-Jax rollout currently derives `tp_size` as the total device count of the rollout
-        mesh (it does not support data-parallel for rollout yet).
-
-### Installation
-
-SGLang-Jax is not installed by default with Tunix. The recommended setup is to
-install Tunix first, then install SGLang-Jax from source:
-
-```sh
-# Install Tunix (see README for options)
-
-# Then install SGLang-Jax
-git clone https://github.com/sgl-project/sglang-jax.git
-cd sglang-jax/python
-pip install -e .
-```
-
-If you see import errors for `sgl_jax`, double-check that you installed the
-`sglang-jax/python` package in the same environment as Tunix.
-
-### Choosing SGLang-Jax as the Rollout
-
-Set `cluster_config.rollout_engine="sglang_jax"`.
-
-Rollout engine selection happens in `tunix/rl/rl_cluster.py`.
-
-### Configuration knobs
-
-Tunix uses `tunix.rl.rollout.base_rollout.RolloutConfig` for rollout settings.
-In addition to the common sampling parameters, the following fields are specific
-to SGLang-Jax:
-
--   `rollout_sglang_jax_model_version`
-
-    -   Model id or local path used by SGLang-Jax as `model_path`.
-    -   Note: Tunix still syncs weights in-memory; this value is primarily used
-        to bootstrap the engine.
-
--   `rollout_sglang_jax_context_length`
-
-    -   Passed to SGLang-Jax as `context_length`.
-    -   Recommendation: set this explicitly to your model context length to
-        avoid surprises.
-
--   `rollout_sglang_jax_mem_fraction_static`
-
-    -   Fraction of accelerator memory reserved for static allocations
-        (weights + runtime buffers) in SGLang-Jax.
-
--   `rollout_sglang_jax_init_with_random_weights`
-
-    -   If `True`, Tunix asks SGLang-Jax to use dummy/random weights during
-        engine initialization (`load_format="dummy"`), then relies on in-memory
-        weight sync.
-
--   `rollout_sglang_jax_disable_radix_cache`
-
-    -   Disables SGLang's radix cache.
-    -   Recommended for RL-style training where the rollout weights are updated
-        frequently (in-memory weight sync). Cached prefix states may no longer
-        match the new weights, so disabling the cache avoids stale reuse.
-
--   `rollout_sglang_jax_enable_deterministic_sampling`
-
-    -   Enables deterministic sampling mode in SGLang-Jax.
-
--   `rollout_sglang_jax_precompile_bs_paddings`, `rollout_sglang_jax_precompile_token_paddings`
-
-    -   Optional “bucket sizes” to precompile common batch sizes / token lengths.
-    -   Useful to reduce JIT/compile overhead when rollout shapes vary.
-
--   `rollout_sglang_jax_chunked_prefill_size`
-
-    -   Enables chunked prefill when set to a positive value.
-    -   Set to `-1` to disables chunked prefill.
-
--   `rollout_sglang_jax_page_size`
-
-    -   Number of tokens per KV-cache page.
-
-#### Weight mapping
-
-SGLang-Jax rollout uses the same `rollout_mapping_config` field as vLLM.
-Internally, Tunix builds a `MappingConfig` via
-`tunix.generate.mappings.MappingConfig.build(..., backend="sglang_jax")`.
-
-If mappings are missing, weight sync will fail. The model implementations in
-Tunix ship SGLang-Jax mappings.
-
-### Example: using SGLang-Jax rollout in a Python entrypoint
-
-Pseudocode (simplified):
-
-```python
-from tunix.rl import rl_cluster as rl_cluster_lib
-from tunix.rl.rollout import base_rollout
-
-rollout_config = base_rollout.RolloutConfig(
-    max_tokens_to_generate=768,
-    max_prompt_length=256,
-    temperature=0.9,
-    top_p=1.0,
-    top_k=50,
-    rollout_sglang_jax_model_version="meta-llama/Llama-3.2-1B-Instruct",
-    rollout_sglang_jax_context_length=4096,
-    rollout_sglang_jax_mem_fraction_static=0.2,
-    rollout_sglang_jax_init_with_random_weights=True,
-    rollout_sglang_jax_disable_radix_cache=True,
-    rollout_sglang_jax_enable_deterministic_sampling=False,
-    rollout_sglang_jax_precompile_bs_paddings=[8],
-    rollout_sglang_jax_precompile_token_paddings=[2048],
-    rollout_sglang_jax_chunked_prefill_size=2048,
-    rollout_sglang_jax_page_size=64,
-)
-
-cluster_config = rl_cluster_lib.ClusterConfig(
-    role_to_mesh=role_to_mesh,
-    rollout_engine="sglang_jax",
-    offload_to_cpu=False,
-    training_config=training_config,
-    rollout_config=rollout_config,
-)
-```
-
-For a concrete example in this repo, `scripts/grpo_demo_llama3_qwen2.py`
-supports `--rollout-engine sglang_jax`.
-
-### Troubleshooting
-
-#### ImportError: `sgl_jax` not found
-
-- Ensure SGLang-Jax is installed (`pip install -e .` from `sglang-jax/python`).
-- Ensure you installed it into the same Python environment used to run Tunix.
-
-#### `max_generation_steps` exceeds `context_length`
-
-- SGLang-Jax requires `max_tokens_to_generate <= rollout_sglang_jax_context_length`.
-  Increase `rollout_sglang_jax_context_length` or lower `max_tokens_to_generate`.
-
-#### Out-of-memory (HBM)
-
-- Lower `rollout_sglang_jax_mem_fraction_static`.
-- Reduce `max_prompt_length` and/or `max_tokens_to_generate`.
-- Consider enabling chunked prefill via `rollout_sglang_jax_chunked_prefill_size`.
-
-#### Weight sync / mapping errors
-
-- Provide a correct `rollout_mapping_config` or use a model that ships SGLang-Jax mappings.
-
-#### Logprobs are missing
-
-- The current SGLang-Jax sampler wrapper does not populate token-level logprobs.
-  If your algorithm needs logprobs, compute them via the trainer model (or add
-  logprob plumbing to the sampler).
 
 
 ## Vanilla
@@ -474,7 +316,7 @@ Vanilla rollout uses:
 Pseudocode (simplified):
 
 ```python
-from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl.rollout import base_rollout
 
 max_prompt_length = 256
@@ -490,7 +332,7 @@ rollout_config = base_rollout.RolloutConfig(
     # eos_tokens=[...],  # optional
 )
 
-cluster_config = rl_cluster_lib.ClusterConfig(
+cluster_config = rl_engine_lib.ClusterConfig(
     role_to_mesh=role_to_mesh,
     rollout_engine="vanilla",
     offload_to_cpu=False,
@@ -516,4 +358,87 @@ cluster_config = rl_cluster_lib.ClusterConfig(
 - Reduce `kv_cache_size` (KV cache scales with batch size and `kv_cache_size`).
 - Reduce `max_prompt_length` and/or `max_tokens_to_generate`.
 
+## Mock
 
+This section explains how to use the `MockRollout` engine, which is useful for
+testing and performance benchmarking the RL pipeline infrastructure (especially
+the trainer side) without requiring heavy model weights or accelerator hardware.
+
+### How the integration works
+
+At a high level:
+
+- When `rollout_engine=mock_rollout.MockRollout` (or a `functools.partial` wrapping it), Tunix uses `MockRollout` instead of a real inference engine.
+- **Text Generation**: It generates random sequences of words from a dummy list.
+- **Latency Simulation**: It sleeps for a random duration between `min_generation_time`
+    and `max_generation_time` to simulate inference delay.
+- **Tensors**: It returns arrays of zeros for logits and log probabilities as NumPy
+    arrays. This keeps the data on the **host** (CPU) memory and avoids device
+    memory allocation, making the mock extremely lightweight.
+- **RNG Seeding**: If a seed is provided in `rollout_config`, it is used to
+    initialize the RNG in `__init__`, ensuring that successive calls to `generate`
+    advance the state but remain deterministic as a sequence.
+
+### Choosing mock as the Rollout
+
+Pass `mock_rollout.MockRollout` or `functools.partial(mock_rollout.MockRollout, **kwargs)` to `rollout_engine`.
+
+Rollout engine selection happens in `tunix/rl/rl_cluster.py`.
+
+### Configuration knobs
+
+In addition to common sampling parameters in `RolloutConfig`, you can pass these directly as `kwargs` to `MockRollout` (or via `functools.partial`):
+
+- `min_generation_time`: Minimum sleep time in seconds.
+- `max_generation_time`: Maximum sleep time in seconds.
+- `length_distribution`: The distribution type for mock generated sequence lengths. Supported modes:
+    - `"uniform"`: Random length. Defaults to full range `[1, max_tokens]`. **Best for**: Broad testing of load and handling varying lengths without specific distribution assumptions.
+    - `"normal"`: Bell curve. Defaults to `mean = max_tokens / 2`. **Best for**: Testing scenarios where lengths are expected to cluster around a typical response length.
+    - `"skewed"`: Right-skewed. Defaults to `mean = max_tokens / 4`. **Best for**: Simulating realistic LLM behavior where most responses are short but a few are very long.
+    - `"fixed"`: Exactly `mean` tokens. **Best for**: Deterministic testing or benchmarking specific fixed workloads.
+- `length_mean`: Optional float to override the default mean for the distribution.
+- `length_std`: Optional float to override the default standard deviation for the distribution.
+
+Note: While `MockRollout` itself can operate without a full `RolloutConfig`, the
+`RLEngine` requires a `rollout_config` to be present in `ClusterConfig`.
+Essential fields like `max_tokens_to_generate` and `max_prompt_length` from
+`RolloutConfig` are used by `MockRollout` to determine the size of generated
+outputs.
+
+### Example: using mock rollout in a Python entrypoint
+
+```python
+import functools
+from tunix.rl import rl_cluster as rl_engine_lib
+from tunix.rl.rollout import base_rollout
+from tunix.rl.rollout import mock_rollout
+
+# Optional: define mock-specific kwargs via partial
+mock_engine_cls = functools.partial(
+    mock_rollout.MockRollout,
+    min_generation_time=2,
+    max_generation_time=20,
+    length_distribution="normal",
+)
+
+rollout_config = base_rollout.RolloutConfig(
+    max_tokens_to_generate=768, # Specify to override default
+    max_prompt_length=256,  # Specify to override default
+    # Other common rollout config fields can be set here,
+    # but are not strictly used by MockRollout beyond length constraints.
+)
+
+cluster_config = rl_engine_lib.ClusterConfig(
+    role_to_mesh=role_to_mesh,
+    rollout_engine=mock_engine_cls,
+    training_config=training_config,
+    rollout_config=rollout_config,
+)
+
+rl_engine = rl_engine_lib.RLEngine(
+    actor=actor_model,
+    reference=reference_model,
+    tokenizer=tokenizer,
+    cluster_config=cluster_config,
+)
+```

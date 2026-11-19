@@ -59,7 +59,7 @@ def _create_mock_spans():
   actor_train_groups = [g_actor]
 
   return (
-      g_global_step,
+      [g_global_step],
       rollout_spans,
       refer_inference_spans,
       actor_train_groups,
@@ -96,6 +96,24 @@ class PerfettoTraceWriterTest(absltest.TestCase):
         cm.output[0],
     )
     self.assertIn("Permission denied", cm.output[0])
+
+  @mock.patch.object(os, "makedirs", autospec=True)
+  def test_init_with_gcs_path_logs_error(self, mock_makedirs):
+    with self.assertLogs(level="ERROR") as cm:
+      writer = perfetto.PerfettoTraceWriter("gs://my-bucket/test_dir")
+    self.assertIsNone(writer._trace_file_path)
+    self.assertLen(cm.output, 1)
+    self.assertIn(
+        "Failed to initialize perfetto trace writer. Skipping trace dumping"
+        " for this run.",
+        cm.output[0],
+    )
+    self.assertIn(
+        "GCS paths are not supported for perfetto trace dumping in"
+        " PerfettoTraceWriter v1: gs://my-bucket/test_dir",
+        cm.output[0],
+    )
+    mock_makedirs.assert_not_called()
 
   @mock.patch.object(os, "makedirs", autospec=True)
   @mock.patch.object(builtins, "open", autospec=True)
@@ -137,7 +155,8 @@ class PerfettoTraceWriterTest(absltest.TestCase):
 
     writer.log_trace(*_create_mock_spans())
 
-    # Metadata (5) (Global + 4 Tracks) + Main (12) + Rollout (2) + Refer (2) + Actor (4) = 25
+    # Metadata (5) (Global + Main + Rollout + Reference + Actor)
+    # + Merged Main (12) + Rollout (2) + Refer (2) + Actor (4) = 25
     self.assertLen(captured_packets, 25)
 
     # Helper to simplify assertions
@@ -170,11 +189,12 @@ class PerfettoTraceWriterTest(absltest.TestCase):
     with self.subTest("Metadata"):
       assert_global_track(captured_packets[0])
       assert_metadata(captured_packets[1], "Main", 1)
-      assert_metadata(captured_packets[2], "Rollout", 2)
-      assert_metadata(captured_packets[3], "Reference", 3)
-      assert_metadata(captured_packets[4], "Actor", 4)
+      # Main -- thread 0 should NOT be created if merge succeeds
+      assert_metadata(captured_packets[2], "Rollout", 2000)
+      assert_metadata(captured_packets[3], "Reference", 2001)
+      assert_metadata(captured_packets[4], "Actor", 2002)
 
-    with self.subTest("Main Track"):
+    with self.subTest("Merged Main Track"):
       # global_step
       assert_slice(captured_packets[5], SliceBegin, 1, 0, "global_step")
       assert_slice(captured_packets[6], SliceEnd, 1, 10_000_000_000)
@@ -201,29 +221,40 @@ class PerfettoTraceWriterTest(absltest.TestCase):
       assert_slice(captured_packets[16], SliceEnd, 1, 9_000_000_000)
 
     with self.subTest("Rollout Track"):
-      assert_slice(captured_packets[17], SliceBegin, 2, 0, "rollout")
-      assert_slice(captured_packets[18], SliceEnd, 2, 4_000_000_000)
+      assert_slice(captured_packets[17], SliceBegin, 2000, 0, "rollout")
+      assert_slice(captured_packets[18], SliceEnd, 2000, 4_000_000_000)
 
     with self.subTest("Reference Track"):
       assert_slice(
-          captured_packets[19], SliceBegin, 3, 4_000_000_000, "refer_inference"
+          captured_packets[19],
+          SliceBegin,
+          2001,
+          4_000_000_000,
+          "refer_inference",
       )
-      assert_slice(captured_packets[20], SliceEnd, 3, 6_000_000_000)
+      assert_slice(captured_packets[20], SliceEnd, 2001, 6_000_000_000)
 
     with self.subTest("Actor Track"):
       # actor_training
       assert_slice(
-          captured_packets[21], SliceBegin, 4, 6_000_000_000, "actor_training"
+          captured_packets[21],
+          SliceBegin,
+          2002,
+          6_000_000_000,
+          "actor_training",
       )
-      assert_slice(captured_packets[22], SliceEnd, 4, 9_000_000_000)
+      assert_slice(captured_packets[22], SliceEnd, 2002, 9_000_000_000)
       # peft_train_step
       assert_slice(
-          captured_packets[23], SliceBegin, 4, 6_000_000_000, "peft_train_step"
+          captured_packets[23],
+          SliceBegin,
+          2002,
+          6_000_000_000,
+          "peft_train_step",
       )
-      assert_slice(captured_packets[24], SliceEnd, 4, 9_000_000_000)
+      assert_slice(captured_packets[24], SliceEnd, 2002, 9_000_000_000)
 
     mock_builder.serialize.assert_called_once()
-    mock_open.return_value.write.assert_called_once()
 
 
 if __name__ == "__main__":

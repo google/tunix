@@ -15,13 +15,9 @@
 """Agent implementation for single-turn interactions."""
 
 import copy
-import logging
 
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
-
-
-logger = logging.getLogger(__name__)
 
 
 class ModelAgent(base_agent.ConversationAgentBase):
@@ -41,8 +37,19 @@ class ModelAgent(base_agent.ConversationAgentBase):
 
     # 2. Record the Step (observation uses the cache from the last env
     # feedback).
+    prev = (
+        self.trajectory.steps[-1].chat_completions
+        if self.trajectory.steps
+        else []
+    )
     step = agent_types.Step(
-        chat_completions=copy.deepcopy(self.chat_completions),
+        chat_completions=[
+            *prev,
+            *(
+                copy.deepcopy(msg)
+                for msg in self.chat_completions[len(prev) :]
+            ),
+        ],
         action=agent_types.Action(action=response),
         model_response=response,
     )

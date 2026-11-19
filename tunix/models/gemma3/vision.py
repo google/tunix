@@ -29,8 +29,6 @@ import numpy as np
 from tunix.utils import compat
 from tunix.utils import sharding_utils
 
-TOKEN_PLACEHOLDER = 262144
-
 
 @dataclasses.dataclass(slots=True, frozen=True)
 class SigLIPShardingConfig:
@@ -84,9 +82,14 @@ class SigLIPConfig:
 
   num_mm_tokens_per_image_prepool: int = 4096
   num_mm_tokens_per_image: int = 256
+
+  # Processor args
   image_height: int = 896
   image_width: int = 896
   image_channels: int = 3
+  image_mean: tuple[float, ...] = (127.5, 127.5, 127.5)
+  image_std: tuple[float, ...] = (127.5, 127.5, 127.5)
+  soft_token_placeholder: int = 219
 
   patch_size: tuple[int, int] = (14, 14)
   width: int = 1152
@@ -106,7 +109,7 @@ class VisionAttention(nnx.Module):
       dropout: float = 0.0,
       *,
       rngs: nnx.Rngs,
-      dtype_mm: jnp.dtype = jnp.float32,
+      dtype_mm: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       shd_config: SigLIPShardingConfig | None = None,
   ):
     self.hidden_dim = hidden_dim
@@ -170,7 +173,7 @@ class VisionAttention(nnx.Module):
         param_dtype=dtype_mm,
         rngs=rngs,
     )
-    self.dropout = nnx.Dropout(rate=dropout)
+    self.dropout = nnx.Dropout(rate=dropout, deterministic=False)
 
     self.shd_config = shd_config
 
@@ -223,7 +226,7 @@ class MlpBlock(nnx.Module):
       rngs: nnx.Rngs,
       mlp_dim: int | None = None,  # Defaults to 4x input dim
       dropout: float = 0.0,
-      dtype_mm: jnp.dtype = jnp.float32,
+      dtype_mm: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       shd_config: SigLIPShardingConfig | None = None,
   ):
     self.block_id = block_id
@@ -246,7 +249,7 @@ class MlpBlock(nnx.Module):
         param_dtype=self.dtype_mm,
         rngs=rngs,
     )
-    self.dropout = nnx.Dropout(rate=self.dropout_rate)
+    self.dropout = nnx.Dropout(rate=self.dropout_rate, deterministic=False)
     self.fc2 = nnx.Linear(
         mlp_dim,
         self.width,
@@ -277,7 +280,7 @@ class MlpBlock(nnx.Module):
     Returns:
       The output tensor.
     """
-    x = self.fc1(x)
+    x = self.fc1(x)  # pyrefly: ignore[bad-argument-type]
     x = nnx.gelu(x, approximate=True)
 
     if self.shd_config:
@@ -305,7 +308,7 @@ class Encoder1DBlock(nnx.Module):
       num_heads: int = 12,
       dropout: float = 0.0,
       rngs: nnx.Rngs,
-      dtype_mm: jnp.dtype = jnp.float32,
+      dtype_mm: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       shd_config: SigLIPShardingConfig | None = None,
   ):
     self.ln1 = nnx.LayerNorm(
@@ -327,8 +330,9 @@ class Encoder1DBlock(nnx.Module):
         dropout=dropout,
         dtype_mm=dtype_mm,
         rngs=rngs,
+        shd_config=shd_config,
     )
-    self.dropout = nnx.Dropout(rate=dropout)
+    self.dropout = nnx.Dropout(rate=dropout, deterministic=False)
     self.ln2 = nnx.LayerNorm(
         num_features=width,
         epsilon=1e-6,
@@ -396,7 +400,7 @@ class Encoder(nnx.Module):
       num_heads: int = 12,
       dropout: float = 0.0,
       rngs: nnx.Rngs,
-      dtype_mm: jnp.dtype = jnp.float32,
+      dtype_mm: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       shd_config: SigLIPShardingConfig | None = None,
   ):
     self.blocks = compat.ModuleList([
@@ -478,7 +482,7 @@ class ViTModel(nnx.Module):
       num_heads: int = 16,
       dropout: float = 0.0,
       rngs: nnx.Rngs,
-      dtype_mm: jnp.dtype = jnp.float32,
+      dtype_mm: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       shd_config: SigLIPShardingConfig | None = None,
   ):
     self.embedding = nnx.Conv(
@@ -511,7 +515,7 @@ class ViTModel(nnx.Module):
         sharding=shd_config.emb_pos_kernel if shd_config else (),
     )
 
-    self.dropout = nnx.Dropout(rate=dropout)
+    self.dropout = nnx.Dropout(rate=dropout, deterministic=False)
 
     self.transformer = Encoder(
         width=width,
@@ -593,7 +597,7 @@ class VisionExit(nnx.Module):
     Returns:
       The output tensor.
     """
-    cur_length = x.shape[1]
+    cur_length = x.shape[1]  # pyrefly: ignore[missing-attribute]
     if cur_length == self.output_length:
       return x
 
@@ -616,7 +620,7 @@ class SigLiP(nnx.Module):
       *,
       apply_stop_gradient: bool = True,
       rngs: nnx.Rngs | None = None,
-      dtype_mm: jnp.dtype = jnp.float32,
+      dtype_mm: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       shd_config: SigLIPShardingConfig | None = None,
   ):
     if rngs is None:
@@ -656,7 +660,7 @@ class SigLiP(nnx.Module):
     Returns:
       The output tensor.
     """
-    b, n, _, _, _ = images.shape
+    b, n, _, _, _ = images.shape  # pyrefly: ignore[missing-attribute]
 
     flattened_images = einops.rearrange(images, "b n h w c -> (b n) h w c")
     soft_tokens = self.siglip_encoder(flattened_images)
@@ -666,7 +670,7 @@ class SigLiP(nnx.Module):
         != self.config.num_mm_tokens_per_image
     ):
       soft_tokens = self.siglip_exit(soft_tokens)
-      assert soft_tokens.shape[-2] == self.siglip_exit.output_length
+      assert soft_tokens.shape[-2] == self.siglip_exit.output_length  # pyrefly: ignore[missing-attribute]
 
     soft_tokens = einops.rearrange(
         soft_tokens, "(b n) ... -> b n ...", b=b, n=n

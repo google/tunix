@@ -1,0 +1,126 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Rollout worker script that hosts a vLLM server and serves generation requests."""
+
+import argparse
+import asyncio
+import logging
+import pickle
+from typing import Sequence
+
+from transformers import AutoConfig  # pylint: disable=g-importing-member
+from transformers import AutoTokenizer  # pylint: disable=g-importing-member
+from tunix.dist_rl.common import test_utils as mocks
+from tunix.dist_rl.distributed.runtime.context import ProcessContext  # pylint: disable=g-importing-member
+from tunix.dist_rl.rollout import inprocess_vllm_sampler as inprocess_sampler_lib
+from tunix.dist_rl.weight_sync import weight_sync
+from tunix.dist_rl.worker import remote_execution
+from tunix.dist_rl.worker import rollout_worker
+
+
+def main(argv: Sequence[str], context: ProcessContext | None) -> None:
+  """Main entry point for the rollout worker process.
+
+  Args:
+    argv: Command-line arguments.
+    context: Process context for IPC discovery and distributed execution.
+  """
+  parser = argparse.ArgumentParser()
+  parser.add_argument(
+      "--model_name",
+      type=str,
+      default="Qwen/Qwen2.5-0.5B",
+      help="Name or path of the model to serve.",
+  )
+  parser.add_argument(
+      "--worker_id",
+      type=str,
+      default="",
+      help="Unique identifier for this rollout worker.",
+  )
+  parser.add_argument(
+      "--service_port",
+      type=int,
+      default=11111,
+      help="Port for the gRPC remote execution server.",
+  )
+  args = parser.parse_args(argv)
+
+  # Suppress noisy HTTP request logs from openai and httpx.
+  logging.getLogger("openai").setLevel(logging.WARNING)
+  logging.getLogger("httpx").setLevel(logging.WARNING)
+
+  tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+  if tokenizer is None:
+    raise ValueError(f"No tokenizer found for {args.model_name!r}.")
+  config = rollout_worker.RolloutConfig(
+      weight_sync_mode=weight_sync.WeightSyncMode.IN_MEMORY,
+      max_tokens_to_generate=128,
+      temperature=0.0,
+      # Serve the model's full context, as vLLM does when `max_model_len` is
+      # unset.
+      kv_cache_size=AutoConfig.from_pretrained(
+          args.model_name
+      ).max_position_embeddings,
+      rollout_vllm_model_version=args.model_name,
+      rollout_vllm_server_mode=True,
+      rollout_vllm_hbm_utilization=0.5,
+      rollout_vllm_tpu_backend_type="jax",
+      rollout_vllm_async_scheduling=True,
+      tensor_parallel_size=1,
+      data_parallel_size=1,
+  )
+  sampler_server = inprocess_sampler_lib.InprocessVllmSampler(
+      server_id="vllm-0",
+      tokenizer=tokenizer,
+      config=config,
+  )
+  sampler_server.initialize()
+
+  worker_service = rollout_worker.RolloutWorker(
+      worker_id=args.worker_id,
+      config=config,
+      sampler=sampler_server,
+      env_name="mock_env",
+      agent_name="mock_agent",
+      tokenizer=tokenizer,
+      chat_parser=mocks.MockChatParser(),
+  )
+
+  async def execution_server_main() -> None:
+    """Starts the remote execution server and registers with discovery."""
+    server = remote_execution.GrpcRemoteExecutionServer(worker_service)
+    await server.start_serving_async(args.service_port)
+
+    if context and context.ipc and context.ipc.discovery:
+      context.ipc.discovery.register(
+          metadata=pickle.dumps({
+              "service_type": "rollout",
+              "service_port": args.service_port,
+              "worker_id": args.worker_id,
+              "model_name": args.model_name,
+          })
+      )
+
+    logging.info("rollout worker is ready at port %d.", args.service_port)
+    try:
+      while True:
+        await asyncio.sleep(1)
+    except asyncio.CancelledError:
+      pass
+    finally:
+      await server.stop_serving()
+
+  asyncio.run(execution_server_main())

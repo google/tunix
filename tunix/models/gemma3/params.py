@@ -69,12 +69,12 @@ def _get_param_dtype(
     return default_dtype
 
   if keys[0] == 'vision_encoder':
-    return jnp.float32
+    return jnp.float32  # pyrefly: ignore[bad-return]
 
   if keys[0] == 'embedder':
     # mm_input_projection and mm_soft_embedding_norm
     if len(keys) > 1 and str(keys[1]).startswith('mm_'):
-      return jnp.float32
+      return jnp.float32  # pyrefly: ignore[bad-return]
 
   return default_dtype
 
@@ -83,7 +83,7 @@ def create_model_from_checkpoint(
     checkpoint_path: str,
     model_config: model_lib.ModelConfig,
     mesh: jax.sharding.Mesh | None = None,
-    dtype: jnp.dtype = jnp.bfloat16,
+    dtype: jnp.dtype = jnp.bfloat16,  # pyrefly: ignore[bad-function-definition]
 ) -> model_lib.Gemma3:
   """Load a Gemma3 model from a checkpoint."""
   abs_model = nnx.eval_shape(
@@ -91,7 +91,7 @@ def create_model_from_checkpoint(
   )
   params = ocp.StandardCheckpointer().restore(checkpoint_path)
   params = map_from_upstream_checkpoint(
-      params, text_only=model_config.siglip_config is None
+      params, text_only=model_config.vision_config is None
   )
 
   if mesh is not None:
@@ -371,5 +371,5 @@ def save_lora_merged_model_as_safetensors(
       alpha=alpha,
       state_key_transform_fn=_gemma3_state_key_to_safetensors_key,
       custom_layer_extractor_fn=_extract_gemma3_lora_layers,
-      transpose_rules=_GEMMA3_HUGGINGFACE_TRANSPOSE_RULES,
+      transpose_rules=_GEMMA3_HUGGINGFACE_TRANSPOSE_RULES,  # pyrefly: ignore[bad-argument-type]
   )

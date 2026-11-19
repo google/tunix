@@ -1,8 +1,19 @@
 """Progress bar."""
 
+import sys
+
 from absl import logging
 from tqdm import auto
 from tunix.sft import metrics_logger as ml
+
+
+def _is_in_ipython() -> bool:
+  """Returns True if running in an IPython environment."""
+  ipython = sys.modules.get("IPython")
+  if ipython is not None and hasattr(ipython, "get_ipython"):
+    return ipython.get_ipython() is not None
+  return False
+
 
 tqdm = auto.tqdm
 
@@ -18,7 +29,6 @@ class ProgressBar:
       max_steps: int,
       description: str | None = None,
   ):
-
     # Initialise progress bar.
     self.tqdm_bar = tqdm(
         total=max_steps,
@@ -31,6 +41,8 @@ class ProgressBar:
             "{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, "
             "{rate_fmt}{postfix}]"
         ),
+        # Disable progress bar if not in IPython or TTY.
+        disable=not (_is_in_ipython() or sys.stderr.isatty()),
     )
 
     # Also, initialise a dictionary for metrics.

@@ -15,8 +15,10 @@
 
 import threading
 from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional
+from absl import logging
 
 _POLICY_LOSS_FN_CATEGORY = "policy_loss_fn"
+_VALUE_LOSS_FN_CATEGORY = "value_loss_fn"
 _ADVANTAGE_ESTIMATOR_CATEGORY = "advantage_estimator"
 _REWARD_MANAGER_CATEGORY = "reward_manager"
 
@@ -26,6 +28,7 @@ class FunctionRegistry:
 
   DEFAULT_ALLOWED_CATEGORIES: FrozenSet[str] = frozenset({
       _POLICY_LOSS_FN_CATEGORY,
+      _VALUE_LOSS_FN_CATEGORY,
       _ADVANTAGE_ESTIMATOR_CATEGORY,
       _REWARD_MANAGER_CATEGORY,
   })
@@ -74,9 +77,11 @@ class FunctionRegistry:
           self._registry[category] = {}
 
         if name in self._registry[category]:
-          raise ValueError(
-              f"Function '{name}' is already registered in category"
-              f" '{category}'."
+          logging.warning(
+              "Function '%s' is already registered in category '%s'. "
+              "Overwriting with new function.",
+              name,
+              category,
           )
         self._registry[category][name] = func
       return func
@@ -127,6 +132,11 @@ def register_policy_loss_fn(
   return default_registry.register(_POLICY_LOSS_FN_CATEGORY, name)
 
 
+def list_policy_loss_fns() -> List[str]:
+  """Lists the names of all registered policy loss functions."""
+  return default_registry.list_functions(_POLICY_LOSS_FN_CATEGORY)
+
+
 def get_advantage_estimator(name: str) -> Callable[..., Any]:
   """Returns the advantage estimator function by name."""
   return default_registry.get(_ADVANTAGE_ESTIMATOR_CATEGORY, name)
@@ -139,6 +149,11 @@ def register_advantage_estimator(
   return default_registry.register(_ADVANTAGE_ESTIMATOR_CATEGORY, name)
 
 
+def list_advantage_estimators() -> List[str]:
+  """Lists the names of all registered advantage estimator functions."""
+  return default_registry.list_functions(_ADVANTAGE_ESTIMATOR_CATEGORY)
+
+
 def get_reward_manager(name: str) -> Callable[..., Any]:
   """Returns the reward manager function by name."""
   return default_registry.get(_REWARD_MANAGER_CATEGORY, name)
@@ -149,3 +164,25 @@ def register_reward_manager(
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
   """Returns a decorator to register a reward manager function by name."""
   return default_registry.register(_REWARD_MANAGER_CATEGORY, name)
+
+
+def list_reward_managers() -> List[str]:
+  """Lists the names of all registered reward manager functions."""
+  return default_registry.list_functions(_REWARD_MANAGER_CATEGORY)
+
+
+def get_value_loss_fn(name: str) -> Callable[..., Any]:
+  """Returns the value loss function by name."""
+  return default_registry.get(_VALUE_LOSS_FN_CATEGORY, name)
+
+
+def register_value_loss_fn(
+    name: str,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+  """Returns a decorator to register a value loss function by name."""
+  return default_registry.register(_VALUE_LOSS_FN_CATEGORY, name)
+
+
+def list_value_loss_fns() -> List[str]:
+  """Lists the names of all registered value loss functions."""
+  return default_registry.list_functions(_VALUE_LOSS_FN_CATEGORY)

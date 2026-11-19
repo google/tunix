@@ -95,6 +95,7 @@ def beam_search_step(
     state: _BeamSearchSamplingState,
     pad_token_id: jax.Array,
     decoding_step: int,
+    logprobs_buffer: jax.Array | None = None,
 ) -> tuple[_BeamSearchSamplingState, dict[str, Any]]:
   """Beam search step.
 
@@ -220,6 +221,12 @@ def beam_search_step(
       else None
   )  # (batch_size * beam_size, max_total_len, vocab_size)
 
+  source_logprobs_buffer = (
+      gather_beams_by_indices(logprobs_buffer, gather_indices)
+      if logprobs_buffer is not None
+      else None
+  )  # (batch_size * beam_size, max_total_len)
+
   source_beams_done = gather_beams_by_indices(done, gather_indices)
 
   new_cache = jax.tree.map(
@@ -230,6 +237,18 @@ def beam_search_step(
       next_token_indices.reshape(batch_size * beam_size)
   )
 
+  # Selected log probabilities for the chosen tokens
+  selected_log_probs = log_probs[
+      jnp.arange(batch_size)[:, None],
+      source_beam_indices,
+      next_token_indices,
+  ]
+
+  if source_logprobs_buffer is not None:
+    source_logprobs_buffer = source_logprobs_buffer.at[
+        :, decoding_step + 1
+    ].set(selected_log_probs.reshape(batch_size * beam_size))
+
   return _BeamSearchSamplingState(
       scores=new_scores,
       initialized=True,
@@ -238,6 +257,7 @@ def beam_search_step(
       "cache": new_cache,
       "done": source_beams_done,
       "logits_buffer": source_logits_buffer,
+      "logprobs_buffer": source_logprobs_buffer,
   }
 
 
@@ -245,6 +265,7 @@ def finalize_beam_search_state(
     beam_search_state: _BeamSearchSamplingState,
     token_buffer: jax.Array,
     logits_buffer: jax.Array | None,
+    logprobs_buffer: jax.Array | None = None,
 ) -> dict[str, Any]:
   """Finalize the beam search sampling state.
 
@@ -267,9 +288,18 @@ def finalize_beam_search_state(
       if logits_buffer is not None
       else None
   )
+  logprobs_buffer = (
+      logprobs_buffer.reshape((batch_size, beam_size, -1))
+      if logprobs_buffer is not None
+      else None
+  )
   return {
       "token_buffer": token_buffer[:, 0, ...],
       "logits_buffer": (
           logits_buffer[:, 0, ...] if logits_buffer is not None else None
       ),
+      "logprobs_buffer": (
+          logprobs_buffer[:, 0, ...] if logprobs_buffer is not None else None
+      ),
   }
+

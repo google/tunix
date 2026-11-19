@@ -20,7 +20,7 @@ from typing import Any, Callable
 
 from flax import nnx
 import jax.numpy as jnp
-import safetensors.numpy as safe_np
+import safetensors.flax as safe_flax
 
 
 def join_path(path) -> str:
@@ -69,12 +69,12 @@ def save_lora_merged_model_as_safetensors(
       path_str = join_path(path[:-1])
       if path_str in lora_layers:
         assert (
-            'lora_b' in path[-1]
+            'lora_b' in path[-1]  # pyrefly: ignore[not-iterable]
         ), f'Expect second LoRAParam to be lora_b, got {path[-1]}'
         lora_layers[path_str].append(value)
       else:
         assert (
-            'lora_a' in path[-1]
+            'lora_a' in path[-1]  # pyrefly: ignore[not-iterable]
         ), f'Expect first LoRAParam to be lora_a, got {path[-1]}'
         lora_layers[path_str] = [value]
 
@@ -82,7 +82,7 @@ def save_lora_merged_model_as_safetensors(
     lora_layers = custom_layer_extractor_fn(lora_layers)
 
   # Load base model state
-  base_state = safe_np.load_file(local_model_path + '/model.safetensors')
+  base_state = safe_flax.load_file(local_model_path + '/model.safetensors')
 
   # Apply LoRA deltas
   for path, (lora_a, lora_b) in lora_layers.items():
@@ -115,7 +115,7 @@ def save_lora_merged_model_as_safetensors(
 
   # Save merged model
   safetensors_path = os.path.join(output_dir, 'model.safetensors')
-  safe_np.save_file(base_state, safetensors_path)
+  safe_flax.save_file(base_state, safetensors_path)
 
   # Copy non-safetensors files (config, tokenizer, etc.)
   for filename in os.listdir(local_model_path):

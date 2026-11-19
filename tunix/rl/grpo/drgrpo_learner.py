@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Helper functions for GRPO Trainer."""
+
 import dataclasses
 import jax
+from tunix.rl import algo_core
 from tunix.rl import function_registry
 from tunix.rl import rl_learner
 from tunix.rl.grpo import grpo_learner as grpo_learner_lib
@@ -23,22 +25,7 @@ RewardFn = rl_learner.RewardFn
 MetricFn = rl_learner.MetricFn
 
 
-@function_registry.register_advantage_estimator("drgrpo")
-def compute_advantages(rewards: jax.Array, num_generations: int) -> jax.Array:
-  """Group relative advantages -- done right.
-
-  Args:
-    rewards: reward functions output.
-    num_generations: Number of generations.
-
-  Returns:
-    Group relative advantages.
-  """
-  mean_grouped_rewards = rewards.reshape(-1, num_generations).mean(axis=1)
-  return rewards - mean_grouped_rewards.repeat(num_generations)
-
-
-@dataclasses.dataclass(slots=True, kw_only=True)
+@dataclasses.dataclass(kw_only=True)
 class DrGRPOConfig(grpo_learner_lib.GRPOConfig):
   """Configuration for DrGRPO."""
 

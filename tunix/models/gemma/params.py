@@ -24,13 +24,28 @@ import orbax.checkpoint as ocp
 Params = Mapping[str, Any]
 
 
+def load_and_format_host_params(path: str) -> Params:
+  """Loads checkpoint parameters into host NumPy arrays and formats keys."""
+  with ocp.PyTreeCheckpointer() as checkpointer:
+    item_metadata = checkpointer.metadata(path).item_metadata
+    if item_metadata is None:
+      params = jax.device_get(checkpointer.restore(path))
+    else:
+      tree = item_metadata.tree
+      sharding_tree = jax.tree.map(lambda _: None, tree)
+      restore_args = ocp.checkpoint_utils.construct_restore_args(
+          tree, sharding_tree
+      )
+      params = checkpointer.restore(
+          path,
+          args=ocp.args.PyTreeRestore(item=tree, restore_args=restore_args),
+      )
+  return _unflatten_params(_param_remapper(params))
+
+
 def load_and_format_params(path: str) -> Params:
   """Loads parameters and formats them for compatibility."""
-  params = _load_params(path)
-  param_state = jax.tree.map(jnp.array, params)
-  remapped_params = _param_remapper(param_state)
-  nested_params = _unflatten_params(remapped_params)
-  return nested_params
+  return jax.tree.map(jnp.array, load_and_format_host_params(path))
 
 
 def load_metadata(path: str) -> Any | None:
@@ -38,13 +53,6 @@ def load_metadata(path: str) -> Any | None:
   checkpointer = ocp.StandardCheckpointer()
   metadata = checkpointer.metadata(path)
   return metadata
-
-
-def _load_params(path: str) -> Params:
-  """Loads parameters from a checkpoint path."""
-  checkpointer = ocp.StandardCheckpointer()
-  params = checkpointer.restore(path)
-  return params
 
 
 def _param_remapper(orig_params: Params) -> Params:

@@ -1,0 +1,145 @@
+from typing import Any
+
+from absl.testing import absltest
+from tunix.dist_rl.trajectory import in_memory_store
+from tunix.dist_rl.trajectory import store
+from tunix.dist_rl.trajectory import store_testing
+from tunix.dist_rl.trajectory import trajectory as trajectory_lib
+
+
+class InMemoryTrajectoryReaderTest(store_testing.TrajectoryReaderTestCase):
+  """Contract tests for InMemoryTrajectoryStore's TrajectoryReader implementation."""
+
+  def _create_reader(
+      self,
+      initial_data: (
+          list[
+              tuple[
+                  trajectory_lib.TrajectoryMetadata, list[trajectory_lib.Step]
+              ]
+          ]
+          | None
+      ) = None,
+  ) -> store.TrajectoryReader:
+    mem_store = in_memory_store.InMemoryTrajectoryStore()
+    if initial_data:
+      for meta, steps in initial_data:
+        if not steps:
+          mem_store.update_metadata(meta)
+        for step in steps:
+          mem_store.add_step(step, meta)
+      mem_store.flush()
+    return mem_store
+
+
+class InMemoryTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
+  """Contract tests for InMemoryTrajectoryStore's TrajectoryWriter implementation."""
+
+  def _create_reader_and_writer(
+      self,
+  ) -> tuple[store.TrajectoryReader, store.TrajectoryWriter]:
+    mem_store = in_memory_store.InMemoryTrajectoryStore()
+    return mem_store, mem_store
+
+  def test_update_metadata(self) -> None:
+    """Verifies that updating metadata in-memory updates the stored metadata."""
+    mem_store = in_memory_store.InMemoryTrajectoryStore()
+    meta = trajectory_lib.TrajectoryMetadata(
+        trajectory_id="t1",
+        agent=trajectory_lib.Agent(name="a1", version="1.0"),
+        extra={"status": "RUNNING"},
+    )
+    step = trajectory_lib.Step(
+        step_id=1, source=trajectory_lib.Source.AGENT, message="m1"
+    )
+    mem_store.add_step(step, meta)
+    meta.extra["status"] = "SUCCEEDED"
+    mem_store.update_metadata(meta)
+    read_meta = mem_store.get_trajectories_metadata()["t1"]
+    self.assertEqual(read_meta.extra["status"], "SUCCEEDED")
+
+  def test_metadata_mutation_isolation(self) -> None:
+    """Verifies that mutating returned metadata does not alter internal store state."""
+    mem_store = in_memory_store.InMemoryTrajectoryStore()
+    meta = trajectory_lib.TrajectoryMetadata(
+        trajectory_id="iso_1",
+        agent=trajectory_lib.Agent(name="a1", version="1.0"),
+        notes="initial notes",
+        extra={"count": 1},
+    )
+    step = trajectory_lib.Step(
+        step_id=1, source=trajectory_lib.Source.AGENT, message="m1"
+    )
+    mem_store.add_step(step, meta)
+
+    # Caller mutates the returned metadata
+    read_meta = mem_store.get_trajectories_metadata()["iso_1"]
+    read_meta.notes = "mutated notes"
+    read_meta.extra["count"] = 99
+
+    # Re-reading from store should still reflect original state
+    stored_meta = mem_store.get_trajectories_metadata()["iso_1"]
+    self.assertEqual(stored_meta.notes, "initial notes")
+    self.assertEqual(stored_meta.extra["count"], 1)
+
+  def test_metrics_mutation_isolation(self) -> None:
+    """Verifies that mutating returned metrics does not alter internal store state."""
+    mem_store = in_memory_store.InMemoryTrajectoryStore()
+    metrics = trajectory_lib.TrajectoryMetrics(extra={"tags": ["a", "b"]})
+    mem_store.update_metrics("t1", metrics)
+
+    retrieved = mem_store.get_trajectories_metrics(["t1"])["t1"]
+    self.assertIsNotNone(retrieved.extra)
+    retrieved.extra["tags"].append("c")
+
+    re_read = mem_store.get_trajectories_metrics(["t1"])["t1"]
+    self.assertEqual(re_read.extra["tags"], ["a", "b"])
+
+  def test_add_step_when_caller_mutates_step_preserves_stored_step(
+      self,
+  ) -> None:
+    """Verifies mutating input step after add_step keeps stored step intact."""
+    mem_store = in_memory_store.InMemoryTrajectoryStore()
+    meta = trajectory_lib.TrajectoryMetadata(
+        trajectory_id="step_iso_1",
+        agent=trajectory_lib.Agent(name="a1", version="1.0"),
+    )
+    step = trajectory_lib.Step(
+        step_id=1,
+        source=trajectory_lib.Source.AGENT,
+        message="initial message",
+        extra={"nested": ["v1"]},
+    )
+
+    mem_store.add_step(step, meta)
+    step.message = "mutated message"
+    assert step.extra is not None
+    step.extra["nested"].append("v2")
+
+    stored_traj = mem_store.get_trajectories(["step_iso_1"])["step_iso_1"]
+    self.assertEqual(stored_traj.steps[0].message, "initial message")
+    self.assertEqual(stored_traj.steps[0].extra, {"nested": ["v1"]})
+
+
+class InMemoryTrajectoryStoreMetadataClsTest(
+    store_testing.TrajectoryStoreMetadataClsTestCase
+):
+  """Contract tests for InMemoryTrajectoryStore metadata_cls handling."""
+
+  def _create_store(self) -> store.TrajectoryStore[Any]:
+    return in_memory_store.InMemoryTrajectoryStore()
+
+
+class InMemoryTrajectoryStoreConfigTest(
+    store_testing.TrajectoryStoreConfigTestCase
+):
+  """Config contract tests for InMemoryTrajectoryStore."""
+
+  def _create_config(self) -> dict[str, Any]:
+    return {
+        "backend": "memory",
+    }
+
+
+if __name__ == "__main__":
+  absltest.main()

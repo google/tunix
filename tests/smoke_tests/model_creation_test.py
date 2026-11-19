@@ -12,12 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+import atexit
 import tempfile
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax
 import numpy as np
 from tunix.cli.utils import model
+
+atexit.register(lambda: os._exit(0))
+
 
 
 class ModelIntegrationTest(parameterized.TestCase):
@@ -43,7 +48,7 @@ class ModelIntegrationTest(parameterized.TestCase):
       ),
       dict(
           testcase_name="gemma3_270m",
-          model_name="gemma3-270m",
+          model_name="gemma-3-270m",
           model_source="gcs",
           model_id="google/gemma-3-270m",
           model_path="gs://gemma-data/checkpoints/gemma3-270m-pt",
@@ -54,14 +59,16 @@ class ModelIntegrationTest(parameterized.TestCase):
           ),
       ),
       dict(
-          testcase_name="gemma2_2b_it",
+          testcase_name="gemma-2-2b-it",
           model_name="gemma-2-2b-it",
-          model_source="kaggle",
+          model_source="gcs",
           model_id="google/gemma-2-2b-it",
-          model_path="google/gemma-2/flax/gemma2-2b-it",
+          model_path="gs://gemma-data/checkpoints/gemma2-2b-it",
           tokenizer_path=model._DEFAULT_TOKENIZER_PATH,
           tokenizer_type="sentencepiece",
-          expected_tokenizer_path=r"^/tmp/[^/]+/models/google/gemma-2/flax/gemma2-2b-it/\d+/tokenizer\.model$",
+          expected_tokenizer_path=(
+              r"^gs://gemma-data/tokenizers/tokenizer_gemma2\.model$"
+          ),
       ),
   )
   def test_create_model(
@@ -80,7 +87,7 @@ class ModelIntegrationTest(parameterized.TestCase):
         "model_id": model_id,
         "model_path": model_path,
         "model_download_path": self.download_dir,
-        "intermediate_ckpt_dir": self.download_dir,
+        "intermediate_ckpt_dir": os.path.join(self.download_dir, "intermediate_ckpt"),
         "lora_config": None,
         "model_display": False,
     }

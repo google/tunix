@@ -18,8 +18,8 @@ DEBUG_LEVELS = {
 
 try:
   # This is a g3-only import.
-  from GOOGLE_INTERNAL_PACKAGE_PATH.perftools.accelerators.xprof.api.python import xprof_session  # pytype: disable=import-error
-  from GOOGLE_INTERNAL_PACKAGE_PATH.pyglib import gfile  # pytype: disable=import-error
+  from GOOGLE_INTERNAL_PACKAGE_PATH.perftools.accelerators.xprof.api.python import xprof_session  # pyrefly: ignore[missing-import]
+  from GOOGLE_INTERNAL_PACKAGE_PATH.pyglib import gfile
 
   ENV = 'g3'
 except ImportError:
@@ -43,7 +43,7 @@ def get_dataset(
 ) -> grain.MapDataset:
   """Loads the dataset, from CNS in g3 or downloading in OSS."""
   if ENV == 'g3':
-    with gfile.Open(path, 'rb') as f:
+    with gfile.Open(path, 'rb') as f:  # pyrefly: ignore[missing-attribute]
       data = json.loads(f.read())
   else:  # oss
     if path.startswith('gs://'):

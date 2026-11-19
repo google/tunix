@@ -1,0 +1,643 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Common configuration classes for Tunix."""
+
+from __future__ import annotations
+
+import dataclasses
+import math
+from typing import Any, Optional, TYPE_CHECKING, Tuple
+
+import numpy as np
+from tunix.common import datatypes
+from tunix.generate import mappings
+
+if TYPE_CHECKING:
+  import flax  # pyrefly: ignore[missing-import]
+  import jax  # pyrefly: ignore[missing-import]
+  from jax import numpy as jnp  # pyrefly: ignore[missing-import]
+  from jax.sharding import Mesh  # pyrefly: ignore[missing-import]
+  import optax  # pyrefly: ignore[missing-import]
+  from tunix.perf import metrics as perf_metrics  # pyrefly: ignore[missing-import]
+  from tunix.rl.rollout import base_rollout  # pyrefly: ignore[missing-import]
+  from tunix.sft import checkpoint_options  # pyrefly: ignore[missing-import]
+  from tunix.sft import metrics_logger as sft_metrics_logger  # pyrefly: ignore[missing-import]
+  from tunix.sft import profiler  # pyrefly: ignore[missing-import]
+
+  MetricsLoggerOptions = sft_metrics_logger.MetricsLoggerOptions
+
+# For rl_utils calls inside RLTrainingConfig
+# For base_rollout typing inside ClusterConfig
+
+_VALID_WEIGHT_SYNC_MODES = tuple(
+    mode.value for mode in datatypes.WeightSyncMode
+)
+Mode = datatypes.Mode
+Role = datatypes.Role
+
+
+def _is_positive_integer(value: int | None, name: str):
+  if value is None:
+    return
+  if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+    raise ValueError(f"{name} must be a positive integer. Got: {value}")
+  if value <= 0:
+    raise ValueError(f"{name} must be a positive integer. Got: {value}")
+
+
+def _check_divisibility(small_size, big_size, small_size_name, big_size_name):
+  if big_size % small_size != 0:
+    raise ValueError(
+        f"{big_size_name} must be a multiple of {small_size_name}."
+    )
+
+
+def validate_routed_experts_encode_config(
+    encode_mode: str,
+    num_experts: int | None,
+) -> None:
+  """Validates `routed_experts_encode_mode` and `routed_experts_num_experts`."""
+  if encode_mode not in datatypes.ROUTED_EXPERTS_ENCODE_MODES:
+    raise ValueError(
+        "routed_experts_encode_mode must be one of"
+        f" {datatypes.ROUTED_EXPERTS_ENCODE_MODES}. Received: {encode_mode!r}"
+    )
+  if num_experts is not None and (
+      isinstance(num_experts, bool)
+      or not isinstance(num_experts, int)
+      or int(num_experts) <= 0
+  ):
+    raise ValueError(
+        "routed_experts_num_experts must be a positive int or None."
+        f" Received: {num_experts!r}"
+    )
+
+
+def resolve_seq_tokens_budget(
+    per_device: int | None,
+    per_tpu: int | None,
+) -> int | None:
+  """Validates and resolves `max_seq_tokens_per_device` and `max_seq_token_per_tpu`."""
+  for field_name, val in (
+      ("max_seq_tokens_per_device", per_device),
+      ("max_seq_token_per_tpu", per_tpu),
+  ):
+    if val is not None and (
+        isinstance(val, bool) or not isinstance(val, int) or val < 0
+    ):
+      raise ValueError(
+          f"{field_name} must be a non-negative integer or None, got {val!r}."
+      )
+  per_device = per_device or None
+  per_tpu = per_tpu or None
+  if per_device is not None and per_tpu is not None and per_device != per_tpu:
+    raise ValueError(
+        "max_seq_tokens_per_device and max_seq_token_per_tpu must match when"
+        f" both are set, got {per_device} vs {per_tpu}."
+    )
+  return per_device if per_device is not None else per_tpu
+
+
+CacheConfig = datatypes.CacheConfig
+
+
+@dataclasses.dataclass(kw_only=True)
+class RolloutConfig:
+  """Configuration for the rollout worker.
+
+  Fields should be mapped to a subset of vLLM sampling knobs
+  https://docs.vllm.ai/en/v0.6.4/dev/sampling_params.html
+  """
+
+  # Maximum number of tokens to generate per single-turn output sequence.
+  max_tokens_to_generate: int = 64
+
+  # Optional cumulative response token budget across all turns of a rollout
+  # trajectory.
+  max_response_length: int | None = None
+
+  # Float that controls the randomness of the sampling.
+  # Lower values make the model more deterministic, while higher values make the
+  # model more random. Zero means greedy sampling.
+  temperature: float = 0.9
+
+  # Float that controls the cumulative probability of the top tokens to
+  # consider. Must be in (0, 1]. Set to 1 to consider all tokens.
+  top_p: float | None = 1.0
+
+  # Integer that controls the number of top tokens to consider. Set to -1 to
+  # consider all tokens.
+  top_k: int | None = None
+
+  # Random seed to use for the generation.
+  seed: int | jax.Array | None = None
+
+  # TODO(yatlas): Beam_size is currently only wired into the Vanilla Sampler.
+  # It should be wired into the vLLM sampler as well.
+  # Beam width for beam search decoding.
+  beam_size: int | None = None
+
+  # Maximum length of the prompt. The prompt will be padded/truncated to this
+  # length.
+  max_prompt_length: int = 64
+
+  # TODO(yatlas): Deprecate this field. Switch to
+  # rollout_vanilla_kv_cache_size, and require
+  # rollout_vllm_kwargs['max_model_len'] in the vLLM sampler.
+
+  # KV cache size of the vanilla rollout engine. `VllmRollout` and
+  # `InprocessVllmSampler` use it as vLLM's `max_model_len` unless
+  # `rollout_vllm_kwargs` sets one.
+  kv_cache_size: int = 1024
+
+  # data type of the rollout model.
+  data_type: jnp.dtype | None = None
+
+  # EOS tokens to stop the generation. If not defined, eos_id from tokenizer
+  # will be used.
+  eos_tokens: list[int] | None = None
+
+  # Weights mapping config for the rollout model. If None, derived from the
+  # rollout model when supported.
+  rollout_mapping_config: mappings.MappingConfig | None = None
+
+  # Parallelism configs.
+  tensor_parallel_size: int = -1
+  data_parallel_size: int = -1
+  expert_parallel_size: int = 1
+
+  # Whether to return logprobs from the sampler.
+  return_logprobs: bool = False
+
+  # Number of most likely tokens whose logprobs the vLLM sampler returns per
+  # generated token. Values > 1 also return the `[gen_len, k]` top-k token ids
+  # and log probs used by Score Centering.
+  num_logprobs: int = 1
+
+  # Whether to return output logits from the sampler.
+  return_logits: bool = False
+
+  # Whether to capture the MoE experts each token was routed through, so the
+  # trainer can replay them instead of re-running its own router. MoE models on
+  # a backend that supports capture only; a no-op otherwise.
+  return_routed_experts: bool = False
+
+  # Whether to persist captured prefill MoE routed_experts into the trajectory
+  # store alongside each agent step. Defaults to False to avoid multi-megabyte
+  # tensor writes unless explicitly opted in.
+  store_routed_experts: bool = False
+
+  # Compact encoding mode for captured MoE routed_experts ("auto", "uint8",
+  # "uint10", or "int16").
+  routed_experts_encode_mode: datatypes.RoutedExpertsEncodeMode = "auto"
+
+  # Optional total number of MoE experts per layer (`E > 0`). When set with
+  # `routed_experts_encode_mode="auto"`, selects a deterministic compact tier
+  # (`uint8` for E <= 255, `uint10` for 256 <= E <= 1023, `int16` for E >= 1024)
+  # across all trajectories and validates that captured expert IDs are < E.
+  # Leaving this None when 256 <= E <= 1023 infers the tier per-trajectory from
+  # the observed max expert ID, which can flip batches between 4D uint8 and 5D
+  # uint10 across steps and trigger extra XLA compilations.
+  routed_experts_num_experts: int | None = None
+
+  # Continuous batching engine configs (`rollout_engine='vanilla_v2'`).
+
+  # Whether to run the engine on a background loop, so that prompts submitted
+  # by separate callers share a continuous batch.
+  rollout_vanilla_v2_server_mode: bool = False
+
+  # Only hand queued requests to the engine once at least this many have
+  # accumulated. 0 disables the threshold. Server mode only.
+  rollout_vanilla_v2_server_mode_submission_threshold: int = 0
+
+  # Hand a partial batch to the engine anyway once this many seconds have
+  # elapsed since its first request arrived. 0 disables the timeout. Server
+  # mode only.
+  rollout_vanilla_v2_server_mode_submission_timeout_s: float = 0.0
+
+  # Allocated HBM fraction for the rollout engine, in (0, 1].
+  rollout_vanilla_v2_hbm_utilization: float = 0.2
+
+  # The maximum number of GiB of KV cache to allocate on the host.
+  rollout_vanilla_v2_host_size_gib: float = 0.0
+
+  # The number of tokens per KV cache page.
+  rollout_vanilla_v2_kv_cache_page_size: int = 16
+
+  # Whether requests with a common prefix may share KV cache pages.
+  rollout_vanilla_v2_enable_prefix_caching: bool = True
+
+  # The maximum number of sequences in a batch.
+  rollout_vanilla_v2_max_num_seqs: int = 32
+
+  # The maximum number of tokens in a batch.
+  rollout_vanilla_v2_max_num_batched_tokens: int = 2048
+
+  # The number of prompt tokens prefilled per chunk. Must be a power of 2, at
+  # most `rollout_vanilla_v2_max_num_batched_tokens`.
+  rollout_vanilla_v2_chunked_prefill_length: int = 512
+
+  # The number of model forward passes per engine step.
+  rollout_vanilla_v2_num_scheduler_steps: int = 1
+
+  # Trajectory execution configs.
+  episode_timeout: float = 600.0
+  overlong_filter: bool = False
+
+  # vLLM specific rollout configs.
+
+  # Whether to run rollout in vLLM server mode or batch inference mode.
+  rollout_vllm_server_mode: bool = False
+
+  # Only drain the vLLM server-mode submission queue once at least this many
+  # requests have accumulated. 0 disables the threshold.
+  rollout_vllm_server_mode_submission_threshold: int = 0
+
+  # Flush the vLLM server-mode submission queue after this many seconds have
+  # elapsed since the first request of the current window arrived, even if the
+  # submission threshold has not been reached. This bounds latency when fewer
+  # than the threshold accumulate. 0 disables the timeout.
+  rollout_vllm_server_mode_submission_timeout_s: float = 0.0
+
+  # Model version for vLLM rollout engine.
+  rollout_vllm_model_version: str = ""
+
+  # LoRA config for vLLM rollout engine.
+  rollout_vllm_lora_config: dict[str, Any] | None = None
+
+  # TODO(yatlas): Once the HBM usage fixes land, make this non-optional and
+  # consolidate on a single default here instead of per-sampler defaults.
+  # Allocated HBM fraction for vLLM rollout engine. `None` falls back to each
+  # sampler's default (`0.2` in colocated `VllmRollout`, `0.5` in `dist_rl`'s
+  # `InprocessVllmSampler`, and vLLM's own default in `dist_rl`'s
+  # `VllmSampler`).
+  rollout_vllm_hbm_utilization: float | None = None
+
+  # Whether to initialize vLLM model with random weights or huggingface weights.
+  rollout_vllm_init_with_random_weights: bool = True
+
+  # TPU backend type for vLLM rollout engine, "jax" or "torchax", default to "jax".
+  rollout_vllm_tpu_backend_type: str = "jax"
+
+  # Whether to enable asynchronous scheduling for vLLM rollout engine.
+  rollout_vllm_async_scheduling: bool = False
+
+  # Mode for processing logprobs from vLLM.
+  rollout_vllm_logprobs_mode: str = "processed_logprobs"
+
+  # Configs for MaxText/Custom Model support in vLLM rollout engine.
+  rollout_vllm_hf_config_path: str | None = None
+  rollout_vllm_additional_config: dict[str, Any] | None = None
+
+  # Whether to enable data parallel in attention for vLLM rollout engine.
+  # The "attn_dp" mesh axis is used when the degree of tensor parallelism
+  # specified is more than the number of KV heads in the model. Enabling this
+  # allows for non-attention tensors to be sharded across "attn_dp" and "model"
+  # axes, which can help reduce memory usage for large models with few KV heads.
+  rollout_vllm_enable_dp_attention: bool = False
+
+  # Whether to delete destination buffers when synchronizing weights between
+  # trainer and vLLM model. Default to True to ensure old weights are deleted
+  # to free up HBM memory.
+  rollout_vllm_delete_dst_buffers: bool = True
+
+  # Maximum number of batched tokens allowed in vLLM. This allows for pending prefill requests
+  # to be batched along with decode requests if enough tokens are available. Only used when
+  # chunked prefill is enabled.
+  rollout_vllm_max_num_batched_tokens: Optional[int] = None
+
+  # Maximum number of concurrent sequences allowed to be processed in vLLM.
+  rollout_vllm_max_num_seqs: Optional[int] = None
+
+  # Number of flat keys to reshard at a time when synchronizing weights between
+  # trainer and vLLM model. None (default) reshards the whole model in one call.
+  # Set to a smaller value to reduce peak HBM pressure on large models.
+  rollout_vllm_reshard_chunk_size: Optional[int] = None
+
+  # Whether to free the vLLM KV cache before each weight sync and re-allocate
+  # it afterwards. The sync holds a second copy of the sampler weights on HBM
+  # while resharding; keep True unless that copy fits next to the KV pool, in
+  # which case False skips the two collective RPCs and the re-allocation.
+  rollout_vllm_free_kv_cache_during_weight_sync: bool = True
+
+  # Whether to freeze in-flight trajectories in-place during weight
+  # synchronization instead of draining them to completion first.
+  partial_rollout: bool = False
+
+  # Decode text / extract logprobs of each finished request in a thread pool
+  # while vLLM keeps decoding the rest of the batch (offline and server mode).
+  # Outputs are identical; False post-processes after generation as before.
+  rollout_vllm_overlap_postprocessing: bool = True
+
+  # Additional keyword arguments forwarded directly to the vLLM engine constructor.
+  rollout_vllm_kwargs: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+  # Additional keyword arguments forwarded directly to the vLLM sampling params.
+  rollout_vllm_sampling_kwargs: dict[str, Any] = dataclasses.field(
+      default_factory=dict
+  )
+
+  # Distributed rollout worker & sampler orchestration configs.
+  weight_sync_mode: str = "none"
+
+  def __post_init__(self):
+    _is_positive_integer(self.max_response_length, "max_response_length")
+    validate_routed_experts_encode_config(
+        self.routed_experts_encode_mode, self.routed_experts_num_experts
+    )
+    if (
+        isinstance(self.episode_timeout, bool)
+        or not isinstance(self.episode_timeout, (int, float))
+        or not math.isfinite(self.episode_timeout)
+        or self.episode_timeout <= 0
+    ):
+      raise ValueError(
+          "episode_timeout must be a positive finite number, got"
+          f" {self.episode_timeout!r}."
+      )
+    self.episode_timeout = float(self.episode_timeout)
+    if self.weight_sync_mode not in _VALID_WEIGHT_SYNC_MODES:
+      raise ValueError(
+          f"weight_sync_mode must be one of {_VALID_WEIGHT_SYNC_MODES}, got"
+          f" {self.weight_sync_mode!r}."
+      )
+    if self.num_logprobs < 1:
+      raise ValueError(f"num_logprobs must be >= 1, got {self.num_logprobs}.")
+    if not math.isfinite(self.temperature) or self.temperature < 0:
+      raise ValueError(
+          f"temperature must be a finite number >= 0, got {self.temperature!r}."
+      )
+    if self.top_p is not None and not 0 < self.top_p <= 1:
+      raise ValueError(f"top_p must be in (0, 1], got {self.top_p!r}.")
+    if self.top_k is not None and self.top_k < -1:
+      raise ValueError(f"top_k must be >= -1, got {self.top_k!r}.")
+
+
+@dataclasses.dataclass(slots=True, kw_only=True)
+class RLProfileConfig:
+  """Configuration for targeted Reinforcement Learning profiling.
+
+  This profiler captures discrete execution traces across disaggregated Trainer
+  and Sampler hosts. Unlike monolithic SFT step profiling, it fences execution
+  windows based on discrete function invocations per role (`generate` on
+  samplers,
+  `update_actor` on trainers).
+
+  Attributes:
+    start_invocation: The zero-indexed function call count at which to start
+      profiling for each role. Defaults to 2.
+    num_invocations: The number of function calls to profile for each role once
+      start_invocation is reached. Defaults to 1.
+    output_dir: Location to save raw JAX `.xplane.pb` traces.
+    mldiagnostics_dir: Explicit GCS output directory for ML Diagnostics tracing.
+    managed_mldiagnostics: If True, securely streams traces to the ML
+      Diagnostics visual UI unified under a single MLRun, bypassing local
+      output_dir dumps.
+    timeout_secs: Timeout in seconds for joining background trace deactivation
+      or upload threads. Defaults to 60.0.
+  """
+
+  start_invocation: int = 2
+  num_invocations: int = 1
+  output_dir: str = ""
+  mldiagnostics_dir: str = ""
+  managed_mldiagnostics: bool = False
+  timeout_secs: float = 60.0
+
+  def __post_init__(self):
+    if self.start_invocation < 0:
+      raise ValueError(
+          f"start_invocation must be >= 0. Got: {self.start_invocation}"
+      )
+    if self.num_invocations <= 0:
+      raise ValueError(
+          f"num_invocations must be > 0. Got: {self.num_invocations}"
+      )
+    if math.isnan(self.timeout_secs) or self.timeout_secs <= 0:
+      raise ValueError(f"timeout_secs must be > 0. Got: {self.timeout_secs}")
+
+
+@dataclasses.dataclass(slots=True, kw_only=True)
+class TrainingConfig:
+  """Configuration for the trainer."""
+
+  eval_every_n_steps: int
+  max_steps: int | None = None
+  gradient_accumulation_steps: int | None = None
+
+  # If set, the checkpoints will be saved to this path. Checkpoints
+  # contains the model params and the train data iterator state.
+  checkpoint_root_directory: str | None = None
+  # Checkpoint configurations. If None, the default options will be used.
+  checkpointing_options: checkpoint_options.CheckpointingOptions | None = None
+  # Whether the `__init__` restores from the latest checkpoint on its own.
+  # True to resume from the latest checkpoint. Disabling is only supported in Peft Trainer v2.
+  resume_from_checkpoint_on_init: bool = True
+
+  # Configs for the metrics logger.
+  metrics_logging_options: MetricsLoggerOptions | None = None
+
+  # Configs for the profiler.
+  profiler_options: profiler.ProfilerOptions | None = None
+
+  # Configs for performance metrics.
+  perf_metrics_options: perf_metrics.PerfMetricsOptions | None = None
+
+  data_sharding_axis: Tuple[str, ...] = ("fsdp",)
+
+  # Controls how many train_steps can be scheduled ahead of time.
+  max_inflight_computations: int = 2
+
+  # Prefix for metric names for logging. Not sticking it in
+  # `metrics_logging_options` because the latter is optional.
+  metrics_prefix: str = ""
+
+  # Progress bar description.
+  pbar_description: str | None = "Training"
+
+  # Sequence packing configuration.
+  max_seq_tokens_per_device: int | None = None
+  # TODO(b/583675740): Deprecate max_seq_token_per_tpu in favor of
+  # max_seq_tokens_per_device.
+  # Note: because both fields are synced in `__post_init__`, callers using
+  # `dataclasses.replace` to change one must also pass or clear the other.
+  max_seq_token_per_tpu: int | None = None
+  # Static upper bound on real segments (sequences) per packed row, used to size
+  # the segment-aware loss buckets (num_segments = this + 1 for the padding
+  # bucket). ``None`` defaults to ``max_seq_tokens_per_device`` -- provably safe
+  # (a pack of ``budget`` tokens holds at most ``budget`` unit-length segments)
+  # and needs no tuning. Set a smaller value only to shrink the loss buckets at
+  # very large budgets; ``pack_sequences`` raises if a pack exceeds it.
+  max_segments_per_packed_row: int | None = None
+
+  def __post_init__(self):
+    resolved = resolve_seq_tokens_budget(
+        self.max_seq_tokens_per_device,
+        self.max_seq_token_per_tpu,
+    )
+    self.max_seq_tokens_per_device = resolved
+    self.max_seq_token_per_tpu = resolved
+
+  @property
+  def sequence_packing_enabled(self) -> bool:
+    """Returns True if sequence packing (`max_seq_tokens_per_device > 0`) is enabled."""
+    return is_sequence_packing_enabled(self)
+
+  def get_with_default(self, key: str, default: Any) -> Any:
+    val = getattr(self, key)
+    if val is None:
+      return default
+    return val
+
+
+def is_sequence_packing_enabled(
+    config: Any,
+) -> bool:
+  """Returns True if sequence packing (`max_seq_tokens_per_device > 0`) is enabled."""
+  budget = getattr(config, "max_seq_tokens_per_device", None)
+  return isinstance(budget, int) and not isinstance(budget, bool) and budget > 0
+
+
+@dataclasses.dataclass(slots=True, kw_only=True)
+class RLTrainingConfig(TrainingConfig):
+  """RLTraining config.
+
+  Attributes:
+    actor_optimizer: Optimizer for the actor model.
+    critic_optimizer: Optimizer for the critic model. If None, the critic model
+      will be trained in the same optimizer as the actor model.
+    mini_batch_size: The mini-batch size used for policy weight updates. One
+      mini-batch corresponds to one optimizer update. `mini_batch_size` must be
+      divisible by the global batch size.
+    train_micro_batch_size: The micro-batch size used for gradient accumulation
+      at training time. `train_micro_batch_size` must be divisible by
+      `mini_batch_size`.
+    rollout_micro_batch_size: The micro-batch size used for model rollouts.
+    compute_logps_micro_batch_size: The micro-batch size used for computing log
+      probabilities (e.g. for reference and old policy models).
+    compute_logps_chunk_size: The chunk size used for computing log
+      probabilities. Instead of using final logits from model, where size is [B,
+      T, V], this will use the last hidden output with size [B, T, D] from model
+      and compute logps in a chunked manner. Good values to pick are like 256,
+      512, etc. When value is 0, it means this feature is disabled. This also
+      requires model to support `skip_lm_head` in its `__call__` method and have
+      a `compute_final_logits` method.
+    rl_profiler_config: Configuration for targeted Reinforcement Learning
+      profiling.
+  """
+
+  actor_optimizer: optax.GradientTransformation
+  critic_optimizer: optax.GradientTransformation | None = None
+  mini_batch_size: int | None = None
+  train_micro_batch_size: int | None = None
+  rollout_micro_batch_size: int | None = None
+  compute_logps_micro_batch_size: int | None = None
+  compute_logps_chunk_size: int = 0
+  rl_profiler_config: Optional[RLProfileConfig] = None
+
+  def __post_init__(self):
+    """Validates the configuration after initialization."""
+    # Call TrainingConfig.__post_init__(self) explicitly instead of
+    # super().__post_init__(): in Python <= 3.12, @dataclass(slots=True)
+    # recreates the class without updating the implicit __class__ closure cell
+    # used by zero-arg super() (CPython gh-90562).
+    TrainingConfig.__post_init__(self)
+    if (
+        self.profiler_options is not None
+        and self.rl_profiler_config is not None
+    ):
+      raise ValueError(
+          "Cannot supply both SFT profiler_options and targeted"
+          " rl_profiler_config. Choose one."
+      )
+
+    for name in [
+        "mini_batch_size",
+        "train_micro_batch_size",
+        "rollout_micro_batch_size",
+        "compute_logps_micro_batch_size",
+        "max_segments_per_packed_row",
+    ]:
+      _is_positive_integer(getattr(self, name, None), name)
+
+    if self.gradient_accumulation_steps is not None:
+      raise ValueError(
+          "For RL training, gradient_accumulation_steps should be None. It is "
+          "automatically derived from: "
+          "`mini_batch_size // train_micro_batch_size`."
+      )
+
+    if (
+        self.train_micro_batch_size is not None
+        and not self.sequence_packing_enabled
+    ):
+      if self.mini_batch_size is None:
+        raise ValueError(
+            "For RL training, `mini_batch_size` must be set when"
+            " `train_micro_batch_size` is set."
+        )
+      _check_divisibility(
+          self.train_micro_batch_size,
+          self.mini_batch_size,
+          f"{self.train_micro_batch_size=}",
+          f"{self.mini_batch_size=}",
+      )
+      self.gradient_accumulation_steps = (
+          self.mini_batch_size // self.train_micro_batch_size
+      )
+
+
+@dataclasses.dataclass(kw_only=True, frozen=True)
+class ClusterConfig:
+  """Cluster config.
+
+  Attributes:
+    role_to_mesh: Mapping from model role to mesh. Key config for colocated vs
+      disaggregated setup.
+    role_to_logical_axis_rule: Mapping from model role to logical axis rule.
+      This is used when models are sharded with logical axis and expects a
+      logical to physical axis mapping at runtime.
+    rollout_engine: Rollout engine to use. E.g. "vanilla", "vanilla_v2", "vllm".
+      Alternatively, if a subclass of `BaseRollout` is provided, it will be used
+      as the rollout engine.
+    offload_to_cpu: Whether to offload models to CPU at each step..
+    gc_collect_after_weight_sync: Whether to run `gc.collect()` after each
+      weight sync. A weight sync creates another copy of the weights on HBM, and
+      that copy is only freed once Python's garbage collector releases it; if
+      the collector does not run, the copies accumulate and the run can OOM over
+      time. Collecting right after the sync frees the copy promptly. A full
+      collection costs about one second per step on a colocated setup, so it can
+      be disabled for performance, provided the memory headroom is there.
+    training_config: RL training config.
+    rollout_config: Rollout config. It may be different for different modes,
+      e.g. TRAIN vs EVAL.
+    rollout_vllm_model_version: Model version for vllm rollout engine.
+    rollout_vllm_lora_config: LoRA config for vllm rollout engine.
+    rollout_vllm_hbm_utilization: The percentage of TPU/GPU HBM allocated the
+      vllm rollout engine.
+    rollout_vllm_init_with_random_weights: Init the vllm TPU backend model with
+      random weights instead of loading from the given path.
+    rollout_vllm_tpu_backend_type: The TPU Jax backend type for vllm rollout
+      engine, E.g. "jax", "torchax" or "pytorch_xla".
+  """
+
+  role_to_mesh: dict[Role, Mesh]
+  role_to_logical_axis_rule: dict[Role, flax.typing.LogicalRules] | None = None
+  rollout_engine: str | type["base_rollout.BaseRollout"] = "vanilla"
+  offload_to_cpu: bool = False
+  gc_collect_after_weight_sync: bool = True
+
+  training_config: RLTrainingConfig
+  rollout_config: dict[Mode, RolloutConfig] | RolloutConfig

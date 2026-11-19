@@ -1,0 +1,304 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Canonical ragged-paged-attention (RPA v3) call-site controls.
+
+Pins the call-site controls for ragged-paged-attention (RPA v3):
+
+* "R2" pinned block sizes (``CANON_RPA_D`` / ``CANON_RPA_P`` /
+  ``CANON_RPA_M``).  Unpinned, RPA v3 calls ``get_tuned_block_sizes()``,
+  whose result is shape-dependent twice over: the lookup key includes the
+  shape, and it clamps with ``min(max_num_tokens, bq)`` -- ``max_num_tokens``
+  IS the decode concurrency.  So the online-softmax KV block (the attention
+  accumulation granularity) changed with concurrency and with decode vs
+  prefill (measured (16, 16) vs (16, 32) at Qwen3-32B@tp4).  The canonical
+  configuration pins all three to ``(128, 512, 128, 512)`` (tuple order
+  ``(bq_sz, bkv_sz, bq_csz, bkv_csz)``), together with
+  ``MIN_TOKEN_BUCKET=256``.
+* forced-mixed distribution (``CANON_FORCE_MIXED``; diagnostic).
+  ``request_distribution = (i, j, k)`` is traced,
+  so decode and prefill share one program, but the kernel branches on it at
+  runtime (decode-only / prefill-only / mixed grids).  Rewriting it to
+  ``[0, 0, k]`` sends every sequence down the mixed branch.
+* "R4" differentiable RPA.  The Pallas kernel has no autodiff rule, but the
+  training forward must be the very kernel the engine ran.
+  ``CANON_RPA_VJP2`` wraps it with ``rpa_diff_chunked`` (forward = kernel
+  verbatim, backward = chunked-cache replica with cache cotangents).  The
+  older ``CANON_RPA_VJP`` (``rpa_diff``: prefill-only contract, zero KV-cache
+  gradient) is kept for prefill-only workloads.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+import os
+from typing import Any
+
+from absl import logging
+import jax
+import jax.numpy as jnp
+from tunix.zero_tim_kernel import rpa_diff
+from tunix.zero_tim_kernel import rpa_diff_chunked
+
+# (RPA v3 kwarg, env var) pairs; tuple order (bq_sz, bkv_sz, bq_csz, bkv_csz).
+BLOCK_SIZE_ENVS = (
+    ("d_block_sizes", "CANON_RPA_D"),
+    ("p_block_sizes", "CANON_RPA_P"),
+    ("m_block_sizes", "CANON_RPA_M"),
+)
+# Canonical block sizes and token bucket.
+CANONICAL_BQ_SZ = 128
+CANONICAL_BKV_SZ = 512
+CANONICAL_BQ_CSZ = 128
+CANONICAL_BKV_CSZ = 512
+CANONICAL_BLOCK_SIZES = (
+    CANONICAL_BQ_SZ,
+    CANONICAL_BKV_SZ,
+    CANONICAL_BQ_CSZ,
+    CANONICAL_BKV_CSZ,
+)
+# Minimal valid decode block sizes when `FORCE_MIXED` routes every sequence
+# through `m_block_sizes` (`distribution = [0, 0, k]`): the idle decode
+# branch is still traced at compile time, so `bq_sz = 1` shrinks its unused
+# `bq_double_buf` / `l_scratch` / `m_scratch` / `acc_scratch` VMEM by 128x
+# while `bkv_sz = 512` stays divisible by any valid `page_size | 512`.
+CANONICAL_IDLE_DECODE_BLOCK_SIZES = (
+    1,
+    CANONICAL_BKV_CSZ,
+    1,
+    CANONICAL_BKV_CSZ,
+)
+CANONICAL_MIN_TOKEN_BUCKET = 256
+FORCE_MIXED_ENV = "CANON_FORCE_MIXED"
+RPA_VJP2_ENV = "CANON_RPA_VJP2"
+RPA_VJP_ENV = "CANON_RPA_VJP"
+
+_RECEIPTS: set[str] = set()
+
+
+def _log_once(tag: str) -> None:
+  if tag not in _RECEIPTS:
+    _RECEIPTS.add(tag)
+    logging.info("[PATHTRACE] %s", tag)
+
+
+def parse_block_sizes(value: str | None) -> tuple[int, ...] | None:
+  """Parses ``"128,512,128,512"``; unset or empty means "not pinned"."""
+  if not value:
+    return None
+  return tuple(int(token) for token in value.split(","))
+
+
+def pinned_block_size_kwargs(
+    *, use_hd64: bool = False, environ: Mapping[str, str] | None = None
+) -> dict[str, tuple[int, ...]]:
+  """Returns the RPA v3 ``{d,p,m}_block_sizes`` kwargs pinned by the env.
+
+  Args:
+    use_hd64: Whether the head-dim-64 kernel is used (never pinned).
+    environ: The environment to read (defaults to ``os.environ``).
+
+  Returns:
+    The block-size kwargs to add to the RPA v3 call (possibly empty).
+  """
+  if use_hd64:
+    return {}
+  env = os.environ if environ is None else environ
+  kwargs = {}
+  for key, name in BLOCK_SIZE_ENVS:
+    blocks = parse_block_sizes(env.get(name))
+    if blocks is not None:
+      kwargs[key] = blocks
+      _log_once(f"RPA_BLOCK {key}={blocks}")
+  return kwargs
+
+
+def canonical_block_size_kwargs(
+    *,
+    bkv_sz: int = CANONICAL_BKV_SZ,
+    force_mixed: bool = False,
+) -> dict[str, tuple[int, int, int, int]]:
+  """Returns canonical RPA v3 block-size kwargs, independent of the environment.
+
+  The inner compute tiles `(bq_csz, bkv_csz) = (128, 512)` and outer query block
+  `bq_sz = 128` govern the online-softmax reduction granularity and causal bound
+  and are locked. Any outer KV DMA block `bkv_sz` that is a positive multiple of
+  `bkv_csz = 512` (e.g. `1024` on long contexts) shares the same VMEM online
+  softmax accumulators across `512`-token inner sub-blocks and produces
+  bitwise-identical forward outputs.
+
+  When `force_mixed=True` (`distribution = [0, 0, k]`), `p_block_sizes` is
+  omitted (never consumed when `chunk_prefill_size is None`) and `d_block_sizes`
+  is set to `CANONICAL_IDLE_DECODE_BLOCK_SIZES = (1, 512, 1, 512)` to shrink
+  compile-time VMEM scratch in the idle `RpaCase.DECODE` branch by 128x.
+
+  Args:
+    bkv_sz: Outer KV DMA block size (`bkv_sz % 512 == 0`).
+    force_mixed: Whether all sequences are routed to the mixed pass.
+  """
+  bkv_sz = int(bkv_sz)
+  if bkv_sz <= 0 or bkv_sz % CANONICAL_BKV_CSZ != 0:
+    raise ValueError(
+        "canonical_block_size_kwargs requires bkv_sz to be a positive multiple "
+        f"of {CANONICAL_BKV_CSZ}, got {bkv_sz}"
+    )
+  mixed_blocks = (
+      CANONICAL_BQ_SZ,
+      bkv_sz,
+      CANONICAL_BQ_CSZ,
+      CANONICAL_BKV_CSZ,
+  )
+  if force_mixed:
+    return {
+        "d_block_sizes": CANONICAL_IDLE_DECODE_BLOCK_SIZES,
+        "m_block_sizes": mixed_blocks,
+    }
+  return {key: mixed_blocks for key, _ in BLOCK_SIZE_ENVS}
+
+
+def force_mixed_distribution(distribution):
+  """Rewrites ``(i, j, k)`` to ``[0, 0, k]``: every sequence takes "mixed"."""
+  return jnp.stack([
+      jnp.zeros_like(distribution[0]),
+      jnp.zeros_like(distribution[1]),
+      distribution[2],
+  ])
+
+
+def maybe_force_mixed_distribution(distribution):
+  """Applies ``force_mixed_distribution`` iff CANON_FORCE_MIXED=1."""
+  if os.environ.get(FORCE_MIXED_ENV) == "1":
+    _log_once("FORCE_MIXED distribution -> [0, 0, k]")
+    return force_mixed_distribution(distribution)
+  return distribution
+
+
+def differentiable_rpa(
+    kernel_fn: Callable[..., Any],
+    *,
+    sm_scale: float,
+    page_size: int,
+    num_q_heads: int,
+    num_kv_heads: int,
+    use_causal_mask: bool = True,
+    use_hd64: bool = False,
+    has_attention_sink: bool = False,
+) -> Callable[..., Any]:
+  """Selects the differentiable wrapper of the local RPA v3 call by env.
+
+  Args:
+    kernel_fn: The shard-local RPA v3 call ``kernel_fn(q, k, v, kv_cache,
+      kv_lens, page_indices, cu_q_lens, distribution)``.
+    sm_scale: Softmax scale.
+    page_size: Tokens per KV-cache page.
+    num_q_heads: Number of query heads (informational for the chunked wrapper,
+      which derives local head counts from operand shapes).
+    num_kv_heads: Number of KV heads (informational, as above).
+    use_causal_mask: Causal masking flag of the RPA call (``rpa_diff`` only).
+    use_hd64: Whether the head-dim-64 kernel is used (unsupported).
+    has_attention_sink: Whether an attention sink is used (unsupported).
+
+  Returns:
+    ``kernel_fn`` wrapped per CANON_RPA_VJP2 / CANON_RPA_VJP, or unchanged.
+
+  Raises:
+    NotImplementedError: If a wrapper is requested on an unsupported path.
+  """
+  if os.environ.get(RPA_VJP2_ENV) == "1":
+    if use_hd64 or has_attention_sink:
+      raise NotImplementedError(f"{RPA_VJP2_ENV}: v3 default path only")
+    _log_once("RPA_VJP2 on (chunked-cache differentiable)")
+    return rpa_diff_chunked.make_diff_rpa_chunked_ragged(
+        kernel_fn,
+        sm_scale=sm_scale,
+        page_size=page_size,
+        num_q_heads=num_q_heads,
+        num_kv_heads=num_kv_heads,
+    )
+  if os.environ.get(RPA_VJP_ENV) == "1":
+    if use_hd64 or has_attention_sink:
+      raise NotImplementedError(
+          f"{RPA_VJP_ENV} is only wired for the v3 default RPA path without "
+          f"attention sink (use_hd64={use_hd64}, "
+          f"attention_sink={has_attention_sink})"
+      )
+    _log_once("RPA_VJP on")
+    return rpa_diff.make_diff_rpa(
+        kernel_fn, sm_scale=sm_scale, use_causal_mask=use_causal_mask
+    )
+  return kernel_fn
+
+
+def scratch_kv_cache_shape(
+    k,
+    *,
+    page_size: int = 16,
+    num_pages: int | None = None,
+) -> tuple[int, int, int, int, int]:
+  """Returns the minimal valid 5D RPA v3 scratch `kv_cache` shape for prefill."""
+  return rpa_diff.scratch_kv_cache_shape(
+      k, page_size=page_size, num_pages=num_pages
+  )
+
+
+def allocate_scratch_kv_cache(
+    k: jax.Array,
+    kv_lens: jax.Array,
+    *,
+    page_size: int = 16,
+    num_pages: int | None = None,
+) -> tuple[jax.Array, jax.Array]:
+  """Allocates a minimal layer-shared `(scratch_kv_cache, scratch_page_indices)`."""
+  return rpa_diff.allocate_scratch_kv_cache(
+      k, kv_lens, page_size=page_size, num_pages=num_pages
+  )
+
+
+def bind_scratch_kv_cache(
+    kernel_fn: Callable[..., Any],
+    *,
+    page_size: int = 16,
+    num_pages: int | None = None,
+    scratch_kv_cache: jax.Array | None = None,
+    scratch_page_indices: jax.Array | None = None,
+) -> Callable[..., Any]:
+  """Wraps `kernel_fn` to bind a minimal layer-shared scratch `kv_cache`.
+
+  Without modifying `v3/kernel.py`, full-prefill Learner calls
+  (`q_len == kv_len`) never read from `kv_cache` (`kv_left_frm_cache == 0`),
+  and only write the current layer's K/V blocks into `kv_cache` before the
+  output cache is discarded. This helper binds a minimal scratch `kv_cache` and
+  `page_indices` so callers can either:
+    1. Call the 8-arg RPA v3 signature with
+       `kv_cache=None, page_indices=None`, or
+    2. Call the 6-arg cacheless signature
+       `bound(q, k, v, kv_lens, cu_q_lens, distribution) -> output`.
+
+  Args:
+    kernel_fn: The 8-arg RPA v3 kernel entry point.
+    page_size: Tokens per KV-cache page of the auto-allocated scratch.
+    num_pages: Optional physical page count of the auto-allocated scratch.
+    scratch_kv_cache: Optional pre-allocated scratch cache.
+    scratch_page_indices: Optional pre-allocated scratch page indices.
+
+  Returns:
+    The bound kernel; see `rpa_diff.bind_scratch_kv_cache`.
+  """
+  _log_once(f"RPA_SCRATCH_KV_CACHE page_size={page_size} num_pages={num_pages}")
+  return rpa_diff.bind_scratch_kv_cache(
+      kernel_fn,
+      page_size=page_size,
+      num_pages=num_pages,
+      scratch_kv_cache=scratch_kv_cache,
+      scratch_page_indices=scratch_page_indices,
+  )

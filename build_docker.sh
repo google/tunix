@@ -9,6 +9,65 @@
 
 set -e
 
+INSTALL_MAXTEXT=false
+INSTALL_RAIDEN=false
+RAIDEN_WHEEL_DIR=/app/raiden_wheels
+INSTALL_DEEPSWE_DEPS=false
+SCAFFOLD="${SCAFFOLD:-r2egym}"
+
+usage() {
+    cat <<'MSG'
+Usage: bash build_docker.sh [--maxtext] [--raiden] [--raiden-wheel-dir PATH] [--deepswe] [--scaffold NAME]
+
+Options:
+  --maxtext               Install MaxText-specific dependencies.
+  --raiden                Install Raiden-specific dependencies.
+  --raiden-wheel-dir PATH Use prebuilt Raiden wheels from PATH inside the Docker build context.
+  --deepswe               Install DeepSWE evaluation dependencies.
+  --scaffold NAME         Agent scaffold (defaults to $SCAFFOLD or r2egym; e.g. openhands installs openhands-k8s-agent-sandbox).
+MSG
+}
+
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --maxtext) INSTALL_MAXTEXT=true; shift ;;
+        --raiden) INSTALL_RAIDEN=true; shift ;;
+        --raiden-wheel-dir)
+            if [[ -z "$2" ]]; then
+                echo "Error: --raiden-wheel-dir requires a path"
+                usage
+                exit 1
+            fi
+            RAIDEN_WHEEL_DIR="$2"
+            shift 2
+            ;;
+        --deepswe) INSTALL_DEEPSWE_DEPS=true; shift ;;
+        --scaffold)
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: --scaffold requires a non-empty name"
+                usage
+                exit 1
+            fi
+            SCAFFOLD="$2"
+            shift 2
+            ;;
+        --scaffold=*)
+            SCAFFOLD="${1#*=}"
+            if [[ -z "$SCAFFOLD" ]]; then
+                echo "Error: --scaffold requires a non-empty name"
+                usage
+                exit 1
+            fi
+            shift
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        *) echo "Unknown parameter: $1"; usage; exit 1 ;;
+    esac
+done
+
 DOCKERFILE=./Dockerfile
 
 if [ ! -f "$DOCKERFILE" ]; then
@@ -31,12 +90,33 @@ build_ai_image() {
     echo "Building Tunix Image at commit hash ${COMMIT_HASH}..."
 
     DOCKER_COMMAND="docker"
-    if ! docker info >/dev/null 2>&1; then
-        DOCKER_COMMAND="sudo docker"
+    if docker info >/dev/null 2>&1; then
+        DOCKER_COMMAND="docker"
+    else
+        # Avoid invoking sudo interactively which can prompt for a password.
+        # Check whether non-interactive sudo would work (no password).
+        if sudo -n docker info >/dev/null 2>&1; then
+            DOCKER_COMMAND="sudo docker"
+        else
+            cat <<'MSG'
+Docker does not appear usable from this account and the build would prompt for a password.
+
+Run the build with sufficient privileges (will prompt): sudo bash build_docker.sh
+On Linux, add your user to the docker group so sudo isn't required (you must re-login):
+  sudo usermod -aG docker "$USER" && newgrp docker
+
+MSG
+            exit 1
+        fi
     fi
 
     $DOCKER_COMMAND build \
         --network=host \
+        --build-arg INSTALL_MAXTEXT=${INSTALL_MAXTEXT} \
+        --build-arg INSTALL_RAIDEN=${INSTALL_RAIDEN} \
+        --build-arg RAIDEN_WHEEL_DIR=${RAIDEN_WHEEL_DIR} \
+        --build-arg INSTALL_DEEPSWE_DEPS=${INSTALL_DEEPSWE_DEPS} \
+        --build-arg SCAFFOLD="${SCAFFOLD}" \
         -t ${LOCAL_IMAGE_NAME} \
         -f ${DOCKERFILE} .
 }
@@ -48,4 +128,4 @@ echo "*************************
 "
 
 echo "Built your docker image and named it ${LOCAL_IMAGE_NAME}.
-It only has the dependencies installed. "
+It now installs Tunix and the pinned vLLM and tpu-inference dependencies from requirements/requirements.txt. "

@@ -16,7 +16,11 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
+
+from absl import logging
+
 
 JaxDevice = Any
 
@@ -184,3 +188,133 @@ def span_group_batch_query_all(
   for group in batch:
     out_batch.extend(group.find_all_inner_groups(name))
   return out_batch
+
+
+def clone_span_or_group(
+    node: Span | SpanGroup, outer: SpanGroup | None = None
+) -> Span | SpanGroup:
+  """Clones a span or span group recursively.
+
+  Args:
+    node: The span or span group to clone.
+    outer: The parent span group to attach the cloned node to.
+
+  Returns:
+    The cloned span or span group.
+  """
+  if isinstance(node, SpanGroup):
+    new_group = SpanGroup(node.name, outer)
+    new_group.begin = node.begin
+    new_group.end = node.end
+    for child in node.inner:
+      clone_span_or_group(child, new_group)
+    return new_group
+  else:
+    new_span = Span(node.name, node.begin)
+    new_span.end = node.end
+    if outer is not None:
+      outer.inner.append(new_span)
+    return new_span
+
+
+def _are_nodes_shallowly_identical(
+    node1: Span | SpanGroup, node2: Span | SpanGroup
+) -> bool:
+  """Checks if two nodes are identical in type, name, start, and end.
+
+  This only checks the root node, not the entire tree.
+
+  Args:
+    node1: The first node to compare.
+    node2: The second node to compare.
+
+  Returns:
+    True if the node roots are identical, False otherwise.
+  """
+
+  return (
+      isinstance(node2, type(node1))
+      and node1.name == node2.name
+      and math.isclose(node1.begin, node2.begin, rel_tol=1e-15, abs_tol=1e-9)
+      and math.isclose(node1.end, node2.end, rel_tol=1e-15, abs_tol=1e-9)
+  )
+
+
+def _merge_span_group_trees_inplace(
+    target: SpanGroup, source: SpanGroup
+) -> None:
+  """Merges source into target in-place.
+
+  Args:
+    target: The target span group tree (mutable).
+    source: The source span group tree (mutable).
+
+  Raises:
+    ValueError: If overlapping nodes are not identical.
+  """
+  # Append source children to target. Parent pointers are updated later.
+  for child in source.inner:
+    target.inner.append(child)
+    if isinstance(child, SpanGroup):
+      child.outer = target
+
+  target.inner.sort(key=lambda x: x.begin)
+
+  # Resolve overlaps
+  merged_inner = []
+  if target.inner:
+    current = target.inner[0]
+    for next_node in target.inner[1:]:
+      if current.end > next_node.begin:
+        if _are_nodes_shallowly_identical(current, next_node):
+          if isinstance(current, SpanGroup) and isinstance(
+              next_node, SpanGroup
+          ):
+            _merge_span_group_trees_inplace(current, next_node)
+          # If Spans, keep current (drop duplicate next_node)
+        else:
+          raise ValueError(
+              f"Merge is not possible: Overlap detected between {current!r}"
+              f" and {next_node!r}"
+          )
+      else:
+        merged_inner.append(current)
+        current = next_node
+    merged_inner.append(current)
+
+  target.inner = merged_inner
+
+
+def merge_span_group_trees(
+    tree1: SpanGroup | Span, tree2: SpanGroup | Span
+) -> SpanGroup | Span:
+  """Merges two SpanGroup or Span trees into a new SpanGroup or Span.
+
+  Validates that the input trees have identical root nodes and no overlapping
+  spans at the same level. Does not modify the input trees.
+
+  Args:
+    tree1: The first SpanGroup or Span tree.
+    tree2: The second SpanGroup or Span tree.
+
+  Returns:
+    A new SpanGroup or Span containing the merged result.
+
+  Raises:
+    ValueError: If the roots are not identical or if the merge results in
+      overlapping spans.
+  """
+  if not _are_nodes_shallowly_identical(tree1, tree2):
+    raise ValueError(
+        f"Roots are not identical: {tree1!r} vs {tree2!r}. Merge expected"
+        " identical roots."
+    )
+
+  target = clone_span_or_group(tree1)
+  source = clone_span_or_group(tree2)
+
+  # Merge if both are SpanGroups. For Spans, simply return target.
+  if isinstance(target, SpanGroup) and isinstance(source, SpanGroup):
+    _merge_span_group_trees_inplace(target, source)
+
+  return target

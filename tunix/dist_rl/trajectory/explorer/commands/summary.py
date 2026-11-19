@@ -1,0 +1,227 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Summarizes every trajectory in a run."""
+
+from collections.abc import Mapping, Sequence
+import dataclasses
+import json
+import sys
+
+import pandas as pd
+import simple_parsing
+from tunix.dist_rl.trajectory import store
+from tunix.dist_rl.trajectory.explorer.commands import base
+from tunix.dist_rl.trajectory.explorer.diagnostics import formatting
+from tunix.dist_rl.trajectory.explorer.diagnostics import schema_diagnostics
+from tunix.dist_rl.trajectory.explorer.diagnostics import stats
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class SummaryCommand(base.BaseCommand):
+  """Prints totals over the run, and optionally one line per trajectory."""
+
+  limit: int | None = simple_parsing.field(
+      default=None,
+      help="Maximum number of trajectories to load and display.",
+  )
+  show_trajectory_table: bool = simple_parsing.field(
+      default=False,
+      action="store_true",
+      help="Also print one row per trajectory above the run totals.",
+  )
+
+  def execute(
+      self,
+      reader: store.TrajectoryReader,
+      output_json: bool = False,
+      *,
+      diagnostics: Sequence[schema_diagnostics.SchemaDiagnostics] = (),
+  ) -> int:
+    """Summarizes all trajectories the reader can see.
+
+    Args:
+      reader: The trajectory store reader backend.
+      output_json: Whether to format output as machine-readable JSON.
+      diagnostics: Schema diagnostics to compute and render for the run.
+
+    Returns:
+      Process exit code (0 for success).
+    """
+    if self.limit is not None and self.limit < 0:
+      print(
+          "trajectory-explore: error: --limit must be non-negative, got"
+          f" {self.limit}",
+          file=sys.stderr,
+      )
+      return 2
+
+    # TODO(tunix-dev): `TrajectoryReader.get_trajectories` requires an explicit
+    # ID list, so listing the run costs two passes over its metadata (the file
+    # and SQL backends re-read every trajectory's metadata in the second call).
+    # Extend `get_trajectories` to accept `None` for "all", as
+    # `get_trajectories_metadata` already does, and call it directly here.
+    all_ids = [
+        m.trajectory_id
+        for m in reader.get_trajectories_metadata().values()
+        if m.trajectory_id is not None
+    ]
+    total_count = len(all_ids)
+    ids = all_ids[: self.limit] if self.limit is not None else all_ids
+    run_stats = stats.RunStats.from_trajectories(
+        reader.get_trajectories(ids).values(),
+        num_total_trajectories=total_count,
+        diagnostics=diagnostics,
+    )
+    if output_json:
+      # `to_dict` yields native Python values (unlike `to_json`, which rounds
+      # floats to 10 significant digits); only the nulls need mapping to None.
+      records = [
+          {k: None if pd.isna(v) else v for k, v in row.items()}
+          for row in run_stats.df.to_dict(orient="records")
+      ]
+      print(
+          json.dumps({
+              "run": run_stats.to_json_dict(),
+              "trajectories": records,
+          })
+      )
+    elif total_count == 0:
+      print("No trajectories found.")
+    else:
+      if self.show_trajectory_table:
+        print(_table(run_stats, diagnostics), end="\n\n")
+      print(*_totals(run_stats, diagnostics), sep="\n")
+    return 0
+
+
+def _table(
+    run_stats: stats.RunStats,
+    diagnostics: Sequence[schema_diagnostics.SchemaDiagnostics],
+) -> str:
+  """Renders one row per trajectory; unreported quantities print as `-`.
+
+  Args:
+    run_stats: The run to render.
+    diagnostics: The schema diagnostics `run_stats` was computed with.
+
+  Returns:
+    The table: the base columns, then those of each active schema diagnostics.
+
+  Raises:
+    ValueError: If a schema diagnostics' column header is already in the table.
+  """
+  df = run_stats.df
+  steps = df[["steps_agent", "steps_user", "steps_system", "steps_other"]]
+  token_columns = [f"tokens_{f}" for f in stats.TokenCounts._fields]
+  tokens = [
+      formatting.format_optional(stats.TokenCounts.from_fields(*row))
+      for row in df[token_columns].itertuples(index=False)
+  ]
+  table = pd.DataFrame({
+      "trajectory": df["trajectory_id"],
+      "status": df["status"],
+      "steps": steps.sum(axis=1),
+      "agent": df["steps_agent"],
+      "env": df["steps_user"] + df["steps_system"],
+      "tokens": tokens,
+      "tool calls": df["num_tool_calls"],
+      "reward": df["total_reward"].map("{:.3g}".format, na_action="ignore"),
+  })
+  for d in diagnostics:
+    if d.NAMESPACE not in run_stats.schema_stats:
+      continue
+    columns = d.format_summary_columns(run_stats.columns_of(d))
+    for header, column in columns.items():
+      if header in table.columns:
+        raise ValueError(
+            f"{type(d).__name__}: summary column {header!r} is"
+            " already in the table."
+        )
+      table[header] = column
+  table = table.astype("string").fillna(formatting.MISSING)
+  return table.to_string(index=False)
+
+
+def _totals(
+    run_stats: stats.RunStats,
+    diagnostics: Sequence[schema_diagnostics.SchemaDiagnostics],
+) -> list[str]:
+  """Returns one line per run-level total.
+
+  Args:
+    run_stats: The run to render.
+    diagnostics: The schema diagnostics `run_stats` was computed with.
+  """
+  n = run_stats.num_trajectories
+  total = run_stats.num_total_trajectories
+  if total is not None and n < total:
+    trajectories_line = f"Trajectories: {n} (of {total})"
+  else:
+    trajectories_line = f"Trajectories: {n}"
+  lines = [
+      trajectories_line,
+      f"Steps: {run_stats.steps}",
+      (
+          f"Tokens: {formatting.format_optional(run_stats.tokens)}"
+          f" reported by {run_stats.num_with_tokens}/{n}"
+      ),
+      (
+          f"Statuses: {formatting.format_counts(run_stats.status_counts)}"
+          f" reported by {run_stats.num_with_status}/{n}"
+      ),
+  ]
+  lines.extend(_format_reward_signs(run_stats.reward_signs_by_status))
+  lines.append(
+      "Mean reward:"
+      f" {formatting.format_optional(run_stats.mean_reward, '.3g')}"
+      f" reported by {run_stats.num_with_reward}/{n}"
+  )
+  for d in diagnostics:
+    if d.NAMESPACE in run_stats.schema_stats:
+      run_summary = run_stats.schema_stats[d.NAMESPACE]
+      lines.extend(d.format_summary_totals(run_summary, n))
+  if run_stats.tool_counts:
+    lines.append(
+        f"Tool calls: {formatting.format_counts(run_stats.tool_counts)}"
+    )
+  return lines
+
+
+def _format_reward_signs(
+    by_status: Mapping[str, stats.RewardSignCounts],
+) -> list[str]:
+  """Returns the `Rewards by status:` line, then one aligned line per status.
+
+  Statuses come most frequent first, as on the `Statuses:` line. There are no
+  lines when no trajectory reports a status.
+
+  Args:
+    by_status: The run's `reward_signs_by_status`.
+  """
+  if not by_status:
+    return []
+  label_width = max(map(len, by_status)) + 1
+  # No count exceeds the total of its status.
+  width = len(str(max(counts.total for counts in by_status.values())))
+  lines = ["Rewards by status:"]
+  for status, counts in sorted(
+      by_status.items(), key=lambda item: item[1].total, reverse=True
+  ):
+    lines.append(
+        f"  {status + ':':<{label_width}} {counts.positive:>{width}} r>0,"
+        f" {counts.non_positive:>{width}} r<=0,"
+        f" {counts.unscored:>{width}} unscored"
+    )
+  return lines

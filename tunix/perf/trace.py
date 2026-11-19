@@ -41,11 +41,11 @@ from __future__ import annotations
 
 from concurrent import futures
 import contextlib
-import logging
 import threading
 import time
 from typing import Any, Callable
 
+from absl import logging
 import jax
 import jaxtyping
 import numpy as np
@@ -472,5 +472,5 @@ def _async_wait(
 
 
 def _synchronize_devices():
-  for device in jax.devices():
+  for device in jax.local_devices():
     jax.device_put(jax.numpy.array(0.0), device=device).block_until_ready()

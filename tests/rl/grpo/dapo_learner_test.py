@@ -59,11 +59,17 @@ class DAPOlearnerTest(parameterized.TestCase):
     example.advantages = self.advantages
     example.ref_per_token_logps = self.ref_per_token_logps
     example.old_per_token_logps = self.old_per_token_logps
+    example.segment_ids = None
+    example.segment_positions = None
+    example.sampler_is_weights = None
+    example.routed_experts = None
     return example
 
   def test_diff_loss(self):
     dapo_config = dapo_lib.DAPOConfig()
     grpo_config = grpo_lib.GRPOConfig()
+    dapo_config.temperature = 1.0
+    grpo_config.temperature = 1.0
 
     dapo_loss_fn_impl = fr.default_registry.get(
         "policy_loss_fn", dapo_config.policy_loss_fn
@@ -85,20 +91,27 @@ class DAPOlearnerTest(parameterized.TestCase):
         rngs=nnx.Rngs(0),
     )
 
-    # Call DAPO loss function
-    dapo_loss, dapo_aux = dapo_loss_fn_impl(
-        model, train_example, dapo_config, pad_id, eos_id
+    # Call DAPO loss function (DAPO sets ref_per_token_logps to None as it
+    # doesn't fetch it).
+    dapo_train_example = self.create_train_example()
+    dapo_train_example.ref_per_token_logps = None
+    dapo_loss_output = dapo_loss_fn_impl(
+        model, dapo_train_example, dapo_config, pad_id, eos_id
     )
+    dapo_loss = dapo_loss_output.primary_loss.compute()
+    dapo_aux = dapo_loss_output.aux_metrics
 
     # Call GRPO loss function
-    grpo_loss, grpo_aux = grpo_loss_fn_impl(
+    grpo_loss_output = grpo_loss_fn_impl(
         model, train_example, grpo_config, pad_id, eos_id
     )
+    grpo_loss = grpo_loss_output.primary_loss.compute()
+    grpo_aux = grpo_loss_output.aux_metrics
 
     # Assert that the loss values are different
     self.assertNotEqual(
-        dapo_loss.item(),
-        grpo_loss.item(),
+        dapo_loss,
+        grpo_loss,
         msg=(
             "DAPO and GRPO loss values should be different for the same input"
             " due to different loss aggregation logics."
@@ -107,7 +120,9 @@ class DAPOlearnerTest(parameterized.TestCase):
 
     self.assertIn("kl", dapo_aux)
     self.assertIn("kl", grpo_aux)
-    self.assertEqual(dapo_aux["kl"], 0.0)  # DAPO does not have KL term.
+    self.assertEqual(
+        dapo_aux["kl"].compute(), 0.0
+    )  # DAPO does not have KL term.
 
 
 class TestDAPOConfigPostInit(parameterized.TestCase):
@@ -118,6 +133,10 @@ class TestDAPOConfigPostInit(parameterized.TestCase):
       dapo_lib.DAPOConfig()
     except ValueError as e:
       self.fail(f"DAPOConfig raised ValueError on default initialization: {e}")
+
+  def test_beta_defaults_to_zero(self):
+    """DAPO has no KL term; beta must be 0.0 so learners skip the ref model."""
+    self.assertEqual(dapo_lib.DAPOConfig().beta, 0.0)
 
   @parameterized.named_parameters(
       dict(testcase_name="custom_epsilons", epsilon=0.1, epsilon_high=0.15),
@@ -145,6 +164,16 @@ class TestDAPOConfigPostInit(parameterized.TestCase):
       self.fail(f"DAPOConfig raised ValueError for valid case {kwargs}: {e}")
 
   @parameterized.named_parameters(
+      dict(
+          testcase_name="nonzero_beta",
+          config_kwargs=dict(beta=0.1),
+          expected_regex="beta must be 0.0",
+      ),
+      dict(
+          testcase_name="base_validation_num_generations",
+          config_kwargs=dict(num_generations=1),
+          expected_regex="num_generations must be greater than 1",
+      ),
       dict(
           testcase_name="invalid_epsilon_high",
           config_kwargs=dict(epsilon=0.2, epsilon_high=0.1),

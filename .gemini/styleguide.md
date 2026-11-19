@@ -72,9 +72,13 @@ If the formatting is off, please instruct the user to run the linter/formatter. 
 
 ## 5. Other generic advice
 
-### Type hints
+### Type hints & Strict Typing
 
-* **Use type hints:**  Type hints improve code readability and help catch errors early.
+* **Use strict, specific type hints:** Always annotate function signatures,
+  attributes, and data structures with concrete, specific types (dataclasses,
+  `TypedDict`, `Protocol`, `jax.Array`, `jaxtyping`) rather than `Any` or
+  untyped `dict`/`object`. Avoid `Any` whenever a specific type can be
+  expressed.
 
 ### Comments
 
@@ -87,6 +91,50 @@ If the formatting is off, please instruct the user to run the linter/formatter. 
 * **Log at appropriate levels:** DEBUG, INFO, WARNING, ERROR, CRITICAL
 * **Provide context:** Include relevant information in log messages to aid debugging.
 
-### Error Handling
-* **Use specific exceptions:** Avoid using broad exceptions like `Exception`.
-* **Handle exceptions gracefully:** Provide informative error messages and avoid crashing the program.
+### Error Handling & One Well-Lit Path (Fail Loud)
+
+* **One well-lit path (No defensive fallbacks):** Never use speculative
+  `getattr(obj, "field", default)`, `dict.get("key", default)` on structured
+  schemas, `dict(getattr(obj, "metadata", None) or {})`, `.setdefault(...)`
+  with fabricated defaults (`""`, `0`, `False`), or
+  `isinstance(..., Mapping)` duck-typing branches. Access attributes and keys
+  directly (`obj.field`) on a single, strictly typed contract.
+* **Fail loud and fast:** Never mask missing attributes, invalid types, or
+  broken invariants with silent default values. Let Python raise
+  `AttributeError`, `KeyError`, `TypeError`, or raise an explicit `ValueError`
+  / specific exception immediately.
+* **Use specific exceptions:** Avoid catching or raising overly broad
+  exceptions like bare `Exception` to swallow errors.
+
+### CL Complexity Advisory (Control Flow & Call Indirection)
+
+* **Advisory Complexity Check (`[tool.cl_complexity_gate]`):**
+  `scripts/check_cl_complexity.py` is a **soft warning / advisory signal**
+  (`continue-on-error` in CI)—never a hard blocking gate on normal PRs.
+* **Control Flow Advisory:** Tracks per-function cognitive (`<= 15`, target
+  `<= 12`), cyclomatic (`<= 15`, target `<= 10`), and nesting (`<= 4`, target
+  `<= 3`) complexity on newly added or modified functions (`delta > 0`). Prefer
+  flat early-exit guard clauses (`if not cond: return`) and flat linear
+  `if/elif` or `match/case` dispatch tables over deeply nested branching.
+* **Call Indirection Advisory:** Tracks intra-file single-caller private chain
+  hops (`max_call_depth_hops <= 2`), trivial single-caller pass-through
+  wrappers, and nested closures. When collapsing a 1-to-1 single-caller chain
+  `outer -> _inner`, preserve the outer domain function name and inline `_inner`
+  upward; keep cohesive multi-statement pipeline stages and shared helpers
+  (`in_degree >= 2`) intact.
+* **Change Scope & Code Duplication Signals:** Change scope (`net_stmts`) is a
+  formatting-invariant AST statement delta (never a reason to compress lines),
+  and code duplication highlights intra-file or cross-file AST statement 2-gram
+  clones (`Jaccard >= 0.60`) outside sanctioned
+  `[tool.cl_complexity_gate].intentional_forks`.
+* **Preserve Readability (Do Not Game Metrics):** Never degrade code clarity to
+  lower a complexity or scope number:
+  * Never replace `if/else` branches with boolean multiplication (`x * bool(c)`)
+    or tuple indexing (`(a, b)[cond]`).
+  * Never replace `for` loops with side-effect list comprehensions
+    (`[fn(x) for x in items]` for mutation/IO).
+  * Never strip leading `_` prefixes from internal helpers to make them appear
+    public, or inline distinct logical stages into an unreadable monolith.
+* **Escape Hatch (`SKIP_CL_COMPLEXITY=<reason>`):** Maintainers can bypass
+  strict complexity checks for mechanical migrations or false positives by
+  adding `SKIP_CL_COMPLEXITY=<reason>` to the PR/CL description.

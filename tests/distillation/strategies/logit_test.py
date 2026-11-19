@@ -156,7 +156,7 @@ class LogitStrategyTest(parameterized.TestCase):
     )
 
     # The losses should be different because the distribution is truncated
-    self.assertNotAlmostEqual(loss_full, loss_k, places=4)
+    self.assertNotAlmostEqual(loss_full, loss_k, places=4)  # pyrefly: ignore[no-matching-overload]
 
   @parameterized.named_parameters(
       ("alpha_one", 1.0),
@@ -218,7 +218,7 @@ class LogitStrategyTest(parameterized.TestCase):
     npt.assert_allclose(teacher_output, inputs["teacher_output"], rtol=1e-6)
     npt.assert_allclose(computed_loss, expected_loss, rtol=1e-6)
     # Check keys match
-    self.assertEqual(expected_metrics.keys(), computed_metrics.keys())
+    self.assertEqual(expected_metrics.keys(), computed_metrics.keys())  # pyrefly: ignore[missing-attribute]
 
   def test_get_eval_loss(self):
     strategy = LogitStrategy(

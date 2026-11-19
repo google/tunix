@@ -1,0 +1,1061 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Gemma4 model attention."""
+
+import functools
+from functools import partial
+import math
+import typing
+from flax import nnx
+import jax
+from jax import numpy as jnp
+from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel as splash
+from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask as mask_lib
+from jax.experimental.shard_map import shard_map
+from jax.interpreters import pxla
+import jax.sharding as shd
+from jax.sharding import PartitionSpec as P
+import jaxtyping
+import numpy as np
+from tunix.models import cache_utils
+from tunix.models import gpu_kernels as kernels_lib
+from tunix.models import paged_attention
+from tunix.models import reference_attention as reference_attention_lib
+from tunix.models.gemma4.config import AttentionType
+from tunix.models.gemma4.config import K_MASK
+from tunix.models.gemma4.config import LayerCache
+from tunix.models.gemma4.config import ModelConfig
+from tunix.models.gemma4.config import RematConfig
+from tunix.models.gemma4.config import SplashAttentionImpl
+from tunix.models.gemma4.layers import apply_rope
+from tunix.models.gemma4.layers import Einsum
+from tunix.models.gemma4.layers import RMSNorm
+from tunix.utils.sharding_utils import shard
+
+if typing.TYPE_CHECKING:
+  from tokamax._src.ops.splash_attention import splash_attention_kernel as tokamax_splash
+
+  SplashKernel = (
+      splash.SplashAttentionKernel | tokamax_splash.SplashAttentionKernel
+  )
+
+AxisSpec = str | tuple[str, ...] | None
+MeshType = shd.Mesh | shd.AbstractMesh
+
+
+@functools.lru_cache(maxsize=128)
+def _get_local_mask(
+    q_len: int, kv_len: int, window_size: int, offset: int
+) -> mask_lib.LocalMask:
+  """Memoized LocalMask constructor that speeds up XLA JIT compilation by caching mask closure objects across unrolled decoder layers."""
+  return mask_lib.LocalMask(
+      (q_len, kv_len),
+      window_size=(window_size - 1, 0),
+      offset=offset,
+  )
+
+
+@functools.lru_cache(maxsize=128)
+def _get_causal_mask(
+    q_len: int, kv_len: int, offset: int
+) -> mask_lib.CausalMask:
+  """Memoized CausalMask constructor that speeds up XLA JIT compilation by caching mask closure objects across unrolled decoder layers."""
+  return mask_lib.CausalMask((q_len, kv_len), offset=offset)
+
+
+def _resolve_active_mesh() -> MeshType | None:
+  """Returns the mesh the caller is currently using or None."""
+  mesh = pxla.thread_resources.env.physical_mesh
+  if not mesh.empty:
+    return mesh
+  abs_mesh = shd.get_abstract_mesh()
+  return None if abs_mesh.empty else abs_mesh
+
+
+def _num_shards(axis: AxisSpec, mesh: MeshType) -> int:
+  """Returns the number of shards `axis` splits a dimension into on `mesh`."""
+  names = (axis,) if isinstance(axis, str) else axis or ()
+  return math.prod(mesh.shape[n] for n in names)
+
+
+def _resolve_axis(axis: AxisSpec, dim: int, mesh: MeshType) -> AxisSpec:
+  """Returns `axis` if in `mesh` and evenly dividing `dim`, else None."""
+  if axis is None:
+    return None
+  names = (axis,) if isinstance(axis, str) else axis
+  if any(name not in mesh.shape for name in names):
+    return None
+  return axis if dim % _num_shards(axis, mesh) == 0 else None
+
+
+def _resolve_kv_head_axis(
+    axis: AxisSpec, num_kv_heads: int, mesh: MeshType | None
+) -> AxisSpec:
+  if num_kv_heads == 1:
+    return None
+  return axis if mesh is None else _resolve_axis(axis, num_kv_heads, mesh)
+
+
+def _resolve_sharding_spec(
+    spec: tuple[AxisSpec, ...] | P,
+    shape: tuple[int, ...],
+    mesh: MeshType | None,
+) -> P:
+  if mesh is None:
+    return P(*spec)
+  return P(*(_resolve_axis(ax, dim, mesh) for ax, dim in zip(spec, shape)))
+
+
+def _align_kv_heads_for_splash(
+    key_proj: jaxtyping.Array,
+    value_proj: jaxtyping.Array,
+    num_q_heads: int,
+    head_shards: int,
+) -> tuple[jaxtyping.Array, jaxtyping.Array]:
+  """Repeats `(B, K, T, H)` KV heads to `num_q_heads` for Splash GQA sharding.
+
+  Splash Attention infers the GQA group size from per-shard head counts, so
+  replicating `1 < num_kv_heads` KV heads that `head_shards` does not divide
+  would pair query heads on each shard with the wrong KV heads.
+
+  Args:
+    key_proj: Key tensor of shape `(B, K, T, H)`.
+    value_proj: Value tensor of shape `(B, K, T, H)`.
+    num_q_heads: Total number of query heads `N`.
+    head_shards: Number of shards along the head dimension.
+
+  Returns:
+    Tuple of `(key_proj, value_proj)` with heads aligned to `head_shards`.
+  """
+  num_kv_heads = key_proj.shape[1]
+  if num_kv_heads == 1 or num_kv_heads % head_shards == 0:
+    return key_proj, value_proj
+  repeats = num_q_heads // num_kv_heads
+  return (
+      jnp.repeat(key_proj, repeats, axis=1),
+      jnp.repeat(value_proj, repeats, axis=1),
+  )
+
+
+def _tokamax_splash_libs():
+  """Lazily imports Tokamax's splash-attention kernel and mask modules."""
+  try:
+    from tokamax._src.ops.splash_attention import splash_attention_kernel as tokamax_splash_lib  # pylint: disable=g-import-not-at-top
+    from tokamax._src.ops.splash_attention import splash_attention_mask as tokamax_splash_mask_lib  # pylint: disable=g-import-not-at-top
+  except ImportError as e:
+    raise ImportError(
+        "The Tokamax splash_attention backend requires the 'tokamax'"
+        ' package.Install it with `pip install tokamax` or keep the default'
+        ' `splash_attention_impl=SplashAttentionImpl.JAX`'
+    ) from e
+  return tokamax_splash_lib, tokamax_splash_mask_lib
+
+
+@functools.lru_cache(maxsize=128)
+def _get_tokamax_local_mask(
+    q_len: int, kv_len: int, window_size: int, offset: int
+):
+  """Memoized Tokamax LocalMask, mirroring `_get_local_mask`"""
+  _, tokamax_mask_lib = _tokamax_splash_libs()
+  return tokamax_mask_lib.LocalMask(
+      (q_len, kv_len),
+      window_size=(window_size - 1, 0),
+      offset=offset,
+  )
+
+
+@functools.lru_cache(maxsize=128)
+def _get_tokamax_causal_mask(q_len: int, kv_len: int, offset: int):
+  """Memoized Tokamax CausalMask, mirroring `_get_causal_mask`."""
+  _, tokamax_mask_lib = _tokamax_splash_libs()
+  return tokamax_mask_lib.CausalMask((q_len, kv_len), offset=offset)
+
+
+@functools.lru_cache(maxsize=32)
+def _zeros(
+    shape: tuple[int, ...], dtype: jnp.dtype, sharding: shd.NamedSharding
+):
+  """Compiles and caches an on-device zero allocator with explicit out_shardings."""
+  return jax.jit(lambda: jnp.zeros(shape, dtype=dtype), out_shardings=sharding)
+
+
+class Attention(nnx.Module):
+  """Attention module."""
+
+  def __init__(
+      self,
+      config: ModelConfig,
+      attn_type: AttentionType,
+      rngs: nnx.Rngs,
+  ):
+    self.config = config
+    self.rope_proportion = (
+        config.global_rope_proportion
+        if attn_type == AttentionType.GLOBAL
+        else config.local_rope_proportion
+    )
+    self.attn_type = attn_type
+    self.rope_base_frequency = (
+        config.local_base_frequency
+        if attn_type == AttentionType.LOCAL_SLIDING
+        else config.global_base_frequency
+    )
+    self.rope_scale_factor = (
+        config.local_scale_factor
+        if attn_type == AttentionType.LOCAL_SLIDING
+        else config.global_scale_factor
+    )
+
+    self.num_kv_heads = config.num_kv_heads
+    self.head_dim = config.head_dim
+    self.sliding_window_size = config.sliding_window_size
+    if attn_type == AttentionType.GLOBAL:
+      self.sliding_window_size = None
+      if config.num_global_kv_heads is not None:
+        self.num_kv_heads = config.num_global_kv_heads
+      if config.global_key_size is not None:
+        self.head_dim = config.global_key_size
+
+    self.attn_vec_einsum = Einsum(
+        einsum_str='BTNH,NHD->BTD',
+        shape=(config.num_heads, self.head_dim, config.embed_dim),
+        rngs=rngs,
+        sharding=config.shd_config.o_weight_nhd,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
+    )
+    self.q_einsum = Einsum(
+        einsum_str='BTD,NDH->BTNH',
+        shape=(config.num_heads, config.embed_dim, self.head_dim),
+        rngs=rngs,
+        sharding=config.shd_config.q_weight_ndh,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
+    )
+
+    mesh = _resolve_active_mesh()
+    k_eq_v = (
+        config.k_eq_v_global if attn_type == AttentionType.GLOBAL else False
+    )
+    if k_eq_v:
+      shd_n, shd_d, shd_h = config.shd_config.q_weight_ndh
+      shd_n_kv = _resolve_kv_head_axis(shd_n, self.num_kv_heads, mesh)
+      self.k_einsum = Einsum(
+          einsum_str='BSD,KDH->BSKH',
+          shape=(
+              self.num_kv_heads,
+              config.embed_dim,
+              self.head_dim,
+          ),
+          rngs=rngs,
+          sharding=P(shd_n_kv, shd_d, shd_h),
+          dtype=config.dtype,
+          param_dtype=config.param_dtype,
+      )
+    else:
+      shd_c, shd_n, shd_d, shd_h = config.shd_config.kv_weight_cndh
+      shd_n_kv = _resolve_kv_head_axis(shd_n, self.num_kv_heads, mesh)
+      kv_sharding = P(shd_c, shd_n_kv, shd_d, shd_h)
+
+      self.kv_einsum = Einsum(
+          einsum_str='BSD,CKDH->CBSKH',
+          shape=(
+              2,
+              self.num_kv_heads,
+              config.embed_dim,
+              self.head_dim,
+          ),
+          rngs=rngs,
+          sharding=kv_sharding,
+          dtype=config.dtype,
+          param_dtype=config.param_dtype,
+      )
+    self._query_norm = RMSNorm(
+        self.head_dim,
+        rngs=rngs,
+        sharding=config.shd_config,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
+    )
+    self._key_norm = RMSNorm(
+        self.head_dim,
+        rngs=rngs,
+        sharding=config.shd_config,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
+    )
+
+  def _compute_kv_projections(
+      self,
+      x: jaxtyping.Array,
+      segment_pos: jaxtyping.Array,
+      kv_shared_cache: LayerCache | None,
+  ) -> tuple[jaxtyping.Array, jaxtyping.Array, jaxtyping.Array | None]:
+    """Computes or retrieves key/value projections."""
+    kv_valid_mask = None
+
+    if kv_shared_cache is not None:
+      key_proj = kv_shared_cache['k']
+      value_proj = kv_shared_cache['v']
+      kv_valid_mask = kv_shared_cache.get('valid_mask', None)
+    else:
+      if hasattr(self, 'k_einsum'):  # case where k_eq_v is True
+        key_proj = self.k_einsum(x)
+        value_proj = key_proj
+      else:
+        key_proj, value_proj = self.kv_einsum(x)
+
+      kv_spec = _resolve_sharding_spec(
+          self.config.shd_config.act_btnh,
+          key_proj.shape,
+          _resolve_active_mesh(),
+      )
+      key_proj = shard(key_proj, kv_spec)
+      value_proj = shard(value_proj, kv_spec)
+
+      # Apply norms to computed KV
+      value_var = jnp.mean(jnp.square(value_proj), axis=-1, keepdims=True)
+      value_proj = value_proj * jax.lax.rsqrt(value_var + 1e-06)
+      key_proj = self._key_norm(key_proj)
+      key_proj = apply_rope(
+          key_proj,
+          segment_pos,
+          base_frequency=self.rope_base_frequency,
+          scale_factor=self.rope_scale_factor,
+          rope_proportion=self.rope_proportion,
+      )
+
+    return key_proj, value_proj, kv_valid_mask
+
+  def _build_flash_mask(
+      self,
+      q_len: int,
+      kv_len: int,
+      offset: int,
+  ) -> mask_lib.Mask:
+    """Builds the single-head splash attention mask for one flash call.
+
+    Uses memoized computable masks (LocalMask / CausalMask) to prevent XLA
+    closure recompilations across unrolled layers and evaluate in-kernel.
+    """
+    if self.attn_type == AttentionType.LOCAL_SLIDING:
+      window_size = self.config.sliding_window_size
+      assert window_size is not None
+      return _get_local_mask(q_len, kv_len, window_size, offset)
+    return _get_causal_mask(q_len, kv_len, offset)
+
+  def _make_block_sizes(
+      self, is_rectangular: bool, q_len: int | None = None
+  ) -> splash.BlockSizes:
+    """Selects splash block sizes for this attention call."""
+    # Choose block sizes. block_kv must divide kv_len.
+    # For LOCAL_SLIDING rectangular shapes, block_kv must divide both
+    # sliding_window_size and chunk_len. Use the smaller of the two.
+    block_q = self.config.flash_attention_block_size
+    if q_len is not None:
+      block_q = min(block_q, q_len)
+    if is_rectangular and self.attn_type == AttentionType.LOCAL_SLIDING:
+      window_size = self.config.sliding_window_size
+      assert window_size is not None
+      block_kv = min(
+          self.config.flash_attention_block_size,
+          window_size,
+      )
+    else:
+      block_kv = self.config.flash_attention_block_size
+
+    # Inner-loop tile size for the attention matmul; must divide block_kv.
+    block_kv_compute = min(
+        self.config.flash_attention_compute_block_size, block_kv
+    )
+
+    # Bwd holds Q + dO + attn_weights + grad accumulators; smaller Q block to
+    # fit VMEM.
+    block_bwd = min(self.config.flash_attention_bwd_block_size, block_q)
+    use_fused = self.config.flash_attention_use_fused_bwd
+    return splash.BlockSizes(
+        block_q=block_q,
+        block_kv=block_kv,
+        block_kv_compute=block_kv_compute,
+        block_q_dkv=block_bwd,
+        block_kv_dkv=block_kv,
+        block_kv_dkv_compute=block_kv_compute,
+        # Fused bwd kernel computes dQ+dKV in one pass; these are ignored.
+        block_q_dq=None if use_fused else block_bwd,
+        block_kv_dq=None if use_fused else block_kv,
+        use_fused_bwd_kernel=use_fused,
+    )
+
+  def _make_sharding_specs(
+      self, q_shape: tuple[int, ...], mesh: MeshType | None
+  ):
+    """Computes mesh/shard-axis specs for splash attention.
+
+    Args:
+      q_shape: `(B, T, N, H)` query shape, matching `act_btnh`.
+      mesh: The active mesh, if any.
+    """
+    if mesh is None:
+      shd_b = shd_t = shd_n = shd_h = None
+      head_shards = q_seq_shards = 1
+    else:
+      shd_b, shd_t, shd_n, shd_h = _resolve_sharding_spec(
+          self.config.shd_config.act_btnh, q_shape, mesh
+      )
+      head_shards = _num_shards(shd_n, mesh)
+      q_seq_shards = _num_shards(shd_t, mesh)
+    shd_spec = P(shd_b, shd_n, shd_t, shd_h)
+    return (
+        shd_b,
+        shd_n,
+        shd_t,
+        shd_h,
+        head_shards,
+        q_seq_shards,
+        shd_spec,
+    )
+
+  def _make_splash_kernel(
+      self,
+      multi_head_mask,
+      block_sizes: splash.BlockSizes,
+      head_shards: int,
+      q_seq_shards: int,
+      mesh: MeshType | None,
+      shd_n: AxisSpec,
+      shd_t: AxisSpec,
+      save_residuals: bool = False,
+  ):
+    """Builds a splash MHA kernel and its manual sharding spec."""
+    kernel = splash.make_splash_mha(
+        multi_head_mask,
+        block_sizes=block_sizes,
+        head_shards=head_shards,
+        q_seq_shards=q_seq_shards,
+        save_residuals=save_residuals,
+    )
+    kernel_spec = (
+        kernel.manual_sharding_spec(shd.NamedSharding(mesh, P(shd_n, shd_t)))
+        if mesh is not None
+        else None
+    )
+    return kernel, kernel_spec
+
+  def block(
+      self,
+      x: jaxtyping.Array,
+      segment_pos: jaxtyping.Array,
+      cache: LayerCache | None,
+      attn_mask: jaxtyping.Array,
+      kv_shared_cache: LayerCache | None = None,
+      segment_ids: jaxtyping.Array | None = None,
+      is_chunked_prefill: bool = False,
+      prefix_length: int = 0,
+      input_mask: jaxtyping.Array | None = None,
+      force_eager: bool = False,
+  ) -> tuple[
+      LayerCache | None,
+      jaxtyping.Array,
+      tuple[
+          jaxtyping.Array,
+          jaxtyping.Array,
+          jaxtyping.Array | None,
+          jaxtyping.Array | None,
+      ],
+  ]:
+    x = x.astype(self.config.dtype)
+    seq_len = x.shape[1]
+    query_proj = self.q_einsum(x)
+    query_proj = shard(query_proj, self.config.shd_config.act_btnh)
+    query_proj = self._query_norm(query_proj)
+    query_proj = apply_rope(
+        query_proj,
+        segment_pos,
+        base_frequency=self.rope_base_frequency,
+        scale_factor=self.rope_scale_factor,
+        rope_proportion=self.rope_proportion,
+    )
+
+    key_proj, value_proj, kv_valid_mask = self._compute_kv_projections(
+        x,
+        segment_pos,
+        kv_shared_cache,
+    )
+
+    prior_end_index = None
+    if cache is not None:
+      assert kv_shared_cache is None
+      is_ring_buffer = (
+          self.config.use_sliding_window_kv_cache
+          and self.sliding_window_size is not None
+      )
+      if seq_len > 1:  # prefill
+        new_cache, prefix_res, prior_end_index = (
+            cache_utils.update_cache_prefill(
+                cache,
+                key_proj,
+                value_proj,
+                seq_len,
+                is_chunked_prefill=is_chunked_prefill,
+                prefix_length=prefix_length,
+                input_mask=input_mask,
+                is_ring_buffer_read=is_ring_buffer,
+                is_ring_buffer_write=self.config.use_sliding_window_kv_cache,
+            )
+        )
+        key_proj = prefix_res.key
+        value_proj = prefix_res.value
+        kv_valid_mask = prefix_res.valid_mask
+      else:  # decode
+        key_proj, value_proj = cache_utils.write_cache_decode(
+            cache,
+            key_proj,
+            value_proj,
+            attn_mask,
+            is_ring_buffer=is_ring_buffer,
+        )
+        new_cache = {
+            'v': value_proj,
+            'k': key_proj,
+            'end_index': cache['end_index'] + seq_len,
+        }
+    else:
+      new_cache = {
+          'v': value_proj,
+          'k': key_proj,
+      }
+
+    _, _, qh, _ = query_proj.shape
+
+    # Determine if we can use flash attention for this call.
+    q_len = query_proj.shape[1]
+    kv_len = key_proj.shape[1]
+    is_rectangular = kv_len > q_len
+    use_flash = (
+        self.config.use_flash_attention
+        and seq_len > 1
+        and kv_len >= self.config.flash_attention_block_size
+        and not (is_rectangular and segment_ids is not None)
+        and not force_eager
+    )
+
+    if use_flash and (is_rectangular, cache, jax.default_backend()) == (
+        False,
+        None,
+        'gpu',
+    ):
+      encoded = kernels_lib.gpu_flash_attention(
+          query_proj,
+          key_proj,
+          value_proj,
+          scale=1.0,
+          is_causal=attn_mask is None,
+          mask=attn_mask,
+          segment_ids=segment_ids,
+          local_window_size=self.sliding_window_size,
+          query_sharding_spec=self.config.shd_config.act_btnh,
+      )
+    elif use_flash and jax.default_backend() != 'gpu':
+      mesh = _resolve_active_mesh()
+
+      # Offset: shifts Q positions so q[0] aligns with kv[prefix_len].
+      offset = kv_len - q_len
+
+      (
+          shd_b,
+          shd_n,
+          shd_t,
+          shd_h,
+          head_shards,
+          q_seq_shards,
+          shd_spec,
+      ) = self._make_sharding_specs(query_proj.shape, mesh)
+
+      query_proj = query_proj.transpose(0, 2, 1, 3)
+      # Keep the unrepeated `key_proj`/`value_proj` for `layers_kvs`.
+      splash_key, splash_value = _align_kv_heads_for_splash(
+          key_proj.transpose(0, 2, 1, 3),
+          value_proj.transpose(0, 2, 1, 3),
+          qh,
+          head_shards,
+      )
+      shd_n_kv = _resolve_kv_head_axis(shd_n, splash_key.shape[1], mesh)
+      unsharded_seq_kv = P(shd_b, shd_n_kv, None, shd_h)
+
+      if self.config.splash_attention_impl == SplashAttentionImpl.TOKAMAX:
+        splash_attn_kernel, kernel_spec = self._make_tokamax_splash_kernel(
+            q_len,
+            kv_len,
+            offset,
+            q_seq_shards,
+            mesh,
+            shd_t,
+        )
+      else:
+        mask = self._build_flash_mask(q_len, kv_len, offset)
+
+        multi_head_mask = mask_lib.MultiHeadMask([mask for _ in range(qh)])
+
+        block_sizes = self._make_block_sizes(is_rectangular, q_len=q_len)
+
+        splash_attn_kernel, kernel_spec = self._make_splash_kernel(
+            multi_head_mask,
+            block_sizes,
+            head_shards,
+            q_seq_shards,
+            mesh,
+            shd_n,
+            shd_t,
+        )
+
+      encoded = self._flash_attention_single(
+          query_proj,
+          splash_key,
+          splash_value,
+          segment_ids,
+          splash_attn_kernel,
+          kernel_spec,
+          shd_spec,
+          unsharded_seq_kv,
+          mesh,
+          shd_b,
+          shd_t,
+      )
+
+    else:
+      encoded = self._eager_attention(
+          query_proj,
+          key_proj,
+          value_proj,
+          attn_mask,
+          segment_pos,
+          cache,
+          kv_shared_cache,
+          kv_valid_mask,
+          prior_end_index,
+          prefix_length,
+          seq_len,
+          is_chunked_prefill,
+      )
+
+    attn_output = self.attn_vec_einsum(encoded)
+    attn_output = shard(attn_output, self.config.shd_config.act_btd)
+    return (
+        new_cache,
+        attn_output,
+        (key_proj, value_proj, kv_valid_mask, prior_end_index),
+    )
+
+  def _make_tokamax_splash_kernel(
+      self,
+      q_len: int,
+      kv_len: int,
+      offset: int,
+      q_seq_shards: int,
+      mesh: MeshType | None,
+      shd_t: str | None,
+  ):
+    """Builds a Tokamax splash MHA kernel and its manual sharding spec."""
+    tokamax_splash, _ = _tokamax_splash_libs()
+    if self.attn_type == AttentionType.LOCAL_SLIDING:
+      window_size = self.config.sliding_window_size
+      assert window_size is not None
+      tokamax_mask = _get_tokamax_local_mask(q_len, kv_len, window_size, offset)
+    else:
+      tokamax_mask = _get_tokamax_causal_mask(q_len, kv_len, offset=offset)
+
+    bs = self.config.flash_attention_block_size
+    splash_config = tokamax_splash.SplashConfig(
+        block_q=bs,
+        block_kv=bs,
+        block_kv_compute=bs,
+        block_q_dkv=bs,
+        block_kv_dkv=bs,
+        block_kv_dkv_compute=bs,
+        # Enabling use_base2 can improve performance but reduce numeric precision.
+        use_base2_exp=False,
+    )
+    splash_attn_kernel = tokamax_splash.make_splash_mha(
+        tokamax_mask,
+        config=splash_config,
+        q_seq_shards=q_seq_shards,
+    )
+    kernel_spec = (
+        splash_attn_kernel.manual_sharding_spec(
+            shd.NamedSharding(mesh, P(shd_t))
+        )
+        if mesh is not None
+        else None
+    )
+    return splash_attn_kernel, kernel_spec
+
+  def _flash_attention_single(
+      self,
+      query_proj: jaxtyping.Array,
+      key_proj: jaxtyping.Array,
+      value_proj: jaxtyping.Array,
+      segment_ids: jaxtyping.Array | None,
+      splash_attn_kernel: 'SplashKernel',
+      kernel_spec: 'SplashKernel | None',
+      shd_spec: P,
+      unsharded_seq_kv: P,
+      mesh: MeshType | None,
+      shd_b: AxisSpec,
+      shd_t: AxisSpec,
+  ) -> jaxtyping.Array:
+    """Single-kernel flash attention over concatenated (or plain) KV."""
+    # Original single-kernel attention path.
+    if segment_ids is not None:
+      seg_spec = P(shd_b, shd_t)
+      unsharded_seg_spec = P(shd_b, None)
+      if self.config.splash_attention_impl == SplashAttentionImpl.TOKAMAX:
+        segment_ids_cls = _tokamax_splash_libs()[0].SegmentIds
+      else:
+        segment_ids_cls = splash.SegmentIds
+
+      @partial(
+          shard_map,
+          mesh=mesh,
+          in_specs=(
+              kernel_spec,
+              shd_spec,
+              unsharded_seq_kv,
+              unsharded_seq_kv,
+              seg_spec,
+              unsharded_seg_spec,
+          ),
+          out_specs=shd_spec,
+          check_rep=False,
+      )
+      def sharded_splash_attn(
+          kernel, q_block, k_block, v_block, q_seg_block, kv_seg_block
+      ):
+        seg_ids = segment_ids_cls(q=q_seg_block, kv=kv_seg_block)
+        return jax.vmap(kernel)(q_block, k_block, v_block, segment_ids=seg_ids)
+
+      qkv: jaxtyping.Array = sharded_splash_attn(
+          splash_attn_kernel,
+          query_proj,
+          key_proj,
+          value_proj,
+          segment_ids,
+          segment_ids,
+      )
+    else:
+
+      @partial(
+          shard_map,
+          mesh=mesh,
+          in_specs=(
+              kernel_spec,
+              shd_spec,
+              unsharded_seq_kv,
+              unsharded_seq_kv,
+          ),
+          out_specs=shd_spec,
+          check_rep=False,
+      )
+      def sharded_splash_attn(kernel, q_block, k_block, v_block):
+        return jax.vmap(kernel)(q_block, k_block, v_block)
+
+      qkv: jaxtyping.Array = sharded_splash_attn(
+          splash_attn_kernel,
+          query_proj,
+          key_proj,
+          value_proj,
+      )
+    return qkv.transpose(0, 2, 1, 3)
+
+  def _eager_attention(
+      self,
+      query_proj: jaxtyping.Array,
+      key_proj: jaxtyping.Array,
+      value_proj: jaxtyping.Array,
+      attn_mask: jaxtyping.Array,
+      segment_pos: jaxtyping.Array,
+      cache: LayerCache | None,
+      kv_shared_cache: LayerCache | None,
+      kv_valid_mask: jaxtyping.Array | None = None,
+      prior_end_index: jaxtyping.Array | None = None,
+      prefix_length: int = 0,
+      seq_len: int = 1,
+      is_chunked_prefill: bool = False,
+  ) -> jaxtyping.Array:
+    """Eager einsum attention (non-flash path)."""
+    kv_len = key_proj.shape[1]
+    q_len = query_proj.shape[1]
+
+    if seq_len > 1:
+      if is_chunked_prefill and kv_len > q_len:
+        attn_mask = cache_utils.build_dense_chunked_prefill_mask(
+            attn_mask,
+            q_len,
+            kv_len,
+            prior_end_index,
+            prefix_length,
+            kv_valid_mask=kv_valid_mask,
+            is_ring_buffer=(
+                self.config.use_sliding_window_kv_cache
+                and self.attn_type == AttentionType.LOCAL_SLIDING
+            ),
+            sliding_window_size=self.config.sliding_window_size,
+            kv_shared_cache=kv_shared_cache,
+            has_own_cache=(cache is not None),
+        )
+      else:
+        attn_mask = attn_mask[..., :kv_len]
+
+    _skip_sliding_mask = (
+        is_chunked_prefill
+        and kv_len > q_len
+        and self.config.use_sliding_window_kv_cache
+        and self.attn_type == AttentionType.LOCAL_SLIDING
+    )
+    if self.attn_type == AttentionType.LOCAL_SLIDING and not _skip_sliding_mask:
+      window_size = self.config.sliding_window_size
+      assert window_size is not None
+      if segment_pos.shape[1] == 1:
+        is_ring_buffer = self.config.use_sliding_window_kv_cache
+        end_idx = None
+        cache_len = None
+        if is_ring_buffer:
+          active_cache = cache if cache is not None else kv_shared_cache
+          if active_cache is None:
+            raise ValueError(
+                'Cache or shared cache is required for local sliding attention'
+                ' in decoding.'
+            )
+          cache_len = key_proj.shape[1]
+          end_idx = active_cache['end_index']
+          if cache is None:
+            # In case of shared KV cache, the origin layer already updated the
+            # end index. We need to subtract 1 to get the correct end index of
+            # the previous token.
+            end_idx = end_idx - 1
+        attn_mask = cache_utils.build_sliding_window_decode_mask(
+            attn_mask,
+            window_size=window_size,
+            is_ring_buffer=is_ring_buffer,
+            end_idx=end_idx,
+            cache_len=cache_len,
+        )
+      else:  # standard (non-chunked) prefill sliding window
+        offset = kv_len - q_len
+        all_ones = jnp.ones_like(attn_mask)
+        sliding_mask = jnp.triu(all_ones, offset - window_size + 1) * jnp.tril(
+            all_ones, offset + window_size - 1
+        )
+        attn_mask = sliding_mask * attn_mask
+
+    return reference_attention_lib.reference_attention(
+        query_proj,
+        key_proj,
+        value_proj,
+        scale=1.0,
+        attn_mask=attn_mask,
+        mask_value=K_MASK,
+    )
+
+  @property
+  def use_gqa(self) -> bool:
+    return self.num_kv_heads != self.config.num_heads
+
+  @jax.named_scope('paged_attention')
+  def paged_block(
+      self,
+      x: jaxtyping.Array,
+      segment_pos: jaxtyping.Array,
+      kv_cache: jax.Array,
+      metadata: paged_attention.PagedAttnMetadata,
+      *,
+      cache_name: str,
+      update_kv_cache: bool,
+      mesh: MeshType,
+  ) -> tuple[jax.Array, jaxtyping.Array]:
+    """Attends a ragged batch through the paged KV cache.
+
+    Args:
+      x: `[num_groups, tokens_per_group, embed_dim]` the batch's tokens, one
+        row per DP group.
+      segment_pos: `[num_groups, tokens_per_group]` each token's position in its
+        sequence.
+      kv_cache: this layer's paged KV cache, in `paged_attention`'s layout.
+      metadata: the batch's ragged layout and page tables.
+      cache_name: the key of `kv_cache` in `metadata.page_indices`.
+      update_kv_cache: whether to write this layer's K/V into `kv_cache`.
+        KV-shared layers pass False: their lender already wrote this step's
+        K/V into the shared cache, and the kernel reads it from there.
+      mesh: the mesh to shard the kernel over, by DP group and KV head.
+
+    Returns:
+      A tuple of (updated `kv_cache`,
+      `[num_groups, tokens_per_group, embed_dim]` output).
+    """
+    num_groups, tokens_per_group, _ = x.shape
+    num_tokens = num_groups * tokens_per_group
+    x = x.astype(self.config.dtype)
+    queries = self._query_norm(self.q_einsum(x))
+    queries = apply_rope(
+        queries,
+        segment_pos,
+        base_frequency=self.rope_base_frequency,
+        scale_factor=self.rope_scale_factor,
+        rope_proportion=self.rope_proportion,
+    ).reshape(num_tokens, self.config.num_heads, self.head_dim)
+    if update_kv_cache:
+      keys, values, _ = self._compute_kv_projections(x, segment_pos, None)
+      keys = keys.reshape(num_tokens, self.num_kv_heads, self.head_dim)
+      values = values.reshape(num_tokens, self.num_kv_heads, self.head_dim)
+    else:
+      # The kernel reads every K/V from the shared cache and ignores these,
+      # but its signature still takes them.
+      keys = jnp.zeros(
+          (num_tokens, self.num_kv_heads, self.head_dim), queries.dtype
+      )
+      values = keys
+
+    attn_output, kv_cache = paged_attention.paged_attention(
+        queries,
+        keys,
+        values,
+        kv_cache,
+        metadata,
+        cache_name=cache_name,
+        mesh=mesh,
+        sliding_window=(
+            self.config.sliding_window_size
+            if self.attn_type == AttentionType.LOCAL_SLIDING
+            else None
+        ),
+        update_kv_cache=update_kv_cache,
+        # Q and K are RMS-normalized, so scores are not scaled.
+        sm_scale=1.0,
+    )
+
+    attn_output = attn_output.reshape(
+        num_groups, tokens_per_group, self.config.num_heads, self.head_dim
+    )
+    attn_output = self.attn_vec_einsum(attn_output)
+    attn_output = shard(attn_output, self.config.shd_config.act_btd)
+    return kv_cache, attn_output
+
+  @jax.named_scope('attention')
+  def __call__(
+      self,
+      x: jaxtyping.Array,
+      segment_pos: jaxtyping.Array,
+      cache: LayerCache | None,
+      attn_mask: jaxtyping.Array,
+      kv_shared_cache: LayerCache | None = None,
+      segment_ids: jaxtyping.Array | None = None,
+      is_chunked_prefill: bool = False,
+      prefix_length: int = 0,
+      input_mask: jaxtyping.Array | None = None,
+      force_eager: bool = False,
+  ) -> tuple[
+      LayerCache | None,
+      jaxtyping.Array,
+      tuple[
+          jaxtyping.Array,
+          jaxtyping.Array,
+          jaxtyping.Array | None,
+          jaxtyping.Array | None,
+      ],
+  ]:
+    remat_config = getattr(self.config, 'remat_config', RematConfig.NONE)
+    if (
+        remat_config == RematConfig.BLOCK
+        or remat_config == RematConfig.BLOCK.value
+    ):
+      # nnx.remat needs to be applied to the unbound function and take self
+      # as the first argument. graph_updates=False prevents TraceContextError
+      # when mutating params across jax transformation trace levels.
+      # Bake static args via partial to avoid ConcretizationTypeError under remat.
+      # Bucket prefix_length to prevent a recompilation storm.
+      active_cache = cache if cache is not None else kv_shared_cache
+      bucketed_prefix = cache_utils.maybe_bucket_prefix_length(
+          prefix_length,
+          active_cache,
+          is_chunked_prefill,
+          self.config.prefix_bucket_boundaries,
+      )
+      block_fn = partial(
+          self.block.__func__,
+          is_chunked_prefill=is_chunked_prefill,
+          prefix_length=bucketed_prefix,
+          input_mask=input_mask,
+          force_eager=force_eager,
+      )
+      policy = getattr(jax.checkpoint_policies, self.config.remat_policy)
+      return nnx.remat(
+          block_fn,
+          graph_updates=False,
+          policy=policy,
+      )(self, x, segment_pos, cache, attn_mask, kv_shared_cache, segment_ids)
+    else:
+      # Bucket prefix_length for the non-remat path too (controls static slice
+      # shapes which affect JAXPR identity).
+      active_cache = cache if cache is not None else kv_shared_cache
+      bucketed_prefix = cache_utils.maybe_bucket_prefix_length(
+          prefix_length,
+          active_cache,
+          is_chunked_prefill,
+          self.config.prefix_bucket_boundaries,
+      )
+      return self.block(
+          x,
+          segment_pos,
+          cache,
+          attn_mask,
+          kv_shared_cache=kv_shared_cache,
+          segment_ids=segment_ids,
+          is_chunked_prefill=is_chunked_prefill,
+          prefix_length=bucketed_prefix,
+          input_mask=input_mask,
+          force_eager=force_eager,
+      )
+
+  def init_cache(
+      self, batch_size: int, max_seq_len: int, dtype: jnp.dtype
+  ) -> LayerCache:
+    cache_len = max_seq_len
+    sliding_window_size = self.config.sliding_window_size
+    if (
+        self.config.use_sliding_window_kv_cache
+        and self.attn_type == AttentionType.LOCAL_SLIDING
+        and sliding_window_size is not None
+    ):
+      cache_len = min(max_seq_len, sliding_window_size)
+
+    cache_shape = (batch_size, cache_len, self.num_kv_heads, self.head_dim)
+    mesh = _resolve_active_mesh()
+
+    shd_config = getattr(self.config, 'shd_config', None)
+    act_btnh = getattr(shd_config, 'act_btnh', None) if shd_config else None
+
+    if mesh is not None and act_btnh is not None:
+      cache_spec = _resolve_sharding_spec(act_btnh, cache_shape, mesh)
+      k_sharding = shd.NamedSharding(mesh, cache_spec)
+      idx_sharding = shd.NamedSharding(mesh, P(*cache_spec[:1]))
+
+      k = _zeros(cache_shape, dtype, k_sharding)()
+      v = _zeros(cache_shape, dtype, k_sharding)()
+      end_index = _zeros((batch_size,), jnp.int32, idx_sharding)()
+    else:
+      k = jnp.zeros(cache_shape, dtype)
+      v = jnp.zeros(cache_shape, dtype)
+      end_index = jnp.zeros((batch_size,), jnp.int32)
+
+    return {'k': k, 'v': v, 'end_index': end_index}

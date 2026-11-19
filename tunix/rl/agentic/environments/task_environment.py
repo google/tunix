@@ -14,9 +14,9 @@
 
 """RL Environment for single-turn task-based agent interactions."""
 
-import logging
 from typing import Any, Dict
 
+from absl import logging
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.rewards import reward
@@ -45,17 +45,20 @@ class TaskEnvironment(base_environment.BaseTaskEnv):
 
     Args:
       single_example: A single prompt.
-      reward_fn: Reward function that takes (task, action) and returns
-        RewardOutput with `.reward` and `.metadata` fields. If None, defaults to
-        `dummy_reward`.
+      reward_fn: RewardFunction to be used in environment. Optional.
       **kwargs: Extra arguments ignored by this environment but accepted for
         compatibility with a common environment config interface.
     """
     if reward_fn is None:
-      logging.warning("No reward_fn provided, defaulting to dummy_reward().")
-      reward_fn = reward.dummy_reward
+      logging.log_first_n(
+          logging.WARNING,
+          "No reward_fn provided.",
+          1,
+      )
 
-    super().__init__(task=single_example, reward_fn=reward_fn, max_steps=1, **kwargs)
+    super().__init__(
+        task=single_example, reward_fn=reward_fn, max_steps=1, **kwargs
+    )
 
   def _initial_observation(self) -> Dict[str, Any]:
     """Reset the environment and return the task as the initial observation."""
@@ -76,12 +79,15 @@ class TaskEnvironment(base_environment.BaseTaskEnv):
     """
     if isinstance(action, agent_types.Action):
       action = action.action
-    r_out = self.reward_fn(task=self.task, action=action)
+    if self.reward_fn is not None:
+      reward_val = self.reward_fn(task=self.task, action=action)
+    else:
+      reward_val = 0.0
     return base_environment.EnvStepResult(
         observation={},
-        reward=r_out.reward,
+        reward=reward_val,
         done=True,
-        info={"response": action, "metadata": r_out.metadata},
+        info={"response": action},
     )
 
   @classmethod

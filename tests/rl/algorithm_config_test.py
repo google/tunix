@@ -15,6 +15,8 @@
 from absl.testing import absltest
 from absl.testing import parameterized
 from tunix.rl import algorithm_config
+from tunix.rl import function_registry
+
 
 class AlgorithmConfigTest(parameterized.TestCase):
 
@@ -25,6 +27,7 @@ class AlgorithmConfigTest(parameterized.TestCase):
       self.assertEqual(config.algo_variant, "grpo")
       self.assertEqual(config.advantage_estimator, "grpo")
       self.assertEqual(config.policy_loss_fn, "grpo")
+      self.assertEqual(config.reward_mode, "reward_fn")
     except ValueError as e:
       self.fail(f"Default AlgorithmConfig values raised ValueError: {e}")
 
@@ -41,6 +44,12 @@ class AlgorithmConfigTest(parameterized.TestCase):
           algo="gspo-token",
           adv="grpo",
           loss="ppo",
+      ),
+      dict(
+          testcase_name="grpo_grpo_loo_grpo",
+          algo="grpo",
+          adv="grpo-loo",
+          loss="grpo",
       ),
   )
   def test_valid_combinations(self, algo: str, adv: str, loss: str):
@@ -92,6 +101,40 @@ class AlgorithmConfigTest(parameterized.TestCase):
     ):
       algorithm_config.AlgorithmConfig(policy_loss_fn=value)
 
+  @parameterized.named_parameters(
+      dict(testcase_name="reward_fn", value="reward_fn"),
+      dict(testcase_name="env", value="env"),
+  )
+  def test_valid_reward_mode(self, value: str):
+    config = algorithm_config.AlgorithmConfig(reward_mode=value)
+    self.assertEqual(config.reward_mode, value)
+
+  @parameterized.named_parameters(
+      dict(testcase_name="unknown", value="invalid_mode"),
+      # Legacy keys removed when `reward_manager` was renamed to `reward_mode`.
+      dict(testcase_name="legacy_sequence_level", value="sequence-level"),
+      dict(
+          testcase_name="legacy_agentic_sequence_level",
+          value="agentic-sequence-level",
+      ),
+  )
+  def test_invalid_reward_mode(self, value: str):
+    with self.assertRaisesRegex(
+        ValueError,
+        f"reward_mode must be one of .* Received: {value!r}",
+    ):
+      algorithm_config.AlgorithmConfig(reward_mode=value)
+
+  def test_reward_mode_accepts_custom_registered_manager(self):
+    """Verifies `reward_mode` falls back to `function_registry` lookups."""
+    function_registry.register_reward_manager("chicken_reward_custom_789")(
+        lambda *args, **kwargs: None
+    )
+    config = algorithm_config.AlgorithmConfig(
+        reward_mode="chicken_reward_custom_789"
+    )
+    self.assertEqual(config.reward_mode, "chicken_reward_custom_789")
+
   def test_kw_only_enforcement(self):
     """Ensures that positional arguments are not allowed."""
     with self.assertRaises(TypeError):
@@ -141,6 +184,208 @@ class AlgorithmConfigTest(parameterized.TestCase):
     self.assertIn("algo_variant: gspo", full_log_output)
     self.assertIn("advantage_estimator: gae", full_log_output)
     self.assertIn("policy_loss_fn: ppo", full_log_output)
+
+  def test_kl_clamp_value_default_is_none(self):
+    """Default `kl_clamp_value` is None (no clamp, prior behavior)."""
+    config = algorithm_config.AlgorithmConfig()
+    self.assertIsNone(config.kl_clamp_value)
+
+  @parameterized.named_parameters(
+      ("ten_thousand", 10000.0),
+      ("one", 1.0),
+      ("explicit_none", None),
+  )
+  def test_kl_clamp_value_round_trips(self, value):
+    """`kl_clamp_value` is stored as-set on the config."""
+    config = algorithm_config.AlgorithmConfig(kl_clamp_value=value)
+    self.assertEqual(config.kl_clamp_value, value)
+
+  def test_grpo_config_defaults(self):
+    """Verifies GRPOConfig default values."""
+    config = algorithm_config.GRPOConfig()
+    self.assertEqual(config.algo_variant, "grpo")
+    self.assertEqual(config.num_generations, 2)
+    self.assertEqual(config.beta, 0.04)
+    self.assertEqual(config.epsilon, 0.2)
+    self.assertEqual(config.epsilon_high, 0.2)
+    self.assertIsNone(config.epsilon_c)
+    self.assertEqual(config.kl_loss_mode, "kl")
+    self.assertEqual(config.loss_agg_mode, "sequence-mean-token-mean")
+    self.assertIsNone(config.sampler_is)
+    self.assertEqual(config.sampler_is_threshold, 2.0)
+    self.assertIsNone(config.sampler_rs)
+    self.assertIsNone(config.sampler_rs_min)
+    self.assertIsNone(config.sampler_rs_max)
+
+  def test_grpo_config_validation(self):
+    """Verifies GRPOConfig parameter validation."""
+    with self.assertRaisesRegex(
+        ValueError, "num_generations must be greater than 1"
+    ):
+      algorithm_config.GRPOConfig(num_generations=1)
+
+    with self.assertRaisesRegex(ValueError, "loss_algo should be either"):
+      algorithm_config.GRPOConfig(loss_algo="invalid_algo")
+
+    with self.assertRaisesRegex(ValueError, "sampler_is should be either"):
+      algorithm_config.GRPOConfig(sampler_is="invalid_is")
+
+  def test_grpo_config_sampler_is_and_rs_validation(self):
+    """Verifies orthogonal sampler_is and sampler_rs validations."""
+    with self.assertRaisesRegex(ValueError, "sampler_is_threshold must be > 0"):
+      algorithm_config.GRPOConfig(sampler_is="token", sampler_is_threshold=0.0)
+    with self.assertRaisesRegex(ValueError, "must be set together"):
+      algorithm_config.GRPOConfig(sampler_rs_min=0.5)
+    with self.assertRaisesRegex(ValueError, "sampler_rs_min must be >= 0.0"):
+      algorithm_config.GRPOConfig(sampler_rs_min=-0.5, sampler_rs_max=2.0)
+    with self.assertRaisesRegex(ValueError, "must not exceed"):
+      algorithm_config.GRPOConfig(sampler_rs_min=2.0, sampler_rs_max=1.0)
+    with self.assertRaisesRegex(
+        ValueError, "sampler_rs should be None, 'geometric', or 'token'"
+    ):
+      algorithm_config.GRPOConfig(
+          sampler_rs="bad", sampler_rs_min=0.5, sampler_rs_max=2.0
+      )
+    with self.assertRaisesRegex(ValueError, "requires a keep-band"):
+      algorithm_config.GRPOConfig(sampler_rs="geometric")
+
+    # Orthogonal combinations: token IS + geometric RS (both capped and unclipped)
+    cfg_seq_mask_tis = algorithm_config.GRPOConfig(
+        sampler_is="token",
+        sampler_is_threshold=None,
+        sampler_rs="geometric",
+        sampler_rs_min=0.5,
+        sampler_rs_max=2.0,
+    )
+    self.assertEqual(cfg_seq_mask_tis.sampler_is, "token")
+    self.assertIsNone(cfg_seq_mask_tis.sampler_is_threshold)
+    self.assertEqual(cfg_seq_mask_tis.sampler_rs, "geometric")
+    self.assertEqual(cfg_seq_mask_tis.sampler_rs_min, 0.5)
+    self.assertEqual(cfg_seq_mask_tis.sampler_rs_max, 2.0)
+
+    cfg_capped_seq_mask_tis = algorithm_config.GRPOConfig(
+        sampler_is="token",
+        sampler_is_threshold=5.0,
+        sampler_rs="geometric",
+        sampler_rs_min=0.5,
+        sampler_rs_max=2.0,
+    )
+    self.assertEqual(cfg_capped_seq_mask_tis.sampler_is_threshold, 5.0)
+
+  def test_grpo_config_score_centering_validation(self):
+    config = algorithm_config.GRPOConfig(
+        score_centering=True, sampler_is="token", score_centering_top_k=32
+    )
+    self.assertTrue(config.score_centering)
+    with self.assertRaisesRegex(ValueError, "score_centering_top_k"):
+      algorithm_config.GRPOConfig(score_centering_top_k=0)
+    with self.assertRaisesRegex(ValueError, "score_centering_eps"):
+      algorithm_config.GRPOConfig(score_centering_eps=0.0)
+    with self.assertRaisesRegex(ValueError, "'grpo' policy loss"):
+      algorithm_config.GRPOConfig(score_centering=True, policy_loss_fn="ppo")
+    with self.assertRaisesRegex(ValueError, "num_iterations == 1"):
+      algorithm_config.GRPOConfig(score_centering=True, num_iterations=2)
+    with self.assertRaisesRegex(ValueError, "does not support sampler_rs"):
+      algorithm_config.GRPOConfig(
+          score_centering=True,
+          sampler_rs="geometric",
+          sampler_rs_min=0.999,
+          sampler_rs_max=1.002,
+      )
+    with self.assertRaisesRegex(ValueError, "no-op with unclipped token IS"):
+      algorithm_config.GRPOConfig(
+          score_centering=True, sampler_is="token", sampler_is_threshold=None
+      )
+
+  def test_grpo_config_custom_policy_loss_and_advantage(self):
+    """Verifies GRPOConfig supports dynamically registered custom functions."""
+    function_registry.register_policy_loss_fn("chicken_loss_custom_123")(
+        lambda *args, **kwargs: None
+    )
+    function_registry.register_advantage_estimator("chicken_adv_custom_456")(
+        lambda *args, **kwargs: None
+    )
+    config = algorithm_config.GRPOConfig(
+        policy_loss_fn="chicken_loss_custom_123",
+        advantage_estimator="chicken_adv_custom_456",
+    )
+    self.assertEqual(config.policy_loss_fn, "chicken_loss_custom_123")
+    self.assertEqual(config.advantage_estimator, "chicken_adv_custom_456")
+
+  def test_routed_experts_encode_config_validation(self):
+    cfg = algorithm_config.GRPOConfig()
+    self.assertEqual(cfg.routed_experts_encode_mode, "auto")
+    self.assertIsNone(cfg.routed_experts_num_experts)
+
+    cfg_det = algorithm_config.GRPOConfig(
+        routed_experts_encode_mode="uint10",
+        routed_experts_num_experts=256,
+    )
+    self.assertEqual(cfg_det.routed_experts_encode_mode, "uint10")
+    self.assertEqual(cfg_det.routed_experts_num_experts, 256)
+
+    with self.assertRaisesRegex(
+        ValueError, "routed_experts_encode_mode must be one of"
+    ):
+      algorithm_config.GRPOConfig(routed_experts_encode_mode="bad")
+
+    for bad_num in (0, -4, True, False):
+      with self.assertRaisesRegex(
+          ValueError, "routed_experts_num_experts must be a positive int"
+      ):
+        algorithm_config.GRPOConfig(routed_experts_num_experts=bad_num)
+
+  def test_requires_reference_kl(self):
+    self.assertFalse(
+        algorithm_config.AlgorithmConfig(
+            beta=0.0, force_compute_kl=False
+        ).requires_reference_kl
+    )
+    self.assertTrue(
+        algorithm_config.AlgorithmConfig(
+            beta=0.04, force_compute_kl=False
+        ).requires_reference_kl
+    )
+    self.assertTrue(
+        algorithm_config.AlgorithmConfig(
+            beta=0.0, force_compute_kl=True
+        ).requires_reference_kl
+    )
+
+  def test_ppo_config_defaults_and_validation(self):
+    cfg = algorithm_config.PPOConfig()
+    self.assertEqual(cfg.algo_variant, "ppo")
+    self.assertEqual(cfg.advantage_estimator, "gae")
+    self.assertEqual(cfg.policy_loss_fn, "ppo")
+    self.assertEqual(cfg.value_loss_fn, "ppo")
+    self.assertEqual(cfg.epsilon_low, 0.2)
+    self.assertEqual(cfg.epsilon_high, 0.2)
+
+    cfg_eps = algorithm_config.PPOConfig(epsilon=0.1)
+    self.assertEqual(cfg_eps.epsilon_low, 0.1)
+    self.assertEqual(cfg_eps.epsilon_high, 0.1)
+
+    # Explicit 0.0 bounds are honored instead of falling back to `epsilon`.
+    cfg_zero = algorithm_config.PPOConfig(
+        epsilon=0.2, epsilon_low=0.0, epsilon_high=0.0
+    )
+    self.assertEqual(cfg_zero.epsilon_low, 0.0)
+    self.assertEqual(cfg_zero.epsilon_high, 0.0)
+
+    # Base-class validation now runs for PPOConfig too.
+    with self.assertRaisesRegex(ValueError, "reward_mode must be one of"):
+      algorithm_config.PPOConfig(reward_mode="bogus")
+    with self.assertRaisesRegex(ValueError, "num_generations must be positive"):
+      algorithm_config.PPOConfig(num_generations=0)
+
+    with self.assertRaisesRegex(ValueError, "Invalid KL method"):
+      algorithm_config.PPOConfig(kl_method="bad_kl")
+    with self.assertRaisesRegex(
+        ValueError, "`epsilon_c` must be greater than 1"
+    ):
+      algorithm_config.PPOConfig(epsilon_c=1.0)
+    with self.assertRaisesRegex(ValueError, "value_loss_fn must be one of"):
+      algorithm_config.PPOConfig(value_loss_fn="bad_value_loss")
 
 
 if __name__ == "__main__":

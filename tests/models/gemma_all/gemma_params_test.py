@@ -558,6 +558,10 @@ class Gemma3LoraParamsTest(lora_params_test_base.LoraParamsTestBase):
             layer.mlp.down_proj.kernel.value
         ).T
 
+    # Ensure all arrays are contiguous before saving
+    for k, v in base_state.items():
+      base_state[k] = np.ascontiguousarray(v)
+
     # Save to disk
     safe_np.save_file(
         base_state, os.path.join(self.base_checkpoint_dir, 'model.safetensors')
