@@ -134,6 +134,7 @@ from typing import Any, Optional, Sequence, TYPE_CHECKING
 from absl import logging
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import timeouts as timeouts_lib
+from tunix.dist_rl.weight_sync import tcp_handler
 from tunix.dist_rl.weight_sync import weight_sync
 from tunix.dist_rl.worker import remote_execution
 
@@ -191,6 +192,12 @@ def create_default_handler(
     )
     logging.info("Built RaidenHandler natively; port %d", handler.port)
     return handler
+  if resolved_mode == weight_sync.WeightSyncMode.TCP:
+    logging.info(
+        "Built TcpWeightSyncHandler for cross-framework TCP weight"
+        " sync."
+    )
+    return tcp_handler.TcpWeightSyncHandler()
   if resolved_mode in (
       weight_sync.WeightSyncMode.NONE,
       weight_sync.WeightSyncMode.NOOP,

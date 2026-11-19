@@ -41,6 +41,7 @@ from tunix.dist_rl.orchestrator import worker_registry
 from tunix.dist_rl.testing import worker_registry_testing
 
 try:
+  from tunix.dist_rl.weight_sync import tcp_handler  # pylint: disable=g-import-not-at-top
   from tunix.dist_rl.weight_sync import weight_sync
   from tunix.dist_rl.weight_sync import weight_sync_coordinator
 except ImportError:
@@ -1994,6 +1995,17 @@ class DestinationStatusFilterTest(CoordinatorTestBase):
   def test_create_default_handler_returns_null_handler_for_none_and_rejects_invalid_modes(
       self,
   ):
+    for mode in (
+        weight_sync.WeightSyncMode.TCP,
+        "tcp",
+        "TCP",
+    ):
+      with self.subTest(mode=mode):
+        handler = weight_sync_coordinator.create_default_handler(mode)
+        self.assertIsInstance(
+            handler,
+            tcp_handler.TcpWeightSyncHandler,
+        )
     for mode in (
         weight_sync.WeightSyncMode.NONE,
         "none",

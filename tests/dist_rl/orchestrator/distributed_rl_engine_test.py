@@ -94,6 +94,7 @@ class MockActorHandle(mock.MagicMock):
     self.clear_staged = mock.AsyncMock(return_value=0)
     self.with_loss_fn = mock.MagicMock()
     self.with_gen_model_input_fn = mock.MagicMock()
+    self.configure_algorithm = mock.MagicMock()
     self.compile = mock.MagicMock()
 
   def submit(self, method_name: str, *args, **kwargs):
@@ -2029,6 +2030,219 @@ class DistributedRLEngineTest(absltest.TestCase):
             "eos_id": 7,
         },
     )
+
+  def test_configure_worker_data_only_algorithm_config_forwarding(self):
+    actor = MockActorHandle()
+    registry = worker_registry.WorkerRegistry()
+    registry.register_handle(
+        "trainer_0",
+        [datatypes.Role.ACTOR],
+        actor,
+        resources={
+            "accepts_callable_loss": False,
+            "needs_aot_compile": False,
+        },
+    )
+    worker_registry_testing.set_status(
+        registry, "trainer_0", worker_registry.AdmissionStatus.ACTIVE
+    )
+    engine = distributed_rl_engine.DistributedRLEngine(
+        registry=registry,
+    )
+    algo_cfg = algorithm_config.GRPOConfig()
+    algo_cfg.policy_loss_fn = "grpo"
+    algo_cfg.epsilon = 0.2
+    algo_cfg.epsilon_high = 0.3
+    algo_cfg.epsilon_c = 0.1
+    algo_cfg.sampler_is = "token"
+    algo_cfg.sampler_rs = "geometric"
+    algo_cfg.sampler_rs_min = 0.5
+    algo_cfg.sampler_rs_max = 1.5
+    algo_cfg.seq_logprob_error_threshold = 2.0
+    mock_assembler = mock.MagicMock(
+        spec=["pad_id", "build_dummy_payload"], pad_id=1
+    )
+    mock_assembler.build_dummy_payload.return_value = "dummy_payload"
+
+    engine.configure_worker(
+        role=datatypes.Role.ACTOR,
+        algo_config=algo_cfg,
+        assembler=mock_assembler,
+        eos_id=2,
+        can_fuse_agreement_in_loss=False,
+        precompile=True,
+        return_routed_experts=True,
+    )
+
+    actor.configure_algorithm.assert_called_once_with(
+        algo_cfg,
+        pad_id=1,
+        eos_id=2,
+        fuse_agreement_in_loss=False,
+        return_routed_experts=True,
+    )
+    actor.compile.assert_not_called()
+
+  def test_configure_worker_data_only_with_aot_compile(self):
+    actor = MockActorHandle()
+    registry = worker_registry.WorkerRegistry()
+    registry.register_handle(
+        "trainer_0",
+        [datatypes.Role.ACTOR],
+        actor,
+        resources={
+            "accepts_callable_loss": False,
+            "needs_aot_compile": True,
+        },
+    )
+    worker_registry_testing.set_status(
+        registry, "trainer_0", worker_registry.AdmissionStatus.ACTIVE
+    )
+    engine = distributed_rl_engine.DistributedRLEngine(
+        registry=registry,
+    )
+    algo_cfg = algorithm_config.GRPOConfig(use_rollout_logps=False, beta=0.04)
+    mock_assembler = mock.MagicMock(
+        spec=["pad_id", "build_dummy_payload"], pad_id=1
+    )
+    mock_assembler.build_dummy_payload.return_value = "dummy_payload"
+
+    engine.configure_worker(
+        role=datatypes.Role.ACTOR,
+        algo_config=algo_cfg,
+        assembler=mock_assembler,
+        eos_id=2,
+        precompile=True,
+    )
+
+    actor.configure_algorithm.assert_called_once_with(
+        algo_cfg,
+        pad_id=1,
+        eos_id=2,
+        fuse_agreement_in_loss=True,
+        return_routed_experts=False,
+    )
+    mock_assembler.build_dummy_payload.assert_called_once_with(
+        with_old_per_token_logps=False,
+        with_ref_per_token_logps=True,
+        with_sampler_is_weights=False,
+        sampler_agreement_applied=False,
+        with_routed_experts=False,
+        routed_experts_encode_mode="auto",
+    )
+    actor.compile.assert_called_once_with("dummy_payload")
+
+  def test_configure_worker_data_only_fail_fast_checks(self):
+    actor = MockActorHandle()
+    registry = worker_registry.WorkerRegistry()
+    registry.register_handle(
+        "trainer_0",
+        [datatypes.Role.ACTOR, datatypes.Role.CRITIC],
+        actor,
+        resources={
+            "accepts_callable_loss": False,
+        },
+    )
+    worker_registry_testing.set_status(
+        registry, "trainer_0", worker_registry.AdmissionStatus.ACTIVE
+    )
+    engine = distributed_rl_engine.DistributedRLEngine(
+        registry=registry,
+    )
+    mock_assembler = mock.MagicMock(
+        spec=["pad_id", "build_dummy_payload"], pad_id=0
+    )
+
+    # 1. Critic rejected for data-only worker
+    with self.assertRaisesRegex(
+        ValueError,
+        "Data-only configure_algorithm currently requires Role.ACTOR",
+    ):
+      engine.configure_worker(
+          role=datatypes.Role.CRITIC,
+          algo_config=algorithm_config.PPOConfig(),
+          assembler=mock_assembler,
+      )
+
+    # 2. Non-GRPOConfig rejected for data-only worker
+    with self.assertRaisesRegex(
+        ValueError,
+        "Data-only configure_algorithm currently requires Role.ACTOR",
+    ):
+      engine.configure_worker(
+          role=datatypes.Role.ACTOR,
+          algo_config=mock.MagicMock(),
+          assembler=mock_assembler,
+      )
+
+  def test_prepare_rollout_policy_skips_target_state_when_not_required(self):
+    async def _run():
+      actor = MockActorHandle()
+      mock_rollout = MockActorHandle()
+      registry = worker_registry.WorkerRegistry()
+      registry.register_handle(
+          "trainer_0",
+          [datatypes.Role.ACTOR],
+          actor,
+          resources={
+              "requires_target_state": False,
+          },
+      )
+      registry.register_handle(
+          "rollout_0",
+          [datatypes.Role.ROLLOUT],
+          mock_rollout,
+      )
+      worker_registry_testing.set_status(
+          registry, "trainer_0", worker_registry.AdmissionStatus.ACTIVE
+      )
+      worker_registry_testing.set_status(
+          registry, "rollout_0", worker_registry.AdmissionStatus.ACTIVE
+      )
+      engine = distributed_rl_engine.DistributedRLEngine(
+          registry=registry,
+      )
+      await engine.prepare_rollout_policy(sync_weights=False)
+      mock_rollout.get_target_state.assert_not_called()
+      actor.set_target_state.assert_not_called()
+
+    asyncio.run(_run())
+
+  def test_configure_worker_conflicting_capabilities_raises(self):
+    actor_0 = MockActorHandle()
+    actor_1 = MockActorHandle()
+    registry = worker_registry.WorkerRegistry()
+    registry.register_handle(
+        "trainer_0",
+        [datatypes.Role.ACTOR],
+        actor_0,
+        resources={"accepts_callable_loss": True},
+    )
+    registry.register_handle(
+        "trainer_1",
+        [datatypes.Role.ACTOR],
+        actor_1,
+        resources={"accepts_callable_loss": False},
+    )
+    worker_registry_testing.set_status(
+        registry, "trainer_0", worker_registry.AdmissionStatus.ACTIVE
+    )
+    worker_registry_testing.set_status(
+        registry, "trainer_1", worker_registry.AdmissionStatus.ACTIVE
+    )
+    engine = distributed_rl_engine.DistributedRLEngine(registry=registry)
+    mock_assembler = mock.MagicMock(
+        spec=["pad_id", "build_dummy_payload"], pad_id=0
+    )
+
+    with self.assertRaisesRegex(
+        ValueError, "Inconsistent worker capability 'accepts_callable_loss'"
+    ):
+      engine.configure_worker(
+          role=datatypes.Role.ACTOR,
+          algo_config=algorithm_config.GRPOConfig(),
+          assembler=mock_assembler,
+      )
 
   def test_poll_rollouts_does_not_block_on_slow_or_idle_worker(self):
     async def _run():
