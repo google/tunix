@@ -14,7 +14,9 @@
 
 """Disttillation trainer unittest."""
 
+from collections.abc import Mapping
 import os
+import types
 from absl.testing import absltest
 from flax import nnx
 import jax
@@ -47,13 +49,21 @@ def create_sharded_model(model_ctor, rngs, mesh):
   return model, state_sharding
 
 
-def dummy_gen_model_input_fn(x: distillation_trainer.TrainingInput):
+def dummy_gen_model_input_fn(
+    x: distillation_trainer.TrainingInput,
+) -> dict[str, jax.typing.ArrayLike]:
   return {
       'input_tokens': x.input_tokens,
       'input_mask': x.input_mask,
       'positions': jnp.arange(x.input_tokens.shape[1]),
       'attention_mask': jnp.ones_like(x.input_tokens),
   }
+
+
+def _mapping_proxy_model_inputs(
+    batch: distillation_trainer.TrainingInput,
+) -> Mapping[str, jax.typing.ArrayLike]:
+  return types.MappingProxyType(dummy_gen_model_input_fn(batch))
 
 
 def get_labels_fn(
@@ -256,6 +266,33 @@ class DistillationTrainerTest(absltest.TestCase):
         jax.sharding.SingleDeviceSharding,
     )
     jax.tree.map_with_path(tc.assert_close, variables, unsharded_variables)
+
+  def test_loss_methods_accept_covariant_mappings(self):
+    student_model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=_VOCAB_SIZE), rngs=nnx.Rngs(0)
+    )
+    teacher_model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=_VOCAB_SIZE), rngs=nnx.Rngs(1)
+    )
+    strategy = get_toy_logit_strategy()
+    config = distillation_trainer.TrainingConfig(
+        eval_every_n_steps=2, max_steps=1
+    )
+    trainer = distillation_trainer.DistillationTrainer(
+        student_model, teacher_model, strategy, optax.sgd(1e-3), config
+    ).with_gen_model_input_fn(_mapping_proxy_model_inputs)
+    trainer.train(self.train_ds[:1], self.eval_ds[:1])
+    self.assertEqual(trainer.train_steps, 1)
+    batch = self.train_ds[0]
+    narrow_dict = dummy_gen_model_input_fn(batch)
+    readonly_mapping = _mapping_proxy_model_inputs(batch)
+    prepared = trainer._prepare_inputs(batch)  # pylint: disable=protected-access
+    train_loss, _ = trainer.get_train_loss(
+        student_model, prepared.teacher_output, narrow_dict
+    )
+    eval_loss, _ = trainer.get_eval_loss(student_model, None, readonly_mapping)
+    self.assertEqual(jnp.asarray(train_loss).shape, ())
+    self.assertEqual(jnp.asarray(eval_loss).shape, ())
 
 
 if __name__ == '__main__':

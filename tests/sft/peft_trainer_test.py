@@ -14,10 +14,12 @@
 
 """Peft trainer unittest."""
 
+from collections.abc import Mapping
 import contextlib
 import functools
 import os
 import tempfile
+import types
 from typing import Any, Tuple
 from unittest import mock
 from absl.testing import absltest
@@ -72,6 +74,29 @@ def dummy_gen_model_input_fn(x: peft_trainer.TrainingInput):
       'positions': jnp.arange(x.input_tokens.shape[1]),
       'attention_mask': jnp.ones_like(x.input_tokens),
   }
+
+
+def _jax_arraylike_gen_model_input_fn(
+    batch: peft_trainer.TrainingInput,
+) -> dict[str, jax.typing.ArrayLike]:
+  return dummy_gen_model_input_fn(batch)
+
+
+def _jax_array_gen_model_input_fn(
+    batch: peft_trainer.TrainingInput,
+) -> dict[str, jax.Array]:
+  return {
+      'input_tokens': jnp.asarray(batch.input_tokens),
+      'input_mask': jnp.asarray(batch.input_mask),
+      'positions': jnp.arange(batch.input_tokens.shape[1]),
+      'attention_mask': jnp.ones_like(batch.input_tokens),
+  }
+
+
+def _mapping_proxy_gen_model_input_fn(
+    batch: peft_trainer.TrainingInput,
+) -> Mapping[str, jax.Array]:
+  return types.MappingProxyType(_jax_array_gen_model_input_fn(batch))
 
 
 def dummy_datasets(batch_size: int, repeat: int = 1):
@@ -1275,6 +1300,26 @@ class PeftTrainerTest(parameterized.TestCase):
     else:
       self.assertIsNotNone(learning_rate)
       self.assertAlmostEqual(float(learning_rate), expected)
+
+  @parameterized.named_parameters(
+      ('jax_array', 'jax_array'),
+      ('jax_arraylike', 'jax_arraylike'),
+      ('mapping_proxy', 'mapping_proxy'),
+  )
+  def test_with_gen_model_input_fn_accepts_covariant_mappings(
+      self, variant: str
+  ):
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=100, max_steps=1)
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    if variant == 'jax_array':
+      trainer.with_gen_model_input_fn(_jax_array_gen_model_input_fn)
+    elif variant == 'jax_arraylike':
+      trainer.with_gen_model_input_fn(_jax_arraylike_gen_model_input_fn)
+    else:
+      trainer.with_gen_model_input_fn(_mapping_proxy_gen_model_input_fn)
+    trainer.train(self.train_ds[:1])
+    self.assertEqual(trainer.train_steps, 1)
 
 
 def _unwrap(state):

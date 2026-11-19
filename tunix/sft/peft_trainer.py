@@ -51,7 +51,7 @@ from tunix.sft import utils
 ArrayLike: TypeAlias = datatypes.ArrayLike
 TrainingConfig = configs.TrainingConfig
 
-_ModelInputT = Dict[str, ArrayLike]
+_ModelInputT = Mapping[str, ArrayLike]
 P = ParamSpec("P")
 MetricsLogger = sft_metrics_logger.MetricsLogger
 MetricsLoggerOptions = sft_metrics_logger.MetricsLoggerOptions
