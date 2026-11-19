@@ -14,405 +14,295 @@
 
 """Loads Gemma3 parameters from safetensors files."""
 
-from collections.abc import Mapping
-from typing import Any
+import re
 
 import jax
 import jax.numpy as jnp
-from tunix.models import hf_mapping
 from tunix.models import safetensors_loader
 from tunix.models.gemma3 import model as model_lib
 
-HfVariant = model_lib.HfVariant
-from_hf_impl = hf_mapping.from_hf_impl
-to_hf_impl = hf_mapping.to_hf_impl
 
-
-_FROM_HF_BASE_JSON = """[
-  {
-    "source_pattern": ["${lm}embed_tokens.weight"],
-    "target_pattern": ["embedder.input_embedding"],
-    "ops": []
-  },
-  {
-    "source_pattern": ["${lm}norm.weight"],
-    "target_pattern": ["final_norm.scale"],
-    "ops": []
-  },
-  {
-    "source_pattern": ["${lm}layers.{i}.input_layernorm.weight"],
-    "target_pattern": ["layers.{i}.pre_attention_norm.scale"],
-    "ops": []
-  },
-  {
-    "source_pattern": ["${lm}layers.{i}.post_attention_layernorm.weight"],
-    "target_pattern": ["layers.{i}.post_attention_norm.scale"],
-    "ops": []
-  },
-  {
-    "source_pattern": ["${lm}layers.{i}.pre_feedforward_layernorm.weight"],
-    "target_pattern": ["layers.{i}.pre_ffw_norm.scale"],
-    "ops": []
-  },
-  {
-    "source_pattern": ["${lm}layers.{i}.post_feedforward_layernorm.weight"],
-    "target_pattern": ["layers.{i}.post_ffw_norm.scale"],
-    "ops": []
-  },
-  {
-    "source_pattern": ["${lm}layers.{i}.self_attn.q_norm.weight"],
-    "target_pattern": ["layers.{i}.attn._query_norm.scale"],
-    "ops": []
-  },
-  {
-    "source_pattern": ["${lm}layers.{i}.self_attn.k_norm.weight"],
-    "target_pattern": ["layers.{i}.attn._key_norm.scale"],
-    "ops": []
-  },
-  {
-    "source_pattern": ["${lm}layers.{i}.self_attn.o_proj.weight"],
-    "target_pattern": ["layers.{i}.attn.attn_vec_einsum.w"],
-    "ops": [
-      {"transpose": {"axes": [1, 0]}},
-      {"reshape": {"src_shape": [$nh, $d], "dst_shape": [$n, $h, $d]}}
-    ]
-  },
-  {
-    "source_pattern": ["${lm}layers.{i}.mlp.gate_proj.weight"],
-    "target_pattern": ["layers.{i}.mlp.gate_proj.kernel"],
-    "ops": [{"transpose": {"axes": [1, 0]}}]
-  },
-  {
-    "source_pattern": ["${lm}layers.{i}.mlp.up_proj.weight"],
-    "target_pattern": ["layers.{i}.mlp.up_proj.kernel"],
-    "ops": [{"transpose": {"axes": [1, 0]}}]
-  },
-  {
-    "source_pattern": ["${lm}layers.{i}.mlp.down_proj.weight"],
-    "target_pattern": ["layers.{i}.mlp.down_proj.kernel"],
-    "ops": [{"transpose": {"axes": [1, 0]}}]
+def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
+  """Mapping of torch_keys to (nnx_keys, (permute_rule, reshape_rule))."""
+  mapping = {
+      r"(?:language_model\.)?model\.embed_tokens\.weight": (
+          "embedder.input_embedding", None
+      ),
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.self_attn\.q_proj\.weight": (
+          r"tmp.layers.\1.attn.q",
+          ((1, 0), (cfg.embed_dim, cfg.num_heads, cfg.head_dim)),
+      ),
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.self_attn\.k_proj\.weight": (
+          r"tmp.layers.\1.attn.k",
+          ((1, 0), (cfg.embed_dim, cfg.num_kv_heads, cfg.head_dim)),
+      ),
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.self_attn\.v_proj\.weight": (
+          r"tmp.layers.\1.attn.v",
+          ((1, 0), (cfg.embed_dim, cfg.num_kv_heads, cfg.head_dim)),
+      ),
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.self_attn\.o_proj\.weight": (
+          r"layers.\1.attn.attn_vec_einsum.w",
+          ((1, 0), (cfg.num_heads, cfg.head_dim, cfg.embed_dim)),
+      ),
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.mlp\.gate_proj\.weight": (
+          r"layers.\1.mlp.gate_proj.kernel",
+          ((1, 0), None),
+      ),
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.mlp\.up_proj\.weight": (
+          r"layers.\1.mlp.up_proj.kernel",
+          ((1, 0), None),
+      ),
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.mlp\.down_proj\.weight": (
+          r"layers.\1.mlp.down_proj.kernel",
+          ((1, 0), None),
+      ),
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.input_layernorm\.weight": (
+          r"layers.\1.pre_attention_norm.scale",
+          None,
+      ),
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.post_attention_layernorm\.weight": (
+          r"layers.\1.post_attention_norm.scale",
+          None,
+      ),
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.(post_feedforward_layernorm|post_ffn_layernorm|post_ffw_layernorm)\.weight": (
+          r"layers.\1.post_ffw_norm.scale",
+          None,
+      ),
+      r"(?:language_model\.)?model\.norm\.weight": ("final_norm.scale", None),
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.self_attn\.q_norm\.weight": (
+          r"layers.\1.attn._query_norm.scale",
+          None,
+      ),
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.self_attn\.k_norm\.weight": (
+          r"layers.\1.attn._key_norm.scale",
+          None,
+      ),
+      r"lm_head\.weight": ("unused.lm_head.weight", None),
+      r"lm_head\.bias": ("unused.lm_head.bias", None),
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.self_attn\.(q_proj|k_proj|v_proj|o_proj)\.bias": (
+          r"unused.layers.\1.attn.\2.bias",
+          None,
+      ),
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.input_layernorm\.bias": (
+          r"unused.layers.\1.input_layernorm.bias",
+          None,
+      ),
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.post_attention_layernorm\.bias": (
+          r"unused.layers.\1.post_attention_layernorm.bias",
+          None,
+      ),
+      r"(?:language_model\.)?model\.rotary_emb\..*": (
+          "unused.rotary_emb", None
+      ),
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.self_attn\.rotary_emb\..*": (
+          r"unused.layers.\1.attn.rotary_emb",
+          None,
+      ),
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.self_attn\.qkv_proj\.weight": (
+          r"unused.layers.\1.attn.qkv_proj.weight",
+          None,
+      ),
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.pre_feedforward_layernorm\.weight": (
+          r"layers.\1.pre_ffw_norm.scale",
+          None,
+      ),
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.(pre_ffn_layernorm|pre_ffw_layernorm)\.weight": (
+          r"layers.\1.pre_ffw_norm.scale",
+          None,
+      ),
   }
-]"""
 
-_FROM_HF_GQA_JSON = """[
-  {
-    "source_pattern": ["${lm}layers.{i}.self_attn.q_proj.weight"],
-    "target_pattern": ["layers.{i}.attn.q_einsum.w"],
-    "ops": [
-      {"reshape": {"src_shape": [$nh, $d], "dst_shape": [$n, $h, $d]}},
-      {"transpose": {"axes": [0, 2, 1]}}
-    ]
-  },
-  {
-    "source_pattern": [
-      "${lm}layers.{i}.self_attn.k_proj.weight",
-      "${lm}layers.{i}.self_attn.v_proj.weight"
-    ],
-    "target_pattern": ["layers.{i}.attn.kv_einsum.w"],
-    "ops": [
-      {"reshape": {"src_shape": [$kh, $d], "dst_shape": [$k, $h, $d]}},
-      {"transpose": {"axes": [0, 2, 1]}},
-      {"stack": {"axis": 0}}
-    ]
-  }
-]"""
-
-_FROM_HF_MHA_JSON = """[
-  {
-    "source_pattern": [
-      "${lm}layers.{i}.self_attn.q_proj.weight",
-      "${lm}layers.{i}.self_attn.k_proj.weight",
-      "${lm}layers.{i}.self_attn.v_proj.weight"
-    ],
-    "target_pattern": ["layers.{i}.attn.qkv_einsum.w"],
-    "ops": [
-      {"reshape": {"src_shape": [$nh, $d], "dst_shape": [$n, $h, $d]}},
-      {"transpose": {"axes": [0, 2, 1]}},
-      {"stack": {"axis": 0}}
-    ]
-  }
-]"""
-
-_FROM_HF_VISION_JSON = """[
-  {
-    "source_pattern": [
-      "${mm}vision_tower.vision_model.embeddings.patch_embedding.weight"
-    ],
-    "target_pattern": ["vision_encoder.siglip_encoder.embedding.kernel"],
-    "ops": [{"transpose": {"axes": [2, 3, 1, 0]}}]
-  },
-  {
-    "source_pattern": [
-      "${mm}vision_tower.vision_model.embeddings.patch_embedding.bias"
-    ],
-    "target_pattern": ["vision_encoder.siglip_encoder.embedding.bias"],
-    "ops": []
-  },
-  {
-    "source_pattern": [
-      "${mm}vision_tower.vision_model.embeddings.position_embedding.weight"
-    ],
-    "target_pattern": ["vision_encoder.siglip_encoder.pos_embedding"],
-    "ops": [{"reshape": {"src_shape": [$vp, $vw], "dst_shape": [1, $vp, $vw]}}]
-  },
-  {
-    "source_pattern": [
-      "${mm}vision_tower.vision_model.encoder.layers.{v}.self_attn.q_proj.weight"
-    ],
-    "target_pattern": [
-      "vision_encoder.siglip_encoder.transformer.blocks.{v}.attn.query_proj.kernel"
-    ],
-    "ops": [{"transpose": {"axes": [1, 0]}}]
-  },
-  {
-    "source_pattern": [
-      "${mm}vision_tower.vision_model.encoder.layers.{v}.self_attn.k_proj.weight"
-    ],
-    "target_pattern": [
-      "vision_encoder.siglip_encoder.transformer.blocks.{v}.attn.key_proj.kernel"
-    ],
-    "ops": [{"transpose": {"axes": [1, 0]}}]
-  },
-  {
-    "source_pattern": [
-      "${mm}vision_tower.vision_model.encoder.layers.{v}.self_attn.v_proj.weight"
-    ],
-    "target_pattern": [
-      "vision_encoder.siglip_encoder.transformer.blocks.{v}.attn.value_proj.kernel"
-    ],
-    "ops": [{"transpose": {"axes": [1, 0]}}]
-  },
-  {
-    "source_pattern": [
-      "${mm}vision_tower.vision_model.encoder.layers.{v}.self_attn.out_proj.weight"
-    ],
-    "target_pattern": [
-      "vision_encoder.siglip_encoder.transformer.blocks.{v}.attn.out_proj.kernel"
-    ],
-    "ops": [{"transpose": {"axes": [1, 0]}}]
-  },
-  {
-    "source_pattern": [
-      "${mm}vision_tower.vision_model.encoder.layers.{v}.self_attn.q_proj.bias"
-    ],
-    "target_pattern": [
-      "vision_encoder.siglip_encoder.transformer.blocks.{v}.attn.query_proj.bias"
-    ],
-    "ops": []
-  },
-  {
-    "source_pattern": [
-      "${mm}vision_tower.vision_model.encoder.layers.{v}.self_attn.k_proj.bias"
-    ],
-    "target_pattern": [
-      "vision_encoder.siglip_encoder.transformer.blocks.{v}.attn.key_proj.bias"
-    ],
-    "ops": []
-  },
-  {
-    "source_pattern": [
-      "${mm}vision_tower.vision_model.encoder.layers.{v}.self_attn.v_proj.bias"
-    ],
-    "target_pattern": [
-      "vision_encoder.siglip_encoder.transformer.blocks.{v}.attn.value_proj.bias"
-    ],
-    "ops": []
-  },
-  {
-    "source_pattern": [
-      "${mm}vision_tower.vision_model.encoder.layers.{v}.self_attn.out_proj.bias"
-    ],
-    "target_pattern": [
-      "vision_encoder.siglip_encoder.transformer.blocks.{v}.attn.out_proj.bias"
-    ],
-    "ops": []
-  },
-  {
-    "source_pattern": [
-      "${mm}vision_tower.vision_model.encoder.layers.{v}.layer_norm1.weight"
-    ],
-    "target_pattern": [
-      "vision_encoder.siglip_encoder.transformer.blocks.{v}.ln1.scale"
-    ],
-    "ops": []
-  },
-  {
-    "source_pattern": [
-      "${mm}vision_tower.vision_model.encoder.layers.{v}.layer_norm1.bias"
-    ],
-    "target_pattern": [
-      "vision_encoder.siglip_encoder.transformer.blocks.{v}.ln1.bias"
-    ],
-    "ops": []
-  },
-  {
-    "source_pattern": [
-      "${mm}vision_tower.vision_model.encoder.layers.{v}.layer_norm2.weight"
-    ],
-    "target_pattern": [
-      "vision_encoder.siglip_encoder.transformer.blocks.{v}.ln2.scale"
-    ],
-    "ops": []
-  },
-  {
-    "source_pattern": [
-      "${mm}vision_tower.vision_model.encoder.layers.{v}.layer_norm2.bias"
-    ],
-    "target_pattern": [
-      "vision_encoder.siglip_encoder.transformer.blocks.{v}.ln2.bias"
-    ],
-    "ops": []
-  },
-  {
-    "source_pattern": [
-      "${mm}vision_tower.vision_model.encoder.layers.{v}.mlp.fc1.weight"
-    ],
-    "target_pattern": [
-      "vision_encoder.siglip_encoder.transformer.blocks.{v}.mlp.fc1.kernel"
-    ],
-    "ops": [{"transpose": {"axes": [1, 0]}}]
-  },
-  {
-    "source_pattern": [
-      "${mm}vision_tower.vision_model.encoder.layers.{v}.mlp.fc2.weight"
-    ],
-    "target_pattern": [
-      "vision_encoder.siglip_encoder.transformer.blocks.{v}.mlp.fc2.kernel"
-    ],
-    "ops": [{"transpose": {"axes": [1, 0]}}]
-  },
-  {
-    "source_pattern": [
-      "${mm}vision_tower.vision_model.encoder.layers.{v}.mlp.fc1.bias"
-    ],
-    "target_pattern": [
-      "vision_encoder.siglip_encoder.transformer.blocks.{v}.mlp.fc1.bias"
-    ],
-    "ops": []
-  },
-  {
-    "source_pattern": [
-      "${mm}vision_tower.vision_model.encoder.layers.{v}.mlp.fc2.bias"
-    ],
-    "target_pattern": [
-      "vision_encoder.siglip_encoder.transformer.blocks.{v}.mlp.fc2.bias"
-    ],
-    "ops": []
-  },
-  {
-    "source_pattern": ["${mm}vision_tower.vision_model.post_layernorm.weight"],
-    "target_pattern": [
-      "vision_encoder.siglip_encoder.transformer.encoder_norm.scale"
-    ],
-    "ops": []
-  },
-  {
-    "source_pattern": ["${mm}vision_tower.vision_model.post_layernorm.bias"],
-    "target_pattern": [
-      "vision_encoder.siglip_encoder.transformer.encoder_norm.bias"
-    ],
-    "ops": []
-  },
-  {
-    "source_pattern": ["${mm}multi_modal_projector.mm_input_projection_weight"],
-    "target_pattern": ["embedder.mm_input_projection.w"],
-    "ops": []
-  },
-  {
-    "source_pattern": ["${mm}multi_modal_projector.mm_soft_emb_norm.weight"],
-    "target_pattern": ["embedder.mm_soft_embedding_norm.scale"],
-    "ops": []
-  }
-]"""
+  # Vision Tower (SigLIP).
+  if cfg.vision_config is not None:
+    mapping.update({  # pyrefly: ignore[no-matching-overload]
+        r"vision_tower\.vision_model\.embeddings\.patch_embedding\.weight": (
+            "vision_encoder.siglip_encoder.embedding.kernel",
+            ((2, 3, 1, 0), None),
+        ),
+        r"vision_tower\.vision_model\.embeddings\.patch_embedding\.bias": (
+            "vision_encoder.siglip_encoder.embedding.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.embeddings\.position_embedding\.weight": (
+            "vision_encoder.siglip_encoder.pos_embedding",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.self_attn\.q_proj\.weight": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.attn.query_proj.kernel",
+            ((1, 0), None),
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.self_attn\.k_proj\.weight": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.attn.key_proj.kernel",
+            ((1, 0), None),
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.self_attn\.v_proj\.weight": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.attn.value_proj.kernel",
+            ((1, 0), None),
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.self_attn\.out_proj\.weight": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.attn.out_proj.kernel",
+            ((1, 0), None),
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.self_attn\.q_proj\.bias": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.attn.query_proj.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.self_attn\.k_proj\.bias": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.attn.key_proj.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.self_attn\.v_proj\.bias": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.attn.value_proj.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.self_attn\.out_proj\.bias": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.attn.out_proj.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.layer_norm1\.weight": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.ln1.scale",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.layer_norm1\.bias": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.ln1.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.layer_norm2\.weight": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.ln2.scale",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.layer_norm2\.bias": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.ln2.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.mlp\.fc1\.weight": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.mlp.fc1.kernel",
+            ((1, 0), None),
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.mlp\.fc2\.weight": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.mlp.fc2.kernel",
+            ((1, 0), None),
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.mlp\.fc1\.bias": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.mlp.fc1.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.mlp\.fc2\.bias": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.mlp.fc2.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.post_layernorm\.weight": (
+            "vision_encoder.siglip_encoder.transformer.encoder_norm.scale",
+            None,
+        ),
+        r"vision_tower\.vision_model\.post_layernorm\.bias": (
+            "vision_encoder.siglip_encoder.transformer.encoder_norm.bias",
+            None,
+        ),
+        # Multi-modal Projector
+        r"multi_modal_projector\.mm_input_projection_weight": (
+            "embedder.mm_input_projection.w",
+            None,
+        ),
+        r"multi_modal_projector\.mm_soft_emb_norm\.weight": (
+            "embedder.mm_soft_embedding_norm.scale",
+            None,
+        ),
+    })
+  return mapping
 
 
-# Template placeholder values per variant: `lm` prefixes each text decoder key,
-# `mm` each vision tower / projector key, and `head` the tied `lm_head.weight`.
-_HF_AFFIXES: Mapping[HfVariant, Mapping[str, str]] = {
-    HfVariant.CAUSAL_LM: {"lm": "model.", "head": ""},
-    HfVariant.CONDITIONAL_GENERATION: {
-        "lm": "model.language_model.",
-        "mm": "model.",
-        "head": "",
-    },
-    HfVariant.CONDITIONAL_GENERATION_LEGACY: {
-        "lm": "language_model.model.",
-        "mm": "",
-        "head": "language_model.",
-    },
-}
+def _make_preprocess_fn(cfg: model_lib.ModelConfig):
+  """Creates a tensor preprocessing function for Gemma3 safetensors, fusing q, k, and v projections."""
+  q_pat = re.compile(r"tmp\.layers\.([0-9]+)\.attn\.q$")
+  k_pat = re.compile(r"tmp\.layers\.([0-9]+)\.attn\.k$")
+  v_pat = re.compile(r"tmp\.layers\.([0-9]+)\.attn\.v$")
 
+  fused_qkv = cfg.num_heads == cfg.num_kv_heads
+  pending: dict[str, dict[str, jnp.ndarray]] = {}
 
-def build_from_hf_manifest(
-    cfg: model_lib.ModelConfig,
-    hf_variant: HfVariant | None = None,
-) -> dict[str, Any]:
-  """Builds the `HF -> Tunix` manifest for `cfg`."""
-  if not isinstance(hf_variant, HfVariant):
-    raise ValueError(
-        f"Pass `hf_variant` (HfVariant) explicitly; got {hf_variant!r}."
-    )
   if cfg.head_dim % 2 != 0:
     raise ValueError(
         f"Gemma3 head_dim must be even for RoPE, got {cfg.head_dim}"
     )
-  d, n, k, h = cfg.embed_dim, cfg.num_heads, cfg.num_kv_heads, cfg.head_dim
-  v_cfg = cfg.vision_config
-  v_layers, vp, vw = 0, 1, 1
-  if v_cfg is not None:
-    v_layers = v_cfg.depth
-    vp = (v_cfg.image_height // v_cfg.patch_size[0]) * (
-        v_cfg.image_width // v_cfg.patch_size[1]
-    )
-    vw = v_cfg.width
-  affixes = _HF_AFFIXES[hf_variant]
-  if v_layers > 0 and "mm" not in affixes:
-    raise ValueError(
-        "Gemma3 vision config requires a CONDITIONAL_GENERATION hf_variant, got"
-        " CAUSAL_LM."
-    )
-  templates = hf_mapping.render_json_templates(
-      _FROM_HF_BASE_JSON,
-      _FROM_HF_MHA_JSON if n == k else _FROM_HF_GQA_JSON,
-      _FROM_HF_VISION_JSON if v_layers > 0 else "",
-      **affixes,
-      d=d,
-      n=n,
-      k=k,
-      h=h,
-      nh=n * h,
-      kh=k * h,
-      vp=vp,
-      vw=vw,
-  )
-  return hf_mapping.generate_manifest(
-      model_type=f"gemma3/{hf_variant.value}",
-      template_rules=templates,
-      axes={"i": cfg.num_layers, "v": v_layers},
-      dropped_keys=[f"{affixes['head']}lm_head.weight"],
-  )
 
+  def _to_ndh(q: jnp.ndarray) -> jnp.ndarray:
+    # Expected shape: (N, D, H)
+    if q.shape == (cfg.num_heads, cfg.embed_dim, cfg.head_dim):
+      return q
+    if q.shape == (cfg.embed_dim, cfg.num_heads, cfg.head_dim):  # D,N,H
+      return jnp.transpose(q, (1, 0, 2))  # -> N,D,H
+    if q.shape == (cfg.num_heads, cfg.head_dim, cfg.embed_dim):  # N,H,D
+      return jnp.transpose(q, (0, 2, 1))  # -> N,D,H
+    raise ValueError(f"[gemma3 preprocess] unexpected q shape: {q.shape}")
 
-def build_to_hf_manifest(
-    cfg: model_lib.ModelConfig,
-    hf_variant: HfVariant | None = None,
-) -> dict[str, Any]:
-  """Builds the `Tunix -> HF` manifest for `cfg`."""
-  return hf_mapping.invert_manifest(build_from_hf_manifest(cfg, hf_variant))
+  def _to_kdh(x: jnp.ndarray) -> jnp.ndarray:
+    if x.shape == (cfg.num_kv_heads, cfg.embed_dim, cfg.head_dim):
+      return x
+    if x.shape == (cfg.embed_dim, cfg.num_kv_heads, cfg.head_dim):  # D,K,H
+      return jnp.transpose(x, (1, 0, 2))  # -> K,D,H
+    if x.shape == (cfg.num_kv_heads, cfg.head_dim, cfg.embed_dim):  # K,H,D
+      return jnp.transpose(x, (0, 2, 1))  # -> K,D,H
+    raise ValueError(f"[gemma3 preprocess] unexpected kv shape: {x.shape}")
 
+  def preprocess(tensors: dict[str, jnp.ndarray]) -> dict[str, jnp.ndarray]:
+    out = dict(tensors)
 
-def export_to_hf_state_dict(
-    model: model_lib.Gemma3,
-    cfg: model_lib.ModelConfig,
-    *,
-    hf_variant: HfVariant | None = None,
-) -> dict[str, jax.Array]:
-  """Exports a Tunix `Gemma3` model into an HF state dict."""
-  resolved = model._hf_variant if hf_variant is None else hf_variant  # pylint: disable=protected-access
-  manifest = build_to_hf_manifest(cfg, resolved)
-  return hf_mapping.to_hf_impl(
-      manifest, safetensors_loader.flatten_model_state(model)
-  )
+    for key in list(out):
+      m = q_pat.fullmatch(key) or k_pat.fullmatch(key) or v_pat.fullmatch(key)
+      if not m:
+        continue
+      layer_id = m.group(1)
+      arr = out.pop(key)
+      slot = "q" if key.endswith(".q") else ("k" if key.endswith(".k") else "v")
+      pending.setdefault(layer_id, {})[slot] = arr
+
+    for layer_id, slots in list(pending.items()):
+      q = slots.get("q")
+      k = slots.get("k")
+      v = slots.get("v")
+
+      if fused_qkv:
+        if (q is not None) and (k is not None) and (v is not None):
+          q = _to_ndh(q)
+          k = _to_kdh(k)
+          v = _to_kdh(v)
+          exp = (cfg.num_heads, cfg.embed_dim, cfg.head_dim)
+          if not (q.shape == k.shape == v.shape == exp):
+            raise ValueError(
+                f"[gemma3 preprocess] layer {layer_id}: fused q/k/v shape"
+                f" mismatch: q={getattr(q, 'shape', None)},"
+                f" k={getattr(k, 'shape', None)},"
+                f" v={getattr(v, 'shape', None)}, expected={exp}"
+            )
+          out[f"layers.{layer_id}.attn.qkv_einsum.w"] = jnp.stack(
+              [q, k, v], axis=0
+          )  # (3,N,D,H)
+          del pending[layer_id]
+      else:
+        wrote = False
+        if q is not None:
+          q = _to_ndh(q)
+          out[f"layers.{layer_id}.attn.q_einsum.w"] = q
+          slots.pop("q", None)
+          wrote = True
+
+        if (k is not None) and (v is not None):
+          k = _to_kdh(k)
+          v = _to_kdh(v)
+          out[f"layers.{layer_id}.attn.kv_einsum.w"] = jnp.stack(
+              [k, v], axis=0
+          )  # (2,K,D,H)
+          slots.pop("k", None)
+          slots.pop("v", None)
+          wrote = True
+
+        if wrote and not slots:
+          del pending[layer_id]
+
+    return out
+
+  return preprocess
 
 
 def create_model_from_safe_tensors(
@@ -421,30 +311,14 @@ def create_model_from_safe_tensors(
     mesh: jax.sharding.Mesh | None = None,
     dtype: jnp.dtype | None = None,
     mode: str = "auto",
-    *,
-    hf_variant: HfVariant | None = None,
 ):
-  """Loads a safetensors checkpoint into a Gemma3 model."""
-  if hf_variant is None:
-    local_dir = safetensors_loader.resolve_checkpoint_dir(file_dir)
-    resolved = hf_mapping.resolve_hf_variant_from_keys(
-        safetensors_loader.read_checkpoint_keys(local_dir), _HF_AFFIXES
-    )
-  else:
-    if not isinstance(hf_variant, HfVariant):
-      raise ValueError(
-          f"Pass `hf_variant` (HfVariant) explicitly; got {hf_variant!r}."
-      )
-    local_dir = file_dir
-    resolved = hf_variant
-  model = safetensors_loader.load_and_create_model(
-      file_dir=local_dir,
+  return safetensors_loader.load_and_create_model(
+      file_dir=file_dir,
       model_class=model_lib.Gemma3,
       config=config,
+      key_mapping=_get_key_and_transform_mapping,
       mesh=mesh,
+      preprocess_fn=_make_preprocess_fn(config),
       dtype=dtype,
       mode=mode,
-      manifest=build_from_hf_manifest(config, resolved),
   )
-  model._hf_variant = resolved  # pylint: disable=protected-access
-  return model

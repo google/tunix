@@ -42,7 +42,6 @@ from tunix.models.gemma4.config import (
     AttentionType,
     Cache,
     GEMMA4_ATTENTION_PATTERN,
-    HfVariant,
     K_MASK,
     LayerCache,
     ModelConfig,
@@ -491,7 +490,6 @@ class Gemma4(BackendMappingMixin, nnx.Module):
           config, vision_encoder=None, audio_encoder=None
       )
     self.config = config
-    self._hf_variant: HfVariant | None = None
     self.embedder = Embedder(config, rngs=rngs)
 
     if config.vision_encoder is not None:

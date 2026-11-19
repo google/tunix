@@ -14,7 +14,7 @@
 
 """Gemma transformer."""
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 import dataclasses
 import enum
 from typing import Any, Callable, Tuple
@@ -30,6 +30,7 @@ import jaxtyping
 from tunix.generate.mappings import BackendMappingMixin
 from tunix.models import gpu_kernels as kernels_lib
 from tunix.models import reference_attention as reference_attention_lib
+from tunix.models.gemma import params as params_lib
 from tunix.utils import compat
 from tunix.utils import env_utils
 
@@ -867,7 +868,7 @@ class Gemma(BackendMappingMixin, nnx.Module):
   BACKEND_PACKAGE_PATH = __name__
 
   @classmethod
-  def from_params(cls, params: Mapping[str, Any], version: str) -> 'Gemma':
+  def from_params(cls, params: params_lib.Params, version: str) -> 'Gemma':
 
     if version.startswith('1.1-'):
       config_id = version.replace('1.1-', 'gemma1p1_')

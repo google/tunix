@@ -30,10 +30,8 @@
 # Tests are skipped if model paths are not configured.
 # END-GOOGLE-INTERNAL
 
-import json
 import os
 import unittest
-from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -41,7 +39,6 @@ from flax.traverse_util import flatten_dict
 import jax.numpy as jnp
 import numpy as np
 import safetensors.numpy as safe_np
-from tunix.models import safetensors_loader
 from tunix.tests import lora_params_test_base
 from tunix.models.gemma3 import model as gemma3_model
 from tunix.models.gemma3 import params as gemma3_params
@@ -409,7 +406,6 @@ class Gemma3LoraParamsTest(lora_params_test_base.LoraParamsTestBase):
         lora_model=lora_model,
         rank=self.rank,
         alpha=self.alpha,
-        hf_variant=gemma3_model.HfVariant.CAUSAL_LM,
     )
 
   def create_model_from_checkpoint(self, checkpoint_dir: str):
@@ -443,15 +439,11 @@ class Gemma3LoraParamsTest(lora_params_test_base.LoraParamsTestBase):
         attention_mask=attention_mask,
     )
 
-  # DEPRECATED (testing-only): Legacy hand-written HF checkpoint fixture builder
-  # is deprecated, retained strictly for bit-by-bit parity testing during
-  # migration to `hf_mapping`, and will be removed in a follow-up cleanup CL.
   def create_checkpoint(self, model) -> str:
     """Extract model weights and save in safetensors format.
 
-    DEPRECATED (testing-only): This hand-written legacy conversion fixture is
-    deprecated, retained strictly for bit-by-bit parity testing during migration
-    to `hf_mapping`, and will be removed in a follow-up cleanup CL.
+    Uses the model's actual weights and applies inverse transformations
+    to create a valid safetensors file compatible with Gemma3 loader.
 
     Key difference from Qwen3: kv_einsum must be decomposed into k_proj and
     v_proj.
@@ -581,82 +573,6 @@ class Gemma3LoraParamsTest(lora_params_test_base.LoraParamsTestBase):
 
     return self.base_checkpoint_dir
 
-  def test_export_to_hf_state_dict_matches_hand_written_fixture(self):
-    """Verifies `export_to_hf_state_dict` matches the hand-written HF fixture."""
-    base_model = self._create_base_model()
-    self.create_checkpoint(base_model)
-    expected = safe_np.load_file(
-        os.path.join(self.base_checkpoint_dir, 'model.safetensors')
-    )
-    loaded = self.create_model_from_checkpoint(self.base_checkpoint_dir)
-    actual = gemma3_params_safetensors.export_to_hf_state_dict(
-        loaded, self.config
-    )
-    self.assertEqual(set(actual.keys()), set(expected.keys()))
-    for k, v in expected.items():
-      np.testing.assert_array_equal(np.asarray(actual[k]), v, err_msg=k)
-
-  def test_mha_and_conditional_generation_legacy_lora_merge(self):
-    """Tests `qkv_einsum` MHA LoRA merge and `CONDITIONAL_GENERATION_LEGACY` override."""
-    mha_cfg = gemma3_model.ModelConfig(
-        num_layers=1,
-        num_embed=64,
-        embed_dim=32,
-        hidden_dim=64,
-        num_heads=2,
-        head_dim=16,
-        num_kv_heads=2,
-        sliding_window_size=128,
-    )
-    self.config = mha_cfg
-    base_model = self._create_base_model()
-    legacy = gemma3_model.HfVariant.CONDITIONAL_GENERATION_LEGACY
-    hf_state = gemma3_params_safetensors.export_to_hf_state_dict(
-        base_model, mha_cfg, hf_variant=legacy
-    )
-    os.makedirs(self.base_checkpoint_dir, exist_ok=True)
-    safe_np.save_file(
-        {k: np.ascontiguousarray(np.asarray(v)) for k, v in hf_state.items()},
-        os.path.join(self.base_checkpoint_dir, 'model.safetensors'),
-    )
-    lora_provider = lora_params_test_base.qwix.LoraProvider(
-        module_path='.*qkv_einsum|.*attn_vec_einsum|.*gate_proj',
-        rank=self.rank,
-        alpha=self.alpha,
-    )
-    lora_model = lora_params_test_base.qwix.apply_lora_to_model(
-        base_model, lora_provider, **base_model.get_model_input()
-    )
-    self._initialize_lora_weights(lora_model)
-    tokens, positions, mask = self._create_test_inputs()
-    expected_out, _ = self._run_forward_pass(
-        lora_model, tokens, positions, mask
-    )
-    gemma3_params.save_lora_merged_model_as_safetensors(
-        local_model_path=self.base_checkpoint_dir,
-        output_dir=self.merged_output_dir,
-        lora_model=lora_model,
-        rank=self.rank,
-        alpha=self.alpha,
-        hf_variant=legacy,
-    )
-    merged_state = safe_np.load_file(
-        os.path.join(self.merged_output_dir, 'model.safetensors')
-    )
-    for proj in ('q_proj', 'k_proj', 'v_proj'):
-      self.assertIn(
-          f'language_model.model.layers.0.self_attn.{proj}.weight', merged_state
-      )
-    reloaded = gemma3_params_safetensors.create_model_from_safe_tensors(
-        file_dir=self.merged_output_dir,
-        config=mha_cfg,
-        mesh=None,
-        dtype=jnp.float32,
-        hf_variant=legacy,
-    )
-    actual_out, _ = self._run_forward_pass(reloaded, tokens, positions, mask)
-    np.testing.assert_allclose(expected_out, actual_out, atol=1e-2)
-
   def test_kv_einsum_decomposition(self):
     """Test that kv_einsum is properly decomposed into k_proj and v_proj."""
     # Create base model and checkpoint
@@ -701,97 +617,6 @@ class Gemma3LoraParamsTest(lora_params_test_base.LoraParamsTestBase):
           expected_shape,
           f'Wrong shape for v_proj in layer {layer_idx}',
       )
-
-  def test_variant_auto_detection_memory_and_fresh_model_errors(self):
-    """Tests header/index lookup across all 3 variants, `_hf_variant` memory, and fresh-model errors."""
-    base_model = self._create_base_model()
-    self.assertIsNone(base_model._hf_variant)  # pylint: disable=protected-access
-    with self.assertRaisesRegex(ValueError, 'Pass `hf_variant`'):
-      gemma3_params_safetensors.export_to_hf_state_dict(base_model, self.config)
-
-    fresh_lora = self._apply_lora_to_model(base_model)
-    with self.assertRaisesRegex(ValueError, 'Pass `hf_variant`'):
-      gemma3_params.save_lora_merged_model_as_safetensors(
-          local_model_path=self.base_checkpoint_dir,
-          output_dir=self.merged_output_dir,
-          lora_model=fresh_lora,
-          rank=self.rank,
-          alpha=self.alpha,
-      )
-
-    variants = gemma3_model.HfVariant
-    for variant, prefix in (
-        (variants.CAUSAL_LM, 'model.'),
-        (variants.CONDITIONAL_GENERATION, 'model.language_model.'),
-        (variants.CONDITIONAL_GENERATION_LEGACY, 'language_model.model.'),
-    ):
-      hf_state = gemma3_params_safetensors.export_to_hf_state_dict(
-          base_model, self.config, hf_variant=variant
-      )
-      np_state = {
-          k: np.ascontiguousarray(np.asarray(v)) for k, v in hf_state.items()
-      }
-      # 1) Single-shard header auto-detection.
-      hdr_dir = os.path.join(self.temp_dir, f'hdr_{variant.value}')
-      os.makedirs(hdr_dir, exist_ok=True)
-      safe_np.save_file(np_state, os.path.join(hdr_dir, 'model.safetensors'))
-      loaded = gemma3_params_safetensors.create_model_from_safe_tensors(
-          file_dir=hdr_dir, config=self.config, mesh=None, dtype=jnp.float32
-      )
-      self.assertEqual(loaded._hf_variant, variant)  # pylint: disable=protected-access
-      re_exported = gemma3_params_safetensors.export_to_hf_state_dict(
-          loaded, self.config
-      )
-      self.assertIn(f'{prefix}embed_tokens.weight', re_exported)
-
-      # 2) `model.safetensors.index.json` anchor lookup.
-      idx_dir = os.path.join(self.temp_dir, f'idx_{variant.value}')
-      os.makedirs(idx_dir, exist_ok=True)
-      safe_np.save_file(
-          np_state, os.path.join(idx_dir, 'model-00001-of-00001.safetensors')
-      )
-      with open(
-          os.path.join(idx_dir, 'model.safetensors.index.json'), 'w'
-      ) as f:
-        json.dump(
-            {
-                'weight_map': {
-                    k: 'model-00001-of-00001.safetensors' for k in np_state
-                }
-            },
-            f,
-        )
-      loaded_idx = gemma3_params_safetensors.create_model_from_safe_tensors(
-          file_dir=idx_dir, config=self.config, mesh=None, dtype=jnp.float32
-      )
-      self.assertEqual(loaded_idx._hf_variant, variant)  # pylint: disable=protected-access
-
-      # 3) Loaded model + LoRA save uses remembered `_hf_variant` without
-      # reading `local_model_path` headers/index.
-      lora_loaded = self._apply_lora_to_model(loaded)
-      self.assertEqual(lora_loaded._hf_variant, variant)  # pylint: disable=protected-access
-      out_dir = os.path.join(self.temp_dir, f'merged_{variant.value}')
-      with (
-          mock.patch.object(
-              safetensors_loader,
-              'read_checkpoint_keys',
-              side_effect=AssertionError('must not read checkpoint keys'),
-          ),
-          mock.patch.object(
-              safetensors_loader,
-              'read_safetensors_headers',
-              side_effect=AssertionError('must not read safetensors headers'),
-          ),
-      ):
-        gemma3_params.save_lora_merged_model_as_safetensors(
-            local_model_path=hdr_dir,
-            output_dir=out_dir,
-            lora_model=lora_loaded,
-            rank=self.rank,
-            alpha=self.alpha,
-        )
-      merged = safe_np.load_file(os.path.join(out_dir, 'model.safetensors'))
-      self.assertIn(f'{prefix}layers.0.self_attn.q_proj.weight', merged)
 
 
 if __name__ == "__main__":

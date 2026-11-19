@@ -88,16 +88,6 @@ class LayerType(enum.Enum):
   FULL_ATTENTION = 'full_attention'
 
 
-class HfVariant(enum.Enum):
-  """HF key layout, fixed by the HF class that wrote the checkpoint."""
-
-  # `Qwen3_5ForCausalLM`: text decoder under `model.`.
-  CAUSAL_LM = 'causal_lm'
-  # `Qwen3_5ForConditionalGeneration`: text decoder under
-  # `model.language_model.`, next to `model.visual.`.
-  CONDITIONAL_GENERATION = 'conditional_generation'
-
-
 @dataclasses.dataclass(slots=True, frozen=True)
 class ShardingConfig:
   """Sharding configuration for Qwen3.5 model."""
@@ -1623,8 +1613,6 @@ class Qwen3p5(BackendMappingMixin, nnx.Module):
       rngs: nnx.Rngs,
   ):
     self.config = config
-    # Checkpoint key layout, stamped by `params.create_model_from_safe_tensors`.
-    self._hf_variant: HfVariant | None = None
     self.embedder = Embedder(
         vocab_size=config.vocab_size,
         embed_dim=config.embed_dim,
