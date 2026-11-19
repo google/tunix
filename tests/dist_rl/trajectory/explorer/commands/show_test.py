@@ -245,7 +245,15 @@ class ShowTest(absltest.TestCase):
     )
     self.assertEqual(exit_code, 0)
     header = out.split("\n\n", maxsplit=1)[0].splitlines()
-    self.assertEqual(header[-2:], ["Tokens: 150 (100+50)", "masked_out: False"])
+    self.assertEqual(
+        header[-4:],
+        [
+            "Tokens: 150 (100+50)",
+            "masked_out: False",
+            "logp_mean: -0.35",
+            "logp_min: -0.5",
+        ],
+    )
 
   def test_schema_diagnostics_skip_trajectories_of_other_schemas(
       self,

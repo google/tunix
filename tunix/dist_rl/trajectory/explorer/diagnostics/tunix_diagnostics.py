@@ -67,7 +67,7 @@ class TunixDiagnostics(
 ):
   """Diagnostics for Tunix RL trajectories (`TunixTrajectory`).
 
-  Columns (all but `masked_out` are hidden):
+  Columns (all but `masked_out`, `logp_mean` and `logp_min` are hidden):
     masked_out: Whether the overlong filter zeroed the trajectory's training
       masks; null until the episode is post-processed.
     prompt_id: The prompt the rollout answered; the rollouts of a prompt form
@@ -86,6 +86,18 @@ class TunixDiagnostics(
       set and finite. The checks mirror the trainer's
       `agent_types.is_valid_trajectory_dict` and finite-reward mask in
       `payload_builder.create_trainer_payloads`. Never null.
+    logp_mean: The mean of the rollout's finite logprobs at mask 1: those of
+      the agent steps that report logprobs, every token of a step without
+      masks; null if there is none.
+    logp_min: The smallest of those finite logprobs; null if there is none.
+    logp_tokens: The number of those finite logprobs, which weighs the rollout
+      in the run's mean; null if no agent step reports logprobs.
+    nonfinite_logp: The number of NaN or infinite logprobs at mask 1; null if
+      no agent step reports logprobs.
+    misaligned_logp_steps: The number of agent steps whose `logprobs` and
+      `assistant_masks` differ in length; null if no agent step reports
+      logprobs. Their logprobs are left out of the columns above, rather than
+      stopping the analysis of the run.
   """
 
   COLUMN_DTYPES = types.MappingProxyType({
@@ -93,8 +105,20 @@ class TunixDiagnostics(
       "prompt_id": "string",
       "trainable_tokens": "Int64",
       "valid": "boolean",
+      "logp_mean": "Float64",
+      "logp_min": "Float64",
+      "logp_tokens": "Int64",
+      "nonfinite_logp": "Int64",
+      "misaligned_logp_steps": "Int64",
   })
-  HIDDEN_COLUMNS = frozenset({"prompt_id", "trainable_tokens", "valid"})
+  HIDDEN_COLUMNS = frozenset({
+      "prompt_id",
+      "trainable_tokens",
+      "valid",
+      "logp_tokens",
+      "nonfinite_logp",
+      "misaligned_logp_steps",
+  })
 
   def compute_columns(
       self, record: trajectory_lib.TunixTrajectory
@@ -106,6 +130,7 @@ class TunixDiagnostics(
         "prompt_id": record.prompt_id or None,
         "trainable_tokens": trainable_tokens,
         "valid": _is_valid(record, trainable_tokens),
+        **_logprob_columns(record),
     }
 
   def compute_run_summary(
@@ -115,7 +140,8 @@ class TunixDiagnostics(
 
     The keys are `num_masked_out` (None when no trajectory reports
     `masked_out`), `num_with_masked_out`, `prompt_groups` (see
-    `_prompt_groups`) and `sample_groups` (see `_sample_groups`).
+    `_prompt_groups`), `logprobs` (see `_logprobs`) and `sample_groups` (see
+    `_sample_groups`).
 
     Args:
       df: The run's core columns, then this class's columns, one row per Tunix
@@ -129,6 +155,7 @@ class TunixDiagnostics(
         "num_masked_out": int(masked_out.sum()) if num_reported else None,
         "num_with_masked_out": num_reported,
         "prompt_groups": _prompt_groups(groups, len(df) - len(rollouts)),
+        "logprobs": _logprobs(df),
         "sample_groups": _sample_groups(groups, rollouts),
     }
 
@@ -137,7 +164,7 @@ class TunixDiagnostics(
       run_summary: Mapping[str, schema_diagnostics.JsonValue],
       num_trajectories: int,
   ) -> Sequence[str]:
-    """Returns the masked-out line, the prompt groups and the sample tables."""
+    """Returns the masked-out line, prompt groups, logprobs and sample tables."""
     return (
         (
             "Masked out:"
@@ -146,6 +173,7 @@ class TunixDiagnostics(
             f"/{num_trajectories}"
         ),
         *_format_prompt_groups(_as_dict(run_summary["prompt_groups"])),
+        *_format_logprobs(run_summary["logprobs"]),
         *_format_sample_groups(_as_dict(run_summary["sample_groups"])),
     )
 
@@ -197,6 +225,48 @@ def _is_valid(
       and (trainable_tokens is None or trainable_tokens > 0)
       and math.isfinite(reward)
   )
+
+
+def _logprob_columns(
+    trajectory: trajectory_lib.TunixTrajectory,
+) -> dict[str, schema_diagnostics.JsonScalar]:
+  """Returns the logprob columns of a trajectory; see `TunixDiagnostics`."""
+  counted: list[np.ndarray] = []
+  num_logprob_steps = 0
+  num_misaligned = 0
+  for step in trajectory.steps:
+    if not isinstance(step, trajectory_lib.TunixAgentStep):
+      continue
+    if step.logprobs is None:
+      continue
+    num_logprob_steps += 1
+    logprobs = np.asarray(step.logprobs, dtype=float)
+    masks = step.assistant_masks
+    if masks is None:
+      # Only a step with masks has a template suffix (mask 0) after the tokens
+      # the policy sampled, so every logprob of this step is a sampled token's.
+      counted.append(logprobs)
+    elif len(masks) == len(logprobs):
+      counted.append(logprobs[np.asarray(masks, dtype=bool)])
+    else:
+      num_misaligned += 1
+  if not num_logprob_steps:
+    return {
+        "logp_mean": None,
+        "logp_min": None,
+        "logp_tokens": None,
+        "nonfinite_logp": None,
+        "misaligned_logp_steps": None,
+    }
+  values = np.concatenate(counted) if counted else np.empty(0)
+  finite = values[np.isfinite(values)]
+  return {
+      "logp_mean": float(finite.mean()) if finite.size else None,
+      "logp_min": float(finite.min()) if finite.size else None,
+      "logp_tokens": int(finite.size),
+      "nonfinite_logp": int(values.size - finite.size),
+      "misaligned_logp_steps": num_misaligned,
+  }
 
 
 def _groups(rollouts: pd.DataFrame) -> pd.DataFrame:
@@ -353,6 +423,55 @@ def _sample_rows(
         "statuses": {str(s): int(n) for s, n in statuses.items()},
     })
   return rows
+
+
+def _logprobs(
+    tunix: pd.DataFrame,
+) -> dict[str, schema_diagnostics.JsonValue] | None:
+  """Returns the run's logprob health, or None if no rollout reports logprobs.
+
+  Args:
+    tunix: The run's Tunix rows: the core columns, then the Tunix columns.
+
+  Returns:
+    `mean`, the mean of every finite logprob at mask 1, and `min`, the smallest
+    (None if there is none); `num_non_finite`, the number of NaN or infinite
+    ones; `num_zero_mask`, the number of rollouts whose masks are all 0; and
+    `num_misaligned`, the number of rollouts with a misaligned step.
+  """
+  reported = tunix[tunix["logp_tokens"].notna()]
+  if reported.empty:
+    return None
+  weights = reported["logp_tokens"]
+  num_tokens = int(weights.sum())
+  # A rollout without a finite logprob has a null mean, and a weight of 0.
+  weighted_sum = float((reported["logp_mean"].fillna(0) * weights).sum())
+  return {
+      "mean": weighted_sum / num_tokens if num_tokens else None,
+      "min": float(reported["logp_min"].min()) if num_tokens else None,
+      "num_non_finite": int(reported["nonfinite_logp"].sum()),
+      "num_zero_mask": int(tunix["trainable_tokens"].eq(0).sum()),
+      "num_misaligned": int(reported["misaligned_logp_steps"].gt(0).sum()),
+  }
+
+
+def _format_logprobs(logprobs: schema_diagnostics.JsonValue) -> list[str]:
+  """Returns the `Rollout Logprobs` line, if the run reports logprobs.
+
+  Args:
+    logprobs: The `logprobs` of the run summary, None without logprobs.
+  """
+  if logprobs is None:
+    return []
+  health = _as_dict(logprobs)
+  mean = formatting.format_optional(health["mean"], formatting.FLOAT_SPEC)
+  minimum = formatting.format_optional(health["min"], formatting.FLOAT_SPEC)
+  return [
+      f"Rollout Logprobs (mask=1): mean {mean}, min {minimum}"
+      f"  |  Anomalies: {health['num_non_finite']} non_finite,"
+      f" {health['num_zero_mask']} zero_mask,"
+      f" {health['num_misaligned']} misaligned"
+  ]
 
 
 def _format_prompt_groups(

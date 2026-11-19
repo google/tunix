@@ -387,6 +387,13 @@ class SummaryTest(absltest.TestCase):
                         "degenerate": 1,
                     },
                 },
+                "logprobs": {
+                    "mean": -0.35,
+                    "min": -0.5,
+                    "num_non_finite": 0,
+                    "num_zero_mask": 0,
+                    "num_misaligned": 0,
+                },
                 "sample_groups": {
                     "contrastive": [],
                     "dead_or_degenerate": [{
@@ -424,12 +431,15 @@ class SummaryTest(absltest.TestCase):
     self.assertEqual(exit_code, 0)
     lines = out.splitlines()
     # Schema columns come after the base columns.
-    self.assertRegex(lines[0], r"\s+reward\s+masked_out$")
     self.assertRegex(
-        lines[1], rf"\s+{_SUCCEEDED_TRAJECTORY.total_reward}\s+False$"
+        lines[0], r"\s+reward\s+masked_out\s+logp_mean\s+logp_min$"
     )
-    # The rollout was not post-processed, so it does not report the value.
-    self.assertRegex(lines[2], r"\s+-\s+-$")
+    self.assertRegex(
+        lines[1],
+        rf"\s+{_SUCCEEDED_TRAJECTORY.total_reward}\s+False\s+-0\.35\s+-0\.5$",
+    )
+    # The rollout was not post-processed, and reports no logprobs.
+    self.assertRegex(lines[2], r"\s+-\s+-\s+-\s+-$")
     # Schema totals come before the tool calls.
     self.assertIn(
         "Mean reward: 3.5 reported by 1/2\n"
@@ -439,6 +449,8 @@ class SummaryTest(absltest.TestCase):
         "  zero_std_dead (valid>=2, std=0, mean<=0): 0 ( 0.0%)\n"
         "  zero_std_saturated (std=0, mean>0):       0 ( 0.0%)\n"
         "  degenerate (valid<2):                     1 (100.0%)\n"
+        "Rollout Logprobs (mask=1): mean -0.35, min -0.5"
+        "  |  Anomalies: 0 non_finite, 0 zero_mask, 0 misaligned\n"
         "Sample Dead / Degenerate Groups:\n"
         "  prompt_id  valid  masked  valid_mean  valid_std"
         "  agent steps (min/mean/max)  statuses\n"

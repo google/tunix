@@ -51,6 +51,15 @@ def _agent_steps(count: int) -> list[trajectory_lib.TunixAgentStep]:
   ]
 
 
+def _agent_step(
+    masks: list[int] | None, logprobs: list[float] | None
+) -> trajectory_lib.TunixAgentStep:
+  """Returns an agent step with the given `assistant_masks` and `logprobs`."""
+  return trajectory_testing.TUNIX_AGENT_STEP_1.model_copy(
+      update={"assistant_masks": masks, "logprobs": logprobs}
+  )
+
+
 def _run_summary(*trajectories: trajectory_lib.Trajectory[Any]) -> Any:
   """Returns the Tunix run summary of a run of `trajectories`, as JSON."""
   run = stats.RunStats.from_trajectories(
@@ -76,10 +85,15 @@ class TunixDiagnosticsTest(parameterized.TestCase):
             "prompt_id": "p_1",
             "trainable_tokens": 2,
             "valid": True,
+            "logp_mean": -0.35,
+            "logp_min": -0.5,
+            "logp_tokens": 2,
+            "nonfinite_logp": 0,
+            "misaligned_logp_steps": 0,
         },
     )
     # A rollout that was not post-processed reports neither `masked_out` nor a
-    # status, and its steps report no masks.
+    # status, and its steps report neither masks nor logprobs.
     self.assertEqual(
         self.diagnostics.extract(trajectory_testing.TUNIX_ROLLOUT_TRAJECTORY),
         {
@@ -87,15 +101,20 @@ class TunixDiagnosticsTest(parameterized.TestCase):
             "prompt_id": None,
             "trainable_tokens": None,
             "valid": False,
+            "logp_mean": None,
+            "logp_min": None,
+            "logp_tokens": None,
+            "nonfinite_logp": None,
+            "misaligned_logp_steps": None,
         },
     )
 
-  def test_only_masked_out_is_printed(self) -> None:
+  def test_show_header_prints_masked_out_and_the_logprobs(self) -> None:
     values = self.diagnostics.extract(_VALID_TRAJECTORY)
 
     self.assertEqual(
         list(self.diagnostics.format_show_header(values)),
-        ["masked_out: False"],
+        ["masked_out: False", "logp_mean: -0.35", "logp_min: -0.5"],
     )
 
   @parameterized.named_parameters(
@@ -182,6 +201,91 @@ class TunixDiagnosticsTest(parameterized.TestCase):
     values = self.diagnostics.extract(trajectory)
     self.assertEqual(values["trainable_tokens"], 0)
     self.assertIs(values["valid"], False)
+
+  @parameterized.named_parameters(
+      (
+          "finite_logprobs_at_mask_1",
+          # The 0.0 under mask 0 is the template suffix's placeholder.
+          [([1, 1, 0], [-1.0, -3.0, 0.0])],
+          (-2.0, -3.0, 2, 0, 0),
+      ),
+      (
+          "non_finite_logprobs",
+          [([1, 1, 1], [-1.0, float("nan"), float("-inf")])],
+          (-1.0, -1.0, 1, 2, 0),
+      ),
+      (
+          "step_without_masks_counts_every_logprob",
+          [(None, [-1.0, -2.0])],
+          (-1.5, -2.0, 2, 0, 0),
+      ),
+      (
+          "misaligned_step_is_left_out",
+          [([1, 1], [-1.0]), ([1], [-2.0])],
+          (-2.0, -2.0, 1, 0, 1),
+      ),
+      (
+          "no_finite_logprob",
+          [([0, 1], [0.0, float("nan")])],
+          (None, None, 0, 1, 0),
+      ),
+      (
+          "masks_without_logprobs",
+          [([1, 1], None)],
+          (None, None, None, None, None),
+      ),
+  )
+  def test_logprob_columns(
+      self,
+      steps: list[tuple[list[int] | None, list[float] | None]],
+      expected: tuple[
+          float | None, float | None, int | None, int | None, int | None
+      ],
+  ) -> None:
+    trajectory = _VALID_TRAJECTORY.model_copy(
+        update={"steps": [_agent_step(masks, lps) for masks, lps in steps]}
+    )
+
+    values = self.diagnostics.extract(trajectory)
+    self.assertEqual(
+        (
+            values["logp_mean"],
+            values["logp_min"],
+            values["logp_tokens"],
+            values["nonfinite_logp"],
+            values["misaligned_logp_steps"],
+        ),
+        expected,
+    )
+
+  def test_run_logprobs_weigh_rollouts_by_their_finite_logprobs(self) -> None:
+    logprobs = _run_summary(
+        # 3 finite logprobs of -1, then 1 of -4 next to a NaN.
+        _rollout("p", 1.0, steps=[_agent_step([1, 1, 1], [-1.0, -1.0, -1.0])]),
+        _rollout("p", 0.0, steps=[_agent_step([1, 1], [-4.0, float("nan")])]),
+        # No trainable token, then a misaligned step, then no logprobs.
+        _rollout("q", 1.0, steps=[_agent_step([0, 0], [0.0, 0.0])]),
+        _rollout("q", 0.0, steps=[_agent_step([1, 1], [-1.0])]),
+        _rollout("r", 1.0, steps=[_agent_step([1], None)]),
+    )["logprobs"]
+
+    self.assertEqual(
+        logprobs,
+        {
+            "mean": -1.75,
+            "min": -4.0,
+            "num_non_finite": 1,
+            "num_zero_mask": 1,
+            "num_misaligned": 1,
+        },
+    )
+
+  def test_run_without_logprobs_has_no_logprob_summary(self) -> None:
+    run_summary = _run_summary(
+        _rollout("p", 1.0, steps=[_agent_step([1, 1], None)])
+    )
+
+    self.assertIsNone(run_summary["logprobs"])
 
   def test_run_summary_counts_masked_out_trajectories(self) -> None:
     run_summary = _run_summary(
@@ -404,13 +508,14 @@ class TunixDiagnosticsTest(parameterized.TestCase):
                     "degenerate": 2,
                 },
             },
+            "logprobs": None,
             "sample_groups": _NO_SAMPLE_GROUPS,
         },
         num_trajectories=512,
     )
 
-    # The shares are of the 64 complete groups, and sample tables without
-    # groups are left out.
+    # The shares are of the 64 complete groups, and the logprobs line and the
+    # sample tables without groups are left out.
     self.assertEqual(
         list(lines),
         [
@@ -439,6 +544,7 @@ class TunixDiagnosticsTest(parameterized.TestCase):
                     "degenerate": 0,
                 },
             },
+            "logprobs": None,
             "sample_groups": _NO_SAMPLE_GROUPS,
         },
         num_trajectories=4,
@@ -452,7 +558,9 @@ class TunixDiagnosticsTest(parameterized.TestCase):
         ],
     )
 
-  def test_format_summary_totals_prints_the_sample_tables(self) -> None:
+  def test_format_summary_totals_prints_logprobs_and_sample_tables(
+      self,
+  ) -> None:
     lines = self.diagnostics.format_summary_totals(
         {
             "num_masked_out": 9,
@@ -467,6 +575,13 @@ class TunixDiagnosticsTest(parameterized.TestCase):
                     "zero_std_saturated": 0,
                     "degenerate": 1,
                 },
+            },
+            "logprobs": {
+                "mean": -0.1423,
+                "min": -18.4012,
+                "num_non_finite": 0,
+                "num_zero_mask": 0,
+                "num_misaligned": 1,
             },
             "sample_groups": {
                 "contrastive": [
@@ -505,9 +620,14 @@ class TunixDiagnosticsTest(parameterized.TestCase):
         num_trajectories=24,
     )
 
+    # The logprobs line follows the prompt groups, at 3 significant digits.
     self.assertEqual(
         list(lines)[6:],
         [
+            (
+                "Rollout Logprobs (mask=1): mean -0.142, min -18.4"
+                "  |  Anomalies: 0 non_finite, 0 zero_mask, 1 misaligned"
+            ),
             "Sample Contrastive Groups:",
             (
                 "  prompt_id               valid  masked  valid_mean  valid_std"
