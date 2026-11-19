@@ -24,7 +24,7 @@ import dataclasses
 import enum
 import math
 import time
-from typing import Any, Dict, Protocol, TypeVar, runtime_checkable
+from typing import Any, Dict, Protocol
 import uuid
 import numpy as np
 from tunix.common import configs as common_configs
@@ -803,35 +803,25 @@ class TrainRequest(Request):
   target_policy_version: int = 0
 
 
-_MetricValueT_co = TypeVar(
-    "_MetricValueT_co",
-    bound=common_datatypes.ArrayLike,
-    covariant=True,
-)
-
-
-class WeightedMetricLike(Protocol[_MetricValueT_co]):
-  """Structural read-only contract for an unreduced weighted metric.
+class WeightedMetricLike(Protocol):
+  """An unreduced weighted metric transported across the wire.
 
   Trainers accumulate some metrics as a running `unreduced_sum` and a
   `denominator` so the orchestrator can reduce them correctly across
-  micro-batches and workers. Readers match on these read-only attributes rather
-  than a concrete class so both accelerator-resident metrics (such as
-  `tunix.sft.utils.WeightedMetric`) and host wire metrics conform without
-  importing ML frameworks. Parameterize by `_MetricValueT_co` to narrow the
-  allowed value type (`WeightedMetricLike[np.ndarray | np.number | float]` on
-  the host wire DTO `MetricsBuffer` versus
-  `WeightedMetricLike[common_datatypes.ArrayLike]` on `MetricsBufferLike`;
-  `rpc_utils.validate_wire_safe` enforces the host-only wire invariant at
-  runtime).
+  micro-batches and workers. This is the structural wire contract; readers match
+  on these read-only attributes rather than a concrete class so the wire format
+  stays framework-neutral. `tunix.sft.utils.WeightedMetric` is the on-device JAX
+  counterpart whose `jax.Array` fields must be converted to host numpy/float
+  values before crossing the wire (`rpc_utils.validate_wire_safe` rejects
+  `jax.Array`).
   """
 
   @property
-  def unreduced_sum(self) -> _MetricValueT_co:
+  def unreduced_sum(self) -> np.ndarray | np.number | float:
     ...
 
   @property
-  def denominator(self) -> _MetricValueT_co:
+  def denominator(self) -> np.ndarray | np.number | float:
     ...
 
   @property
@@ -840,38 +830,6 @@ class WeightedMetricLike(Protocol[_MetricValueT_co]):
 
   @property
   def min_denom(self) -> float | None:
-    ...
-
-
-@runtime_checkable
-class MetricsBufferLike(Protocol):
-  """Structural read-only contract for step metric buffers returned by trainers.
-
-  Satisfied both by `datatypes.MetricsBuffer` (host numpy/float wire DTO) and by
-  accelerator-resident buffers such as MaxText's
-  `abstract_engine.MetricsBuffer` without importing device frameworks.
-  """
-
-  @property
-  def id(self) -> Any:
-    ...
-
-  @property
-  def weighted_metrics(
-      self,
-  ) -> Mapping[str, WeightedMetricLike[common_datatypes.ArrayLike]]:
-    ...
-
-  @property
-  def scalar_metrics(self) -> Mapping[str, common_datatypes.ArrayLike]:
-    ...
-
-  @property
-  def aggregation_fns(self) -> Mapping[str, Callable[..., Any]]:
-    ...
-
-  @property
-  def mode(self) -> str:
     ...
 
 
@@ -895,9 +853,9 @@ class MetricsBuffer:
   """
 
   id: int | str
-  weighted_metrics: Mapping[
-      str, WeightedMetricLike[np.ndarray | np.number | float]
-  ] = dataclasses.field(default_factory=dict)
+  weighted_metrics: Mapping[str, WeightedMetricLike] = dataclasses.field(
+      default_factory=dict
+  )
   scalar_metrics: Mapping[str, np.ndarray | np.number | float] = (
       dataclasses.field(default_factory=dict)
   )
