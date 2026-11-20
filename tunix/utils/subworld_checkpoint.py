@@ -51,6 +51,120 @@ _PATCH_LOCK = threading.Lock()
 _PATCH_DEPTH = 0
 _ACTIVE_PROCESSES: frozenset[int] | None = None
 _ORIG_FUNCS: dict[str, Any] = {}
+# Maps JAX runtime process index (`jax.process_index()`) -> XLA CoordinationService
+# distributed process id (`jax._src.distributed.global_state.process_id`).
+# On GKE TPU slices, JAX assigns runtime ids by torus coordinates while the
+# coordination service indexes barrier `process_ids` by distributed task id.
+_RUNTIME_TO_DIST_ID: dict[int, int] = {}
+_DIST_CLIENT_WRAPPER_INSTALLED = False
+_ORIG_GET_JAX_DISTRIBUTED_CLIENT: Any = None
+
+
+class _DistributedIdBarrierClient:
+  """Proxy over JAX's distributed client translating runtime -> distributed IDs."""
+
+  def __init__(self, raw_client: Any):
+    self._raw = raw_client
+
+  def wait_at_barrier(
+      self,
+      barrier_id: str,
+      timeout_in_ms: int,
+      process_ids: Any = None,
+  ) -> Any:
+    if (
+        process_ids is not None
+        and not ocp_multihost.use_experimental_distributed_process_id()
+    ):
+      translated = [_RUNTIME_TO_DIST_ID.get(int(p), int(p)) for p in process_ids]
+      return self._raw.wait_at_barrier(
+          barrier_id, timeout_in_ms, process_ids=translated
+      )
+    if process_ids is None:
+      return self._raw.wait_at_barrier(barrier_id, timeout_in_ms)
+    return self._raw.wait_at_barrier(
+        barrier_id, timeout_in_ms, process_ids=process_ids
+    )
+
+  def __getattr__(self, name: str) -> Any:
+    return getattr(self._raw, name)
+
+
+def _own_distributed_process_id() -> int | None:
+  """Returns this process's XLA CoordinationService task id, or None."""
+  global_state = getattr(getattr(jax, "_src", None), "distributed", None)
+  global_state = getattr(global_state, "global_state", None)
+  pid = getattr(global_state, "process_id", None)
+  return int(pid) if pid is not None else None
+
+
+def _ensure_runtime_to_dist_map(active_processes: Collection[int]) -> None:
+  """Publishes and resolves runtime -> distributed task IDs for `active_processes`.
+
+  Uses only per-process KV writes and blocking KV gets among `active_processes`
+  so non-participating rollout processes never need to enter a global barrier.
+  """
+  if not ocp_multihost.is_jax_distributed_client_initialized():
+    return
+  own_dist_id = _own_distributed_process_id()
+  if own_dist_id is None:
+    return
+  own_runtime_id = int(jax.process_index())
+  raw_client = (
+      _ORIG_GET_JAX_DISTRIBUTED_CLIENT()
+      if _ORIG_GET_JAX_DISTRIBUTED_CLIENT is not None
+      else ocp_multihost.get_jax_distributed_client()
+  )
+  prefix = "tunix/subworld_ckpt/runtime_to_dist/"
+  if own_runtime_id not in _RUNTIME_TO_DIST_ID:
+    key = f"{prefix}{own_runtime_id}"
+    try:
+      raw_client.key_value_set(key, str(own_dist_id), allow_overwrite=True)
+    except TypeError:
+      try:
+        raw_client.key_value_set(key, str(own_dist_id))
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
+    except Exception:  # pylint: disable=broad-exception-caught
+      pass
+    _RUNTIME_TO_DIST_ID[own_runtime_id] = own_dist_id
+
+  timeout_ms = int(ocp_multihost.coordination_timeout()) * 1000
+  for proc in sorted(set(int(p) for p in active_processes)):
+    if proc in _RUNTIME_TO_DIST_ID:
+      continue
+    raw_val = raw_client.blocking_key_value_get(f"{prefix}{proc}", timeout_ms)
+    _RUNTIME_TO_DIST_ID[proc] = int(raw_val)
+
+  logging.info(
+      "Sub-world checkpoint runtime->distributed id map for %s: %s",
+      sorted(set(int(p) for p in active_processes)),
+      {p: _RUNTIME_TO_DIST_ID[p] for p in sorted(set(int(p) for p in active_processes)) if p in _RUNTIME_TO_DIST_ID},
+  )
+
+
+def _install_distributed_id_barrier_translator() -> None:
+  """Installs a persistent proxy on `get_jax_distributed_client` for sub-world barriers."""
+  global _DIST_CLIENT_WRAPPER_INSTALLED, _ORIG_GET_JAX_DISTRIBUTED_CLIENT
+  if _DIST_CLIENT_WRAPPER_INSTALLED:
+    return
+  _ORIG_GET_JAX_DISTRIBUTED_CLIENT = ocp_multihost.get_jax_distributed_client
+
+  def _wrapped_get_jax_distributed_client() -> Any:
+    raw = _ORIG_GET_JAX_DISTRIBUTED_CLIENT()
+    if isinstance(raw, _DistributedIdBarrierClient):
+      return raw
+    return _DistributedIdBarrierClient(raw)
+
+  ocp_multihost.get_jax_distributed_client = _wrapped_get_jax_distributed_client
+  try:
+    from orbax.checkpoint._src.futures import signaling_client as ocp_sc  # pylint: disable=g-import-not-at-top
+
+    if hasattr(ocp_sc.get_signaling_client, "cache_clear"):
+      ocp_sc.get_signaling_client.cache_clear()
+  except Exception:  # pylint: disable=broad-exception-caught
+    pass
+  _DIST_CLIENT_WRAPPER_INSTALLED = True
 
 
 def mesh_process_indices(mesh: jax.sharding.Mesh | None) -> frozenset[int]:
@@ -349,7 +463,9 @@ def patch_orbax_for_subworld(
     )
 
   global _PATCH_DEPTH, _ACTIVE_PROCESSES
+  _ensure_runtime_to_dist_map(procs)
   with _PATCH_LOCK:
+    _install_distributed_id_barrier_translator()
     prev_procs = _ACTIVE_PROCESSES
     if _PATCH_DEPTH == 0:
       _install_patches()
