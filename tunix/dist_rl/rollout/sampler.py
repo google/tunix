@@ -184,14 +184,8 @@ class Sampler(Protocol):
   # --- Inference ---
   async def sample(
       self,
-      sampling_requests: (
-          SamplingRequest
-          | Sequence[SamplingRequest]
-          | Any
-          | Sequence[Any]
-      ),
-      **kwargs,
-  ) -> list[SamplingResponse] | Any:
+      sampling_requests: SamplingRequest | Sequence[SamplingRequest],
+  ) -> SamplingResponse | Sequence[SamplingResponse]:
     """Generates completions for a batch of prompt conversations concurrently."""
     ...
 

@@ -390,14 +390,12 @@ class MockBaseSamplerImpl(base_sampler_lib.Sampler):
       sampling_requests: (
           base_sampler_lib.SamplingRequest
           | Sequence[base_sampler_lib.SamplingRequest]
-          | Any
-      ) = None,
-      **kwargs,
-  ) -> Any:
+      ),
+  ) -> (
+      base_sampler_lib.SamplingResponse
+      | list[base_sampler_lib.SamplingResponse]
+  ):
     """Simulates LLM inference latency and agentic turn responses."""
-    del kwargs
-    if sampling_requests is None:
-      raise ValueError("sampling_requests cannot be None.")
     is_single = isinstance(sampling_requests, base_sampler_lib.SamplingRequest)
     requests = [sampling_requests] if is_single else list(sampling_requests)
     delay = max(

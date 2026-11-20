@@ -1242,10 +1242,10 @@ class StagingReservationManagerTest(unittest.IsolatedAsyncioTestCase):
 
     class _BlockingSampler(test_utils.MockBaseSamplerImpl):
 
-      async def sample(self, sampling_requests, **kwargs):
+      async def sample(self, sampling_requests):
         entered.set()
         await unblock.wait()
-        return await super().sample(sampling_requests, **kwargs)
+        return await super().sample(sampling_requests)
 
     mgr, buf = self._make_staged_manager(
         sampler=_BlockingSampler(

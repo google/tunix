@@ -1113,10 +1113,10 @@ class RolloutWorkerOTelMetricsTest(absltest.TestCase):
 
     class _BlockingSampler(mocks.MockBaseSamplerImpl):
 
-      async def sample(self, req, **kwargs):
+      async def sample(self, req):
         enter_sample.set()
         await release_sample.wait()
-        return await super().sample(req, **kwargs)
+        return await super().sample(req)
 
     worker_1 = rollout_worker.RolloutWorker(
         config=rollout_worker.RolloutConfig(),

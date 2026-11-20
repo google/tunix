@@ -94,8 +94,7 @@ class _MockSampler(sampler_lib.Sampler):
     self._call_count = 0
     self.routed_experts = routed_experts
 
-  async def sample(self, req, **kwargs):
-    del kwargs
+  async def sample(self, req):
     self.sampled_requests.append(req)
     tok_len = (
         self.token_lengths[self._call_count]
@@ -124,8 +123,7 @@ class _MockVllmSampler(sampler_lib.Sampler):
   def __init__(self):
     self.calls = []
 
-  async def sample(self, req, **kwargs):
-    del kwargs
+  async def sample(self, req):
     self.calls.append(req)
     return sampler_lib.SamplingResponse(
         request_id=getattr(req, "request_id", ""),
@@ -309,10 +307,10 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
 
     class _SlowSecondTurnSampler(_MockSampler):
 
-      async def sample(self, req, **kwargs):
+      async def sample(self, req):
         if self._call_count == 1:
           await never_set.wait()
-        return await super().sample(req, **kwargs)
+        return await super().sample(req)
 
     async def _run():
       engine = collector.TrajectoryCollectorEngine(
@@ -396,8 +394,7 @@ class _RecordingSampler:
   def __init__(self):
     self.seen_max_tokens = []
 
-  async def sample(self, sampling_req, **kwargs):
-    del kwargs
+  async def sample(self, sampling_req):
     self.seen_max_tokens.append(sampling_req.max_tokens)
     return sampler_lib.SamplingResponse(
         request_id=getattr(sampling_req, "request_id", "req"),
@@ -1084,8 +1081,7 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
       def __init__(self):
         self.requests = []
 
-      async def sample(self, req, **kwargs):
-        del kwargs
+      async def sample(self, req):
         self.requests.append(req)
         turn = len(self.requests)
         prompt_toks = (
@@ -1166,8 +1162,7 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
       def __init__(self):
         self.requests = []
 
-      async def sample(self, req, **kwargs):
-        del kwargs
+      async def sample(self, req):
         self.requests.append(req)
         turn = len(self.requests)
         if turn == 1:
@@ -1248,8 +1243,7 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
       def __init__(self):
         self.requests = []
 
-      async def sample(self, req, **kwargs):
-        del kwargs
+      async def sample(self, req):
         self.requests.append(req)
         turn = len(self.requests)
         if turn < len(turn_versions):
@@ -1800,8 +1794,7 @@ class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
         self._routed_per_turn = routed_per_turn
         self._idx = 0
 
-      async def sample(self, req, **kwargs):
-        del kwargs
+      async def sample(self, req):
         i = self._idx
         self._idx += 1
         req_prompt = getattr(req, "prompt", None)
@@ -2206,8 +2199,7 @@ class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
 
     class _CountingPromptSampler:
 
-      async def sample(self, sampling_requests, **kwargs):
-        del kwargs
+      async def sample(self, sampling_requests):
         nonlocal sample_calls
         sample_calls += 1
         return sampler_lib.SamplingResponse(
