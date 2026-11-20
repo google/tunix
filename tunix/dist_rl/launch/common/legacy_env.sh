@@ -39,7 +39,10 @@
 # `TRAINER_LIBTPU_INIT_ARGS` and `REMAT_POLICY`. The sandbox code reads
 # `NAMESPACE` and `NODE_SELECTOR_KEY` / `NODE_SELECTOR_VAL`, but `k8s.sh` and
 # `local.sh` set them from `kubernetes_config`: the pods would drop a caller's
-# value, and `local.sh` would overwrite it whenever the config sets them.
+# value, and `local.sh` would overwrite it whenever the config sets them. The
+# three `OTEL_EXPORTER_OTLP_*` / `OTEL_METRIC_EXPORT_INTERVAL` variables are
+# listed because nodes configure OpenTelemetry from `otel_config` and `k8s.sh`
+# does not forward them to the pods.
 
 LEGACY_LAUNCHER_ENV_VARS=(
   ADAM_B1
@@ -150,7 +153,10 @@ LEGACY_LAUNCHER_ENV_VARS=(
   ORCHESTRATOR_EXTRA_ENV
   ORCHESTRATOR_PORT
   ORCHESTRATOR_PROCESS_MAIN
+  OTEL_EXPORTER_OTLP_ENDPOINT
+  OTEL_EXPORTER_OTLP_TIMEOUT
   OTEL_ID
+  OTEL_METRIC_EXPORT_INTERVAL
   OTEL_PORT
   OVERLONG_FILTER
   PATHWAYS_PROXY_IMAGE
@@ -295,8 +301,9 @@ fail_on_legacy_launcher_env() {
       "${found[*]}." >&2
     echo "launch.sh does not read them. Unset them and pass the settings as" \
       "section.key=value arguments instead (e.g. MAX_STEPS=2 becomes" \
-      "rl_training_config.max_steps=2); see base_dist_config.yaml and the" \
-      "example YAML for the keys." >&2
+      "rl_training_config.max_steps=2, and OTEL_EXPORTER_OTLP_ENDPOINT=..." \
+      "becomes otel_config.enable=true otel_config.endpoint=...); see" \
+      "base_dist_config.yaml and the example YAML for the keys." >&2
     exit 1
   fi
 }

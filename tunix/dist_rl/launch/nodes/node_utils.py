@@ -32,6 +32,7 @@ import pickle
 import signal
 import sys
 from typing import Final, Literal, TypeAlias, TypedDict, cast
+import urllib.parse
 
 import jax
 from jax.experimental import mesh_utils
@@ -446,17 +447,34 @@ def service_port(hp: resolve_config.DistHyperParameters, role: NodeRole) -> int:
   return int(port)
 
 
+def _dashboard_url(
+    *,
+    dashboard_id: str,
+    project: str,
+    run_id: str,
+) -> str:
+  """Builds a Cloud Monitoring dashboard URL filtered to `run_id`."""
+  escaped = run_id.replace("\\", "\\\\").replace(",", "\\,").replace("+", "\\+")
+  encoded_run = urllib.parse.quote(escaped, safe="-._~")
+  return (
+      "https://console.cloud.google.com/monitoring/dashboards/builder/"
+      + urllib.parse.quote(dashboard_id, safe="")
+      + f";filters=type:mlabel,key:tunix_run_id,val:{encoded_run}"
+      + "?project="
+      + urllib.parse.quote(project, safe="")
+  )
+
+
 def setup_otel_metrics(
     hp: resolve_config.DistHyperParameters,
     role: ProcessRole,
     worker_id_str: str | None,
 ) -> bool:
-  """Exports this process's metrics to OpenTelemetry when it is configured.
+  """Exports this process's metrics and lineage event logs when configured.
 
-  `otel_setup.setup_metrics` installs an exporter when
-  `OTEL_EXPORTER_OTLP_ENDPOINT` is set, and fails on a malformed OpenTelemetry
-  setting. Every process names its service `tunix-<role>` and tags its metrics
-  with its role, the run id, and its worker id.
+  Reads the validated `otel_config` section from `hp`. Every process names its
+  service `tunix-<role>` and tags its metrics and event logs with its role, the
+  run id, and (for workers) its worker id.
 
   Args:
     hp: Validated distributed RL configuration.
@@ -465,17 +483,34 @@ def setup_otel_metrics(
       which has none.
 
   Returns:
-    Whether an exporter was installed.
+    Whether OpenTelemetry export was installed.
   """
+  run_id = str(hp.config_mapping("cluster_config")["run_id"])
+  otel = hp.config_mapping("otel_config")
   attributes = {
       "tunix.role": role,
-      "tunix.run_id": str(hp.config_mapping("cluster_config")["run_id"]),
+      "tunix.run_id": run_id,
   }
   if worker_id_str is not None:
     attributes["tunix.worker_id"] = worker_id_str
-  return otel_setup.setup_metrics(
-      default_service_name=f"tunix-{role}", resource_attributes=attributes
+  installed = otel_setup.setup_metrics(
+      service_name=f"tunix-{role}",
+      endpoint=str(otel["endpoint"]),
+      export_interval_ms=int(otel["export_interval_ms"]),
+      export_timeout_s=float(otel["export_timeout_s"]),
+      resource_attributes=attributes,
   )
+  if installed and role == "orchestrator" and otel["dashboard_id"]:
+    logging.info(
+        "[otel] Dashboard URL (run_id=%s): %s",
+        run_id,
+        _dashboard_url(
+            dashboard_id=str(otel["dashboard_id"]),
+            project=str(otel["dashboard_project"]),
+            run_id=run_id,
+        ),
+    )
+  return installed
 
 
 def optional_bool(mapping: Mapping[str, object], key: str) -> bool | None:
