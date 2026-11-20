@@ -287,9 +287,11 @@ def _load_actor_model(
     The actor `nnx.Module`.
   """
   actor = hp.config_mapping(_ACTOR_KEY)
+  model_name = str(actor["model_name"])
   block_size = actor["flash_attention_block_size"]
+  freeze_router = bool(actor["freeze_router"])
   model, _ = automodel.AutoModel.from_pretrained(
-      model_id=str(actor["model_name"]),
+      model_id=model_name,
       mesh=mesh,
       model_path=model_dir,
       dtype=str(actor["dtype"]),
@@ -299,7 +301,23 @@ def _load_actor_model(
       flash_attention_block_size=(
           int(block_size) if block_size is not None else None
       ),
+      freeze_router=freeze_router,
   )
+  if freeze_router:
+    model_config = model.config  # pyrefly: ignore[missing-attribute]
+    try:
+      router_frozen = model_config.freeze_router
+    except AttributeError as exc:
+      raise ValueError(
+          f"actor_model_config.freeze_router is not supported by model"
+          f" {model_name!r} ({type(model_config).__name__} has no freeze_router"
+          " field)."
+      ) from exc
+    if not router_frozen:
+      raise ValueError(
+          "actor_model_config.freeze_router was not applied to model"
+          f" {model_name!r}."
+      )
   lora_config = _lora_config(actor)
   if lora_config is None:
     return model

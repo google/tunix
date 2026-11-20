@@ -1346,6 +1346,27 @@ weight_sync_config:
         },
     )
 
+  def test_freeze_router_validation(self):
+    cfg = lambda *a: resolve_config.initialize(list(a)).config_mapping(
+        "actor_model_config"
+    )
+    self.assertIs(cfg()["freeze_router"], False)
+    self.assertIs(
+        cfg("actor_model_config.freeze_router=true")["freeze_router"], True
+    )
+    with self.assertRaisesRegex(ValueError, "Unknown configuration key"):
+      cfg("model_config.freeze_router=true")
+    with self.assertRaisesRegex(TypeError, "freeze_router must be a bool"):
+      cfg("actor_model_config.freeze_router=1")
+    with self.assertRaisesRegex(ValueError, "not supported by the MaxText"):
+      cfg(
+          "model_config.model_source=maxtext",
+          "model_config.model_path=/ckpt",
+          "model_config.kwargs.maxtext_model_name=qwen3-1.7b",
+          "weight_sync_config.mode=raiden",
+          "actor_model_config.freeze_router=true",
+      )
+
   def test_library_settings(self):
     hp = resolve_config.initialize([])
     vllm = hp.config_mapping("vllm_config")

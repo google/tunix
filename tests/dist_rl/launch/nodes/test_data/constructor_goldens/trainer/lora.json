@@ -171,6 +171,7 @@
         "kwargs": {
           "dtype": "bfloat16",
           "flash_attention_block_size": 256,
+          "freeze_router": false,
           "load_dtype": "float32",
           "mesh": "<tunix.dist_rl.launch.nodes.node_utils.Mesh()>",
           "model_id": "Qwen3-1.7B",

@@ -297,11 +297,34 @@ class TrainerFactoryTest(absltest.TestCase):
         remat_config="decoder",
         use_flash_attention=True,
         flash_attention_block_size=256,
+        freeze_router=False,
     )
     lora_config = apply_lora.call_args.kwargs["lora_config"]
     self.assertEqual(lora_config["rank"], 32)
     self.assertEqual(lora_config["alpha"], 64.0)
     self.assertIn(".*q_proj", lora_config["module_path"])
+
+  def test_model_loading_validates_freeze_router(self):
+    def _load(hp, model):
+      with mock.patch.object(
+          trainer.automodel.AutoModel,
+          "from_pretrained",
+          return_value=(model, "/tmp/m"),
+      ) as load:
+        out = trainer._load_actor_model(hp, "/tmp/m", mock.sentinel.mesh)
+      return out, load
+
+    hp_freeze = _hp("actor_model_config.freeze_router=true")
+    frozen = mock.Mock(config=mock.Mock(freeze_router=True))
+    out, load = _load(hp_freeze, frozen)
+    self.assertIs(out, frozen)
+    self.assertIs(load.call_args.kwargs["freeze_router"], True)
+    for cfg, err in (
+        (object(), "not supported by model"),
+        (mock.Mock(freeze_router=False), "not applied to model"),
+    ):
+      with self.assertRaisesRegex(ValueError, err):
+        _load(hp_freeze, mock.Mock(config=cfg))
 
   def test_lora_config_supports_module_path_weight_qtype_and_tile_size(self):
     lora_config = trainer._lora_config(

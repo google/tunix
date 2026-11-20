@@ -975,6 +975,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   _validate_maxtext_model_names(hp)
   _validate_maxtext_extra_config(hp)
   _validate_maxtext_skip_step_kwargs(hp)
+  _validate_freeze_router(hp)
   _validate_rollout_weights(hp)
   _validate_library_settings(hp)
   if grpo["reward_mode"] == "reward_fn" and not hp.config["reward_functions"]:
@@ -1442,6 +1443,22 @@ def _validate_maxtext_extra_config(hp: cli_config.HyperParameters) -> None:
         " that the trainer builds from the config: "
         + ", ".join(from_config)
         + "."
+    )
+
+
+def _validate_freeze_router(hp: cli_config.HyperParameters) -> None:
+  """Checks `actor_model_config.freeze_router` type and trainer backend."""
+  actor = hp.config_mapping("actor_model_config")
+  freeze_router = actor["freeze_router"]
+  if not isinstance(freeze_router, bool):
+    raise TypeError(
+        "actor_model_config.freeze_router must be a bool, got"
+        f" {freeze_router!r}."
+    )
+  if freeze_router and actor["model_source"] == "maxtext":
+    raise ValueError(
+        "actor_model_config.freeze_router is not supported by the MaxText"
+        " trainer (actor_model_config.model_source='maxtext')."
     )
 
 

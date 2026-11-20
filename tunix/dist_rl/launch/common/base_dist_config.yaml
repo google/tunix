@@ -48,6 +48,9 @@ model_config: &base_model_config
 
 actor_model_config:
   <<: *base_model_config
+  # Stops gradients into MoE router weights (`router_logits` and `router_scale`);
+  # requires the Tunix trainer and a model supporting `freeze_router` (Gemma 4).
+  freeze_router: false
 
 critic_model_config: null
 
