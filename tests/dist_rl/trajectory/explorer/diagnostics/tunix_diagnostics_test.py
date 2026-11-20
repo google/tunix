@@ -109,12 +109,12 @@ class TunixDiagnosticsTest(parameterized.TestCase):
         },
     )
 
-  def test_show_header_prints_masked_out_and_the_logprobs(self) -> None:
+  def test_show_header_prints_only_the_logprobs(self) -> None:
     values = self.diagnostics.extract(_VALID_TRAJECTORY)
 
     self.assertEqual(
         list(self.diagnostics.format_show_header(values)),
-        ["masked_out: False", "logp_mean: -0.35", "logp_min: -0.5"],
+        ["logp_mean: -0.35", "logp_min: -0.5"],
     )
 
   @parameterized.named_parameters(
@@ -286,28 +286,6 @@ class TunixDiagnosticsTest(parameterized.TestCase):
     )
 
     self.assertIsNone(run_summary["logprobs"])
-
-  def test_run_summary_counts_masked_out_trajectories(self) -> None:
-    run_summary = _run_summary(
-        _rollout("p", 1.0, masked_out=True),
-        _rollout("p", 1.0, masked_out=False),
-        _rollout("p", 1.0, masked_out=None),
-        _rollout("p", 1.0, masked_out=True),
-    )
-
-    self.assertEqual(run_summary["num_masked_out"], 2)
-    self.assertEqual(run_summary["num_with_masked_out"], 3)
-
-  def test_run_summary_without_reports_leaves_masked_out_count_unset(
-      self,
-  ) -> None:
-    run_summary = _run_summary(
-        _rollout("p", 1.0, masked_out=None),
-        _rollout("p", 1.0, masked_out=None),
-    )
-
-    self.assertIsNone(run_summary["num_masked_out"])
-    self.assertEqual(run_summary["num_with_masked_out"], 0)
 
   def test_prompt_groups_are_classified_by_their_valid_rewards(self) -> None:
     run_summary = _run_summary(
@@ -495,8 +473,6 @@ class TunixDiagnosticsTest(parameterized.TestCase):
   def test_format_summary_totals(self) -> None:
     lines = self.diagnostics.format_summary_totals(
         {
-            "num_masked_out": 127,
-            "num_with_masked_out": 512,
             "prompt_groups": {
                 "num_groups": 65,
                 "num_incomplete": 1,
@@ -519,7 +495,6 @@ class TunixDiagnosticsTest(parameterized.TestCase):
     self.assertEqual(
         list(lines),
         [
-            "Masked out: 127 reported by 512/512",
             "Prompt Groups: 65 (1 incomplete, 0 ungrouped trajectories)",
             "  contrastive (valid>=2, std>0):            18 (28.1%)",
             "  zero_std_dead (valid>=2, std=0, mean<=0): 40 (62.5%)",
@@ -531,8 +506,6 @@ class TunixDiagnosticsTest(parameterized.TestCase):
   def test_format_summary_totals_without_complete_groups(self) -> None:
     lines = self.diagnostics.format_summary_totals(
         {
-            "num_masked_out": None,
-            "num_with_masked_out": 0,
             "prompt_groups": {
                 "num_groups": 1,
                 "num_incomplete": 1,
@@ -553,7 +526,6 @@ class TunixDiagnosticsTest(parameterized.TestCase):
     self.assertEqual(
         list(lines),
         [
-            "Masked out: - reported by 0/4",
             "Prompt Groups: 1 (1 incomplete, 2 ungrouped trajectories)",
         ],
     )
@@ -563,8 +535,6 @@ class TunixDiagnosticsTest(parameterized.TestCase):
   ) -> None:
     lines = self.diagnostics.format_summary_totals(
         {
-            "num_masked_out": 9,
-            "num_with_masked_out": 24,
             "prompt_groups": {
                 "num_groups": 3,
                 "num_incomplete": 0,
@@ -622,7 +592,7 @@ class TunixDiagnosticsTest(parameterized.TestCase):
 
     # The logprobs line follows the prompt groups, at 3 significant digits.
     self.assertEqual(
-        list(lines)[6:],
+        list(lines)[5:],
         [
             (
                 "Rollout Logprobs (mask=1): mean -0.142, min -18.4"

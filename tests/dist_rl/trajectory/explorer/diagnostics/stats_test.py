@@ -813,9 +813,11 @@ class SchemaDiagnosticsTest(parameterized.TestCase):
         run.columns_of(_TUNIX_DIAGNOSTICS).columns.tolist(),
         [*stats_lib.COLUMN_DTYPES, *_TUNIX_DIAGNOSTICS.COLUMN_DTYPES],
     )
-    # The run summary is computed from the run's columns.
-    self.assertEqual(run.schema_stats["tunix"]["num_masked_out"], 1)
-    self.assertEqual(run.schema_stats["tunix"]["num_with_masked_out"], 2)
+    # The run summary is computed from the frame the run-level hooks receive.
+    self.assertEqual(
+        run.schema_stats["tunix"],
+        _TUNIX_DIAGNOSTICS.summarize(run.columns_of(_TUNIX_DIAGNOSTICS)),
+    )
 
   def test_trajectories_can_be_a_one_shot_iterator(self) -> None:
     # `trajectories` may be a one-shot iterator, such as a generator.

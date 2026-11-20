@@ -374,8 +374,6 @@ class SummaryTest(absltest.TestCase):
         data["run"]["schema_stats"],
         {
             "tunix": {
-                "num_masked_out": 0,
-                "num_with_masked_out": 1,
                 "prompt_groups": {
                     "num_groups": 1,
                     "num_incomplete": 0,
@@ -430,20 +428,17 @@ class SummaryTest(absltest.TestCase):
     )
     self.assertEqual(exit_code, 0)
     lines = out.splitlines()
-    # Schema columns come after the base columns.
-    self.assertRegex(
-        lines[0], r"\s+reward\s+masked_out\s+logp_mean\s+logp_min$"
-    )
+    # Schema columns come after the base columns; `masked_out` is hidden.
+    self.assertRegex(lines[0], r"\s+reward\s+logp_mean\s+logp_min$")
     self.assertRegex(
         lines[1],
-        rf"\s+{_SUCCEEDED_TRAJECTORY.total_reward}\s+False\s+-0\.35\s+-0\.5$",
+        rf"\s+{_SUCCEEDED_TRAJECTORY.total_reward}\s+-0\.35\s+-0\.5$",
     )
-    # The rollout was not post-processed, and reports no logprobs.
-    self.assertRegex(lines[2], r"\s+-\s+-\s+-\s+-$")
+    # The rollout reports no reward and no logprobs.
+    self.assertRegex(lines[2], r"\s+-\s+-\s+-$")
     # Schema totals come before the tool calls.
     self.assertIn(
         "Mean reward: 3.5 reported by 1/2\n"
-        "Masked out: 0 reported by 1/2\n"
         "Prompt Groups: 1 (0 incomplete, 1 ungrouped trajectories)\n"
         "  contrastive (valid>=2, std>0):            0 ( 0.0%)\n"
         "  zero_std_dead (valid>=2, std=0, mean<=0): 0 ( 0.0%)\n"

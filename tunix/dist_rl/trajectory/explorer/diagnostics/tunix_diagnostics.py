@@ -67,7 +67,7 @@ class TunixDiagnostics(
 ):
   """Diagnostics for Tunix RL trajectories (`TunixTrajectory`).
 
-  Columns (all but `masked_out`, `logp_mean` and `logp_min` are hidden):
+  Columns (all but `logp_mean` and `logp_min` are hidden):
     masked_out: Whether the overlong filter zeroed the trajectory's training
       masks; null until the episode is post-processed.
     prompt_id: The prompt the rollout answered; the rollouts of a prompt form
@@ -112,6 +112,7 @@ class TunixDiagnostics(
       "misaligned_logp_steps": "Int64",
   })
   HIDDEN_COLUMNS = frozenset({
+      "masked_out",
       "prompt_id",
       "trainable_tokens",
       "valid",
@@ -136,24 +137,18 @@ class TunixDiagnostics(
   def compute_run_summary(
       self, df: pd.DataFrame
   ) -> Mapping[str, schema_diagnostics.JsonValue]:
-    """Returns the masked-out counts and the prompt groups of the run.
+    """Returns the prompt groups, logprob health and sample groups of the run.
 
-    The keys are `num_masked_out` (None when no trajectory reports
-    `masked_out`), `num_with_masked_out`, `prompt_groups` (see
-    `_prompt_groups`), `logprobs` (see `_logprobs`) and `sample_groups` (see
-    `_sample_groups`).
+    The keys are `prompt_groups` (see `_prompt_groups`), `logprobs` (see
+    `_logprobs`) and `sample_groups` (see `_sample_groups`).
 
     Args:
       df: The run's core columns, then this class's columns, one row per Tunix
         trajectory.
     """
-    masked_out = df["masked_out"]
-    num_reported = int(masked_out.notna().sum())
     rollouts = df[df["prompt_id"].notna()]
     groups = _groups(rollouts)
     return {
-        "num_masked_out": int(masked_out.sum()) if num_reported else None,
-        "num_with_masked_out": num_reported,
         "prompt_groups": _prompt_groups(groups, len(df) - len(rollouts)),
         "logprobs": _logprobs(df),
         "sample_groups": _sample_groups(groups, rollouts),
@@ -164,14 +159,9 @@ class TunixDiagnostics(
       run_summary: Mapping[str, schema_diagnostics.JsonValue],
       num_trajectories: int,
   ) -> Sequence[str]:
-    """Returns the masked-out line, prompt groups, logprobs and sample tables."""
+    """Returns the prompt groups, the logprobs line and the sample tables."""
+    del num_trajectories  # Unused.
     return (
-        (
-            "Masked out:"
-            f" {formatting.format_optional(run_summary['num_masked_out'])}"
-            f" reported by {run_summary['num_with_masked_out']}"
-            f"/{num_trajectories}"
-        ),
         *_format_prompt_groups(_as_dict(run_summary["prompt_groups"])),
         *_format_logprobs(run_summary["logprobs"]),
         *_format_sample_groups(_as_dict(run_summary["sample_groups"])),

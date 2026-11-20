@@ -245,11 +245,11 @@ class ShowTest(absltest.TestCase):
     )
     self.assertEqual(exit_code, 0)
     header = out.split("\n\n", maxsplit=1)[0].splitlines()
+    # `masked_out` is a hidden column.
     self.assertEqual(
-        header[-4:],
+        header[-3:],
         [
             "Tokens: 150 (100+50)",
-            "masked_out: False",
             "logp_mean: -0.35",
             "logp_min: -0.5",
         ],
