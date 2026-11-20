@@ -145,7 +145,7 @@ def summarize_padding_stats(
       row_fill_{min,max}: per-row occupancy extremes over all rows.
       empty_rows: number of fully padded rows holding no sequence.
       sequences_per_row_{mean,max}: trajectories per row over all rows.
-      valid_tokens / capacity_tokens: step totals.
+      valid_tokens: step total.
   """
   if not stats:
     raise ValueError("summarize_padding_stats requires at least one entry.")
@@ -169,7 +169,6 @@ def summarize_padding_stats(
       "sequences_per_row_mean": float(row_num_sequences.mean()),
       "sequences_per_row_max": float(row_num_sequences.max()),
       "valid_tokens": float(valid.sum()),
-      "capacity_tokens": float(capacity.sum()),
   }
 
 
