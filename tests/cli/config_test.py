@@ -732,6 +732,49 @@ class ConfigTest(parameterized.TestCase):
     ):
       hp.obtain_reward_fn()
 
+  def _fake_installed_package(self) -> tuple[pathlib.Path, pathlib.Path]:
+    """Points `config` at a fake installed `tunix`; returns its dirs.
+
+    Returns:
+      (site_packages, project_root), where `project_root` is an empty dir.
+    """
+    site_packages = pathlib.Path(self.create_tempdir("site_packages").full_path)
+    reward_dir = site_packages / "tunix" / "cli" / "reward_fn"
+    reward_dir.mkdir(parents=True)
+    (reward_dir / "gsm8k.py").write_text("def reward_fn(x): return x\n")
+    (site_packages / "escape.py").write_text("def reward_fn(x): return x\n")
+    fake_config_file = site_packages / "tunix" / "cli" / "config.py"
+    self.enter_context(
+        mock.patch.object(config, "__file__", str(fake_config_file))
+    )
+    project_root = pathlib.Path(self.create_tempdir("project_root").full_path)
+    return site_packages, project_root
+
+  def test_resolve_reward_fn_file_falls_back_to_installed_package(self):
+    site_packages, project_root = self._fake_installed_package()
+    resolved = config._resolve_reward_fn_file(
+        project_root, "tunix/cli/reward_fn/gsm8k.py"
+    )
+    self.assertEqual(
+        resolved,
+        (site_packages / "tunix" / "cli" / "reward_fn" / "gsm8k.py").resolve(),
+    )
+
+  def test_resolve_reward_fn_file_prefers_project_root(self):
+    _, project_root = self._fake_installed_package()
+    local_file = project_root / "tunix" / "cli" / "reward_fn" / "gsm8k.py"
+    local_file.parent.mkdir(parents=True)
+    local_file.write_text("def reward_fn(x): return x\n")
+    resolved = config._resolve_reward_fn_file(
+        project_root, "tunix/cli/reward_fn/gsm8k.py"
+    )
+    self.assertEqual(resolved, local_file)
+
+  def test_resolve_reward_fn_file_rejects_package_traversal(self):
+    _, project_root = self._fake_installed_package()
+    resolved = config._resolve_reward_fn_file(project_root, "tunix/../escape.py")
+    self.assertEqual(resolved, project_root / "tunix/../escape.py")
+
   def test_obtain_reward_fn_absolute_path_outside_project(self):
     """Tests loading a reward function from an absolute FILE path outside the project root."""
     hp = self.initialize_config([])

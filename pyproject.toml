@@ -135,7 +135,12 @@ minimum-version = "build-system.requires"
 build-dir = "build/{wheel_tag}"
 wheel.packages = ["tunix"]
 wheel.py-api = "cp312"
+sdist.exclude = ["/.gemini", "/.github", "/docs", "/examples", "/scripts", "/tests"]
 editable.mode = "inplace"
+
+[tool.cibuildwheel]
+build = ["cp312-manylinux_x86_64"]
+manylinux-x86_64-image = "manylinux_2_28"
 
 [tool.pyink]
 line-length = 80

@@ -37,7 +37,7 @@ from tunix.common import datatypes as common_datatypes
 from tunix.rl.agentic.agents import agent_types
 
 try:
-  from tunix.rl import _packing_ext  # pylint: disable=g-import-not-at-top
+  import tunix.rl._packing_ext as _packing_ext  # pylint: disable=g-import-not-at-top,consider-using-from-import
 except ModuleNotFoundError:
   _packing_ext = None
 

@@ -19,6 +19,17 @@ name: Run Tests Against Tunix Package
 
 on:
   workflow_call:
+    inputs:
+      wheel_artifact_name:
+        description: 'Artifact name containing the built Tunix wheel'
+        required: false
+        default: 'tunix-wheel'
+        type: string
+      wheel_only:
+        description: 'Test strictly against the installed wheel in site-packages by removing ./tunix'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -69,17 +80,46 @@ jobs:
       - name: Download the tunix wheel
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          name: tunix-wheel
+          name: ${{ inputs.wheel_artifact_name }}
 
       - name: Install the tunix wheel
+        if: ${{ !inputs.wheel_only }}
         run: |
           python -m pip install -q uv
           uv pip install --system --find-links=. --reinstall-package google-tunix "google-tunix[prod,test,experimental]"
           python -c "import pathlib, shutil, sysconfig; root = pathlib.Path(sysconfig.get_paths()['platlib']) / 'tunix'; exts = {ext: list(root.glob(f'{ext}*.so')) for ext in ('dist_rl/worker/_compression_ext', 'rl/_packing_ext', 'utils/_trajectory_logger_ext')}; assert all(exts.values()), f'Missing nanobind extensions in {root}: {exts}'; [shutil.copy2(p, pathlib.Path('tunix') / p.relative_to(root)) for paths in exts.values() for p in paths]"
 
+      # Wheel-only mode installs the prebuilt wheel (never the sdist that may sit
+      # next to it in the artifact) and deletes ./tunix so that every
+      # `import tunix.*` resolves to site-packages.
+      - name: Install the tunix wheel and remove ./tunix (wheel-only mode)
+        if: ${{ inputs.wheel_only }}
+        env:
+          COMPILE_PROTOS: ${{ matrix.shard == 'dist_rl' || matrix.shard == 'experimental' }}
+        run: |
+          python -m pip install -q uv
+          WHEEL=$(ls -1 ./google_tunix-*.whl | head -n1)
+          [ -n "$WHEEL" ] || { echo "No google_tunix-*.whl found in the artifact"; exit 1; }
+          uv pip install --system "${WHEEL}[prod,test,experimental]"
+          rm -rf tunix
+          PLATLIB=$(python -c "import sysconfig; print(sysconfig.get_paths()['platlib'])")
+          if [ "$COMPILE_PROTOS" = "true" ]; then
+            # Compile the .proto sources shipped in the wheel, not the checkout's.
+            PROTOS=$(find "$PLATLIB/tunix/dist_rl/distributed" -name "*.proto")
+            [ -n "$PROTOS" ] || { echo "No .proto files found in $PLATLIB/tunix/dist_rl/distributed"; exit 1; }
+            find "$PLATLIB/tunix/dist_rl/distributed" -name "*.proto" -exec \
+              python -m grpc_tools.protoc -I"$PLATLIB" --python_out="$PLATLIB" --grpc_python_out="$PLATLIB" {} +
+          fi
+          python -c "import pathlib, sysconfig; root = pathlib.Path(sysconfig.get_paths()['platlib']) / 'tunix'; exts = {ext: list(root.glob(f'{ext}*.abi3.so')) for ext in ('dist_rl/worker/_compression_ext', 'rl/_packing_ext', 'utils/_trajectory_logger_ext')}; assert all(exts.values()), f'Missing nanobind extensions in {root}: {exts}'"
+
       - name: Verify Tunix imports from installed package
+        env:
+          WHEEL_ONLY: ${{ inputs.wheel_only }}
         run: |
           python3 -c "
+          import os
+          import pathlib
+          import sysconfig
           import tunix
           import tunix.models
           import tunix.generate
@@ -91,6 +131,10 @@ jobs:
           from tunix.utils import _trajectory_logger_ext
 
           assert tunix.__version__ != '0.0.0.dev0', 'Tunix version not set correctly'
+          if os.environ['WHEEL_ONLY'] == 'true':
+              platlib = pathlib.Path(sysconfig.get_paths()['platlib']).resolve()
+              tunix_file = pathlib.Path(tunix.__file__).resolve()
+              assert tunix_file.is_relative_to(platlib), f'tunix resolved outside site-packages ({platlib}): {tunix_file}'
           print('All tunix modules imported successfully and version is', tunix.__version__)
           "
 
@@ -143,7 +187,7 @@ jobs:
           python -m pytest tests/models/paged_attention_test.py -n 2 --dist load -v --tb=short
 
       - name: Compile gRPC Protobuf definitions
-        if: ${{ matrix.shard == 'dist_rl' || matrix.shard == 'experimental' }}
+        if: ${{ !inputs.wheel_only && (matrix.shard == 'dist_rl' || matrix.shard == 'experimental') }}
         run: |
           find tunix/dist_rl/distributed -name "*.proto" -exec \
             python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. {} +
@@ -189,15 +233,28 @@ jobs:
       - name: Download the tunix wheel
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          name: tunix-wheel
+          name: ${{ inputs.wheel_artifact_name }}
 
       - name: Install the tunix wheel
+        if: ${{ !inputs.wheel_only }}
         run: |
           python3 -m pip install --upgrade pip setuptools wheel
           python3 -m pip install --find-links=. "google-tunix[prod,test,experimental]"
           python3 -c "import pathlib, shutil, sysconfig; root = pathlib.Path(sysconfig.get_paths()['platlib']) / 'tunix'; exts = {ext: list(root.glob(f'{ext}*.so')) for ext in ('dist_rl/worker/_compression_ext', 'rl/_packing_ext', 'utils/_trajectory_logger_ext')}; assert all(exts.values()), f'Missing nanobind extensions in {root}: {exts}'; [shutil.copy2(p, pathlib.Path('tunix') / p.relative_to(root)) for paths in exts.values() for p in paths]"
           # tpu-inference/Numba needs NumPy 2.3 or less.
           python3 -m pip install numpy==2.3.5 --force-reinstall
+
+      - name: Install the tunix wheel and remove ./tunix (wheel-only mode)
+        if: ${{ inputs.wheel_only }}
+        run: |
+          python3 -m pip install --upgrade pip setuptools wheel
+          WHEEL=$(ls -1 ./google_tunix-*.whl | head -n1)
+          [ -n "$WHEEL" ] || { echo "No google_tunix-*.whl found in the artifact"; exit 1; }
+          python3 -m pip install "${WHEEL}[prod,test,experimental]"
+          python3 -c "import pathlib, sysconfig; root = pathlib.Path(sysconfig.get_paths()['platlib']) / 'tunix'; exts = {ext: list(root.glob(f'{ext}*.abi3.so')) for ext in ('dist_rl/worker/_compression_ext', 'rl/_packing_ext', 'utils/_trajectory_logger_ext')}; assert all(exts.values()), f'Missing nanobind extensions in {root}: {exts}'"
+          # tpu-inference/Numba needs NumPy 2.3 or less.
+          python3 -m pip install numpy==2.3.5 --force-reinstall
+          rm -rf tunix
 
       - name: Run vllm driver tests
         run: |
@@ -258,14 +315,26 @@ jobs:
       - name: Download the tunix wheel
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          name: tunix-wheel
+          name: ${{ inputs.wheel_artifact_name }}
 
       - name: Install the tunix wheel and dependencies
+        if: ${{ !inputs.wheel_only }}
         run: |
           python -m pip install -q uv
           uv pip install --system --find-links=. --reinstall-package google-tunix "google-tunix[prod,test,experimental]"
           python -c "import pathlib, shutil, sysconfig; root = pathlib.Path(sysconfig.get_paths()['platlib']) / 'tunix'; exts = {ext: list(root.glob(f'{ext}*.so')) for ext in ('dist_rl/worker/_compression_ext', 'rl/_packing_ext', 'utils/_trajectory_logger_ext')}; assert all(exts.values()), f'Missing nanobind extensions in {root}: {exts}'; [shutil.copy2(p, pathlib.Path('tunix') / p.relative_to(root)) for paths in exts.values() for p in paths]"
           uv pip install --system --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match --upgrade kagglehub kagglesdk torch
+
+      - name: Install the tunix wheel and dependencies, and remove ./tunix (wheel-only mode)
+        if: ${{ inputs.wheel_only }}
+        run: |
+          python -m pip install -q uv
+          WHEEL=$(ls -1 ./google_tunix-*.whl | head -n1)
+          [ -n "$WHEEL" ] || { echo "No google_tunix-*.whl found in the artifact"; exit 1; }
+          uv pip install --system "${WHEEL}[prod,test,experimental]"
+          python -c "import pathlib, sysconfig; root = pathlib.Path(sysconfig.get_paths()['platlib']) / 'tunix'; exts = {ext: list(root.glob(f'{ext}*.abi3.so')) for ext in ('dist_rl/worker/_compression_ext', 'rl/_packing_ext', 'utils/_trajectory_logger_ext')}; assert all(exts.values()), f'Missing nanobind extensions in {root}: {exts}'"
+          uv pip install --system --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match --upgrade kagglehub kagglesdk torch
+          rm -rf tunix
 
       - name: Run Smoke tests (model creation)
         run: |

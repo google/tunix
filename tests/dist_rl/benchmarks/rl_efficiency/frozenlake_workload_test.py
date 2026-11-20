@@ -14,14 +14,13 @@
 
 """CPU-only tests of the FrozenLake benchmark workload; no TPU/JAX/pytest.
 
-They read the YAML configs with PyYAML. Run directly:
-python3 tests/dist_rl/benchmarks/rl_efficiency/frozenlake_workload_test.py
+They read the YAML configs with PyYAML. Run directly from the repository root:
+python3 -m unittest tests/dist_rl/benchmarks/rl_efficiency/frozenlake_workload_test.py
 """
 
 import argparse
 import ast
 import contextlib
-import importlib.util
 import io
 import json
 from pathlib import Path
@@ -32,17 +31,10 @@ import unittest
 
 import yaml
 
-ROOT = Path(__file__).resolve().parents[4]
+from tests import test_utils
 
-
-def load_module(path):
-  spec = importlib.util.spec_from_file_location(path.stem, path)
-  module = importlib.util.module_from_spec(spec)
-  spec.loader.exec_module(module)
-  return module
-
-
-benchmark = load_module(
+ROOT = test_utils.tunix_package_dir().parent
+benchmark = test_utils.load_module_from_path(
     ROOT / "tunix/dist_rl/benchmarks/rl_efficiency/benchmark.py"
 )
 workload = benchmark.load_workload()

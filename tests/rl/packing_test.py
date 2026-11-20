@@ -15,9 +15,16 @@
 """Tests for the type-agnostic packing core logic."""
 
 import dataclasses
+import importlib.abc
+import importlib.machinery
+import importlib.util
 import os
+import pathlib
 import signal
+import sys
+import tempfile
 import time
+from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 import numpy as np
@@ -374,6 +381,102 @@ class PackCoreTest(absltest.TestCase):
           c_chunk.routed_experts, p_chunk.routed_experts
       )
       self.assertEqual(c_chunk.num_real_segments, p_chunk.num_real_segments)
+
+  def test_missing_packing_ext_falls_back_while_corrupt_so_raises_import_error(
+      self,
+  ):
+    assert packing.__file__ is not None
+    packing_src_path = pathlib.Path(packing.__file__)
+    target_names = frozenset({
+        "tunix.rl._packing_ext",
+        f"{packing.__package__}._packing_ext",
+    })
+
+    class _MissingExtFinder(importlib.abc.MetaPathFinder):
+
+      def find_spec(self, fullname, path, target=None):
+        del path, target
+        if fullname in target_names:
+          raise ModuleNotFoundError(
+              f"No module named {fullname!r}", name=fullname
+          )
+        return None
+
+    rl_pkg = sys.modules.get("tunix.rl")
+    saved_modules = {
+        name: sys.modules.pop(name)
+        for name in list(sys.modules)
+        if name in target_names
+    }
+    had_rl_attr = rl_pkg is not None and "_packing_ext" in rl_pkg.__dict__
+    saved_rl_attr = (
+        rl_pkg.__dict__.pop("_packing_ext", None)
+        if rl_pkg is not None
+        else None
+    )
+    try:
+      with mock.patch.object(
+          sys, "meta_path", [_MissingExtFinder(), *sys.meta_path]
+      ):
+        unbuilt_spec = importlib.util.spec_from_file_location(
+            "_tunix_packing_unbuilt_probe", packing_src_path
+        )
+        assert unbuilt_spec is not None and unbuilt_spec.loader is not None
+        unbuilt_mod = importlib.util.module_from_spec(unbuilt_spec)
+        sys.modules[unbuilt_spec.name] = unbuilt_mod
+        try:
+          unbuilt_spec.loader.exec_module(unbuilt_mod)
+        finally:
+          sys.modules.pop(unbuilt_spec.name, None)
+        self.assertIsNone(unbuilt_mod._packing_ext)
+        [[row]] = unbuilt_mod.pack_core(
+            [
+                unbuilt_mod.PackItem(
+                    prompt_ids=np.array([1, 2], dtype=np.int32),
+                    completion_ids=np.array([3, 4], dtype=np.int32),
+                    completion_mask=np.ones(2, dtype=np.float32),
+                    advantages=np.ones(2, dtype=np.float32),
+                )
+            ],
+            budget=6,
+            pack_size=1,
+        )
+        np.testing.assert_array_equal(row.ids, [1, 2, 3, 4, 0, 0])
+
+      with tempfile.TemporaryDirectory() as tmp_dir:
+        corrupt_so = pathlib.Path(tmp_dir) / "_packing_ext.abi3.so"
+        corrupt_so.write_bytes(b"corrupt-elf-shared-object")
+
+        class _CorruptExtFinder(importlib.abc.MetaPathFinder):
+
+          def find_spec(self, fullname, path, target=None):
+            del path, target
+            if fullname in target_names:
+              loader = importlib.machinery.ExtensionFileLoader(
+                  fullname, str(corrupt_so)
+              )
+              return importlib.util.spec_from_loader(fullname, loader)
+            return None
+
+        with mock.patch.object(
+            sys, "meta_path", [_CorruptExtFinder(), *sys.meta_path]
+        ):
+          broken_spec = importlib.util.spec_from_file_location(
+              "_tunix_packing_corrupt_probe", packing_src_path
+          )
+          assert broken_spec is not None and broken_spec.loader is not None
+          broken_mod = importlib.util.module_from_spec(broken_spec)
+          sys.modules[broken_spec.name] = broken_mod
+          try:
+            with self.assertRaises(ImportError) as cm:
+              broken_spec.loader.exec_module(broken_mod)
+            self.assertNotIsInstance(cm.exception, ModuleNotFoundError)
+          finally:
+            sys.modules.pop(broken_spec.name, None)
+    finally:
+      sys.modules.update(saved_modules)
+      if had_rl_attr and rl_pkg is not None:
+        setattr(rl_pkg, "_packing_ext", saved_rl_attr)
 
 
 class PackRoutedExpertsTest(absltest.TestCase):
