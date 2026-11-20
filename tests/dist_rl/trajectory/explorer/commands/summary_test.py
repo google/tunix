@@ -369,7 +369,8 @@ class SummaryTest(absltest.TestCase):
     )
     self.assertEqual(exit_code, 0)
     data = json.loads(out)
-    # The rollout has no `prompt_id`: its only group has 1 valid rollout.
+    # The rollout has no `prompt_id`, so the only group has 1 rollout (G = 1):
+    # the run has no regimes, and no sample groups.
     self.assertEqual(
         data["run"]["schema_stats"],
         {
@@ -378,12 +379,7 @@ class SummaryTest(absltest.TestCase):
                     "num_groups": 1,
                     "num_incomplete": 0,
                     "num_ungrouped": 1,
-                    "regimes": {
-                        "contrastive": 0,
-                        "zero_std_dead": 0,
-                        "zero_std_saturated": 0,
-                        "degenerate": 1,
-                    },
+                    "regimes": None,
                 },
                 "logprobs": {
                     "mean": -0.35,
@@ -392,18 +388,7 @@ class SummaryTest(absltest.TestCase):
                     "num_zero_mask": 0,
                     "num_misaligned": 0,
                 },
-                "sample_groups": {
-                    "contrastive": [],
-                    "dead_or_degenerate": [{
-                        "prompt_id": "p_1",
-                        "valid": 1,
-                        "masked": 0,
-                        "valid_mean": 3.5,
-                        "valid_std": None,
-                        "agent_steps": {"min": 1, "mean": 1.0, "max": 1},
-                        "statuses": {"SUCCEEDED": 1},
-                    }],
-                },
+                "sample_groups": {"contrastive": [], "dead_or_degenerate": []},
             }
         },
     )
@@ -440,17 +425,8 @@ class SummaryTest(absltest.TestCase):
     self.assertIn(
         "Mean reward: 3.5 reported by 1/2\n"
         "Prompt Groups: 1 (0 incomplete, 1 ungrouped trajectories)\n"
-        "  contrastive (valid>=2, std>0):            0 ( 0.0%)\n"
-        "  zero_std_dead (valid>=2, std=0, mean<=0): 0 ( 0.0%)\n"
-        "  zero_std_saturated (std=0, mean>0):       0 ( 0.0%)\n"
-        "  degenerate (valid<2):                     1 (100.0%)\n"
         "Rollout Logprobs (mask=1): mean -0.35, min -0.5"
         "  |  Anomalies: 0 non_finite, 0 zero_mask, 0 misaligned\n"
-        "Sample Dead / Degenerate Groups:\n"
-        "  prompt_id  valid  masked  valid_mean  valid_std"
-        "  agent steps (min/mean/max)  statuses\n"
-        "  p_1        1      0       3.500       -          1 / 1.0 / 1"
-        "                 SUCCEEDED x1\n"
         "Tool calls: search x1\n",
         out,
     )

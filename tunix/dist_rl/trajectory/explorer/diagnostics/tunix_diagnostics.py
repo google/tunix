@@ -331,9 +331,12 @@ def _prompt_groups(
   Returns:
     `num_groups`; `num_incomplete`, the number of incomplete groups;
     `num_ungrouped`; and `regimes`, the number of complete groups in each
-    regime.
+    regime, or None if every complete group would be degenerate for lack of
+    rollouts, as with one rollout per prompt (G = 1) in PPO or evaluation.
   """
   regimes = groups["regime"]
+  complete = groups[regimes != "incomplete"]
+  has_regimes = complete["rollouts"].ge(_MIN_VALID).any()
   regime_counts: dict[str, schema_diagnostics.JsonValue] = {
       regime: int((regimes == regime).sum()) for regime in _REGIME_LABELS
   }
@@ -341,7 +344,7 @@ def _prompt_groups(
       "num_groups": len(groups),
       "num_incomplete": int((regimes == "incomplete").sum()),
       "num_ungrouped": num_ungrouped,
-      "regimes": regime_counts,
+      "regimes": regime_counts if has_regimes else None,
   }
 
 
@@ -352,7 +355,8 @@ def _sample_groups(
 
   Contrastive groups come by decreasing `valid_std`, dead and degenerate ones
   by decreasing number of invalid rollouts, then of masked-out ones, and ties
-  by `prompt_id`.
+  by `prompt_id`. Groups too small to be anything but degenerate (G = 1) are
+  left out.
 
   Args:
     groups: The run's prompt groups, from `_groups`.
@@ -372,6 +376,7 @@ def _sample_groups(
   )
   dead_or_degenerate = table[
       table["regime"].isin(["zero_std_dead", "degenerate"])
+      & table["rollouts"].ge(_MIN_VALID)
   ].sort_values(
       ["invalid", "masked", "prompt_id"], ascending=[False, False, True]
   )
@@ -470,7 +475,7 @@ def _format_prompt_groups(
   """Returns the `Prompt Groups:` line, then one line per regime.
 
   The regime lines give each regime's share of the complete groups, and are
-  left out when no group is complete.
+  left out when the run has no regimes (see `_prompt_groups`).
 
   Args:
     groups: The `prompt_groups` of the run summary.
@@ -481,9 +486,9 @@ def _format_prompt_groups(
       f"Prompt Groups: {num_groups} ({num_incomplete} incomplete,"
       f" {groups['num_ungrouped']} ungrouped trajectories)"
   ]
-  num_complete = num_groups - num_incomplete
-  if not num_complete:
+  if groups["regimes"] is None:
     return lines
+  num_complete = num_groups - num_incomplete
   regimes = _as_dict(groups["regimes"])
   label_width = max(map(len, _REGIME_LABELS.values())) + 1
   count_width = len(str(num_complete))

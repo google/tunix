@@ -342,12 +342,48 @@ class TunixDiagnosticsTest(parameterized.TestCase):
             "num_groups": 0,
             "num_incomplete": 0,
             "num_ungrouped": 2,
-            "regimes": {
-                "contrastive": 0,
-                "zero_std_dead": 0,
-                "zero_std_saturated": 0,
-                "degenerate": 0,
-            },
+            "regimes": None,
+        },
+    )
+
+  @parameterized.named_parameters(
+      # One rollout per prompt (G = 1), as in PPO or evaluation.
+      (
+          "one_rollout_per_prompt",
+          [
+              _rollout("p_1", 1.0),
+              _rollout("p_2", 0.0, masked_out=True),
+              _rollout("p_3", None, status="RUNNING"),
+          ],
+      ),
+      # An incomplete group doesn't count, even with 2 rollouts.
+      (
+          "no_complete_group",
+          [_rollout("p_1", 1.0), _rollout("p_1", None, status="RUNNING")],
+      ),
+  )
+  def test_no_regimes_without_a_complete_group_of_2_rollouts(
+      self, rollouts: list[trajectory_lib.TunixTrajectory]
+  ) -> None:
+    run_summary = _run_summary(*rollouts)
+
+    self.assertIsNone(run_summary["prompt_groups"]["regimes"])
+    self.assertEqual(run_summary["sample_groups"], _NO_SAMPLE_GROUPS)
+
+  def test_regimes_report_degenerate_groups_of_2_rollouts(self) -> None:
+    # A G = 2 run whose rollouts were all masked out still reports regimes.
+    run_summary = _run_summary(
+        _rollout("p_1", 0.0, masked_out=True),
+        _rollout("p_1", 0.0, masked_out=True),
+    )
+
+    self.assertEqual(
+        run_summary["prompt_groups"]["regimes"],
+        {
+            "contrastive": 0,
+            "zero_std_dead": 0,
+            "zero_std_saturated": 0,
+            "degenerate": 1,
         },
     )
 
@@ -510,12 +546,7 @@ class TunixDiagnosticsTest(parameterized.TestCase):
                 "num_groups": 1,
                 "num_incomplete": 1,
                 "num_ungrouped": 2,
-                "regimes": {
-                    "contrastive": 0,
-                    "zero_std_dead": 0,
-                    "zero_std_saturated": 0,
-                    "degenerate": 0,
-                },
+                "regimes": None,
             },
             "logprobs": None,
             "sample_groups": _NO_SAMPLE_GROUPS,
