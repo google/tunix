@@ -16,27 +16,69 @@
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 from flax import nnx
 import jax
+from tunix.common import configs
+from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.rollout import sampler as base_sampler_lib
-from tunix.dist_rl.weight_sync import weight_sync
 
 
 class RaidenDestinationWeightSyncMixin:
   """Mixin providing destination-side weight sync hooks for samplers."""
 
   server_id: str
+  config: configs.RolloutConfig
   enable_raiden: bool
   raiden_sync_delegate: Any
 
-  def _get_underlying_sampler(self) -> Any:
-    return (
-        getattr(self, "sampler", None)
-        or getattr(self, "vllm_sampler", None)
-        or (self if hasattr(self, "transformer_state") else None)
+  @property
+  def transformer_state(self) -> Any:
+    """Returns the sampler's transformer state."""
+    raise NotImplementedError(
+        f"{self.__class__.__name__} [{self.server_id}] does not expose"
+        " transformer_state."
+    )
+
+  def update_params(
+      self,
+      updated_weights: Any,
+      filter_types: tuple[Any, ...] | None = None,
+  ) -> None:
+    """Updates model parameters in the sampler."""
+    del updated_weights, filter_types
+    raise NotImplementedError(
+        f"{self.__class__.__name__} [{self.server_id}] does not implement"
+        " update_params."
+    )
+
+  def delete_cache(self) -> None:
+    """Deletes the KV cache before weight sync."""
+    raise NotImplementedError(
+        f"{self.__class__.__name__} [{self.server_id}] does not implement"
+        " delete_cache."
+    )
+
+  def reset_prefix_cache(self) -> None:
+    """Resets the prefix cache before weight sync."""
+    raise NotImplementedError(
+        f"{self.__class__.__name__} [{self.server_id}] does not implement"
+        " reset_prefix_cache."
+    )
+
+  def reinitialize_cache(self) -> None:
+    """Reallocates the KV cache after weight sync."""
+    raise NotImplementedError(
+        f"{self.__class__.__name__} [{self.server_id}] does not implement"
+        " reinitialize_cache."
+    )
+
+  def refresh_state_leaves(self) -> None:
+    """Refreshes cached state leaves after weight sync."""
+    raise NotImplementedError(
+        f"{self.__class__.__name__} [{self.server_id}] does not implement"
+        " refresh_state_leaves."
     )
 
   def _check_weight_sync_boundness(self) -> None:
@@ -69,44 +111,25 @@ class RaidenDestinationWeightSyncMixin:
   ) -> Any:
     """Binds destination-side transport resources for weight transfer."""
     if self.enable_raiden:
-      sampler = self._get_underlying_sampler()
-      if sampler is None or not hasattr(sampler, "transformer_state"):
-        raise RuntimeError(
-            f"{self.__class__.__name__} [{self.server_id}] sampler does not"
-            " expose transformer_state for Raiden weight sync."
-        )
-
+      state = self.transformer_state
       if self.raiden_sync_delegate.is_bounded():
         return True
 
-      state = sampler.transformer_state
       return await self.raiden_sync_delegate.bind_weight_sync(
-          sync_request=sync_request, state=state, sampler=sampler, **kwargs
+          sync_request=sync_request,
+          state=state,
+          sampler=self,
+          **kwargs,
       )
     return None
 
   def get_target_state(self) -> Any:
     """Returns target state shape/dtype pytree for weight conversion."""
-    sampler = self._get_underlying_sampler()
-    if sampler is None:
-      raise RuntimeError(
-          f"{self.__class__.__name__} [{self.server_id}] sampler is not"
-          " initialized."
-      )
-    if sampler is not self and hasattr(sampler, "get_target_state"):
-      return sampler.get_target_state()
-    if hasattr(sampler, "transformer_state"):
-      state = sampler.transformer_state
-      return jax.tree.map(
-          lambda x: nnx.Param(
-              jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype)
-          ),
-          state,
-          is_leaf=lambda x: isinstance(x, nnx.Variable),
-      )
-    raise AttributeError(
-        f"{self.__class__.__name__} [{self.server_id}] cannot extract"
-        " target_state."
+    state = self.transformer_state
+    return jax.tree.map(
+        lambda x: nnx.Param(jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype)),
+        state,
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
     )
 
   # TODO(tunix-dev): Make `pause`/`resume` abstract (or type the host sampler
@@ -124,7 +147,11 @@ class RaidenDestinationWeightSyncMixin:
 
   async def pre_weight_sync(
       self,
-      sync_request: base_sampler_lib.WeightSyncRequest | Any = None,
+      sync_request: (
+          base_sampler_lib.WeightSyncRequest
+          | datatypes.WeightSyncMetadata
+          | None
+      ) = None,
       **kwargs,
   ) -> str | None | Any:
     """Prepares staging handshake prior to policy weight update."""
@@ -133,14 +160,11 @@ class RaidenDestinationWeightSyncMixin:
     # and delegate -> resume in post/abort. The coordinator requires
     # destinations to serialize whole phase bodies, because a timed-out phase
     # (e.g. a long pause drain) can still be running when the abort arrives.
-    partial_rollout = bool(getattr(self, "partial_rollout", False))
-    use_partial = bool(kwargs.get("partial_rollout", partial_rollout))
+    partial_rollout = self.config.partial_rollout
     await self.pause(
-        mode="keep" if use_partial else "wait",
-        clear_cache=not use_partial,
+        mode="keep" if partial_rollout else "wait",
+        clear_cache=not partial_rollout,
     )
-    if partial_rollout:
-      kwargs.setdefault("partial_rollout", True)
 
     if self.enable_raiden:
       return await self.raiden_sync_delegate.pre_weight_sync(
@@ -152,7 +176,7 @@ class RaidenDestinationWeightSyncMixin:
       self,
       sync_request: base_sampler_lib.WeightSyncRequest | Any = None,
       **kwargs,
-  ) -> str | None | Any:
+  ) -> int | None:
     """Updates model weights in-place from the specified controller or request."""
     self._check_weight_sync_boundness()
 
@@ -166,22 +190,14 @@ class RaidenDestinationWeightSyncMixin:
             f"{self.__class__.__name__} Fallback mode [{self.server_id}]"
             " weight_sync: sync_request is None."
         )
-      sampler = self._get_underlying_sampler()
-      if sampler and hasattr(sampler, "update_params"):
-        weights = sync_request.weights
-        if weights is None:
-          raise ValueError(
-              f"{self.__class__.__name__} [{self.server_id}] weight_sync:"
-              " weights not found in sync_request."
-          )
-        sampler.update_params(weights)
-      else:
-        raise RuntimeError(
-            f"{self.__class__.__name__} [{self.server_id}] does not support"
-            " Raiden weight sync, while the fallback path missing required"
-            " components."
+      weights = sync_request.weights
+      if weights is None:
+        raise ValueError(
+            f"{self.__class__.__name__} [{self.server_id}] weight_sync:"
+            " weights not found in sync_request."
         )
-      return True
+      self.update_params(weights)
+      return None
 
   async def post_weight_sync(
       self,

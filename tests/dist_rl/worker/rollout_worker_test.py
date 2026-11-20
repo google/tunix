@@ -1651,12 +1651,10 @@ class RolloutWorkerStagingRpcTest(absltest.TestCase):
 
     async def _run():
       req_sync = datatypes.WeightSyncRequest(
-          controller_id="c", policy_version=0
+          controller_id="c", policy_version=2
       )
       await worker.pre_weight_sync(req_sync)
-      await worker.weight_sync(
-          datatypes.WeightSyncRequest(controller_id="c", policy_version=2)
-      )
+      await worker.weight_sync(req_sync)
       await worker.post_weight_sync(req_sync)
       self.assertEqual(worker.info().resources["policy_version"], 2)
 

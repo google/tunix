@@ -18,6 +18,7 @@ import unittest
 from unittest import mock
 
 from absl.testing import absltest
+from tunix.common import configs
 from tunix.dist_rl.weight_sync import raiden_weight_sync_delegate
 
 
@@ -61,6 +62,20 @@ class _Request:
     self.extra_config = {"req_id": req_id} if req_id else {}
 
 
+def _sampler(**config_kwargs):
+  sampler = mock.MagicMock(
+      spec=(
+          "config",
+          "delete_cache",
+          "reset_prefix_cache",
+          "reinitialize_cache",
+          "refresh_state_leaves",
+      )
+  )
+  sampler.config = configs.RolloutConfig(**config_kwargs)
+  return sampler
+
+
 class RaidenWeightSyncDelegateTest(unittest.IsolatedAsyncioTestCase):
 
   def setUp(self):
@@ -91,7 +106,7 @@ class RaidenWeightSyncDelegateTest(unittest.IsolatedAsyncioTestCase):
   async def test_repeat_phases_bind_exactly_once(self):
     delegate = self._delegate()
     fake_state = {"w": 1}
-    await delegate.bind_weight_sync(state=fake_state, sampler=mock.MagicMock())
+    await delegate.bind_weight_sync(state=fake_state, sampler=_sampler())
     await delegate.get_weight_sync_metadata()
     await delegate.pre_weight_sync()
     await delegate.weight_sync()
@@ -154,7 +169,7 @@ class RaidenWeightSyncDelegateTest(unittest.IsolatedAsyncioTestCase):
 
   async def test_post_weight_sync_returns_true(self):
     delegate = self._delegate()
-    await delegate.bind_weight_sync(state={"w": 1}, sampler=mock.MagicMock())
+    await delegate.bind_weight_sync(state={"w": 1}, sampler=_sampler())
     self.assertTrue(await delegate.post_weight_sync())
 
   async def test_pre_weight_sync_without_sampler_raises(self):
@@ -164,7 +179,7 @@ class RaidenWeightSyncDelegateTest(unittest.IsolatedAsyncioTestCase):
       await delegate.pre_weight_sync()
 
   async def test_pre_weight_sync_clears_prefix_and_kv_cache(self):
-    sampler = mock.MagicMock()
+    sampler = _sampler()
     delegate = raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
     await delegate.bind_weight_sync(sampler=sampler, state={"w": 1})
     req = _Request(policy_version=1, req_id="req-1")
@@ -172,7 +187,7 @@ class RaidenWeightSyncDelegateTest(unittest.IsolatedAsyncioTestCase):
     sampler.delete_cache.assert_called_once()
 
   async def test_post_weight_sync_reinitializes_kv_cache(self):
-    sampler = mock.MagicMock()
+    sampler = _sampler()
     delegate = raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
     await delegate.bind_weight_sync(sampler=sampler, state={"w": 1})
     req = _Request(policy_version=1, req_id="req-1")
@@ -183,8 +198,7 @@ class RaidenWeightSyncDelegateTest(unittest.IsolatedAsyncioTestCase):
     sampler.reinitialize_cache.assert_called_once()
 
   async def test_weight_sync_keeps_kv_cache_when_sampler_opts_out(self):
-    sampler = mock.MagicMock()
-    sampler.config.free_kv_cache_during_weight_sync = False
+    sampler = _sampler(rollout_vllm_free_kv_cache_during_weight_sync=False)
     delegate = raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
     await delegate.bind_weight_sync(sampler=sampler, state={"w": 1})
     req = _Request(policy_version=1, req_id="req-1")
@@ -196,12 +210,11 @@ class RaidenWeightSyncDelegateTest(unittest.IsolatedAsyncioTestCase):
     sampler.refresh_state_leaves.assert_called_once()
 
   async def test_partial_rollout_preserves_kv_and_prefix_cache(self):
-    sampler = mock.MagicMock()
-    sampler.config.free_kv_cache_during_weight_sync = True
-    sampler.config.partial_rollout = False
-    delegate = raiden_weight_sync_delegate.RaidenWeightSyncDelegate(
-        partial_rollout=True
+    sampler = _sampler(
+        rollout_vllm_free_kv_cache_during_weight_sync=True,
+        partial_rollout=True,
     )
+    delegate = raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
     await delegate.bind_weight_sync(sampler=sampler, state={"w": 1})
     req = _Request(policy_version=1, req_id="req-1")
     await delegate.pre_weight_sync(sync_request=req)
@@ -213,7 +226,7 @@ class RaidenWeightSyncDelegateTest(unittest.IsolatedAsyncioTestCase):
 
   async def test_round_tracker_lifecycle_and_status(self):
     delegate = self._delegate()
-    await delegate.bind_weight_sync(state={"w": 1}, sampler=mock.MagicMock())
+    await delegate.bind_weight_sync(state={"w": 1}, sampler=_sampler())
     req = _Request(policy_version=1, req_id="req-1")
     await delegate.pre_weight_sync(sync_request=req)
     await delegate.weight_sync(sync_request=req)
