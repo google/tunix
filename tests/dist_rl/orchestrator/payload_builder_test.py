@@ -776,5 +776,55 @@ class ExcludeMaskedFromAdvantageTest(absltest.TestCase):
       np.testing.assert_array_equal(decoded, idx + 1)
 
 
+class ScoreCenteringPayloadTest(absltest.TestCase):
+
+  def _item(self, group_index, topk_ids, topk_logps=None):
+    return datatypes.TrajectoryItem(
+        prompt_id="g1",
+        group_index=group_index,
+        traj={
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([3, 4], dtype=np.int32),
+            "conversation_masks": np.ones(2, dtype=np.float32),
+            "old_topk_token_ids": topk_ids,
+            "old_topk_logprobs": topk_logps,
+        },
+    )
+
+  def test_payloads_slice_topk_and_pad_failed_rollouts(self):
+    ids = np.array([[5, 6, 7], [8, 9, 10]], dtype=np.int32)
+    logps = np.array([[-0.1, -1.0, -2.0], [-0.2, -1.1, -2.1]], np.float32)
+    failed = datatypes.TrajectoryItem(
+        prompt_id="g1",
+        group_index=2,
+        traj={
+            "status": datatypes.TrajectoryStatus.FAILED,
+            "prompt_tokens": np.array([], dtype=np.int32),
+            "conversation_tokens": np.array([], dtype=np.int32),
+            "conversation_masks": np.array([], dtype=np.float32),
+        },
+    )
+    cfg = algorithm_config.GRPOConfig(
+        num_generations=3, score_centering=True, score_centering_top_k=2
+    )
+    payloads = payload_builder.create_trainer_payloads(
+        [self._item(0, ids, logps), self._item(1, ids, logps), failed],
+        rewards=[1.0, 0.0, 0.0],
+        algo_config=cfg,
+    )
+    np.testing.assert_array_equal(payloads[0].old_topk_token_ids, ids[:, :2])
+    np.testing.assert_allclose(payloads[0].old_topk_logps, logps[:, :2])
+    self.assertEqual(payloads[2].old_topk_token_ids.shape, (0, 2))
+
+    cfg2 = dataclasses.replace(cfg, num_generations=2)
+    for bad in (None, np.zeros((1, 2), np.int32), np.zeros((2, 1), np.int32)):
+      with self.assertRaisesRegex(ValueError, "top-k logprobs"):
+        payload_builder.create_trainer_payloads(
+            [self._item(0, bad, bad), self._item(1, bad, bad)],
+            rewards=[1.0, 0.0],
+            algo_config=cfg2,
+        )
+
+
 if __name__ == "__main__":
   absltest.main()

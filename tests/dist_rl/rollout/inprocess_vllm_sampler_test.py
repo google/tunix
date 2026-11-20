@@ -127,6 +127,7 @@ class InprocessVllmSamplerTest(absltest.TestCase):
         tensor_parallel_size=2,
         data_parallel_size=4,
         return_logprobs=True,
+        num_logprobs=4,
         return_routed_experts=True,
         eos_tokens=[7],
         partial_rollout=True,
@@ -153,6 +154,7 @@ class InprocessVllmSamplerTest(absltest.TestCase):
     self.assertEqual(vllm_config_kwargs["tensor_parallel_size"], 2)
     self.assertEqual(vllm_config_kwargs["data_parallel_size"], 4)
     self.assertTrue(vllm_config_kwargs["return_logprobs"])
+    self.assertEqual(vllm_config_kwargs["num_logprobs"], 4)
     self.assertTrue(vllm_config_kwargs["return_routed_experts"])
     self.assertEqual(vllm_config_kwargs["eos_tokens"], [7])
     self.assertTrue(vllm_config_kwargs["partial_rollout"])
@@ -169,7 +171,7 @@ class InprocessVllmSamplerTest(absltest.TestCase):
     self.assertEqual(engine_kwargs["max_num_seqs"], 32)
     self.assertEqual(engine_kwargs["max_model_len"], 2048)
     self.assertEqual(engine_kwargs["dtype"], "bfloat16")
-    self.assertEqual(engine_kwargs["max_logprobs"], 1)
+    self.assertEqual(engine_kwargs["max_logprobs"], 4)
     self.mock_vllm_lib.VllmSampler.assert_called_with(
         tokenizer=sampler.tokenizer,
         config=self.mock_vllm_lib.VllmConfig.return_value,
@@ -363,6 +365,26 @@ class InprocessVllmSamplerTest(absltest.TestCase):
     self.assertEqual(responses[1].text, "completion 2")
     np.testing.assert_array_equal(responses[0].prompt_token_ids, [1, 2])
     np.testing.assert_array_equal(responses[1].prompt_token_ids, [3, 4])
+
+  def test_topk_logprobs_reach_each_response_in_order(self):
+    self.mock_vllm_sampler.return_value = base_sampler.SamplerOutput(
+        text=["completion 1", "completion 2"],
+        logits=None,
+        tokens=[np.array([10, 20], dtype=np.int32)] * 2,
+        padded_prompt_tokens=np.array([[1, 2], [3, 4]], dtype=np.int32),
+        logprobs=None,
+        topk_token_ids=[np.full((2, 3), i, np.int32) for i in range(2)],
+        topk_logprobs=[np.full((2, 3), -i, np.float32) for i in range(2)],
+    )
+    responses = asyncio.run(
+        self.sampler.sample([
+            base_sampler_lib.SamplingRequest(request_id="req_1", prompt="p1"),
+            base_sampler_lib.SamplingRequest(request_id="req_2", prompt="p2"),
+        ])
+    )
+    for i, response in enumerate(responses):
+      np.testing.assert_array_equal(response.topk_token_ids, np.full((2, 3), i))
+      np.testing.assert_array_equal(response.topk_logprobs, np.full((2, 3), -i))
 
   def test_weight_sync_without_raiden_delegate(self):
     mock_weights = {"layer1": "weights"}

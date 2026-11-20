@@ -694,8 +694,6 @@ def grpo_loss_fn(
         eps=algo_config.score_centering_eps,
         completion_mask=active_mask,
         has_sampler_is_weights=sampler_is_weights is not None,
-        completion_ids=completion_ids,
-        topk_token_ids=jnp.asarray(topk_token_ids),
     )
     sc_logp_correction = jnp.where(
         per_token_pg_clipfrac_lower > 0.0, 0.0, sc_logp_correction

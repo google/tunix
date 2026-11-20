@@ -56,6 +56,7 @@
           "max_prompt_length": 1024,
           "max_response_length": 1024,
           "max_tokens_to_generate": 1024,
+          "num_logprobs": 1,
           "overlong_filter": false,
           "partial_rollout": true,
           "return_logprobs": true,
@@ -315,6 +316,7 @@
             "__type__": "MappingConfig"
           },
           "mesh": "<tunix.dist_rl.launch.nodes.node_utils.Mesh()>",
+          "num_logprobs": 1,
           "overlap_postprocessing": true,
           "partial_rollout": true,
           "reshard_chunk_size": null,

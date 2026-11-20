@@ -87,6 +87,11 @@ def response_budget_facts(
   return min(raw_length, max_response_length), clipped
 
 
+def _as_batch_list(value: Any) -> list[Any] | None:
+  """Wraps a single-request rollout value in a batch list, or returns None."""
+  return None if value is None else [value]
+
+
 class TrajectoryCollectorEngine:
   """Wrapper around TrajectoryCollectEngine providing lifecycle controls and Trajectory conversion."""
 
@@ -289,6 +294,10 @@ class TrajectoryCollectorEngine:
       tokens = getattr(res, "token_ids", np.array([], dtype=np.int32))
       logprobs = getattr(res, "logprobs", None)
       routed_experts = getattr(res, "routed_experts", None)
+      # Score Centering top-k, which the inner engine records as the
+      # trajectory's `old_topk_*`. Text-only samplers return a plain str.
+      topk_ids = getattr(res, "topk_token_ids", None)
+      topk_logps = getattr(res, "topk_logprobs", None)
       raw_prompt_tokens = getattr(res, "prompt_token_ids", None)
       prompt_tokens = np.asarray(
           raw_prompt_tokens if raw_prompt_tokens is not None else [],
@@ -315,10 +324,10 @@ class TrajectoryCollectorEngine:
           tokens=[tokens],
           left_padded_prompt_tokens=prompt_tokens,
           prompt_lengths=np.asarray([prompt_len], dtype=np.int32),
-          logprobs=[logprobs] if logprobs is not None else None,
-          routed_experts=[routed_experts]
-          if routed_experts is not None
-          else None,
+          logprobs=_as_batch_list(logprobs),
+          topk_token_ids=_as_batch_list(topk_ids),
+          topk_logprobs=_as_batch_list(topk_logps),
+          routed_experts=_as_batch_list(routed_experts),
       )
 
     if not self.agent or not self.env:

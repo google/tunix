@@ -286,7 +286,7 @@ class ScoredGroup:
       produced by `payload_builder.create_trainer_payloads`. Single owner of
       each rollout's `routed_experts` until packed by the batch assembler.
     items: Telemetry and lineage views of the group's rollouts with
-      `routed_experts` stripped (`len == G`).
+      `routed_experts` and Score Centering top-k stripped (`len == G`).
     rewards: Scalar rewards computed by `critique_stage` (`len == G`), also
       stamped into each `item.traj["trajectory_reward"]` for downstream logging.
     reward_log_metrics: Per-group reward manager log metrics (`name -> (values,
@@ -935,13 +935,18 @@ class StandardRLProgram(RLProgram):
     src_traj = src_item.traj
     if isinstance(src_traj, dict):
       raw_status = src_traj.get("status") or getattr(src_item, "status", None)
-      traj_dict = dict(src_traj)
+      # The payload owns `routed_experts` and the `[T, k]` Score Centering
+      # top-k from here on, which also keeps them out of the trajectory logs.
       src_traj.pop("routed_experts", None)
+      src_traj.pop("old_topk_token_ids", None)
+      src_traj.pop("old_topk_logprobs", None)
+      traj_dict = dict(src_traj)
     elif src_traj is not None:
       raw_status = getattr(src_traj, "status", None) or getattr(
           src_item, "status", None
       )
       traj_dict = src_traj.to_dict() if hasattr(src_traj, "to_dict") else {}
+      traj_dict.pop("routed_experts", None)
     else:
       raw_status = getattr(src_item, "status", None)
       traj_dict = {}
@@ -961,7 +966,6 @@ class StandardRLProgram(RLProgram):
     if isinstance(src_item.metadata, dict):
       src_item.metadata.pop("routed_experts", None)
     metadata.pop("routed_experts", None)
-    traj_dict.pop("routed_experts", None)
     traj_dict["trajectory_reward"] = reward_val
     traj_dict["status"] = status
     traj_dict["conversation_masks"] = payload.completion_mask
@@ -1392,11 +1396,20 @@ class StandardRLProgram(RLProgram):
         self._log_metric("grad_norm", gn_val, log_step, prefix="actor")
 
       # Auxiliary weighted metrics
+      top_level_prefixes = (
+          "sampler_trainer/",
+          "sampler_is/",
+          "sampler_rs/",
+          "score_centering/",
+      )
       for k, v in weighted_metrics.items():
         val = _extract_scalar(v)
         if val is not None:
           clean_key = k.removeprefix("trainer/").removeprefix("actor/")
-          self._log_metric(clean_key, val, log_step, prefix="actor")
+          if clean_key.startswith(top_level_prefixes):
+            self._log_metric(clean_key, val, log_step)
+          else:
+            self._log_metric(clean_key, val, log_step, prefix="actor")
 
       # Auxiliary scalar metrics
       for k, v in scalar_metrics.items():
@@ -1405,11 +1418,7 @@ class StandardRLProgram(RLProgram):
         val = _extract_scalar(v)
         if val is not None:
           clean_key = k.removeprefix("trainer/").removeprefix("actor/")
-          if clean_key.startswith((
-              "sampler_trainer/",
-              "sampler_is/",
-              "sampler_rs/",
-          )):
+          if clean_key.startswith(top_level_prefixes):
             self._log_metric(clean_key, val, log_step)
           else:
             self._log_metric(clean_key, val, log_step, prefix="actor")

@@ -683,6 +683,7 @@ class BatchAssembler(Generic[T], Protocol):
       sampler_agreement_applied: bool = False,
       with_routed_experts: bool = False,
       routed_experts_encode_mode: packing.RoutedExpertsEncodeMode = "auto",
+      score_centering_top_k: int | None = None,
   ) -> datatypes.RLTrainerPayload:
     """Builds a synthetic microbatch with the exact static layout `feed()` emits.
 
@@ -709,6 +710,8 @@ class BatchAssembler(Generic[T], Protocol):
       routed_experts_encode_mode: Compact wire encoding mode (`"auto"`,
         `"uint8"`, `"uint10"`, or `"int16"`) bound into
         `metadata["routed_experts_encode_fn"]` when `with_routed_experts=True`.
+      score_centering_top_k: Width `k` of the `old_topk_*` fields real
+        payloads carry for Score Centering, or None when they carry none.
 
     Returns:
       A batched payload whose `jax.tree.structure`, shapes and dtypes match
@@ -879,6 +882,32 @@ def _completion_aligned(
       dtype=np.float32,
   )
   return out
+
+
+def _padded_topk(
+    chunk: Sequence[datatypes.RLTrainerPayload],
+    batch_size: int,
+    max_response_length: int,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+  """Stacks `[C, k]` Score Centering top-k rows into `[B, max_response, k]`."""
+  first = next(
+      (
+          it.old_topk_token_ids
+          for it in chunk
+          if it.old_topk_token_ids is not None
+      ),
+      None,
+  )
+  if first is None:
+    return None, None
+  return packing.pad_topk(
+      [it.old_topk_token_ids for it in chunk],
+      [it.old_topk_logps for it in chunk],
+      [len(it.completion_ids) for it in chunk],
+      max_response_length,
+      int(first.shape[-1]),
+      batch_size=batch_size,
+  )
 
 
 def with_ref_per_token_logps(
@@ -1233,6 +1262,8 @@ class SequencePackedBatchAssembler:
       items: Sequence[datatypes.RLTrainerPayload],
   ) -> bool:
     """Buffers unbatched payloads; see `BatchAssembler.ingest`."""
+    if any(item.old_topk_token_ids is not None for item in items):
+      raise ValueError("Score Centering does not support sequence packing.")
     new_entries: list[
         tuple[packing.PackItem, str, datatypes.RLTrainerPayload]
     ] = []
@@ -1409,8 +1440,11 @@ class SequencePackedBatchAssembler:
       sampler_agreement_applied: bool = False,
       with_routed_experts: bool = False,
       routed_experts_encode_mode: packing.RoutedExpertsEncodeMode = "auto",
+      score_centering_top_k: int | None = None,
   ) -> datatypes.RLTrainerPayload:
     """Builds a zero-filled `[batch_size, max_packed_len]` dummy payload."""
+    if score_centering_top_k is not None:
+      raise ValueError("Score Centering does not support sequence packing.")
     shape = (self.batch_size, self.max_packed_len)
     max_segments = packing.effective_max_segments(
         self.max_packed_len, self.max_segments_per_packed_row
@@ -1648,6 +1682,7 @@ class PaddedBatchAssembler:
       sampler_agreement_applied: bool = False,
       with_routed_experts: bool = False,
       routed_experts_encode_mode: packing.RoutedExpertsEncodeMode = "auto",
+      score_centering_top_k: int | None = None,
   ) -> datatypes.RLTrainerPayload:
     """Builds a zero-filled `[batch_size, P]` / `[batch_size, C]` dummy payload."""
     prompt_shape = (self.batch_size, self.max_prompt_length)
@@ -1658,6 +1693,11 @@ class PaddedBatchAssembler:
         self.max_seq_len,
         routed_experts_encode_mode,
     )
+    old_topk_token_ids = old_topk_logps = None
+    if score_centering_top_k is not None:
+      topk_shape = (*completion_shape, score_centering_top_k)
+      old_topk_token_ids = np.zeros(topk_shape, dtype=np.int32)
+      old_topk_logps = np.zeros(topk_shape, dtype=np.float32)
     return datatypes.RLTrainerPayload(
         prompt_ids=np.zeros(prompt_shape, dtype=np.int32),
         prompt_mask=np.zeros(prompt_shape, dtype=np.float32),
@@ -1674,6 +1714,8 @@ class PaddedBatchAssembler:
             with_sampler_is_weights, completion_shape
         ),
         sampler_agreement_applied=sampler_agreement_applied,
+        old_topk_token_ids=old_topk_token_ids,
+        old_topk_logps=old_topk_logps,
         routed_experts=routed_experts,
         metadata=metadata,
     )
@@ -1962,6 +2004,9 @@ class PaddedBatchAssembler:
           truncated_completions,
           self.max_response_length,
       )
+    old_topk_token_ids, old_topk_logps = _padded_topk(
+        chunk, self.batch_size, self.max_response_length
+    )
 
     batch_tracking_id = f"{_BATCH_ID_PREFIX}_{self._batch_counter}"
     merged_lineage = _merge_batch_lineage(
@@ -2017,6 +2062,8 @@ class PaddedBatchAssembler:
             if "sampler_is_weights" in stacked_optional
             else None
         ),
+        old_topk_token_ids=old_topk_token_ids,
+        old_topk_logps=old_topk_logps,
         routed_experts=batched_routed_experts,
         metadata=payload_metadata,
     )

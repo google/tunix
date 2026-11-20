@@ -672,6 +672,28 @@ class RunRolloutNodeTest(absltest.TestCase):
       run_rollout_node._parse_args(argv)
     self.assertIn(expected_error, stderr.getvalue())
 
+  def test_num_logprobs_reaches_rollout_config_and_vllm_samplers(self):
+    self.assertEqual(
+        run_rollout_node._rollout_config(
+            run_rollout_node._parse_args([])
+        ).num_logprobs,
+        1,
+    )
+    argv = ["--sampler=vllm", "--num_logprobs=16"]
+    self.assertEqual(_vllm_rollout_config(argv).num_logprobs, 16)
+    self.assertEqual(_vllm_engine_kwargs(argv)["max_logprobs"], 16)
+    self.assertEqual(
+        _inprocess_vllm_rollout_config(["--num_logprobs=16"]).num_logprobs, 16
+    )
+
+  def test_num_logprobs_rejects_zero_and_vanilla_sampler(self):
+    for argv in (
+        ["--num_logprobs=0"],
+        ["--sampler=vanilla", "--num_logprobs=2"],
+    ):
+      with self.subTest(argv=argv):
+        self._assert_parse_args_rejects(argv, "--num_logprobs must be >= 1")
+
   def test_vllm_config_json_rejects_forbidden_keys_and_malformed_inputs(self):
     self._assert_parse_args_rejects(
         ["--sampler=vllm", "--vllm_config_json={bad"],

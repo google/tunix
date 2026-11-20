@@ -483,6 +483,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--num_logprobs",
+      type=int,
+      default=1,
+      help="Logprobs vLLM returns per generated token (> 1 returns top-k).",
+  )
+  parser.add_argument(
       "--in_flight_weight_updates",
       type=_str2bool,
       default=_str2bool(os.getenv("IN_FLIGHT_WEIGHT_UPDATES", "false")),
@@ -580,6 +586,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.error(
         "--return_routed_experts needs a vLLM sampler; the vanilla sampler"
         " does not capture routed experts."
+    )
+  if args.num_logprobs < 1 or (
+      args.num_logprobs > 1 and args.sampler == "vanilla"
+  ):
+    parser.error(
+        "--num_logprobs must be >= 1, and > 1 needs a vLLM sampler; the"
+        " vanilla sampler does not return top-k logprobs."
     )
   try:
     args.episode_timeout_secs = timeouts.validate_positive_finite(
@@ -694,6 +707,7 @@ def _rollout_config(
       overlong_filter=args.overlong_filter,
       episode_timeout=args.episode_timeout_secs,
       return_logprobs=True,
+      num_logprobs=args.num_logprobs,
       eos_tokens=_eos_token_ids(args, tokenizer),
       partial_rollout=bool(args.in_flight_weight_updates),
       drain_timeout_s=timeouts.drain_timeout_for(args.episode_timeout_secs),

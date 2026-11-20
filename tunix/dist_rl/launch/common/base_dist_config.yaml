@@ -176,6 +176,9 @@ grpo_config:
   num_iterations: 1
   beta: 0.04
   epsilon: 0.2
+  score_centering: false
+  score_centering_top_k: 128
+  score_centering_eps: 1.0e-6
 
 ############################### Rollout Config ###############################
 rollout_config:
@@ -186,6 +189,7 @@ rollout_config:
   top_k: -1
   eos_tokens: "151645,151643"
   return_logprobs: true
+  num_logprobs: 1
 
 ############################### Other RL Config ###############################
 rollout_engine: "inprocess_vllm"
@@ -292,6 +296,9 @@ agentic_grpo_config:
   max_turns: 8
   overlong_filter: false
   use_rollout_logps: true
+  score_centering: false
+  score_centering_top_k: 128
+  score_centering_eps: 1.0e-6
 
 ############################# Reward Fns #############################
 verl_compatible: false

@@ -167,8 +167,8 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
         "async_scheduling": config.rollout_vllm_async_scheduling,
         "max_num_seqs": config.rollout_vllm_max_num_seqs,
         "max_num_batched_tokens": config.rollout_vllm_max_num_batched_tokens,
-        # Only the logprob of each sampled token is needed.
-        "max_logprobs": 1,
+        # The sampled token's logprob, plus the top-k Score Centering uses.
+        "max_logprobs": config.num_logprobs,
         "logprobs_mode": config.rollout_vllm_logprobs_mode,
         "enable_return_routed_experts": config.return_routed_experts,
         "trust_remote_code": True,
@@ -428,6 +428,13 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
         "routed_experts_prompt_start",
         _get_val(kwargs, "routed_experts_prompt_start"),
     )
+    return_logprobs = bool(
+        _get_val(
+            sparams,
+            "return_logprobs",
+            kwargs.get("return_logprobs", self.config.return_logprobs),
+        )
+    )
     # TODO(tunix-dev): Read sampling fields directly from the typed request and
     # RolloutConfig instead of chained `_get_val` fallbacks (one well-lit path).
     # `kwargs` goes through `_get_val` too: callers pass unset fields as
@@ -519,13 +526,13 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
                 ),
             )
         ),
-        logprobs=1
-        if _get_val(
-            sparams,
-            "return_logprobs",
-            kwargs.get("return_logprobs", self.config.return_logprobs),
-        )
-        else None,
+        # Score Centering's top-k is returned even when the orchestrator does
+        # not use the sampled logprobs.
+        logprobs=(
+            self.config.num_logprobs
+            if return_logprobs or self.config.num_logprobs > 1
+            else None
+        ),
     )
     struct_fields = getattr(vllm_sampling_params_cls, "__struct_fields__", ())
     if cache_salt is not None and "cache_salt" in struct_fields:
@@ -547,6 +554,29 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
           int(routed_experts_prompt_start),
       )
     return params
+
+  async def _extract_output_logprobs(
+      self, output_choice: Any, num_tokens: int
+  ) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+    """Extracts 1D sampled logprobs and `[L, k]` top-k off the event loop."""
+    raw_logprobs = getattr(output_choice, "logprobs", None)
+    logprobs_arr = None
+    if raw_logprobs:
+      logprob_vals = [
+          lp_dict[next(iter(lp_dict.keys()))].logprob if lp_dict else 0.0
+          for lp_dict in raw_logprobs
+      ]
+      logprobs_arr = np.array(logprob_vals, dtype=np.float32)
+    topk_ids = topk_logps = None
+    if self.config.num_logprobs > 1 and (
+        raw_logprobs is not None or num_tokens == 0
+    ):
+      topk_ids, topk_logps = await asyncio.to_thread(
+          generate_utils.get_topk_logprobs_from_vllm_output,
+          raw_logprobs,
+          self.config.num_logprobs,
+      )
+    return logprobs_arr, topk_ids, topk_logps
 
   async def _process_request_output(
       self,
@@ -599,13 +629,9 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
             raw_prompt_token_ids or [], dtype=np.int32
         )
 
-      logprobs_arr = None
-      if getattr(output_choice, "logprobs", None):
-        logprob_vals = [
-            lp_dict[next(iter(lp_dict.keys()))].logprob if lp_dict else 0.0
-            for lp_dict in output_choice.logprobs
-        ]
-        logprobs_arr = np.array(logprob_vals, dtype=np.float32)
+      logprobs_arr, topk_ids, topk_logps = await self._extract_output_logprobs(
+          output_choice, len(token_ids_arr)
+      )
 
       routed_experts = getattr(output_choice, "routed_experts", None)
       if routed_experts is not None and not isinstance(
@@ -642,6 +668,8 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
         token_ids=token_ids_arr,
         prompt_token_ids=prompt_token_ids_arr,
         logprobs=logprobs_arr,
+        topk_token_ids=topk_ids,
+        topk_logprobs=topk_logps,
         routed_experts=routed_experts,
         finish_reason=finish_reason,
         error=None,

@@ -34,7 +34,6 @@ from typing import Any, Dict, List, Sequence, Type, TypeVar
 
 from absl import logging
 from flax import nnx
-import jax
 import jax.numpy as jnp
 import numpy as np
 from tunix.perf.experimental import constants as perf_constants
@@ -204,10 +203,15 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         env_kwargs=env_kwargs,
     )
 
-    self.algo_config.temperature = (
-        self.rl_engine.get_rollout_config(
-            mode=rl_engine_lib.Mode.TRAIN
-        ).temperature
+    rollout_config = self.rl_engine.get_rollout_config(
+        mode=rl_engine_lib.Mode.TRAIN
+    )
+    self.algo_config.temperature = rollout_config.temperature
+    agentic_rl_learner.algo_config_lib.validate_score_centering_rollout(
+        self.algo_config,
+        self.rl_engine.cluster_config.rollout_engine,
+        rollout_config,
+        self._packing_enabled,
     )
 
     # Workaround to pass loss fn with algorithm flag
@@ -264,6 +268,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         "sampler_trainer/probs_pearson_corr": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
         "sampler_trainer/seq_error_masked_frac": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
         "sampler_trainer/seq_error_masked_count": np.sum,
+        **common.SCORE_CENTERING_METRICS,
     })
     self.rl_engine.actor_trainer.with_tqdm_metrics_to_display([  # pyrefly: ignore[bad-argument-type]
         lambda: "kl"
@@ -458,6 +463,15 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         "Processing results to compute advantage for %d items.",
         len(trajectories),
     )
+    # Known only once training starts (it needs the batch size).
+    if (
+        self.algo_config.score_centering
+        and not self._can_fuse_agreement_in_loss()
+    ):
+      raise ValueError(
+          "score_centering needs one on-policy update per batch:"
+          " num_iterations=1 and mini_batch_size >= the batch size."
+      )
     # With a full group, sorting by pair_index is not necessary as they all
     # originate from the same initial prompt.
     pad_value = self.rl_engine.rollout.pad_id()
@@ -621,6 +635,15 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     prompt_ids = jnp.asarray(padded_prompt_ids)
     completion_ids = jnp.asarray(padded_completion_ids)
     completion_mask = jnp.asarray(padded_completion_masks)
+    old_topk_token_ids = old_topk_logps = None
+    if self.algo_config.score_centering:
+      old_topk_token_ids, old_topk_logps = common.pad_topk(
+          [it.traj["old_topk_token_ids"] for it in trajectories],
+          [it.traj["old_topk_logprobs"] for it in trajectories],
+          [len(tokens) for tokens in completion_tokens_list],
+          max_response_length,
+          self.algo_config.score_centering_top_k,
+      )
     # Validity by length: environment/template tokens are context, and a real
     # token equal to the pad id stays valid.
     prompt_mask = jnp.asarray(padded_prompt_masks)
@@ -936,6 +959,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         old_per_token_logps=old_per_token_logps,
         policy_version=policy_versions,
         sampler_is_weights=sampler_is_weights,
+        old_topk_token_ids=old_topk_token_ids,
+        old_topk_logps=old_topk_logps,
         completion_attention_mask=completion_attention_mask,
         routed_experts=routed_experts,
         sampler_agreement_applied=trainer_per_token_logps is not None,

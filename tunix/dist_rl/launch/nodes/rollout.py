@@ -516,6 +516,7 @@ def _rollout_config(
       episode_timeout=episode_timeout_secs,
       # Required by the trainer; `_validate_rollout_config` rejects `false`.
       return_logprobs=True,
+      num_logprobs=int(rollout["num_logprobs"]),
       eos_tokens=_eos_token_ids(hp, tokenizer),
       partial_rollout=bool(ws["in_flight_weight_updates"]),
       drain_timeout_s=timeouts.drain_timeout_for(episode_timeout_secs),

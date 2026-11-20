@@ -27,6 +27,9 @@
           "sampler_rs": null,
           "sampler_rs_max": null,
           "sampler_rs_min": null,
+          "score_centering": false,
+          "score_centering_eps": 1e-06,
+          "score_centering_top_k": 128,
           "seq_logprob_error_threshold": null,
           "use_rollout_logps": true
         }

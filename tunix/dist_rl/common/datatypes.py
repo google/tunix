@@ -697,6 +697,10 @@ class RLTrainerPayload(TrainerPayload):
     ref_per_token_logps: Optional [B, C] reference model log-probabilities.
     old_per_token_logps: Optional [B, C] behavior policy log-probabilities.
     sampler_is_weights: Optional [B, C] importance sampling weights.
+    old_topk_token_ids: Optional [B, C, k] (unbatched [C, k]) `int32` sampler
+      top-k token IDs for Score Centering (`0`-padded).
+    old_topk_logps: Optional `float32` log probs of `old_topk_token_ids` (`-inf`
+      padded).
     routed_experts: Optional MoE expert ids captured during rollout. May be
       encoded in one of three wire representations: (1) raw `int16` of shape
       `[T, num_layers, top_k]` (unbatched) or `[B, T, num_layers, top_k]`
@@ -732,6 +736,8 @@ class RLTrainerPayload(TrainerPayload):
   ref_per_token_logps: np.ndarray | None = None
   old_per_token_logps: np.ndarray | None = None
   sampler_is_weights: np.ndarray | None = None
+  old_topk_token_ids: np.ndarray | None = None
+  old_topk_logps: np.ndarray | None = None
   routed_experts: np.ndarray | None = None
   routed_experts_ref: RoutedExpertsRef | None = dataclasses.field(
       default=None, metadata=STATIC_FIELD_METADATA
