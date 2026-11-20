@@ -95,7 +95,8 @@ class K8sJaxContext(context.JaxContext):
 
       import jax
 
-      jax.distributed.initialize()
+      if getattr(jax._src.distributed.global_state, "client", None) is None:  # pylint: disable=protected-access
+        jax.distributed.initialize()
 
 
 class K8sDiscoveryContext(context.DiscoveryContext):
