@@ -57,6 +57,11 @@ class InprocessVllmSamplerTest(absltest.TestCase):
         tensor_parallel_size=1,
         data_parallel_size=1,
         temperature=0.7,
+        top_p=0.9,
+        top_k=50,
+        seed=7,
+        max_tokens_to_generate=48,
+        return_logprobs=True,
     )
 
     self.sampler = inprocess_vllm_sampler.InprocessVllmSampler(
@@ -130,6 +135,7 @@ class InprocessVllmSamplerTest(absltest.TestCase):
         return_routed_experts=True,
         eos_tokens=[7],
         partial_rollout=True,
+        seed=11,
         rollout_vllm_model_version="/models/qwen",
         rollout_vllm_hbm_utilization=0.6,
         rollout_vllm_init_with_random_weights=False,
@@ -170,6 +176,7 @@ class InprocessVllmSamplerTest(absltest.TestCase):
     self.assertEqual(engine_kwargs["max_model_len"], 2048)
     self.assertEqual(engine_kwargs["dtype"], "bfloat16")
     self.assertEqual(engine_kwargs["max_logprobs"], 1)
+    self.assertEqual(engine_kwargs["seed"], 11)
     self.mock_vllm_lib.VllmSampler.assert_called_with(
         tokenizer=sampler.tokenizer,
         config=self.mock_vllm_lib.VllmConfig.return_value,
@@ -298,7 +305,7 @@ class InprocessVllmSamplerTest(absltest.TestCase):
     messages = [{"role": "user", "content": "hi"}]
     req = base_sampler_lib.SamplingRequest(
         prompt=messages,
-        sampling_params=base_sampler_lib.SamplingParams(max_tokens=9),
+        max_tokens=9,
     )
     asyncio.run(self.sampler.sample(req))
 
@@ -322,10 +329,7 @@ class InprocessVllmSamplerTest(absltest.TestCase):
     req = base_sampler_lib.SamplingRequest(
         request_id="vllm_req_01",
         prompt="hello vllm",
-        sampling_params=base_sampler_lib.SamplingParams(
-            max_tokens=16,
-            temperature=0.7,
-        ),
+        max_tokens=16,
     )
     response = asyncio.run(self.sampler.sample(req))
     self.assertIsInstance(response, base_sampler_lib.SamplingResponse)
@@ -334,6 +338,14 @@ class InprocessVllmSamplerTest(absltest.TestCase):
     np.testing.assert_array_equal(response.prompt_token_ids, [1, 2])
     np.testing.assert_array_equal(response.token_ids, [10, 20, 30])
     self.mock_vllm_sampler.assert_called_once()
+    call_kwargs = self.mock_vllm_sampler.call_args.kwargs
+    self.assertEqual(call_kwargs["max_generation_steps"], 16)
+    self.assertEqual(call_kwargs["temperature"], 0.7)
+    self.assertEqual(call_kwargs["top_p"], 0.9)
+    self.assertEqual(call_kwargs["top_k"], 50)
+    self.assertNotIn("seed", call_kwargs)
+    self.assertTrue(call_kwargs["return_logprobs"])
+    self.assertEqual(call_kwargs["input_strings"], ["hello vllm"])
 
   def test_batch_sampling_requests(self):
     self.mock_vllm_sampler.return_value = base_sampler.SamplerOutput(
@@ -350,6 +362,7 @@ class InprocessVllmSamplerTest(absltest.TestCase):
         base_sampler_lib.SamplingRequest(
             request_id="req_1",
             prompt="prompt 1",
+            max_tokens=12,
         ),
         base_sampler_lib.SamplingRequest(
             request_id="req_2",
@@ -363,6 +376,36 @@ class InprocessVllmSamplerTest(absltest.TestCase):
     self.assertEqual(responses[1].text, "completion 2")
     np.testing.assert_array_equal(responses[0].prompt_token_ids, [1, 2])
     np.testing.assert_array_equal(responses[1].prompt_token_ids, [3, 4])
+    call_kwargs = self.mock_vllm_sampler.call_args.kwargs
+    self.assertEqual(call_kwargs["max_generation_steps"], 48)
+    self.assertEqual(call_kwargs["temperature"], 0.7)
+    self.assertEqual(call_kwargs["top_p"], 0.9)
+    self.assertEqual(call_kwargs["top_k"], 50)
+    self.assertNotIn("seed", call_kwargs)
+    self.assertTrue(call_kwargs["return_logprobs"])
+    self.assertEqual(call_kwargs["input_strings"], ["prompt 1", "prompt 2"])
+
+  def test_unset_top_k_disables_top_k(self):
+    sampler = inprocess_vllm_sampler.InprocessVllmSampler(
+        server_id="vllm_unset_top_k",
+        tokenizer=self.mock_tokenizer,
+        config=configs.RolloutConfig(
+            weight_sync_mode=weight_sync.WeightSyncMode.IN_MEMORY,
+            tensor_parallel_size=1,
+            data_parallel_size=1,
+        ),
+    )
+    sampler.initialize()
+    asyncio.run(
+        sampler.sample(
+            base_sampler_lib.SamplingRequest(request_id="r", prompt="p")
+        )
+    )
+    self.assertEqual(self.mock_vllm_sampler.call_args.kwargs["top_k"], -1)
+
+  def test_empty_batch_returns_empty_list(self):
+    self.assertEqual(asyncio.run(self.sampler.sample([])), [])
+    self.mock_vllm_sampler.assert_not_called()
 
   def test_weight_sync_without_raiden_delegate(self):
     mock_weights = {"layer1": "weights"}
@@ -568,16 +611,6 @@ class InprocessVllmSamplerTest(absltest.TestCase):
           uninit.sample(base_sampler_lib.SamplingRequest(prompt="test"))
       )
 
-  def test_sample_none_requests_raises(self):
-    with self.assertRaises(ValueError):
-      asyncio.run(self.sampler.sample(None))
-
-  def test_sample_raw_prompt_raises_type_error(self):
-    with self.assertRaises(TypeError):
-      asyncio.run(self.sampler.sample("raw prompt"))
-    with self.assertRaises(TypeError):
-      asyncio.run(self.sampler.sample(["raw prompt"]))
-
   def test_vllm_sampler_deferred_to_initialize(self):
     self.mock_vllm_lib.VllmSampler.reset_mock()
     sampler = inprocess_vllm_sampler.InprocessVllmSampler(
@@ -596,7 +629,7 @@ class InprocessVllmSamplerTest(absltest.TestCase):
 class RoutedExpertsTest(absltest.TestCase):
   """Captured MoE routing must reach the matching response."""
 
-  def _sampler(self, routed_experts, engine_captures=True):
+  def _sampler(self, routed_experts):
     rows = len(routed_experts) if routed_experts else 1
     inner_sampler = mock.MagicMock()
     inner_sampler.return_value = base_sampler.SamplerOutput(
@@ -614,7 +647,7 @@ class RoutedExpertsTest(absltest.TestCase):
         tokenizer=mock.MagicMock(),
         config=configs.RolloutConfig(
             weight_sync_mode=weight_sync.WeightSyncMode.IN_MEMORY,
-            return_routed_experts=engine_captures,
+            return_routed_experts=True,
         ),
     )
     sampler.vllm_sampler = inner_sampler
@@ -625,9 +658,7 @@ class RoutedExpertsTest(absltest.TestCase):
         base_sampler_lib.SamplingRequest(
             request_id=f"req-{i}",
             prompt=np.array([1, 2], dtype=np.int32),
-            sampling_params=base_sampler_lib.SamplingParams(
-                max_tokens=3, return_routed_experts=True
-            ),
+            max_tokens=3,
         )
         for i in range(n)
     ]
@@ -642,27 +673,14 @@ class RoutedExpertsTest(absltest.TestCase):
       self.assertEqual(response.request_id, f"req-{i}")
       np.testing.assert_array_equal(response.routed_experts, routed[i])
 
-  def test_warns_when_engine_cannot_capture(self):
-    """Silently returning None would look like a dense model to the trainer."""
-    sampler = self._sampler(None, engine_captures=False)
-    with self.assertLogs(level="WARNING") as logs:
-      asyncio.run(sampler.sample(self._requests(1)))
-    self.assertTrue(
-        any("return_routed_experts" in line for line in logs.output),
-        f"expected a warning about the engine setting, got {logs.output}",
-    )
-
   def test_forwards_routed_experts_prompt_start(self):
     """Cumulative prompt offset must be forwarded to the vLLM sampler as a list."""
     sampler = self._sampler(None)
     req = base_sampler_lib.SamplingRequest(
         request_id="req-0",
         prompt=np.array([1, 2, 3, 4], dtype=np.int32),
-        sampling_params=base_sampler_lib.SamplingParams(
-            max_tokens=3,
-            return_routed_experts=True,
-            routed_experts_prompt_start=12,
-        ),
+        max_tokens=3,
+        routed_experts_prompt_start=12,
     )
     asyncio.run(sampler.sample([req]))
     call_kwargs = sampler.vllm_sampler.call_args.kwargs
@@ -674,20 +692,14 @@ class RoutedExpertsTest(absltest.TestCase):
     req0 = base_sampler_lib.SamplingRequest(
         request_id="req-0",
         prompt=np.array([1, 2, 3, 4], dtype=np.int32),
-        sampling_params=base_sampler_lib.SamplingParams(
-            max_tokens=3,
-            return_routed_experts=True,
-            routed_experts_prompt_start=8,
-        ),
+        max_tokens=3,
+        routed_experts_prompt_start=8,
     )
     req1 = base_sampler_lib.SamplingRequest(
         request_id="req-1",
         prompt=np.array([1, 2, 3, 4, 5, 6], dtype=np.int32),
-        sampling_params=base_sampler_lib.SamplingParams(
-            max_tokens=3,
-            return_routed_experts=True,
-            routed_experts_prompt_start=14,
-        ),
+        max_tokens=3,
+        routed_experts_prompt_start=14,
     )
     asyncio.run(sampler.sample([req0, req1]))
     call_kwargs = sampler.vllm_sampler.call_args.kwargs
@@ -800,10 +812,8 @@ class RoutedExpertsTest(absltest.TestCase):
     req_single = base_sampler_lib.SamplingRequest(
         request_id="req-0",
         prompt="prompt 0",
-        sampling_params=base_sampler_lib.SamplingParams(
-            max_tokens=3,
-            cache_salt="policy_v2",
-        ),
+        max_tokens=3,
+        cache_salt="policy_v2",
     )
     asyncio.run(sampler.sample([req_single]))
     self.assertEqual(
@@ -813,18 +823,14 @@ class RoutedExpertsTest(absltest.TestCase):
     req_a = base_sampler_lib.SamplingRequest(
         request_id="req-a",
         prompt="prompt a",
-        sampling_params=base_sampler_lib.SamplingParams(
-            max_tokens=3,
-            cache_salt="policy_v2",
-        ),
+        max_tokens=3,
+        cache_salt="policy_v2",
     )
     req_b = base_sampler_lib.SamplingRequest(
         request_id="req-b",
         prompt="prompt b",
-        sampling_params=base_sampler_lib.SamplingParams(
-            max_tokens=3,
-            cache_salt="policy_v3",
-        ),
+        max_tokens=3,
+        cache_salt="policy_v3",
     )
     asyncio.run(sampler.sample([req_a, req_b]))
     self.assertEqual(

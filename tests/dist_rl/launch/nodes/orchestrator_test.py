@@ -409,28 +409,6 @@ class BuildersTest(absltest.TestCase):
     assert isinstance(assembler, batch_assembly.SequencePackedBatchAssembler)
     self.assertEqual(assembler.batch_size, 1)
 
-  def test_generation_args(self):
-    args = orchestrator.build_generation_args(
-        _config(
-            "rollout_config.temperature=0.5",
-            "rollout_config.top_p=0.9",
-            "rollout_config.top_k=-1",
-        )
-    )
-    self.assertEqual(
-        args,
-        datatypes.GenerationArgs(
-            temperature=0.5, top_p=0.9, top_k=0, return_routed_experts=False
-        ),
-    )
-    args = orchestrator.build_generation_args(
-        _config(
-            "rollout_config.top_k=20", "vllm_config.return_routed_experts=true"
-        )
-    )
-    self.assertEqual(args.top_k, 20)
-    self.assertTrue(args.return_routed_experts)
-
   def test_metrics_logging_options(self):
     options = orchestrator.build_metrics_logging_options(
         _config(
@@ -570,8 +548,6 @@ class LoadPromptItemsTest(absltest.TestCase):
         "task_name=gsm8k",
         "data_config.num_records=3",
         "agentic_grpo_config.max_turns=3",
-        "agentic_grpo_config.episode_timeout=60",
-        "agentic_grpo_config.overlong_filter=true",
     )
     items = orchestrator.load_prompt_items(hp)
     # Repeats indefinitely; `StandardRLProgram` stops after `max_steps`.
@@ -587,11 +563,7 @@ class LoadPromptItemsTest(absltest.TestCase):
             "prompt": "train-0",
             "task_name": "gsm8k",
             "max_turns": 3,
-            "metadata": {
-                "env_config": {"seed": 42},
-                "episode_timeout": 60.0,
-                "overlong_filter": True,
-            },
+            "metadata": {"env_config": {"seed": 42}},
         },
     )
 
@@ -1110,6 +1082,7 @@ class ProgramTest(absltest.TestCase):
         "weight_sync_config.mode=in_memory",
         "dist_training_config.precompile_trainer=false",
         "vllm_config.return_routed_experts=true",
+        "rollout_config.temperature=0.5",
     )
     program = self._build_program(hp, reward_fns=[])
     self.addCleanup(program.close)
@@ -1122,7 +1095,8 @@ class ProgramTest(absltest.TestCase):
     self.assertEqual(program.group_order, rl_program.GroupOrder.PROMPT_ARRIVAL)
     self.assertTrue(program.sync_weights)
     self.assertFalse(program.precompile_trainer)
-    self.assertTrue(program.generation_args.return_routed_experts)
+    self.assertTrue(program._rollout_returns_routed_experts)
+    self.assertEqual(program.algo_config.temperature, 0.5)
 
     hp_span = self._program_config(
         "agentic_grpo_config.off_policy_steps=1",

@@ -147,13 +147,8 @@ def request_fields(args: argparse.Namespace, entry: dict, index: int) -> dict:
       "prompt": str(entry.get("problem_statement", "")),
       "max_turns": args.max_steps,
       "max_response_length": response_budget(args),
-      "generation_kwargs": {
-          "max_generation_steps": args.max_response_length,
-          "temperature": 0.0,
-          "return_logprobs": False,
-      },
+      "generation_kwargs": {"max_generation_steps": args.max_response_length},
       "metadata": {
-          "episode_timeout": args.timeout,
           "record_episode_summary": True,
           "env_config": {
               "entry": entry,
