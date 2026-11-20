@@ -264,7 +264,7 @@ def log_resolved_config(
 # TODO(noghabi): Reuse the agentic tokenizer loading
 # (`tunix.cli.utils.model.create_tokenizer`, unwrapping `.tokenizer`) so
 # `tokenizer_type`, `add_bos`/`add_eos`, and `HF_TOKEN` are handled in one place.
-# Kept as in the previous `run_*_node.py` mains for now.
+# Kept as in the removed `run_*_node.py` mains for now.
 def load_hf_tokenizer(hp: resolve_config.DistHyperParameters) -> HfTokenizer:
   """Loads the Hugging Face tokenizer from `tokenizer_config.tokenizer_path`.
 
@@ -624,7 +624,7 @@ async def serve_worker(
 # TODO(noghabi): Delegate to `tunix.utils.mesh.create_mesh` with
 # `hp.parse_mesh_config(model_key)`, as the agentic `BasePipeline` does, keeping
 # the exact device-count check below (`mesh_lib.create_mesh(devices=None)` only
-# rejects meshes larger than the device count). Kept as in the previous
+# rejects meshes larger than the device count). Kept as in the removed
 # `run_*_node.py` mains for now.
 def create_mesh(
     hp: resolve_config.DistHyperParameters, model_key: str, label: str
@@ -667,7 +667,7 @@ def create_mesh(
 # TODO(noghabi): Drop `ensure_local_safetensors` and its helpers and let
 # `AutoModel.from_pretrained` download via `model_id`, `model_source`, and
 # `model_download_path` (as `tunix.cli.utils.model.create_model` does). Kept as
-# in the previous `run_*_node.py` mains for now.
+# in the removed `run_*_node.py` mains for now.
 def has_direct_safetensors(model_path: pathlib.Path) -> bool:
   """Returns whether `model_path` directly contains `*.safetensors` shards."""
   return any(model_path.glob("*.safetensors"))

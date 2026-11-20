@@ -21,7 +21,7 @@
 # nodes export metrics to when `OTEL_EXPORTER_OTLP_ENDPOINT` points at it.
 # Consumes the cluster/deployment environment variables exported by
 # `resolve_config.py` and forwards YAML + `key=value` arguments directly to
-# `run_trainer_node`, `run_rollout_node`, and the distributed orchestrator via
+# the `tunix.dist_rl.launch.nodes` trainer, rollout, and orchestrator mains via
 # `tunix.dist_rl.distributed.runtime.main`.
 
 set -Eeuo pipefail
