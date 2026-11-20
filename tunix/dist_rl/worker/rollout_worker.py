@@ -29,6 +29,7 @@ from absl import logging
 import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import gcs_cache
+from tunix.dist_rl.common import lineage
 from tunix.dist_rl.common import registry
 from tunix.dist_rl.common import timeouts
 from tunix.dist_rl.rollout import manager as manager_lib
@@ -371,7 +372,7 @@ class RolloutWorker(abstract_worker.Worker):
       execution_time_s: float | None = None,
   ) -> None:
     """Appends worker generation telemetry to the lineage context if present."""
-    lineage_ctx = otel_metrics.extract_lineage(metadata)
+    lineage_ctx = lineage.extract_lineage(metadata)
     if lineage_ctx is None:
       return
     attributes: dict[str, Any] = {"worker_id": self.worker_id}

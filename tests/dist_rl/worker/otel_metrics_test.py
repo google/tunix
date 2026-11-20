@@ -21,7 +21,6 @@ from opentelemetry import metrics as otel_api
 from opentelemetry.sdk import metrics as sdk_metrics
 from opentelemetry.sdk.metrics import export as sdk_metrics_export
 from tunix.dist_rl.common import datatypes
-from tunix.dist_rl.common import lineage
 from tunix.dist_rl.testing import otel_testing
 from tunix.dist_rl.worker import otel_metrics
 
@@ -177,14 +176,7 @@ class RolloutWorkerOtelMetricsTest(absltest.TestCase):
         [(2, None, {"worker_id": "rollout_3"})],
     )
 
-  def test_extract_lineage_and_validate_trajectory_dict_contracts(self):
-    self.assertIsNone(otel_metrics.extract_lineage(None))
-    self.assertIsNone(otel_metrics.extract_lineage({}))
-    ctx = lineage.LineageContext(tracking_id="t1", task_name="gsm8k")
-    self.assertIs(otel_metrics.extract_lineage({"lineage": ctx}), ctx)
-    with self.assertRaises(TypeError):
-      otel_metrics.extract_lineage({"lineage": "bad"})
-
+  def test_validate_trajectory_dict_contracts(self):
     traj, status = otel_metrics.validate_trajectory_dict(
         {"status": "SUCCEEDED", "env_time": {}, "reward_time": {}}
     )
