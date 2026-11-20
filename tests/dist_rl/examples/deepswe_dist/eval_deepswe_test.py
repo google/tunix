@@ -57,11 +57,6 @@ class EvalDeepSWETest(unittest.TestCase):
     self.assertEqual(request["prompt"], "Fix the test")
     self.assertEqual(request["max_turns"], 30)
     self.assertEqual(request["max_response_length"], 32512)
-    self.assertEqual(request["generation_kwargs"], {
-        "max_generation_steps": 8192,
-        "temperature": 0.0,
-        "return_logprobs": False,
-    })
     self.assertTrue(request["metadata"]["record_episode_summary"])
     self.assertEqual(request["metadata"]["env_config"]["entry"], entry)
 
@@ -219,14 +214,12 @@ class EvalDeepSWETest(unittest.TestCase):
     self.assertEqual(request["request_id"], "eval_3_2")
     self.assertEqual(request["prompt_id"], "eval_3")
     self.assertEqual(request["group_index"], 2)
-    self.assertEqual(request["generation_kwargs"], {
-        "max_generation_steps": 8192,
-        "temperature": 0.6,
-        "top_p": 0.95,
-        "top_k": 20,
-        "return_logprobs": False,
-    })
-    self.assertEqual(eval_deepswe.model_profile(args)["top_k"], 20)
+    self.assertNotIn("generation_kwargs", request)
+    profile = eval_deepswe.model_profile(args)
+    self.assertEqual(
+        (profile["temperature"], profile["top_p"], profile["top_k"]),
+        (0.6, 0.95, 20),
+    )
     for bad in (["--num_rollouts_per_instance", "0"], ["--temperature", "-1"],
                 ["--top_p", "0"], ["--top_k", "0"]):
       with self.subTest(bad=bad), self.assertRaises(SystemExit):

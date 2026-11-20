@@ -169,16 +169,7 @@ def request_fields(
     index: int,
     attempt: int = 0,
 ) -> dict[str, object]:
-  """Use the same per-trajectory limits as agentic eval; greedy by default."""
-  generation_kwargs = {
-      "max_generation_steps": args.max_response_length,
-      "temperature": args.temperature,
-      "return_logprobs": False,
-  }
-  if args.top_p < 1.0:
-    generation_kwargs["top_p"] = args.top_p
-  if args.top_k > 0:
-    generation_kwargs["top_k"] = args.top_k
+  """Use the same per-trajectory limits as agentic eval."""
   return {
       "request_id": _request_id(args, index, attempt),
       "prompt_id": f"eval_{index}",
@@ -186,7 +177,6 @@ def request_fields(
       "prompt": str(entry.get("problem_statement", "")),
       "max_turns": args.max_steps,
       "max_response_length": response_budget(args),
-      "generation_kwargs": generation_kwargs,
       "metadata": {
           "episode_timeout": args.timeout,
           "record_episode_summary": True,
