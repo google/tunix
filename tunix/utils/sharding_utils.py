@@ -98,7 +98,7 @@ def place_arrays_on_targets(
 
 def spec_on_mesh(
     spec: shd.PartitionSpec | Sequence[str | tuple[str, ...] | None] | None,
-    mesh: shd.Mesh,
+    mesh: shd.Mesh | shd.AbstractMesh,
 ) -> shd.PartitionSpec:
   """Returns `spec` with the axes that `mesh` does not have replicated.
 
@@ -121,6 +121,11 @@ def spec_on_mesh(
   return shd.PartitionSpec(*(_axis_on_mesh(a) for a in spec or ()))
 
 
+_jit_with_sharding_constraint = jax.jit(
+    jax.lax.with_sharding_constraint, static_argnums=1
+)
+
+
 # TODO(abheesht17): Use this function for all models and unify with the fn in
 # sft/sharding_utils.py.
 def shard(
@@ -139,10 +144,20 @@ def shard(
   Returns:
     The sharded JAX array.
   """
+  if jax.devices()[0].platform == 'cpu':
+    return jnp.asarray(x)
   mesh = pxla.thread_resources.env.physical_mesh
-  if mesh.empty or jax.devices()[0].platform == 'cpu':
+  if mesh.empty and shd.get_abstract_mesh().are_all_axes_auto:
+    # `jax.set_mesh` leaves the legacy mesh empty. Explicit axes are skipped:
+    # there the sharding is in the type and the constraint is only an assert.
+    mesh = shd.get_mesh() if eager else shd.get_abstract_mesh()
+  if mesh.empty:
     return jnp.asarray(x)
   sharding = shd.NamedSharding(mesh, spec_on_mesh(s, mesh))
   if eager:
     return place_array_on_target(x, sharding)
+  if isinstance(mesh, shd.AbstractMesh):
+    # An abstract-mesh constraint must be traced under `jit`. Unjitted calls,
+    # also under `jax.grad` or `jax.checkpoint`, would raise without it.
+    return _jit_with_sharding_constraint(x, sharding)
   return jax.lax.with_sharding_constraint(x, sharding)

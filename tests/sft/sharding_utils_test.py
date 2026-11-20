@@ -266,6 +266,60 @@ class ShardingUtilsTest(parameterized.TestCase):
           mismatched_non_addressable, ('fsdp', None), eager=True
       )
 
+  @parameterized.named_parameters(
+      dict(testcase_name='lazy_jit', eager=False, wrap=jax.jit),
+      dict(testcase_name='lazy_no_jit', eager=False, wrap=lambda f: f),
+      dict(testcase_name='lazy_checkpoint', eager=False, wrap=jax.checkpoint),
+      dict(
+          testcase_name='lazy_grad',
+          eager=False,
+          wrap=lambda f: jax.grad(lambda a: f(a).sum()),
+      ),
+      dict(testcase_name='eager', eager=True, wrap=lambda f: f),
+  )
+  def test_utils_shard_applies_spec_under_set_mesh(self, eager, wrap):
+    mesh = jax.make_mesh(
+        (jax.device_count(), 1),
+        ('fsdp', 'tp'),
+        axis_types=(shd.AxisType.Auto,) * 2,
+    )
+    x = jnp.ones((8, 4))
+    fake_tpu = mock.MagicMock(platform='tpu')
+
+    def shard_fn(a):
+      return core_sharding_utils.shard(a, ('fsdp', 'tp'), eager=eager)
+
+    with mock.patch.object(
+        core_sharding_utils.jax, 'devices', return_value=[fake_tpu]
+    ):
+      self.assertIsInstance(shard_fn(x).sharding, shd.SingleDeviceSharding)
+      with jax.set_mesh(mesh):
+        out = wrap(shard_fn)(x)
+
+    self.assertTrue(
+        out.sharding.is_equivalent_to(
+            shd.NamedSharding(mesh, shd.PartitionSpec('fsdp', 'tp')), x.ndim
+        )
+    )
+
+  def test_utils_shard_skips_explicit_axes_under_set_mesh(self):
+    mesh = jax.make_mesh(
+        (jax.device_count(), 1),
+        ('fsdp', 'tp'),
+        axis_types=(shd.AxisType.Explicit,) * 2,
+    )
+    fake_tpu = mock.MagicMock(platform='tpu')
+    with (
+        mock.patch.object(
+            core_sharding_utils.jax, 'devices', return_value=[fake_tpu]
+        ),
+        jax.set_mesh(mesh),
+    ):
+      out = jax.jit(lambda a: core_sharding_utils.shard(a, ('fsdp', 'tp')))(
+          jnp.ones((8, 4))
+      )
+    self.assertEqual(out.sharding.spec, shd.PartitionSpec(None, None))
+
   @mock.patch(
       'tunix.sft.checkpoint_manager.sharding_utils.place_array_on_target'
   )
