@@ -15,6 +15,7 @@
 """Utils for loading and saving Qwen3.5 model weights."""
 
 import functools
+import json
 import os
 
 import jax.numpy as jnp
@@ -161,6 +162,11 @@ def create_model_from_safe_tensors(
 
 def _has_language_model_prefix(local_model_path: str) -> bool:
   """Returns whether checkpoint uses the `model.language_model.` key prefix."""
+  index_path = os.path.join(local_model_path, "model.safetensors.index.json")
+  if os.path.isfile(index_path):
+    with open(index_path, "r", encoding="utf-8") as f:
+      weight_map = json.load(f).get("weight_map", {})
+    return any(k.startswith("model.language_model.") for k in weight_map)
   safetensors_path = os.path.join(local_model_path, "model.safetensors")
   with safe_flax.safe_open(safetensors_path, framework="numpy") as sf:
     return any(k.startswith("model.language_model.") for k in sf.keys())

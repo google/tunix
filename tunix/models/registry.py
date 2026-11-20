@@ -542,6 +542,14 @@ MODEL_CATALOG = (
         model_config_category='qwen3p5',
     ),
     naming.ModelNaming(
+        model_id='Qwen/Qwen3.5-9B',
+        model_name='qwen3.5-9b',
+        model_family='qwen3p5',
+        model_version='9b',
+        model_config_id='qwen3p5_9b',
+        model_config_category='qwen3p5',
+    ),
+    naming.ModelNaming(
         model_id='Qwen/Qwen3.5-35B-A3B',
         model_name='qwen3.5-35b-a3b',
         model_family='qwen3p5',
