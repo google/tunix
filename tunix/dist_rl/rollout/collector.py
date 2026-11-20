@@ -194,8 +194,6 @@ class TrajectoryCollectorEngine:
             " callback to specify max_generation_steps."
         )
 
-      generation_kwargs["max_tokens"] = effective_max_tokens
-
       req_policy_version = int(self.request.target_policy_version or 0)
       turn_policy_version = (
           max(req_policy_version, int(self._policy_version_fn()))
@@ -212,21 +210,6 @@ class TrajectoryCollectorEngine:
         if cache_salt is None:
           cache_salt = self._episode_cache_salt
 
-      sampling_params = sampler_lib.SamplingParams(
-          max_tokens=effective_max_tokens,
-          temperature=generation_kwargs.get("temperature", 0.0),
-          top_p=generation_kwargs.get("top_p", None),
-          top_k=generation_kwargs.get("top_k", None),
-          seed=generation_kwargs.get("seed", None),
-          return_logprobs=generation_kwargs.get("return_logprobs", False),
-          return_routed_experts=generation_kwargs.get(
-              "return_routed_experts", False
-          ),
-          routed_experts_prompt_start=generation_kwargs.get(
-              "routed_experts_prompt_start", 0
-          ),
-          cache_salt=cache_salt,
-      )
       prompt_payload = (
           np.asarray(prompt_token_ids, dtype=np.int32)
           if prompt_token_ids is not None
@@ -237,10 +220,9 @@ class TrajectoryCollectorEngine:
           prompt=prompt_payload,
           max_tokens=effective_max_tokens,
           cache_salt=cache_salt,
-          routed_experts_prompt_start=(
-              sampling_params.routed_experts_prompt_start
+          routed_experts_prompt_start=generation_kwargs.get(
+              "routed_experts_prompt_start", 0
           ),
-          sampling_params=sampling_params,
       )
       sample_start = time.perf_counter()
       try:

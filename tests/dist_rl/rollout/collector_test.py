@@ -339,9 +339,7 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
     self.assertEqual(item.traj["assistant_turn_lengths"], [10])
     self.assertAlmostEqual(item.traj["sampler_time_s"], 0.20)
 
-  def test_model_call_propagates_return_routed_experts_in_generation_kwargs(
-      self,
-  ):
+  def test_model_call_returns_routed_experts(self):
     async def _run():
       mock_routed = np.ones((10, 4, 8), dtype=np.int32)
       sampler = _MockSampler(routed_experts=mock_routed)
@@ -380,9 +378,6 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
         output = await model_call("prompt text", env=mock.MagicMock())
 
       self.assertLen(sampler.sampled_requests, 1)
-      self.assertTrue(
-          sampler.sampled_requests[0].sampling_params.return_routed_experts
-      )
       self.assertIsNotNone(output.routed_experts)
       np.testing.assert_array_equal(output.routed_experts[0], mock_routed)
 
