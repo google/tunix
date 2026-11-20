@@ -855,11 +855,15 @@ def main(
 
   sampler_type = str(hp.config["rollout_engine"])
   # On JAX, vLLM samplers (`inprocess_vllm`, `vllm`) initialize the JAX/Ray
-  # distributed runtime internally; vanilla JAX and non-JAX (e.g. `torch:tpu`)
-  # rollouts initialize their runtime here.
+  # distributed runtime internally unless ICI weight sync is active (in which
+  # case the rollout must join the shared `jax.distributed` world before
+  # building its local-device mesh). Vanilla JAX and non-JAX (e.g. `torch:tpu`)
+  # rollouts always initialize their runtime here.
   if (
       sampler_type == "vanilla"
       or rollout_target.framework != execution_target.Framework.JAX
+      or hp.cluster_targets.weight_sync_mode
+      == common_datatypes.WeightSyncMode.ICI
   ):
     process_context.initialize_runtime(rollout_target)
 

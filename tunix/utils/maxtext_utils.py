@@ -696,13 +696,28 @@ def build_maxtext_config(
   return pyconfig.initialize(argv)
 
 
-def create_maxtext_mesh(maxtext_config: Any) -> Any:
-  """Builds the JAX device Mesh with axis names from MaxText config."""
+def create_maxtext_mesh(
+    maxtext_config: Any,
+    devices: Sequence[Any] | None = None,
+) -> Any:
+  """Builds the JAX device Mesh with axis names from MaxText config.
+
+  Args:
+    maxtext_config: MaxText HyperParameters configuration.
+    devices: Optional subset of JAX devices to build the mesh over (e.g. the
+      trainer's devices inside a shared multi-process ICI JAX world). When None,
+      MaxText uses all visible devices (`jax.devices()`).
+  """
   from jax.sharding import Mesh  # pylint: disable=g-import-not-at-top
 
   _, _, m_utils = maxtext_modules()
-  devices = m_utils.create_device_mesh(maxtext_config)
-  return Mesh(devices, maxtext_config.mesh_axes)
+  if devices is None:
+    mesh_devices = m_utils.create_device_mesh(maxtext_config)
+  else:
+    mesh_devices = m_utils.create_device_mesh(
+        maxtext_config, devices=list(devices)
+    )
+  return Mesh(mesh_devices, maxtext_config.mesh_axes)
 
 
 def log_param_shapes(model: Any) -> None:

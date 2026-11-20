@@ -1071,15 +1071,16 @@ def _validate_ici_weight_sync(hp: cli_config.HyperParameters) -> None:
 
   ICI weight sync moves device arrays between processes of one JAX world with
   collectives, so both ends must hold their weights in a JAX process the
-  coordinator can call: the Tunix trainer and an in-process rollout engine.
+  coordinator can call: either the Tunix or MaxText trainer and an in-process
+  rollout engine.
 
   Args:
     hp: Loaded configuration.
 
   Raises:
     TypeError: If `weight_sync_config.ici_chunk_gb` is not a number.
-    ValueError: If `weight_sync_config.mode` is "ici" with a MaxText trainer,
-      with `rollout_engine: vllm`, or with a non-positive
+    ValueError: If `weight_sync_config.mode` is "ici" with
+      `rollout_engine: vllm`, or with a non-positive
       `weight_sync_config.ici_chunk_gb`.
   """
   ws = hp.config_mapping("weight_sync_config")
@@ -1094,13 +1095,6 @@ def _validate_ici_weight_sync(hp: cli_config.HyperParameters) -> None:
     )
   if ws["mode"] != common_datatypes.WeightSyncMode.ICI.value:
     return
-  if hp.config_mapping("actor_model_config")["model_source"] == "maxtext":
-    raise ValueError(
-        "weight_sync_config.mode=ici is not supported with a MaxText trainer"
-        " (actor_model_config.model_source='maxtext') yet: the MaxText"
-        " training engine has no ICI source. Use the Tunix trainer or"
-        " weight_sync_config.mode=raiden."
-    )
   rollout_engine = hp.config["rollout_engine"]
   if rollout_engine not in ("inprocess_vllm", "vanilla"):
     raise ValueError(

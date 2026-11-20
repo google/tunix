@@ -27,18 +27,23 @@ by name.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+import gc
 import os
 import threading
+import time
 from typing import Any
 
 from absl import logging
+from flax import nnx
 import jax
+import jax.numpy as jnp
 from tunix.dist_rl.weight_sync import ici_handler
 from tunix.dist_rl.weight_sync import ici_transport
 from tunix.dist_rl.weight_sync import weight_sync
 from tunix.dist_rl.weight_sync import weight_sync_coordinator
 from tunix.dist_rl.weight_sync import weight_utils
+from tunix.utils import maxtext_utils
 
 DROP_OLD_WEIGHTS_ENV = "ICI_DROP_OLD_WEIGHTS"
 
@@ -176,6 +181,213 @@ class IciSourceSynchronizer:
 
   def close(self) -> None:
     self.release()
+
+
+def _extract_maxtext_params(engine: Any) -> Any:
+  """Extracts pure parameter arrays from a `MaxTextTrainingEngine`."""
+  getter = getattr(engine, "_get_trainable_params_state", None)
+  if callable(getter):
+    return getter()
+  return nnx.state(engine.model, nnx.Param)
+
+
+def _convert_maxtext_params_for_rollout(engine: Any, params_state: Any) -> Any:
+  """Converts MaxText trainer params into the rollout model's layout and dtype."""
+  use_converter = bool(getattr(engine, "_use_weight_converter", False))
+  converter = getattr(engine, "_weight_converter", None)
+  if use_converter and converter is not None:
+    target_state = getattr(engine, "_target_state", None)
+    return converter.convert(params_state, target_state=target_state)
+
+  cfg = getattr(engine, "_config", None)
+  rollout_dtype_raw = (
+      getattr(cfg, "rollout_weight_dtype", None)
+      or maxtext_utils.DEFAULT_ROLLOUT_WEIGHT_DTYPE
+  )
+  rollout_dtype = jnp.dtype(rollout_dtype_raw)
+  converted = jax.tree_util.tree_map(
+      lambda x: (
+          x.astype(rollout_dtype)
+          if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating)
+          else x
+      ),
+      params_state,
+  )
+  if cfg is not None and bool(getattr(cfg, "scan_layers", False)):
+    from maxtext.integration.tunix.weight_mapping import raiden_unscan  # pylint: disable=g-import-not-at-top
+
+    converted = raiden_unscan.unscan_layers(
+        converted,
+        num_layers=cfg.num_decoder_layers,
+        scan_axis=cfg.param_scan_axis,
+        cycle_interval=cfg.inhomogeneous_layer_cycle_interval,
+    )
+  return converted
+
+
+class IciMaxTextTrainerAdapter:
+  """Wraps a `MaxTextTrainingEngine` to serve weights over ICI instead of Raiden.
+
+  Delegates all training, evaluation, checkpointing, and metric calls to the
+  underlying engine, while replacing `prepare_weight_sync` /
+  `release_weight_sync` / `ici_check` / `ici_transfer` so converted rollout
+  weights stay on device and transfer via `IciSourceSynchronizer`.
+  """
+
+  def __init__(
+      self,
+      engine: Any,
+      *,
+      job_name: str = "trainer",
+      synchronizer_factory: Callable[[], IciSourceSynchronizer] | None = None,
+  ):
+    self._engine = engine
+    self._job_name = job_name
+    self._synchronizer_factory = synchronizer_factory or (
+        lambda: IciSourceSynchronizer(job_name=job_name)
+    )
+    self._ici_sync: IciSourceSynchronizer | None = None
+    self._last_staged_step: int | None = None
+    self._staged_metadata: list[weight_sync.WorkUnitMetadata] | None = None
+
+  def __getattr__(self, name: str) -> Any:
+    return getattr(self._engine, name)
+
+  def _ensure_sync(self) -> IciSourceSynchronizer:
+    if self._ici_sync is None:
+      self._ici_sync = self._synchronizer_factory()
+    return self._ici_sync
+
+  def prepare_weight_sync(
+      self, *, sync_request: Any = None
+  ) -> list[weight_sync.WorkUnitMetadata]:
+    """Converts trainable params on device and binds them for ICI transfer."""
+    del sync_request
+    started = time.monotonic()
+    train_step = getattr(self._engine, "train_step", None)
+    if (
+        self._ici_sync is not None
+        and self._ici_sync.bound
+        and self._staged_metadata is not None
+        and train_step is not None
+        and self._last_staged_step == train_step
+    ):
+      total_vars = sum(len(m.variables) for m in self._staged_metadata)
+      logging.info(
+          "TRAINER_WEIGHT_SYNC_TIMING step=prepare_weight_sync train_step=%s"
+          " transport=ici reused=True total_s=%.3f work_units=%d variables=%d",
+          train_step,
+          time.monotonic() - started,
+          len(self._staged_metadata),
+          total_vars,
+      )
+      return list(self._staged_metadata)
+
+    with jax.profiler.TraceAnnotation("prepare_weight_sync_ici"):
+      t0 = time.monotonic()
+      throttler = getattr(self._engine, "_throttler", None)
+      if throttler is not None:
+        throttler.wait_for_all()
+      throttler_wait_s = time.monotonic() - t0
+
+      t1 = time.monotonic()
+      sync = self._ensure_sync()
+      if sync.bound:
+        sync.release()
+        gc.collect()
+      purge_s = time.monotonic() - t1
+
+      t2 = time.monotonic()
+      params_state = _extract_maxtext_params(self._engine)
+      converted_state = _convert_maxtext_params_for_rollout(
+          self._engine, params_state
+      )
+      del params_state
+      convert_s = time.monotonic() - t2
+
+      t3 = time.monotonic()
+      sync.bind(converted_state)
+      del converted_state
+      sync.d2h()
+      bind_s = time.monotonic() - t3
+
+      checksum_s = 0.0
+      if os.environ.get("VERIFY_WEIGHTS", "").lower() == "true":
+        t_ck = time.monotonic()
+        logging.info("Source weights checksums: %s", sync.checksums())
+        checksum_s = time.monotonic() - t_ck
+
+      t4 = time.monotonic()
+      metadata = [sync.work_unit_metadata()]
+      metadata_s = time.monotonic() - t4
+
+    self._last_staged_step = train_step
+    self._staged_metadata = metadata
+    total_vars = sum(len(m.variables) for m in metadata)
+    logging.info(
+        "TRAINER_WEIGHT_SYNC_TIMING step=prepare_weight_sync train_step=%s"
+        " transport=ici throttler_wait_s=%.3f purge_buffers_s=%.3f"
+        " convert_s=%.3f bind_s=%.3f checksum_s=%.3f metadata_s=%.3f"
+        " total_s=%.3f work_units=%d variables=%d",
+        train_step,
+        throttler_wait_s,
+        purge_s,
+        convert_s,
+        bind_s,
+        checksum_s,
+        metadata_s,
+        time.monotonic() - started,
+        len(metadata),
+        total_vars,
+    )
+    return list(metadata)
+
+  def _require_ici_sync(self) -> IciSourceSynchronizer:
+    if self._ici_sync is None:
+      raise RuntimeError(
+          "ICI weight sync needs prepare_weight_sync to have run first on"
+          f" {self._job_name}."
+      )
+    return self._ici_sync
+
+  def ici_check(self, request: Mapping[str, Any]) -> dict[str, Any]:
+    """Validates this trainer's part of an ICI transfer plan (no collectives)."""
+    # `ici_check` with `plan=None` (Phase 1 world discovery) can arrive even on
+    # a worker that has not yet called `prepare_weight_sync` (e.g. a bystander
+    # or before first bind), so create the synchronizer lazily here.
+    return self._ensure_sync().check(request)
+
+  def ici_transfer(self, request: Mapping[str, Any]) -> dict[str, float]:
+    """Enters the ICI transfer collectives as the source."""
+    return self._require_ici_sync().transfer(request)
+
+  def release_weight_sync(self, *, sync_request: Any = None) -> bool:
+    """Drops converted weight references after the ICI transfer completes."""
+    started = time.monotonic()
+    self._last_staged_step = None
+    self._staged_metadata = None
+    if self._ici_sync is not None and self._ici_sync.bound:
+      logging.vlog(1, "ICI weight sync metrics: %s", self._ici_sync.metrics())
+      self._ici_sync.release(sync_request)
+      gc.collect()
+    logging.info(
+        "TRAINER_WEIGHT_SYNC_TIMING step=release_weight_sync train_step=%s"
+        " transport=ici total_s=%.3f",
+        getattr(self._engine, "train_step", None),
+        time.monotonic() - started,
+    )
+    return True
+
+  def close(self) -> None:
+    """Releases ICI references and closes the wrapped MaxText engine."""
+    self._last_staged_step = None
+    self._staged_metadata = None
+    try:
+      if self._ici_sync is not None:
+        self._ici_sync.close()
+        self._ici_sync = None
+    finally:
+      self._engine.close()
 
 
 class _SamplerSink:

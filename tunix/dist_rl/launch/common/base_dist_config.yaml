@@ -343,8 +343,9 @@ weight_sync_config:
   # "fs", or "nccl"). "ici" moves weights device-to-device with JAX collectives
   # over the TPU interconnect; it needs the trainer and every rollout replica
   # to be processes of ONE multi-process JAX world on one TPU slice, each
-  # owning the same number of chips, the Tunix trainer, and `rollout_engine`
-  # "inprocess_vllm" or "vanilla" (see `weight_sync/ici_transport.py`).
+  # owning the same number of chips, either the Tunix or MaxText trainer, and
+  # `rollout_engine` "inprocess_vllm" or "vanilla" (see
+  # `weight_sync/ici_transport.py`).
   # "fs" selects disaggregated file/object-store staged weight sync,
   # orthogonal to checkpoint serialization format ("orbax" vs "safetensors") and
   # storage backend ("gcs" gs://, "GOOGLE_INTERNAL_STOAGE_PATH" /GOOGLE_INTERNAL_STOAGE_PATH/, or "local" POSIX paths via epath).

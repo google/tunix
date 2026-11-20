@@ -582,6 +582,44 @@ def _kwarg(kwargs: Mapping[str, KwargValue | None], key: str, unset: _T) -> _T:
   return unset if value is None else type(unset)(value)
 
 
+def _ici_trainer_devices() -> list[jax.Device] | None:
+  """Returns the trainer's device subset inside a shared multi-process ICI world.
+
+  Returns None when running single-process (every visible device belongs to the
+  trainer). In a multi-process ICI world, defaults to this process's local
+  devices; multi-host trainers can set `ICI_TRAINER_PROCESS_INDICES` (e.g.
+  `"0,1"`) to span multiple processes of the slice.
+  """
+  if jax.process_count() <= 1:
+    return None
+  from tunix.dist_rl.weight_sync import ici_transport  # pylint: disable=g-import-not-at-top
+
+  raw = os.environ.get("ICI_TRAINER_PROCESS_INDICES", "").strip()
+  if not raw:
+    return ici_transport.local_devices()
+  try:
+    process_indices = sorted({int(p.strip()) for p in raw.split(",") if p.strip()})
+  except ValueError as exc:
+    raise ValueError(
+        f"ICI_TRAINER_PROCESS_INDICES must be comma-separated ints, got {raw!r}."
+    ) from exc
+  if not process_indices:
+    raise ValueError("ICI_TRAINER_PROCESS_INDICES must not be empty.")
+  world = {d.process_index for d in jax.devices()}
+  missing = [p for p in process_indices if p not in world]
+  if missing:
+    raise ValueError(
+        f"ICI_TRAINER_PROCESS_INDICES references process(es) {missing} outside"
+        f" this JAX world {sorted(world)}."
+    )
+  if jax.process_index() not in process_indices:
+    raise ValueError(
+        f"This trainer process ({jax.process_index()}) is not in"
+        f" ICI_TRAINER_PROCESS_INDICES={process_indices}."
+    )
+  return [d for p in process_indices for d in ici_transport.local_devices(p)]
+
+
 def _create_maxtext_trainer_factory(
     hp: resolve_config.DistHyperParameters, worker_id: str
 ) -> tuple[TrainerFactory, Mesh]:
@@ -603,6 +641,14 @@ def _create_maxtext_trainer_factory(
   rollout = hp.config_mapping("rollout_config")
   opt = rl_train[_ACTOR_OPTIMIZER_KEY]
   axes = hp.mesh_axes(_ACTOR_KEY)
+  is_ici = (
+      hp.cluster_targets.weight_sync_mode
+      == common_datatypes.WeightSyncMode.ICI
+  )
+  trainer_devices = _ici_trainer_devices() if is_ici else None
+  num_devices = (
+      len(trainer_devices) if trainer_devices is not None else jax.device_count()
+  )
 
   adamw_options = _maxtext_adamw_options(hp)
   pad_id, _ = node_utils.pad_and_eos_ids(node_utils.load_hf_tokenizer(hp))
@@ -624,7 +670,7 @@ def _create_maxtext_trainer_factory(
       mesh_tp=axes["tp"],
       mesh_expert=axes["expert"],
       mesh_context=_kwarg(kwargs, "mesh_context", 1),
-      num_devices=jax.device_count(),
+      num_devices=num_devices,
       max_prompt_length=int(rollout["max_prompt_length"]),
       max_response_length=int(rollout["total_generation_steps"]),
       learning_rate=float(opt["learning_rate"]),
@@ -668,16 +714,28 @@ def _create_maxtext_trainer_factory(
       skip_step_scaling_factor=_kwarg(kwargs, "skip_step_scaling_factor", 6.0),
   )
   logging.info("Creating MaxText device mesh...")
-  mesh = maxtext_utils.create_maxtext_mesh(maxtext_config)
+  if trainer_devices is None:
+    mesh = maxtext_utils.create_maxtext_mesh(maxtext_config)
+  else:
+    mesh = maxtext_utils.create_maxtext_mesh(
+        maxtext_config, devices=trainer_devices
+    )
   logging.info("Trainer mesh: %s", mesh)
 
   def _factory() -> abstract_trainer.AbstractTrainer:
-    return maxtext_utils.create_maxtext_engine(
+    engine = maxtext_utils.create_maxtext_engine(
         maxtext_config,
         mesh=mesh,
         tokenizer_pad_id=pad_id,
         wrap_with_tunix_adapter=True,
     )
+    if is_ici:
+      from tunix.dist_rl.weight_sync import ici_weight_sync_delegate  # pylint: disable=g-import-not-at-top
+
+      return ici_weight_sync_delegate.IciMaxTextTrainerAdapter(
+          engine, job_name="trainer"
+      )
+    return engine
 
   return _factory, mesh
 

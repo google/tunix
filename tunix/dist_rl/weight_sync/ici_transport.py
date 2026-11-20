@@ -264,13 +264,20 @@ def _participant_devices(plan: TransferPlan) -> list[Any]:
   )
 
 
+def _split_axis(shape: Sequence[int], width: int) -> int | None:
+  """Returns the first axis `width` divides, or None if none does."""
+  for axis, size in enumerate(shape):
+    if size >= width and size % width == 0:
+      return axis
+  return None
+
+
 def canonical_spec(shape: Sequence[int], width: int) -> tuple[Any, ...]:
   """Splits the first axis `width` divides; replicates when none does."""
   spec: list[Any] = [None] * len(shape)
-  for axis, size in enumerate(shape):
-    if size >= width and size % width == 0:
-      spec[axis] = _AXIS
-      break
+  axis = _split_axis(shape, width)
+  if axis is not None:
+    spec[axis] = _AXIS
   return tuple(spec)
 
 
@@ -372,43 +379,126 @@ def _device_pairs(
   )
 
 
-def _as_payload(shards: Sequence[Any], devices: Sequence[Any]) -> Any:
-  """Per-device shards as this process's slice of a pmap argument."""
+def _devices_by_ids(device_ids: tuple[int, ...]) -> list[Any]:
+  by_id = {d.id: d for d in jax.devices()}
+  return [by_id[i] for i in device_ids]
+
+
+def _payload_sharding(ndim: int, mesh: jax.sharding.Mesh) -> Any:
+  return jax.sharding.NamedSharding(
+      mesh, jax.sharding.PartitionSpec("local", *([None] * ndim))
+  )
+
+
+def _pack_canonical_leaf(array: Any, shape: tuple[int, ...], width: int) -> Any:
+  """Reshapes a canonical-sharded leaf into `(width, *shard_shape)`."""
+  axis = _split_axis(shape, width)
+  if axis is None:
+    return jnp.broadcast_to(array[None, ...], (width, *shape))
+  split_shape = (
+      *shape[:axis],
+      width,
+      shape[axis] // width,
+      *shape[axis + 1 :],
+  )
+  return jnp.moveaxis(array.reshape(split_shape), axis, 0)
+
+
+def _unpack_payload_leaf(
+    payload: Any, shape: tuple[int, ...], width: int
+) -> Any:
+  """Inverse of `_pack_canonical_leaf`: `(width, *shard_shape)` -> `shape`."""
+  axis = _split_axis(shape, width)
+  if axis is None:
+    return payload[0]
+  return jnp.moveaxis(payload, 0, axis).reshape(shape)
+
+
+@functools.lru_cache(maxsize=64)
+def _zero_payloads_fn(
+    specs: tuple[tuple[tuple[int, ...], str], ...],
+    device_ids: tuple[int, ...],
+):
+  """Allocates a chunk's zero payloads directly on each local device in one jit."""
+  devices = _devices_by_ids(device_ids)
+  width = len(devices)
   mesh = jax.sharding.Mesh(np.asarray(devices), ("local",))
-  shard_shape = tuple(shards[0].shape)
-  return jax.make_array_from_single_device_arrays(
-      (len(devices), *shard_shape),
-      jax.sharding.NamedSharding(
-          mesh, jax.sharding.PartitionSpec("local", *([None] * len(shard_shape)))
-      ),
-      [shard[None, ...] for shard in shards],
-  )
+  shard_shapes = []
+  dtypes = []
+  out_shardings = []
+  for shape, dtype_str in specs:
+    axis = _split_axis(shape, width)
+    if axis is None:
+      shard_shape = shape
+    else:
+      shard_shape = (*shape[:axis], shape[axis] // width, *shape[axis + 1 :])
+    shard_shapes.append((width, *shard_shape))
+    dtypes.append(jnp.dtype(dtype_str))
+    out_shardings.append(_payload_sharding(len(shape), mesh))
+
+  def make_zeros():
+    return tuple(
+        jnp.zeros(s, dtype=dt) for s, dt in zip(shard_shapes, dtypes)
+    )
+
+  return jax.jit(make_zeros, out_shardings=tuple(out_shardings))
 
 
-def _zero_payload(leaf: LeafSpec, devices: Sequence[Any]) -> Any:
-  shard_shape = _canonical_sharding(leaf, devices).shard_shape(leaf.shape)
-  dtype = jnp.dtype(leaf.dtype)
-  return _as_payload(
-      [jax.device_put(jnp.zeros(shard_shape, dtype), d) for d in devices],
-      devices,
-  )
+def _zero_payloads(
+    leaves: Sequence[LeafSpec], devices: Sequence[Any]
+) -> tuple[Any, ...]:
+  specs = tuple((leaf.shape, leaf.dtype) for leaf in leaves)
+  device_ids = tuple(d.id for d in devices)
+  return _zero_payloads_fn(specs, device_ids)()
+
+
+@functools.lru_cache(maxsize=64)
+def _chunk_packer(
+    shapes: tuple[tuple[int, ...], ...],
+    device_ids: tuple[int, ...],
+):
+  """Packs a chunk of local arrays into pmap `(width, *shard_shape)` payloads."""
+  devices = _devices_by_ids(device_ids)
+  width = len(devices)
+  mesh = jax.sharding.Mesh(np.asarray(devices), ("local",))
+  out_shardings = tuple(_payload_sharding(len(s), mesh) for s in shapes)
+
+  def pack(arrays):
+    return tuple(
+        _pack_canonical_leaf(a, s, width) for a, s in zip(arrays, shapes)
+    )
+
+  return jax.jit(pack, out_shardings=out_shardings)
+
+
+@functools.lru_cache(maxsize=64)
+def _chunk_installer(
+    shapes: tuple[tuple[int, ...], ...],
+    target_shardings: tuple[Any, ...],
+    width: int,
+):
+  """Unpacks a chunk's pmap payloads and reshards them onto `target_shardings`."""
+
+  def install(payloads):
+    return tuple(
+        _unpack_payload_leaf(p, s, width) for p, s in zip(payloads, shapes)
+    )
+
+  return jax.jit(install, out_shardings=target_shardings)
 
 
 def _staging_shardings(
-    leaves: Sequence[LeafSpec], sample: Any, width: int
+    leaves: Sequence[LeafSpec],
+    source_processes: Sequence[int],
+    width: int,
 ) -> tuple[Any, ...]:
   """Shardings that give EVERY source-role process a whole copy of each leaf.
 
-  The source mesh is re-read as (process, local device): replicated over the
-  process axis, split `width` ways over the local one. Each process then holds
-  the leaf in exactly the canonical per-device pieces.
+  The source mesh is `(process, local device)`: replicated over the process
+  axis, split `width` ways over the local one. Each process then holds the leaf
+  in exactly the canonical per-device pieces.
   """
-  devices = sorted(
-      sample.sharding.mesh.devices.reshape(-1),
-      key=lambda d: (d.process_index, d.id),
-  )
-  processes = sorted({d.process_index for d in devices})
-  rows = [[d for d in devices if d.process_index == p] for p in processes]
+  rows = [local_devices(p) for p in source_processes]
   if any(len(row) != width for row in rows):
     raise RuntimeError(
         f"cannot stage: source processes own {[len(r) for r in rows]} mesh"
@@ -427,24 +517,27 @@ def _stage(
     leaves: Sequence[LeafSpec],
     source: Mapping[str, Any],
     devices: Sequence[Any],
-) -> list[Any]:
-  """Puts a chunk into the canonical layout; returns one payload per leaf.
+    source_processes: Sequence[int],
+) -> tuple[Any, ...]:
+  """Puts a chunk into the canonical pmap payload layout in one batched step.
 
   A collective when the source role spans processes: every one of them must
   call it.
   """
-  arrays = [source[leaf.name] for leaf in leaves]
+  arrays = tuple(source[leaf.name] for leaf in leaves)
   width = len(devices)
-  if all(a.is_fully_addressable for a in arrays):
-    staged = [
-        jax.device_put(a, _canonical_sharding(leaf, devices))
-        for leaf, a in zip(leaves, arrays)
-    ]
-  else:
-    shardings = _staging_shardings(leaves, arrays[0], width)
-    staged = list(_resharder(shardings)(tuple(arrays)))
+  shapes = tuple(leaf.shape for leaf in leaves)
+  device_ids = tuple(d.id for d in devices)
+  if len(source_processes) == 1 and all(a.is_fully_addressable for a in arrays):
+    # Single-process source: fuse reshard-to-canonical + pack into one jit call.
+    payloads = _chunk_packer(shapes, device_ids)(arrays)
+    jax.block_until_ready(payloads)
+    return payloads
+
+  shardings = _staging_shardings(leaves, source_processes, width)
+  staged = _resharder(shardings)(arrays)
   jax.block_until_ready(staged)
-  payloads = []
+  local_canonicals = []
   for leaf, array in zip(leaves, staged):
     # Refuse rather than assume: if staging handed this process's devices
     # other slices than the canonical view, shards would arrive at the wrong
@@ -458,7 +551,16 @@ def _stage(
           " different slices than the canonical layout"
       )
     by_device = {s.device: s.data for s in array.addressable_shards}
-    payloads.append(_as_payload([by_device[d] for d in devices], devices))
+    local_canonicals.append(
+        jax.make_array_from_single_device_arrays(
+            leaf.shape,
+            canonical,
+            [by_device[d] for d in devices],
+            dtype=jnp.dtype(leaf.dtype),
+        )
+    )
+  payloads = _chunk_packer(shapes, device_ids)(tuple(local_canonicals))
+  jax.block_until_ready(payloads)
   return payloads
 
 
@@ -468,19 +570,13 @@ def _install_chunk(
     devices: Sequence[Any],
     sink: Sink,
 ) -> None:
-  installed = {}
-  for leaf, payload in zip(leaves, payloads):
-    canonical = jax.make_array_from_single_device_arrays(
-        leaf.shape,
-        _canonical_sharding(leaf, devices),
-        [payload.addressable_data(k)[0] for k in range(len(devices))],
-        dtype=jnp.dtype(leaf.dtype),
-    )
-    installed[leaf.name] = jax.device_put(
-        canonical, sink.target_sharding(leaf.name)
-    )
-  jax.block_until_ready(list(installed.values()))
-  sink.install(installed)
+  shapes = tuple(leaf.shape for leaf in leaves)
+  target_shardings = tuple(sink.target_sharding(leaf.name) for leaf in leaves)
+  unpacked = _chunk_installer(shapes, target_shardings, len(devices))(
+      tuple(payloads)
+  )
+  jax.block_until_ready(unpacked)
+  sink.install({leaf.name: arr for leaf, arr in zip(leaves, unpacked)})
 
 
 def execute(
@@ -527,11 +623,11 @@ def execute(
     leaves = [plan.leaves[i] for i in chunk]
     t0 = time.perf_counter()
     if is_source:
-      payloads = tuple(_stage(leaves, source, devices))
+      payloads = _stage(leaves, source, devices, plan.source_processes)
     else:
       if receive_round is not None:
         sink.release([leaf.name for leaf in leaves])
-      payloads = tuple(_zero_payload(leaf, devices) for leaf in leaves)
+      payloads = _zero_payloads(leaves, devices)
     t1 = time.perf_counter()
     for index, mover in enumerate(movers):
       moved = mover(payloads)
