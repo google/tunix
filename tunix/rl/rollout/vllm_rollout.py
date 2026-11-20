@@ -20,6 +20,7 @@ from flax import nnx
 import jax
 import jaxtyping
 from tunix.generate import mappings
+from tunix.generate import utils
 from tunix.generate import vllm_sampler
 from tunix.rl.rollout import base_rollout
 
@@ -40,6 +41,11 @@ class VllmRollout(base_rollout.BaseRollout):
         model=model,
         backend="vllm_jax",
     )
+    extra_kwargs = dict(rollout_config.rollout_vllm_kwargs)
+    additional_config = utils.merge_additional_config(
+        rollout_config.rollout_vllm_additional_config,
+        extra_kwargs.pop("additional_config", None),
+    )
     self._sampler = vllm_sampler.VllmSampler(
         tokenizer=tokenizer,
         config=vllm_sampler.VllmConfig(
@@ -57,7 +63,7 @@ class VllmRollout(base_rollout.BaseRollout):
             eos_tokens=rollout_config.eos_tokens,
             init_with_random_weights=rollout_config.rollout_vllm_init_with_random_weights,
             tpu_backend_type=rollout_config.rollout_vllm_tpu_backend_type,
-            additional_config=rollout_config.rollout_vllm_additional_config,
+            additional_config=additional_config,
             enable_dp_attention=rollout_config.rollout_vllm_enable_dp_attention,
             # TODO(yatlas): Remove default hbm_utilization once colocated hbm
             # fixes are landed.
@@ -92,7 +98,7 @@ class VllmRollout(base_rollout.BaseRollout):
                 "hf_config_path": rollout_config.rollout_vllm_hf_config_path,
                 "max_logprobs": rollout_config.num_logprobs,
                 "logprobs_mode": rollout_config.rollout_vllm_logprobs_mode,
-                **rollout_config.rollout_vllm_kwargs,
+                **extra_kwargs,
             },
             sampling_kwargs=rollout_config.rollout_vllm_sampling_kwargs,
         ),

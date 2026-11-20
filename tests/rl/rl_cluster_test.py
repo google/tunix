@@ -1750,6 +1750,56 @@ class RlEngineTokenInputTest(parameterized.TestCase):
         vllm_config = mock_sampler.call_args.kwargs['config']
         self.assertEqual(vllm_config.eos_tokens, [151645, 151643])
 
+  @unittest.skipIf(is_run_core, 'Skipping in run_core')
+  def test_vllm_rollout_supports_custom_maxtext_without_mappings(self):
+    # pylint: disable=g-import-not-at-top
+    from tunix.generate import vllm_sampler
+    from tunix.rl.rollout import vllm_rollout
+    # pylint: enable=g-import-not-at-top
+
+    class CustomMaxTextModel(nnx.Module):
+
+      def __init__(self):
+        self.w = nnx.Param(jnp.ones((2, 2)))
+
+    rollout_cfg = base_rollout.RolloutConfig(
+        rollout_mapping_config=None,
+        rollout_vllm_model_version='custom-maxtext',
+        rollout_vllm_hf_config_path='/tmp/hf_config',
+        rollout_vllm_additional_config={
+            'maxtext_config': {
+                'model_name': 'custom',
+                'attention': 'dot_product',
+            }
+        },
+        rollout_vllm_kwargs={
+            'additional_config': {
+                'maxtext_config': {'attention': 'flash'},
+            }
+        },
+        rollout_vllm_delete_dst_buffers=False,
+    )
+    model = CustomMaxTextModel()
+    with mock.patch.object(vllm_sampler, 'VllmSampler') as mock_sampler:
+      mock_instance = mock.Mock()
+      mock_sampler.return_value = mock_instance
+      vllm_rollout.VllmRollout(
+          model=model,
+          tokenizer=mock.Mock(),
+          cache_config_or_size=1024,
+          mesh=mock.Mock(),
+          rollout_config=rollout_cfg,
+      )
+      vllm_cfg = mock_sampler.call_args.kwargs['config']
+      self.assertIsNone(vllm_cfg.mapping_config.to_hf_mappings)
+      self.assertFalse(vllm_cfg.delete_dst_buffers)
+      self.assertEqual(vllm_cfg.hf_config_path, '/tmp/hf_config')
+      self.assertEqual(
+          vllm_cfg.additional_config,
+          {'maxtext_config': {'model_name': 'custom', 'attention': 'flash'}},
+      )
+      mock_instance.load_checkpoint.assert_called_once()
+
 
 class RlEngineTrajectoryStoreTest(absltest.TestCase):
   """Tests the per-trajectory metrics store owned by RLEngine."""
