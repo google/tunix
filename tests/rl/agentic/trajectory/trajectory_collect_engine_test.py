@@ -18,6 +18,7 @@ import time
 from unittest import mock
 
 from absl.testing import absltest
+from absl.testing import parameterized
 import jax.numpy as jnp
 import numpy as np
 from tunix.dist_rl.trajectory import converter as converter_lib
@@ -35,7 +36,7 @@ from tunix.rl.rollout import base_rollout
 RolloutOutput = base_rollout.RolloutOutput
 
 
-class TrajectoryCollectEngineTest(absltest.TestCase):
+class TrajectoryCollectEngineTest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
@@ -2504,7 +2505,8 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         final_metrics.total_completion_tokens,
         sum(len(step.assistant_tokens) for step in traj.steps),
     )
-    self.assertEqual(final_metrics.total_steps, 2)
+    self.assertEqual(final_metrics.total_steps, 5)
+    self.assertLen(stored_traj.steps, final_metrics.total_steps)
     self.assertEqual([step.reward for step in traj.steps], [1.0, 2.5])
     self.assertEqual(
         [step.reward for step in rehydrated_traj.steps],
@@ -2669,6 +2671,97 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.assertLen(trajs, 1)
     self.assertEqual(trajs['traj_fallback_0'].steps[0].step_id, 0)
     self.assertLen(trajs['traj_fallback_0'].steps, 5)
+
+  @parameterized.named_parameters(
+      (
+          'succeeded',
+          5,
+          None,
+          [('obs1', 1.0, False, {}), ('obs2', 2.0, True, {})],
+          'SUCCEEDED',
+          3.5,
+          5,
+          [0, 1, 2, 3],
+      ),
+      (
+          'max_steps_reached',
+          1,
+          None,
+          [('obs1', 1.0, False, {})],
+          'MAX_STEPS_REACHED',
+          1.5,
+          3,
+          [0, 1],
+      ),
+      (
+          'max_context_limit_reached',
+          5,
+          3,
+          [('obs1', 1.0, False, {})],
+          'MAX_CONTEXT_LIMIT_REACHED',
+          1.5,
+          3,
+          [0, 1],
+      ),
+  )
+  @mock.patch.object(
+      utils, 'tokenize_and_generate_masks', autospec=True, spec_set=True
+  )
+  def test_trajectory_store_tail_drop_detected_on_tolerant_read(
+      self,
+      env_max_steps,
+      max_response_length,
+      env_steps,
+      expected_status,
+      expected_reward,
+      expected_num_steps,
+      expected_truncated_step_ids,
+      mock_convert,
+  ):
+    """Verifies strict=False clears completion outcome when terminal env step drops."""
+    mock_convert.side_effect = [
+        ([301, 302], [1, 1]),
+    ]
+    self.mock_env.max_steps = env_max_steps
+    self.mock_env.step.side_effect = env_steps
+    traj_id = f'traj_tail_drop_{expected_status.lower()}'
+    store = in_memory_store.InMemoryTrajectoryStore()
+    metadata = converter_lib.create_trajectory_metadata(
+        traj_id=traj_id,
+    )
+    self.mock_agent.trajectory.task = {'prompts': ['Solve math']}
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+        max_response_length=max_response_length,
+        trajectory_store=store,
+        metadata=metadata,
+    )
+    asyncio.run(self._run_collect(engine, mode='Trajectory'))
+
+    full_traj = store.get_trajectories([traj_id], strict=False)[traj_id]
+    self.assertLen(full_traj.steps, expected_num_steps)
+    self.assertEqual(full_traj.status, expected_status)
+    self.assertEqual(full_traj.total_reward, expected_reward)
+
+    # Simulate dropping the terminal TunixEnvStep (carrying reward/done).
+    truncated_store = in_memory_store.InMemoryTrajectoryStore()
+    meta = store.get_trajectories_metadata([traj_id])[traj_id]
+    for step in full_traj.steps[:-1]:
+      truncated_store.add_step(step, meta)
+    truncated_store.update_metadata(meta)
+
+    recovered = truncated_store.get_trajectories([traj_id], strict=False)[
+        traj_id
+    ]
+    self.assertEqual(
+        [s.step_id for s in recovered.steps], expected_truncated_step_ids
+    )
+    self.assertIsNone(recovered.status)
+    self.assertIsNone(recovered.total_reward)
 
   @mock.patch.object(utils, 'tokenize_and_generate_masks')
   def test_close_called_when_one_step_raises_exception(self, mock_convert):
