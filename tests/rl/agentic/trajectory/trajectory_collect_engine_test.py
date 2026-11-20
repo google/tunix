@@ -2935,6 +2935,56 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         np.array([1, 1, 0, 1, 1], dtype=np.int32),
     )
 
+  def test_slow_reset_logs_info_only_above_threshold(self):
+    threshold = trajectory_collect_engine._SLOW_RESET_LOG_THRESHOLD_SECONDS
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+    )
+    with mock.patch.object(
+        trajectory_collect_engine, 'time', autospec=True
+    ) as mock_time:
+      mock_time.perf_counter.side_effect = [
+          0.0,
+          0.5,
+          0.5,
+          10.0,
+          10.0 + threshold,
+          10.0 + threshold,
+      ]
+      orig_verbosity = trajectory_collect_engine.logging.get_verbosity()
+      try:
+        trajectory_collect_engine.logging.set_verbosity(
+            trajectory_collect_engine.logging.DEBUG
+        )
+        with (
+            self.assertNoLogs(logger='absl', level='INFO'),
+            self.assertLogs(logger='absl', level='DEBUG') as debug_cm,
+        ):
+          asyncio.run(engine._reset())
+        self.assertTrue(
+            any('env.reset done in 0.5s' in msg for msg in debug_cm.output),
+            debug_cm.output,
+        )
+
+        trajectory_collect_engine.logging.set_verbosity(
+            trajectory_collect_engine.logging.INFO
+        )
+        with self.assertLogs(logger='absl', level='INFO') as info_cm:
+          asyncio.run(engine._reset())
+        self.assertTrue(
+            any(
+                f'[SLOW] env.reset: {threshold:.1f}s'
+                f' (threshold={threshold:.1f}s)'
+                in msg
+                for msg in info_cm.output
+            ),
+            info_cm.output,
+        )
+      finally:
+        trajectory_collect_engine.logging.set_verbosity(orig_verbosity)
+
 
 class _FreshTextTokenizer:
   """Only freshly formatted observations are allowed into this encoder."""

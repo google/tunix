@@ -44,6 +44,8 @@ from tunix.rl.rollout import base_rollout
 BaseTaskEnv = base_environment.BaseTaskEnv
 ConversationAgentBase = base_agent.ConversationAgentBase
 
+_SLOW_RESET_LOG_THRESHOLD_SECONDS = 30.0
+
 
 def encode_turn_routed_experts(
     routed: np.ndarray,
@@ -1028,6 +1030,13 @@ class TrajectoryCollectEngine:
         self._debug_prefix,
         wall_time,
     )
+    if wall_time >= _SLOW_RESET_LOG_THRESHOLD_SECONDS:
+      logging.info(
+          "%s [SLOW] env.reset: %.1fs (threshold=%.1fs)",
+          self._debug_prefix,
+          wall_time,
+          _SLOW_RESET_LOG_THRESHOLD_SECONDS,
+      )
 
     self.env_time["reset_latency"] += wall_time
     self._start_ts = time.perf_counter()
