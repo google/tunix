@@ -274,6 +274,29 @@ def validate_score_centering_options(config: AlgorithmConfig) -> None:
     )
 
 
+def validate_score_centering_rollout(
+    config: AlgorithmConfig,
+    rollout_engine: object,
+    rollout_config: common_configs.RolloutConfig,
+    packing_enabled: bool,
+) -> None:
+  """Validates `score_centering` rollout and packing requirements."""
+  if not config.score_centering:
+    return
+  if (
+      rollout_engine != "vllm"
+      or (config.use_rollout_logps and not rollout_config.return_logprobs)
+      or rollout_config.num_logprobs < max(2, config.score_centering_top_k)
+      or packing_enabled
+  ):
+    raise ValueError(
+        "score_centering requires the vLLM rollout with"
+        " num_logprobs >= max(2, score_centering_top_k) (and"
+        " return_logprobs=True when use_rollout_logps=True) on the train"
+        " RolloutConfig, and no sequence packing."
+    )
+
+
 @dataclasses.dataclass(kw_only=True)
 class GRPOConfig(AlgorithmConfig):
   """Configuration for GRPO algorithms.

@@ -728,8 +728,6 @@ class GrpoLossSequenceLevelControlsTest(absltest.TestCase):
     return SimpleNamespace(**defaults)
 
   def _example(self, **overrides):
-    from tunix.rl import common  # pylint: disable=g-import-not-at-top
-
     defaults = dict(
         prompt_ids=jnp.array([[1, 2], [1, 2]], jnp.int32),
         prompt_mask=jnp.array([[1, 1], [1, 1]], jnp.int32),
@@ -740,7 +738,7 @@ class GrpoLossSequenceLevelControlsTest(absltest.TestCase):
         old_per_token_logps=None,
     )
     defaults.update(overrides)
-    return common.TrainExample(**defaults)
+    return algo_core.common.TrainExample(**defaults)
 
   def test_score_centering_requires_sampler_topk_and_fused_agreement(self):
     topk_ids = jnp.zeros((2, 3, 2), jnp.int32)
@@ -803,18 +801,8 @@ class GrpoLossSequenceLevelControlsTest(absltest.TestCase):
         float(out.aux_metrics['score_centering/abs_coeff_sum_mean'].compute()),
         0.0,
     )
-    for name in (
-        'head_mass_q_mean',
-        'head_mass_q_min',
-        'head_mass_p_mean',
-        'tail_ratio_rho_mean',
-        'tail_ratio_rho_max',
-        'abs_coeff_sum_max',
-        'tail_eps_clamped_frac',
-        'tv_distance_mean',
-        'sampled_in_topk_frac',
-    ):
-      self.assertIn(f'score_centering/{name}', out.aux_metrics)
+    for key in algo_core.common.SCORE_CENTERING_METRICS:
+      self.assertIn(key, out.aux_metrics)
     self.assertAlmostEqual(
         float(out.primary_loss.compute()), float(chunked.primary_loss.compute())
     )
