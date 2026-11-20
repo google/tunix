@@ -29,6 +29,10 @@ from tunix.dist_rl.worker import rollout_worker
 from tunix.dist_rl.worker import staging_buffer as sb_lib
 
 
+def _sync_req(policy_version: int = 0) -> sampler_lib.WeightSyncRequest:
+  return sampler_lib.WeightSyncRequest(policy_version=policy_version)
+
+
 class _FakeSampler(sampler_lib.Sampler):
 
   def __init__(self, metadata):
@@ -303,18 +307,18 @@ class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
 
   async def test_pre_closes_admission(self):
     manager = self._manager()
-    await manager.pre_weight_sync()
+    await manager.pre_weight_sync(_sync_req())
     self.assertFalse(manager._traffic.is_admission_open())
 
   async def test_post_reopens_admission(self):
     manager = self._manager()
-    await manager.pre_weight_sync()
-    await manager.post_weight_sync()
+    await manager.pre_weight_sync(_sync_req())
+    await manager.post_weight_sync(_sync_req())
     self.assertTrue(manager._traffic.is_admission_open())
 
   async def test_reopen_admission_after_abort(self):
     manager = self._manager()
-    await manager.pre_weight_sync()
+    await manager.pre_weight_sync(_sync_req())
     self.assertTrue(manager.reopen_admission())
     self.assertTrue(manager._traffic.is_admission_open())
 
@@ -342,15 +346,15 @@ class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
         agent_factory=test_utils.MockAgent,
     )
     manager._traffic.transition_to_syncing()
-    res = await manager.abort_weight_sync()
+    res = await manager.abort_weight_sync(_sync_req())
     self.assertEqual(res, "aborted")
     sampler.abort_weight_sync.assert_awaited_once()
     self.assertTrue(manager._traffic.is_admission_open())
 
   async def test_repeated_pre_is_allowed(self):
     manager = self._manager()
-    await manager.pre_weight_sync()
-    await manager.pre_weight_sync()
+    await manager.pre_weight_sync(_sync_req())
+    await manager.pre_weight_sync(_sync_req())
     self.assertFalse(manager._traffic.is_admission_open())
 
   async def test_pre_waits_for_inflight_work(self):
@@ -363,7 +367,7 @@ class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
     task = asyncio.create_task(work())
     manager._active_tasks["t0"] = task
     manager._traffic.track(task)
-    pre = asyncio.create_task(manager.pre_weight_sync())
+    pre = asyncio.create_task(manager.pre_weight_sync(_sync_req()))
     await asyncio.sleep(0.01)
     self.assertFalse(pre.done())
     done.set()
@@ -376,7 +380,7 @@ class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
     task = asyncio.create_task(asyncio.Event().wait())
     manager._active_tasks["t0"] = task
     manager._traffic.track(task)
-    await manager.pre_weight_sync()
+    await manager.pre_weight_sync(_sync_req())
     task.cancel()
     manager._active_tasks.pop("t0", None)
 
@@ -589,12 +593,12 @@ class PartialRolloutTest(unittest.IsolatedAsyncioTestCase):
     fake_collector = mock.MagicMock()
     manager._active_collectors["t0"] = fake_collector
 
+    sync_req = _sync_req(3)
     try:
-      await asyncio.wait_for(manager.pre_weight_sync(), timeout=0.5)
+      await asyncio.wait_for(manager.pre_weight_sync(sync_req), timeout=0.5)
       fake_collector.pause.assert_called_once()
-      sampler.pre_weight_sync.assert_awaited_once_with(None)
+      sampler.pre_weight_sync.assert_awaited_once_with(sync_req)
 
-      sync_req = sampler_lib.WeightSyncRequest(policy_version=3)
       self.assertEqual(await manager.weight_sync(sync_req), 3)
       # The version is recorded only once post publishes the weights.
       self.assertEqual(manager._policy_version, 0)
@@ -672,7 +676,7 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
         agent_factory=test_utils.MockAgent,
     )
 
-    await manager.pre_weight_sync()
+    await manager.pre_weight_sync(_sync_req())
     self.assertFalse(manager._traffic.is_admission_open())
 
     entered_episode = asyncio.Event()
@@ -712,8 +716,8 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
       self.assertFalse(gen_task.done())
       self.assertFalse(entered_episode.is_set())
 
-      await manager.weight_sync(sampler_lib.WeightSyncRequest(policy_version=2))
-      await manager.post_weight_sync()
+      await manager.weight_sync(_sync_req(2))
+      await manager.post_weight_sync(_sync_req(2))
       result = await asyncio.wait_for(gen_task, timeout=2.0)
 
     self.assertTrue(entered_episode.is_set())
@@ -762,7 +766,7 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
       )
       await asyncio.sleep(0.01)
 
-      pre_task = asyncio.create_task(manager.pre_weight_sync())
+      pre_task = asyncio.create_task(manager.pre_weight_sync(_sync_req()))
       await asyncio.sleep(0.02)
       # Case 1 must wait for the in-flight turn to drain before pausing sampler.
       self.assertFalse(pre_task.done())
@@ -774,7 +778,7 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
 
     self.assertEqual(traj.policy_version, 0)
     self.assertEqual(sampler.pause_calls, [("wait", True)])
-    await manager.post_weight_sync()
+    await manager.post_weight_sync(_sync_req())
     self.assertEqual(sampler.resume_calls, 1)
 
   async def test_case2_single_turn_partial_rollout_on_skips_drain_and_preserves_kv(
@@ -831,14 +835,13 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
 
       # Case 2: pre_weight_sync returns immediately without draining in-flight
       # turn.
-      await asyncio.wait_for(manager.pre_weight_sync(), timeout=0.5)
+      await asyncio.wait_for(manager.pre_weight_sync(_sync_req()), timeout=0.5)
       self.assertEqual(sampler.pause_calls, [("keep", False)])
       self.assertEqual(sampler.pre_kwargs, [{}])
       self.assertFalse(gen_task.done())
 
-      sync_req = sampler_lib.WeightSyncRequest(policy_version=1)
-      await manager.weight_sync(sync_req)
-      await manager.post_weight_sync(sync_req)
+      await manager.weight_sync(_sync_req(1))
+      await manager.post_weight_sync(_sync_req(1))
       self.assertEqual(sampler.resume_calls, 1)
 
       traj = await asyncio.wait_for(gen_task, timeout=2.0)
@@ -888,15 +891,14 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
       )
       await asyncio.wait_for(in_env_step.wait(), timeout=2.0)
 
-      pre_task = asyncio.create_task(manager.pre_weight_sync())
+      pre_task = asyncio.create_task(manager.pre_weight_sync(_sync_req()))
       await asyncio.sleep(0.02)
       self.assertFalse(pre_task.done())
 
       finish_turn2.set()
       await asyncio.wait_for(pre_task, timeout=2.0)
-      sync_req = sampler_lib.WeightSyncRequest(policy_version=1)
-      await manager.weight_sync(sync_req)
-      await manager.post_weight_sync(sync_req)
+      await manager.weight_sync(_sync_req(1))
+      await manager.post_weight_sync(_sync_req(1))
       traj = await asyncio.wait_for(gen_task, timeout=2.0)
 
     self.assertEqual(traj.policy_version, 0)
@@ -977,7 +979,7 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
       await asyncio.wait_for(in_env_step.wait(), timeout=2.0)
 
       # Trigger pre_weight_sync while episode is inside env.step().
-      await asyncio.wait_for(manager.pre_weight_sync(), timeout=0.5)
+      await asyncio.wait_for(manager.pre_weight_sync(_sync_req()), timeout=0.5)
       self.assertEqual(sampler.pause_calls, [("keep", False)])
 
       # Let env.step() finish while still in SYNCING; Turn 2 must park at
@@ -987,9 +989,8 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
       self.assertFalse(turn2_called_sampler.is_set())
 
       # Complete weight sync to v1 and resume.
-      sync_req = sampler_lib.WeightSyncRequest(policy_version=1)
-      await manager.weight_sync(sync_req)
-      await manager.post_weight_sync(sync_req)
+      await manager.weight_sync(_sync_req(1))
+      await manager.post_weight_sync(_sync_req(1))
 
       traj = await asyncio.wait_for(gen_task, timeout=2.0)
 
@@ -1074,7 +1075,9 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
         if not partial_rollout:
           # Wait mode (partial_rollout=False): pre_weight_sync drains all
           # in-flight work before returning.
-          pre_sync_task = asyncio.create_task(manager.pre_weight_sync())
+          pre_sync_task = asyncio.create_task(
+              manager.pre_weight_sync(_sync_req())
+          )
           for _ in range(3):
             await asyncio.sleep(0)
           self.assertFalse(pre_sync_task.done())
@@ -1082,16 +1085,16 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
           await asyncio.wait_for(pre_sync_task, timeout=5.0)
           self.assertTrue(tasks[7].done())
           self.assertEqual(sampler.pause_calls, [("wait", True)])
-          await manager.weight_sync(
-              sampler_lib.WeightSyncRequest(policy_version=1)
-          )
-          await manager.post_weight_sync()
+          await manager.weight_sync(_sync_req(1))
+          await manager.post_weight_sync(_sync_req(1))
           self.assertEqual(sampler.resume_calls, 1)
         else:
           # Keep mode (partial_rollout=True): pre_weight_sync completes
           # immediately while the straggler stays in-flight and is held by
           # the paused sampler until post_weight_sync resumes it.
-          pre_sync_task = asyncio.create_task(manager.pre_weight_sync())
+          pre_sync_task = asyncio.create_task(
+              manager.pre_weight_sync(_sync_req())
+          )
           for _ in range(3):
             await asyncio.sleep(0)
           self.assertTrue(pre_sync_task.done())
@@ -1102,10 +1105,8 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
           for _ in range(3):
             await asyncio.sleep(0.002)
           self.assertFalse(tasks[7].done())
-          await manager.weight_sync(
-              sampler_lib.WeightSyncRequest(policy_version=1)
-          )
-          await manager.post_weight_sync()
+          await manager.weight_sync(_sync_req(1))
+          await manager.post_weight_sync(_sync_req(1))
           self.assertEqual(sampler.resume_calls, 1)
 
         results = await asyncio.gather(*tasks)
@@ -1326,7 +1327,7 @@ class StagingReservationManagerTest(unittest.IsolatedAsyncioTestCase):
 
     # Capacity 320 bytes = exactly 1 slot of (16 + 16) * 10 = 320 bytes.
     mgr, buf = self._make_staged_manager(max_bytes=320)
-    await mgr.pre_weight_sync()  # Close admission (SYNCING).
+    await mgr.pre_weight_sync(_sync_req())  # Close admission (SYNCING).
 
     with mock.patch.object(
         manager_lib.collector_lib,
@@ -1512,7 +1513,7 @@ class StagingReservationManagerTest(unittest.IsolatedAsyncioTestCase):
     # RolloutManager.post_weight_sync updates staging buffer version before
     # reopening admission.
     sync_req = datatypes.WeightSyncRequest(controller_id="c", policy_version=2)
-    await mgr.pre_weight_sync()
+    await mgr.pre_weight_sync(sync_req)
     await mgr.weight_sync(sync_req)
     await mgr.post_weight_sync(sync_req)
     self.assertEqual(mgr._policy_version, 2)

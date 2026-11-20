@@ -50,11 +50,9 @@ logger = logging.getLogger(__name__)
 
 
 def _sync_request_id(
-    sync_request: base_sampler_lib.WeightSyncRequest | None,
+    sync_request: base_sampler_lib.WeightSyncRequest,
 ) -> Any | None:
   """Extracts the transfer request ID from `sync_request`, if present."""
-  if sync_request is None:
-    return None
   if sync_request.extra_config:
     rid = sync_request.extra_config.get("req_id")
     if rid:
@@ -720,7 +718,7 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
 
   async def pre_weight_sync(
       self,
-      sync_request: base_sampler_lib.WeightSyncRequest | None = None,
+      sync_request: base_sampler_lib.WeightSyncRequest,
       free_kv_cache: bool = False,
       **kwargs: Any,
   ) -> Any:
@@ -772,7 +770,7 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
 
   async def weight_sync(
       self,
-      sync_request: base_sampler_lib.WeightSyncRequest | None = None,
+      sync_request: base_sampler_lib.WeightSyncRequest,
       **kwargs: Any,
   ) -> None:
     """Phase 2: Flushes/awaits H2D transfers across TPU workers and refreshes state_leaves."""
@@ -807,7 +805,7 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
 
   async def post_weight_sync(
       self,
-      sync_request: base_sampler_lib.WeightSyncRequest | None = None,
+      sync_request: base_sampler_lib.WeightSyncRequest,
       **kwargs: Any,
   ) -> Any:
     """Phase 3: Closes weight update session (reinitializes KV cache if freed), restores request intake, and bumps active policy version."""
@@ -828,10 +826,7 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
         self._transfer_statuses[str(rid)] = "SUCCESS"
       await self.resume()
 
-      if sync_request is not None and sync_request.policy_version is not None:
-        self._policy_version = sync_request.policy_version
-      else:
-        self._policy_version += 1
+      self._policy_version = sync_request.policy_version
 
       if os.environ.get("VERIFY_WEIGHTS", "").lower() == "true":
         logger.info("Raiden transfer metrics: %s", await self.raiden_metrics())
@@ -841,7 +836,7 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
 
   async def abort_weight_sync(
       self,
-      sync_request: base_sampler_lib.WeightSyncRequest | None = None,
+      sync_request: base_sampler_lib.WeightSyncRequest,
       **kwargs: Any,
   ) -> Any:
     """Safely rolls back to serving previous policy version without publishing staging."""

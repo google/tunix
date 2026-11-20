@@ -21,7 +21,6 @@ from typing import Any
 from flax import nnx
 import jax
 from tunix.common import configs
-from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.rollout import sampler as base_sampler_lib
 
 
@@ -147,11 +146,7 @@ class RaidenDestinationWeightSyncMixin:
 
   async def pre_weight_sync(
       self,
-      sync_request: (
-          base_sampler_lib.WeightSyncRequest
-          | datatypes.WeightSyncMetadata
-          | None
-      ) = None,
+      sync_request: base_sampler_lib.WeightSyncRequest,
       **kwargs,
   ) -> str | None | Any:
     """Prepares staging handshake prior to policy weight update."""
@@ -174,7 +169,7 @@ class RaidenDestinationWeightSyncMixin:
 
   async def weight_sync(
       self,
-      sync_request: base_sampler_lib.WeightSyncRequest | Any = None,
+      sync_request: base_sampler_lib.WeightSyncRequest,
       **kwargs,
   ) -> int | None:
     """Updates model weights in-place from the specified controller or request."""
@@ -184,24 +179,18 @@ class RaidenDestinationWeightSyncMixin:
       return await self.raiden_sync_delegate.weight_sync(
           sync_request=sync_request, **kwargs
       )
-    else:
-      if sync_request is None:
-        raise ValueError(
-            f"{self.__class__.__name__} Fallback mode [{self.server_id}]"
-            " weight_sync: sync_request is None."
-        )
-      weights = sync_request.weights
-      if weights is None:
-        raise ValueError(
-            f"{self.__class__.__name__} [{self.server_id}] weight_sync:"
-            " weights not found in sync_request."
-        )
-      self.update_params(weights)
-      return None
+    weights = sync_request.weights
+    if weights is None:
+      raise ValueError(
+          f"{self.__class__.__name__} [{self.server_id}] weight_sync:"
+          " weights not found in sync_request."
+      )
+    self.update_params(weights)
+    return None
 
   async def post_weight_sync(
       self,
-      sync_request: base_sampler_lib.WeightSyncRequest | Any = None,
+      sync_request: base_sampler_lib.WeightSyncRequest,
       **kwargs,
   ) -> str | None | Any:
     """Finalizes and switches active policy weights after transfer completion."""
@@ -216,7 +205,7 @@ class RaidenDestinationWeightSyncMixin:
 
   async def abort_weight_sync(
       self,
-      sync_request: base_sampler_lib.WeightSyncRequest | Any = None,
+      sync_request: base_sampler_lib.WeightSyncRequest,
       **kwargs,
   ) -> str | None | Any:
     """Safely aborts weight sync round."""

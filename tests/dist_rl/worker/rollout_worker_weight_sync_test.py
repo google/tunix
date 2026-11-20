@@ -30,6 +30,7 @@ class _FakeManager:
     self.calls = []
     self.admission_open = True
     self.sync_result = sync_result
+    self._policy_version = 0
 
   async def pre_weight_sync(self, sync_request=None, **kwargs):
     del sync_request, kwargs
@@ -42,8 +43,10 @@ class _FakeManager:
     return self.sync_result
 
   async def post_weight_sync(self, sync_request=None, **kwargs):
-    del sync_request, kwargs
+    del kwargs
     self.calls.append("post")
+    if sync_request is not None:
+      self._policy_version = sync_request.policy_version
     return "ok"
 
   async def bind_weight_sync(self, **kwargs):
@@ -126,13 +129,6 @@ class WeightSyncPhasesTest(unittest.IsolatedAsyncioTestCase):
     worker = self._worker()
     result = await worker.get_weight_sync_metadata()
     self.assertEqual(result, [{"unit": "u0"}])
-
-  async def test_sync_falls_back_to_metadata_kwarg(self):
-    worker = self._worker()
-    await worker.weight_sync(metadata=_sync_req("r2", 2))
-    status = await worker.get_weight_sync_status()
-    self.assertEqual(status["req_id"], "r2")
-    self.assertEqual(status["phase"], "h2d_done")
 
   async def test_full_round_call_order(self):
     worker = self._worker()

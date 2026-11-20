@@ -21,6 +21,7 @@ from typing import Any, List, Mapping
 
 from absl import logging
 import jax
+from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.weight_sync import raiden_synchronizer
 from tunix.dist_rl.weight_sync import weight_sync_coordinator
 
@@ -201,7 +202,9 @@ class RaidenWeightSyncDelegate:
     extra = getattr(sync_request, "extra_config", None) or {}
     return extra.get("req_id") is not None
 
-  async def pre_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+  async def pre_weight_sync(
+      self, sync_request: datatypes.WeightSyncRequest, **kwargs
+  ) -> Any:
     """Pre-sync phase hook executed before weight transfer begins."""
     del kwargs
     if self._has_round(sync_request):
@@ -224,7 +227,9 @@ class RaidenWeightSyncDelegate:
 
     return True
 
-  async def weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+  async def weight_sync(
+      self, sync_request: datatypes.WeightSyncRequest, **kwargs
+  ) -> Any:
     """Executes weight installation on device from host staging buffer."""
     del kwargs
     if self._has_round(sync_request):
@@ -239,17 +244,16 @@ class RaidenWeightSyncDelegate:
       sync.h2d()
       if os.environ.get("VERIFY_WEIGHTS", "").lower() == "true":
         logging.info("destination checksums: %s", sync.checksums())
-    version = getattr(sync_request, "policy_version", None)
-    self._version = (
-        int(version) if version is not None else self._version + 1
-    )
+    self._version = sync_request.policy_version
 
     if self._has_round(sync_request):
       self._tracker.complete(sync_request, "h2d_done")
 
     return self._version
 
-  async def post_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+  async def post_weight_sync(
+      self, sync_request: datatypes.WeightSyncRequest, **kwargs
+  ) -> Any:
     """Post-sync phase hook executed after weight installation completes."""
     del kwargs
     if self._has_round(sync_request):
@@ -277,7 +281,9 @@ class RaidenWeightSyncDelegate:
 
     return True
 
-  async def abort_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+  async def abort_weight_sync(
+      self, sync_request: datatypes.WeightSyncRequest, **kwargs
+  ) -> Any:
     """Safely handles abort of weight sync round."""
     del kwargs
     if self._has_round(sync_request):

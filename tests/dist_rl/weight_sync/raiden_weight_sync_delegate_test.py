@@ -19,6 +19,7 @@ from unittest import mock
 
 from absl.testing import absltest
 from tunix.common import configs
+from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.weight_sync import raiden_weight_sync_delegate
 
 
@@ -55,11 +56,11 @@ class _FakeWorker:
     return {}
 
 
-class _Request:
-
-  def __init__(self, policy_version, req_id=None):
-    self.policy_version = policy_version
-    self.extra_config = {"req_id": req_id} if req_id else {}
+def _request(policy_version=0, req_id=None):
+  return datatypes.WeightSyncRequest(
+      policy_version=policy_version,
+      extra_config={"req_id": req_id} if req_id else {},
+  )
 
 
 def _sampler(**config_kwargs):
@@ -108,8 +109,8 @@ class RaidenWeightSyncDelegateTest(unittest.IsolatedAsyncioTestCase):
     fake_state = {"w": 1}
     await delegate.bind_weight_sync(state=fake_state, sampler=_sampler())
     await delegate.get_weight_sync_metadata()
-    await delegate.pre_weight_sync()
-    await delegate.weight_sync()
+    await delegate.pre_weight_sync(_request())
+    await delegate.weight_sync(_request())
     self.assertEqual(delegate._synchronizers[0].bind_calls, 1)
 
   async def test_metadata_returns_one_entry_per_worker(self):
@@ -120,25 +121,19 @@ class RaidenWeightSyncDelegateTest(unittest.IsolatedAsyncioTestCase):
   async def test_weight_sync_installs_and_tracks_version(self):
     delegate = self._delegate()
     await delegate.bind_weight_sync(state={"w": 1})
-    version = await delegate.weight_sync(_Request(policy_version=5))
+    version = await delegate.weight_sync(_request(policy_version=5))
     self.assertEqual(version, 5)
     self.assertEqual(delegate._synchronizers[0].h2d_calls, 1)
-
-  async def test_weight_sync_without_request_bumps_version(self):
-    delegate = self._delegate()
-    await delegate.bind_weight_sync(state={"w": 1})
-    self.assertEqual(await delegate.weight_sync(), 1)
-    self.assertEqual(await delegate.weight_sync(), 2)
 
   async def test_weight_sync_with_zero_version_preserves_zero(self):
     delegate = self._delegate()
     await delegate.bind_weight_sync(state={"w": 1})
-    self.assertEqual(await delegate.weight_sync(_Request(policy_version=0)), 0)
+    self.assertEqual(await delegate.weight_sync(_request(policy_version=0)), 0)
 
   async def test_weight_sync_before_bind_raises(self):
     delegate = self._delegate()
     with self.assertRaisesRegex(RuntimeError, "bind_weight_sync"):
-      await delegate.weight_sync()
+      await delegate.weight_sync(_request())
 
   def test_default_server_id_is_rollout(self):
     delegate = self._delegate()
@@ -170,19 +165,19 @@ class RaidenWeightSyncDelegateTest(unittest.IsolatedAsyncioTestCase):
   async def test_post_weight_sync_returns_true(self):
     delegate = self._delegate()
     await delegate.bind_weight_sync(state={"w": 1}, sampler=_sampler())
-    self.assertTrue(await delegate.post_weight_sync())
+    self.assertTrue(await delegate.post_weight_sync(_request()))
 
   async def test_pre_weight_sync_without_sampler_raises(self):
     delegate = self._delegate()
     await delegate.bind_weight_sync(state={"w": 1})
     with self.assertRaisesRegex(RuntimeError, "Sampler is not available"):
-      await delegate.pre_weight_sync()
+      await delegate.pre_weight_sync(_request())
 
   async def test_pre_weight_sync_clears_prefix_and_kv_cache(self):
     sampler = _sampler()
     delegate = raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
     await delegate.bind_weight_sync(sampler=sampler, state={"w": 1})
-    req = _Request(policy_version=1, req_id="req-1")
+    req = _request(policy_version=1, req_id="req-1")
     await delegate.pre_weight_sync(sync_request=req)
     sampler.delete_cache.assert_called_once()
 
@@ -190,7 +185,7 @@ class RaidenWeightSyncDelegateTest(unittest.IsolatedAsyncioTestCase):
     sampler = _sampler()
     delegate = raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
     await delegate.bind_weight_sync(sampler=sampler, state={"w": 1})
-    req = _Request(policy_version=1, req_id="req-1")
+    req = _request(policy_version=1, req_id="req-1")
     # Only a pre (or an abort) may open a round on the tracker, so the commit
     # phase has to follow one that carries the same round key.
     await delegate.pre_weight_sync(sync_request=req)
@@ -201,7 +196,7 @@ class RaidenWeightSyncDelegateTest(unittest.IsolatedAsyncioTestCase):
     sampler = _sampler(rollout_vllm_free_kv_cache_during_weight_sync=False)
     delegate = raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
     await delegate.bind_weight_sync(sampler=sampler, state={"w": 1})
-    req = _Request(policy_version=1, req_id="req-1")
+    req = _request(policy_version=1, req_id="req-1")
     await delegate.pre_weight_sync(sync_request=req)
     await delegate.post_weight_sync(sync_request=req)
     sampler.delete_cache.assert_not_called()
@@ -216,7 +211,7 @@ class RaidenWeightSyncDelegateTest(unittest.IsolatedAsyncioTestCase):
     )
     delegate = raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
     await delegate.bind_weight_sync(sampler=sampler, state={"w": 1})
-    req = _Request(policy_version=1, req_id="req-1")
+    req = _request(policy_version=1, req_id="req-1")
     await delegate.pre_weight_sync(sync_request=req)
     await delegate.post_weight_sync(sync_request=req)
     sampler.delete_cache.assert_not_called()
@@ -227,7 +222,7 @@ class RaidenWeightSyncDelegateTest(unittest.IsolatedAsyncioTestCase):
   async def test_round_tracker_lifecycle_and_status(self):
     delegate = self._delegate()
     await delegate.bind_weight_sync(state={"w": 1}, sampler=_sampler())
-    req = _Request(policy_version=1, req_id="req-1")
+    req = _request(policy_version=1, req_id="req-1")
     await delegate.pre_weight_sync(sync_request=req)
     await delegate.weight_sync(sync_request=req)
     await delegate.post_weight_sync(sync_request=req)
@@ -236,7 +231,7 @@ class RaidenWeightSyncDelegateTest(unittest.IsolatedAsyncioTestCase):
 
   async def test_abort_weight_sync_marks_aborted(self):
     delegate = self._delegate()
-    req = _Request(policy_version=1, req_id="req-1")
+    req = _request(policy_version=1, req_id="req-1")
     res = await delegate.abort_weight_sync(sync_request=req)
     self.assertTrue(res)
 

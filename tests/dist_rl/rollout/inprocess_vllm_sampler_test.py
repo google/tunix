@@ -416,18 +416,22 @@ class InprocessVllmSamplerTest(absltest.TestCase):
         mock_weights, filter_types=None
     )
 
-    # Missing sync_request should raise ValueError
-    with self.assertRaises(ValueError):
-      asyncio.run(self.sampler.weight_sync(sync_request=None))
-
     # Missing weights in sync_request should raise ValueError
     empty_req = base_sampler_lib.WeightSyncRequest()
     with self.assertRaises(ValueError):
       asyncio.run(self.sampler.weight_sync(sync_request=empty_req))
 
     self.assertIsNone(asyncio.run(self.sampler.bind_weight_sync()))
-    self.assertTrue(asyncio.run(self.sampler.pre_weight_sync()))
-    self.assertTrue(asyncio.run(self.sampler.post_weight_sync()))
+    self.assertTrue(
+        asyncio.run(
+            self.sampler.pre_weight_sync(base_sampler_lib.WeightSyncRequest())
+        )
+    )
+    self.assertTrue(
+        asyncio.run(
+            self.sampler.post_weight_sync(base_sampler_lib.WeightSyncRequest())
+        )
+    )
     with self.assertRaises(NotImplementedError):
       asyncio.run(self.sampler.get_weight_sync_metadata())
 
