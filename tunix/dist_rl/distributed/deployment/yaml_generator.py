@@ -811,6 +811,51 @@ def build_substitutions(
     colocated_python_worker_args = ""
     colocated_python_sidecar_volume = ""
 
+  # GCSFuse mount for checkpoints (e.g. a zonal Rapid bucket), at one path in
+  # every container that touches checkpoint files, whichever one writes arrays.
+  gcsfuse_bucket = (
+      os.environ.get("CKPT_GCSFUSE_BUCKET", "")
+      .strip()
+      .removeprefix("gs://")
+      .rstrip("/")
+  )
+  if gcsfuse_bucket:
+    gcsfuse_mount_path = os.environ.get(
+        "CKPT_GCSFUSE_MOUNT_PATH", "/gcs/ckpt"
+    ).strip()
+    gcsfuse_mount_options = os.environ.get(
+        "CKPT_GCSFUSE_MOUNT_OPTIONS",
+        "implicit-dirs,metadata-cache:negative-ttl-secs:0",
+    ).strip()
+    # Zero limits lift the gcsfuse sidecar's default caps for checkpoint bursts.
+    gcsfuse_pod_annotations = (
+        'gke-gcsfuse/volumes: "true"\n'
+        'gke-gcsfuse/cpu-limit: "0"\n'
+        'gke-gcsfuse/memory-limit: "0"\n'
+        'gke-gcsfuse/ephemeral-storage-limit: "0"'
+    )
+    # hostNetworkPodKSA lets hostNetwork pods authenticate as their own KSA.
+    gcsfuse_volume = (
+        "- name: ckpt-gcsfuse\n"
+        "  csi:\n"
+        "    driver: gcsfuse.csi.storage.gke.io\n"
+        "    volumeAttributes:\n"
+        f"      bucketName: {gcsfuse_bucket}\n"
+        f"      mountOptions: {json.dumps(gcsfuse_mount_options)}\n"
+        '      hostNetworkPodKSA: "true"'
+    )
+    gcsfuse_volume_mount = (
+        f"- mountPath: {gcsfuse_mount_path}\n  name: ckpt-gcsfuse"
+    )
+    if colocated_python_sidecar_block:
+      colocated_python_sidecar_block += (
+          f"\n  - mountPath: {gcsfuse_mount_path}\n    name: ckpt-gcsfuse"
+      )
+  else:
+    gcsfuse_pod_annotations = ""
+    gcsfuse_volume = ""
+    gcsfuse_volume_mount = ""
+
   worker_env = {}
   for line in (
       os.environ.get("PATHWAYS_WORKER_EXTRA_ENV", "").strip().splitlines()
@@ -878,6 +923,9 @@ def build_substitutions(
       "COLOCATED_PYTHON_SIDECAR_VOLUME": colocated_python_sidecar_volume,
       "COLOCATED_PYTHON_WORKER_ARGS": colocated_python_worker_args,
       "COLOCATED_PYTHON_PROXY_ARGS": colocated_python_proxy_args,
+      "GCSFUSE_POD_ANNOTATIONS": gcsfuse_pod_annotations,
+      "GCSFUSE_VOLUME": gcsfuse_volume,
+      "GCSFUSE_VOLUME_MOUNT": gcsfuse_volume_mount,
       "PATHWAYS_WORKER_EXTRA_ENV": pathways_worker_extra_env,
       "PATHWAYS_PROXY_EXTRA_ARGS": pathways_proxy_extra_args,
       "RAIDEN_BROADCAST_K": raiden_broadcast_k,
@@ -949,6 +997,21 @@ def render_template(template_text: str, args: argparse.Namespace) -> str:
     if missing_placeholders:
       raise ValueError(
           f"COLOCATED_PYTHON_SIDECAR_IMAGE is set, but template "
+          f"{args.template_file} lacks {', '.join(missing_placeholders)}"
+      )
+  if is_pathways and os.environ.get("CKPT_GCSFUSE_BUCKET", "").strip():
+    missing_placeholders = [
+        p
+        for p in (
+            "${GCSFUSE_POD_ANNOTATIONS}",
+            "${GCSFUSE_VOLUME}",
+            "${GCSFUSE_VOLUME_MOUNT}",
+        )
+        if p not in template_text
+    ]
+    if missing_placeholders:
+      raise ValueError(
+          f"CKPT_GCSFUSE_BUCKET is set, but template "
           f"{args.template_file} lacks {', '.join(missing_placeholders)}"
       )
   substitutions = build_substitutions(args, template_text=template_text)

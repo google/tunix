@@ -1321,6 +1321,90 @@ class YamlGeneratorTest(parameterized.TestCase):
               )
           )
 
+  def _render_pathways_jobset(self, env: dict[str, str]) -> dict[str, Any]:
+    template_file = _get_template_path("jobset.pathways.yaml")
+    with open(template_file, "r") as f:
+      template_text = f.read()
+    with mock.patch.dict(os.environ, env, clear=True):
+      args = yaml_generator.parse_args(
+          [template_file, "--jobset_name=test-pw", "--tpu_slice=tpuv5:4x4x4"]
+      )
+      return yaml.safe_load(yaml_generator.render_template(template_text, args))
+
+  @parameterized.named_parameters(
+      ("persistence", {}, ["main", "pathways-worker"]),
+      (
+          "colocated_python",
+          {"COLOCATED_PYTHON_SIDECAR_IMAGE": "sidecar:v1"},
+          ["main", "pathways-worker", "colocated-python-sidecar"],
+      ),
+  )
+  def test_ckpt_gcsfuse_mount(
+      self, extra_env: dict[str, str], expected_mounts: list[str]
+  ):
+    doc = self._render_pathways_jobset({
+        "CKPT_GCSFUSE_BUCKET": "gs://my-rapid-bucket/",
+        "CKPT_GCSFUSE_MOUNT_PATH": "/mnt/ckpt",
+        **extra_env,
+    })
+    mounted = []
+    for job in doc["spec"]["replicatedJobs"]:
+      pod = job["template"]["spec"]["template"]
+      annotations = pod["metadata"]["annotations"]
+      self.assertEqual(annotations["gke-gcsfuse/volumes"], "true")
+      self.assertEqual(annotations["gke-gcsfuse/memory-limit"], "0")
+      self.assertEqual(
+          annotations["cluster-autoscaler.kubernetes.io/safe-to-evict"], "false"
+      )
+      volumes = [
+          v for v in pod["spec"]["volumes"] if v["name"] == "ckpt-gcsfuse"
+      ]
+      self.assertEqual(
+          [v["csi"] for v in volumes],
+          [{
+              "driver": "gcsfuse.csi.storage.gke.io",
+              "volumeAttributes": {
+                  "bucketName": "my-rapid-bucket",
+                  "mountOptions": (
+                      "implicit-dirs,metadata-cache:negative-ttl-secs:0"
+                  ),
+                  "hostNetworkPodKSA": "true",
+              },
+          }],
+      )
+      containers = (
+          pod["spec"].get("initContainers", []) + pod["spec"]["containers"]
+      )
+      for container in containers:
+        paths = [
+            m["mountPath"]
+            for m in container.get("volumeMounts", [])
+            if m["name"] == "ckpt-gcsfuse"
+        ]
+        if paths:
+          self.assertEqual(paths, ["/mnt/ckpt"])
+          mounted.append(container["name"])
+    self.assertCountEqual(mounted, expected_mounts)
+
+  def test_ckpt_gcsfuse_unset_renders_no_mount(self):
+    doc = self._render_pathways_jobset(
+        {"COLOCATED_PYTHON_SIDECAR_IMAGE": "sidecar:v1"}
+    )
+    self.assertNotIn("gcsfuse", yaml.safe_dump(doc))
+
+  def test_ckpt_gcsfuse_requires_template_placeholders(self):
+    template_file = _get_template_path("jobset.pathways.yaml")
+    with open(template_file, "r") as f:
+      template_text = f.read().replace("${GCSFUSE_VOLUME_MOUNT}", "")
+    with mock.patch.dict(
+        os.environ, {"CKPT_GCSFUSE_BUCKET": "my-rapid-bucket"}, clear=True
+    ):
+      args = yaml_generator.parse_args(
+          [template_file, "--jobset_name=test-pw", "--tpu_slice=tpuv5:4x4x4"]
+      )
+      with self.assertRaisesRegex(ValueError, r"GCSFUSE_VOLUME_MOUNT"):
+        yaml_generator.render_template(template_text, args)
+
   def test_pathways_extra_env_and_proxy_args(self):
     pw_template = _get_template_path("jobset.pathways.yaml")
     with mock.patch.dict(

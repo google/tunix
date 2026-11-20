@@ -459,13 +459,22 @@ def build_maxtext_config(
           ) from e
 
   output_dir = base_output_directory or "/tmp/maxtext"
+  run_name = worker_id or "tunix_maxtext"
   argv = [
       "maxtext_trainer",
       base_yml,
       f"model_name={model_name}",
-      f"run_name={worker_id or 'tunix_maxtext'}",
+      f"run_name={run_name}",
       f"base_output_directory={output_dir}",
   ]
+  # Checkpoints may live apart from the other outputs, e.g. on a GCSFuse mount;
+  # the layout mirrors the default under `base_output_directory`.
+  checkpoint_base_dir = os.environ.get("MAXTEXT_CHECKPOINT_DIR", "").strip()
+  if checkpoint_base_dir:
+    checkpoint_dir = os.path.join(
+        checkpoint_base_dir, run_name, "checkpoints", ""
+    )
+    argv.append(f"checkpoint_dir={checkpoint_dir}")
   if load_parameters_path:
     argv.append(f"load_parameters_path={load_parameters_path}")
   # Checkpointing configs. `save_interval_steps=0` means "never save"
