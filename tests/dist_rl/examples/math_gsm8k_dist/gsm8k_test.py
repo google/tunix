@@ -323,14 +323,11 @@ class ExampleConfigTest(absltest.TestCase):
     self.assertTrue(config.use_rollout_logps)
     self.assertEqual(config.reward_mode, "env")
 
-  def test_batch_config_and_generation_args(self):
+  def test_batch_config(self):
     batch_config = orchestrator.build_batch_config(_hp(), pad_id=3, eos_id=7)
     self.assertEqual(batch_config.pad_id, 3)
     self.assertEqual(batch_config.num_data_shards, 1)
     self.assertEqual(batch_config.segment_alignment_boundary, 1)
-    generation_args = orchestrator.build_generation_args(_hp())
-    self.assertEqual(generation_args.temperature, 1.0)
-    self.assertEqual(generation_args.top_k, 0)
 
   def test_metrics_logging_options(self):
     hp = _hp()
@@ -404,8 +401,6 @@ class TaskRecordsTest(absltest.TestCase):
                   "question": f"Q{index}",
                   "answer": str(index),
               },
-              "episode_timeout": 600.0,
-              "overlong_filter": False,
           },
       })
     # `gsm8k.yaml` shuffles, so the two records come in either order.
@@ -475,9 +470,6 @@ class RewardFunctionsTest(absltest.TestCase):
         prompts=["p"] * 4,
         completions=completions,
         answer=["4"] * 4,
-        # The other record metadata the orchestrator passes along.
-        episode_timeout=[600.0] * 4,
-        overlong_filter=[False] * 4,
     )
     self.assertEqual(rewards, [1.0, 0.1, 0.5, 0.0])
     for completion, reward in zip(completions, rewards, strict=True):

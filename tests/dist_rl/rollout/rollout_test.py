@@ -60,7 +60,6 @@ class RolloutWorkerTest(parameterized.TestCase):
       req = datatypes.RolloutRequest(
           prompt_id="prompt_single",
           prompt="Solve task X",
-          generation_kwargs={"delay_seconds": 0.02, "max_generation_steps": 64},
           max_turns=5,
       )
       trajectory = await self.actor_handle.asubmit("generate", req)
@@ -77,11 +76,6 @@ class RolloutWorkerTest(parameterized.TestCase):
       req = datatypes.RolloutRequest(
           prompt_id="prompt_async",
           prompt="Solve task Y",
-          generation_kwargs={
-              "delay_seconds": 0.01,
-              "force_finish": True,
-              "max_generation_steps": 64,
-          },
       )
       trajectory = await self.actor_handle.asubmit("generate", req)
       self.assertIsInstance(trajectory, datatypes.RolloutResponse)
@@ -96,7 +90,6 @@ class RolloutWorkerTest(parameterized.TestCase):
       req = datatypes.RolloutRequest(
           prompt_id="prompt_error",
           prompt="Solve failing task",
-          generation_kwargs={"max_generation_steps": 64},
       )
       with mock.patch.object(
           collector.TrajectoryCollectorEngine,
@@ -118,23 +111,21 @@ class RolloutWorkerTest(parameterized.TestCase):
       req_a = datatypes.RolloutRequest(
           prompt_id="slow_A",
           prompt="Task A",
-          generation_kwargs={"delay_seconds": 0.15, "max_generation_steps": 64},
       )
       req_b = datatypes.RolloutRequest(
           prompt_id="fast_B",
           prompt="Task B",
-          generation_kwargs={
-              "delay_seconds": 0.01,
-              "force_finish": True,
-              "max_generation_steps": 64,
-          },
       )
       req_c = datatypes.RolloutRequest(
           prompt_id="med_C",
           prompt="Task C",
-          generation_kwargs={"delay_seconds": 0.05, "max_generation_steps": 64},
       )
 
+      self.sampler.delay_by_request_id = {
+          "traj_slow_A_g0": 0.15,
+          "traj_fast_B_g0": 0.01,
+          "traj_med_C_g0": 0.05,
+      }
       completed_order: List[str] = []
       responses = await self.service.generate(
           [req_a, req_b, req_c],
@@ -187,22 +178,10 @@ class RolloutWorkerTest(parameterized.TestCase):
       req_1 = datatypes.RolloutRequest(
           prompt_id="req_worker_1",
           prompt="Task for slice 1",
-          generation_kwargs={
-              "delay_seconds": 0.02,
-              "force_finish": True,
-              "answer": "Solution_A",
-              "max_generation_steps": 64,
-          },
       )
       req_2 = datatypes.RolloutRequest(
           prompt_id="req_worker_2",
           prompt="Task for slice 2",
-          generation_kwargs={
-              "delay_seconds": 0.04,
-              "force_finish": True,
-              "answer": "Solution_B",
-              "max_generation_steps": 64,
-          },
       )
 
       # Option 1 (asubmit) futures across workers via actor handles
@@ -252,11 +231,6 @@ class RolloutWorkerTest(parameterized.TestCase):
       req = datatypes.RolloutRequest(
           prompt_id="prompt_native_actor",
           prompt="Solve native actor task",
-          generation_kwargs={
-              "delay_seconds": 0.01,
-              "force_finish": True,
-              "max_generation_steps": 64,
-          },
       )
       traj = await handle.asubmit("generate", req)
       self.assertIsInstance(traj, datatypes.RolloutResponse)
@@ -283,7 +257,7 @@ class RolloutWorkerTest(parameterized.TestCase):
           config=worker.RolloutConfig(
               trajectory_store_config={"backend": "memory"}
           ),
-          sampler=self.sampler,
+          sampler=mocks.MockBaseSamplerImpl(default_delay=0.01, min_turns=0),
           env_name="mock_env",
           agent_name="mock_agent",
           tokenizer=mocks.MockTokenizer(),
@@ -296,11 +270,6 @@ class RolloutWorkerTest(parameterized.TestCase):
           prompt_id="prompt_store_test",
           prompt="Task for store test",
           target_policy_version=7,
-          generation_kwargs={
-              "delay_seconds": 0.01,
-              "force_finish": True,
-              "max_generation_steps": 64,
-          },
           metadata={"pair_idx": 42},
       )
       with (
@@ -324,14 +293,6 @@ class RolloutWorkerTest(parameterized.TestCase):
         self.assertEqual(meta.status, "SUCCEEDED")
         self.assertEqual(meta.target_policy_versions, [7])
         self.assertEqual(meta.extra.get("pair_idx"), 42)
-        self.assertEqual(
-            meta.hyperparams,
-            {
-                "delay_seconds": 0.01,
-                "force_finish": True,
-                "max_generation_steps": 64,
-            },
-        )
         self.assertIsInstance(meta.env_time, dict)
         self.assertIn("reset_latency", meta.env_time)
         self.assertIn("step_latency", meta.env_time)
@@ -374,11 +335,6 @@ class RolloutWorkerTest(parameterized.TestCase):
           group_index=2,
           prompt="Task for group test",
           target_policy_version=3,
-          generation_kwargs={
-              "delay_seconds": 0.01,
-              "force_finish": True,
-              "max_generation_steps": 64,
-          },
           metadata={"custom_ref": custom_obj},
       )
       res = await svc.generate(req)
@@ -423,11 +379,8 @@ class RolloutWorkerTest(parameterized.TestCase):
       cancel_req = datatypes.RolloutRequest(
           prompt_id="prompt_cancel",
           prompt="Task to cancel",
-          generation_kwargs={
-              "delay_seconds": 2.0,
-              "max_generation_steps": 64,
-          },
       )
+      self.sampler.delay_by_request_id = {"traj_prompt_cancel_g0": 2.0}
       gen_task = asyncio.create_task(cancel_svc.generate(cancel_req))
       await asyncio.sleep(0.05)
       cancel_svc.stop()
@@ -455,7 +408,7 @@ class RolloutWorkerTest(parameterized.TestCase):
           config=worker.RolloutConfig(
               trajectory_store_config={"backend": "memory"}
           ),
-          sampler=self.sampler,
+          sampler=mocks.MockBaseSamplerImpl(default_delay=0.01, min_turns=3),
           env_name="mock_env",
           agent_name="mock_agent",
           env_config={"max_steps": 1},
@@ -466,12 +419,6 @@ class RolloutWorkerTest(parameterized.TestCase):
       max_steps_req = datatypes.RolloutRequest(
           prompt_id="prompt_max_steps",
           prompt="Task hitting max steps",
-          generation_kwargs={
-              "delay_seconds": 0.01,
-              "min_turns": 3,
-              "force_finish": False,
-              "max_generation_steps": 64,
-          },
       )
       await max_steps_svc.generate(max_steps_req)
       mem_store = max_steps_svc.trajectory_store

@@ -823,11 +823,6 @@ class RemoteExecutionPerfTest(absltest.TestCase):
                 "prompt": f"Solve math problem #{i}",
                 "prompt_id": f"prompt_{i}",
                 "group_index": i % 16,
-                "generation_kwargs": {
-                    "temperature": 0.8,
-                    "max_tokens": 2048,
-                    "return_logprobs": True,
-                },
             },
         )
         for i in range(num_items)

@@ -339,14 +339,12 @@ class GcsCacheTest(absltest.TestCase):
           prompt="What is 2+2?",
           prompt_id="p1",
           group_index=0,
-          generation_kwargs={"max_generation_steps": 16},
       )
       req2 = datatypes.RolloutRequest(
           request_id="req_2",
           prompt="What is 3+3?",
           prompt_id="p2",
           group_index=0,
-          generation_kwargs={"max_generation_steps": 16},
       )
       await worker.generate(requests=req1)
       await worker.generate(requests=req2)

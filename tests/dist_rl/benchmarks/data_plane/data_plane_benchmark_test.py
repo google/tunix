@@ -206,7 +206,6 @@ class DataPlaneBenchmarkTest(parameterized.TestCase):
                   group_index=1,
                   max_turns=1,
                   max_response_length=16,
-                  generation_kwargs={"return_routed_experts": True},
                   metadata={"env_config": {"seed": 1, "prompt_tokens": 32}},
               )
           )
@@ -262,7 +261,6 @@ class DataPlaneBenchmarkTest(parameterized.TestCase):
                   group_index=2,
                   max_turns=item_turns,
                   max_response_length=64,
-                  generation_kwargs={"return_routed_experts": True},
                   metadata=dict(item_meta),
               )
           )

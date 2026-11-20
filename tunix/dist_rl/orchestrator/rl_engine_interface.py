@@ -71,11 +71,9 @@ class AbstractRLEngine(Protocol):
       *,
       num_generations: int = 1,
       policy_version: int = 0,
-      generation_args: datatypes.GenerationArgs | None = None,
       route_metadata: Mapping[str, Any] | None = None,
       stage_routed_experts: bool = False,
       max_response_length: int | None = None,
-      **kwargs: Any,
   ) -> list[str]:
     """High-level convenience: Expands prompts by num_generations and dispatches rollouts.
 
@@ -96,7 +94,6 @@ class AbstractRLEngine(Protocol):
       num_generations: Number of rollout trajectories to generate per prompt
         (G).
       policy_version: Active policy version for generation.
-      generation_args: Optional generation parameters (temperature, max steps).
       route_metadata: Optional routing metadata merged into each request's
         metadata.
       stage_routed_experts: Whether rollout workers stage MoE `routed_experts`
@@ -104,7 +101,6 @@ class AbstractRLEngine(Protocol):
       max_response_length: Default response token budget stamped onto requests
         that omit `max_response_length`, and upper bound when
         `stage_routed_experts=True`.
-      **kwargs: Optional additional metadata.
 
     Returns:
       List of dispatched `request_id` strings.
@@ -125,9 +121,7 @@ class AbstractRLEngine(Protocol):
   async def generate(
       self,
       prompts: Sequence[Any],
-      generation_args: datatypes.GenerationArgs | None = None,
       route_metadata: Mapping[str, Any] | None = None,
-      **kwargs: Any,
   ) -> list[datatypes.TrajectoryItem]:
     """Synchronous batched rollout generation over rollout workers."""
     ...
