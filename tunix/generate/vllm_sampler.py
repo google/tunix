@@ -620,7 +620,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
   def tokenize(self, input_string: str) -> np.ndarray | list[int]:
     """Tokenizes the input string."""
-    input_ids = self.tokenizer.encode(input_string)
+    input_ids = self.tokenizer.strip_trailing_eos_id(
+        self.tokenizer.encode(input_string)
+    )
     bos_tok = [self.tokenizer.bos_id()] if self.tokenizer.bos_id() else []
     return self.tokenizer.dedup_bos_ids(bos_tok + input_ids)
 

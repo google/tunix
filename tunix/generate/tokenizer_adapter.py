@@ -109,6 +109,12 @@ class TokenizerAdapter:
       i += 1
     return ids[i:]
 
+  def strip_trailing_eos_id(self, ids: list[int]) -> list[int]:
+    """Removes a trailing eos_id, e.g. one appended by `add_eos=True`."""
+    if ids and ids[-1] == self.eos_id():
+      return ids[:-1]
+    return ids
+
   def _missing_methods(self) -> list[str]:
     """Checks if the tokenizer has any missing methods."""
     required_methods = ['encode', 'decode', 'bos_id', 'eos_id', 'pad_id']
