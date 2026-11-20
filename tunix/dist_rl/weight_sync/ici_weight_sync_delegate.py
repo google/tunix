@@ -28,6 +28,7 @@ by name.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+import dataclasses
 import gc
 import os
 import threading
@@ -38,12 +39,15 @@ from absl import logging
 from flax import nnx
 import jax
 import jax.numpy as jnp
+import numpy as np
 from tunix.dist_rl.weight_sync import ici_handler
 from tunix.dist_rl.weight_sync import ici_transport
 from tunix.dist_rl.weight_sync import weight_sync
 from tunix.dist_rl.weight_sync import weight_sync_coordinator
 from tunix.dist_rl.weight_sync import weight_utils
 from tunix.utils import maxtext_utils
+from tunix.utils import sharding_utils
+from tunix.utils import subworld_checkpoint
 
 DROP_OLD_WEIGHTS_ENV = "ICI_DROP_OLD_WEIGHTS"
 
@@ -249,9 +253,93 @@ class IciMaxTextTrainerAdapter:
     self._ici_sync: IciSourceSynchronizer | None = None
     self._last_staged_step: int | None = None
     self._staged_metadata: list[weight_sync.WorkUnitMetadata] | None = None
+    self._active_processes = subworld_checkpoint.mesh_process_indices(
+        getattr(engine, "_mesh", None)
+    )
+    self._install_multihost_batch_sharding()
+
+  def _install_multihost_batch_sharding(self) -> None:
+    """Ensures multi-host MaxText engines place global host batches via callback.
+
+    When the orchestrator fans a global micro-batch out to S > 1 McJAX trainer
+    processes, `MaxTextTrainingEngine._place_batch_inputs` uses `jax.device_put`
+    (which rejects multi-host shardings) and compiled `fwd_bwd` passes raw NumPy
+    arrays directly. Wrapping `_prepare_batch` converts global host array leaves
+    into globally-sharded `jax.Array`s right after `gen_model_input_fn` runs.
+    """
+    mesh = getattr(self._engine, "_mesh", None)
+    if len(subworld_checkpoint.mesh_process_indices(mesh)) <= 1:
+      return
+    orig_prepare = getattr(self._engine, "_prepare_batch", None)
+    leaf_sharding = getattr(self._engine, "_leaf_data_sharding", None)
+    input_spec = getattr(self._engine, "_input_data_spec", None)
+    if not (
+        callable(orig_prepare)
+        and callable(leaf_sharding)
+        and callable(input_spec)
+    ):
+      return
+
+    def _prepare_batch_multihost(payload: Any) -> Any:
+      batch = orig_prepare(payload)
+      data_spec = input_spec()
+
+      def _place(leaf: Any) -> Any:
+        if not isinstance(leaf, (jax.Array, np.ndarray)):
+          return leaf
+        if leaf.ndim == 0 or 0 in leaf.shape:
+          return leaf
+        if isinstance(leaf, jax.Array) and not leaf.is_fully_addressable:
+          return leaf
+        target = leaf_sharding(leaf, data_spec)
+        if target is None or getattr(leaf, "sharding", None) == target:
+          return leaf
+        return sharding_utils.place_array_on_target(leaf, target)
+
+      return jax.tree.map(_place, batch)
+
+    self._engine._prepare_batch = _prepare_batch_multihost  # pylint: disable=protected-access
 
   def __getattr__(self, name: str) -> Any:
     return getattr(self._engine, name)
+
+  def fwd_only(self, payload: Any) -> Any:
+    mesh = getattr(self._engine, "_mesh", None)
+    if mesh is not None and jax.process_count() > 1:
+      procs = subworld_checkpoint.mesh_process_indices(mesh)
+      if len(procs) > 1:
+        fwd_shardings_fn = getattr(
+            self._engine, "_fwd_only_data_shardings", None
+        )
+        if callable(fwd_shardings_fn):
+          if (
+              dataclasses.is_dataclass(payload)
+              and "metadata" in payload.__dataclass_fields__
+          ):
+            payload = dataclasses.replace(payload, metadata={})
+          shardings = fwd_shardings_fn(payload)
+
+          def _place(leaf: Any, target: Any) -> Any:
+            if not isinstance(leaf, (jax.Array, np.ndarray)):
+              return leaf
+            if leaf.ndim == 0 or 0 in leaf.shape:
+              return leaf
+            if isinstance(leaf, jax.Array) and not leaf.is_fully_addressable:
+              return leaf
+            if target is None or getattr(leaf, "sharding", None) == target:
+              return leaf
+            return sharding_utils.place_array_on_target(leaf, target)
+
+          payload = jax.tree.map(_place, payload, shardings)
+    return self._engine.fwd_only(payload)
+
+  def save_checkpoint(self, *args: Any, **kwargs: Any) -> Any:
+    with subworld_checkpoint.patch_orbax_for_subworld(self._active_processes):
+      return self._engine.save_checkpoint(*args, **kwargs)
+
+  def restore_checkpoint(self, *args: Any, **kwargs: Any) -> Any:
+    with subworld_checkpoint.patch_orbax_for_subworld(self._active_processes):
+      return self._engine.restore_checkpoint(*args, **kwargs)
 
   def _ensure_sync(self) -> IciSourceSynchronizer:
     if self._ici_sync is None:

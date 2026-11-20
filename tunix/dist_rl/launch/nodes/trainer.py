@@ -312,6 +312,7 @@ def _load_actor_model(
 
 def _create_tunix_trainer_factory(
     hp: resolve_config.DistHyperParameters,
+    worker_id: str = LOCAL_WORKER_ID,
 ) -> tuple[TrainerFactory, Mesh]:
   """Creates the PeftTrainer v2 factory and the trainer mesh."""
   logging.info("Trainer backend: Tunix's PeftTrainer.")
@@ -326,8 +327,33 @@ def _create_tunix_trainer_factory(
   )
   logging.info("Prepared trainer safetensors directory: %s", model_dir)
 
+  is_ici = (
+      hp.cluster_targets.weight_sync_mode
+      == common_datatypes.WeightSyncMode.ICI
+  )
   logging.info("Creating trainer mesh...")
-  mesh = node_utils.create_mesh(hp, _ACTOR_KEY, "Trainer")
+  trainer_devices = _ici_trainer_devices(hp) if is_ici else None
+  if trainer_devices is not None and len(trainer_devices) > len(
+      jax.local_devices()
+  ):
+    axes = hp.mesh_axes(_ACTOR_KEY)
+    shape = (axes["fsdp"], axes["tp"])
+    if shape[0] * shape[1] != len(trainer_devices):
+      raise ValueError(
+          "Trainer mesh dimensions must multiply to ICI trainer device count."
+          f" Got {_ACTOR_KEY}.mesh shape={shape},"
+          f" devices={len(trainer_devices)}."
+      )
+    from jax.experimental import mesh_utils  # pylint: disable=g-import-not-at-top
+
+    mesh = Mesh(
+        mesh_utils.create_device_mesh(
+            shape, trainer_devices, allow_split_physical_axes=True
+        ),
+        axis_names=node_utils.MESH_AXIS_NAMES,
+    )
+  else:
+    mesh = node_utils.create_mesh(hp, _ACTOR_KEY, "Trainer")
   logging.info("Trainer mesh: %s", mesh)
 
   training_config = _tunix_training_config(
@@ -363,14 +389,11 @@ def _create_tunix_trainer_factory(
 
   # Raiden is the trainer's default source transport; ICI swaps in its own.
   transport_kwargs = {}
-  if (
-      hp.cluster_targets.weight_sync_mode
-      == common_datatypes.WeightSyncMode.ICI
-  ):
+  if is_ici:
     from tunix.dist_rl.weight_sync import ici_weight_sync_delegate  # pylint: disable=g-import-not-at-top
 
     transport_kwargs["weight_sync_worker_factory"] = functools.partial(
-        ici_weight_sync_delegate.IciSourceSynchronizer, "trainer"
+        ici_weight_sync_delegate.IciSourceSynchronizer, worker_id
     )
 
   def _factory() -> abstract_trainer.AbstractTrainer:
@@ -582,40 +605,111 @@ def _kwarg(kwargs: Mapping[str, KwargValue | None], key: str, unset: _T) -> _T:
   return unset if value is None else type(unset)(value)
 
 
-def _ici_trainer_devices() -> list[jax.Device] | None:
+def _discover_trainer_process_indices(
+    hp: resolve_config.DistHyperParameters,
+) -> list[int]:
+  """Resolves the actual `jax.process_index()` set for all trainer hosts.
+
+  On GKE TPU slices, `jax.distributed.initialize()` orders `jax.process_index()`
+  by physical torus coordinate rather than Kubernetes `POD_INDEX`, so multi-host
+  trainers must NOT assume their ranks equal `0..trainer_replicas-1`.
+
+  Resolution order:
+  1. Explicit `ICI_TRAINER_PROCESS_INDICES` env override (if set).
+  2. When `cluster_config.trainer_replicas > 1`: dynamic rendezvous through the
+     shared JAX distributed coordinator KV store so every trainer replica
+     exchanges its actual `jax.process_index()`.
+  3. Otherwise (single-host trainer): `[jax.process_index()]`.
+  """
+  raw = os.environ.get("ICI_TRAINER_PROCESS_INDICES", "").strip()
+  if raw:
+    try:
+      process_indices = sorted(
+          {int(p.strip()) for p in raw.split(",") if p.strip()}
+      )
+    except ValueError as exc:
+      raise ValueError(
+          "ICI_TRAINER_PROCESS_INDICES must be comma-separated ints, got"
+          f" {raw!r}."
+      ) from exc
+    if not process_indices:
+      raise ValueError("ICI_TRAINER_PROCESS_INDICES must not be empty.")
+    return process_indices
+
+  cluster = hp.config_mapping("cluster_config")
+  trainer_replicas = int(cluster.get("trainer_replicas", 1))
+  if trainer_replicas <= 1:
+    return [int(jax.process_index())]
+
+  raw_replica = os.environ.get(node_utils.TRAINER_REPLICA_ENV, "").strip()
+  if not raw_replica.isdecimal():
+    raise ValueError(
+        f"{node_utils.TRAINER_REPLICA_ENV} must be a non-negative integer when"
+        f" cluster_config.trainer_replicas={trainer_replicas}, got"
+        f" {raw_replica!r}."
+    )
+  replica = int(raw_replica)
+  if not 0 <= replica < trainer_replicas:
+    raise ValueError(
+        f"{node_utils.TRAINER_REPLICA_ENV}={replica} is out of range for"
+        f" cluster_config.trainer_replicas={trainer_replicas}."
+    )
+
+  from orbax.checkpoint._src.multihost import multihost as ocp_multihost  # pylint: disable=g-import-not-at-top
+
+  client = ocp_multihost.get_jax_distributed_client()
+  run_id = str(cluster.get("run_id") or "default")
+  prefix = f"tunix_ici_trainer_proc/{run_id}"
+  timeout_ms = int(float(cluster.get("rpc_timeout_s") or 600.0) * 1000)
+  my_proc = int(jax.process_index())
+  client.key_value_set(f"{prefix}/{replica}", str(my_proc))
+  discovered: list[int] = []
+  for idx in range(trainer_replicas):
+    val = client.blocking_key_value_get(f"{prefix}/{idx}", timeout_ms)
+    discovered.append(int(val))
+  process_indices = sorted(set(discovered))
+  if len(process_indices) != trainer_replicas:
+    raise RuntimeError(
+        f"Expected {trainer_replicas} distinct trainer JAX processes, got"
+        f" {discovered}."
+    )
+  logging.info(
+      "Dynamically discovered trainer JAX process indices via coordinator KV"
+      " store: %s (this replica=%d -> process_index=%d).",
+      process_indices,
+      replica,
+      my_proc,
+  )
+  return process_indices
+
+
+def _ici_trainer_devices(
+    hp: resolve_config.DistHyperParameters,
+) -> list[jax.Device] | None:
   """Returns the trainer's device subset inside a shared multi-process ICI world.
 
   Returns None when running single-process (every visible device belongs to the
-  trainer). In a multi-process ICI world, defaults to this process's local
-  devices; multi-host trainers can set `ICI_TRAINER_PROCESS_INDICES` (e.g.
-  `"0,1"`) to span multiple processes of the slice.
+  trainer). In a multi-process ICI world, resolves the actual `jax.process_index()`
+  of every trainer process (dynamically via the JAX distributed coordinator KV
+  store for multi-host trainers, or `ICI_TRAINER_PROCESS_INDICES` if overridden)
+  and returns their sorted devices.
   """
   if jax.process_count() <= 1:
     return None
   from tunix.dist_rl.weight_sync import ici_transport  # pylint: disable=g-import-not-at-top
 
-  raw = os.environ.get("ICI_TRAINER_PROCESS_INDICES", "").strip()
-  if not raw:
-    return ici_transport.local_devices()
-  try:
-    process_indices = sorted({int(p.strip()) for p in raw.split(",") if p.strip()})
-  except ValueError as exc:
-    raise ValueError(
-        f"ICI_TRAINER_PROCESS_INDICES must be comma-separated ints, got {raw!r}."
-    ) from exc
-  if not process_indices:
-    raise ValueError("ICI_TRAINER_PROCESS_INDICES must not be empty.")
+  process_indices = _discover_trainer_process_indices(hp)
   world = {d.process_index for d in jax.devices()}
   missing = [p for p in process_indices if p not in world]
   if missing:
     raise ValueError(
-        f"ICI_TRAINER_PROCESS_INDICES references process(es) {missing} outside"
-        f" this JAX world {sorted(world)}."
+        f"Trainer process indices {missing} are outside this JAX world"
+        f" {sorted(world)}."
     )
   if jax.process_index() not in process_indices:
     raise ValueError(
-        f"This trainer process ({jax.process_index()}) is not in"
-        f" ICI_TRAINER_PROCESS_INDICES={process_indices}."
+        f"This trainer process ({jax.process_index()}) is not in trainer"
+        f" process indices {process_indices}."
     )
   return [d for p in process_indices for d in ici_transport.local_devices(p)]
 
@@ -645,7 +739,7 @@ def _create_maxtext_trainer_factory(
       hp.cluster_targets.weight_sync_mode
       == common_datatypes.WeightSyncMode.ICI
   )
-  trainer_devices = _ici_trainer_devices() if is_ici else None
+  trainer_devices = _ici_trainer_devices(hp) if is_ici else None
   num_devices = (
       len(trainer_devices) if trainer_devices is not None else jax.device_count()
   )
@@ -733,7 +827,7 @@ def _create_maxtext_trainer_factory(
       from tunix.dist_rl.weight_sync import ici_weight_sync_delegate  # pylint: disable=g-import-not-at-top
 
       return ici_weight_sync_delegate.IciMaxTextTrainerAdapter(
-          engine, job_name="trainer"
+          engine, job_name=worker_id
       )
     return engine
 
@@ -746,7 +840,7 @@ def _create_trainer_factory(
   """Dispatches on `actor_model_config.model_source` (maxtext vs tunix)."""
   if hp.config_mapping(_ACTOR_KEY)["model_source"] == "maxtext":
     return _create_maxtext_trainer_factory(hp, worker_id)
-  return _create_tunix_trainer_factory(hp)
+  return _create_tunix_trainer_factory(hp, worker_id)
 
 
 def main(

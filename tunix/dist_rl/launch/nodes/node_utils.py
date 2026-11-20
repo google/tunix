@@ -52,6 +52,9 @@ ProcessRole = resolve_config.ProcessRole
 # (0-based) when `cluster_config.rollout_replicas > 1`, instead of giving each
 # replica its own config.
 ROLLOUT_REPLICA_ENV = "DIST_RL_ROLLOUT_REPLICA"
+# Environment variable holding each trainer process's 0-based index when
+# `cluster_config.trainer_replicas > 1` (multi-host McJAX trainer).
+TRAINER_REPLICA_ENV = "DIST_RL_TRAINER_REPLICA"
 # Environment variable holding the worker's gRPC port on
 # `cluster_config.target: external`, where the launcher assigns each process
 # its own port (e.g. one a job scheduler allocates), instead of giving each
@@ -70,6 +73,7 @@ CONFIG_SHA256_METADATA_KEY = "config_sha256"
 # nodes set; the prefixes are whole namespaces.
 _LOGGED_ENV_VARS = frozenset({
     ROLLOUT_REPLICA_ENV,
+    TRAINER_REPLICA_ENV,
     WORKER_PORT_ENV,
     "ALLOW_MULTIPLE_LIBTPU_LOAD",
     "DISABLE_JAX_CACHE",
@@ -382,6 +386,30 @@ def worker_id(
   role_id = (
       str(cluster["k8s"][f"{role}_id"]) if target == "k8s" else local_worker_id
   )
+  if role == "trainer":
+    replicas = int(cluster.get("trainer_replicas", 1))
+    if replicas == 1 and TRAINER_REPLICA_ENV not in os.environ:
+      return role_id
+    if TRAINER_REPLICA_ENV not in os.environ:
+      raise ValueError(
+          f"{TRAINER_REPLICA_ENV} must be set on each trainer worker when"
+          f" cluster_config.trainer_replicas={replicas}."
+      )
+    raw_replica = os.environ[TRAINER_REPLICA_ENV]
+    if not raw_replica.isdecimal():
+      raise ValueError(
+          f"{TRAINER_REPLICA_ENV} must be a non-negative integer, got"
+          f" {raw_replica!r}."
+      )
+    replica = int(raw_replica)
+    if not 0 <= replica < replicas:
+      raise ValueError(
+          f"{TRAINER_REPLICA_ENV}={replica} is out of range for"
+          f" cluster_config.trainer_replicas={replicas}."
+      )
+    if replicas == 1:
+      return role_id
+    return f"{role_id}-{replica}" if target == "k8s" else f"{role}-{replica}"
   if role != "rollout":
     return role_id
   replicas = int(cluster["rollout_replicas"])
@@ -571,6 +599,8 @@ async def serve_worker(
         "instance_id": worker_service.instance_id,
         CONFIG_SHA256_METADATA_KEY: config_sha256,
     }
+    if jax.process_count() > 1:
+      metadata["jax_process_index"] = int(jax.process_index())
     if extra_metadata:
       metadata.update(extra_metadata)
     assert process_context.ipc is not None
@@ -660,13 +690,16 @@ def create_mesh(
   # A node is a single-controller JAX program over its own devices. When it
   # shares a multi-process JAX world with the other nodes
   # (`weight_sync_config.mode: ici`), `jax.devices()` also lists their chips.
-  local_devices = (
-      jax.local_devices() if jax.process_count() > 1 else jax.devices()
-  )
-  if shape[0] * shape[1] != len(local_devices):
+  if jax.process_count() > 1:
+    local_devices = jax.local_devices()
+    num_devices = len(local_devices)
+  else:
+    num_devices = jax.device_count()
+    local_devices = jax.devices()
+  if shape[0] * shape[1] != num_devices:
     raise ValueError(
         f"{label} mesh dimensions must multiply to visible JAX device count. "
-        f"Got {model_key}.mesh shape={shape}, devices={len(local_devices)}."
+        f"Got {model_key}.mesh shape={shape}, devices={num_devices}."
     )
   # Shapes that already factor into whole physical axes get the same device
   # order; shapes like (8, 8) on a 4x4x4 slice need a split physical axis.

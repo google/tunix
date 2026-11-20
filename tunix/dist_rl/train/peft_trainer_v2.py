@@ -42,6 +42,7 @@ from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import tracer as perf_tracer_lib
 from tunix.sft import checkpoint_manager
+from tunix.sft import checkpoint_options
 from tunix.sft import hooks
 from tunix.sft import inflight_throttler
 from tunix.sft import metrics_logger as sft_metrics_logger
@@ -464,9 +465,24 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self.loss_fn = _default_loss_fn
     self.eval_loss_fn = _default_loss_fn
     self.gen_model_input_fn = lambda x: x
+    ckpt_options = self.config.checkpointing_options
+    if jax.process_count() > 1:
+      from tunix.utils import subworld_checkpoint  # pylint: disable=g-import-not-at-top
+
+      model_procs = subworld_checkpoint.state_process_indices(
+          nnx.state(self.model)
+      )
+      if subworld_checkpoint.is_subworld(model_procs):
+        resolved_ckpt_opts = checkpoint_options.resolve_checkpointing_defaults(
+            ckpt_options
+        )
+        if resolved_ckpt_opts.active_processes is None:
+          ckpt_options = dataclasses.replace(
+              resolved_ckpt_opts, active_processes=model_procs
+          )
     self.checkpoint_manager = checkpoint_manager.CheckpointManager(
         root_directory=self.config.checkpoint_root_directory,
-        options=self.config.checkpointing_options,
+        options=ckpt_options,
     )
     self.metrics_logger = metrics_logger
     self.metrics_prefix = self.config.metrics_prefix
@@ -770,6 +786,11 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
     def _shard(x: Any, p: shd.PartitionSpec | None) -> Any:
       if not isinstance(x, (jax.Array, np.ndarray)):
+        return x
+      if isinstance(x, jax.Array) and not x.is_fully_addressable:
+        # Already sharded across a multi-host mesh (e.g. optimizer state
+        # initialized from FSDP-sharded params); leave intact rather than
+        # trying to re-place via host-local callbacks.
         return x
       sharding = sharding_utils.get_sharding(
           x, mesh, shd.PartitionSpec() if p is None else p
@@ -1097,6 +1118,26 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     payload = self._prepare_inputs(payload)
     if dataclasses.is_dataclass(payload) and hasattr(payload, "metadata"):
       payload = dataclasses.replace(payload, metadata={})
+    mesh = jax.interpreters.pxla.thread_resources.env.physical_mesh
+    if not mesh.empty and len(
+        {int(d.process_index) for d in mesh.devices.flat}
+    ) > 1:
+      # Under multi-host McJAX, the orchestrator broadcasts the full global
+      # micro-batch to every trainer host; slice each host's addressable piece
+      # via `place_array_on_target` (`make_array_from_callback`) instead of
+      # `make_array_from_process_local_data`, which would multiply the global
+      # batch size by the trainer process count.
+      pspec = jax.sharding.PartitionSpec(*self.config.data_sharding_axis)
+
+      def _place_global(x: Any) -> Any:
+        if not isinstance(x, (np.ndarray, jax.Array)):
+          return x
+        if isinstance(x, jax.Array) and not x.is_fully_addressable:
+          return x
+        target = sharding_utils.get_sharding(x, mesh=mesh, pspec=pspec)
+        return sharding_utils.place_array_on_target(x, target)
+
+      return jax.tree.map(_place_global, payload)
     return sharding_utils.shard_input(payload, self.config.data_sharding_axis)
 
   def _record_fwd_bwd(self, train_loss: ArrayLike, aux: Any) -> None:

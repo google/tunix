@@ -341,7 +341,7 @@ class TrainerFactoryTest(absltest.TestCase):
   ):
     hp_tunix = _hp()
     trainer._create_trainer_factory(hp_tunix, "trainer-0")
-    mock_create_tunix.assert_called_once_with(hp_tunix)
+    mock_create_tunix.assert_called_once_with(hp_tunix, "trainer-0")
     mock_create_maxtext.assert_not_called()
 
     mock_create_tunix.reset_mock()

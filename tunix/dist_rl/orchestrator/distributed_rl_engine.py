@@ -381,11 +381,37 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         )
     }
 
+  def _role_handles(
+      self, role: datatypes.Role | str
+  ) -> list[remote_execution.ActorHandle]:
+    """Returns active handles for `role` in deterministic `worker_id` order."""
+    targets = self._registry.targets(
+        role, statuses=(worker_registry.AdmissionStatus.ACTIVE,)
+    )
+    return [
+        handle
+        for _, handle in sorted(targets, key=lambda item: item[0].worker_id)
+    ]
+
   def _role_handle(
       self, role: datatypes.Role | str
   ) -> remote_execution.ActorHandle | None:
-    handles = self._registry.handles(role)
+    handles = self._role_handles(role)
     return handles[0] if handles else None
+
+  async def _invoke_role_workers(
+      self,
+      workers: Sequence[remote_execution.ActorHandle],
+      method_name: str,
+      **kwargs: Any,
+  ) -> Any:
+    """Invokes `method_name` concurrently on all `workers`; returns primary result."""
+    if len(workers) == 1:
+      return await self._invoke_worker(workers[0], method_name, **kwargs)
+    results = await asyncio.gather(*(
+        self._invoke_worker(w, method_name, **kwargs) for w in workers
+    ))
+    return results[0]
 
   @property
   def restored_checkpoint_metadata(self) -> dict[str, Any] | None:
@@ -402,20 +428,20 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       role: datatypes.Role,
   ) -> None:
     """Seeds trainer-side weight sync with the rollout target-state skeleton."""
-    trainer = self._role_handle(role)
+    trainers = self._role_handles(role)
     # Match the weight sync destinations: a rejoined rollout worker still in
     # PENDING_WEIGHT_SYNC can seed the trainer before its first sync.
     rollout_handles = self._registry.handles(
         datatypes.Role.ROLLOUT, statuses=_WEIGHT_SYNC_DESTINATION_STATUSES
     )
-    if trainer is None or not rollout_handles:
+    if not trainers or not rollout_handles:
       return
 
     rollout = rollout_handles[0]
     try:
       target_state = await self._invoke_worker(rollout, "get_target_state")
-      await self._invoke_worker(
-          trainer, "set_target_state", target_state=target_state
+      await self._invoke_role_workers(
+          trainers, "set_target_state", target_state=target_state
       )
     except (AttributeError, RuntimeError) as exc:
       if isinstance(exc, RuntimeError) and "AttributeError" not in str(exc):
@@ -819,18 +845,19 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       **kwargs: Any,
   ) -> Any:
     """Evaluates reference model or actor logprobs on a padded batch/request."""
-    worker = self._role_handle(role)
-    if worker is None:
+    workers = self._role_handles(role)
+    if not workers:
       raise ValueError(
           f"No worker registered for per_token_logps with role {role}"
       )
     role_name = role.value if isinstance(role, datatypes.Role) else str(role)
     logging.info(
-        "Evaluating per-token log probabilities on %s worker...",
+        "Evaluating per-token log probabilities on %d %s worker(s)...",
+        len(workers),
         role_name,
     )
-    return await self._invoke_worker(
-        worker, "per_token_logps", items=items, **kwargs
+    return await self._invoke_role_workers(
+        workers, "per_token_logps", items=items, **kwargs
     )
 
   async def train_step(
@@ -840,14 +867,15 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       accumulate_gradients: bool = False,
       apply_optimizer: bool = True,
   ) -> Any:
-    """Executes atomic gradient accumulation / update on TrainerWorker."""
-    worker = self._role_handle(role)
-    if worker is None:
+    """Executes atomic gradient accumulation / update on TrainerWorker(s)."""
+    workers = self._role_handles(role)
+    if not workers:
       raise ValueError(f"No trainer worker registered for role {role}")
     role_name = role.value if isinstance(role, datatypes.Role) else str(role)
     logging.info(
-        "Executing train_step on %s worker (accumulate_gradients=%s,"
+        "Executing train_step on %d %s worker(s) (accumulate_gradients=%s,"
         " apply_optimizer=%s)...",
+        len(workers),
         role_name,
         accumulate_gradients,
         apply_optimizer,
@@ -865,8 +893,8 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     )
     inflight_set.add(fwd_bwd_done)
     try:
-      fwd_bwd_result = await self._invoke_worker(
-          worker, "fwd_bwd", request=request
+      fwd_bwd_result = await self._invoke_role_workers(
+          workers, "fwd_bwd", request=request
       )
     except BaseException as exc:
       if not fwd_bwd_done.done():
@@ -894,7 +922,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         await asyncio.shield(prior)
     finally:
       inflight_set.difference_update(prior_fwd_bwd)
-    train_step, metrics = await self._invoke_worker(worker, "update")
+    train_step, metrics = await self._invoke_role_workers(workers, "update")
     return {
         "fwd_bwd": fwd_bwd_result,
         "updated": True,
@@ -949,10 +977,10 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       ))
       return [r for ok, r in results if ok and r is not None]
     else:
-      worker = self._role_handle(role)
-      if worker is None:
+      workers = self._role_handles(role)
+      if not workers:
         raise ValueError(f"No worker registered for role {role}")
-      return await self._invoke_worker(worker, "get_metrics", **kwargs)
+      return await self._invoke_role_workers(workers, "get_metrics", **kwargs)
 
   def configure_worker(
       self,
@@ -993,11 +1021,13 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       )
     match role:
       case datatypes.Role.ACTOR | datatypes.Role.CRITIC:
-        worker = self._role_handle(role)
-        if worker is None:
+        workers = self._role_handles(role)
+        if not workers:
           raise ValueError(f"No trainer worker registered for role {role_name}")
         logging.info(
-            "Auto-configuring trainer loss and model input fn on %s worker...",
+            "Auto-configuring trainer loss and model input fn on %d %s"
+            " worker(s)...",
+            len(workers),
             role_name,
         )
         pad_id = kwargs.get("pad_id", assembler.pad_id)
@@ -1043,15 +1073,8 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
             algo_config.sampler_is is not None
             or algo_config.sampler_rs is not None
         )
-
-        def _configure():
-          assert worker is not None
-          # Both setters clear the trainer's JIT cache, so the ahead-of-time
-          # compile must run strictly after them.
-          worker.submit("with_loss_fn", loss_fn, has_aux=True)
-          worker.submit("with_gen_model_input_fn", gen_fn)
-          if not precompile:
-            return
+        dummy_payload = None
+        if precompile:
           routed_experts_encode_mode = (
               algo_config.routed_experts_encode_mode
               if return_routed_experts
@@ -1065,6 +1088,14 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
               with_routed_experts=return_routed_experts,
               routed_experts_encode_mode=routed_experts_encode_mode,
           )
+
+        def _configure_one(worker: remote_execution.ActorHandle) -> None:
+          # Both setters clear the trainer's JIT cache, so the ahead-of-time
+          # compile must run strictly after them.
+          worker.submit("with_loss_fn", loss_fn, has_aux=True)
+          worker.submit("with_gen_model_input_fn", gen_fn)
+          if not precompile:
+            return
           # TODO(tunix-dev): Move to the worker lifecycle (e.g., the
           # `initialize` step) so pre-compilation runs during the standard
           # lifecycle `compile` phase instead of re-compiling here.
@@ -1074,6 +1105,19 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           )
           worker.submit("compile", dummy_payload)
 
+        def _configure_all() -> None:
+          if len(workers) == 1:
+            _configure_one(workers[0])
+            return
+          # Multi-host SPMD trainers must enter `compile` concurrently so any
+          # cross-host lowering/collectives run in lockstep.
+          with concurrent.futures.ThreadPoolExecutor(
+              max_workers=len(workers)
+          ) as pool:
+            futs = [pool.submit(_configure_one, w) for w in workers]
+            for fut in futs:
+              fut.result()
+
         try:
           loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -1081,9 +1125,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
 
         if loop is not None and loop.is_running():
           with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            pool.submit(_configure).result()
+            pool.submit(_configure_all).result()
         else:
-          _configure()
+          _configure_all()
 
       case datatypes.Role.ROLLOUT:
         if not self._rollout_handles():
@@ -1110,8 +1154,8 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
   ) -> int | None:
     """Bootstraps the rollout-visible policy state before step 0."""
     del kwargs
-    trainer = self._role_handle(role)
-    if trainer is None:
+    trainers = self._role_handles(role)
+    if not trainers:
       raise ValueError(f"No trainer worker registered for role {role}")
 
     await self._maybe_configure_trainer_target_state(role)
@@ -1505,17 +1549,18 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       step: int | None = None,
       force: bool = False,
   ) -> Any:
-    """Requests the trainer worker for `role` to save a checkpoint."""
-    worker = self._role_handle(role)
-    if worker is None:
+    """Requests the trainer worker(s) for `role` to save a checkpoint."""
+    workers = self._role_handles(role)
+    if not workers:
       raise ValueError(f"No trainer worker registered for role {role}")
     role_name = role.value if isinstance(role, datatypes.Role) else str(role)
     logging.info(
-        "Saving checkpoint on %s worker...",
+        "Saving checkpoint on %d %s worker(s)...",
+        len(workers),
         role_name,
     )
-    return await self._invoke_worker(
-        worker, "save_checkpoint", metadata=metadata, step=step, force=force
+    return await self._invoke_role_workers(
+        workers, "save_checkpoint", metadata=metadata, step=step, force=force
     )
 
   async def _restore_checkpoint(
@@ -1524,10 +1569,12 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       step: int | None = None,
   ) -> Any:
     role_name = role.name
-    worker = self._role_handle(role)
-    if worker is None:
+    workers = self._role_handles(role)
+    if not workers:
       raise ValueError(f"No trainer worker registered for role {role_name}")
-    return await self._invoke_worker(worker, "restore_checkpoint", step=step)
+    return await self._invoke_role_workers(
+        workers, "restore_checkpoint", step=step
+    )
 
   async def resume_from_checkpoint(
       self,

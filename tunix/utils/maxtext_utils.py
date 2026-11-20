@@ -891,10 +891,16 @@ def create_maxtext_engine(
 ) -> Any:
   """Builds and initializes a MaxTextTrainingEngine within the given mesh."""
   from flax.core.spmd import logical_axis_rules  # pylint: disable=g-import-not-at-top
+  from tunix.utils import subworld_checkpoint  # pylint: disable=g-import-not-at-top
 
   _, maxtext_engine, _ = maxtext_modules()
+  mesh_procs = subworld_checkpoint.mesh_process_indices(mesh)
 
-  with mesh, logical_axis_rules(maxtext_config.logical_axis_rules):
+  with (
+      subworld_checkpoint.patch_orbax_for_subworld(mesh_procs),
+      mesh,
+      logical_axis_rules(maxtext_config.logical_axis_rules),
+  ):
     engine = maxtext_engine.MaxTextTrainingEngine(
         maxtext_config,
         mesh=mesh,

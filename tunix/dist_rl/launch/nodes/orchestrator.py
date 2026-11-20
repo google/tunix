@@ -501,11 +501,12 @@ def required_workers(
     The minimum worker count per role.
   """
   cluster = hp.config_mapping("cluster_config")
+  num_trainers = int(cluster.get("trainer_replicas", 1))
   num_rollouts = int(cluster["rollout_replicas"])
   min_rollouts = cluster["min_rollout_replicas"]
   beta = float(hp.config_mapping("agentic_grpo_config")["beta"])
   return {
-      datatypes.Role.ACTOR: 1,
+      datatypes.Role.ACTOR: num_trainers,
       datatypes.Role.ROLLOUT: (
           int(min_rollouts) if min_rollouts is not None else num_rollouts
       ),

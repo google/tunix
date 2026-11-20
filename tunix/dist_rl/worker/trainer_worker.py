@@ -499,7 +499,15 @@ class TrainerWorker(abstract_worker.Worker):
               routed_experts=None if routed is None else routed[sl],
           )
           outs.append(trainer.fwd_only(payload))
-        result = np.asarray(jnp.concatenate(outs, axis=0), dtype=np.float32)
+        concat = outs[0] if len(outs) == 1 else jnp.concatenate(outs, axis=0)
+        if isinstance(concat, jax.Array) and not concat.is_fully_addressable:
+          mesh = getattr(concat.sharding, "mesh", None)
+          if mesh is not None:
+            replicated = jax.sharding.NamedSharding(
+                mesh, jax.sharding.PartitionSpec()
+            )
+            concat = jax.jit(lambda x: x, out_shardings=replicated)(concat)
+        result = np.asarray(concat, dtype=np.float32)
       self._last_error = None
       return datatypes.LogprobsResponse(
           request_id=items.request_id,

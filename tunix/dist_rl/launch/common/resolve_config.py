@@ -565,6 +565,26 @@ def _validate_k8s_worker_jobsets(hp: cli_config.HyperParameters) -> None:
     )
 
 
+def _validate_trainer_replicas(hp: cli_config.HyperParameters) -> None:
+  """Checks `cluster_config.trainer_replicas`."""
+  cluster = hp.config_mapping("cluster_config")
+  replicas = cluster["trainer_replicas"]
+  if (
+      isinstance(replicas, bool)
+      or not isinstance(replicas, int)
+      or replicas < 1
+  ):
+    raise ValueError(
+        "cluster_config.trainer_replicas must be an int >= 1, got"
+        f" {replicas!r}."
+    )
+  if cluster["target"] == "local" and replicas != 1:
+    raise ValueError(
+        "cluster_config.target=local runs one trainer (local.sh starts one), so"
+        f" cluster_config.trainer_replicas must be 1, got {replicas}."
+    )
+
+
 def _validate_rollout_replicas(hp: cli_config.HyperParameters) -> None:
   """Checks `cluster_config.{rollout_replicas,min_rollout_replicas}`.
 
@@ -763,6 +783,7 @@ _FORBIDDEN_ROLE_ENVS: Final[Mapping[str, str]] = types.MappingProxyType({
         "set cluster_config.k8s.enable_pathways_persistence instead"
     ),
     "DIST_RL_WORKER_PORT": "launcher-managed worker identity",
+    "DIST_RL_TRAINER_REPLICA": "launcher-managed worker identity",
     "DIST_RL_ROLLOUT_REPLICA": "launcher-managed worker identity",
 })
 _ROLE_ENV_PREFIX_REASONS: Final[tuple[tuple[str, str], ...]] = (
@@ -880,6 +901,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   _validate_k8s_jax_cache_gcs(hp)
   _validate_k8s_scalars(hp)
   _validate_k8s_worker_jobsets(hp)
+  _validate_trainer_replicas(hp)
   _validate_rollout_replicas(hp)
   _validate_role_env(hp)
   _validate_trajectory_logging(hp)

@@ -437,6 +437,11 @@ cluster_config:
   # `agentic_grpo_config.beta > 0`. Set false to use a reference worker started
   # separately; it registers with the orchestrator through discovery.
   run_inference_node: null
+  # Trainer worker processes in the cluster. 1 for single-controller Pathways
+  # or single-host McJAX; >1 for multi-host McJAX (e.g. FSDP=8 across 2 hosts
+  # in a shared ICI slice). With more than one, each trainer reads its 0-based
+  # index from `DIST_RL_TRAINER_REPLICA`.
+  trainer_replicas: 1
   # Rollout workers in the cluster: `k8s.sh` deploys this many, and an external
   # launcher starts this many. `target: local` requires 1 (`local.sh` starts
   # one). With more than one, each rollout reads its 0-based index from the
