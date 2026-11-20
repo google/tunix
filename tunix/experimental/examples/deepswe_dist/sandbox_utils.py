@@ -56,7 +56,7 @@ def set_runtime_container(target: Any, container_name: str) -> None:
 
 @dataclasses.dataclass(frozen=True)
 class SandboxFailFastConfig:
-  """Sandbox-side fail-fast settings (`FT_SANDBOX_*` in the launcher)."""
+  """Sandbox-side fail-fast settings (`FT_SANDBOX_*` rollout env vars)."""
 
   enabled: bool
   ready_timeout_s: int | None
@@ -64,7 +64,7 @@ class SandboxFailFastConfig:
 
   @classmethod
   def from_env(cls) -> SandboxFailFastConfig:
-    """Builds the config from FT_SANDBOX_* variables set by k8s_launcher.sh."""
+    """Builds the config from the rollout worker's FT_SANDBOX_* variables."""
     flag = os.environ.get("FT_SANDBOX_FAIL_FAST")
     if flag is None:
       return cls(

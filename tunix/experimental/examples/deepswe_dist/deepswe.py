@@ -16,8 +16,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-import json
 import logging
 import os
 import re
@@ -26,11 +24,9 @@ from typing import Any
 
 import numpy as np
 from tunix.dist_rl.common import registry
-from tunix.dist_rl.orchestrator import dataset_utils
 from tunix.experimental.examples.deepswe_dist import openhands_template
 from tunix.experimental.examples.deepswe_dist import openhands_utils
 from tunix.experimental.examples.deepswe_dist import sandbox_utils
-from examples.deepswe import deepswe_data
 from examples.deepswe import swe_agent
 from examples.deepswe import swe_env
 from tunix.rl.agentic.agents import agent_types
@@ -41,210 +37,6 @@ from tunix.rl.agentic.environments import base_environment
 DEEPSWE_ENV_NAME = "deepswe_env"
 DEEPSWE_AGENT_NAME = "deepswe_agent"
 CODEACT_AGENT_NAME = "codeact_agent"
-DEFAULT_DATASET_NAME = "R2E-Gym/R2E-Gym-Subset"
-
-
-def normalize_example_value(value: Any) -> Any:
-  """Converts dataset scalar wrappers into plain Python values."""
-  if isinstance(value, np.ndarray):
-    flat = value.reshape(-1).tolist()
-    if len(flat) == 1:
-      return normalize_example_value(flat[0])
-    return [normalize_example_value(v) for v in flat]
-  if isinstance(value, np.bytes_):
-    return value.tobytes().decode("utf-8")
-  if isinstance(value, bytes):
-    return value.decode("utf-8")
-  if isinstance(value, list):
-    return [normalize_example_value(v) for v in value]
-  return value
-
-
-def as_text(value: Any) -> str:
-  value = normalize_example_value(value)
-  return value if isinstance(value, str) else str(value)
-
-
-def _jsonify_lists(entry: dict[str, Any]) -> dict[str, Any]:
-  """Matches the legacy DeepSWE recipe's heterogeneous dataset normalization."""
-  normalized = {}
-  for key, value in entry.items():
-    value = normalize_example_value(value)
-    normalized[key] = json.dumps(value) if isinstance(value, list) else value
-  return normalized
-
-
-def load_deepswe_dataset(
-    *,
-    dataset_name: str = DEFAULT_DATASET_NAME,
-    dataset_split: str = "train",
-    dataset_path: str = "",
-    cache_dir: str | None = None,
-    shuffle: bool = True,
-    seed: int = 42,
-) -> Any:
-  """Loads the R2E-Gym dataset used by the DeepSWE recipe."""
-  if dataset_path:
-    from datasets import DatasetDict  # pylint: disable=g-import-not-at-top
-    from datasets import load_from_disk  # pylint: disable=g-import-not-at-top
-
-    logging.info("Loading DeepSWE dataset from disk: %s", dataset_path)
-    dataset = load_from_disk(dataset_path)
-    if isinstance(dataset, DatasetDict):
-      dataset = dataset[dataset_split]
-    dataset = dataset.map(_jsonify_lists, keep_in_memory=True)
-    if shuffle:
-      dataset = dataset.shuffle(seed=seed)
-    return dataset
-
-  logging.info(
-      "Loading DeepSWE dataset %s split=%s cache_dir=%s shuffle=%s seed=%d.",
-      dataset_name,
-      dataset_split,
-      cache_dir,
-      shuffle,
-      seed,
-  )
-  return deepswe_data.create_dataset(
-      dataset_name=dataset_name,
-      dataset_split=dataset_split,
-      cache_dir=cache_dir,
-      shuffle=shuffle,
-      seed=seed,
-  )
-
-
-def _entry_at(dataset: Any, index: int) -> dict[str, Any]:
-  entry = dataset[index]
-  if not isinstance(entry, dict):
-    raise TypeError(f"DeepSWE dataset item must be a dict, got {type(entry)}")
-  return _jsonify_lists(dict(entry))
-
-
-def _problem_statement(entry: dict[str, Any]) -> str:
-  for key in ("problem_statement", "prompt", "instance_id"):
-    if key in entry and entry[key] is not None:
-      return as_text(entry[key])
-  return ""
-
-
-def build_prompt_item(
-    *,
-    entry: dict[str, Any],
-    prompt_idx: int,
-    max_turns: int,
-    max_response_length: int,
-    temperature: float,
-    top_p: float | None,
-    top_k: int | None,
-    step_timeout_secs: int,
-    reward_timeout_secs: int,
-    env_backend: str,
-    use_agent_sandbox: bool,
-    scaffold: str,
-    env_verbose: bool,
-    overlong_filter: bool = False,
-    episode_timeout_secs: int | None = None,
-    return_routed_experts: bool = False,
-) -> dict[str, Any]:
-  """Builds one StandardRLProgram prompt item for a DeepSWE task."""
-  problem = _problem_statement(entry)
-  prompt_id = as_text(
-      entry["instance_id"]
-      if "instance_id" in entry and entry["instance_id"]
-      else f"deepswe_{prompt_idx}"
-  )
-  env_config = {
-      "entry": entry,
-      "prompt_id": prompt_id,
-      "max_steps": max_turns,
-      "step_timeout": step_timeout_secs,
-      "reward_timeout": reward_timeout_secs,
-      "backend": env_backend,
-      "use_agent_sandbox": use_agent_sandbox,
-      "scaffold": scaffold,
-      "verbose": env_verbose,
-  }
-  agent_config = {"scaffold": scaffold}
-  metadata: dict[str, Any] = {
-      "instance_id": prompt_id,
-      "problem_statement": problem,
-      "env_config": env_config,
-      "agent_config": agent_config,
-      # Read by TrajectoryCollectorEngine to decide which terminal statuses
-      # get their policy loss mask zeroed out.
-      "overlong_filter": overlong_filter,
-  }
-  # When `episode_timeout_secs` is None, `"episode_timeout"` is omitted from
-  # `metadata` so `TrajectoryCollectorEngine` uses its default
-  # (`timeouts.DEFAULT_EPISODE_TIMEOUT_S`).
-  if episode_timeout_secs is not None:
-    metadata["episode_timeout"] = episode_timeout_secs
-  return {
-      "prompt": problem,
-      "prompt_id": prompt_id,
-      "max_turns": max_turns,
-      "max_response_length": max_response_length,
-      "generation_kwargs": {
-          "max_generation_steps": max_response_length,
-          "temperature": temperature,
-          "top_p": top_p,
-          "top_k": top_k,
-          "return_logprobs": True,
-          "return_routed_experts": return_routed_experts,
-      },
-      "metadata": metadata,
-  }
-
-
-def iter_prompt_items(
-    *,
-    dataset: Any,
-    max_steps: int,
-    batch_size: int,
-    max_turns: int,
-    max_response_length: int,
-    temperature: float,
-    top_p: float | None,
-    top_k: int | None,
-    step_timeout_secs: int,
-    reward_timeout_secs: int,
-    env_backend: str,
-    use_agent_sandbox: bool,
-    scaffold: str,
-    env_verbose: bool,
-    overlong_filter: bool = False,
-    max_staleness: int = 0,
-    episode_timeout_secs: int | None = None,
-    return_routed_experts: bool = False,
-) -> Iterator[dict[str, Any]]:
-  """Yields one full-batch worth of prompt groups per RL step plus off-policy lookahead."""
-  dataset_size = len(dataset)
-  if dataset_size <= 0:
-    raise ValueError("DeepSWE dataset is empty.")
-
-  total_prompts = dataset_utils.total_prompt_groups(
-      max_steps, batch_size, max_staleness
-  )
-  for prompt_idx in range(total_prompts):
-    yield build_prompt_item(
-        entry=_entry_at(dataset, prompt_idx % dataset_size),
-        prompt_idx=prompt_idx,
-        max_turns=max_turns,
-        max_response_length=max_response_length,
-        temperature=temperature,
-        top_p=top_p,
-        top_k=top_k,
-        step_timeout_secs=step_timeout_secs,
-        reward_timeout_secs=reward_timeout_secs,
-        episode_timeout_secs=episode_timeout_secs,
-        env_backend=env_backend,
-        use_agent_sandbox=use_agent_sandbox,
-        scaffold=scaffold,
-        env_verbose=env_verbose,
-        overlong_filter=overlong_filter,
-        return_routed_experts=return_routed_experts,
-    )
 
 
 def multi_tool_calls_enabled() -> bool:
