@@ -543,7 +543,9 @@ class Sampler(base_sampler.BaseSampler):
 
   def tokenize(self, input_string: str) -> np.ndarray | list[int]:
     """Tokenizes the input string."""
-    input_ids = self.tokenizer.encode(input_string)
+    input_ids = self.tokenizer.strip_trailing_eos_id(
+        self.tokenizer.encode(input_string)
+    )
     bos_tok = [self.tokenizer.bos_id()] if self.tokenizer.bos_id() else []
     input_ids = np.array(
         self.tokenizer.dedup_bos_ids(bos_tok + input_ids), dtype=np.int32

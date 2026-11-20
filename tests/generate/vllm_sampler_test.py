@@ -960,6 +960,7 @@ class VllmSamplerTokenInputTest(absltest.TestCase):
         bos_id=lambda: None,
         pad_id=lambda: 0,
         dedup_bos_ids=lambda ids: ids,
+        strip_trailing_eos_id=lambda ids: ids,
     )
     obj.llm = SimpleNamespace(
         get_default_sampling_params=SamplingParams,

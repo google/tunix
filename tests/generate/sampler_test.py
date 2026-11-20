@@ -709,6 +709,35 @@ class SamplerTest(parameterized.TestCase):
         result.tokens, [np.array([14]), np.array([12, 1, 17])]
     )
 
+  @parameterized.parameters(True, False)
+  def test_prompt_does_not_end_with_eos(self, add_eos: bool):
+
+    class AddEosVocab(tc.MockVocab):
+      """Appends eos like `spm.SentencePieceProcessor(add_eos=True)`."""
+
+      def EncodeAsIds(self, text: str, **kwargs) -> list[int]:  # pylint: disable=invalid-name
+        return super().EncodeAsIds(text, **kwargs) + [self.eos_id()]
+
+    vocab = AddEosVocab() if add_eos else tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(42),
+    )
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+    result = sampler(
+        ['input string'], max_generation_steps=2, max_prompt_length=4
+    )
+    np.testing.assert_array_equal(result.padded_prompt_tokens, [[0, 1, 3, 4]])
+
   def test_forbidden_token_ids(self):
     vocab = tc.MockVocab()
     transformer = tc.ToyTransformer(
