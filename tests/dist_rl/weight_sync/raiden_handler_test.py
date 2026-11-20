@@ -800,6 +800,17 @@ class RaidenHandlerTest(absltest.TestCase):
         self.controller.start_transfer.call_args.kwargs["skip_tiling"], {}
     )
 
+  def test_transfers_from_staged_copy_follows_skip_d2h(self):
+    live = raiden_handler.RaidenHandler()
+    self.addCleanup(live.close)
+    staged = raiden_handler.RaidenHandler(
+        transfer_options=raiden_handler.make_host_staged_transfer_options()
+    )
+    self.addCleanup(staged.close)
+
+    self.assertFalse(live.transfers_from_staged_copy)
+    self.assertTrue(staged.transfers_from_staged_copy)
+
   def test_make_host_staged_transfer_options_sets_skip_d2h_and_logical_tiling(
       self,
   ):

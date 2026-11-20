@@ -170,6 +170,11 @@ class _RaidenTransport:
     self._req_counter = 0
 
   @property
+  def skip_d2h(self) -> bool:
+    """Whether transfers send the staged host copy instead of running D2H."""
+    return self._transfer_options.skip_d2h
+
+  @property
   def port(self) -> int:
     """Port the controller listens on."""
     return self._port
@@ -507,6 +512,15 @@ class RaidenHandler(weight_sync.WeightSyncHandler):
   def registered_units(self) -> frozenset[weight_sync.WorkUnitId]:
     """Neutral work-unit ids currently registered with the controller."""
     return self._transport.registered_units
+
+  @property
+  def transfers_from_staged_copy(self) -> bool:
+    """True when the configured transfer skips D2H and sends the host copy.
+
+    Reflects the handler's `transfer_options`; a per-call `skip_d2h` override
+    passed to `transfer` is not visible here.
+    """
+    return self._transport.skip_d2h
 
   def register_work_unit(self, metadata: weight_sync.WorkUnitMetadata) -> None:
     self._transport.register_work_unit(metadata)

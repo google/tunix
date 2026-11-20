@@ -64,10 +64,12 @@ class WeightSyncStagingTest(absltest.TestCase):
     worker._state = WorkerState.READY
     return worker
 
-  def test_prepare_stays_syncing(self):
+  def test_prepare_leaves_the_worker_ready(self):
+    # Staging is complete when prepare returns, so the trainer may take the
+    # next batch while the rest of the round runs.
     worker = self._worker(_FakeTrainer())
     worker.prepare_weight_sync()
-    self.assertEqual(worker.state, WorkerState.SYNCING)
+    self.assertEqual(worker.state, WorkerState.READY)
 
   def test_prepare_returns_trainer_metadata(self):
     worker = self._worker(_FakeTrainer())

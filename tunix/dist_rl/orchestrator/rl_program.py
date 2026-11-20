@@ -620,6 +620,13 @@ class StandardRLProgram(RLProgram):
     self.on_step_begin = on_step_begin
     self.on_step_end = on_step_end
     self._in_flight_rollouts = 0
+    # The weight sync round the trainer is no longer waiting on, if any. It is
+    # the one fact both lags below are derived from: while it is set the
+    # trainer is a version ahead of the rollouts (`trainer_policy_version`),
+    # and the dispatch cursor is a batch behind the trained one. The lag keeps
+    # every batch within `max_staleness` when it is consumed: a batch admitted
+    # now is stamped with the rollouts' version, not the trainer's.
+    self._inflight_sync: asyncio.Task[int] | None = None
     self._dispatch_done = asyncio.Event()
     self._assembler_lock = threading.Lock()
     self.scored_q: (
@@ -648,7 +655,9 @@ class StandardRLProgram(RLProgram):
       )
       self.dispatch_window = dispatch_window.DispatchWindow(
           max_staleness=max_staleness,
-          next_batch_fn=lambda: ordered_q.next_batch_idx,
+          next_batch_fn=lambda: (
+              ordered_q.next_batch_idx - int(self._inflight_sync is not None)
+          ),
           full_batch_size=self.full_batch_size,
       )
     else:
@@ -660,7 +669,9 @@ class StandardRLProgram(RLProgram):
       )
       self.dispatch_window = dispatch_window.DispatchWindow(
           max_staleness=max_staleness,
-          next_batch_fn=lambda: self._step,
+          next_batch_fn=lambda: (
+              self._step - int(self._inflight_sync is not None)
+          ),
           full_batch_size=self.full_batch_size,
           out_of_order_resume=True,
       )
@@ -668,7 +679,7 @@ class StandardRLProgram(RLProgram):
           num_generations=self.num_generations,
           max_staleness=max_staleness,
           max_version_span=max_version_span,
-          current_policy_version=lambda: self.policy_version,
+          current_policy_version=lambda: self.trainer_policy_version,
           on_group_filtered=self._on_raw_group_filtered,
       )
 
@@ -1626,6 +1637,82 @@ class StandardRLProgram(RLProgram):
       del mb
       yield ready.pop(), pack_dt
 
+  @property
+  def trainer_policy_version(self) -> int:
+    """Policy version of the weights the trainer holds.
+
+    One ahead of `policy_version`, the version the rollouts serve, while a
+    weight sync round is in flight.
+    """
+    return self.policy_version + int(self._inflight_sync is not None)
+
+  def _commit_completed_sync(self, sync_task: asyncio.Task[int]) -> None:
+    """Publishes a committed round: rollout version, then dispatch capacity.
+
+    Also the round's done callback, so the rollouts' new version is dispatched
+    on without waiting for the next join. A failed or cancelled round stays
+    attached, and the next join raises it.
+    """
+    if (
+        self._inflight_sync is not sync_task
+        or sync_task.cancelled()
+        or sync_task.exception() is not None
+    ):
+      return
+    self._inflight_sync = None
+    new_version = sync_task.result()
+    self.policy_version = (
+        new_version if new_version is not None else self.policy_version + 1
+    )
+    self.dispatch_window.release()
+
+  async def _join_inflight_sync(self) -> None:
+    """Waits for the in-flight weight sync round, if any, and publishes it."""
+    sync_task = self._inflight_sync
+    if sync_task is None:
+      return
+    await sync_task
+    self._commit_completed_sync(sync_task)
+
+  async def _start_weight_sync(self) -> None:
+    """Starts a weight sync round; returns once the trainer may train again.
+
+    That is when the round reports the trainer's weights staged: the rest of
+    it reads only the staged copy. A round that never reports it (the
+    transport reads the trainer's live weights) holds the trainer until the
+    commit. So does an on-policy program (`max_staleness == 0`), which has
+    nothing to train on until the rollouts serve the new version.
+    """
+    assert self.engine is not None
+    source_prepared = asyncio.Event()
+    min_retained: int | None = None
+    if self._relay is not None:
+      min_retained = relay_coordinator.min_retained_policy_version(
+          self.policy_version + 1,
+          max_staleness=self.max_staleness,
+          max_version_span=self.max_version_span,
+      )
+    sync_task = asyncio.create_task(
+        self.engine.sync_weights(
+            role=datatypes.Role.ACTOR,
+            min_retained_policy_version=min_retained,
+            source_prepared=source_prepared,
+        )
+    )
+    # Attached before the first await: the trainer already holds the next
+    # version, so the dispatch lag must apply to every admission from here.
+    self._inflight_sync = sync_task
+    sync_task.add_done_callback(self._commit_completed_sync)
+    staged = asyncio.create_task(source_prepared.wait())
+    try:
+      await asyncio.wait(
+          (sync_task, staged), return_when=asyncio.FIRST_COMPLETED
+      )
+    finally:
+      staged.cancel()
+    if self.max_staleness == 0 or sync_task.done():
+      await self._join_inflight_sync()
+
   async def train_stage(self) -> None:
     """Stage 3: Streaming gradient accumulation with RLTrainerPayloads."""
     assert self.engine is not None
@@ -1645,16 +1732,26 @@ class StandardRLProgram(RLProgram):
         await task
 
     async def _next_scored_group() -> ScoredGroup | None:
-      # Surface a failed in-flight `pending_prep` while waiting for the next
-      # group instead of stalling until that group arrives from `scored_q`.
+      # Surface a failed in-flight `pending_prep` or weight sync round while
+      # waiting for the next group instead of stalling until that group
+      # arrives from `scored_q`.
       get_task = asyncio.ensure_future(self.scored_q.get())
       try:
-        while (prep := pending_prep) is not None and not get_task.done():
+        while not get_task.done():
+          watched = [
+              task
+              for task in (pending_prep, self._inflight_sync)
+              if task is not None
+          ]
+          if not watched:
+            break
           await asyncio.wait(
-              (get_task, prep), return_when=asyncio.FIRST_COMPLETED
+              (get_task, *watched), return_when=asyncio.FIRST_COMPLETED
           )
-          if prep.done():
+          if pending_prep is not None and pending_prep.done():
             await _drain_pending_prep()
+          if self._inflight_sync is not None and self._inflight_sync.done():
+            await self._join_inflight_sync()
         return await get_task
       finally:
         get_task.cancel()
@@ -1679,7 +1776,7 @@ class StandardRLProgram(RLProgram):
         step_start_time = time.monotonic()
         step_times = step_telemetry.StepTimes()
         last_train_end_mono = 0.0
-        consumed_policy_version = self.policy_version
+        consumed_policy_version = self.trainer_policy_version
 
         uncommitted_groups: list[list[datatypes.TrajectoryItem]] = []
         step_reward_log_metrics: list[RewardLogMetrics] = []
@@ -1713,7 +1810,7 @@ class StandardRLProgram(RLProgram):
               metadata={
                   "step": optimizer_step,
                   "global_step": self.step + 1,
-                  "policy_version": self.policy_version + 1,
+                  "policy_version": self.trainer_policy_version + 1,
                   "num_rollouts": num_rollouts,
                   "num_microbatches": num_microbatches,
                   **self.dispatch_window.checkpoint_metadata(
@@ -1893,24 +1990,13 @@ class StandardRLProgram(RLProgram):
           # TODO(tunix-dev): Split into drain/transfer/publish once
           # `sync_weights` reports per-phase times; draining in-flight rollouts
           # can dominate this.
+          # Charged here is only the time the trainer is held: the previous
+          # round still closing (at most one is in flight) plus this round up
+          # to its weights being staged, or to its commit when on-policy.
           sync_start = time.monotonic()
-          min_retained: int | None = None
-          if self._relay is not None:
-            min_retained = relay_coordinator.min_retained_policy_version(
-                self.policy_version + 1,
-                max_staleness=self.max_staleness,
-                max_version_span=self.max_version_span,
-            )
-          new_version = await self.engine.sync_weights(
-              role=datatypes.Role.ACTOR,
-              min_retained_policy_version=min_retained,
-          )
+          await self._join_inflight_sync()
+          await self._start_weight_sync()
           step_times.weight_sync_time += time.monotonic() - sync_start
-          self.policy_version = (
-              new_version
-              if new_version is not None
-              else self.policy_version + 1
-          )
 
         # Before `commit()`, which will eventually take ownership of the groups.
         generation_metrics = _generation_metrics(uncommitted_groups)
@@ -1918,7 +2004,9 @@ class StandardRLProgram(RLProgram):
             "[pipeline] COMMIT step=%d batch_idx=%s consumed_version=%d"
             " rollout_versions=%s groups=%s",
             current_step,
-            self.dispatch_window.next_batch,
+            # The trained batch: the cursor lags it while a round is in flight.
+            self.dispatch_window.next_batch
+            + int(self._inflight_sync is not None),
             consumed_policy_version,
             [_group_latest_policy_version(g) for g in uncommitted_groups if g],
             [
@@ -1966,7 +2054,9 @@ class StandardRLProgram(RLProgram):
 
         self.last_step_result = RLStepResult(
             step=current_step,
-            policy_version=self.policy_version,
+            # The version this step produced. The rollouts serve it once the
+            # step's sync round commits, which may be after this result.
+            policy_version=self.trainer_policy_version,
             num_rollouts=num_rollouts,
             num_microbatches=num_microbatches,
             reward_mean=metrics_summary["reward_mean"],
@@ -1997,7 +2087,21 @@ class StandardRLProgram(RLProgram):
         # `in_flight_prompts` on waking, and waking it on the old step would
         # park it again with no one left to set the event.
         self.dispatch_window.release()
+      # The last step's round: the program is not done until the rollouts
+      # serve the final weights, and a failure in it must not pass silently.
+      await self._join_inflight_sync()
+    except asyncio.CancelledError:
+      if self._inflight_sync is not None:
+        self._inflight_sync.cancel()
+      raise
     finally:
+      if self._inflight_sync is not None:
+        # Unless this stage is itself cancelled, the round is left to finish:
+        # cancelling one mid-transfer leaves the rollouts un-aborted and the
+        # trainer's staging unreleased. Its own phase timeouts bound the wait.
+        sync_task, self._inflight_sync = self._inflight_sync, None
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+          await sync_task
       if pending_prep is not None:
         pending_prep.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):

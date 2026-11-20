@@ -350,14 +350,15 @@ class TrainerWorkerTest(absltest.TestCase):
         "save_checkpoint",
         "restore_checkpoint",
         "prepare_weight_sync",
-        "release_weight_sync",
         "get_metrics",
     ):
       self.assertTrue(
           getattr(getattr(self.worker, offloaded_name), attr, False),
           msg=f"{offloaded_name} should opt in to worker-thread offloading",
       )
-    for inline_name in ("heartbeat", "info"):
+    # `release_weight_sync` is inline so a round can close while a long
+    # `update` or `save_checkpoint` holds the worker lock.
+    for inline_name in ("heartbeat", "info", "release_weight_sync"):
       self.assertFalse(
           getattr(getattr(self.worker, inline_name), attr, False),
           msg=f"{inline_name} must remain inline on the event loop",
@@ -1244,10 +1245,11 @@ class TrainerWorkerOTelMetricsTest(parameterized.TestCase):
       self.worker._state = datatypes.WorkerState.READY
       self.worker.fwd_bwd(request=second_rl_req)
 
-    # A failing `release_weight_sync` must keep `WorkerState.SYNCING` (fail
-    # closed, matching HEAD) and record no `direction="release"` sample.
+    # The worker stays READY across a round, so a failing
+    # `release_weight_sync` leaves it READY; it must still record no
+    # `direction="release"` sample.
     self.worker.prepare_weight_sync()
-    self.assertEqual(self.worker.state, datatypes.WorkerState.SYNCING)
+    self.assertEqual(self.worker.state, datatypes.WorkerState.READY)
     with mock.patch.object(
         self.fake_trainer,
         "release_weight_sync",
@@ -1256,7 +1258,7 @@ class TrainerWorkerOTelMetricsTest(parameterized.TestCase):
     ):
       with self.assertRaisesRegex(RuntimeError, "release failed"):
         self.worker.release_weight_sync()
-    self.assertEqual(self.worker.state, datatypes.WorkerState.SYNCING)
+    self.assertEqual(self.worker.state, datatypes.WorkerState.READY)
 
     metrics = otel_testing.collect_metrics(self.reader)
     tokens_by_type = {
