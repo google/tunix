@@ -303,6 +303,12 @@ class IciMaxTextTrainerAdapter:
   def __getattr__(self, name: str) -> Any:
     return getattr(self._engine, name)
 
+  def with_fwd_only_fn(self, fn: Any) -> Any:
+    with_fwd = getattr(self._engine, "with_fwd_only_fn", None)
+    if callable(with_fwd):
+      with_fwd(fn)
+    return self
+
   def fwd_only(self, payload: Any) -> Any:
     mesh = getattr(self._engine, "_mesh", None)
     if mesh is not None and jax.process_count() > 1:

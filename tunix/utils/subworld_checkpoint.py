@@ -223,19 +223,6 @@ def v0_multiprocessing_options(
   )
 
 
-def v1_multiprocessing_options(
-    active_processes: Collection[int],
-) -> ocp_v1.options.MultiprocessingOptions:
-  """Builds Orbax v1 `MultiprocessingOptions` scoped to `active_processes`."""
-  procs = set(int(p) for p in active_processes)
-  if not procs:
-    raise ValueError("active_processes must be non-empty.")
-  return ocp_v1.options.MultiprocessingOptions(
-      primary_host=min(procs),
-      active_processes=procs,
-  )
-
-
 def configure_v1_context(
     context: ocp_v1.Context,
     active_processes: Collection[int] | None,

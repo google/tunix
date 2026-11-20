@@ -58,7 +58,6 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import orbax.checkpoint as ocp_v0
-from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.launch.common import resolve_config
 from tunix.dist_rl.launch.nodes import trainer as trainer_node
 from tunix.dist_rl.train import peft_trainer_v2

@@ -66,7 +66,7 @@ Constraints:
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 import dataclasses
 import functools
 import time
