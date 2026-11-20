@@ -280,7 +280,8 @@ def summarize(rows: list[dict[str, object]], expected: int, attempts: int = 1) -
 def write_json(path: epath.PathLike, value: object) -> None:
   """Writes `value` as UTF-8 JSON to a local or remote (e.g. `gs://`) file."""
   target = epath.Path(path)
-  target.parent.mkdir(parents=True, exist_ok=True)
+  if not target.is_absolute() or target.as_uri().startswith("file://"):
+    target.parent.mkdir(parents=True, exist_ok=True)
   target.write_text(
       json.dumps(value, ensure_ascii=False, allow_nan=False, indent=2) + "\n",
       encoding="utf-8",
@@ -294,7 +295,8 @@ def write_results(
 ) -> None:
   """Writes `<run>.jsonl` and `<run>.summary.json` next to `run_dir`."""
   target = epath.Path(run_dir)
-  target.parent.mkdir(parents=True, exist_ok=True)
+  if not target.is_absolute() or target.as_uri().startswith("file://"):
+    target.parent.mkdir(parents=True, exist_ok=True)
   (target.parent / f"{target.name}.jsonl").write_text(
       "".join(
           json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n"

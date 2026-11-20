@@ -340,34 +340,40 @@ class EvalDeepSWETest(unittest.TestCase):
     )
 
   def test_write_helpers_persist_attempts_config_and_summary(self):
-    with tempfile.TemporaryDirectory() as temp_dir:
-      run_dir = epath.Path(temp_dir) / "out" / "run"
-      row = {"request_id": "eval_0_1", "instance_id": "task-0", "reward": 1.0}
+    row = {"request_id": "eval_0_1", "instance_id": "task-0", "reward": 1.0}
+    with tempfile.TemporaryDirectory() as temp_dir, contextlib.chdir(temp_dir):
+      for run_dir, out in (
+          (epath.Path(temp_dir) / "out" / "run", Path(temp_dir) / "out"),
+          (epath.Path("eval_results") / "run", Path(temp_dir) / "eval_results"),
+      ):
+        with self.subTest(run_dir=str(run_dir)):
+          eval_deepswe.write_json(
+              run_dir / "config.json", {"num_rollouts_per_instance": 2}
+          )
+          eval_deepswe.write_json(run_dir / "attempts" / "eval_0_1.json", row)
+          eval_deepswe.write_results(run_dir, [row], {"pass_at_1": 1.0})
 
-      eval_deepswe.write_json(
-          run_dir / "config.json", {"num_rollouts_per_instance": 2}
-      )
-      eval_deepswe.write_json(run_dir / "attempts" / "eval_0_1.json", row)
-      eval_deepswe.write_results(run_dir, [row], {"pass_at_1": 1.0})
-
-      out = Path(temp_dir) / "out"
-      self.assertEqual(
-          json.loads(
-              (out / "run/attempts/eval_0_1.json").read_text(encoding="utf-8")
-          ),
-          row,
-      )
-      self.assertEqual(
-          json.loads((out / "run/config.json").read_text(encoding="utf-8")),
-          {"num_rollouts_per_instance": 2},
-      )
-      self.assertEqual(
-          json.loads((out / "run.jsonl").read_text(encoding="utf-8")), row
-      )
-      self.assertEqual(
-          json.loads((out / "run.summary.json").read_text(encoding="utf-8")),
-          {"pass_at_1": 1.0},
-      )
+          self.assertEqual(
+              json.loads(
+                  (out / "run/attempts/eval_0_1.json").read_text(
+                      encoding="utf-8"
+                  )
+              ),
+              row,
+          )
+          self.assertEqual(
+              json.loads((out / "run/config.json").read_text(encoding="utf-8")),
+              {"num_rollouts_per_instance": 2},
+          )
+          self.assertEqual(
+              json.loads((out / "run.jsonl").read_text(encoding="utf-8")), row
+          )
+          self.assertEqual(
+              json.loads(
+                  (out / "run.summary.json").read_text(encoding="utf-8")
+              ),
+              {"pass_at_1": 1.0},
+          )
 
   def test_write_helpers_support_gcs_epath(self):
     run_dir = epath.Path("gs://bkt/out") / "run"
@@ -382,26 +388,7 @@ class EvalDeepSWETest(unittest.TestCase):
       eval_deepswe.write_json(run_dir / "attempts" / "eval_0.json", row)
       eval_deepswe.write_results(run_dir, [row], summary)
 
-    self.assertEqual(
-        mock_mkdir.call_args_list,
-        [
-            mock.call(
-                epath.Path("gs://bkt/out/run/attempts"),
-                parents=True,
-                exist_ok=True,
-            ),
-            mock.call(
-                epath.Path("gs://bkt/out"),
-                parents=True,
-                exist_ok=True,
-            ),
-            mock.call(
-                epath.Path("gs://bkt/out"),
-                parents=True,
-                exist_ok=True,
-            ),
-        ],
-    )
+    mock_mkdir.assert_not_called()
     self.assertEqual(
         mock_write.call_args_list,
         [
