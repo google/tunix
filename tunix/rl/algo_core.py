@@ -14,6 +14,7 @@
 
 """Algorithm core implementations for RL and Agentic RL learners."""
 
+import dataclasses
 import functools
 from typing import Any, Callable
 from flax import nnx
@@ -434,6 +435,97 @@ def _score_centering_topk_ids(
   return topk_ids
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class _PolicySurrogateLoss:
+  """Per-token policy surrogate loss and clipping diagnostics."""
+
+  per_token_loss: jax.Array
+  pg_loss_1: jax.Array
+  pg_loss_2: jax.Array
+  unreduced_clip_frac: jax.Array
+  per_token_pg_clipfrac_lower: jax.Array
+
+
+def _compute_cispo_surrogate_loss(
+    safe_per_token_logps: jax.Array,
+    is_ratio: jax.Array,
+    adv: jax.Array,
+    active_mask: jax.Array,
+    epsilon: float,
+    epsilon_high: float,
+) -> _PolicySurrogateLoss:
+  """Computes the CISPO per-token policy loss (arXiv:2506.13585).
+
+  Clips the importance sampling ratio into `[1 - epsilon, 1 + epsilon_high]` and
+  detaches the weight with `stop_gradient`, so gradients always flow through
+  `log pi_theta` with bounded magnitude rather than vanishing when clipped.
+
+  Args:
+    safe_per_token_logps: Finite per-token policy log-probs, zeroed on inactive
+      positions.
+    is_ratio: Token-level importance sampling ratio `pi_theta / pi_old`.
+    adv: Per-token advantages, zeroed on inactive or non-finite positions.
+    active_mask: Boolean mask of active completion tokens.
+    epsilon: Lower clipping offset (`1 - epsilon`).
+    epsilon_high: Upper clipping offset (`1 + epsilon_high`).
+
+  Returns:
+    Per-token CISPO loss and clipping diagnostics.
+  """
+  lower_bound = 1.0 - epsilon
+  upper_bound = 1.0 + epsilon_high
+  clipped_is_ratio = jnp.clip(is_ratio, lower_bound, upper_bound)
+  detached_ratio = jax.lax.stop_gradient(is_ratio)
+  detached_clipped_ratio = jax.lax.stop_gradient(clipped_is_ratio)
+  pg_loss_1 = (-adv * detached_ratio * safe_per_token_logps).astype(jnp.float32)
+  per_token_loss = (
+      -adv * detached_clipped_ratio * safe_per_token_logps
+  ).astype(jnp.float32)
+  is_clipped = active_mask & (
+      (is_ratio < lower_bound) | (is_ratio > upper_bound)
+  )
+  unreduced_clip_frac = jnp.sum(is_clipped.astype(jnp.float32))
+  return _PolicySurrogateLoss(
+      per_token_loss=per_token_loss,
+      pg_loss_1=pg_loss_1,
+      pg_loss_2=per_token_loss,
+      unreduced_clip_frac=unreduced_clip_frac,
+      per_token_pg_clipfrac_lower=jnp.zeros_like(per_token_loss),
+  )
+
+
+def _compute_clipped_surrogate_loss(
+    is_ratio: jax.Array,
+    adv: jax.Array,
+    epsilon: float,
+    epsilon_high: float,
+    epsilon_c: float | None,
+) -> _PolicySurrogateLoss:
+  """Computes the PPO/GRPO clipped surrogate loss with optional dual-clip."""
+  pg_loss_1 = -adv * is_ratio
+  pg_loss_2 = -adv * jnp.clip(is_ratio, 1.0 - epsilon, 1.0 + epsilon_high)
+  per_token_loss = jnp.maximum(pg_loss_1, pg_loss_2).astype(jnp.float32)
+  unreduced_clip_frac = jnp.sum(
+      jnp.greater(pg_loss_2, pg_loss_1).astype(jnp.float32)
+  )
+  if epsilon_c is not None:
+    pg_loss_3 = -epsilon_c * adv
+  else:
+    pg_loss_3 = per_token_loss
+  per_token_pg_clipfrac_lower = (
+      (per_token_loss > pg_loss_3) & (adv < 0.0)
+  ).astype(jnp.float32)
+  pg_loss_clipped_dual = jnp.minimum(pg_loss_3, per_token_loss)
+  per_token_loss = jnp.where(adv < 0.0, pg_loss_clipped_dual, per_token_loss)
+  return _PolicySurrogateLoss(
+      per_token_loss=per_token_loss,
+      pg_loss_1=pg_loss_1,
+      pg_loss_2=pg_loss_2,
+      unreduced_clip_frac=unreduced_clip_frac,
+      per_token_pg_clipfrac_lower=per_token_pg_clipfrac_lower,
+  )
+
+
 @function_registry.register_policy_loss_fn("grpo")
 def grpo_loss_fn(
     model,
@@ -466,6 +558,7 @@ def grpo_loss_fn(
   loss_algo = algo_config.loss_algo
   epsilon_high = algo_config.epsilon_high
   epsilon_c = algo_config.epsilon_c
+  algorithm_config.validate_grpo_loss_algo(loss_algo, epsilon_c)
   loss_aggregation_mode = algo_config.loss_agg_mode
 
   completion_ids, completion_mask = (
@@ -635,27 +728,28 @@ def grpo_loss_fn(
   )
   adv = jnp.where(active_mask & jnp.isfinite(raw_adv), raw_adv, 0.0)
 
-  pg_loss_1 = -adv * is_ratio
-  pg_loss_2 = -adv * jnp.clip(is_ratio, 1 - epsilon, 1 + epsilon_high)
-
-  per_token_loss = jnp.maximum(pg_loss_1, pg_loss_2).astype(jnp.float32)
-
-  unreduced_clip_frac = jnp.sum(
-      jnp.greater(pg_loss_2, pg_loss_1).astype(jnp.float32)
-  )
-
-  # dual-clip ppo loss
-  if epsilon_c is not None:
-    pg_loss_3 = -epsilon_c * adv
+  if loss_algo == "cispo":
+    surrogate = _compute_cispo_surrogate_loss(
+        safe_per_token_logps=safe_per_token_logps,
+        is_ratio=is_ratio,
+        adv=adv,
+        active_mask=active_mask,
+        epsilon=epsilon,
+        epsilon_high=epsilon_high,
+    )
   else:
-    pg_loss_3 = per_token_loss
-
-  # pg_clipfrac_lower measures how often dual-clip ppo kicks in.
-  # It kicks in when the standard clipped loss is larger than pg_loss_3
-  # for instances with negative advantages.
-  per_token_pg_clipfrac_lower = (
-      (per_token_loss > pg_loss_3) & (adv < 0.0)
-  ).astype(jnp.float32)
+    surrogate = _compute_clipped_surrogate_loss(
+        is_ratio=is_ratio,
+        adv=adv,
+        epsilon=epsilon,
+        epsilon_high=epsilon_high,
+        epsilon_c=epsilon_c,
+    )
+  per_token_loss = surrogate.per_token_loss
+  pg_loss_1 = surrogate.pg_loss_1
+  pg_loss_2 = surrogate.pg_loss_2
+  unreduced_clip_frac = surrogate.unreduced_clip_frac
+  per_token_pg_clipfrac_lower = surrogate.per_token_pg_clipfrac_lower
   pg_clipfrac_lower = common.aggregate_loss(
       per_token_pg_clipfrac_lower,
       completion_mask,
@@ -663,9 +757,6 @@ def grpo_loss_fn(
       segment_ids=segment_ids,
       num_segments=num_segments,
   )
-
-  pg_loss_clipped_dual = jnp.minimum(pg_loss_3, per_token_loss)
-  per_token_loss = jnp.where(adv < 0.0, pg_loss_clipped_dual, per_token_loss)
 
   # Optional truncated importance-sampling (TIS) and/or rejection-sampling (RS)
   # correction for the residual sampler-vs-trainer log-probability mismatch.

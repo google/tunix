@@ -39,6 +39,7 @@ import jax.numpy as jnp
 import numpy as np
 from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import algo_core  # pylint: disable=unused-import
+from tunix.rl import algorithm_config
 from tunix.rl import common
 from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_engine_lib
@@ -79,7 +80,7 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
     epsilon_high: PPO-style clipping epsilon upper bound.
     epsilon_c: Dual-clip lower bound applied when advantages are negative.
       `None` (default) disables dual clipping.
-    loss_algo: "grpo" or "gspo-token".
+    loss_algo: Policy loss variant: `"grpo"`, `"gspo-token"`, or `"cispo"`.
     system_prompt: System prompt for the agent.
     max_concurrency: Maximum number of concurrent rollout engines.
     off_policy_steps: Number of off-policy steps can be accepted before a policy
@@ -125,11 +126,7 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
       )
     if self.epsilon_high is None:
       self.epsilon_high = self.epsilon
-    if self.loss_algo not in ["grpo", "gspo-token"]:
-      raise ValueError(
-          "loss_algo should be either grpo or gspo-token. Received: "
-          f"{self.loss_algo}"
-      )
+    algorithm_config.validate_grpo_loss_algo(self.loss_algo, self.epsilon_c)
     self._validate_sampler_is_and_rs_options()
 
 

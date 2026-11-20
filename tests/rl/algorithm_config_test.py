@@ -51,6 +51,12 @@ class AlgorithmConfigTest(parameterized.TestCase):
           adv="grpo-loo",
           loss="grpo",
       ),
+      dict(
+          testcase_name="cispo_grpo_grpo",
+          algo="cispo",
+          adv="grpo",
+          loss="grpo",
+      ),
   )
   def test_valid_combinations(self, algo: str, adv: str, loss: str):
     """Tests various valid combinations of core algorithm parameters."""
@@ -217,6 +223,15 @@ class AlgorithmConfigTest(parameterized.TestCase):
     self.assertIsNone(config.sampler_rs_min)
     self.assertIsNone(config.sampler_rs_max)
 
+  @parameterized.named_parameters(
+      dict(testcase_name="grpo", loss_algo="grpo"),
+      dict(testcase_name="gspo_token", loss_algo="gspo-token"),
+      dict(testcase_name="cispo", loss_algo="cispo"),
+  )
+  def test_grpo_config_valid_loss_algo(self, loss_algo: str):
+    config = algorithm_config.GRPOConfig(loss_algo=loss_algo)
+    self.assertEqual(config.loss_algo, loss_algo)
+
   def test_grpo_config_validation(self):
     """Verifies GRPOConfig parameter validation."""
     with self.assertRaisesRegex(
@@ -224,8 +239,13 @@ class AlgorithmConfigTest(parameterized.TestCase):
     ):
       algorithm_config.GRPOConfig(num_generations=1)
 
-    with self.assertRaisesRegex(ValueError, "loss_algo should be either"):
+    with self.assertRaisesRegex(ValueError, "loss_algo must be one of"):
       algorithm_config.GRPOConfig(loss_algo="invalid_algo")
+
+    with self.assertRaisesRegex(
+        ValueError, "epsilon_c is not supported with loss_algo='cispo'"
+    ):
+      algorithm_config.GRPOConfig(loss_algo="cispo", epsilon_c=3.0)
 
     with self.assertRaisesRegex(ValueError, "sampler_is should be either"):
       algorithm_config.GRPOConfig(sampler_is="invalid_is")

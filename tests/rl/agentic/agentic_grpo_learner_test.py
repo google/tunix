@@ -357,10 +357,12 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         ValueError, "num_generations must be greater than 1"
     ):
       agentic_grpo_learner.GRPOConfig(num_generations=1)
-    with self.assertRaisesRegex(
-        ValueError, "loss_algo should be either grpo or gspo-token"
-    ):
+    with self.assertRaisesRegex(ValueError, "loss_algo must be one of"):
       agentic_grpo_learner.GRPOConfig(loss_algo="invalid")
+    with self.assertRaisesRegex(
+        ValueError, "epsilon_c is not supported with loss_algo='cispo'"
+    ):
+      agentic_grpo_learner.GRPOConfig(loss_algo="cispo", epsilon_c=3.0)
 
   def test_num_iterations_greater_than_1(self):
     vocab = test_common.MockVocab()
@@ -639,7 +641,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       ]
       self.assertIn(4, chunk_sizes)
 
-  @parameterized.parameters("grpo", "gspo-token")
+  @parameterized.parameters("grpo", "gspo-token", "cispo")
   def test_grpo_loss_fn(self, loss_algo):
     batch_size, seq_len = 2, 8
     prompt_ids = jnp.ones((batch_size, seq_len), dtype=jnp.int32)

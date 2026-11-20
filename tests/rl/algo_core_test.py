@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from absl.testing import absltest
+from absl.testing import parameterized
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -1179,7 +1180,7 @@ class GrpoLossSequenceLevelControlsTest(absltest.TestCase):
             [[-1.0, -1.0, -1.0], [1e9, 1e9, 1e9]], jnp.float32
         ),
     )
-    for loss_algo in ('grpo', 'gspo-token'):
+    for loss_algo in ('grpo', 'gspo-token', 'cispo'):
       with self.subTest(loss_algo=loss_algo):
         config = self._config(
             loss_algo=loss_algo,
@@ -1429,6 +1430,253 @@ class GrpoLossSequenceLevelControlsTest(absltest.TestCase):
     np.testing.assert_allclose(
         float(out.aux_metrics['pg_clipfrac_lower'].compute()), 0.5, rtol=1e-5
     )
+
+
+class _ZeroLogitBiasModel(algo_core.nnx.Module):
+  """Toy model with trainable per-vocab bias producing uniform initial logps."""
+
+  def __init__(self, vocab: int, rngs: algo_core.nnx.Rngs):
+    del rngs
+    self.vocab = vocab
+    self.bias = algo_core.nnx.Param(jnp.zeros((vocab,), dtype=jnp.float32))
+
+  def __call__(
+      self,
+      inputs: jax.Array,
+      segment_ids: jax.Array | None = None,
+      positions: jax.Array | None = None,
+      cache: object = None,
+      attention_mask: jax.Array | None = None,
+  ) -> tuple[jax.Array, object]:
+    del segment_ids, positions, attention_mask
+    logits = jnp.broadcast_to(self.bias[...], inputs.shape + (self.vocab,))
+    return logits, cache
+
+
+class CispoLossTest(parameterized.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.vocab = 8
+    self.trainer_logp = float(-np.log(self.vocab))
+    self.model = _ZeroLogitBiasModel(self.vocab, algo_core.nnx.Rngs(0))
+
+  def _config(
+      self,
+      *,
+      loss_algo: str = 'cispo',
+      epsilon: float = 0.2,
+      epsilon_high: float = 0.28,
+      loss_agg_mode: str = 'sequence-mean-token-mean',
+  ) -> algorithm_config.GRPOConfig:
+    cfg = algorithm_config.GRPOConfig(
+        beta=0.0,
+        epsilon=epsilon,
+        epsilon_high=epsilon_high,
+        loss_algo=loss_algo,
+        loss_agg_mode=loss_agg_mode,
+        use_rollout_logps=True,
+    )
+    cfg.temperature = 1.0
+    return cfg
+
+  def _single_token_example(
+      self,
+      *,
+      token_id: int = 3,
+      advantage: float = 2.0,
+      log_ratio_delta: float = 0.0,
+  ) -> algo_core.common.TrainExample:
+    return algo_core.common.TrainExample(
+        prompt_ids=jnp.array([[1]], dtype=jnp.int32),
+        prompt_mask=jnp.array([[1]], dtype=jnp.int32),
+        completion_ids=jnp.array([[token_id]], dtype=jnp.int32),
+        completion_mask=jnp.array([[1.0]], dtype=jnp.float32),
+        advantages=jnp.array([advantage], dtype=jnp.float32),
+        ref_per_token_logps=None,
+        old_per_token_logps=jnp.array(
+            [[self.trainer_logp - log_ratio_delta]], dtype=jnp.float32
+        ),
+    )
+
+  def _value_and_bias_grad(
+      self,
+      example: algo_core.common.TrainExample,
+      cfg: algorithm_config.GRPOConfig,
+  ) -> tuple[float, dict[str, object], np.ndarray]:
+    def _loss_and_aux(model):
+      out = algo_core.grpo_loss_fn(model, example, cfg, pad_id=0, eos_id=-1)
+      return out.primary_loss.compute(), out.aux_metrics
+
+    (loss_val, aux), grads = algo_core.nnx.value_and_grad(
+        _loss_and_aux, has_aux=True
+    )(self.model)
+    return float(loss_val), aux, np.asarray(grads.bias[...])
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='unclipped_positive_adv',
+          log_ratio_delta=0.05,
+          advantage=2.0,
+          epsilon=0.2,
+          epsilon_high=0.28,
+          expected_clipfrac=0.0,
+      ),
+      dict(
+          testcase_name='upper_clipped_positive_adv',
+          log_ratio_delta=1.0,
+          advantage=2.0,
+          epsilon=0.2,
+          epsilon_high=0.28,
+          expected_clipfrac=1.0,
+      ),
+      dict(
+          testcase_name='lower_clipped_negative_adv',
+          log_ratio_delta=-1.0,
+          advantage=-1.5,
+          epsilon=0.2,
+          epsilon_high=0.28,
+          expected_clipfrac=1.0,
+      ),
+      dict(
+          testcase_name='unclipped_lower_when_epsilon_is_one',
+          log_ratio_delta=-1.0,
+          advantage=1.5,
+          epsilon=1.0,
+          epsilon_high=0.28,
+          expected_clipfrac=0.0,
+      ),
+  )
+  def test_cispo_loss_and_gradient_match_analytical_formula(
+      self,
+      log_ratio_delta: float,
+      advantage: float,
+      epsilon: float,
+      epsilon_high: float,
+      expected_clipfrac: float,
+  ):
+    token_id = 3
+    example = self._single_token_example(
+        token_id=token_id, advantage=advantage, log_ratio_delta=log_ratio_delta
+    )
+    loss_val, aux, bias_grad = self._value_and_bias_grad(
+        example, self._config(epsilon=epsilon, epsilon_high=epsilon_high)
+    )
+
+    clipped_ratio = float(
+        np.clip(np.exp(log_ratio_delta), 1.0 - epsilon, 1.0 + epsilon_high)
+    )
+    expected_logp_grad = np.full((self.vocab,), -1.0 / self.vocab)
+    expected_logp_grad[token_id] += 1.0
+    np.testing.assert_allclose(
+        loss_val, -advantage * clipped_ratio * self.trainer_logp, rtol=1e-5
+    )
+    np.testing.assert_allclose(
+        bias_grad, -advantage * clipped_ratio * expected_logp_grad, rtol=1e-5
+    )
+    np.testing.assert_allclose(
+        float(aux['pg_clipfrac'].compute()), expected_clipfrac, atol=1e-6
+    )
+    np.testing.assert_allclose(
+        float(aux['pg_clipfrac_lower'].compute()), 0.0, atol=1e-6
+    )
+
+  def test_cispo_gradient_matches_grpo_inside_clip_band(self):
+    example = self._single_token_example(token_id=4, log_ratio_delta=0.05)
+    _, _, cispo_grad = self._value_and_bias_grad(
+        example, self._config(loss_algo='cispo')
+    )
+    _, _, grpo_grad = self._value_and_bias_grad(
+        example, self._config(loss_algo='grpo')
+    )
+    np.testing.assert_allclose(cispo_grad, grpo_grad, rtol=1e-5, atol=1e-6)
+
+  def test_cispo_preserves_bounded_gradient_where_grpo_clips_to_zero(self):
+    example = self._single_token_example(token_id=4, log_ratio_delta=1.0)
+    _, _, cispo_grad = self._value_and_bias_grad(
+        example, self._config(loss_algo='cispo')
+    )
+    _, _, grpo_grad = self._value_and_bias_grad(
+        example, self._config(loss_algo='grpo')
+    )
+    np.testing.assert_allclose(grpo_grad, np.zeros_like(grpo_grad), atol=1e-6)
+    self.assertGreater(float(np.linalg.norm(cispo_grad)), 0.1)
+
+  def test_cispo_masked_and_non_finite_positions_contribute_zero(self):
+    lp = self.trainer_logp
+    example = algo_core.common.TrainExample(
+        prompt_ids=jnp.array([[1], [1]], dtype=jnp.int32),
+        prompt_mask=jnp.array([[1], [1]], dtype=jnp.int32),
+        completion_ids=jnp.array([[2, 3, 4], [5, 6, 7]], dtype=jnp.int32),
+        completion_mask=jnp.array(
+            [[1.0, 0.0, 0.0], [0.0, 0.0, 0.0]], dtype=jnp.float32
+        ),
+        advantages=jnp.array([1.5, jnp.nan], dtype=jnp.float32),
+        ref_per_token_logps=None,
+        old_per_token_logps=jnp.array(
+            [[lp, lp - 5.0, -jnp.inf], [lp - 5.0, jnp.nan, lp]],
+            dtype=jnp.float32,
+        ),
+    )
+    loss_val, aux, bias_grad = self._value_and_bias_grad(
+        example, self._config(loss_agg_mode='token-mean')
+    )
+    self.assertTrue(np.isfinite(loss_val))
+    self.assertTrue(bool(np.all(np.isfinite(bias_grad))))
+    np.testing.assert_allclose(loss_val, -1.5 * lp, rtol=1e-5)
+    np.testing.assert_allclose(
+        float(aux['pg_clipfrac'].compute()), 0.0, atol=1e-6
+    )
+
+  def test_cispo_packed_matches_unpacked_loss_and_grads(self):
+    lp = self.trainer_logp
+    packed = algo_core.common.TrainExample(
+        prompt_ids=jnp.zeros((1, 0), dtype=jnp.int32),
+        prompt_mask=jnp.zeros((1, 0), dtype=jnp.int32),
+        completion_ids=jnp.array([[7, 3, 4, 7, 5]], dtype=jnp.int32),
+        completion_mask=jnp.array([[0, 1, 1, 0, 1]], dtype=jnp.float32),
+        advantages=jnp.array([[0.0, 1.5, 1.5, 0.0, -2.0]], dtype=jnp.float32),
+        ref_per_token_logps=None,
+        old_per_token_logps=jnp.array(
+            [[0.0, lp - 0.1, lp - 1.0, 0.0, lp + 1.0]], dtype=jnp.float32
+        ),
+        segment_ids=jnp.array([[1, 1, 1, 2, 2]], dtype=jnp.int32),
+        segment_positions=jnp.array([[0, 1, 2, 0, 1]], dtype=jnp.int32),
+        num_segments=3,
+    )
+    unpacked = algo_core.common.TrainExample(
+        prompt_ids=jnp.array([[7], [7]], dtype=jnp.int32),
+        prompt_mask=jnp.array([[1], [1]], dtype=jnp.int32),
+        completion_ids=jnp.array([[3, 4], [5, 0]], dtype=jnp.int32),
+        completion_mask=jnp.array([[1, 1], [1, 0]], dtype=jnp.float32),
+        advantages=jnp.array([1.5, -2.0], dtype=jnp.float32),
+        ref_per_token_logps=None,
+        old_per_token_logps=jnp.array(
+            [[lp - 0.1, lp - 1.0], [lp + 1.0, 0.0]], dtype=jnp.float32
+        ),
+    )
+    cfg = self._config()
+    packed_loss, _, packed_grad = self._value_and_bias_grad(packed, cfg)
+    unpacked_loss, _, unpacked_grad = self._value_and_bias_grad(unpacked, cfg)
+    np.testing.assert_allclose(packed_loss, unpacked_loss, rtol=1e-5)
+    np.testing.assert_allclose(packed_grad, unpacked_grad, rtol=1e-5, atol=1e-5)
+
+  def test_grpo_loss_fn_rejects_cispo_with_epsilon_c_and_unknown_algo(self):
+    example = self._single_token_example()
+    cfg_with_dual_clip = self._config()
+    cfg_with_dual_clip.epsilon_c = 3.0
+    with self.assertRaisesRegex(
+        ValueError, "epsilon_c is not supported with loss_algo='cispo'"
+    ):
+      algo_core.grpo_loss_fn(
+          self.model, example, cfg_with_dual_clip, pad_id=0, eos_id=-1
+      )
+    cfg_with_unknown_algo = self._config()
+    cfg_with_unknown_algo.loss_algo = 'unknown'
+    with self.assertRaisesRegex(ValueError, 'loss_algo must be one of'):
+      algo_core.grpo_loss_fn(
+          self.model, example, cfg_with_unknown_algo, pad_id=0, eos_id=-1
+      )
 
 
 if __name__ == '__main__':
