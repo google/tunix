@@ -540,9 +540,13 @@ class TrainerWorker(abstract_worker.Worker):
 
   @abstract_worker.offload_to_thread
   def prepare_weight_sync(self, sync_request: Any = None) -> Any:
-    """Stages weights for transfer and returns their metadata."""
+    """Stages weights for transfer and returns their metadata.
+
+    The worker stays READY: staging is complete when this returns. Whether the
+    trainer may take the next batch before the round ends is the caller's
+    decision; it depends on the transport reading only the staged copy.
+    """
     trainer = self._ensure_ready()
-    self.state = WorkerState.SYNCING
     try:
       with self._otel.track_rpc(weight_sync_direction="send"):
         metadata = trainer.prepare_weight_sync(sync_request=sync_request)
@@ -555,19 +559,17 @@ class TrainerWorker(abstract_worker.Worker):
       self.state = WorkerState.ERROR
       raise
 
-  @abstract_worker.offload_to_thread
   def release_weight_sync(self, sync_request: Any = None) -> Any:
-    """Releases this round's staging and restores READY."""
-    # Not `_ensure_ready()`: `prepare_weight_sync` left the state at SYNCING,
-    # and `_ensure_ready()` raises unless the state is READY.
+    """Releases this round's staging.
+
+    Not offloaded behind the worker lock: it changes no worker state, and
+    queueing behind a long `update` or `save_checkpoint` would hold the round
+    open. It therefore runs concurrently with every other worker method.
+    """
     if self._trainer is None:
-      result = None
-    else:
-      with self._otel.track_rpc(weight_sync_direction="release"):
-        result = self._trainer.release_weight_sync(sync_request=sync_request)
-    if self.state == WorkerState.SYNCING:
-      self.state = WorkerState.READY
-    return result
+      return None
+    with self._otel.track_rpc(weight_sync_direction="release"):
+      return self._trainer.release_weight_sync(sync_request=sync_request)
 
   @abstract_worker.offload_to_thread
   def get_metrics(self) -> Any:

@@ -744,6 +744,25 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_sync_weights_forwards_source_prepared_to_coordinator(self):
+    coordinator = mock.MagicMock()
+    coordinator.sync = mock.AsyncMock(
+        return_value=mock.MagicMock(policy_version=1, workers=())
+    )
+    engine = _make_engine(
+        trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+        weight_sync_coordinator=coordinator,
+    )
+    source_prepared = asyncio.Event()
+
+    asyncio.run(
+        engine.sync_weights(policy_version=1, source_prepared=source_prepared)
+    )
+
+    self.assertIs(
+        coordinator.sync.await_args.kwargs["source_prepared"], source_prepared
+    )
+
   def test_prepare_rollout_policy_sets_target_state_and_bootstraps_sync(self):
     async def _run():
       class _FakeResult:

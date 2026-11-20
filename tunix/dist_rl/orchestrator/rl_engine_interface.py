@@ -14,6 +14,7 @@
 
 """The RL engine interface (Layer 1 Compute Routing Protocol) following Orchestrator V2."""
 
+import asyncio
 from collections.abc import Mapping, Sequence
 import dataclasses
 from typing import Any, Protocol, runtime_checkable
@@ -233,6 +234,7 @@ class AbstractRLEngine(Protocol):
       policy_version: int | None = None,
       *,
       min_retained_policy_version: int | None = None,
+      source_prepared: asyncio.Event | None = None,
       **kwargs: Any,
   ) -> int:
     """Coordinates decentralized peer-to-peer weight sync across worker roles.
@@ -243,6 +245,9 @@ class AbstractRLEngine(Protocol):
       policy_version: Optional explicit target policy version.
       min_retained_policy_version: Optional zombie-eviction floor forwarded to
         rollout workers during `post_weight_sync`.
+      source_prepared: Set once the trainer has staged its weights and may
+        train again while the rest of the sync runs. An engine that cannot
+        tell leaves it unset, and the caller then waits for the whole sync.
       **kwargs: Additional engine-specific sync options.
 
     Returns:

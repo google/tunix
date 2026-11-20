@@ -367,6 +367,18 @@ class WeightSyncHandler(abc.ABC):
     Callers running an event loop wrap it in an executor.
     """
 
+  @property
+  def transfers_from_staged_copy(self) -> bool:
+    """Whether `transfer` reads only what `prepare_weight_sync` staged.
+
+    When true, the source may change its live weights as soon as its prepare
+    returns, so the coordinator reports the source prepared and a caller may
+    train through the rest of the round. The default is false: a transport
+    that reads the source's live weights during `transfer` needs them held
+    until the round ends.
+    """
+    return False
+
   def close(self) -> None:
     """Releases any transport resources. Optional for implementations."""
 
