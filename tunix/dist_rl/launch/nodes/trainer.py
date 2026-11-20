@@ -755,10 +755,24 @@ def _create_maxtext_trainer_factory(
         _ACTOR_OPTIMIZER_KEY,
         opt["schedule_type"],
     )
+  # All multi-host trainer replicas share one Orbax CheckpointManager directory
+  # (`{base_output_directory}/{run_name}/checkpoints`). Using the per-replica
+  # `worker_id` (`...-0`, `...-1`, ...) would split shards across separate
+  # directories and fail multi-host checkpoint save/restore.
+  cluster = hp.config_mapping("cluster_config")
+  if int(cluster.get("trainer_replicas", 1)) > 1:
+    maxtext_run_name = (
+        str(cluster["k8s"]["trainer_id"])
+        if cluster["target"] == "k8s"
+        else LOCAL_WORKER_ID
+    )
+  else:
+    maxtext_run_name = worker_id
+
   max_seq_tokens_per_device = rl_train["max_seq_tokens_per_device"]
   maxtext_config = maxtext_utils.build_maxtext_config(
       model_name=maxtext_model_name,
-      worker_id=worker_id,
+      worker_id=maxtext_run_name,
       train_micro_batch_size=int(rl_train["train_micro_batch_size"]),
       mesh_fsdp=axes["fsdp"],
       mesh_tp=axes["tp"],
