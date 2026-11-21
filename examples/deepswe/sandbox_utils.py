@@ -20,14 +20,21 @@ from __future__ import annotations
 
 import atexit
 import collections
+# Eagerly materialize concurrent.futures.thread (even under lazy_imports) before
+# registering exit hooks so its threading._register_atexit(_python_exit) handler
+# precedes teardown_global_fleet in LIFO shutdown order.
+import concurrent.futures.thread as _futures_thread
 import logging
 import os
 import threading
 from typing import Any, Callable
 import numpy as np
 
+_ = _futures_thread._python_exit
+
 _GLOBAL_FLEET = None
 _FLEET_LOCK = threading.RLock()
+_SHUTDOWN_HOOKS_REGISTERED = False
 _PATCH_LOCK = threading.Lock()
 _R2EGYM_PATCHED = False
 
@@ -361,21 +368,22 @@ def init_global_fleet(
       else:
         fleet_inst.load_tasks(normalized_tasks)
 
-    msg = (
-        f"[SandboxFleet] Initializing pipelined fleet in namespace={fleet_ns}"
-        f" (max_concurrent={effective_max_concurrent},"
-        f" window_size={batch_size},"
-        f" max_warmpool_replicas={fleet_kwargs['max_warmpool_size']},"
-        " warm_per_task=True)..."
+    logging.info(
+        "[SandboxFleet] Initializing pipelined fleet in namespace=%s"
+        " (max_concurrent=%d, window_size=%d, max_warmpool_replicas=%d,"
+        " warm_per_task=True)...",
+        fleet_ns,
+        effective_max_concurrent,
+        batch_size,
+        fleet_kwargs["max_warmpool_size"],
     )
-    logging.info(msg)
     if getattr(fleet_cfg, "install_teardown_hooks", False):
       fleet_inst._install_teardown_hooks()
     fleet_inst._torndown = False
     if hasattr(fleet_inst, "plan"):
       fleet_inst.plan()
     _GLOBAL_FLEET = fleet_inst
-    atexit.register(teardown_global_fleet)
+    _register_shutdown_hooks()
     return _GLOBAL_FLEET
 
 
@@ -395,6 +403,16 @@ def warm_global_fleet() -> None:
     )
 
 
+def _register_shutdown_hooks() -> None:
+  """Registers process exit teardown before ThreadPoolExecutor shutdown."""
+  global _SHUTDOWN_HOOKS_REGISTERED
+  if _SHUTDOWN_HOOKS_REGISTERED:
+    return
+  threading._register_atexit(teardown_global_fleet)  # pyrefly: ignore[missing-attribute]
+  atexit.register(teardown_global_fleet)
+  _SHUTDOWN_HOOKS_REGISTERED = True
+
+
 def get_global_fleet() -> Any:
   """Retrieve the active process-wide SandboxFleet instance."""
   if _GLOBAL_FLEET is None:
@@ -405,19 +423,21 @@ def get_global_fleet() -> Any:
 
 
 def teardown_global_fleet() -> None:
-  """Atexit handler to cleanly tear down warm pools on process exit."""
+  """Tears down active warm pools on process exit."""
   global _GLOBAL_FLEET
-  if _GLOBAL_FLEET is not None:
+  with _FLEET_LOCK:
+    fleet = _GLOBAL_FLEET
+    _GLOBAL_FLEET = None
+  if fleet is not None:
     logging.info(
         "[SandboxFleet] Automatically tearing down warm pools on exit..."
     )
     try:
       # verify=True runs the run-scoped reaper after teardown to force-delete
       # any lingering pods belonging to this fleet's run_id.
-      _GLOBAL_FLEET.teardown(verify=True)
+      fleet.teardown(verify=True)
     except Exception as e:  # pylint: disable=broad-exception-caught
       logging.warning("[SandboxFleet] Teardown note: %s", e)
-    _GLOBAL_FLEET = None
 
 
 class PrewarmDatasetIterator:
