@@ -22,6 +22,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from tunix.experimental.generate import configs
+from tunix.experimental.generate import kv_cache_manager as kv_cache_manager_lib
 from tunix.experimental.generate import model_runner as model_runner_lib
 from tunix.experimental.generate import request as request_lib
 from tunix.models import paged_attention
@@ -1031,6 +1032,61 @@ class MultiStepExecuteTest(absltest.TestCase):
     step_rngs = [call.args[5] for call in mock_step.call_args_list]
     self.assertFalse(np.array_equal(step_rngs[0], step_rngs[1]))
     self.assertFalse(np.array_equal(step_rngs[1], step_rngs[2]))
+
+  def test_grouped_page_indices_shared_on_device_and_across_decode_steps(self):
+    runner = _runner(_NextTokenTransformer(), num_scheduler_steps=3)
+    full_pages = np.array(
+        [[0, 1], [2, 3], [4, 5], [-1, -1]], dtype=np.int32
+    )
+    sliding_pages = np.array(
+        [[6, -1], [7, -1], [8, 9], [-1, -1]], dtype=np.int32
+    )
+    grouped_metadata = paged_attention.PagedAttnMetadata(
+        page_indices=kv_cache_manager_lib.GroupedPageIndices(
+            (full_pages, sliding_pages),
+            (('full_0', 'full_1'), ('sliding_0', 'sliding_1')),
+        ),
+        kv_lens=np.array([6, 4, 3, 0], dtype=np.int32),
+        query_lens=np.array([1, 4, 3, 0], dtype=np.int32),
+        distribution=np.array([[1, 2, 3]], dtype=np.int32),
+    )
+    tokens = jnp.array([[5, 1, 2, 3, 4, 7, 8, 9]], dtype=jnp.int32)
+    sampling_params = (
+        _params(temperature=0.0),
+        _params(temperature=0.0),
+        _params(temperature=0.0),
+    )
+    mock_step = mock.Mock(wraps=_fake_step_fn)
+    runner._model_step_fn = mock_step
+    runner._compiled_model_step_fn = mock_step
+    with jax.disable_jit():
+      runner.execute_step(
+          cache=_positions_cache(8),
+          tokens=tokens,
+          metadata=grouped_metadata,
+          sampling_params=sampling_params,
+      )
+
+    step_metadata = [call.args[3] for call in mock_step.call_args_list]
+    self.assertLen(step_metadata, 3)
+    for meta in step_metadata:
+      self.assertIsInstance(
+          meta.page_indices, kv_cache_manager_lib.GroupedPageIndices
+      )
+      self.assertLen(jax.tree.leaves(meta.page_indices), 2)
+      self.assertIs(meta.page_indices['full_0'], meta.page_indices['full_1'])
+      self.assertIs(
+          meta.page_indices['sliding_0'], meta.page_indices['sliding_1']
+      )
+      self.assertIsNot(
+          meta.page_indices['full_0'], meta.page_indices['sliding_0']
+      )
+    np.testing.assert_array_equal(
+        step_metadata[1].page_indices['full_0'][:2], [[0, 1], [4, 5]]
+    )
+    np.testing.assert_array_equal(
+        step_metadata[1].page_indices['sliding_0'][:2], [[6, -1], [8, 9]]
+    )
 
   def test_sampling_settings_follow_their_rows(self):
     runner = _runner(_NextTokenTransformer(), num_scheduler_steps=2)

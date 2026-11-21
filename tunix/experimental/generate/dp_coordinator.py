@@ -278,7 +278,7 @@ class DPCoordinator:
       dict[int, int],
       np.ndarray,
       np.ndarray,
-      dict[str, np.ndarray],
+      kv_cache_manager_lib.GroupedPageIndices,
   ]:
     """Packs the scheduled requests into this rank's tokens and ragged metadata.
 
@@ -296,14 +296,11 @@ class DPCoordinator:
       slot, query_lens, kv_lens, page_indices).
     """
     num_rows = self._scheduler_config.max_num_seqs
+    page_indices = self._kv_cache_manager.get_page_idxs(
+        scheduled, num_rows, self._max_pages_per_seq
+    )
     query_lens = np.zeros((num_rows,), dtype=np.int32)
     kv_lens = np.zeros((num_rows,), dtype=np.int32)
-    page_indices = {
-        cache_name: np.full(
-            (num_rows, self._max_pages_per_seq), -1, dtype=np.int32
-        )
-        for cache_name in self._kv_cache_manager.cache_names
-    }
 
     prev_row_by_id = {
         req.request_id: prev_row for prev_row, req in enumerate(prev_scheduled)
@@ -333,8 +330,6 @@ class DPCoordinator:
 
       query_lens[row] = end - start
       kv_lens[row] = end
-      for cache_name, idxs in self._kv_cache_manager.get_page_idxs(req).items():
-        page_indices[cache_name][row, : len(idxs)] = idxs
 
     return (
         batch_tokens,

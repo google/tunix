@@ -35,6 +35,7 @@ import collections
 from collections.abc import Mapping, Sequence
 
 import jax
+import numpy as np
 from tunix.common import datatypes
 from tunix.experimental.generate import configs
 from tunix.experimental.generate import request as request_lib
@@ -44,6 +45,73 @@ from tunix.experimental.generate import utils
 
 
 Page = single_type_kv_cache_manager.Page
+
+
+class GroupedPageIndices(dict[str, jax.Array | np.ndarray]):
+  """`{cache_name: page_table}` dict that flattens once per KV-cache group.
+
+  Every cache in a KV-cache group shares one `[num_rows, max_pages_per_seq]`
+  page table array. Registering this dict as a custom PyTree node whose leaves
+  are the unique per-group tables ensures `jax.device_put`, `jax.jit`, and
+  `jax.tree.map` transfer, trace, and transform one buffer per group rather than
+  one duplicate copy per layer.
+  """
+
+  def __init__(
+      self,
+      groups: Sequence[jax.Array | np.ndarray],
+      cache_names_per_group: Sequence[Sequence[str]],
+  ):
+    self.groups = tuple(groups)
+    self.cache_names_per_group = tuple(
+        tuple(names) for names in cache_names_per_group
+    )
+    if len(self.groups) != len(self.cache_names_per_group):
+      raise ValueError(
+          f"Got {len(self.groups)} page table groups for"
+          f" {len(self.cache_names_per_group)} cache-name groups."
+      )
+    if any(not names for names in self.cache_names_per_group):
+      raise ValueError("Every page table group must bind at least one cache.")
+    by_cache: dict[str, jax.Array | np.ndarray] = {}
+    for group, names in zip(self.groups, self.cache_names_per_group):
+      for name in names:
+        if name in by_cache:
+          raise ValueError(
+              "Duplicate cache names across groups:"
+              f" {self.cache_names_per_group}."
+          )
+        by_cache[name] = group
+    super().__init__(by_cache)
+
+  @classmethod
+  def concat(cls, shards: Sequence[GroupedPageIndices]) -> GroupedPageIndices:
+    """Concatenates per-rank host `GroupedPageIndices` shards along axis 0."""
+    if not shards:
+      raise ValueError("shards must be non-empty.")
+    if len(shards) == 1:
+      return shards[0]
+    cache_names_per_group = shards[0].cache_names_per_group
+    for shard in shards[1:]:
+      if shard.cache_names_per_group != cache_names_per_group:
+        raise ValueError(
+            "All shards must share cache_names_per_group:"
+            f" {shard.cache_names_per_group} != {cache_names_per_group}."
+        )
+    groups = tuple(
+        np.concatenate([s.groups[g] for s in shards], axis=0)
+        for g in range(len(cache_names_per_group))
+    )
+    return cls(groups, cache_names_per_group)
+
+
+jax.tree_util.register_pytree_node(
+    GroupedPageIndices,
+    lambda m: (m.groups, m.cache_names_per_group),
+    lambda cache_names_per_group, groups: GroupedPageIndices(
+        groups, cache_names_per_group
+    ),
+)
 
 
 def _create_kv_cache_group_managers(
@@ -114,6 +182,9 @@ class KVCacheManager:
     self._request_to_prefix_hashes: dict[str, list[int]] = {}
     self._kv_cache_group_managers, self._num_device_pages = (
         _create_kv_cache_group_managers(config, cache_geometries)
+    )
+    self._cache_names_per_group: tuple[tuple[str, ...], ...] = tuple(
+        tuple(manager.cache_names) for manager in self._kv_cache_group_managers
     )
 
   @property
@@ -191,23 +262,46 @@ class KVCacheManager:
 
   def get_page_idxs(
       self,
-      req: request_lib.RequestState,
-  ) -> dict[str, tuple[int, ...]]:
-    """Returns a mapping of cache name to device page indices for the request.
+      reqs: Sequence[request_lib.RequestState],
+      num_rows: int,
+      max_pages_per_seq: int,
+  ) -> GroupedPageIndices:
+    """Returns a `[num_rows, max_pages_per_seq]` page table per KV cache.
 
     Args:
-        req: The request identifier to get page indices for.
+        reqs: The requests to get page indices for, in row order.
+        num_rows: The row capacity of the page table.
+        max_pages_per_seq: The page capacity of each row.
 
     Returns:
-        A dictionary mapping each cache name to its tuple of device page
-        indices. Entries are -1 for pages outside the cache's active window.
+        A `GroupedPageIndices` mapping each cache name to its
+        `[num_rows, max_pages_per_seq]` device page table, padded with -1.
+        Caches in the same group share a single page table array.
     """
-    page_idxs: dict[str, tuple[int, ...]] = {}
+    if num_rows < 0:
+      raise ValueError(f"num_rows must be non-negative, got {num_rows}.")
+    if max_pages_per_seq < 0:
+      raise ValueError(
+          f"max_pages_per_seq must be non-negative, got {max_pages_per_seq}."
+      )
+    if len(reqs) > num_rows:
+      raise ValueError(
+          f"Got {len(reqs)} requests for page table with num_rows={num_rows}."
+      )
+
+    groups: list[np.ndarray] = []
     for manager in self._kv_cache_group_managers:
-      group_page_idxs = tuple(manager.get_page_idxs(req.request_id))
-      for cache in manager.cache_names:
-        page_idxs[cache] = group_page_idxs
-    return page_idxs
+      table = np.full((num_rows, max_pages_per_seq), -1, dtype=np.int32)
+      for row, req in enumerate(reqs):
+        idxs = manager.get_page_idxs(req.request_id)
+        if len(idxs) > max_pages_per_seq:
+          raise ValueError(
+              f"Request {req.request_id!r} holds {len(idxs)} pages, exceeding"
+              f" max_pages_per_seq={max_pages_per_seq}."
+          )
+        table[row, : len(idxs)] = idxs
+      groups.append(table)
+    return GroupedPageIndices(groups, self._cache_names_per_group)
 
   def get_physical_pages(self) -> dict[str, jax.Array]:
     """Returns a mapping of cache name to physical device pages."""

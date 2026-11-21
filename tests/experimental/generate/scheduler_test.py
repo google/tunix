@@ -203,7 +203,12 @@ class PreemptionTest(parameterized.TestCase):
     self.assertEqual(req.num_computed_tokens, 0)
     self.assertEqual(req.token_ids, [10, 20, 30, 40, 90])
     self.assertEqual(req.prompt_length, 4)
-    self.assertEqual(self.kv_mgr.get_page_idxs(req), {"cache_0": ()})
+    np.testing.assert_array_equal(
+        self.kv_mgr.get_page_idxs([req], num_rows=1, max_pages_per_seq=2)[
+            "cache_0"
+        ],
+        [[-1, -1]],
+    )
 
   def test_preempt_all_on_empty_scheduler_is_a_noop(self):
     self.sched.preempt_all()
@@ -270,7 +275,12 @@ class PreemptionTest(parameterized.TestCase):
 
     self.assertEqual(list(self.sched._pending_requests), [running])
     self.assertEqual(aborted.status, request_lib.RequestStatus.ABORTED)
-    self.assertEqual(self.kv_mgr.get_page_idxs(aborted), {"cache_0": ()})
+    np.testing.assert_array_equal(
+        self.kv_mgr.get_page_idxs([aborted], num_rows=1, max_pages_per_seq=2)[
+            "cache_0"
+        ],
+        [[-1, -1]],
+    )
 
 
 class AdmissionTest(parameterized.TestCase):
@@ -617,12 +627,22 @@ class ScheduleStepTest(parameterized.TestCase):
     self.sched.abort_request(req)
     # The request is no longer active, but keeps its pages until the next step.
     self.assertEqual(self.sched.num_active_requests, 0)
-    self.assertNotEqual(self.kv_mgr.get_page_idxs(req), {"cache_0": ()})
+    self.assertNotEqual(
+        self.kv_mgr.get_page_idxs([req], num_rows=1, max_pages_per_seq=2)[
+            "cache_0"
+        ][0, 0],
+        -1,
+    )
     scheduled, _ = self.sched.schedule_step([])
 
     self.assertEmpty(scheduled)
     self.assertEmpty(self.sched._running_requests)
-    self.assertEqual(self.kv_mgr.get_page_idxs(req), {"cache_0": ()})
+    np.testing.assert_array_equal(
+        self.kv_mgr.get_page_idxs([req], num_rows=1, max_pages_per_seq=2)[
+            "cache_0"
+        ],
+        [[-1, -1]],
+    )
 
   def test_abort_after_finish_keeps_finished_status(self):
     req = _create_request(req_id="r1", prompt_token_ids=[10, 20])
@@ -702,7 +722,12 @@ class ColocatedSchedulingTest(parameterized.TestCase):
 
     self.sched.drop_completed()
     self.assertEqual(list(self.sched._running_requests), [r2])
-    self.assertEqual(self.kv_mgr.get_page_idxs(r1), {"cache_0": ()})
+    np.testing.assert_array_equal(
+        self.kv_mgr.get_page_idxs([r1], num_rows=1, max_pages_per_seq=2)[
+            "cache_0"
+        ],
+        [[-1, -1]],
+    )
 
   def test_request_with_final_tokens_in_flight_is_skipped(self):
     small_kv_mgr = _create_kv_cache_manager(page_size=4, num_device_pages=3)
@@ -723,8 +748,11 @@ class ColocatedSchedulingTest(parameterized.TestCase):
     scheduled2, dist2 = sched.schedule_step([])
     self.assertEqual(scheduled2, (r2,))
     self.assertEqual(dist2, (1, 1, 1))
-    self.assertLen(small_kv_mgr.get_page_idxs(r1)["cache_0"], 1)
-    self.assertLen(small_kv_mgr.get_page_idxs(r2)["cache_0"], 2)
+    page_idxs = small_kv_mgr.get_page_idxs(
+        [r1, r2], num_rows=2, max_pages_per_seq=3
+    )["cache_0"]
+    self.assertEqual(int(np.sum(page_idxs[0] != -1)), 1)
+    self.assertEqual(int(np.sum(page_idxs[1] != -1)), 2)
     self.assertEqual(list(sched._running_requests), [r1, r2])
 
   def test_preemption_while_in_flight_keeps_sampled_token_and_resumes(self):
@@ -795,7 +823,12 @@ class ColocatedSchedulingTest(parameterized.TestCase):
     self.assertEqual(list(self.sched._running_requests), [r1, r2, r3])
     self.assertEmpty(self.sched._pending_requests)
     self.assertEqual(r2.num_stale_output_tokens, 1)
-    self.assertEqual(self.kv_mgr.get_page_idxs(r2), {"cache_0": ()})
+    np.testing.assert_array_equal(
+        self.kv_mgr.get_page_idxs([r2], num_rows=1, max_pages_per_seq=2)[
+            "cache_0"
+        ],
+        [[-1, -1]],
+    )
 
     # Once step 1's output arrives, r2 re-prefills, still ahead of r3.
     _complete_in_flight(r1, 101)

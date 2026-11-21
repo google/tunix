@@ -13,10 +13,13 @@
 # limitations under the License.
 
 from absl.testing import absltest
+import jax
 import jax.numpy as jnp
 import numpy as np
+from tunix.common import datatypes
 from tunix.experimental.generate import configs
 from tunix.experimental.generate import dp_coordinator as dp_coordinator_lib
+from tunix.experimental.generate import kv_cache_manager as kv_cache_manager_lib
 from tunix.experimental.generate import request as request_lib
 from tunix.experimental.generate import testing_utils
 
@@ -30,6 +33,7 @@ def make_coordinator(
     num_scheduler_steps: int = 1,
     eos_token_ids: frozenset[int] = frozenset(),
     max_num_seqs: int = 4,
+    geometries: dict[str, datatypes.CacheGeometry] | None = None,
 ) -> dp_coordinator_lib.DPCoordinator:
   """Returns a `DPCoordinator` configured for unit tests."""
   cache_config = configs.CacheConfig(
@@ -48,7 +52,9 @@ def make_coordinator(
   return dp_coordinator_lib.DPCoordinator(
       cache_config=cache_config,
       scheduler_config=scheduler_config,
-      cache_geometries=testing_utils.GEOMETRIES,
+      cache_geometries=(
+          geometries if geometries is not None else testing_utils.GEOMETRIES
+      ),
       mesh=testing_utils.mesh(),
       max_model_len=max_model_len,
       eos_token_ids=eos_token_ids,
@@ -252,6 +258,39 @@ class StepTest(absltest.TestCase):
 
     # 15 tokens plus 2 decode steps span 5 pages of 4 slots.
     self.assertEqual(page_indices['layer_0'].shape, (4, 5))
+
+  def test_prepare_batch_shares_page_tables_per_group_and_fails_fast(self):
+    geometries = {
+        'full_0': datatypes.CacheGeometry(num_kv_heads=1, head_dim=1),
+        'full_1': datatypes.CacheGeometry(num_kv_heads=1, head_dim=1),
+        'sliding_0': datatypes.CacheGeometry(
+            num_kv_heads=1, head_dim=1, window_size=8
+        ),
+        'sliding_1': datatypes.CacheGeometry(
+            num_kv_heads=1, head_dim=1, window_size=8
+        ),
+    }
+    coordinator = make_coordinator(
+        geometries=geometries,
+        max_device_size_gib=4 * 64 * testing_utils.GIB_PER_PAGE,
+    )
+    coordinator.add_request(testing_utils.make_request('0', [1, 2, 3, 4, 5]))
+
+    scheduled, _ = coordinator.schedule_step()
+    # If `get_page_idxs` fails fast, request counters stay untouched.
+    coordinator._max_pages_per_seq = 1
+    with self.assertRaisesRegex(ValueError, 'max_pages_per_seq'):
+      coordinator.prepare_batch(scheduled)
+    self.assertEqual(scheduled[0].num_computed_tokens, 0)
+    self.assertEqual(scheduled[0].num_in_flight_tokens, 0)
+
+    coordinator._max_pages_per_seq = 7
+    _, _, _, _, page_indices = coordinator.prepare_batch(scheduled)
+    self.assertIsInstance(page_indices, kv_cache_manager_lib.GroupedPageIndices)
+    self.assertLen(jax.tree.leaves(page_indices), 2)
+    self.assertIs(page_indices['full_0'], page_indices['full_1'])
+    self.assertIs(page_indices['sliding_0'], page_indices['sliding_1'])
+    self.assertIsNot(page_indices['full_0'], page_indices['sliding_0'])
 
   def test_prepare_batch_maps_in_flight_decode_to_prev_row(self):
     coordinator = make_coordinator()
