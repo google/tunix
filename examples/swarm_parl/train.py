@@ -169,20 +169,21 @@ class Option5PeftDirectorTrainer:
       p_ids = np.asarray(ex["prompt_ids"][-self.max_prompt_length :], dtype=np.int32)
       c_ids = np.asarray(ex["completion_ids"][: self.max_response_length], dtype=np.int32)
       c_lps = np.asarray(ex["rollout_logprobs"][: len(c_ids)], dtype=np.float32)
-      l_mask = np.asarray(ex["loss_mask"][: len(c_ids)], dtype=np.int32)
-      a_mask = np.asarray(ex["attention_mask"][: len(c_ids)], dtype=np.int32)
-      if c_ids.size == 0 or int(np.sum(l_mask)) == 0:
+      l_mask = np.asarray(ex["loss_mask"][: len(c_ids)], dtype=np.float32)
+      a_mask = np.asarray(ex["attention_mask"][: len(c_ids)], dtype=np.float32)
+      if c_ids.size == 0 or float(np.sum(l_mask)) <= 0.0:
         continue
+      mask_2d = l_mask[None, :]
       payloads.append(
           datatypes.RLTrainerPayload(
               prompt_ids=p_ids[None, :],
-              prompt_mask=np.ones((1, len(p_ids)), dtype=np.int32),
+              prompt_mask=np.ones((1, len(p_ids)), dtype=np.float32),
               completion_ids=c_ids[None, :],
-              completion_mask=l_mask[None, :],
+              completion_mask=mask_2d,
               completion_attention_mask=a_mask[None, :],
-              advantages=np.asarray([float(ex["advantage"])], dtype=np.float32),
+              advantages=mask_2d * float(ex["advantage"]),
               old_per_token_logps=c_lps[None, :],
-              ref_per_token_logps=None,
+              metadata={"episode_id": ex["episode_id"], "role": ex["role"]},
           )
       )
     return payloads
@@ -192,23 +193,22 @@ class Option5PeftDirectorTrainer:
     if not payloads:
       self._has_staged = False
       return {"train/skipped_empty": 1.0}
-    cfg = batch_assembly.BatchConfig(
-        micro_batch_size=self.micro_batch_size,
+    assembler = batch_assembly.PaddedBatchAssembler(
+        batch_size=self.micro_batch_size,
         max_prompt_length=self.max_prompt_length,
         max_response_length=self.max_response_length,
         pad_id=self.pad_id,
-        eos_id=self.eos_id,
+        num_generations=len(payloads),
+        mini_batch_size=1,
     )
-    assembler = batch_assembly.PaddedBatchAssembler(cfg)
-    assembler.add_payloads(payloads)
-    mbs = list(assembler.iter_batches(flush=True))
+    mbs = list(assembler.feed(payloads))
     if not mbs:
       self._has_staged = False
       return {"train/skipped_empty": 1.0}
     total_toks = sum(int(np.sum(p.completion_mask)) for p in payloads)
     losses: list[float] = []
     for mb in mbs:
-      res = self.worker.fwd_bwd(datatypes.TrainRequest(payload=mb.payload))
+      res = self.worker.fwd_bwd(datatypes.TrainRequest(payload=mb))
       if isinstance(res, dict) and "loss" in res:
         losses.append(float(res["loss"]))
     self._has_staged = True
@@ -277,19 +277,21 @@ def _build_vllm_engine(
       },
   )
   with mesh:
-    return inprocess_vllm_sampler.InprocessVllmSampler(
+    eng = inprocess_vllm_sampler.InprocessVllmSampler(
         server_id=server_id,
         tokenizer=tokenizer,
         config=rcfg,
         mesh=mesh,
         max_concurrency=32 * dp,
     )
+    eng.initialize()
+    return eng
 
 
-def _sync_actor_to_vllm(actor: Any, engine: Any) -> None:
+def _sync_actor_to_vllm(actor: Any, engine: Any, mesh: jax.sharding.Mesh) -> None:
   params = nnx.state(actor, nnx.Param)
-  bf16_params = jax.tree.map(lambda x: x.astype(jnp.bfloat16), params)
-  engine.update_params(bf16_params)
+  with mesh:
+    engine.update_params(params)
 
 
 async def _run_parl_fidelity_audit(
@@ -518,6 +520,7 @@ def _boot_parl_stack(args: argparse.Namespace) -> dict[str, Any]:
         epsilon_high=0.28,
         beta=0.0,
     )
+    algo_cfg.temperature = 1.0
     worker.with_loss_fn(
         function_registry.get_policy_loss_fn(algo_cfg.policy_loss_fn), has_aux=True
     )
@@ -549,8 +552,8 @@ def _boot_parl_stack(args: argparse.Namespace) -> dict[str, Any]:
       return_logprobs=False,
       hbm_utilization=args.hbm_utilization,
   )
-  _sync_actor_to_vllm(actor, dir_engine)
-  _sync_actor_to_vllm(actor, wrk_engine)
+  _sync_actor_to_vllm(actor, dir_engine, part.director_mesh)
+  _sync_actor_to_vllm(actor, wrk_engine, part.worker_mesh)
   return {
       "actor": actor,
       "worker": worker,
@@ -559,6 +562,7 @@ def _boot_parl_stack(args: argparse.Namespace) -> dict[str, Any]:
       "pad_id": pad_id,
       "dir_engine": dir_engine,
       "wrk_engine": wrk_engine,
+      "dir_mesh": part.director_mesh,
       "ret_server": ret_server,
   }
 
@@ -645,7 +649,7 @@ def main() -> int:
 
   def _publish(versions: dict[str, int]) -> None:
     new_rev = versions["director"]
-    _sync_actor_to_vllm(stack["actor"], stack["dir_engine"])
+    _sync_actor_to_vllm(stack["actor"], stack["dir_engine"], stack["dir_mesh"])
     dir_wrapper.digest = f"qwen3-4b-v{new_rev}"
 
   for step_id in range(args.num_steps):
