@@ -21,7 +21,11 @@ import dataclasses
 import logging
 import os
 import types
-from typing import Any
+from typing import Any, Protocol, TYPE_CHECKING
+
+if TYPE_CHECKING:
+  from flax import nnx  # pylint: disable=g-import-not-at-top
+  import jaxtyping  # pylint: disable=g-import-not-at-top
 
 
 @dataclasses.dataclass(frozen=True)
@@ -903,3 +907,68 @@ def create_maxtext_engine(
     log_param_shapes(engine.model)
 
   return engine
+
+
+class ScannedCheckpointTarget(Protocol):
+  """In-process vLLM weights that a scanned MaxText checkpoint is loaded into.
+
+  `tunix.generate.vllm_sampler.VllmSampler` satisfies it, as does an
+  initialized `InprocessVllmSampler` (`tunix.dist_rl.rollout`).
+  `update_params` re-allocates the KV cache that `delete_cache` freed, and
+  reshards in chunks of `RolloutConfig.rollout_vllm_reshard_chunk_size`.
+  """
+
+  @property
+  def transformer_state(self) -> nnx.State:
+    ...
+
+  def update_params(self, updated_weights: jaxtyping.PyTree) -> None:
+    ...
+
+  def delete_cache(self) -> None:
+    ...
+
+
+def load_and_convert_scanned_checkpoint(
+    path: str | os.PathLike[str],
+    target: ScannedCheckpointTarget,
+    *,
+    mesh_tp: int,
+    ckpt_prefuse_moe: bool,
+    fp8_moe: bool,
+    maxtext_config_overrides: Mapping[str, object],
+    base_config_path: str | os.PathLike[str] | None = None,
+) -> None:
+  """Loads a scanned MaxText checkpoint into `target`'s unscanned vLLM weights.
+
+  Delegates to `maxtext.integration.vllm.scanned_checkpoint_loader` via a lazy
+  MaxText import so callers can import `maxtext_utils` without `maxtext`
+  installed.
+
+  Args:
+    path: Orbax checkpoint directory of the scanned parameters.
+    target: Initialized in-process vLLM weights to load into.
+    mesh_tp: Tensor-parallel degree of the rollout.
+    ckpt_prefuse_moe: Whether the checkpoint stores MoE gate/up as one `wi`.
+    fp8_moe: Whether to quantize the MoE expert weights to FP8.
+    maxtext_config_overrides: MaxText config of the model (`model_name`,
+      checkpoint storage settings, ...). Scan, attention, and checkpoint path
+      settings are overridden for the restore.
+    base_config_path: MaxText base config; defaults to MaxText's `base.yml`.
+
+  Raises:
+    RuntimeError: If a weight `target` serves was freed during the load.
+  """
+  # pylint: disable=g-import-not-at-top
+  from maxtext.integration.vllm import scanned_checkpoint_loader
+  # pylint: enable=g-import-not-at-top
+
+  scanned_checkpoint_loader.load_and_convert_scanned_checkpoint(
+      path,
+      target,
+      mesh_tp=mesh_tp,
+      ckpt_prefuse_moe=ckpt_prefuse_moe,
+      fp8_moe=fp8_moe,
+      maxtext_config_overrides=maxtext_config_overrides,
+      base_config_path=base_config_path,
+  )
