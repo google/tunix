@@ -448,7 +448,7 @@ class R2OrchPaperStackTest(absltest.TestCase):
       self.assertEqual(rep["mean_acc"], 100.0)
       self.assertEqual(rep["suites"]["math_hard"]["multi_agent_pct"], 100.0)
       self.assertEqual(len(deadlines_set), 1)
-      self.assertEqual(deadlines_set[0]["total_timeout_s"], 1800.0)
+      self.assertEqual(deadlines_set[0]["total_timeout_s"], 2700.0)
       self.assertEqual(closed_count[0], 1)
 
 
