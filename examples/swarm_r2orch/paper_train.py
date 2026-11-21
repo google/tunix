@@ -234,10 +234,7 @@ def boot_tpu_services(
   )
   if unlink_staged_safetensors:
     retriever.release_vectors_file(unlink=True)
-    for ef in (data_root / "models/e5-base-v2").glob("*.safetensors"):
-      ef.unlink(missing_ok=True)
-    (data_root / "models/e5-base-v2/pytorch_model.bin").unlink(missing_ok=True)
-    print("[tpu-boot] freed staged Wiki-18 vectors (31 GiB) & E5 weights from tmpfs", flush=True)
+    print("[tpu-boot] freed staged Wiki-18 vectors (31 GiB) from tmpfs", flush=True)
 
   t_vllm = time.monotonic()
   worker_sampler = paper_serving.build_qwen3p5_vllm_sampler(
