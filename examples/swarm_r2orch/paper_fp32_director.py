@@ -46,15 +46,22 @@ PROMPT_BUCKETS = (2048, 8192, 16384, 30720)
 
 def _remesh_to_sampling_specs(
     src_state: nnx.State,
+    template_state: nnx.State,
     target_shardings: nnx.State,
 ) -> nnx.State:
   """Transfers `src_state` leaves onto the exact sampling mesh shardings."""
+  src_pure = nnx.to_pure_dict(src_state)
+  shd_pure = nnx.to_pure_dict(target_shardings)
+
   def _put(x: Any, shd: Any) -> Any:
     if isinstance(x, jax.Array) and isinstance(shd, jax.sharding.Sharding):
       return jax.device_put(x.astype(jnp.float32), shd)
     return x
 
-  return jax.tree.map(_put, src_state, target_shardings)
+  placed_pure = jax.tree.map(_put, src_pure, shd_pure)
+  out_state = jax.tree.map(lambda v: v, template_state)
+  nnx.replace_by_pure_dict(out_state, placed_pure)
+  return out_state
 
 
 class MeshBoundBatchedSampler(sampler_lib.Sampler):
@@ -157,8 +164,11 @@ class BatchingFp32DirectorSampler:
           lambda: qwen3p5_model.Qwen3p5(cfg, rngs=nnx.Rngs(0))
       )
       gdef, abs_st = nnx.split(abs_m)
+      self._template_state = abs_st
       self._target_shardings = nnx.get_named_sharding(abs_st, self.mesh)
-      sharded_st = _remesh_to_sampling_specs(src_state, self._target_shardings)
+      sharded_st = _remesh_to_sampling_specs(
+          src_state, self._template_state, self._target_shardings
+      )
       mdl = nnx.merge(gdef, sharded_st)
       self._sampler = MeshBoundBatchedSampler(mdl, hf_tok, cache_cfg, self.mesh)
     self._exec_lock = threading.Lock()
@@ -183,7 +193,7 @@ class BatchingFp32DirectorSampler:
     with self._exec_lock:
       with self.mesh:
         self._sampler.transformer_state = _remesh_to_sampling_specs(
-            new_fp32_state, self._target_shardings
+            new_fp32_state, self._template_state, self._target_shardings
         )
 
   def _choose_bucket(self, prompt_len: int, req_max: int) -> tuple[int, int]:
