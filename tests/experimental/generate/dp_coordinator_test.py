@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import dataclasses
+
 from absl.testing import absltest
 import jax.numpy as jnp
 import numpy as np
@@ -67,6 +69,66 @@ class DPCoordinatorTest(absltest.TestCase):
       make_coordinator(
           max_model_len=24, max_device_size_gib=6 * testing_utils.GIB_PER_PAGE
       )
+
+  def test_sliding_window_group_with_insufficient_pages_raises(self):
+    local_geom = dataclasses.replace(
+        testing_utils.GEOMETRIES['layer_0'], window_size=8
+    )
+    cache_config = configs.CacheConfig(
+        max_device_size_gib=3 * testing_utils.GIB_PER_PAGE,
+        max_host_size_gib=0.0,
+        page_size=testing_utils.PAGE_SIZE,
+        dtype=jnp.float32,
+    )
+    scheduler_config = configs.SchedulerConfig(
+        max_num_batched_tokens=8,
+        max_num_seqs=1,
+        max_chunked_prefill_length=8,
+        num_scheduler_steps=1,
+    )
+    # max_model_len=8 needs 3 pages (<= 3), but sliding-window active bound is
+    # cdiv(8 + 8, 4) + 1 = 5 pages (> 3).
+    with self.assertRaisesRegex(ValueError, 'sliding-window group'):
+      dp_coordinator_lib.DPCoordinator(
+          cache_config=cache_config,
+          scheduler_config=scheduler_config,
+          cache_geometries={'layer_0': local_geom},
+          mesh=testing_utils.mesh(),
+          max_model_len=8,
+          eos_token_ids=frozenset(),
+      )
+
+  def test_group_device_page_counts_reports_asymmetric_groups(self):
+    local_geom = dataclasses.replace(
+        testing_utils.GEOMETRIES['layer_0'], window_size=8
+    )
+    global_geom = testing_utils.GEOMETRIES['layer_0']
+    cache_config = configs.CacheConfig(
+        max_device_size_gib=64 * testing_utils.GIB_PER_PAGE,
+        max_host_size_gib=0.0,
+        page_size=testing_utils.PAGE_SIZE,
+        dtype=jnp.float32,
+    )
+    scheduler_config = configs.SchedulerConfig(
+        max_num_batched_tokens=8,
+        max_num_seqs=2,
+        max_chunked_prefill_length=8,
+        num_scheduler_steps=1,
+    )
+    coordinator = dp_coordinator_lib.DPCoordinator(
+        cache_config=cache_config,
+        scheduler_config=scheduler_config,
+        cache_geometries={'local_0': local_geom, 'global_0': global_geom},
+        mesh=testing_utils.mesh(),
+        max_model_len=24,
+        eos_token_ids=frozenset(),
+    )
+    # decode_pages = 4 per seq; max_num_batched_tokens = 8 admits at most 1
+    # extra prefill page (first_extra_tokens = 6) -> 2 * 4 + 1 = 9 local pages.
+    self.assertEqual(
+        coordinator.group_device_page_counts,
+        ((8, 1, 9), (None, 1, 55)),
+    )
 
 
 class AddRequestTest(absltest.TestCase):

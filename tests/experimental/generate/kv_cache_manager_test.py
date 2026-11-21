@@ -831,6 +831,58 @@ class InspectionTest(parameterized.TestCase):
         mgr.get_physical_pages()["cache_0"], old_pages["cache_0"]
     )
 
+  def test_asymmetric_local_and_global_pools_and_prefix_caching(self):
+    geometries = {
+        "local_0": datatypes.CacheGeometry(
+            num_kv_heads=2, head_dim=16, window_size=8
+        ),
+        "local_1": datatypes.CacheGeometry(
+            num_kv_heads=2, head_dim=16, window_size=8
+        ),
+        "local_2": datatypes.CacheGeometry(
+            num_kv_heads=2, head_dim=16, window_size=8
+        ),
+        "local_3": datatypes.CacheGeometry(
+            num_kv_heads=2, head_dim=16, window_size=8
+        ),
+        "global_0": datatypes.CacheGeometry(
+            num_kv_heads=2, head_dim=16, window_size=None
+        ),
+    }
+    cfg = _create_cache_config(
+        page_size=4, num_device_pages=100, num_host_pages=0, num_caches=5
+    )
+    with jax.set_mesh(_create_mesh((1,), ("tp",))):
+      mgr = kv_cache_manager.KVCacheManager(
+          config=cfg,
+          cache_geometries=geometries,
+          max_num_seqs=2,
+          max_chunked_prefill_length=8,
+          num_scheduler_steps=1,
+      )
+
+    # active_per_seq = cdiv(8 + 8, 4) + 1 = 5 -> 2 * 5 = 10 local pages,
+    # leaving 500 - 4 * 10 = 460 global pages.
+    self.assertEqual(mgr.group_device_page_counts, ((8, 4, 10), (None, 1, 460)))
+    self.assertEqual(mgr.num_device_pages, 460)
+
+    # A 26-page (104-token) sequence exceeds the 10-page local pool while
+    # evicting out-of-window pages and retaining all 26 global pages.
+    tokens = list(range(1, 106))
+    req1 = _create_request(req_id="r1", prompt_token_ids=tokens)
+    for step in range(26):
+      mgr.sync_request_state(req1)
+      self.assertTrue(mgr.allocate_slots(req1, num_new_tokens=4))
+      req1.num_computed_tokens = (step + 1) * 4
+    mgr.release_request(req1)
+
+    req2 = _create_request(req_id="r2", prompt_token_ids=tokens)
+    mgr.sync_request_state(req2)
+    n_hit, computed = mgr.get_computed_pages(req2)
+    self.assertEqual(n_hit, 26)
+    self.assertLen(computed[1], 26)
+    self.assertEqual(sum(p is not None for p in computed[0]), 2)
+
 
 if __name__ == "__main__":
   absltest.main()

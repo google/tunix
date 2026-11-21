@@ -100,6 +100,10 @@ class SingleTypeKVCacheManager:
   def window_size(self) -> int | None:
     return self._window_size
 
+  @property
+  def num_device_pages(self) -> int:
+    return self._page_manager.num_device_pages
+
   def get_physical_pages(self) -> dict[str, jax.Array]:
     """Returns a mapping of cache ID to physical page arrays."""
     return self._page_manager.physical_device_pages
