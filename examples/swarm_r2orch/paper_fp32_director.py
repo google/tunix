@@ -197,16 +197,14 @@ class BatchingFp32DirectorSampler:
         )
 
   def _choose_bucket(self, prompt_len: int, req_max: int) -> tuple[int, int]:
-    max_p = self.cache_size - 512
+    max_p = max(1, self.cache_size - 512)
     for b in PROMPT_BUCKETS:
-      if prompt_len <= b:
+      if prompt_len <= b and b < self.cache_size - 1:
         max_p = b
         break
-    gen_cap = min(max(int(req_max), 256), 1024 if max_p <= 30720 else 512)
-    actual_gen = min(gen_cap, self.cache_size - max_p)
-    # Round `actual_gen` to 256 or 1024 so XLA compiles only a tiny set of shapes.
-    actual_gen = 256 if actual_gen <= 256 else min(1024, self.cache_size - max_p)
-    return max_p, actual_gen
+    room = max(1, self.cache_size - max_p - 1)
+    target_gen = 256 if int(req_max) <= 256 else 1024
+    return max_p, min(room, target_gen)
 
   def _drain_compatible_batch(
       self, first: _PendingRequest
