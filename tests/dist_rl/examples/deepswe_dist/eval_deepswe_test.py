@@ -531,7 +531,13 @@ class EvalDeepSWETest(unittest.TestCase):
 _ENTRIES = [{"instance_id": "task-0", "docker_image": "image-0"}]
 
 
-def _fake_hp(artifact_root: str, **env_kwargs: object) -> SimpleNamespace:
+def _fake_hp(
+    artifact_root: str,
+    *,
+    mode: str = "none",
+    rollout_replicas: int = 1,
+    **env_kwargs: object,
+) -> SimpleNamespace:
   """Returns the resolved config sections the eval controller reads."""
   sections = {
       "agentic_grpo_config": {
@@ -544,8 +550,9 @@ def _fake_hp(artifact_root: str, **env_kwargs: object) -> SimpleNamespace:
       },
       "cluster_config": {
           "artifact_root": artifact_root, "init_timeout_s": None,
-          "rollout_replicas": 1,
+          "rollout_replicas": rollout_replicas, "stop_workers_on_exit": True,
       },
+      "weight_sync_config": {"mode": mode},
       "vllm_config": {"max_model_len": None},
       "env_kwargs": {"scaffold": "r2egym", **env_kwargs},
   }
@@ -565,20 +572,21 @@ def _rollout_reply(request_id: str, reward: float) -> SimpleNamespace:
 
 
 class _Discovery:
-  """Registers one rollout worker with `config_sha256` on subscription."""
+  """Registers one rollout worker per fingerprint on subscription."""
 
-  def __init__(self, config_sha256: str):
-    self._config_sha256 = config_sha256
+  def __init__(self, *config_sha256s: str):
+    self._config_sha256s = config_sha256s
 
   def on_register(self, callback):
     from tunix.dist_rl.launch.nodes import node_utils  # pylint: disable=g-import-not-at-top
 
-    callback("localhost", 0, pickle.dumps({
-        "service_type": "rollout",
-        "service_port": 50000,
-        "worker_id": "rollout-0",
-        node_utils.CONFIG_SHA256_METADATA_KEY: self._config_sha256,
-    }))
+    for index, sha in enumerate(self._config_sha256s):
+      callback("localhost", 0, pickle.dumps({
+          "service_type": "rollout",
+          "service_port": 50000 + index,
+          "worker_id": f"rollout-{index}",
+          node_utils.CONFIG_SHA256_METADATA_KEY: sha,
+      }))
 
 
 class EvalControllerMainTest(unittest.TestCase):
@@ -642,21 +650,26 @@ class EvalControllerMainTest(unittest.TestCase):
 
   def _controller_main(
       self,
-      temp_dir: str,
-      worker_sha256: str,
+      hp: SimpleNamespace,
+      discovery: _Discovery,
       handle: mock.AsyncMock,
       sandbox: mock.Mock,
-  ) -> None:
-    """Runs `controller_main` with one discovered rollout worker.
+  ) -> mock.Mock:
+    """Runs `controller_main` on `hp` with a stand-in cluster.
 
-    The controller's config fingerprint is `"a" * 64`, and the worker's is
-    `worker_sha256`. Only `handle` is reached over RPC.
+    The controller's config fingerprint is `"a" * 64`. The cluster has a real
+    worker registry, but its bring-up and shutdown are mocks, and its rollout
+    handles are `[handle]`.
 
     Args:
-      temp_dir: The run's `cluster_config.artifact_root`.
-      worker_sha256: The worker's config fingerprint.
-      handle: The registered worker's handle.
+      hp: The resolved config (`_fake_hp`).
+      discovery: Registers the rollout workers.
+      handle: The registered workers' handle.
       sandbox: Stands in for `examples.deepswe.sandbox_utils`.
+
+    Returns:
+      The cluster. It is also kept as `self.cluster`, for when
+      `controller_main` raises.
     """
     # pylint: disable=g-import-not-at-top
     from tunix.dist_rl.launch.common import resolve_config
@@ -665,17 +678,17 @@ class EvalControllerMainTest(unittest.TestCase):
     from tunix.dist_rl.orchestrator import worker_registry
     # pylint: enable=g-import-not-at-top
 
-    context = SimpleNamespace(
-        ipc=SimpleNamespace(discovery=_Discovery(worker_sha256))
-    )
+    self.cluster = mock.Mock(registry=worker_registry.WorkerRegistry())
+    context = SimpleNamespace(ipc=SimpleNamespace(discovery=discovery))
     with contextlib.ExitStack() as stack:
       for target, attribute, value in (
           (node_utils, "require_discovery_context", lambda _: context),
-          (resolve_config, "initialize",
-           lambda _: _fake_hp(temp_dir, use_agent_sandbox=True)),
+          (resolve_config, "initialize", lambda _: hp),
+          (resolve_config, "plain_config", lambda _: {"resolved": True}),
           (node_utils, "log_resolved_config", lambda *_: "a" * 64),
           (orchestrator, "resolve_weight_sync_timeouts",
            lambda _: (None, 9.0)),
+          (orchestrator, "create_cluster", lambda *_, **__: self.cluster),
           (eval_deepswe, "config_entries", lambda _: _ENTRIES),
           (worker_registry.WorkerRegistry, "handles",
            lambda *_, **__: [handle]),
@@ -685,8 +698,9 @@ class EvalControllerMainTest(unittest.TestCase):
           "examples.deepswe.sandbox_utils", sandbox, create=True
       ))
       eval_deepswe.controller_main([], context=mock.Mock())
+    return self.cluster
 
-  def test_controller_main_warms_runs_stops_and_tears_down(self):
+  def test_controller_main_brings_up_runs_and_tears_down(self):
     replies = iter([_rollout_reply("eval_0_1", 1.0),
                     _rollout_reply("eval_0_0", 0.0)])
     handle = mock.AsyncMock()
@@ -696,14 +710,28 @@ class EvalControllerMainTest(unittest.TestCase):
     handle.poll_responses.side_effect = lambda timeout_s: next(replies)
     sandbox = mock.Mock()
     with tempfile.TemporaryDirectory() as temp_dir:
-      self._controller_main(temp_dir, "a" * 64, handle, sandbox)
+      cluster = self._controller_main(
+          _fake_hp(temp_dir, use_agent_sandbox=True),
+          _Discovery("a" * 64), handle, sandbox,
+      )
 
-      (summary_path,) = Path(temp_dir, "eval").glob("*.summary.json")
-      summary = json.loads(summary_path.read_text(encoding="utf-8"))
+      (run_dir,) = Path(temp_dir, "eval").glob("eval_deepswe_*[0-9]")
+      config = json.loads((run_dir / "config.json").read_text("utf-8"))
+      summary = json.loads(
+          run_dir.with_name(f"{run_dir.name}.summary.json").read_text("utf-8")
+      )
     self.assertEqual(summary["pass_at_k"], {"2": 1.0})
-    self.assertEqual([call.args for call in handle.asubmit.call_args_list],
-                     [("initialize",), ("start",), ("stop",)])
-    handle.close.assert_awaited_once()
+    self.assertEqual(config, {
+        "config_sha256": "a" * 64,
+        "config": {"resolved": True},
+        "instance_ids": ["task-0"],
+    })
+    self.assertEqual(
+        [call.args[1] for call in handle.dispatch_task.call_args_list],
+        ["generate", "generate"],
+    )
+    cluster.bring_up_workers.assert_called_once_with(dummy_data=None)
+    cluster.shutdown.assert_called_once_with()
     sandbox.init_global_fleet.assert_called_once_with(
         tasks=_ENTRIES, max_concurrency=4, num_generations=2,
         scaffold="r2egym",
@@ -711,14 +739,37 @@ class EvalControllerMainTest(unittest.TestCase):
     sandbox.warm_global_fleet.assert_called_once_with()
     sandbox.teardown_global_fleet.assert_called_once_with()
 
-  def test_controller_main_rejects_a_worker_with_another_config(self):
+  def test_controller_main_stops_registered_workers_on_a_rejection(self):
     handle = mock.AsyncMock()
     sandbox = mock.Mock()
     with tempfile.TemporaryDirectory() as temp_dir:
       with self.assertRaisesRegex(ValueError, "resolved a different config"):
-        self._controller_main(temp_dir, "0" * 64, handle, sandbox)
-    handle.asubmit.assert_not_called()
+        self._controller_main(
+            _fake_hp(temp_dir, rollout_replicas=2, use_agent_sandbox=True),
+            _Discovery("a" * 64, "0" * 64), handle, sandbox,
+        )
+    # Abort-shutdown stops and closes every registered worker, including the
+    # one that registered before the rejection.
+    self.cluster.shutdown.assert_called_once_with(abort=True)
+    self.assertEqual(
+        [info.worker_id for info in self.cluster.registry.infos()],
+        ["rollout-0"],
+    )
+    self.cluster.bring_up_workers.assert_not_called()
+    handle.dispatch_task.assert_not_called()
     sandbox.teardown_global_fleet.assert_called_once_with()
+
+  def test_controller_main_requires_no_weight_sync(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      with self.assertRaisesRegex(
+          ValueError, "requires weight_sync_config.mode: none, got raiden"
+      ):
+        self._controller_main(
+            _fake_hp(temp_dir, mode="raiden"), _Discovery(), mock.AsyncMock(),
+            mock.Mock(),
+        )
+    self.cluster.bring_up_workers.assert_not_called()
+    self.cluster.shutdown.assert_not_called()
 
 
 if __name__ == "__main__":

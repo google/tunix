@@ -433,7 +433,9 @@ async def run_controller(args: argparse.Namespace) -> dict[str, object]:
         raise ValueError(f"Worker model settings differ: {actual}")
 
     await asyncio.gather(*(wait_ready(handle) for handle in handles))
-    return await _evaluate(args, entries, handles, rpc="evaluate")
+    return await _evaluate(
+        args, entries, handles, run_config=vars(args), rpc="evaluate"
+    )
   finally:
     await asyncio.gather(*(handle.close() for handle in handles),
                          return_exceptions=True)
@@ -444,6 +446,7 @@ async def _evaluate(
     entries: list[dict[str, object]],
     handles: list[remote_execution.ActorHandle],
     *,
+    run_config: Mapping[str, object],
     rpc: str,
 ) -> dict[str, object]:
   """Runs every attempt of `entries` on `handles` and writes the results.
@@ -452,6 +455,8 @@ async def _evaluate(
     args: Evaluation flags (`parse_args`).
     entries: Raw task entries, each with a `docker_image`.
     handles: Ready workers to spread the attempts over.
+    run_config: What configured the run; written to `config.json` with the
+      task ids.
     rpc: Worker method to dispatch (`collect_worker`).
 
   Returns:
@@ -468,7 +473,7 @@ async def _evaluate(
   write_json(
       run_dir / "config.json",
       {
-          **vars(args),
+          **run_config,
           "instance_ids": [
               entry.get("instance_id", index)
               for index, entry in enumerate(entries)
@@ -600,36 +605,6 @@ def config_entries(
   ]
 
 
-async def evaluate_on_rollout_workers(
-    args: argparse.Namespace,
-    entries: list[dict[str, object]],
-    handles: list[remote_execution.ActorHandle],
-) -> dict[str, object]:
-  """Starts stock rollout workers, evaluates on them, and stops them.
-
-  Args:
-    args: Evaluation flags (`config_args`).
-    entries: Raw task entries.
-    handles: Registered rollout workers.
-
-  Returns:
-    The summary (`summarize`).
-  """
-  try:
-    for method in ("initialize", "start"):
-      await asyncio.gather(*(handle.asubmit(method) for handle in handles))
-    return await _evaluate(args, entries, handles, rpc="generate")
-  finally:
-    results = await asyncio.gather(
-        *(handle.asubmit("stop") for handle in handles), return_exceptions=True
-    )
-    for handle, result in zip(handles, results):
-      if isinstance(result, BaseException):
-        logging.warning("Failed to stop worker %s: %s", handle, result)
-    await asyncio.gather(*(handle.close() for handle in handles),
-                         return_exceptions=True)
-
-
 def _start_sandbox_fleet(
     env_kwargs: Mapping[str, object],
     entries: list[dict[str, object]],
@@ -667,9 +642,13 @@ def controller_main(
   Use as `--process_main=tunix.dist_rl.examples.deepswe_dist.eval_deepswe.
   controller_main` next to stock rollout nodes that resolved the same config
   (`weight_sync_config.mode: none`). The controller waits for
-  `cluster_config.rollout_replicas` workers, starts them, dispatches every
-  attempt as a `generate` request, writes the results (`write_results`), and
-  stops the workers.
+  `cluster_config.rollout_replicas` workers, brings them up, dispatches every
+  attempt as a `generate` request, and writes the results (`write_results`).
+
+  Like the training orchestrator, it runs in `managed_cluster_teardown`: on
+  exit, including on an error or SIGTERM, the registered workers are stopped
+  (`cluster_config.stop_workers_on_exit`) and their handles closed. The
+  sandbox fleet, if any, is torn down first.
 
   Args:
     argv: `override_config_file=...` and `section.key=value` overrides.
@@ -680,7 +659,7 @@ def controller_main(
   from tunix.dist_rl.launch.common import resolve_config as resolve_config_lib
   from tunix.dist_rl.launch.nodes import node_utils
   from tunix.dist_rl.launch.nodes import orchestrator
-  from tunix.dist_rl.orchestrator import worker_registry as registry_lib
+  from tunix.dist_rl.orchestrator import orchestrator as cluster_orchestrator
   # pylint: enable=g-import-not-at-top
 
   discovery = node_utils.require_discovery_context(context).ipc.discovery
@@ -690,35 +669,58 @@ def controller_main(
       force=True,
   )
   hp = resolve_config_lib.initialize(argv)
+  mode = hp.config_mapping("weight_sync_config")["mode"]
+  if mode != "none":
+    # No trainer runs, so the rollout workers must load their own weights.
+    raise ValueError(
+        "The eval controller requires weight_sync_config.mode: none, got"
+        f" {mode}."
+    )
   config_sha256 = node_utils.log_resolved_config(hp, "orchestrator")
   args = config_args(hp)
-  cluster = hp.config_mapping("cluster_config")
-  replicas = int(cluster["rollout_replicas"])
+  cluster_config = hp.config_mapping("cluster_config")
+  replicas = int(cluster_config["rollout_replicas"])
   if args.max_concurrent < replicas:
     raise ValueError(
         f"agentic_grpo_config.max_concurrency ({args.max_concurrent}) must"
         f" cover every rollout replica ({replicas})."
     )
   entries = config_entries(hp)
-  _, rpc_timeout_s = orchestrator.resolve_weight_sync_timeouts(hp)
-  teardown_fleet = _start_sandbox_fleet(
-      hp.config_mapping("env_kwargs"), entries, args
+  weight_sync_timeouts, rpc_timeout_s = (
+      orchestrator.resolve_weight_sync_timeouts(hp)
   )
-  try:
-    registry = registry_lib.WorkerRegistry()
-    node_utils.wait_for_workers(
-        registry,
-        discovery,
-        {datatypes.Role.ROLLOUT: replicas},
-        init_timeout_s=cluster["init_timeout_s"],
-        rpc_timeout_s=rpc_timeout_s,
-        config_sha256=config_sha256,
+  cluster = orchestrator.create_cluster(
+      hp, weight_sync_timeouts=weight_sync_timeouts
+  )
+  with cluster_orchestrator.managed_cluster_teardown(
+      cluster, stop_workers_on_exit=bool(cluster_config["stop_workers_on_exit"])
+  ):
+    teardown_fleet = _start_sandbox_fleet(
+        hp.config_mapping("env_kwargs"), entries, args
     )
-    handles = registry.handles(datatypes.Role.ROLLOUT, statuses=None)
-    asyncio.run(evaluate_on_rollout_workers(args, entries, handles))
-  finally:
-    if teardown_fleet is not None:
-      teardown_fleet()
+    try:
+      node_utils.wait_for_workers(
+          cluster.registry,
+          discovery,
+          {datatypes.Role.ROLLOUT: replicas},
+          init_timeout_s=cluster_config["init_timeout_s"],
+          rpc_timeout_s=rpc_timeout_s,
+          config_sha256=config_sha256,
+      )
+      cluster.bring_up_workers(dummy_data=None)
+      asyncio.run(_evaluate(
+          args,
+          entries,
+          cluster.registry.handles(datatypes.Role.ROLLOUT),
+          run_config={
+              "config_sha256": config_sha256,
+              "config": resolve_config_lib.plain_config(hp),
+          },
+          rpc="generate",
+      ))
+    finally:
+      if teardown_fleet is not None:
+        teardown_fleet()
 
 
 def register_guarded_env(deepswe_module) -> str:
