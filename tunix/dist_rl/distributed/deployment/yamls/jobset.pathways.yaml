@@ -79,10 +79,10 @@ spec:
               resources:
                 requests:
                   cpu: "2"
-                  memory: ${PATHWAYS_RM_MEMORY}
+                  ${PATHWAYS_RM_MEMORY_REQUEST_LINE}
                 limits:
                   cpu: "24"
-                  memory: 32G
+                  ${PATHWAYS_RM_MEMORY_LIMIT_LINE}
               args:
               - --server_port=29001
               - --gcs_scratch_location=${GCS_SCRATCH_LOCATION}
@@ -94,8 +94,7 @@ spec:
                 value: "${RAIDEN_BROADCAST_K}"
               - name: ENABLE_MULTI_NUMA
                 value: "${ENABLE_MULTI_NUMA}"
-              - name: TPU_RAIDEN_DATA_NICS
-                value: "${TPU_RAIDEN_DATA_NICS}"
+              ${TPU_RAIDEN_DATA_NICS_ENV}
               - name: REPLICATED_JOB_NAME
                 valueFrom:
                   fieldRef:
@@ -122,10 +121,10 @@ spec:
               resources:
                 requests:
                   cpu: "4"
-                  memory: ${PATHWAYS_PROXY_MEMORY}
+                  ${PATHWAYS_PROXY_MEMORY_REQUEST_LINE}
                 limits:
                   cpu: "16"
-                  memory: ${PATHWAYS_PROXY_MEMORY_LIMIT}
+                  ${PATHWAYS_PROXY_MEMORY_LIMIT_LINE}
               args:
               - --server_port=29000
               - --resource_manager_address=$$(PATHWAYS_HEAD):29001
@@ -138,8 +137,7 @@ spec:
                 value: "${RAIDEN_BROADCAST_K}"
               - name: ENABLE_MULTI_NUMA
                 value: "${ENABLE_MULTI_NUMA}"
-              - name: TPU_RAIDEN_DATA_NICS
-                value: "${TPU_RAIDEN_DATA_NICS}"
+              ${TPU_RAIDEN_DATA_NICS_ENV}
               - name: PATHWAYS_HEAD
                 valueFrom:
                   fieldRef:
@@ -208,8 +206,7 @@ spec:
                 value: "${RAIDEN_BROADCAST_K}"
               - name: ENABLE_MULTI_NUMA
                 value: "${ENABLE_MULTI_NUMA}"
-              - name: TPU_RAIDEN_DATA_NICS
-                value: "${TPU_RAIDEN_DATA_NICS}"
+              ${TPU_RAIDEN_DATA_NICS_ENV}
               # Injects the JobSet Name
               - name: JOBSET_NAME
                 valueFrom:
@@ -297,8 +294,7 @@ spec:
                 value: "${RAIDEN_BROADCAST_K}"
               - name: ENABLE_MULTI_NUMA
                 value: "${ENABLE_MULTI_NUMA}"
-              - name: TPU_RAIDEN_DATA_NICS
-                value: "${TPU_RAIDEN_DATA_NICS}"
+              ${TPU_RAIDEN_DATA_NICS_ENV}
               - name: TPU_MIN_LOG_LEVEL
                 value: "0"
               - name: TF_CPP_MIN_LOG_LEVEL
@@ -344,9 +340,10 @@ spec:
               resources:
                 limits:
                   google.com/tpu: "4"
+                  ${PATHWAYS_WORKER_MEMORY_LIMIT_LINE}
                 requests:
                   google.com/tpu: "4"
-                  memory: ${PATHWAYS_WORKER_MEMORY}
+                  ${PATHWAYS_WORKER_MEMORY_REQUEST_LINE}
               volumeMounts:
               - mountPath: /tmp
                 name: shared-tmp

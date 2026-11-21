@@ -138,7 +138,7 @@ def _library_env(
   ws = hp.config_mapping("weight_sync_config")
   values: dict[str, str | None] = {
       "VERIFY_WEIGHTS": "true" if ws["verify_weights"] else "false",
-      "TPU_RAIDEN_DATA_NICS": str(ws["raiden_data_nics"]) or None,
+      "TPU_RAIDEN_DATA_NICS": str(ws["raiden"]["data_nics"]) or None,
   }
   if role == "rollout":
     skip = hp.config_mapping("vllm_config")["skip_jax_precompile"]
@@ -163,7 +163,7 @@ def apply_library_env(
     as "true" or "false": whether weight syncs log checksums and Raiden
     metrics.
   * `TPU_RAIDEN_DATA_NICS` (trainer, rollout):
-    `weight_sync_config.raiden_data_nics`; unset when empty, so Raiden picks
+    `weight_sync_config.raiden.data_nics`; unset when empty, so Raiden picks
     its NICs itself.
   * `SKIP_JAX_PRECOMPILE` (rollout): `vllm_config.skip_jax_precompile` as "1"
     or "0".

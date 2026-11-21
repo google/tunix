@@ -104,8 +104,7 @@ spec:
               env:
               - name: ENABLE_MULTI_NUMA
                 value: "${ENABLE_MULTI_NUMA}"
-              - name: TPU_RAIDEN_DATA_NICS
-                value: "${TPU_RAIDEN_DATA_NICS}"
+              ${TPU_RAIDEN_DATA_NICS_ENV}
               # Injects the JobSet Name
               - name: JOBSET_NAME
                 valueFrom:

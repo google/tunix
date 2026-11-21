@@ -1183,7 +1183,7 @@ class RolloutMainTest(absltest.TestCase):
             [
                 *_TASK_ARGV,
                 "vllm_config.skip_jax_precompile=false",
-                "weight_sync_config.raiden_data_nics=eth1",
+                "weight_sync_config.raiden.data_nics=eth1",
             ],
             context=mock.Mock(),
         )

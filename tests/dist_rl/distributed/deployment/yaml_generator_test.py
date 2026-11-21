@@ -354,6 +354,78 @@ class YamlGeneratorTest(parameterized.TestCase):
     (main,) = head["containers"]
     self.assertEqual(main["resources"], {"limits": {"memory": "80G"}})
 
+  def test_pathways_container_memory(self):
+    doc = self._render_yaml(
+        _get_template_path("jobset.pathways.yaml"),
+        "--jobset_name=test-pathways-job",
+        "--tpu_slice=tpuv5e:4x4",
+        "--pathways_proxy_memory=",
+        "--pathways_proxy_memory_limit=",
+        "--pathways_rm_memory=6G",
+        "--pathways_rm_memory_limit=40G",
+        "--pathways_worker_memory=",
+        "--pathways_worker_memory_limit=120G",
+    )
+    jobs = {
+        rj["name"]: rj["template"]["spec"]["template"]["spec"]
+        for rj in doc["spec"]["replicatedJobs"]
+    }
+    head = {c["name"]: c for c in jobs["proc"]["initContainers"]}
+    self.assertEqual(
+        head["pathways-proxy"]["resources"],
+        {"requests": {"cpu": "4"}, "limits": {"cpu": "16"}},
+    )
+    self.assertEqual(
+        head["pathways-rm"]["resources"],
+        {
+            "requests": {"cpu": "2", "memory": "6G"},
+            "limits": {"cpu": "24", "memory": "40G"},
+        },
+    )
+    server = {c["name"]: c for c in jobs["pw-node"]["containers"]}[
+        "pathways-worker"
+    ]
+    self.assertEqual(
+        server["resources"],
+        {
+            "limits": {"google.com/tpu": "4", "memory": "120G"},
+            "requests": {"google.com/tpu": "4"},
+        },
+    )
+
+  def test_pathways_rm_memory_limit_defaults_to_32g(self):
+    doc = self._render_yaml(
+        _get_template_path("jobset.pathways.yaml"),
+        "--jobset_name=test-pathways-job",
+        "--tpu_slice=tpuv5e:4x4",
+    )
+    head = doc["spec"]["replicatedJobs"][0]["template"]["spec"]["template"][
+        "spec"
+    ]
+    rm = {c["name"]: c for c in head["initContainers"]}["pathways-rm"]
+    self.assertEqual(rm["resources"]["limits"], {"cpu": "24", "memory": "32G"})
+
+  def test_colocated_python_sidecar_memory(self):
+    doc = self._render_yaml(
+        _get_template_path("jobset.pathways.yaml"),
+        "--jobset_name=test-pathways-job",
+        "--tpu_slice=tpuv5e:4x4",
+        "--colocated_python_sidecar_image=sidecar:v1",
+        "--colocated_python_sidecar_memory=",
+        "--colocated_python_sidecar_memory_limit=20Gi",
+    )
+    jobs = {
+        rj["name"]: rj["template"]["spec"]["template"]["spec"]
+        for rj in doc["spec"]["replicatedJobs"]
+    }
+    sidecar = {c["name"]: c for c in jobs["pw-node"]["initContainers"]}[
+        "colocated-python-sidecar"
+    ]
+    self.assertEqual(
+        sidecar["resources"],
+        {"requests": {"cpu": "4"}, "limits": {"memory": "20Gi"}},
+    )
+
   def test_cpu_memory_limit(self):
     template = _get_template_path("jobset.cpu.yaml")
     for argv, resources in (
@@ -1116,16 +1188,14 @@ class YamlGeneratorTest(parameterized.TestCase):
         )
 
     tpu_template = _get_template_path("jobset.tpu.yaml")
-    with mock.patch.dict(
-        os.environ,
-        {"KUEUE_PRIORITY_CLASS": "fallback-prio", "TPU_RESERVATION": "my-res"},
-    ):
+    with mock.patch.dict(os.environ, {"KUEUE_PRIORITY_CLASS": "fallback-prio"}):
       argv = [
           "yaml_generator.py",
           tpu_template,
           "--jobset_name=test-tpu",
           "--tpu_slice=tpuv5e:4x4",
           "--termination_grace_seconds=60",
+          "--tpu_reservation=my-res",
       ]
       with mock.patch.object(sys, "argv", argv):
         with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
@@ -1268,13 +1338,11 @@ class YamlGeneratorTest(parameterized.TestCase):
         self.assertEqual(proc_spec["tolerations"][0]["operator"], "Equal")
         self.assertEqual(proc_spec["tolerations"][0]["value"], "cpu-np")
 
-  def _render_pathways_head_spec(
-      self, extra_argv: list[str], env: dict[str, str]
-  ) -> dict[str, Any]:
+  def _render_pathways_head_spec(self, extra_argv: list[str]) -> dict[str, Any]:
     template_file = _get_template_path("jobset.pathways.yaml")
     with open(template_file, "r") as f:
       template_text = f.read()
-    with mock.patch.dict(os.environ, env, clear=True):
+    with mock.patch.dict(os.environ, {}, clear=True):
       args = yaml_generator.parse_args([
           template_file,
           "--jobset_name=test-pw",
@@ -1287,22 +1355,22 @@ class YamlGeneratorTest(parameterized.TestCase):
     ]
 
   def test_colocated_head_has_no_node_affinity_by_default(self):
-    proc_spec = self._render_pathways_head_spec([], {})
+    proc_spec = self._render_pathways_head_spec([])
     self.assertEqual(list(proc_spec["affinity"]), ["podAffinity"])
 
   @parameterized.named_parameters(
-      ("without_reservation", {}, {}),
+      ("without_reservation", [], {}),
       (
           "with_reservation",
-          {"TPU_RESERVATION": "my-res"},
+          ["--tpu_reservation=my-res"],
           {"cloud.google.com/reservation-name": "my-res"},
       ),
   )
   def test_colocated_head_excludes_given_nodepools(
-      self, env: dict[str, str], extra_selector: dict[str, str]
+      self, reservation_argv: list[str], extra_selector: dict[str, str]
   ):
     proc_spec = self._render_pathways_head_spec(
-        ["--head_excluded_nodepools=cpu-np,sandbox-pool"], env
+        ["--head_excluded_nodepools=cpu-np,sandbox-pool", *reservation_argv]
     )
     self.assertEqual(
         proc_spec["nodeSelector"],
@@ -1345,22 +1413,18 @@ class YamlGeneratorTest(parameterized.TestCase):
       self, extra_argv: list[str], error: str
   ):
     with self.assertRaisesRegex(ValueError, error):
-      self._render_pathways_head_spec(extra_argv, {})
+      self._render_pathways_head_spec(extra_argv)
 
   def test_colocated_python_sidecar(self):
     pw_template = _get_template_path("jobset.pathways.yaml")
-    with mock.patch.dict(
-        os.environ,
-        {
-            "COLOCATED_PYTHON_SIDECAR_IMAGE": "test-sidecar-img:v1",
-            "COLOCATED_PYTHON_SIDECAR_SHM": "1",
-        },
-    ):
+    with mock.patch.dict(os.environ, {}):
       argv = [
           "yaml_generator.py",
           pw_template,
           "--jobset_name=test-pw-sidecar",
           "--tpu_slice=tpuv5e:4x4",
+          "--colocated_python_sidecar_image=test-sidecar-img:v1",
+          "--colocated_python_sidecar_shm",
       ]
       with mock.patch.object(sys, "argv", argv):
         with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
@@ -1392,19 +1456,18 @@ class YamlGeneratorTest(parameterized.TestCase):
 
   def test_pathways_extra_env_and_proxy_args(self):
     pw_template = _get_template_path("jobset.pathways.yaml")
-    with mock.patch.dict(
-        os.environ,
-        {
-            "PATHWAYS_WORKER_EXTRA_ENV": 'MY_CUSTOM_VAR="val1"\nOTHER_VAR=2',
-            "PATHWAYS_PROXY_EXTRA_ARGS": "foo=1 bar=2",
-            "RAIDEN_BROADCAST_K": "128",
-        },
-    ):
+    with mock.patch.dict(os.environ, {}):
       argv = [
           "yaml_generator.py",
           pw_template,
           "--jobset_name=test-pw-extra",
           "--tpu_slice=tpuv5e:4x4",
+          (
+              "--pathways_worker_env_json="
+              '{"MY_CUSTOM_VAR": "a b=c", "OTHER_VAR": " \\"2\\"\\n"}'
+          ),
+          "--pathways_proxy_extra_args=--foo=1 bar=2",
+          "--raiden_broadcast_k=128",
       ]
       with mock.patch.object(sys, "argv", argv):
         with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
@@ -1413,7 +1476,7 @@ class YamlGeneratorTest(parameterized.TestCase):
           proxy = doc["spec"]["replicatedJobs"][0]["template"]["spec"][
               "template"
           ]["spec"]["initContainers"][1]
-          self.assertIn("foo=1", proxy["args"])
+          self.assertIn("--foo=1", proxy["args"])
           self.assertIn("bar=2", proxy["args"])
           worker = doc["spec"]["replicatedJobs"][1]["template"]["spec"][
               "template"
@@ -1421,32 +1484,114 @@ class YamlGeneratorTest(parameterized.TestCase):
           env_map = {
               e["name"]: e.get("value") for e in worker["env"] if "value" in e
           }
-          self.assertEqual(env_map["MY_CUSTOM_VAR"], "val1")
-          self.assertEqual(env_map["OTHER_VAR"], "2")
+          # Values reach the manifest unchanged.
+          self.assertEqual(env_map["MY_CUSTOM_VAR"], "a b=c")
+          self.assertEqual(env_map["OTHER_VAR"], ' "2"\n')
           self.assertEqual(env_map["RAIDEN_BROADCAST_K"], "128")
 
-    # Conflicting or malformed PATHWAYS_WORKER_EXTRA_ENV raises ValueError
+    # A conflicting or malformed --pathways_worker_env_json raises ValueError.
     for bad_extra_env in (
-        "RAIDEN_BROADCAST_K=128",
-        "TPU_MIN_LOG_LEVEL=2",
-        "MALFORMED_LINE_WITHOUT_EQUALS",
-        "=empty_key",
+        '{"RAIDEN_BROADCAST_K": "128"}',
+        '{"TPU_MIN_LOG_LEVEL": "2"}',
+        "KEY=VALUE",
+        '["KEY", "VALUE"]',
+        '{"KEY": 2}',
+        # Names are written unquoted into the manifest.
+        '{"KEY: x": "1"}',
+        '{"A\\nB": "1"}',
+        '{"1KEY": "1"}',
     ):
-      with mock.patch.dict(
-          os.environ, {"PATHWAYS_WORKER_EXTRA_ENV": bad_extra_env}
+      with mock.patch.object(
+          sys,
+          "argv",
+          [
+              "yaml_generator.py",
+              pw_template,
+              "--jobset_name=test-pw-extra",
+              "--tpu_slice=tpuv5e:4x4",
+              f"--pathways_worker_env_json={bad_extra_env}",
+          ],
       ):
-        with mock.patch.object(
-            sys,
-            "argv",
-            [
-                "yaml_generator.py",
-                pw_template,
-                "--jobset_name=test-pw-extra",
-                "--tpu_slice=tpuv5e:4x4",
-            ],
-        ):
-          with self.assertRaises(ValueError):
-            yaml_generator.main()
+        with self.assertRaises(ValueError):
+          yaml_generator.main()
+
+  @parameterized.named_parameters(
+      ("pathways", "jobset.pathways.yaml", 4),
+      ("mcjax_ray", "jobset.mcjax.ray.yaml", 1),
+      ("tpu", "jobset.tpu.yaml", 1),
+  )
+  def test_raiden_env_comes_from_flags(self, template: str, containers: int):
+    template_file = _get_template_path(template)
+    with open(template_file, "r") as f:
+      template_text = f.read()
+
+    def raiden_env(*extra_argv: str) -> list[dict[str, str]]:
+      """Returns the Raiden variables of every container that sets any."""
+      args = yaml_generator.parse_args([
+          template_file,
+          "--jobset_name=test-raiden",
+          "--tpu_slice=tpuv5e:4x4",
+          *extra_argv,
+      ])
+      doc = yaml.safe_load(yaml_generator.render_template(template_text, args))
+      result = []
+      for job in doc["spec"]["replicatedJobs"]:
+        pod = job["template"]["spec"]["template"]["spec"]
+        for container in [
+            *(pod["initContainers"] if "initContainers" in pod else []),
+            *pod["containers"],
+        ]:
+          env = {
+              e["name"]: e["value"]
+              for e in (container["env"] if "env" in container else [])
+              if e["name"] in ("TPU_RAIDEN_DATA_NICS", "ENABLE_MULTI_NUMA")
+          }
+          if env:
+            result.append(env)
+      return result
+
+    self.assertEqual(
+        raiden_env(),
+        [{"TPU_RAIDEN_DATA_NICS": "eth0", "ENABLE_MULTI_NUMA": "0"}]
+        * containers,
+    )
+    self.assertEqual(
+        raiden_env("--raiden_data_nics=eth0,eth1", "--enable_multi_numa"),
+        [{"TPU_RAIDEN_DATA_NICS": "eth0,eth1", "ENABLE_MULTI_NUMA": "1"}]
+        * containers,
+    )
+    # An empty value leaves the variable unset, so Raiden picks the NICs.
+    self.assertEqual(
+        raiden_env("--raiden_data_nics="),
+        [{"ENABLE_MULTI_NUMA": "0"}] * containers,
+    )
+    # The variable itself is no longer read.
+    with mock.patch.dict(os.environ, {"TPU_RAIDEN_DATA_NICS": "eth9"}):
+      with self.assertRaisesRegex(ValueError, "use --raiden_data_nics"):
+        raiden_env()
+
+  @parameterized.parameters(
+      ("COLOCATED_PYTHON_SIDECAR_IMAGE", "--colocated_python_sidecar_image"),
+      ("ENABLE_MULTI_NUMA", "--enable_multi_numa"),
+      ("PATHWAYS_PROXY_EXTRA_ARGS", "--pathways_proxy_extra_args"),
+      ("PATHWAYS_WORKER_EXTRA_ENV", "--pathways_worker_env_json"),
+      ("RAIDEN_BROADCAST_K", "--raiden_broadcast_k"),
+      ("TPU_RESERVATION", "--tpu_reservation"),
+  )
+  def test_retired_environment_variable_fails(self, name: str, flag: str):
+    argv = [
+        _get_template_path("jobset.tpu.yaml"),
+        "--jobset_name=test-retired",
+        "--tpu_slice=tpuv5e:4x4",
+    ]
+    with mock.patch.dict(os.environ, {name: "1"}):
+      with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+        with self.assertRaises(SystemExit):
+          yaml_generator.parse_args(argv)
+    self.assertIn(f"{name} (use {flag})", stderr.getvalue())
+    # An empty variable is not a setting.
+    with mock.patch.dict(os.environ, {name: ""}):
+      yaml_generator.parse_args(argv)
 
   def test_generate_mcjax_ray_yaml(self):
     ray_template = _get_template_path("jobset.mcjax.ray.yaml")

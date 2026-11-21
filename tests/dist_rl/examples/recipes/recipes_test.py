@@ -289,7 +289,7 @@ class RecipesTest(launcher_testing.LauncherTestCase):
         },
     )
     weight_sync_cfg = config["weight_sync_config"]
-    self.assertEqual(weight_sync_cfg["raiden_use_ffi"], 1)
+    self.assertIs(weight_sync_cfg["raiden"]["use_ffi"], True)
     self.assertTrue(weight_sync_cfg["prefuse_moe_weights"])
     self.assertTrue(weight_sync_cfg["verify_weights"])
     k8s = config["cluster_config"]["k8s"]

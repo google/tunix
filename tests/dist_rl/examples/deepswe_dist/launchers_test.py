@@ -170,12 +170,13 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
     self.assertEqual(config["cluster_config"]["rollout_replicas"], 16)
     self.assertIn("testuser-roll-15", run.stdout)
 
-  def test_k8s_ifrt_proxy_threshold_env_override_takes_precedence(self):
-    with mock.patch.dict(
-        os.environ,
-        {"TRAINER_IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES": "33554432"},
-    ):
-      run = self.dry_run("deepswe_dist/k8s_launcher.sh", _K8S_IMAGE)
+  def test_k8s_ifrt_proxy_threshold_override_takes_precedence(self):
+    run = self.dry_run(
+        "deepswe_dist/k8s_launcher.sh",
+        _K8S_IMAGE,
+        "cluster_config.pathways.trainer.ifrt_proxy_large_transfer_threshold"
+        "_bytes=33554432",
+    )
     self.assertIn(
         "name: IFRT_PROXY_GRPC_LARGE_TRANSFER_OPTIMIZATION_THRESHOLD_BYTES\n"
         '                value: "33554432"',

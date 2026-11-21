@@ -114,7 +114,9 @@ weight_sync_config:
   prefuse_moe_weights: true
   in_flight_weight_updates: true
   verify_weights: false
-  raiden_data_nics: "eth0"
+  raiden:
+    data_nics: "eth0"
+    multi_numa: false
 
 # The orchestrator loads the DeepSWE task records (`data_config.dataset_path`,
 # set on the command line) with `prewarm.create_dataset(**data_config)` and
@@ -271,11 +273,6 @@ cluster_config:
     service_account: "xpk-sa"
     priority_class: "medium"
     cpu_machine: "n2-standard-64"
-    pathways_proxy_memory: "16G"
-    pathways_proxy_memory_limit: "160G"
-    pathways_worker_memory: "100G"
-    pathways_rm_memory: "4G"
-    enable_pathways_persistence: true
     jax_cache:
       local_dir: "/tmp/jax_cache"
     trainer:
@@ -284,6 +281,26 @@ cluster_config:
     rollout:
       jobset_yaml: "jobset.tpu.yaml"
       tpu_slice: "tpuv5:2x2x1"
+  pathways:
+    proxy_memory:
+      request: "16G"
+      limit: "160G"
+    rm_memory:
+      request: "4G"
+      limit: "32G"
+    server_memory:
+      request: "100G"
+      limit: ""
+    trainer:
+      persistence: true
+      # Routes host buffers of 16 MiB or more through shared memory.
+      ifrt_proxy_large_transfer_threshold_bytes: 16777216
+    # `mlperf_35b_128_v5p.sh` adds `LIBTPU_INIT_ARGS` and sets
+    # `proxy_extra_args` from its libtpu flag list.
+    worker_env:
+      SKIP_MEGASCALE_PJRT_CLIENT: "true"
+      RAIDEN_BROADCAST_HOST_RATIO: "1.0"
+      RAIDEN_BROADCAST_PIPELINE_STAGES: "4"
   roles:
     orchestrator:
       port: 20000

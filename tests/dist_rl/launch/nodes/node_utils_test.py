@@ -177,7 +177,7 @@ class ApplyLibraryEnvTest(absltest.TestCase):
     # Empty lets Raiden pick its own NICs: `TPU_RAIDEN_DATA_NICS` stays unset.
     self.assertEqual(
         _apply_library_env(
-            ["weight_sync_config.raiden_data_nics=''"], "trainer"
+            ["weight_sync_config.raiden.data_nics=''"], "trainer"
         ),
         {"VERIFY_WEIGHTS": "false"},
     )
@@ -185,7 +185,7 @@ class ApplyLibraryEnvTest(absltest.TestCase):
   def test_sets_the_configured_values(self):
     argv = [
         "weight_sync_config.verify_weights=true",
-        "weight_sync_config.raiden_data_nics=eth0,eth1",
+        "weight_sync_config.raiden.data_nics=eth0,eth1",
         "vllm_config.skip_jax_precompile=false",
     ]
     self.assertEqual(
@@ -229,11 +229,11 @@ class ApplyLibraryEnvTest(absltest.TestCase):
   def test_rejects_a_variable_the_config_leaves_unset(self):
     with self.assertRaisesRegex(
         ValueError,
-        "weight_sync_config.raiden_data_nics leaves it unset.*set"
-        " weight_sync_config.raiden_data_nics instead",
+        "weight_sync_config.raiden.data_nics leaves it unset.*set"
+        " weight_sync_config.raiden.data_nics instead",
     ):
       _apply_library_env(
-          ["weight_sync_config.raiden_data_nics=''"],
+          ["weight_sync_config.raiden.data_nics=''"],
           "trainer",
           {"TPU_RAIDEN_DATA_NICS": "eth0"},
       )

@@ -117,6 +117,29 @@ if [[ -n "${SANDBOX_NAMESPACE}" ]]; then
   fi
 fi
 
+# Manifest generator flags shared by the trainer and rollout JobSets: the
+# Raiden variables of the TPU containers, the TPU reservation, and the Pathways
+# worker, proxy and sidecar settings (`weight_sync_config.raiden`,
+# `cluster_config.k8s.tpu_reservation`, `cluster_config.pathways`).
+TPU_JOBSET_GEN_ARGS=(
+  "--raiden_data_nics=${WEIGHT_SYNC_RAIDEN_DATA_NICS}"
+  "--raiden_broadcast_k=${WEIGHT_SYNC_RAIDEN_BROADCAST_K}"
+  "--tpu_reservation=${K8S_TPU_RESERVATION}"
+  "--pathways_worker_env_json=${K8S_PATHWAYS_WORKER_ENV_JSON}"
+  "--pathways_proxy_extra_args=${K8S_PATHWAYS_PROXY_EXTRA_ARGS}"
+  "--colocated_python_sidecar_image=${K8S_PATHWAYS_SIDECAR_IMAGE}"
+  "--colocated_python_sidecar_memory=${K8S_PATHWAYS_SIDECAR_MEMORY}"
+  "--colocated_python_sidecar_memory_limit=${K8S_PATHWAYS_SIDECAR_MEMORY_LIMIT}"
+)
+if is_true "${WEIGHT_SYNC_RAIDEN_MULTI_NUMA}"; then
+  TPU_JOBSET_GEN_ARGS+=(--enable_multi_numa)
+fi
+if is_true "${K8S_PATHWAYS_SIDECAR_SHM}"; then
+  TPU_JOBSET_GEN_ARGS+=(--colocated_python_sidecar_shm)
+else
+  TPU_JOBSET_GEN_ARGS+=(--no-colocated_python_sidecar_shm)
+fi
+
 is_jax_cache_disabled() {
   is_true "${K8S_JAX_CACHE_DISABLE:-false}"
 }
@@ -244,11 +267,14 @@ start_trainer() {
     --pathways_proxy_memory_limit="${K8S_PATHWAYS_PROXY_MEMORY_LIMIT}" \
     --pathways_proxy_memory="${K8S_PATHWAYS_PROXY_MEMORY}" \
     --pathways_rm_memory="${K8S_PATHWAYS_RM_MEMORY}" \
+    --pathways_rm_memory_limit="${K8S_PATHWAYS_RM_MEMORY_LIMIT}" \
     --user_container_memory="${K8S_TRAINER_MEMORY}" \
     --user_container_memory_limit="${K8S_TRAINER_MEMORY_LIMIT}" \
-    --pathways_worker_memory="${K8S_PATHWAYS_WORKER_MEMORY}" \
-    ${TRAINER_IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES:+--ifrt_proxy_large_transfer_threshold_bytes="${TRAINER_IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES}"} \
+    --pathways_worker_memory="${K8S_PATHWAYS_SERVER_MEMORY}" \
+    --pathways_worker_memory_limit="${K8S_PATHWAYS_SERVER_MEMORY_LIMIT}" \
+    ${K8S_PATHWAYS_IFRT_THRESHOLD_BYTES:+--ifrt_proxy_large_transfer_threshold_bytes="${K8S_PATHWAYS_IFRT_THRESHOLD_BYTES}"} \
     --pathways_gcs_scratch_location="${K8S_GCS_SCRATCH_LOCATION}" \
+    "${TPU_JOBSET_GEN_ARGS[@]}" \
     --worker_container_image="${K8S_TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command="${startup_cmd}" \
@@ -363,10 +389,13 @@ render_rollout_yaml() {
     --pathways_proxy_memory_limit="${K8S_PATHWAYS_PROXY_MEMORY_LIMIT}" \
     --pathways_proxy_memory="${K8S_PATHWAYS_PROXY_MEMORY}" \
     --pathways_rm_memory="${K8S_PATHWAYS_RM_MEMORY}" \
+    --pathways_rm_memory_limit="${K8S_PATHWAYS_RM_MEMORY_LIMIT}" \
     --user_container_memory="${K8S_ROLLOUT_MEMORY}" \
     --user_container_memory_limit="${K8S_ROLLOUT_MEMORY_LIMIT}" \
-    --pathways_worker_memory="${K8S_PATHWAYS_WORKER_MEMORY}" \
+    --pathways_worker_memory="${K8S_PATHWAYS_SERVER_MEMORY}" \
+    --pathways_worker_memory_limit="${K8S_PATHWAYS_SERVER_MEMORY_LIMIT}" \
     --pathways_gcs_scratch_location="${K8S_GCS_SCRATCH_LOCATION}" \
+    "${TPU_JOBSET_GEN_ARGS[@]}" \
     --worker_container_image="${K8S_TUNIX_IMAGE}" \
     --worker_container_port="${ROLLOUT_PORT}" \
     --ray_head_pre_init_command="${ray_head_pre_init_cmd}" \
@@ -505,7 +534,7 @@ if [[ "${COMMAND}" == "start" || "${COMMAND}" == "trainer" || "${COMMAND}" == "r
   if (( ${#library_env_set[@]} > 0 )); then
     echo "Error: ${library_env_set[*]} set in the environment, but the k8s" \
       "nodes take them from the config: vllm_config.skip_jax_precompile," \
-      "weight_sync_config.raiden_data_nics and" \
+      "weight_sync_config.raiden.data_nics and" \
       "weight_sync_config.verify_weights." >&2
     exit 1
   fi

@@ -175,6 +175,31 @@ _RETIRED_KEYS: Final[Mapping[str, str]] = types.MappingProxyType({
         "moved to cluster_config.fault_tolerance.enabled"
     ),
     **{
+        f"cluster_config.k8s.pathways_{old}": (
+            f"moved to cluster_config.pathways.{new}"
+        )
+        for old, new in (
+            ("server_image", "server_image"),
+            ("proxy_image", "proxy_image"),
+            ("proxy_memory", "proxy_memory.request"),
+            ("proxy_memory_limit", "proxy_memory.limit"),
+            ("rm_memory", "rm_memory.request"),
+            ("worker_memory", "server_memory.request"),
+        )
+    },
+    "cluster_config.k8s.gcs_scratch_location": (
+        "moved to cluster_config.pathways.gcs_scratch_location"
+    ),
+    "cluster_config.k8s.enable_pathways_persistence": (
+        "moved to cluster_config.pathways.trainer.persistence"
+    ),
+    "weight_sync_config.raiden_use_ffi": (
+        "moved to weight_sync_config.raiden.use_ffi"
+    ),
+    "weight_sync_config.raiden_data_nics": (
+        "moved to weight_sync_config.raiden.data_nics"
+    ),
+    **{
         f"cluster_config.{key}": (
             f"moved to cluster_config.fault_tolerance.{key}"
         )
@@ -914,13 +939,13 @@ def _validate_fault_tolerance(hp: cli_config.HyperParameters) -> None:
 # environments so a value can only come from the config.
 LIBRARY_ENV_CONFIG_KEYS: Final[Mapping[str, str]] = types.MappingProxyType({
     "SKIP_JAX_PRECOMPILE": "vllm_config.skip_jax_precompile",
-    "TPU_RAIDEN_DATA_NICS": "weight_sync_config.raiden_data_nics",
+    "TPU_RAIDEN_DATA_NICS": "weight_sync_config.raiden.data_nics",
     "VERIFY_WEIGHTS": "weight_sync_config.verify_weights",
 })
 _FORBIDDEN_ROLE_ENVS: Final[Mapping[str, str]] = types.MappingProxyType({
     **{k: f"set {v} instead" for k, v in LIBRARY_ENV_CONFIG_KEYS.items()},
     "ENABLE_PATHWAYS_PERSISTENCE": (
-        "set cluster_config.k8s.enable_pathways_persistence instead"
+        "set cluster_config.pathways.trainer.persistence instead"
     ),
     "DIST_RL_WORKER_PORT": "launcher-managed worker identity",
     "DIST_RL_ROLLOUT_REPLICA": "launcher-managed worker identity",
@@ -929,9 +954,8 @@ _ROLE_ENV_PREFIX_REASONS: Final[tuple[tuple[str, str], ...]] = (
     ("T_", "Tunix config override"),
     ("M_", "MaxText config override"),
 )
-_ENV_VAR_NAME_RE: Final[re.Pattern[str]] = re.compile(
-    r"^[A-Za-z_][A-Za-z0-9_]*\Z"
-)
+# The manifest generator's rule, so a name the config accepts also renders.
+_ENV_VAR_NAME_RE: Final[re.Pattern[str]] = yaml_generator.ENV_VAR_NAME_RE
 
 
 def role_env(
@@ -1050,6 +1074,130 @@ def _validate_role_memory(hp: cli_config.HyperParameters) -> None:
     )
 
 
+# The largest value the IFRT proxy client parses (a positive int64).
+_MAX_IFRT_THRESHOLD_BYTES: Final[int] = 2**63 - 1
+
+
+def _is_int(value: object) -> bool:
+  """Returns whether `value` is an int and not a bool."""
+  return isinstance(value, int) and not isinstance(value, bool)
+
+
+def pathways_worker_env_json(hp: cli_config.HyperParameters) -> str:
+  """Validates `cluster_config.pathways.worker_env`; returns it as JSON.
+
+  `k8s.sh` passes the JSON to the manifest generator's
+  `--pathways_worker_env_json`.
+
+  Args:
+    hp: Loaded configuration.
+
+  Returns:
+    The variables as a JSON object of strings.
+
+  Raises:
+    TypeError: If the section is not a mapping of strings to strings.
+    ValueError: If a name is not a variable name or is one the Pathways
+      template sets itself.
+  """
+  env = hp.config_mapping("cluster_config")["pathways"]["worker_env"]
+  if not isinstance(env, Mapping):
+    raise TypeError(
+        f"cluster_config.pathways.worker_env must be a mapping, got {env!r}."
+    )
+  for name, value in env.items():
+    if not isinstance(name, str) or not _ENV_VAR_NAME_RE.match(name):
+      raise ValueError(
+          f"cluster_config.pathways.worker_env has the invalid variable name"
+          f" {name!r}."
+      )
+    if not isinstance(value, str):
+      raise TypeError(
+          f"cluster_config.pathways.worker_env.{name} must be a string, got"
+          f" {value!r}."
+      )
+  env_json = json.dumps(dict(env))
+  try:
+    yaml_generator.parse_pathways_worker_env_json(env_json)
+  except ValueError as e:
+    raise ValueError(f"cluster_config.pathways.worker_env: {e}") from e
+  return env_json
+
+
+def _validate_launcher_settings(hp: cli_config.HyperParameters) -> None:
+  """Checks the types of the Pathways, Raiden and reservation settings.
+
+  These used to be environment variables of the launcher, so a malformed value
+  would otherwise fail only when `k8s.sh` renders the manifests.
+
+  Args:
+    hp: Loaded configuration.
+
+  Raises:
+    TypeError: If a setting has the wrong type.
+    ValueError: If a number is out of range, or a
+      `cluster_config.pathways.worker_env` name is not a variable name.
+  """
+  cluster = hp.config_mapping("cluster_config")
+  pathways = cluster["pathways"]
+  raiden = hp.config_mapping("weight_sync_config")["raiden"]
+  sidecar = pathways["sidecar"]
+  pathways_trainer = pathways["trainer"]
+  for key, value, expected in (
+      (
+          "cluster_config.pathways.trainer.persistence",
+          pathways_trainer["persistence"],
+          bool,
+      ),
+      (
+          "cluster_config.pathways.proxy_extra_args",
+          pathways["proxy_extra_args"],
+          str,
+      ),
+      ("cluster_config.pathways.sidecar.image", sidecar["image"], str),
+      ("cluster_config.pathways.sidecar.shm", sidecar["shm"], bool),
+      (
+          "cluster_config.k8s.tpu_reservation",
+          cluster["k8s"]["tpu_reservation"],
+          str,
+      ),
+      ("weight_sync_config.raiden.multi_numa", raiden["multi_numa"], bool),
+  ):
+    if not isinstance(value, expected):
+      raise TypeError(
+          f"{key} must be a {expected.__name__}, got {value!r}."
+      )
+  for key, memory in (
+      ("proxy_memory", pathways["proxy_memory"]),
+      ("rm_memory", pathways["rm_memory"]),
+      ("server_memory", pathways["server_memory"]),
+      ("sidecar.memory", sidecar["memory"]),
+  ):
+    validate_memory(f"cluster_config.pathways.{key}", memory)
+  pathways_worker_env_json(hp)
+  use_ffi = raiden["use_ffi"]
+  if use_ffi is not None and not isinstance(use_ffi, bool):
+    raise TypeError(
+        "weight_sync_config.raiden.use_ffi must be a bool or null, got"
+        f" {use_ffi!r}."
+    )
+  broadcast_k = raiden["broadcast_k"]
+  if not _is_int(broadcast_k) or broadcast_k <= 0:
+    raise ValueError(
+        "weight_sync_config.raiden.broadcast_k must be a positive int, got"
+        f" {broadcast_k!r}."
+    )
+  threshold = pathways_trainer["ifrt_proxy_large_transfer_threshold_bytes"]
+  if threshold is not None and not (
+      _is_int(threshold) and 0 < threshold <= _MAX_IFRT_THRESHOLD_BYTES
+  ):
+    raise ValueError(
+        "cluster_config.pathways.trainer.ifrt_proxy_large_transfer_threshold"
+        "_bytes must be null or an int in [1, 2**63 - 1], got"
+        f" {threshold!r}."
+    )
+
+
 def _validate_local_settings(hp: cli_config.HyperParameters) -> None:
   """Validates and normalizes `cluster_config.local` settings."""
   local = _mutable_section(hp, "cluster_config")["local"]
@@ -1098,6 +1246,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   _validate_role_env(hp)
   _reject_unimplemented_settings(hp)
   _validate_role_memory(hp)
+  _validate_launcher_settings(hp)
   _validate_trajectory_logging(hp)
   _validate_rollout_logps_settings(hp)
   _validate_fault_tolerance(hp)
@@ -1700,7 +1849,7 @@ def _validate_library_settings(hp: cli_config.HyperParameters) -> None:
 
   Raises:
     TypeError: If a `_LIBRARY_BOOL_SETTINGS` value is not a bool,
-      `weight_sync_config.raiden_data_nics` is not a string, or
+      `weight_sync_config.raiden.data_nics` is not a string, or
       `dist_training_config.ckpt_d2h_concurrent_gb` is neither an int nor
       null.
     ValueError: If `dist_training_config.ckpt_d2h_concurrent_gb` is not
@@ -1710,10 +1859,10 @@ def _validate_library_settings(hp: cli_config.HyperParameters) -> None:
     value = hp.config_mapping(section)[key]
     if not isinstance(value, bool):
       raise TypeError(f"{section}.{key} must be a bool, got {value!r}.")
-  nics = hp.config_mapping("weight_sync_config")["raiden_data_nics"]
+  nics = hp.config_mapping("weight_sync_config")["raiden"]["data_nics"]
   if not isinstance(nics, str):
     raise TypeError(
-        "weight_sync_config.raiden_data_nics must be a string of"
+        "weight_sync_config.raiden.data_nics must be a string of"
         f" comma-separated NIC names, or empty, got {nics!r}."
     )
   gb = hp.config_mapping("dist_training_config")["ckpt_d2h_concurrent_gb"]
@@ -1928,9 +2077,18 @@ def render_bash_exports(hp: DistHyperParameters) -> str:
   jax_cache = cli_config.to_str_dict(k8s["jax_cache"])
   k8s_trainer = cli_config.to_str_dict(k8s["trainer"])
   k8s_rollout = cli_config.to_str_dict(k8s["rollout"])
+  pathways = cli_config.to_str_dict(cluster["pathways"])
+  sidecar = cli_config.to_str_dict(pathways["sidecar"])
+  pathways_trainer = cli_config.to_str_dict(pathways["trainer"])
+  proxy_memory = cli_config.to_str_dict(pathways["proxy_memory"])
+  rm_memory = cli_config.to_str_dict(pathways["rm_memory"])
+  server_memory = cli_config.to_str_dict(pathways["server_memory"])
+  sidecar_memory = cli_config.to_str_dict(sidecar["memory"])
+  ifrt_threshold = pathways_trainer["ifrt_proxy_large_transfer_threshold_bytes"]
   actor = hp.config_mapping("actor_model_config")
   rollout_model = hp.config_mapping("rollout_model_config")
   ws = hp.config_mapping("weight_sync_config")
+  raiden = cli_config.to_str_dict(ws["raiden"])
   sandbox_k8s = (
       hp.config["kubernetes_config"]
       if isinstance(hp.config["kubernetes_config"], Mapping)
@@ -1993,9 +2151,13 @@ def render_bash_exports(hp: DistHyperParameters) -> str:
       "ROLLOUT_MODEL_ID": rollout_model["model_id"],
       "ROLLOUT_MODEL_DIR": rollout_model["model_download_path"],
       "WEIGHT_SYNC_MODE": ws["mode"],
+      # Empty when null.
       "WEIGHT_SYNC_RAIDEN_USE_FFI": (
-          "" if ws["raiden_use_ffi"] is None else ws["raiden_use_ffi"]
+          "" if raiden["use_ffi"] is None else raiden["use_ffi"]
       ),
+      "WEIGHT_SYNC_RAIDEN_DATA_NICS": raiden["data_nics"],
+      "WEIGHT_SYNC_RAIDEN_BROADCAST_K": raiden["broadcast_k"],
+      "WEIGHT_SYNC_RAIDEN_MULTI_NUMA": raiden["multi_numa"],
       "LOCAL_AUTO_DETECT_DEVICES": local["auto_detect_devices"],
       "LOCAL_DOWNLOAD_MODEL_WEIGHTS": local["download_model_weights"],
       "LOCAL_TRAINER_DEVICES": local["trainer_devices"],
@@ -2024,19 +2186,32 @@ def render_bash_exports(hp: DistHyperParameters) -> str:
       "K8S_CPU_NODEPOOL": k8s["cpu_nodepool"],
       "K8S_CPU_MEMORY": memory["orchestrator"]["request"],
       "K8S_CPU_MEMORY_LIMIT": memory["orchestrator"]["limit"],
-      "K8S_GCS_SCRATCH_LOCATION": k8s["gcs_scratch_location"],
-      "K8S_ENABLE_PATHWAYS_PERSISTENCE": k8s["enable_pathways_persistence"],
+      "K8S_GCS_SCRATCH_LOCATION": pathways["gcs_scratch_location"],
+      "K8S_ENABLE_PATHWAYS_PERSISTENCE": pathways_trainer["persistence"],
       "K8S_TUNIX_IMAGE": k8s["tunix_image"],
-      "K8S_PATHWAYS_SERVER_IMAGE": k8s["pathways_server_image"],
-      "K8S_PATHWAYS_PROXY_IMAGE": k8s["pathways_proxy_image"],
-      "K8S_PATHWAYS_PROXY_MEMORY_LIMIT": k8s["pathways_proxy_memory_limit"],
-      "K8S_PATHWAYS_PROXY_MEMORY": k8s["pathways_proxy_memory"],
-      "K8S_PATHWAYS_RM_MEMORY": k8s["pathways_rm_memory"],
+      "K8S_TPU_RESERVATION": k8s["tpu_reservation"],
+      "K8S_PATHWAYS_SERVER_IMAGE": pathways["server_image"],
+      "K8S_PATHWAYS_PROXY_IMAGE": pathways["proxy_image"],
+      "K8S_PATHWAYS_PROXY_MEMORY": proxy_memory["request"],
+      "K8S_PATHWAYS_PROXY_MEMORY_LIMIT": proxy_memory["limit"],
+      "K8S_PATHWAYS_RM_MEMORY": rm_memory["request"],
+      "K8S_PATHWAYS_RM_MEMORY_LIMIT": rm_memory["limit"],
+      "K8S_PATHWAYS_SERVER_MEMORY": server_memory["request"],
+      "K8S_PATHWAYS_SERVER_MEMORY_LIMIT": server_memory["limit"],
+      # Empty when null.
+      "K8S_PATHWAYS_IFRT_THRESHOLD_BYTES": (
+          "" if ifrt_threshold is None else ifrt_threshold
+      ),
+      "K8S_PATHWAYS_WORKER_ENV_JSON": pathways_worker_env_json(hp),
+      "K8S_PATHWAYS_PROXY_EXTRA_ARGS": pathways["proxy_extra_args"],
+      "K8S_PATHWAYS_SIDECAR_IMAGE": sidecar["image"],
+      "K8S_PATHWAYS_SIDECAR_MEMORY": sidecar_memory["request"],
+      "K8S_PATHWAYS_SIDECAR_MEMORY_LIMIT": sidecar_memory["limit"],
+      "K8S_PATHWAYS_SIDECAR_SHM": sidecar["shm"],
       "K8S_TRAINER_MEMORY": memory["trainer"]["request"],
       "K8S_TRAINER_MEMORY_LIMIT": memory["trainer"]["limit"],
       "K8S_ROLLOUT_MEMORY": memory["rollout"]["request"],
       "K8S_ROLLOUT_MEMORY_LIMIT": memory["rollout"]["limit"],
-      "K8S_PATHWAYS_WORKER_MEMORY": k8s["pathways_worker_memory"],
       "K8S_FAIL_FAST": k8s["fail_fast"],
       "K8S_STARTUP_RETRIES": k8s["startup_retries"],
       "K8S_TEARDOWN_GANG_ON_EXIT": k8s["teardown_gang_on_exit"],

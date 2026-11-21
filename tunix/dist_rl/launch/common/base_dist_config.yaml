@@ -325,18 +325,30 @@ weight_sync_config:
   # orthogonal to checkpoint serialization format ("orbax" vs "safetensors") and
   # storage backend ("gcs" gs://, "GOOGLE_INTERNAL_STOAGE_PATH" /GOOGLE_INTERNAL_STOAGE_PATH/, or "local" POSIX paths via epath).
   mode: "none"
-  raiden_use_ffi: null
   use_weight_converter: true
   prefuse_moe_weights: true
   # Log weight checksums on both sides of each sync, and Raiden's transfer
   # metrics. The trainer and rollout nodes set `VERIFY_WEIGHTS` from it.
   verify_weights: false
   in_flight_weight_updates: false
-  # Comma-separated NICs Raiden sends weights over, e.g. "eth0,eth1". "eth0"
-  # matches the earlier launchers; empty lets Raiden pick by its own heuristic.
-  # The trainer and rollout nodes set `TPU_RAIDEN_DATA_NICS` from it when it is
-  # not empty.
-  raiden_data_nics: "eth0"
+  # Settings of `mode: "raiden"`.
+  raiden:
+    # Whether the k8s trainer syncs through Raiden's FFI path
+    # (`RAIDEN_USE_FFI`). null: on for a Pathways trainer
+    # (`jobset.pathways.yaml`), otherwise left to Raiden. The k8s rollout never
+    # uses it. `local.sh` does not apply it.
+    use_ffi: null
+    # Comma-separated NICs Raiden sends weights over, e.g. "eth0,eth1". Empty
+    # lets Raiden pick by its own heuristic. The trainer and rollout nodes set
+    # `TPU_RAIDEN_DATA_NICS` from it when it is not empty, and so do the k8s
+    # templates that set Raiden variables on their containers
+    # (`jobset.pathways.yaml`, `jobset.mcjax.ray.yaml`, `jobset.tpu.yaml`).
+    data_nics: "eth0"
+    # `RAIDEN_BROADCAST_K` and `ENABLE_MULTI_NUMA` of the containers in those
+    # templates (`jobset.tpu.yaml` sets no `RAIDEN_BROADCAST_K`). Only `k8s.sh`
+    # applies them.
+    broadcast_k: 64
+    multi_numa: false
 
 trajectory_store_config:
   enable: false
@@ -448,6 +460,49 @@ cluster_config:
     # OTLP gRPC port of the OpenTelemetry collector that `launch.sh otel`
     # deploys on k8s.
     otel: 4317
+  # Pathways deployment of a trainer or rollout. Only `k8s.sh` applies these,
+  # to the roles whose template is `jobset.pathways.yaml`; `trainer` applies to
+  # the trainer only.
+  pathways:
+    server_image: "us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/server:latest"
+    proxy_image: "us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/proxy_server:latest"
+    # `request` and `limit` (Kubernetes quantities) of the Pathways containers;
+    # an empty value sets none. `proxy_memory` and `rm_memory` size the
+    # pathways-proxy and resource-manager containers of the head pod, which
+    # also runs the role's own container (`roles.<role>.memory`).
+    # `server_memory` sizes the Pathways server (the pathways-worker container,
+    # `server_image`) on each TPU host.
+    proxy_memory:
+      request: "16G"
+      limit: "190G"
+    rm_memory:
+      request: "4G"
+      limit: "32G"
+    server_memory:
+      request: "100G"
+      limit: ""
+    gcs_scratch_location: "gs://cloud-pathways-staging/tmp"
+    # Extra `KEY: "VALUE"` environment variables of the pathways-worker
+    # containers, e.g. `LIBTPU_INIT_ARGS`.
+    worker_env: {}
+    # Extra arguments of the pathways-proxy container, separated by spaces.
+    proxy_extra_args: ""
+    # Colocated Python sidecar of the pathways-worker pods. An empty `image`
+    # runs none. `shm` shares a memory-backed directory with pathways-worker.
+    sidecar:
+      image: ""
+      memory:
+        request: "16Gi"
+        limit: ""
+      shm: true
+    # Settings `k8s.sh` applies to the trainer's Pathways template alone.
+    trainer:
+      # Sets `ENABLE_PATHWAYS_PERSISTENCE` on the trainer.
+      persistence: false
+      # Host buffers of at least this many bytes go from the trainer to
+      # pathways-proxy through shared memory instead of localhost gRPC. null
+      # keeps the IFRT proxy client's default, which turns this off.
+      ifrt_proxy_large_transfer_threshold_bytes: null
   local:
     auto_detect_devices: false
     download_model_weights: true
@@ -491,17 +546,13 @@ cluster_config:
     cpu_machine: "n2-standard-64"
     # Orchestrator node pool. Empty selects the node by `cpu_machine`.
     cpu_nodepool: ""
-    gcs_scratch_location: "gs://cloud-pathways-staging/tmp"
-    enable_pathways_persistence: false
     # Container image for the trainer/rollout pods; required for target=k8s
     # (`k8s.sh` fails fast when empty). Example launchers set it.
     tunix_image: ""
-    pathways_server_image: "us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/server:latest"
-    pathways_proxy_image: "us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/proxy_server:latest"
-    pathways_proxy_memory_limit: "190G"
-    pathways_proxy_memory: "16G"
-    pathways_rm_memory: "4G"
-    pathways_worker_memory: "100G"
+    # Compute Engine reservation the TPU pods of a `jobset.*.yaml` trainer or
+    # rollout must run on; empty sets none. A `leaderworkerset.*.yaml` rollout
+    # does not take it.
+    tpu_reservation: ""
     # Fail-fast restarts for the trainer and rollout JobSets: a failed pod fails
     # its Job instead of restarting in place, and JobSet recreates the whole
     # JobSet up to `startup_retries` times. Needs `jobset.*.yaml` worker

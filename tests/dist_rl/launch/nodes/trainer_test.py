@@ -197,7 +197,7 @@ class TrainerMainTest(absltest.TestCase):
       trainer.main(
           [
               "weight_sync_config.verify_weights=true",
-              "weight_sync_config.raiden_data_nics=eth0,eth1",
+              "weight_sync_config.raiden.data_nics=eth0,eth1",
           ],
           context=self.mock_context,
       )
