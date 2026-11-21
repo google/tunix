@@ -856,30 +856,17 @@ class RaidenSynchronizer:
   def checksums(self, sample: int = 3) -> dict[str, float | int]:
     """Per-tensor float32 abs-sums for cross-process verification.
 
-    Reduces one tensor at a time and syncs each result to the host, so at most
-    one tensor's float32 temporaries are live on device at once.
-
     Args:
-      sample: How many leading tensors (bind order) to report individually.
+      sample: How many leading tensors (canonical param_key order) to report
+        individually.
 
     Returns:
       The sampled per-tensor sums plus `__grand_total__`, `__tensor_count__`,
       and `__element_count__` over every bound tensor.
     """
-
-    def total(arr):
-      return float(jnp.sum(jnp.abs(arr).astype(jnp.float32)))
-
-    head: dict[str, float | int] = {
-        name: total(arr)
-        for name, arr in list(zip(self.names, self.arrays))[:sample]
-    }
-    head["__grand_total__"] = float(sum(total(a) for a in self.arrays))
-    # Registration pairs tensors by position, so the totals only compare when
-    # both sides bound the same set. Check these before trusting a mismatch.
-    head["__tensor_count__"] = len(self.arrays)
-    head["__element_count__"] = int(sum(a.size for a in self.arrays))
-    return head
+    return weight_utils.compute_checksums(
+        self.names, self.arrays, sample=sample
+    )
 
   def _shard_addresses(self) -> Tuple[str, ...]:
     """Data-plane address of each local shard.
@@ -983,7 +970,15 @@ def patch_raiden_worker_sync() -> None:
       if orig_apply is not None:
         orig_apply(self, runner)
 
+    def _patched_checksums(self, sample: int = 3) -> dict[str, float | int]:
+      if self._sync is not None and hasattr(self._sync, "checksums"):
+        return self._sync.checksums(sample=sample)
+      return weight_utils.compute_checksums(
+          self.names, self.arrays, sample=sample
+      )
+
     rws.RaidenWorkerSync.apply_to_runner = _patched_apply_to_runner
+    rws.RaidenWorkerSync.checksums = _patched_checksums
     rws.RaidenWorkerSync._patched_by_tunix = True
     logging.info(
         "Successfully patched RaidenWorkerSync.apply_to_runner with Tunix"
