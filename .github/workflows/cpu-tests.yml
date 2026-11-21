@@ -266,7 +266,7 @@ jobs:
 
       - name: Run vllm sampler and rl_cluster unit tests
         run: |
-          JAX_PLATFORMS=cpu python3 -m pytest tests/generate/vllm_sampler_test.py::VllmSamplerConfigTest tests/generate/vllm_sampler_test.py::VllmSamplerTokenInputTest -v --tb=short
+          JAX_PLATFORMS=cpu python3 -m pytest tests/generate/vllm_sampler_test.py::VllmSamplerConfigTest tests/generate/vllm_sampler_test.py::VllmSamplerTokenInputTest tests/generate/vllm_sampler_hf_test.py -v --tb=short
           JAX_PLATFORMS=cpu XLA_FLAGS="--xla_force_host_platform_device_count=4" python3 -m pytest tests/rl/rl_cluster_test.py -k "vllm" -v --tb=short
 
   # ---------------------------------------------------------------------------
