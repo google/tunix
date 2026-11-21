@@ -15,6 +15,8 @@
 """Checks the GPU (vLLM Triton) path against the pure-JAX path."""
 
 import math
+import sys
+import types
 from unittest import mock
 
 from absl.testing import absltest
@@ -311,6 +313,70 @@ class PagedAttentionJaxTest(parameterized.TestCase):
       )
       self.assertIs(
           mock_gpu.paged_attention.call_args.kwargs["decode_only"], True
+      )
+
+  def test_metadata_decode_only_is_static_and_forwarded_to_tpu(self):
+    inputs = _inputs([1, 1], [12, 15], head_dim=32, dtype=jnp.float32)
+    self.assertIs(inputs["metadata"].decode_only, False)
+    decode_metadata = jax.device_put(
+        inputs["metadata"].replace(decode_only=True), jax.devices("cpu")[0]
+    )
+    self.assertIs(decode_metadata.decode_only, True)
+
+    mock_ragged_paged_attention = mock.Mock(
+        side_effect=lambda q, k, v, cache, *args, **kwargs: (q, cache)
+    )
+    fake_tokamax_ops = types.ModuleType("tokamax.ops")
+    fake_tokamax_ops.ragged_paged_attention = mock_ragged_paged_attention
+    fake_tokamax = types.ModuleType("tokamax")
+    fake_tokamax.ops = fake_tokamax_ops
+
+    mesh = _one_device_mesh("cpu")
+    with mock.patch.dict(
+        sys.modules,
+        {"tokamax": fake_tokamax, "tokamax.ops": fake_tokamax_ops},
+    ):
+      run = jax.jit(
+          lambda x: paged_attention.paged_attention(
+              **x, cache_name=_CACHE, mesh=mesh, backend="tpu"
+          )
+      )
+      run(inputs)
+      mock_ragged_paged_attention.assert_called_once()
+      self.assertIs(
+          mock_ragged_paged_attention.call_args.kwargs["decode_only"], False
+      )
+      self.assertEqual(
+          mock_ragged_paged_attention.call_args.kwargs["implementation"],
+          "mosaic_tpu",
+      )
+
+      mock_ragged_paged_attention.reset_mock()
+      run(dict(inputs, metadata=decode_metadata))
+      mock_ragged_paged_attention.assert_called_once()
+      self.assertIs(
+          mock_ragged_paged_attention.call_args.kwargs["decode_only"], True
+      )
+      self.assertEqual(
+          mock_ragged_paged_attention.call_args.kwargs["implementation"],
+          "mosaic_tpu",
+      )
+
+      mock_ragged_paged_attention.reset_mock()
+      paged_attention.paged_attention(
+          **inputs,
+          cache_name=_CACHE,
+          mesh=mesh,
+          backend="tpu",
+          decode_only=True,
+      )
+      mock_ragged_paged_attention.assert_called_once()
+      self.assertIs(
+          mock_ragged_paged_attention.call_args.kwargs["decode_only"], True
+      )
+      self.assertEqual(
+          mock_ragged_paged_attention.call_args.kwargs["implementation"],
+          "mosaic_tpu",
       )
 
 
