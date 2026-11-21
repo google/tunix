@@ -360,8 +360,7 @@ class PeftTrainerTest(parameterized.TestCase):
         lambda step: step == profiler_options.skip_first_n_steps
     )
     mock_profiler_instance.should_deactivate.side_effect = (
-        lambda step: step
-        == (
+        lambda step: step == (
             profiler_options.skip_first_n_steps
             + profiler_options.profiler_steps
         )
@@ -698,8 +697,8 @@ class PeftTrainerTest(parameterized.TestCase):
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
     with self.assertRaisesRegex(
         ValueError,
-        "resume_from_checkpoint_on_init=False is not supported in SFT"
-        " PeftTrainer",
+        'resume_from_checkpoint_on_init=False is not supported in SFT'
+        ' PeftTrainer',
     ):
       peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
 
@@ -2272,6 +2271,28 @@ class TrainStepGlobalWeightedTest(parameterized.TestCase):
         initializer=jnp.asarray(0.0),
     )
     self.assertGreater(float(max_diff), 1e-3)
+
+  def test_peft_trainer_export_safetensors(self):
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+    out_dir = self.create_tempdir().full_path
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=1,
+        checkpoint_root_directory=out_dir,
+    )
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    result = trainer.export_safetensors(
+        lambda local_path, target_dir, m, **kwargs: (target_dir, kwargs),
+        num_ranks=4,
+        max_bucket_bytes=2048,
+    )
+    self.assertIsNotNone(result)
+    target_dir, kwargs = result
+    self.assertTrue(target_dir.endswith('0/safetensors'))
+    self.assertEqual(kwargs['num_ranks'], 4)
+    self.assertEqual(kwargs['max_bucket_bytes'], 2048)
+    trainer.close()
 
 
 if __name__ == '__main__':
