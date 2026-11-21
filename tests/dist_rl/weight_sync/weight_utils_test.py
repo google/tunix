@@ -14,6 +14,8 @@
 
 """Tests for transport-neutral weight_utils helpers."""
 
+from unittest import mock
+
 from absl.testing import absltest
 from flax import nnx
 import jax
@@ -111,6 +113,21 @@ class WeightUtilsTest(absltest.TestCase):
         ],
     )
     self.assertLen(kept_arrays, 2)
+
+  def test_filter_bindable_batches_block_until_ready(self):
+    a1 = jnp.ones((2, 4), dtype=jnp.bfloat16)
+    a2 = jnp.zeros((2, 4), dtype=jnp.bfloat16)
+    with mock.patch.object(
+        weight_utils.jax,
+        "block_until_ready",
+        wraps=weight_utils.jax.block_until_ready,
+    ) as spy_ready:
+      kept_names, kept_arrays = weight_utils.filter_bindable(
+          ["w1", "w2"], [a1, a2]
+      )
+    self.assertEqual(kept_names, ["w1", "w2"])
+    self.assertEqual(kept_arrays, [a1, a2])
+    spy_ready.assert_called_once_with([a1, a2])
 
   def test_filter_bindable_and_apply_to_runner_preserve_vllm_lookup_buffers(
       self,

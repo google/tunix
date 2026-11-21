@@ -157,11 +157,12 @@ def filter_bindable(
     if is_inference_only_buffer(name):
       inference_only_dropped.append(name)
     elif is_bindable(arr, allow_proxy=allow_proxy):
-      arr.block_until_ready()
       keep_names.append(name)
       keep_arrays.append(arr)
     else:
       dropped.append(name)
+  if keep_arrays:
+    jax.block_until_ready(keep_arrays)
   if inference_only_dropped:
     logging.debug(
         "%s bind skipped %d inference-only non-weight leaves: %s",
