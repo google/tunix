@@ -1291,6 +1291,154 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def _zero_variance_program(self, group_rewards, **kwargs):
+    """Builds a program whose i-th dispatched prompt gets `group_rewards[i]`."""
+    dispatched: list[str] = []
+    ready: list[list[datatypes.TrajectoryItem]] = []
+
+    async def mock_dispatch(prompts, **dispatch_kwargs):
+      prompt_id = prompts[0]["prompt_id"]
+      dispatched.append(prompt_id)
+      ready.append(
+          _make_trajectory_group(
+              prompt_id=prompt_id,
+              policy_version=dispatch_kwargs["policy_version"],
+          )
+      )
+
+    async def mock_poll(timeout_s=0.1):
+      del timeout_s
+      if ready:
+        return ready.pop(0)
+      await asyncio.sleep(0.01)
+      return []
+
+    self.mock_engine.dispatch_rollouts.side_effect = mock_dispatch
+    self.mock_engine.poll_rollouts.side_effect = mock_poll
+    rewards_iter = iter(group_rewards)
+    program = rl_program.StandardRLProgram(
+        algo_config=dataclasses.replace(
+            self.algo_config,
+            drop_zero_variance_groups=True,
+            max_consecutive_filtered_groups=kwargs.pop(
+                "max_consecutive_filtered_groups", None
+            ),
+        ),
+        batch_config=self.batch_config,
+        reward_fns=[lambda prompts, completions, **_: next(rewards_iter)],
+        assembler=self.assembler,
+        **kwargs,
+    )
+    self.addCleanup(program.close)
+    return program, dispatched
+
+  def test_zero_variance_group_is_dropped_and_replaced(self):
+    async def _run():
+      program, dispatched = self._zero_variance_program(
+          [[1.0, 1.0], [0.0, 1.0]],
+          dataset=["prompt_0", "prompt_1"],
+          max_steps=1,
+      )
+      logged = {}
+      log_metric = program._log_metric
+
+      def _record_metric(name, value, step, **kwargs):
+        logged[(name, step)] = value
+        log_metric(name, value, step, **kwargs)
+
+      program._log_metric = _record_metric
+      dropped_groups = []
+      drop_tied_group = program._drop_tied_group
+
+      def _record_drop(group):
+        dropped_groups.append(group)
+        drop_tied_group(group)
+
+      program._drop_tied_group = _record_drop
+
+      await asyncio.wait_for(program.run_async(self.mock_engine), timeout=10.0)
+
+      # The tied `prompt_0` was dropped with its rewards stamped, before any
+      # payload was built for it.
+      self.assertLen(dropped_groups, 1)
+      self.assertEqual(
+          [item.prompt_id for item in dropped_groups[0]],
+          ["prompt_0", "prompt_0"],
+      )
+      self.assertEqual(
+          [item.traj["trajectory_reward"] for item in dropped_groups[0]],
+          [1.0, 1.0],
+      )
+      # It freed its dispatch slot for `prompt_1`, which is the only group
+      # trained.
+      self.assertEqual(dispatched, ["prompt_0", "prompt_1"])
+      self.assertEqual(program.step, 1)
+      self.mock_engine.train_step.assert_called_once()
+      self.assertEqual(program.last_step_result.reward_mean, 0.5)
+      # The dropped group is counted with the step's other filtered groups.
+      self.assertEqual(
+          logged[("rollout/tied_rewards_dropped_groups_count", 0)], 1.0
+      )
+      self.assertEqual(logged[("rollout/filtered_groups_count", 0)], 1.0)
+      self.assertEqual(logged[("rollout/filtered_trajectories_count", 0)], 2.0)
+      # A resumed run skips the dropped prompt as well as the trained one.
+      metadata = self.mock_engine.save_checkpoint.call_args.kwargs["metadata"]
+      self.assertEqual(metadata["skipped_prompt_ids"], ["prompt_0"])
+      self.assertEqual(metadata["committed_prompt_ids"], ["prompt_1"])
+
+    asyncio.run(_run())
+
+  def test_raises_after_max_consecutive_zero_variance_groups(self):
+    async def _run():
+      program_fail, _ = self._zero_variance_program(
+          [[1.0, 1.0]] * 5,
+          dataset=[f"prompt_{i}" for i in range(5)],
+          max_steps=1,
+          max_consecutive_filtered_groups=2,
+      )
+      with self.assertRaisesRegex(
+          RuntimeError, "Dropped 2 zero-variance groups in a row"
+      ):
+        await asyncio.wait_for(
+            program_fail.run_async(self.mock_engine), timeout=10.0
+        )
+
+      # A kept group in between resets the count.
+      program_ok, dispatched = self._zero_variance_program(
+          [[1.0, 1.0], [0.0, 1.0], [0.0, 0.0], [1.0, 0.0]],
+          dataset=[f"prompt_{i}" for i in range(4)],
+          max_steps=2,
+          max_consecutive_filtered_groups=2,
+      )
+      await asyncio.wait_for(
+          program_ok.run_async(self.mock_engine), timeout=10.0
+      )
+      self.assertEqual(program_ok.step, 2)
+      self.assertEqual(
+          dispatched, ["prompt_0", "prompt_1", "prompt_2", "prompt_3"]
+      )
+
+    asyncio.run(_run())
+
+  def test_drop_zero_variance_groups_requires_train_and_completion_order(self):
+    algo_cfg = dataclasses.replace(
+        self.algo_config, drop_zero_variance_groups=True
+    )
+    for kwargs in (
+        {"group_order": rl_program.GroupOrder.PROMPT_ARRIVAL},
+        {"mode": rl_program.Mode.EVAL},
+    ):
+      with self.assertRaisesRegex(
+          ValueError, "drop_zero_variance_groups requires"
+      ):
+        rl_program.StandardRLProgram(
+            dataset=["p0"],
+            algo_config=algo_cfg,
+            batch_config=self.batch_config,
+            reward_fns=[lambda prompts, completions, **_: [1.0, 1.0]],
+            **kwargs,
+        )
+
   def test_window_advances_a_whole_batch_when_a_group_goes_missing(self):
     async def _run():
       program = self._window_program()

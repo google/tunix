@@ -130,6 +130,7 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
           "loss_algo should be either grpo or gspo-token. Received: "
           f"{self.loss_algo}"
       )
+    self._validate_drop_zero_variance_groups()
     self._validate_sampler_is_and_rs_options()
 
 

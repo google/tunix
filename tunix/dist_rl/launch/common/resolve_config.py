@@ -1326,6 +1326,15 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
           "agentic_grpo_config.max_version_span is only supported with"
           " trajectory_group_order='trajectory_completion'."
       )
+  if (
+      grpo["drop_zero_variance_groups"]
+      and grpo["trajectory_group_order"]
+      == dist_rl_datatypes.GroupOrder.PROMPT_ARRIVAL.value
+  ):
+    raise ValueError(
+        "agentic_grpo_config.drop_zero_variance_groups is only supported"
+        " with trajectory_group_order='trajectory_completion'."
+    )
   _check_choice(
       "weight_sync_config.mode",
       hp.config_mapping("weight_sync_config")["mode"],

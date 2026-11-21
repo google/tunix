@@ -95,6 +95,25 @@ class AdvantagesTest(parameterized.TestCase):
       self.assertEqual(out.dtype, np.float32)
       np.testing.assert_array_equal(out, np.zeros((1, 2), dtype=np.float32))
 
+  def test_tied_rewards(self):
+    # Tied vs mixed valid trajectories.
+    self.assertTrue(advantages.tied_rewards([1.0, 1.0], [True, True]))
+    self.assertFalse(advantages.tied_rewards([0.0, 1.0], [True, True]))
+    # Invalid trajectories and non-finite rewards are ignored.
+    self.assertTrue(
+        advantages.tied_rewards([1.0, 1.0, 0.0], [True, True, False])
+    )
+    self.assertTrue(
+        advantages.tied_rewards([1.0, 1.0, float("nan")], [True, True, True])
+    )
+    # Fewer than two usable trajectories is an outage, not a tie, so the group
+    # is kept and stays visible in rollout-health metrics.
+    self.assertFalse(advantages.tied_rewards([1.0, 0.0], [True, False]))
+    self.assertFalse(advantages.tied_rewards([0.0, 0.0], [False, False]))
+    self.assertFalse(
+        advantages.tied_rewards([float("nan"), float("nan")], [True, True])
+    )
+
 
 if __name__ == "__main__":
   absltest.main()
