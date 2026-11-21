@@ -209,7 +209,7 @@ class AlgorithmConfigTest(parameterized.TestCase):
     self.assertEqual(config.epsilon, 0.2)
     self.assertEqual(config.epsilon_high, 0.2)
     self.assertIsNone(config.epsilon_c)
-    self.assertEqual(config.kl_loss_mode, "kl")
+    self.assertEqual(config.kl_loss_mode, "low_var_kl")
     self.assertEqual(config.loss_agg_mode, "sequence-mean-token-mean")
     self.assertIsNone(config.sampler_is)
     self.assertEqual(config.sampler_is_threshold, 2.0)
