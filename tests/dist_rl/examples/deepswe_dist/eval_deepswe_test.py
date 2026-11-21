@@ -554,7 +554,9 @@ def _fake_hp(
       },
       "weight_sync_config": {"mode": mode},
       "vllm_config": {"max_model_len": None},
-      "env_kwargs": {"scaffold": "r2egym", **env_kwargs},
+      "env_kwargs": {
+          "scaffold": "r2egym", "use_agent_sandbox": False, **env_kwargs
+      },
   }
   return SimpleNamespace(config_mapping=lambda key: dict(sections[key]))
 
@@ -592,14 +594,18 @@ class _Discovery:
 class EvalControllerMainTest(unittest.TestCase):
 
   def test_config_args_maps_the_resolved_config(self):
-    args = eval_deepswe.config_args(_fake_hp("gs://bucket/run/"))
+    args = eval_deepswe.config_args(
+        _fake_hp("gs://bucket/run/", rollout_replicas=2)
+    )
 
     self.assertEqual(args.max_steps, 5)
     self.assertEqual(args.timeout, 60)
-    self.assertEqual(args.max_concurrent, 4)
+    # `max_concurrency` limits each of the 2 rollout workers.
+    self.assertEqual(args.max_concurrent, 8)
     self.assertEqual(args.num_rollouts_per_instance, 2)
     self.assertEqual(args.max_model_len, 4096)
     self.assertEqual(args.max_response_length, 1024)
+    self.assertEqual(eval_deepswe.response_budget(args), 1024)
     self.assertEqual((args.temperature, args.top_p, args.top_k),
                      (0.6, 0.95, -1))
     self.assertEqual(args.output_dir, "gs://bucket/run/eval")
@@ -645,7 +651,9 @@ class EvalControllerMainTest(unittest.TestCase):
     ):
       examples.deepswe.__dict__.pop("sandbox_utils", None)
       self.assertIsNone(
-          eval_deepswe._start_sandbox_fleet({"scaffold": "r2egym"}, [], args)
+          eval_deepswe._start_sandbox_fleet(
+              {"scaffold": "r2egym", "use_agent_sandbox": False}, [], args
+          )
       )
 
   def _controller_main(
@@ -684,6 +692,7 @@ class EvalControllerMainTest(unittest.TestCase):
       for target, attribute, value in (
           (node_utils, "require_discovery_context", lambda _: context),
           (resolve_config, "initialize", lambda _: hp),
+          (resolve_config, "validate_task", lambda _: None),
           (resolve_config, "plain_config", lambda _: {"resolved": True}),
           (node_utils, "log_resolved_config", lambda *_: "a" * 64),
           (orchestrator, "resolve_weight_sync_timeouts",

@@ -27,7 +27,6 @@ import argparse
 import asyncio
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping
-import importlib
 import json
 import logging
 import math
@@ -38,7 +37,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from etils import epath
 
@@ -341,14 +340,18 @@ def _attempts(
       yield index, entry, attempt
 
 
-def _unwrap(reply, rpc: str) -> dict[str, object]:
+def _unwrap(
+    reply, rpc: Literal["evaluate", "generate"]
+) -> dict[str, object]:
   """Returns a reply's compact result, compacting `generate` responses."""
   result = reply.unwrap()
   return compact_result(result) if rpc == "generate" else result
 
 
-async def collect_worker(handle, jobs, limit, args, on_result, *,
-                         rpc: str = "evaluate"):
+async def collect_worker(
+    handle, jobs, limit, args, on_result, *,
+    rpc: Literal["evaluate", "generate"] = "evaluate",
+):
   """Bound in-flight work without applying the RPC deadline to episodes.
 
   Each task taken from the shared `jobs` iterator is dispatched as
@@ -447,7 +450,7 @@ async def _evaluate(
     handles: list[remote_execution.ActorHandle],
     *,
     run_config: Mapping[str, object],
-    rpc: str,
+    rpc: Literal["evaluate", "generate"],
 ) -> dict[str, object]:
   """Runs every attempt of `entries` on `handles` and writes the results.
 
@@ -549,8 +552,11 @@ def config_args(hp: resolve_config.DistHyperParameters) -> argparse.Namespace:
 
   The controller and the rollout workers resolve the same config, so the
   evaluation reuses its settings: `agentic_grpo_config.num_generations`
-  attempts per task, `max_turns` turns, `episode_timeout`, `max_concurrency`,
-  and the `rollout_config` sampling settings. Results go to
+  attempts per task, `max_turns` turns, `episode_timeout`, and the
+  `rollout_config` sampling settings. As in training, `max_concurrency` limits
+  each rollout worker (so `--max_concurrent` is it times
+  `cluster_config.rollout_replicas`), and each trajectory's cumulative response
+  budget is `rollout_config.total_generation_steps`. Results go to
   `<cluster_config.artifact_root>/eval`. `data_config.limit` caps the tasks.
 
   Args:
@@ -571,10 +577,12 @@ def config_args(hp: resolve_config.DistHyperParameters) -> argparse.Namespace:
       "--role", "controller",
       "--max_steps", str(grpo["max_turns"]),
       "--timeout", str(grpo["episode_timeout"]),
-      "--max_concurrent", str(grpo["max_concurrency"]),
+      "--max_concurrent",
+      str(int(grpo["max_concurrency"]) * int(cluster["rollout_replicas"])),
       "--num_rollouts_per_instance", str(grpo["num_generations"]),
       "--max_model_len", str(max_model_len),
       "--max_response_length", str(generation_steps),
+      "--max_context_limit", str(generation_steps),
       "--temperature", str(rollout["temperature"]),
       "--top_p", str(rollout["top_p"]),
       "--top_k", str(top_k if top_k > 0 else -1),
@@ -596,13 +604,23 @@ def config_entries(
 
   Args:
     hp: Resolved dist_rl configuration.
+
+  Raises:
+    ValueError: If an entry has no `docker_image`.
   """
-  module = importlib.import_module(str(hp.config["data_module"]))
-  records = module.create_dataset(**hp.config_mapping("data_config"))
-  return [
+  from tunix.cli.utils import data as data_lib  # pylint: disable=g-import-not-at-top
+
+  records = data_lib.get_dataset_from_module(
+      str(hp.config["data_module"]), **hp.config_mapping("data_config")
+  )
+  entries = [
       records[index]["metadata"]["env_config"]["entry"]
       for index in range(len(records))
   ]
+  missing = [i for i, e in enumerate(entries) if "docker_image" not in e]
+  if missing:
+    raise ValueError(f"Task entries {missing} have no docker_image.")
+  return entries
 
 
 def _start_sandbox_fleet(
@@ -620,7 +638,7 @@ def _start_sandbox_fleet(
   Returns:
     The fleet teardown, or None when sandboxes are off.
   """
-  if not env_kwargs.get("use_agent_sandbox", False):
+  if not env_kwargs["use_agent_sandbox"]:
     return None
   from examples.deepswe import sandbox_utils  # pylint: disable=g-import-not-at-top
 
@@ -669,6 +687,7 @@ def controller_main(
       force=True,
   )
   hp = resolve_config_lib.initialize(argv)
+  resolve_config_lib.validate_task(hp)
   mode = hp.config_mapping("weight_sync_config")["mode"]
   if mode != "none":
     # No trainer runs, so the rollout workers must load their own weights.
@@ -680,11 +699,6 @@ def controller_main(
   args = config_args(hp)
   cluster_config = hp.config_mapping("cluster_config")
   replicas = int(cluster_config["rollout_replicas"])
-  if args.max_concurrent < replicas:
-    raise ValueError(
-        f"agentic_grpo_config.max_concurrency ({args.max_concurrent}) must"
-        f" cover every rollout replica ({replicas})."
-    )
   entries = config_entries(hp)
   weight_sync_timeouts, rpc_timeout_s = (
       orchestrator.resolve_weight_sync_timeouts(hp)
