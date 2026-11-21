@@ -54,7 +54,6 @@ exec "${DIR}/../math_gsm8k_dist/launcher.sh" \
   rl_training_config.mini_batch_size=2 \
   rl_training_config.train_micro_batch_size=1 \
   rl_training_config.max_steps=2 \
-  rl_training_config.eval_every_n_steps=999 \
   rl_training_config.checkpointing_options.save_interval_steps=1 \
   rl_training_config.checkpointing_options.max_to_keep=2 \
   rl_training_config.metrics_logging_options.project_name="ci-smoke-gsm8k" \
@@ -64,7 +63,7 @@ exec "${DIR}/../math_gsm8k_dist/launcher.sh" \
   agentic_grpo_config.trajectory_group_order="trajectory_completion" \
   cluster_config.artifact_root="artifacts/qwen3_dist_gsm8k" \
   cluster_config.target="local" \
-  cluster_config.wait_timeout_secs=900 \
+  cluster_config.local.wait_timeout_secs=900 \
   cluster_config.local.auto_detect_devices=true \
   cluster_config.local.trainer_devices="0,1,2,3" \
   cluster_config.local.rollout_devices="4,5,6,7" \

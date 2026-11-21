@@ -1,5 +1,6 @@
 """Unit tests for db_engine."""
 
+from concurrent import futures
 import os
 from typing import Any
 from unittest import mock
@@ -116,6 +117,99 @@ class DbEngineTest(parameterized.TestCase):
           pool_timeout=3.0,
       )
 
+  def test_create_trajectory_engine_postgresql_null_pool_disables_pooling(
+      self,
+  ) -> None:
+    url = "postgresql+psycopg2://user:pass@pgbouncer:6432/testdb"
+    with mock.patch.object(
+        db_engine.sa, "create_engine", autospec=True, spec_set=True
+    ) as mock_create:
+      db_engine.create_trajectory_engine(
+          db_engine.EngineConfig(
+              url=url, pool_kind=db_engine.PoolKind.NULL, pool_size=10
+          )
+      )
+      # Sizing and pre-ping arguments are dropped: NullPool rejects them.
+      mock_create.assert_called_once_with(
+          url,
+          echo=False,
+          json_serializer=db_engine._serialize_json,
+          poolclass=sa.pool.NullPool,
+      )
+
+  def test_create_trajectory_engine_file_sqlite_null_pool_round_trips(
+      self,
+  ) -> None:
+    db_path = os.path.join(self.create_tempdir().full_path, "null_pool.db")
+    engine = db_engine.create_trajectory_engine(
+        db_engine.EngineConfig(
+            url=f"sqlite:///{db_path}", pool_kind=db_engine.PoolKind.NULL
+        )
+    )
+    self.addCleanup(engine.dispose)
+
+    with engine.begin() as conn:
+      conn.execute(sa.text("CREATE TABLE items (item_id TEXT PRIMARY KEY)"))
+      conn.execute(sa.text("INSERT INTO items VALUES ('row1')"))
+    with engine.connect() as conn:
+      rows = conn.execute(sa.text("SELECT item_id FROM items")).scalars().all()
+
+    self.assertIsInstance(engine.pool, sa.pool.NullPool)
+    self.assertEqual(rows, ["row1"])
+    self.assertEqual(_query_pragma(engine, "foreign_keys"), 1)
+    self.assertEqual(str(_query_pragma(engine, "journal_mode")).lower(), "wal")
+
+  def test_create_trajectory_engine_in_memory_sqlite_null_pool_raises(
+      self,
+  ) -> None:
+    with self.assertRaisesRegex(ValueError, r"not supported for in-memory"):
+      db_engine.create_trajectory_engine(
+          db_engine.EngineConfig(
+              url="sqlite:///:memory:", pool_kind=db_engine.PoolKind.NULL
+          )
+      )
+
+  def test_engine_config_converts_pool_kind_string(self) -> None:
+    # Simulates an untyped config value, e.g. parsed from YAML.
+    untyped_pool_kind: Any = "null"
+    config = db_engine.EngineConfig(
+        url="sqlite:///:memory:", pool_kind=untyped_pool_kind
+    )
+
+    self.assertIs(config.pool_kind, db_engine.PoolKind.NULL)
+    self.assertEqual(
+        config,
+        db_engine.EngineConfig(
+            url="sqlite:///:memory:", pool_kind=db_engine.PoolKind.NULL
+        ),
+    )
+
+  def test_engine_config_unknown_pool_kind_raises(self) -> None:
+    bad_pool_kinds: tuple[Any, ...] = ("NULL", "none", "", None)
+    for pool_kind in bad_pool_kinds:
+      with self.subTest(pool_kind=pool_kind):
+        with self.assertRaisesRegex(ValueError, r"Unsupported pool_kind"):
+          db_engine.EngineConfig(url="sqlite:///:memory:", pool_kind=pool_kind)
+
+  def test_acquire_engine_shared_different_pool_kind_returns_distinct_engines(
+      self,
+  ) -> None:
+    db_path = os.path.join(self.create_tempdir().full_path, "shared.db")
+    url = f"sqlite:///{db_path}"
+
+    queue_handle = db_engine.acquire_engine(
+        db_engine.EngineConfig(url=url), shared=True
+    )
+    self.addCleanup(queue_handle.release)
+    null_handle = db_engine.acquire_engine(
+        db_engine.EngineConfig(url=url, pool_kind=db_engine.PoolKind.NULL),
+        shared=True,
+    )
+    self.addCleanup(null_handle.release)
+
+    self.assertIsNot(queue_handle.engine, null_handle.engine)
+    self.assertIsInstance(null_handle.engine.pool, sa.pool.NullPool)
+
   def test_serialize_json_strips_null_byte_escapes(self) -> None:
     engine = db_engine.create_trajectory_engine(
         db_engine.EngineConfig(url="sqlite:///:memory:")
@@ -163,6 +257,7 @@ class DbEngineTest(parameterized.TestCase):
   def test_engine_config_defaults_match_single_writer_budget(self) -> None:
     config = db_engine.EngineConfig(url="sqlite:///:memory:")
 
+    self.assertEqual(config.pool_kind, db_engine.PoolKind.QUEUE)
     self.assertEqual(config.pool_size, 1)
     self.assertEqual(config.max_overflow, 1)
     self.assertEqual(config.pool_timeout_s, 10.0)
@@ -186,8 +281,7 @@ class DbEngineTest(parameterized.TestCase):
     self.assertEqual(_query_pragma(handle.engine, "foreign_keys"), 1)
 
   def test_acquire_engine_same_config_returns_distinct_engines(self) -> None:
-    # Documents current behaviour, one engine per handle. A shared, refcounted
-    # engine per config will replace this test.
+    # Unshared (default) handles each own a private engine.
     config = db_engine.EngineConfig(url="sqlite:///:memory:")
 
     handle_a = db_engine.acquire_engine(config)
@@ -196,6 +290,189 @@ class DbEngineTest(parameterized.TestCase):
     self.addCleanup(handle_b.release)
 
     self.assertIsNot(handle_a.engine, handle_b.engine)
+
+  def test_acquire_engine_shared_same_config_returns_same_engine(self) -> None:
+    db_path = os.path.join(self.create_tempdir().full_path, "shared.db")
+    config = db_engine.EngineConfig(url=f"sqlite:///{db_path}")
+
+    handle_a = db_engine.acquire_engine(config, shared=True)
+    self.addCleanup(handle_a.release)
+    handle_b = db_engine.acquire_engine(
+        db_engine.EngineConfig(url=f"sqlite:///{db_path}"), shared=True
+    )
+    self.addCleanup(handle_b.release)
+
+    self.assertIs(handle_a.engine, handle_b.engine)
+
+  def test_acquire_engine_shared_different_config_returns_distinct_engines(
+      self,
+  ) -> None:
+    db_path = os.path.join(self.create_tempdir().full_path, "shared.db")
+    url = f"sqlite:///{db_path}"
+
+    handle_a = db_engine.acquire_engine(
+        db_engine.EngineConfig(url=url), shared=True
+    )
+    self.addCleanup(handle_a.release)
+    handle_b = db_engine.acquire_engine(
+        db_engine.EngineConfig(url=url, pool_size=2), shared=True
+    )
+    self.addCleanup(handle_b.release)
+
+    self.assertIsNot(handle_a.engine, handle_b.engine)
+
+  def test_acquire_engine_shared_and_unshared_return_distinct_engines(
+      self,
+  ) -> None:
+    db_path = os.path.join(self.create_tempdir().full_path, "shared.db")
+    config = db_engine.EngineConfig(url=f"sqlite:///{db_path}")
+
+    shared_handle = db_engine.acquire_engine(config, shared=True)
+    self.addCleanup(shared_handle.release)
+    private_handle = db_engine.acquire_engine(config)
+    self.addCleanup(private_handle.release)
+
+    self.assertIsNot(shared_handle.engine, private_handle.engine)
+
+  def test_acquire_engine_shared_engine_outlives_released_handle(self) -> None:
+    db_path = os.path.join(self.create_tempdir().full_path, "shared.db")
+    config = db_engine.EngineConfig(url=f"sqlite:///{db_path}")
+    writer = db_engine.acquire_engine(config, shared=True)
+    self.addCleanup(writer.release)
+    reader = db_engine.acquire_engine(config, shared=True)
+    self.addCleanup(reader.release)
+
+    with writer.engine.begin() as conn:
+      conn.execute(sa.text("CREATE TABLE items (item_id TEXT PRIMARY KEY)"))
+      conn.execute(sa.text("INSERT INTO items VALUES ('row1')"))
+    writer.release()
+
+    with reader.engine.connect() as conn:
+      rows = conn.execute(sa.text("SELECT item_id FROM items")).scalars().all()
+    self.assertEqual(rows, ["row1"])
+
+  def test_acquire_engine_shared_disposes_only_on_last_release(self) -> None:
+    mock_engine = mock.create_autospec(sa.Engine, instance=True)
+    config = db_engine.EngineConfig(url="sqlite:///:memory:")
+    with mock.patch.object(
+        db_engine,
+        "create_trajectory_engine",
+        autospec=True,
+        return_value=mock_engine,
+    ) as mock_create:
+      handle_a = db_engine.acquire_engine(config, shared=True)
+      self.addCleanup(handle_a.release)
+      handle_b = db_engine.acquire_engine(config, shared=True)
+      self.addCleanup(handle_b.release)
+
+    handle_a.release()
+    handle_a.release()  # A repeated release must not drop handle_b's ref.
+    mock_engine.dispose.assert_not_called()
+    handle_b.release()
+
+    mock_create.assert_called_once_with(config)
+    mock_engine.dispose.assert_called_once_with(close=True)
+
+  def test_acquire_engine_shared_after_last_release_builds_new_engine(
+      self,
+  ) -> None:
+    db_path = os.path.join(self.create_tempdir().full_path, "shared.db")
+    config = db_engine.EngineConfig(url=f"sqlite:///{db_path}")
+    first = db_engine.acquire_engine(config, shared=True)
+    first_engine = first.engine
+    first.release()
+
+    second = db_engine.acquire_engine(config, shared=True)
+    self.addCleanup(second.release)
+
+    self.assertIsNot(second.engine, first_engine)
+
+  def test_acquire_engine_shared_new_pid_builds_new_engine(self) -> None:
+    db_path = os.path.join(self.create_tempdir().full_path, "shared.db")
+    config = db_engine.EngineConfig(url=f"sqlite:///{db_path}")
+    parent_handle = db_engine.acquire_engine(config, shared=True)
+    self.addCleanup(parent_handle.release)
+
+    # Simulates acquiring in a forked child, which has a new pid.
+    with mock.patch.object(
+        db_engine.os, "getpid", autospec=True, return_value=os.getpid() + 1
+    ):
+      child_handle = db_engine.acquire_engine(config, shared=True)
+      self.assertIsNot(child_handle.engine, parent_handle.engine)
+      child_handle.release()
+
+  def test_release_shared_engine_in_new_pid_keeps_parent_connections(
+      self,
+  ) -> None:
+    mock_engine = mock.create_autospec(sa.Engine, instance=True)
+    with mock.patch.object(
+        db_engine,
+        "create_trajectory_engine",
+        autospec=True,
+        return_value=mock_engine,
+    ):
+      handle = db_engine.acquire_engine(
+          db_engine.EngineConfig(url="sqlite:///:memory:"), shared=True
+      )
+      self.addCleanup(handle.release)
+
+    # Simulates a forked child releasing a handle inherited from its parent.
+    with mock.patch.object(
+        db_engine.os, "getpid", autospec=True, return_value=os.getpid() + 1
+    ):
+      handle.release()
+
+    mock_engine.dispose.assert_called_once_with(close=False)
+
+  def test_reset_in_child_clears_registry_and_inherited_release_still_works(
+      self,
+  ) -> None:
+    mock_engine = mock.create_autospec(sa.Engine, instance=True)
+    config = db_engine.EngineConfig(url="sqlite:///:memory:")
+    with mock.patch.object(
+        db_engine,
+        "create_trajectory_engine",
+        autospec=True,
+        return_value=mock_engine,
+    ):
+      handle = db_engine.acquire_engine(config, shared=True)
+      self.addCleanup(handle.release)
+
+    # Simulates the fork hook running in a child with a new pid.
+    with mock.patch.object(
+        db_engine.os, "getpid", autospec=True, return_value=os.getpid() + 1
+    ):
+      db_engine._reset_shared_engines_in_child()
+      self.assertEmpty(db_engine._SHARED_ENGINES)
+      handle.release()
+
+    mock_engine.dispose.assert_called_once_with(close=False)
+
+  def test_acquire_engine_shared_concurrent_acquires_build_one_engine(
+      self,
+  ) -> None:
+    db_path = os.path.join(self.create_tempdir().full_path, "shared.db")
+    config = db_engine.EngineConfig(url=f"sqlite:///{db_path}")
+    real_create = db_engine.create_trajectory_engine
+
+    with mock.patch.object(
+        db_engine,
+        "create_trajectory_engine",
+        autospec=True,
+        side_effect=real_create,
+    ) as mock_create:
+      with futures.ThreadPoolExecutor(max_workers=8) as executor:
+        handles = list(
+            executor.map(
+                lambda _: db_engine.acquire_engine(config, shared=True),
+                range(16),
+            )
+        )
+    for handle in handles:
+      self.addCleanup(handle.release)
+
+    mock_create.assert_called_once_with(config)
+    self.assertLen({id(handle.engine) for handle in handles}, 1)
 
   def test_release_called_twice_invokes_release_fn_once(self) -> None:
     release_fn = mock.Mock()

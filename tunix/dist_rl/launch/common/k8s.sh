@@ -21,7 +21,7 @@
 # nodes export metrics to when `OTEL_EXPORTER_OTLP_ENDPOINT` points at it.
 # Consumes the cluster/deployment environment variables exported by
 # `resolve_config.py` and forwards YAML + `key=value` arguments directly to
-# `run_trainer_node`, `run_rollout_node`, and the distributed orchestrator via
+# the `tunix.dist_rl.launch.nodes` trainer, rollout, and orchestrator mains via
 # `tunix.dist_rl.distributed.runtime.main`.
 
 set -Eeuo pipefail
@@ -105,6 +105,41 @@ for otel_var in OTEL_EXPORTER_OTLP_ENDPOINT OTEL_METRIC_EXPORT_INTERVAL \
   fi
 done
 
+# Sandbox environment of the orchestrator and rollout processes: the
+# `kubernetes_config` placement and `ORCHESTRATOR_ID`, which keys the job-scoped
+# `SandboxFleet` they share. Placed before `ROLE_ENV_*` so role overrides take
+# precedence.
+SANDBOX_ENV_PREFIX="ORCHESTRATOR_ID=$(printf '%q' "${K8S_ORCHESTRATOR_ID}") "
+if [[ -n "${SANDBOX_NAMESPACE}" ]]; then
+  SANDBOX_ENV_PREFIX+="NAMESPACE=$(printf '%q' "${SANDBOX_NAMESPACE}") "
+  if [[ -n "${SANDBOX_NODE_SELECTOR_KEY}" && -n "${SANDBOX_NODE_SELECTOR_VAL}" ]]; then
+    SANDBOX_ENV_PREFIX+="NODE_SELECTOR_KEY=$(printf '%q' "${SANDBOX_NODE_SELECTOR_KEY}") NODE_SELECTOR_VAL=$(printf '%q' "${SANDBOX_NODE_SELECTOR_VAL}") "
+  fi
+fi
+
+# Manifest generator flags shared by the trainer and rollout JobSets: the
+# Raiden variables of the TPU containers, the TPU reservation, and the Pathways
+# worker, proxy and sidecar settings (`weight_sync_config.raiden`,
+# `cluster_config.k8s.tpu_reservation`, `cluster_config.pathways`).
+TPU_JOBSET_GEN_ARGS=(
+  "--raiden_data_nics=${WEIGHT_SYNC_RAIDEN_DATA_NICS}"
+  "--raiden_broadcast_k=${WEIGHT_SYNC_RAIDEN_BROADCAST_K}"
+  "--tpu_reservation=${K8S_TPU_RESERVATION}"
+  "--pathways_worker_env_json=${K8S_PATHWAYS_WORKER_ENV_JSON}"
+  "--pathways_proxy_extra_args=${K8S_PATHWAYS_PROXY_EXTRA_ARGS}"
+  "--colocated_python_sidecar_image=${K8S_PATHWAYS_SIDECAR_IMAGE}"
+  "--colocated_python_sidecar_memory=${K8S_PATHWAYS_SIDECAR_MEMORY}"
+  "--colocated_python_sidecar_memory_limit=${K8S_PATHWAYS_SIDECAR_MEMORY_LIMIT}"
+)
+if is_true "${WEIGHT_SYNC_RAIDEN_MULTI_NUMA}"; then
+  TPU_JOBSET_GEN_ARGS+=(--enable_multi_numa)
+fi
+if is_true "${K8S_PATHWAYS_SIDECAR_SHM}"; then
+  TPU_JOBSET_GEN_ARGS+=(--colocated_python_sidecar_shm)
+else
+  TPU_JOBSET_GEN_ARGS+=(--no-colocated_python_sidecar_shm)
+fi
+
 is_jax_cache_disabled() {
   is_true "${K8S_JAX_CACHE_DISABLE:-false}"
 }
@@ -141,8 +176,12 @@ start_orchestrator() {
   if [[ -n "${WANDB_API_KEY:-}" ]]; then
     env_prefix+="WANDB_API_KEY=$(printf '%q' "${WANDB_API_KEY}") "
   fi
+  env_prefix+="${OTEL_ENV_PREFIX}${SANDBOX_ENV_PREFIX}"
+  if [[ -n "${ROLE_ENV_ORCHESTRATOR}" ]]; then
+    env_prefix+="${ROLE_ENV_ORCHESTRATOR} "
+  fi
 
-  local startup_cmd="${env_prefix}${OTEL_ENV_PREFIX}python -m tunix.dist_rl.distributed.runtime.main --discovery_id=${K8S_ORCHESTRATOR_ID} --discovery_port=${ORCHESTRATOR_PORT} --process_main=${ORCHESTRATOR_MAIN} ${CONTAINER_ARGS_STR}"
+  local startup_cmd="${env_prefix}python -m tunix.dist_rl.distributed.runtime.main --discovery_id=${K8S_ORCHESTRATOR_ID} --discovery_port=${ORCHESTRATOR_PORT} --process_main=${ORCHESTRATOR_MAIN} ${CONTAINER_ARGS_STR}"
 
   run_yaml_gen \
     "${YAML_DIR}/jobset.cpu.yaml" \
@@ -158,6 +197,7 @@ start_orchestrator() {
     --cpu_machine="${K8S_CPU_MACHINE}" \
     ${K8S_CPU_NODEPOOL:+--cpu_nodepool="${K8S_CPU_NODEPOOL}"} \
     ${K8S_CPU_MEMORY:+--cpu_memory="${K8S_CPU_MEMORY}"} \
+    ${K8S_CPU_MEMORY_LIMIT:+--cpu_memory_limit="${K8S_CPU_MEMORY_LIMIT}"} \
     --worker_container_image="${K8S_TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
     --worker_startup_command="${startup_cmd}" \
@@ -199,8 +239,8 @@ start_trainer() {
       env_prefix+=" RAIDEN_USE_FFI=1"
     fi
   fi
-  if [[ -n "${K8S_TRAINER_EXTRA_ENV}" ]]; then
-    env_prefix+=" ${K8S_TRAINER_EXTRA_ENV}"
+  if [[ -n "${ROLE_ENV_TRAINER}" ]]; then
+    env_prefix+=" ${ROLE_ENV_TRAINER}"
   fi
 
   local startup_cmd="${OTEL_ENV_PREFIX}${env_prefix} python -m tunix.dist_rl.distributed.runtime.main --discovery_addrs=${K8S_ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} --process_executor=tunix.dist_rl.distributed.runtime.executor.K8sExecutor --process_main=${TRAINER_MAIN} ${CONTAINER_ARGS_STR}"
@@ -227,50 +267,48 @@ start_trainer() {
     --pathways_proxy_memory_limit="${K8S_PATHWAYS_PROXY_MEMORY_LIMIT}" \
     --pathways_proxy_memory="${K8S_PATHWAYS_PROXY_MEMORY}" \
     --pathways_rm_memory="${K8S_PATHWAYS_RM_MEMORY}" \
-    --user_container_memory="${K8S_USER_CONTAINER_MEMORY}" \
-    --user_container_memory_limit="${K8S_USER_CONTAINER_MEMORY_LIMIT}" \
-    --pathways_worker_memory="${K8S_PATHWAYS_WORKER_MEMORY}" \
-    ${TRAINER_IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES:+--ifrt_proxy_large_transfer_threshold_bytes="${TRAINER_IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES}"} \
+    --pathways_rm_memory_limit="${K8S_PATHWAYS_RM_MEMORY_LIMIT}" \
+    --user_container_memory="${K8S_TRAINER_MEMORY}" \
+    --user_container_memory_limit="${K8S_TRAINER_MEMORY_LIMIT}" \
+    --pathways_worker_memory="${K8S_PATHWAYS_SERVER_MEMORY}" \
+    --pathways_worker_memory_limit="${K8S_PATHWAYS_SERVER_MEMORY_LIMIT}" \
+    ${K8S_PATHWAYS_IFRT_THRESHOLD_BYTES:+--ifrt_proxy_large_transfer_threshold_bytes="${K8S_PATHWAYS_IFRT_THRESHOLD_BYTES}"} \
     --pathways_gcs_scratch_location="${K8S_GCS_SCRATCH_LOCATION}" \
+    "${TPU_JOBSET_GEN_ARGS[@]}" \
     --worker_container_image="${K8S_TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command="${startup_cmd}" \
     | apply_manifest
 }
 
-stop_rollout_instance() {
-  local target_id="$1"
+stop_rollout() {
+  local replicas=${ROLLOUT_REPLICAS:-1}
+  if (( replicas <= 0 )); then
+    return 0
+  fi
+  local target_ids=()
+  local i
+  for ((i = 0; i < replicas; i++)); do
+    if (( replicas > 1 )); then
+      target_ids+=("${K8S_ROLLOUT_ID}-${i}")
+    else
+      target_ids+=("${K8S_ROLLOUT_ID}")
+    fi
+  done
   local resource_kind="jobset"
   if [[ "${K8S_ROLLOUT_JOBSET_YAML}" =~ ^leaderworkerset ]]; then
     resource_kind="leaderworkerset"
   fi
   if is_true "${DRY_RUN}"; then
-    echo "kubectl delete ${resource_kind} ${target_id} -n ${K8S_NAMESPACE}"
+    echo "kubectl delete ${resource_kind} ${target_ids[*]} -n ${K8S_NAMESPACE}"
   else
-    kubectl delete "${resource_kind}" "${target_id}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=true
-    while kubectl get "${resource_kind}" "${target_id}" -n "${K8S_NAMESPACE}" &>/dev/null; do
-      sleep 2
-    done
+    kubectl delete "${resource_kind}" "${target_ids[@]}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=true
   fi
 }
 
-stop_rollout() {
-  local i
-  for ((i = 0; i < ROLLOUT_REPLICAS; i++)); do
-    local target_id="${K8S_ROLLOUT_ID}"
-    if (( ROLLOUT_REPLICAS > 1 )); then
-      target_id="${K8S_ROLLOUT_ID}-${i}"
-    fi
-    stop_rollout_instance "${target_id}"
-  done
-}
-
-start_rollout_instance() {
+render_rollout_yaml() {
   local target_id="$1"
   local replica="$2"
-  if [[ "${K8S_ROLLOUT_JOBSET_YAML}" == "jobset.pathways.yaml" ]]; then
-    echo "Rollout Pathways images: server=${K8S_PATHWAYS_SERVER_IMAGE} proxy=${K8S_PATHWAYS_PROXY_IMAGE}" >&2
-  fi
 
   local env_prefix=""
   if (( ROLLOUT_REPLICAS > 1 )); then
@@ -284,12 +322,7 @@ start_rollout_instance() {
   if [[ "${WEIGHT_SYNC_MODE}" == "raiden" ]]; then
     env_prefix+=" RAIDEN_USE_FFI=0"
   fi
-  if [[ -n "${SANDBOX_NAMESPACE}" ]]; then
-    env_prefix+=" NAMESPACE=$(printf '%q' "${SANDBOX_NAMESPACE}")"
-    if [[ -n "${SANDBOX_NODE_SELECTOR_KEY}" && -n "${SANDBOX_NODE_SELECTOR_VAL}" ]]; then
-      env_prefix+=" NODE_SELECTOR_KEY=$(printf '%q' "${SANDBOX_NODE_SELECTOR_KEY}") NODE_SELECTOR_VAL=$(printf '%q' "${SANDBOX_NODE_SELECTOR_VAL}")"
-    fi
-  fi
+  env_prefix+=" ${SANDBOX_ENV_PREFIX% }"
 
   if is_jax_cache_disabled; then
     env_prefix+=" DISABLE_JAX_CACHE=1 VLLM_DISABLE_COMPILE_CACHE=1"
@@ -303,6 +336,9 @@ start_rollout_instance() {
     if [[ -n "${K8S_JAX_CACHE_SAVE}" ]]; then
       env_prefix+=" SAVE_JAX_CACHE=$(printf '%q' "${K8S_JAX_CACHE_SAVE}")"
     fi
+  fi
+  if [[ -n "${ROLE_ENV_ROLLOUT}" ]]; then
+    env_prefix+=" ${ROLE_ENV_ROLLOUT}"
   fi
 
   local ray_head_pre_init_cmd=""
@@ -318,6 +354,14 @@ start_rollout_instance() {
     if [[ -n "${K8S_JAX_CACHE_ROLLOUT_GCS_DIR}" ]]; then
       ray_worker_pre_init_cmd+=" && (python3 -m tunix.dist_rl.common.gcs_cache download ${local_dir} $(printf '%q' "${K8S_JAX_CACHE_ROLLOUT_GCS_DIR}") || true)"
     fi
+  fi
+
+  # Multi-host Ray rollouts start Ray on every host with these commands before
+  # `startup_cmd`, so the Ray actors inherit the role env from them. It comes
+  # last, as in `startup_cmd`, so it overrides the JAX cache settings above.
+  if [[ -n "${ROLE_ENV_ROLLOUT}" ]]; then
+    ray_head_pre_init_cmd+=" && export ${ROLE_ENV_ROLLOUT}"
+    ray_worker_pre_init_cmd+=" && export ${ROLE_ENV_ROLLOUT}"
   fi
 
   env_prefix="${env_prefix# }"
@@ -345,30 +389,49 @@ start_rollout_instance() {
     --pathways_proxy_memory_limit="${K8S_PATHWAYS_PROXY_MEMORY_LIMIT}" \
     --pathways_proxy_memory="${K8S_PATHWAYS_PROXY_MEMORY}" \
     --pathways_rm_memory="${K8S_PATHWAYS_RM_MEMORY}" \
-    --user_container_memory="${K8S_USER_CONTAINER_MEMORY}" \
-    --user_container_memory_limit="${K8S_USER_CONTAINER_MEMORY_LIMIT}" \
-    --pathways_worker_memory="${K8S_PATHWAYS_WORKER_MEMORY}" \
+    --pathways_rm_memory_limit="${K8S_PATHWAYS_RM_MEMORY_LIMIT}" \
+    --user_container_memory="${K8S_ROLLOUT_MEMORY}" \
+    --user_container_memory_limit="${K8S_ROLLOUT_MEMORY_LIMIT}" \
+    --pathways_worker_memory="${K8S_PATHWAYS_SERVER_MEMORY}" \
+    --pathways_worker_memory_limit="${K8S_PATHWAYS_SERVER_MEMORY_LIMIT}" \
     --pathways_gcs_scratch_location="${K8S_GCS_SCRATCH_LOCATION}" \
+    "${TPU_JOBSET_GEN_ARGS[@]}" \
     --worker_container_image="${K8S_TUNIX_IMAGE}" \
     --worker_container_port="${ROLLOUT_PORT}" \
     --ray_head_pre_init_command="${ray_head_pre_init_cmd}" \
     --ray_worker_pre_init_command="${ray_worker_pre_init_cmd}" \
-    --worker_startup_command="${startup_cmd}" \
-    | apply_manifest
+    --worker_startup_command="${startup_cmd}"
 }
 
 start_rollout() {
+  local replicas=${ROLLOUT_REPLICAS:-1}
+  if (( replicas <= 0 )); then
+    return 0
+  fi
+  if [[ "${K8S_ROLLOUT_JOBSET_YAML}" == "jobset.pathways.yaml" ]]; then
+    echo "Rollout Pathways images: server=${K8S_PATHWAYS_SERVER_IMAGE} proxy=${K8S_PATHWAYS_PROXY_IMAGE}" >&2
+  fi
   if ! is_jax_cache_disabled && [[ -n "${K8S_JAX_CACHE_ROLLOUT_GCS_DIR}" ]]; then
     echo "[launcher] Rollout JAX cache GCS: ${K8S_JAX_CACHE_ROLLOUT_GCS_DIR} (save=${K8S_JAX_CACHE_SAVE:-true})" >&2
   fi
+
+  local placeholder_id="__TUNIX_ROLLOUT_ID__"
+  local placeholder_replica="__TUNIX_ROLLOUT_REPLICA__"
+  local manifest_template
+  manifest_template="$(render_rollout_yaml "${placeholder_id}" "${placeholder_replica}")" || return $?
+
   local i
-  for ((i = 0; i < ROLLOUT_REPLICAS; i++)); do
+  for ((i = 0; i < replicas; i++)); do
     local target_id="${K8S_ROLLOUT_ID}"
-    if (( ROLLOUT_REPLICAS > 1 )); then
+    if (( replicas > 1 )); then
       target_id="${K8S_ROLLOUT_ID}-${i}"
     fi
-    start_rollout_instance "${target_id}" "${i}"
-  done
+    if (( i > 0 )); then
+      echo "---"
+    fi
+    local rendered="${manifest_template//${placeholder_id}/${target_id}}"
+    printf '%s\n' "${rendered//${placeholder_replica}/${i}}"
+  done | apply_manifest
 }
 
 stop_otel() {
@@ -471,7 +534,7 @@ if [[ "${COMMAND}" == "start" || "${COMMAND}" == "trainer" || "${COMMAND}" == "r
   if (( ${#library_env_set[@]} > 0 )); then
     echo "Error: ${library_env_set[*]} set in the environment, but the k8s" \
       "nodes take them from the config: vllm_config.skip_jax_precompile," \
-      "weight_sync_config.raiden_data_nics and" \
+      "weight_sync_config.raiden.data_nics and" \
       "weight_sync_config.verify_weights." >&2
     exit 1
   fi

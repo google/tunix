@@ -259,6 +259,10 @@ def build_maxtext_config(
     attention: str = "",
     device_host_concurrent_gb: int | None = None,
     extra_flags: Sequence[str] = (),
+    skip_step_on_spikes: bool = False,
+    skip_step_on_nan: bool | None = None,
+    skip_step_interval: int = 128,
+    skip_step_scaling_factor: float = 6.0,
 ) -> Any:
   """Builds the MaxText HyperParameters the training engine runs on.
 
@@ -313,6 +317,17 @@ def build_maxtext_config(
     raise ValueError(
         "max_seq_token_per_tpu must be non-negative, got"
         f" {max_seq_token_per_tpu}"
+    )
+  if isinstance(skip_step_interval, bool) or skip_step_interval <= 0:
+    raise ValueError(
+        f"skip_step_interval must be > 0, got {skip_step_interval!r}."
+    )
+  if isinstance(skip_step_scaling_factor, bool) or not (
+      0 < skip_step_scaling_factor < float("inf")
+  ):
+    raise ValueError(
+        "skip_step_scaling_factor must be finite and > 0, got"
+        f" {skip_step_scaling_factor!r}."
     )
 
   num_data_shards = mesh_fsdp * mesh_expert
@@ -621,6 +636,28 @@ def build_maxtext_config(
           else []
       ),
   ])
+  if skip_step_on_spikes:
+    if not _pyconfig_supports_field(pyconfig, "skip_step_on_spikes"):
+      raise ValueError(
+          "skip_step_on_spikes=True requires a MaxText version that defines"
+          " 'skip_step_on_spikes' on MaxTextConfig."
+      )
+    argv.extend([
+        "skip_step_on_spikes=True",
+        f"skip_step_interval={skip_step_interval}",
+        f"skip_step_scaling_factor={skip_step_scaling_factor}",
+    ])
+  if skip_step_on_nan is not None:
+    if not _pyconfig_supports_field(pyconfig, "skip_step_on_nan"):
+      raise ValueError(
+          "skip_step_on_nan requires a MaxText version that defines"
+          " 'skip_step_on_nan' on MaxTextConfig."
+      )
+    argv.append(
+        "skip_step_on_nan=True"
+        if skip_step_on_nan
+        else "skip_step_on_nan=False"
+    )
   # Pathways persistence: let the TPU workers write the checkpoint themselves
   # The persistence handler rejects the OCDBT/zarr3 layout MaxText writes by
   # default (see maxtext/common/checkpoint_context.py), so both must be off

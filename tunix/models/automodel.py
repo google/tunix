@@ -36,7 +36,6 @@ class ModelModule(enum.Enum):
 
   MODEL = 'model'
   PARAMS = 'params'
-  PARAMS_SAFETENSORS = 'params_safetensors'
 
 
 class ModelSource(enum.Enum):
@@ -348,6 +347,8 @@ def create_model_from_safe_tensors(
     mesh: jax.sharding.Mesh,
     dtype: jnp.dtype | None = None,
     mode: str = "auto",
+    *,
+    hf_variant: enum.Enum | None = None,
 ) -> Any:
   """Dynamically imports the correct module and calls `create_model_from_safe_tensors` based on the model_name.
 
@@ -359,22 +360,20 @@ def create_model_from_safe_tensors(
       dtype: Optional dtype to cast the loaded tensors to.
       mode: The mode to use for loading the model. Options are ('auto',
         'optimized', 'original').
+      hf_variant: Optional family `HfVariant` naming the checkpoint key layout.
+        Multi-layout families infer it from the checkpoint keys when `None`;
+        not accepted by single-layout families.
 
   Returns:
       The result of the create_model_from_safe_tensors call.
 
   Raises:
-      ValueError: If the model_name is invalid.
+      ValueError: If the model_name is invalid, or if `hf_variant` has an
+        invalid type or is passed to a single-layout family.
       ImportError: If the required model module cannot be found.
       AttributeError: If create_model_from_safe_tensors is not in the module.
   """
-  naming_info = naming.ModelNaming(model_name=model_name)
-  if naming_info.model_family in (
-      'gemma', 'gemma1p1', 'gemma2', 'gemma3', 'gemma4'
-  ):
-    params_module = get_model_module(model_name, ModelModule.PARAMS_SAFETENSORS)
-  else:
-    params_module = get_model_module(model_name, ModelModule.PARAMS)
+  params_module = get_model_module(model_name, ModelModule.PARAMS)
 
   try:
     create_fn = getattr(params_module, 'create_model_from_safe_tensors')
@@ -383,6 +382,22 @@ def create_model_from_safe_tensors(
         "'create_model_from_safe_tensors' not found in module "
         f'{params_module.__name__} for model {model_name}'
     ) from exc
+
+  layout_kwargs: dict[str, Any] = {}
+  if hasattr(params_module, 'HfVariant'):
+    if hf_variant is not None and not isinstance(
+        hf_variant, params_module.HfVariant
+    ):
+      raise ValueError(
+          f'Expected `hf_variant` of type {params_module.HfVariant.__name__}'
+          f' for {model_name}, got {hf_variant!r}.'
+      )
+    layout_kwargs['hf_variant'] = hf_variant
+  elif hf_variant is not None:
+    raise ValueError(
+        f'Model {model_name} has a single HF checkpoint layout and does not'
+        f' accept `hf_variant` (got {hf_variant!r}).'
+    )
 
   logging.info(
       'Calling %s.create_model_from_safe_tensors', params_module.__name__
@@ -393,6 +408,7 @@ def create_model_from_safe_tensors(
       mesh=mesh,
       dtype=dtype,
       mode=mode,
+      **layout_kwargs,
   )
 
 
@@ -411,6 +427,7 @@ class AutoModel:
       model_source: ModelSource = ModelSource.HUGGINGFACE,
       model_path: str | None = None,
       model_download_path: str | None = None,
+      hf_variant: enum.Enum | None = None,
       **kwargs,
   ) -> tuple[nnx.Module, str | None]:
     """Loads a pretrained model from a given identifier.
@@ -434,6 +451,9 @@ class AutoModel:
         model_download_path: The local directory where the model should be
           downloaded. The corresponding model_source will handle `None` cases
           differently.
+        hf_variant: The model family's `HfVariant` naming the safetensors key
+          layout. Families with several layouts (Qwen3.5, Gemma 3, Gemma 4)
+          otherwise infer it from the checkpoint's tensor keys.
         **kwargs: Additional keyword arguments passed to the underlying model
           creation functions. - For ModelSource.KAGGLE, Gemma models:
           `intermediate_ckpt_dir` , `rng_seed`
@@ -542,7 +562,7 @@ class AutoModel:
         )
     # Gemma 4: Orbax loading for GCS/INTERNAL sources.
     # Other sources (e.g., HuggingFace) fall through to the common
-    # SafeTensors path, which resolves to gemma4/params_safetensors.py.
+    # SafeTensors path, which resolves to gemma4/params.py.
     elif naming_info.model_family == 'gemma4':
       if model_source in (ModelSource.GCS, ModelSource.INTERNAL):
         # Name is legacy — dynamically resolves to gemma4 via ModelNaming.
@@ -669,6 +689,7 @@ class AutoModel:
             model_params,
             mesh,
             dtype=load_dtype,
+            hf_variant=hf_variant,
         )
 
     return model, resolved_model_path

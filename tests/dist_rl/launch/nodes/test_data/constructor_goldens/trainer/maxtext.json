@@ -57,7 +57,7 @@
         "kwargs": {
           "flush_every_n_steps": 1,
           "log_dir": "/artifacts/metrics",
-          "project_name": "trellis-gsm8k",
+          "project_name": "tunix-dist-rl",
           "run_name": ""
         }
       }
@@ -102,6 +102,10 @@
           "prefuse_moe_weights": false,
           "profiling_options": "<tunix.utils.maxtext_utils.ProfilerOptions()>",
           "rollout_mesh_tp": 2,
+          "skip_step_interval": 128,
+          "skip_step_on_nan": null,
+          "skip_step_on_spikes": false,
+          "skip_step_scaling_factor": 6.0,
           "train_micro_batch_size": 1,
           "use_weight_converter": true,
           "warmup_steps_fraction": 0.05,

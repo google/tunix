@@ -33,9 +33,14 @@ from tunix.dist_rl.weight_sync import weight_sync
 _PATH_COMPONENT_RE = re.compile(r"\[([^\]]*)\]|([^.\[\]]+)")
 # A trailing ordinal folded into the name, as in `layers_0`.
 _FOLDED_INDEX_RE = re.compile(r"^(.+?)_(\d+)$")
-_KV_CACHE_SEGMENTS = frozenset(
-    {"cache", "cached_prefill_key", "cached_prefill_value"}
-)
+_INFERENCE_ONLY_SEGMENTS = frozenset({
+    "cache",
+    "cached_prefill_key",
+    "cached_prefill_value",
+    "cos_sin_cache",
+    "hash_indices_table",
+    "tpu_hash_indices_table",
+})
 _CHECKSUM_META_KEYS = frozenset(
     {"__grand_total__", "__tensor_count__", "__element_count__"}
 )
@@ -81,9 +86,29 @@ def param_key(name: str) -> str:
   return ".".join(segments)
 
 
-def is_kv_cache(name: str) -> bool:
-  """True for inference KV-cache buffers, which are not model weights."""
-  return any(seg in _KV_CACHE_SEGMENTS for seg in param_key(name).split("."))
+def is_inference_only_buffer(name: str) -> bool:
+  """True for inference-only cache and lookup buffers, which are not weights.
+
+  Matches MaxText KV-cache arrays (`...['attention']['cache'][...]`) as well as
+  `VllmModelWrapper` non-trainable lookup buffers (`cos_sin_cache`,
+  `hash_indices_table`, `tpu_hash_indices_table`). Floating-point caches like
+  `cos_sin_cache` have no trainer counterpart -- breaking manifest pairing --
+  and may carry custom TPU layouts (such as `ROPE_CACHE_ROW_MAJOR`) that Raiden
+  C++ `BindWeights` rejects, while integer routing tables would otherwise log
+  spurious unbindable-leaf warnings.
+
+  Args:
+    name: Flattened leaf key path string.
+
+  Returns:
+    True if any path segment identifies an inference-only non-weight buffer.
+  """
+  return any(
+      seg in _INFERENCE_ONLY_SEGMENTS for seg in param_key(name).split(".")
+  )
+
+
+is_kv_cache = is_inference_only_buffer
 
 
 def is_bindable(arr: Any, *, allow_proxy: bool = False) -> bool:
@@ -115,7 +140,7 @@ def filter_bindable(
     allow_proxy: bool = False,
     label: str = "raiden",
 ) -> tuple[list[str], list[Any]]:
-  """Drops unbindable leaves and inference-only KV cache buffers."""
+  """Drops unbindable leaves and inference-only non-weight buffers."""
   logging.vlog(
       1,
       "%s bind census: %s",
@@ -127,22 +152,23 @@ def filter_bindable(
   keep_names: list[str] = []
   keep_arrays: list[Any] = []
   dropped: list[str] = []
-  cache_dropped: list[str] = []
+  inference_only_dropped: list[str] = []
   for name, arr in zip(names, arrays):
-    if is_kv_cache(name):
-      cache_dropped.append(name)
+    if is_inference_only_buffer(name):
+      inference_only_dropped.append(name)
     elif is_bindable(arr, allow_proxy=allow_proxy):
-      arr.block_until_ready()
       keep_names.append(name)
       keep_arrays.append(arr)
     else:
       dropped.append(name)
-  if cache_dropped:
+  if keep_arrays:
+    jax.block_until_ready(keep_arrays)
+  if inference_only_dropped:
     logging.debug(
-        "%s bind skipped %d KV-cache leaves: %s",
+        "%s bind skipped %d inference-only non-weight leaves: %s",
         label,
-        len(cache_dropped),
-        cache_dropped[:5],
+        len(inference_only_dropped),
+        inference_only_dropped[:5],
     )
   if dropped:
     logging.warning(

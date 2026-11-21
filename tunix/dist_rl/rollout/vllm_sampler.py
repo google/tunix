@@ -49,30 +49,10 @@ Sampler = base_sampler_lib.Sampler
 logger = logging.getLogger(__name__)
 
 
-def _get_val(obj: Any, key: str, default: Any = None) -> Any:
-  """Helper to extract an attribute or dict key seamlessly from any duck-typed request.
-
-  Falls back to `default` both when `key` is absent and when it's present
-  but explicitly `None` -- request dataclasses across callers (e.g. tunix's
-  rollout requests) commonly default optional sampling fields to `None`
-  rather than omitting them, and vLLM's `SamplingParams` rejects `None` for
-  fields like `top_k` that it compares numerically.
-  """
-  if obj is None:
-    return default
-  if isinstance(obj, dict):
-    val = obj.get(key, default)
-  else:
-    val = getattr(obj, key, default)
-  return default if val is None else val
-
-
 def _sync_request_id(
-    sync_request: base_sampler_lib.WeightSyncRequest | None,
+    sync_request: base_sampler_lib.WeightSyncRequest,
 ) -> Any | None:
   """Extracts the transfer request ID from `sync_request`, if present."""
-  if sync_request is None:
-    return None
   if sync_request.extra_config:
     rid = sync_request.extra_config.get("req_id")
     if rid:
@@ -140,10 +120,10 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
         `rollout_vllm_lora_config`, `rollout_vllm_hf_config_path`,
         `rollout_vllm_async_scheduling`, `rollout_vllm_max_num_seqs`,
         `rollout_vllm_max_num_batched_tokens`, `rollout_vllm_logprobs_mode`,
-        `return_routed_experts` and `rollout_vllm_additional_config` fields,
-        then `rollout_vllm_kwargs`. `sample()` reads the sampling settings from
-        it and `rollout_vllm_sampling_kwargs`. Its other `rollout_vllm_*` fields
-        are not used.
+        `return_routed_experts`, `seed` and `rollout_vllm_additional_config`
+        fields, then `rollout_vllm_kwargs`. `sample()` reads the sampling
+        settings from it and `rollout_vllm_sampling_kwargs`. Its other
+        `rollout_vllm_*` fields are not used.
       worker_index: Host index within this replica.
       parallelism: Number of hosts in this replica.
     """
@@ -189,6 +169,8 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
       )
     if config.rollout_vllm_hf_config_path is not None:
       engine_kwargs["hf_config_path"] = config.rollout_vllm_hf_config_path
+    if config.seed is not None:
+      engine_kwargs["seed"] = config.seed
     extra_kwargs = dict(config.rollout_vllm_kwargs)
     additional_config = generate_utils.merge_additional_config(
         config.rollout_vllm_additional_config,
@@ -331,25 +313,9 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
     self._is_running = False
     logger.info("VllmSampler stopped.")
 
-  def _check_partial_rollout_kwarg(self, kwargs: Mapping[str, Any]) -> None:
-    """Rejects a per-call `partial_rollout` kwarg that disagrees with config."""
-    # TODO(yatlas): Stop passing `partial_rollout` from
-    # `RolloutManager.pre_weight_sync` and remove `**kwargs` on `pause` /
-    # `pre_weight_sync`.
-    partial_rollout = kwargs.get("partial_rollout")
-    if (
-        partial_rollout is not None
-        and bool(partial_rollout) != self.config.partial_rollout
-    ):
-      raise ValueError(
-          f"VllmSampler [{self.server_id}] received"
-          f" partial_rollout={partial_rollout!r}, which disagrees with"
-          f" config.partial_rollout={self.config.partial_rollout}."
-      )
-
   async def pause(self, **kwargs: Any) -> None:
     """Pauses request intake and drains or freezes active batch iterations during weight updates."""
-    self._check_partial_rollout_kwarg(kwargs)
+    del kwargs
     if self._is_paused:
       return
     self._is_paused = True
@@ -407,145 +373,48 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
   # ---------------------------------------------------------------------------
 
   def _build_vllm_params(
-      self,
-      req: Any,
-      kwargs: dict[str, Any],
+      self, req: base_sampler_lib.SamplingRequest
   ) -> VllmSamplingParams:
-    """Builds a vLLM SamplingParams object from a SamplingRequest or duck-typed request."""
+    """Builds vLLM SamplingParams for one request."""
     from vllm.sampling_params import SamplingParams as vllm_sampling_params_cls  # pylint: disable=g-import-not-at-top
 
-    sparams = _get_val(req, "sampling_params")
-    stop_token_ids = _get_val(
-        sparams,
-        "stop_token_ids",
-        kwargs.get("stop_token_ids")
-        or kwargs.get("eos_tokens")
-        or self.config.eos_tokens,
-    )
-    cache_salt = _get_val(sparams, "cache_salt", kwargs.get("cache_salt"))
-    routed_experts_prompt_start = _get_val(
-        sparams,
-        "routed_experts_prompt_start",
-        _get_val(kwargs, "routed_experts_prompt_start"),
-    )
-    # TODO(tunix-dev): Read sampling fields directly from the typed request and
-    # RolloutConfig instead of chained `_get_val` fallbacks (one well-lit path).
-    # `kwargs` goes through `_get_val` too: callers pass unset fields as
-    # explicit `None`, so `.get(key, default)` returns `None` rather than
-    # the default, defeating it before `_get_val` can coalesce.
-    sampling_defaults = self.config.rollout_vllm_sampling_kwargs
-    vllm_kwargs: dict[str, Any] = dict(sampling_defaults)
-    vllm_kwargs.update(
-        temperature=_get_val(
-            sparams,
-            "temperature",
-            _get_val(
-                kwargs,
-                "temperature",
-                sampling_defaults.get("temperature", self.config.temperature),
-            ),
-        ),
-        top_p=_get_val(
-            sparams,
-            "top_p",
-            _get_val(
-                kwargs,
-                "top_p",
-                sampling_defaults.get(
-                    "top_p",
-                    self.config.top_p
-                    if self.config.top_p is not None
-                    else 0.95,
-                ),
-            ),
-        ),
-        top_k=_get_val(
-            sparams,
-            "top_k",
-            _get_val(
-                kwargs,
-                "top_k",
-                sampling_defaults.get(
-                    "top_k",
-                    self.config.top_k if self.config.top_k is not None else -1,
-                ),
-            ),
-        ),
-        max_tokens=_get_val(
-            sparams,
-            "max_tokens",
-            _get_val(
-                kwargs,
-                "max_tokens",
-                sampling_defaults.get(
-                    "max_tokens", self.config.max_tokens_to_generate
-                ),
-            ),
-        ),
-        stop=_get_val(sparams, "stop_sequences")
-        or _get_val(sparams, "stop")
-        or kwargs.get("stop")
-        or sampling_defaults.get("stop"),
+    vllm_kwargs: dict[str, Any] = dict(
+        temperature=self.config.temperature,
+        # TODO(tunix-dev): RolloutConfig.top_p=None means greedy decoding in
+        # VanillaSampler, the engine's default top_p in InprocessVllmSampler,
+        # and 0.95 here. Give None one meaning across the samplers.
+        top_p=self.config.top_p if self.config.top_p is not None else 0.95,
+        top_k=self.config.top_k if self.config.top_k is not None else -1,
+        max_tokens=self.config.max_tokens_to_generate,
         stop_token_ids=(
-            list(stop_token_ids)
-            if stop_token_ids is not None
-            else sampling_defaults.get("stop_token_ids")
+            list(self.config.eos_tokens)
+            if self.config.eos_tokens is not None
+            else None
         ),
-        include_stop_str_in_output=bool(
-            _get_val(
-                sparams,
-                "include_stop_str_in_output",
-                _get_val(
-                    kwargs,
-                    "include_stop_str_in_output",
-                    sampling_defaults.get("include_stop_str_in_output", True),
-                ),
-            )
-        ),
+        include_stop_str_in_output=True,
         # Detokenize by default so callers that read `SamplingResponse.text`
         # (e.g. agentic rollouts) receive populated text, matching vLLM's
         # default. Token-only callers can opt out via
-        # `config.rollout_vllm_sampling_kwargs` or per-request
-        # `detokenize=False`.
-        # TODO(yatlas): Drop per-request `detokenize` overrides.
-        detokenize=bool(
-            _get_val(
-                sparams,
-                "detokenize",
-                _get_val(
-                    kwargs,
-                    "detokenize",
-                    sampling_defaults.get("detokenize", True),
-                ),
-            )
-        ),
-        logprobs=1
-        if _get_val(
-            sparams,
-            "return_logprobs",
-            kwargs.get("return_logprobs", self.config.return_logprobs),
-        )
-        else None,
+        # `config.rollout_vllm_sampling_kwargs`.
+        detokenize=True,
+        logprobs=1 if self.config.return_logprobs else None,
     )
+    vllm_kwargs.update(self.config.rollout_vllm_sampling_kwargs)
+    if req.max_tokens is not None:
+      vllm_kwargs["max_tokens"] = req.max_tokens
     struct_fields = getattr(vllm_sampling_params_cls, "__struct_fields__", ())
-    if cache_salt is not None and "cache_salt" in struct_fields:
-      vllm_kwargs["cache_salt"] = str(cache_salt)
-    if (
-        routed_experts_prompt_start is not None
-        and "routed_experts_prompt_start" in struct_fields
-    ):
-      vllm_kwargs["routed_experts_prompt_start"] = int(
-          routed_experts_prompt_start
+    if req.cache_salt is not None and "cache_salt" in struct_fields:
+      vllm_kwargs["cache_salt"] = req.cache_salt
+    if "routed_experts_prompt_start" in struct_fields:
+      vllm_kwargs["routed_experts_prompt_start"] = (
+          req.routed_experts_prompt_start
       )
     params = vllm_sampling_params_cls(**vllm_kwargs)
-    if cache_salt is not None:
-      setattr(params, "cache_salt", str(cache_salt))
-    if routed_experts_prompt_start is not None:
-      setattr(
-          params,
-          "routed_experts_prompt_start",
-          int(routed_experts_prompt_start),
-      )
+    if req.cache_salt is not None:
+      setattr(params, "cache_salt", req.cache_salt)
+    setattr(
+        params, "routed_experts_prompt_start", req.routed_experts_prompt_start
+    )
     return params
 
   async def _process_request_output(
@@ -656,22 +525,12 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
       sampling_requests: (
           base_sampler_lib.SamplingRequest
           | Sequence[base_sampler_lib.SamplingRequest]
-          | Any
       ),
-      **kwargs: Any,
   ) -> (
       base_sampler_lib.SamplingResponse
-      | list[base_sampler_lib.SamplingResponse]
-      | Any
+      | Sequence[base_sampler_lib.SamplingResponse]
   ):
-    """Generates completions for a batch of sampling requests or raw prompts.
-
-    Accepts raw string lists, dictionaries, or duck-typed objects from callers
-    (such as `tunix.dist_rl.common.datatypes.SamplingRequest`).
-    """
-    if sampling_requests is None:
-      raise ValueError("sampling_requests cannot be None.")
-
+    """Generates completions for a single SamplingRequest or a batch."""
     while self._is_paused:
       await asyncio.sleep(0.05)
 
@@ -679,46 +538,21 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
       await self.start()
     assert self._engine is not None
 
-    raw_input_mode = False
-    is_sequence = isinstance(sampling_requests, (list, tuple))
-    if isinstance(sampling_requests, (str, list)) and (
-        isinstance(sampling_requests, str)
-        or not sampling_requests
-        or isinstance(sampling_requests[0], str)
-        or (
-            isinstance(sampling_requests[0], list)
-            and not _get_val(sampling_requests[0], "prompt")
-        )
-    ):
-      raw_input_mode = True
-      items = (
-          sampling_requests
-          if isinstance(sampling_requests, list)
-          else [sampling_requests]
-      )
-      req_list = [
-          {
-              "prompt": item,
-              "request_id": f"req_{idx}_{time.time_ns()}",
-          }
-          for idx, item in enumerate(items)
-      ]
-    elif (
-        isinstance(sampling_requests, base_sampler_lib.SamplingRequest)
-        or _get_val(sampling_requests, "prompt") is not None
-    ):
-      req_list = [sampling_requests]
+    if isinstance(sampling_requests, base_sampler_lib.SamplingRequest):
+      req_list: list[base_sampler_lib.SamplingRequest] = [sampling_requests]
+      is_sequence = False
     else:
       req_list = list(sampling_requests)
+      is_sequence = True
 
     from vllm.inputs import TextPrompt, TokensPrompt  # pylint: disable=g-import-not-at-top,g-multiple-import
 
     pending_tasks = []
     for idx, req in enumerate(req_list):
-      vllm_params = self._build_vllm_params(req, kwargs)
-      req_id = _get_val(req, "request_id") or f"req_{time.time_ns()}_{idx}"
-      prompt_val = _get_val(req, "prompt")
-      param_cache_salt = getattr(vllm_params, "cache_salt", None)
+      vllm_params = self._build_vllm_params(req)
+      req_id = req.request_id or f"req_{time.time_ns()}_{idx}"
+      prompt_val = req.prompt
+      cache_salt = req.cache_salt
       engine_prompt: TextPrompt | TokensPrompt | str
       expected_prompt_ids: list[int] | None
       if generate_utils.is_token_id_sequence(prompt_val):
@@ -727,10 +561,10 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
             for x in np.asarray(prompt_val, dtype=np.int32).reshape(-1).tolist()
         ]
         expected_prompt_ids = token_ids
-        if param_cache_salt is not None:
+        if cache_salt is not None:
           engine_prompt = {
               "prompt_token_ids": token_ids,
-              "cache_salt": str(param_cache_salt),
+              "cache_salt": cache_salt,
           }
         else:
           engine_prompt = {"prompt_token_ids": token_ids}
@@ -739,10 +573,10 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
         prompt_str = (
             prompt_val if isinstance(prompt_val, str) else str(prompt_val)
         )
-        if param_cache_salt is not None:
+        if cache_salt is not None:
           engine_prompt = {
               "prompt": prompt_str,
-              "cache_salt": str(param_cache_salt),
+              "cache_salt": cache_salt,
           }
         else:
           engine_prompt = prompt_str
@@ -761,8 +595,6 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
         ])
     )
 
-    if raw_input_mode:
-      return [r.text for r in results]
     if is_sequence:
       return results
     return results[0] if results else base_sampler_lib.SamplingResponse()
@@ -886,7 +718,7 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
 
   async def pre_weight_sync(
       self,
-      sync_request: base_sampler_lib.WeightSyncRequest | None = None,
+      sync_request: base_sampler_lib.WeightSyncRequest,
       free_kv_cache: bool = False,
       **kwargs: Any,
   ) -> Any:
@@ -900,7 +732,7 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
     per-step latency overhead of deallocating (`delete_kv_cache`) and
     reallocating (`reinitialize_kv_cache`) the HBM KV buffer pool.
     """
-    self._check_partial_rollout_kwarg(kwargs)
+    del kwargs
     if not self.enable_raiden:
       return True
     async with self._sync_lock:
@@ -938,9 +770,9 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
 
   async def weight_sync(
       self,
-      sync_request: base_sampler_lib.WeightSyncRequest | None = None,
+      sync_request: base_sampler_lib.WeightSyncRequest,
       **kwargs: Any,
-  ) -> Any:
+  ) -> None:
     """Phase 2: Flushes/awaits H2D transfers across TPU workers and refreshes state_leaves."""
     del kwargs
     if not self.enable_raiden:
@@ -953,7 +785,7 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
       )
     async with self._sync_lock:
       if not self._tracker.admit(sync_request, "h2d_done"):
-        return True
+        return None
 
       logger.info("Executing weight_sync barrier on Raiden synchronizers...")
       checksums = await self.raiden_h2d(
@@ -969,11 +801,11 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
       await self.refresh_model_state_leaves()
 
       self._tracker.complete(sync_request, "h2d_done")
-      return True
+      return None
 
   async def post_weight_sync(
       self,
-      sync_request: base_sampler_lib.WeightSyncRequest | None = None,
+      sync_request: base_sampler_lib.WeightSyncRequest,
       **kwargs: Any,
   ) -> Any:
     """Phase 3: Closes weight update session (reinitializes KV cache if freed), restores request intake, and bumps active policy version."""
@@ -994,10 +826,7 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
         self._transfer_statuses[str(rid)] = "SUCCESS"
       await self.resume()
 
-      if sync_request is not None and sync_request.policy_version is not None:
-        self._policy_version = sync_request.policy_version
-      else:
-        self._policy_version += 1
+      self._policy_version = sync_request.policy_version
 
       if os.environ.get("VERIFY_WEIGHTS", "").lower() == "true":
         logger.info("Raiden transfer metrics: %s", await self.raiden_metrics())
@@ -1007,7 +836,7 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
 
   async def abort_weight_sync(
       self,
-      sync_request: base_sampler_lib.WeightSyncRequest | None = None,
+      sync_request: base_sampler_lib.WeightSyncRequest,
       **kwargs: Any,
   ) -> Any:
     """Safely rolls back to serving previous policy version without publishing staging."""

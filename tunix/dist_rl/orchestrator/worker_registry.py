@@ -49,6 +49,16 @@ class _WorkerEntry:
   status: AdmissionStatus = AdmissionStatus.REGISTERED
 
 
+def _is_same_instance(a: datatypes.WorkerInfo, b: datatypes.WorkerInfo) -> bool:
+  """Returns True when `a` and `b` represent the same live worker process."""
+  return (
+      bool(a.instance_id)
+      and a.instance_id == b.instance_id
+      and a.roles == b.roles
+      and a.resources.get("address") == b.resources.get("address")
+  )
+
+
 class WorkerRegistry:
   """Single source of truth owning all cluster ActorHandles and WorkerInfos."""
 
@@ -158,6 +168,8 @@ class WorkerRegistry:
       worker_id: str,
       roles: Sequence[datatypes.Role | str],
       handle: remote_execution.ActorHandle,
+      *,
+      instance_id: str = "",
       resources: Mapping[str, Any] | None = None,
       override: bool = False,
   ) -> datatypes.WorkerInfo:
@@ -173,6 +185,7 @@ class WorkerRegistry:
     )
     info = datatypes.WorkerInfo(
         worker_id=worker_id,
+        instance_id=instance_id,
         roles=role_names,
         resources={"remote": True, **dict(resources or {})},
     )
@@ -239,6 +252,7 @@ class WorkerRegistry:
     service_type = md["service_type"]
     service_address = f"{hostname}:{md['service_port']}"
     worker_id = md["worker_id"]
+    instance_id = md.get("instance_id", "")
 
     logging.info(
         "Discovered %s service (%s) at %s.",
@@ -262,6 +276,7 @@ class WorkerRegistry:
       resources["trajectory_store_config"] = md["trajectory_store_config"]
     info = datatypes.WorkerInfo(
         worker_id=worker_id,
+        instance_id=instance_id,
         roles=frozenset({role.value}),
         resources=resources,
     )
@@ -270,6 +285,8 @@ class WorkerRegistry:
         rpc_timeout_s=rpc_timeout_s,
     )
     displaced_handle: remote_execution.ActorHandle | None = None
+    duplicate_info: datatypes.WorkerInfo | None = None
+    to_probe: tuple[remote_execution.ActorHandle, str] | None = None
     try:
       with self._condition:
         if self._closed:
@@ -278,40 +295,34 @@ class WorkerRegistry:
               f"Worker registration is closed; cannot register {worker_id!r}."
           )
         existing = self._entries.get(worker_id)
-        # TODO(linchai): Support runtime re-registration for non-rollout roles
-        # once trainer/reference worker fault tolerance is implemented.
-        if existing is not None and (
-            existing.info.roles != info.roles
-            or (
-                existing.status is not AdmissionStatus.REGISTERED
-                and role != datatypes.Role.ROLLOUT
-            )
-        ):
-          raise ValueError(
-              f"duplicate worker_id {worker_id!r} for role {role.value!r}"
-              f" (existing roles {sorted(existing.info.roles)}, status"
-              f" {existing.status.value!r}); only pre-bring_up (REGISTERED)"
-              " workers or rollout workers support re-registration"
-          )
-        # A remote worker at a different address may still be alive: probe it
-        # outside the lock before replacing it.
-        to_probe: tuple[remote_execution.ActorHandle, str] | None = None
         if existing is not None:
           existing_addr = existing.info.resources.get("address")
-          if not existing_addr:
+          if _is_same_instance(existing.info, info):
+            # Duplicate `discovery.register` retry from the same live process.
+            duplicate_info = existing.info
+          # TODO(linchai): Support runtime re-registration for non-rollout roles
+          # once trainer/reference worker fault tolerance is implemented.
+          elif existing.info.roles != info.roles or (
+              existing.status is not AdmissionStatus.REGISTERED
+              and role != datatypes.Role.ROLLOUT
+          ):
+            raise ValueError(
+                f"duplicate worker_id {worker_id!r} for role {role.value!r}"
+                f" (existing roles {sorted(existing.info.roles)}, status"
+                f" {existing.status.value!r}); only pre-bring_up (REGISTERED)"
+                " workers or rollout workers support re-registration"
+            )
+          elif not existing_addr:
             raise ValueError(
                 f"duplicate worker_id {worker_id!r}: existing worker"
                 " has no address to probe (registered via `register()` or"
                 " `register_handle()`)"
             )
-          # TODO(b/577214994): A same-address registration is treated as an
-          # in-place restart, but a `discovery.register` retry after a lost
-          # reply also re-registers the same live process and closes its
-          # handle. Pass a per-process instance id in discovery metadata and
-          # make a duplicate `(address, instance_id)` registration a no-op.
-          if existing_addr != service_address:
+          elif existing_addr != service_address:
+            # A remote worker at a different address may still be alive: probe
+            # it outside the lock before replacing it.
             to_probe = (existing.handle, existing_addr)
-        if to_probe is None:
+        if duplicate_info is None and to_probe is None:
           displaced_handle = self._insert_locked(info, handle, override=True)
       if to_probe is not None:
         existing_handle, existing_addr = to_probe
@@ -340,6 +351,16 @@ class WorkerRegistry:
     except BaseException:
       handle.sync_close()
       raise
+    if duplicate_info is not None:
+      handle.sync_close()
+      logging.info(
+          "Ignoring duplicate discovery registration for %r"
+          " (instance_id=%r) at %s.",
+          worker_id,
+          instance_id,
+          service_address,
+      )
+      return duplicate_info
     if displaced_handle is not None:
       displaced_handle.sync_close()
     logging.info(

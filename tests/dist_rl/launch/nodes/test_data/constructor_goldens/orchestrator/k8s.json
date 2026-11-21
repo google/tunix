@@ -59,7 +59,7 @@
         "kwargs": {
           "flush_every_n_steps": 1,
           "log_dir": "/artifacts/metrics",
-          "project_name": "trellis-gsm8k",
+          "project_name": "tunix-dist-rl",
           "run_name": ""
         }
       }
@@ -74,7 +74,7 @@
           },
           "flush_every_n_steps": 1,
           "log_dir": "/artifacts/metrics",
-          "project_name": "trellis-gsm8k",
+          "project_name": "tunix-dist-rl",
           "run_name": ""
         }
       }

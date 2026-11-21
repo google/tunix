@@ -126,6 +126,8 @@ class FakeClusterHarness:
       max_concurrency: int = 8,
       compile_error_workers: set[str] | None = None,
       routed_experts_shape_spec: tuple[int, int] | None = None,
+      return_routed_experts: bool = False,
+      min_turns: int = 0,
       routed_experts_encode_mode: datatypes.RoutedExpertsEncodeMode = "auto",
       routed_experts_num_experts: int | None = None,
       rollout_max_prompt_length: int = 32,
@@ -160,6 +162,8 @@ class FakeClusterHarness:
     self.max_concurrency = max_concurrency
     self.compile_error_workers = compile_error_workers or set()
     self.routed_experts_shape_spec = routed_experts_shape_spec
+    self.return_routed_experts = return_routed_experts
+    self.min_turns = min_turns
     self.routed_experts_encode_mode: datatypes.RoutedExpertsEncodeMode = (
         routed_experts_encode_mode
     )
@@ -224,7 +228,11 @@ class FakeClusterHarness:
     self.servers[wid] = running_server
     if re_register:
       self.register_worker_from_discovery(
-          wid, "trainer", bound_port, override=override
+          wid,
+          self.trainer_worker.instance_id,
+          "trainer",
+          bound_port,
+          override=override,
       )
     return bound_port
 
@@ -236,6 +244,14 @@ class FakeClusterHarness:
       override: bool = False,
       re_register: bool = True,
   ) -> int:
+    config = rollout_worker_lib.RolloutConfig(
+        partial_rollout=self.partial_rollout,
+        drain_timeout_s=self.drain_timeout_s,
+        max_prompt_length=self.rollout_max_prompt_length,
+        return_routed_experts=self.return_routed_experts,
+        routed_experts_encode_mode=self.routed_experts_encode_mode,
+        routed_experts_num_experts=self.routed_experts_num_experts,
+    )
     sampler = test_utils.MockBaseSamplerImpl(
         sampler_name=wid,
         default_delay=0.0,
@@ -247,6 +263,8 @@ class FakeClusterHarness:
             if self.response_tokens_per_turn is not None
             else 2
         ),
+        min_turns=self.min_turns,
+        config=config,
     )
     self.samplers[wid] = sampler
     worker = rollout_worker_lib.RolloutWorker(
@@ -256,13 +274,7 @@ class FakeClusterHarness:
         agent_name="mock_agent",
         tokenizer=test_utils.MockTokenizer(),
         chat_parser=test_utils.MockChatParser(),
-        config=rollout_worker_lib.RolloutConfig(
-            partial_rollout=self.partial_rollout,
-            drain_timeout_s=self.drain_timeout_s,
-            max_prompt_length=self.rollout_max_prompt_length,
-            routed_experts_encode_mode=self.routed_experts_encode_mode,
-            routed_experts_num_experts=self.routed_experts_num_experts,
-        ),
+        config=config,
         max_concurrency=self.max_concurrency,
     )
     self.rollout_workers[wid] = worker
@@ -277,13 +289,18 @@ class FakeClusterHarness:
     self.servers[wid] = running_server
     if re_register:
       self.register_worker_from_discovery(
-          wid, "rollout", bound_port, override=override
+          wid,
+          worker.instance_id,
+          "rollout",
+          bound_port,
+          override=override,
       )
     return bound_port
 
   def register_worker_from_discovery(
       self,
       worker_id: str,
+      instance_id: str,
       service_type: str,
       port: int,
       override: bool = False,
@@ -293,6 +310,7 @@ class FakeClusterHarness:
         "service_type": service_type,
         "service_port": port,
         "worker_id": worker_id,
+        "instance_id": instance_id,
     })
     if override:
       role = (
@@ -307,6 +325,7 @@ class FakeClusterHarness:
               f"grpc://localhost:{port}",
               rpc_timeout_s=self.rpc_timeout_s,
           ),
+          instance_id=instance_id,
           resources={"address": f"localhost:{port}"},
           override=True,
       )
@@ -352,15 +371,13 @@ class FakeClusterHarness:
           re_register=re_register,
       )
 
-  def build_prompts(
-      self, num_prompts: int = 2, *, min_turns: int = 0
-  ) -> list[dict[str, Any]]:
+  def build_prompts(self, num_prompts: int = 2) -> list[dict[str, Any]]:
     """Builds synthetic prompt payloads for testing."""
     return [
         {
             "prompt": f"Prompt {i}",
             "prompt_id": f"prompt_{i}",
-            "generation_kwargs": {"max_tokens": 8, "min_turns": min_turns},
+            "generation_kwargs": {"max_tokens": 8},
         }
         for i in range(num_prompts)
     ]

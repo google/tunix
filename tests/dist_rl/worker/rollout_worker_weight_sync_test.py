@@ -26,9 +26,11 @@ WorkerState = datatypes.WorkerState
 
 class _FakeManager:
 
-  def __init__(self):
+  def __init__(self, sync_result=1):
     self.calls = []
     self.admission_open = True
+    self.sync_result = sync_result
+    self._policy_version = 0
 
   async def pre_weight_sync(self, sync_request=None, **kwargs):
     del sync_request, kwargs
@@ -38,11 +40,13 @@ class _FakeManager:
   async def weight_sync(self, sync_request=None, **kwargs):
     del sync_request, kwargs
     self.calls.append("sync")
-    return 1
+    return self.sync_result
 
   async def post_weight_sync(self, sync_request=None, **kwargs):
-    del sync_request, kwargs
+    del kwargs
     self.calls.append("post")
+    if sync_request is not None:
+      self._policy_version = sync_request.policy_version
     return "ok"
 
   async def bind_weight_sync(self, **kwargs):
@@ -126,13 +130,6 @@ class WeightSyncPhasesTest(unittest.IsolatedAsyncioTestCase):
     result = await worker.get_weight_sync_metadata()
     self.assertEqual(result, [{"unit": "u0"}])
 
-  async def test_sync_falls_back_to_metadata_kwarg(self):
-    worker = self._worker()
-    await worker.weight_sync(metadata=_sync_req("r2", 2))
-    status = await worker.get_weight_sync_status()
-    self.assertEqual(status["req_id"], "r2")
-    self.assertEqual(status["phase"], "h2d_done")
-
   async def test_full_round_call_order(self):
     worker = self._worker()
     req = _sync_req("r1", 1)
@@ -157,6 +154,16 @@ class WeightSyncPhasesTest(unittest.IsolatedAsyncioTestCase):
     await worker.abort_weight_sync(_sync_req("r1", 1))
     self.assertTrue(worker.manager.admission_open)
     self.assertEqual(worker.state, WorkerState.READY)
+
+  async def test_policy_version_advances_on_post_not_weight_sync(self):
+    worker = self._worker()
+    req = datatypes.WeightSyncRequest(policy_version=4)
+
+    await worker.weight_sync(req)
+    self.assertEqual(worker._policy_version, 0)
+
+    await worker.post_weight_sync(req)
+    self.assertEqual(worker._policy_version, 4)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
+import pydantic
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 from tunix.dist_rl.trajectory import async_writer
@@ -1705,7 +1706,7 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
     store_inst.add_step(step, meta)
     store_inst.flush()
 
-    (traj,) = store_inst.get_trajectories([meta.trajectory_id])
+    traj = store_inst.get_trajectories([meta.trajectory_id])[meta.trajectory_id]
     written_step = traj.steps[1]
     self.assertIsNone(written_step.assistant_tokens)
     self.assertIsNone(written_step.logprobs)
@@ -1931,8 +1932,8 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
     store_inst.flush()
 
     trajs = store_inst.get_trajectories([traj_id])
-    self.assertLen(trajs, 1)
-    self.assertEqual(trajs[0].trajectory_id, traj_id)
+    self.assertEqual(list(trajs.keys()), [traj_id])
+    self.assertEqual(trajs[traj_id].trajectory_id, traj_id)
 
   def test_write_to_closed_store_raises_runtime_error(self) -> None:
     store_inst = self._create_store()
@@ -1965,7 +1966,7 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
     reader_store = self._create_store(run_id="drain_run")
     self.assertEqual(
         reader_store.get_trajectories([trajectory_testing.TRAJECTORY_ID_1]),
-        [trajectory_testing.TRAJECTORY_1],
+        {trajectory_testing.TRAJECTORY_ID_1: trajectory_testing.TRAJECTORY_1},
     )
 
   def test_close_disposes_engine_built_from_db_url(self) -> None:
@@ -2071,7 +2072,10 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
     second_store = self._create_store(run_id="persisted_run")
     trajs = second_store.get_trajectories([trajectory_testing.TRAJECTORY_ID_1])
 
-    self.assertEqual(trajs, [trajectory_testing.TRAJECTORY_1])
+    self.assertEqual(
+        trajs,
+        {trajectory_testing.TRAJECTORY_ID_1: trajectory_testing.TRAJECTORY_1},
+    )
 
   def test_add_step_with_copy_step_true_isolates_step_mutation(self) -> None:
     copy_store = sql_store.SqlTrajectoryStore(
@@ -2093,9 +2097,9 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
     step.extra["notes"] = "MUTATED_AFTER_ENQUEUE"
     copy_store.flush()
 
-    (recovered,) = copy_store.get_trajectories(
+    recovered = copy_store.get_trajectories(
         [trajectory_testing.TRAJECTORY_ID_1]
-    )
+    )[trajectory_testing.TRAJECTORY_ID_1]
     self.assertEqual(recovered.steps[0].message, "Initial message")
     self.assertEqual(recovered.steps[0].extra, {"notes": "initial note"})
 
@@ -2113,10 +2117,16 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
     metas = store_inst.get_trajectories_metadata()
     self.assertEqual(
         metas,
-        [
-            trajectory_testing.TUNIX_METADATA_1,
-            tunix_meta_2,
-        ],
+        {
+            trajectory_testing.TUNIX_METADATA_1.trajectory_id: (
+                trajectory_testing.TUNIX_METADATA_1
+            ),
+            "t_atif_2": tunix_meta_2,
+        },
+    )
+    self.assertEqual(
+        list(metas.keys()),
+        [trajectory_testing.TUNIX_METADATA_1.trajectory_id, "t_atif_2"],
     )
 
   def test_get_trajectories_orders_steps_by_step_id_and_rehydrates_tunix_steps(
@@ -2130,10 +2140,58 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
     store_inst.add_step(trajectory_testing.TUNIX_AGENT_STEP_1, tunix_meta)
     store_inst.flush()
 
-    (trajectory,) = store_inst.get_trajectories([tunix_meta.trajectory_id])
+    trajectory = store_inst.get_trajectories([tunix_meta.trajectory_id])[
+        tunix_meta.trajectory_id
+    ]
     self.assertTrajectoryEqual(
         trajectory, trajectory_testing.PAIRED_TUNIX_TRAJECTORY
     )
+
+  def test_get_trajectories_strict_false_clips_at_corrupt_step_row_in_database(
+      self,
+  ) -> None:
+    store_inst = self._create_store(run_id="corrupt_step_sql_run")
+    meta = trajectory_lib.TunixTrajectoryMetadata(
+        trajectory_id="sql_corrupt_traj",
+        session_id="sess_sql_corrupt",
+        agent=trajectory_lib.Agent(name="agent", version="1.0"),
+        status="SUCCEEDED",
+        total_reward=10.0,
+        extra={"lineage": "sql"},
+    )
+    step_1 = trajectory_testing.make_step(step_id=1, message="sql step 1")
+    step_3 = trajectory_testing.make_step(step_id=3, message="sql step 3")
+    store_inst.add_step(step_1, meta)
+    store_inst.add_step(step_3, meta)
+    store_inst.flush()
+    with store_inst.engine.begin() as conn:
+      conn.execute(
+          sa.insert(schema.STEPS_TABLE).values(
+              run_id="corrupt_step_sql_run",
+              trajectory_id="sql_corrupt_traj",
+              step_id=2,
+              payload={"step_id": 2, "source": "invalid_source"},
+              created_at=datetime.datetime.now(datetime.timezone.utc),
+          )
+      )
+
+    with self.assertRaises(pydantic.ValidationError):
+      store_inst.get_trajectories(["sql_corrupt_traj"], strict=True)
+
+    traj = store_inst.get_trajectories(["sql_corrupt_traj"], strict=False)[
+        "sql_corrupt_traj"
+    ]
+    self.assertIsInstance(traj, trajectory_lib.TunixTrajectory)
+    self.assertEqual([s.step_id for s in traj.steps], [0])
+    self.assertEqual([s.message for s in traj.steps], ["sql step 1"])
+    self.assertIsNone(traj.status)
+    self.assertIsNone(traj.total_reward)
+    self.assertEqual(traj.extra, {"lineage": "sql"})
+    saved_meta = store_inst.get_trajectories_metadata(["sql_corrupt_traj"])[
+        "sql_corrupt_traj"
+    ]
+    self.assertEqual(saved_meta.status, "SUCCEEDED")
+    self.assertEqual(saved_meta.total_reward, 10.0)
 
   def test_reader_methods_isolate_trajectories_across_runs(self) -> None:
     store_run_1 = self._create_store(run_id="run_1")
@@ -2170,11 +2228,11 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
 
     self.assertEqual(
         store_run_1.get_trajectories_metadata(),
-        [trajectory_testing.METADATA_1],
+        {trajectory_testing.TRAJECTORY_ID_1: trajectory_testing.METADATA_1},
     )
     self.assertEqual(
         store_run_1.get_trajectories([trajectory_testing.TRAJECTORY_ID_1]),
-        [trajectory_testing.TRAJECTORY_1],
+        {trajectory_testing.TRAJECTORY_ID_1: trajectory_testing.TRAJECTORY_1},
     )
     self.assertEqual(
         store_run_1.get_trajectories_metrics(),
@@ -2543,7 +2601,7 @@ class SqlTrajectoryStoreConfigTest(store_testing.TrajectoryStoreConfigTestCase):
     original.flush()
 
     self.assertEqual(
-        [m.trajectory_id for m in rebuilt.get_trajectories_metadata()],
+        list(rebuilt.get_trajectories_metadata().keys()),
         [trajectory_testing.METADATA_1.trajectory_id],
     )
 
@@ -2611,7 +2669,9 @@ class SqlTrajectoryStoreConfigTest(store_testing.TrajectoryStoreConfigTestCase):
     meta.notes = "mutated_after_add_step"
     default_store.flush()
 
-    (recovered,) = default_store.get_trajectories([meta.trajectory_id])
+    recovered = default_store.get_trajectories([meta.trajectory_id])[
+        meta.trajectory_id
+    ]
     self.assertEqual(recovered.notes, trajectory_testing.METADATA_1.notes)
     self.assertEqual(recovered.steps[0].message, "zero copy turn")
 

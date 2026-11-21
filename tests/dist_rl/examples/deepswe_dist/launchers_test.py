@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Dry-runs the DeepSWE `launcher_v2.sh` (local) and `k8s_launcher_v2.sh` (GKE)."""
+"""Dry-runs the DeepSWE `launcher.sh` (local) and `k8s_launcher.sh` (GKE)."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ import yaml
 
 _LOCAL = launcher_testing.Expected(
     name="local",
-    script="deepswe_dist/launcher_v2.sh",
+    script="deepswe_dist/launcher.sh",
     example="deepswe_dist",
     module="deepswe",
     target="local",
@@ -42,12 +42,12 @@ _LOCAL = launcher_testing.Expected(
     rollout_mesh=(1, 2),
     model_id="Qwen/Qwen3-32B",
 )
-# Copybara replaces `k8s_launcher_v2.sh`'s internal default image with
+# Copybara replaces `k8s_launcher.sh`'s internal default image with
 # `$TUNIX_IMAGE` (`copy.bara.sky`), so the GKE dry runs set one.
 _K8S_IMAGE = "cluster_config.k8s.tunix_image=test-image"
 _K8S = launcher_testing.Expected(
     name="k8s",
-    script="deepswe_dist/k8s_launcher_v2.sh",
+    script="deepswe_dist/k8s_launcher.sh",
     example="deepswe_dist",
     module="deepswe",
     target="k8s",
@@ -90,12 +90,12 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
 
   def test_local_positive_beta_requires_reference_inference_chips(self):
     run = self.run_launcher(
-        "deepswe_dist/launcher_v2.sh", "agentic_grpo_config.beta=0.04"
+        "deepswe_dist/launcher.sh", "agentic_grpo_config.beta=0.04"
     )
     self.assertNotEqual(run.returncode, 0)
     self.assertIn("cluster_config.local.inference_devices", run.stderr)
     with_chips = self.dry_run(
-        "deepswe_dist/launcher_v2.sh",
+        "deepswe_dist/launcher.sh",
         "agentic_grpo_config.beta=0.04",
         "cluster_config.local.inference_devices=4,5",
     )
@@ -143,17 +143,21 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
     # The sandbox namespace follows `cluster_config.k8s.namespace`.
     self.assertEqual(config["kubernetes_config"]["namespace"], "default")
     self.assertIn("NAMESPACE=default", run.stdout)
-    self.assertEqual(config["cluster_config"]["ports"]["orchestrator"], 20000)
-    self.assertEqual(config["cluster_config"]["ports"]["rollout"], 20001)
-    self.assertEqual(config["cluster_config"]["ports"]["trainer"], 20002)
+    roles = config["cluster_config"]["roles"]
+    self.assertEqual(roles["orchestrator"]["port"], 20000)
+    self.assertEqual(roles["rollout"]["port"], 20001)
+    self.assertEqual(roles["trainer"]["port"], 20002)
     self.assertEqual(hp.mesh_axes("actor_model_config")["fsdp"], 8)
     self.assertEqual(hp.mesh_axes("actor_model_config")["tp"], 8)
     self.assertEqual(hp.mesh_axes("rollout_model_config")["fsdp"], 1)
     self.assertEqual(hp.mesh_axes("rollout_model_config")["tp"], 4)
     k8s = config["cluster_config"]["k8s"]
-    self.assertEqual(k8s["cpu_memory"], "64G")
-    self.assertEqual(k8s["user_container_memory"], "260G")
-    self.assertEqual(k8s["user_container_memory_limit"], "260G")
+    self.assertEqual(
+        roles["orchestrator"]["memory"], {"request": "64G", "limit": ""}
+    )
+    self.assertEqual(
+        roles["trainer"]["memory"], {"request": "260G", "limit": "260G"}
+    )
     self.assertEqual(k8s["trainer"]["jobset_yaml"], "jobset.pathways.yaml")
     self.assertEqual(k8s["trainer"]["tpu_slice"], "tpuv5:4x4x4")
     self.assertIn(
@@ -166,12 +170,13 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
     self.assertEqual(config["cluster_config"]["rollout_replicas"], 16)
     self.assertIn("testuser-roll-15", run.stdout)
 
-  def test_k8s_ifrt_proxy_threshold_env_override_takes_precedence(self):
-    with mock.patch.dict(
-        os.environ,
-        {"TRAINER_IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES": "33554432"},
-    ):
-      run = self.dry_run("deepswe_dist/k8s_launcher_v2.sh", _K8S_IMAGE)
+  def test_k8s_ifrt_proxy_threshold_override_takes_precedence(self):
+    run = self.dry_run(
+        "deepswe_dist/k8s_launcher.sh",
+        _K8S_IMAGE,
+        "cluster_config.pathways.trainer.ifrt_proxy_large_transfer_threshold"
+        "_bytes=33554432",
+    )
     self.assertIn(
         "name: IFRT_PROXY_GRPC_LARGE_TRANSFER_OPTIMIZATION_THRESHOLD_BYTES\n"
         '                value: "33554432"',
@@ -180,7 +185,7 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
 
   def test_k8s_sandbox_namespace_follows_the_gke_namespace(self):
     run = self.dry_run(
-        "deepswe_dist/k8s_launcher_v2.sh",
+        "deepswe_dist/k8s_launcher.sh",
         _K8S_IMAGE,
         "cluster_config.k8s.namespace=team-ns",
     )
@@ -190,7 +195,7 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
 
   def test_k8s_sandbox_node_selectors_propagate_to_rollout_pod(self):
     run = self.dry_run(
-        "deepswe_dist/k8s_launcher_v2.sh",
+        "deepswe_dist/k8s_launcher.sh",
         _K8S_IMAGE,
         "env_kwargs.use_agent_sandbox=true",
         "kubernetes_config.namespace=rl-tunix-swebench",
@@ -208,7 +213,7 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
 
   def test_user_args_override_launcher_values(self):
     run = self.dry_run(
-        "deepswe_dist/k8s_launcher_v2.sh",
+        "deepswe_dist/k8s_launcher.sh",
         _K8S_IMAGE,
         "batch_size=16",
         "cluster_config.rollout_replicas=2",
@@ -226,7 +231,7 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
         "OTEL_METRIC_EXPORT_INTERVAL": "5000",
     }
     with mock.patch.dict(os.environ, otel_env):
-      run = self.dry_run("deepswe_dist/k8s_launcher_v2.sh", _K8S_IMAGE)
+      run = self.dry_run("deepswe_dist/k8s_launcher.sh", _K8S_IMAGE)
     exporting = set(
         re.findall(
             r"OTEL_EXPORTER_OTLP_ENDPOINT=http://testuser-otel:4317 "
@@ -244,7 +249,7 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
     )
 
   def test_k8s_otel_commands_deploy_and_delete_the_collector(self):
-    run = self.dry_run("deepswe_dist/k8s_launcher_v2.sh", "otel")
+    run = self.dry_run("deepswe_dist/k8s_launcher.sh", "otel")
     self.assertIn(
         "kubectl delete deployment testuser-otel -n default", run.stdout
     )
@@ -260,7 +265,7 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
           manifests[doc["kind"]] = doc
     self.assertEqual(set(manifests), {"Deployment", "Service"})
     self.assertEqual(manifests["Service"]["spec"]["ports"][0]["port"], 4317)
-    run = self.dry_run("deepswe_dist/k8s_launcher_v2.sh", "stop-otel")
+    run = self.dry_run("deepswe_dist/k8s_launcher.sh", "stop-otel")
     self.assertIn("kubectl delete service testuser-otel -n default", run.stdout)
     self.assertNotIn("apiVersion:", run.stdout)
 

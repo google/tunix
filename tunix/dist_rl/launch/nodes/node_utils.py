@@ -31,7 +31,6 @@ import pathlib
 import pickle
 import signal
 import sys
-import types
 from typing import Final, Literal, TypeAlias, TypedDict, cast
 
 import jax
@@ -46,7 +45,7 @@ from tunix.dist_rl.worker import remote_execution
 
 NodeRole = Literal["trainer", "rollout", "inference"]
 # Every process of a run: the orchestrator and the worker nodes.
-ProcessRole = Literal["orchestrator", "trainer", "rollout", "inference"]
+ProcessRole = resolve_config.ProcessRole
 
 # Environment variable that `k8s.sh` or an external launcher
 # (`cluster_config.target: external`) sets to each rollout replica's index
@@ -130,16 +129,6 @@ def ensure_repo_root_on_path() -> None:
   logging.info("Repo root inserted into sys.path: %s", repo_root)
 
 
-# Environment variables `apply_library_env` sets from the config, and the
-# config key each comes from. Launchers reject them in user-supplied
-# environments so a value can only come from the config.
-LIBRARY_ENV_CONFIG_KEYS: Final[Mapping[str, str]] = types.MappingProxyType({
-    "SKIP_JAX_PRECOMPILE": "vllm_config.skip_jax_precompile",
-    "TPU_RAIDEN_DATA_NICS": "weight_sync_config.raiden_data_nics",
-    "VERIFY_WEIGHTS": "weight_sync_config.verify_weights",
-})
-
-
 def _library_env(
     hp: resolve_config.DistHyperParameters, role: NodeRole
 ) -> dict[str, tuple[str | None, str]]:
@@ -149,13 +138,13 @@ def _library_env(
   ws = hp.config_mapping("weight_sync_config")
   values: dict[str, str | None] = {
       "VERIFY_WEIGHTS": "true" if ws["verify_weights"] else "false",
-      "TPU_RAIDEN_DATA_NICS": str(ws["raiden_data_nics"]) or None,
+      "TPU_RAIDEN_DATA_NICS": str(ws["raiden"]["data_nics"]) or None,
   }
   if role == "rollout":
     skip = hp.config_mapping("vllm_config")["skip_jax_precompile"]
     values["SKIP_JAX_PRECOMPILE"] = "1" if skip else "0"
   return {
-      name: (value, LIBRARY_ENV_CONFIG_KEYS[name])
+      name: (value, resolve_config.LIBRARY_ENV_CONFIG_KEYS[name])
       for name, value in values.items()
   }
 
@@ -174,7 +163,7 @@ def apply_library_env(
     as "true" or "false": whether weight syncs log checksums and Raiden
     metrics.
   * `TPU_RAIDEN_DATA_NICS` (trainer, rollout):
-    `weight_sync_config.raiden_data_nics`; unset when empty, so Raiden picks
+    `weight_sync_config.raiden.data_nics`; unset when empty, so Raiden picks
     its NICs itself.
   * `SKIP_JAX_PRECOMPILE` (rollout): `vllm_config.skip_jax_precompile` as "1"
     or "0".
@@ -275,7 +264,7 @@ def log_resolved_config(
 # TODO(noghabi): Reuse the agentic tokenizer loading
 # (`tunix.cli.utils.model.create_tokenizer`, unwrapping `.tokenizer`) so
 # `tokenizer_type`, `add_bos`/`add_eos`, and `HF_TOKEN` are handled in one place.
-# Kept as in the previous `run_*_node.py` mains for now.
+# Kept as in the removed `run_*_node.py` mains for now.
 def load_hf_tokenizer(hp: resolve_config.DistHyperParameters) -> HfTokenizer:
   """Loads the Hugging Face tokenizer from `tokenizer_config.tokenizer_path`.
 
@@ -421,11 +410,11 @@ def service_port(hp: resolve_config.DistHyperParameters, role: NodeRole) -> int:
 
   On `cluster_config.target: external` the launcher assigns each worker its
   port in `WORKER_PORT_ENV`, since every process gets the same config. On the
-  other targets the port is `cluster_config.ports.<role>`.
+  other targets the port is `cluster_config.roles.<role>.port`.
 
   Args:
     hp: Validated distributed RL configuration.
-    role: Node role, which selects the `cluster_config.ports.<role>` key.
+    role: Node role, which selects the `cluster_config.roles.<role>.port` key.
 
   Returns:
     The port.
@@ -440,10 +429,11 @@ def service_port(hp: resolve_config.DistHyperParameters, role: NodeRole) -> int:
     if WORKER_PORT_ENV in os.environ:
       raise ValueError(
           f"{WORKER_PORT_ENV} is only for cluster_config.target=external; on"
-          f" target {target!r} the node listens on cluster_config.ports.{role}."
+          f" target {target!r} the node listens on"
+          f" cluster_config.roles.{role}.port."
           f" Unset {WORKER_PORT_ENV}."
       )
-    return int(cluster["ports"][role])
+    return int(cluster["roles"][role]["port"])
   if WORKER_PORT_ENV not in os.environ:
     raise ValueError(
         f"{WORKER_PORT_ENV} must be set on cluster_config.target=external,"
@@ -573,6 +563,7 @@ async def serve_worker(
         "service_type": role,
         "service_port": port,
         "worker_id": worker_id_str,
+        "instance_id": worker_service.instance_id,
         CONFIG_SHA256_METADATA_KEY: config_sha256,
     }
     if extra_metadata:
@@ -634,7 +625,7 @@ async def serve_worker(
 # TODO(noghabi): Delegate to `tunix.utils.mesh.create_mesh` with
 # `hp.parse_mesh_config(model_key)`, as the agentic `BasePipeline` does, keeping
 # the exact device-count check below (`mesh_lib.create_mesh(devices=None)` only
-# rejects meshes larger than the device count). Kept as in the previous
+# rejects meshes larger than the device count). Kept as in the removed
 # `run_*_node.py` mains for now.
 def create_mesh(
     hp: resolve_config.DistHyperParameters, model_key: str, label: str
@@ -677,7 +668,7 @@ def create_mesh(
 # TODO(noghabi): Drop `ensure_local_safetensors` and its helpers and let
 # `AutoModel.from_pretrained` download via `model_id`, `model_source`, and
 # `model_download_path` (as `tunix.cli.utils.model.create_model` does). Kept as
-# in the previous `run_*_node.py` mains for now.
+# in the removed `run_*_node.py` mains for now.
 def has_direct_safetensors(model_path: pathlib.Path) -> bool:
   """Returns whether `model_path` directly contains `*.safetensors` shards."""
   return any(model_path.glob("*.safetensors"))

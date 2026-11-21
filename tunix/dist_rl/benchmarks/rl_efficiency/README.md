@@ -22,8 +22,8 @@ compares their recorded timings.
 Both stacks use BF16 compute, FP32 loading, exact token continuity, separate
 two-chip actor and rollout meshes, and one prompt group (8 trajectories) per
 microbatch. The benchmark injects timing hooks through
-`cluster_config.trainer_main`, `cluster_config.rollout_main`, and
-`cluster_config.orchestrator_main`, which wrap the node mains in
+`cluster_config.roles.trainer.main`, `cluster_config.roles.rollout.main`, and
+`cluster_config.roles.orchestrator.main`, which wrap the node mains in
 `launch/nodes/`.
 
 ## Running

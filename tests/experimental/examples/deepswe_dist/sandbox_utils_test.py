@@ -347,5 +347,45 @@ class SandboxUtilsTest(absltest.TestCase):
     iterator.close()
 
 
+class SetRuntimeContainerTest(absltest.TestCase):
+
+  def test_updates_target_container_container_and_client(self):
+    class FakeClient:
+
+      def __init__(self):
+        self._default_container = "agent-runtime"
+
+    class FakeRuntime:
+
+      def __init__(self):
+        self._target_container = "agent-runtime"
+        self._container = "agent-runtime"
+        self.client = FakeClient()
+
+    class FakeEnv:
+
+      def __init__(self):
+        self.runtime = FakeRuntime()
+
+    env = FakeEnv()
+    sandbox_utils.set_runtime_container(env, sandbox_utils.EVAL_CONTAINER_NAME)
+    self.assertEqual(env.runtime._target_container, "eval")
+    self.assertEqual(env.runtime._container, "eval")
+    self.assertEqual(env.runtime.client._default_container, "eval")
+
+  def test_handles_missing_container_attr_and_none_target(self):
+    class MinimalRuntime:
+
+      def __init__(self):
+        self._target_container = "agent-runtime"
+
+    runtime = MinimalRuntime()
+    sandbox_utils.set_runtime_container(runtime, "eval")
+    self.assertEqual(runtime._target_container, "eval")
+    self.assertFalse(hasattr(runtime, "_container"))
+
+    sandbox_utils.set_runtime_container(None, "eval")
+
+
 if __name__ == "__main__":
   absltest.main()

@@ -54,7 +54,6 @@ _ENV_PASSTHROUGH = frozenset({
     "PYTHON_BIN",
     "RESOLVE_CONFIG_BIN",
     "SECONDS",
-    "TRAINER_IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES",
     "WANDB_API_KEY",
     "YAML_DIR",
     "YAML_GEN",
@@ -63,15 +62,6 @@ _ENV_PASSTHROUGH = frozenset({
 # Environment variables read by `yaml_generator.py` that intentionally pass
 # through from the caller's environment (not configured via `base_dist_config`).
 _YAML_GEN_ENV_PASSTHROUGH = frozenset({
-    "COLOCATED_PYTHON_SIDECAR_IMAGE",
-    "COLOCATED_PYTHON_SIDECAR_MEMORY",
-    "COLOCATED_PYTHON_SIDECAR_SHM",
-    "ENABLE_MULTI_NUMA",
-    "PATHWAYS_PROXY_EXTRA_ARGS",
-    "PATHWAYS_WORKER_EXTRA_ENV",
-    "RAIDEN_BROADCAST_K",
-    "TPU_RAIDEN_DATA_NICS",
-    "TPU_RESERVATION",
     "USER",
 })
 _VAR_REF = re.compile(r"\$\{?([A-Z][A-Z0-9_]*)")
@@ -154,12 +144,16 @@ class LaunchScriptsTest(absltest.TestCase):
       self,
       args: list[str],
       extra_env: dict[str, str] | None = None,
+      *,
+      task: bool = True,
   ) -> subprocess.CompletedProcess[str]:
+    """Runs `launch.sh`, by default with `launcher_testing.TASK_ARGS`."""
     env = launcher_testing.launcher_env()
     if extra_env:
       env.update(extra_env)
+    task_args = launcher_testing.TASK_ARGS if task else ()
     return subprocess.run(
-        ["bash", str(LAUNCH_SH), *args],
+        ["bash", str(LAUNCH_SH), *task_args, *args],
         env=env,
         capture_output=True,
         text=True,
@@ -333,6 +327,23 @@ class LaunchScriptsTest(absltest.TestCase):
         },
         legacy,
     )
+    # The Pathways, Raiden and reservation settings are config keys now
+    # (`cluster_config.pathways`, `weight_sync_config.raiden`,
+    # `cluster_config.k8s.tpu_reservation`).
+    self.assertContainsSubset(
+        {
+            "COLOCATED_PYTHON_SIDECAR_IMAGE",
+            "COLOCATED_PYTHON_SIDECAR_MEMORY",
+            "COLOCATED_PYTHON_SIDECAR_SHM",
+            "ENABLE_MULTI_NUMA",
+            "PATHWAYS_PROXY_EXTRA_ARGS",
+            "PATHWAYS_WORKER_EXTRA_ENV",
+            "RAIDEN_BROADCAST_K",
+            "TPU_RESERVATION",
+            "TRAINER_IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES",
+        },
+        legacy,
+    )
     # `launch.sh` would ignore these, silently dropping the old launchers'
     # rejection sampling or logging the trajectories they turned off.
     self.assertContainsSubset(
@@ -391,7 +402,7 @@ class LaunchScriptsTest(absltest.TestCase):
     # experimental DeepSWE environment, Raiden, vLLM, W&B), or the v2 recipe
     # and `yaml_generator.py` do. `local.sh`'s processes inherit them from the
     # caller's environment; the GKE pods don't, so there they only arrive
-    # through the config (e.g. `cluster_config.k8s.trainer_extra_env`).
+    # through the config (e.g. `cluster_config.roles.trainer.env`).
     self.assertEmpty(
         set(legacy)
         & {
@@ -539,10 +550,9 @@ class LaunchScriptsTest(absltest.TestCase):
     self.assertIn("kubectl delete jobset testuser-orch -n default", res.stdout)
     self.assertIn("kubectl delete jobset testuser-train -n default", res.stdout)
     self.assertIn(
-        "kubectl delete leaderworkerset testuser-roll-0 -n default", res.stdout
-    )
-    self.assertIn(
-        "kubectl delete leaderworkerset testuser-roll-1 -n default", res.stdout
+        "kubectl delete leaderworkerset testuser-roll-0 testuser-roll-1 -n"
+        " default",
+        res.stdout,
     )
     self.assertIn("RAIDEN_USE_FFI=1", res.stdout)
     self.assertIn("RAIDEN_USE_FFI=0", res.stdout)
@@ -576,7 +586,7 @@ class LaunchScriptsTest(absltest.TestCase):
         "--dry-run",
         "cluster_config.target=k8s",
         "cluster_config.k8s.tunix_image=test-image",
-        "cluster_config.k8s.enable_pathways_persistence=true",
+        "cluster_config.pathways.trainer.persistence=true",
         "agentic_grpo_config.beta=0.0",
     ])
     self.assertEqual(res_persistence.returncode, 0, msg=res_persistence.stderr)
@@ -593,25 +603,134 @@ class LaunchScriptsTest(absltest.TestCase):
     self.assertIn("cluster_config.k8s.tunix_image is empty", res.stderr)
 
   def test_k8s_rejects_reference_worker(self):
-    # The default beta (0.04) enables the reference worker, which k8s.sh does
-    # not deploy.
+    # A KL penalty enables the reference worker, which k8s.sh does not deploy.
     res = self._run_launch([
         "start",
         "--dry-run",
         "cluster_config.target=k8s",
         "cluster_config.k8s.tunix_image=test-image",
+        "agentic_grpo_config.beta=0.04",
     ])
     self.assertNotEqual(res.returncode, 0)
     self.assertIn("does not deploy a reference inference worker", res.stderr)
     self.assertNotIn("apiVersion:", res.stdout)
 
   def test_k8s_stop_command_only_deletes_resources(self):
-    # Deleting the jobs needs no node image, and the default beta's reference
+    # Deleting the jobs needs no node image and no task, and a reference
     # worker (which k8s.sh does not deploy) is no reason to fail.
-    res = self._run_launch(["stop", "--dry-run", "cluster_config.target=k8s"])
+    res = self._run_launch(
+        [
+            "stop",
+            "--dry-run",
+            "cluster_config.target=k8s",
+            "agentic_grpo_config.beta=0.04",
+        ],
+        task=False,
+    )
     self.assertEqual(res.returncode, 0, msg=res.stderr)
     self.assertIn("kubectl delete jobset testuser-orch -n default", res.stdout)
     self.assertNotIn("apiVersion:", res.stdout)
+
+  def test_commands_that_start_nodes_require_a_task(self):
+    # `resolve_config_test` covers which keys the message names. The trainer
+    # node does not check the task itself, so `launch.sh` is its only guard.
+    k8s = ["cluster_config.target=k8s", "cluster_config.k8s.tunix_image=img"]
+    for args in (
+        ["start", "cluster_config.target=local"],
+        ["start", *k8s],
+        ["orchestrator", *k8s],
+        ["trainer", *k8s],
+        ["rollout", *k8s],
+    ):
+      with self.subTest(args=args[:2]):
+        res = self._run_launch(["--dry-run", *args], task=False)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn(
+            "Error: The config names no task: data_module, env_class_path,"
+            " agent_class_path, registry_module must be set.",
+            res.stderr,
+        )
+        self.assertNotIn("command:", res.stdout)
+        self.assertNotIn("apiVersion:", res.stdout)
+
+  def test_unsupported_target_or_command_is_reported_before_the_task(self):
+    for args, error in (
+        (
+            ["trainer", "cluster_config.target=local"],
+            (
+                "command 'trainer' is not supported for"
+                " cluster_config.target=local"
+            ),
+        ),
+        (
+            # `target: external` requires an absolute artifact root.
+            [
+                "start",
+                "cluster_config.target=external",
+                "cluster_config.artifact_root=/tmp/artifacts",
+            ],
+            "target=external runs are started by another launcher",
+        ),
+    ):
+      with self.subTest(args=args[:2]):
+        res = self._run_launch(["--dry-run", *args], task=False)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn(error, res.stderr)
+        self.assertNotIn("names no task", res.stderr)
+
+  def test_k8s_rollout_batches_manifests_and_deletes(self):
+    tempdir = self.create_tempdir().full_path
+    kubectl_log = os.path.join(tempdir, "kubectl_calls.log")
+    applied_manifest = os.path.join(tempdir, "applied.yaml")
+    kubectl_bin = os.path.join(tempdir, "kubectl")
+    with open(kubectl_bin, "w") as f:
+      f.write(
+          "#!/bin/bash\n"
+          f'echo "$*" >> "{kubectl_log}"\n'
+          'if [[ "$*" == *"apply -f -"* ]]; then\n'
+          f'  cat > "{applied_manifest}"\n'
+          "fi\n"
+      )
+    os.chmod(kubectl_bin, 0o755)
+
+    res = self._run_launch(
+        [
+            "rollout",
+            "cluster_config.target=k8s",
+            "cluster_config.k8s.tunix_image=test-image",
+            "cluster_config.rollout_replicas=4",
+            "agentic_grpo_config.beta=0.0",
+        ],
+        extra_env={
+            "PATH": f"{tempdir}:{os.environ.get('PATH', '')}",
+            "ENTER_KUBE_CONTEXT": "/dev/null",
+        },
+    )
+    self.assertEqual(res.returncode, 0, msg=res.stderr)
+
+    with open(kubectl_log) as f:
+      calls = [line.strip() for line in f if line.strip()]
+    self.assertEqual(
+        calls,
+        [
+            (
+                "delete leaderworkerset testuser-roll-0 testuser-roll-1"
+                " testuser-roll-2 testuser-roll-3 -n default --ignore-not-found"
+                " --wait=true"
+            ),
+            "apply -f -",
+        ],
+    )
+
+    with open(applied_manifest) as f:
+      docs = list(yaml.safe_load_all(f.read()))
+    self.assertLen(docs, 4)
+    self.assertEqual(
+        [doc["metadata"]["name"] for doc in docs],
+        [f"testuser-roll-{i}" for i in range(4)],
+    )
+    for i, doc in enumerate(docs):
+      self.assertIn(f"DIST_RL_ROLLOUT_REPLICA={i}", yaml.safe_dump(doc))
 
   def test_k8s_rollout_compilation_cache_comes_from_the_config(self):
     args = [
@@ -767,7 +886,7 @@ class LaunchScriptsTest(absltest.TestCase):
         "cluster_config.k8s.termination_grace_seconds=120",
         "cluster_config.k8s.kueue_queue_name=rl-queue",
         "cluster_config.k8s.cpu_nodepool=cpu-np",
-        "cluster_config.k8s.cpu_memory=64Gi",
+        "cluster_config.roles.orchestrator.memory.request=64Gi",
         "cluster_config.k8s.head_excluded_nodepools=[cpu-np,sandbox-pool]",
     ])
     self.assertEqual(res.returncode, 0, msg=res.stderr)
@@ -857,12 +976,23 @@ class LaunchScriptsTest(absltest.TestCase):
         "cluster_config.k8s.rollout.tpu_slice=tpu7x:2x2x1",
         "cluster_config.k8s.use_dynamic_slicing=true",
         "cluster_config.k8s.cpu_machine=n2-highmem-32",
-        "cluster_config.k8s.pathways_proxy_memory_limit=190G",
-        "cluster_config.k8s.pathways_proxy_memory=24G",
-        "cluster_config.k8s.pathways_rm_memory=8G",
-        "cluster_config.k8s.user_container_memory=56G",
-        "cluster_config.k8s.user_container_memory_limit=80G",
-        "cluster_config.k8s.pathways_worker_memory=120G",
+        "cluster_config.pathways.proxy_memory.limit=190G",
+        "cluster_config.pathways.proxy_memory.request=24G",
+        "cluster_config.pathways.rm_memory.request=8G",
+        "cluster_config.roles.rollout.memory.request=56G",
+        "cluster_config.roles.rollout.memory.limit=80G",
+        "cluster_config.pathways.server_memory.request=120G",
+        # Settings that used to be environment variables of the launcher.
+        "cluster_config.pathways.worker_env.MY_WORKER_VAR=a b",
+        "cluster_config.pathways.proxy_extra_args=--xla_a=1 --xla_b=2",
+        (
+            "cluster_config.pathways.trainer.ifrt_proxy_large_transfer_threshold"
+            "_bytes=1048576"
+        ),
+        "cluster_config.k8s.tpu_reservation=my-res",
+        "weight_sync_config.raiden.data_nics=eth0,eth1",
+        "weight_sync_config.raiden.multi_numa=true",
+        "weight_sync_config.raiden.broadcast_k=128",
     ]
     res = self._run_launch(args)
     self.assertEqual(res.returncode, 0, msg=res.stderr)
@@ -901,6 +1031,29 @@ class LaunchScriptsTest(absltest.TestCase):
     self.assertEqual(
         containers["main"]["resources"]["limits"]["memory"], "80G"
     )
+    # The trainer keeps its own request and limit
+    # (`cluster_config.roles.trainer.memory`).
+    trainer_proc = next(
+        rj["template"]["spec"]["template"]["spec"]
+        for rj in jobsets["testuser-train"]["spec"]["replicatedJobs"]
+        if rj["name"] == "proc"
+    )
+    trainer_main = next(
+        c for c in trainer_proc["containers"] if c["name"] == "main"
+    )
+    self.assertEqual(trainer_main["resources"]["requests"]["memory"], "48G")
+    self.assertEqual(trainer_main["resources"]["limits"]["memory"], "70G")
+    # Only the trainer gets the IFRT transfer threshold; the rollout keeps the
+    # generator's default.
+    threshold = "IFRT_PROXY_GRPC_LARGE_TRANSFER_OPTIMIZATION_THRESHOLD_BYTES"
+    self.assertIn(
+        {"name": threshold, "value": "1048576"}, trainer_main["env"]
+    )
+    self.assertIn(
+        {"name": threshold, "value": str(2**63 - 1)}, containers["main"]["env"]
+    )
+    for flag in ("--xla_a=1", "--xla_b=2"):
+      self.assertIn(flag, init_containers["pathways-proxy"]["args"])
 
     # Worker pod (pw-node) container (pathways-worker).
     pw_spec = rjobs["pw-node"]
@@ -908,6 +1061,17 @@ class LaunchScriptsTest(absltest.TestCase):
     self.assertEqual(
         pw_containers["pathways-worker"]["resources"]["requests"]["memory"],
         "120G",
+    )
+    worker_env = pw_containers["pathways-worker"]["env"]
+    for name, value in (
+        ("MY_WORKER_VAR", "a b"),
+        ("TPU_RAIDEN_DATA_NICS", "eth0,eth1"),
+        ("ENABLE_MULTI_NUMA", "1"),
+        ("RAIDEN_BROADCAST_K", "128"),
+    ):
+      self.assertIn({"name": name, "value": value}, worker_env)
+    self.assertEqual(
+        pw_spec["nodeSelector"]["cloud.google.com/reservation-name"], "my-res"
     )
 
     # With `head_nodepool` set alongside `use_dynamic_slicing=true`, both the
@@ -936,12 +1100,12 @@ class LaunchScriptsTest(absltest.TestCase):
         )
 
   def test_otel_commands_deploy_and_delete_the_collector(self):
-    # The collector needs no `cluster_config.k8s.tunix_image`, and the default
-    # beta's reference worker (which k8s.sh does not deploy) is no reason to
-    # fail.
-    k8s = ["cluster_config.target=k8s"]
+    # The collector needs no `cluster_config.k8s.tunix_image` and no task, and
+    # a reference worker (which k8s.sh does not deploy) is no reason to fail.
+    k8s = ["cluster_config.target=k8s", "agentic_grpo_config.beta=0.04"]
     res = self._run_launch(
-        ["otel", "--dry-run", *k8s, "cluster_config.ports.otel=4318"]
+        ["otel", "--dry-run", *k8s, "cluster_config.ports.otel=4318"],
+        task=False,
     )
     self.assertEqual(res.returncode, 0, msg=res.stderr)
     self.assertIn(
@@ -962,7 +1126,7 @@ class LaunchScriptsTest(absltest.TestCase):
     self.assertEqual(service["metadata"]["name"], "testuser-otel")
     self.assertEqual(service["spec"]["ports"][0]["port"], 4318)
 
-    res = self._run_launch(["stop-otel", "--dry-run", *k8s])
+    res = self._run_launch(["stop-otel", "--dry-run", *k8s], task=False)
     self.assertEqual(res.returncode, 0, msg=res.stderr)
     self.assertIn("kubectl delete service testuser-otel -n default", res.stdout)
     self.assertNotIn("apiVersion:", res.stdout)
@@ -983,6 +1147,66 @@ class LaunchScriptsTest(absltest.TestCase):
     )
     self.assertNotEqual(res.returncode, 0)
     self.assertIn("OTEL_PORT", res.stderr)
+
+  def test_role_env_and_sandbox_settings_render_into_processes(self):
+    role_args = [
+        "agentic_grpo_config.beta=0.0",
+        "cluster_config.roles.orchestrator.env.ORCH_FLAG=x",
+        "cluster_config.roles.trainer.env.TRAIN_FLAG='a b'",
+        "cluster_config.roles.rollout.env.ROLL_FLAG='0'",
+    ]
+    local_res = self._run_launch(
+        ["--dry-run", "cluster_config.target=local", *role_args]
+    )
+    self.assertEqual(local_res.returncode, 0, msg=local_res.stderr)
+    for expected in (
+        "Trainer environment: TRAIN_FLAG='a b'",
+        "Rollout environment: ROLL_FLAG=0",
+        "Orchestrator environment: ORCH_FLAG=x",
+    ):
+      self.assertIn(expected, local_res.stdout)
+    inference_res = self._run_launch([
+        "--dry-run",
+        "cluster_config.target=local",
+        "agentic_grpo_config.beta=0.04",
+        "cluster_config.local.inference_devices=4,5",
+        "cluster_config.roles.inference.env.INF_FLAG=y",
+    ])
+    self.assertEqual(inference_res.returncode, 0, msg=inference_res.stderr)
+    self.assertIn("Inference environment: INF_FLAG=y", inference_res.stdout)
+
+    k8s_res = self._run_launch([
+        "start",
+        "--dry-run",
+        "cluster_config.target=k8s",
+        "cluster_config.k8s.tunix_image=test-image",
+        "cluster_config.k8s.orchestrator_id=custom-orch",
+        "kubernetes_config.namespace=swe-ns",
+        "kubernetes_config.node_selector_key=cloud.google.com/gke-nodepool",
+        "kubernetes_config.node_selector_val=swe-pool",
+        "cluster_config.k8s.rollout.jobset_yaml=jobset.mcjax.ray.yaml",
+        *role_args,
+    ])
+    self.assertEqual(k8s_res.returncode, 0, msg=k8s_res.stderr)
+    # Multi-host Ray rollouts export the role env on the head and worker hosts
+    # before starting Ray.
+    self.assertEqual(k8s_res.stdout.count(" && export ROLL_FLAG=0"), 2)
+    for expected in ("ORCH_FLAG=x ", "TRAIN_FLAG='a b' ", "ROLL_FLAG=0 "):
+      self.assertIn(f"{expected}python -m", k8s_res.stdout)
+    self.assertEqual(
+        set(
+            re.findall(
+                r"ORCHESTRATOR_ID=custom-orch NAMESPACE=swe-ns "
+                r"NODE_SELECTOR_KEY=cloud\.google\.com/gke-nodepool "
+                r"NODE_SELECTOR_VAL=swe-pool .*--process_main=(\S+)",
+                k8s_res.stdout,
+            )
+        ),
+        {
+            "tunix.dist_rl.launch.nodes.orchestrator.main",
+            "tunix.dist_rl.launch.nodes.rollout.main",
+        },
+    )
 
   def test_drivers_only_read_exported_or_known_variables(self):
     exported = set(
@@ -1056,7 +1280,7 @@ class LaunchScriptsTest(absltest.TestCase):
     wrapped_default = self._run_launch(
         [
             *base_args,
-            "cluster_config.trainer_main=custom.wrapper.trainer_main",
+            "cluster_config.roles.trainer.main=custom.wrapper.trainer_main",
         ],
         extra_env={"PYTHON_BIN": str(stub_py)},
     )
@@ -1070,8 +1294,8 @@ class LaunchScriptsTest(absltest.TestCase):
         [
             *base_args,
             "cluster_config.local.download_model_weights=false",
-            "cluster_config.trainer_main=custom.mock.trainer_main",
-            "cluster_config.rollout_main=custom.mock.rollout_main",
+            "cluster_config.roles.trainer.main=custom.mock.trainer_main",
+            "cluster_config.roles.rollout.main=custom.mock.rollout_main",
             "weight_sync_config.mode=noop",
         ],
         extra_env={"PYTHON_BIN": str(stub_py)},

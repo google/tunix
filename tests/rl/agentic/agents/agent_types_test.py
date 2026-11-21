@@ -299,7 +299,7 @@ class AgentChatCompletionsShallowSnapshotTest(absltest.TestCase):
       self,
   ):
     ref = agent_types.common_datatypes.RoutedExpertsRef(
-        worker_id="rollout-0", ref_id=42
+        worker_id="rollout-0", instance_id="inst-0", ref_id=42
     )
     item = agent_types.TrajectoryItem(
         prompt_id="p_ref",
@@ -314,7 +314,7 @@ class AgentChatCompletionsShallowSnapshotTest(absltest.TestCase):
     serialized = item.to_dict()
     self.assertEqual(
         serialized["routed_experts_ref"],
-        {"worker_id": "rollout-0", "ref_id": 42},
+        {"worker_id": "rollout-0", "instance_id": "inst-0", "ref_id": 42},
     )
     self.assertEqual(serialized["metadata"], {"extra": "ok"})
     restored = agent_types.TrajectoryItem.from_dict(serialized)

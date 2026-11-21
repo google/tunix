@@ -67,7 +67,7 @@ calls in parallel for efficiency.
 
 ### Agent/Environment interaction
 
-![Agent/Environment interaction](images/agentic_agent:env.png)
+![Agent/Environment interaction](images/agentic_agent_env.png)
 
 --------------------------------------------------------------------------------
 

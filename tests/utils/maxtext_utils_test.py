@@ -73,6 +73,100 @@ class MaxTextUtilsTest(absltest.TestCase):
       self.assertIn("rollout_tensor_parallelism=4", argv)
       self.assertEqual(cfg, mock_cfg)
 
+  def test_build_maxtext_config_skip_step_on_spikes_and_nan(self):
+    mock_pyconfig = mock.MagicMock()
+    mock_engine = mock.MagicMock()
+    mock_mutils = mock.MagicMock()
+
+    mock_cfg = mock.MagicMock()
+    mock_cfg.raw_data_dict = {}
+    mock_pyconfig.initialize.return_value = mock_cfg
+    mock_pyconfig.__file__ = "/fake/maxtext/configs/pyconfig.py"
+
+    with mock.patch.object(
+        maxtext_utils,
+        "maxtext_modules",
+        return_value=(mock_pyconfig, mock_engine, mock_mutils),
+    ), mock.patch("os.path.exists", return_value=True):
+      cfg = maxtext_utils.build_maxtext_config(
+          model_name="gemma2-9b",
+          skip_step_on_spikes=True,
+          skip_step_on_nan=True,
+          skip_step_interval=64,
+          skip_step_scaling_factor=4.5,
+      )
+      mock_pyconfig.initialize.assert_called_once()
+      argv = mock_pyconfig.initialize.call_args[0][0]
+      self.assertIn("skip_step_on_spikes=True", argv)
+      self.assertIn("skip_step_on_nan=True", argv)
+      self.assertIn("skip_step_interval=64", argv)
+      self.assertIn("skip_step_scaling_factor=4.5", argv)
+      self.assertEqual(cfg, mock_cfg)
+
+      mock_pyconfig.initialize.reset_mock()
+      maxtext_utils.build_maxtext_config(
+          model_name="gemma2-9b",
+          skip_step_on_nan=False,
+      )
+      argv_off = mock_pyconfig.initialize.call_args[0][0]
+      self.assertIn("skip_step_on_nan=False", argv_off)
+
+  def test_build_maxtext_config_defaults_omit_skip_step_keys(self):
+    mock_pyconfig = mock.MagicMock()
+    mock_cfg = mock.MagicMock()
+    mock_pyconfig.initialize.return_value = mock_cfg
+    mock_pyconfig.__file__ = "/fake/maxtext/configs/pyconfig.py"
+
+    with mock.patch.object(
+        maxtext_utils,
+        "maxtext_modules",
+        return_value=(mock_pyconfig, mock.MagicMock(), mock.MagicMock()),
+    ), mock.patch("os.path.exists", return_value=True):
+      maxtext_utils.build_maxtext_config(model_name="gemma2-9b")
+      argv = mock_pyconfig.initialize.call_args[0][0]
+      keys = {arg.split("=", 1)[0] for arg in argv if "=" in arg}
+      self.assertFalse(any(k.startswith("skip_step_") for k in keys), keys)
+
+  def test_build_maxtext_config_rejects_unsupported_skip_step_fields(self):
+    mock_pyconfig = mock.MagicMock()
+    mock_pyconfig.__file__ = "/fake/maxtext/configs/pyconfig.py"
+    mock_pyconfig.types.MaxTextConfig.model_fields = {"model_name": object()}
+
+    with mock.patch.object(
+        maxtext_utils,
+        "maxtext_modules",
+        return_value=(mock_pyconfig, mock.MagicMock(), mock.MagicMock()),
+    ), mock.patch("os.path.exists", return_value=True):
+      # Default args emit no skip_step_* keys and succeed on older MaxText.
+      maxtext_utils.build_maxtext_config(model_name="gemma2-9b")
+      with self.assertRaisesRegex(ValueError, "skip_step_on_nan"):
+        maxtext_utils.build_maxtext_config(
+            model_name="gemma2-9b", skip_step_on_nan=False
+        )
+      with self.assertRaisesRegex(ValueError, "skip_step_on_spikes"):
+        maxtext_utils.build_maxtext_config(
+            model_name="gemma2-9b", skip_step_on_spikes=True
+        )
+
+  def test_build_maxtext_config_skip_step_numeric_validation(self):
+    mock_pyconfig = mock.MagicMock()
+    mock_pyconfig.__file__ = "/fake/maxtext/configs/pyconfig.py"
+    with mock.patch.object(
+        maxtext_utils,
+        "maxtext_modules",
+        return_value=(mock_pyconfig, mock.MagicMock(), mock.MagicMock()),
+    ), mock.patch("os.path.exists", return_value=True):
+      for bad_interval in (0, -1, True):
+        with self.assertRaisesRegex(ValueError, "skip_step_interval"):
+          maxtext_utils.build_maxtext_config(
+              model_name="gemma2-9b", skip_step_interval=bad_interval
+          )
+      for bad_factor in (0.0, -1.0, float("inf"), float("nan"), True):
+        with self.assertRaisesRegex(ValueError, "skip_step_scaling_factor"):
+          maxtext_utils.build_maxtext_config(
+              model_name="gemma2-9b", skip_step_scaling_factor=bad_factor
+          )
+
   def test_build_maxtext_config_auto_padded_moe_mlp_dim(self):
     mock_pyconfig = mock.MagicMock()
     mock_cfg = mock.MagicMock()

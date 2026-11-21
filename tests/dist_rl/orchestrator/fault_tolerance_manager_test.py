@@ -425,6 +425,94 @@ class FaultToleranceManagerTest(absltest.TestCase):
     with self.assertRaises(fault_tolerance_manager.RolloutCapacityError):
       zero_grace_ftm.check_rollout_capacity()
 
+  def test_staging_slot_floor_arms_on_eviction_and_recovers(self):
+    registry = worker_registry.WorkerRegistry()
+    h0 = mock.create_autospec(remote_execution.ActorHandle, instance=True)
+    h1 = mock.create_autospec(remote_execution.ActorHandle, instance=True)
+    for idx, h in enumerate((h0, h1)):
+      registry.register_handle(
+          f"r-{idx}",
+          [datatypes.Role.ROLLOUT],
+          h,
+          resources={"slots": 4},
+      )
+      worker_registry_testing.set_status(
+          registry, f"r-{idx}", worker_registry.AdmissionStatus.ACTIVE
+      )
+    now = [0.0]
+    ftm = fault_tolerance_manager.FaultToleranceManager(
+        registry,
+        config=datatypes.FaultToleranceConfig(
+            enabled=True,
+            min_active_rollout_ratio=0.5,
+            min_active_rollout_grace_s=10.0,
+        ),
+    )
+    ftm.set_staging_slot_floor(
+        lambda targets: sum(
+            int(info.resources["slots"]) for info, _ in targets
+        ),
+        required_slots=6,
+    )
+    with mock.patch.object(
+        fault_tolerance_manager, "_monotonic", side_effect=lambda: now[0]
+    ):
+      ftm.check_rollout_capacity()  # 8 >= 6 slots, 2/2 active
+
+      # Evicting r-1 at t=5.0 keeps ratio 1/2 == 0.5 (>= 0.5), yet drops slots
+      # to 4 < 6: `on_worker_unreachable` must arm the staging grace timer at
+      # t=5.0 immediately without raising inside the callback.
+      now[0] = 5.0
+      ftm.on_worker_unreachable(h1, ConnectionError("peer died"))
+      now[0] = 14.9
+      ftm.check_rollout_capacity()
+      now[0] = 15.0
+      with self.assertRaisesRegex(
+          fault_tolerance_manager.RolloutCapacityError,
+          r"staging slots remained below required bound for 10\.0s"
+          r" \(grace 10\.0s\): 4 < 6 across 1 worker\(s\)",
+      ):
+        ftm.check_rollout_capacity()
+
+      # Recovery resets the timer; clearing the floor disables checks.
+      h1_rejoined = mock.create_autospec(
+          remote_execution.ActorHandle, instance=True
+      )
+      registry.register_handle(
+          "r-1",
+          [datatypes.Role.ROLLOUT],
+          h1_rejoined,
+          resources={"slots": 4},
+      )
+      worker_registry_testing.set_status(
+          registry, "r-1", worker_registry.AdmissionStatus.ACTIVE
+      )
+      now[0] = 20.0
+      ftm.check_rollout_capacity()
+      registry.unregister("r-1")
+      now[0] = 30.0
+      ftm.check_rollout_capacity()  # re-armed at t=30.0, not expired
+      ftm.set_staging_slot_floor(None, 0)
+      now[0] = 100.0
+      ftm.check_rollout_capacity()
+
+    # Under enabled=False, shortfall fails immediately without grace.
+    no_ft_ftm = fault_tolerance_manager.FaultToleranceManager(
+        registry,
+        config=datatypes.FaultToleranceConfig(enabled=False),
+    )
+    no_ft_ftm.set_staging_slot_floor(
+        lambda targets: sum(
+            int(info.resources["slots"]) for info, _ in targets
+        ),
+        required_slots=6,
+    )
+    with self.assertRaisesRegex(
+        fault_tolerance_manager.RolloutCapacityError,
+        "only 4 staging slots across 1 worker",
+    ):
+      no_ft_ftm.check_rollout_capacity()
+
 
 if __name__ == "__main__":
   absltest.main()

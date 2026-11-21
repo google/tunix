@@ -21,6 +21,7 @@ import time
 
 from absl.testing import absltest
 import numpy as np
+from tunix.common import configs
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import test_utils
 from tunix.dist_rl.rollout import sampler as sampler_lib
@@ -50,18 +51,14 @@ class MockBaseSamplerImplTest(absltest.TestCase):
         routed_experts_shape_spec=(4, 8),
         num_experts=384,
         eos_token_id=151645,
+        config=configs.RolloutConfig(return_routed_experts=True),
     )
     prompt_turn0 = np.arange(10, 22, dtype=np.int32)  # 12 prompt tokens
     req0 = sampler_lib.SamplingRequest(
         request_id="traj-1",
         prompt=prompt_turn0,
-        metadata={"min_turns": 1},
-        sampling_params=sampler_lib.SamplingParams(
-            max_tokens=32,
-            return_logprobs=True,
-            return_routed_experts=True,
-            routed_experts_prompt_start=0,
-        ),
+        max_tokens=32,
+        routed_experts_prompt_start=0,
     )
     resp0 = asyncio.run(sampler.sample(req0))
     np.testing.assert_array_equal(resp0.prompt_token_ids, prompt_turn0)
@@ -77,13 +74,8 @@ class MockBaseSamplerImplTest(absltest.TestCase):
     req1 = sampler_lib.SamplingRequest(
         request_id="traj-1",
         prompt=prompt_turn1,
-        metadata={"min_turns": 1},
-        sampling_params=sampler_lib.SamplingParams(
-            max_tokens=10,  # caps response_tokens_per_turn=16 to 10
-            return_logprobs=True,
-            return_routed_experts=True,
-            routed_experts_prompt_start=28,
-        ),
+        max_tokens=10,
+        routed_experts_prompt_start=28,
     )
     resp1 = asyncio.run(sampler.sample(req1))
     np.testing.assert_array_equal(resp1.prompt_token_ids, prompt_turn1)
@@ -92,21 +84,25 @@ class MockBaseSamplerImplTest(absltest.TestCase):
     routed1 = np.asarray(resp1.routed_experts)
     self.assertEqual(routed1.shape, (5 + 10, 4, 8))
 
+  def test_sample_empty_batch_returns_empty_list(self):
+    sampler = test_utils.MockBaseSamplerImpl(default_delay=0.5)
+    self.assertEqual(asyncio.run(sampler.sample([])), [])
+
   def test_routed_experts_tiles_deterministically_beyond_slab_rows(self):
     sampler = test_utils.MockBaseSamplerImpl(
         default_delay=0.0,
         response_tokens_per_turn=4500,
         routed_experts_shape_spec=(2, 4),
         num_experts=128,
+        config=configs.RolloutConfig(return_routed_experts=True),
     )
     prompt = np.arange(100, dtype=np.int32)
-    sp = sampler_lib.SamplingParams(
-        max_tokens=4500, return_routed_experts=True
-    )
     resp_a = asyncio.run(
         sampler.sample(
             sampler_lib.SamplingRequest(
-                request_id="long-traj", prompt=prompt, sampling_params=sp
+                request_id="long-traj",
+                prompt=prompt,
+                max_tokens=4500,
             )
         )
     )
@@ -115,11 +111,14 @@ class MockBaseSamplerImplTest(absltest.TestCase):
         response_tokens_per_turn=4500,
         routed_experts_shape_spec=(2, 4),
         num_experts=128,
+        config=configs.RolloutConfig(return_routed_experts=True),
     )
     resp_b = asyncio.run(
         sampler_b.sample(
             sampler_lib.SamplingRequest(
-                request_id="long-traj", prompt=prompt, sampling_params=sp
+                request_id="long-traj",
+                prompt=prompt,
+                max_tokens=4500,
             )
         )
     )
@@ -137,6 +136,7 @@ class MockBaseSamplerImplTest(absltest.TestCase):
         default_delay=0.0,
         response_tokens_per_turn=4,
         routed_experts_shape_spec=(2, 4),
+        config=configs.RolloutConfig(return_routed_experts=True),
     )
     with self.assertRaisesRegex(ValueError, "routed_experts_prompt_start"):
       asyncio.run(
@@ -144,11 +144,8 @@ class MockBaseSamplerImplTest(absltest.TestCase):
               sampler_lib.SamplingRequest(
                   request_id="bad-start",
                   prompt=np.arange(4, dtype=np.int32),
-                  sampling_params=sampler_lib.SamplingParams(
-                      max_tokens=4,
-                      return_routed_experts=True,
-                      routed_experts_prompt_start=5,
-                  ),
+                  max_tokens=4,
+                  routed_experts_prompt_start=5,
               )
           )
       )
@@ -162,8 +159,7 @@ class MockBaseSamplerImplTest(absltest.TestCase):
             sampler_lib.SamplingRequest(
                 request_id="traj-0",
                 prompt=np.array([1, 2], dtype=np.int32),
-                metadata={"min_turns": 1},
-                sampling_params=sampler_lib.SamplingParams(max_tokens=2),
+                max_tokens=2,
             )
         )
     )
@@ -175,8 +171,7 @@ class MockBaseSamplerImplTest(absltest.TestCase):
               sampler_lib.SamplingRequest(
                   request_id=f"traj-{i}",
                   prompt=np.array([1, 2], dtype=np.int32),
-                  metadata={"min_turns": 1},
-                  sampling_params=sampler_lib.SamplingParams(max_tokens=2),
+                  max_tokens=2,
               )
           )
       )
@@ -186,22 +181,20 @@ class MockBaseSamplerImplTest(absltest.TestCase):
             sampler_lib.SamplingRequest(
                 request_id="traj-4096",
                 prompt=np.array([1, 2], dtype=np.int32),
-                metadata={"min_turns": 1},
-                sampling_params=sampler_lib.SamplingParams(max_tokens=2),
+                max_tokens=2,
             )
         )
     )
     self.assertStartsWith(retained_resp.text, "FINAL_ANSWER:")
 
-    # Completed (`is_final=True`) trajectories — including omitted `request_id`
-    # (`"default"`) — are evicted immediately instead of poisoning later calls.
+    # Completed (`is_final=True`) trajectories are evicted immediately instead
+    # of poisoning later calls.
     reused_resp = asyncio.run(
         sampler.sample(
             sampler_lib.SamplingRequest(
                 request_id="traj-4096",
                 prompt=np.array([1, 2], dtype=np.int32),
-                metadata={"min_turns": 1},
-                sampling_params=sampler_lib.SamplingParams(max_tokens=2),
+                max_tokens=2,
             )
         )
     )
@@ -209,11 +202,21 @@ class MockBaseSamplerImplTest(absltest.TestCase):
 
     for _ in range(2):
       default_turn0 = asyncio.run(
-          sampler.sample(np.array([1, 2], dtype=np.int32))
+          sampler.sample(
+              sampler_lib.SamplingRequest(
+                  request_id="traj-reused",
+                  prompt=np.array([1, 2], dtype=np.int32),
+              )
+          )
       )
       self.assertStartsWith(default_turn0.text, "TOOL_CALL:")
       default_turn1 = asyncio.run(
-          sampler.sample(np.array([1, 2, 3, 4], dtype=np.int32))
+          sampler.sample(
+              sampler_lib.SamplingRequest(
+                  request_id="traj-reused",
+                  prompt=np.array([1, 2, 3, 4], dtype=np.int32),
+              )
+          )
       )
       self.assertStartsWith(default_turn1.text, "FINAL_ANSWER:")
 
@@ -222,8 +225,7 @@ class MockBaseSamplerImplTest(absltest.TestCase):
             sampler_lib.SamplingRequest(
                 request_id="traj-0",
                 prompt=np.array([1, 2], dtype=np.int32),
-                metadata={"min_turns": 1},
-                sampling_params=sampler_lib.SamplingParams(max_tokens=2),
+                max_tokens=2,
             )
         )
     )
@@ -240,13 +242,12 @@ class MockBaseSamplerImplTest(absltest.TestCase):
         response_tokens_per_turn=4,
         routed_experts_shape_spec=(2, 4),
         tokenizer=_WordTokenizer(),
+        config=configs.RolloutConfig(return_routed_experts=True),
     )
     req = sampler_lib.SamplingRequest(
         request_id="traj-words",
         prompt="prompt 1 tok tok tok",
-        sampling_params=sampler_lib.SamplingParams(
-            max_tokens=4, return_routed_experts=True
-        ),
+        max_tokens=4,
     )
     resp = asyncio.run(sampler.sample(req))
     self.assertEqual(resp.prompt_token_ids.shape, (5,))

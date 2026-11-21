@@ -126,7 +126,6 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
       raiden_sync_delegate = (
           raiden_weight_sync_delegate.RaidenWeightSyncDelegate(
               server_id=self.server_id,
-              partial_rollout=self.config.partial_rollout,
           )
       )
 
@@ -195,6 +194,8 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
     multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "")
     if multihost_backend:
       engine_kwargs["distributed_executor_backend"] = multihost_backend
+    if config.seed is not None:
+      engine_kwargs["seed"] = config.seed
     engine_kwargs.update(extra_kwargs)
     if config.rollout_vllm_hbm_utilization is not None:
       hbm_utilization = config.rollout_vllm_hbm_utilization
@@ -247,11 +248,6 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
         tokenizer=self.tokenizer, config=vllm_config
     )
 
-  def _get_underlying_sampler(
-      self,
-  ) -> generate_vllm_lib.VllmSampler | None:
-    return self.vllm_sampler
-
   def _require_vllm_sampler(self) -> generate_vllm_lib.VllmSampler:
     if self.vllm_sampler is None:
       raise RuntimeError(
@@ -259,11 +255,6 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
           " initialized."
       )
     return self.vllm_sampler
-
-  @property
-  def partial_rollout(self) -> bool:
-    """Whether in-flight weight updates (partial rollout) are enabled."""
-    return self.config.partial_rollout
 
   @property
   def transformer_state(self) -> Any:
@@ -379,14 +370,10 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
       sampling_requests: (
           base_sampler_lib.SamplingRequest
           | Sequence[base_sampler_lib.SamplingRequest]
-          | Any
-          | Sequence[Any]
       ),
-      **kwargs,
   ) -> (
       base_sampler_lib.SamplingResponse
-      | list[base_sampler_lib.SamplingResponse]
-      | Any
+      | Sequence[base_sampler_lib.SamplingResponse]
   ):
     """Generates completions using underlying Tunix VllmSampler."""
     if not self.vllm_sampler:
@@ -395,42 +382,19 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
           " initialized."
       )
 
-    if sampling_requests is None:
-      raise ValueError("sampling_requests cannot be None.")
-
     if isinstance(sampling_requests, base_sampler_lib.SamplingRequest):
-      requests: list[Any] = [sampling_requests]
-      is_sequence = False
-    elif isinstance(sampling_requests, (list, tuple)):
-      requests = list(sampling_requests)
-      is_sequence = True
-      for req in requests:
-        if not isinstance(
-            req, base_sampler_lib.SamplingRequest
-        ) and not hasattr(req, "prompt"):
-          raise TypeError(
-              "InprocessVllmSampler.sample() expects SamplingRequest instances,"
-              f" got {type(req).__name__}."
-          )
-    elif hasattr(sampling_requests, "prompt"):
-      requests = [sampling_requests]
+      requests: list[base_sampler_lib.SamplingRequest] = [sampling_requests]
       is_sequence = False
     else:
-      raise TypeError(
-          "InprocessVllmSampler.sample() expects SamplingRequest instances,"
-          f" got {type(sampling_requests).__name__}."
-      )
+      requests = list(sampling_requests)
+      is_sequence = True
+      if not requests:
+        return []
 
     prompts = []
     prompt_token_ids_batch = []
     has_token_prompts = False
     max_gen_steps_list = []
-    temps = []
-    top_ps = []
-    top_ks = []
-    seeds = []
-    return_logprobs_list = []
-    return_routed_experts_list = []
     routed_experts_prompt_start_list = []
     cache_salt_list = []
 
@@ -443,67 +407,29 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
         )
       else:
         prompts.append(self._prompt_to_input_string(prompt))
-      sp = (
-          req.sampling_params
-          if hasattr(req, "sampling_params") and req.sampling_params is not None
-          else base_sampler_lib.SamplingParams()
-      )
-      assert sp is not None
 
-      max_gen_steps_list.append(sp.max_tokens)
-      temps.append(sp.temperature)
-      top_ps.append(sp.top_p)
-      top_ks.append(sp.top_k)
-      seeds.append(sp.seed)
-      return_logprobs_list.append(sp.return_logprobs)
-      return_routed_experts_list.append(sp.return_routed_experts)
-      routed_experts_prompt_start_list.append(sp.routed_experts_prompt_start)
-      cache_salt_list.append(sp.cache_salt)
-
-    max_generation_steps = max(max_gen_steps_list) if max_gen_steps_list else 64
-    temperature = temps[0] if temps else 0.0
-    top_p = top_ps[0] if top_ps else None
-    top_k = top_ks[0] if top_ks else None
-    seed = seeds[0] if seeds else None
-    return_logprobs = any(return_logprobs_list) or kwargs.get(
-        "return_logprobs", False
-    )
-    routed_experts_prompt_start = (
-        routed_experts_prompt_start_list
-        if routed_experts_prompt_start_list
-        else kwargs.get("routed_experts_prompt_start", 0)
-    )
-    # Capture is an engine-level vLLM setting, so it cannot be turned on
-    # per request. Warn rather than silently handing back None routing, which
-    # would look like a dense model to the trainer.
-    if (
-        any(return_routed_experts_list)
-        and not self.config.return_routed_experts
-    ):
-      logging.warning(
-          "InprocessVllmSampler [%s]: routed experts were requested per"
-          " request, but the vLLM engine was built without"
-          " return_routed_experts, so none will be returned. Set"
-          " return_routed_experts on the sampler's RolloutConfig.",
-          self.server_id,
+      max_gen_steps_list.append(
+          req.max_tokens
+          if req.max_tokens is not None
+          else self.config.max_tokens_to_generate
       )
+      routed_experts_prompt_start_list.append(req.routed_experts_prompt_start)
+      cache_salt_list.append(req.cache_salt)
+
 
     loop = asyncio.get_running_loop()
     sampler_call_kwargs: dict[str, Any] = dict(
-        max_generation_steps=max_generation_steps,
-        temperature=temperature,
-        top_p=top_p,
-        top_k=top_k,
-        seed=seed,
-        return_logprobs=return_logprobs,
-        routed_experts_prompt_start=routed_experts_prompt_start,
+        max_generation_steps=max(max_gen_steps_list),
+        temperature=self.config.temperature,
+        top_p=self.config.top_p,
+        top_k=self.config.top_k if self.config.top_k is not None else -1,
+        return_logprobs=self.config.return_logprobs,
+        routed_experts_prompt_start=routed_experts_prompt_start_list,
     )
     if any(s is not None for s in cache_salt_list):
       sampler_call_kwargs["cache_salt"] = (
           cache_salt_list[0] if len(cache_salt_list) == 1 else cache_salt_list
       )
-    elif kwargs.get("cache_salt") is not None:
-      sampler_call_kwargs["cache_salt"] = kwargs["cache_salt"]
     if has_token_prompts:
       sampler_call_kwargs["input_strings"] = None
       sampler_call_kwargs["prompt_token_ids"] = prompt_token_ids_batch
@@ -518,8 +444,6 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
     prompt_lengths = sampler_output.prompt_lengths
     responses = []
     for i, req in enumerate(requests):
-      req_id = getattr(req, "request_id", "")
-
       txt = (
           sampler_output.text[i]
           if isinstance(sampler_output.text, list)
@@ -554,7 +478,7 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
 
       responses.append(
           base_sampler_lib.SamplingResponse(
-              request_id=req_id,
+              request_id=req.request_id,
               text=txt,
               prompt_token_ids=prompt_token_ids,
               token_ids=tok_ids,

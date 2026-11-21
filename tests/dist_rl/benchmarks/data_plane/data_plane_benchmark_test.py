@@ -171,11 +171,6 @@ class DataPlaneBenchmarkTest(parameterized.TestCase):
     with self.assertRaisesRegex(ValueError, err_regex):
       mock_trainer.build_mock_trainer_worker(hp, "trainer-0")
 
-    bad_logps_hp = self._resolve("rollout_config.return_logprobs=false")
-    with self.assertRaisesRegex(ValueError, "return_logprobs"):
-      mock_rollout.build_mock_rollout_worker(
-          bad_logps_hp, "rollout-0", tokenizer
-      )
     bad_eos_hp = self._resolve("rollout_config.eos_tokens='tok tok'")
     with self.assertRaisesRegex(ValueError, "eos_tokens"):
       mock_rollout.build_mock_rollout_worker(bad_eos_hp, "rollout-0", tokenizer)
@@ -372,6 +367,7 @@ class DataPlaneBenchmarkTest(parameterized.TestCase):
               "service_type": "trainer",
               "service_port": t_port,
               "worker_id": "trainer-0",
+              "instance_id": t_worker.instance_id,
           }),
           rpc_timeout_s=rpc_timeout_s,
       )
@@ -398,6 +394,7 @@ class DataPlaneBenchmarkTest(parameterized.TestCase):
                 "service_type": "rollout",
                 "service_port": r_port,
                 "worker_id": wid,
+                "instance_id": r_worker.instance_id,
             }),
             rpc_timeout_s=rpc_timeout_s,
         )

@@ -31,6 +31,7 @@ from collections.abc import Mapping, MutableMapping, Sequence
 import datetime
 import getpass
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -38,7 +39,8 @@ import pathlib
 import re
 import shlex
 import sys
-from typing import Any, Final
+import types
+from typing import Any, Final, Literal
 
 import omegaconf
 from tunix.cli import config as cli_config
@@ -57,6 +59,190 @@ DEFAULT_BASE_CONFIG_PATH = LAUNCH_DIR / "base_dist_config.yaml"
 # Program name (`argv[0]`) that `DistHyperParameters` passes to
 # `HyperParameters`; dist callers pass overrides only.
 _DIST_PROG: Final[str] = "dist_rl"
+
+_MODEL_SECTIONS: Final[tuple[str, ...]] = (
+    "model_config",
+    "actor_model_config",
+    "reference_model_config",
+    "rollout_model_config",
+)
+ProcessRole = Literal["orchestrator", "trainer", "rollout", "inference"]
+PROCESS_ROLES: Final[tuple[ProcessRole, ...]] = (
+    "orchestrator",
+    "trainer",
+    "rollout",
+    "inference",
+)
+_NOT_READ: Final[str] = "the distributed RL nodes never read it, so remove it"
+# Keys that earlier versions of `base_dist_config.yaml` had, mapped to what to
+# do instead ("moved to <key>" for a key that only changed its path). An
+# override that sets one fails with that hint instead of the unknown-key error.
+# A whole section is listed by its name.
+_RETIRED_KEYS: Final[Mapping[str, str]] = types.MappingProxyType({
+    **dict.fromkeys(
+        (
+            "agentic_ppo_config",
+            "critic_model_config",
+            "data_directory",
+            "data_source",
+            "dataset_name",
+            "grpo_config",
+            "max_target_length",
+            "num_batches",
+            "offload_to_cpu",
+            "ppo_config",
+            "prompt_key",
+            "rl_training_config.critic_optimizer_config",
+            "rl_training_config.data_sharding_axis",
+            "rl_training_config.gradient_accumulation_steps",
+            "rl_training_config.max_inflight_computations",
+            "rl_training_config.perf_metrics_options",
+            "rl_training_config.rollout_micro_batch_size",
+            "tfds_download",
+            "tokenizer_config.add_bos",
+            "tokenizer_config.add_eos",
+            "training_mode",
+            "vllm_config.model_version",
+        ),
+        _NOT_READ,
+    ),
+    **{
+        f"{section}.{key}": _NOT_READ
+        for section, key in itertools.product(
+            _MODEL_SECTIONS,
+            ("model_display", "mesh.allocation_policy"),
+        )
+    },
+    "training_config": (
+        "the distributed RL nodes never read it; set rl_training_config"
+        " instead"
+    ),
+    "optimizer_config": (
+        "the distributed RL nodes never read it; set"
+        " rl_training_config.actor_optimizer_config instead"
+    ),
+    "apply_chat_template_to_dataset": (
+        "the rollout workers apply the chat template (chat_parser_config), so"
+        " remove it"
+    ),
+    "rollout_config.return_logprobs": (
+        "the rollout always returns logprobs, so remove it"
+    ),
+    "vllm_config.server_mode": (
+        "the vLLM rollout engines always run in server mode, so remove it"
+    ),
+    "vllm_config.tensor_parallel_size": (
+        "it is the 'tp' axis of rollout_model_config.mesh, so remove it"
+    ),
+    "vllm_config.data_parallel_size": (
+        "it is the 'fsdp' axis of rollout_model_config.mesh, so remove it"
+    ),
+    "cluster_config.registry_module": "moved to registry_module",
+    **{
+        f"cluster_config.{role}_main": (
+            f"moved to cluster_config.roles.{role}.main"
+        )
+        for role in PROCESS_ROLES
+    },
+    **{
+        f"cluster_config.ports.{role}": (
+            f"moved to cluster_config.roles.{role}.port"
+        )
+        for role in PROCESS_ROLES
+    },
+    "cluster_config.role_env": "moved to cluster_config.roles.<role>.env",
+    "cluster_config.k8s.user_container_memory": (
+        "moved to cluster_config.roles.trainer.memory.request and"
+        " cluster_config.roles.rollout.memory.request"
+    ),
+    "cluster_config.k8s.cpu_memory": (
+        "moved to cluster_config.roles.orchestrator.memory.request"
+    ),
+    "cluster_config.k8s.user_container_memory_limit": (
+        "moved to cluster_config.roles.trainer.memory.limit and"
+        " cluster_config.roles.rollout.memory.limit"
+    ),
+    **{
+        f"cluster_config.{key}": f"moved to cluster_config.local.{key}"
+        for key in (
+            "wait_timeout_secs",
+            "wait_poll_secs",
+            "wait_debug_every_polls",
+            "wait_log_tail_lines",
+        )
+    },
+    "cluster_config.rollout_fault_tolerance": (
+        "moved to cluster_config.fault_tolerance.enabled"
+    ),
+    **{
+        f"cluster_config.k8s.pathways_{old}": (
+            f"moved to cluster_config.pathways.{new}"
+        )
+        for old, new in (
+            ("server_image", "server_image"),
+            ("proxy_image", "proxy_image"),
+            ("proxy_memory", "proxy_memory.request"),
+            ("proxy_memory_limit", "proxy_memory.limit"),
+            ("rm_memory", "rm_memory.request"),
+            ("worker_memory", "server_memory.request"),
+        )
+    },
+    "cluster_config.k8s.gcs_scratch_location": (
+        "moved to cluster_config.pathways.gcs_scratch_location"
+    ),
+    "cluster_config.k8s.enable_pathways_persistence": (
+        "moved to cluster_config.pathways.trainer.persistence"
+    ),
+    "weight_sync_config.raiden_use_ffi": (
+        "moved to weight_sync_config.raiden.use_ffi"
+    ),
+    "weight_sync_config.raiden_data_nics": (
+        "moved to weight_sync_config.raiden.data_nics"
+    ),
+    **{
+        f"cluster_config.{key}": (
+            f"moved to cluster_config.fault_tolerance.{key}"
+        )
+        for key in (
+            "max_task_retries",
+            "poll_retry_budget_s",
+            "min_active_rollout_ratio",
+            "min_active_rollout_grace_s",
+        )
+    },
+})
+_NO_EVALUATION: Final[str] = "the distributed RL path runs no evaluation yet"
+# Keys the distributed RL path does not implement yet, with the only value it
+# accepts and why. The keys stay in `base_dist_config.yaml` (each with a TODO)
+# so that setting one fails loudly instead of being ignored.
+_UNIMPLEMENTED_KEYS: Final[Mapping[str, tuple[int | None, str]]] = (
+    types.MappingProxyType({
+        **{
+            f"{section}.rng_seed": (
+                None,
+                (
+                    "LoRA always initializes with seed 0, and rollout sampling"
+                    " is not seeded"
+                ),
+            )
+            for section in _MODEL_SECTIONS
+        },
+        "num_train_epochs": (
+            None,
+            (
+                "the dataset repeats and rl_training_config.max_steps sets the"
+                " training length"
+            ),
+        ),
+        "train_fraction": (None, _NO_EVALUATION),
+        "num_test_batches": (None, _NO_EVALUATION),
+        "rl_training_config.eval_every_n_steps": (None, _NO_EVALUATION),
+        "agentic_grpo_config.num_iterations": (
+            1,
+            "each rollout batch gets one optimizer pass",
+        ),
+    })
+)
 
 
 def _dist_argv(overrides: Sequence[str]) -> list[str]:
@@ -119,15 +305,23 @@ class DistHyperParameters(cli_config.HyperParameters):
 
   Takes overrides only (see `_dist_argv`). Override files and `key=value`
   arguments deep-merge (`merge_replace_keys`), and every override key must be
-  in the base schema (`validate_nested`).
+  in the base schema (`validate_nested`). A key in `_RETIRED_KEYS` fails with
+  what to do instead.
   """
 
   cluster_targets: execution_target.ClusterTargets
 
   def __init__(self, overrides: Sequence[str]) -> None:
-    super().__init__(
-        _dist_argv(overrides), merge_replace_keys=True, validate_nested=True
-    )
+    try:
+      super().__init__(
+          _dist_argv(overrides), merge_replace_keys=True, validate_nested=True
+      )
+    except cli_config.UnknownConfigKeyError as e:
+      if e.key not in _RETIRED_KEYS:
+        raise
+      raise ValueError(
+          f"{e.key} is no longer a config key: {_RETIRED_KEYS[e.key]}."
+      ) from e
     self.cluster_targets = finalize_dist_config(self)
 
 
@@ -285,7 +479,6 @@ def _finalize_dist_defaults(hp: cli_config.HyperParameters) -> None:
           artifact_root / "models" / str(role_cfg["model_name"])
       )
 
-  _sync_packed_token_budget(_mutable_section(hp, "training_config"))
   rl_train = _mutable_section(hp, "rl_training_config")
   _sync_packed_token_budget(rl_train)
   if rl_train["mini_batch_size"] is None:
@@ -435,7 +628,6 @@ _K8S_STR_KEYS: Final[tuple[str, ...]] = (
     "priority_class",
     "service_account",
     "cpu_nodepool",
-    "cpu_memory",
     "head_nodepool",
 )
 _K8S_SCALAR_TYPES: Final[tuple[tuple[str, type[bool | str]], ...]] = (
@@ -685,22 +877,22 @@ def _validate_rollout_logps_settings(hp: cli_config.HyperParameters) -> None:
 
 
 def _validate_fault_tolerance(hp: cli_config.HyperParameters) -> None:
-  """Checks the `cluster_config` rollout fault-tolerance settings.
+  """Checks the `cluster_config.fault_tolerance` settings.
 
   Args:
     hp: Loaded configuration.
 
   Raises:
-    TypeError: If `rollout_fault_tolerance` is not a bool, `max_task_retries`
-      is not an int, or `poll_retry_budget_s`, `min_active_rollout_ratio`, or
+    TypeError: If `enabled` is not a bool, `max_task_retries` is not an int, or
+      `poll_retry_budget_s`, `min_active_rollout_ratio`, or
       `min_active_rollout_grace_s` is not a number (the first two may be null).
     ValueError: If a setting is non-finite or out of range.
   """
-  cluster = hp.config_mapping("cluster_config")
-  enabled = cluster["rollout_fault_tolerance"]
+  ft = hp.config_mapping("cluster_config")["fault_tolerance"]
+  enabled = ft["enabled"]
   if not isinstance(enabled, bool):
     raise TypeError(
-        "cluster_config.rollout_fault_tolerance must be a bool, got"
+        "cluster_config.fault_tolerance.enabled must be a bool, got"
         f" {enabled!r}."
     )
   nullable_number = (int, float, type(None))
@@ -710,33 +902,299 @@ def _validate_fault_tolerance(hp: cli_config.HyperParameters) -> None:
       ("min_active_rollout_ratio", nullable_number, "a number or null"),
       ("min_active_rollout_grace_s", (int, float), "a number"),
   ):
-    value = cluster[key]
+    value = ft[key]
     if isinstance(value, bool) or not isinstance(value, allowed):
       raise TypeError(
-          f"cluster_config.{key} must be {type_desc}, got {value!r}."
+          f"cluster_config.fault_tolerance.{key} must be {type_desc}, got"
+          f" {value!r}."
       )
-  retries = cluster["max_task_retries"]
+  retries = ft["max_task_retries"]
   if retries < 0:
     raise ValueError(
-        f"cluster_config.max_task_retries must be >= 0, got {retries}."
+        "cluster_config.fault_tolerance.max_task_retries must be >= 0, got"
+        f" {retries}."
     )
-  budget = cluster["poll_retry_budget_s"]
+  budget = ft["poll_retry_budget_s"]
   if budget is not None and not (0.0 <= budget < math.inf):
     raise ValueError(
-        "cluster_config.poll_retry_budget_s must be finite and >= 0, got"
-        f" {budget}."
+        "cluster_config.fault_tolerance.poll_retry_budget_s must be finite and"
+        f" >= 0, got {budget}."
     )
-  ratio = cluster["min_active_rollout_ratio"]
+  ratio = ft["min_active_rollout_ratio"]
   if ratio is not None and not (0.0 < ratio <= 1.0):
     raise ValueError(
-        "cluster_config.min_active_rollout_ratio must be in (0.0, 1.0], got"
-        f" {ratio}."
+        "cluster_config.fault_tolerance.min_active_rollout_ratio must be in"
+        f" (0.0, 1.0], got {ratio}."
     )
-  grace = cluster["min_active_rollout_grace_s"]
+  grace = ft["min_active_rollout_grace_s"]
   if not (0.0 <= grace < math.inf):
     raise ValueError(
-        "cluster_config.min_active_rollout_grace_s must be finite and >= 0,"
-        f" got {grace}."
+        "cluster_config.fault_tolerance.min_active_rollout_grace_s must be"
+        f" finite and >= 0, got {grace}."
+    )
+
+
+# Environment variables `node_utils.apply_library_env` sets from the config,
+# and the config key each comes from. Launchers reject them in user-supplied
+# environments so a value can only come from the config.
+LIBRARY_ENV_CONFIG_KEYS: Final[Mapping[str, str]] = types.MappingProxyType({
+    "SKIP_JAX_PRECOMPILE": "vllm_config.skip_jax_precompile",
+    "TPU_RAIDEN_DATA_NICS": "weight_sync_config.raiden.data_nics",
+    "VERIFY_WEIGHTS": "weight_sync_config.verify_weights",
+})
+_FORBIDDEN_ROLE_ENVS: Final[Mapping[str, str]] = types.MappingProxyType({
+    **{k: f"set {v} instead" for k, v in LIBRARY_ENV_CONFIG_KEYS.items()},
+    "ENABLE_PATHWAYS_PERSISTENCE": (
+        "set cluster_config.pathways.trainer.persistence instead"
+    ),
+    "DIST_RL_WORKER_PORT": "launcher-managed worker identity",
+    "DIST_RL_ROLLOUT_REPLICA": "launcher-managed worker identity",
+})
+_ROLE_ENV_PREFIX_REASONS: Final[tuple[tuple[str, str], ...]] = (
+    ("T_", "Tunix config override"),
+    ("M_", "MaxText config override"),
+)
+# The manifest generator's rule, so a name the config accepts also renders.
+_ENV_VAR_NAME_RE: Final[re.Pattern[str]] = yaml_generator.ENV_VAR_NAME_RE
+
+
+def role_env(
+    hp: cli_config.HyperParameters,
+) -> dict[ProcessRole, dict[str, str]]:
+  """Validates and returns `cluster_config.roles.<role>.env` per process."""
+  roles = hp.config_mapping("cluster_config")["roles"]
+  if not isinstance(roles, Mapping) or set(roles) != set(PROCESS_ROLES):
+    raise ValueError(
+        f"cluster_config.roles must map {PROCESS_ROLES}, got {roles!r}."
+    )
+  result: dict[ProcessRole, dict[str, str]] = {}
+  for role in PROCESS_ROLES:
+    env = roles[role]["env"]
+    if not isinstance(env, Mapping):
+      raise TypeError(
+          f"cluster_config.roles.{role}.env must be a mapping, got {env!r}."
+      )
+    if not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in env.items()
+    ):
+      raise TypeError(
+          f"cluster_config.roles.{role}.env keys and values must be strings,"
+          f" got {dict(env)!r}."
+      )
+    result[role] = dict(env)
+  return result
+
+
+def _validate_role_env(hp: cli_config.HyperParameters) -> None:
+  """Checks `cluster_config.roles.<role>.env` names and active roles."""
+  parsed = role_env(hp)
+  cluster = hp.config_mapping("cluster_config")
+  if cluster["target"] == "external" and any(parsed.values()):
+    raise ValueError(
+        "cluster_config.roles.<role>.env is set, but"
+        " cluster_config.target=external"
+        " runs the processes outside local.sh and k8s.sh, which apply it."
+    )
+  if (
+      parsed["inference"]
+      and not hp.config_mapping("cluster_config")["run_inference_node"]
+  ):
+    raise ValueError(
+        "cluster_config.roles.inference.env is set, but"
+        " cluster_config.run_inference_node resolved to false."
+    )
+  pairs: list[tuple[str, str]] = []
+  for role, env in parsed.items():
+    pairs.extend((role, k) for k in env)
+  for role, name in pairs:
+    default_reason = (
+        _FORBIDDEN_ROLE_ENVS[name] if name in _FORBIDDEN_ROLE_ENVS else ""
+    )
+    reason = next(
+        (msg for pfx, msg in _ROLE_ENV_PREFIX_REASONS if name.startswith(pfx)),
+        default_reason,
+    )
+    if reason or not _ENV_VAR_NAME_RE.match(name):
+      raise ValueError(
+          f"cluster_config.roles.{role}.env rejects {name!r}"
+          f" ({reason or 'invalid variable name'})."
+      )
+
+
+def _reject_unimplemented_settings(hp: cli_config.HyperParameters) -> None:
+  """Fails on a `_UNIMPLEMENTED_KEYS` key set to a value other than its own.
+
+  Args:
+    hp: Loaded configuration.
+
+  Raises:
+    NotImplementedError: If such a key has another value.
+  """
+  for key, (accepted, reason) in _UNIMPLEMENTED_KEYS.items():
+    section, _, name = key.rpartition(".")
+    value = hp.config_mapping(section)[name] if section else hp.config[name]
+    # `True == 1 == 1.0`, so require the exact type too.
+    if type(value) is type(accepted) and value == accepted:
+      continue
+    raise NotImplementedError(
+        f"{key}={value!r} is not supported yet ({reason}); leave it at"
+        f" {accepted!r}."
+    )
+
+
+def validate_memory(key: str, memory: object) -> None:
+  """Checks a `{request, limit}` memory setting.
+
+  Args:
+    key: Dotted config key of the setting, for the error message.
+    memory: The setting's value.
+
+  Raises:
+    TypeError: If `memory` is not a mapping of `request` and `limit` to str.
+  """
+  if not isinstance(memory, Mapping) or set(memory) != {"request", "limit"}:
+    raise TypeError(
+        f"{key} must be a mapping of `request` and `limit` (Kubernetes"
+        f" quantities such as '48G', or empty for none), got {memory!r}."
+    )
+  for field in ("request", "limit"):
+    if not isinstance(memory[field], str):
+      raise TypeError(
+          f"{key}.{field} must be a str (a Kubernetes quantity such as"
+          f" '48G', or empty for none), got {memory[field]!r}."
+      )
+
+
+def _validate_role_memory(hp: cli_config.HyperParameters) -> None:
+  """Checks each `cluster_config.roles.<role>.memory`."""
+  roles = hp.config_mapping("cluster_config")["roles"]
+  for role in ("orchestrator", "trainer", "rollout"):
+    validate_memory(
+        f"cluster_config.roles.{role}.memory", roles[role]["memory"]
+    )
+
+
+# The largest value the IFRT proxy client parses (a positive int64).
+_MAX_IFRT_THRESHOLD_BYTES: Final[int] = 2**63 - 1
+
+
+def _is_int(value: object) -> bool:
+  """Returns whether `value` is an int and not a bool."""
+  return isinstance(value, int) and not isinstance(value, bool)
+
+
+def pathways_worker_env_json(hp: cli_config.HyperParameters) -> str:
+  """Validates `cluster_config.pathways.worker_env`; returns it as JSON.
+
+  `k8s.sh` passes the JSON to the manifest generator's
+  `--pathways_worker_env_json`.
+
+  Args:
+    hp: Loaded configuration.
+
+  Returns:
+    The variables as a JSON object of strings.
+
+  Raises:
+    TypeError: If the section is not a mapping of strings to strings.
+    ValueError: If a name is not a variable name or is one the Pathways
+      template sets itself.
+  """
+  env = hp.config_mapping("cluster_config")["pathways"]["worker_env"]
+  if not isinstance(env, Mapping):
+    raise TypeError(
+        f"cluster_config.pathways.worker_env must be a mapping, got {env!r}."
+    )
+  for name, value in env.items():
+    if not isinstance(name, str) or not _ENV_VAR_NAME_RE.match(name):
+      raise ValueError(
+          f"cluster_config.pathways.worker_env has the invalid variable name"
+          f" {name!r}."
+      )
+    if not isinstance(value, str):
+      raise TypeError(
+          f"cluster_config.pathways.worker_env.{name} must be a string, got"
+          f" {value!r}."
+      )
+  env_json = json.dumps(dict(env))
+  try:
+    yaml_generator.parse_pathways_worker_env_json(env_json)
+  except ValueError as e:
+    raise ValueError(f"cluster_config.pathways.worker_env: {e}") from e
+  return env_json
+
+
+def _validate_launcher_settings(hp: cli_config.HyperParameters) -> None:
+  """Checks the types of the Pathways, Raiden and reservation settings.
+
+  These used to be environment variables of the launcher, so a malformed value
+  would otherwise fail only when `k8s.sh` renders the manifests.
+
+  Args:
+    hp: Loaded configuration.
+
+  Raises:
+    TypeError: If a setting has the wrong type.
+    ValueError: If a number is out of range, or a
+      `cluster_config.pathways.worker_env` name is not a variable name.
+  """
+  cluster = hp.config_mapping("cluster_config")
+  pathways = cluster["pathways"]
+  raiden = hp.config_mapping("weight_sync_config")["raiden"]
+  sidecar = pathways["sidecar"]
+  pathways_trainer = pathways["trainer"]
+  for key, value, expected in (
+      (
+          "cluster_config.pathways.trainer.persistence",
+          pathways_trainer["persistence"],
+          bool,
+      ),
+      (
+          "cluster_config.pathways.proxy_extra_args",
+          pathways["proxy_extra_args"],
+          str,
+      ),
+      ("cluster_config.pathways.sidecar.image", sidecar["image"], str),
+      ("cluster_config.pathways.sidecar.shm", sidecar["shm"], bool),
+      (
+          "cluster_config.k8s.tpu_reservation",
+          cluster["k8s"]["tpu_reservation"],
+          str,
+      ),
+      ("weight_sync_config.raiden.multi_numa", raiden["multi_numa"], bool),
+  ):
+    if not isinstance(value, expected):
+      raise TypeError(
+          f"{key} must be a {expected.__name__}, got {value!r}."
+      )
+  for key, memory in (
+      ("proxy_memory", pathways["proxy_memory"]),
+      ("rm_memory", pathways["rm_memory"]),
+      ("server_memory", pathways["server_memory"]),
+      ("sidecar.memory", sidecar["memory"]),
+  ):
+    validate_memory(f"cluster_config.pathways.{key}", memory)
+  pathways_worker_env_json(hp)
+  use_ffi = raiden["use_ffi"]
+  if use_ffi is not None and not isinstance(use_ffi, bool):
+    raise TypeError(
+        "weight_sync_config.raiden.use_ffi must be a bool or null, got"
+        f" {use_ffi!r}."
+    )
+  broadcast_k = raiden["broadcast_k"]
+  if not _is_int(broadcast_k) or broadcast_k <= 0:
+    raise ValueError(
+        "weight_sync_config.raiden.broadcast_k must be a positive int, got"
+        f" {broadcast_k!r}."
+    )
+  threshold = pathways_trainer["ifrt_proxy_large_transfer_threshold_bytes"]
+  if threshold is not None and not (
+      _is_int(threshold) and 0 < threshold <= _MAX_IFRT_THRESHOLD_BYTES
+  ):
+    raise ValueError(
+        "cluster_config.pathways.trainer.ifrt_proxy_large_transfer_threshold"
+        "_bytes must be null or an int in [1, 2**63 - 1], got"
+        f" {threshold!r}."
     )
 
 
@@ -785,6 +1243,10 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   _validate_k8s_scalars(hp)
   _validate_k8s_worker_jobsets(hp)
   _validate_rollout_replicas(hp)
+  _validate_role_env(hp)
+  _reject_unimplemented_settings(hp)
+  _validate_role_memory(hp)
+  _validate_launcher_settings(hp)
   _validate_trajectory_logging(hp)
   _validate_rollout_logps_settings(hp)
   _validate_fault_tolerance(hp)
@@ -803,7 +1265,8 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
 
   actor_cfg = hp.config_mapping("actor_model_config")
   actor_axes = hp.mesh_axes("actor_model_config")
-  rollout_axes = hp.mesh_axes("rollout_model_config")
+  # Parses the rollout mesh, so a malformed one fails here.
+  hp.mesh_axes("rollout_model_config")
   if actor_cfg["model_source"] == "maxtext":
     if not actor_cfg["model_path"]:
       raise ValueError(
@@ -819,13 +1282,6 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
             f" ({actor_axes['fsdp']}) when model_source='maxtext'."
         )
 
-  vllm = hp.config_mapping("vllm_config")
-  vllm_tp = vllm["tensor_parallel_size"]
-  if vllm_tp is not None and int(vllm_tp) != rollout_axes["tp"]:
-    raise ValueError(
-        f"vllm_config.tensor_parallel_size ({vllm_tp}) must match"
-        f" rollout_model_config.mesh tp ({rollout_axes['tp']})."
-    )
   _validate_typed_vllm_settings(hp)
 
   for role_key in (
@@ -887,6 +1343,8 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   _validate_maxtext_pairing(hp)
   _validate_maxtext_model_names(hp)
   _validate_maxtext_extra_config(hp)
+  _validate_maxtext_skip_step_kwargs(hp)
+  _validate_freeze_router(hp)
   _validate_rollout_weights(hp)
   _validate_library_settings(hp)
   if grpo["reward_mode"] == "reward_fn" and not hp.config["reward_functions"]:
@@ -904,12 +1362,6 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
     raise ValueError(
         "agentic_grpo_config.num_generations must be > 1 for GRPO, got"
         f" {num_generations}."
-    )
-  if grpo["num_iterations"] != 1:
-    raise ValueError(
-        "agentic_grpo_config.num_iterations must be 1, got"
-        f" {grpo['num_iterations']!r}: StandardRLProgram runs one optimizer"
-        " pass per rollout batch."
     )
   micro_batch = int(rl_train["train_micro_batch_size"])
   if micro_batch <= 0:
@@ -1050,13 +1502,6 @@ def _validate_typed_vllm_settings(hp: cli_config.HyperParameters) -> None:
   for key in ("return_routed_experts", "detokenize"):
     if not isinstance(vllm[key], bool):
       raise TypeError(f"vllm_config.{key} must be a bool, got {vllm[key]!r}.")
-  if vllm["server_mode"] is not None and not isinstance(
-      vllm["server_mode"], bool
-  ):
-    raise TypeError(
-        "vllm_config.server_mode must be a bool or null, got"
-        f" {vllm['server_mode']!r}."
-    )
   common_configs.validate_routed_experts_encode_config(
       vllm["routed_experts_encode_mode"], vllm["routed_experts_num_experts"]
   )
@@ -1215,6 +1660,12 @@ _MAXTEXT_KEYS_FROM_CONFIG: Final[Mapping[str, str]] = {
     "tpu_num_sparse_core_tiles_to_trace": (
         "actor_model_config.kwargs.tpu_num_sparse_core_tiles_to_trace"
     ),
+    "skip_step_on_spikes": "actor_model_config.kwargs.skip_step_on_spikes",
+    "skip_step_on_nan": "actor_model_config.kwargs.skip_step_on_nan",
+    "skip_step_interval": "actor_model_config.kwargs.skip_step_interval",
+    "skip_step_scaling_factor": (
+        "actor_model_config.kwargs.skip_step_scaling_factor"
+    ),
 }
 
 
@@ -1222,6 +1673,62 @@ _MAXTEXT_KEYS_FROM_CONFIG: Final[Mapping[str, str]] = {
 _MAXTEXT_CONFIG_NAME_RE: Final[re.Pattern[str]] = re.compile(
     r"[A-Za-z_][A-Za-z0-9_]*"
 )
+
+
+def _validate_maxtext_skip_step_kwargs(hp: cli_config.HyperParameters) -> None:
+  """Validates `actor_model_config.kwargs.skip_step_*` types and backend."""
+  actor = hp.config_mapping("actor_model_config")
+  kwargs = actor["kwargs"]
+  if not isinstance(kwargs, Mapping):
+    return
+  keys = (
+      "skip_step_on_spikes",
+      "skip_step_on_nan",
+      "skip_step_interval",
+      "skip_step_scaling_factor",
+  )
+  present = [k for k in keys if k in kwargs and kwargs[k] is not None]
+  if not present:
+    return
+  if actor["model_source"] != "maxtext":
+    raise ValueError(
+        "actor_model_config.kwargs."
+        + ", actor_model_config.kwargs.".join(present)
+        + " require actor_model_config.model_source='maxtext', got"
+        f" {actor['model_source']!r}."
+    )
+  for bool_key in ("skip_step_on_spikes", "skip_step_on_nan"):
+    if bool_key in kwargs and kwargs[bool_key] is not None:
+      if not isinstance(kwargs[bool_key], bool):
+        raise ValueError(
+            f"actor_model_config.kwargs.{bool_key} must be a bool, got"
+            f" {kwargs[bool_key]!r}."
+        )
+  if "skip_step_interval" in kwargs and kwargs["skip_step_interval"] is not None:
+    interval = kwargs["skip_step_interval"]
+    if (
+        isinstance(interval, bool)
+        or not isinstance(interval, int)
+        or interval <= 0
+    ):
+      raise ValueError(
+          "actor_model_config.kwargs.skip_step_interval must be a positive int,"
+          f" got {interval!r}."
+      )
+  if (
+      "skip_step_scaling_factor" in kwargs
+      and kwargs["skip_step_scaling_factor"] is not None
+  ):
+    factor = kwargs["skip_step_scaling_factor"]
+    if (
+        isinstance(factor, bool)
+        or not isinstance(factor, (int, float))
+        or not (0 < factor < float("inf"))
+    ):
+      raise ValueError(
+          "actor_model_config.kwargs.skip_step_scaling_factor must be a"
+          f" positive finite number, got {factor!r}."
+      )
 
 
 def _validate_maxtext_extra_config(hp: cli_config.HyperParameters) -> None:
@@ -1295,6 +1802,22 @@ def _validate_maxtext_extra_config(hp: cli_config.HyperParameters) -> None:
     )
 
 
+def _validate_freeze_router(hp: cli_config.HyperParameters) -> None:
+  """Checks `actor_model_config.freeze_router` type and trainer backend."""
+  actor = hp.config_mapping("actor_model_config")
+  freeze_router = actor["freeze_router"]
+  if not isinstance(freeze_router, bool):
+    raise TypeError(
+        "actor_model_config.freeze_router must be a bool, got"
+        f" {freeze_router!r}."
+    )
+  if freeze_router and actor["model_source"] == "maxtext":
+    raise ValueError(
+        "actor_model_config.freeze_router is not supported by the MaxText"
+        " trainer (actor_model_config.model_source='maxtext')."
+    )
+
+
 # `launch.sh` starts the `local` processes (through `local.sh`) and the `k8s`
 # ones (through `k8s.sh`); another launcher starts the `external` ones, e.g. a
 # job scheduler that starts each process separately.
@@ -1335,7 +1858,7 @@ def _validate_library_settings(hp: cli_config.HyperParameters) -> None:
 
   Raises:
     TypeError: If a `_LIBRARY_BOOL_SETTINGS` value is not a bool,
-      `weight_sync_config.raiden_data_nics` is not a string, or
+      `weight_sync_config.raiden.data_nics` is not a string, or
       `dist_training_config.ckpt_d2h_concurrent_gb` is neither an int nor
       null.
     ValueError: If `dist_training_config.ckpt_d2h_concurrent_gb` is not
@@ -1345,10 +1868,10 @@ def _validate_library_settings(hp: cli_config.HyperParameters) -> None:
     value = hp.config_mapping(section)[key]
     if not isinstance(value, bool):
       raise TypeError(f"{section}.{key} must be a bool, got {value!r}.")
-  nics = hp.config_mapping("weight_sync_config")["raiden_data_nics"]
+  nics = hp.config_mapping("weight_sync_config")["raiden"]["data_nics"]
   if not isinstance(nics, str):
     raise TypeError(
-        "weight_sync_config.raiden_data_nics must be a string of"
+        "weight_sync_config.raiden.data_nics must be a string of"
         f" comma-separated NIC names, or empty, got {nics!r}."
     )
   gb = hp.config_mapping("dist_training_config")["ckpt_d2h_concurrent_gb"]
@@ -1379,6 +1902,52 @@ def _validate_library_settings(hp: cli_config.HyperParameters) -> None:
 def initialize(overrides: Sequence[str]) -> DistHyperParameters:
   """Initializes `DistHyperParameters` from overrides only (no program name)."""
   return DistHyperParameters(overrides)
+
+
+# Top-level keys that name the task a run trains on. `base_dist_config.yaml`
+# leaves them empty; each task YAML sets them.
+_TASK_KEYS: Final[tuple[str, ...]] = (
+    "data_module",
+    "env_class_path",
+    "agent_class_path",
+    "registry_module",
+)
+
+
+def task_config_error(hp: cli_config.HyperParameters) -> str:
+  """Returns why the config cannot start a run, or "" when it names a task.
+
+  A run needs the task's dataset (`data_module`), the registered names of its
+  environment and agent (`env_class_path`, `agent_class_path`), and the module
+  that registers them (`registry_module`). `initialize` does not
+  check this: some callers resolve a config without starting a run, e.g.
+  `launch.sh stop`.
+
+  Args:
+    hp: Resolved configuration.
+  """
+  missing = [key for key in _TASK_KEYS if not hp.config[key]]
+  if not missing:
+    return ""
+  return (
+      f"The config names no task: {', '.join(missing)} must be set. Pass the"
+      " task's YAML as override_config_file=<path> (e.g."
+      " tunix/dist_rl/examples/math_gsm8k_dist/gsm8k.yaml)."
+  )
+
+
+def validate_task(hp: cli_config.HyperParameters) -> None:
+  """Checks that the config names a task (see `task_config_error`).
+
+  Args:
+    hp: Resolved configuration.
+
+  Raises:
+    ValueError: If a task key is empty.
+  """
+  error = task_config_error(hp)
+  if error:
+    raise ValueError(error)
 
 
 def plain_config(hp: cli_config.HyperParameters) -> dict[str, object]:
@@ -1493,21 +2062,42 @@ def _bash_quote(val: object) -> str:
   return shlex.quote(str(val))
 
 
+def _shell_env_words(env: Mapping[str, str]) -> str:
+  """Renders `env` as space-separated `KEY=VALUE` words, each value quoted."""
+  return " ".join(f"{name}={shlex.quote(value)}" for name, value in env.items())
+
+
 # TODO(noghabi): Consider auto-flattening `cluster_config.{local,k8s}` into
 # `UPPER_SNAKE_CASE` exports (and mapping only the non-cluster keys by hand),
 # which would shrink this list and the drift check in `launch_test.py`.
 def render_bash_exports(hp: DistHyperParameters) -> str:
   """Renders cluster/deployment shell exports for `local.sh` and `k8s.sh`."""
   cluster = hp.config_mapping("cluster_config")
-  ports = cli_config.to_str_dict(cluster["ports"])
+  roles = {
+      role: cli_config.to_str_dict(cluster["roles"][role])
+      for role in PROCESS_ROLES
+  }
+  memory = {
+      role: cli_config.to_str_dict(roles[role]["memory"])
+      for role in ("orchestrator", "trainer", "rollout")
+  }
   local = cli_config.to_str_dict(cluster["local"])
   k8s = cli_config.to_str_dict(cluster["k8s"])
   jax_cache = cli_config.to_str_dict(k8s["jax_cache"])
   k8s_trainer = cli_config.to_str_dict(k8s["trainer"])
   k8s_rollout = cli_config.to_str_dict(k8s["rollout"])
+  pathways = cli_config.to_str_dict(cluster["pathways"])
+  sidecar = cli_config.to_str_dict(pathways["sidecar"])
+  pathways_trainer = cli_config.to_str_dict(pathways["trainer"])
+  proxy_memory = cli_config.to_str_dict(pathways["proxy_memory"])
+  rm_memory = cli_config.to_str_dict(pathways["rm_memory"])
+  server_memory = cli_config.to_str_dict(pathways["server_memory"])
+  sidecar_memory = cli_config.to_str_dict(sidecar["memory"])
+  ifrt_threshold = pathways_trainer["ifrt_proxy_large_transfer_threshold_bytes"]
   actor = hp.config_mapping("actor_model_config")
   rollout_model = hp.config_mapping("rollout_model_config")
   ws = hp.config_mapping("weight_sync_config")
+  raiden = cli_config.to_str_dict(ws["raiden"])
   sandbox_k8s = (
       hp.config["kubernetes_config"]
       if isinstance(hp.config["kubernetes_config"], Mapping)
@@ -1531,6 +2121,8 @@ def render_bash_exports(hp: DistHyperParameters) -> str:
 
   exports: dict[str, object] = {
       "CLUSTER_TARGET": cluster["target"],
+      # Empty when the config names a task (`task_config_error`).
+      "TASK_CONFIG_ERROR": task_config_error(hp),
       "EXECUTION_PLACEMENT": cluster_targets.placement.value,
       "TRAINER_FRAMEWORK": cluster_targets.trainer.framework.value,
       "TRAINER_ACCELERATOR": cluster_targets.trainer.accelerator.value,
@@ -1538,24 +2130,24 @@ def render_bash_exports(hp: DistHyperParameters) -> str:
       "ROLLOUT_ACCELERATOR": cluster_targets.rollout.accelerator.value,
       "INFERENCE_FRAMEWORK": cluster_targets.inference.framework.value,
       "INFERENCE_ACCELERATOR": cluster_targets.inference.accelerator.value,
-      "ORCHESTRATOR_MAIN": cluster["orchestrator_main"],
-      "TRAINER_MAIN": cluster["trainer_main"],
-      "ROLLOUT_MAIN": cluster["rollout_main"],
-      "INFERENCE_MAIN": cluster["inference_main"],
+      "ORCHESTRATOR_MAIN": roles["orchestrator"]["main"],
+      "TRAINER_MAIN": roles["trainer"]["main"],
+      "ROLLOUT_MAIN": roles["rollout"]["main"],
+      "INFERENCE_MAIN": roles["inference"]["main"],
       "ARTIFACT_ROOT": cluster["artifact_root"],
       "RUN_ID": cluster["run_id"],
       "DRY_RUN": cluster["dry_run"],
-      "WAIT_TIMEOUT_SECS": cluster["wait_timeout_secs"],
-      "WAIT_POLL_SECS": cluster["wait_poll_secs"],
-      "WAIT_DEBUG_EVERY_POLLS": cluster["wait_debug_every_polls"],
-      "WAIT_LOG_TAIL_LINES": cluster["wait_log_tail_lines"],
+      "WAIT_TIMEOUT_SECS": local["wait_timeout_secs"],
+      "WAIT_POLL_SECS": local["wait_poll_secs"],
+      "WAIT_DEBUG_EVERY_POLLS": local["wait_debug_every_polls"],
+      "WAIT_LOG_TAIL_LINES": local["wait_log_tail_lines"],
       "RUN_INFERENCE_NODE": cluster["run_inference_node"],
       "ROLLOUT_REPLICAS": cluster["rollout_replicas"],
-      "ORCHESTRATOR_PORT": ports["orchestrator"],
-      "TRAINER_PORT": ports["trainer"],
-      "ROLLOUT_PORT": ports["rollout"],
-      "INFERENCE_PORT": ports["inference"],
-      "OTEL_PORT": ports["otel"],
+      "ORCHESTRATOR_PORT": roles["orchestrator"]["port"],
+      "TRAINER_PORT": roles["trainer"]["port"],
+      "ROLLOUT_PORT": roles["rollout"]["port"],
+      "INFERENCE_PORT": roles["inference"]["port"],
+      "OTEL_PORT": cluster["ports"]["otel"],
       "ACTOR_MAXTEXT_MODEL_NAME": (
           actor["kwargs"]["maxtext_model_name"]
           if actor["model_source"] == "maxtext"
@@ -1568,9 +2160,13 @@ def render_bash_exports(hp: DistHyperParameters) -> str:
       "ROLLOUT_MODEL_ID": rollout_model["model_id"],
       "ROLLOUT_MODEL_DIR": rollout_model["model_download_path"],
       "WEIGHT_SYNC_MODE": ws["mode"],
+      # Empty when null.
       "WEIGHT_SYNC_RAIDEN_USE_FFI": (
-          "" if ws["raiden_use_ffi"] is None else ws["raiden_use_ffi"]
+          "" if raiden["use_ffi"] is None else raiden["use_ffi"]
       ),
+      "WEIGHT_SYNC_RAIDEN_DATA_NICS": raiden["data_nics"],
+      "WEIGHT_SYNC_RAIDEN_BROADCAST_K": raiden["broadcast_k"],
+      "WEIGHT_SYNC_RAIDEN_MULTI_NUMA": raiden["multi_numa"],
       "LOCAL_AUTO_DETECT_DEVICES": local["auto_detect_devices"],
       "LOCAL_DOWNLOAD_MODEL_WEIGHTS": local["download_model_weights"],
       "LOCAL_TRAINER_DEVICES": local["trainer_devices"],
@@ -1597,19 +2193,34 @@ def render_bash_exports(hp: DistHyperParameters) -> str:
       "K8S_OTEL_ID": k8s["otel_id"],
       "K8S_CPU_MACHINE": k8s["cpu_machine"],
       "K8S_CPU_NODEPOOL": k8s["cpu_nodepool"],
-      "K8S_CPU_MEMORY": k8s["cpu_memory"],
-      "K8S_GCS_SCRATCH_LOCATION": k8s["gcs_scratch_location"],
-      "K8S_ENABLE_PATHWAYS_PERSISTENCE": k8s["enable_pathways_persistence"],
-      "K8S_TRAINER_EXTRA_ENV": k8s["trainer_extra_env"],
+      "K8S_CPU_MEMORY": memory["orchestrator"]["request"],
+      "K8S_CPU_MEMORY_LIMIT": memory["orchestrator"]["limit"],
+      "K8S_GCS_SCRATCH_LOCATION": pathways["gcs_scratch_location"],
+      "K8S_ENABLE_PATHWAYS_PERSISTENCE": pathways_trainer["persistence"],
       "K8S_TUNIX_IMAGE": k8s["tunix_image"],
-      "K8S_PATHWAYS_SERVER_IMAGE": k8s["pathways_server_image"],
-      "K8S_PATHWAYS_PROXY_IMAGE": k8s["pathways_proxy_image"],
-      "K8S_PATHWAYS_PROXY_MEMORY_LIMIT": k8s["pathways_proxy_memory_limit"],
-      "K8S_PATHWAYS_PROXY_MEMORY": k8s["pathways_proxy_memory"],
-      "K8S_PATHWAYS_RM_MEMORY": k8s["pathways_rm_memory"],
-      "K8S_USER_CONTAINER_MEMORY": k8s["user_container_memory"],
-      "K8S_USER_CONTAINER_MEMORY_LIMIT": k8s["user_container_memory_limit"],
-      "K8S_PATHWAYS_WORKER_MEMORY": k8s["pathways_worker_memory"],
+      "K8S_TPU_RESERVATION": k8s["tpu_reservation"],
+      "K8S_PATHWAYS_SERVER_IMAGE": pathways["server_image"],
+      "K8S_PATHWAYS_PROXY_IMAGE": pathways["proxy_image"],
+      "K8S_PATHWAYS_PROXY_MEMORY": proxy_memory["request"],
+      "K8S_PATHWAYS_PROXY_MEMORY_LIMIT": proxy_memory["limit"],
+      "K8S_PATHWAYS_RM_MEMORY": rm_memory["request"],
+      "K8S_PATHWAYS_RM_MEMORY_LIMIT": rm_memory["limit"],
+      "K8S_PATHWAYS_SERVER_MEMORY": server_memory["request"],
+      "K8S_PATHWAYS_SERVER_MEMORY_LIMIT": server_memory["limit"],
+      # Empty when null.
+      "K8S_PATHWAYS_IFRT_THRESHOLD_BYTES": (
+          "" if ifrt_threshold is None else ifrt_threshold
+      ),
+      "K8S_PATHWAYS_WORKER_ENV_JSON": pathways_worker_env_json(hp),
+      "K8S_PATHWAYS_PROXY_EXTRA_ARGS": pathways["proxy_extra_args"],
+      "K8S_PATHWAYS_SIDECAR_IMAGE": sidecar["image"],
+      "K8S_PATHWAYS_SIDECAR_MEMORY": sidecar_memory["request"],
+      "K8S_PATHWAYS_SIDECAR_MEMORY_LIMIT": sidecar_memory["limit"],
+      "K8S_PATHWAYS_SIDECAR_SHM": sidecar["shm"],
+      "K8S_TRAINER_MEMORY": memory["trainer"]["request"],
+      "K8S_TRAINER_MEMORY_LIMIT": memory["trainer"]["limit"],
+      "K8S_ROLLOUT_MEMORY": memory["rollout"]["request"],
+      "K8S_ROLLOUT_MEMORY_LIMIT": memory["rollout"]["limit"],
       "K8S_FAIL_FAST": k8s["fail_fast"],
       "K8S_STARTUP_RETRIES": k8s["startup_retries"],
       "K8S_TEARDOWN_GANG_ON_EXIT": k8s["teardown_gang_on_exit"],
@@ -1625,6 +2236,10 @@ def render_bash_exports(hp: DistHyperParameters) -> str:
       # Empty without a GCS cache.
       "K8S_JAX_CACHE_ROLLOUT_GCS_DIR": rollout_cache_uri or "",
       "K8S_JAX_CACHE_SAVE": jax_cache["save"],
+      **{
+          f"ROLE_ENV_{role.upper()}": _shell_env_words(env)
+          for role, env in role_env(hp).items()
+      },
       "SANDBOX_NAMESPACE": (
           sandbox_k8s["namespace"] if "namespace" in sandbox_k8s else ""
       ),

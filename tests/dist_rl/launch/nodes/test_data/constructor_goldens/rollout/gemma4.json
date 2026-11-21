@@ -3,7 +3,7 @@
     {
       "importlib.import_module": {
         "args": [
-          "tunix.dist_rl.examples.math_gsm8k_dist.gsm8k"
+          "golden_registry_module"
         ]
       }
     },
@@ -93,7 +93,9 @@
           "return_logits": false,
           "return_logprobs": true,
           "return_routed_experts": false,
-          "rollout_mapping_config": "<MappingConfig(**tunix.models.gemma4.mapping_vllm_jax.VLLM_JAX_MAPPING)>",
+          "rollout_mapping_config": {
+            "__type__": "MappingConfig"
+          },
           "rollout_vanilla_v2_chunked_prefill_length": 512,
           "rollout_vanilla_v2_enable_prefix_caching": true,
           "rollout_vanilla_v2_hbm_utilization": 0.2,
@@ -309,7 +311,9 @@
             "max_lora_rank": 8,
             "max_loras": 1
           },
-          "mapping_config": "<MappingConfig(**tunix.models.gemma4.mapping_vllm_jax.VLLM_JAX_MAPPING)>",
+          "mapping_config": {
+            "__type__": "MappingConfig"
+          },
           "mesh": "<tunix.dist_rl.launch.nodes.node_utils.Mesh()>",
           "overlap_postprocessing": true,
           "partial_rollout": true,

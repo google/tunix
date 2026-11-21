@@ -13,8 +13,9 @@
 # limitations under the License.
 
 # Base configuration for the distributed RL launchers in tunix/dist_rl/launch/.
-# Follows the exact section and key naming of tunix/cli/base_agentic_config.yaml,
-# with defaults matching the existing distributed RL launchers and worker nodes.
+# Sections shared with tunix/cli/base_agentic_config.yaml keep its key names.
+# Keys the distributed RL nodes do not read are left out, so setting one is an
+# error instead of a silent no-op.
 
 ################################## LOAD MODEL ##################################
 model_config: &base_model_config
@@ -26,9 +27,14 @@ model_config: &base_model_config
   model_path: ""
   # Defaults to <artifact_root>/models/<model_name> when empty.
   model_download_path: ""
-  rng_seed: 0
-  model_display: false
+  # Not used by the distributed RL nodes: the shared `tunix.cli` config
+  # validation requires it for the "huggingface" and "kaggle" sources.
   intermediate_ckpt_dir: "/tmp/intermediate_ckpt/"
+  # Not supported yet: the resolver rejects any value but null. LoRA always
+  # initializes with seed 0.
+  # TODO(noghabi): Seed the LoRA init (and the model init, once the trainer
+  # loads through `tunix.cli`'s `create_model`) and rollout sampling from it.
+  rng_seed: null
   dtype: "float32"
   load_dtype: "float32"
   remat_config: "none"
@@ -38,16 +44,18 @@ model_config: &base_model_config
   mesh:
     shape: "(1,2)"
     axis_names: "('fsdp','tp')"
-    allocation_policy: "COMPACT"
   # Architecture / MaxText overrides (e.g. maxtext_model_name, maxtext_output_dir,
-  # padded_moe_mlp_dim, warmup_steps_fraction, attention). `maxtext_model_name`
-  # (e.g. "qwen3-0.6b") is required when `model_source` is "maxtext".
+  # padded_moe_mlp_dim, warmup_steps_fraction, attention, skip_step_on_spikes,
+  # skip_step_on_nan, skip_step_interval, skip_step_scaling_factor).
+  # `maxtext_model_name` (e.g. "qwen3-0.6b") is required when `model_source` is
+  # "maxtext".
   kwargs: {}
 
 actor_model_config:
   <<: *base_model_config
-
-critic_model_config: null
+  # Stops gradients into MoE router weights (`router_logits` and `router_scale`);
+  # requires the Tunix trainer and a model supporting `freeze_router` (Gemma 4).
+  freeze_router: false
 
 reference_model_config:
   <<: *base_model_config
@@ -60,117 +68,93 @@ tokenizer_config:
   # Accepts a Hugging Face hub id or a local, CNS, or GCS path.
   tokenizer_path: "Qwen/Qwen3-1.7B"
   tokenizer_type: "huggingface"
-  add_bos: true
-  add_eos: true
 
-################################## DATASET ##################################
-data_source: "tfds"
-data_directory: ""
+################################## TASK ##################################
+# Every task YAML sets `data_module`, `registry_module`, `env_class_path` and
+# `agent_class_path`; `launch.sh` does not start a run without them.
+# Module whose `create_dataset(**data_config)` returns the task records.
 data_module: ""
+# Module (e.g. `tunix.dist_rl.examples.math_gsm8k_dist.gsm8k`) that the rollout
+# node imports to register the task's environments and agents.
+registry_module: ""
 # Default semantic task_name for data_module records without one; required
 # unless every record sets task_name.
 task_name: ""
-apply_chat_template_to_dataset: false
 data_config:
   split: "train"
   shuffle: true
   seed: 42
-dataset_name: "gsm8k"
 batch_size: 4
-prompt_key: "prompts"
-max_target_length: 256
-num_train_epochs: 1
-train_fraction: 1.0
-num_test_batches: 100
-tfds_download: true
-num_batches: 0
-
-############################### Optimizer ###############################
-optimizer_config: &base_optimizer_config
-  learning_rate: 2.0e-7
-  opt_type: "adamw"
-  schedule_type: "warmup_cosine_decay_schedule"
-  value: null
-  peak_value: null
-  init_value: 0.0
-  end_value: 0.0
-  warmup_ratio: 0.1
-  b1: 0.9
-  b2: 0.999
-  eps: 1.0e-8
-  weight_decay: 0.01
-  warmup_steps: null
-  decay_steps: 500
-  # Gradient clipping, chained ahead of the optimizer (same contract as
-  # `tunix.cli.config.create_optimizer`).
-  opt_chain_type: "clip_by_global_norm"
-  chain_kwargs:
-    max_norm: 1.0
+# Not supported yet: the resolver rejects any value but null. The dataset
+# repeats, and `rl_training_config.max_steps` alone sets the training length.
+# TODO(noghabi): Stop after `num_train_epochs` passes over the dataset.
+num_train_epochs: null
+# Not supported yet: the resolver rejects any value but null, since the
+# distributed RL path runs no evaluation.
+# TODO(noghabi): Hold out `train_fraction` of the dataset and evaluate on
+# `num_test_batches` batches of it every
+# `rl_training_config.eval_every_n_steps` steps.
+train_fraction: null
+num_test_batches: null
 
 ############################### Training Config ###############################
-training_config: &base_training_config
-  eval_every_n_steps: 50
+rl_training_config:
   max_steps: 1
-  # Derived by RLTrainingConfig from mini_batch_size // train_micro_batch_size.
-  gradient_accumulation_steps: null
-  # On `rl_training_config`, defaults to <cluster_config.artifact_root>/checkpoints
-  # when empty.
+  # Not supported yet (see `train_fraction`): the resolver rejects any value
+  # but null.
+  eval_every_n_steps: null
+  # Defaults to <cluster_config.artifact_root>/checkpoints when empty.
   checkpoint_root_directory: ""
   checkpointing_options:
     max_to_keep: 10
     save_interval_steps: 1
     enable_async_checkpointing: true
     timeout_secs: 1200
-  # `rl_training_config.metrics_logging_options: null` logs no metrics, and no
-  # trajectories unless `dist_training_config.trajectory_log_dir` is set.
+  # Null logs no metrics, and no trajectories unless
+  # `dist_training_config.trajectory_log_dir` is set.
   metrics_logging_options:
-    project_name: "trellis-gsm8k"
+    project_name: "tunix-dist-rl"
     run_name: ""
-    # On `rl_training_config`, defaults to <cluster_config.artifact_root>/metrics
-    # when empty. The orchestrator also logs the trajectories of each step under
+    # Defaults to <cluster_config.artifact_root>/metrics when empty. The
+    # orchestrator also logs the trajectories of each step under
     # <log_dir>/trajectories, unless `dist_training_config.trajectory_log_dir`
     # is set or `dist_training_config.trajectory_logging` is false.
     log_dir: ""
     flush_every_n_steps: 1
-  perf_metrics_options: {}
   profiler_options:
     log_dir: "/tmp/profiling"
     skip_first_n_steps: 1
     profiler_steps: 0
-  data_sharding_axis: ["fsdp"]
-  max_inflight_computations: 2
   max_seq_tokens_per_device: null
   # TODO(b/583675740): Deprecate max_seq_token_per_tpu in favor of
   # max_seq_tokens_per_device.
   max_seq_token_per_tpu: null
   max_segments_per_packed_row: null
-
-rl_training_config:
-  <<: *base_training_config
   # Defaults to `batch_size` when null.
   mini_batch_size: null
   train_micro_batch_size: 1
-  rollout_micro_batch_size: null
   compute_logps_micro_batch_size: 1
   compute_logps_chunk_size: 0
   actor_optimizer_config:
-    <<: *base_optimizer_config
-  critic_optimizer_config: null
-
-############################### PPO Config ###############################
-ppo_config:
-  num_iterations: 1
-  gae_lambda: 0.95
-  gamma: 1.0
-  beta: 0.08
-  epsilon: 0.2
-
-############################### GRPO Config ###############################
-grpo_config:
-  num_generations: 8
-  num_iterations: 1
-  beta: 0.04
-  epsilon: 0.2
+    learning_rate: 2.0e-7
+    opt_type: "adamw"
+    schedule_type: "warmup_cosine_decay_schedule"
+    value: null
+    peak_value: null
+    init_value: 0.0
+    end_value: 0.0
+    warmup_ratio: 0.1
+    b1: 0.9
+    b2: 0.999
+    eps: 1.0e-8
+    weight_decay: 0.01
+    warmup_steps: null
+    decay_steps: 500
+    # Gradient clipping, chained ahead of the optimizer (same contract as
+    # `tunix.cli.config.create_optimizer`).
+    opt_chain_type: "clip_by_global_norm"
+    chain_kwargs:
+      max_norm: 1.0
 
 ############################### Rollout Config ###############################
 rollout_config:
@@ -179,13 +163,15 @@ rollout_config:
   temperature: 1.0
   top_p: 1.0
   top_k: -1
-  eos_tokens: "151645,151643"
-  return_logprobs: true
+  # Comma-separated token ids or token strings that end a generation, e.g.
+  # "151645,151643" for Qwen3. When empty, generation stops on the tokenizer's
+  # EOS token only, and the rollout cannot tell a finished response from a
+  # truncated one. Each task YAML sets it for its model.
+  eos_tokens: ""
 
 ############################### Other RL Config ###############################
 rollout_engine: "inprocess_vllm"
 vllm_config:
-  model_version: ""
   # null: `rollout_engine: vllm` defers to vLLM's native default
   # (`gpu_memory_utilization` is not set); `inprocess_vllm` uses 0.5.
   hbm_utilization: null
@@ -199,16 +185,10 @@ vllm_config:
   # so it always needs "raiden".
   init_with_random_weights: null
   enable_prefix_caching: false
-  # Both vLLM rollout engines always run in server mode, so `false` is
-  # rejected.
-  # TODO(yatlas): Remove this option.
-  server_mode: null
   async_scheduling: false
   max_num_seqs: null
   max_num_batched_tokens: null
   max_model_len: null
-  data_parallel_size: null
-  tensor_parallel_size: null
   dtype: "bfloat16"
   # Distributed rollout settings, validated by `DistHyperParameters` and read
   # by the rollout node and the orchestrator.
@@ -237,25 +217,28 @@ vllm_config:
   # `maxtext_config`) is deep-merged onto what the rollout node builds.
   engine_kwargs: {}
 
-offload_to_cpu: false
-
-training_mode: "agentic_grpo"
-
 chat_parser_config:
   type: "raw"
   enable_thinking: false
 
-agent_class_path: "gsm8kagent"
+# Registered names of the task's agent and environment (see `registry_module`).
+# Each task YAML sets them.
+agent_class_path: ""
 agent_kwargs: {}
-env_class_path: "gsm8kenv"
+env_class_path: ""
 env_kwargs: {}
 kubernetes_config: {}
 
-agentic_ppo_config: {}
 agentic_grpo_config:
   num_generations: 8
+  # Optimizer passes over each rollout batch. Not supported yet: the resolver
+  # rejects any value but 1.
+  # TODO(noghabi): Run `num_iterations` passes per batch in
+  # `StandardRLProgram`.
   num_iterations: 1
-  beta: 0.04
+  # KL penalty against the reference model. Above 0, the run needs a reference
+  # inference worker (`cluster_config.run_inference_node`).
+  beta: 0.0
   epsilon: 0.2
   epsilon_high: 0.28
   loss_algo: "grpo"
@@ -349,18 +332,30 @@ weight_sync_config:
   # orthogonal to checkpoint serialization format ("orbax" vs "safetensors") and
   # storage backend ("gcs" gs://, "GOOGLE_INTERNAL_STOAGE_PATH" /GOOGLE_INTERNAL_STOAGE_PATH/, or "local" POSIX paths via epath).
   mode: "none"
-  raiden_use_ffi: null
   use_weight_converter: true
   prefuse_moe_weights: true
   # Log weight checksums on both sides of each sync, and Raiden's transfer
   # metrics. The trainer and rollout nodes set `VERIFY_WEIGHTS` from it.
   verify_weights: false
   in_flight_weight_updates: false
-  # Comma-separated NICs Raiden sends weights over, e.g. "eth0,eth1". "eth0"
-  # matches the earlier launchers; empty lets Raiden pick by its own heuristic.
-  # The trainer and rollout nodes set `TPU_RAIDEN_DATA_NICS` from it when it is
-  # not empty.
-  raiden_data_nics: "eth0"
+  # Settings of `mode: "raiden"`.
+  raiden:
+    # Whether the k8s trainer syncs through Raiden's FFI path
+    # (`RAIDEN_USE_FFI`). null: on for a Pathways trainer
+    # (`jobset.pathways.yaml`), otherwise left to Raiden. The k8s rollout never
+    # uses it. `local.sh` does not apply it.
+    use_ffi: null
+    # Comma-separated NICs Raiden sends weights over, e.g. "eth0,eth1". Empty
+    # lets Raiden pick by its own heuristic. The trainer and rollout nodes set
+    # `TPU_RAIDEN_DATA_NICS` from it when it is not empty, and so do the k8s
+    # templates that set Raiden variables on their containers
+    # (`jobset.pathways.yaml`, `jobset.mcjax.ray.yaml`, `jobset.tpu.yaml`).
+    data_nics: "eth0"
+    # `RAIDEN_BROADCAST_K` and `ENABLE_MULTI_NUMA` of the containers in those
+    # templates (`jobset.tpu.yaml` sets no `RAIDEN_BROADCAST_K`). Only `k8s.sh`
+    # applies them.
+    broadcast_k: 64
+    multi_numa: false
 
 trajectory_store_config:
   enable: false
@@ -374,16 +369,6 @@ cluster_config:
   # "external", processes started by another launcher (e.g. a job scheduler
   # that starts each process separately), which `launch.sh` rejects.
   target: "local"
-  # Shared orchestrator for every task; the task comes from `data_module`,
-  # `reward_functions` and the rollout `env_class_path`/`agent_class_path`.
-  orchestrator_main: "tunix.dist_rl.launch.nodes.orchestrator.main"
-  trainer_main: "tunix.dist_rl.launch.nodes.trainer.main"
-  rollout_main: "tunix.dist_rl.launch.nodes.rollout.main"
-  inference_main: "tunix.dist_rl.launch.nodes.inference.main"
-  # Example module (e.g. `examples/math_gsm8k_dist/gsm8k.py`) that the rollout
-  # node imports to register the example's environments and agents. Each
-  # example YAML sets its own value.
-  registry_module: "tunix.dist_rl.examples.math_gsm8k_dist.gsm8k"
   # Relative paths are resolved against the repo root on `target: local` and
   # against the container working directory (repo root) on `target: k8s`;
   # `target: external` requires an absolute filesystem path. URIs such as
@@ -405,22 +390,19 @@ cluster_config:
   # worker startup times: one fixed value would also fail healthy k8s runs
   # whose TPU JobSets Kueue is still queueing, or whose workers are still
   # loading their model. On local, `local.sh` already fails a worker whose
-  # port never opens (`cluster_config.wait_timeout_secs`).
+  # port never opens (`cluster_config.local.wait_timeout_secs`).
   init_timeout_s: null
-  wait_timeout_secs: 1800
-  wait_poll_secs: 5
-  wait_debug_every_polls: 6
-  wait_log_tail_lines: 40
   stop_workers_on_exit: true
-  # Rollout worker fault tolerance (`FaultToleranceConfig`). When
-  # `rollout_fault_tolerance` is false, `max_task_retries` resolves to 0,
-  # `min_active_rollout_ratio` is ignored, and a null `poll_retry_budget_s`
-  # resolves to 300.0 s instead of 60.0 s.
-  rollout_fault_tolerance: true
-  max_task_retries: 1
-  poll_retry_budget_s: null
-  min_active_rollout_ratio: 0.5
-  min_active_rollout_grace_s: 900.0
+  # Rollout worker fault tolerance (`FaultToleranceConfig`). When `enabled` is
+  # false, `max_task_retries` resolves to 0, `min_active_rollout_ratio` is
+  # ignored, and a null `poll_retry_budget_s` resolves to 300.0 s instead of
+  # 60.0 s.
+  fault_tolerance:
+    enabled: true
+    max_task_retries: 1
+    poll_retry_budget_s: null
+    min_active_rollout_ratio: 0.5
+    min_active_rollout_grace_s: 900.0
   # Start a reference inference worker (for the KL penalty). Null means
   # `agentic_grpo_config.beta > 0`. Set false to use a reference worker started
   # separately; it registers with the orchestrator through discovery.
@@ -434,17 +416,100 @@ cluster_config:
   # bring-up; slower initial replicas join in the background and promote to
   # `ACTIVE` on weight sync. Null waits for all `rollout_replicas`.
   min_rollout_replicas: null
-  # On `target: external`, a worker (trainer, rollout, or inference) listens on
-  # the port in the `DIST_RL_WORKER_PORT` environment variable instead of its
-  # port here; the launcher assigns one to each worker.
+  # One block per process. The keys mean the same on every target; a launcher
+  # that does not apply one says so below.
+  # - `main`: the process's entry point. The orchestrator main is shared by
+  #   every task; the task comes from `data_module`, `reward_functions` and the
+  #   rollout `env_class_path`/`agent_class_path`.
+  # - `port`: the port the process listens on. On `target: external`, a worker
+  #   (trainer, rollout, or inference) listens on the port in the
+  #   `DIST_RL_WORKER_PORT` environment variable instead; the launcher assigns
+  #   one to each worker.
+  # - `env`: extra `KEY: "VALUE"` string environment variables (`local.sh` and
+  #   `k8s.sh`; rejected on `target: external`). Rejects config-backed library
+  #   vars, `T_*`/`M_*` overrides, and worker identity vars; logged in resolved
+  #   configs, so omit credentials.
+  # - `memory`: `request` and `limit` of the process's container, as Kubernetes
+  #   quantities (e.g. "48G"); an empty value sets none. Only `k8s.sh` applies
+  #   them: to the orchestrator, and to a trainer or rollout whose template is
+  #   `jobset.pathways.yaml` (the other templates set their own).
+  # Per-role settings that apply to one target stay under that target:
+  # `k8s.<role>_id`, `k8s.trainer`/`k8s.rollout`, `k8s.cpu_machine` and
+  # `k8s.cpu_nodepool` (orchestrator), `local.<role>_devices`, and
+  # `local.trainer_shutdown_grace_secs`.
+  roles:
+    orchestrator:
+      main: "tunix.dist_rl.launch.nodes.orchestrator.main"
+      port: 30000
+      env: {}
+      memory:
+        request: ""
+        limit: ""
+    trainer:
+      main: "tunix.dist_rl.launch.nodes.trainer.main"
+      port: 20000
+      env: {}
+      memory:
+        request: "48G"
+        limit: "70G"
+    rollout:
+      main: "tunix.dist_rl.launch.nodes.rollout.main"
+      port: 20001
+      env: {}
+      memory:
+        request: "48G"
+        limit: "70G"
+    inference:
+      main: "tunix.dist_rl.launch.nodes.inference.main"
+      port: 20002
+      env: {}
   ports:
-    orchestrator: 30000
-    trainer: 20000
-    rollout: 20001
-    inference: 20002
     # OTLP gRPC port of the OpenTelemetry collector that `launch.sh otel`
     # deploys on k8s.
     otel: 4317
+  # Pathways deployment of a trainer or rollout. Only `k8s.sh` applies these,
+  # to the roles whose template is `jobset.pathways.yaml`; `trainer` applies to
+  # the trainer only.
+  pathways:
+    server_image: "us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/server:latest"
+    proxy_image: "us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/proxy_server:latest"
+    # `request` and `limit` (Kubernetes quantities) of the Pathways containers;
+    # an empty value sets none. `proxy_memory` and `rm_memory` size the
+    # pathways-proxy and resource-manager containers of the head pod, which
+    # also runs the role's own container (`roles.<role>.memory`).
+    # `server_memory` sizes the Pathways server (the pathways-worker container,
+    # `server_image`) on each TPU host.
+    proxy_memory:
+      request: "16G"
+      limit: "190G"
+    rm_memory:
+      request: "4G"
+      limit: "32G"
+    server_memory:
+      request: "100G"
+      limit: ""
+    gcs_scratch_location: "gs://cloud-pathways-staging/tmp"
+    # Extra `KEY: "VALUE"` environment variables of the pathways-worker
+    # containers, e.g. `LIBTPU_INIT_ARGS`.
+    worker_env: {}
+    # Extra arguments of the pathways-proxy container, separated by spaces.
+    proxy_extra_args: ""
+    # Colocated Python sidecar of the pathways-worker pods. An empty `image`
+    # runs none. `shm` shares a memory-backed directory with pathways-worker.
+    sidecar:
+      image: ""
+      memory:
+        request: "16Gi"
+        limit: ""
+      shm: true
+    # Settings `k8s.sh` applies to the trainer's Pathways template alone.
+    trainer:
+      # Sets `ENABLE_PATHWAYS_PERSISTENCE` on the trainer.
+      persistence: false
+      # Host buffers of at least this many bytes go from the trainer to
+      # pathways-proxy through shared memory instead of localhost gRPC. null
+      # keeps the IFRT proxy client's default, which turns this off.
+      ifrt_proxy_large_transfer_threshold_bytes: null
   local:
     auto_detect_devices: false
     download_model_weights: true
@@ -459,6 +524,12 @@ cluster_config:
     worker_shutdown_grace_secs: 10
     trainer_shutdown_grace_secs: 900
     force_arm_secs: 5
+    # How long `local.sh` waits for each worker's port to open, how often it
+    # polls, and what it prints while waiting.
+    wait_timeout_secs: 1800
+    wait_poll_secs: 5
+    wait_debug_every_polls: 6
+    wait_log_tail_lines: 40
   k8s:
     namespace: "default"
     kueue_queue_name: ""
@@ -480,24 +551,15 @@ cluster_config:
     # every node then exports to it (`tunix/dist_rl/common/otel_setup.py`).
     otel_id: ""
     cpu_machine: "n2-standard-64"
-    # Orchestrator node pool and memory request. Empty `cpu_nodepool` selects
-    # the node by `cpu_machine`; empty `cpu_memory` requests none.
+    # Orchestrator node pool. Empty selects the node by `cpu_machine`.
     cpu_nodepool: ""
-    cpu_memory: ""
-    gcs_scratch_location: "gs://cloud-pathways-staging/tmp"
-    enable_pathways_persistence: false
-    trainer_extra_env: ""
     # Container image for the trainer/rollout pods; required for target=k8s
     # (`k8s.sh` fails fast when empty). Example launchers set it.
     tunix_image: ""
-    pathways_server_image: "us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/server:latest"
-    pathways_proxy_image: "us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/proxy_server:latest"
-    pathways_proxy_memory_limit: "190G"
-    pathways_proxy_memory: "16G"
-    pathways_rm_memory: "4G"
-    user_container_memory: "48G"
-    user_container_memory_limit: "70G"
-    pathways_worker_memory: "100G"
+    # Compute Engine reservation the TPU pods of a `jobset.*.yaml` trainer or
+    # rollout must run on; empty sets none. A `leaderworkerset.*.yaml` rollout
+    # does not take it.
+    tpu_reservation: ""
     # Fail-fast restarts for the trainer and rollout JobSets: a failed pod fails
     # its Job instead of restarting in place, and JobSet recreates the whole
     # JobSet up to `startup_retries` times. Needs `jobset.*.yaml` worker

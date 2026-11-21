@@ -34,6 +34,7 @@ from tunix.dist_rl.rollout import inprocess_vllm_sampler
 from tunix.dist_rl.rollout import vanilla_sampler
 from tunix.dist_rl.rollout import vllm_sampler
 from tunix.dist_rl.weight_sync import weight_sync as weight_sync_lib
+from tunix.generate import mappings as mappings_lib
 from tunix.models import automodel
 from tunix.rl.agentic.parser.chat_template_parser import parser
 from tunix.utils import maxtext_utils
@@ -49,6 +50,13 @@ _MAXTEXT_ROLLOUT_ARGV = (
 _ROUTED_EXPERTS_ARGV = (
     *_MAXTEXT_ROLLOUT_ARGV,
     "vllm_config.return_routed_experts=true",
+)
+# `base_dist_config.yaml` names no task; `rollout.main` needs one.
+_TASK_ARGV = (
+    "data_module=my_task.data",
+    "env_class_path=my_env",
+    "agent_class_path=my_agent",
+    "registry_module=my_task.registry",
 )
 # The variables `node_utils.apply_library_env` sets.
 _LIBRARY_ENV_VARS = (
@@ -100,6 +108,7 @@ class ModelFamilyTest(absltest.TestCase):
         ("gemma4_e2b", parser.Gemma4ChatTemplateParser),
         ("google/gemma-2-2b-it", parser.GemmaChatTemplateParser),
         ("Qwen/Qwen3-1.7B", parser.QwenChatTemplateParser),
+        ("Qwen/Qwen3.5-0.8B", parser.QwenChatTemplateParser),
     ):
       with self.subTest(model_id=model_id):
         result = rollout._chat_parser_for(
@@ -116,29 +125,145 @@ class ModelFamilyTest(absltest.TestCase):
         rollout._create_chat_parser(hp, mock.Mock()), parser.RawTextParser
     )
 
-  def test_gemma4_mapping_includes_preprocessing_and_fused_projections(self):
-    config = rollout._mapping_config_for("google/gemma-4-E2B-it")
+  def test_validate_rollout_config_rejects_qwen3p5_unsupported_weight_sync(
+      self,
+  ):
+    with self.subTest("oop_vllm_with_raiden"):
+      oop_hp = _hp(
+          "rollout_engine=vllm",
+          "model_config.model_id=Qwen/Qwen3.5-0.8B",
+          "weight_sync_config.mode=raiden",
+          "rollout_model_config.mesh.shape=(1,1)",
+      )
+      with self.assertRaisesRegex(ValueError, "use inprocess_vllm instead"):
+        rollout._validate_rollout_config(oop_hp)
+      oop_config = rollout._rollout_config(
+          oop_hp, mock.Mock(), sampler_type="vllm"
+      )
+      with mock.patch.object(
+          vllm_sampler, "VllmSampler", autospec=True
+      ) as mock_sampler_cls:
+        with self.assertRaisesRegex(ValueError, "use inprocess_vllm instead"):
+          rollout._create_vllm_sampler(
+              oop_hp, "rollout-0", mock.Mock(), oop_config
+          )
+        mock_sampler_cls.assert_not_called()
 
-    # Gemma4 fuses gate/up on the source state before transfer and maps
-    # separate q/k/v projections.
-    self.assertIsNotNone(config.preprocess_src_state)
-    to_hf_mappings = config.to_hf_mappings
-    if to_hf_mappings is None:
-      self.fail("Gemma4 mapping has no to_hf_mappings.")
-    self.assertIn("layers.*.mlp.gate_up_proj.kernel", to_hf_mappings)
-    self.assertIn("layers.*.attn.q_einsum.w", to_hf_mappings)
-    self.assertIn("layers.*.attn.k_einsum.w", to_hf_mappings)
-    self.assertIn("layers.*.attn.v_einsum.w", to_hf_mappings)
+    for name, overrides, exc_type, regex in (
+        (
+            "inprocess_tp_gt_1",
+            (
+                "model_config.model_id=Qwen/Qwen3.5-2B",
+                "weight_sync_config.mode=raiden",
+                "rollout_model_config.mesh.shape=(1,2)",
+            ),
+            NotImplementedError,
+            "tensor_parallel_size=1 only",
+        ),
+        (
+            "inprocess_lora",
+            (
+                "model_config.model_id=Qwen/Qwen3.5-0.8B",
+                "weight_sync_config.mode=raiden",
+                "rollout_model_config.mesh.shape=(1,1)",
+                "rollout_model_config.lora_config={'rank': 8, 'alpha': 16.0}",
+            ),
+            NotImplementedError,
+            "Qwen3.5 LoRA",
+        ),
+        (
+            "inprocess_real_weights_raiden",
+            (
+                "model_config.model_id=Qwen/Qwen3.5-0.8B",
+                "weight_sync_config.mode=raiden",
+                "vllm_config.init_with_random_weights=false",
+                "rollout_model_config.mesh.shape=(1,1)",
+            ),
+            ValueError,
+            "requires init_with_random_weights=True",
+        ),
+        (
+            "inprocess_fs_default_real_weights",
+            (
+                "model_config.model_id=Qwen/Qwen3.5-0.8B",
+                "weight_sync_config.mode=fs",
+                "rollout_model_config.mesh.shape=(1,1)",
+            ),
+            ValueError,
+            "requires init_with_random_weights=True",
+        ),
+    ):
+      with self.subTest(name):
+        with self.assertRaisesRegex(exc_type, regex):
+          rollout._validate_rollout_config(
+              _hp("rollout_engine=inprocess_vllm", *overrides)
+          )
 
-  def test_qwen3_mapping_is_selected_for_qwen3(self):
-    config = rollout._mapping_config_for("Qwen/Qwen3-8B")
+  def test_qwen3p5_samplers_plumb_mapping_config_and_hf_overrides(self):
+    with self.subTest("dense_inproc_raiden"):
+      dense_inproc = _inprocess_vllm_rollout_config(
+          "rollout_engine=inprocess_vllm",
+          "model_config.model_id=Qwen/Qwen3.5-0.8B",
+          "weight_sync_config.mode=raiden",
+          "rollout_model_config.mesh.shape=(1,1)",
+      )
+      self.assertIsNotNone(dense_inproc.rollout_mapping_config)
+      self.assertIsNotNone(
+          dense_inproc.rollout_mapping_config.preprocess_src_state
+      )
+      self.assertIn(
+          "layers.*.linear_attn.in_proj_qkvz.kernel",
+          dense_inproc.rollout_mapping_config.to_hf_mappings,
+      )
+      self.assertEqual(
+          dense_inproc.rollout_vllm_kwargs["hf_overrides"],
+          {"architectures": ["Qwen3_5ForCausalLM"]},
+      )
+      raiden_hp = _hp(
+          "model_config.model_id=Qwen/Qwen3.5-0.8B",
+          "weight_sync_config.mode=raiden",
+      )
+      self.assertEmpty(
+          rollout._vllm_hf_overrides(raiden_hp, sampler_type="vllm")
+      )
 
-    self.assertTrue(config.to_hf_mappings)
-    self.assertIsNone(config.preprocess_src_state)
+    with self.subTest("static_oop"):
+      static_oop = _vllm_engine_kwargs(
+          "model_config.model_id=Qwen/Qwen3.5-35B-A3B",
+          "weight_sync_config.mode=none",
+      )
+      self.assertNotIn("hf_overrides", static_oop)
 
-  def test_unsupported_family_raises(self):
-    with self.assertRaisesRegex(ValueError, "supports Qwen3 and Gemma4"):
-      rollout._mapping_config_for("meta-llama/Llama-3-8B")
+    with self.subTest("maxtext_moe_inproc"):
+      maxtext_moe_inproc = _inprocess_vllm_rollout_config(
+          "rollout_engine=inprocess_vllm",
+          "model_config.model_id=Qwen/Qwen3.5-35B-A3B",
+          "model_config.model_source=maxtext",
+          "model_config.model_path=/ckpt/qwen3.5-35b-a3b",
+          "model_config.model_name=qwen3.5-35b-a3b",
+          "model_config.kwargs.maxtext_model_name=qwen3.5-35b-a3b",
+          "weight_sync_config.mode=raiden",
+      )
+      self.assertEqual(
+          maxtext_moe_inproc.rollout_mapping_config,
+          mappings_lib.MappingConfig(),
+      )
+      self.assertEqual(
+          maxtext_moe_inproc.rollout_vllm_kwargs["hf_overrides"],
+          dict(maxtext_utils.VLLM_MAXTEXT_HF_OVERRIDES),
+      )
+
+    with self.subTest("static_moe_inproc"):
+      static_moe_inproc = _inprocess_vllm_rollout_config(
+          "rollout_engine=inprocess_vllm",
+          "rollout_model_config.model_id=Qwen/Qwen3.5-35B-A3B",
+          "weight_sync_config.mode=none",
+      )
+      self.assertEqual(
+          static_moe_inproc.rollout_mapping_config,
+          mappings_lib.MappingConfig(),
+      )
+      self.assertNotIn("hf_overrides", static_moe_inproc.rollout_vllm_kwargs)
 
   def test_gemma4_vllm_overrides_match_text_only_reference(self):
     overrides = rollout._vllm_hf_overrides(
@@ -213,7 +338,8 @@ class RolloutConfigTest(absltest.TestCase):
     self.assertEqual(config.top_p, 0.95)
     self.assertFalse(config.overlong_filter)
     self.assertTrue(config.return_logprobs)
-    self.assertEqual(config.eos_tokens, [151645, 151643])
+    # No `rollout_config.eos_tokens`: generation stops at the tokenizer's EOS.
+    self.assertIsNone(config.eos_tokens)
     self.assertIsNone(config.trajectory_store_config)
 
   def test_eos_token_strings_resolve_through_tokenizer(self):
@@ -330,12 +456,6 @@ class RolloutConfigPlumbingTest(absltest.TestCase):
 
 class ValidateRolloutConfigTest(absltest.TestCase):
 
-  def test_rejects_return_logprobs_false(self):
-    with self.assertRaisesRegex(ValueError, "return_logprobs must be true"):
-      rollout._validate_rollout_config(
-          _hp("rollout_config.return_logprobs=false")
-      )
-
   def test_rejects_lora_with_vanilla_sampler(self):
     with self.assertRaisesRegex(ValueError, "not supported with.*vanilla"):
       rollout._validate_rollout_config(
@@ -344,20 +464,6 @@ class ValidateRolloutConfigTest(absltest.TestCase):
               "rollout_model_config.lora_config={'rank': 8, 'alpha': 8.0}",
           )
       )
-
-  def test_rejects_server_mode_false(self):
-    for rollout_engine in ("inprocess_vllm", "vllm", "vanilla"):
-      with self.subTest(rollout_engine=rollout_engine):
-        with self.assertRaisesRegex(ValueError, "server_mode: false"):
-          rollout._validate_rollout_config(
-              _hp(
-                  f"rollout_engine={rollout_engine}",
-                  "vllm_config.server_mode=false",
-              )
-          )
-    rollout._validate_rollout_config(
-        _hp("rollout_engine=vllm", "vllm_config.server_mode=true")
-    )
 
   def test_rejects_non_default_tpu_backend_type_for_non_inprocess_vllm(self):
     for rollout_engine in ("vllm", "vanilla"):
@@ -525,17 +631,11 @@ class SamplerTest(absltest.TestCase):
 
   def test_vllm_sampler_always_runs_in_server_mode(self):
     self.assertTrue(_vllm_rollout_config().rollout_vllm_server_mode)
-    self.assertTrue(
-        _vllm_rollout_config(
-            "vllm_config.server_mode=true"
-        ).rollout_vllm_server_mode
-    )
 
   def test_vllm_sampler_rejects_lora_with_data_parallelism(self):
     with self.assertRaisesRegex(ValueError, "LoRA is not supported"):
       _vllm_engine_kwargs(
           "rollout_model_config.mesh.shape=(2,1)",
-          "vllm_config.tensor_parallel_size=1",
           "rollout_model_config.lora_config={'rank': 8, 'alpha': 8.0}",
       )
 
@@ -937,10 +1037,7 @@ class RolloutMainTest(absltest.TestCase):
       events.append(f"restore:{params.sampler}")
       return True
 
-    argv = [
-        "rollout_engine=vanilla",
-        "cluster_config.registry_module=my_task.registry",
-    ]
+    argv = [*_TASK_ARGV, "rollout_engine=vanilla"]
     with contextlib.ExitStack() as stack:
       mock_import = stack.enter_context(
           mock.patch.object(rollout.importlib, "import_module")
@@ -985,7 +1082,9 @@ class RolloutMainTest(absltest.TestCase):
       setup_metrics = stack.enter_context(
           mock.patch.object(otel_setup, "setup_metrics", return_value=False)
       )
-      rollout.main(["cluster_config.run_id=run_1"], context=mock.Mock())
+      rollout.main(
+          [*_TASK_ARGV, "cluster_config.run_id=run_1"], context=mock.Mock()
+      )
 
     setup_metrics.assert_called_once_with(
         default_service_name="tunix-rollout",
@@ -998,7 +1097,7 @@ class RolloutMainTest(absltest.TestCase):
     serve_worker.assert_awaited_once()
 
   def test_main_serves_with_the_config_fingerprint(self):
-    argv = ["cluster_config.run_id=run_1"]
+    argv = [*_TASK_ARGV, "cluster_config.run_id=run_1"]
     worker_service = mock.MagicMock(trajectory_store=None)
     with contextlib.ExitStack() as stack:
       # `main` sets environment defaults; restore the test's environment.
@@ -1045,7 +1144,9 @@ class RolloutMainTest(absltest.TestCase):
               node_utils, "serve_worker", new_callable=mock.AsyncMock
           )
       )
-      rollout.main(["cluster_config.run_id=run_1"], context=mock.Mock())
+      rollout.main(
+          [*_TASK_ARGV, "cluster_config.run_id=run_1"], context=mock.Mock()
+      )
 
     drain_fn = serve_worker.call_args.kwargs["drain_fn"]
     with self.assertRaisesRegex(RuntimeError, "failed to stop cleanly"):
@@ -1080,8 +1181,9 @@ class RolloutMainTest(absltest.TestCase):
       with self.assertRaisesRegex(RuntimeError, "stop after logging"):
         rollout.main(
             [
+                *_TASK_ARGV,
                 "vllm_config.skip_jax_precompile=false",
-                "weight_sync_config.raiden_data_nics=eth1",
+                "weight_sync_config.raiden.data_nics=eth1",
             ],
             context=mock.Mock(),
         )
@@ -1108,7 +1210,7 @@ class RolloutMainTest(absltest.TestCase):
           )
       )
       with self.assertRaisesRegex(RuntimeError, "stop after logging"):
-        rollout.main([], context=mock.Mock())
+        rollout.main(list(_TASK_ARGV), context=mock.Mock())
     self.assertEqual(os.environ["VLLM_WORKER_MULTIPROC_METHOD"], "fork")
 
   def test_main_rejects_another_library_value_before_starting(self):
@@ -1117,8 +1219,16 @@ class RolloutMainTest(absltest.TestCase):
       with self.assertRaisesRegex(
           ValueError, "set vllm_config.skip_jax_precompile instead"
       ):
-        rollout.main([], context=mock.Mock())
+        rollout.main(list(_TASK_ARGV), context=mock.Mock())
     mock_import.assert_not_called()
+
+  def test_main_requires_a_task(self):
+    with self.assertRaisesRegex(
+        ValueError,
+        "names no task: data_module, env_class_path, agent_class_path,"
+        " registry_module must be set",
+    ):
+      rollout.main([], context=mock.Mock())
 
   def test_main_raises_without_discovery_context(self):
     with self.assertRaisesRegex(RuntimeError, "Require discovery API"):
@@ -1151,6 +1261,7 @@ class RolloutMainTest(absltest.TestCase):
       )
       rollout.main(
           [
+              *_TASK_ARGV,
               "cluster_config.target=external",
               "cluster_config.artifact_root=/artifacts/run",
               "execution_targets.rollout=jax:gpu",
@@ -1184,6 +1295,7 @@ class RolloutMainTest(absltest.TestCase):
       )
       rollout.main(
           [
+              *_TASK_ARGV,
               "cluster_config.target=external",
               "cluster_config.artifact_root=/artifacts/run",
               "execution_targets.rollout=torch:tpu",

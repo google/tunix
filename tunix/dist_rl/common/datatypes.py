@@ -24,7 +24,7 @@ import dataclasses
 import enum
 import math
 import time
-from typing import Any, Dict, Protocol
+from typing import Any, Dict, Protocol, TypeVar, runtime_checkable
 import uuid
 import numpy as np
 from tunix.common import configs as common_configs
@@ -239,7 +239,10 @@ class WorkerInfo:
   """Static metadata describing a worker's identity and capabilities.
 
   Attributes:
-    worker_id: The unique identifier for this worker.
+    worker_id: The logical slot identifier for this worker (e.g., "rollout-0").
+    instance_id: Per-process-incarnation identifier generated at worker startup
+      so orchestrator-side caches and registration can distinguish restarts of
+      the same logical `worker_id`. Defaults to `""` when unspecified.
     roles: The orchestrator roles this worker can serve (e.g., "trainer",
       "rollout").
     resources: Unstructured dictionary of hardware or configuration details
@@ -247,6 +250,7 @@ class WorkerInfo:
   """
 
   worker_id: str
+  instance_id: str = ""
   roles: frozenset[str] = frozenset()
   resources: dict[str, Any] = dataclasses.field(default_factory=dict)
 
@@ -321,10 +325,15 @@ class FaultToleranceConfig:
       `min_active_rollout_grace_s` seconds after the first rollout worker has
       reached `ACTIVE`. Ignored when `enabled=False`.
     min_active_rollout_grace_s: Wall-clock grace period in seconds (`>= 0.0`,
-      default `900.0`) that the active rollout ratio may remain strictly below
-      `min_active_rollout_ratio` before `RolloutCapacityError` is raised,
-      allowing crashed workers time to be restarted and rejoin. The grace timer
-      starts on worker eviction, while the floor is checked at
+      default `900.0`) that active rollout capacity may remain below its floor
+      before `RolloutCapacityError` is raised, allowing crashed workers time to
+      restart and rejoin. When `enabled=True`, this grace applies both to
+      `min_active_rollout_ratio` and to any Relay staging-slot floor installed
+      via `DistributedRLEngine.configure_staging_liveness` (during a staging
+      shortfall, surviving rollout workers may block in
+      `RolloutStagingBuffer.reserve()` until capacity recovers or grace
+      elapses; when `enabled=False`, staging-slot shortfalls fail fast). Both
+      timers start immediately on worker eviction and are checked at
       `DistributedRLEngine` construction, after each `poll_rollouts()`, and
       after `sync_weights()` promotion, so `RolloutCapacityError` surfaces on
       the first poll or weight-sync boundary once `min_active_rollout_grace_s`
@@ -572,59 +581,6 @@ class WeightSyncRequest(Request):
       )
 
 
-@dataclasses.dataclass
-class WeightSyncMetadata:
-  """Metadata passed by Orchestrator during Phase 3 decentralized weight synchronization.
-
-  Used to coordinate peer-to-peer (P2P) or broadcast weight transfers between
-  TPU Trainer slices and RolloutWorker inference pods without routing large
-  model weights through the central orchestrator.
-
-  Attributes:
-    worker_ips: List of target rollout worker IP addresses participating in
-      sync.
-    data_ports: Corresponding list of high-speed data transfer ports for each
-      worker.
-    ctrl_ports: List of control plane ports for coordination.
-    mesh: Optional device mesh object for sharded tensor transfer.
-    layout: Optional tensor memory sharding layout dimensions.
-    new_policy_version: The updated policy weight version index being
-      synchronized.
-    transfer_mode: Transport mechanism option for decentralized weight sync: -
-      "p2p" (default): Direct peer-to-peer transfer (e.g., direct RPC, Ray, or
-      Raiden KV/weight streaming between source Trainer pods and target
-      RolloutWorker pods using P2P DMA). - "broadcast" (Not implemented):
-      Collective/tree broadcast (e.g., distributing weights across a pod mesh
-      via collective communication like NCCL or Gloo over DMA links). - "fs"
-      (Not implemented): Shared filesystem checkpoint transfer (where trainers
-      save checkpoint weights to a shared filesystem like CNS/POSIX and rollout
-      workers reload from disk).
-    source_endpoints: Host/port endpoints of the source trainer pods serving the
-      weights.
-    sharding_topology: Optional device mesh sharding layout (e.g., {"mesh": [2,
-      2]}).
-  """
-
-  worker_ips: list[str] = dataclasses.field(default_factory=list)
-  data_ports: list[str] = dataclasses.field(default_factory=list)
-  ctrl_ports: list[str] = dataclasses.field(default_factory=list)
-  mesh: Any = None
-  layout: list[int] = dataclasses.field(default_factory=list)
-  new_policy_version: int = 0
-  transfer_mode: str = "p2p"
-  source_endpoints: list[str] = dataclasses.field(default_factory=list)
-  sharding_topology: Dict[str, Any] = dataclasses.field(default_factory=dict)
-
-  def __post_init__(self):
-    if self.transfer_mode in ("broadcast", "fs"):
-      raise NotImplementedError(
-          f"transfer_mode='{self.transfer_mode}' is not implemented yet."
-          " Currently only 'p2p' is supported."
-      )
-    elif self.transfer_mode != "p2p":
-      raise ValueError(f"Unknown transfer_mode: '{self.transfer_mode}'")
-
-
 ##### Training DTOs #####
 #
 # Trainer payloads are plain frozen dataclasses so this module stays free of
@@ -794,25 +750,35 @@ class TrainRequest(Request):
   target_policy_version: int = 0
 
 
-class WeightedMetricLike(Protocol):
-  """An unreduced weighted metric transported across the wire.
+_MetricValueT_co = TypeVar(
+    "_MetricValueT_co",
+    bound=common_datatypes.ArrayLike,
+    covariant=True,
+)
+
+
+class WeightedMetricLike(Protocol[_MetricValueT_co]):
+  """Structural read-only contract for an unreduced weighted metric.
 
   Trainers accumulate some metrics as a running `unreduced_sum` and a
   `denominator` so the orchestrator can reduce them correctly across
-  micro-batches and workers. This is the structural wire contract; readers match
-  on these read-only attributes rather than a concrete class so the wire format
-  stays framework-neutral. `tunix.sft.utils.WeightedMetric` is the on-device JAX
-  counterpart whose `jax.Array` fields must be converted to host numpy/float
-  values before crossing the wire (`rpc_utils.validate_wire_safe` rejects
-  `jax.Array`).
+  micro-batches and workers. Readers match on these read-only attributes rather
+  than a concrete class so both accelerator-resident metrics (such as
+  `tunix.sft.utils.WeightedMetric`) and host wire metrics conform without
+  importing ML frameworks. Parameterize by `_MetricValueT_co` to narrow the
+  allowed value type (`WeightedMetricLike[np.ndarray | np.number | float]` on
+  the host wire DTO `MetricsBuffer` versus
+  `WeightedMetricLike[common_datatypes.ArrayLike]` on `MetricsBufferLike`;
+  `rpc_utils.validate_wire_safe` enforces the host-only wire invariant at
+  runtime).
   """
 
   @property
-  def unreduced_sum(self) -> np.ndarray | np.number | float:
+  def unreduced_sum(self) -> _MetricValueT_co:
     ...
 
   @property
-  def denominator(self) -> np.ndarray | np.number | float:
+  def denominator(self) -> _MetricValueT_co:
     ...
 
   @property
@@ -821,6 +787,38 @@ class WeightedMetricLike(Protocol):
 
   @property
   def min_denom(self) -> float | None:
+    ...
+
+
+@runtime_checkable
+class MetricsBufferLike(Protocol):
+  """Structural read-only contract for step metric buffers returned by trainers.
+
+  Satisfied both by `datatypes.MetricsBuffer` (host numpy/float wire DTO) and by
+  accelerator-resident buffers such as MaxText's
+  `abstract_engine.MetricsBuffer` without importing device frameworks.
+  """
+
+  @property
+  def id(self) -> Any:
+    ...
+
+  @property
+  def weighted_metrics(
+      self,
+  ) -> Mapping[str, WeightedMetricLike[common_datatypes.ArrayLike]]:
+    ...
+
+  @property
+  def scalar_metrics(self) -> Mapping[str, common_datatypes.ArrayLike]:
+    ...
+
+  @property
+  def aggregation_fns(self) -> Mapping[str, Callable[..., Any]]:
+    ...
+
+  @property
+  def mode(self) -> str:
     ...
 
 
@@ -844,9 +842,9 @@ class MetricsBuffer:
   """
 
   id: int | str
-  weighted_metrics: Mapping[str, WeightedMetricLike] = dataclasses.field(
-      default_factory=dict
-  )
+  weighted_metrics: Mapping[
+      str, WeightedMetricLike[np.ndarray | np.number | float]
+  ] = dataclasses.field(default_factory=dict)
   scalar_metrics: Mapping[str, np.ndarray | np.number | float] = (
       dataclasses.field(default_factory=dict)
   )

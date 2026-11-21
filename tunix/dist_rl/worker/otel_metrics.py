@@ -357,23 +357,6 @@ _ERROR_STATUS_NAMES: frozenset[str] = frozenset(
 )
 
 
-def extract_lineage(
-    metadata: Mapping[str, Any] | None,
-) -> lineage.LineageContext | None:
-  """Extracts `LineageContext` from `metadata` or raises `TypeError`."""
-  if metadata is None:
-    return None
-  lineage_ctx = metadata.get("lineage")
-  if lineage_ctx is None:
-    return None
-  if not isinstance(lineage_ctx, lineage.LineageContext):
-    raise TypeError(
-        "Expected LineageContext for metadata['lineage'], got"
-        f" {type(lineage_ctx)!r}."
-    )
-  return lineage_ctx
-
-
 def _require_mapping(
     traj: Mapping[str, Any], key: str
 ) -> Mapping[str, Any] | None:
@@ -537,7 +520,7 @@ class RolloutWorkerOtelMetrics:
   @staticmethod
   def resolve_task_name(metadata: Mapping[str, Any] | None) -> str:
     """Resolves semantic task_name from LineageContext."""
-    lineage_ctx = extract_lineage(metadata)
+    lineage_ctx = lineage.extract_lineage(metadata)
     return lineage_ctx.task_name if lineage_ctx is not None else ""
 
   def record_trajectory_error(self, metadata: Mapping[str, Any] | None) -> None:

@@ -210,6 +210,26 @@ class RaidenSynchronizerTest(absltest.TestCase):
         "w2": jnp.arange(3, dtype=jnp.float32),
     }
 
+  def _flat_vllm_state(self) -> dict[str, jax.Array]:
+    # Hash-table fixtures use float32 so _bindable does not mask the segment
+    # filter (real hash_indices_table buffers are int32).
+    return {
+        "vllm_model.model.embed_tokens.weight": jnp.zeros((4, 2), jnp.float32),
+        "vllm_model.lm_head.weight": jnp.zeros((4, 2), jnp.float32),
+        "vllm_model.model.layers.0.cache_proj.weight": jnp.zeros(
+            (2, 2), jnp.float32
+        ),
+        "vllm_model.model.layers.3.self_attn.rotary_emb.cos_sin_cache": (
+            jnp.full((8, 4), 3.0, dtype=jnp.float32)
+        ),
+        "vllm_model.model.layers.0.hash_indices_table": jnp.ones(
+            (4,), dtype=jnp.float32
+        ),
+        "vllm_model.model.layers.0.routed_experts.tpu_hash_indices_table": (
+            jnp.ones((4, 2), dtype=jnp.float32)
+        ),
+    }
+
   def test_ctor_passes_safety_kwargs(self):
     sync = raiden_synchronizer.RaidenSynchronizer("rollout", self._state())
     ws = self.ws_lib.instances[0]
@@ -274,6 +294,66 @@ class RaidenSynchronizerTest(absltest.TestCase):
     sums = sync.checksums(sample=1)
     self.assertEqual(sums["__tensor_count__"], 2)
     self.assertEqual(sums["__element_count__"], 2 * 4 + 3)
+
+  def test_checksums_empty_arrays(self):
+    sync = raiden_synchronizer.RaidenSynchronizer("rollout")
+    self.assertEqual(
+        sync.checksums(),
+        {
+            "__grand_total__": 0.0,
+            "__tensor_count__": 0,
+            "__element_count__": 0,
+        },
+    )
+
+  def test_checksums_handles_distinct_shardings(self):
+    dev = jax.devices()[0]
+    single_sharding = jax.sharding.make_single_device_sharding(dev)
+    mesh_sharding = jax.sharding.NamedSharding(
+        jax.sharding.Mesh(np.array([dev]), ("x",)),
+        jax.sharding.PartitionSpec("x"),
+    )
+    a = jax.device_put(jnp.array([-2.0, 3.0], dtype=jnp.bfloat16), single_sharding)
+    b = jax.device_put(jnp.array([4.0, -1.0], dtype=jnp.float32), mesh_sharding)
+
+    sync = raiden_synchronizer.RaidenSynchronizer(
+        "rollout", {"a": a, "b": b}
+    )
+    sums = sync.checksums(sample=2)
+    self.assertAlmostEqual(sums["['a']"], 5.0, places=3)
+    self.assertAlmostEqual(sums["['b']"], 5.0, places=5)
+    self.assertAlmostEqual(sums["__grand_total__"], 10.0, places=3)
+    self.assertEqual(sums["__tensor_count__"], 2)
+    self.assertEqual(sums["__element_count__"], 4)
+
+  def test_patch_raiden_worker_sync_patches_checksums(self):
+    class _FakeRaidenWorkerSync:
+      _patched_by_tunix = False
+
+      def __init__(self):
+        self._sync = None
+        self.names = ["a", "b"]
+        self.arrays = [
+            jnp.array([-2.0, 3.0], dtype=jnp.float32),
+            jnp.array([4.0], dtype=jnp.float32),
+        ]
+
+    fake_mod = mock.MagicMock(RaidenWorkerSync=_FakeRaidenWorkerSync)
+    with (
+        mock.patch.dict("os.environ", {"JAX_PLATFORMS": "tpu"}),
+        mock.patch.object(
+            raiden_synchronizer, "_lazy_import_module", return_value=fake_mod
+        ),
+    ):
+      raiden_synchronizer.patch_raiden_worker_sync()
+
+    worker_sync = _FakeRaidenWorkerSync()
+    sums = worker_sync.checksums(sample=1)
+    self.assertEqual(sums["a"], 5.0)
+    self.assertNotIn("b", sums)
+    self.assertEqual(sums["__grand_total__"], 9.0)
+    self.assertEqual(sums["__tensor_count__"], 2)
+    self.assertEqual(sums["__element_count__"], 3)
 
   def test_work_unit_metadata_shards_and_addresses(self):
     sync = raiden_synchronizer.RaidenSynchronizer(
@@ -1409,6 +1489,19 @@ class RaidenSynchronizerTest(absltest.TestCase):
       raiden_synchronizer._global_shard_indices(
           arr, sharding, devices=[mesh.devices.flat[0], other_dev]
       )
+
+  def test_bind_flat_vllm_dict_drops_inference_only_buffers(self):
+    sync = raiden_synchronizer.RaidenSynchronizer(
+        "rollout", self._flat_vllm_state()
+    )
+    self.assertEqual(
+        sync.names,
+        [
+            "['vllm_model.lm_head.weight']",
+            "['vllm_model.model.embed_tokens.weight']",
+            "['vllm_model.model.layers.0.cache_proj.weight']",
+        ],
+    )
 
 
 if __name__ == "__main__":

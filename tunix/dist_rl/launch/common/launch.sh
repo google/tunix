@@ -74,15 +74,31 @@ fail_on_legacy_launcher_env
 fail_on_maxtext_env_overrides
 resolve_config_or_die "${CONFIG_ARGS[@]}"
 
+# The commands that start nodes need a task; `stop`, `otel` and `stop-otel`
+# only need the cluster settings. Checked after the target and the command, so
+# an unsupported combination reports that first.
+require_task() {
+  case "${COMMAND}" in
+    start|orchestrator|trainer|rollout)
+      if [[ -n "${TASK_CONFIG_ERROR}" ]]; then
+        echo "Error: ${TASK_CONFIG_ERROR}" >&2
+        exit 1
+      fi
+      ;;
+  esac
+}
+
 case "${CLUSTER_TARGET}" in
   local)
     if [[ "${COMMAND}" != "start" ]]; then
       echo "Error: command '${COMMAND}' is not supported for cluster_config.target=local (only 'start' is supported)." >&2
       exit 1
     fi
+    require_task
     exec "${LAUNCH_DIR}/local.sh" "${CONFIG_ARGS[@]}"
     ;;
   k8s)
+    require_task
     exec "${LAUNCH_DIR}/k8s.sh" "${COMMAND}" "${CONFIG_ARGS[@]}"
     ;;
   external)

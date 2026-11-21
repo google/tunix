@@ -18,45 +18,50 @@ Defines the pure ML algorithmic core of a trainer.
 """
 
 import abc
+from collections.abc import Callable, Mapping
 import dataclasses
-from typing import Any, Callable, Protocol, TypeVar, cast
+import functools
+from typing import Any, Concatenate, ParamSpec, Protocol, TypeVar, cast, runtime_checkable
 
 import numpy as np
 from tunix.dist_rl.common import datatypes
 
+_P = ParamSpec("_P")
 _PayloadT = TypeVar("_PayloadT")
 
 
-class _TrainerWithModel(Protocol):
-  """Structural protocol for trainer engines exposing a `.model` attribute."""
-
-  @property
-  def model(self) -> Any:
-    ...
-
-
-class AbstractTrainer(abc.ABC):
+@runtime_checkable
+class AbstractTrainer(Protocol):
   """The pure ML algorithmic core of a trainer.
 
   Step-level only: no training loops, no I/O policy, no orchestration.
+
+  Declared as a `@runtime_checkable` `typing.Protocol` whose required methods
+  carry `@abc.abstractmethod`: nominal subclasses (such as `PeftTrainer`) keep
+  instantiation-time completeness checks and inherit concrete no-op defaults on
+  optional hooks (`set_target_state`, `release_weight_sync`), whereas
+  non-inheriting structural engines (such as `MaxTextTrainingEngine`) conform
+  without cross-repo `abc.ABCMeta` instantiation hazards and must expose all
+  protocol members—including `set_target_state` and `release_weight_sync`—for
+  static `Protocol` and runtime `isinstance()` checks.
   """
 
-  model: Any
-
-  @abc.abstractmethod
-  def __init__(self, config: Any):
-    """Initializes the trainer with the given config.
-
-    Args:
-      config: The trainer config.
-    """
-    raise NotImplementedError(
-        f"{type(self).__name__} does not implement __init__."
+  # Non-data descriptor (no `__set__`): covariant read-only in Pyrefly while
+  # allowing nominal subclasses to assign `self.model = ...` into `__dict__`
+  # (unlike `@property`), raising `AttributeError` when unset.
+  @functools.cached_property
+  def model(self) -> Any:
+    """Returns the underlying trainer model."""
+    raise AttributeError(
+        f"{type(self).__name__!r} object has no attribute 'model'"
     )
 
   @abc.abstractmethod
   def with_loss_fn(
-      self, loss_fn: Callable[..., Any], has_aux: bool = False
+      self,
+      loss_fn: Callable[Concatenate[Any, _P], Any],
+      /,
+      has_aux: bool = False,
   ) -> "AbstractTrainer":
     """Sets the loss function used by `fwd_bwd` (and evaluation).
 
@@ -75,7 +80,7 @@ class AbstractTrainer(abc.ABC):
 
   @abc.abstractmethod
   def with_gen_model_input_fn(
-      self, gen_model_input_fn: Callable[[Any], dict[str, Any]]
+      self, gen_model_input_fn: Callable[[Any], dict[str, Any]], /
   ) -> "AbstractTrainer":
     """Sets the last-mile adapter mapping a payload to the loss fn's kwargs.
 
@@ -155,7 +160,7 @@ class AbstractTrainer(abc.ABC):
     )
 
   @abc.abstractmethod
-  def with_fwd_only_fn(self, fn: Callable[..., Any]) -> "AbstractTrainer":
+  def with_fwd_only_fn(self, fn: Callable[..., Any], /) -> "AbstractTrainer":
     """Sets the read-only callback `fwd_only` runs.
 
     The forward-only counterpart of `with_loss_fn`. Invalidates any cached
@@ -243,7 +248,8 @@ class AbstractTrainer(abc.ABC):
     Args:
       target_state: The target state pytree from the rollout worker.
     """
-    pass
+    del target_state
+    return None
 
   @abc.abstractmethod
   def prepare_weight_sync(self, *, sync_request: Any = None) -> Any:
@@ -276,7 +282,9 @@ class AbstractTrainer(abc.ABC):
     return None
 
   @abc.abstractmethod
-  def get_metrics(self) -> datatypes.MetricsBuffer:
+  def get_metrics(
+      self,
+  ) -> datatypes.MetricsBufferLike | Mapping[str, Any]:
     """Returns and clears the recently collected step metric records."""
     raise NotImplementedError(
         f"{type(self).__name__} does not implement get_metrics."
@@ -284,12 +292,14 @@ class AbstractTrainer(abc.ABC):
 
   @abc.abstractmethod
   def close(self) -> None:
-    """Releases resources held by the trainer. Default: no-op."""
-    pass
+    """Releases resources held by the trainer."""
+    raise NotImplementedError(
+        f"{type(self).__name__} does not implement close."
+    )
 
 
 def resolve_dummy_routed_experts(
-    trainer: AbstractTrainer | _TrainerWithModel,
+    trainer: AbstractTrainer,
     data: _PayloadT,
 ) -> _PayloadT:
   """Expands `(B, S, 0, 0)` precompile `routed_experts` placeholders.
@@ -327,7 +337,7 @@ def resolve_dummy_routed_experts(
         "Expected dummy routed_experts placeholder with rank >= 2, got shape"
         f" {routed_experts.shape}."
     )
-  model = getattr(trainer, "model", None)
+  model = trainer.model
   # `maxtext.utils.model_creation_utils.from_pretrained(...,
   # wrap_with_tunix_adapter=True)` sets `adapter.config = None`, so treat a
   # `None` `.config` as absent and fall back to `.base.config` (or `_config`).

@@ -50,7 +50,7 @@ exec "${DIR}/../math_gsm8k_dist/k8s_launcher.sh" \
   weight_sync_config.prefuse_moe_weights=true \
   weight_sync_config.verify_weights=true \
   weight_sync_config.in_flight_weight_updates=false \
-  weight_sync_config.raiden_use_ffi=1 \
+  weight_sync_config.raiden.use_ffi=true \
   batch_size=4 \
   rl_training_config.mini_batch_size=4 \
   rl_training_config.train_micro_batch_size=8 \

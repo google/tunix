@@ -71,7 +71,7 @@
         "kwargs": {
           "flush_every_n_steps": 1,
           "log_dir": "/artifacts/metrics",
-          "project_name": "trellis-gsm8k",
+          "project_name": "tunix-dist-rl",
           "run_name": ""
         }
       }
@@ -104,7 +104,7 @@
           "data_sharding_axis": [
             "fsdp"
           ],
-          "eval_every_n_steps": 50,
+          "eval_every_n_steps": 1,
           "gradient_accumulation_steps": 1,
           "metrics_prefix": "actor",
           "pbar_description": "Actor Training",
@@ -173,6 +173,7 @@
         "kwargs": {
           "dtype": "float32",
           "flash_attention_block_size": null,
+          "freeze_router": false,
           "load_dtype": "float32",
           "mesh": "<tunix.dist_rl.launch.nodes.node_utils.Mesh()>",
           "model_id": "Qwen3-1.7B",

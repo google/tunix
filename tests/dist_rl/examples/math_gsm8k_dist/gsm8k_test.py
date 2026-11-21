@@ -287,10 +287,10 @@ class ExampleConfigTest(absltest.TestCase):
     cluster = config["cluster_config"]
     self.assertEqual(cluster["target"], "local")
     self.assertEqual(
-        cluster["orchestrator_main"],
+        cluster["roles"]["orchestrator"]["main"],
         "tunix.dist_rl.launch.nodes.orchestrator.main",
     )
-    self.assertEqual(cluster["registry_module"], _GSM8K_MODULE)
+    self.assertEqual(config["registry_module"], _GSM8K_MODULE)
     self.assertTrue(cluster["artifact_root"].endswith("artifacts/math_gsm8k"))
     self.assertEqual(cluster["local"]["trainer_devices"], "0,1")
     self.assertEqual(cluster["local"]["rollout_devices"], "2,3")

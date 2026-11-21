@@ -1,6 +1,6 @@
 # Distributed FrozenLake GRPO Recipe
 
-This directory ports the Qwen3 and Gemma4 E2B FrozenLake recipes under
+This directory ports the Qwen3, Qwen3.5, and Gemma4 E2B FrozenLake recipes under
 `examples/frozenlake/` to the distributed RL stack. It runs on the shared
 launcher and node mains in `tunix/dist_rl/launch/`: the control plane runs on
 CPU, while the generic distributed trainer and rollout workers own model
@@ -94,6 +94,35 @@ fp32 compute and parameters, decoder rematerialization, flash attention with
 block size 256, the Gemma4 non-thinking chat template, and the vLLM limits
 (`max_num_seqs=512`, `max_num_batched_tokens=32768`). Later
 `section.key=value` arguments override any of them.
+
+## Qwen3.5 0.8B / 2B (TP=1)
+
+`../recipes/frozenlake_qwen3p5_0p8b.sh` runs `Qwen/Qwen3.5-0.8B` on any TPU host
+with at least two chips, assigning chip 0 to a `1x1` trainer and chip 1 to a
+`TP=1` in-process vLLM rollout worker (`tpu_chips_per_host_bounds="1,1,1"`):
+
+```bash
+bash tunix/dist_rl/examples/recipes/frozenlake_qwen3p5_0p8b.sh
+```
+
+To run `Qwen3.5-2B` on the same `TP=1` rollout topology, override the model and
+tokenizer keys:
+
+```bash
+bash tunix/dist_rl/examples/recipes/frozenlake_qwen3p5_0p8b.sh \
+  model_config.model_name=Qwen3.5-2B \
+  model_config.model_id=Qwen/Qwen3.5-2B \
+  tokenizer_config.tokenizer_path=Qwen/Qwen3.5-2B
+```
+
+The recipe configures `float32` parameter loading
+(`model_config.load_dtype=float32`) to preserve Gated DeltaNet's `A_log`
+precision and avoid `bfloat16` AdamW update underflow, `bfloat16` compute and
+rollout, `vllm_config.hbm_utilization=0.5`, two-trajectory trainer/logp
+micro-batches, `compute_logps_chunk_size=2048`, and gradient clipping at `1.0`,
+writing artifacts to `artifacts/qwen3p5_0p8b_dist_frozenlake`. Non-thinking chat
+parsing (`chat_parser_config.enable_thinking=false`) and Raiden weight sync come
+from `frozenlake.yaml`.
 
 ## Distributed vs. agentic benchmark
 

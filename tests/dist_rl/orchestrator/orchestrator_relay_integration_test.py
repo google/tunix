@@ -26,12 +26,16 @@ from absl.testing import parameterized
 import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.orchestrator import distributed_rl_engine
+from tunix.dist_rl.orchestrator import worker_registry
 from tunix.dist_rl.testing import fake_cluster
+from tunix.dist_rl.testing import fault_injection
 
 
 def _assert_zero_rollout_staging(
     test_case: absltest.TestCase,
     harness: fake_cluster.FakeClusterHarness,
+    *,
+    expected_workers: int | None = None,
 ):
   """Asserts every active RolloutWorker has zero used and reserved bytes."""
   engine = harness.orchestrator.engine
@@ -39,7 +43,12 @@ def _assert_zero_rollout_staging(
   assert engine is not None
   metrics = asyncio.run(engine.get_metrics(role=datatypes.Role.ROLLOUT))
   test_case.assertIsInstance(metrics, Sequence)
-  test_case.assertLen(metrics, harness.num_rollout_workers)
+  test_case.assertLen(
+      metrics,
+      harness.num_rollout_workers
+      if expected_workers is None
+      else expected_workers,
+  )
   for idx, worker_m in enumerate(metrics):
     test_case.assertEqual(
         worker_m["staging/used_bytes"],
@@ -64,6 +73,7 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
         num_rollout_workers=2,
         enable_bulk_transport=True,
         routed_experts_shape_spec=(4, 8),
+        return_routed_experts=True,
         routed_experts_encode_mode="uint8",
         routed_experts_num_experts=64,
         rollout_max_prompt_length=192,
@@ -304,6 +314,7 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
         enable_bulk_transport=True,
         partial_rollout=True,
         routed_experts_shape_spec=(4, 8),
+        return_routed_experts=True,
         routed_experts_encode_mode="uint8",
         routed_experts_num_experts=64,
         rollout_max_prompt_length=256,
@@ -400,10 +411,15 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
           if step == 6:
             critique_gate.set()
 
-        prompts = harness.build_prompts(num_prompts=12, min_turns=0)
+        prompts = harness.build_prompts(num_prompts=12)
         for idx, p in enumerate(prompts):
           p["metadata"] = {"test_prompt_id": f"prompt_{idx}"}
-        prompts[0]["generation_kwargs"]["min_turns"] = 1
+        # `prompt_0` takes 2 turns; the others finish in 1.
+        for sampler in harness.samplers.values():
+          sampler.min_turns_by_request_id = {
+              "traj_prompt_0_g0": 1,
+              "traj_prompt_0_g1": 1,
+          }
         program = harness.build_program(
             prompts=prompts,
             max_steps=11,
@@ -458,24 +474,24 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
         rollout_gate.set()
         critique_gate.set()
 
-  def test_relay_aborts_on_mid_run_rollout_eviction_even_under_ft(self):
-    """Pins the explicit contract: Relay does not tolerate rollout eviction."""
+  def test_relay_aborts_on_mid_run_rollout_eviction_when_ft_disabled(self):
+    """When FT is disabled, Relay fails fast on rollout worker eviction."""
     with fake_cluster.FakeClusterHarness(
         num_rollout_workers=2,
         enable_bulk_transport=True,
         routed_experts_shape_spec=(4, 8),
+        return_routed_experts=True,
+        min_turns=1,
         routed_experts_encode_mode="uint8",
         routed_experts_num_experts=64,
         rollout_max_prompt_length=192,
         response_tokens_per_turn=8,
         fault_tolerance_config=datatypes.FaultToleranceConfig(
-            enabled=True,
-            min_active_rollout_ratio=0.5,
-            max_task_retries=1,
+            enabled=False,
         ),
     ) as harness:
       program = harness.build_program(
-          prompts=harness.build_prompts(num_prompts=4, min_turns=1),
+          prompts=harness.build_prompts(num_prompts=4),
           max_steps=4,
           mini_batch_size=1,
           batch_size=1,
@@ -513,6 +529,310 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
           ):
             harness.orchestrator.run(program)
       finally:
+        program.close()
+
+  def test_relay_ft_multi_replica_kill_on_fetch_staged_and_rejoin(self):
+    """Kills one rollout worker mid-fetch_staged, masks its refs, and rejoins."""
+    with fake_cluster.FakeClusterHarness(
+        num_rollout_workers=2,
+        enable_bulk_transport=True,
+        routed_experts_shape_spec=(4, 8),
+        return_routed_experts=True,
+        min_turns=1,
+        routed_experts_encode_mode="uint8",
+        routed_experts_num_experts=64,
+        rollout_max_prompt_length=192,
+        response_tokens_per_turn=8,
+        fault_tolerance_config=datatypes.FaultToleranceConfig(
+            enabled=True,
+            min_active_rollout_ratio=0.5,
+            min_active_rollout_grace_s=30.0,
+            max_task_retries=1,
+            poll_retry_budget_s=0.0,
+        ),
+    ) as harness:
+      fetch_gate = fault_injection.FaultGate()
+      harness.injector.on(
+          "rollout_1",
+          "fetch_staged",
+          fault_injection.Block(fetch_gate),
+          times=1,
+      )
+      rejoined = False
+
+      def _on_step_end(unused_step: int, unused_res: Any) -> None:
+        nonlocal rejoined
+        if not rejoined and "rollout_1" not in harness.orchestrator.registry:
+          rejoined = True
+          harness.restart_worker(
+              "rollout_1", same_port=False, override=False, re_register=True
+          )
+          deadline = time.monotonic() + 15.0
+          while time.monotonic() < deadline:
+            if (
+                "rollout_1" in harness.orchestrator.registry
+                and harness.orchestrator.registry.status("rollout_1")
+                == worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC
+            ):
+              break
+            time.sleep(0.02)
+
+      program = harness.build_program(
+          prompts=harness.build_prompts(num_prompts=6),
+          max_steps=3,
+          mini_batch_size=2,
+          batch_size=2,
+          num_generations=2,
+          max_staleness=1,
+          assembler_type="packed",
+          reward_fns=[
+              lambda prompts, completions, group_index, **_: [
+                  1.0 if g % 2 == 0 else -1.0 for g in group_index
+              ]
+          ],
+          generation_args=datatypes.GenerationArgs(
+              temperature=1.0, return_routed_experts=True
+          ),
+          on_step_end=_on_step_end,
+      )
+      future = harness.start_program(program)
+      try:
+        self.assertTrue(fetch_gate.entered.wait(timeout=30.0))
+        old_h1 = harness.orchestrator.registry.handle("rollout_1")
+        harness.stop_worker_server("rollout_1", grace=0.0)
+        harness.orchestrator.fault_tolerance_manager.on_worker_unreachable(
+            old_h1, ConnectionError("rollout_1 crashed")
+        )
+        fetch_gate.release()
+        future.result(timeout=60.0)
+
+        self.assertEqual(program.step, 3)
+        engine = harness.orchestrator.engine
+        assert isinstance(engine, distributed_rl_engine.DistributedRLEngine)
+        ft_metrics = engine.fault_tolerance_metrics()
+        self.assertGreaterEqual(
+            ft_metrics["ft/evictions_total/task_session"], 1.0
+        )
+        assert program._relay is not None
+        self.assertGreaterEqual(program._relay.masked_trajectories_total, 1)
+        self.assertEqual(ft_metrics["ft/rejoin/promoted_total"], 1.0)
+        self.assertEmpty(engine._unreleased_staged_refs)
+        _assert_zero_rollout_staging(self, harness)
+      finally:
+        fetch_gate.release()
+        program.close()
+
+  def test_relay_ft_registered_compiling_replacement_receives_zero_staging_rpcs(
+      self,
+  ):
+    """Replacement worker blocked in initialize() (REGISTERED) gets 0 staging RPCs."""
+    with fake_cluster.FakeClusterHarness(
+        num_rollout_workers=2,
+        enable_bulk_transport=True,
+        routed_experts_shape_spec=(4, 8),
+        return_routed_experts=True,
+        min_turns=1,
+        routed_experts_encode_mode="uint8",
+        routed_experts_num_experts=64,
+        rollout_max_prompt_length=192,
+        response_tokens_per_turn=8,
+        fault_tolerance_config=datatypes.FaultToleranceConfig(
+            enabled=True,
+            min_active_rollout_ratio=0.5,
+            min_active_rollout_grace_s=30.0,
+            max_task_retries=1,
+        ),
+    ) as harness:
+      harness.orchestrator.bring_up_workers()
+      engine = harness.orchestrator.engine
+      assert isinstance(engine, distributed_rl_engine.DistributedRLEngine)
+
+      init_gate = fault_injection.FaultGate()
+      still_compiling = True
+      fetch_rule_ref: list[fault_injection.FaultRule] = []
+      release_rule_ref: list[fault_injection.FaultRule] = []
+      orig_fetch = (
+          distributed_rl_engine.DistributedRLEngine.fetch_routed_experts
+      )
+      injected = False
+
+      async def _replace_with_compiling_worker_before_fetch(self_engine, refs):
+        nonlocal injected
+        if not injected and any(r.worker_id == "rollout_1" for r in refs):
+          injected = True
+          # Evict old rollout_1 and register a replacement whose `initialize`
+          # blocks on `init_gate` so it stays in `AdmissionStatus.REGISTERED`.
+          self_engine._registry.unregister("rollout_1")
+          harness.injector.on(
+              "rollout_1",
+              "initialize",
+              fault_injection.Block(init_gate),
+              times=1,
+          )
+          fetch_rule_ref.append(
+              harness.injector.on(
+                  "rollout_1",
+                  "fetch_staged",
+                  fault_injection.Raise(
+                      RuntimeError("unexpected fetch_staged on REGISTERED")
+                  ),
+                  where=lambda _: still_compiling,
+                  times=None,
+              )
+          )
+          release_rule_ref.append(
+              harness.injector.on(
+                  "rollout_1",
+                  "release_staged",
+                  fault_injection.Raise(
+                      RuntimeError("unexpected release_staged on REGISTERED")
+                  ),
+                  where=lambda _: still_compiling,
+                  times=None,
+              )
+          )
+          await asyncio.to_thread(
+              harness.restart_worker,
+              "rollout_1",
+              same_port=False,
+              override=False,
+              re_register=True,
+          )
+          self.assertTrue(init_gate.entered.wait(timeout=15.0))
+          self.assertEqual(
+              self_engine._registry.status("rollout_1"),
+              worker_registry.AdmissionStatus.REGISTERED,
+          )
+        return await orig_fetch(self_engine, refs)
+
+      def _release_compile_after_step0(step: int, unused_res: Any) -> None:
+        nonlocal still_compiling
+        if step == 0:
+          self.assertEqual(fetch_rule_ref[0].matched_count, 0)
+          self.assertEqual(release_rule_ref[0].matched_count, 0)
+          still_compiling = False
+          init_gate.release()
+          deadline = time.monotonic() + 15.0
+          while time.monotonic() < deadline:
+            if (
+                harness.orchestrator.registry.status("rollout_1")
+                == worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC
+            ):
+              break
+            time.sleep(0.02)
+
+      program = harness.build_program(
+          prompts=harness.build_prompts(num_prompts=4),
+          max_steps=2,
+          mini_batch_size=2,
+          batch_size=2,
+          num_generations=2,
+          assembler_type="packed",
+          reward_fns=[
+              lambda prompts, completions, group_index, **_: [
+                  1.0 if g % 2 == 0 else -1.0 for g in group_index
+              ]
+          ],
+          generation_args=datatypes.GenerationArgs(
+              temperature=1.0, return_routed_experts=True
+          ),
+          on_step_end=_release_compile_after_step0,
+      )
+      try:
+        with mock.patch.object(
+            distributed_rl_engine.DistributedRLEngine,
+            "fetch_routed_experts",
+            _replace_with_compiling_worker_before_fetch,
+        ):
+          harness.orchestrator.run(program, bring_up=False)
+        self.assertTrue(injected)
+        # During Step 0 (while REGISTERED), zero RPCs hit replacement rollout_1;
+        # during Step 1 (after promotion to ACTIVE), rollout_1 served normally!
+        self.assertEqual(
+            engine.fault_tolerance_metrics()["ft/rejoin/promoted_total"], 1.0
+        )
+        assert program._relay is not None
+        self.assertGreaterEqual(program._relay.masked_trajectories_total, 1)
+        self.assertEmpty(engine._unreleased_staged_refs)
+        _assert_zero_rollout_staging(self, harness)
+      finally:
+        init_gate.release()
+        program.close()
+
+  def test_relay_ft_trailing_masked_microbatch_flushes_accumulated_gradients(
+      self,
+  ):
+    """Trailing all-masked microbatch flushes mb0's accumulated gradients via train_step."""
+    with fake_cluster.FakeClusterHarness(
+        num_rollout_workers=2,
+        enable_bulk_transport=True,
+        routed_experts_shape_spec=(4, 8),
+        return_routed_experts=True,
+        min_turns=1,
+        routed_experts_encode_mode="uint8",
+        routed_experts_num_experts=64,
+        rollout_max_prompt_length=192,
+        response_tokens_per_turn=8,
+        fault_tolerance_config=datatypes.FaultToleranceConfig(
+            enabled=True,
+            min_active_rollout_ratio=0.5,
+            min_active_rollout_grace_s=30.0,
+            max_task_retries=1,
+        ),
+    ) as harness:
+      fetch_gate = fault_injection.FaultGate()
+      harness.injector.on(
+          "rollout_1",
+          "fetch_staged",
+          fault_injection.Block(fetch_gate),
+          times=1,
+      )
+      # `max_staleness=0` with 2 rollout workers (`num_generations=2`,
+      # `train_micro_batch_size=1` padded): Step 0 dispatches g=0 to rollout_0
+      # (mb0, `apply_optimizer=False`) and g=1 to rollout_1 (mb1,
+      # `is_final_batch=True`). Killing rollout_1 on mb1's `fetch_staged` makes
+      # the final microbatch 100% masked (`completion_mask == 0`), which still
+      # flushes mb0's accumulated gradients through `train_step(mb1,
+      # apply_optimizer=True)` without dilution.
+      program = harness.build_program(
+          prompts=harness.build_prompts(num_prompts=2),
+          max_steps=2,
+          mini_batch_size=1,
+          batch_size=1,
+          num_generations=2,
+          max_staleness=0,
+          assembler_type="padded",
+          reward_fns=[
+              lambda prompts, completions, group_index, **_: [
+                  1.0 if g % 2 == 0 else -1.0 for g in group_index
+              ]
+          ],
+          generation_args=datatypes.GenerationArgs(
+              temperature=1.0, return_routed_experts=True
+          ),
+      )
+      future = harness.start_program(program)
+      try:
+        self.assertTrue(fetch_gate.entered.wait(timeout=30.0))
+        old_h1 = harness.orchestrator.registry.handle("rollout_1")
+        harness.stop_worker_server("rollout_1", grace=0.0)
+        harness.orchestrator.fault_tolerance_manager.on_worker_unreachable(
+            old_h1, ConnectionError("rollout_1 crashed")
+        )
+        fetch_gate.release()
+
+        future.result(timeout=60.0)
+        self.assertEqual(program.step, 2)
+        assert program._relay is not None
+        self.assertEqual(program._relay.masked_trajectories_total, 1)
+        engine = harness.orchestrator.engine
+        assert isinstance(engine, distributed_rl_engine.DistributedRLEngine)
+        ft_metrics = engine.fault_tolerance_metrics()
+        self.assertEqual(ft_metrics["ft/evictions_total/task_session"], 1.0)
+        self.assertEmpty(engine._unreleased_staged_refs)
+        _assert_zero_rollout_staging(self, harness, expected_workers=1)
+      finally:
+        fetch_gate.release()
         program.close()
 
 

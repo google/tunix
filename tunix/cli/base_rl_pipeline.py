@@ -31,6 +31,7 @@ from tunix.cli import config
 from tunix.cli.utils import data as data_lib
 from tunix.cli.utils import model as model_lib
 from tunix.examples.data import math_dataset as example_data
+from tunix.generate import vllm_model_config
 from tunix.perf import export as perf_export
 from tunix.perf import metrics as perf_metrics
 from tunix.perf.experimental import export as perf_export_v2
@@ -42,6 +43,81 @@ from tunix.utils import mesh as mesh_lib
 _PATHWAYS_BNS = flags.DEFINE_string(
     "pathways_bns", None, "BNS address of the Pathways server."
 )
+
+
+def _resolve_effective_tp_size(
+    rollout_shape: tuple[int, ...],
+    tp_size: int,
+    dp_size: int,
+    ep_size: int = 1,
+) -> int:
+  """Resolves `-1` auto-inferred `tensor_parallel_size` from `rollout_shape`."""
+  # Mirrors `tunix.generate.utils.resolve_parallelism_sizes` (the source of
+  # truth used by `VllmSampler` at engine init) on a raw `devices.shape` tuple.
+  if tp_size != -1:
+    return tp_size
+  total_devices = int(np.prod(rollout_shape))
+  if ep_size <= 0 or total_devices % ep_size != 0:
+    raise ValueError(
+        f"Total mesh devices ({total_devices}) must be divisible by"
+        f" expert_parallel_size ({ep_size})."
+    )
+  effective_dp = 1 if dp_size == -1 else dp_size
+  if effective_dp <= 0:
+    raise ValueError(
+        f"data_parallel_size must be positive or -1; got {dp_size}."
+    )
+  return total_devices // (effective_dp * ep_size)
+
+
+def _validate_and_prepare_qwen3p5_vllm(
+    *,
+    model_name: str,
+    tp_size: int,
+    use_lora: bool,
+    init_with_random_weights: bool,
+    vllm_kwargs: dict[str, Any],
+) -> None:
+  """Validates Qwen3.5 vLLM rollout settings and sets default hf_overrides."""
+  # Monolithic `rollout_engine="vllm"` constructs in-process `VllmRollout` with
+  # `MappingConfig` weight conversion (unlike dist_rl's out-of-process `vllm`).
+  vllm_model_config.validate_vllm_rollout_config(
+      model_name,
+      sampler_type="inprocess_vllm",
+      tp_size=tp_size,
+      weight_sync_mode="in_memory",
+      use_lora=use_lora,
+      init_with_random_weights=init_with_random_weights,
+  )
+  default_overrides = vllm_model_config.vllm_hf_overrides_for_model(
+      model_name,
+      sampler_type="inprocess_vllm",
+      weight_sync_mode="in_memory",
+      init_with_random_weights=init_with_random_weights,
+  )
+  overrides = dict(vllm_kwargs.get("hf_overrides") or {})
+  for key, value in default_overrides.items():
+    overrides.setdefault(key, value)
+  vllm_kwargs["hf_overrides"] = overrides
+
+
+def _resolve_enable_thinking(raw_value: Any, *, default: bool) -> bool:
+  """Resolves `chat_parser_config.enable_thinking` to a boolean."""
+  if raw_value is None:
+    return default
+  if isinstance(raw_value, bool):
+    return raw_value
+  if isinstance(raw_value, str):
+    try:
+      return config.string_to_bool(raw_value)
+    except ValueError as exc:
+      raise ValueError(
+          f"Invalid chat_parser_config.enable_thinking={raw_value!r}: {exc}"
+      ) from exc
+  raise ValueError(
+      "chat_parser_config.enable_thinking must be a bool, bool string"
+      f" ('true'/'false'), or null; got {raw_value!r}."
+  )
 
 
 class BasePipeline(abc.ABC, config.HyperParameters):
@@ -384,30 +460,61 @@ class BasePipeline(abc.ABC, config.HyperParameters):
           "rollout_vllm_server_mode_submission_timeout_s",
           vllm.get("server_mode_submission_timeout_s", 0.0),
       )
-      os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
-      return dict(
-          rollout_vllm_model_version=vllm.get("model_version", model_id),
-          rollout_vllm_hbm_utilization=vllm.get("hbm_utilization", 0.4),
-          rollout_vllm_tpu_backend_type=vllm.get("tpu_backend_type", "jax"),
-          rollout_vllm_server_mode=vllm.get("server_mode", True),
-          rollout_vllm_server_mode_submission_threshold=submission_threshold,
-          rollout_vllm_server_mode_submission_timeout_s=submission_timeout_s,
-          rollout_vllm_async_scheduling=vllm.get("async_scheduling", True),
-          tensor_parallel_size=vllm.get(
-              "tensor_parallel_size",
-              rollout_shape[1] if len(rollout_shape) > 1 else 1,
-          ),
-          data_parallel_size=vllm.get("data_parallel_size", rollout_shape[0]),
-          rollout_vllm_max_num_seqs=max_num_seqs,
-          rollout_vllm_max_num_batched_tokens=max_batched_tokens,
-          rollout_vllm_kwargs=vllm.get(
+      tp_size = vllm.get(
+          "tensor_parallel_size",
+          rollout_shape[1] if len(rollout_shape) > 1 else 1,
+      )
+      dp_size = vllm.get("data_parallel_size", rollout_shape[0])
+      ep_size = rollout_cfg.get("expert_parallel_size", 1)
+      model_version = vllm.get("model_version", model_id)
+      vllm_kwargs = dict(
+          vllm.get(
               "kwargs",
               {
                   "kv_cache_metrics": True,
                   "disable_log_stats": False,
                   "enable_prefix_caching": True,
               },
-          ),
+          )
+          or {}
+      )
+      actor_cfg = self._config_mapping("actor_model_config")
+      actor_model_name = str(
+          actor_cfg.get("model_id") or actor_cfg.get("model_name") or ""
+      )
+      if actor_cfg.get(
+          "model_source"
+      ) != "maxtext" and vllm_model_config.is_qwen3p5_model(actor_model_name):
+        effective_tp_size = _resolve_effective_tp_size(
+            rollout_shape, int(tp_size), int(dp_size), int(ep_size)
+        )
+        raw_random_init = rollout_cfg.get(
+            "rollout_vllm_init_with_random_weights"
+        )
+        init_with_random_weights = (
+            True if raw_random_init is None else bool(raw_random_init)
+        )
+        _validate_and_prepare_qwen3p5_vllm(
+            model_name=actor_model_name,
+            tp_size=effective_tp_size,
+            use_lora=bool(actor_cfg.get("lora_config")),
+            init_with_random_weights=init_with_random_weights,
+            vllm_kwargs=vllm_kwargs,
+        )
+      os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
+      return dict(
+          rollout_vllm_model_version=model_version,
+          rollout_vllm_hbm_utilization=vllm.get("hbm_utilization", 0.4),
+          rollout_vllm_tpu_backend_type=vllm.get("tpu_backend_type", "jax"),
+          rollout_vllm_server_mode=vllm.get("server_mode", True),
+          rollout_vllm_server_mode_submission_threshold=submission_threshold,
+          rollout_vllm_server_mode_submission_timeout_s=submission_timeout_s,
+          rollout_vllm_async_scheduling=vllm.get("async_scheduling", True),
+          tensor_parallel_size=tp_size,
+          data_parallel_size=dp_size,
+          rollout_vllm_max_num_seqs=max_num_seqs,
+          rollout_vllm_max_num_batched_tokens=max_batched_tokens,
+          rollout_vllm_kwargs=vllm_kwargs,
       )
 
     return {}
@@ -796,12 +903,20 @@ class BasePipeline(abc.ABC, config.HyperParameters):
 
     chat_cfg = self._config_mapping("chat_parser_config")
     parser_type = chat_cfg.get("type", "default")
+    enable_thinking = chat_cfg.get("enable_thinking")
     if parser_type == "qwen":
-      return chat_parser_lib.QwenChatTemplateParser(tokenizer)
+      return chat_parser_lib.QwenChatTemplateParser(
+          tokenizer,
+          enable_thinking=_resolve_enable_thinking(
+              enable_thinking, default=True
+          ),
+      )
     elif parser_type == "gemma4":
       return chat_parser_lib.Gemma4ChatTemplateParser(
           tokenizer,
-          enable_thinking=chat_cfg.get("enable_thinking", False)
+          enable_thinking=_resolve_enable_thinking(
+              enable_thinking, default=False
+          ),
       )
     return chat_parser_lib.DefaultChatTemplateParser(tokenizer)
 

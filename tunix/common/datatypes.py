@@ -16,7 +16,35 @@
 
 import dataclasses
 import enum
-from typing import Literal
+from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
+
+import numpy as np
+
+
+@runtime_checkable
+class TensorLike(Protocol):
+  """Framework-neutral NumPy-array-protocol structural type for tensors.
+
+  Statically matches `np.ndarray`, `np.generic`, `jax.Array`, and `torch.Tensor`
+  without importing any ML framework. Callers converting values via `np.asarray`
+  require concrete host-accessible tensors (e.g., detached CPU non-`bfloat16`
+  `torch.Tensor`s and non-traced `jax.Array`s).
+  """
+
+  @property
+  def shape(self) -> tuple[int, ...]:
+    ...
+
+  @property
+  def dtype(self) -> Any:
+    ...
+
+  def __array__(self) -> np.ndarray[Any, np.dtype[Any]]:
+    ...
+
+
+ScalarLike: TypeAlias = np.bool_ | np.number | bool | int | float | complex
+ArrayLike: TypeAlias = TensorLike | ScalarLike
 
 
 @dataclasses.dataclass(frozen=True)
@@ -71,11 +99,14 @@ class RoutedExpertsRef:
   """Opaque handle referencing a staged routed_experts array on a RolloutWorker."""
 
   worker_id: str
+  instance_id: str
   ref_id: int
 
   def __post_init__(self) -> None:
     if not isinstance(self.worker_id, str) or not self.worker_id:
       raise ValueError("RoutedExpertsRef.worker_id must be a non-empty str.")
+    if not isinstance(self.instance_id, str) or not self.instance_id:
+      raise ValueError("RoutedExpertsRef.instance_id must be a non-empty str.")
     if (
         isinstance(self.ref_id, bool)
         or not isinstance(self.ref_id, int)

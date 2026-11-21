@@ -29,6 +29,7 @@ from absl import logging
 import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import gcs_cache
+from tunix.dist_rl.common import lineage
 from tunix.dist_rl.common import registry
 from tunix.dist_rl.common import timeouts
 from tunix.dist_rl.rollout import manager as manager_lib
@@ -85,7 +86,6 @@ TrajectoryOrError = Union[
 ]
 
 WorkerState = datatypes.WorkerState
-
 
 class RolloutWorker(abstract_worker.Worker):
   """Worker wrapper for rollout collection.
@@ -164,6 +164,7 @@ class RolloutWorker(abstract_worker.Worker):
     drain_timeout_s = config.drain_timeout_s
     self._staging_buffer = staging_buffer_lib.RolloutStagingBuffer(
         worker_id=worker_id,
+        instance_id=self.instance_id,
         max_bytes=config.staging_max_bytes,
     )
     self._clear_staged_lock = asyncio.Lock()
@@ -204,6 +205,7 @@ class RolloutWorker(abstract_worker.Worker):
   def info(self) -> datatypes.WorkerInfo:
     return datatypes.WorkerInfo(
         worker_id=self.worker_id,
+        instance_id=self.instance_id,
         roles=frozenset({"rollout"}),
         resources={
             "sampler": type(self.sampler).__name__,
@@ -370,7 +372,7 @@ class RolloutWorker(abstract_worker.Worker):
       execution_time_s: float | None = None,
   ) -> None:
     """Appends worker generation telemetry to the lineage context if present."""
-    lineage_ctx = otel_metrics.extract_lineage(metadata)
+    lineage_ctx = lineage.extract_lineage(metadata)
     if lineage_ctx is None:
       return
     attributes: dict[str, Any] = {"worker_id": self.worker_id}
@@ -489,7 +491,11 @@ class RolloutWorker(abstract_worker.Worker):
     self._jax_cache_syncer.sync_after_first_completed(resp.status)
     return resp
 
-  async def pre_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+  async def pre_weight_sync(
+      self,
+      sync_request: sampler_lib.WeightSyncRequest,
+      **kwargs,
+  ) -> Any:
     """Quiesces the worker; it stays SYNCING until post or abort."""
     self._ensure_initialized()
     self.state = WorkerState.SYNCING
@@ -500,46 +506,52 @@ class RolloutWorker(abstract_worker.Worker):
     self._record_round(sync_request, "prepared")
     return result
 
-  async def weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+  async def weight_sync(
+      self,
+      sync_request: sampler_lib.WeightSyncRequest,
+      **kwargs,
+  ) -> Any:
     """Materializes the received weights; the worker stays SYNCING."""
     self._ensure_initialized()
     self.state = WorkerState.SYNCING
-    metadata = kwargs.pop("metadata", None)
-    request = sync_request if sync_request is not None else metadata
     t0 = otel_metrics.perf_counter_s()
-    result = await self.manager.weight_sync(request, **kwargs)
+    result = await self.manager.weight_sync(sync_request, **kwargs)
     self._otel.record_weight_sync_phase("h2d", t0)
-    if isinstance(result, int) and not isinstance(result, bool):
-      self._policy_version = result
-    else:
-      version = getattr(request, "policy_version", None)
-      if isinstance(version, int) and not isinstance(version, bool):
-        self._policy_version = version
-      else:
-        self._policy_version += 1
-    self._record_round(request, "h2d_done")
+    self._record_round(sync_request, "h2d_done")
     return result
 
-  async def post_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+  async def post_weight_sync(
+      self,
+      sync_request: sampler_lib.WeightSyncRequest,
+      **kwargs,
+  ) -> Any:
     """Publishes the new weights and resumes serving."""
     t0 = otel_metrics.perf_counter_s()
     result = await self.manager.post_weight_sync(sync_request, **kwargs)
-    mgr_version = getattr(self.manager, "_policy_version", None)
-    req_version = getattr(sync_request, "policy_version", None)
-    candidate = mgr_version if isinstance(mgr_version, int) else req_version
-    if (
-        isinstance(candidate, int)
-        and not isinstance(candidate, bool)
-        and (candidate > 0 or self._policy_version == 0)
-    ):
-      self._policy_version = candidate
+    mgr_version = self.manager._policy_version  # pylint: disable=protected-access
+    if mgr_version > 0 or self._policy_version == 0:
+      self._policy_version = mgr_version
     self.state = WorkerState.READY
     self._otel.record_post_weight_sync(t0)
     self._record_round(sync_request, "committed")
     return result
 
-  def fetch_staged(self, ref_ids: Sequence[int]) -> dict[int, np.ndarray]:
-    """Returns staged `routed_experts` arrays for `ref_ids` (Bulk TCP pull)."""
+  def fetch_staged(
+      self,
+      ref_ids: Sequence[int],
+      *,
+      expected_instance_id: str,
+  ) -> dict[int, np.ndarray] | None:
+    """Returns staged `routed_experts` arrays, or `None` on instance mismatch.
+
+    Args:
+      ref_ids: Staged reference IDs requested by the orchestrator.
+      expected_instance_id: Expected `RolloutWorker.instance_id`. When
+        mismatched, returns `None` without forcing initialization so same-port
+        restarts fail over cleanly.
+    """
+    if expected_instance_id != self.instance_id:
+      return None
     self._ensure_initialized()
     return self._staging_buffer.fetch_staged(ref_ids)
 
@@ -580,7 +592,11 @@ class RolloutWorker(abstract_worker.Worker):
     self._ensure_initialized()
     return await self.manager.get_weight_sync_metadata(**kwargs)
 
-  async def abort_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+  async def abort_weight_sync(
+      self,
+      sync_request: sampler_lib.WeightSyncRequest,
+      **kwargs,
+  ) -> Any:
     """Discards the round and resumes serving the previous weights."""
     res = await self.manager.abort_weight_sync(sync_request, **kwargs)
     self.state = WorkerState.READY
@@ -604,8 +620,12 @@ class RolloutWorker(abstract_worker.Worker):
         return dict(report, policy_version=self._policy_version)
     return dict(self._sync_round, policy_version=self._policy_version)
 
-  def _record_round(self, sync_request: Any, phase: str) -> None:
-    extra = getattr(sync_request, "extra_config", None) or {}
+  def _record_round(
+      self,
+      sync_request: sampler_lib.WeightSyncRequest,
+      phase: str,
+  ) -> None:
+    extra = sync_request.extra_config or {}
     req_id = extra.get("req_id")
     key = (req_id, extra.get("uuid", 0)) if req_id is not None else None
     current = (self._sync_round["req_id"], self._sync_round["uuid"])

@@ -103,7 +103,9 @@ class InferenceWorker(abstract_worker.Worker):
 
   def info(self) -> datatypes.WorkerInfo:
     return datatypes.WorkerInfo(
-        worker_id=self._worker_id, roles=frozenset({"inference"})
+        worker_id=self._worker_id,
+        instance_id=self.instance_id,
+        roles=frozenset({"inference"}),
     )
 
   @abstract_worker.offload_to_thread

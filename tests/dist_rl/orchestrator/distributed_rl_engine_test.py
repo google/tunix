@@ -19,6 +19,8 @@ import collections
 from unittest import mock
 
 from absl.testing import absltest
+import grpc
+from grpc import aio as grpc_aio
 import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import lineage
@@ -45,6 +47,7 @@ class MockActorHandle(mock.MagicMock):
 
   def __init__(self, *args, **kwargs):
     super().__init__(spec=remote_execution.ActorHandle, *args, **kwargs)
+    self.is_closed = False
     self._dispatched_request_ids: collections.deque[str] = collections.deque()
 
     # Ensure all mocked methods return awaitables by default
@@ -3504,9 +3507,7 @@ class DistributedRLEngineTest(absltest.TestCase):
       engine = _make_engine(
           registry=registry,
           weight_sync_coordinator=coord,
-          fault_tolerance_config=datatypes.FaultToleranceConfig(
-              enabled=True, min_active_rollout_ratio=0.5
-          ),
+          fault_tolerance_config=datatypes.FaultToleranceConfig(enabled=False),
       )
 
       # 1. None shape fails fast.
@@ -3572,6 +3573,7 @@ class DistributedRLEngineTest(absltest.TestCase):
             f"rollout-{idx}",
             [datatypes.Role.ROLLOUT],
             handle,
+            instance_id=f"inst-{idx}",
             resources={
                 "routed_experts_shape": (2, 5),
                 "staging_max_bytes": 400,
@@ -3583,13 +3585,22 @@ class DistributedRLEngineTest(absltest.TestCase):
       engine = _make_engine(
           registry=registry,
           fault_tolerance_config=datatypes.FaultToleranceConfig(
-              enabled=True, min_active_rollout_ratio=0.5
+              enabled=True,
+              min_active_rollout_ratio=0.5,
+              min_active_rollout_grace_s=30.0,
           ),
       )
       engine.routed_experts_spec(encode_mode="uint8")
-      engine.configure_staging_liveness(
-          worst_case_bytes=100,
-          required_slots=6,
+      with self.assertLogs(level="WARNING") as cm:
+        engine.configure_staging_liveness(
+            worst_case_bytes=100,
+            required_slots=6,
+        )
+      self.assertTrue(
+          any(
+              "provides at most 4 worst-case staging slots" in m
+              for m in cm.output
+          )
       )
 
       # Blocking standalone `generate()` must keep `stage_routed_experts=False`.
@@ -3618,7 +3629,9 @@ class DistributedRLEngineTest(absltest.TestCase):
       # Drive `rollout-0` to 3/4 unreleased staged refs via real `poll_rollouts`
       # (`_unreleased_staged_refs["rollout-0"] += 1` per received ref).
       seed_refs = [
-          datatypes.RoutedExpertsRef(worker_id="rollout-0", ref_id=10 + g)
+          datatypes.RoutedExpertsRef(
+              worker_id="rollout-0", instance_id="inst-0", ref_id=10 + g
+          )
           for g in range(3)
       ]
       w0.poll_responses.return_value = [
@@ -3649,7 +3662,9 @@ class DistributedRLEngineTest(absltest.TestCase):
       ])
       polled = await engine.poll_rollouts(timeout_s=0.1)
       self.assertLen(polled, 3)
-      self.assertEqual(engine._unreleased_staged_refs["rollout-0"], 3)
+      self.assertEqual(
+          engine._unreleased_staged_refs[("rollout-0", "inst-0")], 3
+      )
       w0.generate.reset_mock()
       w1.generate.reset_mock()
 
@@ -3689,11 +3704,44 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.assertEqual(w0.generate.call_count, 2)
       self.assertEqual(w1.generate.call_count, 2)
 
-      # Post-poll `_check_staging_liveness()` raises once pool slots (4) drop
-      # below `required_slots` (6).
-      registry.unregister("rollout-1")
-      with self.assertRaisesRegex(RuntimeError, "below required deadlock-free"):
-        await engine.poll_rollouts(timeout_s=0.05)
+      # `on_worker_unreachable` arms the FT staging-slot grace timer at
+      # eviction time (`t=100s`), so a first poll at `t=130s` (>= 30s grace)
+      # raises immediately; recovery resets the timer for subsequent shortfalls.
+      with mock.patch.object(
+          fault_tolerance_manager_lib,
+          "_monotonic",
+          side_effect=[100.0, 130.0, 200.0, 220.0, 235.0],
+      ):
+        engine._fault_tolerance_manager.on_worker_unreachable(
+            w1, ConnectionError("died")
+        )  # t=100s: arms timer on eviction
+        with self.assertRaisesRegex(
+            fault_tolerance_manager_lib.RolloutCapacityError,
+            "staging slots remained below required bound",
+        ):
+          await engine.poll_rollouts(timeout_s=0.05)  # t=130s (>=30s): raises
+        registry.register_handle(
+            "rollout-1",
+            [datatypes.Role.ROLLOUT],
+            w1,
+            instance_id="inst-1-recovered",
+            resources={
+                "routed_experts_shape": (2, 5),
+                "staging_max_bytes": 400,
+            },
+        )
+        worker_registry_testing.set_status(
+            registry, "rollout-1", worker_registry.AdmissionStatus.ACTIVE
+        )
+        await engine.poll_rollouts(timeout_s=0.05)  # recovers -> resets timer
+        registry.unregister("rollout-1")
+        await engine.poll_rollouts(timeout_s=0.05)  # t=200s: re-arms timer
+        await engine.poll_rollouts(timeout_s=0.05)  # t=220s (<30s grace): ok
+        with self.assertRaisesRegex(
+            fault_tolerance_manager_lib.RolloutCapacityError,
+            "staging slots remained below required bound",
+        ):
+          await engine.poll_rollouts(timeout_s=0.05)  # t=235s (>=30s): raises
       await engine.close()
 
     asyncio.run(_run())
@@ -3707,6 +3755,7 @@ class DistributedRLEngineTest(absltest.TestCase):
             f"rollout-{idx}",
             [datatypes.Role.ROLLOUT],
             handle,
+            instance_id=f"inst-{idx}",
             resources={
                 "routed_experts_shape": (2, 2),
                 "staging_max_bytes": 4096,
@@ -3722,8 +3771,12 @@ class DistributedRLEngineTest(absltest.TestCase):
           ),
       )
 
-      ref0 = datatypes.RoutedExpertsRef(worker_id="rollout-0", ref_id=101)
-      ref1 = datatypes.RoutedExpertsRef(worker_id="rollout-1", ref_id=202)
+      ref0 = datatypes.RoutedExpertsRef(
+          worker_id="rollout-0", instance_id="inst-0", ref_id=101
+      )
+      ref1 = datatypes.RoutedExpertsRef(
+          worker_id="rollout-1", instance_id="inst-1", ref_id=202
+      )
       arr0 = np.ones((4, 2, 2), dtype=np.uint8)
       arr1 = np.full((4, 2, 2), 2, dtype=np.uint8)
       w0.fetch_staged.return_value = {101: arr0}
@@ -3734,19 +3787,29 @@ class DistributedRLEngineTest(absltest.TestCase):
         await engine.release_routed_experts([ref0])
       w0.release_staged.assert_not_awaited()
 
-      engine._unreleased_staged_refs["rollout-0"] = 1
-      engine._unreleased_staged_refs["rollout-1"] = 1
+      engine._unreleased_staged_refs[("rollout-0", "inst-0")] = 1
+      engine._unreleased_staged_refs[("rollout-1", "inst-1")] = 1
 
-      fetched = await engine.fetch_routed_experts([ref0, ref1])
-      np.testing.assert_array_equal(fetched[ref0], arr0)
-      np.testing.assert_array_equal(fetched[ref1], arr1)
+      fetch_res = await engine.fetch_routed_experts([ref0, ref1])
+      self.assertEmpty(fetch_res.failed_refs)
+      np.testing.assert_array_equal(fetch_res.fetched[ref0], arr0)
+      np.testing.assert_array_equal(fetch_res.fetched[ref1], arr1)
 
-      # Evicting rollout-1 causes `fetch_routed_experts` to fail fast, while
-      # `release_routed_experts` skips only the `KeyError` worker with a warning
+      # Evicting rollout-1 under FT returns `ref1` in `failed_refs` with zero
+      # RPCs (and raises `RuntimeError` when FT is disabled), while
+      # `release_routed_experts` skips only the evicted worker with a warning
       # and counter bump, still releasing `ref0` on `rollout-0`.
       registry.unregister("rollout-1")
+      evicted_res = await engine.fetch_routed_experts([ref1])
+      self.assertEmpty(evicted_res.fetched)
+      self.assertEqual(evicted_res.failed_refs, frozenset({ref1}))
+      no_ft_engine = _make_engine(
+          registry=registry,
+          fault_tolerance_config=datatypes.FaultToleranceConfig(enabled=False),
+      )
       with self.assertRaisesRegex(RuntimeError, "was evicted before staged"):
-        await engine.fetch_routed_experts([ref1])
+        await no_ft_engine.fetch_routed_experts([ref1])
+      await no_ft_engine.close()
 
       await engine.release_routed_experts([ref0, ref1])
       w0.release_staged.assert_awaited_once_with(ref_ids=[101])
@@ -3764,14 +3827,14 @@ class DistributedRLEngineTest(absltest.TestCase):
         await engine.release_routed_experts([ref0])
 
       # Non-KeyError RPC failures on `release_staged` MUST propagate!
-      engine._unreleased_staged_refs["rollout-0"] = 1
+      engine._unreleased_staged_refs[("rollout-0", "inst-0")] = 1
       w0.release_staged.side_effect = RuntimeError("gRPC INTERNAL release fail")
       with self.assertRaisesRegex(RuntimeError, "gRPC INTERNAL release fail"):
         await engine.release_routed_experts([ref0])
 
       # `clear_all_staged_routed_experts` clears active workers, resets
       # counters, and bumps the rollout request-id epoch (`_e1`).
-      engine._unreleased_staged_refs["rollout-0"] = 5
+      engine._unreleased_staged_refs[("rollout-0", "inst-0")] = 5
       await engine.clear_all_staged_routed_experts()
       w0.clear_staged.assert_awaited_once()
       self.assertEmpty(engine._unreleased_staged_refs)
@@ -3844,7 +3907,9 @@ class DistributedRLEngineTest(absltest.TestCase):
     async def _run():
       registry = worker_registry.WorkerRegistry()
       w0 = MockActorHandle()
-      registry.register_handle("rollout-0", [datatypes.Role.ROLLOUT], w0)
+      registry.register_handle(
+          "rollout-0", [datatypes.Role.ROLLOUT], w0, instance_id="inst-0"
+      )
       worker_registry_testing.set_status(
           registry, "rollout-0", worker_registry.AdmissionStatus.ACTIVE
       )
@@ -3855,11 +3920,14 @@ class DistributedRLEngineTest(absltest.TestCase):
       engine = distributed_rl_engine.DistributedRLEngine(
           registry=registry, fault_tolerance_manager=ftm
       )
-      engine._unreleased_staged_refs["rollout-0"] = 1
+      engine._unreleased_staged_refs[("rollout-0", "inst-0")] = 1
       w0.release_staged.side_effect = ConnectionError("worker died mid-release")
-      await engine.release_routed_experts(
-          [datatypes.RoutedExpertsRef(worker_id="rollout-0", ref_id=1)]
-      )
+      await engine.release_routed_experts([
+          datatypes.RoutedExpertsRef(
+              worker_id="rollout-0", instance_id="inst-0", ref_id=1
+          )
+      ])
+      self.assertIn("rollout-0", registry)
       self.assertEqual(engine.evicted_release_skips_total, 1)
       self.assertEqual(
           engine.fault_tolerance_metrics()[
@@ -3871,6 +3939,256 @@ class DistributedRLEngineTest(absltest.TestCase):
 
       w0.clear_staged.side_effect = ConnectionError("worker died mid-clear")
       await engine.clear_all_staged_routed_experts()
+      self.assertIn("rollout-0", registry)
+      await engine.close()
+
+    asyncio.run(_run())
+
+  def test_relay_ft_active_gate_instance_isolation_and_error_classification(
+      self,
+  ):
+    async def _run():
+      registry = worker_registry.WorkerRegistry()
+      w_alive = MockActorHandle()
+      w_dead = MockActorHandle()
+      registry.register_handle(
+          "rollout-0",
+          [datatypes.Role.ROLLOUT],
+          w_alive,
+          instance_id="inst_0_a",
+          resources={"staging_max_bytes": 400},
+      )
+      registry.register_handle(
+          "rollout-1",
+          [datatypes.Role.ROLLOUT],
+          w_dead,
+          instance_id="inst_1_old",
+          resources={"staging_max_bytes": 400},
+      )
+      for wid in ("rollout-0", "rollout-1"):
+        worker_registry_testing.set_status(
+            registry, wid, worker_registry.AdmissionStatus.ACTIVE
+        )
+
+      ftm = fault_tolerance_manager_lib.FaultToleranceManager(
+          registry,
+          config=datatypes.FaultToleranceConfig(
+              enabled=True,
+              min_active_rollout_ratio=None,
+              min_active_rollout_grace_s=10.0,
+          ),
+      )
+      engine = distributed_rl_engine.DistributedRLEngine(
+          registry=registry, fault_tolerance_manager=ftm
+      )
+
+      ref_alive = datatypes.RoutedExpertsRef(
+          worker_id="rollout-0", ref_id=11, instance_id="inst_0_a"
+      )
+      ref_dead = datatypes.RoutedExpertsRef(
+          worker_id="rollout-1", ref_id=22, instance_id="inst_1_old"
+      )
+      engine._unreleased_staged_refs[("rollout-0", "inst_0_a")] = 1
+      engine._unreleased_staged_refs[("rollout-1", "inst_1_old")] = 3
+
+      arr_alive = np.full((3, 2, 2), 7, dtype=np.uint8)
+      w_alive.fetch_staged.return_value = {11: arr_alive}
+      w_dead.fetch_staged.side_effect = grpc_aio.AioRpcError(
+          grpc.StatusCode.UNAVAILABLE,
+          grpc_aio.Metadata(),
+          grpc_aio.Metadata(),
+          details="connection reset by peer",
+      )
+
+      # 1. Transport error on `rollout-1` marks `ref_dead` failed without
+      # evicting `rollout-1` or popping `_unreleased_staged_refs`.
+      res1 = await engine.fetch_routed_experts([ref_alive, ref_dead])
+      np.testing.assert_array_equal(res1.fetched[ref_alive], arr_alive)
+      self.assertEqual(w_alive.fetch_staged.await_count, 1)
+      self.assertEqual(w_dead.fetch_staged.await_count, 1)
+      self.assertEqual(res1.failed_refs, frozenset({ref_dead}))
+      self.assertIn("rollout-1", registry)
+      self.assertEqual(
+          engine._unreleased_staged_refs[("rollout-1", "inst_1_old")], 3
+      )
+
+      # 2. Replacement worker re-registers as `REGISTERED` (compiling) and then
+      # `PENDING_WEIGHT_SYNC`, and finally `ACTIVE` with `inst_1_new`:
+      # old `ref_dead` must issue zero `fetch_staged` / `release_staged` RPCs in
+      # every status, and old ledger count (3) must not inflate `inst_1_new`
+      # occupancy.
+      w_rejoined = MockActorHandle()
+      registry.register_handle(
+          "rollout-1",
+          [datatypes.Role.ROLLOUT],
+          w_rejoined,
+          instance_id="inst_1_new",
+          resources={"staging_max_bytes": 400},
+          override=True,
+      )
+      for st in (
+          worker_registry.AdmissionStatus.REGISTERED,
+          worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
+          worker_registry.AdmissionStatus.ACTIVE,
+      ):
+        worker_registry_testing.set_status(registry, "rollout-1", st)
+        res_gate = await engine.fetch_routed_experts([ref_dead])
+        self.assertEmpty(res_gate.fetched)
+        self.assertEqual(res_gate.failed_refs, frozenset({ref_dead}))
+        w_rejoined.fetch_staged.assert_not_awaited()
+
+      engine.configure_staging_liveness(worst_case_bytes=100, required_slots=4)
+      await engine.dispatch_rollouts(
+          [{"prompt": "p_iso", "prompt_id": "p_iso"}],
+          num_generations=4,
+          stage_routed_experts=True,
+          max_response_length=5,
+      )
+      self.assertGreaterEqual(w_rejoined.generate.call_count, 2)
+      await engine._rollout_session.abandon_in_flight()
+
+      # Releasing 1 of the 3 old refs skips RPC to `inst_1_new`, and releasing
+      # the remaining 2 plus `ref_alive` drains the ledger strictly to empty.
+      await engine.release_routed_experts([ref_dead])
+      w_rejoined.release_staged.assert_not_awaited()
+      self.assertEqual(
+          engine._unreleased_staged_refs[("rollout-1", "inst_1_old")], 2
+      )
+      ref_dead_b = datatypes.RoutedExpertsRef(
+          worker_id="rollout-1", ref_id=23, instance_id="inst_1_old"
+      )
+      ref_dead_c = datatypes.RoutedExpertsRef(
+          worker_id="rollout-1", ref_id=24, instance_id="inst_1_old"
+      )
+      await engine.release_routed_experts([ref_alive, ref_dead_b, ref_dead_c])
+      self.assertEmpty(engine._unreleased_staged_refs)
+      self.assertEqual(engine.evicted_release_skips_total, 3)
+
+      # 3. Same-address pre-reregistration `None` return marks refs failed
+      # under FT without evicting the restarted worker, and raises RuntimeError
+      # when FT is disabled.
+      stale_ref = datatypes.RoutedExpertsRef(
+          worker_id="rollout-1", instance_id="inst_1_new", ref_id=999
+      )
+      w_rejoined.fetch_staged.return_value = None
+      stale_res = await engine.fetch_routed_experts([stale_ref])
+      self.assertEqual(stale_res.failed_refs, frozenset({stale_ref}))
+      self.assertIn("rollout-1", registry)
+      no_ft_engine = _make_engine(
+          registry=registry,
+          fault_tolerance_config=datatypes.FaultToleranceConfig(enabled=False),
+      )
+      with self.assertRaisesRegex(RuntimeError, "rejected stale instance_id"):
+        await no_ft_engine.fetch_routed_experts([stale_ref])
+      await no_ft_engine.close()
+
+      # 4. Concurrent displacement mid-`fetch_staged` (handle closed with
+      # `ClosedActorError`) marks ref failed without evicting replacement.
+      w_replacement_2 = MockActorHandle()
+
+      async def _displace_and_close(**_):
+        registry.unregister("rollout-1")
+        registry.register_handle(
+            "rollout-1",
+            [datatypes.Role.ROLLOUT],
+            w_replacement_2,
+            instance_id="inst_1_v3",
+        )
+        worker_registry_testing.set_status(
+            registry, "rollout-1", worker_registry.AdmissionStatus.ACTIVE
+        )
+        raise remote_execution.ClosedActorError("closed by concurrent eviction")
+
+      w_rejoined.fetch_staged.side_effect = _displace_and_close
+      ref_v2 = datatypes.RoutedExpertsRef(
+          worker_id="rollout-1", ref_id=55, instance_id="inst_1_new"
+      )
+      disp_res = await engine.fetch_routed_experts([ref_v2])
+      self.assertEqual(disp_res.failed_refs, frozenset({ref_v2}))
+      self.assertIs(registry.handle("rollout-1"), w_replacement_2)
+
+      # 5. Remote application error (`RemoteCallError`) is never masked.
+      w_alive.fetch_staged.side_effect = remote_execution.RemoteCallError(
+          "RemoteExecutionError [KeyError]: Missing or already-released ref_id"
+      )
+      with self.assertRaisesRegex(
+          remote_execution.RemoteCallError, "Missing or already-released"
+      ):
+        await engine.fetch_routed_experts([ref_alive])
+      self.assertIn("rollout-0", registry)
+      await engine.close()
+
+    asyncio.run(_run())
+
+  def test_get_metrics_rollout_under_fault_tolerance(self):
+    async def _run():
+      registry = worker_registry.WorkerRegistry()
+      ftm = fault_tolerance_manager_lib.FaultToleranceManager(
+          registry,
+          config=datatypes.FaultToleranceConfig(enabled=True),
+      )
+      engine = distributed_rl_engine.DistributedRLEngine(
+          registry=registry, fault_tolerance_manager=ftm
+      )
+
+      # Empty unconfigured engine still raises ValueError, while mid-run 0
+      # active rollout workers (after peak_active > 0) returns `[]` under FT.
+      with self.assertRaisesRegex(ValueError, "No rollout workers registered"):
+        await engine.get_metrics(role=datatypes.Role.ROLLOUT)
+
+      w0, w1 = MockActorHandle(), MockActorHandle()
+      for idx, h in enumerate((w0, w1)):
+        registry.register_handle(
+            f"rollout-{idx}", [datatypes.Role.ROLLOUT], h, instance_id=f"i{idx}"
+        )
+        worker_registry_testing.set_status(
+            registry, f"rollout-{idx}", worker_registry.AdmissionStatus.ACTIVE
+        )
+      ftm.check_rollout_capacity()
+      registry.unregister("rollout-0")
+      registry.unregister("rollout-1")
+      self.assertEqual(
+          await engine.get_metrics(role=datatypes.Role.ROLLOUT), []
+      )
+
+      for idx, h in enumerate((w0, w1)):
+        registry.register_handle(
+            f"rollout-{idx}", [datatypes.Role.ROLLOUT], h, instance_id=f"r{idx}"
+        )
+        worker_registry_testing.set_status(
+            registry, f"rollout-{idx}", worker_registry.AdmissionStatus.ACTIVE
+        )
+      w0.get_metrics.return_value = {"staging/used_bytes": 128}
+      w1.get_metrics.side_effect = remote_execution.ClosedActorError(
+          "handle closed"
+      )
+      self.assertEqual(
+          await engine.get_metrics(role=datatypes.Role.ROLLOUT),
+          [{"staging/used_bytes": 128}],
+      )
+
+      # Application errors (`RemoteCallError`) propagate even under FT=True,
+      # and transport errors fail fast when FT=False.
+      w1.get_metrics.side_effect = remote_execution.RemoteCallError(
+          "RemoteExecutionError [RuntimeError]: broken metric collector"
+      )
+      with self.assertRaisesRegex(
+          remote_execution.RemoteCallError, "broken metric collector"
+      ):
+        await engine.get_metrics(role=datatypes.Role.ROLLOUT)
+
+      no_ft_engine = distributed_rl_engine.DistributedRLEngine(
+          registry=registry,
+          fault_tolerance_manager=fault_tolerance_manager_lib.FaultToleranceManager(
+              registry, config=datatypes.FaultToleranceConfig(enabled=False)
+          ),
+      )
+      w1.get_metrics.side_effect = remote_execution.ClosedActorError(
+          "handle closed"
+      )
+      with self.assertRaises(remote_execution.ClosedActorError):
+        await no_ft_engine.get_metrics(role=datatypes.Role.ROLLOUT)
+      await no_ft_engine.close()
       await engine.close()
 
     asyncio.run(_run())
