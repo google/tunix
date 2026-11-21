@@ -32,6 +32,7 @@ MetadataT = base_store.MetadataT
 TrajectoryNotFoundError = base_store.TrajectoryNotFoundError
 TrajectoryMetadataNotFoundError = base_store.TrajectoryMetadataNotFoundError
 TrajectoryMetricsNotFoundError = base_store.TrajectoryMetricsNotFoundError
+StaleAttemptError = base_store.StaleAttemptError
 TrajectoryReader = base_store.TrajectoryReader
 TrajectoryWriter = base_store.TrajectoryWriter
 TrajectoryStore = base_store.TrajectoryStore

@@ -19,6 +19,7 @@ from typing import Generic, TypeVar
 
 from absl.testing import absltest
 from etils import epath
+from tunix.dist_rl.trajectory import base_store
 from tunix.dist_rl.trajectory import file_store
 from tunix.dist_rl.trajectory import in_memory_store
 from tunix.dist_rl.trajectory import sql_store
@@ -415,6 +416,25 @@ class GenericTypeParametersTest(absltest.TestCase):
     self.assertIn("t1", str(err))
     self.assertIsInstance(err, KeyError)
 
+  def test_stale_attempt_error(self) -> None:
+    """Verifies StaleAttemptError attributes, inheritance, and message."""
+    err = store_lib.StaleAttemptError("t1", attempted=1, current_attempt=3)
+    self.assertEqual(err.trajectory_id, "t1")
+    self.assertEqual(err.attempted, 1)
+    self.assertEqual(err.current_attempt, 3)
+    self.assertIn("t1", str(err))
+    self.assertIn("1", str(err))
+    self.assertIn("3", str(err))
+    self.assertIsInstance(err, ValueError)
+
+  def test_validate_keep_steps(self) -> None:
+    """Verifies validate_keep_steps accepts non-negative ints and rejects bad inputs."""
+    self.assertEqual(base_store.validate_keep_steps(0), 0)
+    self.assertEqual(base_store.validate_keep_steps(3), 3)
+    for bad_value in (-1, True, False, 1.5, "2"):
+      with self.assertRaises(ValueError):
+        base_store.validate_keep_steps(bad_value)  # type: ignore[arg-type]
+
   def test_base_trajectory_store_unimplemented_metrics_methods_raise(
       self,
   ) -> None:
@@ -459,6 +479,13 @@ class GenericTypeParametersTest(absltest.TestCase):
       s.update_metrics("t1", trajectory_lib.TrajectoryMetrics(extra={}))
     with self.assertRaises(NotImplementedError):
       s.get_trajectories_metrics()
+    with self.assertRaises(NotImplementedError):
+      s.resume_attempt(
+          trajectory_lib.TrajectoryMetadata(
+              trajectory_id="t1",
+              agent=trajectory_lib.Agent(name="a", version="1.0"),
+          )
+      )
 
   def test_subclassing_closes_type_parameters(self) -> None:
     """Verifies that concrete subclassing binds and closes type parameters."""

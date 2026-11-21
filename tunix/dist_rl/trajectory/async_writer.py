@@ -207,6 +207,36 @@ class TrajectoryBatch(Generic[_TaskT]):
   merged_queued_metrics_task: _TaskT | None = None
 
 
+def fence_stale_write_tasks(tasks: Sequence[_TaskT]) -> list[_TaskT]:
+  """Drops lower-attempt metadata/step payloads while preserving metrics."""
+  max_attempt_by_key: dict[tuple[str | None, str], int] = {}
+  for task in tasks:
+    if task.metadata is not None:
+      key = (task.run_id, task.trajectory_id)
+      max_attempt_by_key[key] = max(
+          max_attempt_by_key.get(key, 0), task.metadata.attempt
+      )
+  fenced_tasks: list[_TaskT] = []
+  for task in tasks:
+    max_attempt = max_attempt_by_key.get((task.run_id, task.trajectory_id))
+    if (
+        max_attempt is not None
+        and task.metadata is not None
+        and task.metadata.attempt < max_attempt
+    ):
+      logging.warning(
+          "Ignoring stale queued write for trajectory '%s': attempt %d < %d.",
+          task.trajectory_id,
+          task.metadata.attempt,
+          max_attempt,
+      )
+      if task.metrics is not None:
+        fenced_tasks.append(dataclasses.replace(task, metadata=None, step=None))
+      continue
+    fenced_tasks.append(task)
+  return fenced_tasks
+
+
 def group_tasks_by_trajectory(
     tasks: Sequence[_TaskT],
 ) -> tuple[TrajectoryBatch[_TaskT], ...]:
@@ -214,7 +244,9 @@ def group_tasks_by_trajectory(
 
   Preserves first-seen `(run_id, trajectory_id)` order so storage backends can
   write each trajectory's latest metadata, ordered steps, and merged metrics in
-  one operation while isolating distinct trajectories.
+  one operation while isolating distinct trajectories. Lower-attempt metadata
+  and step tasks within the same trajectory group are fenced out while
+  preserving metrics tasks.
 
   Args:
     tasks: Sequence of `WriteTask` instances collected from the queue.
@@ -223,7 +255,7 @@ def group_tasks_by_trajectory(
     Ordered tuple of `TrajectoryBatch` items in first-seen trajectory order.
   """
   tasks_by_trajectory_key: dict[tuple[str | None, str], list[_TaskT]] = {}
-  for task in tasks:
+  for task in fence_stale_write_tasks(tasks):
     trajectory_key = (task.run_id, task.trajectory_id)
     tasks_by_trajectory_key.setdefault(trajectory_key, []).append(task)
 
@@ -242,7 +274,6 @@ def group_tasks_by_trajectory(
         step_tasks.append(task)
       if task.metrics is not None:
         metrics_tasks.append(task)
-
     trajectory_batches.append(
         TrajectoryBatch(
             run_id=run_id,
@@ -254,7 +285,6 @@ def group_tasks_by_trajectory(
             ),
         )
     )
-
   return tuple(trajectory_batches)
 
 

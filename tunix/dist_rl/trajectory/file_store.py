@@ -8,6 +8,7 @@ import dataclasses
 import functools
 import itertools
 import re
+import threading
 import types
 from typing import Any, ClassVar, Final, TypeVar
 
@@ -23,6 +24,11 @@ MetadataT = TypeVar("MetadataT", bound=trajectory_lib.TrajectoryMetadata)
 _METADATA_FILENAME: Final[str] = "metadata.json"
 _METRICS_FILENAME: Final[str] = "metrics.json"
 _TRAJECTORY_DIR_PREFIX: Final[str] = "traj_"
+_ATTEMPT_DIR_PREFIX: Final[str] = "attempt_"
+_ATTEMPT_DIR_REGEX: Final[re.Pattern[str]] = re.compile(
+    r"^attempt_([1-9]\d*)$"
+)
+_ATTEMPT_CAPS_KEY: Final[str] = "_file_store_attempt_step_caps"
 # Characters allowed in a trajectory_id: ASCII letters, digits, underscores, and
 # hyphens. Shared between `_TRAJECTORY_ID_REGEX` and `_TRAJECTORY_DIR_REGEX` so
 # that every ID written to disk is discoverable when listing trajectory
@@ -170,6 +176,7 @@ def _parse_step_file(
     *,
     strict: bool = True,
     trajectory_id: str | None = None,
+    max_step_id: int | None = None,
 ) -> tuple[list[trajectory_lib.Step], bool]:
   """Parses a single-step .json file or a multi-step .jsonl chunk file.
 
@@ -183,6 +190,8 @@ def _parse_step_file(
     content: Raw file contents.
     strict: Whether to raise on corrupt JSON or invalid Step payloads.
     trajectory_id: Trajectory identifier used for warning logs when not strict.
+    max_step_id: Optional upper ATIF step_id bound when reading capped prior
+      attempts; discards chunk lines strictly beyond this bound before parsing.
 
   Returns:
     A tuple of `(parsed_steps, had_corrupt_entry)`.
@@ -192,6 +201,11 @@ def _parse_step_file(
         line for line in content.splitlines() if line and not line.isspace()
     ]
     if non_blank_lines:
+      if max_step_id is not None and (
+          match := _STEPS_CHUNK_FILENAME_REGEX.match(filename)
+      ):
+        first_id = int(match.group(1))
+        non_blank_lines = non_blank_lines[: max(0, max_step_id - first_id + 1)]
       return store.parse_raw_steps(
           non_blank_lines,
           trajectory_lib.Step.model_validate_json,
@@ -220,15 +234,116 @@ def _parse_step_file(
 def _evict_overwritten_step_id(
     filename: str, step_by_id: dict[int, trajectory_lib.Step]
 ) -> None:
-  """Removes a stale chunk step when its single-step `.json` revision fails."""
-  match = _STEP_FILENAME_REGEX.match(filename)
-  if match is not None:
+  """Removes stale steps when an overwriting step or chunk file fails."""
+  if match := _STEP_FILENAME_REGEX.match(filename):
     step_by_id.pop(int(match.group(1)), None)
+  elif match := _STEPS_CHUNK_FILENAME_REGEX.match(filename):
+    first_id, last_id = int(match.group(1)), int(match.group(2))
+    for step_id in [
+        step_id for step_id in step_by_id if first_id <= step_id <= last_id
+    ]:
+      del step_by_id[step_id]
+
+
+def _extract_meta_and_caps(
+    meta_text: str,
+) -> tuple[trajectory_lib.TrajectoryMetadata, dict[int, int]]:
+  """Parses metadata JSON, stripping private prior-attempt step caps."""
+  base_meta = trajectory_lib.TrajectoryMetadata.model_validate_json(meta_text)
+  raw_extra = base_meta.extra
+  if not raw_extra or _ATTEMPT_CAPS_KEY not in raw_extra:
+    return base_meta, {}
+  raw_caps = raw_extra[_ATTEMPT_CAPS_KEY]
+  caps = (
+      {int(k): cap for k, v in raw_caps.items() if (cap := int(v)) > 0}
+      if isinstance(raw_caps, Mapping)
+      else {}
+  )
+  cleaned_extra = {
+      k: v for k, v in raw_extra.items() if k != _ATTEMPT_CAPS_KEY
+  }
+  return base_meta.model_copy(update={"extra": cleaned_extra or None}), caps
+
+
+def _serialize_meta_with_caps(
+    metadata: trajectory_lib.TrajectoryMetadata,
+    caps: Mapping[int, int],
+) -> str:
+  """Serializes ATIF metadata JSON, embedding private caps when non-empty."""
+  base_meta = metadata.to_atif_metadata()
+  raw_extra = base_meta.extra or {}
+  if not caps and _ATTEMPT_CAPS_KEY not in raw_extra:
+    return base_meta.model_dump_json(exclude_none=True)
+  clean_extra = {k: v for k, v in raw_extra.items() if k != _ATTEMPT_CAPS_KEY}
+  if caps:
+    clean_extra[_ATTEMPT_CAPS_KEY] = {
+        str(k): v for k, v in sorted(caps.items())
+    }
+  return base_meta.model_copy(
+      update={"extra": clean_extra or None}
+  ).model_dump_json(exclude_none=True)
+
+
+def _list_dir_entries(path: epath.Path) -> list[epath.Path]:
+  """Returns directory entries under `path`, or [] if `path` does not exist."""
+  try:
+    return list(path.iterdir())
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    if _is_not_found_error(exc) or (
+        isinstance(exc, OSError) and not path.exists()
+    ):
+      return []
+    raise
+
+
+def _trim_attempt_dir_steps(attempt_dir: epath.Path, keep_steps: int) -> int:
+  """Unlinks or truncates step files above `keep_steps`; returns max kept step."""
+  entries = [
+      (entry, k)
+      for entry in _list_dir_entries(attempt_dir)
+      if (k := _step_file_sort_key(entry.name)) is not None
+  ]
+  single_step_ids = {k[0] for _, k in entries if k[1] == 1}
+  max_kept = 0
+  for entry, sort_key in entries:
+    first_id, _, last_id, _ = sort_key
+    if first_id > keep_steps:
+      entry.unlink(missing_ok=True)
+      continue
+    if last_id <= keep_steps:
+      max_kept = max(max_kept, last_id)
+      continue
+    parsed_steps, _ = _parse_step_file(
+        entry.name,
+        entry.read_bytes(),
+        strict=False,
+        max_step_id=keep_steps,
+    )
+    retained = [s for s in parsed_steps if s.step_id <= keep_steps]
+    if len(retained) == 1 and retained[0].step_id not in single_step_ids:
+      _write_text(
+          _get_step_path(attempt_dir, retained[0].step_id),
+          retained[0].model_dump_json(exclude_none=True),
+      )
+    elif len(retained) > 1:
+      chunk_path = _get_steps_chunk_path(
+          attempt_dir, retained[0].step_id, retained[-1].step_id
+      )
+      payload = "\n".join(
+          s.model_dump_json(exclude_none=True) for s in retained
+      )
+      _write_text(chunk_path, payload)
+    if retained:
+      max_kept = max(max_kept, retained[-1].step_id)
+    entry.unlink(missing_ok=True)
+  return max_kept
 
 
 def _assemble_trajectory_steps(
     traj_id: str,
-    step_content_futures: collections.deque[tuple[str, futures.Future[bytes]]],
+    step_content_futures: collections.deque[
+        tuple[str, futures.Future[bytes], int | None]
+    ],
     *,
     strict: bool,
 ) -> tuple[list[trajectory_lib.Step], bool]:
@@ -236,7 +351,7 @@ def _assemble_trajectory_steps(
   step_by_id: dict[int, trajectory_lib.Step] = {}
   is_incomplete = False
   while step_content_futures:
-    filename, step_content_future = step_content_futures.popleft()
+    filename, step_content_future, attempt_cap = step_content_futures.popleft()
     try:
       step_content = step_content_future.result()
     except Exception as exc:  # pylint: disable=broad-exception-caught
@@ -255,12 +370,14 @@ def _assemble_trajectory_steps(
         step_content,
         strict=strict,
         trajectory_id=traj_id,
+        max_step_id=attempt_cap,
     )
     if had_corrupt:
       is_incomplete = True
       _evict_overwritten_step_id(filename, step_by_id)
     for step in parsed_steps:
-      step_by_id[step.step_id] = step
+      if attempt_cap is None or step.step_id <= attempt_cap:
+        step_by_id[step.step_id] = step
   steps = [step_by_id[step_id] for step_id in sorted(step_by_id)]
   return steps, is_incomplete
 
@@ -345,11 +462,12 @@ class _FileWriteTask(async_writer.WriteTask):
   """File-specific write task containing filesystem destination paths."""
 
   traj_dir: epath.Path
+  attempt_dir: epath.Path
   step_path: epath.Path | None = dataclasses.field(default=None, init=False)
 
   @property
   def meta_path(self) -> epath.Path:
-    return self.traj_dir / _METADATA_FILENAME
+    return self.attempt_dir / _METADATA_FILENAME
 
   @property
   def metrics_path(self) -> epath.Path:
@@ -360,7 +478,9 @@ class _FileWriteTask(async_writer.WriteTask):
     super().to_atif()
     if self.step is not None:
       object.__setattr__(
-          self, "step_path", _get_step_path(self.traj_dir, self.step.step_id)
+          self,
+          "step_path",
+          _get_step_path(self.attempt_dir, self.step.step_id),
       )
 
 
@@ -379,7 +499,7 @@ def _resolve_target_path(task: _FileWriteTask) -> epath.Path:
   if task.step is None:
     return task.meta_path
   if task.step_path is None:
-    return task.traj_dir
+    return task.attempt_dir
   return task.step_path
 
 
@@ -421,13 +541,34 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
         copy_step=copy_step,
         exclude_step_arrays=exclude_step_arrays,
     )
-    # Worker-owned caches of persisted state used to skip redundant disk writes
-    # and route step revisions to single-step JSON files.
-    self._max_step_id_by_trajectory_id: dict[str, int] = {}
-    self._metadata_hash_by_trajectory_id: dict[str, int] = {}
+    # Worker-owned caches of persisted state used to skip redundant disk
+    # writes, isolate retry attempts, and route step revisions cleanly.
+    self._attempt_cache_lock = threading.Lock()
+    self._max_attempt_by_trajectory_id: dict[str, int] = {}
+    self._attempt_caps_by_key: dict[tuple[str, int], dict[int, int]] = {}
+    self._max_step_id_by_attempt_key: dict[tuple[str, int], int] = {}
+    self._metadata_hash_by_attempt_key: dict[tuple[str, int], int] = {}
     self._metrics_by_trajectory_id: collections.OrderedDict[
         str, trajectory_lib.TrajectoryMetrics
     ] = collections.OrderedDict()
+
+  def record_resumed_attempt(
+      self,
+      *,
+      traj_id: str,
+      attempt: int,
+      caps: Mapping[int, int],
+      max_step_id: int,
+      meta_hash: int,
+  ) -> None:
+    """Updates attempt, cap, step, and metadata caches under the cache lock."""
+    with self._attempt_cache_lock:
+      self._max_attempt_by_trajectory_id[traj_id] = max(
+          self._max_attempt_by_trajectory_id.get(traj_id, 0), attempt
+      )
+      self._attempt_caps_by_key[(traj_id, attempt)] = dict(caps)
+      self._max_step_id_by_attempt_key[(traj_id, attempt)] = max_step_id
+      self._metadata_hash_by_attempt_key[(traj_id, attempt)] = meta_hash
 
   def enqueue_write(
       self,
@@ -455,9 +596,15 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
     Raises:
       RuntimeError: If the writer has already been closed.
     """
+    attempt_dir = (
+        traj_dir / f"{_ATTEMPT_DIR_PREFIX}{metadata.attempt}"
+        if metadata.attempt >= 2
+        else traj_dir
+    )
     self._enqueue(
         _FileWriteTask(
             traj_dir=traj_dir,
+            attempt_dir=attempt_dir,
             metadata=metadata,
             step=step,
         )
@@ -473,7 +620,10 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
     """Enqueues trajectory metrics for asynchronous shallow-merge writing."""
     self._enqueue(
         _FileWriteTask(
-            traj_dir=traj_dir, trajectory_id=trajectory_id, metrics=metrics
+            traj_dir=traj_dir,
+            attempt_dir=traj_dir,
+            trajectory_id=trajectory_id,
+            metrics=metrics,
         )
     )
 
@@ -489,18 +639,32 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
         or http_code in _BATCHABLE_HTTP_STATUS_CODES
     )
 
-  def _ensure_traj_dir(self, traj_id: str, traj_dir: epath.Path) -> None:
-    """Creates `traj_dir` once per trajectory on local filesystems."""
-    # Create directory once per trajectory on local filesystems. Remote object
-    # stores use a flat object namespace where writing a file materializes the
-    # prefix without a 0-byte directory marker.
-    has_dir = (
-        traj_id in self._max_step_id_by_trajectory_id
-        or traj_id in self._metadata_hash_by_trajectory_id
-        or traj_id in self._metrics_by_trajectory_id
-    )
-    if not has_dir and _is_local_filesystem(traj_dir):
-      traj_dir.mkdir(parents=True, exist_ok=True)
+  def _ensure_traj_dir(
+      self,
+      traj_id: str,
+      dir_path: epath.Path,
+      attempt: int | None = None,
+  ) -> None:
+    """Creates `dir_path` once per `(trajectory_id, attempt)` locally."""
+    # Create directory once per target directory on local filesystems. Remote
+    # object stores use a flat object namespace where writing a file
+    # materializes the prefix without a 0-byte directory marker.
+    with self._attempt_cache_lock:
+      if attempt is None:
+        has_dir = (
+            traj_id in self._metrics_by_trajectory_id
+            or (traj_id, 1) in self._max_step_id_by_attempt_key
+            or (traj_id, 1) in self._metadata_hash_by_attempt_key
+        )
+      else:
+        key = (traj_id, attempt)
+        has_dir = (
+            key in self._max_step_id_by_attempt_key
+            or key in self._metadata_hash_by_attempt_key
+            or (attempt == 1 and traj_id in self._metrics_by_trajectory_id)
+        )
+    if not has_dir and _is_local_filesystem(dir_path):
+      dir_path.mkdir(parents=True, exist_ok=True)
 
   def _write_steps(self, step_tasks: Sequence[_FileWriteTask]) -> None:
     """Writes revised steps as `.json` and contiguous new runs as `.jsonl`."""
@@ -512,21 +676,27 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
         raise RuntimeError("to_atif() must run before _write_steps().")
       latest_step_by_id[task.step.step_id] = task.step
 
-    traj_id = step_tasks[-1].trajectory_id
-    traj_dir = step_tasks[-1].traj_dir
-    if (
-        traj_id not in self._max_step_id_by_trajectory_id
-        and len(latest_step_by_id) > 1
-    ):
-      self._max_step_id_by_trajectory_id[traj_id] = _read_max_persisted_step_id(
-          traj_dir
-      )
-    max_persisted_step_id = self._max_step_id_by_trajectory_id.get(traj_id, 0)
+    first_task = step_tasks[0]
+    traj_id = first_task.trajectory_id
+    attempt = (
+        first_task.metadata.attempt if first_task.metadata is not None else 1
+    )
+    write_dir = first_task.attempt_dir
+    key = (traj_id, attempt)
+    with self._attempt_cache_lock:
+      has_cached_max = key in self._max_step_id_by_attempt_key
+      max_persisted_step_id = self._max_step_id_by_attempt_key.get(key, 0)
+    if not has_cached_max and len(latest_step_by_id) > 1:
+      read_max = _read_max_persisted_step_id(write_dir)
+      with self._attempt_cache_lock:
+        max_persisted_step_id = self._max_step_id_by_attempt_key.setdefault(
+            key, read_max
+        )
     new_step_ids: list[int] = []
     for step_id in sorted(latest_step_by_id):
       if step_id <= max_persisted_step_id:
         _write_text(
-            _get_step_path(traj_dir, step_id),
+            _get_step_path(write_dir, step_id),
             _dump_json(latest_step_by_id[step_id]),
         )
         continue
@@ -536,36 +706,55 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
       if len(run) == 1:
         (step_id,) = run
         _write_text(
-            _get_step_path(traj_dir, step_id),
+            _get_step_path(write_dir, step_id),
             _dump_json(latest_step_by_id[step_id]),
         )
         last_step_id = step_id
       else:
         first_step_id, *_, last_step_id = run
         chunk_path = _get_steps_chunk_path(
-            traj_dir, first_step_id, last_step_id
+            write_dir, first_step_id, last_step_id
         )
         chunk_lines = [
             _dump_json(latest_step_by_id[step_id]) for step_id in run
         ]
         _write_text(chunk_path, "\n".join(chunk_lines))
-      self._max_step_id_by_trajectory_id[traj_id] = last_step_id
+      with self._attempt_cache_lock:
+        self._max_step_id_by_attempt_key[key] = last_step_id
 
   def _write_metadata(self, task: _FileWriteTask | None) -> None:
     """Writes `metadata.json` when the serialized metadata has changed."""
     if task is None or task.metadata is None:
       return
     traj_id = task.trajectory_id
-    meta_json = _dump_json(task.metadata)
+    meta_to_dump = task.metadata
+    attempt = meta_to_dump.attempt
+    key = (traj_id, attempt)
+    with self._attempt_cache_lock:
+      caps = self._attempt_caps_by_key.get(key)
+    if caps is None and attempt >= 2:
+      disk_text = _read_text_or_none(task.meta_path)
+      parsed_caps = (
+          _extract_meta_and_caps(disk_text)[1]
+          if disk_text is not None
+          else {}
+      )
+      with self._attempt_cache_lock:
+        caps = self._attempt_caps_by_key.setdefault(key, parsed_caps)
+    meta_json = _serialize_meta_with_caps(meta_to_dump, caps or {})
     meta_hash = hash(meta_json)
-    if self._metadata_hash_by_trajectory_id.get(traj_id) != meta_hash:
+    with self._attempt_cache_lock:
+      cached_hash = self._metadata_hash_by_attempt_key.get(key)
+    if cached_hash != meta_hash:
       _write_text(task.meta_path, meta_json)
-      self._metadata_hash_by_trajectory_id[traj_id] = meta_hash
+      with self._attempt_cache_lock:
+        self._metadata_hash_by_attempt_key[key] = meta_hash
 
   def _write_metrics(self, task: _FileWriteTask | None) -> None:
     """Shallow-merges and writes `metrics.json` when metrics have changed."""
     if task is None or task.metrics is None:
       return
+    self._ensure_traj_dir(task.trajectory_id, task.traj_dir)
     traj_id = task.trajectory_id
     existing = self._metrics_by_trajectory_id.get(traj_id)
     if (
@@ -583,7 +772,29 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
 
   def _write_single_task(self, task: _FileWriteTask) -> None:
     """Writes directory, step, metadata, and metrics for a single `task`."""
-    self._ensure_traj_dir(task.trajectory_id, task.traj_dir)
+    if task.metadata is not None:
+      with self._attempt_cache_lock:
+        max_attempt = self._max_attempt_by_trajectory_id.get(
+            task.trajectory_id, 0
+        )
+        is_stale = task.metadata.attempt < max_attempt
+        if not is_stale:
+          self._max_attempt_by_trajectory_id[task.trajectory_id] = max(
+              max_attempt, task.metadata.attempt
+          )
+      if is_stale:
+        logging.warning(
+            "Ignoring stale write for trajectory '%s': incoming attempt %d <"
+            " active attempt %d.",
+            task.trajectory_id,
+            task.metadata.attempt,
+            max_attempt,
+        )
+        self._write_metrics(task)
+        return
+      self._ensure_traj_dir(
+          task.trajectory_id, task.attempt_dir, task.metadata.attempt
+      )
     # Write step file before metadata.json so a crash or I/O error mid-write
     # never leaves metadata.json advertising a newer trajectory state (such as
     # COMPLETED) while the corresponding step file is missing on disk.
@@ -609,6 +820,41 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
           had_batchable_error = True
     return had_batchable_error
 
+  def _resolve_active_batch_writes(
+      self,
+      batch: async_writer.TrajectoryBatch[_FileWriteTask],
+      traj_dir: epath.Path,
+  ) -> tuple[
+      int | None,
+      epath.Path,
+      _FileWriteTask | None,
+      tuple[_FileWriteTask, ...],
+  ]:
+    """Filters a trajectory batch against `_max_attempt_by_trajectory_id`."""
+    traj_id = batch.trajectory_id
+    meta_task = batch.latest_metadata_task
+    if meta_task is None or meta_task.metadata is None:
+      attempt = 1 if batch.step_tasks else None
+      return attempt, traj_dir, meta_task, batch.step_tasks
+    incoming_attempt = meta_task.metadata.attempt
+    with self._attempt_cache_lock:
+      max_attempt = self._max_attempt_by_trajectory_id.get(traj_id, 0)
+      is_stale = incoming_attempt < max_attempt
+      if not is_stale:
+        self._max_attempt_by_trajectory_id[traj_id] = max(
+            max_attempt, incoming_attempt
+        )
+    if is_stale:
+      logging.warning(
+          "Ignoring stale batch for trajectory '%s': incoming attempt %d <"
+          " active attempt %d.",
+          traj_id,
+          incoming_attempt,
+          max_attempt,
+      )
+      return None, traj_dir, None, ()
+    return incoming_attempt, meta_task.attempt_dir, meta_task, batch.step_tasks
+
   def _process_batch(self, tasks: Sequence[_FileWriteTask]) -> None:
     """Writes coalesced step, metadata, and metrics files for task batches."""
     if len(tasks) <= 1:
@@ -618,19 +864,23 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
     had_batchable_error = False
     traj_dir_by_id = {task.trajectory_id: task.traj_dir for task in tasks}
     for batch in async_writer.group_tasks_by_trajectory(tasks):
-      traj_dir = traj_dir_by_id[batch.trajectory_id]
+      traj_id = batch.trajectory_id
+      attempt, write_dir, meta_task, step_tasks = (
+          self._resolve_active_batch_writes(batch, traj_dir_by_id[traj_id])
+      )
       try:
-        self._ensure_traj_dir(batch.trajectory_id, traj_dir)
-        self._write_steps(batch.step_tasks)
-        self._write_metadata(batch.latest_metadata_task)
+        if attempt is not None:
+          self._ensure_traj_dir(traj_id, write_dir, attempt)
+        self._write_steps(step_tasks)
+        self._write_metadata(meta_task)
         self._write_metrics(batch.merged_queued_metrics_task)
       except Exception as exc:  # pylint: disable=broad-exception-caught
         if self._should_batch_on_error(exc):
           logging.exception(
               "%s failed to write trajectory batch (trajectory_id=%s) to %s.",
               self._thread_name,
-              batch.trajectory_id,
-              traj_dir,
+              traj_id,
+              write_dir,
           )
           had_batchable_error = True
           continue
@@ -638,11 +888,11 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
             "%s trajectory batch write failed (trajectory_id=%s) at %s;"
             " replaying trajectory tasks individually.",
             self._thread_name,
-            batch.trajectory_id,
-            traj_dir,
+            traj_id,
+            write_dir,
             exc_info=True,
         )
-        if self._replay_failed_tasks(tasks, batch.trajectory_id):
+        if self._replay_failed_tasks(tasks, traj_id):
           had_batchable_error = True
 
     if had_batchable_error:
@@ -870,55 +1120,92 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
         else self._raw_root_dir
     )
 
-  def get_trajectory_dir(self, trajectory_id: str) -> epath.Path:
-    """Returns the directory path for a given trajectory ID."""
-    return self.root_dir / f"{_TRAJECTORY_DIR_PREFIX}{trajectory_id}"
+  def get_trajectory_dir(
+      self, trajectory_id: str, attempt: int = 1
+  ) -> epath.Path:
+    """Returns the directory path for a given trajectory ID and attempt."""
+    base_dir = self.root_dir / f"{_TRAJECTORY_DIR_PREFIX}{trajectory_id}"
+    if attempt >= 2:
+      return base_dir / f"{_ATTEMPT_DIR_PREFIX}{attempt}"
+    return base_dir
 
-  def get_trajectory_metadata_path(self, trajectory_id: str) -> epath.Path:
-    """Returns the file path for a given trajectory ID's metadata."""
-    return self.get_trajectory_dir(trajectory_id) / _METADATA_FILENAME
+  def get_trajectory_metadata_path(
+      self, trajectory_id: str, attempt: int = 1
+  ) -> epath.Path:
+    """Returns the metadata file path for a trajectory ID and attempt."""
+    return (
+        self.get_trajectory_dir(trajectory_id, attempt) / _METADATA_FILENAME
+    )
 
   def get_trajectory_metrics_path(self, trajectory_id: str) -> epath.Path:
     """Returns the file path for a given trajectory ID's metrics."""
     return self.get_trajectory_dir(trajectory_id) / _METRICS_FILENAME
 
-  def get_step_path(self, trajectory_id: str, step_id: int) -> epath.Path:
-    """Returns the file path for a given trajectory ID and ATIF step ID.
+  def get_step_path(
+      self, trajectory_id: str, step_id: int, attempt: int = 1
+  ) -> epath.Path:
+    """Returns the file path for a given trajectory ID, ATIF step ID, and attempt.
 
     Args:
       trajectory_id: The trajectory identifier.
       step_id: The 1-indexed ATIF step_id, as serialized on disk.
+      attempt: Attempt number (1 reads from `traj_<id>/`; >= 2 reads from
+        `traj_<id>/attempt_<attempt>/`).
 
     Returns:
       The path of the step JSON file.
     """
-    return _get_step_path(self.get_trajectory_dir(trajectory_id), step_id)
+    return _get_step_path(
+        self.get_trajectory_dir(trajectory_id, attempt), step_id
+    )
 
   def get_steps_chunk_path(
       self,
       trajectory_id: str,
       first_step_id: int,
       last_step_id: int,
+      attempt: int = 1,
   ) -> epath.Path:
-    """Returns the JSONL chunk file path for a trajectory and ATIF step range.
+    """Returns the JSONL chunk file path for a trajectory, ATIF range, and attempt.
 
     Args:
       trajectory_id: The trajectory identifier.
       first_step_id: First 1-indexed ATIF step_id in the chunk.
       last_step_id: Last 1-indexed ATIF step_id in the chunk.
+      attempt: Attempt number.
 
     Returns:
       The path of the step chunk JSONL file.
     """
     return _get_steps_chunk_path(
-        self.get_trajectory_dir(trajectory_id), first_step_id, last_step_id
+        self.get_trajectory_dir(trajectory_id, attempt),
+        first_step_id,
+        last_step_id,
     )
+
+  def _read_latest_metadata_text(self, traj_id: str) -> str | None:
+    """Reads the highest-attempt metadata.json text for `traj_id`, or None."""
+    traj_dir = self.get_trajectory_dir(traj_id)
+    base_text = _read_text_or_none(traj_dir / _METADATA_FILENAME)
+    attempt_dirs = [
+        (int(m.group(1)), entry)
+        for entry in _list_dir_entries(traj_dir)
+        if (m := _ATTEMPT_DIR_REGEX.match(entry.name)) and int(m.group(1)) >= 2
+    ]
+    for _, attempt_dir in sorted(attempt_dirs, reverse=True):
+      if (
+          attempt_text := _read_text_or_none(attempt_dir / _METADATA_FILENAME)
+      ) is not None:
+        return attempt_text
+    return base_text
 
   @contextlib.contextmanager
   def _open_parallel_reads(
       self,
       trajectory_ids: Iterable[str] | None,
-      get_path: Callable[[str], epath.Path],
+      get_path: Callable[[str], epath.Path] | None = None,
+      *,
+      read_entry: Callable[[str], str | None] | None = None,
   ) -> Iterator[Iterator[tuple[str, str | None]]]:
     """Opens parallel file reads yielding `(trajectory_id, text_or_none)`."""
     if (
@@ -942,10 +1229,17 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
       # did, so that any iterable of IDs still works, including the lazy one
       # from `_list_trajectory_ids`. Entries are popped as they are consumed so
       # each file's contents can be freed once parsed.
-      pending_reads = collections.deque(
-          (traj_id, executor.submit(_read_text_or_none, get_path(traj_id)))
-          for traj_id in ids_to_read
-      )
+      if read_entry is not None:
+        pending_reads = collections.deque(
+            (traj_id, executor.submit(read_entry, traj_id))
+            for traj_id in ids_to_read
+        )
+      else:
+        assert get_path is not None
+        pending_reads = collections.deque(
+            (traj_id, executor.submit(_read_text_or_none, get_path(traj_id)))
+            for traj_id in ids_to_read
+        )
 
       def _iter_results() -> Iterator[tuple[str, str | None]]:
         while pending_reads:
@@ -991,7 +1285,8 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
     """
     metas: dict[str, MetadataT] = {}
     with self._open_parallel_reads(
-        trajectory_ids, self.get_trajectory_metadata_path
+        trajectory_ids,
+        read_entry=self._read_latest_metadata_text,
     ) as reads:
       for traj_id, meta_text in reads:
         if meta_text is None:
@@ -1016,7 +1311,7 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
     if is_discovery:
       if not _read_max_persisted_step_id(self.get_trajectory_dir(traj_id)):
         return None
-      meta_text = _read_text_or_none(self.get_trajectory_metadata_path(traj_id))
+      meta_text = self._read_latest_metadata_text(traj_id)
       if meta_text is not None:
         return meta_text
     if ignore_missing:
@@ -1101,34 +1396,46 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
         thread_name_prefix=_READ_THREAD_NAME_PREFIX,
     )
     try:
-      # Iterates over `trajectory_ids` only once, as reading the files one by
-      # one did, so that any iterable of IDs still works. Each entry holds an
-      # ID, the future of its metadata file contents, and a future that
-      # resolves to the futures of its step file contents. Entries and step
-      # futures are popped as they are consumed, so that each file's contents
-      # can be freed once parsed.
       pending_reads = collections.deque(
           (
               traj_id,
               executor.submit(
                   _read_text_or_none, self.get_trajectory_metadata_path(traj_id)
               ),
-              executor.submit(self._submit_step_reads, traj_id, executor),
+              executor.submit(
+                  _list_dir_entries, self.get_trajectory_dir(traj_id)
+              ),
           )
           for traj_id in trajectory_ids
       )
       trajs: dict[str, trajectory_lib.Trajectory[Any]] = {}
       while pending_reads:
-        traj_id, meta_text_future, step_reads_future = pending_reads.popleft()
-        meta_text = meta_text_future.result()
+        traj_id, meta_text_future, entries_future = pending_reads.popleft()
+        base_meta_text = meta_text_future.result()
+        top_entries = entries_future.result()
+        active_dir_attempt, meta_text, attempt_dirs, attempt_dir_futures = (
+            self._resolve_active_metadata(
+                base_meta_text, top_entries, executor=executor
+            )
+        )
         if meta_text is None:
           if ignore_missing:
             continue
           raise store.TrajectoryNotFoundError(traj_id)
-        meta = self._parse_metadata(meta_text)
+        base_meta, caps = _extract_meta_and_caps(meta_text)
+        meta = self._rehydrate_metadata(base_meta)
+        active_attempt = max(active_dir_attempt, meta.attempt)
+        step_reads = self._submit_attempt_step_reads(
+            top_entries,
+            attempt_dirs,
+            active_attempt,
+            caps,
+            executor,
+            attempt_dir_futures=attempt_dir_futures,
+        )
         steps, is_incomplete = _assemble_trajectory_steps(
             traj_id,
-            step_reads_future.result(),
+            step_reads,
             strict=strict,
         )
         trajs[traj_id] = meta.create_trajectory(
@@ -1196,42 +1503,103 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
     )
 
   def _parse_metadata(self, meta_text: str) -> MetadataT:
-    """Parses the contents of a metadata file as `metadata_cls`."""
-    base_meta = trajectory_lib.TrajectoryMetadata.model_validate_json(meta_text)
+    """Parses metadata file text as `metadata_cls`, stripping internal caps."""
+    base_meta, _ = _extract_meta_and_caps(meta_text)
     return self._rehydrate_metadata(base_meta)
 
-  def _submit_step_reads(
-      self, trajectory_id: str, executor: futures.Executor
-  ) -> collections.deque[tuple[str, futures.Future[bytes]]]:
-    """Lists a trajectory's step files and submits their reads to `executor`.
-
-    Returns without waiting for the reads, so that no task on `executor` waits
-    for another one.
-
-    Args:
-      trajectory_id: The trajectory identifier.
-      executor: The executor to read the step files on.
-
-    Returns:
-      Pairs of `(filename, content_future)` ordered by step range so chunked
-      `.jsonl` files are applied before single-step `.json` revisions.
-    """
-    matched_entries: list[tuple[tuple[int, int, int, str], epath.Path]] = []
-    try:
-      entries = list(self.get_trajectory_dir(trajectory_id).iterdir())
-    except Exception as exc:  # pylint: disable=broad-exception-caught
-      if _is_not_found_error(exc):
-        return collections.deque()
-      raise
-    for entry in entries:
-      sort_key = _step_file_sort_key(entry.name)
-      if sort_key is not None:
-        matched_entries.append((sort_key, entry))
-    matched_entries.sort()
-    return collections.deque(
-        (entry.name, executor.submit(entry.read_bytes))
-        for _, entry in matched_entries
+  def _resolve_active_metadata(
+      self,
+      base_meta_text: str | None,
+      top_entries: Sequence[epath.Path],
+      executor: futures.Executor | None = None,
+  ) -> tuple[
+      int,
+      str | None,
+      list[tuple[int, epath.Path]],
+      dict[int, futures.Future[list[epath.Path]]],
+  ]:
+    """Resolves active attempt, metadata text, retry dirs, and listings."""
+    attempt_dirs = sorted(
+        (
+            (int(m.group(1)), entry)
+            for entry in top_entries
+            if (m := _ATTEMPT_DIR_REGEX.match(entry.name))
+            and int(m.group(1)) >= 2
+        ),
+        key=lambda item: item[0],
     )
+    dir_futures: dict[int, futures.Future[list[epath.Path]]] = {}
+    meta_futures: dict[int, futures.Future[str | None]] = {}
+    if executor is not None and attempt_dirs:
+      dir_futures = {
+          attempt_num: executor.submit(_list_dir_entries, attempt_dir)
+          for attempt_num, attempt_dir in attempt_dirs
+      }
+      meta_futures = {
+          attempt_num: executor.submit(
+              _read_text_or_none, attempt_dir / _METADATA_FILENAME
+          )
+          for attempt_num, attempt_dir in attempt_dirs
+      }
+    for attempt_num, attempt_dir in reversed(attempt_dirs):
+      attempt_text = (
+          meta_futures[attempt_num].result()
+          if attempt_num in meta_futures
+          else _read_text_or_none(attempt_dir / _METADATA_FILENAME)
+      )
+      if attempt_text is not None:
+        return attempt_num, attempt_text, attempt_dirs, dir_futures
+    if base_meta_text is not None:
+      return 1, base_meta_text, attempt_dirs, dir_futures
+    return 0, None, attempt_dirs, dir_futures
+
+  def _submit_attempt_step_reads(
+      self,
+      top_entries: Sequence[epath.Path],
+      attempt_dirs: Sequence[tuple[int, epath.Path]],
+      active_attempt: int,
+      caps: Mapping[int, int],
+      executor: futures.Executor,
+      *,
+      attempt_dir_futures: (
+          Mapping[int, futures.Future[list[epath.Path]]] | None
+      ) = None,
+  ) -> collections.deque[tuple[str, futures.Future[bytes], int | None]]:
+    """Lists and submits parallel step reads in ascending attempt order."""
+    dir_map = attempt_dir_futures or {}
+    sources: list[tuple[Sequence[epath.Path], int | None]] = []
+    if active_attempt == 1:
+      sources.append((top_entries, None))
+    elif (cap1 := caps.get(1, 0)) > 0:
+      sources.append((top_entries, cap1))
+    for attempt_num, attempt_dir in attempt_dirs:
+      if attempt_num > active_attempt:
+        break
+      cap = None if attempt_num == active_attempt else caps.get(attempt_num, 0)
+      if cap == 0:
+        continue
+      entries = (
+          dir_map[attempt_num].result()
+          if attempt_num in dir_map
+          else _list_dir_entries(attempt_dir)
+      )
+      sources.append((entries, cap))
+
+    submitted: collections.deque[
+        tuple[str, futures.Future[bytes], int | None]
+    ] = collections.deque()
+    for dir_entries, attempt_cap in sources:
+      matched = sorted(
+          (sort_key, entry)
+          for entry in dir_entries
+          if (sort_key := _step_file_sort_key(entry.name)) is not None
+          and (attempt_cap is None or sort_key[0] <= attempt_cap)
+      )
+      submitted.extend(
+          (entry.name, executor.submit(entry.read_bytes), attempt_cap)
+          for _, entry in matched
+      )
+    return submitted
 
   def add_step(
       self,
@@ -1331,6 +1699,74 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
         traj_dir=self.get_trajectory_dir(traj_id),
         trajectory_id=traj_id,
         metrics=metrics,
+    )
+
+  def resume_attempt(
+      self,
+      metadata: MetadataT,
+      *,
+      keep_steps: int = 0,
+  ) -> None:
+    """Isolates a retry attempt directory and records prior-attempt step caps."""
+    store.validate_keep_steps(keep_steps)
+    self._validate_and_bind_metadata(metadata)
+    traj_id = _validate_trajectory_id(metadata.trajectory_id)
+    if self._writer.is_closed:
+      raise RuntimeError("FileTrajectoryStore is closed.")
+    # Drain local queued writes from this writer before fencing/trimming disk.
+    self.flush()
+
+    traj_dir = self.get_trajectory_dir(traj_id)
+    top_entries = _list_dir_entries(traj_dir)
+    base_meta_text = _read_text_or_none(traj_dir / _METADATA_FILENAME)
+    active_attempt, active_text, attempt_dirs, _ = (
+        self._resolve_active_metadata(base_meta_text, top_entries)
+    )
+    old_caps: dict[int, int] = {}
+    stored_attempt = active_attempt
+    if active_text is not None:
+      stored_base, old_caps = _extract_meta_and_caps(active_text)
+      stored_attempt = max(active_attempt, stored_base.attempt)
+      if metadata.attempt < stored_attempt:
+        raise store.StaleAttemptError(
+            traj_id, metadata.attempt, stored_attempt
+        )
+
+    target_attempt = metadata.attempt
+    target_dir = self.get_trajectory_dir(traj_id, target_attempt)
+    new_caps: dict[int, int] = {}
+    if keep_steps > 0:
+      new_caps = {
+          att: min(cap, keep_steps)
+          for att, cap in old_caps.items()
+          if att < target_attempt
+      }
+      if 1 <= stored_attempt < target_attempt:
+        new_caps[stored_attempt] = keep_steps
+      elif (
+          stored_attempt == 0
+          and target_attempt > 1
+          and any(_step_file_sort_key(e.name) is not None for e in top_entries)
+      ):
+        new_caps[1] = keep_steps
+
+    max_step_id = 0
+    has_target_dir = target_attempt == 1 or any(
+        att == target_attempt for att, _ in attempt_dirs
+    )
+    if stored_attempt == target_attempt or has_target_dir:
+      max_step_id = _trim_attempt_dir_steps(target_dir, keep_steps)
+
+    if _is_local_filesystem(target_dir):
+      target_dir.mkdir(parents=True, exist_ok=True)
+    meta_json = _serialize_meta_with_caps(metadata, new_caps)
+    _write_text(target_dir / _METADATA_FILENAME, meta_json)
+    self._writer.record_resumed_attempt(
+        traj_id=traj_id,
+        attempt=target_attempt,
+        caps=new_caps,
+        max_step_id=max_step_id,
+        meta_hash=hash(meta_json),
     )
 
   def flush(self) -> None:
