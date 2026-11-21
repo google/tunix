@@ -206,16 +206,12 @@ class Option5PeftDirectorTrainer:
       self._has_staged = False
       return {"train/skipped_empty": 1.0}
     total_toks = sum(int(np.sum(p.completion_mask)) for p in payloads)
-    losses: list[float] = []
     for mb in mbs:
-      res = self.worker.fwd_bwd(datatypes.TrainRequest(payload=mb))
-      if isinstance(res, dict) and "loss" in res:
-        losses.append(float(res["loss"]))
+      self.worker.fwd_bwd(datatypes.TrainRequest(payload=mb.payload))
     self._has_staged = True
     return {
         "train/n_microbatches": float(len(mbs)),
         "train/active_tokens": float(total_toks),
-        "train/loss_mean": statistics.fmean(losses) if losses else 0.0,
     }
 
   def commit_staged(self, version: int) -> None:
