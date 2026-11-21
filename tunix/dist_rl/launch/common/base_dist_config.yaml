@@ -70,11 +70,13 @@ tokenizer_config:
   tokenizer_type: "huggingface"
 
 ################################## TASK ##################################
-# Every task YAML sets `data_module`, `env_class_path`, `agent_class_path` and
-# `cluster_config.registry_module`; `launch.sh` does not start a run without
-# them.
+# Every task YAML sets `data_module`, `registry_module`, `env_class_path` and
+# `agent_class_path`; `launch.sh` does not start a run without them.
 # Module whose `create_dataset(**data_config)` returns the task records.
 data_module: ""
+# Module (e.g. `tunix.dist_rl.examples.math_gsm8k_dist.gsm8k`) that the rollout
+# node imports to register the task's environments and agents.
+registry_module: ""
 # Default semantic task_name for data_module records without one; required
 # unless every record sets task_name.
 task_name: ""
@@ -219,8 +221,8 @@ chat_parser_config:
   type: "raw"
   enable_thinking: false
 
-# Registered names of the task's agent and environment (see
-# `cluster_config.registry_module`). Each task YAML sets them.
+# Registered names of the task's agent and environment (see `registry_module`).
+# Each task YAML sets them.
 agent_class_path: ""
 agent_kwargs: {}
 env_class_path: ""
@@ -348,16 +350,6 @@ cluster_config:
   # "external", processes started by another launcher (e.g. a job scheduler
   # that starts each process separately), which `launch.sh` rejects.
   target: "local"
-  # Shared orchestrator for every task; the task comes from `data_module`,
-  # `reward_functions` and the rollout `env_class_path`/`agent_class_path`.
-  orchestrator_main: "tunix.dist_rl.launch.nodes.orchestrator.main"
-  trainer_main: "tunix.dist_rl.launch.nodes.trainer.main"
-  rollout_main: "tunix.dist_rl.launch.nodes.rollout.main"
-  inference_main: "tunix.dist_rl.launch.nodes.inference.main"
-  # Module (e.g. `tunix.dist_rl.examples.math_gsm8k_dist.gsm8k`) that the
-  # rollout node imports to register the task's environments and agents. Each
-  # task YAML sets it.
-  registry_module: ""
   # Relative paths are resolved against the repo root on `target: local` and
   # against the container working directory (repo root) on `target: k8s`;
   # `target: external` requires an absolute filesystem path. URIs such as
@@ -379,22 +371,19 @@ cluster_config:
   # worker startup times: one fixed value would also fail healthy k8s runs
   # whose TPU JobSets Kueue is still queueing, or whose workers are still
   # loading their model. On local, `local.sh` already fails a worker whose
-  # port never opens (`cluster_config.wait_timeout_secs`).
+  # port never opens (`cluster_config.local.wait_timeout_secs`).
   init_timeout_s: null
-  wait_timeout_secs: 1800
-  wait_poll_secs: 5
-  wait_debug_every_polls: 6
-  wait_log_tail_lines: 40
   stop_workers_on_exit: true
-  # Rollout worker fault tolerance (`FaultToleranceConfig`). When
-  # `rollout_fault_tolerance` is false, `max_task_retries` resolves to 0,
-  # `min_active_rollout_ratio` is ignored, and a null `poll_retry_budget_s`
-  # resolves to 300.0 s instead of 60.0 s.
-  rollout_fault_tolerance: true
-  max_task_retries: 1
-  poll_retry_budget_s: null
-  min_active_rollout_ratio: 0.5
-  min_active_rollout_grace_s: 900.0
+  # Rollout worker fault tolerance (`FaultToleranceConfig`). When `enabled` is
+  # false, `max_task_retries` resolves to 0, `min_active_rollout_ratio` is
+  # ignored, and a null `poll_retry_budget_s` resolves to 300.0 s instead of
+  # 60.0 s.
+  fault_tolerance:
+    enabled: true
+    max_task_retries: 1
+    poll_retry_budget_s: null
+    min_active_rollout_ratio: 0.5
+    min_active_rollout_grace_s: 900.0
   # Start a reference inference worker (for the KL penalty). Null means
   # `agentic_grpo_config.beta > 0`. Set false to use a reference worker started
   # separately; it registers with the orchestrator through discovery.
@@ -408,25 +397,57 @@ cluster_config:
   # bring-up; slower initial replicas join in the background and promote to
   # `ACTIVE` on weight sync. Null waits for all `rollout_replicas`.
   min_rollout_replicas: null
-  # On `target: external`, a worker (trainer, rollout, or inference) listens on
-  # the port in the `DIST_RL_WORKER_PORT` environment variable instead of its
-  # port here; the launcher assigns one to each worker.
+  # One block per process. The keys mean the same on every target; a launcher
+  # that does not apply one says so below.
+  # - `main`: the process's entry point. The orchestrator main is shared by
+  #   every task; the task comes from `data_module`, `reward_functions` and the
+  #   rollout `env_class_path`/`agent_class_path`.
+  # - `port`: the port the process listens on. On `target: external`, a worker
+  #   (trainer, rollout, or inference) listens on the port in the
+  #   `DIST_RL_WORKER_PORT` environment variable instead; the launcher assigns
+  #   one to each worker.
+  # - `env`: extra `KEY: "VALUE"` string environment variables (`local.sh` and
+  #   `k8s.sh`; rejected on `target: external`). Rejects config-backed library
+  #   vars, `T_*`/`M_*` overrides, and worker identity vars; logged in resolved
+  #   configs, so omit credentials.
+  # - `memory`: `request` and `limit` of the process's container, as Kubernetes
+  #   quantities (e.g. "48G"); an empty value sets none. Only `k8s.sh` applies
+  #   them: to the orchestrator, and to a trainer or rollout whose template is
+  #   `jobset.pathways.yaml` (the other templates set their own).
+  # Per-role settings that apply to one target stay under that target:
+  # `k8s.<role>_id`, `k8s.trainer`/`k8s.rollout`, `k8s.cpu_machine` and
+  # `k8s.cpu_nodepool` (orchestrator), `local.<role>_devices`, and
+  # `local.trainer_shutdown_grace_secs`.
+  roles:
+    orchestrator:
+      main: "tunix.dist_rl.launch.nodes.orchestrator.main"
+      port: 30000
+      env: {}
+      memory:
+        request: ""
+        limit: ""
+    trainer:
+      main: "tunix.dist_rl.launch.nodes.trainer.main"
+      port: 20000
+      env: {}
+      memory:
+        request: "48G"
+        limit: "70G"
+    rollout:
+      main: "tunix.dist_rl.launch.nodes.rollout.main"
+      port: 20001
+      env: {}
+      memory:
+        request: "48G"
+        limit: "70G"
+    inference:
+      main: "tunix.dist_rl.launch.nodes.inference.main"
+      port: 20002
+      env: {}
   ports:
-    orchestrator: 30000
-    trainer: 20000
-    rollout: 20001
-    inference: 20002
     # OTLP gRPC port of the OpenTelemetry collector that `launch.sh otel`
     # deploys on k8s.
     otel: 4317
-  # Extra `KEY: "VALUE"` string environment variables per process (`local.sh`
-  # and `k8s.sh`). Rejects config-backed library vars, `T_*`/`M_*` overrides,
-  # and worker identity vars; logged in resolved configs, so omit credentials.
-  role_env:
-    orchestrator: {}
-    trainer: {}
-    rollout: {}
-    inference: {}
   local:
     auto_detect_devices: false
     download_model_weights: true
@@ -441,6 +462,12 @@ cluster_config:
     worker_shutdown_grace_secs: 10
     trainer_shutdown_grace_secs: 900
     force_arm_secs: 5
+    # How long `local.sh` waits for each worker's port to open, how often it
+    # polls, and what it prints while waiting.
+    wait_timeout_secs: 1800
+    wait_poll_secs: 5
+    wait_debug_every_polls: 6
+    wait_log_tail_lines: 40
   k8s:
     namespace: "default"
     kueue_queue_name: ""
@@ -462,10 +489,8 @@ cluster_config:
     # every node then exports to it (`tunix/dist_rl/common/otel_setup.py`).
     otel_id: ""
     cpu_machine: "n2-standard-64"
-    # Orchestrator node pool and memory request. Empty `cpu_nodepool` selects
-    # the node by `cpu_machine`; empty `cpu_memory` requests none.
+    # Orchestrator node pool. Empty selects the node by `cpu_machine`.
     cpu_nodepool: ""
-    cpu_memory: ""
     gcs_scratch_location: "gs://cloud-pathways-staging/tmp"
     enable_pathways_persistence: false
     # Container image for the trainer/rollout pods; required for target=k8s
@@ -476,8 +501,6 @@ cluster_config:
     pathways_proxy_memory_limit: "190G"
     pathways_proxy_memory: "16G"
     pathways_rm_memory: "4G"
-    user_container_memory: "48G"
-    user_container_memory_limit: "70G"
     pathways_worker_memory: "100G"
     # Fail-fast restarts for the trainer and rollout JobSets: a failed pod fails
     # its Job instead of restarting in place, and JobSet recreates the whole

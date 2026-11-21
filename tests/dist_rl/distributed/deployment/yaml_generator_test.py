@@ -316,6 +316,75 @@ class YamlGeneratorTest(parameterized.TestCase):
         self.assertIn("memory: 160G", rendered)
         self.assertIn("memory: 120G", rendered)
 
+  def _render_yaml(self, *argv: str) -> dict[str, Any]:
+    """Renders a template with `argv` and returns the one YAML document."""
+    args = yaml_generator.parse_args(list(argv))
+    with open(args.template_file, "r") as f:
+      return yaml.safe_load(yaml_generator.render_template(f.read(), args))
+
+  def test_empty_user_container_memory_sets_none(self):
+    doc = self._render_yaml(
+        _get_template_path("jobset.pathways.yaml"),
+        "--jobset_name=test-pathways-job",
+        "--tpu_slice=tpuv5e:4x4",
+        "--user_container_memory=",
+        "--user_container_memory_limit=",
+    )
+    head = doc["spec"]["replicatedJobs"][0]["template"]["spec"]["template"][
+        "spec"
+    ]
+    (main,) = head["containers"]
+    self.assertNotIn("resources", main)
+    volumes = {v["name"]: v for v in head["volumes"]}
+    self.assertEqual(
+        volumes["ifrt-proxy-large-transfer"]["emptyDir"], {"medium": "Memory"}
+    )
+
+  def test_user_container_request_and_limit_are_independent(self):
+    doc = self._render_yaml(
+        _get_template_path("jobset.pathways.yaml"),
+        "--jobset_name=test-pathways-job",
+        "--tpu_slice=tpuv5e:4x4",
+        "--user_container_memory=",
+        "--user_container_memory_limit=80G",
+    )
+    head = doc["spec"]["replicatedJobs"][0]["template"]["spec"]["template"][
+        "spec"
+    ]
+    (main,) = head["containers"]
+    self.assertEqual(main["resources"], {"limits": {"memory": "80G"}})
+
+  def test_cpu_memory_limit(self):
+    template = _get_template_path("jobset.cpu.yaml")
+    for argv, resources in (
+        ((), None),
+        (
+            ("--cpu_memory=64G",),
+            {
+                "requests": {
+                    "cpu": "24",
+                    "memory": "64G",
+                    "ephemeral-storage": "20Gi",
+                }
+            },
+        ),
+        (("--cpu_memory_limit=96G",), {"limits": {"memory": "96G"}}),
+    ):
+      with self.subTest(argv=argv):
+        doc = self._render_yaml(
+            template,
+            "--jobset_name=test-cpu-job",
+            "--cpu_machine=n2-standard-64",
+            *argv,
+        )
+        (container,) = doc["spec"]["replicatedJobs"][0]["template"]["spec"][
+            "template"
+        ]["spec"]["containers"]
+        if resources is None:
+          self.assertNotIn("resources", container)
+        else:
+          self.assertEqual(container["resources"], resources)
+
   def test_generate_pathways_yaml_large_transfer_directory(self):
     template_file = _get_template_path("jobset.pathways.yaml")
     argv = [

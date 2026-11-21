@@ -53,7 +53,7 @@ class Mlperf35bRecipeTest(launcher_testing.LauncherTestCase):
     )
     self.assertIn(
         "--xla_tpu_scoped_vmem_limit_kib=65536",
-        cfg["cluster_config"]["role_env"]["trainer"]["LIBTPU_INIT_ARGS"],
+        cfg["cluster_config"]["roles"]["trainer"]["env"]["LIBTPU_INIT_ARGS"],
     )
     self.assertIn("ORCHESTRATOR_ID=testuser-orch", run.stdout)
 

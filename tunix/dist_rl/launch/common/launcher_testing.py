@@ -54,7 +54,7 @@ TASK_ARGS = (
     f"data_module={_GSM8K_MODULE}",
     "env_class_path=gsm8kenv",
     "agent_class_path=gsm8kagent",
-    f"cluster_config.registry_module={_GSM8K_MODULE}",
+    f"registry_module={_GSM8K_MODULE}",
 )
 # Stand-in for the Hugging Face token: the resolver requires one for hub
 # tokenizer paths, and `k8s.sh` writes it into the rendered commands, so a real
@@ -244,7 +244,7 @@ class Expected:
       is `LauncherTestCase.root`).
     example: Package directory (`<root>/<example>`) the script launches.
     module: Entry module (`<root>/<example>/<module>.py`), named by both
-      `data_module` and `cluster_config.registry_module`; the script layers its
+      `data_module` and `registry_module`; the script layers its
       config `<root>/<example>/<module>.yaml`.
     target: Expected `cluster_config.target`.
     batch_size: Expected `batch_size`.
@@ -334,12 +334,14 @@ class LauncherTestCase(parameterized.TestCase):
     config = hp.config
     cluster = config["cluster_config"]
     self.assertEqual(cluster["target"], expected.target)
-    self.assertEqual(cluster["orchestrator_main"], ORCHESTRATOR_MAIN)
+    self.assertEqual(
+        cluster["roles"]["orchestrator"]["main"], ORCHESTRATOR_MAIN
+    )
     module = (
         f"tunix.dist_rl.{self.root}.{expected.example}.{expected.module}"
     )
     self.assertEqual(config["data_module"], module)
-    self.assertEqual(cluster["registry_module"], module)
+    self.assertEqual(config["registry_module"], module)
     self.assertEqual(config["batch_size"], expected.batch_size)
     rl_train = config["rl_training_config"]
     self.assertEqual(rl_train["mini_batch_size"], expected.mini_batch_size)

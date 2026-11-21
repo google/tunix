@@ -84,9 +84,9 @@ def dist_launch(workload, output, model_dir):
   # Match the agentic microbatch of micro_groups prompt groups.
   microbatch_size = w["micro_groups"] * w["generations"]
   overrides = {
-      "cluster_config.trainer_main": _RUNTIME + ".trainer_main",
-      "cluster_config.rollout_main": _RUNTIME + ".rollout_main",
-      "cluster_config.orchestrator_main": MODULE + ".dist_main",
+      "cluster_config.roles.trainer.main": _RUNTIME + ".trainer_main",
+      "cluster_config.roles.rollout.main": _RUNTIME + ".rollout_main",
+      "cluster_config.roles.orchestrator.main": MODULE + ".dist_main",
       "model_config.model_download_path": model_dir,
       "tokenizer_config.tokenizer_path": model_dir,
       "cluster_config.artifact_root": output / "artifacts",

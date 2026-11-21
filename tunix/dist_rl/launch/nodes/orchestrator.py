@@ -32,7 +32,7 @@ the agentic `tunix.cli` path:
   completions with `reward_functions`; `env` uses the environment rewards, plus
   any `reward_functions`.
 * `env_class_path` / `agent_class_path` and their kwargs: read by the rollout
-  node, which imports `cluster_config.registry_module` to register them.
+  node, which imports `registry_module` to register them.
 
 Importing this module has no side effects. `main` pins the control-plane JAX
 platform to CPU (unless `JAX_PLATFORMS` is set) before any JAX use.
@@ -512,21 +512,19 @@ def create_cluster(
     weight_sync_timeouts: weight_sync_coordinator.PhaseTimeouts,
 ) -> cluster_orchestrator.ClusterOrchestrator:
   """Creates the `ClusterOrchestrator`; the workers register in `run_program`."""
-  cluster = hp.config_mapping("cluster_config")
-  budget = cluster["poll_retry_budget_s"]
-  ratio = cluster["min_active_rollout_ratio"]
+  ft = hp.config_mapping("cluster_config")["fault_tolerance"]
+  budget = ft["poll_retry_budget_s"]
+  ratio = ft["min_active_rollout_ratio"]
   return cluster_orchestrator.ClusterOrchestrator(
       weight_sync_mode=_weight_sync_mode(hp).value,
       trajectory_store_config=node_utils.trajectory_store_config(hp),
       weight_sync_timeouts=weight_sync_timeouts,
       fault_tolerance_config=datatypes.FaultToleranceConfig(
-          enabled=bool(cluster["rollout_fault_tolerance"]),
-          max_task_retries=int(cluster["max_task_retries"]),
+          enabled=bool(ft["enabled"]),
+          max_task_retries=int(ft["max_task_retries"]),
           poll_retry_budget_s=None if budget is None else float(budget),
           min_active_rollout_ratio=None if ratio is None else float(ratio),
-          min_active_rollout_grace_s=float(
-              cluster["min_active_rollout_grace_s"]
-          ),
+          min_active_rollout_grace_s=float(ft["min_active_rollout_grace_s"]),
       ),
   )
 

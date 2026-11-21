@@ -83,6 +83,24 @@ def _substitute_template(
   return string.Template(expanded).substitute(substitutions)
 
 
+def render_memory_resources(request: str, limit: str) -> str:
+  """Renders a container's `resources` that set only memory.
+
+  Args:
+    request: Memory request, as a Kubernetes quantity; empty sets none.
+    limit: Memory limit, as a Kubernetes quantity; empty sets none.
+
+  Returns:
+    The `resources:` block, or "" when both are empty.
+  """
+  sections = [
+      f"  {name}:\n    memory: {quantity}"
+      for name, quantity in (("requests", request), ("limits", limit))
+      if quantity
+  ]
+  return "resources:\n" + "\n".join(sections) if sections else ""
+
+
 def validate_gang_id(gang_id: str | None) -> None:
   """Validates gang_id against Kubernetes label value syntax rules."""
   if not gang_id:
@@ -269,6 +287,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
       help="Memory request for CPU jobs (e.g. 240G, 300Gi).",
   )
   parser.add_argument(
+      "--cpu_memory_limit",
+      default=None,
+      help="Memory limit for CPU jobs; empty sets none.",
+  )
+  parser.add_argument(
       "--namespace",
       default=os.environ.get("K8S_NAMESPACE", "default"),
       help="Kubernetes namespace to deploy into.",
@@ -420,12 +443,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
   parser.add_argument(
       "--user_container_memory",
       default="48G",
-      help="Memory request for the user/worker container",
+      help="Memory request for the user/worker container; empty sets none",
   )
   parser.add_argument(
       "--user_container_memory_limit",
       default="70G",
-      help="Memory limit for the user/worker container",
+      help=(
+          "Memory limit for the user/worker container, and the size limit of"
+          " its IFRT large-transfer volume; empty sets none"
+      ),
   )
   parser.add_argument(
       "--pathways_worker_memory",
@@ -581,16 +607,23 @@ def build_substitutions(
   else:
     cpu_node_selector = f"node.kubernetes.io/instance-type: {args.cpu_machine}"
 
+  cpu_resource_sections = []
   if args.cpu_memory:
-    cpu_resources = (
-        "resources:\n"
+    cpu_resource_sections.append(
         "  requests:\n"
         '    cpu: "24"\n'
         f"    memory: {args.cpu_memory}\n"
         "    ephemeral-storage: 20Gi"
     )
-  else:
-    cpu_resources = ""
+  if args.cpu_memory_limit:
+    cpu_resource_sections.append(
+        f"  limits:\n    memory: {args.cpu_memory_limit}"
+    )
+  cpu_resources = (
+      "resources:\n" + "\n".join(cpu_resource_sections)
+      if cpu_resource_sections
+      else ""
+  )
 
   priority_class_line = (
       f"priorityClassName: {args.priority_class}" if args.priority_class else ""
@@ -896,8 +929,14 @@ def build_substitutions(
       "PATHWAYS_PROXY_MEMORY_LIMIT": args.pathways_proxy_memory_limit,
       "PATHWAYS_PROXY_MEMORY": args.pathways_proxy_memory,
       "PATHWAYS_RM_MEMORY": args.pathways_rm_memory,
-      "USER_CONTAINER_MEMORY": args.user_container_memory,
-      "USER_CONTAINER_MEMORY_LIMIT": args.user_container_memory_limit,
+      "USER_CONTAINER_RESOURCES": render_memory_resources(
+          args.user_container_memory, args.user_container_memory_limit
+      ),
+      "IFRT_PROXY_LARGE_TRANSFER_SIZE_LIMIT": (
+          f"sizeLimit: {args.user_container_memory_limit}"
+          if args.user_container_memory_limit
+          else ""
+      ),
       "PATHWAYS_WORKER_MEMORY": args.pathways_worker_memory,
       "IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES": (
           args.ifrt_proxy_large_transfer_threshold_bytes

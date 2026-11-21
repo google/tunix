@@ -14,7 +14,7 @@
 
 """FrozenLake components for the distributed GRPO example.
 
-* The rollout node imports this module (`cluster_config.registry_module`),
+* The rollout node imports this module (`registry_module`),
   which registers the recipe's `FrozenLakeEnv` and `FrozenLakeAgent`.
 * The orchestrator calls `create_dataset(**data_config)` (`data_module`) for
   the task records.

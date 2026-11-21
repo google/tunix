@@ -174,6 +174,7 @@ start_orchestrator() {
     --cpu_machine="${K8S_CPU_MACHINE}" \
     ${K8S_CPU_NODEPOOL:+--cpu_nodepool="${K8S_CPU_NODEPOOL}"} \
     ${K8S_CPU_MEMORY:+--cpu_memory="${K8S_CPU_MEMORY}"} \
+    ${K8S_CPU_MEMORY_LIMIT:+--cpu_memory_limit="${K8S_CPU_MEMORY_LIMIT}"} \
     --worker_container_image="${K8S_TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
     --worker_startup_command="${startup_cmd}" \
@@ -243,8 +244,8 @@ start_trainer() {
     --pathways_proxy_memory_limit="${K8S_PATHWAYS_PROXY_MEMORY_LIMIT}" \
     --pathways_proxy_memory="${K8S_PATHWAYS_PROXY_MEMORY}" \
     --pathways_rm_memory="${K8S_PATHWAYS_RM_MEMORY}" \
-    --user_container_memory="${K8S_USER_CONTAINER_MEMORY}" \
-    --user_container_memory_limit="${K8S_USER_CONTAINER_MEMORY_LIMIT}" \
+    --user_container_memory="${K8S_TRAINER_MEMORY}" \
+    --user_container_memory_limit="${K8S_TRAINER_MEMORY_LIMIT}" \
     --pathways_worker_memory="${K8S_PATHWAYS_WORKER_MEMORY}" \
     ${TRAINER_IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES:+--ifrt_proxy_large_transfer_threshold_bytes="${TRAINER_IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES}"} \
     --pathways_gcs_scratch_location="${K8S_GCS_SCRATCH_LOCATION}" \
@@ -362,8 +363,8 @@ render_rollout_yaml() {
     --pathways_proxy_memory_limit="${K8S_PATHWAYS_PROXY_MEMORY_LIMIT}" \
     --pathways_proxy_memory="${K8S_PATHWAYS_PROXY_MEMORY}" \
     --pathways_rm_memory="${K8S_PATHWAYS_RM_MEMORY}" \
-    --user_container_memory="${K8S_USER_CONTAINER_MEMORY}" \
-    --user_container_memory_limit="${K8S_USER_CONTAINER_MEMORY_LIMIT}" \
+    --user_container_memory="${K8S_ROLLOUT_MEMORY}" \
+    --user_container_memory_limit="${K8S_ROLLOUT_MEMORY_LIMIT}" \
     --pathways_worker_memory="${K8S_PATHWAYS_WORKER_MEMORY}" \
     --pathways_gcs_scratch_location="${K8S_GCS_SCRATCH_LOCATION}" \
     --worker_container_image="${K8S_TUNIX_IMAGE}" \

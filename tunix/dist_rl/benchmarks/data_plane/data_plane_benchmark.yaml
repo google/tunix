@@ -42,6 +42,7 @@ tokenizer_config:
   tokenizer_type: "huggingface"
 
 data_module: "tunix.dist_rl.benchmarks.data_plane.data_plane_benchmark"
+registry_module: "tunix.dist_rl.benchmarks.data_plane.data_plane_benchmark"
 task_name: "data_plane_benchmark"
 data_config:
   split: "train"
@@ -121,10 +122,13 @@ weight_sync_config:
 
 cluster_config:
   target: "local"
-  orchestrator_main: "tunix.dist_rl.launch.nodes.orchestrator.main"
-  trainer_main: "tunix.dist_rl.benchmarks.data_plane.mock_trainer.trainer_main"
-  rollout_main: "tunix.dist_rl.benchmarks.data_plane.mock_rollout.rollout_main"
-  registry_module: "tunix.dist_rl.benchmarks.data_plane.data_plane_benchmark"
+  roles:
+    orchestrator:
+      main: "tunix.dist_rl.launch.nodes.orchestrator.main"
+    trainer:
+      main: "tunix.dist_rl.benchmarks.data_plane.mock_trainer.trainer_main"
+    rollout:
+      main: "tunix.dist_rl.benchmarks.data_plane.mock_rollout.rollout_main"
   artifact_root: "artifacts/data_plane_benchmark"
   local:
     download_model_weights: false

@@ -62,5 +62,5 @@ export TRAINER_IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES="${TRAINER_IFRT_PROXY_L
 
 exec "${DIR}/../../../dist_rl/launch/common/launch.sh" \
   "override_config_file=${DIR}/mlperf_35b_128_v5p.yaml" \
-  "cluster_config.role_env.trainer.LIBTPU_INIT_ARGS=${trainer_libtpu_args}" \
+  "cluster_config.roles.trainer.env.LIBTPU_INIT_ARGS=${trainer_libtpu_args}" \
   "$@"

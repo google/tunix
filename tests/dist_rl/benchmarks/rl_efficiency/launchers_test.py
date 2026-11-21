@@ -64,13 +64,13 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
     self.assertEqual(env, {"LOG_ROOT": str(output)})
     hp = self.dry_run(_GEMMA4_RECIPE, *command[2:]).resolve()
     config = hp.config
-    cluster = config["cluster_config"]
+    roles = config["cluster_config"]["roles"]
     self.assertEqual(
-        cluster["orchestrator_main"], f"{workload.MODULE}.dist_main"
+        roles["orchestrator"]["main"], f"{workload.MODULE}.dist_main"
     )
     runtime = "tunix.dist_rl.benchmarks.rl_efficiency.runtime"
-    self.assertEqual(cluster["trainer_main"], f"{runtime}.trainer_main")
-    self.assertEqual(cluster["rollout_main"], f"{runtime}.rollout_main")
+    self.assertEqual(roles["trainer"]["main"], f"{runtime}.trainer_main")
+    self.assertEqual(roles["rollout"]["main"], f"{runtime}.rollout_main")
     self.assertEqual(
         config["tokenizer_config"]["tokenizer_path"], str(model_dir)
     )

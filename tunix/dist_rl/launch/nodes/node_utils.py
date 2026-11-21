@@ -410,11 +410,11 @@ def service_port(hp: resolve_config.DistHyperParameters, role: NodeRole) -> int:
 
   On `cluster_config.target: external` the launcher assigns each worker its
   port in `WORKER_PORT_ENV`, since every process gets the same config. On the
-  other targets the port is `cluster_config.ports.<role>`.
+  other targets the port is `cluster_config.roles.<role>.port`.
 
   Args:
     hp: Validated distributed RL configuration.
-    role: Node role, which selects the `cluster_config.ports.<role>` key.
+    role: Node role, which selects the `cluster_config.roles.<role>.port` key.
 
   Returns:
     The port.
@@ -429,10 +429,11 @@ def service_port(hp: resolve_config.DistHyperParameters, role: NodeRole) -> int:
     if WORKER_PORT_ENV in os.environ:
       raise ValueError(
           f"{WORKER_PORT_ENV} is only for cluster_config.target=external; on"
-          f" target {target!r} the node listens on cluster_config.ports.{role}."
+          f" target {target!r} the node listens on"
+          f" cluster_config.roles.{role}.port."
           f" Unset {WORKER_PORT_ENV}."
       )
-    return int(cluster["ports"][role])
+    return int(cluster["roles"][role]["port"])
   if WORKER_PORT_ENV not in os.environ:
     raise ValueError(
         f"{WORKER_PORT_ENV} must be set on cluster_config.target=external,"

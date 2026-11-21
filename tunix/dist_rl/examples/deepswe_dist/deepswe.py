@@ -14,7 +14,7 @@
 
 """DeepSWE components for the distributed GRPO example.
 
-* The rollout node imports this module (`cluster_config.registry_module`),
+* The rollout node imports this module (`registry_module`),
   which registers `DeepSWEEnv` and `DeepSWEAgent`.
 * The orchestrator calls `create_dataset(**data_config)` (`data_module`) for
   the task records.

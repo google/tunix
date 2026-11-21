@@ -143,17 +143,21 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
     # The sandbox namespace follows `cluster_config.k8s.namespace`.
     self.assertEqual(config["kubernetes_config"]["namespace"], "default")
     self.assertIn("NAMESPACE=default", run.stdout)
-    self.assertEqual(config["cluster_config"]["ports"]["orchestrator"], 20000)
-    self.assertEqual(config["cluster_config"]["ports"]["rollout"], 20001)
-    self.assertEqual(config["cluster_config"]["ports"]["trainer"], 20002)
+    roles = config["cluster_config"]["roles"]
+    self.assertEqual(roles["orchestrator"]["port"], 20000)
+    self.assertEqual(roles["rollout"]["port"], 20001)
+    self.assertEqual(roles["trainer"]["port"], 20002)
     self.assertEqual(hp.mesh_axes("actor_model_config")["fsdp"], 8)
     self.assertEqual(hp.mesh_axes("actor_model_config")["tp"], 8)
     self.assertEqual(hp.mesh_axes("rollout_model_config")["fsdp"], 1)
     self.assertEqual(hp.mesh_axes("rollout_model_config")["tp"], 4)
     k8s = config["cluster_config"]["k8s"]
-    self.assertEqual(k8s["cpu_memory"], "64G")
-    self.assertEqual(k8s["user_container_memory"], "260G")
-    self.assertEqual(k8s["user_container_memory_limit"], "260G")
+    self.assertEqual(
+        roles["orchestrator"]["memory"], {"request": "64G", "limit": ""}
+    )
+    self.assertEqual(
+        roles["trainer"]["memory"], {"request": "260G", "limit": "260G"}
+    )
     self.assertEqual(k8s["trainer"]["jobset_yaml"], "jobset.pathways.yaml")
     self.assertEqual(k8s["trainer"]["tpu_slice"], "tpuv5:4x4x4")
     self.assertIn(

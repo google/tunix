@@ -434,7 +434,7 @@ class WorkerIdAndPortTest(absltest.TestCase):
     for target in ("local", "k8s"):
       hp = resolve_config.initialize([
           f"cluster_config.target={target}",
-          "cluster_config.ports.rollout=20051",
+          "cluster_config.roles.rollout.port=20051",
           "agentic_grpo_config.beta=0.0",
       ])
       with self.subTest(target=target):

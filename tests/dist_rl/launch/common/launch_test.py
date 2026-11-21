@@ -395,7 +395,7 @@ class LaunchScriptsTest(absltest.TestCase):
     # experimental DeepSWE environment, Raiden, vLLM, W&B), or the v2 recipe
     # and `yaml_generator.py` do. `local.sh`'s processes inherit them from the
     # caller's environment; the GKE pods don't, so there they only arrive
-    # through the config (e.g. `cluster_config.role_env.trainer`).
+    # through the config (e.g. `cluster_config.roles.trainer.env`).
     self.assertEmpty(
         set(legacy)
         & {
@@ -640,7 +640,7 @@ class LaunchScriptsTest(absltest.TestCase):
         self.assertNotEqual(res.returncode, 0)
         self.assertIn(
             "Error: The config names no task: data_module, env_class_path,"
-            " agent_class_path, cluster_config.registry_module must be set.",
+            " agent_class_path, registry_module must be set.",
             res.stderr,
         )
         self.assertNotIn("command:", res.stdout)
@@ -879,7 +879,7 @@ class LaunchScriptsTest(absltest.TestCase):
         "cluster_config.k8s.termination_grace_seconds=120",
         "cluster_config.k8s.kueue_queue_name=rl-queue",
         "cluster_config.k8s.cpu_nodepool=cpu-np",
-        "cluster_config.k8s.cpu_memory=64Gi",
+        "cluster_config.roles.orchestrator.memory.request=64Gi",
         "cluster_config.k8s.head_excluded_nodepools=[cpu-np,sandbox-pool]",
     ])
     self.assertEqual(res.returncode, 0, msg=res.stderr)
@@ -972,8 +972,8 @@ class LaunchScriptsTest(absltest.TestCase):
         "cluster_config.k8s.pathways_proxy_memory_limit=190G",
         "cluster_config.k8s.pathways_proxy_memory=24G",
         "cluster_config.k8s.pathways_rm_memory=8G",
-        "cluster_config.k8s.user_container_memory=56G",
-        "cluster_config.k8s.user_container_memory_limit=80G",
+        "cluster_config.roles.rollout.memory.request=56G",
+        "cluster_config.roles.rollout.memory.limit=80G",
         "cluster_config.k8s.pathways_worker_memory=120G",
     ]
     res = self._run_launch(args)
@@ -1013,6 +1013,18 @@ class LaunchScriptsTest(absltest.TestCase):
     self.assertEqual(
         containers["main"]["resources"]["limits"]["memory"], "80G"
     )
+    # The trainer keeps its own request and limit
+    # (`cluster_config.roles.trainer.memory`).
+    trainer_proc = next(
+        rj["template"]["spec"]["template"]["spec"]
+        for rj in jobsets["testuser-train"]["spec"]["replicatedJobs"]
+        if rj["name"] == "proc"
+    )
+    trainer_main = next(
+        c for c in trainer_proc["containers"] if c["name"] == "main"
+    )
+    self.assertEqual(trainer_main["resources"]["requests"]["memory"], "48G")
+    self.assertEqual(trainer_main["resources"]["limits"]["memory"], "70G")
 
     # Worker pod (pw-node) container (pathways-worker).
     pw_spec = rjobs["pw-node"]
@@ -1099,9 +1111,9 @@ class LaunchScriptsTest(absltest.TestCase):
   def test_role_env_and_sandbox_settings_render_into_processes(self):
     role_args = [
         "agentic_grpo_config.beta=0.0",
-        "cluster_config.role_env.orchestrator.ORCH_FLAG=x",
-        "cluster_config.role_env.trainer.TRAIN_FLAG='a b'",
-        "cluster_config.role_env.rollout.ROLL_FLAG='0'",
+        "cluster_config.roles.orchestrator.env.ORCH_FLAG=x",
+        "cluster_config.roles.trainer.env.TRAIN_FLAG='a b'",
+        "cluster_config.roles.rollout.env.ROLL_FLAG='0'",
     ]
     local_res = self._run_launch(
         ["--dry-run", "cluster_config.target=local", *role_args]
@@ -1118,7 +1130,7 @@ class LaunchScriptsTest(absltest.TestCase):
         "cluster_config.target=local",
         "agentic_grpo_config.beta=0.04",
         "cluster_config.local.inference_devices=4,5",
-        "cluster_config.role_env.inference.INF_FLAG=y",
+        "cluster_config.roles.inference.env.INF_FLAG=y",
     ])
     self.assertEqual(inference_res.returncode, 0, msg=inference_res.stderr)
     self.assertIn("Inference environment: INF_FLAG=y", inference_res.stdout)
@@ -1228,7 +1240,7 @@ class LaunchScriptsTest(absltest.TestCase):
     wrapped_default = self._run_launch(
         [
             *base_args,
-            "cluster_config.trainer_main=custom.wrapper.trainer_main",
+            "cluster_config.roles.trainer.main=custom.wrapper.trainer_main",
         ],
         extra_env={"PYTHON_BIN": str(stub_py)},
     )
@@ -1242,8 +1254,8 @@ class LaunchScriptsTest(absltest.TestCase):
         [
             *base_args,
             "cluster_config.local.download_model_weights=false",
-            "cluster_config.trainer_main=custom.mock.trainer_main",
-            "cluster_config.rollout_main=custom.mock.rollout_main",
+            "cluster_config.roles.trainer.main=custom.mock.trainer_main",
+            "cluster_config.roles.rollout.main=custom.mock.rollout_main",
             "weight_sync_config.mode=noop",
         ],
         extra_env={"PYTHON_BIN": str(stub_py)},

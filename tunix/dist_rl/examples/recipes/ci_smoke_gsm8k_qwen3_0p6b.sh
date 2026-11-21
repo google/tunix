@@ -63,7 +63,7 @@ exec "${DIR}/../math_gsm8k_dist/launcher.sh" \
   agentic_grpo_config.trajectory_group_order="trajectory_completion" \
   cluster_config.artifact_root="artifacts/qwen3_dist_gsm8k" \
   cluster_config.target="local" \
-  cluster_config.wait_timeout_secs=900 \
+  cluster_config.local.wait_timeout_secs=900 \
   cluster_config.local.auto_detect_devices=true \
   cluster_config.local.trainer_devices="0,1,2,3" \
   cluster_config.local.rollout_devices="4,5,6,7" \

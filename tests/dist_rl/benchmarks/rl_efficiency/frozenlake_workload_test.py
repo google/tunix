@@ -345,9 +345,9 @@ class FrozenLakeBenchmarkTest(unittest.TestCase):
     defaults = yaml_defaults()
     local_launcher = (LAUNCH / "common/local.sh").read_text()
     for key, bash_var in (
-        ("cluster_config.trainer_main", "TRAINER_MAIN"),
-        ("cluster_config.rollout_main", "ROLLOUT_MAIN"),
-        ("cluster_config.orchestrator_main", "ORCHESTRATOR_MAIN"),
+        ("cluster_config.roles.trainer.main", "TRAINER_MAIN"),
+        ("cluster_config.roles.rollout.main", "ROLLOUT_MAIN"),
+        ("cluster_config.roles.orchestrator.main", "ORCHESTRATOR_MAIN"),
     ):
       with self.subTest(key=key):
         self.assertIn(f'--process_main="${{{bash_var}}}"', local_launcher)
