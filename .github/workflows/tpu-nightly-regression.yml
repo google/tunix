@@ -45,7 +45,7 @@ jobs:
       matrix:
         suite: [sft, rl, regression]
     container:
-      image: vllm/vllm-tpu:nightly-20260911-4b80060-51da0ca # zizmor: ignore[unpinned-images]
+      image: vllm/vllm-tpu:nightly-20261110-02e570d-52e8596 # zizmor: ignore[unpinned-images]
       options: --privileged
       env:
         CLOUD_TPU_ACCELERATOR: v6e-8
@@ -69,13 +69,23 @@ jobs:
 
     - name: Install tunix dependencies
       run: |
-        python3 -m pip install --upgrade pip setuptools wheel
+        rm -f /etc/pip.conf /root/.config/pip/pip.conf /opt/venv/pip.conf ~/.pip/pip.conf || true
+        # Preserve the container's co-versioned JAX/vLLM/Tokamax stack (including container-only .dev builds)
+        # instead of plain `pip install`, which downgrades preinstalled wheels when resolving Tunix deps.
+        # TODO(b/584829765): Deduplicate container-overrides setup into a shared action/script and
+        # revisit `--override` if vllm/vllm-tpu stops shipping unpublished .dev wheels.
+        python3 -m pip install -q uv
+        uv pip freeze --python "$(which python3)" \
+          | grep -E '^(jax|jaxlib|libtpu|tokamax|flax|safetensors|transformers|huggingface-hub|torch|torchvision|torchax|numba)==' \
+          > /tmp/container-overrides.txt || [ "$?" -eq 1 ]
 
         # Install Tunix with dev and test dependencies without overwriting the vLLM dependencies.
-        python3 -m pip install -e ".[tpu,dev,test,cli]"
+        uv pip install --system --break-system-packages "scikit-build-core>=0.10" "nanobind>=2.5.0" cmake ninja
+        # `--override` forces uv to keep the frozen container versions even if package bounds differ.
+        uv pip install --system --break-system-packages --no-build-isolation --override /tmp/container-overrides.txt -e ".[dev,test,cli]"
 
         # tpu-inference/Numba needs NumPy 2.3 or less.
-        python3 -m pip install numpy==2.3.5 --force-reinstall
+        uv pip install --system --break-system-packages --force-reinstall numpy==2.3.5
 
     - name: Verify TPU availability
       run: |
