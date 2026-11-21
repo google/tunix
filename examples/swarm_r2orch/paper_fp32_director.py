@@ -235,9 +235,9 @@ class BatchingFp32DirectorSampler:
   def _deliver_batch_item(
       self, req: _PendingRequest, text: str, raw_toks: Any, raw_lps: Any, actual_gen: int
   ) -> None:
-    gen_toks = [int(t) for t in raw_toks.tolist()]
+    gen_toks = [int(t) for t in np.asarray(raw_toks).tolist()]
     gen_lps = (
-        [float(x) for x in raw_lps.tolist()]
+        [float(x) for x in np.asarray(raw_lps).tolist()]
         if raw_lps is not None
         else [0.0] * len(gen_toks)
     )
@@ -349,8 +349,8 @@ def run_director_fidelity_gate(
       seed=0,
       return_logprobs=True,
   )
-  comp_ids = [int(t) for t in out.tokens[0].tolist()][:8]
-  samp_lps = [float(x) for x in out.logprobs[0].tolist()][: len(comp_ids)]
+  comp_ids = [int(t) for t in np.asarray(out.tokens[0]).tolist()][:8]
+  samp_lps = [float(x) for x in np.asarray(out.logprobs[0]).tolist()][: len(comp_ids)]
   # Drop synthetic trailing EOS marker (0.0 logprob) if restored after early stop.
   valid_n = sum(1 for lp in samp_lps if lp != 0.0)
   comp_ids = comp_ids[: max(1, valid_n)]
