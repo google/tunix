@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import dataclasses
+import gc
 import queue
 import secrets
 import threading
@@ -56,12 +57,15 @@ def _remesh_to_sampling_specs(
 
   def _put(x: Any, shd: Any) -> Any:
     if isinstance(x, jax.Array) and isinstance(shd, jax.sharding.Sharding):
-      return jax.device_put(x.astype(jnp.float32), shd)
+      placed = jax.device_put(x.astype(jnp.float32), shd)
+      jax.block_until_ready(placed)
+      return placed
     return x
 
   placed_pure = jax.tree.map(_put, src_pure, shd_pure)
   out_state = jax.tree.map(lambda v: v, template_state)
   nnx.replace_by_pure_dict(out_state, placed_pure)
+  gc.collect()
   return out_state
 
 
@@ -196,6 +200,7 @@ class BatchingFp32DirectorSampler:
         self._sampler.transformer_state = _remesh_to_sampling_specs(
             new_fp32_state, self._template_state, self._target_shardings
         )
+      gc.collect()
 
   def _choose_bucket(self, prompt_len: int, req_max: int) -> tuple[int, int]:
     max_p = max(1, self.cache_size - 512)

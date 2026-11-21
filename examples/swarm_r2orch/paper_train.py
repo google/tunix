@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import gc
 import json
 import os
 from pathlib import Path
@@ -231,6 +232,12 @@ def boot_tpu_services(
       f" in {time.monotonic() - t_ret:.1f}s",
       flush=True,
   )
+  if unlink_staged_safetensors:
+    retriever.release_vectors_file(unlink=True)
+    for ef in (data_root / "models/e5-base-v2").glob("*.safetensors"):
+      ef.unlink(missing_ok=True)
+    (data_root / "models/e5-base-v2/pytorch_model.bin").unlink(missing_ok=True)
+    print("[tpu-boot] freed staged Wiki-18 vectors (31 GiB) & E5 weights from tmpfs", flush=True)
 
   t_vllm = time.monotonic()
   worker_sampler = paper_serving.build_qwen3p5_vllm_sampler(
@@ -251,6 +258,8 @@ def boot_tpu_services(
     print("[tpu-boot] freed staged Qwen3.5-9B safetensors from tmpfs", flush=True)
 
   if dir_fidelity.mode == swarm_contracts.ServingFidelityMode.FP32_NATIVE:
+    del base_bf16
+    gc.collect()
     director_sampler: Any = paper_fp32_director.BatchingFp32DirectorSampler(
         hub.base_state,
         hf_tok,

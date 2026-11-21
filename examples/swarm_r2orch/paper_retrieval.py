@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import functools
+import gc
 from http.server import BaseHTTPRequestHandler
 from http.server import ThreadingHTTPServer
 import json
@@ -116,7 +117,8 @@ class TpuWiki18Retriever:
 
     self._torch = torch
     root = Path(wiki18_dir)
-    self.vectors = np.load(root / "vectors_fp16.npy", mmap_mode="r")
+    self._vectors_path = root / "vectors_fp16.npy"
+    self.vectors: Any = np.load(self._vectors_path, mmap_mode="r")
     self.total = int(self.vectors.shape[0])
     self.offsets = np.load(root / "wiki-18.offsets.npy")
     self._corpus_file = (root / "wiki-18.jsonl").open("rb")
@@ -131,7 +133,23 @@ class TpuWiki18Retriever:
     devices = list(tpu_devices) if tpu_devices else list(jax.devices())
     self.mesh = jax.sharding.Mesh(np.asarray(devices), ("ret",))
     self._init_sharded_matrix(len(devices))
+    self.release_vectors_file(unlink=False)
     self._search_fn = _build_sharded_search_fn(self.mesh)
+
+  def release_vectors_file(self, *, unlink: bool = False) -> None:
+    """Closes the host mmap of `vectors_fp16.npy` (already sharded in TPU HBM)."""
+    vec = getattr(self, "vectors", None)
+    if vec is not None:
+      mm = getattr(vec, "_mmap", None)
+      if mm is not None:
+        try:
+          mm.close()
+        except Exception:  # pylint: disable=broad-exception-caught
+          pass
+      self.vectors = None
+      gc.collect()
+    if unlink and self._vectors_path.is_file():
+      self._vectors_path.unlink(missing_ok=True)
 
   def _init_sharded_matrix(self, num_shards: int) -> None:
     pad_rows = (-self.total) % num_shards

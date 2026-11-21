@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import contextlib
+import gc
 from http.server import BaseHTTPRequestHandler
 from http.server import ThreadingHTTPServer
 import json
@@ -272,6 +273,8 @@ class R2OrchTpuGatewayState:
         try:
           self.director_sampler.update_params(merged)
         finally:
+          del merged
+          gc.collect()
           if drv is not None and hasattr(drv, "resume"):
             drv.resume()
       self.loaded_models.add(lora_name)
