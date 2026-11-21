@@ -16,7 +16,9 @@
 
 The defaults match examples/deepswe/eval_deepswe.py: one greedy Qwen3-32B
 trajectory per SWE-Bench Verified task, a 30-turn limit, and Pass@1 reporting.
-Run locally on one TPU host, or run worker and controller roles separately.
+`--num_rollouts_per_instance` samples several attempts per task and adds
+Pass@k. Run locally on one TPU host, or run worker and controller roles
+separately. Results go to a local or remote (e.g. `gs://`) `--output_dir`.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections import Counter
+from collections.abc import Iterator
 import json
 import logging
 import math
@@ -32,7 +35,10 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import threading
 import time
+
+from etils import epath
 
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -76,6 +82,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
   parser.add_argument("--tasks_limit", type=int, default=0,
                       help="Zero evaluates the complete split.")
   parser.add_argument("--max_steps", type=int, default=30)
+  parser.add_argument(
+      "--num_rollouts_per_instance",
+      type=int,
+      default=1,
+      help="Attempts per task; Pass@k uses k = this value.",
+  )
+  parser.add_argument("--temperature", type=float, default=0.0)
+  parser.add_argument("--top_p", type=float, default=1.0)
+  parser.add_argument(
+      "--top_k", type=int, default=-1, help="Top-k sampling; -1 disables it."
+  )
   parser.add_argument("--enable_guard", action="store_true")
   parser.add_argument("--disable_thinking", action="store_true",
                       help="Agentic eval enables the Qwen thinking template.")
@@ -86,10 +103,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
   args = parser.parse_args(argv)
   if args.worker_addresses is None:
     args.worker_addresses = [f"127.0.0.1:{args.port}"]
-  for name in ("port", "mesh_fsdp", "mesh_tp", "max_model_len",
-               "max_response_length", "max_concurrent", "timeout",
-               "startup_timeout", "max_steps", "vllm_max_num_seqs",
-               "vllm_max_batched_tokens"):
+  for name in (
+      "port",
+      "mesh_fsdp",
+      "mesh_tp",
+      "max_model_len",
+      "max_response_length",
+      "max_concurrent",
+      "timeout",
+      "startup_timeout",
+      "max_steps",
+      "num_rollouts_per_instance",
+      "vllm_max_num_seqs",
+      "vllm_max_batched_tokens",
+  ):
     if getattr(args, name) <= 0:
       parser.error(f"--{name} must be positive")
   if (args.tasks_limit < 0 or args.max_context_limit < 0
@@ -97,6 +124,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.error(
         "Task/context limits must be nonnegative and HBM utilization in (0, 1)"
     )
+  if args.temperature < 0 or not 0 < args.top_p <= 1:
+    parser.error("--temperature must be nonnegative and --top_p in (0, 1]")
+  if args.num_rollouts_per_instance > 1 and args.temperature == 0:
+    parser.error("--num_rollouts_per_instance > 1 requires --temperature > 0")
+  if args.top_k != -1 and args.top_k <= 0:
+    parser.error("--top_k must be positive, or -1 to disable it")
   if args.max_response_length > args.max_model_len - _CONTEXT_HEADROOM_TOKENS:
     parser.error(
         f"max_response_length must leave {_CONTEXT_HEADROOM_TOKENS} context"
@@ -111,9 +144,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def model_profile(args: argparse.Namespace) -> dict[str, object]:
   """Reject a worker serving a different model or rollout configuration."""
-  names = ("model_id", "model_dir", "tokenizer_path", "mesh_fsdp", "mesh_tp",
-           "max_model_len", "max_context_limit", "max_response_length", "max_steps",
-           "enable_guard", "disable_thinking")
+  names = (
+      "model_id",
+      "model_dir",
+      "tokenizer_path",
+      "mesh_fsdp",
+      "mesh_tp",
+      "max_model_len",
+      "max_context_limit",
+      "max_response_length",
+      "max_steps",
+      "temperature",
+      "top_p",
+      "top_k",
+      "enable_guard",
+      "disable_thinking",
+  )
   return {name: getattr(args, name) for name in names}
 
 
@@ -138,20 +184,27 @@ def response_budget(args: argparse.Namespace) -> int:
   return args.max_context_limit or args.max_model_len - _CONTEXT_HEADROOM_TOKENS
 
 
-def request_fields(args: argparse.Namespace, entry: dict, index: int) -> dict:
-  """Use the same one-trajectory limits and greedy sampling as agentic eval."""
+def _request_id(args: argparse.Namespace, index: int, attempt: int) -> str:
+  """Returns `eval_<task>`, or `eval_<task>_<attempt>` with several attempts."""
+  if args.num_rollouts_per_instance == 1:
+    return f"eval_{index}"
+  return f"eval_{index}_{attempt}"
+
+
+def request_fields(
+    args: argparse.Namespace,
+    entry: dict[str, object],
+    index: int,
+    attempt: int = 0,
+) -> dict[str, object]:
+  """Use the same per-trajectory limits as agentic eval."""
   return {
-      "request_id": f"eval_{index}",
+      "request_id": _request_id(args, index, attempt),
       "prompt_id": f"eval_{index}",
-      "group_index": 0,
+      "group_index": attempt,
       "prompt": str(entry.get("problem_statement", "")),
       "max_turns": args.max_steps,
       "max_response_length": response_budget(args),
-      "generation_kwargs": {
-          "max_generation_steps": args.max_response_length,
-          "temperature": 0.0,
-          "return_logprobs": False,
-      },
       "metadata": {
           "record_episode_summary": True,
           "env_config": {
@@ -196,52 +249,122 @@ def compact_result(response) -> dict:
   }
 
 
-def summarize(rows: list[dict], expected: int) -> dict:
-  """Pass@1 keeps failed or missing tasks in the denominator."""
+def summarize(
+    rows: list[dict[str, object]], expected: int, attempts: int = 1
+) -> dict[str, object]:
+  """Summarizes `expected` tasks with `attempts` attempts each.
+
+  Failed and missing attempts count as unresolved. `pass_at_1` is the resolved
+  fraction of all attempts; with several attempts, `pass_at_k` adds Pass@k for
+  k = `attempts`.
+
+  Args:
+    rows: One compact result per finished attempt.
+    expected: Number of tasks evaluated.
+    attempts: Attempts per task.
+
+  Returns:
+    The summary metrics.
+  """
+  total = expected * attempts
   resolved = sum(row["reward"] > 0 for row in rows)
-  return {
+  summary = {
       "total_instances": expected,
-      "completed_instances": len(rows),
+      "attempts_per_instance": attempts,
+      "total_attempts": total,
+      "completed_attempts": len(rows),
       "resolved": resolved,
-      "pass_at_1": resolved / expected,
-      "average_reward": sum(row["reward"] for row in rows) / expected,
-      "average_steps": sum(row["num_steps"] for row in rows) / expected,
+      "pass_at_1": resolved / total,
+      "average_reward": sum(row["reward"] for row in rows) / total,
+      "average_steps": sum(row["num_steps"] for row in rows) / total,
       "status_counts": dict(Counter(row["status"] for row in rows)),
       "guard_blocked_trajectories": sum(
           row["guard_blocked_steps"] > 0 for row in rows
       ),
       "guard_blocks": sum(row["guard_blocked_steps"] for row in rows),
-      "guard_reasons": dict(Counter(
-          reason for row in rows for reason in row["guard_reasons"]
-      )),
+      "guard_reasons": dict(
+          Counter(reason for row in rows for reason in row["guard_reasons"])
+      ),
       "errors": sum(bool(row["error"]) for row in rows),
   }
+  if attempts > 1:
+    # For k equal to the attempts per task, the unbiased Pass@k estimate is the
+    # fraction of tasks with at least one resolved attempt. Tasks are keyed by
+    # their dataset index, which is unique even when instance ids are not.
+    resolved_tasks = {row["pair_index"] for row in rows if row["reward"] > 0}
+    summary["pass_at_k"] = {str(attempts): len(resolved_tasks) / expected}
+  return summary
+
+
+def write_json(path: epath.PathLike, value: object) -> None:
+  """Writes `value` as UTF-8 JSON to a local or remote (e.g. `gs://`) file."""
+  target = epath.Path(path)
+  if not target.is_absolute() or target.as_uri().startswith("file://"):
+    target.parent.mkdir(parents=True, exist_ok=True)
+  target.write_text(
+      json.dumps(value, ensure_ascii=False, allow_nan=False, indent=2) + "\n",
+      encoding="utf-8",
+  )
+
+
+def write_results(
+    run_dir: epath.PathLike,
+    rows: list[dict[str, object]],
+    summary: dict[str, object],
+) -> None:
+  """Writes `<run>.jsonl` and `<run>.summary.json` next to `run_dir`."""
+  target = epath.Path(run_dir)
+  if not target.is_absolute() or target.as_uri().startswith("file://"):
+    target.parent.mkdir(parents=True, exist_ok=True)
+  (target.parent / f"{target.name}.jsonl").write_text(
+      "".join(
+          json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n"
+          for row in rows
+      ),
+      encoding="utf-8",
+  )
+  write_json(target.parent / f"{target.name}.summary.json", summary)
+
+
+def _attempts(
+    jobs: Iterator[tuple[int, dict[str, object]]], attempts: int
+) -> Iterator[tuple[int, dict[str, object], int]]:
+  """Expands each `(index, entry)` task taken from `jobs` into its attempts."""
+  for index, entry in jobs:
+    for attempt in range(attempts):
+      yield index, entry, attempt
 
 
 async def collect_worker(handle, jobs, limit, args, on_result):
-  """Bound in-flight work without applying the RPC deadline to episodes."""
+  """Bound in-flight work without applying the RPC deadline to episodes.
+
+  Each task taken from the shared `jobs` iterator is dispatched as
+  `--num_rollouts_per_instance` attempts to this worker. `on_result` runs in a
+  thread so that remote result writes do not block the event loop.
+  """
+  requests = _attempts(jobs, args.num_rollouts_per_instance)
   pending = {}
   exhausted = False
   while pending or not exhausted:
     while not exhausted and len(pending) < limit:
       try:
-        index, entry = next(jobs)
+        index, entry, attempt = next(requests)
       except StopIteration:
         exhausted = True
         break
-      fields = request_fields(args, entry, index)
+      fields = request_fields(args, entry, index, attempt)
       request_id = fields["request_id"]
       ack = await handle.dispatch_task(request_id, "evaluate", fields)
       if ack != request_id:
         raise RuntimeError(f"Unexpected dispatch acknowledgement: {ack}")
-      pending[request_id] = (index, entry, time.monotonic())
+      pending[request_id] = (index, entry, attempt, time.monotonic())
     if not pending:
       break
     reply = await handle.poll_responses(timeout_s=5)
     if reply is not None:
       if reply.request_id not in pending:
         raise RuntimeError(f"Unexpected evaluation result: {reply.request_id}")
-      index, entry, started = pending.pop(reply.request_id)
+      index, entry, attempt, started = pending.pop(reply.request_id)
       try:
         result = reply.unwrap()
       except Exception as exc:  # A task failure must remain in Pass@1's denominator.
@@ -250,29 +373,46 @@ async def collect_worker(handle, jobs, limit, args, on_result):
             "guard_blocked_steps": 0, "guard_reasons": [], "error": str(exc),
         }
       result.update(
+          request_id=reply.request_id,
           pair_index=index,
+          attempt=attempt,
           instance_id=entry.get("instance_id", index),
           docker_image=entry["docker_image"],
           wall_seconds=time.monotonic() - started,
       )
-      on_result(result)
-    if any(time.monotonic() - started > args.timeout + 1800
-           for _, _, started in pending.values()):
+      await asyncio.to_thread(on_result, result)
+    if any(
+        time.monotonic() - started > args.timeout + 1800
+        for _, _, _, started in pending.values()
+    ):
       raise TimeoutError("A rollout exceeded its episode and cleanup deadline")
 
 
-async def run_controller(args: argparse.Namespace) -> dict:
+async def run_controller(args: argparse.Namespace) -> dict[str, object]:
   from tunix.dist_rl.worker import remote_execution
 
   entries = load_entries(args)
-  output_dir = Path(args.output_dir)
-  output_dir.mkdir(parents=True, exist_ok=True)
-  output = output_dir / f"eval_deepswe_{time.strftime('%Y%m%d_%H%M%S')}.jsonl"
+  attempts = args.num_rollouts_per_instance
+  run_dir = (
+      epath.Path(args.output_dir)
+      / f"eval_deepswe_{time.strftime('%Y%m%d_%H%M%S')}"
+  )
+  write_json(
+      run_dir / "config.json",
+      {
+          **vars(args),
+          "instance_ids": [
+              entry.get("instance_id", index)
+              for index, entry in enumerate(entries)
+          ],
+      },
+  )
   handles = [remote_execution.ActorHandle.from_address(
       address if address.startswith("grpc://") else f"grpc://{address}",
       rpc_timeout_s=60,
   ) for address in args.worker_addresses]
   rows = []
+  rows_lock = threading.Lock()
   failure = None
   try:
     async def wait_ready(handle):
@@ -290,44 +430,63 @@ async def run_controller(args: argparse.Namespace) -> dict:
 
     await asyncio.gather(*(wait_ready(handle) for handle in handles))
     jobs = iter(enumerate(entries))
-    with output.open("w", encoding="utf-8") as stream:
-      def record(row):
-        rows.append(row)
-        stream.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
-        stream.flush()
-        logging.info(
-            "[%d/%d] %s reward=%.1f steps=%d status=%s",
-            len(rows), len(entries), row["instance_id"], row["reward"],
-            row["num_steps"], row["status"],
-        )
 
-      workers = len(handles)
-      await asyncio.gather(*(
-          collect_worker(
-              handle, jobs,
-              args.max_concurrent // workers + (index < args.max_concurrent % workers),
-              args, record,
-          )
-          for index, handle in enumerate(handles)
-      ))
+    def record(row: dict[str, object]) -> None:
+      with rows_lock:
+        rows.append(row)
+        done = len(rows)
+      try:
+        write_json(run_dir / "attempts" / f"{row['request_id']}.json", row)
+      except OSError as exc:
+        logging.warning(
+            "Failed to write attempt %s: %s", row["request_id"], exc
+        )
+      logging.info(
+          "[%d/%d] %s reward=%.1f steps=%d status=%s",
+          done,
+          len(entries) * attempts,
+          row["request_id"],
+          row["reward"],
+          row["num_steps"],
+          row["status"],
+      )
+
+    workers = len(handles)
+    await asyncio.gather(*(
+        collect_worker(
+            handle,
+            jobs,
+            args.max_concurrent // workers
+            + (index < args.max_concurrent % workers),
+            args,
+            record,
+        )
+        for index, handle in enumerate(handles)
+    ))
   except BaseException as exc:
     failure = f"{type(exc).__name__}: {exc}"
     raise
   finally:
     await asyncio.gather(*(handle.close() for handle in handles),
                          return_exceptions=True)
-    summary = summarize(rows, len(entries))
+    summary = summarize(rows, len(entries), attempts)
     summary["fatal_error"] = failure
-    summary_path = output.with_suffix(".summary.json")
-    summary_path.write_text(
-        json.dumps(summary, indent=2) + "\n", encoding="utf-8"
-    )
+    write_results(run_dir, rows, summary)
 
-  logging.info("Evaluation results: %s", output)
-  logging.info("Pass@1: %.4f (%d/%d)", summary["pass_at_1"],
-               summary["resolved"], summary["total_instances"])
-  if summary["errors"] or summary["completed_instances"] != len(entries):
-    raise RuntimeError(f"Evaluation contains failures; inspect {output}")
+  logging.info("Evaluation results: %s.jsonl", run_dir)
+  logging.info(
+      "Pass@1: %.4f (%d/%d)",
+      summary["pass_at_1"],
+      summary["resolved"],
+      summary["total_attempts"],
+  )
+  if attempts > 1:
+    logging.info("Pass@%d: %.4f", attempts, summary["pass_at_k"][str(attempts)])
+  if (
+      summary["errors"]
+      or summary["completed_attempts"] != summary["total_attempts"]
+  ):
+    raise RuntimeError(f"Evaluation contains failures; inspect {run_dir}")
   return summary
 
 
@@ -412,14 +571,16 @@ async def run_worker(args: argparse.Namespace):
   env_name = deepswe.DEEPSWE_ENV_NAME
   if args.enable_guard:
     env_name = register_guarded_env(deepswe)
-  # One greedy trajectory per task.
+  # Greedy by default; `--temperature`, `--top_p`, and `--top_k` sample instead.
   config = rollout_worker.RolloutConfig(
       weight_sync_mode="none",
       max_tokens_to_generate=args.max_response_length,
       max_response_length=response_budget(args),
       kv_cache_size=args.max_model_len,
       episode_timeout=float(args.timeout),
-      temperature=0.0,
+      temperature=args.temperature,
+      top_p=args.top_p,
+      top_k=args.top_k if args.top_k > 0 else None,
       return_logprobs=False,
       eos_tokens=eos,
       data_parallel_size=args.mesh_fsdp,
