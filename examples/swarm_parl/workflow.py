@@ -111,10 +111,18 @@ def parse_director_action(text: str, *, max_wave_width: int = 4) -> DirectorComm
   return DirectorCommand(is_final=True, is_valid=False, answer=(text or "").strip())
 
 
+def _fit_user_body(user: str, max_chars: int = 6500) -> str:
+  if len(user) <= max_chars:
+    return user
+  head = max_chars // 2
+  tail = max_chars - head - 32
+  return f"{user[:head]}\n...[truncated]...\n{user[-tail:]}"
+
+
 def format_chat_prompt(system: str, user: str) -> str:
   return (
       f"<|im_start|>system\n{system}<|im_end|>\n"
-      f"<|im_start|>user\n{user}<|im_end|>\n"
+      f"<|im_start|>user\n{_fit_user_body(user)}<|im_end|>\n"
       f"<|im_start|>assistant\n<think>\n\n</think>\n\n"
   )
 
@@ -182,7 +190,7 @@ async def parl_episode_workflow(
     )
     wave_outputs = await ctx.parallel(cmd.jobs, worker_fn, parent=decision)
     for sub_q, sub_a in zip(cmd.jobs, wave_outputs):
-      reports.append(f"- [{sub_q}] => {str(sub_a or '').strip()[:360]}")
+      reports.append(f"- [{sub_q[:160]}] => {str(sub_a or '').strip()[:300]}")
   return last_answer
 
 

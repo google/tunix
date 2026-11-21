@@ -447,7 +447,7 @@ def parse_args() -> argparse.Namespace:
   p.add_argument("--lambda-finish", type=float, default=0.15)
   p.add_argument("--learning-rate", type=float, default=1e-6)
   p.add_argument("--micro-batch-size", type=int, default=4)
-  p.add_argument("--max-prompt-length", type=int, default=3072)
+  p.add_argument("--max-prompt-length", type=int, default=4096)
   p.add_argument("--max-response-length", type=int, default=512)
   p.add_argument("--eval-every", type=int, default=10)
   p.add_argument("--hbm-utilization", type=float, default=0.62)
