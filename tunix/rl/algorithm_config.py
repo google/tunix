@@ -20,6 +20,9 @@ from tunix.common import datatypes as common_datatypes
 from tunix.rl import function_registry
 
 
+VALID_GRPO_LOSS_ALGOS: tuple[str, ...] = ("grpo", "gspo-token", "cispo")
+
+
 @dataclasses.dataclass(slots=True, kw_only=True)
 class AlgorithmConfig:
   """Configuration for RL algorithms.
@@ -123,6 +126,7 @@ class AlgorithmConfig:
         "grpo",
         "drgrpo",
         "gspo-token",
+        "cispo",
         "ppo",
         "dapo",
     ]
@@ -297,6 +301,30 @@ def validate_score_centering_rollout(
     )
 
 
+def validate_grpo_loss_algo(
+    loss_algo: str,
+    epsilon_c: float | None = None,
+) -> None:
+  """Validates `loss_algo` and its compatibility with `epsilon_c`.
+
+  Args:
+    loss_algo: Policy loss variant name (`"grpo"`, `"gspo-token"`, or
+      `"cispo"`).
+    epsilon_c: Optional dual-clip lower bound for negative advantages.
+
+  Raises:
+    ValueError: If `loss_algo` is unsupported or combined with an incompatible
+      option (such as `epsilon_c` with `"cispo"`).
+  """
+  if loss_algo not in VALID_GRPO_LOSS_ALGOS:
+    raise ValueError(
+        f"loss_algo must be one of {VALID_GRPO_LOSS_ALGOS}. Received:"
+        f" {loss_algo!r}"
+    )
+  if loss_algo == "cispo" and epsilon_c is not None:
+    raise ValueError("epsilon_c is not supported with loss_algo='cispo'.")
+
+
 @dataclasses.dataclass(kw_only=True)
 class GRPOConfig(AlgorithmConfig):
   """Configuration for GRPO algorithms.
@@ -311,9 +339,10 @@ class GRPOConfig(AlgorithmConfig):
       `sequence-mean-token-sum-norm`. Default: `sequence-mean-token-mean`.
     reward_mode: The reward computation mode to use (`reward_fn` or `env`).
       Default: `reward_fn`.
-    loss_algo: use GRPO or GSPO for loss computation. GRPO loss is per-batch
-      normalized instead of per-response normalized as mentioned in the paper.
-      For GSPO, we use gspo-token loss which is more flexible.
+    loss_algo: Policy loss variant: `"grpo"`, `"gspo-token"`, or `"cispo"`.
+      `"grpo"` applies per-token PPO clipping, `"gspo-token"` uses sequence-mean
+      importance ratios, and `"cispo"` clips the detached importance sampling
+      weight directly instead of clipping the objective.
     num_generations: The number of times the policy generates multiple responses
       for a given prompt within a single training step. This corresponds to 'G'
       in Algorithm 1 in the `paper <https://arxiv.org/abs/2402.03300>`_. A
@@ -357,6 +386,7 @@ class GRPOConfig(AlgorithmConfig):
 
   References:
     - GRPO: https://arxiv.org/abs/2402.03300
+    - CISPO: https://arxiv.org/abs/2506.13585
     - GSPO: https://arxiv.org/abs/2507.18071
   """
 
@@ -386,11 +416,7 @@ class GRPOConfig(AlgorithmConfig):
 
     super().__post_init__()
 
-    if self.loss_algo not in ["grpo", "gspo-token"]:
-      raise ValueError(
-          "loss_algo should be either grpo or gspo-token. Received: "
-          f"{self.loss_algo}"
-      )
+    validate_grpo_loss_algo(self.loss_algo, self.epsilon_c)
 
 
 @dataclasses.dataclass(kw_only=True)
