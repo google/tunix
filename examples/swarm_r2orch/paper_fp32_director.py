@@ -42,6 +42,7 @@ from tunix.generate import sampler as sampler_lib
 from tunix.models.qwen3p5 import model as qwen3p5_model
 
 PROMPT_BUCKETS = (2048, 8192, 16384, 30720)
+GEN_BUCKETS = (32, 256, 1024, 2048, 4096, 12288)
 
 
 def _remesh_to_sampling_specs(
@@ -203,7 +204,12 @@ class BatchingFp32DirectorSampler:
         max_p = b
         break
     room = max(1, self.cache_size - max_p - 1)
-    target_gen = 256 if int(req_max) <= 256 else 1024
+    req = max(1, int(req_max))
+    target_gen = room
+    for g in GEN_BUCKETS:
+      if req <= g:
+        target_gen = g
+        break
     return max_p, min(room, target_gen)
 
   def _drain_compatible_batch(
@@ -301,8 +307,9 @@ class BatchingFp32DirectorSampler:
 
   def __call__(
       self,
-      input_strings: list[Any],
+      input_strings: list[Any] | None = None,
       *,
+      prompt_token_ids: list[Any] | None = None,
       max_generation_steps: int = 1024,
       temperature: float = 1.0,
       top_p: float | None = 1.0,
@@ -311,10 +318,13 @@ class BatchingFp32DirectorSampler:
       return_logprobs: bool = True,
       **_: Any,
   ) -> base_sampler.SamplerOutput:
-    if len(input_strings) != 1:
+    prompts = prompt_token_ids if prompt_token_ids is not None else input_strings
+    if not prompts or len(prompts) != 1:
       raise ValueError("BatchingFp32DirectorSampler expects 1 prompt per RPC.")
-    prompt_ids = [int(t) for t in input_strings[0]]
+    prompt_ids = [int(t) for t in prompts[0]]
     max_p, actual_gen = self._choose_bucket(len(prompt_ids), max_generation_steps)
+    if len(prompt_ids) > max_p:
+      prompt_ids = prompt_ids[-max_p:]
     fut: concurrent.futures.Future[base_sampler.SamplerOutput] = (
         concurrent.futures.Future()
     )
