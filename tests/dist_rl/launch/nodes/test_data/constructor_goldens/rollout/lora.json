@@ -63,7 +63,7 @@
           "routed_experts_encode_mode": "auto",
           "routed_experts_num_experts": null,
           "temperature": 1.0,
-          "top_k": -1,
+          "top_k": 0,
           "top_p": 1.0,
           "trajectory_store_config": null,
           "weight_sync_mode": "WeightSyncMode.NONE"
@@ -142,7 +142,7 @@
           "store_routed_experts": false,
           "temperature": 1.0,
           "tensor_parallel_size": 4,
-          "top_k": -1,
+          "top_k": 0,
           "top_p": 1.0,
           "trajectory_store_config": null,
           "weight_sync_mode": "WeightSyncMode.NONE"

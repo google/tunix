@@ -181,17 +181,11 @@ def build_generation_args(
     The generation arguments.
   """
   # See `build_batch_config` for why the rollout section is read directly.
-  # TODO(noghabi): Share the sampling settings (temperature, top_p, top_k) with
-  # the rollout node's `RolloutConfig` through one `node_utils` helper, so both
-  # nodes use the same disabled-`top_k` convention.
   rollout = hp.config_mapping("rollout_config")
-  top_k = int(rollout["top_k"])
   return datatypes.GenerationArgs(
       temperature=float(rollout["temperature"]),
       top_p=float(rollout["top_p"]),
-      # The schema disables top-k with a negative value, the rollout worker
-      # with 0.
-      top_k=0 if top_k < 0 else top_k,
+      top_k=node_utils.rollout_top_k(hp),
       # `StandardRLProgram` also enables routing replay on the trainer from it.
       return_routed_experts=bool(
           hp.config_mapping("vllm_config")["return_routed_experts"]

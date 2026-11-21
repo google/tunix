@@ -435,7 +435,8 @@ class RolloutConfigPlumbingTest(absltest.TestCase):
 
   def test_defaults_disable_top_k(self):
     config = _rollout_config()
-    self.assertEqual(config.top_k, -1)
+    # The base config's -1 becomes 0, as in the orchestrator's GenerationArgs.
+    self.assertEqual(config.top_k, 0)
     self.assertTrue(config.return_logprobs)
 
   def test_vllm_model_version_only_for_vllm_samplers(self):

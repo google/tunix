@@ -493,8 +493,7 @@ def _rollout_config(
       kv_cache_size=max_prompt_length + max_tokens_to_generate,
       temperature=float(rollout["temperature"]),
       top_p=float(rollout["top_p"]),
-      # <= 0 disables top-k filtering in both the vanilla and vLLM samplers.
-      top_k=int(rollout["top_k"]),
+      top_k=node_utils.rollout_top_k(hp),
       overlong_filter=bool(grpo["overlong_filter"]),
       episode_timeout=episode_timeout_secs,
       # The trainer consumes the rollout logprobs.
