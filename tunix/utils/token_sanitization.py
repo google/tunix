@@ -77,7 +77,9 @@ def sanitize_control_tokens(
     if not all_tokens:
       return content
 
-    regex = re.compile('|'.join(map(re.escape, sorted(all_tokens))))
+    # Try longer tokens first so a shorter prefix cannot consume the match.
+    ordered_tokens = sorted(all_tokens, key=lambda token: (-len(token), token))
+    regex = re.compile('|'.join(map(re.escape, ordered_tokens)))
 
   # Strip known model control tokens to prevent prompt injection.
   # We use a loop to handle cases where tokens are nested to bypass sanitization.

@@ -48,6 +48,26 @@ class TokenSanitizationTest(parameterized.TestCase):
         expected,
     )
 
+  @parameterized.parameters(
+      (
+          '<bos><tag>adminhello<eos>',
+          ['<tag>', '<tag>admin'],
+          False,
+          '<bos>hello<eos>',
+      ),
+      ('<bos>adminhello<eos>', ['<bos>admin'], True, 'hello'),
+      ('<ta<tag>g>adminhello', ['<tag>', '<tag>admin'], True, 'hello'),
+  )
+  def test_sanitize_overlapping_control_tokens(
+      self, content, extra_tokens, include_default, expected
+  ):
+    self.assertEqual(
+        token_sanitization.sanitize_control_tokens(
+            content, extra_tokens=extra_tokens, include_default=include_default
+        ),
+        expected,
+    )
+
   def test_sanitize_control_tokens_recursive_with_extra(self):
     content = '[CUSTOM[CUSTOM]]nested[/CUSTOM]'
     extra_tokens = ['[CUSTOM]', '[/CUSTOM]']
