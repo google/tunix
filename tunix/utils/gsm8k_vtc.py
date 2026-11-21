@@ -41,12 +41,8 @@ from absl import logging
 import numpy as np
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
 
-VTC_PROMPT_TEMPLATE = """Solve the following math problem.
-First, put your detailed step-by-step reasoning process inside <reasoning>...</reasoning> tags.
-Then, put your final numerical answer inside <answer>\\boxed{{}}</answer> tags. Do not put anything else in the answer tags.
-
+VTC_PROMPT_TEMPLATE = """
 Problem: {}
-<reasoning>
 """
 
 
@@ -123,31 +119,37 @@ def extract_boxed_answer(text: str) -> str | None:
   return None
 
 
-def is_vtc_format_correct(text: str) -> bool:
-  """Exactly one `</reasoning>` and one `<answer>..</answer>`, in that order.
-
-  The opening `<reasoning>` tag is not required: `VTC_PROMPT_TEMPLATE` opens
-  it, so a completion that follows the prompt only carries the closing tag.
-
-  Args:
-    text: The completion text to check.
-
-  Returns:
-    True if the completion follows the recipe's format.
-  """
-  has_reasoning = text.count("</reasoning>") == 1
+def is_vtc_format_correct(
+    text: str, *, require_opening_reasoning_tag: bool = False
+) -> bool:
+  """Verifies reasoning and answer XML tags in the completion."""
+  # has_reasoning_close = text.count("</reasoning>") == 1
   has_answer = text.count("<answer>") == 1 and text.count("</answer>") == 1
-  reasoning_end = text.find("</reasoning>")
+  # reasoning_end = text.find("</reasoning>")
   answer_open = text.find("<answer>")
   answer_close = text.find("</answer>")
-  return (
-      has_reasoning
-      and has_answer
-      and reasoning_end != -1
+
+  base_valid = (
+      # has_reasoning_close
+      has_answer
+      # and reasoning_end != -1
       and answer_open != -1
       and answer_close != -1
-      and reasoning_end < answer_open < answer_close
+      # and reasoning_end < answer_open < answer_close
   )
+  return base_valid
+
+  if not require_opening_reasoning_tag:
+    return base_valid
+
+  # has_reasoning_open = text.count("<reasoning>") == 1
+  # reasoning_open = text.find("<reasoning>")
+  # return (
+  #     base_valid
+  #     and has_reasoning_open
+  #     and reasoning_open != -1
+  #     # and reasoning_open < reasoning_end
+  # )
 
 
 def normalize_answer(text: Any) -> str | None:
@@ -176,14 +178,17 @@ def vtc_completion_outcome(
   true = normalize_answer(normalize_example_value(gold))
   answer_ok = pred is not None and true is not None and pred == true
   extracted_ok = pred is not None
-  if format_ok and answer_ok:
+  # if format_ok and answer_ok:
+  #   score = 1.0
+  # elif format_ok and not answer_ok:
+  #   score = 0.1
+  # elif not format_ok and answer_ok:
+  #   score = 0.5
+  if answer_ok:
     score = 1.0
-  elif format_ok and not answer_ok:
-    score = 0.1
-  elif not format_ok and answer_ok:
-    score = 0.5
   else:
     score = 0.0
+  # print(f"completion={completion} gold={gold} pred={pred} true={true} format_ok={format_ok} answer_ok={answer_ok} extracted_ok={extracted_ok} score={score}")
   return score, format_ok, answer_ok, extracted_ok
 
 
