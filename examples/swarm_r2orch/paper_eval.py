@@ -107,14 +107,16 @@ def _build_eval_deadline(dataset: str, started: float) -> Any:
   from r2orch.deadline import RolloutDeadline  # pylint: disable=g-import-not-at-top
 
   ds = dataset.strip().lower()
-  total_s = 1800.0 if ds in {"aime", "alfworld", "math_hard"} else 900.0
+  long_math = ds in {"aime", "alfworld", "math_hard"}
+  total_s = 2700.0 if long_math else 1200.0
+  req_s = 1800.0 if long_math else 900.0
   return RolloutDeadline(
       total_timeout_s=total_s,
-      no_progress_timeout_s=600.0,
-      request_timeout_s=min(600.0, total_s),
+      no_progress_timeout_s=req_s,
+      request_timeout_s=req_s,
       started_monotonic=started,
       exclude_failed_request_time=True,
-      absolute_wall_timeout_s=total_s + 120.0,
+      absolute_wall_timeout_s=total_s + 180.0,
   )
 
 

@@ -258,7 +258,14 @@ class R2OrchTpuGatewayState:
         self.hub.snapshot_adapter(lora_name, "proposer", lora_path=lora_path)
       elif "director" in lora_name:
         self.hub.snapshot_adapter(lora_name, "solver", lora_path=lora_path)
-        merged = self.hub.merged_state_for_vllm("solver", served_name=lora_name)
+        sync_dtype = getattr(self.director_sampler, "weight_sync_dtype", None)
+        merged = (
+            self.hub.merged_state_for_vllm(
+                "solver", served_name=lora_name, dtype=sync_dtype
+            )
+            if sync_dtype is not None
+            else self.hub.merged_state_for_vllm("solver", served_name=lora_name)
+        )
         drv = getattr(self.director_sampler, "_driver", None)
         if drv is not None and hasattr(drv, "pause"):
           drv.pause(mode="wait", timeout_s=300.0)

@@ -29,9 +29,12 @@ import jax
 import numpy as np
 
 from examples.swarm_r2orch import paper_eval
+from examples.swarm_r2orch import paper_fp32_director
 from examples.swarm_r2orch import paper_retrieval
 from examples.swarm_r2orch import paper_serving
 from examples.swarm_r2orch import paper_trainer
+from tunix.dist_rl.swarm import contracts as swarm_contracts
+from tunix.dist_rl.swarm import step_context as swarm_step
 
 
 @dataclass(frozen=True)
@@ -68,7 +71,10 @@ def partition_tpu_devices(devices: list[Any] | None = None) -> TpuSlicePartition
   raw_devs = list(devices) if devices is not None else list(jax.devices())
   devs = _sort_devices_by_z_slab(raw_devs)
   n = len(devs)
-  if n >= 128:
+  if n >= 256:
+    # Contiguous z-slabs on 4x8x8: train=32, ret=16, fp32_director=64, worker=144
+    n_train, n_ret, n_dir = 32, 16, 64
+  elif n >= 128:
     # Contiguous z-slabs on 4x4x8 (16 chips per z-plane): 1 + 1 + 2 + 4 = 8 planes
     n_train, n_ret, n_dir = 16, 16, 32
   elif n >= 64:
@@ -123,9 +129,11 @@ def render_paper_toml(
       f'seed_skills_path = "{upstream_root}/configs/skills/seed_cards.json"',
   )
   text = text.replace("rollout_workers = 120", f"rollout_workers = {int(rollout_workers)}")
-  text = text.replace("aime_rollout_wall_time_s = 360.0", "aime_rollout_wall_time_s = 1200.0")
-  text = text.replace("alfworld_rollout_wall_time_s = 360.0", "alfworld_rollout_wall_time_s = 1200.0")
-  text = text.replace("rollout_wall_time_s = 400.0", "rollout_wall_time_s = 900.0")
+  text = text.replace("aime_rollout_wall_time_s = 360.0", "aime_rollout_wall_time_s = 1800.0")
+  text = text.replace("alfworld_rollout_wall_time_s = 360.0", "alfworld_rollout_wall_time_s = 1800.0")
+  text = text.replace("rollout_wall_time_s = 400.0", "rollout_wall_time_s = 1200.0")
+  text = text.replace("timeout_s = 600.0", "timeout_s = 1800.0")
+  text = text.replace("timeout_s = 360.0", "timeout_s = 1800.0")
   text = text.replace("vllm_port = 18600", f"vllm_port = {int(vllm_port)}")
   text = text.replace("127.0.0.1:18600", f"127.0.0.1:{int(vllm_port)}")
   text = text.replace("retrieval_port = 18610", f"retrieval_port = {int(retrieval_port)}")
@@ -147,6 +155,35 @@ def configure_paper_environment(data_root: Path, upstream_root: Path) -> None:
   os.environ["ALFWORLD_DATA"] = str(Path(data_root) / "alfworld")
 
 
+def _validate_r2orch_option5_ownership(
+    model_path: Path, director_fidelity: str
+) -> swarm_contracts.ServingFidelity:
+  base_snap = swarm_contracts.SnapshotRef(
+      model_id=model_path.name, revision=0, digest=str(model_path)
+  )
+  fidelity_mode = swarm_contracts.ServingFidelityMode(director_fidelity)
+  dir_fidelity = swarm_contracts.ServingFidelity(
+      mode=fidelity_mode,
+      max_top1_mismatch_rate=0.0 if fidelity_mode == swarm_contracts.ServingFidelityMode.FP32_NATIVE else 0.15,
+      max_logprob_abs_diff=1e-3 if fidelity_mode == swarm_contracts.ServingFidelityMode.FP32_NATIVE else 0.25,
+      allow_lossy_lora_merge=(fidelity_mode == swarm_contracts.ServingFidelityMode.MERGED_BF16),
+  )
+  learners = {
+      "director": swarm_contracts.LearnerSpec.lora(
+          "director", base=base_snap, adapter="director", rank=64, alpha=128.0, fidelity=dir_fidelity
+      ),
+      "proposer": swarm_contracts.LearnerSpec.lora(
+          "proposer", base=base_snap, adapter="proposer", rank=64, alpha=128.0, fidelity=dir_fidelity
+      ),
+  }
+  bindings = {
+      "director": swarm_contracts.PolicySpec.follow("director", fidelity=dir_fidelity),
+      "worker": swarm_contracts.PolicySpec.fixed(base_snap),
+  }
+  swarm_contracts.validate_ownership(learners, bindings)
+  return dir_fidelity
+
+
 def boot_tpu_services(
     *,
     data_root: Path,
@@ -155,6 +192,8 @@ def boot_tpu_services(
     retrieval_port: int = 18610,
     max_model_len: int = 32768,
     hbm_utilization: float = 0.56,
+    director_fidelity: str = "fp32_native",
+    unlink_staged_safetensors: bool = False,
 ) -> dict[str, Any]:
   from transformers import AutoTokenizer  # pylint: disable=g-import-not-at-top
 
@@ -162,14 +201,16 @@ def boot_tpu_services(
   e5_path = Path(data_root) / "models" / "e5-base-v2"
   wiki18_path = Path(data_root) / "wiki18"
   jinja_path = upstream_root / "configs" / "templates" / "director_append_only.jinja"
+  dir_fidelity = _validate_r2orch_option5_ownership(model_path, director_fidelity)
 
   part = partition_tpu_devices()
   print(
       f"[tpu-boot] chips={len(jax.devices())}"
       f" train={part.train_mesh.devices.size}"
       f" ret={len(part.retrieval_devices)}"
-      f" director_dp={part.director_mesh.devices.size}"
-      f" worker_dp={part.worker_mesh.devices.size}",
+      f" director_devs={part.director_mesh.devices.size}"
+      f" worker_dp={part.worker_mesh.devices.size}"
+      f" director_fidelity={dir_fidelity.mode.value}",
       flush=True,
   )
   hf_tok = AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
@@ -202,19 +243,43 @@ def boot_tpu_services(
       return_logprobs=False,
       eos_tokens=eos_ids,
   )
-  director_sampler = paper_serving.build_qwen3p5_vllm_sampler(
-      model_path,
-      hf_tok,
-      mesh=part.director_mesh,
-      max_model_len=max_model_len,
-      hbm_utilization=hbm_utilization,
-      free_kv_cache_during_weight_sync=False,
-      eos_tokens=eos_ids,
-  )
   base_bf16 = hub.merged_state_for_vllm("solver")
   worker_sampler.update_params(base_bf16)
-  director_sampler.update_params(base_bf16)
-  print(f"[tpu-boot] synced base weights to vLLM pools in {time.monotonic() - t_vllm:.1f}s", flush=True)
+  if unlink_staged_safetensors:
+    for sf in model_path.glob("*.safetensors"):
+      sf.unlink(missing_ok=True)
+    print("[tpu-boot] freed staged Qwen3.5-9B safetensors from tmpfs", flush=True)
+
+  if dir_fidelity.mode == swarm_contracts.ServingFidelityMode.FP32_NATIVE:
+    director_sampler: Any = paper_fp32_director.BatchingFp32DirectorSampler(
+        hub.base_state,
+        hf_tok,
+        list(part.director_mesh.devices.flat),
+        eos_ids,
+        cache_size=max_model_len,
+    )
+  else:
+    director_sampler = paper_serving.build_qwen3p5_vllm_sampler(
+        model_path,
+        hf_tok,
+        mesh=part.director_mesh,
+        max_model_len=max_model_len,
+        hbm_utilization=hbm_utilization,
+        free_kv_cache_during_weight_sync=False,
+        eos_tokens=eos_ids,
+    )
+    director_sampler.update_params(base_bf16)
+  print(f"[tpu-boot] synced base weights to serving pools in {time.monotonic() - t_vllm:.1f}s", flush=True)
+
+  fidelity_report = paper_fp32_director.run_director_fidelity_gate(
+      hub, director_sampler, hf_tok, fidelity=dir_fidelity
+  )
+  print(
+      f"[option5-L3] ServingFidelity PASS mode={fidelity_report.mode.value} "
+      f"top1={fidelity_report.top1_agreement:.4f} "
+      f"max_lp_diff={fidelity_report.max_logprob_abs_diff:.3e}",
+      flush=True,
+  )
 
   gw_state = paper_serving.R2OrchTpuGatewayState(
       hf_tokenizer=hf_tok,
@@ -240,7 +305,7 @@ def boot_tpu_services(
       "logprobs": True,
       "chat_template_kwargs": {"enable_thinking": False, "director_append_only": True},
   })
-  print(f"[tpu-boot] warmed up Director & Worker vLLM pools in {time.monotonic() - t_warm:.1f}s", flush=True)
+  print(f"[tpu-boot] warmed up Director & Worker pools in {time.monotonic() - t_warm:.1f}s", flush=True)
   gw_server = paper_serving.start_tpu_openai_gateway(gw_state, port=vllm_port)
   return {
       "partition": part,
@@ -250,6 +315,7 @@ def boot_tpu_services(
       "retriever": retriever,
       "gateway_state": gw_state,
       "gateway_server": gw_server,
+      "fidelity_report": fidelity_report,
   }
 
 
@@ -419,6 +485,7 @@ class _LiveMetricsAndHeldoutTracker:
     self.eval_every = int(eval_every)
     self.eval_concurrency = int(eval_concurrency)
     self.live_jsonl = run_root / "tunix_live_metrics.jsonl"
+    self.manifest_store = swarm_step.ManifestStore(run_root / "option5_manifest")
 
   def start(self, meta: dict[str, Any]) -> None:
     (self.run_root / "tunix_tracker_meta.json").write_text(
@@ -456,6 +523,17 @@ class _LiveMetricsAndHeldoutTracker:
         row[f"heldout/{sname}_multi_pct"] = sdata["multi_agent_pct"]
     with self.live_jsonl.open("a", encoding="utf-8") as f:
       f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    prev_m = self.manifest_store.load_committed()
+    prev_step = -1 if prev_m is None else int(prev_m["step_id"])
+    if cyc > prev_step:
+      self.manifest_store.commit_step(
+          step_id=cyc,
+          expected_prev_step=prev_step,
+          learner_versions={"director": cyc + 1, "proposer": cyc + 1},
+          recipe_state={"completed_cycles": cyc + 1},
+          cursor=cyc + 1,
+          metrics={k: float(v) for k, v in row.items() if isinstance(v, (int, float))},
+      )
     self._prune_transient_cycle_files(cyc)
     print(f"[cycle-{cyc:04d}] {json.dumps(row)}", flush=True)
 
@@ -547,6 +625,41 @@ def build_selfplay_args(
 
 
 def run_full_evaluations(
+    *,
+    rendered_toml: Path,
+    upstream_root: Path,
+    run_root: Path,
+    hub: paper_trainer.SharedTunixLearnerHub,
+    gw_state: paper_serving.R2OrchTpuGatewayState,
+    concurrency: int,
+    iid_runs: int,
+    ood_runs: int,
+    eval_base: bool,
+    limit_per_suite: int = 0,
+) -> dict[str, Any]:
+  prev_ceiling = os.environ.get("R2ORCH_OUTPUT_CEILING")
+  os.environ["R2ORCH_OUTPUT_CEILING"] = "12288"
+  try:
+    return _run_full_evaluations_body(
+        rendered_toml=rendered_toml,
+        upstream_root=upstream_root,
+        run_root=run_root,
+        hub=hub,
+        gw_state=gw_state,
+        concurrency=concurrency,
+        iid_runs=iid_runs,
+        ood_runs=ood_runs,
+        eval_base=eval_base,
+        limit_per_suite=limit_per_suite,
+    )
+  finally:
+    if prev_ceiling is None:
+      os.environ.pop("R2ORCH_OUTPUT_CEILING", None)
+    else:
+      os.environ["R2ORCH_OUTPUT_CEILING"] = prev_ceiling
+
+
+def _run_full_evaluations_body(
     *,
     rendered_toml: Path,
     upstream_root: Path,
@@ -654,6 +767,12 @@ def parse_cli() -> argparse.Namespace:
   p.add_argument("--async-next-cycle", action="store_true")
   p.add_argument("--skip-final-eval", action="store_true")
   p.add_argument("--hbm-utilization", type=float, default=0.56)
+  p.add_argument(
+      "--director-fidelity",
+      choices=("fp32_native", "merged_bf16"),
+      default="fp32_native",
+  )
+  p.add_argument("--unlink-staged-safetensors", action="store_true")
   return p.parse_args()
 
 
@@ -714,6 +833,8 @@ def main() -> int:
       data_root=args.data_root,
       upstream_root=args.upstream_root,
       hbm_utilization=args.hbm_utilization,
+      director_fidelity=args.director_fidelity,
+      unlink_staged_safetensors=args.unlink_staged_safetensors,
   )
   hub: paper_trainer.SharedTunixLearnerHub = services["hub"]
   gw_state: paper_serving.R2OrchTpuGatewayState = services["gateway_state"]
