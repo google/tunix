@@ -21,6 +21,7 @@ import dataclasses
 import functools
 import inspect
 import operator
+import secrets
 from typing import Any
 import warnings
 
@@ -32,6 +33,7 @@ from flax.nnx import graph
 from flax.nnx import statelib
 import jax
 import jax.numpy as jnp
+from jax.experimental import multihost_utils
 import jaxtyping
 import numpy as np
 from tunix.common import datatypes
@@ -57,6 +59,22 @@ CacheConfig = datatypes.CacheConfig
 
 LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]
+
+
+def _make_sampling_seed(seed: int | jax.Array | None) -> jax.Array:
+  """Returns a JAX key, generating and broadcasting one when omitted."""
+  if seed is None:
+    if jax.process_count() > 1:
+      raw_seed = secrets.randbits(32) if jax.process_index() == 0 else 0
+      raw_seed = multihost_utils.broadcast_one_to_all(
+          jnp.asarray(raw_seed, dtype=jnp.uint32)
+      )
+    else:
+      raw_seed = secrets.randbits(32)
+    return jax.random.PRNGKey(raw_seed)
+  if isinstance(seed, int):
+    return jax.random.PRNGKey(seed)
+  return seed
 
 
 @flax.struct.dataclass
@@ -842,7 +860,8 @@ class Sampler(base_sampler.BaseSampler):
       top_p: top-p sampling threshold.
       top_k: top-k sampling threshold.
       beam_size: beam size for beam search.
-      seed: random seed for sampling.
+      seed: random seed for sampling. If None, a fresh seed is generated for
+        each call.
       pad_output: whether to pad the output to maximum length. If this set as
         True, the output len will be max_generation_steps if echo is False,
         otherwise it will be max_generation_steps + max_prompt_length. The
@@ -933,10 +952,7 @@ class Sampler(base_sampler.BaseSampler):
           f' cache size {self.cache_config.cache_size}.'
       )
 
-    if seed is None:
-      seed = jax.random.PRNGKey(0)  # pyrefly: ignore[bad-assignment]
-    elif isinstance(seed, int):
-      seed = jax.random.PRNGKey(seed)  # pyrefly: ignore[bad-assignment]
+    seed = _make_sampling_seed(seed)
     sampling_state = self.init_sample_state(
         jnp.array(all_input_ids),
         include_logits=return_logits,
