@@ -31,6 +31,8 @@ from collections.abc import (
 )
 import contextlib
 import dataclasses
+import itertools
+import math
 import os
 import sys
 import threading
@@ -51,6 +53,7 @@ from tunix.dist_rl.orchestrator import rl_engine_interface
 from tunix.dist_rl.orchestrator import step_telemetry
 from tunix.dist_rl.queue_manager import trajectory_queue_manager
 from tunix.dist_rl.trajectory import store as trajectory_store_lib
+from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.rl import algorithm_config
 from tunix.rl import common as rl_common
 from tunix.rl import function_registry
@@ -270,6 +273,137 @@ def _format_rollout_completion(conversation: Any) -> str:
     label = "environment" if role == "user" else role
     lines.append(f"[{label}]: {content}")
   return "\n".join(lines)
+
+
+def _finite_float(val: Any) -> float | None:
+  """Converts `val` to float if finite, else returns None."""
+  if val is None:
+    return None
+  try:
+    f = float(val)
+  except (TypeError, ValueError):
+    return None
+  return f if math.isfinite(f) else None
+
+
+def _build_legacy_trajectory_row(
+    item: datatypes.TrajectoryItem,
+    *,
+    log_step: int,
+    consumed_policy_version: int,
+) -> dict[str, Any]:
+  """Builds a legacy `AsyncTrajectoryLogger` row for a consumed rollout."""
+  metadata = dict(getattr(item, "metadata", None) or {})
+  metadata.pop("routed_experts", None)
+  metadata.pop("env_config", None)
+  # Logging must never take down a training step, so read defensively
+  # rather than reusing the strict `_extract_reward` above.
+  traj = dict(getattr(item, "traj", None) or {})
+  traj.pop("routed_experts", None)
+  status = traj.get("status", None)
+  reward = traj.get("trajectory_reward", None)
+  if isinstance(status, datatypes.TrajectoryStatus):
+    status = status.name
+  return {
+      "global_step": log_step,
+      "consumed_policy_version": consumed_policy_version,
+      "prompt_id": getattr(item, "prompt_id", ""),
+      "group_index": getattr(item, "group_index", 0),
+      "rollout_policy_version": (
+          trajectory_queue_manager.item_policy_version(item)
+          if trajectory_queue_manager.has_policy_version(item)
+          else None
+      ),
+      "status": status or "UNKNOWN",
+      "reward": _finite_float(reward),
+      "question": metadata.get("question", ""),
+      "prompt": _extract_rollout_prompt(
+          metadata, traj.get("conversation_text")
+      ),
+      "completion": _format_rollout_completion(
+          traj.get("conversation_text", "")
+      ),
+      "gold_answer": metadata.get("gold_answer", metadata.get("answer", "")),
+      "prompt_tokens": getattr(item, "prompt_tokens", None),
+      "completion_tokens": getattr(item, "completion_tokens", None),
+      "metadata": metadata,
+      "trajectory": traj,
+  }
+
+
+def _build_consumed_trajectory_metrics(
+    item: datatypes.TrajectoryItem,
+    *,
+    mode: Mode,
+    log_step: int,
+    consumed_policy_version: int,
+    advantage: float | None,
+    step_stage_times: dict[str, float] | None,
+) -> trajectory_lib.TrajectoryMetrics:
+  """Builds `TrajectoryMetrics` for a rollout consumed at `log_step`."""
+  metadata = item.metadata
+  traj = item.traj if isinstance(item.traj, Mapping) else {}
+  raw_status = traj.get("status")
+  if isinstance(raw_status, datatypes.TrajectoryStatus):
+    raw_status = raw_status.name
+  status = str(raw_status) if raw_status else "UNKNOWN"
+  raw_reward = traj.get("trajectory_reward")
+  rollout_version = (
+      trajectory_queue_manager.item_policy_version(item)
+      if trajectory_queue_manager.has_policy_version(item)
+      else None
+  )
+  staleness = (
+      max(0, consumed_policy_version - rollout_version)
+      if item.is_valid and rollout_version is not None
+      else None
+  )
+  gold_answer = metadata.get("gold_answer")
+  if gold_answer is None:
+    gold_answer = metadata.get("answer")
+  return trajectory_lib.TrajectoryMetrics(
+      extra={
+          "mode": str(mode),
+          "global_step": log_step,
+          "consumed_policy_version": consumed_policy_version,
+          "rollout_policy_version": rollout_version,
+          "staleness": staleness,
+          "prompt_id": str(item.prompt_id),
+          "group_index": item.group_index,
+          "status": status,
+          "is_valid": item.is_valid,
+          "reward": _finite_float(raw_reward),
+          "advantage": _finite_float(advantage),
+          "consumed": True,
+          "question": metadata.get("question"),
+          "gold_answer": gold_answer,
+          "raw_length": metadata.get("raw_length"),
+          "clipped": metadata.get("clipped"),
+          "env_time": traj.get("env_time"),
+          "reward_time": traj.get("reward_time"),
+          "step_StageTime": step_stage_times,
+      }
+  )
+
+
+def _update_trajectory_store_metrics(
+    store: trajectory_store_lib.TrajectoryStore,
+    traj_id: str,
+    metrics: trajectory_lib.TrajectoryMetrics,
+    *,
+    dropped: bool = False,
+) -> None:
+  """Writes `metrics` to `store` without letting telemetry errors fail a step."""
+  try:
+    store.update_metrics(traj_id, metrics)
+  except Exception:  # pylint: disable=broad-exception-caught
+    kind = "drop metrics" if dropped else "metrics"
+    logging.warning(
+        "Failed to log %s for trajectory %s to TrajectoryStore.",
+        kind,
+        traj_id,
+        exc_info=True,
+    )
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True, eq=False)
@@ -607,8 +741,6 @@ class StandardRLProgram(RLProgram):
     # per process), since a store's lifetime should span the whole
     # orchestrator process rather than just one program run. This program
     # only uses it; close() below does not close it.
-    # TODO(sizhi): Wire active trajectory store reads/writes in pipeline stages
-    # in follow-up CLs.
     self._trajectory_store = trajectory_store
     self.metrics_prefix = metrics_prefix
     self.mode = mode if isinstance(mode, Mode) else Mode(mode)
@@ -1516,50 +1648,66 @@ class StandardRLProgram(RLProgram):
       *,
       log_step: int,
       consumed_policy_version: int,
+      item_advantages: Sequence[float | None] | None = None,
+      step_times: step_telemetry.StepTimes | None = None,
+      filtered_groups: Sequence[Sequence[datatypes.TrajectoryItem]] = (),
   ) -> None:
-    """Persists one row per consumed rollout when trajectory logging is enabled."""
-    if self.trajectory_logger is None:
+    """Persists per-rollout telemetry to configured trajectory logger/store."""
+    if self.trajectory_logger is not None:
+      for item in all_step_items:
+        self.trajectory_logger.log_item_async(
+            _build_legacy_trajectory_row(
+                item,
+                log_step=log_step,
+                consumed_policy_version=consumed_policy_version,
+            )
+        )
+    if self._trajectory_store is None:
       return
-    for item in all_step_items:
-      metadata = dict(getattr(item, "metadata", None) or {})
-      metadata.pop("routed_experts", None)
-      metadata.pop("env_config", None)
-      # Logging must never take down a training step, so read defensively
-      # rather than reusing the strict `_extract_reward` above.
-      traj = dict(getattr(item, "traj", None) or {})
-      traj.pop("routed_experts", None)
-      status = traj.get("status", None)
-      reward = traj.get("trajectory_reward", None)
-      if isinstance(status, datatypes.TrajectoryStatus):
-        status = status.name
-      row = {
-          "global_step": log_step,
-          "consumed_policy_version": consumed_policy_version,
-          "prompt_id": getattr(item, "prompt_id", ""),
-          "group_index": getattr(item, "group_index", 0),
-          "rollout_policy_version": (
-              trajectory_queue_manager.item_policy_version(item)
-              if trajectory_queue_manager.has_policy_version(item)
-              else None
+    advantages = (
+        item_advantages
+        if item_advantages is not None
+        else (None,) * len(all_step_items)
+    )
+    step_stage_times = (
+        dataclasses.asdict(step_times) if step_times is not None else None
+    )
+    for item, advantage in zip(all_step_items, advantages, strict=True):
+      _update_trajectory_store_metrics(
+          self._trajectory_store,
+          item.traj_id,
+          _build_consumed_trajectory_metrics(
+              item,
+              mode=self.mode,
+              log_step=log_step,
+              consumed_policy_version=consumed_policy_version,
+              advantage=advantage,
+              step_stage_times=step_stage_times,
           ),
-          "status": status or "UNKNOWN",
-          "reward": float(reward) if reward is not None else None,
-          "question": metadata.get("question", ""),
-          "prompt": _extract_rollout_prompt(
-              metadata, traj.get("conversation_text")
+      )
+    for item in itertools.chain.from_iterable(filtered_groups):
+      rollout_version = (
+          trajectory_queue_manager.item_policy_version(item)
+          if trajectory_queue_manager.has_policy_version(item)
+          else None
+      )
+      _update_trajectory_store_metrics(
+          self._trajectory_store,
+          item.traj_id,
+          trajectory_lib.TrajectoryMetrics(
+              extra={
+                  "mode": str(self.mode),
+                  "global_step": log_step,
+                  "consumed_policy_version": consumed_policy_version,
+                  "rollout_policy_version": rollout_version,
+                  "prompt_id": str(item.prompt_id),
+                  "group_index": item.group_index,
+                  "consumed": False,
+                  "drop_reason": "stale",
+              }
           ),
-          "completion": _format_rollout_completion(
-              traj.get("conversation_text", "")
-          ),
-          "gold_answer": metadata.get(
-              "gold_answer", metadata.get("answer", "")
-          ),
-          "prompt_tokens": getattr(item, "prompt_tokens", None),
-          "completion_tokens": getattr(item, "completion_tokens", None),
-          "metadata": metadata,
-          "trajectory": traj,
-      }
-      self.trajectory_logger.log_item_async(row)
+          dropped=True,
+      )
 
   async def _timed_train_step(
       self, batch: datatypes.RLTrainerPayload, *, apply_optimizer: bool
@@ -1687,6 +1835,7 @@ class StandardRLProgram(RLProgram):
         trainer_metrics = None
         step_sampler_agreement: dict[str, tuple[Any, list[Any]]] = {}
         step_advantages: list[float] = []
+        step_item_advantages: list[float | None] = []
         step_prompt_lengths: list[int] = []
         step_completion_lengths: list[int] = []
         num_microbatches = 0
@@ -1814,9 +1963,12 @@ class StandardRLProgram(RLProgram):
                 strict=True,
             ):
               advantages = np.asarray(payload.advantages)
+              adv_val = None
               if advantages.size > 0:
-                step_advantages.append(float(np.mean(advantages)))
-              del advantages
+                adv_val = float(np.mean(advantages))
+                step_advantages.append(adv_val)
+              step_item_advantages.append(adv_val)
+              del advantages, adv_val
               step_prompt_lengths.append(
                   int(np.count_nonzero(payload.prompt_mask))
               )
@@ -1957,12 +2109,15 @@ class StandardRLProgram(RLProgram):
             step_times=step_times,
             reward_log_metrics=step_reward_log_metrics,
         )
-        del filtered_groups
         self._log_consumed_trajectories(
             all_step_items,
             log_step=current_step,
             consumed_policy_version=consumed_policy_version,
+            item_advantages=step_item_advantages,
+            step_times=step_times,
+            filtered_groups=filtered_groups,
         )
+        del filtered_groups
 
         self.last_step_result = RLStepResult(
             step=current_step,
