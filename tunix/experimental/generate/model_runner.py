@@ -44,6 +44,7 @@ from tunix.rl import utils as rl_utils
 
 _HIERARCHICAL_BLOCK_SIZE = 256
 _HIERARCHICAL_MIN_VOCAB_SIZE = 4096
+_TOPK_TARGET_BLOCK_SIZE = 8192
 _MIN_SAFE_TEMP = float(np.finfo(np.float32).tiny)
 _MAX_SAFE_TEMP = 1.0 / _MIN_SAFE_TEMP
 
@@ -185,12 +186,52 @@ def _sample_hierarchical_256(
   return next_tokens, chosen_logit - jax.nn.logsumexp(block_lse, axis=-1)
 
 
+def _top_k_num_blocks(vocab: int, k: int, tp_size: int = 1) -> int:
+  """Returns a `tp_size`-multiple block count with `k <= cdiv(vocab, blocks)`."""
+  if tp_size < 1:
+    raise ValueError(f'tp_size must be positive, got {tp_size}.')
+  if k >= vocab:
+    return 1
+  max_blocks = vocab if k <= 1 else (vocab - 1) // (k - 1)
+  blocks_per_tp = min(
+      utils.cdiv(vocab, tp_size * _TOPK_TARGET_BLOCK_SIZE),
+      max_blocks // tp_size,
+  )
+  return tp_size * blocks_per_tp if blocks_per_tp >= 1 else 1
+
+
+def _two_stage_top_k(
+    logits: jax.Array,
+    k: int,
+    num_blocks: int,
+) -> tuple[jax.Array, jax.Array]:
+  """Computes exact two-stage top-k across `num_blocks` vocabulary blocks."""
+  if num_blocks <= 1:
+    return jax.lax.top_k(logits, k)
+  rows, vocab = logits.shape
+  block = -(-vocab // num_blocks)
+  if k > block:
+    raise ValueError(
+        f'k ({k}) must not exceed block size ({block}) for {num_blocks} blocks.'
+    )
+  pad = num_blocks * block - vocab
+  if pad:  # Static; pads land at the end, so they lose all -inf ties.
+    logits = jnp.pad(logits, ((0, 0), (0, pad)), constant_values=-jnp.inf)
+  vals, idxs = jax.lax.top_k(logits.reshape(rows, num_blocks, block), k)
+  offsets = jnp.arange(num_blocks, dtype=jnp.int32)[None, :, None] * block
+  cand_vals = vals.reshape(rows, num_blocks * k)
+  cand_idxs = (idxs.astype(jnp.int32) + offsets).reshape(rows, num_blocks * k)
+  top_vals, pick = jax.lax.top_k(cand_vals, k)
+  return top_vals, jnp.take_along_axis(cand_idxs, pick, axis=-1)
+
+
 def sample(
     logits: jax.Array,
     key: jax.Array,
     metadata: SamplingMetadata,
     max_top_k: int,
     return_logprobs: bool = False,
+    tp_size: int = 1,
 ) -> tuple[jax.Array, jax.Array | None]:
   """Samples one token per row, under each row's own sampling settings.
 
@@ -206,6 +247,8 @@ def sample(
     max_top_k: How many candidate tokens to draw for every row. Each row's
       `top_k` must not exceed it. -1 draws every token in the vocabulary.
     return_logprobs: Whether to return the sampled tokens' logprobs.
+    tp_size: Size of the `'tp'` mesh axis, used to align two-stage `top_k`
+      blocks with tensor-parallel vocabulary sharding.
 
   Returns:
     A tuple of
@@ -245,8 +288,9 @@ def sample(
     return next_tokens, chosen - jax.nn.logsumexp(scaled, axis=-1)
 
   k = vocab_size if max_top_k <= 0 else min(max_top_k, vocab_size)
-
-  candidate_logits, candidate_tokens = jax.lax.top_k(logits, k)
+  candidate_logits, candidate_tokens = _two_stage_top_k(
+      logits, k, _top_k_num_blocks(vocab_size, k, tp_size)
+  )
   scaled_logits = candidate_logits.astype(jnp.float32) / temperature[:, None]
 
   ranks = jnp.arange(k)
@@ -602,8 +646,15 @@ class ModelRunner:
         logits_idxs=last_token_idxs,
     )
     # Sampling sorts every row's logits over the whole vocabulary, so each
-    # device samples only its share of the rows rather than all of them.
-    logits = self._split_rows(logits)
+    # device samples only its share of the rows rather than all of them. Keep
+    # axis 1 sharded on `'tp'` so two-stage `top_k` only gathers `k` candidates
+    # per block instead of the full vocabulary.
+    tp_size = (
+        int(config.mesh.shape['tp']) if 'tp' in config.mesh.axis_names else 1
+    )
+    logits = self._split_rows(
+        logits, trailing_spec=('tp',) if tp_size > 1 else ()
+    )
 
     rng, step_rng = jax.random.split(rng)
     next_tokens, logp = sample(
@@ -612,22 +663,30 @@ class ModelRunner:
         sampling_metadata,
         max_top_k=config.max_top_k,
         return_logprobs=config.return_logprobs,
+        tp_size=tp_size,
     )
 
     res_logits = logits if config.return_logits else None
     return next_tokens, res_logits, logp, updated_cache, rng
 
-  def _split_rows(self, x: jax.Array) -> jax.Array:
+  def _split_rows(
+      self,
+      x: jax.Array,
+      *,
+      trailing_spec: tuple[str | None, ...] = (),
+  ) -> jax.Array:
     """Splits the rows of `x` across the mesh's DP axes, if they divide evenly.
 
     The `"dp"` and `"fsdp"` axes index the DP groups, as in `kv_cache_manager`.
 
     Args:
       x: An array with one row per scheduled row of the batch.
+      trailing_spec: Optional `PartitionSpec` entries for axes after axis 0.
 
     Returns:
-      `x` constrained to shard axis 0 across the DP axes, or `x` unchanged when
-      there is only one DP shard or `x.shape[0]` is not divisible by it.
+      `x` constrained to shard axis 0 across the DP axes (and any
+      `trailing_spec`), or `x` unchanged when there is only one DP shard or
+      `x.shape[0]` is not divisible by it.
     """
     mesh = self._config.mesh
     dp_axes = utils.kv_cache_dp_axes(mesh)
@@ -637,7 +696,7 @@ class ModelRunner:
     return jax.lax.with_sharding_constraint(
         x,
         jax.sharding.NamedSharding(
-            mesh, jax.sharding.PartitionSpec(dp_axes)
+            mesh, jax.sharding.PartitionSpec(dp_axes, *trailing_spec)
         ),
     )
 
