@@ -601,7 +601,9 @@ def compute_final_metrics(
         None if the prompt was never tokenized.
       - `total_completion_tokens`: Sum of `len(step.assistant_tokens)` across
         turns that report assistant tokens, or None if no turn does.
-      - `total_steps`: Number of agent turns (`len(trajectory.steps)`).
+      - `total_steps`: Persisted ATIF step count (`step_id = 0` task step when
+        present, plus two ATIF steps per turn: `TunixAgentStep` and
+        `TunixEnvStep`).
     Returns None if `trajectory` is None.
   """
   if trajectory is None:
@@ -626,10 +628,17 @@ def compute_final_metrics(
       completion_tokens if has_completion_tokens else None
   )
 
+  # Persisted Tunix ATIF trajectories start at step_id=0 (user task prompt)
+  # followed by (agent_step, env_step) pairs for each turn.
+  has_task_step = (
+      bool(trajectory.steps) or create_task_step(trajectory.task) is not None
+  )
+  total_steps = (1 if has_task_step else 0) + 2 * len(trajectory.steps)
+
   return trajectory_lib.FinalMetrics(
       total_prompt_tokens=total_prompt_tokens,
       total_completion_tokens=total_completion_tokens,
-      total_steps=len(trajectory.steps),
+      total_steps=total_steps,
   )
 
 

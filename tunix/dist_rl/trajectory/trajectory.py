@@ -1173,6 +1173,19 @@ class Agent(pydantic.BaseModel):
   )
 
 
+# Terminal statuses that represent a completed, usable episode whose step tail
+# must match `final_metrics.total_steps` when verifying completeness under
+# `strict=False`. Aborted/incomplete statuses (`FAILED`, `TIMEOUT`,
+# `ENV_TIMEOUT`, `CANCELLED`, `RUNNING`) intentionally retain their status when
+# fewer steps were produced before termination.
+_COMPLETED_TRAJECTORY_STATUSES: Final[frozenset[str]] = frozenset({
+    "COMPLETED",
+    "SUCCEEDED",
+    "MAX_STEPS_REACHED",
+    "MAX_CONTEXT_LIMIT_REACHED",
+})
+
+
 def _rehydrate_sequence(
     items: Sequence[Any],
     rehydrator: Callable[[Any], Any] | None,
@@ -1567,7 +1580,10 @@ class TrajectoryMetadata(pydantic.BaseModel):
         if self.final_metrics is not None
         else None
     )
-    tail_mismatch = self.status in ("COMPLETED", "SUCCEEDED") and (
+    normalized_status = (
+        self.status.strip().upper() if self.status is not None else None
+    )
+    tail_mismatch = normalized_status in _COMPLETED_TRAJECTORY_STATUSES and (
         (expected_total is not None and num_valid_steps < expected_total)
         or (expected_total is None and num_valid_steps == 0)
     )
