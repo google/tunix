@@ -278,7 +278,11 @@ class BatchingFp32DirectorSampler:
     try:
       with self._exec_lock:
         with self.mesh:
-          out = self._sampler(padded_prompts, **call_kwargs)
+          out = self._sampler(
+              input_strings=None,
+              prompt_token_ids=padded_prompts,
+              **call_kwargs,
+          )
       for i, req in enumerate(batch):
         raw_lps = out.logprobs[i] if out.logprobs is not None else None
         self._deliver_batch_item(req, out.text[i], out.tokens[i], raw_lps, first.actual_gen)
