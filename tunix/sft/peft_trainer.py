@@ -1133,8 +1133,7 @@ class PeftTrainer:
     logging.info("Running evaluation on train step %d.", self._train_steps)
     eval_iterator = iter(eval_ds)
     with self._switch_mode(sft_metrics_logger.Mode.EVAL):
-      eval_loss, eval_steps = 0, 0
-      uses_weighted_loss = False
+      eval_steps = 0
       while True:
         if self.data_hooks:
           eval_example = self.data_hooks.load_next_eval_batch(self)
@@ -1161,7 +1160,6 @@ class PeftTrainer:
         ) = None
         post_process_aux = aux
         if isinstance(aux, utils.LossOutput):
-          uses_weighted_loss = True
           additional_metrics = {
               name: (metric, utils.metric_reducer(metric))
               for name, metric in aux.aux_metrics.items()
@@ -1174,7 +1172,6 @@ class PeftTrainer:
             additional_metrics=additional_metrics,
         )
         self._post_process_eval_step(post_process_aux)
-        eval_loss += loss
         eval_steps += 1
 
       if eval_steps == 0:
@@ -1185,8 +1182,7 @@ class PeftTrainer:
 
       metrics_buffer = self._buffered_eval_metrics
       assert metrics_buffer is not None
-      if uses_weighted_loss:
-        eval_loss = metrics_buffer.loss
+      eval_loss = metrics_buffer.loss
       self._write_metrics(metrics_buffer)
       logging.info(
           "Train step %d eval loss: %f - eval perplexity: %f",
