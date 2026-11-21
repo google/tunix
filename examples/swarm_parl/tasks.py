@@ -65,7 +65,12 @@ def best_qa_match(prediction: str, aliases: list[str]) -> tuple[float, float]:
 
 
 def _extract_answers(row: dict[str, Any]) -> list[str]:
-  raw = row.get("reference", row.get("answer", row.get("answers", "")))
+  raw: Any = None
+  for key in ("target_answers", "answers", "answer", "reference"):
+    val = row.get(key)
+    if val is not None and val != "" and val != []:
+      raw = val
+      break
   if isinstance(raw, list):
     return [str(x).strip() for x in raw if str(x).strip()]
   if isinstance(raw, dict):
@@ -73,6 +78,18 @@ def _extract_answers(row: dict[str, Any]) -> list[str]:
     return [str(x).strip() for x in (vals if isinstance(vals, list) else [vals]) if str(x).strip()]
   s = str(raw or "").strip()
   return [s] if s else []
+
+
+def _clean_question(raw_prompt: str) -> str:
+  text = str(raw_prompt or "").strip()
+  for marker in ("\nPassages:", "\nContext:", "\nDocuments:"):
+    idx = text.find(marker)
+    if idx != -1:
+      text = text[:idx].strip()
+  q_idx = text.find("Question:")
+  if q_idx != -1:
+    text = text[q_idx + len("Question:") :].strip()
+  return text
 
 
 def _load_qa_rows(jsonl_path: Path, dataset_filter: set[str] | None = None) -> list[dict[str, Any]]:
@@ -86,7 +103,7 @@ def _load_qa_rows(jsonl_path: Path, dataset_filter: set[str] | None = None) -> l
     ds = str(rec.get("dataset", rec.get("metadata", {}).get("dataset", ""))).lower()
     if dataset_filter is not None and ds not in dataset_filter:
       continue
-    prompt = str(rec.get("prompt", rec.get("question", ""))).strip()
+    prompt = _clean_question(str(rec.get("prompt", rec.get("question", ""))))
     answers = _extract_answers(rec)
     if prompt and answers:
       rows.append({
@@ -117,11 +134,13 @@ def build_parl_splits(
   train_pool = upstream_root / "data/r2orch/train/train_pool.jsonl"
   held_hotpot = upstream_root / "data/r2orch/heldout/hotpotqa.jsonl"
   held_nq = upstream_root / "data/r2orch/heldout/nq_open.jsonl"
+  iid_nq = upstream_root / "data/r2orch/test/iid/nq_open.jsonl"
+  ood_trivia = upstream_root / "data/r2orch/test/ood/triviaqa.jsonl"
   ood_musique = upstream_root / "data/r2orch/test/ood/musique.jsonl"
 
   nq_train = _load_qa_rows(train_pool, {"nq_open", "triviaqa"})
   mh_train = _load_qa_rows(train_pool, {"hotpotqa", "musique"})
-  nq_eval = _load_qa_rows(held_nq)
+  nq_eval = _load_qa_rows(held_nq) + _load_qa_rows(iid_nq) + _load_qa_rows(ood_trivia)
   mh_eval = _load_qa_rows(held_hotpot) + _load_qa_rows(ood_musique)
 
   rng.shuffle(nq_train)
@@ -135,6 +154,12 @@ def build_parl_splits(
   eval_pub, eval_priv = _pack_split(
       nq_eval, mh_eval, n_wide=n_wide_eval, n_mh=n_multihop_eval, prefix="ev", rng=rng
   )
+  if not train_pub or not eval_pub:
+    raise ValueError(
+        f"Empty PARL split under {upstream_root}: "
+        f"train={len(train_pub)} (nq={len(nq_train)}, mh={len(mh_train)}) "
+        f"eval={len(eval_pub)} (nq={len(nq_eval)}, mh={len(mh_eval)})"
+    )
   return train_pub, train_priv, eval_pub, eval_priv
 
 

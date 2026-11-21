@@ -576,6 +576,10 @@ def main() -> int:
   train_pub, train_priv, eval_pub, eval_priv = parl_tasks.build_parl_splits(
       args.upstream_root
   )
+  print(
+      f"[parl-data] train={len(train_pub)} eval={len(eval_pub)}",
+      flush=True,
+  )
   wiki_env = parl_wf.HttpWikiSearchEnv("http://127.0.0.1:18610/retrieve", top_k=3)
 
   init_snap = SnapshotRef(model_id="Qwen/Qwen3-4B", revision=0, digest="qwen3-4b-v0")
