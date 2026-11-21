@@ -24,10 +24,67 @@ import functools
 from typing import Any, Concatenate, ParamSpec, Protocol, TypeVar, cast, runtime_checkable
 
 import numpy as np
+from tunix.common import datatypes as common_datatypes
 from tunix.dist_rl.common import datatypes
 
 _P = ParamSpec("_P")
 _PayloadT = TypeVar("_PayloadT")
+
+
+class TrainerWeightedMetricLike(Protocol):
+  """Structural read-only contract for trainer-returned weighted metrics.
+
+  Used by `MetricsBufferLike` for in-process `AbstractTrainer.get_metrics()`
+  returns, accepting both accelerator-resident metrics (such as
+  `tunix.sft.utils.WeightedMetric`) and host wire metrics
+  (`datatypes.WeightedMetricLike`) without importing ML frameworks.
+  """
+
+  @property
+  def unreduced_sum(self) -> common_datatypes.ArrayLike:
+    ...
+
+  @property
+  def denominator(self) -> common_datatypes.ArrayLike:
+    ...
+
+  @property
+  def eps(self) -> float | None:
+    ...
+
+  @property
+  def min_denom(self) -> float | None:
+    ...
+
+
+@runtime_checkable
+class MetricsBufferLike(Protocol):
+  """Structural read-only contract for step metric buffers returned by trainers.
+
+  Satisfied both by `datatypes.MetricsBuffer` (host numpy/float wire DTO) and by
+  accelerator-resident buffers such as MaxText's
+  `abstract_engine.MetricsBuffer` without importing device frameworks.
+  """
+
+  @property
+  def id(self) -> Any:
+    ...
+
+  @property
+  def weighted_metrics(self) -> Mapping[str, TrainerWeightedMetricLike]:
+    ...
+
+  @property
+  def scalar_metrics(self) -> Mapping[str, common_datatypes.ArrayLike]:
+    ...
+
+  @property
+  def aggregation_fns(self) -> Mapping[str, Callable[..., Any]]:
+    ...
+
+  @property
+  def mode(self) -> str:
+    ...
 
 
 @runtime_checkable
@@ -284,7 +341,7 @@ class AbstractTrainer(Protocol):
   @abc.abstractmethod
   def get_metrics(
       self,
-  ) -> datatypes.MetricsBufferLike | Mapping[str, Any]:
+  ) -> MetricsBufferLike | Mapping[str, Any]:
     """Returns and clears the recently collected step metric records."""
     raise NotImplementedError(
         f"{type(self).__name__} does not implement get_metrics."
