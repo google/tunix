@@ -1364,6 +1364,44 @@ class AsyncWriterBatchingTest(trajectory_testing.TrajectoryTestCase):
         ),
     )
 
+  def test_group_tasks_by_trajectory_fences_lower_attempt_tasks_in_batch(
+      self,
+  ) -> None:
+    base_meta = trajectory_testing.make_metadata(trajectory_id="traj_fenced")
+    meta_a2 = base_meta.model_copy(update={"attempt": 2, "notes": "new_2"})
+    meta_a1 = base_meta.model_copy(update={"attempt": 1, "notes": "stale_1"})
+    step_a2 = trajectory_testing.make_step(step_id=1, message="new step 1")
+    step_a1_overwrite = trajectory_testing.make_step(
+        step_id=1, message="stale step 1"
+    )
+    step_a1_extra = trajectory_testing.make_step(
+        step_id=9, message="stale step 9"
+    )
+    task_a2 = _TestWriteTask(run_id="r1", metadata=meta_a2, step=step_a2)
+    task_stale_step = _TestWriteTask(
+        run_id="r1", metadata=meta_a1, step=step_a1_overwrite
+    )
+    task_stale_extra = _TestWriteTask(
+        run_id="r1", metadata=meta_a1, step=step_a1_extra
+    )
+    task_metrics = _TestWriteTask(
+        run_id="r1",
+        trajectory_id="traj_fenced",
+        metrics=trajectory_lib.TrajectoryMetrics(extra={"ok": True}),
+    )
+
+    with self.assertLogs(level=logging.WARNING):
+      (batch,) = async_writer.group_tasks_by_trajectory(
+          [task_a2, task_stale_step, task_stale_extra, task_metrics]
+      )
+
+    self.assertIs(batch.latest_metadata_task, task_a2)
+    self.assertEqual(batch.step_tasks, (task_a2,))
+    self.assertEqual(
+        batch.merged_queued_metrics_task.metrics,
+        trajectory_lib.TrajectoryMetrics(extra={"ok": True}),
+    )
+
   def test_should_batch_on_error_with_non_batchable_error_keeps_zero_wait(
       self,
   ) -> None:

@@ -983,6 +983,9 @@ class Step(pydantic.BaseModel):
   # declare their own fields; base ATIF steps define none.
   EXCLUDABLE_ARRAY_FIELDS: ClassVar[frozenset[str]] = frozenset()
 
+  # Offset added to `step_id` when converting to 1-indexed base ATIF steps.
+  ATIF_STEP_ID_OFFSET: ClassVar[int] = 0
+
   @classmethod
   def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
     """Validates `EXTENSIONS_KEY` and records scalar-list fields."""
@@ -1094,12 +1097,33 @@ class Step(pydantic.BaseModel):
   # TODO(tunix-dev): Add automatic Step subclass registration and resolution
   # (mirroring TrajectoryMetadata._SUBCLASS_FIELDS and resolve_subclass) so
   # persistent stores rehydrate custom Step subclasses automatically.
-  def to_atif_step(self, step_id_offset: int = 0) -> Step:
-    """Converts this step to a base ATIF Step, storing subclass fields in extra."""
+  def to_atif_step(self, step_id_offset: int | None = None) -> Step:
+    """Converts this step to a base ATIF Step, storing subclass fields in extra.
+
+    Args:
+      step_id_offset: Optional integer offset added to ``step_id`` during
+        projection. When ``None`` (the default), uses
+        ``type(self).ATIF_STEP_ID_OFFSET``.
+
+    Returns:
+      The projected base ATIF ``Step`` (or ``self`` if already a base ``Step``
+      without subclass fields and zero offset).
+    """
+    offset = (
+        type(self).ATIF_STEP_ID_OFFSET
+        if step_id_offset is None
+        else step_id_offset
+    )
     target_values_by_field = _pack_subclass_values_into_extra(self, Step)
     if target_values_by_field is None:
-      return self
-    target_values_by_field["step_id"] = self.step_id + step_id_offset
+      # Exact-type check: subclasses with no extra fields still project to Step.
+      # pylint: disable-next=unidiomatic-typecheck
+      if type(self) is Step and offset == 0:
+        return self
+      target_values_by_field = _get_non_none_fields(
+          self, _get_field_names(Step)
+      )
+    target_values_by_field["step_id"] = self.step_id + offset
     return Step.model_validate(target_values_by_field)
 
 
@@ -1814,6 +1838,8 @@ class TunixAgentStep(Step):
 
   EXTENSIONS_KEY: ClassVar[str] = TUNIX_EXTENSIONS_KEY
 
+  ATIF_STEP_ID_OFFSET: ClassVar[int] = 1
+
   EXCLUDABLE_ARRAY_FIELDS: ClassVar[frozenset[str]] = frozenset({
       "assistant_tokens",
       "assistant_masks",
@@ -1944,10 +1970,6 @@ class TunixAgentStep(Step):
       )
     return self
 
-  def to_atif_step(self, step_id_offset: int = 1) -> Step:
-    """Converts this 0-indexed Tunix step to a 1-indexed base ATIF Step."""
-    return super().to_atif_step(step_id_offset=step_id_offset)
-
   @classmethod
   def from_atif_step(
       cls, step: Step, step_id_offset: int = 1
@@ -1965,6 +1987,8 @@ class TunixEnvStep(Step):
   )
 
   EXTENSIONS_KEY: ClassVar[str] = TUNIX_EXTENSIONS_KEY
+
+  ATIF_STEP_ID_OFFSET: ClassVar[int] = 1
 
   # Note: `converter.to_tunix_trajectory` uses the previous step's
   # `env_tokens` length to split `prefill_num_context` when reconstructing
@@ -2001,10 +2025,6 @@ class TunixEnvStep(Step):
           f" but source is '{self.source}'"
       )
     return self
-
-  def to_atif_step(self, step_id_offset: int = 1) -> Step:
-    """Converts this 0-indexed Tunix step to a 1-indexed base ATIF Step."""
-    return super().to_atif_step(step_id_offset=step_id_offset)
 
   @classmethod
   def from_atif_step(cls, step: Step, step_id_offset: int = 1) -> TunixEnvStep:
