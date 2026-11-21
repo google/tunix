@@ -38,6 +38,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from tunix.perf.experimental import constants as perf_constants
+from tunix.rl import advantages as rl_advantages
 from tunix.rl import algo_core  # pylint: disable=unused-import
 from tunix.rl import common
 from tunix.rl import function_registry
@@ -785,12 +786,34 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           expected_step=expected_step,
       )
 
+      # Same rule as `create_trainer_payloads` in the distributed path: invalid
+      # rollouts (invalid status, overlong-filtered masks or a non-finite
+      # reward) neither shape the group baseline nor train, and a group with
+      # too few valid rollouts trains on nothing. `trajectories` may hold
+      # several groups when they are processed in the consumer.
+      valid_mask = np.array(
+          [item.is_valid for item in trajectories],
+          dtype=bool,
+      ) & np.isfinite(np.asarray(rewards, dtype=np.float32))
+      group_valid = valid_mask.reshape(-1, self.algo_config.num_generations)
+      valid_mask = (
+          group_valid
+          & (
+              group_valid.sum(axis=-1, keepdims=True)
+              >= rl_advantages.MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE
+          )
+      ).reshape(-1)
       advantage_estimator = function_registry.get_advantage_estimator(
           self.algo_config.advantage_estimator
       )
       advantages = advantage_estimator(
-          rewards=rewards, num_generations=self.algo_config.num_generations
+          rewards=rewards,
+          num_generations=self.algo_config.num_generations,
+          valid_mask=valid_mask,
       )
+      # Custom estimators are not required to honor `valid_mask`.
+      advantages = np.where(valid_mask, advantages, 0.0).astype(np.float32)
+      completion_mask = jnp.where(valid_mask[:, None], completion_mask, 0)
 
     logging.debug("Advantages computed: %s", advantages)
 
