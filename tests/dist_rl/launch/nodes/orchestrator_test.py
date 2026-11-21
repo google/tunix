@@ -989,6 +989,24 @@ class ClusterTest(absltest.TestCase):
           config_sha256=sha,
       )
 
+  def test_wait_for_workers_uses_the_shared_config_check(self):
+    hp = _config("agentic_grpo_config.beta=0.0")
+    sha = resolve_config.config_fingerprint(hp)
+    with mock.patch.object(
+        node_utils, "check_worker_config", autospec=True
+    ) as check:
+      orchestrator.wait_for_workers(
+          hp,
+          self._cluster(hp),
+          _FakeDiscovery(["trainer", "rollout"], config_sha256=sha),
+          rpc_timeout_s=1.0,
+          config_sha256=sha,
+      )
+    self.assertEqual(
+        [call.args[0::2] for call in check.call_args_list],
+        [("localhost", sha), ("localhost", sha)],
+    )
+
   def test_wait_for_workers_raises_a_rejection_even_past_the_deadline(self):
     hp = _config(
         "agentic_grpo_config.beta=0.0", "cluster_config.init_timeout_s=0.2"

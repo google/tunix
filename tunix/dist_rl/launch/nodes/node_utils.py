@@ -31,7 +31,8 @@ import pathlib
 import pickle
 import signal
 import sys
-from typing import Final, Literal, TypeAlias, TypedDict, cast
+import time
+from typing import TYPE_CHECKING, Final, Literal, TypeAlias, TypedDict, cast
 
 import jax
 from jax.experimental import mesh_utils
@@ -42,6 +43,10 @@ from tunix.dist_rl.distributed.runtime import context as context_lib
 from tunix.dist_rl.launch.common import resolve_config
 from tunix.dist_rl.worker import abstract_worker
 from tunix.dist_rl.worker import remote_execution
+
+if TYPE_CHECKING:
+  from tunix.dist_rl.common import datatypes
+  from tunix.dist_rl.orchestrator import worker_registry
 
 NodeRole = Literal["trainer", "rollout", "inference"]
 # Every process of a run: the orchestrator and the worker nodes.
@@ -259,6 +264,121 @@ def log_resolved_config(
       "%s %s", RESOLVED_CONFIG_LOG_MARKER, json.dumps(record, sort_keys=True)
   )
   return fingerprint
+
+
+def check_worker_config(
+    hostname: str, metadata: bytes, config_sha256: str
+) -> None:
+  """Rejects a registering worker that resolved a different config.
+
+  Args:
+    hostname: The worker's discovered hostname.
+    metadata: The worker's pickled registration metadata (`serve_worker`).
+    config_sha256: The checking process's config fingerprint.
+
+  Raises:
+    ValueError: If the worker sent no fingerprint, or a different one.
+  """
+  # The pickled metadata `serve_worker` registers, which
+  # `WorkerRegistry.register_from_hostname` unpickles as well.
+  md = pickle.loads(metadata)  # pylint: disable=g-unsafe-pickle-load
+  worker = f"{md['service_type']} worker {md['worker_id']!r} at {hostname}"
+  key = CONFIG_SHA256_METADATA_KEY
+  if key not in md:
+    raise ValueError(f"The {worker} registered without a {key}.")
+  if md[key] != config_sha256:
+    raise ValueError(
+        f"The {worker} resolved a different config than the orchestrator"
+        f" ({key} {md[key]} vs {config_sha256}). Every process of a run must"
+        " get the same config arguments; compare their"
+        f" {RESOLVED_CONFIG_LOG_MARKER} log lines."
+    )
+
+
+# How often `wait_for_workers` checks for a rejected worker while it waits for
+# the required ones.
+_REGISTRATION_POLL_S = 1.0
+
+
+def wait_for_workers(
+    registry: worker_registry.WorkerRegistry,
+    discovery: context_lib.DiscoveryContext,
+    min_workers: Mapping[datatypes.Role | str, int],
+    *,
+    init_timeout_s: float | None,
+    rpc_timeout_s: float,
+    config_sha256: str,
+) -> None:
+  """Registers workers through `discovery` until `min_workers` are up.
+
+  A worker whose config fingerprint differs from `config_sha256` is rejected
+  (`check_worker_config`): its registration fails, and while this waits, so
+  does the wait. A worker that joins later is rejected the same way.
+
+  Args:
+    registry: Registry to add the workers to.
+    discovery: Discovery API the workers register through.
+    min_workers: Workers per role to wait for.
+    init_timeout_s: `cluster_config.init_timeout_s`: deadline of the wait, or
+      None to wait indefinitely.
+    rpc_timeout_s: Deadline for worker RPCs.
+    config_sha256: This process's config fingerprint (`log_resolved_config`);
+      every worker must match it.
+
+  Raises:
+    ValueError: If a worker resolved a different config.
+    TimeoutError: If `min_workers` do not register within `init_timeout_s`.
+  """
+  rejected: list[ValueError] = []
+
+  def register(hostname: str, port: int, metadata: bytes) -> None:
+    try:
+      check_worker_config(hostname, metadata, config_sha256)
+    except ValueError as e:
+      # Discovery runs this on its own thread and fails the worker's
+      # registration with the error; the wait below raises the first one here.
+      # The callback outlives the wait, so later rejections are only logged.
+      logging.warning("Rejected a worker registration: %s", e)
+      if not rejected:
+        rejected.append(e)
+      raise
+    registry.register_from_hostname(
+        hostname, port, metadata, rpc_timeout_s=rpc_timeout_s
+    )
+
+  discovery.on_register(register)
+  deadline = (
+      None
+      if init_timeout_s is None
+      else time.monotonic() + float(init_timeout_s)
+  )
+  logging.info("Waiting for workers to register: %s", min_workers)
+  while not rejected:
+    poll_s = _REGISTRATION_POLL_S
+    if deadline is not None:
+      poll_s = max(0.0, min(poll_s, deadline - time.monotonic()))
+    try:
+      registry.wait_for_workers(min_workers=min_workers, timeout=poll_s)
+      break
+    except TimeoutError as e:
+      if rejected:
+        # A worker was rejected while this poll waited; raise that, even when
+        # the deadline has passed too.
+        break
+      if deadline is not None and time.monotonic() >= deadline:
+        # `e` only reports the last poll's timeout, so count the registered
+        # workers here.
+        registered = {
+            role: len(registry.infos(role)) for role in min_workers
+        }
+        raise TimeoutError(
+            "Workers did not register within"
+            f" cluster_config.init_timeout_s={init_timeout_s}s. Required:"
+            f" {min_workers}, registered: {registered}."
+        ) from e
+  if rejected:
+    raise rejected[0]
+  logging.info("Registered workers: %s", registry.infos())
 
 
 # TODO(noghabi): Reuse the agentic tokenizer loading
