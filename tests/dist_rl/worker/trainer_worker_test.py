@@ -223,10 +223,15 @@ class TrainerWorkerTest(absltest.TestCase):
 
   def test_compile_forwards_dummy_data_to_trainer(self):
     dummy = {"dummy": 1}
-    resp = self.worker.compile(dummy)
+    with self.assertLogs(level="INFO") as logs:
+      resp = self.worker.compile(dummy)
     self.assertTrue(resp.metadata["compiled"])
     self.assertEqual(self.worker.state, datatypes.WorkerState.READY)
     self.assertEqual(self.fake_trainer.compile_calls, [dummy])
+    joined_logs = "\n".join(logs.output)
+    self.assertIn("Starting trainer compilation", joined_logs)
+    self.assertIn("has_dummy_data=True", joined_logs)
+    self.assertIn("Finished trainer compilation", joined_logs)
 
   def test_compile_resolves_dummy_routed_experts_for_maxtext_engine(self):
     encode_fn = functools.partial(
