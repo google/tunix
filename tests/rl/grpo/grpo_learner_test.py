@@ -33,6 +33,7 @@ import optax
 import orbax.checkpoint as ocp
 from tunix.perf import trace as trace_lib
 from tunix.perf.experimental import tracer as perf_tracer_v2
+from tunix.rl import common
 from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl.grpo import grpo_learner as grpo_lib
 from tunix.rl.queue import data_queue as queue_lib
@@ -394,6 +395,65 @@ class GRPOLearnerTest(parameterized.TestCase):
         np.full(train_example.completion_ids.shape, -7.0, dtype=np.float32),
     )
     self.assertIsNone(train_example.sampler_is_weights)
+
+  @parameterized.named_parameters(
+      dict(testcase_name='one_mini_batch_per_step', batch_size=1),
+      dict(testcase_name='two_mini_batches_per_step', batch_size=2),
+  )
+  def test_recomputed_old_logps_follow_shared_actor_weights(self, batch_size):
+    # One prompt per mini-batch (`setup` uses this as `mini_batch_size`).
+    rl_engine, model, original_variables = setup(
+        {'gradient_accumulation_steps': 1}
+    )
+    # The vanilla rollout samples with the actor's own weights, so the learner
+    # never calls `sync_weights`.
+    self.assertIs(
+        rl_engine._weight_placement, rl_engine_lib.WeightPlacement.SHARED
+    )
+    grpo_learner = grpo_lib.GRPOLearner(
+        rl_engine=rl_engine,
+        reward_fns=reward_1,
+        algo_config=grpo_lib.GRPOConfig(
+            num_generations=2, num_iterations=1, use_rollout_logps=False
+        ),
+    )
+    get_actor_per_token_logps = rl_engine.get_actor_per_token_logps
+    gaps = []
+
+    def spy(prompt_tokens, completion_tokens, pad_id, eos_id, **kwargs):
+      old_logps = get_actor_per_token_logps(
+          prompt_tokens, completion_tokens, pad_id, eos_id, **kwargs
+      )
+      # Nothing trains between sampling and this call, so old logps must match
+      # the live actor, which is what the rollout sampled with.
+      graphdef, state = nnx.split(rl_engine.actor_trainer.model)
+      live_logps = common.compute_per_token_logps(
+          graphdef,
+          state,
+          prompt_tokens,
+          completion_tokens,
+          pad_id,
+          eos_id,
+          temperature=rl_engine.get_rollout_config(
+              rl_engine_lib.Mode.TRAIN
+          ).temperature,
+      )
+      gaps.append(float(jnp.abs(old_logps - live_logps).max()))
+      return old_logps
+
+    rl_engine.get_actor_per_token_logps = spy
+    grpo_learner.train(_dummy_dataset(_DUMMY_DATA, batch_size=batch_size))
+
+    jax.tree.map_with_path(
+        tc.assert_not_equal, original_variables, nnx.state(model, nnx.Param)
+    )
+    self.assertLen(gaps, len(_DUMMY_DATA))
+    np.testing.assert_allclose(gaps, 0.0, atol=1e-5)
+    clipfracs = rl_engine.actor_trainer.metrics_logger.get_metric_history(  # pyrefly: ignore[missing-attribute]
+        'actor', 'pg_clipfrac', 'train'
+    )
+    self.assertLen(clipfracs, len(_DUMMY_DATA))
+    np.testing.assert_array_equal(clipfracs, 0.0)
 
   def test_seq_logprob_error_threshold_below_one_raises(self):
     with self.assertRaisesRegex(
