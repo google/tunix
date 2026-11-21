@@ -375,6 +375,57 @@ class ConfigTest(parameterized.TestCase):
     updates, _ = optimizer.update(grads, optimizer.init(params), params)
     self.assertAlmostEqual(float(optax.global_norm(updates)), 100.0, places=4)
 
+  def test_default_config_max_grad_norm_does_not_clip_gradients(self):
+    """`max_grad_norm` from the base config is not applied to the optimizer.
+
+    The base configs set `max_grad_norm: 0.1` in `optimizer_config`, but
+    `optax` optimizers do not accept it, so it is dropped and gradients reach
+    the optimizer unclipped.
+    """
+    hp = self.initialize_config([])
+    optimizer_config = dict(hp.config["optimizer_config"])
+    self.assertEqual(optimizer_config["max_grad_norm"], 0.1)
+    # Swap in plain SGD with a unit learning rate (and no schedule) so the
+    # update equals the negated gradient and its norm is easy to check.
+    optimizer_config.update(opt_type="sgd", learning_rate=1.0)
+    optimizer_config.pop("schedule_type", None)
+    optimizer = config.create_optimizer(optimizer_config, "base_config.yaml")
+
+    params = {"w": jax.numpy.zeros((2,))}
+    # A gradient with global norm 100, far above `max_grad_norm`.
+    grads = {"w": jax.numpy.array([60.0, 80.0])}
+    updates, _ = optimizer.update(grads, optimizer.init(params), params)
+    self.assertAlmostEqual(float(optax.global_norm(updates)), 100.0, places=4)
+
+  def test_create_optimizer_warns_when_max_grad_norm_is_ignored(self):
+    with mock.patch.object(config.logging, "warning") as mock_warning:
+      config.create_optimizer(
+          {"opt_type": "sgd", "learning_rate": 1.0, "max_grad_norm": 0.1},
+          "test_config_path",
+      )
+    mock_warning.assert_called_once()
+    self.assertIn("NOT clipped", mock_warning.call_args.args[0])
+
+  @parameterized.named_parameters(
+      dict(testcase_name="unset", extra={}),
+      dict(testcase_name="none", extra={"max_grad_norm": None}),
+      dict(
+          testcase_name="with_opt_chain_type",
+          extra={
+              "max_grad_norm": 0.1,
+              "opt_chain_type": "clip_by_global_norm",
+              "chain_kwargs": {"max_norm": 0.1},
+          },
+      ),
+  )
+  def test_create_optimizer_does_not_warn_about_max_grad_norm(self, extra):
+    with mock.patch.object(config.logging, "warning") as mock_warning:
+      config.create_optimizer(
+          {"opt_type": "sgd", "learning_rate": 1.0, **extra},
+          "test_config_path",
+      )
+    mock_warning.assert_not_called()
+
   def test_create_optimizer_rejects_unknown_opt_chain_type(self):
     with self.assertRaisesRegex(ValueError, "not_a_transformation"):
       config.create_optimizer(

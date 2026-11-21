@@ -511,6 +511,45 @@ _OPT_CHAIN_TYPE_KEY = "opt_chain_type"
 _CHAIN_KWARGS_KEY = "chain_kwargs"
 
 
+_MAX_GRAD_NORM_KEY = "max_grad_norm"
+
+
+def _warn_if_max_grad_norm_ignored(
+    optimizer_config: Dict[str, Any],
+    opt_func: Callable[..., Any],
+    opt_chain_type: str | None,
+    config_path_info: str,
+) -> None:
+  """Warns when `max_grad_norm` is set but no gradient clipping is applied.
+
+  `max_grad_norm` is only forwarded to `opt_func` when it is part of its
+  signature, which is not the case for `optax` optimizers such as `adamw`, so
+  the value is otherwise dropped silently and gradients are not clipped.
+
+  Args:
+    optimizer_config: Optimizer settings.
+    opt_func: The `optax` factory named by `opt_type`.
+    opt_chain_type: The configured `opt_chain_type`, if any.
+    config_path_info: The path to the config file, used for logging.
+  """
+  max_grad_norm = optimizer_config.get(_MAX_GRAD_NORM_KEY)
+  if max_grad_norm is None or opt_chain_type:
+    return
+  if _MAX_GRAD_NORM_KEY in inspect.signature(opt_func).parameters:
+    return
+  logging.warning(
+      "`%s: %s` is set in the optimizer config at %s but is not applied:"
+      " gradients are NOT clipped. To clip gradients, set `%s:"
+      " clip_by_global_norm` and `%s: {max_norm: %s}`.",
+      _MAX_GRAD_NORM_KEY,
+      max_grad_norm,
+      config_path_info,
+      _OPT_CHAIN_TYPE_KEY,
+      _CHAIN_KWARGS_KEY,
+      max_grad_norm,
+  )
+
+
 def create_optimizer(
     optimizer_config: Dict[str, Any], config_path_info: str = ""
 ) -> optax.GradientTransformation:
@@ -597,6 +636,9 @@ def create_optimizer(
   # reaches the optimizer this way rather than as an optimizer keyword, which
   # `optax` optimizers do not declare.
   opt_chain_type = optimizer_config.get(_OPT_CHAIN_TYPE_KEY)
+  _warn_if_max_grad_norm_ignored(
+      optimizer_config, opt_func, opt_chain_type, config_path_info
+  )
   if not opt_chain_type:
     return optimizer
   chain_kwargs = optimizer_config.get(_CHAIN_KWARGS_KEY) or {}
