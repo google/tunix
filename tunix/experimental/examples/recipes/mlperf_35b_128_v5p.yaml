@@ -73,7 +73,6 @@ rollout_config:
   # Disabled.
   top_k: -1
   eos_tokens: "248046,248044"
-  return_logprobs: true
 
 vllm_config:
   skip_jax_precompile: false
@@ -132,7 +131,6 @@ data_config:
 batch_size: 16
 rl_training_config:
   max_steps: 50
-  eval_every_n_steps: 1000000
   mini_batch_size: 16
   train_micro_batch_size: 64
   compute_logps_micro_batch_size: 1
@@ -212,7 +210,6 @@ dist_training_config:
 
 agentic_grpo_config:
   num_generations: 16
-  num_iterations: 1
   beta: 0.0
   epsilon: 0.2
   epsilon_high: 0.28

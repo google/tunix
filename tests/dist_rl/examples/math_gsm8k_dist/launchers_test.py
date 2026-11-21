@@ -100,7 +100,6 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
     self.assertEqual(config["cluster_config"]["ports"]["trainer"], 20002)
     self.assertEqual(config["rollout_config"]["max_prompt_length"], 1024)
     self.assertEqual(config["rollout_config"]["total_generation_steps"], 1024)
-    self.assertEqual(config["rl_training_config"]["eval_every_n_steps"], 50)
     self.assertEqual(config["model_config"]["kwargs"], {})
     self.assertEqual(hp.mesh_axes("actor_model_config")["fsdp"], 16)
     k8s = config["cluster_config"]["k8s"]

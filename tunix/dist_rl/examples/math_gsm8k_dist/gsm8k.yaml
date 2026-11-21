@@ -43,7 +43,6 @@ rollout_config:
   top_p: 1.0
   top_k: -1
   eos_tokens: "151645,151643"
-  return_logprobs: true
 
 weight_sync_config:
   mode: "none"
@@ -66,7 +65,6 @@ rl_training_config:
   mini_batch_size: 2
   train_micro_batch_size: 1
   max_steps: 1
-  eval_every_n_steps: 50
   actor_optimizer_config:
     opt_type: "adamw"
     learning_rate: 2.0e-7
@@ -90,7 +88,6 @@ rl_training_config:
 
 agentic_grpo_config:
   num_generations: 8
-  num_iterations: 1
   beta: 0.0
   epsilon: 0.2
   # GSM8K uses the canonical `GRPOConfig` loss defaults: symmetric clipping,

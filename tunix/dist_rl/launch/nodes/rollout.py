@@ -73,8 +73,8 @@ Tokenizer = node_utils.HfTokenizer
 # Keep in sync with every vLLM kwarg set from other config fields or rollout
 # invariants in `_rollout_config`, `VllmSampler` and `InprocessVllmSampler`
 # (`hbm_utilization` is an alias guard for `gpu_memory_utilization`;
-# `server_mode` is `vllm_config.server_mode`, which the in-process sampler would
-# otherwise drop).
+# `server_mode` is always on, and the in-process sampler would otherwise drop
+# it).
 _FORBIDDEN_ROLLOUT_KWARGS = frozenset({
     "model",
     "tokenizer",
@@ -160,14 +160,7 @@ def _episode_timeout_secs(hp: resolve_config.DistHyperParameters) -> float:
 
 
 def _tensor_parallel_size(hp: resolve_config.DistHyperParameters) -> int:
-  """Returns the rollout TP degree, `rollout_model_config.mesh` tp.
-
-  `vllm_config.tensor_parallel_size`, when set, is validated equal to it by
-  `DistHyperParameters`.
-
-  Args:
-    hp: Validated distributed RL configuration.
-  """
+  """Returns the rollout TP degree, `rollout_model_config.mesh` tp."""
   return hp.mesh_axes(_ROLLOUT_KEY)["tp"]
 
 
@@ -312,21 +305,11 @@ def _validate_rollout_config(hp: resolve_config.DistHyperParameters) -> None:
   lora_rank = _lora_rank(hp)
   _vllm_engine_kwargs(hp)
   rollout_engine = str(hp.config["rollout_engine"])
-  if not bool(hp.config_mapping("rollout_config")["return_logprobs"]):
-    raise ValueError(
-        "rollout_config.return_logprobs must be true: the trainer consumes the"
-        " rollout logprobs."
-    )
   if rollout_engine == "vanilla" and lora_rank is not None:
     raise ValueError(
         "rollout_model_config.lora_config is not supported with"
         " rollout_engine: vanilla (the vanilla sampler loads the base model"
         " only); use a vLLM rollout_engine or drop lora_config."
-    )
-  if hp.config_mapping("vllm_config")["server_mode"] is False:
-    raise ValueError(
-        "vllm_config.server_mode: false is not supported: both vLLM rollout"
-        " samplers always run in server mode. Remove it."
     )
   tpu_backend_type = str(hp.config_mapping("vllm_config")["tpu_backend_type"])
   if rollout_engine != "inprocess_vllm" and tpu_backend_type != "jax":
@@ -514,7 +497,7 @@ def _rollout_config(
       top_k=int(rollout["top_k"]),
       overlong_filter=bool(grpo["overlong_filter"]),
       episode_timeout=episode_timeout_secs,
-      # Required by the trainer; `_validate_rollout_config` rejects `false`.
+      # The trainer consumes the rollout logprobs.
       return_logprobs=True,
       eos_tokens=_eos_token_ids(hp, tokenizer),
       partial_rollout=bool(ws["in_flight_weight_updates"]),
@@ -584,8 +567,7 @@ def _with_vllm_settings(
       data_parallel_size=max(1, _data_parallel_size(hp)),
       rollout_mapping_config=mapping_config,
       rollout_vllm_model_version=vllm_model,
-      # Both vLLM samplers always run in server mode;
-      # `_validate_rollout_config` rejects `vllm_config.server_mode: false`.
+      # Both vLLM samplers always run in server mode.
       rollout_vllm_server_mode=True,
       rollout_vllm_init_with_random_weights=(
           resolve_config.rollout_init_with_random_weights(hp)
@@ -816,6 +798,7 @@ def main(
   )
 
   hp = resolve_config.initialize(argv)
+  resolve_config.validate_task(hp)
   node_utils.apply_library_env(hp, "rollout")
   _validate_rollout_config(hp)
   worker_id = node_utils.worker_id(hp, "rollout", LOCAL_WORKER_ID)

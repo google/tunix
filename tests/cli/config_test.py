@@ -1120,10 +1120,11 @@ class ConfigTest(parameterized.TestCase):
 
   def test_validate_nested_rejects_unknown_nested_key(self):
     with self.assertRaisesRegex(
-        ValueError,
+        config.UnknownConfigKeyError,
         "Unknown configuration key 'rollout_config.unknown_nested_key'",
-    ):
+    ) as raised:
       self._initialize_with_flags(["rollout_config.unknown_nested_key=1"])
+    self.assertEqual(raised.exception.key, "rollout_config.unknown_nested_key")
 
   def test_validate_nested_rejects_unknown_root_key(self):
     with self.assertRaisesRegex(

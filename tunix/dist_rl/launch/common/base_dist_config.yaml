@@ -13,8 +13,9 @@
 # limitations under the License.
 
 # Base configuration for the distributed RL launchers in tunix/dist_rl/launch/.
-# Follows the exact section and key naming of tunix/cli/base_agentic_config.yaml,
-# with defaults matching the existing distributed RL launchers and worker nodes.
+# Sections shared with tunix/cli/base_agentic_config.yaml keep its key names.
+# Keys the distributed RL nodes do not read are left out, so setting one is an
+# error instead of a silent no-op.
 
 ################################## LOAD MODEL ##################################
 model_config: &base_model_config
@@ -26,9 +27,14 @@ model_config: &base_model_config
   model_path: ""
   # Defaults to <artifact_root>/models/<model_name> when empty.
   model_download_path: ""
-  rng_seed: 0
-  model_display: false
+  # Not used by the distributed RL nodes: the shared `tunix.cli` config
+  # validation requires it for the "huggingface" and "kaggle" sources.
   intermediate_ckpt_dir: "/tmp/intermediate_ckpt/"
+  # Not supported yet: the resolver rejects any value but null. LoRA always
+  # initializes with seed 0.
+  # TODO(noghabi): Seed the LoRA init (and the model init, once the trainer
+  # loads through `tunix.cli`'s `create_model`) and rollout sampling from it.
+  rng_seed: null
   dtype: "float32"
   load_dtype: "float32"
   remat_config: "none"
@@ -38,7 +44,6 @@ model_config: &base_model_config
   mesh:
     shape: "(1,2)"
     axis_names: "('fsdp','tp')"
-    allocation_policy: "COMPACT"
   # Architecture / MaxText overrides (e.g. maxtext_model_name, maxtext_output_dir,
   # padded_moe_mlp_dim, warmup_steps_fraction, attention, skip_step_on_spikes,
   # skip_step_on_nan, skip_step_interval, skip_step_scaling_factor).
@@ -52,8 +57,6 @@ actor_model_config:
   # requires the Tunix trainer and a model supporting `freeze_router` (Gemma 4).
   freeze_router: false
 
-critic_model_config: null
-
 reference_model_config:
   <<: *base_model_config
 
@@ -65,117 +68,91 @@ tokenizer_config:
   # Accepts a Hugging Face hub id or a local, CNS, or GCS path.
   tokenizer_path: "Qwen/Qwen3-1.7B"
   tokenizer_type: "huggingface"
-  add_bos: true
-  add_eos: true
 
-################################## DATASET ##################################
-data_source: "tfds"
-data_directory: ""
+################################## TASK ##################################
+# Every task YAML sets `data_module`, `env_class_path`, `agent_class_path` and
+# `cluster_config.registry_module`; `launch.sh` does not start a run without
+# them.
+# Module whose `create_dataset(**data_config)` returns the task records.
 data_module: ""
 # Default semantic task_name for data_module records without one; required
 # unless every record sets task_name.
 task_name: ""
-apply_chat_template_to_dataset: false
 data_config:
   split: "train"
   shuffle: true
   seed: 42
-dataset_name: "gsm8k"
 batch_size: 4
-prompt_key: "prompts"
-max_target_length: 256
-num_train_epochs: 1
-train_fraction: 1.0
-num_test_batches: 100
-tfds_download: true
-num_batches: 0
-
-############################### Optimizer ###############################
-optimizer_config: &base_optimizer_config
-  learning_rate: 2.0e-7
-  opt_type: "adamw"
-  schedule_type: "warmup_cosine_decay_schedule"
-  value: null
-  peak_value: null
-  init_value: 0.0
-  end_value: 0.0
-  warmup_ratio: 0.1
-  b1: 0.9
-  b2: 0.999
-  eps: 1.0e-8
-  weight_decay: 0.01
-  warmup_steps: null
-  decay_steps: 500
-  # Gradient clipping, chained ahead of the optimizer (same contract as
-  # `tunix.cli.config.create_optimizer`).
-  opt_chain_type: "clip_by_global_norm"
-  chain_kwargs:
-    max_norm: 1.0
+# Not supported yet: the resolver rejects any value but null. The dataset
+# repeats, and `rl_training_config.max_steps` alone sets the training length.
+# TODO(noghabi): Stop after `num_train_epochs` passes over the dataset.
+num_train_epochs: null
+# Not supported yet: the resolver rejects any value but null, since the
+# distributed RL path runs no evaluation.
+# TODO(noghabi): Hold out `train_fraction` of the dataset and evaluate on
+# `num_test_batches` batches of it every
+# `rl_training_config.eval_every_n_steps` steps.
+train_fraction: null
+num_test_batches: null
 
 ############################### Training Config ###############################
-training_config: &base_training_config
-  eval_every_n_steps: 50
+rl_training_config:
   max_steps: 1
-  # Derived by RLTrainingConfig from mini_batch_size // train_micro_batch_size.
-  gradient_accumulation_steps: null
-  # On `rl_training_config`, defaults to <cluster_config.artifact_root>/checkpoints
-  # when empty.
+  # Not supported yet (see `train_fraction`): the resolver rejects any value
+  # but null.
+  eval_every_n_steps: null
+  # Defaults to <cluster_config.artifact_root>/checkpoints when empty.
   checkpoint_root_directory: ""
   checkpointing_options:
     max_to_keep: 10
     save_interval_steps: 1
     enable_async_checkpointing: true
     timeout_secs: 1200
-  # `rl_training_config.metrics_logging_options: null` logs no metrics, and no
-  # trajectories unless `dist_training_config.trajectory_log_dir` is set.
+  # Null logs no metrics, and no trajectories unless
+  # `dist_training_config.trajectory_log_dir` is set.
   metrics_logging_options:
-    project_name: "trellis-gsm8k"
+    project_name: "tunix-dist-rl"
     run_name: ""
-    # On `rl_training_config`, defaults to <cluster_config.artifact_root>/metrics
-    # when empty. The orchestrator also logs the trajectories of each step under
+    # Defaults to <cluster_config.artifact_root>/metrics when empty. The
+    # orchestrator also logs the trajectories of each step under
     # <log_dir>/trajectories, unless `dist_training_config.trajectory_log_dir`
     # is set or `dist_training_config.trajectory_logging` is false.
     log_dir: ""
     flush_every_n_steps: 1
-  perf_metrics_options: {}
   profiler_options:
     log_dir: "/tmp/profiling"
     skip_first_n_steps: 1
     profiler_steps: 0
-  data_sharding_axis: ["fsdp"]
-  max_inflight_computations: 2
   max_seq_tokens_per_device: null
   # TODO(b/583675740): Deprecate max_seq_token_per_tpu in favor of
   # max_seq_tokens_per_device.
   max_seq_token_per_tpu: null
   max_segments_per_packed_row: null
-
-rl_training_config:
-  <<: *base_training_config
   # Defaults to `batch_size` when null.
   mini_batch_size: null
   train_micro_batch_size: 1
-  rollout_micro_batch_size: null
   compute_logps_micro_batch_size: 1
   compute_logps_chunk_size: 0
   actor_optimizer_config:
-    <<: *base_optimizer_config
-  critic_optimizer_config: null
-
-############################### PPO Config ###############################
-ppo_config:
-  num_iterations: 1
-  gae_lambda: 0.95
-  gamma: 1.0
-  beta: 0.08
-  epsilon: 0.2
-
-############################### GRPO Config ###############################
-grpo_config:
-  num_generations: 8
-  num_iterations: 1
-  beta: 0.04
-  epsilon: 0.2
+    learning_rate: 2.0e-7
+    opt_type: "adamw"
+    schedule_type: "warmup_cosine_decay_schedule"
+    value: null
+    peak_value: null
+    init_value: 0.0
+    end_value: 0.0
+    warmup_ratio: 0.1
+    b1: 0.9
+    b2: 0.999
+    eps: 1.0e-8
+    weight_decay: 0.01
+    warmup_steps: null
+    decay_steps: 500
+    # Gradient clipping, chained ahead of the optimizer (same contract as
+    # `tunix.cli.config.create_optimizer`).
+    opt_chain_type: "clip_by_global_norm"
+    chain_kwargs:
+      max_norm: 1.0
 
 ############################### Rollout Config ###############################
 rollout_config:
@@ -184,13 +161,15 @@ rollout_config:
   temperature: 1.0
   top_p: 1.0
   top_k: -1
-  eos_tokens: "151645,151643"
-  return_logprobs: true
+  # Comma-separated token ids or token strings that end a generation, e.g.
+  # "151645,151643" for Qwen3. When empty, generation stops on the tokenizer's
+  # EOS token only, and the rollout cannot tell a finished response from a
+  # truncated one. Each task YAML sets it for its model.
+  eos_tokens: ""
 
 ############################### Other RL Config ###############################
 rollout_engine: "inprocess_vllm"
 vllm_config:
-  model_version: ""
   # null: `rollout_engine: vllm` defers to vLLM's native default
   # (`gpu_memory_utilization` is not set); `inprocess_vllm` uses 0.5.
   hbm_utilization: null
@@ -204,16 +183,10 @@ vllm_config:
   # so it always needs "raiden".
   init_with_random_weights: null
   enable_prefix_caching: false
-  # Both vLLM rollout engines always run in server mode, so `false` is
-  # rejected.
-  # TODO(yatlas): Remove this option.
-  server_mode: null
   async_scheduling: false
   max_num_seqs: null
   max_num_batched_tokens: null
   max_model_len: null
-  data_parallel_size: null
-  tensor_parallel_size: null
   dtype: "bfloat16"
   # Distributed rollout settings, validated by `DistHyperParameters` and read
   # by the rollout node and the orchestrator.
@@ -242,25 +215,28 @@ vllm_config:
   # `maxtext_config`) is deep-merged onto what the rollout node builds.
   engine_kwargs: {}
 
-offload_to_cpu: false
-
-training_mode: "agentic_grpo"
-
 chat_parser_config:
   type: "raw"
   enable_thinking: false
 
-agent_class_path: "gsm8kagent"
+# Registered names of the task's agent and environment (see
+# `cluster_config.registry_module`). Each task YAML sets them.
+agent_class_path: ""
 agent_kwargs: {}
-env_class_path: "gsm8kenv"
+env_class_path: ""
 env_kwargs: {}
 kubernetes_config: {}
 
-agentic_ppo_config: {}
 agentic_grpo_config:
   num_generations: 8
+  # Optimizer passes over each rollout batch. Not supported yet: the resolver
+  # rejects any value but 1.
+  # TODO(noghabi): Run `num_iterations` passes per batch in
+  # `StandardRLProgram`.
   num_iterations: 1
-  beta: 0.04
+  # KL penalty against the reference model. Above 0, the run needs a reference
+  # inference worker (`cluster_config.run_inference_node`).
+  beta: 0.0
   epsilon: 0.2
   epsilon_high: 0.28
   loss_algo: "grpo"
@@ -378,10 +354,10 @@ cluster_config:
   trainer_main: "tunix.dist_rl.launch.nodes.trainer.main"
   rollout_main: "tunix.dist_rl.launch.nodes.rollout.main"
   inference_main: "tunix.dist_rl.launch.nodes.inference.main"
-  # Example module (e.g. `examples/math_gsm8k_dist/gsm8k.py`) that the rollout
-  # node imports to register the example's environments and agents. Each
-  # example YAML sets its own value.
-  registry_module: "tunix.dist_rl.examples.math_gsm8k_dist.gsm8k"
+  # Module (e.g. `tunix.dist_rl.examples.math_gsm8k_dist.gsm8k`) that the
+  # rollout node imports to register the task's environments and agents. Each
+  # task YAML sets it.
+  registry_module: ""
   # Relative paths are resolved against the repo root on `target: local` and
   # against the container working directory (repo root) on `target: k8s`;
   # `target: external` requires an absolute filesystem path. URIs such as

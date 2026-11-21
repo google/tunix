@@ -47,6 +47,15 @@ import yaml
 
 ORCHESTRATOR_MAIN = "tunix.dist_rl.launch.nodes.orchestrator.main"
 RUN_ID = "run_launcher_test"
+# A task for scripts that layer no task YAML: `base_dist_config.yaml` names
+# none, and the `launch.sh` commands that start nodes need one.
+_GSM8K_MODULE = "tunix.dist_rl.examples.math_gsm8k_dist.gsm8k"
+TASK_ARGS = (
+    f"data_module={_GSM8K_MODULE}",
+    "env_class_path=gsm8kenv",
+    "agent_class_path=gsm8kagent",
+    f"cluster_config.registry_module={_GSM8K_MODULE}",
+)
 # Stand-in for the Hugging Face token: the resolver requires one for hub
 # tokenizer paths, and `k8s.sh` writes it into the rendered commands, so a real
 # token must not reach the dry-run output.
@@ -351,7 +360,6 @@ class LauncherTestCase(parameterized.TestCase):
     self.assertEqual(
         config["tokenizer_config"]["tokenizer_path"], expected.model_id
     )
-    self.assertIsNone(rl_train["gradient_accumulation_steps"])
     # Every example overrides the shared artifact root.
     self.assertNotEqual(pathlib.Path(cluster["artifact_root"]).name, "dist_rl")
 

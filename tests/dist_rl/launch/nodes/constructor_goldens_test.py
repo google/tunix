@@ -135,8 +135,9 @@ _REGENERATE = (
 # Overrides every golden case starts from: values that would otherwise come
 # from the clock (`run_id`), the user (the k8s ids), the checkout (a relative
 # `artifact_root`, and the output directories derived from it), or the Hugging
-# Face hub (a hub tokenizer needs `HF_TOKEN`). The orchestrator's `data_module`
-# is recorded, not imported.
+# Face hub (a hub tokenizer needs `HF_TOKEN`), and the task and its model's stop
+# tokens, which `base_dist_config.yaml` leaves empty. The orchestrator's
+# `data_module` and the rollout's `registry_module` are recorded, not imported.
 FIXED_OVERRIDES = (
     "cluster_config.run_id=golden",
     "cluster_config.artifact_root=/artifacts",
@@ -147,6 +148,10 @@ FIXED_OVERRIDES = (
     "tokenizer_config.tokenizer_path=/models/tokenizer",
     "data_module=golden_data_module",
     "task_name=gsm8k",
+    "env_class_path=gsm8kenv",
+    "agent_class_path=gsm8kagent",
+    "cluster_config.registry_module=golden_registry_module",
+    "rollout_config.eos_tokens=151645,151643",
 )
 
 
@@ -184,8 +189,10 @@ _K8S_OVERRIDES = (
 _K8S_ENV = {node_utils.ROLLOUT_REPLICA_ENV: "1"}
 
 GOLDEN_CASES: Mapping[str, GoldenCase] = {
-    # `base_dist_config.yaml`: Qwen3-1.7B, `inprocess_vllm`, a KL penalty.
+    # `base_dist_config.yaml`: Qwen3-1.7B, `inprocess_vllm`, no KL penalty.
     "base": GoldenCase(),
+    # A KL penalty, which adds the reference inference node.
+    "kl_penalty": GoldenCase(("agentic_grpo_config.beta=0.04",)),
     "k8s": GoldenCase(_K8S_OVERRIDES, env=_K8S_ENV),
     # The same, with the rollout as the default k8s rollout manifest
     # (`leaderworkerset.mcjax.ray.yaml`) runs it: a multi-host Ray job, so the
@@ -278,8 +285,8 @@ GOLDEN_CASES: Mapping[str, GoldenCase] = {
 
 # The cases each role's goldens cover.
 GOLDEN_CASES_BY_ROLE: Mapping[node_utils.ProcessRole, tuple[str, ...]] = {
-    "orchestrator": ("base", "k8s"),
-    "inference": ("base",),
+    "orchestrator": ("base", "k8s", "kl_penalty"),
+    "inference": ("kl_penalty",),
     "trainer": ("base", "k8s", "lora", "maxtext"),
     "rollout": (
         "base",

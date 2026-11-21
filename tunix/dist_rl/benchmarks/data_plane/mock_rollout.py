@@ -136,8 +136,6 @@ def build_mock_rollout_worker(
 ) -> rollout_worker.RolloutWorker:
   """Constructs a `RolloutWorker` backed by `MockBaseSamplerImpl`."""
   rollout_cfg = hp.config_mapping("rollout_config")
-  if not rollout_cfg["return_logprobs"]:
-    raise ValueError("rollout_config.return_logprobs must be true.")
   grpo_cfg = hp.config_mapping("agentic_grpo_config")
   ws_cfg = hp.config_mapping("weight_sync_config")
   vllm_cfg = hp.config_mapping("vllm_config")

@@ -101,6 +101,18 @@ def to_str_dict(cfg: object) -> dict[str, object]:
   return {str(k): v for k, v in container.items()}
 
 
+class UnknownConfigKeyError(ValueError):
+  """An override sets a key that the base config does not have.
+
+  Attributes:
+    key: Dotted path of the unknown key.
+  """
+
+  def __init__(self, key: str, message: str) -> None:
+    super().__init__(message)
+    self.key = key
+
+
 # TODO(noghabi): Let callers supply the open-section allowlist (e.g. a class
 # attribute) instead of the hard-coded _OPEN_DICT_KEYS.
 def _validate_nested_keys(
@@ -123,16 +135,18 @@ def _validate_nested_keys(
     open_dict_keys: Section names that accept any nested keys.
 
   Raises:
-    ValueError: If `candidate` has a key that `schema` lacks, or nests keys
-      under a key whose schema value is neither a mapping nor null. The message
-      names the dotted path.
+    UnknownConfigKeyError: If `candidate` has a key that `schema` lacks. The
+      message names the dotted path.
+    ValueError: If `candidate` nests keys under a key whose schema value is
+      neither a mapping nor null. The message names the dotted path.
   """
   for key, value in candidate.items():
     dotpath = f"{prefix}.{key}" if prefix else str(key)
     if key not in schema:
-      raise ValueError(
+      raise UnknownConfigKeyError(
+          dotpath,
           f"Unknown configuration key '{dotpath}'. Allowed keys at"
-          f" '{prefix or '<root>'}': {sorted(schema.keys())}"
+          f" '{prefix or '<root>'}': {sorted(schema.keys())}",
       )
     if key in open_dict_keys or not isinstance(value, Mapping):
       continue

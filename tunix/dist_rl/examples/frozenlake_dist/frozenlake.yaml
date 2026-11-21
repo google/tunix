@@ -54,10 +54,9 @@ rollout_config:
   top_p: 1.0
   # Disabled.
   top_k: -1
-  # Stop on the tokenizer's EOS token. The base config's Qwen token ids are
-  # ordinary tokens for other models, such as Gemma4.
+  # Stop on the tokenizer's EOS token, whichever model the recipe trains (the
+  # recipes run Qwen3 and Gemma4).
   eos_tokens: ""
-  return_logprobs: true
 
 vllm_config:
   hbm_utilization: 0.75
@@ -97,8 +96,7 @@ rl_training_config:
   train_micro_batch_size: 4
   compute_logps_micro_batch_size: 4
   compute_logps_chunk_size: 0
-  # 150 batches x 1 iteration x 3 epochs (`num_batches` and `num_train_epochs`
-  # are not read).
+  # 150 batches x 3 epochs. Nothing derives it from `data_config.limit`.
   max_steps: 450
   actor_optimizer_config:
     opt_type: "adamw"
@@ -121,7 +119,6 @@ rl_training_config:
 
 agentic_grpo_config:
   num_generations: 8
-  num_iterations: 1
   beta: 0.0
   epsilon: 0.003
   epsilon_high: 0.005

@@ -154,12 +154,16 @@ class LaunchScriptsTest(absltest.TestCase):
       self,
       args: list[str],
       extra_env: dict[str, str] | None = None,
+      *,
+      task: bool = True,
   ) -> subprocess.CompletedProcess[str]:
+    """Runs `launch.sh`, by default with `launcher_testing.TASK_ARGS`."""
     env = launcher_testing.launcher_env()
     if extra_env:
       env.update(extra_env)
+    task_args = launcher_testing.TASK_ARGS if task else ()
     return subprocess.run(
-        ["bash", str(LAUNCH_SH), *args],
+        ["bash", str(LAUNCH_SH), *task_args, *args],
         env=env,
         capture_output=True,
         text=True,
@@ -592,25 +596,80 @@ class LaunchScriptsTest(absltest.TestCase):
     self.assertIn("cluster_config.k8s.tunix_image is empty", res.stderr)
 
   def test_k8s_rejects_reference_worker(self):
-    # The default beta (0.04) enables the reference worker, which k8s.sh does
-    # not deploy.
+    # A KL penalty enables the reference worker, which k8s.sh does not deploy.
     res = self._run_launch([
         "start",
         "--dry-run",
         "cluster_config.target=k8s",
         "cluster_config.k8s.tunix_image=test-image",
+        "agentic_grpo_config.beta=0.04",
     ])
     self.assertNotEqual(res.returncode, 0)
     self.assertIn("does not deploy a reference inference worker", res.stderr)
     self.assertNotIn("apiVersion:", res.stdout)
 
   def test_k8s_stop_command_only_deletes_resources(self):
-    # Deleting the jobs needs no node image, and the default beta's reference
+    # Deleting the jobs needs no node image and no task, and a reference
     # worker (which k8s.sh does not deploy) is no reason to fail.
-    res = self._run_launch(["stop", "--dry-run", "cluster_config.target=k8s"])
+    res = self._run_launch(
+        [
+            "stop",
+            "--dry-run",
+            "cluster_config.target=k8s",
+            "agentic_grpo_config.beta=0.04",
+        ],
+        task=False,
+    )
     self.assertEqual(res.returncode, 0, msg=res.stderr)
     self.assertIn("kubectl delete jobset testuser-orch -n default", res.stdout)
     self.assertNotIn("apiVersion:", res.stdout)
+
+  def test_commands_that_start_nodes_require_a_task(self):
+    # `resolve_config_test` covers which keys the message names. The trainer
+    # node does not check the task itself, so `launch.sh` is its only guard.
+    k8s = ["cluster_config.target=k8s", "cluster_config.k8s.tunix_image=img"]
+    for args in (
+        ["start", "cluster_config.target=local"],
+        ["start", *k8s],
+        ["orchestrator", *k8s],
+        ["trainer", *k8s],
+        ["rollout", *k8s],
+    ):
+      with self.subTest(args=args[:2]):
+        res = self._run_launch(["--dry-run", *args], task=False)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn(
+            "Error: The config names no task: data_module, env_class_path,"
+            " agent_class_path, cluster_config.registry_module must be set.",
+            res.stderr,
+        )
+        self.assertNotIn("command:", res.stdout)
+        self.assertNotIn("apiVersion:", res.stdout)
+
+  def test_unsupported_target_or_command_is_reported_before_the_task(self):
+    for args, error in (
+        (
+            ["trainer", "cluster_config.target=local"],
+            (
+                "command 'trainer' is not supported for"
+                " cluster_config.target=local"
+            ),
+        ),
+        (
+            # `target: external` requires an absolute artifact root.
+            [
+                "start",
+                "cluster_config.target=external",
+                "cluster_config.artifact_root=/tmp/artifacts",
+            ],
+            "target=external runs are started by another launcher",
+        ),
+    ):
+      with self.subTest(args=args[:2]):
+        res = self._run_launch(["--dry-run", *args], task=False)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn(error, res.stderr)
+        self.assertNotIn("names no task", res.stderr)
 
   def test_k8s_rollout_batches_manifests_and_deletes(self):
     tempdir = self.create_tempdir().full_path
@@ -989,12 +1048,12 @@ class LaunchScriptsTest(absltest.TestCase):
         )
 
   def test_otel_commands_deploy_and_delete_the_collector(self):
-    # The collector needs no `cluster_config.k8s.tunix_image`, and the default
-    # beta's reference worker (which k8s.sh does not deploy) is no reason to
-    # fail.
-    k8s = ["cluster_config.target=k8s"]
+    # The collector needs no `cluster_config.k8s.tunix_image` and no task, and
+    # a reference worker (which k8s.sh does not deploy) is no reason to fail.
+    k8s = ["cluster_config.target=k8s", "agentic_grpo_config.beta=0.04"]
     res = self._run_launch(
-        ["otel", "--dry-run", *k8s, "cluster_config.ports.otel=4318"]
+        ["otel", "--dry-run", *k8s, "cluster_config.ports.otel=4318"],
+        task=False,
     )
     self.assertEqual(res.returncode, 0, msg=res.stderr)
     self.assertIn(
@@ -1015,7 +1074,7 @@ class LaunchScriptsTest(absltest.TestCase):
     self.assertEqual(service["metadata"]["name"], "testuser-otel")
     self.assertEqual(service["spec"]["ports"][0]["port"], 4318)
 
-    res = self._run_launch(["stop-otel", "--dry-run", *k8s])
+    res = self._run_launch(["stop-otel", "--dry-run", *k8s], task=False)
     self.assertEqual(res.returncode, 0, msg=res.stderr)
     self.assertIn("kubectl delete service testuser-otel -n default", res.stdout)
     self.assertNotIn("apiVersion:", res.stdout)

@@ -122,7 +122,6 @@ class RecipesTest(launcher_testing.LauncherTestCase):
     self.assertFalse(config["data_config"]["shuffle"])
     self.assertEqual(config["agentic_grpo_config"]["beta"], 0.0)
     rl_train = config["rl_training_config"]
-    self.assertEqual(rl_train["eval_every_n_steps"], 999)
     self.assertEqual(rl_train["checkpointing_options"]["max_to_keep"], 2)
     self.assertEqual(
         rl_train["metrics_logging_options"]["project_name"], "ci-smoke-gsm8k"
@@ -174,9 +173,8 @@ class RecipesTest(launcher_testing.LauncherTestCase):
     self.assertEqual(rollout["model_source"], "maxtext")
     self.assertEqual(rollout["kwargs"]["maxtext_model_name"], "qwen3-0.6b")
     self.assertEqual(config["rollout_engine"], "vllm")
-    # Only the orchestrator skips the logprob check; the rollout node rejects
-    # `rollout_config.return_logprobs: false`.
-    self.assertTrue(config["rollout_config"]["return_logprobs"])
+    # Only the orchestrator skips the logprob check; the rollout still returns
+    # logprobs.
     self.assertFalse(config["agentic_grpo_config"]["use_rollout_logps"])
     weight_sync_cfg = config["weight_sync_config"]
     self.assertEqual(weight_sync_cfg["mode"], "raiden")
@@ -221,7 +219,7 @@ class RecipesTest(launcher_testing.LauncherTestCase):
     self.assertEqual(actor["remat_config"], "decoder")
     self.assertTrue(actor["use_flash_attention"])
     self.assertEqual(actor["flash_attention_block_size"], 256)
-    # The tokenizer's EOS token stops a turn, not the base config's Qwen ids.
+    # The tokenizer's EOS token stops a turn.
     self.assertEqual(hp.config_mapping("rollout_config")["eos_tokens"], "")
     self.assertEqual(
         hp.config_mapping("chat_parser_config"),

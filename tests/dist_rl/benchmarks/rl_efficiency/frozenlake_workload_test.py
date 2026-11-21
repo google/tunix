@@ -250,7 +250,6 @@ class FrozenLakeBenchmarkTest(unittest.TestCase):
             "rollout_config.total_generation_steps",
             rollout["total_generation_steps"],
         ),
-        ("rollout_config.return_logprobs", rollout["return_logprobs"]),
         ("vllm_config.hbm_utilization", vllm["hbm_utilization"]),
         ("vllm_config.max_num_seqs", vllm["max_num_seqs"]),
         ("vllm_config.max_num_batched_tokens", vllm["max_num_batched_tokens"]),

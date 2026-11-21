@@ -23,6 +23,7 @@ import subprocess
 from unittest import mock
 
 from absl.testing import absltest
+from absl.testing import parameterized
 import omegaconf
 from tunix.cli import config as cli_config
 from tunix.dist_rl.common import execution_target
@@ -71,13 +72,12 @@ class ResolveConfigTest(absltest.TestCase):
     self.assertEqual(hp.config["batch_size"], 4)
     self.assertEqual(hp.config["rl_training_config"]["mini_batch_size"], 4)
     self.assertEqual(hp.config["rl_training_config"]["max_steps"], 1)
-    self.assertEqual(hp.config["rl_training_config"]["eval_every_n_steps"], 50)
     self.assertEqual(hp.config["rollout_config"]["max_prompt_length"], 1024)
     self.assertEqual(
         hp.config["rollout_config"]["total_generation_steps"], 1024
     )
     self.assertEqual(hp.config["agentic_grpo_config"]["num_generations"], 8)
-    self.assertEqual(hp.config["agentic_grpo_config"]["beta"], 0.04)
+    self.assertEqual(hp.config["agentic_grpo_config"]["beta"], 0.0)
     self.assertEqual(hp.config["agentic_grpo_config"]["epsilon"], 0.2)
     self.assertEqual(hp.config["weight_sync_config"]["mode"], "none")
     self.assertEqual(
@@ -86,8 +86,8 @@ class ResolveConfigTest(absltest.TestCase):
     self.assertEqual(
         hp.config["cluster_config"]["local"]["rollout_devices"], "2,3"
     )
-    # Since default beta=0.04 > 0, inference node is automatically enabled.
-    self.assertTrue(hp.config["cluster_config"]["run_inference_node"])
+    # The default beta is 0, so no reference inference node is started.
+    self.assertFalse(hp.config["cluster_config"]["run_inference_node"])
 
   def test_model_config_inheritance_and_role_specific_override(self):
     hp = resolve_config.initialize([
@@ -144,7 +144,9 @@ weight_sync_config:
     self.assertEqual(hp.config["rl_training_config"]["mini_batch_size"], 4)
     self.assertEqual(hp.config["rl_training_config"]["max_steps"], 5)
     # Sibling keys in rl_training_config are preserved (not wiped).
-    self.assertEqual(hp.config["rl_training_config"]["eval_every_n_steps"], 50)
+    self.assertEqual(
+        hp.config["rl_training_config"]["train_micro_batch_size"], 1
+    )
     self.assertEqual(hp.config["weight_sync_config"]["mode"], "raiden")
 
   def test_tokenizer_uses_base_cli_validation(self):
@@ -179,15 +181,14 @@ weight_sync_config:
 
   def test_run_inference_node_defaults_to_kl_penalty(self):
     cluster = resolve_config.initialize([]).config["cluster_config"]
-    self.assertTrue(cluster["run_inference_node"])
-    cluster = resolve_config.initialize(
-        ["agentic_grpo_config.beta=0.0"]
-    ).config["cluster_config"]
     self.assertFalse(cluster["run_inference_node"])
+    kl_penalty = "agentic_grpo_config.beta=0.04"
+    cluster = resolve_config.initialize([kl_penalty]).config["cluster_config"]
+    self.assertTrue(cluster["run_inference_node"])
     # A reference worker started separately registers through discovery; there
     # is no address to configure.
     cluster = resolve_config.initialize(
-        ["cluster_config.run_inference_node=false"]
+        [kl_penalty, "cluster_config.run_inference_node=false"]
     ).config["cluster_config"]
     self.assertFalse(cluster["run_inference_node"])
     with self.assertRaisesRegex(ValueError, "cluster_config.inference_addr"):
@@ -306,6 +307,7 @@ weight_sync_config:
     cluster = resolve_config.initialize([
         "cluster_config.target=external",
         "cluster_config.artifact_root=/artifacts/run_1",
+        "agentic_grpo_config.beta=0.04",
     ]).config_mapping("cluster_config")
     self.assertEqual(cluster["target"], "external")
     # Never joined to the repo root.
@@ -592,12 +594,6 @@ weight_sync_config:
     with self.assertRaisesRegex(ValueError, "num_generations must be > 1"):
       resolve_config.initialize(["agentic_grpo_config.num_generations=1"])
 
-    # The program runs one optimizer pass per rollout batch.
-    with self.assertRaisesRegex(
-        ValueError, "num_iterations must be 1, got 2: StandardRLProgram"
-    ):
-      resolve_config.initialize(["agentic_grpo_config.num_iterations=2"])
-
   def test_rollout_random_init_defaults_to_raiden_weight_sync(self):
     hp = resolve_config.initialize([])
     self.assertIsNone(hp.config["vllm_config"]["init_with_random_weights"])
@@ -681,8 +677,9 @@ weight_sync_config:
 
   def test_k8s_target_resolves_reference_worker(self):
     # `k8s.sh` rejects the reference worker only for the commands that start
-    # nodes, so `stop` and `otel` resolve the default beta (0.04) on k8s too.
-    hp = resolve_config.initialize(["cluster_config.target=k8s"])
+    # nodes, so `stop` and `otel` resolve a KL penalty on k8s too.
+    kl_penalty = "agentic_grpo_config.beta=0.04"
+    hp = resolve_config.initialize(["cluster_config.target=k8s", kl_penalty])
     self.assertTrue(hp.config["cluster_config"]["run_inference_node"])
     self.assertIn(
         "export RUN_INFERENCE_NODE=true\n",
@@ -691,6 +688,7 @@ weight_sync_config:
     # A reference worker started separately joins through discovery.
     hp = resolve_config.initialize([
         "cluster_config.target=k8s",
+        kl_penalty,
         "cluster_config.run_inference_node=false",
     ])
     self.assertEqual(hp.config["agentic_grpo_config"]["beta"], 0.04)
@@ -886,17 +884,10 @@ weight_sync_config:
   def test_max_seq_tokens_per_device_syncs_with_legacy_tpu_field(self):
     hp = resolve_config.initialize([
         "batch_size=6",
-        "training_config.max_seq_tokens_per_device=2048",
         "rl_training_config.max_seq_tokens_per_device=4096",
         "rl_training_config.mini_batch_size=3",
         "rl_training_config.train_micro_batch_size=4",
     ])
-    self.assertEqual(
-        hp.config["training_config"]["max_seq_token_per_tpu"], 2048
-    )
-    self.assertEqual(
-        hp.config["training_config"]["max_seq_tokens_per_device"], 2048
-    )
     self.assertEqual(
         hp.config["rl_training_config"]["max_seq_token_per_tpu"], 4096
     )
@@ -1047,8 +1038,6 @@ weight_sync_config:
       ])
     with self.assertRaisesRegex(TypeError, "vllm_config.detokenize"):
       resolve_config.initialize(["vllm_config.detokenize=yes_please"])
-    with self.assertRaisesRegex(TypeError, "vllm_config.server_mode"):
-      resolve_config.initialize(["vllm_config.server_mode=0"])
     for bad_ft in ("yes_please", "0", "null"):
       with self.assertRaisesRegex(
           TypeError, r"cluster_config\.rollout_fault_tolerance"
@@ -1951,6 +1940,205 @@ weight_sync_config:
       with self.subTest(overrides=overrides):
         with self.assertRaisesRegex(exc_type, pattern):
           resolve_config.initialize(overrides)
+
+
+def _has_key(config: object, dotted_key: str) -> bool:
+  """Returns whether the nested mapping `config` has `dotted_key`."""
+  node = config
+  for part in dotted_key.split("."):
+    if not isinstance(node, dict) or part not in node:
+      return False
+    node = node[part]
+  return True
+
+
+class RetiredKeysTest(parameterized.TestCase):
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="key_no_node_reads",
+          override="model_config.model_display=true",
+          message=(
+              "model_config.model_display is no longer a config key: the"
+              " distributed RL nodes never read it, so remove it"
+          ),
+      ),
+      dict(
+          testcase_name="key_of_a_role_mesh",
+          override="actor_model_config.mesh.allocation_policy=COMPACT",
+          message=(
+              "actor_model_config.mesh.allocation_policy is no longer a"
+              " config key"
+          ),
+      ),
+      dict(
+          testcase_name="key_of_a_removed_section",
+          override="training_config.max_steps=5",
+          message=(
+              "training_config is no longer a config key: .* set"
+              " rl_training_config instead"
+          ),
+      ),
+      dict(
+          testcase_name="key_with_one_legal_value",
+          override="rollout_config.return_logprobs=true",
+          message=(
+              "rollout_config.return_logprobs is no longer a config key: the"
+              " rollout always returns logprobs"
+          ),
+      ),
+      dict(
+          testcase_name="key_derived_from_the_mesh",
+          override="vllm_config.tensor_parallel_size=2",
+          message="it is the 'tp' axis of rollout_model_config.mesh",
+      ),
+  )
+  def test_override_fails_with_what_to_do_instead(
+      self, override: str, message: str
+  ):
+    with self.assertRaisesRegex(ValueError, message):
+      resolve_config.initialize([override])
+
+  def test_override_file_fails_the_same_way(self):
+    task_yaml = self.create_tempfile(
+        "task.yaml", "rl_training_config:\n  max_inflight_computations: 2\n"
+    )
+    with self.assertRaisesRegex(
+        ValueError,
+        "rl_training_config.max_inflight_computations is no longer a config"
+        " key: the distributed RL nodes never read it",
+    ):
+      resolve_config.initialize([f"override_config_file={task_yaml.full_path}"])
+
+  def test_every_retired_key_fails_with_its_hint(self):
+    for key, hint in resolve_config._RETIRED_KEYS.items():
+      with self.subTest(key=key):
+        with self.assertRaises(ValueError) as raised:
+          resolve_config.initialize([f"{key}=1"])
+        self.assertEqual(
+            str(raised.exception), f"{key} is no longer a config key: {hint}."
+        )
+
+  def test_other_unknown_keys_keep_the_unknown_key_error(self):
+    with self.assertRaisesRegex(
+        cli_config.UnknownConfigKeyError,
+        "Unknown configuration key 'rollout_config.not_a_key'",
+    ):
+      resolve_config.initialize(["rollout_config.not_a_key=1"])
+
+  def test_no_retired_key_is_in_the_base_config(self):
+    base = omegaconf.OmegaConf.to_container(
+        omegaconf.OmegaConf.load(resolve_config.DEFAULT_BASE_CONFIG_PATH)
+    )
+    still_in_base = [
+        key for key in resolve_config._RETIRED_KEYS if _has_key(base, key)
+    ]
+    self.assertEmpty(still_in_base)
+
+
+class UnimplementedKeysTest(parameterized.TestCase):
+  """Keys kept with a TODO; any value but the accepted one fails."""
+
+  def test_base_config_accepts_the_defaults(self):
+    hp = resolve_config.initialize([])
+    for key, (accepted, _) in resolve_config._UNIMPLEMENTED_KEYS.items():
+      section, _, name = key.rpartition(".")
+      value = hp.config_mapping(section)[name] if section else hp.config[name]
+      with self.subTest(key=key):
+        self.assertEqual(value, accepted)
+
+  def test_every_key_rejects_another_value(self):
+    for key, (accepted, _) in resolve_config._UNIMPLEMENTED_KEYS.items():
+      value = 2 if accepted is not None else 3
+      with self.subTest(key=key):
+        with self.assertRaisesRegex(
+            NotImplementedError,
+            rf"{re.escape(key)}={value} is not supported yet .*; leave it at"
+            rf" {accepted!r}\.",
+        ):
+          resolve_config.initialize([f"{key}={value}"])
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="rng_seed",
+          override="actor_model_config.rng_seed=0",
+          message="LoRA always initializes with seed 0",
+      ),
+      dict(
+          testcase_name="epochs",
+          override="num_train_epochs=1",
+          message="rl_training_config.max_steps sets the training length",
+      ),
+      dict(
+          testcase_name="evaluation",
+          override="rl_training_config.eval_every_n_steps=10",
+          message="runs no evaluation yet",
+      ),
+      dict(
+          testcase_name="bool_is_not_one",
+          override="agentic_grpo_config.num_iterations=true",
+          message="each rollout batch gets one optimizer pass",
+      ),
+      dict(
+          testcase_name="float_is_not_one",
+          override="agentic_grpo_config.num_iterations=1.0",
+          message="each rollout batch gets one optimizer pass",
+      ),
+  )
+  def test_message_says_why(self, override: str, message: str):
+    with self.assertRaisesRegex(NotImplementedError, message):
+      resolve_config.initialize([override])
+
+  def test_no_unimplemented_key_is_retired(self):
+    self.assertEmpty(
+        set(resolve_config._UNIMPLEMENTED_KEYS)
+        & set(resolve_config._RETIRED_KEYS)
+    )
+
+
+_TASK_OVERRIDES = (
+    "data_module=my_task.data",
+    "env_class_path=my_env",
+    "agent_class_path=my_agent",
+    "cluster_config.registry_module=my_task.registry",
+)
+
+
+class TaskConfigTest(absltest.TestCase):
+
+  def test_base_config_names_no_task(self):
+    hp = resolve_config.initialize([])
+    with self.assertRaisesRegex(
+        ValueError,
+        "The config names no task: data_module, env_class_path,"
+        " agent_class_path, cluster_config.registry_module must be set",
+    ):
+      resolve_config.validate_task(hp)
+
+  def test_error_names_only_the_empty_keys(self):
+    hp = resolve_config.initialize(list(_TASK_OVERRIDES[:2]))
+    self.assertStartsWith(
+        resolve_config.task_config_error(hp),
+        "The config names no task: agent_class_path,"
+        " cluster_config.registry_module must be set.",
+    )
+
+  def test_config_with_every_task_key_passes(self):
+    hp = resolve_config.initialize(list(_TASK_OVERRIDES))
+    self.assertEqual(resolve_config.task_config_error(hp), "")
+    resolve_config.validate_task(hp)
+
+  def test_bash_exports_carry_the_error_for_the_launcher(self):
+    self.assertIn(
+        "export TASK_CONFIG_ERROR='The config names no task:",
+        resolve_config.render_bash_exports(resolve_config.initialize([])),
+    )
+    self.assertIn(
+        "export TASK_CONFIG_ERROR=''\n",
+        resolve_config.render_bash_exports(
+            resolve_config.initialize(list(_TASK_OVERRIDES))
+        ),
+    )
 
 
 if __name__ == "__main__":

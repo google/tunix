@@ -50,8 +50,7 @@ class DryRunTest(absltest.TestCase):
           _LAUNCH_SH,
           "cluster_config.target=k8s",
           "cluster_config.k8s.tunix_image=test-image",
-          # `k8s.sh` deploys no reference worker, so no KL penalty.
-          "agentic_grpo_config.beta=0.0",
+          *launcher_testing.TASK_ARGS,
       )
       hp = run.resolve()
 
@@ -63,7 +62,7 @@ class DryRunTest(absltest.TestCase):
             f"cluster_config.run_id={launcher_testing.RUN_ID}",
             "cluster_config.target=k8s",
             "cluster_config.k8s.tunix_image=test-image",
-            "agentic_grpo_config.beta=0.0",
+            *launcher_testing.TASK_ARGS,
         ),
     )
     # The resolved config matches the rendered manifests.

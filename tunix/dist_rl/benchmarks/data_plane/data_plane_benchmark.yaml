@@ -40,8 +40,6 @@ model_config:
 tokenizer_config:
   tokenizer_path: "tunix/dist_rl/benchmarks/data_plane/tokenizer"
   tokenizer_type: "huggingface"
-  add_bos: false
-  add_eos: false
 
 data_module: "tunix.dist_rl.benchmarks.data_plane.data_plane_benchmark"
 task_name: "data_plane_benchmark"
@@ -56,7 +54,6 @@ batch_size: 8
 
 rl_training_config:
   max_steps: 4
-  eval_every_n_steps: 100000
   mini_batch_size: 8
   train_micro_batch_size: 16
   max_seq_tokens_per_device: 65536
@@ -72,7 +69,6 @@ rollout_config:
   top_p: 1.0
   top_k: -1
   eos_tokens: "1"
-  return_logprobs: true
 
 # `inprocess_vllm` satisfies `resolve_config`'s check that
 # `return_routed_experts: true` uses a vLLM `rollout_engine`; the mock rollout

@@ -394,7 +394,6 @@ class TrainerFactoryTest(absltest.TestCase):
     hp = _hp(
         "rollout_model_config.mesh.shape=(1,4)",
         "rollout_engine=vllm",
-        "rl_training_config.eval_every_n_steps=7",
         "rl_training_config.mini_batch_size=2",
         "agentic_grpo_config.num_generations=8",
         "rl_training_config.train_micro_batch_size=4",
@@ -423,7 +422,7 @@ class TrainerFactoryTest(absltest.TestCase):
     self.assertEqual(mock_peft_trainer.call_args.kwargs["sampler_type"], "vllm")
     self.assertEqual(mock_peft_trainer.call_args.kwargs["rollout_tp_size"], 4)
     self.assertIsInstance(training_config, peft_trainer_v2.TrainingConfig)
-    self.assertEqual(training_config.eval_every_n_steps, 7)
+    self.assertEqual(training_config.eval_every_n_steps, 1)
     self.assertEqual(training_config.gradient_accumulation_steps, 4)
     self.assertEqual(training_config.metrics_prefix, "actor")
     self.assertEqual(training_config.data_sharding_axis, ("fsdp",))

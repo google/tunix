@@ -51,6 +51,13 @@ _ROUTED_EXPERTS_ARGV = (
     *_MAXTEXT_ROLLOUT_ARGV,
     "vllm_config.return_routed_experts=true",
 )
+# `base_dist_config.yaml` names no task; `rollout.main` needs one.
+_TASK_ARGV = (
+    "data_module=my_task.data",
+    "env_class_path=my_env",
+    "agent_class_path=my_agent",
+    "cluster_config.registry_module=my_task.registry",
+)
 # The variables `node_utils.apply_library_env` sets.
 _LIBRARY_ENV_VARS = (
     "VERIFY_WEIGHTS",
@@ -127,7 +134,6 @@ class ModelFamilyTest(absltest.TestCase):
           "model_config.model_id=Qwen/Qwen3.5-0.8B",
           "weight_sync_config.mode=raiden",
           "rollout_model_config.mesh.shape=(1,1)",
-          "vllm_config.tensor_parallel_size=1",
       )
       with self.assertRaisesRegex(ValueError, "use inprocess_vllm instead"):
         rollout._validate_rollout_config(oop_hp)
@@ -150,7 +156,6 @@ class ModelFamilyTest(absltest.TestCase):
                 "model_config.model_id=Qwen/Qwen3.5-2B",
                 "weight_sync_config.mode=raiden",
                 "rollout_model_config.mesh.shape=(1,2)",
-                "vllm_config.tensor_parallel_size=2",
             ),
             NotImplementedError,
             "tensor_parallel_size=1 only",
@@ -161,7 +166,6 @@ class ModelFamilyTest(absltest.TestCase):
                 "model_config.model_id=Qwen/Qwen3.5-0.8B",
                 "weight_sync_config.mode=raiden",
                 "rollout_model_config.mesh.shape=(1,1)",
-                "vllm_config.tensor_parallel_size=1",
                 "rollout_model_config.lora_config={'rank': 8, 'alpha': 16.0}",
             ),
             NotImplementedError,
@@ -174,7 +178,6 @@ class ModelFamilyTest(absltest.TestCase):
                 "weight_sync_config.mode=raiden",
                 "vllm_config.init_with_random_weights=false",
                 "rollout_model_config.mesh.shape=(1,1)",
-                "vllm_config.tensor_parallel_size=1",
             ),
             ValueError,
             "requires init_with_random_weights=True",
@@ -185,7 +188,6 @@ class ModelFamilyTest(absltest.TestCase):
                 "model_config.model_id=Qwen/Qwen3.5-0.8B",
                 "weight_sync_config.mode=fs",
                 "rollout_model_config.mesh.shape=(1,1)",
-                "vllm_config.tensor_parallel_size=1",
             ),
             ValueError,
             "requires init_with_random_weights=True",
@@ -204,7 +206,6 @@ class ModelFamilyTest(absltest.TestCase):
           "model_config.model_id=Qwen/Qwen3.5-0.8B",
           "weight_sync_config.mode=raiden",
           "rollout_model_config.mesh.shape=(1,1)",
-          "vllm_config.tensor_parallel_size=1",
       )
       self.assertIsNotNone(dense_inproc.rollout_mapping_config)
       self.assertIsNotNone(
@@ -337,7 +338,8 @@ class RolloutConfigTest(absltest.TestCase):
     self.assertEqual(config.top_p, 0.95)
     self.assertFalse(config.overlong_filter)
     self.assertTrue(config.return_logprobs)
-    self.assertEqual(config.eos_tokens, [151645, 151643])
+    # No `rollout_config.eos_tokens`: generation stops at the tokenizer's EOS.
+    self.assertIsNone(config.eos_tokens)
     self.assertIsNone(config.trajectory_store_config)
 
   def test_eos_token_strings_resolve_through_tokenizer(self):
@@ -454,12 +456,6 @@ class RolloutConfigPlumbingTest(absltest.TestCase):
 
 class ValidateRolloutConfigTest(absltest.TestCase):
 
-  def test_rejects_return_logprobs_false(self):
-    with self.assertRaisesRegex(ValueError, "return_logprobs must be true"):
-      rollout._validate_rollout_config(
-          _hp("rollout_config.return_logprobs=false")
-      )
-
   def test_rejects_lora_with_vanilla_sampler(self):
     with self.assertRaisesRegex(ValueError, "not supported with.*vanilla"):
       rollout._validate_rollout_config(
@@ -468,20 +464,6 @@ class ValidateRolloutConfigTest(absltest.TestCase):
               "rollout_model_config.lora_config={'rank': 8, 'alpha': 8.0}",
           )
       )
-
-  def test_rejects_server_mode_false(self):
-    for rollout_engine in ("inprocess_vllm", "vllm", "vanilla"):
-      with self.subTest(rollout_engine=rollout_engine):
-        with self.assertRaisesRegex(ValueError, "server_mode: false"):
-          rollout._validate_rollout_config(
-              _hp(
-                  f"rollout_engine={rollout_engine}",
-                  "vllm_config.server_mode=false",
-              )
-          )
-    rollout._validate_rollout_config(
-        _hp("rollout_engine=vllm", "vllm_config.server_mode=true")
-    )
 
   def test_rejects_non_default_tpu_backend_type_for_non_inprocess_vllm(self):
     for rollout_engine in ("vllm", "vanilla"):
@@ -649,17 +631,11 @@ class SamplerTest(absltest.TestCase):
 
   def test_vllm_sampler_always_runs_in_server_mode(self):
     self.assertTrue(_vllm_rollout_config().rollout_vllm_server_mode)
-    self.assertTrue(
-        _vllm_rollout_config(
-            "vllm_config.server_mode=true"
-        ).rollout_vllm_server_mode
-    )
 
   def test_vllm_sampler_rejects_lora_with_data_parallelism(self):
     with self.assertRaisesRegex(ValueError, "LoRA is not supported"):
       _vllm_engine_kwargs(
           "rollout_model_config.mesh.shape=(2,1)",
-          "vllm_config.tensor_parallel_size=1",
           "rollout_model_config.lora_config={'rank': 8, 'alpha': 8.0}",
       )
 
@@ -1061,10 +1037,7 @@ class RolloutMainTest(absltest.TestCase):
       events.append(f"restore:{params.sampler}")
       return True
 
-    argv = [
-        "rollout_engine=vanilla",
-        "cluster_config.registry_module=my_task.registry",
-    ]
+    argv = [*_TASK_ARGV, "rollout_engine=vanilla"]
     with contextlib.ExitStack() as stack:
       mock_import = stack.enter_context(
           mock.patch.object(rollout.importlib, "import_module")
@@ -1109,7 +1082,9 @@ class RolloutMainTest(absltest.TestCase):
       setup_metrics = stack.enter_context(
           mock.patch.object(otel_setup, "setup_metrics", return_value=False)
       )
-      rollout.main(["cluster_config.run_id=run_1"], context=mock.Mock())
+      rollout.main(
+          [*_TASK_ARGV, "cluster_config.run_id=run_1"], context=mock.Mock()
+      )
 
     setup_metrics.assert_called_once_with(
         default_service_name="tunix-rollout",
@@ -1122,7 +1097,7 @@ class RolloutMainTest(absltest.TestCase):
     serve_worker.assert_awaited_once()
 
   def test_main_serves_with_the_config_fingerprint(self):
-    argv = ["cluster_config.run_id=run_1"]
+    argv = [*_TASK_ARGV, "cluster_config.run_id=run_1"]
     worker_service = mock.MagicMock(trajectory_store=None)
     with contextlib.ExitStack() as stack:
       # `main` sets environment defaults; restore the test's environment.
@@ -1169,7 +1144,9 @@ class RolloutMainTest(absltest.TestCase):
               node_utils, "serve_worker", new_callable=mock.AsyncMock
           )
       )
-      rollout.main(["cluster_config.run_id=run_1"], context=mock.Mock())
+      rollout.main(
+          [*_TASK_ARGV, "cluster_config.run_id=run_1"], context=mock.Mock()
+      )
 
     drain_fn = serve_worker.call_args.kwargs["drain_fn"]
     with self.assertRaisesRegex(RuntimeError, "failed to stop cleanly"):
@@ -1204,6 +1181,7 @@ class RolloutMainTest(absltest.TestCase):
       with self.assertRaisesRegex(RuntimeError, "stop after logging"):
         rollout.main(
             [
+                *_TASK_ARGV,
                 "vllm_config.skip_jax_precompile=false",
                 "weight_sync_config.raiden_data_nics=eth1",
             ],
@@ -1232,7 +1210,7 @@ class RolloutMainTest(absltest.TestCase):
           )
       )
       with self.assertRaisesRegex(RuntimeError, "stop after logging"):
-        rollout.main([], context=mock.Mock())
+        rollout.main(list(_TASK_ARGV), context=mock.Mock())
     self.assertEqual(os.environ["VLLM_WORKER_MULTIPROC_METHOD"], "fork")
 
   def test_main_rejects_another_library_value_before_starting(self):
@@ -1241,8 +1219,16 @@ class RolloutMainTest(absltest.TestCase):
       with self.assertRaisesRegex(
           ValueError, "set vllm_config.skip_jax_precompile instead"
       ):
-        rollout.main([], context=mock.Mock())
+        rollout.main(list(_TASK_ARGV), context=mock.Mock())
     mock_import.assert_not_called()
+
+  def test_main_requires_a_task(self):
+    with self.assertRaisesRegex(
+        ValueError,
+        "names no task: data_module, env_class_path, agent_class_path,"
+        " cluster_config.registry_module must be set",
+    ):
+      rollout.main([], context=mock.Mock())
 
   def test_main_raises_without_discovery_context(self):
     with self.assertRaisesRegex(RuntimeError, "Require discovery API"):
@@ -1275,6 +1261,7 @@ class RolloutMainTest(absltest.TestCase):
       )
       rollout.main(
           [
+              *_TASK_ARGV,
               "cluster_config.target=external",
               "cluster_config.artifact_root=/artifacts/run",
               "execution_targets.rollout=jax:gpu",
@@ -1308,6 +1295,7 @@ class RolloutMainTest(absltest.TestCase):
       )
       rollout.main(
           [
+              *_TASK_ARGV,
               "cluster_config.target=external",
               "cluster_config.artifact_root=/artifacts/run",
               "execution_targets.rollout=torch:tpu",

@@ -171,11 +171,6 @@ class DataPlaneBenchmarkTest(parameterized.TestCase):
     with self.assertRaisesRegex(ValueError, err_regex):
       mock_trainer.build_mock_trainer_worker(hp, "trainer-0")
 
-    bad_logps_hp = self._resolve("rollout_config.return_logprobs=false")
-    with self.assertRaisesRegex(ValueError, "return_logprobs"):
-      mock_rollout.build_mock_rollout_worker(
-          bad_logps_hp, "rollout-0", tokenizer
-      )
     bad_eos_hp = self._resolve("rollout_config.eos_tokens='tok tok'")
     with self.assertRaisesRegex(ValueError, "eos_tokens"):
       mock_rollout.build_mock_rollout_worker(bad_eos_hp, "rollout-0", tokenizer)

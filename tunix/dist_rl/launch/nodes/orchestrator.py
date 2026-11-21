@@ -322,10 +322,9 @@ def load_prompt_items(
     The prompt items, repeated indefinitely.
 
   Raises:
-    ValueError: If `data_module` is empty, `apply_chat_template_to_dataset` is
-      set, `task_name` is whitespace-only or empty when records omit
-      `task_name`, the dataset is empty, or its first record is malformed
-      (including an empty or whitespace-only `task_name`).
+    ValueError: If `data_module` is empty, `task_name` is whitespace-only or
+      empty when records omit `task_name`, the dataset is empty, or its first
+      record is malformed (including an empty or whitespace-only `task_name`).
     TypeError: If `create_dataset` does not return a `grain.MapDataset`, or the
       first record, its `metadata`, or its `task_name` has an invalid type.
   """
@@ -334,11 +333,6 @@ def load_prompt_items(
     raise ValueError(
         "data_module must name the task's dataset module, which provides"
         " create_dataset(**data_config) -> grain.MapDataset."
-    )
-  if hp.config["apply_chat_template_to_dataset"]:
-    raise ValueError(
-        "apply_chat_template_to_dataset must be false: the rollout workers"
-        " apply the chat template (chat_parser_config)."
     )
   default_task_name = str(hp.config["task_name"])
   if default_task_name and not default_task_name.strip():
@@ -804,6 +798,7 @@ def main(
       force=True,
   )
   hp = resolve_config.initialize(argv)
+  resolve_config.validate_task(hp)
   if hp.config_mapping("cluster_config")["debug"]:
     # Enables debug logging, including full sampler responses.
     logging.getLogger().setLevel(logging.DEBUG)

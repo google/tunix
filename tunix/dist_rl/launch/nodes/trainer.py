@@ -189,10 +189,12 @@ def _tunix_training_config(
   Returns:
     The trainer config.
   """
-  rl_train = hp.config_mapping(_RL_TRAINING_KEY)
   built = hp.obtain_training_config_dict(_RL_TRAINING_KEY)
   return peft_trainer_v2.TrainingConfig(
-      eval_every_n_steps=int(rl_train["eval_every_n_steps"]),
+      # `TrainingConfig` requires it, but only `PeftTrainer.train()` reads it.
+      # The orchestrator drives `fwd_bwd` and `update` instead and runs no
+      # evaluation.
+      eval_every_n_steps=1,
       gradient_accumulation_steps=gradient_accumulation_steps,
       metrics_prefix="actor",
       pbar_description="Actor Training",

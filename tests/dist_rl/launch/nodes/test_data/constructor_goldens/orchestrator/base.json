@@ -11,7 +11,7 @@
       "tunix.rl.algorithm_config.GRPOConfig": {
         "kwargs": {
           "advantage_estimator": "grpo",
-          "beta": 0.04,
+          "beta": 0.0,
           "epsilon": 0.2,
           "epsilon_high": 0.28,
           "kl_loss_mode": "low_var_kl",
@@ -57,7 +57,7 @@
         "kwargs": {
           "flush_every_n_steps": 1,
           "log_dir": "/artifacts/metrics",
-          "project_name": "trellis-gsm8k",
+          "project_name": "tunix-dist-rl",
           "run_name": ""
         }
       }
@@ -72,7 +72,7 @@
           },
           "flush_every_n_steps": 1,
           "log_dir": "/artifacts/metrics",
-          "project_name": "trellis-gsm8k",
+          "project_name": "tunix-dist-rl",
           "run_name": ""
         }
       }
@@ -198,7 +198,7 @@
         "kwargs": {
           "min_workers": {
             "Role.ACTOR": 1,
-            "Role.REFERENCE": 1,
+            "Role.REFERENCE": 0,
             "Role.ROLLOUT": 1
           },
           "timeout": 1.0

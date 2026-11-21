@@ -31,6 +31,7 @@ from collections.abc import Mapping, MutableMapping, Sequence
 import datetime
 import getpass
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -58,6 +59,109 @@ DEFAULT_BASE_CONFIG_PATH = LAUNCH_DIR / "base_dist_config.yaml"
 # Program name (`argv[0]`) that `DistHyperParameters` passes to
 # `HyperParameters`; dist callers pass overrides only.
 _DIST_PROG: Final[str] = "dist_rl"
+
+_MODEL_SECTIONS: Final[tuple[str, ...]] = (
+    "model_config",
+    "actor_model_config",
+    "reference_model_config",
+    "rollout_model_config",
+)
+_NOT_READ: Final[str] = "the distributed RL nodes never read it, so remove it"
+# Keys that earlier versions of `base_dist_config.yaml` had, mapped to what to
+# do instead. An override that sets one fails with that hint instead of the
+# unknown-key error. A whole section is listed by its name.
+_RETIRED_KEYS: Final[Mapping[str, str]] = types.MappingProxyType({
+    **dict.fromkeys(
+        (
+            "agentic_ppo_config",
+            "critic_model_config",
+            "data_directory",
+            "data_source",
+            "dataset_name",
+            "grpo_config",
+            "max_target_length",
+            "num_batches",
+            "offload_to_cpu",
+            "ppo_config",
+            "prompt_key",
+            "rl_training_config.critic_optimizer_config",
+            "rl_training_config.data_sharding_axis",
+            "rl_training_config.gradient_accumulation_steps",
+            "rl_training_config.max_inflight_computations",
+            "rl_training_config.perf_metrics_options",
+            "rl_training_config.rollout_micro_batch_size",
+            "tfds_download",
+            "tokenizer_config.add_bos",
+            "tokenizer_config.add_eos",
+            "training_mode",
+            "vllm_config.model_version",
+        ),
+        _NOT_READ,
+    ),
+    **{
+        f"{section}.{key}": _NOT_READ
+        for section, key in itertools.product(
+            _MODEL_SECTIONS,
+            ("model_display", "mesh.allocation_policy"),
+        )
+    },
+    "training_config": (
+        "the distributed RL nodes never read it; set rl_training_config"
+        " instead"
+    ),
+    "optimizer_config": (
+        "the distributed RL nodes never read it; set"
+        " rl_training_config.actor_optimizer_config instead"
+    ),
+    "apply_chat_template_to_dataset": (
+        "the rollout workers apply the chat template (chat_parser_config), so"
+        " remove it"
+    ),
+    "rollout_config.return_logprobs": (
+        "the rollout always returns logprobs, so remove it"
+    ),
+    "vllm_config.server_mode": (
+        "the vLLM rollout engines always run in server mode, so remove it"
+    ),
+    "vllm_config.tensor_parallel_size": (
+        "it is the 'tp' axis of rollout_model_config.mesh, so remove it"
+    ),
+    "vllm_config.data_parallel_size": (
+        "it is the 'fsdp' axis of rollout_model_config.mesh, so remove it"
+    ),
+})
+_NO_EVALUATION: Final[str] = "the distributed RL path runs no evaluation yet"
+# Keys the distributed RL path does not implement yet, with the only value it
+# accepts and why. The keys stay in `base_dist_config.yaml` (each with a TODO)
+# so that setting one fails loudly instead of being ignored.
+_UNIMPLEMENTED_KEYS: Final[Mapping[str, tuple[int | None, str]]] = (
+    types.MappingProxyType({
+        **{
+            f"{section}.rng_seed": (
+                None,
+                (
+                    "LoRA always initializes with seed 0, and rollout sampling"
+                    " is not seeded"
+                ),
+            )
+            for section in _MODEL_SECTIONS
+        },
+        "num_train_epochs": (
+            None,
+            (
+                "the dataset repeats and rl_training_config.max_steps sets the"
+                " training length"
+            ),
+        ),
+        "train_fraction": (None, _NO_EVALUATION),
+        "num_test_batches": (None, _NO_EVALUATION),
+        "rl_training_config.eval_every_n_steps": (None, _NO_EVALUATION),
+        "agentic_grpo_config.num_iterations": (
+            1,
+            "each rollout batch gets one optimizer pass",
+        ),
+    })
+)
 
 
 def _dist_argv(overrides: Sequence[str]) -> list[str]:
@@ -120,15 +224,23 @@ class DistHyperParameters(cli_config.HyperParameters):
 
   Takes overrides only (see `_dist_argv`). Override files and `key=value`
   arguments deep-merge (`merge_replace_keys`), and every override key must be
-  in the base schema (`validate_nested`).
+  in the base schema (`validate_nested`). A key in `_RETIRED_KEYS` fails with
+  what to do instead.
   """
 
   cluster_targets: execution_target.ClusterTargets
 
   def __init__(self, overrides: Sequence[str]) -> None:
-    super().__init__(
-        _dist_argv(overrides), merge_replace_keys=True, validate_nested=True
-    )
+    try:
+      super().__init__(
+          _dist_argv(overrides), merge_replace_keys=True, validate_nested=True
+      )
+    except cli_config.UnknownConfigKeyError as e:
+      if e.key not in _RETIRED_KEYS:
+        raise
+      raise ValueError(
+          f"{e.key} is no longer a config key: {_RETIRED_KEYS[e.key]}."
+      ) from e
     self.cluster_targets = finalize_dist_config(self)
 
 
@@ -286,7 +398,6 @@ def _finalize_dist_defaults(hp: cli_config.HyperParameters) -> None:
           artifact_root / "models" / str(role_cfg["model_name"])
       )
 
-  _sync_packed_token_budget(_mutable_section(hp, "training_config"))
   rl_train = _mutable_section(hp, "rl_training_config")
   _sync_packed_token_budget(rl_train)
   if rl_train["mini_batch_size"] is None:
@@ -835,6 +946,27 @@ def _validate_role_env(hp: cli_config.HyperParameters) -> None:
       )
 
 
+def _reject_unimplemented_settings(hp: cli_config.HyperParameters) -> None:
+  """Fails on a `_UNIMPLEMENTED_KEYS` key set to a value other than its own.
+
+  Args:
+    hp: Loaded configuration.
+
+  Raises:
+    NotImplementedError: If such a key has another value.
+  """
+  for key, (accepted, reason) in _UNIMPLEMENTED_KEYS.items():
+    section, _, name = key.rpartition(".")
+    value = hp.config_mapping(section)[name] if section else hp.config[name]
+    # `True == 1 == 1.0`, so require the exact type too.
+    if type(value) is type(accepted) and value == accepted:
+      continue
+    raise NotImplementedError(
+        f"{key}={value!r} is not supported yet ({reason}); leave it at"
+        f" {accepted!r}."
+    )
+
+
 def _validate_local_settings(hp: cli_config.HyperParameters) -> None:
   """Validates and normalizes `cluster_config.local` settings."""
   local = _mutable_section(hp, "cluster_config")["local"]
@@ -881,6 +1013,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   _validate_k8s_worker_jobsets(hp)
   _validate_rollout_replicas(hp)
   _validate_role_env(hp)
+  _reject_unimplemented_settings(hp)
   _validate_trajectory_logging(hp)
   _validate_rollout_logps_settings(hp)
   _validate_fault_tolerance(hp)
@@ -899,7 +1032,8 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
 
   actor_cfg = hp.config_mapping("actor_model_config")
   actor_axes = hp.mesh_axes("actor_model_config")
-  rollout_axes = hp.mesh_axes("rollout_model_config")
+  # Parses the rollout mesh, so a malformed one fails here.
+  hp.mesh_axes("rollout_model_config")
   if actor_cfg["model_source"] == "maxtext":
     if not actor_cfg["model_path"]:
       raise ValueError(
@@ -915,13 +1049,6 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
             f" ({actor_axes['fsdp']}) when model_source='maxtext'."
         )
 
-  vllm = hp.config_mapping("vllm_config")
-  vllm_tp = vllm["tensor_parallel_size"]
-  if vllm_tp is not None and int(vllm_tp) != rollout_axes["tp"]:
-    raise ValueError(
-        f"vllm_config.tensor_parallel_size ({vllm_tp}) must match"
-        f" rollout_model_config.mesh tp ({rollout_axes['tp']})."
-    )
   _validate_typed_vllm_settings(hp)
 
   for role_key in (
@@ -993,12 +1120,6 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
     raise ValueError(
         "agentic_grpo_config.num_generations must be > 1 for GRPO, got"
         f" {num_generations}."
-    )
-  if grpo["num_iterations"] != 1:
-    raise ValueError(
-        "agentic_grpo_config.num_iterations must be 1, got"
-        f" {grpo['num_iterations']!r}: StandardRLProgram runs one optimizer"
-        " pass per rollout batch."
     )
   micro_batch = int(rl_train["train_micro_batch_size"])
   if micro_batch <= 0:
@@ -1139,13 +1260,6 @@ def _validate_typed_vllm_settings(hp: cli_config.HyperParameters) -> None:
   for key in ("return_routed_experts", "detokenize"):
     if not isinstance(vllm[key], bool):
       raise TypeError(f"vllm_config.{key} must be a bool, got {vllm[key]!r}.")
-  if vllm["server_mode"] is not None and not isinstance(
-      vllm["server_mode"], bool
-  ):
-    raise TypeError(
-        "vllm_config.server_mode must be a bool or null, got"
-        f" {vllm['server_mode']!r}."
-    )
   common_configs.validate_routed_experts_encode_config(
       vllm["routed_experts_encode_mode"], vllm["routed_experts_num_experts"]
   )
@@ -1548,6 +1662,54 @@ def initialize(overrides: Sequence[str]) -> DistHyperParameters:
   return DistHyperParameters(overrides)
 
 
+# Top-level keys that name the task a run trains on. `base_dist_config.yaml`
+# leaves them, and `cluster_config.registry_module`, empty; each task YAML sets
+# them.
+_TASK_KEYS: Final[tuple[str, ...]] = (
+    "data_module",
+    "env_class_path",
+    "agent_class_path",
+)
+
+
+def task_config_error(hp: cli_config.HyperParameters) -> str:
+  """Returns why the config cannot start a run, or "" when it names a task.
+
+  A run needs the task's dataset (`data_module`), the registered names of its
+  environment and agent (`env_class_path`, `agent_class_path`), and the module
+  that registers them (`cluster_config.registry_module`). `initialize` does not
+  check this: some callers resolve a config without starting a run, e.g.
+  `launch.sh stop`.
+
+  Args:
+    hp: Resolved configuration.
+  """
+  missing = [key for key in _TASK_KEYS if not hp.config[key]]
+  if not hp.config_mapping("cluster_config")["registry_module"]:
+    missing.append("cluster_config.registry_module")
+  if not missing:
+    return ""
+  return (
+      f"The config names no task: {', '.join(missing)} must be set. Pass the"
+      " task's YAML as override_config_file=<path> (e.g."
+      " tunix/dist_rl/examples/math_gsm8k_dist/gsm8k.yaml)."
+  )
+
+
+def validate_task(hp: cli_config.HyperParameters) -> None:
+  """Checks that the config names a task (see `task_config_error`).
+
+  Args:
+    hp: Resolved configuration.
+
+  Raises:
+    ValueError: If a task key is empty.
+  """
+  error = task_config_error(hp)
+  if error:
+    raise ValueError(error)
+
+
 def plain_config(hp: cli_config.HyperParameters) -> dict[str, object]:
   """Returns the resolved config as plain, JSON-serializable containers.
 
@@ -1703,6 +1865,8 @@ def render_bash_exports(hp: DistHyperParameters) -> str:
 
   exports: dict[str, object] = {
       "CLUSTER_TARGET": cluster["target"],
+      # Empty when the config names a task (`task_config_error`).
+      "TASK_CONFIG_ERROR": task_config_error(hp),
       "EXECUTION_PLACEMENT": cluster_targets.placement.value,
       "TRAINER_FRAMEWORK": cluster_targets.trainer.framework.value,
       "TRAINER_ACCELERATOR": cluster_targets.trainer.accelerator.value,

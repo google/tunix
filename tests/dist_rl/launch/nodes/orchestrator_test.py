@@ -507,11 +507,11 @@ class BuildersTest(absltest.TestCase):
   def test_required_workers_adds_reference_only_for_kl_penalty(self):
     role = datatypes.Role
     self.assertEqual(
-        orchestrator.required_workers(_config()),
+        orchestrator.required_workers(_config("agentic_grpo_config.beta=0.04")),
         {role.ACTOR: 1, role.ROLLOUT: 1, role.REFERENCE: 1},
     )
     self.assertEqual(
-        orchestrator.required_workers(_config("agentic_grpo_config.beta=0.0")),
+        orchestrator.required_workers(_config()),
         {role.ACTOR: 1, role.ROLLOUT: 1, role.REFERENCE: 0},
     )
 
@@ -615,14 +615,6 @@ class LoadPromptItemsTest(absltest.TestCase):
   def test_requires_data_module(self):
     with self.assertRaisesRegex(ValueError, "data_module must name"):
       orchestrator.load_prompt_items(_config())
-
-  def test_rejects_dataset_chat_template(self):
-    hp = _config(
-        f"data_module={self._data_module()}",
-        "apply_chat_template_to_dataset=true",
-    )
-    with self.assertRaisesRegex(ValueError, "apply_chat_template_to_dataset"):
-      orchestrator.load_prompt_items(hp)
 
   def test_requires_grain_map_dataset(self):
     for i, returned in enumerate(
@@ -1288,6 +1280,8 @@ class MainTest(absltest.TestCase):
         content=f"""\
 data_module: "{data_module.full_path}"
 task_name: "gsm8k"
+env_class_path: "gsm8kenv"
+agent_class_path: "gsm8kagent"
 data_config:
   num_records: 3
 reward_functions:
@@ -1298,6 +1292,8 @@ agentic_grpo_config:
 rl_training_config:
   metrics_logging_options:
     log_dir: "{tmp_dir.mkdir('metrics').full_path}"
+cluster_config:
+  registry_module: "task_registry"
 """,
     ).full_path
 
@@ -1471,8 +1467,22 @@ rl_training_config:
         content=_records_module("[{'prompts': 'q', 'answer': 'a'}]"),
     )
     for argv, regex in (
-        ([], "data_module must name"),
-        ([f"data_module={flat_records.full_path}"], "unexpected keys"),
+        (
+            [],
+            (
+                "names no task: data_module, env_class_path, agent_class_path,"
+                " cluster_config.registry_module must be set"
+            ),
+        ),
+        (
+            [
+                f"data_module={flat_records.full_path}",
+                "env_class_path=my_env",
+                "agent_class_path=my_agent",
+                "cluster_config.registry_module=my_task.registry",
+            ],
+            "unexpected keys",
+        ),
     ):
       with self.subTest(argv=argv):
         with (
