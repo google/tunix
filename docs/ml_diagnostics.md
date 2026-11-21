@@ -187,10 +187,11 @@ learner.train(train_dataset)
 | :--- | :--- | :--- | :--- |
 | `start_invocation` | `int` | `2` | Zero-indexed invocation count at which to start profiling for each role. Set to a higher value such as `20` to skip initial warmup and XLA compilation. |
 | `num_invocations` | `int` | `1` | Number of invocations to profile for each role once `start_invocation` is reached. |
-| `output_dir` | `str` | `""` | Output directory for raw JAX `.xplane.pb` traces when `managed_mldiagnostics=False`. |
+| `output_dir` | `str` | `""` | Output directory for raw JAX `.xplane.pb` or `.xplane.riegeli` traces when `managed_mldiagnostics=False`. |
 | `mldiagnostics_dir` | `str` | `""` | Optional local or GCS output directory when `managed_mldiagnostics=False` (overrides `output_dir`). |
 | `managed_mldiagnostics` | `bool` | `False` | If `True`, uploads traces to the active `MLRun` for viewing in the ML Diagnostics UI. |
 | `timeout_secs` | `float` | `60.0` | Timeout in seconds to wait for trace finalization and upload. |
+| `enable_continuous_profiling` | `bool` | `False` | If `True`, streams chunked `.xplane.riegeli` traces to avoid the 2 GiB single-protobuf limit (ignored when `managed_mldiagnostics=True`). Requires JAX >= 0.11.2. |
 
 --------------------------------------------------------------------------------
 

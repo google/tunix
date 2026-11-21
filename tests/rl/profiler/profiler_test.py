@@ -14,14 +14,24 @@
 
 """Tests for RL Profiler invocation bounding and lifecycle."""
 
+import pathlib
 from unittest import mock
+
 from absl.testing import absltest
+from absl.testing import parameterized
+import jax
+import jax.numpy as jnp
 from tunix.common import configs
 from tunix.common.datatypes import Role
 from tunix.rl.profiler import profiler
 
 
-class RLProfilerTest(absltest.TestCase):
+@jax.jit
+def _rollout_step(inputs: jax.Array) -> jax.Array:
+  return jnp.tanh(inputs @ inputs + 1.0)
+
+
+class RLProfilerTest(parameterized.TestCase):
 
   def test_should_profile_window_matching(self):
     config = configs.RLProfileConfig(
@@ -529,6 +539,38 @@ class RLProfilerTest(absltest.TestCase):
       mock_xprof.return_value._ensure_initialized.assert_called_once()
       self.assertEqual(p._profiler, mock_xprof.return_value)
 
+  def test_mldiagnostics_warns_when_continuous_profiling_enabled(self):
+    mock_xprof = mock.MagicMock()
+    with (
+        mock.patch.object(profiler, "_HAS_MLDIAG", True),
+        mock.patch.object(profiler, "mldiag_xprof", mock_xprof),
+    ):
+      with self.assertLogs(level="WARNING") as warning_logs:
+        rl_profiler = profiler.RLProfiler(
+            configs.RLProfileConfig(
+                start_invocation=1,
+                num_invocations=1,
+                managed_mldiagnostics=True,
+                enable_continuous_profiling=True,
+            )
+        )
+      self.assertEqual(rl_profiler._profiler, mock_xprof.return_value)
+      self.assertIn(
+          "enable_continuous_profiling=True is ignored when"
+          " managed_mldiagnostics=True",
+          "".join(warning_logs.output),
+      )
+
+      with self.assertNoLogs(level="WARNING"):
+        profiler.RLProfiler(
+            configs.RLProfileConfig(
+                start_invocation=1,
+                num_invocations=1,
+                managed_mldiagnostics=True,
+                enable_continuous_profiling=False,
+            )
+        )
+
   def test_mldiagnostics_uninitialized_run_raises_at_startup(self):
     config = configs.RLProfileConfig(
         start_invocation=1,
@@ -568,6 +610,91 @@ class RLProfilerTest(absltest.TestCase):
 
     backend.stop()
     mock_stop.assert_called_once()
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="disabled_by_default",
+          enable_continuous_profiling=False,
+          expected_advanced_config={},
+      ),
+      dict(
+          testcase_name="enabled",
+          enable_continuous_profiling=True,
+          expected_advanced_config={"enable_continuous_profiling": True},
+      ),
+  )
+  def test_rl_profiler_forwards_continuous_profiling_option(
+      self, enable_continuous_profiling, expected_advanced_config
+  ):
+    mock_start = self.enter_context(
+        mock.patch.object(
+            profiler.jax.profiler,
+            profiler.jax.profiler.start_trace.__name__,
+            autospec=True,
+        )
+    )
+    output_dir = self.create_tempdir().full_path
+    config = configs.RLProfileConfig(
+        start_invocation=0,
+        num_invocations=1,
+        output_dir=output_dir,
+        enable_continuous_profiling=enable_continuous_profiling,
+    )
+    rl_profiler = profiler.RLProfiler(config)
+    rl_profiler.maybe_activate(Role.ACTOR.value)
+
+    mock_start.assert_called_once()
+    options = mock_start.call_args.kwargs["profiler_options"]
+    self.assertEqual(options.session_id, "actor_invocation_0")
+    self.assertEqual(options.advanced_configuration, expected_advanced_config)
+
+  def test_rl_profiler_continuous_profiling_writes_xplane_riegeli_e2e(self):
+    if jax.__version_info__ < (0, 11, 2):
+      self.skipTest(
+          "Chunked .xplane.riegeli export in jax.profiler.stop_trace requires"
+          " jax >= 0.11.2 (jaxlib >= 0.11.1)."
+      )
+
+    temp_dir = self.create_tempdir().full_path
+    config = configs.RLProfileConfig(
+        start_invocation=0,
+        num_invocations=1,
+        output_dir=temp_dir,
+        enable_continuous_profiling=True,
+    )
+    rl_profiler = profiler.RLProfiler(config)
+    inputs = jnp.ones((16, 16), dtype=jnp.float32)
+
+    self.assertTrue(rl_profiler.should_profile(Role.ROLLOUT.value))
+    self.assertTrue(rl_profiler.should_profile(Role.ACTOR.value))
+
+    with rl_profiler.profile(Role.ROLLOUT.value) as scope:
+      with jax.profiler.TraceAnnotation("tunix_continuous_rollout_step"):
+        rollout_output = _rollout_step(inputs)
+      scope.set_future_output(rollout_output)
+
+    with rl_profiler.profile(Role.ACTOR.value) as scope:
+      with jax.profiler.TraceAnnotation("tunix_continuous_actor_step"):
+        actor_output = _rollout_step(rollout_output)
+      scope.set_future_output(actor_output)
+
+    rl_profiler.close()
+
+    self.assertFalse(rl_profiler.should_profile(Role.ROLLOUT.value))
+    self.assertFalse(rl_profiler.should_profile(Role.ACTOR.value))
+
+    profile_root = pathlib.Path(temp_dir) / "plugins" / "profile"
+    for session_name in ("rollout_invocation_0", "actor_invocation_0"):
+      session_dir = profile_root / session_name
+      self.assertTrue(
+          session_dir.is_dir(),
+          f"Expected session trace dir {session_dir} to exist.",
+      )
+      riegeli_files = list(session_dir.glob("*.xplane.riegeli"))
+      self.assertLen(riegeli_files, 1)
+      self.assertGreater(riegeli_files[0].stat().st_size, 0)
+
+    self.assertEmpty(list(pathlib.Path(temp_dir).rglob("*.xplane.pb")))
 
   def test_profile_context_manager_static_future_output(self):
     config = configs.RLProfileConfig(
