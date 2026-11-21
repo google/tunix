@@ -441,13 +441,12 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
           pids = [g[0].prompt_id for g in groups or () if g]
           step_versions.append((step, pids))
           # Before Step 10 (`V_new = 11 -> min_retained = 1`), `zombie_v0`
-          # (`staged_policy_version = 0`) is still retained; at Step 10's
-          # `sync_weights` (which runs right BEFORE `commit`), `zombie_v0`
-          # HAS JUST BEEN EVICTED (`0 < 1`)!
+          # (`staged_policy_version = 0`) is still retained. Step 10's
+          # `sync_weights` round evicts it (`0 < 1`), but with
+          # `max_staleness > 0` that round may still be in flight at this
+          # `commit`; the eviction is asserted after the run instead.
           if step < 10:
             self.assertEqual(zombie_buf.zombie_evictions_total, 0)
-          elif step == 10:
-            self.assertEqual(zombie_buf.zombie_evictions_total, 1)
           orig_commit(step, groups=groups)
 
         program.scored_q.commit = (  # type: ignore[method-assign]

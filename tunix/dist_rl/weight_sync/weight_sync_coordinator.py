@@ -26,15 +26,17 @@ One round, in order:
 
     source                          destination
     ------                          -----------
-                                    bind_weight_sync()       idempotent; builds
-                                                             the synchronizer if
-                                                             absent, keeps ports
-                                    get_weight_sync_metadata()
     prepare_weight_sync()                                    (both sides still
       rebind arrays, FFI D2H,                                serving; metadata
       return this round's metadata                           and registration
-    [register all units]                                     happen before any
-                                    pre_weight_sync()        downtime)
+      [source_prepared is set]                               happen before any
+                                    bind_weight_sync()       downtime)
+                                      idempotent; builds
+                                      the synchronizer if
+                                      absent, keeps ports
+                                    get_weight_sync_metadata()
+    [register all units]
+                                    pre_weight_sync()
                                       stop admitting, drain,
                                       free prefix + KV cache
     [handler.transfer]  --------->  (transport delivers the prepared weights)
@@ -834,6 +836,7 @@ class WeightSyncCoordinator:
           datatypes.AdmissionStatus.ACTIVE,
       ),
       min_retained_policy_version: int | None = None,
+      source_prepared: asyncio.Event | None = None,
       **extra_config,
   ) -> WeightSyncResult:
     """Runs one full round; returns only if it committed.
@@ -850,6 +853,11 @@ class WeightSyncCoordinator:
         to include. Defaults to `(ACTIVE,)`.
       min_retained_policy_version: Optional zombie-eviction floor forwarded on
         `WeightSyncRequest` to rollout workers during `post_weight_sync`.
+      source_prepared: Set once every source has staged this round's weights
+        and returned its metadata. A caller running this round as a task may
+        then let the source train again, so the handler must transfer only the
+        staged copy. Never set if the round fails before or during source
+        prepare.
       **extra_config: Carried to the workers in the request.
     """
     if self._poisoned:
@@ -860,6 +868,15 @@ class WeightSyncCoordinator:
     if self._in_flight:
       raise RuntimeError(
           "a weight sync round is already in flight; rounds must not overlap"
+      )
+    if (
+        source_prepared is not None
+        and not self._handler.transfers_from_staged_copy
+    ):
+      raise ValueError(
+          "the source may train while this round runs, but the handler's"
+          " transfer reads the source's live weights; transfer the staged"
+          " copy instead (for Raiden: skip_d2h=True with no skip_tiling layer)"
       )
     if (
         self._last_committed_version is not None
@@ -878,6 +895,7 @@ class WeightSyncCoordinator:
           extra_config,
           destination_statuses=destination_statuses,
           min_retained_policy_version=min_retained_policy_version,
+          source_prepared=source_prepared,
       )
     finally:
       elapsed_time = time.monotonic() - start_time
@@ -891,6 +909,7 @@ class WeightSyncCoordinator:
       *,
       destination_statuses: Collection[datatypes.AdmissionStatus],
       min_retained_policy_version: int | None = None,
+      source_prepared: asyncio.Event | None = None,
   ) -> WeightSyncResult:
     round_index = self._round_index
     self._round_index += 1
@@ -971,7 +990,25 @@ class WeightSyncCoordinator:
       # Everything up to `pre` runs while the destinations are still serving:
       # bind (a no-op on an already-bound worker), metadata collection, and
       # registration cost no downtime. Failures here need no rollback either.
+      # The source goes first so `source_prepared` fires as early as it can.
       try:
+        # Metadata is collected exactly once and the same objects flow to both
+        # registration and the request. Collecting twice would hand the
+        # controller endpoints from a different rebind than the one staged.
+        src_meta_lists = await asyncio.gather(*[
+            asyncio.wait_for(
+                handle.asubmit("prepare_weight_sync", request),
+                self._timeouts.source_prepare,
+            )
+            for _, handle in sources
+        ])
+        src_metadata = [
+            weight_sync.dict_to_metadata(m)
+            for per_source in src_meta_lists
+            for m in per_source
+        ]
+        if src_metadata and source_prepared is not None:
+          source_prepared.set()
         await asyncio.gather(*[
             asyncio.wait_for(
                 handle.asubmit("bind_weight_sync"), self._timeouts.bind
@@ -985,16 +1022,6 @@ class WeightSyncCoordinator:
             )
             for _, handle in destinations
         ])
-        # Metadata is collected exactly once and the same objects flow to both
-        # registration and the request. Collecting twice would hand the
-        # controller endpoints from a different rebind than the one staged.
-        src_meta_lists = await asyncio.gather(*[
-            asyncio.wait_for(
-                handle.asubmit("prepare_weight_sync", request),
-                self._timeouts.source_prepare,
-            )
-            for _, handle in sources
-        ])
       except asyncio.CancelledError:
         raise
       except Exception as e:  # pylint: disable=broad-except
@@ -1005,11 +1032,6 @@ class WeightSyncCoordinator:
             " quiesced; no rollback needed"
         ) from e
 
-      src_metadata = [
-          weight_sync.dict_to_metadata(m)
-          for per_source in src_meta_lists
-          for m in per_source
-      ]
       dst_metadata = [
           weight_sync.dict_to_metadata(m)
           for per_dest in dst_meta_lists

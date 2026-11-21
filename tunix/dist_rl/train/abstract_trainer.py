@@ -272,6 +272,10 @@ class AbstractTrainer(Protocol):
     Called once the round's transfer is complete. Default implementation is a
     no-op for trainers that hold nothing between prepare and release.
 
+    May run on another thread than, and at the same time as, any other method
+    except `prepare_weight_sync` and `close`: the trainer may already be
+    training on the next batch.
+
     Args:
       sync_request: The same request passed to `prepare_weight_sync`.
 
