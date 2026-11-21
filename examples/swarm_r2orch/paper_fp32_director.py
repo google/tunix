@@ -356,9 +356,12 @@ def run_director_fidelity_gate(
   comp_ids = comp_ids[: max(1, valid_n)]
   samp_lps = samp_lps[: len(comp_ids)]
 
-  seq_ids = np.asarray(prompt_ids + comp_ids, dtype=np.int32)
-  logits = hub.eval_logits(seq_ids, role="solver", reference=False)
-  pred_slice = np.asarray(logits[len(prompt_ids) - 1 : len(seq_ids) - 1], dtype=np.float64)
+  seq_ids = prompt_ids + comp_ids
+  positions = list(range(len(prompt_ids) - 1, len(seq_ids) - 1))
+  pred_slice = np.asarray(
+      hub.eval_selected_logits(seq_ids, positions, role="solver", reference=False),
+      dtype=np.float64,
+  )
   learner_top1 = np.argmax(pred_slice, axis=-1).tolist()
   log_probs = pred_slice - np.log(
       np.sum(np.exp(pred_slice - np.max(pred_slice, axis=-1, keepdims=True)), axis=-1, keepdims=True)
