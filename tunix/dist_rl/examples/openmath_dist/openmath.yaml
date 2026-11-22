@@ -1,0 +1,175 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Strict on-policy GRPO defaults for Qwen3-0.6B on nvidia/OpenMathInstruct-2,
+# reproducing AI-Hypercomputer/tpu-recipes (rl/ironwood/qwen3-0.6b-grpo) with
+# tunix.dist_rl. Layered on top of `launch/common/base_dist_config.yaml`.
+
+model_config:
+  model_name: "Qwen3-0.6B"
+  model_source: "maxtext"
+  model_id: "Qwen/Qwen3-0.6B"
+  dtype: "bfloat16"
+  # Keep master weights and AdamW moments in FP32 (`weight_dtype=float32` in
+  # MaxText, matching upstream tpu-recipes) while activations/rollout use BF16.
+  load_dtype: "float32"
+  kwargs:
+    maxtext_model_name: "qwen3-0.6b"
+
+actor_model_config:
+  kwargs:
+    maxtext_model_name: "qwen3-0.6b"
+    attention: "flash"
+    warmup_steps_fraction: 0.1
+
+rollout_model_config:
+  kwargs:
+    maxtext_model_name: "qwen3-0.6b"
+
+tokenizer_config:
+  tokenizer_path: "Qwen/Qwen3-0.6B"
+
+chat_parser_config:
+  # `openmath.create_dataset` formats prompts with `gsm8k_rl.json` + Qwen3's
+  # `apply_chat_template(..., add_generation_prompt=True)` to match MaxText
+  # `train_rl.py` token-for-token.
+  type: "raw"
+  enable_thinking: false
+
+rollout_engine: "vllm"
+rollout_config:
+  max_prompt_length: 4096
+  total_generation_steps: 8192
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 50
+  eos_tokens: "151645,151643"
+
+vllm_config:
+  dtype: "bfloat16"
+  hbm_utilization: 0.75
+  enable_prefix_caching: false
+  async_scheduling: false
+  max_model_len: 16640
+  max_num_seqs: 64
+  max_num_batched_tokens: 33280
+  engine_kwargs:
+    block_size: 128
+    additional_config:
+      enable_continue_decode: true
+      max_decode_steps: 512
+
+weight_sync_config:
+  mode: "raiden"
+  use_weight_converter: true
+  prefuse_moe_weights: false
+  verify_weights: false
+  in_flight_weight_updates: false
+  raiden:
+    use_ffi: true
+    data_nics: "eth0"
+
+data_module: "tunix.dist_rl.examples.openmath_dist.openmath"
+registry_module: "tunix.dist_rl.examples.openmath_dist.openmath"
+task_name: "openmath"
+data_config:
+  data_files: "hf://datasets/nvidia/OpenMathInstruct-2@469216e3f46f4dacf476b382e192485ea51a143e/data/train_1M-*.parquet"
+  split: "train_1M"
+  shuffle: true
+  seed: 42
+  max_prompt_length: 4096
+  tokenizer_path: "Qwen/Qwen3-0.6B"
+  max_examples: 8192
+
+batch_size: 256
+rl_training_config:
+  mini_batch_size: 256
+  train_micro_batch_size: 32
+  max_seq_token_per_tpu: 12288
+  max_steps: 20
+  actor_optimizer_config:
+    opt_type: "adamw"
+    learning_rate: 1.0e-6
+    schedule_type: ""
+    b1: 0.9
+    b2: 0.99
+    eps: 1.0e-8
+    weight_decay: 0.0
+    opt_chain_type: "clip_by_global_norm"
+    chain_kwargs:
+      max_norm: 1.0
+  checkpointing_options:
+    save_interval_steps: 100
+    max_to_keep: 1000
+  profiler_options:
+    skip_first_n_steps: 1
+    profiler_steps: 1
+  metrics_logging_options:
+    project_name: "trellis-openmath"
+    flush_every_n_steps: 1
+
+dist_training_config:
+  precompile_trainer: true
+  maxtext_extra_config:
+    # Align MaxText's cosine LR schedule (`warmup_steps = 0.1 * 20 = 2`, cosine
+    # decay to 0) with `rl_training_config.max_steps` instead of inheriting
+    # `base.yml`'s `steps: 150_001`.
+    steps: 20
+    learning_rate_schedule_steps: 20
+    learning_rate_final_fraction: 0.0
+    # Use 512 Splash Attention tiles by default so the backward dKV kernel fits
+    # within TPU v5p's 16 MiB scoped VMEM limit (1024/2048 uses 17 MiB and only
+    # fits on TPU v6e / Ironwood tpu7x with larger VMEM).
+    sa_block_q: 512
+    sa_block_q_dkv: 512
+    sa_block_q_dq: 512
+    sa_block_kv: 512
+    sa_block_kv_compute: 512
+    sa_block_kv_dkv: 512
+    sa_block_kv_dkv_compute: 512
+    sa_block_kv_dq: 512
+    sa_use_base2_exp: false
+    remat_policy: "custom"
+    decoder_layer_input: "offload"
+    query_proj: "offload"
+    key_proj: "offload"
+    value_proj: "offload"
+
+agentic_grpo_config:
+  num_generations: 8
+  num_iterations: 1
+  beta: 0.0
+  epsilon: 0.2
+  epsilon_high: null
+  loss_algo: "grpo"
+  loss_agg_mode: "sequence-mean-token-mean"
+  kl_loss_mode: "kl"
+  advantage_estimator: "grpo"
+  sampler_is: null
+  sampler_is_threshold: 2.0
+  max_concurrency: 256
+  max_turns: 1
+  reward_mode: "env"
+  episode_timeout: 1800
+  off_policy_steps: 0
+  trajectory_group_order: "trajectory_completion"
+  use_rollout_logps: false
+
+env_class_path: "openmathenv"
+agent_class_path: "openmathagent"
+
+cluster_config:
+  artifact_root: "artifacts/openmath_qwen3_0p6b"
+  rpc_timeout_s: 3600.0
+  init_timeout_s: 7200.0
