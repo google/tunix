@@ -335,6 +335,43 @@ async def _run_parl_fidelity_audit(
   )
 
 
+def _summarize_eval_subset(
+    prefix: str,
+    parl_eps: list[Any],
+    parl_scores: list[Any],
+    ser_eps: list[Any],
+    ser_scores: list[Any],
+) -> dict[str, float]:
+  if not parl_eps or not ser_eps:
+    return {}
+  p_r = statistics.fmean([s.reward for s in parl_scores])
+  s_r = statistics.fmean([s.reward for s in ser_scores])
+  p_crit = statistics.fmean([float(e.critical_steps) for e in parl_eps])
+  p_tot = statistics.fmean([float(e.total_steps) for e in parl_eps])
+  s_crit = statistics.fmean([float(e.critical_steps) for e in ser_eps])
+  return {
+      f"eval/{prefix}parl_r_perf": p_r,
+      f"eval/{prefix}parl_em": statistics.fmean(
+          [s.components.get("em", 0.0) for s in parl_scores]
+      ),
+      f"eval/{prefix}parl_critical_steps": p_crit,
+      f"eval/{prefix}parl_total_steps": p_tot,
+      f"eval/{prefix}parl_speedup": p_tot / max(p_crit, 1e-6),
+      f"eval/{prefix}parl_mean_children": statistics.fmean(
+          [float(len(e.children)) for e in parl_eps]
+      ),
+      f"eval/{prefix}parl_parallel_rate": statistics.fmean(
+          [1.0 if len(e.children) >= 2 else 0.0 for e in parl_eps]
+      ),
+      f"eval/{prefix}serial_r_perf": s_r,
+      f"eval/{prefix}serial_em": statistics.fmean(
+          [s.components.get("em", 0.0) for s in ser_scores]
+      ),
+      f"eval/{prefix}serial_critical_steps": s_crit,
+      f"eval/{prefix}delta_r_perf_vs_serial": p_r - s_r,
+  }
+
+
 async def evaluate_serial_vs_parl(
     *,
     step_id: int,
@@ -390,24 +427,21 @@ async def evaluate_serial_vs_parl(
   )
   ser_scores = await serial_step.grade(ser_eps)
 
-  p_crit = statistics.fmean([float(e.critical_steps) for e in parl_eps])
-  p_tot = statistics.fmean([float(e.total_steps) for e in parl_eps])
-  s_crit = statistics.fmean([float(e.critical_steps) for e in ser_eps])
-  return {
-      "eval/parl_r_perf": statistics.fmean([s.reward for s in parl_scores]),
-      "eval/parl_em": statistics.fmean([s.components.get("em", 0.0) for s in parl_scores]),
-      "eval/parl_critical_steps": p_crit,
-      "eval/parl_total_steps": p_tot,
-      "eval/parl_speedup": p_tot / max(p_crit, 1e-6),
-      "eval/parl_mean_children": statistics.fmean([float(len(e.children)) for e in parl_eps]),
-      "eval/parl_parallel_rate": statistics.fmean([1.0 if len(e.children) >= 2 else 0.0 for e in parl_eps]),
-      "eval/serial_r_perf": statistics.fmean([s.reward for s in ser_scores]),
-      "eval/serial_critical_steps": s_crit,
-      "eval/delta_r_perf_vs_serial": (
-          statistics.fmean([s.reward for s in parl_scores])
-          - statistics.fmean([s.reward for s in ser_scores])
-      ),
-  }
+  out = _summarize_eval_subset("", parl_eps, parl_scores, ser_eps, ser_scores)
+  for kind, pref in (("wide_wikiqa", "wide_"), ("multihop_qa", "mh_")):
+    idx = [
+        i for i, e in enumerate(parl_eps) if eval_priv[e.task_id].get("kind") == kind
+    ]
+    out.update(
+        _summarize_eval_subset(
+            pref,
+            [parl_eps[i] for i in idx],
+            [parl_scores[i] for i in idx],
+            [ser_eps[i] for i in idx],
+            [ser_scores[i] for i in idx],
+        )
+    )
+  return out
 
 
 def _init_wandb(args: argparse.Namespace) -> Any:
@@ -430,6 +464,7 @@ def _init_wandb(args: argparse.Namespace) -> Any:
 
 def parse_args() -> argparse.Namespace:
   p = argparse.ArgumentParser(description=__doc__)
+  p.add_argument("--model-id", default="Qwen/Qwen3-4B")
   p.add_argument("--model-path", type=Path, required=True)
   p.add_argument("--data-root", type=Path, required=True)
   p.add_argument("--upstream-root", type=Path, required=True)
@@ -438,17 +473,40 @@ def parse_args() -> argparse.Namespace:
   p.add_argument("--tasks-per-step", type=int, default=16)
   p.add_argument("--attempts-per-task", type=int, default=8)
   p.add_argument("--max-critical-steps", type=int, default=8)
+  p.add_argument("--max-waves", type=int, default=3)
+  p.add_argument("--max-wave-width", type=int, default=4)
+  p.add_argument("--wide-min-width", type=int, default=2)
+  p.add_argument("--wide-max-width", type=int, default=3)
+  p.add_argument("--n-wide-train", type=int, default=900)
+  p.add_argument("--n-multihop-train", type=int, default=900)
+  p.add_argument("--n-wide-eval", type=int, default=48)
+  p.add_argument("--n-multihop-eval", type=int, default=48)
   p.add_argument("--anneal-steps", type=int, default=40)
   p.add_argument("--lambda-parallel", type=float, default=0.15)
   p.add_argument("--lambda-finish", type=float, default=0.15)
   p.add_argument("--learning-rate", type=float, default=1e-6)
+  p.add_argument("--lr-schedule", choices=("constant", "cosine"), default="cosine")
   p.add_argument("--micro-batch-size", type=int, default=4)
   p.add_argument("--max-prompt-length", type=int, default=4096)
   p.add_argument("--max-response-length", type=int, default=512)
   p.add_argument("--eval-every", type=int, default=10)
+  p.add_argument("--eval-temperature", type=float, default=0.0)
   p.add_argument("--hbm-utilization", type=float, default=0.62)
+  p.add_argument("--unlink-staged-weights", action="store_true")
   p.add_argument("--wandb-name", default="haoyugao-parl-qwen3-4b-opt5-run1")
   return p.parse_args()
+
+
+def _unlink_staged_files(retriever: Any, model_path: Path) -> None:
+  if hasattr(retriever, "release_vectors_file"):
+    retriever.release_vectors_file(unlink=True)
+    print("[parl-boot] freed staged Wiki-18 vectors (31 GiB) from tmpfs", flush=True)
+  removed = 0
+  for sf in model_path.glob("*.safetensors"):
+    sf.unlink(missing_ok=True)
+    removed += 1
+  if removed:
+    print(f"[parl-boot] freed {removed} staged safetensors shards from tmpfs", flush=True)
 
 
 def _boot_parl_stack(args: argparse.Namespace) -> dict[str, Any]:
@@ -459,7 +517,7 @@ def _boot_parl_stack(args: argparse.Namespace) -> dict[str, Any]:
     flags.FLAGS(["swarm_parl"])
   part = partition_parl_devices()
   print(
-      f"[parl-boot] chips={len(jax.devices())} train={part.train_mesh.size} "
+      f"[parl-boot] model={args.model_id} chips={len(jax.devices())} train={part.train_mesh.size} "
       f"ret={len(part.retrieval_devices)} dir={part.director_mesh.size} "
       f"wrk={part.worker_mesh.size}",
       flush=True,
@@ -482,7 +540,7 @@ def _boot_parl_stack(args: argparse.Namespace) -> dict[str, Any]:
 
   with part.train_mesh:
     actor, _ = automodel.AutoModel.from_pretrained(
-        "Qwen/Qwen3-4B",
+        args.model_id,
         part.train_mesh,
         model_path=str(args.model_path),
         remat_config="BLOCK",
@@ -490,9 +548,18 @@ def _boot_parl_stack(args: argparse.Namespace) -> dict[str, Any]:
         load_dtype="float32",
         use_flash_attention=False,
     )
+    lr_sched: Any = args.learning_rate
+    if args.lr_schedule == "cosine":
+      lr_sched = optax.warmup_cosine_decay_schedule(
+          init_value=0.0,
+          peak_value=args.learning_rate,
+          warmup_steps=min(10, max(1, args.num_steps // 10)),
+          decay_steps=max(args.num_steps, 10),
+          end_value=0.1 * args.learning_rate,
+      )
     opt = optax.chain(
         optax.clip_by_global_norm(1.0),
-        optax.adamw(args.learning_rate, b1=0.9, b2=0.999, weight_decay=0.01),
+        optax.adamw(lr_sched, b1=0.9, b2=0.999, weight_decay=0.01),
     )
     trainer = peft_trainer_v2.PeftTrainer(
         actor,
@@ -513,7 +580,7 @@ def _boot_parl_stack(args: argparse.Namespace) -> dict[str, Any]:
     algo_cfg = algorithm_config.GRPOConfig(
         num_generations=args.attempts_per_task,
         epsilon=0.2,
-        epsilon_high=0.28,
+        epsilon_high=0.24,
         beta=0.0,
     )
     algo_cfg.temperature = 1.0
@@ -550,6 +617,8 @@ def _boot_parl_stack(args: argparse.Namespace) -> dict[str, Any]:
   )
   _sync_actor_to_vllm(actor, dir_engine, part.director_mesh)
   _sync_actor_to_vllm(actor, wrk_engine, part.worker_mesh)
+  if args.unlink_staged_weights:
+    _unlink_staged_files(retriever, args.model_path)
   return {
       "actor": actor,
       "worker": worker,
@@ -563,60 +632,16 @@ def _boot_parl_stack(args: argparse.Namespace) -> dict[str, Any]:
   }
 
 
-def main() -> int:
-  args = parse_args()
-  args.run_root.mkdir(parents=True, exist_ok=True)
-  stack = _boot_parl_stack(args)
-  tok = stack["tokenizer"]
-  encode = lambda text: tok.encode(text, add_special_tokens=False)
-  train_pub, train_priv, eval_pub, eval_priv = parl_tasks.build_parl_splits(
-      args.upstream_root
-  )
-  print(
-      f"[parl-data] train={len(train_pub)} eval={len(eval_pub)}",
-      flush=True,
-  )
-  wiki_env = parl_wf.HttpWikiSearchEnv("http://127.0.0.1:18610/retrieve", top_k=3)
-
-  init_snap = SnapshotRef(model_id="Qwen/Qwen3-4B", revision=0, digest="qwen3-4b-v0")
-  dir_fidelity = ServingFidelity(
-      mode=ServingFidelityMode.FULL_BF16,
-      max_top1_mismatch_rate=0.05,
-      max_logprob_abs_diff=0.15,
-  )
-  dir_wrapper = _VllmParlSamplerWrapper(
-      stack["dir_engine"], tok, stack["eos_ids"], digest="qwen3-4b-v0"
-  )
-  wrk_wrapper = _VllmParlSamplerWrapper(
-      stack["wrk_engine"], tok, stack["eos_ids"], digest="qwen3-4b-v0"
-  )
-  asyncio.run(
-      _run_parl_fidelity_audit(
-          stack["worker"], dir_wrapper, encode, stack["pad_id"], stack["eos_ids"][0], dir_fidelity
-      )
-  )
-
-  recipe = Recipe(
-      workflow=parl_wf.parl_episode_workflow,
-      learners={"director": LearnerSpec.full("director", init_snap, fidelity=dir_fidelity)},
-      bindings={
-          "director": PolicySpec.follow("director", fidelity=dir_fidelity),
-          "worker": PolicySpec.fixed(init_snap),
-      },
-      grade=parl_tasks.grade_parl_episode,
-      train_step=parl_grpo(
-          target="director",
-          roles=("director",),
-          attempts=args.attempts_per_task,
-          lambda_parallel_init=args.lambda_parallel,
-          lambda_finish_init=args.lambda_finish,
-          anneal_steps=args.anneal_steps,
-          mode=CollectionMode.STRICT_BUNDLE,
-          max_policy_lag=0,
-      ),
-      budget=CriticalStepsBudget(limit=args.max_critical_steps),
-  )
-  adapters = {
+def _build_role_adapters(
+    args: argparse.Namespace,
+    dir_wrapper: _VllmParlSamplerWrapper,
+    wrk_wrapper: _VllmParlSamplerWrapper,
+    encode: Any,
+    dir_fidelity: ServingFidelity,
+) -> tuple[dict[str, RoleSamplerAdapter], dict[str, RoleSamplerAdapter]]:
+  eval_temp = float(args.eval_temperature)
+  eval_top_p = 1.0 if eval_temp <= 0.0 else 0.95
+  train_adapters = {
       "director": RoleSamplerAdapter(
           sampler=dir_wrapper,
           encode=encode,
@@ -635,6 +660,109 @@ def main() -> int:
           max_prompt_length=args.max_prompt_length,
       ),
   }
+  eval_adapters = {
+      "director": RoleSamplerAdapter(
+          sampler=dir_wrapper,
+          encode=encode,
+          sampling_params=sampler_lib.SamplingParams(
+              max_tokens=args.max_response_length, temperature=eval_temp, top_p=eval_top_p, return_logprobs=False
+          ),
+          max_prompt_length=args.max_prompt_length,
+          fidelity=dir_fidelity,
+      ),
+      "worker": RoleSamplerAdapter(
+          sampler=wrk_wrapper,
+          encode=encode,
+          sampling_params=sampler_lib.SamplingParams(
+              max_tokens=args.max_response_length, temperature=eval_temp, top_p=eval_top_p, return_logprobs=False
+          ),
+          max_prompt_length=args.max_prompt_length,
+      ),
+  }
+  return train_adapters, eval_adapters
+
+
+def _maybe_update_best_eval(
+    best_eval: dict[str, Any],
+    eval_metrics: dict[str, float],
+    step_id: int,
+    run_root: Path,
+) -> dict[str, Any]:
+  if eval_metrics.get("eval/parl_r_perf", -1.0) > best_eval.get("eval/parl_r_perf", -1.0):
+    updated = {"step": step_id, **eval_metrics}
+    (run_root / "parl_best_eval.json").write_text(
+        json.dumps(updated, indent=2) + "\n", encoding="utf-8"
+    )
+    return updated
+  return best_eval
+
+
+def main() -> int:
+  args = parse_args()
+  args.run_root.mkdir(parents=True, exist_ok=True)
+  stack = _boot_parl_stack(args)
+  tok = stack["tokenizer"]
+  encode = lambda text: tok.encode(text, add_special_tokens=False)
+  train_pub, train_priv, eval_pub, eval_priv = parl_tasks.build_parl_splits(
+      args.upstream_root,
+      n_wide_train=args.n_wide_train,
+      n_multihop_train=args.n_multihop_train,
+      n_wide_eval=args.n_wide_eval,
+      n_multihop_eval=args.n_multihop_eval,
+      wide_min_width=args.wide_min_width,
+      wide_max_width=args.wide_max_width,
+  )
+  print(
+      f"[parl-data] train={len(train_pub)} eval={len(eval_pub)} "
+      f"wide={args.wide_min_width}..{args.wide_max_width} wave_w={args.max_wave_width}",
+      flush=True,
+  )
+  wiki_env = parl_wf.HttpWikiSearchEnv("http://127.0.0.1:18610/retrieve", top_k=3)
+  model_slug = args.model_id.lower().split("/")[-1]
+
+  init_snap = SnapshotRef(model_id=args.model_id, revision=0, digest=f"{model_slug}-v0")
+  dir_fidelity = ServingFidelity(
+      mode=ServingFidelityMode.FULL_BF16,
+      max_top1_mismatch_rate=0.05,
+      max_logprob_abs_diff=0.15,
+  )
+  dir_wrapper = _VllmParlSamplerWrapper(
+      stack["dir_engine"], tok, stack["eos_ids"], digest=f"{model_slug}-v0"
+  )
+  wrk_wrapper = _VllmParlSamplerWrapper(
+      stack["wrk_engine"], tok, stack["eos_ids"], digest=f"{model_slug}-v0"
+  )
+  asyncio.run(
+      _run_parl_fidelity_audit(
+          stack["worker"], dir_wrapper, encode, stack["pad_id"], stack["eos_ids"][0], dir_fidelity
+      )
+  )
+
+  recipe = Recipe(
+      workflow=lambda task, ctx: parl_wf.parl_episode_workflow(
+          task, ctx, max_waves=args.max_waves, max_wave_width=args.max_wave_width
+      ),
+      learners={"director": LearnerSpec.full("director", init_snap, fidelity=dir_fidelity)},
+      bindings={
+          "director": PolicySpec.follow("director", fidelity=dir_fidelity),
+          "worker": PolicySpec.fixed(init_snap),
+      },
+      grade=parl_tasks.grade_parl_episode,
+      train_step=parl_grpo(
+          target="director",
+          roles=("director",),
+          attempts=args.attempts_per_task,
+          lambda_parallel_init=args.lambda_parallel,
+          lambda_finish_init=args.lambda_finish,
+          anneal_steps=args.anneal_steps,
+          mode=CollectionMode.STRICT_BUNDLE,
+          max_policy_lag=0,
+      ),
+      budget=CriticalStepsBudget(limit=args.max_critical_steps),
+  )
+  adapters, eval_adapters = _build_role_adapters(
+      args, dir_wrapper, wrk_wrapper, encode, dir_fidelity
+  )
   dir_trainer = Option5PeftDirectorTrainer(
       worker=stack["worker"],
       pad_id=stack["pad_id"],
@@ -646,16 +774,17 @@ def main() -> int:
   manifest_store = ManifestStore(args.run_root / "option5_manifest")
   live_jsonl = args.run_root / "parl_live_metrics.jsonl"
   wb_run = _init_wandb(args)
+  best_eval: dict[str, Any] = {}
 
   def _publish(versions: dict[str, int]) -> None:
     new_rev = versions["director"]
     _sync_actor_to_vllm(stack["actor"], stack["dir_engine"], stack["dir_mesh"])
-    dir_wrapper.digest = f"qwen3-4b-v{new_rev}"
+    dir_wrapper.digest = f"{model_slug}-v{new_rev}"
 
   for step_id in range(args.num_steps):
     t0 = time.monotonic()
     cur_snap = SnapshotRef(
-        model_id="Qwen/Qwen3-4B", revision=step_id, digest=dir_wrapper.digest
+        model_id=args.model_id, revision=step_id, digest=dir_wrapper.digest
     )
     bundle = SnapshotBundle(
         step_id=step_id,
@@ -671,11 +800,12 @@ def main() -> int:
               eval_priv=eval_priv,
               recipe=recipe,
               snapshots=bundle,
-              adapters=adapters,
+              adapters=eval_adapters,
               wiki_env=wiki_env,
               max_critical_steps=args.max_critical_steps,
           )
       )
+      best_eval = _maybe_update_best_eval(best_eval, eval_metrics, step_id, args.run_root)
     start = (step_id * args.tasks_per_step) % len(train_pub)
     batch_tasks = [
         train_pub[(start + i) % len(train_pub)] for i in range(args.tasks_per_step)
@@ -709,7 +839,7 @@ def main() -> int:
 
   # Final Heldout Evaluation after Step N-1 update.
   final_snap = SnapshotRef(
-      model_id="Qwen/Qwen3-4B", revision=args.num_steps, digest=dir_wrapper.digest
+      model_id=args.model_id, revision=args.num_steps, digest=dir_wrapper.digest
   )
   final_bundle = SnapshotBundle(
       step_id=args.num_steps,
@@ -723,11 +853,12 @@ def main() -> int:
           eval_priv=eval_priv,
           recipe=recipe,
           snapshots=final_bundle,
-          adapters=adapters,
+          adapters=eval_adapters,
           wiki_env=wiki_env,
           max_critical_steps=args.max_critical_steps,
       )
   )
+  best_eval = _maybe_update_best_eval(best_eval, final_eval, args.num_steps, args.run_root)
   (args.run_root / "parl_final_eval.json").write_text(
       json.dumps(final_eval, indent=2) + "\n", encoding="utf-8"
   )

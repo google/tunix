@@ -29,17 +29,21 @@ _ANSWER_RE = re.compile(r"<answer>(.*?)</answer>", re.DOTALL | re.IGNORECASE)
 _SEARCH_RE = re.compile(r"<search>(.*?)</search>", re.DOTALL | re.IGNORECASE)
 _REPORT_RE = re.compile(r"<report>(.*?)</report>", re.DOTALL | re.IGNORECASE)
 
-DIRECTOR_SYSTEM_PROMPT = (
-    "You are a Parallel Orchestrator (PARL) solving complex information-seeking "
-    "questions under a strict CriticalSteps latency budget. You have NO direct "
-    "search tool, but you can dispatch parallel search subagents in a single wave "
-    "(all subagents in one wave run concurrently and only count as the slowest "
-    "branch!).\n"
-    "Output EXACTLY ONE action tag per turn:\n"
-    "1. Dispatch parallel workers: <parallel>[\"subtask 1\", \"subtask 2\", ...]</parallel> "
-    "(up to 4 concise independent sub-questions)\n"
-    "2. Give final answer once you have enough evidence: <answer>concise answer</answer>"
-)
+def director_system_prompt(max_wave_width: int = 4) -> str:
+  return (
+      "You are a Parallel Orchestrator (PARL) solving complex information-seeking "
+      "questions under a strict CriticalSteps latency budget. You have NO direct "
+      "search tool, but you can dispatch parallel search subagents in a single wave "
+      "(all subagents in one wave run concurrently and only count as the slowest "
+      "branch!).\n"
+      "Output EXACTLY ONE action tag per turn:\n"
+      "1. Dispatch parallel workers: <parallel>[\"subtask 1\", \"subtask 2\", ...]</parallel> "
+      f"(up to {int(max_wave_width)} concise independent sub-questions)\n"
+      "2. Give final answer once you have enough evidence: <answer>concise answer</answer>"
+  )
+
+
+DIRECTOR_SYSTEM_PROMPT = director_system_prompt(4)
 
 WORKER_SYSTEM_PROMPT = (
     "You are a fast Wikipedia research subagent. You can run Wikipedia search "
@@ -111,7 +115,7 @@ def parse_director_action(text: str, *, max_wave_width: int = 4) -> DirectorComm
   return DirectorCommand(is_final=True, is_valid=False, answer=(text or "").strip())
 
 
-def _fit_user_body(user: str, max_chars: int = 6500) -> str:
+def _fit_user_body(user: str, max_chars: int = 9000) -> str:
   if len(user) <= max_chars:
     return user
   head = max_chars // 2
@@ -169,6 +173,7 @@ async def parl_episode_workflow(
   question = str(task["question"])
   reports: list[str] = []
   last_answer = ""
+  sys_prompt = director_system_prompt(max_wave_width)
   for wave_idx in range(max_waves):
     body = f"Question:\n{question}"
     if reports:
@@ -178,7 +183,7 @@ async def parl_episode_workflow(
     ):
       body += "\n\nYou must output <answer>...</answer> now."
     decision = await ctx.generate(
-        "director", format_chat_prompt(DIRECTOR_SYSTEM_PROMPT, body)
+        "director", format_chat_prompt(sys_prompt, body)
     )
     cmd = parse_director_action(decision.text, max_wave_width=max_wave_width)
     ctx.annotate(decision, valid=cmd.is_valid, n_jobs=len(cmd.jobs))

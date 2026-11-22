@@ -123,6 +123,8 @@ def build_parl_splits(
     n_multihop_train: int = 900,
     n_wide_eval: int = 48,
     n_multihop_eval: int = 48,
+    wide_min_width: int = 2,
+    wide_max_width: int = 3,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
   """Builds disjoint train and heldout PARL tasks (Wide-WikiQA + Multi-Hop QA).
 
@@ -149,10 +151,24 @@ def build_parl_splits(
   rng.shuffle(mh_eval)
 
   train_pub, train_priv = _pack_split(
-      nq_train, mh_train, n_wide=n_wide_train, n_mh=n_multihop_train, prefix="tr", rng=rng
+      nq_train,
+      mh_train,
+      n_wide=n_wide_train,
+      n_mh=n_multihop_train,
+      prefix="tr",
+      rng=rng,
+      wide_min_width=wide_min_width,
+      wide_max_width=wide_max_width,
   )
   eval_pub, eval_priv = _pack_split(
-      nq_eval, mh_eval, n_wide=n_wide_eval, n_mh=n_multihop_eval, prefix="ev", rng=rng
+      nq_eval,
+      mh_eval,
+      n_wide=n_wide_eval,
+      n_mh=n_multihop_eval,
+      prefix="ev",
+      rng=rng,
+      wide_min_width=wide_min_width,
+      wide_max_width=wide_max_width,
   )
   if not train_pub or not eval_pub:
     raise ValueError(
@@ -185,20 +201,29 @@ def _pack_split(
     n_mh: int,
     prefix: str,
     rng: random.Random,
+    wide_min_width: int = 2,
+    wide_max_width: int = 3,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
   pub_list: list[dict[str, Any]] = []
   priv_map: dict[str, Any] = {}
+  lo = max(2, int(wide_min_width))
+  hi = max(lo, int(wide_max_width))
+  span = hi - lo + 1
   if fact_rows:
+    cursor = 0
     for i in range(n_wide):
-      width = 3 if (i % 3 != 0) else 2
-      picks = [fact_rows[(i * 3 + k) % len(fact_rows)] for k in range(width)]
+      width = lo + (i % span)
+      picks = [fact_rows[(cursor + k) % len(fact_rows)] for k in range(width)]
+      cursor += width
       pub, priv = _make_wide_item(picks, f"{prefix}-wide-{i:04d}")
       pub_list.append(pub)
       priv_map[pub["id"]] = priv
-  for i, row in enumerate(mh_rows[:n_mh]):
-    tid = f"{prefix}-mh-{i:04d}"
-    pub_list.append({"id": tid, "public": {"question": row["question"], "kind": "multihop_qa", "n_parts": 1}})
-    priv_map[tid] = {"kind": "multihop_qa", "sub_answers": [row["answers"]]}
+  if mh_rows:
+    for i in range(min(n_mh, len(mh_rows))):
+      row = mh_rows[i]
+      tid = f"{prefix}-mh-{i:04d}"
+      pub_list.append({"id": tid, "public": {"question": row["question"], "kind": "multihop_qa", "n_parts": 1}})
+      priv_map[tid] = {"kind": "multihop_qa", "sub_answers": [row["answers"]]}
   rng.shuffle(pub_list)
   return pub_list, priv_map
 
