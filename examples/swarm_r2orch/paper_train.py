@@ -581,61 +581,109 @@ class _LiveMetricsAndHeldoutTracker:
 
 
 def _latest_ckpt_step(ckpt_root: Path) -> tuple[int, str]:
+  """Finds highest intact step dir on disk and repairs `latest.json` if stale."""
+  best_step = 0
+  best_dir: Path | None = None
+  if ckpt_root.is_dir():
+    for step_dir in ckpt_root.glob("step-*"):
+      suffix = step_dir.name.removeprefix("step-")
+      if not suffix.isdigit():
+        continue
+      if not (step_dir / "lora_weights.npz").is_file():
+        continue
+      step_num = int(suffix)
+      if step_num > best_step:
+        best_step = step_num
+        best_dir = step_dir
   latest_file = ckpt_root / "latest.json"
-  if not latest_file.is_file():
+  if best_dir is None:
+    latest_file.unlink(missing_ok=True)
     return 0, ""
-  data = json.loads(latest_file.read_text(encoding="utf-8"))
-  step = int(data.get("step", 0))
-  step_dir = ckpt_root / f"step-{step:08d}"
-  if (step_dir / "lora_weights.npz").is_file():
-    return step, str(step_dir)
-  return 0, ""
+  payload = {"step": best_step, "path": str(best_dir.resolve())}
+  latest_file.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+  return best_step, str(best_dir.resolve())
 
 
-def _sanitize_incomplete_cycles_for_resume(run_root: Path) -> None:
+def _receipt_cycle_index(receipt_path: Path) -> int | None:
+  try:
+    data = json.loads(receipt_path.read_text(encoding="utf-8"))
+  except (OSError, json.JSONDecodeError):
+    return 10**9
+  run_id = str(data.get("run_id") or data.get("receipt", {}).get("run_id") or "")
+  prefix = run_id.split("-", 1)[0].removeprefix("c")
+  return int(prefix) if prefix.isdigit() else None
+
+
+def _clear_stale_submission_receipts(sub_dir: Path, completed: int) -> int:
+  if not sub_dir.is_dir():
+    return 0
+  removed = 0
+  for sf in list(sub_dir.glob("*.json")):
+    cyc = _receipt_cycle_index(sf)
+    if cyc is not None and cyc >= completed:
+      sf.unlink(missing_ok=True)
+      sf.with_suffix(".lock").unlink(missing_ok=True)
+      removed += 1
+  for lf in list(sub_dir.glob("*.lock")):
+    if not lf.with_suffix(".json").is_file():
+      lf.unlink(missing_ok=True)
+  return removed
+
+
+def _reconcile_training_state(run_root: Path, completed: int) -> None:
+  p_step, p_path = _latest_ckpt_step(run_root / "checkpoints" / "proposer")
+  s_step, s_path = _latest_ckpt_step(run_root / "checkpoints" / "director")
+  ts_path = run_root / "training_state.json"
+  if not ts_path.is_file():
+    return
+  ts = json.loads(ts_path.read_text(encoding="utf-8"))
+  needs_fix = (
+      int(ts.get("cycle", 0)) > completed
+      or ts.get("phase") != "proposer"
+      or ts.get("proposer_checkpoint", "") != p_path
+      or ts.get("solver_checkpoint", "") != s_path
+  )
+  if not needs_fix:
+    return
+  ts.update({
+      "cycle": completed,
+      "phase": "proposer",
+      "proposer_step": p_step,
+      "proposer_checkpoint": p_path,
+      "solver_step": s_step,
+      "solver_checkpoint": s_path,
+      "global_step": max(p_step, s_step),
+      "history": [
+          h for h in ts.get("history", []) if int(h.get("cycle", -1)) < completed
+      ],
+  })
+  ts_path.write_text(json.dumps(ts, indent=2) + "\n", encoding="utf-8")
+  print(
+      f"[resume-sanitize] reconciled training_state to completed_cycles={completed} "
+      f"(proposer={p_step}, solver={s_step})",
+      flush=True,
+  )
+
+
+def _sanitize_incomplete_cycles_for_resume(run_root: Path, completed: int | None = None) -> None:
   """Removes stale partial-cycle receipts & dirs so `--resume` never poison-locks."""
-  metrics_path = run_root / "r2orch_metrics.jsonl"
-  completed = 0
-  if metrics_path.is_file():
-    completed = sum(
-        1 for ln in metrics_path.read_text(encoding="utf-8").splitlines() if ln.strip()
+  if completed is None:
+    metrics_path = run_root / "r2orch_metrics.jsonl"
+    completed = (
+        sum(1 for ln in metrics_path.read_text(encoding="utf-8").splitlines() if ln.strip())
+        if metrics_path.is_file()
+        else 0
     )
-  sub_dir = run_root / "state" / "submissions"
   cleaned_dirs = 0
-  cleaned_subs = 0
   for cyc_dir in sorted(run_root.glob("cycle-*")):
     suffix = cyc_dir.name.removeprefix("cycle-")
-    if not suffix.isdigit() or int(suffix) < completed:
-      continue
-    cyc_idx = int(suffix)
-    shutil.rmtree(cyc_dir, ignore_errors=True)
-    cleaned_dirs += 1
-    if sub_dir.is_dir():
-      for sf in sub_dir.glob(f"c{cyc_idx:04d}-*"):
-        sf.unlink(missing_ok=True)
-        cleaned_subs += 1
-  ts_path = run_root / "training_state.json"
-  if ts_path.is_file():
-    ts = json.loads(ts_path.read_text(encoding="utf-8"))
-    if int(ts.get("cycle", 0)) > completed:
-      p_step, p_path = _latest_ckpt_step(run_root / "checkpoints" / "proposer")
-      s_step, s_path = _latest_ckpt_step(run_root / "checkpoints" / "director")
-      ts["cycle"] = completed
-      ts["phase"] = "proposer"
-      ts["proposer_step"] = p_step
-      ts["proposer_checkpoint"] = p_path
-      ts["solver_step"] = s_step
-      ts["solver_checkpoint"] = s_path
-      ts["global_step"] = max(p_step, s_step)
-      ts["history"] = [
-          h for h in ts.get("history", []) if int(h.get("cycle", -1)) < completed
-      ]
-      ts_path.write_text(json.dumps(ts, indent=2) + "\n", encoding="utf-8")
-      print(
-          f"[resume-sanitize] reconciled training_state to completed_cycles={completed} "
-          f"(proposer={p_step}, solver={s_step})",
-          flush=True,
-      )
+    if suffix.isdigit() and int(suffix) >= completed:
+      shutil.rmtree(cyc_dir, ignore_errors=True)
+      cleaned_dirs += 1
+  cleaned_subs = _clear_stale_submission_receipts(
+      run_root / "state" / "submissions", completed
+  )
+  _reconcile_training_state(run_root, completed)
   if cleaned_dirs or cleaned_subs:
     print(
         f"[resume-sanitize] cleared {cleaned_dirs} incomplete cycle dirs and "
@@ -871,13 +919,13 @@ def _reconcile_sqlite_pats(db_p: Path, done: int) -> None:
 
 
 def reconcile_resume_state(run_root: Path) -> None:
-  """Aligns SQLite PATS step & SkillLedger with committed `completed_cycles`."""
-  import shutil  # pylint: disable=g-import-not-at-top
-
+  """Aligns SQLite PATS step, SkillLedger, receipts & checkpoints with committed cycles."""
   prog_p = Path(run_root) / "experiment_progress.json"
-  if not prog_p.is_file():
-    return
-  done = int(json.loads(prog_p.read_text(encoding="utf-8")).get("completed_cycles", 0))
+  done = (
+      int(json.loads(prog_p.read_text(encoding="utf-8")).get("completed_cycles", 0))
+      if prog_p.is_file()
+      else 0
+  )
   _reconcile_sqlite_pats(Path(run_root) / "state" / "director_skill_cases.sqlite3", done)
   sl_p = Path(run_root) / "state" / "skill_ledger.json"
   if sl_p.is_file():
@@ -886,7 +934,7 @@ def reconcile_resume_state(run_root: Path) -> None:
       sl["records"] = [r for r in sl.get("records", []) if int(r["cycle"]) < done]
       sl["cycles"] = {k: v for k, v in sl["cycles"].items() if int(k) < done}
       sl_p.write_text(json.dumps(sl, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-  shutil.rmtree(Path(run_root) / f"cycle-{done:04d}", ignore_errors=True)
+  _sanitize_incomplete_cycles_for_resume(Path(run_root), completed=done)
 
 
 def main() -> int:
@@ -958,7 +1006,6 @@ def main() -> int:
     return 0
 
   if args.mode == "train":
-    _sanitize_incomplete_cycles_for_resume(args.run_root)
     exp_args = build_selfplay_args(
         rendered_toml=rendered,
         upstream_root=args.upstream_root,

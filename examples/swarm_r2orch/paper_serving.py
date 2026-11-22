@@ -253,33 +253,34 @@ class R2OrchTpuGatewayState:
         for t in self.hf_tokenizer.encode(rendered, add_special_tokens=False)
     ]
 
+  def _sync_director_adapter(self, lora_name: str, lora_path: str) -> None:
+    self.hub.snapshot_adapter(lora_name, "solver", lora_path=lora_path)
+    sync_dtype = getattr(self.director_sampler, "weight_sync_dtype", None)
+    merged = (
+        self.hub.merged_state_for_vllm(
+            "solver", served_name=lora_name, dtype=sync_dtype
+        )
+        if sync_dtype is not None
+        else self.hub.merged_state_for_vllm("solver", served_name=lora_name)
+    )
+    drv = getattr(self.director_sampler, "_driver", None)
+    if drv is not None and hasattr(drv, "pause"):
+      drv.pause(mode="wait", timeout_s=300.0)
+    try:
+      self.director_sampler.update_params(merged)
+    finally:
+      _delete_jax_leaves(merged)
+      del merged
+      gc.collect()
+      if drv is not None and hasattr(drv, "resume"):
+        drv.resume()
+
   def load_adapter(self, lora_name: str, lora_path: str) -> None:
     with self._lock:
       if "proposer" in lora_name:
         self.hub.snapshot_adapter(lora_name, "proposer", lora_path=lora_path)
       elif "director" in lora_name:
-        self.hub.snapshot_adapter(lora_name, "solver", lora_path=lora_path)
-        sync_dtype = getattr(self.director_sampler, "weight_sync_dtype", None)
-        merged = (
-            self.hub.merged_state_for_vllm(
-                "solver", served_name=lora_name, dtype=sync_dtype
-            )
-            if sync_dtype is not None
-            else self.hub.merged_state_for_vllm("solver", served_name=lora_name)
-        )
-        drv = getattr(self.director_sampler, "_driver", None)
-        if drv is not None and hasattr(drv, "pause"):
-          drv.pause(mode="wait", timeout_s=300.0)
-        try:
-          self.director_sampler.update_params(merged)
-        finally:
-          for leaf in jax.tree.leaves(merged):
-            if isinstance(leaf, jax.Array) and not leaf.is_deleted():
-              leaf.delete()
-          del merged
-          gc.collect()
-          if drv is not None and hasattr(drv, "resume"):
-            drv.resume()
+        self._sync_director_adapter(lora_name, lora_path)
       if len(self.hub.served_snapshots) > 4:
         for old_key in list(self.hub.served_snapshots.keys())[:-4]:
           self.hub.served_snapshots.pop(old_key, None)
@@ -440,6 +441,12 @@ class R2OrchTpuGatewayState:
         finish_reason="stop" if stopped else "length",
         content_logprobs=lp_payload,
     )
+
+
+def _delete_jax_leaves(tree: Any) -> None:
+  for leaf in jax.tree.leaves(tree):
+    if isinstance(leaf, jax.Array) and not leaf.is_deleted():
+      leaf.delete()
 
 
 def _resolve_sampling_kwargs(
