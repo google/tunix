@@ -713,11 +713,11 @@ def controller_main(
         hp.config_mapping("env_kwargs"), entries, args
     )
     try:
-      node_utils.wait_for_workers(
-          cluster.registry,
+      orchestrator.wait_for_workers(
+          hp,
+          cluster,
           discovery,
-          {datatypes.Role.ROLLOUT: replicas},
-          init_timeout_s=cluster_config["init_timeout_s"],
+          min_workers={datatypes.Role.ROLLOUT: replicas},
           rpc_timeout_s=rpc_timeout_s,
           config_sha256=config_sha256,
       )

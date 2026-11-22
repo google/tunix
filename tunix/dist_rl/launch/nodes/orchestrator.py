@@ -50,9 +50,11 @@ import contextlib
 import dataclasses
 import importlib
 import logging
+import pickle
 import signal
 import symtable
 import threading
+import time
 import tokenize
 from typing import TypeAlias
 
@@ -529,6 +531,40 @@ def create_cluster(
   )
 
 
+# How often `wait_for_workers` checks for a rejected worker while it waits for
+# the required ones.
+_REGISTRATION_POLL_S = 1.0
+
+
+def _check_worker_config(
+    hostname: str, metadata: bytes, config_sha256: str
+) -> None:
+  """Rejects a registering worker that resolved a different config.
+
+  Args:
+    hostname: The worker's discovered hostname.
+    metadata: The worker's pickled registration metadata (`serve_worker`).
+    config_sha256: The orchestrator's config fingerprint.
+
+  Raises:
+    ValueError: If the worker sent no fingerprint, or a different one.
+  """
+  # The pickled metadata `node_utils.serve_worker` registers, which
+  # `WorkerRegistry.register_from_hostname` unpickles as well.
+  md = pickle.loads(metadata)  # pylint: disable=g-unsafe-pickle-load
+  worker = f"{md['service_type']} worker {md['worker_id']!r} at {hostname}"
+  key = node_utils.CONFIG_SHA256_METADATA_KEY
+  if key not in md:
+    raise ValueError(f"The {worker} registered without a {key}.")
+  if md[key] != config_sha256:
+    raise ValueError(
+        f"The {worker} resolved a different config than the orchestrator"
+        f" ({key} {md[key]} vs {config_sha256}). Every process of a run must"
+        " get the same config arguments; compare their"
+        f" {node_utils.RESOLVED_CONFIG_LOG_MARKER} log lines."
+    )
+
+
 def wait_for_workers(
     hp: resolve_config.DistHyperParameters,
     cluster: cluster_orchestrator.ClusterOrchestrator,
@@ -536,10 +572,13 @@ def wait_for_workers(
     *,
     rpc_timeout_s: float,
     config_sha256: str,
+    min_workers: Mapping[datatypes.Role | str, int] | None = None,
 ) -> None:
   """Registers the workers announced through `discovery` until `required_workers(hp)` are up.
 
-  See `node_utils.wait_for_workers`.
+  A worker whose config fingerprint differs from `config_sha256` is rejected:
+  its registration fails, and while this waits, so does the wait. A worker
+  that joins later is rejected the same way.
 
   Args:
     hp: Resolved distributed RL configuration.
@@ -548,15 +587,66 @@ def wait_for_workers(
     rpc_timeout_s: Deadline for worker RPCs.
     config_sha256: The orchestrator's config fingerprint
       (`node_utils.log_resolved_config`); every worker must match it.
+    min_workers: Workers per role to wait for instead of `required_workers(hp)`.
+
+  Raises:
+    ValueError: If a worker resolved a different config.
+    TimeoutError: If `required_workers(hp)` do not register within
+      `cluster_config.init_timeout_s`.
   """
-  node_utils.wait_for_workers(
-      cluster.registry,
-      discovery,
-      required_workers(hp),
-      init_timeout_s=hp.config_mapping("cluster_config")["init_timeout_s"],
-      rpc_timeout_s=rpc_timeout_s,
-      config_sha256=config_sha256,
+  rejected: list[ValueError] = []
+
+  def register(hostname: str, port: int, metadata: bytes) -> None:
+    try:
+      _check_worker_config(hostname, metadata, config_sha256)
+    except ValueError as e:
+      # Discovery runs this on its own thread and fails the worker's
+      # registration with the error; the wait below raises the first one here.
+      # The callback outlives the wait, so later rejections are only logged.
+      logging.warning("Rejected a worker registration: %s", e)
+      if not rejected:
+        rejected.append(e)
+      raise
+    cluster.registry.register_from_hostname(
+        hostname, port, metadata, rpc_timeout_s=rpc_timeout_s
+    )
+
+  discovery.on_register(register)
+  if min_workers is None:
+    min_workers = required_workers(hp)
+  init_timeout_s = hp.config_mapping("cluster_config")["init_timeout_s"]
+  deadline = (
+      None
+      if init_timeout_s is None
+      else time.monotonic() + float(init_timeout_s)
   )
+  logging.info("Waiting for workers to register: %s", min_workers)
+  while not rejected:
+    poll_s = _REGISTRATION_POLL_S
+    if deadline is not None:
+      poll_s = max(0.0, min(poll_s, deadline - time.monotonic()))
+    try:
+      cluster.registry.wait_for_workers(min_workers=min_workers, timeout=poll_s)
+      break
+    except TimeoutError as e:
+      if rejected:
+        # A worker was rejected while this poll waited; raise that, even when
+        # the deadline has passed too.
+        break
+      if deadline is not None and time.monotonic() >= deadline:
+        # `e` only reports the last poll's timeout, so count the registered
+        # workers here.
+        registered = {
+            role: len(cluster.registry.infos(role)) for role in min_workers
+        }
+        raise TimeoutError(
+            "Workers did not register within"
+            f" cluster_config.init_timeout_s={init_timeout_s}s. Required:"
+            f" {min_workers}, registered: {registered}."
+        ) from e
+  if rejected:
+    raise rejected[0]
+  logging.info("Registered workers: %s", cluster.registry.infos())
 
 
 def build_program(
