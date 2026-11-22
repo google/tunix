@@ -1664,6 +1664,7 @@ class RLEngine:
         self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
             nnx.state(self.actor_trainer.model), "pinned_host"
         )
+        self._anchor_train_steps = self.actor_trainer.train_steps
       if self.cluster_config.gc_collect_after_weight_sync:
         gc.collect()
 
