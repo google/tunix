@@ -27,8 +27,8 @@ dependencies = [
   "huggingface_hub",
   "importlib_resources",
   # Jax 0.7.2 has performance regression on OSS
-  # Jax 0.11.1 removed jax.experimental.hijax.MutableHiType, which flax (through 0.12.8, the newest release) still subclasses
-  "jax>=0.6.0,!=0.7.2,<0.11.1",
+  # Keep <0.12 until jax 0.12.x is qualified; flax>=0.12.10 supports jax>=0.11.1.
+  "jax>=0.6.0,!=0.7.2,<0.12",
   "jaxtyping",
   "jinja2",  # Huggingface chat template
   "kagglehub",
@@ -64,21 +64,21 @@ docs = [
     "sphinx_contributors",
 ]
 prod = [
-  "jax[tpu]>=0.6.0,!=0.7.2,<0.11.1",
+  "jax[tpu]>=0.6.0,!=0.7.2,<0.12",
   "tokamax>=0.0.4",
 ]
 tpu = [
-  "jax[tpu]>=0.6.0,!=0.7.2,<0.11.1",
+  "jax[tpu]>=0.6.0,!=0.7.2,<0.12",
   "tokamax>=0.0.4",
 ]
 gpu = [
-  "jax[cuda12]>=0.6.0,!=0.7.2,<0.11.1",
+  "jax[cuda12]>=0.6.0,!=0.7.2,<0.12",
   "tokamax>=0.0.4",
   "triton",
   "jax-triton",  # vLLM Triton GPU paged attention (not yet supported by Tokamax)
 ]
 cuda13 = [
-  "jax[cuda13]>=0.6.0,!=0.7.2,<0.11.1",
+  "jax[cuda13]>=0.6.0,!=0.7.2,<0.12",
   "tokamax>=0.0.4",
   "triton",
   "jax-triton",  # vLLM Triton GPU paged attention (not yet supported by Tokamax)

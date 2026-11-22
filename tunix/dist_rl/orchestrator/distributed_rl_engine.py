@@ -1441,6 +1441,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       policy_version: int | None = None,
       *,
       min_retained_policy_version: int | None = None,
+      source_prepared: asyncio.Event | None = None,
   ) -> int:
     """Runs one weight sync round through the coordinator."""
     del role, target_roles
@@ -1463,6 +1464,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         policy_version=next_policy_version,
         destination_statuses=_WEIGHT_SYNC_DESTINATION_STATUSES,
         min_retained_policy_version=min_retained_policy_version,
+        source_prepared=source_prepared,
     )
     for r in result.workers:
       if r.phase != "committed":

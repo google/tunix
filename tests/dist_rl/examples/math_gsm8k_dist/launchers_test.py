@@ -95,9 +95,10 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
     self.assertEqual(config["agentic_grpo_config"]["beta"], 0.0)
     self.assertFalse(config["cluster_config"]["run_inference_node"])
     self.assertNotIn("data_dir", config["data_config"])
-    self.assertEqual(config["cluster_config"]["ports"]["orchestrator"], 20000)
-    self.assertEqual(config["cluster_config"]["ports"]["rollout"], 20001)
-    self.assertEqual(config["cluster_config"]["ports"]["trainer"], 20002)
+    roles = config["cluster_config"]["roles"]
+    self.assertEqual(roles["orchestrator"]["port"], 20000)
+    self.assertEqual(roles["rollout"]["port"], 20001)
+    self.assertEqual(roles["trainer"]["port"], 20002)
     self.assertEqual(config["rollout_config"]["max_prompt_length"], 1024)
     self.assertEqual(config["rollout_config"]["total_generation_steps"], 1024)
     self.assertEqual(config["model_config"]["kwargs"], {})

@@ -54,7 +54,6 @@ _ENV_PASSTHROUGH = frozenset({
     "PYTHON_BIN",
     "RESOLVE_CONFIG_BIN",
     "SECONDS",
-    "TRAINER_IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES",
     "WANDB_API_KEY",
     "YAML_DIR",
     "YAML_GEN",
@@ -63,15 +62,6 @@ _ENV_PASSTHROUGH = frozenset({
 # Environment variables read by `yaml_generator.py` that intentionally pass
 # through from the caller's environment (not configured via `base_dist_config`).
 _YAML_GEN_ENV_PASSTHROUGH = frozenset({
-    "COLOCATED_PYTHON_SIDECAR_IMAGE",
-    "COLOCATED_PYTHON_SIDECAR_MEMORY",
-    "COLOCATED_PYTHON_SIDECAR_SHM",
-    "ENABLE_MULTI_NUMA",
-    "PATHWAYS_PROXY_EXTRA_ARGS",
-    "PATHWAYS_WORKER_EXTRA_ENV",
-    "RAIDEN_BROADCAST_K",
-    "TPU_RAIDEN_DATA_NICS",
-    "TPU_RESERVATION",
     "USER",
 })
 _VAR_REF = re.compile(r"\$\{?([A-Z][A-Z0-9_]*)")
@@ -337,6 +327,23 @@ class LaunchScriptsTest(absltest.TestCase):
         },
         legacy,
     )
+    # The Pathways, Raiden and reservation settings are config keys now
+    # (`cluster_config.pathways`, `weight_sync_config.raiden`,
+    # `cluster_config.k8s.tpu_reservation`).
+    self.assertContainsSubset(
+        {
+            "COLOCATED_PYTHON_SIDECAR_IMAGE",
+            "COLOCATED_PYTHON_SIDECAR_MEMORY",
+            "COLOCATED_PYTHON_SIDECAR_SHM",
+            "ENABLE_MULTI_NUMA",
+            "PATHWAYS_PROXY_EXTRA_ARGS",
+            "PATHWAYS_WORKER_EXTRA_ENV",
+            "RAIDEN_BROADCAST_K",
+            "TPU_RESERVATION",
+            "TRAINER_IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES",
+        },
+        legacy,
+    )
     # `launch.sh` would ignore these, silently dropping the old launchers'
     # rejection sampling or logging the trajectories they turned off.
     self.assertContainsSubset(
@@ -395,7 +402,7 @@ class LaunchScriptsTest(absltest.TestCase):
     # experimental DeepSWE environment, Raiden, vLLM, W&B), or the v2 recipe
     # and `yaml_generator.py` do. `local.sh`'s processes inherit them from the
     # caller's environment; the GKE pods don't, so there they only arrive
-    # through the config (e.g. `cluster_config.role_env.trainer`).
+    # through the config (e.g. `cluster_config.roles.trainer.env`).
     self.assertEmpty(
         set(legacy)
         & {
@@ -579,7 +586,7 @@ class LaunchScriptsTest(absltest.TestCase):
         "--dry-run",
         "cluster_config.target=k8s",
         "cluster_config.k8s.tunix_image=test-image",
-        "cluster_config.k8s.enable_pathways_persistence=true",
+        "cluster_config.pathways.trainer.persistence=true",
         "agentic_grpo_config.beta=0.0",
     ])
     self.assertEqual(res_persistence.returncode, 0, msg=res_persistence.stderr)
@@ -640,7 +647,7 @@ class LaunchScriptsTest(absltest.TestCase):
         self.assertNotEqual(res.returncode, 0)
         self.assertIn(
             "Error: The config names no task: data_module, env_class_path,"
-            " agent_class_path, cluster_config.registry_module must be set.",
+            " agent_class_path, registry_module must be set.",
             res.stderr,
         )
         self.assertNotIn("command:", res.stdout)
@@ -879,7 +886,7 @@ class LaunchScriptsTest(absltest.TestCase):
         "cluster_config.k8s.termination_grace_seconds=120",
         "cluster_config.k8s.kueue_queue_name=rl-queue",
         "cluster_config.k8s.cpu_nodepool=cpu-np",
-        "cluster_config.k8s.cpu_memory=64Gi",
+        "cluster_config.roles.orchestrator.memory.request=64Gi",
         "cluster_config.k8s.head_excluded_nodepools=[cpu-np,sandbox-pool]",
     ])
     self.assertEqual(res.returncode, 0, msg=res.stderr)
@@ -969,12 +976,23 @@ class LaunchScriptsTest(absltest.TestCase):
         "cluster_config.k8s.rollout.tpu_slice=tpu7x:2x2x1",
         "cluster_config.k8s.use_dynamic_slicing=true",
         "cluster_config.k8s.cpu_machine=n2-highmem-32",
-        "cluster_config.k8s.pathways_proxy_memory_limit=190G",
-        "cluster_config.k8s.pathways_proxy_memory=24G",
-        "cluster_config.k8s.pathways_rm_memory=8G",
-        "cluster_config.k8s.user_container_memory=56G",
-        "cluster_config.k8s.user_container_memory_limit=80G",
-        "cluster_config.k8s.pathways_worker_memory=120G",
+        "cluster_config.pathways.proxy_memory.limit=190G",
+        "cluster_config.pathways.proxy_memory.request=24G",
+        "cluster_config.pathways.rm_memory.request=8G",
+        "cluster_config.roles.rollout.memory.request=56G",
+        "cluster_config.roles.rollout.memory.limit=80G",
+        "cluster_config.pathways.server_memory.request=120G",
+        # Settings that used to be environment variables of the launcher.
+        "cluster_config.pathways.worker_env.MY_WORKER_VAR=a b",
+        "cluster_config.pathways.proxy_extra_args=--xla_a=1 --xla_b=2",
+        (
+            "cluster_config.pathways.trainer.ifrt_proxy_large_transfer_threshold"
+            "_bytes=1048576"
+        ),
+        "cluster_config.k8s.tpu_reservation=my-res",
+        "weight_sync_config.raiden.data_nics=eth0,eth1",
+        "weight_sync_config.raiden.multi_numa=true",
+        "weight_sync_config.raiden.broadcast_k=128",
     ]
     res = self._run_launch(args)
     self.assertEqual(res.returncode, 0, msg=res.stderr)
@@ -1013,6 +1031,29 @@ class LaunchScriptsTest(absltest.TestCase):
     self.assertEqual(
         containers["main"]["resources"]["limits"]["memory"], "80G"
     )
+    # The trainer keeps its own request and limit
+    # (`cluster_config.roles.trainer.memory`).
+    trainer_proc = next(
+        rj["template"]["spec"]["template"]["spec"]
+        for rj in jobsets["testuser-train"]["spec"]["replicatedJobs"]
+        if rj["name"] == "proc"
+    )
+    trainer_main = next(
+        c for c in trainer_proc["containers"] if c["name"] == "main"
+    )
+    self.assertEqual(trainer_main["resources"]["requests"]["memory"], "48G")
+    self.assertEqual(trainer_main["resources"]["limits"]["memory"], "70G")
+    # Only the trainer gets the IFRT transfer threshold; the rollout keeps the
+    # generator's default.
+    threshold = "IFRT_PROXY_GRPC_LARGE_TRANSFER_OPTIMIZATION_THRESHOLD_BYTES"
+    self.assertIn(
+        {"name": threshold, "value": "1048576"}, trainer_main["env"]
+    )
+    self.assertIn(
+        {"name": threshold, "value": str(2**63 - 1)}, containers["main"]["env"]
+    )
+    for flag in ("--xla_a=1", "--xla_b=2"):
+      self.assertIn(flag, init_containers["pathways-proxy"]["args"])
 
     # Worker pod (pw-node) container (pathways-worker).
     pw_spec = rjobs["pw-node"]
@@ -1020,6 +1061,17 @@ class LaunchScriptsTest(absltest.TestCase):
     self.assertEqual(
         pw_containers["pathways-worker"]["resources"]["requests"]["memory"],
         "120G",
+    )
+    worker_env = pw_containers["pathways-worker"]["env"]
+    for name, value in (
+        ("MY_WORKER_VAR", "a b"),
+        ("TPU_RAIDEN_DATA_NICS", "eth0,eth1"),
+        ("ENABLE_MULTI_NUMA", "1"),
+        ("RAIDEN_BROADCAST_K", "128"),
+    ):
+      self.assertIn({"name": name, "value": value}, worker_env)
+    self.assertEqual(
+        pw_spec["nodeSelector"]["cloud.google.com/reservation-name"], "my-res"
     )
 
     # With `head_nodepool` set alongside `use_dynamic_slicing=true`, both the
@@ -1099,9 +1151,9 @@ class LaunchScriptsTest(absltest.TestCase):
   def test_role_env_and_sandbox_settings_render_into_processes(self):
     role_args = [
         "agentic_grpo_config.beta=0.0",
-        "cluster_config.role_env.orchestrator.ORCH_FLAG=x",
-        "cluster_config.role_env.trainer.TRAIN_FLAG='a b'",
-        "cluster_config.role_env.rollout.ROLL_FLAG='0'",
+        "cluster_config.roles.orchestrator.env.ORCH_FLAG=x",
+        "cluster_config.roles.trainer.env.TRAIN_FLAG='a b'",
+        "cluster_config.roles.rollout.env.ROLL_FLAG='0'",
     ]
     local_res = self._run_launch(
         ["--dry-run", "cluster_config.target=local", *role_args]
@@ -1118,7 +1170,7 @@ class LaunchScriptsTest(absltest.TestCase):
         "cluster_config.target=local",
         "agentic_grpo_config.beta=0.04",
         "cluster_config.local.inference_devices=4,5",
-        "cluster_config.role_env.inference.INF_FLAG=y",
+        "cluster_config.roles.inference.env.INF_FLAG=y",
     ])
     self.assertEqual(inference_res.returncode, 0, msg=inference_res.stderr)
     self.assertIn("Inference environment: INF_FLAG=y", inference_res.stdout)
@@ -1228,7 +1280,7 @@ class LaunchScriptsTest(absltest.TestCase):
     wrapped_default = self._run_launch(
         [
             *base_args,
-            "cluster_config.trainer_main=custom.wrapper.trainer_main",
+            "cluster_config.roles.trainer.main=custom.wrapper.trainer_main",
         ],
         extra_env={"PYTHON_BIN": str(stub_py)},
     )
@@ -1242,8 +1294,8 @@ class LaunchScriptsTest(absltest.TestCase):
         [
             *base_args,
             "cluster_config.local.download_model_weights=false",
-            "cluster_config.trainer_main=custom.mock.trainer_main",
-            "cluster_config.rollout_main=custom.mock.rollout_main",
+            "cluster_config.roles.trainer.main=custom.mock.trainer_main",
+            "cluster_config.roles.rollout.main=custom.mock.rollout_main",
             "weight_sync_config.mode=noop",
         ],
         extra_env={"PYTHON_BIN": str(stub_py)},

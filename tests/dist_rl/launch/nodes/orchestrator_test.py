@@ -831,11 +831,11 @@ class ClusterTest(absltest.TestCase):
 
     disabled_cluster = self._cluster(
         _config(
-            "cluster_config.rollout_fault_tolerance=false",
-            "cluster_config.max_task_retries=3",
-            "cluster_config.poll_retry_budget_s=42.5",
-            "cluster_config.min_active_rollout_ratio=0.75",
-            "cluster_config.min_active_rollout_grace_s=120",
+            "cluster_config.fault_tolerance.enabled=false",
+            "cluster_config.fault_tolerance.max_task_retries=3",
+            "cluster_config.fault_tolerance.poll_retry_budget_s=42.5",
+            "cluster_config.fault_tolerance.min_active_rollout_ratio=0.75",
+            "cluster_config.fault_tolerance.min_active_rollout_grace_s=120",
         )
     )
     self.assertEqual(
@@ -850,7 +850,7 @@ class ClusterTest(absltest.TestCase):
     )
 
     unguarded_cluster = self._cluster(
-        _config("cluster_config.min_active_rollout_ratio=null")
+        _config("cluster_config.fault_tolerance.min_active_rollout_ratio=null")
     )
     self.assertIsNone(
         unguarded_cluster.fault_tolerance_manager.config.min_active_rollout_ratio
@@ -1280,7 +1280,8 @@ class MainTest(absltest.TestCase):
     jax.config.update("jax_platforms", None)
 
   def test_base_config_selects_this_orchestrator(self):
-    main_path = _config().config_mapping("cluster_config")["orchestrator_main"]
+    roles = _config().config_mapping("cluster_config")["roles"]
+    main_path = roles["orchestrator"]["main"]
     module_name, attr = main_path.rsplit(".", 1)
     self.assertIs(
         getattr(importlib.import_module(module_name), attr), orchestrator.main
@@ -1302,6 +1303,7 @@ class MainTest(absltest.TestCase):
         content=f"""\
 data_module: "{data_module.full_path}"
 task_name: "gsm8k"
+registry_module: "task_registry"
 env_class_path: "gsm8kenv"
 agent_class_path: "gsm8kagent"
 data_config:
@@ -1314,8 +1316,6 @@ agentic_grpo_config:
 rl_training_config:
   metrics_logging_options:
     log_dir: "{tmp_dir.mkdir('metrics').full_path}"
-cluster_config:
-  registry_module: "task_registry"
 """,
     ).full_path
 
@@ -1493,7 +1493,7 @@ cluster_config:
             [],
             (
                 "names no task: data_module, env_class_path, agent_class_path,"
-                " cluster_config.registry_module must be set"
+                " registry_module must be set"
             ),
         ),
         (
@@ -1501,7 +1501,7 @@ cluster_config:
                 f"data_module={flat_records.full_path}",
                 "env_class_path=my_env",
                 "agent_class_path=my_agent",
-                "cluster_config.registry_module=my_task.registry",
+                "registry_module=my_task.registry",
             ],
             "unexpected keys",
         ),

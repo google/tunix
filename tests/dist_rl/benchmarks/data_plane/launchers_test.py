@@ -75,8 +75,10 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
     )
     self.assertEqual(config["vllm_config"]["routed_experts_num_experts"], 384)
     self.assertFalse(config["dist_training_config"]["precompile_trainer"])
-    ports = config["cluster_config"]["ports"]
-    self.assertEqual(len(set(ports.values())), len(ports))
+    ports = [
+        role["port"] for role in config["cluster_config"]["roles"].values()
+    ]
+    self.assertEqual(len(set(ports)), len(ports))
     k8s = config["cluster_config"]["k8s"]
     self.assertEqual(k8s["trainer"]["jobset_yaml"], "jobset.tpu.yaml")
     self.assertEqual(k8s["trainer"]["tpu_slice"], "tpuv5:2x2x1")

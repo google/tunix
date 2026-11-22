@@ -53,6 +53,8 @@ weight_sync_config:
 # The orchestrator loads the task records with
 # `gsm8k.create_dataset(**data_config)`.
 data_module: "tunix.dist_rl.examples.math_gsm8k_dist.gsm8k"
+# Imported by the rollout node to register `GSM8KEnv` / `GSM8KAgent`.
+registry_module: "tunix.dist_rl.examples.math_gsm8k_dist.gsm8k"
 task_name: "gsm8k"
 data_config:
   split: "train"
@@ -115,8 +117,6 @@ env_class_path: "gsm8kenv"
 agent_class_path: "gsm8kagent"
 
 cluster_config:
-  # Imported by the rollout node to register `GSM8KEnv` / `GSM8KAgent`.
-  registry_module: "tunix.dist_rl.examples.math_gsm8k_dist.gsm8k"
   artifact_root: "artifacts/math_gsm8k"
   # Runs on `target: local` with the default single-host placement from
   # `base_dist_config.yaml` (trainer chips 0,1; rollout chips 2,3). Use

@@ -114,12 +114,16 @@ weight_sync_config:
   prefuse_moe_weights: true
   in_flight_weight_updates: true
   verify_weights: false
-  raiden_data_nics: "eth0"
+  raiden:
+    data_nics: "eth0"
+    multi_numa: false
 
 # The orchestrator loads the DeepSWE task records (`data_config.dataset_path`,
 # set on the command line) with `prewarm.create_dataset(**data_config)` and
 # prewarms the sandbox pools of upcoming batches (`prewarm.prompt_items_context`).
 data_module: "tunix.experimental.examples.deepswe_dist.prewarm"
+# Imported by the rollout node to register `DeepSWEEnv` / `CodeActAgent`.
+registry_module: "tunix.experimental.examples.deepswe_dist.deepswe"
 task_name: "deepswe"
 data_config:
   split: "train"
@@ -259,30 +263,16 @@ kubernetes_config:
 
 cluster_config:
   target: "k8s"
-  # Imported by the rollout node to register `DeepSWEEnv` / `CodeActAgent`.
-  registry_module: "tunix.experimental.examples.deepswe_dist.deepswe"
   artifact_root: "artifacts/deepswe"
   debug: false
   rpc_timeout_s: 10800
   init_timeout_s: 7200
   rollout_replicas: 16
-  ports:
-    orchestrator: 20000
-    rollout: 20001
-    trainer: 20002
   k8s:
     namespace: "default"
     service_account: "xpk-sa"
     priority_class: "medium"
     cpu_machine: "n2-standard-64"
-    cpu_memory: "240G"
-    user_container_memory: "260G"
-    user_container_memory_limit: "260G"
-    pathways_proxy_memory: "16G"
-    pathways_proxy_memory_limit: "160G"
-    pathways_worker_memory: "100G"
-    pathways_rm_memory: "4G"
-    enable_pathways_persistence: true
     jax_cache:
       local_dir: "/tmp/jax_cache"
     trainer:
@@ -291,46 +281,78 @@ cluster_config:
     rollout:
       jobset_yaml: "jobset.tpu.yaml"
       tpu_slice: "tpuv5:2x2x1"
-  role_env:
-    orchestrator:
-      RAIDEN_BROADCAST_HOST_RATIO: "1.0"
-      RAIDEN_BROADCAST_PIPELINE_STAGES: "4"
+  pathways:
+    proxy_memory:
+      request: "16G"
+      limit: "160G"
+    rm_memory:
+      request: "4G"
+      limit: "32G"
+    server_memory:
+      request: "100G"
+      limit: ""
     trainer:
-      HF_HOME: "/dev/shm/hf"
-      ONEHOT_MOE_PERMUTE_THRESHOLD: "32768"
-      RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES: "67108864"
-      RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE: "16"
+      persistence: true
+      # Routes host buffers of 16 MiB or more through shared memory.
+      ifrt_proxy_large_transfer_threshold_bytes: 16777216
+    # `mlperf_35b_128_v5p.sh` adds `LIBTPU_INIT_ARGS` and sets
+    # `proxy_extra_args` from its libtpu flag list.
+    worker_env:
+      SKIP_MEGASCALE_PJRT_CLIENT: "true"
       RAIDEN_BROADCAST_HOST_RATIO: "1.0"
       RAIDEN_BROADCAST_PIPELINE_STAGES: "4"
-      RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER: "0"
+  roles:
+    orchestrator:
+      port: 20000
+      memory:
+        request: "240G"
+        limit: ""
+      env:
+        RAIDEN_BROADCAST_HOST_RATIO: "1.0"
+        RAIDEN_BROADCAST_PIPELINE_STAGES: "4"
+    trainer:
+      port: 20002
+      memory:
+        request: "260G"
+        limit: "260G"
+      env:
+        HF_HOME: "/dev/shm/hf"
+        ONEHOT_MOE_PERMUTE_THRESHOLD: "32768"
+        RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES: "67108864"
+        RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE: "16"
+        RAIDEN_BROADCAST_HOST_RATIO: "1.0"
+        RAIDEN_BROADCAST_PIPELINE_STAGES: "4"
+        RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER: "0"
     rollout:
-      HF_HOME: "/dev/shm/hf"
-      RAIDEN_DEVICES_PER_HOST: "4"
-      NUM_PRECOMPILE_WORKERS: "8"
-      ATTN_BUCKETIZED_NUM_REQS: "true"
-      ATTN_CUSTOM_NUM_REQS_BUCKETS: "4"
-      ONEHOT_MOE_PERMUTE_THRESHOLD: "32768"
-      RAGGED_GATHER_REDUCE_VERSION: "v2"
-      VLLM_MOE_CHUNK_SIZE: "256"
-      SLICE_ROPE_CACHE: "1"
-      DP_SCHED_BATCH_PREFILL: "false"
-      VLLM_LOGGING_LEVEL: "INFO"
-      TPU_SMALL_ALL_REDUCE: "0"
-      TPU_MOE_SINGLE_SORT: "0"
-      TPU_MOE_ROUTER_TOPK: "sort"
-      TPU_MOE_LOWTOK: "0"
-      USE_BATCHED_RPA_LONG_CTX_KERNEL: "false"
-      RAY_memory_monitor_refresh_ms: "0"
-      RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES: "67108864"
-      RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE: "16"
-      RAIDEN_PARALLELISM: "16"
-      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1800"
-      RAIDEN_BROADCAST_HOST_RATIO: "1.0"
-      RAIDEN_BROADCAST_PIPELINE_STAGES: "4"
-      LIBTPU_INIT_ARGS: >-
-        --xla_tpu_use_minor_sharding_for_major_trivial_input=true
-        --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false
-        --xla_tpu_ars_combiner_threshold_in_bytes=0
-        --xla_tpu_enable_async_collective_merger=false
-        --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false
-      OPENHANDS_MULTI_TOOL_CALLS: "false"
+      port: 20001
+      env:
+        HF_HOME: "/dev/shm/hf"
+        RAIDEN_DEVICES_PER_HOST: "4"
+        NUM_PRECOMPILE_WORKERS: "8"
+        ATTN_BUCKETIZED_NUM_REQS: "true"
+        ATTN_CUSTOM_NUM_REQS_BUCKETS: "4"
+        ONEHOT_MOE_PERMUTE_THRESHOLD: "32768"
+        RAGGED_GATHER_REDUCE_VERSION: "v2"
+        VLLM_MOE_CHUNK_SIZE: "256"
+        SLICE_ROPE_CACHE: "1"
+        DP_SCHED_BATCH_PREFILL: "false"
+        VLLM_LOGGING_LEVEL: "INFO"
+        TPU_SMALL_ALL_REDUCE: "0"
+        TPU_MOE_SINGLE_SORT: "0"
+        TPU_MOE_ROUTER_TOPK: "sort"
+        TPU_MOE_LOWTOK: "0"
+        USE_BATCHED_RPA_LONG_CTX_KERNEL: "false"
+        RAY_memory_monitor_refresh_ms: "0"
+        RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES: "67108864"
+        RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE: "16"
+        RAIDEN_PARALLELISM: "16"
+        VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1800"
+        RAIDEN_BROADCAST_HOST_RATIO: "1.0"
+        RAIDEN_BROADCAST_PIPELINE_STAGES: "4"
+        LIBTPU_INIT_ARGS: >-
+          --xla_tpu_use_minor_sharding_for_major_trivial_input=true
+          --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false
+          --xla_tpu_ars_combiner_threshold_in_bytes=0
+          --xla_tpu_enable_async_collective_merger=false
+          --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false
+        OPENHANDS_MULTI_TOOL_CALLS: "false"

@@ -36,8 +36,6 @@ TUNIX_IMAGE=${TUNIX_IMAGE:-}
 # of buffering them in `pathways-proxy` gRPC.
 # Rollout: 16 single-host v5p 2x2x1 replicas, one vLLM engine (TP=4) each;
 # `jobset.tpu.yaml` does not span hosts.
-export TRAINER_IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES="${TRAINER_IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES:-16777216}"
-
 exec "${DIR}/../../launch/common/launch.sh" \
   "override_config_file=${DIR}/deepswe.yaml" \
   actor_model_config.mesh.shape="(8,8,1)" \
@@ -48,12 +46,13 @@ exec "${DIR}/../../launch/common/launch.sh" \
   kubernetes_config.namespace=null \
   cluster_config.target="k8s" \
   cluster_config.k8s.tunix_image="${TUNIX_IMAGE}" \
-  cluster_config.ports.orchestrator=20000 \
-  cluster_config.ports.rollout=20001 \
-  cluster_config.ports.trainer=20002 \
-  cluster_config.k8s.cpu_memory="64G" \
-  cluster_config.k8s.user_container_memory="260G" \
-  cluster_config.k8s.user_container_memory_limit="260G" \
+  cluster_config.roles.orchestrator.port=20000 \
+  cluster_config.roles.rollout.port=20001 \
+  cluster_config.roles.trainer.port=20002 \
+  cluster_config.roles.orchestrator.memory.request="64G" \
+  cluster_config.roles.trainer.memory.request="260G" \
+  cluster_config.roles.trainer.memory.limit="260G" \
+  cluster_config.pathways.trainer.ifrt_proxy_large_transfer_threshold_bytes=16777216 \
   cluster_config.k8s.trainer.jobset_yaml="jobset.pathways.yaml" \
   cluster_config.k8s.trainer.tpu_slice="tpuv5:4x4x4" \
   cluster_config.k8s.rollout.jobset_yaml="jobset.tpu.yaml" \

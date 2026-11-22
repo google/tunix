@@ -94,7 +94,10 @@ class TrainerMainTest(absltest.TestCase):
     )
 
   def test_main_builds_worker_and_serves_with_close(self):
-    argv = ["cluster_config.ports.trainer=20050", "cluster_config.run_id=run_1"]
+    argv = [
+        "cluster_config.roles.trainer.port=20050",
+        "cluster_config.run_id=run_1",
+    ]
     trainer.main(argv, context=self.mock_context)
 
     self.mock_setup_metrics.assert_called_once_with(
@@ -194,7 +197,7 @@ class TrainerMainTest(absltest.TestCase):
       trainer.main(
           [
               "weight_sync_config.verify_weights=true",
-              "weight_sync_config.raiden_data_nics=eth0,eth1",
+              "weight_sync_config.raiden.data_nics=eth0,eth1",
           ],
           context=self.mock_context,
       )

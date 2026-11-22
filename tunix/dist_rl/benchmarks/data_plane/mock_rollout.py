@@ -235,7 +235,7 @@ def rollout_main(
   port = node_utils.service_port(hp, "rollout")
   node_utils.setup_otel_metrics(hp, "rollout", worker_id_str)
   node_utils.ensure_repo_root_on_path()
-  registry_mod = str(hp.config_mapping("cluster_config")["registry_module"])
+  registry_mod = str(hp.config["registry_module"])
   if registry_mod:
     importlib.import_module(registry_mod)
   config_sha256 = node_utils.log_resolved_config(hp, "rollout")

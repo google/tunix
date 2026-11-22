@@ -19,8 +19,10 @@ AbstractTrainer (fwd_bwd, eval_step, update), response metadata stamping, and
 per-token log-prob scorer run through AbstractTrainer.fwd_only.
 """
 
+import asyncio
 import dataclasses
 import functools
+import inspect
 import os
 import threading
 from typing import Any
@@ -350,13 +352,16 @@ class TrainerWorkerTest(absltest.TestCase):
         "save_checkpoint",
         "restore_checkpoint",
         "prepare_weight_sync",
-        "release_weight_sync",
         "get_metrics",
     ):
       self.assertTrue(
           getattr(getattr(self.worker, offloaded_name), attr, False),
           msg=f"{offloaded_name} should opt in to worker-thread offloading",
       )
+    # Neither on the worker thread nor inline: it runs on a thread of its own.
+    self.assertTrue(
+        inspect.iscoroutinefunction(self.worker.release_weight_sync)
+    )
     for inline_name in ("heartbeat", "info"):
       self.assertFalse(
           getattr(getattr(self.worker, inline_name), attr, False),
@@ -922,7 +927,7 @@ class TrainerWorkerExecutionContextTest(absltest.TestCase):
         lambda: self.worker.save_checkpoint(metadata={"step": 1}),
         lambda: self.worker.restore_checkpoint(step=1),
         self.worker.prepare_weight_sync,
-        self.worker.release_weight_sync,
+        lambda: asyncio.run(self.worker.release_weight_sync()),
         self.worker.stop,
     ]:
       self.events.clear()
@@ -1116,7 +1121,7 @@ class TrainerWorkerOTelMetricsTest(parameterized.TestCase):
       )
       self.worker.save_checkpoint(metadata={"step": 11}, step=11)
       self.worker.prepare_weight_sync()
-      self.worker.release_weight_sync()
+      asyncio.run(self.worker.release_weight_sync())
 
     metrics = otel_testing.collect_metrics(self.reader)
 
@@ -1244,10 +1249,11 @@ class TrainerWorkerOTelMetricsTest(parameterized.TestCase):
       self.worker._state = datatypes.WorkerState.READY
       self.worker.fwd_bwd(request=second_rl_req)
 
-    # A failing `release_weight_sync` must keep `WorkerState.SYNCING` (fail
-    # closed, matching HEAD) and record no `direction="release"` sample.
+    # The worker stays READY across a round, so a failing
+    # `release_weight_sync` leaves it READY; it must still record no
+    # `direction="release"` sample.
     self.worker.prepare_weight_sync()
-    self.assertEqual(self.worker.state, datatypes.WorkerState.SYNCING)
+    self.assertEqual(self.worker.state, datatypes.WorkerState.READY)
     with mock.patch.object(
         self.fake_trainer,
         "release_weight_sync",
@@ -1255,8 +1261,8 @@ class TrainerWorkerOTelMetricsTest(parameterized.TestCase):
         side_effect=RuntimeError("release failed"),
     ):
       with self.assertRaisesRegex(RuntimeError, "release failed"):
-        self.worker.release_weight_sync()
-    self.assertEqual(self.worker.state, datatypes.WorkerState.SYNCING)
+        asyncio.run(self.worker.release_weight_sync())
+    self.assertEqual(self.worker.state, datatypes.WorkerState.READY)
 
     metrics = otel_testing.collect_metrics(self.reader)
     tokens_by_type = {
@@ -1387,7 +1393,7 @@ class TrainerWorkerOTelMetricsTest(parameterized.TestCase):
         worker_id="trainer_otel_0",
         otel_meter_provider=self.meter_provider,
     )
-    self.assertIsNone(uninit_worker.release_weight_sync())
+    self.assertIsNone(asyncio.run(uninit_worker.release_weight_sync()))
 
     # 2. Boundary `valid_tokens == capacity_tokens` records `padded == 0`.
     full_req = datatypes.TrainRequest(
@@ -1472,7 +1478,7 @@ class TrainerWorkerOTelMetricsTest(parameterized.TestCase):
       )
       disabled_worker.save_checkpoint(metadata={"step": 1}, step=1)
       disabled_worker.prepare_weight_sync()
-      disabled_worker.release_weight_sync()
+      asyncio.run(disabled_worker.release_weight_sync())
 
     metrics = otel_testing.collect_metrics(self.reader)
     self.assertNotIn("tunix.trainer.weight_sync.duration", metrics)
@@ -1576,7 +1582,7 @@ class TrainerWorkerOTelMetricsTest(parameterized.TestCase):
     # NOT arm `last_free_time_s`, so MB1 emits zero cold-start starvation.
     self.worker.compile({"dummy": 1})
     self.worker.prepare_weight_sync()
-    self.worker.release_weight_sync()
+    asyncio.run(self.worker.release_weight_sync())
     self.assertIsNone(self.worker._otel.last_free_time_s)
 
     # Wall-clock sequence via `otel_metrics.now_s`:
@@ -1695,8 +1701,10 @@ class TrainerWorkerOTelMetricsTest(parameterized.TestCase):
       with mock.patch.object(otel_metrics, "now_s", side_effect=[35.0, 42.0]):
         self.worker.prepare_weight_sync()
         self.assertEqual(self.worker._otel.last_free_time_s, 35.0)
-        self.worker.release_weight_sync()
-      self.assertEqual(self.worker._otel.last_free_time_s, 42.0)
+        # The round may close while the trainer already waits for rollouts, so
+        # the release keeps the anchor that staging set.
+        asyncio.run(self.worker.release_weight_sync())
+      self.assertEqual(self.worker._otel.last_free_time_s, 35.0)
       return
     if rpc_case == "failed_update":
       with (

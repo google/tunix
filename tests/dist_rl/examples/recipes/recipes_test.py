@@ -127,7 +127,7 @@ class RecipesTest(launcher_testing.LauncherTestCase):
         rl_train["metrics_logging_options"]["project_name"], "ci-smoke-gsm8k"
     )
     cluster = hp.config_mapping("cluster_config")
-    self.assertEqual(cluster["wait_timeout_secs"], 900)
+    self.assertEqual(cluster["local"]["wait_timeout_secs"], 900)
     expected_local = {
         "auto_detect_devices": True,
         "trainer_devices": "0,1,2,3",
@@ -289,7 +289,7 @@ class RecipesTest(launcher_testing.LauncherTestCase):
         },
     )
     weight_sync_cfg = config["weight_sync_config"]
-    self.assertEqual(weight_sync_cfg["raiden_use_ffi"], 1)
+    self.assertIs(weight_sync_cfg["raiden"]["use_ffi"], True)
     self.assertTrue(weight_sync_cfg["prefuse_moe_weights"])
     self.assertTrue(weight_sync_cfg["verify_weights"])
     k8s = config["cluster_config"]["k8s"]
@@ -300,7 +300,9 @@ class RecipesTest(launcher_testing.LauncherTestCase):
     self.assertEqual(config["cluster_config"]["rollout_replicas"], 2)
     # Ports come from `math_gsm8k_dist/k8s_launcher.sh`; sequence lengths from
     # `math_gsm8k_dist/gsm8k.yaml`.
-    self.assertEqual(config["cluster_config"]["ports"]["trainer"], 20002)
+    self.assertEqual(
+        config["cluster_config"]["roles"]["trainer"]["port"], 20002
+    )
     self.assertEqual(config["rollout_config"]["max_prompt_length"], 1024)
     self.assertEqual(config["rollout_config"]["total_generation_steps"], 1024)
     self.assertIn("RAIDEN_USE_FFI=1", run.stdout)

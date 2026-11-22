@@ -77,6 +77,8 @@ weight_sync_config:
 # The orchestrator loads the task records with
 # `frozenlake.create_dataset(**data_config)`.
 data_module: "tunix.dist_rl.examples.frozenlake_dist.frozenlake"
+# Imported by the rollout node to register `FrozenLakeEnv` / `FrozenLakeAgent`.
+registry_module: "tunix.dist_rl.examples.frozenlake_dist.frozenlake"
 task_name: "frozenlake"
 data_config:
   split: "train"
@@ -155,9 +157,6 @@ agent_kwargs:
   use_multistep_prompt: true
 
 cluster_config:
-  # Imported by the rollout node to register `FrozenLakeEnv` /
-  # `FrozenLakeAgent`.
-  registry_module: "tunix.dist_rl.examples.frozenlake_dist.frozenlake"
   artifact_root: "artifacts/frozenlake"
   # Null derives the worker RPC deadline from the weight-sync phase timeouts,
   # which scale with `agentic_grpo_config.episode_timeout` (base: 1800).

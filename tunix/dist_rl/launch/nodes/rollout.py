@@ -813,7 +813,7 @@ def main(
 
   node_utils.ensure_repo_root_on_path()
 
-  registry_module = str(cluster["registry_module"])
+  registry_module = str(hp.config["registry_module"])
   logging.info("Importing rollout registry module: %s", registry_module)
   importlib.import_module(registry_module)
 

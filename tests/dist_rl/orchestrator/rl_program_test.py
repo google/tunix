@@ -581,6 +581,7 @@ class RLProgramTest(absltest.TestCase):
       self.mock_engine.sync_weights.assert_called_once_with(
           role=datatypes.Role.ACTOR,
           min_retained_policy_version=None,
+          source_prepared=mock.ANY,
       )
       self.assertIsNotNone(program.last_step_result)
       self.assertEqual(program.last_step_result.num_rollouts, 2)
@@ -664,10 +665,372 @@ class RLProgramTest(absltest.TestCase):
       self.mock_engine.sync_weights.assert_called_once_with(
           role=datatypes.Role.ACTOR,
           min_retained_policy_version=None,
+          source_prepared=mock.ANY,
       )
       self.assertEqual(program.policy_version, 5)
       self.assertIsNotNone(program.last_step_result)
       self.assertEqual(program.last_step_result.policy_version, 5)
+
+    asyncio.run(_run())
+
+  def _serve_dispatched_rollouts(self) -> list[int]:
+    """Answers every dispatched prompt with a group at the dispatched version.
+
+    Returns:
+      The `batch_idx` of each dispatched prompt, appended as dispatch happens.
+    """
+    pending_groups: list[list[datatypes.TrajectoryItem]] = []
+    dispatched_batches: list[int] = []
+
+    async def _dispatch(prompts, *, policy_version: int = 0, **kwargs):
+      del kwargs
+      batch_idx = prompts[0]["metadata"]["batch_idx"]
+      dispatched_batches.append(batch_idx)
+      pending_groups.append([
+          dataclasses.replace(
+              item, metadata={**item.metadata, "batch_idx": batch_idx}
+          )
+          for item in _make_trajectory_group(
+              prompts[0]["prompt_id"], policy_version=policy_version
+          )
+      ])
+
+    async def _poll(timeout_s=0.1):
+      del timeout_s
+      if pending_groups:
+        return pending_groups.pop(0)
+      await asyncio.sleep(0.005)
+      return []
+
+    self.mock_engine.dispatch_rollouts.side_effect = _dispatch
+    self.mock_engine.poll_rollouts.side_effect = _poll
+    return dispatched_batches
+
+  def _assert_trainer_overlaps_in_flight_weight_sync(
+      self, group_order: rl_program.GroupOrder
+  ) -> None:
+    async def _run():
+      dispatched_batches = self._serve_dispatched_rollouts()
+      sync_may_commit = asyncio.Event()
+      events: list[str] = []
+      seen_at_second_train: dict[str, Any] = {}
+      committed_versions = iter((1, 2))
+      checkpoint_versions: list[int] = []
+      step_result_versions: list[int] = []
+
+      async def _sync(*, role, source_prepared, **_):
+        del role
+        events.append("sync_staged")
+        source_prepared.set()
+        await sync_may_commit.wait()
+        events.append("sync_committed")
+        return next(committed_versions)
+
+      async def _train(*args, **kwargs):
+        del args, kwargs
+        events.append("train")
+        if events.count("train") == 2:
+          seen_at_second_train["dispatched"] = list(dispatched_batches)
+          seen_at_second_train["rollout_version"] = program.policy_version
+          seen_at_second_train["trainer_version"] = (
+              program.trainer_policy_version
+          )
+        return "step_done"
+
+      async def _save_checkpoint(*, metadata, **_):
+        checkpoint_versions.append(metadata["policy_version"])
+        # Step 0's round stays open through step 1's checkpoint.
+        if len(checkpoint_versions) == 2:
+          sync_may_commit.set()
+        return {"checkpoint_saved": True}
+
+      self.mock_engine.sync_weights = mock.AsyncMock(side_effect=_sync)
+      self.mock_engine.train_step.side_effect = _train
+      self.mock_engine.save_checkpoint = mock.AsyncMock(
+          side_effect=_save_checkpoint
+      )
+      program = rl_program.StandardRLProgram(
+          dataset=[f"prompt_data_{i}" for i in range(4)],
+          max_steps=2,
+          algo_config=self.algo_config,
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
+          assembler=self.assembler,
+          batch_config=self.batch_config,
+          sync_weights=True,
+          max_staleness=1,
+          group_order=group_order,
+          on_step_end=lambda step, result: step_result_versions.append(
+              program.last_step_result.policy_version
+          ),
+      )
+
+      with mock.patch.object(
+          program, "_log_metric", wraps=program._log_metric
+      ) as log_metric:
+        await asyncio.wait_for(program.run_async(self.mock_engine), timeout=30)
+      logged = {
+          (call.args[0], call.args[2]): call.args[1]
+          for call in log_metric.call_args_list
+      }
+
+      # Step 1 trains between step 0's round staging the weights and that
+      # round committing.
+      self.assertEqual(
+          events,
+          [
+              "train",
+              "sync_staged",
+              "train",
+              "sync_committed",
+              "sync_staged",
+              "sync_committed",
+          ],
+      )
+      # While that round is open the rollouts still serve version 0, so the
+      # dispatcher must not admit batch 2: it would be sampled at version 0
+      # and consumed at version 2, past `max_staleness=1`.
+      self.assertEqual(
+          seen_at_second_train,
+          {"dispatched": [0, 1], "rollout_version": 0, "trainer_version": 1},
+      )
+      self.assertEqual(program.policy_version, 2)
+      self.assertEqual(program.trainer_policy_version, 2)
+      # Everything a step reports is the trainer's version, although the
+      # rollouts still served version 0 until step 1's checkpoint was written.
+      self.assertEqual(step_result_versions, [1, 2])
+      self.assertEqual(checkpoint_versions, [1, 2])
+      self.assertEqual(logged[("orchestrator/policy_version", 0)], 1.0)
+      self.assertEqual(logged[("rollout/staleness_mean", 1)], 1.0)
+
+    asyncio.run(_run())
+
+  def test_trainer_overlaps_in_flight_weight_sync_in_completion_order(self):
+    self._assert_trainer_overlaps_in_flight_weight_sync(
+        rl_program.GroupOrder.TRAJECTORY_COMPLETION
+    )
+
+  def test_trainer_overlaps_in_flight_weight_sync_in_prompt_order(self):
+    self._assert_trainer_overlaps_in_flight_weight_sync(
+        rl_program.GroupOrder.PROMPT_ARRIVAL
+    )
+
+  def test_on_policy_step_waits_for_weight_sync_to_commit(self):
+    async def _run():
+      self._serve_dispatched_rollouts()
+      events: list[str] = []
+      committed_versions = iter((1, 2))
+
+      async def _sync(*, role, source_prepared, **_):
+        del role
+        # No early signal is offered: nothing could be trained on before the
+        # rollouts serve the new version.
+        self.assertIsNone(source_prepared)
+        events.append("sync_started")
+        await asyncio.sleep(0.05)
+        events.append("sync_committed")
+        return next(committed_versions)
+
+      async def _train(*args, **kwargs):
+        del args, kwargs
+        events.append("train")
+        return "step_done"
+
+      self.mock_engine.sync_weights = mock.AsyncMock(side_effect=_sync)
+      self.mock_engine.train_step.side_effect = _train
+      program = rl_program.StandardRLProgram(
+          dataset=["prompt_data_0", "prompt_data_1"],
+          max_steps=2,
+          algo_config=self.algo_config,
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
+          assembler=self.assembler,
+          batch_config=self.batch_config,
+          sync_weights=True,
+          max_staleness=0,
+      )
+
+      await asyncio.wait_for(program.run_async(self.mock_engine), timeout=30)
+
+      self.assertEqual(
+          events,
+          [
+              "train",
+              "sync_started",
+              "sync_committed",
+              "train",
+              "sync_started",
+              "sync_committed",
+          ],
+      )
+      self.assertEqual(program.last_step_result.policy_version, 2)
+
+    asyncio.run(_run())
+
+  def test_in_flight_weight_sync_failure_ends_the_wait_for_rollouts(self):
+    async def _run():
+      # Only the first batch ever comes back, so step 1 waits on `scored_q`.
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+
+      async def _sync(*, role, source_prepared, **_):
+        del role
+        source_prepared.set()
+        await asyncio.sleep(0.05)
+        raise RuntimeError("transfer lost")
+
+      self.mock_engine.sync_weights = mock.AsyncMock(side_effect=_sync)
+      program = self._create_program(
+          dataset=("prompt_0", "prompt_1"),
+          max_steps=2,
+          sync_weights=True,
+          max_staleness=1,
+      )
+
+      with self.assertRaisesRegex(RuntimeError, "transfer lost"):
+        await asyncio.wait_for(program.run_async(self.mock_engine), timeout=30)
+
+    asyncio.run(_run())
+
+  def _overlap_program(self, *, max_steps: int) -> rl_program.StandardRLProgram:
+    return rl_program.StandardRLProgram(
+        dataset=[f"prompt_data_{i}" for i in range(4)],
+        max_steps=max_steps,
+        algo_config=self.algo_config,
+        reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
+        assembler=self.assembler,
+        batch_config=self.batch_config,
+        sync_weights=True,
+        max_staleness=1,
+    )
+
+  def test_in_flight_round_judges_staleness_at_the_trainer_version(self):
+    async def _run():
+      self.algo_config.reward_mode = "env"
+      program = rl_program.StandardRLProgram(
+          algo_config=self.algo_config,
+          batch_config=self.batch_config,
+          dataset=["p0"],
+          reward_fns=[],
+          max_staleness=1,
+          group_order=rl_program.GroupOrder.TRAJECTORY_COMPLETION,
+      )
+      program.policy_version = 1
+      # A round is open: the trainer holds version 2, so a version-0 rollout
+      # would be two versions stale by the time it is trained on.
+      program._inflight_sync = asyncio.get_running_loop().create_future()
+      try:
+        for group_index in range(2):
+          await program.raw_q.put(
+              datatypes.TrajectoryItem(
+                  prompt_id="p_stale",
+                  group_index=group_index,
+                  start_step=0,
+                  traj={**_scored_traj(1.0), "policy_versions": [0]},
+              )
+          )
+        self.assertEqual(program.raw_q.ready_groups_count, 0)
+        self.assertEqual(program.raw_q.filtered_groups_count, 1)
+      finally:
+        program._inflight_sync = None
+        program.close()
+
+    asyncio.run(_run())
+
+  def test_committed_round_publishes_version_and_wakes_the_dispatcher(self):
+    async def _run():
+      program = self._overlap_program(max_steps=1)
+      committed = asyncio.get_running_loop().create_future()
+      committed.set_result(7)
+      program._inflight_sync = committed
+
+      with mock.patch.object(program.dispatch_window, "release") as release:
+        program._commit_completed_sync(committed)
+
+      self.assertEqual(program.policy_version, 7)
+      self.assertEqual(program.trainer_policy_version, 7)
+      release.assert_called_once_with()
+      program.close()
+
+    asyncio.run(_run())
+
+  def test_round_failing_during_the_next_step_fails_that_step(self):
+    async def _run():
+      self._serve_dispatched_rollouts()
+      second_train_started = asyncio.Event()
+      trains = []
+
+      async def _sync(*, role, source_prepared, **_):
+        del role
+        source_prepared.set()
+        await second_train_started.wait()
+        raise RuntimeError("transfer lost")
+
+      async def _train(*args, **kwargs):
+        del args, kwargs
+        trains.append("train")
+        if len(trains) == 2:
+          second_train_started.set()
+        return "step_done"
+
+      self.mock_engine.sync_weights = mock.AsyncMock(side_effect=_sync)
+      self.mock_engine.train_step.side_effect = _train
+      program = self._overlap_program(max_steps=3)
+
+      with self.assertRaisesRegex(RuntimeError, "transfer lost"):
+        await asyncio.wait_for(program.run_async(self.mock_engine), timeout=30)
+
+      # Step 1 had its data, so only its own end could surface the failure;
+      # step 2 must not have started on top of a failed round.
+      self.assertLen(trains, 2)
+      self.assertEqual(self.mock_engine.sync_weights.await_count, 1)
+
+    asyncio.run(_run())
+
+  def test_last_round_failing_after_staging_fails_the_program(self):
+    async def _run():
+      self._serve_dispatched_rollouts()
+
+      async def _sync(*, role, source_prepared, **_):
+        del role
+        source_prepared.set()
+        await asyncio.sleep(0.05)
+        raise RuntimeError("transfer lost")
+
+      self.mock_engine.sync_weights = mock.AsyncMock(side_effect=_sync)
+      program = self._overlap_program(max_steps=1)
+
+      # No later step is left to notice: the join after the loop must.
+      with self.assertRaisesRegex(RuntimeError, "transfer lost"):
+        await asyncio.wait_for(program.run_async(self.mock_engine), timeout=30)
+
+    asyncio.run(_run())
+
+  def test_cancelling_the_program_cancels_the_in_flight_round(self):
+    async def _run():
+      self._serve_dispatched_rollouts()
+      round_open = asyncio.Event()
+      round_cancelled = asyncio.Event()
+
+      async def _sync(*, role, source_prepared, **_):
+        del role
+        source_prepared.set()
+        round_open.set()
+        try:
+          await asyncio.Event().wait()
+        except asyncio.CancelledError:
+          round_cancelled.set()
+          raise
+
+      self.mock_engine.sync_weights = mock.AsyncMock(side_effect=_sync)
+      program = self._overlap_program(max_steps=1)
+      run_task = asyncio.create_task(program.run_async(self.mock_engine))
+      await asyncio.wait_for(round_open.wait(), timeout=30)
+
+      run_task.cancel()
+      with self.assertRaises(asyncio.CancelledError):
+        await asyncio.wait_for(run_task, timeout=30)
+
+      # No round outlives the program.
+      self.assertTrue(round_cancelled.is_set())
+      self.assertIsNone(program._inflight_sync)
 
     asyncio.run(_run())
 
@@ -799,8 +1162,9 @@ class RLProgramTest(absltest.TestCase):
         policy_version,
         destination_statuses,
         min_retained_policy_version=None,
+        source_prepared=None,
     ):
-      del destination_statuses, min_retained_policy_version
+      del destination_statuses, min_retained_policy_version, source_prepared
       events.append(("sync", policy_version))
       return mock.MagicMock(policy_version=policy_version, workers=())
 
@@ -2467,6 +2831,7 @@ class RLProgramTest(absltest.TestCase):
       self.mock_engine.sync_weights.assert_called_once_with(
           role=datatypes.Role.ACTOR,
           min_retained_policy_version=None,
+          source_prepared=mock.ANY,
       )
       self.mock_engine.save_checkpoint.assert_called_once()
       checkpoint_metadata = self.mock_engine.save_checkpoint.call_args.kwargs[
@@ -7570,6 +7935,7 @@ class RLProgramTest(absltest.TestCase):
         self.mock_engine.sync_weights.assert_awaited_once_with(
             role=datatypes.Role.ACTOR,
             min_retained_policy_version=-6,
+            source_prepared=mock.ANY,
         )
         self.mock_engine.clear_all_staged_routed_experts.assert_awaited_once()
         self.assertAlmostEqual(

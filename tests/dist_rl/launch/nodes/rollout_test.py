@@ -56,7 +56,7 @@ _TASK_ARGV = (
     "data_module=my_task.data",
     "env_class_path=my_env",
     "agent_class_path=my_agent",
-    "cluster_config.registry_module=my_task.registry",
+    "registry_module=my_task.registry",
 )
 # The variables `node_utils.apply_library_env` sets.
 _LIBRARY_ENV_VARS = (
@@ -1183,7 +1183,7 @@ class RolloutMainTest(absltest.TestCase):
             [
                 *_TASK_ARGV,
                 "vllm_config.skip_jax_precompile=false",
-                "weight_sync_config.raiden_data_nics=eth1",
+                "weight_sync_config.raiden.data_nics=eth1",
             ],
             context=mock.Mock(),
         )
@@ -1226,7 +1226,7 @@ class RolloutMainTest(absltest.TestCase):
     with self.assertRaisesRegex(
         ValueError,
         "names no task: data_module, env_class_path, agent_class_path,"
-        " cluster_config.registry_module must be set",
+        " registry_module must be set",
     ):
       rollout.main([], context=mock.Mock())
 

@@ -16,7 +16,7 @@
 
 Kept free of rollout-node (`automodel`, `maxtext_utils`, `raiden_preload`) and
 worker/server imports so importing this module on the stock CPU Orchestrator
-(`data_module` and `benchmark_rewards`) or as `cluster_config.registry_module`
+(`data_module` and `benchmark_rewards`) or as `registry_module`
 never inflates baseline process RSS/HWM. Mock Rollout and Trainer node
 entrypoints live in `mock_rollout.py` and `mock_trainer.py`.
 """

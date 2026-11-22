@@ -150,7 +150,7 @@ FIXED_OVERRIDES = (
     "task_name=gsm8k",
     "env_class_path=gsm8kenv",
     "agent_class_path=gsm8kagent",
-    "cluster_config.registry_module=golden_registry_module",
+    "registry_module=golden_registry_module",
     "rollout_config.eos_tokens=151645,151643",
 )
 

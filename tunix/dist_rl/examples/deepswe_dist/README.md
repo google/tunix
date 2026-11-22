@@ -10,7 +10,7 @@ The launchers run these node mains:
 1. `tunix.dist_rl.launch.nodes.orchestrator` runs the CPU control plane and
    loads task records via `deepswe.create_dataset(**data_config)`.
 2. `tunix.dist_rl.launch.nodes.rollout` imports `deepswe.py`
-   (`cluster_config.registry_module`) and runs `DeepSWEEnv` (`SWEEnv`) and
+   (`registry_module`) and runs `DeepSWEEnv` (`SWEEnv`) and
    `DeepSWEAgent` (`SWEAgent`).
 3. `tunix.dist_rl.launch.nodes.trainer` runs the distributed trainer worker.
 
@@ -81,9 +81,9 @@ the trainer container's memory limit to cover the cached weights:
 bash tunix/dist_rl/examples/deepswe_dist/k8s_launcher.sh start \
   cluster_config.k8s.tunix_image=<IMAGE> \
   model_config.model_download_path=/dev/shm/models \
-  cluster_config.role_env.trainer.HF_HOME=/dev/shm/hf \
-  cluster_config.role_env.rollout.HF_HOME=/dev/shm/hf \
-  cluster_config.k8s.user_container_memory_limit=340G
+  cluster_config.roles.trainer.env.HF_HOME=/dev/shm/hf \
+  cluster_config.roles.rollout.env.HF_HOME=/dev/shm/hf \
+  cluster_config.roles.trainer.memory.limit=340G
 ```
 
 Run with `SandboxFleet` enabled on GKE. The sandboxes run in the run's GKE

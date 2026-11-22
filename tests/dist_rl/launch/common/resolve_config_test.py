@@ -712,7 +712,6 @@ weight_sync_config:
         "priority_class=123",
         "service_account=true",
         "cpu_nodepool=123",
-        "cpu_memory=64",
         "head_nodepool=true",
     ):
       key = str_override.split("=")[0]
@@ -1040,10 +1039,10 @@ weight_sync_config:
       resolve_config.initialize(["vllm_config.detokenize=yes_please"])
     for bad_ft in ("yes_please", "0", "null"):
       with self.assertRaisesRegex(
-          TypeError, r"cluster_config\.rollout_fault_tolerance"
+          TypeError, r"cluster_config\.fault_tolerance\.enabled"
       ):
         resolve_config.initialize(
-            [f"cluster_config.rollout_fault_tolerance={bad_ft}"]
+            [f"cluster_config.fault_tolerance.enabled={bad_ft}"]
         )
 
   def test_maxtext_skip_step_kwargs_validation(self):
@@ -1076,24 +1075,16 @@ weight_sync_config:
       ])
 
   def test_rollout_fault_tolerance_settings_and_validation(self):
-    ft_keys = (
-        "rollout_fault_tolerance",
-        "max_task_retries",
-        "poll_retry_budget_s",
-        "min_active_rollout_ratio",
-        "min_active_rollout_grace_s",
-    )
-
     def ft_values(*overrides: str) -> dict[str, object]:
       cluster = resolve_config.initialize(list(overrides)).config_mapping(
           "cluster_config"
       )
-      return {key: cluster[key] for key in ft_keys}
+      return dict(cluster["fault_tolerance"])
 
     self.assertEqual(
         ft_values(),
         {
-            "rollout_fault_tolerance": True,
+            "enabled": True,
             "max_task_retries": 1,
             "poll_retry_budget_s": None,
             "min_active_rollout_ratio": 0.5,
@@ -1102,14 +1093,14 @@ weight_sync_config:
     )
     self.assertEqual(
         ft_values(
-            "cluster_config.rollout_fault_tolerance=false",
-            "cluster_config.max_task_retries=3",
-            "cluster_config.poll_retry_budget_s=45.5",
-            "cluster_config.min_active_rollout_ratio=null",
-            "cluster_config.min_active_rollout_grace_s=0",
+            "cluster_config.fault_tolerance.enabled=false",
+            "cluster_config.fault_tolerance.max_task_retries=3",
+            "cluster_config.fault_tolerance.poll_retry_budget_s=45.5",
+            "cluster_config.fault_tolerance.min_active_rollout_ratio=null",
+            "cluster_config.fault_tolerance.min_active_rollout_grace_s=0",
         ),
         {
-            "rollout_fault_tolerance": False,
+            "enabled": False,
             "max_task_retries": 3,
             "poll_retry_budget_s": 45.5,
             "min_active_rollout_ratio": None,
@@ -1118,12 +1109,12 @@ weight_sync_config:
     )
     self.assertEqual(
         ft_values(
-            "cluster_config.max_task_retries=0",
-            "cluster_config.poll_retry_budget_s=0",
-            "cluster_config.min_active_rollout_ratio=1",
+            "cluster_config.fault_tolerance.max_task_retries=0",
+            "cluster_config.fault_tolerance.poll_retry_budget_s=0",
+            "cluster_config.fault_tolerance.min_active_rollout_ratio=1",
         ),
         {
-            "rollout_fault_tolerance": True,
+            "enabled": True,
             "max_task_retries": 0,
             "poll_retry_budget_s": 0,
             "min_active_rollout_ratio": 1,
@@ -1132,17 +1123,17 @@ weight_sync_config:
     )
 
     for arg in (
-        "cluster_config.max_task_retries=true",
-        "cluster_config.max_task_retries=1.5",
-        "cluster_config.max_task_retries=null",
-        "cluster_config.max_task_retries=abc",
-        "cluster_config.poll_retry_budget_s=true",
-        "cluster_config.poll_retry_budget_s=abc",
-        "cluster_config.min_active_rollout_ratio=false",
-        "cluster_config.min_active_rollout_ratio=abc",
-        "cluster_config.min_active_rollout_grace_s=true",
-        "cluster_config.min_active_rollout_grace_s=null",
-        "cluster_config.min_active_rollout_grace_s=abc",
+        "cluster_config.fault_tolerance.max_task_retries=true",
+        "cluster_config.fault_tolerance.max_task_retries=1.5",
+        "cluster_config.fault_tolerance.max_task_retries=null",
+        "cluster_config.fault_tolerance.max_task_retries=abc",
+        "cluster_config.fault_tolerance.poll_retry_budget_s=true",
+        "cluster_config.fault_tolerance.poll_retry_budget_s=abc",
+        "cluster_config.fault_tolerance.min_active_rollout_ratio=false",
+        "cluster_config.fault_tolerance.min_active_rollout_ratio=abc",
+        "cluster_config.fault_tolerance.min_active_rollout_grace_s=true",
+        "cluster_config.fault_tolerance.min_active_rollout_grace_s=null",
+        "cluster_config.fault_tolerance.min_active_rollout_grace_s=abc",
     ):
       key = arg.split("=", 1)[0]
       with self.subTest(arg=arg):
@@ -1150,20 +1141,20 @@ weight_sync_config:
           resolve_config.initialize([arg])
 
     for arg in (
-        "cluster_config.max_task_retries=-1",
-        "cluster_config.poll_retry_budget_s=-0.1",
-        "cluster_config.poll_retry_budget_s=.inf",
-        "cluster_config.poll_retry_budget_s=-.inf",
-        "cluster_config.poll_retry_budget_s=.nan",
-        "cluster_config.min_active_rollout_ratio=0.0",
-        "cluster_config.min_active_rollout_ratio=-0.5",
-        "cluster_config.min_active_rollout_ratio=1.1",
-        "cluster_config.min_active_rollout_ratio=.nan",
-        "cluster_config.min_active_rollout_ratio=.inf",
-        "cluster_config.min_active_rollout_grace_s=-1.0",
-        "cluster_config.min_active_rollout_grace_s=.inf",
-        "cluster_config.min_active_rollout_grace_s=-.inf",
-        "cluster_config.min_active_rollout_grace_s=.nan",
+        "cluster_config.fault_tolerance.max_task_retries=-1",
+        "cluster_config.fault_tolerance.poll_retry_budget_s=-0.1",
+        "cluster_config.fault_tolerance.poll_retry_budget_s=.inf",
+        "cluster_config.fault_tolerance.poll_retry_budget_s=-.inf",
+        "cluster_config.fault_tolerance.poll_retry_budget_s=.nan",
+        "cluster_config.fault_tolerance.min_active_rollout_ratio=0.0",
+        "cluster_config.fault_tolerance.min_active_rollout_ratio=-0.5",
+        "cluster_config.fault_tolerance.min_active_rollout_ratio=1.1",
+        "cluster_config.fault_tolerance.min_active_rollout_ratio=.nan",
+        "cluster_config.fault_tolerance.min_active_rollout_ratio=.inf",
+        "cluster_config.fault_tolerance.min_active_rollout_grace_s=-1.0",
+        "cluster_config.fault_tolerance.min_active_rollout_grace_s=.inf",
+        "cluster_config.fault_tolerance.min_active_rollout_grace_s=-.inf",
+        "cluster_config.fault_tolerance.min_active_rollout_grace_s=.nan",
     ):
       key = arg.split("=", 1)[0]
       with self.subTest(arg=arg):
@@ -1366,7 +1357,7 @@ weight_sync_config:
     ws = hp.config_mapping("weight_sync_config")
     self.assertIs(ws["verify_weights"], False)
     # As the earlier launchers did.
-    self.assertEqual(ws["raiden_data_nics"], "eth0")
+    self.assertEqual(ws["raiden"]["data_nics"], "eth0")
 
     hp = resolve_config.initialize([
         "vllm_config.skip_jax_precompile=false",
@@ -1374,14 +1365,14 @@ weight_sync_config:
         "actor_model_config.model_path=/ckpt",
         "actor_model_config.kwargs.maxtext_model_name=qwen3-1.7b",
         "dist_training_config.ckpt_d2h_concurrent_gb=16",
-        "weight_sync_config.raiden_data_nics=eth0,eth1",
+        "weight_sync_config.raiden.data_nics=eth0,eth1",
     ])
     vllm = hp.config_mapping("vllm_config")
     self.assertIs(vllm["skip_jax_precompile"], False)
     dist_training = hp.config_mapping("dist_training_config")
     self.assertEqual(dist_training["ckpt_d2h_concurrent_gb"], 16)
     self.assertEqual(
-        hp.config_mapping("weight_sync_config")["raiden_data_nics"],
+        hp.config_mapping("weight_sync_config")["raiden"]["data_nics"],
         "eth0,eth1",
     )
 
@@ -1392,7 +1383,7 @@ weight_sync_config:
     for override, error in (
         ("vllm_config.skip_jax_precompile=1", "skip_jax_precompile must be a"),
         ("weight_sync_config.verify_weights=1", "verify_weights must be a"),
-        ("weight_sync_config.raiden_data_nics=1", "must be a string"),
+        ("weight_sync_config.raiden.data_nics=1", "must be a string"),
         (f"{d2h}=8.5", "must be an int or null"),
         (f"{d2h}=true", "must be an int or null"),
     ):
@@ -1672,10 +1663,10 @@ weight_sync_config:
 
   def test_role_env(self):
     hp = resolve_config.initialize([
-        "cluster_config.role_env.orchestrator.ORCH_FLAG=x",
-        "cluster_config.role_env.trainer.XLA_FLAGS='--xla_a --xla_b'",
-        "cluster_config.role_env.trainer.TPU_STDERR_LOG_LEVEL='0'",
-        "cluster_config.role_env.rollout.VLLM_LOGGING_LEVEL=DEBUG",
+        "cluster_config.roles.orchestrator.env.ORCH_FLAG=x",
+        "cluster_config.roles.trainer.env.XLA_FLAGS='--xla_a --xla_b'",
+        "cluster_config.roles.trainer.env.TPU_STDERR_LOG_LEVEL='0'",
+        "cluster_config.roles.rollout.env.VLLM_LOGGING_LEVEL=DEBUG",
         "agentic_grpo_config.beta=0.0",
     ])
     self.assertEqual(
@@ -1706,7 +1697,7 @@ weight_sync_config:
         ["XLA_FLAGS=--xla_a --xla_b", "TPU_STDERR_LOG_LEVEL=0"],
     )
 
-    trainer = "cluster_config.role_env.trainer"
+    trainer = "cluster_config.roles.trainer.env"
     with self.assertRaisesRegex(TypeError, "keys and values must be strings"):
       resolve_config.initialize([f"{trainer}.FOO=1"])
     with self.assertRaisesRegex(TypeError, f"{trainer} must be a mapping"):
@@ -1724,7 +1715,7 @@ weight_sync_config:
     ):
       resolve_config.initialize([
           "agentic_grpo_config.beta=0.0",
-          "cluster_config.role_env.inference.FOO=x",
+          "cluster_config.roles.inference.env.FOO=x",
       ])
     with self.assertRaisesRegex(
         ValueError, "target=external runs the processes"
@@ -1992,6 +1983,46 @@ class RetiredKeysTest(parameterized.TestCase):
           override="vllm_config.tensor_parallel_size=2",
           message="it is the 'tp' axis of rollout_model_config.mesh",
       ),
+      dict(
+          testcase_name="moved_key",
+          override="cluster_config.ports.trainer=20050",
+          message=(
+              "cluster_config.ports.trainer is no longer a config key: moved"
+              " to cluster_config.roles.trainer.port"
+          ),
+      ),
+      dict(
+          testcase_name="key_of_a_moved_section",
+          override="cluster_config.role_env.trainer.HF_HOME=/dev/shm/hf",
+          message=(
+              "cluster_config.role_env is no longer a config key: moved to"
+              " cluster_config.roles.<role>.env"
+          ),
+      ),
+      dict(
+          testcase_name="key_split_per_role",
+          override="cluster_config.k8s.user_container_memory=56G",
+          message=(
+              "moved to cluster_config.roles.trainer.memory.request and"
+              " cluster_config.roles.rollout.memory.request"
+          ),
+      ),
+      dict(
+          testcase_name="limit_split_per_role",
+          override="cluster_config.k8s.user_container_memory_limit=80G",
+          message=(
+              "moved to cluster_config.roles.trainer.memory.limit and"
+              " cluster_config.roles.rollout.memory.limit"
+          ),
+      ),
+      dict(
+          testcase_name="renamed_pathways_memory",
+          override="cluster_config.k8s.pathways_worker_memory=120G",
+          message=(
+              "cluster_config.k8s.pathways_worker_memory is no longer a config"
+              " key: moved to cluster_config.pathways.server_memory.request"
+          ),
+      ),
   )
   def test_override_fails_with_what_to_do_instead(
       self, override: str, message: str
@@ -2096,11 +2127,247 @@ class UnimplementedKeysTest(parameterized.TestCase):
     )
 
 
+class RolesTest(absltest.TestCase):
+
+  def test_each_role_has_its_own_memory(self):
+    exports = resolve_config.render_bash_exports(
+        resolve_config.initialize([
+            "cluster_config.roles.orchestrator.memory.request=64G",
+            "cluster_config.roles.orchestrator.memory.limit=96G",
+            "cluster_config.roles.trainer.memory.request=260G",
+            "cluster_config.roles.trainer.memory.limit=340G",
+        ])
+    )
+    for line in (
+        "export K8S_CPU_MEMORY=64G",
+        "export K8S_CPU_MEMORY_LIMIT=96G",
+        "export K8S_TRAINER_MEMORY=260G",
+        "export K8S_TRAINER_MEMORY_LIMIT=340G",
+        "export K8S_ROLLOUT_MEMORY=48G",
+        "export K8S_ROLLOUT_MEMORY_LIMIT=70G",
+    ):
+      self.assertIn(f"{line}\n", exports)
+
+  def test_empty_memory_exports_empty(self):
+    exports = resolve_config.render_bash_exports(
+        resolve_config.initialize([
+            "cluster_config.roles.trainer.memory.request=''",
+            "cluster_config.roles.trainer.memory.limit=''",
+        ])
+    )
+    self.assertIn("export K8S_TRAINER_MEMORY=''\n", exports)
+    self.assertIn("export K8S_TRAINER_MEMORY_LIMIT=''\n", exports)
+
+  def test_memory_fields_must_be_strings(self):
+    for role in ("orchestrator", "trainer", "rollout"):
+      for field in ("request", "limit"):
+        with self.subTest(role=role, field=field):
+          with self.assertRaisesRegex(
+              TypeError,
+              rf"cluster_config\.roles\.{role}\.memory\.{field} must be a"
+              r" str",
+          ):
+            resolve_config.initialize(
+                [f"cluster_config.roles.{role}.memory.{field}=64"]
+            )
+
+  def test_memory_must_be_a_request_and_limit_mapping(self):
+    with self.assertRaisesRegex(
+        TypeError,
+        r"cluster_config\.roles\.trainer\.memory must be a mapping of"
+        r" `request` and `limit`",
+    ):
+      resolve_config.initialize(["cluster_config.roles.trainer.memory=64G"])
+
+  def test_roles_are_the_four_processes(self):
+    roles = resolve_config.initialize([]).config_mapping("cluster_config")[
+        "roles"
+    ]
+    self.assertEqual(tuple(roles), resolve_config.PROCESS_ROLES)
+    self.assertNotIn("memory", roles["inference"])
+
+
+class LauncherSettingsTest(absltest.TestCase):
+  """The Pathways, Raiden and reservation settings `k8s.sh` passes on."""
+
+  def _exports(self, *overrides: str) -> str:
+    return resolve_config.render_bash_exports(
+        resolve_config.initialize(list(overrides))
+    )
+
+  def test_defaults_match_the_former_environment_defaults(self):
+    exports = self._exports()
+    for line in (
+        "export WEIGHT_SYNC_RAIDEN_USE_FFI=''",
+        "export WEIGHT_SYNC_RAIDEN_DATA_NICS=eth0",
+        "export WEIGHT_SYNC_RAIDEN_BROADCAST_K=64",
+        "export WEIGHT_SYNC_RAIDEN_MULTI_NUMA=false",
+        "export K8S_TPU_RESERVATION=''",
+        "export K8S_PATHWAYS_IFRT_THRESHOLD_BYTES=''",
+        "export K8S_PATHWAYS_WORKER_ENV_JSON='{}'",
+        "export K8S_PATHWAYS_PROXY_EXTRA_ARGS=''",
+        "export K8S_PATHWAYS_SIDECAR_IMAGE=''",
+        "export K8S_PATHWAYS_SIDECAR_MEMORY=16Gi",
+        "export K8S_PATHWAYS_SIDECAR_MEMORY_LIMIT=''",
+        "export K8S_PATHWAYS_SIDECAR_SHM=true",
+        "export K8S_ENABLE_PATHWAYS_PERSISTENCE=false",
+        "export K8S_PATHWAYS_PROXY_MEMORY=16G",
+        "export K8S_PATHWAYS_PROXY_MEMORY_LIMIT=190G",
+        "export K8S_PATHWAYS_RM_MEMORY=4G",
+        "export K8S_PATHWAYS_RM_MEMORY_LIMIT=32G",
+        "export K8S_PATHWAYS_SERVER_MEMORY=100G",
+        "export K8S_PATHWAYS_SERVER_MEMORY_LIMIT=''",
+    ):
+      self.assertIn(f"{line}\n", exports)
+
+  def test_overrides_reach_the_exports(self):
+    exports = self._exports(
+        "weight_sync_config.raiden.use_ffi=false",
+        "weight_sync_config.raiden.data_nics=",
+        "weight_sync_config.raiden.multi_numa=true",
+        "cluster_config.k8s.tpu_reservation=my-res",
+        (
+            "cluster_config.pathways.trainer.ifrt_proxy_large_transfer_threshold"
+            "_bytes=16777216"
+        ),
+        "cluster_config.pathways.worker_env.LIBTPU_INIT_ARGS=--a=1 --b=2",
+        # As in a role's `env`, a value that parses as a bool or a number
+        # needs quotes.
+        "cluster_config.pathways.worker_env.SKIP_X='true'",
+        "cluster_config.pathways.proxy_extra_args=--xla_a=1 --xla_b=2",
+        "cluster_config.pathways.sidecar.image=sidecar:v1",
+        "cluster_config.pathways.sidecar.shm=false",
+        "cluster_config.pathways.sidecar.memory.limit=20Gi",
+        "cluster_config.pathways.trainer.persistence=true",
+        "cluster_config.pathways.rm_memory.limit=''",
+        "cluster_config.pathways.server_memory.limit=120G",
+    )
+    for line in (
+        "export WEIGHT_SYNC_RAIDEN_USE_FFI=false",
+        "export WEIGHT_SYNC_RAIDEN_DATA_NICS=''",
+        "export WEIGHT_SYNC_RAIDEN_MULTI_NUMA=true",
+        "export K8S_TPU_RESERVATION=my-res",
+        "export K8S_PATHWAYS_IFRT_THRESHOLD_BYTES=16777216",
+        (
+            "export K8S_PATHWAYS_WORKER_ENV_JSON="
+            """'{"LIBTPU_INIT_ARGS": "--a=1 --b=2", "SKIP_X": "true"}'"""
+        ),
+        "export K8S_PATHWAYS_PROXY_EXTRA_ARGS='--xla_a=1 --xla_b=2'",
+        "export K8S_PATHWAYS_SIDECAR_IMAGE=sidecar:v1",
+        "export K8S_PATHWAYS_SIDECAR_SHM=false",
+        "export K8S_PATHWAYS_SIDECAR_MEMORY_LIMIT=20Gi",
+        "export K8S_ENABLE_PATHWAYS_PERSISTENCE=true",
+        "export K8S_PATHWAYS_RM_MEMORY_LIMIT=''",
+        "export K8S_PATHWAYS_SERVER_MEMORY_LIMIT=120G",
+    ):
+      self.assertIn(f"{line}\n", exports)
+
+  def test_malformed_settings_fail(self):
+    for override, error, message in (
+        (
+            "weight_sync_config.raiden.use_ffi=1",
+            TypeError,
+            "raiden.use_ffi must be a bool or null",
+        ),
+        (
+            "weight_sync_config.raiden.multi_numa=1",
+            TypeError,
+            "raiden.multi_numa must be a bool",
+        ),
+        (
+            "weight_sync_config.raiden.broadcast_k=0",
+            ValueError,
+            "raiden.broadcast_k must be a positive int",
+        ),
+        (
+            "weight_sync_config.raiden.broadcast_k=true",
+            ValueError,
+            "raiden.broadcast_k must be a positive int",
+        ),
+        (
+            (
+                "cluster_config.pathways.trainer.ifrt_proxy_large_transfer_threshold"
+                "_bytes=0"
+            ),
+            ValueError,
+            r"must be null or an int in \[1, 2\*\*63 - 1\]",
+        ),
+        (
+            "cluster_config.pathways.trainer.persistence=1",
+            TypeError,
+            "pathways.trainer.persistence must be a bool",
+        ),
+        (
+            "cluster_config.pathways.sidecar.shm=1",
+            TypeError,
+            "pathways.sidecar.shm must be a bool",
+        ),
+        (
+            "cluster_config.pathways.proxy_extra_args=7",
+            TypeError,
+            "pathways.proxy_extra_args must be a str",
+        ),
+        (
+            "cluster_config.pathways.rm_memory.limit=7",
+            TypeError,
+            r"pathways\.rm_memory\.limit must be a str",
+        ),
+        (
+            "cluster_config.pathways.sidecar.memory=16Gi",
+            TypeError,
+            (
+                r"pathways\.sidecar\.memory must be a mapping of `request`"
+                r" and `limit`"
+            ),
+        ),
+        (
+            "cluster_config.k8s.tpu_reservation=7",
+            TypeError,
+            "k8s.tpu_reservation must be a str",
+        ),
+        (
+            "cluster_config.pathways.worker_env.SOME_VAR=7",
+            TypeError,
+            "worker_env.SOME_VAR must be a string",
+        ),
+        (
+            # The Pathways template sets it; it has its own key.
+            "cluster_config.pathways.worker_env.RAIDEN_BROADCAST_K='128'",
+            ValueError,
+            (
+                "worker_env: Pathways worker environment variable"
+                " 'RAIDEN_BROADCAST_K' is set by the template"
+            ),
+        ),
+    ):
+      with self.subTest(override=override):
+        with self.assertRaisesRegex(error, message):
+          resolve_config.initialize([override])
+
+  def test_worker_env_values_pass_through_unchanged(self):
+    # `k8s.sh` passes the variables to the manifest generator as JSON, so any
+    # string value survives.
+    env = {"A": "x\ry=z", "B": "a\nb", "C": " padded", "D": '"quoted"'}
+    overlay = self.create_tempfile(
+        content=(
+            "cluster_config:\n  pathways:\n    worker_env: "
+            + json.dumps(env)
+            + "\n"
+        )
+    )
+    hp = resolve_config.initialize(
+        [f"override_config_file={overlay.full_path}"]
+    )
+    self.assertEqual(
+        json.loads(resolve_config.pathways_worker_env_json(hp)), env
+    )
+
+
 _TASK_OVERRIDES = (
     "data_module=my_task.data",
     "env_class_path=my_env",
     "agent_class_path=my_agent",
-    "cluster_config.registry_module=my_task.registry",
+    "registry_module=my_task.registry",
 )
 
 
@@ -2111,7 +2378,7 @@ class TaskConfigTest(absltest.TestCase):
     with self.assertRaisesRegex(
         ValueError,
         "The config names no task: data_module, env_class_path,"
-        " agent_class_path, cluster_config.registry_module must be set",
+        " agent_class_path, registry_module must be set",
     ):
       resolve_config.validate_task(hp)
 
@@ -2120,7 +2387,7 @@ class TaskConfigTest(absltest.TestCase):
     self.assertStartsWith(
         resolve_config.task_config_error(hp),
         "The config names no task: agent_class_path,"
-        " cluster_config.registry_module must be set.",
+        " registry_module must be set.",
     )
 
   def test_config_with_every_task_key_passes(self):

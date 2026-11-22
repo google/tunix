@@ -322,8 +322,20 @@ class TrainerWorkerOtelMetrics:
       weight_sync_direction: str | None = None,
       token_counts: tuple[int, int] | None = None,
       arm: bool = False,
+      refresh_free_time: bool = True,
   ) -> Iterator[None]:
-    """Times a worker RPC, updates `last_free_time_s`, and records metrics on success."""
+    """Times a worker RPC, updates `last_free_time_s`, and records metrics on success.
+
+    Args:
+      phase: `step.duration` phase to record the RPC under, if any.
+      weight_sync_direction: `weight_sync.duration` direction to record the RPC
+        under, if any.
+      token_counts: `(valid, padded)` tokens to add to `tokens.processed`.
+      arm: Whether this RPC starts the busy anchor when it is still unset.
+      refresh_free_time: Whether the RPC occupied the trainer. False for an RPC
+        that can land while the trainer is idle, so the idle time before it is
+        not lost.
+    """
     # Trigger: only `fwd_bwd` passes `arm=True`; `compile`,
     # `restore_checkpoint`, and weight-sync RPCs leave `arm=False`. Before the
     # first training microbatch arrives, startup `compile()` and initial weight
@@ -338,7 +350,7 @@ class TrainerWorkerOtelMetrics:
       yield
       elapsed_s = (perf_counter_s() - t0) if timed else 0.0
     finally:
-      if arm or self.last_free_time_s is not None:
+      if refresh_free_time and (arm or self.last_free_time_s is not None):
         self.last_free_time_s = now_s()
     if phase is not None:
       self._step_duration.record(float(elapsed_s), phase=phase)
