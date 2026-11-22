@@ -205,8 +205,13 @@ class BatchingFp32DirectorSampler:
             new_fp32_state, self._template_state, self._target_shardings
         )
         self._sampler.transformer_state = new_state
+      keep_ids = {id(x) for x in jax.tree.leaves(new_state)}
       for leaf in jax.tree.leaves(old_state):
-        if isinstance(leaf, jax.Array) and not leaf.is_deleted():
+        if (
+            isinstance(leaf, jax.Array)
+            and id(leaf) not in keep_ids
+            and not leaf.is_deleted()
+        ):
           leaf.delete()
       del old_state
       gc.collect()

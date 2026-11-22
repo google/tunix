@@ -269,7 +269,7 @@ class R2OrchTpuGatewayState:
     try:
       self.director_sampler.update_params(merged)
     finally:
-      _delete_jax_leaves(merged)
+      _delete_jax_leaves(merged, keep_tree=self.hub.base_state)
       del merged
       gc.collect()
       if drv is not None and hasattr(drv, "resume"):
@@ -443,9 +443,16 @@ class R2OrchTpuGatewayState:
     )
 
 
-def _delete_jax_leaves(tree: Any) -> None:
+def _delete_jax_leaves(tree: Any, *, keep_tree: Any = None) -> None:
+  keep_ids = (
+      {id(x) for x in jax.tree.leaves(keep_tree)} if keep_tree is not None else set()
+  )
   for leaf in jax.tree.leaves(tree):
-    if isinstance(leaf, jax.Array) and not leaf.is_deleted():
+    if (
+        isinstance(leaf, jax.Array)
+        and id(leaf) not in keep_ids
+        and not leaf.is_deleted()
+    ):
       leaf.delete()
 
 
