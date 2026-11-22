@@ -379,19 +379,25 @@ def init_global_fleet(
     return _GLOBAL_FLEET
 
 
-def warm_global_fleet() -> None:
-  """Warms all planned task images in the global SandboxFleet and waits until ready."""
+def warm_global_fleet(wait: bool = True) -> None:
+  """Warms all planned task images in the global SandboxFleet.
+
+  Args:
+    wait: Whether to block until every warm pool is ready. Without it, a slow
+      pool delays only the tasks that use its image.
+  """
   fleet_inst = get_global_fleet()
   entries = fleet_inst.plan_.entries
   images = [e.image for e in entries]
   if images:
     target_replicas = fleet_inst.config.max_warmpool_size
-    fleet_inst.warm_images(images, replicas_override=target_replicas, wait=True)
+    fleet_inst.warm_images(images, replicas_override=target_replicas, wait=wait)
     logging.info(
         "[SandboxFleet] Started initial warmpools for %d image(s) (%s"
-        " replicas each, wait=True).",
+        " replicas each, wait=%s).",
         len(images),
         target_replicas,
+        wait,
     )
 
 

@@ -356,6 +356,15 @@ trajectory_store_config:
   # Empty with the "file" backend: `<cluster_config.artifact_root>/trajectory_store`.
   dir: ""
 
+# Offline eval (`eval_deepswe.controller_main`) only; training ignores it.
+eval_config:
+  # Attempts per task: Pass@1 averages them, and Pass@k uses k = this value.
+  # More than one needs `rollout_config.temperature > 0`.
+  attempts_per_task: 1
+  # Results directory, a path or a URI (e.g. `gs://`). Empty:
+  # `<cluster_config.artifact_root>/eval`.
+  output_dir: ""
+
 cluster_config:
   # Where the processes run and what starts them: "local" (one host,
   # `local.sh`) or "k8s" (GKE, `k8s.sh`), both through `launch.sh`; or

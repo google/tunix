@@ -26,7 +26,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections import Counter
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 import json
 import logging
 import math
@@ -341,7 +341,8 @@ def _attempts(
 
 
 def _unwrap(
-    reply, rpc: Literal["evaluate", "generate"]
+    reply: remote_execution.ExecutionResponse,
+    rpc: Literal["evaluate", "generate"],
 ) -> dict[str, object]:
   """Returns a reply's compact result, compacting `generate` responses."""
   result = reply.unwrap()
@@ -362,6 +363,9 @@ async def collect_worker(
   results. `rpc="generate"` targets a stock dist_rl rollout worker: each attempt
   is sent as a `RolloutRequest` and its `RolloutResponse` is compacted here.
   """
+  # TODO(sanbao): Dispatch through the cluster engine's `TaskSession` so that
+  # `cluster_config` fault tolerance applies; a transient gRPC error now ends
+  # the evaluation.
   from tunix.dist_rl.common import datatypes  # pylint: disable=g-import-not-at-top
 
   requests = _attempts(jobs, args.num_rollouts_per_instance)
@@ -435,9 +439,13 @@ async def run_controller(args: argparse.Namespace) -> dict[str, object]:
       if actual != model_profile(args):
         raise ValueError(f"Worker model settings differ: {actual}")
 
-    await asyncio.gather(*(wait_ready(handle) for handle in handles))
     return await _evaluate(
-        args, entries, handles, run_config=vars(args), rpc="evaluate"
+        args,
+        entries,
+        handles,
+        run_config=vars(args),
+        ready=lambda: asyncio.gather(*(wait_ready(h) for h in handles)),
+        rpc="evaluate",
     )
   finally:
     await asyncio.gather(*(handle.close() for handle in handles),
@@ -450,6 +458,7 @@ async def _evaluate(
     handles: list[remote_execution.ActorHandle],
     *,
     run_config: Mapping[str, object],
+    ready: Callable[[], Awaitable[object]],
     rpc: Literal["evaluate", "generate"],
 ) -> dict[str, object]:
   """Runs every attempt of `entries` on `handles` and writes the results.
@@ -457,9 +466,10 @@ async def _evaluate(
   Args:
     args: Evaluation flags (`parse_args`).
     entries: Raw task entries, each with a `docker_image`.
-    handles: Ready workers to spread the attempts over.
+    handles: Workers to spread the attempts over.
     run_config: What configured the run; written to `config.json` with the
       task ids.
+    ready: Readies the workers. A failure here is recorded like any other.
     rpc: Worker method to dispatch (`collect_worker`).
 
   Returns:
@@ -487,6 +497,7 @@ async def _evaluate(
   rows_lock = threading.Lock()
   failure = None
   try:
+    await ready()
     jobs = iter(enumerate(entries))
 
     def record(row: dict[str, object]) -> None:
@@ -551,46 +562,61 @@ def config_args(hp: resolve_config.DistHyperParameters) -> argparse.Namespace:
   """Maps the resolved dist_rl config onto this script's evaluation flags.
 
   The controller and the rollout workers resolve the same config, so the
-  evaluation reuses its settings: `agentic_grpo_config.num_generations`
-  attempts per task, `max_turns` turns, `episode_timeout`, and the
+  evaluation reuses its settings: `max_turns` turns, `episode_timeout`, and the
   `rollout_config` sampling settings. As in training, `max_concurrency` limits
   each rollout worker (so `--max_concurrent` is it times
   `cluster_config.rollout_replicas`), and each trajectory's cumulative response
-  budget is `rollout_config.total_generation_steps`. Results go to
-  `<cluster_config.artifact_root>/eval`. `data_config.limit` caps the tasks.
+  budget is `rollout_config.total_generation_steps`. `eval_config` sets the
+  attempts per task and the output directory, and `data_config.limit` caps the
+  tasks.
 
   Args:
     hp: Resolved dist_rl configuration.
 
   Returns:
-    The flags, validated by `parse_args`.
+    The flags.
+
+  Raises:
+    ValueError: If the turns or concurrency are not positive, or if several
+      attempts per task would all be greedy.
   """
   grpo = hp.config_mapping("agentic_grpo_config")
+  for key in ("max_turns", "max_concurrency"):
+    if int(grpo[key]) <= 0:
+      raise ValueError(
+          f"agentic_grpo_config.{key} must be > 0, got {grpo[key]}."
+      )
   rollout = hp.config_mapping("rollout_config")
-  cluster = hp.config_mapping("cluster_config")
+  eval_config = hp.config_mapping("eval_config")
+  attempts = int(eval_config["attempts_per_task"])
+  temperature = float(rollout["temperature"])
+  if attempts > 1 and temperature <= 0:
+    raise ValueError(
+        f"eval_config.attempts_per_task > 1 ({attempts}) needs"
+        f" rollout_config.temperature > 0, got {temperature}."
+    )
   generation_steps = int(rollout["total_generation_steps"])
-  max_model_len = hp.config_mapping("vllm_config")["max_model_len"] or (
-      int(rollout["max_prompt_length"]) + generation_steps
-  )
   top_k = int(rollout["top_k"])
-  argv = [
-      "--role", "controller",
-      "--max_steps", str(grpo["max_turns"]),
-      "--timeout", str(grpo["episode_timeout"]),
-      "--max_concurrent",
-      str(int(grpo["max_concurrency"]) * int(cluster["rollout_replicas"])),
-      "--num_rollouts_per_instance", str(grpo["num_generations"]),
-      "--max_model_len", str(max_model_len),
-      "--max_response_length", str(generation_steps),
-      "--max_context_limit", str(generation_steps),
-      "--temperature", str(rollout["temperature"]),
-      "--top_p", str(rollout["top_p"]),
-      "--top_k", str(top_k if top_k > 0 else -1),
-      "--output_dir", f"{str(cluster['artifact_root']).rstrip('/')}/eval",
-  ]
-  if cluster["init_timeout_s"] is not None:
-    argv += ["--startup_timeout", str(cluster["init_timeout_s"])]
-  return parse_args(argv)
+  replicas = int(hp.config_mapping("cluster_config")["rollout_replicas"])
+  # These bypass `parse_args`'s flag checks: the ones above cover what nothing
+  # else checks, `resolve_weight_sync_timeouts` checks `episode_timeout`, and
+  # the workers' `RolloutConfig` checks the sampling settings.
+  return argparse.Namespace(**{
+      **vars(parse_args(["--role", "controller"])),
+      "max_steps": int(grpo["max_turns"]),
+      "timeout": float(grpo["episode_timeout"]),
+      "max_concurrent": int(grpo["max_concurrency"]) * replicas,
+      "num_rollouts_per_instance": attempts,
+      "max_model_len": hp.config_mapping("vllm_config")["max_model_len"] or (
+          int(rollout["max_prompt_length"]) + generation_steps
+      ),
+      "max_response_length": generation_steps,
+      "max_context_limit": generation_steps,
+      "temperature": temperature,
+      "top_p": float(rollout["top_p"]),
+      "top_k": top_k if top_k > 0 else -1,
+      "output_dir": str(eval_config["output_dir"]),
+  })
 
 
 def config_entries(
@@ -617,7 +643,7 @@ def config_entries(
       records[index]["metadata"]["env_config"]["entry"]
       for index in range(len(records))
   ]
-  missing = [i for i, e in enumerate(entries) if "docker_image" not in e]
+  missing = [i for i, e in enumerate(entries) if not e.get("docker_image")]
   if missing:
     raise ValueError(f"Task entries {missing} have no docker_image.")
   return entries
@@ -648,7 +674,9 @@ def _start_sandbox_fleet(
       num_generations=args.num_rollouts_per_instance,
       scaffold=str(env_kwargs["scaffold"]),
   )
-  sandbox_utils.warm_global_fleet()
+  # TODO(sanbao): Prewarm a sliding window of tasks, as the controller this
+  # ports did, instead of every task image up front.
+  sandbox_utils.warm_global_fleet(wait=False)
   return sandbox_utils.teardown_global_fleet
 
 
@@ -706,6 +734,8 @@ def controller_main(
   cluster = orchestrator.create_cluster(
       hp, weight_sync_timeouts=weight_sync_timeouts
   )
+  # TODO(sanbao): Under `launch.sh start` a trainer also starts, registers and
+  # is brought up; a launcher `eval` mode should start only rollout workers.
   with cluster_orchestrator.managed_cluster_teardown(
       cluster, stop_workers_on_exit=bool(cluster_config["stop_workers_on_exit"])
   ):
@@ -730,6 +760,7 @@ def controller_main(
               "config_sha256": config_sha256,
               "config": resolve_config_lib.plain_config(hp),
           },
+          ready=lambda: asyncio.sleep(0),  # Brought up above.
           rpc="generate",
       ))
     finally:

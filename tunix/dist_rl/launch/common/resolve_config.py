@@ -426,8 +426,8 @@ def _resolve_sandbox_namespace(
 def _finalize_dist_defaults(hp: cli_config.HyperParameters) -> None:
   """Resolves derived cluster, model, tokenizer, and optimizer defaults.
 
-  The output directories (checkpoints, metrics) default to subdirectories of
-  `cluster_config.artifact_root`.
+  The output directories (checkpoints, metrics, eval) default to
+  subdirectories of `cluster_config.artifact_root`.
 
   Args:
     hp: Loaded configuration updated in place.
@@ -502,6 +502,10 @@ def _finalize_dist_defaults(hp: cli_config.HyperParameters) -> None:
   traj_store = _mutable_section(hp, "trajectory_store_config")
   if traj_store["backend"] == "file" and not traj_store["dir"]:
     traj_store["dir"] = str(artifact_root / "trajectory_store")
+
+  eval_config = _mutable_section(hp, "eval_config")
+  if not eval_config["output_dir"]:
+    eval_config["output_dir"] = str(artifact_root / "eval")
 
   opt = rl_train["actor_optimizer_config"]
   if isinstance(opt, MutableMapping):
@@ -799,6 +803,20 @@ def _validate_rollout_replicas(hp: cli_config.HyperParameters) -> None:
     raise ValueError(
         f"cluster_config.min_rollout_replicas ({min_replicas}) must be <="
         f" cluster_config.rollout_replicas ({replicas})."
+    )
+
+
+def _validate_eval_config(hp: cli_config.HyperParameters) -> None:
+  """Checks that `eval_config.attempts_per_task` is an int >= 1."""
+  attempts = hp.config_mapping("eval_config")["attempts_per_task"]
+  if (
+      isinstance(attempts, bool)
+      or not isinstance(attempts, int)
+      or attempts < 1
+  ):
+    raise ValueError(
+        "eval_config.attempts_per_task must be an int >= 1, got"
+        f" {attempts!r}."
     )
 
 
@@ -1243,6 +1261,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   _validate_k8s_scalars(hp)
   _validate_k8s_worker_jobsets(hp)
   _validate_rollout_replicas(hp)
+  _validate_eval_config(hp)
   _validate_role_env(hp)
   _reject_unimplemented_settings(hp)
   _validate_role_memory(hp)
