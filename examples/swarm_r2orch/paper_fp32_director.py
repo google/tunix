@@ -57,8 +57,11 @@ def _remesh_to_sampling_specs(
 
   def _put(x: Any, shd: Any) -> Any:
     if isinstance(x, jax.Array) and isinstance(shd, jax.sharding.Sharding):
-      placed = jax.device_put(x.astype(jnp.float32), shd)
+      src = x if x.dtype == jnp.float32 else x.astype(jnp.float32)
+      placed = jax.device_put(src, shd)
       jax.block_until_ready(placed)
+      if src is not x:
+        src.delete()
       return placed
     return x
 
@@ -196,10 +199,16 @@ class BatchingFp32DirectorSampler:
 
   def update_params(self, new_fp32_state: nnx.State) -> None:
     with self._exec_lock:
+      old_state = self._sampler.transformer_state
       with self.mesh:
-        self._sampler.transformer_state = _remesh_to_sampling_specs(
+        new_state = _remesh_to_sampling_specs(
             new_fp32_state, self._template_state, self._target_shardings
         )
+        self._sampler.transformer_state = new_state
+      for leaf in jax.tree.leaves(old_state):
+        if isinstance(leaf, jax.Array) and not leaf.is_deleted():
+          leaf.delete()
+      del old_state
       gc.collect()
 
   def _choose_bucket(self, prompt_len: int, req_max: int) -> tuple[int, int]:

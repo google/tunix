@@ -21,6 +21,7 @@ import gc
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 import time
 from typing import Any
@@ -579,6 +580,70 @@ class _LiveMetricsAndHeldoutTracker:
     )
 
 
+def _latest_ckpt_step(ckpt_root: Path) -> tuple[int, str]:
+  latest_file = ckpt_root / "latest.json"
+  if not latest_file.is_file():
+    return 0, ""
+  data = json.loads(latest_file.read_text(encoding="utf-8"))
+  step = int(data.get("step", 0))
+  step_dir = ckpt_root / f"step-{step:08d}"
+  if (step_dir / "lora_weights.npz").is_file():
+    return step, str(step_dir)
+  return 0, ""
+
+
+def _sanitize_incomplete_cycles_for_resume(run_root: Path) -> None:
+  """Removes stale partial-cycle receipts & dirs so `--resume` never poison-locks."""
+  metrics_path = run_root / "r2orch_metrics.jsonl"
+  completed = 0
+  if metrics_path.is_file():
+    completed = sum(
+        1 for ln in metrics_path.read_text(encoding="utf-8").splitlines() if ln.strip()
+    )
+  sub_dir = run_root / "state" / "submissions"
+  cleaned_dirs = 0
+  cleaned_subs = 0
+  for cyc_dir in sorted(run_root.glob("cycle-*")):
+    suffix = cyc_dir.name.removeprefix("cycle-")
+    if not suffix.isdigit() or int(suffix) < completed:
+      continue
+    cyc_idx = int(suffix)
+    shutil.rmtree(cyc_dir, ignore_errors=True)
+    cleaned_dirs += 1
+    if sub_dir.is_dir():
+      for sf in sub_dir.glob(f"c{cyc_idx:04d}-*"):
+        sf.unlink(missing_ok=True)
+        cleaned_subs += 1
+  ts_path = run_root / "training_state.json"
+  if ts_path.is_file():
+    ts = json.loads(ts_path.read_text(encoding="utf-8"))
+    if int(ts.get("cycle", 0)) > completed:
+      p_step, p_path = _latest_ckpt_step(run_root / "checkpoints" / "proposer")
+      s_step, s_path = _latest_ckpt_step(run_root / "checkpoints" / "director")
+      ts["cycle"] = completed
+      ts["phase"] = "proposer"
+      ts["proposer_step"] = p_step
+      ts["proposer_checkpoint"] = p_path
+      ts["solver_step"] = s_step
+      ts["solver_checkpoint"] = s_path
+      ts["global_step"] = max(p_step, s_step)
+      ts["history"] = [
+          h for h in ts.get("history", []) if int(h.get("cycle", -1)) < completed
+      ]
+      ts_path.write_text(json.dumps(ts, indent=2) + "\n", encoding="utf-8")
+      print(
+          f"[resume-sanitize] reconciled training_state to completed_cycles={completed} "
+          f"(proposer={p_step}, solver={s_step})",
+          flush=True,
+      )
+  if cleaned_dirs or cleaned_subs:
+    print(
+        f"[resume-sanitize] cleared {cleaned_dirs} incomplete cycle dirs and "
+        f"{cleaned_subs} stale submission receipts for cycle >= {completed}",
+        flush=True,
+    )
+
+
 def build_selfplay_args(
     *,
     rendered_toml: Path,
@@ -893,6 +958,7 @@ def main() -> int:
     return 0
 
   if args.mode == "train":
+    _sanitize_incomplete_cycles_for_resume(args.run_root)
     exp_args = build_selfplay_args(
         rendered_toml=rendered,
         upstream_root=args.upstream_root,

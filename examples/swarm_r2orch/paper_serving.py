@@ -273,10 +273,16 @@ class R2OrchTpuGatewayState:
         try:
           self.director_sampler.update_params(merged)
         finally:
+          for leaf in jax.tree.leaves(merged):
+            if isinstance(leaf, jax.Array) and not leaf.is_deleted():
+              leaf.delete()
           del merged
           gc.collect()
           if drv is not None and hasattr(drv, "resume"):
             drv.resume()
+      if len(self.hub.served_snapshots) > 4:
+        for old_key in list(self.hub.served_snapshots.keys())[:-4]:
+          self.hub.served_snapshots.pop(old_key, None)
       self.loaded_models.add(lora_name)
 
   def unload_adapter(self, lora_name: str) -> None:
