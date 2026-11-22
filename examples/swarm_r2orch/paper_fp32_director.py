@@ -46,6 +46,72 @@ PROMPT_BUCKETS = (2048, 8192, 16384, 30720)
 GEN_BUCKETS = (32, 256, 1024, 2048, 4096, 12288)
 
 
+def _delete_unshared_leaves(tree: Any, keep_ids: set[int]) -> None:
+  for leaf in jax.tree.leaves(tree):
+    if (
+        isinstance(leaf, jax.Array)
+        and id(leaf) not in keep_ids
+        and not leaf.is_deleted()
+    ):
+      leaf.delete()
+
+
+def _merge_single_lora_leaf(
+    arr: jax.Array,
+    entry: dict[str, np.ndarray],
+    scale: float,
+    rep_sharding: jax.sharding.Sharding,
+    target_shd: Any,
+) -> jax.Array:
+  a_jax = jax.device_put(np.asarray(entry["lora_a"], dtype=np.float32), rep_sharding)
+  b_jax = jax.device_put(np.asarray(entry["lora_b"], dtype=np.float32), rep_sharding)
+  delta_2d = jnp.matmul(a_jax, b_jax, precision=jax.lax.Precision.HIGHEST)
+  delta = (delta_2d * jnp.float32(scale)).reshape(arr.shape)
+  updated = (arr.astype(jnp.float32) + delta).astype(jnp.float32)
+  if isinstance(target_shd, jax.sharding.Sharding) and updated.sharding != target_shd:
+    placed = jax.device_put(updated, target_shd)
+    jax.block_until_ready(placed)
+    updated.delete()
+    updated = placed
+  else:
+    jax.block_until_ready(updated)
+  for tmp in (a_jax, b_jax, delta_2d, delta):
+    if isinstance(tmp, jax.Array) and not tmp.is_deleted():
+      tmp.delete()
+  return updated
+
+
+def _merge_base_with_lora_on_mesh(
+    base_state: nnx.State,
+    target_shardings: nnx.State,
+    lora_np: dict[str, dict[str, np.ndarray]] | None,
+    scale: float,
+    rep_sharding: jax.sharding.Sharding,
+) -> tuple[nnx.State, int]:
+  """Merges FP32 LoRA deltas directly on the Director TPU mesh (~465MB transfer)."""
+  shd_by_key = {
+      k: (v.get_value() if isinstance(v, nnx.Variable) else v)
+      for k, v in nnx.to_flat_state(target_shardings)
+  }
+  merged_flat: list[tuple[tuple[Any, ...], Any]] = []
+  n_merged = 0
+  for keys, var in nnx.to_flat_state(base_state):
+    arr = var.get_value() if isinstance(var, nnx.Variable) else var
+    key_str = ".".join(str(k) for k in keys)
+    entry = lora_np.get(key_str) if (lora_np and scale != 0.0) else None
+    if entry is None:
+      merged_flat.append((keys, type(var)(arr) if isinstance(var, nnx.Variable) else arr))
+      continue
+    updated = _merge_single_lora_leaf(
+        arr, entry, scale, rep_sharding, shd_by_key.get(keys)
+    )
+    merged_flat.append(
+        (keys, type(var)(updated) if isinstance(var, nnx.Variable) else updated)
+    )
+    n_merged += 1
+  return nnx.from_flat_state(merged_flat), n_merged
+
+
 def _remesh_to_sampling_specs(
     src_state: nnx.State,
     template_state: nnx.State,
@@ -177,6 +243,15 @@ class BatchingFp32DirectorSampler:
       sharded_st = _remesh_to_sampling_specs(
           src_state, self._template_state, self._target_shardings
       )
+      self._base_state = nnx.from_flat_state(
+          [
+              (k, type(v)(v.get_value()) if isinstance(v, nnx.Variable) else v)
+              for k, v in nnx.to_flat_state(sharded_st)
+          ]
+      )
+      self._rep_sharding = jax.sharding.NamedSharding(
+          self.mesh, jax.sharding.PartitionSpec()
+      )
       mdl = nnx.merge(gdef, sharded_st)
       self._sampler = MeshBoundBatchedSampler(mdl, hf_tok, cache_cfg, self.mesh)
     self._exec_lock = threading.Lock()
@@ -197,6 +272,36 @@ class BatchingFp32DirectorSampler:
     self._queue.put(None)
     self._worker.join(timeout=5.0)
 
+  def update_lora(
+      self,
+      lora_np: dict[str, dict[str, np.ndarray]] | None,
+      scale: float,
+  ) -> None:
+    """Applies LoRA deltas on Director TPU HBM without transferring 36 GiB."""
+    t0 = time.monotonic()
+    with self._exec_lock:
+      old_state = self._sampler.transformer_state
+      with self.mesh:
+        new_state, n_merged = _merge_base_with_lora_on_mesh(
+            self._base_state,
+            self._target_shardings,
+            lora_np,
+            float(scale),
+            self._rep_sharding,
+        )
+        self._sampler.transformer_state = new_state
+      keep_ids = {id(x) for x in jax.tree.leaves(new_state)} | {
+          id(x) for x in jax.tree.leaves(self._base_state)
+      }
+      _delete_unshared_leaves(old_state, keep_ids)
+      del old_state
+      gc.collect()
+    print(
+        f"[fp32-director] update_lora merged {n_merged} LoRA layers on-TPU in "
+        f"{time.monotonic() - t0:.2f}s",
+        flush=True,
+    )
+
   def update_params(self, new_fp32_state: nnx.State) -> None:
     with self._exec_lock:
       old_state = self._sampler.transformer_state
@@ -205,14 +310,10 @@ class BatchingFp32DirectorSampler:
             new_fp32_state, self._template_state, self._target_shardings
         )
         self._sampler.transformer_state = new_state
-      keep_ids = {id(x) for x in jax.tree.leaves(new_state)}
-      for leaf in jax.tree.leaves(old_state):
-        if (
-            isinstance(leaf, jax.Array)
-            and id(leaf) not in keep_ids
-            and not leaf.is_deleted()
-        ):
-          leaf.delete()
+      keep_ids = {id(x) for x in jax.tree.leaves(new_state)} | {
+          id(x) for x in jax.tree.leaves(self._base_state)
+      }
+      _delete_unshared_leaves(old_state, keep_ids)
       del old_state
       gc.collect()
 

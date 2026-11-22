@@ -273,6 +273,25 @@ class SharedTunixLearnerHub:
         scale = float(meta.get("lora_scale", 1.0))
         self.served_snapshots[served_name] = (loaded_p, scale)
 
+  def lora_numpy_for_serving(
+      self,
+      role: str = "solver",
+      *,
+      served_name: str | None = None,
+  ) -> tuple[dict[str, dict[str, np.ndarray]] | None, float]:
+    """Exports only the compact FP32 LoRA adapter matrices (~465MB) to NumPy."""
+    with self._lock:
+      lora_p, scale = self._resolve_lora_for_eval(role, served_name, reference=False)
+      if not lora_p:
+        return None, float(scale)
+      out: dict[str, dict[str, np.ndarray]] = {}
+      for key_str, entry in lora_p.items():
+        out[key_str] = {
+            "lora_a": np.asarray(jax.device_get(entry["lora_a"]), dtype=np.float32),
+            "lora_b": np.asarray(jax.device_get(entry["lora_b"]), dtype=np.float32),
+        }
+      return out, float(scale)
+
   def merged_state_for_vllm(
       self,
       role: str = "solver",

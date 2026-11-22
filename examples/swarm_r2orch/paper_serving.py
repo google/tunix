@@ -255,6 +255,16 @@ class R2OrchTpuGatewayState:
 
   def _sync_director_adapter(self, lora_name: str, lora_path: str) -> None:
     self.hub.snapshot_adapter(lora_name, "solver", lora_path=lora_path)
+    if hasattr(self.director_sampler, "update_lora"):
+      lora_np, scale = self.hub.lora_numpy_for_serving(
+          "solver", served_name=lora_name
+      )
+      try:
+        self.director_sampler.update_lora(lora_np, scale)
+      finally:
+        del lora_np
+        gc.collect()
+      return
     sync_dtype = getattr(self.director_sampler, "weight_sync_dtype", None)
     merged = (
         self.hub.merged_state_for_vllm(
