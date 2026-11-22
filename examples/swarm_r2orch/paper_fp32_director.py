@@ -81,6 +81,20 @@ def _merge_single_lora_leaf(
   return updated
 
 
+def _set_pure_leaf(mapping: Any, keys: tuple[Any, ...], value: Any) -> None:
+  cur = mapping
+  for k in keys[:-1]:
+    if isinstance(cur, dict):
+      cur = cur[k] if k in cur else cur[str(k)]
+    else:
+      cur = cur[int(k)]
+  last = keys[-1]
+  if isinstance(cur, dict):
+    cur[last if last in cur else str(last)] = value
+  else:
+    cur[int(last)] = value
+
+
 def _merge_base_with_lora_on_mesh(
     base_state: nnx.State,
     target_shardings: nnx.State,
@@ -93,23 +107,22 @@ def _merge_base_with_lora_on_mesh(
       k: (v.get_value() if isinstance(v, nnx.Variable) else v)
       for k, v in nnx.to_flat_state(target_shardings)
   }
-  merged_flat: list[tuple[tuple[Any, ...], Any]] = []
+  merged_pure = nnx.to_pure_dict(base_state)
   n_merged = 0
   for keys, var in nnx.to_flat_state(base_state):
     arr = var.get_value() if isinstance(var, nnx.Variable) else var
     key_str = ".".join(str(k) for k in keys)
     entry = lora_np.get(key_str) if (lora_np and scale != 0.0) else None
     if entry is None:
-      merged_flat.append((keys, type(var)(arr) if isinstance(var, nnx.Variable) else arr))
       continue
     updated = _merge_single_lora_leaf(
         arr, entry, scale, rep_sharding, shd_by_key.get(keys)
     )
-    merged_flat.append(
-        (keys, type(var)(updated) if isinstance(var, nnx.Variable) else updated)
-    )
+    _set_pure_leaf(merged_pure, keys, updated)
     n_merged += 1
-  return nnx.from_flat_state(merged_flat), n_merged
+  out_state = jax.tree.map(lambda v: v, base_state)
+  nnx.replace_by_pure_dict(out_state, merged_pure)
+  return out_state, n_merged
 
 
 def _remesh_to_sampling_specs(
@@ -243,12 +256,7 @@ class BatchingFp32DirectorSampler:
       sharded_st = _remesh_to_sampling_specs(
           src_state, self._template_state, self._target_shardings
       )
-      self._base_state = nnx.from_flat_state(
-          [
-              (k, type(v)(v.get_value()) if isinstance(v, nnx.Variable) else v)
-              for k, v in nnx.to_flat_state(sharded_st)
-          ]
-      )
+      self._base_state = jax.tree.map(lambda v: v, sharded_st)
       self._rep_sharding = jax.sharding.NamedSharding(
           self.mesh, jax.sharding.PartitionSpec()
       )
