@@ -46,293 +46,135 @@ flowchart LR
 
 ---
 
-### 2. Design Options
+### 2. Design Options (Options 1–5)
 
-This section presents candidate trunk architectures for landing Swarm RL in `tunix/dist_rl` (additional options can be appended modularly as `2.3+`), followed by a seam-by-seam architectural comparison with diagrams and code samples.
+This section evaluates **five trunk architectures** for landing Swarm RL in `tunix/dist_rl`—spanning our initial TPU prototype (**Option 1**), the single-learner envelope spec (**Option 2**), the `1 + 2` `StandardRLProgram` hybrid (**Option 3**), the 3-contract runtime & composable step spec (**Option 4**, `72abca164`), and our **converged, implemented, TPU-validated Three-Layer architecture (Option 5)**—followed by a 6-seam architectural comparison.
 
-#### 2.1 Option A: IoC Runtime + Parallel Orchestrator (`haoyu-next` Prototype)
+#### 2.1 Option 1: IoC Runtime + Parallel Orchestrator (`haoyu-next` Initial Prototype)
 
-Option A prioritizes **workflow expressiveness (Inversion of Control)** and **explicit policy routing** while leaving `StandardRLProgram` untouched:
+Option 1 prioritized **workflow expressiveness (Inversion of Control)** and **explicit policy routing** while leaving `StandardRLProgram` untouched:
+1. **Control Plane (`SwarmRLProgram`):** Sibling orchestrator running synchronous group rounds with outer self-play hooks.
+2. **Workflow API (`RecordingRuntime`):** Plain `async` Python (`await runtime.generate(role, prompt)`) recording exact tokens and logprobs.
+3. **Sequence Unit (`CallTrace`):** One immutable sequence per LLM call (`O(T^2)` prefix recomputation on long tool loops).
+4. **Policy Routing (`PolicyBinding`):** Explicit `(policy_id, sampler, trainable: bool)` supporting frozen workers on Day 1.
 
-1. **Control Plane (`SwarmRLProgram`):** A sibling orchestrator running synchronous group collection rounds with explicit outer hooks for curriculum and multi-timescale self-play updates.
-2. **Workflow API (`RecordingRuntime`):** Plain `async` Python coroutines (`if/else`, `for`, `asyncio.gather`) call `await runtime.generate(role, prompt)` while the runtime records exact token IDs and rollout logprobs automatically.
-3. **Sequence Unit (`CallTrace`):** Each LLM call emits one immutable `CallTrace` (`1..M` calls per episode).
-4. **Policy Routing (`PolicyBinding`):** Explicitly maps each logical role to `(policy_id, sampler, trainable)`, natively spanning shared pools, zero-drift frozen workers, and multi-LoRA setups.
+#### 2.2 Option 2: Envelope Pipeline + Framework Runners
+
+Option 2 prioritized **One Well-Lit Single-Learner Pipeline** and **TITO merging**:
+1. **Control Plane (`StandardRLProgram`):** Queues `1` Envelope `TrajectoryItem` per episode upstream (cardinality `G`) and expands `G -> M` at `ScoredGroup` with 2-level worker semaphores (`_episode_sem` + `_sampler_sem`).
+2. **Workflow API (`EpisodeRunner` + `BaseTaskEnv`):** Framework-owned runner subclasses (`SingleAgent`, `Parl`, `MultiRole`) driving `env.step()` loops.
+3. **Sequence Unit (`RoleTrajectory`):** Merges multi-turn prefixes per `role_id` (breaks when later rounds restructure prompts or parallel children share `role="worker"`).
+4. **Policy Routing (Shared Pool First):** Phase 1 binds all roles to one active trainable pool `v_t` (`Role == Active Policy`).
+
+#### 2.3 Option 3: Hybrid `StandardRLProgram` Trunk (Combining Option 1 + Option 2)
+
+Option 3 grafted Option 1's runtime and policy abstractions onto Option 2's single-learner `StandardRLProgram` trunk:
+1. Keeps `StandardRLProgram` (async `DispatchWindow`, `partial_rollout`, 2-level semaphores) as the fixed outer loop with step/epoch callback hooks (forcing 2nd learners like `R²Orch` Proposer into side-channel hooks with split commit boundaries).
+2. Layers `SingleAgent` / `Parl` / `MultiRole` runner templates above `RecordingRuntime`.
+3. Exposes an explicit user-managed `async with runtime.open_session(role)` API (`SessionTrajectory`) to separate append-only tool loops from restructured calls.
+4. Adopts Day-1 `PolicyBinding(policy_id, sampler, trainable: bool)`.
+
+#### 2.4 Option 4: Unified `EpisodeRuntime` + Composable `StepContext` (`72abca164`)
+
+Option 4 ([`docs/unified_episode_runtime_design.md`](./unified_episode_runtime_design.md)) redesigned the public API around **three orthogonal contracts** (`Recipe(workflow, learners, bindings, grade, train_step)`):
+1. **`StepContext` (`collect`, `grade`, `record`, multi-target `update`):** Expresses single-learner GRPO as a 1-line built-in while handling multi-learner, multi-objective cycles (`R²Orch` Proposer + Director + replayable `ADS`/`SkillLedger`/`PATS`) under one atomic conditional manifest.
+2. **`EpisodeRuntime` (`generate`, `parallel`, `annotate`, `PublicEnvironment`):** Deterministic child lineage (`SubagentTrajectoryRef`), online `CriticalSteps` budgets, and strict `PublicEnvironment` vs. post-run private `grade()` isolation.
+3. **Automatic Internal TITO Compaction:** Merges actions internally iff `(participant_id, served_snapshot, encoding, exact_prefix)` match—eliminating manual `open_session()` boilerplate.
+4. **3-Way `Learner` / `Binding` / `Objective` Split:** Disjoint `Learner.full` / `Learner.lora`, `PolicyBinding.fixed` / `PolicyBinding.follow` (+ served-snapshot attestation), and `ObjectiveBatch(roles=...)`.
+
+#### 2.5 Option 5 (Recommended & Implemented): Unified Three-Layer Swarm RL Architecture (`tunix/dist_rl/swarm/`)
+
+**Why Option 5 Supersedes Standalone Option 4 and Option 3:** Option 4 resolved the public API and multi-learner orchestration seams, but left **two production-critical gaps** exposed directly on 128-chip TPU `v5p` runs: (a) cross-step async streaming (`DispatchWindow` / `partial_rollout` for `max_policy_lag > 0` single-learner recipes) was absent from standalone Option 4's pinned-bundle step, and (b) neither Option 3 nor Option 4 modeled **serving-vs-learner numerical fidelity**—allowing `bfloat16` merged-LoRA serving on TPU `v5p` to silently truncate `82%–99.9%` of small (`~1e-4`) LoRA weight deltas during `R²Orch` Run 1!
+
+**Option 5** unifies Option 4's clean public contracts, Option 2/3's async streaming & 2-level gating engine, and a mandatory **Layer 3 `ServingFidelity` Startup Parity Gate** into one production-validated three-layer trunk implemented in `tunix/dist_rl/swarm/`:
+
+1. **Layer 1 — Unified Public Execution (`EpisodeRuntime` + `ctx.spawn` / `ctx.parallel` + `CriticalStepsBudget` + Auto-TITO):**
+   - `ctx.spawn` / `ctx.parallel` provide deterministic child IDs, parent-child lineage (`SubagentTrajectoryRef`), deadlock-free parent sampler slot release, online `CriticalSteps` accounting ($\text{CriticalSteps} = S_{\text{main}} + \max_i S_{\text{sub}, i}$), `PublicEnvironment` / post-run private `grade()` isolation, and zero-boilerplate automatic internal TITO compaction.
+2. **Layer 2 — Dual-Mode Composable Orchestrator (`StepContext` + `STRICT_BUNDLE` / `ASYNC_WINDOW` + Atomic `ManifestStore`):**
+   - Exposes `CollectionMode.STRICT_BUNDLE` (`max_policy_lag=0`, pinned `SnapshotBundle` for multi-learner `R²Orch` and strict on-policy `Dr. MAS` / `PARL`) **and** `CollectionMode.ASYNC_WINDOW` (`max_policy_lag > 0`, cross-step streaming `DispatchWindow` + `partial_rollout` with 2-level `_episode_sem` / `_sampler_sem` gating) under one `StepContext` + conditional atomic `ManifestStore` + built-in `group_grpo` / `parl_grpo` objectives.
+3. **Layer 3 — `ServingFidelity` Contract & Startup Parity Gate (`serving_fidelity.py` + On-TPU FP32 LoRA Serving):**
+   - Every `LearnerSpec` / `PolicySpec` declares an explicit `ServingFidelity(mode=FP32_NATIVE | FULL_BF16 | LORA_UNMERGED_BF16, max_top1_mismatch_rate, max_logprob_abs_diff)`.
+   - Before Step 0, `verify_serving_fidelity(...)` audits real sampler vs. learner logprobs & top-1 tokens and fails fast if serving quantization destroys LoRA updates.
+   - For TPU LoRA directors (`R²Orch` Run 2), Option 5 pairs `ServingFidelityMode.FP32_NATIVE` with a single-compiled `(dp=8, tp=4)` TRUE `float32` Director (`paper_fp32_director.py`) and **on-TPU LoRA merge (`update_lora`, transferring only `465 MB` LoRA adapters instead of `36 GiB` full weights — `77×` less Pathways proxy traffic, `< 3s` sync, `0` OOM, `TIS = 0.999972` / `1.000068`)**.
 
 ```mermaid
 flowchart TD
-    A1["1. Control Plane: SwarmRLProgram (Sync Group Rounds + Outer Self-Play Hooks)"]
-    A2["2. Workflow API: RecordingRuntime (IoC — User async / await / asyncio.gather)"]
-    A3["3. Sequence Unit: CallTrace (1..M Immutable Sequences per Episode)"]
-    A4["4. Policy Routing: PolicyBinding (role -> policy_id, sampler, trainable)"]
-    A5["Shared Learner Backbone: Credit Assignment -> PaddedBatchAssembler -> PeftTrainer V2 + Raiden"]
-    A1 --> A2 --> A3 --> A4 --> A5
+    L1["Layer 1 — Unified EpisodeRuntime (from Option 4)<br/>ctx.generate / ctx.spawn / ctx.parallel + CriticalStepsBudget + Auto TITO Compaction + PublicEnv / Private grade()"]
+    L2["Layer 2 — Dual-Mode StepContext & Atomic Manifest (Option 4 + Option 2/3 Async)<br/>CollectionMode.STRICT_BUNDLE (R2Orch / PARL / Dr. MAS) | CollectionMode.ASYNC_WINDOW (DispatchWindow, lag > 0)<br/>2-Level Gating (_episode_sem + _sampler_sem) + step.record() Replay + Atomic ManifestStore"]
+    L3["Layer 3 — ServingFidelity Startup Gate & TPU Serving Plane (New in Option 5)<br/>verify_serving_fidelity() Pre-Step-0 Audit: FULL_BF16 (max_lp_diff=4.98e-4) | FP32_NATIVE On-TPU LoRA Merge (465MB, TIS=0.99997)"]
+    L4["Unchanged Tunix Backbone: AbstractTrainer / PeftTrainer V2 + PaddedBatchAssembler + InprocessVllmSampler / Pathways"]
+    L1 --> L2 --> L3 --> L4
+    L4 -->|"Weight / 465MB LoRA Sync + Attestation"| L3
 ```
 
-**Option A Code Sample (`RecordingRuntime` + `PolicyBinding` + `SwarmRLProgram`):**
+**Option 5 Production Code Sample (`tunix/dist_rl/swarm/` + `examples/swarm_parl/train.py`):**
 
 ```python
-bindings = {
-    "director": PolicyBinding("director", dir_pool, trainable=True),
-    "worker":   PolicyBinding("frozen", work_pool, trainable=False),
-}
+from tunix.dist_rl.swarm import (
+    CollectionMode, CriticalStepsBudget, LearnerSpec, ManifestStore,
+    PolicySpec, Recipe, ServingFidelity, ServingFidelityMode, StepContext,
+    parl_grpo, verify_serving_fidelity,
+)
 
-async def dag_workflow(task: Task, rt: RecordingRuntime) -> float:
-    # CallTrace #0 (trainable director)
-    plan = await rt.generate("director", plan_prompt(task))
-    # CallTraces #1..K (frozen workers via standard asyncio.gather)
-    subs = parse_subtasks(plan.text)
-    outs = await asyncio.gather(
-        *(rt.generate("worker", sub) for sub in subs)
-    )
-    # CallTrace #K+1 (trainable director synthesis)
-    final = await rt.generate("director", synth_prompt(task, outs))
-    return score_answer(final.text, task.ground_truth)
+# Layer 3: Explicit fidelity contract verified against live TPU sampler before Step 0
+dir_fidelity = ServingFidelity(
+    mode=ServingFidelityMode.FULL_BF16,  # Or FP32_NATIVE for LoRA Directors (R2Orch)
+    max_top1_mismatch_rate=0.05,
+    max_logprob_abs_diff=0.15,
+)
+verify_serving_fidelity(
+    learner_top1_ids=..., sampler_top1_ids=...,
+    learner_logprobs=..., sampler_logprobs=...,
+    fidelity=dir_fidelity, raise_on_fail=True,
+)
 
-program = SwarmRLProgram(
-    workflow=dag_workflow, bindings=bindings, step_hook=proposer.step
+# Layer 1 + Layer 2: Recipe binds EpisodeRuntime workflow, 3-way ownership & dual-mode StepContext
+recipe = Recipe(
+    workflow=parl_episode_workflow,  # Uses ctx.generate + ctx.parallel + auto TITO
+    learners={"director": LearnerSpec.full("director", init_snap, fidelity=dir_fidelity)},
+    bindings={
+        "director": PolicySpec.follow("director", fidelity=dir_fidelity),
+        "worker":   PolicySpec.fixed(init_snap),  # Zero-drift frozen subagents
+    },
+    grade=grade_parl_episode,        # Strictly isolated private grader
+    budget=CriticalStepsBudget(limit=10),
+    train_step=parl_grpo(
+        target="director", roles=("director",), attempts=8,
+        lambda_parallel_init=0.15, lambda_finish_init=0.15, anneal_steps=60,
+        mode=CollectionMode.STRICT_BUNDLE,  # Switchable to ASYNC_WINDOW for lag > 0
+        max_policy_lag=0,
+    ),
 )
 ```
 
-#### 2.2 Option B: Envelope Pipeline + Framework Runners
+#### 2.6 Six-Seam Architectural Comparison Across Options 1–5
 
-Option B prioritizes **One Well-Lit Distributed Pipeline** and **Token-In-Token-Out (TITO) trajectory merging**:
-
-1. **Control Plane (`StandardRLProgram`):** Generalizes the existing production trunk so `1 RolloutRequest` queues `1 Envelope TrajectoryItem` upstream (cardinality `G`) and expands to `M` trainer payloads only at `ScoredGroup`, paired with 2-level worker semaphores.
-2. **Workflow API (`EpisodeRunner` + `BaseTaskEnv`):** Framework-owned `EpisodeRunner` subclasses (`SingleAgentEpisodeRunner`, `ParlEpisodeRunner`, `MultiRoleEpisodeRunner`) drive structured `BaseTaskEnv.step()` loops.
-3. **Sequence Unit (`RoleTrajectory`):** Merges multi-turn prefixes per `role_id` via TITO timeline concatenation.
-4. **Policy Routing (Shared Pool First):** Phase 1 binds all roles inside an episode to one shared active trainable pool `v_t` (`Role == Active Policy`), deferring multi-pool `PolicySpec` to a later phase.
-
-```mermaid
-flowchart TD
-    B1["1. Control Plane: StandardRLProgram (Async Streaming DispatchWindow of G Envelopes)"]
-    B2["2. Workflow API: EpisodeRunner Subclasses (SingleAgent / Parl / MultiRole + BaseTaskEnv)"]
-    B3["3. Sequence Unit: RoleTrajectory (Per-role_id TITO Timeline Merging)"]
-    B4["4. Policy Routing: Shared Active Pool v_t in Phase 1 (Multi-Pool Deferred)"]
-    B5["Shared Learner Backbone: ScoredGroup (G -> M) -> BatchAssembler -> PeftTrainer V2 + Raiden"]
-    B1 --> B2 --> B3 --> B4 --> B5
-```
-
-**Option B Code Sample (`EpisodeRunner` + `BaseTaskEnv` + `StandardRLProgram` Envelope):**
-
-```python
-class MultiRoleMathEnv(BaseTaskEnv):
-    async def step(self, action: str) -> EnvStepResult:
-        if self.turn == 0:
-            self.draft, self.turn = action, 1
-            return EnvStepResult(
-                obs=verify_prompt(action), next_role="verifier", done=False
-            )
-        return EnvStepResult(
-            obs="", reward=grade(self.draft, self.gt), done=True
-        )
-
-# Framework runner drives env.step() on single active pool v_t:
-runner = MultiRoleEpisodeRunner(sampler=shared_active_pool)
-env_item: TrajectoryItem = await runner.run_episode(MultiRoleMathEnv(task))
-
-# StandardRLProgram queues G envelopes upstream, expands M rows later:
-payloads = standard_program.expand_scored_group(group_envelopes)
-```
-
-#### 2.3 Architectural Comparison Across Key Differences (Option A vs. Option B)
-
-Comparing Option A and Option B across the four core system seams highlights complementary strengths—**Option B is stronger at the lower-level distributed pipeline (`One Well-Lit Path`)**, whereas **Option A is cleaner at the upper-level workflow primitive (`RecordingRuntime`) and policy routing (`PolicyBinding`)**:
-
-| **Architectural Seam** | **Option A (`haoyu-next`)** | **Option B (Envelope / Runner)** | **Trade-Off & Hybrid Direction** |
-| --- | --- | --- | --- |
-| **1. Control Plane** | Sibling `SwarmRLProgram` (sync barrier + outer self-play hooks) | Unified `StandardRLProgram` (`G` envelopes → `M` payloads + 2-level gating) | **Option B `1-to-M` trunk** + retain **Option A outer self-play hooks** |
-| **2. Workflow Model** | IoC `RecordingRuntime` (`async` Python coroutines) | Framework `EpisodeRunner` subclasses + `BaseTaskEnv` | **Option A `RecordingRuntime` base** + layer **Option B Runners** on top as templates |
-| **3. Sequence Unit** | `CallTrace` (1 sequence per LLM call) | `RoleTrajectory` (TITO merge by `role_id`) | Unify as **`SessionTrajectory`** (continuous append-only session) |
-| **4. Policy Routing** | Day-1 `PolicyBinding(policy_id, sampler, trainable)` | Phase-1 implicit `Role == Active Policy` | Adopt **Option A `PolicyBinding`** in Day-1 core contract |
-
-##### Difference 1: Distributed Control Plane & Concurrency Gating
-
-- **Sync Barrier vs. Streaming Envelope Trunk:** Option A's parallel `SwarmRLProgram` duplicates orchestration logic and stalls on the slowest team per round, forfeiting `StandardRLProgram`'s async `DispatchWindow` watermark flow control, cross-version `partial_rollout` continuation, and EDF priority scheduling. Option B keeps `1 Request == 1 Envelope TrajectoryItem` (cardinality `G`) upstream and expands `G → M` only at `ScoredGroup`, making single-agent RL the `M = 1` special case.
-- **Deadlock-Free Fan-Out:** Option B splits outer episode admission (`_episode_sem`) from per-call sampler slots (`_sampler_sem`) under one SSOT weight-sync pause event so parent episodes never deadlock child `asyncio.gather` subagent calls.
-
-```mermaid
-flowchart TD
-    subgraph OA["Option A: Sibling SwarmRLProgram (Synchronous Barrier)"]
-        P1["Dispatch B x G Episodes"] --> P2["Sync Barrier: Wait for Slowest Team<br/>(No DispatchWindow / partial_rollout)"] --> P3["Compile M Rows -> Train"]
-    end
-    subgraph OB["Option B (Converged): StandardRLProgram 1-to-M Streaming Trunk"]
-        U1["DispatchWindow & EDF Queue<br/>Cardinality = G Envelopes"] --> U2["RolloutManager 2-Level Gating<br/>_episode_sem + _sampler_sem + SSOT Pause"]
-        U2 --> U3["ScoredGroup Expansion (G -> M)<br/>BatchAssembler(episodes_ingested=G)"] --> U4["PeftTrainer V2"]
-    end
-```
-
-```python
-# [Option A] Hard round barrier stalls on slowest team
-episodes = await asyncio.gather(*(run_team(t) for t in batch_tasks))
-
-# [Option B] 2-level worker gating + G -> M ScoredGroup expansion
-async def run_envelope(self, req: RolloutRequest) -> TrajectoryItem:
-    async with self._episode_sem:     # Level 1: parent episode slot
-        rt = self.make_runtime(call_fn=self._gated_sample)
-        return await self.workflow(req, rt)
-
-async def _gated_sample(self, sreq: SamplingRequest) -> SamplingResponse:
-    await self._ssot_unpaused.wait()  # SSOT barrier for weight sync
-    async with self._sampler_sem:     # Level 2: child LLM call slot
-        return await self.sampler.sample(sreq)
-
-# Downstream at ScoredGroup: track G episodes, microbatch M rows
-payloads = credit_assigner.score_and_expand(group_envelopes)
-batch_assembler.ingest(payloads, episodes_ingested=len(group_envelopes))
-```
-
-##### Difference 2: Workflow Programming Model
-
-- **Framework-Coupled Runners vs. IoC:** Option B encodes multi-agent branching and subagent dispatch inside `BaseTaskEnv.step()` state machines, violating the Open-Closed Principle whenever new dynamic topologies arise (`R²Orch` mutable DAGs, MCTS search, or `Swarm-Repair` dynamic worker spawning).
-- **Orthogonal Layering:** Option A's `RecordingRuntime` lets user code write arbitrary `async / await / asyncio.gather` Python while recording exact token provenance; Option B's `SingleAgent`, `Parl`, and `MultiRole` runners sit naturally *above* `RecordingRuntime` as thin templates for `BaseTaskEnv` tasks.
-
-```mermaid
-flowchart LR
-    subgraph RB["Option B Standalone: Framework-Owned Loop"]
-        E1["Custom EpisodeRunner"] -->|"action"| E2["Env.step() State Machine<br/>(Must smuggle subagents & branches)"]
-        E2 -->|"obs, next_role"| E1
-    end
-    subgraph RA["Converged Layering: IoC Base + Runner Templates"]
-        T1["Prebuilt Runners (Parl / MultiRole)"] --> R0["RecordingRuntime.generate(role, prompt)<br/>Exact Token & Logprob Provenance"]
-        T2["Custom Async Workflows (Dr. MAS / R2Orch)"] --> R0
-    end
-```
-
-```python
-# [Option B] Multi-role branching trapped inside Env state machine
-class VerifyEnv(BaseTaskEnv):
-    def step(self, action: str) -> EnvStepResult:
-        if self.phase == "SOLVE":
-            self.draft, self.phase = action, "VERIFY"
-            return EnvStepResult(verify_p(action), next_role="ver")
-        if "<verify>reject</verify>" in action and self.retries == 0:
-            self.retries, self.phase = 1, "SOLVE"
-            return EnvStepResult(rev_p(self.draft, action), "sol")
-        return EnvStepResult("", reward=grade(self.draft), done=True)
-
-# [Option A] 6-line native async Python over RecordingRuntime
-async def drmas_workflow(task: MathTask, rt: RecordingRuntime) -> float:
-    draft = await rt.generate("sol", solve_p(task))
-    verdict = await rt.generate("ver", verify_p(task, draft.text))
-    if "<verify>reject</verify>" in verdict.text:
-        draft = await rt.generate("sol", rev_p(draft.text, verdict.text))
-    return grade(draft.text, task.answer)
-
-# [Hybrid Layering] Option B Runner implemented thinly on Runtime
-async def run_env_template(env: BaseTaskEnv, rt: RecordingRuntime) -> float:
-    obs, role = await env.reset()
-    done, reward = False, 0.0
-    while not done:
-        turn = await rt.generate(role, obs)
-        obs, role, reward, done = await env.step(turn.text)
-    return reward
-```
-
-##### Difference 3: Sequence Granularity (`CallTrace` vs. `RoleTrajectory` vs. `SessionTrajectory`)
-
-- **Boundary Cases:**
-  - *Case A (Append-Only Tool Session):* Option A's per-call `CallTrace` incurs $O(T^2)$ prefix recomputation on long append-only tool loops (e.g., SWE bash sessions), where Turn $t+1$ is an exact token-prefix extension of Turn $t$.
-  - *Case B (Restructured Multi-Round / DAG Prompts):* Option B's per-`role_id` TITO merge breaks when later rounds receive newly compacted prompts or upstream DAG node summaries that are *not* token prefixes of earlier rounds (`Dr. MAS` Round 2, `R²Orch`).
-  - *Case C (Concurrent Subagent Fan-Out):* In `PARL`, $K$ parallel subagents share `role="worker"` and must emit $1 + K$ isolated sequences rather than merging by `role_id`.
-- **Unified `SessionTrajectory`:** Defining the inner envelope unit as **one continuous append-only session** merges append-only tool turns into `1` TITO sequence while keeping restructured rounds and parallel subagents as separate sequences.
-
-```mermaid
-flowchart TD
-    IN["LLM Turn Generated in Episode"] --> PFX{"Exact append-only prefix<br/>of an open agent session?"}
-    PFX -->|"Yes (Case A: Multi-Step Tool Loop)"| TITO["Merge into Same SessionTrajectory<br/>(Option B Strength: 1 TITO Sequence, no O(T^2) recompute)"]
-    PFX -->|"No (Case B: Compacted Prompt / Case C: Parallel Subagent)"| SEP["Emit Separate SessionTrajectory<br/>(Option A Strength: Preserves per-round & per-subagent structure)"]
-```
-
-```python
-# Case A (Append-Only SWE Tool Loop) -> 1 merged TITO SessionTrajectory
-async with runtime.open_session(role="swe_agent") as sess:
-    for _ in range(max_steps):
-        act = await sess.generate_next(tool_obs)  # Exact prefix merge
-
-# Case B (Restructured Prompt in Dr. MAS) -> 2 separate solver sessions
-r1 = await runtime.generate("solver", round1_prompt)       # Session #1
-v1 = await runtime.generate("verifier", verify_p(r1.text)) # Session #2
-r2 = await runtime.generate("solver", compact_p(v1.text))  # Session #3
-
-# Case C (PARL Fan-Out) -> 1 orchestrator + K isolated worker sessions
-plan = await runtime.generate("orchestrator", plan_prompt) # Session #0
-subs = await asyncio.gather(
-    *(run_worker_session(runtime, sub) for sub in parse(plan.text))
-)
-```
-
-##### Difference 4: Role-to-Policy Routing (`PolicyBinding` vs. Shared Pool)
-
-Tying all roles to one active trainable pool (`Role == Active Policy` in Option B Phase 1) prevents zero-drift frozen workers in `PARL` / `R²Orch` setups where only the orchestrator should update. Option A's `PolicyBinding(policy_id, sampler, trainable)` costs nothing for single-pool homogeneous runs (`policy_id="default"`) while supporting zero-drift frozen pools (`drift == 0.0`), Multi-LoRA, and heterogeneous models from Day 1 without interface churn.
-
-```mermaid
-flowchart LR
-    subgraph PB["Option B Phase 1: Implicit Shared Pool"]
-        R1["Orchestrator + Worker Roles"] --> SP["Single Active Trainable Pool v_t<br/>(Cannot freeze workers without drift)"]
-    end
-    subgraph PA["Option A (Converged): Explicit Day-1 PolicyBinding"]
-        O1["role = 'director'"] -->|"policy_id='director', trainable=True"| TP["Trainable Pool (loss_mask = 1 -> Trainer)"]
-        W1["role = 'worker'"] -->|"policy_id='frozen', trainable=False"| FP["Frozen Pool (loss_mask = 0 -> 0 Trainer Rows)"]
-    end
-```
-
-```python
-# Homogeneous Shared Policy (Dr. MAS Qwen3-4B)
-shared_bindings = {
-    "*": PolicyBinding("default", shared_pool, trainable=True),
-}
-
-# Trainable Director + Zero-Drift Frozen Workers (R2Orch / PARL)
-hetero_bindings = {
-    "director": PolicyBinding("director", dir_pool, trainable=True),
-    "worker":   PolicyBinding("frozen", worker_pool, trainable=False),
-}
-```
-
-#### 2.4 Hybrid Synthesis (Converged Three-Tier Trunk Architecture)
-
-```mermaid
-flowchart TD
-    D1["Tier 1 — Unified 1-to-M Trunk (Option B + Option A Hooks)<br/>StandardRLProgram + DispatchWindow + Outer Curriculum/Self-Play Hooks"]
-    D2["RolloutManager 2-Level Gating (_episode_sem + _sampler_sem + SSOT Pause)"]
-    D3["Tier 2 — Execution Layer (Option A Base + Option B Templates)<br/>Prebuilt Runners (SingleAgent / Parl / MultiRole) OR Custom Async Workflows -> RecordingRuntime"]
-    D4["Tier 3 — Core Contracts (Option A + Session Unification)<br/>PolicyBinding(policy_id, trainable) + Continuous SessionTrajectory"]
-    D5["ScoredGroup (G Envelopes -> M Trainable Payloads) -> BatchAssembler(episodes_ingested=G) -> PeftTrainer V2"]
-    D1 --> D2 --> D3 --> D4 --> D5
-    D5 -->|"Raiden Weight Sync"| D1
-```
-
-Combining the stronger layer from each option yields three concrete design decisions:
-
-1. **Decision 1 — Single `1-to-M` Distributed Pipeline Trunk (from Option B):** Generalize `StandardRLProgram`, `ScoredGroup` (`G` episode envelopes → `M` sequence payloads), `BatchAssembler(episodes_ingested=G)`, and `RolloutManager` (`_episode_sem` + `_sampler_sem` under SSOT pause); retire the parallel `SwarmRLProgram` path while keeping step/epoch hooks for outer self-play (`R²Orch`).
-2. **Decision 2 — `RecordingRuntime` Base + Runner Templates Above (Option A + Option B):** Standardize `RecordingRuntime` as the canonical intra-episode execution primitive, with `SingleAgent`, `Parl`, and `MultiRole` implemented on top as ergonomic `BaseTaskEnv` templates.
-3. **Decision 3 — `SessionTrajectory` & Day-1 `PolicyBinding` (Option A + Hybrid Session):** Standardize inner envelope sequences as continuous append-only `SessionTrajectory(role_id, policy_id, trainable)` supporting TITO tool loops, restructured multi-round calls, per-`(task, role)` credit, and zero-drift frozen pools without future breaking refactors.
-
-| **Concern** | **Option A Standalone** | **Option B Standalone** | **Converged Trunk Architecture** |
-| --- | --- | --- | --- |
-| **Async Streaming & `partial_rollout`** | Missing (sync round barrier in `SwarmRLProgram`) | Native via `StandardRLProgram` | **Retained** (single `StandardRLProgram` `1-to-M` trunk) |
-| **Outer Self-Play / Curriculum Loops** | Native hooks on `SwarmRLProgram` | Not exposed on runner loop | **Retained** (step/epoch hooks on `StandardRLProgram`) |
-| **Dynamic Topologies (DAGs, Spawn)** | Native Python `async` / `gather` over `RecordingRuntime` | Requires new Runner & Env subclasses per topology | **Retained** (`RecordingRuntime` base + Runners as thin templates) |
-| **Long Append-Only Tool Loops** | Recomputes prefixes per call ($O(T^2)$) | Merged into `1` TITO sequence | **Retained** (`runtime.open_session` merges TITO prefixes) |
-| **Restructured Rounds & Fan-Out** | Clean separate `CallTrace`s | Breaks if merged naively by `role_id` | **Retained** (each non-prefix call/subagent is a `SessionTrajectory`) |
-| **Frozen Workers (`drift == 0.0`)** | Day-1 `PolicyBinding(trainable=False)` | Deferred to Phase 3 (`Role == Active Policy`) | **Retained** (`PolicyBinding` in Day-1 core contract) |
+| **Seam** | **Option 1 (`haoyu-next` v1)** | **Option 2 (Envelope Spec)** | **Option 3 (`1 + 2` Hybrid)** | **Option 4 (`72abca164` Spec)** | **Option 5 (Converged & Implemented)** |
+| --- | --- | --- | --- | --- | --- |
+| **1. Control Plane** | Sibling `SwarmRLProgram` (sync barrier). | Single-learner `StandardRLProgram` (`G -> M`). | `StandardRLProgram` + side-channel hooks. | Composable `StepContext` (`STRICT_BUNDLE` only). | **Dual-Mode `StepContext`** (`STRICT_BUNDLE` + `ASYNC_WINDOW` `lag > 0`) + Atomic `ManifestStore`. |
+| **2. Workflow API** | Minimal `RecordingRuntime` (`generate`). | `EpisodeRunner` subclasses + `BaseTaskEnv`. | `RecordingRuntime` + Runner templates. | `EpisodeRuntime` (`parallel`, `CriticalSteps`, `PublicEnv`). | **`EpisodeRuntime`** (`spawn`/`parallel`, online `CriticalStepsBudget`, `PublicEnv`/`grade()`). |
+| **3. Sequence Unit** | Per-call `CallTrace` ($O(T^2)$ loops). | Per-`role_id` TITO `RoleTrajectory`. | Manual `open_session()` vs. `generate()`. | Automatic internal TITO compaction. | **Automatic internal TITO compaction** (zero user boilerplate; safe across rounds & fan-out). |
+| **4. Policy & Weights** | `PolicyBinding(trainable: bool)`. | Shared active pool `v_t`. | `PolicyBinding(trainable: bool)`. | 3-way `Learner` / `PolicySpec` / `ObjectiveBatch`. | **3-way ownership + served-digest attestation** (`full` / `lora`, `fixed` / `follow`). |
+| **5. Recovery & Gating** | Sync retry + custom JSON/SQLite. | 2-level semaphores + watermarks. | 2-level semaphores + split hook state. | 2-level admission + `step.record` + manifest. | **2-level semaphores + `step.record` + atomic `ManifestStore` + `reconcile_resume_state()`.** |
+| **6. Serving Fidelity** | Unchecked (`bfloat16` silent drift risk). | Unchecked. | Unchecked. | Unchecked (leaves LoRA `bf16` truncation silent). | **Mandatory L3 `ServingFidelity` Startup Gate + On-TPU FP32 LoRA Merge (`465 MB`, `TIS≈1.0000`).** |
 
 ---
 
 ### 3. Current Progress
 
-`tunix/dist_rl/swarm` decouples **interaction topology** (`RecordingRuntime`), **role-to-model routing** (`PolicyBinding`), and **credit assignment** (`credit.build_credit`) from Tunix's distributed learner/serving backbone (`PeftTrainer V2`, `PaddedBatchAssembler`, `VllmSampler`, Pathways sub-meshes). Below is our milestone progress, recipe snapshot, and full document directory.
+`tunix/dist_rl/swarm` implements **Option 5's three-layer architecture** (L1 `EpisodeRuntime`, L2 dual-mode `StepContext` + `ManifestStore`, L3 `ServingFidelity` gate) on top of Tunix's distributed learner/serving backbone (`PeftTrainer V2`, `PaddedBatchAssembler`, `InprocessVllmSampler`, Pathways sub-meshes). Below is our milestone progress, recipe snapshot, and full document directory.
 
 #### 3.1 Dev Map & Milestone Progress
 
 | **Phase / Milestone** | **Scope & Core Capability** | **Code Location** | **Status** | **Key Result / Next Gate** |
 | --- | --- | --- | --- | --- |
-| **Phase 0: Swarm Core & TPU Precision** | `RecordingRuntime`, `PolicyBinding`, `CallTrace`, `SwarmRLProgram`, 4D mask padding, TPU `float32` + XLA Attention invariants | `tunix/dist_rl/swarm/`, `tunix/dist_rl/orchestrator/swarm_program.py` | **Done** | `67/67` unit + `768` regression tests green; PyTorch parity `<= 2e-6`; resolved SplashAttention shallow-layer gradient corruption (`cos 0.155 -> 1.000`). |
+| **Phase 0: Swarm Core & TPU Precision** | `RecordingRuntime`, `PolicyBinding`, `CallTrace`, 4D mask padding, TPU `float32` + XLA Attention invariants | `tunix/dist_rl/swarm/`, `tunix/dist_rl/orchestrator/swarm_program.py` | **Done** | `67/67` unit + `768` regression tests green; PyTorch parity `<= 2e-6`; resolved SplashAttention shallow-layer gradient corruption (`cos 0.155 -> 1.000`). |
+| **Phase 0.5: Option 5 Unified Three-Layer Trunk** | L1 `EpisodeRuntime` (`spawn`/`parallel`/`CriticalStepsBudget`/auto-TITO), L2 dual-mode `StepContext` (`STRICT_BUNDLE`/`ASYNC_WINDOW`) + `ManifestStore` + `parl_grpo`, L3 `ServingFidelity` startup parity gate | `tunix/dist_rl/swarm/` (`episode_runtime.py`, `step_context.py`, `manifest_store.py`, `serving_fidelity.py`) | **Done (TPU Validated)** | `64/64` K8s CPU tests + strict complexity gate green; 8-chip FP32 Director gate `top1=1.0, max_lp_diff=2.63e-7`; 64-chip PARL gate `max_lp_diff=4.98e-4`; 128-chip R²Orch gate `top1=1.0, max_lp_diff=9.22e-4`. |
 | **Phase 1: Recipe 1 (`Dr. MAS`)** | Shared-policy conditional `Solver -> Verifier -> Solver` math collaboration + per-role active-call credit | `examples/swarm_math/` | **Done** | 500-step TPU `v5p-256` `Qwen3-4B` run **surpassed paper Table 1** across all 6 benchmarks (`60.8 / 77.8`, peak `61.1 / 78.2` vs. paper `59.0 / 73.2`). |
-| **Phase 2A: Recipe 2 (`R²Orch SW3`)** | Trainable `GraphCanvas` DAG orchestrator + peer cross-check waves over bit-exact frozen Workers (`trainable=False`) | `examples/swarm_r2orch/` | **Done** | 100-step TPU `v5p` verified `frozen_worker_drift == 0.0`, Heldout `+4.43 / +6.51 pp`, OOD `MATH-Hard +6.64 / +10.15 pp`. |
-| **Phase 2B: Recipe 2 (`Full Paper R²Orch`)** | Paper-exact `Qwen3.5-9B` hybrid `GDN+GQA` learner, `ADS+TSDS` `Proposer`, Bayesian `SkillLedger` withdrawal, `PATS` distillation, `21M Wiki-18` TPU search & `ALFWorld` | `examples/swarm_r2orch/paper_*.py`, `tunix/models/qwen3p5/` | **Running (`150/200`, `75%`)** | Zero-skill Heldout climbed **`13.54% [C0] -> 29.17% [C74]`** (`HotpotQA` up to `59.38%`, `MBPP+` up to `59.38%`, `NQ-Open` up to `40.62%`); `9/9` human seeds across 3 domains retired; `6` live `PATS` cards distilled (`4` internalized & retired); `C111` train `92.2%`. |
-| **Phase 3: Recipe 3 (`Swarm-Repair`)** | Dynamic `spawn_worker` / `retire_worker`, versioned shared code workspace, anytime scoring & physical wall-clock prefix abort | `docs/swarm_rlcr_design.md` | **Design Ready** | Architecture, conflict rules, and fixed team-capacity loss reduction specified; implementation queued as Gate `G5`. |
+| **Phase 2A: Recipe 2 (`R²Orch SW3` & Run 1 9B)** | `4B SW3` + `Paper Qwen3.5-9B` (`200/200` cycles + `2,108`-episode final eval on 128 TPU `v5p`) | `examples/swarm_r2orch/paper_*.py`, `tunix/models/qwen3p5/` | **Done (Run 1)** | Run 1 Heldout `13.54% -> 34.93%` (`C174`) / `34.44%` (`C199`); Locked IID (`670`) `19.01% -> 31.90%` (`+12.89 pp`); Locked OOD (`384`) `19.27% -> 35.42%` (`+16.15 pp`); `12/12` seeds retired. |
+| **Phase 2B: Recipe 2 (`R²Orch` Option 5 Run 2)** | Independent `Qwen3.5-9B` retrain fixing Run 1's `bf16` LoRA rounding & `4096` AIME cutoff via 32-chip TRUE `float32` Director + `77×` on-TPU LoRA merge (`465 MB`) + `12,288` final eval ceiling | `examples/swarm_r2orch/paper_fp32_director.py`, `paper_train.py` | **Running (128 TPU `v5p`)** | L3 gate PASS (`top1=1.0, max_lp_diff=9.22e-4`); Cycle 0 `TIS=0.999972` (**0.0028% drift**), **Zero-Skill Heldout jumped `21.95% -> 35.49%` (`+13.54 pp`) in 1 step**; Cycle 1 `TIS=1.000068`; running 200 cycles + `12,288` final eval. |
+| **Phase 3: Recipe 3 (`PARL`, Kimi K2.5 §3)** | Native Option 5 parallel orchestrator (`ctx.parallel` + `CriticalStepsBudget` + annealed `parl_grpo`) over 21M Wiki-18 TPU HBM | `examples/swarm_parl/` | **Run 1 Done; Run 2 (`14B` Blog) Running** | **Run 1 (`Qwen3-4B`, 64 TPU, 100 steps, 0 restarts, 130m):** Beat matched Serial on **10/11** heldout evals (peak **`+6.47 pp`**, `0.3793` vs `0.3146`), **`1.93×`** speedup, **Zero Serial Collapse** (`99–100%` for 60 steps after $\lambda \to 0$). **Run 2 (`Qwen3-14B`, 64 TPU, 200 steps, `Wide-WikiQA-8` 5–8 sub-Q, 256 greedy eval)** running now. |
+| **Phase 4: Recipe 4 (`Swarm-Repair`)** | Dynamic `spawn_worker` / `retire_worker`, versioned shared code workspace, anytime scoring & physical wall-clock prefix abort | `docs/swarm_rlcr_design.md` | **Design Ready** | Architecture & team-capacity reduction specified; ready to land on Option 5 `EpisodeRuntime`. |
 
 #### 3.2 Recipes Snapshot (What Each Recipe Does & Results)
 
@@ -341,15 +183,21 @@ Combining the stronger layer from each option yields three concrete design decis
 - **Progress & Results:** Completed 500-step training on `v5p-256`; achieved **`60.8% avg@16 / 77.8% pass@16`** (`Step 475: 61.1% / 78.2%`) over `24,752` evaluation episodes (`AIME24`, `AIME25`, `AMC`, `MATH500`, `Minerva`, `Olympiad`), outperforming published `Dr. MAS` (`59.0 / 73.2`) and demonstrating 3-phase multi-agent collaboration emergence.
 - **Consolidated Sections & Links:** [Part IV (Design & Emergence)](#part-iv-recipe-1-dr-mas-detailed-design-and-emergence-analysis) · [Part V (Reproduction & Debug Log)](#part-v-recipe-1-dr-mas-full-tpu-v5p-256-reproduction-and-debug-log) · [W&B Run 5](https://wandb.ai/linchai-google/tunix-swarm/runs/haoyugao-drmas-qwen3-4b-run5-500)
 
-##### Recipe 2: `R²Orch` — Heterogeneous DAG Orchestration & Recursive Self-Play (`SW3 Done; Paper 9B Running`)
+##### Recipe 2: `R²Orch` — Heterogeneous DAG Orchestration & Recursive Self-Play (`Run 1 Done; Option 5 Run 2 Running`)
 - **What it does:** A trainable `Graph Director` builds and edits layered multi-agent DAGs (`add_agent`, `consider_relation`, `finish`) over frozen `Workers`, coupled with an outer `Proposer` (`ADS+TSDS` pairwise RL+KL), Rubin Bayesian-bootstrap `SkillLedger` (withdrawing internalized prompt skills when $\mathbb{E}[\Delta^+] \le 0.02$), and zero-leakage `PATS` skill distillation. Zero-skill evaluation (`skill_context = ""`) tests purely internalized orchestration weights.
 - **Progress & Results:**
   1. **`Qwen3-4B` `SW3` & 100-Cycle Validation (`Done`):** Verified `frozen_worker_drift == 0.0`, closed-loop Bayesian skill withdrawal & self-healing reinstatement, `+7.03 to +8.60 pp` IID `HotpotQA`, `+3.91 pp` IID `MBPP+`, and `+6.25 / +6.64 pp` OOD `MATH-Hard`.
-  2. **Paper-Exact `Qwen3.5-9B` Full Stack (`Active on 128 TPU v5p chips, 150 / 200 cycles = 75.0%`):** Built native JAX `float32` `Qwen3.5-9B` LoRA (`rank=64`) hub, 16-chip `21,015,324`-passage `Wiki-18` TPU search server, `ALFWorld` & `python_exec` sandboxes, and `32 + 64` DP `VllmSampler` pools across 6 IID + OOD suites. Across the first 150 cycles, zero-skill Heldout climbed from `13.54% [C0]` up to `29.17% [C74]`, `Cycle 111` hit a `92.2%` batch mean, `9/9` human seeds across `HotpotQA`, `MedQA`, and `MBPP+` retired, and `PATS` autonomously distilled `6` live skill cards (`4` already internalized & retired).
-- **Consolidated Sections & Links:** [Part VI (Detailed Design)](#part-vi-recipe-2-r2orch-detailed-design-sw3-and-full-self-play) · [Part VII (Reproduction & Debug Log)](#part-vii-recipe-2-r2orch-reproduction-live-128-chip-telemetry-and-debug-log) · [W&B Live 9B Run](https://wandb.ai/linchai-google/tunix-swarm/runs/haoyugao-r2orch-paper-qwen3p5-9b-run1)
+  2. **`Qwen3.5-9B` Run 1 (`Done` — 200/200 Cycles + 2,108-Episode Final Eval on 128 TPU `v5p`):** Heldout rose `13.54% [C0] -> 34.93% [C174] / 34.44% [C199]` (`12/12` human seeds retired); Locked Test IID (`670`) rose `19.01% -> 31.90% (+12.89 pp / 1.68×)`; Locked Test OOD (`384`) rose `19.27% -> 35.42% (+16.15 pp / 1.84×)`.
+  3. **`Qwen3.5-9B` Option 5 Run 2 (`Active` on 128 TPU `v5p`):** Eliminates Run 1's `bfloat16` merged-LoRA rounding loss & `4096` eval cutoff via Option 5's L3 `ServingFidelityMode.FP32_NATIVE` 32-chip `(dp=8, tp=4)` Director + `77×` on-TPU LoRA merge (`465 MB` vs `36 GiB`) + `12,288` eval ceiling. Passed L3 gate (`top1=1.0000, max_lp_diff=9.218e-4`); Cycle 0 achieved `TIS = 0.999972` and jumped Zero-Skill Heldout **`21.95% -> 35.49% (+13.54 pp)` after a single RL update** (`HotpotQA 62.50%`, `MBPP+ 62.50%`, `MedQA 56.25%`).
+- **Consolidated Sections & Links:** [Part VI (Detailed Design)](#part-vi-recipe-2-r2orch-detailed-design-sw3-and-full-self-play) · [Part VII (Reproduction & Debug Log)](#part-vii-recipe-2-r2orch-reproduction-live-128-chip-telemetry-and-debug-log) · [W&B Run 1](https://wandb.ai/linchai-google/tunix-swarm/runs/haoyugao-r2orch-paper-qwen3p5-9b-run1) · [W&B Option 5 Run 2](https://wandb.ai/linchai-google/tunix-swarm/runs/haoyugao-r2orch-opt5-qwen3p5-9b-run2)
 
-##### Recipe 3: `Swarm-Repair` — Deadline-Bounded Parallel Code Repair (`Design Complete`)
-- **What it does:** Extends `RecordingRuntime` to asynchronous multi-worker teams (`spawn_worker` / `retire_worker`) editing a versioned shared repository under a physical wall-clock deadline, using prefix-preserving token truncation and fixed team-capacity credit reduction.
+##### Recipe 3: `PARL` (Kimi K2.5 §3) — Parallel-Agent Reinforcement Learning (`Run 1 4B Done; Run 2 14B Blog Scale-Up Running`)
+- **What it does:** Trains a `Director` natively on Option 5 (`ctx.parallel` + `CriticalStepsBudget` + `parl_grpo`) to dynamically fan out concurrent frozen Wikipedia search subagents under annealed shaping rewards ($r_{\text{PARL}} = r_{\text{perf}} + \lambda_1 r_{\text{parallel}} + \lambda_2 r_{\text{finish}}$, annealing $\lambda_1, \lambda_2 \to 0$).
+- **Run 1 (`Qwen3-4B`, 64 TPU `v5p`, 100 Steps / 12,800 Episodes, `0` Restarts, `130 min` — `Done`):** Passed L3 gate (`max_lp_diff = 4.98e-4`); beat matched-budget Serial on **10/11** heldout checkpoints (Step 80 peak **`0.3793` vs `0.3146` = `+6.47 pp`**), achieved **`1.93×`** peak speedup (`1.88×` final, `4.60` vs `4.84` critical steps), and proved **Zero Serial Collapse** (`99.0%–100.0%` parallel rate across 60 pure-$r_{\text{perf}}$ steps after $\lambda \to 0$). [W&B Run 1](https://wandb.ai/linchai-google/tunix-swarm/runs/3wim04c5).
+- **Run 2 Blog Scale-Up (`Qwen3-14B` Full-Param, 64 TPU `v5p`, 200 Steps, `Wide-WikiQA-8` 5–8 Sub-Questions + Multi-Hop QA, `256` Greedy Heldout Tasks — `Running`):** Scales model size `3.7×`, doubles parallel fan-out width (`max_wave_width=8`, targeting `3×–4×` latency compression), adds cosine LR decay & deterministic greedy 256-task per-category evaluation.
+
+##### Recipe 4: `Swarm-Repair` — Deadline-Bounded Parallel Code Repair (`Design Complete`)
+- **What it does:** Extends the Option 5 runtime to asynchronous multi-worker teams (`spawn_worker` / `retire_worker`) editing a versioned shared repository under a physical wall-clock deadline, using prefix-preserving token truncation and fixed team-capacity credit reduction.
 - **Consolidated Section:** [Part VIII (Dynamic Parallel Design)](#part-viii-recipe-3-swarm-repair-dynamic-parallel-code-repair-design)
 
 #### 3.3 Complete Document Index
@@ -1509,6 +1357,24 @@ Evaluated across `796` zero-skill tasks (`k = 2`, `skill_context = ""`, `frozen_
 | **D12** | HBM Sync Race (`Array deleted`) | `--async-next-cycle` raced `VLLMInProcessDriverLoop` against `update_params` (`delete_dst_buffers=True`) | Set `delete_dst_buffers=False`, wrapped `update_params` in `drv.pause(mode="wait")` / `drv.resume()`, warmed up both vLLM pools at boot (`7s` zero-error sync) |
 | **D13** | Eval Stragglers & `2400s` Floor | 3 unbounded `AIME` eval tasks spun `60+ min` behind sequential suite barriers; upstream `training_cycle.py` `2400s` constant overrode `360s` TOML | Attached `RolloutDeadline(360s/300s)` + pooled all 6 suites `longest_first` (`~10x` faster eval), aligned `R2ORCH_*_ROLLOUT_WALL_TIME_S = 360.0`, set Worker `return_logprobs=False`, resumed seamlessly at `Cycle 1` (`collection_wall_s` `-53%`) |
 | **D14-D17** | Worker Reset, Host `/tmp` & Atomic Resume | Transient IFRT worker disconnects (`C62`, `C83`) left full neighbor `/tmp`, non-atomic `pats_state.step`, or partial `solver_rollouts.jsonl` (`worker_backend_unavailable`) | Upgraded `_gcs_sync.py` (`~80s` parallel `latest.json` pull), isolated `64 GiB` RAM `emptyDir` + excluded node `alzw`, and added `reconcile_resume_state()` + `maxRestarts: 20` + `final_eval` watchdog |
+| **D18** | `300s/360s` Timeout Truncation (`enable_prefix_caching=False`) | Hybrid `GDN` layers disable prefix cache on TPU; tight `300s/360s` deadlines killed `97%` of AIME/ALFWorld & `70%` of MedQA before Finish | Restored `900s–1200s` train & `900s–1800s` eval rollout budgets at `C157`: AIME finish rate jumped `3.3% -> 66.7%` and `C174` Zero-Skill Heldout surged `+10.45 pp` to `34.93%` (Run 1 finished all `200/200` cycles + `2,108`-episode final eval: IID `19.01% -> 31.90%`, OOD `19.27% -> 35.42%`) |
+
+### 5. Option 5 Independent Retrain (`Run 2`: 32-Chip TRUE `float32` Director on `128` TPU `v5p`) — Reproduction & Debug Log (`D19–D23`)
+
+To eliminate Run 1's two remaining sources of precision/eval gap—(a) `bfloat16` merged-LoRA serving truncating `82%–99.9%` of small (`~1e-4`) LoRA weight deltas and (b) `4096` single-call AIME output cutoffs—we launched a full independent 200-cycle retrain (`hy-swarm-r2o9b-opt5`, [W&B Run 2](https://wandb.ai/linchai-google/tunix-swarm/runs/haoyugao-r2orch-opt5-qwen3p5-9b-run2)) on **Option 5** (`16` Learner + `16` Wiki-18 HBM + `32` single-compiled `(dp=8, tp=4)` TRUE `float32` Director + `64` frozen `VllmSampler` Workers = `128` TPU `v5p` chips, final eval ceiling `12,288` tokens):
+
+- **Verified Breakthroughs (Pre-Launch & Early Cycles):**
+  - **L3 Startup Parity Gate:** `[option5-L3] ServingFidelity PASS mode=fp32_native top1=1.0000 max_lp_diff=9.218e-04`.
+  - **Cycle 0 (`proposer` step 1 + `director` step 2):** **`r2orch_tis_weight_mean = 0.999972`** (`0.0028%` drift!), `r2orch_logratio_abs_mean = 0.001139`; **Zero-Skill 6-Domain Heldout (`190` tasks) jumped `+13.54 pp` in a single RL update (`21.95%` base -> `35.49%` `cycle-0000`):** `HotpotQA 28.12% -> 62.50%`, `MBPP+ 46.88% -> 62.50%`, `MedQA 15.62% -> 56.25%`, `AIME 6.67%`, `ALFWorld 9.38%`, `NQ-Open 15.62%`.
+  - **Cycle 1 (`proposer` step 3 `43.5s` + `director` step 4 `187.8s`):** **`r2orch_tis_weight_mean = 1.000068`** (`0.0068%` drift).
+
+| **#** | **Stage / Component** | **Bug / Failure Symptom** | **Root Cause & Permanent Fix** |
+| --- | --- | --- | --- |
+| **D19** | FP32 Director Call API & `12288` Ceiling | `BatchingFp32DirectorSampler.__call__` lacked `prompt_token_ids` kwarg; `GEN_BUCKETS` capped below `12,288` | Added `prompt_token_ids` passthrough & expanded `GEN_BUCKETS = (32, 256, 1024, 2048, 4096, 12288)` (`a598936dc`). |
+| **D20** | Head Node `tmpfs` Pressure & `e5-base-v2` | `251 GiB` `n2d-standard-64` evicted (`jax-tpu 179.5 GiB + pathways-proxy 56.4 GiB`); unlinking `e5-base-v2` broke `E5SkillEmbedder` | Unlinked `31 GiB` `vectors_fp16.npy` (`release_vectors_file(unlink=True)`) & `18 GiB` `Qwen3.5-9B/*.safetensors` (`+50 GiB` RAM reclaimed) while keeping `0.4 GiB` `e5-base-v2` intact (`c5725ef3c`, `1c61eee5b`). |
+| **D21** | `SubmissionJournal` Poison-Lock & Stale `latest.json` on Resume | Crashed Cycle 1 left 86 SHA-256 hashed `<sha>.json/.lock` receipts in `state/submissions/` (triggering `CanvasState.FAILED` / `CollectionInfrastructureIncidentError` at Round 0) and a stale `checkpoints/director/latest.json` pointing to unsynced `step-00000004` | Upgraded `reconcile_resume_state()` (`607e14c13`) to parse `run_id` inside every hashed receipt JSON, remove all `cycle >= completed_cycles` receipts/locks, scan actual intact `step-*/lora_weights.npz` dirs, and repair `latest.json` + `training_state.json` before `boot_tpu_services()`. |
+| **D22** | Shared `base_state` Leaf Deletion | `_delete_jax_leaves(merged)` deleted `float32[248320, 4096]` (`embedder`) shared with `hub.base_state` because `base_state` and `sync_dtype` are both `float32` (`24/24` Proposer HTTP 500s) | Guarded `_delete_jax_leaves(merged, keep_tree=self.hub.base_state)` & protected `new_state` leaves (`b076c5d6c`). |
+| **D23** | Cross-Mesh `36 GiB` Host OOM, GCS Sync Stall & `/tmp` Disk Growth | Streaming full `36 GiB` FP32 `merged` weights through `pathways-proxy` on `load_adapter("director-v0004")` OOM-killed `251 GiB` head node; naive `_gcs_sync.py` re-uploaded `5.5 GiB` every `30s`; `200 × 177 MiB` exceeded `27 GiB` `/tmp` | Retained immutable `_base_state` on Director TPU HBM (`95 GiB/chip`) and implemented `BatchingFp32DirectorSampler.update_lora()` (`14aedde6b`): transfers only **`465 MB` LoRA adapters (`77×` smaller)** and merges `float32` directly on TPU HBM (`< 3s`, `~0.5 GiB` host RAM, `0` OOM); upgraded `_gcs_sync.py` to 8-thread incremental `(mtime_ns, size)` sync + GCS-verified local blob pruning. |
 
 ---
 

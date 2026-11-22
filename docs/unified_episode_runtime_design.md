@@ -297,3 +297,21 @@ Put episode execution and role bindings under `tunix/dist_rl/rollout/` and the t
 | R²Orch and recovery | Match hidden/visible membership and both objective gradients on a fixed cycle. Inject a crash between optimizer stages and another after commit but before publication. After recovery, the published model/optimizer states, next selection and ledger match the uninterrupted run. Verify held-out evaluation with empty skill context. |
 
 The first useful release is the single-agent and Dr. MAS pair. It demonstrates that one execution model supports both a conventional tool loop and a conditional team while preserving their different gradient semantics. PARL exercises parallelism and frozen participants. R²Orch exercises multiple objectives and recoverable state across training cycles.
+
+---
+
+## Option 5: Converged Three-Layer Implementation & TPU `v5p` Validation (`tunix/dist_rl/swarm/`)
+
+While Option 4 above defines the canonical public API (`Recipe`, `EpisodeRuntime`, 3-way `Learner` / `PolicySpec` / `ObjectiveBatch`, and composable `StepContext`), production 64–128 chip TPU `v5p` bring-up surfaced two additional systems requirements that we unified into **Option 5** (implemented directly in `tunix/dist_rl/swarm/`):
+
+1. **Layer 1 (`EpisodeRuntime` — `episode_runtime.py`, `contracts.py`):** Implements Option 4's unified runtime (`generate`, `spawn`, `parallel`, `annotate`, online `CriticalStepsBudget`, `PublicEnvironment` vs. post-run private `grade()`, and automatic internal TITO compaction keyed on participant/snapshot/prefix).
+2. **Layer 2 (`StepContext` Dual Collection Modes — `step_context.py`, `manifest_store.py`, `objectives.py`):** Supports both Option 4's `CollectionMode.STRICT_BUNDLE` (`max_policy_lag=0`, pinned `SnapshotBundle` for `R²Orch`, `PARL`, and `Dr. MAS`) and Option 2/3's `CollectionMode.ASYNC_WINDOW` (`max_policy_lag > 0` streaming window + 2-level `_episode_sem` / `_sampler_sem` admission) under one atomic conditional `ManifestStore` and built-in `group_grpo` / `parl_grpo` steps.
+3. **Layer 3 (`ServingFidelity` Startup Parity Gate — `serving_fidelity.py` + On-TPU FP32 LoRA Serving):** Makes serving-vs-learner numerical fidelity an explicit contract (`FULL_BF16`, `FP32_NATIVE`, `LORA_UNMERGED_BF16`) audited before Step 0 via `verify_serving_fidelity(...)` so `bfloat16` merged-LoRA quantization cannot silently erase small LoRA deltas.
+
+### Live TPU `v5p` Validation Summary
+
+- **Core Unit & Gate Suite:** `64/64` K8s CPU tests green; 8-device `(dp=2, tp=4)` FP32 Director parity gate `top1=1.0000, max_lp_diff=2.63e-7`.
+- **Recipe 3 (`PARL`, `examples/swarm_parl/`):**
+  - *Run 1 (`Qwen/Qwen3-4B`, 64 TPU `v5p`, 100 steps / 12,800 episodes, `0` restarts, `130 min`):* L3 gate `max_lp_diff = 4.98e-4`; outperformed matched-budget Serial on **10/11** heldout checkpoints (Step 80 peak **`+6.47 pp`**, `0.3793` vs `0.3146`), achieved **`1.93×`** peak speedup (`1.88×` final, `4.60` vs `4.84` critical steps), and proved **Zero Serial Collapse** (`99%–100%` parallel rate across 60 pure-$r_{\text{perf}}$ steps after $\lambda_1, \lambda_2 \to 0$).
+  - *Run 2 Blog Scale-Up (`Qwen/Qwen3-14B`, 64 TPU `v5p`, 200 steps, `Wide-WikiQA-8` 5–8 sub-questions + Multi-Hop QA, 256 greedy heldout tasks):* Active.
+- **Recipe 2 (`R²Orch` Option 5 Run 2, `examples/swarm_r2orch/paper_fp32_director.py`):** 128 TPU `v5p` with single-compiled 32-chip `(dp=8, tp=4)` TRUE `float32` Director + on-TPU LoRA merge (`465 MB` vs `36 GiB` host transfer, `77×` reduction): L3 gate `top1=1.0000, max_lp_diff=9.22e-4`, Cycle 0 `TIS = 0.999972`, Zero-Skill Heldout **`21.95% -> 35.49%` (`+13.54 pp` in 1 step)**, Cycle 1 `TIS = 1.000068`.
