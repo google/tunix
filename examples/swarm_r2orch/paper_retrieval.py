@@ -216,13 +216,17 @@ class TpuWiki18Retriever:
     t0 = time.monotonic()
     q_bucket = self.encode_queries(texts)
     t_enc = time.monotonic()
-    _, shortlist_jax = self._search_fn(
+    shortlist_vals_jax, shortlist_jax = self._search_fn(
         jnp.asarray(q_bucket), self.matrix_bf16, self.row_ids
     )
+    shortlist_vals = np.asarray(jax.device_get(shortlist_vals_jax))[: len(texts)]
     shortlist_ids = np.asarray(jax.device_get(shortlist_jax))[: len(texts)]
     t_ip = time.monotonic()
     results = self._rescore_and_fetch(
-        q_bucket[: len(texts)], shortlist_ids, topk
+        q_bucket[: len(texts)],
+        shortlist_ids,
+        topk,
+        shortlist_vals=shortlist_vals,
     )
     t_done = time.monotonic()
     self.timing["encode_s"] = self.timing.get("encode_s", 0.0) + (t_enc - t0)
@@ -230,23 +234,43 @@ class TpuWiki18Retriever:
     self.timing["fetch_s"] = self.timing.get("fetch_s", 0.0) + (t_done - t_ip)
     return results
 
-  def _rescore_and_fetch(
+  def _rank_candidates(
       self,
-      queries: np.ndarray,
-      shortlist_ids: np.ndarray,
+      q_vec: np.ndarray,
+      cands: np.ndarray,
+      cand_vals: np.ndarray | None,
       topk: int,
-  ) -> list[list[dict[str, Any]]]:
-    out: list[list[dict[str, Any]]] = []
-    for q_vec, cands in zip(queries, shortlist_ids):
+  ) -> list[tuple[int, float]]:
+    if self.vectors is not None:
       valid = cands[(cands >= 0) & (cands < self.total)]
       unique_ids = np.sort(np.unique(valid))
       exact_vecs = np.asarray(self.vectors[unique_ids], dtype=np.float32)
       exact_scores = exact_vecs @ q_vec
       keep = np.argsort(-exact_scores, kind="stable")[:topk]
+      return [(int(unique_ids[idx]), float(exact_scores[idx])) for idx in keep]
+    best_by_id: dict[int, float] = {}
+    vals = cand_vals if cand_vals is not None else np.zeros_like(cands, dtype=np.float32)
+    for raw_id, raw_val in zip(cands, vals):
+      pid = int(raw_id)
+      if 0 <= pid < self.total:
+        score = float(raw_val)
+        if pid not in best_by_id or score > best_by_id[pid]:
+          best_by_id[pid] = score
+    ranked = sorted(best_by_id.items(), key=lambda kv: (-kv[1], kv[0]))
+    return ranked[:topk]
+
+  def _rescore_and_fetch(
+      self,
+      queries: np.ndarray,
+      shortlist_ids: np.ndarray,
+      topk: int,
+      shortlist_vals: np.ndarray | None = None,
+  ) -> list[list[dict[str, Any]]]:
+    out: list[list[dict[str, Any]]] = []
+    val_rows = shortlist_vals if shortlist_vals is not None else [None] * len(queries)
+    for q_vec, cands, cand_vals in zip(queries, shortlist_ids, val_rows):
       hits: list[dict[str, Any]] = []
-      for idx in keep:
-        pid = int(unique_ids[idx])
-        score = float(exact_scores[idx])
+      for pid, score in self._rank_candidates(q_vec, cands, cand_vals, topk):
         line = self.corpus[int(self.offsets[pid]) : int(self.offsets[pid + 1])]
         rec = json.loads(line)
         title, _, text = str(rec["contents"]).partition("\n")
