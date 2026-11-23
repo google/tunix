@@ -366,7 +366,7 @@ def unpad_train_example(example: common.TrainExample) -> list[dict[str, Any]]:
   if has_old_values:
     old_values_np = np.asarray(old_values_val)
 
-  sampler_is_weights_val = getattr(example, "sampler_is_weights", None)
+  sampler_is_weights_val = example.sampler_is_weights
   has_sampler_is_weights = sampler_is_weights_val is not None
   if has_sampler_is_weights:
     sampler_is_weights_np = np.asarray(sampler_is_weights_val)
@@ -608,7 +608,7 @@ def pack_sequences(
   for item_list in item_iterator:
     for example in item_list:
       example_cls = type(example)
-      agreement_applied = getattr(example, "sampler_agreement_applied", False)
+      agreement_applied = example.sampler_agreement_applied
       if getattr(example, "completion_mask", None) is not None:
         mask_dtype = np.asarray(example.completion_mask).dtype
       for item in train_example_to_pack_items(example):
