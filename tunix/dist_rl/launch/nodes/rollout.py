@@ -762,6 +762,7 @@ def _scanned_checkpoint_layout(path: str) -> tuple[str, dict[str, bool], bool]:
   Raises:
     FileNotFoundError: If neither `path` nor one of those subdirectories holds
       an Orbax `_METADATA` file.
+    ValueError: If the Orbax `_METADATA` file is not a JSON object.
   """
   from etils import epath  # pylint: disable=g-import-not-at-top
 
@@ -774,6 +775,11 @@ def _scanned_checkpoint_layout(path: str) -> tuple[str, dict[str, bool], bool]:
         " subdirectories."
     )
   metadata = json.loads((params_dir / "_METADATA").read_text())
+  if not isinstance(metadata, Mapping):
+    raise ValueError(
+        f"Invalid Orbax _METADATA format in {params_dir}: expected a JSON"
+        " object."
+    )
   storage = {
       f"checkpoint_storage_{key}": metadata[key]
       for key in ("use_ocdbt", "use_zarr3")

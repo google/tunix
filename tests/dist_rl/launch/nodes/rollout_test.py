@@ -834,6 +834,12 @@ class CreateRolloutWorkerTest(absltest.TestCase):
         precedence_dir.full_path,
     )
 
+  def test_scanned_checkpoint_layout_rejects_non_mapping_metadata(self):
+    params_dir = self.create_tempdir()
+    params_dir.create_file("_METADATA", "[1, 2, 3]")
+    with self.assertRaisesRegex(ValueError, "Invalid Orbax _METADATA format"):
+      rollout._scanned_checkpoint_layout(params_dir.full_path)
+
 
 class SamplerTest(absltest.TestCase):
 
