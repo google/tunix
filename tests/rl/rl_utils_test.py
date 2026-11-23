@@ -618,6 +618,51 @@ class UtilsTest(absltest.TestCase):
           ),
       )
 
+  def test_pack_sequences_keeps_precomputed_sampler_is_weights(self):
+    # GRPOLearner precomputes the sampler IS/RS weights and marks the batch
+    # sampler_agreement_applied. If packing drops either, grpo_loss_fn redoes
+    # the agreement with the trainer logps standing in for the sampler's.
+    # A: completion 3 + 2 padding (weights 0.5), B: completion 2 (weights 2.0).
+    example_a = self._create_mock_train_example(
+        2,
+        3,
+        pad_len=2,
+        sampler_is_weights=jnp.array([[0.5, 0.5, 0.5, 9.0, 9.0]]),
+        sampler_agreement_applied=True,
+    )
+    example_b = self._create_mock_train_example(
+        1,
+        2,
+        sampler_is_weights=jnp.full((1, 2), 2.0),
+        sampler_agreement_applied=True,
+    )
+    [[pack]] = list(
+        utils.pack_sequences(
+            iter([[example_a, example_b]]),
+            max_token_budget=10,
+            sequences_per_update=2,
+        )
+    )
+    # Weights on completion tokens only: 0 on prompts, padding is dropped.
+    np.testing.assert_allclose(
+        pack.sampler_is_weights[0],
+        jnp.array([0, 0, 0.5, 0.5, 0.5, 0, 2, 2, 0, 0], dtype=jnp.float32),
+    )
+    self.assertTrue(pack.sampler_agreement_applied)
+    # seq_logprob_error_threshold alone sets the flag without any weights.
+    example = self._create_mock_train_example(
+        1, 2, sampler_agreement_applied=True
+    )
+    [[pack]] = list(
+        utils.pack_sequences(
+            iter([[example]]),
+            max_token_budget=10,
+            sequences_per_update=1,
+        )
+    )
+    self.assertIsNone(pack.sampler_is_weights)
+    self.assertTrue(pack.sampler_agreement_applied)
+
   def test_pack_sequences_is_independent_of_producer_granularity(self):
     # The mini-batch boundary is defined in SEQUENCES (sequences_per_update),
     # so how the producer chops the stream is irrelevant: the same 2 sequences

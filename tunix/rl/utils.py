@@ -366,6 +366,11 @@ def unpad_train_example(example: common.TrainExample) -> list[dict[str, Any]]:
   if has_old_values:
     old_values_np = np.asarray(old_values_val)
 
+  sampler_is_weights_val = getattr(example, "sampler_is_weights", None)
+  has_sampler_is_weights = sampler_is_weights_val is not None
+  if has_sampler_is_weights:
+    sampler_is_weights_np = np.asarray(sampler_is_weights_val)
+
   policy_version_val = getattr(example, "policy_version", None)
   has_policy_version = policy_version_val is not None
   if has_policy_version:
@@ -391,6 +396,9 @@ def unpad_train_example(example: common.TrainExample) -> list[dict[str, Any]]:
         "old_per_token_logps": old_logps[i, :c_len] if has_old else None,  # pyrefly: ignore[unbound-name]
         "returns": returns_np[i, :c_len] if has_returns else None,  # pyrefly: ignore[unbound-name]
         "old_values": old_values_np[i, :c_len] if has_old_values else None,  # pyrefly: ignore[unbound-name]
+        "sampler_is_weights": (
+            sampler_is_weights_np[i, :c_len] if has_sampler_is_weights else None  # pyrefly: ignore[unbound-name]
+        ),
         "policy_version": (
             policy_version_np[i : i + 1] if has_policy_version else None  # pyrefly: ignore[unbound-name]
         ),
@@ -455,6 +463,7 @@ def pack_rows_to_train_examples(
     mask_dtype: Any,
     num_segments: int,
     is_update_step: bool,
+    sampler_agreement_applied: bool = False,
 ) -> Any:
   """Converts a PackedChunk to a TrainExample."""
   n = len(chunk)
@@ -484,6 +493,8 @@ def pack_rows_to_train_examples(
   }
   if hasattr(example, "num_segments"):
     replacements["num_segments"] = num_segments
+  if hasattr(example, "sampler_agreement_applied"):
+    replacements["sampler_agreement_applied"] = sampler_agreement_applied
   return example.replace(**replacements)
 
 
@@ -537,6 +548,9 @@ def pack_sequences(
   chunk_capacity = pack_size * max_token_budget
   example_cls: type[Any] = common.TrainExample
   mask_dtype: Any = jnp.float32
+  # Set by learners that precompute sampler IS/RS weights; packing must keep
+  # it, or grpo_loss_fn recomputes agreement against the trainer's own logps.
+  agreement_applied = False
   first_item_for_dummy: packing.PackItem | None = None
 
   def _emit_chunk(bins, is_update):
@@ -555,6 +569,7 @@ def pack_sequences(
             mask_dtype=mask_dtype,
             num_segments=num_segments,
             is_update_step=is_update,
+            sampler_agreement_applied=agreement_applied,
         )
     ]
 
@@ -593,6 +608,7 @@ def pack_sequences(
   for item_list in item_iterator:
     for example in item_list:
       example_cls = type(example)
+      agreement_applied = getattr(example, "sampler_agreement_applied", False)
       if getattr(example, "completion_mask", None) is not None:
         mask_dtype = np.asarray(example.completion_mask).dtype
       for item in train_example_to_pack_items(example):

@@ -663,6 +663,116 @@ class AlgoCoreTest(absltest.TestCase):
               atol=1e-6,
           )
 
+  def test_precomputed_sampler_is_loss_unchanged_by_packing(self):
+    """A batch with precomputed IS/RS weights packs to the same loss."""
+    from types import SimpleNamespace  # pylint: disable=g-import-not-at-top
+    from flax import nnx  # pylint: disable=g-import-not-at-top
+    from tunix.rl import common  # pylint: disable=g-import-not-at-top
+    from tunix.rl import utils as rl_utils  # pylint: disable=g-import-not-at-top
+
+    class _ToyModel(nnx.Module):
+      """Per-token logits, so packing cannot change the logps."""
+
+      def __init__(self, *, vocab_size, rngs):
+        self.emb = nnx.Embed(vocab_size, 8, rngs=rngs)
+        self.head = nnx.Linear(8, vocab_size, rngs=rngs)
+
+      def __call__(
+          self,
+          x,
+          segment_ids=None,
+          positions=None,
+          cache=None,
+          attention_mask=None,
+      ):
+        del segment_ids, positions, attention_mask
+        return self.head(self.emb(x)), cache
+
+    model = _ToyModel(vocab_size=16, rngs=nnx.Rngs(42))
+    prompt_ids = jnp.array([[1, 2], [3, 4]], jnp.int32)
+    completion_ids = jnp.array([[5, 6, 7], [8, 9, 10]], jnp.int32)
+    completion_mask = jnp.array([[1.0, 1.0, 1.0], [1.0, 1.0, 0.0]], jnp.float32)
+    graphdef, state = nnx.split(model)
+    trainer_logps = common.compute_per_token_logps(
+        graphdef,
+        state,
+        prompt_tokens=prompt_ids,
+        completion_tokens=completion_ids,
+        pad_id=0,
+        eos_id=-1,
+        stop_gradient=True,
+    )
+    rollout_logps = trainer_logps + jnp.array(
+        [[0.3, -0.6, 0.1], [-0.4, 0.5, 0.0]], jnp.float32
+    )
+    cfg = SimpleNamespace(
+        beta=0.0,
+        epsilon=0.2,
+        epsilon_high=0.2,
+        epsilon_c=None,
+        loss_algo='grpo',
+        loss_agg_mode='token-mean',
+        temperature=1.0,
+        kl_loss_mode='low_var_kl',
+        kl_clamp_value=None,
+        force_compute_kl=False,
+        use_rollout_logps=True,
+        sampler_is='token',
+        sampler_is_threshold=2.0,
+        sampler_rs='token',
+        sampler_rs_min=0.6,
+        sampler_rs_max=1.5,
+        seq_logprob_error_threshold=None,
+        score_centering=False,
+    )
+    # What GRPOLearner hands the trainer: trainer logps as the PPO anchor plus
+    # the precomputed IS/RS weights.
+    _, weights, _ = common.sampler_trainer_agreement(
+        rollout_logps,
+        trainer_logps,
+        completion_mask,
+        sampler_is=cfg.sampler_is,
+        sampler_is_threshold=cfg.sampler_is_threshold,
+        sampler_rs=cfg.sampler_rs,
+        sampler_rs_min=cfg.sampler_rs_min,
+        sampler_rs_max=cfg.sampler_rs_max,
+    )
+    unpacked = common.TrainExample(
+        prompt_ids=prompt_ids,
+        prompt_mask=jnp.ones_like(prompt_ids),
+        completion_ids=completion_ids,
+        completion_mask=completion_mask,
+        advantages=jnp.array([1.2, -0.8], jnp.float32),
+        ref_per_token_logps=None,
+        old_per_token_logps=trainer_logps,
+        sampler_is_weights=weights,
+        sampler_agreement_applied=True,
+    )
+    [[packed]] = list(
+        rl_utils.pack_sequences(
+            iter([[unpacked]]), max_token_budget=16, sequences_per_update=2
+        )
+    )
+
+    def _loss(m, ex):
+      return algo_core.grpo_loss_fn(
+          m, ex, cfg, pad_id=0, eos_id=-1
+      ).primary_loss.compute()
+
+    # The second model is a later update on the same batch: the policy has
+    # moved away from the anchor, so the PPO clip matters too.
+    moved = nnx.merge(graphdef, jax.tree.map(lambda x: 1.5 * x, state))
+    for name, m in (('first_update', model), ('policy_moved', moved)):
+      with self.subTest(name=name):
+        loss_u, grads_u = nnx.value_and_grad(_loss)(m, unpacked)
+        loss_p, grads_p = nnx.value_and_grad(_loss)(m, packed)
+        np.testing.assert_allclose(loss_p, loss_u, rtol=1e-5, atol=1e-6)
+        for g_p, g_u in zip(
+            jax.tree_util.tree_leaves(grads_p),
+            jax.tree_util.tree_leaves(grads_u),
+        ):
+          np.testing.assert_allclose(g_p, g_u, rtol=1e-5, atol=1e-6)
+
 
 class GrpoLossSequenceLevelControlsTest(absltest.TestCase):
   """Tests for seq logp error gate and orthogonal sampler_is + sampler_rs."""
