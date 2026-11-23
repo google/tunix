@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Distillation trainer."""
+from collections.abc import Mapping
 import dataclasses
 from typing import Any, Callable, TypeAlias
 
@@ -82,10 +83,10 @@ class DistillationTrainer(peft_trainer.PeftTrainer):
 
   @override
   def with_gen_model_input_fn(
-      self, gen_model_input_fn: Callable[[Any], dict[str, ArrayLike]]
+      self, gen_model_input_fn: Callable[[Any], Mapping[str, ArrayLike]]
   ) -> "DistillationTrainer":
     self.gen_model_input_fn = lambda x: {
-        "inputs": gen_model_input_fn(x),
+        "inputs": dict(gen_model_input_fn(x)),
         "teacher_output": (
             x.teacher_output if hasattr(x, "teacher_output") else None
         ),
@@ -150,19 +151,19 @@ class DistillationTrainer(peft_trainer.PeftTrainer):
       self,
       model: nnx.Module,
       teacher_output: Any,
-      inputs: dict[str, ArrayLike],
+      inputs: Mapping[str, ArrayLike],
   ) -> tuple[ArrayLike, dict[str, Any]]:
-    output = self.strategy.get_train_loss(model, teacher_output, inputs)  # pyrefly: ignore[bad-argument-type]
+    output = self.strategy.get_train_loss(model, teacher_output, dict(inputs))  # pyrefly: ignore[bad-argument-type]
     return self._standardize_loss_output(output)
 
   def get_eval_loss(
       self,
       model: nnx.Module,
       teacher_output: Any,
-      inputs: dict[str, ArrayLike],
+      inputs: Mapping[str, ArrayLike],
   ) -> tuple[ArrayLike, dict[str, Any]]:
     del teacher_output  # Not computed in eval.
-    output = self.strategy.get_eval_loss(model, inputs)  # pyrefly: ignore[bad-argument-type]
+    output = self.strategy.get_eval_loss(model, dict(inputs))  # pyrefly: ignore[bad-argument-type]
     return self._standardize_loss_output(output)
 
   def close(self):
