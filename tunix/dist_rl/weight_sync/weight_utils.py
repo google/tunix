@@ -208,8 +208,24 @@ def global_shard_indices(
     arr: Any,
     sharding: Any,
     devices: Sequence[jax.Device] | None = None,
+    *,
+    use_ffi: bool = False,
 ) -> tuple[int, ...]:
-  """Grid index of each shard `arr` is published from, in shard order."""
+  """Grid index of each shard `arr` is published from, in shard order.
+
+  Args:
+    arr: The array.
+    sharding: `arr.sharding`.
+    devices: Optional explicit device sequence overriding `mesh.devices.flat`.
+    use_ffi: Whether the array is published over the XLA FFI (Pathways)
+      transport. When True, skips reading `arr.addressable_shards` (which
+      triggers Pathways disassembly ops and reports `platform == "tpu"` on
+      single-controller Pathways IFRT) and computes indices across full
+      `mesh.devices.flat`.
+
+  Returns:
+    One flattened grid index per shard.
+  """
   shape = tuple(arr.shape)
   index_map = sharding.devices_indices_map(shape)
   if devices is not None:
@@ -222,11 +238,12 @@ def global_shard_indices(
     return tuple(
         compute_global_shard_index(index_map[d], shape) for d in devices
     )
-  shards = getattr(arr, "addressable_shards", None)
-  if shards and not any(
-      s.device.platform in ("proxy", "pathways") for s in shards
-  ):
-    return tuple(compute_global_shard_index(s.index, shape) for s in shards)
+  if not use_ffi:
+    shards = getattr(arr, "addressable_shards", None)
+    if shards and not any(
+        s.device.platform in ("proxy", "pathways") for s in shards
+    ):
+      return tuple(compute_global_shard_index(s.index, shape) for s in shards)
   mesh_obj = getattr(sharding, "mesh", None)
   mesh_devices = (
       mesh_obj.devices.flat if hasattr(mesh_obj, "devices") else index_map
@@ -244,8 +261,21 @@ def tensor_metadata(
     layer_idx: int,
     *,
     devices: Sequence[jax.Device] | None = None,
+    use_ffi: bool = False,
 ) -> weight_sync.TensorMetadata:
-  """Constructs `TensorMetadata` for `arr`."""
+  """Constructs `TensorMetadata` for `arr`.
+
+  Args:
+    name: Name the variable is published under.
+    arr: The array.
+    layer_idx: Index of the variable among the published variables.
+    devices: Optional explicit device sequence; see `global_shard_indices`.
+    use_ffi: Whether the array is published over the XLA FFI transport; see
+      `global_shard_indices`.
+
+  Returns:
+    The metadata of `arr`.
+  """
   sharding: Any = getattr(arr, "sharding", None)
   spec = tuple(getattr(sharding, "spec", ()) or ())
   spec = (spec + (None,) * arr.ndim)[: arr.ndim]
@@ -272,7 +302,7 @@ def tensor_metadata(
       layer_idx=layer_idx,
       sharding_spec=tuple(_axis_name(a) for a in spec),
       global_shard_indices=(
-          global_shard_indices(arr, sharding, devices=devices)
+          global_shard_indices(arr, sharding, devices=devices, use_ffi=use_ffi)
           if hasattr(sharding, "devices_indices_map")
           else ()
       ),

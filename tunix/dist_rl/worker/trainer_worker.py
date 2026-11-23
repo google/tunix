@@ -21,8 +21,10 @@ from collections.abc import Callable
 import contextlib
 import functools
 import threading
+import time
 from typing import Any, ContextManager, TYPE_CHECKING, cast
 
+from absl import logging
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -204,12 +206,24 @@ class TrainerWorker(abstract_worker.Worker):
     """Triggers JIT compilation using the provided dummy_data."""
     trainer = self._ensure_ready()
     self.state = WorkerState.COMPILING
+    logging.info(
+        "[%s] Starting trainer compilation (trainer=%s, has_dummy_data=%s)...",
+        self._worker_id,
+        type(trainer).__name__,
+        dummy_data is not None,
+    )
+    t0 = time.perf_counter()
     try:
       with self._otel.track_rpc():
         dummy_data = abstract_trainer.resolve_dummy_routed_experts(
             trainer, dummy_data
         )
         trainer.compile(dummy_data)
+      logging.info(
+          "[%s] Finished trainer compilation in %.2fs.",
+          self._worker_id,
+          time.perf_counter() - t0,
+      )
       return self._response(compiled=True)
     except Exception as exc:
       self._last_error = str(exc)
