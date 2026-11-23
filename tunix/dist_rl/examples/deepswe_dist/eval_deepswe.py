@@ -93,6 +93,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
   parser.add_argument(
       "--top_k", type=int, default=-1, help="Top-k sampling; -1 disables it."
   )
+  parser.add_argument("--seed", type=int, default=None)
+  parser.add_argument(
+      "--worker_index",
+      type=int,
+      default=0,
+      help="Worker replica index used to offset --seed.",
+  )
   parser.add_argument("--enable_guard", action="store_true")
   parser.add_argument("--disable_thinking", action="store_true",
                       help="Agentic eval enables the Qwen thinking template.")
@@ -130,6 +137,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.error("--num_rollouts_per_instance > 1 requires --temperature > 0")
   if args.top_k != -1 and args.top_k <= 0:
     parser.error("--top_k must be positive, or -1 to disable it")
+  if args.worker_index < 0 or (args.seed is not None and args.seed < 0):
+    parser.error("--seed and --worker_index must be nonnegative")
   if args.max_response_length > args.max_model_len - _CONTEXT_HEADROOM_TOKENS:
     parser.error(
         f"max_response_length must leave {_CONTEXT_HEADROOM_TOKENS} context"
@@ -157,6 +166,7 @@ def model_profile(args: argparse.Namespace) -> dict[str, object]:
       "temperature",
       "top_p",
       "top_k",
+      "seed",
       "enable_guard",
       "disable_thinking",
   )
@@ -556,6 +566,7 @@ async def run_worker(args: argparse.Namespace):
   from tunix.dist_rl.worker import remote_execution, rollout_worker
   from tunix.generate import tokenizer_adapter
   from tunix.rl.agentic.parser.chat_template_parser import parser
+  from tunix.utils import math_utils
 
   if args.mesh_fsdp * args.mesh_tp != jax.device_count():
     raise ValueError("mesh_fsdp * mesh_tp must equal visible TPU chips")
@@ -581,6 +592,7 @@ async def run_worker(args: argparse.Namespace):
       temperature=args.temperature,
       top_p=args.top_p,
       top_k=args.top_k if args.top_k > 0 else None,
+      seed=math_utils.replica_seed(args.seed, args.worker_index),
       return_logprobs=False,
       eos_tokens=eos,
       data_parallel_size=args.mesh_fsdp,
