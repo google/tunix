@@ -380,7 +380,6 @@ class FakeClusterHarness:
         {
             "prompt": f"Prompt {i}",
             "prompt_id": f"prompt_{i}",
-            "generation_kwargs": {"max_tokens": 8},
         }
         for i in range(num_prompts)
     ]

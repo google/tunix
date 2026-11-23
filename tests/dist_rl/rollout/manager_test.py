@@ -973,7 +973,6 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
           prompt_id="p_case4",
           group_index=0,
           max_response_length=32,
-          generation_kwargs={"max_generation_steps": 32},
       )
       gen_task = asyncio.create_task(manager.generate(req))
       await asyncio.wait_for(in_env_step.wait(), timeout=2.0)
@@ -1266,7 +1265,6 @@ class StagingReservationManagerTest(unittest.IsolatedAsyncioTestCase):
         max_turns=1,
         max_response_length=16,
         stage_routed_experts=True,
-        generation_kwargs={"return_routed_experts": True},
     )
 
     # 1. Cancel mid-sampling after `sample()` has started.
@@ -1442,7 +1440,6 @@ class StagingReservationManagerTest(unittest.IsolatedAsyncioTestCase):
             max_turns=1,
             max_response_length=16,
             stage_routed_experts=True,
-            generation_kwargs={"return_routed_experts": False},
         )
     )
     self.assertIsInstance(res, trajectory_lib.TrajectoryError)
@@ -1473,7 +1470,6 @@ class StagingReservationManagerTest(unittest.IsolatedAsyncioTestCase):
         max_turns=1,
         max_response_length=16,
         stage_routed_experts=True,
-        generation_kwargs={"return_routed_experts": True},
     )
     t1 = asyncio.create_task(mgr.generate(req_dup))
     t2 = asyncio.create_task(mgr.generate(req_dup))
@@ -1495,7 +1491,6 @@ class StagingReservationManagerTest(unittest.IsolatedAsyncioTestCase):
         max_turns=1,
         max_response_length=16,
         stage_routed_experts=True,
-        generation_kwargs={"return_routed_experts": True},
     )
     req_bad = datatypes.RolloutRequest(
         prompt="p",

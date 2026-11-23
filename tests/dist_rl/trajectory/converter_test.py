@@ -1710,7 +1710,6 @@ class CreateTrajectoryMetadataTest(parameterized.TestCase):
     class MockRolloutRequest:
       prompt_id = "prompt_123"
       group_index = 4
-      generation_kwargs = {"temperature": 0.8, "top_k": 40}
       metadata = {"experiment": "exp_v1"}
 
     class MockAgent:
@@ -1730,6 +1729,7 @@ class CreateTrajectoryMetadataTest(parameterized.TestCase):
         target_policy_versions=[1, 2, 3],
         status="SUCCEEDED",
         extra={"custom_tag": "run_1"},
+        hyperparams={"temperature": 0.8, "top_k": 40},
     )
     self.assertIsInstance(meta, trajectory_lib.TunixTrajectoryMetadata)
     self.assertEqual(meta.trajectory_id, "traj_200")
@@ -1752,7 +1752,6 @@ class CreateTrajectoryMetadataTest(parameterized.TestCase):
     class MockRolloutRequest:
       prompt_id = "prompt_harbor"
       group_index = 0
-      generation_kwargs = None
       metadata = {"env_config": {"verifier_bytes": b"\x80\xff"}}
 
     meta = converter.create_trajectory_metadata(

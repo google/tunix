@@ -143,6 +143,12 @@ class TrajectoryCollectorEngine:
             self.request,
             self.agent,
             target_policy_versions=[self.request.target_policy_version],
+            hyperparams={
+                "temperature": config.temperature,
+                "top_p": config.top_p,
+                "top_k": config.top_k,
+                "max_tokens_to_generate": config.max_tokens_to_generate,
+            },
         )
       except Exception:  # pylint: disable=broad-exception-caught
         logging.warning(
@@ -161,38 +167,19 @@ class TrajectoryCollectorEngine:
     # TrajectoryCollectEngine on the asyncio event loop without blocking
     # threads.
     async def model_call(
-        chat_completions, env=None, max_generation_steps=None, **kwargs
-    ):
+        chat_completions: list[dict[str, Any]] | None,
+        env: Any = None,
+        max_generation_steps: int | None = None,
+        prompt_token_ids: Sequence[int] | np.ndarray | None = None,
+        routed_experts_prompt_start: int = 0,
+    ) -> base_rollout.RolloutOutput:
       del env
       nonlocal sampler_time_s, is_first_model_call
       is_turn0, is_first_model_call = is_first_model_call, False
       await self._unpaused.wait()
-      generation_kwargs = dict(self.request.generation_kwargs)
-      # NB: extra kwargs can be passed in from trajectory_collect_engine.
-      generation_kwargs.update(kwargs)
-      prompt_token_ids = generation_kwargs.pop("prompt_token_ids", None)
-      request_max_generation_steps = generation_kwargs.pop(
-          "max_generation_steps", None
-      )
-      req_max_tokens = (
-          request_max_generation_steps
-          if request_max_generation_steps is not None
-          else generation_kwargs.get("max_tokens")
-      )
-
-      if max_generation_steps is not None and req_max_tokens is not None:
-        effective_max_tokens = min(max_generation_steps, req_max_tokens)
-      elif max_generation_steps is not None:
-        effective_max_tokens = max_generation_steps
-      elif req_max_tokens is not None:
-        effective_max_tokens = req_max_tokens
-      else:
-        raise ValueError(
-            "TrajectoryCollectorEngine requires"
-            " request.max_response_length, request.generation_kwargs"
-            " ('max_generation_steps' or 'max_tokens'), or the model_call"
-            " callback to specify max_generation_steps."
-        )
+      max_tokens = self.config.max_tokens_to_generate
+      if max_generation_steps is not None:
+        max_tokens = min(max_tokens, max_generation_steps)
 
       req_policy_version = int(self.request.target_policy_version or 0)
       turn_policy_version = (
@@ -203,12 +190,11 @@ class TrajectoryCollectorEngine:
       if self._inner_engine is not None:
         self._inner_engine.policy_version = turn_policy_version
 
-      cache_salt = generation_kwargs.pop("cache_salt", None)
+      cache_salt = None
       if self.config.partial_rollout:
         if self._episode_cache_salt is None:
           self._episode_cache_salt = f"policy_v{turn_policy_version}"
-        if cache_salt is None:
-          cache_salt = self._episode_cache_salt
+        cache_salt = self._episode_cache_salt
 
       prompt_payload = (
           np.asarray(prompt_token_ids, dtype=np.int32)
@@ -218,11 +204,9 @@ class TrajectoryCollectorEngine:
       sampling_req = sampler_lib.SamplingRequest(
           request_id=self.traj_id,
           prompt=prompt_payload,
-          max_tokens=effective_max_tokens,
+          max_tokens=max_tokens,
           cache_salt=cache_salt,
-          routed_experts_prompt_start=generation_kwargs.get(
-              "routed_experts_prompt_start", 0
-          ),
+          routed_experts_prompt_start=routed_experts_prompt_start,
       )
       sample_start = time.perf_counter()
       try:
