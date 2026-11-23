@@ -32,7 +32,7 @@ the agentic `tunix.cli` path:
   completions with `reward_functions`; `env` uses the environment rewards, plus
   any `reward_functions`.
 * `env_class_path` / `agent_class_path` and their kwargs: read by the rollout
-  node, which imports `cluster_config.registry_module` to register them.
+  node, which imports `registry_module` to register them.
 
 Importing this module has no side effects. `main` pins the control-plane JAX
 platform to CPU (unless `JAX_PLATFORMS` is set) before any JAX use.
@@ -82,8 +82,8 @@ MIN_DERIVED_RPC_TIMEOUT_S = 1800.0
 
 # Keys a `data_module` record may hold (see `load_prompt_items`).
 _RECORD_KEYS = frozenset({"prompt", "metadata", "task_name"})
-# Prompt-item metadata stamped from the run configuration; records must not set
-# it.
+# Episode settings the rollout workers take from their `RolloutConfig`; records
+# must not set them.
 _RUN_WIDE_METADATA_KEYS = frozenset({"episode_timeout", "overlong_filter"})
 
 
@@ -163,39 +163,6 @@ def build_batch_config(
       num_data_shards=_num_data_shards(hp),
       mini_batch_size=int(rl_train["mini_batch_size"]),
       train_micro_batch_size=int(rl_train["train_micro_batch_size"]),
-  )
-
-
-def build_generation_args(
-    hp: resolve_config.DistHyperParameters,
-) -> datatypes.GenerationArgs:
-  """Builds the sampling arguments sent with every rollout request.
-
-  `return_logprobs` is left unset: `StandardRLProgram` sets it from
-  `GRPOConfig.use_rollout_logps`.
-
-  Args:
-    hp: Resolved distributed RL configuration.
-
-  Returns:
-    The generation arguments.
-  """
-  # See `build_batch_config` for why the rollout section is read directly.
-  # TODO(noghabi): Share the sampling settings (temperature, top_p, top_k) with
-  # the rollout node's `RolloutConfig` through one `node_utils` helper, so both
-  # nodes use the same disabled-`top_k` convention.
-  rollout = hp.config_mapping("rollout_config")
-  top_k = int(rollout["top_k"])
-  return datatypes.GenerationArgs(
-      temperature=float(rollout["temperature"]),
-      top_p=float(rollout["top_p"]),
-      # The schema disables top-k with a negative value, the rollout worker
-      # with 0.
-      top_k=0 if top_k < 0 else top_k,
-      # `StandardRLProgram` also enables routing replay on the trainer from it.
-      return_routed_experts=bool(
-          hp.config_mapping("vllm_config")["return_routed_experts"]
-      ),
   )
 
 
@@ -322,10 +289,9 @@ def load_prompt_items(
     The prompt items, repeated indefinitely.
 
   Raises:
-    ValueError: If `data_module` is empty, `apply_chat_template_to_dataset` is
-      set, `task_name` is whitespace-only or empty when records omit
-      `task_name`, the dataset is empty, or its first record is malformed
-      (including an empty or whitespace-only `task_name`).
+    ValueError: If `data_module` is empty, `task_name` is whitespace-only or
+      empty when records omit `task_name`, the dataset is empty, or its first
+      record is malformed (including an empty or whitespace-only `task_name`).
     TypeError: If `create_dataset` does not return a `grain.MapDataset`, or the
       first record, its `metadata`, or its `task_name` has an invalid type.
   """
@@ -334,11 +300,6 @@ def load_prompt_items(
     raise ValueError(
         "data_module must name the task's dataset module, which provides"
         " create_dataset(**data_config) -> grain.MapDataset."
-    )
-  if hp.config["apply_chat_template_to_dataset"]:
-    raise ValueError(
-        "apply_chat_template_to_dataset must be false: the rollout workers"
-        " apply the chat template (chat_parser_config)."
     )
   default_task_name = str(hp.config["task_name"])
   if default_task_name and not default_task_name.strip():
@@ -354,19 +315,15 @@ def load_prompt_items(
   if not len(dataset):
     raise ValueError(f"data_module {data_module!r} returned an empty dataset.")
   logging.info("Loaded %d task records from %s.", len(dataset), data_module)
-  grpo = hp.config_mapping("agentic_grpo_config")
-  max_turns = int(grpo["max_turns"])
-  episode_timeout = float(grpo["episode_timeout"])
-  overlong_filter = bool(grpo["overlong_filter"])
+  max_turns = int(hp.config_mapping("agentic_grpo_config")["max_turns"])
 
   # TODO(noghabi): Unify the rollout env construction
   # (`RolloutManager`: `env_cls(**metadata["env_config"])`) with the agentic
   # learner's (`AgenticRLLearner`: `env_class(single_example, **env_kwargs)`) so
   # `tunix.cli` data modules work unchanged, and drop `prompt` from records if
   # `RolloutRequest.prompt` stays unused. Also have `StandardRLProgram` stamp
-  # `max_turns` (from `agentic_grpo_config.max_turns`) and the rollout worker
-  # take `episode_timeout` / `overlong_filter` from its config, so prompt items
-  # carry only task data.
+  # `max_turns` (from `agentic_grpo_config.max_turns`), so prompt items carry
+  # only task data.
   def to_prompt_item(record: object) -> dict[str, object]:
     if not isinstance(record, Mapping):
       raise TypeError(
@@ -414,11 +371,7 @@ def load_prompt_items(
         "prompt": record["prompt"],
         "task_name": task_name,
         "max_turns": max_turns,
-        "metadata": {
-            **metadata,
-            "episode_timeout": episode_timeout,
-            "overlong_filter": overlong_filter,
-        },
+        "metadata": dict(metadata),
     }
 
   prompt_items = dataset.map(to_prompt_item)
@@ -518,21 +471,19 @@ def create_cluster(
     weight_sync_timeouts: weight_sync_coordinator.PhaseTimeouts,
 ) -> cluster_orchestrator.ClusterOrchestrator:
   """Creates the `ClusterOrchestrator`; the workers register in `run_program`."""
-  cluster = hp.config_mapping("cluster_config")
-  budget = cluster["poll_retry_budget_s"]
-  ratio = cluster["min_active_rollout_ratio"]
+  ft = hp.config_mapping("cluster_config")["fault_tolerance"]
+  budget = ft["poll_retry_budget_s"]
+  ratio = ft["min_active_rollout_ratio"]
   return cluster_orchestrator.ClusterOrchestrator(
       weight_sync_mode=_weight_sync_mode(hp).value,
       trajectory_store_config=node_utils.trajectory_store_config(hp),
       weight_sync_timeouts=weight_sync_timeouts,
       fault_tolerance_config=datatypes.FaultToleranceConfig(
-          enabled=bool(cluster["rollout_fault_tolerance"]),
-          max_task_retries=int(cluster["max_task_retries"]),
+          enabled=bool(ft["enabled"]),
+          max_task_retries=int(ft["max_task_retries"]),
           poll_retry_budget_s=None if budget is None else float(budget),
           min_active_rollout_ratio=None if ratio is None else float(ratio),
-          min_active_rollout_grace_s=float(
-              cluster["min_active_rollout_grace_s"]
-          ),
+          min_active_rollout_grace_s=float(ft["min_active_rollout_grace_s"]),
       ),
   )
 
@@ -700,7 +651,12 @@ def build_program(
         dataset=prompt_items,
         max_steps=int(hp.config_mapping("rl_training_config")["max_steps"]),
         reward_fns=reward_fns,
-        generation_args=build_generation_args(hp),
+        rollout_temperature=float(
+            hp.config_mapping("rollout_config")["temperature"]
+        ),
+        rollout_returns_routed_experts=bool(
+            hp.config_mapping("vllm_config")["return_routed_experts"]
+        ),
         batch_size=int(hp.config["batch_size"]),
         batch_config=build_batch_config(hp, pad_id=pad_id, eos_id=eos_id),
         metrics_logging_options=metrics_logging_options,
@@ -804,6 +760,7 @@ def main(
       force=True,
   )
   hp = resolve_config.initialize(argv)
+  resolve_config.validate_task(hp)
   if hp.config_mapping("cluster_config")["debug"]:
     # Enables debug logging, including full sampler responses.
     logging.getLogger().setLevel(logging.DEBUG)

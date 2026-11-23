@@ -130,14 +130,9 @@ class SimulatedTrainerWorker(abstract_worker.Worker):
     logging.info("[%s] Executing gradient update (fwd_bwd)", self.worker_id)
     return {"loss": 0.25, "grad_norm": 1.2}
 
-  def prepare_weight_sync(self) -> datatypes.WeightSyncMetadata:
+  def prepare_weight_sync(self) -> datatypes.WeightSyncRequest:
     logging.info("[%s] Staging weights for sync", self.worker_id)
-    meta = datatypes.WeightSyncMetadata(
-        new_policy_version=1,
-        transfer_mode="p2p",
-        source_endpoints=["trainer:50051"],
-    )
-    return meta
+    return datatypes.WeightSyncRequest(policy_version=1)
 
   def heartbeat(self) -> datatypes.HealthReport:
     return datatypes.HealthReport(state=datatypes.WorkerState.READY)
@@ -175,7 +170,8 @@ def main():
       reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
       assembler=assembler,
       batch_config=batch_assembly.BatchConfig(mini_batch_size=1),
-      generation_args=datatypes.GenerationArgs(temperature=1.0),
+      rollout_temperature=1.0,
+      rollout_returns_routed_experts=False,
       max_steps=2,
   )
   orch.run(program=program)

@@ -60,7 +60,7 @@ class RolloutWorkerTest(parameterized.TestCase):
       req = datatypes.RolloutRequest(
           prompt_id="prompt_single",
           prompt="Solve task X",
-          generation_kwargs={"delay_seconds": 0.02, "max_generation_steps": 64},
+          generation_kwargs={"max_generation_steps": 64},
           max_turns=5,
       )
       trajectory = await self.actor_handle.asubmit("generate", req)
@@ -77,11 +77,7 @@ class RolloutWorkerTest(parameterized.TestCase):
       req = datatypes.RolloutRequest(
           prompt_id="prompt_async",
           prompt="Solve task Y",
-          generation_kwargs={
-              "delay_seconds": 0.01,
-              "force_finish": True,
-              "max_generation_steps": 64,
-          },
+          generation_kwargs={"max_generation_steps": 64},
       )
       trajectory = await self.actor_handle.asubmit("generate", req)
       self.assertIsInstance(trajectory, datatypes.RolloutResponse)
@@ -118,23 +114,24 @@ class RolloutWorkerTest(parameterized.TestCase):
       req_a = datatypes.RolloutRequest(
           prompt_id="slow_A",
           prompt="Task A",
-          generation_kwargs={"delay_seconds": 0.15, "max_generation_steps": 64},
+          generation_kwargs={"max_generation_steps": 64},
       )
       req_b = datatypes.RolloutRequest(
           prompt_id="fast_B",
           prompt="Task B",
-          generation_kwargs={
-              "delay_seconds": 0.01,
-              "force_finish": True,
-              "max_generation_steps": 64,
-          },
+          generation_kwargs={"max_generation_steps": 64},
       )
       req_c = datatypes.RolloutRequest(
           prompt_id="med_C",
           prompt="Task C",
-          generation_kwargs={"delay_seconds": 0.05, "max_generation_steps": 64},
+          generation_kwargs={"max_generation_steps": 64},
       )
 
+      self.sampler.delay_by_request_id = {
+          "traj_slow_A_g0": 0.15,
+          "traj_fast_B_g0": 0.01,
+          "traj_med_C_g0": 0.05,
+      }
       completed_order: List[str] = []
       responses = await self.service.generate(
           [req_a, req_b, req_c],
@@ -187,22 +184,12 @@ class RolloutWorkerTest(parameterized.TestCase):
       req_1 = datatypes.RolloutRequest(
           prompt_id="req_worker_1",
           prompt="Task for slice 1",
-          generation_kwargs={
-              "delay_seconds": 0.02,
-              "force_finish": True,
-              "answer": "Solution_A",
-              "max_generation_steps": 64,
-          },
+          generation_kwargs={"max_generation_steps": 64},
       )
       req_2 = datatypes.RolloutRequest(
           prompt_id="req_worker_2",
           prompt="Task for slice 2",
-          generation_kwargs={
-              "delay_seconds": 0.04,
-              "force_finish": True,
-              "answer": "Solution_B",
-              "max_generation_steps": 64,
-          },
+          generation_kwargs={"max_generation_steps": 64},
       )
 
       # Option 1 (asubmit) futures across workers via actor handles
@@ -237,26 +224,17 @@ class RolloutWorkerTest(parameterized.TestCase):
       handle = self.actor_handle
 
       # Direct async submission of pre_weight_sync and weight_sync over handle
-      metadata = datatypes.WeightSyncMetadata(
-          new_policy_version=333,
-          transfer_mode="p2p",
-          source_endpoints=["trainer:50051"],
-          sharding_topology={"mesh": [2, 2]},
-      )
-      await handle.asubmit("pre_weight_sync", metadata)
-      v = await handle.asubmit("weight_sync", metadata)
+      sync_request = datatypes.WeightSyncRequest(policy_version=333)
+      await handle.asubmit("pre_weight_sync", sync_request)
+      v = await handle.asubmit("weight_sync", sync_request)
       self.assertEqual(v, 333)
-      await handle.asubmit("post_weight_sync", metadata)
+      await handle.asubmit("post_weight_sync", sync_request)
 
       # Direct coroutine execution of generate over handle
       req = datatypes.RolloutRequest(
           prompt_id="prompt_native_actor",
           prompt="Solve native actor task",
-          generation_kwargs={
-              "delay_seconds": 0.01,
-              "force_finish": True,
-              "max_generation_steps": 64,
-          },
+          generation_kwargs={"max_generation_steps": 64},
       )
       traj = await handle.asubmit("generate", req)
       self.assertIsInstance(traj, datatypes.RolloutResponse)
@@ -283,7 +261,7 @@ class RolloutWorkerTest(parameterized.TestCase):
           config=worker.RolloutConfig(
               trajectory_store_config={"backend": "memory"}
           ),
-          sampler=self.sampler,
+          sampler=mocks.MockBaseSamplerImpl(default_delay=0.01, min_turns=0),
           env_name="mock_env",
           agent_name="mock_agent",
           tokenizer=mocks.MockTokenizer(),
@@ -296,11 +274,7 @@ class RolloutWorkerTest(parameterized.TestCase):
           prompt_id="prompt_store_test",
           prompt="Task for store test",
           target_policy_version=7,
-          generation_kwargs={
-              "delay_seconds": 0.01,
-              "force_finish": True,
-              "max_generation_steps": 64,
-          },
+          generation_kwargs={"max_generation_steps": 64},
           metadata={"pair_idx": 42},
       )
       with (
@@ -318,29 +292,25 @@ class RolloutWorkerTest(parameterized.TestCase):
 
         metas = mem_store.get_trajectories_metadata()
         self.assertLen(metas, 1)
-        self.assertEqual(metas[0].trajectory_id, "traj_prompt_store_test_g0")
-        self.assertEqual(metas[0].prompt_id, "prompt_store_test")
-        self.assertEqual(metas[0].status, "SUCCEEDED")
-        self.assertEqual(metas[0].target_policy_versions, [7])
-        self.assertEqual(metas[0].extra.get("pair_idx"), 42)
+        meta = metas["traj_prompt_store_test_g0"]
+        self.assertEqual(meta.trajectory_id, "traj_prompt_store_test_g0")
+        self.assertEqual(meta.prompt_id, "prompt_store_test")
+        self.assertEqual(meta.status, "SUCCEEDED")
+        self.assertEqual(meta.target_policy_versions, [7])
+        self.assertEqual(meta.extra.get("pair_idx"), 42)
         self.assertEqual(
-            metas[0].hyperparams,
-            {
-                "delay_seconds": 0.01,
-                "force_finish": True,
-                "max_generation_steps": 64,
-            },
+            meta.hyperparams, {"max_generation_steps": 64}
         )
-        self.assertIsInstance(metas[0].env_time, dict)
-        self.assertIn("reset_latency", metas[0].env_time)
-        self.assertIn("step_latency", metas[0].env_time)
-        self.assertIn("close_latency", metas[0].env_time)
-        self.assertIsInstance(metas[0].reward_time, dict)
-        self.assertIn("reward_latency", metas[0].reward_time)
+        self.assertIsInstance(meta.env_time, dict)
+        self.assertIn("reset_latency", meta.env_time)
+        self.assertIn("step_latency", meta.env_time)
+        self.assertIn("close_latency", meta.env_time)
+        self.assertIsInstance(meta.reward_time, dict)
+        self.assertIn("reward_latency", meta.reward_time)
 
         trajs = mem_store.get_trajectories(["traj_prompt_store_test_g0"])
         self.assertLen(trajs, 1)
-        self.assertNotEmpty(trajs[0].steps)
+        self.assertNotEmpty(trajs["traj_prompt_store_test_g0"].steps)
         svc.stop()
         mock_flush.assert_not_called()
         mock_close.assert_called_once()
@@ -373,11 +343,7 @@ class RolloutWorkerTest(parameterized.TestCase):
           group_index=2,
           prompt="Task for group test",
           target_policy_version=3,
-          generation_kwargs={
-              "delay_seconds": 0.01,
-              "force_finish": True,
-              "max_generation_steps": 64,
-          },
+          generation_kwargs={"max_generation_steps": 64},
           metadata={"custom_ref": custom_obj},
       )
       res = await svc.generate(req)
@@ -387,9 +353,10 @@ class RolloutWorkerTest(parameterized.TestCase):
 
       metas = mem_store.get_trajectories_metadata()
       self.assertLen(metas, 1)
-      self.assertEqual(metas[0].trajectory_id, "traj_prompt_grp_test_g2")
-      self.assertEqual(metas[0].group_index, 2)
-      self.assertEqual(metas[0].extra.get("custom_ref"), custom_obj)
+      meta = metas["traj_prompt_grp_test_g2"]
+      self.assertEqual(meta.trajectory_id, "traj_prompt_grp_test_g2")
+      self.assertEqual(meta.group_index, 2)
+      self.assertEqual(meta.extra.get("custom_ref"), custom_obj)
 
       svc.stop()
 
@@ -421,11 +388,9 @@ class RolloutWorkerTest(parameterized.TestCase):
       cancel_req = datatypes.RolloutRequest(
           prompt_id="prompt_cancel",
           prompt="Task to cancel",
-          generation_kwargs={
-              "delay_seconds": 2.0,
-              "max_generation_steps": 64,
-          },
+          generation_kwargs={"max_generation_steps": 64},
       )
+      self.sampler.delay_by_request_id = {"traj_prompt_cancel_g0": 2.0}
       gen_task = asyncio.create_task(cancel_svc.generate(cancel_req))
       await asyncio.sleep(0.05)
       cancel_svc.stop()
@@ -436,9 +401,11 @@ class RolloutWorkerTest(parameterized.TestCase):
           file_store_cfg
       )
       assert reader_store is not None
-      (cancel_meta,) = reader_store.get_trajectories_metadata(  # pyrefly: ignore[missing-attribute]
+      cancel_meta = reader_store.get_trajectories_metadata(  # pyrefly: ignore[missing-attribute]
           ["traj_prompt_cancel_g0"]
-      )
+      )[
+          "traj_prompt_cancel_g0"
+      ]
       self.assertEqual(cancel_meta.status, "CANCELLED")
       self.assertIsInstance(cancel_meta.env_time, dict)
       self.assertIn("reset_latency", cancel_meta.env_time)
@@ -451,7 +418,7 @@ class RolloutWorkerTest(parameterized.TestCase):
           config=worker.RolloutConfig(
               trajectory_store_config={"backend": "memory"}
           ),
-          sampler=self.sampler,
+          sampler=mocks.MockBaseSamplerImpl(default_delay=0.01, min_turns=3),
           env_name="mock_env",
           agent_name="mock_agent",
           env_config={"max_steps": 1},
@@ -462,12 +429,7 @@ class RolloutWorkerTest(parameterized.TestCase):
       max_steps_req = datatypes.RolloutRequest(
           prompt_id="prompt_max_steps",
           prompt="Task hitting max steps",
-          generation_kwargs={
-              "delay_seconds": 0.01,
-              "min_turns": 3,
-              "force_finish": False,
-              "max_generation_steps": 64,
-          },
+          generation_kwargs={"max_generation_steps": 64},
       )
       await max_steps_svc.generate(max_steps_req)
       mem_store = max_steps_svc.trajectory_store
@@ -476,13 +438,14 @@ class RolloutWorkerTest(parameterized.TestCase):
           ["traj_prompt_max_steps_g0"]
       )
       self.assertLen(max_steps_metas, 1)
-      self.assertEqual(max_steps_metas[0].status, "MAX_STEPS_REACHED")
-      self.assertIsInstance(max_steps_metas[0].env_time, dict)
-      self.assertIn("reset_latency", max_steps_metas[0].env_time)
-      self.assertIn("step_latency", max_steps_metas[0].env_time)
-      self.assertIn("close_latency", max_steps_metas[0].env_time)
-      self.assertIsInstance(max_steps_metas[0].reward_time, dict)
-      self.assertIn("reward_latency", max_steps_metas[0].reward_time)
+      max_steps_meta = max_steps_metas["traj_prompt_max_steps_g0"]
+      self.assertEqual(max_steps_meta.status, "MAX_STEPS_REACHED")
+      self.assertIsInstance(max_steps_meta.env_time, dict)
+      self.assertIn("reset_latency", max_steps_meta.env_time)
+      self.assertIn("step_latency", max_steps_meta.env_time)
+      self.assertIn("close_latency", max_steps_meta.env_time)
+      self.assertIsInstance(max_steps_meta.reward_time, dict)
+      self.assertIn("reward_latency", max_steps_meta.reward_time)
       max_steps_svc.stop()
 
     asyncio.run(_run_test())

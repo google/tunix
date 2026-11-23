@@ -19,7 +19,7 @@ import contextlib
 import dataclasses
 import functools
 import time
-from typing import Any, Callable, Concatenate, Dict, List, ParamSpec, Tuple, cast
+from typing import Any, Callable, Concatenate, Dict, List, ParamSpec, Tuple, TypeAlias, cast
 
 from absl import logging
 import flax
@@ -28,11 +28,11 @@ import jax
 from jax.interpreters import pxla
 import jax.numpy as jnp
 import jax.sharding as shd
-from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 from jax.typing import DTypeLike  # pylint: disable=g-importing-member
 import numpy as np
 import optax
 from tunix.common import configs
+from tunix.common import datatypes
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
@@ -48,6 +48,7 @@ from tunix.sft import progress_bar
 from tunix.sft import sharding_utils
 from tunix.sft import utils
 
+ArrayLike: TypeAlias = datatypes.ArrayLike
 TrainingConfig = configs.TrainingConfig
 
 _ModelInputT = Dict[str, ArrayLike]
@@ -353,8 +354,12 @@ class PeftTrainer:
         self.model, wrt_target, allocate_grads=_uses_cond_path
     )
 
-    self.loss_fn = _default_loss_fn
-    self.eval_loss_fn = _default_loss_fn
+    self.loss_fn: Callable[
+        ..., jax.Array | Tuple[jax.Array, Any] | utils.LossOutput
+    ] = _default_loss_fn
+    self.eval_loss_fn: Callable[
+        ..., jax.Array | Tuple[jax.Array, Any] | utils.LossOutput
+    ] = _default_loss_fn
     self.gen_model_input_fn = lambda x: x
     self.checkpoint_manager = checkpoint_manager.CheckpointManager(
         root_directory=self.config.checkpoint_root_directory,
@@ -436,13 +441,13 @@ class PeftTrainer:
       self,
       loss_fn: Callable[
           Concatenate[nnx.Module, P],
-          ArrayLike | Tuple[ArrayLike, Any] | utils.LossOutput,
+          jax.Array | Tuple[jax.Array, Any] | utils.LossOutput,
       ],
       has_aux: bool = False,
   ):
     self.clear_jit_cache()
-    self.loss_fn = loss_fn  # pyrefly: ignore[bad-assignment]
-    self.eval_loss_fn = loss_fn  # pyrefly: ignore[bad-assignment]
+    self.loss_fn = loss_fn
+    self.eval_loss_fn = loss_fn
     self._has_aux = has_aux
     return self
 
@@ -472,7 +477,7 @@ class PeftTrainer:
       grad_accumulator: GradientAccumulator,
       inputs: Any,
       is_update_step: jax.Array,
-  ) -> Tuple[ArrayLike, Any | None, ArrayLike]:
+  ) -> Tuple[jax.Array, Any | None, jax.Array]:
     """Main body for one train step.
 
     Args:
@@ -585,26 +590,26 @@ class PeftTrainer:
 
   def _eval_step(
       self, model: nnx.Module, inputs: Any
-  ) -> ArrayLike | Tuple[ArrayLike, Any]:
+  ) -> Tuple[jax.Array, Any | None]:
     inputs = self.gen_model_input_fn(inputs)
     out = self.eval_loss_fn(model, **inputs)
     if isinstance(out, utils.LossOutput):
       return out.primary_loss.compute(), out
     elif self._has_aux:
-      loss, aux = out  # pyrefly: ignore[not-iterable]
+      loss, aux = out
       return loss, aux
     else:
-      return out, None
+      return out, None  # pyrefly: ignore[bad-return]
 
   def create_train_step_fn(
       self,
-  ) -> Callable[..., Tuple[ArrayLike, Any | None, ArrayLike]]:
+  ) -> Callable[..., Tuple[jax.Array, Any | None, jax.Array]]:
     """Creates the train step function."""
     return self._train_step
 
   def create_eval_step_fn(
       self,
-  ) -> Callable[..., ArrayLike | Tuple[ArrayLike, Any]]:
+  ) -> Callable[..., Tuple[jax.Array, Any | None]]:
     """Creates the eval step function."""
     return self._eval_step
 
@@ -1203,7 +1208,7 @@ def _default_loss_fn(
     positions: jax.Array,
     attention_mask: jax.Array,
     images: jax.Array | None = None,
-) -> utils.LossOutput | ArrayLike:
+) -> utils.LossOutput:
   """Default loss function for PEFT training."""
   # Weird kwargs workaround because not all models support `images` right now.
   kwargs = {} if images is None else {"images": images}

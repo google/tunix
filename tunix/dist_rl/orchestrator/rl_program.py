@@ -24,6 +24,7 @@ import collections
 from collections.abc import (
     AsyncIterator,
     Callable,
+    Hashable,
     Iterable,
     Iterator,
     Mapping,
@@ -35,7 +36,7 @@ import os
 import sys
 import threading
 import time
-from typing import Any
+from typing import Any, TypeAlias
 
 from absl import logging
 import numpy as np
@@ -83,6 +84,60 @@ RewardLogMetrics = Mapping[
 # Orchestrator host memory to at most 4 microbatches across packing,
 # `pending_prep`, and `pending_trains`).
 _MAX_INFLIGHT_TRAIN_STEPS = 2
+
+# Maximum number of prompts coalesced into a single `dispatch_rollouts` RPC
+# wave in `StandardRLProgram.rollout_dispatch_stage`. Caps each wave so rollout
+# workers begin prefill promptly while reducing per-step dispatch round-trips
+# from `O(batch_size)` to `O(ceil(batch_size / _MAX_DISPATCH_BATCH_SIZE))`. On
+# threaded iterators (`iter_dataset_async`), up to
+# `min(_MAX_DISPATCH_BATCH_SIZE, full_batch_size)` prefetched dataset reads
+# accumulate before the wave's RPC fires.
+_MAX_DISPATCH_BATCH_SIZE = 64
+
+_DispatchedPromptItem: TypeAlias = (
+    dict[str, object] | dispatch_window.HasPromptId
+)
+# An admitted prompt waiting for its wave: `prompt_id`, the dataset coordinates
+# from `tagging.prompt_coordinates`, and the tagged item to dispatch.
+_PendingPrompt: TypeAlias = tuple[
+    Hashable, Mapping[str, int], _DispatchedPromptItem
+]
+
+
+def _normalize_prompt_item(
+    prompt_idx: int,
+    prompt_item: object,
+    max_response_length: int | None,
+) -> tuple[Hashable, _DispatchedPromptItem]:
+  """Ensures `prompt_item` carries a unique `prompt_id` and response cap."""
+  if isinstance(prompt_item, Mapping):
+    item_dict = dict(prompt_item)
+    if "prompt_id" not in item_dict:
+      item_dict["prompt_id"] = f"prompt_{prompt_idx}"
+    if (
+        max_response_length is not None
+        and "max_response_length" not in item_dict
+    ):
+      item_dict["max_response_length"] = max_response_length
+    prompt_id = item_dict["prompt_id"]
+    normalized_item: _DispatchedPromptItem = item_dict
+  elif isinstance(prompt_item, dispatch_window.HasPromptId):
+    prompt_id = prompt_item.prompt_id
+    normalized_item = prompt_item
+  else:
+    prompt_id = f"prompt_{prompt_idx}"
+    item_dict = {
+        "prompt": prompt_item,
+        "prompt_id": prompt_id,
+    }
+    if max_response_length is not None:
+      item_dict["max_response_length"] = max_response_length
+    normalized_item = item_dict
+  if not isinstance(prompt_id, Hashable):
+    raise TypeError(
+        f"prompt_id must be hashable, got {type(prompt_id).__name__}."
+    )
+  return prompt_id, normalized_item
 
 
 def _next_microbatch(
@@ -399,7 +454,7 @@ class StandardRLProgram(RLProgram):
   3. Critique stage: Scores rewards, PRMs, and reference KL logprobs.
   4. Train stage: Streaming gradient accumulation over microbatches.
 
-  When `generation_args.return_routed_experts=True`:
+  When `rollout_returns_routed_experts=True`:
   - `use_routed_experts_relay=None` (default): enables Orchestrator Relay
     automatically when the wire encoding is statically resolvable
     (`algo_config.routed_experts_encode_mode != "auto"` or positive
@@ -425,6 +480,8 @@ class StandardRLProgram(RLProgram):
   def __init__(
       self,
       algo_config: algorithm_config.AlgorithmConfig,
+      rollout_temperature: float,
+      rollout_returns_routed_experts: bool,
       dataset: Iterable[Any] | None = None,
       max_steps: int | None = None,
       reward_fns: (
@@ -434,7 +491,6 @@ class StandardRLProgram(RLProgram):
       ) = None,
       assembler: batch_assembly.BatchAssembler | None = None,
       batch_config: batch_assembly.BatchConfig | None = None,
-      generation_args: datatypes.GenerationArgs | None = None,
       batch_size: int | None = None,
       max_staleness: int = 0,
       max_version_span: int | None = None,
@@ -470,27 +526,25 @@ class StandardRLProgram(RLProgram):
         if self.batch_config.eos_id is not None
         else self.pad_id
     )
-    self.generation_args = generation_args or datatypes.GenerationArgs()
+    if not rollout_temperature > 0:
+      raise ValueError(
+          f"rollout_temperature must be positive, got {rollout_temperature!r}."
+      )
+    self._rollout_temperature = rollout_temperature
+    self._rollout_returns_routed_experts = rollout_returns_routed_experts
 
     # `algo_config` has a 1:1 relationship with a single `StandardRLProgram`
     # instance and is not shared across multiple programs, so we propagate
-    # `generation_args.temperature` into `algo_config.temperature` in place.
+    # `rollout_temperature` into `algo_config.temperature` in place.
     if self.algo_config.temperature is not None:
       raise ValueError(
-          "Do not set temperature on AlgorithmConfig; configure it via"
-          " generation_args on StandardRLProgram."
+          "Do not set temperature on AlgorithmConfig; pass it to"
+          " StandardRLProgram."
       )
-    gen_temp = self.generation_args.temperature
-    if gen_temp is not None:
-      self.algo_config.temperature = gen_temp
-
-    self.generation_args = dataclasses.replace(
-        self.generation_args,
-        return_logprobs=self.algo_config.use_rollout_logps,
-    )
+    self.algo_config.temperature = rollout_temperature
     self._relay: relay_coordinator.RelayCoordinator | None = None
     if (
-        self.generation_args.return_routed_experts
+        rollout_returns_routed_experts
         and use_routed_experts_relay is not False
     ):
       try:
@@ -620,6 +674,13 @@ class StandardRLProgram(RLProgram):
     self.on_step_begin = on_step_begin
     self.on_step_end = on_step_end
     self._in_flight_rollouts = 0
+    # The weight sync round the trainer is no longer waiting on, if any. It is
+    # the one fact both lags below are derived from: while it is set the
+    # trainer is a version ahead of the rollouts (`trainer_policy_version`),
+    # and the dispatch cursor is a batch behind the trained one. The lag keeps
+    # every batch within `max_staleness` when it is consumed: a batch admitted
+    # now is stamped with the rollouts' version, not the trainer's.
+    self._inflight_sync: asyncio.Task[int] | None = None
     self._dispatch_done = asyncio.Event()
     self._assembler_lock = threading.Lock()
     self.scored_q: (
@@ -648,7 +709,9 @@ class StandardRLProgram(RLProgram):
       )
       self.dispatch_window = dispatch_window.DispatchWindow(
           max_staleness=max_staleness,
-          next_batch_fn=lambda: ordered_q.next_batch_idx,
+          next_batch_fn=lambda: (
+              ordered_q.next_batch_idx - int(self._inflight_sync is not None)
+          ),
           full_batch_size=self.full_batch_size,
       )
     else:
@@ -660,7 +723,9 @@ class StandardRLProgram(RLProgram):
       )
       self.dispatch_window = dispatch_window.DispatchWindow(
           max_staleness=max_staleness,
-          next_batch_fn=lambda: self._step,
+          next_batch_fn=lambda: (
+              self._step - int(self._inflight_sync is not None)
+          ),
           full_batch_size=self.full_batch_size,
           out_of_order_resume=True,
       )
@@ -668,7 +733,7 @@ class StandardRLProgram(RLProgram):
           num_generations=self.num_generations,
           max_staleness=max_staleness,
           max_version_span=max_version_span,
-          current_policy_version=lambda: self.policy_version,
+          current_policy_version=lambda: self.trainer_policy_version,
           on_group_filtered=self._on_raw_group_filtered,
       )
 
@@ -761,6 +826,48 @@ class StandardRLProgram(RLProgram):
         self.dispatch_window.dataset_skip_count,
     )
 
+  async def _dispatch_wave(self, pending: Sequence[_PendingPrompt]) -> None:
+    """Logs, accounts, and dispatches one coalesced wave of admitted prompts."""
+    assert self.engine is not None
+    batch_version = self.policy_version
+    next_batch = self.dispatch_window.next_batch
+    # One `[pipeline] DISPATCH` line per prompt, logged when its wave is sent.
+    # Log parsers read `policy_version` from this line, and its timestamp is
+    # the start of the prompt's rollout latency.
+    for prompt_id, coordinates, _ in pending:
+      logging.info(
+          "[pipeline] DISPATCH prompt_id=%s prompt_idx=%d batch_idx=%d"
+          " intra_batch_idx=%d policy_version=%d next_batch=%d",
+          prompt_id,
+          coordinates["prompt_idx"],
+          coordinates["batch_idx"],
+          coordinates["intra_batch_idx"],
+          batch_version,
+          next_batch,
+      )
+    logging.info(
+        "[pipeline] WAVE_DISPATCH count=%d policy_version=%d next_batch=%d",
+        len(pending),
+        batch_version,
+        next_batch,
+    )
+    prompts = [prompt_item for _, _, prompt_item in pending]
+    self._in_flight_rollouts += len(prompts) * self.num_generations
+    if self._relay is not None:
+      await self.engine.dispatch_rollouts(
+          prompts,
+          num_generations=self.num_generations,
+          policy_version=batch_version,
+          stage_routed_experts=True,
+          max_response_length=self.max_response_length,
+      )
+    else:
+      await self.engine.dispatch_rollouts(
+          prompts,
+          num_generations=self.num_generations,
+          policy_version=batch_version,
+      )
+
   async def rollout_dispatch_stage(self) -> None:
     """Stage 1A: Dispatches rollout requests across workers asynchronously.
 
@@ -779,63 +886,42 @@ class StandardRLProgram(RLProgram):
           "StandardRLProgram requires a dataset either at init or in run()."
       )
 
+    pending: list[_PendingPrompt] = []
     try:
       async for prompt_idx, prompt_item in dataset_utils.iter_dataset_async(
           self.dataset,
           skip_count=self.dispatch_window.dataset_skip_count,
           prefetch_size=max(1, self.full_batch_size),
       ):
-        if isinstance(prompt_item, Mapping):
-          prompt_item = dict(prompt_item)
-          if "prompt_id" not in prompt_item:
-            prompt_item["prompt_id"] = f"prompt_{prompt_idx}"
-          if (
-              self.max_response_length is not None
-              and "max_response_length" not in prompt_item
-          ):
-            prompt_item["max_response_length"] = self.max_response_length
-          prompt_id = prompt_item["prompt_id"]
-        elif hasattr(prompt_item, "prompt_id"):
-          prompt_id = prompt_item.prompt_id
-        else:
-          prompt_id = f"prompt_{prompt_idx}"
-          prompt_item = {
-              "prompt": prompt_item,
-              "prompt_id": prompt_id,
-          }
-          if self.max_response_length is not None:
-            prompt_item["max_response_length"] = self.max_response_length
-
-        if not await self.dispatch_window.admit(prompt_id):
-          continue
-        coordinates = tagging.prompt_coordinates(
-            prompt_idx, self.full_batch_size
+        prompt_id, normalized_item = _normalize_prompt_item(
+            prompt_idx, prompt_item, self.max_response_length
         )
-        prompt_item = tagging.tag_prompt(prompt_item, coordinates)
-        logging.info(
-            "[pipeline] DISPATCH prompt_id=%s prompt_idx=%d batch_idx=%d"
-            " intra_batch_idx=%d policy_version=%d next_batch=%d",
-            prompt_id,
-            coordinates["prompt_idx"],
-            coordinates["batch_idx"],
-            coordinates["intra_batch_idx"],
-            self.policy_version,
-            self.dispatch_window.next_batch,
-        )
-        self._in_flight_rollouts += self.num_generations
-        dispatch_kwargs: dict[str, Any] = {
-            "num_generations": self.num_generations,
-            "policy_version": self.policy_version,
-        }
-        if self.generation_args is not None:
-          dispatch_kwargs["generation_args"] = self.generation_args
-        if self._relay is not None:
-          dispatch_kwargs["stage_routed_experts"] = True
-          dispatch_kwargs["max_response_length"] = self.max_response_length
-        await self.engine.dispatch_rollouts(
-            [prompt_item],
-            **dispatch_kwargs,
-        )
+        # The window can fill while this loop waits for the dataset (starting
+        # a weight sync holds back one batch), so flush before `admit()` parks.
+        if pending and not self.dispatch_window.can_admit:
+          await self._dispatch_wave(pending)
+          pending = []
+        if await self.dispatch_window.admit(prompt_id):
+          coordinates = tagging.prompt_coordinates(
+              prompt_idx, self.full_batch_size
+          )
+          pending.append((
+              prompt_id,
+              coordinates,
+              tagging.tag_prompt(normalized_item, coordinates),
+          ))
+        # Flush at the wave cap, at prompt-batch boundaries, or whenever the
+        # dispatch window is full so pending prompts run before `admit()` parks.
+        is_batch_end = (prompt_idx + 1) % self.full_batch_size == 0
+        if pending and (
+            len(pending) >= _MAX_DISPATCH_BATCH_SIZE
+            or is_batch_end
+            or not self.dispatch_window.can_admit
+        ):
+          await self._dispatch_wave(pending)
+          pending = []
+      if pending:
+        await self._dispatch_wave(pending)
     finally:
       self._dispatch_done.set()
 
@@ -1293,7 +1379,7 @@ class StandardRLProgram(RLProgram):
     # --- 3. Perf & Orchestrator Metrics ---
     self._log_metric("perf/global_step_time", float(step_time_sec), log_step)
     orchestrator_stats = {
-        "policy_version": float(self.policy_version),
+        "policy_version": float(self.trainer_policy_version),
         "num_rollouts": float(num_rollouts),
         "num_microbatches": float(num_microbatches),
     }
@@ -1460,11 +1546,10 @@ class StandardRLProgram(RLProgram):
       IS/RS weights and trainer logps when configured.
     """
     assert self.engine is not None
-    gen_temp = self.generation_args.temperature
     logps_req = datatypes.LogprobsRequest(
         prompt_tokens=batch.prompt_ids,
         completion_tokens=batch.completion_ids,
-        temperature=gen_temp if gen_temp is not None else 1.0,
+        temperature=self._rollout_temperature,
         model_role="actor",
         pad_id=self.pad_id,
         eos_id=self.eos_id,
@@ -1626,6 +1711,83 @@ class StandardRLProgram(RLProgram):
       del mb
       yield ready.pop(), pack_dt
 
+  @property
+  def trainer_policy_version(self) -> int:
+    """Policy version of the weights the trainer holds.
+
+    One ahead of `policy_version`, the version the rollouts serve, while a
+    weight sync round is in flight.
+    """
+    return self.policy_version + int(self._inflight_sync is not None)
+
+  def _commit_completed_sync(self, sync_task: asyncio.Task[int]) -> None:
+    """Publishes a committed round: rollout version, then dispatch capacity.
+
+    Also the round's done callback, so the rollouts' new version is dispatched
+    on without waiting for the next join. A failed or cancelled round stays
+    attached, and the next join raises it.
+    """
+    if (
+        self._inflight_sync is not sync_task
+        or sync_task.cancelled()
+        or sync_task.exception() is not None
+    ):
+      return
+    self._inflight_sync = None
+    new_version = sync_task.result()
+    self.policy_version = (
+        new_version if new_version is not None else self.policy_version + 1
+    )
+    self.dispatch_window.release()
+
+  async def _join_inflight_sync(self) -> None:
+    """Waits for the in-flight weight sync round, if any, and publishes it."""
+    sync_task = self._inflight_sync
+    if sync_task is None:
+      return
+    await sync_task
+    self._commit_completed_sync(sync_task)
+
+  async def _start_weight_sync(self) -> None:
+    """Starts a weight sync round; returns once the trainer may train again.
+
+    That is when the round reports the trainer's weights staged: the rest of
+    it reads only the staged copy. An on-policy program (`max_staleness == 0`)
+    has nothing to train on until the rollouts serve the new version, so it
+    waits for the commit.
+    """
+    assert self.engine is not None
+    # On-policy the trainer waits for the commit, so no early signal is needed.
+    source_prepared = asyncio.Event() if self.max_staleness > 0 else None
+    min_retained: int | None = None
+    if self._relay is not None:
+      min_retained = relay_coordinator.min_retained_policy_version(
+          self.policy_version + 1,
+          max_staleness=self.max_staleness,
+          max_version_span=self.max_version_span,
+      )
+    sync_task = asyncio.create_task(
+        self.engine.sync_weights(
+            role=datatypes.Role.ACTOR,
+            min_retained_policy_version=min_retained,
+            source_prepared=source_prepared,
+        )
+    )
+    # Attached before the first await: the trainer already holds the next
+    # version, so the dispatch lag must apply to every admission from here.
+    self._inflight_sync = sync_task
+    sync_task.add_done_callback(self._commit_completed_sync)
+    if source_prepared is not None:
+      staged = asyncio.create_task(source_prepared.wait())
+      try:
+        await asyncio.wait(
+            (sync_task, staged), return_when=asyncio.FIRST_COMPLETED
+        )
+      finally:
+        staged.cancel()
+    if source_prepared is None or sync_task.done():
+      await self._join_inflight_sync()
+
   async def train_stage(self) -> None:
     """Stage 3: Streaming gradient accumulation with RLTrainerPayloads."""
     assert self.engine is not None
@@ -1645,16 +1807,26 @@ class StandardRLProgram(RLProgram):
         await task
 
     async def _next_scored_group() -> ScoredGroup | None:
-      # Surface a failed in-flight `pending_prep` while waiting for the next
-      # group instead of stalling until that group arrives from `scored_q`.
+      # Surface a failed in-flight `pending_prep` or weight sync round while
+      # waiting for the next group instead of stalling until that group
+      # arrives from `scored_q`.
       get_task = asyncio.ensure_future(self.scored_q.get())
       try:
-        while (prep := pending_prep) is not None and not get_task.done():
+        while not get_task.done():
+          watched = [
+              task
+              for task in (pending_prep, self._inflight_sync)
+              if task is not None
+          ]
+          if not watched:
+            break
           await asyncio.wait(
-              (get_task, prep), return_when=asyncio.FIRST_COMPLETED
+              (get_task, *watched), return_when=asyncio.FIRST_COMPLETED
           )
-          if prep.done():
+          if pending_prep is not None and pending_prep.done():
             await _drain_pending_prep()
+          if self._inflight_sync is not None and self._inflight_sync.done():
+            await self._join_inflight_sync()
         return await get_task
       finally:
         get_task.cancel()
@@ -1679,7 +1851,7 @@ class StandardRLProgram(RLProgram):
         step_start_time = time.monotonic()
         step_times = step_telemetry.StepTimes()
         last_train_end_mono = 0.0
-        consumed_policy_version = self.policy_version
+        consumed_policy_version = self.trainer_policy_version
 
         uncommitted_groups: list[list[datatypes.TrajectoryItem]] = []
         step_reward_log_metrics: list[RewardLogMetrics] = []
@@ -1713,7 +1885,7 @@ class StandardRLProgram(RLProgram):
               metadata={
                   "step": optimizer_step,
                   "global_step": self.step + 1,
-                  "policy_version": self.policy_version + 1,
+                  "policy_version": self.trainer_policy_version + 1,
                   "num_rollouts": num_rollouts,
                   "num_microbatches": num_microbatches,
                   **self.dispatch_window.checkpoint_metadata(
@@ -1737,12 +1909,11 @@ class StandardRLProgram(RLProgram):
                   f"{type(batch).__name__}."
               )
             reference_start = time.monotonic()
-            gen_temp = self.generation_args.temperature
             ref_req = datatypes.LogprobsRequest(
                 request_id="reference_logps",
                 prompt_tokens=batch.prompt_ids,
                 completion_tokens=batch.completion_ids,
-                temperature=gen_temp if gen_temp is not None else 1.0,
+                temperature=self._rollout_temperature,
                 model_role="reference",
                 segment_ids=batch.segment_ids,
                 segment_positions=batch.segment_positions,
@@ -1893,24 +2064,13 @@ class StandardRLProgram(RLProgram):
           # TODO(tunix-dev): Split into drain/transfer/publish once
           # `sync_weights` reports per-phase times; draining in-flight rollouts
           # can dominate this.
+          # Charged here is only the time the trainer is held: the previous
+          # round still closing (at most one is in flight) plus this round up
+          # to its weights being staged, or to its commit when on-policy.
           sync_start = time.monotonic()
-          min_retained: int | None = None
-          if self._relay is not None:
-            min_retained = relay_coordinator.min_retained_policy_version(
-                self.policy_version + 1,
-                max_staleness=self.max_staleness,
-                max_version_span=self.max_version_span,
-            )
-          new_version = await self.engine.sync_weights(
-              role=datatypes.Role.ACTOR,
-              min_retained_policy_version=min_retained,
-          )
+          await self._join_inflight_sync()
+          await self._start_weight_sync()
           step_times.weight_sync_time += time.monotonic() - sync_start
-          self.policy_version = (
-              new_version
-              if new_version is not None
-              else self.policy_version + 1
-          )
 
         # Before `commit()`, which will eventually take ownership of the groups.
         generation_metrics = _generation_metrics(uncommitted_groups)
@@ -1918,7 +2078,9 @@ class StandardRLProgram(RLProgram):
             "[pipeline] COMMIT step=%d batch_idx=%s consumed_version=%d"
             " rollout_versions=%s groups=%s",
             current_step,
-            self.dispatch_window.next_batch,
+            # The trained batch: the cursor lags it while a round is in flight.
+            self.dispatch_window.next_batch
+            + int(self._inflight_sync is not None),
             consumed_policy_version,
             [_group_latest_policy_version(g) for g in uncommitted_groups if g],
             [
@@ -1966,7 +2128,9 @@ class StandardRLProgram(RLProgram):
 
         self.last_step_result = RLStepResult(
             step=current_step,
-            policy_version=self.policy_version,
+            # The version this step produced. The rollouts serve it once the
+            # step's sync round commits, which may be after this result.
+            policy_version=self.trainer_policy_version,
             num_rollouts=num_rollouts,
             num_microbatches=num_microbatches,
             reward_mean=metrics_summary["reward_mean"],
@@ -1997,7 +2161,15 @@ class StandardRLProgram(RLProgram):
         # `in_flight_prompts` on waking, and waking it on the old step would
         # park it again with no one left to set the event.
         self.dispatch_window.release()
+      # The last step's round: the program is not done until the rollouts
+      # serve the final weights, and a failure in it must not pass silently.
+      await self._join_inflight_sync()
     finally:
+      if self._inflight_sync is not None:
+        sync_task, self._inflight_sync = self._inflight_sync, None
+        sync_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+          await sync_task
       if pending_prep is not None:
         pending_prep.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -2047,9 +2219,7 @@ class StandardRLProgram(RLProgram):
           eos_id=self.eos_id,
           can_fuse_agreement_in_loss=self.can_fuse_agreement_in_loss,
           precompile=self.precompile_trainer,
-          return_routed_experts=bool(
-              self.generation_args.return_routed_experts
-          ),
+          return_routed_experts=self._rollout_returns_routed_experts,
       )
 
       if self.sync_weights:

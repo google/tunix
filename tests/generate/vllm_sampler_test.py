@@ -1056,6 +1056,131 @@ class VllmSamplerTokenInputTest(absltest.TestCase):
     self.assertIsNone(out_eval.topk_token_ids)
     self.assertIsNone(out_eval.topk_logprobs)
 
+  def test_num_logprobs_missing_subset_and_concurrent_overrides(self):
+    obj = self._sampler()
+    cfg_topk_only = vllm_sampler.VllmConfig(
+        return_logprobs=False, num_logprobs=4
+    )
+    self.assertEqual(obj._vllm_config(cfg_topk_only)["max_logprobs"], 4)
+
+    obj.config.return_logprobs = False
+    obj.config.num_logprobs = 1
+
+    # Empty completion alongside non-empty completion keeps top-k aligned, and
+    # return_logprobs=False skips sampled-token lookup into top-k dicts.
+    empty_res = self._result("0", [1, 2])
+    empty_res.outputs[0].token_ids = []
+    empty_res.outputs[0].logprobs = None
+    unmatched_sampled = self._result("1", [3, 4])
+    unmatched_sampled.outputs[0].token_ids = [99, 0]
+    obj.llm.generate = mock.Mock(return_value=[empty_res, unmatched_sampled])
+    out = obj(None, 4, prompt_token_ids=[[1, 2], [3, 4]], num_logprobs=2)
+    self.assertIsNone(out.logprobs)
+    self.assertLen(out.topk_token_ids, 2)
+    self.assertEqual(out.topk_token_ids[0].shape, (0, 2))
+    self.assertEqual(out.topk_token_ids[1].shape, (2, 2))
+
+    # Direct detokenize() without overrides uses config defaults.
+    _, _, _, _, topk_ids, _ = obj.detokenize([""], [self._result("2", [1, 2])])
+    self.assertIsNone(topk_ids)
+
+    # Partial batch missing logprobs on non-empty completion must raise.
+    missing_res = self._result("1", [3, 4])
+    missing_res.outputs[0].logprobs = None
+    obj.llm.generate = mock.Mock(
+        return_value=[self._result("0", [1, 2]), missing_res]
+    )
+    with self.assertRaisesRegex(
+        ValueError, "Top-k logprobs are not returned from the vLLM"
+    ):
+      obj(None, 4, prompt_token_ids=[[1, 2], [3, 4]], num_logprobs=2)
+
+    # Concurrent server_mode + overlap_postprocessing calls with per-call
+    # (return_logprobs, num_logprobs) overrides must not race with each other.
+    srv = self._sampler()
+    srv.config.return_logprobs = True
+    srv.config.num_logprobs = 128
+    srv.config.overlap_postprocessing = True
+    srv.config.postprocessing_threads = 2
+    srv.args["max_logprobs"] = 128
+    srv._postprocess_pool = None
+    srv._postprocess_pool_lock = threading.Lock()
+    entered = threading.Barrier(3)
+    deferred = {}
+    deferred_lock = threading.Lock()
+
+    def submit_requests(requests):
+      req = requests[0]
+      rid = req["request_id"]
+      prompt = tuple(req["prompt"]["prompt_token_ids"])
+      fut = concurrent.futures.Future()
+      if prompt == (1, 2):
+        res = self._result(rid, prompt)
+        res.outputs[0].logprobs = None
+        fut.set_result(res)
+      else:
+        with deferred_lock:
+          deferred[prompt] = (rid, fut)
+      entered.wait(timeout=5.0)
+      return [fut]
+
+    srv._driver = types.SimpleNamespace(
+        llm_engine=types.SimpleNamespace(
+            model_config=types.SimpleNamespace(
+                get_diff_sampling_param=lambda: {}
+            )
+        ),
+        submit_requests=submit_requests,
+        shutdown=mock.Mock(),
+    )
+
+    def run_fast_eval():
+      try:
+        return srv(
+            None,
+            4,
+            prompt_token_ids=[[1, 2]],
+            return_logprobs=False,
+            num_logprobs=1,
+        )
+      finally:
+        with deferred_lock:
+          rid_eval, fut_eval = deferred[(3, 4)]
+          rid_topk, fut_topk = deferred[(5, 6)]
+        res_eval = self._result(rid_eval, [3, 4])
+        res_eval.outputs[0].logprobs = None
+        fut_eval.set_result(res_eval)
+        fut_topk.set_result(self._result(rid_topk, [5, 6]))
+
+    try:
+      with concurrent.futures.ThreadPoolExecutor(max_workers=3) as callers:
+        f1 = callers.submit(run_fast_eval)
+        f2 = callers.submit(
+            srv,
+            None,
+            4,
+            prompt_token_ids=[[3, 4]],
+            return_logprobs=False,
+            num_logprobs=1,
+        )
+        f3 = callers.submit(
+            srv,
+            None,
+            4,
+            prompt_token_ids=[[5, 6]],
+            return_logprobs=False,
+            num_logprobs=2,
+        )
+        out1, out2, out3 = f1.result(), f2.result(), f3.result()
+      self.assertIsNone(out1.logprobs)
+      self.assertIsNone(out1.topk_token_ids)
+      self.assertIsNone(out2.logprobs)
+      self.assertIsNone(out2.topk_token_ids)
+      self.assertIsNone(out3.logprobs)
+      self.assertEqual(out3.topk_token_ids[0].shape, (2, 2))
+    finally:
+      srv.stop()
+
   def test_invalid_token_inputs_fail_before_submission(self):
     for kwargs in (
         {"input_strings": "text", "prompt_token_ids": [[1]]},

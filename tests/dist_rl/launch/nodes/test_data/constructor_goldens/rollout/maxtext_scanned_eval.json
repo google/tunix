@@ -3,7 +3,7 @@
     {
       "importlib.import_module": {
         "args": [
-          "tunix.dist_rl.examples.math_gsm8k_dist.gsm8k"
+          "golden_registry_module"
         ]
       }
     },

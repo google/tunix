@@ -17,8 +17,8 @@
 #
 # Invoked by `launch.sh` (never directly). Consumes the cluster/deployment
 # environment variables exported by `resolve_config.py` and forwards YAML +
-# `key=value` arguments directly to `run_trainer_node`, `run_rollout_node`,
-# `run_inference_node`, and the distributed orchestrator via
+# `key=value` arguments directly to the `tunix.dist_rl.launch.nodes` trainer,
+# rollout, inference, and orchestrator mains via
 # `tunix.dist_rl.distributed.runtime.main`.
 
 set -Ee

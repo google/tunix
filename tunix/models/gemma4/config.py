@@ -83,6 +83,16 @@ class SplashAttentionImpl(enum.Enum):
   TOKAMAX = 'tokamax'
 
 
+class HfVariant(enum.Enum):
+  """HF key layout, fixed by the HF class that wrote the checkpoint."""
+
+  # `Gemma4ForCausalLM`: text decoder under `model.`, no towers.
+  CAUSAL_LM = 'causal_lm'
+  # `Gemma4ForConditionalGeneration`: text decoder under
+  # `model.language_model.`, towers and embedders under `model.`.
+  CONDITIONAL_GENERATION = 'conditional_generation'
+
+
 @dataclasses.dataclass(slots=True, frozen=True)
 class ShardingConfig:
   """Sharding configuration for gemma transformer."""
@@ -125,7 +135,7 @@ class ShardingConfig:
         o_weight_nhd=P('tp', None, fsdp),
         ffw_weight_df=P(fsdp, 'tp'),
         ffw_weight_fd=P('tp', fsdp),
-        rms_norm_weight=P('tp'),
+        rms_norm_weight=P(None) if is_sampling else P('tp'),
         act_btd=P('fsdp', None, None if is_sampling else 'tp'),
         act_btf=P('fsdp', None, 'tp'),
         act_btnh=P('fsdp', None, 'tp', None),

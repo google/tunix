@@ -43,7 +43,6 @@ rollout_config:
   top_p: 1.0
   top_k: -1
   eos_tokens: "151645,151643"
-  return_logprobs: true
 
 weight_sync_config:
   mode: "none"
@@ -54,6 +53,8 @@ weight_sync_config:
 # The orchestrator loads the task records with
 # `gsm8k.create_dataset(**data_config)`.
 data_module: "tunix.dist_rl.examples.math_gsm8k_dist.gsm8k"
+# Imported by the rollout node to register `GSM8KEnv` / `GSM8KAgent`.
+registry_module: "tunix.dist_rl.examples.math_gsm8k_dist.gsm8k"
 task_name: "gsm8k"
 data_config:
   split: "train"
@@ -66,7 +67,6 @@ rl_training_config:
   mini_batch_size: 2
   train_micro_batch_size: 1
   max_steps: 1
-  eval_every_n_steps: 50
   actor_optimizer_config:
     opt_type: "adamw"
     learning_rate: 2.0e-7
@@ -90,7 +90,6 @@ rl_training_config:
 
 agentic_grpo_config:
   num_generations: 8
-  num_iterations: 1
   beta: 0.0
   epsilon: 0.2
   # GSM8K uses the canonical `GRPOConfig` loss defaults: symmetric clipping,
@@ -118,8 +117,6 @@ env_class_path: "gsm8kenv"
 agent_class_path: "gsm8kagent"
 
 cluster_config:
-  # Imported by the rollout node to register `GSM8KEnv` / `GSM8KAgent`.
-  registry_module: "tunix.dist_rl.examples.math_gsm8k_dist.gsm8k"
   artifact_root: "artifacts/math_gsm8k"
   # Runs on `target: local` with the default single-host placement from
   # `base_dist_config.yaml` (trainer chips 0,1; rollout chips 2,3). Use

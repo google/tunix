@@ -409,28 +409,6 @@ class BuildersTest(absltest.TestCase):
     assert isinstance(assembler, batch_assembly.SequencePackedBatchAssembler)
     self.assertEqual(assembler.batch_size, 1)
 
-  def test_generation_args(self):
-    args = orchestrator.build_generation_args(
-        _config(
-            "rollout_config.temperature=0.5",
-            "rollout_config.top_p=0.9",
-            "rollout_config.top_k=-1",
-        )
-    )
-    self.assertEqual(
-        args,
-        datatypes.GenerationArgs(
-            temperature=0.5, top_p=0.9, top_k=0, return_routed_experts=False
-        ),
-    )
-    args = orchestrator.build_generation_args(
-        _config(
-            "rollout_config.top_k=20", "vllm_config.return_routed_experts=true"
-        )
-    )
-    self.assertEqual(args.top_k, 20)
-    self.assertTrue(args.return_routed_experts)
-
   def test_metrics_logging_options(self):
     options = orchestrator.build_metrics_logging_options(
         _config(
@@ -507,11 +485,11 @@ class BuildersTest(absltest.TestCase):
   def test_required_workers_adds_reference_only_for_kl_penalty(self):
     role = datatypes.Role
     self.assertEqual(
-        orchestrator.required_workers(_config()),
+        orchestrator.required_workers(_config("agentic_grpo_config.beta=0.04")),
         {role.ACTOR: 1, role.ROLLOUT: 1, role.REFERENCE: 1},
     )
     self.assertEqual(
-        orchestrator.required_workers(_config("agentic_grpo_config.beta=0.0")),
+        orchestrator.required_workers(_config()),
         {role.ACTOR: 1, role.ROLLOUT: 1, role.REFERENCE: 0},
     )
 
@@ -570,8 +548,6 @@ class LoadPromptItemsTest(absltest.TestCase):
         "task_name=gsm8k",
         "data_config.num_records=3",
         "agentic_grpo_config.max_turns=3",
-        "agentic_grpo_config.episode_timeout=60",
-        "agentic_grpo_config.overlong_filter=true",
     )
     items = orchestrator.load_prompt_items(hp)
     # Repeats indefinitely; `StandardRLProgram` stops after `max_steps`.
@@ -587,11 +563,7 @@ class LoadPromptItemsTest(absltest.TestCase):
             "prompt": "train-0",
             "task_name": "gsm8k",
             "max_turns": 3,
-            "metadata": {
-                "env_config": {"seed": 42},
-                "episode_timeout": 60.0,
-                "overlong_filter": True,
-            },
+            "metadata": {"env_config": {"seed": 42}},
         },
     )
 
@@ -615,14 +587,6 @@ class LoadPromptItemsTest(absltest.TestCase):
   def test_requires_data_module(self):
     with self.assertRaisesRegex(ValueError, "data_module must name"):
       orchestrator.load_prompt_items(_config())
-
-  def test_rejects_dataset_chat_template(self):
-    hp = _config(
-        f"data_module={self._data_module()}",
-        "apply_chat_template_to_dataset=true",
-    )
-    with self.assertRaisesRegex(ValueError, "apply_chat_template_to_dataset"):
-      orchestrator.load_prompt_items(hp)
 
   def test_requires_grain_map_dataset(self):
     for i, returned in enumerate(
@@ -839,11 +803,11 @@ class ClusterTest(absltest.TestCase):
 
     disabled_cluster = self._cluster(
         _config(
-            "cluster_config.rollout_fault_tolerance=false",
-            "cluster_config.max_task_retries=3",
-            "cluster_config.poll_retry_budget_s=42.5",
-            "cluster_config.min_active_rollout_ratio=0.75",
-            "cluster_config.min_active_rollout_grace_s=120",
+            "cluster_config.fault_tolerance.enabled=false",
+            "cluster_config.fault_tolerance.max_task_retries=3",
+            "cluster_config.fault_tolerance.poll_retry_budget_s=42.5",
+            "cluster_config.fault_tolerance.min_active_rollout_ratio=0.75",
+            "cluster_config.fault_tolerance.min_active_rollout_grace_s=120",
         )
     )
     self.assertEqual(
@@ -858,7 +822,7 @@ class ClusterTest(absltest.TestCase):
     )
 
     unguarded_cluster = self._cluster(
-        _config("cluster_config.min_active_rollout_ratio=null")
+        _config("cluster_config.fault_tolerance.min_active_rollout_ratio=null")
     )
     self.assertIsNone(
         unguarded_cluster.fault_tolerance_manager.config.min_active_rollout_ratio
@@ -1110,6 +1074,7 @@ class ProgramTest(absltest.TestCase):
         "weight_sync_config.mode=in_memory",
         "dist_training_config.precompile_trainer=false",
         "vllm_config.return_routed_experts=true",
+        "rollout_config.temperature=0.5",
     )
     program = self._build_program(hp, reward_fns=[])
     self.addCleanup(program.close)
@@ -1122,7 +1087,8 @@ class ProgramTest(absltest.TestCase):
     self.assertEqual(program.group_order, rl_program.GroupOrder.PROMPT_ARRIVAL)
     self.assertTrue(program.sync_weights)
     self.assertFalse(program.precompile_trainer)
-    self.assertTrue(program.generation_args.return_routed_experts)
+    self.assertTrue(program._rollout_returns_routed_experts)
+    self.assertEqual(program.algo_config.temperature, 0.5)
 
     hp_span = self._program_config(
         "agentic_grpo_config.off_policy_steps=1",
@@ -1266,7 +1232,8 @@ class MainTest(absltest.TestCase):
     jax.config.update("jax_platforms", None)
 
   def test_base_config_selects_this_orchestrator(self):
-    main_path = _config().config_mapping("cluster_config")["orchestrator_main"]
+    roles = _config().config_mapping("cluster_config")["roles"]
+    main_path = roles["orchestrator"]["main"]
     module_name, attr = main_path.rsplit(".", 1)
     self.assertIs(
         getattr(importlib.import_module(module_name), attr), orchestrator.main
@@ -1288,6 +1255,9 @@ class MainTest(absltest.TestCase):
         content=f"""\
 data_module: "{data_module.full_path}"
 task_name: "gsm8k"
+registry_module: "task_registry"
+env_class_path: "gsm8kenv"
+agent_class_path: "gsm8kagent"
 data_config:
   num_records: 3
 reward_functions:
@@ -1471,8 +1441,22 @@ rl_training_config:
         content=_records_module("[{'prompts': 'q', 'answer': 'a'}]"),
     )
     for argv, regex in (
-        ([], "data_module must name"),
-        ([f"data_module={flat_records.full_path}"], "unexpected keys"),
+        (
+            [],
+            (
+                "names no task: data_module, env_class_path, agent_class_path,"
+                " registry_module must be set"
+            ),
+        ),
+        (
+            [
+                f"data_module={flat_records.full_path}",
+                "env_class_path=my_env",
+                "agent_class_path=my_agent",
+                "registry_module=my_task.registry",
+            ],
+            "unexpected keys",
+        ),
     ):
       with self.subTest(argv=argv):
         with (

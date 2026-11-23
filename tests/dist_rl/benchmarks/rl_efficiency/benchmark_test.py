@@ -14,15 +14,14 @@
 
 """CPU-only benchmark regression tests; runnable without TPU/JAX/pytest.
 
-Run directly:
-python3 tests/dist_rl/benchmarks/rl_efficiency/benchmark_test.py
+Run directly from the repository root:
+python3 -m unittest tests/dist_rl/benchmarks/rl_efficiency/benchmark_test.py
 """
 
 import argparse
 import asyncio
 import contextlib
 import copy
-import importlib.util
 import io
 import json
 import os
@@ -33,21 +32,14 @@ import types
 import unittest
 from unittest import mock
 
-
-def load_module(name):
-  path = (
-      Path(__file__).resolve().parents[4]
-      / "tunix/dist_rl/benchmarks/rl_efficiency"
-      / (name + ".py")
-  )
-  spec = importlib.util.spec_from_file_location(name, path)
-  module = importlib.util.module_from_spec(spec)
-  spec.loader.exec_module(module)
-  return module
+from tests import test_utils
 
 
-benchmark = load_module("benchmark")
-runtime = load_module("runtime")
+_BENCHMARK_DIR = (
+    test_utils.tunix_package_dir() / "dist_rl/benchmarks/rl_efficiency"
+)
+benchmark = test_utils.load_module_from_path(_BENCHMARK_DIR / "benchmark.py")
+runtime = test_utils.load_module_from_path(_BENCHMARK_DIR / "runtime.py")
 
 # The smallest workload that satisfies benchmark.load_workload.
 FAKE_WORKLOAD = """

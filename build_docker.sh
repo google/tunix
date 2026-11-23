@@ -13,16 +13,18 @@ INSTALL_MAXTEXT=false
 INSTALL_RAIDEN=false
 RAIDEN_WHEEL_DIR=/app/raiden_wheels
 INSTALL_DEEPSWE_DEPS=false
+SCAFFOLD="${SCAFFOLD:-r2egym}"
 
 usage() {
     cat <<'MSG'
-Usage: bash build_docker.sh [--maxtext] [--raiden] [--raiden-wheel-dir PATH] [--deepswe]
+Usage: bash build_docker.sh [--maxtext] [--raiden] [--raiden-wheel-dir PATH] [--deepswe] [--scaffold NAME]
 
 Options:
   --maxtext               Install MaxText-specific dependencies.
   --raiden                Install Raiden-specific dependencies.
   --raiden-wheel-dir PATH Use prebuilt Raiden wheels from PATH inside the Docker build context.
   --deepswe               Install DeepSWE evaluation dependencies.
+  --scaffold NAME         Agent scaffold (defaults to $SCAFFOLD or r2egym; e.g. openhands installs openhands-k8s-agent-sandbox).
 MSG
 }
 
@@ -40,6 +42,24 @@ while [[ "$#" -gt 0 ]]; do
             shift 2
             ;;
         --deepswe) INSTALL_DEEPSWE_DEPS=true; shift ;;
+        --scaffold)
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: --scaffold requires a non-empty name"
+                usage
+                exit 1
+            fi
+            SCAFFOLD="$2"
+            shift 2
+            ;;
+        --scaffold=*)
+            SCAFFOLD="${1#*=}"
+            if [[ -z "$SCAFFOLD" ]]; then
+                echo "Error: --scaffold requires a non-empty name"
+                usage
+                exit 1
+            fi
+            shift
+            ;;
         --help|-h)
             usage
             exit 0
@@ -96,6 +116,7 @@ MSG
         --build-arg INSTALL_RAIDEN=${INSTALL_RAIDEN} \
         --build-arg RAIDEN_WHEEL_DIR=${RAIDEN_WHEEL_DIR} \
         --build-arg INSTALL_DEEPSWE_DEPS=${INSTALL_DEEPSWE_DEPS} \
+        --build-arg SCAFFOLD="${SCAFFOLD}" \
         -t ${LOCAL_IMAGE_NAME} \
         -f ${DOCKERFILE} .
 }

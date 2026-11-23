@@ -3,7 +3,7 @@
     {
       "importlib.import_module": {
         "args": [
-          "tunix.dist_rl.examples.math_gsm8k_dist.gsm8k"
+          "golden_registry_module"
         ]
       }
     },
@@ -216,7 +216,6 @@
     {
       "tunix.dist_rl.weight_sync.raiden_weight_sync_delegate.RaidenWeightSyncDelegate": {
         "kwargs": {
-          "partial_rollout": false,
           "server_id": "rollout-0"
         }
       }

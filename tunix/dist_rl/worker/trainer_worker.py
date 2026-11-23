@@ -16,11 +16,15 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 import contextlib
 import functools
+import threading
+import time
 from typing import Any, ContextManager, TYPE_CHECKING, cast
 
+from absl import logging
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -138,6 +142,9 @@ class TrainerWorker(abstract_worker.Worker):
     self._otel = otel_metrics.TrainerWorkerOtelMetrics(
         worker_id=worker_id, meter_provider=otel_meter_provider
     )
+    # Keeps `release_weight_sync`, which runs on its own thread, apart from
+    # the trainer calls that own the same staging: prepare and close.
+    self._weight_sync_lock = threading.Lock()
 
   def _policy_version(self) -> int:
     trainer = self._trainer
@@ -199,12 +206,24 @@ class TrainerWorker(abstract_worker.Worker):
     """Triggers JIT compilation using the provided dummy_data."""
     trainer = self._ensure_ready()
     self.state = WorkerState.COMPILING
+    logging.info(
+        "[%s] Starting trainer compilation (trainer=%s, has_dummy_data=%s)...",
+        self._worker_id,
+        type(trainer).__name__,
+        dummy_data is not None,
+    )
+    t0 = time.perf_counter()
     try:
       with self._otel.track_rpc():
         dummy_data = abstract_trainer.resolve_dummy_routed_experts(
             trainer, dummy_data
         )
         trainer.compile(dummy_data)
+      logging.info(
+          "[%s] Finished trainer compilation in %.2fs.",
+          self._worker_id,
+          time.perf_counter() - t0,
+      )
       return self._response(compiled=True)
     except Exception as exc:
       self._last_error = str(exc)
@@ -257,7 +276,8 @@ class TrainerWorker(abstract_worker.Worker):
         self.state = WorkerState.DRAINING
       try:
         if self._trainer is not None:
-          self._trainer.close()
+          with self._weight_sync_lock:
+            self._trainer.close()
       except Exception as exc:
         self._stop_error = self._last_error = str(exc)
         abort = True
@@ -540,11 +560,18 @@ class TrainerWorker(abstract_worker.Worker):
 
   @abstract_worker.offload_to_thread
   def prepare_weight_sync(self, sync_request: Any = None) -> Any:
-    """Stages weights for transfer and returns their metadata."""
+    """Stages weights for transfer and returns their metadata.
+
+    The worker stays READY: staging is complete when this returns. Whether the
+    trainer may take the next batch before the round ends is the caller's
+    decision; it depends on the transport reading only the staged copy.
+    """
     trainer = self._ensure_ready()
-    self.state = WorkerState.SYNCING
     try:
-      with self._otel.track_rpc(weight_sync_direction="send"):
+      with (
+          self._weight_sync_lock,
+          self._otel.track_rpc(weight_sync_direction="send"),
+      ):
         metadata = trainer.prepare_weight_sync(sync_request=sync_request)
       self._last_error = None
       if metadata is not None:
@@ -555,19 +582,26 @@ class TrainerWorker(abstract_worker.Worker):
       self.state = WorkerState.ERROR
       raise
 
-  @abstract_worker.offload_to_thread
-  def release_weight_sync(self, sync_request: Any = None) -> Any:
-    """Releases this round's staging and restores READY."""
-    # Not `_ensure_ready()`: `prepare_weight_sync` left the state at SYNCING,
-    # and `_ensure_ready()` raises unless the state is READY.
-    if self._trainer is None:
-      result = None
-    else:
-      with self._otel.track_rpc(weight_sync_direction="release"):
-        result = self._trainer.release_weight_sync(sync_request=sync_request)
-    if self.state == WorkerState.SYNCING:
-      self.state = WorkerState.READY
-    return result
+  async def release_weight_sync(self, sync_request: Any = None) -> Any:
+    """Releases this round's staging.
+
+    Runs on a thread of its own. On the event loop it would stall heartbeats
+    for as long as the trainer takes to free its buffers; on the worker thread
+    it would queue behind the trainer's `fwd_bwd` and hold the round open,
+    which delays the rollouts' next version.
+    """
+    return await asyncio.to_thread(self._release_weight_sync, sync_request)
+
+  def _release_weight_sync(self, sync_request: Any) -> Any:
+    with self._weight_sync_lock:
+      if self._trainer is None:
+        return None
+      # The trainer may be waiting for rollouts when the round closes; that
+      # idle time must survive the release.
+      with self._otel.track_rpc(
+          weight_sync_direction="release", refresh_free_time=False
+      ):
+        return self._trainer.release_weight_sync(sync_request=sync_request)
 
   @abstract_worker.offload_to_thread
   def get_metrics(self) -> Any:

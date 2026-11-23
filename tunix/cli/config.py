@@ -101,6 +101,18 @@ def to_str_dict(cfg: object) -> dict[str, object]:
   return {str(k): v for k, v in container.items()}
 
 
+class UnknownConfigKeyError(ValueError):
+  """An override sets a key that the base config does not have.
+
+  Attributes:
+    key: Dotted path of the unknown key.
+  """
+
+  def __init__(self, key: str, message: str) -> None:
+    super().__init__(message)
+    self.key = key
+
+
 # TODO(noghabi): Let callers supply the open-section allowlist (e.g. a class
 # attribute) instead of the hard-coded _OPEN_DICT_KEYS.
 def _validate_nested_keys(
@@ -123,16 +135,18 @@ def _validate_nested_keys(
     open_dict_keys: Section names that accept any nested keys.
 
   Raises:
-    ValueError: If `candidate` has a key that `schema` lacks, or nests keys
-      under a key whose schema value is neither a mapping nor null. The message
-      names the dotted path.
+    UnknownConfigKeyError: If `candidate` has a key that `schema` lacks. The
+      message names the dotted path.
+    ValueError: If `candidate` nests keys under a key whose schema value is
+      neither a mapping nor null. The message names the dotted path.
   """
   for key, value in candidate.items():
     dotpath = f"{prefix}.{key}" if prefix else str(key)
     if key not in schema:
-      raise ValueError(
+      raise UnknownConfigKeyError(
+          dotpath,
           f"Unknown configuration key '{dotpath}'. Allowed keys at"
-          f" '{prefix or '<root>'}': {sorted(schema.keys())}"
+          f" '{prefix or '<root>'}': {sorted(schema.keys())}",
       )
     if key in open_dict_keys or not isinstance(value, Mapping):
       continue
@@ -295,6 +309,34 @@ def get_project_root() -> pathlib.Path:
 
   # Fallback: if no marker is found, return the current working directory
   return pathlib.Path.cwd()
+
+
+def _resolve_reward_fn_file(
+    project_root: pathlib.Path, reward_fn_path: str
+) -> pathlib.Path:
+  """Resolves a reward function file path against the project root.
+
+  A relative `tunix/...` path that is missing under `project_root` (e.g. a wheel
+  install run outside a source checkout) falls back to the installed `tunix`
+  package, but only if it stays inside that package directory.
+
+  Args:
+    project_root: Directory that relative reward function paths resolve to.
+    reward_fn_path: Reward function file path from the config.
+
+  Returns:
+    The installed-package file for a missing relative `tunix/...` path that
+    exists inside the package, otherwise `project_root / reward_fn_path`.
+  """
+  candidate = project_root / reward_fn_path
+  rel_path = pathlib.PurePath(reward_fn_path)
+  if candidate.is_file() or rel_path.parts[:1] != ("tunix",):
+    return candidate
+  pkg_dir = pathlib.Path(__file__).resolve().parents[1]
+  pkg_candidate = (pkg_dir.parent / rel_path).resolve()
+  if pkg_candidate.is_relative_to(pkg_dir) and pkg_candidate.is_file():
+    return pkg_candidate
+  return candidate
 
 
 # TODO(noghabi): Split this module into a light config loader
@@ -1544,7 +1586,7 @@ class HyperParameters:
 
       # Try importing the module from the project root.
       if module is None:
-        full_path = str(project_root / reward_fn_path)
+        full_path = str(_resolve_reward_fn_file(project_root, reward_fn_path))
         module_name = os.path.splitext(os.path.basename(full_path))[0]
         # load from source
         loader = importlib.machinery.SourceFileLoader(module_name, full_path)

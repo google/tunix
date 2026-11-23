@@ -47,6 +47,15 @@ import yaml
 
 ORCHESTRATOR_MAIN = "tunix.dist_rl.launch.nodes.orchestrator.main"
 RUN_ID = "run_launcher_test"
+# A task for scripts that layer no task YAML: `base_dist_config.yaml` names
+# none, and the `launch.sh` commands that start nodes need one.
+_GSM8K_MODULE = "tunix.dist_rl.examples.math_gsm8k_dist.gsm8k"
+TASK_ARGS = (
+    f"data_module={_GSM8K_MODULE}",
+    "env_class_path=gsm8kenv",
+    "agent_class_path=gsm8kagent",
+    f"registry_module={_GSM8K_MODULE}",
+)
 # Stand-in for the Hugging Face token: the resolver requires one for hub
 # tokenizer paths, and `k8s.sh` writes it into the rendered commands, so a real
 # token must not reach the dry-run output.
@@ -235,7 +244,7 @@ class Expected:
       is `LauncherTestCase.root`).
     example: Package directory (`<root>/<example>`) the script launches.
     module: Entry module (`<root>/<example>/<module>.py`), named by both
-      `data_module` and `cluster_config.registry_module`; the script layers its
+      `data_module` and `registry_module`; the script layers its
       config `<root>/<example>/<module>.yaml`.
     target: Expected `cluster_config.target`.
     batch_size: Expected `batch_size`.
@@ -325,12 +334,14 @@ class LauncherTestCase(parameterized.TestCase):
     config = hp.config
     cluster = config["cluster_config"]
     self.assertEqual(cluster["target"], expected.target)
-    self.assertEqual(cluster["orchestrator_main"], ORCHESTRATOR_MAIN)
+    self.assertEqual(
+        cluster["roles"]["orchestrator"]["main"], ORCHESTRATOR_MAIN
+    )
     module = (
         f"tunix.dist_rl.{self.root}.{expected.example}.{expected.module}"
     )
     self.assertEqual(config["data_module"], module)
-    self.assertEqual(cluster["registry_module"], module)
+    self.assertEqual(config["registry_module"], module)
     self.assertEqual(config["batch_size"], expected.batch_size)
     rl_train = config["rl_training_config"]
     self.assertEqual(rl_train["mini_batch_size"], expected.mini_batch_size)
@@ -351,7 +362,6 @@ class LauncherTestCase(parameterized.TestCase):
     self.assertEqual(
         config["tokenizer_config"]["tokenizer_path"], expected.model_id
     )
-    self.assertIsNone(rl_train["gradient_accumulation_steps"])
     # Every example overrides the shared artifact root.
     self.assertNotEqual(pathlib.Path(cluster["artifact_root"]).name, "dist_rl")
 

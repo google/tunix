@@ -367,6 +367,17 @@ class WeightSyncHandler(abc.ABC):
     Callers running an event loop wrap it in an executor.
     """
 
+  @property
+  def transfers_from_staged_copy(self) -> bool:
+    """Whether `transfer` reads only what `prepare_weight_sync` staged.
+
+    True by default. A handler whose `transfer` reads the source's live
+    weights must override this to return False: a source may train again as
+    soon as it has staged its weights, and the coordinator refuses a round
+    given `source_prepared` for such a handler.
+    """
+    return True
+
   def close(self) -> None:
     """Releases any transport resources. Optional for implementations."""
 
@@ -465,9 +476,7 @@ class WeightSyncDestination(Protocol):
     """
     ...
 
-  async def pre_weight_sync(
-      self, sync_request: Any = None, **kwargs: Any
-  ) -> Any:
+  async def pre_weight_sync(self, sync_request: Any, **kwargs: Any) -> Any:
     """Quiesces the worker so the arriving weights have somewhere to land.
 
     Must actually gate admission: stop accepting new requests, drain or cancel
@@ -476,12 +485,12 @@ class WeightSyncDestination(Protocol):
     setting a pause flag does not satisfy this.
 
     Args:
-      sync_request: Optional request context for the sync round.
+      sync_request: Request context for the sync round.
       **kwargs: Additional transport-specific options.
     """
     ...
 
-  async def weight_sync(self, sync_request: Any = None, **kwargs: Any) -> Any:
+  async def weight_sync(self, sync_request: Any, **kwargs: Any) -> Any:
     """Materializes the received weights into the staging copy.
 
     Called only after the transport reported success. A Raiden/JAX worker
@@ -490,14 +499,12 @@ class WeightSyncDestination(Protocol):
     pending policy version for post to publish.
 
     Args:
-      sync_request: Optional request context for the sync round.
+      sync_request: Request context for the sync round.
       **kwargs: Additional transport-specific options.
     """
     ...
 
-  async def post_weight_sync(
-      self, sync_request: Any = None, **kwargs: Any
-  ) -> Any:
+  async def post_weight_sync(self, sync_request: Any, **kwargs: Any) -> Any:
     """Publishes the pending weights atomically, rebuilds caches, resumes.
 
     Must be idempotent for the round key: a retry after a lost reply, or
@@ -505,14 +512,12 @@ class WeightSyncDestination(Protocol):
     same committed state rather than fail or double-apply.
 
     Args:
-      sync_request: Optional request context for the sync round.
+      sync_request: Request context for the sync round.
       **kwargs: Additional transport-specific options.
     """
     ...
 
-  async def abort_weight_sync(
-      self, sync_request: Any = None, **kwargs: Any
-  ) -> Any:
+  async def abort_weight_sync(self, sync_request: Any, **kwargs: Any) -> Any:
     """Rolls back to serving the previous weights.
 
     Invalidates this round's staging -- physically or logically: a
@@ -534,7 +539,7 @@ class WeightSyncDestination(Protocol):
     expensively.
 
     Args:
-      sync_request: Optional request context for the sync round.
+      sync_request: Request context for the sync round.
       **kwargs: Additional transport-specific options.
     """
     ...

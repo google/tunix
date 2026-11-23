@@ -20,38 +20,33 @@ import jax.numpy as jnp
 import ml_dtypes
 import numpy as np
 from safetensors import numpy as stnp
+from tunix.models import hf_mapping
 from tunix.models import safetensors_loader
 from tunix.tests import test_common
 from tunix.utils import env_utils
 
 
-def key_mapping(config):
-  del config
-  return {
-      r'^emb\.embedding$': ('emb.embedding', None),
-      r'^layers\.(\d+)\.attn\.query\.kernel$': (
-          r'layers.\1.attn.query.kernel',
-          None,
-      ),
-      r'^layers\.(\d+)\.attn\.key\.kernel$': (
-          r'layers.\1.attn.key.kernel',
-          None,
-      ),
-      r'^layers\.(\d+)\.attn\.value\.kernel$': (
-          r'layers.\1.attn.value.kernel',
-          None,
-      ),
-      r'^layers\.(\d+)\.attn\.out\.kernel$': (
-          r'layers.\1.attn.out.kernel',
-          None,
-      ),
-      r'^layers\.(\d+)\.w1\.kernel$': (r'layers.\1.w1.kernel', None),
-      r'^layers\.(\d+)\.w1\.bias$': (r'layers.\1.w1.bias', None),
-      r'^layers\.(\d+)\.w2\.kernel$': (r'layers.\1.w2.kernel', None),
-      r'^layers\.(\d+)\.w2\.bias$': (r'layers.\1.w2.bias', None),
-      r'^lm_head\.kernel$': ('lm_head.kernel', None),
-      r'^lm_head\.bias$': ('lm_head.bias', None),
-  }
+def build_toy_manifest(config: test_common.ModelConfig):
+  return hf_mapping.generate_manifest(
+      model_type='toy',
+      template_rules=[
+          {'source_pattern': [k], 'target_pattern': [k], 'ops': []}
+          for k in (
+              'emb.embedding',
+              'layers.{i}.attn.query.kernel',
+              'layers.{i}.attn.key.kernel',
+              'layers.{i}.attn.value.kernel',
+              'layers.{i}.attn.out.kernel',
+              'layers.{i}.w1.kernel',
+              'layers.{i}.w1.bias',
+              'layers.{i}.w2.kernel',
+              'layers.{i}.w2.bias',
+              'lm_head.kernel',
+              'lm_head.bias',
+          )
+      ],
+      axes={'i': config.num_layers},
+  )
 
 
 class _TrackedBinaryFile(io.BufferedIOBase):
@@ -127,8 +122,12 @@ class SafetensorsLoaderTest(parameterized.TestCase):
     super().setUpClass()
     config = test_common.ModelConfig(num_layers=4, num_kv_heads=4, head_dim=16)
     cls.model = test_common.ToyTransformer(config=config, rngs=nnx.Rngs(0))
+    cls.manifest = build_toy_manifest(config)
 
     cls.state = nnx.state(cls.model)
+    # DEPRECATED (testing-only): Legacy hand-written tensor dict fixture is
+    # deprecated, retained strictly for bit-by-bit parity testing during
+    # migration to `hf_mapping`, and will be removed in a follow-up cleanup CL.
     cls.tensors = {
         'emb.embedding': np.array(cls.state['emb']['embedding'].value),
         'lm_head.kernel': np.array(cls.state['lm_head']['kernel'].value),
@@ -204,7 +203,7 @@ class SafetensorsLoaderTest(parameterized.TestCase):
         load_dir,
         test_common.ToyTransformer,
         self.model.config,
-        key_mapping,
+        self.manifest,
         dtype=jnp.float32,
         mode=mode,
     )
@@ -235,7 +234,7 @@ class SafetensorsLoaderTest(parameterized.TestCase):
         'gs://bucket/model',
         test_common.ToyTransformer,
         self.model.config,
-        key_mapping,
+        self.manifest,
         dtype=jnp.float32,
     )
     mock_load.assert_called_once_with('gs://bucket/model')
@@ -255,38 +254,49 @@ class SafetensorsLoaderTest(parameterized.TestCase):
     filename = os.path.join(self.st_dir, 'model.safetensors')
     stnp.save_file(tensors, filename)
 
-    def duplicate_key_mapping(config):
-      del config
-      return {
-          r'^lm_head\.kernel$': ('lm_head.kernel', None),
-          r'^lm_head\.weight$': ('lm_head.kernel', None),
-      }
+    duplicate_manifest = {
+        'schema_version': hf_mapping.SCHEMA_VERSION,
+        'rules': [
+            {
+                'source_keys': ['lm_head.kernel'],
+                'target_keys': ['lm_head.kernel'],
+                'ops': [],
+            },
+            {
+                'source_keys': ['lm_head.weight'],
+                'target_keys': ['lm_head.kernel'],
+                'ops': [],
+            },
+        ],
+    }
 
-    with self.assertRaisesRegex(RuntimeError, 'Duplicate key'):
+    with self.assertRaisesRegex(ValueError, 'Duplicate target_keys'):
       safetensors_loader.load_and_create_model(
           self.st_dir,
           test_common.ToyTransformer,
           self.model.config,
-          duplicate_key_mapping,
+          duplicate_manifest,
           dtype=jnp.float32,
           mode='original',
       )
 
   def test_load_bfloat16_custom_dtype_avoids_ml_dtypes(self):
     bf16_data = np.random.rand(256, 16).astype(ml_dtypes.bfloat16)
-    tensors = {'emb.embedding': bf16_data}
+    tensors = {
+        k: np.asarray(
+            v.value if isinstance(v, nnx.Param) else v, dtype=ml_dtypes.bfloat16
+        )
+        for k, v in self.tensors.items()
+    }
+    tensors['emb.embedding'] = bf16_data
     filename = os.path.join(self.st_dir, 'model.safetensors')
     stnp.save_file(tensors, filename)
-
-    def simple_mapping(config):
-      del config
-      return {r'^emb\.embedding$': ('emb.embedding', None)}
 
     result = safetensors_loader.load_and_create_model(
         self.st_dir,
         test_common.ToyTransformer,
         self.model.config,
-        simple_mapping,
+        self.manifest,
         dtype=jnp.bfloat16,
         mode='original',
     )
@@ -297,6 +307,94 @@ class SafetensorsLoaderTest(parameterized.TestCase):
         jnp.bfloat16,
     )
     np.testing.assert_allclose(state['emb']['embedding'].value, bf16_data)
+
+  def test_loader_raises_on_missing_params_and_incomplete_pending_rules(self):
+    missing_dir = os.path.join(self.st_dir, 'missing_param')
+    os.makedirs(missing_dir, exist_ok=True)
+    partial_tensors = {
+        k: np.asarray(v.value if isinstance(v, nnx.Param) else v)
+        for k, v in self.tensors.items()
+        if k != 'lm_head.bias'
+    }
+    stnp.save_file(
+        partial_tensors, os.path.join(missing_dir, 'model.safetensors')
+    )
+    with self.assertRaisesRegex(
+        ValueError,
+        r"parameters for declared HF layout 'toy'; missing.*lm_head\.bias",
+    ):
+      safetensors_loader.load_and_create_model(
+          missing_dir,
+          test_common.ToyTransformer,
+          self.model.config,
+          self.manifest,
+          dtype=jnp.float32,
+          mode='original',
+      )
+
+    pending_dir = os.path.join(self.st_dir, 'incomplete_pending')
+    os.makedirs(pending_dir, exist_ok=True)
+    fused_manifest = {
+        'schema_version': hf_mapping.SCHEMA_VERSION,
+        'rules': [
+            *self.manifest['rules'][:-1],
+            {
+                'source_keys': ['lm_head.bias_part0', 'lm_head.bias_part1'],
+                'target_keys': ['lm_head.bias'],
+                'ops': [{'concat': {'axis': 0, 'sizes': [128, 128]}}],
+            },
+        ],
+    }
+    pending_tensors = {
+        **partial_tensors,
+        'lm_head.bias_part0': np.zeros((128,), dtype=np.float32),
+    }
+    stnp.save_file(
+        pending_tensors, os.path.join(pending_dir, 'model.safetensors')
+    )
+    with self.assertRaisesRegex(
+        ValueError,
+        r"rules for declared HF layout ''; unconsumed.*lm_head\.bias_part0",
+    ):
+      safetensors_loader.load_and_create_model(
+          pending_dir,
+          test_common.ToyTransformer,
+          self.model.config,
+          fused_manifest,
+          dtype=jnp.float32,
+          mode='original',
+      )
+
+    with (
+        mock.patch.object(env_utils, 'is_internal_env', return_value=False),
+        mock.patch.object(
+            env_utils, 'is_pathways_initialized', return_value=False
+        ),
+    ):
+      with self.assertRaisesRegex(
+          ValueError,
+          r"parameters for declared HF layout 'toy'; missing.*lm_head\.bias",
+      ):
+        safetensors_loader.load_and_create_model(
+            missing_dir,
+            test_common.ToyTransformer,
+            self.model.config,
+            self.manifest,
+            dtype=jnp.float32,
+            mode='optimized',
+        )
+      with self.assertRaisesRegex(
+          ValueError,
+          r"rules for declared HF layout ''; unconsumed.*lm_head\.bias_part0",
+      ):
+        safetensors_loader.load_and_create_model(
+            pending_dir,
+            test_common.ToyTransformer,
+            self.model.config,
+            fused_manifest,
+            dtype=jnp.float32,
+            mode='optimized',
+        )
 
   def test_load_mixed_dtype_safetensors_offsets(self):
     f32_data = np.ones((16,), dtype=np.float32) * 1.5
@@ -368,23 +466,28 @@ class SafetensorsLoaderTest(parameterized.TestCase):
     )
 
     host_checks: list[tuple[bool, bool, bool, bool]] = []
+    orig_load_file_tensors = safetensors_loader._load_file_tensors
 
-    def check_host_and_emit_jax_array(tensors):
-      out = dict(tensors)
-      for key, arr in out.items():
+    def check_host_tensors(*args, **kwargs):
+      out = orig_load_file_tensors(*args, **kwargs)
+      for arr in out.values():
         host_checks.append((
             isinstance(arr, np.ndarray),
             arr.dtype == np.float32,
             arr.flags.c_contiguous and arr.flags.aligned,
             arr.flags.writeable,
         ))
-        if key == 'emb.embedding':
-          # Simulate MoE/Gemma `preprocess_fn` emitting a `jax.Array`.
-          out[key] = jnp.asarray(arr)
       return out
 
     mesh = jax.sharding.Mesh(
         np.array(jax.devices()[:1]).reshape(1, 1), ('fsdp', 'tp')
+    )
+    self.enter_context(
+        mock.patch.object(
+            safetensors_loader,
+            '_load_file_tensors',
+            side_effect=check_host_tensors,
+        )
     )
     mock_device_put = self.enter_context(
         mock.patch.object(jax, 'device_put', wraps=jax.device_put)
@@ -394,9 +497,8 @@ class SafetensorsLoaderTest(parameterized.TestCase):
         self.st_dir,
         test_common.ToyTransformer,
         self.model.config,
-        key_mapping,
+        self.manifest,
         mesh=mesh,
-        preprocess_fn=check_host_and_emit_jax_array,
         dtype=jnp.float32,
         mode='original',
     )
@@ -470,7 +572,7 @@ class SafetensorsLoaderTest(parameterized.TestCase):
         self.st_dir,
         test_common.ToyTransformer,
         self.model.config,
-        key_mapping,
+        self.manifest,
         dtype=jnp.float32,
         mode='original',
     )
@@ -536,7 +638,7 @@ class SafetensorsLoaderTest(parameterized.TestCase):
           self.st_dir,
           test_common.ToyTransformer,
           self.model.config,
-          key_mapping,
+          self.manifest,
           dtype=jnp.float32,
           mode='original',
       )
@@ -554,7 +656,7 @@ class SafetensorsLoaderTest(parameterized.TestCase):
     empty_val = np.zeros((0, 4), dtype=np.float32)
     codes_val = np.array([7, 8, 9], dtype=np.uint8)
     unaligned_val = np.array([1.25, -2.5, 3.75, 4.0], dtype=np.float32)
-    # Stored as (2, 6), transposed + reshaped to (3, 2) via `transform`.
+    # Stored as (2, 3), transposed + reshaped to (3, 2) via manifest rule.
     proj_stored = np.arange(6, dtype=np.float16).reshape(2, 3)
 
     ordered = [
@@ -581,21 +683,33 @@ class SafetensorsLoaderTest(parameterized.TestCase):
       fh.write(header_bytes)
       fh.write(payload)
 
-    def edge_mapping(config):
-      del config
-      return {
-          r'^a_codes$': ('codes', None),
-          r'^b_unaligned$': ('unaligned_f32', None),
-          r'^c_empty$': ('empty', None),
-          r'^d_scalar$': ('scalar', None),
-          r'^e_proj$': ('f16_proj', ((1, 0), (3, 2))),
-      }
+    edge_manifest = {
+        'schema_version': hf_mapping.SCHEMA_VERSION,
+        'rules': [
+            {'source_keys': ['a_codes'], 'target_keys': ['codes'], 'ops': []},
+            {
+                'source_keys': ['b_unaligned'],
+                'target_keys': ['unaligned_f32'],
+                'ops': [],
+            },
+            {'source_keys': ['c_empty'], 'target_keys': ['empty'], 'ops': []},
+            {'source_keys': ['d_scalar'], 'target_keys': ['scalar'], 'ops': []},
+            {
+                'source_keys': ['e_proj'],
+                'target_keys': ['f16_proj'],
+                'ops': [
+                    {'transpose': {'axes': [1, 0]}},
+                    {'reshape': {'src_shape': [3, 2], 'dst_shape': [3, 2]}},
+                ],
+            },
+        ],
+    }
 
     loaded = safetensors_loader.load_and_create_model(
         self.st_dir,
         _EdgeCaseModel,
         config=None,
-        key_mapping=edge_mapping,
+        manifest=edge_manifest,
         dtype=None,
         mode='original',
     )
@@ -616,8 +730,22 @@ class SafetensorsLoaderTest(parameterized.TestCase):
           empty_dir,
           test_common.ToyTransformer,
           self.model.config,
-          key_mapping,
+          self.manifest,
           mode='original',
+      )
+    with (
+        mock.patch.object(env_utils, 'is_internal_env', return_value=False),
+        mock.patch.object(
+            env_utils, 'is_pathways_initialized', return_value=True
+        ),
+        self.assertRaisesRegex(ValueError, 'Optimized mode is not supported'),
+    ):
+      safetensors_loader.load_and_create_model(
+          empty_dir,
+          test_common.ToyTransformer,
+          self.model.config,
+          self.manifest,
+          mode='optimized',
       )
 
     stnp.save_file(
@@ -629,7 +757,7 @@ class SafetensorsLoaderTest(parameterized.TestCase):
           self.st_dir,
           test_common.ToyTransformer,
           self.model.config,
-          key_mapping,
+          self.manifest,
           mode='original',
       )
 
@@ -644,11 +772,13 @@ class SafetensorsLoaderTest(parameterized.TestCase):
     with open(os.path.join(self.st_dir, 'truncated.safetensors'), 'wb') as fh:
       fh.write(raw)
     with self.assertRaisesRegex(OSError, 'Truncated safetensors'):
+      safetensors_loader.read_safetensors_headers(self.st_dir)
+    with self.assertRaisesRegex(OSError, 'Truncated safetensors'):
       safetensors_loader.load_and_create_model(
           self.st_dir,
           test_common.ToyTransformer,
           self.model.config,
-          key_mapping,
+          self.manifest,
           mode='original',
       )
 
@@ -661,17 +791,20 @@ class SafetensorsLoaderTest(parameterized.TestCase):
     local_dev = jax.local_devices()[0]
     remote_dev = mock.create_autospec(jax.Device, instance=True)
 
+    def forbid_backend_query(backend=None):
+      if backend is not None:
+        raise RuntimeError(f'Unknown backend {backend}')
+      return [remote_dev, local_dev]
+
     with (
-        mock.patch.object(
-            jax, 'devices', return_value=[remote_dev, local_dev]
-        ),
+        mock.patch.object(jax, 'devices', side_effect=forbid_backend_query),
         mock.patch.object(jax, 'local_devices', return_value=[local_dev]),
     ):
       local_loaded = safetensors_loader.load_and_create_model(
           self.st_dir,
           test_common.ToyTransformer,
           self.model.config,
-          key_mapping,
+          self.manifest,
           mesh=None,
           dtype=jnp.float32,
           mode='original',
@@ -714,7 +847,7 @@ class SafetensorsLoaderTest(parameterized.TestCase):
           self.st_dir,
           test_common.ToyTransformer,
           self.model.config,
-          key_mapping,
+          self.manifest,
           mesh=mesh,
           dtype=jnp.float32,
           mode='original',
@@ -725,6 +858,246 @@ class SafetensorsLoaderTest(parameterized.TestCase):
     jax.tree.map(
         np.testing.assert_array_equal, self.state, nnx.state(mh_loaded)
     )
+
+  def test_gcs_uri_resolved_once_for_headers_read_and_model_load(self):
+    stnp.save_file(
+        self.tensors, os.path.join(self.st_dir, 'model.safetensors')
+    )
+    mock_load = self.enter_context(
+        mock.patch.object(
+            safetensors_loader,
+            'load_file_from_gcs',
+            autospec=True,
+            spec_set=True,
+            return_value=self.st_dir,
+        )
+    )
+    standalone_headers = safetensors_loader.read_safetensors_headers(
+        'gs://bucket/standalone'
+    )
+    self.assertEqual(set(standalone_headers), set(self.tensors))
+    mock_load.assert_called_once_with('gs://bucket/standalone')
+
+    mock_load.reset_mock()
+    loaded = safetensors_loader.load_and_create_model(
+        'gs://bucket/model',
+        test_common.ToyTransformer,
+        self.model.config,
+        self.manifest,
+        dtype=jnp.float32,
+        mode='original',
+    )
+    mock_load.assert_called_once_with('gs://bucket/model')
+    jax.tree.map(np.testing.assert_array_equal, self.state, nnx.state(loaded))
+
+  def test_read_checkpoint_keys_prefers_index_then_falls_back_to_headers(self):
+    stnp.save_file(
+        self.tensors, os.path.join(self.st_dir, 'model.safetensors')
+    )
+    index_path = epath.Path(self.st_dir) / 'model.safetensors.index.json'
+    mock_gcs = self.enter_context(
+        mock.patch.object(
+            safetensors_loader,
+            'load_file_from_gcs',
+            autospec=True,
+            spec_set=True,
+            return_value=self.st_dir,
+        )
+    )
+    # 1. No index: keys come from the shard headers (gs:// resolved once).
+    self.assertEqual(
+        safetensors_loader.read_checkpoint_keys('gs://bucket/ckpt'),
+        frozenset(self.tensors),
+    )
+    mock_gcs.assert_called_once_with('gs://bucket/ckpt')
+    # 2. Empty or malformed `weight_map` falls back to the shard headers.
+    for payload in ({'weight_map': {}}, {'weight_map': ['a']}, ['a']):
+      index_path.write_text(json.dumps(payload))
+      self.assertEqual(
+          safetensors_loader.read_checkpoint_keys(self.st_dir),
+          frozenset(self.tensors),
+      )
+    # 3. A populated index is authoritative: shard headers are never opened.
+    index_path.write_text(
+        json.dumps({'weight_map': {'only.key': 'model.safetensors'}})
+    )
+    with mock.patch.object(
+        safetensors_loader, 'read_safetensors_headers', autospec=True
+    ) as mock_headers:
+      self.assertEqual(
+          safetensors_loader.read_checkpoint_keys(self.st_dir),
+          frozenset({'only.key'}),
+      )
+    mock_headers.assert_not_called()
+
+  def test_cross_shard_duplicates_optimized_dtypes_and_corrupt_headers(self):
+    self.assertEqual(safetensors_loader.to_np_dtype('I8'), np.dtype(np.int8))
+    self.assertEqual(
+        safetensors_loader.to_np_dtype('F8_E4M3'),
+        np.dtype(ml_dtypes.float8_e4m3fn),
+    )
+    self.assertEqual(
+        safetensors_loader.to_np_dtype(np.float32), np.dtype(np.float32)
+    )
+    with self.assertRaisesRegex(ValueError, 'Unsupported safetensors dtype'):
+      safetensors_loader.to_np_dtype('UNSUPPORTED')
+
+    # Cross-shard duplicate source keys must fail fast in both modes.
+    dup_dir = os.path.join(self.st_dir, 'dup_shards')
+    os.makedirs(dup_dir, exist_ok=True)
+    raw = {
+        k: np.asarray(v.value if isinstance(v, nnx.Param) else v)
+        for k, v in self.tensors.items()
+    }
+    stnp.save_file(raw, os.path.join(dup_dir, 'shard-00001.safetensors'))
+    stnp.save_file(
+        {'emb.embedding': raw['emb.embedding']},
+        os.path.join(dup_dir, 'shard-00002.safetensors'),
+    )
+    with self.assertRaisesRegex(ValueError, 'Duplicate tensor keys'):
+      safetensors_loader.load_and_create_model(
+          dup_dir,
+          test_common.ToyTransformer,
+          self.model.config,
+          self.manifest,
+          mode='original',
+      )
+
+    # Optimized mode with U8 / BF16 / F16 / skipped keys / shape mismatch.
+    opt_dir = os.path.join(self.st_dir, 'opt_edge')
+    os.makedirs(opt_dir, exist_ok=True)
+    edge_header = {
+        'a_codes': {'dtype': 'U8', 'shape': [3], 'data_offsets': [0, 3]},
+        'b_unaligned': {'dtype': 'F32', 'shape': [4], 'data_offsets': [3, 19]},
+        'c_empty': {'dtype': 'F32', 'shape': [0, 4], 'data_offsets': [19, 19]},
+        'd_scalar': {'dtype': 'BF16', 'shape': [], 'data_offsets': [19, 21]},
+        'e_proj': {'dtype': 'F16', 'shape': [2, 3], 'data_offsets': [21, 33]},
+        'z_skip': {'dtype': 'I8', 'shape': [2], 'data_offsets': [33, 35]},
+    }
+    edge_payload = (
+        np.array([1, 2, 3], dtype=np.uint8).tobytes()
+        + np.ones((4,), dtype=np.float32).tobytes()
+        + np.array(2.0, dtype=ml_dtypes.bfloat16).tobytes()
+        + np.arange(6, dtype=np.float16).tobytes()
+        + np.array([-1, 1], dtype=np.int8).tobytes()
+    )
+    hb = json.dumps(edge_header).encode('utf-8')
+    with open(os.path.join(opt_dir, 'edge.safetensors'), 'wb') as fh:
+      fh.write(struct.pack('<Q', len(hb)) + hb + edge_payload)
+    edge_manifest = {
+        'schema_version': hf_mapping.SCHEMA_VERSION,
+        'rules': [
+            {'source_keys': ['a_codes'], 'target_keys': ['codes'], 'ops': []},
+            {
+                'source_keys': ['b_unaligned'],
+                'target_keys': ['unaligned_f32'],
+                'ops': [],
+            },
+            {'source_keys': ['c_empty'], 'target_keys': ['empty'], 'ops': []},
+            {'source_keys': ['d_scalar'], 'target_keys': ['scalar'], 'ops': []},
+            {
+                'source_keys': ['e_proj'],
+                'target_keys': ['f16_proj'],
+                'ops': [{'transpose': {'axes': [1, 0]}}],
+            },
+        ],
+    }
+    with (
+        mock.patch.object(env_utils, 'is_internal_env', return_value=False),
+        mock.patch.object(
+            env_utils, 'is_pathways_initialized', return_value=False
+        ),
+    ):
+      opt_loaded = safetensors_loader.load_and_create_model(
+          opt_dir,
+          _EdgeCaseModel,
+          config=None,
+          manifest=edge_manifest,
+          dtype=None,
+          mode='optimized',
+      )
+      np.testing.assert_array_equal(opt_loaded.codes.value, [1, 2, 3])
+      bf16_opt_dir = os.path.join(self.st_dir, 'opt_bf16_cast')
+      os.makedirs(bf16_opt_dir, exist_ok=True)
+      stnp.save_file(
+          {k: v.astype(ml_dtypes.bfloat16) for k, v in raw.items()},
+          os.path.join(bf16_opt_dir, 'model.safetensors'),
+      )
+      opt_f32 = safetensors_loader.load_and_create_model(
+          bf16_opt_dir,
+          test_common.ToyTransformer,
+          self.model.config,
+          self.manifest,
+          dtype=jnp.float32,
+          mode='optimized',
+      )
+      self.assertEqual(
+          nnx.state(opt_f32)['emb']['embedding'].value.dtype, jnp.float32
+      )
+      with (
+          mock.patch.object(
+              safetensors_loader.mmap,
+              'mmap',
+              side_effect=OSError('mmap failed'),
+          ),
+          self.assertRaises(OSError),
+      ):
+        safetensors_loader.load_safetensors_with_offsets(
+            os.path.join(bf16_opt_dir, 'model.safetensors')
+        )
+      with self.assertRaisesRegex(ValueError, 'Duplicate tensor keys'):
+        safetensors_loader.load_and_create_model(
+            dup_dir,
+            test_common.ToyTransformer,
+            self.model.config,
+            self.manifest,
+            mode='optimized',
+        )
+      bad_opt_dir = os.path.join(self.st_dir, 'bad_opt_shape')
+      os.makedirs(bad_opt_dir, exist_ok=True)
+      stnp.save_file(
+          {
+              **raw,
+              'emb.embedding': np.zeros((4, 4), dtype=np.float32),
+          },
+          os.path.join(bad_opt_dir, 'model.safetensors'),
+      )
+      with self.assertRaisesRegex(ValueError, 'Shape mismatch'):
+        safetensors_loader.load_and_create_model(
+            bad_opt_dir,
+            test_common.ToyTransformer,
+            self.model.config,
+            self.manifest,
+            mode='optimized',
+        )
+
+    # Corrupt headers: oversized size, non-dict JSON, bad metadata, OOB offsets.
+    for idx, (raw_bytes, exc_cls) in enumerate((
+        (struct.pack('<Q', 0), ValueError),
+        (struct.pack('<Q', 200_000_000), ValueError),
+        (struct.pack('<Q', 2) + b'[]', ValueError),
+        (struct.pack('<Q', 20) + b'{"x": 1}', OSError),
+    )):
+      del idx
+      bad_path = os.path.join(self.st_dir, 'corrupt.safetensors')
+      with open(bad_path, 'wb') as fh:
+        fh.write(raw_bytes)
+      with self.assertRaises(exc_cls):
+        safetensors_loader.load_safetensors_with_offsets(bad_path)
+
+    bad_meta_dir = os.path.join(self.st_dir, 'bad_meta')
+    os.makedirs(bad_meta_dir, exist_ok=True)
+    for meta, expected_exc in (
+        ({'dtype': 'F32', 'shape': [-1], 'data_offsets': [0, 4]}, ValueError),
+        ({'dtype': 'F32', 'shape': [2], 'data_offsets': [0, 4]}, ValueError),
+        ({'dtype': 'F32', 'shape': [1], 'data_offsets': [0, 4]}, OSError),
+    ):
+      b = json.dumps({'emb.embedding': meta}).encode('utf-8')
+      p = os.path.join(bad_meta_dir, 'bad.safetensors')
+      with open(p, 'wb') as fh:
+        fh.write(struct.pack('<Q', len(b)) + b)
+      with self.assertRaises(expected_exc):
+        safetensors_loader.load_safetensors_with_offsets(p)
 
 
 if __name__ == '__main__':

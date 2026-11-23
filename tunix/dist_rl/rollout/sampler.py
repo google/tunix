@@ -16,52 +16,9 @@
 
 import dataclasses
 from typing import Any, Protocol, Sequence, runtime_checkable
-from jax import typing
 import numpy as np
 
 from tunix.dist_rl.common import datatypes
-
-ArrayLike = typing.ArrayLike
-
-
-@dataclasses.dataclass(kw_only=True)
-class SamplingParams:
-  """Engine-neutral sampling configuration for a generation request.
-
-  Attributes:
-    max_tokens: Maximum number of tokens to generate.
-    temperature: Softmax temperature applied while sampling. Kept explicit so it
-      can be carried through to any later log-probability scoring, ensuring the
-      sampling distribution and the scoring distribution match.
-    top_p: Nucleus sampling probability threshold.
-    top_k: Top-k sampling candidate count threshold.
-    seed: Random seed for reproducible generation.
-    return_logprobs: Whether to record per-token log probabilities.
-    return_logits: Whether to record per-token output logits.
-    return_routed_experts: Whether to record the MoE expert ids each token was
-      routed through, so training can replay them instead of re-routing. Only
-      meaningful for MoE models on a backend that supports capture; the backend
-      must also be configured to capture, since it is an engine-level setting.
-    routed_experts_prompt_start: Token index in prompt from which to start
-      returning routing data. In multi-turn rollouts, set to the cumulative
-      length of previously processed tokens to return only newly prefilled
-      environment tokens and completion.
-    beam_size: Beam width for beam search decoding.
-    cache_salt: Optional salt string for isolating KV prefix cache entries
-      (e.g., pinned to Turn-1 policy version during partial rollout).
-  """
-
-  max_tokens: int = 64
-  temperature: float = 1.0
-  top_p: float | None = None
-  top_k: int | None = None
-  seed: int | None = None
-  return_logprobs: bool = False
-  return_logits: bool = False
-  return_routed_experts: bool = False
-  routed_experts_prompt_start: int = 0
-  beam_size: int | None = None
-  cache_salt: str | None = None
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -79,7 +36,6 @@ class SamplingRequest(datatypes.Request):
       returning routing data. In multi-turn rollouts, set to the cumulative
       length of previously processed tokens to return only newly prefilled
       environment tokens and completion.
-    sampling_params: Optional per-request sampling configuration.
     images: Optional image input(s) associated with this prompt.
     audios: Optional audio waveform input(s) associated with this prompt.
   """
@@ -88,7 +44,6 @@ class SamplingRequest(datatypes.Request):
   max_tokens: int | None = None
   cache_salt: str | None = None
   routed_experts_prompt_start: int = 0
-  sampling_params: SamplingParams | None = None
   images: Any = None
   audios: Any = None
 
@@ -126,7 +81,7 @@ class SamplingResponse(datatypes.Response):
   logprobs: np.ndarray | None = None
   logits: np.ndarray | None = None
   finish_reason: str = "stop"
-  routed_experts: ArrayLike | None = None
+  routed_experts: np.ndarray | None = None
 
   def __post_init__(self):
     if (
@@ -187,14 +142,8 @@ class Sampler(Protocol):
   # --- Inference ---
   async def sample(
       self,
-      sampling_requests: (
-          SamplingRequest
-          | Sequence[SamplingRequest]
-          | Any
-          | Sequence[Any]
-      ),
-      **kwargs,
-  ) -> list[SamplingResponse] | Any:
+      sampling_requests: SamplingRequest | Sequence[SamplingRequest],
+  ) -> SamplingResponse | Sequence[SamplingResponse]:
     """Generates completions for a batch of prompt conversations concurrently."""
     ...
 
@@ -216,25 +165,25 @@ class Sampler(Protocol):
     ...
 
   async def pre_weight_sync(
-      self, sync_request: WeightSyncRequest | Any = None, **kwargs
+      self, sync_request: WeightSyncRequest, **kwargs
   ) -> str | None | Any:
     """Prepares staging handshake prior to policy weight update from the specified controller."""
     ...
 
   async def weight_sync(
-      self, sync_request: WeightSyncRequest | Any = None, **kwargs
-  ) -> str | None | Any:
+      self, sync_request: WeightSyncRequest, **kwargs
+  ) -> int | None:
     """Updates model weights in-place from the specified controller."""
     ...
 
   async def post_weight_sync(
-      self, sync_request: WeightSyncRequest | Any = None, **kwargs
+      self, sync_request: WeightSyncRequest, **kwargs
   ) -> str | None | Any:
     """Finalizes and switches active policy weights after transfer completion."""
     ...
 
   async def abort_weight_sync(
-      self, sync_request: WeightSyncRequest | Any = None, **kwargs
+      self, sync_request: WeightSyncRequest, **kwargs
   ) -> str | None | Any:
     """Discards staging and restores serving the previous policy weights."""
     ...

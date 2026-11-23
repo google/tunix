@@ -37,9 +37,9 @@ exec "${DIR}/../../launch/common/launch.sh" \
   rollout_model_config.mesh.axis_names="('fsdp','tp')" \
   cluster_config.target="k8s" \
   cluster_config.k8s.tunix_image="${TUNIX_IMAGE}" \
-  cluster_config.ports.orchestrator=20000 \
-  cluster_config.ports.rollout=20001 \
-  cluster_config.ports.trainer=20002 \
+  cluster_config.roles.orchestrator.port=20000 \
+  cluster_config.roles.rollout.port=20001 \
+  cluster_config.roles.trainer.port=20002 \
   cluster_config.k8s.trainer.jobset_yaml="jobset.pathways.yaml" \
   cluster_config.k8s.trainer.tpu_slice="tpuv5e:4x4" \
   cluster_config.k8s.rollout.jobset_yaml="leaderworkerset.mcjax.ray.yaml" \

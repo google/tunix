@@ -25,6 +25,10 @@ from typing import Any
 # Rendered in place of a quantity a trajectory does not report.
 MISSING = "-"
 
+# The format spec of the floats the explorer prints (rewards, Float64 schema
+# values): 3 significant digits, e.g. `12.3` or `1.23e+03`.
+FLOAT_SPEC = ".3g"
+
 
 def format_optional(value: Any, spec: str = "") -> str:
   """Formats `value` with `spec` (as in `format()`), or `MISSING` for None."""

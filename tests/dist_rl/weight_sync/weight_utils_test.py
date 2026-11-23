@@ -14,6 +14,8 @@
 
 """Tests for transport-neutral weight_utils helpers."""
 
+from unittest import mock
+
 from absl.testing import absltest
 from flax import nnx
 import jax
@@ -111,6 +113,21 @@ class WeightUtilsTest(absltest.TestCase):
         ],
     )
     self.assertLen(kept_arrays, 2)
+
+  def test_filter_bindable_batches_block_until_ready(self):
+    a1 = jnp.ones((2, 4), dtype=jnp.bfloat16)
+    a2 = jnp.zeros((2, 4), dtype=jnp.bfloat16)
+    with mock.patch.object(
+        weight_utils.jax,
+        "block_until_ready",
+        wraps=weight_utils.jax.block_until_ready,
+    ) as spy_ready:
+      kept_names, kept_arrays = weight_utils.filter_bindable(
+          ["w1", "w2"], [a1, a2]
+      )
+    self.assertEqual(kept_names, ["w1", "w2"])
+    self.assertEqual(kept_arrays, [a1, a2])
+    spy_ready.assert_called_once_with([a1, a2])
 
   def test_filter_bindable_and_apply_to_runner_preserve_vllm_lookup_buffers(
       self,
@@ -374,6 +391,50 @@ class WeightUtilsTest(absltest.TestCase):
             "__element_count__": 0,
         },
     )
+
+  def test_global_shard_indices_and_tensor_metadata_use_ffi_skips_addressable_shards(
+      self,
+  ):
+    mesh = jax.sharding.Mesh(np.array(jax.devices()[:4]), ("data",))
+    sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec("data")
+    )
+    tpu_shard = mock.Mock()
+    tpu_shard.device.platform = "tpu"
+    tpu_shard.index = (slice(0, 2), slice(None))
+    local_arr = mock.Mock(
+        shape=(8, 2),
+        ndim=2,
+        dtype=np.dtype(np.float32),
+        sharding=sharding,
+        addressable_shards=[tpu_shard],
+    )
+    self.assertEqual(
+        weight_utils.global_shard_indices(local_arr, sharding, use_ffi=False),
+        (0,),
+    )
+
+    class _NoDisassembleArray:
+      shape = (8, 2)
+      ndim = 2
+      dtype = np.dtype(np.float32)
+
+      def __init__(self, arr_sharding):
+        self.sharding = arr_sharding
+
+      @property
+      def addressable_shards(self):
+        raise AssertionError(
+            "addressable_shards must not be accessed when use_ffi=True"
+        )
+
+    ffi_arr = _NoDisassembleArray(sharding)
+    self.assertEqual(
+        weight_utils.global_shard_indices(ffi_arr, sharding, use_ffi=True),
+        (0, 1, 2, 3),
+    )
+    meta = weight_utils.tensor_metadata("w", ffi_arr, 0, use_ffi=True)
+    self.assertEqual(meta.global_shard_indices, (0, 1, 2, 3))
 
 
 if __name__ == "__main__":

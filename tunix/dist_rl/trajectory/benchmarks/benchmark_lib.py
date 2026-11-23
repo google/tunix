@@ -1,6 +1,6 @@
 """Benchmark engine for progressive recovery load testing on Trajectory Store."""
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 import concurrent.futures
 import dataclasses
 import itertools
@@ -163,8 +163,8 @@ def _drain_trajectories(
 def _validate_checkpoint_reads(
     reader: store.TrajectoryReader,
     target_ids: Sequence[str],
-    metas: Sequence[trajectory_lib.TrajectoryMetadata],
-    loaded_trajs: Sequence[trajectory_lib.Trajectory],
+    metas: Mapping[str, trajectory_lib.TrajectoryMetadata],
+    loaded_trajs: Mapping[str, trajectory_lib.Trajectory],
     metrics_updates: int,
 ) -> str | None:
   """Validates recovered metadata, trajectories, and optional metrics."""

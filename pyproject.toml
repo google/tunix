@@ -1,6 +1,6 @@
 [project]
 name = "google-tunix"
-version = "0.1.8"
+version = "0.1.9"
 authors = [
   { name = "Tunix Developers", email = "tunix-dev@google.com" },
 ]
@@ -27,8 +27,8 @@ dependencies = [
   "huggingface_hub",
   "importlib_resources",
   # Jax 0.7.2 has performance regression on OSS
-  # Jax 0.11.1 removed jax.experimental.hijax.MutableHiType, which flax (through 0.12.8, the newest release) still subclasses
-  "jax>=0.6.0,!=0.7.2,<0.11.1",
+  # Keep <0.12 until jax 0.12.x is qualified; flax>=0.12.10 supports jax>=0.11.1.
+  "jax>=0.6.0,!=0.7.2,<0.12",
   "jaxtyping",
   "jinja2",  # Huggingface chat template
   "kagglehub",
@@ -64,21 +64,21 @@ docs = [
     "sphinx_contributors",
 ]
 prod = [
-  "jax[tpu]>=0.6.0,!=0.7.2,<0.11.1",
+  "jax[tpu]>=0.6.0,!=0.7.2,<0.12",
   "tokamax>=0.0.4",
 ]
 tpu = [
-  "jax[tpu]>=0.6.0,!=0.7.2,<0.11.1",
+  "jax[tpu]>=0.6.0,!=0.7.2,<0.12",
   "tokamax>=0.0.4",
 ]
 gpu = [
-  "jax[cuda12]>=0.6.0,!=0.7.2,<0.11.1",
+  "jax[cuda12]>=0.6.0,!=0.7.2,<0.12",
   "tokamax>=0.0.4",
   "triton",
   "jax-triton",  # vLLM Triton GPU paged attention (not yet supported by Tokamax)
 ]
 cuda13 = [
-  "jax[cuda13]>=0.6.0,!=0.7.2,<0.11.1",
+  "jax[cuda13]>=0.6.0,!=0.7.2,<0.12",
   "tokamax>=0.0.4",
   "triton",
   "jax-triton",  # vLLM Triton GPU paged attention (not yet supported by Tokamax)
@@ -91,18 +91,18 @@ test = [
   "pytest-xdist",
   "gcsfs",
   "chex",
-  "opentelemetry-exporter-otlp-proto-grpc>=1.25.0",
-  "opentelemetry-sdk>=1.25.0",
+  "opentelemetry-exporter-otlp-proto-grpc>=1.39.0",
+  "opentelemetry-sdk>=1.39.0",
 ]
 cli = [
   "tensorflow",
 ]
 otel = [
-  # OpenTelemetry metrics export for dist_rl.
-  "opentelemetry-api>=1.25.0",
-  "opentelemetry-sdk>=1.25.0",
+  # OpenTelemetry metrics and event-log export for dist_rl.
+  "opentelemetry-api>=1.39.0",
+  "opentelemetry-sdk>=1.39.0",
   # OTLP/gRPC exporter so the SDK can reach a collector.
-  "opentelemetry-exporter-otlp-proto-grpc>=1.25.0",
+  "opentelemetry-exporter-otlp-proto-grpc>=1.39.0",
 ]
 frozenlake = [
   "gymnasium",
@@ -135,7 +135,12 @@ minimum-version = "build-system.requires"
 build-dir = "build/{wheel_tag}"
 wheel.packages = ["tunix"]
 wheel.py-api = "cp312"
+sdist.exclude = ["/.gemini", "/.github", "/docs", "/examples", "/scripts", "/tests"]
 editable.mode = "inplace"
+
+[tool.cibuildwheel]
+build = ["cp312-manylinux_x86_64"]
+manylinux-x86_64-image = "manylinux_2_28"
 
 [tool.pyink]
 line-length = 80

@@ -224,7 +224,7 @@ class RunCliTest(absltest.TestCase):
     self.assertEqual(exit_code, 0)
     self.assertEqual(
         json.loads(stdout.getvalue())["stats"]["schema_stats"],
-        {"tunix": {"masked_out": False}},
+        {"tunix": tunix_diagnostics.TunixDiagnostics().extract(trajectory)},
     )
 
 

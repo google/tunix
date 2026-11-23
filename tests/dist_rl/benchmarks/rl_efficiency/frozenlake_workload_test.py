@@ -14,14 +14,13 @@
 
 """CPU-only tests of the FrozenLake benchmark workload; no TPU/JAX/pytest.
 
-They read the YAML configs with PyYAML. Run directly:
-python3 tests/dist_rl/benchmarks/rl_efficiency/frozenlake_workload_test.py
+They read the YAML configs with PyYAML. Run directly from the repository root:
+python3 -m unittest tests/dist_rl/benchmarks/rl_efficiency/frozenlake_workload_test.py
 """
 
 import argparse
 import ast
 import contextlib
-import importlib.util
 import io
 import json
 from pathlib import Path
@@ -32,17 +31,10 @@ import unittest
 
 import yaml
 
-ROOT = Path(__file__).resolve().parents[4]
+from tests import test_utils
 
-
-def load_module(path):
-  spec = importlib.util.spec_from_file_location(path.stem, path)
-  module = importlib.util.module_from_spec(spec)
-  spec.loader.exec_module(module)
-  return module
-
-
-benchmark = load_module(
+ROOT = test_utils.tunix_package_dir().parent
+benchmark = test_utils.load_module_from_path(
     ROOT / "tunix/dist_rl/benchmarks/rl_efficiency/benchmark.py"
 )
 workload = benchmark.load_workload()
@@ -258,7 +250,6 @@ class FrozenLakeBenchmarkTest(unittest.TestCase):
             "rollout_config.total_generation_steps",
             rollout["total_generation_steps"],
         ),
-        ("rollout_config.return_logprobs", rollout["return_logprobs"]),
         ("vllm_config.hbm_utilization", vllm["hbm_utilization"]),
         ("vllm_config.max_num_seqs", vllm["max_num_seqs"]),
         ("vllm_config.max_num_batched_tokens", vllm["max_num_batched_tokens"]),
@@ -354,9 +345,9 @@ class FrozenLakeBenchmarkTest(unittest.TestCase):
     defaults = yaml_defaults()
     local_launcher = (LAUNCH / "common/local.sh").read_text()
     for key, bash_var in (
-        ("cluster_config.trainer_main", "TRAINER_MAIN"),
-        ("cluster_config.rollout_main", "ROLLOUT_MAIN"),
-        ("cluster_config.orchestrator_main", "ORCHESTRATOR_MAIN"),
+        ("cluster_config.roles.trainer.main", "TRAINER_MAIN"),
+        ("cluster_config.roles.rollout.main", "ROLLOUT_MAIN"),
+        ("cluster_config.roles.orchestrator.main", "ORCHESTRATOR_MAIN"),
     ):
       with self.subTest(key=key):
         self.assertIn(f'--process_main="${{{bash_var}}}"', local_launcher)

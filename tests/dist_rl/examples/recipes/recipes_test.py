@@ -94,6 +94,42 @@ _TRELLIS = launcher_testing.Expected(
     model_id="Qwen/Qwen3.5-35B-A3B",
     extra_args=(_K8S_IMAGE,),
 )
+_V5P_OPENMATH = launcher_testing.Expected(
+    name="v5p_openmath_qwen3_0p6b",
+    script="recipes/v5p_openmath_qwen3_0p6b.sh",
+    example="openmath_dist",
+    module="openmath",
+    target="k8s",
+    batch_size=256,
+    mini_batch_size=256,
+    num_generations=8,
+    max_steps=20,
+    actor_mesh=(16, 1, 1),
+    rollout_mesh=(4, 1),
+    model_id="Qwen/Qwen3-0.6B",
+    extra_args=(
+        _K8S_IMAGE,
+        "actor_model_config.model_path=gs://test-bucket/qwen3-0.6b/0/items",
+    ),
+)
+_V7X_OPENMATH = launcher_testing.Expected(
+    name="v7x_openmath_qwen3_0p6b",
+    script="recipes/v7x_openmath_qwen3_0p6b.sh",
+    example="openmath_dist",
+    module="openmath",
+    target="k8s",
+    batch_size=256,
+    mini_batch_size=256,
+    num_generations=8,
+    max_steps=20,
+    actor_mesh=(32, 1, 1),
+    rollout_mesh=(4, 2),
+    model_id="Qwen/Qwen3-0.6B",
+    extra_args=(
+        _K8S_IMAGE,
+        "actor_model_config.model_path=gs://test-bucket/qwen3-0.6b/0/items",
+    ),
+)
 
 
 class RecipesTest(launcher_testing.LauncherTestCase):
@@ -106,6 +142,8 @@ class RecipesTest(launcher_testing.LauncherTestCase):
           _BENCHMARK_FROZENLAKE_GEMMA4,
           _FROZENLAKE_QWEN3P5,
           _TRELLIS,
+          _V5P_OPENMATH,
+          _V7X_OPENMATH,
       )
   )
   def test_recipe_contract(self, expected: launcher_testing.Expected):
@@ -122,13 +160,12 @@ class RecipesTest(launcher_testing.LauncherTestCase):
     self.assertFalse(config["data_config"]["shuffle"])
     self.assertEqual(config["agentic_grpo_config"]["beta"], 0.0)
     rl_train = config["rl_training_config"]
-    self.assertEqual(rl_train["eval_every_n_steps"], 999)
     self.assertEqual(rl_train["checkpointing_options"]["max_to_keep"], 2)
     self.assertEqual(
         rl_train["metrics_logging_options"]["project_name"], "ci-smoke-gsm8k"
     )
     cluster = hp.config_mapping("cluster_config")
-    self.assertEqual(cluster["wait_timeout_secs"], 900)
+    self.assertEqual(cluster["local"]["wait_timeout_secs"], 900)
     expected_local = {
         "auto_detect_devices": True,
         "trainer_devices": "0,1,2,3",
@@ -174,9 +211,8 @@ class RecipesTest(launcher_testing.LauncherTestCase):
     self.assertEqual(rollout["model_source"], "maxtext")
     self.assertEqual(rollout["kwargs"]["maxtext_model_name"], "qwen3-0.6b")
     self.assertEqual(config["rollout_engine"], "vllm")
-    # Only the orchestrator skips the logprob check; the rollout node rejects
-    # `rollout_config.return_logprobs: false`.
-    self.assertTrue(config["rollout_config"]["return_logprobs"])
+    # Only the orchestrator skips the logprob check; the rollout still returns
+    # logprobs.
     self.assertFalse(config["agentic_grpo_config"]["use_rollout_logps"])
     weight_sync_cfg = config["weight_sync_config"]
     self.assertEqual(weight_sync_cfg["mode"], "raiden")
@@ -221,7 +257,7 @@ class RecipesTest(launcher_testing.LauncherTestCase):
     self.assertEqual(actor["remat_config"], "decoder")
     self.assertTrue(actor["use_flash_attention"])
     self.assertEqual(actor["flash_attention_block_size"], 256)
-    # The tokenizer's EOS token stops a turn, not the base config's Qwen ids.
+    # The tokenizer's EOS token stops a turn.
     self.assertEqual(hp.config_mapping("rollout_config")["eos_tokens"], "")
     self.assertEqual(
         hp.config_mapping("chat_parser_config"),
@@ -291,7 +327,7 @@ class RecipesTest(launcher_testing.LauncherTestCase):
         },
     )
     weight_sync_cfg = config["weight_sync_config"]
-    self.assertEqual(weight_sync_cfg["raiden_use_ffi"], 1)
+    self.assertIs(weight_sync_cfg["raiden"]["use_ffi"], True)
     self.assertTrue(weight_sync_cfg["prefuse_moe_weights"])
     self.assertTrue(weight_sync_cfg["verify_weights"])
     k8s = config["cluster_config"]["k8s"]
@@ -302,12 +338,99 @@ class RecipesTest(launcher_testing.LauncherTestCase):
     self.assertEqual(config["cluster_config"]["rollout_replicas"], 2)
     # Ports come from `math_gsm8k_dist/k8s_launcher.sh`; sequence lengths from
     # `math_gsm8k_dist/gsm8k.yaml`.
-    self.assertEqual(config["cluster_config"]["ports"]["trainer"], 20002)
+    self.assertEqual(
+        config["cluster_config"]["roles"]["trainer"]["port"], 20002
+    )
     self.assertEqual(config["rollout_config"]["max_prompt_length"], 1024)
     self.assertEqual(config["rollout_config"]["total_generation_steps"], 1024)
     self.assertIn("RAIDEN_USE_FFI=1", run.stdout)
     self.assertIn("RAIDEN_USE_FFI=0", run.stdout)
     self.assertIn("testuser-roll-1", run.stdout)
+
+  def test_v5p_openmath_qwen3_0p6b(self):
+    run, hp = self.assert_launcher(_V5P_OPENMATH)
+    config = hp.config
+    self.assertEqual(config["actor_model_config"]["model_source"], "maxtext")
+    self.assertEqual(config["rollout_model_config"]["model_source"], "maxtext")
+    self.assertEqual(
+        config["actor_model_config"]["model_download_path"],
+        "/dev/shm/models/Qwen3-0.6B",
+    )
+    extra_cfg = config["dist_training_config"]["maxtext_extra_config"]
+    self.assertEqual(extra_cfg["steps"], 20)
+    self.assertEqual(extra_cfg["learning_rate_schedule_steps"], 20)
+    self.assertEqual(extra_cfg["learning_rate_final_fraction"], 0.0)
+    k8s = config["cluster_config"]["k8s"]
+    self.assertEqual(k8s["service_account"], "xpk-sa")
+    self.assertEqual(k8s["priority_class"], "medium")
+    self.assertEqual(k8s["cpu_machine"], "n2-standard-64")
+    roles = config["cluster_config"]["roles"]
+    rollout_env = roles["rollout"]["env"]
+    self.assertEqual(roles["orchestrator"]["memory"]["request"], "240G")
+    self.assertEqual(roles["trainer"]["memory"]["request"], "120G")
+    self.assertEqual(roles["trainer"]["memory"]["limit"], "160G")
+    self.assertEqual(k8s["trainer"]["jobset_yaml"], "jobset.pathways.yaml")
+    self.assertEqual(k8s["trainer"]["tpu_slice"], "tpuv5:2x2x4")
+    self.assertEqual(k8s["rollout"]["jobset_yaml"], "jobset.tpu.yaml")
+    self.assertEqual(k8s["rollout"]["tpu_slice"], "tpuv5:2x2x1")
+    self.assertEqual(config["cluster_config"]["rollout_replicas"], 12)
+    self.assertEqual(
+        roles["trainer"]["env"]["RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER"], "0"
+    )
+    self.assertEqual(rollout_env["RAIDEN_DEVICES_PER_HOST"], "4")
+    self.assertEqual(rollout_env["DP_SCHED_ROUTING"], "round_robin")
+    self.assertEqual(rollout_env["CONTINUE_DECODE_EOS_CHECK_INTERVAL"], "0")
+    self.assertIn("testuser-roll-11", run.stdout)
+
+  def test_v7x_openmath_qwen3_0p6b(self):
+    run, hp = self.assert_launcher(_V7X_OPENMATH)
+    config = hp.config
+    self.assertEqual(config["actor_model_config"]["model_source"], "maxtext")
+    self.assertEqual(config["rollout_model_config"]["model_source"], "maxtext")
+    rl_train = config["rl_training_config"]
+    self.assertEqual(rl_train["max_seq_token_per_tpu"], 17408)
+    self.assertEqual(rl_train["profiler_options"]["profiler_steps"], 0)
+    vllm = config["vllm_config"]
+    self.assertFalse(vllm["skip_jax_precompile"])
+    self.assertEqual(vllm["max_num_seqs"], 48)
+    self.assertEqual(vllm["max_num_batched_tokens"], 8192)
+    self.assertEqual(
+        vllm["engine_kwargs"]["additional_config"]["max_decode_steps"], 256
+    )
+    extra_cfg = config["dist_training_config"]["maxtext_extra_config"]
+    self.assertTrue(extra_cfg["use_tokamax_splash"])
+    self.assertTrue(extra_cfg["sa_qk_diag_skip"])
+    self.assertTrue(extra_cfg["sa_sv_diag_skip"])
+    self.assertTrue(extra_cfg["sa_use_base2_exp"])
+    self.assertEqual(extra_cfg["remat_policy"], "none")
+    self.assertEqual(extra_cfg["sa_block_q"], 1024)
+    self.assertEqual(extra_cfg["sa_block_kv"], 1024)
+    k8s = config["cluster_config"]["k8s"]
+    self.assertEqual(k8s["service_account"], "xpk-sa")
+    self.assertEqual(k8s["priority_class"], "high")
+    self.assertTrue(k8s["use_dynamic_slicing"])
+    self.assertEqual(k8s["cpu_machine"], "c3d-standard-60")
+    roles = config["cluster_config"]["roles"]
+    rollout_env = roles["rollout"]["env"]
+    self.assertEqual(roles["orchestrator"]["memory"]["request"], "200G")
+    self.assertEqual(k8s["trainer"]["jobset_yaml"], "jobset.pathways.yaml")
+    self.assertEqual(k8s["trainer"]["tpu_slice"], "tpu7x:2x2x4")
+    self.assertEqual(k8s["rollout"]["jobset_yaml"], "jobset.tpu.yaml")
+    self.assertEqual(k8s["rollout"]["tpu_slice"], "tpu7x:2x2x1")
+    self.assertEqual(config["cluster_config"]["rollout_replicas"], 12)
+    self.assertEqual(
+        roles["orchestrator"]["env"]["TPU_RAIDEN_CONTROL_PLANE_BACKEND"], "tcp"
+    )
+    self.assertEqual(
+        roles["trainer"]["env"]["RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER"], "0"
+    )
+    self.assertEqual(rollout_env["RAIDEN_DEVICES_PER_HOST"], "8")
+    self.assertEqual(rollout_env["DP_SCHED_ROUTING"], "least_loaded")
+    self.assertEqual(rollout_env["NUM_PRECOMPILE_WORKERS"], "4")
+    self.assertEqual(rollout_env["ENABLE_TOPK_PREFILTER"], "1")
+    self.assertEqual(rollout_env["USE_BATCHED_RPA_KERNEL"], "1")
+    self.assertEqual(rollout_env["CONTINUE_DECODE_EOS_CHECK_INTERVAL"], "0")
+    self.assertIn("testuser-roll-11", run.stdout)
 
   def test_user_args_override_recipe_values(self):
     run = self.dry_run(

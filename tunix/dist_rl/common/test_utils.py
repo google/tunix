@@ -192,6 +192,9 @@ class MockBaseSamplerImpl(base_sampler_lib.Sampler):
     self.current_policy_version: int = 0
     self.staging_policy_version: int | None = None
     self.fail_request_ids: set[str] = set()
+    # Per-request overrides of `default_delay` and `min_turns`.
+    self.delay_by_request_id: dict[str, float] = {}
+    self.min_turns_by_request_id: dict[str, int] = {}
     self.tokenizer: TokenizerLike = (
         tokenizer if tokenizer is not None else MockTokenizer()
     )
@@ -255,20 +258,20 @@ class MockBaseSamplerImpl(base_sampler_lib.Sampler):
 
   async def post_weight_sync(
       self,
-      sync_request: (
-          datatypes.WeightSyncRequest | datatypes.WeightSyncMetadata | None
-      ) = None,
+      sync_request: datatypes.WeightSyncRequest,
       **kwargs,
   ) -> Any:
     del kwargs
     if self.staging_policy_version is not None:
       self.current_policy_version = self.staging_policy_version
       self.staging_policy_version = None
-    elif isinstance(sync_request, datatypes.WeightSyncRequest):
-      self.current_policy_version = int(sync_request.policy_version)
+    else:
+      self.current_policy_version = sync_request.policy_version
     return True
 
-  async def abort_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+  async def abort_weight_sync(
+      self, sync_request: datatypes.WeightSyncRequest, **kwargs
+  ) -> Any:
     del sync_request, kwargs
     self.staging_policy_version = None
     return True
@@ -296,10 +299,10 @@ class MockBaseSamplerImpl(base_sampler_lib.Sampler):
       tokens[-1] = self.eos_token_id
     return tokens
 
-  def _resolve_prompt_ids(self, req: Any) -> np.ndarray:
-    prompt = (
-        req.prompt if isinstance(req, base_sampler_lib.SamplingRequest) else req
-    )
+  def _resolve_prompt_ids(
+      self, req: base_sampler_lib.SamplingRequest
+  ) -> np.ndarray:
+    prompt = req.prompt
     if isinstance(prompt, np.ndarray):
       return np.asarray(prompt, dtype=np.int32).reshape(-1)
     return np.asarray(self.tokenizer.encode(str(prompt)), dtype=np.int32)
@@ -311,12 +314,12 @@ class MockBaseSamplerImpl(base_sampler_lib.Sampler):
       turn: int,
       prompt_len: int,
       gen_len: int,
-      sp: base_sampler_lib.SamplingParams | None,
+      return_routed_experts: bool,
+      prompt_start: int,
   ) -> np.ndarray | None:
     slab = self._routed_slab
-    if slab is None or sp is None or not sp.return_routed_experts:
+    if slab is None or not return_routed_experts:
       return None
-    prompt_start = int(sp.routed_experts_prompt_start)
     if prompt_start < 0 or prompt_start > prompt_len:
       raise ValueError(
           "routed_experts_prompt_start must satisfy"
@@ -338,38 +341,31 @@ class MockBaseSamplerImpl(base_sampler_lib.Sampler):
     return out
 
   def _sample_single(
-      self, req: Any, base_kwargs: Dict[str, Any]
+      self, req: base_sampler_lib.SamplingRequest
   ) -> base_sampler_lib.SamplingResponse:
     """Builds a single `SamplingResponse` for `req`."""
-    is_req = isinstance(req, base_sampler_lib.SamplingRequest)
-    request_kwargs = {
-        **base_kwargs,
-        **(req.metadata if is_req and req.metadata else {}),
-    }
-    req_id_str = str(req.request_id) if is_req and req.request_id else "default"
-    if request_kwargs.get("raise_in_sample"):
-      raise RuntimeError(str(request_kwargs["raise_in_sample"]))
+    req_id_str = req.request_id
     if req_id_str in self.fail_request_ids:
       raise RuntimeError(f"Simulated failure for request_id={req_id_str}")
 
-    sp = req.sampling_params if is_req else None
     prompt_ids = self._resolve_prompt_ids(req)
     self.sample_calls += 1
     turn = self._turn_counters.pop(req_id_str, 0)
-    min_turns = int(request_kwargs.get("min_turns", self.min_turns))
-    is_final = turn >= min_turns or bool(request_kwargs.get("force_finish"))
+    is_final = turn >= self.min_turns_by_request_id.get(
+        req_id_str, self.min_turns
+    )
     if not is_final:
       self._turn_counters[req_id_str] = turn + 1
       if len(self._turn_counters) > _MAX_TURN_COUNTER_ENTRIES:
         self._turn_counters.popitem(last=False)
-    ans = request_kwargs.get("answer", f"result_for_{req_id_str}")
+    ans = f"result_for_{req_id_str}"
     txt = (
         f"FINAL_ANSWER: [{self.sampler_name}] {ans}"
         if is_final
         else f"TOOL_CALL: search(query='turn {turn} for {req_id_str}')"
     )
     tokens = self._build_turn_tokens(
-        max_tokens=sp.max_tokens if sp is not None else None,
+        max_tokens=req.max_tokens,
         is_final_turn=is_final,
     )
     routed_experts = self._maybe_build_routed(
@@ -377,7 +373,8 @@ class MockBaseSamplerImpl(base_sampler_lib.Sampler):
         turn=turn,
         prompt_len=int(prompt_ids.size),
         gen_len=int(tokens.size),
-        sp=sp,
+        return_routed_experts=self.config.return_routed_experts,
+        prompt_start=req.routed_experts_prompt_start,
     )
     return base_sampler_lib.SamplingResponse(
         request_id=req_id_str,
@@ -393,21 +390,25 @@ class MockBaseSamplerImpl(base_sampler_lib.Sampler):
       sampling_requests: (
           base_sampler_lib.SamplingRequest
           | Sequence[base_sampler_lib.SamplingRequest]
-          | Any
-      ) = None,
-      **kwargs,
-  ) -> Any:
+      ),
+  ) -> (
+      base_sampler_lib.SamplingResponse
+      | list[base_sampler_lib.SamplingResponse]
+  ):
     """Simulates LLM inference latency and agentic turn responses."""
-    if sampling_requests is None:
-      raise ValueError("sampling_requests cannot be None.")
-    delay = kwargs.get("delay_seconds", self.default_delay)
+    is_single = isinstance(sampling_requests, base_sampler_lib.SamplingRequest)
+    requests = [sampling_requests] if is_single else list(sampling_requests)
+    delay = max(
+        (
+            self.delay_by_request_id.get(req.request_id, self.default_delay)
+            for req in requests
+        ),
+        default=0.0,
+    )
     if delay > 0:
       await asyncio.sleep(delay)
-
-    is_sequence = isinstance(sampling_requests, (list, tuple))
-    requests = list(sampling_requests) if is_sequence else [sampling_requests]
-    responses = [self._sample_single(req, kwargs) for req in requests]
-    return responses if is_sequence else responses[0]
+    responses = [self._sample_single(req) for req in requests]
+    return responses[0] if is_single else responses
 
   async def migrate_kv_cache(
       self,
@@ -428,33 +429,21 @@ class MockBaseSamplerImpl(base_sampler_lib.Sampler):
 
   async def pre_weight_sync(
       self,
-      sync_request: (
-          datatypes.WeightSyncRequest | datatypes.WeightSyncMetadata | None
-      ) = None,
+      sync_request: datatypes.WeightSyncRequest,
       **kwargs,
   ) -> Any:
     self.staging_policy_version = None
-    if isinstance(sync_request, datatypes.WeightSyncRequest):
-      return int(sync_request.policy_version)
-    metadata = kwargs.pop("metadata", sync_request)
-    if isinstance(metadata, datatypes.WeightSyncMetadata):
-      return metadata.new_policy_version
-    return None
+    del kwargs
+    return sync_request.policy_version
 
   async def weight_sync(
       self,
-      sync_request: (
-          datatypes.WeightSyncRequest | datatypes.WeightSyncMetadata | None
-      ) = None,
+      sync_request: datatypes.WeightSyncRequest,
       **kwargs,
   ) -> Any:
-    if isinstance(sync_request, datatypes.WeightSyncRequest):
-      self.staging_policy_version = int(sync_request.policy_version)
-      return self.staging_policy_version
-    metadata = kwargs.pop("metadata", sync_request)
-    if isinstance(metadata, datatypes.WeightSyncMetadata):
-      self.current_policy_version = metadata.new_policy_version
-    return self.current_policy_version
+    del kwargs
+    self.staging_policy_version = sync_request.policy_version
+    return self.staging_policy_version
 
 
 @dataclasses.dataclass(frozen=True)
@@ -484,6 +473,7 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
       synthetic_fwd_only: bool = False,
   ) -> None:
     self.config = config
+    self.model: Any = None
     # Feeds the `trainer._config` fallback in
     # `abstract_trainer.resolve_dummy_routed_experts`.
     self._config: FakeMoeModelConfig | None = None
@@ -627,9 +617,7 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
     del step
     return {}
 
-  # Return type kept as `Any` for Pyrefly override compatibility with
-  # `AbstractTrainer.get_metrics() -> datatypes.MetricsBuffer`.
-  def get_metrics(self) -> Any:
+  def get_metrics(self) -> dict[str, int | float]:
     return {
         "loss": 0.25,
         "mock_trainer/fwd_bwd_calls": self.fwd_bwd_calls,
@@ -820,23 +808,6 @@ class MockGlobalOrchestrator:
     if self.trainer_handle:
       return await self.trainer_handle.asubmit("train_step", valid_trajs)
     return 1
-
-  def synchronize_weights(
-      self, metadata: datatypes.WeightSyncMetadata
-  ) -> List[int]:
-    """Executes Phase 3 weight synchronization across rollout handles."""
-    if self.trainer_handle:
-      self.trainer_handle.submit(
-          "push_weights", metadata.source_endpoints or []
-      )
-
-    versions: List[int] = []
-    for handle in self.actor_handles:
-      handle.submit("pre_weight_sync", metadata)
-    for handle in self.actor_handles:
-      v = handle.submit("weight_sync", metadata)
-      versions.append(v)
-    return versions
 
 
 def is_tpu_available() -> bool:

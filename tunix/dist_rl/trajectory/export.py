@@ -30,7 +30,7 @@ Trajectories without recorded metrics keep their row, with null `metrics.*`
 values. Lists (e.g. `agent.tool_definitions`) are kept as single cells.
 """
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 import pandas as pd
@@ -116,7 +116,7 @@ def _check_no_metrics_collision(metadata_columns: Iterable[str]) -> None:
 
 def _get_metrics(
     reader: base_store.TrajectoryReader[Any],
-    trajectory_ids: list[str] | None,
+    trajectory_ids: Sequence[str] | None,
     metadata_ids: set[str | None],
 ) -> dict[str, trajectory_lib.TrajectoryMetrics]:
   """Returns the recorded metrics for the trajectories in `metadata_ids`.
@@ -152,7 +152,7 @@ def _get_metrics(
 
 def export_trajectories_df(
     reader: base_store.TrajectoryReader[Any],
-    trajectory_ids: list[str] | None = None,
+    trajectory_ids: Sequence[str] | None = None,
 ) -> pd.DataFrame:
   """Returns one flat row per trajectory, combining its metadata and metrics.
 
@@ -181,7 +181,7 @@ def export_trajectories_df(
   """
   metadata_rows = [
       _flatten(metadata.model_dump())
-      for metadata in reader.get_trajectories_metadata(trajectory_ids)
+      for metadata in reader.get_trajectories_metadata(trajectory_ids).values()
   ]
   if not metadata_rows:
     return pd.DataFrame(columns=[TRAJECTORY_ID_COLUMN])

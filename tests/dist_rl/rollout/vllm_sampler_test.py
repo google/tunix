@@ -132,11 +132,7 @@ class VllmSamplerTest(absltest.TestCase):
     req = base_sampler_lib.SamplingRequest(
         request_id="req_01",
         prompt="Test prompt",
-        sampling_params=base_sampler_lib.SamplingParams(
-            max_tokens=16,
-            temperature=0.7,
-            return_logprobs=True,
-        ),
+        max_tokens=16,
     )
     response = asyncio.run(self.sampler.sample(req))
     self.assertIsInstance(response, base_sampler_lib.SamplingResponse)
@@ -193,28 +189,6 @@ class VllmSamplerTest(absltest.TestCase):
     self.assertEqual(responses[1].request_id, "req_b")
     self.assertEqual(responses[1].text, "completion b")
     self.assertEqual(responses[1].finish_reason, "length")
-
-  def test_sample_raw_string_mode(self):
-    async def mock_generate_stream(prompt, sampling_params, request_id):
-      del prompt, sampling_params, request_id
-      yield SimpleNamespace(
-          outputs=[
-              SimpleNamespace(
-                  text="Output text",
-                  token_ids=[1, 2],
-                  finish_reason="stop",
-                  logprobs=None,
-              )
-          ]
-      )
-
-    self.mock_engine.generate.side_effect = mock_generate_stream
-    texts = asyncio.run(
-        self.sampler.sample(
-            ["Prompt string 1", "Prompt string 2"], max_tokens=16
-        )
-    )
-    self.assertEqual(texts, ["Output text", "Output text"])
 
   def test_sample_error_resilience(self):
     async def mock_failing_stream(prompt, sampling_params, request_id):
@@ -310,7 +284,7 @@ class VllmSamplerTest(absltest.TestCase):
     )
 
     res_sync = asyncio.run(self.sampler.weight_sync(sync_req))
-    self.assertTrue(res_sync)
+    self.assertIsNone(res_sync)
     self.mock_engine.collective_rpc.assert_any_call(
         "raiden_h2d", args=(), kwargs={"uuid": 1}
     )
@@ -354,10 +328,6 @@ class VllmSamplerTest(absltest.TestCase):
     self.assertEqual(load_info.num_requests_running, 1)
     self.assertAlmostEqual(load_info.kv_cache_usage_perc, 25.5)
 
-  def test_sample_none_requests_raises(self):
-    with self.assertRaises(ValueError):
-      asyncio.run(self.sampler.sample(None))
-
   def test_engine_args_built_from_config(self):
     sampler = vllm_sampler.VllmSampler(
         server_id="engine_args",
@@ -366,6 +336,7 @@ class VllmSamplerTest(absltest.TestCase):
             tensor_parallel_size=2,
             data_parallel_size=3,
             return_routed_experts=True,
+            seed=1234,
             rollout_vllm_model_version="Qwen/Qwen3-8B",
             rollout_vllm_hbm_utilization=0.75,
             rollout_vllm_async_scheduling=True,
@@ -393,6 +364,7 @@ class VllmSamplerTest(absltest.TestCase):
     self.assertEqual(engine_args.max_logprobs, 1)
     self.assertEqual(engine_args.logprobs_mode, "processed_logprobs")
     self.assertTrue(engine_args.enable_return_routed_experts)
+    self.assertEqual(engine_args.seed, 1234)
     self.assertEqual(engine_args.dtype, "bfloat16")
 
   def test_lora_config_expanded_and_rejects_dp_greater_than_one(self):
@@ -522,15 +494,27 @@ class VllmSamplerTest(absltest.TestCase):
         server_id="uninit_no_raiden", config=_config(weight_sync_mode="none")
     )
     self.assertIsNone(asyncio.run(uninit.bind_weight_sync()))
-    self.assertTrue(asyncio.run(uninit.pre_weight_sync(None)))
-    self.assertTrue(asyncio.run(uninit.post_weight_sync(None)))
-    self.assertTrue(asyncio.run(uninit.abort_weight_sync(None)))
+    self.assertTrue(
+        asyncio.run(
+            uninit.pre_weight_sync(base_sampler_lib.WeightSyncRequest())
+        )
+    )
+    self.assertTrue(
+        asyncio.run(
+            uninit.post_weight_sync(base_sampler_lib.WeightSyncRequest())
+        )
+    )
+    self.assertTrue(
+        asyncio.run(
+            uninit.abort_weight_sync(base_sampler_lib.WeightSyncRequest())
+        )
+    )
     with self.assertRaises(NotImplementedError):
       asyncio.run(uninit.get_weight_sync_metadata())
     with self.assertRaisesRegex(
         RuntimeError, "supports Raiden weight sync only"
     ):
-      asyncio.run(uninit.weight_sync(None))
+      asyncio.run(uninit.weight_sync(base_sampler_lib.WeightSyncRequest()))
 
   def test_raiden_job_name_derived_from_server_id(self):
     sampler = vllm_sampler.VllmSampler(server_id="worker-42", config=_config())
@@ -615,23 +599,15 @@ class VllmSamplerTest(absltest.TestCase):
     self.mock_engine.reset_prefix_cache.assert_not_awaited()
     self.mock_engine.resume_generation.assert_awaited_once()
 
-    with self.assertRaisesRegex(ValueError, "disagrees with"):
-      asyncio.run(sampler.pause(partial_rollout=False))
-    with self.assertRaisesRegex(ValueError, "disagrees with"):
-      asyncio.run(sampler.pre_weight_sync(req, partial_rollout=False))
-
   def test_build_vllm_params_forwards_cache_salt(self):
     sampler = vllm_sampler.VllmSampler(
         server_id="cache_salt",
         config=_config(temperature=0.6, partial_rollout=True),
     )
-    req_params = SimpleNamespace(
-        max_tokens=32,
-        temperature=0.6,
-        cache_salt="policy_v4",
+    req = base_sampler_lib.SamplingRequest(
+        prompt="test", max_tokens=32, cache_salt="policy_v4"
     )
-    req = SimpleNamespace(sampling_params=req_params)
-    vllm_params = sampler._build_vllm_params(req, {})
+    vllm_params = sampler._build_vllm_params(req)
     self.assertEqual(getattr(vllm_params, "cache_salt", None), "policy_v4")
 
   def test_sample_forwards_cache_salt_for_string_and_token_prompts(self):
@@ -656,28 +632,24 @@ class VllmSamplerTest(absltest.TestCase):
         base_sampler_lib.SamplingRequest(
             request_id="turn0_str",
             prompt="Turn 0 prompt string",
-            sampling_params=base_sampler_lib.SamplingParams(
-                max_tokens=16,
-                cache_salt="policy_v0",
-            ),
+            max_tokens=16,
+            cache_salt="policy_v0",
         ),
         base_sampler_lib.SamplingRequest(
             request_id="turn1_tokens",
             prompt=np.array([10, 20, 30], dtype=np.int32),
-            sampling_params=base_sampler_lib.SamplingParams(
-                max_tokens=16,
-                cache_salt="policy_v0",
-            ),
+            max_tokens=16,
+            cache_salt="policy_v0",
         ),
         base_sampler_lib.SamplingRequest(
             request_id="unsalted_str",
             prompt="Unsalted string prompt",
-            sampling_params=base_sampler_lib.SamplingParams(max_tokens=16),
+            max_tokens=16,
         ),
         base_sampler_lib.SamplingRequest(
             request_id="unsalted_tokens",
             prompt=np.array([40, 50], dtype=np.int32),
-            sampling_params=base_sampler_lib.SamplingParams(max_tokens=16),
+            max_tokens=16,
         ),
     ]
     asyncio.run(self.sampler.sample(reqs))
@@ -695,13 +667,10 @@ class VllmSamplerTest(absltest.TestCase):
     sampler = vllm_sampler.VllmSampler(
         server_id="routed_experts", config=_config(temperature=0.6)
     )
-    req_params = SimpleNamespace(
-        max_tokens=32,
-        temperature=0.6,
-        routed_experts_prompt_start=48,
+    req = base_sampler_lib.SamplingRequest(
+        prompt="test", max_tokens=32, routed_experts_prompt_start=48
     )
-    req = SimpleNamespace(sampling_params=req_params)
-    vllm_params = sampler._build_vllm_params(req, {})
+    vllm_params = sampler._build_vllm_params(req)
     self.assertEqual(
         getattr(vllm_params, "routed_experts_prompt_start", 0), 48
     )
@@ -713,55 +682,11 @@ class VllmSamplerTest(absltest.TestCase):
     )
     req = base_sampler_lib.SamplingRequest(
         prompt="test",
-        sampling_params=base_sampler_lib.SamplingParams(max_tokens=32),
+        max_tokens=32,
     )
-    vllm_params = sampler._build_vllm_params(req, {})
+    vllm_params = sampler._build_vllm_params(req)
     self.assertTrue(vllm_params.detokenize)
     self.assertTrue(vllm_params.include_stop_str_in_output)
-
-  def test_build_vllm_params_detokenize_opt_out_via_sampling_params(self):
-    """An explicit detokenize=False from sampling_params is honored."""
-    sampler = vllm_sampler.VllmSampler(
-        server_id="detokenize", config=_config(temperature=0.6)
-    )
-    req = SimpleNamespace(
-        sampling_params=SimpleNamespace(
-            max_tokens=32, temperature=0.6, detokenize=False
-        )
-    )
-    vllm_params = sampler._build_vllm_params(req, {})
-    self.assertFalse(vllm_params.detokenize)
-
-  def test_build_vllm_params_detokenize_opt_out_via_kwargs(self):
-    """An explicit detokenize=False from kwargs is honored even when rollout_vllm_sampling_kwargs sets detokenize=True."""
-    sampler = vllm_sampler.VllmSampler(
-        server_id="detokenize",
-        config=_config(
-            temperature=0.6,
-            rollout_vllm_sampling_kwargs={"detokenize": True},
-        ),
-    )
-    req = base_sampler_lib.SamplingRequest(
-        prompt="test",
-        sampling_params=base_sampler_lib.SamplingParams(
-            max_tokens=32, temperature=0.6
-        ),
-    )
-    vllm_params = sampler._build_vllm_params(req, {"detokenize": False})
-    self.assertFalse(vllm_params.detokenize)
-
-  def test_build_vllm_params_sampling_params_overrides_kwargs(self):
-    """sampling_params.detokenize takes precedence over conflicting kwargs."""
-    sampler = vllm_sampler.VllmSampler(
-        server_id="detokenize", config=_config(temperature=0.6)
-    )
-    req = SimpleNamespace(
-        sampling_params=SimpleNamespace(
-            max_tokens=32, temperature=0.6, detokenize=False
-        )
-    )
-    vllm_params = sampler._build_vllm_params(req, {"detokenize": True})
-    self.assertFalse(vllm_params.detokenize)
 
   def test_build_vllm_params_applies_rollout_vllm_sampling_kwargs(self):
     """A worker opts out of the detokenize and stop-string defaults."""
@@ -776,52 +701,55 @@ class VllmSamplerTest(absltest.TestCase):
     )
     req = base_sampler_lib.SamplingRequest(
         prompt="test",
-        sampling_params=base_sampler_lib.SamplingParams(max_tokens=32),
+        max_tokens=32,
     )
-    vllm_params = sampler._build_vllm_params(req, {})
+    vllm_params = sampler._build_vllm_params(req)
     self.assertFalse(vllm_params.detokenize)
     self.assertFalse(vllm_params.include_stop_str_in_output)
 
-  def test_duck_typed_request_processing(self):
-    async def mock_generate_stream(prompt, sampling_params, request_id):
-      del prompt, sampling_params
-      yield SimpleNamespace(
-          outputs=[
-              SimpleNamespace(
-                  text=f"ans:{request_id}",
-                  token_ids=[1, 2],
-                  finish_reason="stop",
-                  logprobs=None,
-              )
-          ]
-      )
-
-    self.mock_engine.generate.side_effect = mock_generate_stream
-    reqs = [
-        SimpleNamespace(
-            prompt="Solve 2+2",
-            request_id="req_attr_1",
-            sampling_params=SimpleNamespace(
-                max_tokens=64,
-                temperature=0.5,
-                top_p=0.9,
-                top_k=-1,
-                stop_sequences=[],
-                return_logprobs=False,
-            ),
+  def test_build_vllm_params_maps_rollout_config(self):
+    sampler = vllm_sampler.VllmSampler(
+        server_id="config_mapping",
+        config=_config(
+            temperature=0.6,
+            top_p=0.8,
+            top_k=20,
+            max_tokens_to_generate=128,
+            eos_tokens=[1, 2],
+            return_logprobs=True,
         ),
-        {
-            "prompt": "Solve 3+3",
-            "request_id": "req_dict_2",
-            "sampling_params": {"max_tokens": 32, "temperature": 0.2},
-        },
-    ]
-    results = asyncio.run(self.sampler.sample(reqs))
-    self.assertLen(results, 2)
-    self.assertEqual(results[0].request_id, "req_attr_1")
-    self.assertEqual(results[0].text, "ans:req_attr_1")
-    self.assertEqual(results[1].request_id, "req_dict_2")
-    self.assertEqual(results[1].text, "ans:req_dict_2")
+    )
+    req = base_sampler_lib.SamplingRequest(prompt="test")
+    vllm_params = sampler._build_vllm_params(req)
+    self.assertAlmostEqual(vllm_params.temperature, 0.6)
+    self.assertAlmostEqual(vllm_params.top_p, 0.8)
+    self.assertEqual(vllm_params.top_k, 20)
+    self.assertEqual(vllm_params.max_tokens, 128)
+    self.assertEqual(vllm_params.stop_token_ids, [1, 2])
+    self.assertEqual(vllm_params.logprobs, 1)
+
+  def test_build_vllm_params_defaults_unset_rollout_config_fields(self):
+    sampler = vllm_sampler.VllmSampler(
+        server_id="config_defaults",
+        config=_config(top_p=None, top_k=None, return_logprobs=False),
+    )
+    req = base_sampler_lib.SamplingRequest(prompt="test")
+    vllm_params = sampler._build_vllm_params(req)
+    self.assertAlmostEqual(vllm_params.top_p, 0.95)
+    self.assertEqual(vllm_params.top_k, -1)
+    self.assertIsNone(vllm_params.logprobs)
+
+  def test_build_vllm_params_request_max_tokens_takes_precedence(self):
+    sampler = vllm_sampler.VllmSampler(
+        server_id="max_tokens",
+        config=_config(
+            max_tokens_to_generate=128,
+            rollout_vllm_sampling_kwargs={"max_tokens": 64},
+        ),
+    )
+    req = base_sampler_lib.SamplingRequest(prompt="test", max_tokens=32)
+    vllm_params = sampler._build_vllm_params(req)
+    self.assertEqual(vllm_params.max_tokens, 32)
 
   def test_pre_weight_sync_forwards_free_kv_cache_and_tracks_transfer_status(
       self,
@@ -877,11 +805,23 @@ class VllmSamplerTest(absltest.TestCase):
     self.assertIsNone(asyncio.run(sampler.bind_weight_sync()))
     with self.assertRaises(NotImplementedError):
       asyncio.run(sampler.get_weight_sync_metadata())
-    self.assertTrue(asyncio.run(sampler.pre_weight_sync()))
+    self.assertTrue(
+        asyncio.run(
+            sampler.pre_weight_sync(base_sampler_lib.WeightSyncRequest())
+        )
+    )
     with self.assertRaises(RuntimeError):
-      asyncio.run(sampler.weight_sync())
-    self.assertTrue(asyncio.run(sampler.post_weight_sync()))
-    self.assertTrue(asyncio.run(sampler.abort_weight_sync()))
+      asyncio.run(sampler.weight_sync(base_sampler_lib.WeightSyncRequest()))
+    self.assertTrue(
+        asyncio.run(
+            sampler.post_weight_sync(base_sampler_lib.WeightSyncRequest())
+        )
+    )
+    self.assertTrue(
+        asyncio.run(
+            sampler.abort_weight_sync(base_sampler_lib.WeightSyncRequest())
+        )
+    )
 
     invalid_cfg = _config()
     invalid_cfg.weight_sync_mode = "invalid"  # type: ignore[assignment]

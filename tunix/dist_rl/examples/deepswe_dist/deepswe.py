@@ -14,7 +14,7 @@
 
 """DeepSWE components for the distributed GRPO example.
 
-* The rollout node imports this module (`cluster_config.registry_module`),
+* The rollout node imports this module (`registry_module`),
   which registers `DeepSWEEnv` and `DeepSWEAgent`.
 * The orchestrator calls `create_dataset(**data_config)` (`data_module`) for
   the task records.
@@ -22,7 +22,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping
 import json
 import logging
 from typing import Any
@@ -30,7 +30,6 @@ from typing import Any
 import grain
 import numpy as np
 from tunix.dist_rl.common import registry
-from tunix.dist_rl.orchestrator import dataset_utils
 from examples.deepswe import deepswe_data
 from examples.deepswe import sandbox_utils
 from examples.deepswe import swe_agent
@@ -244,127 +243,6 @@ def create_dataset(
       len(raw),
   )
   return raw.map_with_index(_to_task_record)
-
-
-def _entry_at(dataset: Any, index: int) -> dict[str, Any]:
-  entry = dataset[index]
-  if not isinstance(entry, dict):
-    raise TypeError(f"DeepSWE dataset item must be a dict, got {type(entry)}")
-  return _jsonify_lists(dict(entry))
-
-
-# TODO(noghabi): Remove build_prompt_item and iter_prompt_items with
-# run_deepswe_dist.py.
-def build_prompt_item(
-    *,
-    entry: dict[str, Any],
-    prompt_idx: int,
-    max_turns: int,
-    max_response_length: int,
-    temperature: float,
-    top_p: float | None,
-    top_k: int | None,
-    step_timeout_secs: int,
-    reward_timeout_secs: int,
-    env_backend: str,
-    use_agent_sandbox: bool,
-    scaffold: str,
-    env_verbose: bool,
-    overlong_filter: bool = False,
-    episode_timeout_secs: int | None = None,
-) -> dict[str, Any]:
-  """Builds one StandardRLProgram prompt item for a DeepSWE task."""
-  problem = _problem_statement(entry)
-  prompt_id = as_text(entry.get("instance_id") or f"deepswe_{prompt_idx}")
-  env_config = {
-      "entry": entry,
-      "prompt_id": prompt_id,
-      "max_steps": max_turns,
-      "step_timeout": step_timeout_secs,
-      "reward_timeout": reward_timeout_secs,
-      "backend": env_backend,
-      "use_agent_sandbox": use_agent_sandbox,
-      "scaffold": scaffold,
-      "verbose": env_verbose,
-  }
-  agent_config = {"scaffold": scaffold}
-  metadata: dict[str, Any] = {
-      "instance_id": prompt_id,
-      "problem_statement": problem,
-      "env_config": env_config,
-      "agent_config": agent_config,
-      # Read by TrajectoryCollectorEngine to decide which terminal statuses
-      # get their policy loss mask zeroed out.
-      "overlong_filter": overlong_filter,
-  }
-  # When `episode_timeout_secs` is None, `"episode_timeout"` is omitted from
-  # `metadata` so `TrajectoryCollectorEngine` uses its default
-  # (`timeouts.DEFAULT_EPISODE_TIMEOUT_S`).
-  if episode_timeout_secs is not None:
-    metadata["episode_timeout"] = episode_timeout_secs
-  return {
-      "prompt": problem,
-      "prompt_id": prompt_id,
-      "task_name": "deepswe",
-      "max_turns": max_turns,
-      "max_response_length": max_response_length,
-      "generation_kwargs": {
-          "max_generation_steps": max_response_length,
-          "temperature": temperature,
-          "top_p": top_p,
-          "top_k": top_k,
-          "return_logprobs": True,
-      },
-      "metadata": metadata,
-  }
-
-
-def iter_prompt_items(
-    *,
-    dataset: Any,
-    max_steps: int,
-    batch_size: int,
-    max_turns: int,
-    max_response_length: int,
-    temperature: float,
-    top_p: float | None,
-    top_k: int | None,
-    step_timeout_secs: int,
-    reward_timeout_secs: int,
-    env_backend: str,
-    use_agent_sandbox: bool,
-    scaffold: str,
-    env_verbose: bool,
-    overlong_filter: bool = False,
-    max_staleness: int = 0,
-    episode_timeout_secs: int | None = None,
-) -> Iterator[dict[str, Any]]:
-  """Yields one full-batch worth of prompt groups per RL step plus off-policy lookahead."""
-  dataset_size = len(dataset)
-  if dataset_size <= 0:
-    raise ValueError("DeepSWE dataset is empty.")
-
-  total_prompts = dataset_utils.total_prompt_groups(
-      max_steps, batch_size, max_staleness
-  )
-  for prompt_idx in range(total_prompts):
-    yield build_prompt_item(
-        entry=_entry_at(dataset, prompt_idx % dataset_size),
-        prompt_idx=prompt_idx,
-        max_turns=max_turns,
-        max_response_length=max_response_length,
-        temperature=temperature,
-        top_p=top_p,
-        top_k=top_k,
-        step_timeout_secs=step_timeout_secs,
-        reward_timeout_secs=reward_timeout_secs,
-        episode_timeout_secs=episode_timeout_secs,
-        env_backend=env_backend,
-        use_agent_sandbox=use_agent_sandbox,
-        scaffold=scaffold,
-        env_verbose=env_verbose,
-        overlong_filter=overlong_filter,
-    )
 
 
 @registry.register_env(DEEPSWE_ENV_NAME)

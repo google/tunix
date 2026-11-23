@@ -20,6 +20,7 @@ from typing import Any, ClassVar
 
 from absl.testing import absltest
 from absl.testing import parameterized
+import pandas as pd
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.dist_rl.trajectory import trajectory_testing
 from tunix.dist_rl.trajectory.explorer.diagnostics import schema_diagnostics
@@ -28,6 +29,8 @@ from tunix.dist_rl.trajectory.explorer.diagnostics import tunix_diagnostics
 
 _AGENT = trajectory_lib.Agent(name="a", version="1.0")
 _TUNIX_DIAGNOSTICS = tunix_diagnostics.TunixDiagnostics()
+# The `RunStats.df` names of the Tunix columns, which the Tunix diagnostics own.
+_TUNIX_DF_COLUMNS = [f"tunix__{c}" for c in _TUNIX_DIAGNOSTICS.COLUMN_DTYPES]
 
 
 def _trajectory(
@@ -767,14 +770,14 @@ class SchemaDiagnosticsTest(parameterized.TestCase):
   def test_trajectory_stats_carry_the_values_of_active_diagnostics(
       self,
   ) -> None:
+    trajectory = _tunix_trajectory(masked_out=True)
     stats = stats_lib.TrajectoryStats.from_trajectory(
-        _tunix_trajectory(masked_out=True), diagnostics=(_TUNIX_DIAGNOSTICS,)
+        trajectory, diagnostics=(_TUNIX_DIAGNOSTICS,)
     )
 
-    self.assertEqual(stats.schema_stats, {"tunix": {"masked_out": True}})
-    self.assertEqual(
-        stats.to_json_dict()["schema_stats"], {"tunix": {"masked_out": True}}
-    )
+    values = _TUNIX_DIAGNOSTICS.extract(trajectory)
+    self.assertEqual(stats.schema_stats, {"tunix": values})
+    self.assertEqual(stats.to_json_dict()["schema_stats"], {"tunix": values})
     self.assertIs(stats.to_row()["tunix__masked_out"], True)
 
   def test_diagnostics_skip_trajectories_of_other_schemas(self) -> None:
@@ -798,8 +801,7 @@ class SchemaDiagnosticsTest(parameterized.TestCase):
     )
 
     self.assertEqual(
-        run.df.columns.tolist(),
-        [*stats_lib.COLUMN_DTYPES, "tunix__masked_out"],
+        run.df.columns.tolist(), [*stats_lib.COLUMN_DTYPES, *_TUNIX_DF_COLUMNS]
     )
     masked_out = run.df["tunix__masked_out"]
     self.assertEqual(str(masked_out.dtype), "boolean")
@@ -808,11 +810,13 @@ class SchemaDiagnosticsTest(parameterized.TestCase):
     self.assertEqual(masked_out.isna().tolist(), [False, False, True, True])
     self.assertEqual(masked_out.dropna().tolist(), [True, False])
     self.assertEqual(
-        run.columns_of(_TUNIX_DIAGNOSTICS).columns.tolist(), ["masked_out"]
+        run.columns_of(_TUNIX_DIAGNOSTICS).columns.tolist(),
+        [*stats_lib.COLUMN_DTYPES, *_TUNIX_DIAGNOSTICS.COLUMN_DTYPES],
     )
+    # The run summary is computed from the frame the run-level hooks receive.
     self.assertEqual(
-        run.schema_stats,
-        {"tunix": {"num_masked_out": 1, "num_with_masked_out": 2}},
+        run.schema_stats["tunix"],
+        _TUNIX_DIAGNOSTICS.summarize(run.columns_of(_TUNIX_DIAGNOSTICS)),
     )
 
   def test_trajectories_can_be_a_one_shot_iterator(self) -> None:
@@ -841,7 +845,7 @@ class SchemaDiagnosticsTest(parameterized.TestCase):
     self.assertEqual(
         run.df.columns.tolist()[len(stats_lib.COLUMN_DTYPES) :],
         [
-            "tunix__masked_out",
+            *_TUNIX_DF_COLUMNS,
             "acme_eval__verdict",
             "acme_eval__num_retries",
             "acme_eval__latency_ms",
@@ -863,9 +867,9 @@ class SchemaDiagnosticsTest(parameterized.TestCase):
     )
 
     payload = json.loads(json.dumps(run.to_json_dict()))
+    # The run summary survives a JSON round trip unchanged.
     self.assertEqual(
-        payload["schema_stats"],
-        {"tunix": {"num_masked_out": 0, "num_with_masked_out": 1}},
+        payload["schema_stats"], {"tunix": dict(run.schema_stats["tunix"])}
     )
     # `summary --json` rows are `df` records: a boolean cell must come out as a
     # plain `bool`, which `json` can serialize (unlike `numpy.bool_`).
@@ -884,7 +888,7 @@ class SchemaDiagnosticsTest(parameterized.TestCase):
         diagnostics=(diagnostics,),
     )
 
-    columns = run.columns_of(diagnostics)
+    columns = run.columns_of(diagnostics)[list(diagnostics.COLUMN_DTYPES)]
     self.assertEqual(
         columns.dtypes.astype(str).tolist(), ["string", "Int64", "Float64"]
     )
@@ -907,6 +911,84 @@ class SchemaDiagnosticsTest(parameterized.TestCase):
     self.assertEqual(num_retries.isna().tolist(), [False, True])
     # 2**53 + 1 is the smallest int a float64 cannot hold exactly.
     self.assertEqual(num_retries.iloc[0], 2**53 + 1)
+
+  def test_run_level_hooks_see_the_core_columns(self) -> None:
+    class Reporting(schema_diagnostics.SchemaDiagnostics[_EvalMetadata]):
+      COLUMN_DTYPES = {"verdict": "string"}
+
+      def compute_run_summary(
+          self, df: pd.DataFrame
+      ) -> Mapping[str, schema_diagnostics.JsonValue]:
+        return {"columns": df.columns.tolist()}
+
+    diagnostics = Reporting()
+    run = stats_lib.RunStats.from_trajectories(
+        [
+            _EvalMetadata(agent=_AGENT, verdict="pass").create_trajectory(
+                steps=[]
+            )
+        ],
+        diagnostics=(diagnostics,),
+    )
+
+    columns = [*stats_lib.COLUMN_DTYPES, "verdict"]
+    self.assertEqual(run.schema_stats["acme_eval"], {"columns": columns})
+    self.assertEqual(run.columns_of(diagnostics).columns.tolist(), columns)
+
+  def test_run_level_hooks_see_only_the_trajectories_of_their_schema(
+      self,
+  ) -> None:
+    class Reporting(
+        schema_diagnostics.SchemaDiagnostics[
+            trajectory_lib.TunixTrajectoryMetadata
+        ]
+    ):
+      COLUMN_DTYPES = {"masked_out": "boolean"}
+
+      def compute_run_summary(
+          self, df: pd.DataFrame
+      ) -> Mapping[str, schema_diagnostics.JsonValue]:
+        return {"trajectory_ids": df["trajectory_id"].tolist()}
+
+    diagnostics = Reporting()
+    run = stats_lib.RunStats.from_trajectories(
+        [
+            _tunix_trajectory("traj_1", masked_out=True),
+            _trajectory(),
+            # Its only column is null, yet it is a trajectory of the schema.
+            _tunix_trajectory("traj_3"),
+        ],
+        diagnostics=(diagnostics,),
+    )
+
+    self.assertEqual(
+        run.schema_stats["tunix"], {"trajectory_ids": ["traj_1", "traj_3"]}
+    )
+    # The rows keep their labels in `df`, which `summary` matches them by.
+    self.assertEqual(run.columns_of(diagnostics).index.tolist(), [0, 2])
+
+  def test_columns_must_not_have_the_names_of_core_columns(self) -> None:
+    class Shadowing(
+        schema_diagnostics.SchemaDiagnostics[
+            trajectory_lib.TunixTrajectoryMetadata
+        ]
+    ):
+      COLUMN_DTYPES = {"status": "string"}
+
+    diagnostics = (Shadowing(),)
+    error = r"Shadowing: columns \['status'\] have the names of core columns"
+    with self.assertRaisesRegex(ValueError, error):
+      stats_lib.RunStats.from_trajectories(
+          [_tunix_trajectory(status="SUCCEEDED")], diagnostics=diagnostics
+      )
+    # Like the namespace check, it runs up front, whatever the trajectories: a
+    # trajectory of another schema or an empty run fails too.
+    with self.assertRaisesRegex(ValueError, error):
+      stats_lib.TrajectoryStats.from_trajectory(
+          _trajectory(), diagnostics=diagnostics
+      )
+    with self.assertRaisesRegex(ValueError, error):
+      stats_lib.RunStats.from_trajectories([], diagnostics=diagnostics)
 
   @parameterized.named_parameters(
       ("run_of_another_schema", 2),

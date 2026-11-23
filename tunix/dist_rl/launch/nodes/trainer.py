@@ -189,10 +189,12 @@ def _tunix_training_config(
   Returns:
     The trainer config.
   """
-  rl_train = hp.config_mapping(_RL_TRAINING_KEY)
   built = hp.obtain_training_config_dict(_RL_TRAINING_KEY)
   return peft_trainer_v2.TrainingConfig(
-      eval_every_n_steps=int(rl_train["eval_every_n_steps"]),
+      # `TrainingConfig` requires it, but only `PeftTrainer.train()` reads it.
+      # The orchestrator drives `fwd_bwd` and `update` instead and runs no
+      # evaluation.
+      eval_every_n_steps=1,
       gradient_accumulation_steps=gradient_accumulation_steps,
       metrics_prefix="actor",
       pbar_description="Actor Training",
@@ -287,9 +289,11 @@ def _load_actor_model(
     The actor `nnx.Module`.
   """
   actor = hp.config_mapping(_ACTOR_KEY)
+  model_name = str(actor["model_name"])
   block_size = actor["flash_attention_block_size"]
+  freeze_router = bool(actor["freeze_router"])
   model, _ = automodel.AutoModel.from_pretrained(
-      model_id=str(actor["model_name"]),
+      model_id=model_name,
       mesh=mesh,
       model_path=model_dir,
       dtype=str(actor["dtype"]),
@@ -299,7 +303,23 @@ def _load_actor_model(
       flash_attention_block_size=(
           int(block_size) if block_size is not None else None
       ),
+      freeze_router=freeze_router,
   )
+  if freeze_router:
+    model_config = model.config  # pyrefly: ignore[missing-attribute]
+    try:
+      router_frozen = model_config.freeze_router
+    except AttributeError as exc:
+      raise ValueError(
+          f"actor_model_config.freeze_router is not supported by model"
+          f" {model_name!r} ({type(model_config).__name__} has no freeze_router"
+          " field)."
+      ) from exc
+    if not router_frozen:
+      raise ValueError(
+          "actor_model_config.freeze_router was not applied to model"
+          f" {model_name!r}."
+      )
   lora_config = _lora_config(actor)
   if lora_config is None:
     return model
@@ -645,6 +665,12 @@ def _create_maxtext_trainer_factory(
       attention=_kwarg(kwargs, "attention", ""),
       device_host_concurrent_gb=_ckpt_d2h_concurrent_gb(hp),
       extra_flags=_maxtext_extra_flags(hp),
+      skip_step_on_spikes=bool(
+          node_utils.optional_bool(kwargs, "skip_step_on_spikes")
+      ),
+      skip_step_on_nan=node_utils.optional_bool(kwargs, "skip_step_on_nan"),
+      skip_step_interval=_kwarg(kwargs, "skip_step_interval", 128),
+      skip_step_scaling_factor=_kwarg(kwargs, "skip_step_scaling_factor", 6.0),
   )
   logging.info("Creating MaxText device mesh...")
   mesh = maxtext_utils.create_maxtext_mesh(maxtext_config)

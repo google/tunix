@@ -367,8 +367,6 @@ class DeepSWEDistTest(parameterized.TestCase):
         "data_config.shuffle=true",
         "data_config.seed=7",
         "agentic_grpo_config.max_turns=5",
-        "agentic_grpo_config.episode_timeout=900.0",
-        "agentic_grpo_config.overlong_filter=true",
     ])
 
     items = orchestrator.load_prompt_items(hp)
@@ -379,94 +377,7 @@ class DeepSWEDistTest(parameterized.TestCase):
     metadata = first["metadata"]
     assert isinstance(metadata, Mapping)
     self.assertNotIn("agent_config", metadata)
-    self.assertEqual(metadata["episode_timeout"], 900.0)
-    self.assertTrue(metadata["overlong_filter"])
     self.assertEqual([items[0], items[1]], [items[2], items[3]])
-
-  # TODO(noghabi): Remove with `build_prompt_item` and `run_deepswe_dist.py`.
-  def test_rollout_env_and_agent_match_legacy_build_prompt_item(self):
-    dataset_dir = self.create_tempdir().full_path
-    datasets.Dataset.from_list(_sample_rows(1)).save_to_disk(dataset_dir)
-    record = deepswe.create_dataset(
-        split="train",
-        shuffle=False,
-        dataset_path=dataset_dir,
-    )[0]
-    assert record is not None
-    metadata = record["metadata"]
-    assert isinstance(metadata, Mapping)
-    env_config = metadata["env_config"]
-    assert isinstance(env_config, Mapping)
-    entry = env_config["entry"]
-    assert isinstance(entry, dict)
-
-    env_kwargs = {
-        "max_steps": 3,
-        "step_timeout": 1800,
-        "reward_timeout": 1800,
-        "backend": "kubernetes",
-        "use_agent_sandbox": False,
-        "scaffold": "r2egym",
-        "verbose": False,
-    }
-    env_cls = registry.ENV_REGISTRY.get(deepswe.DEEPSWE_ENV_NAME)
-    env = env_cls(**{
-        **env_kwargs,
-        **env_config,
-        "group_index": 1,
-        "num_generations": 2,
-        "policy_version": 4,
-    })
-
-    legacy_item = deepswe.build_prompt_item(
-        entry=entry,
-        prompt_idx=0,
-        max_turns=3,
-        max_response_length=1024,
-        temperature=0.7,
-        top_p=0.95,
-        top_k=None,
-        step_timeout_secs=1800,
-        reward_timeout_secs=1800,
-        env_backend="kubernetes",
-        use_agent_sandbox=False,
-        scaffold="r2egym",
-        env_verbose=False,
-    )
-    legacy_env = env_cls(**{
-        **legacy_item["metadata"]["env_config"],
-        "group_index": 1,
-        "num_generations": 2,
-        "policy_version": 4,
-    })
-
-    self.assertEqual(env.max_steps, 3)
-    self.assertEqual(env.step_timeout, 1800)
-    self.assertEqual(env.reward_timeout, 1800)
-    self.assertEqual(env.backend, "kubernetes")
-    self.assertFalse(env.use_agent_sandbox)
-    self.assertEqual(env.scaffold, "r2egym")
-    self.assertFalse(env.verbose)
-    self.assertEqual(env.extra_kwargs["group_id"], "repo__0")
-    self.assertEqual(env.extra_kwargs["pair_index"], 1)
-    self.assertEqual(env.entry, legacy_env.entry)
-    self.assertEqual(env.task, legacy_env.task)
-    self.assertEqual(env.extra_kwargs, legacy_env.extra_kwargs)
-
-    agent_cls = registry.AGENT_REGISTRY.get(deepswe.DEEPSWE_AGENT_NAME)
-    agent = agent_cls(scaffold="r2egym")
-    self.assertIsInstance(agent, deepswe.DeepSWEAgent)
-    self.assertEqual(agent.name, "deepswe_agent")
-    self.assertEqual(
-        agent.system_prompt,
-        swe_agent.get_system_prompt(scaffold="r2egym", use_fn_calling=False),
-    )
-    self.assertEqual(
-        agent.user_prompt_template,
-        swe_agent.get_user_prompt_template(
-            scaffold="r2egym", use_fn_calling=False
-        ),
-    )
 
   def test_rollout_env_and_agent_from_deepswe_yaml(self):
     dataset_dir = self.create_tempdir().full_path
@@ -480,8 +391,6 @@ class DeepSWEDistTest(parameterized.TestCase):
     metadata = item["metadata"]
     assert isinstance(metadata, Mapping)
     self.assertNotIn("agent_config", metadata)
-    self.assertEqual(metadata["episode_timeout"], 4800.0)
-    self.assertFalse(metadata["overlong_filter"])
     env_config = metadata["env_config"]
     assert isinstance(env_config, Mapping)
 

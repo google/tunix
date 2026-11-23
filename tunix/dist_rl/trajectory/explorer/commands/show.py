@@ -82,7 +82,7 @@ class ShowCommand(base.BaseCommand):
       )
       return 2
     try:
-      trajectories = reader.get_trajectories(self.trajectory_id)
+      trajectories = reader.get_trajectories(self.trajectory_id).values()
     except store.TrajectoryNotFoundError as error:
       print(
           "trajectory-explore: error: trajectory not found:"
@@ -144,15 +144,15 @@ def _render_header(
     diagnostics: Sequence[schema_diagnostics.SchemaDiagnostics],
 ) -> str:
   """Renders the trajectory's identity and headline figures."""
+  reward = formatting.format_optional(
+      trajectory_stats.total_reward, formatting.FLOAT_SPEC
+  )
   lines = [
       f"Trajectory {trajectory.trajectory_id}",
       f"Session: {formatting.format_optional(trajectory.session_id)}",
       f"Agent: {trajectory.agent.name} {trajectory.agent.version}",
       f"Status: {formatting.format_optional(trajectory_stats.status)}",
-      (
-          "Reward:"
-          f" {formatting.format_optional(trajectory_stats.total_reward, '.3g')}"
-      ),
+      f"Reward: {reward}",
       f"Steps: {trajectory_stats.steps}",
       f"Tokens: {formatting.format_optional(trajectory_stats.tokens)}",
   ]

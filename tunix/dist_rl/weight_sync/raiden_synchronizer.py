@@ -169,9 +169,12 @@ _filter_bindable = weight_utils.filter_bindable
 def _resolve_device_host_keys(devices: Sequence[Any]) -> List[Any]:
   """Returns per-device host grouping keys with consistent precedence.
 
-  Prefers `task_id` over `mesh.device_host_key` whenever `task_id`
-  distinguishes more hosts (for example, single-controller Pathways devices
-  that expose `task_id` with `process_index == 0` and no `logical_task=` repr).
+  Chooses whichever of `mesh.device_host_key`, `task_id`, or
+  `(slice_index, logical_task_id)` distinguishes the most physical hosts.
+  Single-controller Pathways IFRT TPU devices expose `logical_task_id` as a
+  structured device attribute while reporting `process_index == 0`, so
+  checking it directly avoids relying solely on `mesh.device_host_key`'s
+  `repr()` parsing (which is gated on `_is_pathways_backend_used()`).
 
   Args:
     devices: Sequence of JAX device objects to group by physical host.
@@ -180,12 +183,18 @@ def _resolve_device_host_keys(devices: Sequence[Any]) -> List[Any]:
     A list of host grouping keys aligned with `devices`.
   """
   host_keys = [mesh.device_host_key(d) for d in devices]
-  task_keys = [getattr(d, "task_id", None) for d in devices]
-  distinct_hosts = {k for k in host_keys if k is not None}
-  distinct_tasks = {k for k in task_keys if k is not None}
-  if len(distinct_tasks) > len(distinct_hosts):
-    return task_keys
-  return host_keys
+  task_keys = [mesh.device_attr(d, "task_id") for d in devices]
+  logical_task_keys = []
+  for d in devices:
+    tid = mesh.device_attr(d, "logical_task_id")
+    if isinstance(tid, int) and not isinstance(tid, bool):
+      logical_task_keys.append((mesh.device_slice_id(d), tid))
+    else:
+      logical_task_keys.append(None)
+  return max(
+      (host_keys, task_keys, logical_task_keys),
+      key=lambda ks: len({k for k in ks if k is not None}),
+  )
 
 
 def _devices_per_host(devices: List[Any]) -> int:
@@ -856,30 +865,17 @@ class RaidenSynchronizer:
   def checksums(self, sample: int = 3) -> dict[str, float | int]:
     """Per-tensor float32 abs-sums for cross-process verification.
 
-    Reduces one tensor at a time and syncs each result to the host, so at most
-    one tensor's float32 temporaries are live on device at once.
-
     Args:
-      sample: How many leading tensors (bind order) to report individually.
+      sample: How many leading tensors (canonical param_key order) to report
+        individually.
 
     Returns:
       The sampled per-tensor sums plus `__grand_total__`, `__tensor_count__`,
       and `__element_count__` over every bound tensor.
     """
-
-    def total(arr):
-      return float(jnp.sum(jnp.abs(arr).astype(jnp.float32)))
-
-    head: dict[str, float | int] = {
-        name: total(arr)
-        for name, arr in list(zip(self.names, self.arrays))[:sample]
-    }
-    head["__grand_total__"] = float(sum(total(a) for a in self.arrays))
-    # Registration pairs tensors by position, so the totals only compare when
-    # both sides bound the same set. Check these before trusting a mismatch.
-    head["__tensor_count__"] = len(self.arrays)
-    head["__element_count__"] = int(sum(a.size for a in self.arrays))
-    return head
+    return weight_utils.compute_checksums(
+        self.names, self.arrays, sample=sample
+    )
 
   def _shard_addresses(self) -> Tuple[str, ...]:
     """Data-plane address of each local shard.
@@ -927,7 +923,11 @@ class RaidenSynchronizer:
     # canonicalising here is what makes the manifests line up.
     variables = tuple(
         _tensor_metadata(
-            _param_key(name), arr, idx, devices=self._ffi_devices
+            _param_key(name),
+            arr,
+            idx,
+            devices=self._ffi_devices,
+            use_ffi=self._is_proxy,
         )
         for idx, (name, arr) in enumerate(zip(self.names, self.arrays))
     )
@@ -983,7 +983,15 @@ def patch_raiden_worker_sync() -> None:
       if orig_apply is not None:
         orig_apply(self, runner)
 
+    def _patched_checksums(self, sample: int = 3) -> dict[str, float | int]:
+      if self._sync is not None and hasattr(self._sync, "checksums"):
+        return self._sync.checksums(sample=sample)
+      return weight_utils.compute_checksums(
+          self.names, self.arrays, sample=sample
+      )
+
     rws.RaidenWorkerSync.apply_to_runner = _patched_apply_to_runner
+    rws.RaidenWorkerSync.checksums = _patched_checksums
     rws.RaidenWorkerSync._patched_by_tunix = True
     logging.info(
         "Successfully patched RaidenWorkerSync.apply_to_runner with Tunix"

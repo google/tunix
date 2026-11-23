@@ -245,7 +245,15 @@ class ShowTest(absltest.TestCase):
     )
     self.assertEqual(exit_code, 0)
     header = out.split("\n\n", maxsplit=1)[0].splitlines()
-    self.assertEqual(header[-2:], ["Tokens: 150 (100+50)", "masked_out: False"])
+    # `masked_out` is a hidden column.
+    self.assertEqual(
+        header[-3:],
+        [
+            "Tokens: 150 (100+50)",
+            "logp_mean: -0.35",
+            "logp_min: -0.5",
+        ],
+    )
 
   def test_schema_diagnostics_skip_trajectories_of_other_schemas(
       self,
@@ -270,7 +278,7 @@ class ShowTest(absltest.TestCase):
     self.assertEqual(exit_code, 0)
     self.assertEqual(
         json.loads(out)["stats"]["schema_stats"],
-        {"tunix": {"masked_out": False}},
+        {"tunix": _TUNIX_DIAGNOSTICS[0].extract(_SUCCEEDED_TRAJECTORY)},
     )
 
   def test_hidden_schema_columns_are_only_in_json(self) -> None:

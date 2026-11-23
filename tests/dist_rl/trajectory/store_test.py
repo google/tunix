@@ -176,11 +176,15 @@ class FromConfigTest(absltest.TestCase):
             "backend": self.BACKEND,
         }
 
-      def get_trajectories_metadata(self, trajectory_ids=None):
-        return []
+      def get_trajectories_metadata(
+          self, trajectory_ids=None, *, ignore_missing=False
+      ):
+        return {}
 
-      def get_trajectories(self, trajectory_ids):
-        return []
+      def get_trajectories(
+          self, trajectory_ids, *, ignore_missing=False, strict=True
+      ):
+        return {}
 
       def add_step(self, step, metadata):
         pass
@@ -428,11 +432,15 @@ class GenericTypeParametersTest(absltest.TestCase):
       def to_config(self):
         return {"backend": "minimal"}
 
-      def get_trajectories_metadata(self, trajectory_ids=None):
-        return []
+      def get_trajectories_metadata(
+          self, trajectory_ids=None, *, ignore_missing=False
+      ):
+        return {}
 
-      def get_trajectories(self, trajectory_ids):
-        return []
+      def get_trajectories(
+          self, trajectory_ids, *, ignore_missing=False, strict=True
+      ):
+        return {}
 
       def add_step(self, step, metadata):
         pass
@@ -715,8 +723,8 @@ class GenericTypeParametersTest(absltest.TestCase):
     try:
       metas = reader.get_trajectories_metadata(["t_tie"])
       self.assertLen(metas, 1)
-      self.assertIs(type(metas[0]), DuplicateMetaB)
-      self.assertEqual(metas[0].shared_metric, 7)
+      self.assertIs(type(metas["t_tie"]), DuplicateMetaB)
+      self.assertEqual(metas["t_tie"].shared_metric, 7)
     finally:
       reader.close()
 

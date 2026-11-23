@@ -37,7 +37,7 @@ from tunix.common import datatypes as common_datatypes
 from tunix.rl.agentic.agents import agent_types
 
 try:
-  from tunix.rl import _packing_ext  # pylint: disable=g-import-not-at-top
+  import tunix.rl._packing_ext as _packing_ext  # pylint: disable=g-import-not-at-top,consider-using-from-import
 except ModuleNotFoundError:
   _packing_ext = None
 
@@ -1139,3 +1139,37 @@ def pack_core(
         )
     )
   return chunks
+
+
+def pad_topk(
+    topk_ids: Sequence[np.ndarray | None] | None,
+    topk_logps: Sequence[np.ndarray | None] | None,
+    lengths: Sequence[int],
+    max_length: int,
+    k: int,
+    batch_size: int | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+  """Pads each item's leading `k` top-k columns to `[rows, max_length, k]`."""
+  if topk_ids is None or topk_logps is None:
+    raise ValueError("score_centering needs top-k logprobs from the rollout.")
+  rows = len(lengths) if batch_size is None else batch_size
+  ids = np.zeros((rows, max_length, k), dtype=np.int32)
+  logps = np.full(ids.shape, -np.inf, dtype=np.float32)
+  for i, length in enumerate(lengths):
+    row_ids, row_logps = topk_ids[i], topk_logps[i]
+    if (
+        row_ids is None
+        or row_logps is None
+        or row_ids.shape != row_logps.shape
+        or row_ids.ndim != 2
+        or row_ids.shape[0] != length
+        or row_ids.shape[1] < k
+    ):
+      raise ValueError(
+          f"Item {i} needs [{length}, >= {k}] top-k logprobs, got"
+          f" {None if row_ids is None else row_ids.shape}."
+      )
+    n = min(length, max_length)
+    ids[i, :n] = row_ids[:n, :k]
+    logps[i, :n] = row_logps[:n, :k]
+  return ids, logps

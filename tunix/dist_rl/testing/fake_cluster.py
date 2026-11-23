@@ -126,6 +126,8 @@ class FakeClusterHarness:
       max_concurrency: int = 8,
       compile_error_workers: set[str] | None = None,
       routed_experts_shape_spec: tuple[int, int] | None = None,
+      return_routed_experts: bool = False,
+      min_turns: int = 0,
       routed_experts_encode_mode: datatypes.RoutedExpertsEncodeMode = "auto",
       routed_experts_num_experts: int | None = None,
       rollout_max_prompt_length: int = 32,
@@ -160,6 +162,9 @@ class FakeClusterHarness:
     self.max_concurrency = max_concurrency
     self.compile_error_workers = compile_error_workers or set()
     self.routed_experts_shape_spec = routed_experts_shape_spec
+    self.return_routed_experts = return_routed_experts
+    self.min_turns = min_turns
+    self.rollout_temperature = 1.0
     self.routed_experts_encode_mode: datatypes.RoutedExpertsEncodeMode = (
         routed_experts_encode_mode
     )
@@ -240,6 +245,16 @@ class FakeClusterHarness:
       override: bool = False,
       re_register: bool = True,
   ) -> int:
+    config = rollout_worker_lib.RolloutConfig(
+        temperature=self.rollout_temperature,
+        return_logprobs=True,
+        partial_rollout=self.partial_rollout,
+        drain_timeout_s=self.drain_timeout_s,
+        max_prompt_length=self.rollout_max_prompt_length,
+        return_routed_experts=self.return_routed_experts,
+        routed_experts_encode_mode=self.routed_experts_encode_mode,
+        routed_experts_num_experts=self.routed_experts_num_experts,
+    )
     sampler = test_utils.MockBaseSamplerImpl(
         sampler_name=wid,
         default_delay=0.0,
@@ -251,6 +266,8 @@ class FakeClusterHarness:
             if self.response_tokens_per_turn is not None
             else 2
         ),
+        min_turns=self.min_turns,
+        config=config,
     )
     self.samplers[wid] = sampler
     worker = rollout_worker_lib.RolloutWorker(
@@ -260,13 +277,7 @@ class FakeClusterHarness:
         agent_name="mock_agent",
         tokenizer=test_utils.MockTokenizer(),
         chat_parser=test_utils.MockChatParser(),
-        config=rollout_worker_lib.RolloutConfig(
-            partial_rollout=self.partial_rollout,
-            drain_timeout_s=self.drain_timeout_s,
-            max_prompt_length=self.rollout_max_prompt_length,
-            routed_experts_encode_mode=self.routed_experts_encode_mode,
-            routed_experts_num_experts=self.routed_experts_num_experts,
-        ),
+        config=config,
         max_concurrency=self.max_concurrency,
     )
     self.rollout_workers[wid] = worker
@@ -363,15 +374,13 @@ class FakeClusterHarness:
           re_register=re_register,
       )
 
-  def build_prompts(
-      self, num_prompts: int = 2, *, min_turns: int = 0
-  ) -> list[dict[str, Any]]:
+  def build_prompts(self, num_prompts: int = 2) -> list[dict[str, Any]]:
     """Builds synthetic prompt payloads for testing."""
     return [
         {
             "prompt": f"Prompt {i}",
             "prompt_id": f"prompt_{i}",
-            "generation_kwargs": {"max_tokens": 8, "min_turns": min_turns},
+            "generation_kwargs": {"max_tokens": 8},
         }
         for i in range(num_prompts)
     ]
@@ -393,7 +402,6 @@ class FakeClusterHarness:
       ) = rl_program.GroupOrder.TRAJECTORY_COMPLETION,
       prompts: Sequence[dict[str, Any]] | None = None,
       reward_fns: Sequence[Callable[..., Any]] | None = None,
-      generation_args: datatypes.GenerationArgs | None = None,
       on_step_begin: Callable[[int], None] | None = None,
       on_step_end: Callable[[int, Any], None] | None = None,
   ) -> rl_program.StandardRLProgram:
@@ -448,11 +456,6 @@ class FakeClusterHarness:
         if prompts is not None
         else self.build_prompts(num_prompts=num_prompts)
     )
-    gen_args = (
-        generation_args
-        if generation_args is not None
-        else datatypes.GenerationArgs(temperature=1.0)
-    )
     return rl_program.StandardRLProgram(
         algo_config=algo_cfg,
         dataset=dataset,
@@ -460,7 +463,8 @@ class FakeClusterHarness:
         reward_fns=reward_fns,
         assembler=assembler,
         batch_config=batch_cfg,
-        generation_args=gen_args,
+        rollout_temperature=self.rollout_temperature,
+        rollout_returns_routed_experts=self.return_routed_experts,
         max_staleness=max_staleness,
         sync_weights=sync_weights,
         precompile_trainer=precompile_trainer,

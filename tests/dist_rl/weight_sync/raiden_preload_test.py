@@ -37,7 +37,7 @@ class ImportRaidenTest(absltest.TestCase):
     )
 
   def test_absent_wheel_is_not_an_error(self):
-    """Every run_*_node.py preloads, including on hosts with no Raiden."""
+    """Every dist_rl node preloads, including on hosts with no Raiden."""
     with mock.patch.object(
         raiden_preload.importlib, "import_module", side_effect=ImportError
     ):

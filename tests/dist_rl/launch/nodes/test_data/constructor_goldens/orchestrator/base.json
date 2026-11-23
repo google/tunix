@@ -11,7 +11,7 @@
       "tunix.rl.algorithm_config.GRPOConfig": {
         "kwargs": {
           "advantage_estimator": "grpo",
-          "beta": 0.04,
+          "beta": 0.0,
           "epsilon": 0.2,
           "epsilon_high": 0.28,
           "kl_loss_mode": "low_var_kl",
@@ -57,7 +57,7 @@
         "kwargs": {
           "flush_every_n_steps": 1,
           "log_dir": "/artifacts/metrics",
-          "project_name": "trellis-gsm8k",
+          "project_name": "tunix-dist-rl",
           "run_name": ""
         }
       }
@@ -72,7 +72,7 @@
           },
           "flush_every_n_steps": 1,
           "log_dir": "/artifacts/metrics",
-          "project_name": "trellis-gsm8k",
+          "project_name": "tunix-dist-rl",
           "run_name": ""
         }
       }
@@ -121,16 +121,6 @@
       }
     },
     {
-      "tunix.dist_rl.common.datatypes.GenerationArgs": {
-        "kwargs": {
-          "return_routed_experts": false,
-          "temperature": 1.0,
-          "top_k": 0,
-          "top_p": 1.0
-        }
-      }
-    },
-    {
       "tunix.dist_rl.orchestrator.batch_assembly.BatchConfig": {
         "kwargs": {
           "eos_id": 151645,
@@ -156,16 +146,13 @@
             "[0]": {
               "max_turns": 8,
               "metadata": {
-                "answer": "42",
-                "episode_timeout": 600.0,
-                "overlong_filter": false
+                "answer": "42"
               },
               "prompt": "golden prompt",
               "task_name": "gsm8k"
             },
             "__type__": "grain.MapDataset"
           },
-          "generation_args": "<tunix.dist_rl.common.datatypes.GenerationArgs()>",
           "group_order": "GroupOrder.TRAJECTORY_COMPLETION",
           "max_staleness": 0,
           "max_steps": 1,
@@ -173,6 +160,8 @@
           "metrics_logging_options": "<tunix.sft.metrics_logger.MetricsLoggerOptions()#2>",
           "precompile_trainer": true,
           "reward_fns": [],
+          "rollout_returns_routed_experts": false,
+          "rollout_temperature": 1.0,
           "sync_weights": false,
           "trajectory_log_dir": null,
           "trajectory_store": null
@@ -198,7 +187,7 @@
         "kwargs": {
           "min_workers": {
             "Role.ACTOR": 1,
-            "Role.REFERENCE": 1,
+            "Role.REFERENCE": 0,
             "Role.ROLLOUT": 1
           },
           "timeout": 1.0

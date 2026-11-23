@@ -1888,26 +1888,18 @@ class ProcessIdsTokenMaskTest(absltest.TestCase):
 
 class ScoreCenteringTest(parameterized.TestCase):
 
-  def test_topk_log_softmax_matches_selective_log_softmax(self):
+  def test_selective_log_softmax_3d_topk_matches_per_column(self):
     # A clip-boundary logit, NaN and +/-inf, also at the top-k ids.
     raw_logits = [[
         [1.0, 2.0, -1e9, 0.0],
         [jnp.nan, -jnp.inf, 0.5, -1.0],
         [jnp.inf, 0.0, 1.0, jnp.nan],
     ]]
-    target = jnp.array([[1, 2, 2]], dtype=jnp.int32)
     topk_ids = jnp.array([[[1, 2], [2, 3], [0, 3]]], dtype=jnp.int32)
     for dtype in (jnp.float32, jnp.bfloat16):
       with self.subTest(dtype=jnp.dtype(dtype).name):
         logits = jnp.array(raw_logits, dtype=dtype)
-        target_logps, topk_logps = common.selective_topk_log_softmax(
-            logits, target, topk_ids
-        )
-        np.testing.assert_allclose(
-            target_logps,
-            common.selective_log_softmax(logits, target),
-            rtol=1e-6,
-        )
+        topk_logps = common.selective_log_softmax(logits, topk_ids)
         for k in range(topk_ids.shape[-1]):
           np.testing.assert_allclose(
               topk_logps[..., k],
@@ -1915,9 +1907,7 @@ class ScoreCenteringTest(parameterized.TestCase):
               rtol=1e-6,
           )
         grads = jax.grad(
-            lambda x: common.selective_topk_log_softmax(x, target, topk_ids)[
-                1
-            ].sum()
+            lambda x: common.selective_log_softmax(x, topk_ids).sum()
         )(logits)
         self.assertTrue(np.isfinite(topk_logps).all())
         self.assertTrue(np.isfinite(grads).all())
@@ -2015,9 +2005,7 @@ class ScoreCenteringTest(parameterized.TestCase):
     topk_q_logps, topk_ids = jax.lax.top_k(q_logps, top_k)
 
     def topk_loss(logits):
-      _, trainer_topk_logps = common.selective_topk_log_softmax(
-          logits, topk_ids[..., 0], topk_ids
-      )
+      trainer_topk_logps = common.selective_log_softmax(logits, topk_ids)
       correction, _ = common.compute_score_centering_correction(
           trainer_topk_logps, topk_q_logps, sampler_is, threshold, eps=1e-12
       )
@@ -2048,85 +2036,40 @@ class ScoreCenteringTest(parameterized.TestCase):
         atol=1e-6,
     )
 
-  def test_score_centering_is_finite_with_padded_slots(self):
-    # Position 0 has two padded (-inf) slots; position 1 is all padding.
+  def test_score_centering_padded_slots_and_weighted_metrics(self):
+    # Position 0 has two valid slots (0.6 + 0.2 = 0.8); position 1 is all -inf
+    # padding despite completion_mask=1 and must be excluded from denominators.
     sampler_topk_logps = jnp.array(
-        [[[-0.6, -1.2, -jnp.inf, -jnp.inf], [-jnp.inf] * 4]]
-    )
-    topk_ids = jnp.array([[[1, 2, 0, 0], [0, 0, 0, 0]]], dtype=jnp.int32)
-
-    def loss(logits):
-      _, trainer_topk_logps = common.selective_topk_log_softmax(
-          logits, topk_ids[..., 0], topk_ids
-      )
-      correction, _ = common.compute_score_centering_correction(
-          trainer_topk_logps, sampler_topk_logps, "token", 2.0, eps=1e-6
-      )
-      return correction.sum()
-
-    value, grads = jax.value_and_grad(loss)(jnp.ones((1, 2, 16)))
-    self.assertTrue(np.isfinite(value))
-    self.assertTrue(np.isfinite(grads).all())
-
-  def test_score_centering_weighted_metrics_and_valid_masking(self):
-    # Position 1 has completion_mask=1 but all -inf top-k slots: it must be
-    # excluded from means/min/max rather than contributing head_mass=0, rho=1.
-    sampler_topk_logps = jnp.array(
-        [[[jnp.log(0.6), jnp.log(0.2)], [-jnp.inf, -jnp.inf]]],
+        [[[jnp.log(0.6), jnp.log(0.2), -jnp.inf], [-jnp.inf] * 3]],
         dtype=jnp.float32,
     )
-    trainer_topk_logps = jnp.array(
-        [[[jnp.log(0.5), jnp.log(0.3)], [-0.5, -0.5]]],
-        dtype=jnp.float32,
-    )
-    topk_ids = jnp.array([[[4, 7], [0, 0]]], dtype=jnp.int32)
-    completion_ids = jnp.array([[7, 0]], dtype=jnp.int32)
-    completion_mask = jnp.array([[1.0, 1.0]], dtype=jnp.float32)
+    topk_ids = jnp.array([[[4, 7, 0], [0, 0, 0]]], dtype=jnp.int32)
+    mask = jnp.array([[1.0, 1.0]], dtype=jnp.float32)
 
-    _, stats = common.compute_score_centering_correction(
-        trainer_topk_logps,
-        sampler_topk_logps,
-        sampler_is="token",
-        sampler_is_threshold=2.0,
-        eps=1e-6,
-        completion_mask=completion_mask,
-        completion_ids=completion_ids,
-        topk_token_ids=topk_ids,
-    )
+    def run(logits, m):
+      trainer_topk_logps = common.selective_log_softmax(logits, topk_ids)
+      return common.compute_score_centering_correction(
+          trainer_topk_logps,
+          sampler_topk_logps,
+          "token",
+          2.0,
+          eps=1e-6,
+          completion_mask=m,
+      )
+
+    logits = jnp.ones((1, 2, 16), dtype=jnp.float32)
+    value, grads = jax.value_and_grad(lambda x: run(x, mask)[0].sum())(logits)
+    self.assertTrue(np.isfinite(value) and np.isfinite(grads).all())
+
+    _, stats = run(logits, mask)
     hm_q = stats["score_centering/head_mass_q_mean"]
-    self.assertIsInstance(hm_q, utils.WeightedMetric)
     self.assertAlmostEqual(float(hm_q.denominator), 1.0)
     self.assertAlmostEqual(float(hm_q.compute()), 0.8, places=5)
-    self.assertAlmostEqual(
-        float(stats["score_centering/head_mass_q_min"]), 0.8, places=5
-    )
-    self.assertAlmostEqual(
-        float(stats["score_centering/tail_ratio_rho_max"]), 1.0, places=5
-    )
-    self.assertAlmostEqual(
-        float(stats["score_centering/sampled_in_topk_frac"].compute()),
-        1.0,
-        places=5,
-    )
-    self.assertIn("score_centering/tv_distance_mean", stats)
-    self.assertIn("score_centering/tail_eps_clamped_frac", stats)
-    self.assertIn("score_centering/tail_is_clipped_frac", stats)
 
-    # All-masked micro-batch contributes 0 denominator to global_weighted_mean.
-    _, empty_stats = common.compute_score_centering_correction(
-        trainer_topk_logps,
-        sampler_topk_logps,
-        sampler_is="token",
-        sampler_is_threshold=2.0,
-        eps=1e-6,
-        completion_mask=jnp.zeros_like(completion_mask),
-        completion_ids=completion_ids,
-        topk_token_ids=topk_ids,
+    _, empty_stats = run(logits, jnp.zeros_like(mask))
+    combined = common.global_weighted_mean(
+        [hm_q, empty_stats["score_centering/head_mass_q_mean"]]
     )
-    combined = common.global_weighted_mean([
-        hm_q,
-        empty_stats["score_centering/head_mass_q_mean"],  # pyrefly: ignore[bad-argument-type]
-    ])
     self.assertAlmostEqual(float(combined), 0.8, places=5)
 
 

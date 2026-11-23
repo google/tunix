@@ -15,12 +15,60 @@
 """Base protocols and abstract class defining Trajectory Store interfaces."""
 
 import abc
-from collections.abc import Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any, ClassVar, Protocol, Self, TypeVar, cast, get_args, get_origin, runtime_checkable
 
+from absl import logging
+import pydantic
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 
 MetadataT = TypeVar("MetadataT", bound=trajectory_lib.TrajectoryMetadata)
+_RawStepT = TypeVar("_RawStepT")
+
+
+def parse_raw_steps(
+    raw_steps: Iterable[_RawStepT],
+    validate_step: Callable[[_RawStepT], trajectory_lib.Step],
+    *,
+    strict: bool,
+    trajectory_id: str | None = None,
+    source_desc: str = "step payload",
+) -> tuple[list[trajectory_lib.Step], bool]:
+  """Validates serialized step items, skipping corrupt entries when tolerant.
+
+  Args:
+    raw_steps: Iterable of raw serialized step payloads (JSON text or dicts).
+    validate_step: Callable converting one raw step item into a `Step`.
+    strict: Whether to re-raise validation errors immediately.
+    trajectory_id: Optional trajectory identifier included in warning logs.
+    source_desc: Human-readable label for the step source in warning logs.
+
+  Returns:
+    A tuple `(parsed_steps, had_corrupt)` containing validated `Step` instances
+    and whether at least one corrupt item was skipped under `strict=False`.
+
+  Raises:
+    pydantic.ValidationError: If `strict` is True and step validation fails.
+    ValueError: If `strict` is True and raw payload parsing fails.
+    TypeError: If `strict` is True and a raw payload has an invalid type.
+  """
+  steps: list[trajectory_lib.Step] = []
+  had_corrupt = False
+  for raw_step in raw_steps:
+    try:
+      steps.append(validate_step(raw_step))
+    except (pydantic.ValidationError, ValueError, TypeError):
+      if strict:
+        raise
+      had_corrupt = True
+      logging.warning(
+          "Skipping corrupt %s in trajectory %s.",
+          source_desc,
+          trajectory_id,
+          exc_info=True,
+      )
+  return steps, had_corrupt
+
 
 # ==============================================================================
 # Custom Exceptions
@@ -61,44 +109,64 @@ class TrajectoryReader(Protocol[MetadataT]):
   """Structural protocol defining read-only Trajectory Store operations."""
 
   def get_trajectories_metadata(
-      self, trajectory_ids: list[str] | None = None
-  ) -> list[MetadataT]:
+      self,
+      trajectory_ids: Sequence[str] | None = None,
+      *,
+      ignore_missing: bool = False,
+  ) -> dict[str, MetadataT]:
     """Retrieves metadata for trajectories in the run.
 
     Args:
-      trajectory_ids: Optional list of unique trajectory identifiers. If
+      trajectory_ids: Optional sequence of unique trajectory identifiers. If
         specified, only metadata for these IDs is returned. If None, metadata
         for all trajectories in the run is returned.
+      ignore_missing: If True, trajectory IDs with no stored metadata are
+        omitted from the returned dictionary instead of raising
+        TrajectoryMetadataNotFoundError.
 
     Returns:
-      A list of TrajectoryMetadata objects for the requested trajectories, in
-      the order of `trajectory_ids` if specified.
+      A dictionary mapping trajectory IDs to TrajectoryMetadata objects for the
+      present trajectories, in the order of `trajectory_ids` if specified.
 
     Raises:
-      TrajectoryMetadataNotFoundError: If any requested trajectory ID does not
-        exist.
+      TrajectoryMetadataNotFoundError: If `ignore_missing` is False and any
+        requested trajectory ID does not exist.
     """
     ...
 
   def get_trajectories(
-      self, trajectory_ids: list[str]
-  ) -> list[trajectory_lib.Trajectory[Any]]:
-    """Retrieves full trajectories for a list of trajectory IDs.
+      self,
+      trajectory_ids: Sequence[str],
+      *,
+      ignore_missing: bool = False,
+      strict: bool = True,
+  ) -> dict[str, trajectory_lib.Trajectory[Any]]:
+    """Retrieves full trajectories for a sequence of trajectory IDs.
 
     Args:
-      trajectory_ids: List of unique trajectory identifiers to load.
+      trajectory_ids: Sequence of unique trajectory identifiers to load.
+      ignore_missing: If True, trajectory IDs with no stored records are omitted
+        from the returned dictionary instead of raising TrajectoryNotFoundError.
+      strict: If False, retains the longest contiguous valid prefix [1..k] for
+        any trajectory with a corrupt step, step-ID gap, or step-count mismatch
+        instead of raising ValidationError, and resets completion fields
+        (`status = None`, `total_reward = None`) on the returned Trajectory
+        while preserving lineage metadata.
 
     Returns:
-      A list of full Trajectory objects corresponding to the requested IDs, in
-      the order of `trajectory_ids`.
+      A dictionary mapping trajectory IDs to full Trajectory objects for the
+      present trajectories, in the order of `trajectory_ids`.
 
     Raises:
-      TrajectoryNotFoundError: If any requested trajectory ID does not exist.
+      TrajectoryNotFoundError: If `ignore_missing` is False and any requested
+        trajectory ID does not exist.
+      pydantic.ValidationError: If `strict` is True and steps contain gaps or
+        fail model validation.
     """
     ...
 
   def get_trajectories_metrics(
-      self, trajectory_ids: list[str] | None = None
+      self, trajectory_ids: Sequence[str] | None = None
   ) -> dict[str, trajectory_lib.TrajectoryMetrics]:
     """Retrieves metrics for trajectories in the run.
 
@@ -428,7 +496,7 @@ class TrajectoryStore(
     )
 
   def get_trajectories_metrics(
-      self, trajectory_ids: list[str] | None = None
+      self, trajectory_ids: Sequence[str] | None = None
   ) -> dict[str, trajectory_lib.TrajectoryMetrics]:
     """Retrieves metrics for trajectories in the run.
 

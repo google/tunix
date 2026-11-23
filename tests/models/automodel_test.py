@@ -1,7 +1,11 @@
 import dataclasses
+import inspect
+import itertools
+import json
 import os
 import sys
 import types
+from typing import Any
 from unittest import mock
 
 from absl.testing import absltest
@@ -11,11 +15,106 @@ import jax
 import numpy as np
 import orbax.checkpoint as ocp
 from tunix.models import automodel
+from tunix.models import hf_mapping
 from tunix.models import naming
+from tunix.models import registry
+from tunix.models import safetensors_loader
 from tunix.models.gemma import model as gemma_model
 from tunix.models.gemma import params as gemma_params
+from tunix.models.gemma4 import model as gemma4_model
+from tunix.models.qwen3 import params as qwen3_params
+from tunix.models.qwen3p5 import model as qwen3p5_model
+from tunix.models.qwen3p5 import params as qwen3p5_params
 from tunix.oss import utils as oss_utils
 from tunix.utils import env_utils
+
+_MAXTEXT_ONLY_REPOS = frozenset({
+    "Qwen/Qwen3.5-35B-A3B",
+    "Qwen/Qwen3.5-397B-A17B",
+})
+
+_MODEL_CLASS_BY_CATEGORY = {
+    "gemma": "Gemma",
+    "gemma3": "Gemma3",
+    "gemma4": "Gemma4",
+    "llama3": "Llama3",
+    "qwen2": "Qwen2",
+    "qwen3": "Qwen3",
+    "qwen3p5": "Qwen3p5",
+}
+
+
+def _hf_variant_of(model):
+  return model._hf_variant  # pylint: disable=protected-access
+
+
+def _shrink_cfg_for_eval_shape(category: str, cfg):
+  """Caps layer/expert counts while preserving every param-leaf pattern."""
+  if category == "gemma":
+    n = min(cfg.num_layers, 4)
+    return dataclasses.replace(
+        cfg, num_layers=n, attention_types=tuple(cfg.attention_types)[:n]
+    )
+  if category == "gemma3":
+    v_cfg = cfg.vision_config
+    if v_cfg is not None:
+      v_cfg = dataclasses.replace(v_cfg, depth=min(v_cfg.depth, 2))
+    return dataclasses.replace(
+        cfg, num_layers=min(cfg.num_layers, 4), vision_config=v_cfg
+    )
+  if category == "gemma4":
+    pat = cfg.attention_pattern or gemma4_model.GEMMA4_ATTENTION_PATTERN
+    has_shared = cfg.frac_shared_layers > 0
+    n = min(cfg.num_layers, 2 * len(pat) if has_shared else len(pat))
+    v_cfg = cfg.vision_encoder
+    if v_cfg is not None:
+      v_cfg = dataclasses.replace(v_cfg, num_layers=min(v_cfg.num_layers, 2))
+    a_cfg = cfg.audio_encoder
+    if a_cfg is not None:
+      a_cfg = dataclasses.replace(a_cfg, num_layers=min(a_cfg.num_layers, 2))
+    ne = min(cfg.num_experts, 4) if cfg.num_experts is not None else None
+    ept = (
+        min(cfg.num_experts_per_tok, ne)
+        if cfg.num_experts_per_tok is not None and ne is not None
+        else cfg.num_experts_per_tok
+    )
+    return dataclasses.replace(
+        cfg,
+        num_layers=n,
+        frac_shared_layers=0.5 if has_shared else 0.0,
+        vision_encoder=v_cfg,
+        audio_encoder=a_cfg,
+        num_experts=ne,
+        num_experts_per_tok=ept,
+    )
+  if category == "qwen3p5":
+    n = min(cfg.num_layers, cfg.full_attention_interval * 2)
+    return dataclasses.replace(
+        cfg, num_layers=n, layer_types=cfg.layer_types[:n]
+    )
+  kw = {"num_layers": min(cfg.num_layers, 4)}
+  if getattr(cfg, "num_experts", None) is not None:
+    kw["num_experts"] = min(cfg.num_experts, 4)
+    kw["num_experts_per_tok"] = min(
+        cfg.num_experts_per_tok, kw["num_experts"]
+    )
+  return dataclasses.replace(cfg, **kw)
+
+
+def _manifest_target_keys(manifest: dict[str, Any]) -> set[str]:
+  dropped = frozenset(manifest["dropped_keys"])
+  active_rules = [
+      r
+      for r in manifest["rules"]
+      if not dropped.intersection((*r["source_keys"], *r["target_keys"]))
+  ]
+  targets = set(
+      itertools.chain.from_iterable(r["target_keys"] for r in active_rules)
+  )
+  for _, dst in manifest["tied_keys"]:
+    if dst not in dropped:
+      targets.add(dst)
+  return targets
 
 
 def _get_all_models_test_parameters():
@@ -132,22 +231,6 @@ def _get_all_models_test_parameters():
   )
 
 
-def _get_gemma_models_test_parameters():
-  return [
-      p
-      for p in _get_all_models_test_parameters()
-      if p["model_name"].startswith("gemma")
-  ]
-
-
-def _get_non_gemma_models_test_parameters():
-  return [
-      p
-      for p in _get_all_models_test_parameters()
-      if not p["model_name"].startswith("gemma")
-  ]
-
-
 class AutoModelTest(parameterized.TestCase):
 
   @mock.patch(
@@ -218,19 +301,31 @@ class AutoModelTest(parameterized.TestCase):
   def test_obtain_model_params_valid(self, model_name: str):
     automodel.call_model_config(model_name)
 
-  @parameterized.named_parameters(*_get_gemma_models_test_parameters())
-  def test_get_params_module_gemma_valid(self, model_name: str):
-    params_module = automodel.get_model_module(
-        model_name, automodel.ModelModule.PARAMS_SAFETENSORS
+  @parameterized.named_parameters(*_get_all_models_test_parameters())
+  def test_get_params_module_valid(self, model_name: str):
+    self.assertEqual(
+        tuple(automodel.ModelModule),
+        (automodel.ModelModule.MODEL, automodel.ModelModule.PARAMS),
     )
-    self.assertTrue(hasattr(params_module, "create_model_from_safe_tensors"))
-
-  @parameterized.named_parameters(*_get_non_gemma_models_test_parameters())
-  def test_get_params_module_non_gemma_valid(self, model_name: str):
     params_module = automodel.get_model_module(
         model_name, automodel.ModelModule.PARAMS
     )
-    self.assertTrue(hasattr(params_module, "create_model_from_safe_tensors"))
+    for attr in (
+        "from_hf_impl",
+        "to_hf_impl",
+        "build_from_hf_manifest",
+        "build_to_hf_manifest",
+        "export_to_hf_state_dict",
+        "create_model_from_safe_tensors",
+    ):
+      self.assertTrue(
+          hasattr(params_module, attr), msg=f"{model_name}: missing {attr}"
+      )
+    category = naming.ModelNaming(model_name=model_name).model_config_category
+    self.assertEqual(
+        hasattr(params_module, "HfVariant"),
+        category in ("gemma3", "gemma4", "qwen3p5"),
+    )
 
   @parameterized.named_parameters(*_get_all_models_test_parameters())
   def test_get_model_module_valid(self, model_name: str):
@@ -251,12 +346,12 @@ class AutoModelTest(parameterized.TestCase):
       self, mock_get_model_module, model_name: str
   ):
     mock_create_fn = mock.Mock()
-    mock_params_module = mock.Mock()
-    mock_params_module.create_model_from_safe_tensors = mock_create_fn
-    mock_params_module.__name__ = "mock_params_module"
-    mock_get_model_module.return_value = mock_params_module
+    # A single-layout family module: no `HfVariant` enum.
+    mock_get_model_module.return_value = types.SimpleNamespace(
+        create_model_from_safe_tensors=mock_create_fn,
+        __name__="mock_params_module",
+    )
     mesh = jax.sharding.Mesh(jax.devices(), ("devices",))
-    naming_info = naming.ModelNaming(model_name=model_name)
     automodel.create_model_from_safe_tensors(
         model_name, "file_dir", "model_config", mesh, "dtype", "mode"
     )
@@ -267,21 +362,205 @@ class AutoModelTest(parameterized.TestCase):
         dtype="dtype",
         mode="mode",
     )
-
-    if naming_info.model_family in (
-        "gemma",
-        "gemma1p1",
-        "gemma2",
-        "gemma3",
-        "gemma4",
-    ):
-      expected_module_type = automodel.ModelModule.PARAMS_SAFETENSORS
-    else:
-      expected_module_type = automodel.ModelModule.PARAMS
-
     mock_get_model_module.assert_called_once_with(
-        model_name, expected_module_type
+        model_name, automodel.ModelModule.PARAMS
     )
+
+  def test_create_model_infers_hf_variant_from_checkpoint_keys(self):
+    mesh = jax.sharding.Mesh(jax.devices(), ("devices",))
+    variants = qwen3p5_params.HfVariant
+    cfg = qwen3p5_model.ModelConfig(
+        num_layers=4,
+        vocab_size=32,
+        embed_dim=16,
+        hidden_dim=32,
+        num_heads=2,
+        head_dim=8,
+        num_kv_heads=1,
+        rope_theta=10_000,
+        norm_eps=1e-6,
+        use_tied_embedding=True,
+    )
+    ckpt_dirs = {}
+    for variant, prefix in (
+        (variants.CAUSAL_LM, "model."),
+        (variants.CONDITIONAL_GENERATION, "model.language_model."),
+    ):
+      ckpt_dirs[variant] = self.create_tempdir().full_path
+      with open(
+          os.path.join(ckpt_dirs[variant], "model.safetensors.index.json"),
+          "w",
+      ) as f:
+        json.dump({"weight_map": {f"{prefix}embed_tokens.weight": "a"}}, f)
+    empty_dir = self.create_tempdir().full_path
+    mock_load = self.enter_context(
+        mock.patch.object(
+            safetensors_loader, "load_and_create_model", autospec=True
+        )
+    )
+    # 1. `hf_variant=None` resolves from `model.safetensors.index.json` keys
+    # and stamps the loaded model.
+    for variant, ckpt_dir in ckpt_dirs.items():
+      model = automodel.create_model_from_safe_tensors(
+          "qwen3.5-0.8b", ckpt_dir, cfg, mesh
+      )
+      self.assertEqual(
+          mock_load.call_args.kwargs["manifest"]["model_type"],
+          f"qwen3p5/{variant.value}",
+      )
+      self.assertIs(_hf_variant_of(model), variant)
+    # 2. Explicit `hf_variant` skips key lookup entirely.
+    model = automodel.create_model_from_safe_tensors(
+        "qwen3.5-0.8b", empty_dir, cfg, mesh, hf_variant=variants.CAUSAL_LM
+    )
+    self.assertEqual(
+        mock_load.call_args.kwargs["manifest"]["model_type"],
+        "qwen3p5/causal_lm",
+    )
+    # 3. No matching anchor key or wrong-type `hf_variant` fails closed.
+    with self.assertRaisesRegex(ValueError, "exactly one HF variant anchor"):
+      automodel.create_model_from_safe_tensors(
+          "qwen3.5-0.8b", empty_dir, cfg, mesh
+      )
+    with self.assertRaisesRegex(
+        ValueError, "Expected `hf_variant` of type HfVariant"
+    ):
+      automodel.create_model_from_safe_tensors(
+          "qwen3.5-0.8b", empty_dir, cfg, mesh, hf_variant="causal_lm"
+      )
+    # 4. `AutoModel.from_pretrained` loads unregistered `<org>/<repo>` forks
+    # from their checkpoint keys, and honors an explicit override.
+    with mock.patch.object(
+        automodel, "call_model_config", autospec=True, return_value=cfg
+    ):
+      model, _ = automodel.AutoModel.from_pretrained(
+          "my-org/Qwen3.5-0.8B",
+          mesh,
+          model_path=ckpt_dirs[variants.CAUSAL_LM],
+      )
+      self.assertIs(_hf_variant_of(model), variants.CAUSAL_LM)
+      model, _ = automodel.AutoModel.from_pretrained(
+          "my-org/Qwen3.5-0.8B",
+          mesh,
+          model_path=empty_dir,
+          hf_variant=variants.CONDITIONAL_GENERATION,
+      )
+      self.assertIs(_hf_variant_of(model), variants.CONDITIONAL_GENERATION)
+    self.assertEqual(mock_load.call_count, 5)
+
+    # 5. Single-layout families reject `hf_variant`.
+    mock_qwen3 = self.enter_context(
+        mock.patch.object(
+            qwen3_params, "create_model_from_safe_tensors", autospec=True
+        )
+    )
+    automodel.create_model_from_safe_tensors(
+        "qwen3-1.7b", empty_dir, "model_config", mesh
+    )
+    self.assertNotIn("hf_variant", mock_qwen3.call_args.kwargs)
+    with self.assertRaisesRegex(
+        ValueError, "single HF checkpoint layout and does not accept"
+    ):
+      automodel.create_model_from_safe_tensors(
+          "qwen3-1.7b",
+          empty_dir,
+          "model_config",
+          mesh,
+          hf_variant=variants.CAUSAL_LM,
+      )
+
+  def test_model_catalog_manifest_and_param_completeness(self):
+    self.assertNotEmpty(registry.MODEL_CATALOG)
+    eval_cache: dict[tuple[object, ...], set[str]] = {}
+
+    def eval_param_keys(model_cls, cfg, **model_kwargs) -> set[str]:
+      key = (model_cls, tuple(sorted(model_kwargs.items())), repr(cfg))
+      if key not in eval_cache:
+        abs_m = nnx.eval_shape(
+            lambda: model_cls(cfg, rngs=nnx.Rngs(params=0), **model_kwargs)
+        )
+        leaves, _ = jax.tree_util.tree_flatten_with_path(
+            nnx.state(abs_m, nnx.Param).to_pure_dict()
+        )
+        eval_cache[key] = {
+            safetensors_loader.path_to_key(p) for p, _ in leaves
+        }
+      return eval_cache[key]
+
+    for info in registry.MODEL_CATALOG:
+      with self.subTest(model_id=info.model_id):
+        assert info.model_id is not None and info.model_name is not None
+        assert info.model_config_category is not None
+        cfg = automodel.call_model_config(info.model_name)
+        if info.model_id in _MAXTEXT_ONLY_REPOS:
+          with self.assertRaises(NotImplementedError):
+            qwen3p5_params.build_from_hf_manifest(
+                cfg, qwen3p5_params.HfVariant.CONDITIONAL_GENERATION
+            )
+          with self.assertRaises(NotImplementedError):
+            nnx.eval_shape(
+                lambda c=cfg: qwen3p5_model.Qwen3p5(
+                    c, rngs=nnx.Rngs(params=0)
+                )
+            )
+          continue
+
+        params_mod = automodel.get_model_module(
+            info.model_name, automodel.ModelModule.PARAMS
+        )
+        model_mod = automodel.get_model_module(
+            info.model_name, automodel.ModelModule.MODEL
+        )
+        model_cls = getattr(
+            model_mod, _MODEL_CLASS_BY_CATEGORY[info.model_config_category]
+        )
+
+        # 1. Full production preset config builds valid forward & inverse
+        # manifests (multi-layout families: `CONDITIONAL_GENERATION` layout).
+        layout = (
+            (params_mod.HfVariant.CONDITIONAL_GENERATION,)
+            if hasattr(params_mod, "HfVariant")
+            else ()
+        )
+        full_from = params_mod.build_from_hf_manifest(cfg, *layout)
+        full_to = params_mod.build_to_hf_manifest(cfg, *layout)
+        self.assertEqual(full_to, hf_mapping.invert_manifest(full_from))
+
+        # 2. Bijective NNX parameter-leaf coverage on eval_shape model state.
+        small_cfg = _shrink_cfg_for_eval_shape(
+            info.model_config_category, cfg
+        )
+        cases: list[tuple[object, dict[str, object]]] = []
+        if info.model_config_category == "gemma4":
+          text_cfg = dataclasses.replace(
+              small_cfg, vision_encoder=None, audio_encoder=None
+          )
+          cases.append((text_cfg, {"text_only": True}))
+          if small_cfg.vision_encoder or small_cfg.audio_encoder:
+            cases.append((small_cfg, {"text_only": False}))
+        else:
+          cases.append((small_cfg, {}))
+          if info.model_config_category == "gemma3":
+            cfg_fn = getattr(model_mod.ModelConfig, info.model_config_id)
+            if "text_only" in inspect.signature(cfg_fn).parameters:
+              mm_small = _shrink_cfg_for_eval_shape(
+                  "gemma3", cfg_fn(text_only=False)
+              )
+              cases.append((mm_small, {}))
+
+        for m_cfg, model_kw in cases:
+          from_m = params_mod.build_from_hf_manifest(m_cfg, *layout)
+          to_m = params_mod.build_to_hf_manifest(m_cfg, *layout)
+          eval_cfg = small_cfg if model_kw else m_cfg
+          nnx_keys = eval_param_keys(model_cls, eval_cfg, **model_kw)
+          self.assertEqual(_manifest_target_keys(from_m), nnx_keys)
+          dropped = frozenset(from_m["dropped_keys"])
+          tied_dst = {
+              dst for _, dst in from_m["tied_keys"] if dst not in dropped
+          }
+          self.assertEqual(
+              set(hf_mapping.active_source_keys(to_m)), nnx_keys - tied_dst
+          )
 
   @parameterized.named_parameters(
       dict(
@@ -708,6 +987,8 @@ class AutoModelTest(parameterized.TestCase):
     self.assertEqual(args[1], resolved_download)
     self.assertEqual(args[3], mesh)
     self.assertIsNone(kwargs["dtype"])
+    self.assertNotIn("repo_id", kwargs)
+    self.assertIsNone(kwargs["hf_variant"])
 
   @parameterized.named_parameters(
       dict(
@@ -877,6 +1158,75 @@ class AutoModelTest(parameterized.TestCase):
     self.assertTrue(args[2].use_flash_attention)
     self.assertEqual(args[2].flash_attention_block_size, 256)
     self.assertEqual(kwargs["dtype"], jax.numpy.float32)
+
+    # Bare `model_name` (`dist_rl` nodes) and `ConfigId` resolve the model
+    # name and defer `hf_variant` to checkpoint-key inference.
+    for selector, expected_name in (
+        ("Qwen3.5-0.8B", "qwen3.5-0.8b"),
+        ("gemma4_e2b_it", "gemma4_e2b_it"),
+    ):
+      mock_create_model.reset_mock()
+      automodel.AutoModel.from_pretrained(
+          model_id=selector,
+          mesh=mesh,
+          model_path=local_dir,
+      )
+      mock_create_model.assert_called_once()
+      c_args, c_kwargs = mock_create_model.call_args
+      self.assertEqual(c_args[0], expected_name)
+      self.assertNotIn("repo_id", c_kwargs)
+      self.assertIsNone(c_kwargs["hf_variant"])
+
+  def test_gemma_base_and_gemma3_checkpoint_helpers(self):
+    mesh = jax.sharding.Mesh(
+        np.array(jax.devices()[:1]).reshape(1, 1), ("fsdp", "tp")
+    )
+    tiny_cfg = gemma_model.ModelConfig(
+        num_layers=1,
+        num_embed=32,
+        embed_dim=16,
+        hidden_dim=32,
+        num_heads=2,
+        head_dim=8,
+        num_kv_heads=1,
+        final_logit_softcap=None,
+        attention_types=(gemma_model.AttentionType.GLOBAL,),
+        use_post_attn_norm=False,
+        use_post_ffw_norm=False,
+    )
+    ckpt_dir = self.create_tempdir().full_path
+    ref_model = gemma_model.Gemma(tiny_cfg, rngs=nnx.Rngs(0))
+    _, ref_state = nnx.split(ref_model)
+    with ocp.StandardCheckpointer() as ckptr:
+      ckptr.save(os.path.join(ckpt_dir, "state"), ref_state)
+      ckptr.wait_until_finished()
+    with mock.patch.object(
+        automodel, "call_model_config", autospec=True, return_value=tiny_cfg
+    ):
+      restored_model, cfg_out = (
+          automodel.create_gemma_model_with_nnx_conversion(
+              "gemma-2b", ckpt_dir, ckpt_dir, 0, mesh
+          )
+      )
+    self.assertIs(cfg_out, tiny_cfg)
+    self.assertIsInstance(restored_model, gemma_model.Gemma)
+
+    g3_params_mod = automodel.get_model_module(
+        "gemma-3-270m", automodel.ModelModule.PARAMS
+    )
+    sentinel = mock.create_autospec(nnx.Module, instance=True, spec_set=True)
+    with mock.patch.object(
+        g3_params_mod,
+        "create_model_from_checkpoint",
+        autospec=True,
+        return_value=sentinel,
+    ) as mock_g3_ckpt:
+      model_out, g3_cfg = automodel.create_gemma3_model_from_checkpoint(
+          "gs://bucket/gemma3", "gemma-3-270m", mesh, sliding_window_size=64
+      )
+    self.assertIs(model_out, sentinel)
+    self.assertEqual(g3_cfg.sliding_window_size, 64)
+    mock_g3_ckpt.assert_called_once_with("gs://bucket/gemma3", g3_cfg, mesh)
 
 
 if __name__ == "__main__":

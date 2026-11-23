@@ -498,7 +498,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     else:
       args["gpu_memory_utilization"] = 0.2
 
-    if config.return_logprobs:
+    if config.return_logprobs or config.num_logprobs > 1:
       args.setdefault("max_logprobs", config.num_logprobs)
       args.setdefault("logprobs_mode", "processed_logprobs")
 

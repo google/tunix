@@ -95,7 +95,7 @@ class InferenceMainTest(absltest.TestCase):
         "reference_model_config.dtype=bfloat16",
         "reference_model_config.load_dtype=float32",
         "rl_training_config.compute_logps_micro_batch_size=4",
-        "cluster_config.ports.inference=20052",
+        "cluster_config.roles.inference.port=20052",
         "cluster_config.run_id=run_1",
     ]
     inference.main(argv, context=self.mock_context)

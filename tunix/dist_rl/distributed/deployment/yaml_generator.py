@@ -21,6 +21,7 @@ import math
 import os
 import re
 import string
+import types
 from typing import Any
 
 from tunix.dist_rl.common import env_utils
@@ -30,6 +31,11 @@ _STANDALONE_PLACEHOLDER_RE = re.compile(
     r"^(?P<indent>[ \t]*)\$\{(?P<key>[A-Z0-9_]+)\}[ \t]*\n",
     re.MULTILINE,
 )
+_GCS_BUCKET_NAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]")
+
+# A shell environment variable name. The manifests write names unquoted, so
+# any other name could change the rendered YAML.
+ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
 
 _PATHWAYS_WORKER_TEMPLATE_ENV = frozenset({
     "RAIDEN_BROADCAST_K",
@@ -81,6 +87,60 @@ def _substitute_template(
 
   expanded = _STANDALONE_PLACEHOLDER_RE.sub(_replace_standalone, template_text)
   return string.Template(expanded).substitute(substitutions)
+
+
+def memory_line(quantity: str) -> str:
+  """Returns a `memory: <quantity>` resources entry, or "" for none."""
+  return f"memory: {quantity}" if quantity else ""
+
+
+def render_memory_resources(request: str, limit: str) -> str:
+  """Renders a container's `resources` that set only memory.
+
+  Args:
+    request: Memory request, as a Kubernetes quantity; empty sets none.
+    limit: Memory limit, as a Kubernetes quantity; empty sets none.
+
+  Returns:
+    The `resources:` block, or "" when both are empty.
+  """
+  sections = [
+      f"  {name}:\n    memory: {quantity}"
+      for name, quantity in (("requests", request), ("limits", limit))
+      if quantity
+  ]
+  return "resources:\n" + "\n".join(sections) if sections else ""
+
+
+def parse_ckpt_gcsfuse_bucket(value: str) -> str:
+  """Returns the bucket name in `value`, or "" when `value` is empty.
+
+  Args:
+    value: A bucket name, optionally with a `gs://` prefix and a trailing slash.
+
+  Raises:
+    ValueError: If `value` is not empty and does not name a bucket.
+  """
+  raw = value.strip()
+  if not raw:
+    return ""
+  bucket = raw.removeprefix("gs://").rstrip("/")
+  if not _GCS_BUCKET_NAME_RE.fullmatch(bucket):
+    raise ValueError(
+        f"invalid checkpoint GCSFuse bucket {raw!r}: expected a bucket name"
+        " such as 'my-bucket' or 'gs://my-bucket'. To mount a subdirectory,"
+        " add 'only-dir=<prefix>' to the mount options."
+    )
+  return bucket
+
+
+def validate_ckpt_gcsfuse_mount_path(mount_path: str) -> None:
+  """Raises ValueError unless `mount_path` is an absolute path."""
+  if not mount_path.startswith("/"):
+    raise ValueError(
+        "the checkpoint GCSFuse mount path must be an absolute path, got"
+        f" {mount_path!r}."
+    )
 
 
 def validate_gang_id(gang_id: str | None) -> None:
@@ -234,6 +294,62 @@ def render_fail_fast_fields(
   }
 
 
+def parse_pathways_worker_env_json(text: str) -> dict[str, str]:
+  """Parses the `--pathways_worker_env_json` value: a JSON object of strings.
+
+  Args:
+    text: The flag value.
+
+  Returns:
+    The variables, in order.
+
+  Raises:
+    ValueError: If the value is not a JSON object of strings to strings, or a
+      name is not a variable name or is one the Pathways template sets itself.
+  """
+  try:
+    worker_env = json.loads(text)
+  except json.JSONDecodeError as e:
+    raise ValueError(
+        f"Pathways worker environment {text!r} is not valid JSON: {e}"
+    ) from e
+  if not isinstance(worker_env, dict) or not all(
+      isinstance(value, str) for value in worker_env.values()
+  ):
+    raise ValueError(
+        f"Pathways worker environment {text!r} must be a JSON object of"
+        " strings."
+    )
+  for key in worker_env:
+    if not ENV_VAR_NAME_RE.match(key):
+      raise ValueError(
+          f"Pathways worker environment variable name {key!r} is not a"
+          " variable name."
+      )
+    if key in _PATHWAYS_WORKER_TEMPLATE_ENV:
+      raise ValueError(
+          f"Pathways worker environment variable {key!r} is set by the"
+          " template (RAIDEN_BROADCAST_K, ENABLE_MULTI_NUMA and"
+          " TPU_RAIDEN_DATA_NICS have their own settings)."
+      )
+  return worker_env
+
+
+_DATA_NICS_ENV = "TPU_RAIDEN_DATA_NICS"
+# Environment variables this module read before each got a flag. A caller that
+# still sets one fails, since the value would otherwise be ignored.
+_RETIRED_ENV_FLAGS = types.MappingProxyType({
+    "COLOCATED_PYTHON_SIDECAR_IMAGE": "--colocated_python_sidecar_image",
+    "COLOCATED_PYTHON_SIDECAR_MEMORY": "--colocated_python_sidecar_memory",
+    "COLOCATED_PYTHON_SIDECAR_SHM": "--[no-]colocated_python_sidecar_shm",
+    "ENABLE_MULTI_NUMA": "--enable_multi_numa",
+    "PATHWAYS_PROXY_EXTRA_ARGS": "--pathways_proxy_extra_args",
+    "PATHWAYS_WORKER_EXTRA_ENV": "--pathways_worker_env_json",
+    "RAIDEN_BROADCAST_K": "--raiden_broadcast_k",
+    "TPU_RESERVATION": "--tpu_reservation",
+})
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
   """Parses command line arguments."""
   parser = argparse.ArgumentParser(
@@ -267,6 +383,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
       "--cpu_memory",
       default=os.environ.get("CPU_MEMORY") or None,
       help="Memory request for CPU jobs (e.g. 240G, 300Gi).",
+  )
+  parser.add_argument(
+      "--cpu_memory_limit",
+      default=None,
+      help="Memory limit for CPU jobs; empty sets none.",
   )
   parser.add_argument(
       "--namespace",
@@ -400,7 +521,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
   parser.add_argument(
       "--pathways_proxy_memory_limit",
       default="100G",
-      help="Memory limit of the Pathways proxy container",
+      help="Memory limit of the Pathways proxy container; empty sets none",
   )
   parser.add_argument(
       "--pathways_proxy_memory",
@@ -409,28 +530,45 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
           "Memory request for the Pathways proxy container. Kept well below"
           " --pathways_proxy_memory_limit: requests are the scheduling floor,"
           " and the head pod is co-located with pw-node via podAffinity, so"
-          " requesting the full limit over-reserves the node."
+          " requesting the full limit over-reserves the node. Empty sets"
+          " none."
       ),
   )
   parser.add_argument(
       "--pathways_rm_memory",
       default="4G",
-      help="Memory request for the pathways-rm container",
+      help="Memory request for the pathways-rm container; empty sets none",
+  )
+  parser.add_argument(
+      "--pathways_rm_memory_limit",
+      default="32G",
+      help="Memory limit for the pathways-rm container; empty sets none",
   )
   parser.add_argument(
       "--user_container_memory",
       default="48G",
-      help="Memory request for the user/worker container",
+      help="Memory request for the user/worker container; empty sets none",
   )
   parser.add_argument(
       "--user_container_memory_limit",
       default="70G",
-      help="Memory limit for the user/worker container",
+      help=(
+          "Memory limit for the user/worker container, and the size limit of"
+          " its IFRT large-transfer volume; empty sets none"
+      ),
   )
   parser.add_argument(
       "--pathways_worker_memory",
       default="100G",
-      help="Memory request for the pathways-worker container",
+      help=(
+          "Memory request for the pathways-worker container (the Pathways"
+          " server on each TPU host); empty sets none"
+      ),
+  )
+  parser.add_argument(
+      "--pathways_worker_memory_limit",
+      default="",
+      help="Memory limit for the pathways-worker container; empty sets none",
   )
   parser.add_argument(
       "--ifrt_proxy_large_transfer_threshold_bytes",
@@ -444,6 +582,93 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
           " takes memory in the user container until it has been sent to the"
           " workers. The default, like the IFRT proxy client's, turns this"
           " off."
+      ),
+  )
+
+  parser.add_argument(
+      "--pathways_worker_env_json",
+      default="{}",
+      help=(
+          "Pathways templates: extra environment variables for the"
+          " pathways-worker container, as a JSON object of strings such as"
+          ' {"KEY": "VALUE"}'
+      ),
+  )
+  parser.add_argument(
+      "--pathways_proxy_extra_args",
+      default="",
+      help=(
+          "Pathways templates: extra arguments for the pathways-proxy"
+          " container, separated by whitespace"
+      ),
+  )
+  parser.add_argument(
+      "--colocated_python_sidecar_image",
+      default="",
+      help=(
+          "Pathways templates: image of the colocated Python sidecar of the"
+          " pathways-worker pods; empty runs no sidecar"
+      ),
+  )
+  parser.add_argument(
+      "--colocated_python_sidecar_memory",
+      default="16Gi",
+      help="Memory request of the colocated Python sidecar; empty sets none",
+  )
+  parser.add_argument(
+      "--colocated_python_sidecar_memory_limit",
+      default="",
+      help="Memory limit of the colocated Python sidecar; empty sets none",
+  )
+  parser.add_argument(
+      "--colocated_python_sidecar_shm",
+      action=argparse.BooleanOptionalAction,
+      default=True,
+      help=(
+          "Whether the colocated Python sidecar shares a memory-backed"
+          " directory with pathways-worker"
+      ),
+  )
+  parser.add_argument(
+      "--ckpt_gcsfuse_bucket",
+      default="",
+      help=(
+          "GCS bucket to mount with GCSFuse for checkpoints in a Pathways"
+          " JobSet; empty mounts none"
+      ),
+  )
+  parser.add_argument(
+      "--ckpt_gcsfuse_mount_path",
+      default="/gcs/ckpt",
+      help="Absolute path at which --ckpt_gcsfuse_bucket is mounted",
+  )
+  parser.add_argument(
+      "--ckpt_gcsfuse_mount_options",
+      default="implicit-dirs,metadata-cache:negative-ttl-secs:0",
+      help="gcsfuse mount options of --ckpt_gcsfuse_bucket",
+  )
+  parser.add_argument(
+      "--tpu_reservation",
+      default="",
+      help="Compute Engine reservation the TPU pods must run on",
+  )
+  parser.add_argument(
+      "--raiden_broadcast_k",
+      type=int,
+      default=64,
+      help="RAIDEN_BROADCAST_K of the TPU containers",
+  )
+  parser.add_argument(
+      "--enable_multi_numa",
+      action="store_true",
+      help="Sets ENABLE_MULTI_NUMA=1 on the TPU containers (0 otherwise)",
+  )
+  parser.add_argument(
+      "--raiden_data_nics",
+      default="eth0",
+      help=(
+          "Comma-separated NICs for TPU_RAIDEN_DATA_NICS on the TPU"
+          " containers; empty leaves the variable unset"
       ),
   )
 
@@ -480,6 +705,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
   )
 
   args = parser.parse_args(argv)
+  retired = [
+      f"{name} (use {flag})"
+      for name, flag in _RETIRED_ENV_FLAGS.items()
+      if name in os.environ and os.environ[name]
+  ]
+  if retired:
+    parser.error(
+        "these environment variables are no longer read: " + ", ".join(retired)
+    )
   if not 0 < args.ifrt_proxy_large_transfer_threshold_bytes <= 2**63 - 1:
     # The IFRT proxy client parses the value as a positive int64.
     parser.error(
@@ -581,16 +815,23 @@ def build_substitutions(
   else:
     cpu_node_selector = f"node.kubernetes.io/instance-type: {args.cpu_machine}"
 
+  cpu_resource_sections = []
   if args.cpu_memory:
-    cpu_resources = (
-        "resources:\n"
+    cpu_resource_sections.append(
         "  requests:\n"
         '    cpu: "24"\n'
         f"    memory: {args.cpu_memory}\n"
         "    ephemeral-storage: 20Gi"
     )
-  else:
-    cpu_resources = ""
+  if args.cpu_memory_limit:
+    cpu_resource_sections.append(
+        f"  limits:\n    memory: {args.cpu_memory_limit}"
+    )
+  cpu_resources = (
+      "resources:\n" + "\n".join(cpu_resource_sections)
+      if cpu_resource_sections
+      else ""
+  )
 
   priority_class_line = (
       f"priorityClassName: {args.priority_class}" if args.priority_class else ""
@@ -608,7 +849,7 @@ def build_substitutions(
   else:
     termination_grace_seconds = 10
 
-  reservation_name = os.environ.get("TPU_RESERVATION", "").strip()
+  reservation_name = args.tpu_reservation.strip()
   reservation_selector = (
       f"cloud.google.com/reservation-name: {reservation_name}"
       if reservation_name
@@ -746,13 +987,18 @@ def build_substitutions(
     )
     tpu_affinity = ""
 
-  sidecar_image = os.environ.get("COLOCATED_PYTHON_SIDECAR_IMAGE", "").strip()
-  sidecar_shm = os.environ.get(
-      "COLOCATED_PYTHON_SIDECAR_SHM", "1"
-  ).strip().lower() not in ("0", "false", "no")
-  sidecar_memory = os.environ.get(
-      "COLOCATED_PYTHON_SIDECAR_MEMORY", "16Gi"
-  ).strip()
+  sidecar_image = args.colocated_python_sidecar_image.strip()
+  sidecar_shm = args.colocated_python_sidecar_shm
+  sidecar_memory = args.colocated_python_sidecar_memory.strip()
+  sidecar_memory_limit = args.colocated_python_sidecar_memory_limit.strip()
+  sidecar_memory_request_entry = (
+      f"      memory: {sidecar_memory}\n" if sidecar_memory else ""
+  )
+  sidecar_memory_limits = (
+      f"    limits:\n      memory: {sidecar_memory_limit}\n"
+      if sidecar_memory_limit
+      else ""
+  )
   if sidecar_shm:
     worker_shm_mount = (
         "  - mountPath: /tmp/sidecar\n"
@@ -789,7 +1035,8 @@ def build_substitutions(
         "  resources:\n"
         "    requests:\n"
         '      cpu: "4"\n'
-        f"      memory: {sidecar_memory}\n"
+        f"{sidecar_memory_request_entry}"
+        f"{sidecar_memory_limits}"
         "  restartPolicy: Always\n"
         "  volumeMounts:\n"
         f"{sidecar_volume_mount}"
@@ -811,36 +1058,43 @@ def build_substitutions(
     colocated_python_worker_args = ""
     colocated_python_sidecar_volume = ""
 
-  worker_env = {}
-  for line in (
-      os.environ.get("PATHWAYS_WORKER_EXTRA_ENV", "").strip().splitlines()
-  ):
-    line = line.strip()
-    if not line:
-      continue
-    if "=" not in line:
-      raise ValueError(
-          f"Invalid PATHWAYS_WORKER_EXTRA_ENV entry {line!r}; expected"
-          " KEY=VALUE"
+  # GCSFuse mount for checkpoints (e.g. a zonal Rapid bucket), at one path in
+  # every container that touches checkpoint files, whichever one writes arrays.
+  gcsfuse_bucket = parse_ckpt_gcsfuse_bucket(args.ckpt_gcsfuse_bucket)
+  if gcsfuse_bucket:
+    validate_ckpt_gcsfuse_mount_path(args.ckpt_gcsfuse_mount_path)
+    gcsfuse_mount_path = json.dumps(args.ckpt_gcsfuse_mount_path)
+    # Zero limits lift the gcsfuse sidecar's default caps for checkpoint bursts.
+    gcsfuse_pod_annotations = (
+        'gke-gcsfuse/volumes: "true"\n'
+        'gke-gcsfuse/cpu-limit: "0"\n'
+        'gke-gcsfuse/memory-limit: "0"\n'
+        'gke-gcsfuse/ephemeral-storage-limit: "0"'
+    )
+    # hostNetworkPodKSA lets hostNetwork pods authenticate as their own KSA.
+    gcsfuse_volume = (
+        "- name: ckpt-gcsfuse\n"
+        "  csi:\n"
+        "    driver: gcsfuse.csi.storage.gke.io\n"
+        "    volumeAttributes:\n"
+        f"      bucketName: {json.dumps(gcsfuse_bucket)}\n"
+        "      mountOptions:"
+        f" {json.dumps(args.ckpt_gcsfuse_mount_options)}\n"
+        '      hostNetworkPodKSA: "true"'
+    )
+    gcsfuse_volume_mount = (
+        f"- mountPath: {gcsfuse_mount_path}\n  name: ckpt-gcsfuse"
+    )
+    if colocated_python_sidecar_block:
+      colocated_python_sidecar_block += (
+          f"\n  - mountPath: {gcsfuse_mount_path}\n    name: ckpt-gcsfuse"
       )
-    key, value = line.split("=", 1)
-    key = key.strip()
-    if not key:
-      raise ValueError(
-          f"Invalid PATHWAYS_WORKER_EXTRA_ENV entry {line!r}; empty key"
-      )
-    if key in _PATHWAYS_WORKER_TEMPLATE_ENV:
-      raise ValueError(
-          f"PATHWAYS_WORKER_EXTRA_ENV key {key!r} conflicts with a"
-          " template-defined environment variable; configure"
-          " RAIDEN_BROADCAST_K, ENABLE_MULTI_NUMA, or TPU_RAIDEN_DATA_NICS"
-          " directly via environment variables."
-      )
-    value = value.strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-      value = value[1:-1]
-    worker_env[key] = value
+  else:
+    gcsfuse_pod_annotations = ""
+    gcsfuse_volume = ""
+    gcsfuse_volume_mount = ""
 
+  worker_env = parse_pathways_worker_env_json(args.pathways_worker_env_json)
   pathways_worker_extra_env = "\n".join(
       f"- name: {key}\n  value: {json.dumps(value)}"
       for key, value in worker_env.items()
@@ -848,12 +1102,17 @@ def build_substitutions(
 
   pathways_proxy_extra_args = "\n".join(
       f"- {json.dumps(flag)}"
-      for flag in os.environ.get("PATHWAYS_PROXY_EXTRA_ARGS", "").split()
+      for flag in args.pathways_proxy_extra_args.split()
   )
 
-  raiden_broadcast_k = os.environ.get("RAIDEN_BROADCAST_K", "64")
-  enable_multi_numa = os.environ.get("ENABLE_MULTI_NUMA", "0")
-  tpu_raiden_data_nics = os.environ.get("TPU_RAIDEN_DATA_NICS", "eth0")
+  raiden_data_nics = args.raiden_data_nics.strip()
+  # Empty drops the entry, so Raiden picks the NICs by its own heuristic.
+  tpu_raiden_data_nics_env = ""
+  if raiden_data_nics:
+    tpu_raiden_data_nics_env = (
+        "- name: TPU_RAIDEN_DATA_NICS\n"
+        f"  value: {json.dumps(raiden_data_nics)}"
+    )
 
   return {
       "JOBSET_NAME": jobset_name,
@@ -878,11 +1137,14 @@ def build_substitutions(
       "COLOCATED_PYTHON_SIDECAR_VOLUME": colocated_python_sidecar_volume,
       "COLOCATED_PYTHON_WORKER_ARGS": colocated_python_worker_args,
       "COLOCATED_PYTHON_PROXY_ARGS": colocated_python_proxy_args,
+      "GCSFUSE_POD_ANNOTATIONS": gcsfuse_pod_annotations,
+      "GCSFUSE_VOLUME": gcsfuse_volume,
+      "GCSFUSE_VOLUME_MOUNT": gcsfuse_volume_mount,
       "PATHWAYS_WORKER_EXTRA_ENV": pathways_worker_extra_env,
       "PATHWAYS_PROXY_EXTRA_ARGS": pathways_proxy_extra_args,
-      "RAIDEN_BROADCAST_K": raiden_broadcast_k,
-      "ENABLE_MULTI_NUMA": enable_multi_numa,
-      "TPU_RAIDEN_DATA_NICS": tpu_raiden_data_nics,
+      "RAIDEN_BROADCAST_K": args.raiden_broadcast_k,
+      "ENABLE_MULTI_NUMA": "1" if args.enable_multi_numa else "0",
+      "TPU_RAIDEN_DATA_NICS_ENV": tpu_raiden_data_nics_env,
       "TEARDOWN_ON_EXIT": render_teardown_on_exit(
           teardown_gang_on_exit,
           args.gang_id,
@@ -893,12 +1155,30 @@ def build_substitutions(
       "SERVER_IMAGE": args.pathways_server_image,
       "PROXY_IMAGE": args.pathways_proxy_server_image,
       "GCS_SCRATCH_LOCATION": args.pathways_gcs_scratch_location,
-      "PATHWAYS_PROXY_MEMORY_LIMIT": args.pathways_proxy_memory_limit,
-      "PATHWAYS_PROXY_MEMORY": args.pathways_proxy_memory,
-      "PATHWAYS_RM_MEMORY": args.pathways_rm_memory,
-      "USER_CONTAINER_MEMORY": args.user_container_memory,
-      "USER_CONTAINER_MEMORY_LIMIT": args.user_container_memory_limit,
-      "PATHWAYS_WORKER_MEMORY": args.pathways_worker_memory,
+      "PATHWAYS_PROXY_MEMORY_REQUEST_LINE": memory_line(
+          args.pathways_proxy_memory
+      ),
+      "PATHWAYS_PROXY_MEMORY_LIMIT_LINE": memory_line(
+          args.pathways_proxy_memory_limit
+      ),
+      "PATHWAYS_RM_MEMORY_REQUEST_LINE": memory_line(args.pathways_rm_memory),
+      "PATHWAYS_RM_MEMORY_LIMIT_LINE": memory_line(
+          args.pathways_rm_memory_limit
+      ),
+      "USER_CONTAINER_RESOURCES": render_memory_resources(
+          args.user_container_memory, args.user_container_memory_limit
+      ),
+      "IFRT_PROXY_LARGE_TRANSFER_SIZE_LIMIT": (
+          f"sizeLimit: {args.user_container_memory_limit}"
+          if args.user_container_memory_limit
+          else ""
+      ),
+      "PATHWAYS_WORKER_MEMORY_REQUEST_LINE": memory_line(
+          args.pathways_worker_memory
+      ),
+      "PATHWAYS_WORKER_MEMORY_LIMIT_LINE": memory_line(
+          args.pathways_worker_memory_limit
+      ),
       "IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES": (
           args.ifrt_proxy_large_transfer_threshold_bytes
       ),
@@ -933,8 +1213,18 @@ def render_template(template_text: str, args: argparse.Namespace) -> str:
         f"--teardown_gang_on_exit is not supported by template"
         f" {args.template_file}"
     )
+  # Only the templates that set the variable took it from the environment.
+  if (
+      "${TPU_RAIDEN_DATA_NICS_ENV}" in template_text
+      and _DATA_NICS_ENV in os.environ
+      and os.environ[_DATA_NICS_ENV]
+  ):
+    raise ValueError(
+        f"{_DATA_NICS_ENV} is set in the environment, which is no longer read;"
+        " use --raiden_data_nics."
+    )
   is_pathways = "name: pathways-worker" in template_text
-  sidecar_image = os.environ.get("COLOCATED_PYTHON_SIDECAR_IMAGE", "").strip()
+  sidecar_image = args.colocated_python_sidecar_image.strip()
   if is_pathways and sidecar_image:
     missing_placeholders = [
         p
@@ -948,7 +1238,22 @@ def render_template(template_text: str, args: argparse.Namespace) -> str:
     ]
     if missing_placeholders:
       raise ValueError(
-          f"COLOCATED_PYTHON_SIDECAR_IMAGE is set, but template "
+          f"--colocated_python_sidecar_image is set, but template "
+          f"{args.template_file} lacks {', '.join(missing_placeholders)}"
+      )
+  if is_pathways and parse_ckpt_gcsfuse_bucket(args.ckpt_gcsfuse_bucket):
+    missing_placeholders = [
+        p
+        for p in (
+            "${GCSFUSE_POD_ANNOTATIONS}",
+            "${GCSFUSE_VOLUME}",
+            "${GCSFUSE_VOLUME_MOUNT}",
+        )
+        if p not in template_text
+    ]
+    if missing_placeholders:
+      raise ValueError(
+          f"--ckpt_gcsfuse_bucket is set, but template "
           f"{args.template_file} lacks {', '.join(missing_placeholders)}"
       )
   substitutions = build_substitutions(args, template_text=template_text)

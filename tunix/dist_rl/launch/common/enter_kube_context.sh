@@ -14,7 +14,7 @@
 # limitations under the License.
 #
 # Usage:
-#   source tunix/dist_rl/examples/common/enter_kube_context.sh
+#   source tunix/dist_rl/launch/common/enter_kube_context.sh
 
 PROJECT=${PROJECT:-cloud-tpu-multipod-dev}
 REGION=${REGION:-us-central1}

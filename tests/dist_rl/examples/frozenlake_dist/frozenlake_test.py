@@ -248,11 +248,7 @@ class TaskRecordsTest(absltest.TestCase):
             "prompt": "",
             "task_name": "frozenlake",
             "max_turns": 8,
-            "metadata": {
-                "env_config": {"entry": entries[0]},
-                "episode_timeout": 600.0,
-                "overlong_filter": False,
-            },
+            "metadata": {"env_config": {"entry": entries[0]}},
         },
     )
     # Every epoch repeats the same order.

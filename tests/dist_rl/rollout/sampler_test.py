@@ -14,6 +14,10 @@
 
 """Tests for Sampler requests and responses in rollout/sampler.py."""
 
+import importlib
+import sys
+from unittest import mock
+
 from absl.testing import absltest
 import cloudpickle
 import numpy as np
@@ -38,9 +42,7 @@ def _sampling_request() -> base_sampler_lib.SamplingRequest:
   return base_sampler_lib.SamplingRequest(
       prompt="Solve 2+2",
       request_id="req-sample-42",
-      sampling_params=base_sampler_lib.SamplingParams(
-          max_tokens=64, temperature=0.7
-      ),
+      max_tokens=64,
       metadata={"priority": "high"},
   )
 
@@ -86,14 +88,7 @@ class SamplerTest(absltest.TestCase):
     self.assertEqual(restored.request_id, original.request_id)
     self.assertEqual(restored.prompt, original.prompt)
     self.assertEqual(restored.metadata, original.metadata)
-    self.assertIsNotNone(restored.sampling_params)
-    self.assertEqual(
-        restored.sampling_params.max_tokens, original.sampling_params.max_tokens
-    )
-    self.assertEqual(
-        restored.sampling_params.temperature,
-        original.sampling_params.temperature,
-    )
+    self.assertEqual(restored.max_tokens, original.max_tokens)
 
   def test_sampling_response_round_trips_through_cloudpickle(self):
     original = _sample_response()
@@ -108,7 +103,11 @@ class SamplerTest(absltest.TestCase):
     np.testing.assert_array_equal(
         restored.prompt_token_ids, original.prompt_token_ids
     )
+    assert restored.logprobs is not None
+    assert original.logprobs is not None
     np.testing.assert_allclose(restored.logprobs, original.logprobs)
+    assert restored.routed_experts is not None
+    assert original.routed_experts is not None
     np.testing.assert_array_equal(
         restored.routed_experts, original.routed_experts
     )
@@ -121,8 +120,34 @@ class SamplerTest(absltest.TestCase):
     response = base_sampler_lib.SamplingResponse(
         routed_experts=routed_experts
     )
+    assert response.routed_experts is not None
     self.assertEqual(response.routed_experts.shape, (2, 4, 10, 2))
     np.testing.assert_array_equal(response.routed_experts, routed_experts)
+
+  def test_module_imports_without_ml_frameworks(self):
+    orig = sys.modules["tunix.dist_rl.rollout.sampler"]
+    roots = (
+        "jax",
+        "flax",
+        "optax",
+        "torch",
+        "jaxtyping",
+        "vllm",
+        "pathwaysutils",
+        "tpu_sync",
+    )
+    prefixes = tuple(f"{r}." for r in roots)
+    blocked = dict.fromkeys(
+        (*roots, *(k for k in sys.modules if k.startswith(prefixes))),
+        None,
+    )
+    try:
+      with mock.patch.dict(sys.modules, blocked):
+        sys.modules.pop("tunix.dist_rl.rollout.sampler", None)
+        reloaded = importlib.import_module("tunix.dist_rl.rollout.sampler")
+        self.assertIsNone(reloaded.SamplingResponse().routed_experts)
+    finally:
+      setattr(sys.modules["tunix.dist_rl.rollout"], "sampler", orig)
 
   def test_sampling_response_enforces_shapes(self):
     with self.assertRaisesRegex(

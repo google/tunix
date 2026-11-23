@@ -94,7 +94,10 @@ class TrainerMainTest(absltest.TestCase):
     )
 
   def test_main_builds_worker_and_serves_with_close(self):
-    argv = ["cluster_config.ports.trainer=20050", "cluster_config.run_id=run_1"]
+    argv = [
+        "cluster_config.roles.trainer.port=20050",
+        "cluster_config.run_id=run_1",
+    ]
     trainer.main(argv, context=self.mock_context)
 
     self.mock_setup_metrics.assert_called_once_with(
@@ -194,7 +197,7 @@ class TrainerMainTest(absltest.TestCase):
       trainer.main(
           [
               "weight_sync_config.verify_weights=true",
-              "weight_sync_config.raiden_data_nics=eth0,eth1",
+              "weight_sync_config.raiden.data_nics=eth0,eth1",
           ],
           context=self.mock_context,
       )
@@ -297,11 +300,34 @@ class TrainerFactoryTest(absltest.TestCase):
         remat_config="decoder",
         use_flash_attention=True,
         flash_attention_block_size=256,
+        freeze_router=False,
     )
     lora_config = apply_lora.call_args.kwargs["lora_config"]
     self.assertEqual(lora_config["rank"], 32)
     self.assertEqual(lora_config["alpha"], 64.0)
     self.assertIn(".*q_proj", lora_config["module_path"])
+
+  def test_model_loading_validates_freeze_router(self):
+    def _load(hp, model):
+      with mock.patch.object(
+          trainer.automodel.AutoModel,
+          "from_pretrained",
+          return_value=(model, "/tmp/m"),
+      ) as load:
+        out = trainer._load_actor_model(hp, "/tmp/m", mock.sentinel.mesh)
+      return out, load
+
+    hp_freeze = _hp("actor_model_config.freeze_router=true")
+    frozen = mock.Mock(config=mock.Mock(freeze_router=True))
+    out, load = _load(hp_freeze, frozen)
+    self.assertIs(out, frozen)
+    self.assertIs(load.call_args.kwargs["freeze_router"], True)
+    for cfg, err in (
+        (object(), "not supported by model"),
+        (mock.Mock(freeze_router=False), "not applied to model"),
+    ):
+      with self.assertRaisesRegex(ValueError, err):
+        _load(hp_freeze, mock.Mock(config=cfg))
 
   def test_lora_config_supports_module_path_weight_qtype_and_tile_size(self):
     lora_config = trainer._lora_config(
@@ -371,7 +397,6 @@ class TrainerFactoryTest(absltest.TestCase):
     hp = _hp(
         "rollout_model_config.mesh.shape=(1,4)",
         "rollout_engine=vllm",
-        "rl_training_config.eval_every_n_steps=7",
         "rl_training_config.mini_batch_size=2",
         "agentic_grpo_config.num_generations=8",
         "rl_training_config.train_micro_batch_size=4",
@@ -400,7 +425,7 @@ class TrainerFactoryTest(absltest.TestCase):
     self.assertEqual(mock_peft_trainer.call_args.kwargs["sampler_type"], "vllm")
     self.assertEqual(mock_peft_trainer.call_args.kwargs["rollout_tp_size"], 4)
     self.assertIsInstance(training_config, peft_trainer_v2.TrainingConfig)
-    self.assertEqual(training_config.eval_every_n_steps, 7)
+    self.assertEqual(training_config.eval_every_n_steps, 1)
     self.assertEqual(training_config.gradient_accumulation_steps, 4)
     self.assertEqual(training_config.metrics_prefix, "actor")
     self.assertEqual(training_config.data_sharding_axis, ("fsdp",))
@@ -634,6 +659,19 @@ class MaxTextTrainerFactoryTest(absltest.TestCase):
     self.assertTrue(kwargs["use_weight_converter"])
     self.assertEqual(kwargs["max_seq_token_per_tpu"], 0)
     self.assertIsNone(kwargs["profiling_options"])
+
+  def test_skip_step_kwargs_reach_build_maxtext_config(self, mock_build_cfg, *_):
+    kwargs = self._build_kwargs(
+        mock_build_cfg,
+        "actor_model_config.kwargs.skip_step_on_spikes=true",
+        "actor_model_config.kwargs.skip_step_on_nan=false",
+        "actor_model_config.kwargs.skip_step_interval=64",
+        "actor_model_config.kwargs.skip_step_scaling_factor=4.5",
+    )
+    self.assertTrue(kwargs["skip_step_on_spikes"])
+    self.assertFalse(kwargs["skip_step_on_nan"])
+    self.assertEqual(kwargs["skip_step_interval"], 64)
+    self.assertEqual(kwargs["skip_step_scaling_factor"], 4.5)
 
   def test_plumbs_max_seq_tokens_per_device(self, mock_build_cfg, *_):
     kwargs = self._build_kwargs(
@@ -951,6 +989,8 @@ class MaxTextExtraConfigTest(absltest.TestCase):
           rollout_mesh_tp=1,
           adamw_options=trainer._maxtext_adamw_options(hp),
           device_host_concurrent_gb=8,
+          skip_step_on_spikes=True,
+          skip_step_on_nan=True,
       )
     argv = pyconfig.initialize.call_args.args[0]
     return {arg.split("=", 1)[0] for arg in argv if "=" in arg}

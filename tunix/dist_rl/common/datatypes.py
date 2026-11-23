@@ -24,7 +24,7 @@ import dataclasses
 import enum
 import math
 import time
-from typing import Any, Dict, Protocol
+from typing import Any, Dict, Protocol, TypeVar, runtime_checkable
 import uuid
 import numpy as np
 from tunix.common import configs as common_configs
@@ -581,59 +581,6 @@ class WeightSyncRequest(Request):
       )
 
 
-@dataclasses.dataclass
-class WeightSyncMetadata:
-  """Metadata passed by Orchestrator during Phase 3 decentralized weight synchronization.
-
-  Used to coordinate peer-to-peer (P2P) or broadcast weight transfers between
-  TPU Trainer slices and RolloutWorker inference pods without routing large
-  model weights through the central orchestrator.
-
-  Attributes:
-    worker_ips: List of target rollout worker IP addresses participating in
-      sync.
-    data_ports: Corresponding list of high-speed data transfer ports for each
-      worker.
-    ctrl_ports: List of control plane ports for coordination.
-    mesh: Optional device mesh object for sharded tensor transfer.
-    layout: Optional tensor memory sharding layout dimensions.
-    new_policy_version: The updated policy weight version index being
-      synchronized.
-    transfer_mode: Transport mechanism option for decentralized weight sync: -
-      "p2p" (default): Direct peer-to-peer transfer (e.g., direct RPC, Ray, or
-      Raiden KV/weight streaming between source Trainer pods and target
-      RolloutWorker pods using P2P DMA). - "broadcast" (Not implemented):
-      Collective/tree broadcast (e.g., distributing weights across a pod mesh
-      via collective communication like NCCL or Gloo over DMA links). - "fs"
-      (Not implemented): Shared filesystem checkpoint transfer (where trainers
-      save checkpoint weights to a shared filesystem like CNS/POSIX and rollout
-      workers reload from disk).
-    source_endpoints: Host/port endpoints of the source trainer pods serving the
-      weights.
-    sharding_topology: Optional device mesh sharding layout (e.g., {"mesh": [2,
-      2]}).
-  """
-
-  worker_ips: list[str] = dataclasses.field(default_factory=list)
-  data_ports: list[str] = dataclasses.field(default_factory=list)
-  ctrl_ports: list[str] = dataclasses.field(default_factory=list)
-  mesh: Any = None
-  layout: list[int] = dataclasses.field(default_factory=list)
-  new_policy_version: int = 0
-  transfer_mode: str = "p2p"
-  source_endpoints: list[str] = dataclasses.field(default_factory=list)
-  sharding_topology: Dict[str, Any] = dataclasses.field(default_factory=dict)
-
-  def __post_init__(self):
-    if self.transfer_mode in ("broadcast", "fs"):
-      raise NotImplementedError(
-          f"transfer_mode='{self.transfer_mode}' is not implemented yet."
-          " Currently only 'p2p' is supported."
-      )
-    elif self.transfer_mode != "p2p":
-      raise ValueError(f"Unknown transfer_mode: '{self.transfer_mode}'")
-
-
 ##### Training DTOs #####
 #
 # Trainer payloads are plain frozen dataclasses so this module stays free of
@@ -803,25 +750,35 @@ class TrainRequest(Request):
   target_policy_version: int = 0
 
 
-class WeightedMetricLike(Protocol):
-  """An unreduced weighted metric transported across the wire.
+_MetricValueT_co = TypeVar(
+    "_MetricValueT_co",
+    bound=common_datatypes.ArrayLike,
+    covariant=True,
+)
+
+
+class WeightedMetricLike(Protocol[_MetricValueT_co]):
+  """Structural read-only contract for an unreduced weighted metric.
 
   Trainers accumulate some metrics as a running `unreduced_sum` and a
   `denominator` so the orchestrator can reduce them correctly across
-  micro-batches and workers. This is the structural wire contract; readers match
-  on these read-only attributes rather than a concrete class so the wire format
-  stays framework-neutral. `tunix.sft.utils.WeightedMetric` is the on-device JAX
-  counterpart whose `jax.Array` fields must be converted to host numpy/float
-  values before crossing the wire (`rpc_utils.validate_wire_safe` rejects
-  `jax.Array`).
+  micro-batches and workers. Readers match on these read-only attributes rather
+  than a concrete class so both accelerator-resident metrics (such as
+  `tunix.sft.utils.WeightedMetric`) and host wire metrics conform without
+  importing ML frameworks. Parameterize by `_MetricValueT_co` to narrow the
+  allowed value type (`WeightedMetricLike[np.ndarray | np.number | float]` on
+  the host wire DTO `MetricsBuffer` versus
+  `WeightedMetricLike[common_datatypes.ArrayLike]` on `MetricsBufferLike`;
+  `rpc_utils.validate_wire_safe` enforces the host-only wire invariant at
+  runtime).
   """
 
   @property
-  def unreduced_sum(self) -> np.ndarray | np.number | float:
+  def unreduced_sum(self) -> _MetricValueT_co:
     ...
 
   @property
-  def denominator(self) -> np.ndarray | np.number | float:
+  def denominator(self) -> _MetricValueT_co:
     ...
 
   @property
@@ -830,6 +787,38 @@ class WeightedMetricLike(Protocol):
 
   @property
   def min_denom(self) -> float | None:
+    ...
+
+
+@runtime_checkable
+class MetricsBufferLike(Protocol):
+  """Structural read-only contract for step metric buffers returned by trainers.
+
+  Satisfied both by `datatypes.MetricsBuffer` (host numpy/float wire DTO) and by
+  accelerator-resident buffers such as MaxText's
+  `abstract_engine.MetricsBuffer` without importing device frameworks.
+  """
+
+  @property
+  def id(self) -> Any:
+    ...
+
+  @property
+  def weighted_metrics(
+      self,
+  ) -> Mapping[str, WeightedMetricLike[common_datatypes.ArrayLike]]:
+    ...
+
+  @property
+  def scalar_metrics(self) -> Mapping[str, common_datatypes.ArrayLike]:
+    ...
+
+  @property
+  def aggregation_fns(self) -> Mapping[str, Callable[..., Any]]:
+    ...
+
+  @property
+  def mode(self) -> str:
     ...
 
 
@@ -853,9 +842,9 @@ class MetricsBuffer:
   """
 
   id: int | str
-  weighted_metrics: Mapping[str, WeightedMetricLike] = dataclasses.field(
-      default_factory=dict
-  )
+  weighted_metrics: Mapping[
+      str, WeightedMetricLike[np.ndarray | np.number | float]
+  ] = dataclasses.field(default_factory=dict)
   scalar_metrics: Mapping[str, np.ndarray | np.number | float] = (
       dataclasses.field(default_factory=dict)
   )

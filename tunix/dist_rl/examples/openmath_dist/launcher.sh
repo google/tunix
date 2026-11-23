@@ -13,21 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Launches the distributed DeepSWE GRPO recipe on a single TPU host
-# (`deepswe.yaml` on top of `launch/common/base_dist_config.yaml`).
-# The local target runs `start` only, which is the default command.
+# Launches the distributed OpenMathInstruct-2 GRPO recipe on a single TPU host
+# (`openmath.yaml` on top of `launch/common/base_dist_config.yaml`).
 #
 # Usage:
-#   bash launcher_v2.sh [--dry-run] [section.key=value ...]
+#   bash launcher.sh [--dry-run] [section.key=value ...]
 
 set -Eeuo pipefail
 
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${DIR}/../../../.." && pwd)"
+readonly DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Not `ARTIFACT_ROOT`: `launch.sh` rejects that legacy name when exported.
+artifact_root="$(cd "${DIR}/../../../.." && pwd)/artifacts/openmath_qwen3_0p6b"
 
-# Checkpoints and metrics go under `cluster_config.artifact_root`
-# (`artifacts/deepswe`); keep the dataset download there too.
 exec "${DIR}/../../launch/common/launch.sh" \
-  "override_config_file=${DIR}/deepswe.yaml" \
-  "data_config.cache_dir=${REPO_ROOT}/artifacts/deepswe/dataset_cache" \
+  "override_config_file=${DIR}/openmath.yaml" \
+  "cluster_config.artifact_root=${artifact_root}" \
+  "actor_model_config.model_path=${artifact_root}/maxtext_models/qwen3-0.6b/0/items" \
   "$@"

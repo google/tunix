@@ -136,8 +136,6 @@ def build_mock_rollout_worker(
 ) -> rollout_worker.RolloutWorker:
   """Constructs a `RolloutWorker` backed by `MockBaseSamplerImpl`."""
   rollout_cfg = hp.config_mapping("rollout_config")
-  if not rollout_cfg["return_logprobs"]:
-    raise ValueError("rollout_config.return_logprobs must be true.")
   grpo_cfg = hp.config_mapping("agentic_grpo_config")
   ws_cfg = hp.config_mapping("weight_sync_config")
   vllm_cfg = hp.config_mapping("vllm_config")
@@ -162,6 +160,8 @@ def build_mock_rollout_worker(
       return_logprobs=True,
       eos_tokens=_resolve_eos_token_ids(rollout_cfg["eos_tokens"], tokenizer),
       partial_rollout=bool(ws_cfg["in_flight_weight_updates"]),
+      episode_timeout=episode_timeout_s,
+      overlong_filter=bool(grpo_cfg["overlong_filter"]),
       drain_timeout_s=timeouts.drain_timeout_for(episode_timeout_s),
       trajectory_store_config=node_utils.trajectory_store_config(hp),
       return_routed_experts=bool(vllm_cfg["return_routed_experts"]),
@@ -235,7 +235,7 @@ def rollout_main(
   port = node_utils.service_port(hp, "rollout")
   node_utils.setup_otel_metrics(hp, "rollout", worker_id_str)
   node_utils.ensure_repo_root_on_path()
-  registry_mod = str(hp.config_mapping("cluster_config")["registry_module"])
+  registry_mod = str(hp.config["registry_module"])
   if registry_mod:
     importlib.import_module(registry_mod)
   config_sha256 = node_utils.log_resolved_config(hp, "rollout")

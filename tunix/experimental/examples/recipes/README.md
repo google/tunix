@@ -3,9 +3,9 @@
 `mlperf_35b_128_v5p.sh` runs the MLPerf DeepSWE recipe (Qwen3.5-35B-A3B MoE,
 OpenHands CodeAct agent, 128 TPU v5p chips) on GKE through the shared launcher
 (`tunix/dist_rl/launch/`). `mlperf_35b_128_v5p.yaml` holds the recipe; the
-script adds the Pathways worker and proxy flags, which have no config keys, and
-passes its arguments to `launch.sh`. Pass the per-run settings as
-`section.key=value` arguments:
+script adds the libtpu flags of the trainer, the Pathways workers and the
+Pathways proxy, and passes its arguments to `launch.sh`. Pass the per-run
+settings as `section.key=value` arguments:
 
 ```bash
 B=gs://<bucket>
@@ -19,7 +19,7 @@ bash tunix/experimental/examples/recipes/mlperf_35b_128_v5p.sh start \
   actor_model_config.kwargs.maxtext_output_dir="${B}/maxtext/${USER}" \
   trajectory_store_config.enable=true trajectory_store_config.backend=file \
   trajectory_store_config.dir="${B}/trajectories/${USER}/store" \
-  cluster_config.k8s.gcs_scratch_location="${B}/pathways-staging/${USER}" \
+  cluster_config.pathways.gcs_scratch_location="${B}/pathways-staging/${USER}" \
   cluster_config.k8s.jax_cache.rollout_gcs_dir="${B}/jax_cache/v5p/qwen3.5-35b-a3b/rollout_2x2x1_ep4_tp1_8fb2c88823" \
   cluster_config.k8s.jax_cache.save=true
 ```

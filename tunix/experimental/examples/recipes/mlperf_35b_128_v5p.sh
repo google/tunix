@@ -47,20 +47,12 @@ for flag in "${trainer_libtpu_flags[@]}"; do
   fi
 done
 
-# `yaml_generator` reads the Pathways worker and proxy settings from the
-# launcher's environment; they have no config keys. The template sets
-# TPU_RAIDEN_DATA_NICS on the workers itself.
-export PATHWAYS_WORKER_EXTRA_ENV="${PATHWAYS_WORKER_EXTRA_ENV:-\
-LIBTPU_INIT_ARGS=${trainer_libtpu_args} --megascale_port=-1 \
---xprof_compress_jftrace=true
-SKIP_MEGASCALE_PJRT_CLIENT=true
-RAIDEN_BROADCAST_HOST_RATIO=1.0
-RAIDEN_BROADCAST_PIPELINE_STAGES=4}"
-export PATHWAYS_PROXY_EXTRA_ARGS="${PATHWAYS_PROXY_EXTRA_ARGS:-${xla_flags% }}"
-export ENABLE_MULTI_NUMA="${ENABLE_MULTI_NUMA:-0}"
-export TRAINER_IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES="${TRAINER_IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES:-16777216}"
-
+# The libtpu flags go to the trainer process, the Pathways workers and (the
+# `--xla_*` ones) the Pathways proxy. `mlperf_35b_128_v5p.yaml` holds the other
+# Pathways settings.
 exec "${DIR}/../../../dist_rl/launch/common/launch.sh" \
   "override_config_file=${DIR}/mlperf_35b_128_v5p.yaml" \
-  "cluster_config.role_env.trainer.LIBTPU_INIT_ARGS=${trainer_libtpu_args}" \
+  "cluster_config.roles.trainer.env.LIBTPU_INIT_ARGS=${trainer_libtpu_args}" \
+  "cluster_config.pathways.worker_env.LIBTPU_INIT_ARGS=${trainer_libtpu_args} --megascale_port=-1 --xprof_compress_jftrace=true" \
+  "cluster_config.pathways.proxy_extra_args=${xla_flags% }" \
   "$@"
