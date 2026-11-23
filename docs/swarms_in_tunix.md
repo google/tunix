@@ -58,6 +58,26 @@ Option 1 prioritized **workflow expressiveness (Inversion of Control)** and **ex
 3. **Sequence Unit (`CallTrace`):** One immutable sequence per LLM call (`O(T^2)` prefix recomputation on long tool loops).
 4. **Policy Routing (`PolicyBinding`):** Explicit `(policy_id, sampler, trainable: bool)` supporting frozen workers on Day 1.
 
+```mermaid
+flowchart LR
+    R["1. Sync Round Barrier<br/>(SwarmRLProgram)"] --> WF["2. IoC Async Workflow<br/>(rt.generate + gather)"]
+    WF --> PB["3. PolicyBinding<br/>(trainable: bool)"]
+    PB --> CT["4. CallTrace [1..M]<br/>(1 seq / call)"]
+    CT --> TR["5. Credit + BatchAssembler<br/>→ PeftTrainer V2 + Raiden"]
+```
+
+```python
+bindings = {
+    "director": PolicyBinding("director", dir_pool, trainable=True),
+    "worker":   PolicyBinding("worker",   wrk_pool, trainable=False),  # drift == 0.0
+}
+async def parl_opt1(task: Task, rt: RecordingRuntime) -> EpisodeOutcome:
+    plan = await rt.generate("director", build_director_prompt(task))
+    reps = await asyncio.gather(*[rt.generate("worker", q) for q in parse_jobs(plan.text)])
+    ans  = await rt.generate("director", build_synth_prompt(task, reps))
+    return EpisodeOutcome(reward=score_answer(ans.text, task.answer))
+```
+
 #### 2.2 Option 2: Envelope Pipeline + Framework Runners
 
 Option 2 prioritized **One Well-Lit Single-Learner Pipeline** and **TITO merging**:
@@ -65,6 +85,26 @@ Option 2 prioritized **One Well-Lit Single-Learner Pipeline** and **TITO merging
 2. **Workflow API (`EpisodeRunner` + `BaseTaskEnv`):** Framework-owned runner subclasses (`SingleAgent`, `Parl`, `MultiRole`) driving `env.step()` loops.
 3. **Sequence Unit (`RoleTrajectory`):** Merges multi-turn prefixes per `role_id` (breaks when later rounds restructure prompts or parallel children share `role="worker"`).
 4. **Policy Routing (Shared Pool First):** Phase 1 binds all roles to one active trainable pool `v_t` (`Role == Active Policy`).
+
+```mermaid
+flowchart LR
+    DW["1. DispatchWindow<br/>(lag > 0, EDF)"] --> SEM["2. 2-Level Semaphores<br/>(_episode_sem / _sampler_sem)"]
+    SEM --> RUN["3. EpisodeRunner Subclass<br/>(Parl / MultiRole + BaseTaskEnv)"]
+    RUN --> RT["4. RoleTrajectory<br/>(per-role_id TITO, pool v_t)"]
+    RT --> SG["5. ScoredGroup (G → M)<br/>→ 1 PeftTrainer V2"]
+```
+
+```python
+class ParlEpisodeRunner(EpisodeRunner):
+    async def run_episode(self, env: BaseTaskEnv, sampler: SamplerPool) -> EpisodeEnvelope:
+        trajs: dict[str, RoleTrajectory] = {}
+        obs = await env.reset()
+        while not env.done:
+            act = await self.step_role("director", obs, sampler, trajs)
+            obs = await (asyncio.gather(*[self.step_role("worker", s, sampler, trajs) for s in act.subtasks])
+                         if act.has_subtasks else env.step(act))
+        return EpisodeEnvelope(trajectories=list(trajs.values()), reward=env.score())
+```
 
 #### 2.3 Option 3: Hybrid `StandardRLProgram` Trunk (Combining Option 1 + Option 2)
 
@@ -74,6 +114,25 @@ Option 3 grafted Option 1's runtime and policy abstractions onto Option 2's sing
 3. Exposes an explicit user-managed `async with runtime.open_session(role)` API (`SessionTrajectory`) to separate append-only tool loops from restructured calls.
 4. Adopts Day-1 `PolicyBinding(policy_id, sampler, trainable: bool)`.
 
+```mermaid
+flowchart LR
+    STD["1. StandardRLProgram<br/>(DispatchWindow + Hooks)"] --> RT["2. RecordingRuntime<br/>+ Runner Templates"]
+    RT --> SESS["3. Manual open_session()<br/>vs. generate()"]
+    SESS --> PB["4. PolicyBinding<br/>(Day-1 trainable: bool)"]
+    PB --> TR["5. 1 PeftTrainer V2<br/>+ Split Side-Channel Hooks"]
+```
+
+```python
+async def swe_opt3(task: Task, rt: RecordingRuntime):
+    async with rt.open_session(role="swe_agent") as sess:  # manual TITO plumbing
+        for _ in range(max_steps):
+            obs = await run_tool(await sess.generate_next(obs))
+
+async def r2orch_epoch_hook(program_ctx):  # 2nd learner split outside trunk manifest
+    pairs, arms = proposer_sidecar.sample_and_step_outside_trunk()
+    program_ctx.override_next_prompts(arms)
+```
+
 #### 2.4 Option 4: Unified `EpisodeRuntime` + Composable `StepContext` (`72abca164`)
 
 Option 4 ([`docs/unified_episode_runtime_design.md`](./unified_episode_runtime_design.md)) redesigned the public API around **three orthogonal contracts** (`Recipe(workflow, learners, bindings, grade, train_step)`):
@@ -81,6 +140,28 @@ Option 4 ([`docs/unified_episode_runtime_design.md`](./unified_episode_runtime_d
 2. **`EpisodeRuntime` (`generate`, `parallel`, `annotate`, `PublicEnvironment`):** Deterministic child lineage (`SubagentTrajectoryRef`), online `CriticalSteps` budgets, and strict `PublicEnvironment` vs. post-run private `grade()` isolation.
 3. **Automatic Internal TITO Compaction:** Merges actions internally iff `(participant_id, served_snapshot, encoding, exact_prefix)` match—eliminating manual `open_session()` boilerplate.
 4. **3-Way `Learner` / `Binding` / `Objective` Split:** Disjoint `Learner.full` / `Learner.lora`, `PolicyBinding.fixed` / `PolicyBinding.follow` (+ served-snapshot attestation), and `ObjectiveBatch(roles=...)`.
+
+```mermaid
+flowchart LR
+    SC["1. StepContext (Pinned)<br/>step.record() + SnapshotBundle"] --> ER["2. EpisodeRuntime<br/>generate + parallel(CriticalSteps) + PublicEnv"]
+    ER --> GR["3. Private grade()<br/>+ Auto Internal TITO"]
+    GR --> OW["4. 3-Way Split<br/>Learner ≠ Binding ≠ Credit"]
+    OW --> UP["5. Multi-Target update()<br/>→ Atomic Manifest"]
+```
+
+```python
+learners = {"director": Learner.lora(qwen_snap, "director"),
+            "proposer": Learner.lora(qwen_snap, "proposer")}
+bindings = {"director": PolicyBinding.follow("director"), "worker": PolicyBinding.fixed(qwen_snap)}
+
+async def r2orch_step(step: StepContext) -> StepResult:
+    sel = await step.record("sel", lambda: select_pairs(step.state, step.snapshots["proposer"]))
+    eps = await step.collect(plan_arms(step.state, sel))  # auto-TITO inside engine
+    ev  = join(sel, eps, await step.grade(eps))
+    await step.update("proposer", pair_objective(sel, ev, ref=step.snapshots["proposer_ref"]))
+    await step.update("director", director_grpo(ev, roles=("director",)))
+    return StepResult(state=next_cycle_state(step.state, sel, ev))
+```
 
 #### 2.5 Option 5 (Recommended & Implemented): Unified Three-Layer Swarm RL Architecture (`tunix/dist_rl/swarm/`)
 
