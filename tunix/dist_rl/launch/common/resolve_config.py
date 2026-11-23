@@ -1528,7 +1528,10 @@ def _validate_scanned_checkpoint(hp: cli_config.HyperParameters) -> None:
   elif mode != common_datatypes.WeightSyncMode.NONE.value:
     problems.append(f"it needs weight_sync_config.mode: none, got {mode!r}")
   if ws["in_flight_weight_updates"]:
-    problems.append("weight_sync_config.in_flight_weight_updates must be false")
+    problems.append(
+        "weight_sync_config.in_flight_weight_updates must be false"
+        " (partial_rollout skips KV cache reallocation after loading)"
+    )
   if hp.config_mapping("rollout_model_config")["model_source"] != "maxtext":
     problems.append("it needs rollout_model_config.model_source: maxtext")
   if hp.config["rollout_engine"] != "inprocess_vllm":
