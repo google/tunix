@@ -21,6 +21,7 @@ which involves XML-like tags around a JSON object.
 import json
 from typing import Any
 
+from absl import logging
 from tunix.rl.agentic.parser.tool_parser import tool_parser_base
 from tunix.rl.agentic.tools import base_tool
 
@@ -87,12 +88,19 @@ class QwenToolParser(ToolParser):
       json_content = text[start:end].strip()
       try:
         call_data = json.loads(json_content)
-        # Convert to common format matching parse_tool_calls output
-        tool_calls.append(
-            {"name": call_data["name"], "arguments": call_data["arguments"]}
-        )
+        if (
+            isinstance(call_data, dict)
+            and isinstance(call_data.get("name"), str)
+            and isinstance(call_data.get("arguments"), dict)
+        ):
+          # Convert to common format matching parse_tool_calls output
+          tool_calls.append(
+              {"name": call_data["name"], "arguments": call_data["arguments"]}
+          )
+        else:
+          logging.warning("Skipping malformed tool call: %s", json_content)
       except json.JSONDecodeError:
-        print(f"Error parsing tool call: {json_content}")
+        logging.warning("Error parsing tool call: %s", json_content)
         text = text[end + len(self.tool_call_end) :]
         continue
 
