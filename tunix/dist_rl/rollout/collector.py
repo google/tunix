@@ -387,6 +387,10 @@ class TrajectoryCollectorEngine:
       )
     if sampler_time_s is not None:
       rl_traj["sampler_time_s"] = sampler_time_s
+    # Without sampler logprobs the inner engine fills in zeros; drop them so
+    # payload building rejects them when `use_rollout_logps` is set.
+    if not self.config.return_logprobs:
+      rl_traj["old_logprobs"] = None
 
     # Metadata carries only request-scoped context. Everything about the
     # episode itself stays on `traj`, which is the single source of truth and

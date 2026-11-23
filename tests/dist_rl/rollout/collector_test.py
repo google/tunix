@@ -568,7 +568,7 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
         agent=mocks.MockAgent(),
         tokenizer=mocks.MockTokenizer(),
         chat_parser=mocks.MockChatParser(),
-        config=base_rollout.RolloutConfig(),
+        config=base_rollout.RolloutConfig(return_logprobs=True),
     )
 
     rl_traj = {
@@ -650,7 +650,7 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
         agent=mocks.MockAgent(),
         tokenizer=mocks.MockTokenizer(),
         chat_parser=mocks.MockChatParser(),
-        config=base_rollout.RolloutConfig(),
+        config=base_rollout.RolloutConfig(return_logprobs=True),
     )
 
     rl_traj = {
@@ -676,6 +676,28 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
         item.conversation_masks, [1.0, 1.0, 0.0, 0.0, 1.0]
     )
     np.testing.assert_allclose(item.old_logprobs, [-0.1, -0.2, 0.0, 0.0, -0.3])
+
+  def test_convert_to_trajectory_drops_logprobs_when_not_returned(self):
+    request = datatypes.RolloutRequest(
+        request_id="req", prompt_id="prompt", prompt="p"
+    )
+    engine = collector.TrajectoryCollectorEngine(
+        traj_id=request.traj_id,
+        request=request,
+        sampler=_RecordingSampler(),
+        env_client=object(),
+        agent=mocks.MockAgent(),
+        tokenizer=mocks.MockTokenizer(),
+        chat_parser=mocks.MockChatParser(),
+        config=base_rollout.RolloutConfig(return_logprobs=False),
+    )
+    item = engine._convert_to_trajectory({
+        "prompt_tokens": np.array([1], dtype=np.int32),
+        "conversation_tokens": np.array([10, 11], dtype=np.int32),
+        "conversation_masks": np.array([1.0, 1.0], dtype=np.float32),
+        "old_logprobs": np.zeros(2, dtype=np.float32),
+    })
+    self.assertIsNone(item.traj["old_logprobs"])
 
   def test_convert_to_trajectory_rejects_non_dict(self):
     request = datatypes.RolloutRequest(
@@ -1609,6 +1631,7 @@ class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
 
         algo_cfg = algorithm_config.GRPOConfig(
             num_generations=2,
+            use_rollout_logps=False,
             routed_experts_encode_mode="auto",
             routed_experts_num_experts=num_experts,
         )
@@ -2044,13 +2067,16 @@ class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
         p_i16 = payload_builder.create_trainer_payloads(
             [item_i16, dataclasses.replace(item_i16, group_index=1)],
             rewards=[0.0, 1.0],
-            algo_config=algorithm_config.GRPOConfig(num_generations=2),
+            algo_config=algorithm_config.GRPOConfig(
+                num_generations=2, use_rollout_logps=False
+            ),
         )
         p_cmp = payload_builder.create_trainer_payloads(
             [item_cmp, dataclasses.replace(item_cmp, group_index=1)],
             rewards=[0.0, 1.0],
             algo_config=algorithm_config.GRPOConfig(
                 num_generations=2,
+                use_rollout_logps=False,
                 routed_experts_encode_mode="auto",
                 routed_experts_num_experts=num_experts,
             ),
@@ -2146,13 +2172,16 @@ class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
         promo_payloads_i16 = payload_builder.create_trainer_payloads(
             [promo_i16, dataclasses.replace(promo_i16, group_index=1)],
             rewards=[0.0, 1.0],
-            algo_config=algorithm_config.GRPOConfig(num_generations=2),
+            algo_config=algorithm_config.GRPOConfig(
+                num_generations=2, use_rollout_logps=False
+            ),
         )
         promo_payloads_cmp = payload_builder.create_trainer_payloads(
             [promo_cmp, dataclasses.replace(promo_cmp, group_index=1)],
             rewards=[0.0, 1.0],
             algo_config=algorithm_config.GRPOConfig(
                 num_generations=2,
+                use_rollout_logps=False,
                 routed_experts_encode_mode="auto",
             ),
         )

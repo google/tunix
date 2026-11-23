@@ -195,6 +195,14 @@ def create_trainer_payloads(
     # Custom estimators are not required to honor `valid_mask`, so the zero
     # advantage for invalid trajectories is enforced here.
     adv_val = float(advs[i]) if valid_mask[i] else 0.0
+    old_logps = None
+    if algo_config.use_rollout_logps:
+      old_logps = _extract_old_logps(item, len(c_arr))
+      if old_logps is None:
+        raise ValueError(
+            "use_rollout_logps is set but the rollout has no old_logprobs;"
+            " set RolloutConfig.return_logprobs=True on the rollout workers."
+        )
     payloads.append(
         datatypes.RLTrainerPayload(
             prompt_ids=p_arr,
@@ -202,11 +210,7 @@ def create_trainer_payloads(
             completion_ids=c_arr,
             completion_mask=act_arr,
             advantages=np.full(len(c_arr), adv_val, dtype=np.float32),
-            old_per_token_logps=(
-                _extract_old_logps(item, len(c_arr))
-                if algo_config.use_rollout_logps
-                else None
-            ),
+            old_per_token_logps=old_logps,
             returns=(
                 None
                 if returns is None
