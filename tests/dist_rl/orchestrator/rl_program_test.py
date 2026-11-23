@@ -16,6 +16,7 @@ import asyncio
 import builtins
 from collections.abc import Sequence
 import dataclasses
+import itertools
 import threading
 import types
 from typing import Any
@@ -266,6 +267,14 @@ def _make_engine(
   return distributed_rl_engine.DistributedRLEngine(
       registry=registry,
       weight_sync_coordinator=weight_sync_coordinator,
+  )
+
+
+def _dispatched_prompts(mock_engine: Any) -> list[Any]:
+  return list(
+      itertools.chain.from_iterable(
+          call.args[0] for call in mock_engine.dispatch_rollouts.call_args_list
+      )
   )
 
 
@@ -616,11 +625,12 @@ class RLProgramTest(absltest.TestCase):
 
       async def _mock_dispatch(prompts, *, policy_version: int = 0, **kwargs):
         del kwargs
-        dispatched_versions.append(policy_version)
-        prompt_id = prompts[0]["prompt_id"]
-        pending_batches.append(
-            _make_trajectory_group(prompt_id, policy_version=policy_version)
-        )
+        for prompt_dict in prompts:
+          dispatched_versions.append(policy_version)
+          prompt_id = prompt_dict["prompt_id"]
+          pending_batches.append(
+              _make_trajectory_group(prompt_id, policy_version=policy_version)
+          )
 
       async def _mock_poll(timeout_s=0.1):
         del timeout_s
@@ -684,16 +694,17 @@ class RLProgramTest(absltest.TestCase):
 
     async def _dispatch(prompts, *, policy_version: int = 0, **kwargs):
       del kwargs
-      batch_idx = prompts[0]["metadata"]["batch_idx"]
-      dispatched_batches.append(batch_idx)
-      pending_groups.append([
-          dataclasses.replace(
-              item, metadata={**item.metadata, "batch_idx": batch_idx}
-          )
-          for item in _make_trajectory_group(
-              prompts[0]["prompt_id"], policy_version=policy_version
-          )
-      ])
+      for prompt_item in prompts:
+        batch_idx = prompt_item["metadata"]["batch_idx"]
+        dispatched_batches.append(batch_idx)
+        pending_groups.append([
+            dataclasses.replace(
+                item, metadata={**item.metadata, "batch_idx": batch_idx}
+            )
+            for item in _make_trajectory_group(
+                prompt_item["prompt_id"], policy_version=policy_version
+            )
+        ])
 
     async def _poll(timeout_s=0.1):
       del timeout_s
@@ -1209,8 +1220,8 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
     dispatched = [
-        call.args[0][0]["prompt_id"]
-        for call in self.mock_engine.dispatch_rollouts.call_args_list
+        prompt_item["prompt_id"]
+        for prompt_item in _dispatched_prompts(self.mock_engine)
     ]
     self.assertEqual(
         dispatched,
@@ -1237,8 +1248,8 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
     dispatched = [
-        call.args[0][0]["prompt_id"]
-        for call in self.mock_engine.dispatch_rollouts.call_args_list
+        prompt_item["prompt_id"]
+        for prompt_item in _dispatched_prompts(self.mock_engine)
     ]
     self.assertEqual(
         dispatched, ["prompt_4", "prompt_5", "prompt_6", "prompt_7"]
@@ -1292,10 +1303,7 @@ class RLProgramTest(absltest.TestCase):
     self.assertIn("dispatch_rollouts", call_order)
 
   def _dispatched_prompts(self) -> list[Any]:
-    return [
-        call.args[0][0]
-        for call in self.mock_engine.dispatch_rollouts.call_args_list
-    ]
+    return _dispatched_prompts(self.mock_engine)
 
   def _run_dispatch(self, program: rl_program.StandardRLProgram) -> None:
     async def _run():
@@ -1465,8 +1473,9 @@ class RLProgramTest(absltest.TestCase):
       dispatched = []
 
       async def mock_dispatch(prompts, **kwargs):
-        dispatched.append((prompts[0], kwargs["policy_version"]))
-        return [f"{prompts[0]}_{kwargs['policy_version']}"]
+        for prompt_item in prompts:
+          dispatched.append((prompt_item, kwargs["policy_version"]))
+        return [f"{p}_{kwargs['policy_version']}" for p in prompts]
 
       self.mock_engine.dispatch_rollouts.side_effect = mock_dispatch
 
@@ -1538,8 +1547,8 @@ class RLProgramTest(absltest.TestCase):
 
       async def mock_dispatch(prompts, **kwargs):
         del kwargs
-        dispatched.append(prompts[0]["prompt_id"])
-        return ["rollout"]
+        dispatched.extend(prompt_item["prompt_id"] for prompt_item in prompts)
+        return ["rollout"] * len(prompts)
 
       self.mock_engine.dispatch_rollouts.side_effect = mock_dispatch
       dataset = [
@@ -1563,6 +1572,63 @@ class RLProgramTest(absltest.TestCase):
       resumed.close()
 
     asyncio.run(_run())
+
+  def test_normalize_prompt_item(self):
+    normalize = rl_program._normalize_prompt_item
+
+    with self.subTest("raw_prompt"):
+      self.assertEqual(
+          normalize(3, "q", 16),
+          (
+              "prompt_3",
+              {
+                  "prompt": "q",
+                  "prompt_id": "prompt_3",
+                  "max_response_length": 16,
+              },
+          ),
+      )
+      self.assertEqual(
+          normalize(3, "q", None),
+          ("prompt_3", {"prompt": "q", "prompt_id": "prompt_3"}),
+      )
+
+    with self.subTest("mapping"):
+      source = types.MappingProxyType({"prompt": "q"})
+      self.assertEqual(
+          normalize(3, source, 16),
+          (
+              "prompt_3",
+              {
+                  "prompt": "q",
+                  "prompt_id": "prompt_3",
+                  "max_response_length": 16,
+              },
+          ),
+      )
+      self.assertEqual(
+          normalize(3, source, None),
+          ("prompt_3", {"prompt": "q", "prompt_id": "prompt_3"}),
+      )
+      # The item's own id and response cap win over the defaults.
+      self.assertEqual(
+          normalize(3, {"prompt_id": 0, "max_response_length": 4}, 16),
+          (0, {"prompt_id": 0, "max_response_length": 4}),
+      )
+
+    with self.subTest("has_prompt_id"):
+      item = types.SimpleNamespace(prompt_id="custom")
+      prompt_id, normalized = normalize(3, item, 16)
+      self.assertEqual(prompt_id, "custom")
+      self.assertIs(normalized, item)
+
+    with self.subTest("unhashable_prompt_id"):
+      for bad_item in (
+          {"prompt": "bad", "prompt_id": ["unhashable"]},
+          types.SimpleNamespace(prompt_id=["unhashable"]),
+      ):
+        with self.assertRaisesRegex(TypeError, "prompt_id must be hashable"):
+          normalize(0, bad_item, None)
 
   def _window_program(self, **kwargs: Any) -> rl_program.StandardRLProgram:
     """A program whose full batch is two single-rollout groups."""
@@ -1613,8 +1679,10 @@ class RLProgramTest(absltest.TestCase):
 
       async def mock_dispatch(prompts, **kwargs):
         del kwargs
-        dispatched.append(prompts[0]["metadata"]["batch_idx"])
-        return ["rollout"]
+        dispatched.extend(
+            prompt_item["metadata"]["batch_idx"] for prompt_item in prompts
+        )
+        return ["rollout"] * len(prompts)
 
       self.mock_engine.dispatch_rollouts.side_effect = mock_dispatch
 
@@ -7737,18 +7805,19 @@ class RLProgramTest(absltest.TestCase):
 
       async def _mock_dispatch(prompts, **kwargs):
         del kwargs
-        prompt_id = prompts[0]["prompt_id"]
-        ver = 0 if prompt_id in ("prompt_0", "prompt_1") else 5
-        for g_idx in range(2):
-          resp = _create_rollout_response(
-              f"{prompt_id}_{g_idx}",
-              prompt_id,
-              group_index=g_idx,
-              policy_version=ver,
-          )
-          pending_responses.append(
-              distributed_rl_engine._response_to_trajectory_item(resp)
-          )
+        for prompt_item in prompts:
+          prompt_id = prompt_item["prompt_id"]
+          ver = 0 if prompt_id in ("prompt_0", "prompt_1") else 5
+          for g_idx in range(2):
+            resp = _create_rollout_response(
+                f"{prompt_id}_{g_idx}",
+                prompt_id,
+                group_index=g_idx,
+                policy_version=ver,
+            )
+            pending_responses.append(
+                distributed_rl_engine._response_to_trajectory_item(resp)
+            )
 
       async def _mock_poll():
         if pending_responses:
@@ -9069,15 +9138,9 @@ class StandardRLProgramAsyncDatasetTest(absltest.TestCase):
 
       await program.rollout_dispatch_stage()
 
-      self.assertEqual(mock_engine.dispatch_rollouts.call_count, 2)
-      dispatched_ids = [
-          call.args[0][0]["prompt_id"]
-          for call in mock_engine.dispatch_rollouts.call_args_list
-      ]
-      dispatched_prompts = [
-          call.args[0][0]["prompt"]
-          for call in mock_engine.dispatch_rollouts.call_args_list
-      ]
+      all_dispatched = _dispatched_prompts(mock_engine)
+      dispatched_ids = [item["prompt_id"] for item in all_dispatched]
+      dispatched_prompts = [item["prompt"] for item in all_dispatched]
       self.assertEqual(dispatched_ids, ["prompt_2", "prompt_3"])
       self.assertEqual(dispatched_prompts, ["prompt_2", "prompt_3"])
       program.close()
@@ -9479,47 +9542,49 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
 
       async def _dispatch_rollouts(prompts, **kwargs):
         num_generations = kwargs["num_generations"]
-        prompt_dict = prompts[0]
-        pid = prompt_dict["prompt_id"]
-        meta = dict(prompt_dict["metadata"])
-        v = program.policy_version
-        dispatched_versions[pid] = v
-        items = [
-            datatypes.TrajectoryItem(
-                prompt_id=pid,
-                group_index=g,
-                start_step=program.step,
-                prompt_tokens=np.array([1, 2], dtype=np.int32),
-                completion_tokens=np.array([3, 4], dtype=np.int32),
-                action_mask=np.array([1, 1], dtype=np.int32),
-                traj={
-                    "policy_versions": [v],
-                    "status": datatypes.TrajectoryStatus.SUCCEEDED,
-                    "trajectory_reward": 0.0,
-                    "prompt_tokens": [1, 2],
-                    "conversation_tokens": [3, 4],
-                    "conversation_masks": [1, 1],
-                    "conversation_text": [
-                        {"role": "user", "content": pid},
-                        {"role": "assistant", "content": f"{pid}_{g}"},
-                    ],
-                },
-                metadata=meta,
-            )
-            for g in range(num_generations)
-        ]
-        if meta["batch_idx"] == 0:
-          batch0_delayed.extend(items)
-        else:
-          for it in items:
-            await completed_items.put(it)
-          if pid == "p3":
-            for it in batch0_delayed:
+        req_ids: list[str] = []
+        for prompt_dict in prompts:
+          pid = prompt_dict["prompt_id"]
+          meta = dict(prompt_dict["metadata"])
+          v = program.policy_version
+          dispatched_versions[pid] = v
+          items = [
+              datatypes.TrajectoryItem(
+                  prompt_id=pid,
+                  group_index=g,
+                  start_step=program.step,
+                  prompt_tokens=np.array([1, 2], dtype=np.int32),
+                  completion_tokens=np.array([3, 4], dtype=np.int32),
+                  action_mask=np.array([1, 1], dtype=np.int32),
+                  traj={
+                      "policy_versions": [v],
+                      "status": datatypes.TrajectoryStatus.SUCCEEDED,
+                      "trajectory_reward": 0.0,
+                      "prompt_tokens": [1, 2],
+                      "conversation_tokens": [3, 4],
+                      "conversation_masks": [1, 1],
+                      "conversation_text": [
+                          {"role": "user", "content": pid},
+                          {"role": "assistant", "content": f"{pid}_{g}"},
+                      ],
+                  },
+                  metadata=meta,
+              )
+              for g in range(num_generations)
+          ]
+          if meta["batch_idx"] == 0:
+            batch0_delayed.extend(items)
+          else:
+            for it in items:
               await completed_items.put(it)
-            batch0_delayed.clear()
-          if pid == "p5":
-            await completed_items.put(None)
-        return [f"req_{pid}_{g}" for g in range(num_generations)]
+            if pid == "p3":
+              for it in batch0_delayed:
+                await completed_items.put(it)
+              batch0_delayed.clear()
+            if pid == "p5":
+              await completed_items.put(None)
+          req_ids.extend(f"req_{pid}_{g}" for g in range(num_generations))
+        return req_ids
 
       async def _poll_rollouts(timeout_s=0.1):
         del timeout_s
@@ -9628,8 +9693,8 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
       # batch 2 (p4, p5).
       await program.rollout_dispatch_stage()
       dispatched_coords = [
-          call.args[0][0]["metadata"]
-          for call in self.mock_engine.dispatch_rollouts.call_args_list
+          prompt_item["metadata"]
+          for prompt_item in _dispatched_prompts(self.mock_engine)
       ]
       self.assertEqual(
           [c["prompt_idx"] for c in dispatched_coords],
@@ -9683,32 +9748,34 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
       self.mock_engine.restored_checkpoint_metadata = None
 
       async def _run1_dispatch(prompts, **kwargs):
-        p = prompts[0]
-        pid = p["prompt_id"]
-        pv = -3 if pid == "prompt_1" else kwargs.get("policy_version", 0)
-        batch = [
-            distributed_rl_engine._response_to_trajectory_item(
-                _create_rollout_response(
-                    f"req_{pid}_{g_idx}",
-                    pid,
-                    group_index=g_idx,
-                    policy_version=pv,
-                    reward=1.0,
-                )
-            )
-            for g_idx in range(4)
-        ]
+        req_ids: list[str] = []
+        for p in prompts:
+          pid = p["prompt_id"]
+          pv = -3 if pid == "prompt_1" else kwargs.get("policy_version", 0)
+          batch = [
+              distributed_rl_engine._response_to_trajectory_item(
+                  _create_rollout_response(
+                      f"req_{pid}_{g_idx}",
+                      pid,
+                      group_index=g_idx,
+                      policy_version=pv,
+                      reward=1.0,
+                  )
+              )
+              for g_idx in range(4)
+          ]
 
-        if pid in ("prompt_0", "prompt_1", "prompt_3"):
-          await run1_poll_queue.put(batch)
-        else:
+          if pid in ("prompt_0", "prompt_1", "prompt_3"):
+            await run1_poll_queue.put(batch)
+          else:
 
-          async def _delayed(b):
-            await asyncio.sleep(10.0)
-            await run1_poll_queue.put(b)
+            async def _delayed(b):
+              await asyncio.sleep(10.0)
+              await run1_poll_queue.put(b)
 
-          run1_bg_tasks.append(asyncio.create_task(_delayed(batch)))
-        return [f"req_{pid}_{g}" for g in range(4)]
+            run1_bg_tasks.append(asyncio.create_task(_delayed(batch)))
+          req_ids.extend(f"req_{pid}_{g}" for g in range(4))
+        return req_ids
 
       async def _run1_poll(timeout_s=0.1):
         del timeout_s
@@ -9776,31 +9843,35 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
       delays_run2 = {"prompt_2": 0.04, "prompt_4": 0.01, "prompt_5": 0.08}
 
       async def _run2_dispatch(prompts, **kwargs):
-        p = prompts[0]
-        pid = p["prompt_id"]
-        run2_dispatched.append(pid)
-        pv = kwargs.get("policy_version", 0)
-        batch = [
-            distributed_rl_engine._response_to_trajectory_item(
-                _create_rollout_response(
-                    f"req_{pid}_{g_idx}",
-                    pid,
-                    group_index=g_idx,
-                    policy_version=pv,
-                    reward=1.0,
-                )
-            )
-            for g_idx in range(4)
-        ]
+        req_ids: list[str] = []
+        for p in prompts:
+          pid = p["prompt_id"]
+          run2_dispatched.append(pid)
+          pv = kwargs.get("policy_version", 0)
+          batch = [
+              distributed_rl_engine._response_to_trajectory_item(
+                  _create_rollout_response(
+                      f"req_{pid}_{g_idx}",
+                      pid,
+                      group_index=g_idx,
+                      policy_version=pv,
+                      reward=1.0,
+                  )
+              )
+              for g_idx in range(4)
+          ]
 
-        async def _delayed_put(b, d):
-          await asyncio.sleep(d)
-          await run2_poll_queue.put(b)
+          async def _delayed_put(b, d):
+            await asyncio.sleep(d)
+            await run2_poll_queue.put(b)
 
-        run2_bg_tasks.append(
-            asyncio.create_task(_delayed_put(batch, delays_run2.get(pid, 0.01)))
-        )
-        return [f"req_{pid}_{g}" for g in range(4)]
+          run2_bg_tasks.append(
+              asyncio.create_task(
+                  _delayed_put(batch, delays_run2.get(pid, 0.01))
+              )
+          )
+          req_ids.extend(f"req_{pid}_{g}" for g in range(4))
+        return req_ids
 
       async def _run2_poll(timeout_s=0.1):
         del timeout_s
@@ -10229,6 +10300,212 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
         )
         self.assertAlmostEqual(
             logger.get_metric("rollout", "version_span_mean", "train"), 1.5
+        )
+      finally:
+        program.close()
+
+    asyncio.run(_run())
+
+  def test_rollout_dispatch_stage_coalesces_large_batch_into_64_prompt_waves(
+      self,
+  ):
+    async def _run():
+      dataset = [f"q_{i}" for i in range(150)]
+      program = rl_program.StandardRLProgram(
+          dataset=dataset,
+          max_steps=1,
+          batch_size=150,
+          algo_config=self.algo_config,
+          batch_config=self.batch_config,
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
+          max_staleness=0,
+      )
+      program.engine = self.mock_engine
+      try:
+        with self.assertLogs(level="INFO") as logs:
+          await program.rollout_dispatch_stage()
+        wave_sizes = [
+            len(call.args[0])
+            for call in self.mock_engine.dispatch_rollouts.call_args_list
+        ]
+        self.assertEqual(wave_sizes, [64, 64, 22])
+        # Each prompt keeps its `[pipeline] DISPATCH` line with the fields log
+        # parsers read, logged with its wave; the wave line has another prefix.
+        pipeline_logs = [
+            log.split("[pipeline] ", 1)[1]
+            for log in logs.output
+            if "[pipeline] " in log
+        ]
+        self.assertEqual(
+            pipeline_logs[:2],
+            [
+                (
+                    "DISPATCH prompt_id=prompt_0 prompt_idx=0 batch_idx=0"
+                    " intra_batch_idx=0 policy_version=0 next_batch=0"
+                ),
+                (
+                    "DISPATCH prompt_id=prompt_1 prompt_idx=1 batch_idx=0"
+                    " intra_batch_idx=1 policy_version=0 next_batch=0"
+                ),
+            ],
+        )
+        self.assertEqual(
+            [
+                i
+                for i, log in enumerate(pipeline_logs)
+                if not log.startswith("DISPATCH prompt_id=")
+            ],
+            [64, 129, 152],
+        )
+        self.assertEqual(
+            pipeline_logs[64],
+            "WAVE_DISPATCH count=64 policy_version=0 next_batch=0",
+        )
+        dispatched_ids = [
+            prompt_item["prompt_id"]
+            for prompt_item in _dispatched_prompts(self.mock_engine)
+        ]
+        self.assertEqual(dispatched_ids, [f"prompt_{i}" for i in range(150)])
+      finally:
+        program.close()
+
+    asyncio.run(_run())
+
+  def test_rollout_dispatch_stage_flushes_immediately_on_filtered_slot_refill(
+      self,
+  ):
+    async def _run():
+      wave_q: asyncio.Queue[list[str]] = asyncio.Queue()
+
+      async def _mock_dispatch(prompts, **kwargs):
+        del kwargs
+        await wave_q.put([p["prompt_id"] for p in prompts])
+        return ["req"] * len(prompts)
+
+      self.mock_engine.dispatch_rollouts.side_effect = _mock_dispatch
+      program = rl_program.StandardRLProgram(
+          dataset=[f"q_{i}" for i in range(8)],
+          max_steps=2,
+          batch_size=4,
+          algo_config=self.algo_config,
+          batch_config=self.batch_config,
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
+          max_staleness=0,
+      )
+      program.engine = self.mock_engine
+      dispatch_task = asyncio.create_task(program.rollout_dispatch_stage())
+      try:
+        first_wave = await asyncio.wait_for(wave_q.get(), timeout=1.0)
+        self.assertEqual(
+            first_wave,
+            ["prompt_0", "prompt_1", "prompt_2", "prompt_3"],
+        )
+
+        # Filtering 1 group frees exactly 1 slot; prompt_4 must flush
+        # immediately once admitted because `can_admit` returns False again.
+        program.dispatch_window.on_group_filtered([
+            datatypes.TrajectoryItem(
+                group_index=0,
+                prompt_id="prompt_0",
+                start_step=0,
+                traj=_scored_traj(),
+            )
+        ])
+        second_wave = await asyncio.wait_for(wave_q.get(), timeout=1.0)
+        self.assertEqual(second_wave, ["prompt_4"])
+      finally:
+        dispatch_task.cancel()
+        await asyncio.gather(dispatch_task, return_exceptions=True)
+        program.close()
+
+    asyncio.run(_run())
+
+  def test_rollout_dispatch_stage_flushes_when_window_fills_between_reads(
+      self,
+  ):
+    async def _run():
+      wave_q: asyncio.Queue[list[str]] = asyncio.Queue()
+
+      async def _mock_dispatch(prompts, **kwargs):
+        del kwargs
+        await wave_q.put([p["prompt_id"] for p in prompts])
+        return ["req"] * len(prompts)
+
+      self.mock_engine.dispatch_rollouts.side_effect = _mock_dispatch
+      program = rl_program.StandardRLProgram(
+          dataset=[f"q_{i}" for i in range(4)],
+          max_steps=1,
+          batch_size=4,
+          algo_config=self.algo_config,
+          batch_config=self.batch_config,
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
+          max_staleness=0,
+      )
+      program.engine = self.mock_engine
+
+      async def _fill_window_before_third_prompt(dataset, **kwargs):
+        del kwargs
+        yield 0, dataset[0]
+        yield 1, dataset[1]
+        # An in-flight weight sync holds back one batch, which fills the window
+        # while two admitted prompts are still pending.
+        program._inflight_sync = mock.create_autospec(
+            asyncio.Task, instance=True
+        )
+        self.assertFalse(program.dispatch_window.can_admit)
+        yield 2, dataset[2]
+
+      with mock.patch.object(
+          rl_program.dataset_utils,
+          "iter_dataset_async",
+          _fill_window_before_third_prompt,
+      ):
+        dispatch_task = asyncio.create_task(program.rollout_dispatch_stage())
+        try:
+          # The third prompt parks in `admit()`; the first two are sent first.
+          wave = await asyncio.wait_for(wave_q.get(), timeout=1.0)
+          self.assertEqual(wave, ["prompt_0", "prompt_1"])
+          self.assertFalse(dispatch_task.done())
+        finally:
+          dispatch_task.cancel()
+          await asyncio.gather(dispatch_task, return_exceptions=True)
+          program._inflight_sync = None
+          program.close()
+
+    asyncio.run(_run())
+
+  def test_rollout_dispatch_stage_flushes_at_batch_boundaries_and_eof(self):
+    async def _run():
+      dispatched_waves: list[list[str]] = []
+
+      async def _mock_dispatch(prompts, **kwargs):
+        del kwargs
+        dispatched_waves.append([p["prompt_id"] for p in prompts])
+        return ["req"] * len(prompts)
+
+      self.mock_engine.dispatch_rollouts.side_effect = _mock_dispatch
+      program = rl_program.StandardRLProgram(
+          dataset=[f"q_{i}" for i in range(10)],
+          max_steps=3,
+          batch_size=4,
+          algo_config=self.algo_config,
+          batch_config=self.batch_config,
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
+          max_staleness=2,
+      )
+      program.engine = self.mock_engine
+      program.dispatch_window.restore_checkpoint_metadata(
+          {"committed_prompt_ids": ["prompt_3"], "skipped_prompt_ids": []}
+      )
+      try:
+        await program.rollout_dispatch_stage()
+        self.assertEqual(
+            dispatched_waves,
+            [
+                ["prompt_0", "prompt_1", "prompt_2"],
+                ["prompt_4", "prompt_5", "prompt_6", "prompt_7"],
+                ["prompt_8", "prompt_9"],
+            ],
         )
       finally:
         program.close()
