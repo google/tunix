@@ -503,6 +503,16 @@ cluster_config:
       # pathways-proxy through shared memory instead of localhost gRPC. null
       # keeps the IFRT proxy client's default, which turns this off.
       ifrt_proxy_large_transfer_threshold_bytes: null
+      # GCSFuse mount for checkpoints, e.g. of a zonal Rapid bucket near the
+      # TPUs: the trainer's role container, every pathways-worker and the
+      # sidecar mount `bucket` at `mount_path`. An empty `bucket` mounts none.
+      # To write checkpoints there, set a MaxText trainer's `checkpoint_dir`
+      # under `mount_path`
+      # (`dist_training_config.maxtext_extra_config.checkpoint_dir`).
+      checkpoint_gcsfuse:
+        bucket: ""
+        mount_path: "/gcs/ckpt"
+        mount_options: "implicit-dirs,metadata-cache:negative-ttl-secs:0"
   local:
     auto_detect_devices: false
     download_model_weights: true

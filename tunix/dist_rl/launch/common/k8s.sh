@@ -273,6 +273,9 @@ start_trainer() {
     --pathways_worker_memory="${K8S_PATHWAYS_SERVER_MEMORY}" \
     --pathways_worker_memory_limit="${K8S_PATHWAYS_SERVER_MEMORY_LIMIT}" \
     ${K8S_PATHWAYS_IFRT_THRESHOLD_BYTES:+--ifrt_proxy_large_transfer_threshold_bytes="${K8S_PATHWAYS_IFRT_THRESHOLD_BYTES}"} \
+    --ckpt_gcsfuse_bucket="${K8S_PATHWAYS_CKPT_GCSFUSE_BUCKET}" \
+    --ckpt_gcsfuse_mount_path="${K8S_PATHWAYS_CKPT_GCSFUSE_MOUNT_PATH}" \
+    --ckpt_gcsfuse_mount_options="${K8S_PATHWAYS_CKPT_GCSFUSE_MOUNT_OPTIONS}" \
     --pathways_gcs_scratch_location="${K8S_GCS_SCRATCH_LOCATION}" \
     "${TPU_JOBSET_GEN_ARGS[@]}" \
     --worker_container_image="${K8S_TUNIX_IMAGE}" \
