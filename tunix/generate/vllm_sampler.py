@@ -395,9 +395,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           reshard_chunk_size=self.config.reshard_chunk_size,
       )
 
-    if (
-        self.config.free_kv_cache_during_weight_sync or self._kv_cache_deleted
-    ) and not keep_active_kv:
+    if self._kv_cache_deleted or (
+        self.config.free_kv_cache_during_weight_sync and not keep_active_kv
+    ):
       self.reinitialize_cache()
     else:
       self.refresh_state_leaves()

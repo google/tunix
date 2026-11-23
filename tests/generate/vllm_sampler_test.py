@@ -649,6 +649,30 @@ class VllmSamplerConfigTest(absltest.TestCase):
     rpcs = [c.args[0] for c in sampler.llm.collective_rpc.call_args_list]
     self.assertEqual(rpcs, ["delete_kv_cache", "reinitialize_kv_cache"])
 
+  def test_update_params_reinitializes_deleted_kv_cache_during_partial_rollout(
+      self,
+  ):
+    config = vllm_sampler.VllmConfig(
+        init_with_random_weights=False,
+        partial_rollout=True,
+        additional_config={"maxtext_config": {}},
+    )
+    sampler = self._make_sampler(config)
+    sampler.to_hf_key_mappings = None
+    sampler.delete_cache()
+    self.assertTrue(sampler._kv_cache_deleted)
+
+    with mock.patch.object(
+        vllm_sampler.utils, "transfer_state_directly"
+    ), mock.patch.object(vllm_sampler.jax, "effects_barrier"):
+      sampler.update_params({})
+      # Once reallocated, an in-flight partial-rollout update keeps active KV.
+      sampler.update_params({})
+
+    rpcs = [c.args[0] for c in sampler.llm.collective_rpc.call_args_list]
+    self.assertEqual(rpcs, ["delete_kv_cache", "reinitialize_kv_cache"])
+    self.assertFalse(sampler._kv_cache_deleted)
+
   def test_overlap_postprocessing_decodes_finished_requests_early(self):
     config = vllm_sampler.VllmConfig(init_with_random_weights=False)
     sampler = self._make_sampler(config)
