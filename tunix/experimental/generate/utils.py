@@ -194,11 +194,33 @@ def to_scheduler_config(
 def to_model_runner_config(
     rollout_config: common_configs.RolloutConfig,
     mesh: jax.sharding.Mesh,
+    vocab_size: int,
 ) -> configs.ModelRunnerConfig:
-  """Returns the model runner config for the given rollout config and mesh."""
+  """Returns the model runner config for the given rollout config and mesh.
+
+  Args:
+    rollout_config: The engine's rollout configuration.
+    mesh: The device mesh the model runs on.
+    vocab_size: The model's vocabulary size.
+
+  Raises:
+    ValueError: If `rollout_vanilla_v2_max_logprobs` exceeds `vocab_size`.
+  """
+  max_logprobs = 0
+  if rollout_config.return_logprobs:
+    max_logprobs = rollout_config.rollout_vanilla_v2_max_logprobs
+  if max_logprobs < 0:
+    max_logprobs = vocab_size
+  elif max_logprobs > vocab_size:
+    raise ValueError(
+        f"rollout_vanilla_v2_max_logprobs={max_logprobs} exceeds the"
+        f" vocabulary size {vocab_size}."
+    )
+
   return configs.ModelRunnerConfig(
       max_top_k=rollout_config.top_k or -1,
       mesh=mesh,
+      max_logprobs=max_logprobs,
       return_logprobs=rollout_config.return_logprobs,
       return_logits=rollout_config.return_logits,
       num_scheduler_steps=rollout_config.rollout_vanilla_v2_num_scheduler_steps,

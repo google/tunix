@@ -353,6 +353,23 @@ Cache = dict[str, jax.Array]
 _PyTree = TypeVar('_PyTree')
 
 
+@struct.dataclass
+class ModelRunnerOutput:
+  """The sampled tokens of one or more steps, and what else was asked for.
+
+  Every array is indexed by `[num_rows, ...]`, with a step axis after the row
+  axis when there are several steps.
+  """
+
+  # `[num_rows, ...]` sampled tokens.
+  sampled_tokens: jax.Array
+  # `[num_rows, ..., vocab_size]` logits, or None unless `return_logits`.
+  logits: jax.Array | None
+  # `[num_rows, ...]` logprobs of `sampled_tokens`, or None unless
+  # `return_logprobs`.
+  logprobs: jax.Array | None
+
+
 @functools.partial(jax.jit, static_argnames=['num_steps'])
 def _stack_steps(
     first_step: jax.Array,
@@ -363,7 +380,7 @@ def _stack_steps(
 
   Args:
     first_step: The `[num_rows, ...]` output of the scheduled batch's step.
-    decode_steps: The `[num_scheduler_steps - 1, num_rows, ...]` output of the
+    decode_steps: The `[num_rows, num_scheduler_steps - 1, ...]` output of the
       decode loop, or None when the loop did not run.
     num_steps: The step capacity to pad out to.
 
@@ -371,9 +388,7 @@ def _stack_steps(
     The outputs indexed by `[row, step, ...]`.
   """
   if decode_steps is not None:
-    return jnp.concatenate(
-        [first_step[:, None], jnp.swapaxes(decode_steps, 0, 1)], axis=1
-    )
+    return jnp.concatenate([first_step[:, None], decode_steps], axis=1)
   if num_steps == 1:
     return first_step[:, None]
   out = jnp.zeros(
@@ -624,7 +639,7 @@ class ModelRunner:
       metadata: paged_attention.PagedAttnMetadata,
       sampling_metadata: SamplingMetadata,
       rng: jax.Array,
-  ) -> tuple[jax.Array, jax.Array | None, jax.Array | None, Cache, jax.Array]:
+  ) -> tuple[ModelRunnerOutput, Cache, jax.Array]:
     """Runs the model over a mixed batch and samples the next tokens.
 
     Args:
@@ -638,9 +653,8 @@ class ModelRunner:
 
     Returns:
       A tuple of
-      - next_tokens: `[num_rows]` array of sampled tokens.
-      - logits: `[num_rows, vocab_size]` array of logits, or None.
-      - logprobs: `[num_rows]` array of logprobs, or None.
+      - output: The step's sampled tokens, with their logits and logprobs, as
+        `[num_rows, ...]` arrays.
       - updated_cache: The updated KV cache pages.
       - rng: The updated PRNG key for subsequent steps.
     """
@@ -690,8 +704,12 @@ class ModelRunner:
         tp_size=tp_size,
     )
 
-    res_logits = logits if config.return_logits else None
-    return next_tokens, res_logits, logp, updated_cache, rng
+    output = ModelRunnerOutput(
+        sampled_tokens=next_tokens,
+        logits=logits if config.return_logits else None,
+        logprobs=logp,
+    )
+    return output, updated_cache, rng
 
   def _split_rows(
       self,
@@ -737,7 +755,7 @@ class ModelRunner:
       sampling_metadata: SamplingMetadata,
       rng: jax.Array,
       num_steps: int,
-  ) -> tuple[jax.Array, jax.Array | None, jax.Array | None, Cache, jax.Array]:
+  ) -> tuple[ModelRunnerOutput, Cache, jax.Array]:
     """Decodes `num_steps` tokens from the batch `metadata` just ran.
 
     Args:
@@ -753,9 +771,8 @@ class ModelRunner:
 
     Returns:
       A tuple of
-      - tokens: `[num_steps, num_rows]` array of sampled tokens.
-      - logits: `[num_steps, num_rows, vocab_size]` array of logits, or None.
-      - logprobs: `[num_steps, num_rows]` array of logprobs, or None.
+      - output: Each decode step's sampled tokens, with their logits and
+        logprobs, as `[num_rows, num_steps, ...]` arrays.
       - updated cache: The updated KV cache pages.
       - rng: The updated PRNG key for subsequent steps.
     """
@@ -836,7 +853,7 @@ class ModelRunner:
     def decode_step(carry, _):
       cache, tokens, kv_lens, rng = carry
       step_metadata = dataclasses.replace(decode_metadata, kv_lens=kv_lens)
-      next_tokens, logits, logp, cache, rng = self._model_step_fn(
+      output, cache, rng = self._model_step_fn(
           params,
           cache,
           tokens,
@@ -846,11 +863,11 @@ class ModelRunner:
       )
       carry = (
           cache,
-          next_tokens.reshape(num_groups, rows_per_group),
+          output.sampled_tokens.reshape(num_groups, rows_per_group),
           kv_lens + query_lens,
           rng,
       )
-      return carry, (next_tokens, logits, logp)
+      return carry, output
 
     carry, outputs = jax.lax.scan(
         decode_step,
@@ -859,15 +876,11 @@ class ModelRunner:
         length=num_steps,
     )
     cache, _, _, rng = carry
-    tokens, logits, logp = outputs
     # Send each output row back to the scheduled row it came from.
-    return (
-        tokens[:, inverse_order],
-        logits[:, inverse_order] if logits is not None else None,
-        logp[:, inverse_order] if logp is not None else None,
-        cache,
-        rng,
-    )
+    outputs = jax.tree.map(lambda x: x[:, inverse_order], outputs)
+    # Put the step axis after the row axis.
+    outputs = jax.tree.map(lambda x: jnp.swapaxes(x, 0, 1), outputs)
+    return outputs, cache, rng
 
   def _to_device(self, tree: _PyTree) -> _PyTree:
     """Moves host arrays onto the device, replicated across the mesh."""
@@ -884,7 +897,7 @@ class ModelRunner:
       tokens: jax.Array,
       metadata: paged_attention.PagedAttnMetadata,
       sampling_params: Sequence[request_lib.SamplingParams],
-  ) -> tuple[jax.Array, jax.Array | None, jax.Array | None, Cache]:
+  ) -> tuple[ModelRunnerOutput, Cache]:
     """Runs model forward passes on a batch of requests, and samples tokens.
 
     Note: This function runs `num_scheduler_steps` forward passes, and samples
@@ -900,11 +913,8 @@ class ModelRunner:
 
     Returns:
       A tuple of:
-        - tokens: `[num_rows, num_scheduler_steps]` array of sampled tokens.
-        - logits: `[num_rows, num_scheduler_steps, vocab_size]` array of
-          logits, or None.
-        - logprobs: `[num_rows, num_scheduler_steps]` array of logprobs, or
-          None.
+        - output: Each step's sampled tokens, with their logits and logprobs,
+          as `[num_rows, num_scheduler_steps, ...]` arrays.
         - updated cache: The updated KV cache pages.
 
     Raises:
@@ -931,7 +941,7 @@ class ModelRunner:
         ),
     ))
 
-    next_tokens, logits, logp, cache, self._rng = self._compiled_model_step_fn(
+    output, cache, self._rng = self._compiled_model_step_fn(
         self._flattened_transformer_state,
         cache,
         tokens,
@@ -953,27 +963,19 @@ class ModelRunner:
 
     num_decode_steps = num_steps - 1 if num_surviving else 0
 
-    decode_tokens = decode_logits = decode_logp = None
+    stack = functools.partial(_stack_steps, num_steps=num_steps)
     if num_decode_steps:
-      decode_tokens, decode_logits, decode_logp, cache, self._rng = (
-          self._compiled_decode_loop_fn(
-              self._flattened_transformer_state,
-              cache,
-              next_tokens,
-              dataclasses.replace(device_metadata, decode_only=True),
-              sampling_metadata,
-              self._rng,
-              num_steps=num_decode_steps,
-          )
+      decode_output, cache, self._rng = self._compiled_decode_loop_fn(
+          self._flattened_transformer_state,
+          cache,
+          output.sampled_tokens,
+          dataclasses.replace(device_metadata, decode_only=True),
+          sampling_metadata,
+          self._rng,
+          num_steps=num_decode_steps,
       )
+      output = jax.tree.map(stack, output, decode_output)
+    else:
+      output = jax.tree.map(lambda x: stack(x, None), output)
 
-    out_tokens = _stack_steps(next_tokens, decode_tokens, num_steps)
-    out_logits = (
-        _stack_steps(logits, decode_logits, num_steps)
-        if logits is not None
-        else None
-    )
-    out_logp = (
-        _stack_steps(logp, decode_logp, num_steps) if logp is not None else None
-    )
-    return out_tokens, out_logits, out_logp, cache
+    return output, cache
