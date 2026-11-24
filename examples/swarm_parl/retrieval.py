@@ -105,6 +105,7 @@ class LocalDenseCorpusRetriever:
 class _MultiCorpusHandler(BaseHTTPRequestHandler):
   wiki_retriever: Any = None
   browsecomp_retriever: LocalDenseCorpusRetriever | None = None
+  search_lock: threading.Lock = threading.Lock()
 
   def log_message(self, fmt: str, *args: Any) -> None:
     del fmt, args
@@ -136,10 +137,11 @@ class _MultiCorpusHandler(BaseHTTPRequestHandler):
     topk = int(req.get("topk", 3))
     corpus = str(req.get("corpus", "wiki18")).strip().lower()
     bc = self.browsecomp_retriever
-    if corpus == "browsecomp" and bc is not None:
-      res = bc.search(queries, topk=topk)
-    else:
-      res = self.wiki_retriever.search(queries, topk=topk)
+    with self.search_lock:
+      if corpus == "browsecomp" and bc is not None:
+        res = bc.search(queries, topk=topk)
+      else:
+        res = self.wiki_retriever.search(queries, topk=topk)
     self._send_json(200, {"result": res})
 
   def _handle_open_doc(self, req: dict[str, Any]) -> None:
@@ -182,7 +184,11 @@ def start_multi_corpus_retrieval_server(
   handler_cls = type(
       "_BoundMultiCorpusHandler",
       (_MultiCorpusHandler,),
-      {"wiki_retriever": wiki_ret, "browsecomp_retriever": bc_ret},
+      {
+          "wiki_retriever": wiki_ret,
+          "browsecomp_retriever": bc_ret,
+          "search_lock": threading.Lock(),
+      },
   )
   server = ThreadingHTTPServer(("127.0.0.1", port), handler_cls)
   thread = threading.Thread(target=server.serve_forever, daemon=True)
