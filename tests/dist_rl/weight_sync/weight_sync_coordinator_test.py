@@ -352,6 +352,8 @@ class FakeDestination:
 class FakeHandler(weight_sync.WeightSyncHandler):
   """Records registrations and transfers; moves the wire pattern on transfer."""
 
+  transfers_from_staged_copy = True
+
   def __init__(self, wire: Wire, log: list[str]):
     self._wire = wire
     self._log = log
@@ -1916,6 +1918,96 @@ class SourcePrepareTimeoutTest(CoordinatorTestBase):
     # Release still runs; workers must make it safe against an in-flight
     # prepare for the same round.
     self.assertEqual(slow_source.release_calls, 1)
+
+
+class SourcePreparedSignalTest(CoordinatorTestBase):
+
+  def test_signal_fires_once_staged_and_before_destinations_are_touched(self):
+    dest = FakeDestination("sampler", [])
+    coordinator = self.make(dest)
+
+    async def scenario():
+      source_prepared = asyncio.Event()
+      round_task = asyncio.create_task(
+          coordinator.sync(2, source_prepared=source_prepared)
+      )
+      await asyncio.wait_for(source_prepared.wait(), timeout=5)
+      log_at_signal = list(self.log)
+      round_open_at_signal = not round_task.done()
+      return log_at_signal, round_open_at_signal, await round_task
+
+    log_at_signal, round_open_at_signal, result = asyncio.run(scenario())
+
+    # The source is staged and nothing else has happened: the caller may let
+    # the trainer go while the whole destination side is still ahead.
+    self.assertEqual(log_at_signal, ["trainer:prepare"])
+    self.assertTrue(round_open_at_signal)
+    self.assertTrue(result.success)
+    self.assertEqual(dest.serving, expected_pattern(2))
+
+  def test_signal_stays_unset_when_source_stages_nothing(self):
+    class _EmptySource(FakeSource):
+
+      async def prepare_weight_sync(self, sync_request: Any = None, **kwargs):
+        del sync_request, kwargs
+        return []
+
+    coordinator = self.make(
+        FakeDestination("sampler", []),
+        sources=[_EmptySource("trainer", Wire(), [])],
+    )
+    signal_set_after_round = []
+
+    async def scenario():
+      source_prepared = asyncio.Event()
+      try:
+        await coordinator.sync(1, source_prepared=source_prepared)
+      finally:
+        signal_set_after_round.append(source_prepared.is_set())
+
+    with self.assertRaises(WeightSyncError):
+      asyncio.run(scenario())
+
+    # A source that returned no metadata staged nothing a round can transfer.
+    self.assertEqual(signal_set_after_round, [False])
+
+  def test_signal_stays_unset_when_source_prepare_fails(self):
+    dest = FakeDestination("sampler", [])
+    slow_source = FakeSource("trainer", Wire(), [], prepare_delay=60)
+    coordinator = self.make(
+        dest,
+        sources=[slow_source],
+        timeouts=dataclasses.replace(FAST_TIMEOUTS, source_prepare=0.05),
+    )
+    signal_set_after_round = []
+
+    async def scenario():
+      source_prepared = asyncio.Event()
+      try:
+        await coordinator.sync(1, source_prepared=source_prepared)
+      finally:
+        signal_set_after_round.append(source_prepared.is_set())
+
+    with self.assertRaises(WeightSyncError):
+      asyncio.run(scenario())
+
+    # A caller waiting on the signal must learn of the failure from the round
+    # itself, never by being told the source is staged.
+    self.assertEqual(signal_set_after_round, [False])
+    self.assertEmpty(self.phases("sampler"))
+    self.assertEqual(slow_source.release_calls, 1)
+
+  def test_round_is_refused_when_transfer_reads_live_source_weights(self):
+    dest = FakeDestination("sampler", [])
+    coordinator = self.make(dest)
+    self.handler.transfers_from_staged_copy = False
+
+    # The caller may train once the source is staged, which such a transfer
+    # cannot tolerate; without the signal the round is an ordinary one.
+    with self.assertRaisesRegex(ValueError, "live weights"):
+      asyncio.run(coordinator.sync(2, source_prepared=asyncio.Event()))
+    self.assertEmpty(self.log)
+    self.assertTrue(asyncio.run(coordinator.sync(2)).success)
 
 
 class PhaseTimeoutsTest(absltest.TestCase):

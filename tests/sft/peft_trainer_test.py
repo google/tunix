@@ -24,11 +24,13 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import chex
 from flax import nnx
+from flax import traverse_util
 import jax
 import jax.numpy as jnp
 import jax.sharding as shd
 import numpy as np
 import optax
+from safetensors import numpy as safe_np
 from tunix.rl import common
 from tunix.sft import checkpoint_manager
 from tunix.sft import checkpoint_options
@@ -360,8 +362,7 @@ class PeftTrainerTest(parameterized.TestCase):
         lambda step: step == profiler_options.skip_first_n_steps
     )
     mock_profiler_instance.should_deactivate.side_effect = (
-        lambda step: step
-        == (
+        lambda step: step == (
             profiler_options.skip_first_n_steps
             + profiler_options.profiler_steps
         )
@@ -698,8 +699,8 @@ class PeftTrainerTest(parameterized.TestCase):
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
     with self.assertRaisesRegex(
         ValueError,
-        "resume_from_checkpoint_on_init=False is not supported in SFT"
-        " PeftTrainer",
+        'resume_from_checkpoint_on_init=False is not supported in SFT'
+        ' PeftTrainer',
     ):
       peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
 
@@ -1275,6 +1276,58 @@ class PeftTrainerTest(parameterized.TestCase):
     else:
       self.assertIsNotNone(learning_rate)
       self.assertAlmostEqual(float(learning_rate), expected)
+
+  def test_export_safetensors_after_training_keeps_orbax_restore(self):
+    root = f'{self.temp_path}/{self.id()}/checkpoints'
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100, max_steps=1, checkpoint_root_directory=root
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+    trainer.train(self.train_ds, self.eval_ds)
+    self.assertEqual(trainer.train_steps, 1)
+    flat = traverse_util.flatten_dict(
+        nnx.to_pure_dict(nnx.state(model, nnx.Param))
+    )
+    expected = {
+        'model.' + '.'.join(map(str, k)): np.asarray(v) for k, v in flat.items()
+    }
+    manifest = {
+        'rules': [
+            {'source_keys': [k[len('model.'):]], 'target_keys': [k], 'ops': []}
+            for k in expected
+        ]
+    }
+    explicit_dir = f'{self.temp_path}/{self.id()}/explicit'
+
+    default_result = trainer.export_safetensors(to_hf_manifest=manifest)
+    explicit_result = trainer.export_safetensors(
+        to_hf_manifest=manifest, output_dir=explicit_dir
+    )
+
+    self.assertEqual(
+        default_result.paths, (f'{root}/safetensors/1/model.safetensors',)
+    )
+    self.assertEqual(
+        explicit_result.paths, (f'{explicit_dir}/model.safetensors',)
+    )
+    for result in (default_result, explicit_result):
+      written = safe_np.load_file(result.paths[0])
+      self.assertCountEqual(written, expected)
+      for key, value in expected.items():
+        np.testing.assert_array_equal(written[key], value)
+    restored_model = tc.ToyTransformer(
+        config=tc.ModelConfig(), rngs=nnx.Rngs(1)
+    )
+    restored = peft_trainer.PeftTrainer(restored_model, optax.sgd(1e-3), config)
+    self.assertEqual(restored.train_steps, 1)
+    jax.tree.map_with_path(
+        tc.assert_equal,
+        nnx.state(model, nnx.Param),
+        nnx.state(restored_model, nnx.Param),
+    )
+    restored.close()
 
 
 def _unwrap(state):

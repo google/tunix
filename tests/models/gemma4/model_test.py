@@ -1276,6 +1276,39 @@ class ModelTest(parameterized.TestCase):
       expected_positions = jnp.arange(8, 12, dtype=jnp.int32)[None, :]
       np.testing.assert_array_equal(passed_positions, expected_positions)
 
+  @parameterized.named_parameters(
+      ('sampling', True, jax.sharding.PartitionSpec(None)),
+      ('training', False, jax.sharding.PartitionSpec('tp')),
+  )
+  def test_default_sharding_rms_norm_weight(
+      self, is_sampling, expected_spec
+  ):
+    cfg = dataclasses.replace(
+        model_lib.ModelConfig.gemma4_12b(
+            sharding_config=model_lib.ShardingConfig.get_default_sharding(
+                is_sampling=is_sampling
+            )
+        ),
+        num_layers=1,
+        num_embed=128,
+        embed_dim=64,
+        hidden_dim=128,
+        num_heads=2,
+        head_dim=32,
+        num_kv_heads=1,
+    )
+    abs_model = nnx.eval_shape(lambda: model_lib.Gemma4(cfg, rngs=nnx.Rngs(0)))
+    pspecs = nnx.get_partition_spec(nnx.state(abs_model))
+    self.assertEqual(
+        pspecs['layers'][0]['pre_attention_norm']['scale'].get_value(),
+        expected_spec,
+    )
+    self.assertEqual(
+        pspecs['layers'][0]['post_ffw_norm']['scale'].get_value(),
+        expected_spec,
+    )
+    self.assertEqual(pspecs['final_norm']['scale'].get_value(), expected_spec)
+
 
 _MOE_SHAPE = (2, 8, 2, 2)  # (batch, seq, layers, top_k)
 

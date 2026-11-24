@@ -170,6 +170,17 @@ class _RaidenTransport:
     self._req_counter = 0
 
   @property
+  def transfers_from_staged_copy(self) -> bool:
+    """Whether transfers send the host copy the source staged, as staged.
+
+    Needs `skip_d2h`, and no layer planned with `skip_tiling=True`: the source
+    stages logical bytes, so such a layer is staged again from the device
+    during the transfer.
+    """
+    options = self._transfer_options
+    return options.skip_d2h and not any((options.skip_tiling or {}).values())
+
+  @property
   def port(self) -> int:
     """Port the controller listens on."""
     return self._port
@@ -507,6 +518,15 @@ class RaidenHandler(weight_sync.WeightSyncHandler):
   def registered_units(self) -> frozenset[weight_sync.WorkUnitId]:
     """Neutral work-unit ids currently registered with the controller."""
     return self._transport.registered_units
+
+  @property
+  def transfers_from_staged_copy(self) -> bool:
+    """True when the configured transfer never reads the source's device.
+
+    Reflects the handler's `transfer_options`; a per-call override passed to
+    `transfer` is not visible here.
+    """
+    return self._transport.transfers_from_staged_copy
 
   def register_work_unit(self, metadata: weight_sync.WorkUnitMetadata) -> None:
     self._transport.register_work_unit(metadata)

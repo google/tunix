@@ -170,7 +170,8 @@ def main():
       reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
       assembler=assembler,
       batch_config=batch_assembly.BatchConfig(mini_batch_size=1),
-      generation_args=datatypes.GenerationArgs(temperature=1.0),
+      rollout_temperature=1.0,
+      rollout_returns_routed_experts=False,
       max_steps=2,
   )
   orch.run(program=program)

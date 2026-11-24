@@ -14,6 +14,7 @@
 
 """The RL engine interface (Layer 1 Compute Routing Protocol) following Orchestrator V2."""
 
+import asyncio
 from collections.abc import Mapping, Sequence
 import dataclasses
 from typing import Any, Protocol, runtime_checkable
@@ -71,11 +72,9 @@ class AbstractRLEngine(Protocol):
       *,
       num_generations: int = 1,
       policy_version: int = 0,
-      generation_args: datatypes.GenerationArgs | None = None,
       route_metadata: Mapping[str, Any] | None = None,
       stage_routed_experts: bool = False,
       max_response_length: int | None = None,
-      **kwargs: Any,
   ) -> list[str]:
     """High-level convenience: Expands prompts by num_generations and dispatches rollouts.
 
@@ -96,7 +95,6 @@ class AbstractRLEngine(Protocol):
       num_generations: Number of rollout trajectories to generate per prompt
         (G).
       policy_version: Active policy version for generation.
-      generation_args: Optional generation parameters (temperature, max steps).
       route_metadata: Optional routing metadata merged into each request's
         metadata.
       stage_routed_experts: Whether rollout workers stage MoE `routed_experts`
@@ -104,7 +102,6 @@ class AbstractRLEngine(Protocol):
       max_response_length: Default response token budget stamped onto requests
         that omit `max_response_length`, and upper bound when
         `stage_routed_experts=True`.
-      **kwargs: Optional additional metadata.
 
     Returns:
       List of dispatched `request_id` strings.
@@ -125,9 +122,7 @@ class AbstractRLEngine(Protocol):
   async def generate(
       self,
       prompts: Sequence[Any],
-      generation_args: datatypes.GenerationArgs | None = None,
       route_metadata: Mapping[str, Any] | None = None,
-      **kwargs: Any,
   ) -> list[datatypes.TrajectoryItem]:
     """Synchronous batched rollout generation over rollout workers."""
     ...
@@ -233,6 +228,7 @@ class AbstractRLEngine(Protocol):
       policy_version: int | None = None,
       *,
       min_retained_policy_version: int | None = None,
+      source_prepared: asyncio.Event | None = None,
       **kwargs: Any,
   ) -> int:
     """Coordinates decentralized peer-to-peer weight sync across worker roles.
@@ -243,6 +239,9 @@ class AbstractRLEngine(Protocol):
       policy_version: Optional explicit target policy version.
       min_retained_policy_version: Optional zombie-eviction floor forwarded to
         rollout workers during `post_weight_sync`.
+      source_prepared: Set once the trainer has staged its weights and may
+        train again while the rest of the sync runs. The sync fails if its
+        transport would read the trainer's live weights after that.
       **kwargs: Additional engine-specific sync options.
 
     Returns:

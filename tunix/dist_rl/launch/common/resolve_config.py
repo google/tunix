@@ -1143,7 +1143,13 @@ def _validate_launcher_settings(hp: cli_config.HyperParameters) -> None:
   raiden = hp.config_mapping("weight_sync_config")["raiden"]
   sidecar = pathways["sidecar"]
   pathways_trainer = pathways["trainer"]
+  ckpt_gcsfuse = pathways_trainer["checkpoint_gcsfuse"]
+  ckpt_gcsfuse_key = "cluster_config.pathways.trainer.checkpoint_gcsfuse"
   for key, value, expected in (
+      *(
+          (f"{ckpt_gcsfuse_key}.{name}", ckpt_gcsfuse[name], str)
+          for name in ("bucket", "mount_path", "mount_options")
+      ),
       (
           "cluster_config.pathways.trainer.persistence",
           pathways_trainer["persistence"],
@@ -1174,6 +1180,11 @@ def _validate_launcher_settings(hp: cli_config.HyperParameters) -> None:
       ("sidecar.memory", sidecar["memory"]),
   ):
     validate_memory(f"cluster_config.pathways.{key}", memory)
+  try:
+    yaml_generator.parse_ckpt_gcsfuse_bucket(ckpt_gcsfuse["bucket"])
+    yaml_generator.validate_ckpt_gcsfuse_mount_path(ckpt_gcsfuse["mount_path"])
+  except ValueError as e:
+    raise ValueError(f"{ckpt_gcsfuse_key}: {e}") from e
   pathways_worker_env_json(hp)
   use_ffi = raiden["use_ffi"]
   if use_ffi is not None and not isinstance(use_ffi, bool):
@@ -2093,6 +2104,7 @@ def render_bash_exports(hp: DistHyperParameters) -> str:
   rm_memory = cli_config.to_str_dict(pathways["rm_memory"])
   server_memory = cli_config.to_str_dict(pathways["server_memory"])
   sidecar_memory = cli_config.to_str_dict(sidecar["memory"])
+  ckpt_gcsfuse = cli_config.to_str_dict(pathways_trainer["checkpoint_gcsfuse"])
   ifrt_threshold = pathways_trainer["ifrt_proxy_large_transfer_threshold_bytes"]
   actor = hp.config_mapping("actor_model_config")
   rollout_model = hp.config_mapping("rollout_model_config")
@@ -2217,6 +2229,9 @@ def render_bash_exports(hp: DistHyperParameters) -> str:
       "K8S_PATHWAYS_SIDECAR_MEMORY": sidecar_memory["request"],
       "K8S_PATHWAYS_SIDECAR_MEMORY_LIMIT": sidecar_memory["limit"],
       "K8S_PATHWAYS_SIDECAR_SHM": sidecar["shm"],
+      "K8S_PATHWAYS_CKPT_GCSFUSE_BUCKET": ckpt_gcsfuse["bucket"],
+      "K8S_PATHWAYS_CKPT_GCSFUSE_MOUNT_PATH": ckpt_gcsfuse["mount_path"],
+      "K8S_PATHWAYS_CKPT_GCSFUSE_MOUNT_OPTIONS": ckpt_gcsfuse["mount_options"],
       "K8S_TRAINER_MEMORY": memory["trainer"]["request"],
       "K8S_TRAINER_MEMORY_LIMIT": memory["trainer"]["limit"],
       "K8S_ROLLOUT_MEMORY": memory["rollout"]["request"],

@@ -164,6 +164,7 @@ class FakeClusterHarness:
     self.routed_experts_shape_spec = routed_experts_shape_spec
     self.return_routed_experts = return_routed_experts
     self.min_turns = min_turns
+    self.rollout_temperature = 1.0
     self.routed_experts_encode_mode: datatypes.RoutedExpertsEncodeMode = (
         routed_experts_encode_mode
     )
@@ -245,6 +246,8 @@ class FakeClusterHarness:
       re_register: bool = True,
   ) -> int:
     config = rollout_worker_lib.RolloutConfig(
+        temperature=self.rollout_temperature,
+        return_logprobs=True,
         partial_rollout=self.partial_rollout,
         drain_timeout_s=self.drain_timeout_s,
         max_prompt_length=self.rollout_max_prompt_length,
@@ -377,7 +380,6 @@ class FakeClusterHarness:
         {
             "prompt": f"Prompt {i}",
             "prompt_id": f"prompt_{i}",
-            "generation_kwargs": {"max_tokens": 8},
         }
         for i in range(num_prompts)
     ]
@@ -399,7 +401,6 @@ class FakeClusterHarness:
       ) = rl_program.GroupOrder.TRAJECTORY_COMPLETION,
       prompts: Sequence[dict[str, Any]] | None = None,
       reward_fns: Sequence[Callable[..., Any]] | None = None,
-      generation_args: datatypes.GenerationArgs | None = None,
       on_step_begin: Callable[[int], None] | None = None,
       on_step_end: Callable[[int, Any], None] | None = None,
   ) -> rl_program.StandardRLProgram:
@@ -454,11 +455,6 @@ class FakeClusterHarness:
         if prompts is not None
         else self.build_prompts(num_prompts=num_prompts)
     )
-    gen_args = (
-        generation_args
-        if generation_args is not None
-        else datatypes.GenerationArgs(temperature=1.0)
-    )
     return rl_program.StandardRLProgram(
         algo_config=algo_cfg,
         dataset=dataset,
@@ -466,7 +462,8 @@ class FakeClusterHarness:
         reward_fns=reward_fns,
         assembler=assembler,
         batch_config=batch_cfg,
-        generation_args=gen_args,
+        rollout_temperature=self.rollout_temperature,
+        rollout_returns_routed_experts=self.return_routed_experts,
         max_staleness=max_staleness,
         sync_weights=sync_weights,
         precompile_trainer=precompile_trainer,

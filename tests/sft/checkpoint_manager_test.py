@@ -22,12 +22,14 @@ from absl.testing import parameterized
 from etils import epath
 from flax import config as flax_config
 from flax import nnx
+from flax import traverse_util
 import jax
 import jax.numpy as jnp
 import jax.sharding as shd
 import numpy as np
 import optax
 import qwix
+from safetensors import numpy as safe_np
 from tunix.sft import checkpoint_manager
 from tunix.sft import checkpoint_options
 
@@ -128,6 +130,7 @@ class CheckpointManagerTest(parameterized.TestCase):
     self.assertIsNone(cp_manager.latest_step())
     self.assertFalse(cp_manager.save(1, None))  # pyrefly: ignore[bad-argument-type]
     self.assertEqual(cp_manager.maybe_restore(None), (0, {}))  # pyrefly: ignore[bad-argument-type]
+    cp_manager.close()
 
   def test_checkpoint_manager_options_none_sets_default(self):
     cp_path = f'{self.temp_path}/{self.id()}'
@@ -520,12 +523,11 @@ class CheckpointManagerTest(parameterized.TestCase):
         jax.sharding.SingleDeviceSharding,
     )
 
-    restored_step, _ = ckpt_manager.maybe_restore(
-        model, new_optimizer
-    )
+    restored_step, _ = ckpt_manager.maybe_restore(model, new_optimizer)
     self.assertEqual(restored_step, 1)
 
     errors = []
+
     def assert_named_sharding(path, x):
       if hasattr(x, 'sharding'):
         try:
@@ -687,13 +689,16 @@ class CheckpointManagerTest(parameterized.TestCase):
     cp_manager = checkpoint_manager.CheckpointManager(cp_path, options=options)
     model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
 
-    with mock.patch.object(
-        cp_manager._checkpointer,
-        'save_checkpointables_async',
-        return_value=mock.MagicMock(),
-    ) as mock_async, mock.patch.object(
-        cp_manager._checkpointer, 'save_checkpointables', return_value=True
-    ) as mock_sync:
+    with (
+        mock.patch.object(
+            cp_manager._checkpointer,
+            'save_checkpointables_async',
+            return_value=mock.MagicMock(),
+        ) as mock_async,
+        mock.patch.object(
+            cp_manager._checkpointer, 'save_checkpointables', return_value=True
+        ) as mock_sync,
+    ):
       cp_manager.save(1, model)
       if enable_async:
         mock_async.assert_called_once()
@@ -737,6 +742,75 @@ class CheckpointManagerTest(parameterized.TestCase):
     assert cp_manager._checkpointer is not None
     cp_manager._checkpointer.wait()
     self.assertEqual(cp_manager.latest_step(), 1)
+
+  def _expected_flat_params(self, model):
+    flat = traverse_util.flatten_dict(
+        nnx.to_pure_dict(nnx.state(model, nnx.Param))
+    )
+    return {'.'.join(map(str, k)): np.asarray(v) for k, v in flat.items()}
+
+  def _hf_manifest(self, model):
+    return {
+        'rules': [
+            {'source_keys': [k], 'target_keys': [f'model.{k}'], 'ops': []}
+            for k in self._expected_flat_params(model)
+        ]
+    }
+
+  def test_export_safetensors_default_dir_keeps_orbax_steps(self):
+    cp_path = f'{self.temp_path}/{self.id()}'
+    cp_manager = checkpoint_manager.CheckpointManager(cp_path)
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+    cp_manager.save(1, model)
+    result = cp_manager.export_safetensors(
+        1, model, to_hf_manifest=self._hf_manifest(model)
+    )
+    checkpointer = cp_manager._checkpointer
+    assert checkpointer is not None
+    checkpointer.wait()
+    # The default ContinuousCheckpointingPolicy declines saves within 180 s of
+    # the previous one, so step 2 must be forced.
+    self.assertTrue(cp_manager.save(2, model, force=True))
+    checkpointer.wait()
+
+    self.assertEqual(
+        result.paths, (f'{cp_path}/safetensors/1/model.safetensors',)
+    )
+    written = safe_np.load_file(result.paths[0])
+    expected = {
+        f'model.{k}': v for k, v in self._expected_flat_params(model).items()
+    }
+    self.assertEqual(set(written), set(expected))
+    for key, value in expected.items():
+      np.testing.assert_array_equal(written[key], value)
+    self.assertEqual(cp_manager.latest_step(), 2)
+    self.assertEqual(cp_manager.maybe_restore(model)[0], 2)
+    cp_manager.close()
+
+  def test_export_safetensors_explicit_dir_when_disabled(self):
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+    out_dir = f'{self.temp_path}/{self.id()}_out'
+    manifest = self._hf_manifest(model)
+    cp_manager = checkpoint_manager.CheckpointManager(None)
+    result = cp_manager.export_safetensors(
+        3, model, to_hf_manifest=manifest, output_dir=out_dir
+    )
+    self.assertEqual(result.paths, (f'{out_dir}/model.safetensors',))
+    with self.assertRaisesRegex(ValueError, 'needs output_dir'):
+      cp_manager.export_safetensors(3, model, to_hf_manifest=manifest)
+    with self.assertRaisesRegex(ValueError, 'must not be empty'):
+      cp_manager.export_safetensors(
+          3, model, to_hf_manifest=manifest, output_dir=''
+      )
+
+  def test_export_safetensors_rejects_lora(self):
+    cp_manager = checkpoint_manager.CheckpointManager(
+        f'{self.temp_path}/{self.id()}'
+    )
+    lora = nnx.LoRA(2, 1, 2, rngs=nnx.Rngs(0))
+    with self.assertRaisesRegex(ValueError, 'save_lora_merged_model'):
+      cp_manager.export_safetensors(0, lora, to_hf_manifest={'rules': []})
+    cp_manager.close()
 
 
 if __name__ == '__main__':

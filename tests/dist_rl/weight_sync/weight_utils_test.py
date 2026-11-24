@@ -392,6 +392,50 @@ class WeightUtilsTest(absltest.TestCase):
         },
     )
 
+  def test_global_shard_indices_and_tensor_metadata_use_ffi_skips_addressable_shards(
+      self,
+  ):
+    mesh = jax.sharding.Mesh(np.array(jax.devices()[:4]), ("data",))
+    sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec("data")
+    )
+    tpu_shard = mock.Mock()
+    tpu_shard.device.platform = "tpu"
+    tpu_shard.index = (slice(0, 2), slice(None))
+    local_arr = mock.Mock(
+        shape=(8, 2),
+        ndim=2,
+        dtype=np.dtype(np.float32),
+        sharding=sharding,
+        addressable_shards=[tpu_shard],
+    )
+    self.assertEqual(
+        weight_utils.global_shard_indices(local_arr, sharding, use_ffi=False),
+        (0,),
+    )
+
+    class _NoDisassembleArray:
+      shape = (8, 2)
+      ndim = 2
+      dtype = np.dtype(np.float32)
+
+      def __init__(self, arr_sharding):
+        self.sharding = arr_sharding
+
+      @property
+      def addressable_shards(self):
+        raise AssertionError(
+            "addressable_shards must not be accessed when use_ffi=True"
+        )
+
+    ffi_arr = _NoDisassembleArray(sharding)
+    self.assertEqual(
+        weight_utils.global_shard_indices(ffi_arr, sharding, use_ffi=True),
+        (0, 1, 2, 3),
+    )
+    meta = weight_utils.tensor_metadata("w", ffi_arr, 0, use_ffi=True)
+    self.assertEqual(meta.global_shard_indices, (0, 1, 2, 3))
+
 
 if __name__ == "__main__":
   jax.config.update("jax_num_cpu_devices", 4)

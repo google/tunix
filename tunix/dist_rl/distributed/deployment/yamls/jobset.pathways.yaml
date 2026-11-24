@@ -43,6 +43,7 @@ spec:
           metadata:
             annotations:
               cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+              ${GCSFUSE_POD_ANNOTATIONS}
           spec:
             ${PRIORITY_CLASS_LINE}
             ${SERVICE_ACCOUNT_LINE}
@@ -67,6 +68,7 @@ spec:
             - name: dshm
               emptyDir:
                 medium: Memory
+            ${GCSFUSE_VOLUME}
             initContainers:
             - name: pathways-rm
               image: ${SERVER_IMAGE}
@@ -245,6 +247,7 @@ spec:
                 mountPath: /ifrt_proxy_large_transfer
               - name: dshm
                 mountPath: /dev/shm
+              ${GCSFUSE_VOLUME_MOUNT}
   - name: pw-node
     replicas: ${REPLICAS}
     template:
@@ -258,6 +261,7 @@ spec:
             annotations:
               cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
               ${TPU_ANNOTATIONS}
+              ${GCSFUSE_POD_ANNOTATIONS}
           spec:
             ${PRIORITY_CLASS_LINE}
             ${SERVICE_ACCOUNT_LINE}
@@ -347,6 +351,7 @@ spec:
               volumeMounts:
               - mountPath: /tmp
                 name: shared-tmp
+              ${GCSFUSE_VOLUME_MOUNT}
             ${COLOCATED_PYTHON_SIDECAR_BLOCK}
             volumes:
             - name: shared-tmp
@@ -354,6 +359,7 @@ spec:
                 path: /tmp
                 type: DirectoryOrCreate
             ${COLOCATED_PYTHON_SIDECAR_VOLUME}
+            ${GCSFUSE_VOLUME}
   startupPolicy:
     startupPolicyOrder: AnyOrder
   successPolicy:

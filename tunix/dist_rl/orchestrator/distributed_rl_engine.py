@@ -528,19 +528,11 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       *,
       num_generations: int = 1,
       policy_version: int = 0,
-      generation_args: datatypes.GenerationArgs | None = None,
       route_metadata: Mapping[str, Any] | None = None,
-      **kwargs: Any,
   ) -> list[datatypes.RolloutRequest]:
     """Validates prompts and constructs typed RolloutRequests with lineage attached."""
-    base_metadata = {
-        **(route_metadata or {}),
-        **(kwargs.get("metadata") or {}),
-    }
-    base_generation_kwargs = (
-        generation_args.as_kwargs() if generation_args else {}
-    )
-    version = kwargs.get("policy_version", policy_version)
+    base_metadata = dict(route_metadata or {})
+    version = policy_version
 
     rollout_reqs: list[datatypes.RolloutRequest] = []
     req_task_names: list[str] = []
@@ -552,19 +544,22 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
               " 'prompt_id'. Every request must provide a non-empty"
               " 'prompt_id'."
           )
-        for k, v in base_generation_kwargs.items():
-          p.generation_kwargs.setdefault(k, v)
         rollout_reqs.append(p)
         req_task_names.append("")
         continue
 
+      if (
+          "generation_kwargs" in p
+          if isinstance(p, Mapping)
+          else hasattr(p, "generation_kwargs")
+      ):
+        raise ValueError(
+            f"Prompt at index {idx} sets 'generation_kwargs'; sampling settings"
+            " come from the rollout workers' RolloutConfig."
+        )
       item_metadata = dict(getattr(p, "metadata", {}) or {})
-      item_generation_kwargs = dict(getattr(p, "generation_kwargs", {}) or {})
       if isinstance(p, Mapping):
         item_metadata.update(dict(p.get("metadata", {}) or {}))
-        item_generation_kwargs.update(
-            dict(p.get("generation_kwargs", {}) or {})
-        )
 
       if isinstance(p, Mapping):
         prompt_id = p.get("prompt_id")
@@ -612,9 +607,6 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           env_config["policy_version"] = version
           request_metadata["env_config"] = env_config
 
-        generation_kwargs = dict(base_generation_kwargs)
-        generation_kwargs.update(item_generation_kwargs)
-
         epoch_suffix = (
             f"_e{self._rollout_epoch}" if self._rollout_epoch > 0 else ""
         )
@@ -627,7 +619,6 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
                 prompt_id=prompt_id,
                 group_index=group_index,
                 target_policy_version=version,
-                generation_kwargs=generation_kwargs,
                 max_turns=max_turns,
                 max_response_length=max_response_length,
                 metadata=request_metadata,
@@ -675,11 +666,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       *,
       num_generations: int = 1,
       policy_version: int = 0,
-      generation_args: datatypes.GenerationArgs | None = None,
       route_metadata: Mapping[str, Any] | None = None,
       stage_routed_experts: bool = False,
       max_response_length: int | None = None,
-      **kwargs: Any,
   ) -> list[str]:
     """Dispatches rollout requests across workers, constructing RolloutRequests internally.
 
@@ -692,9 +681,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         prompts,
         num_generations=num_generations,
         policy_version=policy_version,
-        generation_args=generation_args,
         route_metadata=route_metadata,
-        **kwargs,
     )
     if stage_routed_experts or max_response_length is not None:
       _apply_request_staging_defaults(
@@ -736,21 +723,12 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
   async def generate(
       self,
       prompts: Sequence[Any],
-      generation_args: datatypes.GenerationArgs | None = None,
       route_metadata: Mapping[str, Any] | None = None,
-      **kwargs: Any,
   ) -> list[datatypes.TrajectoryItem]:
     """Blocking rollout generation: load-balances prompts across workers and awaits completion."""
     rollout_handles = self._rollout_handles()
     if not rollout_handles:
       raise ValueError("DistributedRLEngine has no registered rollout workers.")
-
-    if kwargs:
-      raise TypeError(
-          "Unexpected generate kwargs: "
-          f"{sorted(kwargs)}. Use generation_args=GenerationArgs(...) for "
-          "sampling parameters."
-      )
 
     logging.info(
         "Generating rollouts for %d prompt(s)/request(s) across %d"
@@ -761,7 +739,6 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     requests = self._build_rollout_requests(
         prompts,
         policy_version=self._policy_version,
-        generation_args=generation_args,
         route_metadata=route_metadata,
     )
     if not requests:
@@ -1441,6 +1418,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       policy_version: int | None = None,
       *,
       min_retained_policy_version: int | None = None,
+      source_prepared: asyncio.Event | None = None,
   ) -> int:
     """Runs one weight sync round through the coordinator."""
     del role, target_roles
@@ -1463,6 +1441,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         policy_version=next_policy_version,
         destination_statuses=_WEIGHT_SYNC_DESTINATION_STATUSES,
         min_retained_policy_version=min_retained_policy_version,
+        source_prepared=source_prepared,
     )
     for r in result.workers:
       if r.phase != "committed":

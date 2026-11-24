@@ -2376,5 +2376,51 @@ class HfMappingTest(absltest.TestCase):
     )
 
 
+  def test_apply_host_manifest_strict_and_unconsumed_rules(self):
+    manifest = {
+        "rules": [
+            {"source_keys": ["a"], "target_keys": ["hf.a"], "ops": []},
+            {"source_keys": ["b"], "target_keys": ["hf.b"], "ops": []},
+        ],
+        "tied_keys": [],
+        "dropped_keys": [],
+    }
+    tensors = {"a": np.ones((2,), np.float32)}
+    with self.assertRaisesRegex(ValueError, r"missing source keys: \['b'\]"):
+      hf_mapping.apply_host_manifest(manifest, tensors, drop_tied_targets=True)
+    out = hf_mapping.apply_host_manifest(
+        manifest, tensors, drop_tied_targets=True, strict=False
+    )
+    self.assertEqual(list(out), ["hf.a"])
+    np.testing.assert_array_equal(out["hf.a"], tensors["a"])
+
+    concat_rules = [{
+        "source_keys": ["q", "k"],
+        "target_keys": ["qk"],
+        "ops": [{"concat": {"axis": 0, "sizes": [1, 1]}}],
+    }]
+    with self.assertRaisesRegex(ValueError, r"unconsumed source keys: \['q'\]"):
+      hf_mapping.apply_host_manifest(
+          {"rules": concat_rules, "tied_keys": [], "dropped_keys": []},
+          {"q": np.ones(1, np.float32)},
+          drop_tied_targets=True,
+          strict=False,
+      )
+
+  def test_apply_host_manifest_drops_tied_targets(self):
+    manifest = hf_mapping.parse_manifest({
+        "rules": [
+            {"source_keys": ["embed"], "target_keys": ["hf.embed"], "ops": []}
+        ],
+        "tied_keys": [["hf.embed", "hf.lm_head"]],
+    })
+    tensors = {"embed": np.arange(3, dtype=np.float32)}
+    out = hf_mapping.apply_host_manifest(
+        manifest, tensors, drop_tied_targets=True
+    )
+    self.assertEqual(list(out), ["hf.embed"])
+    np.testing.assert_array_equal(out["hf.embed"], tensors["embed"])
+
+
 if __name__ == "__main__":
   absltest.main()

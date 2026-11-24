@@ -16,9 +16,10 @@
 
 import asyncio
 from collections.abc import Callable, Hashable, Mapping, Sequence
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 
+@runtime_checkable
 class HasPromptId(Protocol):
   """Protocol for trajectory or prompt objects carrying a `prompt_id`."""
 
@@ -115,6 +116,13 @@ class DispatchWindow:
     return self._admitted_prompts - trained_since_start - self._filtered_groups
 
   @property
+  def can_admit(self) -> bool:
+    """Whether at least one in-flight prompt slot is currently available."""
+    return (
+        self.in_flight_prompts < (self.max_staleness + 1) * self.full_batch_size
+    )
+
+  @property
   def is_released(self) -> bool:
     """Whether a release signal is currently set."""
     return self._release.is_set()
@@ -203,8 +211,7 @@ class DispatchWindow:
         return False
     if self._start_step is None:
       self._start_step = self.next_batch
-    window_capacity = (self.max_staleness + 1) * self.full_batch_size
-    while self.in_flight_prompts >= window_capacity:
+    while not self.can_admit:
       # Wait first, clear second. The reverse loses a release that lands
       # between the test above and the clear, and nothing would set it again.
       await self._release.wait()

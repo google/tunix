@@ -22,11 +22,14 @@ from typing import Any
 
 from absl import logging
 from flax import nnx
+from flax import traverse_util
 import jax
 import numpy as np
 from orbax.checkpoint import pathways as ocp_pathways
 from orbax.checkpoint import utils as ocp_utils
 from orbax.checkpoint import v1 as ocp
+from tunix.models import hf_mapping
+from tunix.models import safetensors_saver
 from tunix.sft import checkpoint_options
 from tunix.utils import sharding_utils
 
@@ -140,10 +143,9 @@ class CheckpointManager:
         the checkpoint manager will be disabled.
       options: The options for the checkpoint manager.
     """
+    self._root_directory: str | None = root_directory
     self._checkpointer: ocp.training.Checkpointer | None = None
-    self._options = checkpoint_options.resolve_checkpointing_defaults(
-        options
-    )
+    self._options = checkpoint_options.resolve_checkpointing_defaults(options)
     if root_directory:
       self._checkpointer = ocp.training.Checkpointer(
           root_directory,
@@ -374,3 +376,61 @@ class CheckpointManager:
     if self._checkpointer is None:
       return
     self._checkpointer.close()
+
+  def export_safetensors(
+      self,
+      step: int,
+      model: nnx.Module,
+      *,
+      to_hf_manifest: hf_mapping.RuleSpec,
+      output_dir: str | None = None,
+  ) -> safetensors_saver.SafetensorsSaveResult:
+    """Exports the model's full `nnx.Param` weights as safetensors.
+
+    Collective: every process must call it. Export is independent of the
+    Orbax checkpointer's async save and close lifecycle: it reads the current
+    weights from `model` directly, never awaits or affects in-flight Orbax
+    saves, and may be called after `close()` (e.g. after `train()` returns).
+
+    Args:
+      step: Training step naming the default output directory.
+      model: Model whose `nnx.Param` state is exported; must hold no LoRA
+        parameters (use `<family>.params.save_lora_merged_model_as_safetensors`
+        to export merged LoRA weights).
+      to_hf_manifest: `hf_mapping` manifest mapping dotted `nnx` parameter
+        paths to canonical Hugging Face tensor names and layouts.
+      output_dir: Destination directory; defaults to
+        `<root_directory>/safetensors/<step>`, beside the Orbax step dirs.
+
+    Returns:
+      The committed safetensors paths (commit marker last) and checksums.
+
+    Raises:
+      ValueError: If `output_dir` is empty or missing while checkpointing is
+        disabled, or if `model` holds LoRA parameters.
+    """
+    if output_dir is None:
+      if not self._root_directory:
+        raise ValueError(
+            'export_safetensors() needs output_dir when checkpointing is'
+            ' disabled.'
+        )
+      output_dir = os.path.join(self._root_directory, 'safetensors', str(step))
+    elif not output_dir:
+      raise ValueError('export_safetensors() output_dir must not be empty.')
+    if jax.tree.leaves(nnx.state(model, nnx.LoRAParam)):
+      raise ValueError(
+          'export_safetensors() would drop the LoRA deltas of a LoRA model; use'
+          ' `<family>.params.save_lora_merged_model_as_safetensors` instead.'
+      )
+    flat_params = traverse_util.flatten_dict(
+        nnx.to_pure_dict(nnx.state(model, nnx.Param))
+    )
+    return safetensors_saver.save_safetensors(
+        {
+            safetensors_saver.join_path(path): value
+            for path, value in flat_params.items()
+        },
+        output_dir,
+        to_hf_manifest=to_hf_manifest,
+    )

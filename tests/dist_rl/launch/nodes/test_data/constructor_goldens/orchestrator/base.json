@@ -123,16 +123,6 @@
       }
     },
     {
-      "tunix.dist_rl.common.datatypes.GenerationArgs": {
-        "kwargs": {
-          "return_routed_experts": false,
-          "temperature": 1.0,
-          "top_k": 0,
-          "top_p": 1.0
-        }
-      }
-    },
-    {
       "tunix.dist_rl.orchestrator.batch_assembly.BatchConfig": {
         "kwargs": {
           "eos_id": 151645,
@@ -158,16 +148,13 @@
             "[0]": {
               "max_turns": 8,
               "metadata": {
-                "answer": "42",
-                "episode_timeout": 600.0,
-                "overlong_filter": false
+                "answer": "42"
               },
               "prompt": "golden prompt",
               "task_name": "gsm8k"
             },
             "__type__": "grain.MapDataset"
           },
-          "generation_args": "<tunix.dist_rl.common.datatypes.GenerationArgs()>",
           "group_order": "GroupOrder.TRAJECTORY_COMPLETION",
           "max_staleness": 0,
           "max_steps": 1,
@@ -175,6 +162,8 @@
           "metrics_logging_options": "<tunix.sft.metrics_logger.MetricsLoggerOptions()#2>",
           "precompile_trainer": true,
           "reward_fns": [],
+          "rollout_returns_routed_experts": false,
+          "rollout_temperature": 1.0,
           "sync_weights": false,
           "trajectory_log_dir": null,
           "trajectory_store": null

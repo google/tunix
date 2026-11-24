@@ -88,9 +88,6 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
       inline_items = asyncio.run(
           engine.generate(
               harness.build_prompts(num_prompts=2),
-              generation_args=datatypes.GenerationArgs(
-                  temperature=1.0, return_routed_experts=True
-              ),
           )
       )
       self.assertLen(inline_items, 2)
@@ -113,9 +110,6 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
           mini_batch_size=1,
           max_staleness=2,
           assembler_type=assembler_type,
-          generation_args=datatypes.GenerationArgs(
-              temperature=1.0, return_routed_experts=True
-          ),
       )
       orig_raw_put = prog_max_steps.raw_q.put
       orig_scored_put = prog_max_steps.scored_q.put
@@ -162,9 +156,6 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
           num_generations=2,
           mini_batch_size=1,
           assembler_type=assembler_type,
-          generation_args=datatypes.GenerationArgs(
-              temperature=1.0, return_routed_experts=True
-          ),
       )
       prog_eof.policy_version = engine._policy_version
       try:
@@ -191,9 +182,6 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
                   : len(prompts)
               ]
           ],
-          generation_args=datatypes.GenerationArgs(
-              temperature=1.0, return_routed_experts=True
-          ),
       )
       prog_degen.policy_version = engine._policy_version
       try:
@@ -216,9 +204,6 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
           mini_batch_size=1,
           max_staleness=2,
           assembler_type=assembler_type,
-          generation_args=datatypes.GenerationArgs(
-              temperature=1.0, return_routed_experts=True
-          ),
           on_step_end=_boom_on_step_end,
       )
       prog_abort.policy_version = engine._policy_version
@@ -264,9 +249,6 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
           max_staleness=2,
           assembler_type=assembler_type,
           reward_fns=[_drop_staged_in_critique],
-          generation_args=datatypes.GenerationArgs(
-              temperature=1.0, return_routed_experts=True
-          ),
       )
       prog_missing.policy_version = engine._policy_version
       try:
@@ -290,9 +272,6 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
           mini_batch_size=1,
           max_staleness=2,
           assembler_type=assembler_type,
-          generation_args=datatypes.GenerationArgs(
-              temperature=1.0, return_routed_experts=True
-          ),
       )
       prog_retry.policy_version = engine._policy_version
       try:
@@ -429,9 +408,6 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
             max_staleness=4,
             assembler_type="packed",
             reward_fns=[_gated_reward_fn],
-            generation_args=datatypes.GenerationArgs(
-                temperature=1.0, return_routed_experts=True
-            ),
             on_step_end=_on_step_end,
         )
         program_ref.append(program)
@@ -441,13 +417,12 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
           pids = [g[0].prompt_id for g in groups or () if g]
           step_versions.append((step, pids))
           # Before Step 10 (`V_new = 11 -> min_retained = 1`), `zombie_v0`
-          # (`staged_policy_version = 0`) is still retained; at Step 10's
-          # `sync_weights` (which runs right BEFORE `commit`), `zombie_v0`
-          # HAS JUST BEEN EVICTED (`0 < 1`)!
+          # (`staged_policy_version = 0`) is still retained. Step 10's
+          # `sync_weights` round evicts it (`0 < 1`), but with
+          # `max_staleness > 0` that round may still be in flight at this
+          # `commit`; the eviction is asserted after the run instead.
           if step < 10:
             self.assertEqual(zombie_buf.zombie_evictions_total, 0)
-          elif step == 10:
-            self.assertEqual(zombie_buf.zombie_evictions_total, 1)
           orig_commit(step, groups=groups)
 
         program.scored_q.commit = (  # type: ignore[method-assign]
@@ -502,9 +477,6 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
                   1.0 if g % 2 == 0 else -1.0 for g in group_index
               ]
           ],
-          generation_args=datatypes.GenerationArgs(
-              temperature=1.0, return_routed_experts=True
-          ),
       )
       orig_fetch = (
           distributed_rl_engine.DistributedRLEngine.fetch_routed_experts
@@ -590,9 +562,6 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
                   1.0 if g % 2 == 0 else -1.0 for g in group_index
               ]
           ],
-          generation_args=datatypes.GenerationArgs(
-              temperature=1.0, return_routed_experts=True
-          ),
           on_step_end=_on_step_end,
       )
       future = harness.start_program(program)
@@ -733,9 +702,6 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
                   1.0 if g % 2 == 0 else -1.0 for g in group_index
               ]
           ],
-          generation_args=datatypes.GenerationArgs(
-              temperature=1.0, return_routed_experts=True
-          ),
           on_step_end=_release_compile_after_step0,
       )
       try:
@@ -807,9 +773,6 @@ class OrchestratorRelayIntegrationTest(parameterized.TestCase):
                   1.0 if g % 2 == 0 else -1.0 for g in group_index
               ]
           ],
-          generation_args=datatypes.GenerationArgs(
-              temperature=1.0, return_routed_experts=True
-          ),
       )
       future = harness.start_program(program)
       try:

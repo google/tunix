@@ -2218,6 +2218,12 @@ class LauncherSettingsTest(absltest.TestCase):
         "export K8S_PATHWAYS_SIDECAR_MEMORY=16Gi",
         "export K8S_PATHWAYS_SIDECAR_MEMORY_LIMIT=''",
         "export K8S_PATHWAYS_SIDECAR_SHM=true",
+        "export K8S_PATHWAYS_CKPT_GCSFUSE_BUCKET=''",
+        "export K8S_PATHWAYS_CKPT_GCSFUSE_MOUNT_PATH=/gcs/ckpt",
+        (
+            "export K8S_PATHWAYS_CKPT_GCSFUSE_MOUNT_OPTIONS="
+            "implicit-dirs,metadata-cache:negative-ttl-secs:0"
+        ),
         "export K8S_ENABLE_PATHWAYS_PERSISTENCE=false",
         "export K8S_PATHWAYS_PROXY_MEMORY=16G",
         "export K8S_PATHWAYS_PROXY_MEMORY_LIMIT=190G",
@@ -2246,6 +2252,18 @@ class LauncherSettingsTest(absltest.TestCase):
         "cluster_config.pathways.sidecar.image=sidecar:v1",
         "cluster_config.pathways.sidecar.shm=false",
         "cluster_config.pathways.sidecar.memory.limit=20Gi",
+        (
+            "cluster_config.pathways.trainer.checkpoint_gcsfuse.bucket="
+            "gs://my-bucket/"
+        ),
+        (
+            "cluster_config.pathways.trainer.checkpoint_gcsfuse.mount_path="
+            "/mnt/ckpt"
+        ),
+        (
+            "cluster_config.pathways.trainer.checkpoint_gcsfuse.mount_options="
+            "only-dir=a"
+        ),
         "cluster_config.pathways.trainer.persistence=true",
         "cluster_config.pathways.rm_memory.limit=''",
         "cluster_config.pathways.server_memory.limit=120G",
@@ -2264,6 +2282,9 @@ class LauncherSettingsTest(absltest.TestCase):
         "export K8S_PATHWAYS_SIDECAR_IMAGE=sidecar:v1",
         "export K8S_PATHWAYS_SIDECAR_SHM=false",
         "export K8S_PATHWAYS_SIDECAR_MEMORY_LIMIT=20Gi",
+        "export K8S_PATHWAYS_CKPT_GCSFUSE_BUCKET=gs://my-bucket/",
+        "export K8S_PATHWAYS_CKPT_GCSFUSE_MOUNT_PATH=/mnt/ckpt",
+        "export K8S_PATHWAYS_CKPT_GCSFUSE_MOUNT_OPTIONS=only-dir=a",
         "export K8S_ENABLE_PATHWAYS_PERSISTENCE=true",
         "export K8S_PATHWAYS_RM_MEMORY_LIMIT=''",
         "export K8S_PATHWAYS_SERVER_MEMORY_LIMIT=120G",
@@ -2309,6 +2330,28 @@ class LauncherSettingsTest(absltest.TestCase):
             "cluster_config.pathways.sidecar.shm=1",
             TypeError,
             "pathways.sidecar.shm must be a bool",
+        ),
+        (
+            "cluster_config.pathways.trainer.checkpoint_gcsfuse.bucket=7",
+            TypeError,
+            r"trainer\.checkpoint_gcsfuse\.bucket must be a str",
+        ),
+        (
+            (
+                "cluster_config.pathways.trainer.checkpoint_gcsfuse.bucket="
+                "gs://b/prefix"
+            ),
+            ValueError,
+            r"trainer\.checkpoint_gcsfuse: invalid checkpoint GCSFuse bucket",
+        ),
+        (
+            # Checked with no bucket set too.
+            (
+                "cluster_config.pathways.trainer.checkpoint_gcsfuse.mount_path="
+                "gcs/ckpt"
+            ),
+            ValueError,
+            r"trainer\.checkpoint_gcsfuse: .* must be an absolute path",
         ),
         (
             "cluster_config.pathways.proxy_extra_args=7",

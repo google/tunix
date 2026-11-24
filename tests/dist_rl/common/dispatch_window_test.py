@@ -301,12 +301,14 @@ class DispatchWindowTest(absltest.TestCase):
           if await window.admit(f"prompt_{idx}"):
             admitted.append(idx)
 
+      self.assertTrue(window.can_admit)
       task = asyncio.create_task(_dispatch())
       await asyncio.sleep(0.01)
       # Step 0 with max_staleness=1 and full_batch_size=4 admits 8 prompts
       # (0..7).
       self.assertEqual(admitted, list(range(8)))
       self.assertEqual(window.in_flight_prompts, 8)
+      self.assertFalse(window.can_admit)
 
       # Filtering 1 group must replenish exactly 1 prompt (idx=8), NOT an entire
       # batch of 4 prompts (8..11).
@@ -314,6 +316,7 @@ class DispatchWindowTest(absltest.TestCase):
       await asyncio.sleep(0.01)
       self.assertEqual(admitted, list(range(9)))
       self.assertEqual(window.in_flight_prompts, 8)
+      self.assertFalse(window.can_admit)
 
       window.on_group_filtered([_FakeItem("prompt_1")])
       await asyncio.sleep(0.01)
@@ -321,10 +324,12 @@ class DispatchWindowTest(absltest.TestCase):
       self.assertEqual(window.in_flight_prompts, 8)
 
       step = 1
+      self.assertTrue(window.can_admit)
       window.release()
       await asyncio.wait_for(task, timeout=1.0)
       self.assertEqual(admitted, list(range(12)))
       self.assertEqual(window.in_flight_prompts, 6)
+      self.assertTrue(window.can_admit)
 
     asyncio.run(_run())
 

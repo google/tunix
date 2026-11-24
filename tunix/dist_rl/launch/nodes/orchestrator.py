@@ -82,8 +82,8 @@ MIN_DERIVED_RPC_TIMEOUT_S = 1800.0
 
 # Keys a `data_module` record may hold (see `load_prompt_items`).
 _RECORD_KEYS = frozenset({"prompt", "metadata", "task_name"})
-# Prompt-item metadata stamped from the run configuration; records must not set
-# it.
+# Episode settings the rollout workers take from their `RolloutConfig`; records
+# must not set them.
 _RUN_WIDE_METADATA_KEYS = frozenset({"episode_timeout", "overlong_filter"})
 
 
@@ -163,39 +163,6 @@ def build_batch_config(
       num_data_shards=_num_data_shards(hp),
       mini_batch_size=int(rl_train["mini_batch_size"]),
       train_micro_batch_size=int(rl_train["train_micro_batch_size"]),
-  )
-
-
-def build_generation_args(
-    hp: resolve_config.DistHyperParameters,
-) -> datatypes.GenerationArgs:
-  """Builds the sampling arguments sent with every rollout request.
-
-  `return_logprobs` is left unset: `StandardRLProgram` sets it from
-  `GRPOConfig.use_rollout_logps`.
-
-  Args:
-    hp: Resolved distributed RL configuration.
-
-  Returns:
-    The generation arguments.
-  """
-  # See `build_batch_config` for why the rollout section is read directly.
-  # TODO(noghabi): Share the sampling settings (temperature, top_p, top_k) with
-  # the rollout node's `RolloutConfig` through one `node_utils` helper, so both
-  # nodes use the same disabled-`top_k` convention.
-  rollout = hp.config_mapping("rollout_config")
-  top_k = int(rollout["top_k"])
-  return datatypes.GenerationArgs(
-      temperature=float(rollout["temperature"]),
-      top_p=float(rollout["top_p"]),
-      # The schema disables top-k with a negative value, the rollout worker
-      # with 0.
-      top_k=0 if top_k < 0 else top_k,
-      # `StandardRLProgram` also enables routing replay on the trainer from it.
-      return_routed_experts=bool(
-          hp.config_mapping("vllm_config")["return_routed_experts"]
-      ),
   )
 
 
@@ -348,19 +315,15 @@ def load_prompt_items(
   if not len(dataset):
     raise ValueError(f"data_module {data_module!r} returned an empty dataset.")
   logging.info("Loaded %d task records from %s.", len(dataset), data_module)
-  grpo = hp.config_mapping("agentic_grpo_config")
-  max_turns = int(grpo["max_turns"])
-  episode_timeout = float(grpo["episode_timeout"])
-  overlong_filter = bool(grpo["overlong_filter"])
+  max_turns = int(hp.config_mapping("agentic_grpo_config")["max_turns"])
 
   # TODO(noghabi): Unify the rollout env construction
   # (`RolloutManager`: `env_cls(**metadata["env_config"])`) with the agentic
   # learner's (`AgenticRLLearner`: `env_class(single_example, **env_kwargs)`) so
   # `tunix.cli` data modules work unchanged, and drop `prompt` from records if
   # `RolloutRequest.prompt` stays unused. Also have `StandardRLProgram` stamp
-  # `max_turns` (from `agentic_grpo_config.max_turns`) and the rollout worker
-  # take `episode_timeout` / `overlong_filter` from its config, so prompt items
-  # carry only task data.
+  # `max_turns` (from `agentic_grpo_config.max_turns`), so prompt items carry
+  # only task data.
   def to_prompt_item(record: object) -> dict[str, object]:
     if not isinstance(record, Mapping):
       raise TypeError(
@@ -408,11 +371,7 @@ def load_prompt_items(
         "prompt": record["prompt"],
         "task_name": task_name,
         "max_turns": max_turns,
-        "metadata": {
-            **metadata,
-            "episode_timeout": episode_timeout,
-            "overlong_filter": overlong_filter,
-        },
+        "metadata": dict(metadata),
     }
 
   prompt_items = dataset.map(to_prompt_item)
@@ -692,7 +651,12 @@ def build_program(
         dataset=prompt_items,
         max_steps=int(hp.config_mapping("rl_training_config")["max_steps"]),
         reward_fns=reward_fns,
-        generation_args=build_generation_args(hp),
+        rollout_temperature=float(
+            hp.config_mapping("rollout_config")["temperature"]
+        ),
+        rollout_returns_routed_experts=bool(
+            hp.config_mapping("vllm_config")["return_routed_experts"]
+        ),
         batch_size=int(hp.config["batch_size"]),
         batch_config=build_batch_config(hp, pad_id=pad_id, eos_id=eos_id),
         metrics_logging_options=metrics_logging_options,

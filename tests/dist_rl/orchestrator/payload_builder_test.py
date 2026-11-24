@@ -45,7 +45,9 @@ class CreateTrainerPayloadsTest(absltest.TestCase):
     )
 
   def test_grpo_create_trainer_payloads(self):
-    cfg = algorithm_config.GRPOConfig(num_generations=2)
+    cfg = algorithm_config.GRPOConfig(
+        num_generations=2, use_rollout_logps=False
+    )
     item1 = datatypes.TrajectoryItem(
         group_index=0,
         prompt_id="g1",
@@ -111,15 +113,24 @@ class CreateTrainerPayloadsTest(absltest.TestCase):
         },
     )
 
-    payloads = payload_builder.create_trainer_payloads(
-        [item1, item2], rewards=[1.0, 2.0], algo_config=cfg
+    item2_with_logprobs = dataclasses.replace(
+        item2,
+        traj={
+            **item2.traj,
+            "old_logprobs": np.array([-0.1, -0.3], dtype=np.float32),
+        },
     )
-    self.assertLen(payloads, 2)
+    payloads = payload_builder.create_trainer_payloads(
+        [item1, item2_with_logprobs], rewards=[1.0, 2.0], algo_config=cfg
+    )
     np.testing.assert_allclose(
         payloads[0].old_per_token_logps,
         np.array([-0.5, -0.2], dtype=np.float32),
     )
-    self.assertIsNone(payloads[1].old_per_token_logps)
+    with self.assertRaisesRegex(ValueError, "no old_logprobs"):
+      payload_builder.create_trainer_payloads(
+          [item1, item2], rewards=[1.0, 2.0], algo_config=cfg
+      )
 
   def test_grpo_create_trainer_payloads_with_disabled_rollout_logps(self):
     cfg = algorithm_config.GRPOConfig(
@@ -220,7 +231,7 @@ class CreateTrainerPayloadsTest(absltest.TestCase):
       )
 
   def test_ppo_advantages_and_trainer_payloads(self):
-    cfg = algorithm_config.PPOConfig()
+    cfg = algorithm_config.PPOConfig(use_rollout_logps=False)
     item = datatypes.TrajectoryItem(
         group_index=0,
         prompt_id="g1",
@@ -281,6 +292,7 @@ class CreateTrainerPayloadsTest(absltest.TestCase):
     cfg = algorithm_config.GRPOConfig(
         num_generations=2,
         advantage_estimator="test_custom_irt",
+        use_rollout_logps=False,
     )
     items = [
         datatypes.TrajectoryItem(
@@ -304,7 +316,7 @@ class CreateTrainerPayloadsTest(absltest.TestCase):
     np.testing.assert_allclose(payloads[1].advantages, [-42.0, -42.0])
 
   def test_ppo_masks_invalid_trajectory_and_attaches_routed_experts(self):
-    cfg = algorithm_config.PPOConfig(num_generations=2)
+    cfg = algorithm_config.PPOConfig(num_generations=2, use_rollout_logps=False)
     routed = np.array([[[0, 1]], [[2, 3]], [[4, 5]]], dtype=np.int32)
     valid_item = datatypes.TrajectoryItem(
         group_index=0,
@@ -340,7 +352,7 @@ class CreateTrainerPayloadsTest(absltest.TestCase):
     np.testing.assert_array_equal(payloads[1].returns, [0.0, 0.0])
 
   def test_ppo_masks_nonfinite_reward_trajectories(self):
-    cfg = algorithm_config.PPOConfig(num_generations=3)
+    cfg = algorithm_config.PPOConfig(num_generations=3, use_rollout_logps=False)
     items = [
         datatypes.TrajectoryItem(
             group_index=i,
@@ -414,7 +426,9 @@ class CreateTrainerPayloadsTest(absltest.TestCase):
   def test_create_trainer_payloads_unpads_prompt_tokens_using_prompt_length(
       self,
   ):
-    cfg = algorithm_config.GRPOConfig(num_generations=2)
+    cfg = algorithm_config.GRPOConfig(
+        num_generations=2, use_rollout_logps=False
+    )
     item1 = datatypes.TrajectoryItem(
         group_index=0,
         prompt_id="g1",
@@ -445,7 +459,9 @@ class CreateTrainerPayloadsTest(absltest.TestCase):
     np.testing.assert_array_equal(payloads[1].prompt_ids, [0, 10, 20])
 
   def test_create_trainer_payloads_encodes_compact_routed_experts(self):
-    cfg = algorithm_config.GRPOConfig(num_generations=2)
+    cfg = algorithm_config.GRPOConfig(
+        num_generations=2, use_rollout_logps=False
+    )
     routed_u8 = np.array(
         [[[0, 1, 2, 3]], [[4, 5, 6, 7]], [[8, 9, 10, 11]]], dtype=np.int32
     )
@@ -600,7 +616,9 @@ class ExcludeMaskedFromAdvantageTest(absltest.TestCase):
     )
 
   def _cfg(self):
-    return algorithm_config.GRPOConfig(num_generations=4)
+    return algorithm_config.GRPOConfig(
+        num_generations=4, use_rollout_logps=False
+    )
 
   def test_masked_item_is_excluded_and_zeroed(self):
     group = [self._item(i) for i in range(3)] + [self._item(3, masked=True)]

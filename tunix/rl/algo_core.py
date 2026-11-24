@@ -869,14 +869,14 @@ def build_gen_model_input_fn(
 
   Args:
     algo_config: Algorithm configuration; its `temperature` must already be set
-      (`StandardRLProgram` propagates it from `generation_args`).
+      (`StandardRLProgram` sets it from `rollout_temperature`).
     pad_id: Pad token id handed to the loss function.
     eos_id: End-of-sequence token id handed to the loss function.
   """
   if algo_config.temperature is None:
     raise ValueError(
-        "Trainer temperature is unset on algo_config. Configure temperature"
-        " via generation_args on StandardRLProgram (which propagates it to"
+        "Trainer temperature is unset on algo_config. Pass"
+        " rollout_temperature to StandardRLProgram (which sets"
         " algo_config.temperature) before building the trainer model input fn."
     )
   return functools.partial(
