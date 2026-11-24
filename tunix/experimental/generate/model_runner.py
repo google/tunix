@@ -150,10 +150,18 @@ def _sample_hierarchical_256(
     key: jax.Array,
     is_greedy: jax.Array,
     temp: jax.Array,
-    return_logprobs: bool = False,
     tp_size: int = 1,
-) -> tuple[jax.Array, jax.Array | None]:
-  """Samples tokens in two 256-wide stages without full-vocab fp32 buffers."""
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+  """Samples tokens in two 256-wide stages without full-vocab fp32 buffers.
+
+  Returns:
+    A tuple of
+    - `sampled_tokens`: The `[num_rows]` sampled tokens.
+    - `logprobs`: The `[num_rows]` logprobs of `sampled_tokens`.
+    - `row_max`: The `[num_rows]` largest finite logit of each row, or 0.
+    - `log_normalizer`: The `[num_rows]` log normalizer of each row. A token
+      with logit `x` has logprob `(x - row_max) / temp - log_normalizer`.
+  """
   num_rows, vocab_size = logits.shape
 
   # A multiple of `tp_size` blocks keeps alignment with the vocabulary
@@ -192,16 +200,14 @@ def _sample_hierarchical_256(
   greedy_within = jnp.argmax(chosen_raw, axis=-1)
   sampled_within = jax.random.categorical(k_within, chosen_scaled, axis=-1)
   within_idx = jnp.where(is_greedy, greedy_within, sampled_within)
-  next_tokens = (block_idx * _HIERARCHICAL_BLOCK_SIZE + within_idx).astype(
+  sampled_tokens = (block_idx * _HIERARCHICAL_BLOCK_SIZE + within_idx).astype(
       jnp.int32
   )
 
-  if not return_logprobs:
-    return next_tokens, None
-
+  log_normalizer = jax.nn.logsumexp(block_lse, axis=-1)
   chosen_logit = chosen_scaled[jnp.arange(num_rows), within_idx]
-  logprobs = chosen_logit - jax.nn.logsumexp(block_lse, axis=-1)
-  return next_tokens, logprobs
+  logprobs = chosen_logit - log_normalizer
+  return sampled_tokens, logprobs, row_max, log_normalizer
 
 
 def _top_k_num_blocks(vocab: int, k: int, tp_size: int = 1) -> int:
@@ -267,8 +273,9 @@ def sample(
     metadata: SamplingMetadata,
     max_top_k: int,
     return_logprobs: bool = False,
+    num_top_logprobs: int = 0,
     tp_size: int = 1,
-) -> tuple[jax.Array, jax.Array | None]:
+) -> tuple[jax.Array, jax.Array | None, jax.Array | None, jax.Array | None]:
   """Samples one token per row, under each row's own sampling settings.
 
   A row with zero temperature takes its most likely token. Every other row
@@ -282,7 +289,9 @@ def sample(
     metadata: Each row's sampling settings.
     max_top_k: How many candidate tokens to draw for every row. Each row's
       `top_k` must not exceed it. -1 draws every token in the vocabulary.
-    return_logprobs: Whether to return the sampled tokens' logprobs.
+    return_logprobs: Whether to return logprobs.
+    num_top_logprobs: How many of the most likely tokens to also return. Must
+      be 0 unless `return_logprobs` is set, and at most the vocabulary size.
     tp_size: Size of the `'tp'` mesh axis, used to align the vocabulary blocks
       of two-stage `top_k` and of unconstrained block sampling with
       tensor-parallel vocabulary sharding.
@@ -292,6 +301,13 @@ def sample(
     - `next_tokens`: The `[num_rows]` sampled tokens.
     - `logprobs`: The `[num_rows]` logprobs, or None if `return_logprobs` is
       False.
+    - `top_token_ids`: The `[num_rows, num_top_logprobs]` most likely tokens, in
+      no particular order, or None if `num_top_logprobs` is 0.
+    - `top_logprobs`: The `[num_rows, num_top_logprobs]` logprobs of
+      `top_token_ids`, or None if `num_top_logprobs` is 0.
+
+  Raises:
+    ValueError: If `num_top_logprobs` is set without `return_logprobs`.
   """
   # For most current use cases of Tunix, k does not vary across rows. If this
   # changes, this function should be updated to sample individually per row so
@@ -301,19 +317,35 @@ def sample(
   temperature = jnp.where(
       is_greedy, 1.0, jnp.clip(temp, _MIN_SAFE_TEMP, _MAX_SAFE_TEMP)
   )
-  vocab_size = logits.shape[-1]
+  if num_top_logprobs and not return_logprobs:
+    raise ValueError('num_top_logprobs requires return_logprobs.')
+
+  num_rows, vocab_size = logits.shape
   if metadata.unconstrained:
-    return _sample_hierarchical_256(
-        logits,
-        key,
-        is_greedy,
-        temperature,
-        return_logprobs=return_logprobs,
-        tp_size=tp_size,
+    next_tokens, logp, row_max, log_normalizer = _sample_hierarchical_256(
+        logits, key, is_greedy, temperature, tp_size=tp_size
     )
+    if not num_top_logprobs:
+      return next_tokens, logp if return_logprobs else None, None, None
+
+    if num_top_logprobs == vocab_size:
+      # The most likely `vocab_size` tokens are the whole vocabulary, so they
+      # need no sort.
+      top_token_ids = jnp.broadcast_to(
+          jnp.arange(num_top_logprobs, dtype=jnp.int32),
+          (num_rows, num_top_logprobs),
+      )
+      top_logits = logits[:, :num_top_logprobs]
+    else:
+      top_logits, top_token_ids = _top_k(logits, num_top_logprobs, tp_size)
+    top_logprobs = (
+        top_logits.astype(jnp.float32) - row_max[:, None]
+    ) / temperature[:, None] - log_normalizer[:, None]
+    return next_tokens, logp, top_token_ids, top_logprobs
 
   k = vocab_size if max_top_k <= 0 else min(max_top_k, vocab_size)
-  candidate_logits, candidate_tokens = _top_k(logits, k, tp_size)
+  top_logits, top_tokens = _top_k(logits, max(k, num_top_logprobs), tp_size)
+  candidate_logits, candidate_tokens = top_logits[:, :k], top_tokens[:, :k]
   scaled_logits = candidate_logits.astype(jnp.float32) / temperature[:, None]
 
   ranks = jnp.arange(k)
@@ -339,18 +371,46 @@ def sample(
   next_tokens = jnp.where(is_greedy, candidate_tokens[:, 0], sampled_tokens)
 
   if not return_logprobs:
-    return next_tokens, None
+    return next_tokens, None, None, None
 
   # Upscale logits before computing logprobs to preserve precision.
   scaled_full_logits = logits.astype(jnp.float32) / temperature[:, None]
 
   logp = jax.nn.log_softmax(scaled_full_logits, axis=-1)
   logp_sampled = jnp.take_along_axis(logp, next_tokens[:, None], axis=-1)
-  return next_tokens, logp_sampled[:, 0]
+  if not num_top_logprobs:
+    return next_tokens, logp_sampled[:, 0], None, None
+
+  top_token_ids = top_tokens[:, :num_top_logprobs]
+  top_logprobs = jnp.take_along_axis(logp, top_token_ids, axis=-1)
+  return next_tokens, logp_sampled[:, 0], top_token_ids, top_logprobs
 
 
 Cache = dict[str, jax.Array]
 _PyTree = TypeVar('_PyTree')
+
+
+@struct.dataclass
+class ModelRunnerOutput:
+  """The sampled tokens of one or more steps, and what else was asked for.
+
+  Every array is indexed by `[num_rows, ...]`, with a step axis after the row
+  axis when there are several steps.
+  """
+
+  # `[num_rows, ...]` sampled tokens.
+  sampled_tokens: jax.Array
+  # `[num_rows, ..., vocab_size]` logits, or None unless `return_logits`.
+  logits: jax.Array | None
+  # `[num_rows, ...]` logprobs of `sampled_tokens`, or None unless
+  # `return_logprobs`.
+  logprobs: jax.Array | None
+  # `[num_rows, ..., max_logprobs]` most likely tokens, in no particular order,
+  # or None unless `max_logprobs`.
+  top_token_ids: jax.Array | None
+  # `[num_rows, ..., max_logprobs]` logprobs of `top_token_ids`, or None unless
+  # `max_logprobs`.
+  top_logprobs: jax.Array | None
 
 
 @functools.partial(jax.jit, static_argnames=['num_steps'])
@@ -363,7 +423,7 @@ def _stack_steps(
 
   Args:
     first_step: The `[num_rows, ...]` output of the scheduled batch's step.
-    decode_steps: The `[num_scheduler_steps - 1, num_rows, ...]` output of the
+    decode_steps: The `[num_rows, num_scheduler_steps - 1, ...]` output of the
       decode loop, or None when the loop did not run.
     num_steps: The step capacity to pad out to.
 
@@ -371,9 +431,7 @@ def _stack_steps(
     The outputs indexed by `[row, step, ...]`.
   """
   if decode_steps is not None:
-    return jnp.concatenate(
-        [first_step[:, None], jnp.swapaxes(decode_steps, 0, 1)], axis=1
-    )
+    return jnp.concatenate([first_step[:, None], decode_steps], axis=1)
   if num_steps == 1:
     return first_step[:, None]
   out = jnp.zeros(
@@ -624,7 +682,7 @@ class ModelRunner:
       metadata: paged_attention.PagedAttnMetadata,
       sampling_metadata: SamplingMetadata,
       rng: jax.Array,
-  ) -> tuple[jax.Array, jax.Array | None, jax.Array | None, Cache, jax.Array]:
+  ) -> tuple[ModelRunnerOutput, Cache, jax.Array]:
     """Runs the model over a mixed batch and samples the next tokens.
 
     Args:
@@ -638,9 +696,8 @@ class ModelRunner:
 
     Returns:
       A tuple of
-      - next_tokens: `[num_rows]` array of sampled tokens.
-      - logits: `[num_rows, vocab_size]` array of logits, or None.
-      - logprobs: `[num_rows]` array of logprobs, or None.
+      - output: The step's sampled tokens, with their logits, logprobs and
+        most likely tokens, as `[num_rows, ...]` arrays.
       - updated_cache: The updated KV cache pages.
       - rng: The updated PRNG key for subsequent steps.
     """
@@ -681,17 +738,24 @@ class ModelRunner:
     )
 
     rng, step_rng = jax.random.split(rng)
-    next_tokens, logp = sample(
+    next_tokens, logp, top_token_ids, top_logprobs = sample(
         logits,
         step_rng,
         sampling_metadata,
         max_top_k=config.max_top_k,
         return_logprobs=config.return_logprobs,
+        num_top_logprobs=config.max_logprobs,
         tp_size=tp_size,
     )
 
-    res_logits = logits if config.return_logits else None
-    return next_tokens, res_logits, logp, updated_cache, rng
+    output = ModelRunnerOutput(
+        sampled_tokens=next_tokens,
+        logits=logits if config.return_logits else None,
+        logprobs=logp,
+        top_token_ids=top_token_ids,
+        top_logprobs=top_logprobs,
+    )
+    return output, updated_cache, rng
 
   def _split_rows(
       self,
@@ -737,7 +801,7 @@ class ModelRunner:
       sampling_metadata: SamplingMetadata,
       rng: jax.Array,
       num_steps: int,
-  ) -> tuple[jax.Array, jax.Array | None, jax.Array | None, Cache, jax.Array]:
+  ) -> tuple[ModelRunnerOutput, Cache, jax.Array]:
     """Decodes `num_steps` tokens from the batch `metadata` just ran.
 
     Args:
@@ -753,9 +817,8 @@ class ModelRunner:
 
     Returns:
       A tuple of
-      - tokens: `[num_steps, num_rows]` array of sampled tokens.
-      - logits: `[num_steps, num_rows, vocab_size]` array of logits, or None.
-      - logprobs: `[num_steps, num_rows]` array of logprobs, or None.
+      - output: Each decode step's sampled tokens, with their logits, logprobs
+        and most likely tokens, as `[num_rows, num_steps, ...]` arrays.
       - updated cache: The updated KV cache pages.
       - rng: The updated PRNG key for subsequent steps.
     """
@@ -836,7 +899,7 @@ class ModelRunner:
     def decode_step(carry, _):
       cache, tokens, kv_lens, rng = carry
       step_metadata = dataclasses.replace(decode_metadata, kv_lens=kv_lens)
-      next_tokens, logits, logp, cache, rng = self._model_step_fn(
+      output, cache, rng = self._model_step_fn(
           params,
           cache,
           tokens,
@@ -846,11 +909,11 @@ class ModelRunner:
       )
       carry = (
           cache,
-          next_tokens.reshape(num_groups, rows_per_group),
+          output.sampled_tokens.reshape(num_groups, rows_per_group),
           kv_lens + query_lens,
           rng,
       )
-      return carry, (next_tokens, logits, logp)
+      return carry, output
 
     carry, outputs = jax.lax.scan(
         decode_step,
@@ -859,15 +922,11 @@ class ModelRunner:
         length=num_steps,
     )
     cache, _, _, rng = carry
-    tokens, logits, logp = outputs
     # Send each output row back to the scheduled row it came from.
-    return (
-        tokens[:, inverse_order],
-        logits[:, inverse_order] if logits is not None else None,
-        logp[:, inverse_order] if logp is not None else None,
-        cache,
-        rng,
-    )
+    outputs = jax.tree.map(lambda x: x[:, inverse_order], outputs)
+    # Put the step axis after the row axis.
+    outputs = jax.tree.map(lambda x: jnp.swapaxes(x, 0, 1), outputs)
+    return outputs, cache, rng
 
   def _to_device(self, tree: _PyTree) -> _PyTree:
     """Moves host arrays onto the device, replicated across the mesh."""
@@ -884,7 +943,7 @@ class ModelRunner:
       tokens: jax.Array,
       metadata: paged_attention.PagedAttnMetadata,
       sampling_params: Sequence[request_lib.SamplingParams],
-  ) -> tuple[jax.Array, jax.Array | None, jax.Array | None, Cache]:
+  ) -> tuple[ModelRunnerOutput, Cache]:
     """Runs model forward passes on a batch of requests, and samples tokens.
 
     Note: This function runs `num_scheduler_steps` forward passes, and samples
@@ -900,11 +959,9 @@ class ModelRunner:
 
     Returns:
       A tuple of:
-        - tokens: `[num_rows, num_scheduler_steps]` array of sampled tokens.
-        - logits: `[num_rows, num_scheduler_steps, vocab_size]` array of
-          logits, or None.
-        - logprobs: `[num_rows, num_scheduler_steps]` array of logprobs, or
-          None.
+        - output: Each step's sampled tokens, with their logits, logprobs and
+          most likely tokens, as `[num_rows, num_scheduler_steps, ...]`
+          arrays.
         - updated cache: The updated KV cache pages.
 
     Raises:
@@ -931,7 +988,7 @@ class ModelRunner:
         ),
     ))
 
-    next_tokens, logits, logp, cache, self._rng = self._compiled_model_step_fn(
+    output, cache, self._rng = self._compiled_model_step_fn(
         self._flattened_transformer_state,
         cache,
         tokens,
@@ -953,27 +1010,19 @@ class ModelRunner:
 
     num_decode_steps = num_steps - 1 if num_surviving else 0
 
-    decode_tokens = decode_logits = decode_logp = None
+    stack = functools.partial(_stack_steps, num_steps=num_steps)
     if num_decode_steps:
-      decode_tokens, decode_logits, decode_logp, cache, self._rng = (
-          self._compiled_decode_loop_fn(
-              self._flattened_transformer_state,
-              cache,
-              next_tokens,
-              dataclasses.replace(device_metadata, decode_only=True),
-              sampling_metadata,
-              self._rng,
-              num_steps=num_decode_steps,
-          )
+      decode_output, cache, self._rng = self._compiled_decode_loop_fn(
+          self._flattened_transformer_state,
+          cache,
+          output.sampled_tokens,
+          dataclasses.replace(device_metadata, decode_only=True),
+          sampling_metadata,
+          self._rng,
+          num_steps=num_decode_steps,
       )
+      output = jax.tree.map(stack, output, decode_output)
+    else:
+      output = jax.tree.map(lambda x: stack(x, None), output)
 
-    out_tokens = _stack_steps(next_tokens, decode_tokens, num_steps)
-    out_logits = (
-        _stack_steps(logits, decode_logits, num_steps)
-        if logits is not None
-        else None
-    )
-    out_logp = (
-        _stack_steps(logp, decode_logp, num_steps) if logp is not None else None
-    )
-    return out_tokens, out_logits, out_logp, cache
+    return output, cache

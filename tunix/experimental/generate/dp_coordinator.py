@@ -183,6 +183,8 @@ class DPCoordinator:
       generated_tokens: np.ndarray,
       logits: np.ndarray | None = None,
       logprobs: np.ndarray | None = None,
+      top_token_ids: np.ndarray | None = None,
+      top_logprobs: np.ndarray | None = None,
   ) -> list[request_lib.RequestState]:
     """Updates request state based on a sampler output and returns completed requests."""
     i, j, k = distribution
@@ -199,6 +201,8 @@ class DPCoordinator:
           generated_tokens[row],
           logits[row] if logits is not None else None,
           logprobs[row] if logprobs is not None else None,
+          top_token_ids[row] if top_token_ids is not None else None,
+          top_logprobs[row] if top_logprobs is not None else None,
       )
 
       if req.is_done:
@@ -215,6 +219,8 @@ class DPCoordinator:
       generated_tokens: np.ndarray,
       logits: np.ndarray | None = None,
       logprobs: np.ndarray | None = None,
+      top_token_ids: np.ndarray | None = None,
+      top_logprobs: np.ndarray | None = None,
   ) -> None:
     """Updates request state based on a sampler output."""
     num_steps = self._scheduler_config.num_scheduler_steps
@@ -258,6 +264,10 @@ class DPCoordinator:
     req.token_ids.extend(new_tokens)
     if logprobs is not None:
       req.logprobs.extend(logprobs[:num_added])
+    if top_token_ids is not None:
+      req.top_token_ids.extend(top_token_ids[:num_added])
+    if top_logprobs is not None:
+      req.top_logprobs.extend(top_logprobs[:num_added])
     if logits is not None:
       req.logits.extend(logits[:num_added])
 
