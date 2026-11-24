@@ -16,8 +16,10 @@
 
 import dataclasses
 import enum
+import functools
 import json
 import os
+import re
 from typing import Any, cast
 from unittest import mock
 
@@ -38,6 +40,7 @@ from tunix.models.llama3 import model as llama3_model
 from tunix.models.llama3 import params as llama3_params
 from tunix.models.qwen2 import model as qwen2_model
 from tunix.models.qwen2 import params as qwen2_params
+from tunix.models.qwen3 import mapping_vllm_jax as qwen3_vllm
 from tunix.models.qwen3 import model as qwen3_model
 from tunix.models.qwen3 import params as qwen3_params
 from tunix.models.qwen3p5 import model as qwen3p5_model
@@ -2001,26 +2004,36 @@ class HfMappingTest(absltest.TestCase):
     safetensors_loader.load_file_from_gcs = (
         lambda uri: calls.append(uri) or q_dir
     )
-    q_loaded_auto = qwen3p5_params.create_model_from_safe_tensors(
-        "gs://bucket/qwen3p5",
-        q_cfg,
-        dtype=jnp.float32,
-    )
-    self.assertEqual(calls, ["gs://bucket/qwen3p5"])
-    self.assertEqual(
-        q_loaded_auto._hf_variant, q_variants.CONDITIONAL_GENERATION
-    )
-    np.testing.assert_array_equal(
-        q_loaded_auto.lm_head.w.value, q_model.lm_head.w.value
-    )
-    calls.clear()
-    q_loaded = qwen3p5_params.create_model_from_safe_tensors(
-        "gs://bucket/qwen3p5",
-        q_cfg,
-        dtype=jnp.float32,
-        hf_variant=q_variants.CONDITIONAL_GENERATION,
-    )
-    self.assertEqual(calls, ["gs://bucket/qwen3p5"])
+    real_epath = safetensors_loader.epath.Path
+    with mock.patch.object(
+        safetensors_loader.epath,
+        "Path",
+        side_effect=lambda p: (
+            real_epath(q_dir)
+            if str(p) == "gs://bucket/qwen3p5"
+            else real_epath(p)
+        ),
+    ):
+      q_loaded_auto = qwen3p5_params.create_model_from_safe_tensors(
+          "gs://bucket/qwen3p5",
+          q_cfg,
+          dtype=jnp.float32,
+      )
+      self.assertEqual(calls, ["gs://bucket/qwen3p5"])
+      self.assertEqual(
+          q_loaded_auto._hf_variant, q_variants.CONDITIONAL_GENERATION
+      )
+      np.testing.assert_array_equal(
+          q_loaded_auto.lm_head.w.value, q_model.lm_head.w.value
+      )
+      calls.clear()
+      q_loaded = qwen3p5_params.create_model_from_safe_tensors(
+          "gs://bucket/qwen3p5",
+          q_cfg,
+          dtype=jnp.float32,
+          hf_variant=q_variants.CONDITIONAL_GENERATION,
+      )
+    self.assertEqual(calls, [])
     np.testing.assert_array_equal(
         q_loaded.lm_head.w.value, q_model.lm_head.w.value
     )
@@ -2374,6 +2387,211 @@ class HfMappingTest(absltest.TestCase):
         set(safetensors_loader.read_safetensors_headers(q_lora_override_dir)),
         set(q_causal_override),
     )
+
+  def test_compose_backend_manifest_reads_canonical_hf_wire(self):
+    """Trainer `to_hf` wire == what the vLLM-jax destination manifest reads."""
+    for tied in (True, False):
+      cfg = qwen3_model.ModelConfig(
+          num_layers=2,
+          vocab_size=32,
+          embed_dim=16,
+          hidden_dim=24,
+          num_heads=2,
+          head_dim=8,
+          num_kv_heads=1,
+          rope_theta=10000,
+          norm_eps=1e-6,
+          use_tied_embedding=tied,
+      )
+      model = qwen3_model.Qwen3(cfg, rngs=nnx.Rngs(params=0))
+      tunix_flat = safetensors_loader.flatten_model_state(model)
+      wire = jax.eval_shape(
+          functools.partial(
+              hf_mapping.to_hf_impl, qwen3_params.build_to_hf_manifest(cfg)
+          ),
+          tunix_flat,
+      )
+      self.assertEqual("lm_head.weight" in wire, not tied)
+      # vLLM-jax keeps Tunix layouts under mapped names and materializes a
+      # transposed lm_head even for tied checkpoints.
+      backend = {
+          qwen3_vllm.TO_HF_MAPPINGS[re.sub(r"\.\d+\.", ".*.", k)][0].replace(
+              "*", (re.findall(r"\.(\d+)\.", k) or [""])[0]
+          ): tuple(v.shape)
+          for k, v in tunix_flat.items()
+      }
+      if tied:
+        backend["lm_head.weight"] = backend["model.embed_tokens.weight"][::-1]
+      manifest = hf_mapping.compose_backend_manifest(
+          qwen3_params.build_from_hf_manifest(cfg),
+          qwen3_vllm.TO_HF_MAPPINGS,
+          backend,
+      )
+      self.assertEqual(hf_mapping.active_source_keys(manifest), set(wire))
+      out = jax.eval_shape(
+          functools.partial(hf_mapping.execute_manifest, manifest), wire
+      )
+      self.assertEqual({k: tuple(v.shape) for k, v in out.items()}, backend)
+
+  def test_compose_backend_manifest_fails_fast_on_uncovered_key(self):
+    manifest = {
+        "rules": [{
+            "source_keys": ["model.embed_tokens.weight"],
+            "target_keys": ["embedder.input_embedding"],
+            "ops": [],
+        }],
+    }
+    with self.assertRaisesRegex(
+        ValueError, "'lm_head.weight' .* has no HF source"
+    ):
+      hf_mapping.compose_backend_manifest(
+          manifest,
+          {"embedder.input_embedding": ("model.embed_tokens.weight", None)},
+          {"model.embed_tokens.weight": (32, 16), "lm_head.weight": (16, 32)},
+      )
+    with self.assertRaisesRegex(ValueError, "has no backend key mapping"):
+      hf_mapping.compose_backend_manifest(
+          manifest, {}, {"model.embed_tokens.weight": (32, 16)}
+      )
+
+  def test_compose_backend_manifest_resolves_tied_keys(self):
+    manifest = {
+        "rules": [
+            {
+                "source_keys": ["model.layers.0.self_attn.k_proj.weight"],
+                "target_keys": ["layers.0.attn.k_proj.w"],
+                "ops": [],
+            },
+        ],
+        "tied_keys": [
+            ["layers.0.attn.k_proj.w", "layers.1.attn.k_proj.w"],
+        ],
+    }
+    key_mappings = {
+        "layers.*.attn.k_proj.w": ("model.layers.*.self_attn.k_proj.weight", None),
+    }
+    dst_shapes = {
+        "model.layers.0.self_attn.k_proj.kernel": (8, 8),
+        "model.layers.1.self_attn.k_proj.kernel": (8, 8),
+    }
+    composed = hf_mapping.compose_backend_manifest(
+        manifest, key_mappings, dst_shapes
+    )
+    self.assertEqual(
+        composed["tied_keys"],
+        [[
+            "model.layers.0.self_attn.k_proj.kernel",
+            "model.layers.1.self_attn.k_proj.kernel",
+        ]],
+    )
+    wire = {
+        "model.layers.0.self_attn.k_proj.weight": jnp.arange(
+            64, dtype=jnp.float32
+        ).reshape(8, 8)
+    }
+    out = hf_mapping.execute_manifest(composed, wire)
+    self.assertEqual(set(out), set(dst_shapes))
+    np.testing.assert_array_equal(
+        out["model.layers.1.self_attn.k_proj.kernel"],
+        out["model.layers.0.self_attn.k_proj.kernel"],
+    )
+
+  def test_compose_backend_manifest_suffix_guard_and_dotless_keys(self):
+    # Dotless backend key resolves on exact match only.
+    dotless_manifest = {
+        "rules": [{
+            "source_keys": ["lm_head.weight"],
+            "target_keys": ["lm_head.w"],
+            "ops": [],
+        }]
+    }
+    composed = hf_mapping.compose_backend_manifest(
+        dotless_manifest,
+        {"lm_head.w": ("lm_head", None)},
+        {"lm_head": (16, 32)},
+    )
+    self.assertEqual(composed["rules"][0]["target_keys"], ["lm_head"])
+    with self.assertRaisesRegex(ValueError, "matches"):
+      hf_mapping.compose_backend_manifest(
+          dotless_manifest,
+          {"lm_head.w": ("lm_head", None)},
+          {"lm_head.weight": (16, 32)},
+      )
+
+    # Dotted `.weight` must not fall back to `.bias` or `.weight_scale`.
+    proj_manifest = {
+        "rules": [{
+            "source_keys": ["model.layers.0.proj.weight"],
+            "target_keys": ["layers.0.proj.w"],
+            "ops": [],
+        }]
+    }
+    for bad_dst in (
+        {"model.layers.0.proj.bias": (8,)},
+        {"model.layers.0.proj.weight_scale": (8,)},
+        {"model.layers.0.proj": (8, 8)},
+    ):
+      with self.assertRaisesRegex(ValueError, "matches"):
+        hf_mapping.compose_backend_manifest(
+            proj_manifest,
+            {"layers.*.proj.w": ("model.layers.*.proj.weight", None)},
+            bad_dst,
+        )
+
+  def test_compose_backend_manifest_tied_fan_out_strict_checks(self):
+    # Square vocab_size == hidden_dim with another square rule still picks the
+    # embedding rule for dropped `lm_head.weight`.
+    square_manifest = {
+        "rules": [
+            {
+                "source_keys": ["model.embed_tokens.weight"],
+                "target_keys": ["embedder.input_embedding"],
+                "ops": [],
+            },
+            {
+                "source_keys": ["model.layers.0.self_attn.o_proj.weight"],
+                "target_keys": ["layers.0.attn.o_proj.w"],
+                "ops": [],
+            },
+        ],
+        "dropped_keys": ["lm_head.weight"],
+    }
+    key_mappings = {
+        "embedder.input_embedding": ("model.embed_tokens.weight", None),
+        "layers.*.attn.o_proj.w": (
+            "model.layers.*.self_attn.o_proj.weight",
+            None,
+        ),
+    }
+    composed = hf_mapping.compose_backend_manifest(
+        square_manifest,
+        key_mappings,
+        {
+            "model.embed_tokens.weight": (16, 16),
+            "model.layers.0.self_attn.o_proj.weight": (16, 16),
+            "lm_head.weight": (16, 16),
+        },
+    )
+    fan_rule = next(
+        r for r in composed["rules"] if r["target_keys"] == ["lm_head.weight"]
+    )
+    self.assertEqual(fan_rule["source_keys"], ["model.embed_tokens.weight"])
+
+    # Unrelated uncovered 1D or 2D keys must fail even when dropped_keys is set.
+    for extra in (
+        {"model.extra_norm.weight": (16,)},
+        {"model.extra_proj.weight": (16, 16)},
+    ):
+      with self.assertRaisesRegex(ValueError, "does not match dropped tied HF"):
+        hf_mapping.compose_backend_manifest(
+            square_manifest,
+            key_mappings,
+            {
+                "model.embed_tokens.weight": (16, 16),
+                "model.layers.0.self_attn.o_proj.weight": (16, 16),
+                **extra,
+            },
+        )
 
 
   def test_apply_host_manifest_strict_and_unconsumed_rules(self):
