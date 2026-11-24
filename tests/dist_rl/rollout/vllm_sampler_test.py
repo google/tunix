@@ -190,6 +190,17 @@ class VllmSamplerTest(absltest.TestCase):
     self.assertEqual(responses[1].text, "completion b")
     self.assertEqual(responses[1].finish_reason, "length")
 
+  def test_fs_and_gcs_weight_sync_modes_fail_fast(self):
+    for mode in ("fs", "gcs"):
+      with self.subTest(mode=mode):
+        with self.assertRaisesRegex(
+            ValueError, f"weight_sync_mode='{mode}' needs"
+        ):
+          vllm_sampler.VllmSampler(
+              server_id=f"{mode}_unsupported",
+              config=_config(weight_sync_mode=mode),
+          )
+
   def test_sample_error_resilience(self):
     async def mock_failing_stream(prompt, sampling_params, request_id):
       del prompt, sampling_params, request_id

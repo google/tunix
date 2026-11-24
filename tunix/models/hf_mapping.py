@@ -23,6 +23,7 @@ import functools
 import itertools
 import json
 import math
+import re
 import string
 from typing import Any, Final, TypeAlias, TypedDict, TypeVar
 
@@ -404,6 +405,195 @@ def invert_manifest(manifest: RuleSpec) -> dict[str, Any]:
       "rules": inv_rules,
       "tied_keys": [],
       "dropped_keys": [*spec["dropped_keys"], *tied_dst],
+  }
+
+
+_WEIGHT_LEAF_SUFFIXES: Final[frozenset[str]] = frozenset(
+    {"weight", "kernel", "w", "scale", "embedding"}
+)
+_DROPPED_KEY_PREFIXES: Final[tuple[str, ...]] = (
+    "vllm_model.",
+    "model.",
+    "language_model.",
+)
+
+
+def _canonical_dropped_stem(key: str) -> str:
+  """Normalizes optional model prefixes and weight leaf suffixes."""
+  stem, dot, suffix = key.rpartition(".")
+  base = stem if (dot and suffix in _WEIGHT_LEAF_SUFFIXES) else key
+  for prefix in _DROPPED_KEY_PREFIXES:
+    if base.startswith(prefix):
+      base = base[len(prefix) :]
+  return base
+
+
+def _is_embedding_rule(rule: Mapping[str, Any]) -> bool:
+  """Returns True if `rule` is a single-target embedding conversion rule."""
+  return len(rule["target_keys"]) == 1 and any(
+      "embed" in part
+      for k in (*rule["source_keys"], *rule["target_keys"])
+      for part in k.split(".")
+  )
+
+
+def _resolve_backend_key(
+    model_key: str,
+    renames: Sequence[tuple[re.Pattern[str], str]],
+    dst_keys_by_stem: Mapping[str, Sequence[str]],
+) -> str:
+  """Renames `model_key` to its unique backend state key."""
+  match, pattern = next(
+      ((m, dst) for regex, dst in renames if (m := regex.match(model_key))),
+      (None, ""),
+  )
+  if match is None:
+    raise ValueError(f"Model key {model_key!r} has no backend key mapping.")
+  name = functools.reduce(
+      lambda s, g: s.replace("*", g, 1), match.groups(), pattern
+  )
+  stem, dot, suffix = name.rpartition(".")
+  candidates = dst_keys_by_stem.get(stem if dot else name, ())
+  if name in candidates:
+    return name
+  if (
+      dot
+      and len(candidates) == 1
+      and suffix in _WEIGHT_LEAF_SUFFIXES
+      and "." in candidates[0]
+      and candidates[0].rsplit(".", 1)[1] in _WEIGHT_LEAF_SUFFIXES
+  ):
+    return candidates[0]
+  raise ValueError(
+      f"Backend key {name!r} (from {model_key!r}) matches {candidates!r}."
+  )
+
+
+def _tied_fan_out_rule(
+    key: str,
+    rules: Sequence[Mapping[str, Any]],
+    dst_shapes: Mapping[str, Sequence[int]],
+    dropped_keys: Sequence[str],
+) -> dict[str, Any]:
+  """Feeds a dropped tied backend `key` from the transposed embedding rule.
+
+  A tied HF checkpoint omits the output projection (`dropped_keys`); a backend
+  that still materializes it reads the tied embedding source through that rule's
+  ops plus a final transpose.
+
+  Args:
+    key: The uncovered backend key.
+    rules: The composed backend rules.
+    dst_shapes: Backend key to shape.
+    dropped_keys: HF keys omitted from the tied checkpoint.
+
+  Returns:
+    The fan-out rule that feeds `key`.
+
+  Raises:
+    ValueError: If `key` is not a rank-2 key matching `dropped_keys` or has no
+      unique transposed-shape embedding source.
+  """
+  shape = tuple(dst_shapes[key])
+  dropped_stems = {_canonical_dropped_stem(k) for k in dropped_keys}
+  if len(shape) != 2 or _canonical_dropped_stem(key) not in dropped_stems:
+    raise ValueError(
+        f"Backend key {key!r} (shape={shape}) has no HF source and does not"
+        f" match dropped tied HF keys {list(dropped_keys)!r}."
+    )
+  sources = [
+      r
+      for r in rules
+      if _is_embedding_rule(r)
+      and tuple(dst_shapes[r["target_keys"][0]]) == shape[::-1]
+  ]
+  if len(sources) != 1:
+    raise ValueError(
+        f"Backend key {key!r} has no unique tied embedding source:"
+        f" {len(sources)} candidates, dropped HF keys {list(dropped_keys)!r}."
+    )
+  return {
+      **sources[0],
+      "target_keys": [key],
+      "ops": [*sources[0]["ops"], {"transpose": {"axes": [1, 0]}}],
+  }
+
+
+def compose_backend_manifest(
+    from_hf_manifest: RuleSpec,
+    key_mappings: Mapping[str, tuple[str, Any]],
+    dst_shapes: Mapping[str, Sequence[int]],
+) -> dict[str, Any]:
+  """Retargets an `HF -> Model` manifest onto a serving backend's state keys.
+
+  Each rule's model target is renamed through `key_mappings` (model pattern ->
+  `(backend pattern, sharding)`, `*` = layer index; e.g. a family's
+  `mapping_vllm_jax.TO_HF_MAPPINGS`) and resolved against the backend's bound
+  keys, accepting a unique same-stem weight leaf key (`.weight` vs `.kernel`).
+  The backend is assumed to keep the model's layout, so wire tensors stay
+  canonical HF. Manifest `tied_keys` are retargeted onto backend keys, and an
+  uncovered rank-2 backend key matching `dropped_keys` is fanned out from the
+  tied embedding rule (embedding -> transposed `lm_head`).
+
+  Args:
+    from_hf_manifest: The model family's `HF -> Model` manifest.
+    key_mappings: Model-to-backend key patterns.
+    dst_shapes: Backend state shapes keyed by canonical parameter name.
+
+  Returns:
+    `HF -> backend` manifest covering every key of `dst_shapes`.
+
+  Raises:
+    ValueError: If a model target has no backend key, or a backend key has no
+      HF source.
+  """
+  spec = parse_manifest(from_hf_manifest)
+  renames = [
+      (re.compile("^" + re.escape(p).replace(r"\*", r"(\d+)") + "$"), dst)
+      for p, (dst, _) in key_mappings.items()
+  ]
+  by_stem: dict[str, list[str]] = {}
+  for key in dst_shapes:
+    by_stem.setdefault(key.rsplit(".", 1)[0], []).append(key)
+  rules = [
+      {
+          **r,
+          "target_keys": [
+              _resolve_backend_key(t, renames, by_stem)
+              for t in r["target_keys"]
+          ],
+      }
+      for r in spec["rules"]
+  ]
+  dropped_set = frozenset(spec["dropped_keys"])
+  tied_keys = [
+      [
+          _resolve_backend_key(src, renames, by_stem),
+          _resolve_backend_key(dst, renames, by_stem),
+      ]
+      for src, dst in spec["tied_keys"]
+      if dst not in dropped_set
+  ]
+  covered: set[str] = {
+      *itertools.chain.from_iterable(r["target_keys"] for r in rules),
+      *(dst for _, dst in tied_keys),
+  }
+  uncovered = sorted(set(dst_shapes) - covered)
+  rules += [
+      _tied_fan_out_rule(k, rules, dst_shapes, spec["dropped_keys"])
+      for k in uncovered
+  ]
+  fanned_stems = {_canonical_dropped_stem(k) for k in uncovered}
+  dropped = [
+      k
+      for k in spec["dropped_keys"]
+      if k not in dst_shapes and _canonical_dropped_stem(k) not in fanned_stems
+  ]
+  return {
+      **spec,
+      "rules": rules,
+      "tied_keys": tied_keys,
+      "dropped_keys": dropped,
   }
 
 

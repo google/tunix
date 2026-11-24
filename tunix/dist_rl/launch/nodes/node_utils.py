@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 import contextlib
+import inspect
 import json
 import logging
 import os
@@ -31,7 +32,7 @@ import pathlib
 import pickle
 import signal
 import sys
-from typing import Final, Literal, TypeAlias, TypedDict, cast
+from typing import Any, Final, Literal, TypeAlias, TypedDict, cast
 
 import jax
 from jax.experimental import mesh_utils
@@ -722,3 +723,50 @@ def ensure_local_safetensors(
       "Download completed, but no '*.safetensors' files were found directly"
       f" in {model_key}.model_download_path: {model_path}"
   )
+
+
+def build_single_arg_hf_manifest(
+    params_lib: Any,
+    fn_name: str,
+    model_cfg: Any,
+    *,
+    model_name: str,
+    mode: str,
+) -> Any:
+  """Builds a single-arg HF weight-sync manifest, failing fast on variants."""
+  builder = getattr(params_lib, fn_name, None)
+  if not callable(builder):
+    raise ValueError(
+        f"weight_sync_config.mode={mode!r} requires {fn_name} on"
+        f" {model_name!r}'s params module."
+    )
+  sig = inspect.signature(builder)
+  params = list(sig.parameters.values())
+  has_varargs = any(
+      p.kind == inspect.Parameter.VAR_POSITIONAL for p in params
+  )
+  positional = [
+      p
+      for p in params
+      if p.kind
+      in (
+          inspect.Parameter.POSITIONAL_ONLY,
+          inspect.Parameter.POSITIONAL_OR_KEYWORD,
+      )
+  ]
+  has_req_kwonly = any(
+      p.kind == inspect.Parameter.KEYWORD_ONLY
+      and p.default is inspect.Parameter.empty
+      for p in params
+  )
+  if (
+      "hf_variant" in sig.parameters
+      or has_req_kwonly
+      or (not has_varargs and len(positional) != 1)
+  ):
+    raise ValueError(
+        f"weight_sync_config.mode={mode!r} does not support {model_name!r}:"
+        f" {fn_name}{sig} requires variant-specific arguments rather than a"
+        " single model_config."
+    )
+  return builder(model_cfg)
