@@ -15,15 +15,19 @@
 """Tests for InprocessVllmSampler with Tunix VllmSampler and Raiden delegate."""
 
 import asyncio
+import types
 from unittest import mock
 
 from absl.testing import absltest
+import jax.numpy as jnp
 import numpy as np
 from tunix.common import configs
+from tunix.dist_rl.common import datatypes as dist_rl_datatypes
 from tunix.dist_rl.rollout import inprocess_vllm_sampler
 from tunix.dist_rl.rollout import sampler as base_sampler_lib
 from tunix.dist_rl.weight_sync import raiden_weight_sync_delegate
 from tunix.dist_rl.weight_sync import weight_sync
+from tunix.experimental.weight_sync import gcs_synchronizer
 from tunix.generate import base_sampler
 from tunix.generate import mappings
 
@@ -103,6 +107,16 @@ class InprocessVllmSamplerTest(absltest.TestCase):
         "vllm_raiden_slice",
     )
     self.assertFalse(sampler.raiden_sync_delegate.is_bounded())
+
+  def test_fs_and_gcs_modes_require_injected_delegate(self):
+    for mode in (weight_sync.WeightSyncMode.FS, weight_sync.WeightSyncMode.GCS):
+      with self.subTest(mode=mode):
+        with self.assertRaisesRegex(ValueError, "requires an injected"):
+          inprocess_vllm_sampler.InprocessVllmSampler(
+              server_id=f"vllm_{mode.value}_slice",
+              tokenizer=self.mock_tokenizer,
+              config=configs.RolloutConfig(weight_sync_mode=mode),
+          )
 
   def test_weight_sync_mode_read_from_rollout_config(self):
     sampler = inprocess_vllm_sampler.InprocessVllmSampler(
@@ -550,8 +564,11 @@ class InprocessVllmSamplerTest(absltest.TestCase):
 
   def test_exposes_weights_and_cache_hooks_from_vllm_sampler(self):
     fake_state = {"w": 1}
+    fake_runner = types.SimpleNamespace(state=fake_state, state_leaves=None)
     self.mock_vllm_sampler.transformer_state = fake_state
+    self.mock_vllm_sampler.model_runner = fake_runner
     self.assertIs(self.sampler.transformer_state, fake_state)
+    self.assertIs(self.sampler.model_runner, fake_runner)
 
     self.sampler.update_params({"w": 2})
     self.mock_vllm_sampler.update_params.assert_called_once_with(
@@ -583,7 +600,65 @@ class InprocessVllmSamplerTest(absltest.TestCase):
     with self.assertRaisesRegex(RuntimeError, "not initialized"):
       _ = uninit.transformer_state
     with self.assertRaisesRegex(RuntimeError, "not initialized"):
+      _ = uninit.model_runner
+    with self.assertRaisesRegex(RuntimeError, "not initialized"):
       uninit.update_params({"w": 2})
+
+  def test_fs_weight_sync_end_to_end_updates_inprocess_vllm_model_runner(self):
+    staging_dir = self.create_tempdir().full_path
+    src_sync = gcs_synchronizer.GCSSynchronizer(
+        "trainer",
+        gcs_synchronizer.GCSSynchronizerConfig(staging_dir=staging_dir),
+    )
+    src_req = dist_rl_datatypes.WeightSyncRequest(
+        policy_version=3, extra_config={"req_id": "r3", "uuid": 3}
+    )
+    src_sync.bind({"w": jnp.full((2, 2), 7.0, dtype=jnp.float32)})
+    src_sync.d2h(sync_request=src_req)
+    src_md = src_sync.work_unit_metadata()
+
+    old_weight = jnp.ones((2, 2), dtype=jnp.float32)
+    runner = types.SimpleNamespace(state={"w": old_weight}, state_leaves=None)
+    self.mock_vllm_sampler.model_runner = runner
+    self.mock_vllm_sampler.transformer_state = runner.state
+
+    delegate = raiden_weight_sync_delegate.RaidenWeightSyncDelegate(
+        server_id="vllm_fs_slice",
+        synchronizer_factory=lambda state: gcs_synchronizer.GCSSynchronizer(
+            "vllm_fs_slice",
+            gcs_synchronizer.GCSSynchronizerConfig(staging_dir=staging_dir),
+        ),
+    )
+    fs_sampler = inprocess_vllm_sampler.InprocessVllmSampler(
+        server_id="vllm_fs_slice",
+        tokenizer=self.mock_tokenizer,
+        config=configs.RolloutConfig(
+            weight_sync_mode=weight_sync.WeightSyncMode.FS,
+            tensor_parallel_size=1,
+            data_parallel_size=1,
+        ),
+        raiden_sync_delegate=delegate,
+    )
+    fs_sampler.initialize()
+
+    sync_req = base_sampler_lib.WeightSyncRequest(
+        policy_version=3,
+        source_metadata=[src_md],
+        extra_config={"req_id": "r3", "uuid": 3},
+    )
+    asyncio.run(fs_sampler.bind_weight_sync(sync_req))
+    self.assertTrue(asyncio.run(fs_sampler.pre_weight_sync(sync_req)))
+    self.assertEqual(asyncio.run(fs_sampler.weight_sync(sync_req)), 3)
+    self.assertTrue(asyncio.run(fs_sampler.post_weight_sync(sync_req)))
+
+    np.testing.assert_allclose(
+        np.asarray(runner.state["w"]), np.full((2, 2), 7.0, dtype=np.float32)
+    )
+    self.assertIs(runner.state_leaves, runner.state)
+    self.assertTrue(old_weight.is_deleted())
+    self.mock_vllm_sampler.delete_cache.assert_called_once_with()
+    self.mock_vllm_sampler.reinitialize_cache.assert_called_once_with()
+    src_sync.close()
 
   def test_other_sampler_methods(self):
     self.assertEqual(

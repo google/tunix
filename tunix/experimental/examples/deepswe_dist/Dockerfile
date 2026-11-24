@@ -16,7 +16,7 @@ ENV TZ=Etc/UTC
 
 # Install system dependencies, including Python 3 and pip
 RUN apt-get update && \
-    apt-get install -y build-essential cmake curl git ninja-build python3 python3-pip && \
+    apt-get install -y build-essential cmake curl git iproute2 ninja-build python3 python3-pip && \
     rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip

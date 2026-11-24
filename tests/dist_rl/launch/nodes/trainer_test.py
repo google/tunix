@@ -19,6 +19,7 @@ import functools
 import importlib
 import json
 import os
+import types
 from unittest import mock
 
 from absl.testing import absltest
@@ -33,6 +34,7 @@ from tunix.dist_rl.launch.nodes import node_utils
 from tunix.dist_rl.launch.nodes import trainer
 from tunix.dist_rl.train import peft_trainer_v2
 from tunix.dist_rl.worker import trainer_worker
+from tunix.experimental.weight_sync import gcs_synchronizer
 from tunix.sft import checkpoint_options
 from tunix.utils import maxtext_utils
 
@@ -220,6 +222,51 @@ class TrainerMainTest(absltest.TestCase):
 
     with self.assertRaisesRegex(RuntimeError, "Require discovery API"):
       trainer.main([], context=mock.MagicMock(ipc=None))
+
+  def test_weight_sync_worker_factory_builds_fs_source_and_validates_manifest(
+      self,
+  ):
+    actor = mock.MagicMock()
+    self.assertIsNone(trainer.weight_sync_worker_factory(_hp(), actor))
+    for mode in ("fs", "gcs"):
+      with self.subTest(mode=mode):
+        params_lib = mock.MagicMock()
+        params_lib.build_to_hf_manifest.return_value = {"rules": []}
+        with mock.patch.object(
+            trainer.automodel, "get_model_module", return_value=params_lib
+        ):
+          factory = trainer.weight_sync_worker_factory(
+              _hp(
+                  f"weight_sync_config.mode={mode}",
+                  "weight_sync_config.staging_dir=gs://bucket/ws",
+              ),
+              actor,
+          )
+        params_lib.build_to_hf_manifest.assert_called_once_with(actor.config)
+        if factory is None:
+          self.fail(f"mode={mode} built no weight-sync worker factory.")
+        worker = factory()
+        self.assertIsInstance(worker, gcs_synchronizer.GCSSynchronizer)
+        self.assertEqual(worker.job_name, "trainer")
+        self.assertEqual(worker.config.staging_dir, "gs://bucket/ws")
+
+    # 2-arg variant builders (e.g. Qwen3.5 / Gemma4) fail fast.
+    variant_params = types.SimpleNamespace(
+        build_to_hf_manifest=lambda cfg, hf_variant=None: {"rules": []}
+    )
+    with mock.patch.object(
+        trainer.automodel, "get_model_module", return_value=variant_params
+    ):
+      with self.assertRaisesRegex(
+          ValueError, "requires variant-specific arguments"
+      ):
+        trainer.weight_sync_worker_factory(
+            _hp(
+                "weight_sync_config.mode=fs",
+                "weight_sync_config.staging_dir=gs://bucket/ws",
+            ),
+            actor,
+        )
 
   def test_main_raises_on_non_positive_micro_batch_size(self):
     with self.assertRaisesRegex(

@@ -98,8 +98,8 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
         itself (the Ray multi-host executor).
       max_concurrency: Number of threads that submit `sample()` calls to the
         engine.
-      raiden_sync_delegate: Raiden delegate to use instead of building one when
-        `config.weight_sync_mode` is RAIDEN.
+      raiden_sync_delegate: Destination delegate to use instead of building a
+        Raiden one; required when `config.weight_sync_mode` is FS or GCS.
     """
     self.server_id = server_id
     self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
@@ -114,14 +114,25 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
     self.weight_sync_mode = weight_sync.WeightSyncMode(
         self.config.weight_sync_mode
     )
+    # Raiden and FS/GCS both sync through the destination delegate; the FS/GCS
+    # one is model-family specific, so the caller injects it.
+    is_fs_mode = weight_sync.is_fs_weight_sync_mode(self.weight_sync_mode)
     self.enable_raiden = (
         self.weight_sync_mode == weight_sync.WeightSyncMode.RAIDEN
+        or is_fs_mode
     )
 
+    if is_fs_mode and raiden_sync_delegate is None:
+      raise ValueError(
+          f"weight_sync_mode={self.weight_sync_mode.value!r} requires an"
+          " injected raiden_sync_delegate that reads the family's canonical"
+          " HF safetensors."
+      )
     if self.enable_raiden and raiden_sync_delegate is None:
       logging.info(
-          "InprocessVllmSampler [%s] weight_sync: initializing Raiden delegate",
+          "InprocessVllmSampler [%s] weight_sync: initializing %s delegate",
           self.server_id,
+          self.weight_sync_mode.value,
       )
       raiden_sync_delegate = (
           raiden_weight_sync_delegate.RaidenWeightSyncDelegate(
@@ -260,6 +271,11 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
   def transformer_state(self) -> Any:
     """The underlying vLLM sampler's transformer state."""
     return self._require_vllm_sampler().transformer_state
+
+  @property
+  def model_runner(self) -> Any:
+    """The underlying vLLM sampler's model runner."""
+    return self._require_vllm_sampler().model_runner
 
   def update_params(
       self,
