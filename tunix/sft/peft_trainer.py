@@ -33,6 +33,8 @@ import numpy as np
 import optax
 from tunix.common import configs
 from tunix.common import datatypes
+from tunix.models import hf_mapping
+from tunix.models import safetensors_saver
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
@@ -1123,6 +1125,32 @@ class PeftTrainer:
     if self._pbar is not None:
       self._pbar.close()
       self._pbar = None
+
+  def export_safetensors(
+      self,
+      *,
+      to_hf_manifest: hf_mapping.RuleSpec,
+      output_dir: str | None = None,
+  ) -> safetensors_saver.SafetensorsSaveResult:
+    """Exports the full model weights at the current step as safetensors.
+
+    Export is independent of the Orbax async save and close lifecycle, so it
+    may be called after `train()` returns; it reads the current weights. See
+    `CheckpointManager.export_safetensors`; LoRA models are rejected.
+
+    Args:
+      to_hf_manifest: `hf_mapping` manifest to canonical HF tensor names.
+      output_dir: Destination; defaults to `<root>/safetensors/<step>`.
+
+    Returns:
+      The committed safetensors paths (commit marker last) and checksums.
+    """
+    return self.checkpoint_manager.export_safetensors(
+        self._train_steps,
+        self.model,
+        to_hf_manifest=to_hf_manifest,
+        output_dir=output_dir,
+    )
 
   def _run_eval(
       self,
