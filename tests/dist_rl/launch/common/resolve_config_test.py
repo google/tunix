@@ -1972,10 +1972,18 @@ class RetiredKeysTest(parameterized.TestCase):
       ),
       dict(
           testcase_name="key_with_one_legal_value",
+          override="vllm_config.server_mode=true",
+          message=(
+              "vllm_config.server_mode is no longer a config key: the vLLM"
+              " rollout engines always run in server mode"
+          ),
+      ),
+      dict(
+          testcase_name="key_derived_from_use_rollout_logps",
           override="rollout_config.return_logprobs=true",
           message=(
-              "rollout_config.return_logprobs is no longer a config key: the"
-              " rollout always returns logprobs"
+              "rollout_config.return_logprobs is no longer a config key:"
+              " derived from agentic_grpo_config.use_rollout_logps"
           ),
       ),
       dict(

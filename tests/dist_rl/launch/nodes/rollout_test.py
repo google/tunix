@@ -433,6 +433,18 @@ class RolloutConfigPlumbingTest(absltest.TestCase):
         ).overlong_filter
     )
 
+  def test_use_rollout_logps_controls_return_logprobs(self):
+    self.assertFalse(
+        _rollout_config(
+            "agentic_grpo_config.use_rollout_logps=false"
+        ).return_logprobs
+    )
+    self.assertTrue(
+        _rollout_config(
+            "agentic_grpo_config.use_rollout_logps=true"
+        ).return_logprobs
+    )
+
   def test_defaults_disable_top_k(self):
     config = _rollout_config()
     self.assertEqual(config.top_k, -1)

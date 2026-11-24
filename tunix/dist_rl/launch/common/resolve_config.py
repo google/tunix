@@ -126,7 +126,7 @@ _RETIRED_KEYS: Final[Mapping[str, str]] = types.MappingProxyType({
         " remove it"
     ),
     "rollout_config.return_logprobs": (
-        "the rollout always returns logprobs, so remove it"
+        "derived from agentic_grpo_config.use_rollout_logps, so remove it"
     ),
     "vllm_config.server_mode": (
         "the vLLM rollout engines always run in server mode, so remove it"
