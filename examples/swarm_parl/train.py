@@ -756,7 +756,14 @@ def main() -> int:
   args.run_root.mkdir(parents=True, exist_ok=True)
   stack = _boot_parl_stack(args)
   tok = stack["tokenizer"]
-  encode = lambda text: tok.encode(text, add_special_tokens=False)
+  max_p = int(args.max_prompt_length)
+
+  def encode(text: str) -> list[int]:
+    ids = tok.encode(text, add_special_tokens=False)
+    if len(ids) <= max_p:
+      return ids
+    head = max_p // 2
+    return ids[:head] + ids[-(max_p - head) :]
   train_pub, train_priv, eval_pub, eval_priv = parl_tasks.build_parl_splits(
       args.upstream_root,
       browsecomp_dir=args.browsecomp_dir,

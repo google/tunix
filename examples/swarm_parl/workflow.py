@@ -279,7 +279,7 @@ def parse_director_action(
   )
 
 
-def _fit_user_body(user: str, max_chars: int = 16000) -> str:
+def _fit_user_body(user: str, max_chars: int = 11000) -> str:
   if len(user) <= max_chars:
     return user
   head = max_chars // 2
