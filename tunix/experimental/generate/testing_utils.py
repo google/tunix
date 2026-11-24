@@ -73,6 +73,10 @@ class PagedSumTransformer(nnx.Module):
     """Returns the geometry of each configured KV cache."""
     return dict(self.geometries)
 
+  @property
+  def num_embed(self) -> int:
+    return VOCAB_SIZE
+
   def __call__(
       self, tokens, positions, cache, metadata, mesh, logits_idxs=None
   ):
@@ -202,6 +206,7 @@ def make_engine(
     max_top_k: int = 4,
     return_logprobs: bool = False,
     return_logits: bool = False,
+    max_logprobs: int = 0,
     eos_token_ids: frozenset[int] = frozenset(),
     max_num_seqs: int = 4,
     dp_mesh: jax.sharding.Mesh | None = None,
@@ -219,6 +224,7 @@ def make_engine(
     max_top_k: The largest `top_k` requests may use.
     return_logprobs: Whether requests return logprobs.
     return_logits: Whether requests return logits.
+    max_logprobs: The engine's `rollout_vanilla_v2_max_logprobs`.
     eos_token_ids: The tokens that finish a request.
     max_num_seqs: The sequence budget of each DP rank.
     dp_mesh: A mesh to split the KV caches into DP ranks over, one per device
@@ -230,6 +236,7 @@ def make_engine(
       eos_tokens=list(eos_token_ids),
       return_logprobs=return_logprobs,
       return_logits=return_logits,
+      rollout_vanilla_v2_max_logprobs=max_logprobs,
       rollout_vanilla_v2_kv_cache_page_size=PAGE_SIZE,
       rollout_vanilla_v2_host_size_gib=max_host_size_gib,
       rollout_vanilla_v2_max_num_seqs=max_num_seqs,
