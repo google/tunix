@@ -127,8 +127,18 @@ class _NominalTrainer(abstract_trainer.AbstractTrainer):
 
 
 @dataclasses.dataclass(frozen=True)
+class _HostWeightedMetric:
+  """Host wire `WeightedMetricLike` double."""
+
+  unreduced_sum: float
+  denominator: float
+  eps: float | None = None
+  min_denom: float | None = None
+
+
+@dataclasses.dataclass(frozen=True)
 class _StructuralWeightedMetric:
-  """Non-NumPy `WeightedMetricLike` double mirroring on-device metrics."""
+  """Non-NumPy `TrainerWeightedMetricLike` double for on-device metrics."""
 
   unreduced_sum: common_test_utils.CustomTensor
   denominator: common_test_utils.CustomTensor
@@ -365,8 +375,8 @@ class AbstractTrainerTest(absltest.TestCase):
     )
     self.assertIs(_accept_trainer(engine), engine)
     self.assertIsInstance(engine, abstract_trainer.AbstractTrainer)
-    metrics_buf: datatypes.MetricsBufferLike = engine.get_metrics()
-    self.assertIsInstance(metrics_buf, datatypes.MetricsBufferLike)
+    metrics_buf: abstract_trainer.MetricsBufferLike = engine.get_metrics()
+    self.assertIsInstance(metrics_buf, abstract_trainer.MetricsBufferLike)
     self.assertAlmostEqual(
         float(np.asarray(metrics_buf.weighted_metrics["kl"].unreduced_sum)),
         3.0,
@@ -419,6 +429,61 @@ class AbstractTrainerTest(absltest.TestCase):
     self.assertNotIsInstance(
         _StructuralWithoutReleaseWeightSync(), abstract_trainer.AbstractTrainer
     )
+
+  def test_metrics_buffer_like_conformance_and_rejection(self):
+    host_metric = _HostWeightedMetric(
+        unreduced_sum=3.0, denominator=2.0, eps=1e-8
+    )
+    wire_metric: datatypes.WeightedMetricLike = host_metric
+    trainer_from_wire: abstract_trainer.TrainerWeightedMetricLike = wire_metric
+    self.assertEqual(trainer_from_wire.unreduced_sum, 3.0)
+    self.assertEqual(trainer_from_wire.denominator, 2.0)
+    self.assertEqual(trainer_from_wire.eps, 1e-8)
+
+    device_metric = _StructuralWeightedMetric(
+        unreduced_sum=common_test_utils.CustomTensor(np.array(4.0)),
+        denominator=common_test_utils.CustomTensor(np.array(2.0)),
+        eps=1e-6,
+    )
+    trainer_from_device: abstract_trainer.TrainerWeightedMetricLike = (
+        device_metric
+    )
+    self.assertAlmostEqual(
+        float(np.asarray(trainer_from_device.unreduced_sum)), 4.0
+    )
+    self.assertEqual(trainer_from_device.eps, 1e-6)
+
+    host_buf: abstract_trainer.MetricsBufferLike = datatypes.MetricsBuffer(
+        id=1,
+        weighted_metrics={"kl": host_metric},
+        scalar_metrics={"loss": np.float32(0.5)},
+        aggregation_fns={"loss": np.mean},
+    )
+    self.assertIsInstance(host_buf, abstract_trainer.MetricsBufferLike)
+    self.assertAlmostEqual(
+        float(
+            host_buf.aggregation_fns["loss"](host_buf.scalar_metrics["loss"])
+        ),
+        0.5,
+    )
+
+    device_buf: abstract_trainer.MetricsBufferLike = _StructuralMetricsBuffer(
+        id="step-1",
+        weighted_metrics={"kl": device_metric},
+        scalar_metrics={
+            "loss": common_test_utils.CustomTensor(np.array(0.25))
+        },
+        aggregation_fns={"loss": lambda arr: float(np.asarray(arr))},
+    )
+    self.assertIsInstance(device_buf, abstract_trainer.MetricsBufferLike)
+    self.assertAlmostEqual(
+        device_buf.aggregation_fns["loss"](device_buf.scalar_metrics["loss"]),
+        0.25,
+    )
+
+    self.assertNotIsInstance({}, abstract_trainer.MetricsBufferLike)
+    self.assertNotIsInstance({"id": 1}, abstract_trainer.MetricsBufferLike)
+    self.assertNotIsInstance(object(), abstract_trainer.MetricsBufferLike)
 
   def test_resolve_dummy_routed_experts_passthrough_cases(self):
     trainer = _NominalTrainer()
