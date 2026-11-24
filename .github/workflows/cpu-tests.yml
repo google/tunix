@@ -183,8 +183,10 @@ jobs:
           # Cap at -n 2 to stay within the 16 GB runner RAM budget (~14 GB peak RSS vs ~21.8 GB at -n 4).
           python -m pytest tests/models/ -n 2 --dist loadscope -v --tb=short \
             --ignore=tests/models/naming_test.py \
-            --ignore=tests/models/paged_attention_test.py
+            --ignore=tests/models/paged_attention_test.py \
+            --ignore=tests/models/safetensors_saver_test.py
           python -m pytest tests/models/paged_attention_test.py -n 2 --dist load -v --tb=short
+          python -m pytest tests/models/safetensors_saver_test.py -v --tb=short
 
       - name: Compile gRPC Protobuf definitions
         if: ${{ !inputs.wheel_only && (matrix.shard == 'dist_rl' || matrix.shard == 'experimental') }}

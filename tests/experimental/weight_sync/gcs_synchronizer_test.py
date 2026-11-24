@@ -17,8 +17,12 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 import dataclasses
+import json
+import multiprocessing as mp
 import os
+import socket
 from typing import Any
 from unittest import mock
 
@@ -28,14 +32,105 @@ from etils import epath
 from flax import nnx
 import jax
 import jax.numpy as jnp
+import ml_dtypes
 import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.weight_sync import weight_sync
 from tunix.experimental.weight_sync import gcs_synchronizer
+from tunix.models import hf_mapping
+from tunix.models import safetensors_loader
+from tunix.models import safetensors_saver
+from tunix.models.qwen3 import model as qwen3_model
+from tunix.models.qwen3 import params as qwen3_params
 from tunix.tests import test_common
 
 os.environ.setdefault("XLA_FLAGS", "--xla_force_host_platform_device_count=4")
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
+
+
+def _free_port() -> int:
+  with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    sock.bind(("127.0.0.1", 0))
+    return int(sock.getsockname()[1])
+
+
+def _multihost_safetensors_worker(
+    proc_id: int,
+    port: int,
+    staging_dir: str,
+    out_q: Any,
+) -> None:
+  """Runs 2-process `jax.distributed` safetensors `d2h` + `h2d` round-trip."""
+  os.environ.pop("CLOUDSDK_CONTEXT_AWARE_USE_ECP_HTTP_PROXY", None)
+  os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=2"
+  os.environ["JAX_PLATFORMS"] = "cpu"
+  jax.distributed.initialize(
+      f"127.0.0.1:{port}", num_processes=2, process_id=proc_id
+  )
+  try:
+    fsdp_mesh = jax.sharding.Mesh(np.array(jax.devices()), ("fsdp",))
+    tp_mesh = jax.sharding.Mesh(np.array(jax.devices()), ("tp",))
+    fsdp_sharding = jax.sharding.NamedSharding(
+        fsdp_mesh, jax.sharding.PartitionSpec("fsdp", None)
+    )
+    tp_sharding = jax.sharding.NamedSharding(
+        tp_mesh, jax.sharding.PartitionSpec(None, "tp")
+    )
+    src_global = np.arange(16, dtype=ml_dtypes.bfloat16).reshape(4, 4)
+    dst_global = np.zeros((4, 4), dtype=ml_dtypes.bfloat16)
+    src_arr = jax.make_array_from_callback(
+        src_global.shape, fsdp_sharding, lambda idx: src_global[idx]
+    )
+    dst_arr = jax.make_array_from_callback(
+        dst_global.shape, tp_sharding, lambda idx: dst_global[idx]
+    )
+
+    manifest = {
+        "schema_version": hf_mapping.SCHEMA_VERSION,
+        "rules": [{
+            "source_keys": ["layers.0.w"],
+            "target_keys": ["model.layers.0.weight"],
+            "ops": [{"transpose": {"axes": [1, 0]}}],
+        }],
+        "tied_keys": [],
+        "dropped_keys": [],
+    }
+    inv_manifest = hf_mapping.invert_manifest(manifest)
+
+    src_sync = gcs_synchronizer.GCSSynchronizer(
+        job_name="trainer",
+        config=gcs_synchronizer.GCSSynchronizerConfig(staging_dir=staging_dir),
+        verify_weights=True,
+        to_hf_manifest=manifest,
+    )
+    dst_sync = gcs_synchronizer.GCSSynchronizer(
+        job_name="rollout",
+        verify_weights=True,
+        from_hf_manifest=inv_manifest,
+    )
+    src_sync.bind({"layers.0.w": src_arr})
+    runner = _FlatDictRunner({"layers.0.w": dst_arr})
+    dst_sync.bind(runner.state)
+
+    req = datatypes.WeightSyncRequest(
+        policy_version=3, extra_config={"req_id": "mh", "uuid": 3}
+    )
+    src_sync.d2h(req)
+    dst_sync.h2d(
+        datatypes.WeightSyncRequest(
+            policy_version=3,
+            source_metadata=(src_sync.work_unit_metadata(),),
+            extra_config={"req_id": "mh", "uuid": 3},
+        )
+    )
+    dst_sync.apply_to_runner(runner)
+    local_shards = [
+        (s.index, np.asarray(s.data).astype(np.float32).tolist())
+        for s in runner.state["layers.0.w"].addressable_shards
+    ]
+    out_q.put((proc_id, len(local_shards), local_shards[0][1]))
+  finally:
+    jax.distributed.shutdown()
 
 
 def _shard_toy_model(
@@ -84,6 +179,13 @@ class _FlatDictRunner:
     self.state_leaves: dict[str, jax.Array] = state
 
 
+class _FakeSampler:
+
+  def __init__(self, state: nnx.State) -> None:
+    self.model_runner: Any = None
+    self.transformer_state: nnx.State = state
+
+
 class _FakeTPUWorker:
 
   def __init__(self, runner: _NnxRunner, rank: int = 0) -> None:
@@ -97,15 +199,98 @@ class _FakeTPUWorker:
     self.model_runner.refresh_state_leaves()
 
 
+_WIRE_VOCAB, _WIRE_DIM, _WIRE_FFN = 8, 4, 6
+_WIRE_EMBED = "model.embed_tokens.weight"
+_WIRE_DOWN = "model.layers.0.mlp.down_proj.weight"
+_TRANSPOSE = ({"transpose": {"axes": [1, 0]}},)
+
+
+def _wire_rule(src: str, dst: str, ops: Sequence[Any]) -> dict[str, Any]:
+  return {"source_keys": [src], "target_keys": [dst], "ops": list(ops)}
+
+
+def _wire_trainer(
+    staging_dir: str, tied: bool, *, verify_weights: bool = False
+) -> gcs_synchronizer.GCSSynchronizer:
+  """Binds a Tunix-native trainer whose `to_hf_manifest` writes HF names."""
+  embedding = np.arange(_WIRE_VOCAB * _WIRE_DIM, dtype=np.float32)
+  rules = [
+      _wire_rule(_WIRE_EMBED, "embedder.input_embedding", ()),
+      _wire_rule(_WIRE_DOWN, "layers.0.mlp.down_proj.kernel", _TRANSPOSE),
+  ]
+  state = {
+      "embedder.input_embedding": embedding.reshape(_WIRE_VOCAB, _WIRE_DIM),
+      "layers.0.mlp.down_proj.kernel": np.ones(
+          (_WIRE_FFN, _WIRE_DIM), np.float32
+      ),
+  }
+  if not tied:
+    rules.append(_wire_rule("lm_head.weight", "lm_head.w", _TRANSPOSE))
+    state["lm_head.w"] = state["embedder.input_embedding"].T.copy()
+  from_hf = {
+      "rules": rules,
+      "dropped_keys": ["lm_head.weight"] if tied else [],
+  }
+  sync = gcs_synchronizer.GCSSynchronizer(
+      job_name="trainer",
+      config=gcs_synchronizer.GCSSynchronizerConfig(staging_dir=staging_dir),
+      verify_weights=verify_weights,
+      to_hf_manifest=hf_mapping.invert_manifest(from_hf),
+  )
+  sync.bind({k: jax.device_put(v) for k, v in state.items()})
+  return sync
+
+
+def _wire_rollout(
+    tied: bool, *, verify_weights: bool = False
+) -> tuple[gcs_synchronizer.GCSSynchronizer, _FlatDictRunner]:
+  """Binds a vLLM-like reader; tied readers fan `lm_head` out of the embed."""
+  head_src = _WIRE_EMBED if tied else "lm_head.weight"
+  sync = gcs_synchronizer.GCSSynchronizer(
+      job_name="rollout",
+      verify_weights=verify_weights,
+      from_hf_manifest={
+          "rules": [
+              _wire_rule(_WIRE_EMBED, "embed_tokens.weight", ()),
+              _wire_rule(head_src, "lm_head.weight", _TRANSPOSE),
+              _wire_rule(
+                  _WIRE_DOWN, "layers.0.mlp.down_proj.weight", _TRANSPOSE
+              ),
+          ]
+      },
+  )
+  runner = _FlatDictRunner({
+      "embed_tokens.weight": jnp.zeros((_WIRE_VOCAB, _WIRE_DIM)),
+      "lm_head.weight": jnp.zeros((_WIRE_DIM, _WIRE_VOCAB)),
+      "layers.0.mlp.down_proj.weight": jnp.zeros((_WIRE_FFN, _WIRE_DIM)),
+  })
+  sync.bind(runner.state)
+  return sync, runner
+
+
 class GCSSynchronizerTest(absltest.TestCase):
 
   def test_config_validation_env_default_and_cleanup_on_start(self):
+    self.assertEqual(
+        gcs_synchronizer.GCSSynchronizerConfig().checkpoint_format,
+        "safetensors",
+    )
     with self.assertRaisesRegex(ValueError, "staging_dir must not be empty"):
       gcs_synchronizer.GCSSynchronizerConfig(staging_dir="   ")
     with self.assertRaisesRegex(ValueError, "max_to_keep"):
       gcs_synchronizer.GCSSynchronizerConfig(max_to_keep=-1)
     with self.assertRaisesRegex(ValueError, "max_to_keep"):
       gcs_synchronizer.GCSSynchronizerConfig(max_to_keep=True)
+    with self.assertRaisesRegex(ValueError, "checkpoint_format"):
+      gcs_synchronizer.GCSSynchronizerConfig(checkpoint_format="npz")
+    with self.assertRaisesRegex(ValueError, "max_shard_bytes"):
+      gcs_synchronizer.GCSSynchronizerConfig(max_shard_bytes=0)
+    self.assertEqual(
+        gcs_synchronizer.GCSSynchronizerConfig(
+            max_shard_bytes=(5 << 30)
+        ).max_shard_bytes,
+        5 << 30,
+    )
     with self.assertRaisesRegex(ValueError, "save_concurrent_gb"):
       gcs_synchronizer.GCSSynchronizerConfig(save_concurrent_gb=0)
     with self.assertRaisesRegex(ValueError, "cleanup_on_start=True requires"):
@@ -114,17 +299,12 @@ class GCSSynchronizerTest(absltest.TestCase):
     staging = epath.Path(self.create_tempdir().full_path)
     (staging / "step_0_stale").mkdir()
     (staging / "keep_marker.txt").write_text("ok")
-    prev_env = os.environ.get("WEIGHT_SYNC_GCS_DIR")
-    os.environ["WEIGHT_SYNC_GCS_DIR"] = str(staging)
-    try:
-      cfg = gcs_synchronizer.GCSSynchronizerConfig(cleanup_on_start=True)
-      self.assertEqual(cfg.staging_dir, str(staging))
-      gcs_synchronizer.GCSSynchronizer(job_name="trainer", config=cfg)
-    finally:
-      if prev_env is None:
-        os.environ.pop("WEIGHT_SYNC_GCS_DIR", None)
-      else:
-        os.environ["WEIGHT_SYNC_GCS_DIR"] = prev_env
+    cfg = gcs_synchronizer.GCSSynchronizerConfig(
+        staging_dir=str(staging), cleanup_on_start=True
+    )
+    sync = gcs_synchronizer.GCSSynchronizer(job_name="trainer", config=cfg)
+    self.assertFalse(sync.bound)
+    self.assertFalse(sync.active)
     self.assertFalse((staging / "step_0_stale").exists())
     self.assertTrue((staging / "keep_marker.txt").exists())
 
@@ -134,9 +314,7 @@ class GCSSynchronizerTest(absltest.TestCase):
         artifact_uri="gs://bucket/step_1_r1",
         checksums={"w": 2.0, "__grand_total__": 2.0, "__tensor_count__": 1},
     )
-    req = datatypes.WeightSyncRequest(
-        policy_version=1, source_metadata=(meta,)
-    )
+    req = datatypes.WeightSyncRequest(policy_version=1, source_metadata=(meta,))
     uri, sums = gcs_synchronizer.extract_source_artifact(req)
     self.assertEqual(uri, "gs://bucket/step_1_r1")
     assert sums is not None
@@ -176,8 +354,8 @@ class GCSSynchronizerTest(absltest.TestCase):
         "tp",
         col_major=True,
     )
-    src_model.emb.embedding.value = (
-        jnp.ones_like(src_model.emb.embedding.value) * 3.5
+    src_model.emb.embedding.set_value(
+        jnp.ones_like(src_model.emb.embedding.get_value()) * 3.5
     )
 
     staging = self.create_tempdir().full_path
@@ -190,8 +368,11 @@ class GCSSynchronizerTest(absltest.TestCase):
         job_name="rollout", verify_weights=True
     )
     src_sync.bind(nnx.state(src_model))
+    self.assertTrue(src_sync.bound)
+    self.assertTrue(src_sync.active)
+    self.assertLen(src_sync.work_unit_metadata_all(), 1)
     dst_runner = _NnxRunner(nnx.state(dst_model))
-    old_emb_buf = dst_model.emb.embedding.value
+    old_emb_buf = dst_model.emb.embedding.get_value()
     dst_sync.bind(dst_runner.state)
 
     req = datatypes.WeightSyncRequest(
@@ -199,6 +380,10 @@ class GCSSynchronizerTest(absltest.TestCase):
     )
     src_sync.d2h(req)
     src_meta = src_sync.work_unit_metadata()
+    assert src_meta.artifact_uri is not None
+    self.assertTrue(
+        (epath.Path(src_meta.artifact_uri) / "model.safetensors").exists()
+    )
 
     dst_sync.h2d(
         datatypes.WeightSyncRequest(
@@ -211,12 +396,265 @@ class GCSSynchronizerTest(absltest.TestCase):
     dst_sync.apply_to_runner(dst_runner)
     self.assertTrue(old_emb_buf.is_deleted())
     self.assertEqual(
-        dst_model.emb.embedding.value.sharding.mesh.axis_names, ("tp",)
+        dst_model.emb.embedding.get_value().sharding.mesh.axis_names, ("tp",)
     )
     np.testing.assert_allclose(
-        np.asarray(dst_model.emb.embedding.value),
-        np.asarray(src_model.emb.embedding.value),
+        np.asarray(dst_model.emb.embedding.get_value()),
+        np.asarray(src_model.emb.embedding.get_value()),
     )
+
+  def test_work_unit_metadata_pairs_tied_and_untied_peers_on_wire(self):
+    def trainer(tied: bool) -> gcs_synchronizer.GCSSynchronizer:
+      return _wire_trainer(self.create_tempdir().full_path, tied)
+
+    def wire(sync: gcs_synchronizer.GCSSynchronizer) -> dict[str, Any]:
+      return {
+          v.name: (v.shape, v.item_size)
+          for v in sync.work_unit_metadata().variables
+      }
+
+    for tied in (True, False):
+      with self.subTest(tied=tied):
+        src_wire = wire(trainer(tied))
+        self.assertEqual(src_wire, wire(_wire_rollout(tied)[0]))
+        self.assertEqual("lm_head.weight" in src_wire, not tied)
+        self.assertEqual(src_wire[_WIRE_EMBED], ((_WIRE_VOCAB, _WIRE_DIM), 4))
+
+    # A tied reader materializes `lm_head` from the one wire embedding and
+    # ignores a redundant wire `lm_head` (HF checkpoints ship both forms).
+    for src_tied in (True, False):
+      with self.subTest(src_tied=src_tied):
+        src, (dst, runner) = trainer(src_tied), _wire_rollout(tied=True)
+        src.d2h(
+            datatypes.WeightSyncRequest(
+                policy_version=1, extra_config={"req_id": "tie", "uuid": 1}
+            )
+        )
+        dst.h2d(checkpoint_path=src.work_unit_metadata().artifact_uri)
+        dst.apply_to_runner(runner)
+        out = runner.state
+        np.testing.assert_array_equal(
+            out["lm_head.weight"], np.asarray(out["embed_tokens.weight"]).T
+        )
+        np.testing.assert_array_equal(
+            out["embed_tokens.weight"],
+            np.arange(_WIRE_VOCAB * _WIRE_DIM, dtype=np.float32).reshape(
+                _WIRE_VOCAB, _WIRE_DIM
+            ),
+        )
+
+  def test_manifest_verify_weights_checksums_wire_namespace(self):
+    req = datatypes.WeightSyncRequest(
+        policy_version=1, extra_config={"req_id": "wire", "uuid": 1}
+    )
+
+    def staged(tied: bool) -> weight_sync.WorkUnitMetadata:
+      src = _wire_trainer(
+          self.create_tempdir().full_path, tied, verify_weights=True
+      )
+      src.d2h(req)
+      return src.work_unit_metadata()
+
+    # Tunix-native and vLLM-native names (and tied tensor counts) differ, so
+    # both peers must checksum exactly the HF tensors that cross the wire.
+    for tied in (True, False):
+      with self.subTest(tied=tied):
+        meta = staged(tied)
+        assert meta.checksums is not None
+        self.assertEqual(meta.checksums["__tensor_count__"], 2 if tied else 3)
+        dst, runner = _wire_rollout(tied, verify_weights=True)
+        dst.h2d(
+            datatypes.WeightSyncRequest(
+                policy_version=1, source_metadata=(meta,)
+            )
+        )
+        dst.apply_to_runner(runner)
+        np.testing.assert_array_equal(
+            runner.state["lm_head.weight"],
+            np.asarray(runner.state["embed_tokens.weight"]).T,
+        )
+
+    meta = staged(tied=True)
+    assert meta.artifact_uri is not None
+    corrupt = np.arange(_WIRE_VOCAB * _WIRE_DIM, dtype=np.float32) + 1.0
+    safetensors_saver.save_safetensors(
+        {
+            _WIRE_EMBED: corrupt.reshape(_WIRE_VOCAB, _WIRE_DIM),
+            _WIRE_DOWN: np.ones((_WIRE_DIM, _WIRE_FFN), np.float32),
+        },
+        meta.artifact_uri,
+    )
+    dst, runner = _wire_rollout(tied=True, verify_weights=True)
+    with self.assertRaisesRegex(RuntimeError, "Weight checksum"):
+      dst.h2d(
+          datatypes.WeightSyncRequest(policy_version=1, source_metadata=(meta,))
+      )
+    np.testing.assert_array_equal(runner.state["lm_head.weight"], 0.0)
+
+  def test_sharded_safetensors_qwen3_manifest_and_orbax_autodetect(self):
+    qcfg = qwen3_model.ModelConfig(
+        num_layers=1,
+        vocab_size=32,
+        embed_dim=16,
+        hidden_dim=32,
+        num_heads=2,
+        head_dim=8,
+        num_kv_heads=2,
+        norm_eps=1e-6,
+        rope_theta=10000,
+    )
+    src_model = qwen3_model.Qwen3(qcfg, rngs=nnx.Rngs(0))
+    dst_model = qwen3_model.Qwen3(qcfg, rngs=nnx.Rngs(9))
+    to_hf = qwen3_params.build_to_hf_manifest(qcfg)
+    from_hf = qwen3_params.build_from_hf_manifest(qcfg)
+
+    staging = self.create_tempdir().full_path
+    src_sync = gcs_synchronizer.GCSSynchronizer(
+        job_name="trainer",
+        config=gcs_synchronizer.GCSSynchronizerConfig(
+            staging_dir=staging,
+            max_shard_bytes=512,
+        ),
+        verify_weights=True,
+        to_hf_manifest=to_hf,
+    )
+    dst_sync = gcs_synchronizer.GCSSynchronizer(
+        job_name="rollout",
+        verify_weights=True,
+        from_hf_manifest=from_hf,
+    )
+    src_sync.bind(nnx.state(src_model))
+    sampler = _FakeSampler(nnx.state(dst_model))
+    dst_sync.bind(sampler.transformer_state)
+
+    req = datatypes.WeightSyncRequest(
+        policy_version=1, extra_config={"req_id": "qwen", "uuid": 1}
+    )
+    src_sync.d2h(req)
+    meta = src_sync.work_unit_metadata()
+    assert meta.artifact_uri is not None
+    ckpt_dir = epath.Path(meta.artifact_uri)
+    index_data = json.loads(
+        (ckpt_dir / "model.safetensors.index.json").read_text()
+    )
+    self.assertGreater(len(set(index_data["weight_map"].values())), 1)
+    self.assertIn("model.embed_tokens.weight", index_data["weight_map"])
+
+    dst_sync.h2d(
+        datatypes.WeightSyncRequest(policy_version=1, source_metadata=(meta,))
+    )
+    dst_sync.apply_to_sampler(sampler)
+    src_flat = safetensors_loader.flatten_model_state(src_model)
+    dst_flat = safetensors_loader.flatten_model_state(dst_model)
+    for k, src_val in src_flat.items():
+      np.testing.assert_allclose(np.asarray(dst_flat[k]), np.asarray(src_val))
+
+    # Verify Orbax checkpoint auto-detection even when receiver defaults to ST.
+    orbax_dir = self.create_tempdir().full_path
+    orbax_src = gcs_synchronizer.GCSSynchronizer(
+        job_name="trainer_orbax",
+        config=gcs_synchronizer.GCSSynchronizerConfig(
+            staging_dir=orbax_dir,
+            checkpoint_format="orbax",
+        ),
+        verify_weights=True,
+    )
+    orbax_dst = gcs_synchronizer.GCSSynchronizer(
+        job_name="rollout_auto", verify_weights=True
+    )
+    w_src = jax.device_put(np.full((4, 4), 5.0, dtype=np.float32))
+    w_dst = jax.device_put(np.zeros((4, 4), dtype=np.float32))
+    orbax_src.bind({"layers.0.w": w_src})
+    runner = _FlatDictRunner({"layers.0.w": w_dst})
+    orbax_dst.bind(runner.state)
+    orbax_src.d2h(req)
+    orbax_dst.h2d(
+        datatypes.WeightSyncRequest(
+            policy_version=1,
+            source_metadata=(orbax_src.work_unit_metadata(),),
+        )
+    )
+    orbax_dst.apply_to_runner(runner)
+    np.testing.assert_allclose(np.asarray(runner.state["layers.0.w"]), 5.0)
+
+  def test_tied_keys_manifest_checksum_conservation_and_multihost(self):
+    tied_to_hf = {
+        "schema_version": hf_mapping.SCHEMA_VERSION,
+        "rules": [],
+        "tied_keys": [["embed.w", "lm_head.w"]],
+        "dropped_keys": [],
+    }
+    tied_from_hf = {
+        "schema_version": hf_mapping.SCHEMA_VERSION,
+        "rules": [],
+        "tied_keys": [["embed.w", "lm_head.w"]],
+        "dropped_keys": [],
+    }
+    emb = jax.device_put(np.arange(8, dtype=ml_dtypes.bfloat16).reshape(4, 2))
+    src_sync = gcs_synchronizer.GCSSynchronizer(
+        job_name="trainer",
+        config=gcs_synchronizer.GCSSynchronizerConfig(
+            staging_dir=self.create_tempdir().full_path
+        ),
+        verify_weights=True,
+        to_hf_manifest=tied_to_hf,
+    )
+    dst_sync = gcs_synchronizer.GCSSynchronizer(
+        job_name="rollout",
+        verify_weights=True,
+        from_hf_manifest=tied_from_hf,
+    )
+    src_sync.bind({"embed.w": emb, "lm_head.w": emb})
+    runner = _FlatDictRunner({
+        "embed.w": jax.device_put(np.zeros((4, 2), dtype=ml_dtypes.bfloat16)),
+        "lm_head.w": jax.device_put(np.zeros((4, 2), dtype=ml_dtypes.bfloat16)),
+    })
+    dst_sync.bind(runner.state)
+    req = datatypes.WeightSyncRequest(
+        policy_version=1, extra_config={"req_id": "tied", "uuid": 1}
+    )
+    src_sync.d2h(req)
+    meta = src_sync.work_unit_metadata()
+    assert meta.artifact_uri is not None
+    self.assertEqual(
+        safetensors_loader.read_checkpoint_keys(meta.artifact_uri),
+        frozenset({"embed.w"}),
+    )
+    # Both peers advertise exactly the written tensors; tied targets are
+    # derived, never on the wire.
+    self.assertEqual([v.name for v in meta.variables], ["embed.w"])
+    self.assertEqual(
+        [v.name for v in dst_sync.work_unit_metadata().variables], ["embed.w"]
+    )
+    dst_sync.h2d(
+        datatypes.WeightSyncRequest(policy_version=1, source_metadata=(meta,))
+    )
+    dst_sync.apply_to_runner(runner)
+    np.testing.assert_array_equal(
+        np.asarray(runner.state["lm_head.w"]), np.asarray(emb)
+    )
+
+    # 2-process jax.distributed safetensors d2h (allgather) -> h2d (broadcast).
+    ctx = mp.get_context("spawn")
+    port = _free_port()
+    out_q = ctx.Queue()
+    mh_dir = self.create_tempdir().full_path
+    procs = [
+        ctx.Process(
+            target=_multihost_safetensors_worker,
+            args=(idx, port, mh_dir, out_q),
+        )
+        for idx in range(2)
+    ]
+    for proc in procs:
+      proc.start()
+    for proc in procs:
+      proc.join(timeout=30)
+      self.assertEqual(proc.exitcode, 0)
+    mh_results = sorted([out_q.get(), out_q.get()])
+    self.assertEqual(mh_results[0][0], 0)
+    self.assertEqual(mh_results[1][0], 1)
+    self.assertEqual(mh_results[0][2], [[0.0], [4.0], [8.0], [12.0]])
 
   def test_flat_dict_runner_checksum_rollback_and_retention(self):
     staging = self.create_tempdir().full_path
@@ -240,6 +678,7 @@ class GCSSynchronizerTest(absltest.TestCase):
     req1 = datatypes.WeightSyncRequest(
         policy_version=1, extra_config={"req_id": "r1", "uuid": 1}
     )
+    src_sync.d2h(req1)
     src_sync.d2h(req1)
     src_meta = src_sync.work_unit_metadata()
     assert src_meta.checksums is not None
@@ -296,8 +735,8 @@ class GCSSynchronizerTest(absltest.TestCase):
     src_model(
         jnp.zeros((1, 4), dtype=jnp.int32), jnp.zeros((1, 4), dtype=jnp.int32)
     )
-    src_model.emb.embedding.value = (
-        jnp.ones_like(src_model.emb.embedding.value) * 9.0
+    src_model.emb.embedding.set_value(
+        jnp.ones_like(src_model.emb.embedding.get_value()) * 9.0
     )
     staging = self.create_tempdir().full_path
     src_sync = gcs_synchronizer.GCSSynchronizer(
@@ -326,33 +765,325 @@ class GCSSynchronizerTest(absltest.TestCase):
     with self.assertRaisesRegex(RuntimeError, "bind_gcs_sync must run before"):
       gcs_synchronizer.tpu_worker_get_gcs_metadata(worker)
 
-    meta_dict = gcs_synchronizer.tpu_worker_bind_gcs_sync(worker)
+    identity_manifest = {
+        "schema_version": hf_mapping.SCHEMA_VERSION,
+        "rules": [],
+        "tied_keys": [],
+        "dropped_keys": [],
+    }
+    self.assertEqual(
+        gcs_synchronizer.GCSSynchronizer("unbound").checksums()[
+            "__tensor_count__"
+        ],
+        0,
+    )
+    with mock.patch.dict(os.environ, {"VERIFY_WEIGHTS": "true"}):
+      meta_dict = gcs_synchronizer.tpu_worker_bind_gcs_sync(
+          worker, from_hf_manifest=identity_manifest
+      )
     self.assertEqual(meta_dict["transport_mode"], "gcs")
     rebound_cfg = gcs_synchronizer.GCSSynchronizerConfig(max_to_keep=3)
     rebound_meta = gcs_synchronizer.tpu_worker_bind_gcs_sync(
-        worker, job_name="rollout_rebound", config=rebound_cfg
+        worker,
+        job_name="rollout_rebound",
+        config=rebound_cfg,
+        from_hf_manifest=identity_manifest,
     )
     self.assertEqual(rebound_meta["unit"]["job_name"], "rollout_rebound")
     self.assertEqual(
         gcs_synchronizer.require_gcs_worker_sync(worker, "test").config,
         rebound_cfg,
     )
+    with self.assertRaisesRegex(ValueError, "Manifest must be a mapping"):
+      gcs_synchronizer.tpu_worker_bind_gcs_sync(
+          worker, job_name="bad_rebind", from_hf_manifest="{}"
+      )
+    self.assertEqual(
+        gcs_synchronizer.require_gcs_worker_sync(worker, "test").job_name,
+        "rollout_rebound",
+    )
     self.assertEqual(
         gcs_synchronizer.tpu_worker_get_gcs_metadata(worker)["transport_mode"],
         "gcs",
     )
 
-    async def _run_h2d() -> None:
-      gcs_synchronizer.tpu_worker_gcs_h2d(worker, ckpt_uri)
+    async def _run_h2d() -> dict[str, float | int]:
+      return gcs_synchronizer.tpu_worker_gcs_h2d(worker, ckpt_uri)
 
+    first_sums = asyncio.run(_run_h2d())
+    self.assertGreater(first_sums["__tensor_count__"], 0)
+    gcs_synchronizer.tpu_worker_gcs_abort(worker)
     asyncio.run(_run_h2d())
     gcs_synchronizer.tpu_worker_gcs_commit(worker)
     np.testing.assert_allclose(
-        np.asarray(dst_model.emb.embedding.value), 9.0
+        np.asarray(dst_model.emb.embedding.get_value()), 9.0
     )
     self.assertEqual(
-        gcs_synchronizer.tpu_worker_gcs_metrics(worker)["h2d_count"], 1
+        gcs_synchronizer.tpu_worker_gcs_metrics(worker)["h2d_count"], 2
     )
+
+  def test_safetensors_h2d_error_diagnostics(self):
+    staging = self.create_tempdir().full_path
+    src_sync = gcs_synchronizer.GCSSynchronizer(
+        job_name="trainer",
+        config=gcs_synchronizer.GCSSynchronizerConfig(staging_dir=staging),
+    )
+    src_sync.bind({"layers.0.w": jax.device_put(np.ones((2, 2), np.float32))})
+    src_sync.d2h(
+        datatypes.WeightSyncRequest(
+            policy_version=1, extra_config={"req_id": "diag", "uuid": 1}
+        )
+    )
+    ckpt_uri = src_sync.work_unit_metadata().artifact_uri
+    assert ckpt_uri is not None
+
+    empty_dir = self.create_tempdir().full_path
+    dst_missing = gcs_synchronizer.GCSSynchronizer(job_name="rollout")
+    dst_missing.bind({
+        "layers.0.w": jax.device_put(np.zeros((2, 2), np.float32)),
+        "layers.1.w": jax.device_put(np.zeros((2, 2), np.float32)),
+    })
+    with self.assertRaisesRegex(
+        FileNotFoundError, "No finalized safetensors or Orbax checkpoint"
+    ):
+      dst_missing.h2d(checkpoint_path=empty_dir)
+    with self.assertRaisesRegex(KeyError, "Missing 1 weight tensor"):
+      dst_missing.h2d(checkpoint_path=ckpt_uri)
+
+    # Uncommitted shard without index.json or model.safetensors must fail.
+    uncommitted_dir = epath.Path(self.create_tempdir().full_path)
+    (uncommitted_dir / "model-00001-of-00002.safetensors").write_bytes(b"")
+    with self.assertRaisesRegex(
+        FileNotFoundError, "No finalized safetensors or Orbax checkpoint"
+    ):
+      dst_missing.h2d(checkpoint_path=str(uncommitted_dir))
+
+    # Staging `.tmp` directories are rejected even if a marker file exists.
+    tmp_dir = epath.Path(self.create_tempdir().full_path) / "step_1.tmp"
+    tmp_dir.mkdir()
+    (tmp_dir / "model.safetensors").write_bytes(b"")
+    with self.assertRaisesRegex(FileNotFoundError, "not finalized"):
+      dst_missing.h2d(checkpoint_path=str(tmp_dir))
+
+    # Index missing `weight_map` or pointing outside `ckpt_path` must fail.
+    bad_idx_dir = epath.Path(self.create_tempdir().full_path)
+    (bad_idx_dir / "model.safetensors.index.json").write_text('{"metadata":{}}')
+    with self.assertRaisesRegex(ValueError, "weight_map"):
+      dst_missing.h2d(checkpoint_path=str(bad_idx_dir))
+
+    for bad_shard in (
+        "../escape.safetensors",
+        "/tmp/abs.safetensors",
+        "sub/shard.safetensors",
+        r"..\escape.safetensors",
+        "",
+    ):
+      with self.subTest(bad_shard=bad_shard):
+        (bad_idx_dir / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": {"layers.0.w": bad_shard}})
+        )
+        with self.assertRaisesRegex(ValueError, "Invalid shard filename"):
+          dst_missing.h2d(checkpoint_path=str(bad_idx_dir))
+
+    dst_bad_shape = gcs_synchronizer.GCSSynchronizer(job_name="rollout")
+    dst_bad_shape.bind(
+        {"layers.0.w": jax.device_put(np.zeros((4, 2), np.float32))}
+    )
+    with self.assertRaisesRegex(ValueError, "Shape mismatch"):
+      dst_bad_shape.h2d(checkpoint_path=ckpt_uri)
+
+  def test_tied_reader_checksums_ignore_redundant_disk_target_key(self):
+    src_tied = _wire_trainer(
+        self.create_tempdir().full_path, tied=True, verify_weights=True
+    )
+    req = datatypes.WeightSyncRequest(
+        policy_version=1, extra_config={"req_id": "redundant", "uuid": 1}
+    )
+    src_tied.d2h(req)
+    tied_meta = src_tied.work_unit_metadata()
+    assert tied_meta.checksums is not None
+    self.assertEqual(tied_meta.checksums["__tensor_count__"], 2)
+
+    # Write a checkpoint with the same two wire tensors plus an extra on-disk
+    # `lm_head.weight` matching the bound target name.
+    extra_dir = self.create_tempdir().full_path
+    safetensors_saver.save_safetensors(
+        {
+            _WIRE_EMBED: np.arange(
+                _WIRE_VOCAB * _WIRE_DIM, dtype=np.float32
+            ).reshape(_WIRE_VOCAB, _WIRE_DIM),
+            _WIRE_DOWN: np.ones((_WIRE_DIM, _WIRE_FFN), dtype=np.float32),
+            "lm_head.weight": np.full(
+                (_WIRE_DIM, _WIRE_VOCAB), 99.0, dtype=np.float32
+            ),
+        },
+        extra_dir,
+    )
+    dst, runner = _wire_rollout(tied=True, verify_weights=True)
+    dst.h2d(
+        checkpoint_path=extra_dir,
+        source_checksums=tied_meta.checksums,
+    )
+    dst.apply_to_runner(runner)
+    np.testing.assert_array_equal(
+        runner.state["lm_head.weight"],
+        np.asarray(runner.state["embed_tokens.weight"]).T,
+    )
+
+    # Active `tied_keys` whose source is produced by a rule must not load a
+    # same-named backend target tensor from disk into wire checksums.
+    active_tied_manifest = {
+        "rules": [{
+            "source_keys": ["hf.k_proj.weight"],
+            "target_keys": ["k0.kernel"],
+            "ops": [],
+        }],
+        "tied_keys": [["k0.kernel", "k1.kernel"]],
+    }
+    tied_dir = self.create_tempdir().full_path
+    k_wire = np.arange(4, dtype=np.float32).reshape(2, 2)
+    safetensors_saver.save_safetensors(
+        {
+            "hf.k_proj.weight": k_wire,
+            "k0.kernel": np.full((2, 2), 99.0, dtype=np.float32),
+        },
+        tied_dir,
+    )
+    expected_sums = gcs_synchronizer.weight_utils.compute_checksums(
+        ["hf.k_proj.weight"], [k_wire], sample=None, canonical_keys=True
+    )
+    dst_active = gcs_synchronizer.GCSSynchronizer(
+        job_name="rollout",
+        verify_weights=True,
+        from_hf_manifest=active_tied_manifest,
+    )
+    runner_active = _FlatDictRunner({
+        "k0.kernel": jax.device_put(np.zeros((2, 2), np.float32)),
+        "k1.kernel": jax.device_put(np.zeros((2, 2), np.float32)),
+    })
+    dst_active.bind(runner_active.state)
+    dst_active.h2d(checkpoint_path=tied_dir, source_checksums=expected_sums)
+    dst_active.apply_to_runner(runner_active)
+    np.testing.assert_array_equal(runner_active.state["k0.kernel"], k_wire)
+    np.testing.assert_array_equal(runner_active.state["k1.kernel"], k_wire)
+
+  def test_multihost_error_broadcast_prevents_collective_deadlock(self):
+    staging = epath.Path(self.create_tempdir().full_path)
+    missing_dir = str(staging / "nonexistent_step")
+    dst = gcs_synchronizer.GCSSynchronizer(job_name="rollout")
+    dst.bind({"layers.0.w": jax.device_put(np.zeros((2, 2), np.float32))})
+
+    # Simulate host 0 failing on missing checkpoint and broadcasting status to
+    # rank 1 before entering any tensor `broadcast_one_to_all`.
+    shared_status: dict[str, Any] = {}
+
+    def _capture_broadcast(payload: Any) -> Any:
+      if payload is not None and not shared_status:
+        shared_status["value"] = payload
+      return shared_status["value"]
+
+    with (
+        mock.patch.object(jax, "process_count", return_value=2),
+        mock.patch.object(jax, "process_index", return_value=0),
+        mock.patch.object(
+            gcs_synchronizer.sharding_utils,
+            "broadcast_host0_json",
+            side_effect=_capture_broadcast,
+        ),
+        mock.patch.object(
+            gcs_synchronizer.multihost_utils,
+            "broadcast_one_to_all",
+            side_effect=AssertionError("must not enter tensor broadcast"),
+        ),
+    ):
+      with self.assertRaisesRegex(
+          FileNotFoundError, "No finalized safetensors or Orbax checkpoint"
+      ):
+        dst.h2d(checkpoint_path=missing_dir)
+
+    with (
+        mock.patch.object(jax, "process_count", return_value=2),
+        mock.patch.object(jax, "process_index", return_value=1),
+        mock.patch.object(
+            gcs_synchronizer.sharding_utils,
+            "broadcast_host0_json",
+            side_effect=_capture_broadcast,
+        ),
+        mock.patch.object(
+            gcs_synchronizer.multihost_utils,
+            "broadcast_one_to_all",
+            side_effect=AssertionError("must not enter tensor broadcast"),
+        ),
+    ):
+      with self.assertRaisesRegex(
+          FileNotFoundError, "No finalized safetensors or Orbax checkpoint"
+      ):
+        dst.h2d(checkpoint_path=missing_dir)
+
+    # Also verify `_maybe_cleanup_on_start` broadcasts host-0 storage errors.
+    (staging / "step_0_boom").mkdir()
+    cleanup_status: dict[str, Any] = {}
+
+    def _capture_cleanup(payload: Any) -> Any:
+      if payload is not None and not cleanup_status:
+        cleanup_status["value"] = payload
+      return cleanup_status["value"]
+
+    cfg = gcs_synchronizer.GCSSynchronizerConfig(
+        staging_dir=str(staging), cleanup_on_start=True
+    )
+    with (
+        mock.patch.object(jax, "process_count", return_value=2),
+        mock.patch.object(jax, "process_index", return_value=0),
+        mock.patch.object(
+            gcs_synchronizer.safetensors_saver,
+            "remove_tree",
+            side_effect=OSError("disk full"),
+        ),
+        mock.patch.object(
+            gcs_synchronizer.sharding_utils,
+            "broadcast_host0_json",
+            side_effect=_capture_cleanup,
+        ),
+    ):
+      with self.assertRaisesRegex(OSError, "disk full"):
+        gcs_synchronizer.GCSSynchronizer(job_name="trainer", config=cfg)
+
+    with (
+        mock.patch.object(jax, "process_count", return_value=2),
+        mock.patch.object(jax, "process_index", return_value=1),
+        mock.patch.object(
+            gcs_synchronizer.sharding_utils,
+            "broadcast_host0_json",
+            side_effect=_capture_cleanup,
+        ),
+    ):
+      with self.assertRaisesRegex(OSError, "disk full"):
+        gcs_synchronizer.GCSSynchronizer(job_name="trainer", config=cfg)
+
+    # Corrupt index JSON (`JSONDecodeError`) broadcasts as `ValueError`.
+    corrupt_dir = staging / "corrupt_index"
+    corrupt_dir.mkdir()
+    (corrupt_dir / "model.safetensors.index.json").write_text("{bad json")
+    corrupt_status: dict[str, Any] = {}
+
+    def _capture_corrupt(payload: Any) -> Any:
+      if payload is not None and not corrupt_status:
+        corrupt_status["value"] = payload
+      return corrupt_status["value"]
+
+    for rank in (0, 1):
+      with (
+          mock.patch.object(jax, "process_count", return_value=2),
+          mock.patch.object(jax, "process_index", return_value=rank),
+          mock.patch.object(
+              gcs_synchronizer.sharding_utils,
+              "broadcast_host0_json",
+              side_effect=_capture_corrupt,
+          ),
+      ):
+        with self.assertRaises(ValueError):
+          dst.h2d(checkpoint_path=str(corrupt_dir))
 
   def test_release_with_max_to_keep_zero_stops_advertising_artifact(self):
     staging = self.create_tempdir().full_path
@@ -383,6 +1114,8 @@ class GCSSynchronizerTest(absltest.TestCase):
     )
     sync._staged_checkpoints.append("gs://fake-bucket/step_1_r1")
     fake_path = mock.create_autospec(epath.Path, instance=True)
+    fake_path.is_dir.return_value = True
+    fake_path.iterdir.return_value = []
     fake_path.rmtree.side_effect = OSError("permission denied")
     with (
         mock.patch.object(
@@ -391,9 +1124,7 @@ class GCSSynchronizerTest(absltest.TestCase):
             autospec=True,
             return_value=fake_path,
         ),
-        mock.patch.object(
-            logging, "warning", autospec=True
-        ) as mock_warning,
+        mock.patch.object(logging, "warning", autospec=True) as mock_warning,
     ):
       sync.release()
       sync.close()

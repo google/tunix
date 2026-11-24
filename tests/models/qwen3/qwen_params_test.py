@@ -18,10 +18,10 @@ import os
 import unittest
 
 from absl.testing import absltest
+from flax import nnx
 import jax.numpy as jnp
 import numpy as np
 import safetensors.numpy as safe_np
-from flax import nnx
 from tunix.models.qwen3 import model as qwen3_model
 from tunix.models.qwen3 import params as qwen3_params
 from tunix.tests import lora_params_test_base

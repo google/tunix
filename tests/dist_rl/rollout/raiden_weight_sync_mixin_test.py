@@ -24,6 +24,7 @@ import jax.numpy as jnp
 from tunix.common import configs
 from tunix.dist_rl.rollout import raiden_weight_sync_mixin
 from tunix.dist_rl.rollout import sampler as base_sampler_lib
+from tunix.dist_rl.weight_sync import raiden_weight_sync_delegate
 
 
 class _BareAdapter(raiden_weight_sync_mixin.RaidenDestinationWeightSyncMixin):
@@ -100,6 +101,24 @@ class RaidenDestinationWeightSyncMixinTest(unittest.IsolatedAsyncioTestCase):
     res = await adapter.bind_weight_sync()
     self.assertTrue(res)
     adapter.raiden_sync_delegate.bind_weight_sync.assert_awaited_once()
+
+  async def test_bind_weight_sync_runs_synchronizer_factory(self):
+    sync = mock.MagicMock(bound=False)
+    sync.bind.side_effect = lambda state: setattr(sync, "bound", True)
+    sync.work_unit_metadata.return_value = {"unit": "gcs"}
+    factory = mock.MagicMock(return_value=sync)
+    adapter = _MockAdapter(enable_raiden=True)
+    adapter.raiden_sync_delegate = (
+        raiden_weight_sync_delegate.RaidenWeightSyncDelegate(
+            synchronizer_factory=factory
+        )
+    )
+    with self.assertRaises(RuntimeError):
+      await adapter.get_weight_sync_metadata()
+    self.assertTrue(await adapter.bind_weight_sync())
+    factory.assert_called_once_with({"param": 1})
+    sync.bind.assert_called_once_with({"param": 1})
+    self.assertEqual(await adapter.get_weight_sync_metadata(), [{"unit": "gcs"}])
 
   async def test_pre_weight_sync_delegates(self):
     adapter = _MockAdapter(enable_raiden=True)

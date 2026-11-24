@@ -14,6 +14,8 @@
 
 """Utils for loading and converting Qwen3 PT weights."""
 
+from collections.abc import Mapping, Sequence
+import time
 from typing import Any
 
 import jax
@@ -197,32 +199,245 @@ def create_model_from_safe_tensors(
   )
 
 
+def _make_tensor_spec(
+    flat_state: Mapping[str, jax.Array],
+    source_key: str,
+    hf_key: str,
+    *,
+    shape_2d: Sequence[int] | None = None,
+    transpose_axes: Sequence[int] | None = None,
+    unstack_axis: int | None = None,
+    lora_scaling: float = 1.0,
+    itemsize: int | None = None,
+) -> safetensors_saver.TensorExportSpec:
+  """Constructs a TensorExportSpec from flat model state."""
+  arr = flat_state[source_key]
+  lora_a_key, lora_b_key = f"{source_key}_lora_a", f"{source_key}_lora_b"
+  has_lora = lora_a_key in flat_state and lora_b_key in flat_state
+  return safetensors_saver.TensorExportSpec(
+      source_key=source_key,
+      hf_key=hf_key,
+      shape_2d=tuple(shape_2d) if shape_2d is not None else None,
+      transpose_axes=(
+          tuple(transpose_axes) if transpose_axes is not None else None
+      ),
+      unstack_axis=unstack_axis,
+      nbytes=int(arr.size) * (
+          arr.dtype.itemsize if itemsize is None else itemsize
+      ),
+      lora_a_key=lora_a_key if has_lora else None,
+      lora_b_key=lora_b_key if has_lora else None,
+      lora_scaling=lora_scaling,
+      is_replicated=safetensors_saver.infer_is_replicated(arr),
+  )
+
+
+_QWEN3_INV_RULES_CACHE: dict[Any, tuple[dict[str, Any], ...]] = {}
+
+
+_EXPORT_OP_ORDER = ("reshape", "unstack", "transpose")
+
+
+def _parse_export_rule_ops(
+    src_key: str,
+    rule_ops: Sequence[Mapping[str, Any]],
+) -> tuple[Sequence[int] | None, tuple[int, ...] | None, int | None]:
+  """Parses and validates a Qwen3 inverse-manifest op sequence."""
+  if any(len(step) != 1 for step in rule_ops):
+    raise ValueError(
+        f"Expected single-op steps in manifest rule {src_key!r}: {rule_ops!r}."
+    )
+  op_names = [next(iter(step)) for step in rule_ops]
+  unknown = [name for name in op_names if name not in _EXPORT_OP_ORDER]
+  if unknown:
+    raise ValueError(
+        f"Unsupported manifest op {unknown[0]!r} in rule {src_key!r}."
+    )
+  if len(set(op_names)) != len(op_names) or op_names != sorted(
+      op_names, key=_EXPORT_OP_ORDER.index
+  ):
+    raise ValueError(
+        f"Unsupported op order in manifest rule {src_key!r}: {rule_ops!r}."
+    )
+  ops_by_name = {
+      next(iter(step)): next(iter(step.values())) for step in rule_ops
+  }
+  shape_2d = (
+      ops_by_name["reshape"]["dst_shape"] if "reshape" in ops_by_name else None
+  )
+  unstack_axis: int | None = None
+  if "unstack" in ops_by_name:
+    if ops_by_name["unstack"]["axis"] != 0:
+      raise ValueError(
+          f"Unsupported unstack op in manifest rule {src_key!r}: {rule_ops!r}."
+      )
+    unstack_axis = 0
+  axes: tuple[int, ...] | None = None
+  if "transpose" in ops_by_name:
+    raw_axes = tuple(ops_by_name["transpose"]["axes"])
+    if unstack_axis is not None and raw_axes != (1, 0):
+      raise ValueError(
+          f"Unsupported stacked transpose {raw_axes!r} for {src_key!r}."
+      )
+    axes = (0, 2, 1) if unstack_axis is not None else raw_axes
+  return shape_2d, axes, unstack_axis
+
+
+def build_qwen3_export_specs(
+    model: model_lib.Qwen3,
+    *,
+    rank: int = 1,
+    alpha: float = 1.0,
+    output_dtype: jnp.dtype | None = None,
+) -> tuple[
+    dict[str, jax.Array],
+    list[safetensors_saver.TensorExportSpec],
+    dict[str, int],
+]:
+  """Builds flat state and Subtree all-to-all TensorExportSpecs for Qwen3."""
+  flat_state = safetensors_saver.extract_flat_state_dict(model)
+  itemsize = jnp.dtype(output_dtype).itemsize if output_dtype else None
+  lora_scaling = float(alpha) / float(rank)
+  cfg_key = repr(model.config)
+  if cfg_key not in _QWEN3_INV_RULES_CACHE:
+    inv_manifest = build_to_hf_manifest(model.config)
+    _QWEN3_INV_RULES_CACHE[cfg_key] = tuple(inv_manifest["rules"])
+  specs: list[safetensors_saver.TensorExportSpec] = []
+  unstack_counts: dict[str, int] = {}
+  for rule in _QWEN3_INV_RULES_CACHE[cfg_key]:
+    src_key, tgt_keys = rule["source_keys"][0], rule["target_keys"]
+    if src_key not in flat_state:
+      raise KeyError(
+          f"Missing expected Qwen3 parameter {src_key!r} in model state."
+      )
+    shape_2d, axes, unstack_axis = _parse_export_rule_ops(src_key, rule["ops"])
+    hf_key = tgt_keys[0]
+    if unstack_axis is not None:
+      hf_key = hf_key.replace(".experts.0.", ".experts.{expert}.")
+      unstack_counts[src_key] = len(tgt_keys)
+    specs.append(
+        _make_tensor_spec(
+            flat_state,
+            src_key,
+            hf_key,
+            shape_2d=shape_2d,
+            transpose_axes=axes,
+            unstack_axis=unstack_axis,
+            lora_scaling=lora_scaling,
+            itemsize=itemsize,
+        )
+    )
+  return flat_state, specs, unstack_counts
+
+
+def export_qwen3_as_safetensors(
+    model: model_lib.Qwen3,
+    output_dir: str,
+    *,
+    local_model_path: str | None = None,
+    rank: int = 1,
+    alpha: float = 1.0,
+    num_ranks: int = 1,
+    max_bucket_bytes: int | None = None,
+    output_dtype: jnp.dtype | None = None,
+    devices: Sequence[jax.Device] | None = None,
+    async_write: bool = False,
+    per_wave_shards: bool | None = None,
+    write_buffer_bytes: int | None = None,
+    max_write_threads: int | None = None,
+    defer_contiguous: bool = True,
+) -> safetensors_saver.SaveMetrics:
+  """Exports Qwen3 (Dense or MoE, base or LoRA) via Subtree all-to-all plan."""
+  t_plan = time.perf_counter()
+  backend = safetensors_saver.resolve_storage_backend(output_dir)
+  use_wave_shards = (
+      backend.default_per_wave_shards
+      if per_wave_shards is None
+      else per_wave_shards
+  )
+  flat_state, specs, unstack_counts = build_qwen3_export_specs(
+      model, rank=rank, alpha=alpha, output_dtype=output_dtype
+  )
+  plan = safetensors_saver.build_save_plan(
+      specs,
+      num_ranks=num_ranks,
+      max_bucket_bytes=max_bucket_bytes,
+      unstack_counts=unstack_counts,
+      per_wave_shards=use_wave_shards,
+  )
+  plan_sec = time.perf_counter() - t_plan
+  return safetensors_saver.export_safetensors_with_plan(
+      flat_state,
+      plan,
+      output_dir,
+      local_model_path=local_model_path,
+      output_dtype=output_dtype,
+      devices=devices,
+      plan_time_sec=plan_sec,
+      async_write=async_write,
+      write_buffer_bytes=write_buffer_bytes,
+      max_write_threads=max_write_threads,
+      defer_contiguous=defer_contiguous,
+  )
+
+
 def save_lora_merged_model_as_safetensors(
-    local_model_path: str,
+    local_model_path: str | None,
     output_dir: str,
     lora_model: model_lib.Qwen3,
-    rank: int,
-    alpha: float,
-):
-  """Saves a Qwen3 model with LoRA weights merged in safetensors format.
+    rank: int = 1,
+    alpha: float = 1.0,
+    *,
+    num_ranks: int = 1,
+    max_bucket_bytes: int | None = None,
+    output_dtype: jnp.dtype | None = None,
+    devices: Sequence[jax.Device] | None = None,
+    async_write: bool = False,
+    per_wave_shards: bool | None = None,
+    write_buffer_bytes: int | None = None,
+    max_write_threads: int | None = None,
+    defer_contiguous: bool = True,
+) -> safetensors_saver.SaveMetrics:
+  """Saves in-memory Qwen3 weights (with optional LoRA merged) as safetensors.
+
+  Exports `lora_model` directly via `export_qwen3_as_safetensors` in model dtype
+  or `output_dtype`; `local_model_path`, when set, is only read on process 0 to
+  copy non-safetensors metadata/tokenizer files rather than loading base weights
+  from disk.
 
   Args:
-    local_model_path: Path to the base model safetensors checkpoint directory.
-    output_dir: Directory where the merged model will be saved.
-    lora_model: Qwen3 model instance with LoRA weights.
-    rank: LoRA rank used during training.
-    alpha: LoRA alpha used during training.
+    local_model_path: Optional source checkpoint dir for metadata/tokenizer
+      files.
+    output_dir: Destination checkpoint directory (local, `gs://`, or remote).
+    lora_model: Qwen3 model instance (base or LoRA-adapted).
+    rank: LoRA rank used to compute `alpha / rank` scaling.
+    alpha: LoRA alpha used to compute `alpha / rank` scaling.
+    num_ranks: Number of output writer ranks.
+    max_bucket_bytes: Optional per-wave byte cap per rank.
+    output_dtype: Optional cast dtype for exported tensors.
+    devices: Optional explicit device sequence (defaults to `jax.devices()`).
+    async_write: Whether to overlap wave host writes asynchronously.
+    per_wave_shards: Whether to emit one shard per `(wave, rank)`.
+    write_buffer_bytes: Optional per-writer byte buffer size (`0` unbuffered).
+    max_write_threads: Optional cap on concurrent shard writer threads.
+    defer_contiguous: Whether to defer contiguous host copies until write time.
+
+  Returns:
+    `SaveMetrics` describing exported byte volume, timings, and shard paths.
   """
-  local_dir = safetensors_loader.resolve_checkpoint_dir(local_model_path)
-  key_map, transpose_rules = hf_mapping.lora_mapping_from_manifest(
-      build_to_hf_manifest(lora_model.config)
-  )
-  safetensors_saver.save_lora_merged_model_as_safetensors(
-      local_model_path=local_dir,
-      output_dir=output_dir,
-      lora_model=lora_model,
+  return export_qwen3_as_safetensors(
+      lora_model,
+      output_dir,
+      local_model_path=local_model_path,
       rank=rank,
       alpha=alpha,
-      state_key_transform_fn=key_map.__getitem__,
-      transpose_rules=transpose_rules,
+      num_ranks=num_ranks,
+      max_bucket_bytes=max_bucket_bytes,
+      output_dtype=output_dtype,
+      devices=devices,
+      async_write=async_write,
+      per_wave_shards=per_wave_shards,
+      write_buffer_bytes=write_buffer_bytes,
+      max_write_threads=max_write_threads,
+      defer_contiguous=defer_contiguous,
   )
