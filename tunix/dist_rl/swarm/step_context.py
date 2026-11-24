@@ -454,6 +454,24 @@ def group_grpo(
   return _step
 
 
+def _episode_parl_terms(
+    ep: contracts.EpisodeRecord,
+    sc: contracts.ScoreRecord,
+) -> tuple[float, float, float, float]:
+  r_perf = float(sc.components.get("r_perf", sc.reward))
+  n_ch = len(ep.children)
+  if n_ch == 0:
+    return r_perf, 0.0, 0.0, 0.0
+  has_par = 1.0 if n_ch >= 2 else 0.0
+  r_par = 0.5 + 0.5 * min(1.0, (n_ch - 2) / 4.0) if n_ch >= 2 else 0.0
+  done = sum(
+      1
+      for c in ep.children
+      if c.status == "completed" and len(str(c.output or "").strip()) >= 3
+  )
+  return r_perf, r_par, done / float(n_ch), has_par
+
+
 def shape_parl_rewards(
     episodes: Sequence[contracts.EpisodeRecord],
     scores: Sequence[contracts.ScoreRecord],
@@ -464,38 +482,33 @@ def shape_parl_rewards(
   """Computes Kimi K2.5 PARL annealed rewards and CriticalSteps metrics."""
   score_by_ep = {s.episode_id: s for s in scores}
   shaped: dict[str, float] = {}
-  perf_vals, par_vals, fin_vals = [], [], []
+  perf_vals, par_vals, fin_vals, par_flags = [], [], [], []
   for ep in episodes:
-    sc = score_by_ep[ep.episode_id]
-    r_perf = float(sc.components.get("r_perf", sc.reward))
-    n_ch = len(ep.children)
-    r_par = 1.0 if n_ch >= 2 else 0.0
-    r_fin = (
-        sum(1 for c in ep.children if c.status == "completed") / float(n_ch)
-        if n_ch > 0
-        else 0.0
+    r_perf, r_par, r_fin, has_par = _episode_parl_terms(
+        ep, score_by_ep[ep.episode_id]
     )
     shaped[ep.episode_id] = r_perf + lam1 * r_par + lam2 * r_fin
     perf_vals.append(r_perf)
     par_vals.append(r_par)
     fin_vals.append(r_fin)
-  mean_crit = statistics.fmean([float(e.critical_steps) for e in episodes]) if episodes else 0.0
-  mean_tot = statistics.fmean([float(e.total_steps) for e in episodes]) if episodes else 0.0
+    par_flags.append(has_par)
+  def _avg(vals: Sequence[float]) -> float:
+    return statistics.fmean(vals) if vals else 0.0
+  mean_crit = _avg([float(e.critical_steps) for e in episodes])
+  mean_tot = _avg([float(e.total_steps) for e in episodes])
   metrics = {
-      "parl/r_perf": statistics.fmean(perf_vals) if perf_vals else 0.0,
-      "parl/r_parallel": statistics.fmean(par_vals) if par_vals else 0.0,
-      "parl/r_finish": statistics.fmean(fin_vals) if fin_vals else 0.0,
-      "parl/r_shaped": statistics.fmean(shaped.values()) if shaped else 0.0,
+      "parl/r_perf": _avg(perf_vals),
+      "parl/r_parallel": _avg(par_vals),
+      "parl/r_finish": _avg(fin_vals),
+      "parl/r_shaped": _avg(list(shaped.values())),
+      "parl/parallel_rate": _avg(par_flags),
       "parl/lambda_1": lam1,
       "parl/lambda_2": lam2,
       "parl/critical_steps": mean_crit,
       "parl/total_steps": mean_tot,
       "parl/parallel_speedup": mean_tot / max(mean_crit, 1e-6),
-      "parl/mean_children": (
-          statistics.fmean([float(len(e.children)) for e in episodes])
-          if episodes
-          else 0.0
-      ),
+      "parl/wall_time_s": _avg([float(e.wall_time_s) for e in episodes]),
+      "parl/mean_children": _avg([float(len(e.children)) for e in episodes]),
   }
   return shaped, metrics
 
@@ -527,6 +540,11 @@ def parl_grpo(
         episodes, scores, lam1=lam1, lam2=lam2
     )
     advs = compute_group_advantages(episodes, shaped)
+    groups = {e.group_id for e in episodes}
+    active_groups = {
+        e.group_id for e in episodes if abs(advs.get(e.episode_id, 0.0)) >= 1e-12
+    }
+    active_frac = len(active_groups) / float(max(len(groups), 1))
     batch = build_compacted_grpo_batch(
         target=target,
         episodes=episodes,
@@ -537,7 +555,12 @@ def parl_grpo(
     upd = await step.update(target, batch)
     return contracts.StepResult(
         state=step.state,
-        metrics={**parl_metrics, "parl/n_director_rows": float(len(batch.examples)), **upd},
+        metrics={
+            **parl_metrics,
+            "parl/active_group_frac": active_frac,
+            "parl/n_director_rows": float(len(batch.examples)),
+            **upd,
+        },
     )
 
   return _step

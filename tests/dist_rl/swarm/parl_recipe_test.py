@@ -172,6 +172,38 @@ class ParlRecipeTest(unittest.TestCase):
     self.assertGreater(res.metrics["parl/parallel_speedup"], 1.0)
     self.assertGreater(res.metrics["parl/r_perf"], 0.4)
 
+  def test_dual_mode_spawn_wave_think_stripping_and_direct_search(self) -> None:
+    raw = (
+        "<think>I should NOT trigger <search>fake</search> inside thinking. "
+        "Instead spawn two specialized subagents.</think>\n"
+        '<spawn_wave>[{"role": "Geo_Agent", "persona": "Find capitals", '
+        '"task": "Capital of France"}, {"role": "Asia_Agent", "task": "Capital of Japan"}]</spawn_wave>'
+    )
+    cmd = parl_wf.parse_director_action(raw, max_wave_width=8, allow_direct_tools=True)
+    self.assertTrue(cmd.is_valid and not cmd.is_final)
+    self.assertEqual(cmd.action_kind, "spawn_wave")
+    self.assertEqual(len(cmd.subagents), 2)
+    self.assertEqual(cmd.subagents[0].role, "Geo_Agent")
+    self.assertEqual(cmd.subagents[0].persona, "Find capitals")
+
+    srch = parl_wf.parse_director_action(
+        "<think>Quick direct lookup.</think><search>Inception director</search>",
+        allow_direct_tools=True,
+    )
+    self.assertEqual(srch.action_kind, "search")
+    self.assertEqual(srch.query, "Inception director")
+
+    od = parl_wf.parse_director_action(
+        "<open_doc>bc-42</open_doc>", allow_direct_tools=True
+    )
+    self.assertEqual(od.action_kind, "open_doc")
+    self.assertEqual(od.docid, "bc-42")
+
+    ep_like = type("Ep", (), {"episode_id": "e1", "task_id": "t1", "public_output": "(1) Paris\n(2) Tokyo"})()
+    sc = parl_tasks.grade_parl_episode(ep_like, {"kind": "wide_wikiqa", "sub_answers": [["Paris"], ["Tokyo"]]})
+    self.assertEqual(sc.components["em"], 1.0)
+    self.assertEqual(sc.components["f1"], 1.0)
+
 
 if __name__ == "__main__":
   unittest.main()

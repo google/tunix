@@ -4,14 +4,14 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Option 5 PARL (Kimi K2.5 §3) TPU trainer & Serial-vs-Parallel evaluator."""
+"""Option 5 PARL (Kimi K2.5 §3) TPU trainer, ablation runner & Pareto evaluator."""
 
 from __future__ import annotations
 
@@ -21,20 +21,19 @@ import dataclasses
 import json
 import os
 from pathlib import Path
-import statistics
 import time
 from typing import Any
 
 from absl import flags
 from flax import nnx
 import jax
-import jax.numpy as jnp
 import numpy as np
 import optax
 
+from examples.swarm_parl import eval_utils
+from examples.swarm_parl import retrieval as parl_ret
 from examples.swarm_parl import tasks as parl_tasks
 from examples.swarm_parl import workflow as parl_wf
-from examples.swarm_r2orch import paper_retrieval
 from tunix.common import configs
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.orchestrator import batch_assembly
@@ -52,8 +51,8 @@ from tunix.dist_rl.swarm import ServingFidelityMode
 from tunix.dist_rl.swarm import SnapshotBundle
 from tunix.dist_rl.swarm import SnapshotRef
 from tunix.dist_rl.swarm import StepContext
+from tunix.dist_rl.swarm import group_grpo
 from tunix.dist_rl.swarm import parl_grpo
-from tunix.dist_rl.swarm import repeat_tasks
 from tunix.dist_rl.swarm import verify_serving_fidelity
 from tunix.dist_rl.train import peft_trainer_v2
 from tunix.dist_rl.worker import trainer_worker
@@ -79,14 +78,21 @@ def _sort_z_slab(devs: list[Any]) -> list[Any]:
   return devs
 
 
-def partition_parl_devices(devices: list[Any] | None = None) -> ParlTpuPartition:
+def partition_parl_devices(
+    devices: list[Any] | None = None,
+    *,
+    tp_serve: int = 1,
+) -> ParlTpuPartition:
+  """Splits TPU chips along contiguous z-slabs into train/ret/director/worker."""
   if "proxy" in os.environ.get("JAX_PLATFORMS", ""):
     import pathwaysutils  # pylint: disable=g-import-not-at-top  # pyrefly: ignore[missing-import]
 
     pathwaysutils.initialize()
   devs = _sort_z_slab(list(devices) if devices is not None else list(jax.devices()))
   n = len(devs)
-  if n >= 128:
+  if n >= 128 and tp_serve >= 2:
+    n_train, n_ret, n_dir = 32, 16, 32
+  elif n >= 128:
     n_train, n_ret, n_dir = 16, 16, 32
   elif n >= 64:
     n_train, n_ret, n_dir = 16, 16, 16
@@ -94,17 +100,19 @@ def partition_parl_devices(devices: list[Any] | None = None) -> ParlTpuPartition
     n_train, n_ret, n_dir = 4, 4, 4
   else:
     raise ValueError(f"PARL TPU layout requires >= 16 chips, got {n}")
-  tp = 4 if n_train >= 4 else 1
+  tp_tr = 4 if n_train >= 4 else 1
   train_mesh = jax.sharding.Mesh(
-      np.asarray(devs[:n_train]).reshape(n_train // tp, tp), ("fsdp", "tp")
+      np.asarray(devs[:n_train]).reshape(n_train // tp_tr, tp_tr), ("fsdp", "tp")
   )
   ret_devs = devs[n_train : n_train + n_ret]
   d0 = n_train + n_ret
+  n_wrk = n - d0 - n_dir
+  tp_s = max(1, int(tp_serve))
   dir_mesh = jax.sharding.Mesh(
-      np.asarray(devs[d0 : d0 + n_dir]).reshape(n_dir, 1), ("fsdp", "tp")
+      np.asarray(devs[d0 : d0 + n_dir]).reshape(n_dir // tp_s, tp_s), ("fsdp", "tp")
   )
   wrk_mesh = jax.sharding.Mesh(
-      np.asarray(devs[d0 + n_dir :]).reshape(n - d0 - n_dir, 1), ("fsdp", "tp")
+      np.asarray(devs[d0 + n_dir :]).reshape(n_wrk // tp_s, tp_s), ("fsdp", "tp")
   )
   return ParlTpuPartition(train_mesh, ret_devs, dir_mesh, wrk_mesh)
 
@@ -141,12 +149,13 @@ class _VllmParlSamplerWrapper:
 
 
 class Option5PeftDirectorTrainer:
-  """Stages Option 5 `ObjectiveBatch` into Tunix `TrainerWorker` / `PeftTrainer V2`."""
+  """Stages Option 5 `ObjectiveBatch` into Tunix `TrainerWorker` (+ optional KL ref)."""
 
   def __init__(
       self,
       *,
       worker: trainer_worker.TrainerWorker,
+      ref_worker: trainer_worker.TrainerWorker | None,
       pad_id: int,
       eos_id: int,
       max_prompt_length: int,
@@ -154,6 +163,7 @@ class Option5PeftDirectorTrainer:
       micro_batch_size: int,
   ) -> None:
     self.worker = worker
+    self.ref_worker = ref_worker
     self.pad_id = int(pad_id)
     self.eos_id = int(eos_id)
     self.max_prompt_length = int(max_prompt_length)
@@ -188,6 +198,31 @@ class Option5PeftDirectorTrainer:
       )
     return payloads
 
+  def _attach_ref_logps(
+      self, payload: datatypes.RLTrainerPayload
+  ) -> datatypes.RLTrainerPayload:
+    if self.ref_worker is None:
+      return payload
+    tok_mask = (
+        None
+        if payload.completion_attention_mask is None
+        else np.concatenate(
+            [payload.prompt_mask, payload.completion_attention_mask], axis=1
+        )
+    )
+    ref_resp = self.ref_worker.per_token_logps(
+        datatypes.LogprobsRequest(
+            request_id="reference_logps",
+            prompt_tokens=payload.prompt_ids,
+            completion_tokens=payload.completion_ids,
+            token_mask=tok_mask,
+            pad_id=self.pad_id,
+            eos_id=self.eos_id,
+            temperature=1.0,
+        )
+    )
+    return batch_assembly.with_ref_per_token_logps(payload, ref_resp)
+
   def stage_update(self, batch: ObjectiveBatch) -> dict[str, float]:
     payloads = self._examples_to_payloads(batch.examples)
     if not payloads:
@@ -207,7 +242,8 @@ class Option5PeftDirectorTrainer:
       return {"train/skipped_empty": 1.0}
     total_toks = sum(int(np.sum(p.completion_mask)) for p in payloads)
     for mb in mbs:
-      self.worker.fwd_bwd(datatypes.TrainRequest(payload=mb.payload))
+      payload = self._attach_ref_logps(mb.payload)
+      self.worker.fwd_bwd(datatypes.TrainRequest(payload=payload))
     self._has_staged = True
     return {
         "train/n_microbatches": float(len(mbs)),
@@ -244,10 +280,11 @@ def _build_vllm_engine(
   os.environ.setdefault("NEW_MODEL_DESIGN", "1")
   dp = int(mesh.shape["fsdp"])
   tp = int(mesh.shape["tp"])
+  kv_len = max_prompt_length + max_response_length
   rcfg = configs.RolloutConfig(
       max_prompt_length=max_prompt_length,
       max_tokens_to_generate=max_response_length,
-      kv_cache_size=max_prompt_length + max_response_length,
+      kv_cache_size=kv_len,
       temperature=1.0,
       top_p=1.0,
       top_k=0,
@@ -264,7 +301,7 @@ def _build_vllm_engine(
       rollout_vllm_reshard_chunk_size=16,
       rollout_vllm_async_scheduling=False,
       rollout_vllm_max_num_seqs=32,
-      rollout_vllm_max_num_batched_tokens=8192,
+      rollout_vllm_max_num_batched_tokens=max(8192, kv_len),
       rollout_vllm_kwargs={
           "enable_prefix_caching": False,
           "dtype": "bfloat16",
@@ -298,7 +335,15 @@ async def _run_parl_fidelity_audit(
     eos_id: int,
     fidelity: ServingFidelity,
 ) -> None:
-  prompt_ids = np.asarray(encode(parl_wf.format_chat_prompt(parl_wf.DIRECTOR_SYSTEM_PROMPT, "Question: What is the capital of France?")), dtype=np.int32)
+  prompt_ids = np.asarray(
+      encode(
+          parl_wf.format_chat_prompt(
+              parl_wf.DIRECTOR_SYSTEM_PROMPT,
+              "Question: What is the capital of France?",
+          )
+      ),
+      dtype=np.int32,
+  )
   req = sampler_lib.SamplingRequest(
       request_id="fidelity-0",
       prompt=prompt_ids,
@@ -335,115 +380,6 @@ async def _run_parl_fidelity_audit(
   )
 
 
-def _summarize_eval_subset(
-    prefix: str,
-    parl_eps: list[Any],
-    parl_scores: list[Any],
-    ser_eps: list[Any],
-    ser_scores: list[Any],
-) -> dict[str, float]:
-  if not parl_eps or not ser_eps:
-    return {}
-  p_r = statistics.fmean([s.reward for s in parl_scores])
-  s_r = statistics.fmean([s.reward for s in ser_scores])
-  p_crit = statistics.fmean([float(e.critical_steps) for e in parl_eps])
-  p_tot = statistics.fmean([float(e.total_steps) for e in parl_eps])
-  s_crit = statistics.fmean([float(e.critical_steps) for e in ser_eps])
-  return {
-      f"eval/{prefix}parl_r_perf": p_r,
-      f"eval/{prefix}parl_em": statistics.fmean(
-          [s.components.get("em", 0.0) for s in parl_scores]
-      ),
-      f"eval/{prefix}parl_critical_steps": p_crit,
-      f"eval/{prefix}parl_total_steps": p_tot,
-      f"eval/{prefix}parl_speedup": p_tot / max(p_crit, 1e-6),
-      f"eval/{prefix}parl_mean_children": statistics.fmean(
-          [float(len(e.children)) for e in parl_eps]
-      ),
-      f"eval/{prefix}parl_parallel_rate": statistics.fmean(
-          [1.0 if len(e.children) >= 2 else 0.0 for e in parl_eps]
-      ),
-      f"eval/{prefix}serial_r_perf": s_r,
-      f"eval/{prefix}serial_em": statistics.fmean(
-          [s.components.get("em", 0.0) for s in ser_scores]
-      ),
-      f"eval/{prefix}serial_critical_steps": s_crit,
-      f"eval/{prefix}delta_r_perf_vs_serial": p_r - s_r,
-  }
-
-
-async def evaluate_serial_vs_parl(
-    *,
-    step_id: int,
-    eval_pub: list[dict[str, Any]],
-    eval_priv: dict[str, Any],
-    recipe: Recipe,
-    snapshots: SnapshotBundle,
-    adapters: dict[str, RoleSamplerAdapter],
-    wiki_env: parl_wf.HttpWikiSearchEnv,
-    max_critical_steps: int,
-) -> dict[str, float]:
-  """Evaluates PARL parallel policy vs matched-budget Serial baseline on Heldout."""
-  plan = repeat_tasks(eval_pub, attempts=1, base_seed=step_id * 100)
-  parl_step = StepContext(
-      step_id=step_id,
-      tasks=eval_pub,
-      private_examples=eval_priv,
-      recipe=recipe,
-      snapshots=snapshots,
-      adapters=adapters,
-      learners={},
-      env_factory=lambda _: wiki_env,
-  )
-  parl_eps = await parl_step.collect(
-      plan,
-      mode=CollectionMode.STRICT_BUNDLE,
-      max_concurrent_episodes=48,
-      max_concurrent_sampler_calls=96,
-  )
-  parl_scores = await parl_step.grade(parl_eps)
-
-  serial_recipe = dataclasses.replace(
-      recipe,
-      workflow=lambda task, ctx: parl_wf.serial_baseline_workflow(
-          task, ctx, max_steps=max_critical_steps
-      ),
-  )
-  serial_step = StepContext(
-      step_id=step_id,
-      tasks=eval_pub,
-      private_examples=eval_priv,
-      recipe=serial_recipe,
-      snapshots=snapshots,
-      adapters=adapters,
-      learners={},
-      env_factory=lambda _: wiki_env,
-  )
-  ser_eps = await serial_step.collect(
-      plan,
-      mode=CollectionMode.STRICT_BUNDLE,
-      max_concurrent_episodes=48,
-      max_concurrent_sampler_calls=96,
-  )
-  ser_scores = await serial_step.grade(ser_eps)
-
-  out = _summarize_eval_subset("", parl_eps, parl_scores, ser_eps, ser_scores)
-  for kind, pref in (("wide_wikiqa", "wide_"), ("multihop_qa", "mh_")):
-    idx = [
-        i for i, e in enumerate(parl_eps) if eval_priv[e.task_id].get("kind") == kind
-    ]
-    out.update(
-        _summarize_eval_subset(
-            pref,
-            [parl_eps[i] for i in idx],
-            [parl_scores[i] for i in idx],
-            [ser_eps[i] for i in idx],
-            [ser_scores[i] for i in idx],
-        )
-    )
-  return out
-
-
 def _init_wandb(args: argparse.Namespace) -> Any:
   if not os.environ.get("WANDB_API_KEY"):
     return None
@@ -464,43 +400,94 @@ def _init_wandb(args: argparse.Namespace) -> Any:
 
 def parse_args() -> argparse.Namespace:
   p = argparse.ArgumentParser(description=__doc__)
-  p.add_argument("--model-id", default="Qwen/Qwen3-4B")
+  p.add_argument("--mode", choices=("parl", "serial_rl"), default="parl")
+  p.add_argument("--model-id", default="Qwen/Qwen3-32B")
   p.add_argument("--model-path", type=Path, required=True)
   p.add_argument("--data-root", type=Path, required=True)
   p.add_argument("--upstream-root", type=Path, required=True)
+  p.add_argument("--browsecomp-dir", type=Path, default=None)
   p.add_argument("--run-root", type=Path, required=True)
-  p.add_argument("--num-steps", type=int, default=100)
+  p.add_argument("--tp-serve", type=int, default=0)
+  p.add_argument("--num-steps", type=int, default=200)
   p.add_argument("--tasks-per-step", type=int, default=16)
   p.add_argument("--attempts-per-task", type=int, default=8)
-  p.add_argument("--max-critical-steps", type=int, default=8)
-  p.add_argument("--max-waves", type=int, default=3)
-  p.add_argument("--max-wave-width", type=int, default=4)
-  p.add_argument("--wide-min-width", type=int, default=2)
-  p.add_argument("--wide-max-width", type=int, default=3)
-  p.add_argument("--n-wide-train", type=int, default=900)
-  p.add_argument("--n-multihop-train", type=int, default=900)
-  p.add_argument("--n-wide-eval", type=int, default=48)
-  p.add_argument("--n-multihop-eval", type=int, default=48)
-  p.add_argument("--anneal-steps", type=int, default=40)
-  p.add_argument("--lambda-parallel", type=float, default=0.15)
+  p.add_argument("--max-critical-steps", type=int, default=16)
+  p.add_argument("--max-waves", type=int, default=6)
+  p.add_argument("--max-wave-width", type=int, default=12)
+  p.add_argument("--max-worker-steps", type=int, default=4)
+  p.add_argument("--dual-mode", action="store_true")
+  p.add_argument("--enable-thinking", action="store_true")
+  p.add_argument("--wide-min-width", type=int, default=6)
+  p.add_argument("--wide-max-width", type=int, default=10)
+  p.add_argument("--n-wide-train", type=int, default=1200)
+  p.add_argument("--n-multihop-train", type=int, default=600)
+  p.add_argument("--n-browsecomp-train", type=int, default=630)
+  p.add_argument("--n-wide-eval", type=int, default=96)
+  p.add_argument("--n-multihop-eval", type=int, default=64)
+  p.add_argument("--n-browsecomp-eval", type=int, default=128)
+  p.add_argument("--anneal-steps", type=int, default=60)
+  p.add_argument("--lambda-parallel", type=float, default=0.20)
   p.add_argument("--lambda-finish", type=float, default=0.15)
+  p.add_argument("--kl-beta", type=float, default=0.01)
+  p.add_argument("--epsilon-high", type=float, default=0.28)
   p.add_argument("--learning-rate", type=float, default=1e-6)
   p.add_argument("--lr-schedule", choices=("constant", "cosine"), default="cosine")
-  p.add_argument("--micro-batch-size", type=int, default=4)
-  p.add_argument("--max-prompt-length", type=int, default=4096)
-  p.add_argument("--max-response-length", type=int, default=512)
-  p.add_argument("--eval-every", type=int, default=10)
+  p.add_argument("--micro-batch-size", type=int, default=2)
+  p.add_argument("--max-prompt-length", type=int, default=6144)
+  p.add_argument("--max-response-length", type=int, default=1024)
+  p.add_argument("--eval-every", type=int, default=20)
   p.add_argument("--eval-temperature", type=float, default=0.0)
-  p.add_argument("--hbm-utilization", type=float, default=0.62)
+  p.add_argument("--pareto-budgets", default="4,8,12,16,20")
+  p.add_argument("--hbm-utilization", type=float, default=0.60)
   p.add_argument("--unlink-staged-weights", action="store_true")
-  p.add_argument("--wandb-name", default="haoyugao-parl-qwen3-4b-opt5-run1")
+  p.add_argument("--wandb-name", default="haoyugao-parl-v3-qwen3-32b")
   return p.parse_args()
 
 
-def _unlink_staged_files(retriever: Any, model_path: Path) -> None:
-  if hasattr(retriever, "release_vectors_file"):
-    retriever.release_vectors_file(unlink=True)
-    print("[parl-boot] freed staged Wiki-18 vectors (31 GiB) from tmpfs", flush=True)
+def _resolve_tp_serve(args: argparse.Namespace) -> int:
+  if args.tp_serve > 0:
+    return int(args.tp_serve)
+  low = args.model_id.lower()
+  return 2 if ("32b" in low or "30b" in low or "35b" in low) else 1
+
+
+def _build_ref_worker(
+    args: argparse.Namespace,
+    mesh: jax.sharding.Mesh,
+) -> trainer_worker.TrainerWorker | None:
+  if args.kl_beta <= 0.0:
+    return None
+  from tunix.models import automodel  # pylint: disable=g-import-not-at-top
+
+  with mesh:
+    ref_actor, _ = automodel.AutoModel.from_pretrained(
+        args.model_id,
+        mesh,
+        model_path=str(args.model_path),
+        remat_config="NONE",
+        dtype="bfloat16",
+        load_dtype="bfloat16",
+        use_flash_attention=False,
+    )
+    ref_trainer = peft_trainer_v2.PeftTrainer(
+        ref_actor,
+        optax.set_to_zero(),
+        peft_trainer_v2.TrainingConfig(
+            eval_every_n_steps=args.num_steps + 1,
+            max_steps=1,
+            gradient_accumulation_steps=1,
+            resume_from_checkpoint_on_init=False,
+        ),
+        sampler_type="inprocess_vllm",
+    )
+    ref_worker = trainer_worker.TrainerWorker(
+        lambda: ref_trainer, logps_chunk_size=0, execution_context=mesh
+    )
+    ref_worker.initialize()
+    return ref_worker
+
+
+def _unlink_safetensors(model_path: Path) -> None:
   removed = 0
   for sf in model_path.glob("*.safetensors"):
     sf.unlink(missing_ok=True)
@@ -515,20 +502,30 @@ def _boot_parl_stack(args: argparse.Namespace) -> dict[str, Any]:
 
   if not flags.FLAGS.is_parsed():
     flags.FLAGS(["swarm_parl"])
-  part = partition_parl_devices()
+  tp_serve = _resolve_tp_serve(args)
+  part = partition_parl_devices(tp_serve=tp_serve)
   print(
-      f"[parl-boot] model={args.model_id} chips={len(jax.devices())} train={part.train_mesh.size} "
+      f"[parl-boot] mode={args.mode} model={args.model_id} tp_serve={tp_serve} "
+      f"chips={len(jax.devices())} train={part.train_mesh.size} "
       f"ret={len(part.retrieval_devices)} dir={part.director_mesh.size} "
-      f"wrk={part.worker_mesh.size}",
+      f"wrk={part.worker_mesh.size} kl_beta={args.kl_beta}",
       flush=True,
   )
-  ret_server, retriever = paper_retrieval.start_tpu_retrieval_server(
+  ret_server, retriever, bc_ret = parl_ret.start_multi_corpus_retrieval_server(
       args.data_root / "wiki18",
       args.data_root / "models" / "e5-base-v2",
+      browsecomp_dir=args.browsecomp_dir,
       port=18610,
       tpu_devices=part.retrieval_devices,
   )
-  print(f"[parl-boot] Wiki-18 ({retriever.total}) ready on :18610", flush=True)
+  print(
+      f"[parl-boot] Retrieval ready on :18610 wiki18={retriever.total} "
+      f"browsecomp={bc_ret.total if bc_ret else 0}",
+      flush=True,
+  )
+  if args.unlink_staged_weights and hasattr(retriever, "release_vectors_file"):
+    retriever.release_vectors_file(unlink=True)
+    print("[parl-boot] freed staged Wiki-18 vectors (31 GiB) from tmpfs", flush=True)
 
   tok = AutoTokenizer.from_pretrained(str(args.model_path), local_files_only=True)
   eos_ids = [int(tok.eos_token_id)]
@@ -580,8 +577,8 @@ def _boot_parl_stack(args: argparse.Namespace) -> dict[str, Any]:
     algo_cfg = algorithm_config.GRPOConfig(
         num_generations=args.attempts_per_task,
         epsilon=0.2,
-        epsilon_high=0.24,
-        beta=0.0,
+        epsilon_high=float(args.epsilon_high),
+        beta=float(args.kl_beta),
     )
     algo_cfg.temperature = 1.0
     worker.with_loss_fn(
@@ -591,6 +588,7 @@ def _boot_parl_stack(args: argparse.Namespace) -> dict[str, Any]:
         algo_core.build_gen_model_input_fn(algo_cfg, pad_id=pad_id, eos_id=eos_ids[0])
     )
 
+  ref_worker = _build_ref_worker(args, part.train_mesh)
   dir_engine = _build_vllm_engine(
       server_id="parl_director",
       actor=actor,
@@ -618,10 +616,11 @@ def _boot_parl_stack(args: argparse.Namespace) -> dict[str, Any]:
   _sync_actor_to_vllm(actor, dir_engine, part.director_mesh)
   _sync_actor_to_vllm(actor, wrk_engine, part.worker_mesh)
   if args.unlink_staged_weights:
-    _unlink_staged_files(retriever, args.model_path)
+    _unlink_safetensors(args.model_path)
   return {
       "actor": actor,
       "worker": worker,
+      "ref_worker": ref_worker,
       "tokenizer": tok,
       "eos_ids": eos_ids,
       "pad_id": pad_id,
@@ -682,13 +681,68 @@ def _build_role_adapters(
   return train_adapters, eval_adapters
 
 
+def _build_recipe(
+    args: argparse.Namespace,
+    init_snap: SnapshotRef,
+    dir_fidelity: ServingFidelity,
+) -> Recipe:
+  if args.mode == "serial_rl":
+    wf = lambda task, ctx: parl_wf.serial_baseline_workflow(
+        task,
+        ctx,
+        max_steps=args.max_critical_steps,
+        role="director",
+        enable_thinking=args.enable_thinking,
+    )
+    step_fn = group_grpo(
+        target="director",
+        roles=("director",),
+        attempts=args.attempts_per_task,
+        mode=CollectionMode.STRICT_BUNDLE,
+        max_policy_lag=0,
+    )
+  else:
+    wf = lambda task, ctx: parl_wf.parl_episode_workflow(
+        task,
+        ctx,
+        max_waves=args.max_waves,
+        max_wave_width=args.max_wave_width,
+        max_worker_steps=args.max_worker_steps,
+        dual_mode=args.dual_mode,
+        enable_thinking=args.enable_thinking,
+    )
+    step_fn = parl_grpo(
+        target="director",
+        roles=("director",),
+        attempts=args.attempts_per_task,
+        lambda_parallel_init=args.lambda_parallel,
+        lambda_finish_init=args.lambda_finish,
+        anneal_steps=args.anneal_steps,
+        mode=CollectionMode.STRICT_BUNDLE,
+        max_policy_lag=0,
+    )
+  return Recipe(
+      workflow=wf,
+      learners={"director": LearnerSpec.full("director", init_snap, fidelity=dir_fidelity)},
+      bindings={
+          "director": PolicySpec.follow("director", fidelity=dir_fidelity),
+          "worker": PolicySpec.fixed(init_snap),
+      },
+      grade=parl_tasks.grade_parl_episode,
+      train_step=step_fn,
+      budget=CriticalStepsBudget(limit=args.max_critical_steps),
+  )
+
+
 def _maybe_update_best_eval(
     best_eval: dict[str, Any],
     eval_metrics: dict[str, float],
     step_id: int,
     run_root: Path,
+    tag: str,
 ) -> dict[str, Any]:
-  if eval_metrics.get("eval/parl_r_perf", -1.0) > best_eval.get("eval/parl_r_perf", -1.0):
+  key = f"eval/{tag}_r_perf"
+  if eval_metrics.get(key, -1.0) > best_eval.get(key, -1.0):
     updated = {"step": step_id, **eval_metrics}
     (run_root / "parl_best_eval.json").write_text(
         json.dumps(updated, indent=2) + "\n", encoding="utf-8"
@@ -705,20 +759,25 @@ def main() -> int:
   encode = lambda text: tok.encode(text, add_special_tokens=False)
   train_pub, train_priv, eval_pub, eval_priv = parl_tasks.build_parl_splits(
       args.upstream_root,
+      browsecomp_dir=args.browsecomp_dir,
       n_wide_train=args.n_wide_train,
       n_multihop_train=args.n_multihop_train,
+      n_browsecomp_train=args.n_browsecomp_train,
       n_wide_eval=args.n_wide_eval,
       n_multihop_eval=args.n_multihop_eval,
+      n_browsecomp_eval=args.n_browsecomp_eval,
       wide_min_width=args.wide_min_width,
       wide_max_width=args.wide_max_width,
   )
   print(
       f"[parl-data] train={len(train_pub)} eval={len(eval_pub)} "
-      f"wide={args.wide_min_width}..{args.wide_max_width} wave_w={args.max_wave_width}",
+      f"wide={args.wide_min_width}..{args.wide_max_width} wave_w={args.max_wave_width} "
+      f"dual_mode={args.dual_mode} think={args.enable_thinking}",
       flush=True,
   )
   wiki_env = parl_wf.HttpWikiSearchEnv("http://127.0.0.1:18610/retrieve", top_k=3)
   model_slug = args.model_id.lower().split("/")[-1]
+  tag = "serial_rl" if args.mode == "serial_rl" else "parl"
 
   init_snap = SnapshotRef(model_id=args.model_id, revision=0, digest=f"{model_slug}-v0")
   dir_fidelity = ServingFidelity(
@@ -738,33 +797,13 @@ def main() -> int:
       )
   )
 
-  recipe = Recipe(
-      workflow=lambda task, ctx: parl_wf.parl_episode_workflow(
-          task, ctx, max_waves=args.max_waves, max_wave_width=args.max_wave_width
-      ),
-      learners={"director": LearnerSpec.full("director", init_snap, fidelity=dir_fidelity)},
-      bindings={
-          "director": PolicySpec.follow("director", fidelity=dir_fidelity),
-          "worker": PolicySpec.fixed(init_snap),
-      },
-      grade=parl_tasks.grade_parl_episode,
-      train_step=parl_grpo(
-          target="director",
-          roles=("director",),
-          attempts=args.attempts_per_task,
-          lambda_parallel_init=args.lambda_parallel,
-          lambda_finish_init=args.lambda_finish,
-          anneal_steps=args.anneal_steps,
-          mode=CollectionMode.STRICT_BUNDLE,
-          max_policy_lag=0,
-      ),
-      budget=CriticalStepsBudget(limit=args.max_critical_steps),
-  )
+  recipe = _build_recipe(args, init_snap, dir_fidelity)
   adapters, eval_adapters = _build_role_adapters(
       args, dir_wrapper, wrk_wrapper, encode, dir_fidelity
   )
   dir_trainer = Option5PeftDirectorTrainer(
       worker=stack["worker"],
+      ref_worker=stack["ref_worker"],
       pad_id=stack["pad_id"],
       eos_id=stack["eos_ids"][0],
       max_prompt_length=args.max_prompt_length,
@@ -775,6 +814,29 @@ def main() -> int:
   live_jsonl = args.run_root / "parl_live_metrics.jsonl"
   wb_run = _init_wandb(args)
   best_eval: dict[str, Any] = {}
+
+  # Evaluate strictly frozen Base Serial ONCE (decoupled from Director updates).
+  init_bundle = SnapshotBundle(
+      step_id=0,
+      role_snapshots={"director": init_snap, "worker": init_snap},
+      learner_snapshots={"director": init_snap},
+  )
+  base_serial = asyncio.run(
+      eval_utils.evaluate_frozen_base_serial(
+          eval_pub=eval_pub,
+          eval_priv=eval_priv,
+          recipe=recipe,
+          snapshots=init_bundle,
+          adapters=eval_adapters,
+          wiki_env=wiki_env,
+          max_critical_steps=args.max_critical_steps,
+          enable_thinking=args.enable_thinking,
+      )
+  )
+  (args.run_root / "base_serial_eval.json").write_text(
+      json.dumps(base_serial, indent=2) + "\n", encoding="utf-8"
+  )
+  print(f"[parl-base-serial] {json.dumps(base_serial)}", flush=True)
 
   def _publish(versions: dict[str, int]) -> None:
     new_rev = versions["director"]
@@ -793,8 +855,8 @@ def main() -> int:
     )
     eval_metrics: dict[str, float] = {}
     if step_id == 0 or (args.eval_every > 0 and step_id % args.eval_every == 0):
-      eval_metrics = asyncio.run(
-          evaluate_serial_vs_parl(
+      raw_ev = asyncio.run(
+          eval_utils.run_policy_eval(
               step_id=step_id,
               eval_pub=eval_pub,
               eval_priv=eval_priv,
@@ -802,10 +864,11 @@ def main() -> int:
               snapshots=bundle,
               adapters=eval_adapters,
               wiki_env=wiki_env,
-              max_critical_steps=args.max_critical_steps,
+              tag=tag,
           )
       )
-      best_eval = _maybe_update_best_eval(best_eval, eval_metrics, step_id, args.run_root)
+      eval_metrics = eval_utils.attach_base_deltas(raw_ev, base_serial, tag=tag)
+      best_eval = _maybe_update_best_eval(best_eval, eval_metrics, step_id, args.run_root, tag)
     start = (step_id * args.tasks_per_step) % len(train_pub)
     batch_tasks = [
         train_pub[(start + i) % len(train_pub)] for i in range(args.tasks_per_step)
@@ -825,19 +888,13 @@ def main() -> int:
     )
     res = asyncio.run(recipe.train_step(step_ctx))
     asyncio.run(step_ctx.commit(res))
-    row = {
-        "step": step_id,
-        "wall_s": time.monotonic() - t0,
-        **res.metrics,
-        **eval_metrics,
-    }
+    row = {"step": step_id, "wall_s": time.monotonic() - t0, **res.metrics, **eval_metrics}
     with live_jsonl.open("a", encoding="utf-8") as f:
       f.write(json.dumps(row) + "\n")
     if wb_run is not None:
       wb_run.log(row, step=step_id)
     print(f"[parl-step-{step_id:04d}] {json.dumps(row)}", flush=True)
 
-  # Final Heldout Evaluation after Step N-1 update.
   final_snap = SnapshotRef(
       model_id=args.model_id, revision=args.num_steps, digest=dir_wrapper.digest
   )
@@ -846,8 +903,8 @@ def main() -> int:
       role_snapshots={"director": final_snap, "worker": init_snap},
       learner_snapshots={"director": final_snap},
   )
-  final_eval = asyncio.run(
-      evaluate_serial_vs_parl(
+  raw_final = asyncio.run(
+      eval_utils.run_policy_eval(
           step_id=args.num_steps,
           eval_pub=eval_pub,
           eval_priv=eval_priv,
@@ -855,13 +912,35 @@ def main() -> int:
           snapshots=final_bundle,
           adapters=eval_adapters,
           wiki_env=wiki_env,
-          max_critical_steps=args.max_critical_steps,
+          tag=tag,
       )
   )
-  best_eval = _maybe_update_best_eval(best_eval, final_eval, args.num_steps, args.run_root)
+  final_eval = eval_utils.attach_base_deltas(raw_final, base_serial, tag=tag)
+  best_eval = _maybe_update_best_eval(best_eval, final_eval, args.num_steps, args.run_root, tag)
   (args.run_root / "parl_final_eval.json").write_text(
       json.dumps(final_eval, indent=2) + "\n", encoding="utf-8"
   )
+  budgets = tuple(int(x) for x in args.pareto_budgets.split(",") if x.strip())
+  if budgets:
+    pareto = asyncio.run(
+        eval_utils.run_pareto_sweep(
+            budgets=budgets,
+            step_id=args.num_steps,
+            eval_pub=eval_pub,
+            eval_priv=eval_priv,
+            recipe=recipe,
+            snapshots=final_bundle,
+            adapters=eval_adapters,
+            wiki_env=wiki_env,
+            tag=tag,
+            enable_thinking=args.enable_thinking,
+            include_base_serial=(args.mode == "parl"),
+        )
+    )
+    (args.run_root / "parl_pareto_eval.json").write_text(
+        json.dumps(pareto, indent=2) + "\n", encoding="utf-8"
+    )
+    print(f"[parl-pareto] {json.dumps(pareto)}", flush=True)
   if wb_run is not None:
     wb_run.log(final_eval, step=args.num_steps)
     wb_run.finish()
