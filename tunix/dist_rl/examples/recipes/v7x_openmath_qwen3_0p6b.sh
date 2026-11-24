@@ -17,9 +17,10 @@
 # ==============================================================================
 # High-throughput strict on-policy GRPO recipe (<40s/step) on Ironwood TPU v7x
 # layered on `../openmath_dist/k8s_launcher.sh` (`../openmath_dist/openmath.yaml`):
-# - Trainer: MaxText on Pathways (`tpu7x:2x2x4`, 16 chips / 32 devices, FSDP=32,
-#   TP=1) with 17408-token sequence packing, Tokamax Splash Attention (1024-token
-#   tiles + diagonal mask skip), no activation remat (`remat_policy="none"`), and
+# - Trainer: MaxText on Pathways (`tpu7x:2x2x4`, 16 chips / 32 devices, FSDP=16,
+#   intra-chip TP=2) with 26624-token sequence packing
+#   (`train_micro_batch_size=16`), Tokamax Splash Attention (1024-token tiles +
+#   diagonal mask skip), no activation remat (`remat_policy="none"`), and
 #   single-pass on-policy logps (`use_rollout_logps: false` in `openmath.yaml`).
 # - Rollout: 12 single-host vLLM replicas (`12 x tpu7x:2x2x1`, 48 chips / 96
 #   devices, intra-chip TP=2, DP=4 per replica -> 48 concurrent DP workers) with
@@ -51,16 +52,21 @@ exec "${DIR}/../openmath_dist/k8s_launcher.sh" \
   cluster_config.pathways.server_memory.request="100G" \
   cluster_config.pathways.rm_memory.request="4G" \
   cluster_config.k8s.trainer.tpu_slice="tpu7x:2x2x4" \
-  actor_model_config.mesh.shape="(32,1,1)" \
+  actor_model_config.mesh.shape="(16,2,1)" \
   cluster_config.k8s.rollout.tpu_slice="tpu7x:2x2x1" \
   rollout_model_config.mesh.shape="(4,2)" \
-  rl_training_config.max_seq_token_per_tpu=17408 \
+  rl_training_config.train_micro_batch_size=16 \
+  rl_training_config.max_seq_token_per_tpu=26624 \
   rl_training_config.profiler_options.profiler_steps=0 \
   dist_training_config.maxtext_extra_config.use_tokamax_splash=true \
   dist_training_config.maxtext_extra_config.sa_qk_diag_skip=true \
   dist_training_config.maxtext_extra_config.sa_sv_diag_skip=true \
   dist_training_config.maxtext_extra_config.sa_use_base2_exp=true \
   dist_training_config.maxtext_extra_config.remat_policy="none" \
+  dist_training_config.maxtext_extra_config.decoder_layer_input="device" \
+  dist_training_config.maxtext_extra_config.query_proj="device" \
+  dist_training_config.maxtext_extra_config.key_proj="device" \
+  dist_training_config.maxtext_extra_config.value_proj="device" \
   dist_training_config.maxtext_extra_config.sa_block_q=1024 \
   dist_training_config.maxtext_extra_config.sa_block_q_dkv=1024 \
   dist_training_config.maxtext_extra_config.sa_block_q_dq=1024 \
