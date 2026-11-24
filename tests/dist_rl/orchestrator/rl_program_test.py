@@ -1758,6 +1758,8 @@ class RLProgramTest(absltest.TestCase):
         batch_config=self.batch_config,
         reward_fns=[lambda prompts, completions, **_: next(rewards_iter)],
         assembler=self.assembler,
+        rollout_temperature=0.9,
+        rollout_returns_routed_experts=False,
         **kwargs,
     )
     self.addCleanup(program.close)
@@ -1852,9 +1854,6 @@ class RLProgramTest(absltest.TestCase):
     asyncio.run(_run())
 
   def test_drop_zero_variance_groups_requires_train_and_completion_order(self):
-    algo_cfg = dataclasses.replace(
-        self.algo_config, drop_zero_variance_groups=True
-    )
     for kwargs in (
         {"group_order": rl_program.GroupOrder.PROMPT_ARRIVAL},
         {"mode": rl_program.Mode.EVAL},
@@ -1864,9 +1863,15 @@ class RLProgramTest(absltest.TestCase):
       ):
         rl_program.StandardRLProgram(
             dataset=["p0"],
-            algo_config=algo_cfg,
+            # A fresh config per program: the program writes
+            # `rollout_temperature` into its `algo_config` in place.
+            algo_config=dataclasses.replace(
+                self.algo_config, drop_zero_variance_groups=True
+            ),
             batch_config=self.batch_config,
             reward_fns=[lambda prompts, completions, **_: [1.0, 1.0]],
+            rollout_temperature=0.9,
+            rollout_returns_routed_experts=False,
             **kwargs,
         )
 
