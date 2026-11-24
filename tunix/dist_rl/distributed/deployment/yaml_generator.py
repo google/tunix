@@ -703,6 +703,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
       default="",
       help="Command to run on Ray worker pods before joining the Ray cluster.",
   )
+  parser.add_argument(
+      "--otel_googlecloud",
+      action=argparse.BooleanOptionalAction,
+      default=True,
+      help=(
+          "Enable Cloud Monitoring and Cloud Logging (`googlecloud`) exporters"
+          " in `jobset.otel.yaml` (default: True; pass --no-otel_googlecloud to"
+          " keep only `debug` and `file/events`)."
+      ),
+  )
 
   args = parser.parse_args(argv)
   retired = [
@@ -1113,9 +1123,20 @@ def build_substitutions(
         "- name: TPU_RAIDEN_DATA_NICS\n"
         f"  value: {json.dumps(raiden_data_nics)}"
     )
+  if args.otel_googlecloud:
+    otel_pipeline_args = (
+        "- --set=service::pipelines::metrics::exporters=[debug,googlecloud]\n"
+        "- --set=service::pipelines::logs::exporters="
+        "[debug,googlecloud,file/events]"
+    )
+  else:
+    otel_pipeline_args = (
+        "- --set=service::pipelines::logs::exporters=[debug,file/events]"
+    )
 
   return {
       "JOBSET_NAME": jobset_name,
+      "OTEL_PIPELINE_ARGS": otel_pipeline_args,
       "USER": os.environ.get("USER"),
       "NAMESPACE": args.namespace,
       "QUEUE_NAME": args.queue_name,

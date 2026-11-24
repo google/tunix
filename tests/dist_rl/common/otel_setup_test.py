@@ -142,84 +142,12 @@ class OtelSetupTest(absltest.TestCase):
             reloaded.normalize_endpoint("127.0.0.1:4317"),
             "http://127.0.0.1:4317",
         )
-        self.assertFalse(
-            reloaded.setup_metrics(default_service_name="x", endpoint="")
-        )
+        self.assertFalse(reloaded.setup_metrics(service_name="x", endpoint=""))
     finally:
       importlib.reload(otel_setup)
 
   def test_disabled_without_endpoint(self):
-    with mock.patch.dict(os.environ):
-      os.environ.pop("OTEL_EXPORTER_OTLP_ENDPOINT", None)
-      self.assertFalse(otel_setup.setup_metrics(default_service_name="x"))
-
-  def test_legacy_env_settings_parses_values_defaults_and_rejects_bad_inputs(
-      self,
-  ):
-    with mock.patch.dict(os.environ, {}, clear=True):
-      self.assertEqual(
-          otel_setup.legacy_env_settings(),
-          (
-              "",
-              otel_setup.DEFAULT_EXPORT_INTERVAL_MS,
-              otel_setup.DEFAULT_EXPORT_TIMEOUT_S,
-          ),
-      )
-
-    with mock.patch.dict(
-        os.environ,
-        {
-            "OTEL_EXPORTER_OTLP_ENDPOINT": "  127.0.0.1:4317  ",
-            "OTEL_METRIC_EXPORT_INTERVAL": "4000",
-            "OTEL_EXPORTER_OTLP_TIMEOUT": "2.5",
-        },
-        clear=True,
-    ):
-      self.assertEqual(
-          otel_setup.legacy_env_settings(), ("127.0.0.1:4317", 4000, 2.5)
-      )
-      with (
-          mock.patch.object(
-              otlp_metric_exporter,
-              "OTLPMetricExporter",
-              side_effect=_RecordingMetricExporter,
-          ) as mock_metric,
-          mock.patch.object(
-              otlp_log_exporter,
-              "OTLPLogExporter",
-              side_effect=_RecordingLogExporter,
-          ) as mock_log,
-      ):
-        self.assertTrue(
-            otel_setup.setup_metrics(default_service_name="tunix-trainer")
-        )
-      self.assertEqual(
-          mock_metric.call_args.kwargs["endpoint"], "http://127.0.0.1:4317"
-      )
-      self.assertEqual(mock_metric.call_args.kwargs["timeout"], 2.5)
-      self.assertEqual(mock_log.call_args.kwargs["timeout"], 2.5)
-
-    for bad_interval in ("abc", "0", "-5"):
-      with self.subTest(bad_interval=bad_interval):
-        with mock.patch.dict(
-            os.environ,
-            {"OTEL_METRIC_EXPORT_INTERVAL": bad_interval},
-            clear=True,
-        ):
-          with self.assertRaisesRegex(
-              ValueError, "OTEL_METRIC_EXPORT_INTERVAL"
-          ):
-            otel_setup.legacy_env_settings()
-
-    for bad_timeout in ("abc", "0", "-1", "nan", "inf"):
-      with self.subTest(bad_timeout=bad_timeout):
-        with mock.patch.dict(
-            os.environ,
-            {"OTEL_EXPORTER_OTLP_TIMEOUT": bad_timeout},
-            clear=True,
-        ):
-          with self.assertRaisesRegex(ValueError, "OTEL_EXPORTER_OTLP_TIMEOUT"):
-            otel_setup.legacy_env_settings()
+    self.assertFalse(otel_setup.setup_metrics(service_name="x", endpoint="  "))
 
   def test_disabled_with_warning_when_exporter_missing(self):
     missing = {"opentelemetry.exporter.otlp.proto.grpc.metric_exporter": None}
@@ -227,7 +155,7 @@ class OtelSetupTest(absltest.TestCase):
       with self.assertLogs(level="WARNING") as logs:
         self.assertFalse(
             otel_setup.setup_metrics(
-                default_service_name="x", endpoint="http://127.0.0.1:4317"
+                service_name="x", endpoint="http://127.0.0.1:4317"
             )
         )
     self.assertTrue(any("google-tunix[otel]" in line for line in logs.output))
@@ -263,7 +191,7 @@ class OtelSetupTest(absltest.TestCase):
     ):
       self.assertTrue(
           otel_setup.setup_metrics(
-              default_service_name="tunix-rollout",
+              service_name="tunix-rollout",
               resource_attributes={
                   "tunix.worker_id": "rollout_0",
                   "tunix.role": "rollout",
@@ -381,7 +309,7 @@ class OtelSetupTest(absltest.TestCase):
           metric_fake.reset()
           log_fake.reset()
           child_setup = otel_setup.setup_metrics(
-              default_service_name="tunix-child",
+              service_name="tunix-child",
               endpoint="http://127.0.0.1:4317",
           )
           sec_hist.record(1.2)
@@ -418,7 +346,7 @@ class OtelSetupTest(absltest.TestCase):
   def test_idempotent_and_warns_on_role_collision_when_provider_installed(self):
     self.assertTrue(
         otel_setup.setup_metrics(
-            default_service_name="tunix-orchestrator",
+            service_name="tunix-orchestrator",
             endpoint="http://127.0.0.1:1",
             export_interval_ms=60_000,
             export_timeout_s=1.0,
@@ -427,14 +355,14 @@ class OtelSetupTest(absltest.TestCase):
     with mock.patch.object(otel_metrics, "set_meter_provider") as mock_set:
       self.assertTrue(
           otel_setup.setup_metrics(
-              default_service_name="tunix-orchestrator",
+              service_name="tunix-orchestrator",
               endpoint="http://127.0.0.1:1",
           )
       )
       with self.assertLogs(level="WARNING") as logs:
         self.assertTrue(
             otel_setup.setup_metrics(
-                default_service_name="tunix-trainer",
+                service_name="tunix-trainer",
                 endpoint="http://127.0.0.1:1",
             )
         )
@@ -480,7 +408,7 @@ class OtelSetupTest(absltest.TestCase):
       t1 = threading.Thread(
           target=lambda: results.append(
               otel_setup.setup_metrics(
-                  default_service_name="tunix-orchestrator",
+                  service_name="tunix-orchestrator",
                   endpoint="http://127.0.0.1:4317",
               )
           )
@@ -488,7 +416,7 @@ class OtelSetupTest(absltest.TestCase):
       t2 = threading.Thread(
           target=lambda: results.append(
               otel_setup.setup_metrics(
-                  default_service_name="tunix-trainer",
+                  service_name="tunix-trainer",
                   endpoint="http://127.0.0.1:4317",
               )
           )
@@ -537,7 +465,7 @@ class OtelSetupTest(absltest.TestCase):
           ValueError, "OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE"
       ):
         otel_setup.setup_metrics(
-            default_service_name="tunix-rollout",
+            service_name="tunix-rollout",
             endpoint="http://127.0.0.1:4317",
         )
 
@@ -571,7 +499,7 @@ class OtelSetupTest(absltest.TestCase):
     ):
       with self.assertRaisesRegex(ValueError, "OTEL_BLRP_SCHEDULE_DELAY"):
         otel_setup.setup_metrics(
-            default_service_name="tunix-rollout",
+            service_name="tunix-rollout",
             endpoint="http://127.0.0.1:4317",
         )
 
@@ -599,7 +527,7 @@ class OtelSetupTest(absltest.TestCase):
     ):
       with self.assertRaisesRegex(ValueError, "OTEL_METRIC_EXPORT_INTERVAL"):
         otel_setup.setup_metrics(
-            default_service_name="tunix-rollout",
+            service_name="tunix-rollout",
             endpoint="http://127.0.0.1:4317",
         )
 
@@ -623,7 +551,7 @@ class OtelSetupTest(absltest.TestCase):
     ):
       self.assertTrue(
           otel_setup.setup_metrics(
-              default_service_name="tunix-rollout",
+              service_name="tunix-rollout",
               endpoint="http://127.0.0.1:4317",
           )
       )
@@ -669,7 +597,7 @@ class OtelSetupTest(absltest.TestCase):
     ):
       self.assertFalse(
           otel_setup.setup_metrics(
-              default_service_name="tunix-rollout",
+              service_name="tunix-rollout",
               endpoint="http://127.0.0.1:4317",
           )
       )
@@ -702,7 +630,7 @@ class OtelSetupTest(absltest.TestCase):
     ):
       self.assertTrue(
           otel_setup.setup_metrics(
-              default_service_name="tunix-rollout",
+              service_name="tunix-rollout",
               endpoint="http://127.0.0.1:4317",
           )
       )
@@ -738,14 +666,14 @@ class OtelSetupTest(absltest.TestCase):
       with self.subTest(endpoint=bad_endpoint):
         with self.assertRaisesRegex(ValueError, "OTLP endpoint"):
           otel_setup.setup_metrics(
-              default_service_name="tunix-rollout", endpoint=bad_endpoint
+              service_name="tunix-rollout", endpoint=bad_endpoint
           )
 
     for bad_interval in (0, -5, False):
       with self.subTest(interval=bad_interval):
         with self.assertRaisesRegex(ValueError, "export_interval_ms"):
           otel_setup.setup_metrics(
-              default_service_name="tunix-trainer",
+              service_name="tunix-trainer",
               endpoint="http://127.0.0.1:1",
               export_interval_ms=bad_interval,
           )
@@ -754,7 +682,7 @@ class OtelSetupTest(absltest.TestCase):
       with self.subTest(timeout=bad_timeout):
         with self.assertRaisesRegex(ValueError, "export_timeout_s"):
           otel_setup.setup_metrics(
-              default_service_name="tunix-trainer",
+              service_name="tunix-trainer",
               endpoint="http://127.0.0.1:1",
               export_timeout_s=bad_timeout,
           )

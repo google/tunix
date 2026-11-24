@@ -570,6 +570,52 @@ class YamlGeneratorTest(parameterized.TestCase):
             rendered,
         )
         self.assertIn("memory: 512Mi", rendered)
+        deployment = list(yaml.safe_load_all(rendered))[0]
+        container = deployment["spec"]["template"]["spec"]["containers"][0]
+        self.assertIn(
+            "--set=service::pipelines::metrics::exporters=[debug,googlecloud]",
+            container["args"],
+        )
+        self.assertIn(
+            "--set=service::pipelines::logs::exporters="
+            "[debug,googlecloud,file/events]",
+            container["args"],
+        )
+        self.assertIn(
+            {
+                "name": "TUNIX_OTEL_EVENTS_FILE",
+                "value": "/tmp/otelcol-storage/tunix-otel-events.jsonl",
+            },
+            container["env"],
+        )
+
+    with open(template_file, "r") as f:
+      template_text = f.read()
+    no_gc_rendered = yaml_generator.render_template(
+        template_text,
+        yaml_generator.parse_args([
+            template_file,
+            "--jobset_name=test-user-otel",
+            "--namespace=test-ns",
+            "--service_account=otel-sa",
+            "--worker_container_port=4317",
+            "--no-otel_googlecloud",
+        ]),
+    )
+    no_gc_dep = list(yaml.safe_load_all(no_gc_rendered))[0]
+    self.assertEqual(
+        no_gc_dep["spec"]["template"]["spec"]["serviceAccountName"],
+        "otel-sa",
+    )
+    no_gc_args = no_gc_dep["spec"]["template"]["spec"]["containers"][0]["args"]
+    self.assertNotIn(
+        "--set=service::pipelines::metrics::exporters=[debug,googlecloud]",
+        no_gc_args,
+    )
+    self.assertIn(
+        "--set=service::pipelines::logs::exporters=[debug,file/events]",
+        no_gc_args,
+    )
 
   def test_generate_pathways_yaml_init_containers(self):
     template_file = _get_template_path("jobset.pathways.yaml")
@@ -2058,6 +2104,15 @@ class YamlGeneratorTest(parameterized.TestCase):
     )
     user_mounts = proc_spec["containers"][0]["volumeMounts"]
     self.assertIn({"name": "dshm", "mountPath": "/dev/shm"}, user_mounts)
+
+  def test_otel_collector_yaml_configures_logs_pipeline_and_append_jsonl(self):
+    collector_path = _get_template_path("otel-collector.yaml")
+    with open(collector_path, "r") as f:
+      doc = yaml.safe_load(f.read())
+    self.assertIs(doc["exporters"]["file/events"]["append"], True)
+    self.assertIn("logs", doc["service"]["pipelines"])
+    for exporter in doc["service"]["pipelines"]["logs"]["exporters"]:
+      self.assertIn(exporter, doc["exporters"])
 
 
 if __name__ == "__main__":

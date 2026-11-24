@@ -18,7 +18,7 @@
 #
 # Invoked by `launch.sh` (never directly) as `k8s.sh <command> [config args]`.
 # `otel` / `stop-otel` deploy / delete the OpenTelemetry collector that the
-# nodes export metrics to when `OTEL_EXPORTER_OTLP_ENDPOINT` points at it.
+# nodes export metrics and lineage event logs to when `otel_config.enable=true`.
 # Consumes the cluster/deployment environment variables exported by
 # `resolve_config.py` and forwards YAML + `key=value` arguments directly to
 # the `tunix.dist_rl.launch.nodes` trainer, rollout, and orchestrator mains via
@@ -94,17 +94,6 @@ bool_flag() {
 
 CONTAINER_ARGS_STR="$(format_args "${CONTAINER_CONFIG_ARGS[@]}")"
 
-# OpenTelemetry metrics export settings, read by every node
-# (`tunix/dist_rl/common/otel_setup.py`): passed to the pods when set in the
-# caller's environment, as `local.sh`'s child processes inherit them.
-OTEL_ENV_PREFIX=""
-for otel_var in OTEL_EXPORTER_OTLP_ENDPOINT OTEL_METRIC_EXPORT_INTERVAL \
-  OTEL_EXPORTER_OTLP_TIMEOUT; do
-  if [[ -n "${!otel_var:-}" ]]; then
-    OTEL_ENV_PREFIX+="${otel_var}=$(printf '%q' "${!otel_var}") "
-  fi
-done
-
 # Sandbox environment of the orchestrator and rollout processes: the
 # `kubernetes_config` placement and `ORCHESTRATOR_ID`, which keys the job-scoped
 # `SandboxFleet` they share. Placed before `ROLE_ENV_*` so role overrides take
@@ -176,7 +165,7 @@ start_orchestrator() {
   if [[ -n "${WANDB_API_KEY:-}" ]]; then
     env_prefix+="WANDB_API_KEY=$(printf '%q' "${WANDB_API_KEY}") "
   fi
-  env_prefix+="${OTEL_ENV_PREFIX}${SANDBOX_ENV_PREFIX}"
+  env_prefix+="${SANDBOX_ENV_PREFIX}"
   if [[ -n "${ROLE_ENV_ORCHESTRATOR}" ]]; then
     env_prefix+="${ROLE_ENV_ORCHESTRATOR} "
   fi
@@ -243,7 +232,7 @@ start_trainer() {
     env_prefix+=" ${ROLE_ENV_TRAINER}"
   fi
 
-  local startup_cmd="${OTEL_ENV_PREFIX}${env_prefix} python -m tunix.dist_rl.distributed.runtime.main --discovery_addrs=${K8S_ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} --process_executor=tunix.dist_rl.distributed.runtime.executor.K8sExecutor --process_main=${TRAINER_MAIN} ${CONTAINER_ARGS_STR}"
+  local startup_cmd="${env_prefix} python -m tunix.dist_rl.distributed.runtime.main --discovery_addrs=${K8S_ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} --process_executor=tunix.dist_rl.distributed.runtime.executor.K8sExecutor --process_main=${TRAINER_MAIN} ${CONTAINER_ARGS_STR}"
 
   run_yaml_gen \
     "${YAML_DIR}/${K8S_TRAINER_JOBSET_YAML}" \
@@ -368,7 +357,7 @@ render_rollout_yaml() {
   fi
 
   env_prefix="${env_prefix# }"
-  local startup_cmd="${OTEL_ENV_PREFIX}${env_prefix} python -m tunix.dist_rl.distributed.runtime.main --discovery_addrs=${K8S_ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} --process_executor=tunix.dist_rl.distributed.runtime.executor.K8sExecutor --process_main=${ROLLOUT_MAIN} ${CONTAINER_ARGS_STR}"
+  local startup_cmd="${env_prefix} python -m tunix.dist_rl.distributed.runtime.main --discovery_addrs=${K8S_ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} --process_executor=tunix.dist_rl.distributed.runtime.executor.K8sExecutor --process_main=${ROLLOUT_MAIN} ${CONTAINER_ARGS_STR}"
 
   run_yaml_gen \
     "${YAML_DIR}/${K8S_ROLLOUT_JOBSET_YAML}" \
@@ -451,8 +440,12 @@ stop_otel() {
 
 # Deploys the OpenTelemetry collector: the Deployment and Service in
 # `jobset.otel.yaml`, configured by `otel-collector.yaml`. The nodes export to
-# it with OTEL_EXPORTER_OTLP_ENDPOINT=http://${K8S_OTEL_ID}:${OTEL_PORT}.
+# it when launched with `otel_config.enable=true`.
 start_otel() {
+  local otel_gc_flag="--no-otel_googlecloud"
+  if is_true "${OTEL_GOOGLECLOUD}"; then
+    otel_gc_flag="--otel_googlecloud"
+  fi
   if is_true "${DRY_RUN}"; then
     echo "kubectl create configmap ${K8S_OTEL_ID}-config -n ${K8S_NAMESPACE} --from-file=otel-collector.yaml=${YAML_DIR}/otel-collector.yaml"
   else
@@ -464,7 +457,9 @@ start_otel() {
     "${YAML_DIR}/jobset.otel.yaml" \
     --jobset_name="${K8S_OTEL_ID}" \
     --namespace="${K8S_NAMESPACE}" \
+    ${K8S_SERVICE_ACCOUNT:+--service_account="${K8S_SERVICE_ACCOUNT}"} \
     --worker_container_port="${OTEL_PORT}" \
+    "${otel_gc_flag}" \
     | apply_manifest
 }
 

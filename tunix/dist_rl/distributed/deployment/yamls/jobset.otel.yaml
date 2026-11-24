@@ -40,6 +40,7 @@ spec:
       labels:
         app: ${JOBSET_NAME}
     spec:
+      ${SERVICE_ACCOUNT_LINE}
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
@@ -73,6 +74,10 @@ spec:
         args:
         - --config=/etc/otelcol-contrib/otel-collector.yaml
         - --set=receivers::otlp::protocols::grpc::endpoint=0.0.0.0:${USER_CONTAINER_PORT}
+        ${OTEL_PIPELINE_ARGS}
+        env:
+        - name: TUNIX_OTEL_EVENTS_FILE
+          value: /tmp/otelcol-storage/tunix-otel-events.jsonl
         ports:
         - containerPort: ${USER_CONTAINER_PORT}
           name: grpc

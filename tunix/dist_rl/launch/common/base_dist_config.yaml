@@ -356,6 +356,27 @@ trajectory_store_config:
   # Empty with the "file" backend: `<cluster_config.artifact_root>/trajectory_store`.
   dir: ""
 
+# OpenTelemetry export of every node's metrics and lineage event logs to an
+# OTLP/gRPC collector (`tunix/dist_rl/common/otel_setup.py`).
+otel_config:
+  enable: false
+  # On k8s (`launch.sh otel`), ship metrics and event logs from the in-cluster
+  # collector to Cloud Monitoring and Cloud Logging alongside `debug` and
+  # `file/events`. Set `false` on clusters without GCP credentials.
+  googlecloud: true
+  # Empty with `enable: true`: the collector that `launch.sh otel` deploys on
+  # k8s (`http://<cluster_config.k8s.otel_id>:<cluster_config.ports.otel>`), or
+  # `http://localhost:<cluster_config.ports.otel>` on local.
+  # `cluster_config.target: external` requires an explicit value.
+  endpoint: ""
+  # Keep in sync with `otel_setup.DEFAULT_EXPORT_INTERVAL_MS` / `_TIMEOUT_S`.
+  export_interval_ms: 10000
+  export_timeout_s: 5.0
+  # Cloud Monitoring dashboard the orchestrator links to at startup, filtered
+  # to `cluster_config.run_id`. Set both or neither.
+  dashboard_id: ""
+  dashboard_project: ""
+
 cluster_config:
   # Where the processes run and what starts them: "local" (one host,
   # `local.sh`) or "k8s" (GKE, `k8s.sh`), both through `launch.sh`; or
@@ -549,9 +570,8 @@ cluster_config:
     rollout_id: ""
     inference_id: ""
     # Name of the OpenTelemetry collector Deployment and Service that
-    # `launch.sh otel` deploys (default `<user>-otel`). To export metrics, set
-    # OTEL_EXPORTER_OTLP_ENDPOINT=http://<otel_id>:<ports.otel> when launching;
-    # every node then exports to it (`tunix/dist_rl/common/otel_setup.py`).
+    # `launch.sh otel` deploys (default `<user>-otel`). To export metrics and
+    # lineage event logs to it, set `otel_config.enable=true` when launching.
     otel_id: ""
     cpu_machine: "n2-standard-64"
     # Orchestrator node pool. Empty selects the node by `cpu_machine`.
