@@ -1,9 +1,10 @@
 """Metric logger with a unified, protocol-based backend system."""
 
 import collections
+from collections.abc import Callable
 import dataclasses
 import enum
-from typing import Any, Callable
+from typing import Any
 
 from absl import logging
 import jax
@@ -109,34 +110,99 @@ def _calculate_geometric_mean(x: np.ndarray) -> np.ndarray:
   return np.exp(np.mean(np.log(x)))
 
 
-def extract_scalar(val: Any) -> float | None:
-  """Safely extracts a scalar float from arrays, tensors, or WeightedMetrics."""
+# Mirrors `tunix.sft.utils._WEIGHTED_METRIC_FIELDS` / `WeightedMetricLike`
+# without pulling `flax`/`nnx` dependencies into `metrics_logger`.
+_WEIGHTED_METRIC_FIELDS = ("unreduced_sum", "denominator", "eps", "min_denom")
+
+# Metric namespaces that already carry their own top-level prefix and should be
+# logged directly under that namespace rather than nested under `actor/` or
+# `metrics_prefix`.
+TOP_LEVEL_METRIC_PREFIXES = (
+    "sampler_trainer/",
+    "sampler_is/",
+    "sampler_rs/",
+    "score_centering/",
+)
+
+
+def default_scalar_reducer(name: str) -> Callable[[Any], Any]:
+  """Returns the canonical cross-microbatch reducer for a scalar metric name.
+
+  Args:
+    name: Metric key (with or without namespace prefix, e.g.
+      ``"sampler_trainer/logp_diff_max"`` or ``"is_ratio/min"``).
+
+  Returns:
+    ``np.max`` for ``_max``/``/max`` keys, ``np.min`` for ``_min``/``/min``
+    keys, ``np.sum`` for ``_count``/``/count`` keys, and ``np.mean`` otherwise.
+  """
+  if name.endswith(("_max", "/max")):
+    return np.max
+  if name.endswith(("_min", "/min")):
+    return np.min
+  if name.endswith(("_count", "/count")):
+    return np.sum
+  return np.mean
+
+
+def _reduce_weighted_metric(val: Any) -> float | None:
+  """Reduces a single or microbatch-stacked `WeightedMetricLike` to a float."""
+  reduce_fn = getattr(type(val), "reduce", None)
+  try:
+    if callable(reduce_fn):
+      return float(reduce_fn([val]))
+    num = float(np.sum(np.asarray(val.unreduced_sum, dtype=np.float64)))
+    denom = float(np.sum(np.asarray(val.denominator, dtype=np.float64)))
+    if val.eps is not None:
+      denom += float(val.eps)
+    if val.min_denom is not None:
+      denom = max(denom, float(val.min_denom))
+    return float(num / denom) if denom else 0.0
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    logging.warning(
+        "Failed to reduce weighted metric %s: %s", type(val).__name__, exc
+    )
+    return None
+
+
+def extract_scalar(
+    val: Any,
+    aggregation_fn: Callable[[Any], Any] | None = None,
+) -> float | None:
+  """Safely extracts a scalar float from arrays, tensors, or WeightedMetrics.
+
+  Args:
+    val: Scalar, NumPy/JAX array, ``WeightedMetricLike`` (including
+      microbatch-stacked ``WeightedMetric`` or ``PearsonMetric``), or metric
+      object exposing ``compute()``.
+    aggregation_fn: Optional reduction applied to non-weighted scalar/array
+      values (e.g. ``np.max``, ``np.min``, ``np.sum``). When ``None``,
+      multi-element arrays default to ``np.mean``.
+
+  Returns:
+    The reduced Python ``float``, or ``None`` if ``val`` is ``None``, empty, or
+    cannot be computed/converted.
+  """
   if val is None:
     return None
+  if all(hasattr(val, field) for field in _WEIGHTED_METRIC_FIELDS):
+    return _reduce_weighted_metric(val)
   if hasattr(val, "compute") and callable(val.compute):
     try:
       val = val.compute()
     except Exception:  # pylint: disable=broad-exception-caught
       return None
-  if hasattr(val, "unreduced_sum") and hasattr(val, "denominator"):
-    try:
-      denom = float(np.sum(np.asarray(val.denominator)))
-      return (
-          float(np.sum(np.asarray(val.unreduced_sum)) / denom)
-          if denom > 0
-          else 0.0
-      )
-    except Exception:  # pylint: disable=broad-exception-caught
-      return None
   try:
     arr = np.asarray(val)
-    if arr.size == 1:
-      return float(arr.item())
-    elif arr.size > 1:
-      return float(np.mean(arr))
+    if arr.size == 0:
+      return None
+    if aggregation_fn is not None:
+      arr = np.asarray(aggregation_fn(arr))
+      if arr.size == 0:
+        return None
+    return float(arr.item()) if arr.size == 1 else float(np.mean(arr))
   except Exception:  # pylint: disable=broad-exception-caught
     return None
-  return None
 
 
 class MetricsLogger:

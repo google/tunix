@@ -95,6 +95,7 @@ _MAX_INFLIGHT_TRAIN_STEPS = 2
 # accumulate before the wave's RPC fires.
 _MAX_DISPATCH_BATCH_SIZE = 64
 
+
 _DispatchedPromptItem: TypeAlias = (
     dict[str, object] | dispatch_window.HasPromptId
 )
@@ -1498,12 +1499,13 @@ class StandardRLProgram(RLProgram):
     if trainer_metrics is not None:
       scalar_metrics = {}
       weighted_metrics = {}
+      aggregation_fns: dict[str, Callable[[Any], Any]] = {}
       if hasattr(trainer_metrics, "scalar_metrics"):
-        scalar_metrics.update(getattr(trainer_metrics, "scalar_metrics", {}))
+        scalar_metrics.update(trainer_metrics.scalar_metrics or {})
       if hasattr(trainer_metrics, "weighted_metrics"):
-        weighted_metrics.update(
-            getattr(trainer_metrics, "weighted_metrics", {})
-        )
+        weighted_metrics.update(trainer_metrics.weighted_metrics or {})
+      if hasattr(trainer_metrics, "aggregation_fns"):
+        aggregation_fns.update(trainer_metrics.aggregation_fns or {})
       if isinstance(trainer_metrics, dict):
         if (
             "scalar_metrics" in trainer_metrics
@@ -1511,77 +1513,64 @@ class StandardRLProgram(RLProgram):
         ):
           scalar_metrics.update(trainer_metrics.get("scalar_metrics") or {})
           weighted_metrics.update(trainer_metrics.get("weighted_metrics") or {})
+          aggregation_fns.update(trainer_metrics.get("aggregation_fns") or {})
         else:
           for k, v in trainer_metrics.items():
             if k == "metrics":
               continue
             scalar_metrics[k] = v
 
-      # Loss & Perplexity
-      raw_loss = scalar_metrics.pop(
-          "loss",
-          scalar_metrics.pop(
-              "trainer/loss", scalar_metrics.pop("actor/loss", None)
-          ),
-      )
-      if raw_loss is None and "loss" in weighted_metrics:
-        raw_loss = weighted_metrics.pop("loss")
-      elif raw_loss is None and "trainer/loss" in weighted_metrics:
-        raw_loss = weighted_metrics.pop("trainer/loss")
-      elif raw_loss is None and "actor/loss" in weighted_metrics:
-        raw_loss = weighted_metrics.pop("actor/loss")
+      def _reducer(key: str, clean_key: str) -> Callable[[Any], Any]:
+        return (
+            aggregation_fns.get(key)
+            or aggregation_fns.get(clean_key)
+            or metrics_logger_lib.default_scalar_reducer(clean_key)
+        )
 
-      loss_val = _extract_scalar(raw_loss)
+      def _pop_metric(clean_key: str, *dicts: dict[str, Any]) -> float | None:
+        for d in dicts:
+          for k in (clean_key, f"trainer/{clean_key}", f"actor/{clean_key}"):
+            if k in d and (val := d.pop(k)) is not None:
+              return _extract_scalar(val, aggregation_fn=_reducer(k, clean_key))
+        return None
+
+      def _log_aux(clean_key: str, val: float | None) -> None:
+        if val is None:
+          return
+        prefix = (
+            None
+            if clean_key.startswith(
+                metrics_logger_lib.TOP_LEVEL_METRIC_PREFIXES
+            )
+            else "actor"
+        )
+        self._log_metric(clean_key, val, log_step, prefix=prefix)
+
+      # Loss & Perplexity
+      loss_val = _pop_metric("loss", scalar_metrics, weighted_metrics)
       if loss_val is not None:
         self._log_metric("loss", loss_val, log_step, prefix="actor")
         perplexity_val = float(np.exp(loss_val))
         self._log_metric("perplexity", perplexity_val, log_step, prefix="actor")
 
-      # Learning Rate
-      raw_lr = scalar_metrics.pop(
-          "learning_rate",
-          scalar_metrics.pop(
-              "trainer/learning_rate",
-              scalar_metrics.pop("actor/learning_rate", None),
-          ),
-      )
-      lr_val = _extract_scalar(raw_lr)
-      if lr_val is not None:
-        self._log_metric("learning_rate", lr_val, log_step, prefix="actor")
-
-      # Grad Norm
-      raw_gn = scalar_metrics.pop(
-          "grad_norm",
-          scalar_metrics.pop(
-              "trainer/grad_norm", scalar_metrics.pop("actor/grad_norm", None)
-          ),
-      )
-      gn_val = _extract_scalar(raw_gn)
-      if gn_val is not None:
-        self._log_metric("grad_norm", gn_val, log_step, prefix="actor")
+      # Learning Rate & Grad Norm
+      for name in ("learning_rate", "grad_norm"):
+        if (val := _pop_metric(name, scalar_metrics)) is not None:
+          self._log_metric(name, val, log_step, prefix="actor")
 
       # Auxiliary weighted metrics
       for k, v in weighted_metrics.items():
-        val = _extract_scalar(v)
-        if val is not None:
-          clean_key = k.removeprefix("trainer/").removeprefix("actor/")
-          self._log_metric(clean_key, val, log_step, prefix="actor")
+        clean_key = k.removeprefix("trainer/").removeprefix("actor/")
+        _log_aux(clean_key, _extract_scalar(v))
 
       # Auxiliary scalar metrics
       for k, v in scalar_metrics.items():
         if k in ("perplexity", "trainer/perplexity", "actor/perplexity"):
           continue
-        val = _extract_scalar(v)
-        if val is not None:
-          clean_key = k.removeprefix("trainer/").removeprefix("actor/")
-          if clean_key.startswith((
-              "sampler_trainer/",
-              "sampler_is/",
-              "sampler_rs/",
-          )):
-            self._log_metric(clean_key, val, log_step)
-          else:
-            self._log_metric(clean_key, val, log_step, prefix="actor")
+        clean_key = k.removeprefix("trainer/").removeprefix("actor/")
+        _log_aux(
+            clean_key, _extract_scalar(v, aggregation_fn=_reducer(k, clean_key))
+        )
 
     # --- 5. Sampler/Trainer Agreement Metrics ---
     # Names are already namespaced (``sampler_trainer/*``, ``sampler_is/*``,

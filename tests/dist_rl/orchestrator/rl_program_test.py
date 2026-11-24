@@ -43,6 +43,7 @@ from tunix.dist_rl.worker import inference_worker as exp_inference_worker
 from tunix.dist_rl.worker import remote_execution
 from tunix.rl import algo_core
 from tunix.rl import algorithm_config
+from tunix.rl import common as rl_common
 from tunix.rl import function_registry
 from tunix.rl.inference import inference_worker as rl_inference_worker
 from tunix.sft import metrics_logger as metrics_logger_lib
@@ -6140,6 +6141,122 @@ class RLProgramTest(absltest.TestCase):
         raise RuntimeError("Metric compute failed")
 
     self.assertIsNone(rl_program._extract_scalar(FailingMetric()))
+
+  def test_stacked_multi_microbatch_trainer_metrics_reduction(self):
+    async def _run():
+      # 2-microbatch stacked PearsonMetric (shape (2, 3)): within-microbatch
+      # correlation is 0.0 and naive sum/sum is 0.2, while Chan's global
+      # Pearson across means (0, 0) and (4, 4) is 16 / 18 = 8/9.
+      stacked_pearson = rl_common.PearsonMetric(
+          unreduced_sum=np.array([[0.0, 1.0, 1.0], [0.0, 1.0, 1.0]]),
+          denominator=np.array([[2.0, 0.0, 0.0], [2.0, 4.0, 4.0]]),
+          min_denom=1e-12,
+      )
+
+      mock_buffer = datatypes.MetricsBuffer(
+          id=0,
+          scalar_metrics={
+              "loss": np.array([0.4, 0.8]),
+              "sampler_trainer/logp_diff_max": np.array([0.8, 28.4, 1.1, 0.9]),
+              "sampler_trainer/seq_error_masked_count": np.array(
+                  [0.0, 3.0, 1.0, 0.0]
+              ),
+              "sampler_is/weight_min": np.array([0.95, 2.0e-9, 0.88, 0.91]),
+              "custom/override_max": np.array([10.0, 2.0, 5.0]),
+              "custom/p90": np.array([1.0, 2.0, 3.0, 4.0, 5.0]),
+          },
+          weighted_metrics={
+              "kl": sft_utils.WeightedMetric(
+                  unreduced_sum=np.array([1.0, 3.0]),
+                  denominator=np.array([2.0, 6.0]),
+                  min_denom=1.0,
+              ),
+              "sampler_trainer/logp_diff_mean": sft_utils.WeightedMetric(
+                  unreduced_sum=np.array([0.5, 9.5]),
+                  denominator=np.array([10.0, 990.0]),
+                  min_denom=1.0,
+              ),
+              "sampler_trainer/probs_pearson_corr": stacked_pearson,
+              "score_centering/head_mass_q_mean": sft_utils.WeightedMetric(
+                  unreduced_sum=np.array([0.2, 0.8]),
+                  denominator=np.array([1.0, 3.0]),
+                  min_denom=1.0,
+              ),
+          },
+          aggregation_fns={
+              "custom/override_max": np.min,
+              "custom/p90": lambda xs: float(np.percentile(xs, 90)),
+          },
+          mode="train",
+      )
+      rollout_worker = _MockWorkerHandle(role="rollout")
+      rollout_worker.responses = [[
+          _create_rollout_response(
+              "req_0", "prompt_data_0", group_index=0, reward=2.0
+          ),
+          _create_rollout_response(
+              "req_1", "prompt_data_0", group_index=1, reward=1.0
+          ),
+      ]]
+      trainer_worker = _MockWorkerHandle(role="trainer")
+      trainer_worker.metrics_buffer = mock_buffer
+
+      engine = _make_engine(
+          rollout_workers=[rollout_worker],
+          trainer_workers={datatypes.Role.ACTOR: trainer_worker},
+      )
+      self.algo_config.reward_mode = "env"
+      program = self._create_program(
+          dataset=["prompt_data_0"],
+          reward_fns=[],
+          sync_weights=False,
+          rollout_temperature=1.0,
+      )
+      await program.run_async(engine, max_steps=1)
+
+      logger = program.metrics_logger
+      self.assertAlmostEqual(
+          logger.get_metric("sampler_trainer", "logp_diff_max", "train"), 28.4
+      )
+      self.assertAlmostEqual(
+          logger.get_metric(
+              "sampler_trainer", "seq_error_masked_count", "train"
+          ),
+          4.0,
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("sampler_is", "weight_min", "train"),
+          2.0e-9,
+          places=12,
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("actor", "custom/override_max", "train"), 2.0
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("actor", "custom/p90", "train"), 4.6
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("actor", "kl", "train"),
+          0.5,
+          places=6,
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("sampler_trainer", "logp_diff_mean", "train"),
+          0.01,
+          places=6,
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("sampler_trainer", "probs_pearson_corr", "train"),
+          16.0 / 18.0,
+          places=6,
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("score_centering", "head_mass_q_mean", "train"),
+          0.25,
+          places=6,
+      )
+
+    asyncio.run(_run())
 
   def test_generate_mock_dashboard_events(self):
     async def _run():
