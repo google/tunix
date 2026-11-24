@@ -43,6 +43,7 @@ from tunix.dist_rl.testing import worker_registry_testing
 try:
   from tunix.dist_rl.weight_sync import weight_sync
   from tunix.dist_rl.weight_sync import weight_sync_coordinator
+  from tunix.experimental.weight_sync import gcs_handler  # pylint: disable=g-import-not-at-top
 except ImportError:
   raise unittest.SkipTest("tpu_raiden is required")
 
@@ -2100,8 +2101,18 @@ class DestinationStatusFilterTest(CoordinatorTestBase):
             weight_sync_coordinator.NullHandler,
         )
     for mode in (
-        weight_sync.WeightSyncMode.IN_MEMORY,
         weight_sync.WeightSyncMode.FS,
+        "fs",
+        weight_sync.WeightSyncMode.GCS,
+        "gcs",
+    ):
+      with self.subTest(mode=mode):
+        self.assertIsInstance(
+            weight_sync_coordinator.create_default_handler(mode),
+            gcs_handler.GCSHandler,
+        )
+    for mode in (
+        weight_sync.WeightSyncMode.IN_MEMORY,
         weight_sync.WeightSyncMode.NCCL,
     ):
       with self.subTest(mode=mode.value):
