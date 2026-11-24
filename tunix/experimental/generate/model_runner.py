@@ -43,7 +43,6 @@ from tunix.rl import utils as rl_utils
 
 
 _HIERARCHICAL_BLOCK_SIZE = 256
-_HIERARCHICAL_MIN_VOCAB_SIZE = 4096
 _TOPK_TARGET_BLOCK_SIZE = 8192
 _MIN_SAFE_TEMP = float(np.finfo(np.float32).tiny)
 _MAX_SAFE_TEMP = 1.0 / _MIN_SAFE_TEMP
@@ -138,23 +137,45 @@ def _finite_or_zero(x: jax.Array) -> jax.Array:
   return jnp.where(jnp.isfinite(x), x, 0.0)
 
 
+def _hierarchical_num_blocks(vocab_size: int, tp_size: int = 1) -> int:
+  """Returns the `tp_size`-multiple number of 256-token blocks for the vocab."""
+  if tp_size < 1:
+    raise ValueError(f'tp_size must be positive, got {tp_size}.')
+
+  return utils.cdiv(vocab_size, tp_size * _HIERARCHICAL_BLOCK_SIZE) * tp_size
+
+
 def _sample_hierarchical_256(
     logits: jax.Array,
     key: jax.Array,
     is_greedy: jax.Array,
-    inv_temp: jax.Array,
-    *,
+    temp: jax.Array,
     return_logprobs: bool = False,
+    tp_size: int = 1,
 ) -> tuple[jax.Array, jax.Array | None]:
   """Samples tokens in two 256-wide stages without full-vocab fp32 buffers."""
-  logits_3d = logits.reshape(logits.shape[0], -1, _HIERARCHICAL_BLOCK_SIZE)
-  block_max = jnp.max(logits_3d, axis=-1)
-  bmax_f32 = block_max.astype(jnp.float32)
+  num_rows, vocab_size = logits.shape
+
+  # A multiple of `tp_size` blocks keeps alignment with the vocabulary
+  # sharding.
+  num_blocks = _hierarchical_num_blocks(vocab_size, tp_size)
+  pad_width = num_blocks * _HIERARCHICAL_BLOCK_SIZE - vocab_size
+  inv_temp = 1.0 / temp
+
+  if pad_width:
+    logits = jnp.pad(
+        logits,
+        ((0, 0), (0, pad_width)),
+        constant_values=-jnp.inf,
+    )
+  blocks = logits.reshape(num_rows, num_blocks, _HIERARCHICAL_BLOCK_SIZE)
+  block_max = jnp.max(blocks, axis=-1).astype(jnp.float32)
+  row_max = _finite_or_zero(jnp.max(block_max, axis=-1))
+
   shifted = (
-      logits_3d.astype(jnp.float32) - _finite_or_zero(bmax_f32)[:, :, None]
+      blocks.astype(jnp.float32) - _finite_or_zero(block_max)[:, :, None]
   ) * inv_temp[:, None, None]
-  safe_rmax = _finite_or_zero(jnp.max(bmax_f32, axis=-1))
-  block_lse = (bmax_f32 - safe_rmax[:, None]) * inv_temp[:, None] + jnp.log(
+  block_lse = (block_max - row_max[:, None]) * inv_temp[:, None] + jnp.log(
       jnp.sum(jnp.exp(shifted), axis=-1)
   )
 
@@ -164,65 +185,80 @@ def _sample_hierarchical_256(
       jnp.argmax(block_max, axis=-1),
       jax.random.categorical(k_block, block_lse, axis=-1),
   )
-  chosen_raw = jnp.take_along_axis(logits_3d, block_idx[:, None, None], axis=1)[
-      :, 0, :
-  ]
+  chosen_raw = blocks[jnp.arange(num_rows), block_idx]
   chosen_scaled = (
-      chosen_raw.astype(jnp.float32) - safe_rmax[:, None]
+      chosen_raw.astype(jnp.float32) - row_max[:, None]
   ) * inv_temp[:, None]
-  within_idx = jnp.where(
-      is_greedy,
-      jnp.argmax(chosen_raw, axis=-1),
-      jax.random.categorical(k_within, chosen_scaled, axis=-1),
-  )
+  greedy_within = jnp.argmax(chosen_raw, axis=-1)
+  sampled_within = jax.random.categorical(k_within, chosen_scaled, axis=-1)
+  within_idx = jnp.where(is_greedy, greedy_within, sampled_within)
   next_tokens = (block_idx * _HIERARCHICAL_BLOCK_SIZE + within_idx).astype(
       jnp.int32
   )
+
   if not return_logprobs:
     return next_tokens, None
-  chosen_logit = jnp.take_along_axis(
-      chosen_scaled, within_idx[:, None], axis=-1
-  )[:, 0]
-  return next_tokens, chosen_logit - jax.nn.logsumexp(block_lse, axis=-1)
+
+  chosen_logit = chosen_scaled[jnp.arange(num_rows), within_idx]
+  logprobs = chosen_logit - jax.nn.logsumexp(block_lse, axis=-1)
+  return next_tokens, logprobs
 
 
 def _top_k_num_blocks(vocab: int, k: int, tp_size: int = 1) -> int:
   """Returns a `tp_size`-multiple block count with `k <= cdiv(vocab, blocks)`."""
   if tp_size < 1:
     raise ValueError(f'tp_size must be positive, got {tp_size}.')
+
   if k >= vocab:
     return 1
+
   max_blocks = vocab if k <= 1 else (vocab - 1) // (k - 1)
   blocks_per_tp = min(
       utils.cdiv(vocab, tp_size * _TOPK_TARGET_BLOCK_SIZE),
       max_blocks // tp_size,
   )
+
   return tp_size * blocks_per_tp if blocks_per_tp >= 1 else 1
 
 
-def _two_stage_top_k(
+# TODO(yatlas): Remove tp_size param, and derive it from active mesh axis.
+def _top_k(
     logits: jax.Array,
     k: int,
-    num_blocks: int,
+    tp_size: int = 1,
 ) -> tuple[jax.Array, jax.Array]:
-  """Computes exact two-stage top-k across `num_blocks` vocabulary blocks."""
+  """Returns the `k` largest logits of each row and their token ids."""
+  # jax.lax.top_k lowers to two stages of top_k when the vocabulary is large
+  # to take advantage of tp parallelism. But, when
+  # jax.lax.top_k call leads into a sampling call, XLA is unable to shard the
+  # logits, causing unnecessary collectives.
+  #
+  # Perform the two-stage top_k here manually so that logits are sharded across
+  # the tp_axis.
+  rows, vocab = logits.shape
+  num_blocks = _top_k_num_blocks(vocab, k, tp_size)
   if num_blocks <= 1:
     return jax.lax.top_k(logits, k)
-  rows, vocab = logits.shape
-  block = utils.cdiv(vocab, num_blocks)
-  if k > block:
-    raise ValueError(
-        f'k ({k}) must not exceed block size ({block}) for {num_blocks} blocks.'
-    )
-  pad = num_blocks * block - vocab
-  if pad:  # Static; pads land at the end, so they lose all -inf ties.
+
+  # `_top_k_num_blocks` keeps every block at least `k` wide.
+  block_size = utils.cdiv(vocab, num_blocks)
+  pad = num_blocks * block_size - vocab
+  if pad:
+    # Padding lands at the end, so real -inf logits win ties against it.
     logits = jnp.pad(logits, ((0, 0), (0, pad)), constant_values=-jnp.inf)
-  vals, idxs = jax.lax.top_k(logits.reshape(rows, num_blocks, block), k)
-  offsets = jnp.arange(num_blocks, dtype=jnp.int32)[None, :, None] * block
-  cand_vals = vals.reshape(rows, num_blocks * k)
-  cand_idxs = (idxs.astype(jnp.int32) + offsets).reshape(rows, num_blocks * k)
+  blocks = logits.reshape(rows, num_blocks, block_size)
+
+  # First stage: top_k within each block to get `num_blocks * k` candidates.
+  top_block_vals, top_block_idxs = jax.lax.top_k(blocks, k)
+  offsets = jnp.arange(num_blocks, dtype=jnp.int32)[None, :, None] * block_size
+  cand_vals = top_block_vals.reshape(rows, num_blocks * k)
+  cand_token_ids = (top_block_idxs + offsets).reshape(rows, num_blocks * k)
+
+  # Second stage: top_k across the candidates.
   top_vals, pick = jax.lax.top_k(cand_vals, k)
-  return top_vals, jnp.take_along_axis(cand_idxs, pick, axis=-1)
+  top_token_ids = jnp.take_along_axis(cand_token_ids, pick, axis=-1)
+
+  return top_vals, top_token_ids
 
 
 def sample(
@@ -247,8 +283,9 @@ def sample(
     max_top_k: How many candidate tokens to draw for every row. Each row's
       `top_k` must not exceed it. -1 draws every token in the vocabulary.
     return_logprobs: Whether to return the sampled tokens' logprobs.
-    tp_size: Size of the `'tp'` mesh axis, used to align two-stage `top_k`
-      blocks with tensor-parallel vocabulary sharding.
+    tp_size: Size of the `'tp'` mesh axis, used to align the vocabulary blocks
+      of two-stage `top_k` and of unconstrained block sampling with
+      tensor-parallel vocabulary sharding.
 
   Returns:
     A tuple of
@@ -265,32 +302,18 @@ def sample(
       is_greedy, 1.0, jnp.clip(temp, _MIN_SAFE_TEMP, _MAX_SAFE_TEMP)
   )
   vocab_size = logits.shape[-1]
-  if metadata.unconstrained and max_top_k <= 0:
-    inv_temp = 1.0 / temperature
-    if (
-        vocab_size >= _HIERARCHICAL_MIN_VOCAB_SIZE
-        and vocab_size % _HIERARCHICAL_BLOCK_SIZE == 0
-    ):
-      return _sample_hierarchical_256(
-          logits, key, is_greedy, inv_temp, return_logprobs=return_logprobs
-      )
-    logits_f32 = logits.astype(jnp.float32)
-    rmax = _finite_or_zero(jnp.max(logits_f32, axis=-1, keepdims=True))
-    scaled = (logits_f32 - rmax) * inv_temp[:, None]
-    next_tokens = jnp.where(
+  if metadata.unconstrained:
+    return _sample_hierarchical_256(
+        logits,
+        key,
         is_greedy,
-        jnp.argmax(logits, axis=-1),
-        jax.random.categorical(key, scaled, axis=-1),
-    ).astype(jnp.int32)
-    if not return_logprobs:
-      return next_tokens, None
-    chosen = jnp.take_along_axis(scaled, next_tokens[:, None], axis=-1)[:, 0]
-    return next_tokens, chosen - jax.nn.logsumexp(scaled, axis=-1)
+        temperature,
+        return_logprobs=return_logprobs,
+        tp_size=tp_size,
+    )
 
   k = vocab_size if max_top_k <= 0 else min(max_top_k, vocab_size)
-  candidate_logits, candidate_tokens = _two_stage_top_k(
-      logits, k, _top_k_num_blocks(vocab_size, k, tp_size)
-  )
+  candidate_logits, candidate_tokens = _top_k(logits, k, tp_size)
   scaled_logits = candidate_logits.astype(jnp.float32) / temperature[:, None]
 
   ranks = jnp.arange(k)
@@ -311,6 +334,7 @@ def sample(
   sampled_tokens = jnp.take_along_axis(
       candidate_tokens, sampled[:, None], axis=-1
   )[:, 0]
+
   # The candidates are sorted, so the first one is the most likely token.
   next_tokens = jnp.where(is_greedy, candidate_tokens[:, 0], sampled_tokens)
 
