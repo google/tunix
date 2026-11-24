@@ -5271,7 +5271,7 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_rollouts_without_status_report_running_frac(self):
+  def test_rollouts_without_status_count_toward_no_reported_status(self):
     async def _run():
       traj_item_0 = datatypes.TrajectoryItem(
           group_index=0,
@@ -5312,9 +5312,12 @@ class RLProgramTest(absltest.TestCase):
       await program.run_async(self.mock_engine)
 
       logger = program.metrics_logger
-      # A missing producer status is mapped to RUNNING.
+      # A missing producer status is mapped to RUNNING, which is not reported.
       self.assertAlmostEqual(
-          logger.get_metric("rollout", "status/running_frac", "train"), 1.0
+          logger.get_metric("rollout", "status/succeeded_frac", "train"), 0.0
+      )
+      self.assertFalse(
+          logger.metric_exists("rollout", "status/running_frac", "train")
       )
 
     asyncio.run(_run())
