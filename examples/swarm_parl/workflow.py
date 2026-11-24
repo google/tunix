@@ -61,7 +61,7 @@ def director_system_prompt(
   return (
       "You are a Kimi-style Parallel Agent Orchestrator (PARL) solving complex "
       "information-seeking tasks under a strict CriticalSteps latency budget. "
-      "You may think briefly inside <think>...</think>, then output EXACTLY ONE "
+      "Optionally write 1-2 concise planning sentences, then output EXACTLY ONE "
       "action tag:\n"
       "1. Direct serial search: <search>concise query</search>\n"
       f"{open_doc_line}"
@@ -85,7 +85,7 @@ WORKER_SYSTEM_PROMPT = (
 
 SERIAL_SYSTEM_PROMPT = (
     "You are a single-agent researcher under a strict CriticalSteps budget. "
-    "You may think briefly inside <think>...</think>, then use "
+    "Optionally write 1-2 concise planning sentences, then use "
     "<search>concise query</search> to look up facts, or return "
     "<answer>concise answer</answer> when ready."
 )
@@ -111,7 +111,7 @@ def _serial_prompt_for(allow_open_doc: bool) -> str:
     return SERIAL_SYSTEM_PROMPT
   return (
       "You are a single-agent deep researcher under a strict CriticalSteps budget. "
-      "You may think briefly inside <think>...</think>, then output ONE tag: "
+      "Optionally write 1-2 concise planning sentences, then output ONE tag: "
       "<search>concise query</search>, <open_doc>docid</open_doc>, or "
       "<answer>concise final answer</answer>."
   )
@@ -483,8 +483,10 @@ async def serial_baseline_workflow(
     ans_m = _ANSWER_RE.search(last_text)
     if ans_m:
       return ans_m.group(1).strip()
-    if step_i + 1 < max_steps:
-      obs = await _maybe_exec_tool(ctx.env, last_text, corpus, allow_open=allow_open)
-      if obs is not None:
-        history.append(obs)
+    if step_i + 1 >= max_steps:
+      return last_text
+    obs = await _maybe_exec_tool(ctx.env, last_text, corpus, allow_open=allow_open)
+    if obs is None:
+      return last_text
+    history.append(obs)
   return last_text
