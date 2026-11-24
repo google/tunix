@@ -17,13 +17,17 @@
 import asyncio
 from collections.abc import Mapping
 import contextlib
+import dataclasses
 import functools
 import json
 import os
+import types
 from typing import Any
 from unittest import mock
 
 from absl.testing import absltest
+import jax.numpy as jnp
+import numpy as np
 from tunix.dist_rl.common import execution_target
 from tunix.dist_rl.common import gcs_cache
 from tunix.dist_rl.common import otel_setup
@@ -36,6 +40,7 @@ from tunix.dist_rl.rollout import vllm_sampler
 from tunix.dist_rl.weight_sync import weight_sync as weight_sync_lib
 from tunix.generate import mappings as mappings_lib
 from tunix.models import automodel
+from tunix.models.qwen3 import mapping_vllm_jax as qwen3_vllm
 from tunix.rl.agentic.parser.chat_template_parser import parser
 from tunix.utils import maxtext_utils
 
@@ -183,10 +188,22 @@ class ModelFamilyTest(absltest.TestCase):
             "requires init_with_random_weights=True",
         ),
         (
-            "inprocess_fs_default_real_weights",
+            "inprocess_in_memory_default_real_weights",
+            (
+                "model_config.model_id=Qwen/Qwen3.5-0.8B",
+                "weight_sync_config.mode=in_memory",
+                "rollout_model_config.mesh.shape=(1,1)",
+            ),
+            ValueError,
+            "requires init_with_random_weights=True",
+        ),
+        (
+            "inprocess_fs_explicit_real_weights",
             (
                 "model_config.model_id=Qwen/Qwen3.5-0.8B",
                 "weight_sync_config.mode=fs",
+                "weight_sync_config.staging_dir=gs://bucket/ws",
+                "vllm_config.init_with_random_weights=false",
                 "rollout_model_config.mesh.shape=(1,1)",
             ),
             ValueError,
@@ -761,6 +778,172 @@ class SamplerTest(absltest.TestCase):
         ).rollout_vllm_hbm_utilization,
         0.8,
     )
+
+  def test_fs_sync_delegate_binds_hf_manifest_and_validates_preconditions(self):
+    self.assertIsNone(
+        rollout._fs_sync_delegate(
+            _hp(), "rollout-0", _inprocess_vllm_rollout_config()
+        )
+    )
+    from_hf_manifest = {
+        "rules": [{
+            "source_keys": ["model.embed_tokens.weight"],
+            "target_keys": ["embedder.input_embedding"],
+            "ops": [],
+        }],
+    }
+    for mode in ("fs", "gcs"):
+      with self.subTest(mode=mode):
+        fs_argv = (
+            "rollout_engine=inprocess_vllm",
+            f"weight_sync_config.mode={mode}",
+            "weight_sync_config.staging_dir=gs://bucket/ws",
+        )
+        # Includes Qwen3's dead `'embedding': (1, 0)` transpose entry, which
+        # matches no key in TO_HF_MAPPINGS and must be allowed.
+        config = dataclasses.replace(
+            _inprocess_vllm_rollout_config(*fs_argv),
+            rollout_mapping_config=mappings_lib.MappingConfig(
+                **qwen3_vllm.VLLM_JAX_MAPPING
+            ),
+        )
+        with (
+            mock.patch.object(rollout.automodel, "call_model_config"),
+            mock.patch.object(rollout.automodel, "get_model_module") as module,
+        ):
+          module.return_value.build_from_hf_manifest.return_value = (
+              from_hf_manifest
+          )
+          delegate = rollout._fs_sync_delegate(
+              _hp(*fs_argv), "rollout-0", config
+          )
+        if delegate is None or delegate._synchronizer_factory is None:
+          self.fail(f"mode={mode} built no synchronizer factory.")
+        # Inference-only buffers (cos_sin_cache) are filtered out before
+        # building dst_shapes; vLLM `model.` prefix is dropped by param_key.
+        synchronizer = delegate._synchronizer_factory({
+            "model": {
+                "embed_tokens": {"weight": jnp.zeros((4, 2), jnp.float32)},
+                "cos_sin_cache": jnp.zeros((8,), jnp.float32),
+            }
+        })
+        self.assertIsInstance(
+            synchronizer, rollout.gcs_synchronizer.GCSSynchronizer
+        )
+        self.assertEqual(synchronizer.job_name, "rollout-0")
+        self.assertEqual(synchronizer.config.staging_dir, "gs://bucket/ws")
+        manifest = synchronizer._from_hf_manifest
+        if manifest is None:
+          self.fail(f"mode={mode} bound no HF -> vLLM manifest.")
+        self.assertEqual(
+            [r["target_keys"] for r in manifest["rules"]],
+            [["embed_tokens.weight"]],
+        )
+        # Duplicate canonical param_key fails fast.
+        with self.assertRaisesRegex(ValueError, "empty or duplicate"):
+          delegate._synchronizer_factory({
+              "model": {"w": jnp.zeros((2, 2), jnp.float32)},
+              "base": {"w": jnp.zeros((2, 2), jnp.float32)},
+          })
+
+    fs_argv = (
+        "rollout_engine=inprocess_vllm",
+        "weight_sync_config.mode=fs",
+        "weight_sync_config.staging_dir=gs://bucket/ws",
+    )
+    base_config = dataclasses.replace(
+        _inprocess_vllm_rollout_config(*fs_argv),
+        rollout_mapping_config=mappings_lib.MappingConfig(
+            to_hf_mappings=qwen3_vllm.TO_HF_MAPPINGS
+        ),
+    )
+
+    with mock.patch.dict(os.environ, {"TPU_MULTIHOST_BACKEND": "ray"}):
+      with self.assertRaisesRegex(ValueError, "TPU_MULTIHOST_BACKEND"):
+        rollout._fs_sync_delegate(_hp(*fs_argv), "rollout-0", base_config)
+
+    with self.assertRaisesRegex(ValueError, "tpu_backend_type='jax'"):
+      rollout._fs_sync_delegate(
+          _hp(*fs_argv),
+          "rollout-0",
+          dataclasses.replace(
+              base_config, rollout_vllm_tpu_backend_type="torchax"
+          ),
+      )
+
+    with self.assertRaisesRegex(ValueError, "needs the rollout family's"):
+      rollout._fs_sync_delegate(
+          _hp(*fs_argv),
+          "rollout-0",
+          dataclasses.replace(base_config, rollout_mapping_config=None),
+      )
+
+    for label, bad_mapping, pattern in (
+        (
+            "preprocess_src_state",
+            mappings_lib.MappingConfig(
+                to_hf_mappings=qwen3_vllm.TO_HF_MAPPINGS,
+                preprocess_src_state=lambda state, tp_size=1: state,
+            ),
+            "preprocess_src_state",
+        ),
+        (
+            "to_hf_hook_fns",
+            mappings_lib.MappingConfig(
+                to_hf_mappings=qwen3_vllm.TO_HF_MAPPINGS,
+                to_hf_hook_fns={"embedder.input_embedding": lambda x: x},
+            ),
+            "to_hf_hook_fns",
+        ),
+        (
+            "active_transpose_keys",
+            mappings_lib.MappingConfig(
+                to_hf_mappings=qwen3_vllm.TO_HF_MAPPINGS,
+                to_hf_transpose_keys={"input_embedding": (1, 0)},
+            ),
+            "active to_hf_transpose_keys",
+        ),
+    ):
+      with self.subTest(bad_mapping=label):
+        with self.assertRaisesRegex(ValueError, pattern):
+          rollout._fs_sync_delegate(
+              _hp(*fs_argv),
+              "rollout-0",
+              dataclasses.replace(
+                  base_config, rollout_mapping_config=bad_mapping
+              ),
+          )
+
+    # 2-arg manifest builder (e.g. Qwen3.5 / Gemma4) fails fast.
+    variant_params = types.SimpleNamespace(
+        build_from_hf_manifest=lambda cfg, hf_variant=None: from_hf_manifest
+    )
+    with (
+        mock.patch.object(rollout.automodel, "call_model_config"),
+        mock.patch.object(
+            rollout.automodel, "get_model_module", return_value=variant_params
+        ),
+    ):
+      with self.assertRaisesRegex(
+          ValueError, "requires variant-specific arguments"
+      ):
+        rollout._fs_sync_delegate(_hp(*fs_argv), "rollout-0", base_config)
+
+    # Unmapped MoE manifest target fails fast pre-init.
+    moe_manifest = {
+        "rules": [{
+            "source_keys": ["model.layers.0.mlp.gate.weight"],
+            "target_keys": ["layers.0.mlp.router.kernel"],
+            "ops": [],
+        }],
+    }
+    with (
+        mock.patch.object(rollout.automodel, "call_model_config"),
+        mock.patch.object(rollout.automodel, "get_model_module") as module,
+    ):
+      module.return_value.build_from_hf_manifest.return_value = moe_manifest
+      with self.assertRaisesRegex(ValueError, "have no vLLM mapping"):
+        rollout._fs_sync_delegate(_hp(*fs_argv), "rollout-0", base_config)
 
 
 class EngineKwargsTest(absltest.TestCase):

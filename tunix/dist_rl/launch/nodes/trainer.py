@@ -40,12 +40,14 @@ import optax
 from orbax import checkpoint as ocp
 from tunix.cli import config as cli_config
 from tunix.cli.utils import model as model_utils
+from tunix.common import datatypes as common_datatypes
 from tunix.dist_rl.distributed.runtime import context as context_lib
 from tunix.dist_rl.launch.common import resolve_config
 from tunix.dist_rl.launch.nodes import node_utils
 from tunix.dist_rl.train import abstract_trainer
 from tunix.dist_rl.train import peft_trainer_v2
 from tunix.dist_rl.worker import trainer_worker
+from tunix.experimental.weight_sync import gcs_synchronizer
 from tunix.models import automodel
 from tunix.utils import maxtext_utils
 
@@ -386,11 +388,51 @@ def _create_tunix_trainer_factory(
         actor_model,
         optimizer,
         training_config,
+        weight_sync_worker_factory=weight_sync_worker_factory(hp, actor_model),
         sampler_type=sampler_type,
         rollout_tp_size=rollout_tp_size,
     )
 
   return _factory, mesh
+
+
+def weight_sync_worker_factory(
+    hp: resolve_config.DistHyperParameters,
+    actor_model: nnx.Module,
+) -> Callable[[], gcs_synchronizer.GCSSynchronizer] | None:
+  """Returns the trainer's weight-sync source for `weight_sync_config.mode`.
+
+  "fs" (or alias "gcs") stages each round under `weight_sync_config.staging_dir`
+  as canonical HF safetensors, exported through the actor family's
+  `build_to_hf_manifest`; other modes return None, keeping `PeftTrainer`'s
+  Raiden source.
+
+  Args:
+    hp: Validated distributed RL configuration.
+    actor_model: The actor whose config sizes the HF export manifest.
+  """
+  ws = hp.config_mapping("weight_sync_config")
+  mode = str(ws["mode"])
+  if not common_datatypes.is_fs_weight_sync_mode(mode):
+    return None
+  model_name = str(hp.config_mapping(_ACTOR_KEY)["model_name"])
+  config = gcs_synchronizer.GCSSynchronizerConfig(
+      staging_dir=str(ws["staging_dir"])
+  )
+  params_lib = automodel.get_model_module(
+      model_name,
+      automodel.ModelModule.PARAMS,
+  )
+  to_hf_manifest = node_utils.build_single_arg_hf_manifest(
+      params_lib,
+      "build_to_hf_manifest",
+      actor_model.config,  # pyrefly: ignore[missing-attribute]
+      model_name=model_name,
+      mode=mode,
+  )
+  return lambda: gcs_synchronizer.GCSSynchronizer(
+      "trainer", config, to_hf_manifest=to_hf_manifest
+  )
 
 
 def _maxtext_checkpointing_options(

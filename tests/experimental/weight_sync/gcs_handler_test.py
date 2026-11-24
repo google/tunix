@@ -37,12 +37,15 @@ _DST = weight_sync.WorkUnitId("rollout")
 
 class GCSHandlerTest(absltest.TestCase):
 
-  def _stage_checkpoint(self) -> weight_sync.WorkUnitMetadata:
-    """Saves a real finalized Orbax checkpoint and returns source metadata."""
+  def _stage_checkpoint(
+      self, checkpoint_format: str = "safetensors"
+  ) -> weight_sync.WorkUnitMetadata:
+    """Saves a finalized Safetensors or Orbax checkpoint and returns metadata."""
     sync = gcs_synchronizer.GCSSynchronizer(
         job_name="trainer",
         config=gcs_synchronizer.GCSSynchronizerConfig(
-            staging_dir=self.create_tempdir().full_path
+            staging_dir=self.create_tempdir().full_path,
+            checkpoint_format=checkpoint_format,
         ),
     )
     sync.bind({"layers.0.w": jax.device_put(np.ones((2, 2), np.float32))})
@@ -65,9 +68,7 @@ class GCSHandlerTest(absltest.TestCase):
     handler = self._handler(
         weight_sync.WorkUnitMetadata(unit=_SRC, artifact_uri="/tmp/x")
     )
-    self.assertIn(
-        "at least one source", handler.transfer([], [_DST]).message
-    )
+    self.assertIn("at least one source", handler.transfer([], [_DST]).message)
     self.assertIn(
         "at least one destination", handler.transfer([_SRC], []).message
     )
@@ -78,6 +79,7 @@ class GCSHandlerTest(absltest.TestCase):
     self.assertIn(
         "Unregistered source", handler.transfer([unknown], [_DST]).message
     )
+    handler.close()
 
   def test_transfer_requires_fresh_artifact_each_round(self):
     handler = self._handler(weight_sync.WorkUnitMetadata(unit=_SRC))
@@ -123,6 +125,68 @@ class GCSHandlerTest(absltest.TestCase):
     self.assertFalse(unfinalized.success)
     self.assertIn("not finalized", unfinalized.message)
 
+    tmp_st = root / "step_1_r1.tmp"
+    tmp_st.mkdir()
+    (tmp_st / "model.safetensors").write_bytes(b"partial")
+    unfinalized_st_tmp = self._handler(
+        weight_sync.WorkUnitMetadata(unit=_SRC, artifact_uri=str(tmp_st))
+    ).transfer([_SRC], [_DST])
+    self.assertFalse(unfinalized_st_tmp.success)
+    self.assertIn("not finalized", unfinalized_st_tmp.message)
+
+    empty_ckpt = root / "step_1_empty"
+    empty_ckpt.mkdir()
+    unfinalized_empty = self._handler(
+        weight_sync.WorkUnitMetadata(unit=_SRC, artifact_uri=str(empty_ckpt))
+    ).transfer([_SRC], [_DST])
+    self.assertFalse(unfinalized_empty.success)
+    self.assertIn("not finalized", unfinalized_empty.message)
+
+    uncommitted_st = root / "step_1_uncommitted_shard"
+    uncommitted_st.mkdir()
+    (uncommitted_st / "model-00001-of-00002.safetensors").write_bytes(b"")
+    uncommitted_res = self._handler(
+        weight_sync.WorkUnitMetadata(
+            unit=_SRC, artifact_uri=str(uncommitted_st)
+        )
+    ).transfer([_SRC], [_DST])
+    self.assertFalse(uncommitted_res.success)
+    self.assertIn("not finalized", uncommitted_res.message)
+
+    traversal_st = root / "step_1_traversal_st"
+    traversal_st.mkdir()
+    (traversal_st / "model.safetensors.index.json").write_text(
+        '{"weight_map": {"w": "../escape.safetensors"}}'
+    )
+    traversal_res = self._handler(
+        weight_sync.WorkUnitMetadata(unit=_SRC, artifact_uri=str(traversal_st))
+    ).transfer([_SRC], [_DST])
+    self.assertFalse(traversal_res.success)
+    self.assertIn("Invalid shard filename", traversal_res.message)
+
+    orbax_ok = self._handler(
+        self._stage_checkpoint(checkpoint_format="orbax")
+    ).transfer([_SRC], [_DST], req_id="orbax-r1")
+    self.assertTrue(orbax_ok.success, orbax_ok.message)
+
+    single_st = root / "step_1_single_st"
+    single_st.mkdir()
+    (single_st / "model.safetensors").write_bytes(b"")
+    st_ok = self._handler(
+        weight_sync.WorkUnitMetadata(unit=_SRC, artifact_uri=str(single_st))
+    ).transfer([_SRC], [_DST], req_id="st-single")
+    self.assertTrue(st_ok.success, st_ok.message)
+
+    sharded_st = root / "step_1_sharded_st"
+    sharded_st.mkdir()
+    (sharded_st / "model.safetensors.index.json").write_text(
+        '{"weight_map": {"w": "model-00001-of-00001.safetensors"}}'
+    )
+    sharded_ok = self._handler(
+        weight_sync.WorkUnitMetadata(unit=_SRC, artifact_uri=str(sharded_st))
+    ).transfer([_SRC], [_DST], req_id="st-sharded")
+    self.assertTrue(sharded_ok.success, sharded_ok.message)
+
   def test_transfer_inside_running_event_loop(self):
     handler = self._handler(self._stage_checkpoint())
 
@@ -133,7 +197,7 @@ class GCSHandlerTest(absltest.TestCase):
     self.assertTrue(res.success, res.message)
 
   def test_transfer_reports_storage_errors_as_failed_result(self):
-    handler = self._handler(self._stage_checkpoint())
+    handler = self._handler(self._stage_checkpoint(checkpoint_format="orbax"))
     with mock.patch.object(
         gcs_handler.ocp.path.step,
         "is_path_finalized",
@@ -144,6 +208,29 @@ class GCSHandlerTest(absltest.TestCase):
     self.assertFalse(res.success)
     self.assertEqual(res.req_id, "req-io")
     self.assertIn("Failed checking checkpoint artifact", res.message)
+    # Transient storage errors must NOT burn source freshness: retry succeeds.
+    retry = handler.transfer([_SRC], [_DST], req_id="req-io-retry")
+    self.assertTrue(retry.success, retry.message)
+
+  def test_transfer_detects_concurrent_artifact_change(self):
+    meta1 = self._stage_checkpoint()
+    meta2 = self._stage_checkpoint()
+    handler = self._handler(meta1)
+    orig_check = gcs_handler._check_finalized_artifact  # pylint: disable=protected-access
+
+    def _racy_check(uri: str) -> tuple[bool, str]:
+      handler.register_work_unit(meta2)
+      return orig_check(uri)
+
+    with mock.patch.object(
+        gcs_handler, "_check_finalized_artifact", side_effect=_racy_check
+    ):
+      res = handler.transfer([_SRC], [_DST], req_id="racy")
+    self.assertFalse(res.success)
+    self.assertIn("changed concurrently", res.message)
+    # The newer artifact's freshness must remain intact for its own transfer.
+    res2 = handler.transfer([_SRC], [_DST], req_id="round-2")
+    self.assertTrue(res2.success, res2.message)
 
 
 if __name__ == "__main__":

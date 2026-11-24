@@ -37,6 +37,8 @@ from tunix.common import datatypes as common_datatypes
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.train import abstract_trainer
 from tunix.dist_rl.train import jax_pytrees  # pylint: disable=unused-import
+from tunix.dist_rl.weight_sync import weight_utils
+from tunix.experimental.weight_sync import gcs_synchronizer
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
@@ -355,6 +357,37 @@ def _default_weight_sync_worker() -> Any:
   return raiden_synchronizer.RaidenSynchronizer("trainer")
 
 
+def _cast_floats_like(state: nnx.State, target_state: Any) -> nnx.State:
+  """Casts floating leaves of `state` to `target_state`'s floating dtype."""
+  if target_state is None:
+    raise RuntimeError("set_target_state must run before FS weight sync.")
+  raw_names, raw_arrays = weight_utils.flatten_weights(target_state)
+  float_dtypes = {
+      np.dtype(arr.dtype)
+      for name, arr in zip(raw_names, raw_arrays, strict=True)
+      if not weight_utils.is_inference_only_buffer(name)
+      and arr.ndim >= 1
+      and jnp.issubdtype(arr.dtype, jnp.floating)
+      and (
+          not isinstance(arr, jax.Array)
+          or weight_utils.is_bindable(arr, allow_proxy=True)
+      )
+  }
+  if not float_dtypes:
+    raise ValueError("FS weight sync target state has no floating leaves.")
+  if len(float_dtypes) > 1:
+    dtype_names = sorted(str(d) for d in float_dtypes)
+    raise ValueError(
+        f"FS weight sync target state has mixed floating dtypes {dtype_names};"
+        " expected a single rollout weight dtype."
+    )
+  dtype = next(iter(float_dtypes))
+  return jax.tree_util.tree_map(
+      lambda x: x.astype(dtype) if jnp.issubdtype(x.dtype, jnp.floating) else x,
+      state,
+  )
+
+
 def _cast_state_to_target_dtypes(
     src_state: nnx.State, target_state: nnx.State
 ) -> nnx.State:
@@ -542,6 +575,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._sampler_type = sampler_type
     self._rollout_tp_size = rollout_tp_size
     self._weight_sync_worker: Any = None
+    self._weight_sync_worker_factory: Callable[[], Any] = (
+        weight_sync_worker_factory or _default_weight_sync_worker
+    )
 
   def _sync_step_derived_state(self) -> None:
     """Recomputes everything derived from `_train_steps`"""
@@ -1425,12 +1461,16 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
   @override
   def prepare_weight_sync(self, *, sync_request: Any = None) -> Any:
-    """Stages this round's weights on the raiden transport, returns metadata."""
-    del sync_request
+    """Stages this round's weights on the sync transport, returns metadata."""
     worker = self._weight_sync_worker
     if worker is None:
-      worker = _default_weight_sync_worker()
+      worker = self._weight_sync_worker_factory()
       self._weight_sync_worker = worker
+
+    if isinstance(worker, gcs_synchronizer.GCSSynchronizer):
+      worker.bind(_cast_floats_like(nnx.state(self.model), self._target_state))
+      worker.d2h(sync_request=sync_request)
+      return [worker.work_unit_metadata()]
 
     backend = "vllm_jax" if "vllm" in self._sampler_type else self._sampler_type
     mapping_config = getattr(self.config, "mapping_config", None)
@@ -1477,7 +1517,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         src_state = _cast_state_to_target_dtypes(src_state, self._target_state)
       worker.bind(src_state)
 
-    worker.d2h()
+    worker.d2h(sync_request=sync_request)
     if os.environ.get("VERIFY_WEIGHTS", "").lower() == "true":
       logging.info("source checksums: %s", worker.checksums())
     return [worker.work_unit_metadata()]
@@ -1485,10 +1525,10 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
   @override
   def release_weight_sync(self, *, sync_request: Any = None) -> Any:
     """Ends this round's staging hold."""
-    del sync_request
     worker = self._weight_sync_worker
     if worker is not None and worker.bound:
-      logging.vlog(1, "raiden metrics: %s", worker.metrics())
+      logging.vlog(1, "weight sync metrics: %s", worker.metrics())
+      worker.release(sync_request=sync_request)
     return True
 
   @override
@@ -1721,11 +1761,14 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     """Closes the trainer and its associated resources.
 
     This includes writing any buffered metrics, saving the last checkpoint,
-    and closing the checkpoint manager and metrics logger.
+    and closing the checkpoint manager, weight-sync worker, and metrics logger.
     """
     self._write_train_metrics()
     self._save_last_checkpoint()
     self.checkpoint_manager.close()
+    if self._weight_sync_worker is not None:
+      self._weight_sync_worker.close()
+      self._weight_sync_worker = None
     self.metrics_logger.close()  # pyrefly: ignore[missing-attribute]
     if self._pbar is not None:
       self._pbar.close()

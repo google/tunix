@@ -1347,6 +1347,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   _validate_maxtext_extra_config(hp)
   _validate_maxtext_skip_step_kwargs(hp)
   _validate_freeze_router(hp)
+  _validate_fs_weight_sync(hp)
   _validate_rollout_weights(hp)
   _validate_library_settings(hp)
   if grpo["reward_mode"] == "reward_fn" and not hp.config["reward_functions"]:
@@ -1426,16 +1427,16 @@ def rollout_init_with_random_weights(hp: cli_config.HyperParameters) -> bool:
   """Returns the effective `vllm_config.init_with_random_weights`.
 
   True makes the `inprocess_vllm` rollout start from random weights (vLLM's
-  `load_format="dummy"`) instead of loading the checkpoint. Only Raiden weight
-  sync replaces them: its bootstrap sync loads the trainer's weights before
-  step 0, whereas `none` skips the sync.
+  `load_format="dummy"`) instead of loading the checkpoint. Raiden and FS/GCS
+  weight sync replace them via bootstrap sync before step 0, whereas `none`
+  skips the sync.
 
   Args:
     hp: Loaded configuration.
 
   Returns:
     `vllm_config.init_with_random_weights`, or, when it is null, whether
-    `weight_sync_config.mode` is "raiden".
+    `weight_sync_config.mode` is "raiden", "fs", or "gcs".
 
   Raises:
     TypeError: If `vllm_config.init_with_random_weights` is not a bool or null.
@@ -1443,7 +1444,10 @@ def rollout_init_with_random_weights(hp: cli_config.HyperParameters) -> bool:
   value = hp.config_mapping("vllm_config")["init_with_random_weights"]
   if value is None:
     mode = hp.config_mapping("weight_sync_config")["mode"]
-    return mode == common_datatypes.WeightSyncMode.RAIDEN.value
+    return (
+        mode == common_datatypes.WeightSyncMode.RAIDEN.value
+        or common_datatypes.is_fs_weight_sync_mode(mode)
+    )
   if not isinstance(value, bool):
     raise TypeError(
         "vllm_config.init_with_random_weights must be a bool or null, got"
@@ -1452,21 +1456,65 @@ def rollout_init_with_random_weights(hp: cli_config.HyperParameters) -> bool:
   return value
 
 
+def _validate_fs_weight_sync(hp: cli_config.HyperParameters) -> None:
+  """Validates `weight_sync_config.staging_dir` and preconditions for FS/GCS."""
+  ws = hp.config_mapping("weight_sync_config")
+  mode = ws["mode"]
+  is_fs = common_datatypes.is_fs_weight_sync_mode(mode)
+  staging_dir = ws["staging_dir"]
+  if is_fs != bool(str(staging_dir).strip()):
+    raise ValueError(
+        "weight_sync_config.staging_dir must be set exactly when"
+        f" weight_sync_config.mode is 'fs' (or alias 'gcs'); got mode={mode!r},"
+        f" staging_dir={staging_dir!r}."
+    )
+  if not is_fs:
+    return
+  rollout_engine = hp.config["rollout_engine"]
+  if rollout_engine != "inprocess_vllm":
+    raise ValueError(
+        f"weight_sync_config.mode={mode!r} requires"
+        f" rollout_engine='inprocess_vllm', got {rollout_engine!r}."
+    )
+  for role_key in ("actor_model_config", "rollout_model_config"):
+    role_cfg = hp.config_mapping(role_key)
+    if role_cfg["model_source"] == "maxtext":
+      raise ValueError(
+          f"weight_sync_config.mode={mode!r} is not supported with"
+          f" {role_key}.model_source='maxtext'; use"
+          " weight_sync_config.mode='raiden' instead."
+      )
+    if role_cfg["lora_config"]:
+      raise ValueError(
+          f"weight_sync_config.mode={mode!r} does not support LoRA"
+          f" ({role_key}.lora_config is non-empty); disable LoRA or use"
+          " weight_sync_config.mode='raiden'."
+      )
+  tpu_backend_type = str(hp.config_mapping("vllm_config")["tpu_backend_type"])
+  if tpu_backend_type != "jax":
+    raise ValueError(
+        f"weight_sync_config.mode={mode!r} requires"
+        f" vllm_config.tpu_backend_type='jax', got {tpu_backend_type!r}."
+    )
+
+
 def _validate_rollout_weights(hp: cli_config.HyperParameters) -> None:
   """Rejects a vLLM rollout that would never get real weights.
 
-  Without Raiden weight sync, the rollout keeps the weights it starts from for
-  the whole run. vLLM's `MaxTextForCausalLM` always starts from random weights:
-  it loads weights only from `maxtext_config.load_parameters_path`, which the
-  rollout does not set (`maxtext_utils.build_vllm_maxtext_additional_config`).
+  Without Raiden or FS/GCS weight sync, the rollout keeps the weights it starts
+  from for the whole run. vLLM's `MaxTextForCausalLM` always starts from random
+  weights: it loads weights only from `maxtext_config.load_parameters_path`,
+  which the rollout does not set
+  (`maxtext_utils.build_vllm_maxtext_additional_config`).
 
   Args:
     hp: Loaded configuration.
 
   Raises:
     TypeError: If `vllm_config.init_with_random_weights` is not a bool or null.
-    ValueError: If `weight_sync_config.mode` is not "raiden" and either a vLLM
+    ValueError: If `weight_sync_config.mode` is not "raiden" and a vLLM
       `rollout_engine` serves `rollout_model_config.model_source: maxtext`, or
+      if `weight_sync_config.mode` is not "raiden"/"fs"/"gcs" and
       `rollout_engine` is "inprocess_vllm" with
       `vllm_config.init_with_random_weights` true.
   """
@@ -1487,6 +1535,8 @@ def _validate_rollout_weights(hp: cli_config.HyperParameters) -> None:
         " Use weight_sync_config.mode=raiden with a MaxText trainer"
         " (model_config.model_source=maxtext sets both roles)."
     )
+  if common_datatypes.is_fs_weight_sync_mode(mode):
+    return
   if random_init and rollout_engine == "inprocess_vllm":
     raise ValueError(
         "vllm_config.init_with_random_weights=true starts the inprocess_vllm"
@@ -1494,7 +1544,7 @@ def _validate_rollout_weights(hp: cli_config.HyperParameters) -> None:
         " never loads the trainer's weights into it, so the rollout would"
         " sample from random weights for the whole run. Set"
         " vllm_config.init_with_random_weights to false or null to load the"
-        " checkpoint, or use weight_sync_config.mode=raiden."
+        " checkpoint, or use weight_sync_config.mode='raiden' or 'fs'."
     )
 
 
