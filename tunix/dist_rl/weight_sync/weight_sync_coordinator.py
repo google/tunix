@@ -138,6 +138,9 @@ from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import timeouts as timeouts_lib
 from tunix.dist_rl.weight_sync import weight_sync
 from tunix.dist_rl.worker import remote_execution
+# TODO(lancewang): Graduate gcs_synchronizer/gcs_handler from
+# experimental/weight_sync to dist_rl/weight_sync in a follow-up CL.
+from tunix.experimental.weight_sync import gcs_handler
 
 if TYPE_CHECKING:
   # Type-only: rollout workers import this module and must not import the
@@ -170,9 +173,10 @@ def create_default_handler(
 ) -> weight_sync.WeightSyncHandler:
   """Creates the default coordinator weight sync handler.
 
-  Supports `WeightSyncMode.RAIDEN` for production TPU RMA weight sync and
-  `WeightSyncMode.NOOP` / `WeightSyncMode.NONE` for protocol-only no-op
-  transfers (`NullHandler`).
+  Supports `WeightSyncMode.RAIDEN` for production TPU RMA weight sync,
+  `WeightSyncMode.FS` (and deprecated `"gcs"` alias) for checkpoint-staged sync
+  (`GCSHandler`), and `WeightSyncMode.NOOP` / `WeightSyncMode.NONE` for
+  protocol-only no-op transfers (`NullHandler`).
   Raises `NotImplementedError` for valid modes without a coordinator transport
   handler yet, and `ValueError` for unknown mode strings.
   """
@@ -193,6 +197,9 @@ def create_default_handler(
     )
     logging.info("Built RaidenHandler natively; port %d", handler.port)
     return handler
+  if weight_sync.is_fs_weight_sync_mode(resolved_mode):
+    logging.info("Built GCSHandler for checkpoint-staged weight sync.")
+    return gcs_handler.GCSHandler()
   if resolved_mode in (
       weight_sync.WeightSyncMode.NONE,
       weight_sync.WeightSyncMode.NOOP,

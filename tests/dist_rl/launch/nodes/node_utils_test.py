@@ -27,6 +27,7 @@ import sys
 import tempfile
 from typing import Literal
 import threading
+import types
 from unittest import mock
 
 from absl.testing import absltest
@@ -1040,6 +1041,51 @@ class EnsureLocalSafetensorsTest(absltest.TestCase):
         node_utils.ensure_local_safetensors(
             tmp_file.name, "Qwen/Qwen3-1.7B", model_key="actor_model_config"
         )
+
+
+class BuildSingleArgHfManifestTest(absltest.TestCase):
+
+  def test_builds_manifest_for_single_arg_builder(self):
+    params_lib = types.SimpleNamespace(
+        build_to_hf_manifest=lambda cfg: {"cfg": cfg}
+    )
+    self.assertEqual(
+        node_utils.build_single_arg_hf_manifest(
+            params_lib,
+            "build_to_hf_manifest",
+            "qwen3_cfg",
+            model_name="Qwen3-0.6B",
+            mode="fs",
+        ),
+        {"cfg": "qwen3_cfg"},
+    )
+
+  def test_rejects_missing_or_multi_arg_builders(self):
+    with self.assertRaisesRegex(ValueError, "requires build_from_hf_manifest"):
+      node_utils.build_single_arg_hf_manifest(
+          types.SimpleNamespace(),
+          "build_from_hf_manifest",
+          "cfg",
+          model_name="CustomModel",
+          mode="fs",
+      )
+
+    for label, builder in (
+        ("hf_variant", lambda cfg, hf_variant=None: {"cfg": cfg}),
+        ("two_positional", lambda cfg, extra: {"cfg": cfg, "extra": extra}),
+        ("req_kwonly", lambda cfg, *, variant: {"cfg": cfg, "v": variant}),
+    ):
+      with self.subTest(builder=label):
+        with self.assertRaisesRegex(
+            ValueError, "requires variant-specific arguments"
+        ):
+          node_utils.build_single_arg_hf_manifest(
+              types.SimpleNamespace(build_from_hf_manifest=builder),
+              "build_from_hf_manifest",
+              "cfg",
+              model_name="VariantModel",
+              mode="fs",
+          )
 
 
 if __name__ == "__main__":
