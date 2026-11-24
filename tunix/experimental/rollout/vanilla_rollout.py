@@ -151,6 +151,8 @@ class VanillaRollout(base_rollout.BaseRollout):
         tokens=output.tokens,  # pyrefly: ignore[bad-argument-type]
         left_padded_prompt_tokens=output.padded_prompt_tokens,
         logprobs=output.logprobs,  # pyrefly: ignore[bad-argument-type]
+        topk_token_ids=output.topk_token_ids,
+        topk_logprobs=output.topk_logprobs,
         prompt_lengths=output.prompt_lengths,
     )
 

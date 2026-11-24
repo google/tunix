@@ -19,6 +19,7 @@ import re
 from unittest import mock
 
 from absl.testing import absltest
+from absl.testing import parameterized
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -128,16 +129,175 @@ class SamplingMetadataTest(absltest.TestCase):
       self.assertIs(metadata.unconstrained, expected)
 
 
+class TopLogprobsTest(parameterized.TestCase):
+
+  def _sample(self, logits, metadata, num_top_logprobs, max_top_k=8):
+    return model_runner_lib.sample(
+        logits,
+        jax.random.PRNGKey(0),
+        metadata,
+        max_top_k=max_top_k,
+        return_logprobs=True,
+        num_top_logprobs=num_top_logprobs,
+    )
+
+  @parameterized.named_parameters(
+      ('top_k_path', 8, dict(top_k=4)),
+      ('unconstrained', -1, dict()),
+  )
+  def test_returns_the_most_likely_tokens(self, max_top_k, row_kwargs):
+    logits = jnp.array(
+        [[0.0, 3.0, 1.0, 2.0], [4.0, 0.0, 1.0, -1.0]], dtype=jnp.float32
+    )
+    metadata = _metadata(
+        _params(temperature=0.5, **row_kwargs),
+        _params(temperature=0.0, **row_kwargs),
+        max_top_k=max_top_k,
+    )
+
+    tokens, _, top_token_ids, top_logprobs = self._sample(
+        logits, metadata, 3, max_top_k=max_top_k
+    )
+
+    self.assertEqual(top_token_ids.shape, (2, 3))
+    self.assertEqual(top_token_ids.dtype, jnp.int32)
+    np.testing.assert_array_equal(
+        np.sort(top_token_ids, axis=-1), [[1, 2, 3], [0, 1, 2]]
+    )
+    # Greedy row 1 samples its most likely token.
+    self.assertEqual(int(tokens[1]), 0)
+    # Row 0 is scaled by its temperature; greedy row 1 is not scaled.
+    expected = np.stack([
+        jax.nn.log_softmax(logits[0] / 0.5)[top_token_ids[0]],
+        jax.nn.log_softmax(logits[1])[top_token_ids[1]],
+    ])
+    np.testing.assert_allclose(top_logprobs, expected, rtol=1e-6, atol=1e-6)
+
+  def test_ignores_top_k_and_top_p(self):
+    probs = jnp.array([0.5, 0.3, 0.2], dtype=jnp.float32)
+    metadata = _metadata(_params(top_k=1, top_p=0.1))
+
+    _, logp, top_token_ids, top_logprobs = self._sample(
+        jnp.log(probs)[None], metadata, 3
+    )
+
+    np.testing.assert_allclose(logp, np.log([0.5]), rtol=1e-6)
+    np.testing.assert_array_equal(np.sort(top_token_ids[0]), [0, 1, 2])
+    np.testing.assert_allclose(
+        top_logprobs, jnp.log(probs)[top_token_ids], rtol=1e-6
+    )
+
+  @parameterized.named_parameters(
+      ('top_k_path', 8, dict(top_k=4)),
+      ('unconstrained', -1, dict()),
+  )
+  def test_top_logprobs_span_blocks(self, max_top_k, row_kwargs):
+    vocab_size = 4000
+    logits = jax.random.normal(
+        jax.random.PRNGKey(1), (2, vocab_size), dtype=jnp.float32
+    )
+    metadata = _metadata(
+        _params(temperature=0.7, **row_kwargs),
+        _params(temperature=0.0, **row_kwargs),
+        max_top_k=max_top_k,
+    )
+
+    _, _, top_token_ids, top_logprobs = self._sample(
+        logits, metadata, 10, max_top_k
+    )
+
+    _, expected_ids = jax.lax.top_k(logits, 10)
+    np.testing.assert_array_equal(
+        np.sort(top_token_ids, axis=-1), np.sort(expected_ids, axis=-1)
+    )
+    expected = np.stack([
+        jax.nn.log_softmax(logits[0] / 0.7)[top_token_ids[0]],
+        jax.nn.log_softmax(logits[1])[top_token_ids[1]],
+    ])
+    np.testing.assert_allclose(top_logprobs, expected, rtol=1e-5, atol=1e-5)
+
+  @parameterized.named_parameters(
+      ('top_k_path', 8, dict(top_k=4)),
+      ('block_sampler', -1, dict()),
+  )
+  def test_vocab_size_top_logprobs_return_every_token(
+      self, max_top_k, row_kwargs
+  ):
+    # 300 tokens pad out to two blocks.
+    vocab_size = 300
+    logits = jax.random.normal(
+        jax.random.PRNGKey(2), (2, vocab_size), dtype=jnp.float32
+    )
+    metadata = _metadata(
+        _params(temperature=0.7, **row_kwargs),
+        _params(temperature=0.0, **row_kwargs),
+        max_top_k=max_top_k,
+    )
+
+    tokens, logp, top_token_ids, top_logprobs = self._sample(
+        logits, metadata, vocab_size, max_top_k
+    )
+
+    every_token_id = np.broadcast_to(np.arange(vocab_size), (2, vocab_size))
+    np.testing.assert_array_equal(
+        np.sort(top_token_ids, axis=-1), every_token_id
+    )
+    expected = np.stack([
+        jax.nn.log_softmax(logits[0] / 0.7),
+        jax.nn.log_softmax(logits[1]),
+    ])
+    np.testing.assert_allclose(
+        top_logprobs,
+        np.take_along_axis(expected, np.asarray(top_token_ids), axis=-1),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    np.testing.assert_allclose(
+        logp,
+        np.take_along_axis(expected, np.asarray(tokens)[:, None], axis=-1)[
+            :, 0
+        ],
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+  def test_block_sampler_does_not_sort_for_every_logprob(self):
+    metadata = _metadata(_params(), max_top_k=-1)
+
+    with mock.patch.object(jax.lax, 'top_k') as mock_top_k:
+      self._sample(jnp.zeros((1, 300), dtype=jnp.float32), metadata, 300, -1)
+
+    mock_top_k.assert_not_called()
+
+  @parameterized.named_parameters(
+      ('top_k_path', 8),
+      ('unconstrained', -1),
+  )
+  def test_no_top_logprobs_by_default(self, max_top_k):
+    _, logp, top_token_ids, top_logprobs = model_runner_lib.sample(
+        jnp.zeros((1, 4), dtype=jnp.float32),
+        jax.random.PRNGKey(0),
+        _metadata(_params(), max_top_k=max_top_k),
+        max_top_k=max_top_k,
+        return_logprobs=True,
+    )
+
+    self.assertIsNotNone(logp)
+    self.assertEqual(top_token_ids.shape, (1, 0))
+    self.assertEqual(top_logprobs.shape, (1, 0))
+
+
 class SampleTest(absltest.TestCase):
 
   def _sample(self, logits, metadata, max_top_k=8, seed=0):
-    return model_runner_lib.sample(
+    tokens, logp, _, _ = model_runner_lib.sample(
         logits,
         jax.random.PRNGKey(seed),
         metadata,
         max_top_k=max_top_k,
         return_logprobs=True,
     )
+    return tokens, logp
 
   def _sampled_set(self, tokens) -> set[int]:
     return set(np.asarray(tokens).tolist())
@@ -264,7 +424,7 @@ class SampleTest(absltest.TestCase):
   def test_rows_sample_independently_under_one_key(self):
     logits = _logits([0.0, 0.0, 0.0, 0.0], num_rows=64)
 
-    tokens, _ = model_runner_lib.sample(
+    tokens, _, _, _ = model_runner_lib.sample(
         logits, jax.random.PRNGKey(3), _metadata(*[_params()] * 64), max_top_k=8
     )
 
@@ -280,7 +440,7 @@ class SampleTest(absltest.TestCase):
     np.testing.assert_array_equal(first, second)
 
   def test_without_logprobs_returns_none(self):
-    _, logp = model_runner_lib.sample(
+    _, logp, _, _ = model_runner_lib.sample(
         _logits([0.0, 1.0]),
         jax.random.PRNGKey(0),
         _metadata(_params()),
@@ -294,7 +454,7 @@ class SampleTest(absltest.TestCase):
     for vocab_size in (16, 4096):
       logits = jnp.full((2, vocab_size), -jnp.inf, dtype=jnp.bfloat16)
       with mock.patch.object(jax.lax, 'top_k') as mock_top_k:
-        tokens, logp = model_runner_lib.sample(
+        tokens, logp, _, _ = model_runner_lib.sample(
             logits, jax.random.PRNGKey(0), metadata, max_top_k=-1
         )
         mock_top_k.assert_not_called()
@@ -371,7 +531,7 @@ class SampleTest(absltest.TestCase):
         model_runner_lib.sample,
         static_argnames=['max_top_k', 'return_logprobs'],
     )
-    tokens, _ = jit_sample(
+    tokens, _, _, _ = jit_sample(
         jnp.broadcast_to(row_logits, (num_rows, 4096)),
         jax.random.PRNGKey(0),
         metadata,
@@ -381,6 +541,33 @@ class SampleTest(absltest.TestCase):
     expected = jax.nn.softmax(row_logits.astype(jnp.float32) / temperature)
     np.testing.assert_array_equal(counts[512:768], 0)
     np.testing.assert_allclose(counts / num_rows, expected, atol=1.5e-2)
+
+  def test_unconstrained_pads_the_vocab_to_whole_blocks(self):
+    # 300 tokens fill one 256-token block and part of a second.
+    row_logits = (
+        jnp.full((300,), -6.0, dtype=jnp.float32)
+        .at[jnp.array([7, 260, 299])]
+        .set(jnp.array([1.0, 1.5, 0.5]))
+    )
+    num_rows = 8192
+    metadata = _metadata(*[_params()] * num_rows, max_top_k=-1)
+
+    tokens, logp, _, _ = model_runner_lib.sample(
+        jnp.broadcast_to(row_logits, (num_rows, 300)),
+        jax.random.PRNGKey(0),
+        metadata,
+        max_top_k=-1,
+        return_logprobs=True,
+    )
+
+    assert logp is not None
+    self.assertLess(int(jnp.max(tokens)), 300)
+    counts = np.bincount(np.asarray(tokens), minlength=300)
+    expected = jax.nn.softmax(row_logits)
+    np.testing.assert_allclose(counts / num_rows, expected, atol=1.5e-2)
+    np.testing.assert_allclose(
+        logp, jax.nn.log_softmax(row_logits)[tokens], rtol=1e-5, atol=1e-6
+    )
 
 
 class ModelRunnerTest(absltest.TestCase):
@@ -685,7 +872,10 @@ class ExecuteStepTest(absltest.TestCase):
     np.testing.assert_array_equal(positions, [[0, 4, 5, 6, 0, 1]])
 
   def test_samples_from_the_last_token_of_each_row(self):
-    tokens, logits, logp, _ = self._execute(_runner(_NextTokenTransformer()))
+    output, _ = self._execute(
+        _runner(_NextTokenTransformer())
+    )
+    tokens, logits, logp = output.sampled_tokens, output.logits, output.logprobs
 
     self.assertIsInstance(tokens, jax.Array)
     # The decode continues from 4, and the prefill from its last token 9.
@@ -694,14 +884,15 @@ class ExecuteStepTest(absltest.TestCase):
     self.assertIsNone(logp)
 
   def test_positions_continue_from_the_cached_tokens(self):
-    _, _, _, cache = self._execute(_runner(_NextTokenTransformer()))
+    output, cache = self._execute(_runner(_NextTokenTransformer()))
 
     np.testing.assert_array_equal(cache['positions'], [5, 0, 1, 2])
 
   def test_returns_last_token_logits_per_row(self):
     runner = _runner(_NextTokenTransformer(), return_logits=True)
 
-    tokens, logits, _, _ = self._execute(runner)
+    output, _ = self._execute(runner)
+    tokens, logits = output.sampled_tokens, output.logits
 
     np.testing.assert_array_equal(tokens[:2], [[5], [10]])
     self.assertEqual(logits.shape, (3, 1, _VOCAB_SIZE))
@@ -711,7 +902,8 @@ class ExecuteStepTest(absltest.TestCase):
   def test_returns_logprobs_per_row(self):
     runner = _runner(_NextTokenTransformer(), return_logprobs=True)
 
-    _, _, logp, _ = self._execute(runner)
+    output, _ = self._execute(runner)
+    logp = output.logprobs
 
     self.assertEqual(logp.shape, (3, 1))
     expected = jax.nn.log_softmax(
@@ -725,9 +917,10 @@ class ExecuteStepTest(absltest.TestCase):
     # temperature, while the decode stays greedy.
     runner = _runner(_NextTokenTransformer())
 
-    tokens, _, _, _ = self._execute(
+    output, _ = self._execute(
         runner, (_params(temperature=0.0), _params(temperature=5.0, top_k=1))
     )
+    tokens = output.sampled_tokens
 
     np.testing.assert_array_equal(tokens[:2], [[5], [10]])
 
@@ -738,7 +931,10 @@ class ExecuteStepTest(absltest.TestCase):
     with mock.patch.object(
         runner, '_to_device', wraps=runner._to_device
     ) as mock_to_device:
-      tokens, logits, logp, _ = self._execute(runner)
+      output, _ = self._execute(runner)
+      tokens = output.sampled_tokens
+      logits = output.logits
+      logp = output.logprobs
 
     # Both `metadata` and `sampling_metadata` are transferred in one call.
     mock_to_device.assert_called_once()
@@ -770,12 +966,13 @@ class ExecuteStepSeedTest(absltest.TestCase):
         query_lens=[1] * num_rows,
         distribution=[num_rows] * 3,
     )
-    tokens, _, _, _ = runner.execute_step(
+    output, _ = runner.execute_step(
         cache={},
         tokens=jnp.zeros((1, num_rows), dtype=jnp.int32),
         metadata=metadata,
         sampling_params=sampling_params or (_params(),) * num_rows,
     )
+    tokens = output.sampled_tokens
     return tokens
 
   def test_unseeded_sampling_is_reproducible_for_an_engine_seed(self):
@@ -803,7 +1000,14 @@ def _fake_step_fn(params, cache, tokens, metadata, sampling_metadata, rng):
   del params, tokens, sampling_metadata
   rng, _ = jax.random.split(rng)
   num_rows = len(metadata.query_lens)
-  return jnp.ones((num_rows,), dtype=jnp.int32), None, None, cache, rng
+  output = model_runner_lib.ModelRunnerOutput(
+      sampled_tokens=jnp.ones((num_rows,), dtype=jnp.int32),
+      logits=None,
+      logprobs=None,
+      top_token_ids=jnp.zeros((num_rows, 0), dtype=jnp.int32),
+      top_logprobs=jnp.zeros((num_rows, 0), dtype=jnp.float32),
+  )
+  return output, cache, rng
 
 
 class SplitRowsTest(absltest.TestCase):
@@ -852,7 +1056,7 @@ class SplitRowsTest(absltest.TestCase):
     runner = _runner(_NextTokenTransformer(), mesh=mesh, num_scheduler_steps=2)
 
     # Four decodes, one row per DP group.
-    tokens, _, _, _ = runner.execute_step(
+    output, _ = runner.execute_step(
         cache=_positions_cache(4),
         tokens=jnp.array([[4], [7], [1], [2]], dtype=jnp.int32),
         metadata=paged_attention.PagedAttnMetadata(
@@ -865,8 +1069,10 @@ class SplitRowsTest(absltest.TestCase):
         ),
         sampling_params=(_params(temperature=0.0),) * 4,
     )
+    tokens = output.sampled_tokens
 
     np.testing.assert_array_equal(tokens, [[5, 6], [8, 9], [2, 3], [3, 4]])
+    assert isinstance(tokens, jax.Array)
     self.assertTrue(
         tokens.sharding.is_equivalent_to(
             jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec('dp')),
@@ -885,7 +1091,7 @@ class SplitRowsTest(absltest.TestCase):
 
     # Group 0: [decode (4), chunked prefill (1, 2), full prefill (7, 8), pad].
     # Group 1: [decode (2), full prefill (10, 11), pad, pad].
-    tokens, _, logp, cache = runner.execute_step(
+    output, cache = runner.execute_step(
         cache=_positions_cache(12),
         tokens=jnp.array(
             [[4, 1, 2, 7, 8, 0], [2, 10, 11, 0, 0, 0]], dtype=jnp.int32
@@ -906,6 +1112,7 @@ class SplitRowsTest(absltest.TestCase):
             _params(temperature=10.0, top_k=1),
         ),
     )
+    tokens, logp = output.sampled_tokens, output.logprobs
 
     # Surviving rows (0, 2 in group 0; 4, 5 in group 1) return to their
     # scheduled row positions after compacting within each group.
@@ -925,6 +1132,7 @@ class SplitRowsTest(absltest.TestCase):
       np.testing.assert_allclose(
           logp[row], [expected, expected], rtol=1e-5, atol=1e-6
       )
+    assert isinstance(tokens, jax.Array)
     self.assertTrue(
         tokens.sharding.is_equivalent_to(
             jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec('dp')),
@@ -962,7 +1170,8 @@ class MultiStepExecuteTest(absltest.TestCase):
         static_argnames=['num_steps'],
     )
 
-    tokens, _, _, cache = self._execute(runner)
+    output, cache = self._execute(runner)
+    tokens = output.sampled_tokens
     runner.execute_step(
         cache=_positions_cache(8),
         tokens=self.tokens,
@@ -986,7 +1195,8 @@ class MultiStepExecuteTest(absltest.TestCase):
         return_logprobs=True,
     )
 
-    _, logits, logp, _ = self._execute(runner)
+    output, _ = self._execute(runner)
+    logits, logp = output.logits, output.logprobs
 
     self.assertEqual(logits.shape, (4, 3, _VOCAB_SIZE))
     self.assertEqual(logp.shape, (4, 3))
@@ -997,6 +1207,59 @@ class MultiStepExecuteTest(absltest.TestCase):
         + 5.0 * jax.nn.one_hot(12, _VOCAB_SIZE)
     )[11]
     np.testing.assert_allclose(logp[2, 1], expected, rtol=1e-6)
+
+  def test_returns_the_most_likely_tokens_for_every_step(self):
+    runner = _runner(
+        _NextTokenTransformer(),
+        num_scheduler_steps=3,
+        return_logprobs=True,
+        max_logprobs=2,
+    )
+
+    output, _ = self._execute(runner)
+    tokens = output.sampled_tokens
+    top_token_ids = output.top_token_ids
+    top_logprobs = output.top_logprobs
+
+    self.assertEqual(top_token_ids.shape, (4, 3, 2))
+    self.assertEqual(top_logprobs.shape, (4, 3, 2))
+    # The full prefill's second step decoded 10, so it favours 11, then 12.
+    self.assertEqual(int(tokens[2, 1]), 11)
+    np.testing.assert_array_equal(np.sort(top_token_ids[2, 1]), [11, 12])
+    expected = jax.nn.log_softmax(
+        10.0 * jax.nn.one_hot(11, _VOCAB_SIZE)
+        + 5.0 * jax.nn.one_hot(12, _VOCAB_SIZE)
+    )[top_token_ids[2, 1]]
+    np.testing.assert_allclose(
+        top_logprobs[2, 1], expected, rtol=1e-6, atol=1e-6
+    )
+
+  def test_returns_no_top_logprobs_without_max_logprobs(self):
+    runner = _runner(
+        _NextTokenTransformer(), num_scheduler_steps=3, return_logprobs=True
+    )
+
+    output, _ = self._execute(runner)
+    logp = output.logprobs
+    top_token_ids = output.top_token_ids
+    top_logprobs = output.top_logprobs
+
+    self.assertIsNotNone(logp)
+    self.assertEqual(top_token_ids.shape, (4, 3, 0))
+    self.assertEqual(top_logprobs.shape, (4, 3, 0))
+
+  def test_vocab_size_max_logprobs_returns_every_token(self):
+    runner = _runner(
+        _NextTokenTransformer(),
+        num_scheduler_steps=3,
+        return_logprobs=True,
+        max_logprobs=_VOCAB_SIZE,
+    )
+
+    output, _ = self._execute(runner)
+    top_token_ids, top_logprobs = output.top_token_ids, output.top_logprobs
+    self.assertEqual(top_token_ids.shape, (4, 3, _VOCAB_SIZE))
+    self.assertEqual(top_logprobs.shape, (4, 3, _VOCAB_SIZE))
 
   def test_the_metadata_advances_between_steps(self):
     runner = _runner(_NextTokenTransformer(), num_scheduler_steps=3)
@@ -1096,7 +1359,7 @@ class MultiStepExecuteTest(absltest.TestCase):
     runner = _runner(_NextTokenTransformer(), num_scheduler_steps=4)
     runner._compiled_decode_loop_fn = mock.Mock()
 
-    tokens, _, _, _ = runner.execute_step(
+    output, _ = runner.execute_step(
         cache=_positions_cache(8),
         tokens=self.tokens,
         metadata=_rpa_metadata(
@@ -1104,6 +1367,7 @@ class MultiStepExecuteTest(absltest.TestCase):
         ),
         sampling_params=self.greedy[:2],
     )
+    tokens = output.sampled_tokens
 
     runner._compiled_decode_loop_fn.assert_not_called()
     self.assertEqual(tokens.shape, (3, 4))
@@ -1181,10 +1445,8 @@ class TwoStageTopKTest(absltest.TestCase):
     self.assertEqual(model_runner_lib._top_k_num_blocks(64, 64, 4), 1)
     with self.assertRaisesRegex(ValueError, 'tp_size must be positive'):
       model_runner_lib._top_k_num_blocks(64, 4, 0)
-    with self.assertRaisesRegex(ValueError, 'must not exceed block size'):
-      model_runner_lib._two_stage_top_k(jnp.zeros((2, 16)), 5, num_blocks=4)
 
-  def test_two_stage_top_k_matches_lax_top_k_with_ties_padding_and_neg_inf(
+  def test_top_k_matches_lax_top_k_with_ties_padding_and_neg_inf(
       self,
   ):
     mesh_1x4 = jax.sharding.Mesh(
@@ -1231,10 +1493,10 @@ class TwoStageTopKTest(absltest.TestCase):
         if vocab_size % tp_size == 0:
           inp = jax.device_put(logits, sharding)
 
-      def _run(x, k=k, nb=num_blocks, s=sharding):
+      def _run(x, k=k, tp_size=tp_size, s=sharding):
         if s is not None:
           x = jax.lax.with_sharding_constraint(x, s)
-        return model_runner_lib._two_stage_top_k(x, k, nb)
+        return model_runner_lib._top_k(x, k, tp_size)
 
       got_vals, got_idxs = jax.jit(_run)(inp)
       np.testing.assert_array_equal(got_vals, expected_vals)
@@ -1252,7 +1514,7 @@ class TwoStageTopKTest(absltest.TestCase):
         top_p=jnp.array([1.0, 0.9, 0.95, 1.0], dtype=jnp.float32),
         top_k=jnp.array([1, 8, 12, 4], dtype=jnp.int32),
     )
-    ref_toks, ref_logp = jax.jit(
+    ref_toks, ref_logp, _, _ = jax.jit(
         lambda x: model_runner_lib.sample(
             x, key, meta, max_top_k=12, return_logprobs=True, tp_size=1
         )
@@ -1263,13 +1525,73 @@ class TwoStageTopKTest(absltest.TestCase):
             mesh, jax.sharding.PartitionSpec(None, 'tp')
         ),
     )
-    got_toks, got_logp = jax.jit(
+    got_toks, got_logp, _, _ = jax.jit(
         lambda x: model_runner_lib.sample(
             x, key, meta, max_top_k=12, return_logprobs=True, tp_size=4
         )
     )(sharded_logits)
     np.testing.assert_array_equal(got_toks, ref_toks)
     np.testing.assert_allclose(got_logp, ref_logp, rtol=1e-5, atol=1e-5)
+
+  def test_unconstrained_sample_with_tp_matches_reference(self):
+    mesh = jax.sharding.Mesh(
+        np.array(jax.devices()[:4]).reshape(1, 4), ('fsdp', 'tp')
+    )
+    vocab_size = 600
+    # 600 tokens take 3 blocks, which `tp_size=4` rounds up to 4, leaving an
+    # all-padding block.
+    self.assertEqual(model_runner_lib._hierarchical_num_blocks(vocab_size), 3)
+    self.assertEqual(
+        model_runner_lib._hierarchical_num_blocks(vocab_size, tp_size=4), 4
+    )
+    rng = np.random.default_rng(7)
+    logits = jnp.asarray(rng.normal(size=(4, vocab_size)).astype(np.float32))
+    temperature = np.array([0.0, 0.7, 1.0, 0.5], dtype=np.float32)
+    meta = model_runner_lib.SamplingMetadata(
+        temperature=jnp.asarray(temperature),
+        top_p=jnp.ones((4,), dtype=jnp.float32),
+        top_k=jnp.zeros((4,), dtype=jnp.int32),
+        unconstrained=True,
+    )
+
+    def _sample(x, tp_size):
+      return model_runner_lib.sample(
+          x,
+          jax.random.PRNGKey(123),
+          meta,
+          max_top_k=-1,
+          return_logprobs=True,
+          tp_size=tp_size,
+      )
+
+    ref_toks, _, _, _ = jax.jit(lambda x: _sample(x, 1))(logits)
+    sharded_logits = jax.device_put(
+        logits,
+        jax.sharding.NamedSharding(
+            mesh, jax.sharding.PartitionSpec(None, 'tp')
+        ),
+    )
+    got_toks, got_logp, _, _ = jax.jit(lambda x: _sample(x, 4))(
+        sharded_logits
+    )
+
+    # The block counts differ, so only the greedy row samples the same token.
+    self.assertEqual(int(got_toks[0]), int(ref_toks[0]))
+    self.assertEqual(int(got_toks[0]), int(jnp.argmax(logits[0])))
+    self.assertLess(int(jnp.max(got_toks)), vocab_size)
+    assert got_logp is not None
+    scale = np.where(temperature > 0.0, temperature, 1.0)
+    expected = jax.nn.log_softmax(logits / scale[:, None], axis=-1)
+    np.testing.assert_allclose(
+        got_logp,
+        jnp.take_along_axis(expected, got_toks[:, None], axis=-1)[:, 0],
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+  def test_non_positive_tp_size_raises(self):
+    with self.assertRaisesRegex(ValueError, 'tp_size must be positive'):
+      model_runner_lib._hierarchical_num_blocks(600, tp_size=0)
 
   def test_compiled_hlo_has_no_vocab_sized_collective(self):
     if jax.default_backend() == 'cpu':
@@ -1290,7 +1612,7 @@ class TwoStageTopKTest(absltest.TestCase):
     self.assertEqual(num_blocks, 8)
 
     hlo = (
-        jax.jit(lambda x: model_runner_lib._two_stage_top_k(x, k, num_blocks))
+        jax.jit(lambda x: model_runner_lib._top_k(x, k, tp_size=2))
         .lower(logits)
         .compile()
         .as_text()
@@ -1315,7 +1637,7 @@ class TwoStageTopKTest(absltest.TestCase):
 
     def _ragged_fn(x):
       x = jax.lax.with_sharding_constraint(x, sharding)
-      return model_runner_lib._two_stage_top_k(x, k, ragged_blocks)
+      return model_runner_lib._top_k(x, k, tp_size=2)
 
     ragged_hlo = (
         jax.jit(_ragged_fn)
@@ -1373,14 +1695,15 @@ class TwoStageTopKTest(absltest.TestCase):
         distribution=np.array([[2, 2, 2], [2, 2, 2]], dtype=np.int32),
     )
     sampling_params = (_params(temperature=0.0),) * rows
-    tokens, out_logits, _, _ = runner.execute_step(
+    output, _ = runner.execute_step(
         cache={},
         tokens=jnp.zeros((2, 2), dtype=jnp.int32),
         metadata=metadata,
         sampling_params=sampling_params,
     )
+    tokens, out_logits = output.sampled_tokens, output.logits
     np.testing.assert_array_equal(tokens[:, 0], [vocab_size - 1] * rows)
-    assert out_logits is not None
+    assert isinstance(out_logits, jax.Array)
     self.assertTrue(
         out_logits.sharding.is_equivalent_to(
             jax.sharding.NamedSharding(
@@ -1400,12 +1723,14 @@ class TwoStageTopKTest(absltest.TestCase):
         max_top_k=8,
         return_logits=True,
     )
-    ragged_tokens, ragged_out, _, _ = ragged_runner.execute_step(
+    ragged_output, _ = ragged_runner.execute_step(
         cache={},
         tokens=jnp.zeros((2, 2), dtype=jnp.int32),
         metadata=metadata,
         sampling_params=sampling_params,
     )
+    ragged_tokens = ragged_output.sampled_tokens
+    ragged_out = ragged_output.logits
     np.testing.assert_array_equal(ragged_tokens[:, 0], [64] * rows)
     assert ragged_out is not None
     self.assertEqual(ragged_out.shape, (rows, 1, 65))
