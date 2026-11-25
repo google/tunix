@@ -81,6 +81,15 @@ class _DeferHookState:
 _DEFER = _DeferHookState()
 
 
+def _call_name(call: ast.Call) -> str:
+  """The called name: `f` for both `f(...)` and `obj.f(...)`."""
+  if isinstance(call.func, ast.Name):
+    return call.func.id
+  if isinstance(call.func, ast.Attribute):
+    return call.func.attr
+  return ""
+
+
 def _check_continue_decode_runner(source: str) -> List[str]:
   """Problems with the tpu-inference runner structure the deferral relies on.
 
@@ -90,7 +99,10 @@ def _check_continue_decode_runner(source: str) -> List[str]:
   fetch. That requires a module-level `_process_continue_decode_outputs`
   whose first statement is a `device_get` (jax.device_get or
   common_utils.safe_device_get), called after `continue_decode` in
-  `_execute_continue_decode`.
+  `_execute_continue_decode`. The hook replaces that module-level function,
+  so the runner must call it by its bare name; a call through an attribute
+  (`self.` or another module) would bypass the hook and is reported.
+  `continue_decode` only anchors the order and may be called either way.
 
   Args:
     source: Source of tpu_inference.runner.tpu_runner.
@@ -98,15 +110,15 @@ def _check_continue_decode_runner(source: str) -> List[str]:
   Returns:
     A list of problems; empty when the anchors hold.
   """
+  hooked = "_process_continue_decode_outputs"
   tree = ast.parse(source)
   fns = [
       n
       for n in tree.body
-      if isinstance(n, ast.FunctionDef)
-      and n.name == "_process_continue_decode_outputs"
+      if isinstance(n, ast.FunctionDef) and n.name == hooked
   ]
   if len(fns) != 1:
-    return [f"module-level _process_continue_decode_outputs x{len(fns)}"]
+    return [f"module-level {hooked} x{len(fns)}"]
   body = [
       st
       for st in fns[0].body
@@ -114,9 +126,18 @@ def _check_continue_decode_runner(source: str) -> List[str]:
   ]
   problems = []
   if not body or "device_get(" not in ast.unparse(body[0]):
+    problems.append(f"first statement of {hooked} is not a device_get")
+  bypassing = sorted(
+      c.lineno
+      for c in ast.walk(tree)
+      if isinstance(c, ast.Call)
+      and isinstance(c.func, ast.Attribute)
+      and c.func.attr == hooked
+  )
+  if bypassing:
     problems.append(
-        "first statement of _process_continue_decode_outputs is not a"
-        " device_get"
+        f"{hooked} called through an attribute at lines {bypassing}, which"
+        " the hook does not intercept"
     )
   execs = [
       n
@@ -126,14 +147,13 @@ def _check_continue_decode_runner(source: str) -> List[str]:
   if len(execs) != 1:
     return problems + [f"_execute_continue_decode x{len(execs)}"]
   calls = sorted(
-      (c.lineno, c.func.id)
+      (c.lineno, c.col_offset, _call_name(c))
       for c in ast.walk(execs[0])
       if isinstance(c, ast.Call)
-      and isinstance(c.func, ast.Name)
-      and c.func.id in ("continue_decode", "_process_continue_decode_outputs")
+      and _call_name(c) in ("continue_decode", hooked)
   )
-  order = [name for _, name in calls]
-  if order != ["continue_decode", "_process_continue_decode_outputs"]:
+  order = [name for _, _, name in calls]
+  if order != ["continue_decode", hooked]:
     problems.append(f"_execute_continue_decode call order {order}")
   return problems
 
