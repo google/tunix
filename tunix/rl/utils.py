@@ -812,7 +812,7 @@ def train_example_to_exact_pack_items(
   Raises:
     _PerHostPackError: if the example cannot be packed exactly.
   """
-  if getattr(example, "routed_experts", None) is not None:
+  if example.routed_experts is not None:
     raise _PerHostPackError(_PH_ERR_UNSUPPORTED, "routed_experts")
   prompt_ids = _host_array(example.prompt_ids)
   prompt_mask = _host_array(example.prompt_mask).astype(bool)
@@ -918,8 +918,7 @@ def _pack_mini_batch_per_host(
   num_segments = max_segments + 1
   example_cls: type[Any] = type(examples[0])
   mask_dtype = np.dtype(np.float32)
-  # Static flag of the unpacked examples; the packed chunks keep it.
-  applied = bool(getattr(examples[0], "sampler_agreement_applied", False))
+  applied = False
   err, detail = 0, ""
   items: list[packing.PackItem] = []
   holes = 0
@@ -929,6 +928,8 @@ def _pack_mini_batch_per_host(
   # so no process skips the allgather below and leaves the others hanging.
   try:
     mask_dtype = _host_array(examples[0].completion_mask).dtype
+    # Static flag of the unpacked examples; the packed chunks keep it.
+    applied = bool(examples[0].sampler_agreement_applied)
     for example in examples:
       example_items, example_holes = train_example_to_exact_pack_items(
           example, pad_id
@@ -1057,14 +1058,13 @@ def _pack_mini_batch_per_host(
     chunk = example_cls(**kwargs)
     # A 0-d flag: `shard_input` replicates it on any mesh, and the trainer
     # reads it with `.item()`.
-    replacements: dict[str, Any] = {
-        "is_update_step": np.asarray(c == num_chunks - 1)
-    }
-    if hasattr(chunk, "num_segments"):
-      replacements["num_segments"] = num_segments
-    if hasattr(chunk, "sampler_agreement_applied"):
-      replacements["sampler_agreement_applied"] = applied
-    chunks.append(chunk.replace(**replacements))
+    chunks.append(
+        chunk.replace(
+            is_update_step=np.asarray(c == num_chunks - 1),
+            num_segments=num_segments,
+            sampler_agreement_applied=applied,
+        )
+    )
   t3 = time.perf_counter()
   nproc = table.shape[0]
   glob_pad_frac = 1.0 - float(table[:, _PH_TOKENS].sum()) / float(

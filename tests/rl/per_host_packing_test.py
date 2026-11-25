@@ -315,6 +315,19 @@ class PackSequencesPerHostTest(parameterized.TestCase):
     with self.assertRaisesRegex(RuntimeError, "empty prompt"):
       _pack([ex.replace(prompt_mask=pm)])
 
+  def test_routed_experts_abort(self):
+    experts = np.zeros((len(_LENGTHS), _P + _C, 1, 1), np.int32)
+    ex = _batch(_LENGTHS).replace(routed_experts=experts)
+    with self.assertRaisesRegex(RuntimeError, "routed_experts"):
+      _pack([ex])
+
+  def test_chunks_keep_the_sampler_agreement_flag(self):
+    for applied in (False, True):
+      ex = _batch(_LENGTHS).replace(sampler_agreement_applied=applied)
+      chunks = _pack([ex], max_rows_per_shard=1)
+      self.assertGreater(len(chunks), 1)
+      self.assertEqual({c.sampler_agreement_applied for c in chunks}, {applied})
+
   def test_stream_must_end_on_a_mini_batch_boundary(self):
     gen = utils.pack_sequences_per_host(
         iter([[_batch(_LENGTHS)]]),
