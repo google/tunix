@@ -303,5 +303,24 @@ class ConfigsTest(absltest.TestCase):
         configs.RolloutConfig(max_tokens_to_generate=bad_max_tokens)
 
 
+class ReplicaSeedTest(parameterized.TestCase):
+
+  @parameterized.parameters(
+      (None, 0, None),
+      (None, 7, None),
+      (0, 0, 0),
+      (42, 0, 42),
+      (42, 15, 57),
+      (2**32 - 2, 5, 3),
+  )
+  def test_replica_seed(self, seed, replica_index, expected):
+    self.assertEqual(configs.replica_seed(seed, replica_index), expected)
+
+  def test_replica_seed_rejects_invalid_inputs(self):
+    for seed, idx in ((-1, 0), (42, -1), (None, -1), (True, 0), (42, False)):
+      with self.subTest(seed=seed, idx=idx), self.assertRaises(ValueError):
+        configs.replica_seed(seed, idx)
+
+
 if __name__ == "__main__":
   absltest.main()

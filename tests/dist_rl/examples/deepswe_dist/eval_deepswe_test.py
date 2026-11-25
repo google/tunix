@@ -266,6 +266,26 @@ class EvalDeepSWETest(unittest.TestCase):
           stderr.getvalue(),
       )
 
+  def test_seed_and_worker_index_flags_and_model_profile(self) -> None:
+    defaults = eval_deepswe.parse_args([])
+    self.assertIsNone(defaults.seed)
+    self.assertEqual(defaults.worker_index, 0)
+    self.assertIsNone(eval_deepswe.model_profile(defaults)["seed"])
+
+    args = eval_deepswe.parse_args(["--seed", "42", "--worker_index", "15"])
+    self.assertEqual((args.seed, args.worker_index), (42, 15))
+    profile = eval_deepswe.model_profile(args)
+    self.assertEqual(profile["seed"], 42)
+    self.assertNotIn("worker_index", profile)
+
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as e:
+      eval_deepswe.parse_args(["--seed", "-1"])
+    self.assertEqual(e.exception.code, 2)
+    self.assertIn(
+        "--seed and --worker_index must be nonnegative", stderr.getvalue()
+    )
+
   def test_pass_at_k_counts_failed_and_missing_attempts(self):
     def row(pair_index, reward, error=None):
       return {
