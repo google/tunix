@@ -134,6 +134,17 @@ class TestDAPOConfigPostInit(parameterized.TestCase):
     except ValueError as e:
       self.fail(f"DAPOConfig raised ValueError on default initialization: {e}")
 
+  def test_drop_zero_variance_groups_defaults_on_and_is_tunable(self):
+    self.assertTrue(dapo_lib.DAPOConfig().drop_zero_variance_groups)
+    self.assertIsNone(dapo_lib.DAPOConfig().max_consecutive_filtered_groups)
+    config = dapo_lib.DAPOConfig(
+        drop_zero_variance_groups=False, max_consecutive_filtered_groups=16
+    )
+    self.assertFalse(config.drop_zero_variance_groups)
+    self.assertEqual(config.max_consecutive_filtered_groups, 16)
+    with self.assertRaisesRegex(ValueError, "positive int or None"):
+      dapo_lib.DAPOConfig(max_consecutive_filtered_groups=0)
+
   def test_beta_defaults_to_zero(self):
     """DAPO has no KL term; beta must be 0.0 so learners skip the ref model."""
     self.assertEqual(dapo_lib.DAPOConfig().beta, 0.0)

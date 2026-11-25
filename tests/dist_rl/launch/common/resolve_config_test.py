@@ -879,6 +879,14 @@ weight_sync_config:
           "agentic_grpo_config.max_version_span=2",
           "agentic_grpo_config.trajectory_group_order=prompt_arrival",
       ])
+    with self.assertRaisesRegex(
+        ValueError,
+        "agentic_grpo_config.drop_zero_variance_groups is only supported",
+    ):
+      resolve_config.initialize([
+          "agentic_grpo_config.drop_zero_variance_groups=true",
+          "agentic_grpo_config.trajectory_group_order=prompt_arrival",
+      ])
 
   def test_max_seq_tokens_per_device_syncs_with_legacy_tpu_field(self):
     hp = resolve_config.initialize([

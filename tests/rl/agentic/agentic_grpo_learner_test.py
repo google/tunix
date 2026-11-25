@@ -361,6 +361,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         ValueError, "loss_algo should be either grpo or gspo-token"
     ):
       agentic_grpo_learner.GRPOConfig(loss_algo="invalid")
+    with self.assertRaisesRegex(ValueError, "positive int or None"):
+      agentic_grpo_learner.GRPOConfig(max_consecutive_filtered_groups=0)
 
   def test_num_iterations_greater_than_1(self):
     vocab = test_common.MockVocab()

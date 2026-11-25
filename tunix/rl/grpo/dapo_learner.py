@@ -47,7 +47,13 @@ class DAPOConfig(grpo_learner_lib.GRPOConfig):
    epsilon: Epsilon value for clipping (𝜀 in GRPO loss in paper). Similar to
      PPO, it ensures stable updates.
    epsilon_high: Epsilon value for upper bound clipping.
-   dynamic_sampling: Whether to use dynamic sampling.
+   drop_zero_variance_groups: Whether to drop prompt groups whose rewards
+     tie and sample replacement prompts (DAPO's dynamic sampling). On by
+     default for DAPO. Applied by the distributed `StandardRLProgram`;
+     `DAPOLearner` does not apply it yet.
+   max_consecutive_filtered_groups: Raise `RuntimeError` after this many
+     consecutive groups are dropped by `drop_zero_variance_groups`. `None`
+     disables the guard.
    overlong_buffer: The overlong buffer to use for overlong reward shaping.
    References: - DAPO:
      https://arxiv.org/pdf/2503.14476
@@ -63,7 +69,9 @@ class DAPOConfig(grpo_learner_lib.GRPOConfig):
   beta: float = 0.0  # No KL term.
   epsilon: float = 0.2
   epsilon_high: float = 0.28  # Clip higher
-  dynamic_sampling: bool = True  # TODO(sizhi): Add dynamic sampling.
+  # TODO(sizhi): Drop zero-variance groups in `DAPOLearner` too.
+  drop_zero_variance_groups: bool = True
+  max_consecutive_filtered_groups: int | None = None
   overlong_buffer: Optional[Dict[str, Any]] = dataclasses.field(
       default_factory=lambda: {
           "enable": True,

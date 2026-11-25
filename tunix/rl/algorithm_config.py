@@ -116,6 +116,13 @@ class AlgorithmConfig:
   # IDs happen to be `< 255` do not flip between 4D `uint8` and 5D `uint10`
   # across steps and trigger an extra XLA compilation.
   routed_experts_num_experts: int | None = None
+  # Drops prompt groups whose rewards tie (`advantages.tied_rewards`), so they
+  # carry no group-relative signal, before policy training so replacement
+  # prompts can fill the step (DAPO's dynamic sampling).
+  drop_zero_variance_groups: bool = False
+  # Raise `RuntimeError` after this many consecutive groups are dropped by
+  # `drop_zero_variance_groups`. `None` disables the guard.
+  max_consecutive_filtered_groups: int | None = None
 
   def __post_init__(self):
     self.temperature = None
@@ -178,6 +185,7 @@ class AlgorithmConfig:
         self.routed_experts_encode_mode,
         self.routed_experts_num_experts,
     )
+    self._validate_drop_zero_variance_groups()
     self._validate_sampler_is_and_rs_options()
 
     # Automatically prints configuration upon initialization.
@@ -187,6 +195,28 @@ class AlgorithmConfig:
   def requires_reference_kl(self) -> bool:
     """Whether reference-model KL log-probabilities must be computed."""
     return self.beta != 0.0 or self.force_compute_kl
+
+  def _validate_drop_zero_variance_groups(self) -> None:
+    """Validates the options for dropping zero-variance prompt groups."""
+    if self.drop_zero_variance_groups:
+      if self.advantage_estimator == "gae":
+        raise ValueError(
+            "drop_zero_variance_groups requires a group-relative"
+            " advantage_estimator, not 'gae'."
+        )
+      if self.num_generations < 2:
+        raise ValueError(
+            "drop_zero_variance_groups requires num_generations >= 2; got"
+            f" {self.num_generations}."
+        )
+    limit = self.max_consecutive_filtered_groups
+    if limit is not None and (
+        isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
+    ):
+      raise ValueError(
+          "max_consecutive_filtered_groups must be a positive int or None,"
+          f" got {limit!r}."
+      )
 
   def _validate_sampler_is_and_rs_options(self):
     """Checks sampler-vs-trainer error masking, IS and RS.
