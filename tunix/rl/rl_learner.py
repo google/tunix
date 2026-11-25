@@ -79,6 +79,35 @@ def per_host_learner_enabled() -> bool:
   return _env_flag("TUNIX_PER_HOST_LEARNER") and jax.process_count() > 1
 
 
+def _env_nonneg_int(name: str, default: int) -> int:
+  """A non-negative integer environment variable (same on every process)."""
+  raw = (os.environ.get(name, "") or "").strip()
+  if not raw:
+    return default
+  value = int(raw)
+  if value < 0:
+    raise ValueError(f"{name}={raw!r} must be >= 0.")
+  return value
+
+
+def _per_host_pack_knobs() -> tuple[int, int]:
+  """Per-host packing knobs from the environment, validated.
+
+  TUNIX_PER_HOST_PACK_MAX_ROWS_PER_SHARD (default 0): if > 0, the most packed
+  rows per data shard in one train step. A mini-batch that needs more is split
+  into equal chunks whose gradients are accumulated, which bounds activation
+  memory. TUNIX_PER_HOST_PACK_ROW_MULTIPLE (default 1): rounds the rows per
+  data shard up to a multiple, so fewer distinct shapes are compiled.
+
+  Returns:
+    `(max_rows_per_shard, row_multiple)`.
+  """
+  max_rows = _env_nonneg_int("TUNIX_PER_HOST_PACK_MAX_ROWS_PER_SHARD", 0)
+  multiple = _env_nonneg_int("TUNIX_PER_HOST_PACK_ROW_MULTIPLE", 1) or 1
+  rl_utils.per_host_pack_plan(0, 1, max_rows, multiple)  # Raises if invalid.
+  return max_rows, multiple
+
+
 def shard_batch_by_process(
     batch: TrainingInputT,
     process_index: int,
@@ -652,11 +681,18 @@ class RLLearner(abc.ABC, Generic[TConfig]):
     local_size = self._per_host_size if per_host else (lambda size, _: size)
     if per_host:
       if self._packing_enabled:
-        raise NotImplementedError(
-            "TUNIX_PER_HOST_LEARNER=1 does not support sequence packing: the"
-            " number of packed chunks is data dependent, so processes would"
-            " run different numbers of train steps."
-        )
+        # Per-host packing (`rl_utils.pack_sequences_per_host`): processes
+        # agree on the packed shape with one allgather per mini-batch, so
+        # they run the same number of identically shaped train steps.
+        if not sharding_utils.per_host_safe_logps_enabled():
+          raise ValueError(
+              "TUNIX_PER_HOST_LEARNER=1 with sequence packing"
+              " (max_seq_token_per_tpu) needs TUNIX_PER_HOST_SAFE_LOGPS=1:"
+              " packed rows are process-local, and shard_input must judge"
+              " their divisibility by the global row count (otherwise every"
+              " packed chunk would need data-axis-size rows per process)."
+          )
+        self._per_host_pack_knobs = _per_host_pack_knobs()
       logps_passes = self._per_host_trainer_side_logps()
       if logps_passes and not sharding_utils.per_host_safe_logps_enabled():
         raise ValueError(
@@ -886,6 +922,23 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       passes.append(f"trainer logprobs ({', '.join(reasons)})")
     return passes
 
+  def _data_axis_size(self) -> int:
+    """Actor-mesh size of the trainer's data sharding axes (their product)."""
+    mesh = self.rl_engine.cluster_config.role_to_mesh[rl_engine_lib.Role.ACTOR]
+    axis_size = 1
+    for axis in self._training_config.data_sharding_axis:
+      for name in axis if isinstance(axis, tuple) else (axis,):
+        if name is None:
+          continue
+        if name not in mesh.shape:
+          raise ValueError(
+              f"TUNIX_PER_HOST_LEARNER=1: data sharding axis {name!r} is not"
+              f" in the actor mesh {dict(mesh.shape)}; shard_input would"
+              " replicate process-local data."
+          )
+        axis_size *= mesh.shape[name]
+    return axis_size
+
   def _check_per_host_data_axis(
       self,
       train_micro_batch_size: int,
@@ -1030,7 +1083,37 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         yield item
 
     train_data_gen = queue_iterator()
-    if self._packing_enabled:
+    if self._packing_enabled and per_host_learner_enabled():
+      assert self._training_config.max_seq_token_per_tpu is not None
+      max_rows_per_shard, row_multiple = (
+          getattr(self, "_per_host_pack_knobs", None) or _per_host_pack_knobs()
+      )
+      logging.info(
+          "Using per-host sequence packing with max_seq_token_per_tpu: %d,"
+          " max_rows_per_shard: %d, row_multiple: %d",
+          self._training_config.max_seq_token_per_tpu,
+          max_rows_per_shard,
+          row_multiple,
+      )
+      train_data_gen = rl_utils.pack_sequences_per_host(
+          train_data_gen,
+          self._training_config.max_seq_token_per_tpu,
+          sequences_per_update=mini_batch_size * self._num_generations(),
+          pad_id=self.rl_engine.rollout.pad_id(),
+          data_axis_size=self._data_axis_size(),
+          leading_dim_factor=(
+              jax.process_count()
+              if sharding_utils.per_host_safe_logps_enabled()
+              else 1
+          ),
+          max_segments_per_packed_row=getattr(
+              self._training_config, "max_segments_per_packed_row", None
+          ),
+          max_rows_per_shard=max_rows_per_shard,
+          row_multiple=row_multiple,
+          first_step=self.rl_engine.global_steps,
+      )
+    elif self._packing_enabled:
       assert self._training_config.max_seq_token_per_tpu is not None
       mesh = self.rl_engine.cluster_config.role_to_mesh[
           rl_engine_lib.Role.ACTOR
