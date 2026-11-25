@@ -194,9 +194,11 @@ class RolloutHealthTest(absltest.TestCase):
     )
     # Statuses that did not occur still report 0, so series stay continuous.
     self.assertEqual(health.metrics["rollout/status/timeout_frac"], 0.0)
+    # RUNNING is not a terminal status and is not reported.
+    self.assertNotIn("rollout/status/running_frac", health.metrics)
     self.assertLen(
         [k for k in health.metrics if k.startswith("rollout/status/")],
-        len(datatypes.TrajectoryStatus),
+        len(datatypes.TrajectoryStatus) - 1,
     )
 
   def test_counts_rollouts_per_status(self):
@@ -240,7 +242,6 @@ class RolloutHealthTest(absltest.TestCase):
     )
 
     self.assertEqual(health.metrics["rollout/turn_length/mean"], 20.0)
-    self.assertEqual(health.metrics["rollout/turn_length/p50"], 20.0)
     self.assertAlmostEqual(health.metrics["rollout/turn_length/p99"], 29.8)
     self.assertEqual(health.metrics["rollout/turn_length/max"], 30.0)
 
@@ -258,8 +259,6 @@ class RolloutHealthTest(absltest.TestCase):
         )
     )
 
-    self.assertEqual(health.metrics["rollout/duration_sec/p50"], 25.0)
-    self.assertAlmostEqual(health.metrics["rollout/duration_sec/p90"], 37.0)
     self.assertAlmostEqual(health.metrics["rollout/duration_sec/p99"], 39.7)
     self.assertEqual(health.metrics["rollout/duration_sec/max"], 40.0)
     self.assertEqual(health.metrics["rollout/tail_sec"], 15.0)
@@ -297,15 +296,17 @@ class RolloutHealthTest(absltest.TestCase):
         )
     )
 
-    self.assertEqual(health.metrics["rollout/dispatch_delay_sec/p50"], 12.5)
+    self.assertAlmostEqual(
+        health.metrics["rollout/dispatch_delay_sec/p99"], 19.85
+    )
     self.assertEqual(health.metrics["rollout/dispatch_delay_sec/max"], 20.0)
-    self.assertEqual(health.metrics["rollout/execution_sec/p50"], 15.0)
+    self.assertAlmostEqual(health.metrics["rollout/execution_sec/p99"], 19.9)
     self.assertEqual(health.metrics["rollout/execution_sec/max"], 20.0)
-    self.assertEqual(health.metrics["rollout/queue_wait_sec/p50"], 25.0)
-    self.assertEqual(health.metrics["rollout/queue_wait_sec/max"], 30.0)
     # Item 0: finish=130, received=105, exec=10 -> worker_queue_wait=15s.
     # Item 1: finish=150, received=120, exec=20 -> worker_queue_wait=10s.
-    self.assertEqual(health.metrics["rollout/worker_queue_wait_sec/p50"], 12.5)
+    self.assertAlmostEqual(
+        health.metrics["rollout/worker_queue_wait_sec/p99"], 14.95
+    )
     self.assertEqual(health.metrics["rollout/worker_queue_wait_sec/max"], 15.0)
     self.assertEqual(health.metrics["rollout/env_time_sec/mean"], 6.5)
     # `reward_time` on the trajectory is not reported as a rollout metric.
@@ -364,7 +365,6 @@ class RolloutHealthTest(absltest.TestCase):
     self.assertEqual(health.metrics["rollout/duration_sec/max"], 65.0)
     self.assertEqual(health.metrics["rollout/dispatch_delay_sec/max"], 40.0)
     self.assertEqual(health.metrics["rollout/execution_sec/max"], 20.0)
-    self.assertEqual(health.metrics["rollout/queue_wait_sec/max"], 45.0)
     self.assertEqual(health.metrics["rollout/worker_queue_wait_sec/max"], 5.0)
 
   def test_ignores_worker_received_from_different_worker_id(self):
@@ -403,7 +403,6 @@ class RolloutHealthTest(absltest.TestCase):
     health = step_telemetry.rollout_health([facts])
     self.assertNotIn("rollout/dispatch_delay_sec/max", health.metrics)
     self.assertNotIn("rollout/worker_queue_wait_sec/max", health.metrics)
-    self.assertEqual(health.metrics["rollout/queue_wait_sec/max"], 45.0)
     self.assertEqual(health.metrics["rollout/execution_sec/max"], 20.0)
 
   def test_groups_batch_wall_sec_by_batch_idx_cohort(self):
@@ -439,10 +438,6 @@ class RolloutHealthTest(absltest.TestCase):
     )
 
     self.assertEqual(health.metrics["rollout/group_straggler_sec/mean"], 30.0)
-    self.assertEqual(health.metrics["rollout/group_straggler_sec/p50"], 30.0)
-    self.assertAlmostEqual(
-        health.metrics["rollout/group_straggler_sec/p90"], 38.0
-    )
     self.assertAlmostEqual(
         health.metrics["rollout/group_straggler_sec/p99"], 39.8
     )

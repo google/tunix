@@ -169,9 +169,12 @@ _filter_bindable = weight_utils.filter_bindable
 def _resolve_device_host_keys(devices: Sequence[Any]) -> List[Any]:
   """Returns per-device host grouping keys with consistent precedence.
 
-  Prefers `task_id` over `mesh.device_host_key` whenever `task_id`
-  distinguishes more hosts (for example, single-controller Pathways devices
-  that expose `task_id` with `process_index == 0` and no `logical_task=` repr).
+  Chooses whichever of `mesh.device_host_key`, `task_id`, or
+  `(slice_index, logical_task_id)` distinguishes the most physical hosts.
+  Single-controller Pathways IFRT TPU devices expose `logical_task_id` as a
+  structured device attribute while reporting `process_index == 0`, so
+  checking it directly avoids relying solely on `mesh.device_host_key`'s
+  `repr()` parsing (which is gated on `_is_pathways_backend_used()`).
 
   Args:
     devices: Sequence of JAX device objects to group by physical host.
@@ -180,12 +183,18 @@ def _resolve_device_host_keys(devices: Sequence[Any]) -> List[Any]:
     A list of host grouping keys aligned with `devices`.
   """
   host_keys = [mesh.device_host_key(d) for d in devices]
-  task_keys = [getattr(d, "task_id", None) for d in devices]
-  distinct_hosts = {k for k in host_keys if k is not None}
-  distinct_tasks = {k for k in task_keys if k is not None}
-  if len(distinct_tasks) > len(distinct_hosts):
-    return task_keys
-  return host_keys
+  task_keys = [mesh.device_attr(d, "task_id") for d in devices]
+  logical_task_keys = []
+  for d in devices:
+    tid = mesh.device_attr(d, "logical_task_id")
+    if isinstance(tid, int) and not isinstance(tid, bool):
+      logical_task_keys.append((mesh.device_slice_id(d), tid))
+    else:
+      logical_task_keys.append(None)
+  return max(
+      (host_keys, task_keys, logical_task_keys),
+      key=lambda ks: len({k for k in ks if k is not None}),
+  )
 
 
 def _devices_per_host(devices: List[Any]) -> int:
@@ -914,7 +923,11 @@ class RaidenSynchronizer:
     # canonicalising here is what makes the manifests line up.
     variables = tuple(
         _tensor_metadata(
-            _param_key(name), arr, idx, devices=self._ffi_devices
+            _param_key(name),
+            arr,
+            idx,
+            devices=self._ffi_devices,
+            use_ffi=self._is_proxy,
         )
         for idx, (name, arr) in enumerate(zip(self.names, self.arrays))
     )

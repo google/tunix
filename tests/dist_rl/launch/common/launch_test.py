@@ -46,9 +46,6 @@ _ENV_PASSTHROUGH = frozenset({
     "HF_TOKEN",
     "LOG_ROOT",
     "ORCHESTRATOR_ID",
-    "OTEL_EXPORTER_OTLP_ENDPOINT",
-    "OTEL_EXPORTER_OTLP_TIMEOUT",
-    "OTEL_METRIC_EXPORT_INTERVAL",
     "PYTHON",
     "PYTHONPATH",
     "PYTHON_BIN",
@@ -818,51 +815,49 @@ class LaunchScriptsTest(absltest.TestCase):
     self.assertNotIn("gcs_cache download", res.stdout)
 
   def test_k8s_passes_otel_settings_to_every_pod(self):
-    args = [
+    base_args = [
         "start",
         "--dry-run",
         "cluster_config.target=k8s",
         "cluster_config.k8s.tunix_image=test-image",
         "agentic_grpo_config.beta=0.0",
     ]
-    res = self._run_launch(
-        args,
-        extra_env={
-            "OTEL_EXPORTER_OTLP_ENDPOINT": "http://testuser-otel:4317",
-            "OTEL_METRIC_EXPORT_INTERVAL": "5000",
-            "OTEL_EXPORTER_OTLP_TIMEOUT": "10000",
-        },
-    )
+    res = self._run_launch([
+        *base_args,
+        "otel_config.enable=true",
+        "otel_config.export_interval_ms=5000",
+        "otel_config.dashboard_id=dash-1",
+        "otel_config.dashboard_project=proj-1",
+    ])
     self.assertEqual(res.returncode, 0, msg=res.stderr)
-    # Each startup command is one line of its rendered manifest.
-    exporting = set(
-        re.findall(
-            r"OTEL_EXPORTER_OTLP_ENDPOINT=http://testuser-otel:4317 "
-            r"OTEL_METRIC_EXPORT_INTERVAL=5000 "
-            r"OTEL_EXPORTER_OTLP_TIMEOUT=10000 .*--process_main=(\S+)",
-            res.stdout,
-        )
-    )
     mains = {
         "tunix.dist_rl.launch.nodes.orchestrator.main",
         "tunix.dist_rl.launch.nodes.trainer.main",
         "tunix.dist_rl.launch.nodes.rollout.main",
     }
-    self.assertEqual(exporting, mains)
-    # Every pod resolves the collector name the launcher deployed, not one
-    # from the container's `$USER`.
+    # Every pod gets the pinned collector id and the `otel_config.*` arguments,
+    # with no `OTEL_*` environment variable prefix.
     pinned = set(
         re.findall(
             r"--process_main=(\S+) [^\n]*"
-            r"cluster_config\.k8s\.otel_id=testuser-otel",
+            r"cluster_config\.k8s\.otel_id=testuser-otel [^\n]*"
+            r"otel_config\.enable=true otel_config\.export_interval_ms=5000 "
+            r"otel_config\.dashboard_id=dash-1 "
+            r"otel_config\.dashboard_project=proj-1",
             res.stdout,
         )
     )
     self.assertEqual(pinned, mains)
-    # Unset in the caller's environment, the pods get neither.
-    res = self._run_launch(args)
-    self.assertEqual(res.returncode, 0, msg=res.stderr)
     self.assertNotIn("OTEL_", res.stdout)
+
+    # Legacy `OTEL_*` environment variables fail fast with a migration hint.
+    legacy = self._run_launch(
+        base_args,
+        extra_env={"OTEL_EXPORTER_OTLP_ENDPOINT": "http://testuser-otel:4317"},
+    )
+    self.assertNotEqual(legacy.returncode, 0)
+    self.assertIn("OTEL_EXPORTER_OTLP_ENDPOINT", legacy.stderr)
+    self.assertIn("otel_config.enable=true", legacy.stderr)
 
   def test_k8s_passes_restart_and_scheduling_settings_to_the_jobsets(self):
     args = [
@@ -1097,6 +1092,62 @@ class LaunchScriptsTest(absltest.TestCase):
                 "value": "head-np",
                 "effect": "NoSchedule",
             }],
+        )
+
+  def test_k8s_checkpoint_gcsfuse_mounts_on_the_trainer_alone(self):
+    ckpt_gcsfuse = "cluster_config.pathways.trainer.checkpoint_gcsfuse"
+    res = self._run_launch([
+        "start",
+        "--dry-run",
+        "cluster_config.target=k8s",
+        "cluster_config.k8s.tunix_image=test-image",
+        "agentic_grpo_config.beta=0.0",
+        "cluster_config.k8s.rollout.jobset_yaml=jobset.pathways.yaml",
+        "cluster_config.k8s.rollout.tpu_slice=tpu7x:2x2x1",
+        f"{ckpt_gcsfuse}.bucket=gs://my-rapid-bucket/",
+        f"{ckpt_gcsfuse}.mount_path=/mnt/ckpt",
+        f"{ckpt_gcsfuse}.mount_options=implicit-dirs,only-dir=run1",
+    ])
+    self.assertEqual(res.returncode, 0, msg=res.stderr)
+    jobsets = _dry_run_jobsets(res.stdout)
+
+    volume_mounts = {}
+    for job in jobsets["testuser-train"]["spec"]["replicatedJobs"]:
+      pod = job["template"]["spec"]["template"]
+      with self.subTest(job=job["name"]):
+        self.assertEqual(
+            pod["metadata"]["annotations"]["gke-gcsfuse/volumes"], "true"
+        )
+        self.assertIn(
+            {
+                "name": "ckpt-gcsfuse",
+                "csi": {
+                    "driver": "gcsfuse.csi.storage.gke.io",
+                    "volumeAttributes": {
+                        "bucketName": "my-rapid-bucket",
+                        "mountOptions": "implicit-dirs,only-dir=run1",
+                        "hostNetworkPodKSA": "true",
+                    },
+                },
+            },
+            pod["spec"]["volumes"],
+        )
+      for container in pod["spec"]["containers"]:
+        volume_mounts[container["name"]] = container["volumeMounts"]
+    for name in ("main", "pathways-worker"):
+      with self.subTest(container=name):
+        self.assertIn(
+            {"mountPath": "/mnt/ckpt", "name": "ckpt-gcsfuse"},
+            volume_mounts[name],
+        )
+
+    # The rollout renders the same Pathways template, but mounts no bucket.
+    for job in jobsets["testuser-roll"]["spec"]["replicatedJobs"]:
+      pod = job["template"]["spec"]["template"]
+      with self.subTest(rollout_job=job["name"]):
+        self.assertNotIn("gke-gcsfuse/volumes", pod["metadata"]["annotations"])
+        self.assertNotIn(
+            "ckpt-gcsfuse", [v["name"] for v in pod["spec"]["volumes"]]
         )
 
   def test_otel_commands_deploy_and_delete_the_collector(self):

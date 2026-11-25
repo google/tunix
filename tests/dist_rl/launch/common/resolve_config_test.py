@@ -1932,6 +1932,231 @@ weight_sync_config:
         with self.assertRaisesRegex(exc_type, pattern):
           resolve_config.initialize(overrides)
 
+  def test_otel_config_derivation_validation_and_env_invariant_fingerprint(
+      self,
+  ):
+    defaults = resolve_config.initialize([])
+    self.assertEqual(
+        resolve_config.plain_config(defaults)["otel_config"],
+        {
+            "enable": False,
+            "googlecloud": True,
+            "endpoint": "",
+            "export_interval_ms": 10000,
+            "export_timeout_s": 5.0,
+            "dashboard_id": "",
+            "dashboard_project": "",
+        },
+    )
+    # `otel_config.googlecloud=false` works standalone for `launch.sh otel`
+    # without requiring `otel_config.enable=true`.
+    no_gc = resolve_config.initialize(["otel_config.googlecloud=false"])
+    self.assertFalse(no_gc.config["otel_config"]["googlecloud"])
+    self.assertIn(
+        "export OTEL_GOOGLECLOUD=false\n",
+        resolve_config.render_bash_exports(no_gc),
+    )
+
+    local_hp = resolve_config.initialize(
+        ["otel_config.enable=true", "cluster_config.ports.otel=4318"]
+    )
+    self.assertEqual(
+        local_hp.config["otel_config"]["endpoint"], "http://localhost:4318"
+    )
+
+    k8s_hp = resolve_config.initialize([
+        "cluster_config.target=k8s",
+        "cluster_config.k8s.otel_id=alice-otel",
+        "cluster_config.ports.otel=4319",
+        "otel_config.enable=true",
+        "otel_config.dashboard_id=dash-1",
+        "otel_config.dashboard_project=proj-1",
+    ])
+    self.assertEqual(
+        k8s_hp.config["otel_config"]["endpoint"], "http://alice-otel:4319"
+    )
+    self.assertEqual(k8s_hp.config["otel_config"]["dashboard_id"], "dash-1")
+    self.assertEqual(
+        k8s_hp.config["otel_config"]["dashboard_project"], "proj-1"
+    )
+
+    # Pod environments never leak into `otel_config` or `config_sha256`.
+    common_args = [
+        "cluster_config.target=k8s",
+        "cluster_config.run_id=run_1",
+        "cluster_config.k8s.orchestrator_id=u-orch",
+        "cluster_config.k8s.trainer_id=u-train",
+        "cluster_config.k8s.rollout_id=u-roll",
+        "cluster_config.k8s.inference_id=u-inf",
+        "cluster_config.k8s.otel_id=u-otel",
+        "otel_config.enable=true",
+    ]
+    with mock.patch.dict(
+        os.environ,
+        {
+            "OTEL_EXPORTER_OTLP_ENDPOINT": "http://other:9999",
+            "OTEL_METRIC_EXPORT_INTERVAL": "1234",
+            "GOOGLE_CLOUD_PROJECT": "proj-a",
+        },
+    ):
+      fp_a = resolve_config.config_fingerprint(
+          resolve_config.initialize(common_args)
+      )
+    with mock.patch.dict(
+        os.environ,
+        {
+            "OTEL_EXPORTER_OTLP_ENDPOINT": "",
+            "GOOGLE_CLOUD_PROJECT": "proj-b",
+        },
+    ):
+      fp_b = resolve_config.config_fingerprint(
+          resolve_config.initialize(common_args)
+      )
+    self.assertEqual(fp_a, fp_b)
+
+    for overrides, exc_type, pattern in (
+        (
+            ["otel_config.enable=yes_please"],
+            TypeError,
+            "otel_config.enable must be a bool",
+        ),
+        (
+            ["otel_config.googlecloud=yes_please"],
+            TypeError,
+            "otel_config.googlecloud must be a bool",
+        ),
+        (
+            ["otel_config.endpoint=123"],
+            TypeError,
+            "otel_config.endpoint must be a str",
+        ),
+        (
+            ["otel_config.export_interval_ms=true"],
+            TypeError,
+            "otel_config.export_interval_ms must be an int",
+        ),
+        (
+            ["otel_config.export_interval_ms=0"],
+            ValueError,
+            "otel_config.export_interval_ms must be > 0",
+        ),
+        (
+            ["otel_config.export_timeout_s=slow"],
+            TypeError,
+            "otel_config.export_timeout_s must be a number",
+        ),
+        (
+            ["otel_config.export_timeout_s=0"],
+            ValueError,
+            "otel_config.export_timeout_s must be finite and > 0",
+        ),
+        (
+            ["otel_config.endpoint=http://localhost:4317"],
+            ValueError,
+            "only take effect with otel_config.enable=true",
+        ),
+        (
+            ["otel_config.dashboard_id=dash-1"],
+            ValueError,
+            "only take effect with otel_config.enable=true",
+        ),
+        (
+            ["otel_config.dashboard_project=proj-1"],
+            ValueError,
+            "only take effect with otel_config.enable=true",
+        ),
+        (
+            ["otel_config.export_interval_ms=5000"],
+            ValueError,
+            "only take effect with otel_config.enable=true",
+        ),
+        (
+            ["otel_config.export_timeout_s=2.0"],
+            ValueError,
+            "only take effect with otel_config.enable=true",
+        ),
+        (
+            [
+                "cluster_config.roles.rollout.env."
+                "OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317"
+            ],
+            ValueError,
+            r"set otel_config\.enable=true",
+        ),
+        (
+            ["cluster_config.ports.otel=true"],
+            TypeError,
+            r"cluster_config\.ports\.otel must be an int",
+        ),
+        (
+            ["cluster_config.ports.otel=4317.5"],
+            TypeError,
+            r"cluster_config\.ports\.otel must be an int",
+        ),
+        (
+            ["cluster_config.ports.otel=0"],
+            ValueError,
+            r"cluster_config\.ports\.otel must be in 1\.\.65535",
+        ),
+        (
+            ["cluster_config.ports.otel=70000"],
+            ValueError,
+            r"cluster_config\.ports\.otel must be in 1\.\.65535",
+        ),
+        (
+            [
+                "cluster_config.target=k8s",
+                "cluster_config.k8s.otel_id=true",
+            ],
+            TypeError,
+            r"cluster_config\.k8s\.otel_id must be a str",
+        ),
+        (
+            [
+                "cluster_config.target=k8s",
+                "cluster_config.k8s.otel_id='   '",
+            ],
+            ValueError,
+            (
+                r"cluster_config\.k8s\.otel_id must be non-empty without"
+                r" whitespace"
+            ),
+        ),
+        (
+            [
+                "cluster_config.target=k8s",
+                "cluster_config.k8s.otel_id=bad id",
+            ],
+            ValueError,
+            (
+                r"cluster_config\.k8s\.otel_id must be non-empty without"
+                r" whitespace"
+            ),
+        ),
+        (
+            ["otel_config.enable=true", "otel_config.dashboard_id=dash-1"],
+            ValueError,
+            "dashboard_id and otel_config.dashboard_project must both be set",
+        ),
+        (
+            [
+                "cluster_config.target=external",
+                "cluster_config.artifact_root=/artifacts/run",
+                "otel_config.enable=true",
+            ],
+            ValueError,
+            "requires an explicit otel_config.endpoint",
+        ),
+        (
+            ["otel_config.enable=true", "otel_config.endpoint=http://no-port"],
+            ValueError,
+            "OTLP endpoint must include a valid host and explicit port",
+        ),
+    ):
+      with self.subTest(overrides=overrides):
+        with self.assertRaisesRegex(exc_type, pattern):
+          resolve_config.initialize(overrides)
+
 
 def _has_key(config: object, dotted_key: str) -> bool:
   """Returns whether the nested mapping `config` has `dotted_key`."""
@@ -1972,10 +2197,18 @@ class RetiredKeysTest(parameterized.TestCase):
       ),
       dict(
           testcase_name="key_with_one_legal_value",
+          override="vllm_config.server_mode=true",
+          message=(
+              "vllm_config.server_mode is no longer a config key: the vLLM"
+              " rollout engines always run in server mode"
+          ),
+      ),
+      dict(
+          testcase_name="key_derived_from_use_rollout_logps",
           override="rollout_config.return_logprobs=true",
           message=(
-              "rollout_config.return_logprobs is no longer a config key: the"
-              " rollout always returns logprobs"
+              "rollout_config.return_logprobs is no longer a config key:"
+              " derived from agentic_grpo_config.use_rollout_logps"
           ),
       ),
       dict(
@@ -2210,6 +2443,12 @@ class LauncherSettingsTest(absltest.TestCase):
         "export K8S_PATHWAYS_SIDECAR_MEMORY=16Gi",
         "export K8S_PATHWAYS_SIDECAR_MEMORY_LIMIT=''",
         "export K8S_PATHWAYS_SIDECAR_SHM=true",
+        "export K8S_PATHWAYS_CKPT_GCSFUSE_BUCKET=''",
+        "export K8S_PATHWAYS_CKPT_GCSFUSE_MOUNT_PATH=/gcs/ckpt",
+        (
+            "export K8S_PATHWAYS_CKPT_GCSFUSE_MOUNT_OPTIONS="
+            "implicit-dirs,metadata-cache:negative-ttl-secs:0"
+        ),
         "export K8S_ENABLE_PATHWAYS_PERSISTENCE=false",
         "export K8S_PATHWAYS_PROXY_MEMORY=16G",
         "export K8S_PATHWAYS_PROXY_MEMORY_LIMIT=190G",
@@ -2238,6 +2477,18 @@ class LauncherSettingsTest(absltest.TestCase):
         "cluster_config.pathways.sidecar.image=sidecar:v1",
         "cluster_config.pathways.sidecar.shm=false",
         "cluster_config.pathways.sidecar.memory.limit=20Gi",
+        (
+            "cluster_config.pathways.trainer.checkpoint_gcsfuse.bucket="
+            "gs://my-bucket/"
+        ),
+        (
+            "cluster_config.pathways.trainer.checkpoint_gcsfuse.mount_path="
+            "/mnt/ckpt"
+        ),
+        (
+            "cluster_config.pathways.trainer.checkpoint_gcsfuse.mount_options="
+            "only-dir=a"
+        ),
         "cluster_config.pathways.trainer.persistence=true",
         "cluster_config.pathways.rm_memory.limit=''",
         "cluster_config.pathways.server_memory.limit=120G",
@@ -2256,6 +2507,9 @@ class LauncherSettingsTest(absltest.TestCase):
         "export K8S_PATHWAYS_SIDECAR_IMAGE=sidecar:v1",
         "export K8S_PATHWAYS_SIDECAR_SHM=false",
         "export K8S_PATHWAYS_SIDECAR_MEMORY_LIMIT=20Gi",
+        "export K8S_PATHWAYS_CKPT_GCSFUSE_BUCKET=gs://my-bucket/",
+        "export K8S_PATHWAYS_CKPT_GCSFUSE_MOUNT_PATH=/mnt/ckpt",
+        "export K8S_PATHWAYS_CKPT_GCSFUSE_MOUNT_OPTIONS=only-dir=a",
         "export K8S_ENABLE_PATHWAYS_PERSISTENCE=true",
         "export K8S_PATHWAYS_RM_MEMORY_LIMIT=''",
         "export K8S_PATHWAYS_SERVER_MEMORY_LIMIT=120G",
@@ -2301,6 +2555,28 @@ class LauncherSettingsTest(absltest.TestCase):
             "cluster_config.pathways.sidecar.shm=1",
             TypeError,
             "pathways.sidecar.shm must be a bool",
+        ),
+        (
+            "cluster_config.pathways.trainer.checkpoint_gcsfuse.bucket=7",
+            TypeError,
+            r"trainer\.checkpoint_gcsfuse\.bucket must be a str",
+        ),
+        (
+            (
+                "cluster_config.pathways.trainer.checkpoint_gcsfuse.bucket="
+                "gs://b/prefix"
+            ),
+            ValueError,
+            r"trainer\.checkpoint_gcsfuse: invalid checkpoint GCSFuse bucket",
+        ),
+        (
+            # Checked with no bucket set too.
+            (
+                "cluster_config.pathways.trainer.checkpoint_gcsfuse.mount_path="
+                "gcs/ckpt"
+            ),
+            ValueError,
+            r"trainer\.checkpoint_gcsfuse: .* must be an absolute path",
         ),
         (
             "cluster_config.pathways.proxy_extra_args=7",

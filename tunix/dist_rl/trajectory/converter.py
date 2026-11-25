@@ -643,6 +643,7 @@ def create_trajectory_metadata(
     ) = agent_types.TrajectoryStatus.RUNNING,
     gamma: float | None = None,
     extra: dict[str, Any] | None = None,
+    hyperparams: dict[str, Any] | None = None,
 ) -> trajectory_lib.TunixTrajectoryMetadata:
   """Constructs TunixTrajectoryMetadata from rollout request and agent state."""
   meta_extra = dict(getattr(request, "metadata", None) or {})
@@ -681,9 +682,9 @@ def create_trajectory_metadata(
       total_reward=getattr(traj_obj, "reward", None),
       gamma=(float(gamma) if gamma is not None else None),
       masked_out=traj_obj.masked_out if traj_obj is not None else None,
-      hyperparams=getattr(request, "generation_kwargs", None),
       env_time=getattr(traj_obj, "env_time", None),
       reward_time=getattr(traj_obj, "reward_time", None),
+      hyperparams=hyperparams,
       extra=meta_extra or None,
   )
 

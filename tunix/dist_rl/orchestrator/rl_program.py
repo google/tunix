@@ -24,6 +24,7 @@ import collections
 from collections.abc import (
     AsyncIterator,
     Callable,
+    Hashable,
     Iterable,
     Iterator,
     Mapping,
@@ -35,7 +36,7 @@ import os
 import sys
 import threading
 import time
-from typing import Any
+from typing import Any, TypeAlias
 
 from absl import logging
 import numpy as np
@@ -83,6 +84,60 @@ RewardLogMetrics = Mapping[
 # Orchestrator host memory to at most 4 microbatches across packing,
 # `pending_prep`, and `pending_trains`).
 _MAX_INFLIGHT_TRAIN_STEPS = 2
+
+# Maximum number of prompts coalesced into a single `dispatch_rollouts` RPC
+# wave in `StandardRLProgram.rollout_dispatch_stage`. Caps each wave so rollout
+# workers begin prefill promptly while reducing per-step dispatch round-trips
+# from `O(batch_size)` to `O(ceil(batch_size / _MAX_DISPATCH_BATCH_SIZE))`. On
+# threaded iterators (`iter_dataset_async`), up to
+# `min(_MAX_DISPATCH_BATCH_SIZE, full_batch_size)` prefetched dataset reads
+# accumulate before the wave's RPC fires.
+_MAX_DISPATCH_BATCH_SIZE = 64
+
+_DispatchedPromptItem: TypeAlias = (
+    dict[str, object] | dispatch_window.HasPromptId
+)
+# An admitted prompt waiting for its wave: `prompt_id`, the dataset coordinates
+# from `tagging.prompt_coordinates`, and the tagged item to dispatch.
+_PendingPrompt: TypeAlias = tuple[
+    Hashable, Mapping[str, int], _DispatchedPromptItem
+]
+
+
+def _normalize_prompt_item(
+    prompt_idx: int,
+    prompt_item: object,
+    max_response_length: int | None,
+) -> tuple[Hashable, _DispatchedPromptItem]:
+  """Ensures `prompt_item` carries a unique `prompt_id` and response cap."""
+  if isinstance(prompt_item, Mapping):
+    item_dict = dict(prompt_item)
+    if "prompt_id" not in item_dict:
+      item_dict["prompt_id"] = f"prompt_{prompt_idx}"
+    if (
+        max_response_length is not None
+        and "max_response_length" not in item_dict
+    ):
+      item_dict["max_response_length"] = max_response_length
+    prompt_id = item_dict["prompt_id"]
+    normalized_item: _DispatchedPromptItem = item_dict
+  elif isinstance(prompt_item, dispatch_window.HasPromptId):
+    prompt_id = prompt_item.prompt_id
+    normalized_item = prompt_item
+  else:
+    prompt_id = f"prompt_{prompt_idx}"
+    item_dict = {
+        "prompt": prompt_item,
+        "prompt_id": prompt_id,
+    }
+    if max_response_length is not None:
+      item_dict["max_response_length"] = max_response_length
+    normalized_item = item_dict
+  if not isinstance(prompt_id, Hashable):
+    raise TypeError(
+        f"prompt_id must be hashable, got {type(prompt_id).__name__}."
+    )
+  return prompt_id, normalized_item
 
 
 def _next_microbatch(
@@ -399,7 +454,7 @@ class StandardRLProgram(RLProgram):
   3. Critique stage: Scores rewards, PRMs, and reference KL logprobs.
   4. Train stage: Streaming gradient accumulation over microbatches.
 
-  When `generation_args.return_routed_experts=True`:
+  When `rollout_returns_routed_experts=True`:
   - `use_routed_experts_relay=None` (default): enables Orchestrator Relay
     automatically when the wire encoding is statically resolvable
     (`algo_config.routed_experts_encode_mode != "auto"` or positive
@@ -425,6 +480,8 @@ class StandardRLProgram(RLProgram):
   def __init__(
       self,
       algo_config: algorithm_config.AlgorithmConfig,
+      rollout_temperature: float,
+      rollout_returns_routed_experts: bool,
       dataset: Iterable[Any] | None = None,
       max_steps: int | None = None,
       reward_fns: (
@@ -434,7 +491,6 @@ class StandardRLProgram(RLProgram):
       ) = None,
       assembler: batch_assembly.BatchAssembler | None = None,
       batch_config: batch_assembly.BatchConfig | None = None,
-      generation_args: datatypes.GenerationArgs | None = None,
       batch_size: int | None = None,
       max_staleness: int = 0,
       max_version_span: int | None = None,
@@ -470,27 +526,25 @@ class StandardRLProgram(RLProgram):
         if self.batch_config.eos_id is not None
         else self.pad_id
     )
-    self.generation_args = generation_args or datatypes.GenerationArgs()
+    if not rollout_temperature > 0:
+      raise ValueError(
+          f"rollout_temperature must be positive, got {rollout_temperature!r}."
+      )
+    self._rollout_temperature = rollout_temperature
+    self._rollout_returns_routed_experts = rollout_returns_routed_experts
 
     # `algo_config` has a 1:1 relationship with a single `StandardRLProgram`
     # instance and is not shared across multiple programs, so we propagate
-    # `generation_args.temperature` into `algo_config.temperature` in place.
+    # `rollout_temperature` into `algo_config.temperature` in place.
     if self.algo_config.temperature is not None:
       raise ValueError(
-          "Do not set temperature on AlgorithmConfig; configure it via"
-          " generation_args on StandardRLProgram."
+          "Do not set temperature on AlgorithmConfig; pass it to"
+          " StandardRLProgram."
       )
-    gen_temp = self.generation_args.temperature
-    if gen_temp is not None:
-      self.algo_config.temperature = gen_temp
-
-    self.generation_args = dataclasses.replace(
-        self.generation_args,
-        return_logprobs=self.algo_config.use_rollout_logps,
-    )
+    self.algo_config.temperature = rollout_temperature
     self._relay: relay_coordinator.RelayCoordinator | None = None
     if (
-        self.generation_args.return_routed_experts
+        rollout_returns_routed_experts
         and use_routed_experts_relay is not False
     ):
       try:
@@ -772,6 +826,48 @@ class StandardRLProgram(RLProgram):
         self.dispatch_window.dataset_skip_count,
     )
 
+  async def _dispatch_wave(self, pending: Sequence[_PendingPrompt]) -> None:
+    """Logs, accounts, and dispatches one coalesced wave of admitted prompts."""
+    assert self.engine is not None
+    batch_version = self.policy_version
+    next_batch = self.dispatch_window.next_batch
+    # One `[pipeline] DISPATCH` line per prompt, logged when its wave is sent.
+    # Log parsers read `policy_version` from this line, and its timestamp is
+    # the start of the prompt's rollout latency.
+    for prompt_id, coordinates, _ in pending:
+      logging.info(
+          "[pipeline] DISPATCH prompt_id=%s prompt_idx=%d batch_idx=%d"
+          " intra_batch_idx=%d policy_version=%d next_batch=%d",
+          prompt_id,
+          coordinates["prompt_idx"],
+          coordinates["batch_idx"],
+          coordinates["intra_batch_idx"],
+          batch_version,
+          next_batch,
+      )
+    logging.info(
+        "[pipeline] WAVE_DISPATCH count=%d policy_version=%d next_batch=%d",
+        len(pending),
+        batch_version,
+        next_batch,
+    )
+    prompts = [prompt_item for _, _, prompt_item in pending]
+    self._in_flight_rollouts += len(prompts) * self.num_generations
+    if self._relay is not None:
+      await self.engine.dispatch_rollouts(
+          prompts,
+          num_generations=self.num_generations,
+          policy_version=batch_version,
+          stage_routed_experts=True,
+          max_response_length=self.max_response_length,
+      )
+    else:
+      await self.engine.dispatch_rollouts(
+          prompts,
+          num_generations=self.num_generations,
+          policy_version=batch_version,
+      )
+
   async def rollout_dispatch_stage(self) -> None:
     """Stage 1A: Dispatches rollout requests across workers asynchronously.
 
@@ -790,63 +886,42 @@ class StandardRLProgram(RLProgram):
           "StandardRLProgram requires a dataset either at init or in run()."
       )
 
+    pending: list[_PendingPrompt] = []
     try:
       async for prompt_idx, prompt_item in dataset_utils.iter_dataset_async(
           self.dataset,
           skip_count=self.dispatch_window.dataset_skip_count,
           prefetch_size=max(1, self.full_batch_size),
       ):
-        if isinstance(prompt_item, Mapping):
-          prompt_item = dict(prompt_item)
-          if "prompt_id" not in prompt_item:
-            prompt_item["prompt_id"] = f"prompt_{prompt_idx}"
-          if (
-              self.max_response_length is not None
-              and "max_response_length" not in prompt_item
-          ):
-            prompt_item["max_response_length"] = self.max_response_length
-          prompt_id = prompt_item["prompt_id"]
-        elif hasattr(prompt_item, "prompt_id"):
-          prompt_id = prompt_item.prompt_id
-        else:
-          prompt_id = f"prompt_{prompt_idx}"
-          prompt_item = {
-              "prompt": prompt_item,
-              "prompt_id": prompt_id,
-          }
-          if self.max_response_length is not None:
-            prompt_item["max_response_length"] = self.max_response_length
-
-        if not await self.dispatch_window.admit(prompt_id):
-          continue
-        coordinates = tagging.prompt_coordinates(
-            prompt_idx, self.full_batch_size
+        prompt_id, normalized_item = _normalize_prompt_item(
+            prompt_idx, prompt_item, self.max_response_length
         )
-        prompt_item = tagging.tag_prompt(prompt_item, coordinates)
-        logging.info(
-            "[pipeline] DISPATCH prompt_id=%s prompt_idx=%d batch_idx=%d"
-            " intra_batch_idx=%d policy_version=%d next_batch=%d",
-            prompt_id,
-            coordinates["prompt_idx"],
-            coordinates["batch_idx"],
-            coordinates["intra_batch_idx"],
-            self.policy_version,
-            self.dispatch_window.next_batch,
-        )
-        self._in_flight_rollouts += self.num_generations
-        dispatch_kwargs: dict[str, Any] = {
-            "num_generations": self.num_generations,
-            "policy_version": self.policy_version,
-        }
-        if self.generation_args is not None:
-          dispatch_kwargs["generation_args"] = self.generation_args
-        if self._relay is not None:
-          dispatch_kwargs["stage_routed_experts"] = True
-          dispatch_kwargs["max_response_length"] = self.max_response_length
-        await self.engine.dispatch_rollouts(
-            [prompt_item],
-            **dispatch_kwargs,
-        )
+        # The window can fill while this loop waits for the dataset (starting
+        # a weight sync holds back one batch), so flush before `admit()` parks.
+        if pending and not self.dispatch_window.can_admit:
+          await self._dispatch_wave(pending)
+          pending = []
+        if await self.dispatch_window.admit(prompt_id):
+          coordinates = tagging.prompt_coordinates(
+              prompt_idx, self.full_batch_size
+          )
+          pending.append((
+              prompt_id,
+              coordinates,
+              tagging.tag_prompt(normalized_item, coordinates),
+          ))
+        # Flush at the wave cap, at prompt-batch boundaries, or whenever the
+        # dispatch window is full so pending prompts run before `admit()` parks.
+        is_batch_end = (prompt_idx + 1) % self.full_batch_size == 0
+        if pending and (
+            len(pending) >= _MAX_DISPATCH_BATCH_SIZE
+            or is_batch_end
+            or not self.dispatch_window.can_admit
+        ):
+          await self._dispatch_wave(pending)
+          pending = []
+      if pending:
+        await self._dispatch_wave(pending)
     finally:
       self._dispatch_done.set()
 
@@ -1471,11 +1546,10 @@ class StandardRLProgram(RLProgram):
       IS/RS weights and trainer logps when configured.
     """
     assert self.engine is not None
-    gen_temp = self.generation_args.temperature
     logps_req = datatypes.LogprobsRequest(
         prompt_tokens=batch.prompt_ids,
         completion_tokens=batch.completion_ids,
-        temperature=gen_temp if gen_temp is not None else 1.0,
+        temperature=self._rollout_temperature,
         model_role="actor",
         pad_id=self.pad_id,
         eos_id=self.eos_id,
@@ -1835,12 +1909,11 @@ class StandardRLProgram(RLProgram):
                   f"{type(batch).__name__}."
               )
             reference_start = time.monotonic()
-            gen_temp = self.generation_args.temperature
             ref_req = datatypes.LogprobsRequest(
                 request_id="reference_logps",
                 prompt_tokens=batch.prompt_ids,
                 completion_tokens=batch.completion_ids,
-                temperature=gen_temp if gen_temp is not None else 1.0,
+                temperature=self._rollout_temperature,
                 model_role="reference",
                 segment_ids=batch.segment_ids,
                 segment_positions=batch.segment_positions,
@@ -2146,9 +2219,7 @@ class StandardRLProgram(RLProgram):
           eos_id=self.eos_id,
           can_fuse_agreement_in_loss=self.can_fuse_agreement_in_loss,
           precompile=self.precompile_trainer,
-          return_routed_experts=bool(
-              self.generation_args.return_routed_experts
-          ),
+          return_routed_experts=self._rollout_returns_routed_experts,
       )
 
       if self.sync_weights:

@@ -146,6 +146,7 @@ jobs:
           for mod_name, rel_glob in (
               ('_packing_ext', 'rl/_packing_ext*.abi3.so'),
               ('_compression_ext', 'dist_rl/worker/_compression_ext*.abi3.so'),
+              ('_delta_encoder_ext', 'experimental/delta_sync/_delta_encoder_ext*.abi3.so'),
               ('_trajectory_logger_ext', 'utils/_trajectory_logger_ext*.abi3.so'),
           ):
               so_paths = list(root.glob(rel_glob))
@@ -161,6 +162,9 @@ jobs:
           assert str(formatted) == '[1, 2]', formatted
           comp = mods['_compression_ext'].try_compress_bulk_buffer(memoryview(np.zeros(65536, dtype=np.uint8)), 0.85, 16384)
           assert comp is not None
+          bits = np.zeros((16, 128), dtype=np.uint16)
+          fullest = mods['_delta_encoder_ext'].fullest_block_changes([bits], [bits + 1], block_rows=[16], num_threads=2)
+          assert fullest == [1024], fullest
           print('Verified cp312-abi3 extensions on Python', sys.version.split()[0])
           "
           done

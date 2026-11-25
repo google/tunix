@@ -296,6 +296,11 @@ class ConfigsTest(absltest.TestCase):
         configs.RolloutConfig(top_p=bad_top_p)
     with self.assertRaisesRegex(ValueError, "top_k must be"):
       configs.RolloutConfig(top_k=-2)
+    for bad_max_tokens in (0, -1, True, 1.5):
+      with self.assertRaisesRegex(
+          ValueError, "max_tokens_to_generate must be a positive integer"
+      ):
+        configs.RolloutConfig(max_tokens_to_generate=bad_max_tokens)
 
 
 if __name__ == "__main__":

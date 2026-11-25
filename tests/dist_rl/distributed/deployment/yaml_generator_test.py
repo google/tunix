@@ -570,6 +570,52 @@ class YamlGeneratorTest(parameterized.TestCase):
             rendered,
         )
         self.assertIn("memory: 512Mi", rendered)
+        deployment = list(yaml.safe_load_all(rendered))[0]
+        container = deployment["spec"]["template"]["spec"]["containers"][0]
+        self.assertIn(
+            "--set=service::pipelines::metrics::exporters=[debug,googlecloud]",
+            container["args"],
+        )
+        self.assertIn(
+            "--set=service::pipelines::logs::exporters="
+            "[debug,googlecloud,file/events]",
+            container["args"],
+        )
+        self.assertIn(
+            {
+                "name": "TUNIX_OTEL_EVENTS_FILE",
+                "value": "/tmp/otelcol-storage/tunix-otel-events.jsonl",
+            },
+            container["env"],
+        )
+
+    with open(template_file, "r") as f:
+      template_text = f.read()
+    no_gc_rendered = yaml_generator.render_template(
+        template_text,
+        yaml_generator.parse_args([
+            template_file,
+            "--jobset_name=test-user-otel",
+            "--namespace=test-ns",
+            "--service_account=otel-sa",
+            "--worker_container_port=4317",
+            "--no-otel_googlecloud",
+        ]),
+    )
+    no_gc_dep = list(yaml.safe_load_all(no_gc_rendered))[0]
+    self.assertEqual(
+        no_gc_dep["spec"]["template"]["spec"]["serviceAccountName"],
+        "otel-sa",
+    )
+    no_gc_args = no_gc_dep["spec"]["template"]["spec"]["containers"][0]["args"]
+    self.assertNotIn(
+        "--set=service::pipelines::metrics::exporters=[debug,googlecloud]",
+        no_gc_args,
+    )
+    self.assertIn(
+        "--set=service::pipelines::logs::exporters=[debug,file/events]",
+        no_gc_args,
+    )
 
   def test_generate_pathways_yaml_init_containers(self):
     template_file = _get_template_path("jobset.pathways.yaml")
@@ -1454,6 +1500,190 @@ class YamlGeneratorTest(parameterized.TestCase):
               )
           )
 
+  def _render_pathways_text(
+      self, extra_argv: list[str], template_text: str | None = None
+  ) -> str:
+    template_file = _get_template_path("jobset.pathways.yaml")
+    if template_text is None:
+      with open(template_file, "r") as f:
+        template_text = f.read()
+    with mock.patch.dict(os.environ, {}, clear=True):
+      args = yaml_generator.parse_args([
+          template_file,
+          "--jobset_name=test-pw",
+          "--tpu_slice=tpuv5:4x4x4",
+          *extra_argv,
+      ])
+      return yaml_generator.render_template(template_text, args)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="persistence_defaults",
+          extra_argv=["--ckpt_gcsfuse_bucket=my-rapid-bucket"],
+          expected_mounts=["main", "pathways-worker"],
+          expected_path="/gcs/ckpt",
+          expected_options="implicit-dirs,metadata-cache:negative-ttl-secs:0",
+      ),
+      dict(
+          testcase_name="colocated_python_shm",
+          extra_argv=[
+              "--ckpt_gcsfuse_bucket=gs://my-rapid-bucket/",
+              "--ckpt_gcsfuse_mount_path=/mnt/ckpt",
+              "--ckpt_gcsfuse_mount_options=implicit-dirs,only-dir=run1",
+              "--colocated_python_sidecar_image=sidecar:v1",
+          ],
+          expected_mounts=[
+              "main",
+              "pathways-worker",
+              "colocated-python-sidecar",
+          ],
+          expected_path="/mnt/ckpt",
+          expected_options="implicit-dirs,only-dir=run1",
+      ),
+      dict(
+          testcase_name="colocated_python_no_shm",
+          extra_argv=[
+              "--ckpt_gcsfuse_bucket=my-rapid-bucket",
+              "--colocated_python_sidecar_image=sidecar:v1",
+              "--no-colocated_python_sidecar_shm",
+          ],
+          expected_mounts=[
+              "main",
+              "pathways-worker",
+              "colocated-python-sidecar",
+          ],
+          expected_path="/gcs/ckpt",
+          expected_options="implicit-dirs,metadata-cache:negative-ttl-secs:0",
+      ),
+  )
+  def test_ckpt_gcsfuse_mount(
+      self,
+      extra_argv: list[str],
+      expected_mounts: list[str],
+      expected_path: str,
+      expected_options: str,
+  ):
+    doc = yaml.safe_load(self._render_pathways_text(extra_argv))
+    mounted = []
+    for job in doc["spec"]["replicatedJobs"]:
+      pod = job["template"]["spec"]["template"]
+      annotations = pod["metadata"]["annotations"]
+      self.assertEqual(
+          {
+              key: value
+              for key, value in annotations.items()
+              if key.startswith("gke-gcsfuse/")
+          },
+          {
+              "gke-gcsfuse/volumes": "true",
+              "gke-gcsfuse/cpu-limit": "0",
+              "gke-gcsfuse/memory-limit": "0",
+              "gke-gcsfuse/ephemeral-storage-limit": "0",
+          },
+      )
+      self.assertEqual(
+          annotations["cluster-autoscaler.kubernetes.io/safe-to-evict"], "false"
+      )
+      volumes = [
+          v for v in pod["spec"]["volumes"] if v["name"] == "ckpt-gcsfuse"
+      ]
+      self.assertEqual(
+          [v["csi"] for v in volumes],
+          [{
+              "driver": "gcsfuse.csi.storage.gke.io",
+              "volumeAttributes": {
+                  "bucketName": "my-rapid-bucket",
+                  "mountOptions": expected_options,
+                  "hostNetworkPodKSA": "true",
+              },
+          }],
+      )
+      containers = (
+          pod["spec"].get("initContainers", []) + pod["spec"]["containers"]
+      )
+      for container in containers:
+        paths = [
+            m["mountPath"]
+            for m in container.get("volumeMounts", [])
+            if m["name"] == "ckpt-gcsfuse"
+        ]
+        if paths:
+          self.assertEqual(paths, [expected_path])
+          mounted.append(container["name"])
+    self.assertCountEqual(mounted, expected_mounts)
+
+  def test_ckpt_gcsfuse_unset_renders_template_unchanged(self):
+    template_file = _get_template_path("jobset.pathways.yaml")
+    with open(template_file, "r") as f:
+      template_text = f.read()
+    without_placeholders = "".join(
+        line
+        for line in template_text.splitlines(keepends=True)
+        if "${GCSFUSE_" not in line
+    )
+    self.assertNotEqual(without_placeholders, template_text)
+    argv = ["--colocated_python_sidecar_image=sidecar:v1"]
+    self.assertEqual(
+        self._render_pathways_text(argv),
+        self._render_pathways_text(argv, template_text=without_placeholders),
+    )
+
+  @parameterized.named_parameters(
+      ("only_scheme", ["--ckpt_gcsfuse_bucket=gs://"], "GCSFuse bucket"),
+      ("only_slash", ["--ckpt_gcsfuse_bucket=/"], "GCSFuse bucket"),
+      (
+          "bucket_with_prefix",
+          ["--ckpt_gcsfuse_bucket=gs://my-rapid-bucket/ckpts"],
+          "only-dir",
+      ),
+      ("uppercase", ["--ckpt_gcsfuse_bucket=My-Bkt"], "GCSFuse bucket"),
+      (
+          "relative_mount_path",
+          [
+              "--ckpt_gcsfuse_bucket=my-rapid-bucket",
+              "--ckpt_gcsfuse_mount_path=gcs/ckpt",
+          ],
+          "mount path must be an absolute path",
+      ),
+      (
+          "empty_mount_path",
+          [
+              "--ckpt_gcsfuse_bucket=my-rapid-bucket",
+              "--ckpt_gcsfuse_mount_path=",
+          ],
+          "mount path must be an absolute path",
+      ),
+  )
+  def test_ckpt_gcsfuse_invalid_values_raise(
+      self, extra_argv: list[str], error: str
+  ):
+    with self.assertRaisesRegex(ValueError, error):
+      self._render_pathways_text(extra_argv)
+
+  def test_ckpt_gcsfuse_requires_template_placeholders(self):
+    template_file = _get_template_path("jobset.pathways.yaml")
+    with open(template_file, "r") as f:
+      template_text = f.read().replace("${GCSFUSE_VOLUME_MOUNT}", "")
+    with self.assertRaisesRegex(ValueError, r"GCSFUSE_VOLUME_MOUNT"):
+      self._render_pathways_text(
+          ["--ckpt_gcsfuse_bucket=my-rapid-bucket"],
+          template_text=template_text,
+      )
+
+  def test_ckpt_gcsfuse_is_ignored_by_non_pathways_template(self):
+    template_file = _get_template_path("jobset.cpu.yaml")
+    with open(template_file, "r") as f:
+      template_text = f.read()
+    with mock.patch.dict(os.environ, {}, clear=True):
+      args = yaml_generator.parse_args([
+          template_file,
+          "--jobset_name=test-cpu",
+          "--cpu_machine=n2-standard-64",
+          "--ckpt_gcsfuse_bucket=my-rapid-bucket",
+      ])
+      rendered = yaml_generator.render_template(template_text, args)
+    self.assertNotIn("gcsfuse", rendered)
+
   def test_pathways_extra_env_and_proxy_args(self):
     pw_template = _get_template_path("jobset.pathways.yaml")
     with mock.patch.dict(os.environ, {}):
@@ -1874,6 +2104,15 @@ class YamlGeneratorTest(parameterized.TestCase):
     )
     user_mounts = proc_spec["containers"][0]["volumeMounts"]
     self.assertIn({"name": "dshm", "mountPath": "/dev/shm"}, user_mounts)
+
+  def test_otel_collector_yaml_configures_logs_pipeline_and_append_jsonl(self):
+    collector_path = _get_template_path("otel-collector.yaml")
+    with open(collector_path, "r") as f:
+      doc = yaml.safe_load(f.read())
+    self.assertIs(doc["exporters"]["file/events"]["append"], True)
+    self.assertIn("logs", doc["service"]["pipelines"])
+    for exporter in doc["service"]["pipelines"]["logs"]["exporters"]:
+      self.assertIn(exporter, doc["exporters"])
 
 
 if __name__ == "__main__":

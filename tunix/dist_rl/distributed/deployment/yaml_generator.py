@@ -31,6 +31,7 @@ _STANDALONE_PLACEHOLDER_RE = re.compile(
     r"^(?P<indent>[ \t]*)\$\{(?P<key>[A-Z0-9_]+)\}[ \t]*\n",
     re.MULTILINE,
 )
+_GCS_BUCKET_NAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]")
 
 # A shell environment variable name. The manifests write names unquoted, so
 # any other name could change the rendered YAML.
@@ -109,6 +110,37 @@ def render_memory_resources(request: str, limit: str) -> str:
       if quantity
   ]
   return "resources:\n" + "\n".join(sections) if sections else ""
+
+
+def parse_ckpt_gcsfuse_bucket(value: str) -> str:
+  """Returns the bucket name in `value`, or "" when `value` is empty.
+
+  Args:
+    value: A bucket name, optionally with a `gs://` prefix and a trailing slash.
+
+  Raises:
+    ValueError: If `value` is not empty and does not name a bucket.
+  """
+  raw = value.strip()
+  if not raw:
+    return ""
+  bucket = raw.removeprefix("gs://").rstrip("/")
+  if not _GCS_BUCKET_NAME_RE.fullmatch(bucket):
+    raise ValueError(
+        f"invalid checkpoint GCSFuse bucket {raw!r}: expected a bucket name"
+        " such as 'my-bucket' or 'gs://my-bucket'. To mount a subdirectory,"
+        " add 'only-dir=<prefix>' to the mount options."
+    )
+  return bucket
+
+
+def validate_ckpt_gcsfuse_mount_path(mount_path: str) -> None:
+  """Raises ValueError unless `mount_path` is an absolute path."""
+  if not mount_path.startswith("/"):
+    raise ValueError(
+        "the checkpoint GCSFuse mount path must be an absolute path, got"
+        f" {mount_path!r}."
+    )
 
 
 def validate_gang_id(gang_id: str | None) -> None:
@@ -598,6 +630,24 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--ckpt_gcsfuse_bucket",
+      default="",
+      help=(
+          "GCS bucket to mount with GCSFuse for checkpoints in a Pathways"
+          " JobSet; empty mounts none"
+      ),
+  )
+  parser.add_argument(
+      "--ckpt_gcsfuse_mount_path",
+      default="/gcs/ckpt",
+      help="Absolute path at which --ckpt_gcsfuse_bucket is mounted",
+  )
+  parser.add_argument(
+      "--ckpt_gcsfuse_mount_options",
+      default="implicit-dirs,metadata-cache:negative-ttl-secs:0",
+      help="gcsfuse mount options of --ckpt_gcsfuse_bucket",
+  )
+  parser.add_argument(
       "--tpu_reservation",
       default="",
       help="Compute Engine reservation the TPU pods must run on",
@@ -652,6 +702,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
       "--ray_worker_pre_init_command",
       default="",
       help="Command to run on Ray worker pods before joining the Ray cluster.",
+  )
+  parser.add_argument(
+      "--otel_googlecloud",
+      action=argparse.BooleanOptionalAction,
+      default=True,
+      help=(
+          "Enable Cloud Monitoring and Cloud Logging (`googlecloud`) exporters"
+          " in `jobset.otel.yaml` (default: True; pass --no-otel_googlecloud to"
+          " keep only `debug` and `file/events`)."
+      ),
   )
 
   args = parser.parse_args(argv)
@@ -1008,6 +1068,42 @@ def build_substitutions(
     colocated_python_worker_args = ""
     colocated_python_sidecar_volume = ""
 
+  # GCSFuse mount for checkpoints (e.g. a zonal Rapid bucket), at one path in
+  # every container that touches checkpoint files, whichever one writes arrays.
+  gcsfuse_bucket = parse_ckpt_gcsfuse_bucket(args.ckpt_gcsfuse_bucket)
+  if gcsfuse_bucket:
+    validate_ckpt_gcsfuse_mount_path(args.ckpt_gcsfuse_mount_path)
+    gcsfuse_mount_path = json.dumps(args.ckpt_gcsfuse_mount_path)
+    # Zero limits lift the gcsfuse sidecar's default caps for checkpoint bursts.
+    gcsfuse_pod_annotations = (
+        'gke-gcsfuse/volumes: "true"\n'
+        'gke-gcsfuse/cpu-limit: "0"\n'
+        'gke-gcsfuse/memory-limit: "0"\n'
+        'gke-gcsfuse/ephemeral-storage-limit: "0"'
+    )
+    # hostNetworkPodKSA lets hostNetwork pods authenticate as their own KSA.
+    gcsfuse_volume = (
+        "- name: ckpt-gcsfuse\n"
+        "  csi:\n"
+        "    driver: gcsfuse.csi.storage.gke.io\n"
+        "    volumeAttributes:\n"
+        f"      bucketName: {json.dumps(gcsfuse_bucket)}\n"
+        "      mountOptions:"
+        f" {json.dumps(args.ckpt_gcsfuse_mount_options)}\n"
+        '      hostNetworkPodKSA: "true"'
+    )
+    gcsfuse_volume_mount = (
+        f"- mountPath: {gcsfuse_mount_path}\n  name: ckpt-gcsfuse"
+    )
+    if colocated_python_sidecar_block:
+      colocated_python_sidecar_block += (
+          f"\n  - mountPath: {gcsfuse_mount_path}\n    name: ckpt-gcsfuse"
+      )
+  else:
+    gcsfuse_pod_annotations = ""
+    gcsfuse_volume = ""
+    gcsfuse_volume_mount = ""
+
   worker_env = parse_pathways_worker_env_json(args.pathways_worker_env_json)
   pathways_worker_extra_env = "\n".join(
       f"- name: {key}\n  value: {json.dumps(value)}"
@@ -1027,9 +1123,20 @@ def build_substitutions(
         "- name: TPU_RAIDEN_DATA_NICS\n"
         f"  value: {json.dumps(raiden_data_nics)}"
     )
+  if args.otel_googlecloud:
+    otel_pipeline_args = (
+        "- --set=service::pipelines::metrics::exporters=[debug,googlecloud]\n"
+        "- --set=service::pipelines::logs::exporters="
+        "[debug,googlecloud,file/events]"
+    )
+  else:
+    otel_pipeline_args = (
+        "- --set=service::pipelines::logs::exporters=[debug,file/events]"
+    )
 
   return {
       "JOBSET_NAME": jobset_name,
+      "OTEL_PIPELINE_ARGS": otel_pipeline_args,
       "USER": os.environ.get("USER"),
       "NAMESPACE": args.namespace,
       "QUEUE_NAME": args.queue_name,
@@ -1051,6 +1158,9 @@ def build_substitutions(
       "COLOCATED_PYTHON_SIDECAR_VOLUME": colocated_python_sidecar_volume,
       "COLOCATED_PYTHON_WORKER_ARGS": colocated_python_worker_args,
       "COLOCATED_PYTHON_PROXY_ARGS": colocated_python_proxy_args,
+      "GCSFUSE_POD_ANNOTATIONS": gcsfuse_pod_annotations,
+      "GCSFUSE_VOLUME": gcsfuse_volume,
+      "GCSFUSE_VOLUME_MOUNT": gcsfuse_volume_mount,
       "PATHWAYS_WORKER_EXTRA_ENV": pathways_worker_extra_env,
       "PATHWAYS_PROXY_EXTRA_ARGS": pathways_proxy_extra_args,
       "RAIDEN_BROADCAST_K": args.raiden_broadcast_k,
@@ -1150,6 +1260,21 @@ def render_template(template_text: str, args: argparse.Namespace) -> str:
     if missing_placeholders:
       raise ValueError(
           f"--colocated_python_sidecar_image is set, but template "
+          f"{args.template_file} lacks {', '.join(missing_placeholders)}"
+      )
+  if is_pathways and parse_ckpt_gcsfuse_bucket(args.ckpt_gcsfuse_bucket):
+    missing_placeholders = [
+        p
+        for p in (
+            "${GCSFUSE_POD_ANNOTATIONS}",
+            "${GCSFUSE_VOLUME}",
+            "${GCSFUSE_VOLUME_MOUNT}",
+        )
+        if p not in template_text
+    ]
+    if missing_placeholders:
+      raise ValueError(
+          f"--ckpt_gcsfuse_bucket is set, but template "
           f"{args.template_file} lacks {', '.join(missing_placeholders)}"
       )
   substitutions = build_substitutions(args, template_text=template_text)

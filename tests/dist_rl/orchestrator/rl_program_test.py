@@ -16,6 +16,7 @@ import asyncio
 import builtins
 from collections.abc import Sequence
 import dataclasses
+import itertools
 import threading
 import types
 from typing import Any
@@ -269,6 +270,14 @@ def _make_engine(
   )
 
 
+def _dispatched_prompts(mock_engine: Any) -> list[Any]:
+  return list(
+      itertools.chain.from_iterable(
+          call.args[0] for call in mock_engine.dispatch_rollouts.call_args_list
+      )
+  )
+
+
 class RLProgramTest(absltest.TestCase):
 
   def setUp(self):
@@ -372,6 +381,8 @@ class RLProgramTest(absltest.TestCase):
       reward_fns: Any = None,
       assembler: Any = None,
       batch_config: batch_assembly.BatchConfig | None = None,
+      rollout_temperature: float = 0.9,
+      rollout_returns_routed_experts: bool = False,
       **kwargs: Any,
   ) -> rl_program.StandardRLProgram:
     effective_batch_config = (
@@ -380,10 +391,15 @@ class RLProgramTest(absltest.TestCase):
     if assembler is None:
       self.assembler.num_generations = self.algo_config.num_generations
       self.assembler.mini_batch_size = effective_batch_config.mini_batch_size
+    # `StandardRLProgram` sets `algo_config.temperature` from
+    # `rollout_temperature`.
+    self.algo_config.temperature = None
     program = rl_program.StandardRLProgram(
         dataset=dataset,
         max_steps=max_steps,
         algo_config=self.algo_config,
+        rollout_temperature=rollout_temperature,
+        rollout_returns_routed_experts=rollout_returns_routed_experts,
         reward_fns=(
             reward_fns
             if reward_fns is not None
@@ -434,6 +450,8 @@ class RLProgramTest(absltest.TestCase):
     program = rl_program.StandardRLProgram(
         dataset=["prompt_1"],
         algo_config=self.algo_config,
+        rollout_temperature=0.9,
+        rollout_returns_routed_experts=False,
         reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
         assembler=self.assembler,
         batch_config=self.batch_config,
@@ -450,6 +468,8 @@ class RLProgramTest(absltest.TestCase):
     program = rl_program.StandardRLProgram(
         dataset=["prompt_1"],
         algo_config=self.algo_config,
+        rollout_temperature=0.9,
+        rollout_returns_routed_experts=False,
         batch_config=self.batch_config,
         reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
     )
@@ -467,6 +487,8 @@ class RLProgramTest(absltest.TestCase):
     program = rl_program.StandardRLProgram(
         dataset=["prompt_1"],
         algo_config=self.algo_config,
+        rollout_temperature=0.9,
+        rollout_returns_routed_experts=False,
         batch_config=self.batch_config,
     )
     self.assertEqual(program.num_generations, 5)
@@ -477,6 +499,8 @@ class RLProgramTest(absltest.TestCase):
       rl_program.StandardRLProgram(  # pyrefly: ignore[unexpected-keyword-arg]
           dataset=["prompt_1"],
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           num_generations=4,
       )
 
@@ -485,40 +509,10 @@ class RLProgramTest(absltest.TestCase):
       rl_program.StandardRLProgram(  # pyrefly: ignore[unexpected-keyword-arg]
           dataset=["prompt_1"],
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           mini_batch_size=3,
       )
-
-  def test_program_use_rollout_logps_matching(self):
-    self.algo_config = algorithm_config.GRPOConfig(
-        num_generations=2,
-        use_rollout_logps=True,
-        reward_mode="env",
-    )
-    program = rl_program.StandardRLProgram(
-        dataset=["prompt_1"],
-        algo_config=self.algo_config,
-        generation_args=datatypes.GenerationArgs(
-            temperature=0.7,
-            return_logprobs=True,
-        ),
-    )
-    self.assertTrue(program.generation_args.return_logprobs)
-    self.assertTrue(self.algo_config.use_rollout_logps)
-
-  def test_program_use_rollout_logps_missing_in_generation_args_inherits_from_algo(
-      self,
-  ):
-    self.algo_config = algorithm_config.GRPOConfig(
-        num_generations=2,
-        use_rollout_logps=True,
-        reward_mode="env",
-    )
-    program = rl_program.StandardRLProgram(
-        dataset=["prompt_1"],
-        algo_config=self.algo_config,
-    )
-    self.assertTrue(program.generation_args.return_logprobs)
-    self.assertTrue(self.algo_config.use_rollout_logps)
 
   def test_run_async_four_stages_with_long_polling(self):
     async def _run():
@@ -563,9 +557,6 @@ class RLProgramTest(absltest.TestCase):
           }],
           num_generations=2,
           policy_version=0,
-          generation_args=datatypes.GenerationArgs(
-              return_logprobs=True,
-          ),
       )
       self.mock_engine.train_step.assert_called_once()
       self.mock_engine.save_checkpoint.assert_called_once_with(
@@ -616,11 +607,12 @@ class RLProgramTest(absltest.TestCase):
 
       async def _mock_dispatch(prompts, *, policy_version: int = 0, **kwargs):
         del kwargs
-        dispatched_versions.append(policy_version)
-        prompt_id = prompts[0]["prompt_id"]
-        pending_batches.append(
-            _make_trajectory_group(prompt_id, policy_version=policy_version)
-        )
+        for prompt_dict in prompts:
+          dispatched_versions.append(policy_version)
+          prompt_id = prompt_dict["prompt_id"]
+          pending_batches.append(
+              _make_trajectory_group(prompt_id, policy_version=policy_version)
+          )
 
       async def _mock_poll(timeout_s=0.1):
         del timeout_s
@@ -635,6 +627,8 @@ class RLProgramTest(absltest.TestCase):
           dataset=["prompt_data_0", "prompt_data_1"],
           max_steps=2,
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=self.assembler,
           batch_config=self.batch_config,
@@ -684,16 +678,17 @@ class RLProgramTest(absltest.TestCase):
 
     async def _dispatch(prompts, *, policy_version: int = 0, **kwargs):
       del kwargs
-      batch_idx = prompts[0]["metadata"]["batch_idx"]
-      dispatched_batches.append(batch_idx)
-      pending_groups.append([
-          dataclasses.replace(
-              item, metadata={**item.metadata, "batch_idx": batch_idx}
-          )
-          for item in _make_trajectory_group(
-              prompts[0]["prompt_id"], policy_version=policy_version
-          )
-      ])
+      for prompt_item in prompts:
+        batch_idx = prompt_item["metadata"]["batch_idx"]
+        dispatched_batches.append(batch_idx)
+        pending_groups.append([
+            dataclasses.replace(
+                item, metadata={**item.metadata, "batch_idx": batch_idx}
+            )
+            for item in _make_trajectory_group(
+                prompt_item["prompt_id"], policy_version=policy_version
+            )
+        ])
 
     async def _poll(timeout_s=0.1):
       del timeout_s
@@ -750,6 +745,8 @@ class RLProgramTest(absltest.TestCase):
           side_effect=_save_checkpoint
       )
       program = rl_program.StandardRLProgram(
+          rollout_temperature=1.0,
+          rollout_returns_routed_experts=False,
           dataset=[f"prompt_data_{i}" for i in range(4)],
           max_steps=2,
           algo_config=self.algo_config,
@@ -838,6 +835,8 @@ class RLProgramTest(absltest.TestCase):
       self.mock_engine.sync_weights = mock.AsyncMock(side_effect=_sync)
       self.mock_engine.train_step.side_effect = _train
       program = rl_program.StandardRLProgram(
+          rollout_temperature=1.0,
+          rollout_returns_routed_experts=False,
           dataset=["prompt_data_0", "prompt_data_1"],
           max_steps=2,
           algo_config=self.algo_config,
@@ -891,6 +890,8 @@ class RLProgramTest(absltest.TestCase):
 
   def _overlap_program(self, *, max_steps: int) -> rl_program.StandardRLProgram:
     return rl_program.StandardRLProgram(
+        rollout_temperature=1.0,
+        rollout_returns_routed_experts=False,
         dataset=[f"prompt_data_{i}" for i in range(4)],
         max_steps=max_steps,
         algo_config=self.algo_config,
@@ -905,6 +906,8 @@ class RLProgramTest(absltest.TestCase):
     async def _run():
       self.algo_config.reward_mode = "env"
       program = rl_program.StandardRLProgram(
+          rollout_temperature=1.0,
+          rollout_returns_routed_experts=False,
           algo_config=self.algo_config,
           batch_config=self.batch_config,
           dataset=["p0"],
@@ -1178,7 +1181,7 @@ class RLProgramTest(absltest.TestCase):
         max_steps=3,
         sync_weights=True,
         precompile_trainer=True,
-        generation_args=datatypes.GenerationArgs(temperature=1.0),
+        rollout_temperature=1.0,
     )
 
     asyncio.run(program.run_async(engine))
@@ -1209,8 +1212,8 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
     dispatched = [
-        call.args[0][0]["prompt_id"]
-        for call in self.mock_engine.dispatch_rollouts.call_args_list
+        prompt_item["prompt_id"]
+        for prompt_item in _dispatched_prompts(self.mock_engine)
     ]
     self.assertEqual(
         dispatched,
@@ -1237,8 +1240,8 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
     dispatched = [
-        call.args[0][0]["prompt_id"]
-        for call in self.mock_engine.dispatch_rollouts.call_args_list
+        prompt_item["prompt_id"]
+        for prompt_item in _dispatched_prompts(self.mock_engine)
     ]
     self.assertEqual(
         dispatched, ["prompt_4", "prompt_5", "prompt_6", "prompt_7"]
@@ -1292,10 +1295,7 @@ class RLProgramTest(absltest.TestCase):
     self.assertIn("dispatch_rollouts", call_order)
 
   def _dispatched_prompts(self) -> list[Any]:
-    return [
-        call.args[0][0]
-        for call in self.mock_engine.dispatch_rollouts.call_args_list
-    ]
+    return _dispatched_prompts(self.mock_engine)
 
   def _run_dispatch(self, program: rl_program.StandardRLProgram) -> None:
     async def _run():
@@ -1465,14 +1465,17 @@ class RLProgramTest(absltest.TestCase):
       dispatched = []
 
       async def mock_dispatch(prompts, **kwargs):
-        dispatched.append((prompts[0], kwargs["policy_version"]))
-        return [f"{prompts[0]}_{kwargs['policy_version']}"]
+        for prompt_item in prompts:
+          dispatched.append((prompt_item, kwargs["policy_version"]))
+        return [f"{p}_{kwargs['policy_version']}" for p in prompts]
 
       self.mock_engine.dispatch_rollouts.side_effect = mock_dispatch
 
       program = rl_program.StandardRLProgram(
           dataset=["prompt_0", "prompt_1"],
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=self.assembler,
@@ -1538,8 +1541,8 @@ class RLProgramTest(absltest.TestCase):
 
       async def mock_dispatch(prompts, **kwargs):
         del kwargs
-        dispatched.append(prompts[0]["prompt_id"])
-        return ["rollout"]
+        dispatched.extend(prompt_item["prompt_id"] for prompt_item in prompts)
+        return ["rollout"] * len(prompts)
 
       self.mock_engine.dispatch_rollouts.side_effect = mock_dispatch
       dataset = [
@@ -1564,8 +1567,66 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_normalize_prompt_item(self):
+    normalize = rl_program._normalize_prompt_item
+
+    with self.subTest("raw_prompt"):
+      self.assertEqual(
+          normalize(3, "q", 16),
+          (
+              "prompt_3",
+              {
+                  "prompt": "q",
+                  "prompt_id": "prompt_3",
+                  "max_response_length": 16,
+              },
+          ),
+      )
+      self.assertEqual(
+          normalize(3, "q", None),
+          ("prompt_3", {"prompt": "q", "prompt_id": "prompt_3"}),
+      )
+
+    with self.subTest("mapping"):
+      source = types.MappingProxyType({"prompt": "q"})
+      self.assertEqual(
+          normalize(3, source, 16),
+          (
+              "prompt_3",
+              {
+                  "prompt": "q",
+                  "prompt_id": "prompt_3",
+                  "max_response_length": 16,
+              },
+          ),
+      )
+      self.assertEqual(
+          normalize(3, source, None),
+          ("prompt_3", {"prompt": "q", "prompt_id": "prompt_3"}),
+      )
+      # The item's own id and response cap win over the defaults.
+      self.assertEqual(
+          normalize(3, {"prompt_id": 0, "max_response_length": 4}, 16),
+          (0, {"prompt_id": 0, "max_response_length": 4}),
+      )
+
+    with self.subTest("has_prompt_id"):
+      item = types.SimpleNamespace(prompt_id="custom")
+      prompt_id, normalized = normalize(3, item, 16)
+      self.assertEqual(prompt_id, "custom")
+      self.assertIs(normalized, item)
+
+    with self.subTest("unhashable_prompt_id"):
+      for bad_item in (
+          {"prompt": "bad", "prompt_id": ["unhashable"]},
+          types.SimpleNamespace(prompt_id=["unhashable"]),
+      ):
+        with self.assertRaisesRegex(TypeError, "prompt_id must be hashable"):
+          normalize(0, bad_item, None)
+
   def _window_program(self, **kwargs: Any) -> rl_program.StandardRLProgram:
     """A program whose full batch is two single-rollout groups."""
+    self.algo_config.temperature = None
     self.algo_config.num_generations = 1
     self.batch_config.mini_batch_size = 1
     program = rl_program.StandardRLProgram(
@@ -1573,6 +1634,8 @@ class RLProgramTest(absltest.TestCase):
         max_steps=1,
         batch_size=2,
         algo_config=self.algo_config,
+        rollout_temperature=0.9,
+        rollout_returns_routed_experts=False,
         batch_config=self.batch_config,
         reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
         assembler=batch_assembly.PaddedBatchAssembler(
@@ -1613,14 +1676,18 @@ class RLProgramTest(absltest.TestCase):
 
       async def mock_dispatch(prompts, **kwargs):
         del kwargs
-        dispatched.append(prompts[0]["metadata"]["batch_idx"])
-        return ["rollout"]
+        dispatched.extend(
+            prompt_item["metadata"]["batch_idx"] for prompt_item in prompts
+        )
+        return ["rollout"] * len(prompts)
 
       self.mock_engine.dispatch_rollouts.side_effect = mock_dispatch
 
       program = rl_program.StandardRLProgram(
           dataset=[f"prompt_{i}" for i in range(8)],
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=self.assembler,
@@ -1710,6 +1777,8 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=TwoMicrobatchAssembler(),
@@ -1809,6 +1878,8 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=LazyPipelinedAssembler(),
@@ -1980,6 +2051,8 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=ThreeStageOverlapAssembler(),
@@ -2118,6 +2191,8 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=SingleMicrobatchPerGroupAssembler(),
@@ -2212,6 +2287,8 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=TwoGroupPipelinedAssembler(),
@@ -2336,6 +2413,8 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=FailingSecondMicrobatchAssembler(),
@@ -2418,6 +2497,8 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           reward_fns=[lambda *_: 1.0],
           assembler=FourMicrobatchAssembler(),
@@ -2540,6 +2621,8 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           reward_fns=[lambda *_: 1.0],
           assembler=FailingThirdMicrobatchAssembler(),
@@ -2625,6 +2708,8 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           reward_fns=[lambda *_: 1.0],
           assembler=TwoOverlappingMicrobatchAssembler(),
@@ -2707,6 +2792,8 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=padded_assembler,
@@ -2782,6 +2869,8 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           batch_size=4,
           reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
@@ -2868,6 +2957,8 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=padded_assembler,
@@ -2935,6 +3026,8 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           batch_size=4,
           reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
@@ -3041,6 +3134,8 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=packed_assembler,
@@ -3110,6 +3205,8 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=packed_assembler,
@@ -3181,6 +3278,8 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=packed_assembler,
@@ -3259,6 +3358,8 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=packed_assembler,
@@ -3360,6 +3461,8 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=TwoMicrobatchAssembler(),
@@ -3420,6 +3523,8 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=padded_assembler,
@@ -3485,6 +3590,8 @@ class RLProgramTest(absltest.TestCase):
       prog = FailingProgram(
           dataset=["prompt"],
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           assembler=self.assembler,
       )
@@ -3525,6 +3632,8 @@ class RLProgramTest(absltest.TestCase):
       self.algo_config.reward_mode = "env"
       program = rl_program.StandardRLProgram(
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           assembler=self.assembler,
       )
@@ -3561,9 +3670,6 @@ class RLProgramTest(absltest.TestCase):
           }],
           num_generations=2,
           policy_version=0,
-          generation_args=datatypes.GenerationArgs(
-              return_logprobs=True,
-          ),
       )
 
     asyncio.run(_run())
@@ -3644,7 +3750,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=dataset,
           reward_fns=[tracking_reward_fn],
           max_steps=1,
-          generation_args=datatypes.GenerationArgs(temperature=1.0),
+          rollout_temperature=1.0,
       )
 
       await program.run_async(engine)
@@ -3782,7 +3888,7 @@ class RLProgramTest(absltest.TestCase):
       self.assertEqual(set(call.kwargs), {"items"})
       sent_req = call.kwargs["items"]
       self.assertIsInstance(sent_req, datatypes.LogprobsRequest)
-      self.assertEqual(sent_req.temperature, 1.0)
+      self.assertEqual(sent_req.temperature, 0.9)
       np.testing.assert_array_equal(
           sent_req.prompt_tokens, mock_payload.prompt_ids
       )
@@ -3823,7 +3929,7 @@ class RLProgramTest(absltest.TestCase):
       _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
       program = self._create_program(
           dataset=["prompt_0"],
-          generation_args=datatypes.GenerationArgs(temperature=0.6),
+          rollout_temperature=0.6,
       )
 
       await program.run_async(self.mock_engine)
@@ -3921,7 +4027,8 @@ class RLProgramTest(absltest.TestCase):
         algo_config=algo_config,
         dataset=["prompt_0"],
         max_steps=1,
-        generation_args=datatypes.GenerationArgs(temperature=0.7),
+        rollout_temperature=0.7,
+        rollout_returns_routed_experts=False,
         batch_size=1,
         batch_config=batch_config,
         sync_weights=False,
@@ -3960,7 +4067,7 @@ class RLProgramTest(absltest.TestCase):
       self.assertAlmostEqual(kl_loss_matched, 0.0, places=5)
 
       # Pre-fix regression check: scoring Role.REFERENCE with temperature=1.0
-      # instead of generation_args.temperature (0.7) produces a spurious
+      # instead of the program's temperature (0.7) produces a spurious
       # positive KL even when actor and reference weights are identical.
       unmatched_ref_logps = ref_worker.per_token_logps(
           datatypes.LogprobsRequest(
@@ -4190,6 +4297,8 @@ class RLProgramTest(absltest.TestCase):
       prog_env = rl_program.StandardRLProgram(
           dataset=["prompt_0"],
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           reward_fns=None,
           assembler=self.assembler,
@@ -4204,9 +4313,12 @@ class RLProgramTest(absltest.TestCase):
       # algo_config.reward_mode="reward_fn" -> SequenceRewardManager
       # uses reward_fns only and ignores trajectory_reward.
       self.algo_config.reward_mode = "reward_fn"
+      self.algo_config.temperature = None
       prog_fn = rl_program.StandardRLProgram(
           dataset=["prompt_0"],
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           reward_fns=[lambda prompts, completions, **_: [10.0, 20.0]],
           assembler=self.assembler,
@@ -4221,9 +4333,12 @@ class RLProgramTest(absltest.TestCase):
       # algo_config.reward_mode="env" ->
       # AgenticSequenceRewardManager sums trajectory_reward + reward_fns.
       self.algo_config.reward_mode = "env"
+      self.algo_config.temperature = None
       prog_both = rl_program.StandardRLProgram(
           dataset=["prompt_0"],
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           reward_fns=[lambda prompts, completions, **_: [10.0, 20.0]],
           assembler=self.assembler,
@@ -4237,10 +4352,13 @@ class RLProgramTest(absltest.TestCase):
       # 4. Negative control: algo_config.reward_mode="reward_fn" without
       # reward_fns raises ValueError instead of silently falling back.
       self.algo_config.reward_mode = "reward_fn"
+      self.algo_config.temperature = None
       with self.assertRaisesRegex(ValueError, "reward_fns cannot be empty"):
         rl_program.StandardRLProgram(
             dataset=["prompt_0"],
             algo_config=self.algo_config,
+            rollout_temperature=0.9,
+            rollout_returns_routed_experts=False,
             batch_config=self.batch_config,
             reward_fns=None,
             assembler=self.assembler,
@@ -4540,7 +4658,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=["prompt_data_0"],
           reward_fns=[],
           sync_weights=False,
-          generation_args=datatypes.GenerationArgs(temperature=1.0),
+          rollout_temperature=1.0,
       )
       await program.run_async(engine, max_steps=1)
 
@@ -4745,7 +4863,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=["prompt_0"],
           reward_fns=[],
           sync_weights=False,
-          generation_args=datatypes.GenerationArgs(temperature=1.0),
+          rollout_temperature=1.0,
       )
       await program.run_async(engine, max_steps=1)
 
@@ -5153,7 +5271,7 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_rollouts_without_status_report_running_frac(self):
+  def test_rollouts_without_status_count_toward_no_reported_status(self):
     async def _run():
       traj_item_0 = datatypes.TrajectoryItem(
           group_index=0,
@@ -5194,9 +5312,12 @@ class RLProgramTest(absltest.TestCase):
       await program.run_async(self.mock_engine)
 
       logger = program.metrics_logger
-      # A missing producer status is mapped to RUNNING.
+      # A missing producer status is mapped to RUNNING, which is not reported.
       self.assertAlmostEqual(
-          logger.get_metric("rollout", "status/running_frac", "train"), 1.0
+          logger.get_metric("rollout", "status/succeeded_frac", "train"), 0.0
+      )
+      self.assertFalse(
+          logger.metric_exists("rollout", "status/running_frac", "train")
       )
 
     asyncio.run(_run())
@@ -5389,6 +5510,8 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=TwoMicrobatchAssembler(),
@@ -5917,7 +6040,7 @@ class RLProgramTest(absltest.TestCase):
     ):
       self._create_program()
 
-  def test_program_passes_generation_args_to_dispatch_rollouts(self):
+  def test_program_passes_max_response_length_to_dispatch_rollouts(self):
     async def _run():
       self.batch_config.max_response_length = 512
       _set_mock_poll_batches(
@@ -5925,51 +6048,11 @@ class RLProgramTest(absltest.TestCase):
           _make_trajectory_group(prompt_id="p0", num_generations=2),
           [],
       )
-      gen_args = datatypes.GenerationArgs(
-          max_generation_steps=128,
-          temperature=0.7,
-          top_p=0.9,
-          return_logprobs=True,
-      )
-      p = self._create_program(
-          dataset=("p0",),
-          generation_args=gen_args,
-          sync_weights=False,
-      )
+      p = self._create_program(dataset=("p0",), sync_weights=False)
       await p.run_async(self.mock_engine)
       self.mock_engine.dispatch_rollouts.assert_called_once()
       args, kwargs = self.mock_engine.dispatch_rollouts.call_args
-      expected_gen_args = datatypes.GenerationArgs(
-          max_generation_steps=128,
-          temperature=0.7,
-          top_p=0.9,
-          return_logprobs=True,
-      )
-      self.assertEqual(kwargs.get("generation_args"), expected_gen_args)
-      self.assertEqual(args[0][0].get("max_response_length"), 512)
-
-    asyncio.run(_run())
-
-  def test_program_passes_algo_max_response_length_when_gen_args_none(self):
-    async def _run():
-      self.batch_config.max_response_length = 512
-      _set_mock_poll_batches(
-          self.mock_engine,
-          _make_trajectory_group(prompt_id="p0", num_generations=2),
-          [],
-      )
-      p = self._create_program(
-          dataset=("p0",),
-          generation_args=None,
-          sync_weights=False,
-      )
-      await p.run_async(self.mock_engine)
-      self.mock_engine.dispatch_rollouts.assert_called_once()
-      args, kwargs = self.mock_engine.dispatch_rollouts.call_args
-      expected_gen_args = datatypes.GenerationArgs(
-          return_logprobs=True,
-      )
-      self.assertEqual(kwargs.get("generation_args"), expected_gen_args)
+      self.assertEqual(kwargs, {"num_generations": 2, "policy_version": 0})
       self.assertEqual(args[0][0].get("max_response_length"), 512)
 
     asyncio.run(_run())
@@ -5982,7 +6065,6 @@ class RLProgramTest(absltest.TestCase):
     )
     algo_config.temperature = 0.8
 
-    gen_args = datatypes.GenerationArgs(temperature=0.8)
     with self.assertRaisesRegex(
         ValueError,
         "Do not set temperature on AlgorithmConfig",
@@ -5990,12 +6072,27 @@ class RLProgramTest(absltest.TestCase):
       rl_program.StandardRLProgram(
           dataset=("p0",),
           algo_config=algo_config,
-          generation_args=gen_args,
+          rollout_temperature=0.8,
+          rollout_returns_routed_experts=False,
       )
 
-  def test_program_temperature_missing_in_generation_args_leaves_none(
-      self,
-  ):
+  def test_program_rejects_non_positive_rollout_temperature(self):
+    for temperature in (0.0, -1.0, float("nan")):
+      with self.subTest(temperature=temperature):
+        algo_config = algorithm_config.GRPOConfig(
+            num_generations=2,
+            use_rollout_logps=False,
+            reward_mode="env",
+        )
+        with self.assertRaisesRegex(ValueError, "must be positive"):
+          rl_program.StandardRLProgram(
+              dataset=("p0",),
+              algo_config=algo_config,
+              rollout_temperature=temperature,
+              rollout_returns_routed_experts=False,
+          )
+
+  def test_program_sets_algo_config_temperature(self):
     algo_config = algorithm_config.GRPOConfig(
         num_generations=2,
         use_rollout_logps=False,
@@ -6005,24 +6102,8 @@ class RLProgramTest(absltest.TestCase):
     program = rl_program.StandardRLProgram(
         dataset=("p0",),
         algo_config=algo_config,
-    )
-    self.assertIsNone(program.generation_args.temperature)
-    self.assertIsNone(algo_config.temperature)
-
-  def test_program_temperature_missing_in_algo_config_propagates_from_generation_args(
-      self,
-  ):
-    algo_config = algorithm_config.GRPOConfig(
-        num_generations=2,
-        use_rollout_logps=False,
-        reward_mode="env",
-    )
-
-    gen_args = datatypes.GenerationArgs(temperature=0.8)
-    program = rl_program.StandardRLProgram(
-        dataset=("p0",),
-        algo_config=algo_config,
-        generation_args=gen_args,
+        rollout_temperature=0.8,
+        rollout_returns_routed_experts=False,
     )
     self.assertIs(program.algo_config, algo_config)
     self.assertEqual(algo_config.temperature, 0.8)
@@ -6165,6 +6246,8 @@ class RLProgramTest(absltest.TestCase):
         dataset=["prompt_0"],
         max_steps=1,
         algo_config=self.algo_config,
+        rollout_temperature=0.9,
+        rollout_returns_routed_experts=False,
         reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
         assembler=None,
         batch_config=batch_assembly.BatchConfig(
@@ -6185,6 +6268,8 @@ class RLProgramTest(absltest.TestCase):
         dataset=["prompt_0"],
         max_steps=1,
         algo_config=self.algo_config,
+        rollout_temperature=0.9,
+        rollout_returns_routed_experts=False,
         reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
         assembler=None,
         batch_config=batch_assembly.BatchConfig(
@@ -6200,10 +6285,13 @@ class RLProgramTest(absltest.TestCase):
     self.assertEqual(program.assembler.max_response_length, 2048)
     self.assertEqual(program.assembler.pad_id, 5)
 
+    self.algo_config.temperature = None
     program_override = rl_program.StandardRLProgram(
         dataset=["prompt_0"],
         max_steps=1,
         algo_config=self.algo_config,
+        rollout_temperature=0.9,
+        rollout_returns_routed_experts=False,
         reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
         assembler=None,
         batch_config=batch_assembly.BatchConfig(
@@ -6219,6 +6307,8 @@ class RLProgramTest(absltest.TestCase):
         dataset=["prompt_0"],
         max_steps=1,
         algo_config=self.algo_config,
+        rollout_temperature=0.9,
+        rollout_returns_routed_experts=False,
         reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
         assembler=None,
     )
@@ -7255,6 +7345,8 @@ class RLProgramTest(absltest.TestCase):
           dataset=["prompt_0"],
           max_steps=1,
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           metrics_logging_options=metrics_logger_lib.MetricsLoggerOptions(
               log_dir="/tmp/metrics_dir"
@@ -7265,10 +7357,13 @@ class RLProgramTest(absltest.TestCase):
 
       # Case 2: explicit trajectory_log_dir
       mock_logger_cls.reset_mock()
+      self.algo_config.temperature = None
       program2 = rl_program.StandardRLProgram(
           dataset=["prompt_0"],
           max_steps=1,
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           trajectory_log_dir="/custom/trajectories",
       )
@@ -7276,10 +7371,13 @@ class RLProgramTest(absltest.TestCase):
       self.assertIs(program2.trajectory_logger, mock_logger_inst)
 
       # Case 3: disabled when no log_dir provided
+      self.algo_config.temperature = None
       program3 = rl_program.StandardRLProgram(
           dataset=["prompt_0"],
           max_steps=1,
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
       )
       self.assertIsNone(program3.trajectory_logger)
@@ -7290,6 +7388,8 @@ class RLProgramTest(absltest.TestCase):
         dataset=["prompt_0"],
         max_steps=1,
         algo_config=self.algo_config,
+        rollout_temperature=0.9,
+        rollout_returns_routed_experts=False,
         batch_config=self.batch_config,
     )
     mock_traj_logger = mock.MagicMock()
@@ -7374,6 +7474,8 @@ class RLProgramTest(absltest.TestCase):
         dataset=["prompt_0"],
         max_steps=1,
         algo_config=self.algo_config,
+        rollout_temperature=0.9,
+        rollout_returns_routed_experts=False,
         batch_config=self.batch_config,
     )
     mock_traj_logger = mock.MagicMock()
@@ -7421,6 +7523,8 @@ class RLProgramTest(absltest.TestCase):
         dataset=["prompt_0"],
         max_steps=1,
         algo_config=self.algo_config,
+        rollout_temperature=0.9,
+        rollout_returns_routed_experts=False,
         batch_config=self.batch_config,
     )
     mock_traj_logger = mock.MagicMock()
@@ -7464,6 +7568,8 @@ class RLProgramTest(absltest.TestCase):
         dataset=["prompt_0"],
         max_steps=1,
         algo_config=self.algo_config,
+        rollout_temperature=0.9,
+        rollout_returns_routed_experts=False,
         batch_config=self.batch_config,
     )
     mock_traj_logger = mock.MagicMock()
@@ -7723,6 +7829,8 @@ class RLProgramTest(absltest.TestCase):
       self.algo_config.reward_mode = "env"
       program = rl_program.StandardRLProgram(
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           dataset=["prompt_0", "prompt_1", "prompt_2"],
           reward_fns=[],
@@ -7737,18 +7845,19 @@ class RLProgramTest(absltest.TestCase):
 
       async def _mock_dispatch(prompts, **kwargs):
         del kwargs
-        prompt_id = prompts[0]["prompt_id"]
-        ver = 0 if prompt_id in ("prompt_0", "prompt_1") else 5
-        for g_idx in range(2):
-          resp = _create_rollout_response(
-              f"{prompt_id}_{g_idx}",
-              prompt_id,
-              group_index=g_idx,
-              policy_version=ver,
-          )
-          pending_responses.append(
-              distributed_rl_engine._response_to_trajectory_item(resp)
-          )
+        for prompt_item in prompts:
+          prompt_id = prompt_item["prompt_id"]
+          ver = 0 if prompt_id in ("prompt_0", "prompt_1") else 5
+          for g_idx in range(2):
+            resp = _create_rollout_response(
+                f"{prompt_id}_{g_idx}",
+                prompt_id,
+                group_index=g_idx,
+                policy_version=ver,
+            )
+            pending_responses.append(
+                distributed_rl_engine._response_to_trajectory_item(resp)
+            )
 
       async def _mock_poll():
         if pending_responses:
@@ -7788,7 +7897,6 @@ class RLProgramTest(absltest.TestCase):
   def test_relay_batch_config_requires_explicit_prompt_and_response_lengths(
       self,
   ):
-    gen_args = datatypes.GenerationArgs(return_routed_experts=True)
     relay_algo = algorithm_config.GRPOConfig(
         num_generations=2,
         beta=0.0,
@@ -7805,8 +7913,10 @@ class RLProgramTest(absltest.TestCase):
               max_prompt_length=None,
               max_response_length=8,
           ),
-          generation_args=gen_args,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=True,
       )
+    relay_algo.temperature = None
     with self.assertRaisesRegex(
         ValueError, "BatchConfig.max_response_length must be positive"
     ):
@@ -7818,7 +7928,8 @@ class RLProgramTest(absltest.TestCase):
               max_prompt_length=8,
               max_response_length=None,
           ),
-          generation_args=gen_args,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=True,
       )
 
   def test_relay_two_phase_pipeline_plumbs_spec_fetch_release_and_sync_bound(
@@ -7901,7 +8012,7 @@ class RLProgramTest(absltest.TestCase):
           reward_fns=[
               lambda prompts, completions, **_: [1.0, -1.0][: len(prompts)]
           ],
-          generation_args=datatypes.GenerationArgs(return_routed_experts=True),
+          rollout_returns_routed_experts=True,
           max_staleness=2,
           max_version_span=1,
       )
@@ -8007,7 +8118,8 @@ class RLProgramTest(absltest.TestCase):
           dataset=["p0"],
           reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           batch_config=batch_cfg,
-          generation_args=datatypes.GenerationArgs(return_routed_experts=True),
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=True,
           max_staleness=0,
       )
       try:
@@ -8072,6 +8184,7 @@ class RLProgramTest(absltest.TestCase):
 
       # 2. Late group dropped in `BatchOrderedGroupQueue` (`PROMPT_ARRIVAL`).
       self.mock_engine.release_routed_experts.reset_mock()
+      self.algo_config.temperature = None
       ordered_prog = rl_program.StandardRLProgram(
           algo_config=self.algo_config,
           dataset=["p0"],
@@ -8079,7 +8192,8 @@ class RLProgramTest(absltest.TestCase):
               lambda prompts, completions, **_: [1.0, -1.0][: len(prompts)]
           ],
           batch_config=batch_cfg,
-          generation_args=datatypes.GenerationArgs(return_routed_experts=True),
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=True,
           group_order=rl_program.GroupOrder.PROMPT_ARRIVAL,
       )
       try:
@@ -8119,6 +8233,7 @@ class RLProgramTest(absltest.TestCase):
       # 3. `critique_stage` releases `scored_group` refs when `scored_q.put`
       # raises (e.g. closed `scored_q`).
       self.mock_engine.release_routed_experts.reset_mock()
+      self.algo_config.temperature = None
       put_fail_prog = rl_program.StandardRLProgram(
           algo_config=self.algo_config,
           dataset=["p0"],
@@ -8126,7 +8241,8 @@ class RLProgramTest(absltest.TestCase):
               lambda prompts, completions, **_: [1.0, -1.0][: len(prompts)]
           ],
           batch_config=batch_cfg,
-          generation_args=datatypes.GenerationArgs(return_routed_experts=True),
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=True,
       )
       try:
         assert put_fail_prog._relay is not None
@@ -8225,7 +8341,7 @@ class RLProgramTest(absltest.TestCase):
           reward_fns=[
               lambda prompts, completions, **_: [1.0, -1.0][: len(prompts)]
           ],
-          generation_args=datatypes.GenerationArgs(return_routed_experts=True),
+          rollout_returns_routed_experts=True,
       )
       try:
         with self.assertRaisesRegex(RuntimeError, "release RPC boom"):
@@ -8250,7 +8366,7 @@ class RLProgramTest(absltest.TestCase):
           reward_fns=[
               lambda prompts, completions, **_: [1.0, -1.0][: len(prompts)]
           ],
-          generation_args=datatypes.GenerationArgs(return_routed_experts=True),
+          rollout_returns_routed_experts=True,
       )
       try:
         with self.assertRaisesRegex(ValueError, "primary train boom"):
@@ -8513,7 +8629,8 @@ class RLProgramTest(absltest.TestCase):
           reward_fns=[
               lambda prompts, completions, **_: [1.0, -1.0][: len(prompts)]
           ],
-          generation_args=datatypes.GenerationArgs(return_routed_experts=True),
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=True,
           use_routed_experts_relay=False,
       )
       self.assertIsNone(program._relay)
@@ -8559,10 +8676,12 @@ class RLProgramTest(absltest.TestCase):
         algo_config=auto_algo,
         batch_config=batch_cfg,
         reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
-        generation_args=datatypes.GenerationArgs(return_routed_experts=True),
+        rollout_temperature=0.9,
+        rollout_returns_routed_experts=True,
     )
     self.assertIsNone(fallback_prog._relay)
 
+    auto_algo.temperature = None
     with self.assertRaisesRegex(
         ValueError, "requires a positive routed_experts_num_experts"
     ):
@@ -8570,7 +8689,8 @@ class RLProgramTest(absltest.TestCase):
           algo_config=auto_algo,
           batch_config=batch_cfg,
           reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
-          generation_args=datatypes.GenerationArgs(return_routed_experts=True),
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=True,
           use_routed_experts_relay=True,
       )
 
@@ -8674,7 +8794,7 @@ class RLProgramTest(absltest.TestCase):
           reward_fns=[
               lambda prompts, completions, **_: [2.0, -2.0][: len(prompts)]
           ],
-          generation_args=datatypes.GenerationArgs(return_routed_experts=True),
+          rollout_returns_routed_experts=True,
       )
       try:
         await program.run_async(self.mock_engine)
@@ -8863,6 +8983,8 @@ class GenerationMetricsLoggingTest(absltest.TestCase):
         dataset=["prompt_0"],
         max_steps=1,
         algo_config=algo_config,
+        rollout_temperature=0.9,
+        rollout_returns_routed_experts=False,
         batch_config=batch_config,
         reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
     )
@@ -8920,6 +9042,8 @@ class EfficiencyMetricsLoggingTest(absltest.TestCase):
         dataset=["prompt_0"],
         max_steps=1,
         algo_config=algo_config,
+        rollout_temperature=0.9,
+        rollout_returns_routed_experts=False,
         batch_config=batch_config,
         reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
     )
@@ -8995,6 +9119,8 @@ class StandardRLProgramTrajectoryStoreTest(absltest.TestCase):
     return rl_program.StandardRLProgram(
         dataset=["prompt_0"],
         algo_config=self.algo_config,
+        rollout_temperature=0.9,
+        rollout_returns_routed_experts=False,
         batch_config=self.batch_config,
         reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
         assembler=self.assembler,
@@ -9056,6 +9182,8 @@ class StandardRLProgramAsyncDatasetTest(absltest.TestCase):
           max_steps=2,
           batch_size=2,
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
       )
@@ -9069,15 +9197,9 @@ class StandardRLProgramAsyncDatasetTest(absltest.TestCase):
 
       await program.rollout_dispatch_stage()
 
-      self.assertEqual(mock_engine.dispatch_rollouts.call_count, 2)
-      dispatched_ids = [
-          call.args[0][0]["prompt_id"]
-          for call in mock_engine.dispatch_rollouts.call_args_list
-      ]
-      dispatched_prompts = [
-          call.args[0][0]["prompt"]
-          for call in mock_engine.dispatch_rollouts.call_args_list
-      ]
+      all_dispatched = _dispatched_prompts(mock_engine)
+      dispatched_ids = [item["prompt_id"] for item in all_dispatched]
+      dispatched_prompts = [item["prompt"] for item in all_dispatched]
       self.assertEqual(dispatched_ids, ["prompt_2", "prompt_3"])
       self.assertEqual(dispatched_prompts, ["prompt_2", "prompt_3"])
       program.close()
@@ -9132,6 +9254,8 @@ class StandardRLProgramRoutedExpertsCleanupTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo_config=algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=batch_config,
           reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=assembler,
@@ -9316,6 +9440,8 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
   ):
     default_prog = rl_program.StandardRLProgram(
         algo_config=self.algo_config,
+        rollout_temperature=0.9,
+        rollout_returns_routed_experts=False,
         batch_config=self.batch_config,
         dataset=["p0", "p1"],
     )
@@ -9329,8 +9455,11 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
     )
     default_prog.close()
 
+    self.algo_config.temperature = None
     ordered_prog = rl_program.StandardRLProgram(
         algo_config=self.algo_config,
+        rollout_temperature=0.9,
+        rollout_returns_routed_experts=False,
         batch_config=self.batch_config,
         dataset=["p0", "p1"],
         batch_size=4,
@@ -9355,6 +9484,8 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
     async def _run():
       program = rl_program.StandardRLProgram(
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           dataset=["p0", "p1", "p2", "p3"],
           batch_size=2,
@@ -9397,6 +9528,8 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
     async def _run():
       program = rl_program.StandardRLProgram(
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           dataset=["p0"],
           batch_size=2,
@@ -9425,6 +9558,8 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
   def test_skip_updates_next_batch_on_ordered_queue(self):
     program = rl_program.StandardRLProgram(
         algo_config=self.algo_config,
+        rollout_temperature=0.9,
+        rollout_returns_routed_experts=False,
         batch_config=self.batch_config,
         dataset=["p0", "p1", "p2"],
         batch_size=2,
@@ -9454,6 +9589,8 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
       dataset = [{"prompt": f"p{i}", "prompt_id": f"p{i}"} for i in range(6)]
       program = rl_program.StandardRLProgram(
           algo_config=grpo_cfg,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=batch_cfg,
           dataset=dataset,
           batch_size=2,
@@ -9479,47 +9616,49 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
 
       async def _dispatch_rollouts(prompts, **kwargs):
         num_generations = kwargs["num_generations"]
-        prompt_dict = prompts[0]
-        pid = prompt_dict["prompt_id"]
-        meta = dict(prompt_dict["metadata"])
-        v = program.policy_version
-        dispatched_versions[pid] = v
-        items = [
-            datatypes.TrajectoryItem(
-                prompt_id=pid,
-                group_index=g,
-                start_step=program.step,
-                prompt_tokens=np.array([1, 2], dtype=np.int32),
-                completion_tokens=np.array([3, 4], dtype=np.int32),
-                action_mask=np.array([1, 1], dtype=np.int32),
-                traj={
-                    "policy_versions": [v],
-                    "status": datatypes.TrajectoryStatus.SUCCEEDED,
-                    "trajectory_reward": 0.0,
-                    "prompt_tokens": [1, 2],
-                    "conversation_tokens": [3, 4],
-                    "conversation_masks": [1, 1],
-                    "conversation_text": [
-                        {"role": "user", "content": pid},
-                        {"role": "assistant", "content": f"{pid}_{g}"},
-                    ],
-                },
-                metadata=meta,
-            )
-            for g in range(num_generations)
-        ]
-        if meta["batch_idx"] == 0:
-          batch0_delayed.extend(items)
-        else:
-          for it in items:
-            await completed_items.put(it)
-          if pid == "p3":
-            for it in batch0_delayed:
+        req_ids: list[str] = []
+        for prompt_dict in prompts:
+          pid = prompt_dict["prompt_id"]
+          meta = dict(prompt_dict["metadata"])
+          v = program.policy_version
+          dispatched_versions[pid] = v
+          items = [
+              datatypes.TrajectoryItem(
+                  prompt_id=pid,
+                  group_index=g,
+                  start_step=program.step,
+                  prompt_tokens=np.array([1, 2], dtype=np.int32),
+                  completion_tokens=np.array([3, 4], dtype=np.int32),
+                  action_mask=np.array([1, 1], dtype=np.int32),
+                  traj={
+                      "policy_versions": [v],
+                      "status": datatypes.TrajectoryStatus.SUCCEEDED,
+                      "trajectory_reward": 0.0,
+                      "prompt_tokens": [1, 2],
+                      "conversation_tokens": [3, 4],
+                      "conversation_masks": [1, 1],
+                      "conversation_text": [
+                          {"role": "user", "content": pid},
+                          {"role": "assistant", "content": f"{pid}_{g}"},
+                      ],
+                  },
+                  metadata=meta,
+              )
+              for g in range(num_generations)
+          ]
+          if meta["batch_idx"] == 0:
+            batch0_delayed.extend(items)
+          else:
+            for it in items:
               await completed_items.put(it)
-            batch0_delayed.clear()
-          if pid == "p5":
-            await completed_items.put(None)
-        return [f"req_{pid}_{g}" for g in range(num_generations)]
+            if pid == "p3":
+              for it in batch0_delayed:
+                await completed_items.put(it)
+              batch0_delayed.clear()
+            if pid == "p5":
+              await completed_items.put(None)
+          req_ids.extend(f"req_{pid}_{g}" for g in range(num_generations))
+        return req_ids
 
       async def _poll_rollouts(timeout_s=0.1):
         del timeout_s
@@ -9605,6 +9744,8 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
       dataset = [f"p{i}" for i in range(6)]
       program = rl_program.StandardRLProgram(
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           dataset=dataset,
           batch_size=2,
@@ -9628,8 +9769,8 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
       # batch 2 (p4, p5).
       await program.rollout_dispatch_stage()
       dispatched_coords = [
-          call.args[0][0]["metadata"]
-          for call in self.mock_engine.dispatch_rollouts.call_args_list
+          prompt_item["metadata"]
+          for prompt_item in _dispatched_prompts(self.mock_engine)
       ]
       self.assertEqual(
           [c["prompt_idx"] for c in dispatched_coords],
@@ -9683,32 +9824,34 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
       self.mock_engine.restored_checkpoint_metadata = None
 
       async def _run1_dispatch(prompts, **kwargs):
-        p = prompts[0]
-        pid = p["prompt_id"]
-        pv = -3 if pid == "prompt_1" else kwargs.get("policy_version", 0)
-        batch = [
-            distributed_rl_engine._response_to_trajectory_item(
-                _create_rollout_response(
-                    f"req_{pid}_{g_idx}",
-                    pid,
-                    group_index=g_idx,
-                    policy_version=pv,
-                    reward=1.0,
-                )
-            )
-            for g_idx in range(4)
-        ]
+        req_ids: list[str] = []
+        for p in prompts:
+          pid = p["prompt_id"]
+          pv = -3 if pid == "prompt_1" else kwargs.get("policy_version", 0)
+          batch = [
+              distributed_rl_engine._response_to_trajectory_item(
+                  _create_rollout_response(
+                      f"req_{pid}_{g_idx}",
+                      pid,
+                      group_index=g_idx,
+                      policy_version=pv,
+                      reward=1.0,
+                  )
+              )
+              for g_idx in range(4)
+          ]
 
-        if pid in ("prompt_0", "prompt_1", "prompt_3"):
-          await run1_poll_queue.put(batch)
-        else:
+          if pid in ("prompt_0", "prompt_1", "prompt_3"):
+            await run1_poll_queue.put(batch)
+          else:
 
-          async def _delayed(b):
-            await asyncio.sleep(10.0)
-            await run1_poll_queue.put(b)
+            async def _delayed(b):
+              await asyncio.sleep(10.0)
+              await run1_poll_queue.put(b)
 
-          run1_bg_tasks.append(asyncio.create_task(_delayed(batch)))
-        return [f"req_{pid}_{g}" for g in range(4)]
+            run1_bg_tasks.append(asyncio.create_task(_delayed(batch)))
+          req_ids.extend(f"req_{pid}_{g}" for g in range(4))
+        return req_ids
 
       async def _run1_poll(timeout_s=0.1):
         del timeout_s
@@ -9726,6 +9869,8 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
           dataset=[f"q_{i}" for i in range(6)],
           max_steps=1,
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           batch_size=2,
           max_staleness=2,
@@ -9776,31 +9921,35 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
       delays_run2 = {"prompt_2": 0.04, "prompt_4": 0.01, "prompt_5": 0.08}
 
       async def _run2_dispatch(prompts, **kwargs):
-        p = prompts[0]
-        pid = p["prompt_id"]
-        run2_dispatched.append(pid)
-        pv = kwargs.get("policy_version", 0)
-        batch = [
-            distributed_rl_engine._response_to_trajectory_item(
-                _create_rollout_response(
-                    f"req_{pid}_{g_idx}",
-                    pid,
-                    group_index=g_idx,
-                    policy_version=pv,
-                    reward=1.0,
-                )
-            )
-            for g_idx in range(4)
-        ]
+        req_ids: list[str] = []
+        for p in prompts:
+          pid = p["prompt_id"]
+          run2_dispatched.append(pid)
+          pv = kwargs.get("policy_version", 0)
+          batch = [
+              distributed_rl_engine._response_to_trajectory_item(
+                  _create_rollout_response(
+                      f"req_{pid}_{g_idx}",
+                      pid,
+                      group_index=g_idx,
+                      policy_version=pv,
+                      reward=1.0,
+                  )
+              )
+              for g_idx in range(4)
+          ]
 
-        async def _delayed_put(b, d):
-          await asyncio.sleep(d)
-          await run2_poll_queue.put(b)
+          async def _delayed_put(b, d):
+            await asyncio.sleep(d)
+            await run2_poll_queue.put(b)
 
-        run2_bg_tasks.append(
-            asyncio.create_task(_delayed_put(batch, delays_run2.get(pid, 0.01)))
-        )
-        return [f"req_{pid}_{g}" for g in range(4)]
+          run2_bg_tasks.append(
+              asyncio.create_task(
+                  _delayed_put(batch, delays_run2.get(pid, 0.01))
+              )
+          )
+          req_ids.extend(f"req_{pid}_{g}" for g in range(4))
+        return req_ids
 
       async def _run2_poll(timeout_s=0.1):
         del timeout_s
@@ -9814,10 +9963,13 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
       )
       self.mock_engine.poll_rollouts = mock.AsyncMock(side_effect=_run2_poll)
 
+      self.algo_config.temperature = None
       program2 = rl_program.StandardRLProgram(
           dataset=[f"q_{i}" for i in range(6)],
           max_steps=2,
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           batch_size=2,
           max_staleness=2,
@@ -9896,7 +10048,8 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
           batch_config=self.batch_config,
           batch_size=1,
           max_staleness=1,
-          generation_args=datatypes.GenerationArgs(temperature=1.0),
+          rollout_temperature=1.0,
+          rollout_returns_routed_experts=False,
           reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=batch_assembly.PaddedBatchAssembler(
               batch_size=1,
@@ -9975,8 +10128,11 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
           (rl_program.GroupOrder.PROMPT_ARRIVAL, ["p0", "p1"]),
       ):
         self.algo_config.reward_mode = "env"
+        self.algo_config.temperature = None
         program = rl_program.StandardRLProgram(
             algo_config=self.algo_config,
+            rollout_temperature=0.9,
+            rollout_returns_routed_experts=False,
             batch_config=self.batch_config,
             dataset=["p0", "p1", "p2"],
             batch_size=2,
@@ -10055,6 +10211,8 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, "max_version_span"):
       rl_program.StandardRLProgram(
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           dataset=["p0"],
           reward_fns=[],
@@ -10063,8 +10221,11 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
     with self.assertRaisesRegex(
         ValueError, "max_version_span is only supported"
     ):
+      self.algo_config.temperature = None
       rl_program.StandardRLProgram(
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           dataset=["p0"],
           reward_fns=[],
@@ -10086,8 +10247,11 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
           dummy_payload,
           dummy_payload,
       ]
+      self.algo_config.temperature = None
       program = rl_program.StandardRLProgram(
           algo_config=self.algo_config,
+          rollout_temperature=0.9,
+          rollout_returns_routed_experts=False,
           batch_config=self.batch_config,
           dataset=["p0", "p1", "p2"],
           reward_fns=[],
@@ -10229,6 +10393,220 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
         )
         self.assertAlmostEqual(
             logger.get_metric("rollout", "version_span_mean", "train"), 1.5
+        )
+      finally:
+        program.close()
+
+    asyncio.run(_run())
+
+  def test_rollout_dispatch_stage_coalesces_large_batch_into_64_prompt_waves(
+      self,
+  ):
+    async def _run():
+      dataset = [f"q_{i}" for i in range(150)]
+      program = rl_program.StandardRLProgram(
+          rollout_temperature=1.0,
+          rollout_returns_routed_experts=False,
+          dataset=dataset,
+          max_steps=1,
+          batch_size=150,
+          algo_config=self.algo_config,
+          batch_config=self.batch_config,
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
+          max_staleness=0,
+      )
+      program.engine = self.mock_engine
+      try:
+        with self.assertLogs(level="INFO") as logs:
+          await program.rollout_dispatch_stage()
+        wave_sizes = [
+            len(call.args[0])
+            for call in self.mock_engine.dispatch_rollouts.call_args_list
+        ]
+        self.assertEqual(wave_sizes, [64, 64, 22])
+        # Each prompt keeps its `[pipeline] DISPATCH` line with the fields log
+        # parsers read, logged with its wave; the wave line has another prefix.
+        pipeline_logs = [
+            log.split("[pipeline] ", 1)[1]
+            for log in logs.output
+            if "[pipeline] " in log
+        ]
+        self.assertEqual(
+            pipeline_logs[:2],
+            [
+                (
+                    "DISPATCH prompt_id=prompt_0 prompt_idx=0 batch_idx=0"
+                    " intra_batch_idx=0 policy_version=0 next_batch=0"
+                ),
+                (
+                    "DISPATCH prompt_id=prompt_1 prompt_idx=1 batch_idx=0"
+                    " intra_batch_idx=1 policy_version=0 next_batch=0"
+                ),
+            ],
+        )
+        self.assertEqual(
+            [
+                i
+                for i, log in enumerate(pipeline_logs)
+                if not log.startswith("DISPATCH prompt_id=")
+            ],
+            [64, 129, 152],
+        )
+        self.assertEqual(
+            pipeline_logs[64],
+            "WAVE_DISPATCH count=64 policy_version=0 next_batch=0",
+        )
+        dispatched_ids = [
+            prompt_item["prompt_id"]
+            for prompt_item in _dispatched_prompts(self.mock_engine)
+        ]
+        self.assertEqual(dispatched_ids, [f"prompt_{i}" for i in range(150)])
+      finally:
+        program.close()
+
+    asyncio.run(_run())
+
+  def test_rollout_dispatch_stage_flushes_immediately_on_filtered_slot_refill(
+      self,
+  ):
+    async def _run():
+      wave_q: asyncio.Queue[list[str]] = asyncio.Queue()
+
+      async def _mock_dispatch(prompts, **kwargs):
+        del kwargs
+        await wave_q.put([p["prompt_id"] for p in prompts])
+        return ["req"] * len(prompts)
+
+      self.mock_engine.dispatch_rollouts.side_effect = _mock_dispatch
+      program = rl_program.StandardRLProgram(
+          rollout_temperature=1.0,
+          rollout_returns_routed_experts=False,
+          dataset=[f"q_{i}" for i in range(8)],
+          max_steps=2,
+          batch_size=4,
+          algo_config=self.algo_config,
+          batch_config=self.batch_config,
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
+          max_staleness=0,
+      )
+      program.engine = self.mock_engine
+      dispatch_task = asyncio.create_task(program.rollout_dispatch_stage())
+      try:
+        first_wave = await asyncio.wait_for(wave_q.get(), timeout=1.0)
+        self.assertEqual(
+            first_wave,
+            ["prompt_0", "prompt_1", "prompt_2", "prompt_3"],
+        )
+
+        # Filtering 1 group frees exactly 1 slot; prompt_4 must flush
+        # immediately once admitted because `can_admit` returns False again.
+        program.dispatch_window.on_group_filtered([
+            datatypes.TrajectoryItem(
+                group_index=0,
+                prompt_id="prompt_0",
+                start_step=0,
+                traj=_scored_traj(),
+            )
+        ])
+        second_wave = await asyncio.wait_for(wave_q.get(), timeout=1.0)
+        self.assertEqual(second_wave, ["prompt_4"])
+      finally:
+        dispatch_task.cancel()
+        await asyncio.gather(dispatch_task, return_exceptions=True)
+        program.close()
+
+    asyncio.run(_run())
+
+  def test_rollout_dispatch_stage_flushes_when_window_fills_between_reads(
+      self,
+  ):
+    async def _run():
+      wave_q: asyncio.Queue[list[str]] = asyncio.Queue()
+
+      async def _mock_dispatch(prompts, **kwargs):
+        del kwargs
+        await wave_q.put([p["prompt_id"] for p in prompts])
+        return ["req"] * len(prompts)
+
+      self.mock_engine.dispatch_rollouts.side_effect = _mock_dispatch
+      program = rl_program.StandardRLProgram(
+          rollout_temperature=1.0,
+          rollout_returns_routed_experts=False,
+          dataset=[f"q_{i}" for i in range(4)],
+          max_steps=1,
+          batch_size=4,
+          algo_config=self.algo_config,
+          batch_config=self.batch_config,
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
+          max_staleness=0,
+      )
+      program.engine = self.mock_engine
+
+      async def _fill_window_before_third_prompt(dataset, **kwargs):
+        del kwargs
+        yield 0, dataset[0]
+        yield 1, dataset[1]
+        # An in-flight weight sync holds back one batch, which fills the window
+        # while two admitted prompts are still pending.
+        program._inflight_sync = mock.create_autospec(
+            asyncio.Task, instance=True
+        )
+        self.assertFalse(program.dispatch_window.can_admit)
+        yield 2, dataset[2]
+
+      with mock.patch.object(
+          rl_program.dataset_utils,
+          "iter_dataset_async",
+          _fill_window_before_third_prompt,
+      ):
+        dispatch_task = asyncio.create_task(program.rollout_dispatch_stage())
+        try:
+          # The third prompt parks in `admit()`; the first two are sent first.
+          wave = await asyncio.wait_for(wave_q.get(), timeout=1.0)
+          self.assertEqual(wave, ["prompt_0", "prompt_1"])
+          self.assertFalse(dispatch_task.done())
+        finally:
+          dispatch_task.cancel()
+          await asyncio.gather(dispatch_task, return_exceptions=True)
+          program._inflight_sync = None
+          program.close()
+
+    asyncio.run(_run())
+
+  def test_rollout_dispatch_stage_flushes_at_batch_boundaries_and_eof(self):
+    async def _run():
+      dispatched_waves: list[list[str]] = []
+
+      async def _mock_dispatch(prompts, **kwargs):
+        del kwargs
+        dispatched_waves.append([p["prompt_id"] for p in prompts])
+        return ["req"] * len(prompts)
+
+      self.mock_engine.dispatch_rollouts.side_effect = _mock_dispatch
+      program = rl_program.StandardRLProgram(
+          rollout_temperature=1.0,
+          rollout_returns_routed_experts=False,
+          dataset=[f"q_{i}" for i in range(10)],
+          max_steps=3,
+          batch_size=4,
+          algo_config=self.algo_config,
+          batch_config=self.batch_config,
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
+          max_staleness=2,
+      )
+      program.engine = self.mock_engine
+      program.dispatch_window.restore_checkpoint_metadata(
+          {"committed_prompt_ids": ["prompt_3"], "skipped_prompt_ids": []}
+      )
+      try:
+        await program.rollout_dispatch_stage()
+        self.assertEqual(
+            dispatched_waves,
+            [
+                ["prompt_0", "prompt_1", "prompt_2"],
+                ["prompt_4", "prompt_5", "prompt_6", "prompt_7"],
+                ["prompt_8", "prompt_9"],
+            ],
         )
       finally:
         program.close()

@@ -975,3 +975,35 @@ def make_streaming_executor(
   return functools.partial(
       _step_streaming_rules, base_spec, active_rules, rule_sources, buf
   )
+
+
+def apply_host_manifest(
+    manifest: Mapping[str, Any],
+    tensors: Mapping[str, np.ndarray],
+    *,
+    drop_tied_targets: bool,
+    strict: bool = True,
+) -> dict[str, np.ndarray]:
+  """Executes a normalized `hf_mapping` manifest on host NumPy buffers."""
+  effective: Mapping[str, Any] = manifest
+  if drop_tied_targets and manifest["tied_keys"]:
+    tied_dst = [dst for _, dst in manifest["tied_keys"]]
+    effective = {
+        **manifest,
+        "tied_keys": [],
+        "dropped_keys": [*manifest["dropped_keys"], *tied_dst],
+    }
+  if strict:
+    missing = active_source_keys(effective) - tensors.keys()
+    if missing:
+      raise ValueError(
+          f"Incomplete manifest rules; missing source keys: {sorted(missing)!r}"
+      )
+  pending: dict[str, Any] = {}
+  out = make_streaming_executor(effective, pending=pending)(tensors)
+  if pending:
+    raise ValueError(
+        "Incomplete manifest rules; unconsumed source keys:"
+        f" {sorted(pending)!r}"
+    )
+  return out

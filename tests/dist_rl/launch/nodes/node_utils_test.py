@@ -472,7 +472,13 @@ class WorkerIdAndPortTest(absltest.TestCase):
 class SetupOtelMetricsTest(absltest.TestCase):
 
   def test_names_the_service_and_tags_role_run_and_worker(self):
-    hp = resolve_config.initialize(["cluster_config.run_id=run_1"])
+    hp = resolve_config.initialize([
+        "cluster_config.run_id=run_1",
+        "otel_config.enable=true",
+        "otel_config.endpoint=127.0.0.1:4317",
+        "otel_config.export_interval_ms=5000",
+        "otel_config.export_timeout_s=2.5",
+    ])
     with mock.patch.object(
         otel_setup, "setup_metrics", return_value=True
     ) as setup_metrics:
@@ -484,7 +490,10 @@ class SetupOtelMetricsTest(absltest.TestCase):
         setup_metrics.call_args_list,
         [
             mock.call(
-                default_service_name="tunix-rollout",
+                service_name="tunix-rollout",
+                endpoint="http://127.0.0.1:4317",
+                export_interval_ms=5000,
+                export_timeout_s=2.5,
                 resource_attributes={
                     "tunix.role": "rollout",
                     "tunix.run_id": "run_1",
@@ -493,7 +502,10 @@ class SetupOtelMetricsTest(absltest.TestCase):
             ),
             # The orchestrator registers no worker id.
             mock.call(
-                default_service_name="tunix-orchestrator",
+                service_name="tunix-orchestrator",
+                endpoint="http://127.0.0.1:4317",
+                export_interval_ms=5000,
+                export_timeout_s=2.5,
                 resource_attributes={
                     "tunix.role": "orchestrator",
                     "tunix.run_id": "run_1",
@@ -501,6 +513,56 @@ class SetupOtelMetricsTest(absltest.TestCase):
             ),
         ],
     )
+
+  def test_orchestrator_logs_filtered_dashboard_url_when_configured(self):
+    hp = resolve_config.initialize([
+        "cluster_config.run_id=run_a,b+c",
+        "otel_config.enable=true",
+        "otel_config.dashboard_id=dash-99",
+        "otel_config.dashboard_project=proj-1",
+    ])
+    with mock.patch.object(otel_setup, "setup_metrics", return_value=True):
+      with self.assertLogs(level="INFO") as logs:
+        self.assertTrue(
+            node_utils.setup_otel_metrics(
+                hp, "orchestrator", worker_id_str=None
+            )
+        )
+    self.assertTrue(
+        any(
+            "builder/dash-99;filters=type:mlabel,key:tunix_run_id,"
+            "val:run_a%5C%2Cb%5C%2Bc?project=proj-1"
+            in msg
+            for msg in logs.output
+        ),
+        msg=logs.output,
+    )
+
+  def test_does_not_log_dashboard_url_when_not_applicable(self):
+    configured = resolve_config.initialize([
+        "cluster_config.run_id=run_42",
+        "otel_config.enable=true",
+        "otel_config.dashboard_id=dash-99",
+        "otel_config.dashboard_project=proj-1",
+    ])
+    unconfigured = resolve_config.initialize([
+        "cluster_config.run_id=run_42",
+        "otel_config.enable=true",
+    ])
+    for label, hp, role, installed in (
+        ("worker_role", configured, "rollout", True),
+        ("setup_disabled", configured, "orchestrator", False),
+        ("no_dashboard", unconfigured, "orchestrator", True),
+    ):
+      with self.subTest(case=label):
+        with mock.patch.object(
+            otel_setup, "setup_metrics", return_value=installed
+        ):
+          with self.assertNoLogs(level="INFO"):
+            self.assertEqual(
+                node_utils.setup_otel_metrics(hp, role, worker_id_str=None),
+                installed,
+            )
 
 
 class OptionalBoolTest(absltest.TestCase):

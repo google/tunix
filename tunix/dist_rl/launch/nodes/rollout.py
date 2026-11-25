@@ -497,8 +497,8 @@ def _rollout_config(
       top_k=int(rollout["top_k"]),
       overlong_filter=bool(grpo["overlong_filter"]),
       episode_timeout=episode_timeout_secs,
-      # The trainer consumes the rollout logprobs.
-      return_logprobs=True,
+      # Only compute rollout logprobs when the trainer consumes them.
+      return_logprobs=bool(grpo["use_rollout_logps"]),
       eos_tokens=_eos_token_ids(hp, tokenizer),
       partial_rollout=bool(ws["in_flight_weight_updates"]),
       drain_timeout_s=timeouts.drain_timeout_for(episode_timeout_secs),

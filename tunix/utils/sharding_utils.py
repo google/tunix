@@ -14,11 +14,13 @@
 
 """Sharding utilities."""
 
-from collections.abc import Sequence
-from typing import Tuple
+from collections.abc import Mapping, Sequence
+import json
+from typing import Any, Tuple
 
 import jax
 from jax import numpy as jnp
+from jax.experimental import multihost_utils
 from jax.interpreters import pxla
 import jax.sharding as shd
 import numpy as np
@@ -146,3 +148,94 @@ def shard(
   if eager:
     return place_array_on_target(x, sharding)
   return jax.lax.with_sharding_constraint(x, sharding)
+
+
+def broadcast_host0_json(payload: Any) -> Any:
+  """Returns process 0's JSON-serializable `payload` on every process."""
+  is_host0 = jax.process_index() == 0
+  buf = (
+      np.frombuffer(json.dumps(payload).encode('utf-8'), dtype=np.uint8)
+      if is_host0
+      else np.zeros(0, dtype=np.uint8)
+  )
+  if jax.process_count() > 1:
+    size = multihost_utils.broadcast_one_to_all(
+        np.int32(buf.size), is_source=is_host0
+    )
+    src = buf if is_host0 else np.zeros(int(size), dtype=np.uint8)
+    buf = np.asarray(
+        multihost_utils.broadcast_one_to_all(src, is_source=is_host0)
+    )
+  return json.loads(buf.tobytes())
+
+
+def _needs_multihost_gather(arr: Any) -> bool:
+  """Returns whether `arr` needs a cross-host allgather to materialize."""
+  return (
+      jax.process_count() > 1
+      and isinstance(arr, jax.Array)
+      and not arr.is_fully_addressable
+  )
+
+
+def gather_tensor_to_host(arr: Any) -> np.ndarray:
+  """Materializes a single global or host-local tensor as a host NumPy array.
+
+  Gating `multihost_utils.process_allgather(..., tiled=True)` on
+  `_needs_multihost_gather` handles both single-controller and multi-process
+  JAX runtimes cleanly:
+
+  - On single-controller runtimes such as Pathways on Cloud
+    (`jax.process_count() == 1`, `is_fully_addressable == True`),
+    `process_allgather(arr, tiled=True)` also returns `np.asarray(arr)`
+    (whereas `tiled=False` expands `()` to `(1,)`), so routing directly to
+    `jax.device_get(arr)` avoids unnecessary `multihost_utils` indirection.
+  - On multi-process JAX (McJAX, `jax.process_count() > 1`), calling
+    `process_allgather(arr, tiled=True)` unconditionally on a host-local
+    `np.ndarray`, fully-addressable `jax.Array`, or 0-D scalar stacks or
+    concatenates across all `N = jax.process_count()` hosts, inflating
+    `(D, ...)` to `(N * D, ...)` and turning a 0-D scalar `()` into a 1-D
+    `(N,)` array. Restricting `process_allgather(..., tiled=True)` to
+    non-fully-addressable `jax.Array` values preserves exact shapes (including
+    0-D scalars) via `jax.device_get(arr)`.
+
+  Args:
+    arr: A `jax.Array` (sharded or replicated) or host array-like object.
+
+  Returns:
+    Host `np.ndarray` containing the full tensor value.
+  """
+  if _needs_multihost_gather(arr):
+    return np.asarray(multihost_utils.process_allgather(arr, tiled=True))
+  return np.asarray(jax.device_get(arr))
+
+
+def gather_tensors_to_host0(
+    tensors: Mapping[str, Any],
+    *,
+    is_host0: bool,
+) -> dict[str, np.ndarray]:
+  """Gathers `tensors` in sorted key order, materializing only on host 0.
+
+  Non-host-0 processes still enter `process_allgather(..., tiled=True)` for
+  non-fully-addressable `jax.Array` values (required by SPMD collectives to
+  avoid deadlocking host 0), while skipping `jax.device_get` on host-local
+  arrays.
+
+  Args:
+    tensors: Mapping of source tensor names to `jax.Array` or host array-like
+      values.
+    is_host0: Whether the current process is process 0.
+
+  Returns:
+    Mapping of source tensor names to host `np.ndarray` values on host 0, or an
+    empty dict on non-host-0 processes.
+  """
+  host_tensors: dict[str, np.ndarray] = {}
+  for key in sorted(tensors):
+    arr = tensors[key]
+    if is_host0:
+      host_tensors[key] = gather_tensor_to_host(arr)
+    elif _needs_multihost_gather(arr):
+      multihost_utils.process_allgather(arr, tiled=True)
+  return host_tensors

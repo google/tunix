@@ -31,9 +31,9 @@ from etils import epath
 from flax import nnx
 import jax
 import jax.numpy as jnp
-import ml_dtypes
 import numpy as np
 from tunix.models import hf_mapping
+from tunix.models import safetensors_io
 from tunix.oss import utils
 from tunix.utils import compat
 from tunix.utils import env_utils
@@ -70,24 +70,6 @@ def flatten_model_state(model: Any) -> dict[str, jax.Array]:
 
 _MAX_HEADER_BYTES = 100_000_000
 
-_SAFETENSORS_DTYPES: Mapping[str, np.dtype] = {
-    'BOOL': np.dtype(np.bool_),
-    'U8': np.dtype(np.uint8),
-    'I8': np.dtype(np.int8),
-    'U16': np.dtype(np.uint16),
-    'I16': np.dtype(np.int16),
-    'U32': np.dtype(np.uint32),
-    'I32': np.dtype(np.int32),
-    'U64': np.dtype(np.uint64),
-    'I64': np.dtype(np.int64),
-    'F8_E4M3': np.dtype(ml_dtypes.float8_e4m3fn),
-    'F8_E5M2': np.dtype(ml_dtypes.float8_e5m2),
-    'BF16': np.dtype(ml_dtypes.bfloat16),
-    'F16': np.dtype(np.float16),
-    'F32': np.dtype(np.float32),
-    'F64': np.dtype(np.float64),
-}
-
 
 def _read_safetensors_header(
     filepath: epath.Path,
@@ -119,13 +101,13 @@ def _validate_tensor_meta(
   """Validates safetensors dtype, non-negative shape, and exact byte span."""
   if (
       not isinstance(meta, Mapping)
-      or meta.get('dtype') not in _SAFETENSORS_DTYPES
+      or meta.get('dtype') not in safetensors_io.SAFETENSORS_DTYPES
       or not isinstance(meta.get('shape'), Sequence)
       or not isinstance(meta.get('data_offsets'), Sequence)
       or len(meta['data_offsets']) != 2
   ):
     raise ValueError(f'Invalid metadata for {name!r} in {filepath}.')
-  np_dt = _SAFETENSORS_DTYPES[meta['dtype']]
+  np_dt = safetensors_io.SAFETENSORS_DTYPES[meta['dtype']]
   raw_shape = meta['shape']
   if any(not isinstance(d, int) or d < 0 for d in raw_shape):
     raise ValueError(f'Invalid shape {raw_shape!r} for {name!r} in {filepath}.')
@@ -180,9 +162,9 @@ def read_checkpoint_keys(file_dir: str) -> frozenset[str]:
 
 def to_np_dtype(dtype):
   if isinstance(dtype, str):
-    if dtype not in _SAFETENSORS_DTYPES:
+    if dtype not in safetensors_io.SAFETENSORS_DTYPES:
       raise ValueError(f'Unsupported safetensors dtype: {dtype!r}')
-    return _SAFETENSORS_DTYPES[dtype]
+    return safetensors_io.SAFETENSORS_DTYPES[dtype]
   return np.dtype(dtype)
 
 
