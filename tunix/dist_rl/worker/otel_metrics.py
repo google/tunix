@@ -35,6 +35,7 @@ import weakref
 import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import lineage
+from tunix.dist_rl.worker import device_idle_tracker
 from tunix.rl.agentic.agents import agent_types
 
 if TYPE_CHECKING:
@@ -260,8 +261,10 @@ class TrainerWorkerOtelMetrics:
       self,
       worker_id: str,
       meter_provider: otel_api_types.MeterProvider | None = None,
+      idle_clock: Callable[[], float] = time.monotonic,
   ):
     self.last_free_time_s: float | None = None
+    self._idle_tracker = device_idle_tracker.DeviceIdleTracker(clock=idle_clock)
     self._meter = WorkerMeter("tunix.trainer", worker_id, meter_provider)
     self._step_duration = self._meter.histogram(
         "tunix.trainer.step.duration",
@@ -298,6 +301,33 @@ class TrainerWorkerOtelMetrics:
             " microbatch."
         ),
     )
+
+  def idle_clock_now(self) -> float:
+    """Returns the current reading of the device idle tracker's clock."""
+    return self._idle_tracker.now()
+
+  def record_fwd_bwd(
+      self,
+      t_enter: float,
+      wait_until_done: Callable[[], object] | None,
+  ) -> None:
+    """Records a dispatched `fwd_bwd` computation or marks the device busy."""
+    if wait_until_done is not None:
+      self._idle_tracker.record(t_enter, wait_until_done)
+    else:
+      self._idle_tracker.mark_busy_until_now()
+
+  def flush_data_waits(self) -> tuple[float, ...]:
+    """Returns and clears per-microbatch device idle times in dispatch order."""
+    return self._idle_tracker.flush()
+
+  def reset_idle(self) -> None:
+    """Clears recorded device idle times and marks the device busy until now."""
+    self._idle_tracker.reset()
+
+  def close(self, *, wait: bool) -> None:
+    """Stops the device idle tracker's background observer thread."""
+    self._idle_tracker.close(wait=wait)
 
   def record_starvation(self, mb_ready_s: float | None) -> None:
     """Records `trainer_idle` and `data_fetch_delay` before a microbatch."""
@@ -352,6 +382,8 @@ class TrainerWorkerOtelMetrics:
     finally:
       if refresh_free_time and (arm or self.last_free_time_s is not None):
         self.last_free_time_s = now_s()
+      if refresh_free_time and not arm:
+        self._idle_tracker.mark_busy_until_now()
     if phase is not None:
       self._step_duration.record(float(elapsed_s), phase=phase)
     if weight_sync_direction is not None:

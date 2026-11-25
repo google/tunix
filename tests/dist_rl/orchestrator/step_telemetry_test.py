@@ -504,5 +504,38 @@ class SlowestRolloutsSummaryTest(absltest.TestCase):
     )
 
 
+class AggregateTrainerDataWaitTest(absltest.TestCase):
+
+  def test_no_waits_reports_nothing(self):
+    self.assertEqual(step_telemetry.aggregate_trainer_data_wait([]), {})
+
+  def test_splits_total_wait_into_rollout_and_data_plane(self):
+    # Three micro-batches over two updates: (wait, data-plane part).
+    waits = [(7.0, 3.0), (1.0, 1.0), (0.5, 0.0)]
+
+    self.assertEqual(
+        step_telemetry.aggregate_trainer_data_wait(waits),
+        {
+            "perf/trainer_data_wait_time": 8.5,
+            "perf/trainer_data_wait_first_mb": 7.0,
+            "perf/trainer_data_wait_intra_step": 1.5,
+            "perf/trainer_data_wait_max": 7.0,
+            "perf/trainer_data_wait_data_plane": 4.0,
+            "perf/trainer_data_wait_rollout": 4.5,
+        },
+    )
+
+  def test_omits_split_when_a_micro_batch_lacks_its_data_plane_part(self):
+    self.assertEqual(
+        step_telemetry.aggregate_trainer_data_wait([(2.0, 0.5), (1.0, None)]),
+        {
+            "perf/trainer_data_wait_time": 3.0,
+            "perf/trainer_data_wait_first_mb": 2.0,
+            "perf/trainer_data_wait_intra_step": 1.0,
+            "perf/trainer_data_wait_max": 2.0,
+        },
+    )
+
+
 if __name__ == "__main__":
   absltest.main()

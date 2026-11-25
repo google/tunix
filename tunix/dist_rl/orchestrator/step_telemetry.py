@@ -69,6 +69,8 @@ class StepTimes:
     weight_sync_time: Syncing the new policy to the rollout workers.
     routed_experts_fetch_time: Pulling staged MoE `routed_experts` arrays from
       rollout workers prior to microbatch packing.
+    critique_time: Sum of off-loop `_critique_group` durations across groups
+      consumed in the step.
   """
 
   exposed_generation_time: float = 0.0
@@ -78,6 +80,42 @@ class StepTimes:
   checkpoint_time: float = 0.0
   weight_sync_time: float = 0.0
   routed_experts_fetch_time: float = 0.0
+  critique_time: float = 0.0
+
+
+def aggregate_trainer_data_wait(
+    waits: Sequence[tuple[float, float | None]],
+) -> dict[str, float]:
+  """Sums a step's `(wait_sec, data_plane_sec)` pairs into `perf/` metrics.
+
+  Args:
+    waits: `(wait_sec, data_plane_sec)` per micro-batch, in execution order.
+
+  Returns:
+    The step's trainer data wait: total, first micro-batch, later micro-batches
+    and the longest single wait. When every micro-batch reports its data-plane
+    part, also the split of the total into rollout and data plane. Note that
+    `perf/trainer_data_wait_data_plane` covers all post-rollout orchestrator
+    work before trainer dispatch (including exposed `Role.REFERENCE` KL scoring,
+    which is logged separately as `perf/reference_logps_time`). Empty when
+    `waits` is empty.
+  """
+  if not waits:
+    return {}
+  wait_secs = [wait_sec for wait_sec, _ in waits]
+  total = sum(wait_secs)
+  metrics = {
+      "perf/trainer_data_wait_time": total,
+      "perf/trainer_data_wait_first_mb": wait_secs[0],
+      "perf/trainer_data_wait_intra_step": sum(wait_secs[1:]),
+      "perf/trainer_data_wait_max": max(wait_secs),
+  }
+  data_plane_secs = [dp for _, dp in waits if dp is not None]
+  if len(data_plane_secs) == len(waits):
+    data_plane = sum(data_plane_secs)
+    metrics["perf/trainer_data_wait_data_plane"] = data_plane
+    metrics["perf/trainer_data_wait_rollout"] = total - data_plane
+  return metrics
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)

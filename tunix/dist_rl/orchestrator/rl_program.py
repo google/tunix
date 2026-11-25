@@ -344,6 +344,9 @@ class ScoredGroup:
       `routed_experts` stripped (`len == G`).
     rewards: Scalar rewards computed by `critique_stage` (`len == G`), also
       stamped into each `item.traj["trajectory_reward"]` for downstream logging.
+    rollout_ready_mono: Orchestrator monotonic time at which the group's
+      rollouts were complete, or None when unknown.
+    critique_time_s: Duration of `_critique_group` in seconds.
     reward_log_metrics: Per-group reward manager log metrics (`name -> (values,
       agg_fn)`) to be aggregated across the step in `train_stage`.
   """
@@ -351,6 +354,8 @@ class ScoredGroup:
   payloads: tuple[datatypes.RLTrainerPayload, ...]
   items: tuple[datatypes.TrajectoryItem, ...]
   rewards: tuple[float, ...]
+  rollout_ready_mono: float | None = None
+  critique_time_s: float = 0.0
   reward_log_metrics: RewardLogMetrics = dataclasses.field(default_factory=dict)
 
   def __post_init__(self) -> None:
@@ -1071,8 +1076,10 @@ class StandardRLProgram(RLProgram):
   def _critique_group(
       self,
       group: Sequence[datatypes.TrajectoryItem],
+      rollout_ready_mono: float | None = None,
   ) -> ScoredGroup:
     """Scores a trajectory group and builds its RLTrainerPayloads and ScoredGroup off-loop."""
+    critique_start = time.monotonic()
     rewards, group_reward_log_metrics = self._score_group(group)
     payloads = payload_builder.create_trainer_payloads(
         group,
@@ -1092,6 +1099,8 @@ class StandardRLProgram(RLProgram):
         payloads=tuple(payloads),
         items=tuple(items),
         rewards=tuple(rewards),
+        rollout_ready_mono=rollout_ready_mono,
+        critique_time_s=time.monotonic() - critique_start,
         reward_log_metrics=group_reward_log_metrics,
     )
 
@@ -1101,11 +1110,12 @@ class StandardRLProgram(RLProgram):
     try:
       while True:
         try:
-          group = await self.raw_q.get_group()
-          if not group:
+          timed_group = await self.raw_q.get_timed_group()
+          if timed_group is None:
             break
         except Exception:
           break
+        group, rollout_ready_mono = timed_group
 
         if len(group) != self.num_generations:
           raise ValueError(
@@ -1113,7 +1123,9 @@ class StandardRLProgram(RLProgram):
               f" num_generations={self.num_generations}."
           )
 
-        scored_group = await asyncio.to_thread(self._critique_group, group)
+        scored_group = await asyncio.to_thread(
+            self._critique_group, group, rollout_ready_mono
+        )
         if self._relay is not None:
           self._relay.release_unreferenced_critique_refs(
               group, scored_group.payloads
@@ -1186,6 +1198,7 @@ class StandardRLProgram(RLProgram):
       filtered_groups: Sequence[Sequence[datatypes.TrajectoryItem]] = (),
       step_times: step_telemetry.StepTimes | None = None,
       reward_log_metrics: Sequence[RewardLogMetrics] = (),
+      trainer_data_waits: Sequence[tuple[float, float | None]] = (),
   ) -> dict[str, Any]:
     """Logs rollout, reward, trainer, and orchestrator metrics.
 
@@ -1388,6 +1401,10 @@ class StandardRLProgram(RLProgram):
     if step_times is not None:
       for tag, val in dataclasses.asdict(step_times).items():
         self._log_metric(f"perf/{tag}", val, log_step)
+    for tag, val in step_telemetry.aggregate_trainer_data_wait(
+        trainer_data_waits
+    ).items():
+      self._log_metric(tag, val, log_step)
     if self.engine is not None:
       for tag, val in self.engine.fault_tolerance_metrics().items():
         self._log_metric(tag, val, log_step)
@@ -1851,6 +1868,11 @@ class StandardRLProgram(RLProgram):
         step_start_time = time.monotonic()
         step_times = step_telemetry.StepTimes()
         last_train_end_mono = 0.0
+        # Latest rollout-ready monotonic time among the groups consumed so far:
+        # a micro-batch can only be built once all of them were ready.
+        rollout_ready_mono: float | None = None
+        minibatch_prep_lags: list[float | None] = []
+        trainer_data_waits: list[tuple[float, float | None]] = []
         consumed_policy_version = self.trainer_policy_version
 
         uncommitted_groups: list[list[datatypes.TrajectoryItem]] = []
@@ -1898,6 +1920,7 @@ class StandardRLProgram(RLProgram):
 
         async def _prepare_and_enqueue_train(
             mb: batch_assembly.AssembledBatch,
+            mb_rollout_ready_mono: float | None,
         ) -> None:
           nonlocal num_microbatches
           batch = mb.payload
@@ -1958,6 +1981,11 @@ class StandardRLProgram(RLProgram):
               or len(pending_trains) >= _MAX_INFLIGHT_TRAIN_STEPS
           ):
             await _await_oldest_train()
+          minibatch_prep_lags.append(
+              None
+              if mb_rollout_ready_mono is None
+              else max(0.0, time.monotonic() - mb_rollout_ready_mono)
+          )
           pending_trains.append(
               asyncio.create_task(
                   self._timed_train_step(batch, apply_optimizer=is_final_batch)
@@ -1975,6 +2003,13 @@ class StandardRLProgram(RLProgram):
               self.on_step_begin(current_step)
 
             groups_consumed += 1
+            step_times.critique_time += scored_group.critique_time_s
+            group_ready_mono = scored_group.rollout_ready_mono
+            if group_ready_mono is not None and (
+                rollout_ready_mono is None
+                or group_ready_mono > rollout_ready_mono
+            ):
+              rollout_ready_mono = group_ready_mono
             group_items = list(scored_group.items)
             if scored_group.reward_log_metrics:
               step_reward_log_metrics.append(scored_group.reward_log_metrics)
@@ -2016,11 +2051,23 @@ class StandardRLProgram(RLProgram):
             await _drain_pending_prep()
             is_final_batch = mb.is_final_batch
             if is_final_batch:
-              await _prepare_and_enqueue_train(mb)
+              await _prepare_and_enqueue_train(mb, rollout_ready_mono)
               del mb
               await _drain_pending_trains()
               if isinstance(step_result, dict):
                 trainer_metrics = step_result.get("metrics")
+                if isinstance(trainer_metrics, datatypes.MetricsBuffer):
+                  waits = trainer_metrics.microbatch_data_waits
+                  if len(waits) == len(minibatch_prep_lags):
+                    trainer_data_waits.extend(
+                        (idle_s, None if lag_s is None else min(idle_s, lag_s))
+                        for idle_s, lag_s in zip(waits, minibatch_prep_lags)
+                    )
+                  else:
+                    trainer_data_waits.extend(
+                        (idle_s, None) for idle_s in waits
+                    )
+              minibatch_prep_lags.clear()
               final_minibatch_completed = True
               # TODO(tunix-dev): Configurable checkpointing frequency. Today we
               # checkpoint at the same frequency as the weight update.
@@ -2037,7 +2084,9 @@ class StandardRLProgram(RLProgram):
               if full_batch_complete:
                 await _maybe_save_checkpoint()
             else:
-              pending_prep = asyncio.create_task(_prepare_and_enqueue_train(mb))
+              pending_prep = asyncio.create_task(
+                  _prepare_and_enqueue_train(mb, rollout_ready_mono)
+              )
               del mb
               await asyncio.sleep(0)
               if pending_prep.done():
@@ -2118,6 +2167,7 @@ class StandardRLProgram(RLProgram):
             filtered_groups=filtered_groups,
             step_times=step_times,
             reward_log_metrics=step_reward_log_metrics,
+            trainer_data_waits=trainer_data_waits,
         )
         del filtered_groups
         self._log_consumed_trajectories(

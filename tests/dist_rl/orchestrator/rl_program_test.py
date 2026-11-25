@@ -9524,6 +9524,68 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_train_stage_attributes_monotonic_prep_lag_and_logs_data_wait(
+      self,
+  ):
+    async def _run():
+      program = rl_program.StandardRLProgram(
+          algo_config=self.algo_config,
+          batch_config=self.batch_config,
+          dataset=["p0", "p1"],
+          batch_size=2,
+          rollout_temperature=1.0,
+          rollout_returns_routed_experts=False,
+      )
+      program.engine = self.mock_engine
+      # Two groups ready at monotonic t=12.0 and t=10.0: the micro-batch
+      # waited on the later group (12.0). At dispatch time (12.25), local
+      # prep_lag is 0.25s; out of 0.6s trainer idle wait, 0.25s is data_plane
+      # and 0.35s is rollout.
+      for prompt_id, ready_mono, critique_s in (
+          ("p0", 12.0, 0.07),
+          ("p1", 10.0, 0.13),
+      ):
+        await program.scored_q.put(
+            dataclasses.replace(
+                self._make_scored_item(prompt_id, batch_idx=0),
+                rollout_ready_mono=ready_mono,
+                critique_time_s=critique_s,
+            )
+        )
+      await program.scored_q.close()
+
+      async def _train_step(batch, **_):
+        del batch
+        return {
+            "metrics": datatypes.MetricsBuffer(
+                id=1, microbatch_data_waits=(0.6,)
+            )
+        }
+
+      self.mock_engine.train_step.side_effect = _train_step
+
+      with mock.patch.object(
+          rl_program.time, "monotonic", return_value=12.25
+      ):
+        await program.train_stage()
+
+      logged = {
+          name: program.metrics_logger.get_metric("perf", name, "train")
+          for name in (
+              "trainer_data_wait_time",
+              "trainer_data_wait_data_plane",
+              "trainer_data_wait_rollout",
+              "critique_time",
+          )
+      }
+      self.assertAlmostEqual(logged["trainer_data_wait_time"], 0.6)
+      self.assertAlmostEqual(logged["trainer_data_wait_data_plane"], 0.25)
+      self.assertAlmostEqual(logged["trainer_data_wait_rollout"], 0.35)
+      self.assertAlmostEqual(logged["critique_time"], 0.20)
+      program.close()
+
+    asyncio.run(_run())
+
   def test_short_batch_flushes_and_commits_without_waiting_for_next_batch(self):
     async def _run():
       program = rl_program.StandardRLProgram(

@@ -21,9 +21,11 @@ per-token log-prob scorer run through AbstractTrainer.fwd_only.
 
 import asyncio
 import dataclasses
+import enum
 import functools
 import inspect
 import os
+import pickle
 import threading
 from typing import Any
 from unittest import mock
@@ -31,6 +33,7 @@ from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
+import flax.struct
 import jax
 import jax.numpy as jnp
 import jax.sharding as shd
@@ -39,6 +42,7 @@ from opentelemetry.sdk import metrics as sdk_metrics
 from opentelemetry.sdk.metrics import export as sdk_metrics_export
 import optax
 from tunix.dist_rl.common import datatypes
+from tunix.dist_rl.common import rpc_utils
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.testing import otel_testing
 from tunix.dist_rl.train import abstract_trainer
@@ -48,11 +52,21 @@ from tunix.dist_rl.worker import trainer_worker
 from tunix.rl import algo_core
 from tunix.rl import algorithm_config
 from tunix.rl import common as rl_common
+from tunix.sft import utils as sft_utils
 from tunix.tests import test_common as tc
 
 # CPU environment setup to simulate multi device env. Use 4 devices so pytest
 # collection does not downgrade XLA_FLAGS below what sibling dist_rl tests need.
 os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"
+
+
+class _ImmediateToken:
+
+  def block_until_ready(self) -> "_ImmediateToken":
+    return self
+
+
+_IMMEDIATE_TOKEN = _ImmediateToken()
 
 
 class FakeTrainer(abstract_trainer.AbstractTrainer):
@@ -82,6 +96,7 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
 
   def fwd_bwd(self, payload):
     self.fwd_bwd_calls.append(payload)
+    return _IMMEDIATE_TOKEN
 
   def update(self):
     self.step_count += 1
@@ -107,7 +122,9 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
     return {}
 
   def get_metrics(self):
-    return {"loss": 0.25}
+    return datatypes.MetricsBuffer(
+        id=self.step_count, scalar_metrics={"loss": 0.25}
+    )
 
   def prepare_weight_sync(self, *, sync_request=None):
     pass
@@ -128,6 +145,7 @@ class TrainerWorkerTest(absltest.TestCase):
         trainer_factory=lambda: self.fake_trainer,
         worker_id="trainer_0",
     )
+    self.addCleanup(self.worker.stop)
     self.worker.initialize()
 
   def test_trainer_factory_deferred_until_initialize(self):
@@ -382,6 +400,7 @@ class TrainerWorkerTest(absltest.TestCase):
       entered_step.set()
       if not release_step.wait(timeout=10.0):
         raise TimeoutError("release_step timed out")
+      return _IMMEDIATE_TOKEN
 
     def _recording_close():
       close_called.set()
@@ -508,7 +527,10 @@ class TrainerWorkerTest(absltest.TestCase):
   def test_update_returns_step_count(self):
     step, metrics = self.worker.update()
     self.assertEqual(step, 11)
-    self.assertEqual(metrics, {"loss": 0.25})
+    self.assertEqual(
+        metrics,
+        datatypes.MetricsBuffer(id=11, scalar_metrics={"loss": 0.25}),
+    )
 
   def test_set_target_state_configures_trainer(self):
     target_state = {"params": np.zeros((4, 4))}
@@ -1756,6 +1778,159 @@ class TrainerWorkerOTelMetricsTest(parameterized.TestCase):
       elif rpc_case == "compile":
         self.worker.compile({"dummy": 1})
     self.assertEqual(self.worker._otel.last_free_time_s, 42.0)
+
+
+@flax.struct.dataclass
+class _OnDeviceMetricsBuffer:
+  id: Any
+  weighted_metrics: dict[str, sft_utils.WeightedMetric] = flax.struct.field(
+      default_factory=dict
+  )
+  scalar_metrics: dict[str, jax.Array] = flax.struct.field(default_factory=dict)
+  aggregation_fns: dict[str, Any] = flax.struct.field(
+      default_factory=dict, pytree_node=False
+  )
+  mode: str | enum.Enum = flax.struct.field(default="train", pytree_node=False)
+
+
+class TrainerWorkerDataWaitTelemetryTest(absltest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self._now = 0.0
+    self.fake_trainer = FakeTrainer()
+    self.worker = trainer_worker.TrainerWorker(
+        trainer_factory=lambda: self.fake_trainer,
+        worker_id="trainer_wait",
+        idle_clock=lambda: self._now,
+    )
+    self.addCleanup(self.worker.stop)
+    self._now = 1.0
+    self.worker.initialize()
+
+  def _train_req(
+      self, request_id: str = "req-mb", metadata: dict[str, Any] | None = None
+  ) -> datatypes.TrainRequest:
+    return datatypes.TrainRequest(
+        request_id=request_id,
+        metadata=metadata or {},
+        payload=datatypes.RLTrainerPayload(
+            prompt_ids=np.array([[1, 2]], dtype=np.int32),
+            prompt_mask=np.ones((1, 2), dtype=np.float32),
+            completion_ids=np.array([[3, 4]], dtype=np.int32),
+            completion_mask=np.ones((1, 2), dtype=np.float32),
+            advantages=np.array([1.0], dtype=np.float32),
+        ),
+    )
+
+  def test_checkpoint_weight_staging_and_logps_excluded_from_wait(self):
+    self._now = 1.2
+    self.worker.fwd_bwd(self._train_req("req-0"))
+    self._now = 1.5
+    self.worker.update()
+
+    # save_checkpoint occupies the trainer until 3.0.
+    self._now = 3.0
+    self.worker.save_checkpoint(metadata={"step": 1})
+    self._now = 3.75
+    self.worker.fwd_bwd(self._train_req("req-after-ckpt"))
+    self._now = 4.0
+    _, ckpt_metrics = self.worker.update()
+    self.assertEqual(ckpt_metrics.microbatch_data_waits, (0.75,))
+
+    # Weight staging occupies the trainer until 5.0; release does not.
+    self._now = 5.0
+    self.worker.prepare_weight_sync()
+    self._now = 5.5
+    asyncio.run(self.worker.release_weight_sync())
+    self._now = 6.25
+    self.worker.fwd_bwd(self._train_req("req-after-sync"))
+    self._now = 6.50
+    _, sync_metrics = self.worker.update()
+    self.assertEqual(sync_metrics.microbatch_data_waits, (1.25,))
+
+    # Standalone per_token_logps occupies the trainer until 7.0.
+    self.fake_trainer.with_fwd_only_fn(
+        lambda model, payload: jnp.zeros((1, 2), dtype=jnp.float32)
+    )
+    self._now = 7.0
+    self.worker.per_token_logps(
+        datatypes.LogprobsRequest(
+            request_id="logps-1",
+            prompt_tokens=np.array([[1, 2]], dtype=np.int32),
+            completion_tokens=np.array([[3, 4]], dtype=np.int32),
+            temperature=1.0,
+            pad_id=0,
+            eos_id=1,
+        )
+    )
+    self._now = 7.4
+    self.worker.fwd_bwd(self._train_req("req-after-logps"))
+    self._now = 7.6
+    _, logps_metrics = self.worker.update()
+    self.assertLen(logps_metrics.microbatch_data_waits, 1)
+    self.assertAlmostEqual(logps_metrics.microbatch_data_waits[0], 0.4)
+
+  def test_fwd_bwd_returning_none_does_not_crash_and_emits_no_waits(self):
+    self.fake_trainer.fwd_bwd = lambda payload: None
+    self._now = 1.5
+    self.worker.fwd_bwd(self._train_req("req-none"))
+    self._now = 2.0
+    _, metrics = self.worker.update()
+    self.assertEqual(metrics.microbatch_data_waits, ())
+
+  def test_idempotent_initialize_and_standalone_get_metrics_preserve_waits(
+      self,
+  ):
+    self._now = 1.5
+    self.worker.fwd_bwd(self._train_req("req-idem"))
+
+    # Calling initialize() when already READY or standalone get_metrics() must
+    # neither clear nor flush the in-progress step's wait metrics.
+    self._now = 1.6
+    self.worker.initialize()
+    standalone_buf = self.worker.get_metrics()
+    self.assertEqual(standalone_buf.microbatch_data_waits, ())
+
+    self._now = 2.0
+    _, update_buf = self.worker.update()
+    self.assertLen(update_buf.microbatch_data_waits, 1)
+    self.assertAlmostEqual(update_buf.microbatch_data_waits[0], 0.5)
+
+  def test_on_device_metrics_buffer_materializes_to_wire_safe_host_buffer(self):
+    class _EngineMode(str, enum.Enum):
+      TRAIN = "train"
+
+    self.fake_trainer.get_metrics = lambda: _OnDeviceMetricsBuffer(
+        id=7,
+        weighted_metrics={
+            "loss": sft_utils.WeightedMetric(
+                unreduced_sum=jnp.asarray(3.0, dtype=jnp.float32),
+                denominator=jnp.asarray(2.0, dtype=jnp.float32),
+            )
+        },
+        scalar_metrics={"grad_norm": jnp.asarray(1.25, dtype=jnp.float32)},
+        mode=_EngineMode.TRAIN,
+    )
+    self._now = 1.3
+    self.worker.fwd_bwd(self._train_req("req-dev"))
+    self._now = 1.4
+    step, metrics = self.worker.update()
+
+    self.assertEqual(step, 11)
+    self.assertIsInstance(metrics, datatypes.MetricsBuffer)
+    self.assertIs(type(metrics.mode), str)
+    self.assertEqual(metrics.mode, "train")
+    rpc_utils.validate_wire_safe(metrics)
+    roundtripped = pickle.loads(pickle.dumps(metrics))
+    self.assertIs(type(roundtripped.mode), str)
+    self.assertEqual(roundtripped.mode, "train")
+    self.assertIsInstance(
+        metrics.weighted_metrics["loss"].unreduced_sum, np.ndarray
+    )
+    self.assertAlmostEqual(float(metrics.scalar_metrics["grad_norm"]), 1.25)
+    self.assertLen(metrics.microbatch_data_waits, 1)
+    self.assertAlmostEqual(metrics.microbatch_data_waits[0], 0.3)
 
 
 if __name__ == "__main__":
