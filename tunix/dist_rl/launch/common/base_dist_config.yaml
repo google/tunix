@@ -410,7 +410,9 @@ cluster_config:
   # Rollout worker fault tolerance (`FaultToleranceConfig`). When `enabled` is
   # false, `max_task_retries` resolves to 0, `min_active_rollout_ratio` is
   # ignored, and a null `poll_retry_budget_s` resolves to 300.0 s instead of
-  # 60.0 s.
+  # 60.0 s. With `cluster_config.autoscaling.enabled=true`, a non-null
+  # `min_active_rollout_ratio` is derived as `min_replicas / max_replicas` and
+  # overrides any set value.
   fault_tolerance:
     enabled: true
     max_task_retries: 1
@@ -430,6 +432,20 @@ cluster_config:
   # bring-up; slower initial replicas join in the background and promote to
   # `ACTIVE` on weight sync. Null waits for all `rollout_replicas`.
   min_rollout_replicas: null
+  # Rollout worker pool autoscaling. With `enabled: true`, `rollout_replicas`
+  # is the initial pool size, `min_replicas` / `max_replicas` bound it (and
+  # override the policy file's bounds), and `policy_file` replaces the default
+  # KEDA `ScaledObject` (empty uses the default). `enabled` also derives
+  # `fault_tolerance.min_active_rollout_ratio` (see above).
+  # `min_rollout_replicas` keeps its meaning as the startup quorum.
+  # TODO(edwinhernandez): `k8s.sh` does not deploy the LeaderWorkerSet or
+  # `ScaledObject` yet, so `enabled: true` only validates and derives the
+  # guard.
+  autoscaling:
+    enabled: false
+    policy_file: ""
+    min_replicas: null
+    max_replicas: null
   # One block per process. The keys mean the same on every target; a launcher
   # that does not apply one says so below.
   # - `main`: the process's entry point. The orchestrator main is shared by

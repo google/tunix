@@ -452,6 +452,306 @@ weight_sync_config:
     self.assertIn("export ROLLOUT_REPLICAS=4\n", exports)
     self.assertNotIn("MIN_ROLLOUT_REPLICAS", exports)
 
+  def test_autoscaling_off_preserves_ratio(self):
+    hp = resolve_config.initialize([])
+    self.assertIs(
+        hp.config_mapping("cluster_config")["autoscaling"]["enabled"], False
+    )
+    # With autoscaling off, user-set fault_tolerance.min_active_rollout_ratio
+    # is preserved untouched.
+    hp_custom = resolve_config.initialize(
+        ["cluster_config.fault_tolerance.min_active_rollout_ratio=0.75"]
+    )
+    self.assertEqual(
+        hp_custom.config_mapping("cluster_config")["fault_tolerance"][
+            "min_active_rollout_ratio"
+        ],
+        0.75,
+    )
+
+  def test_autoscaling_valid_configurations(self):
+    k8s = ("cluster_config.target=k8s", "agentic_grpo_config.beta=0.0")
+    for overrides, expected_policy in (
+        (
+            [
+                *k8s,
+                "cluster_config.autoscaling.enabled=true",
+                "cluster_config.autoscaling.min_replicas=1",
+                "cluster_config.autoscaling.max_replicas=4",
+                "cluster_config.rollout_replicas=2",
+            ],
+            "",
+        ),
+        (
+            [
+                *k8s,
+                "cluster_config.autoscaling.enabled=true",
+                "cluster_config.autoscaling.policy_file=/etc/keda/policy.yaml",
+                "cluster_config.autoscaling.min_replicas=2",
+                "cluster_config.autoscaling.max_replicas=6",
+                "cluster_config.rollout_replicas=2",
+            ],
+            "/etc/keda/policy.yaml",
+        ),
+        (
+            [
+                *k8s,
+                "cluster_config.autoscaling.enabled=true",
+                "cluster_config.autoscaling.policy_file=null",
+                "cluster_config.autoscaling.min_replicas=1",
+                "cluster_config.autoscaling.max_replicas=1",
+                "cluster_config.rollout_replicas=1",
+            ],
+            "",
+        ),
+        (
+            [
+                *k8s,
+                "cluster_config.autoscaling.enabled=true",
+                "cluster_config.autoscaling.min_replicas=2",
+                "cluster_config.autoscaling.max_replicas=4",
+                "cluster_config.rollout_replicas=4",
+                "cluster_config.min_rollout_replicas=2",
+            ],
+            "",
+        ),
+    ):
+      with self.subTest(overrides=overrides):
+        cluster = resolve_config.initialize(overrides).config_mapping(
+            "cluster_config"
+        )
+        self.assertIs(cluster["autoscaling"]["enabled"], True)
+        self.assertEqual(
+            cluster["autoscaling"]["policy_file"], expected_policy
+        )
+
+  def test_autoscaling_validation_errors(self):
+    k8s = ("cluster_config.target=k8s", "agentic_grpo_config.beta=0.0")
+    valid_enabled = (
+        *k8s,
+        "cluster_config.autoscaling.enabled=true",
+        "cluster_config.autoscaling.min_replicas=1",
+        "cluster_config.autoscaling.max_replicas=4",
+        "cluster_config.rollout_replicas=2",
+    )
+
+    for arg in (
+        "cluster_config.autoscaling.enabled=1",
+        "cluster_config.autoscaling.enabled=maybe",
+        "cluster_config.autoscaling.enabled=null",
+        "cluster_config.autoscaling.policy_file=123",
+        "cluster_config.autoscaling.policy_file=true",
+        "cluster_config.autoscaling.min_replicas=true",
+        "cluster_config.autoscaling.min_replicas=false",
+        "cluster_config.autoscaling.min_replicas=1.5",
+        "cluster_config.autoscaling.min_replicas=two",
+        "cluster_config.autoscaling.max_replicas=true",
+        "cluster_config.autoscaling.max_replicas=false",
+        "cluster_config.autoscaling.max_replicas=2.5",
+        "cluster_config.autoscaling.max_replicas=four",
+    ):
+      key = arg.split("=", 1)[0]
+      with self.subTest(arg=arg):
+        with self.assertRaisesRegex(TypeError, re.escape(key)):
+          resolve_config.initialize([*valid_enabled, arg])
+
+    for overrides, pattern in (
+        (
+            [*valid_enabled, "cluster_config.autoscaling.policy_file='   '"],
+            "policy_file must not be whitespace-only",
+        ),
+        (
+            [*valid_enabled, "cluster_config.autoscaling.min_replicas=0"],
+            "min_replicas must be null or an int >= 1",
+        ),
+        (
+            [*valid_enabled, "cluster_config.autoscaling.max_replicas=-1"],
+            "max_replicas must be null or an int >= 1",
+        ),
+        (
+            ["cluster_config.autoscaling.policy_file=/tmp/p.yaml"],
+            (
+                r"enabled=false, but cluster_config\.autoscaling\.policy_file="
+                r"'/tmp/p\.yaml' is set"
+            ),
+        ),
+        (
+            ["cluster_config.autoscaling.min_replicas=2"],
+            (
+                r"enabled=false, but cluster_config\.autoscaling\.min_replicas=2"
+                r" is set"
+            ),
+        ),
+        (
+            ["cluster_config.autoscaling.max_replicas=4"],
+            (
+                r"enabled=false, but cluster_config\.autoscaling\.max_replicas=4"
+                r" is set"
+            ),
+        ),
+        (
+            [
+                "cluster_config.autoscaling.enabled=true",
+                "cluster_config.autoscaling.min_replicas=1",
+                "cluster_config.autoscaling.max_replicas=4",
+            ],
+            "requires cluster_config.target=k8s, got 'local'",
+        ),
+        (
+            [
+                "cluster_config.target=external",
+                "cluster_config.artifact_root=/artifacts/run",
+                "cluster_config.autoscaling.enabled=true",
+                "cluster_config.autoscaling.min_replicas=1",
+                "cluster_config.autoscaling.max_replicas=4",
+            ],
+            "requires cluster_config.target=k8s, got 'external'",
+        ),
+        (
+            [
+                *k8s,
+                "cluster_config.autoscaling.enabled=true",
+                "cluster_config.autoscaling.max_replicas=4",
+            ],
+            "requires both cluster_config.autoscaling.min_replicas",
+        ),
+        (
+            [
+                *k8s,
+                "cluster_config.autoscaling.enabled=true",
+                "cluster_config.autoscaling.min_replicas=1",
+            ],
+            "requires both cluster_config.autoscaling.min_replicas",
+        ),
+        (
+            [
+                *k8s,
+                "cluster_config.autoscaling.enabled=true",
+                "cluster_config.autoscaling.min_replicas=4",
+                "cluster_config.autoscaling.max_replicas=2",
+                "cluster_config.rollout_replicas=2",
+            ],
+            r"min_replicas \(4\) must be <= .*max_replicas \(2\)",
+        ),
+        (
+            [
+                *k8s,
+                "cluster_config.autoscaling.enabled=true",
+                "cluster_config.autoscaling.min_replicas=2",
+                "cluster_config.autoscaling.max_replicas=4",
+                "cluster_config.rollout_replicas=1",
+            ],
+            (
+                r"rollout_replicas \(1\) must be between"
+                r" .*min_replicas \(2\) and .*max_replicas \(4\)"
+            ),
+        ),
+        (
+            [
+                *k8s,
+                "cluster_config.autoscaling.enabled=true",
+                "cluster_config.autoscaling.min_replicas=2",
+                "cluster_config.autoscaling.max_replicas=4",
+                "cluster_config.rollout_replicas=5",
+            ],
+            (
+                r"rollout_replicas \(5\) must be between"
+                r" .*min_replicas \(2\) and .*max_replicas \(4\)"
+            ),
+        ),
+    ):
+      with self.subTest(pattern=pattern):
+        with self.assertRaisesRegex(ValueError, pattern):
+          resolve_config.initialize(overrides)
+
+  def test_autoscaling_guard_derivation(self):
+    k8s = ("cluster_config.target=k8s", "agentic_grpo_config.beta=0.0")
+    for min_r, max_r, init_r in (
+        (1, 4, 2),
+        (2, 5, 3),
+        (3, 7, 4),
+        (1, 1, 1),
+        (4, 4, 4),
+    ):
+      with self.subTest(min_r=min_r, max_r=max_r, init_r=init_r):
+        hp = resolve_config.initialize([
+            *k8s,
+            "cluster_config.autoscaling.enabled=true",
+            f"cluster_config.autoscaling.min_replicas={min_r}",
+            f"cluster_config.autoscaling.max_replicas={max_r}",
+            f"cluster_config.rollout_replicas={init_r}",
+        ])
+        ratio = hp.config_mapping("cluster_config")["fault_tolerance"][
+            "min_active_rollout_ratio"
+        ]
+        self.assertEqual(ratio, min_r / max_r)
+        # Mirrors FaultToleranceManager._evaluate_ratio_floor_locked: trips
+        # strictly below `ratio` (`active / peak < ratio`).
+        for peak in range(min_r, max_r + 1):
+          for active in range(min_r, peak + 1):
+            self.assertGreaterEqual(active / peak, ratio)
+        self.assertLess((min_r - 1) / max_r, ratio)
+
+  def test_autoscaling_guard_overrides_user_ratio(self):
+    k8s = ("cluster_config.target=k8s", "agentic_grpo_config.beta=0.0")
+    hp_override = resolve_config.initialize([
+        *k8s,
+        "cluster_config.autoscaling.enabled=true",
+        "cluster_config.autoscaling.min_replicas=1",
+        "cluster_config.autoscaling.max_replicas=4",
+        "cluster_config.rollout_replicas=2",
+        "cluster_config.fault_tolerance.min_active_rollout_ratio=0.8",
+    ])
+    self.assertEqual(
+        hp_override.config_mapping("cluster_config")["fault_tolerance"][
+            "min_active_rollout_ratio"
+        ],
+        0.25,
+    )
+    with self.assertRaisesRegex(ValueError, "min_active_rollout_ratio"):
+      resolve_config.initialize([
+          *k8s,
+          "cluster_config.autoscaling.enabled=true",
+          "cluster_config.autoscaling.min_replicas=1",
+          "cluster_config.autoscaling.max_replicas=4",
+          "cluster_config.rollout_replicas=2",
+          "cluster_config.fault_tolerance.min_active_rollout_ratio=0.0",
+      ])
+
+  def test_autoscaling_guard_skips_when_fault_tolerance_disabled(self):
+    hp_ft_off = resolve_config.initialize([
+        "cluster_config.target=k8s",
+        "agentic_grpo_config.beta=0.0",
+        "cluster_config.autoscaling.enabled=true",
+        "cluster_config.autoscaling.min_replicas=1",
+        "cluster_config.autoscaling.max_replicas=4",
+        "cluster_config.rollout_replicas=2",
+        "cluster_config.fault_tolerance.enabled=false",
+        "cluster_config.fault_tolerance.min_active_rollout_ratio=0.8",
+    ])
+    self.assertEqual(
+        hp_ft_off.config_mapping("cluster_config")["fault_tolerance"][
+            "min_active_rollout_ratio"
+        ],
+        0.8,
+    )
+
+  def test_autoscaling_guard_preserves_null_ratio(self):
+    hp_null = resolve_config.initialize([
+        "cluster_config.target=k8s",
+        "agentic_grpo_config.beta=0.0",
+        "cluster_config.autoscaling.enabled=true",
+        "cluster_config.autoscaling.min_replicas=1",
+        "cluster_config.autoscaling.max_replicas=4",
+        "cluster_config.rollout_replicas=2",
+        "cluster_config.fault_tolerance.min_active_rollout_ratio=null",
+    ])
+    self.assertIsNone(
+        hp_null.config_mapping("cluster_config")["fault_tolerance"][
+            "min_active_rollout_ratio"
+        ]
+    )
+
   def test_output_dirs_default_under_artifact_root(self):
     def output_dirs(*overrides: str) -> tuple[object, object]:
       rl_train = resolve_config.initialize(list(overrides)).config_mapping(
