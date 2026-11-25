@@ -44,27 +44,21 @@ if TYPE_CHECKING:
 WorkerState = datatypes.WorkerState
 
 
-def _to_host_metrics_buffer(
+def _as_metrics_buffer(
     raw: datatypes.MetricsBufferLike,
     *,
     microbatch_data_waits: tuple[float, ...] = (),
 ) -> datatypes.MetricsBuffer:
-  """Materializes a trainer metrics buffer to a wire-safe host `MetricsBuffer`."""
-  # TODO(tunix-dev): Drop `jax.device_get` once `MaxTextTrainingEngine.get_metrics()`
-  # returns host arrays (matching `PeftTrainer.get_metrics()`) so this stays
-  # framework-agnostic.
-  weighted_host, scalar_host = jax.device_get(
-      (dict(raw.weighted_metrics), dict(raw.scalar_metrics))
-  )
-  mode = (
-      str(raw.mode.value) if isinstance(raw.mode, enum.Enum) else str(raw.mode)
-  )
+  """Wraps a host `MetricsBufferLike` into a wire `datatypes.MetricsBuffer`."""
+  if isinstance(raw, datatypes.MetricsBuffer):
+    return dataclasses.replace(raw, microbatch_data_waits=microbatch_data_waits)
+  mode = raw.mode.value if isinstance(raw.mode, enum.Enum) else raw.mode
   return datatypes.MetricsBuffer(
       id=raw.id,
-      weighted_metrics=weighted_host,
-      scalar_metrics=scalar_host,
+      weighted_metrics=cast(Any, dict(raw.weighted_metrics)),
+      scalar_metrics=cast(Any, dict(raw.scalar_metrics)),
       aggregation_fns=dict(raw.aggregation_fns),
-      mode=mode,
+      mode=str(mode),
       microbatch_data_waits=microbatch_data_waits,
   )
 
@@ -429,10 +423,10 @@ class TrainerWorker(abstract_worker.Worker):
     try:
       with self._otel.track_rpc(phase="optimizer_step"):
         train_step = trainer.update()
-        host_metrics = _to_host_metrics_buffer(trainer.get_metrics())
+        raw_metrics = trainer.get_metrics()
       data_waits = self._otel.flush_data_waits()
-      metrics = dataclasses.replace(
-          host_metrics, microbatch_data_waits=data_waits
+      metrics = _as_metrics_buffer(
+          raw_metrics, microbatch_data_waits=data_waits
       )
       self._last_error = None
       return train_step, metrics
@@ -660,4 +654,4 @@ class TrainerWorker(abstract_worker.Worker):
   @abstract_worker.offload_to_thread
   def get_metrics(self) -> datatypes.MetricsBuffer:
     """Returns and clears the recently collected step metric records."""
-    return _to_host_metrics_buffer(self._ensure_ready().get_metrics())
+    return _as_metrics_buffer(self._ensure_ready().get_metrics())

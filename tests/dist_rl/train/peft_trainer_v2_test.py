@@ -32,6 +32,7 @@ import numpy as np
 import optax
 import orbax.checkpoint as ocp
 from tunix.dist_rl.common import datatypes
+from tunix.dist_rl.common import rpc_utils
 from tunix.dist_rl.train import peft_trainer_v2
 from tunix.sft import checkpoint_manager
 from tunix.sft import hooks
@@ -1110,6 +1111,7 @@ class PeftTrainerTest(parameterized.TestCase):
     self.assertEqual(train_invoke, {'foo': 4.0, 'bar': 6.0})
     self.assertEqual(eval_invoke, {'foo': 8.0, 'bar': 12.0})
     metrics = trainer.get_metrics()
+    rpc_utils.validate_wire_safe(metrics)
     self.assertIn('foo', metrics.weighted_metrics)
     self.assertIsInstance(
         metrics.weighted_metrics['foo'], sft_utils.WeightedMetric

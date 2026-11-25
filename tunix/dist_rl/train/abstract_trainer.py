@@ -301,7 +301,7 @@ class AbstractTrainer(Protocol):
 
   @abc.abstractmethod
   def get_metrics(self) -> datatypes.MetricsBufferLike:
-    """Returns and clears the recently collected step metric records."""
+    """Returns and clears the recently collected step metrics on host."""
     raise NotImplementedError(
         f"{type(self).__name__} does not implement get_metrics."
     )

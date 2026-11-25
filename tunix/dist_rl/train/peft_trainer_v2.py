@@ -1072,6 +1072,8 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         weighted_metrics[k] = val
       else:
         scalar_metrics[k] = val
+    if weighted_metrics:
+      weighted_metrics = jax.device_get(weighted_metrics)
     self._written_metrics = datatypes.MetricsBuffer(
         id=metrics_buffer.step,
         weighted_metrics=weighted_metrics,

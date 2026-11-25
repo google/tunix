@@ -1781,12 +1781,14 @@ class TrainerWorkerOTelMetricsTest(parameterized.TestCase):
 
 
 @flax.struct.dataclass
-class _OnDeviceMetricsBuffer:
+class _StructuralMetricsBuffer:
   id: Any
   weighted_metrics: dict[str, sft_utils.WeightedMetric] = flax.struct.field(
       default_factory=dict
   )
-  scalar_metrics: dict[str, jax.Array] = flax.struct.field(default_factory=dict)
+  scalar_metrics: dict[str, np.ndarray] = flax.struct.field(
+      default_factory=dict
+  )
   aggregation_fns: dict[str, Any] = flax.struct.field(
       default_factory=dict, pytree_node=False
   )
@@ -1897,31 +1899,42 @@ class TrainerWorkerDataWaitTelemetryTest(absltest.TestCase):
     self.assertLen(update_buf.microbatch_data_waits, 1)
     self.assertAlmostEqual(update_buf.microbatch_data_waits[0], 0.5)
 
-  def test_on_device_metrics_buffer_materializes_to_wire_safe_host_buffer(self):
+  def test_structural_metrics_buffer_wraps_to_wire_safe_metrics_buffer(self):
     class _EngineMode(str, enum.Enum):
       TRAIN = "train"
 
-    self.fake_trainer.get_metrics = lambda: _OnDeviceMetricsBuffer(
+    self.fake_trainer.get_metrics = lambda: _StructuralMetricsBuffer(
         id=7,
         weighted_metrics={
             "loss": sft_utils.WeightedMetric(
-                unreduced_sum=jnp.asarray(3.0, dtype=jnp.float32),
-                denominator=jnp.asarray(2.0, dtype=jnp.float32),
+                unreduced_sum=np.asarray(3.0, dtype=np.float32),
+                denominator=np.asarray(2.0, dtype=np.float32),
             )
         },
-        scalar_metrics={"grad_norm": jnp.asarray(1.25, dtype=jnp.float32)},
+        scalar_metrics={"grad_norm": np.asarray(1.25, dtype=np.float32)},
         mode=_EngineMode.TRAIN,
     )
     self._now = 1.3
     self.worker.fwd_bwd(self._train_req("req-dev"))
     self._now = 1.4
-    step, metrics = self.worker.update()
+    with mock.patch.object(jax, "device_get", autospec=True) as mock_device_get:
+      step, metrics = self.worker.update()
+      self.fake_trainer.get_metrics = lambda: _StructuralMetricsBuffer(
+          id=8,
+          scalar_metrics={"eval_loss": np.asarray(0.5, dtype=np.float32)},
+          mode="eval",
+      )
+      eval_metrics = self.worker.get_metrics()
+    mock_device_get.assert_not_called()
 
     self.assertEqual(step, 11)
     self.assertIsInstance(metrics, datatypes.MetricsBuffer)
     self.assertIs(type(metrics.mode), str)
     self.assertEqual(metrics.mode, "train")
+    self.assertIs(type(eval_metrics.mode), str)
+    self.assertEqual(eval_metrics.mode, "eval")
     rpc_utils.validate_wire_safe(metrics)
+    rpc_utils.validate_wire_safe(eval_metrics)
     roundtripped = pickle.loads(pickle.dumps(metrics))
     self.assertIs(type(roundtripped.mode), str)
     self.assertEqual(roundtripped.mode, "train")
