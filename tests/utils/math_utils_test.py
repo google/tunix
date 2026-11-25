@@ -68,56 +68,5 @@ class MathUtilsSpecialHandlingTest(parameterized.TestCase):
     )
 
 
-class ReplicaSeedTest(parameterized.TestCase):
-
-  @parameterized.named_parameters(
-      dict(testcase_name="unseeded", seed=None, replica_index=0, expected=None),
-      dict(
-          testcase_name="unseeded_nonzero_replica",
-          seed=None,
-          replica_index=15,
-          expected=None,
-      ),
-      dict(testcase_name="zero_seed", seed=0, replica_index=0, expected=0),
-      dict(testcase_name="replica_zero", seed=42, replica_index=0, expected=42),
-      dict(
-          testcase_name="replica_offset", seed=42, replica_index=15, expected=57
-      ),
-      dict(
-          testcase_name="wraps_32bit",
-          seed=2**32 - 2,
-          replica_index=5,
-          expected=3,
-      ),
-  )
-  def test_replica_seed(
-      self, seed: int | None, replica_index: int, expected: int | None
-  ):
-    self.assertEqual(math_utils.replica_seed(seed, replica_index), expected)
-
-  @parameterized.named_parameters(
-      dict(testcase_name="negative_seed", seed=-1, replica_index=0),
-      dict(testcase_name="negative_replica", seed=42, replica_index=-1),
-      dict(
-          testcase_name="negative_replica_when_unseeded",
-          seed=None,
-          replica_index=-1,
-      ),
-      dict(testcase_name="bool_seed_true", seed=True, replica_index=0),
-      dict(testcase_name="bool_seed_false", seed=False, replica_index=0),
-      dict(testcase_name="bool_replica_true", seed=42, replica_index=True),
-      dict(
-          testcase_name="bool_replica_when_unseeded",
-          seed=None,
-          replica_index=False,
-      ),
-  )
-  def test_replica_seed_rejects_invalid_inputs(
-      self, seed: object, replica_index: object
-  ):
-    with self.assertRaises(ValueError):
-      math_utils.replica_seed(seed, replica_index)  # type: ignore[arg-type]
-
-
 if __name__ == "__main__":
   absltest.main()

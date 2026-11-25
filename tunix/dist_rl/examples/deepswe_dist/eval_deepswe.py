@@ -571,13 +571,13 @@ async def run_worker(args: argparse.Namespace):
   from jax.experimental import mesh_utils
   from jax.sharding import Mesh
   from transformers import AutoTokenizer
+  from tunix.common import configs
   from tunix.dist_rl.common import datatypes
   from tunix.dist_rl.examples.deepswe_dist import deepswe
   from tunix.dist_rl.rollout import inprocess_vllm_sampler
   from tunix.dist_rl.worker import remote_execution, rollout_worker
   from tunix.generate import tokenizer_adapter
   from tunix.rl.agentic.parser.chat_template_parser import parser
-  from tunix.utils import math_utils
 
   if args.mesh_fsdp * args.mesh_tp != jax.device_count():
     raise ValueError("mesh_fsdp * mesh_tp must equal visible TPU chips")
@@ -603,7 +603,7 @@ async def run_worker(args: argparse.Namespace):
       temperature=args.temperature,
       top_p=args.top_p,
       top_k=args.top_k if args.top_k > 0 else None,
-      seed=math_utils.replica_seed(args.seed, args.worker_index),
+      seed=configs.replica_seed(args.seed, args.worker_index),
       return_logprobs=False,
       eos_tokens=eos,
       data_parallel_size=args.mesh_fsdp,

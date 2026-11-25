@@ -694,20 +694,3 @@ def extract_answer(passage: str):
   if "\\boxed" in passage:
     return extract_boxed_answer(passage)
   return None
-
-
-def replica_seed(seed: int | None, replica_index: int) -> int | None:
-  """Derives a 32-bit seed for `replica_index`, or `None` when unseeded."""
-  if (
-      isinstance(replica_index, bool)
-      or not isinstance(replica_index, int)
-      or replica_index < 0
-  ):
-    raise ValueError(
-        f"replica_index must be a non-negative int, got {replica_index!r}."
-    )
-  if seed is None:
-    return None
-  if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
-    raise ValueError(f"seed must be a non-negative int or None, got {seed!r}.")
-  return (seed + replica_index) % (2**32)
