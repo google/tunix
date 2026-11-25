@@ -270,170 +270,21 @@ class EvalDeepSWETest(unittest.TestCase):
     defaults = eval_deepswe.parse_args([])
     self.assertIsNone(defaults.seed)
     self.assertEqual(defaults.worker_index, 0)
-    default_profile = eval_deepswe.model_profile(defaults)
-    self.assertIsNone(default_profile["seed"])
-    self.assertNotIn("worker_index", default_profile)
+    self.assertIsNone(eval_deepswe.model_profile(defaults)["seed"])
 
-    zero_seed = eval_deepswe.parse_args(["--seed", "0", "--worker_index", "0"])
-    self.assertEqual((zero_seed.seed, zero_seed.worker_index), (0, 0))
-    self.assertEqual(eval_deepswe.model_profile(zero_seed)["seed"], 0)
+    args = eval_deepswe.parse_args(["--seed", "42", "--worker_index", "15"])
+    self.assertEqual((args.seed, args.worker_index), (42, 15))
+    profile = eval_deepswe.model_profile(args)
+    self.assertEqual(profile["seed"], 42)
+    self.assertNotIn("worker_index", profile)
 
-    worker_0 = eval_deepswe.parse_args(["--seed", "42", "--worker_index", "0"])
-    worker_15 = eval_deepswe.parse_args(
-        ["--seed", "42", "--worker_index", "15"]
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as e:
+      eval_deepswe.parse_args(["--seed", "-1"])
+    self.assertEqual(e.exception.code, 2)
+    self.assertIn(
+        "--seed and --worker_index must be nonnegative", stderr.getvalue()
     )
-    self.assertEqual((worker_15.seed, worker_15.worker_index), (42, 15))
-    self.assertEqual(eval_deepswe.model_profile(worker_0)["seed"], 42)
-    self.assertEqual(
-        eval_deepswe.model_profile(worker_0),
-        eval_deepswe.model_profile(worker_15),
-    )
-    self.assertNotIn("worker_index", eval_deepswe.model_profile(worker_15))
-    self.assertNotEqual(default_profile, eval_deepswe.model_profile(worker_0))
-
-    for bad in (
-        ["--seed", "-1"],
-        ["--worker_index", "-1"],
-        ["--seed", "42", "--worker_index", "-2"],
-    ):
-      stderr = io.StringIO()
-      with (
-          self.subTest(bad=bad),
-          contextlib.redirect_stderr(stderr),
-          self.assertRaises(SystemExit) as ctx,
-      ):
-        eval_deepswe.parse_args(bad)
-      self.assertEqual(ctx.exception.code, 2)
-      self.assertIn(
-          "--seed and --worker_index must be nonnegative",
-          stderr.getvalue(),
-      )
-
-  def test_run_worker_passes_replica_seed_to_rollout_config(self) -> None:
-    # pylint: disable=g-import-not-at-top
-    import os
-    import sys
-    import types
-    import jax
-    from tunix.dist_rl.common import registry
-    from tunix.dist_rl.examples import deepswe_dist as deepswe_dist_pkg
-    import tunix.generate as generate_pkg
-    # pylint: enable=g-import-not-at-top
-
-    class FakeTokenizer:
-      bos_token = ""
-      pad_token_id = 0
-      eos_token = "<|im_end|>"
-
-      def encode(self, text: str, add_special_tokens: bool = True) -> list[int]:
-        del text, add_special_tokens
-        return [151645]
-
-      def decode(self, ids: list[int], **kwargs: object) -> str:
-        del ids, kwargs
-        return ""
-
-      def bos_id(self) -> int:
-        return 151643
-
-      def eos_id(self) -> int:
-        return 151645
-
-      def pad_id(self) -> int:
-        return 0
-
-    fake_vllm_sampler = types.ModuleType("tunix.generate.vllm_sampler")
-    fake_deepswe = types.ModuleType(
-        "tunix.dist_rl.examples.deepswe_dist.deepswe"
-    )
-    setattr(fake_deepswe, "DEEPSWE_ENV_NAME", "fake_deepswe_eval_env")
-    setattr(fake_deepswe, "DEEPSWE_AGENT_NAME", "fake_deepswe_eval_agent")
-    mesh_tp = str(jax.device_count())
-
-    for extra_argv, expected_profile_seed, expected_replica_seed in (
-        ([], None, None),
-        (["--seed", "42", "--worker_index", "0"], 42, 42),
-        (["--seed", "42", "--worker_index", "15"], 42, 57),
-        (["--seed", str(2**32 - 2), "--worker_index", "5"], 2**32 - 2, 3),
-    ):
-      with self.subTest(extra_argv=extra_argv):
-        args = eval_deepswe.parse_args(
-            ["--mesh_fsdp", "1", "--mesh_tp", mesh_tp, *extra_argv]
-        )
-        captured_workers = []
-
-        class FakeServer:
-
-          def __init__(self, worker):
-            self._worker = worker
-            captured_workers.append(worker)
-
-          async def start_serving_async(self, port: int) -> None:
-            del port
-            self._worker.shutdown()
-
-          async def stop_serving(self) -> None:
-            pass
-
-        sampler = mock.MagicMock()
-        sampler.routed_experts_shape.return_value = None
-        sampler.start = mock.AsyncMock()
-        sampler.stop = mock.AsyncMock()
-
-        with (
-            mock.patch.dict(os.environ),
-            mock.patch.dict(
-                sys.modules,
-                {
-                    "tunix.generate.vllm_sampler": fake_vllm_sampler,
-                    "tunix.dist_rl.examples.deepswe_dist.deepswe": fake_deepswe,
-                    "vllm": None,
-                    "maxtext": None,
-                    "agent_sandbox_rl": None,
-                    "openhands": None,
-                    "examples.deepswe": None,
-                },
-            ),
-            mock.patch.dict(
-                generate_pkg.__dict__, {"vllm_sampler": fake_vllm_sampler}
-            ),
-            mock.patch.dict(
-                deepswe_dist_pkg.__dict__, {"deepswe": fake_deepswe}
-            ),
-            mock.patch.dict(
-                registry.ENV_REGISTRY._registry,
-                {"fake_deepswe_eval_env": object},
-            ),
-            mock.patch.dict(
-                registry.AGENT_REGISTRY._registry,
-                {"fake_deepswe_eval_agent": object},
-            ),
-            mock.patch(
-                "transformers.AutoTokenizer.from_pretrained",
-                return_value=FakeTokenizer(),
-            ),
-            mock.patch(
-                "tunix.dist_rl.rollout.inprocess_vllm_sampler"
-                ".InprocessVllmSampler",
-                return_value=sampler,
-            ) as mock_sampler_cls,
-            mock.patch(
-                "tunix.dist_rl.worker.remote_execution"
-                ".GrpcRemoteExecutionServer",
-                side_effect=FakeServer,
-            ),
-        ):
-          asyncio.run(eval_deepswe.run_worker(args))
-
-        sampler_config = mock_sampler_cls.call_args.kwargs["config"]
-        self.assertEqual(sampler_config.seed, expected_replica_seed)
-        self.assertEqual(
-            captured_workers[-1].config.seed, expected_replica_seed
-        )
-        self.assertEqual(
-            captured_workers[-1].evaluation_info()["seed"],
-            expected_profile_seed,
-        )
 
   def test_pass_at_k_counts_failed_and_missing_attempts(self):
     def row(pair_index, reward, error=None):

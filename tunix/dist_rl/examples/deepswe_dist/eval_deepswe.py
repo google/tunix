@@ -93,12 +93,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
   parser.add_argument(
       "--top_k", type=int, default=-1, help="Top-k sampling; -1 disables it."
   )
-  parser.add_argument("--seed", type=int, default=None)
+  parser.add_argument(
+      "--seed",
+      type=int,
+      default=None,
+      help=(
+          "Base rollout seed (offset by --worker_index); space repeated runs"
+          " by at least the number of workers to avoid overlapping seeds."
+      ),
+  )
   parser.add_argument(
       "--worker_index",
       type=int,
       default=0,
-      help="Worker replica index used to offset --seed.",
+      help=(
+          "Worker replica index added to --seed; each worker replica must be"
+          " given a distinct index."
+      ),
   )
   parser.add_argument("--enable_guard", action="store_true")
   parser.add_argument("--disable_thinking", action="store_true",
