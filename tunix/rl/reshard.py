@@ -252,25 +252,6 @@ def _batched_publish_mode() -> str:
   return mode if mode in ('1', '2', 'true', 'True') else ''
 
 
-def batched_publish_active() -> bool:
-  """Whether TUNIX_BATCHED_PUBLISH can batch this job's publishes.
-
-  True only where the batched path can actually run: the flag is on, the
-  multi-controller reshard is on (TUNIX_MULTI_CONTROLLER_RESHARD=1), the job
-  has more than one process, and no failed check has disabled batching
-  (that verdict is agreed on by every process).
-
-  Returns:
-    Whether batched publishing is active.
-  """
-  return bool(
-      _batched_publish_mode()
-      and _env_flag('TUNIX_MULTI_CONTROLLER_RESHARD')
-      and jax.process_count() > 1
-      and not _BP_STATE['off']
-  )
-
-
 def _bp_should_log(pub: int) -> bool:
   return pub <= 3 or pub % 50 == 0
 
