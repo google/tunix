@@ -21,6 +21,7 @@ import dataclasses
 import json
 import os
 from pathlib import Path
+import shutil
 import time
 from typing import Any
 
@@ -817,8 +818,11 @@ def main() -> int:
       max_response_length=args.max_response_length,
       micro_batch_size=args.micro_batch_size,
   )
-  manifest_store = ManifestStore(args.run_root / "option5_manifest")
+  manifest_dir = args.run_root / "option5_manifest"
+  shutil.rmtree(manifest_dir, ignore_errors=True)
+  manifest_store = ManifestStore(manifest_dir)
   live_jsonl = args.run_root / "parl_live_metrics.jsonl"
+  live_jsonl.unlink(missing_ok=True)
   wb_run = _init_wandb(args)
   best_eval: dict[str, Any] = {}
 
