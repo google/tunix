@@ -605,26 +605,15 @@ def _run_rollout(
       mock.patch.dict(sys.modules, {"vllm.engine.arg_utils": arg_utils})
   )
   recorder.patch(vanilla_sampler, "VanillaSampler")
-  recorder.patch(
-      rollout,
-      "_scanned_checkpoint_layout",
-      returns=(
-          "/ckpt/scanned/0/items",
-          {"checkpoint_storage_use_ocdbt": True},
-          False,
-      ),
-  )
   scanned_loader = types.ModuleType(
       "maxtext.integration.vllm.scanned_checkpoint_loader"
   )
-  setattr(
-      scanned_loader,
-      "load_and_convert_scanned_checkpoint",
-      recorder.record(
-          "maxtext.integration.vllm.scanned_checkpoint_loader"
-          ".load_and_convert_scanned_checkpoint"
-      ),
-  )
+  for name in ("resolve_scanned_checkpoint", "load_scanned_checkpoint"):
+    setattr(
+        scanned_loader,
+        name,
+        recorder.record(f"{scanned_loader.__name__}.{name}"),
+    )
   maxtext_vllm = types.ModuleType("maxtext.integration.vllm")
   setattr(maxtext_vllm, "scanned_checkpoint_loader", scanned_loader)
   maxtext_integration = types.ModuleType("maxtext.integration")

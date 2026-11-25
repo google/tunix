@@ -163,14 +163,14 @@
       }
     },
     {
-      "tunix.dist_rl.launch.nodes.rollout._scanned_checkpoint_layout": {
+      "tunix.dist_rl.launch.nodes.rollout._import_vllm_sampler": {}
+    },
+    {
+      "maxtext.integration.vllm.scanned_checkpoint_loader.resolve_scanned_checkpoint": {
         "args": [
           "/ckpt/scanned/0"
         ]
       }
-    },
-    {
-      "tunix.dist_rl.launch.nodes.rollout._import_vllm_sampler": {}
     },
     {
       "jax.experimental.mesh_utils.create_device_mesh": {
@@ -293,17 +293,12 @@
       }
     },
     {
-      "maxtext.integration.vllm.scanned_checkpoint_loader.load_and_convert_scanned_checkpoint": {
+      "maxtext.integration.vllm.scanned_checkpoint_loader.load_scanned_checkpoint": {
         "args": [
-          "/ckpt/scanned/0/items",
-          "<tunix.dist_rl.rollout.inprocess_vllm_sampler.InprocessVllmSampler()>"
-        ],
-        "kwargs": {
-          "ckpt_prefuse_moe": false,
-          "fp8_moe": false,
-          "maxtext_config_overrides": {
+          "/ckpt/scanned/0",
+          "<tunix.dist_rl.rollout.inprocess_vllm_sampler.InprocessVllmSampler()>",
+          {
             "allow_split_physical_axes": true,
-            "checkpoint_storage_use_ocdbt": true,
             "enable_dp_attention": false,
             "log_config": false,
             "model_call_mode": "inference",
@@ -311,9 +306,8 @@
             "prefuse_moe_weights": true,
             "scan_layers": false,
             "weight_dtype": "bfloat16"
-          },
-          "mesh_tp": 2
-        }
+          }
+        ]
       }
     },
     {
