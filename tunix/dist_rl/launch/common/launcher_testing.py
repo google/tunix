@@ -70,6 +70,9 @@ EXAMPLES_DIR = _DIST_RL_DIR / "examples"
 LauncherRoot = Literal["examples", "benchmarks"]
 _RESOLVE_CONFIG_BIN = _COMMON_DIR / "resolve_config"
 _YAML_GEN_BIN = _DIST_RL_DIR / "distributed" / "deployment" / "yaml_generator"
+_OTEL_DASHBOARD_BIN = (
+    _DIST_RL_DIR / "distributed" / "deployment" / "otel_dashboard"
+)
 # `tunix.cli.config` reads `T_<KEY>` environment variables as config overrides.
 _CONFIG_OVERRIDE_ENV_PREFIX = "T_"
 # JAX compilation cache variables that `k8s.sh` rejects (or, for `BUCKET`, warns
@@ -123,6 +126,8 @@ def launcher_env() -> dict[str, str]:
     env["RESOLVE_CONFIG_BIN"] = str(_RESOLVE_CONFIG_BIN)
   if _YAML_GEN_BIN.is_file():
     env["YAML_GEN_BIN"] = str(_YAML_GEN_BIN)
+  if _OTEL_DASHBOARD_BIN.is_file():
+    env["OTEL_DASHBOARD_BIN"] = str(_OTEL_DASHBOARD_BIN)
   env["USER"] = "testuser"
   env["HF_TOKEN"] = FAKE_HF_TOKEN
   return env

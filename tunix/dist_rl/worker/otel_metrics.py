@@ -35,6 +35,7 @@ import weakref
 import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import lineage
+from tunix.dist_rl.common import otel_registry
 from tunix.rl.agentic.agents import agent_types
 
 if TYPE_CHECKING:
@@ -136,6 +137,21 @@ class WorkerMeter:
         name, unit=unit, description=description
     )
     return BoundInstrument(counter.add, self.worker_id)
+
+  def from_spec(self, spec: otel_registry.InstrumentSpec) -> BoundInstrument:
+    """Creates a bound counter or histogram directly from `spec`."""
+    if spec.kind == "histogram":
+      return self.histogram(
+          spec.name, unit=spec.unit, description=spec.description
+      )
+    if spec.kind == "counter":
+      return self.counter(
+          spec.name, unit=spec.unit, description=spec.description
+      )
+    raise ValueError(
+        "WorkerMeter.from_spec only builds counters/histograms, got"
+        f" {spec.kind!r} for {spec.name!r}."
+    )
 
 
 def extract_payload_tokens(
@@ -263,40 +279,17 @@ class TrainerWorkerOtelMetrics:
   ):
     self.last_free_time_s: float | None = None
     self._meter = WorkerMeter("tunix.trainer", worker_id, meter_provider)
-    self._step_duration = self._meter.histogram(
-        "tunix.trainer.step.duration",
-        unit="s",
-        description=(
-            "Host-side execution or dispatch duration of trainer worker"
-            " operations by phase."
-        ),
+    self._step_duration = self._meter.from_spec(
+        otel_registry.TRAINER_STEP_DURATION_SPEC
     )
-    self._tokens_processed = self._meter.counter(
-        "tunix.trainer.tokens.processed",
-        unit="{token}",
-        description=(
-            "Total valid and padded tokens processed by the trainer worker"
-            " across BatchAssembler-stamped RLTrainerPayload microbatches."
-        ),
+    self._tokens_processed = self._meter.from_spec(
+        otel_registry.TRAINER_TOKENS_PROCESSED_SPEC
     )
-    self._weight_sync_duration = self._meter.histogram(
-        "tunix.trainer.weight_sync.duration",
-        unit="s",
-        description=(
-            "Duration of trainer weight sync staging and release (staging"
-            " includes waiting on queued device work)."
-        ),
+    self._weight_sync_duration = self._meter.from_spec(
+        otel_registry.TRAINER_WEIGHT_SYNC_DURATION_SPEC
     )
-    self._starvation_duration = self._meter.histogram(
-        "tunix.trainer.starvation.duration",
-        unit="s",
-        description=(
-            "Host-side trainer idle time (now - last_free_time_s, anchored at"
-            " host RPC completion) and data-fetch delay (max(0, now -"
-            " max(last_free_time_s, mb_ready_time_s)), including post-assembly"
-            " prep and RPC transfer across host wall clocks) before a"
-            " microbatch."
-        ),
+    self._starvation_duration = self._meter.from_spec(
+        otel_registry.TRAINER_STARVATION_DURATION_SPEC
     )
 
   def record_starvation(self, mb_ready_s: float | None) -> None:
@@ -426,54 +419,32 @@ class RolloutWorkerOtelMetrics:
     # Per-trajectory recording short-circuits on this flag so a worker without
     # `opentelemetry` skips building attributes on the rollout hot path.
     self._enabled = self._meter.enabled
-    self._traj_completed = self._meter.counter(
-        "tunix.worker.trajectories.completed",
-        unit="{trajectory}",
-        description="Count of completed rollout trajectories.",
+    self._traj_completed = self._meter.from_spec(
+        otel_registry.ROLLOUT_TRAJ_COMPLETED_SPEC
     )
-    self._turns_total = self._meter.counter(
-        "tunix.worker.turns.total",
-        unit="{turn}",
-        description="Total assistant turns generated across trajectories.",
+    self._turns_total = self._meter.from_spec(
+        otel_registry.ROLLOUT_TURNS_TOTAL_SPEC
     )
-    self._prompt_tokens = self._meter.histogram(
-        "tunix.worker.prompt_tokens",
-        unit="{token}",
-        description="Prompt token count per rollout trajectory.",
+    self._prompt_tokens = self._meter.from_spec(
+        otel_registry.ROLLOUT_PROMPT_TOKENS_SPEC
     )
-    self._completion_tokens = self._meter.histogram(
-        "tunix.worker.completion_tokens",
-        unit="{token}",
-        description="Completion token count per rollout trajectory.",
+    self._completion_tokens = self._meter.from_spec(
+        otel_registry.ROLLOUT_COMPLETION_TOKENS_SPEC
     )
-    self._execution_sec = self._meter.histogram(
-        "tunix.worker.execution_sec",
-        unit="s",
-        description="End-to-end episode execution time on the rollout worker.",
+    self._execution_sec = self._meter.from_spec(
+        otel_registry.ROLLOUT_EXECUTION_SEC_SPEC
     )
-    self._sampler_time_s = self._meter.histogram(
-        "tunix.worker.sampler_time_s",
-        unit="s",
-        description=(
-            "Cumulative model sampler inference latency per trajectory."
-        ),
+    self._sampler_time_s = self._meter.from_spec(
+        otel_registry.ROLLOUT_SAMPLER_TIME_SPEC
     )
-    self._env_time_sec = self._meter.histogram(
-        "tunix.worker.env_time_sec",
-        unit="s",
-        description="Environment interaction latency by operation.",
+    self._env_time_sec = self._meter.from_spec(
+        otel_registry.ROLLOUT_ENV_TIME_SPEC
     )
-    self._reward_time_sec = self._meter.histogram(
-        "tunix.worker.reward_time_sec",
-        unit="s",
-        description="Final reward computation latency per trajectory.",
+    self._reward_time_sec = self._meter.from_spec(
+        otel_registry.ROLLOUT_REWARD_TIME_SPEC
     )
-    self._weight_sync_duration = self._meter.histogram(
-        "tunix.worker.weight_sync.duration",
-        unit="s",
-        description=(
-            "Rollout worker weight sync phase and total paused duration."
-        ),
+    self._weight_sync_duration = self._meter.from_spec(
+        otel_registry.ROLLOUT_WEIGHT_SYNC_SPEC
     )
     if self._meter.provider is not None and self._meter.meter is not None:
       self.register_inflight_gauge(
@@ -512,12 +483,10 @@ class RolloutWorkerOtelMetrics:
         )
 
     meter.create_observable_gauge(
-        "tunix.worker.requests_inflight",
+        otel_registry.ROLLOUT_REQUESTS_INFLIGHT_SPEC.name,
         callbacks=[_observe_inflight],
-        unit="{request}",
-        description=(
-            "Number of active rollout episodes in flight on this worker."
-        ),
+        unit=otel_registry.ROLLOUT_REQUESTS_INFLIGHT_SPEC.unit,
+        description=otel_registry.ROLLOUT_REQUESTS_INFLIGHT_SPEC.description,
     )
 
   def unregister_inflight(self) -> None:
