@@ -375,6 +375,17 @@ class SandboxUtilsTest(absltest.TestCase):
           wait=True,
       )
 
+  def test_warm_global_fleet_can_skip_the_readiness_wait(self):
+    mock_fleet = mock.MagicMock()
+    mock_fleet.plan_.entries = [mock.MagicMock(image="test-image:v1")]
+    mock_fleet.config.max_warmpool_size = 4
+
+    with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", mock_fleet):
+      sandbox_utils.warm_global_fleet(wait=False)
+    mock_fleet.warm_images.assert_called_once_with(
+        ["test-image:v1"], replicas_override=4, wait=False
+    )
+
   def test_build_template_spec_sets_unmanaged_network_policy_and_pod_hardening(
       self,
   ):

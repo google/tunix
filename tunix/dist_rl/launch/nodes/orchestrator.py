@@ -529,8 +529,9 @@ def wait_for_workers(
     *,
     rpc_timeout_s: float,
     config_sha256: str,
+    min_workers: Mapping[datatypes.Role | str, int] | None = None,
 ) -> None:
-  """Registers the workers announced through `discovery` until `required_workers(hp)` are up.
+  """Registers workers through `discovery` until `min_workers` are up.
 
   A worker whose config fingerprint differs from `config_sha256` is rejected:
   its registration fails, and while this waits, so does the wait. A worker
@@ -543,10 +544,11 @@ def wait_for_workers(
     rpc_timeout_s: Deadline for worker RPCs.
     config_sha256: The orchestrator's config fingerprint
       (`node_utils.log_resolved_config`); every worker must match it.
+    min_workers: Workers per role to wait for; `required_workers(hp)` if None.
 
   Raises:
     ValueError: If a worker resolved a different config.
-    TimeoutError: If `required_workers(hp)` do not register within
+    TimeoutError: If `min_workers` do not register within
       `cluster_config.init_timeout_s`.
   """
   rejected: list[ValueError] = []
@@ -567,7 +569,8 @@ def wait_for_workers(
     )
 
   discovery.on_register(register)
-  min_workers = required_workers(hp)
+  if min_workers is None:
+    min_workers = required_workers(hp)
   init_timeout_s = hp.config_mapping("cluster_config")["init_timeout_s"]
   deadline = (
       None

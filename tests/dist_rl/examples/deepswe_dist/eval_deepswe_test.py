@@ -19,11 +19,14 @@ import contextlib
 import io
 import json
 from pathlib import Path
+import pickle
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest import mock
 
+from absl.testing import absltest
 from etils import epath
 from tunix.dist_rl.examples.deepswe_dist import eval_deepswe
 
@@ -201,6 +204,31 @@ class EvalDeepSWETest(unittest.TestCase):
       self.assertEqual(row["docker_image"], "image-1")
       self.assertEqual(summary["pass_at_1"], 1.0)
       self.assertTrue(results[0].with_suffix(".summary.json").exists())
+
+  def test_controller_records_a_startup_failure(self):
+    args = eval_deepswe.parse_args(["--tasks_limit", "1"])
+    handle = mock.AsyncMock()
+    handle.asubmit.return_value = {"model_id": "another-model"}
+    with tempfile.TemporaryDirectory() as temp_dir:
+      args.output_dir = temp_dir
+      with (
+          mock.patch.object(
+              eval_deepswe, "load_entries",
+              return_value=[{"instance_id": "task-1", "docker_image": "i"}],
+          ),
+          mock.patch(
+              "tunix.dist_rl.worker.remote_execution.ActorHandle.from_address",
+              return_value=handle,
+          ),
+          self.assertRaisesRegex(ValueError, "Worker model settings differ"),
+      ):
+        asyncio.run(eval_deepswe.run_controller(args))
+      (summary_path,) = Path(temp_dir).glob("*.summary.json")
+      summary = json.loads(summary_path.read_text(encoding="utf-8"))
+      self.assertEqual(len(list(Path(temp_dir).glob("*/config.json"))), 1)
+    self.assertTrue(summary["fatal_error"].startswith("ValueError"))
+    self.assertEqual(summary["completed_attempts"], 0)
+    handle.close.assert_awaited_once()
 
   def test_sampling_flags_and_validation(self):
     args = eval_deepswe.parse_args([
@@ -546,5 +574,279 @@ class EvalDeepSWETest(unittest.TestCase):
       self.assertEqual(saved_summary, summary)
 
 
+_ENTRIES = [{"instance_id": "task-0", "docker_image": "image-0"}]
+
+
+def _hp(*overrides: str):
+  """Resolves deepswe.yaml for an evaluation (no weight sync)."""
+  from tunix.dist_rl.launch.common import resolve_config  # pylint: disable=g-import-not-at-top
+
+  yaml = eval_deepswe.ROOT / "tunix/dist_rl/examples/deepswe_dist/deepswe.yaml"
+  return resolve_config.initialize([
+      f"override_config_file={yaml}", "weight_sync_config.mode=none",
+      *overrides,
+  ])
+
+
+def _rollout_reply(request_id: str, reward: float) -> SimpleNamespace:
+  """Returns a polled reply carrying a stock rollout worker's response."""
+  response = SimpleNamespace(error=None, payload=SimpleNamespace(traj={
+      "trajectory_reward": reward,
+      "status": "SUCCEEDED",
+      "episode_summary": {
+          "num_steps": 3, "guard_blocked_steps": 0, "guard_reasons": [],
+      },
+  }))
+  return SimpleNamespace(request_id=request_id, unwrap=lambda: response)
+
+
+class _Discovery:
+  """Registers one rollout worker per fingerprint on subscription."""
+
+  def __init__(self, *config_sha256s: str):
+    self._config_sha256s = config_sha256s
+
+  def on_register(self, callback):
+    from tunix.dist_rl.launch.nodes import node_utils  # pylint: disable=g-import-not-at-top
+
+    for index, sha in enumerate(self._config_sha256s):
+      callback("localhost", 0, pickle.dumps({
+          "service_type": "rollout",
+          "service_port": 50000 + index,
+          "worker_id": f"rollout-{index}",
+          node_utils.CONFIG_SHA256_METADATA_KEY: sha,
+      }))
+
+
+class EvalControllerMainTest(unittest.TestCase):
+
+  def test_config_args_maps_the_resolved_config(self):
+    args = eval_deepswe.config_args(_hp(
+        "cluster_config.target=k8s",
+        "cluster_config.rollout_replicas=2",
+        "eval_config.attempts_per_task=2",
+        "eval_config.output_dir=gs://bucket/eval",
+    ))
+
+    self.assertEqual(args.max_steps, 50)
+    self.assertEqual(args.timeout, 4800)
+    # `max_concurrency` limits each of the 2 rollout workers.
+    self.assertEqual(args.max_concurrent, 512)
+    self.assertEqual(args.num_rollouts_per_instance, 2)
+    self.assertEqual(args.max_model_len, 4096 + 28672)
+    self.assertEqual(args.max_response_length, 28672)
+    self.assertEqual(eval_deepswe.response_budget(args), 28672)
+    self.assertEqual((args.temperature, args.top_p, args.top_k),
+                     (1.0, 1.0, -1))
+    self.assertEqual(args.output_dir, "gs://bucket/eval")
+
+  def test_eval_config_defaults_and_checks(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      args = eval_deepswe.config_args(
+          _hp(f"cluster_config.artifact_root={temp_dir}")
+      )
+    self.assertEqual(args.num_rollouts_per_instance, 1)
+    self.assertEqual(args.output_dir, f"{temp_dir}/eval")
+    with self.assertRaisesRegex(
+        ValueError, r"eval_config.attempts_per_task must be an int >= 1"
+    ):
+      _hp("eval_config.attempts_per_task=0")
+    with self.assertRaisesRegex(
+        ValueError, r"agentic_grpo_config.max_turns must be > 0, got 0"
+    ):
+      eval_deepswe.config_args(_hp("agentic_grpo_config.max_turns=0"))
+    with self.assertRaisesRegex(
+        ValueError,
+        r"eval_config.attempts_per_task > 1 \(2\) needs"
+        r" rollout_config.temperature > 0, got 0.0",
+    ):
+      eval_deepswe.config_args(_hp(
+          "eval_config.attempts_per_task=2", "rollout_config.temperature=0"
+      ))
+
+  def test_generate_dispatch_compacts_out_of_order_responses(self):
+    from tunix.dist_rl.common import datatypes  # pylint: disable=g-import-not-at-top
+
+    args = eval_deepswe.parse_args([])
+    entries = [
+        {"instance_id": f"task-{i}", "docker_image": f"image-{i}"}
+        for i in range(2)
+    ]
+    replies = iter([_rollout_reply("eval_1", 1.0),
+                    _rollout_reply("eval_0", 0.0)])
+    handle = mock.AsyncMock()
+    handle.dispatch_task.side_effect = (
+        lambda request_id, method, request: request_id
+    )
+    handle.poll_responses.side_effect = lambda timeout_s: next(replies)
+    rows = []
+
+    asyncio.run(eval_deepswe.collect_worker(
+        handle, iter(enumerate(entries)), 2, args, rows.append, rpc="generate"
+    ))
+
+    for call in handle.dispatch_task.call_args_list:
+      _, method, request = call.args
+      self.assertEqual(method, "generate")
+      self.assertIsInstance(request, datatypes.RolloutRequest)
+    self.assertEqual(
+        [(row["instance_id"], row["reward"], row["num_steps"]) for row in rows],
+        [("task-1", 1.0, 3), ("task-0", 0.0, 3)],
+    )
+
+  def test_sandbox_module_is_not_imported_when_off(self):
+    from examples import deepswe as deepswe_examples  # pylint: disable=g-import-not-at-top
+
+    args = eval_deepswe.parse_args([])
+    # Any import of the module raises, even if another test imported it.
+    with (
+        mock.patch.dict(
+            sys.modules, {f"{deepswe_examples.__name__}.sandbox_utils": None}
+        ),
+        mock.patch.dict(deepswe_examples.__dict__),
+    ):
+      deepswe_examples.__dict__.pop("sandbox_utils", None)
+      self.assertIsNone(
+          eval_deepswe._start_sandbox_fleet(
+              {"scaffold": "r2egym", "use_agent_sandbox": False}, [], args
+          )
+      )
+
+  def _controller_main(
+      self,
+      hp: object,
+      discovery: _Discovery,
+      handle: mock.AsyncMock,
+      sandbox: mock.Mock,
+  ) -> mock.Mock:
+    """Runs `controller_main` on `hp` with a stand-in cluster.
+
+    The controller's config fingerprint is `"a" * 64`. The cluster has a real
+    worker registry, but its bring-up and shutdown are mocks, and its rollout
+    handles are `[handle]`.
+
+    Args:
+      hp: The resolved config (`_hp`).
+      discovery: Registers the rollout workers.
+      handle: The registered workers' handle.
+      sandbox: Stands in for `examples.deepswe.sandbox_utils`.
+
+    Returns:
+      The cluster. It is also kept as `self.cluster`, for when
+      `controller_main` raises.
+    """
+    # pylint: disable=g-import-not-at-top
+    from tunix.dist_rl.launch.common import resolve_config
+    from tunix.dist_rl.launch.nodes import node_utils
+    from tunix.dist_rl.launch.nodes import orchestrator
+    from tunix.dist_rl.orchestrator import worker_registry
+    from examples import deepswe as deepswe_examples
+    # pylint: enable=g-import-not-at-top
+
+    self.cluster = mock.Mock(registry=worker_registry.WorkerRegistry())
+    context = SimpleNamespace(ipc=SimpleNamespace(discovery=discovery))
+    with contextlib.ExitStack() as stack:
+      for target, attribute, value in (
+          (node_utils, "require_discovery_context", lambda _: context),
+          (resolve_config, "initialize", lambda _: hp),
+          (node_utils, "log_resolved_config", lambda *_: "a" * 64),
+          (orchestrator, "create_cluster", lambda *_, **__: self.cluster),
+          (eval_deepswe, "config_entries", lambda _: _ENTRIES),
+          (worker_registry.WorkerRegistry, "handles",
+           lambda *_, **__: [handle]),
+      ):
+        stack.enter_context(mock.patch.object(target, attribute, value))
+      stack.enter_context(mock.patch(
+          f"{deepswe_examples.__name__}.sandbox_utils", sandbox, create=True
+      ))
+      eval_deepswe.controller_main([], context=mock.Mock())
+    return self.cluster
+
+  def test_controller_main_brings_up_runs_and_tears_down(self):
+    replies = iter([_rollout_reply("eval_0_1", 1.0),
+                    _rollout_reply("eval_0_0", 0.0)])
+    handle = mock.AsyncMock()
+    handle.dispatch_task.side_effect = (
+        lambda request_id, method, request: request_id
+    )
+    handle.poll_responses.side_effect = lambda timeout_s: next(replies)
+    sandbox = mock.Mock()
+    with tempfile.TemporaryDirectory() as temp_dir:
+      cluster = self._controller_main(
+          _hp(
+              f"cluster_config.artifact_root={temp_dir}",
+              "env_kwargs.use_agent_sandbox=true",
+              "eval_config.attempts_per_task=2",
+          ),
+          _Discovery("a" * 64), handle, sandbox,
+      )
+
+      (run_dir,) = Path(temp_dir, "eval").glob("eval_deepswe_*[0-9]")
+      config = json.loads((run_dir / "config.json").read_text("utf-8"))
+      summary = json.loads(
+          run_dir.with_name(f"{run_dir.name}.summary.json").read_text("utf-8")
+      )
+    self.assertEqual(summary["pass_at_k"], {"2": 1.0})
+    self.assertEqual(
+        (config["config_sha256"], config["instance_ids"]),
+        ("a" * 64, ["task-0"]),
+    )
+    self.assertEqual(config["config"]["eval_config"], {
+        "attempts_per_task": 2, "output_dir": f"{temp_dir}/eval",
+    })
+    self.assertEqual(
+        [call.args[1] for call in handle.dispatch_task.call_args_list],
+        ["generate", "generate"],
+    )
+    cluster.bring_up_workers.assert_called_once_with(dummy_data=None)
+    cluster.shutdown.assert_called_once_with()
+    sandbox.init_global_fleet.assert_called_once_with(
+        tasks=_ENTRIES, max_concurrency=256, num_generations=2,
+        scaffold="r2egym",
+    )
+    sandbox.warm_global_fleet.assert_called_once_with(wait=False)
+    sandbox.teardown_global_fleet.assert_called_once_with()
+
+  def test_controller_main_stops_registered_workers_on_a_rejection(self):
+    handle = mock.AsyncMock()
+    sandbox = mock.Mock()
+    with tempfile.TemporaryDirectory() as temp_dir:
+      with self.assertRaisesRegex(ValueError, "resolved a different config"):
+        self._controller_main(
+            _hp(
+                f"cluster_config.artifact_root={temp_dir}",
+                "cluster_config.target=k8s",
+                "cluster_config.rollout_replicas=2",
+                "env_kwargs.use_agent_sandbox=true",
+            ),
+            _Discovery("a" * 64, "0" * 64), handle, sandbox,
+        )
+    # Abort-shutdown stops and closes every registered worker, including the
+    # one that registered before the rejection.
+    self.cluster.shutdown.assert_called_once_with(abort=True)
+    self.assertEqual(
+        [info.worker_id for info in self.cluster.registry.infos()],
+        ["rollout-0"],
+    )
+    self.cluster.bring_up_workers.assert_not_called()
+    handle.dispatch_task.assert_not_called()
+    sandbox.teardown_global_fleet.assert_called_once_with()
+
+  def test_controller_main_requires_no_weight_sync(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      with self.assertRaisesRegex(
+          ValueError, "requires weight_sync_config.mode: none, got raiden"
+      ):
+        self._controller_main(
+            _hp(
+                f"cluster_config.artifact_root={temp_dir}",
+                "weight_sync_config.mode=raiden",
+            ),
+            _Discovery(), mock.AsyncMock(), mock.Mock(),
+        )
+    self.cluster.bring_up_workers.assert_not_called()
+    self.cluster.shutdown.assert_not_called()
+
+
 if __name__ == "__main__":
-  unittest.main()
+  absltest.main()
