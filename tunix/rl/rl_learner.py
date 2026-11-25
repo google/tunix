@@ -234,6 +234,9 @@ class RLLearner(abc.ABC, Generic[TConfig]):
     self._packing_enabled = rl_engine_lib.configs.is_sequence_packing_enabled(
         self._training_config
     )
+    # `(max_rows_per_shard, row_multiple)`; `train` sets it, validated, when
+    # the per-host learner packs sequences.
+    self._per_host_pack_knobs: tuple[int, int] | None = None
 
     if self._packing_enabled:
       assert self._training_config.max_seq_token_per_tpu is not None
@@ -1085,9 +1088,8 @@ class RLLearner(abc.ABC, Generic[TConfig]):
     train_data_gen = queue_iterator()
     if self._packing_enabled and per_host_learner_enabled():
       assert self._training_config.max_seq_token_per_tpu is not None
-      max_rows_per_shard, row_multiple = (
-          getattr(self, "_per_host_pack_knobs", None) or _per_host_pack_knobs()
-      )
+      assert self._per_host_pack_knobs is not None  # Set by `train`.
+      max_rows_per_shard, row_multiple = self._per_host_pack_knobs
       logging.info(
           "Using per-host sequence packing with max_seq_token_per_tpu: %d,"
           " max_rows_per_shard: %d, row_multiple: %d",
