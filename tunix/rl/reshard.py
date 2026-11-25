@@ -15,6 +15,7 @@
 """Resharding functions."""
 
 from concurrent import futures
+import dataclasses
 import functools
 # Keep this import for google internal usage.
 import math  # pylint: disable=unused-import
@@ -242,8 +243,27 @@ def _multicontroller_reshard_leaf(
   return jax.device_put(replicated.addressable_data(0), sharding)
 
 
-# One jitted transfer for all leaves of a publish (TUNIX_BATCHED_PUBLISH).
-_BP_STATE: dict[str, Any] = {'pub': 0, 'exe': {}, 'off': None}
+# Batched multi-controller publish (TUNIX_BATCHED_PUBLISH): one jitted
+# transfer per group of leaves instead of one per leaf.
+# A group's compile signature: (source sharding, shape, dtype) per leaf.
+_BPKey = tuple[tuple[jax.sharding.Sharding, tuple[int, ...], np.dtype], ...]
+# A group's compiled transfer: its source leaves in, their replicas out.
+_BPTransfer = Callable[..., tuple[jax.Array, ...]]
+
+
+@dataclasses.dataclass
+class _BatchedPublishState:
+  """Process-wide state of the batched publish."""
+
+  # Publishes so far; the first TUNIX_BATCHED_PUBLISH_CHECK are checked.
+  pub: int = 0
+  # The compiled transfer of every group signature agreed on so far.
+  exe: dict[_BPKey, _BPTransfer] = dataclasses.field(default_factory=dict)
+  # Why batching is disabled for the run (a failed check), or None.
+  off: str | None = None
+
+
+_BP_STATE = _BatchedPublishState()
 
 
 def _batched_publish_mode() -> str:
@@ -270,8 +290,8 @@ def _bp_vote(ok: bool) -> list[int]:
 
 def _bp_decline(xs: list[Any], ts: list[Any]) -> str | None:
   """Why a leaf would not take the per-leaf bridge (global metadata only)."""
-  if _BP_STATE['off']:
-    return 'disabled(%s)' % _BP_STATE['off']
+  if _BP_STATE.off:
+    return 'disabled(%s)' % _BP_STATE.off
   if not xs:
     return 'empty'
   for x, s in zip(xs, ts):
@@ -288,7 +308,7 @@ def _bp_decline(xs: list[Any], ts: list[Any]) -> str | None:
   return None
 
 
-def _bp_groups(xs: list[Any]) -> list[list[int]]:
+def _bp_groups(xs: list[jax.Array]) -> list[list[int]]:
   """Leaf indices grouped by source mesh and TUNIX_BATCHED_PUBLISH_GROUP_MB."""
   cap = (
       float(os.environ.get('TUNIX_BATCHED_PUBLISH_GROUP_MB', '2048') or '2048')
@@ -308,9 +328,30 @@ def _bp_groups(xs: list[Any]) -> list[list[int]]:
   return groups
 
 
+def _bp_compile(group: list[jax.Array]) -> _BPTransfer:
+  """Compiles the transfer of one group of leaves.
+
+  An identity whose inputs keep their source shardings and whose outputs are
+  replicated over each leaf's source mesh; XLA emits the all-gathers.
+
+  Args:
+    group: The group's source leaves.
+
+  Returns:
+    The compiled transfer.
+  """
+  ins = tuple(x.sharding for x in group)
+  outs = tuple(
+      jax.sharding.NamedSharding(s.mesh, jax.sharding.PartitionSpec())
+      for s in ins
+  )
+  fn = jax.jit(lambda *a: a, in_shardings=ins, out_shardings=outs)
+  return fn.lower(*group).compile()
+
+
 def _bp_place(
-    reps: list[Any], ts: list[Any], zero_copy: bool
-) -> tuple[list[Any], int]:
+    reps: list[jax.Array], ts: list[jax.sharding.Sharding], zero_copy: bool
+) -> tuple[list[jax.Array], int]:
   """Places replicated leaves on their targets; local only.
 
   With `zero_copy`, a fully replicated target is assembled from the
@@ -345,7 +386,12 @@ def _bp_place(
   return outs, len(reps) - len(put)
 
 
-def _bp_check(pub: int, xs: list[Any], ts: list[Any], outs: list[Any]) -> bool:
+def _bp_check(
+    pub: int,
+    xs: list[jax.Array],
+    ts: list[jax.sharding.Sharding],
+    outs: list[jax.Array],
+) -> bool:
   """Byte-exact comparison against the per-leaf path; every process votes.
 
   Checks up to four leaves (first, last, two inner; each at most
@@ -419,7 +465,9 @@ def _bp_check(pub: int, xs: list[Any], ts: list[Any], outs: list[Any]) -> bool:
   return all(votes)
 
 
-def _batched_publish(source: Any, target: Any) -> Any:
+def _batched_publish(
+    source: jaxtyping.PyTree, target: jaxtyping.PyTree
+) -> jaxtyping.PyTree | None:
   """Moves every leaf of one publish with one jitted program per group.
 
   Same transfer as `_multicontroller_reshard_leaf`, batched: one identity jit
@@ -440,8 +488,8 @@ def _batched_publish(source: Any, target: Any) -> Any:
   Returns:
     The published tree, or None to fall back to the per-leaf path.
   """
-  _BP_STATE['pub'] += 1
-  pub, t0, stage = _BP_STATE['pub'], time.perf_counter(), 'pre'
+  _BP_STATE.pub += 1
+  pub, t0, stage = _BP_STATE.pub, time.perf_counter(), 'pre'
   try:
     checks = int(os.environ.get('TUNIX_BATCHED_PUBLISH_CHECK', '0') or '0')
     xs, treedef = jax.tree_util.tree_flatten(source)
@@ -463,16 +511,10 @@ def _batched_publish(source: Any, target: Any) -> Any:
     ]
     new, ok, err = {}, True, ''
     for key, g in zip(keys, groups):
-      if key in _BP_STATE['exe'] or key in new:
+      if key in _BP_STATE.exe or key in new:
         continue
       try:
-        ins = tuple(xs[i].sharding for i in g)
-        outs_sh = tuple(
-            jax.sharding.NamedSharding(s.mesh, jax.sharding.PartitionSpec())
-            for s in ins
-        )
-        fn = jax.jit(lambda *a: a, in_shardings=ins, out_shardings=outs_sh)
-        new[key] = fn.lower(*[xs[i] for i in g]).compile()
+        new[key] = _bp_compile([xs[i] for i in g])
       except Exception as e:  # pylint: disable=broad-exception-caught
         ok, err = False, repr(e)[:300]
         break
@@ -488,14 +530,14 @@ def _batched_publish(source: Any, target: Any) -> Any:
             err,
         )
         return None
-      _BP_STATE['exe'].update(new)
+      _BP_STATE.exe.update(new)
     t1 = time.perf_counter()
     zero_copy = _batched_publish_mode() == '2'
     outs, zero_copied, gather_s = [None] * len(xs), 0, 0.0
     for key, g in zip(keys, groups):
       stage = 'gather'
       t = time.perf_counter()
-      reps = list(_BP_STATE['exe'][key](*[xs[i] for i in g]))
+      reps = list(_BP_STATE.exe[key](*[xs[i] for i in g]))
       jax.block_until_ready(reps)
       gather_s += time.perf_counter() - t
       stage = 'place'
@@ -545,7 +587,7 @@ def _batched_publish(source: Any, target: Any) -> Any:
         (t2 - t1 - gather_s) * 1e3,
     )
   if pub <= checks and not _bp_check(pub, xs, ts, outs):
-    _BP_STATE['off'] = 'check_failed_pub%d' % pub
+    _BP_STATE.off = 'check_failed_pub%d' % pub
     logging.error(
         'TUNIX_BATCHED_PUBLISH pub=%d: check failed; batching disabled for the'
         ' run, redoing this publish per leaf.',
