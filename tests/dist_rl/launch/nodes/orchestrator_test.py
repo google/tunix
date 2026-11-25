@@ -961,6 +961,28 @@ class ClusterTest(absltest.TestCase):
           config_sha256=sha,
       )
 
+  def test_wait_for_workers_waits_for_min_workers_when_given(self):
+    hp = _config(
+        "cluster_config.target=k8s",
+        "agentic_grpo_config.beta=0.0",
+        "cluster_config.rollout_replicas=2",
+        "cluster_config.init_timeout_s=30",
+    )
+    sha = resolve_config.config_fingerprint(hp)
+    cluster = self._cluster(hp)
+    # No trainer registers, which `required_workers(hp)` would wait for.
+    orchestrator.wait_for_workers(
+        hp,
+        cluster,
+        _FakeDiscovery(["rollout", "rollout"], config_sha256=sha),
+        rpc_timeout_s=1.0,
+        config_sha256=sha,
+        min_workers={datatypes.Role.ROLLOUT: 2},
+    )
+    self.assertLen(
+        cluster.registry.handles(datatypes.Role.ROLLOUT, statuses=None), 2
+    )
+
   def test_wait_for_workers_raises_a_rejection_even_past_the_deadline(self):
     hp = _config(
         "agentic_grpo_config.beta=0.0", "cluster_config.init_timeout_s=0.2"

@@ -26,7 +26,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 import json
 import logging
 import math
@@ -37,11 +37,19 @@ import subprocess
 import sys
 import threading
 import time
+from typing import TYPE_CHECKING, Literal
 
 from etils import epath
 
+if TYPE_CHECKING:
+  # pylint: disable=g-import-not-at-top
+  from tunix.dist_rl.distributed.runtime import context as runtime_context
+  from tunix.dist_rl.launch.common import resolve_config
+  from tunix.dist_rl.worker import remote_execution
+  # pylint: enable=g-import-not-at-top
 
-ROOT = Path(__file__).resolve().parents[4]
+
+ROOT = Path(__file__).absolute().parents[4]
 # Model context tokens kept free of responses, so the prompt still fits.
 _CONTEXT_HEADROOM_TOKENS = 256
 
@@ -234,7 +242,6 @@ def request_fields(
               "group_id": index,
               "pair_index": index,
           },
-          "agent_config": {"scaffold": "r2egym"},
       },
   }
 
@@ -356,13 +363,42 @@ def _attempts(
       yield index, entry, attempt
 
 
-async def collect_worker(handle, jobs, limit, args, on_result):
+def _unwrap(
+    reply: remote_execution.ExecutionResponse,
+    rpc: Literal["evaluate", "generate"],
+) -> dict[str, object]:
+  """Returns a reply's compact result, compacting `generate` responses."""
+  result = reply.unwrap()
+  return compact_result(result) if rpc == "generate" else result
+
+
+async def collect_worker(
+    handle, jobs, limit, args, on_result, *,
+    rpc: Literal["evaluate", "generate"] = "evaluate",
+):
   """Bound in-flight work without applying the RPC deadline to episodes.
 
   Each task taken from the shared `jobs` iterator is dispatched as
   `--num_rollouts_per_instance` attempts to this worker. `on_result` runs in a
   thread so that remote result writes do not block the event loop.
+
+  `rpc="evaluate"` targets this script's `--role worker`, which returns compact
+  results. `rpc="generate"` targets a stock dist_rl rollout worker: each attempt
+  is sent as a `RolloutRequest` and its `RolloutResponse` is compacted here.
+
+  Args:
+    handle: Worker actor handle.
+    jobs: Shared `(index, entry)` task iterator.
+    limit: Maximum in-flight attempts on `handle`.
+    args: Evaluation flags.
+    on_result: Result callback run in a worker thread.
+    rpc: Worker RPC method (`"evaluate"` or `"generate"`).
   """
+  # TODO(sanbao): Dispatch through the cluster engine's `TaskSession` so that
+  # `cluster_config` fault tolerance applies; a transient gRPC error now ends
+  # the evaluation.
+  from tunix.dist_rl.common import datatypes  # pylint: disable=g-import-not-at-top
+
   requests = _attempts(jobs, args.num_rollouts_per_instance)
   pending = {}
   exhausted = False
@@ -375,7 +411,10 @@ async def collect_worker(handle, jobs, limit, args, on_result):
         break
       fields = request_fields(args, entry, index, attempt)
       request_id = fields["request_id"]
-      ack = await handle.dispatch_task(request_id, "evaluate", fields)
+      payload = (
+          fields if rpc == "evaluate" else datatypes.RolloutRequest(**fields)
+      )
+      ack = await handle.dispatch_task(request_id, rpc, payload)
       if ack != request_id:
         raise RuntimeError(f"Unexpected dispatch acknowledgement: {ack}")
       pending[request_id] = (index, entry, attempt, time.monotonic())
@@ -387,7 +426,7 @@ async def collect_worker(handle, jobs, limit, args, on_result):
         raise RuntimeError(f"Unexpected evaluation result: {reply.request_id}")
       index, entry, attempt, started = pending.pop(reply.request_id)
       try:
-        result = reply.unwrap()
+        result = _unwrap(reply, rpc)
       except Exception as exc:  # A task failure must remain in Pass@1's denominator.
         result = {
             "reward": 0.0, "num_steps": 0, "status": "ERROR",
@@ -413,28 +452,10 @@ async def run_controller(args: argparse.Namespace) -> dict[str, object]:
   from tunix.dist_rl.worker import remote_execution
 
   entries = load_entries(args)
-  attempts = args.num_rollouts_per_instance
-  run_dir = (
-      epath.Path(args.output_dir)
-      / f"eval_deepswe_{time.strftime('%Y%m%d_%H%M%S')}"
-  )
-  write_json(
-      run_dir / "config.json",
-      {
-          **vars(args),
-          "instance_ids": [
-              entry.get("instance_id", index)
-              for index, entry in enumerate(entries)
-          ],
-      },
-  )
   handles = [remote_execution.ActorHandle.from_address(
       address if address.startswith("grpc://") else f"grpc://{address}",
       rpc_timeout_s=60,
   ) for address in args.worker_addresses]
-  rows = []
-  rows_lock = threading.Lock()
-  failure = None
   try:
     async def wait_ready(handle):
       deadline = time.monotonic() + args.startup_timeout
@@ -449,7 +470,65 @@ async def run_controller(args: argparse.Namespace) -> dict[str, object]:
       if actual != model_profile(args):
         raise ValueError(f"Worker model settings differ: {actual}")
 
-    await asyncio.gather(*(wait_ready(handle) for handle in handles))
+    return await _evaluate(
+        args,
+        entries,
+        handles,
+        run_config=vars(args),
+        ready=lambda: asyncio.gather(*(wait_ready(h) for h in handles)),
+        rpc="evaluate",
+    )
+  finally:
+    await asyncio.gather(*(handle.close() for handle in handles),
+                         return_exceptions=True)
+
+
+async def _evaluate(
+    args: argparse.Namespace,
+    entries: list[dict[str, object]],
+    handles: list[remote_execution.ActorHandle],
+    *,
+    run_config: Mapping[str, object],
+    ready: Callable[[], Awaitable[object]],
+    rpc: Literal["evaluate", "generate"],
+) -> dict[str, object]:
+  """Runs every attempt of `entries` on `handles` and writes the results.
+
+  Args:
+    args: Evaluation flags (`parse_args`).
+    entries: Raw task entries, each with a `docker_image`.
+    handles: Workers to spread the attempts over.
+    run_config: What configured the run; written to `config.json` with the
+      task ids.
+    ready: Readies the workers. A failure here is recorded like any other.
+    rpc: Worker method to dispatch (`collect_worker`).
+
+  Returns:
+    The summary (`summarize`).
+
+  Raises:
+    RuntimeError: If any attempt failed or is missing.
+  """
+  attempts = args.num_rollouts_per_instance
+  run_dir = (
+      epath.Path(args.output_dir)
+      / f"eval_deepswe_{time.strftime('%Y%m%d_%H%M%S')}"
+  )
+  write_json(
+      run_dir / "config.json",
+      {
+          **run_config,
+          "instance_ids": [
+              entry.get("instance_id", index)
+              for index, entry in enumerate(entries)
+          ],
+      },
+  )
+  rows = []
+  rows_lock = threading.Lock()
+  failure = None
+  try:
+    await ready()
     jobs = iter(enumerate(entries))
 
     def record(row: dict[str, object]) -> None:
@@ -481,6 +560,7 @@ async def run_controller(args: argparse.Namespace) -> dict[str, object]:
             + (index < args.max_concurrent % workers),
             args,
             record,
+            rpc=rpc,
         )
         for index, handle in enumerate(handles)
     ))
@@ -488,8 +568,6 @@ async def run_controller(args: argparse.Namespace) -> dict[str, object]:
     failure = f"{type(exc).__name__}: {exc}"
     raise
   finally:
-    await asyncio.gather(*(handle.close() for handle in handles),
-                         return_exceptions=True)
     summary = summarize(rows, len(entries), attempts)
     summary["fatal_error"] = failure
     write_results(run_dir, rows, summary)
@@ -509,6 +587,216 @@ async def run_controller(args: argparse.Namespace) -> dict[str, object]:
   ):
     raise RuntimeError(f"Evaluation contains failures; inspect {run_dir}")
   return summary
+
+
+def config_args(hp: resolve_config.DistHyperParameters) -> argparse.Namespace:
+  """Maps the resolved dist_rl config onto this script's evaluation flags.
+
+  The controller and the rollout workers resolve the same config, so the
+  evaluation reuses its settings: `max_turns` turns, `episode_timeout`, and the
+  `rollout_config` sampling settings. As in training, `max_concurrency` limits
+  each rollout worker (so `--max_concurrent` is it times
+  `cluster_config.rollout_replicas`), and each trajectory's cumulative response
+  budget is `rollout_config.total_generation_steps`. `eval_config` sets the
+  attempts per task and the output directory, and `data_config.limit` caps the
+  tasks.
+
+  Args:
+    hp: Resolved dist_rl configuration.
+
+  Returns:
+    The flags.
+
+  Raises:
+    ValueError: If the turns or concurrency are not positive, or if several
+      attempts per task would all be greedy.
+  """
+  grpo = hp.config_mapping("agentic_grpo_config")
+  for key in ("max_turns", "max_concurrency"):
+    if int(grpo[key]) <= 0:
+      raise ValueError(
+          f"agentic_grpo_config.{key} must be > 0, got {grpo[key]}."
+      )
+  rollout = hp.config_mapping("rollout_config")
+  eval_config = hp.config_mapping("eval_config")
+  attempts = int(eval_config["attempts_per_task"])
+  temperature = float(rollout["temperature"])
+  if attempts > 1 and temperature <= 0:
+    raise ValueError(
+        f"eval_config.attempts_per_task > 1 ({attempts}) needs"
+        f" rollout_config.temperature > 0, got {temperature}."
+    )
+  generation_steps = int(rollout["total_generation_steps"])
+  top_k = int(rollout["top_k"])
+  replicas = int(hp.config_mapping("cluster_config")["rollout_replicas"])
+  # These bypass `parse_args`'s flag checks: the ones above cover what nothing
+  # else checks, `resolve_weight_sync_timeouts` checks `episode_timeout`, and
+  # the workers' `RolloutConfig` checks the sampling settings.
+  return argparse.Namespace(**{
+      **vars(parse_args(["--role", "controller"])),
+      "max_steps": int(grpo["max_turns"]),
+      "timeout": float(grpo["episode_timeout"]),
+      "max_concurrent": int(grpo["max_concurrency"]) * replicas,
+      "num_rollouts_per_instance": attempts,
+      "max_model_len": hp.config_mapping("vllm_config")["max_model_len"] or (
+          int(rollout["max_prompt_length"]) + generation_steps
+      ),
+      "max_response_length": generation_steps,
+      "max_context_limit": generation_steps,
+      "temperature": temperature,
+      "top_p": float(rollout["top_p"]),
+      "top_k": top_k if top_k > 0 else -1,
+      "output_dir": str(eval_config["output_dir"]),
+  })
+
+
+def config_entries(
+    hp: resolve_config.DistHyperParameters,
+) -> list[dict[str, object]]:
+  """Returns the raw task entries of `data_module.create_dataset`.
+
+  The dataset is created from `data_config`, and its records follow
+  `deepswe.create_dataset`: each holds its raw entry in
+  `metadata.env_config.entry`.
+
+  Args:
+    hp: Resolved dist_rl configuration.
+
+  Raises:
+    ValueError: If an entry has no `docker_image`.
+  """
+  from tunix.cli.utils import data as data_lib  # pylint: disable=g-import-not-at-top
+
+  records = data_lib.get_dataset_from_module(
+      str(hp.config["data_module"]), **hp.config_mapping("data_config")
+  )
+  entries = [
+      records[index]["metadata"]["env_config"]["entry"]
+      for index in range(len(records))
+  ]
+  missing = [i for i, e in enumerate(entries) if not e.get("docker_image")]
+  if missing:
+    raise ValueError(f"Task entries {missing} have no docker_image.")
+  return entries
+
+
+def _start_sandbox_fleet(
+    env_kwargs: Mapping[str, object],
+    entries: list[dict[str, object]],
+    args: argparse.Namespace,
+) -> Callable[[], None] | None:
+  """Warms the tasks' sandbox pools up front when `use_agent_sandbox` is set.
+
+  Args:
+    env_kwargs: The run's `env_kwargs`, free-form environment settings.
+    entries: Raw task entries.
+    args: Evaluation flags.
+
+  Returns:
+    The fleet teardown, or None when sandboxes are off.
+  """
+  if not env_kwargs["use_agent_sandbox"]:
+    return None
+  from examples.deepswe import sandbox_utils  # pylint: disable=g-import-not-at-top
+
+  sandbox_utils.init_global_fleet(
+      tasks=entries,
+      max_concurrency=args.max_concurrent,
+      num_generations=args.num_rollouts_per_instance,
+      scaffold=str(env_kwargs["scaffold"]),
+  )
+  # TODO(sanbao): Prewarm a sliding window of tasks, as the controller this
+  # ports did, instead of every task image up front.
+  sandbox_utils.warm_global_fleet(wait=False)
+  return sandbox_utils.teardown_global_fleet
+
+
+def controller_main(
+    argv: list[str], context: runtime_context.ProcessContext | None = None
+) -> None:
+  """Runs the evaluation controller as a dist_rl launch process main.
+
+  Use as `--process_main=tunix.dist_rl.examples.deepswe_dist.eval_deepswe.
+  controller_main` next to stock rollout nodes that resolved the same config
+  (`weight_sync_config.mode: none`). The controller waits for
+  `cluster_config.rollout_replicas` workers, brings them up, dispatches every
+  attempt as a `generate` request, and writes the results (`write_results`).
+
+  Like the training orchestrator, it runs in `managed_cluster_teardown`: on
+  exit, including on an error or SIGTERM, the registered workers are stopped
+  (`cluster_config.stop_workers_on_exit`) and their handles closed. The
+  sandbox fleet, if any, is torn down first.
+
+  Args:
+    argv: `override_config_file=...` and `section.key=value` overrides.
+    context: Runtime process context providing the discovery API.
+  """
+  # pylint: disable=g-import-not-at-top
+  from tunix.dist_rl.common import datatypes
+  from tunix.dist_rl.launch.common import resolve_config as resolve_config_lib
+  from tunix.dist_rl.launch.nodes import node_utils
+  from tunix.dist_rl.launch.nodes import orchestrator
+  from tunix.dist_rl.orchestrator import orchestrator as cluster_orchestrator
+  # pylint: enable=g-import-not-at-top
+
+  discovery = node_utils.require_discovery_context(context).ipc.discovery
+  logging.basicConfig(
+      level=logging.INFO,
+      format="%(asctime)s - [EvalController] %(message)s",
+      force=True,
+  )
+  hp = resolve_config_lib.initialize(argv)
+  resolve_config_lib.validate_task(hp)
+  mode = hp.config_mapping("weight_sync_config")["mode"]
+  if mode != "none":
+    # No trainer runs, so the rollout workers must load their own weights.
+    raise ValueError(
+        "The eval controller requires weight_sync_config.mode: none, got"
+        f" {mode}."
+    )
+  config_sha256 = node_utils.log_resolved_config(hp, "orchestrator")
+  args = config_args(hp)
+  cluster_config = hp.config_mapping("cluster_config")
+  replicas = int(cluster_config["rollout_replicas"])
+  entries = config_entries(hp)
+  weight_sync_timeouts, rpc_timeout_s = (
+      orchestrator.resolve_weight_sync_timeouts(hp)
+  )
+  cluster = orchestrator.create_cluster(
+      hp, weight_sync_timeouts=weight_sync_timeouts
+  )
+  # TODO(sanbao): Under `launch.sh start` a trainer also starts, registers and
+  # is brought up; a launcher `eval` mode should start only rollout workers.
+  with cluster_orchestrator.managed_cluster_teardown(
+      cluster, stop_workers_on_exit=bool(cluster_config["stop_workers_on_exit"])
+  ):
+    teardown_fleet = _start_sandbox_fleet(
+        hp.config_mapping("env_kwargs"), entries, args
+    )
+    try:
+      orchestrator.wait_for_workers(
+          hp,
+          cluster,
+          discovery,
+          min_workers={datatypes.Role.ROLLOUT: replicas},
+          rpc_timeout_s=rpc_timeout_s,
+          config_sha256=config_sha256,
+      )
+      cluster.bring_up_workers(dummy_data=None)
+      asyncio.run(_evaluate(
+          args,
+          entries,
+          cluster.registry.handles(datatypes.Role.ROLLOUT),
+          run_config={
+              "config_sha256": config_sha256,
+              "config": resolve_config_lib.plain_config(hp),
+          },
+          ready=lambda: asyncio.sleep(0),  # Brought up above.
+          rpc="generate",
+      ))
+    finally:
+      if teardown_fleet is not None:
+        teardown_fleet()
 
 
 def register_guarded_env(deepswe_module) -> str:
@@ -650,6 +938,7 @@ async def run_worker(args: argparse.Namespace):
       sampler=sampler,
       env_name=env_name,
       agent_name=deepswe.DEEPSWE_AGENT_NAME,
+      agent_config={"scaffold": "r2egym"},
       tokenizer=tokenizer_adapter.TokenizerAdapter(tokenizer),
       chat_parser=parser.QwenChatTemplateParser(
           tokenizer, enable_thinking=not args.disable_thinking
