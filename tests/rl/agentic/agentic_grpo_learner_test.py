@@ -361,6 +361,25 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         ValueError, "loss_algo should be either grpo or gspo-token"
     ):
       agentic_grpo_learner.GRPOConfig(loss_algo="invalid")
+    with self.assertRaisesRegex(ValueError, "positive int or None"):
+      agentic_grpo_learner.GRPOConfig(max_consecutive_filtered_groups=0)
+    with self.assertRaisesRegex(
+        TypeError, "drop_zero_variance_groups must be a bool"
+    ):
+      agentic_grpo_learner.GRPOConfig(
+          drop_zero_variance_groups="false"  # pyrefly: ignore[bad-argument-type]
+      )
+    mock_rl_engine = mock.MagicMock()
+    with self.assertRaisesRegex(
+        ValueError, "only supported by the distributed StandardRLProgram"
+    ):
+      agentic_grpo_learner.GRPOLearner(
+          rl_engine=mock_rl_engine,
+          algo_config=agentic_grpo_learner.GRPOConfig(
+              num_generations=2, drop_zero_variance_groups=True
+          ),
+          reward_fns=[lambda prompts, completions, **_: [0.0] * len(prompts)],
+      )
 
   def test_num_iterations_greater_than_1(self):
     vocab = test_common.MockVocab()

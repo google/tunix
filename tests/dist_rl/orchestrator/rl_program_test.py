@@ -1722,6 +1722,417 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def _zero_variance_program(self, group_rewards, **kwargs):
+    """Builds a program whose i-th dispatched prompt gets `group_rewards[i]`."""
+    dispatched: list[str] = []
+    ready: list[list[datatypes.TrajectoryItem]] = []
+    item_mutator = kwargs.pop("item_mutator", None)
+
+    async def mock_dispatch(prompts, **dispatch_kwargs):
+      for prompt in prompts:
+        prompt_id = prompt["prompt_id"]
+        dispatched.append(prompt_id)
+        group = _make_trajectory_group(
+            prompt_id=prompt_id,
+            policy_version=dispatch_kwargs["policy_version"],
+        )
+        if item_mutator is not None:
+          item_mutator(prompt_id, group)
+        ready.append(group)
+
+    async def mock_poll(timeout_s=0.1):
+      del timeout_s
+      if ready:
+        return ready.pop(0)
+      await asyncio.sleep(0.01)
+      return []
+
+    self.mock_engine.dispatch_rollouts.side_effect = mock_dispatch
+    self.mock_engine.poll_rollouts.side_effect = mock_poll
+    rewards_iter = iter(group_rewards)
+    batch_config = kwargs.pop("batch_config", self.batch_config)
+    assembler = kwargs.pop("assembler", self.assembler)
+    program = rl_program.StandardRLProgram(
+        algo_config=dataclasses.replace(
+            self.algo_config,
+            drop_zero_variance_groups=True,
+            max_consecutive_filtered_groups=kwargs.pop(
+                "max_consecutive_filtered_groups", None
+            ),
+        ),
+        rollout_temperature=0.9,
+        rollout_returns_routed_experts=kwargs.pop(
+            "rollout_returns_routed_experts", False
+        ),
+        batch_config=batch_config,
+        reward_fns=[lambda prompts, completions, **_: next(rewards_iter)],
+        assembler=assembler,
+        **kwargs,
+    )
+    self.addCleanup(program.close)
+    return program, dispatched
+
+  def test_zero_variance_group_is_dropped_and_replaced(self):
+    async def _run():
+      program, dispatched = self._zero_variance_program(
+          [[1.0, 1.0], [0.0, 1.0]],
+          dataset=["prompt_0", "prompt_1"],
+          max_steps=1,
+      )
+      logged = {}
+      log_metric = program._log_metric
+
+      def _record_metric(name, value, step, **kwargs):
+        logged[(name, step)] = value
+        log_metric(name, value, step, **kwargs)
+
+      program._log_metric = _record_metric
+      dropped_groups = []
+      drop_tied_group = program._drop_tied_group
+
+      def _record_drop(group):
+        dropped_groups.append(group)
+        drop_tied_group(group)
+
+      program._drop_tied_group = _record_drop
+
+      await asyncio.wait_for(program.run_async(self.mock_engine), timeout=10.0)
+
+      # The tied `prompt_0` was dropped before any trainer payload was built for
+      # it, and only scalar counters were tracked across the step.
+      self.assertLen(dropped_groups, 1)
+      self.assertEqual(
+          [item.prompt_id for item in dropped_groups[0]],
+          ["prompt_0", "prompt_0"],
+      )
+      self.mock_create_trainer_payloads.assert_called_once()
+      self.assertEqual(program._tied_dropped_groups_count, 0)
+      self.assertEqual(program._tied_dropped_trajectories_count, 0)
+      # It freed its dispatch slot for `prompt_1`, which is the only group
+      # trained.
+      self.assertEqual(dispatched, ["prompt_0", "prompt_1"])
+      self.assertEqual(program.step, 1)
+      self.mock_engine.train_step.assert_called_once()
+      self.assertEqual(program.last_step_result.reward_mean, 0.5)
+      # The dropped group is counted with the step's other filtered groups.
+      self.assertEqual(
+          logged[("rollout/tied_rewards_dropped_groups_count", 0)], 1.0
+      )
+      self.assertEqual(logged[("rollout/filtered_groups_count", 0)], 1.0)
+      self.assertEqual(logged[("rollout/filtered_trajectories_count", 0)], 2.0)
+      # A resumed run skips the dropped prompt as well as the trained one.
+      metadata = self.mock_engine.save_checkpoint.call_args.kwargs["metadata"]
+      self.assertEqual(metadata["skipped_prompt_ids"], ["prompt_0"])
+      self.assertEqual(metadata["committed_prompt_ids"], ["prompt_1"])
+
+      # Multi-prompt wave (`batch_size=2`): both `prompt_0` and `prompt_1`
+      # dispatch together, tied `prompt_0` replenishes `prompt_2`.
+      self.mock_engine.train_step.reset_mock()
+      batch_cfg_2 = batch_assembly.BatchConfig(mini_batch_size=2)
+      program_b2, dispatched_b2 = self._zero_variance_program(
+          [[1.0, 1.0], [0.0, 1.0], [1.0, 0.0]],
+          dataset=["prompt_0", "prompt_1", "prompt_2"],
+          batch_size=2,
+          batch_config=batch_cfg_2,
+          assembler=None,
+          max_steps=1,
+      )
+      await asyncio.wait_for(
+          program_b2.run_async(self.mock_engine), timeout=10.0
+      )
+      self.assertEqual(dispatched_b2, ["prompt_0", "prompt_1", "prompt_2"])
+      self.assertEqual(program_b2.step, 1)
+
+    asyncio.run(_run())
+
+  def test_zero_variance_drop_releases_staged_routed_experts_refs(self):
+    async def _run():
+      self.algo_config.routed_experts_encode_mode = "uint8"
+      self.mock_create_trainer_payloads.side_effect = (
+          self._orig_create_trainer_payloads
+      )
+      refs_by_prompt = {
+          "prompt_0": (
+              datatypes.RoutedExpertsRef(
+                  worker_id="w0", instance_id="inst0", ref_id=11
+              ),
+              datatypes.RoutedExpertsRef(
+                  worker_id="w0", instance_id="inst0", ref_id=12
+              ),
+          ),
+          "prompt_1": (
+              datatypes.RoutedExpertsRef(
+                  worker_id="w0", instance_id="inst0", ref_id=21
+              ),
+              datatypes.RoutedExpertsRef(
+                  worker_id="w0", instance_id="inst0", ref_id=22
+              ),
+          ),
+      }
+      ref2, ref3 = refs_by_prompt["prompt_1"]
+      arr = np.full((4, 2, 2), 3, dtype=np.uint8)
+      self.mock_engine.fetch_routed_experts.return_value = (
+          rl_engine_interface.RoutedExpertsFetchResult(
+              fetched={ref2: arr, ref3: arr}, failed_refs=frozenset()
+          )
+      )
+      self.mock_engine.get_metrics = mock.AsyncMock(
+          return_value=[{
+              "staging/used_bytes": 0,
+              "staging/reserved_bytes": 0,
+              "staging/zombie_evictions_total": 0,
+          }]
+      )
+
+      def _attach_refs(prompt_id, group):
+        for idx, item in enumerate(group):
+          item.routed_experts_ref = refs_by_prompt[prompt_id][idx]
+          item.prompt_tokens = np.array([1, 2], dtype=np.int32)
+          item.completion_tokens = np.array([3, 4], dtype=np.int32)
+          item.traj["prompt_tokens"] = np.array([1, 2], dtype=np.int32)
+          item.traj["conversation_tokens"] = np.array([3, 4], dtype=np.int32)
+          item.traj["conversation_masks"] = np.array([1, 1], dtype=np.int32)
+          item.traj["old_logprobs"] = np.array([-0.2, -0.3], dtype=np.float32)
+
+      batch_cfg = batch_assembly.BatchConfig(
+          mini_batch_size=1,
+          train_micro_batch_size=1,
+          max_seq_token_per_tpu=16,
+          max_prompt_length=8,
+          max_response_length=8,
+      )
+      assembler = batch_assembly.SequencePackedBatchAssembler(
+          batch_size=1,
+          num_generations=2,
+          mini_batch_size=1,
+          max_packed_len=16,
+      )
+      program, dispatched = self._zero_variance_program(
+          [[1.0, 1.0], [0.0, 1.0]],
+          dataset=["prompt_0", "prompt_1"],
+          max_steps=1,
+          rollout_returns_routed_experts=True,
+          batch_config=batch_cfg,
+          assembler=assembler,
+          item_mutator=_attach_refs,
+      )
+      await asyncio.wait_for(program.run_async(self.mock_engine), timeout=10.0)
+
+      self.assertEqual(dispatched, ["prompt_0", "prompt_1"])
+      # Dropped `prompt_0` is never fetched into trainer payloads.
+      self.mock_engine.fetch_routed_experts.assert_awaited_once_with(
+          (ref2, ref3)
+      )
+      released: set[datatypes.RoutedExpertsRef] = set()
+      for call in self.mock_engine.release_routed_experts.await_args_list:
+        released.update(call.args[0])
+      self.assertEqual(
+          released,
+          {*refs_by_prompt["prompt_0"], *refs_by_prompt["prompt_1"]},
+      )
+
+    asyncio.run(_run())
+
+  def test_max_staleness_zero_two_restarts_with_drop_on_second_run_never_replays_step_zero(
+      self,
+  ):
+    async def _run():
+      dataset = [f"prompt_{i}" for i in range(5)]
+      rewards_by_prompt = {
+          "prompt_0": [1.0, 0.0],  # Step 0 (Run 1): kept, 0 drops -> ckpt={}
+          "prompt_1": [1.0, 1.0],  # Step 1 (Run 2): tied -> dropped!
+          "prompt_2": [0.0, 1.0],  # Step 1 (Run 2): kept -> ckpt has skip=1
+          "prompt_3": [1.0, 0.0],  # Step 2 (Run 3): kept
+      }
+
+      async def _run_segment(
+          *, max_steps: int, restored_step: int, ckpt_meta: dict[str, Any]
+      ) -> tuple[list[str], dict[str, Any]]:
+        scored_prompts: list[str] = []
+        ready: list[list[datatypes.TrajectoryItem]] = []
+        engine = mock.create_autospec(
+            rl_program.rl_engine_interface.AbstractRLEngine, instance=True
+        )
+        engine.resume_from_checkpoint = mock.AsyncMock(
+            return_value=restored_step
+        )
+        engine.restored_checkpoint_metadata = ckpt_meta
+        engine.prepare_rollout_policy = mock.AsyncMock(
+            return_value=restored_step
+        )
+        engine.sync_weights = mock.AsyncMock(return_value=restored_step + 1)
+        engine.save_checkpoint = mock.AsyncMock()
+        engine.train_step = mock.AsyncMock(return_value={"metrics": {}})
+
+        async def _dispatch(prompts, **dispatch_kwargs):
+          for prompt in prompts:
+            pid = prompt["prompt_id"]
+            group = _make_trajectory_group(
+                prompt_id=pid,
+                policy_version=dispatch_kwargs["policy_version"],
+            )
+            for item in group:
+              item.traj["conversation_text"][0]["content"] = pid
+            ready.append(group)
+
+        async def _poll(timeout_s=0.1):
+          del timeout_s
+          if ready:
+            return ready.pop(0)
+          await asyncio.sleep(0.01)
+          return []
+
+        engine.dispatch_rollouts = mock.AsyncMock(side_effect=_dispatch)
+        engine.poll_rollouts = mock.AsyncMock(side_effect=_poll)
+
+        def _score_by_prompt(prompts, completions, **_):
+          del completions
+          pid = prompts[0]
+          scored_prompts.append(pid)
+          return rewards_by_prompt[pid]
+
+        prog = rl_program.StandardRLProgram(
+            dataset=dataset,
+            max_steps=max_steps,
+            batch_size=1,
+            max_staleness=0,
+            algo_config=dataclasses.replace(
+                self.algo_config, drop_zero_variance_groups=True
+            ),
+            rollout_temperature=0.9,
+            rollout_returns_routed_experts=False,
+            batch_config=batch_assembly.BatchConfig(mini_batch_size=1),
+            reward_fns=[_score_by_prompt],
+        )
+        try:
+          await asyncio.wait_for(prog.run_async(engine), timeout=10.0)
+          saved = dict(engine.save_checkpoint.call_args.kwargs["metadata"])
+          return scored_prompts, saved
+        finally:
+          prog.close()
+
+      # Run 1 completes step 0 cleanly with zero drops (prefix-only ckpt).
+      scored_1, ckpt_1 = await _run_segment(
+          max_steps=1, restored_step=0, ckpt_meta={}
+      )
+      self.assertIn("prompt_0", scored_1)
+      self.assertNotIn("committed_prompt_ids", ckpt_1)
+      self.assertNotIn("skipped_prompt_ids", ckpt_1)
+
+      # Run 2 resumes at step 1, drops prompt_1, commits prompt_2, and persists
+      # resume_skip_count=1 alongside prompt_id sets.
+      scored_2, ckpt_2 = await _run_segment(
+          max_steps=2, restored_step=1, ckpt_meta=ckpt_1
+      )
+      self.assertNotIn("prompt_0", scored_2)
+      self.assertEqual(ckpt_2["skipped_prompt_ids"], ["prompt_1"])
+      self.assertEqual(ckpt_2["committed_prompt_ids"], ["prompt_2"])
+      self.assertEqual(ckpt_2["resume_skip_count"], 1)
+
+      # Run 3 resumes at step 2: must NOT replay prompt_0 from step 0!
+      scored_3, ckpt_3 = await _run_segment(
+          max_steps=3, restored_step=2, ckpt_meta=ckpt_2
+      )
+      self.assertNotIn("prompt_0", scored_3)
+      self.assertNotIn("prompt_1", scored_3)
+      self.assertNotIn("prompt_2", scored_3)
+      self.assertEqual(ckpt_3["committed_prompt_ids"], ["prompt_2", "prompt_3"])
+      self.assertEqual(ckpt_3["resume_skip_count"], 1)
+
+    asyncio.run(_run())
+
+  def test_raises_after_max_consecutive_zero_variance_groups(self):
+    async def _run():
+      # Dataset has exactly `limit=2` prompts so an off-by-one `>` guard would
+      # exhaust the dataset without raising.
+      program_fail, dispatched_fail = self._zero_variance_program(
+          [[1.0, 1.0]] * 2,
+          dataset=["prompt_0", "prompt_1"],
+          max_steps=1,
+          max_consecutive_filtered_groups=2,
+      )
+      with self.assertRaisesRegex(
+          RuntimeError, "Dropped 2 zero-variance groups in a row"
+      ):
+        await asyncio.wait_for(
+            program_fail.run_async(self.mock_engine), timeout=10.0
+        )
+      self.assertEqual(dispatched_fail, ["prompt_0", "prompt_1"])
+
+      # A kept group in between resets the count.
+      program_ok, dispatched = self._zero_variance_program(
+          [[1.0, 1.0], [0.0, 1.0], [0.0, 0.0], [1.0, 0.0]],
+          dataset=[f"prompt_{i}" for i in range(4)],
+          max_steps=2,
+          max_consecutive_filtered_groups=2,
+      )
+      await asyncio.wait_for(
+          program_ok.run_async(self.mock_engine), timeout=10.0
+      )
+      self.assertEqual(program_ok.step, 2)
+      self.assertEqual(
+          dispatched, ["prompt_0", "prompt_1", "prompt_2", "prompt_3"]
+      )
+
+    asyncio.run(_run())
+
+  def test_zero_variance_group_keeps_partial_outage_group_via_is_valid_mask(
+      self,
+  ):
+    async def _run():
+      # Invalid item gets a 0.0 placeholder reward, matching the single valid
+      # item's 0.0 reward (`rewards == [0.0, 0.0]`). Passing `item.is_valid` to
+      # `tied_rewards` keeps this partial-outage group visible to rollout health
+      # instead of dropping it as tied.
+      def _invalidate_second(prompt_id, group):
+        del prompt_id
+        group[1].is_valid = False
+
+      program, dispatched = self._zero_variance_program(
+          [[0.0]],
+          dataset=["prompt_0"],
+          max_steps=1,
+          item_mutator=_invalidate_second,
+      )
+      logged = {}
+      log_metric = program._log_metric
+
+      def _record_metric(name, value, step, **kwargs):
+        logged[(name, step)] = value
+        log_metric(name, value, step, **kwargs)
+
+      program._log_metric = _record_metric
+      await asyncio.wait_for(program.run_async(self.mock_engine), timeout=10.0)
+      self.assertEqual(dispatched, ["prompt_0"])
+      self.assertEqual(program.step, 1)
+      self.mock_engine.train_step.assert_called_once()
+      self.assertEqual(
+          logged[("rollout/tied_rewards_dropped_groups_count", 0)], 0.0
+      )
+
+    asyncio.run(_run())
+
+  def test_drop_zero_variance_groups_requires_train_and_completion_order(self):
+    for kwargs in (
+        {"group_order": rl_program.GroupOrder.PROMPT_ARRIVAL},
+        {"mode": rl_program.Mode.EVAL},
+    ):
+      algo_cfg = dataclasses.replace(
+          self.algo_config, drop_zero_variance_groups=True
+      )
+      with self.assertRaisesRegex(
+          ValueError, "drop_zero_variance_groups requires"
+      ):
+        rl_program.StandardRLProgram(
+            dataset=["p0"],
+            algo_config=algo_cfg,
+            rollout_temperature=0.9,
+            rollout_returns_routed_experts=False,
+            batch_config=self.batch_config,
+            reward_fns=[lambda prompts, completions, **_: [1.0, 1.0]],
+            **kwargs,
+        )
+
   def test_window_advances_a_whole_batch_when_a_group_goes_missing(self):
     async def _run():
       program = self._window_program()

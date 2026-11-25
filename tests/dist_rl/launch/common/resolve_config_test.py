@@ -879,6 +879,62 @@ weight_sync_config:
           "agentic_grpo_config.max_version_span=2",
           "agentic_grpo_config.trajectory_group_order=prompt_arrival",
       ])
+    with self.assertRaisesRegex(
+        ValueError,
+        "agentic_grpo_config.drop_zero_variance_groups is only supported",
+    ):
+      resolve_config.initialize([
+          "agentic_grpo_config.drop_zero_variance_groups=true",
+          "agentic_grpo_config.trajectory_group_order=prompt_arrival",
+      ])
+    with self.assertRaisesRegex(
+        TypeError,
+        "agentic_grpo_config.drop_zero_variance_groups must be a bool",
+    ):
+      resolve_config.initialize(
+          ["agentic_grpo_config.drop_zero_variance_groups='false'"]
+      )
+    with self.assertRaisesRegex(
+        ValueError,
+        "agentic_grpo_config.drop_zero_variance_groups requires a"
+        " group-relative advantage_estimator",
+    ):
+      resolve_config.initialize([
+          "agentic_grpo_config.drop_zero_variance_groups=true",
+          "agentic_grpo_config.advantage_estimator=gae",
+      ])
+    with self.assertRaisesRegex(
+        ValueError,
+        "agentic_grpo_config.drop_zero_variance_groups requires"
+        " num_generations >= 2",
+    ):
+      resolve_config.initialize([
+          "agentic_grpo_config.drop_zero_variance_groups=true",
+          "agentic_grpo_config.num_generations=1",
+      ])
+    for bad_limit, exc_type in (
+        ("agentic_grpo_config.max_consecutive_filtered_groups=true", TypeError),
+        ("agentic_grpo_config.max_consecutive_filtered_groups='4'", TypeError),
+        ("agentic_grpo_config.max_consecutive_filtered_groups=0", ValueError),
+        ("agentic_grpo_config.max_consecutive_filtered_groups=-2", ValueError),
+    ):
+      with self.subTest(bad_limit=bad_limit):
+        with self.assertRaisesRegex(
+            exc_type, "agentic_grpo_config.max_consecutive_filtered_groups"
+        ):
+          resolve_config.initialize([bad_limit])
+
+    hp = resolve_config.initialize([
+        "agentic_grpo_config.drop_zero_variance_groups=true",
+        "agentic_grpo_config.max_consecutive_filtered_groups=32",
+    ])
+    self.assertTrue(
+        hp.config["agentic_grpo_config"]["drop_zero_variance_groups"]
+    )
+    self.assertEqual(
+        hp.config["agentic_grpo_config"]["max_consecutive_filtered_groups"],
+        32,
+    )
 
   def test_max_seq_tokens_per_device_syncs_with_legacy_tpu_field(self):
     hp = resolve_config.initialize([

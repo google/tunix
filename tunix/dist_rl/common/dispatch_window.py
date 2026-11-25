@@ -28,6 +28,16 @@ class HasPromptId(Protocol):
     ...
 
 
+def _extract_prompt_ids(
+    ckpt_meta: Mapping[str, object], key: str
+) -> set[str]:
+  """Extracts a string set of prompt IDs from checkpoint metadata."""
+  raw = ckpt_meta[key] if key in ckpt_meta else ()
+  if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
+    return {str(pid) for pid in raw}
+  return set()
+
+
 class DispatchWindow:
   """Bounds how many prompts ahead of training the dispatcher may run.
 
@@ -46,8 +56,8 @@ class DispatchWindow:
     - In-order (`out_of_order_resume=False`): skips the first `next_batch *
       full_batch_size` dataset items via `dataset_skip_count`.
     - Out-of-order (`out_of_order_resume=True`): records `committed_prompt_ids`
-      and `skipped_prompt_ids` so `admit()` can skip already-handled prompts
-      on resume.
+      and `skipped_prompt_ids` (plus any prior prefix `resume_skip_count`) so
+      `admit()` and `dataset_skip_count` skip already-handled prompts on resume.
   """
 
   def __init__(
@@ -75,6 +85,7 @@ class DispatchWindow:
     self._committed_prompt_ids: set[str] = set()
     self._skipped_prompt_ids: set[str] = set()
     self._has_resume_state = False
+    self._resume_skip_count = 0
     self._start_step: int | None = None
     self._admitted_prompts = 0
 
@@ -102,7 +113,7 @@ class DispatchWindow:
   def dataset_skip_count(self) -> int:
     """Number of leading dataset items `iter_dataset_async` can skip."""
     if self.uses_prompt_id_resume:
-      return 0
+      return self._resume_skip_count
     return self.next_batch * self.full_batch_size
 
   @property
@@ -150,8 +161,8 @@ class DispatchWindow:
 
   def checkpoint_metadata(
       self, pending_groups: Sequence[Sequence[HasPromptId]] = ()
-  ) -> dict[str, list[str]]:
-    """Returns off-policy prompt_id sets for checkpoint metadata when active."""
+  ) -> dict[str, list[str] | int]:
+    """Returns prompt_id sets and `resume_skip_count` for checkpoint metadata."""
     if not self.out_of_order_resume or (
         self.max_staleness <= 0
         and not self._skipped_prompt_ids
@@ -163,34 +174,63 @@ class DispatchWindow:
         for g in pending_groups
         if g and g[0].prompt_id not in (None, "")
     }
-    return {
+    metadata: dict[str, list[str] | int] = {
         "committed_prompt_ids": sorted(self._committed_prompt_ids | step_pids),
         "skipped_prompt_ids": sorted(self._skipped_prompt_ids),
     }
+    if self._resume_skip_count > 0:
+      metadata["resume_skip_count"] = self._resume_skip_count
+    return metadata
 
   def restore_checkpoint_metadata(
       self, ckpt_meta: Mapping[str, object] | None
   ) -> bool:
-    """Restores committed and skipped prompt_ids from checkpoint metadata."""
-    if (
-        not self.out_of_order_resume
-        or not isinstance(ckpt_meta, Mapping)
-        or (
-            "committed_prompt_ids" not in ckpt_meta
-            and "skipped_prompt_ids" not in ckpt_meta
-        )
-    ):
+    """Restores committed/skipped `prompt_id` sets and `resume_skip_count`."""
+    if not self.out_of_order_resume:
       return False
+    if not isinstance(ckpt_meta, Mapping) or (
+        "committed_prompt_ids" not in ckpt_meta
+        and "skipped_prompt_ids" not in ckpt_meta
+    ):
+      if self.next_batch < 0:
+        raise ValueError(
+            f"next_batch must be non-negative, got {self.next_batch}."
+        )
+      # Prefix-skip resume (`max_staleness == 0` with no prior drops) skips the
+      # first `next_batch * full_batch_size` dataset items without recording
+      # their prompt_ids in `_committed_prompt_ids`. Retain that prefix bound so
+      # if a later step drops a group and switches subsequent checkpoints to
+      # prompt_id resume, a second restart still skips those prefix items
+      # instead of replaying step 0.
+      self._has_resume_state = False
+      self._committed_prompt_ids = set()
+      self._skipped_prompt_ids = set()
+      self._resume_skip_count = self.next_batch * self.full_batch_size
+      return False
+
+    raw_skip_count = (
+        ckpt_meta["resume_skip_count"]
+        if "resume_skip_count" in ckpt_meta
+        else 0
+    )
+    if isinstance(raw_skip_count, bool) or not isinstance(raw_skip_count, int):
+      raise TypeError(
+          "checkpoint metadata resume_skip_count must be an int, got"
+          f" {raw_skip_count!r}."
+      )
+    if raw_skip_count < 0:
+      raise ValueError(
+          "checkpoint metadata resume_skip_count must be non-negative, got"
+          f" {raw_skip_count}."
+      )
     self._has_resume_state = True
-
-    def _extract_ids(key: str) -> set[str]:
-      raw = ckpt_meta[key] if key in ckpt_meta else ()
-      if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
-        return {str(pid) for pid in raw}
-      return set()
-
-    self._committed_prompt_ids = _extract_ids("committed_prompt_ids")
-    self._skipped_prompt_ids = _extract_ids("skipped_prompt_ids")
+    self._resume_skip_count = raw_skip_count
+    self._committed_prompt_ids = _extract_prompt_ids(
+        ckpt_meta, "committed_prompt_ids"
+    )
+    self._skipped_prompt_ids = _extract_prompt_ids(
+        ckpt_meta, "skipped_prompt_ids"
+    )
     return True
 
   async def admit(self, prompt_id: Hashable) -> bool:

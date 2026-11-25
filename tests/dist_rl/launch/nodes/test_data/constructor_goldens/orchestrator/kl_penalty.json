@@ -12,11 +12,13 @@
         "kwargs": {
           "advantage_estimator": "grpo",
           "beta": 0.04,
+          "drop_zero_variance_groups": false,
           "epsilon": 0.2,
           "epsilon_high": 0.28,
           "kl_loss_mode": "low_var_kl",
           "loss_agg_mode": "sequence-mean-token-mean",
           "loss_algo": "grpo",
+          "max_consecutive_filtered_groups": null,
           "num_generations": 8,
           "num_iterations": 1,
           "reward_mode": "env",

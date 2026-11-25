@@ -1386,6 +1386,47 @@ def _validate_local_settings(hp: cli_config.HyperParameters) -> None:
       )
 
 
+def _validate_drop_zero_variance_settings(grpo: Mapping[str, Any]) -> None:
+  """Validates `agentic_grpo_config` zero-variance group filtering settings."""
+  drop_zero_variance = grpo["drop_zero_variance_groups"]
+  if not isinstance(drop_zero_variance, bool):
+    raise TypeError(
+        "agentic_grpo_config.drop_zero_variance_groups must be a bool, got"
+        f" {drop_zero_variance!r}."
+    )
+  limit = grpo["max_consecutive_filtered_groups"]
+  if limit is not None:
+    if isinstance(limit, bool) or not isinstance(limit, int):
+      raise TypeError(
+          "agentic_grpo_config.max_consecutive_filtered_groups must be an int"
+          f" or null, got {limit!r}."
+      )
+    if limit <= 0:
+      raise ValueError(
+          "agentic_grpo_config.max_consecutive_filtered_groups must be"
+          f" positive, got {limit}."
+      )
+  if drop_zero_variance:
+    if grpo["advantage_estimator"] == "gae":
+      raise ValueError(
+          "agentic_grpo_config.drop_zero_variance_groups requires a"
+          " group-relative advantage_estimator, not 'gae'."
+      )
+    if int(grpo["num_generations"]) < 2:
+      raise ValueError(
+          "agentic_grpo_config.drop_zero_variance_groups requires"
+          f" num_generations >= 2, got {grpo['num_generations']}."
+      )
+    if (
+        grpo["trajectory_group_order"]
+        == dist_rl_datatypes.GroupOrder.PROMPT_ARRIVAL.value
+    ):
+      raise ValueError(
+          "agentic_grpo_config.drop_zero_variance_groups is only supported"
+          " with trajectory_group_order='trajectory_completion'."
+      )
+
+
 def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   """Validates cross-field invariants across trainer and rollout configs."""
   # TODO(noghabi): Check which of these checks can be consolidated with the
@@ -1478,6 +1519,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
           "agentic_grpo_config.max_version_span is only supported with"
           " trajectory_group_order='trajectory_completion'."
       )
+  _validate_drop_zero_variance_settings(grpo)
   _check_choice(
       "weight_sync_config.mode",
       hp.config_mapping("weight_sync_config")["mode"],

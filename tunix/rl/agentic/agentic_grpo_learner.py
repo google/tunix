@@ -130,6 +130,7 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
           "loss_algo should be either grpo or gspo-token. Received: "
           f"{self.loss_algo}"
       )
+    self._validate_drop_zero_variance_groups()
     self._validate_sampler_is_and_rs_options()
 
 
@@ -192,6 +193,12 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       env_class: The class of the environment to be used.
       env_kwargs: Keyword arguments to pass to the environment class.
     """  # fmt: skip
+    if algo_config.drop_zero_variance_groups:
+      raise ValueError(
+          "drop_zero_variance_groups is only supported by the distributed"
+          " StandardRLProgram; non-distributed agentic GRPOLearner does not"
+          " drop zero-variance groups."
+      )
     super().__init__(
         rl_engine=rl_engine,
         reward_fns=reward_fns,

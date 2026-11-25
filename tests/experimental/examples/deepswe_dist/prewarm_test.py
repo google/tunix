@@ -110,6 +110,17 @@ class PrewarmSandboxesTest(absltest.TestCase):
         max_warmpool_replicas=8,
     )
 
+  def test_prompt_items_context_rejects_drop_zero_variance_groups(self):
+    hp = resolve_config.initialize([
+        "batch_size=16",
+        "agentic_grpo_config.num_generations=8",
+        "agentic_grpo_config.drop_zero_variance_groups=true",
+    ])
+    with self.assertRaisesRegex(
+        ValueError, "does not support.*drop_zero_variance_groups=True"
+    ):
+      prewarm.prompt_items_context(hp, self.prompt_items)
+
   def test_noop_when_agent_sandbox_disabled(self):
     del os.environ["ORCHESTRATOR_ID"]
     with self._wrap(use_agent_sandbox=False) as items:

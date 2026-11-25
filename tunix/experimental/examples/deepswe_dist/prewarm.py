@@ -113,6 +113,14 @@ def prompt_items_context(
 ) -> contextlib.AbstractContextManager[Iterable[dict[str, object]]]:
   """`orchestrator.PromptItemsContext` that prewarms one pool per generation."""
   grpo = hp.config_mapping("agentic_grpo_config")
+  if grpo["drop_zero_variance_groups"]:
+    raise ValueError(
+        "experimental.examples.deepswe_dist.prewarm does not support"
+        " agentic_grpo_config.drop_zero_variance_groups=True: tied-group"
+        " replacements advance PrewarmDatasetIterator past its fixed"
+        " max_staleness retention window while straggler sandboxes are still"
+        " active."
+    )
   num_generations = int(grpo["num_generations"])
   return prewarm_sandboxes(
       prompt_items,

@@ -17,6 +17,7 @@ import shutil
 import tempfile
 import types
 from typing import Any, Dict, Optional
+from unittest import mock
 import uuid
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -1383,6 +1384,24 @@ class GRPOLearnerTest(parameterized.TestCase):
           base_rollout.RolloutConfig(return_logprobs=True, num_logprobs=1),
           packing_enabled=False,
       )
+
+  def test_drop_zero_variance_groups_rejected_in_non_distributed_grpo_learner(
+      self,
+  ):
+    for algo_variant in ('grpo', 'dapo'):
+      with self.subTest(algo_variant=algo_variant):
+        with self.assertRaisesRegex(
+            ValueError, 'only supported by the distributed StandardRLProgram'
+        ):
+          grpo_lib.GRPOLearner(
+              rl_engine=mock.MagicMock(),
+              reward_fns=reward_1,
+              algo_config=grpo_lib.GRPOConfig(
+                  num_generations=2,
+                  algo_variant=algo_variant,
+                  drop_zero_variance_groups=True,
+              ),
+          )
 
 
 if __name__ == '__main__':

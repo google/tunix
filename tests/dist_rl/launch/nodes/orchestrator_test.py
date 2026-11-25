@@ -342,6 +342,16 @@ class BuildersTest(absltest.TestCase):
     self.assertEqual(config.routed_experts_encode_mode, "uint10")
     self.assertEqual(config.routed_experts_num_experts, 256)
 
+  def test_grpo_config_forwards_drop_zero_variance_groups_settings(self):
+    config = orchestrator.build_grpo_config(
+        _config(
+            "agentic_grpo_config.drop_zero_variance_groups=true",
+            "agentic_grpo_config.max_consecutive_filtered_groups=32",
+        )
+    )
+    self.assertTrue(config.drop_zero_variance_groups)
+    self.assertEqual(config.max_consecutive_filtered_groups, 32)
+
   def test_batch_config(self):
     config = orchestrator.build_batch_config(
         _config(

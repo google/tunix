@@ -14,7 +14,11 @@
 """Helper functions for GRPO Trainer."""
 
 import dataclasses
+import functools
+import typing
 from typing import Any, Dict, List, Optional, Sequence
+import warnings
+from absl import logging
 from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl import rl_learner
 from tunix.rl.grpo import grpo_learner as grpo_learner_lib
@@ -47,7 +51,13 @@ class DAPOConfig(grpo_learner_lib.GRPOConfig):
    epsilon: Epsilon value for clipping (𝜀 in GRPO loss in paper). Similar to
      PPO, it ensures stable updates.
    epsilon_high: Epsilon value for upper bound clipping.
-   dynamic_sampling: Whether to use dynamic sampling.
+   drop_zero_variance_groups: Whether to drop prompt groups whose rewards tie
+     and sample replacement prompts (DAPO's dynamic sampling). On by default for
+     DAPO. Applied by the distributed `StandardRLProgram`; `DAPOLearner` does
+     not apply it yet.
+   max_consecutive_filtered_groups: Raise `RuntimeError` after this many
+     consecutive groups are dropped by `drop_zero_variance_groups`. `None`
+     disables the guard.
    overlong_buffer: The overlong buffer to use for overlong reward shaping.
    References: - DAPO:
      https://arxiv.org/pdf/2503.14476
@@ -63,7 +73,9 @@ class DAPOConfig(grpo_learner_lib.GRPOConfig):
   beta: float = 0.0  # No KL term.
   epsilon: float = 0.2
   epsilon_high: float = 0.28  # Clip higher
-  dynamic_sampling: bool = True  # TODO(sizhi): Add dynamic sampling.
+  # TODO(sizhi): Drop zero-variance groups in `DAPOLearner` too.
+  drop_zero_variance_groups: bool = True
+  max_consecutive_filtered_groups: int | None = None
   overlong_buffer: Optional[Dict[str, Any]] = dataclasses.field(
       default_factory=lambda: {
           "enable": True,
@@ -72,6 +84,24 @@ class DAPOConfig(grpo_learner_lib.GRPOConfig):
           "max_response_length": 20480,  # Hard maximum generation length.
       }
   )
+
+  if typing.TYPE_CHECKING:
+    # Type-checker-only alias so legacy `DAPOConfig(dynamic_sampling=...)` and
+    # `cfg.dynamic_sampling` type-check without adding a runtime dataclass field
+    # or `InitVar` (which breaks `dataclasses.replace`).
+    dynamic_sampling: bool = True
+  else:
+
+    @property
+    def dynamic_sampling(self) -> bool:
+      """Deprecated alias for `drop_zero_variance_groups`."""
+      warnings.warn(
+          "DAPOConfig.dynamic_sampling is deprecated; use"
+          " drop_zero_variance_groups instead.",
+          DeprecationWarning,
+          stacklevel=2,
+      )
+      return self.drop_zero_variance_groups
 
   def __post_init__(self):
     if self.beta != 0.0:
@@ -106,6 +136,36 @@ class DAPOConfig(grpo_learner_lib.GRPOConfig):
     super().__post_init__()
 
 
+def _alias_dynamic_sampling_init(init_fn):
+  """Preserves deprecated `dynamic_sampling` keyword on `DAPOConfig`."""
+
+  @functools.wraps(init_fn)
+  def _wrapped(self, *args, **kwargs):
+    if "dynamic_sampling" in kwargs:
+      if "drop_zero_variance_groups" in kwargs:
+        raise ValueError(
+            "Cannot specify both 'drop_zero_variance_groups' and"
+            " 'dynamic_sampling'. Please use 'drop_zero_variance_groups' only."
+        )
+      warnings.warn(
+          "DAPOConfig(dynamic_sampling=...) is deprecated; use"
+          " drop_zero_variance_groups instead.",
+          DeprecationWarning,
+          stacklevel=2,
+      )
+      kwargs["drop_zero_variance_groups"] = kwargs.pop("dynamic_sampling")
+    return init_fn(self, *args, **kwargs)
+
+  return _wrapped
+
+
+setattr(
+    DAPOConfig,
+    "__init__",
+    _alias_dynamic_sampling_init(DAPOConfig.__init__),
+)
+
+
 def reward_shaping(
     prompts: List[str],
     completions: List[str],
@@ -137,6 +197,8 @@ def reward_shaping(
 class DAPOLearner(grpo_learner_lib.GrpoLearner[DAPOConfig]):
   """DAPO learner."""
 
+  _allow_unimplemented_drop_zero_variance: bool = True
+
   @compat.alias_init_param("rl_cluster", "rl_engine")
   def __init__(
       self,
@@ -147,6 +209,12 @@ class DAPOLearner(grpo_learner_lib.GrpoLearner[DAPOConfig]):
       data_shuffle_seed: int | None = None,
   ):
     """Initializes the `DAPOLearner`."""
+    if algo_config.drop_zero_variance_groups:
+      logging.warning(
+          "DAPOConfig.drop_zero_variance_groups=True is not yet implemented in"
+          " non-distributed DAPOLearner and will have no effect; use"
+          " distributed StandardRLProgram to drop zero-variance groups."
+      )
     reward_fns = (
         [reward_fns] if not isinstance(reward_fns, Sequence) else reward_fns
     )

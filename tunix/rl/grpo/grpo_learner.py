@@ -60,6 +60,8 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
   group's performance to update the policy.
   """
 
+  _allow_unimplemented_drop_zero_variance: bool = False
+
   @compat.alias_init_param("rl_cluster", "rl_engine")
   def __init__(
       self,
@@ -89,6 +91,15 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         ... }
       data_shuffle_seed: The seed used to shuffle the training data.
     """  # fmt: skip
+    if (
+        algo_config.drop_zero_variance_groups
+        and not self._allow_unimplemented_drop_zero_variance
+    ):
+      raise ValueError(
+          "drop_zero_variance_groups is only supported by the distributed"
+          " StandardRLProgram; non-distributed GRPOLearner does not drop"
+          " zero-variance groups."
+      )
     super().__init__(
         rl_engine=rl_engine,
         algo_config=algo_config,

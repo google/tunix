@@ -333,6 +333,124 @@ class DispatchWindowTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_prefix_resume_then_filtered_drop_preserves_skip_count_across_restarts(
+      self,
+  ):
+    async def _run():
+      # Run 1 (max_staleness=0, full_batch_size=2): Step 0 commits prompt_0 and
+      # prompt_1 with zero drops, so checkpoint metadata stays empty ({}).
+      step_run1 = 0
+      run1 = dispatch_window.DispatchWindow(
+          max_staleness=0,
+          next_batch_fn=lambda: step_run1,
+          full_batch_size=2,
+          out_of_order_resume=True,
+      )
+      self.assertTrue(await run1.admit("prompt_0"))
+      self.assertTrue(await run1.admit("prompt_1"))
+      ckpt1 = run1.checkpoint_metadata(
+          pending_groups=[[_FakeItem("prompt_0")], [_FakeItem("prompt_1")]]
+      )
+      self.assertEqual(ckpt1, {})
+
+      # Run 2 resumes at step=1 from prefix-only ckpt1: skips leading 2 items
+      # (prompt_0, prompt_1), drops prompt_2, and commits prompt_3, prompt_4.
+      step_run2 = 0
+      run2 = dispatch_window.DispatchWindow(
+          max_staleness=0,
+          next_batch_fn=lambda: step_run2,
+          full_batch_size=2,
+          out_of_order_resume=True,
+      )
+      step_run2 = 1
+      self.assertFalse(run2.restore_checkpoint_metadata(ckpt1))
+      self.assertFalse(run2.uses_prompt_id_resume)
+      self.assertEqual(run2.dataset_skip_count, 2)
+
+      self.assertTrue(await run2.admit("prompt_2"))
+      self.assertTrue(await run2.admit("prompt_3"))
+      run2.on_group_filtered([_FakeItem("prompt_2")])
+      self.assertTrue(await run2.admit("prompt_4"))
+      ckpt2 = run2.checkpoint_metadata(
+          pending_groups=[[_FakeItem("prompt_3")], [_FakeItem("prompt_4")]]
+      )
+      self.assertEqual(
+          ckpt2,
+          {
+              "committed_prompt_ids": ["prompt_3", "prompt_4"],
+              "skipped_prompt_ids": ["prompt_2"],
+              "resume_skip_count": 2,
+          },
+      )
+
+      # Run 3 resumes at step=2 from prompt-ID ckpt2: must still skip leading 2
+      # items (prompt_0, prompt_1) via dataset_skip_count=2, reject prompt_2..4
+      # via admit(), and admit prompt_5, prompt_6 for step 2.
+      step_run3 = 0
+      run3 = dispatch_window.DispatchWindow(
+          max_staleness=0,
+          next_batch_fn=lambda: step_run3,
+          full_batch_size=2,
+          out_of_order_resume=True,
+      )
+      step_run3 = 2
+      self.assertTrue(run3.restore_checkpoint_metadata(ckpt2))
+      self.assertTrue(run3.uses_prompt_id_resume)
+      self.assertEqual(run3.dataset_skip_count, 2)
+
+      admitted_run3: list[int] = []
+      for idx in range(run3.dataset_skip_count, 7):
+        if await run3.admit(f"prompt_{idx}"):
+          admitted_run3.append(idx)
+      self.assertEqual(admitted_run3, [5, 6])
+      self.assertEqual(run3.in_flight_prompts, 2)
+
+      # Subsequent checkpoints preserve resume_skip_count=2 alongside new IDs.
+      ckpt3 = run3.checkpoint_metadata(
+          pending_groups=[[_FakeItem("prompt_5")], [_FakeItem("prompt_6")]]
+      )
+      self.assertEqual(
+          ckpt3,
+          {
+              "committed_prompt_ids": [
+                  "prompt_3",
+                  "prompt_4",
+                  "prompt_5",
+                  "prompt_6",
+              ],
+              "skipped_prompt_ids": ["prompt_2"],
+              "resume_skip_count": 2,
+          },
+      )
+
+    asyncio.run(_run())
+
+  def test_restore_checkpoint_metadata_rejects_invalid_resume_skip_count(self):
+    window = dispatch_window.DispatchWindow(
+        max_staleness=0,
+        next_batch_fn=lambda: 1,
+        full_batch_size=2,
+        out_of_order_resume=True,
+    )
+    with self.assertRaisesRegex(
+        ValueError, "resume_skip_count must be non-negative"
+    ):
+      window.restore_checkpoint_metadata({
+          "committed_prompt_ids": ["prompt_0"],
+          "skipped_prompt_ids": [],
+          "resume_skip_count": -1,
+      })
+    for bad_skip in (True, "2", 1.5):
+      with self.subTest(bad_skip=bad_skip):
+        with self.assertRaisesRegex(
+            TypeError, "resume_skip_count must be an int"
+        ):
+          window.restore_checkpoint_metadata({
+              "committed_prompt_ids": ["prompt_0"],
+              "skipped_prompt_ids": [],
+              "resume_skip_count": bad_skip,
+          })
+
 
 if __name__ == "__main__":
   absltest.main()

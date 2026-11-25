@@ -265,6 +265,13 @@ agentic_grpo_config:
   off_policy_steps: 0
   max_version_span: null
   trajectory_group_order: "trajectory_completion"
+  # Drop prompt groups whose rewards tie (zero variance) and sample replacement
+  # prompts, as in DAPO's dynamic sampling (https://arxiv.org/abs/2503.14476).
+  # Requires `trajectory_group_order: "trajectory_completion"`.
+  drop_zero_variance_groups: false
+  # Fail after this many consecutive groups are dropped by
+  # `drop_zero_variance_groups`. Null disables the guard.
+  max_consecutive_filtered_groups: null
   reward_mode: "env"
   episode_timeout: 600
   max_turns: 8

@@ -52,6 +52,7 @@ from tunix.dist_rl.orchestrator import rl_engine_interface
 from tunix.dist_rl.orchestrator import step_telemetry
 from tunix.dist_rl.queue_manager import trajectory_queue_manager
 from tunix.dist_rl.trajectory import store as trajectory_store_lib
+from tunix.rl import advantages as advantages_lib
 from tunix.rl import algorithm_config
 from tunix.rl import common as rl_common
 from tunix.rl import function_registry
@@ -640,6 +641,13 @@ class StandardRLProgram(RLProgram):
           num_generations=self.num_generations,
           batch_config=self.batch_config,
       )
+    # Per-step tied-reward drop counts for
+    # `algo_config.drop_zero_variance_groups`, plus the current run of
+    # consecutive drops. Tracked as scalars so dropped `TrajectoryItem`s are
+    # never retained in host RAM across the step.
+    self._tied_dropped_groups_count = 0
+    self._tied_dropped_trajectories_count = 0
+    self._consecutive_tied_groups = 0
     self.max_staleness = max_staleness
     self.max_version_span = max_version_span
     self.sync_weights = sync_weights
@@ -676,6 +684,14 @@ class StandardRLProgram(RLProgram):
         if isinstance(group_order, GroupOrder)
         else GroupOrder(group_order)
     )
+    if self.algo_config.drop_zero_variance_groups and (
+        self.group_order,
+        self.mode,
+    ) != (GroupOrder.TRAJECTORY_COMPLETION, Mode.TRAIN):
+      raise ValueError(
+          "algo_config.drop_zero_variance_groups requires"
+          " GroupOrder.TRAJECTORY_COMPLETION and Mode.TRAIN."
+      )
     self.on_step_begin = on_step_begin
     self.on_step_end = on_step_end
     self._in_flight_rollouts = 0
@@ -1077,10 +1093,27 @@ class StandardRLProgram(RLProgram):
       self,
       group: Sequence[datatypes.TrajectoryItem],
       rollout_ready_mono: float | None = None,
-  ) -> ScoredGroup:
-    """Scores a trajectory group and builds its RLTrainerPayloads and ScoredGroup off-loop."""
+  ) -> ScoredGroup | None:
+    """Scores a trajectory group and builds its RLTrainerPayloads and ScoredGroup off-loop.
+
+    Args:
+      group: Raw trajectory items of one prompt group.
+      rollout_ready_mono: Orchestrator monotonic timestamp when the group's
+        rollouts became ready, or `None` when unknown.
+
+    Returns:
+      The `ScoredGroup`, or `None` when `algo_config.drop_zero_variance_groups`
+      is on and the group's rewards tie.
+    """
     critique_start = time.monotonic()
     rewards, group_reward_log_metrics = self._score_group(group)
+    if (
+        self.algo_config.drop_zero_variance_groups
+        and advantages_lib.tied_rewards(
+            rewards, [item.is_valid for item in group]
+        )
+    ):
+      return None
     payloads = payload_builder.create_trainer_payloads(
         group,
         rewards=rewards,
@@ -1104,6 +1137,31 @@ class StandardRLProgram(RLProgram):
         reward_log_metrics=group_reward_log_metrics,
     )
 
+  def _drop_tied_group(self, group: list[datatypes.TrajectoryItem]) -> None:
+    """Drops a tied-reward group so a replacement prompt can be dispatched.
+
+    Frees the group's dispatch slot and staged MoE routing refs via
+    `_on_raw_group_filtered`, and counts the group and its trajectories for
+    step-end telemetry without holding the raw `TrajectoryItem`s in RAM.
+
+    Args:
+      group: Raw trajectory items of the dropped prompt group.
+
+    Raises:
+      RuntimeError: If `algo_config.max_consecutive_filtered_groups` groups in
+        a row were dropped.
+    """
+    logging.info(
+        "[pipeline] DROP reason=tied_rewards prompt_id=%s", group[0].prompt_id
+    )
+    self._on_raw_group_filtered(group)
+    self._tied_dropped_groups_count += 1
+    self._tied_dropped_trajectories_count += len(group)
+    self._consecutive_tied_groups += 1
+    limit = self.algo_config.max_consecutive_filtered_groups
+    if limit is not None and self._consecutive_tied_groups >= limit:
+      raise RuntimeError(f"Dropped {limit} zero-variance groups in a row.")
+
   async def critique_stage(self) -> None:
     """Stage 2: Scores rewards, PRMs, and reference KL logprobs."""
     assert self.engine is not None
@@ -1126,6 +1184,10 @@ class StandardRLProgram(RLProgram):
         scored_group = await asyncio.to_thread(
             self._critique_group, group, rollout_ready_mono
         )
+        if scored_group is None:
+          self._drop_tied_group(group)
+          continue
+        self._consecutive_tied_groups = 0
         if self._relay is not None:
           self._relay.release_unreferenced_critique_refs(
               group, scored_group.payloads
@@ -1174,7 +1236,7 @@ class StandardRLProgram(RLProgram):
   async def _drain_filtered_groups(
       self,
   ) -> list[list[datatypes.TrajectoryItem]]:
-    """Drains and returns all filtered groups from the raw trajectory queue."""
+    """Drains the groups dropped by `raw_q`."""
     return await self.raw_q.get_filtered_groups()
 
   def _collect_and_log_step_metrics(
@@ -1196,6 +1258,8 @@ class StandardRLProgram(RLProgram):
       log_step: int,
       sampler_agreement: dict[str, tuple[Any, list[Any]]] | None = None,
       filtered_groups: Sequence[Sequence[datatypes.TrajectoryItem]] = (),
+      tied_dropped_groups_count: int = 0,
+      tied_dropped_trajectories_count: int = 0,
       step_times: step_telemetry.StepTimes | None = None,
       reward_log_metrics: Sequence[RewardLogMetrics] = (),
       trainer_data_waits: Sequence[tuple[float, float | None]] = (),
@@ -1318,8 +1382,10 @@ class StandardRLProgram(RLProgram):
           tag = "rollout/" + tag.removeprefix("generation/")
         self._log_metric(tag, val, log_step)
 
-    filtered_groups_count = len(filtered_groups)
-    filtered_trajectories_count = sum(len(g) for g in filtered_groups)
+    filtered_groups_count = len(filtered_groups) + tied_dropped_groups_count
+    filtered_trajectories_count = (
+        sum(len(g) for g in filtered_groups) + tied_dropped_trajectories_count
+    )
     self._log_metric(
         "rollout/filtered_groups_count",
         float(filtered_groups_count),
@@ -2101,6 +2167,8 @@ class StandardRLProgram(RLProgram):
           await _maybe_save_checkpoint()
 
         if not all_step_items:
+          self._tied_dropped_groups_count = 0
+          self._tied_dropped_trajectories_count = 0
           logging.info(
               "Dataset exhausted at step %d before max_steps.", current_step
           )
@@ -2143,6 +2211,16 @@ class StandardRLProgram(RLProgram):
 
         step_time_sec = time.monotonic() - step_start_time
 
+        tied_dropped_groups_count = self._tied_dropped_groups_count
+        tied_dropped_trajectories_count = self._tied_dropped_trajectories_count
+        self._tied_dropped_groups_count = 0
+        self._tied_dropped_trajectories_count = 0
+        if self.algo_config.drop_zero_variance_groups:
+          self._log_metric(
+              "rollout/tied_rewards_dropped_groups_count",
+              float(tied_dropped_groups_count),
+              current_step,
+          )
         filtered_groups = await self._drain_filtered_groups()
         if self._relay is not None:
           await self._relay.flush_releases()
@@ -2165,6 +2243,8 @@ class StandardRLProgram(RLProgram):
             log_step=current_step,
             sampler_agreement=step_sampler_agreement,
             filtered_groups=filtered_groups,
+            tied_dropped_groups_count=tied_dropped_groups_count,
+            tied_dropped_trajectories_count=tied_dropped_trajectories_count,
             step_times=step_times,
             reward_log_metrics=step_reward_log_metrics,
             trainer_data_waits=trainer_data_waits,
@@ -2312,6 +2392,9 @@ class StandardRLProgram(RLProgram):
         await asyncio.gather(*tasks, return_exceptions=True)
       with self._assembler_lock:
         self.assembler.reset()
+      self._tied_dropped_groups_count = 0
+      self._tied_dropped_trajectories_count = 0
+      self._consecutive_tied_groups = 0
       if self._relay is not None:
         await self._relay.teardown(suppress_errors=not completed_cleanly)
 
