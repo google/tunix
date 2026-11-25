@@ -14,10 +14,10 @@
 
 """Process-level OpenTelemetry metrics and event-logs bootstrap for dist_rl.
 
-Installs a global ``MeterProvider`` and ``LoggerProvider`` (exporting to an
-OTLP/gRPC collector) and registers ``lineage_otel`` on ``common.lineage``.
-Applies three SDK-level policies across orchestrator, trainer, and rollout
-processes:
+Configured via ``otel_config`` in ``base_dist_config.yaml``. Installs a global
+``MeterProvider`` and ``LoggerProvider`` exporting to an OTLP/gRPC collector
+and registers ``lineage_otel`` on ``common.lineage``. Applies three SDK-level
+policies across orchestrator, trainer, and rollout processes:
 
 * ``unit="s"`` histograms use log-spaced ``SECONDS_HISTOGRAM_BOUNDARIES`` (5 ms
   to 1 h) instead of the SDK default buckets.
@@ -127,45 +127,6 @@ def normalize_endpoint(endpoint: str) -> str:
         f" http://localhost:4317), got {endpoint!r}."
     )
   return normalized
-
-
-def legacy_env_settings() -> tuple[str, int, float]:
-  """Reads legacy `OTEL_*` env vars for standalone `argparse` entry points."""
-  endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip()
-  raw_interval = os.getenv("OTEL_METRIC_EXPORT_INTERVAL", "").strip()
-  if raw_interval:
-    try:
-      interval_ms = int(raw_interval)
-    except ValueError as exc:
-      raise ValueError(
-          "OTEL_METRIC_EXPORT_INTERVAL must be a positive integer (ms), got"
-          f" {raw_interval!r}."
-      ) from exc
-    if interval_ms <= 0:
-      raise ValueError(
-          "OTEL_METRIC_EXPORT_INTERVAL must be a positive integer (ms), got"
-          f" {interval_ms}."
-      )
-  else:
-    interval_ms = DEFAULT_EXPORT_INTERVAL_MS
-
-  raw_timeout = os.getenv("OTEL_EXPORTER_OTLP_TIMEOUT", "").strip()
-  if raw_timeout:
-    try:
-      timeout_s = float(raw_timeout)
-    except ValueError as exc:
-      raise ValueError(
-          "OTEL_EXPORTER_OTLP_TIMEOUT must be a positive finite number (s),"
-          f" got {raw_timeout!r}."
-      ) from exc
-    if not math.isfinite(timeout_s) or timeout_s <= 0:
-      raise ValueError(
-          "OTEL_EXPORTER_OTLP_TIMEOUT must be a positive finite number (s),"
-          f" got {raw_timeout!r}."
-      )
-  else:
-    timeout_s = DEFAULT_EXPORT_TIMEOUT_S
-  return endpoint, interval_ms, timeout_s
 
 
 def _validate_timing(
@@ -322,25 +283,25 @@ def _build_meter_provider(
 
 
 def setup_metrics(
-    default_service_name: str,
-    resource_attributes: Mapping[str, str] | None = None,
     *,
-    endpoint: str | None = None,
+    service_name: str,
+    endpoint: str,
     export_interval_ms: int = DEFAULT_EXPORT_INTERVAL_MS,
     export_timeout_s: float = DEFAULT_EXPORT_TIMEOUT_S,
+    resource_attributes: Mapping[str, str] | None = None,
 ) -> bool:
   """Installs global OpenTelemetry MeterProvider and LoggerProvider when enabled.
 
   Args:
-    default_service_name: ``service.name`` resource attribute identifying the
-      process role (for example ``tunix-orchestrator`` or ``tunix-rollout``).
+    service_name: ``service.name`` resource attribute identifying the process
+      role (for example ``tunix-orchestrator`` or ``tunix-rollout``).
+    endpoint: OTLP collector endpoint (for example ``http://localhost:4317``);
+      an empty string leaves export disabled.
+    export_interval_ms: Metric export interval in milliseconds.
+    export_timeout_s: OTLP gRPC export timeout in seconds.
     resource_attributes: Optional process-level resource attributes (such as
       ``tunix.worker_id``, ``tunix.role``, ``tunix.run_id``); empty values are
       omitted.
-    endpoint: Explicit OTLP collector endpoint; empty disables export, and
-      ``None`` reads ``legacy_env_settings()``.
-    export_interval_ms: Metric export interval in milliseconds.
-    export_timeout_s: OTLP gRPC export timeout in seconds.
 
   Returns:
     True when export is active in this process; False when disabled, when the
@@ -350,16 +311,12 @@ def setup_metrics(
     ValueError: If the endpoint, interval, or timeout is malformed.
   """
   global _installed_pid
-  if endpoint is None:
-    raw_endpoint, interval_ms, timeout_s = legacy_env_settings()
-  else:
-    raw_endpoint = endpoint.strip()
-    interval_ms, timeout_s = _validate_timing(
-        export_interval_ms, export_timeout_s
-    )
-  if not raw_endpoint:
+  if not endpoint.strip():
     return False
-  normalized_endpoint = normalize_endpoint(raw_endpoint)
+  normalized_endpoint = normalize_endpoint(endpoint)
+  interval_ms, timeout_s = _validate_timing(
+      export_interval_ms, export_timeout_s
+  )
   try:
     # pylint: disable=g-import-not-at-top
     from opentelemetry import _logs as otel_logs
@@ -391,15 +348,15 @@ def setup_metrics(
     existing_meter = otel_metrics.get_meter_provider()
     if _installed_pid == current_pid:
       if isinstance(existing_meter, MeterProvider):
-        _warn_on_service_collision(existing_meter, default_service_name)
+        _warn_on_service_collision(existing_meter, service_name)
       return True
 
     need_meter = not isinstance(existing_meter, MeterProvider)
     if not need_meter:
-      _warn_on_service_collision(existing_meter, default_service_name)
+      _warn_on_service_collision(existing_meter, service_name)
     need_log = not isinstance(otel_logs.get_logger_provider(), LoggerProvider)
 
-    attrs = _build_resource_attrs(default_service_name, resource_attributes)
+    attrs = _build_resource_attrs(service_name, resource_attributes)
     resource = Resource.create(attrs)
     logger_provider = _build_logger_provider(
         need_log, resource, normalized_endpoint, timeout_s
@@ -438,7 +395,7 @@ def setup_metrics(
         metrics_active,
         logs_active,
         normalized_endpoint,
-        default_service_name,
+        service_name,
         interval_ms,
         attrs,
     )

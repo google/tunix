@@ -331,7 +331,6 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
       # freezes the engine; RolloutManager drains in-flight trajectories before
       # pre_weight_sync. Drain here or correct the docstring.
       self._paused_generation = False
-    await asyncio.sleep(0.01)
 
   async def resume(self, **kwargs: Any) -> None:
     """Resumes inference processing after weight sync completion."""

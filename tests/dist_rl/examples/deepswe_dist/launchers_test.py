@@ -16,9 +16,7 @@
 
 from __future__ import annotations
 
-import os
 import re
-from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -226,16 +224,20 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
     self.assertIn("testuser-roll-1", run.stdout)
 
   def test_k8s_passes_otel_settings_to_every_pod(self):
-    otel_env = {
-        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://testuser-otel:4317",
-        "OTEL_METRIC_EXPORT_INTERVAL": "5000",
-    }
-    with mock.patch.dict(os.environ, otel_env):
-      run = self.dry_run("deepswe_dist/k8s_launcher.sh", _K8S_IMAGE)
+    run = self.dry_run(
+        "deepswe_dist/k8s_launcher.sh",
+        _K8S_IMAGE,
+        "otel_config.enable=true",
+        "otel_config.export_interval_ms=5000",
+    )
+    self.assertEqual(
+        run.resolve().config["otel_config"]["endpoint"],
+        "http://testuser-otel:4317",
+    )
     exporting = set(
         re.findall(
-            r"OTEL_EXPORTER_OTLP_ENDPOINT=http://testuser-otel:4317 "
-            r"OTEL_METRIC_EXPORT_INTERVAL=5000 .*--process_main=(\S+)",
+            r"--process_main=(\S+) [^\n]*otel_config\.enable=true "
+            r"otel_config\.export_interval_ms=5000",
             run.stdout,
         )
     )
@@ -247,6 +249,7 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
             "tunix.dist_rl.launch.nodes.rollout.main",
         },
     )
+    self.assertNotIn("OTEL_", run.stdout)
 
   def test_k8s_otel_commands_deploy_and_delete_the_collector(self):
     run = self.dry_run("deepswe_dist/k8s_launcher.sh", "otel")
@@ -265,6 +268,26 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
           manifests[doc["kind"]] = doc
     self.assertEqual(set(manifests), {"Deployment", "Service"})
     self.assertEqual(manifests["Service"]["spec"]["ports"][0]["port"], 4317)
+    otel_args = manifests["Deployment"]["spec"]["template"]["spec"][
+        "containers"
+    ][0]["args"]
+    self.assertIn(
+        "--set=service::pipelines::metrics::exporters=[debug,googlecloud]",
+        otel_args,
+    )
+    self.assertIn(
+        "--set=service::pipelines::logs::exporters="
+        "[debug,googlecloud,file/events]",
+        otel_args,
+    )
+    no_gc = self.dry_run(
+        "deepswe_dist/k8s_launcher.sh", "otel", "otel_config.googlecloud=false"
+    )
+    self.assertNotIn("googlecloud", no_gc.stdout)
+    self.assertIn(
+        "--set=service::pipelines::logs::exporters=[debug,file/events]",
+        no_gc.stdout,
+    )
     run = self.dry_run("deepswe_dist/k8s_launcher.sh", "stop-otel")
     self.assertIn("kubectl delete service testuser-otel -n default", run.stdout)
     self.assertNotIn("apiVersion:", run.stdout)

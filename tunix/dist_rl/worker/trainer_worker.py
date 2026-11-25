@@ -19,6 +19,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 import contextlib
+import dataclasses
+import enum
 import functools
 import threading
 import time
@@ -40,6 +42,31 @@ if TYPE_CHECKING:
   from opentelemetry import metrics as otel_api_types  # pylint: disable=g-bad-import-order,g-import-not-at-top
 
 WorkerState = datatypes.WorkerState
+
+
+def _to_host_metrics_buffer(
+    raw: datatypes.MetricsBufferLike,
+    *,
+    microbatch_data_waits: tuple[float, ...] = (),
+) -> datatypes.MetricsBuffer:
+  """Materializes a trainer metrics buffer to a wire-safe host `MetricsBuffer`."""
+  # TODO(tunix-dev): Drop `jax.device_get` once `MaxTextTrainingEngine.get_metrics()`
+  # returns host arrays (matching `PeftTrainer.get_metrics()`) so this stays
+  # framework-agnostic.
+  weighted_host, scalar_host = jax.device_get(
+      (dict(raw.weighted_metrics), dict(raw.scalar_metrics))
+  )
+  mode = (
+      str(raw.mode.value) if isinstance(raw.mode, enum.Enum) else str(raw.mode)
+  )
+  return datatypes.MetricsBuffer(
+      id=raw.id,
+      weighted_metrics=weighted_host,
+      scalar_metrics=scalar_host,
+      aggregation_fns=dict(raw.aggregation_fns),
+      mode=mode,
+      microbatch_data_waits=microbatch_data_waits,
+  )
 
 
 def _compute_per_token_logps(
@@ -109,6 +136,7 @@ class TrainerWorker(abstract_worker.Worker):
       logps_micro_batch_size: int | None = None,
       execution_context: Any = None,
       otel_meter_provider: otel_api_types.MeterProvider | None = None,
+      idle_clock: Callable[[], float] | None = None,
   ):
     """Initializes the TrainerWorker.
 
@@ -123,6 +151,8 @@ class TrainerWorker(abstract_worker.Worker):
         the whole request is scored in one forward.
       otel_meter_provider: Optional OpenTelemetry MeterProvider override for
         testing; defaults to the global MeterProvider when None.
+      idle_clock: Optional monotonic clock override for device idle tracking in
+        tests.
     """
     self._execution_context = execution_context
     self._trainer_factory = trainer_factory
@@ -140,7 +170,9 @@ class TrainerWorker(abstract_worker.Worker):
     # Set when `stop()` failed to close the trainer; later stops re-raise it.
     self._stop_error: str | None = None
     self._otel = otel_metrics.TrainerWorkerOtelMetrics(
-        worker_id=worker_id, meter_provider=otel_meter_provider
+        worker_id=worker_id,
+        meter_provider=otel_meter_provider,
+        **(dict(idle_clock=idle_clock) if idle_clock is not None else {}),
     )
     # Keeps `release_weight_sync`, which runs on its own thread, apart from
     # the trainer calls that own the same staging: prepare and close.
@@ -192,6 +224,7 @@ class TrainerWorker(abstract_worker.Worker):
             self._pending_gen_model_input_fn = None
           self._trainer = trainer
       self._last_error = None
+      self._otel.reset_idle()
       return self._response(initialized=True)
     except Exception as exc:
       self._last_error = str(exc)
@@ -219,6 +252,7 @@ class TrainerWorker(abstract_worker.Worker):
             trainer, dummy_data
         )
         trainer.compile(dummy_data)
+      self._otel.reset_idle()
       logging.info(
           "[%s] Finished trainer compilation in %.2fs.",
           self._worker_id,
@@ -283,6 +317,7 @@ class TrainerWorker(abstract_worker.Worker):
         abort = True
         raise
       finally:
+        self._otel.close(wait=not abort)
         self.state = WorkerState.STOPPED
       return self._response(stopped=True, abort=bool(abort))
     finally:
@@ -366,6 +401,7 @@ class TrainerWorker(abstract_worker.Worker):
     mb_ready_s = otel_metrics.extract_mb_ready_time_s(req_metadata)
     trainer = self._ensure_ready()
     self._otel.record_starvation(mb_ready_s)
+    t_enter = self._otel.idle_clock_now()
     try:
       # TODO(b/579110728): `fwd_bwd` records host dispatch duration under JAX
       # async dispatch; queued device time surfaces in the next synchronizing
@@ -373,7 +409,10 @@ class TrainerWorker(abstract_worker.Worker):
       with self._otel.track_rpc(
           phase="fwd_bwd", token_counts=token_counts, arm=True
       ):
-        trainer.fwd_bwd(request.payload)
+        token = trainer.fwd_bwd(request.payload)
+      self._otel.record_fwd_bwd(
+          t_enter, None if token is None else token.block_until_ready
+      )
       self._last_error = None
       resp = self._response(queued=True, **req_metadata)
       resp.request_id = request.request_id
@@ -384,13 +423,17 @@ class TrainerWorker(abstract_worker.Worker):
       raise
 
   @abstract_worker.offload_to_thread
-  def update(self) -> tuple[int, Any]:
+  def update(self) -> tuple[int, datatypes.MetricsBuffer]:
     """Applies the accumulated (mean) gradients and returns `(train_step, metrics)`."""
     trainer = self._ensure_ready()
     try:
       with self._otel.track_rpc(phase="optimizer_step"):
         train_step = trainer.update()
-        metrics = trainer.get_metrics()
+        host_metrics = _to_host_metrics_buffer(trainer.get_metrics())
+      data_waits = self._otel.flush_data_waits()
+      metrics = dataclasses.replace(
+          host_metrics, microbatch_data_waits=data_waits
+      )
       self._last_error = None
       return train_step, metrics
     except Exception as exc:
@@ -400,7 +443,13 @@ class TrainerWorker(abstract_worker.Worker):
 
   @abstract_worker.offload_to_thread
   def eval_step(self, request: datatypes.TrainRequest) -> datatypes.Response:
-    """Executes one evaluation step on the given payload."""
+    """Executes one evaluation micro-batch step on the given payload.
+
+    `run_eval` is the canonical step-boundary evaluation RPC (draining
+    `eval_context` before marking the device busy until now); standalone
+    `eval_step`
+    marks host dispatch completion.
+    """
     trainer = self._ensure_ready()
     req_metadata = dict(request.metadata) if request.metadata else {}
     try:
@@ -556,7 +605,9 @@ class TrainerWorker(abstract_worker.Worker):
     """Restore state from a checkpoint and return the metadata pytree."""
     trainer = self._ensure_ready()
     with self._otel.track_rpc():
-      return trainer.restore_checkpoint(step=step)
+      restored = trainer.restore_checkpoint(step=step)
+    self._otel.reset_idle()
+    return restored
 
   @abstract_worker.offload_to_thread
   def prepare_weight_sync(self, sync_request: Any = None) -> Any:
@@ -573,6 +624,9 @@ class TrainerWorker(abstract_worker.Worker):
           self._otel.track_rpc(weight_sync_direction="send"),
       ):
         metadata = trainer.prepare_weight_sync(sync_request=sync_request)
+      # Staging occupied the trainer; `track_rpc` marks it busy on exit.
+      # The release does not (`refresh_free_time=False`), so idle time while
+      # the round is still open counts as data wait.
       self._last_error = None
       if metadata is not None:
         return metadata
@@ -604,6 +658,6 @@ class TrainerWorker(abstract_worker.Worker):
         return self._trainer.release_weight_sync(sync_request=sync_request)
 
   @abstract_worker.offload_to_thread
-  def get_metrics(self) -> Any:
+  def get_metrics(self) -> datatypes.MetricsBuffer:
     """Returns and clears the recently collected step metric records."""
-    return self._ensure_ready().get_metrics()
+    return _to_host_metrics_buffer(self._ensure_ready().get_metrics())

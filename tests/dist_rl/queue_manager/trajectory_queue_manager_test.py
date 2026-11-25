@@ -70,10 +70,10 @@ class QueueManagerTest(absltest.TestCase):
       item2 = _create_item("g1", group_index=1)
 
       await manager.put(item1)
-      self.assertEmpty(manager._ready_groups)
+      self.assertEqual(manager.ready_groups_count, 0)
 
       await manager.put(item2)
-      self.assertLen(manager._ready_groups, 1)
+      self.assertEqual(manager.ready_groups_count, 1)
 
       batch = await manager.get_batch(2)
       self.assertLen(batch, 2)
@@ -132,10 +132,10 @@ class QueueManagerTest(absltest.TestCase):
       item2 = _create_item("g2", group_index=0)
 
       await manager.put(item1)
-      self.assertEmpty(manager._ready_groups)
+      self.assertEqual(manager.ready_groups_count, 0)
 
       await manager.put(item2)
-      self.assertLen(manager._ready_groups, 1)
+      self.assertEqual(manager.ready_groups_count, 1)
 
       batch = await manager.get_batch(2)
       self.assertCountEqual([item1, item2], batch)
@@ -174,8 +174,10 @@ class QueueManagerTest(absltest.TestCase):
     """Tests item-granular get_batch splitting a group across calls."""
 
     async def _run_test():
+      now = 12.5
       manager = trajectory_queue_manager.TrajectoryQueueManager(
-          num_generations=3
+          num_generations=3,
+          clock=lambda: now,
       )
       items = [_create_item("g1", group_index=i) for i in range(3)]
       for item in items:
@@ -184,12 +186,67 @@ class QueueManagerTest(absltest.TestCase):
       batch1 = await manager.get_batch(2)
       self.assertLen(batch1, 2)
       self.assertCountEqual(items[:2], batch1)
-      self.assertLen(manager._ready_groups, 1)
+      self.assertEqual(manager.ready_groups_count, 1)
 
-      batch2 = await manager.get_batch(1)
-      self.assertLen(batch2, 1)
-      self.assertEqual(batch2[0], items[2])
-      self.assertEmpty(manager._ready_groups)
+      now = 99.0
+      leftover = await manager.get_timed_group()
+      self.assertIsNotNone(leftover)
+      group_slice, ready_time_s = leftover
+      self.assertEqual(group_slice, [items[2]])
+      self.assertAlmostEqual(ready_time_s, 12.5)
+      self.assertEqual(manager.ready_groups_count, 0)
+
+    asyncio.run(_run_test())
+
+  def test_get_timed_group_stamps_completion_ignores_filtered_and_clears(self):
+    """Tests get_timed_group() completion timestamp, filtering, EOF, and clear()."""
+
+    async def _run_test():
+      now = 1.0
+      manager = trajectory_queue_manager.TrajectoryQueueManager.create(
+          num_generations=2,
+          max_staleness=0,
+          current_policy_version=lambda: 2,
+          clock=lambda: now,
+      )
+
+      # Stale group dropped at t=2.0 -> not staged in _timed_ready_groups.
+      now = 2.0
+      await manager.put(
+          _create_item("g_stale", group_index=0, policy_version=1)
+      )
+      await manager.put(
+          _create_item("g_stale", group_index=1, policy_version=1)
+      )
+      self.assertEqual(manager.ready_groups_count, 0)
+
+      # Valid group first item at t=3.0, completes on second item at t=7.5.
+      now = 3.0
+      i0 = _create_item("g_valid", group_index=0, policy_version=2)
+      await manager.put(i0)
+      now = 7.5
+      i1 = _create_item("g_valid", group_index=1, policy_version=2)
+      await manager.put(i1)
+
+      timed = await manager.get_timed_group()
+      self.assertIsNotNone(timed)
+      group, ready_time_s = timed
+      self.assertEqual(group, [i0, i1])
+      self.assertAlmostEqual(ready_time_s, 7.5)
+
+      # Put another group, then clear() and close() -> get_timed_group() is None.
+      now = 11.0
+      await manager.put(
+          _create_item("g_cleared", group_index=0, policy_version=2)
+      )
+      await manager.put(
+          _create_item("g_cleared", group_index=1, policy_version=2)
+      )
+      self.assertEqual(manager.ready_groups_count, 1)
+      await manager.clear()
+      self.assertEqual(manager.ready_groups_count, 0)
+      await manager.close()
+      self.assertIsNone(await manager.get_timed_group())
 
     asyncio.run(_run_test())
 

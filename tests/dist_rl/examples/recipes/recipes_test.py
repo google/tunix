@@ -122,7 +122,7 @@ _V7X_OPENMATH = launcher_testing.Expected(
     mini_batch_size=256,
     num_generations=8,
     max_steps=20,
-    actor_mesh=(32, 1, 1),
+    actor_mesh=(16, 2, 1),
     rollout_mesh=(4, 2),
     model_id="Qwen/Qwen3-0.6B",
     extra_args=(
@@ -388,7 +388,8 @@ class RecipesTest(launcher_testing.LauncherTestCase):
     self.assertEqual(config["actor_model_config"]["model_source"], "maxtext")
     self.assertEqual(config["rollout_model_config"]["model_source"], "maxtext")
     rl_train = config["rl_training_config"]
-    self.assertEqual(rl_train["max_seq_token_per_tpu"], 17408)
+    self.assertEqual(rl_train["train_micro_batch_size"], 16)
+    self.assertEqual(rl_train["max_seq_token_per_tpu"], 26624)
     self.assertEqual(rl_train["profiler_options"]["profiler_steps"], 0)
     vllm = config["vllm_config"]
     self.assertFalse(vllm["skip_jax_precompile"])
@@ -403,6 +404,10 @@ class RecipesTest(launcher_testing.LauncherTestCase):
     self.assertTrue(extra_cfg["sa_sv_diag_skip"])
     self.assertTrue(extra_cfg["sa_use_base2_exp"])
     self.assertEqual(extra_cfg["remat_policy"], "none")
+    self.assertEqual(extra_cfg["decoder_layer_input"], "device")
+    self.assertEqual(extra_cfg["query_proj"], "device")
+    self.assertEqual(extra_cfg["key_proj"], "device")
+    self.assertEqual(extra_cfg["value_proj"], "device")
     self.assertEqual(extra_cfg["sa_block_q"], 1024)
     self.assertEqual(extra_cfg["sa_block_kv"], 1024)
     k8s = config["cluster_config"]["k8s"]

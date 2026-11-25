@@ -803,6 +803,10 @@ class MetricsBuffer:
       `scalar_metrics`, keyed by metric name.
     mode: The training mode the metrics were collected in (`"train"` /
       `"eval"`).
+    microbatch_data_waits: Device idle time in seconds before each micro-batch
+      of the update, in execution order, measured on the trainer's monotonic
+      clock and set by `TrainerWorker.update()`. Empty when the trainer does
+      not return a `DeviceReadinessToken` from `fwd_bwd`.
   """
 
   id: int | str
@@ -816,6 +820,7 @@ class MetricsBuffer:
       str, Callable[[np.ndarray | np.number | float], Any]
   ] = dataclasses.field(default_factory=dict)
   mode: str = "train"
+  microbatch_data_waits: tuple[float, ...] = ()
 
 
 @dataclasses.dataclass(kw_only=True)

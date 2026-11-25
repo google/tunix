@@ -87,7 +87,7 @@ jobs:
         run: |
           python -m pip install -q uv
           uv pip install --system --find-links=. --reinstall-package google-tunix "google-tunix[prod,test,experimental]"
-          python -c "import pathlib, shutil, sysconfig; root = pathlib.Path(sysconfig.get_paths()['platlib']) / 'tunix'; exts = {ext: list(root.glob(f'{ext}*.so')) for ext in ('dist_rl/worker/_compression_ext', 'rl/_packing_ext', 'utils/_trajectory_logger_ext')}; assert all(exts.values()), f'Missing nanobind extensions in {root}: {exts}'; [shutil.copy2(p, pathlib.Path('tunix') / p.relative_to(root)) for paths in exts.values() for p in paths]"
+          python -c "import pathlib, shutil, sysconfig; root = pathlib.Path(sysconfig.get_paths()['platlib']) / 'tunix'; exts = {ext: list(root.glob(f'{ext}*.so')) for ext in ('dist_rl/worker/_compression_ext', 'experimental/delta_sync/_delta_encoder_ext', 'rl/_packing_ext', 'utils/_trajectory_logger_ext')}; assert all(exts.values()), f'Missing nanobind extensions in {root}: {exts}'; [shutil.copy2(p, pathlib.Path('tunix') / p.relative_to(root)) for paths in exts.values() for p in paths]"
 
       # Wheel-only mode installs the prebuilt wheel (never the sdist that may sit
       # next to it in the artifact) and deletes ./tunix so that every
@@ -110,7 +110,7 @@ jobs:
             find "$PLATLIB/tunix/dist_rl/distributed" -name "*.proto" -exec \
               python -m grpc_tools.protoc -I"$PLATLIB" --python_out="$PLATLIB" --grpc_python_out="$PLATLIB" {} +
           fi
-          python -c "import pathlib, sysconfig; root = pathlib.Path(sysconfig.get_paths()['platlib']) / 'tunix'; exts = {ext: list(root.glob(f'{ext}*.abi3.so')) for ext in ('dist_rl/worker/_compression_ext', 'rl/_packing_ext', 'utils/_trajectory_logger_ext')}; assert all(exts.values()), f'Missing nanobind extensions in {root}: {exts}'"
+          python -c "import pathlib, sysconfig; root = pathlib.Path(sysconfig.get_paths()['platlib']) / 'tunix'; exts = {ext: list(root.glob(f'{ext}*.abi3.so')) for ext in ('dist_rl/worker/_compression_ext', 'experimental/delta_sync/_delta_encoder_ext', 'rl/_packing_ext', 'utils/_trajectory_logger_ext')}; assert all(exts.values()), f'Missing nanobind extensions in {root}: {exts}'"
 
       - name: Verify Tunix imports from installed package
         env:
@@ -127,6 +127,7 @@ jobs:
           import tunix.distillation
           import tunix.rl
           from tunix.dist_rl.worker import _compression_ext
+          from tunix.experimental.delta_sync import _delta_encoder_ext
           from tunix.rl import _packing_ext
           from tunix.utils import _trajectory_logger_ext
 
@@ -253,7 +254,7 @@ jobs:
           # `--override` forces uv to keep the frozen container versions even if package bounds differ.
           uv pip install --system --break-system-packages --find-links=. --override /tmp/container-overrides.txt "google-tunix[test,experimental]"
           # Copy compiled nanobind .so extensions from the wheel into `./tunix` so pytest finds them via source-tree imports.
-          python3 -c "import pathlib, shutil, sysconfig; root = pathlib.Path(sysconfig.get_paths()['platlib']) / 'tunix'; exts = {ext: list(root.glob(f'{ext}*.so')) for ext in ('dist_rl/worker/_compression_ext', 'rl/_packing_ext', 'utils/_trajectory_logger_ext')}; assert all(exts.values()), f'Missing nanobind extensions in {root}: {exts}'; [shutil.copy2(p, pathlib.Path('tunix') / p.relative_to(root)) for paths in exts.values() for p in paths]"
+          python3 -c "import pathlib, shutil, sysconfig; root = pathlib.Path(sysconfig.get_paths()['platlib']) / 'tunix'; exts = {ext: list(root.glob(f'{ext}*.so')) for ext in ('dist_rl/worker/_compression_ext', 'experimental/delta_sync/_delta_encoder_ext', 'rl/_packing_ext', 'utils/_trajectory_logger_ext')}; assert all(exts.values()), f'Missing nanobind extensions in {root}: {exts}'; [shutil.copy2(p, pathlib.Path('tunix') / p.relative_to(root)) for paths in exts.values() for p in paths]"
           # tpu-inference/Numba needs NumPy 2.3 or less.
           uv pip install --system --break-system-packages --force-reinstall numpy==2.3.5
 
@@ -264,7 +265,7 @@ jobs:
           [ -n "$WHEEL" ] || { echo "No google_tunix-*.whl found in the artifact"; exit 1; }
           # `--override` forces uv to keep the frozen container versions even if package bounds differ.
           uv pip install --system --break-system-packages --override /tmp/container-overrides.txt "${WHEEL}[test,experimental]"
-          python3 -c "import pathlib, sysconfig; root = pathlib.Path(sysconfig.get_paths()['platlib']) / 'tunix'; exts = {ext: list(root.glob(f'{ext}*.abi3.so')) for ext in ('dist_rl/worker/_compression_ext', 'rl/_packing_ext', 'utils/_trajectory_logger_ext')}; assert all(exts.values()), f'Missing nanobind extensions in {root}: {exts}'"
+          python3 -c "import pathlib, sysconfig; root = pathlib.Path(sysconfig.get_paths()['platlib']) / 'tunix'; exts = {ext: list(root.glob(f'{ext}*.abi3.so')) for ext in ('dist_rl/worker/_compression_ext', 'experimental/delta_sync/_delta_encoder_ext', 'rl/_packing_ext', 'utils/_trajectory_logger_ext')}; assert all(exts.values()), f'Missing nanobind extensions in {root}: {exts}'"
           # tpu-inference/Numba needs NumPy 2.3 or less.
           uv pip install --system --break-system-packages --force-reinstall numpy==2.3.5
           rm -rf tunix
@@ -335,7 +336,7 @@ jobs:
         run: |
           python -m pip install -q uv
           uv pip install --system --find-links=. --reinstall-package google-tunix "google-tunix[prod,test,experimental]"
-          python -c "import pathlib, shutil, sysconfig; root = pathlib.Path(sysconfig.get_paths()['platlib']) / 'tunix'; exts = {ext: list(root.glob(f'{ext}*.so')) for ext in ('dist_rl/worker/_compression_ext', 'rl/_packing_ext', 'utils/_trajectory_logger_ext')}; assert all(exts.values()), f'Missing nanobind extensions in {root}: {exts}'; [shutil.copy2(p, pathlib.Path('tunix') / p.relative_to(root)) for paths in exts.values() for p in paths]"
+          python -c "import pathlib, shutil, sysconfig; root = pathlib.Path(sysconfig.get_paths()['platlib']) / 'tunix'; exts = {ext: list(root.glob(f'{ext}*.so')) for ext in ('dist_rl/worker/_compression_ext', 'experimental/delta_sync/_delta_encoder_ext', 'rl/_packing_ext', 'utils/_trajectory_logger_ext')}; assert all(exts.values()), f'Missing nanobind extensions in {root}: {exts}'; [shutil.copy2(p, pathlib.Path('tunix') / p.relative_to(root)) for paths in exts.values() for p in paths]"
           uv pip install --system --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match --upgrade kagglehub kagglesdk torch
 
       - name: Install the tunix wheel and dependencies, and remove ./tunix (wheel-only mode)
@@ -345,7 +346,7 @@ jobs:
           WHEEL=$(ls -1 ./google_tunix-*.whl | head -n1)
           [ -n "$WHEEL" ] || { echo "No google_tunix-*.whl found in the artifact"; exit 1; }
           uv pip install --system "${WHEEL}[prod,test,experimental]"
-          python -c "import pathlib, sysconfig; root = pathlib.Path(sysconfig.get_paths()['platlib']) / 'tunix'; exts = {ext: list(root.glob(f'{ext}*.abi3.so')) for ext in ('dist_rl/worker/_compression_ext', 'rl/_packing_ext', 'utils/_trajectory_logger_ext')}; assert all(exts.values()), f'Missing nanobind extensions in {root}: {exts}'"
+          python -c "import pathlib, sysconfig; root = pathlib.Path(sysconfig.get_paths()['platlib']) / 'tunix'; exts = {ext: list(root.glob(f'{ext}*.abi3.so')) for ext in ('dist_rl/worker/_compression_ext', 'experimental/delta_sync/_delta_encoder_ext', 'rl/_packing_ext', 'utils/_trajectory_logger_ext')}; assert all(exts.values()), f'Missing nanobind extensions in {root}: {exts}'"
           uv pip install --system --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match --upgrade kagglehub kagglesdk torch
           rm -rf tunix
 

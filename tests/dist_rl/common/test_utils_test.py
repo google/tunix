@@ -314,7 +314,7 @@ class FakeTrainerTest(absltest.TestCase):
     self.assertEqual(trainer.total_routed_experts_bytes, routed.nbytes)
     self.assertEqual(trainer.last_batch_shape, (2, 8))
     self.assertEqual(trainer.last_routed_experts_shape, (2, 8, 4, 2, 5))
-    metrics = trainer.get_metrics()
+    metrics = trainer.get_metrics().scalar_metrics
     self.assertEqual(metrics["mock_trainer/fwd_bwd_calls"], 1)
     self.assertEqual(
         metrics["mock_trainer/routed_experts_bytes"], routed.nbytes

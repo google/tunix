@@ -455,6 +455,16 @@ class FakeMoeModelConfig:
   num_experts: int
 
 
+class ImmediateReadyToken:
+  """Zero-dependency synchronous `DeviceReadinessToken` for CPU test doubles."""
+
+  def block_until_ready(self) -> "ImmediateReadyToken":
+    return self
+
+
+_IMMEDIATE_READY = ImmediateReadyToken()
+
+
 class FakeTrainer(abstract_trainer.AbstractTrainer):
   """Pure CPU / zero XLA model compilation implementation of AbstractTrainer."""
 
@@ -570,13 +580,16 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
     self.last_routed_experts_shape = tuple(int(d) for d in routed_arr.shape)
     self.total_routed_experts_bytes += int(routed_arr.nbytes)
 
-  def fwd_bwd(self, payload: datatypes.TrainerPayload) -> None:
+  def fwd_bwd(
+      self, payload: datatypes.TrainerPayload
+  ) -> abstract_trainer.DeviceReadinessToken:
     if isinstance(payload, datatypes.RLTrainerPayload):
       self._record_rl_tokens(payload)
       self._record_rl_routed(payload.routed_experts)
     self.fwd_bwd_calls += 1
     if self.fwd_bwd_sleep_s > 0:
       time.sleep(self.fwd_bwd_sleep_s)
+    return _IMMEDIATE_READY
 
   def update(self) -> int:
     self.step_count += 1
@@ -617,12 +630,17 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
     del step
     return {}
 
-  def get_metrics(self) -> dict[str, int | float]:
-    return {
-        "loss": 0.25,
-        "mock_trainer/fwd_bwd_calls": self.fwd_bwd_calls,
-        "mock_trainer/routed_experts_bytes": self.total_routed_experts_bytes,
-    }
+  def get_metrics(self) -> datatypes.MetricsBuffer:
+    return datatypes.MetricsBuffer(
+        id=self.step_count,
+        scalar_metrics={
+            "loss": 0.25,
+            "mock_trainer/fwd_bwd_calls": self.fwd_bwd_calls,
+            "mock_trainer/routed_experts_bytes": (
+                self.total_routed_experts_bytes
+            ),
+        },
+    )
 
   def prepare_weight_sync(self, *, sync_request: Any = None) -> Any:
     del sync_request

@@ -382,6 +382,33 @@ class SampleTest(absltest.TestCase):
     np.testing.assert_array_equal(counts[512:768], 0)
     np.testing.assert_allclose(counts / num_rows, expected, atol=1.5e-2)
 
+  def test_unconstrained_pads_the_vocab_to_whole_blocks(self):
+    # 300 tokens fill one 256-token block and part of a second.
+    row_logits = (
+        jnp.full((300,), -6.0, dtype=jnp.float32)
+        .at[jnp.array([7, 260, 299])]
+        .set(jnp.array([1.0, 1.5, 0.5]))
+    )
+    num_rows = 8192
+    metadata = _metadata(*[_params()] * num_rows, max_top_k=-1)
+
+    tokens, logp = model_runner_lib.sample(
+        jnp.broadcast_to(row_logits, (num_rows, 300)),
+        jax.random.PRNGKey(0),
+        metadata,
+        max_top_k=-1,
+        return_logprobs=True,
+    )
+
+    assert logp is not None
+    self.assertLess(int(jnp.max(tokens)), 300)
+    counts = np.bincount(np.asarray(tokens), minlength=300)
+    expected = jax.nn.softmax(row_logits)
+    np.testing.assert_allclose(counts / num_rows, expected, atol=1.5e-2)
+    np.testing.assert_allclose(
+        logp, jax.nn.log_softmax(row_logits)[tokens], rtol=1e-5, atol=1e-6
+    )
+
 
 class ModelRunnerTest(absltest.TestCase):
 
@@ -1181,10 +1208,8 @@ class TwoStageTopKTest(absltest.TestCase):
     self.assertEqual(model_runner_lib._top_k_num_blocks(64, 64, 4), 1)
     with self.assertRaisesRegex(ValueError, 'tp_size must be positive'):
       model_runner_lib._top_k_num_blocks(64, 4, 0)
-    with self.assertRaisesRegex(ValueError, 'must not exceed block size'):
-      model_runner_lib._two_stage_top_k(jnp.zeros((2, 16)), 5, num_blocks=4)
 
-  def test_two_stage_top_k_matches_lax_top_k_with_ties_padding_and_neg_inf(
+  def test_top_k_matches_lax_top_k_with_ties_padding_and_neg_inf(
       self,
   ):
     mesh_1x4 = jax.sharding.Mesh(
@@ -1231,10 +1256,10 @@ class TwoStageTopKTest(absltest.TestCase):
         if vocab_size % tp_size == 0:
           inp = jax.device_put(logits, sharding)
 
-      def _run(x, k=k, nb=num_blocks, s=sharding):
+      def _run(x, k=k, tp_size=tp_size, s=sharding):
         if s is not None:
           x = jax.lax.with_sharding_constraint(x, s)
-        return model_runner_lib._two_stage_top_k(x, k, nb)
+        return model_runner_lib._top_k(x, k, tp_size)
 
       got_vals, got_idxs = jax.jit(_run)(inp)
       np.testing.assert_array_equal(got_vals, expected_vals)
@@ -1271,6 +1296,64 @@ class TwoStageTopKTest(absltest.TestCase):
     np.testing.assert_array_equal(got_toks, ref_toks)
     np.testing.assert_allclose(got_logp, ref_logp, rtol=1e-5, atol=1e-5)
 
+  def test_unconstrained_sample_with_tp_matches_reference(self):
+    mesh = jax.sharding.Mesh(
+        np.array(jax.devices()[:4]).reshape(1, 4), ('fsdp', 'tp')
+    )
+    vocab_size = 600
+    # 600 tokens take 3 blocks, which `tp_size=4` rounds up to 4, leaving an
+    # all-padding block.
+    self.assertEqual(model_runner_lib._hierarchical_num_blocks(vocab_size), 3)
+    self.assertEqual(
+        model_runner_lib._hierarchical_num_blocks(vocab_size, tp_size=4), 4
+    )
+    rng = np.random.default_rng(7)
+    logits = jnp.asarray(rng.normal(size=(4, vocab_size)).astype(np.float32))
+    temperature = np.array([0.0, 0.7, 1.0, 0.5], dtype=np.float32)
+    meta = model_runner_lib.SamplingMetadata(
+        temperature=jnp.asarray(temperature),
+        top_p=jnp.ones((4,), dtype=jnp.float32),
+        top_k=jnp.zeros((4,), dtype=jnp.int32),
+        unconstrained=True,
+    )
+
+    def _sample(x, tp_size):
+      return model_runner_lib.sample(
+          x,
+          jax.random.PRNGKey(123),
+          meta,
+          max_top_k=-1,
+          return_logprobs=True,
+          tp_size=tp_size,
+      )
+
+    ref_toks, _ = jax.jit(lambda x: _sample(x, 1))(logits)
+    sharded_logits = jax.device_put(
+        logits,
+        jax.sharding.NamedSharding(
+            mesh, jax.sharding.PartitionSpec(None, 'tp')
+        ),
+    )
+    got_toks, got_logp = jax.jit(lambda x: _sample(x, 4))(sharded_logits)
+
+    # The block counts differ, so only the greedy row samples the same token.
+    self.assertEqual(int(got_toks[0]), int(ref_toks[0]))
+    self.assertEqual(int(got_toks[0]), int(jnp.argmax(logits[0])))
+    self.assertLess(int(jnp.max(got_toks)), vocab_size)
+    assert got_logp is not None
+    scale = np.where(temperature > 0.0, temperature, 1.0)
+    expected = jax.nn.log_softmax(logits / scale[:, None], axis=-1)
+    np.testing.assert_allclose(
+        got_logp,
+        jnp.take_along_axis(expected, got_toks[:, None], axis=-1)[:, 0],
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+  def test_non_positive_tp_size_raises(self):
+    with self.assertRaisesRegex(ValueError, 'tp_size must be positive'):
+      model_runner_lib._hierarchical_num_blocks(600, tp_size=0)
+
   def test_compiled_hlo_has_no_vocab_sized_collective(self):
     if jax.default_backend() == 'cpu':
       self.skipTest('XLA:CPU runs TopkDecomposer after SPMD partitioning.')
@@ -1290,7 +1373,7 @@ class TwoStageTopKTest(absltest.TestCase):
     self.assertEqual(num_blocks, 8)
 
     hlo = (
-        jax.jit(lambda x: model_runner_lib._two_stage_top_k(x, k, num_blocks))
+        jax.jit(lambda x: model_runner_lib._top_k(x, k, tp_size=2))
         .lower(logits)
         .compile()
         .as_text()
@@ -1315,7 +1398,7 @@ class TwoStageTopKTest(absltest.TestCase):
 
     def _ragged_fn(x):
       x = jax.lax.with_sharding_constraint(x, sharding)
-      return model_runner_lib._two_stage_top_k(x, k, ragged_blocks)
+      return model_runner_lib._top_k(x, k, tp_size=2)
 
     ragged_hlo = (
         jax.jit(_ragged_fn)

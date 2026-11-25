@@ -194,9 +194,11 @@ class RolloutHealthTest(absltest.TestCase):
     )
     # Statuses that did not occur still report 0, so series stay continuous.
     self.assertEqual(health.metrics["rollout/status/timeout_frac"], 0.0)
+    # RUNNING is not a terminal status and is not reported.
+    self.assertNotIn("rollout/status/running_frac", health.metrics)
     self.assertLen(
         [k for k in health.metrics if k.startswith("rollout/status/")],
-        len(datatypes.TrajectoryStatus),
+        len(datatypes.TrajectoryStatus) - 1,
     )
 
   def test_counts_rollouts_per_status(self):
@@ -240,7 +242,6 @@ class RolloutHealthTest(absltest.TestCase):
     )
 
     self.assertEqual(health.metrics["rollout/turn_length/mean"], 20.0)
-    self.assertEqual(health.metrics["rollout/turn_length/p50"], 20.0)
     self.assertAlmostEqual(health.metrics["rollout/turn_length/p99"], 29.8)
     self.assertEqual(health.metrics["rollout/turn_length/max"], 30.0)
 
@@ -258,8 +259,6 @@ class RolloutHealthTest(absltest.TestCase):
         )
     )
 
-    self.assertEqual(health.metrics["rollout/duration_sec/p50"], 25.0)
-    self.assertAlmostEqual(health.metrics["rollout/duration_sec/p90"], 37.0)
     self.assertAlmostEqual(health.metrics["rollout/duration_sec/p99"], 39.7)
     self.assertEqual(health.metrics["rollout/duration_sec/max"], 40.0)
     self.assertEqual(health.metrics["rollout/tail_sec"], 15.0)
@@ -297,15 +296,17 @@ class RolloutHealthTest(absltest.TestCase):
         )
     )
 
-    self.assertEqual(health.metrics["rollout/dispatch_delay_sec/p50"], 12.5)
+    self.assertAlmostEqual(
+        health.metrics["rollout/dispatch_delay_sec/p99"], 19.85
+    )
     self.assertEqual(health.metrics["rollout/dispatch_delay_sec/max"], 20.0)
-    self.assertEqual(health.metrics["rollout/execution_sec/p50"], 15.0)
+    self.assertAlmostEqual(health.metrics["rollout/execution_sec/p99"], 19.9)
     self.assertEqual(health.metrics["rollout/execution_sec/max"], 20.0)
-    self.assertEqual(health.metrics["rollout/queue_wait_sec/p50"], 25.0)
-    self.assertEqual(health.metrics["rollout/queue_wait_sec/max"], 30.0)
     # Item 0: finish=130, received=105, exec=10 -> worker_queue_wait=15s.
     # Item 1: finish=150, received=120, exec=20 -> worker_queue_wait=10s.
-    self.assertEqual(health.metrics["rollout/worker_queue_wait_sec/p50"], 12.5)
+    self.assertAlmostEqual(
+        health.metrics["rollout/worker_queue_wait_sec/p99"], 14.95
+    )
     self.assertEqual(health.metrics["rollout/worker_queue_wait_sec/max"], 15.0)
     self.assertEqual(health.metrics["rollout/env_time_sec/mean"], 6.5)
     # `reward_time` on the trajectory is not reported as a rollout metric.
@@ -364,7 +365,6 @@ class RolloutHealthTest(absltest.TestCase):
     self.assertEqual(health.metrics["rollout/duration_sec/max"], 65.0)
     self.assertEqual(health.metrics["rollout/dispatch_delay_sec/max"], 40.0)
     self.assertEqual(health.metrics["rollout/execution_sec/max"], 20.0)
-    self.assertEqual(health.metrics["rollout/queue_wait_sec/max"], 45.0)
     self.assertEqual(health.metrics["rollout/worker_queue_wait_sec/max"], 5.0)
 
   def test_ignores_worker_received_from_different_worker_id(self):
@@ -403,7 +403,6 @@ class RolloutHealthTest(absltest.TestCase):
     health = step_telemetry.rollout_health([facts])
     self.assertNotIn("rollout/dispatch_delay_sec/max", health.metrics)
     self.assertNotIn("rollout/worker_queue_wait_sec/max", health.metrics)
-    self.assertEqual(health.metrics["rollout/queue_wait_sec/max"], 45.0)
     self.assertEqual(health.metrics["rollout/execution_sec/max"], 20.0)
 
   def test_groups_batch_wall_sec_by_batch_idx_cohort(self):
@@ -439,10 +438,6 @@ class RolloutHealthTest(absltest.TestCase):
     )
 
     self.assertEqual(health.metrics["rollout/group_straggler_sec/mean"], 30.0)
-    self.assertEqual(health.metrics["rollout/group_straggler_sec/p50"], 30.0)
-    self.assertAlmostEqual(
-        health.metrics["rollout/group_straggler_sec/p90"], 38.0
-    )
     self.assertAlmostEqual(
         health.metrics["rollout/group_straggler_sec/p99"], 39.8
     )
@@ -506,6 +501,39 @@ class SlowestRolloutsSummaryTest(absltest.TestCase):
   def test_returns_none_without_lineage(self):
     self.assertIsNone(
         step_telemetry.slowest_rollouts_summary(_facts(_health_item(0)), k=3)
+    )
+
+
+class AggregateTrainerDataWaitTest(absltest.TestCase):
+
+  def test_no_waits_reports_nothing(self):
+    self.assertEqual(step_telemetry.aggregate_trainer_data_wait([]), {})
+
+  def test_splits_total_wait_into_rollout_and_data_plane(self):
+    # Three micro-batches over two updates: (wait, data-plane part).
+    waits = [(7.0, 3.0), (1.0, 1.0), (0.5, 0.0)]
+
+    self.assertEqual(
+        step_telemetry.aggregate_trainer_data_wait(waits),
+        {
+            "perf/trainer_data_wait_time": 8.5,
+            "perf/trainer_data_wait_first_mb": 7.0,
+            "perf/trainer_data_wait_intra_step": 1.5,
+            "perf/trainer_data_wait_max": 7.0,
+            "perf/trainer_data_wait_data_plane": 4.0,
+            "perf/trainer_data_wait_rollout": 4.5,
+        },
+    )
+
+  def test_omits_split_when_a_micro_batch_lacks_its_data_plane_part(self):
+    self.assertEqual(
+        step_telemetry.aggregate_trainer_data_wait([(2.0, 0.5), (1.0, None)]),
+        {
+            "perf/trainer_data_wait_time": 3.0,
+            "perf/trainer_data_wait_first_mb": 2.0,
+            "perf/trainer_data_wait_intra_step": 1.0,
+            "perf/trainer_data_wait_max": 2.0,
+        },
     )
 
 

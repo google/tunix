@@ -1680,7 +1680,7 @@ class V1ParityTest(parameterized.TestCase):
 
     trainer_v1.train(batches)
     for batch in batches:
-      trainer_split.fwd_bwd(batch)
+      self.assertIsInstance(trainer_split.fwd_bwd(batch), jax.Array)
     self.assertEqual(trainer_split.train_steps, 0)
     trainer_split.update()
 
@@ -1928,6 +1928,7 @@ class V1ParityTest(parameterized.TestCase):
     self.assertIsNotNone(prepared[0].routed_experts)
     self.assertEqual(prepared[0].routed_experts.shape, (2, 10, 3, 2))
     self.assertEqual(prepared[0].routed_experts.dtype, np.uint8)
+    self.assertEqual(trainer.iter_steps, 0)
     self.assertNotIn('routed_experts_encode_fn', prepared[0].metadata)
     self.assertEqual(prepared[0].metadata['keep_key'], 42)
     self.assertIn('routed_experts_encode_fn', dummy.metadata)

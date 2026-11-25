@@ -1171,18 +1171,18 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       *,
       skip_jit: bool = False,
       cache_nnx_graph: bool = True,
-  ) -> None:
-    """Executes forward and backward passes."""
+  ) -> jax.Array:
+    """Executes forward and backward passes and returns the micro-batch loss."""
     self._ensure_persistent_grad_accumulator()
     fwd_bwd_step, _, _ = self.jit_fwd_bwd_update_and_eval_step(
         skip_jit, cache_nnx_graph
     )
-    self._record_fwd_bwd(
-        *fwd_bwd_step(
-            grad_accumulator=self.grad_accumulator,
-            inputs=self._prepare_payload(payload),
-        )
+    train_loss, aux = fwd_bwd_step(
+        grad_accumulator=self.grad_accumulator,
+        inputs=self._prepare_payload(payload),
     )
+    self._record_fwd_bwd(train_loss, aux)
+    return jnp.asarray(train_loss)
 
   @override
   def update(

@@ -18,7 +18,7 @@ Defines the pure ML algorithmic core of a trainer.
 """
 
 import abc
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 import dataclasses
 import functools
 from typing import Any, Concatenate, ParamSpec, Protocol, TypeVar, cast, runtime_checkable
@@ -28,6 +28,13 @@ from tunix.dist_rl.common import datatypes
 
 _P = ParamSpec("_P")
 _PayloadT = TypeVar("_PayloadT")
+
+
+class DeviceReadinessToken(Protocol):
+  """Handle to an in-flight computation exposing `block_until_ready()`."""
+
+  def block_until_ready(self) -> object:
+    ...
 
 
 @runtime_checkable
@@ -119,7 +126,9 @@ class AbstractTrainer(Protocol):
     )
 
   @abc.abstractmethod
-  def fwd_bwd(self, payload: datatypes.TrainerPayload) -> None:
+  def fwd_bwd(
+      self, payload: datatypes.TrainerPayload
+  ) -> DeviceReadinessToken | None:
     """Executes forward and backward passes.
 
     Metrics are cached to overlap train steps.
@@ -128,6 +137,11 @@ class AbstractTrainer(Protocol):
     caller-driven: one `update()` per N `fwd_bwd()` calls.
     Args:
       payload: A packed micro-batch ready for gradient descent.
+
+    Returns:
+      An optional un-donated completion handle exposing `block_until_ready()`
+      that resolves when the device finishes this forward/backward pass, or
+      `None` if the trainer does not expose a readiness token.
     """
     raise NotImplementedError(
         f"{type(self).__name__} does not implement fwd_bwd."
@@ -286,9 +300,7 @@ class AbstractTrainer(Protocol):
     return None
 
   @abc.abstractmethod
-  def get_metrics(
-      self,
-  ) -> datatypes.MetricsBufferLike | Mapping[str, Any]:
+  def get_metrics(self) -> datatypes.MetricsBufferLike:
     """Returns and clears the recently collected step metric records."""
     raise NotImplementedError(
         f"{type(self).__name__} does not implement get_metrics."

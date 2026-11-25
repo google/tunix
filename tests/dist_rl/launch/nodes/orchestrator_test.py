@@ -1301,7 +1301,10 @@ rl_training_config:
       orchestrator.main(argv, _FakeProcessContext(discovery))
 
     setup_metrics.assert_called_once_with(
-        default_service_name="tunix-orchestrator",
+        service_name="tunix-orchestrator",
+        endpoint="",
+        export_interval_ms=otel_setup.DEFAULT_EXPORT_INTERVAL_MS,
+        export_timeout_s=otel_setup.DEFAULT_EXPORT_TIMEOUT_S,
         resource_attributes={
             "tunix.role": "orchestrator",
             "tunix.run_id": "run_1",

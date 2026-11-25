@@ -69,6 +69,8 @@ class StepTimes:
     weight_sync_time: Syncing the new policy to the rollout workers.
     routed_experts_fetch_time: Pulling staged MoE `routed_experts` arrays from
       rollout workers prior to microbatch packing.
+    critique_time: Sum of off-loop `_critique_group` durations across groups
+      consumed in the step.
   """
 
   exposed_generation_time: float = 0.0
@@ -78,6 +80,42 @@ class StepTimes:
   checkpoint_time: float = 0.0
   weight_sync_time: float = 0.0
   routed_experts_fetch_time: float = 0.0
+  critique_time: float = 0.0
+
+
+def aggregate_trainer_data_wait(
+    waits: Sequence[tuple[float, float | None]],
+) -> dict[str, float]:
+  """Sums a step's `(wait_sec, data_plane_sec)` pairs into `perf/` metrics.
+
+  Args:
+    waits: `(wait_sec, data_plane_sec)` per micro-batch, in execution order.
+
+  Returns:
+    The step's trainer data wait: total, first micro-batch, later micro-batches
+    and the longest single wait. When every micro-batch reports its data-plane
+    part, also the split of the total into rollout and data plane. Note that
+    `perf/trainer_data_wait_data_plane` covers all post-rollout orchestrator
+    work before trainer dispatch (including exposed `Role.REFERENCE` KL scoring,
+    which is logged separately as `perf/reference_logps_time`). Empty when
+    `waits` is empty.
+  """
+  if not waits:
+    return {}
+  wait_secs = [wait_sec for wait_sec, _ in waits]
+  total = sum(wait_secs)
+  metrics = {
+      "perf/trainer_data_wait_time": total,
+      "perf/trainer_data_wait_first_mb": wait_secs[0],
+      "perf/trainer_data_wait_intra_step": sum(wait_secs[1:]),
+      "perf/trainer_data_wait_max": max(wait_secs),
+  }
+  data_plane_secs = [dp for _, dp in waits if dp is not None]
+  if len(data_plane_secs) == len(waits):
+    data_plane = sum(data_plane_secs)
+    metrics["perf/trainer_data_wait_data_plane"] = data_plane
+    metrics["perf/trainer_data_wait_rollout"] = total - data_plane
+  return metrics
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -281,19 +319,15 @@ def _add_percentiles(
     metrics: dict[str, float],
     prefix: str,
     values: Sequence[float | int] | np.ndarray,
-    percentiles: Sequence[int] = (50, 90, 99),
     *,
     include_mean: bool = False,
 ) -> None:
-  """Records `prefix/{mean,pXX,...,max}` summary statistics into `metrics`."""
+  """Records `prefix/{mean,p99,max}` summary statistics into `metrics`."""
   if len(values) == 0:
     return
   if include_mean:
     metrics[f"{prefix}/mean"] = float(np.mean(values))
-  for p, val in zip(
-      percentiles, np.percentile(values, percentiles), strict=True
-  ):
-    metrics[f"{prefix}/p{p}"] = float(val)
+  metrics[f"{prefix}/p99"] = float(np.percentile(values, 99))
   metrics[f"{prefix}/max"] = float(np.max(values))
 
 
@@ -303,32 +337,33 @@ def rollout_health(facts: Sequence[RolloutFacts]) -> RolloutHealth:
   Covers the rollouts the step consumed; filtered groups are not included.
 
     * `rollout/status/<status>_frac`: share of rollouts that ended in each
-      `TrajectoryStatus`, all reported every step so dashboard series stay
-      continuous. `critique_stage` maps a missing or unrecognized producer
-      status to RUNNING, so a nonzero `running_frac` points at the producer.
+      terminal `TrajectoryStatus`, all reported every step so dashboard series
+      stay continuous. RUNNING is not reported: `critique_stage` maps a missing
+      or unrecognized producer status to it, so the reported shares sum to
+      less than 1 only when the producer misbehaves.
     * `rollout/num_turns_{mean,max}`: assistant turns per rollout, counted in
       `conversation_text`.
-    * `rollout/turn_length/{mean,p50,p99,max}`: tokens sampled per assistant
+    * `rollout/turn_length/{mean,p99,max}`: tokens sampled per assistant
       turn, pooled over the step.
-    * `rollout/env_time_sec/{mean,p50,p99,max}`: environment (`reset` +
+    * `rollout/env_time_sec/{mean,p99,max}`: environment (`reset` +
       `step` + `close`) wall time per rollout.
-    * `rollout/duration_sec/{p50,p90,p99,max}`: seconds from the engine
+    * `rollout/duration_sec/{p99,max}`: seconds from the engine
       building a rollout's request to its worker handing the trajectory back,
       as the orchestrator sees it: queueing before the worker starts, pauses
       for weight sync and clock skew between hosts are all included.
-      `rollout/execution_sec/{p50,p90,p99,max}` is the worker-side episode
-      execution duration, and `rollout/queue_wait_sec/{p50,p90,p99,max}` is
-      `max(0, duration_sec - execution_sec)`.
-      `rollout/dispatch_delay_sec/{p50,p90,p99,max}` is `max(0, received_time_s
+      `rollout/execution_sec/{p99,max}` is the worker-side episode
+      execution duration,
+      `rollout/dispatch_delay_sec/{p99,max}` is `max(0, received_time_s
       - dispatch_time_s)`, capturing transport transit and any pre-reroute wait
       time on failed attempts before the winning worker received the request,
-      and `rollout/worker_queue_wait_sec/{p50,p90,p99,max}` is
+      and `rollout/worker_queue_wait_sec/{p99,max}` is
       `max(0, (finish_time_s - received_time_s) - execution_sec)` measured on
       the winning worker's clock (`duration ≈ dispatch_delay +
-      worker_queue_wait + execution`). `rollout/tail_sec` is max - p50,
+      worker_queue_wait + execution`). `rollout/tail_sec` is the slowest
+      rollout's duration minus the median duration,
       `rollout/batch_wall_sec` is the maximum cohort span from first dispatch
       to last finish within each `batch_idx` cohort, and
-      `rollout/group_straggler_sec/{mean,p50,p90,p99,max}` is the first-to-last
+      `rollout/group_straggler_sec/{mean,p99,max}` is the first-to-last
       finish span (`max(finish_time_s) - min(finish_time_s)`) within each
       `(batch_idx, prompt_id)` group with `> 1` rollout (including cross-host
       clock skew when a prompt group is striped across multiple rollout
@@ -367,22 +402,23 @@ def rollout_health(facts: Sequence[RolloutFacts]) -> RolloutHealth:
   metrics: dict[str, float] = {}
   if facts:
     for name, count in status_counts.items():
+      if name == datatypes.TrajectoryStatus.RUNNING.name:
+        continue
       metrics[f"rollout/status/{name.lower()}_frac"] = count / len(facts)
   if turns:
     metrics["rollout/num_turns_mean"] = float(np.mean(turns))
     metrics["rollout/num_turns_max"] = float(np.max(turns))
   _add_percentiles(
-      metrics, "rollout/turn_length", turn_lengths, (50, 99), include_mean=True
+      metrics, "rollout/turn_length", turn_lengths, include_mean=True
   )
   _add_percentiles(
-      metrics, "rollout/env_time_sec", env_times, (50, 99), include_mean=True
+      metrics, "rollout/env_time_sec", env_times, include_mean=True
   )
   if windows:
     durations = np.array([window.duration_s for window in windows])
     _add_percentiles(metrics, "rollout/duration_sec", durations)
-    metrics["rollout/tail_sec"] = (
-        metrics["rollout/duration_sec/max"]
-        - metrics["rollout/duration_sec/p50"]
+    metrics["rollout/tail_sec"] = float(
+        np.max(durations) - np.median(durations)
     )
     cohorts: collections.defaultdict[int | None, list[RolloutWindow]] = (
         collections.defaultdict(list)
@@ -405,7 +441,6 @@ def rollout_health(facts: Sequence[RolloutFacts]) -> RolloutHealth:
         metrics,
         "rollout/group_straggler_sec",
         group_lags,
-        (50, 90, 99),
         include_mean=True,
     )
     dispatch_delays = [
@@ -420,12 +455,6 @@ def rollout_health(facts: Sequence[RolloutFacts]) -> RolloutHealth:
         if window.execution_time_s is not None
     ]
     _add_percentiles(metrics, "rollout/execution_sec", exec_durations)
-    queue_waits = [
-        max(0.0, window.duration_s - window.execution_time_s)
-        for window in windows
-        if window.execution_time_s is not None
-    ]
-    _add_percentiles(metrics, "rollout/queue_wait_sec", queue_waits)
     worker_queue_waits = [
         max(
             0.0,

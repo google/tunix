@@ -35,6 +35,7 @@ from collections.abc import Callable, Hashable, Sequence
 import heapq
 import itertools
 import logging
+import time
 from typing import Any, Deque, Dict, Generic, Optional, Tuple, TypeVar
 
 from tunix.dist_rl.common import datatypes
@@ -124,6 +125,7 @@ class TrajectoryQueueManager(
       filter_fn: Optional[FilterFn[TrajectoryItem]] = None,
       key_fn: Optional[Callable[[TrajectoryItem], Hashable]] = None,
       on_group_filtered: Callable[[list[TrajectoryItem]], None] | None = None,
+      clock: Callable[[], float] = time.monotonic,
   ):
     """Initializes TrajectoryQueueManager.
 
@@ -137,6 +139,7 @@ class TrajectoryQueueManager(
         fallback.
       on_group_filtered: Optional callback invoked when a candidate group is
         completely filtered out (e.g., due to staleness).
+      clock: Monotonic clock used to stamp when each group became complete.
     """
     if key_fn is None and group_fn is None:
       key_fn = default_key_fn
@@ -147,6 +150,7 @@ class TrajectoryQueueManager(
         filter_fn=filter_fn,
         key_fn=key_fn,
         on_group_filtered=on_group_filtered,
+        clock=clock,
     )
 
   @classmethod
@@ -158,6 +162,7 @@ class TrajectoryQueueManager(
       filter_fn: FilterFn[TrajectoryItem] | None = None,
       on_group_filtered: Callable[[list[TrajectoryItem]], None] | None = None,
       max_version_span: int | None = None,
+      clock: Callable[[], float] = time.monotonic,
   ) -> "TrajectoryQueueManager":
     """Creates a grouped trajectory queue with optional staleness and span filtering.
 
@@ -194,6 +199,7 @@ class TrajectoryQueueManager(
       on_group_filtered: Called with each group the filters drop.
       max_version_span: Optional maximum allowed policy-version span (`max -
         min`) across valid items/turns in a group.
+      clock: Monotonic clock used to stamp when each group became complete.
 
     Returns:
       The configured `TrajectoryQueueManager`.
@@ -237,6 +243,7 @@ class TrajectoryQueueManager(
         num_generations=num_generations,
         filter_fn=combined_filter,
         on_group_filtered=on_group_filtered,
+        clock=clock,
     )
 
   def __aiter__(self) -> "TrajectoryQueueManager":
@@ -258,8 +265,6 @@ class TrajectoryQueueManager(
       num_groups: int | None = None,
   ) -> list[TrajectoryItem]:
     """Retrieves items by either batch_size or num_groups."""
-    # TODO: why do we need both batch_size and num_groups?
-    # TODO: should this be in parent class?
     if num_groups is not None:
       out: list[TrajectoryItem] = []
       for _ in range(num_groups):
