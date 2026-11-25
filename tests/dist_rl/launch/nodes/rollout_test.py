@@ -690,6 +690,39 @@ class CreateRolloutWorkerTest(absltest.TestCase):
     self.assertNotIn("padded_base_moe_mlp_dim", overrides)
     self.assertIs(overrides["checkpoint_storage_use_ocdbt"], False)
 
+  def test_scanned_checkpoint_without_maxtext_config_fails_before_init(self):
+    hp = _hp(
+        *_MAXTEXT_ROLLOUT_ARGV,
+        "weight_sync_config.mode=none",
+        "rollout_model_config.scanned_checkpoint_path=/ckpt/scanned/0",
+    )
+    with (
+        mock.patch.object(
+            rollout, "_import_vllm_sampler", return_value=mock.Mock()
+        ),
+        mock.patch.object(node_utils, "create_mesh"),
+        mock.patch.object(
+            inprocess_vllm_sampler, "InprocessVllmSampler", autospec=True
+        ) as sampler_cls,
+        mock.patch.object(
+            rollout,
+            "_scanned_checkpoint_layout",
+            autospec=True,
+            return_value=("/ckpt/scanned/0/items", {}, False),
+        ),
+        # Validated configs always yield one; simulate a missing one.
+        mock.patch.object(
+            rollout, "_maxtext_additional_config", return_value=None
+        ),
+        _patch_scanned_checkpoint_loader() as load,
+    ):
+      with self.assertRaisesRegex(
+          ValueError, r"needs a vLLM additional_config\.maxtext_config"
+      ):
+        rollout._create_rollout_worker(hp, "rollout-0", self.tokenizer)
+    sampler_cls.return_value.initialize.assert_not_called()
+    load.assert_not_called()
+
   def test_scanned_checkpoint_fails_fast_and_resolves_dp_attention_tp(self):
     base_argv = (
         *_MAXTEXT_ROLLOUT_ARGV,

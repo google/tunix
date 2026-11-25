@@ -736,10 +736,20 @@ def _create_inprocess_vllm_sampler(
             config.rollout_vllm_kwargs.get("additional_config"),
         )
     )
+    if not additional or not isinstance(
+        additional.get("maxtext_config"), Mapping
+    ):
+      raise ValueError(
+          "rollout_model_config.scanned_checkpoint_path needs a vLLM"
+          " additional_config.maxtext_config describing the checkpoint's"
+          " MaxText model (from rollout_model_config.kwargs.maxtext_model_name,"
+          " overridable via"
+          " vllm_config.engine_kwargs.additional_config.maxtext_config)."
+      )
     # Build the engine on random weights now and load the checkpoint over them,
     # so the worker registers only once it serves the real weights.
     sampler.initialize()
-    _load_scanned_checkpoint(hp, sampler, additional or {}, scanned_layout)
+    _load_scanned_checkpoint(hp, sampler, additional, scanned_layout)
   return sampler
 
 
@@ -807,7 +817,7 @@ def _load_scanned_checkpoint(
     hp: resolve_config.DistHyperParameters,
     sampler: scanned_checkpoint_loader.ScannedCheckpointTarget,
     additional: Mapping[str, Any],
-    layout: tuple[str, Mapping[str, bool], bool] | None = None,
+    layout: tuple[str, Mapping[str, bool], bool],
 ) -> None:
   """Loads `rollout_model_config.scanned_checkpoint_path` into `sampler`.
 
@@ -817,20 +827,14 @@ def _load_scanned_checkpoint(
     additional: Merged vLLM `additional_config` describing the checkpoint's
       MaxText model (with `vllm_config.engine_kwargs` overrides) before
       `sampler.initialize()` mutates it in place.
-    layout: Pre-resolved `_scanned_checkpoint_layout` result, or None to read it
-      from `rollout_model_config.scanned_checkpoint_path`.
+    layout: The `_scanned_checkpoint_layout` result for
+      `rollout_model_config.scanned_checkpoint_path`.
   """
   from maxtext.integration.vllm import (  # pylint: disable=g-import-not-at-top
       scanned_checkpoint_loader,
   )
 
-  params_dir, storage, prefused_moe = (
-      layout
-      if layout is not None
-      else _scanned_checkpoint_layout(
-          resolve_config.rollout_scanned_checkpoint_path(hp)
-      )
-  )
+  params_dir, storage, prefused_moe = layout
   sharding = additional.get("sharding")
   strategy = (
       sharding.get("sharding_strategy")
