@@ -108,7 +108,12 @@ class ModelFamilyTest(absltest.TestCase):
         ("gemma4_e2b", parser.Gemma4ChatTemplateParser),
         ("google/gemma-2-2b-it", parser.GemmaChatTemplateParser),
         ("Qwen/Qwen3-1.7B", parser.QwenChatTemplateParser),
-        ("Qwen/Qwen3.5-0.8B", parser.QwenChatTemplateParser),
+        ("/ckpt/qwen3.5-baselines/Qwen3-8B", parser.QwenChatTemplateParser),
+        ("Qwen/Qwen3.5-0.8B", parser.Qwen35ChatTemplateParser),
+        ("Qwen/Qwen3.5-35B-A3B", parser.Qwen35ChatTemplateParser),
+        ("qwen3p5-35b-a3b", parser.Qwen35ChatTemplateParser),
+        ("qwen-3.5-0.8b", parser.Qwen35ChatTemplateParser),
+        ("qwen35-35b", parser.Qwen35ChatTemplateParser),
     ):
       with self.subTest(model_id=model_id):
         result = rollout._chat_parser_for(

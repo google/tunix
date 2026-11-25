@@ -38,13 +38,6 @@ from tunix.rl.agentic.parser.chat_template_parser import (
 
 LOCAL_ROLLOUT_WORKER_ID = "rollout-0"
 _ENV_OBS_RESERVE_PER_TURN = 8
-_CHAT_PARSERS: dict[str, type[chat_parser_lib.BaseChatTemplateParser]] = {
-    "gemma-4": chat_parser_lib.Gemma4ChatTemplateParser,
-    "gemma4": chat_parser_lib.Gemma4ChatTemplateParser,
-    "qwen": chat_parser_lib.QwenChatTemplateParser,
-    "llama": chat_parser_lib.LlamaChatTemplateParser,
-    "gemma": chat_parser_lib.GemmaChatTemplateParser,
-}
 
 
 def _resolve_eos_token_ids(
@@ -82,13 +75,8 @@ def _build_chat_parser(
   if str(chat_cfg["type"]) == "raw":
     return chat_parser_lib.RawTextParser(tokenizer)
   rollout_model = hp.config_mapping("rollout_model_config")
-  family = str(
-      rollout_model["model_name"] or rollout_model["model_id"]
-  ).lower()
-  parser_cls = next(
-      (cls for key, cls in _CHAT_PARSERS.items() if key in family),
-      chat_parser_lib.DefaultChatTemplateParser,
-  )
+  model_id = str(rollout_model["model_id"] or rollout_model["model_name"])
+  parser_cls = chat_parser_lib.resolve_chat_parser_cls(model_id)
   return parser_cls(
       tokenizer, enable_thinking=bool(chat_cfg["enable_thinking"])
   )

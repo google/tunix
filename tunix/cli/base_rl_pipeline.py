@@ -904,7 +904,14 @@ class BasePipeline(abc.ABC, config.HyperParameters):
     chat_cfg = self._config_mapping("chat_parser_config")
     parser_type = chat_cfg.get("type", "default")
     enable_thinking = chat_cfg.get("enable_thinking")
-    if parser_type == "qwen":
+    if parser_type in ("qwen-3.5", "qwen3.5", "qwen3_5", "qwen3p5", "qwen35"):
+      return chat_parser_lib.Qwen35ChatTemplateParser(
+          tokenizer,
+          enable_thinking=_resolve_enable_thinking(
+              enable_thinking, default=True
+          ),
+      )
+    elif parser_type == "qwen":
       return chat_parser_lib.QwenChatTemplateParser(
           tokenizer,
           enable_thinking=_resolve_enable_thinking(

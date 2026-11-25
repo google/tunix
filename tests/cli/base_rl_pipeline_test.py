@@ -892,6 +892,22 @@ class ChatParserConfigTest(parameterized.TestCase):
           True,
       ),
       (
+          "qwen3p5_null_defaults_true",
+          "qwen3.5",
+          None,
+          [],
+          chat_parser_lib.Qwen35ChatTemplateParser,
+          True,
+      ),
+      (
+          "qwen3p5_cli_false_disables",
+          "qwen3.5",
+          None,
+          ["chat_parser_config.enable_thinking=false"],
+          chat_parser_lib.Qwen35ChatTemplateParser,
+          False,
+      ),
+      (
           "gemma4_null_defaults_false",
           "gemma4",
           None,

@@ -57,13 +57,9 @@ os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
 _ROLLOUT_KEY = "rollout_model_config"
 
-CHAT_PARSERS: dict[str, type[chat_parser_lib.BaseChatTemplateParser]] = {
-    "gemma-4": chat_parser_lib.Gemma4ChatTemplateParser,
-    "gemma4": chat_parser_lib.Gemma4ChatTemplateParser,
-    "qwen": chat_parser_lib.QwenChatTemplateParser,
-    "llama": chat_parser_lib.LlamaChatTemplateParser,
-    "gemma": chat_parser_lib.GemmaChatTemplateParser,
-}
+CHAT_PARSERS: dict[str, type[chat_parser_lib.BaseChatTemplateParser]] = (
+    chat_parser_lib.MODEL_FAMILY_CHAT_PARSERS
+)
 
 ChatParser = (
     chat_parser_lib.BaseChatTemplateParser | chat_parser_lib.RawTextParser
@@ -345,13 +341,10 @@ def _chat_parser_for(
   """
   if mode == "raw":
     return chat_parser_lib.RawTextParser(tokenizer)
-  name = model_id.lower()
-  for family, parser_cls in CHAT_PARSERS.items():
-    if family in name:
-      return parser_cls(tokenizer, enable_thinking=enable_thinking)
-  return chat_parser_lib.DefaultChatTemplateParser(
-      tokenizer, enable_thinking=enable_thinking
+  parser_cls = chat_parser_lib.resolve_chat_parser_cls(
+      model_id, parsers=CHAT_PARSERS
   )
+  return parser_cls(tokenizer, enable_thinking=enable_thinking)
 
 
 def _create_chat_parser(
