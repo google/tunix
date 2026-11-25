@@ -792,11 +792,12 @@ class RLEngine:
 
   def close(self):
     """Closes engine components and flushes buffered metrics and profiler traces."""
-    exporter = getattr(self, "_async_metrics_exporter", None)
-    if exporter is not None:
+    if self._async_metrics_exporter is not None:
       # Runs the queued flushes, stops the worker thread and drops its
       # references to this engine.
-      exporter.close(timeout_s=_ASYNC_METRICS_CLOSE_TIMEOUT_S)
+      self._async_metrics_exporter.close(
+          timeout_s=_ASYNC_METRICS_CLOSE_TIMEOUT_S
+      )
     for m in self._buffered_train_metrics + self._buffered_eval_metrics:
       self._log_metrics(m)
     self.actor_trainer.close()
@@ -872,7 +873,7 @@ class RLEngine:
     if not _env_flag("TUNIX_ASYNC_METRICS"):
       self._log_metrics(metrics_buffer)
       return
-    exporter = getattr(self, "_async_metrics_exporter", None)
+    exporter = self._async_metrics_exporter
     if exporter is None:
       qdepth = int(
           os.environ.get("TUNIX_ASYNC_METRICS_QUEUE_DEPTH", "3") or "3"
