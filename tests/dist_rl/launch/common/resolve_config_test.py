@@ -2740,5 +2740,158 @@ class TaskConfigTest(absltest.TestCase):
     )
 
 
+class DapoConfigResolutionTest(absltest.TestCase):
+
+  def test_dapo_variant_resolves_defaults_and_overlong_buffer(self):
+    hp = resolve_config.initialize(["agentic_grpo_config.algo_variant=dapo"])
+    grpo = hp.config_mapping("agentic_grpo_config")
+    self.assertEqual(grpo["algo_variant"], "dapo")
+    self.assertEqual(grpo["loss_agg_mode"], "token-mean")
+    self.assertTrue(grpo["drop_zero_variance_groups"])
+    self.assertIsNone(grpo["overlong_buffer"])
+
+    hp_buf = resolve_config.initialize([
+        "rollout_config.total_generation_steps=2048",
+        "agentic_grpo_config.algo_variant=dapo",
+        "agentic_grpo_config.overlong_buffer.enable=true",
+        "agentic_grpo_config.overlong_buffer.overlong_buffer_length=512",
+    ])
+    self.assertEqual(
+        hp_buf.config_mapping("agentic_grpo_config")["overlong_buffer"],
+        {
+            "enable": True,
+            "overlong_buffer_length": 512,
+            "overlong_buffer_penalty": 1.0,
+            "max_response_length": 2048,
+        },
+    )
+
+    hp_opt_out = resolve_config.initialize([
+        "agentic_grpo_config.algo_variant=dapo",
+        "agentic_grpo_config.loss_agg_mode=sequence-mean-token-scale",
+        "agentic_grpo_config.drop_zero_variance_groups=false",
+        "agentic_grpo_config.overlong_buffer.enable=false",
+    ])
+    grpo_opt_out = hp_opt_out.config_mapping("agentic_grpo_config")
+    self.assertEqual(grpo_opt_out["loss_agg_mode"], "sequence-mean-token-scale")
+    self.assertFalse(grpo_opt_out["drop_zero_variance_groups"])
+    self.assertEqual(grpo_opt_out["overlong_buffer"], {"enable": False})
+
+  def test_dapo_variant_rejects_invalid_combinations(self):
+    for overrides, err_type, regex in (
+        (
+            ["agentic_grpo_config.algo_variant=unknown"],
+            ValueError,
+            "algo_variant must be one of",
+        ),
+        (
+            ["agentic_grpo_config.algo_variant=drgrpo"],
+            ValueError,
+            "algo_variant must be one of",
+        ),
+        (
+            ["agentic_grpo_config.loss_agg_mode=123"],
+            ValueError,
+            "loss_agg_mode must be one of",
+        ),
+        (
+            ["agentic_grpo_config.loss_agg_mode=unknown_mode"],
+            ValueError,
+            "loss_agg_mode must be one of",
+        ),
+        (
+            ["agentic_grpo_config.drop_zero_variance_groups=123"],
+            TypeError,
+            "drop_zero_variance_groups must be a bool or null",
+        ),
+        (
+            [
+                "agentic_grpo_config.algo_variant=dapo",
+                "agentic_grpo_config.beta=0.04",
+            ],
+            ValueError,
+            "beta must be 0.0",
+        ),
+        (
+            [
+                "agentic_grpo_config.algo_variant=dapo",
+                "agentic_grpo_config.epsilon=0.3",
+            ],
+            ValueError,
+            "epsilon_high must be set and >= agentic_grpo_config.epsilon",
+        ),
+        (
+            [
+                "agentic_grpo_config.algo_variant=dapo",
+                "agentic_grpo_config.epsilon_high=null",
+            ],
+            ValueError,
+            "epsilon_high must be set and >= agentic_grpo_config.epsilon",
+        ),
+        (
+            [
+                "agentic_grpo_config.algo_variant=dapo",
+                "agentic_grpo_config.overlong_buffer.enable=true",
+                "agentic_grpo_config.overlong_buffer.overlong_buffer_length=256",
+                "agentic_grpo_config.overlong_buffer.overlong_buffer_penalty=.nan",
+            ],
+            ValueError,
+            "overlong_buffer_penalty must be non-negative and finite",
+        ),
+        (
+            [
+                "agentic_grpo_config.algo_variant=dapo",
+                "agentic_grpo_config.overlong_buffer.enable=true",
+                "agentic_grpo_config.overlong_buffer.overlong_buffer_length=256",
+                "agentic_grpo_config.overlong_buffer.overlong_buffer_penalty=.inf",
+            ],
+            ValueError,
+            "overlong_buffer_penalty must be non-negative and finite",
+        ),
+        (
+            [
+                "agentic_grpo_config.algo_variant=dapo",
+                "agentic_grpo_config.trajectory_group_order=prompt_arrival",
+            ],
+            ValueError,
+            "drop_zero_variance_groups is only supported",
+        ),
+        (
+            ["agentic_grpo_config.overlong_buffer.enable=true"],
+            ValueError,
+            "overlong_buffer requires agentic_grpo_config.algo_variant='dapo'",
+        ),
+        (
+            [
+                "agentic_grpo_config.algo_variant=dapo",
+                "agentic_grpo_config.overlong_buffer.overlong_buffer_length=256",
+            ],
+            ValueError,
+            "overlong_buffer must specify 'enable'",
+        ),
+        (
+            [
+                "rollout_config.total_generation_steps=1024",
+                "agentic_grpo_config.algo_variant=dapo",
+                "agentic_grpo_config.overlong_buffer.enable=true",
+                "agentic_grpo_config.overlong_buffer.overlong_buffer_length=1024",
+            ],
+            ValueError,
+            "must be less than max_response_length",
+        ),
+        (
+            [
+                "agentic_grpo_config.algo_variant=dapo",
+                "agentic_grpo_config.overlong_buffer.bad_key=1",
+            ],
+            ValueError,
+            "unexpected keys",
+        ),
+    ):
+      with self.subTest(overrides=overrides):
+        with self.assertRaisesRegex(err_type, regex):
+          resolve_config.initialize(overrides)
+
+
 if __name__ == "__main__":
   absltest.main()

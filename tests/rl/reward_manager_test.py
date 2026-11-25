@@ -731,5 +731,101 @@ class ParallelSequenceRewardManagerTest(parameterized.TestCase):
       TestAlgoConfig(reward_worker_timeout_seconds=0)
 
 
+def dapo_acc_reward(prompts: List[str], completions: List[str]) -> List[float]:
+  del prompts
+  return [1.0 if c.startswith("ok") else 0.0 for c in completions]
+
+
+dapo_acc_reward.__name__ = "acc_reward"
+
+
+class DapoRewardManagerTest(parameterized.TestCase):
+
+  @parameterized.named_parameters(
+      dict(testcase_name="serial", reward_num_workers=0),
+      dict(testcase_name="parallel", reward_num_workers=2),
+  )
+  def test_dapo_overlong_buffer_attaches_once_and_separates_task_rewards(
+      self, reward_num_workers: int
+  ):
+    caller_fns = [dapo_acc_reward]
+    dapo_cfg = algo_config_lib.DAPOConfig(
+        reward_mode="reward_fn",
+        reward_num_workers=reward_num_workers,
+        overlong_buffer={
+            "enable": True,
+            "overlong_buffer_length": 20,
+            "overlong_buffer_penalty": 10.0,
+            "max_response_length": 100,
+        },
+    )
+    manager = reward_manager.SequenceRewardManager(
+        reward_fns=caller_fns, algo_config=dapo_cfg
+    )
+    self.addCleanup(manager.close)
+    # Caller's list is not mutated; reward_shaping is attached once on manager.
+    self.assertEqual(caller_fns, [dapo_acc_reward])
+    self.assertEqual(
+        manager.reward_fns, [dapo_acc_reward, algo_config_lib.reward_shaping]
+    )
+
+    # Deduplicates when caller already passed reward_shaping explicitly.
+    dedup_manager = reward_manager.SequenceRewardManager(
+        reward_fns=(dapo_acc_reward, algo_config_lib.reward_shaping),
+        algo_config=dapo_cfg,
+    )
+    self.addCleanup(dedup_manager.close)
+    self.assertEqual(
+        dedup_manager.reward_fns,
+        [dapo_acc_reward, algo_config_lib.reward_shaping],
+    )
+
+    prompts = ["p0", "p0", "p1", "p1"]
+    completions = ["ok_short", "ok_" + "x" * 300, "ok_ans", "bad_ans"]
+    token_lengths = [70, 90, 90, 70]
+    info = manager(
+        prompts=prompts,
+        completions=completions,
+        completion_token_lengths=token_lengths,
+    )
+    if (
+        reward_num_workers > 1
+        and reward_manager._fork_context() is not None  # pylint: disable=protected-access
+    ):
+      self.assertIsNotNone(manager._pool)  # pylint: disable=protected-access
+      self.assertEmpty(manager._parent_only_fns)  # pylint: disable=protected-access
+    # Unshaped task_rewards tie on p0 ([1.0, 1.0]) despite token penalty -5.0.
+    npt.assert_allclose(info["task_rewards"], [1.0, 1.0, 1.0, 0.0])
+    npt.assert_allclose(info["rewards"], [1.0, -4.0, -4.0, 0.0])
+    npt.assert_allclose(
+        info["log_metrics"]["rewards/reward_shaping"][0],
+        [0.0, -5.0, -5.0, 0.0],
+    )
+
+  def test_dapo_env_mode_attaches_reward_shaping_without_user_reward_fns(self):
+    dapo_cfg = algo_config_lib.DAPOConfig(
+        reward_mode="env",
+        overlong_buffer={
+            "enable": True,
+            "overlong_buffer_length": 20,
+            "overlong_buffer_penalty": 10.0,
+            "max_response_length": 100,
+        },
+    )
+    manager = reward_manager.AgenticSequenceRewardManager(
+        reward_fns=[], algo_config=dapo_cfg
+    )
+    self.addCleanup(manager.close)
+    self.assertEqual(manager.reward_fns, [algo_config_lib.reward_shaping])
+    info = manager(
+        prompts=["p0", "p0"],
+        completions=["short_answer", "very_verbose_answer"],
+        trajectory_rewards=[1.0, 1.0],
+        completion_token_lengths=[80, 90],
+    )
+    npt.assert_allclose(info["task_rewards"], [1.0, 1.0])
+    npt.assert_allclose(info["rewards"], [1.0, -4.0])
+
+
 if __name__ == "__main__":
   absltest.main()

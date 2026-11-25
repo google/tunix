@@ -352,6 +352,31 @@ class BuildersTest(absltest.TestCase):
     self.assertTrue(config.drop_zero_variance_groups)
     self.assertEqual(config.max_consecutive_filtered_groups, 32)
 
+  def test_build_grpo_config_constructs_dapo_config_for_dapo_variant(self):
+    config = orchestrator.build_grpo_config(
+        _config(
+            "rollout_config.total_generation_steps=1024",
+            "agentic_grpo_config.algo_variant=dapo",
+            "agentic_grpo_config.overlong_buffer.enable=true",
+            "agentic_grpo_config.overlong_buffer.overlong_buffer_length=256",
+            "agentic_grpo_config.overlong_buffer.overlong_buffer_penalty=2.0",
+        )
+    )
+    if not isinstance(config, orchestrator.algorithm_config.DAPOConfig):
+      self.fail(f"Expected DAPOConfig, got {type(config).__name__}.")
+    self.assertEqual(config.algo_variant, "dapo")
+    self.assertEqual(config.loss_agg_mode, "token-mean")
+    self.assertTrue(config.drop_zero_variance_groups)
+    self.assertEqual(
+        config.overlong_buffer,
+        {
+            "enable": True,
+            "overlong_buffer_length": 256,
+            "overlong_buffer_penalty": 2.0,
+            "max_response_length": 1024,
+        },
+    )
+
   def test_batch_config(self):
     config = orchestrator.build_batch_config(
         _config(

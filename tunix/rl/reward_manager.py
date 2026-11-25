@@ -150,8 +150,10 @@ class AbstractRewardManager(abc.ABC):
         **kwargs: Additional keyword arguments passed to the reward functions.
 
     Returns:
-        A dictionary of rewards information, including the final rewards for
-        advantage computation and intermediate rewards for logging.
+        A dictionary of rewards information, including `"rewards"` (final total
+        rewards for advantage computation), optional `"task_rewards"` (unshaped
+        task rewards excluding length-shaping penalties for zero-variance group
+        filtering), and `"log_metrics"` for logging.
     """
     pass
 
@@ -191,6 +193,13 @@ class SequenceRewardManager(AbstractRewardManager):
           " algo_config.reward_mode='env' to use environment trajectory"
           " rewards."
       )
+    if (
+        isinstance(algo_config, algo_config_lib.DAPOConfig)
+        and algo_config.overlong_buffer is not None
+        and algo_config.overlong_buffer["enable"]
+        and algo_config_lib.reward_shaping not in self.reward_fns
+    ):
+      self.reward_fns.append(algo_config_lib.reward_shaping)
     reserved = sorted(
         {fn.__name__ for fn in self.reward_fns} & _RESERVED_REWARD_FN_NAMES
     )
@@ -417,6 +426,22 @@ class SequenceRewardManager(AbstractRewardManager):
       rewards[:, i] = np.array(r)
 
     sum_rewards = _sum_trajectory_rewards(rewards, env_rewards)
+    task_fn_indices = [
+        i
+        for i, fn in enumerate(self.reward_fns)
+        if fn is not algo_config_lib.reward_shaping
+    ]
+    # Separate unshaped task rewards from DAPO's soft overlong length penalty
+    # so `drop_zero_variance_groups` filters prompt groups whose task accuracy
+    # ties even when differing response lengths produce distinct shaped totals
+    # (DAPO Eqs. 8, 11, 12). When `reward_shaping` is the sole reward source,
+    # fall back to `sum_rewards` so standalone length-only scoring is unchanged.
+    has_task_source = env_rewards is not None or bool(task_fn_indices)
+    task_rewards = (
+        _sum_trajectory_rewards(rewards[:, task_fn_indices], env_rewards)
+        if has_task_source
+        else sum_rewards
+    )
     # Prepare metrics for logging.
     log_metrics = self._prepare_log_metrics(
         prompts,
@@ -427,6 +452,7 @@ class SequenceRewardManager(AbstractRewardManager):
     )
     rewards_info = {
         "rewards": sum_rewards,
+        "task_rewards": task_rewards,
         "log_metrics": log_metrics,
     }
 

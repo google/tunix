@@ -325,6 +325,32 @@ class TestDAPOConfigPostInit(parameterized.TestCase):
           ),
           expected_regex="overlong_buffer_penalty must be non-negative",
       ),
+      dict(
+          testcase_name="buffer_missing_enable",
+          config_kwargs=dict(
+              overlong_buffer={
+                  "overlong_buffer_length": 4096,
+                  "overlong_buffer_penalty": 1.0,
+                  "max_response_length": 20480,
+              }
+          ),
+          expected_regex="overlong_buffer must specify 'enable'",
+      ),
+      dict(
+          testcase_name="buffer_length_ge_max_length",
+          config_kwargs=dict(
+              overlong_buffer={
+                  "enable": True,
+                  "overlong_buffer_length": 4096,
+                  "overlong_buffer_penalty": 1.0,
+                  "max_response_length": 4096,
+              }
+          ),
+          expected_regex=(
+              r"overlong_buffer_length \(4096\) must be less than"
+              r" max_response_length \(4096\)"
+          ),
+      ),
   )
   def test_invalid_configurations(self, config_kwargs, expected_regex):
     """Tests various invalid configurations that should raise ValueError."""
@@ -374,12 +400,12 @@ class RewardShapingTest(parameterized.TestCase):
       dict(
           testcase_name="over_max_length",
           lengths=[110],
-          expected_scores=[-15.0],
+          expected_scores=[-10.0],
       ),
       dict(
           testcase_name="mixed_lengths",
           lengths=[70, 80, 90, 100, 110],
-          expected_scores=[0.0, 0.0, -5.0, -10.0, -15.0],
+          expected_scores=[0.0, 0.0, -5.0, -10.0, -10.0],
       ),
       dict(
           testcase_name="zero_penalty",
@@ -405,6 +431,52 @@ class RewardShapingTest(parameterized.TestCase):
     )
 
     self.assertSequenceAlmostEqual(expected_scores, scores, places=4)
+
+  def test_uses_completion_token_lengths_instead_of_character_lengths(self):
+    overlong_buffer = {
+        "overlong_buffer_length": 20,
+        "overlong_buffer_penalty": 10.0,
+        "max_response_length": 100,
+    }
+    # Character lengths are [400, 10, 5], while actual response token lengths
+    # are [70, 90, 150] (under threshold -> 0.0, midpoint -> -5.0, past max ->
+    # capped at -10.0 per Eq. 13).
+    scores = dapo_lib.reward_shaping(
+        prompts=["p0", "p1", "p2"],
+        completions=["x" * 400, "short_text", "tiny"],
+        mode=self.mock_cluster.Mode,
+        overlong_buffer=overlong_buffer,
+        completion_token_lengths=[70, 90, 150],
+    )
+    self.assertSequenceAlmostEqual(scores, [0.0, -5.0, -10.0], places=4)
+
+  def test_rejects_invalid_completion_token_lengths(self):
+    overlong_buffer = {
+        "overlong_buffer_length": 20,
+        "overlong_buffer_penalty": 10.0,
+        "max_response_length": 100,
+    }
+    with self.assertRaisesRegex(ValueError, "must match completions length"):
+      dapo_lib.reward_shaping(
+          prompts=["p0", "p1"],
+          completions=["a", "b"],
+          overlong_buffer=overlong_buffer,
+          completion_token_lengths=[10],
+      )
+    with self.assertRaisesRegex(ValueError, "must be non-negative"):
+      dapo_lib.reward_shaping(
+          prompts=["p0"],
+          completions=["a"],
+          overlong_buffer=overlong_buffer,
+          completion_token_lengths=[-1],
+      )
+    with self.assertRaisesRegex(TypeError, "must be non-negative ints"):
+      dapo_lib.reward_shaping(
+          prompts=["p0"],
+          completions=["a"],
+          overlong_buffer=overlong_buffer,
+          completion_token_lengths=[True],
+      )
 
 
 if __name__ == "__main__":

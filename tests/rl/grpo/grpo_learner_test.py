@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import dataclasses
 import itertools
 import os
 import shutil
@@ -1403,6 +1404,72 @@ class GRPOLearnerTest(parameterized.TestCase):
               ),
           )
 
+  def test_dapo_overlong_buffer_uses_generated_token_lengths(self):
+    rl_engine, _, _ = setup({'rollout_micro_batch_size': 1})
+    captured: dict[str, list[int]] = {}
+
+    def spy_task_reward(
+        prompts, completions, completion_token_lengths, **kwargs
+    ):
+      del prompts, completions, kwargs
+      captured['token_lengths'] = list(completion_token_lengths)
+      return [1.0, 1.0]
+
+    dapo_config = grpo_lib.algo_config_lib.DAPOConfig(
+        num_generations=2,
+        num_iterations=1,
+        drop_zero_variance_groups=False,
+        overlong_buffer={
+            'enable': True,
+            'overlong_buffer_length': 4,
+            'overlong_buffer_penalty': 2.0,
+            'max_response_length': 8,
+        },
+    )
+    orig_generate = rl_engine.generate
+    generated_token_lengths: list[int] = []
+
+    def _spy_generate(*args, **kwargs):
+      out = orig_generate(*args, **kwargs)
+      out = dataclasses.replace(
+          out,
+          tokens=[np.ones(5, dtype=np.int32), np.ones(8, dtype=np.int32)],
+          text=['x' * 50, 'y' * 50],
+      )
+      generated_token_lengths[:] = [len(t) for t in out.tokens]
+      return out
+
+    rl_engine.generate = _spy_generate
+    rl_engine.buffer_metrics = mock.MagicMock(wraps=rl_engine.buffer_metrics)
+    learner = grpo_lib.GRPOLearner(
+        rl_engine=rl_engine,
+        algo_config=dapo_config,
+        reward_fns=[spy_task_reward],
+    )
+    example = learner._generate_and_compute_advantage(
+        {
+            'prompts': ['input string', 'input string'],
+            'completion_token_lengths': np.array([999, 999], dtype=np.int32),
+        },
+        mode=rl_engine_lib.Mode.TRAIN,
+    )
+    self.assertEqual(captured['token_lengths'], [5, 8])
+    self.assertEqual(generated_token_lengths, [5, 8])
+    assert learner.reward_manager is not None
+    self.assertEqual(
+        learner.reward_manager.reward_fns,
+        [spy_task_reward, grpo_lib.algo_config_lib.reward_shaping],
+    )
+    shaping_logs = [
+        call.args[0]['rewards/reward_shaping'][0]
+        for call in rl_engine.buffer_metrics.call_args_list
+        if 'rewards/reward_shaping' in call.args[0]
+    ]
+    self.assertLen(shaping_logs, 1)
+    np.testing.assert_allclose(shaping_logs[0], [-0.5, -2.0])
+    adv = np.asarray(example.advantages)
+    self.assertGreater(float(adv[0]), 0.0)
+    self.assertLess(float(adv[1]), 0.0)
 
 if __name__ == '__main__':
   absltest.main()

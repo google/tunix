@@ -230,6 +230,10 @@ env_kwargs: {}
 kubernetes_config: {}
 
 agentic_grpo_config:
+  # Core RL variant ("grpo" or "dapo"). "dapo" builds `DAPOConfig`
+  # (https://arxiv.org/abs/2503.14476), defaulting `loss_agg_mode` to
+  # "token-mean" and `drop_zero_variance_groups` to true when left null.
+  algo_variant: "grpo"
   num_generations: 8
   # Optimizer passes over each rollout batch. Not supported yet: the resolver
   # rejects any value but 1.
@@ -242,7 +246,9 @@ agentic_grpo_config:
   epsilon: 0.2
   epsilon_high: 0.28
   loss_algo: "grpo"
-  loss_agg_mode: "sequence-mean-token-mean"
+  # Defaults to "token-mean" when `algo_variant` is "dapo", else
+  # "sequence-mean-token-mean".
+  loss_agg_mode: null
   kl_loss_mode: "low_var_kl"
   advantage_estimator: "grpo"
   sampler_is: "token"
@@ -267,11 +273,18 @@ agentic_grpo_config:
   trajectory_group_order: "trajectory_completion"
   # Drop prompt groups whose rewards tie (zero variance) and sample replacement
   # prompts, as in DAPO's dynamic sampling (https://arxiv.org/abs/2503.14476).
-  # Requires `trajectory_group_order: "trajectory_completion"`.
-  drop_zero_variance_groups: false
+  # Defaults to true when `algo_variant` is "dapo", else false. Requires
+  # `trajectory_group_order: "trajectory_completion"`.
+  drop_zero_variance_groups: null
   # Fail after this many consecutive groups are dropped by
   # `drop_zero_variance_groups`. Null disables the guard.
   max_consecutive_filtered_groups: null
+  # DAPO soft overlong length penalty (`{enable, overlong_buffer_length,
+  # overlong_buffer_penalty, max_response_length}`); only supported with
+  # `algo_variant: "dapo"`. When `enable` is true, omitted/null
+  # `overlong_buffer_penalty` defaults to 1.0 and `max_response_length`
+  # defaults to `rollout_config.total_generation_steps`. Null leaves it off.
+  overlong_buffer: null
   reward_mode: "env"
   episode_timeout: 600
   max_turns: 8

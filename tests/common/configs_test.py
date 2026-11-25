@@ -302,6 +302,22 @@ class ConfigsTest(absltest.TestCase):
       ):
         configs.RolloutConfig(max_tokens_to_generate=bad_max_tokens)
 
+  def test_validate_overlong_buffer_rejects_nonfinite_and_negative_penalty(
+      self,
+  ):
+    for bad_penalty in (-0.1, float("nan"), float("inf"), float("-inf")):
+      with self.subTest(penalty=bad_penalty):
+        with self.assertRaisesRegex(
+            ValueError,
+            "overlong_buffer_penalty must be non-negative and finite",
+        ):
+          configs.validate_overlong_buffer({
+              "enable": True,
+              "overlong_buffer_length": 128,
+              "overlong_buffer_penalty": bad_penalty,
+              "max_response_length": 1024,
+          })
+
 
 class ReplicaSeedTest(parameterized.TestCase):
 
