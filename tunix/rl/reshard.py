@@ -243,7 +243,7 @@ def _multicontroller_reshard_leaf(
 
 
 # One jitted transfer for all leaves of a publish (TUNIX_BATCHED_PUBLISH).
-_BP_STATE: dict[str, Any] = {'pub': 0, 'exe': {}, 'off': None, 'nosync': False}
+_BP_STATE: dict[str, Any] = {'pub': 0, 'exe': {}, 'off': None}
 
 
 def _batched_publish_mode() -> str:
@@ -424,13 +424,14 @@ def _batched_publish(source: Any, target: Any) -> Any:
 
   Same transfer as `_multicontroller_reshard_leaf`, batched: one identity jit
   per group of leaves (source shardings in, replicated over the source mesh
-  out), compiled once per group signature, then one local placement. All
-  decisions before the first collective use global metadata only, so every
-  process takes the same branch; new compilations are agreed on by a vote.
-  The first TUNIX_BATCHED_PUBLISH_CHECK publishes are compared byte-exactly
-  against the per-leaf path and a failed check disables batching for the
-  run. TUNIX_BATCHED_PUBLISH_NOSYNC=1 skips the timing-only syncs after the
-  checked publishes.
+  out), compiled once per group signature. Every group is placed on its
+  targets (local only) and its replicas are released before the next group
+  is gathered, so at most one group (TUNIX_BATCHED_PUBLISH_GROUP_MB) is
+  replicated at a time, as one leaf is on the per-leaf path. All decisions
+  before the first collective use global metadata only, so every process
+  takes the same branch; new compilations are agreed on by a vote. The first
+  TUNIX_BATCHED_PUBLISH_CHECK publishes are compared byte-exactly against the
+  per-leaf path and a failed check disables batching for the run.
 
   Args:
     source: The source tree.
@@ -489,37 +490,36 @@ def _batched_publish(source: Any, target: Any) -> Any:
         return None
       _BP_STATE['exe'].update(new)
     t1 = time.perf_counter()
-    stage = 'gather'
-    sync = (
-        pub <= checks or os.environ.get('TUNIX_BATCHED_PUBLISH_NOSYNC') != '1'
-    )
-    if not sync and not _BP_STATE['nosync']:
-      _BP_STATE['nosync'] = True
-      logging.info('TUNIX_BATCHED_PUBLISH_NOSYNC=1 from pub=%d.', pub)
-    reps = [None] * len(xs)
+    zero_copy = _batched_publish_mode() == '2'
+    outs, zero_copied, gather_s = [None] * len(xs), 0, 0.0
     for key, g in zip(keys, groups):
-      out = _BP_STATE['exe'][key](*[xs[i] for i in g])
-      if sync:
-        jax.block_until_ready(out)
-      for j, i in enumerate(g):
-        reps[i] = out[j]
-    t2 = time.perf_counter()
-    stage = 'place'
-    try:
-      outs, zero_copied = _bp_place(
-          reps, ts, _batched_publish_mode() == '2'
-      )
-      if sync:
-        jax.block_until_ready(outs)
-    except Exception as e:  # pylint: disable=broad-exception-caught
-      # Local-only recovery; never a collective.
-      logging.warning('TUNIX_BATCHED_PUBLISH pub=%d: place failed: %r', pub, e)
-      outs = [
-          jax.device_put(r.addressable_data(0), s) for r, s in zip(reps, ts)
-      ]
-      zero_copied = 0
-      jax.block_until_ready(outs)
-    del reps
+      stage = 'gather'
+      t = time.perf_counter()
+      reps = list(_BP_STATE['exe'][key](*[xs[i] for i in g]))
+      jax.block_until_ready(reps)
+      gather_s += time.perf_counter() - t
+      stage = 'place'
+      group_ts = [ts[i] for i in g]
+      try:
+        placed, group_zero_copied = _bp_place(reps, group_ts, zero_copy)
+        jax.block_until_ready(placed)
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        # Local-only recovery; never a collective.
+        logging.warning(
+            'TUNIX_BATCHED_PUBLISH pub=%d: place failed: %r', pub, e
+        )
+        placed = [
+            jax.device_put(r.addressable_data(0), s)
+            for r, s in zip(reps, group_ts)
+        ]
+        group_zero_copied = 0
+        jax.block_until_ready(placed)
+      # Release this group's replicas before the next gather allocates its
+      # own: with the waits above, at most one group is replicated at a time.
+      del reps
+      zero_copied += group_zero_copied
+      for i, y in zip(g, placed):
+        outs[i] = y
   except Exception as e:  # pylint: disable=broad-exception-caught
     if stage != 'pre':
       # Past the first collective a per-leaf fallback on this process alone
@@ -530,7 +530,7 @@ def _batched_publish(source: Any, target: Any) -> Any:
       raise
     logging.warning('TUNIX_BATCHED_PUBLISH pub=%d: per-leaf path: %r', pub, e)
     return None
-  t3 = time.perf_counter()
+  t2 = time.perf_counter()
   if _bp_should_log(pub):
     logging.info(
         'TUNIX_BATCHED_PUBLISH pub=%d: %d leaves in %d groups, %d bytes,'
@@ -541,8 +541,8 @@ def _batched_publish(source: Any, target: Any) -> Any:
         sum(x.nbytes for x in xs),
         zero_copied,
         (t1 - t0) * 1e3,
-        (t2 - t1) * 1e3,
-        (t3 - t2) * 1e3,
+        gather_s * 1e3,
+        (t2 - t1 - gather_s) * 1e3,
     )
   if pub <= checks and not _bp_check(pub, xs, ts, outs):
     _BP_STATE['off'] = 'check_failed_pub%d' % pub
