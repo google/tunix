@@ -16,6 +16,7 @@
 
 import ast
 import atexit
+from collections.abc import Callable
 import concurrent.futures
 import copy
 import dataclasses
@@ -58,10 +59,26 @@ def _env_flag(name: str, default: str = "0") -> bool:
   return (os.environ.get(name, default) or default).strip() in _TRUTHY
 
 
-# TUNIX_DEFER_POSTPROCESS_SUBMIT: the flush callback of the running deferring
-# `_generate_offline` call, and the tpu-inference runner file that was hooked.
-_DEFER_STATE: Dict[str, Any] = {"flush": None, "hooked": ""}
-_DEFER_LOCK = threading.Lock()
+class _DeferHookState:
+  """State of the TUNIX_DEFER_POSTPROCESS_SUBMIT runner hook; one per process.
+
+  Process-wide on purpose, not thread-local: with async scheduling, vLLM's
+  uniprocess executor runs `AsyncModelRunnerOutput.get_output`, where
+  tpu-inference calls `_process_continue_decode_outputs`, on its own output
+  thread rather than on the thread that steps the engine, so the hook would
+  never see a thread-local callback there. One `_generate_offline` call at a
+  time owns `flush`; nested or concurrent calls submit right away.
+  """
+
+  def __init__(self):
+    self.lock = threading.Lock()
+    # Called by the hook; set by the `_generate_offline` call that owns it.
+    self.flush: Optional[Callable[[], None]] = None
+    # The tpu-inference runner file that was hooked; empty until then.
+    self.hooked = ""
+
+
+_DEFER = _DeferHookState()
 
 
 def _check_continue_decode_runner(source: str) -> List[str]:
@@ -122,29 +139,37 @@ def _check_continue_decode_runner(source: str) -> List[str]:
 
 
 def _install_defer_hook() -> None:
-  """Wraps tpu-inference's `_process_continue_decode_outputs` once."""
-  if _DEFER_STATE["hooked"]:
-    return
-  runner = importlib.import_module("tpu_inference.runner.tpu_runner")
-  problems = _check_continue_decode_runner(inspect.getsource(runner))
-  if problems:
-    raise RuntimeError(
-        "TUNIX_DEFER_POSTPROCESS_SUBMIT=1 but the tpu-inference runner does"
-        f" not match ({'; '.join(problems)}; {runner.__file__}); refusing to"
-        " run with an inert deferral."
-    )
-  name = "_process_continue_decode_outputs"
-  original = getattr(runner, name)
+  """Wraps tpu-inference's `_process_continue_decode_outputs`, once.
 
-  @functools.wraps(original)
-  def _process_continue_decode_outputs(*args, **kwargs):
-    flush = _DEFER_STATE["flush"]
-    if flush is not None:
-      flush()
-    return original(*args, **kwargs)
+  Runs under `_DEFER.lock`, so concurrent first calls check the runner and
+  wrap the function exactly once.
 
-  setattr(runner, name, _process_continue_decode_outputs)
-  _DEFER_STATE["hooked"] = runner.__file__
+  Raises:
+    RuntimeError: The runner lacks the structure the deferral relies on.
+  """
+  with _DEFER.lock:
+    if _DEFER.hooked:
+      return
+    runner = importlib.import_module("tpu_inference.runner.tpu_runner")
+    problems = _check_continue_decode_runner(inspect.getsource(runner))
+    if problems:
+      raise RuntimeError(
+          "TUNIX_DEFER_POSTPROCESS_SUBMIT=1 but the tpu-inference runner does"
+          f" not match ({'; '.join(problems)}; {runner.__file__}); refusing"
+          " to run with an inert deferral."
+      )
+    name = "_process_continue_decode_outputs"
+    original = getattr(runner, name)
+
+    @functools.wraps(original)
+    def _process_continue_decode_outputs(*args, **kwargs):
+      flush = _DEFER.flush
+      if flush is not None:
+        flush()
+      return original(*args, **kwargs)
+
+    setattr(runner, name, _process_continue_decode_outputs)
+    _DEFER.hooked = runner.__file__
   logging.info(
       "TUNIX_DEFER_POSTPROCESS_SUBMIT: post-processing submits deferred to"
       " the next continue-decode dispatch (%s).",
@@ -797,10 +822,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         total=len(prompts), desc="Processed prompts", dynamic_ncols=True
     )
     defer = False
-    if _DEFER_STATE["hooked"] and _env_flag("TUNIX_DEFER_POSTPROCESS_SUBMIT"):
-      with _DEFER_LOCK:
-        if _DEFER_STATE["flush"] is None:  # Nested calls submit right away.
-          _DEFER_STATE["flush"] = submit_deferred
+    if _DEFER.hooked and _env_flag("TUNIX_DEFER_POSTPROCESS_SUBMIT"):
+      with _DEFER.lock:
+        if _DEFER.flush is None:  # Nested or concurrent calls submit now.
+          _DEFER.flush = submit_deferred
           defer = True
     try:
       while engine.has_unfinished_requests():
@@ -817,8 +842,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
             progress.update(1)
     finally:
       if defer:
-        with _DEFER_LOCK:
-          _DEFER_STATE["flush"] = None
+        with _DEFER.lock:
+          _DEFER.flush = None
         submit_deferred()
       progress.close()
     self._postprocessed = {rid: f.result() for rid, f in futures.items()}
