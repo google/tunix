@@ -496,19 +496,20 @@ class ORPOTrainerTest(parameterized.TestCase):
     )
     out = orpo_trainer._prepare_inputs(training_input)
 
+    # Only the prompt starts with a BOS (id 1); the responses do not.
     expected_input_ids = np.array([
-        [0, 1, 14, 1, 16, 0],
-        [0, 1, 15, 1, 18, 19],
-        [0, 1, 14, 1, 20, 17],
-        [0, 1, 15, 1, 21, 0],
+        [0, 1, 14, 16, 0, 0],
+        [0, 1, 15, 18, 19, 0],
+        [0, 1, 14, 20, 17, 0],
+        [0, 1, 15, 21, 0, 0],
     ])
     np.testing.assert_array_equal(out.input_ids, expected_input_ids)
-    self.assertEqual(np.sum(out.attention_mask[0]), 14)
-    self.assertEqual(np.sum(out.attention_mask[1]), 15)
-    self.assertEqual(np.sum(out.attention_mask[2]), 15)
-    self.assertEqual(np.sum(out.attention_mask[3]), 14)
+    self.assertEqual(np.sum(out.attention_mask[0]), 12)
+    self.assertEqual(np.sum(out.attention_mask[1]), 14)
+    self.assertEqual(np.sum(out.attention_mask[2]), 14)
+    self.assertEqual(np.sum(out.attention_mask[3]), 12)
     expected_completion_mask = np.array(
-        [[1, 1, 0], [1, 1, 1], [1, 1, 1], [1, 1, 0]]
+        [[1, 0, 0], [1, 1, 0], [1, 1, 0], [1, 0, 0]]
     )
     np.testing.assert_array_equal(out.completion_mask, expected_completion_mask)
     self.assertEqual(out.logits_to_keep, 3)
