@@ -27,10 +27,23 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 from orbax import checkpoint as ocp
+from tunix.models import hf_mapping
+from tunix.models import safetensors_loader
 from tunix.models import safetensors_saver
 from tunix.models.gemma3 import model as model_lib
+from tunix.models.gemma3 import params_safetensors
 
 import sentencepiece as spm
+
+HfVariant = model_lib.HfVariant
+from_hf_impl = params_safetensors.from_hf_impl
+to_hf_impl = params_safetensors.to_hf_impl
+build_from_hf_manifest = params_safetensors.build_from_hf_manifest
+build_to_hf_manifest = params_safetensors.build_to_hf_manifest
+export_to_hf_state_dict = params_safetensors.export_to_hf_state_dict
+create_model_from_safe_tensors = (
+    params_safetensors.create_model_from_safe_tensors
+)
 
 # Pretrained
 GEMMA3_270M_PT = 'gs://gemma-data/checkpoints/gemma3-270m-pt'
@@ -301,50 +314,15 @@ def map_from_upstream_checkpoint(
 def _extract_gemma3_lora_layers(
     lora_layers: dict[str, list[Any]],
 ) -> dict[str, list[Any]]:
-  """Extract LoRA layers from a Gemma3 model."""
-  updated_lora_layers = {}
+  """Splits stacked `kv_einsum` / `qkv_einsum` LoRA B tensors per projection."""
+  updated_lora_layers: dict[str, list[Any]] = {}
   for k, v in lora_layers.items():
-    if 'kv_einsum' in k:
-      updated_lora_layers[k.replace('kv_einsum', 'k_einsum')] = [
-          v[0],
-          v[1][:, 0],
-      ]
-      updated_lora_layers[k.replace('kv_einsum', 'v_einsum')] = [
-          v[0],
-          v[1][:, 1],
-      ]
+    if k.endswith(('.kv_einsum', '.qkv_einsum')):
+      for idx in range(v[1].shape[1]):
+        updated_lora_layers[f'{k}.{idx}'] = [v[0], v[1][:, idx]]
     else:
       updated_lora_layers[k] = v
   return updated_lora_layers
-
-
-def _gemma3_state_key_to_safetensors_key(lora_name: str) -> str:
-  """Transform Gemma3 layer path to safetensors state dict key.
-
-  Args:
-    lora_name: Internal layer path (e.g., 'layers.0.attn.q_einsum').
-
-  Returns:
-    Safetensors state dict key (e.g., 'model.layers.0.self_attn.q_proj.weight').
-  """
-  return (
-      f'model.{lora_name}.weight'.replace('.attn.', '.self_attn.')
-      .replace('q_einsum', 'q_proj')
-      .replace('k_einsum', 'k_proj')
-      .replace('v_einsum', 'v_proj')
-      .replace('attn_vec_einsum', 'o_proj')
-  )
-
-
-_GEMMA3_HUGGINGFACE_TRANSPOSE_RULES = {
-    'q_proj': (1, 0),
-    'k_proj': (1, 0),
-    'v_proj': (1, 0),
-    'o_proj': (1, 0),
-    'up_proj': (1, 0),
-    'down_proj': (1, 0),
-    'gate_proj': (1, 0),
-}
 
 
 def save_lora_merged_model_as_safetensors(
@@ -353,6 +331,8 @@ def save_lora_merged_model_as_safetensors(
     lora_model: model_lib.Gemma3,
     rank: int,
     alpha: float,
+    *,
+    hf_variant: HfVariant | None = None,
 ):
   """Saves a Gemma3 model with LoRA weights merged in safetensors format.
 
@@ -362,14 +342,23 @@ def save_lora_merged_model_as_safetensors(
     lora_model: Gemma3 model instance with LoRA weights.
     rank: LoRA rank used during training.
     alpha: LoRA alpha used during training.
+    hf_variant: Key layout of the base checkpoint at `local_model_path`.
+      Defaults to the variant recorded on `lora_model` when loaded from
+      safetensors; required if `lora_model` was not loaded from safetensors.
   """
+  resolved = lora_model._hf_variant if hf_variant is None else hf_variant  # pylint: disable=protected-access
+  manifest = params_safetensors.build_to_hf_manifest(
+      lora_model.config, resolved
+  )
+  local_dir = safetensors_loader.resolve_checkpoint_dir(local_model_path)
+  key_map, transpose_rules = hf_mapping.lora_mapping_from_manifest(manifest)
   safetensors_saver.save_lora_merged_model_as_safetensors(
-      local_model_path=local_model_path,
+      local_model_path=local_dir,
       output_dir=output_dir,
       lora_model=lora_model,
       rank=rank,
       alpha=alpha,
-      state_key_transform_fn=_gemma3_state_key_to_safetensors_key,
+      state_key_transform_fn=key_map.__getitem__,
       custom_layer_extractor_fn=_extract_gemma3_lora_layers,
-      transpose_rules=_GEMMA3_HUGGINGFACE_TRANSPOSE_RULES,  # pyrefly: ignore[bad-argument-type]
+      transpose_rules=transpose_rules,
   )

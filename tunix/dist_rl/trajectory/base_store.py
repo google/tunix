@@ -15,12 +15,60 @@
 """Base protocols and abstract class defining Trajectory Store interfaces."""
 
 import abc
-from collections.abc import Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any, ClassVar, Protocol, Self, TypeVar, cast, get_args, get_origin, runtime_checkable
 
+from absl import logging
+import pydantic
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 
 MetadataT = TypeVar("MetadataT", bound=trajectory_lib.TrajectoryMetadata)
+_RawStepT = TypeVar("_RawStepT")
+
+
+def parse_raw_steps(
+    raw_steps: Iterable[_RawStepT],
+    validate_step: Callable[[_RawStepT], trajectory_lib.Step],
+    *,
+    strict: bool,
+    trajectory_id: str | None = None,
+    source_desc: str = "step payload",
+) -> tuple[list[trajectory_lib.Step], bool]:
+  """Validates serialized step items, skipping corrupt entries when tolerant.
+
+  Args:
+    raw_steps: Iterable of raw serialized step payloads (JSON text or dicts).
+    validate_step: Callable converting one raw step item into a `Step`.
+    strict: Whether to re-raise validation errors immediately.
+    trajectory_id: Optional trajectory identifier included in warning logs.
+    source_desc: Human-readable label for the step source in warning logs.
+
+  Returns:
+    A tuple `(parsed_steps, had_corrupt)` containing validated `Step` instances
+    and whether at least one corrupt item was skipped under `strict=False`.
+
+  Raises:
+    pydantic.ValidationError: If `strict` is True and step validation fails.
+    ValueError: If `strict` is True and raw payload parsing fails.
+    TypeError: If `strict` is True and a raw payload has an invalid type.
+  """
+  steps: list[trajectory_lib.Step] = []
+  had_corrupt = False
+  for raw_step in raw_steps:
+    try:
+      steps.append(validate_step(raw_step))
+    except (pydantic.ValidationError, ValueError, TypeError):
+      if strict:
+        raise
+      had_corrupt = True
+      logging.warning(
+          "Skipping corrupt %s in trajectory %s.",
+          source_desc,
+          trajectory_id,
+          exc_info=True,
+      )
+  return steps, had_corrupt
+
 
 # ==============================================================================
 # Custom Exceptions
@@ -61,44 +109,64 @@ class TrajectoryReader(Protocol[MetadataT]):
   """Structural protocol defining read-only Trajectory Store operations."""
 
   def get_trajectories_metadata(
-      self, trajectory_ids: list[str] | None = None
-  ) -> list[MetadataT]:
+      self,
+      trajectory_ids: Sequence[str] | None = None,
+      *,
+      ignore_missing: bool = False,
+  ) -> dict[str, MetadataT]:
     """Retrieves metadata for trajectories in the run.
 
     Args:
-      trajectory_ids: Optional list of unique trajectory identifiers. If
+      trajectory_ids: Optional sequence of unique trajectory identifiers. If
         specified, only metadata for these IDs is returned. If None, metadata
         for all trajectories in the run is returned.
+      ignore_missing: If True, trajectory IDs with no stored metadata are
+        omitted from the returned dictionary instead of raising
+        TrajectoryMetadataNotFoundError.
 
     Returns:
-      A list of TrajectoryMetadata objects for the requested trajectories, in
-      the order of `trajectory_ids` if specified.
+      A dictionary mapping trajectory IDs to TrajectoryMetadata objects for the
+      present trajectories, in the order of `trajectory_ids` if specified.
 
     Raises:
-      TrajectoryMetadataNotFoundError: If any requested trajectory ID does not
-        exist.
+      TrajectoryMetadataNotFoundError: If `ignore_missing` is False and any
+        requested trajectory ID does not exist.
     """
     ...
 
   def get_trajectories(
-      self, trajectory_ids: list[str]
-  ) -> list[trajectory_lib.Trajectory[Any]]:
-    """Retrieves full trajectories for a list of trajectory IDs.
+      self,
+      trajectory_ids: Sequence[str],
+      *,
+      ignore_missing: bool = False,
+      strict: bool = True,
+  ) -> dict[str, trajectory_lib.Trajectory[Any]]:
+    """Retrieves full trajectories for a sequence of trajectory IDs.
 
     Args:
-      trajectory_ids: List of unique trajectory identifiers to load.
+      trajectory_ids: Sequence of unique trajectory identifiers to load.
+      ignore_missing: If True, trajectory IDs with no stored records are omitted
+        from the returned dictionary instead of raising TrajectoryNotFoundError.
+      strict: If False, retains the longest contiguous valid prefix [1..k] for
+        any trajectory with a corrupt step, step-ID gap, or step-count mismatch
+        instead of raising ValidationError, and resets completion fields
+        (`status = None`, `total_reward = None`) on the returned Trajectory
+        while preserving lineage metadata.
 
     Returns:
-      A list of full Trajectory objects corresponding to the requested IDs, in
-      the order of `trajectory_ids`.
+      A dictionary mapping trajectory IDs to full Trajectory objects for the
+      present trajectories, in the order of `trajectory_ids`.
 
     Raises:
-      TrajectoryNotFoundError: If any requested trajectory ID does not exist.
+      TrajectoryNotFoundError: If `ignore_missing` is False and any requested
+        trajectory ID does not exist.
+      pydantic.ValidationError: If `strict` is True and steps contain gaps or
+        fail model validation.
     """
     ...
 
   def get_trajectories_metrics(
-      self, trajectory_ids: list[str] | None = None
+      self, trajectory_ids: Sequence[str] | None = None
   ) -> dict[str, trajectory_lib.TrajectoryMetrics]:
     """Retrieves metrics for trajectories in the run.
 
@@ -133,8 +201,10 @@ class TrajectoryWriter(Protocol[MetadataT]):
     asynchronously. Readers never observe partially written or inconsistent
     state.
 
-    Implementations snapshot `step` and `metadata` at call time, so callers may
-    keep mutating those objects afterwards without affecting what was logged.
+    Implementations always snapshot `metadata` at call time. Unless defensive
+    step copying is enabled on the backend, ownership of `step` transfers to
+    the writer on `add_step()`, so callers must not mutate `step` or its
+    nested containers afterwards.
 
     Args:
       step: Step object to log.
@@ -233,6 +303,10 @@ class TrajectoryStore(
   # `InMemoryStore[TunixMetadata]()`) or on the first read/write operation.
   _metadata_cls: type[MetadataT] | None = None
 
+  # Whether `exclude_step_arrays` has been validated against the bound metadata
+  # class's step schema. Set on the instance by `_validate_and_bind_metadata`.
+  _step_array_exclusions_validated: bool = False
+
   def __init_subclass__(cls, **kwargs: Any) -> None:
     super().__init_subclass__(**kwargs)
     # Check `cls.__dict__` (not `getattr`) so a subclass that inherits `BACKEND`
@@ -302,8 +376,43 @@ class TrajectoryStore(
     """The TrajectoryMetadata class bound to this store, or None if unbound."""
     return self._get_bound_metadata_cls()
 
+  @property
+  def exclude_step_arrays(self) -> frozenset[str]:
+    """Step array fields this store drops before writing steps.
+
+    Defaults to none; backends that support `exclude_step_arrays` override it.
+    """
+    return frozenset()
+
+  def _validate_step_array_exclusions(
+      self, metadata_cls: type[MetadataT]
+  ) -> None:
+    """Checks `exclude_step_arrays` against `metadata_cls`'s step schema.
+
+    Args:
+      metadata_cls: The TrajectoryMetadata class bound to this store.
+
+    Raises:
+      ValueError: If `exclude_step_arrays` names fields that no step class of
+        `metadata_cls` declares in `EXCLUDABLE_ARRAY_FIELDS`.
+    """
+    if self.exclude_step_arrays:
+      try:
+        trajectory_lib.validate_step_array_exclusions(
+            self.exclude_step_arrays,
+            allowed_fields=metadata_cls.excludable_step_array_fields(),
+        )
+      except ValueError as e:
+        raise ValueError(
+            f"{type(self).__name__} bound to {metadata_cls.__name__}: {e}"
+        ) from e
+    self._step_array_exclusions_validated = True
+
   def _validate_and_bind_metadata(self, metadata: MetadataT) -> None:
     """Validates and binds the store instance's single TrajectoryMetadata type.
+
+    On the first write, also validates `exclude_step_arrays` against the bound
+    metadata class's step schema (`TrajectoryMetadata.STEP_CLASSES`).
 
     Args:
       metadata: The metadata instance being written to the store.
@@ -312,9 +421,15 @@ class TrajectoryStore(
       TypeError: If `metadata` is not a `TrajectoryMetadata` instance (or is a
         `Trajectory`), or if its type does not match the metadata type already
         bound to this store instance.
+      ValueError: If `exclude_step_arrays` names fields that the bound metadata
+        class's step classes cannot exclude.
     """
     meta_cls = type(metadata)
-    if self._metadata_cls is not None and meta_cls is self._metadata_cls:
+    if (
+        self._metadata_cls is not None
+        and meta_cls is self._metadata_cls
+        and self._step_array_exclusions_validated
+    ):
       return
     if not isinstance(metadata, trajectory_lib.TrajectoryMetadata) or (
         isinstance(metadata, trajectory_lib.Trajectory)
@@ -331,6 +446,8 @@ class TrajectoryStore(
           f"{type(self).__name__} is bound to metadata type"
           f" {bound_cls.__name__}, got {meta_cls.__name__}."
       )
+    if not self._step_array_exclusions_validated:
+      self._validate_step_array_exclusions(meta_cls)
 
   def _rehydrate_metadata(
       self, atif_metadata: trajectory_lib.TrajectoryMetadata
@@ -362,6 +479,42 @@ class TrajectoryStore(
           f" {bound_cls.__name__}, got {resolved_cls.__name__}."
       )
     return resolved_cls.from_atif_metadata(atif_metadata)
+
+  def update_metrics(
+      self,
+      trajectory_id: str,
+      metrics: trajectory_lib.TrajectoryMetrics,
+  ) -> None:
+    """Updates (or creates) trajectory-level metrics.
+
+    Args:
+      trajectory_id: Unique identifier of the trajectory.
+      metrics: TrajectoryMetrics containing trajectory-level metrics.
+    """
+    raise NotImplementedError(
+        f"{type(self).__name__} does not implement update_metrics."
+    )
+
+  def get_trajectories_metrics(
+      self, trajectory_ids: Sequence[str] | None = None
+  ) -> dict[str, trajectory_lib.TrajectoryMetrics]:
+    """Retrieves metrics for trajectories in the run.
+
+    Args:
+      trajectory_ids: Optional list of unique trajectory identifiers. If
+        specified, only metrics for these IDs is returned. If None, metrics for
+        all trajectories with recorded metrics is returned.
+
+    Returns:
+      A mapping from trajectory_id to TrajectoryMetrics.
+
+    Raises:
+      TrajectoryMetricsNotFoundError: If any requested trajectory ID does not
+        exist.
+    """
+    raise NotImplementedError(
+        f"{type(self).__name__} does not implement get_trajectories_metrics."
+    )
 
   @classmethod
   @abc.abstractmethod
@@ -398,24 +551,6 @@ class TrajectoryStore(
     """
     return self.to_config()
 
-  def get_trajectories_metrics(
-      self, trajectory_ids: list[str] | None = None
-  ) -> dict[str, trajectory_lib.TrajectoryMetrics]:
-    """Retrieves metrics for trajectories in the run."""
-    raise NotImplementedError(
-        f"{type(self).__name__} does not implement get_trajectories_metrics."
-    )
-
-  def update_metrics(
-      self,
-      trajectory_id: str,
-      metrics: trajectory_lib.TrajectoryMetrics,
-  ) -> None:
-    """Updates (or creates) trajectory metrics."""
-    raise NotImplementedError(
-        f"{type(self).__name__} does not implement update_metrics."
-    )
-
   @classmethod
   def from_config(cls, config: Mapping[str, Any] | None) -> Self | None:
     """Builds the store described by `config`, or None when it is disabled.
@@ -435,8 +570,11 @@ class TrajectoryStore(
 
     Raises:
       ValueError: If `config` contains the removed "enabled" key, "backend"
-        names no known implementation, or the selected backend rejects the
-        rest of the config.
+        names no known implementation, "exclude_step_arrays" names fields the
+        bound metadata class's step classes cannot exclude, or the selected
+        backend rejects the rest of the config.
+      TypeError: If "exclude_step_arrays" is a string or contains non-string
+        entries.
     """
     if config is None:
       return None
@@ -455,8 +593,15 @@ class TrajectoryStore(
           f"Unknown Trajectory Store backend {backend!r}; expected one of"
           f" {sorted(cls._REGISTRY)}."
       )
-    store = cls._REGISTRY[backend]._from_config(config)  # pylint: disable=protected-access
     metadata_cls = getattr(cls, "_metadata_cls", None)
+    # Fail fast at startup for schema-bound stores (e.g. TunixTrajectoryStore);
+    # unbound stores validate on the first write instead.
+    exclude = config.get("exclude_step_arrays")
+    if metadata_cls is not None and exclude is not None:
+      trajectory_lib.validate_step_array_exclusions(
+          exclude, allowed_fields=metadata_cls.excludable_step_array_fields()
+      )
+    store = cls._REGISTRY[backend]._from_config(config)  # pylint: disable=protected-access
     if metadata_cls is not None:
       store._metadata_cls = metadata_cls  # pylint: disable=protected-access
     return cast(Self, store)

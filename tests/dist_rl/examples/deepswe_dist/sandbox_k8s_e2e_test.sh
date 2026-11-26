@@ -151,8 +151,8 @@ if [[ "${DRY_RUN}" == "1" || "${DRY_RUN}" == "true" ]]; then
 fi
 
 # Configure Kubernetes context
-if [[ "${SWITCH_KUBE_CONTEXT:-0}" == "1" ]] && [[ -f "${SCRIPT_DIR}/../common/enter_kube_context.sh" ]]; then
-  source "${SCRIPT_DIR}/../common/enter_kube_context.sh"
+if [[ "${SWITCH_KUBE_CONTEXT:-0}" == "1" ]] && [[ -f "${SCRIPT_DIR}/../../launch/common/enter_kube_context.sh" ]]; then
+  source "${SCRIPT_DIR}/../../launch/common/enter_kube_context.sh"
 fi
 
 RANDOM_SUFFIX=$(head /dev/urandom | tr -dc a-z0-9 | head -c 6 ; echo '')

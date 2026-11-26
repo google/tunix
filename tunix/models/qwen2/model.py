@@ -30,6 +30,8 @@ import jax.sharding as shd
 from jax.sharding import PartitionSpec as P
 import jaxtyping
 from tunix.generate.mappings import BackendMappingMixin
+from tunix.models import gpu_kernels as kernels_lib
+from tunix.models import reference_attention as reference_attention_lib
 from tunix.utils import compat
 from tunix.utils import env_utils
 
@@ -519,18 +521,54 @@ class Attention(nnx.Module):
       cache_value_proj = value_proj
       cache_key_proj = key_proj
 
-    b, t, qh, d = query_proj.shape
+    b, t, qh, _ = query_proj.shape
     _, _, kh, _ = key_proj.shape
 
-    # NB: flash attention doesn't work for decoding step
-    if self.config.use_flash_attention and seq_len > 1:
+    # NB: flash attention doesn't work for decoding step or non-zero cache
+    # offset.
+    if (
+        self.config.use_flash_attention
+        and seq_len > 1
+        and cache is None
+        and jax.default_backend() == 'gpu'
+    ):
+      qkv = kernels_lib.gpu_flash_attention(
+          query_proj,
+          key_proj,
+          value_proj,
+          scale=self.scale,
+          is_causal=attn_mask is None,
+          mask=attn_mask,
+          segment_ids=segment_ids,
+          query_sharding_spec=self.shd_config.act_btnh,
+      )
+    elif (
+        self.config.use_flash_attention
+        and seq_len > 1
+        and cache is None
+        and jax.default_backend() != 'gpu'
+    ):
       query_proj = query_proj.transpose(0, 2, 1, 3)
       key_proj = key_proj.transpose(0, 2, 1, 3)
       value_proj = value_proj.transpose(0, 2, 1, 3)
 
       query_proj = query_proj * self.scale
 
-      mesh = pxla.thread_resources.env.physical_mesh
+      effective_segment_ids = reference_attention_lib.extract_token_mask(
+          attn_mask, seq_len, segment_ids=segment_ids, dtype=jnp.int32
+      )
+      (
+          mesh,
+          shd_b,
+          shd_t,
+          shd_n,
+          shd_h,
+          shd_n_kv,
+          head_shards,
+          q_seq_shards,
+      ) = reference_attention_lib.resolve_splash_sharding(
+          self.shd_config.act_btnh, b, kh
+      )
       causal_mask = mask_lib.CausalMask((seq_len, seq_len))
       multi_head_mask = mask_lib.MultiHeadMask([causal_mask for _ in range(qh)])
 
@@ -544,14 +582,6 @@ class Attention(nnx.Module):
           block_kv_dq=self.config.flash_attention_block_size,
       )
 
-      shd_b, shd_t, shd_n, shd_h = self.shd_config.act_btnh
-      head_shards = (
-          mesh.shape[shd_n] if shd_n is not None and shd_n in mesh.shape else 1
-      )
-      q_seq_shards = (
-          mesh.shape[shd_t] if shd_t is not None and shd_t in mesh.shape else 1
-      )
-
       splash_attn_kernel = splash.make_splash_mha(
           multi_head_mask,
           block_sizes=block_sizes,
@@ -560,17 +590,17 @@ class Attention(nnx.Module):
       )
 
       shd_spec = P(shd_b, shd_n, shd_t, shd_h)
-      unsharded_seq = P(shd_b, shd_n, None, shd_h)
+      unsharded_seq = P(shd_b, shd_n_kv, None, shd_h)
       kernel_spec = splash_attn_kernel.manual_sharding_spec(
           shd.NamedSharding(mesh, P(shd_n, shd_t))
       )
 
       # Segment IDs are used to implement sequence packing
-      if segment_ids is not None:
+      if effective_segment_ids is not None:
         seg_spec = P(shd_b, shd_t)
         unsharded_seg_spec = P(shd_b, None)
         splash_segment_ids = splash.SegmentIds(
-            q=segment_ids, kv=segment_ids
+            q=effective_segment_ids, kv=effective_segment_ids
         )
 
         @partial(
@@ -622,25 +652,15 @@ class Attention(nnx.Module):
       # Transpose back
       qkv = qkv.transpose(0, 2, 1, 3)
     else:
-      # GQA
-      query_proj = query_proj.reshape((b, t, kh, qh // kh, d))
-      attn = jnp.einsum('BTHGD,BSHD->BHGTS', query_proj, key_proj) * self.scale
-
-      if attn_mask is not None:
-        attn = jnp.where(attn_mask[:, None, None, :, :], attn, K_MASK)
-
-      if segment_ids is not None:
-        seg_mask = (
-            segment_ids[:, :, None] == segment_ids[:, None, :]
-        )
-        attn = jnp.where(seg_mask[:, None, None, :, :], attn, K_MASK)
-
-      attn = jax.nn.softmax(attn.astype(jnp.float32), axis=-1).astype(
-          key_proj.dtype
+      qkv = reference_attention_lib.reference_attention(
+          query_proj,
+          key_proj,
+          value_proj,
+          scale=self.scale,
+          attn_mask=attn_mask,
+          segment_ids=segment_ids,
+          mask_value=K_MASK,
       )
-
-      qkv = jnp.einsum('BHGTS,BSHD->BTHGD', attn, value_proj)
-      qkv = qkv.reshape((b, t, qh, d))
 
     outputs = self.o_proj(qkv)
     outputs = shard(outputs, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]

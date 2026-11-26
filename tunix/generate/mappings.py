@@ -53,11 +53,6 @@ class BackendMappingMixin:
     return result or None
 
   @classmethod
-  def lora_to_hf_transpose_keys(cls, backend: str | None = None):
-    result = cls.mapping_for(backend).get('lora_to_hf_transpose_keys')
-    return result or None
-
-  @classmethod
   def to_hf_hook_fns(cls, backend: str | None = None):
     return cls.mapping_for(backend).get('to_hf_hook_fns')
 
@@ -80,7 +75,6 @@ class MappingConfig:
   lora_to_hf_mappings: Optional[Dict[str, Any]] = None
   to_hf_hook_fns: Optional[Dict[str, Any]] = None
   to_hf_transpose_keys: Optional[Dict[str, Tuple[int, ...]]] = None
-  lora_to_hf_transpose_keys: Optional[Dict[str, Tuple[int, ...]]] = None
   preprocess_src_state: Optional[Callable[..., Any]] = None
 
   @classmethod
@@ -106,7 +100,6 @@ class MappingConfig:
         'lora_to_hf_mappings',
         'to_hf_hook_fns',
         'to_hf_transpose_keys',
-        'lora_to_hf_transpose_keys',
         'preprocess_src_state',
     )
 
@@ -134,7 +127,6 @@ class MappingConfig:
         lora_to_hf_mappings=resolved.get('lora_to_hf_mappings'),
         to_hf_hook_fns=resolved.get('to_hf_hook_fns'),
         to_hf_transpose_keys=resolved.get('to_hf_transpose_keys'),
-        lora_to_hf_transpose_keys=resolved.get('lora_to_hf_transpose_keys'),
         preprocess_src_state=resolved.get('preprocess_src_state'),
     )
 
@@ -163,7 +155,6 @@ class MappingConfig:
         lora_to_hf_mappings=maybe_call('lora_to_hf_mappings'),
         to_hf_hook_fns=maybe_call('to_hf_hook_fns'),
         to_hf_transpose_keys=maybe_call('to_hf_transpose_keys'),
-        lora_to_hf_transpose_keys=maybe_call('lora_to_hf_transpose_keys'),
         preprocess_src_state=maybe_call('preprocess_src_state'),
     )
 

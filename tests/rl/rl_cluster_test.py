@@ -29,6 +29,8 @@ import numpy as np
 import optax
 from transformers import tokenization_utils_base
 from tunix.dist_rl.orchestrator import rl_engine_interface
+from tunix.dist_rl.trajectory import file_store
+from tunix.dist_rl.trajectory import in_memory_store
 from tunix.generate import mappings
 from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl import utils
@@ -36,7 +38,7 @@ from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout import mock_rollout
 from tunix.tests import test_common as tc
 
-# Some tests relying on SGLang and vLLM cannot run in run_core environment.
+# Some tests relying on vLLM cannot run in run_core environment.
 is_run_core = os.environ.get('GITHUB_JOB') == 'run_core'
 
 PreTrainedTokenizerBase = tokenization_utils_base.PreTrainedTokenizerBase
@@ -307,6 +309,8 @@ class RlEngineTest(parameterized.TestCase):
       self,
       rollout_engine: str,
       rollout_config: base_rollout.RolloutConfig,
+      colocated: bool = False,
+      checkpoint_root_directory: str | None = None,
   ) -> rl_engine_lib.RLEngine:
     split_index = self.device_count // 2
     actor_mesh = Mesh(
@@ -317,6 +321,8 @@ class RlEngineTest(parameterized.TestCase):
         np.array(jax.devices()[split_index:]).reshape(1, split_index),
         ('fsdp', 'tp'),
     )
+    if colocated:
+      rollout_mesh = actor_mesh
     cluster_config = rl_engine_lib.ClusterConfig(
         role_to_mesh={
             rl_engine_lib.Role.ACTOR: actor_mesh,
@@ -330,6 +336,7 @@ class RlEngineTest(parameterized.TestCase):
             eval_every_n_steps=1,
             max_steps=10,
             gradient_accumulation_steps=None,
+            checkpoint_root_directory=checkpoint_root_directory,
         ),
         rollout_config=rollout_config,
     )
@@ -384,22 +391,87 @@ class RlEngineTest(parameterized.TestCase):
       rl_engine.sync_weights()
     self.assertEqual(mock_collect.called, gc_collect_after_weight_sync)
 
-  def test_init_engine_invalid_engine_string(self):
+  def test_sync_weights_can_leave_the_global_step(self):
+    rl_engine = self._create_test_rl_engine(
+        'vanilla',
+        base_rollout.RolloutConfig(
+            max_tokens_to_generate=10, max_prompt_length=256, kv_cache_size=1024
+        ),
+        colocated=True,
+    )
+    rl_engine.sync_weights(increment_global_steps=False)
+    self.assertEqual(rl_engine.global_steps, 0)
+    rl_engine.sync_weights()
+    self.assertEqual(rl_engine.global_steps, 1)
+
+  def test_init_syncs_restored_actor_weights_to_a_rollout_copy(self):
+    # One mesh: on CPU, sync_weights' transfer guard rejects cross-mesh copies.
+    # The rollout then shares the actor's weights, so pretend it holds a copy,
+    # like vLLM or a vanilla rollout on another mesh.
+    self.enter_context(
+        mock.patch.object(
+            rl_engine_lib.rl_utils, 'is_sharing_weights', return_value=False
+        )
+    )
+    sync = self.enter_context(
+        mock.patch.object(
+            rl_engine_lib.RLEngine,
+            'sync_weights',
+            autospec=True,
+            side_effect=rl_engine_lib.RLEngine.sync_weights,
+        )
+    )
+    rollout_config = base_rollout.RolloutConfig(
+        max_tokens_to_generate=10, max_prompt_length=256, kv_cache_size=1024
+    )
+    root = self.create_tempdir().full_path
+    rl_engine = self._create_test_rl_engine(
+        'vanilla',
+        rollout_config,
+        colocated=True,
+        checkpoint_root_directory=root,
+    )
+    # Nothing was restored, so the rollout already has the actor's weights.
+    sync.assert_not_called()
+    trainer = rl_engine.actor_trainer
+    trained = jax.tree.map(
+        lambda x: x + 1.0, nnx.state(trainer.model, nnx.Param)
+    )
+    nnx.update(trainer.model, trained)
+    trainer.checkpoint_manager.save(1, trainer.model, force=True)
+    # Closing waits for the save.
+    trainer.checkpoint_manager.close()
+
+    # The rollout is built from the actor before the trainer restores it.
+    rl_engine = self._create_test_rl_engine(
+        'vanilla',
+        rollout_config,
+        colocated=True,
+        checkpoint_root_directory=root,
+    )
+
+    sync.assert_called_once_with(rl_engine, increment_global_steps=False)
+    jax.tree.map_with_path(
+        tc.assert_close,
+        trained,
+        nnx.state(rl_engine.rollout.model(), nnx.Param),
+    )
+
+  @parameterized.parameters('invalid_engine', 'sglang_jax')
+  def test_init_engine_invalid_engine_string(self, engine):
     with self.assertRaisesRegex(
         ValueError, '`cluster_config.rollout_engine` should be one of'
     ):
-      self._create_test_rl_engine(
-          'invalid_engine', base_rollout.RolloutConfig()
-      )
+      self._create_test_rl_engine(engine, base_rollout.RolloutConfig())
 
-  @parameterized.parameters('vanilla', 'vanilla_v2', 'vllm', 'sglang_jax')
+  @parameterized.parameters('vanilla', 'vanilla_v2', 'vllm')
   def test_init_rollout_engine_missing_config_raises_error(self, engine):
     with self.assertRaisesRegex(
         ValueError, '`cluster_config.rollout_config` cannot be None.'
     ):
       self._create_test_rl_engine(engine, None)
 
-  @parameterized.parameters('vanilla', 'vanilla_v2', 'vllm', 'sglang_jax')
+  @parameterized.parameters('vanilla', 'vanilla_v2', 'vllm')
   def test_init_rollout_engine_empty_dict_config_raises_error(self, engine):
     with self.assertRaisesRegex(
         ValueError,
@@ -639,62 +711,6 @@ class RlEngineTest(parameterized.TestCase):
         ValueError, 'Rollout vllm model version or path is missing!'
     ):
       self._create_test_rl_engine('vllm', rollout_config)
-
-  @parameterized.named_parameters(
-      dict(
-          testcase_name='single_config',
-          rollout_config=base_rollout.RolloutConfig(
-              max_tokens_to_generate=10, kv_cache_size=1024
-          ),
-          expected_train_config=base_rollout.RolloutConfig(
-              max_tokens_to_generate=10, kv_cache_size=1024
-          ),
-      ),
-      dict(
-          testcase_name='dict_config',
-          rollout_config={
-              rl_engine_lib.Mode.TRAIN: base_rollout.RolloutConfig(
-                  max_tokens_to_generate=10, kv_cache_size=1024
-              ),
-              rl_engine_lib.Mode.EVAL: base_rollout.RolloutConfig(
-                  max_tokens_to_generate=20, kv_cache_size=2048
-              ),
-          },
-          expected_train_config=base_rollout.RolloutConfig(
-              max_tokens_to_generate=10, kv_cache_size=1024
-          ),
-      ),
-  )
-  @unittest.skipIf(is_run_core, 'Skipping in run_core')
-  def test_init_sglang_jax_rollout_engine(
-      self, rollout_config, expected_train_config
-  ):
-    # Internal placeholder for sglang_jax rollout worker stub, don't change this line.
-    from tunix.rl.rollout import sglang_jax_rollout
-
-    with mock.patch.object(
-        sglang_jax_rollout, 'SglangJaxRollout', autospec=True
-    ) as mock_sglang_cls:
-      rl_engine = self._create_test_rl_engine('sglang_jax', rollout_config)
-
-      mock_sglang_cls.assert_called_once()
-      self.assertEqual(rl_engine.rollout, mock_sglang_cls.return_value)
-      called_kwargs = mock_sglang_cls.call_args.kwargs
-      self.assertEqual(called_kwargs['rollout_config'], expected_train_config)
-      self.assertIn('mesh', called_kwargs)
-
-  @unittest.skipIf(is_run_core, 'Skipping in run_core')
-  @mock.patch.object(rl_engine_lib.sft_utils, 'is_lora_enabled', autospec=True)
-  def test_init_sglang_jax_rollout_engine_lora_error(self, mock_is_lora):
-    mock_is_lora.return_value = True
-    rollout_config = base_rollout.RolloutConfig(
-        rollout_sglang_jax_enable_static_lora=False
-    )
-
-    with self.assertRaisesRegex(
-        ValueError, 'Rollout sglang jax lora config is missing'
-    ):
-      self._create_test_rl_engine('sglang_jax', rollout_config)
 
   def test_init_engine_unsupported_engine_type(self):
     class InvalidEngine:
@@ -1191,18 +1207,393 @@ class RlEngineTest(parameterized.TestCase):
     rl_engine.close()
     rl_engine.profiler.close.assert_called_once()
 
+  def test_is_colocated_and_release_rollout_for_training(self):
+    if self.device_count < 2:
+      self.skipTest('Requires at least 2 devices.')
+    devices = np.array(jax.devices()[:2])
+    actor_mesh = Mesh(devices.reshape(2, 1), ('fsdp', 'tp'))
+    colocated_rollout_mesh = Mesh(devices.reshape(1, 2), ('fsdp', 'tp'))
+    disjoint_mesh_a = Mesh(devices[:1].reshape(1, 1), ('fsdp', 'tp'))
+    disjoint_mesh_b = Mesh(devices[1:2].reshape(1, 1), ('fsdp', 'tp'))
+
+    vocab = tc.MockVocab()
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
+    cluster_config = rl_engine_lib.ClusterConfig(
+        role_to_mesh={
+            rl_engine_lib.Role.ACTOR: actor_mesh,
+            rl_engine_lib.Role.REFERENCE: actor_mesh,
+            rl_engine_lib.Role.ROLLOUT: colocated_rollout_mesh,
+        },
+        rollout_engine='vanilla',
+        offload_to_cpu=False,
+        training_config=rl_engine_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=1,
+            max_steps=10,
+            gradient_accumulation_steps=None,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=10,
+            max_prompt_length=256,
+            kv_cache_size=1024,
+            data_type=jnp.bfloat16,
+        ),
+    )
+    rl_engine = rl_engine_lib.RLEngine(
+        actor=model,
+        reference=model,
+        tokenizer=vocab,
+        cluster_config=cluster_config,
+    )
+    self.assertTrue(
+        rl_engine.is_colocated(
+            rl_engine_lib.Role.ACTOR, rl_engine_lib.Role.ROLLOUT
+        )
+    )
+    rl_engine.r2m[rl_engine_lib.Role.ACTOR] = disjoint_mesh_a
+    rl_engine.r2m[rl_engine_lib.Role.ROLLOUT] = disjoint_mesh_b
+    self.assertFalse(
+        rl_engine.is_colocated(
+            rl_engine_lib.Role.ACTOR, rl_engine_lib.Role.ROLLOUT
+        )
+    )
+    rl_engine.r2m[rl_engine_lib.Role.ACTOR] = actor_mesh
+    rl_engine.r2m[rl_engine_lib.Role.ROLLOUT] = colocated_rollout_mesh
+
+    with (
+        mock.patch.object(
+            rl_engine.rollout, 'release_for_training'
+        ) as mock_release,
+        mock.patch.object(
+            rl_engine.rollout, 'restore_after_training'
+        ) as mock_restore,
+        mock.patch.object(
+            rl_engine.rollout, 'update_params'
+        ) as mock_update_params,
+    ):
+      rl_engine.release_rollout_for_training()
+      mock_release.assert_called_once()
+      self.assertTrue(mock_release.call_args.kwargs['free_weights'])
+      self.assertTrue(rl_engine._rollout_released_for_training)
+
+      rl_engine.sync_weights()
+      mock_update_params.assert_called_once()
+      mock_restore.assert_called_once()
+      self.assertFalse(rl_engine._rollout_released_for_training)
+
+  def test_colocated_vanilla_v2_actor_and_rollout_swap_weights_in_place(self):
+    if self.device_count < 2:
+      self.skipTest('Requires at least 2 devices.')
+    devices = np.array(jax.devices()[:2])
+    actor_mesh = Mesh(devices.reshape(2, 1), ('fsdp', 'tp'))
+    vocab = tc.MockVocab()
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
+    fsdp_sharding = jax.sharding.NamedSharding(
+        actor_mesh, jax.sharding.PartitionSpec('fsdp', 'tp')
+    )
+    model.lm_head.kernel = nnx.Param(
+        jax.device_put(model.lm_head.kernel.value, fsdp_sharding),
+        out_sharding=('fsdp', 'tp'),
+    )
+    cluster_config = rl_engine_lib.ClusterConfig(
+        role_to_mesh={
+            rl_engine_lib.Role.ACTOR: actor_mesh,
+            rl_engine_lib.Role.REFERENCE: actor_mesh,
+            rl_engine_lib.Role.ROLLOUT: actor_mesh,
+        },
+        rollout_engine='vanilla_v2',
+        offload_to_cpu=False,
+        training_config=rl_engine_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=1,
+            max_steps=10,
+            gradient_accumulation_steps=None,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=10,
+            max_prompt_length=256,
+            kv_cache_size=1024,
+            data_type=jnp.float32,
+        ),
+    )
+    with mock.patch.object(
+        rl_engine_lib.vanilla_rollout_v2,
+        'VanillaRollout',
+        autospec=True,
+    ) as mock_vanilla_cls:
+      rollout_instance = mock_vanilla_cls.return_value
+
+      def _init_rollout(rollout_actor, *args, **kwargs):
+        del args, kwargs
+        rollout_instance.model.return_value = rollout_actor
+        return rollout_instance
+
+      mock_vanilla_cls.side_effect = _init_rollout
+      rl_engine = rl_engine_lib.RLEngine(
+          actor=model,
+          reference=model,
+          tokenizer=vocab,
+          cluster_config=cluster_config,
+      )
+
+    rollout_mesh = Mesh(devices.reshape(2, 1), ('dp', 'tp'))
+    self.assertEqual(
+        rl_engine._physical_r2m[rl_engine_lib.Role.ROLLOUT], actor_mesh
+    )
+    self.assertEqual(rl_engine.r2m[rl_engine_lib.Role.ROLLOUT], rollout_mesh)
+    self.assertNotIn(
+        rl_engine_lib.Role.ROLLOUT,
+        rl_engine._backbone_sharing_map[rl_engine_lib.Role.ACTOR],
+    )
+    self.assertIs(
+        rl_engine._weight_placement, rl_engine_lib.WeightPlacement.SWAPPED
+    )
+    self.assertFalse(rl_engine._rollout_released_for_training)
+    rollout_kernel = rollout_instance.model.return_value.lm_head.kernel.value
+    self.assertEqual(
+        rollout_kernel.sharding,
+        jax.sharding.NamedSharding(
+            rollout_mesh, jax.sharding.PartitionSpec(None, 'tp')
+        ),
+    )
+
+    # Only one copy of the weights is live: the actor's was donated.
+    self.assertTrue(
+        rl_engine.actor_trainer.model.lm_head.kernel.value.is_deleted()
+    )
+
+    def _update_rollout_model(new_params, filter_types=None):
+      del filter_types
+      nnx.update(rollout_instance.model.return_value, new_params)
+
+    rollout_instance.update_params.side_effect = _update_rollout_model
+
+    rl_engine.release_rollout_for_training()
+    rollout_instance.release_for_training.assert_called_once_with(
+        free_weights=False
+    )
+    self.assertTrue(rl_engine._rollout_released_for_training)
+    actor_kernel = rl_engine.actor_trainer.model.lm_head.kernel.value
+    self.assertFalse(actor_kernel.is_deleted())
+    self.assertEqual(actor_kernel.sharding, fsdp_sharding)
+    # The rollout kernel is not checked: on CPU, sharding a replicated array
+    # can slice its buffers without copying, so they stay alive.
+
+    rl_engine.sync_weights()
+    self.assertTrue(actor_kernel.is_deleted())
+    rollout_instance.update_params.assert_called_once()
+    self.assertLen(rollout_instance.update_params.call_args.args, 1)
+    synced_kernel = rollout_instance.update_params.call_args.args[0]['lm_head'][
+        'kernel'
+    ].value
+    self.assertFalse(synced_kernel.is_deleted())
+    self.assertEqual(
+        synced_kernel.sharding,
+        jax.sharding.NamedSharding(
+            rollout_mesh, jax.sharding.PartitionSpec(None, 'tp')
+        ),
+    )
+    self.assertEqual(rollout_instance.restore_after_training.call_count, 1)
+    self.assertFalse(rl_engine._rollout_released_for_training)
+
+    # Calling sync_weights() again while weights are already on rollout must
+    # not crash on deleted actor buffers.
+    rl_engine.sync_weights()
+    self.assertEqual(rollout_instance.update_params.call_count, 1)
+    self.assertEqual(rollout_instance.restore_after_training.call_count, 2)
+
+    # A second swap reshards onto the shardings of the deleted buffers again.
+    rl_engine.release_rollout_for_training()
+    actor_kernel = rl_engine.actor_trainer.model.lm_head.kernel.value
+    self.assertFalse(actor_kernel.is_deleted())
+    self.assertEqual(actor_kernel.sharding, fsdp_sharding)
+    rl_engine.sync_weights()
+    synced_kernel = rollout_instance.update_params.call_args.args[0]['lm_head'][
+        'kernel'
+    ].value
+    self.assertFalse(synced_kernel.is_deleted())
+    self.assertEqual(
+        synced_kernel.sharding,
+        jax.sharding.NamedSharding(
+            rollout_mesh, jax.sharding.PartitionSpec(None, 'tp')
+        ),
+    )
+
+    # Closing after sync_weights() must stop the rollout driver first, then
+    # swap weights back onto actor_trainer before actor_trainer.close() runs.
+    teardown_order = []
+    closed_with_live_actor = []
+    orig_trainer_close = rl_engine.actor_trainer.close
+    rollout_instance.close.side_effect = lambda: teardown_order.append(
+        'rollout.close'
+    )
+    rollout_instance.release_for_training.side_effect = (
+        lambda **kw: teardown_order.append('rollout.release_for_training')
+    )
+
+    def _recording_trainer_close():
+      teardown_order.append('actor_trainer.close')
+      closed_with_live_actor.append(
+          not rl_engine.actor_trainer.model.lm_head.kernel.value.is_deleted()
+      )
+      orig_trainer_close()
+
+    with mock.patch.object(
+        rl_engine.actor_trainer, 'close', side_effect=_recording_trainer_close
+    ):
+      rl_engine.close()
+
+    self.assertEqual(
+        teardown_order,
+        [
+            'rollout.close',
+            'rollout.release_for_training',
+            'actor_trainer.close',
+        ],
+    )
+    self.assertEqual(closed_with_live_actor, [True])
+    self.assertFalse(
+        rl_engine.actor_trainer.model.lm_head.kernel.value.is_deleted()
+    )
+    rollout_instance.close.assert_called_once()
+
+  def test_colocated_vanilla_v2_reshaped_rollout_mesh_uses_swapped_placement(
+      self,
+  ):
+    if self.device_count < 2:
+      self.skipTest('Requires at least 2 devices.')
+    devices = np.array(jax.devices()[:2])
+    actor_mesh = Mesh(devices.reshape(2, 1), ('fsdp', 'tp'))
+    distinct_rollout_mesh = Mesh(devices.reshape(1, 2), ('dp', 'tp'))
+    vocab = tc.MockVocab()
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
+    cluster_config = rl_engine_lib.ClusterConfig(
+        role_to_mesh={
+            rl_engine_lib.Role.ACTOR: actor_mesh,
+            rl_engine_lib.Role.REFERENCE: actor_mesh,
+            rl_engine_lib.Role.ROLLOUT: distinct_rollout_mesh,
+        },
+        rollout_engine='vanilla_v2',
+        offload_to_cpu=False,
+        training_config=rl_engine_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=1,
+            max_steps=10,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=10,
+            max_prompt_length=256,
+            kv_cache_size=1024,
+            data_type=jnp.float32,
+        ),
+    )
+    with mock.patch.object(
+        rl_engine_lib.vanilla_rollout_v2,
+        'VanillaRollout',
+        autospec=True,
+    ) as mock_vanilla_cls:
+      rollout_instance = mock_vanilla_cls.return_value
+      mock_vanilla_cls.side_effect = (
+          lambda rollout_actor, *a, **kw: setattr(
+              rollout_instance.model, 'return_value', rollout_actor
+          )
+          or rollout_instance
+      )
+      rl_engine = rl_engine_lib.RLEngine(
+          actor=model,
+          reference=None,
+          tokenizer=vocab,
+          cluster_config=cluster_config,
+      )
+
+    self.assertIs(
+        rl_engine._weight_placement, rl_engine_lib.WeightPlacement.SWAPPED
+    )
+    self.assertEqual(
+        rl_engine.r2m[rl_engine_lib.Role.ROLLOUT], distinct_rollout_mesh
+    )
+
+  def test_colocated_vanilla_v2_lora_uses_separate_placement_preserving_ref(
+      self,
+  ):
+    if self.device_count < 2:
+      self.skipTest('Requires at least 2 devices.')
+    devices = np.array(jax.devices()[:2])
+    actor_mesh = Mesh(devices.reshape(2, 1), ('fsdp', 'tp'))
+    vocab = tc.MockVocab()
+    ref_model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
+    lora_actor = tc.get_lora_model(
+        ref_model, module_path='.*query|.*key|.*value'
+    )
+    cluster_config = rl_engine_lib.ClusterConfig(
+        role_to_mesh={
+            rl_engine_lib.Role.ACTOR: actor_mesh,
+            rl_engine_lib.Role.REFERENCE: actor_mesh,
+            rl_engine_lib.Role.ROLLOUT: actor_mesh,
+        },
+        rollout_engine='vanilla_v2',
+        offload_to_cpu=False,
+        training_config=rl_engine_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=1,
+            max_steps=10,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=10,
+            max_prompt_length=256,
+            kv_cache_size=1024,
+            data_type=jnp.float32,
+        ),
+    )
+    with mock.patch.object(
+        rl_engine_lib.vanilla_rollout_v2,
+        'VanillaRollout',
+        autospec=True,
+    ) as mock_vanilla_cls:
+      rollout_instance = mock_vanilla_cls.return_value
+      mock_vanilla_cls.side_effect = (
+          lambda rollout_actor, *a, **kw: setattr(
+              rollout_instance.model, 'return_value', rollout_actor
+          )
+          or rollout_instance
+      )
+      rl_engine = rl_engine_lib.RLEngine(
+          actor=lora_actor,
+          reference=ref_model,
+          tokenizer=vocab,
+          cluster_config=cluster_config,
+      )
+
+    self.assertIs(
+        rl_engine._weight_placement, rl_engine_lib.WeightPlacement.SEPARATE
+    )
+    ref_leaves = jax.tree.leaves(
+        nnx.state(rl_engine.inference_worker.get_model('reference'), nnx.Param)
+    )
+    self.assertTrue(all(not x.is_deleted() for x in ref_leaves))
+
 
 class RlEngineTokenInputTest(parameterized.TestCase):
   """Explicit token rows through RLEngine.generate and VllmRollout.generate."""
 
-  def _fake_engine(self):
+  def _fake_engine(self, rollout_engine='vanilla'):
     import contextlib  # pylint: disable=g-import-not-at-top
     from types import SimpleNamespace  # pylint: disable=g-import-not-at-top
     from tunix.perf import trace  # pylint: disable=g-import-not-at-top
     from tunix.perf.experimental import tracer  # pylint: disable=g-import-not-at-top
 
-    def generate(prompts, cfg, *, prompt_token_ids=None):
+    def generate(prompts, cfg, *, prompt_token_ids=None, **kwargs):
       del cfg
+      if rollout_engine != 'vanilla_v2':
+        self.assertEmpty(kwargs)
       self.assertIsNone(prompts)
       rows = prompt_token_ids
       width = 3  # the sampler pads every microbatch to max_prompt_length
@@ -1225,6 +1616,7 @@ class RlEngineTokenInputTest(parameterized.TestCase):
         ),
         cluster_config=SimpleNamespace(
             offload_to_cpu=False,
+            rollout_engine=rollout_engine,
             rollout_config=base_rollout.RolloutConfig(max_tokens_to_generate=4),
         ),
         tokenizer=SimpleNamespace(
@@ -1235,11 +1627,26 @@ class RlEngineTokenInputTest(parameterized.TestCase):
         _get_mesh_and_logical_axis_rules_cm=lambda _: contextlib.nullcontext(
             (SimpleNamespace(devices=[]), None)
         ),
+        maybe_restore_rollout_for_generation=mock.Mock(),
         _maybe_load_model_from_cpu=mock.Mock(),
         _maybe_offload_model_to_cpu=mock.Mock(),
         _perf=trace.NoopTracer(),
         _perf_v2=tracer.NoopTracer(),
     )
+
+  @parameterized.parameters('vanilla', 'vanilla_v2')
+  def test_route_key_reaches_only_a_vanilla_v2_rollout(self, rollout_engine):
+    engine = self._fake_engine(rollout_engine)
+
+    rl_engine_lib.RLEngine.generate(
+        engine, None, prompt_token_ids=[[0, 3]], route_key='g1_p2'
+    )
+
+    kwargs = engine.rollout.generate.call_args.kwargs
+    if rollout_engine == 'vanilla_v2':
+      self.assertEqual(kwargs['route_key'], 'g1_p2')
+    else:
+      self.assertNotIn('route_key', kwargs)
 
   def test_token_rows_split_into_microbatches_and_merge_back(self):
     engine = self._fake_engine()
@@ -1342,6 +1749,74 @@ class RlEngineTokenInputTest(parameterized.TestCase):
         self.assertEqual(mock_sampler.call_count, 1)
         vllm_config = mock_sampler.call_args.kwargs['config']
         self.assertEqual(vllm_config.eos_tokens, [151645, 151643])
+
+
+class RlEngineTrajectoryStoreTest(absltest.TestCase):
+  """Tests the per-trajectory metrics store owned by RLEngine."""
+
+  def _engine(self, log_dir=None):
+    engine = object.__new__(rl_engine_lib.RLEngine)
+    engine.cluster_config = mock.Mock()
+    engine.cluster_config.training_config.metrics_logging_options = (
+        mock.Mock(log_dir=log_dir) if log_dir else None
+    )
+    engine._trajectory_store = engine._create_trajectory_store()
+    return engine
+
+  def test_creates_file_store_under_log_dir(self):
+    log_dir = self.create_tempdir().full_path
+    engine = self._engine(log_dir)
+    self.addCleanup(engine.trajectory_store.close)
+    self.assertIsInstance(
+        engine.trajectory_store, file_store.FileTrajectoryStore
+    )
+    engine.log_trajectory_metrics(
+        [('traj_0_g0', {'reward': 1.0})], mode=rl_engine_lib.Mode.EVAL, step=5
+    )
+    engine.trajectory_store.flush()
+    self.assertEqual(
+        engine.trajectory_store.get_trajectories_metrics()['traj_0_g0'].extra,
+        {'reward': 1.0, 'mode': 'eval', 'global_step': 5},
+    )
+    self.assertTrue(os.path.isdir(os.path.join(log_dir, 'trajectories')))
+
+  def test_no_store_without_log_dir(self):
+    engine = self._engine()
+    self.assertIsNone(engine.trajectory_store)
+    # Without a store, recording trajectory metrics is a no-op.
+    engine.log_trajectory_metrics(
+        [('traj_0_g0', {'reward': 1.0})], mode=rl_engine_lib.Mode.TRAIN, step=0
+    )
+
+  def test_close_closes_trajectory_store(self):
+    engine = object.__new__(rl_engine_lib.RLEngine)
+    engine._buffered_train_metrics = []
+    engine._buffered_eval_metrics = []
+    engine._weight_placement = rl_engine_lib.WeightPlacement.SHARED
+    engine._rollout = mock.Mock()
+    engine._actor_trainer = mock.Mock()
+    engine.profiler = None
+    store = mock.create_autospec(
+        in_memory_store.InMemoryTrajectoryStore, instance=True
+    )
+    engine._trajectory_store = store
+    engine.close()
+    store.close.assert_called_once()
+
+  def test_log_trajectory_metrics_failure_is_not_fatal(self):
+    engine = object.__new__(rl_engine_lib.RLEngine)
+    store = mock.create_autospec(
+        in_memory_store.InMemoryTrajectoryStore, instance=True
+    )
+    store.update_metrics.side_effect = RuntimeError('store is down')
+    engine._trajectory_store = store
+    with self.assertLogs(level='WARNING'):
+      engine.log_trajectory_metrics(
+          [('traj_0_g0', {}), ('traj_0_g1', {})],
+          mode=rl_engine_lib.Mode.TRAIN,
+          step=0,
+      )
+    self.assertEqual(store.update_metrics.call_count, 2)
 
 
 if __name__ == '__main__':

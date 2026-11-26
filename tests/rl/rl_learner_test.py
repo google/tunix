@@ -7,7 +7,9 @@ from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
+import numpy as np
 import optax
+from tunix.common import test_utils
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl import rl_learner
@@ -71,6 +73,8 @@ def _mock_engine(actor_mesh, rollout_mesh):
       rl_engine_lib.Role.ACTOR: actor_mesh,
       rl_engine_lib.Role.ROLLOUT: rollout_mesh,
   }
+  # Separate mesh objects stand for actor and rollout on different devices.
+  engine.is_colocated.return_value = actor_mesh is rollout_mesh
   engine.actor_trainer.train_steps = 0
   engine.actor_trainer.iter_steps = 0
   return engine
@@ -91,7 +95,7 @@ class PerHostLearnerTest(parameterized.TestCase):
     engine = _mock_engine(_mesh(2), _mesh(2))
     with _per_host_env(2):
       learner = _learner(engine)
-    # Separate meshes: asynchronous rollout is on without the per-host learner.
+    # Not colocated: asynchronous rollout is on without the per-host learner.
     self.assertTrue(learner.can_enable_async_rollout)
 
     def fake_submit(fn, **kwargs):
@@ -109,6 +113,29 @@ class PerHostLearnerTest(parameterized.TestCase):
     self.assertIn('asynchronous rollout is turned off', '\n'.join(logs.output))
     submit.assert_called_once()
     self.assertIs(submit.call_args.kwargs['async_loading'], False)
+
+  @parameterized.named_parameters(
+      ('none', {}, []),
+      (
+          'trainer_logps',
+          {'use_rollout_logps': False},
+          ['trainer logprobs (use_rollout_logps=False)'],
+      ),
+      # GRPOLearner skips trainer logprobs under score centering.
+      (
+          'score_centering',
+          {'use_rollout_logps': False, 'score_centering': True},
+          [],
+      ),
+  )
+  def test_trainer_side_logps_mirror_grpo(self, config, want):
+    mesh = _mesh(2)
+    learner = DummyLearner(
+        rl_engine=_mock_engine(mesh, mesh),
+        algo_config=DummyConfig(**config),
+        reward_fns=lambda prompts, completions, **kwargs: [1.0] * len(prompts),
+    )
+    self.assertEqual(learner._per_host_trainer_side_logps(), want)
 
   @parameterized.named_parameters(
       # TUNIX_PER_HOST_SAFE_LOGPS=1: rows x 2 processes must divide fsdp=4.
@@ -225,7 +252,7 @@ class RLLearnerTest(parameterized.TestCase):
         train_micro_batch_size=3,
         rollout_micro_batch_size=None,
         compute_logps_micro_batch_size=None,
-        max_seq_token_per_tpu=128,
+        max_seq_tokens_per_device=128,
         eval_every_n_steps=1,
         max_steps=1,
     )
@@ -289,6 +316,119 @@ class RLLearnerTest(parameterized.TestCase):
         learner.train(train_ds)
 
     mock_engine.close.assert_called_once()
+
+  @parameterized.parameters(([],), (None,))
+  def test_empty_or_none_reward_fns_fails_fast_for_sequence_level(
+      self, empty_fns
+  ):
+    config = rl_engine_lib.RLTrainingConfig(
+        actor_optimizer=optax.sgd(1e-3),
+        eval_every_n_steps=1,
+        max_steps=1,
+    )
+    mock_engine = mock.MagicMock()
+    mock_engine.actor_trainer.model = DummyModel()
+    mock_engine.rollout.model.return_value = DummyModel()
+    mock_engine.cluster_config.training_config = config
+
+    with self.assertRaisesRegex(ValueError, 'reward_fns cannot be empty'):
+      DummyLearner(
+          rl_engine=mock_engine,
+          algo_config=DummyConfig(),
+          reward_fns=empty_fns,
+      )
+
+  def test_env_reward_mode_with_reward_fns_none_builds_manager(self):
+    config = rl_engine_lib.RLTrainingConfig(
+        actor_optimizer=optax.sgd(1e-3),
+        eval_every_n_steps=1,
+        max_steps=1,
+    )
+    mock_engine = mock.MagicMock()
+    mock_engine.actor_trainer.model = DummyModel()
+    mock_engine.rollout.model.return_value = DummyModel()
+    mock_engine.cluster_config.training_config = config
+
+    learner = DummyLearner(
+        rl_engine=mock_engine,
+        algo_config=DummyConfig(reward_mode='env'),
+        reward_fns=None,
+    )
+    self.assertIsNotNone(learner.reward_manager)
+    rewards = learner._compute_rewards(
+        prompts=['p'],
+        completions=['c'],
+        mode=rl_engine_lib.Mode.TRAIN,
+        trajectory_rewards=[3.5],
+    )
+    self.assertEqual(list(rewards), [3.5])
+
+  def test_use_reward_model_skips_reward_manager_and_fails_on_compute(self):
+    config = rl_engine_lib.RLTrainingConfig(
+        actor_optimizer=optax.sgd(1e-3),
+        eval_every_n_steps=1,
+        max_steps=1,
+    )
+    mock_engine = mock.MagicMock()
+    mock_engine.actor_trainer.model = DummyModel()
+    mock_engine.rollout.model.return_value = DummyModel()
+    mock_engine.cluster_config.training_config = config
+    mock_engine.inference_worker._models = {'reward': DummyModel()}
+
+    learner = DummyLearner(
+        rl_engine=mock_engine,
+        algo_config=DummyConfig(algo_variant='ppo'),
+        reward_fns=None,
+    )
+    self.assertIsNone(learner.reward_manager)
+    with self.assertRaisesRegex(
+        ValueError, 'reward_manager is not initialized'
+    ):
+      learner._compute_rewards(
+          prompts=['p'],
+          completions=['c'],
+          mode=rl_engine_lib.Mode.TRAIN,
+      )
+
+  def test_create_micro_batch_iterator_flattens_tensor_like(self):
+    learner = DummyLearner.__new__(DummyLearner)
+    values = np.arange(4, dtype=np.float32)
+    batch = {
+        'prompts': ['a', 'b', 'c', 'd'],
+        'vector': test_utils.CustomTensor(values),
+        'column': test_utils.CustomTensor(values.reshape(4, 1)),
+    }
+    micro_batches = list(
+        learner._create_micro_batch_iterator(iter([batch]), 2)
+    )
+    self.assertLen(micro_batches, 2)
+    self.assertEqual(list(micro_batches[1]['prompts']), ['c', 'd'])
+    for key in ('vector', 'column'):
+      flattened = np.concatenate([mb[key] for mb in micro_batches])
+      np.testing.assert_array_equal(flattened, [0.0, 1.0, 2.0, 3.0])
+      self.assertEqual(micro_batches[0][key].shape, (2,))
+      self.assertEqual(micro_batches[0][key].dtype, np.float32)
+
+    scalar_batches = [
+        {
+            'prompts': 'p0',
+            'weight': test_utils.CustomTensor(np.array(0.5, dtype=np.float32)),
+            'step': test_utils.CustomTensor(np.array(3, dtype=np.int32)),
+        },
+        {
+            'prompts': 'p1',
+            'weight': test_utils.CustomTensor(np.array(1.5, dtype=np.float32)),
+            'step': test_utils.CustomTensor(np.array(4, dtype=np.int32)),
+        },
+    ]
+    scalar_out = list(
+        learner._create_micro_batch_iterator(iter(scalar_batches), 2)
+    )
+    self.assertLen(scalar_out, 1)
+    np.testing.assert_array_equal(scalar_out[0]['weight'], [0.5, 1.5])
+    self.assertEqual(scalar_out[0]['weight'].dtype, np.float32)
+    np.testing.assert_array_equal(scalar_out[0]['step'], [3, 4])
+    self.assertEqual(scalar_out[0]['step'].dtype, np.int32)
 
 
 if __name__ == '__main__':

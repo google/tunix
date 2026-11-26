@@ -109,10 +109,15 @@ PAGE_SIZE = 16
 # call the kernel at the same `max_num_tokens`.
 TOKEN_BUCKET = rpa_canonical.CANONICAL_MIN_TOKEN_BUCKET
 
-# Pinned `(bq_sz, bkv_sz, bq_csz, bkv_csz) = (128, 512, 128, 512)` for the
-# decode / prefill / mixed passes (`rpa_canonical.CANONICAL_BLOCK_SIZES`);
-# False leaves the kernel's shape-dependent heuristic in charge.
+# Pinned `(bq_sz, bkv_sz, bq_csz, bkv_csz) = (128, BKV_SZ, 128, 512)` for the
+# active RPA pass (`rpa_canonical.canonical_block_size_kwargs`); False leaves
+# the kernel's shape-dependent heuristic in charge.
 PIN_BLOCK_SIZES = True
+
+# Outer KV DMA block size (`bkv_sz % 512 == 0`). Increasing to e.g. `1024`
+# improves KV-cache DMA throughput on long contexts while keeping the `512`
+# inner online-softmax reduction granularity bitwise identical.
+BKV_SZ = rpa_canonical.CANONICAL_BKV_SZ
 
 # Every sequence takes the mixed pass (`distribution = [0, 0, B]`); False keeps
 # the natural split, which only differs for `T == 1` (decode) calls.
@@ -122,7 +127,7 @@ FORCE_MIXED = True
 # query dtype). The kernel stores the output through its query block buffer,
 # so the dtype must have the query dtype's width (`_validate` rejects e.g.
 # float32 with bf16 queries).
-OUT_DTYPE: Any = None
+OUT_DTYPE: jax.typing.DTypeLike | None = None
 
 # The RPA kernel entry point; None loads it from tpu_inference on first use.
 # Tests inject `reference_kernel` on CPU.
@@ -368,12 +373,18 @@ def kernel_kwargs(
     *,
     scale: float,
     pin_block_sizes: bool,
-    out_dtype: Any,
+    out_dtype: jax.typing.DTypeLike | None,
+    force_mixed: bool = False,
+    bkv_sz: int = rpa_canonical.CANONICAL_BKV_SZ,
 ) -> dict[str, Any]:
   """The static keyword arguments of the kernel call."""
   kwargs: dict[str, Any] = {'sm_scale': scale}
   if pin_block_sizes:
-    kwargs.update(rpa_canonical.canonical_block_size_kwargs())
+    kwargs.update(
+        rpa_canonical.canonical_block_size_kwargs(
+            bkv_sz=bkv_sz, force_mixed=force_mixed
+        )
+    )
   if out_dtype is not None:
     kwargs['out_dtype'] = jnp.dtype(out_dtype)
   return kwargs
@@ -390,9 +401,11 @@ def call_kernel(
     scale: float,
     page_size: int,
     pin_block_sizes: bool,
-    out_dtype: Any,
+    out_dtype: jax.typing.DTypeLike | None,
     differentiable: bool,
     max_q_len: int | None = None,
+    force_mixed: bool = False,
+    bkv_sz: int = rpa_canonical.CANONICAL_BKV_SZ,
 ) -> tuple[jax.Array, jax.Array]:
   """One shard-local kernel call in the engine form.
 
@@ -405,13 +418,15 @@ def call_kernel(
     md: The metadata.
     scale: Softmax scale (`sm_scale`).
     page_size: Rows per page.
-    pin_block_sizes: Pass the canonical `{d,p,m}_block_sizes`.
+    pin_block_sizes: Pass the canonical block-size kwargs.
     out_dtype: Kernel accumulator dtype, or None for the kernel default.
     differentiable: Wrap the call in the chunked replica VJP
       (`rpa_diff_chunked.make_diff_rpa_chunked_ragged`).
     max_q_len: Static per-sequence query length handed to the chunked VJP (the
       backward differentiates each sequence on a window of this many rows
       instead of the whole `rows` buffer); None keeps the full width.
+    force_mixed: Omit unused `p_block_sizes` and shrink idle `d_block_sizes`.
+    bkv_sz: Outer KV DMA block size (`bkv_sz % 512 == 0`).
 
   Returns:
     `(out_rows, new_cache)`; `out_rows` is `[rows, QH, D]` in the query dtype.
@@ -419,7 +434,11 @@ def call_kernel(
   fn = functools.partial(
       kernel,
       **kernel_kwargs(
-          scale=scale, pin_block_sizes=pin_block_sizes, out_dtype=out_dtype
+          scale=scale,
+          pin_block_sizes=pin_block_sizes,
+          out_dtype=out_dtype,
+          force_mixed=force_mixed,
+          bkv_sz=bkv_sz,
       ),
   )
   if differentiable:
@@ -458,8 +477,9 @@ def _validate(
     *,
     page_size: int,
     pin_block_sizes: bool,
-    out_dtype: Any,
+    out_dtype: jax.typing.DTypeLike | None,
     differentiable: bool,
+    bkv_sz: int = rpa_canonical.CANONICAL_BKV_SZ,
 ) -> None:
   """Static (shape / dtype) checks of one adapter call; fail closed."""
   _check_rank(q, k, v)
@@ -493,11 +513,17 @@ def _validate(
     )
   if page_size % packing:
     raise ValueError(f'page_size {page_size} must be a multiple of {packing}')
-  if pin_block_sizes and rpa_canonical.CANONICAL_BLOCK_SIZES[1] % page_size:
-    raise ValueError(
-        f'page_size {page_size} must divide the pinned bkv'
-        f' {rpa_canonical.CANONICAL_BLOCK_SIZES[1]}'
-    )
+  if pin_block_sizes:
+    if bkv_sz <= 0 or bkv_sz % rpa_canonical.CANONICAL_BKV_CSZ:
+      raise ValueError(
+          f'bkv_sz {bkv_sz} must be a positive multiple of'
+          f' {rpa_canonical.CANONICAL_BKV_CSZ}'
+      )
+    if rpa_canonical.CANONICAL_BKV_CSZ % page_size:
+      raise ValueError(
+          f'page_size {page_size} must divide the pinned bkv'
+          f' {rpa_canonical.CANONICAL_BKV_CSZ}'
+      )
   if cache.ndim != 5 or int(cache.shape[0]) % b:
     raise ValueError(
         f'paged cache {cache.shape} is not [B * pages_per_seq, ...] for B={b}'
@@ -537,11 +563,12 @@ def _attend(
     token_bucket: int,
     pin_block_sizes: bool,
     force_mixed: bool,
-    out_dtype: Any,
+    out_dtype: jax.typing.DTypeLike | None,
     kernel: Callable[..., Any],
     differentiable: bool,
     mesh: jax.sharding.Mesh | None,
     tp_axis: str,
+    bkv_sz: int = rpa_canonical.CANONICAL_BKV_SZ,
 ) -> tuple[jax.Array, jax.Array]:
   """The shared body: metadata, token rows, TP map, kernel call."""
   _validate(
@@ -553,6 +580,7 @@ def _attend(
       pin_block_sizes=pin_block_sizes,
       out_dtype=out_dtype,
       differentiable=differentiable,
+      bkv_sz=bkv_sz,
   )
   b, t, qh, _ = (int(s) for s in q.shape)
   kh = int(k.shape[2])
@@ -582,6 +610,8 @@ def _attend(
         out_dtype=out_dtype,
         differentiable=differentiable,
         max_q_len=t,
+        force_mixed=force_mixed,
+        bkv_sz=bkv_sz,
     )
     return unflatten_tokens(out_rows, b, t), new_cache
 
@@ -615,7 +645,14 @@ def _attend(
   )
 
 
-def _knobs(page_size, token_bucket, pin_block_sizes, force_mixed, out_dtype):
+def _knobs(
+    page_size,
+    token_bucket,
+    pin_block_sizes,
+    force_mixed,
+    out_dtype,
+    bkv_sz=None,
+):
   """Resolves `None` arguments to the module defaults."""
   return (
       PAGE_SIZE if page_size is None else int(page_size),
@@ -623,6 +660,7 @@ def _knobs(page_size, token_bucket, pin_block_sizes, force_mixed, out_dtype):
       PIN_BLOCK_SIZES if pin_block_sizes is None else bool(pin_block_sizes),
       FORCE_MIXED if force_mixed is None else bool(force_mixed),
       OUT_DTYPE if out_dtype is None else out_dtype,
+      BKV_SZ if bkv_sz is None else int(bkv_sz),
   )
 
 
@@ -638,7 +676,8 @@ def attention_cacheless(
     token_bucket: int | None = None,
     pin_block_sizes: bool | None = None,
     force_mixed: bool | None = None,
-    out_dtype: Any = None,
+    out_dtype: jax.typing.DTypeLike | None = None,
+    bkv_sz: int | None = None,
     kernel: Callable[..., Any] | None = None,
     differentiable: bool = True,
 ) -> jax.Array:
@@ -661,14 +700,15 @@ def attention_cacheless(
     force_mixed: Force the mixed pass (None: `FORCE_MIXED`).
     out_dtype: Kernel accumulator dtype (None: `OUT_DTYPE`); must have the query
       dtype's width.
+    bkv_sz: Outer KV DMA block size (`bkv_sz % 512 == 0`, None: `BKV_SZ`).
     kernel: The kernel (None: `KERNEL`, else tpu_inference).
     differentiable: Wrap the call in the chunked replica VJP.
 
   Returns:
     `out[B, T, QH, D]` in the query dtype.
   """
-  page_size, token_bucket, pin, mixed, acc_dtype = _knobs(
-      page_size, token_bucket, pin_block_sizes, force_mixed, out_dtype
+  page_size, token_bucket, pin, mixed, acc_dtype, resolved_bkv = _knobs(
+      page_size, token_bucket, pin_block_sizes, force_mixed, out_dtype, bkv_sz
   )
   kernel_fn = resolve_kernel(kernel)
   _check_rank(q, k, v)
@@ -695,6 +735,7 @@ def attention_cacheless(
       differentiable=differentiable,
       mesh=mesh,
       tp_axis=tp_axis,
+      bkv_sz=resolved_bkv,
   )
   return out
 
@@ -712,7 +753,8 @@ def attention_cached(
     token_bucket: int | None = None,
     pin_block_sizes: bool | None = None,
     force_mixed: bool | None = None,
-    out_dtype: Any = None,
+    out_dtype: jax.typing.DTypeLike | None = None,
+    bkv_sz: int | None = None,
     kernel: Callable[..., Any] | None = None,
     differentiable: bool = True,
 ) -> tuple[dict[str, jax.Array], jax.Array]:
@@ -738,6 +780,7 @@ def attention_cached(
     force_mixed: Force the mixed pass (None: `FORCE_MIXED`).
     out_dtype: Kernel accumulator dtype (None: `OUT_DTYPE`); must have the query
       dtype's width.
+    bkv_sz: Outer KV DMA block size (`bkv_sz % 512 == 0`, None: `BKV_SZ`).
     kernel: The kernel (None: `KERNEL`, else tpu_inference).
     differentiable: Wrap the call in the chunked replica VJP (the sampler never
       differentiates; kept on for one code path with the learner).
@@ -746,8 +789,8 @@ def attention_cached(
     `(new_layer_cache, out[B, T, QH, D])`; `new_layer_cache['end_index']` is
     advanced by `T`.
   """
-  page_size, token_bucket, pin, mixed, acc_dtype = _knobs(
-      page_size, token_bucket, pin_block_sizes, force_mixed, out_dtype
+  page_size, token_bucket, pin, mixed, acc_dtype, resolved_bkv = _knobs(
+      page_size, token_bucket, pin_block_sizes, force_mixed, out_dtype, bkv_sz
   )
   kernel_fn = resolve_kernel(kernel)
   _check_rank(q, k, v)
@@ -796,6 +839,7 @@ def attention_cached(
       differentiable=differentiable,
       mesh=mesh,
       tp_axis=tp_axis,
+      bkv_sz=resolved_bkv,
   )
   new_layer_cache = {
       PAGED_CACHE_KEY: new_cache,
@@ -811,18 +855,23 @@ def describe(
     token_bucket: int | None = None,
     pin_block_sizes: bool | None = None,
     force_mixed: bool | None = None,
-    out_dtype: Any = None,
-) -> dict[str, Any]:
+    out_dtype: jax.typing.DTypeLike | None = None,
+    bkv_sz: int | None = None,
+) -> dict[str, int | str | tuple[int, ...]]:
   """The effective call-site controls (for reports); `None` = module default."""
-  page_size, token_bucket, pin, mixed, acc_dtype = _knobs(
-      page_size, token_bucket, pin_block_sizes, force_mixed, out_dtype
+  page_size, token_bucket, pin, mixed, acc_dtype, resolved_bkv = _knobs(
+      page_size, token_bucket, pin_block_sizes, force_mixed, out_dtype, bkv_sz
+  )
+  active_blocks = (
+      rpa_canonical.CANONICAL_BQ_SZ,
+      resolved_bkv,
+      rpa_canonical.CANONICAL_BQ_CSZ,
+      rpa_canonical.CANONICAL_BKV_CSZ,
   )
   return {
       'page_size': page_size,
       'token_bucket': token_bucket,
-      'block_sizes': (
-          rpa_canonical.CANONICAL_BLOCK_SIZES if pin else 'kernel heuristic'
-      ),
+      'block_sizes': active_blocks if pin else 'kernel heuristic',
       'distribution': '[0, 0, B] (forced mixed)' if mixed else 'natural',
       'out_dtype': (
           'kernel default' if acc_dtype is None else str(jnp.dtype(acc_dtype))

@@ -1,45 +1,121 @@
-# GitHub Actions workflow for building, testing, and publishing a Python package to PyPI
-# using Trusted Publishing (OIDC) and a secure Environment.
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# GitHub Actions workflow for building, testing, and publishing google-tunix to
+# PyPI using Trusted Publishing (OIDC) and a protected 'release' environment.
+#
+# Pre-release verification: trigger manually via `workflow_dispatch`
+# (`gh workflow run pypi_release.yml`) to run `build` + `test` + `cpu-tests`
+# without publishing to PyPI (`publish-to-pypi` runs only on published GitHub
+# releases). The same dry run also runs nightly and files an issue on failure.
 
 name: Build, Test, and Publish Python Package to PyPI
 
-# This triggers when a new "release" is published in the GitHub UI.
-# This is safer than publishing on every push to 'main'.
 on:
   release:
     types: [published]
+  workflow_dispatch:
+  schedule:
+    # Run nightly at 2:00 AM PST (10:00 AM UTC) to monitor release packaging health.
+    - cron: '0 10 * * *'
+
+concurrency:
+  # Dedup scheduled runs but nothing else
+  group: >
+    ${{
+      github.event_name == 'schedule' && format('{0}-schedule', github.workflow) ||
+      github.run_id
+    }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Build package
-    runs-on: ubuntu-latest
+    name: Build manylinux wheel and sdist
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
           python-version: '3.12'
-      - name: Install build tools
+      - name: Build manylinux cp312-abi3 wheel
+        uses: pypa/cibuildwheel@f9b966cfadf4109556cadc5bb39ddb72d0ce664e # v4.3.5
+        with:
+          output-dir: dist
+      - name: Build sdist and validate distribution metadata
         run: |
-          python -m pip install --upgrade pip build
-      - name: Build distributions
-        run: |
-          python -m build
+          python -m pip install --upgrade pip build twine
+          python -m build --sdist --outdir dist
+          ls -lh dist/
+          python -c "
+          import pathlib
+          import tarfile
+          import zipfile
+          dist = pathlib.Path('dist')
+          wheels = list(dist.glob('google_tunix-*-cp312-abi3-manylinux*_x86_64.whl'))
+          unrepaired = list(dist.glob('*-linux_*.whl'))
+          sdists = list(dist.glob('google_tunix-*.tar.gz'))
+          assert len(wheels) == 1, f'Expected 1 manylinux abi3 wheel, got {wheels}'
+          assert not unrepaired, f'Found unrepaired linux wheel(s): {unrepaired}'
+          assert len(sdists) == 1, f'Expected 1 sdist tarball, got {sdists}'
+
+          # Enforce the root-anchored sdist.exclude contract in pyproject.toml.
+          with tarfile.open(sdists[0], 'r:gz') as tar:
+              names = tar.getnames()
+          colon_names = [n for n in names if ':' in n]
+          assert not colon_names, f'sdist member paths contain colons: {colon_names}'
+          rel_paths = {n.split('/', 1)[1] for n in names if '/' in n}
+          top_level = {p.split('/', 1)[0] for p in rel_paths}
+          excluded = top_level & {'.gemini', '.github', 'docs', 'examples', 'scripts', 'tests'}
+          assert not excluded, f'sdist contains excluded top-level dirs: {sorted(excluded)}'
+
+          # Both archives must ship exactly the checkout's tunix/**/*.py sources.
+          # Compare against the checkout (not wheel vs sdist), since an unanchored
+          # sdist.exclude entry would drop the same files from both archives.
+          repo_py = {p.as_posix() for p in pathlib.Path('tunix').rglob('*.py') if p.is_file()}
+          with zipfile.ZipFile(wheels[0]) as zf:
+              wheel_py = {n for n in zf.namelist() if n.startswith('tunix/') and n.endswith('.py')}
+          sdist_py = {p for p in rel_paths if p.startswith('tunix/') and p.endswith('.py')}
+          assert repo_py, 'No tunix/**/*.py found in the checkout'
+          assert wheel_py == repo_py, (
+              f'wheel vs checkout tunix/**/*.py mismatch: '
+              f'missing_in_wheel={sorted(repo_py - wheel_py)} '
+              f'extra_in_wheel={sorted(wheel_py - repo_py)}'
+          )
+          assert sdist_py == repo_py, (
+              f'sdist vs checkout tunix/**/*.py mismatch: '
+              f'missing_in_sdist={sorted(repo_py - sdist_py)} '
+              f'extra_in_sdist={sorted(sdist_py - repo_py)}'
+          )
+          "
+          python -m twine check --strict dist/*
       - name: Store package artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.4.0
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: python-package
           path: dist/*
 
   test:
-    name: Run unit tests
+    name: Verify sdist build and Python 3.13/3.14 abi3
     needs: [build]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4 # v4.2.2
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
           python-version: '3.12'
       - name: Download package artifacts
@@ -47,49 +123,109 @@ jobs:
         with:
           name: python-package
           path: dist
-      - name: Install built package
+      - name: Verify cp312-abi3 extensions on Python 3.13 and 3.14
         run: |
-          python -m pip install --upgrade pip
-          WHEEL=$(ls -1 dist/google_tunix-*.whl | head -n1)
-          python -m pip install "${WHEEL}[test]"
-      - name: Run smoke tests
-        run: |
-          python3 -c "
-          import tunix
-          import tunix.models
-          import tunix.generate
-          import tunix.sft
-          import tunix.distillation
-          import tunix.rl
+          python -m pip install -q --upgrade pip uv
+          WHEEL=$(ls -1 "${GITHUB_WORKSPACE}"/dist/google_tunix-*-cp312-abi3-manylinux*_x86_64.whl | head -n1)
+          for py_ver in 3.13 3.14; do
+            uv venv "/tmp/abi3-py${py_ver}" --python "${py_ver}"
+            uv pip install --python "/tmp/abi3-py${py_ver}/bin/python" --no-deps "${WHEEL}"
+            uv pip install --python "/tmp/abi3-py${py_ver}/bin/python" numpy
+            cd /tmp
+            "/tmp/abi3-py${py_ver}/bin/python" -c "
+          import importlib.util
+          import pathlib
+          import sys
+          import sysconfig
+          import numpy as np
 
-          print('All tunix modules imported successfully')
+          # Match *.abi3.so explicitly: a non-STABLE_ABI .cpython-312-*.so would
+          # still be tagged cp312-abi3 via wheel.py-api but is not loadable here.
+          root = pathlib.Path(sysconfig.get_paths()['platlib']) / 'tunix'
+          mods = {}
+          for mod_name, rel_glob in (
+              ('_packing_ext', 'rl/_packing_ext*.abi3.so'),
+              ('_compression_ext', 'dist_rl/worker/_compression_ext*.abi3.so'),
+              ('_delta_encoder_ext', 'experimental/delta_sync/_delta_encoder_ext*.abi3.so'),
+              ('_trajectory_logger_ext', 'utils/_trajectory_logger_ext*.abi3.so'),
+          ):
+              so_paths = list(root.glob(rel_glob))
+              assert len(so_paths) == 1, f'Expected 1 {rel_glob} under {root}, got {so_paths}'
+              spec = importlib.util.spec_from_file_location(mod_name, so_paths[0])
+              mods[mod_name] = importlib.util.module_from_spec(spec)
+              spec.loader.exec_module(mods[mod_name])
+
+          # Exercise Py_LIMITED_API calls and the numpy buffer protocol.
+          bins, _ = mods['_packing_ext'].fill_one_chunk_fast([4, 3], 8, 1, 4, 1)
+          assert bins == [[0, 1]], bins
+          formatted = mods['_trajectory_logger_ext'].format_ndarray(np.array([1, 2], dtype=np.int32))
+          assert str(formatted) == '[1, 2]', formatted
+          comp = mods['_compression_ext'].try_compress_bulk_buffer(memoryview(np.zeros(65536, dtype=np.uint8)), 0.85, 16384)
+          assert comp is not None
+          bits = np.zeros((16, 128), dtype=np.uint16)
+          fullest = mods['_delta_encoder_ext'].fullest_block_changes([bits], [bits + 1], block_rows=[16], num_threads=2)
+          assert fullest == [1024], fullest
+          print('Verified cp312-abi3 extensions on Python', sys.version.split()[0])
           "
+          done
+      - name: Smoke-test building and importing from sdist
+        run: |
+          SDIST=$(ls -1 "${GITHUB_WORKSPACE}"/dist/google_tunix-*.tar.gz | head -n1)
+          uv venv /tmp/sdist-venv --python 3.12
+          uv pip install --python /tmp/sdist-venv/bin/python --no-binary google-tunix "${SDIST}[test,experimental]"
+          cd /tmp
+          /tmp/sdist-venv/bin/python -c "
+          import pathlib
+          import sysconfig
+          import tunix
+          from tunix.rl import packing
+          from tunix.utils import trajectory_logger
+          from tunix.dist_rl.worker import network
+
+          platlib = pathlib.Path(sysconfig.get_paths()['platlib']).resolve()
+          assert pathlib.Path(tunix.__file__).resolve().is_relative_to(platlib)
+          assert packing._packing_ext is not None
+          assert trajectory_logger._trajectory_logger_ext is not None
+          assert network._compression_ext is not None
+          print('sdist build and import smoke test passed:', tunix.__version__)
+          "
+
+  cpu-tests:
+    name: Run CPU test suite against the built wheel
+    needs: [build]
+    uses: ./.github/workflows/cpu-tests.yml # zizmor: ignore[self-repository] matches build_and_test_tunix.yml
+    with:
+      wheel_artifact_name: python-package
+      wheel_only: true
 
   publish-to-pypi:
     name: Publish package to PyPI
-    needs: [test]
-    runs-on: ubuntu-latest
-
-    # 1. IMPORTANT: Specify the environment
-    # This tells GitHub to apply the 'release' environment's rules
-    # and to include 'environment: release' in the OIDC token.
+    needs: [test, cpu-tests]
+    if: github.event_name == 'release'
+    runs-on: ubuntu-24.04
     environment: release
-
-    # 2. IMPORTANT: Set permissions for OIDC
-    # This gives the workflow write access to the OIDC token,
-    # which is required for trusted publishing.
     permissions:
-      id-token: write  # Required for trusted publishing
+      id-token: write
 
     steps:
       - name: Download package artifacts
-        # Retrieve the .whl and .tar.gz files from the 'build' job
-        # Note: We download again here; jobs run on fresh VMs.
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           name: python-package
           path: dist/
 
       - name: Publish package to PyPI
-        # This is the official action for PyPI Trusted Publishing
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+
+  notify_failure:
+    name: Notify failed nightly release dry run # creates an issue or modifies last open existing issue for failed build
+    needs: [build, test, cpu-tests]
+    if: ${{ always() && github.event_name == 'schedule' && contains(needs.*.result, 'failure') }}
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    steps:
+      - name: Create or update failed build issue
+        uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b # v1.2.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}

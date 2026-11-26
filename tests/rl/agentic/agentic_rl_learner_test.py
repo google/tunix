@@ -23,11 +23,19 @@ from absl import logging
 from absl.testing import absltest
 from absl.testing import parameterized
 import numpy as np
+from tunix.common import test_utils
 from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl import utils as rl_utils
 from tunix.rl.agentic import agentic_grpo_learner
 from tunix.rl.agentic import agentic_rl_learner
 from tunix.rl.rollout import base_rollout
+
+
+def _dummy_reward_fn(
+    prompts: list[str], completions: list[str], **kwargs: Any
+) -> list[float]:
+  del completions, kwargs
+  return [0.0] * len(prompts)
 
 
 class DummyLearner(agentic_rl_learner.AgenticRLLearner):
@@ -61,7 +69,7 @@ class AgenticRLLearnerTest(parameterized.TestCase):
     ):
       DummyLearner(
           rl_engine=rl_engine,
-          reward_fns=mock.Mock(),
+          reward_fns=_dummy_reward_fn,
           algo_config=algo_config,
       )
 
@@ -84,7 +92,7 @@ class AgenticRLLearnerTest(parameterized.TestCase):
     with self.assertRaisesRegex(ValueError, r"must have return_logprobs=True"):
       DummyLearner(
           rl_engine=rl_engine,
-          reward_fns=mock.Mock(),
+          reward_fns=_dummy_reward_fn,
           algo_config=algo_config,
       )
 
@@ -117,7 +125,7 @@ class AgenticRLLearnerTest(parameterized.TestCase):
     ):
       DummyLearner(
           rl_engine=rl_engine,
-          reward_fns=mock.Mock(),
+          reward_fns=_dummy_reward_fn,
           algo_config=algo_config,
       )
 
@@ -145,7 +153,7 @@ class AgenticRLLearnerTest(parameterized.TestCase):
     ):
       DummyLearner(
           rl_engine=rl_engine,
-          reward_fns=mock.Mock(),
+          reward_fns=_dummy_reward_fn,
           algo_config=algo_config,
       )
 
@@ -161,7 +169,7 @@ class AgenticRLLearnerTest(parameterized.TestCase):
       training_config.compute_logps_micro_batch_size = 2
       training_config.train_micro_batch_size = 1
       training_config.mini_batch_size = None
-      training_config.max_seq_token_per_tpu = None
+      training_config.max_seq_tokens_per_device = None
       rl_engine.cluster_config.training_config = training_config
       rl_engine.cluster_config.rollout_config = base_rollout.RolloutConfig(
           max_tokens_to_generate=10, return_logprobs=True
@@ -175,7 +183,7 @@ class AgenticRLLearnerTest(parameterized.TestCase):
       algo_config = agentic_rl_learner.AgenticRLConfig(max_response_length=10)
       learner = DummyLearner(
           rl_engine=rl_engine,
-          reward_fns=mock.Mock(),
+          reward_fns=_dummy_reward_fn,
           algo_config=algo_config,
       )
       train_dataset = [{"prompt": ["p1"]}]
@@ -200,7 +208,7 @@ class AgenticRLLearnerTest(parameterized.TestCase):
       training_config.compute_logps_micro_batch_size = 1
       training_config.train_micro_batch_size = 3
       training_config.mini_batch_size = 4
-      training_config.max_seq_token_per_tpu = 16  # Enable packing
+      training_config.max_seq_tokens_per_device = 16  # Enable packing
       training_config.max_segments_per_packed_row = None
       training_config.max_steps = 100
       rl_engine.cluster_config.training_config = training_config
@@ -217,7 +225,7 @@ class AgenticRLLearnerTest(parameterized.TestCase):
       algo_config = agentic_rl_learner.AgenticRLConfig(max_response_length=10)
       learner = DummyLearner(
           rl_engine=rl_engine,
-          reward_fns=mock.Mock(),
+          reward_fns=_dummy_reward_fn,
           algo_config=algo_config,
       )
       self.assertTrue(learner._packing_enabled)
@@ -240,52 +248,72 @@ class AgenticRLLearnerTest(parameterized.TestCase):
         learner.train(train_dataset)
         spy_consumer_gen.assert_called_once_with(mock.ANY, 4)
 
+  def test_create_micro_batch_iterator_flattens_tensor_like(self):
+    learner = DummyLearner.__new__(DummyLearner)
+    values = np.arange(4, dtype=np.float32)
+    batch = {
+        "prompts": ["a", "b", "c", "d"],
+        "vector": test_utils.CustomTensor(values),
+        "column": test_utils.CustomTensor(values.reshape(4, 1)),
+    }
+    micro_batches = list(
+        learner._create_micro_batch_iterator(iter([batch]), 2)
+    )
+    self.assertLen(micro_batches, 2)
+    self.assertEqual(list(micro_batches[1]["prompts"]), ["c", "d"])
+    for key in ("vector", "column"):
+      flattened = np.concatenate([mb[key] for mb in micro_batches])
+      np.testing.assert_array_equal(flattened, [0.0, 1.0, 2.0, 3.0])
+      self.assertEqual(micro_batches[0][key].shape, (2,))
+      self.assertEqual(micro_batches[0][key].dtype, np.float32)
+
+    scalar_batches = [
+        {
+            "prompts": "p0",
+            "weight": test_utils.CustomTensor(np.array(0.5, dtype=np.float32)),
+            "step": test_utils.CustomTensor(np.array(3, dtype=np.int32)),
+        },
+        {
+            "prompts": "p1",
+            "weight": test_utils.CustomTensor(np.array(1.5, dtype=np.float32)),
+            "step": test_utils.CustomTensor(np.array(4, dtype=np.int32)),
+        },
+    ]
+    scalar_out = list(
+        learner._create_micro_batch_iterator(iter(scalar_batches), 2)
+    )
+    self.assertLen(scalar_out, 1)
+    np.testing.assert_array_equal(scalar_out[0]["weight"], [0.5, 1.5])
+    self.assertEqual(scalar_out[0]["weight"].dtype, np.float32)
+    np.testing.assert_array_equal(scalar_out[0]["step"], [3, 4])
+    self.assertEqual(scalar_out[0]["step"].dtype, np.int32)
+
 
 class ExactTokenContinuityConfigTest(absltest.TestCase):
 
-  def test_default_exact_token_continuity_reaches_the_collector(self):
-    config = base_rollout.RolloutConfig(
-        max_tokens_to_generate=1024, return_logprobs=True
+  def test_orchestrator_wires_tokenizer_and_parser_to_collector(self):
+    obj = types.SimpleNamespace(
+        algo_config=agentic_rl_learner.AgenticRLConfig(),
+        _model_call=mock.Mock(),
+        tokenizer=mock.Mock(),
+        chat_parser=mock.Mock(),
+        rl_engine=types.SimpleNamespace(perf_v2=mock.Mock()),
+        _rollout_sync_lock=mock.Mock(),
     )
-    engine = mock.MagicMock()
-    engine.cluster_config.rollout_engine = "generic"
-    engine.cluster_config.rollout_config = config
-    engine.cluster_config.training_config.max_seq_token_per_tpu = None
-    with mock.patch.object(rl_utils, "is_sharing_weights", return_value=False):
-      learner = DummyLearner(
-          rl_engine=engine,
-          reward_fns=mock.Mock(),
-          algo_config=agentic_grpo_learner.GRPOConfig(),
-          chat_parser=object(),
-      )
-    self.assertIs(learner.algo_config.exact_token_continuity, True)
+    with mock.patch.object(
+        agentic_rl_learner.rollout_orchestrator, "RolloutOrchestrator"
+    ) as factory:
+      agentic_rl_learner.AgenticRLLearner._build_orchestrator(obj)
+    engine_kwargs = factory.call_args.kwargs["engine_kwargs"]
+    self.assertIs(engine_kwargs["tokenizer"], obj.tokenizer)
+    self.assertIs(engine_kwargs["chat_parser"], obj.chat_parser)
 
-    for enabled in (False, True):
-      obj = types.SimpleNamespace(
-          algo_config=agentic_rl_learner.AgenticRLConfig(
-              exact_token_continuity=enabled
-          ),
-          _model_call=mock.Mock(),
-          tokenizer=mock.Mock(),
-          chat_parser=mock.Mock(),
-          rl_engine=types.SimpleNamespace(perf_v2=mock.Mock()),
-          _rollout_sync_lock=mock.Mock(),
-      )
-      with mock.patch.object(
-          agentic_rl_learner.rollout_orchestrator, "RolloutOrchestrator"
-      ) as factory:
-        agentic_rl_learner.AgenticRLLearner._build_orchestrator(obj)
-      self.assertIs(
-          factory.call_args.kwargs["engine_kwargs"]["exact_token_continuity"],
-          enabled,
-      )
-
-  def test_exact_mode_rejects_rollout_configs_it_cannot_honor(
+  def test_learner_rejects_rollout_configs_it_cannot_honor(
       self,
   ):
-    for option, value, max_seq_token, message in (
-        ("return_logprobs", False, None, "sampled logprobs"),
-        ("return_routed_experts", True, 1024, "expert routing"),
+    for option, value, max_seq_token, use_rollout_logps, message in (
+        ("return_logprobs", False, None, True, "return_logprobs=True"),
+        ("return_routed_experts", True, 1024, False, "expert routing"),
     ):
       config = base_rollout.RolloutConfig(
           max_tokens_to_generate=1024, return_logprobs=True
@@ -297,7 +325,7 @@ class ExactTokenContinuityConfigTest(absltest.TestCase):
           cluster_config=types.SimpleNamespace(
               rollout_config=config,
               training_config=types.SimpleNamespace(
-                  max_seq_token_per_tpu=max_seq_token
+                  max_seq_tokens_per_device=max_seq_token
               ),
           ),
       )
@@ -305,16 +333,14 @@ class ExactTokenContinuityConfigTest(absltest.TestCase):
         agentic_grpo_learner.GRPOLearner(
             engine,
             agentic_grpo_learner.GRPOConfig(
-                exact_token_continuity=True, use_rollout_logps=False
+                use_rollout_logps=use_rollout_logps
             ),
             chat_parser=object(),
         )
 
   def test_model_call_forwards_token_ids_without_parsing(self):
     obj = types.SimpleNamespace(
-        algo_config=agentic_rl_learner.AgenticRLConfig(
-            exact_token_continuity=True
-        ),
+        algo_config=agentic_rl_learner.AgenticRLConfig(),
         chat_parser=types.SimpleNamespace(
             parse=mock.Mock(side_effect=AssertionError("history parse"))
         ),

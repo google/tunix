@@ -14,16 +14,18 @@
 
 """RL Trainer."""
 
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, TypeAlias
 
 from flax import nnx
-from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import optax
+from tunix.common import datatypes
 from tunix.sft import peft_trainer
 from typing_extensions import override
 from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import tracer as perf_tracer_lib
 from tunix.sft.metrics_logger import MetricsLogger  # pylint: disable=unused-import
+
+ArrayLike: TypeAlias = datatypes.ArrayLike
 
 
 class Trainer(peft_trainer.PeftTrainer):

@@ -187,7 +187,7 @@ def _copy_view_slice_nogil(
 
 def _grpc_options(
     max_message_bytes: int = _MAX_MESSAGE_BYTES,
-) -> List[Tuple[str, int]]:
+) -> list[tuple[str, int]]:
   """Channel/server options lifting the message-size cap and enabling keepalive."""
   # Note: On POSIX sockets, gRPC C-core (`socket_utils_common_posix.cc`) sets
   # kernel `TCP_USER_TIMEOUT` equal to `grpc.keepalive_timeout_ms` whenever
@@ -212,11 +212,25 @@ def _grpc_options(
 
 def _grpc_channel_options(
     max_message_bytes: int = _MAX_MESSAGE_BYTES,
-) -> List[Tuple[str, int]]:
-  """Client channel options extending `_grpc_options` with reconnect bounds."""
+) -> list[tuple[str, int]]:
+  """Client channel options with bounded reconnect and isolated subchannels."""
+  # Use a channel-local subchannel pool so a fresh handle to a restarted
+  # container on the same `hostname:port` never inherits a stale C-core global
+  # subchannel still in `TRANSIENT_FAILURE` reconnect backoff.
   return [
       *_grpc_options(max_message_bytes),
       ("grpc.max_reconnect_backoff_ms", 10000),
+      ("grpc.use_local_subchannel_pool", 1),
+  ]
+
+
+def _grpc_server_options(
+    max_message_bytes: int = _MAX_MESSAGE_BYTES,
+) -> list[tuple[str, int]]:
+  """Server options disabling SO_REUSEPORT so duplicate port binds fail fast."""
+  return [
+      *_grpc_options(max_message_bytes),
+      ("grpc.so_reuseport", 0),
   ]
 
 

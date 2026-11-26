@@ -31,11 +31,14 @@ import jax.sharding as shd
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
+from tunix.dist_rl.common import datatypes
+from tunix.dist_rl.common import rpc_utils
 from tunix.dist_rl.train import peft_trainer_v2
 from tunix.sft import checkpoint_manager
 from tunix.sft import hooks
 from tunix.sft import peft_trainer
 from tunix.sft import profiler
+from tunix.sft import profiler_jax
 from tunix.sft import utils as sft_utils
 from tunix.tests import test_common as tc
 from tunix.utils import compat
@@ -175,56 +178,155 @@ class PeftTrainerTest(parameterized.TestCase):
 
     trainer.train(self.train_ds)  # No eval dataset.
 
-  def test_fwd_only_hands_live_model_and_shards_arrays(self):
+  def _scoring_payload(
+      self,
+      prompt: np.ndarray,
+      completion: np.ndarray,
+      *,
+      temperature: float = 1.0,
+  ) -> datatypes.LogprobsScoringPayload:
+    return datatypes.LogprobsScoringPayload(
+        prompt_ids=prompt,
+        completion_ids=completion,
+        pad_id=0,
+        eos_id=1,
+        temperature=temperature,
+    )
+
+  def test_fwd_only_shards_payload_and_passes_model_copy(self):
     config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
     trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
-    tokens = np.arange(8, dtype=np.int32).reshape(2, 4)
-    empty = np.zeros((2, 0), dtype=np.int32)
+    prompt = np.zeros((2, 0), dtype=np.int32)
+    completion = np.arange(8, dtype=np.int32).reshape(2, 4)
+    seen = {}
 
-    def fn(m, x, *, y, pad_id, opt=None):
-      return m, x, y, pad_id, opt
-
-    with self.mesh:
-      fn_model, fn_x, fn_y, fn_pad, fn_opt = trainer.fwd_only(
-          fn, tokens, y=empty, pad_id=0
+    def fn(m, payload):
+      seen['model'] = m
+      seen['pad_id'] = payload.pad_id
+      seen['eos_id'] = payload.eos_id
+      logits, _ = m(
+          payload.completion_ids,
+          positions=jnp.arange(payload.completion_ids.shape[1])[None, :],
+          attention_mask=jnp.ones(
+              (
+                  1,
+                  payload.completion_ids.shape[1],
+                  payload.completion_ids.shape[1],
+              ),
+              dtype=jnp.bool_,
+          ),
+          cache=None,
+      )
+      return (
+          logits.sum(),
+          payload.completion_ids,
+          payload.prompt_ids,
       )
 
-    # The trainer model itself is passed (no copy, no split).
-    self.assertIs(fn_model, model)
-    # Array leaves become sharded device arrays; scalars / None pass through.
-    self.assertIsInstance(fn_x, jax.Array)
-    np.testing.assert_array_equal(np.asarray(fn_x), tokens)
-    self.assertIsInstance(fn_x.sharding, shd.NamedSharding)
-    self.assertEqual(
-        fn_x.sharding.spec,
-        shd.PartitionSpec(config.data_sharding_axis),
-    )
-    self.assertEqual(fn_y.shape, (2, 0))
-    self.assertEqual(fn_pad, 0)
-    self.assertIsNone(fn_opt)
+    with self.assertRaisesRegex(ValueError, 'with_fwd_only_fn'):
+      trainer.fwd_only(self._scoring_payload(prompt, completion))
 
-  def test_fwd_only_runs_jitted_scorer_read_only(self):
+    self.assertIs(trainer.with_fwd_only_fn(fn), trainer)
+
+    scoring_payload = self._scoring_payload(prompt, completion)
+    with self.mesh:
+      loss_sum, out_comp, out_prompt = trainer.fwd_only(scoring_payload)
+
+    self.assertIsInstance(seen['model'], nnx.Module)
+    self.assertIsNot(seen['model'], model)
+    self.assertEqual(seen['pad_id'], 0)
+    self.assertEqual(seen['eos_id'], 1)
+    self.assertTrue(np.isfinite(float(loss_sum)))
+
+    expected_spec = shd.PartitionSpec(config.data_sharding_axis)
+    self.assertIsInstance(out_comp, jax.Array)
+    np.testing.assert_array_equal(np.asarray(out_comp), completion)
+    self.assertIsInstance(out_comp.sharding, shd.NamedSharding)
+    self.assertEqual(out_comp.sharding.spec, expected_spec)
+    self.assertEqual(out_prompt.shape, (2, 0))
+
+  def test_fwd_only_is_read_only_and_caches_one_jit_per_static_field(self):
     config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
     trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
-    before = jax.tree.map(np.asarray, nnx.state(model, nnx.Param))
+    before = jax.tree.map(
+        lambda x: np.asarray(
+            jax.random.key_data(x)
+            if jax.dtypes.issubdtype(x.dtype, jax.dtypes.prng_key)
+            else x
+        ),
+        nnx.state(model),
+    )
+    trace_calls = 0
 
-    @nnx.jit
-    def logits_sum(m, tokens):
+    def scorer(m, payload):
+      nonlocal trace_calls
+      trace_calls += 1
+      # Mutate the merged model (both attribute and nnx.Param state) inside the
+      # callback to verify live trainer state is insulated by
+      # `nnx.merge(..., copy=True)`.
+      m.custom_ephemeral_attr = 'mutated'
+      tokens = payload.completion_ids
       logits, _ = m(
           tokens,
           positions=jnp.arange(tokens.shape[1])[None, :],
           attention_mask=jnp.ones((1, 4, 4), dtype=jnp.bool_),
           cache=None,
       )
-      return logits.sum()
+      nnx.update(m, jax.tree.map(jnp.zeros_like, nnx.state(m, nnx.Param)))
+      return (logits.sum() + payload.prompt_ids.sum()) * payload.temperature
 
-    out = trainer.fwd_only(logits_sum, np.arange(1, 5, dtype=np.int32)[None])
+    trainer.with_fwd_only_fn(scorer)
+    prompt = np.arange(1, 5, dtype=np.int32)[None]
+    completion = np.arange(5, 9, dtype=np.int32)[None]
 
-    self.assertTrue(np.isfinite(float(out)))
-    after = jax.tree.map(np.asarray, nnx.state(model, nnx.Param))
+    def make_payload(prompt_offset: int, temperature: float):
+      return self._scoring_payload(
+          prompt + prompt_offset, completion, temperature=temperature
+      )
+
+    out1 = trainer.fwd_only(make_payload(0, 1.0))
+    out1_again = trainer.fwd_only(make_payload(1, 1.0))
+    self.assertEqual(trace_calls, 1)
+    self.assertIsNotNone(trainer._jitted_fwd_only_fn)
+    self.assertNotAlmostEqual(float(out1_again), float(out1), places=3)
+
+    out2 = trainer.fwd_only(make_payload(0, 2.0))
+    self.assertAlmostEqual(float(out2), 2.0 * float(out1), places=3)
+    self.assertEqual(trace_calls, 2)
+    self.assertFalse(hasattr(model, 'custom_ephemeral_attr'))
+
+    after = jax.tree.map(
+        lambda x: np.asarray(
+            jax.random.key_data(x)
+            if jax.dtypes.issubdtype(x.dtype, jax.dtypes.prng_key)
+            else x
+        ),
+        nnx.state(model),
+    )
     jax.tree.map(np.testing.assert_array_equal, before, after)
+
+    # Re-registering with a different callback invalidates cached JIT and
+    # uses the new callback.
+    base_val = float(out1)
+    trainer.with_fwd_only_fn(lambda m, payload: -scorer(m, payload))
+    self.assertIsNone(trainer._jitted_fwd_only_fn)
+
+    alt_val = float(trainer.fwd_only(make_payload(0, 1.0)))
+    self.assertAlmostEqual(alt_val, -base_val, places=3)
+    self.assertIsNotNone(trainer._jitted_fwd_only_fn)
+
+    # Re-registering immediately with the exact same payload must not hit JAX's
+    # internal JIT cache for the prior callback.
+    trainer.with_fwd_only_fn(lambda m, payload: 2.0 * scorer(m, payload))
+    self.assertAlmostEqual(
+        float(trainer.fwd_only(make_payload(0, 1.0))),
+        2.0 * base_val,
+        places=3,
+    )
+    trainer.clear_jit_cache()
+    self.assertIsNone(trainer._jitted_fwd_only_fn)
 
   @parameterized.named_parameters(
       ('lora_disabled_distributed', False, True),
@@ -333,7 +435,7 @@ class PeftTrainerTest(parameterized.TestCase):
     self.assertIsNotNone(curr_jit_func)
     self.assertIsNot(previous_jit_func, curr_jit_func)
 
-  @mock.patch.object(profiler, 'Profiler')
+  @mock.patch.object(profiler, 'Profiler', autospec=True)
   def test_basic_training_with_profiler(self, mock_profiler_init):
     mock_profiler_instance = mock.MagicMock()
     mock_profiler_init.return_value = mock_profiler_instance
@@ -341,8 +443,7 @@ class PeftTrainerTest(parameterized.TestCase):
         lambda step: step == profiler_options.skip_first_n_steps
     )
     mock_profiler_instance.should_deactivate.side_effect = (
-        lambda step: step
-        == (
+        lambda step: step == (
             profiler_options.skip_first_n_steps
             + profiler_options.profiler_steps
         )
@@ -366,6 +467,11 @@ class PeftTrainerTest(parameterized.TestCase):
         initial_step=0,
         max_step=config.max_steps,
         profiler_options=profiler_options,
+        backend=mock.ANY,
+    )
+    self.assertIsInstance(
+        mock_profiler_init.call_args.kwargs['backend'],
+        profiler_jax.JaxProfilerBackend,
     )
     expected_calls = (
         # steps 0 through 8.
@@ -614,6 +720,7 @@ class PeftTrainerTest(parameterized.TestCase):
                     mock.ANY,
                     mock.ANY,
                     save_only_lora_params=True,
+                    force=False,
                     custom_metadata={},
                 )
                 for i in expected_save_steps
@@ -761,6 +868,43 @@ class PeftTrainerTest(parameterized.TestCase):
         force=True,
     )
 
+  @mock.patch.object(checkpoint_manager, 'CheckpointManager')
+  def test_save_checkpoint_explicit_step_overrides_metadata_step(
+      self, mock_checkpoint_manager_init
+  ):
+    mock_cm = mock.MagicMock()
+    mock_checkpoint_manager_init.return_value = mock_cm
+    mock_cm.maybe_restore.return_value = (0, {})
+    config = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=1000,
+        checkpoint_root_directory='/tmp/checkpoint',
+        checkpointing_options=ocp.CheckpointManagerOptions(),
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+
+    custom_metadata = {'step': 25, 'policy_version': 3}
+    trainer.save_checkpoint(metadata=custom_metadata, step=30)
+
+    mock_cm.save.assert_called_once_with(
+        30,
+        trainer.model,
+        trainer.optimizer,
+        save_only_lora_params=False,
+        force=False,
+        custom_metadata=custom_metadata,
+    )
+
+  def test_save_checkpoint_rejects_undeclared_options(self):
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=1000)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    with self.assertRaises(TypeError):
+      trainer.save_checkpoint(  # pylint: disable=unexpected-keyword-arg
+          metadata={'step': 1},
+          checkpoint_directory='/somewhere/else',  # pyrefly: ignore[unexpected-keyword]
+      )
+
   def _external_resume_trainer(
       self, root, *, implicit_resume, gradient_accumulation_steps=None
   ):
@@ -881,14 +1025,16 @@ class PeftTrainerTest(parameterized.TestCase):
         tc.assert_equal, states[1], nnx.state(rolled_back.model, nnx.Param)
     )
 
-  def test_restore_checkpoint_accepts_unexpected_kwargs(self):
+  def test_restore_checkpoint_rejects_undeclared_options(self):
     config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=1000)
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
     trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
-    metadata = trainer.restore_checkpoint(
-        checkpoint_directory='/somewhere/else'
-    )
-    self.assertEqual(metadata, {'step': 0})
+    with self.assertRaises(TypeError):
+      trainer.restore_checkpoint(  # pylint: disable=unexpected-keyword-arg
+          checkpoint_directory=(  # pyrefly: ignore[unexpected-keyword]
+              '/somewhere/else'
+          )
+      )
 
   def test_restore_checkpoint_without_configured_directory_is_a_noop(self):
     config = peft_trainer_v2.TrainingConfig(
@@ -965,6 +1111,7 @@ class PeftTrainerTest(parameterized.TestCase):
     self.assertEqual(train_invoke, {'foo': 4.0, 'bar': 6.0})
     self.assertEqual(eval_invoke, {'foo': 8.0, 'bar': 12.0})
     metrics = trainer.get_metrics()
+    rpc_utils.validate_wire_safe(metrics)
     self.assertIn('foo', metrics.weighted_metrics)
     self.assertIsInstance(
         metrics.weighted_metrics['foo'], sft_utils.WeightedMetric
@@ -1535,7 +1682,7 @@ class V1ParityTest(parameterized.TestCase):
 
     trainer_v1.train(batches)
     for batch in batches:
-      trainer_split.fwd_bwd(batch)
+      self.assertIsInstance(trainer_split.fwd_bwd(batch), jax.Array)
     self.assertEqual(trainer_split.train_steps, 0)
     trainer_split.update()
 
@@ -1602,8 +1749,8 @@ class V1ParityTest(parameterized.TestCase):
         model_accum, accum_steps=2, max_steps=1
     )
     # Distributed RL with sequence packing sets gradient_accumulation_steps=1
-    # and max_seq_token_per_tpu=None on TrainingConfig while invoking fwd_bwd()
-    # a dynamic number of times per update().
+    # and max_seq_tokens_per_device=None on TrainingConfig while invoking
+    # fwd_bwd() a dynamic number of times per update().
     trainer_dynamic = self._make_trainer_v2(
         model_dynamic, accum_steps=1, max_steps=1
     )
@@ -1783,6 +1930,7 @@ class V1ParityTest(parameterized.TestCase):
     self.assertIsNotNone(prepared[0].routed_experts)
     self.assertEqual(prepared[0].routed_experts.shape, (2, 10, 3, 2))
     self.assertEqual(prepared[0].routed_experts.dtype, np.uint8)
+    self.assertEqual(trainer.iter_steps, 0)
     self.assertNotIn('routed_experts_encode_fn', prepared[0].metadata)
     self.assertEqual(prepared[0].metadata['keep_key'], 42)
     self.assertIn('routed_experts_encode_fn', dummy.metadata)

@@ -15,18 +15,22 @@
 """Rollout Manager concurrency controller and Raiden KV migration orchestrator."""
 
 import asyncio
+from collections.abc import Mapping
+import functools
 import logging
 import time
-from typing import Any, AsyncIterator, Callable, Dict, Optional, Sequence, Union
+import types
+from typing import Any, Callable, Dict, Optional, Sequence, Union
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import timeouts as timeouts_lib
-from tunix.dist_rl.common import registry
 from tunix.dist_rl.rollout import collector as collector_lib
 from tunix.dist_rl.rollout import sampler as sampler_lib
 from tunix.dist_rl.trajectory import base_store as store
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
-from tunix.dist_rl.weight_sync import weight_sync
+from tunix.dist_rl.worker import staging_buffer as staging_buffer_lib
 from tunix.dist_rl.worker import traffic_controller as traffic_controller_lib
+from tunix.rl.agentic.agents import base_agent
+from tunix.rl.agentic.environments import base_environment
 from tunix.rl.rollout import base_rollout
 
 TrajectoryOrError = Union[
@@ -44,139 +48,68 @@ class RolloutManager:
 
   def __init__(
       self,
-      config: Optional[base_rollout.RolloutConfig] = None,
-      sampler: Optional[sampler_lib.Sampler] = None,
-      env_pool: Any = None,
-      agent_factory: Optional[Callable[[], Any]] = None,
+      sampler: sampler_lib.Sampler,
+      tokenizer: Any,
+      chat_parser: Any,
+      env_factory: Callable[..., base_environment.BaseTaskEnv],
+      agent_factory: Callable[..., base_agent.ConversationAgentBase],
+      config: base_rollout.RolloutConfig,
+      env_config: Mapping[str, Any] = types.MappingProxyType({}),
+      agent_config: Mapping[str, Any] = types.MappingProxyType({}),
       max_concurrency: int = 64,
-      tokenizer: Any = None,
-      chat_parser: Any = None,
       drain_timeout_s: float = timeouts_lib.DEFAULT_DRAIN_TIMEOUT_S,
       trajectory_store: Optional[store.TrajectoryWriter] = None,
+      staging_buffer: Optional[staging_buffer_lib.RolloutStagingBuffer] = None,
   ):
     """Initializes the RolloutManager.
 
     Args:
-      config: RolloutConfig configuration options.
-      sampler: Optional pre-constructed Sampler instance.
-      env_pool: Environment pool for rollout execution.
-      agent_factory: Factory callable producing agent instances.
-      max_concurrency: Maximum number of concurrent episodes.
+      sampler: Pre-constructed Sampler instance.
       tokenizer: Tokenizer for prompt/response encoding.
       chat_parser: Chat parser for conversation templating.
+      env_factory: Factory callable producing environment instances.
+      agent_factory: Factory callable producing agent instances.
+      config: RolloutConfig configuration options.
+      env_config: Default environment constructor kwargs. A request's
+        `metadata["env_config"]` entries are shallow-merged on top of these.
+      agent_config: Default agent constructor kwargs. A request's
+        `metadata["agent_config"]` replaces these entirely when present.
+      max_concurrency: Maximum number of concurrent episodes.
       drain_timeout_s: Soft drain window (seconds) in `pre_weight_sync` when
         `partial_rollout` is False. Waits up to `drain_timeout_s` for in-flight
         trajectories to finish naturally before `pause_all()` pauses remaining
         stragglers.
       trajectory_store: Optional TrajectoryWriter for persisting rollout steps
         and episode metadata.
+      staging_buffer: Optional bounded staging buffer for MoE `routed_experts`.
     """
     self._drain_timeout_s = timeouts_lib.validate_positive_finite(
         drain_timeout_s, "drain_timeout_s"
     )
-    self.config = config
-    self._partial_rollout: bool = (
-        bool(getattr(config, "partial_rollout", False))
-        if config is not None
-        else False
+    self.config: base_rollout.RolloutConfig = config
+    self._staging_buffer: staging_buffer_lib.RolloutStagingBuffer | None = (
+        staging_buffer
     )
-    self._store_routed_experts: bool = (
-        bool(getattr(config, "store_routed_experts", False))
-        if config is not None
-        else False
-    )
-    self._routed_experts_encode_mode: datatypes.RoutedExpertsEncodeMode = (
-        config.routed_experts_encode_mode if config is not None else "auto"
-    )
-    self._routed_experts_num_experts: int | None = (
-        config.routed_experts_num_experts if config is not None else None
-    )
+    self._staging_bytes_per_token: int | None = None
     self._policy_version: int = 0
-    # TODO(tunix-dev): Require all callers to pass a non-None, pre-constructed
-    # sampler with RaidenWeightSyncDelegate already applied, and remove this
-    # lazy sampler construction fallback from RolloutManager.
-    if sampler is None:
-      sampler_type = getattr(config, "sampler_type", "vanilla")
-      weight_sync_mode = getattr(
-          config, "weight_sync_mode", weight_sync.DEFAULT_WEIGHT_SYNC_MODE
-      )
-
-      if sampler_type == "vllm":
-        from tunix.dist_rl.rollout import vllm_sampler  # pylint: disable=g-import-not-at-top
-
-        sampler_kwargs: dict[str, Any] = {
-            "server_id": "vllm_sampler",
-            "model_name": getattr(config, "rollout_vllm_model_version", ""),
-            "config": self.config,
-            "weight_sync_mode": weight_sync_mode,
-        }
-        if self._partial_rollout:
-          sampler_kwargs["partial_rollout"] = True
-        sampler = vllm_sampler.VllmSampler(**sampler_kwargs)
-      elif "inprocess_vllm" in sampler_type:
-        from tunix.dist_rl.rollout import inprocess_vllm_sampler  # pylint: disable=g-import-not-at-top
-
-        raiden_delegate = None
-        if weight_sync_mode == weight_sync.WeightSyncMode.RAIDEN:
-          from tunix.dist_rl.weight_sync import raiden_weight_sync_delegate  # pylint: disable=g-import-not-at-top
-
-          delegate_kwargs: dict[str, Any] = {
-              "server_id": "inprocess_vllm_sampler"
-          }
-          if self._partial_rollout:
-            delegate_kwargs["partial_rollout"] = True
-          raiden_delegate = (
-              raiden_weight_sync_delegate.RaidenWeightSyncDelegate(
-                  **delegate_kwargs
-              )
-          )
-
-        sampler_kwargs = {
-            "server_id": "inprocess_vllm_sampler",
-            "tokenizer": tokenizer,
-            "config": config,
-            "raiden_sync_delegate": raiden_delegate,
-            "weight_sync_mode": weight_sync_mode,
-            "max_concurrency": max_concurrency,
-        }
-        if self._partial_rollout:
-          sampler_kwargs["partial_rollout"] = True
-        sampler = inprocess_vllm_sampler.InprocessVllmSampler(**sampler_kwargs)
-      elif "vanilla" in sampler_type:
-        raise ValueError(
-            "VanillaSampler requires an explicit pre-constructed sampler"
-            " instance with an initialized transformer model."
-        )
-      else:
-        raise ValueError(f"Unknown sampler_type: {sampler_type}")
-      sampler.initialize()
-
-    if not isinstance(sampler, sampler_lib.Sampler):
-      raise TypeError(
-          f"Expected object implementing Sampler Protocol, got {type(sampler)}"
-      )
     self.sampler = sampler
-    self.env_pool = env_pool
+    self.env_factory = env_factory
     self.agent_factory = agent_factory
+    self.env_config: Mapping[str, Any] = types.MappingProxyType(
+        dict(env_config)
+    )
+    self.agent_config: Mapping[str, Any] = types.MappingProxyType(
+        dict(agent_config)
+    )
     self.max_concurrency = max_concurrency
     self.tokenizer = tokenizer
     self.chat_parser = chat_parser
     self.trajectory_store = trajectory_store
-    if self.tokenizer is None or self.chat_parser is None:
-      raise ValueError(
-          "RolloutManager requires valid tokenizer and chat_parser arguments"
-          " (none can be None)."
-      )
-    # `RolloutConfig.eos_tokens` is the stop set the sampler runs with, and it
-    # overrides the tokenizer's own EOS. Collectors need it to tell a rollout
-    # that stopped on its own from one that exhausted its budget.
-    self.eos_ids = getattr(config, "eos_tokens", None) if config else None
 
     self._active_collectors: Dict[
         str, collector_lib.TrajectoryCollectorEngine
     ] = {}
     self._active_tasks: Dict[str, asyncio.Task[Any]] = {}
-    self._completed_queue: asyncio.Queue[TrajectoryOrError] = asyncio.Queue()
     self._traffic_inst = None
 
   @property
@@ -185,13 +118,136 @@ class RolloutManager:
 
   @property
   def partial_rollout(self) -> bool:
-    return self._partial_rollout
+    return self.config.partial_rollout
+
+  @property
+  def active_tasks(self) -> tuple[asyncio.Task[Any], ...]:
+    return tuple(self._active_tasks.values())
 
   @property
   def _traffic(self) -> traffic_controller_lib.TrafficController:
     if self._traffic_inst is None:
       self._traffic_inst = traffic_controller_lib.TrafficController()
     return self._traffic_inst
+
+  def _release_item_ref(self, item: TrajectoryOrError) -> None:
+    """Releases any staged `routed_experts_ref` held by an orphaned item."""
+    if (
+        self._staging_buffer is not None
+        and isinstance(item, datatypes.TrajectoryItem)
+        and item.routed_experts_ref is not None
+    ):
+      self._staging_buffer.release_staged([item.routed_experts_ref.ref_id])
+
+  def _on_episode_task_done(
+      self,
+      slot_key: str,
+      collector: collector_lib.TrajectoryCollectorEngine,
+      reservation: staging_buffer_lib.StagingReservation | None,
+      future: asyncio.Future[TrajectoryOrError],
+      done_task: asyncio.Task[Any],
+  ) -> None:
+    """Reclaims uncommitted staging quota and active tracking on task exit."""
+    if reservation is not None:
+      reservation.cancel()
+    if self._active_tasks.get(slot_key) is done_task:
+      self._active_tasks.pop(slot_key, None)
+    if self._active_collectors.get(slot_key) is collector:
+      self._active_collectors.pop(slot_key, None)
+    if done_task.cancelled() and not future.done():
+      future.cancel()
+
+  async def _reserve_for_request(
+      self, request: datatypes.RolloutRequest
+  ) -> staging_buffer_lib.StagingReservation | None:
+    """Reserves worst-case staging bytes when `request.stage_routed_experts` is set."""
+    if not request.stage_routed_experts:
+      return None
+    if self._staging_buffer is None:
+      raise RuntimeError(
+          "RolloutRequest(stage_routed_experts=True) requires initialized MoE"
+          " staging on RolloutManager."
+      )
+    if self._staging_bytes_per_token is None:
+      shape = self.sampler.routed_experts_shape()
+      if shape is None:
+        raise RuntimeError(
+            "RolloutRequest(stage_routed_experts=True) requires a sampler with"
+            " MoE routed_experts capture enabled."
+        )
+      encoding = datatypes.resolve_routed_experts_wire_encoding(
+          self.config.routed_experts_encode_mode,
+          self.config.routed_experts_num_experts,
+      )
+      self._staging_bytes_per_token = datatypes.routed_experts_bytes_per_token(
+          shape[0], shape[1], encoding
+      )
+    max_resp = request.max_response_length
+    if (
+        isinstance(max_resp, bool)
+        or not isinstance(max_resp, int)
+        or max_resp <= 0
+    ):
+      raise ValueError(
+          "RolloutRequest(stage_routed_experts=True) requires positive"
+          f" request.max_response_length, got {max_resp!r}."
+      )
+    if self.config.max_prompt_length <= 0:
+      raise ValueError(
+          "RolloutRequest(stage_routed_experts=True) requires positive"
+          " RolloutConfig.max_prompt_length, got"
+          f" {self.config.max_prompt_length!r}."
+      )
+    worst_case_bytes = (
+        self.config.max_prompt_length + max_resp
+    ) * self._staging_bytes_per_token
+    return await self._staging_buffer.reserve(
+        worst_case_bytes,
+        is_paused_fn=lambda: not self._traffic.is_admission_open(),
+    )
+
+  def _stamp_target_policy_version(
+      self, request: datatypes.RolloutRequest
+  ) -> None:
+    """Advances `request.target_policy_version` to the active worker version."""
+    sampler_version = getattr(self.sampler, "policy_version", None)
+    effective_version = self._policy_version
+    if (
+        isinstance(sampler_version, int)
+        and not isinstance(sampler_version, bool)
+        and sampler_version > effective_version
+    ):
+      effective_version = sampler_version
+    if effective_version > int(request.target_policy_version or 0):
+      request.target_policy_version = effective_version
+
+  def _build_collector(
+      self, traj_id: str, request: datatypes.RolloutRequest
+  ) -> collector_lib.TrajectoryCollectorEngine:
+    """Instantiates environment, agent, and `TrajectoryCollectorEngine`."""
+    env_config = dict(self.env_config)
+    env_config.update(request.metadata.get("env_config", {}))
+    env_config.setdefault("group_index", request.group_index)
+    env_config.setdefault("policy_version", request.target_policy_version)
+    env_client = self.env_factory(**env_config)
+    agent = self.agent_factory(
+        **request.metadata.get("agent_config", self.agent_config)
+    )
+    return collector_lib.TrajectoryCollectorEngine(
+        traj_id=traj_id,
+        request=request,
+        sampler=self.sampler,
+        env_client=env_client,
+        agent=agent,
+        tokenizer=self.tokenizer,
+        chat_parser=self.chat_parser,
+        config=self.config,
+        policy_version_fn=lambda: self._policy_version,
+        trajectory_store=self.trajectory_store,
+        max_prompt_length=(
+            self.config.max_prompt_length if request.stage_routed_experts else None
+        ),
+    )
 
   async def _generate_one(
       self,
@@ -203,91 +259,82 @@ class RolloutManager:
       raise traffic_controller_lib.AdmissionClosedError(
           "rollout worker is stopped"
       )
-    await self._traffic.wait_for_admission()
-    if self._traffic.state == datatypes.WorkerState.STOPPED:
-      raise traffic_controller_lib.AdmissionClosedError(
-          "rollout worker is stopped"
-      )
-    sampler_version = getattr(self.sampler, "policy_version", None)
-    effective_version = self._policy_version
-    if isinstance(sampler_version, int) and sampler_version > effective_version:
-      effective_version = sampler_version
-    if effective_version > int(request.target_policy_version or 0):
-      request.target_policy_version = effective_version
-    loop = asyncio.get_running_loop()
-    future: asyncio.Future[TrajectoryOrError] = loop.create_future()
+    reservation = await self._reserve_for_request(request)
+    try:
+      await self._traffic.wait_for_admission()
+      if self._traffic.state == datatypes.WorkerState.STOPPED:
+        raise traffic_controller_lib.AdmissionClosedError(
+            "rollout worker is stopped"
+        )
+      if reservation is not None and not reservation.attach_to_task():
+        raise traffic_controller_lib.AdmissionClosedError(
+            "rollout staging buffer is clearing or reservation was revoked"
+        )
+      self._stamp_target_policy_version(request)
+      loop = asyncio.get_running_loop()
+      future: asyncio.Future[TrajectoryOrError] = loop.create_future()
 
-    def _resolve(result: TrajectoryOrError) -> None:
-      if on_complete:
-        on_complete(result)
-      if not future.done():
+      def _resolve(result: TrajectoryOrError) -> None:
+        if future.done():
+          self._release_item_ref(result)
+          return
+        if on_complete:
+          on_complete(result)
         future.set_result(result)
 
-    traj_id = request.traj_id
-
-    env_name = getattr(self.config, "env_name", "")
-    if env_name and registry.ENV_REGISTRY.contains(env_name):
-      env_cls = registry.ENV_REGISTRY.get(env_name)
-      request_metadata = dict(request.metadata or {})
-      env_config = dict(getattr(self.config, "env_config", {}))
-      if isinstance(request_metadata.get("env_config"), dict):
-        env_config.update(request_metadata["env_config"])
-      env_config.setdefault("group_index", request.group_index)
-      env_config.setdefault("policy_version", request.target_policy_version)
-
-      env_client = env_cls(**env_config)
-    elif self.env_pool and hasattr(self.env_pool, "acquire_env"):
-      env_client = self.env_pool.acquire_env(request.metadata.get("env_config"))
-    else:
-      env_client = None
-
-    agent_name = getattr(self.config, "agent_name", "")
-    if agent_name and registry.AGENT_REGISTRY.contains(agent_name):
-      agent_cls = registry.AGENT_REGISTRY.get(agent_name)
-      agent_config = request.metadata.get(
-          "agent_config", getattr(self.config, "agent_config", {})
+      traj_id = request.traj_id
+      collector = self._build_collector(traj_id, request)
+      slot_key = traj_id
+      if (
+          traj_id in self._active_tasks
+          or traj_id in self._active_collectors
+      ):
+        slot_key = f"{traj_id}#{id(collector):x}"
+      self._active_collectors[slot_key] = collector
+      owned_reservation, reservation = reservation, None
+      task = asyncio.create_task(
+          self._run_and_enqueue(
+              collector,
+              request,
+              owned_reservation,
+              _resolve,
+              slot_key=slot_key,
+          )
       )
-      agent = agent_cls(**agent_config)
-    elif self.agent_factory and callable(self.agent_factory):
-      agent = self.agent_factory()
-    else:
-      agent = None
+      task.add_done_callback(
+          functools.partial(
+              self._on_episode_task_done,
+              slot_key,
+              collector,
+              owned_reservation,
+              future,
+          )
+      )
+      self._active_tasks[slot_key] = task
+      self._traffic.track(task)
+    except BaseException:
+      if reservation is not None:
+        reservation.cancel()
+      raise
 
-    collector_kwargs: dict[str, Any] = {
-        "routed_experts_encode_mode": self._routed_experts_encode_mode,
-        "routed_experts_num_experts": self._routed_experts_num_experts,
-    }
-    if self.trajectory_store is not None:
-      collector_kwargs["trajectory_store"] = self.trajectory_store
-    if self._store_routed_experts:
-      collector_kwargs["store_routed_experts"] = True
-    collector = collector_lib.TrajectoryCollectorEngine(
-        traj_id=traj_id,
-        request=request,
-        sampler=self.sampler,
-        env_client=env_client,
-        agent=agent,
-        tokenizer=self.tokenizer,
-        chat_parser=self.chat_parser,
-        eos_ids=self.eos_ids,
-        partial_rollout=self._partial_rollout,
-        policy_version_fn=lambda: self._policy_version,
-        **collector_kwargs,
-    )
-
-    self._active_collectors[traj_id] = collector
-    task = asyncio.create_task(
-        self._run_and_enqueue(collector, request, _resolve)
-    )
-    task.add_done_callback(
-        lambda t: future.cancel()
-        if t.cancelled() and not future.done()
-        else None
-    )
-    self._active_tasks[traj_id] = task
-    self._traffic.track(task)
-
-    return await future
+    try:
+      return await future
+    except BaseException:
+      collector.cancel()
+      task.cancel()
+      try:
+        await task
+      except BaseException:  # pylint: disable=broad-exception-caught
+        pass
+      if owned_reservation is not None:
+        owned_reservation.cancel()
+      if (
+          future.done()
+          and not future.cancelled()
+          and future.exception() is None
+      ):
+        self._release_item_ref(future.result())
+      raise
 
   async def generate(
       self,
@@ -301,24 +348,45 @@ class RolloutManager:
         asyncio.create_task(self._generate_one(req, on_complete=on_complete))
         for req in requests
     ]
-    return await asyncio.gather(*tasks)
+    try:
+      return await asyncio.gather(*tasks)
+    except BaseException:
+      for t in tasks:
+        if not t.done():
+          t.cancel()
+      results = await asyncio.gather(*tasks, return_exceptions=True)
+      for res in results:
+        if not isinstance(res, BaseException):
+          self._release_item_ref(res)
+      raise
 
   async def _run_and_enqueue(
       self,
       collector: collector_lib.TrajectoryCollectorEngine,
       request: datatypes.RolloutRequest,
+      reservation: staging_buffer_lib.StagingReservation | None,
       resolve_cb: Callable[[TrajectoryOrError], None],
+      *,
+      slot_key: str,
   ) -> None:
     """Runs episode loop, removes active tracking, and resolves callbacks/streams."""
     run_start = time.perf_counter()
+    trajectory: TrajectoryOrError
     try:
-      trajectory: TrajectoryOrError = await collector.run_episode()
-      if isinstance(trajectory, datatypes.TrajectoryItem) and isinstance(
-          trajectory.traj, dict
-      ):
-        trajectory.traj["execution_time_s"] = time.perf_counter() - run_start
+      item = await collector.run_episode()
+      if isinstance(item.traj, dict):
+        item.traj["execution_time_s"] = time.perf_counter() - run_start
+      if reservation is not None:
+        assert self._staging_buffer is not None
+        self._staging_buffer.stage_trajectory_item(
+            reservation, item, traj_id=collector.traj_id
+        )
+      trajectory = item
     except Exception as e:  # pylint: disable=broad-exception-caught
+      if reservation is not None:
+        reservation.cancel()
       error_metadata = dict(request.metadata or {})
+      error_metadata.pop("env_config", None)
       error_metadata["prompt_id"] = request.prompt_id
       error_metadata["group_index"] = request.group_index
       error_metadata["policy_version"] = int(request.target_policy_version or 0)
@@ -330,30 +398,14 @@ class RolloutManager:
           metadata=error_metadata,
       )
     finally:
-      self._active_collectors.pop(collector.traj_id, None)
-      self._active_tasks.pop(collector.traj_id, None)
-      if (
-          self.env_pool
-          and hasattr(self.env_pool, "release_env")
-          and collector.env is not None
-      ):
-        self.env_pool.release_env(collector.env)
+      if reservation is not None:
+        reservation.cancel()
+      if self._active_collectors.get(slot_key) is collector:
+        self._active_collectors.pop(slot_key, None)
+      if self._active_tasks.get(slot_key) is asyncio.current_task():
+        self._active_tasks.pop(slot_key, None)
 
-    await self._completed_queue.put(trajectory)
     resolve_cb(trajectory)
-
-  async def pop_next_completed(self) -> TrajectoryOrError:
-    """Pull-based stream: yields whichever trajectory finishes first out-of-order."""
-    return await self._completed_queue.get()
-
-  async def as_completed_stream(
-      self,
-  ) -> AsyncIterator[TrajectoryOrError]:
-    """Async generator yielding completed trajectories strictly out-of-order."""
-    # TODO(lancewang): Add termination condition to prevent hangs when stream
-    # is exhausted.
-    while True:
-      yield await self.pop_next_completed()
 
   async def migrate_straggler(
       self,
@@ -393,28 +445,23 @@ class RolloutManager:
       task.cancel()
 
   async def pre_weight_sync(
-      self, sync_request: sampler_lib.WeightSyncRequest | Any = None, **kwargs
+      self,
+      sync_request: sampler_lib.WeightSyncRequest,
+      **kwargs,
   ) -> Any:
     """Phase 3 Barrier 1: Closes admission and drains or pauses in-flight work."""
     t0 = time.monotonic()
     self._traffic.transition_to_syncing()
     in_flight_before = len(self._active_collectors)
-    if not self._partial_rollout:
+    if not self.config.partial_rollout:
       await self._traffic.drain(self._drain_timeout_s)
     self.pause_all()
-    res = None
-    if self.sampler:
-      if self._partial_rollout:
-        res = await self.sampler.pre_weight_sync(
-            sync_request, partial_rollout=True, **kwargs
-        )
-      else:
-        res = await self.sampler.pre_weight_sync(sync_request, **kwargs)
+    res = await self.sampler.pre_weight_sync(sync_request, **kwargs)
     elapsed_ms = (time.monotonic() - t0) * 1000.0
     logging.info(
         "[RolloutManager] pre_weight_sync(partial_rollout=%s,"
         " in_flight_before=%d, in_flight_after=%d) completed in %.2f ms",
-        self._partial_rollout,
+        self.config.partial_rollout,
         in_flight_before,
         len(self._active_collectors),
         elapsed_ms,
@@ -422,52 +469,50 @@ class RolloutManager:
     return res
 
   async def weight_sync(
-      self, sync_request: sampler_lib.WeightSyncRequest | Any = None, **kwargs
-  ) -> Any:
-    """Phase 3 Barrier 2: Executes weight synchronization and updates policy version."""
-    req_version = getattr(sync_request, "policy_version", None)
-    if req_version is None:
-      req_version = getattr(sync_request, "version", None)
-    completed_version = int(req_version) if req_version is not None else 0
-    if self.sampler:
-      res = await self.sampler.weight_sync(sync_request, **kwargs)
-      if res is not None:
-        completed_version = res
-    if isinstance(completed_version, int):
-      self._policy_version = completed_version
-    elif req_version is not None:
-      self._policy_version = int(req_version)
-    return completed_version
+      self,
+      sync_request: sampler_lib.WeightSyncRequest,
+      **kwargs,
+  ) -> int:
+    """Phase 3 Barrier 2: Installs the staged weights.
+
+    Returns the round's policy version. `post_weight_sync` records it once the
+    weights go live.
+    """
+    await self.sampler.weight_sync(sync_request, **kwargs)
+    return sync_request.policy_version
 
   async def post_weight_sync(
-      self, sync_request: sampler_lib.WeightSyncRequest | Any = None, **kwargs
+      self,
+      sync_request: sampler_lib.WeightSyncRequest,
+      **kwargs,
   ) -> Any:
     """Phase 3 Barrier 3: Finalizes policy weight update and resumes collectors."""
-    req_version = getattr(sync_request, "policy_version", None)
-    if req_version is None:
-      req_version = getattr(sync_request, "version", None)
-    if req_version is not None:
-      self._policy_version = int(req_version)
-    res = None
-    if self.sampler:
-      res = await self.sampler.post_weight_sync(sync_request, **kwargs)
+    self._policy_version = sync_request.policy_version
+
+    res = await self.sampler.post_weight_sync(sync_request, **kwargs)
+    if self._staging_buffer is not None:
+      self._staging_buffer.on_post_weight_sync(
+          self._policy_version,
+          min_retained_policy_version=sync_request.min_retained_policy_version,
+      )
+
     self.resume_all()
     self._traffic.reopen()
     logging.info(
         "[RolloutManager] post_weight_sync(partial_rollout=%s,"
         " resumed_collectors=%d) completed",
-        self._partial_rollout,
+        self.config.partial_rollout,
         len(self._active_collectors),
     )
     return res
 
   async def abort_weight_sync(
-      self, sync_request: sampler_lib.WeightSyncRequest | Any = None, **kwargs
+      self,
+      sync_request: sampler_lib.WeightSyncRequest,
+      **kwargs,
   ) -> Any:
-    """Discards the round, delegates to sampler if available, and resumes serving."""
-    res = None
-    if self.sampler:
-      res = await self.sampler.abort_weight_sync(sync_request, **kwargs)
+    """Discards the round, delegates to the sampler, and resumes serving."""
+    res = await self.sampler.abort_weight_sync(sync_request, **kwargs)
     # TODO(tunix-dev): It might be better to fail hard if weight sync failed
     # right now instead of letting it proceed silently, otherwise it may mess
     # up with the policy version.
@@ -485,12 +530,8 @@ class RolloutManager:
 
   async def get_weight_sync_metadata(self, **kwargs) -> Any:
     """Returns the sampler's transport metadata for weight sync registration."""
-    if self.sampler:
-      return await self.sampler.get_weight_sync_metadata(**kwargs)
-    return []
+    return await self.sampler.get_weight_sync_metadata(**kwargs)
 
   def get_target_state(self) -> Any:
     """Returns the sampler target-state skeleton used for trainer conversion."""
-    if self.sampler is None:
-      raise RuntimeError("RolloutManager has no sampler configured.")
     return self.sampler.get_target_state()

@@ -625,16 +625,16 @@ def _run_learner_child(args):
     )
 
   logps_job = args["job"] == "logps"
-  mesh = jax.sharding.Mesh(
-      np.array(jax.devices()).reshape(2, 2), ("fsdp", "tp")
-  )
-  # The logps job rolls out on a mesh of its own; without the per-host learner
-  # that would turn on asynchronous rollout.
-  rollout_mesh = (
-      jax.sharding.Mesh(np.array(jax.devices()).reshape(2, 2).T, ("fsdp", "tp"))
-      if logps_job
-      else mesh
-  )
+  devices = np.array(jax.devices()).reshape(2, 2)  # [process, local device]
+  if logps_job:
+    # Actor and rollout on different devices (local device 0 and 1 of every
+    # process). `RLEngine.is_colocated` compares physical devices, so without
+    # the per-host learner this would turn on asynchronous rollout.
+    mesh = jax.sharding.Mesh(devices[:, :1], ("fsdp", "tp"))
+    rollout_mesh = jax.sharding.Mesh(devices[:, 1:], ("fsdp", "tp"))
+  else:
+    mesh = jax.sharding.Mesh(devices, ("fsdp", "tp"))
+    rollout_mesh = mesh
   cluster_config = rl_engine_lib.ClusterConfig(
       role_to_mesh={
           rl_engine_lib.Role.ACTOR: mesh,
@@ -836,7 +836,7 @@ _JOBS = {
         eval_prompts=[_PROMPTS],
         batch_sizes={},
     ),
-    # Per-host-safe reference logps on separate actor and rollout meshes. Per
+    # Per-host-safe reference logps, actor and rollout on separate devices. Per
     # process: 4 prompts per batch, train micro-batches of 2 (each rolled out
     # and scored on its own, so asynchronous loading would overlap them with
     # train steps), logps chunks of 2 prompts (4 rows). The eval set (4 + 1

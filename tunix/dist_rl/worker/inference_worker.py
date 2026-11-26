@@ -21,7 +21,6 @@ and results are returned as host numpy. This version hosts frozen weights only;
 there is no weight sync.
 """
 
-from collections.abc import Sequence
 from typing import Any, Protocol
 
 import jax
@@ -44,6 +43,8 @@ class ReferenceScoringCore(Protocol):
       pad_id: int,
       eos_id: int,
       temperature: float = 1.0,
+      segment_ids: jax.Array | None = None,
+      segment_positions: jax.Array | None = None,
   ) -> jax.Array:
     ...
 
@@ -76,9 +77,6 @@ class InferenceWorker(abstract_worker.Worker):
       eos_id: int,
       model_version: int = 0,
       chunk_size: int | None = None,
-      max_prompt_length: int | None = None,
-      max_response_length: int | None = None,
-      temperature: float = 1.0,
       execution_context: Any = None,
   ):
     """Initializes the worker.
@@ -91,11 +89,6 @@ class InferenceWorker(abstract_worker.Worker):
       eos_id: End-of-sequence token id.
       model_version: Version tag for the hosted weights; constant while frozen.
       chunk_size: Optional maximum batch size for scoring to reduce peak memory.
-      max_prompt_length: Retained for launcher/config compatibility. Padding is
-        owned by the orchestrator BatchAssembler, not this worker.
-      max_response_length: Retained for launcher/config compatibility. Padding
-        is owned by the orchestrator BatchAssembler, not this worker.
-      temperature: Default sampling temperature used for reference log-probs.
       execution_context: Optional context manager or zero-arg callable returning
         a context manager (e.g., a JAX Mesh) to enter during worker method
         execution.
@@ -107,15 +100,15 @@ class InferenceWorker(abstract_worker.Worker):
     self._eos_id = eos_id
     self._model_version = model_version
     self._chunk_size = chunk_size
-    self._max_prompt_length = max_prompt_length
-    self._max_response_length = max_response_length
-    self._temperature = temperature
 
   def info(self) -> datatypes.WorkerInfo:
     return datatypes.WorkerInfo(
-        worker_id=self._worker_id, roles=frozenset({"inference"})
+        worker_id=self._worker_id,
+        instance_id=self.instance_id,
+        roles=frozenset({"inference"}),
     )
 
+  @abstract_worker.offload_to_thread
   def initialize(self) -> datatypes.Response:
     self.state = WorkerState.INITIALIZING
     try:
@@ -123,6 +116,7 @@ class InferenceWorker(abstract_worker.Worker):
     finally:
       self.state = WorkerState.READY
 
+  @abstract_worker.offload_to_thread
   def compile(self, dummy_data: Any) -> datatypes.Response:
     del dummy_data
     self.state = WorkerState.COMPILING
@@ -131,16 +125,32 @@ class InferenceWorker(abstract_worker.Worker):
     finally:
       self.state = WorkerState.READY
 
+  @abstract_worker.offload_to_thread
   def start(self) -> datatypes.Response:
     return datatypes.Response()
 
-  def stop(self) -> datatypes.Response:
-    self.state = WorkerState.STOPPED
-    return datatypes.Response()
+  @abstract_worker.offload_to_thread
+  def stop(self, *, abort: bool = False) -> datatypes.Response:
+    try:
+      if self.state == WorkerState.STOPPED:
+        return datatypes.Response(
+            metadata={
+                "stopped": True,
+                "already_stopped": True,
+                "abort": bool(abort),
+            }
+        )
+      self.state = WorkerState.STOPPED
+      return datatypes.Response(
+          metadata={"stopped": True, "abort": bool(abort)}
+      )
+    finally:
+      self._notify_stopped(abort)
 
   def heartbeat(self) -> datatypes.HealthReport:
     return datatypes.HealthReport(state=self.state)
 
+  @abstract_worker.offload_to_thread
   def compute_logps(
       self, req: datatypes.LogprobsRequest
   ) -> datatypes.LogprobsResponse:
@@ -153,25 +163,58 @@ class InferenceWorker(abstract_worker.Worker):
             "later addition)."
         )
 
-      if req.temperature <= 1e-5:
+      temperature = float(req.temperature)
+      if temperature <= 1e-5:
         raise ValueError("Temperature must be strictly positive.")
 
+      prompt_tokens = np.asarray(req.prompt_tokens, dtype=np.int32)
+      completion_tokens = np.asarray(req.completion_tokens, dtype=np.int32)
+      segment_ids = (
+          None
+          if req.segment_ids is None
+          else np.asarray(req.segment_ids, dtype=np.int32)
+      )
+      segment_positions = (
+          None
+          if req.segment_positions is None
+          else np.asarray(req.segment_positions, dtype=np.int32)
+      )
+      if (segment_ids is None) != (segment_positions is None):
+        raise ValueError(
+            "LogprobsRequest must specify both segment_ids and"
+            " segment_positions or neither."
+        )
+
       def _score(
-          prompt_chunk: np.ndarray, completion_chunk: np.ndarray
+          prompt_chunk: np.ndarray,
+          completion_chunk: np.ndarray,
+          segment_ids_chunk: np.ndarray | None = None,
+          segment_positions_chunk: np.ndarray | None = None,
       ) -> jax.Array:
+        segment_kwargs: dict[str, jax.Array] = {}
+        if (
+            segment_ids_chunk is not None
+            and segment_positions_chunk is not None
+        ):
+          segment_kwargs = {
+              "segment_ids": jnp.asarray(segment_ids_chunk, dtype=jnp.int32),
+              "segment_positions": jnp.asarray(
+                  segment_positions_chunk, dtype=jnp.int32
+              ),
+          }
         return self._core.get_ref_per_token_logps(
             prompt_tokens=jnp.asarray(prompt_chunk, dtype=jnp.int32),
             completion_tokens=jnp.asarray(completion_chunk, dtype=jnp.int32),
             pad_id=self._pad_id,
             eos_id=self._eos_id,
-            temperature=req.temperature,
+            temperature=temperature,
+            **segment_kwargs,
         )
 
-      prompt_tokens = np.asarray(req.prompt_tokens)
-      completion_tokens = np.asarray(req.completion_tokens)
-      logps = batch_utils.apply_chunked(
-          _score, self._chunk_size, prompt_tokens, completion_tokens
-      )
+      chunk_inputs = [prompt_tokens, completion_tokens]
+      if segment_ids is not None and segment_positions is not None:
+        chunk_inputs.extend([segment_ids, segment_positions])
+      logps = batch_utils.apply_chunked(_score, self._chunk_size, *chunk_inputs)
       return datatypes.LogprobsResponse(
           request_id=req.request_id,
           per_token_logps=np.asarray(logps, dtype=np.float32),
@@ -187,34 +230,23 @@ class InferenceWorker(abstract_worker.Worker):
           ),
       )
 
+  @abstract_worker.offload_to_thread
   def per_token_logps(
       self,
-      items: datatypes.RLTrainerPayload,
-      request_id: str = "reference_logps",
-      temperature: float | None = None,
-      model_role: str = "reference",
+      items: datatypes.LogprobsRequest,
   ) -> np.ndarray:
-    """Scores reference log-probs for an already padded batch."""
-    if not isinstance(items, datatypes.RLTrainerPayload):
+    """Scores reference log-probs for an already padded LogprobsRequest."""
+    if not isinstance(items, datatypes.LogprobsRequest):
       raise TypeError(
-          "InferenceWorker.per_token_logps expects a padded RLTrainerPayload. "
-          "Pad trajectory items in BatchAssembler before scoring."
+          "InferenceWorker.per_token_logps expects a padded LogprobsRequest. "
+          "Assemble microbatches in BatchAssembler before scoring."
       )
-
-    req = datatypes.LogprobsRequest(
-        request_id=request_id,
-        prompt_tokens=np.asarray(items.prompt_ids, dtype=np.int32),
-        completion_tokens=np.asarray(items.completion_ids, dtype=np.int32),
-        temperature=(
-            self._temperature if temperature is None else float(temperature)
-        ),
-        model_role=model_role,
-    )
-    resp = self.compute_logps(req)
+    resp = self.compute_logps(items)
     if resp.error is not None:
       raise RuntimeError(resp.error.message)
     return np.asarray(resp.per_token_logps, dtype=np.float32)
 
+  @abstract_worker.offload_to_thread
   def score(self, req: datatypes.ScoreRequest) -> datatypes.ScoreResponse:
     """Scores one scalar per row under a hosted (frozen) reward model."""
     try:

@@ -52,13 +52,20 @@ class VllmRollout(base_rollout.BaseRollout):
             ),
             mapping_config=mapping_config,
             return_logprobs=rollout_config.return_logprobs,
+            num_logprobs=rollout_config.num_logprobs,
             return_routed_experts=rollout_config.return_routed_experts,
             eos_tokens=rollout_config.eos_tokens,
             init_with_random_weights=rollout_config.rollout_vllm_init_with_random_weights,
-            tpu_backend_type=rollout_config.rollout_vllm_tpu_backend_type,  # pyrefly: ignore[bad-argument-type]
+            tpu_backend_type=rollout_config.rollout_vllm_tpu_backend_type,
             additional_config=rollout_config.rollout_vllm_additional_config,
             enable_dp_attention=rollout_config.rollout_vllm_enable_dp_attention,
-            hbm_utilization=rollout_config.rollout_vllm_hbm_utilization,
+            # TODO(yatlas): Remove default hbm_utilization once colocated hbm
+            # fixes are landed.
+            hbm_utilization=(
+                rollout_config.rollout_vllm_hbm_utilization
+                if rollout_config.rollout_vllm_hbm_utilization is not None
+                else 0.2
+            ),
             lora_config=rollout_config.rollout_vllm_lora_config,
             mesh=mesh,
             tensor_parallel_size=rollout_config.tensor_parallel_size,
@@ -83,9 +90,7 @@ class VllmRollout(base_rollout.BaseRollout):
                 ),
                 "max_num_seqs": rollout_config.rollout_vllm_max_num_seqs,
                 "hf_config_path": rollout_config.rollout_vllm_hf_config_path,
-                "max_logprobs": (
-                    1
-                ),  # We only need the logprobs of the sampled tokens
+                "max_logprobs": rollout_config.num_logprobs,
                 "logprobs_mode": rollout_config.rollout_vllm_logprobs_mode,
                 **rollout_config.rollout_vllm_kwargs,
             },
@@ -120,6 +125,8 @@ class VllmRollout(base_rollout.BaseRollout):
         seed=rollout_config.seed,  # pyrefly: ignore[bad-argument-type]
         echo=False,
         pad_output=True,
+        return_logprobs=rollout_config.return_logprobs,
+        num_logprobs=rollout_config.num_logprobs,
         **kwargs,
     )
     # The legacy last-output accessor is not a per-request identity source.
@@ -131,6 +138,8 @@ class VllmRollout(base_rollout.BaseRollout):
         tokens=output.tokens,  # pyrefly: ignore[bad-argument-type]
         left_padded_prompt_tokens=output.padded_prompt_tokens,
         logprobs=output.logprobs,  # pyrefly: ignore[bad-argument-type]
+        topk_token_ids=output.topk_token_ids,
+        topk_logprobs=output.topk_logprobs,
         routed_experts=output.routed_experts,
         prompt_lengths=output.prompt_lengths,
     )
@@ -151,6 +160,18 @@ class VllmRollout(base_rollout.BaseRollout):
       filter_types: Optional[Tuple[Any, ...]] = None,
   ) -> None:
     self._sampler.update_params(params, filter_types)
+
+  def release_for_training(
+      self,
+      free_weights: bool = True,
+      src_state: jaxtyping.PyTree | None = None,
+  ) -> None:
+    self._sampler.release_for_training(
+        free_weights=free_weights, src_state=src_state
+    )
+
+  def restore_after_training(self) -> None:
+    self._sampler.restore_after_training()
 
   def pad_id(self) -> int:
     return self._sampler.tokenizer.pad_id()

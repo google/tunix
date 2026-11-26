@@ -44,14 +44,10 @@ warmup_steps=$(awk "BEGIN {printf \"%.0f\", $warmup_ratio * $max_steps}")
 echo "Max steps: $max_steps"
 echo "Rounded warmup steps: $warmup_steps"
 
-intermediate_ckpt_dir=${intermediate_ckpt_dir:-"/tmp/intermediate_ckpt/gemma2_2b_ppo"}
-
-
 python3 -m tunix.cli.ppo_main \
   tunix/cli/base_config.yaml \
   override_config_file=examples/rl/ppo/gsm8k/configs/gemma2_2b.yaml \
   model_config.model_download_path="/tmp/models/gemma-2-2b" \
-  model_config.intermediate_ckpt_dir="$intermediate_ckpt_dir" \
   batch_size=$batch_size \
   num_batches=$num_batches \
   num_train_epochs=$num_train_epochs \
