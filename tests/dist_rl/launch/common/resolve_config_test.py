@@ -2360,6 +2360,7 @@ class LauncherSettingsTest(absltest.TestCase):
             "implicit-dirs,metadata-cache:negative-ttl-secs:0"
         ),
         "export K8S_ENABLE_PATHWAYS_PERSISTENCE=false",
+        "export K8S_ROLLOUT_ENABLE_PATHWAYS_PERSISTENCE=false",
         "export K8S_PATHWAYS_PROXY_MEMORY=16G",
         "export K8S_PATHWAYS_PROXY_MEMORY_LIMIT=190G",
         "export K8S_PATHWAYS_RM_MEMORY=4G",
@@ -2400,6 +2401,7 @@ class LauncherSettingsTest(absltest.TestCase):
             "only-dir=a"
         ),
         "cluster_config.pathways.trainer.persistence=true",
+        "cluster_config.pathways.rollout.persistence=true",
         "cluster_config.pathways.rm_memory.limit=''",
         "cluster_config.pathways.server_memory.limit=120G",
     )
@@ -2421,6 +2423,7 @@ class LauncherSettingsTest(absltest.TestCase):
         "export K8S_PATHWAYS_CKPT_GCSFUSE_MOUNT_PATH=/mnt/ckpt",
         "export K8S_PATHWAYS_CKPT_GCSFUSE_MOUNT_OPTIONS=only-dir=a",
         "export K8S_ENABLE_PATHWAYS_PERSISTENCE=true",
+        "export K8S_ROLLOUT_ENABLE_PATHWAYS_PERSISTENCE=true",
         "export K8S_PATHWAYS_RM_MEMORY_LIMIT=''",
         "export K8S_PATHWAYS_SERVER_MEMORY_LIMIT=120G",
     ):
@@ -2460,6 +2463,11 @@ class LauncherSettingsTest(absltest.TestCase):
             "cluster_config.pathways.trainer.persistence=1",
             TypeError,
             "pathways.trainer.persistence must be a bool",
+        ),
+        (
+            "cluster_config.pathways.rollout.persistence=1",
+            TypeError,
+            "pathways.rollout.persistence must be a bool",
         ),
         (
             "cluster_config.pathways.sidecar.shm=1",

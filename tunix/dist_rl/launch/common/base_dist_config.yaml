@@ -468,8 +468,8 @@ cluster_config:
     # deploys on k8s.
     otel: 4317
   # Pathways deployment of a trainer or rollout. Only `k8s.sh` applies these,
-  # to the roles whose template is `jobset.pathways.yaml`; `trainer` applies to
-  # the trainer only.
+  # to the roles whose template is `jobset.pathways.yaml`; `trainer` and
+  # `rollout` apply to that role only.
   pathways:
     server_image: "us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/server:latest"
     proxy_image: "us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/proxy_server:latest"
@@ -520,6 +520,12 @@ cluster_config:
         bucket: ""
         mount_path: "/gcs/ckpt"
         mount_options: "implicit-dirs,metadata-cache:negative-ttl-secs:0"
+    # Settings `k8s.sh` applies to the rollout's Pathways template alone.
+    rollout:
+      # Sets `ENABLE_PATHWAYS_PERSISTENCE` on the rollout, so the TPU workers
+      # read a plain Zarr v2 `rollout_model_config.scanned_checkpoint_path`
+      # directly instead of staging it through the rollout container's memory.
+      persistence: false
   local:
     auto_detect_devices: false
     download_model_weights: true

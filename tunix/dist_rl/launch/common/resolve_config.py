@@ -945,7 +945,7 @@ LIBRARY_ENV_CONFIG_KEYS: Final[Mapping[str, str]] = types.MappingProxyType({
 _FORBIDDEN_ROLE_ENVS: Final[Mapping[str, str]] = types.MappingProxyType({
     **{k: f"set {v} instead" for k, v in LIBRARY_ENV_CONFIG_KEYS.items()},
     "ENABLE_PATHWAYS_PERSISTENCE": (
-        "set cluster_config.pathways.trainer.persistence instead"
+        "set cluster_config.pathways.<trainer|rollout>.persistence instead"
     ),
     "DIST_RL_WORKER_PORT": "launcher-managed worker identity",
     "DIST_RL_ROLLOUT_REPLICA": "launcher-managed worker identity",
@@ -1153,6 +1153,11 @@ def _validate_launcher_settings(hp: cli_config.HyperParameters) -> None:
       (
           "cluster_config.pathways.trainer.persistence",
           pathways_trainer["persistence"],
+          bool,
+      ),
+      (
+          "cluster_config.pathways.rollout.persistence",
+          pathways["rollout"]["persistence"],
           bool,
       ),
       (
@@ -2218,6 +2223,7 @@ def render_bash_exports(hp: DistHyperParameters) -> str:
   pathways = cli_config.to_str_dict(cluster["pathways"])
   sidecar = cli_config.to_str_dict(pathways["sidecar"])
   pathways_trainer = cli_config.to_str_dict(pathways["trainer"])
+  pathways_rollout = cli_config.to_str_dict(pathways["rollout"])
   proxy_memory = cli_config.to_str_dict(pathways["proxy_memory"])
   rm_memory = cli_config.to_str_dict(pathways["rm_memory"])
   server_memory = cli_config.to_str_dict(pathways["server_memory"])
@@ -2327,6 +2333,9 @@ def render_bash_exports(hp: DistHyperParameters) -> str:
       "K8S_CPU_MEMORY_LIMIT": memory["orchestrator"]["limit"],
       "K8S_GCS_SCRATCH_LOCATION": pathways["gcs_scratch_location"],
       "K8S_ENABLE_PATHWAYS_PERSISTENCE": pathways_trainer["persistence"],
+      "K8S_ROLLOUT_ENABLE_PATHWAYS_PERSISTENCE": pathways_rollout[
+          "persistence"
+      ],
       "K8S_TUNIX_IMAGE": k8s["tunix_image"],
       "K8S_TPU_RESERVATION": k8s["tpu_reservation"],
       "K8S_PATHWAYS_SERVER_IMAGE": pathways["server_image"],
