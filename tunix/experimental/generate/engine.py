@@ -82,9 +82,7 @@ class _InFlightStep:
   """A model runner step currently executing on the device."""
 
   batch: ScheduledBatch
-  generated_tokens: jax.Array
-  logits: jax.Array | None
-  logprobs: jax.Array | None
+  output: model_runner_lib.ModelRunnerOutput
 
 
 class LLMEngine:
@@ -120,7 +118,9 @@ class LLMEngine:
     )
 
     self._model_runner_config = utils.to_model_runner_config(
-        rollout_config, mesh
+        rollout_config,
+        mesh,
+        transformer.num_embed,  # pyrefly: ignore[missing-attribute]
     )
     self._model_runner = model_runner_lib.ModelRunner(
         transformer, self._model_runner_config
@@ -287,7 +287,7 @@ class LLMEngine:
       in_flight = self._execute_batch(batch, tokens, target_idxs, metadata)
 
     # Schedule the next step, load its prefill token buffer onto the device,
-    # write its decode tokens from `in_flight.generated_tokens`, and launch it
+    # write its decode tokens from `in_flight.output`, and launch it
     # while the current forward pass runs on device.
     next_batch = self._schedule_step()
     if next_batch.requests:
@@ -299,7 +299,7 @@ class LLMEngine:
           next_tokens,
           target_idxs,
           next_metadata,
-          prev_generated_tokens=in_flight.generated_tokens,
+          prev_generated_tokens=in_flight.output.sampled_tokens,
       )
 
     return self._consume_in_flight_step(in_flight)
@@ -308,15 +308,8 @@ class LLMEngine:
       self, in_flight: _InFlightStep
   ) -> list[request_lib.EngineResponse]:
     """Blocks on `in_flight`, updates request states, and returns finished outputs."""
-    generated_tokens, logits, logprobs = jax.device_get(
-        (in_flight.generated_tokens, in_flight.logits, in_flight.logprobs)
-    )
-
     finished = self._update_from_output(
-        in_flight.batch,
-        generated_tokens,
-        logits,
-        logprobs,
+        in_flight.batch, jax.device_get(in_flight.output)
     )
     if self._in_flight_step is not None and all(
         req.is_done for req in self._in_flight_step.batch.requests
@@ -344,15 +337,11 @@ class LLMEngine:
         coordinator.get_physical_pages()
         for coordinator in self._dp_coordinators
     ]
-    generated_tokens, logits, logprobs, pages = (
-        self._model_runner.execute_step(
-            cache=utils.stitch_physical_pages(self.mesh, rank_pages),
-            tokens=tokens,
-            metadata=metadata,
-            sampling_params=tuple(
-                req.sampling_params for req in batch.requests
-            ),
-        )
+    output, pages = self._model_runner.execute_step(
+        cache=utils.stitch_physical_pages(self.mesh, rank_pages),
+        tokens=tokens,
+        metadata=metadata,
+        sampling_params=tuple(req.sampling_params for req in batch.requests),
     )
 
     # JAX functions cannot have side effects, so the model runner returns the
@@ -364,28 +353,31 @@ class LLMEngine:
     ):
       coordinator.update_device_pool(updated_rank_pages)
 
-    generated_tokens.copy_to_host_async()
-    if logits is not None:
-      logits.copy_to_host_async()
-    if logprobs is not None:
-      logprobs.copy_to_host_async()
+    for array in jax.tree.leaves(output):
+      array.copy_to_host_async()
 
-    return _InFlightStep(
-        batch=batch,
-        generated_tokens=generated_tokens,
-        logits=logits,
-        logprobs=logprobs,
-    )
+    return _InFlightStep(batch=batch, output=output)
 
   def _update_from_output(
       self,
       batch: ScheduledBatch,
-      generated_tokens: np.ndarray,
-      logits: np.ndarray | None = None,
-      logprobs: np.ndarray | None = None,
+      output: model_runner_lib.ModelRunnerOutput,
   ) -> list[request_lib.RequestState]:
-    """Updates request state across all DP ranks based on sampler output."""
+    """Updates request state across all DP ranks based on sampler output.
+
+    Args:
+      batch: The scheduled requests of every DP rank.
+      output: The step's output, already copied to the host.
+    """
     rows_per_rank = self._scheduler_config.max_num_seqs
+    sampled_tokens = np.asarray(output.sampled_tokens)
+    logits = None if output.logits is None else np.asarray(output.logits)
+    logprobs = None if output.logprobs is None else np.asarray(output.logprobs)
+    top_token_ids, top_logprobs = output.top_token_ids, output.top_logprobs
+    if top_token_ids is not None:
+      top_token_ids = np.asarray(top_token_ids)
+    if top_logprobs is not None:
+      top_logprobs = np.asarray(top_logprobs)
 
     completed_reqs: list[request_lib.RequestState] = []
     for r, (coordinator, (scheduled, distribution)) in enumerate(
@@ -395,9 +387,11 @@ class LLMEngine:
       finished = coordinator.update_from_output(
           scheduled,
           distribution,
-          generated_tokens[row_slice],
+          sampled_tokens[row_slice],
           None if logits is None else logits[row_slice],
           None if logprobs is None else logprobs[row_slice],
+          None if top_token_ids is None else top_token_ids[row_slice],
+          None if top_logprobs is None else top_logprobs[row_slice],
       )
       completed_reqs.extend(finished)
 

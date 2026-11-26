@@ -256,6 +256,16 @@ class Sampler(base_sampler.BaseSampler):
           )
         logprobs.append(output.logprobs)
 
+    top_token_ids: list[np.ndarray] | None = None
+    top_logprobs: list[np.ndarray] | None = None
+    if return_logprobs and outputs and outputs[0].top_token_ids is not None:
+      top_token_ids, top_logprobs = [], []
+      for output in outputs:
+        if output.top_token_ids is None or output.top_logprobs is None:
+          raise ValueError('Not all outputs have top logprobs.')
+        top_token_ids.append(output.top_token_ids)
+        top_logprobs.append(output.top_logprobs)
+
     if pad_output:
       target_len = (
           padded_prompt_len + max_generation_steps
@@ -291,6 +301,8 @@ class Sampler(base_sampler.BaseSampler):
             if logits is not None
             else None
         ),
+        topk_token_ids=top_token_ids,
+        topk_logprobs=top_logprobs,
     )
 
   def generate(

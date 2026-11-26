@@ -588,6 +588,49 @@ class StepTest(parameterized.TestCase):
         atol=1e-5,
     )
 
+  @parameterized.parameters(1, 2)
+  def test_returns_the_engine_top_logprobs(self, num_scheduler_steps):
+    engine = testing_utils.make_engine(
+        num_scheduler_steps=num_scheduler_steps,
+        return_logprobs=True,
+        max_logprobs=3,
+    )
+    for request_id, prompt in (('0', [1, 2, 3]), ('1', [4, 5])):
+      engine.add_request(
+          testing_utils.make_request(request_id, prompt, return_logprobs=True)
+      )
+
+    outputs = drive(engine)
+
+    one_hot_logprobs = jax.nn.log_softmax(
+        10.0 * jax.nn.one_hot(0, testing_utils.VOCAB_SIZE)
+    )
+    for output in outputs.values():
+      top_token_ids, top_logprobs = output.top_token_ids, output.top_logprobs
+      assert top_token_ids is not None and top_logprobs is not None
+      num_tokens = len(output.token_ids)
+      self.assertEqual(top_token_ids.shape, (num_tokens, 3))
+      self.assertEqual(top_logprobs.shape, (num_tokens, 3))
+      # The greedy sampled token is the most likely one.
+      for token_id, ids in zip(output.token_ids, top_token_ids):
+        self.assertIn(token_id, ids)
+      np.testing.assert_allclose(
+          np.sort(top_logprobs, axis=-1)[:, ::-1],
+          np.broadcast_to(one_hot_logprobs[:3], (num_tokens, 3)),
+          atol=1e-5,
+      )
+
+  def test_no_max_logprobs_returns_no_top_logprobs(self):
+    engine = testing_utils.make_engine(return_logprobs=True)
+    engine.add_request(
+        testing_utils.make_request('0', [1, 2, 3], return_logprobs=True)
+    )
+
+    output = drive(engine)['0']
+
+    self.assertIsNone(output.top_token_ids)
+    self.assertIsNone(output.top_logprobs)
+
   def test_aborted_request_stops_generating(self):
     engine = testing_utils.make_engine()
     engine.add_request(testing_utils.make_request('kept', [1, 2, 3]))

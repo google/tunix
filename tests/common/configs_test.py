@@ -204,6 +204,13 @@ class ConfigsTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, "num_logprobs must be >= 1"):
       configs.RolloutConfig(num_logprobs=0)
 
+  def test_rollout_config_vanilla_v2_max_logprobs_validation(self):
+    self.assertEqual(configs.RolloutConfig().rollout_vanilla_v2_max_logprobs, 0)
+    with self.assertRaisesRegex(
+        ValueError, "rollout_vanilla_v2_max_logprobs must be >= -1"
+    ):
+      configs.RolloutConfig(rollout_vanilla_v2_max_logprobs=-2)
+
   def test_rl_profile_config_defaults_and_validation(self):
     cfg = configs.RLProfileConfig()
     self.assertEqual(cfg.start_invocation, 2)

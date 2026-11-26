@@ -299,6 +299,34 @@ class StepTest(absltest.TestCase):
     self.assertLen(req.logits, 1)
     self.assertEqual(req.logprobs, [np.float32(-0.5)])
 
+  def test_records_the_top_logprobs_of_kept_tokens(self):
+    coordinator = make_coordinator(num_scheduler_steps=2)
+    coordinator.add_request(
+        testing_utils.make_request(
+            '0', [1, 2, 3], max_tokens=1, return_logprobs=True
+        )
+    )
+    scheduled, distribution = coordinator.schedule_step()
+    coordinator.prepare_batch(scheduled)
+    top_token_ids = np.zeros((4, 2, 2), dtype=np.int32)
+    top_token_ids[0] = [[4, 7], [5, 6]]
+    top_logprobs = np.zeros((4, 2, 2), dtype=np.float32)
+    top_logprobs[0] = [[-0.5, -1.5], [-0.25, -2.0]]
+
+    (req,) = coordinator.update_from_output(
+        scheduled,
+        distribution,
+        np.array([[4, 5], [0, 0], [0, 0], [0, 0]], dtype=np.int32),
+        logprobs=np.zeros((4, 2), dtype=np.float32),
+        top_token_ids=top_token_ids,
+        top_logprobs=top_logprobs,
+    )
+
+    # Only the first step's token fits in `max_tokens`.
+    self.assertEqual(req.token_ids, [1, 2, 3, 4])
+    np.testing.assert_array_equal(req.top_token_ids, [[4, 7]])
+    np.testing.assert_array_equal(req.top_logprobs, [[-0.5, -1.5]])
+
   def test_aborted_request_is_not_unfinished(self):
     coordinator = make_coordinator()
     coordinator.add_request(testing_utils.make_request('0', [1, 2, 3]))

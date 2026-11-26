@@ -315,12 +315,18 @@ class EngineDPTest(parameterized.TestCase):
 
     expected = _outputs(
         testing_utils.make_engine(
-            return_logprobs=True, return_logits=True, max_num_seqs=8
+            return_logprobs=True,
+            return_logits=True,
+            max_logprobs=3,
+            max_num_seqs=8,
         )
     )
     outputs = _outputs(
         testing_utils.make_engine(
-            dp_mesh=_dp_mesh(), return_logprobs=True, return_logits=True
+            dp_mesh=_dp_mesh(),
+            return_logprobs=True,
+            return_logits=True,
+            max_logprobs=3,
         )
     )
 
@@ -333,6 +339,22 @@ class EngineDPTest(parameterized.TestCase):
           output.logprobs, expected[request_id].logprobs
       )
       np.testing.assert_allclose(output.logits, expected[request_id].logits)
+      top_token_ids = output.top_token_ids
+      expected_top_token_ids = expected[request_id].top_token_ids
+      assert top_token_ids is not None and expected_top_token_ids is not None
+      np.testing.assert_array_equal(
+          np.sort(top_token_ids, axis=-1),
+          np.sort(expected_top_token_ids, axis=-1),
+      )
+      top_logprobs = output.top_logprobs
+      expected_top_logprobs = expected[request_id].top_logprobs
+      assert top_logprobs is not None and expected_top_logprobs is not None
+      np.testing.assert_allclose(
+          np.sort(top_logprobs, axis=-1),
+          np.sort(expected_top_logprobs, axis=-1),
+          rtol=1e-6,
+          atol=1e-6,
+      )
 
 
 if __name__ == "__main__":

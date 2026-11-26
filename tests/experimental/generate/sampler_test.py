@@ -205,6 +205,39 @@ class _SamplerTests(absltest.TestCase):
     )
     self.assertEqual(responses[0].logprobs.shape, (1,))
 
+  def test_returns_the_engine_top_logprobs(self):
+    engine = testing_utils.make_engine(
+        eos_token_ids=frozenset({6}), return_logprobs=True, max_logprobs=2
+    )
+    sampler = self.make_sampler(engine)
+
+    output = sampler(
+        ['1 5', '1 2'],
+        max_generation_steps=4,
+        pad_output=True,
+        return_logprobs=True,
+    )
+
+    assert output.topk_token_ids is not None
+    assert output.topk_logprobs is not None
+    self.assertEqual(
+        [ids.shape for ids in output.topk_token_ids], [(1, 2), (2, 2)]
+    )
+    self.assertEqual(
+        [logps.shape for logps in output.topk_logprobs], [(1, 2), (2, 2)]
+    )
+    for tokens, ids in zip(output.tokens, output.topk_token_ids):
+      for token_id, row in zip(tokens, ids):
+        self.assertIn(token_id, row)
+
+  def test_no_max_logprobs_returns_no_top_logprobs(self):
+    sampler = self.make_sampler(testing_utils.make_engine(return_logprobs=True))
+
+    output = sampler('1 2', max_generation_steps=2, return_logprobs=True)
+
+    self.assertIsNone(output.topk_token_ids)
+    self.assertIsNone(output.topk_logprobs)
+
   def test_concurrent_calls_all_resolve(self):
     sampler = self.make_sampler()
     prompts = [f'{i + 1} {i + 2}' for i in range(4)]
