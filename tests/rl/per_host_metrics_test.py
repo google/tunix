@@ -922,9 +922,15 @@ def _reference(results, mode: str) -> dict[str, list[float]]:
     rewards = np.concatenate([e["rewards"] for e in per_process])
     lengths = np.concatenate([e["lengths"] for e in per_process])
     valid = lengths > _LONG
+    # The reward manager's `rewards/*` summarize the per-trajectory totals
+    # (one reward fn here, all finite) over the step: NaN-aware sum, mean, std,
+    # min and max, plus the fraction of non-finite totals. Each step makes one
+    # rollout call, so a call's union is the step's.
     values = {
-        "rewards/sum": rewards.mean(),
+        "rewards/sum": rewards.sum(),
         "rewards/mean": rewards.mean(),
+        "rewards/std": rewards.std(),
+        "rewards/nonfinite_frac": 0.0,
         "rewards/shard_reward": rewards.mean(),
         "rewards/min": rewards.min(),
         "rewards/max": rewards.max(),
