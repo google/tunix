@@ -32,6 +32,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import traceback
 import types
 
@@ -502,6 +503,7 @@ class PackedLossEquivalenceTest(parameterized.TestCase):
 _CHILD_ENV = "TUNIX_PER_HOST_PACKING_TEST_CHILD"
 _NUM_PROCESSES = 2
 _TRAIN_STEPS = 2
+_JOB_TIMEOUT_S = 900
 _PROMPTS = ["hello world", "My name", "input string", "hello there"]
 _BASE_LENGTH = {"hello world": 1, "My name": 6, "input string": 3, "hello there": 8}
 
@@ -671,27 +673,51 @@ def _run_job(out_dir: str, budget: int, max_rows_per_shard: int = 0):
           [os.path.abspath(repo_root), env.get("PYTHONPATH", "")]
       ),
   )
-  procs = []
-  for process_id in range(_NUM_PROCESSES):
-    env[_CHILD_ENV] = json.dumps({
-        "process_id": process_id,
-        "port": port,
-        "out_dir": out_dir,
-        "budget": budget,
-    })
-    procs.append(
-        subprocess.Popen(
-            [sys.executable, os.path.abspath(__file__)],
-            env=dict(env),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
+  procs, log_paths = [], []
+  timed_out = False
+  try:
+    for process_id in range(_NUM_PROCESSES):
+      env[_CHILD_ENV] = json.dumps({
+          "process_id": process_id,
+          "port": port,
+          "out_dir": out_dir,
+          "budget": budget,
+      })
+      # A file, not a pipe: nothing reads a pipe while the processes run.
+      log_paths.append(os.path.join(out_dir, f"process{process_id}.log"))
+      with open(log_paths[-1], "w", encoding="utf-8") as log:
+        procs.append(
+            subprocess.Popen(
+                [sys.executable, os.path.abspath(__file__)],
+                env=dict(env),
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
         )
-    )
-  logs = [p.communicate(timeout=900)[0] for p in procs]
-  if any(p.returncode for p in procs):
+    # One deadline for the whole job. A failed process ends the job too: its
+    # peer may wait in a collective forever. Whatever still runs is killed.
+    deadline = time.monotonic() + _JOB_TIMEOUT_S
+    while any(p.poll() is None for p in procs):
+      if any(p.returncode for p in procs):
+        break
+      if time.monotonic() > deadline:
+        timed_out = True
+        break
+      time.sleep(1)
+  finally:
+    for p in procs:
+      if p.poll() is None:
+        p.kill()
+    for p in procs:
+      p.wait()
+  logs = []
+  for path in log_paths:
+    with open(path, encoding="utf-8", errors="replace") as f:
+      logs.append(f.read())
+  if timed_out or any(p.returncode for p in procs):
     raise AssertionError(
-        "per-host job failed:\n" + "\n".join(log[-4000:] for log in logs)
+        f"per-host job {'timed out' if timed_out else 'failed'}:\n"
+        + "\n".join(log[-4000:] for log in logs)
     )
   results = []
   for process_id in range(_NUM_PROCESSES):
