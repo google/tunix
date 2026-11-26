@@ -825,9 +825,12 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     # right after the next decode window is dispatched instead of at the
     # chunk boundary, where the pool's pure-Python decode would compete for
     # the GIL with the engine's schedule/prepare/dispatch work. Same function
-    # on the same outputs in the same order; only the submit time moves.
+    # on the same outputs in the same order; only the submit time moves. A
+    # step that does not reach the hook submits the queue when it returns, as
+    # with the deferral off.
     deferred: List[RequestOutput] = []
     deferred_lock = threading.Lock()
+    hook_ran = threading.Event()
 
     def submit_deferred() -> None:
       with deferred_lock:
@@ -838,6 +841,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
               self._postprocess_request_output, done
           )
 
+    def flush_from_hook() -> None:
+      hook_ran.set()
+      submit_deferred()
+
     progress = tqdm.tqdm(
         total=len(prompts), desc="Processed prompts", dynamic_ncols=True
     )
@@ -845,10 +852,11 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     if _DEFER.hooked and _env_flag("TUNIX_DEFER_POSTPROCESS_SUBMIT"):
       with _DEFER.lock:
         if _DEFER.flush is None:  # Nested or concurrent calls submit now.
-          _DEFER.flush = submit_deferred
+          _DEFER.flush = flush_from_hook
           defer = True
     try:
       while engine.has_unfinished_requests():
+        hook_ran.clear()
         for output in engine.step():
           if output.finished:
             outputs.append(output)
@@ -860,6 +868,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
                   self._postprocess_request_output, output
               )
             progress.update(1)
+        if defer and not hook_ran.is_set():
+          # The hook did not run in this step; submit now, as with defer off.
+          submit_deferred()
     finally:
       if defer:
         with _DEFER.lock:
