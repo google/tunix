@@ -121,8 +121,9 @@ def shard_batch_by_process(
   prompt stays on one process and GRPO's within-group advantage is unchanged.
 
   Args:
-    batch: A global batch; batch-aligned columns have `len(batch["prompts"])`
-      rows, other entries are passed through.
+    batch: A global batch; batch-aligned columns (lists, tuples and
+      `datatypes.TensorLike` tensors such as NumPy, JAX or torch arrays) have
+      `len(batch["prompts"])` rows, other entries are passed through.
     process_index: This process's index.
     process_count: The number of processes.
     indices: Rows of this process; defaults to the stride
@@ -146,14 +147,18 @@ def shard_batch_by_process(
     rows = np.asarray(indices, dtype=np.int64)
   out = {}
   for key, value in batch.items():
-    if isinstance(value, (np.ndarray, jax.Array)):
-      aligned = value.ndim > 0 and value.shape[0] == num_rows
+    if isinstance(value, datatypes.TensorLike):
+      aligned = len(value.shape) > 0 and value.shape[0] == num_rows
     else:
       aligned = isinstance(value, (list, tuple)) and len(value) == num_rows
     if not aligned:
       out[key] = value
     elif isinstance(value, (np.ndarray, jax.Array)):
       out[key] = value[rows]
+    elif isinstance(value, datatypes.TensorLike):
+      # Other tensors (e.g. torch): a host copy, as the micro-batch iterator
+      # (`_create_micro_batch_iterator`) makes of them.
+      out[key] = np.asarray(value)[rows]
     else:
       value = list(value)
       out[key] = (
