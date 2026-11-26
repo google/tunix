@@ -112,7 +112,7 @@ class _GcFreeze:
     )
 
   def _on_gc(self, phase: str, info: Dict[str, Any]) -> None:
-    if phase == "stop" and info.get("generation") == 2:
+    if phase == "stop" and info["generation"] == 2:
       self._full_collections += 1
 
   def step_end(self) -> None:
