@@ -336,7 +336,6 @@ class DistributedRLEngine(AbstractRLEngine):
       role: datatypes.Role = datatypes.Role.ACTOR,
       accumulate_gradients: bool = False,
       apply_optimizer: bool = True,
-      skip_jit: bool = False,
   ) -> Any:
     """Executes atomic gradient accumulation / update on TrainerWorker."""
     worker = self._trainer_workers[role]
@@ -345,7 +344,6 @@ class DistributedRLEngine(AbstractRLEngine):
         batch=payload,
         accumulate_gradients=accumulate_gradients,
         apply_optimizer=apply_optimizer,
-        skip_jit=skip_jit,
     )
 
   async def sync_weights(self, role: datatypes.Role = datatypes.Role.ACTOR) -> int:

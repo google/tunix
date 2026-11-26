@@ -21,6 +21,7 @@ import os
 import tempfile
 import threading
 import time
+import types
 from unittest import mock
 from absl.testing import absltest
 from flax import nnx
@@ -49,7 +50,7 @@ class VllmSamplerTest(absltest.TestCase):
   @classmethod
   def setUpClass(cls) -> None:
     super().setUpClass()
-    cls.repo_id = "meta-llama/Llama-3.2-1B-Instruct"
+    cls.repo_id = "unsloth/Llama-3.2-1B-Instruct"
     temp_dir = tempfile.gettempdir()
     cls.model_path = os.path.join(temp_dir, "models", cls.repo_id)
 
@@ -114,6 +115,7 @@ class VllmSamplerTest(absltest.TestCase):
   @functools.lru_cache(maxsize=1)
   def load_llama3_model(cls, model_version: str, enable_lora: bool = False):
     model_config = {
+        "unsloth/Llama-3.2-1B-Instruct": llama_lib.ModelConfig.llama3p2_1b,
         "meta-llama/Llama-3.2-1B-Instruct": llama_lib.ModelConfig.llama3p2_1b,
         "meta-llama/Llama-3.1-8B-Instruct": llama_lib.ModelConfig.llama3p1_8b,
     }
@@ -556,6 +558,13 @@ class VllmSamplerTest(absltest.TestCase):
 class VllmSamplerConfigTest(absltest.TestCase):
   """Unit tests for VllmSampler config plumbing (no hardware required)."""
 
+  def setUp(self):
+    super().setUp()
+    # `VllmSampler` sets process-wide variables (`TPU_BACKEND_TYPE`, and
+    # `NEW_MODEL_DESIGN` with data parallelism); restore the environment after
+    # each test, so they don't reach the engines of later tests in the process.
+    self.enter_context(mock.patch.dict(os.environ))
+
   def _make_mock_mesh(self, total_devices):
     mesh = mock.MagicMock()
     mesh.shape = {"axis": total_devices}
@@ -671,7 +680,11 @@ class VllmSamplerConfigTest(absltest.TestCase):
     sampler.llm.generate.assert_not_called()
     self.assertEqual(engine.add_request.call_count, 2)
     self.assertEqual([o.request_id for o in outputs], ["0", "1"])
-    texts, logprobs, tokens, _ = sampler.detokenize(["a", "b"], outputs)
+    texts, logprobs, tokens, _, topk_ids, topk_logps = sampler.detokenize(
+        ["a", "b"], outputs
+    )
+    self.assertIsNone(topk_ids)
+    self.assertIsNone(topk_logps)
     self.assertEqual(texts, [["t01", "t12"]])
     self.assertEqual(logprobs, [[[], []]])
     self.assertEqual([t.tolist() for t in tokens[0]], [[0, 1], [1, 2]])
@@ -716,7 +729,7 @@ class VllmSamplerConfigTest(absltest.TestCase):
     output.request_id = "7"
     output.outputs = [sample]
 
-    texts, logprobs, tokens, _ = sampler.detokenize(["a"], [output])
+    texts, logprobs, tokens, _, _, _ = sampler.detokenize(["a"], [output])
 
     self.assertEqual(texts, [["text"]])
     self.assertEqual(logprobs, [[[]]])
@@ -754,7 +767,7 @@ class VllmSamplerConfigTest(absltest.TestCase):
     )
 
     self.assertEqual([o.request_id for o in outputs], ["0", "1"])
-    texts, logprobs, _, _ = sampler.detokenize(["a", "b"], outputs)
+    texts, logprobs, _, _, _, _ = sampler.detokenize(["a", "b"], outputs)
     self.assertEqual(texts, [["t01", "t12"]])
     self.assertEqual(logprobs, [[[], []]])
     self.assertEqual(sampler.tokenizer.decode.call_count, 2)
@@ -877,6 +890,20 @@ class VllmSamplerConfigTest(absltest.TestCase):
     self.assertEqual(sharding["sharding_strategy"]["expert_parallelism"], 4)
     self.assertNotIn("device_indexes", sharding["sharding_strategy"])
 
+  def test_language_model_only_defaults_true_and_allows_override(self):
+    default_sampler = self._make_sampler(
+        vllm_sampler.VllmConfig(init_with_random_weights=False)
+    )
+    self.assertTrue(default_sampler.args["language_model_only"])
+
+    override_sampler = self._make_sampler(
+        vllm_sampler.VllmConfig(
+            init_with_random_weights=False,
+            engine_kwargs={"language_model_only": False},
+        )
+    )
+    self.assertFalse(override_sampler.args["language_model_only"])
+
   def test_fast_logprobs_check_counter_is_locked(self):
     for checks in (1, 3):
       with self.subTest(checks=checks), mock.patch.dict(
@@ -980,6 +1007,7 @@ class VllmSamplerTokenInputTest(absltest.TestCase):
         eos_tokens=None,
         sampling_kwargs={},
         overlap_postprocessing=False,  # upstream 323946941 added this field
+        num_logprobs=1,
     )
     obj._driver = None
     obj._request_counter = itertools.count()
@@ -1018,6 +1046,174 @@ class VllmSamplerTokenInputTest(absltest.TestCase):
         out.padded_prompt_tokens, [[0, 0, 0, 0, 3], [0, 0, 4, 0, 5]]
     )
     np.testing.assert_array_equal(out.logprobs, [[-0.25, -0.75]] * 2)
+
+  def test_num_logprobs_returns_topk_per_prompt(self):
+    for bad in (0, -1, False, True):
+      with self.assertRaisesRegex(ValueError, "num_logprobs must be >= 1"):
+        vllm_sampler.VllmConfig(num_logprobs=bad)
+    obj = self._sampler()
+    cfg = vllm_sampler.VllmConfig(return_logprobs=True, num_logprobs=4)
+    self.assertEqual(obj._vllm_config(cfg)["max_logprobs"], 4)
+    obj.config.num_logprobs = 2
+    out = obj(None, 4, prompt_token_ids=[[1, 2], [3, 4]])
+    params = obj.llm.generate.call_args.kwargs["sampling_params"]
+    self.assertEqual(params.logprobs, 2)
+    self.assertLen(out.topk_token_ids, 2)
+    for ids, logps in zip(out.topk_token_ids, out.topk_logprobs):
+      # The fake engine returns one candidate per position; the rest is
+      # padding.
+      np.testing.assert_array_equal(ids, [[7, 0], [0, 0]])
+      np.testing.assert_array_equal(
+          logps, [[-0.25, -np.inf], [-0.75, -np.inf]]
+      )
+
+    # return_logprobs=False still returns top-k when num_logprobs > 1, while
+    # per-call num_logprobs=1 skips top-k (e.g. eval rollouts).
+    obj.config.return_logprobs = False
+    out_no_sampled = obj(None, 4, prompt_token_ids=[[1, 2]])
+    self.assertIsNone(out_no_sampled.logprobs)
+    self.assertLen(out_no_sampled.topk_token_ids, 1)
+    np.testing.assert_array_equal(
+        out_no_sampled.topk_token_ids[0], [[7, 0], [0, 0]]
+    )
+
+    out_eval = obj(
+        None,
+        4,
+        prompt_token_ids=[[1, 2]],
+        return_logprobs=False,
+        num_logprobs=1,
+    )
+    eval_params = obj.llm.generate.call_args.kwargs["sampling_params"]
+    self.assertEqual(eval_params.logprobs, 0)
+    self.assertIsNone(out_eval.logprobs)
+    self.assertIsNone(out_eval.topk_token_ids)
+    self.assertIsNone(out_eval.topk_logprobs)
+
+  def test_num_logprobs_missing_subset_and_concurrent_overrides(self):
+    obj = self._sampler()
+    cfg_topk_only = vllm_sampler.VllmConfig(
+        return_logprobs=False, num_logprobs=4
+    )
+    self.assertEqual(obj._vllm_config(cfg_topk_only)["max_logprobs"], 4)
+
+    obj.config.return_logprobs = False
+    obj.config.num_logprobs = 1
+
+    # Empty completion alongside non-empty completion keeps top-k aligned, and
+    # return_logprobs=False skips sampled-token lookup into top-k dicts.
+    empty_res = self._result("0", [1, 2])
+    empty_res.outputs[0].token_ids = []
+    empty_res.outputs[0].logprobs = None
+    unmatched_sampled = self._result("1", [3, 4])
+    unmatched_sampled.outputs[0].token_ids = [99, 0]
+    obj.llm.generate = mock.Mock(return_value=[empty_res, unmatched_sampled])
+    out = obj(None, 4, prompt_token_ids=[[1, 2], [3, 4]], num_logprobs=2)
+    self.assertIsNone(out.logprobs)
+    self.assertLen(out.topk_token_ids, 2)
+    self.assertEqual(out.topk_token_ids[0].shape, (0, 2))
+    self.assertEqual(out.topk_token_ids[1].shape, (2, 2))
+
+    # Direct detokenize() without overrides uses config defaults.
+    _, _, _, _, topk_ids, _ = obj.detokenize([""], [self._result("2", [1, 2])])
+    self.assertIsNone(topk_ids)
+
+    # Partial batch missing logprobs on non-empty completion must raise.
+    missing_res = self._result("1", [3, 4])
+    missing_res.outputs[0].logprobs = None
+    obj.llm.generate = mock.Mock(
+        return_value=[self._result("0", [1, 2]), missing_res]
+    )
+    with self.assertRaisesRegex(
+        ValueError, "Top-k logprobs are not returned from the vLLM"
+    ):
+      obj(None, 4, prompt_token_ids=[[1, 2], [3, 4]], num_logprobs=2)
+
+    # Concurrent server_mode + overlap_postprocessing calls with per-call
+    # (return_logprobs, num_logprobs) overrides must not race with each other.
+    srv = self._sampler()
+    srv.config.return_logprobs = True
+    srv.config.num_logprobs = 128
+    srv.config.overlap_postprocessing = True
+    srv.config.postprocessing_threads = 2
+    srv.args["max_logprobs"] = 128
+    srv._postprocess_pool = None
+    srv._postprocess_pool_lock = threading.Lock()
+    entered = threading.Barrier(3)
+    deferred = {}
+    deferred_lock = threading.Lock()
+
+    def submit_requests(requests):
+      req = requests[0]
+      rid = req["request_id"]
+      prompt = tuple(req["prompt"]["prompt_token_ids"])
+      fut = concurrent.futures.Future()
+      if prompt == (1, 2):
+        res = self._result(rid, prompt)
+        res.outputs[0].logprobs = None
+        fut.set_result(res)
+      else:
+        with deferred_lock:
+          deferred[prompt] = (rid, fut)
+      entered.wait(timeout=5.0)
+      return [fut]
+
+    srv._driver = types.SimpleNamespace(
+        llm_engine=types.SimpleNamespace(
+            model_config=types.SimpleNamespace(
+                get_diff_sampling_param=lambda: {}
+            )
+        ),
+        submit_requests=submit_requests,
+        shutdown=mock.Mock(),
+    )
+
+    def run_fast_eval():
+      try:
+        return srv(
+            None,
+            4,
+            prompt_token_ids=[[1, 2]],
+            return_logprobs=False,
+            num_logprobs=1,
+        )
+      finally:
+        with deferred_lock:
+          rid_eval, fut_eval = deferred[(3, 4)]
+          rid_topk, fut_topk = deferred[(5, 6)]
+        res_eval = self._result(rid_eval, [3, 4])
+        res_eval.outputs[0].logprobs = None
+        fut_eval.set_result(res_eval)
+        fut_topk.set_result(self._result(rid_topk, [5, 6]))
+
+    try:
+      with concurrent.futures.ThreadPoolExecutor(max_workers=3) as callers:
+        f1 = callers.submit(run_fast_eval)
+        f2 = callers.submit(
+            srv,
+            None,
+            4,
+            prompt_token_ids=[[3, 4]],
+            return_logprobs=False,
+            num_logprobs=1,
+        )
+        f3 = callers.submit(
+            srv,
+            None,
+            4,
+            prompt_token_ids=[[5, 6]],
+            return_logprobs=False,
+            num_logprobs=2,
+        )
+        out1, out2, out3 = f1.result(), f2.result(), f3.result()
+      self.assertIsNone(out1.logprobs)
+      self.assertIsNone(out1.topk_token_ids)
+      self.assertIsNone(out2.logprobs)
+      self.assertIsNone(out2.topk_token_ids)
+      self.assertIsNone(out3.logprobs)
+      self.assertEqual(out3.topk_token_ids[0].shape, (2, 2))
+    finally:
+      srv.stop()
 
   def test_invalid_token_inputs_fail_before_submission(self):
     for kwargs in (
@@ -1149,6 +1345,173 @@ class VllmSamplerTokenInputTest(absltest.TestCase):
 
     obj.resume()
     obj._driver.resume.assert_called_once()
+
+  def test_release_for_training_and_idempotent_delete_cache(self):
+    obj = self._sampler()
+    obj.config.free_kv_cache_during_weight_sync = True
+    obj.config.delete_dst_buffers = True
+    obj.config.partial_rollout = False
+    obj.config.reshard_chunk_size = None
+    obj.config.mapping_config = types.SimpleNamespace(preprocess_src_state=None)
+    obj.to_hf_key_mappings = {"w": ("w", None)}
+    obj.to_hf_transpose_keys = None
+    obj.to_hf_hook_fns = None
+    obj.llm.reset_prefix_cache = mock.Mock()
+    obj.llm.collective_rpc = mock.Mock()
+
+    dst_arr = jax.numpy.ones((2, 2), dtype=jax.numpy.float32)
+    runner = types.SimpleNamespace(
+        state=nnx.State({"w": nnx.Param(dst_arr)}),
+        state_leaves=(dst_arr,),
+        model_config=types.SimpleNamespace(
+            get_total_num_kv_heads=lambda: 1,
+            get_head_size=lambda: 2,
+        ),
+    )
+    obj.llm.llm_engine = types.SimpleNamespace(
+        model_executor=types.SimpleNamespace(
+            driver_worker=types.SimpleNamespace(model_runner=runner)
+        )
+    )
+
+    obj.release_for_training(free_weights=True)
+    self.assertTrue(obj._kv_cache_deleted)
+    self.assertEqual(obj.llm.reset_prefix_cache.call_count, 1)
+    obj.llm.collective_rpc.assert_called_once_with("delete_kv_cache")
+    self.assertTrue(dst_arr.is_deleted())
+    self.assertEqual(obj._model_runner.state_leaves, ())
+
+    # Second delete_cache call is a no-op while _kv_cache_deleted is True.
+    obj.delete_cache()
+    self.assertEqual(obj.llm.collective_rpc.call_count, 1)
+
+    # Restore reallocates KV cache and resets _kv_cache_deleted.
+    new_arr = jax.numpy.ones((2, 2), dtype=jax.numpy.float32) * 2.0
+    obj._model_runner.state = nnx.State({"w": nnx.Param(new_arr)})
+    obj.restore_after_training()
+    self.assertFalse(obj._kv_cache_deleted)
+    obj.llm.collective_rpc.assert_called_with("reinitialize_kv_cache")
+    self.assertEqual(obj._model_runner.state_leaves, (new_arr,))
+
+  def test_flat_dict_runner_state_preserved_on_update_and_refresh(self):
+    obj = self._sampler()
+    obj.to_hf_key_mappings = {"src.w": ("dst.w", None)}
+    obj.to_hf_hook_fns = {}
+    obj.to_hf_transpose_keys = {}
+    obj.config.free_kv_cache_during_weight_sync = False
+    obj.config.partial_rollout = False
+    obj.config.delete_dst_buffers = True
+    obj.config.reshard_chunk_size = None
+    old_dst_w = jax.device_put(np.zeros((2, 2), dtype=np.float32))
+    untouched_cache = jax.device_put(np.ones((3,), dtype=np.float32))
+    non_jax_meta = np.array([1, 2], dtype=np.int32)
+    runner_state = {
+        "dst.w": old_dst_w,
+        "untouched.cache": untouched_cache,
+        "non_jax.meta": non_jax_meta,
+    }
+    runner = types.SimpleNamespace(
+        state=runner_state,
+        state_leaves=runner_state,
+        model=types.SimpleNamespace(),
+        model_config=types.SimpleNamespace(
+            get_total_num_kv_heads=lambda: 1,
+            get_head_size=lambda: 2,
+        ),
+    )
+    obj.llm = types.SimpleNamespace(
+        llm_engine=types.SimpleNamespace(
+            model_executor=types.SimpleNamespace(
+                driver_worker=types.SimpleNamespace(model_runner=runner)
+            )
+        )
+    )
+
+    obj.release_for_training(free_weights=True)
+    self.assertTrue(old_dst_w.is_deleted())
+    self.assertFalse(untouched_cache.is_deleted())
+    self.assertEqual(runner.state_leaves, ())
+
+    obj._update_params_jax(
+        {"src.w": jax.device_put(np.full((2, 2), 5.0, dtype=np.float32))}
+    )
+    obj.restore_after_training()
+
+    self.assertFalse(untouched_cache.is_deleted())
+    self.assertFalse(runner.state["dst.w"].is_deleted())
+    self.assertIsInstance(runner.state_leaves, dict)
+    self.assertIs(runner.state_leaves, runner.state)
+    self.assertIs(runner.state["untouched.cache"], untouched_cache)
+    self.assertIs(runner.state["non_jax.meta"], non_jax_meta)
+    np.testing.assert_allclose(runner.state["dst.w"], 5.0)
+    np.testing.assert_allclose(runner.state["untouched.cache"], 1.0)
+
+  def test_refresh_state_leaves_delegates_to_runner_when_present(self):
+    obj = self._sampler()
+    runner = types.SimpleNamespace(
+        state={"dst.w": jax.numpy.zeros((2, 2), dtype=jax.numpy.float32)},
+        refresh_state_leaves=mock.Mock(),
+    )
+    obj.llm = types.SimpleNamespace(
+        llm_engine=types.SimpleNamespace(
+            model_executor=types.SimpleNamespace(
+                driver_worker=types.SimpleNamespace(model_runner=runner)
+            )
+        )
+    )
+
+    obj.refresh_state_leaves()
+
+    runner.refresh_state_leaves.assert_called_once_with()
+
+  def test_routed_experts_shape_llm_and_driver_paths(self):
+    obj = self._sampler()
+    # return_routed_experts=False -> None.
+    self.assertIsNone(obj.routed_experts_shape())
+
+    obj.config.return_routed_experts = True
+    obj.llm = None
+    obj._driver = None
+    self.assertIsNone(obj.routed_experts_shape())
+
+    # llm.llm_engine path + non-positive top_k -> None.
+    obj.llm = types.SimpleNamespace(
+        llm_engine=types.SimpleNamespace(
+            vllm_config=types.SimpleNamespace(
+                model_config=types.SimpleNamespace(
+                    get_total_num_hidden_layers=lambda: 32,
+                    get_num_experts_per_tok=lambda: 0,
+                )
+            )
+        )
+    )
+    self.assertIsNone(obj.routed_experts_shape())
+
+    obj.llm = types.SimpleNamespace(
+        llm_engine=types.SimpleNamespace(
+            vllm_config=types.SimpleNamespace(
+                model_config=types.SimpleNamespace(
+                    get_total_num_hidden_layers=lambda: 61,
+                    get_num_experts_per_tok=lambda: 8,
+                )
+            )
+        )
+    )
+    self.assertEqual(obj.routed_experts_shape(), (61, 8))
+
+    # _driver.llm_engine path when llm is None (server_mode=True).
+    obj.llm = None
+    obj._driver = types.SimpleNamespace(
+        llm_engine=types.SimpleNamespace(
+            vllm_config=types.SimpleNamespace(
+                model_config=types.SimpleNamespace(
+                    get_total_num_hidden_layers=lambda: 40,
+                    get_num_experts_per_tok=lambda: 6,
+                )
+            )
+        )
+    )
+    self.assertEqual(obj.routed_experts_shape(), (40, 6))
 
 
 if __name__ == "__main__":

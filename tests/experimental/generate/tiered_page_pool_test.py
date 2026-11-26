@@ -692,6 +692,25 @@ class TieredPagePoolManagerTest(parameterized.TestCase):
     with self.assertRaisesRegex(ValueError, r"Cannot free duplicate pages\."):
       manager.free([pids[0], pids[0]])
 
+  def test_delete_and_reallocate_device_pool(self):
+    config = self.get_config("no device sharding", has_subshape=True)
+    manager = config.create_manager()
+
+    pids = manager.allocate_device_pages(2)
+    manager.free(pids)
+    for arr in manager.physical_device_pages.values():
+      self.assertFalse(arr.is_deleted())
+
+    manager.delete_device_pool()
+    for arr in manager.physical_device_pages.values():
+      self.assertTrue(arr.is_deleted())
+
+    manager.reallocate_device_pool()
+    for arr in manager.physical_device_pages.values():
+      self.assertFalse(arr.is_deleted())
+      self.assertEqual(arr.shape, config._page_shape(config.num_device_pages))
+      self.assertEqual(arr.dtype, config.dtype)
+
 
 if __name__ == "__main__":
   absltest.main()

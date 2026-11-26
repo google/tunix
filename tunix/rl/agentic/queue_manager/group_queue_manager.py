@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import collections
 from collections.abc import Hashable
+import time
 from typing import Callable, Deque, Dict, Generic, List, Optional, Tuple, TypeVar, Union
 
 _T = TypeVar("_T")
@@ -51,6 +52,7 @@ class GroupQueueManager(Generic[_T]):
       group_fn: Optional[GroupFn[_T]] = None,
       filter_fn: Optional[FilterFn[_T]] = None,
       on_group_filtered: Optional[Callable[[List[_T]], None]] = None,
+      clock: Callable[[], float] = time.monotonic,
   ):
     """Initializes GroupQueueManager.
 
@@ -64,6 +66,7 @@ class GroupQueueManager(Generic[_T]):
       on_group_filtered: Optional callback invoked with the filtered-out items
         whenever a completed candidate group is completely rejected by
         `filter_fn` (i.e., produces an empty `valid_group`).
+      clock: Monotonic clock used to stamp when each group became ready.
     """
     if group_fn is None:
       if num_generations is None:
@@ -93,9 +96,10 @@ class GroupQueueManager(Generic[_T]):
     self.group_fn = group_fn
     self.filter_fn = filter_fn
     self.on_group_filtered = on_group_filtered
+    self._clock = clock
 
     self._buckets: Dict[Hashable, List[_T]] = collections.defaultdict(list)
-    self._ready_groups: Deque[List[_T]] = collections.deque()
+    self._ready_groups: Deque[Tuple[float, List[_T]]] = collections.deque()
     self._filtered_groups: Deque[List[_T]] = collections.deque()
     self._clearing = False
     self._closed = False
@@ -197,7 +201,7 @@ class GroupQueueManager(Generic[_T]):
       self._filtered_groups.append(filtered_out)
 
     if valid_group:
-      self._ready_groups.append(valid_group)
+      self._ready_groups.append((self._clock(), valid_group))
       self._have_ready.set()
 
   async def close(self):
@@ -206,19 +210,28 @@ class GroupQueueManager(Generic[_T]):
       self._closed = True
       self._have_ready.set()
 
-  async def _get_one_ready_group(self) -> List[_T]:
+  async def get_timed_group(self) -> Optional[Tuple[List[_T], float]]:
+    """Retrieves `(group, ready_time_s)` for the next ready group, or `None` at EOF/clear."""
     while True:
       if self._exc:
         raise self._exc
       if self._clearing:
-        return []
+        return None
       async with self._lock:
         if self._ready_groups:
-          return self._ready_groups.popleft()
+          ready_time_s, group = self._ready_groups.popleft()
+          return group, ready_time_s
         if self._closed:
-          return []
+          return None
       await self._have_ready.wait()
       self._have_ready.clear()
+
+  async def _get_one_ready_group(self) -> List[_T]:
+    timed = await self.get_timed_group()
+    if timed is None:
+      return []
+    group, _ = timed
+    return group
 
   async def get_batch(self, batch_size: int) -> List[_T]:
     """Retrieves a batch of items, waiting until enough are ready.
@@ -231,15 +244,16 @@ class GroupQueueManager(Generic[_T]):
     """
     out = []
     while len(out) < batch_size:
-      group = await self._get_one_ready_group()
-      if not group:
+      timed = await self.get_timed_group()
+      if timed is None:
         break
+      group, ready_time_s = timed
       async with self._lock:
         room = batch_size - len(out)
         if len(group) <= room:
           out.extend(group)
         else:
           out.extend(group[:room])
-          self._ready_groups.appendleft(group[room:])
+          self._ready_groups.appendleft((ready_time_s, group[room:]))
           self._have_ready.set()
     return out

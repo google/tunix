@@ -37,12 +37,10 @@ class RolloutSpec:
   Attributes:
     worker_id: Unique identifier for the rollout worker.
     address: gRPC service address of the worker.
-    model_name: Name of the model being served by the worker.
   """
 
   worker_id: str
   address: str
-  model_name: str
 
 
 class RequestStatsMonitor:
@@ -161,11 +159,6 @@ def orchestrator_main(
             "What is 123 + 456? Please explain each step in detail and verify"
             " the result."
         ),
-        generation_kwargs={
-            "max_tokens": 128,
-            "temperature": 0.0,
-            "model": rollout_spec.model_name,
-        },
         max_turns=2,
         metadata={"system_prompt": "You are a helpful mathematical assistant."},
     )
@@ -226,7 +219,6 @@ def main(argv: Sequence[str], context: ProcessContext | None) -> None:
     service_type = md["service_type"]
     service_address = f"grpc://{hostname}:{md['service_port']}"
     worker_id = md["worker_id"]
-    model_name = md["model_name"]
 
     logging.info(
         "discovered %s service %s at %s",
@@ -240,7 +232,6 @@ def main(argv: Sequence[str], context: ProcessContext | None) -> None:
         rollout_spec = RolloutSpec(
             worker_id=worker_id,
             address=service_address,
-            model_name=model_name,
         )
         rollout_spec_queue.put(rollout_spec)
       case _:

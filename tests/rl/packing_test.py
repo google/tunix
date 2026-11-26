@@ -15,10 +15,18 @@
 """Tests for the type-agnostic packing core logic."""
 
 import dataclasses
+import importlib.abc
+import importlib.machinery
+import importlib.util
 import os
+import pathlib
 import signal
+import sys
+import tempfile
 import time
+from unittest import mock
 from absl.testing import absltest
+from absl.testing import parameterized
 import numpy as np
 from tunix.rl import packing
 from tunix.rl.agentic.agents import agent_types
@@ -374,6 +382,102 @@ class PackCoreTest(absltest.TestCase):
       )
       self.assertEqual(c_chunk.num_real_segments, p_chunk.num_real_segments)
 
+  def test_missing_packing_ext_falls_back_while_corrupt_so_raises_import_error(
+      self,
+  ):
+    assert packing.__file__ is not None
+    packing_src_path = pathlib.Path(packing.__file__)
+    target_names = frozenset({
+        "tunix.rl._packing_ext",
+        f"{packing.__package__}._packing_ext",
+    })
+
+    class _MissingExtFinder(importlib.abc.MetaPathFinder):
+
+      def find_spec(self, fullname, path, target=None):
+        del path, target
+        if fullname in target_names:
+          raise ModuleNotFoundError(
+              f"No module named {fullname!r}", name=fullname
+          )
+        return None
+
+    rl_pkg = sys.modules.get("tunix.rl")
+    saved_modules = {
+        name: sys.modules.pop(name)
+        for name in list(sys.modules)
+        if name in target_names
+    }
+    had_rl_attr = rl_pkg is not None and "_packing_ext" in rl_pkg.__dict__
+    saved_rl_attr = (
+        rl_pkg.__dict__.pop("_packing_ext", None)
+        if rl_pkg is not None
+        else None
+    )
+    try:
+      with mock.patch.object(
+          sys, "meta_path", [_MissingExtFinder(), *sys.meta_path]
+      ):
+        unbuilt_spec = importlib.util.spec_from_file_location(
+            "_tunix_packing_unbuilt_probe", packing_src_path
+        )
+        assert unbuilt_spec is not None and unbuilt_spec.loader is not None
+        unbuilt_mod = importlib.util.module_from_spec(unbuilt_spec)
+        sys.modules[unbuilt_spec.name] = unbuilt_mod
+        try:
+          unbuilt_spec.loader.exec_module(unbuilt_mod)
+        finally:
+          sys.modules.pop(unbuilt_spec.name, None)
+        self.assertIsNone(unbuilt_mod._packing_ext)
+        [[row]] = unbuilt_mod.pack_core(
+            [
+                unbuilt_mod.PackItem(
+                    prompt_ids=np.array([1, 2], dtype=np.int32),
+                    completion_ids=np.array([3, 4], dtype=np.int32),
+                    completion_mask=np.ones(2, dtype=np.float32),
+                    advantages=np.ones(2, dtype=np.float32),
+                )
+            ],
+            budget=6,
+            pack_size=1,
+        )
+        np.testing.assert_array_equal(row.ids, [1, 2, 3, 4, 0, 0])
+
+      with tempfile.TemporaryDirectory() as tmp_dir:
+        corrupt_so = pathlib.Path(tmp_dir) / "_packing_ext.abi3.so"
+        corrupt_so.write_bytes(b"corrupt-elf-shared-object")
+
+        class _CorruptExtFinder(importlib.abc.MetaPathFinder):
+
+          def find_spec(self, fullname, path, target=None):
+            del path, target
+            if fullname in target_names:
+              loader = importlib.machinery.ExtensionFileLoader(
+                  fullname, str(corrupt_so)
+              )
+              return importlib.util.spec_from_loader(fullname, loader)
+            return None
+
+        with mock.patch.object(
+            sys, "meta_path", [_CorruptExtFinder(), *sys.meta_path]
+        ):
+          broken_spec = importlib.util.spec_from_file_location(
+              "_tunix_packing_corrupt_probe", packing_src_path
+          )
+          assert broken_spec is not None and broken_spec.loader is not None
+          broken_mod = importlib.util.module_from_spec(broken_spec)
+          sys.modules[broken_spec.name] = broken_mod
+          try:
+            with self.assertRaises(ImportError) as cm:
+              broken_spec.loader.exec_module(broken_mod)
+            self.assertNotIsInstance(cm.exception, ModuleNotFoundError)
+          finally:
+            sys.modules.pop(broken_spec.name, None)
+    finally:
+      sys.modules.update(saved_modules)
+      if had_rl_attr and rl_pkg is not None:
+        setattr(rl_pkg, "_packing_ext", saved_rl_attr)
+
 
 class PackRoutedExpertsTest(absltest.TestCase):
 
@@ -639,18 +743,33 @@ class PackSegmentAlignmentTest(absltest.TestCase):
     np.testing.assert_array_equal(
         packing.decode_routed_experts(enc_i16), raw_i16.astype(np.int16)
     )
-    # 255 <= max <= 1022 with K % 4 != 0 falls back to int16 in "auto" mode and
-    # raises ValueError when mode="uint10" is requested explicitly.
-    for k_non_div4 in (2, 6):
+    # 255 <= max <= 1022 with K % 4 != 0 (e.g., K=1, 2, 3, 5, 6, 7, 10 for
+    # tail-only rem=1/2/3 and Qwen3.5-397B-A17B) packs into byte-exact uint10
+    # (T, L, 1, ceil(10*K/8)).
+    non_div4_cases: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    for k_non_div4 in (1, 2, 3, 5, 6, 7, 10):
       raw_k_non_div4 = rng.integers(
           -1, 512, size=(5, 3, k_non_div4), dtype=np.int16
       )
       raw_k_non_div4[0, 0, 0] = 300
+      raw_k_non_div4[1] = agent_types.UNSET_ROUTED_EXPERT
       enc_auto = packing.encode_routed_experts(raw_k_non_div4, mode="auto")
-      self.assertEqual(enc_auto.dtype, np.int16)
-      np.testing.assert_array_equal(enc_auto, raw_k_non_div4)
-      with self.assertRaisesRegex(ValueError, "top_k divisible by 4"):
-        packing.encode_routed_experts(raw_k_non_div4, mode="uint10")
+      expected_bytes = (10 * k_non_div4 + 7) // 8
+      self.assertEqual(enc_auto.dtype, np.uint8)
+      self.assertEqual(enc_auto.shape, (5, 3, 1, expected_bytes))
+      self.assertEqual(
+          packing.routed_experts_logical_shape(enc_auto, batched=False),
+          (5, 3, k_non_div4),
+      )
+      np.testing.assert_array_equal(
+          packing.decode_routed_experts(enc_auto, batched=False),
+          raw_k_non_div4,
+      )
+      enc_explicit = packing.encode_routed_experts(
+          raw_k_non_div4, mode="uint10"
+      )
+      np.testing.assert_array_equal(enc_explicit, enc_auto)
+      non_div4_cases[k_non_div4] = (raw_k_non_div4, enc_auto)
 
     # 4. K == 5 disambiguation between unbatched (T, L, 5) and batched
     # (B, T, L, 5) for both C++ and Python fallback.
@@ -699,16 +818,16 @@ class PackSegmentAlignmentTest(absltest.TestCase):
           packing.decode_routed_experts(enc_k5_batched, batched=True),
           raw_k5_batched,
       )
-      for k_non_div4 in (2, 6):
-        raw_k_non_div4 = rng.integers(
-            -1, 512, size=(5, 3, k_non_div4), dtype=np.int16
-        )
-        raw_k_non_div4[0, 0, 0] = 300
+      for k_non_div4, (raw_k_non_div4, enc_auto) in non_div4_cases.items():
         py_auto = packing.encode_routed_experts(raw_k_non_div4, mode="auto")
-        self.assertEqual(py_auto.dtype, np.int16)
-        np.testing.assert_array_equal(py_auto, raw_k_non_div4)
-        with self.assertRaisesRegex(ValueError, "top_k divisible by 4"):
-          packing.encode_routed_experts(raw_k_non_div4, mode="uint10")
+        expected_bytes = (10 * k_non_div4 + 7) // 8
+        self.assertEqual(py_auto.dtype, np.uint8)
+        self.assertEqual(py_auto.shape, (5, 3, 1, expected_bytes))
+        np.testing.assert_array_equal(py_auto, enc_auto)
+        np.testing.assert_array_equal(
+            packing.decode_routed_experts(py_auto, batched=False),
+            raw_k_non_div4,
+        )
     finally:
       packing._packing_ext = orig_ext
 
@@ -903,10 +1022,15 @@ class PackSegmentAlignmentTest(absltest.TestCase):
           self.assertEqual(re_i16.dtype, np.int16)
           self.assertEqual(re_i16.shape, (2, 7, 3, 5))
           np.testing.assert_array_equal(re_i16, raw_batched_k5)
-          with self.assertRaisesRegex(ValueError, "top_k divisible by 4"):
-            packing.encode_routed_experts(
-                enc_batched_k5, mode="uint10", batched=True
-            )
+          re_u10 = packing.encode_routed_experts(
+              enc_batched_k5, mode="uint10", batched=True
+          )
+          self.assertEqual(re_u10.dtype, np.uint8)
+          self.assertEqual(re_u10.shape, (2, 7, 3, 1, 7))
+          np.testing.assert_array_equal(
+              packing.decode_routed_experts(re_u10, batched=True),
+              raw_batched_k5,
+          )
 
           # Verify routed_experts_encoding on unbatched vs batched uint10/int16.
           enc_unbatched_u10 = packing.encode_routed_experts(
@@ -1194,6 +1318,152 @@ class ParallelPackingPoolTest(absltest.TestCase):
           os.WIFEXITED(status), f"Child did not exit cleanly: {status}"
       )
       self.assertEqual(os.WEXITSTATUS(status), 0)
+
+
+class ValidatePackingBudgetTest(absltest.TestCase):
+
+  def test_accepts_budget_that_fits_a_maximal_sequence(self):
+    packing.validate_packing_budget(
+        max_token_budget=4096, max_prompt_length=1024, max_response_length=1024
+    )
+    # Exactly one maximal sequence per row is the boundary case, still valid.
+    packing.validate_packing_budget(
+        max_token_budget=2048, max_prompt_length=1024, max_response_length=1024
+    )
+
+  def test_raises_when_a_maximal_sequence_cannot_fit(self):
+    # Without this check the run reaches pack_sequences' per-sequence raise only
+    # once a maximal sequence actually shows up, potentially hours in.
+    with self.assertRaisesRegex(ValueError, "max_seq_token_per_tpu >= 2048"):
+      packing.validate_packing_budget(
+          max_token_budget=1024,
+          max_prompt_length=1024,
+          max_response_length=1024,
+      )
+
+
+class TokenIdsTest(parameterized.TestCase):
+
+  @parameterized.parameters(
+      ([0, 3],),
+      ((0, np.int64(3)),),
+      (np.array([0, 3], dtype=np.uint64),),
+      (np.array([0, 3], dtype=np.int64),),
+  )
+  def test_as_token_ids_returns_owned_1d_int32_copy(self, value):
+    out = packing.as_token_ids(value)
+    self.assertEqual(out.dtype, np.int32)
+    np.testing.assert_array_equal(out, [0, 3])
+    if isinstance(value, np.ndarray):
+      value[0] = 999
+      self.assertEqual(int(out[0]), 0)
+
+  def test_as_token_ids_rejects_non_1d(self):
+    with self.assertRaisesRegex(ValueError, "token ids must be 1-D"):
+      packing.as_token_ids(np.zeros((2, 3), dtype=np.int32))
+    with self.assertRaisesRegex(ValueError, "token ids must be 1-D"):
+      packing.as_token_ids(7)
+
+  def test_unpad_prompt_slices_trailing_tokens_and_handles_non_positive_length(
+      self,
+  ):
+    source = np.array([0, 0, 4, 0, 5], dtype=np.int32)
+    unpadded = packing.unpad_prompt(source, 4)
+    self.assertEqual(unpadded.dtype, np.int32)
+    np.testing.assert_array_equal(unpadded, [0, 4, 0, 5])
+    source[:] = 888
+    np.testing.assert_array_equal(unpadded, [0, 4, 0, 5])
+
+    for zero_or_neg in (0, -2):
+      empty = packing.unpad_prompt(source, zero_or_neg)
+      self.assertEqual(empty.dtype, np.int32)
+      self.assertEqual(empty.shape, (0,))
+
+  def test_alloc_batched_routed_experts_all_modes_and_invalid(self):
+    buf_u8 = packing.alloc_batched_routed_experts(2, 6, (3, 8), "uint8")
+    self.assertEqual(buf_u8.dtype, np.uint8)
+    self.assertEqual(buf_u8.shape, (2, 6, 3, 8))
+    np.testing.assert_array_equal(buf_u8, 0)
+    np.testing.assert_array_equal(
+        packing.decode_routed_experts(buf_u8, batched=True), -1
+    )
+
+    buf_u10_div4 = packing.alloc_batched_routed_experts(2, 6, (3, 8), "uint10")
+    self.assertEqual(buf_u10_div4.dtype, np.uint8)
+    self.assertEqual(buf_u10_div4.shape, (2, 6, 3, 2, 5))
+    np.testing.assert_array_equal(
+        packing.decode_routed_experts(buf_u10_div4, batched=True), -1
+    )
+
+    buf_u10_tail = packing.alloc_batched_routed_experts(2, 6, (3, 10), "uint10")
+    self.assertEqual(buf_u10_tail.dtype, np.uint8)
+    self.assertEqual(buf_u10_tail.shape, (2, 6, 3, 1, 13))
+    np.testing.assert_array_equal(
+        packing.decode_routed_experts(buf_u10_tail, batched=True), -1
+    )
+
+    buf_i16 = packing.alloc_batched_routed_experts(2, 6, (3, 10), "int16")
+    self.assertEqual(buf_i16.dtype, np.int16)
+    self.assertEqual(buf_i16.shape, (2, 6, 3, 10))
+    np.testing.assert_array_equal(buf_i16, -1)
+
+    bad_mode = "bad"
+    with self.assertRaisesRegex(
+        ValueError, "Unsupported routed_experts wire encoding"
+    ):
+      packing.alloc_batched_routed_experts(2, 6, (3, 8), bad_mode)  # pyrefly: ignore[bad-argument-type]
+
+  def test_routed_experts_bytes_per_token_matches_encode_routed_experts(self):
+    seq_len = 5
+    num_layers = 3
+    tier_specs = (
+        ("uint8", 128),
+        ("uint10", 384),
+        ("int16", 2048),
+    )
+    orig_ext = packing._packing_ext
+    for use_cpp in (True, False):
+      if use_cpp and orig_ext is None:
+        continue
+      try:
+        packing._packing_ext = orig_ext if use_cpp else None
+        for top_k in (6, 8, 9):
+          for enc, num_experts in tier_specs:
+            raw = np.zeros((seq_len, num_layers, top_k), dtype=np.int16)
+            encoded_explicit = packing.encode_routed_experts(
+                raw, mode=enc, num_experts=num_experts
+            )
+            encoded_auto = packing.encode_routed_experts(
+                raw, mode="auto", num_experts=num_experts
+            )
+            assert encoded_explicit is not None and encoded_auto is not None
+            expected_bytes = (
+                packing.routed_experts_bytes_per_token(num_layers, top_k, enc)
+                * seq_len
+            )
+            self.assertEqual(encoded_explicit.nbytes, expected_bytes)
+            self.assertEqual(encoded_auto.nbytes, expected_bytes)
+      finally:
+        packing._packing_ext = orig_ext
+
+
+class PadTopKTest(absltest.TestCase):
+
+  def test_pad_topk_slices_pads_and_validates(self):
+    ids, logps = packing.pad_topk(
+        [np.array([[4, 6, 7], [5, 8, 9]], dtype=np.int32)],
+        [np.array([[-0.2, -1.0, -2.0], [-0.4, -1.2, -2.2]], dtype=np.float32)],
+        lengths=[2],
+        max_length=4,
+        k=2,
+        batch_size=2,
+    )
+    np.testing.assert_array_equal(ids[0], [[4, 6], [5, 8], [0, 0], [0, 0]])
+    np.testing.assert_array_equal(ids[1], 0)
+    self.assertTrue(np.isneginf(logps[0, 2:]).all())
+    self.assertTrue(np.isneginf(logps[1]).all())
+    with self.assertRaisesRegex(ValueError, "top-k logprobs"):
+      packing.pad_topk([None], [None], [2], max_length=4, k=2)
 
 
 if __name__ == "__main__":

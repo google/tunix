@@ -472,5 +472,5 @@ def _async_wait(
 
 
 def _synchronize_devices():
-  for device in jax.devices():
+  for device in jax.local_devices():
     jax.device_put(jax.numpy.array(0.0), device=device).block_until_ready()

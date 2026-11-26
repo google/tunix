@@ -15,10 +15,13 @@
 """Algorithm core implementations for RL and Agentic RL learners."""
 
 import functools
+from typing import Any, Callable
 from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from tunix.rl import advantages as rl_advantages
+from tunix.rl import algorithm_config
 from tunix.rl import common
 from tunix.rl import function_registry
 from tunix.sft import utils as sft_utils
@@ -397,6 +400,40 @@ def ppo_value_loss_fn(
 # ==============================================================================
 
 
+def _score_centering_topk_ids(
+    train_example: common.TrainExample,
+    use_score_centering: bool,
+    should_fuse_sampler_agreement: bool,
+) -> jax.Array | np.ndarray | None:
+  """Validates Score Centering inputs and returns `old_topk_token_ids`."""
+  if not use_score_centering:
+    return None
+  topk_ids = train_example.old_topk_token_ids
+  topk_logps = train_example.old_topk_logps
+  if topk_ids is None or topk_logps is None:
+    raise ValueError("score_centering needs the sampler's top-k logprobs.")
+  if (
+      topk_ids.ndim != 3
+      or topk_ids.shape != topk_logps.shape
+      or topk_ids.shape[:2] != train_example.completion_ids.shape
+  ):
+    raise ValueError(
+        "score_centering expects matching [B, C, K] old_topk_token_ids and"
+        f" old_topk_logps aligned with completion_ids"
+        f" {train_example.completion_ids.shape}, got {topk_ids.shape} and"
+        f" {topk_logps.shape}."
+    )
+  if (
+      train_example.old_per_token_logps is not None
+      and not should_fuse_sampler_agreement
+  ):
+    raise ValueError(
+        "score_centering with old_per_token_logps requires fused single-step"
+        " sampler agreement."
+    )
+  return topk_ids
+
+
 @function_registry.register_policy_loss_fn("grpo")
 def grpo_loss_fn(
     model,
@@ -427,12 +464,8 @@ def grpo_loss_fn(
   beta = algo_config.beta
   epsilon = algo_config.epsilon
   loss_algo = algo_config.loss_algo
-  epsilon_high = (
-      algo_config.epsilon_high
-      if hasattr(algo_config, "epsilon_high")
-      else epsilon
-  )
-  epsilon_c = getattr(algo_config, "epsilon_c", None)
+  epsilon_high = algo_config.epsilon_high
+  epsilon_c = algo_config.epsilon_c
   loss_aggregation_mode = algo_config.loss_agg_mode
 
   completion_ids, completion_mask = (
@@ -456,7 +489,18 @@ def grpo_loss_fn(
     token_mask = jnp.concatenate(
         [train_example.prompt_mask, completion_attention_mask], axis=1
     )
-  per_token_logps, token_entropy = common.compute_per_token_logps(
+  use_score_centering = algo_config.score_centering
+  sampler_is_weights = train_example.sampler_is_weights
+  should_fuse_sampler_agreement = (
+      algo_config.use_rollout_logps
+      and train_example.old_per_token_logps is not None
+      and sampler_is_weights is None
+      and not train_example.sampler_agreement_applied
+  )
+  topk_token_ids = _score_centering_topk_ids(
+      train_example, use_score_centering, should_fuse_sampler_agreement
+  )
+  logp_outputs = common.compute_per_token_logps(
       graphdef,
       state,
       prompt_tokens=train_example.prompt_ids,
@@ -471,19 +515,17 @@ def grpo_loss_fn(
       chunk_size=kwargs.get("compute_logps_chunk_size", 0),
       routed_experts=getattr(train_example, "routed_experts", None),
       token_mask=token_mask,
+      topk_token_ids=topk_token_ids,
   )
+  trainer_topk_logps = None
+  if use_score_centering:
+    logp_outputs, trainer_topk_logps = logp_outputs
+  per_token_logps, token_entropy = logp_outputs
   per_token_logps = jnp.astype(per_token_logps, jnp.float32)
   # TODO(tsbao): We should handle token level advantages.
   advantages = jnp.astype(train_example.advantages, jnp.float32)
 
-  sampler_is_weights = train_example.sampler_is_weights
   sa_metrics = {}
-  should_fuse_sampler_agreement = (
-      algo_config.use_rollout_logps
-      and train_example.old_per_token_logps is not None
-      and sampler_is_weights is None
-      and not train_example.sampler_agreement_applied
-  )
   if should_fuse_sampler_agreement:
     rollout_per_token_logps = jnp.astype(
         train_example.old_per_token_logps, jnp.float32
@@ -512,7 +554,10 @@ def grpo_loss_fn(
   # Use on-policy stop_gradient(per_token_logps) as the PPO ratio baseline when:
   # 1. No rollout/old logps were provided, or
   # 2. Fused in-loss IS/RS/error-masking is active (since sampler_is_weights
-  #    already corrects for trainer-vs-sampler divergence outside the PPO clip).
+  #    already corrects for trainer-vs-sampler divergence outside the PPO clip),
+  #    or
+  # 3. Fused in-loss Score Centering is active (the centering term below
+  #    corrects for the sampler-vs-trainer mismatch instead of the PPO ratio).
   use_on_policy_old_logps = (
       train_example.old_per_token_logps is None
       or (
@@ -521,6 +566,7 @@ def grpo_loss_fn(
               algo_config.sampler_is is not None
               or algo_config.sampler_rs is not None
               or algo_config.seq_logprob_error_threshold is not None
+              or use_score_centering
           )
       )
   )
@@ -634,6 +680,26 @@ def grpo_loss_fn(
     )
     per_token_loss = per_token_loss * safe_sis
 
+  # Score Centering (arXiv:2609.20807). The coefficients are detached, so the
+  # gradient flows only through the trainer's top-k log probabilities; the term
+  # is zero in value, so the reported loss is unchanged. Its IS weights mirror
+  # the token IS applied above, if any.
+  sc_stats = {}
+  if use_score_centering:
+    sc_logp_correction, sc_stats = common.compute_score_centering_correction(
+        trainer_topk_logps=trainer_topk_logps,  # pyrefly: ignore[bad-argument-type]
+        sampler_topk_logps=train_example.old_topk_logps,  # pyrefly: ignore[bad-argument-type]
+        sampler_is=algo_config.sampler_is,
+        sampler_is_threshold=algo_config.sampler_is_threshold,
+        eps=algo_config.score_centering_eps,
+        completion_mask=active_mask,
+        has_sampler_is_weights=sampler_is_weights is not None,
+    )
+    sc_logp_correction = jnp.where(
+        per_token_pg_clipfrac_lower > 0.0, 0.0, sc_logp_correction
+    )
+    per_token_loss = per_token_loss + adv * sc_logp_correction
+
   # Two independent aggregations of the same policy loss (equal today):
   #   unreduced (sum/denom, deferred) — feeds the gradient
   #   reduced   (eager per-sequence mean, pre-CL form) — metric only
@@ -666,20 +732,6 @@ def grpo_loss_fn(
   log_ratio_abs_mean = masked_mean(jnp.abs(seq_importance_ratio), active_mask)
   pg_loss_1_mean = masked_mean(pg_loss_1, active_mask)
   pg_loss_2_mean = masked_mean(pg_loss_2, active_mask)
-  adv_abs_mean = masked_mean(jnp.abs(adv), active_mask)
-  adv_max = jnp.where(
-      has_valid,
-      jnp.max(jnp.where(active_mask, adv, -jnp.inf)),
-      0.0,
-  )
-  adv_min = jnp.where(
-      has_valid,
-      jnp.min(jnp.where(active_mask, adv, jnp.inf)),
-      0.0,
-  )
-  nonzero_adv_frac = masked_mean(
-      (jnp.abs(adv) > 1e-8).astype(jnp.float32), active_mask
-  )
   aux: dict[str, jax.Array | sft_utils.WeightedMetric] = {
       "kl": sft_utils.WeightedMetric(jnp.array(0.0), jnp.array(1.0)),
       "kl_loss": sft_utils.WeightedMetric(jnp.array(0.0), jnp.array(1.0)),
@@ -700,10 +752,6 @@ def grpo_loss_fn(
       "log_ratio/abs_mean": log_ratio_abs_mean,
       "pg_loss/unclipped_mean": pg_loss_1_mean,
       "pg_loss/clipped_mean": pg_loss_2_mean,
-      "advantage/abs_mean": adv_abs_mean,
-      "advantage/max": adv_max,
-      "advantage/min": adv_min,
-      "advantage/nonzero_frac": nonzero_adv_frac,
   }
   if sampler_is_weights is not None:
     aux["sampler_is/weight_mean"] = sft_utils.WeightedMetric(
@@ -719,6 +767,7 @@ def grpo_loss_fn(
         token_denom, token_denom, min_denom=1.0
     )
     aux["sampler_is/weight_min"] = jnp.float32(1.0)
+  aux.update(sc_stats)
   for metric_name, (metric_val, _) in sa_metrics.items():
     aux[metric_name] = metric_val
   # We do not always compute KL divergence (e.g. when beta is 0.0 unless
@@ -763,232 +812,91 @@ def grpo_loss_fn(
   return sft_utils.LossOutput(primary_loss=total_loss, aux_metrics=aux)
 
 
-MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE: int = 2
-
-
-def _grouped_valid_stats(
-    rewards: np.ndarray | jax.Array,
-    valid_mask: np.ndarray | jax.Array,
-    num_generations: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-  """Reshapes rewards into groups and computes valid-only group statistics.
-
-  Args:
-    rewards: Flat `[num_groups * num_generations]` rewards.
-    valid_mask: Flat `[num_groups * num_generations]` boolean mask; `True` marks
-      a trajectory that should contribute to (and receive) an advantage.
-    num_generations: Group size `G`.
-
-  Returns:
-    Tuple `(grouped_rewards, grouped_mask, valid_counts, masked_sum)` where the
-    grouped arrays are `[num_groups, num_generations]` and `valid_counts` /
-    `masked_sum` are `[num_groups, 1]`. Rewards of invalid trajectories are
-    zeroed in `grouped_rewards` and excluded from `masked_sum`.
-  """
-  grouped_rewards = np.asarray(rewards, dtype=np.float32).reshape(
-      -1, num_generations
-  )
-  grouped_mask = (
-      np.asarray(valid_mask).astype(bool).reshape(-1, num_generations)
-  )
-  grouped_mask = grouped_mask & np.isfinite(grouped_rewards)
-  grouped_rewards = np.where(grouped_mask, grouped_rewards, 0.0)
-  valid_counts = grouped_mask.sum(axis=-1, keepdims=True)
-  masked_sum = grouped_rewards.sum(axis=-1, keepdims=True)
-  return grouped_rewards, grouped_mask, valid_counts, masked_sum
-
-
-@function_registry.register_advantage_estimator("grpo")
-def compute_advantages(
-    rewards: np.ndarray,
-    num_generations: int,
-    valid_mask: np.ndarray | jax.Array | None = None,
-) -> np.ndarray:
-  """Compute group relative advantages.
-
-  Args:
-    rewards: reward functions output.
-    num_generations: Number of generations.
-    valid_mask: Optional boolean mask, same shape as `rewards`, marking the
-      trajectories that are healthy enough to be trained on. When provided, the
-      group mean and (sample, `ddof=1`) std are computed over valid trajectories
-      only, invalid trajectories get a `0.0` advantage, and groups with fewer
-      than `MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE` valid trajectories are zeroed
-      out entirely (a sample std is undefined there).
-
-  Returns:
-    Group relative advantages.
-  """
-  if valid_mask is None:
-    valid_mask = np.ones_like(rewards, dtype=bool)
-
-  grouped_rewards, grouped_mask, valid_counts, masked_sum = (
-      _grouped_valid_stats(rewards, valid_mask, num_generations)
-  )
-  mean_grouped_rewards = masked_sum / np.maximum(valid_counts, 1)
-  squared_deviations = np.where(
-      grouped_mask, (grouped_rewards - mean_grouped_rewards) ** 2, 0.0
-  ).sum(axis=-1, keepdims=True)
-  std_grouped_rewards = np.sqrt(
-      squared_deviations / np.maximum(valid_counts - 1, 1)
-  )
-  advantages = (grouped_rewards - mean_grouped_rewards) / (
-      std_grouped_rewards + 1e-6
-  )
-  advantages = np.where(
-      grouped_mask & (valid_counts >= MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE),
-      advantages,
-      0.0,
-  )
-  return advantages.reshape(np.shape(rewards)).astype(np.float32)
-
-
-@function_registry.register_advantage_estimator("grpo-loo")
-def compute_grpo_loo_advantages(
-    rewards: np.ndarray,
-    num_generations: int,
-    valid_mask: np.ndarray | jax.Array | None = None,
-) -> np.ndarray:
-  """GRPO advantages with leave-one-out centering and std normalization.
-
-  Combines RLOO's unbiased baseline with GRPO's variance normalization. In
-  plain GRPO the sample `r_i` appears in its own baseline `mean(r)` with weight
-  `1/k`, which shrinks every residual by `(k - 1) / k`; divided by the sample
-  std (`ddof=1`), `A_i = ((k - 1) / k) * (r_i - mean_{-i}) / std(r)`. At small
-  valid group sizes (`k = 2..4`, or larger groups after invalid trajectories are
-  masked out) that `(k - 1) / k` factor attenuates the advantage by 25%--50% as
-  a pure function of how many peers survived. Using the leave-one-out mean
-  `mean_{-i}` removes the self-inclusion bias while keeping the group-std
-  scaling that makes advantages comparable across prompts of different
-  difficulty:
-
-    `A_i = (r_i - mean_{j != i, valid} r_j) / (std_{valid}(r) + 1e-6)`
-
-  Equivalently, `A_i = (k / (k - 1)) * A_i^{grpo}` for a group with `k` valid
-  trajectories.
-
-  Args:
-    rewards: reward functions output.
-    num_generations: Number of generations `G`.
-    valid_mask: Optional boolean mask, same shape as `rewards`, marking the
-      trajectories that are healthy enough to be trained on. Invalid
-      trajectories are excluded from every peer's leave-one-out mean and from
-      the group std, receive a `0.0` advantage themselves, and groups with fewer
-      than `MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE` valid trajectories are zeroed
-      out entirely.
-
-  Returns:
-    Leave-one-out, std-normalized group advantages (`float32` ndarray).
-  """
-  if num_generations < MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE:
-    return np.zeros_like(rewards, dtype=np.float32)
-
-  if valid_mask is None:
-    valid_mask = np.ones_like(rewards, dtype=bool)
-
-  grouped_rewards, grouped_mask, valid_counts, masked_sum = (
-      _grouped_valid_stats(rewards, valid_mask, num_generations)
-  )
-  loo_mean = (masked_sum - grouped_rewards) / np.maximum(valid_counts - 1, 1)
-  group_mean = masked_sum / np.maximum(valid_counts, 1)
-  squared_deviations = np.where(
-      grouped_mask, (grouped_rewards - group_mean) ** 2, 0.0
-  ).sum(axis=-1, keepdims=True)
-  std_grouped_rewards = np.sqrt(
-      squared_deviations / np.maximum(valid_counts - 1, 1)
-  )
-  advantages = (grouped_rewards - loo_mean) / (std_grouped_rewards + 1e-6)
-  advantages = np.where(
-      grouped_mask & (valid_counts >= MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE),
-      advantages,
-      0.0,
-  )
-  return advantages.reshape(np.shape(rewards)).astype(np.float32)
-
-
-@function_registry.register_advantage_estimator("rloo")
-def compute_rloo_advantages(
-    rewards: jax.Array,
-    num_generations: int,
-    valid_mask: np.ndarray | jax.Array | None = None,
-) -> jax.Array:
-  """Compute RLOO (REINFORCE Leave-One-Out) advantages.
-
-  RLOO computes a baseline for each completion by averaging the rewards of all
-  other completions to the same prompt.
-
-  Args:
-    rewards: reward functions output.
-    num_generations: Number of generations.
-    valid_mask: Optional boolean mask, same shape as `rewards`, marking the
-      trajectories that are healthy enough to be trained on. When provided, the
-      leave-one-out baseline averages valid peers only, invalid trajectories get
-      a `0.0` advantage, and groups with fewer than
-      `MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE` valid trajectories are zeroed out
-      entirely (no peer is left to form a baseline).
-
-  Returns:
-    RLOO advantages.
-  """
-  if num_generations < MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE:
-    # RLOO requires at least 2 samples to calculate a baseline.
-    return jnp.zeros_like(rewards)
-
-  if valid_mask is None:
-    valid_mask = np.ones_like(rewards, dtype=bool)
-
-  grouped_rewards, grouped_mask, valid_counts, masked_sum = (
-      _grouped_valid_stats(rewards, valid_mask, num_generations)
-  )
-  loo_mean = (masked_sum - grouped_rewards) / np.maximum(valid_counts - 1, 1)
-  rloo_advantages = grouped_rewards - loo_mean
-  rloo_advantages = np.where(
-      grouped_mask & (valid_counts >= MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE),
-      rloo_advantages,
-      0.0,
-  )
-  return jnp.asarray(
-      rloo_advantages.reshape(np.shape(rewards)), dtype=jnp.float32
-  )
+MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE = (
+    rl_advantages.MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE
+)
+compute_advantages = rl_advantages.compute_advantages
+compute_grpo_loo_advantages = rl_advantages.compute_grpo_loo_advantages
+compute_rloo_advantages = rl_advantages.compute_rloo_advantages
+compute_drgrpo_advantages = rl_advantages.compute_drgrpo_advantages
 
 
 # ==============================================================================
-# DrGRPO Core
+# Trainer Model Input Builders
 # ==============================================================================
 
 
-@function_registry.register_advantage_estimator("drgrpo")
-def compute_drgrpo_advantages(
-    rewards: jax.Array,
-    num_generations: int,
-    valid_mask: np.ndarray | jax.Array | None = None,
-) -> jax.Array:
-  """Group relative advantages -- done right.
+def _algo_model_input(
+    batch: Any,
+    algo_config: algorithm_config.AlgorithmConfig,
+    pad_id: int,
+    eos_id: int,
+) -> dict[str, Any]:
+  return {
+      "train_example": batch,
+      "algo_config": algo_config,
+      "pad_id": pad_id,
+      "eos_id": eos_id,
+  }
+
+
+def _critic_model_input(
+    batch: Any,
+    *,
+    clip_range_value: float | None,
+    pad_id: int,
+    eos_id: int,
+) -> dict[str, Any]:
+  return {
+      "train_example": batch,
+      "clip_range_value": clip_range_value,
+      "pad_id": pad_id,
+      "eos_id": eos_id,
+  }
+
+
+def build_gen_model_input_fn(
+    algo_config: algorithm_config.AlgorithmConfig,
+    *,
+    pad_id: int,
+    eos_id: int,
+) -> Callable[[Any], dict[str, Any]]:
+  """Returns a closure mapping a `TrainExample` batch to policy-loss kwargs.
+
+  The trainer worker calls the returned function on every microbatch and
+  forwards the resulting kwargs to the policy loss registered for
+  `algo_config.policy_loss_fn`.
 
   Args:
-    rewards: reward functions output.
-    num_generations: Number of generations.
-    valid_mask: Optional boolean mask, same shape as `rewards`, marking the
-      trajectories that are healthy enough to be trained on. When provided, the
-      group mean is computed over valid trajectories only, invalid trajectories
-      get a `0.0` advantage, and groups with fewer than
-      `MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE` valid trajectories are zeroed out
-      entirely (a single valid trajectory has zero deviation from its own mean).
-
-  Returns:
-    Group relative advantages.
+    algo_config: Algorithm configuration; its `temperature` must already be set
+      (`StandardRLProgram` sets it from `rollout_temperature`).
+    pad_id: Pad token id handed to the loss function.
+    eos_id: End-of-sequence token id handed to the loss function.
   """
-  if valid_mask is None:
-    valid_mask = np.ones_like(rewards, dtype=bool)
+  if algo_config.temperature is None:
+    raise ValueError(
+        "Trainer temperature is unset on algo_config. Pass"
+        " rollout_temperature to StandardRLProgram (which sets"
+        " algo_config.temperature) before building the trainer model input fn."
+    )
+  return functools.partial(
+      _algo_model_input,
+      algo_config=algo_config,
+      pad_id=pad_id,
+      eos_id=eos_id,
+  )
 
-  grouped_rewards, grouped_mask, valid_counts, masked_sum = (
-      _grouped_valid_stats(rewards, valid_mask, num_generations)
+
+def build_critic_model_input_fn(
+    algo_config: algorithm_config.PPOConfig,
+    *,
+    pad_id: int,
+    eos_id: int,
+) -> Callable[[Any], dict[str, Any]]:
+  """Returns a closure mapping a `TrainExample` batch to value-loss kwargs."""
+  return functools.partial(
+      _critic_model_input,
+      clip_range_value=algo_config.clip_range_value,
+      pad_id=pad_id,
+      eos_id=eos_id,
   )
-  mean_grouped_rewards = masked_sum / np.maximum(valid_counts, 1)
-  advantages = grouped_rewards - mean_grouped_rewards
-  advantages = np.where(
-      grouped_mask & (valid_counts >= MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE),
-      advantages,
-      0.0,
-  )
-  return jnp.asarray(advantages.reshape(np.shape(rewards)), dtype=jnp.float32)

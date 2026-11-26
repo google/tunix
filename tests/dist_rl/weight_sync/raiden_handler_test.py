@@ -800,6 +800,37 @@ class RaidenHandlerTest(absltest.TestCase):
         self.controller.start_transfer.call_args.kwargs["skip_tiling"], {}
     )
 
+  def test_transfers_from_staged_copy_needs_skip_d2h_and_no_pretiled_layer(self):
+    staged = raiden_handler.RaidenHandler(
+        transfer_options=raiden_handler.make_host_staged_transfer_options()
+    )
+    self.addCleanup(staged.close)
+    # A layer planned as pre-tiled is staged again from the device mid-transfer.
+    restaged = raiden_handler.RaidenHandler(
+        transfer_options=raiden_handler.RaidenTransferOptions(
+            skip_d2h=True, skip_tiling={0: False, 1: True}
+        )
+    )
+    self.addCleanup(restaged.close)
+
+    self.assertFalse(self.handler.transfers_from_staged_copy)
+    self.assertTrue(staged.transfers_from_staged_copy)
+    self.assertFalse(restaged.transfers_from_staged_copy)
+
+  def test_make_host_staged_transfer_options_sets_skip_d2h_and_logical_tiling(
+      self,
+  ):
+    options = raiden_handler.make_host_staged_transfer_options(
+        parallelism=8, group_size=64, max_layers=4
+    )
+
+    self.assertEqual(options.parallelism, 8)
+    self.assertEqual(options.group_size, 64)
+    self.assertTrue(options.skip_d2h)
+    self.assertEqual(
+        options.skip_tiling, {0: False, 1: False, 2: False, 3: False}
+    )
+
   def test_incomplete_status_is_outcome_unknown(self):
     self._register_both()
     self.controller.get_transfer_status.return_value = (

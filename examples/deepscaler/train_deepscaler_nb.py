@@ -217,8 +217,8 @@ GENERATION_CONFIGS = {
 }
 # ====== Rollout ======
 ROLLOUT_ENGINE = os.getenv(
-    "ROLLOUT_ENGINE", "sglang_jax"
-)  # one of "vanilla", "vllm" or "sglang_jax"
+    "ROLLOUT_ENGINE", "vllm"
+)  # one of "vanilla" or "vllm"
 
 # mesh = jax.make_mesh(
 #     *MESH, axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0])
@@ -235,7 +235,7 @@ if trainer_devices + rollout_devices > jax.device_count():  # pyrefly: ignore[un
   )
 
 
-if ROLLOUT_ENGINE in ("sglang_jax", "vllm"):
+if ROLLOUT_ENGINE == "vllm":
   rollout_device_list = jax._src.mesh_utils.create_device_mesh(
       ROLLOUT_MESH[0], jax.devices()[:rollout_devices]  # pyrefly: ignore[bad-argument-type, bad-index]
   )
@@ -506,20 +506,6 @@ base_rollout_dict = {
     "max_tokens_to_generate": MAX_RESPONSE_LENGTH,
 }
 
-sglang_jax_rollout_dict = {
-    # sglang-jax specific configs
-    "rollout_sglang_jax_model_version": (
-        "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-    ),
-    "rollout_sglang_jax_mem_fraction_static": 0.8,
-    "rollout_sglang_jax_init_with_random_weights": True,
-    "rollout_sglang_jax_disable_radix_cache": True,
-    "rollout_sglang_jax_enable_deterministic_sampling": False,
-    "rollout_sglang_jax_chunked_prefill_size": 2048,
-    "rollout_sglang_jax_max_running_requests": MAX_CONCURRENCY,
-    "rollout_sglang_jax_page_size": 128,
-}
-
 vllm_rollout_dict = {
     # vllm-tpu specific configs
     "rollout_vllm_model_version": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
@@ -538,11 +524,7 @@ vllm_rollout_dict = {
     },
 }
 
-if ROLLOUT_ENGINE == "sglang_jax":
-  rollout_engine_config = base_rollout.RolloutConfig(
-      **base_rollout_dict, **sglang_jax_rollout_dict
-  )
-elif ROLLOUT_ENGINE == "vllm":
+if ROLLOUT_ENGINE == "vllm":
   rollout_engine_config = base_rollout.RolloutConfig(
       **base_rollout_dict, **vllm_rollout_dict  # pyrefly: ignore[bad-argument-type]
   )

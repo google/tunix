@@ -4,166 +4,173 @@
 """Loads Gemma2 parameters from safetensors files."""
 
 import dataclasses
-import os
-import re
+from typing import Any
 
 import jax
 import jax.numpy as jnp
-import safetensors
+from tunix.models import hf_mapping
 from tunix.models import safetensors_loader
 from tunix.models.gemma import model as model_lib
 
+from_hf_impl = hf_mapping.from_hf_impl
+to_hf_impl = hf_mapping.to_hf_impl
 
-def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
-  """Mapping of torch_keys to (nnx_keys, (permute_rule, reshape_rule))."""
-  mapping = {
-      r"model\.embed_tokens\.weight": ("embedder.input_embedding", None),
-      r"model\.layers\.([0-9]+)\.self_attn\.q_proj\.weight": (
-          r"tmp.layers.\1.attn.q",
-          ((1, 0), (cfg.embed_dim, cfg.num_heads, cfg.head_dim)),
-      ),
-      r"model\.layers\.([0-9]+)\.self_attn\.k_proj\.weight": (
-          r"tmp.layers.\1.attn.k",
-          ((1, 0), (cfg.embed_dim, cfg.num_kv_heads, cfg.head_dim)),
-      ),
-      r"model\.layers\.([0-9]+)\.self_attn\.v_proj\.weight": (
-          r"tmp.layers.\1.attn.v",
-          ((1, 0), (cfg.embed_dim, cfg.num_kv_heads, cfg.head_dim)),
-      ),
-      r"model\.layers\.([0-9]+)\.self_attn\.o_proj\.weight": (
-          r"layers.\1.attn.attn_vec_einsum.w",
-          ((1, 0), (cfg.num_heads, cfg.head_dim, cfg.embed_dim)),
-      ),
-      r"model\.layers\.([0-9]+)\.mlp\.gate_proj\.weight": (
-          r"layers.\1.mlp.gate_proj.kernel",
-          ((1, 0), None),
-      ),
-      r"model\.layers\.([0-9]+)\.mlp\.up_proj\.weight": (
-          r"layers.\1.mlp.up_proj.kernel",
-          ((1, 0), None),
-      ),
-      r"model\.layers\.([0-9]+)\.mlp\.down_proj\.weight": (
-          r"layers.\1.mlp.down_proj.kernel",
-          ((1, 0), None),
-      ),
-      r"model\.layers\.([0-9]+)\.input_layernorm\.weight": (
-          r"layers.\1.pre_attention_norm.scale",
-          None,
-      ),
-      r"model\.layers\.([0-9]+)\.post_attention_layernorm\.weight": (
-          r"layers.\1.post_attn_norm.scale",
-          None,
-      ),
-      r"model\.layers\.([0-9]+)\.pre_feedforward_layernorm\.weight": (
-          r"layers.\1.pre_ffw_norm.scale",
-          None,
-      ),
-      r"model\.layers\.([0-9]+)\.post_feedforward_layernorm\.weight": (
-          r"layers.\1.post_ffw_norm.scale",
-          None,
-      ),
-      r"model\.norm\.weight": ("final_norm.scale", None),
-      r"lm_head\.weight": ("unused.lm_head.weight", None),
-      r"lm_head\.bias": ("unused.lm_head.bias", None),
-      r"model\.layers\.([0-9]+)\.self_attn\.rotary_emb\..*": (
-          r"unused.rotary.\1",
-          None,
-      ),
-      r".*\.bias": (r"unused.bias", None),
+
+_FROM_HF_BASE_JSON = """[
+  {
+    "source_pattern": ["model.embed_tokens.weight"],
+    "target_pattern": ["embedder.input_embedding"],
+    "ops": []
+  },
+  {
+    "source_pattern": ["model.norm.weight"],
+    "target_pattern": ["final_norm.scale"],
+    "ops": []
+  },
+  {
+    "source_pattern": ["model.layers.{i}.input_layernorm.weight"],
+    "target_pattern": ["layers.{i}.pre_attention_norm.scale"],
+    "ops": []
+  },
+  {
+    "source_pattern": ["model.layers.{i}.self_attn.o_proj.weight"],
+    "target_pattern": ["layers.{i}.attn.attn_vec_einsum.w"],
+    "ops": [
+      {"transpose": {"axes": [1, 0]}},
+      {"reshape": {"src_shape": [$nh, $d], "dst_shape": [$n, $h, $d]}}
+    ]
+  },
+  {
+    "source_pattern": ["model.layers.{i}.mlp.gate_proj.weight"],
+    "target_pattern": ["layers.{i}.mlp.gate_proj.kernel"],
+    "ops": [{"transpose": {"axes": [1, 0]}}]
+  },
+  {
+    "source_pattern": ["model.layers.{i}.mlp.up_proj.weight"],
+    "target_pattern": ["layers.{i}.mlp.up_proj.kernel"],
+    "ops": [{"transpose": {"axes": [1, 0]}}]
+  },
+  {
+    "source_pattern": ["model.layers.{i}.mlp.down_proj.weight"],
+    "target_pattern": ["layers.{i}.mlp.down_proj.kernel"],
+    "ops": [{"transpose": {"axes": [1, 0]}}]
   }
-  return mapping
+]"""
+
+# Gemma 1 / 1.1 (`use_post_attn_norm=False`) names its pre-MLP RMSNorm
+# `post_attention_layernorm`; Gemma 2 (`use_post_attn_norm=True`) uses both
+# `post_attention_layernorm` (post-attn) and `pre_feedforward_layernorm`.
+_FROM_HF_GEMMA1_PRE_FFW_NORM_JSON = """[
+  {
+    "source_pattern": ["model.layers.{i}.post_attention_layernorm.weight"],
+    "target_pattern": ["layers.{i}.pre_ffw_norm.scale"],
+    "ops": []
+  }
+]"""
+
+_FROM_HF_GEMMA2_ATTN_FFW_NORMS_JSON = """[
+  {
+    "source_pattern": ["model.layers.{i}.post_attention_layernorm.weight"],
+    "target_pattern": ["layers.{i}.post_attn_norm.scale"],
+    "ops": []
+  },
+  {
+    "source_pattern": ["model.layers.{i}.pre_feedforward_layernorm.weight"],
+    "target_pattern": ["layers.{i}.pre_ffw_norm.scale"],
+    "ops": []
+  }
+]"""
+
+_FROM_HF_POST_FFW_NORM_JSON = """[
+  {
+    "source_pattern": ["model.layers.{i}.post_feedforward_layernorm.weight"],
+    "target_pattern": ["layers.{i}.post_ffw_norm.scale"],
+    "ops": []
+  }
+]"""
+
+_FROM_HF_GQA_JSON = """[
+  {
+    "source_pattern": ["model.layers.{i}.self_attn.q_proj.weight"],
+    "target_pattern": ["layers.{i}.attn.q_einsum.w"],
+    "ops": [
+      {"reshape": {"src_shape": [$nh, $d], "dst_shape": [$n, $h, $d]}},
+      {"transpose": {"axes": [0, 2, 1]}}
+    ]
+  },
+  {
+    "source_pattern": [
+      "model.layers.{i}.self_attn.k_proj.weight",
+      "model.layers.{i}.self_attn.v_proj.weight"
+    ],
+    "target_pattern": ["layers.{i}.attn.kv_einsum.w"],
+    "ops": [
+      {"reshape": {"src_shape": [$kh, $d], "dst_shape": [$k, $h, $d]}},
+      {"transpose": {"axes": [0, 2, 1]}},
+      {"stack": {"axis": 0}}
+    ]
+  }
+]"""
+
+_FROM_HF_MHA_JSON = """[
+  {
+    "source_pattern": [
+      "model.layers.{i}.self_attn.q_proj.weight",
+      "model.layers.{i}.self_attn.k_proj.weight",
+      "model.layers.{i}.self_attn.v_proj.weight"
+    ],
+    "target_pattern": ["layers.{i}.attn.qkv_einsum.w"],
+    "ops": [
+      {"reshape": {"src_shape": [$nh, $d], "dst_shape": [$n, $h, $d]}},
+      {"transpose": {"axes": [0, 2, 1]}},
+      {"stack": {"axis": 0}}
+    ]
+  }
+]"""
 
 
-def _make_preprocess_fn(cfg: model_lib.ModelConfig):
-  """Creates a preprocess function to reshape and stack Q, K, and V tensors for Gemma safetensors."""
-  q_pat = re.compile(r"tmp\.layers\.([0-9]+)\.attn\.q$")
-  k_pat = re.compile(r"tmp\.layers\.([0-9]+)\.attn\.k$")
-  v_pat = re.compile(r"tmp\.layers\.([0-9]+)\.attn\.v$")
-  fused_qkv = cfg.num_heads == cfg.num_kv_heads
-  pending: dict[str, dict[str, jnp.ndarray]] = {}
+def build_from_hf_manifest(cfg: model_lib.ModelConfig) -> dict[str, Any]:
+  """Builds the declarative PrimOp `HF -> Tunix` manifest for `cfg`."""
   if cfg.head_dim % 2 != 0:
     raise ValueError(
         f"Gemma2 head_dim must be even for RoPE, got {cfg.head_dim}"
     )
-
-  def _to_ndh(q: jnp.ndarray) -> jnp.ndarray:
-    if q.shape == (cfg.num_heads, cfg.embed_dim, cfg.head_dim):
-      return q
-    if q.shape == (cfg.embed_dim, cfg.num_heads, cfg.head_dim):
-      return jnp.transpose(q, (1, 0, 2))
-    if q.shape == (cfg.num_heads, cfg.head_dim, cfg.embed_dim):
-      return jnp.transpose(q, (0, 2, 1))
-    raise ValueError(f"[gemma2 preprocess] unexpected q shape: {q.shape}")
-
-  def _to_kdh(x: jnp.ndarray) -> jnp.ndarray:
-    if x.shape == (cfg.num_kv_heads, cfg.embed_dim, cfg.head_dim):
-      return x
-    if x.shape == (cfg.embed_dim, cfg.num_kv_heads, cfg.head_dim):
-      return jnp.transpose(x, (1, 0, 2))
-    if x.shape == (cfg.num_kv_heads, cfg.head_dim, cfg.embed_dim):
-      return jnp.transpose(x, (0, 2, 1))
-    raise ValueError(f"[gemma2 preprocess] unexpected kv shape: {x.shape}")
-
-  def preprocess(tensors: dict[str, jnp.ndarray]) -> dict[str, jnp.ndarray]:
-    out = dict(tensors)
-    for key in list(out):
-      m = q_pat.fullmatch(key) or k_pat.fullmatch(key) or v_pat.fullmatch(key)
-      if not m:
-        continue
-      layer_id = m.group(1)
-      arr = out.pop(key)
-      slot = "q" if key.endswith(".q") else ("k" if key.endswith(".k") else "v")
-      pending.setdefault(layer_id, {})[slot] = arr
-    for layer_id, slots in list(pending.items()):
-      q = slots.get("q")
-      k = slots.get("k")
-      v = slots.get("v")
-      if fused_qkv:
-        if (q is not None) and (k is not None) and (v is not None):
-          q = _to_ndh(q)
-          k = _to_kdh(k)
-          v = _to_kdh(v)
-          exp = (cfg.num_heads, cfg.embed_dim, cfg.head_dim)
-          if not (q.shape == k.shape == v.shape == exp):
-            raise ValueError(
-                f"[gemma2 preprocess] layer {layer_id}: fused q/k/v shape"
-                f" mismatch: q={getattr(q, 'shape', None)},"
-                f" k={getattr(k, 'shape', None)},"
-                f" v={getattr(v, 'shape', None)}, expected={exp}"
-            )
-          out[f"layers.{layer_id}.attn.qkv_einsum.w"] = jnp.stack(
-              [q, k, v], axis=0
-          )
-          del pending[layer_id]
-      else:
-        wrote = False
-        if q is not None:
-          q = _to_ndh(q)
-          out[f"layers.{layer_id}.attn.q_einsum.w"] = q
-          slots.pop("q", None)
-          wrote = True
-        if (k is not None) and (v is not None):
-          k = _to_kdh(k)
-          v = _to_kdh(v)
-          out[f"layers.{layer_id}.attn.kv_einsum.w"] = jnp.stack([k, v], axis=0)
-          slots.pop("k", None)
-          slots.pop("v", None)
-          wrote = True
-        if wrote and not slots:
-          del pending[layer_id]
-    return out
-  return preprocess
+  d, n, k, h = cfg.embed_dim, cfg.num_heads, cfg.num_kv_heads, cfg.head_dim
+  templates = hf_mapping.render_json_templates(
+      _FROM_HF_BASE_JSON,
+      (
+          _FROM_HF_GEMMA2_ATTN_FFW_NORMS_JSON
+          if cfg.use_post_attn_norm
+          else _FROM_HF_GEMMA1_PRE_FFW_NORM_JSON
+      ),
+      _FROM_HF_POST_FFW_NORM_JSON if cfg.use_post_ffw_norm else "",
+      _FROM_HF_MHA_JSON if n == k else _FROM_HF_GQA_JSON,
+      d=d,
+      n=n,
+      k=k,
+      h=h,
+      nh=n * h,
+      kh=k * h,
+  )
+  return hf_mapping.generate_manifest(
+      model_type="gemma",
+      template_rules=templates,
+      axes={"i": cfg.num_layers},
+      dropped_keys=["lm_head.weight"],
+  )
 
 
-def _peek_vocab_size_from_safetensors(file_dir: str) -> int:
-  for fn in os.listdir(file_dir):
-    if fn.endswith(".safetensors"):
-      path = os.path.join(file_dir, fn)
-      with safetensors.safe_open(path, framework="jax") as f:
-        if "model.embed_tokens.weight" in f.keys():
-          shape = f.get_tensor("model.embed_tokens.weight").shape
-          return shape[0]
-  raise FileNotFoundError("No .safetensors found to peek vocab size")
+def build_to_hf_manifest(cfg: model_lib.ModelConfig) -> dict[str, Any]:
+  """Builds the declarative PrimOp `Tunix -> HF` manifest for `cfg`."""
+  return hf_mapping.invert_manifest(build_from_hf_manifest(cfg))
+
+
+def export_to_hf_state_dict(
+    model: model_lib.Gemma, cfg: model_lib.ModelConfig
+) -> dict[str, jax.Array]:
+  """Exports a Tunix `Gemma` model into a HuggingFace state dict."""
+  flat_state = safetensors_loader.flatten_model_state(model)
+  return hf_mapping.to_hf_impl(build_to_hf_manifest(cfg), flat_state)
 
 
 def create_model_from_safe_tensors(
@@ -173,17 +180,23 @@ def create_model_from_safe_tensors(
     dtype: jnp.dtype | None = None,
     mode: str = "auto",
 ) -> model_lib.Gemma:
-  v_ckpt = _peek_vocab_size_from_safetensors(file_dir)
+  """Loads HuggingFace safetensors checkpoints into a Gemma model."""
+  local_dir = safetensors_loader.resolve_checkpoint_dir(file_dir)
+  headers = safetensors_loader.read_safetensors_headers(local_dir)
+  embed_key = "model.embed_tokens.weight"
+  if embed_key not in headers:
+    raise FileNotFoundError(
+        f"{embed_key} not found in safetensors at {local_dir}"
+    )
+  v_ckpt = int(headers[embed_key]["shape"][0])
   if v_ckpt != config.num_embed:
     config = dataclasses.replace(config, num_embed=v_ckpt)
-    print(f"[gemma2] override num_embed -> {v_ckpt} from checkpoint")
   return safetensors_loader.load_and_create_model(
-      file_dir=file_dir,
+      file_dir=local_dir,
       model_class=model_lib.Gemma,
       config=config,
-      key_mapping=_get_key_and_transform_mapping,
       mesh=mesh,
-      preprocess_fn=_make_preprocess_fn(config),
       dtype=dtype,
       mode=mode,
+      manifest=build_from_hf_manifest(config),
   )

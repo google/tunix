@@ -21,10 +21,13 @@ from absl.testing import absltest
 from etils import epath
 from tunix.dist_rl.trajectory import file_store
 from tunix.dist_rl.trajectory import in_memory_store
+from tunix.dist_rl.trajectory import store
+from tunix.dist_rl.trajectory import trajectory_testing
 from tunix.dist_rl.trajectory.explorer import run_explorer
 from tunix.dist_rl.trajectory.explorer.commands import ping
 from tunix.dist_rl.trajectory.explorer.commands import show
 from tunix.dist_rl.trajectory.explorer.commands import summary
+from tunix.dist_rl.trajectory.explorer.diagnostics import tunix_diagnostics
 
 
 def _parse_cmd(cmd: str = "") -> run_explorer.ExplorerConfig:
@@ -69,16 +72,50 @@ class ParseArgsTest(absltest.TestCase):
     config = _parse_cmd("summary")
     self.assertIsInstance(config.cmd, summary.SummaryCommand)
 
+  def test_subcommand_summary_with_limit(self) -> None:
+    config = _parse_cmd("summary --limit 5")
+    self.assertEqual(config.cmd, summary.SummaryCommand(limit=5))
+
+  def test_subcommand_summary_with_trajectory_table(self) -> None:
+    config = _parse_cmd("summary --show_trajectory_table")
+    self.assertEqual(
+        config.cmd, summary.SummaryCommand(show_trajectory_table=True)
+    )
+
   def test_subcommand_show_with_its_own_flags(self) -> None:
     config = _parse_cmd("show --trajectory_id t1 --max_chars 0")
     self.assertEqual(
-        config.cmd, show.ShowCommand(trajectory_id="t1", max_chars=0)
+        config.cmd, show.ShowCommand(trajectory_id=["t1"], max_chars=0)
     )
+
+  def test_subcommand_show_with_multiple_trajectory_ids(self) -> None:
+    config = _parse_cmd("show --trajectory_id t1 t2 t3")
+    self.assertEqual(
+        config.cmd, show.ShowCommand(trajectory_id=["t1", "t2", "t3"])
+    )
+
+  def test_subcommand_show_with_comma_separated_trajectory_ids(self) -> None:
+    for raw_cmd in (
+        "show --trajectory_id t1,t2,t3",
+        "show --trajectory_id=t1,t2,t3",
+        "show --trajectory_id t1, t2, t3",
+    ):
+      with self.subTest(raw_cmd=raw_cmd):
+        config = _parse_cmd(raw_cmd)
+        self.assertEqual(
+            config.cmd, show.ShowCommand(trajectory_id=["t1", "t2", "t3"])
+        )
 
   def test_subcommand_show_requires_a_trajectory_id(self) -> None:
     with self.assertRaises(SystemExit) as cm:
       with contextlib.redirect_stderr(io.StringIO()):
         _parse_cmd("show")
+    self.assertEqual(cm.exception.code, 2)
+
+  def test_subcommand_show_rejects_empty_trajectory_id_flag(self) -> None:
+    with self.assertRaises(SystemExit) as cm:
+      with contextlib.redirect_stderr(io.StringIO()):
+        _parse_cmd("show --trajectory_id")
     self.assertEqual(cm.exception.code, 2)
 
   def test_global_flags_compose_with_a_subcommand(self) -> None:
@@ -152,6 +189,54 @@ class RunCliTest(absltest.TestCase):
     self.assertEqual(exit_code, 2)
     self.assertEmpty(stdout.getvalue())
     self.assertIn("trajectory-explore: error:", stderr.getvalue())
+
+  def test_schema_diagnostics_reach_the_subcommand(self) -> None:
+    # A Tunix trajectory read back from a file store must still be a Tunix
+    # trajectory, or its diagnostics would not apply.
+    root_dir = self.create_tempdir().full_path
+    trajectory = trajectory_testing.PAIRED_TUNIX_TRAJECTORY
+    writer = store.TrajectoryStore.from_config(
+        {"backend": "file", "root_dir": root_dir, "run_id": "my_run"}
+    )
+    assert writer is not None
+    for step in trajectory.steps:
+      writer.add_step(step, trajectory.get_metadata())
+    writer.close()
+
+    stdout = io.StringIO()
+    with contextlib.redirect_stdout(stdout):
+      exit_code = run_explorer.run_cli(
+          [
+              "--store",
+              "file",
+              "--root_dir",
+              root_dir,
+              "--run_id",
+              "my_run",
+              "--json",
+              "show",
+              "--trajectory_id",
+              str(trajectory.trajectory_id),
+          ],
+          diagnostics=(tunix_diagnostics.TunixDiagnostics(),),
+      )
+
+    self.assertEqual(exit_code, 0)
+    self.assertEqual(
+        json.loads(stdout.getvalue())["stats"]["schema_stats"],
+        {"tunix": tunix_diagnostics.TunixDiagnostics().extract(trajectory)},
+    )
+
+
+class MainTest(absltest.TestCase):
+
+  def test_main_exits_with_the_subcommand_exit_code(self) -> None:
+    with (
+        self.assertRaises(SystemExit) as cm,
+        contextlib.redirect_stdout(io.StringIO()),
+    ):
+      run_explorer.main(["trajectory-explore", "--json", "ping"], diagnostics=())
+    self.assertEqual(cm.exception.code, 0)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,27 @@
+import copy
+
 from absl.testing import absltest
+from absl.testing import parameterized
 import optax
 from tunix.common import configs
+from tunix.common import datatypes
+
+
+class CacheGeometryTest(parameterized.TestCase):
+
+  @parameterized.named_parameters(
+      dict(testcase_name="zero_num_kv_heads", field="num_kv_heads", value=0),
+      dict(testcase_name="zero_head_dim", field="head_dim", value=0),
+      dict(testcase_name="zero_window_size", field="window_size", value=0),
+      dict(
+          testcase_name="negative_window_size", field="window_size", value=-8
+      ),
+  )
+  def test_non_positive_field_raises(self, field, value):
+    kwargs = dict(num_kv_heads=2, head_dim=16, window_size=8)
+    kwargs[field] = value
+    with self.assertRaisesRegex(ValueError, rf"{field} must be positive"):
+      datatypes.CacheGeometry(**kwargs)
 
 
 class ConfigsTest(absltest.TestCase):
@@ -132,6 +153,57 @@ class ConfigsTest(absltest.TestCase):
     self.assertFalse(configs.is_sequence_packing_enabled(cfg_disabled))
     self.assertFalse(configs.is_sequence_packing_enabled(object()))
 
+    cfg_zero = configs.TrainingConfig(
+        eval_every_n_steps=1, max_seq_tokens_per_device=0
+    )
+    self.assertFalse(cfg_zero.sequence_packing_enabled)
+    self.assertFalse(configs.is_sequence_packing_enabled(cfg_zero))
+    self.assertIsNone(cfg_zero.max_seq_tokens_per_device)
+    self.assertIsNone(cfg_zero.max_seq_token_per_tpu)
+
+    cfg_device_with_zero_tpu = configs.TrainingConfig(
+        eval_every_n_steps=1,
+        max_seq_tokens_per_device=2048,
+        max_seq_token_per_tpu=0,
+    )
+    self.assertEqual(cfg_device_with_zero_tpu.max_seq_tokens_per_device, 2048)
+    self.assertEqual(cfg_device_with_zero_tpu.max_seq_token_per_tpu, 2048)
+
+    cfg_device = configs.RLTrainingConfig(
+        eval_every_n_steps=1,
+        actor_optimizer=self.actor_optimizer,
+        mini_batch_size=6,
+        train_micro_batch_size=4,
+        max_seq_tokens_per_device=2048,
+    )
+    self.assertTrue(cfg_device.sequence_packing_enabled)
+    self.assertEqual(cfg_device.max_seq_token_per_tpu, 2048)
+    self.assertNotIn(
+        "__class__", configs.RLTrainingConfig.__post_init__.__code__.co_freevars
+    )
+    cfg_copied = copy.deepcopy(cfg_device)
+    self.assertEqual(cfg_copied.max_seq_tokens_per_device, 2048)
+    self.assertEqual(cfg_copied.max_seq_token_per_tpu, 2048)
+
+    with self.assertRaisesRegex(ValueError, "non-negative integer or None"):
+      configs.TrainingConfig(
+          eval_every_n_steps=1,
+          max_seq_tokens_per_device=-1,
+      )
+
+    with self.assertRaisesRegex(ValueError, "must match when both are set"):
+      configs.TrainingConfig(
+          eval_every_n_steps=1,
+          max_seq_tokens_per_device=2048,
+          max_seq_token_per_tpu=4096,
+      )
+
+  def test_rollout_config_num_logprobs_validation(self):
+    self.assertEqual(configs.RolloutConfig().num_logprobs, 1)
+    self.assertEqual(configs.RolloutConfig(num_logprobs=32).num_logprobs, 32)
+    with self.assertRaisesRegex(ValueError, "num_logprobs must be >= 1"):
+      configs.RolloutConfig(num_logprobs=0)
+
   def test_rl_profile_config_defaults_and_validation(self):
     cfg = configs.RLProfileConfig()
     self.assertEqual(cfg.start_invocation, 2)
@@ -158,6 +230,96 @@ class ConfigsTest(absltest.TestCase):
 
     with self.assertRaisesRegex(ValueError, "timeout_secs must be > 0"):
       configs.RLProfileConfig(timeout_secs=float("nan"))
+
+  def test_rollout_config_validation(self):
+    cfg = configs.RolloutConfig(
+        max_response_length=256,
+        episode_timeout=120,
+        weight_sync_mode="raiden",
+    )
+    self.assertEqual(cfg.max_response_length, 256)
+    self.assertEqual(cfg.episode_timeout, 120.0)
+    self.assertIsInstance(cfg.episode_timeout, float)
+    self.assertEqual(cfg.weight_sync_mode, "raiden")
+
+    # Positional arguments should be rejected (kw_only=True).
+    with self.assertRaises(TypeError):
+      configs.RolloutConfig(64)  # pytype: disable=wrong-arg-count
+
+    for bad_max_resp in (0, -1, True, 1.5):
+      with self.assertRaisesRegex(
+          ValueError, "max_response_length must be a positive integer"
+      ):
+        configs.RolloutConfig(max_response_length=bad_max_resp)  # pytype: disable=wrong-arg-types
+
+    for bad_timeout in (
+        0,
+        -1.0,
+        True,
+        False,
+        float("nan"),
+        float("inf"),
+        "60",
+    ):
+      with self.assertRaisesRegex(
+          ValueError, "episode_timeout must be a positive finite number"
+      ):
+        configs.RolloutConfig(episode_timeout=bad_timeout)  # pytype: disable=wrong-arg-types
+
+    for valid_mode in (
+        "none",
+        "noop",
+        "raiden",
+        "in_memory",
+        "fs",
+        "nccl",
+    ):
+      self.assertEqual(
+          configs.RolloutConfig(weight_sync_mode=valid_mode).weight_sync_mode,
+          valid_mode,
+      )
+
+    for bad_mode in ("fallback", "raden", "RAIDEN", "invalid", ""):
+      with self.assertRaisesRegex(
+          ValueError, "weight_sync_mode must be one of"
+      ):
+        configs.RolloutConfig(weight_sync_mode=bad_mode)
+
+  def test_rollout_config_validates_sampling_settings(self):
+    configs.RolloutConfig(temperature=0.0, top_p=None, top_k=-1)
+    configs.RolloutConfig(temperature=1.5, top_p=1.0, top_k=0)
+    for bad_temperature in (-0.1, float("nan"), float("inf")):
+      with self.assertRaisesRegex(ValueError, "temperature must be"):
+        configs.RolloutConfig(temperature=bad_temperature)
+    for bad_top_p in (0.0, -0.5, 1.1):
+      with self.assertRaisesRegex(ValueError, "top_p must be"):
+        configs.RolloutConfig(top_p=bad_top_p)
+    with self.assertRaisesRegex(ValueError, "top_k must be"):
+      configs.RolloutConfig(top_k=-2)
+    for bad_max_tokens in (0, -1, True, 1.5):
+      with self.assertRaisesRegex(
+          ValueError, "max_tokens_to_generate must be a positive integer"
+      ):
+        configs.RolloutConfig(max_tokens_to_generate=bad_max_tokens)
+
+
+class ReplicaSeedTest(parameterized.TestCase):
+
+  @parameterized.parameters(
+      (None, 0, None),
+      (None, 7, None),
+      (0, 0, 0),
+      (42, 0, 42),
+      (42, 15, 57),
+      (2**32 - 2, 5, 3),
+  )
+  def test_replica_seed(self, seed, replica_index, expected):
+    self.assertEqual(configs.replica_seed(seed, replica_index), expected)
+
+  def test_replica_seed_rejects_invalid_inputs(self):
+    for seed, idx in ((-1, 0), (42, -1), (None, -1), (True, 0), (42, False)):
+      with self.subTest(seed=seed, idx=idx), self.assertRaises(ValueError):
+        configs.replica_seed(seed, idx)
 
 
 if __name__ == "__main__":

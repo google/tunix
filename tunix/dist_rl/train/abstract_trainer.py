@@ -18,32 +18,57 @@ Defines the pure ML algorithmic core of a trainer.
 """
 
 import abc
-from typing import Any, Callable
+from collections.abc import Callable
+import dataclasses
+import functools
+from typing import Any, Concatenate, ParamSpec, Protocol, TypeVar, cast, runtime_checkable
 
+import numpy as np
 from tunix.dist_rl.common import datatypes
-from tunix.dist_rl.metrics import metrics
+
+_P = ParamSpec("_P")
+_PayloadT = TypeVar("_PayloadT")
 
 
-class AbstractTrainer(abc.ABC):
+class DeviceReadinessToken(Protocol):
+  """Handle to an in-flight computation exposing `block_until_ready()`."""
+
+  def block_until_ready(self) -> object:
+    ...
+
+
+@runtime_checkable
+class AbstractTrainer(Protocol):
   """The pure ML algorithmic core of a trainer.
 
   Step-level only: no training loops, no I/O policy, no orchestration.
+
+  Declared as a `@runtime_checkable` `typing.Protocol` whose required methods
+  carry `@abc.abstractmethod`: nominal subclasses (such as `PeftTrainer`) keep
+  instantiation-time completeness checks and inherit concrete no-op defaults on
+  optional hooks (`set_target_state`, `release_weight_sync`), whereas
+  non-inheriting structural engines (such as `MaxTextTrainingEngine`) conform
+  without cross-repo `abc.ABCMeta` instantiation hazards and must expose all
+  protocol members—including `set_target_state` and `release_weight_sync`—for
+  static `Protocol` and runtime `isinstance()` checks.
   """
 
-  @abc.abstractmethod
-  def __init__(self, config: Any):
-    """Initializes the trainer with the given config.
-
-    Args:
-      config: The trainer config.
-    """
-    raise NotImplementedError(
-        f"{type(self).__name__} does not implement __init__."
+  # Non-data descriptor (no `__set__`): covariant read-only in Pyrefly while
+  # allowing nominal subclasses to assign `self.model = ...` into `__dict__`
+  # (unlike `@property`), raising `AttributeError` when unset.
+  @functools.cached_property
+  def model(self) -> Any:
+    """Returns the underlying trainer model."""
+    raise AttributeError(
+        f"{type(self).__name__!r} object has no attribute 'model'"
     )
 
   @abc.abstractmethod
   def with_loss_fn(
-      self, loss_fn: Callable[..., Any], has_aux: bool = False
+      self,
+      loss_fn: Callable[Concatenate[Any, _P], Any],
+      /,
+      has_aux: bool = False,
   ) -> "AbstractTrainer":
     """Sets the loss function used by `fwd_bwd` (and evaluation).
 
@@ -62,7 +87,7 @@ class AbstractTrainer(abc.ABC):
 
   @abc.abstractmethod
   def with_gen_model_input_fn(
-      self, gen_model_input_fn: Callable[[Any], dict[str, Any]]
+      self, gen_model_input_fn: Callable[[Any], dict[str, Any]], /
   ) -> "AbstractTrainer":
     """Sets the last-mile adapter mapping a payload to the loss fn's kwargs.
 
@@ -101,7 +126,9 @@ class AbstractTrainer(abc.ABC):
     )
 
   @abc.abstractmethod
-  def fwd_bwd(self, payload: datatypes.TrainerPayload, **kwargs) -> None:
+  def fwd_bwd(
+      self, payload: datatypes.TrainerPayload
+  ) -> DeviceReadinessToken | None:
     """Executes forward and backward passes.
 
     Metrics are cached to overlap train steps.
@@ -110,19 +137,22 @@ class AbstractTrainer(abc.ABC):
     caller-driven: one `update()` per N `fwd_bwd()` calls.
     Args:
       payload: A packed micro-batch ready for gradient descent.
-      **kwargs: Implementation-specific options.
+
+    Returns:
+      An optional un-donated completion handle exposing `block_until_ready()`
+      that resolves when the device finishes this forward/backward pass, or
+      `None` if the trainer does not expose a readiness token.
     """
     raise NotImplementedError(
         f"{type(self).__name__} does not implement fwd_bwd."
     )
 
   @abc.abstractmethod
-  def update(self, **kwargs) -> int:
+  def update(self) -> int:
     """Applies the accumulated (mean) gradients as one optimizer update.
 
     Must be preceded by at least one `fwd_bwd()` call since the last update.
-    Args:
-      **kwargs: Implementation-specific options.
+
     Returns:
       The new train step count (number of optimizer updates applied).
     """
@@ -131,63 +161,90 @@ class AbstractTrainer(abc.ABC):
     )
 
   @abc.abstractmethod
-  def eval_step(self, payload: datatypes.TrainerPayload, **kwargs) -> None:
+  def eval_step(self, payload: datatypes.TrainerPayload) -> None:
     """Executes one evaluation step on the given payload.
 
     Must not mutate any trainer state, including gradient accumulation
     buffers.
     Args:
       payload: A packed micro-batch ready for evaluation.
-      **kwargs: Implementation-specific options.
     """
     raise NotImplementedError(
         f"{type(self).__name__} does not implement eval_step."
     )
 
   @abc.abstractmethod
-  def fwd_only(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-    """Read-only.
+  def with_fwd_only_fn(self, fn: Callable[..., Any], /) -> "AbstractTrainer":
+    """Sets the read-only callback `fwd_only` runs.
 
-    Runs a forward pass with the trainer model and caller-supplied function.
+    The forward-only counterpart of `with_loss_fn`. Invalidates any cached
+    forward-only JIT executables.
 
-    The trainer owns model access and shards `args`/`kwargs` on its data axis;
-    `fn` owns the computation and must not mutate the model.
     Args:
-      fn: Called as `fn(model, *args, **kwargs)`.
-      *args: Positional arguments forwarded to `fn` after sharding.
-      **kwargs: Keyword arguments forwarded to `fn` after sharding.
+      fn: Called as `fn(model, payload)`, where `model` is a read-only copy of
+        the trainer model in `eval()` mode (`model.eval()`) and `payload` is the
+        sharded input payload.
 
     Returns:
-      Whatever `fn` returns.
+      self, for chaining.
+    """
+    raise NotImplementedError(
+        f"{type(self).__name__} does not implement with_fwd_only_fn."
+    )
+
+  @abc.abstractmethod
+  def fwd_only(self, payload: datatypes.TrainerPayload) -> Any:
+    """Read-only.
+
+    Runs the registered `with_fwd_only_fn` callback on a read-only model copy in
+    `eval()` mode (`model.eval()`) and sharded `payload`.
+
+    The trainer owns model access, JIT compilation/caching, and sharding on its
+    data axis; `fn` owns the computation and must not mutate trainer state.
+
+    Args:
+      payload: The input payload to prepare and shard.
+
+    Returns:
+      Whatever the callback returns.
+
+    Raises:
+      ValueError: If `with_fwd_only_fn` has not been called.
     """
     raise NotImplementedError(
         f"{type(self).__name__} does not implement fwd_only."
     )
 
   @abc.abstractmethod
-  def save_checkpoint(self, metadata: Any, **kwargs) -> None:
+  def save_checkpoint(
+      self,
+      metadata: Any = None,
+      *,
+      step: int | None = None,
+      force: bool = False,
+  ) -> None:
     """Force the trainer to serialize its state (model + optimizer).
 
     Checkpoint cadence/policy is the caller's responsibility.
     Args:
-      metadata: The metadata pytree to save alongside the checkpoint.
-      **kwargs: Implementation-specific options.
+      metadata: The metadata pytree to save alongside the checkpoint, if any.
+      step: The step to save under. If None, implementations use
+        `metadata["step"]` when present, else their current train step.
+      force: Save even if the checkpoint manager's save policy (e.g. a save
+        interval) would skip this step.
     """
     raise NotImplementedError(
         f"{type(self).__name__} does not implement save_checkpoint."
     )
 
   @abc.abstractmethod
-  def restore_checkpoint(
-      self, step: int | None = None, **kwargs
-  ) -> Any:
+  def restore_checkpoint(self, *, step: int | None = None) -> Any:
     """Restore state from checkpoint and return the metadata pytree.
 
     The metadata is the same as what is used on save_checkpoint.
     Args:
       step: Checkpoint step to restore. If None, restores from the latest
         checkpoint.
-      **kwargs: Implementation-specific options.
 
     Returns:
       The restored metadata pytree (global_step, etc.).
@@ -205,28 +262,124 @@ class AbstractTrainer(abc.ABC):
     Args:
       target_state: The target state pytree from the rollout worker.
     """
-    pass
+    del target_state
+    return None
 
   @abc.abstractmethod
-  def prepare_weight_sync(self, **kwargs) -> None:
+  def prepare_weight_sync(self, *, sync_request: Any = None) -> Any:
     """Stages weights for transfer and returns coordinates/metadata for Rollouts to pull.
 
     For a Raiden based implementation, trigger the d2h weight transfer here.
     Args:
-      **kwargs: Implementation-specific options.
+      sync_request: The round's request from `WeightSyncCoordinator`.
+
+    Returns:
+      The staged weights' transfer metadata (e.g. work-unit metadata).
     """
     raise NotImplementedError(
         f"{type(self).__name__} does not implement prepare_weight_sync."
     )
 
+  def release_weight_sync(self, *, sync_request: Any = None) -> Any:
+    """Ends the staging hold taken by `prepare_weight_sync`.
+
+    Called once the round's transfer is complete. Default implementation is a
+    no-op for trainers that hold nothing between prepare and release.
+
+    May run on another thread than, and at the same time as, any other method
+    except `prepare_weight_sync` and `close`: the trainer may already be
+    training on the next batch.
+
+    Args:
+      sync_request: The same request passed to `prepare_weight_sync`.
+
+    Returns:
+      An implementation-defined acknowledgement.
+    """
+    del sync_request
+    return None
+
   @abc.abstractmethod
-  def get_metrics(self) -> metrics.MetricsBuffer:
-    """Returns and clears the recently collected step metric records."""
+  def get_metrics(self) -> datatypes.MetricsBufferLike:
+    """Returns and clears the recently collected step metrics on host."""
     raise NotImplementedError(
         f"{type(self).__name__} does not implement get_metrics."
     )
 
   @abc.abstractmethod
   def close(self) -> None:
-    """Releases resources held by the trainer. Default: no-op."""
-    pass
+    """Releases resources held by the trainer."""
+    raise NotImplementedError(
+        f"{type(self).__name__} does not implement close."
+    )
+
+
+def resolve_dummy_routed_experts(
+    trainer: AbstractTrainer,
+    data: _PayloadT,
+) -> _PayloadT:
+  """Expands `(B, S, 0, 0)` precompile `routed_experts` placeholders.
+
+  During pre-rollout trainer compilation, `batch_assembly` builds a dummy
+  `RLTrainerPayload` with a zero-sized `(B, S, 0, 0)` `routed_experts`
+  placeholder and attaches `routed_experts_encode_fn` in `payload.metadata`.
+  Expanding and encoding the placeholder against the trainer model's MoE
+  dimensions (`num_layers` or MaxText's `num_decoder_layers`,
+  `num_experts_per_tok`, and `num_experts`) ensures all trainer backends
+  (`PeftTrainer` and `MaxTextTrainingEngine`) precompile with the exact
+  encoded `routed_experts` shape and dtype.
+
+  This function is idempotent: once expanded (`routed_experts.size != 0`),
+  subsequent calls return `data` unchanged.
+
+  Args:
+    trainer: Initialized trainer or training engine exposing `.model.config` (or
+      `.model.base.config` for `TunixMaxTextAdapter`-wrapped MaxText models).
+    data: Optional dummy payload passed to `compile()`.
+
+  Returns:
+    `data` with any zero-sized `routed_experts` placeholder expanded (and
+    encoded via `metadata.pop("routed_experts_encode_fn")` if present).
+  """
+  if not isinstance(data, datatypes.RLTrainerPayload):
+    return data
+  if data.routed_experts is None:
+    return data
+  routed_experts = np.asarray(data.routed_experts)
+  if routed_experts.size != 0:
+    return data
+  if routed_experts.ndim < 2:
+    raise ValueError(
+        "Expected dummy routed_experts placeholder with rank >= 2, got shape"
+        f" {routed_experts.shape}."
+    )
+  model = trainer.model
+  # `maxtext.utils.model_creation_utils.from_pretrained(...,
+  # wrap_with_tunix_adapter=True)` sets `adapter.config = None`, so treat a
+  # `None` `.config` as absent and fall back to `.base.config` (or `_config`).
+  cfg = (
+      getattr(model, "config", None)
+      or getattr(getattr(model, "base", None), "config", None)
+      or getattr(trainer, "_config", None)
+  )
+  if cfg is None:
+    raise ValueError(
+        "Cannot resolve dummy routed_experts: trainer model does not expose a"
+        " non-None `.config` or `.base.config`."
+    )
+  num_layers = getattr(cfg, "num_layers", None)
+  if num_layers is None:
+    num_layers = cfg.num_decoder_layers
+  batch_size, seq_len = routed_experts.shape[:2]
+  expanded = np.zeros(
+      (batch_size, seq_len, num_layers, cfg.num_experts_per_tok),
+      dtype=routed_experts.dtype,
+  )
+  metadata = dict(data.metadata)
+  if "routed_experts_encode_fn" in metadata:
+    encode_fn = metadata.pop("routed_experts_encode_fn")
+    expanded = encode_fn(expanded, num_experts=cfg.num_experts)
+  return cast(
+      _PayloadT,
+      dataclasses.replace(data, routed_experts=expanded, metadata=metadata),
+  )

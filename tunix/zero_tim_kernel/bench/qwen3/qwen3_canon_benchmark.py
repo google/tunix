@@ -74,11 +74,10 @@ HBM_DUMP_MODULE_PREFIX = 'hbmdump_'
 # the library's `PRODUCTION_V`) and the same vocabulary padded to the
 # library's own column grouping (`TILES_PER_GROUP=8` tiles of
 # `VOCAB_TILE=1024` columns): `151936 -> 19 groups -> 155648 = 38 * 4096`.
-# The padded size makes every rank's `V/TP` shard a whole number of
-# 1024-column tiles for TP in {2, 4, 8}, which is what admits the
-# vocab-parallel log-softmax path (`vocab_parallel_logsoftmax_admitted`);
-# `151936` itself is not admitted at any of these degrees (`V/TP % 1024` =
-# 192 / 96 / 560).
+# Both admit `vocab_parallel_logsoftmax_admitted` for TP in {2, 4, 8}:
+# `151936` uses a single 1024-column neighbor halo exchange (`lax.ppermute`)
+# to align per-rank slices to global 1024-column tiles, while `155648` has
+# already-aligned per-rank slices and requires zero LM-head column padding.
 PRODUCTION_VOCAB = canonical_logsoftmax.PRODUCTION_V
 _VOCAB_GROUP_COLUMNS = (
     canonical_logsoftmax.TILES_PER_GROUP * canonical_logsoftmax.VOCAB_TILE
@@ -258,16 +257,13 @@ def build_model_config(
     return cfg
   if preset in ('qwen3_0p6b_2l_fullvocab', 'qwen3_0p6b_2l_fullvocab_aligned'):
     # Two layers at the production vocabulary (`qwen3_0p6b_2l` shrinks it to
-    # 8192 so that the suite runs in minutes), independent of `tp_size`. At
-    # `V=151936` the vocab-parallel log-softmax path is not admitted for
-    # TP in {2, 4, 8} (see `PRODUCTION_VOCAB`), so `compute_log_softmax` /
-    # `compute_token_logprobs` take their gathered fallback and the fixed LM
-    # head pads its `N=V/TP` columns (`37984 -> 38144` at TP=4). The
-    # `_aligned` variant uses `PRODUCTION_VOCAB_ALIGNED` (`V/TP = 38 * 1024`
-    # at TP=4; no LM-head padding), which admits the vocab-parallel path: the
-    # pair measures what aligning the vocabulary to `1024 * TP` buys at
-    # production scale. Both keep the 0.6B widths (`embed_dim=1024`,
-    # `hidden_dim=3072`, 16 / 8 heads) and tied embeddings.
+    # 8192 so that the suite runs in minutes), independent of `tp_size`. Both
+    # admit the vocab-parallel log-softmax path (`V/TP >= 1024`): at `V=151936`
+    # `vocab_parallel_normalizer` exchanges a 1024-column neighbor halo and the
+    # fixed LM head pads its `N=V/TP` columns (`37984 -> 38144` at TP=4),
+    # whereas `_aligned` (`PRODUCTION_VOCAB_ALIGNED`, `V/TP = 38 * 1024` at
+    # TP=4) needs neither halo nor LM-head padding. Both keep the 0.6B widths
+    # (`embed_dim=1024`, `hidden_dim=3072`, 16 / 8 heads) and tied embeddings.
     cfg = qwen3_stock.ModelConfig.qwen3_0p6b()
     cfg.num_layers = 2
     cfg.vocab_size = (

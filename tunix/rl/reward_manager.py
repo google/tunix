@@ -15,17 +15,19 @@
 """Reward output for RL."""
 
 import abc
+from collections.abc import Sequence
 from dataclasses import asdict
 import inspect
-import multiprocessing
 import os
-from typing import Any, Callable, Dict, List, Sequence
+from typing import Any, Callable, ClassVar, Dict, List
 import weakref
 
 from absl import logging
 import numpy as np
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import function_registry
+
+import multiprocessing
 
 RewardFn = Callable[..., Any]
 
@@ -56,17 +58,49 @@ def _fork_context():
     return None
 
 
-def _calculate_scalar_reward_log_metrics(
+def _sum_trajectory_rewards(
     rewards: np.ndarray,
-    prefix: str = "rewards",
-    axis: int = 1,
+    env_rewards: np.ndarray | None = None,
+) -> np.ndarray:
+  """Sums per-trajectory reward-function columns, propagating NaN env rewards."""
+  fn_sum = np.nansum(rewards, axis=1)
+  return fn_sum if env_rewards is None else env_rewards + fn_sum
+
+
+# Summary metrics logged as `rewards/<name>`; a reward function with one of
+# these names would overwrite them with its own `rewards/<name>` series.
+_RESERVED_REWARD_FN_NAMES: frozenset[str] = frozenset(
+    {"sum", "mean", "std", "min", "max", "nonfinite_frac"}
+)
+
+
+def _calculate_scalar_reward_log_metrics(
+    total_rewards: np.ndarray,
 ) -> Dict[str, Any]:
-  """Helper to calculate sum, mean, min, and max log metrics for rewards."""
+  """Builds the step-level `rewards/*` summary of per-trajectory total rewards.
+
+  A trajectory whose total reward is not finite (e.g. a `NaN` environment
+  reward) is excluded from training (`advantages`, `payload_builder`), so it is
+  excluded here too: its entry is set to `NaN` and every aggregation function
+  is `NaN`-aware, which lets the step-level reduction skip it instead of turning
+  the whole step's metric into `NaN`. `rewards/nonfinite_frac` reports how many
+  trajectories were excluded.
+
+  Args:
+    total_rewards: 1D per-trajectory total rewards.
+
+  Returns:
+    Mapping from metric name to `(values, agg_fn)`.
+  """
+  finite = np.isfinite(total_rewards)
+  masked = np.where(finite, total_rewards, np.nan)
   return {
-      f"{prefix}/sum": (np.nansum(rewards, axis=axis), np.mean),
-      f"{prefix}/mean": (np.nanmean(rewards, axis=axis), np.mean),
-      f"{prefix}/min": (np.min(rewards, axis=axis), np.min),
-      f"{prefix}/max": (np.max(rewards, axis=axis), np.max),
+      "rewards/sum": (masked, np.nansum),
+      "rewards/mean": (masked, np.nanmean),
+      "rewards/std": (masked, np.nanstd),
+      "rewards/min": (masked, np.nanmin),
+      "rewards/max": (masked, np.nanmax),
+      "rewards/nonfinite_frac": ((~finite).astype(np.float64), np.mean),
   }
 
 
@@ -75,24 +109,29 @@ class AbstractRewardManager(abc.ABC):
 
   def __init__(
       self,
-      reward_fns: RewardFn | List[RewardFn],
+      reward_fns: RewardFn | Sequence[RewardFn] | None,
       algo_config: algo_config_lib.AlgorithmConfig,
   ):
     """Initializes the manager with a list of callable reward function objects.
 
     Args:
-        reward_fns: A list of reward functions or models.
+        reward_fns: A list of reward functions or models, or None when rewards
+          are supplied externally (e.g. environment trajectory rewards).
         algo_config: The algorithm config to use for reward function
           configuration.
-    """
-    self.reward_fns = (
-        [reward_fns] if not isinstance(reward_fns, Sequence) else reward_fns
-    )
 
-    if not self.reward_fns:
-      raise ValueError(
-          "reward_fns cannot be empty. You must provide at least one reward"
-          " function."
+    Raises:
+        TypeError: If any item in `reward_fns` is not callable.
+    """
+    if reward_fns is None:
+      self.reward_fns = []
+    elif callable(reward_fns):
+      self.reward_fns = [reward_fns]
+    else:
+      self.reward_fns = list(reward_fns)
+    if not all(callable(fn) for fn in self.reward_fns):
+      raise TypeError(
+          f"All items in reward_fns must be callable; got {self.reward_fns!r}."
       )
     self.algo_config = algo_config
 
@@ -116,28 +155,57 @@ class AbstractRewardManager(abc.ABC):
     """
     pass
 
+  def close(self) -> None:
+    """Releases any resources held by the reward manager."""
 
-@function_registry.register_reward_manager("sequence-level")
+
+@function_registry.register_reward_manager("reward_fn")
 class SequenceRewardManager(AbstractRewardManager):
-  """Reward manager for sequence-level rewards only."""
+  """Reward manager for sequence-level reward functions (`reward_mode='reward_fn'`)."""
+
+  _require_reward_fns: ClassVar[bool] = True
 
   def __init__(
       self,
-      reward_fns: RewardFn | List[RewardFn],
+      reward_fns: RewardFn | Sequence[RewardFn] | None,
       algo_config: algo_config_lib.AlgorithmConfig,
       **kwargs,
   ):
-    """Initializes the manager with a list of callable reward function objects."""
+    """Initializes the manager with a list of callable reward function objects.
+
+    Args:
+      reward_fns: Callable(s) scored per prompt-completion pair.
+      algo_config: Algorithm configuration.
+      **kwargs: Unused.
+
+    Raises:
+      ValueError: If `reward_fns` is empty while required, or a reward function
+        is named after a summary metric (e.g. `sum`, `mean`, `min`, `max`),
+        whose per-function `rewards/<name>` series would overwrite it.
+    """
     super().__init__(reward_fns, algo_config)
+    if self._require_reward_fns and not self.reward_fns:
+      raise ValueError(
+          f"reward_fns cannot be empty for {type(self).__name__}."
+          " Provide at least one reward function, or set"
+          " algo_config.reward_mode='env' to use environment trajectory"
+          " rewards."
+      )
+    reserved = sorted(
+        {fn.__name__ for fn in self.reward_fns} & _RESERVED_REWARD_FN_NAMES
+    )
+    if reserved:
+      raise ValueError(
+          f"Reward function names {reserved} are reserved for the"
+          " `rewards/*` summary metrics; rename them."
+      )
     self._pool = None
     # Reward fns that must be evaluated in the parent process, learned at
     # runtime: fns that are unpicklable, or that spawn subprocesses of their
     # own (which the pool's daemonic workers forbid).
     self._parent_only_fns = set()
     self._parallel_disabled = False
-    self._worker_timeout = getattr(
-        algo_config, "reward_worker_timeout_seconds", 180.0
-    )
+    self._worker_timeout = algo_config.reward_worker_timeout_seconds
 
   def _parallel_enabled(self) -> bool:
     return (
@@ -148,7 +216,7 @@ class SequenceRewardManager(AbstractRewardManager):
 
   def _num_workers(self) -> int:
     """Resolves `reward_num_workers`; -1 means one worker per CPU."""
-    n = getattr(self.algo_config, "reward_num_workers", 0)
+    n = self.algo_config.reward_num_workers
     cpus = os.cpu_count() or 1
     if n == -1:
       return cpus
@@ -178,11 +246,10 @@ class SequenceRewardManager(AbstractRewardManager):
       weakref.finalize(self, _terminate_pool, self._pool)
     return self._pool
 
-  def close(self):
+  def close(self) -> None:
     """Shuts down the reward worker pool, if one was created."""
-    pool = getattr(self, "_pool", None)
-    if pool is not None:
-      pool.terminate()
+    if self._pool is not None:
+      self._pool.terminate()
       self._pool = None
 
   def _call_reward_fn(
@@ -262,47 +329,76 @@ class SequenceRewardManager(AbstractRewardManager):
       completions: List[str],
       **kwargs,
   ) -> Dict[str, Any]:
-    """Computes the rewards for completions using the provided reward function, and return the sequence-level rewards information for advantage computationand logging."""
-    return self._compute_rewards(prompts, completions, **kwargs)
+    """Computes sequence-level rewards and log metrics for completions."""
+    return self._compute_rewards(prompts, completions, None, **kwargs)
 
   def _compute_rewards(
       self,
       prompts: List[str],
       completions: List[str],
-      **kwargs,
+      env_rewards: np.ndarray | None = None,
+      /,
+      **reward_kwargs,
   ) -> Dict[str, Any]:
-    """Computes the rewards for completions using the provided reward functions."""
+    """Computes rewards and log metrics for completions.
+
+    Args:
+        prompts: Input prompts (or 1D array of prompts) for the batch.
+        completions: Generated text completions aligned with `prompts`.
+        env_rewards: Optional 1D float64 array of per-trajectory environment
+          rewards (`reward_mode='env'`), positional-only so dataset columns
+          named `env_rewards` in `reward_kwargs` do not collide.
+        **reward_kwargs: Extra per-example dataset or metadata columns forwarded
+          to `reward_fns`.
+
+    Returns:
+        A dictionary with `"rewards"` (1D per-trajectory total rewards) and
+        `"log_metrics"` (metric tuples `(values, agg_fn)`).
+
+    Raises:
+        ValueError: If `prompts` is empty.
+        RuntimeError: If a reward function returns `None` or a list whose length
+          does not match `len(prompts)`.
+    """
 
     num_prompts = len(prompts)
     if num_prompts == 0:
       raise ValueError(
-          "SequenceRewardManager received an empty batch; nothing to score."
+          f"{type(self).__name__} received an empty batch; nothing to score."
       )
 
     algo_config_params = asdict(self.algo_config)
-    base_kwargs = kwargs.copy()
+    base_kwargs = reward_kwargs.copy()
 
     num_reward_fns = len(self.reward_fns)
     rewards = np.zeros((num_prompts, num_reward_fns))
 
     # Compute all rewards for each prompt-completion pair.
     for i, reward_fn in enumerate(self.reward_fns):
-      # Update the kwargs with the algo_config parameters.
       signature = inspect.signature(reward_fn)
-      reward_fn_config_params = {}
-      # Iterate over the function's expected parameters
-      for name, _ in signature.parameters.items():
-        # Skip standard parameters that are always passed (self, prompts, completions, kwargs)
-        if name in ["self", "prompts", "completions", "kwargs"]:
+      accepts_var_keyword = any(
+          param.kind == inspect.Parameter.VAR_KEYWORD
+          for param in signature.parameters.values()
+      )
+      call_kwargs = (
+          base_kwargs.copy()
+          if accepts_var_keyword
+          else {
+              k: v
+              for k, v in base_kwargs.items()
+              if k in signature.parameters
+              and k not in ("self", "prompts", "completions")
+          }
+      )
+      # Fill declared parameters that the caller did not pass from algo_config.
+      for name, param in signature.parameters.items():
+        if name in ("self", "prompts", "completions") or param.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
           continue
-
-        # Check if the parameter name matches a key in the algo_config dict. If
-        # so, set the value to the algo_config parameter value, otherwise respect the value in the base_kwargs.
-        if name in algo_config_params and name not in base_kwargs:
-          reward_fn_config_params[name] = algo_config_params[name]
-
-      call_kwargs = base_kwargs.copy()
-      call_kwargs.update(reward_fn_config_params)
+        if name in algo_config_params and name not in call_kwargs:
+          call_kwargs[name] = algo_config_params[name]
 
       r = self._call_reward_fn(reward_fn, prompts, completions, call_kwargs)
 
@@ -320,13 +416,15 @@ class SequenceRewardManager(AbstractRewardManager):
 
       rewards[:, i] = np.array(r)
 
+    sum_rewards = _sum_trajectory_rewards(rewards, env_rewards)
     # Prepare metrics for logging.
     log_metrics = self._prepare_log_metrics(
         prompts,
         completions,
         rewards,
+        sum_rewards=sum_rewards,
+        env_rewards=env_rewards,
     )
-    sum_rewards = np.nansum(rewards, axis=1)
     rewards_info = {
         "rewards": sum_rewards,
         "log_metrics": log_metrics,
@@ -355,52 +453,91 @@ class SequenceRewardManager(AbstractRewardManager):
       prompts: List[str],
       completions: List[str],
       rewards: np.ndarray,  # (num_prompts, num_reward_fns)
+      *,
+      sum_rewards: np.ndarray,
+      env_rewards: np.ndarray | None = None,
   ) -> Dict[str, Any]:
-    """Logs individual and summed rewards, along with prompts/completions, for each trajectory."""
-    # Assuming self.reward_fns and self.rl_engine are accessible instance attributes
+    """Builds per-trajectory reward and text log metrics.
+
+    `rewards/{sum,mean,std,min,max}` summarize the per-trajectory total reward
+    over the step. Per-source series (`rewards/env`, `rewards/<reward_fn>`)
+    skip trajectories with a non-finite total and `NaN` scores, matching the
+    trajectories that train.
+
+    Args:
+        prompts: Input prompts for the batch.
+        completions: Generated text completions for the batch.
+        rewards: 2D `(num_prompts, num_reward_fns)` matrix of reward-function
+          scores.
+        sum_rewards: 1D total reward per trajectory.
+        env_rewards: Optional 1D array of environment trajectory rewards; logged
+          under `"rewards/env"` only when `self.reward_fns` is non-empty.
+
+    Returns:
+        Mapping from metric name to `(values, agg_fn)`.
+    """
     metrics_to_log = {}
 
     # Log prompts and completions.
     metrics_to_log["prompts"] = (prompts, None)
     metrics_to_log["completions"] = (completions, None)
 
-    # Log the sum/mean rewards for each prompt-completion pair.
-    metrics_to_log.update(
-        _calculate_scalar_reward_log_metrics(rewards, prefix="rewards")
-    )
+    metrics_to_log.update(_calculate_scalar_reward_log_metrics(sum_rewards))
+
+    finite_total = np.isfinite(sum_rewards)
+    if env_rewards is not None and self.reward_fns:
+      metrics_to_log["rewards/env"] = (
+          np.where(finite_total, env_rewards, np.nan),
+          np.nanmean,
+      )
 
     # Log individual rewards for this trajectory
     for i, reward_fn in enumerate(self.reward_fns):
       metric_name = f"rewards/{reward_fn.__name__}"
-      metrics_to_log[metric_name] = (rewards[:, i], np.mean)
+      metrics_to_log[metric_name] = (
+          np.where(finite_total, rewards[:, i], np.nan),
+          np.nanmean,
+      )
 
     return metrics_to_log
 
 
-@function_registry.register_reward_manager("agentic-sequence-level")
+@function_registry.register_reward_manager("env")
 class AgenticSequenceRewardManager(SequenceRewardManager):
-  """Reward manager for agentic settings.
+  """Reward manager for agentic environment trajectories (`reward_mode='env'`).
 
-  Supports two reward sources:
-  - Pluggable reward_fns evaluated post-rollout (e.g. deepscaler).
-  - Trajectory rewards from the environment, passed via `trajectory_rewards`
-    kwarg (e.g. deepswe).
-
-  reward_fns is optional. When not provided, only trajectory_rewards are used
-  and the fn computation step is skipped entirely.
+  Starts from `trajectory_rewards` produced by the rollout environment and, when
+  `reward_fns` are provided, evaluates and sums them on top of
+  `trajectory_rewards`. Logs unified `rewards/{sum,mean,min,max}` across active
+  reward sources and emits `rewards/env` only when `reward_fns` is non-empty.
   """
+
+  _require_reward_fns: ClassVar[bool] = False
 
   def __init__(
       self,
-      reward_fns: RewardFn | List[RewardFn] | None,
+      reward_fns: RewardFn | Sequence[RewardFn] | None,
       algo_config: algo_config_lib.AlgorithmConfig,
       **kwargs,
   ):
-    if reward_fns is None:
-      self.reward_fns = []
-      self.algo_config = algo_config
-    else:
-      super().__init__(reward_fns, algo_config)
+    """Initializes the agentic reward manager.
+
+    Args:
+        reward_fns: Optional callable(s) summed on top of `trajectory_rewards`.
+        algo_config: Algorithm configuration.
+        **kwargs: Additional keyword arguments forwarded to the parent class.
+
+    Raises:
+        TypeError: If any item in `reward_fns` is not callable.
+        ValueError: If any reward function is named `'env'` (reserved for
+          `rewards/env`).
+    """
+    super().__init__(reward_fns, algo_config, **kwargs)
+    if any(fn.__name__ == "env" for fn in self.reward_fns):
+      raise ValueError(
+          "Reward function name 'env' is reserved for environment trajectory"
+          " rewards (`rewards/env`) in `reward_mode='env'`."
+      )
 
   def __call__(
       self,
@@ -408,23 +545,35 @@ class AgenticSequenceRewardManager(SequenceRewardManager):
       completions: List[str],
       **kwargs,
   ) -> Dict[str, Any]:
+    """Computes combined environment and function rewards and log metrics.
 
-    log_metrics = {}
+    Args:
+        prompts: Input prompts (or 1D array of prompts) for the batch.
+        completions: Generated text completions aligned with `prompts`.
+        **kwargs: Must include `trajectory_rewards` (1D sequence/array of length
+          `len(prompts)`); remaining entries are forwarded to `reward_fns`.
 
-    # Extract trajectory rewards from kwargs and log them. Even trajectory rewards will be all zero if not provided.
+    Returns:
+        A dictionary with `"rewards"` (propagating `NaN` environment rewards)
+        and `"log_metrics"` under `rewards/*` (`"rewards/env"` included only
+        when `reward_fns` is non-empty).
+
+    Raises:
+        KeyError: If `trajectory_rewards` is missing from `kwargs`.
+        ValueError: If `prompts` is empty or `trajectory_rewards` does not have
+          1D shape `(len(prompts),)`.
+    """
     trajectory_rewards = kwargs.pop("trajectory_rewards")
-    trajectory_rewards_array = np.asarray(trajectory_rewards)
-    # Log trajectory rewards separately
-    log_metrics.update(
-        _calculate_scalar_reward_log_metrics(
-            trajectory_rewards_array, prefix="trajectory_rewards", axis=0
-        )
+    trajectory_rewards_array = np.asarray(trajectory_rewards, dtype=np.float64)
+    num_prompts = len(prompts)
+    if trajectory_rewards_array.shape != (num_prompts,):
+      raise ValueError(
+          "trajectory_rewards shape mismatch: expected"
+          f" {(num_prompts,)}, got {trajectory_rewards_array.shape}."
+      )
+    return self._compute_rewards(
+        prompts,
+        completions,
+        trajectory_rewards_array,
+        **kwargs,
     )
-    final_rewards = trajectory_rewards_array
-
-    if self.reward_fns:
-      rewards_info = self._compute_rewards(prompts, completions, **kwargs)
-      final_rewards += rewards_info["rewards"]
-      log_metrics.update(rewards_info["log_metrics"])
-
-    return {"rewards": final_rewards, "log_metrics": log_metrics}

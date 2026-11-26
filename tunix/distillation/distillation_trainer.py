@@ -14,16 +14,18 @@
 
 """Distillation trainer."""
 import dataclasses
-from typing import Any, Callable
+from typing import Any, Callable, TypeAlias
 
 import flax
 from flax import nnx
-from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import optax
+from tunix.common import datatypes
 from tunix.distillation import strategies
 from tunix.sft import metrics_logger
 from tunix.sft import peft_trainer
 from typing_extensions import override
+
+ArrayLike: TypeAlias = datatypes.ArrayLike
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)

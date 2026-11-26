@@ -11,7 +11,7 @@ dives, launch news, and collaborations.
 | :--- | :--- | :--- | :--- |
 | **2025-12-16** | Blog | **GRL**<br>Turning verifiable games into a post-training suite for LLM agents<br>with Tunix on TPUs | [Read](https://opensource.googleblog.com/2025/12/grl-turning-verifiable-games-into-a-post-training-suite-for-llm-agents-with-tunix-on-tpus.html) |
 | **2025-12-11** | Blog | **Empowering App Developers**<br>Fine-tuning Gemma 3 for mobile with Tunix in Google Colab. | [Read](https://opensource.googleblog.com/2025/12/empowering-app-developers-fine-tuning-gemma-3-for-mobile-with-tunix-in-google-colab.html) |
-| **2025-11-14** | Hackathon | **Google Tunix Hackathon (Kaggle)**<br>Challenge to train reasoning models **(active)**. | [View](https://www.kaggle.com/competitions/google-tunix-hackathon) |
+| **2025-11-14** | Hackathon | **Google Tunix Hackathon (Kaggle)**<br>Challenge to train reasoning models (concluded). | [View](https://www.kaggle.com/competitions/google-tunix-hackathon) |
 | **2025-09-30** | Launch | **Introducing Tunix: A JAX-Native Library**<br>Official launch post. | [Read](https://developers.googleblog.com/introducing-tunix-a-jax-native-library-for-llm-post-training/) |
 
 ## Talks
