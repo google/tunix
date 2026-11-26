@@ -77,24 +77,18 @@ def _make_recorder(delay_s: float = 0.0):
 
 class AsyncMetricsShutdownTest(absltest.TestCase):
 
-  @classmethod
-  def setUpClass(cls):
-    super().setUpClass()
-    tc.safe_set_n_cpu_devices(4)
-
   def _make_engine(self, recorder) -> rl_engine_lib.RLEngine:
-    devices = jax.devices()
-    actor_mesh = jax.sharding.Mesh(
-        np.array(devices[:2]).reshape(2, 1), ("fsdp", "tp")
-    )
-    rollout_mesh = jax.sharding.Mesh(
-        np.array(devices[2:4]).reshape(1, 2), ("fsdp", "tp")
+    # One device: these tests exercise the metrics flushes, not device
+    # placement, and another test class may already have initialized JAX
+    # with fewer CPU devices in this process.
+    mesh = jax.sharding.Mesh(
+        np.array(jax.devices()[:1]).reshape(1, 1), ("fsdp", "tp")
     )
     cluster_config = rl_engine_lib.ClusterConfig(
         role_to_mesh={
-            rl_engine_lib.Role.ACTOR: actor_mesh,
-            rl_engine_lib.Role.REFERENCE: actor_mesh,
-            rl_engine_lib.Role.ROLLOUT: rollout_mesh,
+            rl_engine_lib.Role.ACTOR: mesh,
+            rl_engine_lib.Role.REFERENCE: mesh,
+            rl_engine_lib.Role.ROLLOUT: mesh,
         },
         rollout_engine="vanilla",
         offload_to_cpu=False,
