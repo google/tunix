@@ -21,6 +21,7 @@ import os
 import tempfile
 import threading
 import time
+import types
 from unittest import mock
 from absl.testing import absltest
 from flax import nnx
@@ -553,6 +554,22 @@ class VllmSamplerTest(absltest.TestCase):
     self.assertEqual(sampling_params.presence_penalty, 0.3)
 
 
+def _chip_face(nx, ny, cores=(0,), z=None):
+  """Fake TPU devices of an nx x ny chip face, ids in row-major order."""
+  devices = []
+  for y in range(ny):
+    for x in range(nx):
+      for core in cores:
+        devices.append(
+            types.SimpleNamespace(
+                id=len(devices),
+                coords=(x, y) if z is None else (x, y, z),
+                core_on_chip=core,
+            )
+        )
+  return devices
+
+
 class VllmSamplerConfigTest(absltest.TestCase):
   """Unit tests for VllmSampler config plumbing (no hardware required)."""
 
@@ -876,6 +893,94 @@ class VllmSamplerConfigTest(absltest.TestCase):
     self.assertEqual(sharding["sharding_strategy"]["custom_param"], "foo")
     self.assertEqual(sharding["sharding_strategy"]["expert_parallelism"], 4)
     self.assertNotIn("device_indexes", sharding["sharding_strategy"])
+
+  # `_snake_device_order` with fake device coordinates.
+
+  def assert_ici_ring(self, devices, order):
+    self.assertCountEqual(order, [d.id for d in devices])
+    by_id = {d.id: d for d in devices}
+    chips = []
+    for device_id in order:
+      chip = tuple(by_id[device_id].coords[:2])
+      if not chips or chips[-1] != chip:
+        chips.append(chip)
+    # Every chip appears once (its cores are consecutive), and every step,
+    # including the one from the last chip back to the first, is one hop.
+    self.assertLen(set(chips), len(chips))
+    for a, b in zip(chips, chips[1:] + chips[:1]):
+      if a != b:
+        self.assertEqual(abs(a[0] - b[0]) + abs(a[1] - b[1]), 1, chips)
+
+  def test_faces_with_a_ring(self):
+    for nx, ny in [(1, 1), (1, 2), (2, 1), (2, 2), (2, 4), (4, 2), (4, 4),
+                   (2, 6), (4, 3), (3, 4)]:
+      with self.subTest(face=f"{nx}x{ny}"):
+        devices = _chip_face(nx, ny)
+        self.assert_ici_ring(devices, vllm_sampler._snake_device_order(devices))
+
+  def test_2x2_face_order_is_unchanged(self):
+    # Row-major ids 0 1 / 2 3: (0,0) (1,0) (1,1) (0,1).
+    devices = _chip_face(2, 2)
+    self.assertEqual(vllm_sampler._snake_device_order(devices), [0, 1, 3, 2])
+
+  def test_2x4_face_closes_the_ring(self):
+    # Row-major ids: (x, y) -> 2y + x. The old x-major snake ended at (0, 3),
+    # three hops from (0, 0); this ring snakes along y and ends at (0, 1).
+    devices = _chip_face(2, 4)
+    order = vllm_sampler._snake_device_order(devices)
+    self.assertEqual(order, [0, 1, 3, 5, 7, 6, 4, 2])
+    self.assert_ici_ring(devices, order)
+
+  def test_two_cores_per_chip_stay_together_and_flip(self):
+    devices = _chip_face(2, 2, cores=(0, 1), z=0)
+    order = vllm_sampler._snake_device_order(devices)
+    self.assert_ici_ring(devices, order)
+    # Chips (0,0) (1,0) (1,1) (0,1) hold ids 0-1, 2-3, 6-7, 4-5.
+    self.assertEqual(order, [0, 1, 3, 2, 6, 7, 5, 4])
+
+  def test_offset_face(self):
+    devices = _chip_face(2, 2)
+    for d in devices:
+      d.coords = (d.coords[0] + 2, d.coords[1] + 4)
+    self.assertEqual(vllm_sampler._snake_device_order(devices), [0, 1, 3, 2])
+
+  def test_faces_without_a_ring_are_rejected(self):
+    for nx, ny in [(3, 3), (1, 4), (4, 1), (3, 1)]:
+      with self.subTest(face=f"{nx}x{ny}"):
+        with self.assertRaisesRegex(ValueError, "no ICI-adjacent ring"):
+          vllm_sampler._snake_device_order(_chip_face(nx, ny))
+
+  def test_devices_that_do_not_fill_one_face_are_rejected(self):
+    missing_chip = _chip_face(2, 2)[:3]
+    two_faces = _chip_face(2, 2, z=0) + [
+        types.SimpleNamespace(id=9, coords=(0, 0, 1), core_on_chip=0)
+    ]
+    uneven_cores = _chip_face(2, 2, cores=(0, 1))[:-1]
+    for devices in (missing_chip, two_faces, uneven_cores):
+      with self.assertRaisesRegex(ValueError, "do not fill one chip face"):
+        vllm_sampler._snake_device_order(devices)
+
+  def test_host_local_engine_args_use_the_ring(self):
+    args = {
+        "tensor_parallel_size": 8,
+        "data_parallel_size": 1,
+        "additional_config": {"sharding": {"sharding_strategy": {}}},
+    }
+    with mock.patch.dict(
+        os.environ,
+        {"TUNIX_VLLM_SNAKE_DEVICE_ORDER": "1", "TPU_MULTIPROCESS_DP": "1"},
+    ):
+      os.environ.pop("TUNIX_VLLM_HOST_LOCAL_TP", None)
+      os.environ.pop("TUNIX_VLLM_HOST_LOCAL_DP", None)
+      out = vllm_sampler._host_local_engine_args(args, _chip_face(2, 4))
+    strategy = out["additional_config"]["sharding"]["sharding_strategy"]
+    self.assertEqual(strategy["device_indexes"], [0, 1, 3, 5, 7, 6, 4, 2])
+    self.assertEqual(out["tensor_parallel_size"], 8)
+    self.assertEqual(out["data_parallel_size"], 1)
+    # The input args are not modified.
+    self.assertEqual(
+        args["additional_config"]["sharding"]["sharding_strategy"], {}
+    )
 
 
 class VllmSamplerTokenInputTest(absltest.TestCase):
