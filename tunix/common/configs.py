@@ -269,6 +269,11 @@ class RolloutConfig:
   # The number of model forward passes per engine step.
   rollout_vanilla_v2_num_scheduler_steps: int = 1
 
+  # How many of the most likely tokens to return logprobs for at each position,
+  # besides the sampled token, when `return_logprobs` is set. -1 returns every
+  # token.
+  rollout_vanilla_v2_max_logprobs: int = 0
+
   # Trajectory execution configs.
   episode_timeout: float = 600.0
   overlong_filter: bool = False
@@ -392,6 +397,11 @@ class RolloutConfig:
       )
     if self.num_logprobs < 1:
       raise ValueError(f"num_logprobs must be >= 1, got {self.num_logprobs}.")
+    if self.rollout_vanilla_v2_max_logprobs < -1:
+      raise ValueError(
+          "rollout_vanilla_v2_max_logprobs must be >= -1, got"
+          f" {self.rollout_vanilla_v2_max_logprobs}."
+      )
     if not math.isfinite(self.temperature) or self.temperature < 0:
       raise ValueError(
           f"temperature must be a finite number >= 0, got {self.temperature!r}."
