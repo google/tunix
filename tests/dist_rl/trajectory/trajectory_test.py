@@ -3656,7 +3656,7 @@ class TrajectoryMetricsTest(parameterized.TestCase):
       trajectory.TrajectoryMetrics.model_validate({"unknown_metric": 1})
 
 
-class TolerantCreateTrajectoryTest(absltest.TestCase):
+class TolerantCreateTrajectoryTest(parameterized.TestCase):
   """Unit tests for tolerant trajectory construction (strict=False)."""
 
   def test_create_trajectory_complete_steps_strict_false_preserves_completion(
@@ -4054,13 +4054,48 @@ class TolerantCreateTrajectoryTest(absltest.TestCase):
     self.assertEqual(recovered_subagent.trajectory_id, "dup_id")
     self.assertEqual(recovered_subagent.steps[0].message, "sub first")
 
-  def test_create_trajectory_failed_status_fewer_steps_preserves_status(
+  @parameterized.named_parameters(
+      ("completed", "COMPLETED"),
+      ("succeeded", "SUCCEEDED"),
+      ("max_steps_reached", "MAX_STEPS_REACHED"),
+      ("max_context_limit_reached", "MAX_CONTEXT_LIMIT_REACHED"),
+      ("whitespace_and_lowercase", " succeeded "),
+  )
+  def test_create_trajectory_strict_false_resets_completed_status_on_tail_mismatch(
       self,
+      status: str,
   ) -> None:
     meta = trajectory.TunixTrajectoryMetadata(
-        trajectory_id="failed_early",
+        trajectory_id="tail_mismatch_status",
         agent=trajectory.Agent(name="test", version="1.0"),
-        status="FAILED",
+        status=status,
+        total_reward=2.5,
+        final_metrics=trajectory.FinalMetrics(total_steps=3),
+    )
+    step1 = trajectory_testing.make_step(step_id=1, message="step 1")
+    step2 = trajectory_testing.make_step(step_id=2, message="step 2")
+
+    traj = meta.create_trajectory(steps=[step1, step2], strict=False)
+
+    self.assertEqual([s.step_id for s in traj.steps], [0, 1])
+    self.assertIsNone(traj.status)
+    self.assertIsNone(traj.total_reward)
+
+  @parameterized.named_parameters(
+      ("failed", "FAILED"),
+      ("timeout", "TIMEOUT"),
+      ("env_timeout", "ENV_TIMEOUT"),
+      ("cancelled", "CANCELLED"),
+      ("running", "RUNNING"),
+  )
+  def test_create_trajectory_strict_false_preserves_non_completed_status_on_fewer_steps(
+      self,
+      status: str,
+  ) -> None:
+    meta = trajectory.TunixTrajectoryMetadata(
+        trajectory_id="non_completed_early",
+        agent=trajectory.Agent(name="test", version="1.0"),
+        status=status,
         total_reward=-1.0,
         final_metrics=trajectory.FinalMetrics(total_steps=5),
     )
@@ -4069,8 +4104,80 @@ class TolerantCreateTrajectoryTest(absltest.TestCase):
     traj = meta.create_trajectory(steps=[step1], strict=False)
 
     self.assertEqual([s.step_id for s in traj.steps], [0])
-    self.assertEqual(traj.status, "FAILED")
+    self.assertEqual(traj.status, status)
     self.assertEqual(traj.total_reward, -1.0)
+
+  @parameterized.named_parameters(
+      ("completed", "COMPLETED"),
+      ("succeeded", "SUCCEEDED"),
+      ("max_steps_reached", "MAX_STEPS_REACHED"),
+      ("max_context_limit_reached", "MAX_CONTEXT_LIMIT_REACHED"),
+      ("whitespace_and_lowercase", " succeeded "),
+  )
+  def test_create_trajectory_strict_false_preserves_completed_status_on_exact_count(
+      self,
+      status: str,
+  ) -> None:
+    meta = trajectory.TunixTrajectoryMetadata(
+        trajectory_id="exact_match_status",
+        agent=trajectory.Agent(name="test", version="1.0"),
+        status=status,
+        total_reward=2.5,
+        final_metrics=trajectory.FinalMetrics(total_steps=2),
+    )
+    step1 = trajectory_testing.make_step(step_id=1, message="step 1")
+    step2 = trajectory_testing.make_step(step_id=2, message="step 2")
+
+    traj = meta.create_trajectory(steps=[step1, step2], strict=False)
+
+    self.assertEqual([s.step_id for s in traj.steps], [0, 1])
+    self.assertEqual(traj.status, status)
+    self.assertEqual(traj.total_reward, 2.5)
+
+  def test_create_trajectory_strict_false_zero_steps_without_and_with_zero_expected_total(
+      self,
+  ) -> None:
+    for status in ("MAX_STEPS_REACHED", "MAX_CONTEXT_LIMIT_REACHED"):
+      with self.subTest(case=f"none_metrics_{status}"):
+        meta = trajectory.TunixTrajectoryMetadata(
+            trajectory_id=f"zero_steps_none_{status}",
+            agent=trajectory.Agent(name="test", version="1.0"),
+            status=status,
+            total_reward=1.0,
+            final_metrics=None,
+        )
+        traj = meta.create_trajectory(steps=[], strict=False)
+        self.assertEmpty(traj.steps)
+        self.assertIsNone(traj.status)
+        self.assertIsNone(traj.total_reward)
+
+    with self.subTest(case="none_metrics_FAILED_preserved"):
+      failed_meta = trajectory.TunixTrajectoryMetadata(
+          trajectory_id="zero_steps_none_FAILED",
+          agent=trajectory.Agent(name="test", version="1.0"),
+          status="FAILED",
+          total_reward=-1.0,
+          final_metrics=None,
+      )
+      failed_traj = failed_meta.create_trajectory(steps=[], strict=False)
+      self.assertEmpty(failed_traj.steps)
+      self.assertEqual(failed_traj.status, "FAILED")
+      self.assertEqual(failed_traj.total_reward, -1.0)
+
+    with self.subTest(case="zero_expected_total_SUCCEEDED_preserved"):
+      zero_expected_meta = trajectory.TunixTrajectoryMetadata(
+          trajectory_id="zero_steps_zero_expected",
+          agent=trajectory.Agent(name="test", version="1.0"),
+          status="SUCCEEDED",
+          total_reward=2.5,
+          final_metrics=trajectory.FinalMetrics(total_steps=0),
+      )
+      zero_expected_traj = zero_expected_meta.create_trajectory(
+          steps=[], strict=False
+      )
+      self.assertEmpty(zero_expected_traj.steps)
+      self.assertEqual(zero_expected_traj.status, "SUCCEEDED")
+      self.assertEqual(zero_expected_traj.total_reward, 2.5)
 
   def test_add_step_tunix_trajectory_assigns_zero_indexed_step_ids(
       self,

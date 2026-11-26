@@ -1894,7 +1894,7 @@ class ComputeFinalMetricsTest(parameterized.TestCase):
   def test_compute_final_metrics_none_trajectory(self):
     self.assertIsNone(converter.compute_final_metrics(None))
 
-  def test_compute_final_metrics_sums_tokens_and_counts_turns(self):
+  def test_compute_final_metrics_sums_tokens_and_counts_atif_steps(self):
     traj = agent_types.Trajectory(
         steps=[
             agent_types.Step(assistant_tokens=np.array([1, 2, 3])),
@@ -1910,7 +1910,7 @@ class ComputeFinalMetricsTest(parameterized.TestCase):
         trajectory_lib.FinalMetrics(
             total_prompt_tokens=4,
             total_completion_tokens=5,
-            total_steps=2,
+            total_steps=5,
         ),
     )
 
@@ -1926,6 +1926,7 @@ class ComputeFinalMetricsTest(parameterized.TestCase):
 
     self.assertIsNotNone(final_metrics)
     self.assertEqual(final_metrics.total_prompt_tokens, 2)
+    self.assertEqual(final_metrics.total_steps, 3)
 
   def test_compute_final_metrics_skips_turns_without_tokens(self):
     traj = agent_types.Trajectory(
@@ -1942,7 +1943,7 @@ class ComputeFinalMetricsTest(parameterized.TestCase):
         trajectory_lib.FinalMetrics(
             total_prompt_tokens=None,
             total_completion_tokens=2,
-            total_steps=2,
+            total_steps=5,
         ),
     )
 
@@ -1958,7 +1959,7 @@ class ComputeFinalMetricsTest(parameterized.TestCase):
         trajectory_lib.FinalMetrics(
             total_prompt_tokens=None,
             total_completion_tokens=None,
-            total_steps=2,
+            total_steps=5,
         ),
     )
 
@@ -1969,6 +1970,17 @@ class ComputeFinalMetricsTest(parameterized.TestCase):
         final_metrics,
         trajectory_lib.FinalMetrics(total_steps=0),
     )
+
+  def test_compute_final_metrics_task_only_counts_step_zero(self):
+    with_prompt = converter.compute_final_metrics(
+        agent_types.Trajectory(task="Solve 2+2", steps=[])
+    )
+    empty_prompt = converter.compute_final_metrics(
+        agent_types.Trajectory(task="", steps=[])
+    )
+
+    self.assertEqual(with_prompt, trajectory_lib.FinalMetrics(total_steps=1))
+    self.assertEqual(empty_prompt, trajectory_lib.FinalMetrics(total_steps=0))
 
   def test_compute_final_metrics_none_prompt_tokens(self):
     traj = agent_types.Trajectory(
@@ -1981,6 +1993,7 @@ class ComputeFinalMetricsTest(parameterized.TestCase):
     self.assertIsNotNone(final_metrics)
     self.assertIsNone(final_metrics.total_prompt_tokens)
     self.assertEqual(final_metrics.total_completion_tokens, 2)
+    self.assertEqual(final_metrics.total_steps, 3)
 
   def test_compute_final_metrics_zero_token_turn_counts_as_zero(self):
     traj = agent_types.Trajectory(
@@ -1994,7 +2007,7 @@ class ComputeFinalMetricsTest(parameterized.TestCase):
         trajectory_lib.FinalMetrics(
             total_prompt_tokens=None,
             total_completion_tokens=0,
-            total_steps=1,
+            total_steps=3,
         ),
     )
 
@@ -2021,9 +2034,58 @@ class ComputeFinalMetricsTest(parameterized.TestCase):
         trajectory_lib.FinalMetrics(
             total_prompt_tokens=2,
             total_completion_tokens=5,
-            total_steps=2,
+            total_steps=5,
         ),
     )
+
+  def test_compute_final_metrics_tail_drop_detected_from_converted_steps(self):
+    turn_0 = agent_types.Step(
+        model_response="step 1",
+        observation="obs 1",
+        reward=0.0,
+        done=False,
+    )
+    turn_1 = agent_types.Step(
+        model_response="step 2",
+        observation="obs 2",
+        reward=1.0,
+        done=True,
+    )
+    traj = agent_types.Trajectory(
+        task="Solve task",
+        steps=[turn_0, turn_1],
+        reward=1.0,
+        status=agent_types.TrajectoryStatus.SUCCEEDED,
+    )
+    persisted_steps = [
+        converter.create_task_step(traj.task),
+        converter.create_agent_step(turn_0, tunix_step_id=0),
+        converter.create_env_step(turn_0, tunix_step_id=0),
+        converter.create_agent_step(turn_1, tunix_step_id=1),
+        converter.create_env_step(turn_1, tunix_step_id=1),
+    ]
+    self.assertNotIn(None, persisted_steps)
+    meta = converter.create_trajectory_metadata(
+        traj_id="traj_converter_tail_drop",
+        status=traj.status,
+    )
+    converter.update_trajectory_metadata(
+        metadata=meta,
+        status=traj.status,
+        extra=None,
+        final_metrics=converter.compute_final_metrics(traj),
+    )
+    meta.total_reward = 1.0
+
+    full = meta.create_trajectory(steps=persisted_steps, strict=False)
+    self.assertLen(full.steps, 5)
+    self.assertEqual(full.status, "SUCCEEDED")
+    self.assertEqual(full.total_reward, 1.0)
+
+    truncated = meta.create_trajectory(steps=persisted_steps[:-1], strict=False)
+    self.assertLen(truncated.steps, 4)
+    self.assertIsNone(truncated.status)
+    self.assertIsNone(truncated.total_reward)
 
 
 if __name__ == "__main__":
