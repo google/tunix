@@ -692,10 +692,10 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         # every process must launch in the same order; from two threads they
         # can interleave differently on different processes and hang.
         logging.warning(
-            "TUNIX_PER_HOST_LEARNER=1: the actor and rollout meshes differ,"
-            " but asynchronous rollout is turned off. Data loading stays"
-            " synchronous so that every process launches its multi-process"
-            " programs (logprobs, train steps) in the same order."
+            "TUNIX_PER_HOST_LEARNER=1: the actor and rollout are not"
+            " colocated, but asynchronous rollout is turned off. Data loading"
+            " stays synchronous so that every process launches its"
+            " multi-process programs (logprobs, train steps) in the same order."
         )
         self.can_enable_async_rollout = False
       train_ds = _ProcessShardedIterable(
@@ -927,8 +927,8 @@ class RLLearner(abc.ABC, Generic[TConfig]):
 
     Under the per-host learner they need TUNIX_PER_HOST_SAFE_LOGPS=1. Mirrors
     GRPOLearner: reference logps when beta != 0; trainer (actor) logps when
-    use_rollout_logps is off or sampler_is/sampler_rs/
-    seq_logprob_error_threshold is set.
+    score_centering is off and use_rollout_logps is off or sampler_is/
+    sampler_rs/seq_logprob_error_threshold is set.
 
     Returns:
       A description of each pass that runs; empty if none does.
@@ -950,7 +950,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         )
         if value is not None
     ]
-    if reasons:
+    if reasons and not cfg.score_centering:
       passes.append(f"trainer logprobs ({', '.join(reasons)})")
     return passes
 

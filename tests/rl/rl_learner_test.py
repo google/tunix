@@ -73,6 +73,8 @@ def _mock_engine(actor_mesh, rollout_mesh):
       rl_engine_lib.Role.ACTOR: actor_mesh,
       rl_engine_lib.Role.ROLLOUT: rollout_mesh,
   }
+  # Separate mesh objects stand for actor and rollout on different devices.
+  engine.is_colocated.return_value = actor_mesh is rollout_mesh
   engine.actor_trainer.train_steps = 0
   engine.actor_trainer.iter_steps = 0
   return engine
@@ -93,7 +95,7 @@ class PerHostLearnerTest(parameterized.TestCase):
     engine = _mock_engine(_mesh(2), _mesh(2))
     with _per_host_env(2):
       learner = _learner(engine)
-    # Separate meshes: asynchronous rollout is on without the per-host learner.
+    # Not colocated: asynchronous rollout is on without the per-host learner.
     self.assertTrue(learner.can_enable_async_rollout)
 
     def fake_submit(fn, **kwargs):
@@ -111,6 +113,29 @@ class PerHostLearnerTest(parameterized.TestCase):
     self.assertIn('asynchronous rollout is turned off', '\n'.join(logs.output))
     submit.assert_called_once()
     self.assertIs(submit.call_args.kwargs['async_loading'], False)
+
+  @parameterized.named_parameters(
+      ('none', {}, []),
+      (
+          'trainer_logps',
+          {'use_rollout_logps': False},
+          ['trainer logprobs (use_rollout_logps=False)'],
+      ),
+      # GRPOLearner skips trainer logprobs under score centering.
+      (
+          'score_centering',
+          {'use_rollout_logps': False, 'score_centering': True},
+          [],
+      ),
+  )
+  def test_trainer_side_logps_mirror_grpo(self, config, want):
+    mesh = _mesh(2)
+    learner = DummyLearner(
+        rl_engine=_mock_engine(mesh, mesh),
+        algo_config=DummyConfig(**config),
+        reward_fns=lambda prompts, completions, **kwargs: [1.0] * len(prompts),
+    )
+    self.assertEqual(learner._per_host_trainer_side_logps(), want)
 
   @parameterized.named_parameters(
       # TUNIX_PER_HOST_SAFE_LOGPS=1: rows x 2 processes must divide fsdp=4.

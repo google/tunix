@@ -2271,22 +2271,21 @@ class RLEngine:
   def _generate_mesh_cm(self):
     """Mesh context for `generate`.
 
-    By default `generate` enters the ROLLOUT mesh and its logical axis rules.
-    With `TUNIX_ROLLOUT_NO_MESH_CONTEXT=1` it yields the ROLLOUT mesh without
-    entering it. A host-local in-process engine (TUNIX_VLLM_HOST_LOCAL_ENGINE=1)
-    sets its own per-process mesh inside `execute_model`; entering the global
-    ROLLOUT mesh around it makes jit read two meshes, and eager ops in the
-    engine's decode loop then fail on some processes with "Attempted to
-    execute with N argument lists when local device count is M". Other roles
-    and the ROLLOUT uses outside `generate` keep the normal context.
+    By default `generate` enters the ROLLOUT mesh (`r2m[Role.ROLLOUT]`) and its
+    logical axis rules. With `TUNIX_ROLLOUT_NO_MESH_CONTEXT=1` it yields that
+    mesh without entering it. A host-local in-process engine
+    (TUNIX_VLLM_HOST_LOCAL_ENGINE=1) sets its own per-process mesh inside
+    `execute_model`; entering the global ROLLOUT mesh around it makes jit read
+    two meshes, and eager ops in the engine's decode loop then fail on some
+    processes with "Attempted to execute with N argument lists when local
+    device count is M". Other roles and the ROLLOUT uses outside `generate`
+    keep the normal context.
 
     Returns:
       A context manager yielding `(mesh, logical_axis_rules_or_None)`.
     """
     if _env_flag("TUNIX_ROLLOUT_NO_MESH_CONTEXT"):
-      return contextlib.nullcontext(
-          (self.cluster_config.role_to_mesh[Role.ROLLOUT], None)
-      )
+      return contextlib.nullcontext((self.r2m[Role.ROLLOUT], None))
     return self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT)
 
   @contextlib.contextmanager
