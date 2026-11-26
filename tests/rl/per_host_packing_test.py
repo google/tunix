@@ -598,6 +598,7 @@ class PerHostRowChecksTest(absltest.TestCase):
 _CHILD_ENV = "TUNIX_PER_HOST_PACKING_TEST_CHILD"
 _NUM_PROCESSES = 2
 _TRAIN_STEPS = 2
+# Wall-clock budget of one 2-process job, shared by both processes.
 _JOB_TIMEOUT_S = 900
 _PROMPTS = ["hello world", "My name", "input string", "hello there"]
 _BASE_LENGTH = {
@@ -783,7 +784,7 @@ def _run_job(out_dir: str, budget: int, max_rows_per_shard: int = 0):
           "out_dir": out_dir,
           "budget": budget,
       })
-      # A file, not a pipe: nothing reads a pipe while the processes run.
+      # Output goes to a file, so a chatty child never blocks on a full pipe.
       log_paths.append(os.path.join(out_dir, f"process{process_id}.log"))
       with open(log_paths[-1], "w", encoding="utf-8") as log:
         procs.append(
@@ -794,31 +795,34 @@ def _run_job(out_dir: str, budget: int, max_rows_per_shard: int = 0):
                 stderr=subprocess.STDOUT,
             )
         )
-    # One deadline for the whole job. A failed process ends the job too: its
-    # peer may wait in a collective forever. Whatever still runs is killed.
     deadline = time.monotonic() + _JOB_TIMEOUT_S
-    while any(p.poll() is None for p in procs):
-      if any(p.returncode for p in procs):
+    while True:
+      codes = [p.poll() for p in procs]  # Polls every process.
+      if all(code is not None for code in codes):
         break
+      if any(codes):
+        break  # One process failed; its peer may wait in a collective.
       if time.monotonic() > deadline:
         timed_out = True
         break
-      time.sleep(1)
+      time.sleep(0.5)
   finally:
     for p in procs:
       if p.poll() is None:
         p.kill()
-    for p in procs:
-      p.wait()
+        p.wait()
   logs = []
   for path in log_paths:
     with open(path, encoding="utf-8", errors="replace") as f:
       logs.append(f.read())
   if timed_out or any(p.returncode for p in procs):
-    raise AssertionError(
-        f"per-host job {'timed out' if timed_out else 'failed'}:\n"
-        + "\n".join(log[-4000:] for log in logs)
-    )
+    tails = [
+        f"--- process {process_id} (exit code {p.returncode}) ---\n"
+        + log[-3000:]
+        for process_id, (p, log) in enumerate(zip(procs, logs))
+    ]
+    reason = f"timed out after {_JOB_TIMEOUT_S}s" if timed_out else "failed"
+    raise AssertionError(f"per-host job {reason}:\n" + "\n".join(tails))
   results = []
   for process_id in range(_NUM_PROCESSES):
     with open(
