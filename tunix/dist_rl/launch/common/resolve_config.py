@@ -289,6 +289,7 @@ def finalize_dist_config(
   _finalize_dist_defaults(hp)
   _validate_local_settings(hp)
   _validate_dist_invariants(hp)
+  _resolve_autoscaling_guard(hp)
   cluster_targets = resolve_cluster_targets(hp)
   cluster = _mutable_section(hp, "cluster_config")
   local = cluster["local"]
@@ -928,6 +929,130 @@ def _validate_rollout_replicas(hp: cli_config.HyperParameters) -> None:
     )
 
 
+def _validate_autoscaling(hp: cli_config.HyperParameters) -> None:
+  """Checks `cluster_config.autoscaling` and its bounds on `rollout_replicas`.
+
+  Args:
+    hp: Loaded configuration.
+
+  Raises:
+    TypeError: If `enabled` is not a bool, `policy_file` is neither a str nor
+      null, or `min_replicas` / `max_replicas` is neither null nor an int
+      (bools rejected).
+    ValueError: If `autoscaling` is enabled on a target other than `k8s`,
+      disabled while other `autoscaling` keys are set, enabled without both
+      `min_replicas` and `max_replicas`, `policy_file` is whitespace-only,
+      `min_replicas` or `max_replicas` is `< 1`, `min_replicas > max_replicas`,
+      or `rollout_replicas` is outside `[min_replicas, max_replicas]`.
+  """
+  cluster = hp.config_mapping("cluster_config")
+  autoscaling = cluster["autoscaling"]
+  enabled = autoscaling["enabled"]
+  if not isinstance(enabled, bool):
+    raise TypeError(
+        "cluster_config.autoscaling.enabled must be a bool, got"
+        f" {enabled!r}."
+    )
+  policy_file = autoscaling["policy_file"]
+  if policy_file is not None and not isinstance(policy_file, str):
+    raise TypeError(
+        "cluster_config.autoscaling.policy_file must be a str or null, got"
+        f" {policy_file!r}."
+    )
+  if isinstance(policy_file, str) and policy_file and not policy_file.strip():
+    raise ValueError(
+        "cluster_config.autoscaling.policy_file must not be whitespace-only,"
+        f" got {policy_file!r}."
+    )
+  for key in ("min_replicas", "max_replicas"):
+    value = autoscaling[key]
+    if value is not None and not _is_int(value):
+      raise TypeError(
+          f"cluster_config.autoscaling.{key} must be null or an int >= 1, got"
+          f" {value!r}."
+      )
+    if value is not None and value < 1:
+      raise ValueError(
+          f"cluster_config.autoscaling.{key} must be null or an int >= 1, got"
+          f" {value!r}."
+      )
+  min_replicas = autoscaling["min_replicas"]
+  max_replicas = autoscaling["max_replicas"]
+  if not enabled:
+    set_keys = [
+        f"cluster_config.autoscaling.{key}={autoscaling[key]!r}"
+        for key, is_set in (
+            ("policy_file", bool(policy_file)),
+            ("min_replicas", min_replicas is not None),
+            ("max_replicas", max_replicas is not None),
+        )
+        if is_set
+    ]
+    if set_keys:
+      raise ValueError(
+          "cluster_config.autoscaling.enabled=false, but"
+          f" {', '.join(set_keys)} is set. Clear it or set"
+          " cluster_config.autoscaling.enabled=true."
+      )
+    return
+
+  target = cluster["target"]
+  if target != "k8s":
+    raise ValueError(
+        "cluster_config.autoscaling.enabled=true requires"
+        f" cluster_config.target=k8s, got {target!r}."
+    )
+  # TODO(edwinhernandez): Once task 2.6 adds the default ScaledObject policy
+  # file, read unset min_replicas/max_replicas from it instead of requiring both
+  # here.
+  if min_replicas is None or max_replicas is None:
+    raise ValueError(
+        "cluster_config.autoscaling.enabled=true requires both"
+        " cluster_config.autoscaling.min_replicas and"
+        " cluster_config.autoscaling.max_replicas to be set."
+    )
+  if min_replicas > max_replicas:
+    raise ValueError(
+        f"cluster_config.autoscaling.min_replicas ({min_replicas}) must be <="
+        f" cluster_config.autoscaling.max_replicas ({max_replicas})."
+    )
+  rollout_replicas = cluster["rollout_replicas"]
+  if not (min_replicas <= rollout_replicas <= max_replicas):
+    raise ValueError(
+        f"cluster_config.rollout_replicas ({rollout_replicas}) must be between"
+        f" cluster_config.autoscaling.min_replicas ({min_replicas}) and"
+        f" cluster_config.autoscaling.max_replicas ({max_replicas})."
+    )
+
+
+def _resolve_autoscaling_guard(hp: cli_config.HyperParameters) -> None:
+  """Derives `fault_tolerance.min_active_rollout_ratio` when autoscaling is on.
+
+  `FaultToleranceManager` raises `RolloutCapacityError` when
+  `active / peak < min_active_rollout_ratio`, where `peak` is the running
+  maximum `ACTIVE` count. Setting the ratio to `min_replicas / max_replicas`
+  ensures a pool at `min_replicas` never trips the guard, while a pool below
+  `min_replicas` trips once `active < peak * min_replicas / max_replicas` (with
+  `peak < max_replicas`, `active` can drop below `min_replicas` without
+  tripping). Leaves a `null` ratio (guardrail disabled) untouched.
+
+  Args:
+    hp: Validated configuration updated in place.
+  """
+  cluster = _mutable_section(hp, "cluster_config")
+  autoscaling = cluster["autoscaling"]
+  ft = cluster["fault_tolerance"]
+  if (
+      not autoscaling["enabled"]
+      or not ft["enabled"]
+      or ft["min_active_rollout_ratio"] is None
+  ):
+    return
+  ft["min_active_rollout_ratio"] = (
+      autoscaling["min_replicas"] / autoscaling["max_replicas"]
+  )
+
+
 def _validate_trajectory_logging(hp: cli_config.HyperParameters) -> None:
   """Checks `dist_training_config.trajectory_logging`.
 
@@ -1436,6 +1561,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   _validate_k8s_scalars(hp)
   _validate_k8s_worker_jobsets(hp)
   _validate_rollout_replicas(hp)
+  _validate_autoscaling(hp)
   _validate_role_env(hp)
   _reject_unimplemented_settings(hp)
   _validate_role_memory(hp)
