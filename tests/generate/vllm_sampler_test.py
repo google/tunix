@@ -904,9 +904,7 @@ class VllmSamplerConfigTest(absltest.TestCase):
     )
     self.assertFalse(override_sampler.args["language_model_only"])
 
-
-class TokenizeMemoTest(absltest.TestCase):
-  """`_TokenizeMemo` and `VllmSampler.tokenize` with fake tokenizers."""
+  # `_TokenizeMemo` and `VllmSampler.tokenize` with fake tokenizers.
 
   def _counting_tokenizer(self):
     """A tokenizer mapping "ab" to [97, 98], and the list of its inputs."""
