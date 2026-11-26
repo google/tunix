@@ -18,7 +18,7 @@ Defines the pure ML algorithmic core of a trainer.
 """
 
 import abc
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 import dataclasses
 import functools
 from typing import Any, Concatenate, ParamSpec, Protocol, TypeVar, cast, runtime_checkable
@@ -312,6 +312,40 @@ class AbstractTrainer(Protocol):
     raise NotImplementedError(
         f"{type(self).__name__} does not implement close."
     )
+
+
+@runtime_checkable
+class IciWeightSyncCapable(Protocol):
+  """Optional protocol for trainers participating in ICI weight sync.
+
+  Kept separate from `AbstractTrainer` so non-ICI structural engines (such as
+  unwrapped external training engines) continue to satisfy `AbstractTrainer`.
+  """
+
+  def ici_check(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Validates this trainer's part of an ICI transfer plan (no collectives).
+
+    Args:
+      request: Dict with `"plan"` (`TransferPlan` or None during Phase 1 world
+        discovery), `"req_id"`, and `"generation"`.
+
+    Returns:
+      Mapping `{"process": int, "world": list[int]}` identifying this worker in
+      the shared JAX world.
+    """
+    ...
+
+  def ici_transfer(self, request: Mapping[str, Any]) -> Mapping[str, float]:
+    """Enters the ICI transfer collectives as the source or a bystander.
+
+    Args:
+      request: Dict with `"plan"` (`TransferPlan`), `"req_id"`, and
+        `"generation"`.
+
+    Returns:
+      Mapping of stage timing breakdowns and received byte counts.
+    """
+    ...
 
 
 def resolve_dummy_routed_experts(

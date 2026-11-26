@@ -24,6 +24,7 @@ from typing import Any
 from unittest import mock
 
 from absl.testing import absltest
+import jax
 from tunix.dist_rl.common import execution_target
 from tunix.dist_rl.common import gcs_cache
 from tunix.dist_rl.common import otel_setup
@@ -614,8 +615,43 @@ class CreateRolloutWorkerTest(absltest.TestCase):
     worker_kwargs = self._worker_kwargs()
     self.assertIs(worker_kwargs["sampler"], sampler_cls.return_value)
 
+  def test_ici_rollout_meshes_over_its_local_devices(self):
+    hp = _hp(
+        "weight_sync_config.mode=ici",
+        "cluster_config.fault_tolerance.enabled=false",
+        "rollout_engine=inprocess_vllm",
+    )
+    local_devices = [mock.sentinel.device]
+    with (
+        mock.patch.dict(os.environ, {"TPU_MULTIHOST_BACKEND": ""}),
+        mock.patch.object(
+            rollout, "_import_vllm_sampler", return_value=mock.Mock()
+        ),
+        mock.patch.object(jax, "local_devices", return_value=local_devices),
+        mock.patch.object(node_utils, "create_mesh") as create_mesh,
+        mock.patch.object(inprocess_vllm_sampler, "InprocessVllmSampler"),
+    ):
+      rollout._create_rollout_worker(hp, "rollout-0", self.tokenizer)
+    create_mesh.assert_called_once_with(
+        hp, "rollout_model_config", "Rollout", devices=local_devices
+    )
+
 
 class SamplerTest(absltest.TestCase):
+
+  def test_inprocess_vllm_rejects_tpu_multihost_backend_under_ici(self):
+    hp = _hp(
+        "weight_sync_config.mode=ici",
+        "cluster_config.fault_tolerance.enabled=false",
+        "rollout_engine=inprocess_vllm",
+    )
+    with mock.patch.dict(
+        os.environ, {"TPU_MULTIHOST_BACKEND": "ray"}, clear=False
+    ):
+      with self.assertRaisesRegex(ValueError, "TPU_MULTIHOST_BACKEND"):
+        rollout._create_inprocess_vllm_sampler(
+            hp, "rollout-0", mock.Mock(), mock.Mock()
+        )
 
   def test_vllm_sampler_engine_kwargs_follow_config(self):
     kwargs = _vllm_engine_kwargs(
@@ -1022,6 +1058,33 @@ class EngineKwargsTest(absltest.TestCase):
         },
         rollout._FORBIDDEN_MAXTEXT_CONFIG_KEYS,
     )
+
+
+class ShouldInitializeRuntimeTest(absltest.TestCase):
+
+  def test_follows_rollout_engine_and_weight_sync_mode(self):
+    cases = (
+        (
+            (
+                "weight_sync_config.mode=ici",
+                "cluster_config.fault_tolerance.enabled=false",
+                "rollout_engine=inprocess_vllm",
+            ),
+            True,
+        ),
+        (
+            ("weight_sync_config.mode=raiden", "rollout_engine=inprocess_vllm"),
+            False,
+        ),
+        (("weight_sync_config.mode=raiden", "rollout_engine=vanilla"), True),
+    )
+    for overrides, expected in cases:
+      with self.subTest(overrides=overrides):
+        hp = _hp(*overrides)
+        self.assertEqual(
+            rollout._should_initialize_runtime(hp, hp.cluster_targets.rollout),
+            expected,
+        )
 
 
 class RolloutMainTest(absltest.TestCase):

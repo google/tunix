@@ -94,8 +94,13 @@ class TunixCheckpointingOptions:
   async_options: AsyncOptionsType | None = None
   # Caps the GB a save copies from device to host at once; None: no cap.
   device_host_concurrent_gb: int | None = None
+  # JAX process indices participating in checkpointing when running inside a
+  # shared multi-process JAX world (e.g. ICI weight sync); None uses all.
+  active_processes: frozenset[int] | None = None
 
   def __post_init__(self) -> None:
+    if self.active_processes is not None and not self.active_processes:
+      raise ValueError("active_processes must be non-empty when provided.")
     if self.device_host_concurrent_gb is None:
       return
     if isinstance(self.device_host_concurrent_gb, bool) or not isinstance(
@@ -137,6 +142,7 @@ def create_checkpointing_options(
     enable_async_checkpointing: bool | None = None,
     async_options: AsyncOptionsType | None = None,
     device_host_concurrent_gb: int | None = None,
+    active_processes: frozenset[int] | None = None,
 ) -> TunixCheckpointingOptions:
   """Creates a TunixCheckpointingOptions instance."""
   return TunixCheckpointingOptions(
@@ -146,6 +152,7 @@ def create_checkpointing_options(
       enable_async_checkpointing=enable_async_checkpointing,
       async_options=async_options,
       device_host_concurrent_gb=device_host_concurrent_gb,
+      active_processes=active_processes,
   )
 
 
@@ -229,6 +236,11 @@ def resolve_checkpointing_defaults(
       if isinstance(options, TunixCheckpointingOptions)
       else None
   )
+  active_processes = (
+      options.active_processes
+      if isinstance(options, TunixCheckpointingOptions)
+      else None
+  )
 
   return create_checkpointing_options(
       save_decision_policy=save_policy,
@@ -237,6 +249,7 @@ def resolve_checkpointing_defaults(
       enable_async_checkpointing=enable_async,
       async_options=async_options,
       device_host_concurrent_gb=device_host_concurrent_gb,
+      active_processes=active_processes,
   )
 
 

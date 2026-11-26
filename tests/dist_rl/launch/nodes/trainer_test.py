@@ -19,9 +19,12 @@ import functools
 import importlib
 import json
 import os
+import types
+from typing import Any
 from unittest import mock
 
 from absl.testing import absltest
+import jax
 from jax.sharding import Mesh
 import omegaconf
 from orbax.checkpoint import v1 as ocp_v1
@@ -245,6 +248,53 @@ class TrainerMainTest(absltest.TestCase):
     )
 
 
+def _cluster_hp(trainer_replicas: int) -> Any:
+  """Returns a stand-in hp whose `cluster_config` holds `trainer_replicas`."""
+  cluster = {"trainer_replicas": trainer_replicas}
+  return types.SimpleNamespace(config_mapping=lambda key: cluster)
+
+
+class IciTrainerDevicesTest(absltest.TestCase):
+
+  def test_single_process_world_uses_every_device(self):
+    self.assertEqual(
+        trainer._ici_trainer_devices(_cluster_hp(1)), list(jax.devices())
+    )
+
+  def test_single_process_world_rejects_multiple_trainers(self):
+    with self.assertRaisesRegex(ValueError, "multi-process JAX world"):
+      trainer._ici_trainer_devices(_cluster_hp(2))
+
+  def test_multi_trainer_devices_are_leading_processes(self):
+    with (
+        mock.patch.object(jax, "process_count", return_value=4),
+        mock.patch.object(jax, "process_index", return_value=1),
+        mock.patch.dict(os.environ, {node_utils.TRAINER_REPLICA_ENV: "1"}),
+        mock.patch.object(
+            trainer.ici_transport,
+            "local_devices",
+            side_effect=lambda p: (f"d{p}",),
+        ),
+    ):
+      self.assertEqual(
+          trainer._ici_trainer_devices(_cluster_hp(2)), ["d0", "d1"]
+      )
+
+  def test_rejects_replica_on_other_process(self):
+    with (
+        mock.patch.object(jax, "process_count", return_value=4),
+        mock.patch.object(jax, "process_index", return_value=3),
+        mock.patch.dict(os.environ, {node_utils.TRAINER_REPLICA_ENV: "1"}),
+    ):
+      with self.assertRaisesRegex(RuntimeError, "ici_slice_worker"):
+        trainer._ici_trainer_devices(_cluster_hp(2))
+
+  def test_rejects_more_trainers_than_processes(self):
+    with mock.patch.object(jax, "process_count", return_value=2):
+      with self.assertRaisesRegex(ValueError, "exceeds"):
+        trainer._ici_trainer_devices(_cluster_hp(3))
+
+
 class TrainerFactoryTest(absltest.TestCase):
 
   def test_model_loading_separates_compute_and_parameter_dtypes(self):
@@ -370,7 +420,7 @@ class TrainerFactoryTest(absltest.TestCase):
   ):
     hp_tunix = _hp()
     trainer._create_trainer_factory(hp_tunix, "trainer-0")
-    mock_create_tunix.assert_called_once_with(hp_tunix)
+    mock_create_tunix.assert_called_once_with(hp_tunix, "trainer-0")
     mock_create_maxtext.assert_not_called()
 
     mock_create_tunix.reset_mock()
@@ -411,10 +461,10 @@ class TrainerFactoryTest(absltest.TestCase):
         self._tunix_factory_patches(),
         mock.patch.object(peft_trainer_v2, "PeftTrainer") as mock_peft_trainer,
     ):
-      factory, mesh = trainer._create_tunix_trainer_factory(hp)
+      factory, mesh = trainer._create_tunix_trainer_factory(hp, "trainer-0")
       self.assertIs(mesh, self.mock_create_mesh.return_value)
       self.mock_create_mesh.assert_called_once_with(
-          hp, "actor_model_config", "Trainer"
+          hp, "actor_model_config", "Trainer", devices=None
       )
       self.mock_load_model.assert_not_called()
 
@@ -472,7 +522,7 @@ class TrainerFactoryTest(absltest.TestCase):
             peft_trainer_v2, "TrainingConfig"
         ) as mock_training_config,
     ):
-      trainer._create_tunix_trainer_factory(hp)
+      trainer._create_tunix_trainer_factory(hp, "trainer-0")
     mock_training_config.assert_called_once()
     self.assertNotIn(
         "max_seq_tokens_per_device", mock_training_config.call_args.kwargs
@@ -495,7 +545,7 @@ class TrainerFactoryTest(absltest.TestCase):
         self._tunix_factory_patches(),
         mock.patch.object(peft_trainer_v2, "PeftTrainer") as mock_peft_trainer,
     ):
-      factory, _ = trainer._create_tunix_trainer_factory(hp)
+      factory, _ = trainer._create_tunix_trainer_factory(hp, "trainer-0")
       factory()
     training_config = mock_peft_trainer.call_args.args[2]
     self.assertIsNone(training_config.checkpoint_root_directory)
@@ -523,6 +573,17 @@ class TrainerFactoryTest(absltest.TestCase):
         "rl_training_config.checkpoint_root_directory=/checkpoints/test",
     )
     self.assertIsNone(trainer._checkpoint_root_directory(hp))
+
+  def test_checkpoint_root_directory_rejects_unrestorable_checkpoints(self):
+    root = self.create_tempdir().full_path
+    hp = _hp(
+        "rl_training_config.checkpointing_options.save_interval_steps=0",
+        f"rl_training_config.checkpoint_root_directory={root}",
+    )
+    self.assertIsNone(trainer._checkpoint_root_directory(hp))
+    os.makedirs(os.path.join(root, "10"))
+    with self.assertRaisesRegex(ValueError, "cannot resume"):
+      trainer._checkpoint_root_directory(hp)
 
   def test_save_interval_negative_raises(self):
     hp = _hp("rl_training_config.checkpointing_options.save_interval_steps=-1")

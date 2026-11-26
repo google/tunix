@@ -167,6 +167,22 @@ class RaidenDestinationWeightSyncMixinTest(unittest.IsolatedAsyncioTestCase):
       await adapter.abort_weight_sync(base_sampler_lib.WeightSyncRequest())
     adapter.resume.assert_awaited_once()
 
+  async def test_ici_post_and_abort_do_not_resume_when_delegate_raises(self):
+    adapter = _MockAdapter(enable_raiden=False)
+    adapter.enable_ici = True
+    adapter.ici_sync_delegate = mock.MagicMock()
+    adapter.ici_sync_delegate.post_weight_sync = mock.AsyncMock(
+        side_effect=RuntimeError("post corrupted")
+    )
+    adapter.ici_sync_delegate.abort_weight_sync = mock.AsyncMock(
+        side_effect=RuntimeError("abort corrupted")
+    )
+    with self.assertRaisesRegex(RuntimeError, "post corrupted"):
+      await adapter.post_weight_sync(base_sampler_lib.WeightSyncRequest())
+    with self.assertRaisesRegex(RuntimeError, "abort corrupted"):
+      await adapter.abort_weight_sync(base_sampler_lib.WeightSyncRequest())
+    adapter.resume.assert_not_awaited()
+
   async def test_get_weight_sync_status_reports_delegate_round(self):
     adapter = _MockAdapter(enable_raiden=True)
     adapter.raiden_sync_delegate.get_weight_sync_status = mock.MagicMock(

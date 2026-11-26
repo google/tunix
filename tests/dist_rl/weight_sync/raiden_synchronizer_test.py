@@ -280,9 +280,9 @@ class RaidenSynchronizerTest(absltest.TestCase):
     self.assertEqual(sums["__grand_total__"], 8.0 + 3.0)
     self.assertEqual(sums["__tensor_count__"], 2)
     self.assertEqual(sums["__element_count__"], 11)
-    self.assertLen(
-        sums, 5
-    )  # two sampled tensors + grand total + tensor/element counts
+    # Two sampled tensors (L1 and position-weighted each) + grand total +
+    # tensor/element counts.
+    self.assertLen(sums, 7)
 
   def test_checksums_count_every_tensor_not_just_the_sample(self):
     """Verifies counts cover every tensor even when sampled.

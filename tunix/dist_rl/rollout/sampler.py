@@ -14,6 +14,7 @@
 
 """Sampler abstractions for Distributed-RL."""
 
+from collections.abc import Mapping
 import dataclasses
 from typing import Any, Protocol, Sequence, runtime_checkable
 import numpy as np
@@ -206,4 +207,19 @@ class Sampler(Protocol):
 
   async def get_load_info(self, **kwargs) -> LoadInfo | Any:
     """Returns the current load information for this sampler."""
+    ...
+
+
+@runtime_checkable
+class IciWeightSyncSampler(Protocol):
+  """Optional protocol for samplers participating in ICI weight sync."""
+
+  async def ici_check(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Validates this sampler's part of an ICI transfer plan."""
+    ...
+
+  async def ici_transfer(
+      self, request: Mapping[str, Any]
+  ) -> Mapping[str, float]:
+    """Enters the ICI transfer collectives as a destination."""
     ...

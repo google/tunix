@@ -114,6 +114,50 @@ class WeightUtilsTest(absltest.TestCase):
     )
     self.assertLen(kept_arrays, 2)
 
+  def test_filter_bindable_strict_drops_only_non_weight_leaves(self):
+    names = ["w", "rng_count", "rng_key_data", "scalar_scale"]
+    arrays = [
+        jnp.ones((2, 4), dtype=jnp.float32),
+        jnp.array(3, dtype=jnp.uint32),
+        jnp.ones((2,), dtype=jnp.uint32),
+        jnp.array(1.0, dtype=jnp.float32),
+    ]
+    kept_names, _ = weight_utils.filter_bindable(names, arrays, strict=True)
+    self.assertEqual(kept_names, ["w"])
+
+  def test_filter_bindable_strict_fails_on_unbindable_weight(self):
+    names = ["w", "gpu_weight"]
+    arrays = [jnp.ones((2, 4)), jnp.ones((2, 4))]
+    real_is_bindable = weight_utils.is_bindable
+    with mock.patch.object(
+        weight_utils,
+        "is_bindable",
+        side_effect=lambda arr, **kw: arr is arrays[0]
+        and real_is_bindable(arr, **kw),
+    ):
+      self.assertEqual(
+          weight_utils.filter_bindable(names, arrays)[0], ["w"]
+      )
+      with self.assertRaisesRegex(ValueError, "gpu_weight"):
+        weight_utils.filter_bindable(names, arrays, strict=True)
+
+  def test_filter_bindable_warns_inference_only_drops_once_per_set(self):
+    arrays = [jnp.ones((2,)), jnp.ones((2,))]
+    label = f"test-{self.id()}"
+    with mock.patch.object(weight_utils.logging, "warning") as warning:
+      for _ in range(3):
+        weight_utils.filter_bindable(
+            ["w", "layers.0.attention.cache.k"], arrays, label=label
+        )
+      weight_utils.filter_bindable(
+          ["w", "layers.1.attention.cache.k"], arrays, label=label
+      )
+    logged = [call.args[-1] for call in warning.call_args_list]
+    self.assertEqual(
+        logged,
+        [["layers.0.attention.cache.k"], ["layers.1.attention.cache.k"]],
+    )
+
   def test_filter_bindable_batches_block_until_ready(self):
     a1 = jnp.ones((2, 4), dtype=jnp.bfloat16)
     a2 = jnp.zeros((2, 4), dtype=jnp.bfloat16)
@@ -334,7 +378,7 @@ class WeightUtilsTest(absltest.TestCase):
     self.assertFalse(old_w1.is_deleted())
     self.assertFalse(old_w2.is_deleted())
 
-  def test_compute_and_verify_checksums_across_mixed_shardings_and_sample(self):
+  def test_compute_and_verify_checksums_across_mixed_shardings(self):
     devs = jax.devices()
     mesh_a = jax.sharding.Mesh(np.array(devs[:1]), ("tp",))
     mesh_b = jax.sharding.Mesh(
@@ -351,8 +395,7 @@ class WeightUtilsTest(absltest.TestCase):
     arr_l1 = jnp.ones((2,), dtype=jnp.float32) * 3.0
     arr_lm_head = jnp.ones((3,), dtype=jnp.float32) * 4.0
 
-    # Different tree orders ('base' < 'lm_head' vs 'lm_head' < 'model') must
-    # select the identical canonical 3-tensor sample under default sample=3.
+    # Different tree orders and raw vs canonical names pair up by key.
     src_sums = weight_utils.compute_checksums(
         [
             "['base']['embed']['weight'].value",
@@ -361,7 +404,7 @@ class WeightUtilsTest(absltest.TestCase):
             "['lm_head']['weight'].value",
         ],
         [arr_embed, arr_l0, arr_l1, arr_lm_head],
-        sample=3,
+        sample=None,
         canonical_keys=True,
     )
     dst_sums = weight_utils.compute_checksums(
@@ -372,7 +415,7 @@ class WeightUtilsTest(absltest.TestCase):
             "model.embed.weight",
         ],
         [arr_lm_head, arr_l1, arr_l0, arr_embed],
-        sample=3,
+        sample=None,
         canonical_keys=False,
     )
     weight_utils.verify_weight_checksums(src_sums, dst_sums)
@@ -381,6 +424,38 @@ class WeightUtilsTest(absltest.TestCase):
     corrupted["model.layers[0].w"] = 999.0
     with self.assertRaisesRegex(RuntimeError, "tensor mismatch"):
       weight_utils.verify_weight_checksums(src_sums, corrupted)
+
+  def test_verify_checksums_rejects_sampled_checksums(self):
+    names = ["a", "b", "c", "d"]
+    arrays = [np.full((2,), i, np.float32) for i in range(4)]
+    full = weight_utils.compute_checksums(names, arrays, sample=None)
+    sampled = weight_utils.compute_checksums(names, arrays, sample=3)
+    with self.assertRaisesRegex(RuntimeError, "cover 3 of 4 tensors"):
+      weight_utils.verify_weight_checksums(full, sampled)
+
+  def test_position_weighted_checksum_catches_layout_errors(self):
+    w = np.arange(12, dtype=np.float32).reshape(3, 4)
+    mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ("tp",))
+    sharded = jax.device_put(
+        jnp.asarray(w),
+        jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("tp")),
+    )
+    src = weight_utils.compute_checksums(["w"], [sharded], sample=None)
+    # Device and host computations agree.
+    weight_utils.verify_weight_checksums(
+        src, weight_utils.compute_checksums(["w"], [w], sample=None)
+    )
+    for wrong in (w[::-1].copy(), w.reshape(4, 3).T.copy()):
+      dst = weight_utils.compute_checksums(["w"], [wrong], sample=None)
+      self.assertEqual(dst["w"], src["w"])  # The L1 sum alone is blind.
+      with self.assertRaisesRegex(RuntimeError, r"w@pw"):
+        weight_utils.verify_weight_checksums(src, dst)
+
+  def test_position_weights_wrap_without_overflow(self):
+    shape = (3, 2000)
+    weights = np.asarray(weight_utils._position_weights(shape))
+    expected = (np.arange(6000) % 1009 + 1).reshape(shape)
+    np.testing.assert_array_equal(weights, expected)
 
   def test_compute_checksums_empty(self):
     self.assertEqual(

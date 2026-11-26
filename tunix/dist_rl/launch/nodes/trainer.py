@@ -27,12 +27,14 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping
 import dataclasses
+import functools
 import logging
 import os
 import re
 import sys
 from typing import Final, TypeVar
 
+from etils import epath
 from flax import nnx
 import jax
 from jax.sharding import Mesh
@@ -40,11 +42,15 @@ import optax
 from orbax import checkpoint as ocp
 from tunix.cli import config as cli_config
 from tunix.cli.utils import model as model_utils
+from tunix.common import datatypes as common_datatypes
 from tunix.dist_rl.distributed.runtime import context as context_lib
 from tunix.dist_rl.launch.common import resolve_config
 from tunix.dist_rl.launch.nodes import node_utils
 from tunix.dist_rl.train import abstract_trainer
 from tunix.dist_rl.train import peft_trainer_v2
+from tunix.dist_rl.weight_sync import ici_maxtext_adapter
+from tunix.dist_rl.weight_sync import ici_transport
+from tunix.dist_rl.weight_sync import ici_weight_sync_delegate
 from tunix.dist_rl.worker import trainer_worker
 from tunix.models import automodel
 from tunix.utils import maxtext_utils
@@ -131,6 +137,13 @@ def _save_interval_steps(hp: resolve_config.DistHyperParameters) -> int:
   return interval
 
 
+def _has_step_checkpoints(root: epath.Path) -> bool:
+  """Returns whether `root` holds an Orbax step directory (e.g. `root/100`)."""
+  return root.is_dir() and any(
+      p.name.isdigit() and p.is_dir() for p in root.iterdir()
+  )
+
+
 def _checkpoint_root_directory(
     hp: resolve_config.DistHyperParameters,
 ) -> str | None:
@@ -138,14 +151,25 @@ def _checkpoint_root_directory(
 
   Tunix's `CheckpointManager` has no read-only mode, so keeping a root with
   `save_interval_steps=0` makes `save_checkpoint()` hit `step % 0` and
-  `close()` force-save anyway. Without a root there is no checkpointer at all;
-  the orchestrator-driven restore path is unaffected.
+  `close()` force-save anyway. Without a root there is no checkpointer at all,
+  so the orchestrator's restore would silently start from the base weights.
 
   Args:
     hp: Validated distributed RL configuration.
+
+  Raises:
+    ValueError: If saving is disabled but the root holds step checkpoints.
   """
+  root = str(hp.config_mapping(_RL_TRAINING_KEY)["checkpoint_root_directory"])
   if _save_interval_steps(hp) > 0:
-    return str(hp.config_mapping(_RL_TRAINING_KEY)["checkpoint_root_directory"])
+    return root
+  if root and _has_step_checkpoints(epath.Path(root)):
+    raise ValueError(
+        "rl_training_config.checkpointing_options.save_interval_steps=0"
+        " disables the Tunix trainer's checkpointer, which then cannot resume"
+        f" from the checkpoints in {root}. Set a positive save_interval_steps"
+        " or a checkpoint_root_directory without checkpoints."
+    )
   logging.info(
       "save_interval_steps=0; checkpoint saving is disabled and"
       " checkpoint_root_directory is withheld."
@@ -330,6 +354,7 @@ def _load_actor_model(
 
 def _create_tunix_trainer_factory(
     hp: resolve_config.DistHyperParameters,
+    worker_id: str,
 ) -> tuple[TrainerFactory, Mesh]:
   """Creates the PeftTrainer v2 factory and the trainer mesh."""
   logging.info("Trainer backend: Tunix's PeftTrainer.")
@@ -344,8 +369,17 @@ def _create_tunix_trainer_factory(
   )
   logging.info("Prepared trainer safetensors directory: %s", model_dir)
 
+  is_ici = (
+      hp.cluster_targets.weight_sync_mode
+      == common_datatypes.WeightSyncMode.ICI
+  )
   logging.info("Creating trainer mesh...")
-  mesh = node_utils.create_mesh(hp, _ACTOR_KEY, "Trainer")
+  mesh = node_utils.create_mesh(
+      hp,
+      _ACTOR_KEY,
+      "Trainer",
+      devices=_ici_trainer_devices(hp) if is_ici else None,
+  )
   logging.info("Trainer mesh: %s", mesh)
 
   training_config = _tunix_training_config(
@@ -378,6 +412,13 @@ def _create_tunix_trainer_factory(
   # rather than on TrainingConfig.
   sampler_type = str(hp.config["rollout_engine"])
   rollout_tp_size = hp.mesh_axes("rollout_model_config")["tp"]
+  worker_factory = (
+      functools.partial(
+          ici_weight_sync_delegate.IciSourceSynchronizer, worker_id
+      )
+      if is_ici
+      else None
+  )
 
   def _factory() -> abstract_trainer.AbstractTrainer:
     logging.info("Loading actor model...")
@@ -388,6 +429,7 @@ def _create_tunix_trainer_factory(
         training_config,
         sampler_type=sampler_type,
         rollout_tp_size=rollout_tp_size,
+        weight_sync_worker_factory=worker_factory,
     )
 
   return _factory, mesh
@@ -587,6 +629,52 @@ def _kwarg(kwargs: Mapping[str, KwargValue | None], key: str, unset: _T) -> _T:
   return unset if value is None else type(unset)(value)
 
 
+def _ici_trainer_devices(
+    hp: resolve_config.DistHyperParameters,
+) -> list[jax.Device]:
+  """Returns the devices of every trainer process in a shared ICI JAX world.
+
+  `ici_slice_worker`, the only launcher of more than one trainer, makes JAX
+  process `r < trainer_replicas` the trainer with replica index `r`.
+
+  Args:
+    hp: Validated distributed RL configuration.
+
+  Returns:
+    The trainers' devices, ordered by process index then device id.
+
+  Raises:
+    ValueError: If `trainer_replicas` does not fit the JAX world or the replica
+      index is invalid.
+    RuntimeError: If this trainer is not JAX process `replica`.
+  """
+  trainer_replicas = hp.config_mapping("cluster_config")["trainer_replicas"]
+  if jax.process_count() <= 1:
+    if trainer_replicas > 1:
+      raise ValueError(
+          f"cluster_config.trainer_replicas={trainer_replicas} requires a"
+          " multi-process JAX world."
+      )
+    return list(jax.devices())
+  if trainer_replicas > jax.process_count():
+    raise ValueError(
+        f"cluster_config.trainer_replicas={trainer_replicas} exceeds"
+        f" jax.process_count()={jax.process_count()}."
+    )
+  replica = node_utils.resolve_replica_index(
+      "trainer", trainer_replicas, node_utils.TRAINER_REPLICA_ENV
+  )
+  if jax.process_index() != (replica or 0):
+    raise RuntimeError(
+        f"Trainer replica {replica or 0} runs as JAX process"
+        f" {jax.process_index()}; multi-host trainers must be launched by"
+        " ici_slice_worker, which makes JAX process r trainer replica r."
+    )
+  return [
+      d for p in range(trainer_replicas) for d in ici_transport.local_devices(p)
+  ]
+
+
 def _create_maxtext_trainer_factory(
     hp: resolve_config.DistHyperParameters, worker_id: str
 ) -> tuple[TrainerFactory, Mesh]:
@@ -594,7 +682,7 @@ def _create_maxtext_trainer_factory(
 
   Args:
     hp: Validated distributed RL configuration.
-    worker_id: Worker id, used as the MaxText run name.
+    worker_id: Worker id, used as the ICI weight sync job name.
 
   Returns:
     The trainer factory and the MaxText device mesh.
@@ -608,6 +696,13 @@ def _create_maxtext_trainer_factory(
   rollout = hp.config_mapping("rollout_config")
   opt = rl_train[_ACTOR_OPTIMIZER_KEY]
   axes = hp.mesh_axes(_ACTOR_KEY)
+  is_ici = (
+      hp.cluster_targets.weight_sync_mode
+      == common_datatypes.WeightSyncMode.ICI
+  )
+  # Under ICI the JAX world is shared with the rollouts, so the trainer owns
+  # only the trainer processes' devices.
+  trainer_devices = _ici_trainer_devices(hp) if is_ici else jax.devices()
 
   adamw_options = _maxtext_adamw_options(hp)
   pad_id, _ = node_utils.pad_and_eos_ids(node_utils.load_hf_tokenizer(hp))
@@ -620,16 +715,21 @@ def _create_maxtext_trainer_factory(
         _ACTOR_OPTIMIZER_KEY,
         opt["schedule_type"],
     )
+  # All multi-host trainer replicas share one Orbax CheckpointManager directory
+  # (`{base_output_directory}/{run_name}/checkpoints`). Using the per-replica
+  # `worker_id` (`...-0`, `...-1`, ...) would split shards across separate
+  # directories and fail multi-host checkpoint save/restore.
+  maxtext_run_name = node_utils.base_worker_id(hp, "trainer", LOCAL_WORKER_ID)
   max_seq_tokens_per_device = rl_train["max_seq_tokens_per_device"]
   maxtext_config = maxtext_utils.build_maxtext_config(
       model_name=maxtext_model_name,
-      worker_id=worker_id,
+      worker_id=maxtext_run_name,
       train_micro_batch_size=int(rl_train["train_micro_batch_size"]),
       mesh_fsdp=axes["fsdp"],
       mesh_tp=axes["tp"],
       mesh_expert=axes["expert"],
       mesh_context=_kwarg(kwargs, "mesh_context", 1),
-      num_devices=jax.device_count(),
+      num_devices=len(trainer_devices),
       max_prompt_length=int(rollout["max_prompt_length"]),
       max_response_length=int(rollout["total_generation_steps"]),
       learning_rate=float(opt["learning_rate"]),
@@ -673,16 +773,23 @@ def _create_maxtext_trainer_factory(
       skip_step_scaling_factor=_kwarg(kwargs, "skip_step_scaling_factor", 6.0),
   )
   logging.info("Creating MaxText device mesh...")
-  mesh = maxtext_utils.create_maxtext_mesh(maxtext_config)
+  mesh = maxtext_utils.create_maxtext_mesh(
+      maxtext_config, devices=trainer_devices
+  )
   logging.info("Trainer mesh: %s", mesh)
 
   def _factory() -> abstract_trainer.AbstractTrainer:
-    return maxtext_utils.create_maxtext_engine(
+    engine = maxtext_utils.create_maxtext_engine(
         maxtext_config,
         mesh=mesh,
         tokenizer_pad_id=pad_id,
         wrap_with_tunix_adapter=True,
     )
+    if is_ici:
+      return ici_maxtext_adapter.IciMaxTextTrainerAdapter(
+          engine, job_name=worker_id
+      )
+    return engine
 
   return _factory, mesh
 
@@ -693,7 +800,7 @@ def _create_trainer_factory(
   """Dispatches on `actor_model_config.model_source` (maxtext vs tunix)."""
   if hp.config_mapping(_ACTOR_KEY)["model_source"] == "maxtext":
     return _create_maxtext_trainer_factory(hp, worker_id)
-  return _create_tunix_trainer_factory(hp)
+  return _create_tunix_trainer_factory(hp, worker_id)
 
 
 def main(

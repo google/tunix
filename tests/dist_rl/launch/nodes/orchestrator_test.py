@@ -523,6 +523,21 @@ class BuildersTest(absltest.TestCase):
             {role.ACTOR: 1, role.ROLLOUT: 3, role.REFERENCE: 0},
         )
 
+  def test_required_workers_waits_for_every_trainer_replica(self):
+    role = datatypes.Role
+    hp = _config(
+        "cluster_config.target=k8s",
+        "cluster_config.k8s.tunix_image=img:latest",
+        "cluster_config.trainer_replicas=2",
+        "cluster_config.rollout_replicas=2",
+        "weight_sync_config.mode=ici",
+        "cluster_config.fault_tolerance.enabled=false",
+        "rollout_engine=inprocess_vllm",
+    )
+    req = orchestrator.required_workers(hp)
+    self.assertEqual(req[role.ACTOR], 2)
+    self.assertEqual(req[role.ROLLOUT], 2)
+
   def test_required_workers_uses_min_rollout_replicas_when_set(self):
     role = datatypes.Role
     for target_overrides in (
@@ -806,6 +821,7 @@ class ClusterTest(absltest.TestCase):
         trajectory_store_config=None,
         weight_sync_timeouts=phase_timeouts,
         fault_tolerance_config=datatypes.FaultToleranceConfig(enabled=True),
+        ici_chunk_bytes=None,
     )
     self.assertTrue(cluster.fault_tolerance_manager.config.enabled)
     # Workers register later, in `run_program`.

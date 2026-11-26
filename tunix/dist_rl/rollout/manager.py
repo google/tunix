@@ -532,6 +532,23 @@ class RolloutManager:
     """Returns the sampler's transport metadata for weight sync registration."""
     return await self.sampler.get_weight_sync_metadata(**kwargs)
 
+  def _require_ici_sampler(self) -> sampler_lib.IciWeightSyncSampler:
+    if not isinstance(self.sampler, sampler_lib.IciWeightSyncSampler):
+      raise NotImplementedError(
+          f"{type(self.sampler).__name__} does not support ICI weight sync."
+      )
+    return self.sampler
+
+  async def ici_check(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Validates the sampler's part of an ICI transfer plan."""
+    return await self._require_ici_sampler().ici_check(request)
+
+  async def ici_transfer(
+      self, request: Mapping[str, Any]
+  ) -> Mapping[str, float]:
+    """Runs the sampler's part of an ICI transfer."""
+    return await self._require_ici_sampler().ici_transfer(request)
+
   def get_target_state(self) -> Any:
     """Returns the sampler target-state skeleton used for trainer conversion."""
     return self.sampler.get_target_state()

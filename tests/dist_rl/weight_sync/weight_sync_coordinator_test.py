@@ -353,6 +353,8 @@ class FakeHandler(weight_sync.WeightSyncHandler):
   """Records registrations and transfers; moves the wire pattern on transfer."""
 
   transfers_from_staged_copy = True
+  source_joins_transfer = False
+  shares_world = False
 
   def __init__(self, wire: Wire, log: list[str]):
     self._wire = wire
@@ -1394,6 +1396,73 @@ class TransferTimeoutTest(CoordinatorTestBase):
     self.assertTrue(result.success)
 
 
+class SharedWorldTest(CoordinatorTestBase):
+  """In a shared JAX world (ICI) every failed round is fatal to the run."""
+
+  def make_shared(self, *destinations: FakeDestination, **kwargs):
+    coordinator = self.make(*destinations, **kwargs)
+    self.handler.shares_world = True
+    return coordinator
+
+  def test_failed_transfer_is_fatal_without_rollback_or_release(self):
+    dest = FakeDestination("sampler", [])
+    self.make_shared(dest)
+    self.handler.raise_on_transfer = RuntimeError("ppermute failed")
+
+    with self.assertRaisesRegex(
+        weight_sync_coordinator.FatalWeightSyncError, "ppermute failed"
+    ) as ctx:
+      self.sync()
+
+    self.assertIs(ctx.exception.result.state, RoundState.FAILED_NEEDS_RESTART)
+    self.assertNotIn("abort", self.phases("sampler"))
+    self.assertEqual(self.sources[0].release_calls, 0)
+    self.assertIsNotNone(self.coordinator.poisoned)
+    with self.assertRaisesRegex(RuntimeError, "cannot recover"):
+      self.coordinator.reset_after_recovery()
+    with self.assertRaisesRegex(RuntimeError, "poisoned"):
+      self.sync(policy_version=2)
+
+  def test_timed_out_transfer_is_fatal_and_does_not_block_exit(self):
+    dest = FakeDestination("sampler", [])
+    self.make_shared(
+        dest, timeouts=dataclasses.replace(FAST_TIMEOUTS, transfer=0.05)
+    )
+    self.handler.transfer_delay = 0.4
+    transfer_threads = []
+    original_transfer = self.handler.transfer
+
+    def _transfer(*args, **kwargs):
+      transfer_threads.append(threading.current_thread())
+      return original_transfer(*args, **kwargs)
+
+    self.handler.transfer = _transfer
+
+    with self.assertRaises(weight_sync_coordinator.FatalWeightSyncError):
+      self.sync()
+
+    self.assertLen(transfer_threads, 1)
+    # A wedged transfer must not keep the process alive at exit.
+    self.assertTrue(transfer_threads[0].daemon)
+    self.assertNotIn("abort", self.phases("sampler"))
+
+  def test_pre_failure_is_fatal(self):
+    dest = FakeDestination("sampler", [], fail_on="pre", fail_persistently=True)
+    self.make_shared(dest)
+
+    with self.assertRaises(weight_sync_coordinator.FatalWeightSyncError):
+      self.sync()
+
+    self.assertNotIn("abort", self.phases("sampler"))
+
+  def test_committed_round_is_unchanged(self):
+    dest = FakeDestination("sampler", [])
+    self.make_shared(dest)
+
+    self.assertTrue(self.sync().success)
+    self.assertEqual(self.sources[0].release_calls, 1)
+
+
 class TransferOutcomeUnknownTest(CoordinatorTestBase):
 
   def test_outcome_unknown_parks_unknown_and_touches_nothing(self):
@@ -2008,6 +2077,40 @@ class SourcePreparedSignalTest(CoordinatorTestBase):
       asyncio.run(coordinator.sync(2, source_prepared=asyncio.Event()))
     self.assertEmpty(self.log)
     self.assertTrue(asyncio.run(coordinator.sync(2)).success)
+
+  def test_signal_waits_for_transfer_when_source_joins_it(self):
+    dest = FakeDestination("sampler", [])
+    coordinator = self.make(dest)
+    self.handler.source_joins_transfer = True
+
+    async def scenario():
+      source_prepared = asyncio.Event()
+      round_task = asyncio.create_task(
+          coordinator.sync(2, source_prepared=source_prepared)
+      )
+      await asyncio.wait_for(source_prepared.wait(), timeout=5)
+      log_at_signal = list(self.log)
+      return log_at_signal, await round_task
+
+    log_at_signal, result = asyncio.run(scenario())
+
+    # The source runs device work inside the transfer (ICI collectives), so
+    # it may train again only once the transfer has returned.
+    self.assertEqual(log_at_signal[-1], "transfer")
+    self.assertNotIn("sampler:sync", log_at_signal)
+    self.assertTrue(result.success)
+    self.assertEqual(dest.serving, expected_pattern(2))
+
+  def test_signal_stays_unset_when_joined_transfer_fails(self):
+    dest = FakeDestination("sampler", [])
+    coordinator = self.make(dest)
+    self.handler.source_joins_transfer = True
+    self.handler.result_success = False
+    source_prepared = asyncio.Event()
+
+    with self.assertRaises(WeightSyncError):
+      asyncio.run(coordinator.sync(2, source_prepared=source_prepared))
+    self.assertFalse(source_prepared.is_set())
 
 
 class PhaseTimeoutsTest(absltest.TestCase):

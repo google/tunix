@@ -86,10 +86,19 @@ class K8sContextTest(absltest.TestCase):
   def test_k8s_jax_context_mcjax(self):
     envs = {}
     mock_jax = mock.MagicMock()
+    mock_jax.distributed.is_initialized.return_value = False
     with mock.patch.dict(os.environ, envs, clear=True):
       with mock.patch.dict(sys.modules, {"jax": mock_jax}):
         k8s_context.K8sJaxContext().initialize()
         mock_jax.distributed.initialize.assert_called_once()
+
+  def test_k8s_jax_context_mcjax_skips_when_already_initialized(self):
+    mock_jax = mock.MagicMock()
+    mock_jax.distributed.is_initialized.return_value = True
+    with mock.patch.dict(os.environ, {}, clear=True):
+      with mock.patch.dict(sys.modules, {"jax": mock_jax}):
+        k8s_context.K8sJaxContext().initialize()
+        mock_jax.distributed.initialize.assert_not_called()
 
   def test_k8s_discovery_context_register(self):
     envs = {

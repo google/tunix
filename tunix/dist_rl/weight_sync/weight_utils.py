@@ -44,10 +44,19 @@ _INFERENCE_ONLY_SEGMENTS = frozenset({
 _CHECKSUM_META_KEYS = frozenset(
     {"__grand_total__", "__tensor_count__", "__element_count__"}
 )
+# Suffix of the position-weighted checksum of a tensor. The plain L1 sum is
+# blind to layout errors (it is permutation-invariant); weighting each element
+# by `(flat_index % _POSITION_WEIGHT_MODULUS) + 1` is not.
+_POSITION_WEIGHTED_SUFFIX = "@pw"
+_POSITION_WEIGHT_MODULUS = 1009
 
 
 class SyncedSamplerTarget(Protocol):
-  """Sampler surface required for out-of-place destination weight updates."""
+  """Sampler surface required for out-of-place destination weight updates.
+
+  `model_runner` is optional: `apply_to_sampler` updates a sampler that has
+  none (e.g. `VanillaSampler`) through `transformer_state` instead.
+  """
 
   @property
   def model_runner(self) -> Any:
@@ -133,14 +142,45 @@ def is_bindable(arr: Any, *, allow_proxy: bool = False) -> bool:
     return False
 
 
+# Last inference-only drop set logged per `filter_bindable` label.
+_LOGGED_INFERENCE_ONLY_DROPS: dict[str, tuple[str, ...]] = {}
+
+
+def _is_weight_like(arr: Any) -> bool:
+  """True for a floating-point array of rank >= 1: what a weight looks like."""
+  return (
+      hasattr(arr, "shape")
+      and hasattr(arr, "dtype")
+      and len(arr.shape) >= 1
+      and jnp.issubdtype(arr.dtype, jnp.floating)
+  )
+
+
 def filter_bindable(
     names: Sequence[str],
     arrays: Sequence[Any],
     *,
     allow_proxy: bool = False,
     label: str = "raiden",
+    strict: bool = False,
 ) -> tuple[list[str], list[Any]]:
-  """Drops unbindable leaves and inference-only non-weight buffers."""
+  """Drops unbindable leaves and inference-only non-weight buffers.
+
+  Args:
+    names: Leaf names, parallel to `arrays`.
+    arrays: Leaf arrays.
+    allow_proxy: Whether Pathways proxy arrays are bindable.
+    label: Log prefix.
+    strict: Whether to fail rather than drop a floating-point leaf of rank >= 1
+      (a weight) that is not bindable; only non-float or rank-0 leaves (e.g.
+      RNG counters) may then be dropped.
+
+  Returns:
+    The kept `(names, arrays)`.
+
+  Raises:
+    ValueError: If `strict` and a weight-like leaf is not bindable.
+  """
   logging.vlog(
       1,
       "%s bind census: %s",
@@ -161,15 +201,29 @@ def filter_bindable(
       keep_arrays.append(arr)
     else:
       dropped.append(name)
+  if strict:
+    by_name = dict(zip(names, arrays))
+    weights = [n for n in dropped if _is_weight_like(by_name[n])]
+    if weights:
+      raise ValueError(
+          f"{label} cannot bind {len(weights)} floating-point weight leaves"
+          f" (unsupported platform or array type), e.g. {weights[:5]}"
+      )
   if keep_arrays:
     jax.block_until_ready(keep_arrays)
   if inference_only_dropped:
-    logging.debug(
-        "%s bind skipped %d inference-only non-weight leaves: %s",
-        label,
-        len(inference_only_dropped),
-        inference_only_dropped[:5],
-    )
+    # Binding runs several times per sync; warn when the set first appears or
+    # changes, not on every call.
+    drops = tuple(inference_only_dropped)
+    if _LOGGED_INFERENCE_ONLY_DROPS.get(label) != drops:
+      _LOGGED_INFERENCE_ONLY_DROPS[label] = drops
+      logging.warning(
+          "%s bind skips %d inference-only non-weight leaves (not synced):"
+          " %s",
+          label,
+          len(drops),
+          list(drops),
+      )
   if dropped:
     logging.warning(
         "%s bind dropped %d unbindable leaves: %s",
@@ -556,7 +610,7 @@ def apply_to_sampler(
     delete_replaced_buffers: bool = False,
 ) -> None:
   """Installs `arrays` into `sampler.model_runner` or `sampler.transformer_state`."""
-  runner = sampler.model_runner
+  runner = getattr(sampler, "model_runner", None)
   if runner is not None:
     apply_to_runner(
         job_name,
@@ -575,10 +629,53 @@ def apply_to_sampler(
   )
 
 
+def _position_weights(shape: tuple[int, ...]) -> jax.Array:
+  """`(row-major flat index % modulus) + 1` as float32, without int overflow.
+
+  Built from per-axis iotas, so under `jit` every shard computes its own
+  weights from the global shape and the result is independent of sharding.
+
+  Args:
+    shape: Logical (global) array shape.
+
+  Returns:
+    float32 weights of `shape`, in `[1, _POSITION_WEIGHT_MODULUS]`.
+  """
+  m = _POSITION_WEIGHT_MODULUS
+  index = jnp.zeros(shape, jnp.int32)
+  stride = 1
+  for axis in reversed(range(len(shape))):
+    iota = jax.lax.broadcasted_iota(jnp.int32, shape, axis)
+    index = (index + (iota % m) * (stride % m)) % m
+    stride *= shape[axis]
+  return (index + 1).astype(jnp.float32)
+
+
 @jax.jit
-def _fused_l1_sum(arr: jax.Array) -> jax.Array:
-  """float32 L1 sum fused into one kernel, so no full-size temporary exists."""
-  return jnp.sum(jnp.abs(arr), dtype=jnp.float32)
+def _fused_checksums(arr: jax.Array) -> jax.Array:
+  """float32 `[L1, position-weighted L1]` sums, fused with no full temporary."""
+  magnitude = jnp.abs(arr).astype(jnp.float32)
+  return jnp.stack([
+      jnp.sum(magnitude),
+      jnp.sum(magnitude * _position_weights(arr.shape)),
+  ])
+
+
+def _host_checksums(arr: Any) -> tuple[float, float]:
+  """NumPy twin of `_fused_checksums` for host arrays."""
+  magnitude = np.abs(np.asarray(arr, dtype=np.float32)).reshape(-1)
+  weights = (
+      np.arange(magnitude.size, dtype=np.int64) % _POSITION_WEIGHT_MODULUS + 1
+  ).astype(np.float32)
+  return float(np.sum(magnitude)), float(np.sum(magnitude * weights))
+
+
+def _checksum_key(key: str) -> str:
+  """Canonical comparison key of a per-tensor checksum entry."""
+  if key.endswith(_POSITION_WEIGHTED_SUFFIX):
+    base = key[: -len(_POSITION_WEIGHTED_SUFFIX)]
+    return param_key(base) + _POSITION_WEIGHTED_SUFFIX
+  return param_key(key)
 
 
 def compute_checksums(
@@ -588,7 +685,22 @@ def compute_checksums(
     sample: int | None = 3,
     canonical_keys: bool = False,
 ) -> dict[str, float | int]:
-  """Computes per-tensor float32 abs-sums and exact aggregate counts."""
+  """Computes per-tensor float32 checksums and exact aggregate counts.
+
+  Each tensor gets its L1 sum under its name and a position-weighted L1 sum
+  (catching transposed or permuted layouts) under `name + "@pw"`.
+
+  Args:
+    names: Tensor names, parallel to `arrays`.
+    arrays: `jax.Array` (any sharding) or host arrays.
+    sample: How many tensors (in canonical-key order) to report individually,
+      or None for all of them; `verify_weight_checksums` needs None.
+    canonical_keys: Whether to key tensors by `param_key(name)`.
+
+  Returns:
+    Per-tensor checksums plus `__grand_total__` (sum of the L1 sums),
+    `__tensor_count__` and `__element_count__`.
+  """
   if not arrays:
     return {
         "__grand_total__": 0.0,
@@ -596,37 +708,44 @@ def compute_checksums(
         "__element_count__": 0,
     }
   per_tensor = [0.0] * len(arrays)
+  per_tensor_weighted = [0.0] * len(arrays)
   jax_groups: dict[jax.sharding.Sharding, list[tuple[int, jax.Array]]] = (
       collections.defaultdict(list)
   )
   for idx, arr in enumerate(arrays):
     if isinstance(arr, jax.Array):
-      scalar = _fused_l1_sum(arr)
-      jax_groups[scalar.sharding].append((idx, scalar))
+      sums = _fused_checksums(arr)
+      jax_groups[sums.sharding].append((idx, sums))
     else:
-      per_tensor[idx] = float(np.sum(np.abs(np.asarray(arr, dtype=np.float32))))
+      per_tensor[idx], per_tensor_weighted[idx] = _host_checksums(arr)
 
   for entries in jax_groups.values():
     stacked = np.asarray(
-        jax.device_get(jnp.stack([scalar for _, scalar in entries])),
+        jax.device_get(jnp.stack([sums for _, sums in entries])),
         dtype=np.float64,
     )
-    for (idx, _), value in zip(entries, stacked.tolist(), strict=True):
-      per_tensor[idx] = float(value)
+    for (idx, _), (l1, weighted) in zip(
+        entries, stacked.tolist(), strict=True
+    ):
+      per_tensor[idx] = float(l1)
+      per_tensor_weighted[idx] = float(weighted)
 
   paired = [
-      (param_key(name), name, total)
-      for name, total in zip(names, per_tensor, strict=True)
+      (param_key(name), name, total, weighted)
+      for name, total, weighted in zip(
+          names, per_tensor, per_tensor_weighted, strict=True
+      )
   ]
   selected = (
       paired
       if sample is None
       else sorted(paired, key=lambda item: item[0])[:sample]
   )
-  out: dict[str, float | int] = {
-      (canon if canonical_keys else raw_name): total
-      for canon, raw_name, total in selected
-  }
+  out: dict[str, float | int] = {}
+  for canon, raw_name, total, weighted in selected:
+    key = canon if canonical_keys else raw_name
+    out[key] = total
+    out[key + _POSITION_WEIGHTED_SUFFIX] = weighted
   out["__grand_total__"] = float(math.fsum(per_tensor))
   out["__tensor_count__"] = len(arrays)
   out["__element_count__"] = int(sum(int(a.size) for a in arrays))
@@ -640,7 +759,34 @@ def verify_weight_checksums(
     rtol: float = 1e-5,
     atol: float = 1e-5,
 ) -> None:
-  """Verifies source and destination weight checksum dictionaries match."""
+  """Verifies every tensor's checksums match between source and destination.
+
+  Args:
+    src_checksums: Source `compute_checksums(..., sample=None)` output.
+    dst_checksums: Destination `compute_checksums(..., sample=None)` output.
+    rtol: Relative tolerance per checksum.
+    atol: Absolute tolerance per checksum.
+
+  Raises:
+    RuntimeError: On any count, key set, or checksum mismatch, or if either
+      side reports only a sample of its tensors.
+  """
+  for side, checksums in (
+      ("source", src_checksums),
+      ("destination", dst_checksums),
+  ):
+    reported = sum(
+        1
+        for k in checksums
+        if k not in _CHECKSUM_META_KEYS
+        and not k.endswith(_POSITION_WEIGHTED_SUFFIX)
+    )
+    if reported != checksums["__tensor_count__"]:
+      raise RuntimeError(
+          f"{side} weight checksums cover {reported} of"
+          f" {checksums['__tensor_count__']} tensors; compute them with"
+          " sample=None to verify every tensor"
+      )
   for count_key in ("__tensor_count__", "__element_count__"):
     if src_checksums[count_key] != dst_checksums[count_key]:
       raise RuntimeError(
@@ -658,12 +804,12 @@ def verify_weight_checksums(
     )
 
   src_tensors = {
-      param_key(k): float(v)
+      _checksum_key(k): float(v)
       for k, v in src_checksums.items()
       if k not in _CHECKSUM_META_KEYS
   }
   dst_tensors = {
-      param_key(k): float(v)
+      _checksum_key(k): float(v)
       for k, v in dst_checksums.items()
       if k not in _CHECKSUM_META_KEYS
   }

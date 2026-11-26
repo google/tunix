@@ -696,13 +696,22 @@ def build_maxtext_config(
   return pyconfig.initialize(argv)
 
 
-def create_maxtext_mesh(maxtext_config: Any) -> Any:
-  """Builds the JAX device Mesh with axis names from MaxText config."""
+def create_maxtext_mesh(
+    maxtext_config: Any,
+    devices: Sequence[Any],
+) -> Any:
+  """Builds the JAX device Mesh with axis names from MaxText config.
+
+  Args:
+    maxtext_config: MaxText HyperParameters configuration.
+    devices: JAX devices to build the mesh over, e.g. the trainer's devices
+      inside a shared multi-process ICI JAX world.
+  """
   from jax.sharding import Mesh  # pylint: disable=g-import-not-at-top
 
   _, _, m_utils = maxtext_modules()
-  devices = m_utils.create_device_mesh(maxtext_config)
-  return Mesh(devices, maxtext_config.mesh_axes)
+  mesh_devices = m_utils.create_device_mesh(maxtext_config, devices=devices)
+  return Mesh(mesh_devices, maxtext_config.mesh_axes)
 
 
 def log_param_shapes(model: Any) -> None:
@@ -876,8 +885,20 @@ def create_maxtext_engine(
 ) -> Any:
   """Builds and initializes a MaxTextTrainingEngine within the given mesh."""
   from flax.core.spmd import logical_axis_rules  # pylint: disable=g-import-not-at-top
+  # pylint: disable=g-import-not-at-top
+  from tunix.utils import subworld_checkpoint
+  # pylint: enable=g-import-not-at-top
 
   _, maxtext_engine, _ = maxtext_modules()
+  engine_kwargs = {}
+  mesh_procs = subworld_checkpoint.mesh_process_indices(mesh)
+  if subworld_checkpoint.is_subworld(mesh_procs):
+    # Only the mesh's processes checkpoint in a shared JAX world. Needs a
+    # MaxText whose engine accepts Orbax v1 `checkpoint_multiprocessing_options`
+    # (AI-Hypercomputer/maxtext#6603).
+    engine_kwargs["checkpoint_multiprocessing_options"] = (
+        subworld_checkpoint.multiprocessing_options(mesh_procs)
+    )
 
   with mesh, logical_axis_rules(maxtext_config.logical_axis_rules):
     engine = maxtext_engine.MaxTextTrainingEngine(
@@ -885,6 +906,7 @@ def create_maxtext_engine(
         mesh=mesh,
         wrap_with_tunix_adapter=wrap_with_tunix_adapter,
         tokenizer_pad_id=tokenizer_pad_id,
+        **engine_kwargs,
     )
 
   # TODO(tunix-dev): [legacy-maxtext-a2cf3bc8b] Remove once legacy pinned

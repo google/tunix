@@ -327,8 +327,10 @@ dist_training_config:
   trajectory_log_dir: ""
 
 weight_sync_config:
-  # Weight synchronization transport mode ("none", "in_memory", "raiden", "fs",
-  # or "nccl"). "fs" selects disaggregated file/object-store staged weight sync,
+  # Weight synchronization transport mode ("none", "in_memory", "raiden", "ici",
+  # "fs", or "nccl"). "ici" moves weights device-to-device over the TPU
+  # interconnect within a single multi-process JAX world on one TPU slice.
+  # "fs" selects disaggregated file/object-store staged weight sync,
   # orthogonal to checkpoint serialization format ("orbax" vs "safetensors") and
   # storage backend ("gcs" gs://, "GOOGLE_INTERNAL_STOAGE_PATH" /GOOGLE_INTERNAL_STOAGE_PATH/, or "local" POSIX paths via epath).
   mode: "none"
@@ -356,6 +358,9 @@ weight_sync_config:
     # applies them.
     broadcast_k: 64
     multi_numa: false
+  # `mode: "ici"` only. Upper bound, in GiB of weights, on what one collective
+  # moves; it bounds the scratch device memory of a sync on every process.
+  ici_chunk_gb: 2
 
 trajectory_store_config:
   enable: false
@@ -417,7 +422,9 @@ cluster_config:
   # Rollout worker fault tolerance (`FaultToleranceConfig`). When `enabled` is
   # false, `max_task_retries` resolves to 0, `min_active_rollout_ratio` is
   # ignored, and a null `poll_retry_budget_s` resolves to 300.0 s instead of
-  # 60.0 s.
+  # 60.0 s. `weight_sync_config.mode: ici` requires `enabled: false`: trainers
+  # and rollouts share one JAX world, so any process failure is fatal for the
+  # slice.
   fault_tolerance:
     enabled: true
     max_task_retries: 1
@@ -428,6 +435,12 @@ cluster_config:
   # `agentic_grpo_config.beta > 0`. Set false to use a reference worker started
   # separately; it registers with the orchestrator through discovery.
   run_inference_node: null
+  # Trainer worker processes in the cluster. 1 for single-controller Pathways
+  # or single-host McJAX; >1 for multi-host McJAX (e.g. FSDP=8 across 2 hosts
+  # in a shared ICI slice), which needs `weight_sync_config.mode: ici` and the
+  # `ici_slice_worker` launcher. With more than one, each trainer reads its
+  # 0-based index from `DIST_RL_TRAINER_REPLICA`.
+  trainer_replicas: 1
   # Rollout workers in the cluster: `k8s.sh` deploys this many, and an external
   # launcher starts this many. `target: local` requires 1 (`local.sh` starts
   # one). With more than one, each rollout reads its 0-based index from the
@@ -435,7 +448,8 @@ cluster_config:
   rollout_replicas: 1
   # Minimum rollout workers the orchestrator waits for before starting
   # bring-up; slower initial replicas join in the background and promote to
-  # `ACTIVE` on weight sync. Null waits for all `rollout_replicas`.
+  # `ACTIVE` on weight sync. Null waits for all `rollout_replicas`. Must be
+  # null or `rollout_replicas` with `weight_sync_config.mode: ici`.
   min_rollout_replicas: null
   # One block per process. The keys mean the same on every target; a launcher
   # that does not apply one says so below.

@@ -882,6 +882,51 @@ def _validate_k8s_worker_jobsets(hp: cli_config.HyperParameters) -> None:
     )
 
 
+def _validate_replica_count(cluster: Mapping[str, Any], role: str) -> int:
+  """Validates `cluster_config.<role>_replicas` and returns it as an int."""
+  key = f"{role}_replicas"
+  replicas = cluster[key]
+  if (
+      isinstance(replicas, bool)
+      or not isinstance(replicas, int)
+      or replicas < 1
+  ):
+    raise ValueError(
+        f"cluster_config.{key} must be an int >= 1, got {replicas!r}."
+    )
+  if cluster["target"] == "local" and replicas != 1:
+    raise ValueError(
+        f"cluster_config.target=local runs one {role} (local.sh starts one), so"
+        f" cluster_config.{key} must be 1, got {replicas}."
+    )
+  return replicas
+
+
+def _validate_trainer_replicas(hp: cli_config.HyperParameters) -> None:
+  """Checks `cluster_config.trainer_replicas`.
+
+  Only the shared-slice `ici_slice_worker` launcher starts more than one
+  trainer; `k8s.sh` and `local.sh` deploy one.
+
+  Args:
+    hp: Loaded configuration.
+
+  Raises:
+    ValueError: If `trainer_replicas` is not an int >= 1, is not 1 on
+      `target: local`, or is above 1 without `weight_sync_config.mode=ici`.
+  """
+  replicas = _validate_replica_count(
+      hp.config_mapping("cluster_config"), "trainer"
+  )
+  mode = hp.config_mapping("weight_sync_config")["mode"]
+  if replicas > 1 and mode != common_datatypes.WeightSyncMode.ICI.value:
+    raise ValueError(
+        f"cluster_config.trainer_replicas={replicas} requires"
+        " weight_sync_config.mode=ici (launched by ici_slice_worker), got"
+        f" mode={mode!r}."
+    )
+
+
 def _validate_rollout_replicas(hp: cli_config.HyperParameters) -> None:
   """Checks `cluster_config.{rollout_replicas,min_rollout_replicas}`.
 
@@ -894,21 +939,7 @@ def _validate_rollout_replicas(hp: cli_config.HyperParameters) -> None:
       null nor an int in `1..rollout_replicas`.
   """
   cluster = hp.config_mapping("cluster_config")
-  replicas = cluster["rollout_replicas"]
-  if (
-      isinstance(replicas, bool)
-      or not isinstance(replicas, int)
-      or replicas < 1
-  ):
-    raise ValueError(
-        "cluster_config.rollout_replicas must be an int >= 1, got"
-        f" {replicas!r}."
-    )
-  if cluster["target"] == "local" and replicas != 1:
-    raise ValueError(
-        "cluster_config.target=local runs one rollout (local.sh starts one), so"
-        f" cluster_config.rollout_replicas must be 1, got {replicas}."
-    )
+  replicas = _validate_replica_count(cluster, "rollout")
   min_replicas = cluster["min_rollout_replicas"]
   if min_replicas is None:
     return
@@ -1060,6 +1091,44 @@ def _validate_fault_tolerance(hp: cli_config.HyperParameters) -> None:
     )
 
 
+def _validate_ici_failure_semantics(hp: cli_config.HyperParameters) -> None:
+  """Rejects per-worker recovery with `weight_sync_config.mode=ici`.
+
+  ICI trainers and rollouts share one `jax.distributed` world, whose
+  coordination service runs in one of its processes (possibly a rollout). Any
+  failure of a process, or of an SPMD collective, is fatal for the whole slice,
+  and no process can restart or join the world later. So rollout fault
+  tolerance (task retries, evicting a failed rollout) and rollouts that join
+  after bring-up cannot work.
+
+  Args:
+    hp: Loaded configuration.
+
+  Raises:
+    ValueError: With `mode=ici`, if `cluster_config.fault_tolerance.enabled` is
+      true or `cluster_config.min_rollout_replicas` is not null and below
+      `cluster_config.rollout_replicas`.
+  """
+  mode = hp.config_mapping("weight_sync_config")["mode"]
+  if mode != common_datatypes.WeightSyncMode.ICI.value:
+    return
+  cluster = hp.config_mapping("cluster_config")
+  if cluster["fault_tolerance"]["enabled"]:
+    raise ValueError(
+        "weight_sync_config.mode=ici requires"
+        " cluster_config.fault_tolerance.enabled=false: trainers and rollouts"
+        " share one JAX world, so any process failure is fatal for the slice."
+    )
+  min_replicas = cluster["min_rollout_replicas"]
+  if min_replicas is not None and min_replicas != cluster["rollout_replicas"]:
+    raise ValueError(
+        "weight_sync_config.mode=ici requires cluster_config."
+        "min_rollout_replicas to be null or equal to rollout_replicas"
+        f" ({cluster['rollout_replicas']}), got {min_replicas}: rollouts"
+        " cannot join the shared JAX world after bring-up."
+    )
+
+
 # Environment variables `node_utils.apply_library_env` sets from the config,
 # and the config key each comes from. Launchers reject them in user-supplied
 # environments so a value can only come from the config.
@@ -1089,6 +1158,7 @@ _FORBIDDEN_ROLE_ENVS: Final[Mapping[str, str]] = types.MappingProxyType({
         "set cluster_config.pathways.trainer.persistence instead"
     ),
     "DIST_RL_WORKER_PORT": "launcher-managed worker identity",
+    "DIST_RL_TRAINER_REPLICA": "launcher-managed worker identity",
     "DIST_RL_ROLLOUT_REPLICA": "launcher-managed worker identity",
 })
 _ROLE_ENV_PREFIX_REASONS: Final[tuple[tuple[str, str], ...]] = (
@@ -1435,6 +1505,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   _validate_k8s_jax_cache_gcs(hp)
   _validate_k8s_scalars(hp)
   _validate_k8s_worker_jobsets(hp)
+  _validate_trainer_replicas(hp)
   _validate_rollout_replicas(hp)
   _validate_role_env(hp)
   _reject_unimplemented_settings(hp)
@@ -1443,6 +1514,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   _validate_trajectory_logging(hp)
   _validate_rollout_logps_settings(hp)
   _validate_fault_tolerance(hp)
+  _validate_ici_failure_semantics(hp)
   batch_size = int(hp.config["batch_size"])
   rl_train = hp.config_mapping("rl_training_config")
   mini_batch_size = int(rl_train["mini_batch_size"])
@@ -1531,6 +1603,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   _validate_maxtext_skip_step_kwargs(hp)
   _validate_freeze_router(hp)
   _validate_rollout_weights(hp)
+  _validate_ici_weight_sync(hp)
   _validate_library_settings(hp)
   if grpo["reward_mode"] == "reward_fn" and not hp.config["reward_functions"]:
     raise ValueError(
@@ -1605,20 +1678,58 @@ def _validate_maxtext_pairing(hp: cli_config.HyperParameters) -> None:
     )
 
 
+# Modes that move the trainer's weights into the rollout over a transport the
+# coordinator drives, so a rollout may start without real weights.
+_TRANSPORT_WEIGHT_SYNC_MODES: Final[frozenset[str]] = frozenset({
+    common_datatypes.WeightSyncMode.RAIDEN.value,
+    common_datatypes.WeightSyncMode.ICI.value,
+})
+
+
+def _validate_ici_weight_sync(hp: cli_config.HyperParameters) -> None:
+  """Validates `weight_sync_config.ici_chunk_gb` and ICI mode compatibility."""
+  ws = hp.config_mapping("weight_sync_config")
+  chunk_gb = ws["ici_chunk_gb"]
+  if isinstance(chunk_gb, bool) or not isinstance(chunk_gb, (int, float)):
+    raise TypeError(
+        f"weight_sync_config.ici_chunk_gb must be a number, got {chunk_gb!r}."
+    )
+  if not math.isfinite(chunk_gb) or ici_chunk_bytes(hp) <= 0:
+    raise ValueError(
+        "weight_sync_config.ici_chunk_gb must be a finite positive number of"
+        f" GiB (>= 1 byte), got {chunk_gb!r}."
+    )
+  if ws["mode"] != common_datatypes.WeightSyncMode.ICI.value:
+    return
+  rollout_engine = hp.config["rollout_engine"]
+  if rollout_engine not in ("inprocess_vllm", "vanilla"):
+    raise ValueError(
+        "weight_sync_config.mode=ici needs the rollout weights in the rollout"
+        " worker's own JAX process (rollout_engine 'inprocess_vllm' or"
+        f" 'vanilla'), got rollout_engine={rollout_engine!r}."
+    )
+
+
+def ici_chunk_bytes(hp: cli_config.HyperParameters) -> int:
+  """Returns `weight_sync_config.ici_chunk_gb` converted to bytes."""
+  chunk_gb = hp.config_mapping("weight_sync_config")["ici_chunk_gb"]
+  return int(float(chunk_gb) * (1 << 30))
+
+
 def rollout_init_with_random_weights(hp: cli_config.HyperParameters) -> bool:
   """Returns the effective `vllm_config.init_with_random_weights`.
 
   True makes the `inprocess_vllm` rollout start from random weights (vLLM's
-  `load_format="dummy"`) instead of loading the checkpoint. Only Raiden weight
-  sync replaces them: its bootstrap sync loads the trainer's weights before
-  step 0, whereas `none` skips the sync.
+  `load_format="dummy"`) instead of loading the checkpoint. Only Raiden and ICI
+  weight sync replace them: their bootstrap sync loads the trainer's weights
+  before step 0, whereas `none` skips the sync.
 
   Args:
     hp: Loaded configuration.
 
   Returns:
     `vllm_config.init_with_random_weights`, or, when it is null, whether
-    `weight_sync_config.mode` is "raiden".
+    `weight_sync_config.mode` is "raiden" or "ici".
 
   Raises:
     TypeError: If `vllm_config.init_with_random_weights` is not a bool or null.
@@ -1626,7 +1737,7 @@ def rollout_init_with_random_weights(hp: cli_config.HyperParameters) -> bool:
   value = hp.config_mapping("vllm_config")["init_with_random_weights"]
   if value is None:
     mode = hp.config_mapping("weight_sync_config")["mode"]
-    return mode == common_datatypes.WeightSyncMode.RAIDEN.value
+    return mode in _TRANSPORT_WEIGHT_SYNC_MODES
   if not isinstance(value, bool):
     raise TypeError(
         "vllm_config.init_with_random_weights must be a bool or null, got"
@@ -1638,24 +1749,25 @@ def rollout_init_with_random_weights(hp: cli_config.HyperParameters) -> bool:
 def _validate_rollout_weights(hp: cli_config.HyperParameters) -> None:
   """Rejects a vLLM rollout that would never get real weights.
 
-  Without Raiden weight sync, the rollout keeps the weights it starts from for
-  the whole run. vLLM's `MaxTextForCausalLM` always starts from random weights:
-  it loads weights only from `maxtext_config.load_parameters_path`, which the
-  rollout does not set (`maxtext_utils.build_vllm_maxtext_additional_config`).
+  Without Raiden or ICI weight sync, the rollout keeps the weights it starts
+  from for the whole run. vLLM's `MaxTextForCausalLM` always starts from random
+  weights: it loads weights only from `maxtext_config.load_parameters_path`,
+  which the rollout does not set
+  (`maxtext_utils.build_vllm_maxtext_additional_config`).
 
   Args:
     hp: Loaded configuration.
 
   Raises:
     TypeError: If `vllm_config.init_with_random_weights` is not a bool or null.
-    ValueError: If `weight_sync_config.mode` is not "raiden" and either a vLLM
-      `rollout_engine` serves `rollout_model_config.model_source: maxtext`, or
-      `rollout_engine` is "inprocess_vllm" with
-      `vllm_config.init_with_random_weights` true.
+    ValueError: If `weight_sync_config.mode` is not "raiden" or "ici" and
+      either a vLLM `rollout_engine` serves
+      `rollout_model_config.model_source: maxtext`, or `rollout_engine` is
+      "inprocess_vllm" with `vllm_config.init_with_random_weights` true.
   """
   random_init = rollout_init_with_random_weights(hp)
   mode = hp.config_mapping("weight_sync_config")["mode"]
-  if mode == common_datatypes.WeightSyncMode.RAIDEN.value:
+  if mode in _TRANSPORT_WEIGHT_SYNC_MODES:
     return
   rollout_engine = hp.config["rollout_engine"]
   rollout_source = hp.config_mapping("rollout_model_config")["model_source"]

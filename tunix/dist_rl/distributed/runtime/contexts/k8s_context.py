@@ -91,11 +91,13 @@ class K8sJaxContext(context.JaxContext):
     elif "ray" in os.environ.get("TPU_MULTIHOST_BACKEND", ""):
       pass
     else:
-      logging.info("initializing multi-controller JAX runtime")
-
       import jax
 
-      jax.distributed.initialize()
+      # `ici_slice_worker` initializes JAX itself, with its own shutdown
+      # barrier timeout.
+      if not jax.distributed.is_initialized():
+        logging.info("initializing multi-controller JAX runtime")
+        jax.distributed.initialize()
 
 
 class K8sDiscoveryContext(context.DiscoveryContext):
