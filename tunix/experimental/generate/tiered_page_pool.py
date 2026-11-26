@@ -358,6 +358,10 @@ class TieredPagePoolManager:
           )
 
   @property
+  def num_device_pages(self) -> int:
+    return self._device_pool.num_pages
+
+  @property
   def num_free_device_pages(self) -> int:
     return self._device_pool.num_free_pages
 

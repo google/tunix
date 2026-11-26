@@ -67,7 +67,14 @@ class DPCoordinator:
 
     with jax.set_mesh(mesh):
       self._kv_cache_manager = kv_cache_manager_lib.KVCacheManager(
-          cache_config, cache_geometries
+          cache_config,
+          cache_geometries,
+          max_num_seqs=scheduler_config.max_num_seqs,
+          max_chunked_prefill_length=(
+              scheduler_config.max_chunked_prefill_length
+          ),
+          num_scheduler_steps=scheduler_config.num_scheduler_steps,
+          max_num_batched_tokens=scheduler_config.max_num_batched_tokens,
       )
     self._scheduler = scheduler_lib.Scheduler(
         config=scheduler_config, kv_cache_manager=self._kv_cache_manager
@@ -85,11 +92,33 @@ class DPCoordinator:
     if self._max_pages_per_seq > self._kv_cache_manager.num_device_pages:
       raise ValueError(
           f'A sequence of max_model_len={max_model_len} with'
-          f' num_scheduler_steps={self._scheduler_config.num_scheduler_steps} and'
-          f' page_size={self._kv_cache_manager.page_size} needs up to'
+          f' num_scheduler_steps={self._scheduler_config.num_scheduler_steps}'
+          f' and page_size={self._kv_cache_manager.page_size} needs up to'
           f' {self._max_pages_per_seq} pages, but the KV cache only has'
           f' {self._kv_cache_manager.num_device_pages} device pages.'
       )
+    for (
+        window_size,
+        _,
+        group_pages,
+    ) in self._kv_cache_manager.group_device_page_counts:
+      if window_size is not None:
+        min_local_pages = utils.local_window_active_pages_per_seq(
+            window_size=window_size,
+            page_size=self._kv_cache_manager.page_size,
+            max_chunked_prefill_length=self._scheduler.chunked_prefill_length,
+            num_scheduler_steps=self._scheduler_config.num_scheduler_steps,
+        )
+        if min_local_pages > group_pages:
+          raise ValueError(
+              f'A sliding-window group with window_size={window_size},'
+              f' chunked_prefill_length={self._scheduler.chunked_prefill_length},'
+              ' num_scheduler_steps='
+              f'{self._scheduler_config.num_scheduler_steps}, and'
+              f' page_size={self._kv_cache_manager.page_size} needs up to'
+              f' {min_local_pages} pages per sequence, but only has'
+              f' {group_pages} device pages.'
+          )
 
     # Requests submitted since the last step, in submission order.
     self._queued_requests: list[request_lib.RequestState] = []
@@ -97,6 +126,11 @@ class DPCoordinator:
     # removed when aborted in `abort_request` or when finished in
     # `update_from_output`.
     self._requests: dict[str, request_lib.RequestState] = {}
+
+  @property
+  def group_device_page_counts(self) -> tuple[tuple[int | None, int, int], ...]:
+    """Per-group `(window_size, num_caches, num_device_pages)` summary."""
+    return self._kv_cache_manager.group_device_page_counts
 
   def reset_kv_caches(self) -> None:
     """Discards all KV, for after the weights change in place.

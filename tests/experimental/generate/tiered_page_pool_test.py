@@ -695,6 +695,7 @@ class TieredPagePoolManagerTest(parameterized.TestCase):
   def test_delete_and_reallocate_device_pool(self):
     config = self.get_config("no device sharding", has_subshape=True)
     manager = config.create_manager()
+    self.assertEqual(manager.num_device_pages, config.num_device_pages)
 
     pids = manager.allocate_device_pages(2)
     manager.free(pids)
