@@ -1790,6 +1790,7 @@ class RlEngineTrajectoryStoreTest(absltest.TestCase):
 
   def test_close_closes_trajectory_store(self):
     engine = object.__new__(rl_engine_lib.RLEngine)
+    engine._async_metrics_exporter = None
     engine._buffered_train_metrics = []
     engine._buffered_eval_metrics = []
     engine._weight_placement = rl_engine_lib.WeightPlacement.SHARED
