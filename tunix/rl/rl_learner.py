@@ -116,10 +116,10 @@ def shard_batch_by_process(
     rows = np.asarray(indices, dtype=np.int64)
   out = {}
   for key, value in batch.items():
-    try:
-      aligned = len(value) == num_rows and not isinstance(value, (str, bytes))
-    except TypeError:
-      aligned = False
+    if isinstance(value, (np.ndarray, jax.Array)):
+      aligned = value.ndim > 0 and value.shape[0] == num_rows
+    else:
+      aligned = isinstance(value, (list, tuple)) and len(value) == num_rows
     if not aligned:
       out[key] = value
     elif isinstance(value, (np.ndarray, jax.Array)):
@@ -917,16 +917,20 @@ class RLLearner(abc.ABC, Generic[TConfig]):
     """
     cfg = self.algo_config
     passes = []
+    # `beta` is not an `AlgorithmConfig` field (GRPOConfig and PPOConfig have
+    # it); the other fields below are.
     beta = getattr(cfg, "beta", 0.0)
     if beta is not None and beta != 0.0:
       passes.append(f"reference logprobs (beta={beta})")
-    reasons = [] if getattr(cfg, "use_rollout_logps", True) else [
-        "use_rollout_logps=False"
-    ]
+    reasons = [] if cfg.use_rollout_logps else ["use_rollout_logps=False"]
     reasons += [
-        f"{name}={getattr(cfg, name)!r}"
-        for name in ("sampler_is", "sampler_rs", "seq_logprob_error_threshold")
-        if getattr(cfg, name, None) is not None
+        f"{name}={value!r}"
+        for name, value in (
+            ("sampler_is", cfg.sampler_is),
+            ("sampler_rs", cfg.sampler_rs),
+            ("seq_logprob_error_threshold", cfg.seq_logprob_error_threshold),
+        )
+        if value is not None
     ]
     if reasons:
       passes.append(f"trainer logprobs ({', '.join(reasons)})")

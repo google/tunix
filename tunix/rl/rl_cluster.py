@@ -835,7 +835,7 @@ class RLEngine:
 
   def _log_metrics(self, metrics_buffer: MetricsBuffer) -> None:
     """Log metrics."""
-    cross_process = getattr(self, "_cross_process_metrics", False)
+    cross_process = self._cross_process_metrics
     unreduced = cross_process and not isinstance(
         metrics_buffer.metrics, _GlobalMetrics
     )
@@ -980,7 +980,7 @@ class RLEngine:
       include_current: Also reduce the buffers of the current global step
         (at the end of training).
     """
-    if not getattr(self, "_cross_process_metrics", False):
+    if not self._cross_process_metrics:
       return
     pending = []
     occurrences = collections.Counter()
@@ -1720,12 +1720,15 @@ class RLEngine:
           chunk[name] = None
           continue
         chunk[name] = sharding_utils.shard_input(x[batch_slice], axis)
-        if getattr(chunk[name].sharding, "spec", None) != pspec:
+        sharding = chunk[name].sharding
+        if (
+            not isinstance(sharding, jax.sharding.NamedSharding)
+            or sharding.spec != pspec
+        ):
           raise ValueError(
               f"TUNIX_PER_HOST_SAFE_LOGPS: a {name} chunk of {rows} rows per"
-              " process got sharding"
-              f" {chunk[name].sharding}, not {pspec}; process-local rows must"
-              " never be treated as replicated."
+              f" process got sharding {sharding}, not {pspec}; process-local"
+              " rows must never be treated as replicated."
           )
       out = compute_fn(**chunk)
       local = sharding_utils.process_local_rows(out)
@@ -1788,7 +1791,11 @@ class RLEngine:
       self._maybe_load_model_from_cpu(ref_model, Role.REFERENCE)
       temperature = self.get_rollout_config(mode=Mode.TRAIN).temperature
 
-      def compute(prompt_tokens, completion_tokens, **kwargs):
+      def compute(
+          prompt_tokens: jax.Array,
+          completion_tokens: jax.Array,
+          **kwargs: jax.Array | None,
+      ) -> jax.Array:
         return self.inference_worker.get_ref_per_token_logps(
             prompt_tokens,
             completion_tokens,
