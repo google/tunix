@@ -22,7 +22,7 @@ import math  # pylint: disable=unused-import
 import os
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, TypedDict
 
 from absl import logging
 import jax
@@ -150,8 +150,17 @@ def _env_flag(name: str, default: str = '0') -> bool:
 
 # Multi-controller (jax.distributed, no Pathways) trainer -> in-process engine
 # weight publish. Enabled by TUNIX_MULTI_CONTROLLER_RESHARD=1.
-_MC_REPLICATE_FNS: dict[Any, Any] = {}
-_MC_STATE = {'barrier_done': False, 'logged': False}
+class _MultiControllerState(TypedDict):
+  barrier_done: bool  # `_multicontroller_pre_reshard_barrier` ran.
+  logged: bool  # The first multi-controller publish was logged.
+
+
+# Jitted replication per (source sharding, shape, dtype).
+_MC_REPLICATE_FNS: dict[
+    tuple[jax.sharding.NamedSharding, tuple[int, ...], str],
+    Callable[[jax.Array], jax.Array],
+] = {}
+_MC_STATE: _MultiControllerState = {'barrier_done': False, 'logged': False}
 
 
 def _multicontroller_pre_reshard_barrier() -> None:
@@ -162,8 +171,12 @@ def _multicontroller_pre_reshard_barrier() -> None:
   spread wider than the runtime settle window, and a late peer could abort
   the collective for everyone ("continuator has halted" on cold boots). A
   device barrier plus a tiny all-gather first makes every host confirm it is
-  up and warms the collective path. One-time and best-effort; disable with
+  up and warms the collective path. One-time; disable with
   TUNIX_PRE_RESHARD_BARRIER=0.
+
+  Raises:
+    RuntimeError: The barrier failed; the publish that follows needs the same
+      collectives.
   """
   if _MC_STATE['barrier_done']:
     return
@@ -185,8 +198,12 @@ def _multicontroller_pre_reshard_barrier() -> None:
         'Multi-controller pre-reshard barrier passed on %d processes.',
         jax.process_count(),
     )
-  except Exception as e:  # pylint: disable=broad-exception-caught
-    logging.warning('Multi-controller pre-reshard barrier failed: %s', e)
+  except jax.errors.JaxRuntimeError as e:
+    raise RuntimeError(
+        'Multi-controller pre-reshard barrier failed on process'
+        f' {jax.process_index()} of {jax.process_count()}; the weight publish'
+        ' needs every process to join its collectives.'
+    ) from e
 
 
 def _multicontroller_reshard_leaf(
@@ -602,7 +619,7 @@ def _get_reshard_fn_multicontroller(
     cache_resharding_plans: bool,
     donate: bool,
     use_experimental_pre_reshard: bool,
-):
+) -> Callable[[Any, Any], Any]:
   """Returns the multi-controller reshard function.
 
   Enabled by TUNIX_MULTI_CONTROLLER_RESHARD=1.
@@ -622,7 +639,7 @@ def _get_reshard_fn_multicontroller(
   if jax.process_count() <= 1:
     raise EnvironmentError('Single-process job; no multi-controller reshard.')
 
-  def reshard_fn(x: Any, sharding: Any):
+  def reshard_fn(x: Any, sharding: Any) -> Any:
     _multicontroller_pre_reshard_barrier()
     if not _MC_STATE['logged']:
       _MC_STATE['logged'] = True
