@@ -3537,7 +3537,6 @@ class MergeAdditionalConfigTest(absltest.TestCase):
     )
 
 
-
 class _FlatLogprobs:
   """Test double of vLLM's `FlatLogprobs`, filled the way vLLM fills it.
 
