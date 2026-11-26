@@ -1,5 +1,7 @@
 """Tests for `rl_learner`."""
 
+import contextlib
+import os
 from unittest import mock
 
 from absl.testing import absltest
@@ -32,6 +34,81 @@ class DummyLearner(rl_learner.RLLearner[DummyConfig]):
 
   def _num_generations(self):
     return 1
+
+
+_PER_HOST_SWITCHES = ('TUNIX_PER_HOST_LEARNER', 'TUNIX_PER_HOST_SAFE_LOGPS')
+
+
+@contextlib.contextmanager
+def _per_host_env(process_count, **switches):
+  """Sets exactly `switches` and fakes `process_count` JAX processes."""
+  with mock.patch.dict(os.environ), mock.patch.object(
+      rl_learner.jax, 'process_count', return_value=process_count
+  ):
+    for name in _PER_HOST_SWITCHES:
+      os.environ.pop(name, None)
+    os.environ.update(switches)
+    yield
+
+
+def _mesh(fsdp):
+  mesh = mock.MagicMock()
+  mesh.shape = {'fsdp': fsdp}
+  return mesh
+
+
+def _mock_engine(actor_mesh, rollout_mesh):
+  config = rl_engine_lib.RLTrainingConfig(
+      actor_optimizer=optax.sgd(1e-3),
+      eval_every_n_steps=1,
+      max_steps=1,
+  )
+  engine = mock.MagicMock()
+  engine.actor_trainer.model = DummyModel()
+  engine.rollout.model.return_value = DummyModel()
+  engine.cluster_config.training_config = config
+  engine.cluster_config.role_to_mesh = {
+      rl_engine_lib.Role.ACTOR: actor_mesh,
+      rl_engine_lib.Role.ROLLOUT: rollout_mesh,
+  }
+  engine.actor_trainer.train_steps = 0
+  engine.actor_trainer.iter_steps = 0
+  return engine
+
+
+def _learner(engine):
+  return DummyLearner(
+      rl_engine=engine,
+      algo_config=DummyConfig(),
+      reward_fns=lambda prompts, completions, **kwargs: [1.0] * len(prompts),
+  )
+
+
+class PerHostLearnerTest(parameterized.TestCase):
+  """The per-host learner (TUNIX_PER_HOST_LEARNER=1) with a mock engine."""
+
+  def test_separate_meshes_load_data_synchronously(self):
+    engine = _mock_engine(_mesh(2), _mesh(2))
+    with _per_host_env(2):
+      learner = _learner(engine)
+    # Separate meshes: asynchronous rollout is on without the per-host learner.
+    self.assertTrue(learner.can_enable_async_rollout)
+
+    def fake_submit(fn, **kwargs):
+      del fn
+      kwargs['data_queue'].put(None)  # An empty mini-batch.
+      return mock.MagicMock()
+
+    engine.actor_trainer.train_steps = 1  # Stop after one global step.
+    with _per_host_env(2, TUNIX_PER_HOST_LEARNER='1'), mock.patch.object(
+        learner.executor, 'submit', side_effect=fake_submit
+    ) as submit:
+      with self.assertLogs(level='WARNING') as logs:
+        learner.train([{'prompts': [''] * 8}])
+    self.assertFalse(learner.can_enable_async_rollout)
+    self.assertIn('asynchronous rollout is turned off', '\n'.join(logs.output))
+    submit.assert_called_once()
+    self.assertIs(submit.call_args.kwargs['async_loading'], False)
 
 
 class RLLearnerTest(parameterized.TestCase):

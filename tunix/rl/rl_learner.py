@@ -667,6 +667,19 @@ class RLLearner(abc.ABC, Generic[TConfig]):
             " slice the globalised batch with process-local offsets, so every"
             " process but the first would score another process's rows."
         )
+      if self.can_enable_async_rollout:
+        # Asynchronous loading runs `_prepare_data` (rollout and the per-host
+        # reference/trainer logprob programs) on the executor thread while the
+        # main thread runs train steps. Those are multi-process programs, which
+        # every process must launch in the same order; from two threads they
+        # can interleave differently on different processes and hang.
+        logging.warning(
+            "TUNIX_PER_HOST_LEARNER=1: the actor and rollout meshes differ,"
+            " but asynchronous rollout is turned off. Data loading stays"
+            " synchronous so that every process launches its multi-process"
+            " programs (logprobs, train steps) in the same order."
+        )
+        self.can_enable_async_rollout = False
       train_ds = _ProcessShardedIterable(
           train_ds, self._shard_batch_for_process
       )
