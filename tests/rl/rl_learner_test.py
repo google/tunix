@@ -1,5 +1,8 @@
 """Tests for `rl_learner`."""
 
+import gc
+import os
+import threading
 from unittest import mock
 
 from absl.testing import absltest
@@ -9,6 +12,18 @@ import optax
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl import rl_learner
+
+# Full collections the tests run themselves, e.g. in place of the one after
+# the weight sync. The `gc.collect` spy in GcFreezeTest does not count them.
+_real_collect = gc.collect
+_GC_FREEZE_ENV_VARS = (
+    'TUNIX_GC_FREEZE',
+    'TUNIX_GC_FREEZE_AT',
+    'TUNIX_GC_FREEZE_EVERY',
+    'TUNIX_GC_FREEZE_REFREEZE',
+    'TUNIX_GC_FREEZE_DISABLE',
+    'TUNIX_GC_FREEZE_SAFETY',
+)
 
 
 class DummyModel(nnx.Module):
@@ -32,6 +47,26 @@ class DummyLearner(rl_learner.RLLearner[DummyConfig]):
 
   def _num_generations(self):
     return 1
+
+
+def _learner_with_mock_engine(max_steps):
+  config = rl_engine_lib.RLTrainingConfig(
+      actor_optimizer=optax.sgd(1e-3),
+      eval_every_n_steps=1,
+      max_steps=max_steps,
+  )
+  mock_engine = mock.MagicMock()
+  mock_engine.actor_trainer.model = DummyModel()
+  mock_engine.rollout.model.return_value = DummyModel()
+  mock_engine.cluster_config.training_config = config
+  mock_engine.actor_trainer.train_steps = 0
+  mock_engine.actor_trainer.iter_steps = 0
+  learner = DummyLearner(
+      rl_engine=mock_engine,
+      algo_config=DummyConfig(),
+      reward_fns=lambda prompts, completions, **kwargs: [1.0] * len(prompts),
+  )
+  return learner, mock_engine
 
 
 class RLLearnerTest(parameterized.TestCase):
@@ -169,6 +204,313 @@ class RLLearnerTest(parameterized.TestCase):
         learner.train(train_ds)
 
     mock_engine.close.assert_called_once()
+
+  def test_train_drives_gc_freeze_after_every_global_step(self):
+    self.enter_context(mock.patch.dict(os.environ, {'TUNIX_GC_FREEZE': '1'}))
+    gc_freeze_cls = self.enter_context(
+        mock.patch.object(rl_learner, '_GcFreeze')
+    )
+    gc_freeze = gc_freeze_cls.return_value
+    learner, mock_engine = _learner_with_mock_engine(max_steps=3)
+    events = []
+    gc_freeze.step_end.side_effect = lambda: events.append('step_end')
+    gc_freeze.close.side_effect = lambda: events.append('gc_freeze.close')
+    mock_engine.close.side_effect = lambda: events.append('engine.close')
+
+    def run_global_step(*args, **kwargs):
+      del args, kwargs
+      events.append('global_step')
+      mock_engine.actor_trainer.train_steps += 1
+
+    with mock.patch.object(
+        learner, '_run_global_step', side_effect=run_global_step
+    ):
+      learner.train([{'prompts': [''] * 8}])
+
+    gc_freeze_cls.assert_called_once_with()
+    self.assertEqual(
+        events,
+        ['global_step', 'step_end'] * 3 + ['gc_freeze.close', 'engine.close'],
+    )
+
+  def test_train_closes_gc_freeze_when_the_loop_raises(self):
+    self.enter_context(mock.patch.dict(os.environ, {'TUNIX_GC_FREEZE': '1'}))
+    gc_freeze = self.enter_context(
+        mock.patch.object(rl_learner, '_GcFreeze')
+    ).return_value
+    learner, _ = _learner_with_mock_engine(max_steps=3)
+
+    with mock.patch.object(
+        learner, '_run_global_step', side_effect=RuntimeError('Loop crash')
+    ):
+      with self.assertRaises(RuntimeError):
+        learner.train([{'prompts': [''] * 8}])
+
+    gc_freeze.step_end.assert_not_called()
+    gc_freeze.close.assert_called_once_with()
+
+  def test_train_without_the_flag_does_not_touch_gc(self):
+    self.enter_context(mock.patch.dict(os.environ))
+    os.environ.pop('TUNIX_GC_FREEZE', None)
+    gc_freeze_cls = self.enter_context(
+        mock.patch.object(rl_learner, '_GcFreeze')
+    )
+    learner, mock_engine = _learner_with_mock_engine(max_steps=1)
+
+    def run_global_step(*args, **kwargs):
+      del args, kwargs
+      mock_engine.actor_trainer.train_steps += 1
+
+    with mock.patch.object(
+        learner, '_run_global_step', side_effect=run_global_step
+    ):
+      learner.train([{'prompts': [''] * 8}])
+
+    gc_freeze_cls.assert_not_called()
+
+
+class GcFreezeTest(absltest.TestCase):
+  """Drives `_GcFreeze` with patched env and checks the interpreter's GC state.
+
+  `gc.collect` is wrapped to count the collections `_GcFreeze` runs. Every test
+  restores the GC state and the environment it started with.
+  """
+
+  def setUp(self):
+    super().setUp()
+    if gc.get_freeze_count():
+      self.skipTest('Objects are already frozen in this process.')
+    was_enabled = gc.isenabled()
+    self.callbacks_before = list(gc.callbacks)
+
+    def restore_gc_state():
+      gc.unfreeze()
+      gc.callbacks[:] = self.callbacks_before
+      if was_enabled:
+        gc.enable()
+      else:
+        gc.disable()
+
+    self.addCleanup(restore_gc_state)
+    self.enter_context(mock.patch.dict(os.environ))
+    for name in _GC_FREEZE_ENV_VARS:
+      os.environ.pop(name, None)
+    self.collect = self.enter_context(
+        mock.patch.object(gc, 'collect', wraps=_real_collect)
+    )
+
+  def _make_gc_freeze(self, env):
+    os.environ.update(env)
+    return rl_learner._GcFreeze()
+
+  def test_freezes_after_warmup_and_close_restores_the_gc_state(self):
+    gc.enable()
+    gc_freeze = self._make_gc_freeze({'TUNIX_GC_FREEZE_AT': '3'})
+    self.assertLen(gc.callbacks, len(self.callbacks_before) + 1)
+    for _ in range(2):
+      gc_freeze.step_end()
+      self.assertTrue(gc.isenabled())
+      self.assertEqual(gc.get_freeze_count(), 0)
+    self.collect.assert_not_called()
+
+    gc_freeze.step_end()
+
+    self.collect.assert_called_once_with()
+    self.assertFalse(gc.isenabled())
+    self.assertGreater(gc.get_freeze_count(), 0)
+
+    gc_freeze.close()
+
+    self.assertTrue(gc.isenabled())
+    self.assertEqual(gc.get_freeze_count(), 0)
+    self.assertEqual(gc.callbacks, self.callbacks_before)
+
+  def test_close_leaves_automatic_gc_off_if_it_was_off(self):
+    gc.disable()
+    gc_freeze = self._make_gc_freeze({'TUNIX_GC_FREEZE_AT': '1'})
+    gc_freeze.step_end()
+    self.assertGreater(gc.get_freeze_count(), 0)
+
+    gc_freeze.close()
+
+    self.assertFalse(gc.isenabled())
+    self.assertEqual(gc.get_freeze_count(), 0)
+    self.assertEqual(gc.callbacks, self.callbacks_before)
+
+  def test_close_before_the_freeze_only_removes_the_callback(self):
+    gc.enable()
+    gc_freeze = self._make_gc_freeze({'TUNIX_GC_FREEZE_AT': '5'})
+    gc_freeze.step_end()
+
+    gc_freeze.close()
+    gc_freeze.close()  # Idempotent.
+
+    self.collect.assert_not_called()
+    self.assertTrue(gc.isenabled())
+    self.assertEqual(gc.get_freeze_count(), 0)
+    self.assertEqual(gc.callbacks, self.callbacks_before)
+
+  def test_disable_0_keeps_automatic_gc_on(self):
+    gc.enable()
+    gc_freeze = self._make_gc_freeze(
+        {'TUNIX_GC_FREEZE_AT': '1', 'TUNIX_GC_FREEZE_DISABLE': '0'}
+    )
+    gc_freeze.step_end()
+
+    self.assertTrue(gc.isenabled())
+    self.assertGreater(gc.get_freeze_count(), 0)
+    gc_freeze.close()
+    self.assertEqual(gc.get_freeze_count(), 0)
+
+  def test_turns_automatic_gc_off_again_if_something_reenables_it(self):
+    gc.enable()
+    gc_freeze = self._make_gc_freeze({'TUNIX_GC_FREEZE_AT': '1'})
+    gc_freeze.step_end()
+    gc.enable()
+
+    gc_freeze.step_end()
+
+    self.assertFalse(gc.isenabled())
+    gc_freeze.close()
+    self.assertTrue(gc.isenabled())
+
+  def test_collects_every_n_steps_after_the_freeze(self):
+    gc_freeze = self._make_gc_freeze({
+        'TUNIX_GC_FREEZE_AT': '1',
+        'TUNIX_GC_FREEZE_EVERY': '2',
+        'TUNIX_GC_FREEZE_SAFETY': '0',
+    })
+    gc_freeze.step_end()  # Freezes.
+    self.collect.reset_mock()
+
+    collections = []
+    for _ in range(4):  # Steps 2 to 5.
+      gc_freeze.step_end()
+      collections.append(self.collect.call_count)
+
+    self.assertEqual(collections, [1, 1, 2, 2])  # On steps 2 and 4.
+    gc_freeze.close()
+
+  def test_refreeze_unfreezes_collects_and_freezes_again(self):
+    gc_freeze = self._make_gc_freeze({
+        'TUNIX_GC_FREEZE_AT': '1',
+        'TUNIX_GC_FREEZE_EVERY': '2',
+        'TUNIX_GC_FREEZE_REFREEZE': '1',
+    })
+    gc_freeze.step_end()  # Freezes.
+    calls = mock.Mock()
+    calls.attach_mock(self.collect, 'collect')
+    calls.attach_mock(
+        self.enter_context(mock.patch.object(gc, 'freeze', wraps=gc.freeze)),
+        'freeze',
+    )
+    calls.attach_mock(
+        self.enter_context(
+            mock.patch.object(gc, 'unfreeze', wraps=gc.unfreeze)
+        ),
+        'unfreeze',
+    )
+    calls.reset_mock()
+
+    gc_freeze.step_end()  # Step 2: periodic.
+
+    self.assertEqual(
+        calls.mock_calls,
+        [mock.call.unfreeze(), mock.call.collect(), mock.call.freeze()],
+    )
+    self.assertGreater(gc.get_freeze_count(), 0)
+    gc_freeze.close()
+    self.assertEqual(gc.get_freeze_count(), 0)
+
+  def test_safety_collect_only_in_steps_without_a_full_collection(self):
+    gc_freeze = self._make_gc_freeze(
+        {'TUNIX_GC_FREEZE_AT': '1', 'TUNIX_GC_FREEZE_EVERY': '100'}
+    )
+    gc_freeze.step_end()  # Freezes.
+    self.collect.reset_mock()
+
+    _real_collect()  # E.g. the collection after the weight sync.
+    gc_freeze.step_end()
+    self.collect.assert_not_called()
+
+    gc_freeze.step_end()
+    self.collect.assert_called_once_with()
+    gc_freeze.close()
+
+  def test_no_collection_after_the_freeze_with_safety_0(self):
+    gc_freeze = self._make_gc_freeze({
+        'TUNIX_GC_FREEZE_AT': '1',
+        'TUNIX_GC_FREEZE_EVERY': '100',
+        'TUNIX_GC_FREEZE_SAFETY': '0',
+    })
+    gc_freeze.step_end()  # Freezes.
+    self.collect.reset_mock()
+
+    for _ in range(3):
+      gc_freeze.step_end()
+
+    self.collect.assert_not_called()
+    gc_freeze.close()
+
+  def test_counts_a_full_collection_on_another_thread(self):
+    gc_freeze = self._make_gc_freeze(
+        {'TUNIX_GC_FREEZE_AT': '1', 'TUNIX_GC_FREEZE_EVERY': '100'}
+    )
+    gc_freeze.step_end()  # Freezes.
+    self.collect.reset_mock()
+
+    # E.g. a data loader thread.
+    collector = threading.Thread(target=_real_collect)
+    collector.start()
+    collector.join()
+    gc_freeze.step_end()
+
+    self.collect.assert_not_called()
+    gc_freeze.close()
+
+  def test_young_generation_collection_is_not_a_full_collection(self):
+    gc_freeze = self._make_gc_freeze(
+        {'TUNIX_GC_FREEZE_AT': '1', 'TUNIX_GC_FREEZE_EVERY': '100'}
+    )
+    gc_freeze.step_end()  # Freezes.
+    self.collect.reset_mock()
+
+    _real_collect(0)
+    gc_freeze.step_end()
+
+    self.collect.assert_called_once_with()
+    gc_freeze.close()
+
+  def test_rejects_step_counts_below_1(self):
+    for name in ('TUNIX_GC_FREEZE_AT', 'TUNIX_GC_FREEZE_EVERY'):
+      with self.subTest(name=name):
+        with mock.patch.dict(os.environ, {name: '0'}):
+          with self.assertRaises(ValueError):
+            rl_learner._GcFreeze()
+    self.assertEqual(gc.callbacks, self.callbacks_before)
+
+  def test_train_restores_the_gc_state(self):
+    gc.enable()
+    os.environ.update({'TUNIX_GC_FREEZE': '1', 'TUNIX_GC_FREEZE_AT': '1'})
+    learner, mock_engine = _learner_with_mock_engine(max_steps=2)
+    frozen_during_step = []
+
+    def run_global_step(*args, **kwargs):
+      del args, kwargs
+      frozen_during_step.append(gc.get_freeze_count() > 0)
+      mock_engine.actor_trainer.train_steps += 1
+
+    with mock.patch.object(
+        learner, '_run_global_step', side_effect=run_global_step
+    ):
+      learner.train([{'prompts': [''] * 8}])
+
+    # Frozen at the end of the first global step, restored when train()
+    # returns.
+    self.assertEqual(frozen_during_step, [False, True])
+    self.assertTrue(gc.isenabled())
+    self.assertEqual(gc.get_freeze_count(), 0)
+    self.assertEqual(gc.callbacks, self.callbacks_before)
 
 
 if __name__ == '__main__':
