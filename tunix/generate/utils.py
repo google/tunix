@@ -388,6 +388,7 @@ def _flat_logprobs_fast(
   if (
       width < 1
       or len(ids) < stop
+      or len(values) < stop
       or starts != list(range(s0, stop, width))
       or ends != list(range(s0 + width, stop + 1, width))
   ):
