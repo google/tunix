@@ -172,6 +172,29 @@ class TrainerWorkerTest(absltest.TestCase):
     self.assertEqual(worker.info().resources["trainer"], "FakeTrainer")
     self.assertIs(self.fake_trainer.gen_model_input_fn, gen_fn)
 
+  def test_initialize_and_info_omit_retired_capability_flags(self):
+    worker = trainer_worker.TrainerWorker(
+        trainer_factory=lambda: self.fake_trainer,
+        worker_id="cap_trainer",
+    )
+    retired_caps = (
+        "accepts_callable_loss",
+        "requires_target_state",
+        "needs_aot_compile",
+    )
+    for key in retired_caps:
+      self.assertNotIn(key, worker.info().resources)
+
+    init_resp = worker.initialize()
+    for key in retired_caps:
+      self.assertNotIn(key, init_resp.metadata)
+
+    reinit_resp = worker.initialize()
+    self.assertTrue(reinit_resp.metadata["ready"])
+    for key in retired_caps:
+      self.assertNotIn(key, reinit_resp.metadata)
+      self.assertNotIn(key, worker.info().resources)
+
   def test_initialize_failure_sets_error_state(self):
     def _failing_factory():
       raise RuntimeError("weight load failed")
@@ -240,6 +263,203 @@ class TrainerWorkerTest(absltest.TestCase):
     self.worker.with_loss_fn(fn)
 
     self.assertIs(self.fake_trainer.loss_fn, fn)
+
+  def test_with_loss_fn_legacy_without_algo_config_requires_callable(self):
+    with self.assertRaisesRegex(ValueError, "callable loss_fn"):
+      self.worker.with_loss_fn("grpo")
+
+  def test_with_loss_fn_resolves_actor_and_critic_strings_with_algo_config(
+      self,
+  ):
+    cfg = algorithm_config.GRPOConfig(beta=0.0)
+    cfg.temperature = 1.0
+    worker = trainer_worker.TrainerWorker(
+        trainer_factory=lambda: self.fake_trainer,
+        logps_chunk_size=4,
+    )
+    worker.with_loss_fn(
+        "grpo", algo_config=cfg, role=datatypes.Role.ACTOR, pad_id=3, eos_id=4
+    )
+    worker.initialize()
+    self.assertTrue(self.fake_trainer.has_aux)
+    self.assertIs(self.fake_trainer.loss_fn.func, algo_core.grpo_loss_fn)
+    self.assertEqual(
+        self.fake_trainer.loss_fn.keywords, {"compute_logps_chunk_size": 4}
+    )
+    self.assertEqual(
+        self.fake_trainer.gen_model_input_fn("batch"),
+        {
+            "train_example": "batch",
+            "algo_config": cfg,
+            "pad_id": 3,
+            "eos_id": 4,
+        },
+    )
+
+    ppo_cfg = algorithm_config.PPOConfig()
+    self.worker.with_loss_fn(
+        "ppo",
+        algo_config=ppo_cfg,
+        role=datatypes.Role.CRITIC,
+        pad_id=5,
+        eos_id=6,
+    )
+    self.assertIs(self.fake_trainer.loss_fn, algo_core.ppo_value_loss_fn)
+    self.assertEqual(
+        self.fake_trainer.gen_model_input_fn("batch"),
+        {
+            "train_example": "batch",
+            "clip_range_value": ppo_cfg.clip_range_value,
+            "pad_id": 5,
+            "eos_id": 6,
+        },
+    )
+
+    with self.assertRaisesRegex(ValueError, "requires a PPOConfig"):
+      self.worker.with_loss_fn(
+          "ppo", algo_config=cfg, role=datatypes.Role.CRITIC
+      )
+
+  def test_with_loss_fn_wraps_and_validates_narrow_policy_loss_fn(self):
+    cfg = algorithm_config.GRPOConfig(beta=0.0)
+    cfg.temperature = 1.0
+    seen_inputs = []
+
+    def _custom_narrow_loss(
+        inputs: algorithm_config.PolicyLossInputs[jax.Array],
+        config: algorithm_config.AlgorithmConfig,
+    ) -> algorithm_config.PolicyLossOutput[jax.Array]:
+      del config
+      seen_inputs.append(inputs)
+      loss = -jnp.sum(inputs.per_token_logps * inputs.completion_mask)
+      denom = jnp.sum(inputs.completion_mask)
+      return algorithm_config.PolicyLossOutput(
+          loss_sum=loss,
+          denominator=denom,
+          metrics={"custom_metric": jnp.sum(inputs.completion_mask)},
+          token_denom=denom,
+      )
+
+    self.worker.with_loss_fn(
+        _custom_narrow_loss,
+        algo_config=cfg,
+        role=datatypes.Role.ACTOR,
+        pad_id=0,
+        eos_id=0,
+    )
+    # Dry-run executed once on [2, 4] CPU inputs during registration.
+    self.assertLen(seen_inputs, 1)
+    self.assertEqual(seen_inputs[0].per_token_logps.shape, (2, 4))
+    self.assertIsNotNone(seen_inputs[0].old_per_token_logps)
+    self.assertIsNone(seen_inputs[0].ref_per_token_logps)
+
+    example = rl_common.TrainExample(
+        prompt_ids=np.array([[1, 2], [1, 2]], dtype=np.int32),
+        prompt_mask=np.ones((2, 2), dtype=np.float32),
+        completion_ids=np.array([[3, 4], [5, 6]], dtype=np.int32),
+        completion_mask=np.ones((2, 2), dtype=np.float32),
+        advantages=np.array([1.0, -1.0], dtype=np.float32),
+        ref_per_token_logps=None,
+        old_per_token_logps=np.full((2, 2), -0.5, dtype=np.float32),
+    )
+    model_kwargs = self.fake_trainer.gen_model_input_fn(example)
+    out = self.fake_trainer.loss_fn(self.fake_trainer.model, **model_kwargs)
+    self.assertIsInstance(out, sft_utils.LossOutput)
+    self.assertIsInstance(out.primary_loss, sft_utils.WeightedMetric)
+    self.assertIn("custom_metric", out.aux_metrics)
+    self.assertIn("entropy", out.aux_metrics)
+
+    # Bad return types fail immediately during with_loss_fn dry-run.
+    for bad_fn, msg in (
+        (lambda inputs, c: "not_output", "PolicyLossOutput"),
+        (
+            lambda inputs, c: algorithm_config.PolicyLossOutput(
+                loss_sum=1.0, denominator=jnp.array(1.0)  # pyrefly: ignore[bad-argument-type]
+            ),
+            "loss_sum must be a jax.Array",
+        ),
+        (
+            lambda inputs, c: algorithm_config.PolicyLossOutput(
+                loss_sum=jnp.array(1.0), denominator=1.0  # pyrefly: ignore[bad-argument-type]
+            ),
+            "denominator must be a jax.Array",
+        ),
+        (
+            lambda inputs, c: algorithm_config.PolicyLossOutput(
+                loss_sum=jnp.array(1.0),
+                denominator=jnp.array(1.0),
+                metrics={"bad": 1.0},  # pyrefly: ignore[bad-argument-type]
+            ),
+            "metrics\\['bad'\\] must be a jax.Array",
+        ),
+    ):
+      with self.subTest(msg=msg):
+        with self.assertRaisesRegex(TypeError, msg):
+          self.worker.with_loss_fn(bad_fn, algo_config=cfg)
+
+  def test_with_loss_fn_narrow_policy_loss_forwards_packed_and_is_fields(self):
+    cfg = algorithm_config.GRPOConfig(beta=0.0)
+    cfg.temperature = 1.0
+    seen_inputs = []
+
+    def _packed_narrow_loss(
+        inputs: algorithm_config.PolicyLossInputs[jax.Array],
+        config: algorithm_config.AlgorithmConfig,
+    ) -> algorithm_config.PolicyLossOutput[jax.Array]:
+      del config
+      seen_inputs.append(inputs)
+      weights = (
+          inputs.sampler_is_weights
+          if inputs.sampler_is_weights is not None
+          else jnp.ones_like(inputs.per_token_logps)
+      )
+      loss = -jnp.sum(inputs.per_token_logps * inputs.completion_mask * weights)
+      denom = jnp.sum(inputs.completion_mask)
+      return algorithm_config.PolicyLossOutput(
+          loss_sum=loss,
+          denominator=denom,
+          metrics={"custom_metric": jnp.sum(weights)},
+          token_denom=denom,
+      )
+
+    self.worker.with_loss_fn(
+        _packed_narrow_loss,
+        algo_config=cfg,
+        role=datatypes.Role.ACTOR,
+        pad_id=0,
+        eos_id=0,
+    )
+    packed_example = rl_common.TrainExample(
+        prompt_ids=np.zeros((1, 0), dtype=np.int32),
+        prompt_mask=np.zeros((1, 0), dtype=np.float32),
+        completion_ids=np.array([[3, 4, 5, 0]], dtype=np.int32),
+        completion_mask=np.array([[1.0, 1.0, 1.0, 0.0]], dtype=np.float32),
+        advantages=np.array([[1.0, 1.0, -1.0, 0.0]], dtype=np.float32),
+        ref_per_token_logps=None,
+        old_per_token_logps=np.full((1, 4), -0.5, dtype=np.float32),
+        segment_ids=np.array([[1, 1, 2, 0]], dtype=np.int32),
+        segment_positions=np.array([[0, 1, 0, 0]], dtype=np.int32),
+        num_segments=3,
+        sampler_is_weights=np.array([[0.8, 1.2, 0.5, 0.0]], dtype=np.float32),
+        sampler_agreement_applied=True,
+    )
+    model_kwargs = self.fake_trainer.gen_model_input_fn(packed_example)
+    out = self.fake_trainer.loss_fn(self.fake_trainer.model, **model_kwargs)
+    self.assertIsInstance(out, sft_utils.LossOutput)
+    self.assertLen(seen_inputs, 2)
+    packed_in = seen_inputs[1]
+    self.assertIsNotNone(packed_in.segment_ids)
+    np.testing.assert_array_equal(
+        np.asarray(packed_in.segment_ids),
+        np.array([[1, 1, 2, 0]], dtype=np.int32),
+    )
+    self.assertEqual(packed_in.num_segments, 3)
+    self.assertIsNotNone(packed_in.sampler_is_weights)
+    np.testing.assert_allclose(
+        np.asarray(packed_in.sampler_is_weights),
+        np.array([[0.8, 1.2, 0.5, 0.0]], dtype=np.float32),
+    )
+    self.assertTrue(packed_in.sampler_agreement_applied)
 
   def test_compile_forwards_dummy_data_to_trainer(self):
     dummy = {"dummy": 1}

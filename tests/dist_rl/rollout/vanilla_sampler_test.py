@@ -1173,6 +1173,8 @@ class VanillaSamplerTest(parameterized.TestCase):
 
   def test_weight_sync_with_raiden_delegate(self):
     mock_delegate = mock.MagicMock()
+    mock_delegate.serving_corrupted = False
+    mock_delegate.has_uncommitted_mutation = False
     mock_delegate.is_bounded.return_value = False
     mock_delegate.bind_weight_sync = mock.AsyncMock(return_value=True)
     mock_delegate.get_weight_sync_metadata = mock.AsyncMock(

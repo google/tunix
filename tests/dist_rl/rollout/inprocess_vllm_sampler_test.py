@@ -15,13 +15,18 @@
 """Tests for InprocessVllmSampler with Tunix VllmSampler and Raiden delegate."""
 
 import asyncio
+import types
 from unittest import mock
 
 from absl.testing import absltest
+import jax
+import jax.numpy as jnp
 import numpy as np
 from tunix.common import configs
 from tunix.dist_rl.rollout import inprocess_vllm_sampler
 from tunix.dist_rl.rollout import sampler as base_sampler_lib
+from tunix.dist_rl.weight_sync import basic_delegate
+from tunix.dist_rl.weight_sync import basic_handler
 from tunix.dist_rl.weight_sync import raiden_weight_sync_delegate
 from tunix.dist_rl.weight_sync import weight_sync
 from tunix.generate import base_sampler
@@ -104,6 +109,22 @@ class InprocessVllmSamplerTest(absltest.TestCase):
     )
     self.assertFalse(sampler.raiden_sync_delegate.is_bounded())
 
+  def test_real_basic_delegate_instantiation(self):
+    basic_config = configs.RolloutConfig(
+        weight_sync_mode=weight_sync.WeightSyncMode.BASIC,
+        tensor_parallel_size=1,
+        data_parallel_size=1,
+    )
+    sampler = inprocess_vllm_sampler.InprocessVllmSampler(
+        server_id="vllm_basic_slice",
+        tokenizer=self.mock_tokenizer,
+        config=basic_config,
+    )
+    self.assertFalse(sampler.enable_raiden)
+    self.assertIsNotNone(sampler._sync_delegate)
+    self.assertEqual(sampler._sync_delegate._server_id, "vllm_basic_slice")
+    self.assertFalse(sampler._sync_delegate.is_bounded())
+
   def test_weight_sync_mode_read_from_rollout_config(self):
     sampler = inprocess_vllm_sampler.InprocessVllmSampler(
         server_id="rollout_cfg",
@@ -115,6 +136,39 @@ class InprocessVllmSamplerTest(absltest.TestCase):
     )
     self.assertFalse(sampler.enable_raiden)
     self.assertIsNone(sampler.raiden_sync_delegate)
+
+  def test_basic_partial_rollout_and_stop_closes_delegate_before_vllm_stop(
+      self,
+  ):
+    sampler = inprocess_vllm_sampler.InprocessVllmSampler(
+        server_id="vllm_basic_partial",
+        tokenizer=self.mock_tokenizer,
+        config=configs.RolloutConfig(
+            weight_sync_mode=weight_sync.WeightSyncMode.BASIC,
+            partial_rollout=True,
+        ),
+    )
+    delegate = sampler._sync_delegate
+    self.assertIsInstance(delegate, basic_delegate.BasicDestinationDelegate)
+    assert isinstance(delegate, basic_delegate.BasicDestinationDelegate)
+    self.assertIs(delegate.partial_rollout, True)
+
+    call_order: list[str] = []
+    orig_close = delegate.close
+    sampler.vllm_sampler = self.mock_vllm_sampler
+    self.mock_vllm_sampler.stop.side_effect = (
+        lambda *args, **kwargs: call_order.append("vllm_stop")
+    )
+    with mock.patch.object(
+        delegate,
+        "close",
+        side_effect=lambda: (call_order.append("delegate_close"), orig_close())[
+            1
+        ],
+    ):
+      self.assertTrue(asyncio.run(sampler.stop()))
+    self.assertEqual(call_order, ["delegate_close", "vllm_stop"])
+    self.assertTrue(delegate._closed)
 
     invalid_cfg = configs.RolloutConfig()
     invalid_cfg.weight_sync_mode = "invalid"  # type: ignore[assignment]
@@ -439,6 +493,8 @@ class InprocessVllmSamplerTest(absltest.TestCase):
     mock_delegate = mock.MagicMock(
         spec=raiden_weight_sync_delegate.RaidenWeightSyncDelegate
     )
+    mock_delegate.serving_corrupted = False
+    mock_delegate.has_uncommitted_mutation = False
     mock_delegate.is_bounded.return_value = False
     mock_delegate.bind_weight_sync = mock.AsyncMock(return_value=True)
     mock_delegate.get_weight_sync_metadata = mock.AsyncMock(
@@ -527,6 +583,8 @@ class InprocessVllmSamplerTest(absltest.TestCase):
     mock_delegate = mock.MagicMock(
         spec=raiden_weight_sync_delegate.RaidenWeightSyncDelegate
     )
+    mock_delegate.serving_corrupted = False
+    mock_delegate.has_uncommitted_mutation = False
     mock_delegate.is_bounded.return_value = False
     if hasattr(self.mock_vllm_sampler, "transformer_state"):
       del self.mock_vllm_sampler.transformer_state
@@ -574,6 +632,134 @@ class InprocessVllmSamplerTest(absltest.TestCase):
 
     self.sampler.refresh_state_leaves()
     self.mock_vllm_sampler.refresh_state_leaves.assert_called_once_with()
+
+    self.assertIsInstance(
+        self.sampler, basic_delegate.HfWeightUpdatableSampler
+    )
+    manifest_sentinel = {"rules": []}
+    self.mock_vllm_sampler.from_hf_manifest.return_value = manifest_sentinel
+    self.assertIs(self.sampler.from_hf_manifest(), manifest_sentinel)
+    self.mock_vllm_sampler.from_hf_manifest.assert_called_once_with()
+
+    expected_meta = (
+        weight_sync.TensorMetadata(
+            name="model.norm.weight",
+            shape=(4,),
+            mesh_shape=(1,),
+            layout=(0,),
+            item_size=4,
+        ),
+    )
+    self.mock_vllm_sampler.expected_hf_variables.return_value = expected_meta
+    self.assertEqual(self.sampler.expected_hf_variables(), expected_meta)
+    self.mock_vllm_sampler.expected_hf_variables.assert_called_once_with()
+
+    hf_weights = {"model.norm.weight": np.ones((4,), dtype=np.float32)}
+    self.sampler.update_params_from_hf(dict(hf_weights))
+    self.mock_vllm_sampler.update_params_from_hf.assert_called_once_with(
+        hf_weights, preserve_active_kv_cache=None
+    )
+    self.mock_vllm_sampler.update_params_from_hf.reset_mock()
+    self.sampler.update_params_from_hf(
+        types.MappingProxyType(hf_weights), preserve_active_kv_cache=True
+    )
+    self.mock_vllm_sampler.update_params_from_hf.assert_called_once_with(
+        hf_weights, preserve_active_kv_cache=True
+    )
+
+  def test_update_params_from_hf_unpacks_raw_tensor_payloads_and_passes_arrays(
+      self,
+  ):
+    local_cpus = jax.local_devices(backend="cpu")
+    cpu_device = local_cpus[0] if local_cpus else jax.devices("cpu")[0]
+    np_passthru = np.array([1.0, 2.0], dtype=np.float32)
+    jax_passthru = jax.device_put(
+        jnp.array([3.0], dtype=jnp.float32), cpu_device
+    )
+
+    payloads = {
+        "bf16": basic_handler.RawTensorPayload(
+            buffer=np.array([0x3F80], dtype=np.uint16),
+            shape=(1,),
+            dtype="bf16",
+        ),
+        "bfloat16": basic_handler.RawTensorPayload(
+            buffer=np.array([0x4000], dtype=np.uint16),
+            shape=(1,),
+            dtype="bfloat16",
+        ),
+        "u16": basic_handler.RawTensorPayload(
+            buffer=np.array([0x3F80], dtype=np.uint16),
+            shape=(1,),
+            dtype="uint16",
+        ),
+        "f32": basic_handler.RawTensorPayload(
+            buffer=np.array([5.5], dtype=np.float32),
+            shape=(1,),
+            dtype="f32",
+        ),
+        "np_raw": np_passthru,
+        "jax_raw": jax_passthru,
+    }
+    self.sampler.update_params_from_hf(payloads, preserve_active_kv_cache=False)
+    self.assertEmpty(payloads)
+
+    self.mock_vllm_sampler.update_params_from_hf.assert_called_once()
+    call_args = self.mock_vllm_sampler.update_params_from_hf.call_args
+    self.assertFalse(call_args.kwargs["preserve_active_kv_cache"])
+    forwarded = call_args.args[0]
+
+    self.assertEqual(forwarded["bf16"].dtype, jnp.bfloat16)
+    self.assertEqual(forwarded["bf16"].devices(), {cpu_device})
+    self.assertEqual(float(forwarded["bf16"][0]), 1.0)
+
+    self.assertEqual(forwarded["bfloat16"].dtype, jnp.bfloat16)
+    self.assertEqual(forwarded["bfloat16"].devices(), {cpu_device})
+    self.assertEqual(float(forwarded["bfloat16"][0]), 2.0)
+
+    self.assertEqual(forwarded["u16"].dtype, jnp.uint16)
+    self.assertEqual(forwarded["u16"].devices(), {cpu_device})
+    self.assertEqual(int(forwarded["u16"][0]), 0x3F80)
+
+    self.assertEqual(forwarded["f32"].dtype, jnp.float32)
+    self.assertEqual(forwarded["f32"].devices(), {cpu_device})
+    self.assertEqual(float(forwarded["f32"][0]), 5.5)
+
+    self.assertIs(forwarded["np_raw"], np_passthru)
+    self.assertIs(forwarded["jax_raw"], jax_passthru)
+
+  def test_basic_bind_does_not_access_transformer_state(self):
+    mock_delegate = mock.MagicMock(
+        spec=basic_delegate.BasicDestinationDelegate
+    )
+    mock_delegate.is_bounded.return_value = False
+    mock_delegate.bind_weight_sync = mock.AsyncMock(return_value=True)
+    if hasattr(self.mock_vllm_sampler, "transformer_state"):
+      del self.mock_vllm_sampler.transformer_state
+
+    basic_config = configs.RolloutConfig(
+        weight_sync_mode=weight_sync.WeightSyncMode.BASIC,
+        tensor_parallel_size=1,
+        data_parallel_size=1,
+    )
+    with mock.patch.object(
+        basic_delegate,
+        "BasicDestinationDelegate",
+        return_value=mock_delegate,
+    ):
+      basic_sampler = inprocess_vllm_sampler.InprocessVllmSampler(
+          server_id="vllm_basic_slice",
+          tokenizer=self.mock_tokenizer,
+          config=basic_config,
+      )
+    basic_sampler.initialize()
+
+    self.assertTrue(asyncio.run(basic_sampler.bind_weight_sync()))
+    mock_delegate.bind_weight_sync.assert_awaited_once_with(
+        sync_request=None,
+        state=None,
+        sampler=basic_sampler,
+    )
 
     uninit = inprocess_vllm_sampler.InprocessVllmSampler(
         server_id="uninit_slice",
@@ -844,6 +1030,8 @@ class RoutedExpertsTest(absltest.TestCase):
     mock_delegate = mock.MagicMock(
         spec=raiden_weight_sync_delegate.RaidenWeightSyncDelegate
     )
+    mock_delegate.serving_corrupted = False
+    mock_delegate.has_uncommitted_mutation = False
     mock_delegate.pre_weight_sync = mock.AsyncMock(return_value=True)
     mock_delegate.post_weight_sync = mock.AsyncMock(return_value=True)
     mock_delegate.abort_weight_sync = mock.AsyncMock(return_value=True)
