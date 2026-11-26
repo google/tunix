@@ -38,14 +38,24 @@ COPY requirements/ requirements/
 
 RUN bash scripts/install_tunix_vllm_requirement.sh
 
+# Record the JAX stack (jax, jaxlib, libtpu) that the pinned tpu-inference was built against. The
+# check at the end of this file fails the build if a later step moves any of them, because a newer
+# jax over the pinned libtpu makes every vLLM engine fail at start ("Pallas TPU requires a recent
+# libtpu version").
+RUN uv pip freeze | grep -E '^(jax|jaxlib|libtpu)==' | tee /app/.jax-pins.txt
+
 # Copy pyproject.toml, README.md, and CMakeLists.txt to install dependencies first
 COPY pyproject.toml README.md CMakeLists.txt /app/
 RUN mkdir /app/tunix && touch /app/tunix/__init__.py
-RUN uv pip install ".[tpu]"
+RUN uv pip install -c /app/.jax-pins.txt ".[tpu]"
 
 # Install SFT/MaxText dependencies (unconditional)
-RUN uv pip install --upgrade flax && \
-    uv pip install torchax aqtp tokamax math_verify drjax && \
+# `--upgrade-package flax`, not `--upgrade`: a bare `--upgrade` re-resolves flax's dependencies too and
+# moves jax to the newest release while libtpu stays at the version pinned above. The recorded pins are
+# passed as a constraints file, so a dependency that needs a different JAX fails here instead of
+# silently replacing the stack.
+RUN uv pip install -c /app/.jax-pins.txt --upgrade-package flax flax && \
+    uv pip install -c /app/.jax-pins.txt torchax aqtp tokamax math_verify drjax && \
     uv pip install --no-deps git+https://github.com/google/maxtext.git
 
 # Build argument to conditionally install Kubernetes tools
@@ -114,6 +124,10 @@ RUN cd /app && find tunix/dist_rl/distributed -name "*.proto" -exec python -m gr
 
 # Install Tunix in editable mode
 RUN uv pip install --no-deps -e .
+
+# The JAX stack must still be the one tpu-inference pinned (recorded in /app/.jax-pins.txt above).
+RUN uv pip freeze | grep -E '^(jax|jaxlib|libtpu)==' | diff /app/.jax-pins.txt - && \
+    python -c "import jax, jaxlib; assert jax.__version__ == jaxlib.__version__, (jax.__version__, jaxlib.__version__)"
 
 
 
