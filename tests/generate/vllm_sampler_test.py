@@ -941,7 +941,9 @@ class VllmSamplerConfigTest(absltest.TestCase):
         def request():
           barrier.wait()
           decisions.append(
-              sampler._request_flat_logprobs(vllm_sampler.SamplingParams())
+              sampler._request_flat_logprobs(
+                  vllm_sampler.SamplingParams(), True
+              )
           )
 
         threads = [threading.Thread(target=request) for _ in range(8)]
@@ -955,6 +957,23 @@ class VllmSamplerConfigTest(absltest.TestCase):
             sorted(decisions), [False] * (8 - checks) + [True] * checks
         )
         self.assertEqual(sampler._fast_logprobs_calls, 8)
+
+  def test_fast_logprobs_calls_without_logprobs_use_no_check(self):
+    sampler = self._make_sampler(
+        vllm_sampler.VllmConfig(init_with_random_weights=False)
+    )
+    with mock.patch.dict(os.environ, {"TUNIX_FAST_LOGPROBS_CHECK": "1"}):
+      params = vllm_sampler.SamplingParams()
+      self.assertFalse(sampler._request_flat_logprobs(params, False))
+      self.assertEqual(sampler._fast_logprobs_calls, 0)
+      if hasattr(params, "flat_logprobs"):
+        self.assertTrue(params.flat_logprobs)  # Still requested.
+      decisions = [
+          sampler._request_flat_logprobs(vllm_sampler.SamplingParams(), True)
+          for _ in range(2)
+      ]
+    self.assertEqual(decisions, [True, False])
+    self.assertEqual(sampler._fast_logprobs_calls, 2)
 
   def test_fast_logprobs_check_reaches_the_postprocess_pool(self):
     sampler = self._make_sampler(
@@ -1312,6 +1331,28 @@ class VllmSamplerTokenInputTest(absltest.TestCase):
     )
     self.assertEqual(obj._fast_logprobs_calls, 2)
     np.testing.assert_allclose(first.logprobs[0], [-0.25, -0.75])
+
+  def test_fast_logprobs_check_goes_to_the_first_call_with_logprobs(self):
+    obj = self._sampler()
+    seen = []
+    extract = vllm_sampler.utils.get_logprobs_from_vllm_output
+
+    def spy(token_ids, logprobs, **kwargs):
+      seen.append(kwargs)
+      return extract(token_ids, logprobs, **kwargs)
+
+    env = {"TUNIX_FAST_LOGPROBS": "1", "TUNIX_FAST_LOGPROBS_CHECK": "1"}
+    with mock.patch.dict(os.environ, env), mock.patch.object(
+        vllm_sampler.utils, "get_logprobs_from_vllm_output", side_effect=spy
+    ):
+      without = obj(None, 4, prompt_token_ids=[[1, 1]], return_logprobs=False)
+      checked = obj(None, 4, prompt_token_ids=[[2, 2]], return_logprobs=True)
+    # The first call extracts no logprobs, so it leaves the check to the
+    # second call.
+    self.assertIsNone(without.logprobs)
+    self.assertEqual(seen, [{"fast": True, "check": True}])
+    self.assertEqual(obj._fast_logprobs_calls, 1)
+    np.testing.assert_allclose(checked.logprobs[0], [-0.25, -0.75])
 
   def test_text_path_still_encodes(self):
     obj = self._sampler()

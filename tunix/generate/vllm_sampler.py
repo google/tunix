@@ -960,30 +960,39 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       outputs.append(result)
     return outputs
 
-  def _request_flat_logprobs(self, sampling_params: SamplingParams) -> bool:
+  def _request_flat_logprobs(
+      self, sampling_params: SamplingParams, extracts_logprobs: bool
+  ) -> bool:
     """TUNIX_FAST_LOGPROBS=1: ask vLLM for `FlatLogprobs` containers.
 
     FlatLogprobs keeps a request's logprobs in a few flat lists instead of one
     dict per position (far fewer Python objects), and lets
     `utils.get_logprobs_from_vllm_output` read the sampled-token values with
-    slicing. The first TUNIX_FAST_LOGPROBS_CHECK calls (default 1) also verify
-    every extraction against the per-position loop.
+    slicing. The first TUNIX_FAST_LOGPROBS_CHECK calls (default 1) that
+    extract those values also verify every extraction against the
+    per-position loop.
 
     Args:
       sampling_params: The request's sampling params (updated in place).
+      extracts_logprobs: Whether the call extracts the sampled tokens'
+        logprobs (its effective `return_logprobs`). Only such calls are
+        counted; the others are never checked and use up no check.
 
     Returns:
       Whether this call verifies its extractions. The calls are counted under
       a lock and the decision is passed down to `_decode_single_output`, so
       concurrent calls cannot skip or overwrite each other's check.
     """
+    supported = hasattr(sampling_params, "flat_logprobs")
+    if supported:
+      sampling_params.flat_logprobs = True
+    if not extracts_logprobs:
+      return False
     checks = int(os.environ.get("TUNIX_FAST_LOGPROBS_CHECK", "1") or "0")
     with self._fast_logprobs_lock:
       self._fast_logprobs_calls += 1
       calls = self._fast_logprobs_calls
-    if hasattr(sampling_params, "flat_logprobs"):
-      sampling_params.flat_logprobs = True
-    elif calls == 1:
+    if not supported and calls == 1:
       logging.warning(
           "TUNIX_FAST_LOGPROBS: this vLLM has no SamplingParams.flat_logprobs;"
           " logprobs stay per-position dicts (stock extraction)."
@@ -1102,7 +1111,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       # recomputation against the model's actual sampling context.
       sampling_params.include_stop_str_in_output = True
       if _env_flag("TUNIX_FAST_LOGPROBS"):
-        check_fast_logprobs = self._request_flat_logprobs(sampling_params)
+        check_fast_logprobs = self._request_flat_logprobs(
+            sampling_params, eff_return_logprobs
+        )
 
       if top_p is not None:
         sampling_params.top_p = top_p
