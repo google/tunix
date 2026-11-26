@@ -136,6 +136,7 @@ class PerHostLearnerTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       ('none', {}, []),
+      ('reference_logps', {'beta': 0.04}, ['reference logprobs (beta=0.04)']),
       (
           'trainer_logps',
           {'use_rollout_logps': False},
