@@ -208,14 +208,97 @@ jobs:
       id-token: write
 
     steps:
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: '3.12'
+
       - name: Download package artifacts
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           name: python-package
           path: dist/
 
-      - name: Publish package to PyPI
-        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+      - name: Authenticate to Google Cloud (OSS Exit Gate)
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: 'projects/305452601764/locations/global/workloadIdentityPools/builders/providers/github'
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      - name: Clean up previous OSS Exit Gate staging version (if any)
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import email, glob, re, subprocess, tarfile, zipfile
+          seen = set()
+          for f in sorted(glob.glob("dist/**/*.whl", recursive=True) + glob.glob("dist/**/*.tar.gz", recursive=True)):
+            if f.endswith(".whl"):
+              with zipfile.ZipFile(f) as zf:
+                meta = [n for n in zf.namelist() if n.endswith(".dist-info/METADATA")][0]
+                msg = email.message_from_bytes(zf.read(meta))
+            else:
+              with tarfile.open(f, "r:gz") as tf:
+                pi = [m for m in tf.getmembers() if m.name.endswith("/PKG-INFO")][0]
+                msg = email.message_from_bytes(tf.extractfile(pi).read())
+            pkg = re.sub(r"[-_.]+", "-", msg["Name"]).lower()
+            ver = msg["Version"]
+            if (pkg, ver) in seen:
+              continue
+            seen.add((pkg, ver))
+            res = subprocess.run([
+              "gcloud", "artifacts", "versions", "describe", ver,
+              f"--package={pkg}", "--project=oss-exit-gate-prod",
+              "--location=us", "--repository=tunix--pypi",
+            ], capture_output=True, text=True)
+            if res.returncode == 0:
+              subprocess.run([
+                "gcloud", "artifacts", "versions", "delete", ver,
+                f"--package={pkg}", "--project=oss-exit-gate-prod",
+                "--location=us", "--repository=tunix--pypi", "--quiet",
+              ], check=True)
+          PY
+
+      - name: Upload package to OSS Exit Gate Artifact Registry
+        run: |
+          set -euo pipefail
+          python3 -m pip install --upgrade twine
+          ACCESS_TOKEN="$(gcloud auth print-access-token)"
+          echo "::add-mask::${ACCESS_TOKEN}"
+          TWINE_USERNAME=oauth2accesstoken           TWINE_PASSWORD="${ACCESS_TOKEN}"           python3 -m twine upload             --repository-url https://us-python.pkg.dev/oss-exit-gate-prod/tunix--pypi/             dist/*
+
+      - name: Trigger OSS Exit Gate release manifest
+        env:
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import email, glob, json, os, re, tarfile, zipfile
+          pkgs = {}
+          for f in sorted(glob.glob("dist/**/*.whl", recursive=True) + glob.glob("dist/**/*.tar.gz", recursive=True)):
+            if f.endswith(".whl"):
+              with zipfile.ZipFile(f) as zf:
+                meta = [n for n in zf.namelist() if n.endswith(".dist-info/METADATA")][0]
+                msg = email.message_from_bytes(zf.read(meta))
+            else:
+              with tarfile.open(f, "r:gz") as tf:
+                pi = [m for m in tf.getmembers() if m.name.endswith("/PKG-INFO")][0]
+                msg = email.message_from_bytes(tf.extractfile(pi).read())
+            name = re.sub(r"[-_.]+", "-", msg["Name"]).lower()
+            pkgs[name] = msg["Version"]
+          assert pkgs, "No wheel or sdist found in dist/"
+          manifest = {
+            "publish_all": False,
+            "publishing_groups": [{
+              "packages": [{"name": k, "version": v} for k, v in sorted(pkgs.items())]
+            }]
+          }
+          with open("/tmp/manifest.json", "w") as fh:
+            json.dump(manifest, fh, indent=2)
+          print(json.dumps(manifest))
+          PY
+          gcloud storage cp /tmp/manifest.json             "gs://oss-exit-gate-prod-projects-bucket/tunix/pypi/manifests/manifest-${RUN_ID}-${RUN_ATTEMPT}.json"
 
   notify_failure:
     name: Notify failed nightly release dry run # creates an issue or modifies last open existing issue for failed build
