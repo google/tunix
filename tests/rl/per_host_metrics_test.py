@@ -613,14 +613,13 @@ def _run_learner_child(args):
     return metrics
 
   gather_threads = []
-  if hasattr(rl_engine_lib, "_allgather_bytes"):
-    allgather_bytes = rl_engine_lib._allgather_bytes
+  allgather_bytes = rl_engine_lib._allgather_bytes
 
-    def recording_allgather(payload):
-      gather_threads.append(threading.current_thread().name)
-      return allgather_bytes(payload)
+  def recording_allgather(payload):
+    gather_threads.append(threading.current_thread().name)
+    return allgather_bytes(payload)
 
-    rl_engine_lib._allgather_bytes = recording_allgather
+  rl_engine_lib._allgather_bytes = recording_allgather
   if args["disable_reduction"]:
     rl_engine_lib.RLEngine.reduce_metrics_across_processes = (
         lambda self, include_current=False: None
