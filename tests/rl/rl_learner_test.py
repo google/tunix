@@ -114,6 +114,26 @@ class PerHostLearnerTest(parameterized.TestCase):
     submit.assert_called_once()
     self.assertIs(submit.call_args.kwargs['async_loading'], False)
 
+  def test_shard_batch_by_process_slices_tensor_like_columns(self):
+    values = np.arange(4, dtype=np.float32)
+    batch = {
+        'prompts': ['a', 'b', 'c', 'd'],
+        'array': values,
+        'tensor': test_utils.CustomTensor(values.reshape(4, 1)),
+        'scalar': test_utils.CustomTensor(np.array(0.5, dtype=np.float32)),
+        'tag': 'shared',
+    }
+    local = rl_learner.shard_batch_by_process(batch, 1, 2)
+    self.assertEqual(local['prompts'], ['b', 'd'])
+    np.testing.assert_array_equal(local['array'], [1.0, 3.0])
+    np.testing.assert_array_equal(local['tensor'], [[1.0], [3.0]])
+    self.assertIs(local['scalar'], batch['scalar'])  # Not batch-aligned.
+    self.assertEqual(local['tag'], 'shared')
+    # Explicit rows, e.g. a length-balanced shard.
+    local = rl_learner.shard_batch_by_process(batch, 0, 2, indices=[0, 3])
+    self.assertEqual(local['prompts'], ['a', 'd'])
+    np.testing.assert_array_equal(local['tensor'], [[0.0], [3.0]])
+
   @parameterized.named_parameters(
       ('none', {}, []),
       (
