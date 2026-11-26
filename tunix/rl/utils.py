@@ -654,7 +654,7 @@ _PH_ERR_UNSUPPORTED = 6
 _PH_ERR_FIELDS = 7
 _PH_ERROR_NAMES = {
     _PH_ERR_EXCEPTION: "unexpected error",
-    _PH_ERR_TOO_LONG: "sequence longer than max_seq_token_per_tpu",
+    _PH_ERR_TOO_LONG: "sequence longer than max_seq_tokens_per_device",
     _PH_ERR_HOLES: "pad-valued token inside a completion",
     _PH_ERR_NO_PROMPT: "empty prompt",
     _PH_ERR_MASK_PAST_END: "completion_mask set on padding",
@@ -783,6 +783,14 @@ def train_example_to_exact_pack_items(
   """
   if example.routed_experts is not None:
     raise _PerHostPackError(_PH_ERR_UNSUPPORTED, "routed_experts")
+  if (
+      example.old_topk_token_ids is not None
+      or example.old_topk_logps is not None
+  ):
+    # Score Centering's `[B, C, K]` sampler top-k: packed rows do not carry it.
+    raise _PerHostPackError(
+        _PH_ERR_UNSUPPORTED, "old_topk_token_ids / old_topk_logps"
+    )
   prompt_ids = _host_array(example.prompt_ids)
   prompt_mask = _host_array(example.prompt_mask).astype(bool)
   completion_ids = _host_array(example.completion_ids)
@@ -1125,7 +1133,7 @@ def pack_sequences_per_host(
 
   Args:
     item_iterator: Stream of lists of process-local TrainExamples.
-    max_token_budget: Tokens per packed row (= max_seq_token_per_tpu).
+    max_token_budget: Tokens per packed row (= max_seq_tokens_per_device).
     sequences_per_update: Process-local sequences per mini-batch.
     pad_id: The rollout pad id (marks invalid tokens, fills padding).
     data_axis_size: Product of the actor-mesh sizes of `data_sharding_axis`.

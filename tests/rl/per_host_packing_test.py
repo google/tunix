@@ -321,6 +321,15 @@ class PackSequencesPerHostTest(parameterized.TestCase):
     with self.assertRaisesRegex(RuntimeError, "routed_experts"):
       _pack([ex])
 
+  def test_score_centering_topk_aborts(self):
+    topk_ids = np.zeros((len(_LENGTHS), _C, 2), np.int32)
+    ex = _batch(_LENGTHS).replace(
+        old_topk_token_ids=topk_ids,
+        old_topk_logps=np.zeros(topk_ids.shape, np.float32),
+    )
+    with self.assertRaisesRegex(RuntimeError, "old_topk_token_ids"):
+      _pack([ex])
+
   def test_chunks_keep_the_sampler_agreement_flag(self):
     for applied in (False, True):
       ex = _batch(_LENGTHS).replace(sampler_agreement_applied=applied)
@@ -585,7 +594,7 @@ def _run_child():
           actor_optimizer=optax.sgd(1e-2),
           eval_every_n_steps=1,
           max_steps=_TRAIN_STEPS,
-          max_seq_token_per_tpu=budget or None,
+          max_seq_tokens_per_device=budget or None,
       ),
       rollout_config=base_rollout.RolloutConfig(
           max_tokens_to_generate=10, max_prompt_length=8, kv_cache_size=64

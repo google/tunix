@@ -708,7 +708,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         if not sharding_utils.per_host_safe_logps_enabled():
           raise ValueError(
               "TUNIX_PER_HOST_LEARNER=1 with sequence packing"
-              " (max_seq_token_per_tpu) needs TUNIX_PER_HOST_SAFE_LOGPS=1:"
+              " (max_seq_tokens_per_device) needs TUNIX_PER_HOST_SAFE_LOGPS=1:"
               " packed rows are process-local, and shard_input must judge"
               " their divisibility by the global row count (otherwise every"
               " packed chunk would need data-axis-size rows per process)."
@@ -1159,19 +1159,19 @@ class RLLearner(abc.ABC, Generic[TConfig]):
 
     train_data_gen = queue_iterator()
     if self._packing_enabled and per_host_learner_enabled():
-      assert self._training_config.max_seq_token_per_tpu is not None
+      assert self._training_config.max_seq_tokens_per_device is not None
       assert self._per_host_pack_knobs is not None  # Set by `train`.
       max_rows_per_shard, row_multiple = self._per_host_pack_knobs
       logging.info(
-          "Using per-host sequence packing with max_seq_token_per_tpu: %d,"
+          "Using per-host sequence packing with max_seq_tokens_per_device: %d,"
           " max_rows_per_shard: %d, row_multiple: %d",
-          self._training_config.max_seq_token_per_tpu,
+          self._training_config.max_seq_tokens_per_device,
           max_rows_per_shard,
           row_multiple,
       )
       train_data_gen = rl_utils.pack_sequences_per_host(
           train_data_gen,
-          self._training_config.max_seq_token_per_tpu,
+          self._training_config.max_seq_tokens_per_device,
           sequences_per_update=mini_batch_size * self._num_generations(),
           pad_id=self.rl_engine.rollout.pad_id(),
           data_axis_size=self._data_axis_size(),
