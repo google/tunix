@@ -938,8 +938,18 @@ class VllmSamplerConfigTest(absltest.TestCase):
         self.assertEqual(abs(a[0] - b[0]) + abs(a[1] - b[1]), 1, chips)
 
   def test_faces_with_a_ring(self):
-    for nx, ny in [(1, 1), (1, 2), (2, 1), (2, 2), (2, 4), (4, 2), (4, 4),
-                   (2, 6), (4, 3), (3, 4)]:
+    for nx, ny in [
+        (1, 1),
+        (1, 2),
+        (2, 1),
+        (2, 2),
+        (2, 4),
+        (4, 2),
+        (4, 4),
+        (2, 6),
+        (4, 3),
+        (3, 4),
+    ]:
       with self.subTest(face=f"{nx}x{ny}"):
         devices = _chip_face(nx, ny)
         self.assert_ici_ring(devices, vllm_sampler._snake_device_order(devices))

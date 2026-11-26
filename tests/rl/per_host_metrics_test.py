@@ -50,6 +50,8 @@ _CHILD_ENV = "TUNIX_PER_HOST_METRICS_TEST_CHILD"
 _NUM_PROCESSES = 2
 _TRAIN_STEPS = 2
 _REF_LOGPS_ATOL = 1e-4
+# Wall-clock budget of one 2-process job, shared by both processes.
+_JOB_TIMEOUT_S = 600
 
 # The global batch is strided over the processes ([process::2]), so process 0
 # gets the short completions with high rewards and process 1 the long ones.
@@ -611,14 +613,13 @@ def _run_learner_child(args):
     return metrics
 
   gather_threads = []
-  if hasattr(rl_engine_lib, "_allgather_bytes"):
-    allgather_bytes = rl_engine_lib._allgather_bytes
+  allgather_bytes = rl_engine_lib._allgather_bytes
 
-    def recording_allgather(payload):
-      gather_threads.append(threading.current_thread().name)
-      return allgather_bytes(payload)
+  def recording_allgather(payload):
+    gather_threads.append(threading.current_thread().name)
+    return allgather_bytes(payload)
 
-    rl_engine_lib._allgather_bytes = recording_allgather
+  rl_engine_lib._allgather_bytes = recording_allgather
   if args["disable_reduction"]:
     rl_engine_lib.RLEngine.reduce_metrics_across_processes = (
         lambda self, include_current=False: None
@@ -880,30 +881,55 @@ def _run_job(
       ),
   )
   env.update(extra_env or {})
-  procs = []
-  for process_id in range(_NUM_PROCESSES):
-    env[_CHILD_ENV] = json.dumps({
-        "process_id": process_id,
-        "port": port,
-        "out_dir": out_dir,
-        "disable_reduction": disable_reduction,
-        "job": job,
-        **_JOBS[job],
-    })
-    procs.append(
-        subprocess.Popen(
-            [sys.executable, os.path.abspath(__file__)],
-            env=dict(env),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
+  procs, log_paths = [], []
+  timed_out = False
+  try:
+    for process_id in range(_NUM_PROCESSES):
+      env[_CHILD_ENV] = json.dumps({
+          "process_id": process_id,
+          "port": port,
+          "out_dir": out_dir,
+          "disable_reduction": disable_reduction,
+          "job": job,
+          **_JOBS[job],
+      })
+      # Output goes to a file, so a chatty child never blocks on a full pipe.
+      log_paths.append(os.path.join(out_dir, f"process{process_id}.log"))
+      with open(log_paths[-1], "w", encoding="utf-8") as log:
+        procs.append(
+            subprocess.Popen(
+                [sys.executable, os.path.abspath(__file__)],
+                env=dict(env),
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
         )
-    )
-  logs = [p.communicate(timeout=600)[0] for p in procs]
-  if any(p.returncode for p in procs):
-    raise AssertionError(
-        "per-host job failed:\n" + "\n".join(log[-3000:] for log in logs)
-    )
+    deadline = time.monotonic() + _JOB_TIMEOUT_S
+    while True:
+      codes = [p.poll() for p in procs]  # Polls every process.
+      if all(code is not None for code in codes):
+        break
+      if any(codes):
+        break  # One process failed; its peer may wait in a collective.
+      if time.monotonic() > deadline:
+        timed_out = True
+        break
+      time.sleep(0.5)
+  finally:
+    for p in procs:
+      if p.poll() is None:
+        p.kill()
+        p.wait()
+  if timed_out or any(p.returncode for p in procs):
+    tails = []
+    for process_id, (p, path) in enumerate(zip(procs, log_paths)):
+      with open(path, encoding="utf-8", errors="replace") as f:
+        tails.append(
+            f"--- process {process_id} (exit code {p.returncode}) ---\n"
+            + f.read()[-3000:]
+        )
+    reason = f"timed out after {_JOB_TIMEOUT_S}s" if timed_out else "failed"
+    raise AssertionError(f"per-host job {reason}:\n" + "\n".join(tails))
   results = []
   for process_id in range(_NUM_PROCESSES):
     with open(
@@ -922,9 +948,15 @@ def _reference(results, mode: str) -> dict[str, list[float]]:
     rewards = np.concatenate([e["rewards"] for e in per_process])
     lengths = np.concatenate([e["lengths"] for e in per_process])
     valid = lengths > _LONG
+    # The reward manager's `rewards/*` summarize the per-trajectory totals
+    # (one reward fn here, all finite) over the step: NaN-aware sum, mean, std,
+    # min and max, plus the fraction of non-finite totals. Each step makes one
+    # rollout call, so a call's union is the step's.
     values = {
-        "rewards/sum": rewards.mean(),
+        "rewards/sum": rewards.sum(),
         "rewards/mean": rewards.mean(),
+        "rewards/std": rewards.std(),
+        "rewards/nonfinite_frac": 0.0,
         "rewards/shard_reward": rewards.mean(),
         "rewards/min": rewards.min(),
         "rewards/max": rewards.max(),
