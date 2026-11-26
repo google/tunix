@@ -145,9 +145,13 @@ class _GcFreeze:
     self._last_collections = self._full_collections
 
   def close(self) -> None:
-    """Removes the callback and restores automatic collection."""
+    """Removes the callback, unfreezes and restores automatic collection."""
     if self._on_gc in gc.callbacks:
       gc.callbacks.remove(self._on_gc)
+    if self._frozen:
+      # Objects that die in reference cycles can be reclaimed again.
+      gc.unfreeze()
+      self._frozen = False
     if self._was_enabled and not gc.isenabled():
       gc.enable()
 
