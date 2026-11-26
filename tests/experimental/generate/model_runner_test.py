@@ -712,7 +712,10 @@ class ExecuteStepTest(absltest.TestCase):
     np.testing.assert_array_equal(positions, [[0, 4, 5, 6, 0, 1]])
 
   def test_samples_from_the_last_token_of_each_row(self):
-    tokens, logits, logp, _ = self._execute(_runner(_NextTokenTransformer()))
+    output, _ = self._execute(
+        _runner(_NextTokenTransformer())
+    )
+    tokens, logits, logp = output.sampled_tokens, output.logits, output.logprobs
 
     self.assertIsInstance(tokens, jax.Array)
     # The decode continues from 4, and the prefill from its last token 9.
@@ -721,14 +724,15 @@ class ExecuteStepTest(absltest.TestCase):
     self.assertIsNone(logp)
 
   def test_positions_continue_from_the_cached_tokens(self):
-    _, _, _, cache = self._execute(_runner(_NextTokenTransformer()))
+    output, cache = self._execute(_runner(_NextTokenTransformer()))
 
     np.testing.assert_array_equal(cache['positions'], [5, 0, 1, 2])
 
   def test_returns_last_token_logits_per_row(self):
     runner = _runner(_NextTokenTransformer(), return_logits=True)
 
-    tokens, logits, _, _ = self._execute(runner)
+    output, _ = self._execute(runner)
+    tokens, logits = output.sampled_tokens, output.logits
 
     np.testing.assert_array_equal(tokens[:2], [[5], [10]])
     self.assertEqual(logits.shape, (3, 1, _VOCAB_SIZE))
@@ -738,7 +742,8 @@ class ExecuteStepTest(absltest.TestCase):
   def test_returns_logprobs_per_row(self):
     runner = _runner(_NextTokenTransformer(), return_logprobs=True)
 
-    _, _, logp, _ = self._execute(runner)
+    output, _ = self._execute(runner)
+    logp = output.logprobs
 
     self.assertEqual(logp.shape, (3, 1))
     expected = jax.nn.log_softmax(
@@ -752,9 +757,10 @@ class ExecuteStepTest(absltest.TestCase):
     # temperature, while the decode stays greedy.
     runner = _runner(_NextTokenTransformer())
 
-    tokens, _, _, _ = self._execute(
+    output, _ = self._execute(
         runner, (_params(temperature=0.0), _params(temperature=5.0, top_k=1))
     )
+    tokens = output.sampled_tokens
 
     np.testing.assert_array_equal(tokens[:2], [[5], [10]])
 
@@ -765,7 +771,10 @@ class ExecuteStepTest(absltest.TestCase):
     with mock.patch.object(
         runner, '_to_device', wraps=runner._to_device
     ) as mock_to_device:
-      tokens, logits, logp, _ = self._execute(runner)
+      output, _ = self._execute(runner)
+      tokens = output.sampled_tokens
+      logits = output.logits
+      logp = output.logprobs
 
     # Both `metadata` and `sampling_metadata` are transferred in one call.
     mock_to_device.assert_called_once()
@@ -797,12 +806,13 @@ class ExecuteStepSeedTest(absltest.TestCase):
         query_lens=[1] * num_rows,
         distribution=[num_rows] * 3,
     )
-    tokens, _, _, _ = runner.execute_step(
+    output, _ = runner.execute_step(
         cache={},
         tokens=jnp.zeros((1, num_rows), dtype=jnp.int32),
         metadata=metadata,
         sampling_params=sampling_params or (_params(),) * num_rows,
     )
+    tokens = output.sampled_tokens
     return tokens
 
   def test_unseeded_sampling_is_reproducible_for_an_engine_seed(self):
@@ -830,7 +840,12 @@ def _fake_step_fn(params, cache, tokens, metadata, sampling_metadata, rng):
   del params, tokens, sampling_metadata
   rng, _ = jax.random.split(rng)
   num_rows = len(metadata.query_lens)
-  return jnp.ones((num_rows,), dtype=jnp.int32), None, None, cache, rng
+  output = model_runner_lib.ModelRunnerOutput(
+      sampled_tokens=jnp.ones((num_rows,), dtype=jnp.int32),
+      logits=None,
+      logprobs=None,
+  )
+  return output, cache, rng
 
 
 class SplitRowsTest(absltest.TestCase):
@@ -879,7 +894,7 @@ class SplitRowsTest(absltest.TestCase):
     runner = _runner(_NextTokenTransformer(), mesh=mesh, num_scheduler_steps=2)
 
     # Four decodes, one row per DP group.
-    tokens, _, _, _ = runner.execute_step(
+    output, _ = runner.execute_step(
         cache=_positions_cache(4),
         tokens=jnp.array([[4], [7], [1], [2]], dtype=jnp.int32),
         metadata=paged_attention.PagedAttnMetadata(
@@ -892,6 +907,7 @@ class SplitRowsTest(absltest.TestCase):
         ),
         sampling_params=(_params(temperature=0.0),) * 4,
     )
+    tokens = output.sampled_tokens
 
     np.testing.assert_array_equal(tokens, [[5, 6], [8, 9], [2, 3], [3, 4]])
     self.assertTrue(
@@ -912,7 +928,7 @@ class SplitRowsTest(absltest.TestCase):
 
     # Group 0: [decode (4), chunked prefill (1, 2), full prefill (7, 8), pad].
     # Group 1: [decode (2), full prefill (10, 11), pad, pad].
-    tokens, _, logp, cache = runner.execute_step(
+    output, cache = runner.execute_step(
         cache=_positions_cache(12),
         tokens=jnp.array(
             [[4, 1, 2, 7, 8, 0], [2, 10, 11, 0, 0, 0]], dtype=jnp.int32
@@ -933,6 +949,7 @@ class SplitRowsTest(absltest.TestCase):
             _params(temperature=10.0, top_k=1),
         ),
     )
+    tokens, logp = output.sampled_tokens, output.logprobs
 
     # Surviving rows (0, 2 in group 0; 4, 5 in group 1) return to their
     # scheduled row positions after compacting within each group.
@@ -989,7 +1006,8 @@ class MultiStepExecuteTest(absltest.TestCase):
         static_argnames=['num_steps'],
     )
 
-    tokens, _, _, cache = self._execute(runner)
+    output, cache = self._execute(runner)
+    tokens = output.sampled_tokens
     runner.execute_step(
         cache=_positions_cache(8),
         tokens=self.tokens,
@@ -1013,7 +1031,8 @@ class MultiStepExecuteTest(absltest.TestCase):
         return_logprobs=True,
     )
 
-    _, logits, logp, _ = self._execute(runner)
+    output, _ = self._execute(runner)
+    logits, logp = output.logits, output.logprobs
 
     self.assertEqual(logits.shape, (4, 3, _VOCAB_SIZE))
     self.assertEqual(logp.shape, (4, 3))
@@ -1123,7 +1142,7 @@ class MultiStepExecuteTest(absltest.TestCase):
     runner = _runner(_NextTokenTransformer(), num_scheduler_steps=4)
     runner._compiled_decode_loop_fn = mock.Mock()
 
-    tokens, _, _, _ = runner.execute_step(
+    output, _ = runner.execute_step(
         cache=_positions_cache(8),
         tokens=self.tokens,
         metadata=_rpa_metadata(
@@ -1131,6 +1150,7 @@ class MultiStepExecuteTest(absltest.TestCase):
         ),
         sampling_params=self.greedy[:2],
     )
+    tokens = output.sampled_tokens
 
     runner._compiled_decode_loop_fn.assert_not_called()
     self.assertEqual(tokens.shape, (3, 4))
@@ -1456,12 +1476,13 @@ class TwoStageTopKTest(absltest.TestCase):
         distribution=np.array([[2, 2, 2], [2, 2, 2]], dtype=np.int32),
     )
     sampling_params = (_params(temperature=0.0),) * rows
-    tokens, out_logits, _, _ = runner.execute_step(
+    output, _ = runner.execute_step(
         cache={},
         tokens=jnp.zeros((2, 2), dtype=jnp.int32),
         metadata=metadata,
         sampling_params=sampling_params,
     )
+    tokens, out_logits = output.sampled_tokens, output.logits
     np.testing.assert_array_equal(tokens[:, 0], [vocab_size - 1] * rows)
     assert out_logits is not None
     self.assertTrue(
@@ -1483,12 +1504,14 @@ class TwoStageTopKTest(absltest.TestCase):
         max_top_k=8,
         return_logits=True,
     )
-    ragged_tokens, ragged_out, _, _ = ragged_runner.execute_step(
+    ragged_output, _ = ragged_runner.execute_step(
         cache={},
         tokens=jnp.zeros((2, 2), dtype=jnp.int32),
         metadata=metadata,
         sampling_params=sampling_params,
     )
+    ragged_tokens = ragged_output.sampled_tokens
+    ragged_out = ragged_output.logits
     np.testing.assert_array_equal(ragged_tokens[:, 0], [64] * rows)
     assert ragged_out is not None
     self.assertEqual(ragged_out.shape, (rows, 1, 65))

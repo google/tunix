@@ -175,6 +175,21 @@ class ModelRunnerConfigTest(absltest.TestCase):
           max_top_k=1, mesh=_create_mesh(), num_scheduler_steps=0
       )
 
+  def test_negative_max_logprobs_raises(self):
+    with self.assertRaisesRegex(ValueError, "max_logprobs"):
+      configs.ModelRunnerConfig(
+          max_top_k=1,
+          mesh=_create_mesh(),
+          max_logprobs=-1,
+          return_logprobs=True,
+      )
+
+  def test_max_logprobs_without_return_logprobs_raises(self):
+    with self.assertRaisesRegex(ValueError, "return_logprobs"):
+      configs.ModelRunnerConfig(
+          max_top_k=1, mesh=_create_mesh(), max_logprobs=2
+      )
+
 
 if __name__ == "__main__":
   absltest.main()

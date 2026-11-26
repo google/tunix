@@ -585,6 +585,34 @@ class ConfigAndSamplingParamsTest(parameterized.TestCase):
           rollout_config,
       )
 
+  def test_to_model_runner_config_resolves_max_logprobs(self):
+    mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ("x",))
+    for return_logprobs, max_logprobs, expected in (
+        (True, 7, 7),
+        (True, -1, 16),
+        (False, 7, 0),
+    ):
+      rollout_config = common_configs.RolloutConfig(
+          return_logprobs=return_logprobs,
+          rollout_vanilla_v2_max_logprobs=max_logprobs,
+      )
+
+      config = utils.to_model_runner_config(rollout_config, mesh, 16)
+
+      self.assertEqual(config.max_logprobs, expected)
+
+  def test_to_model_runner_config_max_logprobs_above_vocab_size_raises(self):
+    rollout_config = common_configs.RolloutConfig(
+        return_logprobs=True, rollout_vanilla_v2_max_logprobs=17
+    )
+
+    with self.assertRaisesRegex(ValueError, "vocabulary size"):
+      utils.to_model_runner_config(
+          rollout_config,
+          jax.sharding.Mesh(np.array(jax.devices()[:1]), ("x",)),
+          16,
+      )
+
 
 class DPRanksTest(parameterized.TestCase):
 
