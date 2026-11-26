@@ -50,13 +50,23 @@ _ENV_BOOLS = {"0": False, "1": True, "false": False, "true": True}
 
 
 def _env_flag(name: str, default: str = "0") -> bool:
-  """Parses environment variable `name` (or `default` if unset) as a bool.
+  """Reads environment variable `name` as a bool.
+
+  Unset or empty means `default`; 0, 1, true and false are accepted in any
+  case.
+
+  Args:
+    name: The environment variable.
+    default: The value used when `name` is unset or empty.
+
+  Returns:
+    The parsed value.
 
   Raises:
-    ValueError: The value is not 0, 1, true or false (in any case).
+    ValueError: `name` holds anything else.
   """
-  raw = os.environ.get(name, default)
-  value = _ENV_BOOLS.get(raw.strip().lower())
+  raw = os.environ.get(name, "")
+  value = _ENV_BOOLS.get((raw.strip() or default).lower())
   if value is None:
     raise ValueError(f"{name}={raw!r}: expected 0, 1, true or false.")
   return value
