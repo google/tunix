@@ -23,6 +23,7 @@ import jax.numpy as jnp
 import numpy as np
 from tunix.common import datatypes
 from tunix.experimental.generate import engine as engine_lib
+from tunix.experimental.generate import kv_cache_manager as kv_cache_manager_lib
 from tunix.experimental.generate import request as request_lib
 from tunix.experimental.generate import testing_utils
 
@@ -391,6 +392,43 @@ class StepTest(parameterized.TestCase):
     # 15 tokens plus 2 decode steps span 5 pages of 4 slots.
     metadata = spy.call_args_list[0].kwargs['metadata']
     self.assertEqual(metadata.page_indices['layer_0'].shape, (4, 5))
+
+  def test_page_indices_shared_within_cache_group(self):
+    geometries = {
+        'full_0': datatypes.CacheGeometry(num_kv_heads=1, head_dim=1),
+        'full_1': datatypes.CacheGeometry(num_kv_heads=1, head_dim=1),
+        'sliding_0': datatypes.CacheGeometry(
+            num_kv_heads=1, head_dim=1, window_size=8
+        ),
+        'sliding_1': datatypes.CacheGeometry(
+            num_kv_heads=1, head_dim=1, window_size=8
+        ),
+    }
+    engine = testing_utils.make_engine(
+        testing_utils.PagedSumTransformer(geometries=geometries),
+        max_device_size_gib=4 * 64 * testing_utils.GIB_PER_PAGE,
+        num_scheduler_steps=2,
+    )
+    spy = spy_on_execute_step(engine)
+    engine.add_request(testing_utils.make_request('0', [1, 2, 3, 4, 5]))
+    engine.add_request(testing_utils.make_request('1', [6, 7]))
+
+    engine.step()
+
+    metadata = spy.call_args_list[0].kwargs['metadata']
+    self.assertIsInstance(
+        metadata.page_indices, kv_cache_manager_lib.GroupedPageIndices
+    )
+    self.assertLen(jax.tree.leaves(metadata.page_indices), 2)
+    self.assertIs(
+        metadata.page_indices['full_0'], metadata.page_indices['full_1']
+    )
+    self.assertIs(
+        metadata.page_indices['sliding_0'], metadata.page_indices['sliding_1']
+    )
+    self.assertIsNot(
+        metadata.page_indices['full_0'], metadata.page_indices['sliding_0']
+    )
 
   @parameterized.named_parameters(
       ('within_the_window', 16, 16),

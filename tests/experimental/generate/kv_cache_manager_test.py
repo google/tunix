@@ -421,7 +421,9 @@ class SyncRequestStateTest(parameterized.TestCase):
     # 12 tokens over a 4-token window leaves the first two pages behind. They
     # keep their slots, reported as -1 rather than dropped, so the indices stay
     # aligned with the request's page positions.
-    page_idxs = mgr.get_page_idxs(req)["cache_0"]
+    page_idxs = mgr.get_page_idxs([req], num_rows=1, max_pages_per_seq=4)[
+        "cache_0"
+    ][0]
     self.assertLen(page_idxs, 4)
     self.assertEqual(list(page_idxs[:2]), [-1, -1])
     self.assertNotIn(-1, page_idxs[2:])
@@ -569,7 +571,11 @@ class AllocateSlotsTest(parameterized.TestCase):
     mgr = _create_manager()
     req = _create_request(req_id="r1", prompt_token_ids=list(range(8)))
     self.assertTrue(mgr.allocate_slots(req, num_new_tokens=8))
-    self.assertLen(mgr.get_page_idxs(req)["cache_0"], 2)
+    page_idxs = mgr.get_page_idxs([req], num_rows=1, max_pages_per_seq=4)[
+        "cache_0"
+    ][0]
+    self.assertNotIn(-1, page_idxs[:2])
+    self.assertEqual(list(page_idxs[2:]), [-1, -1])
 
   def test_allocate_slots_insufficient_space_returns_false(self):
     mgr = _create_manager(num_device_pages=1)
@@ -652,21 +658,21 @@ class AllocateSlotsTest(parameterized.TestCase):
 
     # Step 1: Prefill 6 tokens into 2 pages, leaving 2 free slots in page 2.
     self.assertTrue(mgr.allocate_slots(req, num_new_tokens=6))
-    prefill_page_idxs = mgr.get_page_idxs(req)["cache_0"]
+    prefill_page_idxs = group.get_page_idxs("r1")
     self.assertLen(prefill_page_idxs, 2)
     req.num_computed_tokens = 6
 
     # Step 2: 2 more tokens fit in the partially filled page, so no new page is
     # allocated.
     self.assertTrue(mgr.allocate_slots(req, num_new_tokens=2))
-    self.assertEqual(mgr.get_page_idxs(req)["cache_0"], prefill_page_idxs)
+    self.assertEqual(group.get_page_idxs("r1"), prefill_page_idxs)
     self.assertEqual(group._page_manager.num_free_device_pages, 8)
     req.num_computed_tokens = 8
 
     # Step 3: Both pages are full, so 1 more token crosses the page boundary
     # and allocates a new page after the existing ones.
     self.assertTrue(mgr.allocate_slots(req, num_new_tokens=1))
-    page_idxs = mgr.get_page_idxs(req)["cache_0"]
+    page_idxs = group.get_page_idxs("r1")
     self.assertLen(page_idxs, 3)
     self.assertEqual(page_idxs[:2], prefill_page_idxs)
     self.assertEqual(group._page_manager.num_free_device_pages, 7)
@@ -677,14 +683,14 @@ class AllocateSlotsTest(parameterized.TestCase):
     req = _create_request(req_id="r1", prompt_token_ids=list(range(8)))
 
     self.assertTrue(mgr.allocate_slots(req, num_new_tokens=8))
-    page_idxs = mgr.get_page_idxs(req)["cache_0"]
+    page_idxs = group.get_page_idxs("r1")
     self.assertLen(page_idxs, 2)
     req.num_computed_tokens = 8
 
     # Both pages are full, so the next token needs a third page, which does
     # not exist. This is only detected if `num_computed_tokens` is forwarded.
     self.assertFalse(mgr.allocate_slots(req, num_new_tokens=1))
-    self.assertEqual(mgr.get_page_idxs(req)["cache_0"], page_idxs)
+    self.assertEqual(group.get_page_idxs("r1"), page_idxs)
     self.assertEqual(group._page_manager.num_free_device_pages, 0)
 
 
@@ -700,9 +706,9 @@ class ReleaseRequestTest(parameterized.TestCase):
     mgr.release_request(req)
     self.assertNotIn("r1", full._request_to_pages)
     self.assertNotIn("r1", local._request_to_pages)
-    self.assertEqual(
-        mgr.get_page_idxs(req), {f"cache_{i}": () for i in range(4)}
-    )
+    page_idxs = mgr.get_page_idxs([req], num_rows=1, max_pages_per_seq=2)
+    for i in range(4):
+      np.testing.assert_array_equal(page_idxs[f"cache_{i}"], [[-1, -1]])
 
   def test_release_unknown_request_is_noop(self):
     mgr = _create_manager()
@@ -779,21 +785,39 @@ class InspectionTest(parameterized.TestCase):
     req = _create_request(req_id="r1", prompt_token_ids=list(range(8)))
     mgr.allocate_slots(req, num_new_tokens=8)
 
-    page_idxs = mgr.get_page_idxs(req)
+    page_idxs = mgr.get_page_idxs([req], num_rows=2, max_pages_per_seq=3)
 
-    full_page_idxs = tuple(full.get_page_idxs("r1"))
-    local_page_idxs = tuple(local.get_page_idxs("r1"))
+    full_page_idxs = full.get_page_idxs("r1")
+    local_page_idxs = local.get_page_idxs("r1")
     self.assertLen(full_page_idxs, 2)
     self.assertLen(local_page_idxs, 2)
-    self.assertEqual(
-        page_idxs,
-        {
-            "cache_0": full_page_idxs,
-            "cache_1": full_page_idxs,
-            "cache_2": local_page_idxs,
-            "cache_3": local_page_idxs,
-        },
+    self.assertIsInstance(page_idxs, kv_cache_manager.GroupedPageIndices)
+    self.assertLen(jax.tree.leaves(page_idxs), 2)
+    self.assertIs(page_idxs["cache_0"], page_idxs["cache_1"])
+    self.assertIs(page_idxs["cache_2"], page_idxs["cache_3"])
+    self.assertIsNot(page_idxs["cache_0"], page_idxs["cache_2"])
+    np.testing.assert_array_equal(
+        page_idxs["cache_0"],
+        [full_page_idxs + [-1], [-1, -1, -1]],
     )
+    np.testing.assert_array_equal(
+        page_idxs["cache_2"],
+        [local_page_idxs + [-1], [-1, -1, -1]],
+    )
+
+  def test_get_page_idxs_validates_bounds(self):
+    mgr = _create_manager()
+    req = _create_request(req_id="r1", prompt_token_ids=list(range(8)))
+    mgr.allocate_slots(req, num_new_tokens=8)
+
+    with self.assertRaisesRegex(ValueError, "num_rows"):
+      mgr.get_page_idxs([], num_rows=-1, max_pages_per_seq=2)
+    with self.assertRaisesRegex(ValueError, "max_pages_per_seq"):
+      mgr.get_page_idxs([], num_rows=1, max_pages_per_seq=-1)
+    with self.assertRaisesRegex(ValueError, "num_rows"):
+      mgr.get_page_idxs([req, req], num_rows=1, max_pages_per_seq=2)
+    with self.assertRaisesRegex(ValueError, "max_pages_per_seq"):
+      mgr.get_page_idxs([req], num_rows=1, max_pages_per_seq=1)
 
   def test_get_physical_pages(self):
     mgr, _, _ = _create_two_group_manager()
@@ -830,6 +854,85 @@ class InspectionTest(parameterized.TestCase):
     np.testing.assert_array_equal(
         mgr.get_physical_pages()["cache_0"], old_pages["cache_0"]
     )
+
+
+class GroupedPageIndicesTest(parameterized.TestCase):
+
+  def test_flattens_once_per_group_and_preserves_identity_on_device(self):
+    full_table = np.array([[0, 1], [2, -1]], dtype=np.int32)
+    sliding_table = np.array([[3, -1], [4, -1]], dtype=np.int32)
+    grouped = kv_cache_manager.GroupedPageIndices(
+        [full_table, sliding_table],
+        [["full_0", "full_1"], ["sliding_0", "sliding_1"]],
+    )
+
+    self.assertLen(grouped, 4)
+    self.assertEqual(
+        list(grouped), ["full_0", "full_1", "sliding_0", "sliding_1"]
+    )
+    self.assertEqual(
+        grouped.cache_names_per_group,
+        (("full_0", "full_1"), ("sliding_0", "sliding_1")),
+    )
+    self.assertLen(jax.tree.leaves(grouped), 2)
+    self.assertIs(grouped["full_0"], grouped["full_1"])
+    self.assertIs(grouped["sliding_0"], grouped["sliding_1"])
+    self.assertIsNot(grouped["full_0"], grouped["sliding_0"])
+
+    on_device = jax.device_put(grouped, jax.devices("cpu")[0])
+    self.assertIsInstance(on_device, kv_cache_manager.GroupedPageIndices)
+    self.assertLen(jax.tree.leaves(on_device), 2)
+    self.assertIs(on_device["full_0"], on_device["full_1"])
+    self.assertIs(on_device["sliding_0"], on_device["sliding_1"])
+    self.assertIsNot(on_device["full_0"], on_device["sliding_0"])
+
+    traced = jax.jit(lambda m: jax.tree.map(lambda x: x + 1, m))(on_device)
+    self.assertIsInstance(traced, kv_cache_manager.GroupedPageIndices)
+    self.assertLen(jax.tree.leaves(traced), 2)
+    self.assertIs(traced["full_0"], traced["full_1"])
+    self.assertIs(traced["sliding_0"], traced["sliding_1"])
+    np.testing.assert_array_equal(traced["full_0"], full_table + 1)
+
+  def test_concat_single_and_multi_shard(self):
+    s0 = kv_cache_manager.GroupedPageIndices(
+        (
+            np.array([[0, 1]], dtype=np.int32),
+            np.array([[2, -1]], dtype=np.int32),
+        ),
+        (("full_0", "full_1"), ("sliding_0",)),
+    )
+    s1 = kv_cache_manager.GroupedPageIndices(
+        (
+            np.array([[3, 4]], dtype=np.int32),
+            np.array([[5, -1]], dtype=np.int32),
+        ),
+        (("full_0", "full_1"), ("sliding_0",)),
+    )
+
+    self.assertIs(kv_cache_manager.GroupedPageIndices.concat([s0]), s0)
+
+    merged = kv_cache_manager.GroupedPageIndices.concat([s0, s1])
+    self.assertIsInstance(merged, kv_cache_manager.GroupedPageIndices)
+    self.assertLen(jax.tree.leaves(merged), 2)
+    self.assertIsInstance(merged["full_0"], np.ndarray)
+    self.assertIs(merged["full_0"], merged["full_1"])
+    np.testing.assert_array_equal(merged["full_0"], [[0, 1], [3, 4]])
+    np.testing.assert_array_equal(merged["sliding_0"], [[2, -1], [5, -1]])
+
+  def test_validation_errors(self):
+    t = np.zeros((1, 2), dtype=np.int32)
+    with self.assertRaisesRegex(ValueError, "page table groups"):
+      kv_cache_manager.GroupedPageIndices((t,), (("a",), ("b",)))
+    with self.assertRaisesRegex(ValueError, "at least one cache"):
+      kv_cache_manager.GroupedPageIndices((t,), ((),))
+    with self.assertRaisesRegex(ValueError, "Duplicate cache names"):
+      kv_cache_manager.GroupedPageIndices((t, t), (("a",), ("a",)))
+    with self.assertRaisesRegex(ValueError, "non-empty"):
+      kv_cache_manager.GroupedPageIndices.concat([])
+    s0 = kv_cache_manager.GroupedPageIndices((t,), (("a",),))
+    s1 = kv_cache_manager.GroupedPageIndices((t,), (("b",),))
+    with self.assertRaisesRegex(ValueError, "cache_names_per_group"):
+      kv_cache_manager.GroupedPageIndices.concat([s0, s1])
 
 
 if __name__ == "__main__":

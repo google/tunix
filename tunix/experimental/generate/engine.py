@@ -35,6 +35,7 @@ import numpy as np
 from tunix.common import configs as common_configs
 from tunix.common import routing
 from tunix.experimental.generate import dp_coordinator as dp_coordinator_lib
+from tunix.experimental.generate import kv_cache_manager as kv_cache_manager_lib
 from tunix.experimental.generate import model_runner as model_runner_lib
 from tunix.experimental.generate import request as request_lib
 from tunix.experimental.generate import utils
@@ -466,12 +467,9 @@ class LLMEngine:
         )
 
     metadata = paged_attention.PagedAttnMetadata(
-        page_indices={
-            cache_name: np.concatenate(
-                [p[cache_name] for p in rank_page_indices], axis=0
-            )
-            for cache_name in rank_page_indices[0]
-        },
+        page_indices=kv_cache_manager_lib.GroupedPageIndices.concat(
+            rank_page_indices
+        ),
         kv_lens=np.concatenate(rank_kv_lens, axis=0),
         query_lens=np.concatenate(rank_query_lens, axis=0),
         distribution=np.asarray(batch.distributions, dtype=np.int32),
