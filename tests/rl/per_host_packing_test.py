@@ -612,8 +612,14 @@ def _run_child():
   learner = grpo_lib.GRPOLearner(
       rl_engine=rl_engine,
       reward_fns=reward,
+      # token-mean keeps the logged loss away from 0: with one iteration the
+      # ratio is 1 and each group's advantages sum to 0, so a sequence-mean
+      # loss is 0 up to rounding and comparing it would compare noise.
       algo_config=grpo_lib.GRPOConfig(
-          num_generations=2, num_iterations=1, beta=0.0
+          num_generations=2,
+          num_iterations=1,
+          beta=0.0,
+          loss_agg_mode="token-mean",
       ),
   )
   learner.train([{"prompts": np.array(_PROMPTS)}] * _TRAIN_STEPS)
@@ -722,6 +728,7 @@ class PerHostPackedJobTest(absltest.TestCase):
           results[0]["trainer"]["loss"],
           ref_results[0]["trainer"]["loss"],
           rtol=1e-5,
+          atol=1e-6,
           err_msg=name,
       )
       self.assertLen(params, len(ref_params))
