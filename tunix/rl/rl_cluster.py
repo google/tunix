@@ -835,7 +835,7 @@ class RLEngine:
 
   def _log_metrics(self, metrics_buffer: MetricsBuffer) -> None:
     """Log metrics."""
-    cross_process = getattr(self, "_cross_process_metrics", False)
+    cross_process = self._cross_process_metrics
     unreduced = cross_process and not isinstance(
         metrics_buffer.metrics, _GlobalMetrics
     )
@@ -980,7 +980,7 @@ class RLEngine:
       include_current: Also reduce the buffers of the current global step
         (at the end of training).
     """
-    if not getattr(self, "_cross_process_metrics", False):
+    if not self._cross_process_metrics:
       return
     pending = []
     occurrences = collections.Counter()
@@ -1685,13 +1685,16 @@ class RLEngine:
     then slice the global array with process-local offsets, so every process
     but the first would get another process's rows. Here the process-local
     batch is chunked first; each chunk is globalised and run through
-    `compute_fn` on every process in lockstep (all processes hold the same
-    number of rows), and this process's rows of each result are copied back,
-    so the result is host-local like every other TrainExample field.
+    `compute_fn` on every process in lockstep, and this process's rows of each
+    result are copied back, so the result is host-local like every other
+    TrainExample field. Every process holds the same number of rows (the
+    learner splits every batch evenly), so every process runs the same chunk
+    sequence, including a smaller last chunk (e.g. the tail of an eval set).
 
     Args:
       compute_fn: Called with the globalised chunk of every input (by name).
-      micro_batch_size: Process-local rows per chunk.
+      micro_batch_size: Process-local rows per chunk (the last may have
+        fewer).
       **inputs: Process-local inputs (None entries are passed through).
 
     Returns:
@@ -1706,28 +1709,26 @@ class RLEngine:
             f"TUNIX_PER_HOST_SAFE_LOGPS: {name} is a global array; the per-host"
             " logps path expects process-local rows."
         )
-    if batch_size % micro_batch_size:
-      raise ValueError(
-          f"TUNIX_PER_HOST_SAFE_LOGPS: the process-local batch of {batch_size}"
-          f" rows is not divisible by micro_batch_size={micro_batch_size};"
-          " every process must run the same number of equal chunks."
-      )
     outs = []
     for batch_slice in rl_utils.chunk_slices_by_size(
         stop=batch_size, step=micro_batch_size
     ):
+      rows = batch_slice.stop - batch_slice.start
       chunk = {}
       for name, x in inputs.items():
         if x is None:
           chunk[name] = None
           continue
         chunk[name] = sharding_utils.shard_input(x[batch_slice], axis)
-        if getattr(chunk[name].sharding, "spec", None) != pspec:
+        sharding = chunk[name].sharding
+        if (
+            not isinstance(sharding, jax.sharding.NamedSharding)
+            or sharding.spec != pspec
+        ):
           raise ValueError(
-              f"TUNIX_PER_HOST_SAFE_LOGPS: a {name} chunk of"
-              f" {micro_batch_size} rows per process got sharding"
-              f" {chunk[name].sharding}, not {pspec}; process-local rows must"
-              " never be treated as replicated."
+              f"TUNIX_PER_HOST_SAFE_LOGPS: a {name} chunk of {rows} rows per"
+              f" process got sharding {sharding}, not {pspec}; process-local"
+              " rows must never be treated as replicated."
           )
       out = compute_fn(**chunk)
       local = sharding_utils.process_local_rows(out)
@@ -1737,7 +1738,7 @@ class RLEngine:
           if isinstance(out, jax.Array) and not out.is_fully_addressable
           else None
       )
-      if out_rows != in_rows or local.shape[0] != micro_batch_size:
+      if out_rows != in_rows or local.shape[0] != rows:
         raise RuntimeError(
             f"TUNIX_PER_HOST_SAFE_LOGPS: output rows {out_rows} (shape"
             f" {local.shape}) of process {jax.process_index()} do not match its"
@@ -1790,7 +1791,11 @@ class RLEngine:
       self._maybe_load_model_from_cpu(ref_model, Role.REFERENCE)
       temperature = self.get_rollout_config(mode=Mode.TRAIN).temperature
 
-      def compute(prompt_tokens, completion_tokens, **kwargs):
+      def compute(
+          prompt_tokens: jax.Array,
+          completion_tokens: jax.Array,
+          **kwargs: jax.Array | None,
+      ) -> jax.Array:
         return self.inference_worker.get_ref_per_token_logps(
             prompt_tokens,
             completion_tokens,

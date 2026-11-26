@@ -64,42 +64,96 @@ def _env_positive_int(name: str) -> Optional[int]:
   return int(raw)
 
 
-def _snake_device_order(devices: Sequence[Any]) -> List[int]:
-  """Orders a host's devices along an ICI-adjacent cycle of its chip face.
+def _chip_ring(nx: int, ny: int) -> List[Tuple[int, int]]:
+  """A cycle through every chip of an nx x ny grid in one-hop steps.
 
-  Walks the (x, y) face boustrophedon (x reversed on odd rows) so consecutive
-  chips are one ICI hop apart, and flips the two cores on every other chip so
-  the chip-to-chip step stays a single hop.
+  With an even number of rows: out along row 0, a boustrophedon through
+  columns 1..nx-1 of the other rows, and back down column 0. On a face with a
+  side of 2 (e.g. 2x4) that is the snake along the longer side.
 
   Args:
-    devices: The host's local devices; each needs `coords` and `core_on_chip`.
+    nx: Chips along x.
+    ny: Chips along y.
 
   Returns:
-    The device ids in snake order.
+    The `(x, y)` chip positions in ring order.
+
+  Raises:
+    ValueError: The grid has no such cycle: both sides odd, or a line of more
+      than two chips.
   """
-  meta = []
+  if nx == 1 or ny == 1:
+    if nx * ny > 2:
+      raise ValueError(
+          f"a {nx}x{ny} line of chips has no ICI-adjacent ring (its ends are"
+          f" {nx * ny - 1} hops apart)"
+      )
+    return [(i, 0) if ny == 1 else (0, i) for i in range(nx * ny)]
+  if ny % 2:
+    if nx % 2:
+      raise ValueError(
+          f"a {nx}x{ny} chip face has no ICI-adjacent ring (both sides odd)"
+      )
+    return [(x, y) for y, x in _chip_ring(ny, nx)]
+  ring = [(0, 0)]
+  for y in range(ny):
+    xs = range(1, nx) if y % 2 == 0 else range(nx - 1, 0, -1)
+    ring += [(x, y) for x in xs]
+  return ring + [(0, y) for y in range(ny - 1, 0, -1)]
+
+
+def _snake_device_order(devices: Sequence[jax.Device]) -> List[int]:
+  """Orders a host's devices along an ICI-adjacent ring of its chip face.
+
+  The chips must fill one x-y face: one z, every (x, y) of the bounding box
+  present, the same cores on every chip. They are walked along a cycle of
+  one-hop steps that closes back on the first chip (`_chip_ring`; the snake
+  along the longer side of a 2x4 face), so a TP all-reduce ring over all the
+  local devices only uses neighboring links. A chip's cores stay together,
+  flipped on every other chip so the chip-to-chip step stays a single hop.
+  Only the full ring is guaranteed: a prefix (fewer TP devices than local
+  devices) is a path.
+
+  Args:
+    devices: The host's local TPU devices.
+
+  Returns:
+    The device ids in ring order.
+
+  Raises:
+    ValueError: The devices do not fill one chip face, or the face has no
+      ICI-adjacent ring.
+  """
+  chips: Dict[Tuple[int, int], List[Tuple[int, int]]] = {}
+  faces = set()
   for d in devices:
-    coords = getattr(d, "coords", None)
-    if coords is None or len(coords) < 2:
-      raise ValueError(f"device {d} has no usable coords {coords}")
-    core = int(getattr(d, "core_on_chip", 0) or 0)
-    meta.append((int(coords[0]), int(coords[1]), core, int(d.id)))
-  x0 = min(m[0] for m in meta)
-  y0 = min(m[1] for m in meta)
-  nx = max(m[0] for m in meta) - x0 + 1
-
-  def key(m):
-    lx, ly, core = m[0] - x0, m[1] - y0, m[2]
-    row_pos = lx if ly % 2 == 0 else nx - 1 - lx
-    chip_pos = ly * nx + row_pos
-    core_pos = core if chip_pos % 2 == 0 else 1 - core
-    return chip_pos * 2 + core_pos
-
-  return [m[3] for m in sorted(meta, key=key)]
+    coords = tuple(int(c) for c in d.coords)
+    if len(coords) < 2:
+      raise ValueError(f"device {d} has no x-y coords: {coords}")
+    faces.add(coords[2:])
+    chips.setdefault(coords[:2], []).append((int(d.core_on_chip), int(d.id)))
+  x0 = min(x for x, _ in chips)
+  y0 = min(y for _, y in chips)
+  nx = max(x for x, _ in chips) - x0 + 1
+  ny = max(y for _, y in chips) - y0 + 1
+  cores = {tuple(sorted(core for core, _ in chip)) for chip in chips.values()}
+  if len(faces) > 1 or len(chips) != nx * ny or len(cores) > 1:
+    raise ValueError(
+        "the local devices do not fill one chip face with the same cores on"
+        f" every chip: chips {sorted(chips)}, z {sorted(faces)}, cores"
+        f" {sorted(cores)}"
+    )
+  order = []
+  for position, (x, y) in enumerate(_chip_ring(nx, ny)):
+    chip = sorted(chips[(x0 + x, y0 + y)])
+    if position % 2:
+      chip.reverse()
+    order += [device_id for _, device_id in chip]
+  return order
 
 
 def _host_local_engine_args(
-    args: Dict[str, Any], devices: Optional[Sequence[Any]] = None
+    args: Dict[str, Any], devices: Optional[Sequence[jax.Device]] = None
 ) -> Dict[str, Any]:
   """Points the in-process vLLM engine at this process's local devices.
 
@@ -129,7 +183,8 @@ def _host_local_engine_args(
   from it can be rejected at compile time on some TPU topologies.
 
   Args:
-    args: Engine args built by `VllmSampler._vllm_config`.
+    args: Engine args built by `VllmSampler._vllm_config`, which always set
+      `additional_config["sharding"]["sharding_strategy"]`.
     devices: The process-local devices; defaults to `jax.local_devices()`.
 
   Returns:
@@ -164,9 +219,9 @@ def _host_local_engine_args(
   args = dict(args)
   args["tensor_parallel_size"] = tp_local
   args["data_parallel_size"] = dp_local
-  additional_config = dict(args.get("additional_config") or {})
-  sharding = dict(additional_config.get("sharding") or {})
-  strategy = dict(sharding.get("sharding_strategy") or {})
+  additional_config = dict(args["additional_config"])
+  sharding = dict(additional_config["sharding"])
+  strategy = dict(sharding["sharding_strategy"])
   if dp_local > 1 and strategy.get("tensor_parallelism") not in (
       None,
       tp_local,

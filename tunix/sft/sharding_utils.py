@@ -118,7 +118,7 @@ def get_sharding(
     mesh: shd.Mesh,
     pspec: shd.PartitionSpec,
     leading_dim_factor: int = 1,
-):
+) -> shd.NamedSharding:
   """Get a sharding for an tensor given a mesh and partition spec.
 
   Args:
