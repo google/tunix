@@ -95,7 +95,11 @@ class _GcFreeze:
     self._steps = 0
     self._frozen = False
     self._was_enabled = gc.isenabled()
+    # Running total of full collections, counted by `_on_gc` on whichever
+    # thread collects, and the total at the end of the last step. `_on_gc`
+    # only increments and `step_end` only reads it, so none is lost.
     self._full_collections = 0
+    self._last_collections = 0
     gc.callbacks.append(self._on_gc)
     logging.info(
         "TUNIX_GC_FREEZE: freeze after %d steps, collect every %d (refreeze=%s,"
@@ -114,7 +118,7 @@ class _GcFreeze:
   def step_end(self) -> None:
     """Called once per completed global step."""
     self._steps += 1
-    saw_full_collection = self._full_collections > 0
+    saw_full_collection = self._full_collections > self._last_collections
     if self._frozen and self._disable and gc.isenabled():
       gc.disable()  # Someone re-enabled automatic collection.
     if not self._frozen and self._steps >= self._freeze_at:
@@ -137,7 +141,8 @@ class _GcFreeze:
         gc.freeze()
     elif self._frozen and self._safety and not saw_full_collection:
       gc.collect()
-    self._full_collections = 0
+    # Also takes in the collections run above.
+    self._last_collections = self._full_collections
 
   def close(self) -> None:
     """Removes the callback and restores automatic collection."""
