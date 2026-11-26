@@ -12,17 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Global RL metrics under the per-host learner (TUNIX_PER_HOST_LEARNER=1).
+"""The per-host learner (TUNIX_PER_HOST_LEARNER=1) on 2 CPU processes.
 
 Every process of the per-host learner rolls out and scores its own prompt
 shard, and only process 0 exports metrics. These tests check that the
 exported rewards, completion lengths and metric fn values are the ones of the
 union of all processes' examples, including uneven completion lengths and a
-process without valid items, and that training itself is unchanged.
+process without valid items, and that training itself is unchanged. They also
+check that the per-host-safe reference logprobs (beta > 0,
+TUNIX_PER_HOST_SAFE_LOGPS=1) score every process's own rows, with separate
+actor and rollout meshes, and that the multi-controller weight publish
+(TUNIX_MULTI_CONTROLLER_RESHARD=1) to host-local devices is bit-exact.
 """
 
 # pylint: disable=protected-access
 
+import inspect
 import json
 import os
 import socket
@@ -30,6 +35,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import traceback
 from unittest import mock
 
@@ -43,6 +49,7 @@ from tunix.sft import utils as sft_utils
 _CHILD_ENV = "TUNIX_PER_HOST_METRICS_TEST_CHILD"
 _NUM_PROCESSES = 2
 _TRAIN_STEPS = 2
+_REF_LOGPS_ATOL = 1e-4
 
 # The global batch is strided over the processes ([process::2]), so process 0
 # gets the short completions with high rewards and process 1 the long ones.
@@ -409,7 +416,7 @@ class RLEngineCrossProcessMetricsTest(absltest.TestCase):
 
 
 def _run_child():
-  """One process of the 2-process per-host GRPO job (see `_run_job`)."""
+  """One process of a 2-process per-host job (see `_run_job`)."""
   args = json.loads(os.environ[_CHILD_ENV])
   import jax  # pylint: disable=g-import-not-at-top
 
@@ -419,6 +426,97 @@ def _run_child():
       num_processes=_NUM_PROCESSES,
       process_id=args["process_id"],
   )
+  if args["job"] == "reshard":
+    _run_reshard_child(args)
+  else:
+    _run_learner_child(args)
+
+
+def _run_reshard_child(args):
+  """Publishes trainer-sharded arrays onto each process's own devices.
+
+  The trainer arrays are sharded over the devices of both processes, the
+  targets over this process's devices only (the host-local engine layout), so
+  only the multi-controller transfer can move them.
+
+  Args:
+    args: The child arguments (see `_run_job`).
+  """
+  # pylint: disable=g-import-not-at-top
+  import jax
+  import jax.numpy as jnp
+  from tunix.rl import reshard
+  # pylint: enable=g-import-not-at-top
+
+  named = jax.sharding.NamedSharding
+  spec = jax.sharding.PartitionSpec
+  mesh = jax.sharding.Mesh(
+      np.array(jax.devices()).reshape(2, 2), ("fsdp", "tp")
+  )
+  local_mesh = jax.sharding.Mesh(np.array(jax.local_devices()), ("tp",))
+  rng = np.random.default_rng(0)
+  # name: (global value, trainer spec on `mesh`, engine spec on `local_mesh`)
+  leaves = {
+      "w": (
+          rng.standard_normal((8, 6)).astype(np.float32),
+          spec("fsdp", "tp"),
+          spec(None, "tp"),
+      ),
+      "b": (
+          rng.standard_normal((4,)).astype(jnp.bfloat16),
+          spec("fsdp"),
+          spec(),
+      ),
+      "e": (
+          np.arange(24, dtype=np.int32).reshape(4, 6),
+          spec(None, "tp"),
+          spec("tp"),
+      ),
+  }
+  source = {
+      name: jax.make_array_from_callback(
+          value.shape, named(mesh, src), lambda index, value=value: value[index]
+      )
+      for name, (value, src, _) in leaves.items()
+  }
+  # A fully addressable leaf takes the plain `jax.device_put` path.
+  leaves["local"] = (np.arange(6, dtype=np.float32), None, spec())
+  source["local"] = jax.device_put(leaves["local"][0], jax.local_devices()[0])
+  target = {
+      name: named(local_mesh, dst) for name, (_, _, dst) in leaves.items()
+  }
+
+  published = reshard.reshard_pytree(source, target)
+
+  result = {
+      "multi_controller_publish": reshard._MC_STATE["logged"],
+      "leaves": {},
+  }
+  for name, (value, _, _) in leaves.items():
+    got = published[name]
+    host = np.asarray(got)
+    result["leaves"][name] = {
+        "bit_exact": (
+            host.shape == value.shape and host.tobytes() == value.tobytes()
+        ),
+        "dtype_kept": got.dtype == value.dtype,
+        "on_target": got.is_fully_addressable and got.sharding == target[name],
+    }
+  with open(
+      os.path.join(args["out_dir"], f"process{args['process_id']}.json"),
+      "w",
+      encoding="utf-8",
+  ) as f:
+    json.dump(result, f)
+
+
+def _run_learner_child(args):
+  """One process of a 2-process per-host GRPO job (see `_run_job`).
+
+  Args:
+    args: The child arguments (see `_run_job`).
+  """
+  import jax  # pylint: disable=g-import-not-at-top
   # pylint: disable=g-import-not-at-top
   from flax import nnx
   from jax.experimental import multihost_utils
@@ -526,14 +624,22 @@ def _run_child():
         lambda self, include_current=False: None
     )
 
+  logps_job = args["job"] == "logps"
   mesh = jax.sharding.Mesh(
       np.array(jax.devices()).reshape(2, 2), ("fsdp", "tp")
+  )
+  # The logps job rolls out on a mesh of its own; without the per-host learner
+  # that would turn on asynchronous rollout.
+  rollout_mesh = (
+      jax.sharding.Mesh(np.array(jax.devices()).reshape(2, 2).T, ("fsdp", "tp"))
+      if logps_job
+      else mesh
   )
   cluster_config = rl_engine_lib.ClusterConfig(
       role_to_mesh={
           rl_engine_lib.Role.ACTOR: mesh,
           rl_engine_lib.Role.REFERENCE: mesh,
-          rl_engine_lib.Role.ROLLOUT: mesh,
+          rl_engine_lib.Role.ROLLOUT: rollout_mesh,
       },
       rollout_engine=ShardRollout,
       offload_to_cpu=False,
@@ -541,6 +647,7 @@ def _run_child():
           actor_optimizer=optax.sgd(1e-2),
           eval_every_n_steps=1,
           max_steps=_TRAIN_STEPS,
+          **args["batch_sizes"],
       ),
       rollout_config=base_rollout.RolloutConfig(
           max_tokens_to_generate=10, max_prompt_length=8, kv_cache_size=64
@@ -551,7 +658,14 @@ def _run_child():
           config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
           rngs=nnx.Rngs(0),
       ),
-      reference=None,
+      reference=(
+          tc.ToyTransformer(
+              config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+              rngs=nnx.Rngs(1),
+          )
+          if args["beta"]
+          else None
+      ),
       tokenizer=vocab,
       cluster_config=cluster_config,
   )
@@ -559,12 +673,105 @@ def _run_child():
       rl_engine=rl_engine,
       reward_fns=shard_reward,
       algo_config=grpo_lib.GRPOConfig(
-          num_generations=2, num_iterations=1, beta=0.0
+          num_generations=2, num_iterations=1, beta=args["beta"]
       ),
       metric_fns=[valid_item_metrics],
   )
-  batch = {"prompts": np.array(_PROMPTS)}
-  learner.train([batch] * _TRAIN_STEPS, [batch])
+
+  # Logps job: record every reference logps call (inputs and host-local
+  # result) and when each multi-process call (reference logps, train update)
+  # ran, on which thread.
+  events, ref_calls = [], []
+  stock_ref_logps = rl_engine.get_ref_per_token_logps
+  ref_signature = inspect.signature(stock_ref_logps)
+  stock_update_actor = rl_engine.update_actor
+
+  def recording_ref_logps(*call_args, **call_kwargs):
+    call = ref_signature.bind(*call_args, **call_kwargs)
+    call.apply_defaults()
+    start = time.monotonic()
+    out = stock_ref_logps(*call_args, **call_kwargs)
+    rows = int(call.arguments["prompt_tokens"].shape[0])
+    events.append({
+        "kind": "ref",
+        "rows": rows,
+        "thread": threading.current_thread().name,
+        "start": start,
+        "end": time.monotonic(),
+    })
+    ref_calls.append({
+        "prompt_tokens": np.asarray(call.arguments["prompt_tokens"]),
+        "completion_tokens": np.asarray(call.arguments["completion_tokens"]),
+        "pad_id": call.arguments["pad_id"],
+        "eos_id": call.arguments["eos_id"],
+        "micro_batch_size": call.arguments["micro_batch_size"],
+        "logps": np.asarray(out),
+    })
+    return out
+
+  def timed_update_actor(*call_args, **call_kwargs):
+    start = time.monotonic()
+    try:
+      return stock_update_actor(*call_args, **call_kwargs)
+    finally:
+      events.append({
+          "kind": "train",
+          "rows": 0,
+          "thread": threading.current_thread().name,
+          "start": start,
+          "end": time.monotonic(),
+      })
+
+  if logps_job:
+    rl_engine.get_ref_per_token_logps = recording_ref_logps
+    rl_engine.update_actor = timed_update_actor
+
+  learner.train(
+      [{"prompts": np.array(args["prompts"])}] * _TRAIN_STEPS,
+      [{"prompts": np.array(prompts)} for prompts in args["eval_prompts"]],
+  )
+
+  ref_checks = []
+  if logps_job:
+    # Recompute every recorded call on this process alone, with a
+    # single-device copy of the (frozen) reference model: the per-host result
+    # must be the logps of this process's own rows.
+    reference = rl_engine.inference_worker.get_model("reference")
+    graphdef, state = nnx.split(reference)
+    state = jax.device_put(
+        jax.tree.map(
+            lambda x: np.asarray(
+                multihost_utils.process_allgather(x, tiled=True)
+            ),
+            state,
+        ),
+        jax.local_devices()[0],
+    )
+    temperature = rl_engine.get_rollout_config(
+        rl_engine_lib.Mode.TRAIN
+    ).temperature
+    for call in ref_calls:
+      want = common.compute_per_token_logps(
+          graphdef,
+          state,
+          prompt_tokens=call["prompt_tokens"],
+          completion_tokens=call["completion_tokens"],
+          pad_id=call["pad_id"],
+          eos_id=call["eos_id"],
+          stop_gradient=True,
+          temperature=temperature,
+      )
+      ref_checks.append({
+          "rows": int(call["logps"].shape[0]),
+          "micro_batch_size": call["micro_batch_size"],
+          "max_abs_error": float(
+              np.max(np.abs(np.asarray(want) - call["logps"]))
+          ),
+      })
+    np.savez(
+        os.path.join(args["out_dir"], f"ref_logps{args['process_id']}.npz"),
+        *[call["logps"] for call in ref_calls],
+    )
 
   exported = {}
   rl_logger = rl_engine._rl_metrics_logger
@@ -605,6 +812,10 @@ def _run_child():
             "trainer": trainer,
             "gather_threads": gather_threads,
             "main_thread": threading.main_thread().name,
+            "meshes_differ": rollout_mesh != mesh,
+            "can_enable_async_rollout": learner.can_enable_async_rollout,
+            "events": events,
+            "ref_checks": ref_checks,
         },
         f,
     )
@@ -616,8 +827,43 @@ def _free_port() -> int:
     return s.getsockname()[1]
 
 
-def _run_job(out_dir: str, disable_reduction: bool = False) -> list[dict]:
-  """Runs a 2-process per-host GRPO job on CPU (gloo collectives)."""
+# Per-job child arguments.
+_JOBS = {
+    # Global metrics: one micro-batch per global step, no reference model.
+    "metrics": dict(
+        beta=0.0,
+        prompts=_PROMPTS,
+        eval_prompts=[_PROMPTS],
+        batch_sizes={},
+    ),
+    # Per-host-safe reference logps on separate actor and rollout meshes. Per
+    # process: 4 prompts per batch, train micro-batches of 2 (each rolled out
+    # and scored on its own, so asynchronous loading would overlap them with
+    # train steps), logps chunks of 2 prompts (4 rows). The eval set (4 + 1
+    # prompts per process) runs 2 chunks, then a smaller last chunk.
+    "logps": dict(
+        beta=0.04,
+        prompts=_PROMPTS * 2,
+        eval_prompts=[_PROMPTS * 2, _PROMPTS[:2]],
+        batch_sizes=dict(
+            mini_batch_size=8,
+            train_micro_batch_size=4,
+            rollout_micro_batch_size=2,
+            compute_logps_micro_batch_size=4,
+        ),
+    ),
+    # Multi-controller weight publish only (no learner).
+    "reshard": {},
+}
+
+
+def _run_job(
+    out_dir: str,
+    disable_reduction: bool = False,
+    job: str = "metrics",
+    extra_env: dict[str, str] | None = None,
+) -> list[dict]:
+  """Runs a 2-process per-host job on CPU (gloo collectives)."""
   port = _free_port()
   env = {
       k: v
@@ -633,6 +879,7 @@ def _run_job(out_dir: str, disable_reduction: bool = False) -> list[dict]:
           [os.path.abspath(repo_root), env.get("PYTHONPATH", "")]
       ),
   )
+  env.update(extra_env or {})
   procs = []
   for process_id in range(_NUM_PROCESSES):
     env[_CHILD_ENV] = json.dumps({
@@ -640,6 +887,8 @@ def _run_job(out_dir: str, disable_reduction: bool = False) -> list[dict]:
         "port": port,
         "out_dir": out_dir,
         "disable_reduction": disable_reduction,
+        "job": job,
+        **_JOBS[job],
     })
     procs.append(
         subprocess.Popen(
@@ -748,6 +997,80 @@ class PerHostLearnerMetricsTest(absltest.TestCase):
     self.assertLen(params, len(unreduced_params))
     for got, want in zip(params, unreduced_params):
       np.testing.assert_array_equal(got, want)
+
+
+class PerHostSafeLogpsTest(absltest.TestCase):
+
+  def test_reference_logps_score_each_process_own_rows(self):
+    with tempfile.TemporaryDirectory() as out_dir:
+      results = _run_job(
+          out_dir,
+          job="logps",
+          extra_env={"TUNIX_PER_HOST_SAFE_LOGPS": "1"},
+      )
+      ref_logps = []
+      for process_id in range(_NUM_PROCESSES):
+        with np.load(
+            os.path.join(out_dir, f"ref_logps{process_id}.npz")
+        ) as f:
+          ref_logps.append(
+              [f[k] for k in sorted(f.files, key=lambda k: int(k[4:]))]
+          )
+    for result in results:
+      # Separate meshes, yet data loading stayed synchronous.
+      self.assertTrue(result["meshes_differ"])
+      self.assertFalse(result["can_enable_async_rollout"])
+      checks = result["ref_checks"]
+      self.assertNotEmpty(checks)
+      # Some calls ran several chunks, one a smaller last chunk (eval tail).
+      self.assertTrue(any(c["rows"] > c["micro_batch_size"] for c in checks))
+      self.assertTrue(any(c["rows"] < c["micro_batch_size"] for c in checks))
+      for check in checks:
+        self.assertLess(check["max_abs_error"], _REF_LOGPS_ATOL, check)
+      # No multi-process call overlapped another one (on another thread).
+      events = sorted(result["events"], key=lambda e: e["start"])
+      for before, after in zip(events, events[1:]):
+        self.assertLessEqual(before["end"], after["start"], (before, after))
+    # Both processes launched the same multi-process calls in the same order.
+    launched = [
+        [
+            (e["kind"], e["rows"])
+            for e in sorted(r["events"], key=lambda e: e["start"])
+        ]
+        for r in results
+    ]
+    self.assertNotEmpty(launched[0])
+    self.assertEqual(launched[0], launched[1])
+    # The processes scored different rows, so the comparison is sensitive to
+    # a process getting another process's rows.
+    self.assertLen(ref_logps[0], len(ref_logps[1]))
+    self.assertFalse(
+        all(
+            np.allclose(a, b, atol=_REF_LOGPS_ATOL)
+            for a, b in zip(*ref_logps)
+            if a.shape == b.shape
+        )
+    )
+
+
+class MultiControllerPublishTest(absltest.TestCase):
+
+  def test_publish_to_host_local_devices_is_bit_exact(self):
+    with tempfile.TemporaryDirectory() as out_dir:
+      results = _run_job(
+          out_dir,
+          job="reshard",
+          extra_env={"TUNIX_MULTI_CONTROLLER_RESHARD": "1"},
+      )
+    for result in results:
+      self.assertTrue(result["multi_controller_publish"])
+      self.assertCountEqual(result["leaves"], ["w", "b", "e", "local"])
+      for name, leaf in result["leaves"].items():
+        self.assertEqual(
+            leaf,
+            {"bit_exact": True, "dtype_kept": True, "on_target": True},
+            name,
+        )
 
 
 if __name__ == "__main__":

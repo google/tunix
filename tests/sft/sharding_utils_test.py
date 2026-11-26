@@ -164,5 +164,170 @@ class ShardingUtilsTest(parameterized.TestCase):
     self.assertIs(x, x_resharded)
     mock_make_array.assert_not_called()
 
+
+class ProcessLocalShardingTest(parameterized.TestCase):
+  """`leading_dim_factor`: process-local rows concatenated across processes."""
+
+  def setUp(self):
+    super().setUp()
+    self.num_devices = jax.device_count()
+    if self.num_devices < 4:
+      self.skipTest('needs at least 4 devices')
+
+  def test_get_sharding_judges_axis_0_by_its_global_size(self):
+    mesh = shd.Mesh(
+        np.array(jax.devices()).reshape(self.num_devices, 1), ('fsdp', 'tp')
+    )
+    pspec = shd.PartitionSpec('fsdp')
+    local = np.ones((self.num_devices // 2, 5))
+    # Local rows alone do not divide the data axis; local rows x 2 do.
+    self.assertEqual(
+        sharding_utils.get_sharding(local, mesh, pspec).spec,
+        shd.PartitionSpec(),
+    )
+    self.assertEqual(
+        sharding_utils.get_sharding(
+            local, mesh, pspec, leading_dim_factor=2
+        ).spec,
+        pspec,
+    )
+    self.assertEqual(
+        sharding_utils.get_sharding(
+            np.ones((self.num_devices // 2 - 1, 5)),
+            mesh,
+            pspec,
+            leading_dim_factor=2,
+        ).spec,
+        shd.PartitionSpec(),
+    )
+
+  def test_get_sharding_scales_axis_0_only(self):
+    mesh = shd.Mesh(
+        np.array(jax.devices()[:4]).reshape(2, 2), ('fsdp', 'tp')
+    )
+    pspec = shd.PartitionSpec('fsdp', 'tp')
+    self.assertEqual(
+        sharding_utils.get_sharding(
+            np.ones((1, 4)), mesh, pspec, leading_dim_factor=2
+        ).spec,
+        pspec,
+    )
+    self.assertEqual(
+        sharding_utils.get_sharding(
+            np.ones((1, 3)), mesh, pspec, leading_dim_factor=2
+        ).spec,
+        shd.PartitionSpec(),
+    )
+
+  def test_shard_input_judges_global_rows_under_per_host_safe_logps(self):
+    mesh = shd.Mesh(
+        np.array(jax.devices()).reshape(self.num_devices, 1), ('fsdp', 'tp')
+    )
+    x = np.ones((self.num_devices // 2, 3))
+    switches = ('TUNIX_PER_HOST_LEARNER', 'TUNIX_PER_HOST_SAFE_LOGPS')
+    with mesh, mock.patch.object(
+        sharding_utils.jax, 'process_count', return_value=2
+    ), mock.patch.object(
+        sharding_utils.jax, 'make_array_from_process_local_data'
+    ) as make_array:
+      with mock.patch.dict(os.environ, {name: '1' for name in switches}):
+        sharding_utils.shard_input(x, ('fsdp',))
+      with mock.patch.dict(os.environ):
+        for name in switches:
+          os.environ.pop(name, None)
+        sharding_utils.shard_input(x, ('fsdp',))
+    per_host, stock = [c.args[0] for c in make_array.call_args_list]
+    self.assertEqual(per_host.spec, shd.PartitionSpec('fsdp'))
+    self.assertEqual(stock.spec, shd.PartitionSpec())  # Flags off: unchanged.
+
+
+def _fake_global_array(full, local_indices):
+  """A global array whose local shards hold `full`'s blocks at the indices."""
+  x = mock.MagicMock(spec=jax.Array)
+  x.is_fully_addressable = False
+  x.shape = full.shape
+  x.ndim = full.ndim
+  x.dtype = full.dtype
+  x.sharding = 'fake sharding'
+  x.addressable_shards = [
+      mock.Mock(index=index, data=full[index]) for index in local_indices
+  ]
+  return x
+
+
+class ProcessLocalRowsTest(parameterized.TestCase):
+  """Row extraction of a global array, with fake shards (no processes)."""
+
+  _FULL = np.arange(8 * 6, dtype=np.float32).reshape(8, 6)
+
+  @parameterized.named_parameters(
+      dict(
+          # Process 1 of 2 on an (fsdp=4, tp=2) mesh: rows 4:8 in two row
+          # blocks, each split into two column halves.
+          testcase_name='row_blocks_split_by_column',
+          local_indices=[
+              (slice(4, 6), slice(0, 3)),
+              (slice(4, 6), slice(3, 6)),
+              (slice(6, 8), slice(0, 3)),
+              (slice(6, 8), slice(3, 6)),
+          ],
+          ranges=[(4, 8)],
+          rows=[4, 5, 6, 7],
+      ),
+      dict(
+          # Two local devices hold copies of the same rows.
+          testcase_name='replicated_copies',
+          local_indices=[
+              (slice(0, 2), slice(None)),
+              (slice(0, 2), slice(None)),
+              (slice(2, 4), slice(None)),
+              (slice(2, 4), slice(None)),
+          ],
+          ranges=[(0, 4)],
+          rows=[0, 1, 2, 3],
+      ),
+      dict(
+          # A device order that interleaves the processes; shards unsorted.
+          testcase_name='non_contiguous_blocks',
+          local_indices=[
+              (slice(4, 6), slice(None)),
+              (slice(0, 2), slice(None)),
+          ],
+          ranges=[(0, 2), (4, 6)],
+          rows=[0, 1, 4, 5],
+      ),
+      dict(
+          testcase_name='open_slices',
+          local_indices=[
+              (slice(None, 4), slice(None)),
+              (slice(4, None), slice(None)),
+          ],
+          ranges=[(0, 8)],
+          rows=list(range(8)),
+      ),
+  )
+  def test_rows_of_this_process(self, local_indices, ranges, rows):
+    x = _fake_global_array(self._FULL, local_indices)
+    self.assertEqual(sharding_utils.process_row_ranges(x), ranges)
+    np.testing.assert_array_equal(
+        sharding_utils.process_local_rows(x), self._FULL[rows]
+    )
+
+  def test_partly_addressable_rows_raise(self):
+    # Only the left half of rows 4:6 is addressable on this process.
+    x = _fake_global_array(self._FULL, [(slice(4, 6), slice(0, 3))])
+    with self.assertRaisesRegex(ValueError, 'only partly addressable'):
+      sharding_utils.process_local_rows(x)
+
+  def test_fully_addressable_inputs_are_returned_whole(self):
+    x = jnp.arange(6).reshape(3, 2)
+    np.testing.assert_array_equal(
+        sharding_utils.process_local_rows(x), np.asarray(x)
+    )
+    np.testing.assert_array_equal(
+        sharding_utils.process_local_rows(np.ones(3)), np.ones(3)
+    )
+
+
 if __name__ == '__main__':
   absltest.main()
