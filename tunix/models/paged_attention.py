@@ -103,7 +103,8 @@ def paged_attention(
       the DP axes (`'dp'` and `'fsdp'`), and each device runs its group's slice
       of rows and tokens against its own pages.
     decode_only: static promise of one query token per sequence. Combined with
-      `metadata.decode_only`; on GPU it enables vLLM's split-KV decode launch.
+      `metadata.decode_only`; on TPU it skips the mixed-sequence kernel, and on
+      GPU it enables vLLM's split-KV decode launch.
     max_q_len: static per-sequence query bound for the JAX path; tokens past it
       are dropped. Defaults to `max_num_tokens`.
     backend: `"tpu"`, `"gpu"`, or anything else for the JAX path. Defaults to
@@ -250,8 +251,9 @@ def _paged_attention(
     page_indices: `i32[max_num_seqs * pages_per_seq]`.
     cu_q_lens: `i32[max_num_seqs + 1]`.
     distribution: `i32[3]`; `distribution[-1]` is the active sequence count.
-    decode_only: static promise of one query token per sequence. On GPU it
-      enables vLLM's split-KV decode launch.
+    decode_only: static promise of one query token per sequence. On TPU it skips
+      the mixed-sequence kernel; on GPU it enables vLLM's split-KV decode
+      launch.
     max_q_len: static per-sequence query bound for the JAX path; tokens past it
       are dropped. Defaults to `max_num_tokens`.
     backend: `"tpu"`, `"gpu"`, or anything else for the JAX path. Defaults to
@@ -294,6 +296,7 @@ def _paged_attention(
         *args,
         **common,
         skip_kv_update=not update_kv_cache,
+        decode_only=decode_only,
         implementation="mosaic_tpu",
     )
   if backend == "gpu":
