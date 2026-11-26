@@ -30,6 +30,7 @@ it therefore does NOT cover is tpu-inference's own capture kernel, which fills
 """
 
 import asyncio
+import os
 from unittest import mock
 
 from absl.testing import absltest
@@ -117,6 +118,12 @@ def _request_output(routed_experts):
 class VllmSamplerRoutingTest(absltest.TestCase):
   """`VllmSampler` must surface what vLLM put on the CompletionOutput."""
 
+  def setUp(self):
+    super().setUp()
+    # `VllmSampler` sets process-wide variables (e.g. `JAX_RANDOM_WEIGHTS`);
+    # restore the environment after each test.
+    self.enter_context(mock.patch.dict(os.environ))
+
   def _sampler(self, routed_experts, return_routed_experts=True):
     config = vllm_sampler.VllmConfig(
         return_logprobs=False,
@@ -161,9 +168,14 @@ class VllmSamplerRoutingTest(absltest.TestCase):
 class SamplerToPayloadTest(absltest.TestCase):
   """Routing must reach a batched RLTrainerPayload with its layout intact."""
 
+  def setUp(self):
+    super().setUp()
+    # `VllmSampler` sets process-wide variables (e.g. `JAX_RANDOM_WEIGHTS`);
+    # restore the environment after each test.
+    self.enter_context(mock.patch.dict(os.environ))
+
   def _sampling_response(self, fill):
     stub = mock.MagicMock()
-    stub.config = mock.Mock(return_routed_experts=True)
     stub.return_value = base_sampler.SamplerOutput(
         text=["answer"],
         logits=None,
@@ -175,14 +187,16 @@ class SamplerToPayloadTest(absltest.TestCase):
         routed_experts=[_routing(PROMPT_LEN + GEN_LEN, fill)],
     )
 
-    adapter = inprocess_vllm_sampler.InprocessVllmSampler(server_id="rollout")
+    adapter = inprocess_vllm_sampler.InprocessVllmSampler(
+        server_id="rollout",
+        tokenizer=_StubTokenizer(),
+        config=base_rollout.RolloutConfig(return_routed_experts=True),
+    )
     adapter.vllm_sampler = stub
     request = base_sampler_lib.SamplingRequest(
         request_id="req-0",
         prompt=np.arange(10, 10 + PROMPT_LEN, dtype=np.int32),
-        sampling_params=base_sampler_lib.SamplingParams(
-            max_tokens=GEN_LEN, return_routed_experts=True
-        ),
+        max_tokens=GEN_LEN,
     )
     return asyncio.run(adapter.sample([request]))[0]
 
@@ -216,7 +230,6 @@ class SamplerToPayloadTest(absltest.TestCase):
   def test_multi_turn_routed_experts_prompt_start_to_payload(self):
     """Multi-turn rollout via routed_experts_prompt_start yields unpadded bit-exact payload."""
     stub = mock.MagicMock()
-    stub.config = mock.Mock(return_routed_experts=True)
 
     env_len = 3
     turn0_routing = _routing(PROMPT_LEN + GEN_LEN, 3)
@@ -245,17 +258,18 @@ class SamplerToPayloadTest(absltest.TestCase):
         ),
     ]
 
-    adapter = inprocess_vllm_sampler.InprocessVllmSampler(server_id="rollout")
+    adapter = inprocess_vllm_sampler.InprocessVllmSampler(
+        server_id="rollout",
+        tokenizer=_StubTokenizer(),
+        config=base_rollout.RolloutConfig(return_routed_experts=True),
+    )
     adapter.vllm_sampler = stub
 
     req0 = base_sampler_lib.SamplingRequest(
         request_id="req-0",
         prompt=np.arange(10, 10 + PROMPT_LEN, dtype=np.int32),
-        sampling_params=base_sampler_lib.SamplingParams(
-            max_tokens=GEN_LEN,
-            return_routed_experts=True,
-            routed_experts_prompt_start=0,
-        ),
+        max_tokens=GEN_LEN,
+        routed_experts_prompt_start=0,
     )
     resp0 = asyncio.run(adapter.sample([req0]))[0]
 
@@ -264,11 +278,8 @@ class SamplerToPayloadTest(absltest.TestCase):
         prompt=np.arange(
             10, 10 + PROMPT_LEN + GEN_LEN + env_len, dtype=np.int32
         ),
-        sampling_params=base_sampler_lib.SamplingParams(
-            max_tokens=GEN_LEN,
-            return_routed_experts=True,
-            routed_experts_prompt_start=PROMPT_LEN + GEN_LEN,
-        ),
+        max_tokens=GEN_LEN,
+        routed_experts_prompt_start=PROMPT_LEN + GEN_LEN,
     )
     resp1 = asyncio.run(adapter.sample([req1]))[0]
 
@@ -317,7 +328,6 @@ class SamplerToPayloadTest(absltest.TestCase):
   def test_heterogeneous_batch_routed_experts_prompt_start(self):
     """Batched requests with heterogeneous prompt_start offsets do not collapse or truncate each other."""
     stub = mock.MagicMock()
-    stub.config = mock.Mock(return_routed_experts=True)
 
     env_len = 3
     # req_a is Turn 0 (prompt_start=0): 8 tokens total
@@ -337,28 +347,26 @@ class SamplerToPayloadTest(absltest.TestCase):
         routed_experts=[routing_a, routing_b],
     )
 
-    adapter = inprocess_vllm_sampler.InprocessVllmSampler(server_id="rollout")
+    adapter = inprocess_vllm_sampler.InprocessVllmSampler(
+        server_id="rollout",
+        tokenizer=_StubTokenizer(),
+        config=base_rollout.RolloutConfig(return_routed_experts=True),
+    )
     adapter.vllm_sampler = stub
 
     req_a = base_sampler_lib.SamplingRequest(
         request_id="req-a",
         prompt=np.arange(10, 10 + PROMPT_LEN, dtype=np.int32),
-        sampling_params=base_sampler_lib.SamplingParams(
-            max_tokens=GEN_LEN,
-            return_routed_experts=True,
-            routed_experts_prompt_start=0,
-        ),
+        max_tokens=GEN_LEN,
+        routed_experts_prompt_start=0,
     )
     req_b = base_sampler_lib.SamplingRequest(
         request_id="req-b",
         prompt=np.arange(
             10, 10 + PROMPT_LEN + GEN_LEN + env_len, dtype=np.int32
         ),
-        sampling_params=base_sampler_lib.SamplingParams(
-            max_tokens=GEN_LEN,
-            return_routed_experts=True,
-            routed_experts_prompt_start=PROMPT_LEN + GEN_LEN,
-        ),
+        max_tokens=GEN_LEN,
+        routed_experts_prompt_start=PROMPT_LEN + GEN_LEN,
     )
 
     # Concurrently sample the batch in a single call
@@ -382,12 +390,12 @@ class SamplerToPayloadTest(absltest.TestCase):
     env_len = 3
     prompt0_ids = list(range(10, 10 + PROMPT_LEN))
     gen0_ids = list(range(20, 20 + GEN_LEN))
-    prompt1_ids = list(range(10, 10 + PROMPT_LEN + GEN_LEN + env_len))
+    env_ids = list(range(30, 30 + env_len))
+    prompt1_ids = prompt0_ids + gen0_ids + env_ids
     gen1_ids = list(range(40, 40 + GEN_LEN))
 
     mock_tokenize_masks.side_effect = [
-        (prompt0_ids, [1] * PROMPT_LEN),
-        (list(range(30, 30 + env_len)), [1] * env_len),
+        (env_ids, [1] * env_len),
     ]
 
     # Turn 0: vLLM routes P_0 + G_0 - 1 tokens (4 prompt + 3 generated = 7 tokens)
@@ -456,7 +464,11 @@ class SamplerToPayloadTest(absltest.TestCase):
           tokenizer=_StubTokenizer(), config=config
       )
 
-    adapter = inprocess_vllm_sampler.InprocessVllmSampler(server_id="rollout")
+    adapter = inprocess_vllm_sampler.InprocessVllmSampler(
+        server_id="rollout",
+        tokenizer=_StubTokenizer(),
+        config=base_rollout.RolloutConfig(return_routed_experts=True),
+    )
     adapter.vllm_sampler = sampler
 
     mock_agent = mock.MagicMock()
@@ -487,6 +499,7 @@ class SamplerToPayloadTest(absltest.TestCase):
 
     mock_env = mock.MagicMock()
     mock_env.max_steps = 2
+    mock_env.final_reward_fn = None
     mock_env.reset.return_value = ("initial_obs", {})
     mock_env.step.side_effect = [
         ("env_obs_1", 1.0, False, {}),
@@ -504,23 +517,25 @@ class SamplerToPayloadTest(absltest.TestCase):
         chat_completions, env=None, max_generation_steps=GEN_LEN, **kwargs
     ):
       del chat_completions, env
+      prompt_ids = kwargs.get("prompt_token_ids")
+      if prompt_ids is None:
+        prompt_ids = np.array(prompt0_ids, dtype=np.int32)
       req = base_sampler_lib.SamplingRequest(
           request_id="req",
-          prompt=np.array(prompt0_ids, dtype=np.int32),
-          sampling_params=base_sampler_lib.SamplingParams(
-              max_tokens=max_generation_steps,
-              return_routed_experts=True,
-              routed_experts_prompt_start=kwargs.get(
-                  "routed_experts_prompt_start", 0
-              ),
+          prompt=np.asarray(prompt_ids, dtype=np.int32),
+          max_tokens=max_generation_steps,
+          routed_experts_prompt_start=kwargs.get(
+              "routed_experts_prompt_start", 0
           ),
       )
       resp = (await adapter.sample([req]))[0]
+      echoed = np.asarray(resp.prompt_token_ids, dtype=np.int32)
       return base_rollout.RolloutOutput(
           text=[resp.text],
           logits=None,
           tokens=[np.asarray(resp.output_tokens, dtype=np.int32)],
-          left_padded_prompt_tokens=np.asarray([prompt0_ids], dtype=np.int32),
+          left_padded_prompt_tokens=echoed.reshape(1, -1),
+          prompt_lengths=np.asarray([len(echoed)], dtype=np.int32),
           logprobs=[np.zeros(GEN_LEN, dtype=np.float32)],
           routed_experts=[resp.routed_experts],
       )

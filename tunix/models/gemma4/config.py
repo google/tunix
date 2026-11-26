@@ -83,6 +83,16 @@ class SplashAttentionImpl(enum.Enum):
   TOKAMAX = 'tokamax'
 
 
+class HfVariant(enum.Enum):
+  """HF key layout, fixed by the HF class that wrote the checkpoint."""
+
+  # `Gemma4ForCausalLM`: text decoder under `model.`, no towers.
+  CAUSAL_LM = 'causal_lm'
+  # `Gemma4ForConditionalGeneration`: text decoder under
+  # `model.language_model.`, towers and embedders under `model.`.
+  CONDITIONAL_GENERATION = 'conditional_generation'
+
+
 @dataclasses.dataclass(slots=True, frozen=True)
 class ShardingConfig:
   """Sharding configuration for gemma transformer."""
@@ -125,7 +135,7 @@ class ShardingConfig:
         o_weight_nhd=P('tp', None, fsdp),
         ffw_weight_df=P(fsdp, 'tp'),
         ffw_weight_fd=P('tp', fsdp),
-        rms_norm_weight=P('tp'),
+        rms_norm_weight=P(None) if is_sampling else P('tp'),
         act_btd=P('fsdp', None, None if is_sampling else 'tp'),
         act_btf=P('fsdp', None, 'tp'),
         act_btnh=P('fsdp', None, 'tp', None),
@@ -213,6 +223,13 @@ class ModelConfig:
   num_experts_per_tok: int | None = None
   expert_dim: int | None = None
   moe_dense_hidden_dim: int | None = None
+  # Stops the gradient into the router parameters (`router_logits` and
+  # `router_scale`), so training keeps the routing function the model was
+  # loaded with. RL recipes that replay rollout routing usually do this.
+  # Gradients still flow through the routing weights into the router input.
+  # Decoupled weight decay (e.g. AdamW with weight_decay > 0) still shrinks
+  # these parameters.
+  freeze_router: bool = False
 
   # Vision config
   vision_encoder: vision.VisionEncoderConfig | None = None
@@ -229,6 +246,11 @@ class ModelConfig:
       raise ValueError(
           'prefix_bucket_boundaries must be non-negative and sorted strictly '
           f'ascending with no duplicates; got {boundaries}'
+      )
+    if self.freeze_router and not self.enable_moe:
+      raise ValueError(
+          'freeze_router=True requires enable_moe=True; this model has no'
+          ' router to freeze.'
       )
 
   @classmethod

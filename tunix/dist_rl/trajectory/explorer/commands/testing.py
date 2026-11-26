@@ -23,6 +23,7 @@ from tunix.dist_rl.trajectory import store
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.dist_rl.trajectory import trajectory_testing
 from tunix.dist_rl.trajectory.explorer.commands import base
+from tunix.dist_rl.trajectory.explorer.diagnostics import schema_diagnostics
 
 
 def create_store(
@@ -63,6 +64,7 @@ def execute_command(
     reader: store.TrajectoryReader,
     *,
     output_json: bool = False,
+    diagnostics: Sequence[schema_diagnostics.SchemaDiagnostics] = (),
 ) -> tuple[int, str]:
   """Executes a CLI command against a reader while capturing standard output.
 
@@ -70,11 +72,14 @@ def execute_command(
     cmd: The CLI command instance to execute.
     reader: The TrajectoryReader to run the command against.
     output_json: Whether to request machine-readable JSON output.
+    diagnostics: Schema diagnostics for the command to compute and render.
 
   Returns:
     A tuple of `(exit_code, stdout_output)`.
   """
   buffer = io.StringIO()
   with contextlib.redirect_stdout(buffer):
-    exit_code = cmd.execute(reader, output_json=output_json)
+    exit_code = cmd.execute(
+        reader, output_json=output_json, diagnostics=diagnostics
+    )
   return exit_code, buffer.getvalue()

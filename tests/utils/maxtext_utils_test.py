@@ -15,6 +15,8 @@
 from unittest import mock
 
 from absl.testing import absltest
+import jax
+from jax import numpy as jnp
 from tunix.utils import maxtext_utils
 
 # MaxText optimizer config keys. `AdamWOptions` sets all but opt_type, which
@@ -70,6 +72,100 @@ class MaxTextUtilsTest(absltest.TestCase):
       self.assertIn("use_weight_converter=False", argv)
       self.assertIn("rollout_tensor_parallelism=4", argv)
       self.assertEqual(cfg, mock_cfg)
+
+  def test_build_maxtext_config_skip_step_on_spikes_and_nan(self):
+    mock_pyconfig = mock.MagicMock()
+    mock_engine = mock.MagicMock()
+    mock_mutils = mock.MagicMock()
+
+    mock_cfg = mock.MagicMock()
+    mock_cfg.raw_data_dict = {}
+    mock_pyconfig.initialize.return_value = mock_cfg
+    mock_pyconfig.__file__ = "/fake/maxtext/configs/pyconfig.py"
+
+    with mock.patch.object(
+        maxtext_utils,
+        "maxtext_modules",
+        return_value=(mock_pyconfig, mock_engine, mock_mutils),
+    ), mock.patch("os.path.exists", return_value=True):
+      cfg = maxtext_utils.build_maxtext_config(
+          model_name="gemma2-9b",
+          skip_step_on_spikes=True,
+          skip_step_on_nan=True,
+          skip_step_interval=64,
+          skip_step_scaling_factor=4.5,
+      )
+      mock_pyconfig.initialize.assert_called_once()
+      argv = mock_pyconfig.initialize.call_args[0][0]
+      self.assertIn("skip_step_on_spikes=True", argv)
+      self.assertIn("skip_step_on_nan=True", argv)
+      self.assertIn("skip_step_interval=64", argv)
+      self.assertIn("skip_step_scaling_factor=4.5", argv)
+      self.assertEqual(cfg, mock_cfg)
+
+      mock_pyconfig.initialize.reset_mock()
+      maxtext_utils.build_maxtext_config(
+          model_name="gemma2-9b",
+          skip_step_on_nan=False,
+      )
+      argv_off = mock_pyconfig.initialize.call_args[0][0]
+      self.assertIn("skip_step_on_nan=False", argv_off)
+
+  def test_build_maxtext_config_defaults_omit_skip_step_keys(self):
+    mock_pyconfig = mock.MagicMock()
+    mock_cfg = mock.MagicMock()
+    mock_pyconfig.initialize.return_value = mock_cfg
+    mock_pyconfig.__file__ = "/fake/maxtext/configs/pyconfig.py"
+
+    with mock.patch.object(
+        maxtext_utils,
+        "maxtext_modules",
+        return_value=(mock_pyconfig, mock.MagicMock(), mock.MagicMock()),
+    ), mock.patch("os.path.exists", return_value=True):
+      maxtext_utils.build_maxtext_config(model_name="gemma2-9b")
+      argv = mock_pyconfig.initialize.call_args[0][0]
+      keys = {arg.split("=", 1)[0] for arg in argv if "=" in arg}
+      self.assertFalse(any(k.startswith("skip_step_") for k in keys), keys)
+
+  def test_build_maxtext_config_rejects_unsupported_skip_step_fields(self):
+    mock_pyconfig = mock.MagicMock()
+    mock_pyconfig.__file__ = "/fake/maxtext/configs/pyconfig.py"
+    mock_pyconfig.types.MaxTextConfig.model_fields = {"model_name": object()}
+
+    with mock.patch.object(
+        maxtext_utils,
+        "maxtext_modules",
+        return_value=(mock_pyconfig, mock.MagicMock(), mock.MagicMock()),
+    ), mock.patch("os.path.exists", return_value=True):
+      # Default args emit no skip_step_* keys and succeed on older MaxText.
+      maxtext_utils.build_maxtext_config(model_name="gemma2-9b")
+      with self.assertRaisesRegex(ValueError, "skip_step_on_nan"):
+        maxtext_utils.build_maxtext_config(
+            model_name="gemma2-9b", skip_step_on_nan=False
+        )
+      with self.assertRaisesRegex(ValueError, "skip_step_on_spikes"):
+        maxtext_utils.build_maxtext_config(
+            model_name="gemma2-9b", skip_step_on_spikes=True
+        )
+
+  def test_build_maxtext_config_skip_step_numeric_validation(self):
+    mock_pyconfig = mock.MagicMock()
+    mock_pyconfig.__file__ = "/fake/maxtext/configs/pyconfig.py"
+    with mock.patch.object(
+        maxtext_utils,
+        "maxtext_modules",
+        return_value=(mock_pyconfig, mock.MagicMock(), mock.MagicMock()),
+    ), mock.patch("os.path.exists", return_value=True):
+      for bad_interval in (0, -1, True):
+        with self.assertRaisesRegex(ValueError, "skip_step_interval"):
+          maxtext_utils.build_maxtext_config(
+              model_name="gemma2-9b", skip_step_interval=bad_interval
+          )
+      for bad_factor in (0.0, -1.0, float("inf"), float("nan"), True):
+        with self.assertRaisesRegex(ValueError, "skip_step_scaling_factor"):
+          maxtext_utils.build_maxtext_config(
+              model_name="gemma2-9b", skip_step_scaling_factor=bad_factor
+          )
 
   def test_build_maxtext_config_auto_padded_moe_mlp_dim(self):
     mock_pyconfig = mock.MagicMock()
@@ -534,10 +630,21 @@ class MaxTextUtilsTest(absltest.TestCase):
     self.assertIn("enable_checkpointing=False", argv)
     self.assertNotIn("enable_checkpointing=True", argv)
 
-  def test_ckpt_d2h_concurrent_gb_override(self):
+  def test_device_host_concurrent_gb_sets_checkpoint_d2h_cap(self):
+    argv = self._build_config_argv(device_host_concurrent_gb=32)
+    self.assertIn("checkpoint_storage_device_host_concurrent_gb=32", argv)
+    # Without it MaxText keeps its own cap; the environment is not read.
     with mock.patch.dict("os.environ", {"CKPT_D2H_CONCURRENT_GB": "32"}):
       argv = self._build_config_argv()
-    self.assertIn("checkpoint_storage_device_host_concurrent_gb=32", argv)
+    self.assertEmpty([
+        a
+        for a in argv
+        if a.startswith("checkpoint_storage_device_host_concurrent_gb=")
+    ])
+    with self.assertRaisesRegex(TypeError, "must be an int or None"):
+      self._build_config_argv(device_host_concurrent_gb=True)
+    with self.assertRaisesRegex(ValueError, "must be positive"):
+      self._build_config_argv(device_host_concurrent_gb=0)
 
   def test_checkpoint_save_interval_positive_enables_saving(self):
     argv = self._build_config_argv(
@@ -650,24 +757,33 @@ class MaxTextUtilsTest(absltest.TestCase):
     self.assertIn("skip_first_n_steps_for_profiler=-1", argv)
     self.assertNotIn("profiler=xplane", argv)
 
-  def test_build_maxtext_config_maxtext_extra_flags_passthrough_and_validation(
-      self,
-  ):
+  def test_build_maxtext_config_extra_flags_passthrough_and_validation(self):
+    with self.assertLogs(level="INFO") as logs:
+      argv = self._build_config_argv(
+          extra_flags=("use_ring_of_experts=true", "sa_block_q=512")
+      )
+    # Appended last, so they override the arguments built before them.
+    self.assertEqual(argv[-2:], ["use_ring_of_experts=true", "sa_block_q=512"])
+    # Log tooling parses this line.
+    self.assertIn(
+        "MAXTEXT_EXTRA_FLAGS adding 2 flag(s): ['use_ring_of_experts=true',"
+        " 'sa_block_q=512']",
+        "\n".join(logs.output),
+    )
+
+    with self.assertRaisesRegex(
+        ValueError, "extra_flags entries must be key=value, got: invalid_flag"
+    ):
+      self._build_config_argv(
+          extra_flags=["use_ring_of_experts=true", "invalid_flag"]
+      )
+
+    # The environment is not read.
     with mock.patch.dict(
-        "os.environ",
-        {"MAXTEXT_EXTRA_FLAGS": "use_ring_of_experts=true sa_block_q=512"},
+        "os.environ", {"MAXTEXT_EXTRA_FLAGS": "use_ring_of_experts=true"}
     ):
       argv = self._build_config_argv()
-    self.assertEqual(argv[-2:], ["use_ring_of_experts=true", "sa_block_q=512"])
-
-    with mock.patch.dict(
-        "os.environ",
-        {"MAXTEXT_EXTRA_FLAGS": "use_ring_of_experts=true invalid_flag"},
-    ):
-      with self.assertRaisesRegex(
-          ValueError, "MAXTEXT_EXTRA_FLAGS entries must be key=value"
-      ):
-        self._build_config_argv()
+    self.assertNotIn("use_ring_of_experts=true", argv)
 
   def test_vllm_additional_config_returns_routed_experts_only_when_asked(self):
     default = maxtext_utils.build_vllm_maxtext_additional_config(
@@ -832,6 +948,313 @@ class MaxTextUtilsTest(absltest.TestCase):
     self.assertEqual(captured["mesh_exited"], 0)
     mock_mesh.__exit__.assert_called_once()
     self.assertEqual(spmd.get_logical_axis_rules(), ())
+
+  # TODO(tunix-dev): [legacy-maxtext-a2cf3bc8b] Replace the three legacy-pin
+  # compatibility tests below with a direct assertion that
+  # `build_maxtext_config()` unconditionally emits
+  # `rollout_weight_dtype=bfloat16` once pinned MaxText images predating
+  # `rollout_weight_dtype` are retired.
+  def test_build_maxtext_config_omits_rollout_weight_dtype_when_unsupported(
+      self,
+  ):
+    mock_pyconfig = mock.MagicMock()
+    mock_cfg = mock.MagicMock()
+    mock_pyconfig.__file__ = "/fake/maxtext/configs/pyconfig.py"
+    mock_pyconfig.initialize.return_value = mock_cfg
+    mock_pyconfig.types.MaxTextConfig.model_fields = {"model_name": object()}
+
+    with mock.patch.object(
+        maxtext_utils,
+        "maxtext_modules",
+        return_value=(mock_pyconfig, mock.MagicMock(), mock.MagicMock()),
+    ), mock.patch("os.path.exists", return_value=True):
+      result = maxtext_utils.build_maxtext_config("qwen3.5-35b-a3b")
+
+    self.assertIs(result, mock_cfg)
+    mock_pyconfig.initialize.assert_called_once()
+    legacy_argv = mock_pyconfig.initialize.call_args[0][0]
+    self.assertFalse(
+        any(arg.startswith("rollout_weight_dtype=") for arg in legacy_argv)
+    )
+
+    mock_pyconfig.reset_mock()
+    mock_pyconfig.types.MaxTextConfig.model_fields = {
+        "model_name": object(),
+        "rollout_weight_dtype": object(),
+    }
+    mock_pyconfig.initialize.side_effect = ValueError(
+        "invalid M_ROLLOUT_WEIGHT_DTYPE"
+    )
+    with mock.patch.object(
+        maxtext_utils,
+        "maxtext_modules",
+        return_value=(mock_pyconfig, mock.MagicMock(), mock.MagicMock()),
+    ), mock.patch("os.path.exists", return_value=True):
+      with self.assertRaisesRegex(ValueError, "invalid M_ROLLOUT_WEIGHT_DTYPE"):
+        maxtext_utils.build_maxtext_config("qwen3.5-35b-a3b")
+    mock_pyconfig.initialize.assert_called_once()
+    supported_argv = mock_pyconfig.initialize.call_args[0][0]
+    self.assertIn("rollout_weight_dtype=bfloat16", supported_argv)
+
+  def test_create_maxtext_engine_target_free_shim_legacy_pinned_maxtext(self):
+    class TunixMaxTextAdapter:
+      pass
+
+    class LegacyDirectConverter:
+      """Simulates pinned MaxText predating `rollout_weight_dtype`."""
+
+      def __init__(self):
+        self.target_dtype = "float32"
+
+      def _resolve_target_dtype(self):
+        return jnp.dtype(self.target_dtype)
+
+      def _execute_group_target_free(self, group, src_flat):
+        key = group.source_keys[0]
+        raw_val = src_flat.get(
+            key, jax.ShapeDtypeStruct((4, 4), jnp.float32)
+        )
+        if getattr(group, "quantize_to_fp8", False):
+          return [(key, raw_val)]
+        path_str = ".".join(str(p) for p in key)
+        target_dt = self._resolve_target_dtype()
+        if "gate" in path_str or "router" in path_str:
+          return [(key, raw_val)]
+        if hasattr(raw_val, "dtype") and jnp.issubdtype(
+            raw_val.dtype, jnp.floating
+        ):
+          if isinstance(raw_val, jax.ShapeDtypeStruct):
+            return [(key, jax.ShapeDtypeStruct(raw_val.shape, target_dt))]
+          return [(key, raw_val.astype(target_dt))]
+        return [(key, raw_val)]
+
+    def _make_group(*path, quantize_to_fp8=False):
+      return mock.MagicMock(source_keys=[path], quantize_to_fp8=quantize_to_fp8)
+
+    # Older pinned MaxText container images (e.g. built for the `a2cf3bc8b` 35B
+    # recipe): `get_weight_dtype` keeps norm/gate/GDN/logits_dense modules in
+    # FP32 when `float32_gate_logits=True`, and `_execute_group_target_free`
+    # returns uncast source leaves.
+    def _legacy_get_weight_dtype(config, module_name):
+      if getattr(config, "float32_gate_logits", False) and module_name in (
+          "norm",
+          "gate",
+          "shared_expert_gate",
+          "A_log",
+          "dt_bias",
+          "conv1d",
+          "logits_dense",
+      ):
+        return "float32"
+      return config.weight_dtype
+
+    mock_cfg = mock.MagicMock()
+    mock_cfg.logical_axis_rules = ()
+    mock_cfg.float32_gate_logits = True
+    mock_cfg.rollout_weight_dtype = None
+    direct_legacy = LegacyDirectConverter()
+    engine_legacy = mock.MagicMock()
+    engine_legacy.model = TunixMaxTextAdapter()
+    engine_legacy._weight_converter._direct = direct_legacy
+    mock_engine_mod = mock.MagicMock()
+    mock_engine_mod.MaxTextTrainingEngine.return_value = engine_legacy
+
+    with mock.patch.object(
+        maxtext_utils,
+        "maxtext_modules",
+        return_value=(mock.MagicMock(), mock_engine_mod, mock.MagicMock()),
+    ), mock.patch.object(
+        maxtext_utils,
+        "_maxtext_get_weight_dtype",
+        return_value=_legacy_get_weight_dtype,
+    ):
+      maxtext_utils.create_maxtext_engine(
+          mock_cfg,
+          mock.MagicMock(),
+          wrap_with_tunix_adapter=True,
+          log_shapes=False,
+      )
+
+    fp32_paths = (
+        ("decoder", "layers", "mlp", "gate", "kernel"),
+        ("decoder", "layers", "mlp", "gate", "bias"),
+        ("decoder", "layers", "input_layernorm", "scale"),
+        ("decoder", "layers", "post_attention_layernorm", "scale"),
+        ("decoder", "layers", "linear_attention", "norm", "scale"),
+        ("decoder", "layers", "linear_attention", "A_log"),
+        ("decoder", "layers", "linear_attention", "conv1d", "kernel"),
+        ("decoder", "layers", "linear_attention", "dt_bias"),
+        ("decoder", "layers", "mlp", "shared_expert_gate", "kernel"),
+        ("decoder", "logits_dense", "kernel"),
+    )
+    for path in fp32_paths:
+      with self.subTest(fp32_path=path):
+        out = direct_legacy._execute_group_target_free(_make_group(*path), {})
+        self.assertEqual(out[0][1].dtype, jnp.float32)
+
+    bf16_paths = (
+        ("token_embedder", "embedding"),
+        ("decoder", "decoder_norm", "scale"),
+        ("decoder", "layers", "self_attention", "query_norm", "scale"),
+        ("decoder", "layers", "mlp", "wi_0"),
+    )
+    for path in bf16_paths:
+      with self.subTest(bf16_path=path):
+        out = direct_legacy._execute_group_target_free(_make_group(*path), {})
+        self.assertEqual(out[0][1].dtype, jnp.bfloat16)
+
+    # Live `jax.Array` floating leaves exercise the `.astype` branch, while
+    # non-floating `int32` leaves and `quantize_to_fp8=True` groups stay intact.
+    wi_key = ("decoder", "layers", "mlp", "wi_0")
+    gate_key = ("decoder", "layers", "mlp", "gate", "kernel")
+    step_key = ("decoder", "layers", "router_gate", "step_count")
+    fp8_key = ("decoder", "layers", "mlp", "wo")
+    live_wi_out = direct_legacy._execute_group_target_free(
+        _make_group(*wi_key),
+        {wi_key: jnp.ones((2, 2), dtype=jnp.float32)},
+    )
+    self.assertIsInstance(live_wi_out[0][1], jax.Array)
+    self.assertEqual(live_wi_out[0][1].dtype, jnp.bfloat16)
+
+    live_gate_out = direct_legacy._execute_group_target_free(
+        _make_group(*gate_key),
+        {gate_key: jnp.ones((2, 2), dtype=jnp.float32)},
+    )
+    self.assertEqual(live_gate_out[0][1].dtype, jnp.float32)
+
+    for int_leaf in (
+        jax.ShapeDtypeStruct((1,), jnp.int32),
+        jnp.ones((1,), dtype=jnp.int32),
+    ):
+      int_out = direct_legacy._execute_group_target_free(
+          _make_group(*step_key), {step_key: int_leaf}
+      )
+      self.assertEqual(int_out[0][1].dtype, jnp.int32)
+
+    fp8_leaf = jax.ShapeDtypeStruct((2, 2), jnp.float8_e4m3fn)
+    fp8_out = direct_legacy._execute_group_target_free(
+        _make_group(*fp8_key, quantize_to_fp8=True), {fp8_key: fp8_leaf}
+    )
+    self.assertEqual(fp8_out[0][1].dtype, jnp.float8_e4m3fn)
+
+    # Pinned MaxText with `float32_gate_logits=False`: `fp32_modules` is empty,
+    # yet the shim must still install to override pinned MaxText's unconditional
+    # `"gate"`/`"router"` raw-FP32 retention so gate weights come out BF16.
+    mock_cfg_no_fp32_gates = mock.MagicMock()
+    mock_cfg_no_fp32_gates.logical_axis_rules = ()
+    mock_cfg_no_fp32_gates.float32_gate_logits = False
+    mock_cfg_no_fp32_gates.rollout_weight_dtype = None
+    direct_legacy_bf16 = LegacyDirectConverter()
+    engine_legacy_bf16 = mock.MagicMock()
+    engine_legacy_bf16.model = TunixMaxTextAdapter()
+    engine_legacy_bf16._weight_converter._direct = direct_legacy_bf16
+    mock_engine_mod.MaxTextTrainingEngine.return_value = engine_legacy_bf16
+    with mock.patch.object(
+        maxtext_utils,
+        "maxtext_modules",
+        return_value=(mock.MagicMock(), mock_engine_mod, mock.MagicMock()),
+    ), mock.patch.object(
+        maxtext_utils,
+        "_maxtext_get_weight_dtype",
+        return_value=_legacy_get_weight_dtype,
+    ):
+      maxtext_utils.create_maxtext_engine(
+          mock_cfg_no_fp32_gates,
+          mock.MagicMock(),
+          wrap_with_tunix_adapter=True,
+          log_shapes=False,
+      )
+    self.assertIn("_execute_group_target_free", direct_legacy_bf16.__dict__)
+    for gate_path in (
+        ("decoder", "layers", "mlp", "routed_experts", "gate", "kernel"),
+        ("decoder", "layers", "mlp", "shared_expert_gate", "kernel"),
+    ):
+      gate_out = direct_legacy_bf16._execute_group_target_free(
+          _make_group(*gate_path), {}
+      )
+      self.assertEqual(gate_out[0][1].dtype, jnp.bfloat16)
+
+  def test_create_maxtext_engine_target_free_noop_on_upstream_main(self):
+    class TunixMaxTextAdapter:
+      pass
+
+    class MainDirectConverter:
+      """Simulates upstream MaxText `main` with `_resolve_target_dtype`."""
+
+      def __init__(self):
+        self.target_dtype = jnp.dtype("bfloat16")
+        self.seen_target_dtypes = []
+
+      def _resolve_target_dtype(self):
+        return jnp.dtype(self.target_dtype)
+
+      def _execute_group_target_free(self, group, src_flat):
+        del src_flat
+        resolved = self._resolve_target_dtype()
+        self.seen_target_dtypes.append(resolved)
+        return [(group.source_keys[0], jax.ShapeDtypeStruct((4, 4), resolved))]
+
+    def _make_group(*path):
+      return mock.MagicMock(source_keys=[path], quantize_to_fp8=False)
+
+    mock_cfg_main = mock.MagicMock()
+    mock_cfg_main.logical_axis_rules = ()
+    mock_cfg_main.float32_gate_logits = True
+    mock_cfg_main.routed_bias = True
+    mock_cfg_main.rollout_weight_dtype = jnp.dtype("bfloat16")
+    direct_main = MainDirectConverter()
+    engine_main = mock.MagicMock()
+    engine_main.model = TunixMaxTextAdapter()
+    engine_main._weight_converter._direct = direct_main
+    mock_engine_mod = mock.MagicMock()
+    mock_engine_mod.MaxTextTrainingEngine.return_value = engine_main
+
+    with mock.patch.object(
+        maxtext_utils,
+        "maxtext_modules",
+        return_value=(mock.MagicMock(), mock_engine_mod, mock.MagicMock()),
+    ):
+      maxtext_utils.create_maxtext_engine(
+          mock_cfg_main,
+          mock.MagicMock(),
+          wrap_with_tunix_adapter=True,
+          log_shapes=False,
+      )
+
+    # Strict no-op on upstream `main`: method is not wrapped on the instance,
+    # and all modules (including `gate.bias` when `routed_bias=True`) stay BF16.
+    self.assertNotIn("_execute_group_target_free", direct_main.__dict__)
+    for path in (
+        ("decoder", "layers", "mlp", "gate", "kernel"),
+        ("decoder", "layers", "post_attention_layernorm", "scale"),
+        ("decoder", "layers", "mlp", "gate", "bias"),
+    ):
+      out = direct_main._execute_group_target_free(_make_group(*path), {})
+      self.assertEqual(out[0][1].dtype, jnp.bfloat16)
+    self.assertEqual(
+        direct_main.seen_target_dtypes,
+        [jnp.dtype("bfloat16")] * 3,
+    )
+
+    # Warn if `_direct` exists without a callable `_execute_group_target_free`.
+    engine_missing_hook = mock.MagicMock()
+    engine_missing_hook.model = TunixMaxTextAdapter()
+    engine_missing_hook._weight_converter._direct = object()
+    mock_engine_mod.MaxTextTrainingEngine.return_value = engine_missing_hook
+    with mock.patch.object(
+        maxtext_utils,
+        "maxtext_modules",
+        return_value=(mock.MagicMock(), mock_engine_mod, mock.MagicMock()),
+    ), self.assertLogs(level="WARNING") as warn_logs:
+      maxtext_utils.create_maxtext_engine(
+          mock_cfg_main,
+          mock.MagicMock(),
+          wrap_with_tunix_adapter=True,
+          log_shapes=False,
+      )
+    self.assertIn(
+        "no callable '_execute_group_target_free'", "\n".join(warn_logs.output)
+    )
 
 
 if __name__ == "__main__":

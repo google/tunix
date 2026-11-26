@@ -799,6 +799,112 @@ class UtilsTest(absltest.TestCase):
         jax.random.key_impl(source_tree['key']),
     )
 
+  def test_get_shardings_on_mesh_replicates_missing_axes(self):
+    devices = np.array(jax.devices()[:4])
+    actor_mesh = sharding.Mesh(devices.reshape(2, 2), ('fsdp', 'tp'))
+    rollout_mesh = sharding.Mesh(devices.reshape(2, 2), ('dp', 'tp'))
+
+    def _param(spec, actor_spec):
+      value = jax.device_put(
+          jnp.ones((4, 4)),
+          sharding.NamedSharding(
+              actor_mesh, sharding.PartitionSpec(*actor_spec)
+          ),
+      )
+      return nnx.Param(value, out_sharding=spec)
+
+    class _Model(nnx.Module):
+
+      def __init__(self):
+        self.a_replicated = _param((None, None), (None, None))
+        self.b_dp_fsdp = _param((('dp', 'fsdp'), None), ('fsdp', None))
+        self.c_fsdp_tp = _param(('fsdp', 'tp'), ('fsdp', 'tp'))
+
+    memory_kind = jax.devices()[0].default_memory().kind
+    shardings = reshard.get_shardings_on_mesh(
+        nnx.state(_Model()), rollout_mesh, memory_kind
+    )
+
+    def _on_rollout(*spec):
+      return sharding.NamedSharding(
+          rollout_mesh, sharding.PartitionSpec(*spec), memory_kind=memory_kind
+      )
+
+    self.assertEqual(
+        jax.tree.leaves(shardings),
+        [
+            _on_rollout(None, None),
+            _on_rollout('dp', None),
+            _on_rollout(None, 'tp'),
+        ],
+    )
+
+  def test_delete_unaliased_keeps_shared_buffers(self):
+    deleted = jnp.ones((4,)) + 1
+    kept = jnp.ones((4,)) + 2
+    already_deleted = jnp.ones((4,)) + 3
+    already_deleted.delete()
+
+    reshard.delete_unaliased(
+        {'deleted': deleted, 'kept': kept, 'already': already_deleted},
+        keep={'kept': kept},
+    )
+
+    self.assertTrue(deleted.is_deleted())
+    self.assertFalse(kept.is_deleted())
+    self.assertTrue(already_deleted.is_deleted())
+
+  def test_delete_unaliased_handles_non_pjrt_backend_error(self):
+    arr = jnp.ones((4,)) + 1
+
+    class _FakeData:
+
+      def __init__(self, msg: str):
+        self._msg = msg
+
+      def unsafe_buffer_pointer(self):
+        raise jax.errors.JaxRuntimeError(self._msg)
+
+    class _FakeArray:
+
+      def __init__(self, msg: str):
+        self.addressable_shards = [mock.Mock(data=_FakeData(msg))]
+        self.deleted = False
+
+      def is_deleted(self) -> bool:
+        return self.deleted
+
+      def delete(self) -> None:
+        self.deleted = True
+
+    ifrt_arr = _FakeArray('UNIMPLEMENTED: PjRt-compatible backend only')
+    reshard.delete_unaliased({'x': arr}, keep={'k': ifrt_arr})
+    self.assertFalse(arr.is_deleted())
+
+    other_arr = _FakeArray('INTERNAL: unexpected backend failure')
+    with self.assertRaisesRegex(
+        jax.errors.JaxRuntimeError, 'unexpected backend failure'
+    ):
+      reshard.delete_unaliased({'x': arr}, keep={'k': other_arr})
+    self.assertFalse(arr.is_deleted())
+
+  def test_reshard_in_place_frees_source(self):
+    mesh = sharding.Mesh(
+        np.array(jax.devices()[:2]).reshape(2, 1), ('fsdp', 'tp')
+    )
+    src = jax.device_put(
+        jnp.arange(8.0).reshape(4, 2),
+        sharding.NamedSharding(mesh, sharding.PartitionSpec('fsdp')),
+    )
+    expected = np.asarray(src)
+    replicated = sharding.NamedSharding(mesh, sharding.PartitionSpec())
+
+    resharded = reshard.reshard_in_place({'w': src}, {'w': replicated})
+
+    self.assertTrue(src.is_deleted())
+    self.assertEqual(resharded['w'].sharding, replicated)
+    np.testing.assert_array_equal(np.asarray(resharded['w']), expected)
+
 
 class IsPositiveIntegerTest(absltest.TestCase):
   """Tests for `utils.is_positive_integer`."""
@@ -870,28 +976,6 @@ class ComputePackSizeTest(parameterized.TestCase):
       self.assertEqual(utils.compute_pack_size(mesh), 1)
     self.assertIn("no 'fsdp'/'dp' axis", logs.output[0])
     self.assertIn("'tp': 4", logs.output[0])
-
-
-class ValidatePackingBudgetTest(absltest.TestCase):
-
-  def test_accepts_budget_that_fits_a_maximal_sequence(self):
-    utils.validate_packing_budget(
-        max_token_budget=4096, max_prompt_length=1024, max_response_length=1024
-    )
-    # Exactly one maximal sequence per row is the boundary case, still valid.
-    utils.validate_packing_budget(
-        max_token_budget=2048, max_prompt_length=1024, max_response_length=1024
-    )
-
-  def test_raises_when_a_maximal_sequence_cannot_fit(self):
-    # Without this check the run reaches pack_sequences' per-sequence raise only
-    # once a maximal sequence actually shows up, potentially hours in.
-    with self.assertRaisesRegex(ValueError, 'max_seq_token_per_tpu >= 2048'):
-      utils.validate_packing_budget(
-          max_token_budget=1024,
-          max_prompt_length=1024,
-          max_response_length=1024,
-      )
 
 
 if __name__ == '__main__':

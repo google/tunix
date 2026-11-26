@@ -17,6 +17,7 @@ from absl.testing import parameterized
 from tunix.rl import algorithm_config
 from tunix.rl import function_registry
 
+
 class AlgorithmConfigTest(parameterized.TestCase):
 
   def test_defaults_are_valid(self):
@@ -26,6 +27,7 @@ class AlgorithmConfigTest(parameterized.TestCase):
       self.assertEqual(config.algo_variant, "grpo")
       self.assertEqual(config.advantage_estimator, "grpo")
       self.assertEqual(config.policy_loss_fn, "grpo")
+      self.assertEqual(config.reward_mode, "reward_fn")
     except ValueError as e:
       self.fail(f"Default AlgorithmConfig values raised ValueError: {e}")
 
@@ -98,6 +100,40 @@ class AlgorithmConfigTest(parameterized.TestCase):
         "policy_loss_fn must be one of .* Received: .*",
     ):
       algorithm_config.AlgorithmConfig(policy_loss_fn=value)
+
+  @parameterized.named_parameters(
+      dict(testcase_name="reward_fn", value="reward_fn"),
+      dict(testcase_name="env", value="env"),
+  )
+  def test_valid_reward_mode(self, value: str):
+    config = algorithm_config.AlgorithmConfig(reward_mode=value)
+    self.assertEqual(config.reward_mode, value)
+
+  @parameterized.named_parameters(
+      dict(testcase_name="unknown", value="invalid_mode"),
+      # Legacy keys removed when `reward_manager` was renamed to `reward_mode`.
+      dict(testcase_name="legacy_sequence_level", value="sequence-level"),
+      dict(
+          testcase_name="legacy_agentic_sequence_level",
+          value="agentic-sequence-level",
+      ),
+  )
+  def test_invalid_reward_mode(self, value: str):
+    with self.assertRaisesRegex(
+        ValueError,
+        f"reward_mode must be one of .* Received: {value!r}",
+    ):
+      algorithm_config.AlgorithmConfig(reward_mode=value)
+
+  def test_reward_mode_accepts_custom_registered_manager(self):
+    """Verifies `reward_mode` falls back to `function_registry` lookups."""
+    function_registry.register_reward_manager("chicken_reward_custom_789")(
+        lambda *args, **kwargs: None
+    )
+    config = algorithm_config.AlgorithmConfig(
+        reward_mode="chicken_reward_custom_789"
+    )
+    self.assertEqual(config.reward_mode, "chicken_reward_custom_789")
 
   def test_kw_only_enforcement(self):
     """Ensures that positional arguments are not allowed."""
@@ -236,6 +272,31 @@ class AlgorithmConfigTest(parameterized.TestCase):
     )
     self.assertEqual(cfg_capped_seq_mask_tis.sampler_is_threshold, 5.0)
 
+  def test_grpo_config_score_centering_validation(self):
+    config = algorithm_config.GRPOConfig(
+        score_centering=True, sampler_is="token", score_centering_top_k=32
+    )
+    self.assertTrue(config.score_centering)
+    with self.assertRaisesRegex(ValueError, "score_centering_top_k"):
+      algorithm_config.GRPOConfig(score_centering_top_k=0)
+    with self.assertRaisesRegex(ValueError, "score_centering_eps"):
+      algorithm_config.GRPOConfig(score_centering_eps=0.0)
+    with self.assertRaisesRegex(ValueError, "'grpo' policy loss"):
+      algorithm_config.GRPOConfig(score_centering=True, policy_loss_fn="ppo")
+    with self.assertRaisesRegex(ValueError, "num_iterations == 1"):
+      algorithm_config.GRPOConfig(score_centering=True, num_iterations=2)
+    with self.assertRaisesRegex(ValueError, "does not support sampler_rs"):
+      algorithm_config.GRPOConfig(
+          score_centering=True,
+          sampler_rs="geometric",
+          sampler_rs_min=0.999,
+          sampler_rs_max=1.002,
+      )
+    with self.assertRaisesRegex(ValueError, "no-op with unclipped token IS"):
+      algorithm_config.GRPOConfig(
+          score_centering=True, sampler_is="token", sampler_is_threshold=None
+      )
+
   def test_grpo_config_custom_policy_loss_and_advantage(self):
     """Verifies GRPOConfig supports dynamically registered custom functions."""
     function_registry.register_policy_loss_fn("chicken_loss_custom_123")(
@@ -273,6 +334,85 @@ class AlgorithmConfigTest(parameterized.TestCase):
           ValueError, "routed_experts_num_experts must be a positive int"
       ):
         algorithm_config.GRPOConfig(routed_experts_num_experts=bad_num)
+
+  def test_requires_reference_kl(self):
+    self.assertFalse(
+        algorithm_config.AlgorithmConfig(
+            beta=0.0, force_compute_kl=False
+        ).requires_reference_kl
+    )
+    self.assertTrue(
+        algorithm_config.AlgorithmConfig(
+            beta=0.04, force_compute_kl=False
+        ).requires_reference_kl
+    )
+    self.assertTrue(
+        algorithm_config.AlgorithmConfig(
+            beta=0.0, force_compute_kl=True
+        ).requires_reference_kl
+    )
+
+  def test_ppo_config_defaults_and_validation(self):
+    cfg = algorithm_config.PPOConfig()
+    self.assertEqual(cfg.algo_variant, "ppo")
+    self.assertEqual(cfg.advantage_estimator, "gae")
+    self.assertEqual(cfg.policy_loss_fn, "ppo")
+    self.assertEqual(cfg.value_loss_fn, "ppo")
+    self.assertEqual(cfg.epsilon_low, 0.2)
+    self.assertEqual(cfg.epsilon_high, 0.2)
+
+    cfg_eps = algorithm_config.PPOConfig(epsilon=0.1)
+    self.assertEqual(cfg_eps.epsilon_low, 0.1)
+    self.assertEqual(cfg_eps.epsilon_high, 0.1)
+
+    # Explicit 0.0 bounds are honored instead of falling back to `epsilon`.
+    cfg_zero = algorithm_config.PPOConfig(
+        epsilon=0.2, epsilon_low=0.0, epsilon_high=0.0
+    )
+    self.assertEqual(cfg_zero.epsilon_low, 0.0)
+    self.assertEqual(cfg_zero.epsilon_high, 0.0)
+
+    # Base-class validation now runs for PPOConfig too.
+    with self.assertRaisesRegex(ValueError, "reward_mode must be one of"):
+      algorithm_config.PPOConfig(reward_mode="bogus")
+    with self.assertRaisesRegex(ValueError, "num_generations must be positive"):
+      algorithm_config.PPOConfig(num_generations=0)
+
+    with self.assertRaisesRegex(ValueError, "Invalid KL method"):
+      algorithm_config.PPOConfig(kl_method="bad_kl")
+    with self.assertRaisesRegex(
+        ValueError, "`epsilon_c` must be greater than 1"
+    ):
+      algorithm_config.PPOConfig(epsilon_c=1.0)
+    with self.assertRaisesRegex(ValueError, "value_loss_fn must be one of"):
+      algorithm_config.PPOConfig(value_loss_fn="bad_value_loss")
+
+  def test_drop_zero_variance_groups_validation(self):
+    self.assertFalse(algorithm_config.GRPOConfig().drop_zero_variance_groups)
+    cfg = algorithm_config.GRPOConfig(
+        drop_zero_variance_groups=True, max_consecutive_filtered_groups=32
+    )
+    self.assertTrue(cfg.drop_zero_variance_groups)
+    self.assertEqual(cfg.max_consecutive_filtered_groups, 32)
+
+    with self.assertRaisesRegex(ValueError, "not 'gae'"):
+      algorithm_config.GRPOConfig(
+          advantage_estimator="gae", drop_zero_variance_groups=True
+      )
+    with self.assertRaisesRegex(ValueError, "num_generations >= 2"):
+      algorithm_config.AlgorithmConfig(
+          num_generations=1, drop_zero_variance_groups=True
+      )
+    for bad_flag in ("false", 1, None):
+      with self.assertRaisesRegex(
+          TypeError, "drop_zero_variance_groups must be a bool"
+      ):
+        algorithm_config.GRPOConfig(
+            drop_zero_variance_groups=bad_flag  # pyrefly: ignore[bad-argument-type]
+        )
+    for bad_limit in (0, True):
+      with self.assertRaisesRegex(ValueError, "positive int or None"):
+        algorithm_config.GRPOConfig(max_consecutive_filtered_groups=bad_limit)
 
 
 if __name__ == "__main__":

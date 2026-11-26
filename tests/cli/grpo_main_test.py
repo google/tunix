@@ -235,8 +235,6 @@ agentic_grpo_config:
   max_concurrency: 1
   off_policy_steps: 0
   max_turns: 1
-sglang_jax_config:
-  mem_fraction_static: 0.8
 vllm_config:
   hbm_utilization: 0.4
 """
@@ -287,8 +285,6 @@ agentic_grpo_config:
   max_concurrency: 1
   off_policy_steps: 0
   max_turns: 1
-sglang_jax_config:
-  mem_fraction_static: 0.8
 vllm_config:
   hbm_utilization: 0.4
 """
@@ -330,8 +326,6 @@ agentic_grpo_config:
   max_concurrency: 1
   off_policy_steps: 0
   max_turns: 1
-sglang_jax_config:
-  mem_fraction_static: 0.8
 vllm_config:
   hbm_utilization: 0.4
 """
@@ -379,8 +373,6 @@ agentic_grpo_config:
   max_concurrency: 1
   off_policy_steps: 0
   max_turns: 1
-sglang_jax_config:
-  mem_fraction_static: 0.8
 vllm_config:
   hbm_utilization: 0.4
 """
@@ -443,8 +435,6 @@ agentic_grpo_config:
   max_concurrency: 1
   off_policy_steps: 0
   max_turns: 1
-sglang_jax_config:
-  mem_fraction_static: 0.8
 vllm_config:
   hbm_utilization: 0.4
 """
@@ -538,8 +528,6 @@ agentic_grpo_config:
   max_concurrency: 1
   off_policy_steps: 0
   max_turns: {max_turns}
-sglang_jax_config:
-  mem_fraction_static: 0.8
 vllm_config:
   hbm_utilization: 0.4
 """
@@ -627,8 +615,6 @@ agentic_grpo_config:
   max_concurrency: 1
   off_policy_steps: 0
   {agentic_overrides}
-sglang_jax_config:
-  mem_fraction_static: 0.8
 vllm_config:
   hbm_utilization: 0.4
 """
@@ -689,8 +675,6 @@ agentic_grpo_config:
   max_concurrency: 1
   off_policy_steps: 0
   max_turns: 1
-sglang_jax_config:
-  mem_fraction_static: 0.8
 vllm_config:
   hbm_utilization: 0.4
 """
@@ -796,8 +780,6 @@ agentic_grpo_config:
   max_concurrency: 1
   off_policy_steps: 0
   max_turns: 1
-sglang_jax_config:
-  mem_fraction_static: 0.8
 vllm_config:
   hbm_utilization: 0.4
 """

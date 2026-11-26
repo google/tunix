@@ -19,8 +19,9 @@
 * `FifoGroupQueue` and `BatchOrderedGroupQueue` hold pre-formed group items
   (such as `ScoredGroup`) for `StandardRLProgram.scored_q` without redundant
   per-item bucketing:
-  - `FifoGroupQueue.get()` yields groups in completion/arrival order (`None` at
-    EOF).
+  - `FifoGroupQueue.get()` yields groups in completion/arrival order (or
+    smallest-priority-key-first order with FIFO tie-breaking when `priority_fn`
+    is provided; `None` at EOF).
   - `BatchOrderedGroupQueue.get()` yields up to `full_batch_size` groups of the
     batch at `next_batch_idx` in dataset prompt-batch order (`None` at batch
     boundary or EOF).
@@ -31,8 +32,10 @@ from __future__ import annotations
 import asyncio
 import collections
 from collections.abc import Callable, Hashable, Sequence
-import enum
+import heapq
+import itertools
 import logging
+import time
 from typing import Any, Deque, Dict, Generic, Optional, Tuple, TypeVar
 
 from tunix.dist_rl.common import datatypes
@@ -40,35 +43,73 @@ from tunix.rl.agentic.queue_manager import group_queue_manager
 
 _T = TypeVar("_T")
 TrajectoryItem = datatypes.TrajectoryItem
+GroupOrder = datatypes.GroupOrder
 GroupFn = group_queue_manager.GroupFn
 FilterFn = group_queue_manager.FilterFn
 
 
-class GroupOrder(enum.Enum):
-  """Order in which the scored group queue yields ready groups to the trainer.
 
-  Attributes:
-    TRAJECTORY_COMPLETION: Yields any completed group in completion/arrival
-      order as soon as it finishes scoring via `FifoGroupQueue`, regardless of
-      which dataset prompt batch it originated from. Fast prompts can overtake
-      slower earlier prompts across batches, and stale raw groups
-      (`policy_version < current - max_staleness`) are dropped at `raw_q` via
-      `TrajectoryQueueManager.create`.
-    PROMPT_ARRIVAL: Partitions scored groups by dataset prompt batch (`batch_idx
-      = prompt_idx // full_batch_size`) via `BatchOrderedGroupQueue` and serves
-      only groups belonging to the current batch cursor (`next_batch_idx`),
-      withholding groups from later batches until the current batch commits.
-      Because `DispatchWindow` bounds in-flight batches to `next_batch +
-      max_staleness` and `pre_weight_sync` synchronizes in-flight rollouts at
-      each step boundary, every batch delivers all `full_batch_size` groups
-      within the staleness window without dropping groups or creating short
-      batches.
-  """
+def has_policy_version(item: TrajectoryItem) -> bool:
+  """Returns whether `item.traj` carries a non-empty `policy_versions` list."""
+  return isinstance(item.traj, dict) and bool(item.traj.get("policy_versions"))
 
-  # Completion order: any ready group, as soon as it exists.
-  TRAJECTORY_COMPLETION = "trajectory_completion"
-  # Prompt-arrival order: only groups of the batch the cursor points at.
-  PROMPT_ARRIVAL = "prompt_arrival"
+
+def item_policy_versions(item: TrajectoryItem) -> Sequence[int]:
+  """Returns the non-empty policy version sequence from `item.traj`."""
+  versions = (
+      item.traj.get("policy_versions") if isinstance(item.traj, dict) else None
+  )
+  if not versions:
+    raise ValueError(
+        f"Valid TrajectoryItem {item.traj_id} (prompt_id="
+        f"{item.prompt_id!r}, group_index={item.group_index}) is"
+        " missing policy_versions."
+    )
+  return [int(version) for version in versions]
+
+
+def item_policy_version(item: TrajectoryItem) -> int:
+  """Returns the latest policy version that generated tokens for `item`."""
+  return item_policy_versions(item)[-1]
+
+
+def item_version_span(item: TrajectoryItem) -> int:
+  """Returns the policy version span (`max - min`) across turns for `item`."""
+  versions = item_policy_versions(item)
+  return max(versions) - min(versions)
+
+
+def _is_group_within_version_window(
+    valid_items: Sequence[TrajectoryItem],
+    *,
+    max_staleness: int,
+    policy_version_fn: Callable[[], int] | None,
+    span_limit: int | None,
+) -> bool:
+  """Returns whether `valid_items` satisfy monotonicity, span, and staleness bounds."""
+  item_versions = [item_policy_versions(item) for item in valid_items]
+  if any(
+      a > b
+      for versions in item_versions
+      for a, b in itertools.pairwise(versions)
+  ):
+    return False
+  all_versions = list(itertools.chain.from_iterable(item_versions))
+  if (
+      span_limit is not None
+      and max(all_versions) - min(all_versions) > span_limit
+  ):
+    return False
+  if policy_version_fn is None:
+    return True
+  current_version = policy_version_fn()
+  min_version = current_version - max_staleness
+  checked_versions = (
+      (max(all_versions),)
+      if span_limit is not None
+      else (versions[-1] for versions in item_versions)
+  )
+  return all(min_version <= v <= current_version for v in checked_versions)
 
 
 class TrajectoryQueueManager(
@@ -84,6 +125,7 @@ class TrajectoryQueueManager(
       filter_fn: Optional[FilterFn[TrajectoryItem]] = None,
       key_fn: Optional[Callable[[TrajectoryItem], Hashable]] = None,
       on_group_filtered: Callable[[list[TrajectoryItem]], None] | None = None,
+      clock: Callable[[], float] = time.monotonic,
   ):
     """Initializes TrajectoryQueueManager.
 
@@ -97,6 +139,7 @@ class TrajectoryQueueManager(
         fallback.
       on_group_filtered: Optional callback invoked when a candidate group is
         completely filtered out (e.g., due to staleness).
+      clock: Monotonic clock used to stamp when each group became complete.
     """
     if key_fn is None and group_fn is None:
       key_fn = default_key_fn
@@ -107,6 +150,7 @@ class TrajectoryQueueManager(
         filter_fn=filter_fn,
         key_fn=key_fn,
         on_group_filtered=on_group_filtered,
+        clock=clock,
     )
 
   @classmethod
@@ -117,23 +161,73 @@ class TrajectoryQueueManager(
       current_policy_version: Callable[[], int] | None = None,
       filter_fn: FilterFn[TrajectoryItem] | None = None,
       on_group_filtered: Callable[[list[TrajectoryItem]], None] | None = None,
+      max_version_span: int | None = None,
+      clock: Callable[[], float] = time.monotonic,
   ) -> "TrajectoryQueueManager":
-    """Creates a grouped trajectory queue with optional policy staleness filtering."""
-    assert max_staleness >= 0, "max_staleness must be non-negative."
+    """Creates a grouped trajectory queue with optional staleness and span filtering.
+
+    The window is checked once, when a group completes in `put`, and only
+    against the group's valid items: invalid items (error tombstones,
+    overlong-masked rollouts) contribute no gradient, so their version does
+    not matter and is never substituted with `0`. A group with no valid item
+    has nothing to judge and passes through; it trains with zero advantage. A
+    valid item without a `policy_version` is a producer bug and makes `put`
+    raise `ValueError`.
+
+    Each valid item's per-turn version sequence must be monotonically
+    non-decreasing (`v_0 <= v_1 <= ... <= v_k`); any trajectory whose version
+    regressed across turns (e.g. after a checkpoint rollback) is dropped. When
+    `max_version_span` is set (partial rollout), filtering enforces group-wide
+    version span (`max(all_versions) - min(all_versions) <= max_version_span`)
+    and group completion window (`max(all_versions) in
+    [current_policy_version() - max_staleness, current_policy_version()]`),
+    allowing early-finishing rollouts in `num_generations > 1` groups as long
+    as the group-wide span is bounded. When `max_version_span` is `None`,
+    filtering enforces per-item two-sided window (`item_policy_version(item) in
+    [current_policy_version() - max_staleness, current_policy_version()]`)
+    across valid items.
+
+    Args:
+      num_generations: Number of trajectories per ready group.
+      max_staleness: How many policy versions behind `current_policy_version()`
+        a group's rollouts may be when the group completes. `0` admits only
+        rollouts sampled from the current version.
+      current_policy_version: Returns the trainer's current policy version. When
+        given, the staleness window is enforced (including for `max_staleness ==
+        0`); when `None`, no staleness filtering happens.
+      filter_fn: Optional extra filter applied after the staleness check.
+      on_group_filtered: Called with each group the filters drop.
+      max_version_span: Optional maximum allowed policy-version span (`max -
+        min`) across valid items/turns in a group.
+      clock: Monotonic clock used to stamp when each group became complete.
+
+    Returns:
+      The configured `TrajectoryQueueManager`.
+
+    Raises:
+      ValueError: If `max_staleness` or `max_version_span` is negative.
+    """
+    if max_staleness < 0:
+      raise ValueError("max_staleness must be non-negative.")
+    if max_version_span is not None and max_version_span < 0:
+      raise ValueError(
+          f"max_version_span must be non-negative, got {max_version_span}."
+      )
     combined_filter: FilterFn[TrajectoryItem] | None = filter_fn
-    if max_staleness > 0 and current_policy_version is not None:
+    policy_version_fn = current_policy_version
+    span_limit = max_version_span
+    if policy_version_fn is not None or span_limit is not None:
 
-      def _item_policy_version(item: TrajectoryItem) -> int:
-        version = getattr(item, "policy_version", None)
-        if version is None and isinstance(item.metadata, dict):
-          version = item.metadata.get("policy_version")
-        return int(version or 0)
-
-      def _staleness_filter(
+      def _version_filter(
           group: list[TrajectoryItem],
       ) -> tuple[list[TrajectoryItem], list[TrajectoryItem]]:
-        min_allowed = current_policy_version() - max_staleness
-        if any(_item_policy_version(item) < min_allowed for item in group):
+        valid_items = [item for item in group if item.is_valid]
+        if valid_items and not _is_group_within_version_window(
+            valid_items,
+            max_staleness=max_staleness,
+            policy_version_fn=policy_version_fn,
+            span_limit=span_limit,
+        ):
           return [], list(group)
         if filter_fn is not None:
           res = filter_fn(group)
@@ -143,12 +237,13 @@ class TrajectoryQueueManager(
           return res, [x for x in group if id(x) not in valid_ids]
         return list(group), []
 
-      combined_filter = _staleness_filter
+      combined_filter = _version_filter
 
     return cls(
         num_generations=num_generations,
         filter_fn=combined_filter,
         on_group_filtered=on_group_filtered,
+        clock=clock,
     )
 
   def __aiter__(self) -> "TrajectoryQueueManager":
@@ -170,8 +265,6 @@ class TrajectoryQueueManager(
       num_groups: int | None = None,
   ) -> list[TrajectoryItem]:
     """Retrieves items by either batch_size or num_groups."""
-    # TODO: why do we need both batch_size and num_groups?
-    # TODO: should this be in parent class?
     if num_groups is not None:
       out: list[TrajectoryItem] = []
       for _ in range(num_groups):
@@ -236,15 +329,32 @@ def default_batch_idx_fn(item: TrajectoryItem) -> int:
 
 
 class FifoGroupQueue(Generic[_T]):
-  """Async closable/abortable FIFO queue of pre-formed groups (`_T`).
+  """Async closable/abortable completion-order queue of pre-formed groups (`_T`).
 
   Used for `StandardRLProgram.scored_q` under
   `GroupOrder.TRAJECTORY_COMPLETION`, where each `put` enqueues an already
-  completed `ScoredGroup` without redundant per-item bucketing.
+  completed `ScoredGroup` without redundant per-item bucketing. When
+  `priority_fn` is provided, buffered groups are yielded in smallest-key-first
+  order with FIFO tie-breaking; otherwise they are yielded in pure FIFO order.
   """
 
-  def __init__(self) -> None:
-    self._ready: Deque[_T] = collections.deque()
+  def __init__(
+      self,
+      priority_fn: Callable[[_T], int] | None = None,
+      *,
+      on_group_dropped: Callable[[_T], None] | None = None,
+  ) -> None:
+    """Initializes FifoGroupQueue.
+
+    Args:
+      priority_fn: Optional smallest-key-first priority function.
+      on_group_dropped: Optional callback invoked for groups discarded on
+        `put()` while clearing/aborting or during `clear()`.
+    """
+    self._ready: list[tuple[int, int, _T]] = []
+    self._seq = itertools.count()
+    self._priority_fn = priority_fn
+    self._on_group_dropped = on_group_dropped
     self._clearing = False
     self._closed = False
     self._exc: Optional[BaseException] = None
@@ -252,9 +362,14 @@ class FifoGroupQueue(Generic[_T]):
     self._have_ready = asyncio.Event()
 
   @classmethod
-  def create(cls) -> "FifoGroupQueue[_T]":
-    """Creates a FIFO group queue."""
-    return cls()
+  def create(
+      cls,
+      priority_fn: Callable[[_T], int] | None = None,
+      *,
+      on_group_dropped: Callable[[_T], None] | None = None,
+  ) -> "FifoGroupQueue[_T]":
+    """Creates a FIFO group queue with optional smallest-key-first priority ordering and FIFO tie-breaking."""
+    return cls(priority_fn=priority_fn, on_group_dropped=on_group_dropped)
 
   async def put(self, group: _T) -> None:
     """Enqueues a completed group.
@@ -269,6 +384,8 @@ class FifoGroupQueue(Generic[_T]):
     if self._closed:
       raise RuntimeError("Cannot put into a closed FifoGroupQueue.")
     if self._clearing:
+      if self._on_group_dropped is not None:
+        self._on_group_dropped(group)
       return
     if self._exc is not None:
       raise self._exc
@@ -277,14 +394,23 @@ class FifoGroupQueue(Generic[_T]):
       if self._closed:
         raise RuntimeError("Cannot put into a closed FifoGroupQueue.")
       if self._clearing:
+        if self._on_group_dropped is not None:
+          self._on_group_dropped(group)
         return
       if self._exc is not None:
         raise self._exc
-      self._ready.append(group)
+      priority = (
+          self._priority_fn(group) if self._priority_fn is not None else 0
+      )
+      heapq.heappush(self._ready, (priority, next(self._seq), group))
       self._have_ready.set()
 
   async def get(self) -> Optional[_T]:
-    """Dequeues the next ready group in FIFO order, or `None` at EOF/clear.
+    """Dequeues the next ready group in FIFO (or smallest-key-first priority) order, or `None` at EOF/clear.
+
+    When `priority_fn` is set and multiple groups are buffered, selects the
+    group with the smallest `priority_fn(group)` value (breaking ties in FIFO
+    arrival order via a monotonic sequence counter).
 
     Returns:
       The next group, or `None` once closed and drained (or cleared).
@@ -299,7 +425,8 @@ class FifoGroupQueue(Generic[_T]):
         return None
       async with self._lock:
         if self._ready:
-          return self._ready.popleft()
+          _, _, group = heapq.heappop(self._ready)
+          return group
         if self._closed:
           return None
       await self._have_ready.wait()
@@ -320,11 +447,16 @@ class FifoGroupQueue(Generic[_T]):
   async def clear(self) -> None:
     """Clears all queued groups and resets close/abort flags."""
     async with self._lock:
+      dropped = [group for _, _, group in self._ready]
       self._ready.clear()
+      self._seq = itertools.count()
       self._exc = None
       self._clearing = False
       self._closed = False
       self._have_ready.clear()
+    if self._on_group_dropped is not None:
+      for group in dropped:
+        self._on_group_dropped(group)
 
   def commit(self, step: int = 0, groups: Sequence[Any] | None = None) -> None:
     """No-op commit hook matching `BatchOrderedGroupQueue.commit`."""
@@ -358,12 +490,15 @@ class BatchOrderedGroupQueue(Generic[_T]):
       *,
       full_batch_size: int,
       batch_idx_fn: Callable[[_T], int],
+      on_group_dropped: Callable[[_T], None] | None = None,
   ) -> None:
     """Initializes BatchOrderedGroupQueue.
 
     Args:
       full_batch_size: Groups per prompt batch.
       batch_idx_fn: Function to read a group's prompt-batch index.
+      on_group_dropped: Optional callback invoked for groups discarded on late
+        arrival (`batch_idx < next_batch_idx`), `skip()`, or `clear()`.
 
     Raises:
       ValueError: If `full_batch_size` is not positive.
@@ -374,6 +509,7 @@ class BatchOrderedGroupQueue(Generic[_T]):
       )
     self.full_batch_size = full_batch_size
     self._batch_idx_fn = batch_idx_fn
+    self._on_group_dropped = on_group_dropped
     self._pending: Dict[int, Deque[_T]] = collections.defaultdict(
         collections.deque
     )
@@ -392,11 +528,13 @@ class BatchOrderedGroupQueue(Generic[_T]):
       full_batch_size: int = 1,
       *,
       batch_idx_fn: Callable[[_T], int],
+      on_group_dropped: Callable[[_T], None] | None = None,
   ) -> "BatchOrderedGroupQueue[_T]":
     """Creates a prompt-batch-ordered group queue."""
     return cls(
         full_batch_size=full_batch_size,
         batch_idx_fn=batch_idx_fn,
+        on_group_dropped=on_group_dropped,
     )
 
   async def put(self, group: _T) -> None:
@@ -413,6 +551,8 @@ class BatchOrderedGroupQueue(Generic[_T]):
     if self._closed:
       raise RuntimeError("Cannot put into a closed BatchOrderedGroupQueue.")
     if self._clearing:
+      if self._on_group_dropped is not None:
+        self._on_group_dropped(group)
       return
     if self._exc is not None:
       raise self._exc
@@ -423,6 +563,8 @@ class BatchOrderedGroupQueue(Generic[_T]):
       if self._closed:
         raise RuntimeError("Cannot put into a closed BatchOrderedGroupQueue.")
       if self._clearing:
+        if self._on_group_dropped is not None:
+          self._on_group_dropped(group)
         return
       if self._exc is not None:
         raise self._exc
@@ -436,6 +578,8 @@ class BatchOrderedGroupQueue(Generic[_T]):
             self._next_batch_idx,
             self._dropped_late_groups,
         )
+        if self._on_group_dropped is not None:
+          self._on_group_dropped(group)
         return
 
       self._pending[batch_idx].append(group)
@@ -498,12 +642,18 @@ class BatchOrderedGroupQueue(Generic[_T]):
       begin: First batch to pass over.
       end: One past the last batch to pass over.
     """
+    dropped: list[_T] = []
     for batch_idx in range(begin, end):
-      self._pending.pop(batch_idx, None)
+      popped = self._pending.pop(batch_idx, None)
+      if popped:
+        dropped.extend(popped)
     if end > self._next_batch_idx:
       self._next_batch_idx = end
       self._served_in_batch = 0
     self._have_ready.set()
+    if self._on_group_dropped is not None:
+      for group in dropped:
+        self._on_group_dropped(group)
 
   def commit_batch(self, batch_idx: int) -> None:
     """Releases a batch's state after its optimizer step.
@@ -528,6 +678,9 @@ class BatchOrderedGroupQueue(Generic[_T]):
   async def clear(self) -> None:
     """Clears all staged batches and resets the batch cursor."""
     async with self._lock:
+      dropped: list[_T] = []
+      for pending in self._pending.values():
+        dropped.extend(pending)
       self._pending.clear()
       self._served_in_batch = 0
       self._next_batch_idx = 0
@@ -536,6 +689,9 @@ class BatchOrderedGroupQueue(Generic[_T]):
       self._clearing = False
       self._closed = False
       self._have_ready.clear()
+    if self._on_group_dropped is not None:
+      for group in dropped:
+        self._on_group_dropped(group)
 
   @property
   def pending_groups_count(self) -> int:

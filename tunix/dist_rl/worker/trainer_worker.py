@@ -14,10 +14,19 @@
 
 """TrainerWorker implementation for role-based isolation."""
 
-import contextlib
-import functools
-from typing import Any, Callable, ContextManager, cast
+from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
+import contextlib
+import dataclasses
+import enum
+import functools
+import threading
+import time
+from typing import Any, ContextManager, TYPE_CHECKING, cast
+
+from absl import logging
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -25,31 +34,83 @@ import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.train import abstract_trainer
 from tunix.dist_rl.worker import abstract_worker
+from tunix.dist_rl.worker import otel_metrics
 from tunix.rl import common as rl_common
 from tunix.rl import packing
+
+if TYPE_CHECKING:
+  from opentelemetry import metrics as otel_api_types  # pylint: disable=g-bad-import-order,g-import-not-at-top
 
 WorkerState = datatypes.WorkerState
 
 
+def _as_metrics_buffer(
+    raw: datatypes.MetricsBufferLike,
+    *,
+    microbatch_data_waits: tuple[float, ...] = (),
+) -> datatypes.MetricsBuffer:
+  """Wraps a host `MetricsBufferLike` into a wire `datatypes.MetricsBuffer`."""
+  if isinstance(raw, datatypes.MetricsBuffer):
+    return dataclasses.replace(raw, microbatch_data_waits=microbatch_data_waits)
+  mode = raw.mode.value if isinstance(raw.mode, enum.Enum) else raw.mode
+  return datatypes.MetricsBuffer(
+      id=raw.id,
+      weighted_metrics=cast(Any, dict(raw.weighted_metrics)),
+      scalar_metrics=cast(Any, dict(raw.scalar_metrics)),
+      aggregation_fns=dict(raw.aggregation_fns),
+      mode=str(mode),
+      microbatch_data_waits=microbatch_data_waits,
+  )
+
+
 def _compute_per_token_logps(
-    model: nnx.Module, *args: Any, **kwargs: Any
+    model: nnx.Module,
+    payload: datatypes.LogprobsScoringPayload,
+    *,
+    chunk_size: int,
 ) -> jax.Array:
-  """Computes per-token log-probabilities under live model weights.
+  """Computes per-token log-probabilities on the read-only model copy.
 
   Args:
     model: The NNX Module instance to score with.
-    *args: Positional arguments forwarded to
-      `rl_common.compute_per_token_logps`.
-    **kwargs: Keyword arguments forwarded to
-      `rl_common.compute_per_token_logps`.
+    payload: The `LogprobsScoringPayload` micro-batch containing prompt,
+      completion, static scoring parameters (`pad_id`, `eos_id`, `temperature`),
+      and optional packing/routing arrays.
+    chunk_size: Sequence chunk size for computing log-probabilities (0 computes
+      all at once).
 
   Returns:
     A JAX Array containing the computed per-token log-probabilities.
   """
   graphdef, state = nnx.split(model)
-  return rl_common.compute_per_token_logps(
-      graphdef, state, *args, stop_gradient=True, **kwargs
+  logps = rl_common.compute_per_token_logps(
+      graphdef,
+      state,
+      prompt_tokens=jnp.asarray(payload.prompt_ids),
+      completion_tokens=jnp.asarray(payload.completion_ids),
+      pad_id=payload.pad_id,
+      eos_id=payload.eos_id,
+      stop_gradient=True,
+      return_entropy=False,
+      segment_ids=(
+          None
+          if payload.segment_ids is None
+          else jnp.asarray(payload.segment_ids)
+      ),
+      segment_positions=(
+          None
+          if payload.segment_positions is None
+          else jnp.asarray(payload.segment_positions)
+      ),
+      temperature=payload.temperature,
+      chunk_size=chunk_size,
+      routed_experts=(
+          None
+          if payload.routed_experts is None
+          else jnp.asarray(payload.routed_experts)
+      ),
   )
+  return cast(jax.Array, logps)
 
 
 class TrainerWorker(abstract_worker.Worker):
@@ -68,6 +129,8 @@ class TrainerWorker(abstract_worker.Worker):
       logps_chunk_size: int = 0,
       logps_micro_batch_size: int | None = None,
       execution_context: Any = None,
+      otel_meter_provider: otel_api_types.MeterProvider | None = None,
+      idle_clock: Callable[[], float] | None = None,
   ):
     """Initializes the TrainerWorker.
 
@@ -78,8 +141,12 @@ class TrainerWorker(abstract_worker.Worker):
         a context manager (e.g., a JAX Mesh) to enter during trainer
         initialization and worker method execution.
       logps_chunk_size: Optionally chunk the vocab (final-logits) computation.
-      logps_micro_batch_size: Row chunk size for `per_token_logps`.
-        If `None`, the whole request is scored in one forward.
+      logps_micro_batch_size: Row chunk size for `per_token_logps`. If `None`,
+        the whole request is scored in one forward.
+      otel_meter_provider: Optional OpenTelemetry MeterProvider override for
+        testing; defaults to the global MeterProvider when None.
+      idle_clock: Optional monotonic clock override for device idle tracking in
+        tests.
     """
     self._execution_context = execution_context
     self._trainer_factory = trainer_factory
@@ -94,11 +161,22 @@ class TrainerWorker(abstract_worker.Worker):
     self._worker_id = worker_id
     self._state = WorkerState.PENDING
     self._last_error: str | None = None
+    # Set when `stop()` failed to close the trainer; later stops re-raise it.
+    self._stop_error: str | None = None
+    self._otel = otel_metrics.TrainerWorkerOtelMetrics(
+        worker_id=worker_id,
+        meter_provider=otel_meter_provider,
+        **(dict(idle_clock=idle_clock) if idle_clock is not None else {}),
+    )
+    # Keeps `release_weight_sync`, which runs on its own thread, apart from
+    # the trainer calls that own the same staging: prepare and close.
+    self._weight_sync_lock = threading.Lock()
 
   def _policy_version(self) -> int:
-    if self._trainer is None:
+    trainer = self._trainer
+    if trainer is None:
       return 0
-    return int(getattr(self._trainer, "policy_version", 0))
+    return int(getattr(trainer, "policy_version", 0))
 
   def _response(self, **metadata: Any) -> datatypes.Response:
     return datatypes.Response(
@@ -117,6 +195,7 @@ class TrainerWorker(abstract_worker.Worker):
       raise RuntimeError(f"TrainerWorker is not ready: {self.state.value}.")
     return self._trainer
 
+  @abstract_worker.offload_to_thread
   def initialize(self) -> datatypes.Response:
     """Initializes the worker and the underlying trainer."""
     if self.state == WorkerState.READY:
@@ -126,16 +205,20 @@ class TrainerWorker(abstract_worker.Worker):
       if self._trainer is None:
         with self.execution_context():
           trainer = self._trainer_factory()
+          trainer.with_fwd_only_fn(
+              functools.partial(
+                  _compute_per_token_logps, chunk_size=self._logps_chunk_size
+              )
+          )
           if self._pending_loss_fn is not None:
             trainer.with_loss_fn(*self._pending_loss_fn)
             self._pending_loss_fn = None
           if self._pending_gen_model_input_fn is not None:
-            trainer.with_gen_model_input_fn(
-                self._pending_gen_model_input_fn
-            )
+            trainer.with_gen_model_input_fn(self._pending_gen_model_input_fn)
             self._pending_gen_model_input_fn = None
           self._trainer = trainer
       self._last_error = None
+      self._otel.reset_idle()
       return self._response(initialized=True)
     except Exception as exc:
       self._last_error = str(exc)
@@ -145,12 +228,30 @@ class TrainerWorker(abstract_worker.Worker):
       if self.state == WorkerState.INITIALIZING:
         self.state = WorkerState.READY
 
+  @abstract_worker.offload_to_thread
   def compile(self, dummy_data: Any = None) -> datatypes.Response:
     """Triggers JIT compilation using the provided dummy_data."""
     trainer = self._ensure_ready()
     self.state = WorkerState.COMPILING
+    logging.info(
+        "[%s] Starting trainer compilation (trainer=%s, has_dummy_data=%s)...",
+        self._worker_id,
+        type(trainer).__name__,
+        dummy_data is not None,
+    )
+    t0 = time.perf_counter()
     try:
-      trainer.compile(dummy_data)
+      with self._otel.track_rpc():
+        dummy_data = abstract_trainer.resolve_dummy_routed_experts(
+            trainer, dummy_data
+        )
+        trainer.compile(dummy_data)
+      self._otel.reset_idle()
+      logging.info(
+          "[%s] Finished trainer compilation in %.2fs.",
+          self._worker_id,
+          time.perf_counter() - t0,
+      )
       return self._response(compiled=True)
     except Exception as exc:
       self._last_error = str(exc)
@@ -160,32 +261,72 @@ class TrainerWorker(abstract_worker.Worker):
       if self.state == WorkerState.COMPILING:
         self.state = WorkerState.READY
 
+  @abstract_worker.offload_to_thread
   def start(self) -> datatypes.Response:
     """Starts the worker's main loop."""
     self._ensure_ready()
     self._is_running = True
     return self._response(started=True)
 
-  def stop(self) -> datatypes.Response:
-    """Gracefully stops the worker."""
-    if self.state == WorkerState.STOPPED:
-      return self._response(stopped=True, already_stopped=True)
-    self._is_running = False
-    if self.state == WorkerState.READY:
-      self.state = WorkerState.DRAINING
-    if self._trainer is not None:
-      self._trainer.close()
-    self.state = WorkerState.STOPPED
-    return self._response(stopped=True)
+  @abstract_worker.offload_to_thread
+  def stop(self, *, abort: bool = False) -> datatypes.Response:
+    """Gracefully stops the worker, closing the trainer at most once.
+
+    If closing the trainer fails, the worker still ends up `STOPPED` so that
+    teardown never re-runs a partially failed close. The failure is kept instead
+    of dropped: it is recorded as the worker's last error, escalated to an abort
+    for the `set_on_stop` callback, and re-raised by every later `stop()` call,
+    so local node teardown still exits non-zero.
+
+    Args:
+      abort: Whether the stop is part of an abnormal cluster teardown; see
+        `Worker.stop`.
+
+    Returns:
+      A response with `stopped=True` and the requested `abort` flag, plus
+      `already_stopped=True` if the worker was already stopped.
+
+    Raises:
+      RuntimeError: If an earlier `stop()` failed to close the trainer.
+    """
+    try:
+      if self.state == WorkerState.STOPPED:
+        if self._stop_error is not None:
+          raise RuntimeError(
+              f"TrainerWorker {self._worker_id!r} failed to stop cleanly"
+              f" earlier: {self._stop_error}"
+          )
+        return self._response(
+            stopped=True, already_stopped=True, abort=bool(abort)
+        )
+      self._is_running = False
+      if self.state == WorkerState.READY:
+        self.state = WorkerState.DRAINING
+      try:
+        if self._trainer is not None:
+          with self._weight_sync_lock:
+            self._trainer.close()
+      except Exception as exc:
+        self._stop_error = self._last_error = str(exc)
+        abort = True
+        raise
+      finally:
+        self._otel.close(wait=not abort)
+        self.state = WorkerState.STOPPED
+      return self._response(stopped=True, abort=bool(abort))
+    finally:
+      self._notify_stopped(abort)
 
   def info(self) -> datatypes.WorkerInfo:
+    trainer = self._trainer
     return datatypes.WorkerInfo(
         worker_id=self._worker_id,
+        instance_id=self.instance_id,
         roles=frozenset({"trainer", "weight_sync"}),
         resources={
             "trainer": (
-                type(self._trainer).__name__
-                if self._trainer is not None
+                type(trainer).__name__
+                if trainer is not None
                 else "UninitializedTrainer"
             ),
             "policy_version": self._policy_version(),
@@ -199,6 +340,7 @@ class TrainerWorker(abstract_worker.Worker):
         last_error=self._last_error,
     )
 
+  @abstract_worker.offload_to_thread
   def with_loss_fn(
       self, loss_fn: Callable[..., Any], has_aux: bool = False
   ) -> datatypes.Response:
@@ -228,6 +370,7 @@ class TrainerWorker(abstract_worker.Worker):
       self._trainer.with_loss_fn(loss_fn, has_aux)
     return self._response(loss_fn_configured=True)
 
+  @abstract_worker.offload_to_thread
   def with_gen_model_input_fn(
       self, gen_model_input_fn: Callable[[Any], dict[str, Any]]
   ) -> datatypes.Response:
@@ -238,28 +381,32 @@ class TrainerWorker(abstract_worker.Worker):
       self._trainer.with_gen_model_input_fn(gen_model_input_fn)
     return self._response(gen_model_input_fn_configured=True)
 
+  @abstract_worker.offload_to_thread
   def set_target_state(self, target_state: Any) -> datatypes.Response:
     """Stores rollout target_state so trainer-side weight sync can convert."""
-    trainer = self._ensure_ready()
-    setter = getattr(trainer, "set_target_state", None)
-    if not callable(setter):
-      raise AttributeError(
-          f"{type(trainer).__name__} does not support set_target_state"
-      )
-    setter(target_state)
+    self._ensure_ready().set_target_state(target_state)
     return self._response(target_state_configured=True)
 
-  def fwd_bwd(
-      self,
-      request: datatypes.TrainRequest,
-      **kwargs: Any,
-  ) -> datatypes.Response:
+  @abstract_worker.offload_to_thread
+  def fwd_bwd(self, request: datatypes.TrainRequest) -> datatypes.Response:
     """Executes one forward/backward pass."""
-    trainer = self._ensure_ready()
+    token_counts = otel_metrics.extract_payload_tokens(request.payload)
     req_metadata = dict(request.metadata) if request.metadata else {}
-    kwargs.pop("skip_jit", None)
+    mb_ready_s = otel_metrics.extract_mb_ready_time_s(req_metadata)
+    trainer = self._ensure_ready()
+    self._otel.record_starvation(mb_ready_s)
+    t_enter = self._otel.idle_clock_now()
     try:
-      trainer.fwd_bwd(request.payload, **kwargs)
+      # TODO(b/579110728): `fwd_bwd` records host dispatch duration under JAX
+      # async dispatch; queued device time surfaces in the next synchronizing
+      # RPC (`update`, `prepare_weight_sync`, or `per_token_logps`).
+      with self._otel.track_rpc(
+          phase="fwd_bwd", token_counts=token_counts, arm=True
+      ):
+        token = trainer.fwd_bwd(request.payload)
+      self._otel.record_fwd_bwd(
+          t_enter, None if token is None else token.block_until_ready
+      )
       self._last_error = None
       resp = self._response(queued=True, **req_metadata)
       resp.request_id = request.request_id
@@ -269,28 +416,39 @@ class TrainerWorker(abstract_worker.Worker):
       self.state = WorkerState.ERROR
       raise
 
-  def update(self, **kwargs) -> int:
-    """Applies the accumulated (mean) gradients as one optimizer update."""
+  @abstract_worker.offload_to_thread
+  def update(self) -> tuple[int, datatypes.MetricsBuffer]:
+    """Applies the accumulated (mean) gradients and returns `(train_step, metrics)`."""
     trainer = self._ensure_ready()
     try:
-      train_step = trainer.update(**kwargs)
+      with self._otel.track_rpc(phase="optimizer_step"):
+        train_step = trainer.update()
+        raw_metrics = trainer.get_metrics()
+      data_waits = self._otel.flush_data_waits()
+      metrics = _as_metrics_buffer(
+          raw_metrics, microbatch_data_waits=data_waits
+      )
       self._last_error = None
-      return train_step
+      return train_step, metrics
     except Exception as exc:
       self._last_error = str(exc)
       self.state = WorkerState.ERROR
       raise
 
-  def eval_step(
-      self,
-      request: datatypes.TrainRequest,
-      **kwargs: Any,
-  ) -> datatypes.Response:
-    """Executes one evaluation step on the given payload."""
+  @abstract_worker.offload_to_thread
+  def eval_step(self, request: datatypes.TrainRequest) -> datatypes.Response:
+    """Executes one evaluation micro-batch step on the given payload.
+
+    `run_eval` is the canonical step-boundary evaluation RPC (draining
+    `eval_context` before marking the device busy until now); standalone
+    `eval_step`
+    marks host dispatch completion.
+    """
     trainer = self._ensure_ready()
     req_metadata = dict(request.metadata) if request.metadata else {}
     try:
-      trainer.eval_step(request.payload, **kwargs)
+      with self._otel.track_rpc(phase="eval_step"):
+        trainer.eval_step(request.payload)
       self._last_error = None
       resp = self._response(evaluated=True, **req_metadata)
       resp.request_id = request.request_id
@@ -300,7 +458,8 @@ class TrainerWorker(abstract_worker.Worker):
       self.state = WorkerState.ERROR
       raise
 
-  def run_eval(self, eval_ds: Any, **kwargs) -> datatypes.Response:
+  @abstract_worker.offload_to_thread
+  def run_eval(self, eval_ds: Any) -> datatypes.Response:
     """Runs an explicit evaluation phase over eval micro-batches."""
     trainer = self._ensure_ready()
     if eval_ds is None:
@@ -308,7 +467,8 @@ class TrainerWorker(abstract_worker.Worker):
     try:
       run_eval = getattr(trainer, "run_eval", None)
       if callable(run_eval):
-        run_eval(eval_ds, **kwargs)
+        with self._otel.track_rpc():
+          run_eval(eval_ds)
         self._last_error = None
         return self._response(evaluated=True)
 
@@ -321,7 +481,8 @@ class TrainerWorker(abstract_worker.Worker):
       eval_batches = 0
       with context:
         for payload in eval_ds:
-          trainer.eval_step(payload, **kwargs)
+          with self._otel.track_rpc(phase="eval_step"):
+            trainer.eval_step(payload)
           eval_batches += 1
       self._last_error = None
       return self._response(evaluated=True, eval_batches=eval_batches)
@@ -330,6 +491,7 @@ class TrainerWorker(abstract_worker.Worker):
       self.state = WorkerState.ERROR
       raise
 
+  @abstract_worker.offload_to_thread
   def per_token_logps(
       self, items: datatypes.LogprobsRequest, **kwargs: Any
   ) -> datatypes.LogprobsResponse:
@@ -384,25 +546,23 @@ class TrainerWorker(abstract_worker.Worker):
             if routed_enc in ("uint8", "uint10")
             else np.asarray(routed_raw, dtype=np.int16)
         )
-      micro_batch_size = self._logps_micro_batch_size or batch_size
-      outs = []
-      for start in range(0, batch_size, micro_batch_size):
-        sl = slice(start, start + micro_batch_size)
-        outs.append(
-            trainer.fwd_only(
-                _compute_per_token_logps,
-                prompt[sl],
-                completion[sl],
-                pad_id=items.pad_id,
-                eos_id=items.eos_id,
-                temperature=temperature,
-                chunk_size=self._logps_chunk_size,
-                segment_ids=None if seg_ids is None else seg_ids[sl],
-                segment_positions=None if seg_pos is None else seg_pos[sl],
-                routed_experts=None if routed is None else routed[sl],
-            )
-        )
-      result = np.asarray(jnp.concatenate(outs, axis=0), dtype=np.float32)
+      with self._otel.track_rpc(phase="per_token_logps"):
+        micro_batch_size = self._logps_micro_batch_size or batch_size
+        outs = []
+        for start in range(0, batch_size, micro_batch_size):
+          sl = slice(start, start + micro_batch_size)
+          payload = datatypes.LogprobsScoringPayload(
+              prompt_ids=prompt[sl],
+              completion_ids=completion[sl],
+              pad_id=int(items.pad_id),
+              eos_id=int(items.eos_id),
+              temperature=temperature,
+              segment_ids=None if seg_ids is None else seg_ids[sl],
+              segment_positions=None if seg_pos is None else seg_pos[sl],
+              routed_experts=None if routed is None else routed[sl],
+          )
+          outs.append(trainer.fwd_only(payload))
+        result = np.asarray(jnp.concatenate(outs, axis=0), dtype=np.float32)
       self._last_error = None
       return datatypes.LogprobsResponse(
           request_id=items.request_id,
@@ -414,11 +574,19 @@ class TrainerWorker(abstract_worker.Worker):
       self.state = WorkerState.ERROR
       raise
 
-  def save_checkpoint(self, metadata: Any, **kwargs) -> datatypes.Response:
+  @abstract_worker.offload_to_thread
+  def save_checkpoint(
+      self,
+      metadata: Any = None,
+      *,
+      step: int | None = None,
+      force: bool = False,
+  ) -> datatypes.Response:
     """Force the trainer to serialize its state (model + optimizer)."""
     trainer = self._ensure_ready()
     try:
-      trainer.save_checkpoint(metadata, **kwargs)
+      with self._otel.track_rpc(phase="checkpoint_save"):
+        trainer.save_checkpoint(metadata, step=step, force=force)
       self._last_error = None
       return self._response(checkpoint_saved=True)
     except Exception as exc:
@@ -426,18 +594,33 @@ class TrainerWorker(abstract_worker.Worker):
       self.state = WorkerState.ERROR
       raise
 
-  def restore_checkpoint(self, **kwargs) -> Any:
-    """Restore state from latest checkpoint and return the metadata pytree."""
-    return self._ensure_ready().restore_checkpoint(**kwargs)
-
-  def prepare_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
-    """Stages weights for transfer and returns their metadata."""
+  @abstract_worker.offload_to_thread
+  def restore_checkpoint(self, step: int | None = None) -> Any:
+    """Restore state from a checkpoint and return the metadata pytree."""
     trainer = self._ensure_ready()
-    self.state = WorkerState.SYNCING
+    with self._otel.track_rpc():
+      restored = trainer.restore_checkpoint(step=step)
+    self._otel.reset_idle()
+    return restored
+
+  @abstract_worker.offload_to_thread
+  def prepare_weight_sync(self, sync_request: Any = None) -> Any:
+    """Stages weights for transfer and returns their metadata.
+
+    The worker stays READY: staging is complete when this returns. Whether the
+    trainer may take the next batch before the round ends is the caller's
+    decision; it depends on the transport reading only the staged copy.
+    """
+    trainer = self._ensure_ready()
     try:
-      if sync_request is not None:
-        kwargs["sync_request"] = sync_request
-      metadata = trainer.prepare_weight_sync(**kwargs)
+      with (
+          self._weight_sync_lock,
+          self._otel.track_rpc(weight_sync_direction="send"),
+      ):
+        metadata = trainer.prepare_weight_sync(sync_request=sync_request)
+      # Staging occupied the trainer; `track_rpc` marks it busy on exit.
+      # The release does not (`refresh_free_time=False`), so idle time while
+      # the round is still open counts as data wait.
       self._last_error = None
       if metadata is not None:
         return metadata
@@ -447,14 +630,28 @@ class TrainerWorker(abstract_worker.Worker):
       self.state = WorkerState.ERROR
       raise
 
-  def release_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
-    """Releases this round's staging and restores READY."""
-    release = getattr(self._trainer, "release_weight_sync", None)
-    result = release(sync_request=sync_request, **kwargs) if release else None
-    if self.state == WorkerState.SYNCING:
-      self.state = WorkerState.READY
-    return result
+  async def release_weight_sync(self, sync_request: Any = None) -> Any:
+    """Releases this round's staging.
 
-  def get_metrics(self) -> Any:
+    Runs on a thread of its own. On the event loop it would stall heartbeats
+    for as long as the trainer takes to free its buffers; on the worker thread
+    it would queue behind the trainer's `fwd_bwd` and hold the round open,
+    which delays the rollouts' next version.
+    """
+    return await asyncio.to_thread(self._release_weight_sync, sync_request)
+
+  def _release_weight_sync(self, sync_request: Any) -> Any:
+    with self._weight_sync_lock:
+      if self._trainer is None:
+        return None
+      # The trainer may be waiting for rollouts when the round closes; that
+      # idle time must survive the release.
+      with self._otel.track_rpc(
+          weight_sync_direction="release", refresh_free_time=False
+      ):
+        return self._trainer.release_weight_sync(sync_request=sync_request)
+
+  @abstract_worker.offload_to_thread
+  def get_metrics(self) -> datatypes.MetricsBuffer:
     """Returns and clears the recently collected step metric records."""
-    return self._ensure_ready().get_metrics()
+    return _as_metrics_buffer(self._ensure_ready().get_metrics())

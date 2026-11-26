@@ -16,7 +16,6 @@
 
 # pylint: disable=g-importing-member
 from tunix.dist_rl.common.datatypes import RolloutRequest
-from tunix.dist_rl.common.datatypes import WeightSyncMetadata
 from tunix.dist_rl.rollout.collector import TrajectoryCollectorEngine
 from tunix.dist_rl.rollout.inprocess_vllm_sampler import InprocessVllmSampler
 from tunix.dist_rl.rollout.manager import RolloutManager

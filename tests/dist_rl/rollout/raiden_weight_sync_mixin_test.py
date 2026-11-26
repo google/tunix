@@ -18,21 +18,39 @@ import unittest
 from unittest import mock
 
 from absl.testing import absltest
+from flax import nnx
+import jax
+import jax.numpy as jnp
+from tunix.common import configs
 from tunix.dist_rl.rollout import raiden_weight_sync_mixin
+from tunix.dist_rl.rollout import sampler as base_sampler_lib
+
+
+class _BareAdapter(raiden_weight_sync_mixin.RaidenDestinationWeightSyncMixin):
+
+  def __init__(self):
+    self.server_id = "bare"
+    self.config = configs.RolloutConfig()
+    self.enable_raiden = False
+    self.raiden_sync_delegate = None
 
 
 class _MockAdapter(raiden_weight_sync_mixin.RaidenDestinationWeightSyncMixin):
 
   def __init__(self, enable_raiden=True, partial_rollout=False):
     self.server_id = "test_server"
+    self.config = configs.RolloutConfig(partial_rollout=partial_rollout)
     self.enable_raiden = enable_raiden
-    self.partial_rollout = partial_rollout
     self.raiden_sync_delegate = mock.AsyncMock()
     self.raiden_sync_delegate.is_bounded = mock.MagicMock(return_value=True)
-    self.sampler = mock.MagicMock()
-    self.sampler.transformer_state = {"param": 1}
+    self._transformer_state = {"param": 1}
+    self.update_params = mock.MagicMock()
     self.pause = mock.AsyncMock(return_value=True)
     self.resume = mock.AsyncMock(return_value=True)
+
+  @property
+  def transformer_state(self):
+    return self._transformer_state
 
 
 class _SelfHostedAdapter(
@@ -42,11 +60,16 @@ class _SelfHostedAdapter(
 
   def __init__(self, enable_raiden=True):
     self.server_id = "self_hosted"
+    self.config = configs.RolloutConfig()
     self.enable_raiden = enable_raiden
     self.raiden_sync_delegate = mock.AsyncMock()
     self.raiden_sync_delegate.is_bounded = mock.MagicMock(return_value=False)
-    self.transformer_state = {"param": 2}
+    self._transformer_state = {"param": 2}
     self.update_params = mock.MagicMock()
+
+  @property
+  def transformer_state(self):
+    return self._transformer_state
 
 
 class RaidenDestinationWeightSyncMixinTest(unittest.IsolatedAsyncioTestCase):
@@ -81,7 +104,7 @@ class RaidenDestinationWeightSyncMixinTest(unittest.IsolatedAsyncioTestCase):
   async def test_pre_weight_sync_delegates(self):
     adapter = _MockAdapter(enable_raiden=True)
     adapter.raiden_sync_delegate.pre_weight_sync.return_value = True
-    res = await adapter.pre_weight_sync()
+    res = await adapter.pre_weight_sync(base_sampler_lib.WeightSyncRequest())
     self.assertTrue(res)
     adapter.raiden_sync_delegate.pre_weight_sync.assert_awaited_once()
 
@@ -89,49 +112,41 @@ class RaidenDestinationWeightSyncMixinTest(unittest.IsolatedAsyncioTestCase):
     adapter = _MockAdapter(enable_raiden=False)
     sync_req = mock.MagicMock(weights={"w": 1})
     res = await adapter.weight_sync(sync_request=sync_req)
-    self.assertTrue(res)
-    adapter.sampler.update_params.assert_called_once_with({"w": 1})
+    self.assertIsNone(res)
+    adapter.update_params.assert_called_once_with({"w": 1})
 
   async def test_abort_weight_sync_delegates(self):
     adapter = _MockAdapter(enable_raiden=True)
     adapter.raiden_sync_delegate.abort_weight_sync = mock.AsyncMock(
         return_value=True
     )
-    res = await adapter.abort_weight_sync()
+    res = await adapter.abort_weight_sync(base_sampler_lib.WeightSyncRequest())
     self.assertTrue(res)
     adapter.raiden_sync_delegate.abort_weight_sync.assert_awaited_once()
 
   async def test_pre_weight_sync_waits_and_clears_cache_when_not_partial(self):
     adapter = _MockAdapter(enable_raiden=True)
-    await adapter.pre_weight_sync()
+    req = base_sampler_lib.WeightSyncRequest()
+    await adapter.pre_weight_sync(req)
     adapter.pause.assert_awaited_once_with(mode="wait", clear_cache=True)
     adapter.raiden_sync_delegate.pre_weight_sync.assert_awaited_once_with(
-        sync_request=None
+        sync_request=req
     )
 
-  async def test_pre_weight_sync_keeps_cache_and_forwards_flag_when_partial(
-      self,
-  ):
+  async def test_pre_weight_sync_keeps_cache_when_partial(self):
     adapter = _MockAdapter(enable_raiden=True, partial_rollout=True)
-    await adapter.pre_weight_sync()
+    req = base_sampler_lib.WeightSyncRequest()
+    await adapter.pre_weight_sync(req)
     adapter.pause.assert_awaited_once_with(mode="keep", clear_cache=False)
     adapter.raiden_sync_delegate.pre_weight_sync.assert_awaited_once_with(
-        sync_request=None, partial_rollout=True
-    )
-
-  async def test_pre_weight_sync_partial_kwarg_overrides_sampler_default(self):
-    adapter = _MockAdapter(enable_raiden=True, partial_rollout=False)
-    await adapter.pre_weight_sync(partial_rollout=True)
-    adapter.pause.assert_awaited_once_with(mode="keep", clear_cache=False)
-    adapter.raiden_sync_delegate.pre_weight_sync.assert_awaited_once_with(
-        sync_request=None, partial_rollout=True
+        sync_request=req
     )
 
   async def test_pre_weight_sync_unbound_raises_before_pausing(self):
     adapter = _MockAdapter(enable_raiden=True)
     adapter.raiden_sync_delegate.is_bounded.return_value = False
     with self.assertRaises(RuntimeError):
-      await adapter.pre_weight_sync()
+      await adapter.pre_weight_sync(base_sampler_lib.WeightSyncRequest())
     adapter.pause.assert_not_awaited()
 
   async def test_post_weight_sync_resumes_when_delegate_raises(self):
@@ -140,7 +155,7 @@ class RaidenDestinationWeightSyncMixinTest(unittest.IsolatedAsyncioTestCase):
         "post failed"
     )
     with self.assertRaisesRegex(RuntimeError, "post failed"):
-      await adapter.post_weight_sync()
+      await adapter.post_weight_sync(base_sampler_lib.WeightSyncRequest())
     adapter.resume.assert_awaited_once()
 
   async def test_abort_weight_sync_resumes_when_delegate_raises(self):
@@ -149,7 +164,7 @@ class RaidenDestinationWeightSyncMixinTest(unittest.IsolatedAsyncioTestCase):
         "abort failed"
     )
     with self.assertRaisesRegex(RuntimeError, "abort failed"):
-      await adapter.abort_weight_sync()
+      await adapter.abort_weight_sync(base_sampler_lib.WeightSyncRequest())
     adapter.resume.assert_awaited_once()
 
   async def test_get_weight_sync_status_reports_delegate_round(self):
@@ -177,8 +192,35 @@ class RaidenDestinationWeightSyncMixinTest(unittest.IsolatedAsyncioTestCase):
   ):
     adapter = _SelfHostedAdapter(enable_raiden=False)
     sync_req = mock.MagicMock(weights={"w": 2})
-    self.assertTrue(await adapter.weight_sync(sync_request=sync_req))
+    self.assertIsNone(await adapter.weight_sync(sync_request=sync_req))
     adapter.update_params.assert_called_once_with({"w": 2})
+
+  def test_get_target_state_maps_nnx_variables_to_shape_dtype_structs(self):
+    adapter = _MockAdapter(enable_raiden=False)
+    adapter._transformer_state = {
+        "w": nnx.Param(jnp.ones((2, 3), dtype=jnp.float32))
+    }
+    target = adapter.get_target_state()
+    self.assertIsInstance(target["w"], nnx.Param)
+    self.assertEqual(
+        target["w"].value,
+        jax.ShapeDtypeStruct(shape=(2, 3), dtype=jnp.float32),
+    )
+
+  def test_default_stubs_raise_not_implemented_error(self):
+    adapter = _BareAdapter()
+    with self.assertRaises(NotImplementedError):
+      _ = adapter.transformer_state
+    with self.assertRaises(NotImplementedError):
+      adapter.update_params({"w": 1})
+    with self.assertRaises(NotImplementedError):
+      adapter.delete_cache()
+    with self.assertRaises(NotImplementedError):
+      adapter.reset_prefix_cache()
+    with self.assertRaises(NotImplementedError):
+      adapter.reinitialize_cache()
+    with self.assertRaises(NotImplementedError):
+      adapter.refresh_state_leaves()
 
 
 if __name__ == "__main__":

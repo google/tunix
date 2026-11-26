@@ -43,7 +43,7 @@ python3 -m tunix.cli.grpo_main \
   override_config_file=examples/rl/grpo/gsm8k/configs/llama3.2_1b.yaml \
   model_config.model_download_path="/tmp/models/llama3.2-1b" \
   model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/1" \
-  tokenizer_config.tokenizer_path="meta-llama/Llama-3.2-1B" \
+  tokenizer_config.tokenizer_path="unsloth/Llama-3.2-1B" \
   batch_size=$batch_size \
   num_batches=$num_batches \
   num_train_epochs=$num_train_epochs \

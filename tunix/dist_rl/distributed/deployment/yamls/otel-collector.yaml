@@ -1,0 +1,151 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# OpenTelemetry Collector (contrib) config for dist_rl runs across all recipes
+# (math_gsm8k_dist, deepswe_dist, frozenlake_dist, etc.), on a single host or
+# as the standalone in-cluster Service of `jobset.otel.yaml`.
+#
+# Single host: run the collector as an independent local process alongside
+# launcher.sh so metrics collection has its own endpoint decoupled from the
+# orchestrator, then point every node at it:
+#
+#   otelcol-contrib --config tunix/dist_rl/distributed/deployment/yamls/otel-collector.yaml
+#   ./launcher.sh otel_config.enable=true
+#
+# Kubernetes / GKE: `launch.sh otel` (or `k8s_launcher.sh otel`) mounts this
+# file into the Deployment of `jobset.otel.yaml`, reachable at
+# http://${USER}-otel:4317 from every pod when launched with
+# `otel_config.enable=true`. Redeploy an existing collector with `launch.sh otel`
+# after updating this file so its `logs` pipeline is active before nodes export
+# lineage event logs.
+#
+# Exporters: this file defaults to [debug] so local `otelcol-contrib` runs start
+# on any host without Cloud credentials. On GKE, `launch.sh otel` adds
+# `googlecloud` and `file/events` automatically (`otel_config.googlecloud=true`;
+# pass `otel_config.googlecloud=false` to keep only `[debug,file/events]`). To
+# enable the same exporters manually on a local host (set
+# `TUNIX_OTEL_EVENTS_FILE` to override `/tmp/tunix-otel-events.jsonl`):
+#
+#   otelcol-contrib --config otel-collector.yaml \
+#     --set 'service::pipelines::metrics::exporters=[debug,googlecloud]' \
+#     --set 'service::pipelines::logs::exporters=[debug,googlecloud,file/events]'
+#
+# The exporter uses Application Default Credentials: the VM / node service
+# account on GCE and GKE (grant it `roles/monitoring.metricWriter` and
+# `roles/logging.logWriter`; on GKE with Workload Identity grant the collector
+# pod's Kubernetes ServiceAccount principal instead), and
+# `GOOGLE_APPLICATION_CREDENTIALS` elsewhere. Set `GOOGLE_CLOUD_PROJECT` to
+# override the project detected from the metadata server.
+#
+# Aggregation: the collector only transports. Worker-side instruments carry
+# bounded attributes (`worker_id`, `task_name`, `status`, `phase`, `op`,
+# `fate`, ...), and `resource_filters` below turns the `tunix.*` resource
+# attributes every node sets (`tunix.role`, `tunix.worker_id`, `tunix.run_id`)
+# into metric labels, so Cloud Monitoring can aggregate across the fleet at
+# query time (`sum` of counters, merged `DISTRIBUTION` percentiles of
+# histograms) and still slice by run, role, or worker.
+
+extensions:
+  # Durable sending queue: data received by the collector survives a backend
+  # outage or collector restart.
+  file_storage:
+    directory: /tmp/otelcol-storage
+    create_directory: true
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: localhost:4317
+
+processors:
+  # Cloud Monitoring accepts one point per time series per request and at most
+  # 200 time series per request. A short timeout keeps each SDK export
+  # interval (10 s by default) in its own request instead of coalescing two
+  # exports of the same series, which the backend rejects as duplicates.
+  batch:
+    timeout: 1s
+    send_batch_size: 200
+    send_batch_max_size: 200
+  # Describes the host the collector itself runs on (project, zone, and the
+  # `gce_instance` the series are attributed to; on GKE, the collector pod's
+  # node). It does not identify the producing node: that is what the `tunix.*`
+  # resource attributes every process sets are for, and `resource_filters`
+  # below turns them into metric labels. Each node's own attributes are kept;
+  # the detector only fills in cloud attributes the SDKs do not set.
+  resourcedetection:
+    detectors: [env, gcp]
+    timeout: 2s
+    override: false
+  # Optional: once trainer-native instruments land, drop the orchestrator's
+  # relayed copy of trainer metrics if only the trainer's direct stream is
+  # desired.
+  # filter/relayed_trainer:
+  #   metrics:
+  #     datapoint:
+  #       - 'resource.attributes["service.name"] == "tunix-orchestrator" and IsMatch(metric.name, "^tunix\\.trainer\\.")'
+
+exporters:
+  # Local verification: prints every export to the collector's stdout.
+  debug:
+    verbosity: basic
+  # Structured JSONL persistence for OTel Event Logs (such as `tunix.lineage.*`
+  # trajectory lifecycle events). `append: true` preserves prior event lines
+  # across collector restarts instead of truncating the file on startup. On GKE,
+  # `jobset.otel.yaml` sets `TUNIX_OTEL_EVENTS_FILE` under `/tmp/otelcol-storage`
+  # because the pod root filesystem is read-only.
+  file/events:
+    path: ${env:TUNIX_OTEL_EVENTS_FILE:-/tmp/tunix-otel-events.jsonl}
+    append: true
+  googlecloud:
+    # Empty picks the project from Application Default Credentials / metadata.
+    project: ${env:GOOGLE_CLOUD_PROJECT:-}
+    metric:
+      # Metric types become `workload.googleapis.com/tunix.<prefix>.<name>`.
+      prefix: workload.googleapis.com
+      # Promote the per-process identity to metric labels. Two rollout workers
+      # share `service.name=tunix-rollout`; without `tunix_worker_id` on the
+      # series they would collide into one time series and be rejected.
+      resource_filters:
+        - prefix: "tunix."
+      # `service_name` / `service_namespace` / `service_instance_id` labels.
+      service_resource_labels: true
+      instrumentation_library_labels: false
+      cumulative_normalization: true
+    log:
+      default_log_name: tunix-dist-rl-events
+      # Copy the per-process identity (`tunix.role`, `tunix.worker_id`,
+      # `tunix.run_id`) onto every log entry as labels, so event logs can be
+      # filtered to one run the way metrics are.
+      resource_filters:
+        - prefix: "tunix."
+    sending_queue:
+      enabled: true
+      storage: file_storage
+
+service:
+  extensions: [file_storage]
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [resourcedetection, batch]
+      # Default to [debug] so the collector starts on any host without
+      # requiring Cloud Monitoring credentials; add googlecloud (see the header
+      # comment) to ship to Cloud Monitoring.
+      exporters: [debug]
+    logs:
+      receivers: [otlp]
+      processors: [resourcedetection, batch]
+      # Receives structured OTel Event Logs (such as `tunix.lineage.*` events).
+      exporters: [debug]

@@ -296,6 +296,20 @@ class MetadataTest(parameterized.TestCase):
     )
     self.assertEqual(
         rpa_backend.kernel_kwargs(
+            scale=0.5,
+            pin_block_sizes=True,
+            out_dtype=None,
+            force_mixed=True,
+            bkv_sz=1024,
+        ),
+        {
+            'sm_scale': 0.5,
+            'd_block_sizes': (1, 512, 1, 512),
+            'm_block_sizes': (128, 1024, 128, 512),
+        },
+    )
+    self.assertEqual(
+        rpa_backend.kernel_kwargs(
             scale=0.5, pin_block_sizes=False, out_dtype=None
         ),
         {'sm_scale': 0.5},
@@ -573,7 +587,11 @@ class AdapterTest(parameterized.TestCase):
     self.assertEqual(shapes[1], ((256, kh, _D), 'float32'))
     self.assertEqual(shapes[3], ((b * 1, 16, 2 * kh, 1, _D), 'float32'))
     self.assertEqual(
-        kwargs, {'sm_scale': 0.1, **rpa_canonical.canonical_block_size_kwargs()}
+        kwargs,
+        {
+            'sm_scale': 0.1,
+            **rpa_canonical.canonical_block_size_kwargs(force_mixed=True),
+        },
     )
     kv_lens, page_indices, cu_q_lens, distribution = metadata
     np.testing.assert_array_equal(kv_lens, [t, t])
@@ -886,11 +904,18 @@ class ModelTest(absltest.TestCase):
     )
     # `canon_all_disabled` does not route through the RPA backend
     # (`use_canon_attention=False`): still the stock program, bitwise.
+    stock = by_name['stock_qwen3 (model.py)']
     disabled = by_name['canon_all_disabled']
     self.assertEqual(disabled.vs_stock_max_abs_diff, 0.0)
-    self.assertEqual(disabled.decode_vs_prefill_max_diff, 0.0)
-    self.assertEqual(disabled.batch1_vs_batchn_max_diff, 0.0)
-    self.assertEqual(disabled.fwd_vs_fwdbwd_max_diff, 0.0)
+    self.assertEqual(
+        disabled.decode_vs_prefill_max_diff, stock.decode_vs_prefill_max_diff
+    )
+    self.assertEqual(
+        disabled.batch1_vs_batchn_max_diff, stock.batch1_vs_batchn_max_diff
+    )
+    self.assertEqual(
+        disabled.fwd_vs_fwdbwd_max_diff, stock.fwd_vs_fwdbwd_max_diff
+    )
     enabled = by_name['canon_all_enabled (Zero-TIM)']
     for field in (
         'decode_vs_prefill_max_diff',

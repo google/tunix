@@ -21,6 +21,7 @@ from tunix.models.gemma4 import model as gemma4_model
 from tunix.models.llama3 import model as llama3_model
 from tunix.models.qwen2 import model as qwen2_model
 from tunix.models.qwen3 import model as qwen3_model
+from tunix.models.qwen3p5 import model as qwen3p5_model
 
 _ALL_MODEL_MODULES = [
     gemma_model,
@@ -29,6 +30,7 @@ _ALL_MODEL_MODULES = [
     llama3_model,
     qwen2_model,
     qwen3_model,
+    qwen3p5_model,
 ]
 
 
@@ -67,10 +69,6 @@ class RegistryTest(absltest.TestCase):
     """Check each item in MODEL_CATALOG maps to a valid config id."""
     module_config_ids = _get_all_model_config_ids_from_modules()
     for model_info in registry.MODEL_CATALOG:
-      if model_info.model_family == 'qwen3p5':
-        # Qwen 3.5 models are only supported via MaxText and don't have native
-        # configs.
-        continue
       self.assertIn(
           model_info.model_config_id,
           module_config_ids,

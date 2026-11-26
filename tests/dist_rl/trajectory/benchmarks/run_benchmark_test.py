@@ -32,6 +32,7 @@ class RunBenchmarkCLITest(absltest.TestCase):
         ),
     )
     self.assertEqual(config.workload.num_workers, 1)
+    self.assertEqual(config.workload.metrics_updates_per_trajectory, 0)
     self.assertFalse(config.workload.writer_per_worker)
 
   def test_parse_flags_file_store_custom_overrides_store_and_workload(
@@ -39,7 +40,8 @@ class RunBenchmarkCLITest(absltest.TestCase):
   ) -> None:
     config = _parse_cmd(
         "--store file --root_dir /tmp/custom_path --cleanup_after True"
-        " --steps_per_trajectory 10 --step_payload_chars 500 --num_workers 4"
+        " --steps_per_trajectory 10 --step_payload_chars 500"
+        " --metrics_updates_per_trajectory 2 --num_workers 4"
         " --writer_per_worker True"
     )
 
@@ -52,6 +54,7 @@ class RunBenchmarkCLITest(absltest.TestCase):
     )
     self.assertEqual(config.workload.steps_per_trajectory, 10)
     self.assertEqual(config.workload.step_payload_chars, 500)
+    self.assertEqual(config.workload.metrics_updates_per_trajectory, 2)
     self.assertEqual(config.workload.num_workers, 4)
     self.assertTrue(config.workload.writer_per_worker)
 

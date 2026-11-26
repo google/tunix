@@ -31,19 +31,30 @@ class ModelTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       dict(
-          testcase_name='no_path',
+          testcase_name='no_path_unset_hf_token',
           tokenizer_path=None,
+          env={},
           expected_path='path1',
+          expected_token=None,
       ),
       dict(
-          testcase_name='with_path',
+          testcase_name='with_path_blank_hf_token',
           tokenizer_path='path2',
+          env={'HF_TOKEN': '   '},
           expected_path='path2',
+          expected_token=None,
+      ),
+      dict(
+          testcase_name='with_nonempty_hf_token',
+          tokenizer_path='path2',
+          env={'HF_TOKEN': 'hf_valid_token'},
+          expected_path='path2',
+          expected_token='hf_valid_token',
       ),
   )
   @mock.patch.object(tokenizer_adapter, 'Tokenizer', autospec=True)
   def test_create_tokenizer(
-      self, mock_tokenizer, tokenizer_path, expected_path
+      self, mock_tokenizer, tokenizer_path, env, expected_path, expected_token
   ):
     tokenizer_config = {
         'tokenizer_path': 'path1',
@@ -51,9 +62,10 @@ class ModelTest(parameterized.TestCase):
         'add_bos': True,
         'add_eos': False,
     }
-    model.create_tokenizer(tokenizer_config, tokenizer_path=tokenizer_path)
+    with mock.patch.dict(os.environ, env, clear=True):
+      model.create_tokenizer(tokenizer_config, tokenizer_path=tokenizer_path)
     mock_tokenizer.assert_called_once_with(
-        'type1', expected_path, True, False, mock.ANY
+        'type1', expected_path, True, False, expected_token
     )
 
   @parameterized.named_parameters(
@@ -144,6 +156,70 @@ class ModelTest(parameterized.TestCase):
           tokenizer_config={'tokenizer_path': model._DEFAULT_TOKENIZER_PATH},
           expected_tokenizer_path=(
               'gs://gemma-data/tokenizers/tokenizer_gemma3.model'
+          ),
+          apply_lora=False,
+          model_display=False,
+      ),
+      dict(
+          testcase_name='no_lora_gemma2_gcs_tokenizer',
+          model_config={
+              'model_name': 'gemma-2-2b-it',
+              'model_source': 'gcs',
+              'model_id': 'google/gemma-2-2b-it',
+              'model_path': 'gs://gemma-data/checkpoints/gemma2-2b-it',
+              'model_display': False,
+          },
+          tokenizer_config={'tokenizer_path': model._DEFAULT_TOKENIZER_PATH},
+          expected_tokenizer_path=(
+              'gs://gemma-data/tokenizers/tokenizer_gemma2.model'
+          ),
+          apply_lora=False,
+          model_display=False,
+      ),
+      dict(
+          testcase_name='no_lora_gemma_gcs_tokenizer',
+          model_config={
+              'model_name': 'gemma-2b',
+              'model_source': 'gcs',
+              'model_id': 'google/gemma-2b',
+              'model_path': 'gs://my-bucket/checkpoints/gemma-2b',
+              'model_display': False,
+          },
+          tokenizer_config={'tokenizer_path': model._DEFAULT_TOKENIZER_PATH},
+          expected_tokenizer_path=(
+              'gs://gemma-data/tokenizers/tokenizer_gemma2.model'
+          ),
+          apply_lora=False,
+          model_display=False,
+      ),
+      dict(
+          testcase_name='no_lora_gemma1p1_gcs_tokenizer',
+          model_config={
+              'model_name': 'gemma-1.1-2b-it',
+              'model_source': 'gcs',
+              'model_id': 'google/gemma-1.1-2b-it',
+              'model_path': 'gs://my-bucket/checkpoints/gemma-1.1-2b-it',
+              'model_display': False,
+          },
+          tokenizer_config={'tokenizer_path': model._DEFAULT_TOKENIZER_PATH},
+          expected_tokenizer_path=(
+              'gs://gemma-data/tokenizers/tokenizer_gemma2.model'
+          ),
+          apply_lora=False,
+          model_display=False,
+      ),
+      dict(
+          testcase_name='no_lora_gemma4_gcs_tokenizer',
+          model_config={
+              'model_name': 'gemma-4-e2b',
+              'model_source': 'gcs',
+              'model_id': 'google/gemma-4-e2b',
+              'model_path': 'gs://gemma-data/checkpoints/gemma4-e2b-pt',
+              'model_display': False,
+          },
+          tokenizer_config={'tokenizer_path': model._DEFAULT_TOKENIZER_PATH},
+          expected_tokenizer_path=(
+              'gs://gemma-data/tokenizers/tokenizer_gemma4.model'
           ),
           apply_lora=False,
           model_display=False,

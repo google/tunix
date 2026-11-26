@@ -34,6 +34,7 @@ import jax
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
+import transformers
 from tunix.common import configs
 from tunix.dist_rl.rollout import sampler as base_sampler_lib
 from tunix.dist_rl.rollout.raiden_weight_sync_mixin import (
@@ -47,6 +48,8 @@ from tunix.processors import audio_processor
 from tunix.processors import image_processor
 from tunix.rl import reshard
 from tunix.rl import utils as rl_utils
+
+import sentencepiece as spm
 
 LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]
@@ -203,7 +206,7 @@ class VanillaSampler(
        to `RaidenWeightSyncDelegate`. Binds destination memory buffers using
        `self.transformer_state` and executes phased synchronization lifecycle
        hooks (`bind`, `pre`, `sync`, `post`).
-    2. Fallback Direct Mode (`weight_sync_mode == FALLBACK`):
+    2. In-Memory Direct Mode (`weight_sync_mode == IN_MEMORY`):
        Synchronizes weights in-place without Raiden transport. When a weight
        payload is received in `sync_request.weights`, updates
        `self.transformer_state` directly.
@@ -214,7 +217,9 @@ class VanillaSampler(
       server_id: str,
       config: configs.RolloutConfig,
       transformer: nnx.Module,
-      tokenizer: Any,
+      tokenizer: (
+          transformers.PreTrainedTokenizerBase | spm.SentencePieceProcessor
+      ),
       image_processor: image_processor.ImageProcessor | None = None,
       raiden_sync_delegate: Any = None,
   ):
@@ -224,7 +229,7 @@ class VanillaSampler(
       server_id: Unique identifier for this sampler server slice.
       config: Rollout configuration for this worker.
       transformer: an instance of the transformer.
-      tokenizer: a tokenizer for the given model.
+      tokenizer: HuggingFace or SentencePiece tokenizer for the given model.
       image_processor: The image processor.
       raiden_sync_delegate: Optional Raiden weight sync delegate.
     """
@@ -235,9 +240,7 @@ class VanillaSampler(
       )
     self.server_id = server_id
     self.config: configs.RolloutConfig = config
-    self.tokenizer = tokenizer
-    if not isinstance(tokenizer, tok_adapter.TokenizerAdapter):
-      self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
+    self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
     self.image_processor = image_processor
     self.cache_size: int = self.config.kv_cache_size
     self.raiden_sync_delegate = raiden_sync_delegate
@@ -252,7 +255,6 @@ class VanillaSampler(
       self.raiden_sync_delegate = (
           raiden_weight_sync_delegate.RaidenWeightSyncDelegate(
               server_id=self.server_id,
-              partial_rollout=self.config.partial_rollout,
           )
       )
 
@@ -851,10 +853,9 @@ class VanillaSampler(
       ) = None,
       max_audio_length: int | None = None,
       max_audio_clips: int | None = None,
-      **kwargs,
   ) -> (
       base_sampler_lib.SamplingResponse
-      | list[base_sampler_lib.SamplingResponse]
+      | Sequence[base_sampler_lib.SamplingResponse]
   ):
     """Generates completions for a single SamplingRequest or a batch.
 
@@ -884,12 +885,10 @@ class VanillaSampler(
       max_audio_clips: Maximum number of audio clips in a sample. If specified,
         audio input to the model will be padded upto this count. Specify to
         avoid recompilation on different number of clips across calls.
-      **kwargs: Additional unused keyword arguments.
 
     Returns:
       A single SamplingResponse or a list of SamplingResponse objects.
     """
-    del kwargs
     is_sequence = not isinstance(
         sampling_requests, base_sampler_lib.SamplingRequest
     )
@@ -913,8 +912,8 @@ class VanillaSampler(
         prompt_token_ids_batch.append(prompt)
 
       max_tokens = (
-          req.sampling_params.max_tokens
-          if req.sampling_params is not None
+          req.max_tokens
+          if req.max_tokens is not None
           else self.config.max_tokens_to_generate
       )
       max_gen_steps_list.append(max_tokens)
@@ -1160,6 +1159,10 @@ class VanillaSampler(
     return responses[0]
 
   # --- Weight Synchronization & Load Info ---
+  def routed_experts_shape(self) -> tuple[int, int] | None:
+    """Returns None; VanillaSampler does not capture MoE routed experts."""
+    return None
+
   async def get_transfer_status(self, req_id: str | Any, **kwargs) -> str | Any:
     """Queries status of an ongoing weight transfer or KV-cache migration."""
     del req_id, kwargs
