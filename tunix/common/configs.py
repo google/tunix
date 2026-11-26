@@ -500,6 +500,12 @@ class TrainingConfig:
   # very large budgets; ``pack_sequences`` raises if a pack exceeds it.
   max_segments_per_packed_row: int | None = None
 
+  # Guard against NaN/Inf gradients or severe gradient spikes poisoning model
+  # weights and optimizer state. When True, updates are skipped if the gradient
+  # norm is non-finite (NaN or Inf), or if it exceeds max_grad_norm_spike.
+  skip_step_on_nan: bool = False
+  max_grad_norm_spike: float | None = None
+
   def __post_init__(self):
     resolved = resolve_seq_tokens_budget(
         self.max_seq_tokens_per_device,
@@ -507,6 +513,17 @@ class TrainingConfig:
     )
     self.max_seq_tokens_per_device = resolved
     self.max_seq_token_per_tpu = resolved
+    if self.max_grad_norm_spike is not None:
+      if (
+          isinstance(self.max_grad_norm_spike, bool)
+          or not isinstance(self.max_grad_norm_spike, (int, float))
+          or not math.isfinite(self.max_grad_norm_spike)
+          or self.max_grad_norm_spike <= 0
+      ):
+        raise ValueError(
+            "max_grad_norm_spike must be a finite positive number, got"
+            f" {self.max_grad_norm_spike!r}."
+        )
 
   @property
   def sequence_packing_enabled(self) -> bool:

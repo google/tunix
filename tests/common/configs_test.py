@@ -321,6 +321,18 @@ class ReplicaSeedTest(parameterized.TestCase):
       with self.subTest(seed=seed, idx=idx), self.assertRaises(ValueError):
         configs.replica_seed(seed, idx)
 
+  def test_training_config_validates_max_grad_norm_spike(self):
+    configs.TrainingConfig(eval_every_n_steps=1, max_grad_norm_spike=None)
+    configs.TrainingConfig(eval_every_n_steps=1, max_grad_norm_spike=10.0)
+    configs.TrainingConfig(eval_every_n_steps=1, max_grad_norm_spike=1)
+    for bad_spike in (0, 0.0, -1.0, float("nan"), float("inf"), True, False):
+      with self.assertRaisesRegex(
+          ValueError, "max_grad_norm_spike must be a finite positive number"
+      ):
+        configs.TrainingConfig(
+            eval_every_n_steps=1, max_grad_norm_spike=bad_spike
+        )
+
 
 if __name__ == "__main__":
   absltest.main()
