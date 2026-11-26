@@ -841,9 +841,10 @@ class RLLearner(abc.ABC, Generic[TConfig]):
     # use the full batch iterator directly.
     if iterator_batch_size == full_batch_size:
       train_iterator = full_batch_iterator
-      if per_host:
+      if per_host and not self._packing_enabled:
         # Batches are used as they come, so a smaller last batch is a train
         # micro-batch of its own: check every batch like the configured size.
+        # Packed batches reach `shard_input` only as packed chunks.
         train_iterator = self._check_per_host_batches(
             train_iterator, "train batch"
         )
@@ -1055,12 +1056,17 @@ class RLLearner(abc.ABC, Generic[TConfig]):
   ) -> None:
     """Checks the configured per-host batch sizes (`_check_per_host_rows`).
 
+    With sequence packing the train micro-batch is not checked: it reaches
+    `shard_input` only as packed chunks, which hold a multiple of
+    `rl_utils.per_host_pack_unit` rows per process.
+
     Args:
       train_micro_batch_size: Per-host prompts per train micro-batch.
       logps_micro_batch_size: Per-host prompts per reference/trainer logps
         chunk, or None if no trainer-side logps pass runs.
     """
-    self._check_per_host_rows(train_micro_batch_size, "train micro-batch")
+    if not self._packing_enabled:
+      self._check_per_host_rows(train_micro_batch_size, "train micro-batch")
     if logps_micro_batch_size is not None:
       self._check_per_host_rows(
           logps_micro_batch_size, "reference/trainer logps chunk"

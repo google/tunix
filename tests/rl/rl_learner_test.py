@@ -59,11 +59,12 @@ def _mesh(fsdp):
   return mesh
 
 
-def _mock_engine(actor_mesh, rollout_mesh):
+def _mock_engine(actor_mesh, rollout_mesh, **training_config):
   config = rl_engine_lib.RLTrainingConfig(
       actor_optimizer=optax.sgd(1e-3),
       eval_every_n_steps=1,
       max_steps=1,
+      **training_config,
   )
   engine = mock.MagicMock()
   engine.actor_trainer.model = DummyModel()
@@ -199,6 +200,32 @@ class PerHostLearnerTest(parameterized.TestCase):
       self.assertLen(next(eval_batches)['prompts'], 2)
       with self.assertRaisesRegex(ValueError, 'eval batch has 1 rows'):
         next(eval_batches)
+
+  def test_packing_skips_the_train_batch_row_checks(self):
+    # 2 processes, fsdp=8: 2 prompts per process are 4 global rows, which
+    # `shard_input` would replicate, so unpacked training is refused. Packed
+    # chunks hold a multiple of `per_host_pack_unit` rows instead.
+    mesh = _mesh(8)
+    batches = [{'prompts': [''] * 4}]
+    with _per_host_env(
+        2, TUNIX_PER_HOST_LEARNER='1', TUNIX_PER_HOST_SAFE_LOGPS='1'
+    ):
+      with self.assertRaisesRegex(ValueError, 'train micro-batch has 2 rows'):
+        _learner(_mock_engine(mesh, mesh)).train(batches)
+
+      engine = _mock_engine(mesh, mesh, max_seq_tokens_per_device=64)
+      engine.cluster_config.rollout_config = mock.MagicMock(
+          max_prompt_length=8, max_tokens_to_generate=8
+      )
+      learner = _learner(engine)
+      engine.actor_trainer.train_steps = 1  # Stop after one global step.
+      with mock.patch.object(learner, '_run_global_step') as run_global_step:
+        learner.train(batches)
+      train_iterator = run_global_step.call_args.args[4]
+      self.assertLen(next(train_iterator)['prompts'], 2)
+      # Eval batches are not packed: they keep their check.
+      with self.assertRaisesRegex(ValueError, 'eval batch has 1 rows'):
+        learner._shard_eval_batch_for_process({'prompts': ['e', 'f']})
 
 
 class RLLearnerTest(parameterized.TestCase):
