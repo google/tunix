@@ -166,6 +166,7 @@ def _config(mode, algo):
       sampler_rs_max=None,
       seq_logprob_error_threshold=None,
       use_rollout_logps=True,
+      score_centering=False,
   )
 
 
@@ -309,11 +310,13 @@ class PackSequencesPerHostTest(parameterized.TestCase):
       _pack([_batch(_LENGTHS)], budget=12)
 
   def test_empty_prompt_aborts(self):
+    # Without a completion_attention_mask the prompt is its non-pad tokens, as
+    # in `common.process_ids`, so blank the ids (and the mask with them).
     ex = _batch(_LENGTHS)
-    pm = np.array(ex.prompt_mask)
-    pm[2] = False
+    pi = np.array(ex.prompt_ids)
+    pi[2] = _PAD
     with self.assertRaisesRegex(RuntimeError, "empty prompt"):
-      _pack([ex.replace(prompt_mask=pm)])
+      _pack([ex.replace(prompt_ids=pi, prompt_mask=pi != _PAD)])
 
   def test_routed_experts_abort(self):
     experts = np.zeros((len(_LENGTHS), _P + _C, 1, 1), np.int32)
