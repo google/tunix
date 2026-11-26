@@ -14,6 +14,7 @@
 
 """Tests for the frozen-model InferenceWorker wrapper."""
 
+import threading
 from absl.testing import absltest
 import cloudpickle
 import jax.numpy as jnp
@@ -32,15 +33,48 @@ class _StubCore:
     self.calls = 0
     self.last_prompt_tokens = None
     self.last_completion_tokens = None
+    self.last_segment_ids = None
+    self.last_segment_positions = None
+    self.chunk_shapes = []
 
   def get_ref_per_token_logps(
-      self, prompt_tokens, completion_tokens, pad_id, eos_id, temperature=1.0
+      self,
+      prompt_tokens,
+      completion_tokens,
+      pad_id,
+      eos_id,
+      temperature=1.0,
+      segment_ids=None,
+      segment_positions=None,
   ):
     del pad_id, eos_id
     self.calls += 1
     self.last_prompt_tokens = np.asarray(prompt_tokens, dtype=np.int32)
     self.last_completion_tokens = np.asarray(completion_tokens, dtype=np.int32)
-    return jnp.asarray(completion_tokens, dtype=jnp.float32) * temperature
+    self.last_segment_ids = (
+        None if segment_ids is None else np.asarray(segment_ids, dtype=np.int32)
+    )
+    self.last_segment_positions = (
+        None
+        if segment_positions is None
+        else np.asarray(segment_positions, dtype=np.int32)
+    )
+    self.chunk_shapes.append((
+        self.last_prompt_tokens.shape,
+        self.last_completion_tokens.shape,
+        None if self.last_segment_ids is None else self.last_segment_ids.shape,
+        None
+        if self.last_segment_positions is None
+        else self.last_segment_positions.shape,
+    ))
+    offset = (
+        0.0
+        if segment_positions is None
+        else jnp.asarray(segment_positions, dtype=jnp.float32) * 0.1
+    )
+    return (
+        jnp.asarray(completion_tokens, dtype=jnp.float32) * temperature + offset
+    )
 
   def get_rewards(self, prompt_tokens, completion_tokens, pad_id, eos_id):
     del prompt_tokens, pad_id, eos_id
@@ -106,25 +140,90 @@ class InferenceWorkerTest(absltest.TestCase):
 
   def test_per_token_logps_uses_padded_batch_without_repadding(self):
     core = _StubCore()
-    batch = datatypes.RLTrainerPayload(
-        prompt_ids=np.array([[0, 0, 5, 6], [0, 7, 8, 9]], dtype=np.int32),
-        prompt_mask=np.array([[0, 0, 1, 1], [0, 1, 1, 1]], dtype=np.float32),
-        completion_ids=np.array([[10, 11, 0], [12, 0, 0]], dtype=np.int32),
-        completion_mask=np.array([[1, 1, 0], [1, 0, 0]], dtype=np.float32),
-        advantages=np.ones((2, 3), dtype=np.float32),
-        ref_per_token_logps=None,
-        old_per_token_logps=None,
+    req = datatypes.LogprobsRequest(
+        prompt_tokens=np.array([[0, 0, 5, 6], [0, 7, 8, 9]], dtype=np.int32),
+        completion_tokens=np.array([[10, 11, 0], [12, 0, 0]], dtype=np.int32),
+        temperature=2.0,
     )
 
-    result = _worker(core).per_token_logps(batch, temperature=2.0)
+    result = _worker(core).per_token_logps(req)
 
-    np.testing.assert_array_equal(core.last_prompt_tokens, batch.prompt_ids)
+    np.testing.assert_array_equal(core.last_prompt_tokens, req.prompt_tokens)
     np.testing.assert_array_equal(
-        core.last_completion_tokens, batch.completion_ids
+        core.last_completion_tokens, req.completion_tokens
     )
     np.testing.assert_allclose(
-        result, batch.completion_ids.astype(np.float32) * 2.0
+        result, req.completion_tokens.astype(np.float32) * 2.0
     )
+    self.assertIsNone(core.last_segment_ids)
+    self.assertIsNone(core.last_segment_positions)
+
+  def test_per_token_logps_forwards_sequence_packing_segment_metadata(self):
+    core = _StubCore()
+    req = datatypes.LogprobsRequest(
+        prompt_tokens=np.zeros((2, 0), dtype=np.int32),
+        completion_tokens=np.array(
+            [[3, 4, 5, 6, 7, 8], [9, 10, 11, 0, 0, 0]], dtype=np.int32
+        ),
+        temperature=1.5,
+        segment_ids=np.array(
+            [[1, 1, 1, 2, 2, 2], [1, 1, 1, 0, 0, 0]], dtype=np.int32
+        ),
+        segment_positions=np.array(
+            [[0, 1, 2, 0, 1, 2], [0, 1, 2, 0, 0, 0]], dtype=np.int32
+        ),
+    )
+
+    result = _worker(core).per_token_logps(req)
+
+    self.assertEqual(core.last_prompt_tokens.shape, (2, 0))
+    np.testing.assert_array_equal(
+        core.last_completion_tokens, req.completion_tokens
+    )
+    np.testing.assert_array_equal(core.last_segment_ids, req.segment_ids)
+    np.testing.assert_array_equal(
+        core.last_segment_positions, req.segment_positions
+    )
+    expected = (
+        req.completion_tokens.astype(np.float32) * 1.5
+        + req.segment_positions.astype(np.float32) * 0.1
+    )
+    np.testing.assert_allclose(result, expected)
+
+  def test_compute_logps_chunks_segment_metadata_along_batch_axis(self):
+    segment_ids = np.tile(np.array([[1, 1, 2]], dtype=np.int32), (6, 1))
+    segment_positions = np.tile(np.array([[0, 1, 0]], dtype=np.int32), (6, 1))
+    req = _logprobs_request(
+        batch=6,
+        prompt_tokens=np.zeros((6, 0), dtype=np.int32),
+        segment_ids=segment_ids,
+        segment_positions=segment_positions,
+    )
+
+    core_single = _StubCore()
+    single = _worker(core_single).compute_logps(req)
+
+    core_chunked = _StubCore()
+    chunked = _worker(core_chunked, chunk_size=2).compute_logps(req)
+
+    np.testing.assert_allclose(single.per_token_logps, chunked.per_token_logps)
+    self.assertEqual(core_single.calls, 1)
+    self.assertEqual(core_chunked.calls, 3)
+    self.assertEqual(
+        core_chunked.chunk_shapes,
+        [((2, 0), (2, 3), (2, 3), (2, 3))] * 3,
+    )
+
+  def test_compute_logps_rejects_half_specified_segment_metadata(self):
+    req = _logprobs_request(
+        batch=2,
+        segment_ids=np.ones((2, 3), dtype=np.int32),
+        segment_positions=None,
+    )
+    result = _worker().compute_logps(req)
+    self.assertIsNotNone(result.error)
+    self.assertEqual(result.error.error_type, "ValueError")
+    self.assertIn("segment_ids and segment_positions", result.error.message)
 
   def test_per_token_logps_rejects_unpadded_trajectory_items(self):
     item = datatypes.TrajectoryItem(
@@ -244,6 +343,147 @@ class InferenceWorkerTest(absltest.TestCase):
     )
     worker.score(req)
     self.assertEqual(events, ["enter_ctx", "exit_ctx"])
+
+  def test_offload_markers_and_lock_serialization(self):
+    worker = _worker()
+    attr = inference_lib.abstract_worker.OFFLOAD_TO_THREAD_ATTR
+    for offloaded_name in (
+        "initialize",
+        "compile",
+        "start",
+        "stop",
+        "compute_logps",
+        "per_token_logps",
+        "score",
+    ):
+      self.assertTrue(
+          getattr(getattr(worker, offloaded_name), attr, False),
+          msg=f"{offloaded_name} should opt in to worker-thread offloading",
+      )
+    for inline_name in ("heartbeat", "info"):
+      self.assertFalse(
+          getattr(getattr(worker, inline_name), attr, False),
+          msg=f"{inline_name} must remain inline on the event loop",
+      )
+
+    entered_logps = threading.Event()
+    release_logps = threading.Event()
+    stop_finished = threading.Event()
+    logps_results: list[np.ndarray] = []
+    logps_errors: list[BaseException] = []
+
+    class _BlockingCore(_StubCore):
+
+      def get_ref_per_token_logps(
+          self,
+          prompt_tokens,
+          completion_tokens,
+          pad_id,
+          eos_id,
+          temperature=1.0,
+      ):
+        entered_logps.set()
+        if not release_logps.wait(timeout=5.0):
+          raise TimeoutError("release_logps timed out")
+        return super().get_ref_per_token_logps(
+            prompt_tokens, completion_tokens, pad_id, eos_id, temperature
+        )
+
+    blocking_worker = _worker(_BlockingCore())
+    blocking_worker.initialize()
+    req = datatypes.LogprobsRequest(
+        prompt_tokens=np.array([[1, 2]], dtype=np.int32),
+        completion_tokens=np.array([[3, 4]], dtype=np.int32),
+        temperature=1.0,
+    )
+
+    def _run_logps():
+      try:
+        logps_results.append(blocking_worker.per_token_logps(req))
+      except BaseException as exc:  # pylint: disable=broad-exception-caught
+        logps_errors.append(exc)
+
+    t_logps = threading.Thread(target=_run_logps)
+    t_logps.start()
+    self.assertTrue(entered_logps.wait(timeout=5.0))
+
+    # Inline probes do not acquire `_worker_lock` and respond immediately.
+    self.assertEqual(blocking_worker.heartbeat().state, WorkerState.READY)
+    self.assertEqual(blocking_worker.info().worker_id, "test_worker_1")
+
+    def _run_stop():
+      blocking_worker.stop()
+      stop_finished.set()
+
+    t_stop = threading.Thread(target=_run_stop)
+    t_stop.start()
+    self.assertFalse(stop_finished.wait(timeout=0.05))
+
+    release_logps.set()
+    t_logps.join(timeout=5.0)
+    t_stop.join(timeout=5.0)
+    self.assertEmpty(logps_errors)
+    self.assertLen(logps_results, 1)
+    np.testing.assert_allclose(logps_results[0], req.completion_tokens)
+    self.assertTrue(stop_finished.is_set())
+    self.assertEqual(blocking_worker.heartbeat().state, WorkerState.STOPPED)
+
+  def test_offload_to_thread_rejects_async_and_supports_reentrant_lock(self):
+    aw = inference_lib.abstract_worker
+
+    async def _async_fn(self):
+      return self
+
+    with self.assertRaisesRegex(TypeError, "synchronous methods"):
+      aw.offload_to_thread(_async_fn)
+
+    class _MinimalWorker(aw.Worker):
+
+      @aw.offload_to_thread
+      def initialize(self):
+        return datatypes.Response()
+
+      @aw.offload_to_thread
+      def compile(self, dummy_data=None):
+        del dummy_data
+        return self.initialize()
+
+      def start(self):
+        return datatypes.Response()
+
+      def stop(self, *, abort: bool = False):
+        del abort
+        return datatypes.Response()
+
+      def info(self):
+        return datatypes.WorkerInfo(worker_id="m", roles=frozenset())
+
+      def heartbeat(self):
+        return datatypes.HealthReport(state=self.state)
+
+    w = _MinimalWorker()
+    self.assertTrue(getattr(w.compile, aw.OFFLOAD_TO_THREAD_ATTR, False))
+    self.assertFalse(getattr(w.heartbeat, aw.OFFLOAD_TO_THREAD_ATTR, False))
+    self.assertIsInstance(w.compile(), datatypes.Response)
+
+  def test_stop_is_idempotent_and_invokes_on_stop_callback(self):
+    worker = _worker()
+    worker.initialize()
+    observed = []
+    worker.set_on_stop(observed.append)
+
+    first = worker.stop()
+    self.assertEqual(worker.state, WorkerState.STOPPED)
+    self.assertEqual(first.metadata, {"stopped": True, "abort": False})
+    self.assertEqual(observed, [False])
+
+    second = worker.stop(abort=True)
+    self.assertEqual(worker.state, WorkerState.STOPPED)
+    self.assertEqual(
+        second.metadata,
+        {"stopped": True, "already_stopped": True, "abort": True},
+    )
+    self.assertEqual(observed, [False, True])
 
 
 if __name__ == "__main__":

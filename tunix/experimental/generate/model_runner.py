@@ -21,6 +21,7 @@ sampling on device.
 from collections.abc import Sequence
 import dataclasses
 import functools
+import math
 import operator
 from typing import Any, TypeVar
 
@@ -33,35 +34,18 @@ import jax
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
-from tunix.dist_rl.rollout import sampler as sampler_lib
+from tunix.experimental.generate import configs
+from tunix.experimental.generate import request as request_lib
+from tunix.experimental.generate import utils
+from tunix.models import paged_attention
 from tunix.rl import reshard
 from tunix.rl import utils as rl_utils
 
 
-@dataclasses.dataclass(frozen=True, kw_only=True)
-class ModelRunnerConfig:
-  """Configuration for the model runner."""
-
-  # The maximum `top_k` value allowed in `SamplingParams`.
-  # <= 0 to set no limit.
-  max_top_k: int
-  # The device mesh the transformer runs on.
-  mesh: jax.sharding.Mesh
-  # Whether or not return logprobs.
-  return_logprobs: bool = False
-  # Whether or not to return logits.
-  return_logits: bool = False
-  # The number of model forward passes to execute per engine step.
-  num_scheduler_steps: int = 1
-  # The engine's single sampling seed. Each step's key is derived from it, and
-  # every row samples independently under that key.
-  seed: int = 0
-
-  def __post_init__(self):
-    if self.num_scheduler_steps < 1:
-      raise ValueError(
-          f'num_scheduler_steps must be positive, got {self.num_scheduler_steps}.'
-      )
+_HIERARCHICAL_BLOCK_SIZE = 256
+_TOPK_TARGET_BLOCK_SIZE = 8192
+_MIN_SAFE_TEMP = float(np.finfo(np.float32).tiny)
+_MAX_SAFE_TEMP = 1.0 / _MIN_SAFE_TEMP
 
 
 @struct.dataclass
@@ -79,14 +63,18 @@ class SamplingMetadata:
   top_p: jax.Array | np.ndarray        # `[num_rows]` float32, in (0, 1].
   # Samples only from the `top_k` most likely tokens. <= 0 means no limit.
   top_k: jax.Array | np.ndarray        # `[num_rows]` int32, in [1, max_top_k].
+  # Whether every request samples from the full vocabulary without `top_k` or
+  # `top_p` truncation.
+  unconstrained: bool = struct.field(pytree_node=False, default=False)
 
   # TODO(yatlas): Remove sampling_params. It is being deprecated.
   @classmethod
   def from_sampling_params(
       cls,
-      sampling_params: Sequence[sampler_lib.SamplingParams],
+      sampling_params: Sequence[request_lib.SamplingParams],
       num_rows: int,
       max_top_k: int,
+      distribution: jax.Array | np.ndarray,
   ) -> 'SamplingMetadata':
     """Packs the scheduled requests' sampling settings into host arrays.
 
@@ -95,6 +83,9 @@ class SamplingMetadata:
         order.
       num_rows: The row capacity of the batch.
       max_top_k: The maximum `top_k` value allowed.
+      distribution: `[num_groups, 3]` row layout of each DP group. Group `i`'s
+        `distribution[i, 2]` requests are packed starting at row
+        `i * (num_rows // num_groups)`.
 
     Returns:
       The metadata, padded out to `num_rows` rows.
@@ -107,7 +98,17 @@ class SamplingMetadata:
     temperature = np.zeros((num_rows,), dtype=np.float32)
     top_p = np.ones((num_rows,), dtype=np.float32)
     top_k = np.ones((num_rows,), dtype=np.int32)
-    for row, params in enumerate(sampling_params):
+    unconstrained = bool(max_top_k <= 0)
+
+    dists = np.asarray(distribution)
+    rows_per_group = num_rows // dists.shape[0]
+    n_tokens = dists[:, 2]
+    row_indices = []
+    for i, n in enumerate(n_tokens):
+      start = i * rows_per_group
+      row_indices.extend(range(start, start + int(n)))
+
+    for row, params in zip(row_indices, sampling_params):
       if (
           max_top_k > 0
           and params.top_k is not None
@@ -121,8 +122,143 @@ class SamplingMetadata:
       # No `top_p` keeps every token.
       top_p[row] = 1.0 if params.top_p is None else params.top_p
       top_k[row] = max_top_k if params.top_k is None else params.top_k
+      if temperature[row] > 0.0 and (top_k[row] > 0 or top_p[row] < 1.0):
+        unconstrained = False
 
-    return cls(temperature=temperature, top_p=top_p, top_k=top_k)
+    return cls(
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        unconstrained=unconstrained,
+    )
+
+
+def _finite_or_zero(x: jax.Array) -> jax.Array:
+  return jnp.where(jnp.isfinite(x), x, 0.0)
+
+
+def _hierarchical_num_blocks(vocab_size: int, tp_size: int = 1) -> int:
+  """Returns the `tp_size`-multiple number of 256-token blocks for the vocab."""
+  if tp_size < 1:
+    raise ValueError(f'tp_size must be positive, got {tp_size}.')
+
+  return utils.cdiv(vocab_size, tp_size * _HIERARCHICAL_BLOCK_SIZE) * tp_size
+
+
+def _sample_hierarchical_256(
+    logits: jax.Array,
+    key: jax.Array,
+    is_greedy: jax.Array,
+    temp: jax.Array,
+    return_logprobs: bool = False,
+    tp_size: int = 1,
+) -> tuple[jax.Array, jax.Array | None]:
+  """Samples tokens in two 256-wide stages without full-vocab fp32 buffers."""
+  num_rows, vocab_size = logits.shape
+
+  # A multiple of `tp_size` blocks keeps alignment with the vocabulary
+  # sharding.
+  num_blocks = _hierarchical_num_blocks(vocab_size, tp_size)
+  pad_width = num_blocks * _HIERARCHICAL_BLOCK_SIZE - vocab_size
+  inv_temp = 1.0 / temp
+
+  if pad_width:
+    logits = jnp.pad(
+        logits,
+        ((0, 0), (0, pad_width)),
+        constant_values=-jnp.inf,
+    )
+  blocks = logits.reshape(num_rows, num_blocks, _HIERARCHICAL_BLOCK_SIZE)
+  block_max = jnp.max(blocks, axis=-1).astype(jnp.float32)
+  row_max = _finite_or_zero(jnp.max(block_max, axis=-1))
+
+  shifted = (
+      blocks.astype(jnp.float32) - _finite_or_zero(block_max)[:, :, None]
+  ) * inv_temp[:, None, None]
+  block_lse = (block_max - row_max[:, None]) * inv_temp[:, None] + jnp.log(
+      jnp.sum(jnp.exp(shifted), axis=-1)
+  )
+
+  k_block, k_within = jax.random.split(key)
+  block_idx = jnp.where(
+      is_greedy,
+      jnp.argmax(block_max, axis=-1),
+      jax.random.categorical(k_block, block_lse, axis=-1),
+  )
+  chosen_raw = blocks[jnp.arange(num_rows), block_idx]
+  chosen_scaled = (
+      chosen_raw.astype(jnp.float32) - row_max[:, None]
+  ) * inv_temp[:, None]
+  greedy_within = jnp.argmax(chosen_raw, axis=-1)
+  sampled_within = jax.random.categorical(k_within, chosen_scaled, axis=-1)
+  within_idx = jnp.where(is_greedy, greedy_within, sampled_within)
+  next_tokens = (block_idx * _HIERARCHICAL_BLOCK_SIZE + within_idx).astype(
+      jnp.int32
+  )
+
+  if not return_logprobs:
+    return next_tokens, None
+
+  chosen_logit = chosen_scaled[jnp.arange(num_rows), within_idx]
+  logprobs = chosen_logit - jax.nn.logsumexp(block_lse, axis=-1)
+  return next_tokens, logprobs
+
+
+def _top_k_num_blocks(vocab: int, k: int, tp_size: int = 1) -> int:
+  """Returns a `tp_size`-multiple block count with `k <= cdiv(vocab, blocks)`."""
+  if tp_size < 1:
+    raise ValueError(f'tp_size must be positive, got {tp_size}.')
+
+  if k >= vocab:
+    return 1
+
+  max_blocks = vocab if k <= 1 else (vocab - 1) // (k - 1)
+  blocks_per_tp = min(
+      utils.cdiv(vocab, tp_size * _TOPK_TARGET_BLOCK_SIZE),
+      max_blocks // tp_size,
+  )
+
+  return tp_size * blocks_per_tp if blocks_per_tp >= 1 else 1
+
+
+# TODO(yatlas): Remove tp_size param, and derive it from active mesh axis.
+def _top_k(
+    logits: jax.Array,
+    k: int,
+    tp_size: int = 1,
+) -> tuple[jax.Array, jax.Array]:
+  """Returns the `k` largest logits of each row and their token ids."""
+  # jax.lax.top_k lowers to two stages of top_k when the vocabulary is large
+  # to take advantage of tp parallelism. But, when
+  # jax.lax.top_k call leads into a sampling call, XLA is unable to shard the
+  # logits, causing unnecessary collectives.
+  #
+  # Perform the two-stage top_k here manually so that logits are sharded across
+  # the tp_axis.
+  rows, vocab = logits.shape
+  num_blocks = _top_k_num_blocks(vocab, k, tp_size)
+  if num_blocks <= 1:
+    return jax.lax.top_k(logits, k)
+
+  # `_top_k_num_blocks` keeps every block at least `k` wide.
+  block_size = utils.cdiv(vocab, num_blocks)
+  pad = num_blocks * block_size - vocab
+  if pad:
+    # Padding lands at the end, so real -inf logits win ties against it.
+    logits = jnp.pad(logits, ((0, 0), (0, pad)), constant_values=-jnp.inf)
+  blocks = logits.reshape(rows, num_blocks, block_size)
+
+  # First stage: top_k within each block to get `num_blocks * k` candidates.
+  top_block_vals, top_block_idxs = jax.lax.top_k(blocks, k)
+  offsets = jnp.arange(num_blocks, dtype=jnp.int32)[None, :, None] * block_size
+  cand_vals = top_block_vals.reshape(rows, num_blocks * k)
+  cand_token_ids = (top_block_idxs + offsets).reshape(rows, num_blocks * k)
+
+  # Second stage: top_k across the candidates.
+  top_vals, pick = jax.lax.top_k(cand_vals, k)
+  top_token_ids = jnp.take_along_axis(cand_token_ids, pick, axis=-1)
+
+  return top_vals, top_token_ids
 
 
 def sample(
@@ -131,6 +267,7 @@ def sample(
     metadata: SamplingMetadata,
     max_top_k: int,
     return_logprobs: bool = False,
+    tp_size: int = 1,
 ) -> tuple[jax.Array, jax.Array | None]:
   """Samples one token per row, under each row's own sampling settings.
 
@@ -146,6 +283,9 @@ def sample(
     max_top_k: How many candidate tokens to draw for every row. Each row's
       `top_k` must not exceed it. -1 draws every token in the vocabulary.
     return_logprobs: Whether to return the sampled tokens' logprobs.
+    tp_size: Size of the `'tp'` mesh axis, used to align the vocabulary blocks
+      of two-stage `top_k` and of unconstrained block sampling with
+      tensor-parallel vocabulary sharding.
 
   Returns:
     A tuple of
@@ -156,14 +296,24 @@ def sample(
   # For most current use cases of Tunix, k does not vary across rows. If this
   # changes, this function should be updated to sample individually per row so
   # that performance is not dependent on max_top_k.
-
-  is_greedy = metadata.temperature <= 0.0
-  temperature = jnp.where(is_greedy, 1.0, metadata.temperature)
-
+  temp = jnp.asarray(metadata.temperature, dtype=jnp.float32)
+  is_greedy = temp <= 0.0
+  temperature = jnp.where(
+      is_greedy, 1.0, jnp.clip(temp, _MIN_SAFE_TEMP, _MAX_SAFE_TEMP)
+  )
   vocab_size = logits.shape[-1]
-  k = vocab_size if max_top_k <= 0 else min(max_top_k, vocab_size)
+  if metadata.unconstrained:
+    return _sample_hierarchical_256(
+        logits,
+        key,
+        is_greedy,
+        temperature,
+        return_logprobs=return_logprobs,
+        tp_size=tp_size,
+    )
 
-  candidate_logits, candidate_tokens = jax.lax.top_k(logits, k)
+  k = vocab_size if max_top_k <= 0 else min(max_top_k, vocab_size)
+  candidate_logits, candidate_tokens = _top_k(logits, k, tp_size)
   scaled_logits = candidate_logits.astype(jnp.float32) / temperature[:, None]
 
   ranks = jnp.arange(k)
@@ -184,6 +334,7 @@ def sample(
   sampled_tokens = jnp.take_along_axis(
       candidate_tokens, sampled[:, None], axis=-1
   )[:, 0]
+
   # The candidates are sorted, so the first one is the most likely token.
   next_tokens = jnp.where(is_greedy, candidate_tokens[:, 0], sampled_tokens)
 
@@ -200,30 +351,6 @@ def sample(
 
 Cache = dict[str, jax.Array]
 _PyTree = TypeVar('_PyTree')
-
-
-@struct.dataclass
-class RPAMetadata:
-  """Execution metadata for the Ragged Paged Attention kernel.
-
-  Rows are ordered `[decodes, chunked prefills, full prefills]`, followed by
-  padding rows up to the batch's row capacity.
-  """
-
-  # `[num_rows, max_pages_per_seq]` physical page indices of each row, keyed by
-  # the name of the KV cache they index.
-  page_indices: dict[str, jax.Array | np.ndarray]
-  # `[num_rows]` KV length of each row, including the tokens it runs this step.
-  kv_lens: jax.Array | np.ndarray
-  # `[num_rows]` number of tokens each row runs this step.
-  query_lens: jax.Array | np.ndarray
-  # `[3]` row layout `(num_decodes, num_chunked_end, num_seqs)`: the decodes
-  # are rows `[0, i)`, the chunked prefills `[i, j)` and the full prefills
-  # `[j, k)`.
-  distribution: jax.Array | np.ndarray
-  chunk_prefill_size: int | None = struct.field(
-      default=None, pytree_node=False
-  )
 
 
 @functools.partial(jax.jit, static_argnames=['num_steps'])
@@ -261,7 +388,7 @@ class ModelRunner:
   def __init__(
       self,
       transformer: nnx.Module,
-      config: ModelRunnerConfig,
+      config: configs.ModelRunnerConfig,
   ):
     """Initializes the runner.
 
@@ -292,7 +419,7 @@ class ModelRunner:
     )
 
   @property
-  def config(self) -> ModelRunnerConfig:
+  def config(self) -> configs.ModelRunnerConfig:
     return self._config
 
   def model_def_and_state(
@@ -450,44 +577,51 @@ class ModelRunner:
   def _get_token_positions(
       self,
       tokens: jax.Array,
-      metadata: RPAMetadata,
+      metadata: paged_attention.PagedAttnMetadata,
   ) -> jax.Array:
-    """Returns the positions of each token within its sequence."""
-    total_capacity = tokens.shape[0]
-    n_rows = metadata.query_lens.shape[0]
+    """Returns the `[num_groups, tokens_per_group]` positions of each token."""
+    num_groups = metadata.distribution.shape[0]
+    group_query_lens = jnp.asarray(metadata.query_lens).reshape(num_groups, -1)
+    group_kv_lens = jnp.asarray(metadata.kv_lens).reshape(num_groups, -1)
 
-    # Example:
-    # tokens: [a, b, c, d, e, f, PAD, PAD]
-    # query_lens: [2, 1, 3]
-    # row_idxs: [0, 0, 1, 2, 2, 2, 2, 2]
-    row_idxs = jnp.repeat(
-        jnp.arange(n_rows),
-        metadata.query_lens,
-        total_repeat_length=total_capacity,
-    )
+    def _group_positions(toks, q_lens, kv_lens):
+      total_capacity = toks.shape[0]
+      n_rows = q_lens.shape[0]
 
-    # Example:
-    # tokens: [a, b, c, d, e, f, PAD, PAD]
-    # query_lens: [2, 1, 3]
-    # intra_offsets: [0, 1, 0, 0, 1, 2, 3, 4]
-    local_positions = jnp.arange(total_capacity)
-    starts = jnp.zeros_like(metadata.query_lens)
-    if len(metadata.query_lens) > 0:
-      starts = starts.at[1:].set(jnp.cumsum(metadata.query_lens)[:-1])
-    intra_offsets = local_positions - starts[row_idxs]
+      # Example:
+      # tokens: [a, b, c, d, e, f, PAD, PAD]
+      # query_lens: [2, 1, 3]
+      # row_idxs: [0, 0, 1, 2, 2, 2, 2, 2]
+      row_idxs = jnp.repeat(
+          jnp.arange(n_rows),
+          q_lens,
+          total_repeat_length=total_capacity,
+      )
 
-    # KV lens includes the query tokens. This yields the length of the sequences
-    # before appending the query tokens.
-    curr_seq_lens = metadata.kv_lens - metadata.query_lens
+      # Example:
+      # tokens: [a, b, c, d, e, f, PAD, PAD]
+      # query_lens: [2, 1, 3]
+      # intra_offsets: [0, 1, 0, 0, 1, 2, 3, 4]
+      local_positions = jnp.arange(total_capacity)
+      starts = jnp.zeros_like(q_lens)
+      if len(q_lens) > 0:
+        starts = starts.at[1:].set(jnp.cumsum(q_lens)[:-1])
+      intra_offsets = local_positions - starts[row_idxs]
 
-    return intra_offsets + curr_seq_lens[row_idxs]
+      # KV lens includes the query tokens. This yields the length of the
+      # sequences before appending the query tokens.
+      curr_seq_lens = kv_lens - q_lens
+
+      return intra_offsets + curr_seq_lens[row_idxs]
+
+    return jax.vmap(_group_positions)(tokens, group_query_lens, group_kv_lens)
 
   def _model_step_fn(
       self,
       params: list[nnx.Variable],
       cache: Cache,
       tokens: jax.Array,
-      metadata: RPAMetadata,
+      metadata: paged_attention.PagedAttnMetadata,
       sampling_metadata: SamplingMetadata,
       rng: jax.Array,
   ) -> tuple[jax.Array, jax.Array | None, jax.Array | None, Cache, jax.Array]:
@@ -496,7 +630,8 @@ class ModelRunner:
     Args:
       params: The flattened transformer state to run with.
       cache: The physical KV cache pages to read and write.
-      tokens: The ragged array of tokens for the batch.
+      tokens: `[num_groups, tokens_per_group]` array of tokens for the batch,
+        where each row is a DP group's padded ragged token array.
       metadata: Ragged execution metadata for the attention kernel.
       sampling_metadata: Each row's sampling settings.
       rng: PRNG key to split for sampling this step.
@@ -514,9 +649,18 @@ class ModelRunner:
     transformer = nnx.merge(self._transformer_graphdef, params)
     positions = self._get_token_positions(tokens, metadata)
 
+    num_groups = metadata.distribution.shape[0]
+    group_query_lens = jnp.asarray(metadata.query_lens).reshape(num_groups, -1)
+    last_token_idxs = jnp.maximum(0, jnp.cumsum(group_query_lens, axis=-1) - 1)
+
+    tokens, positions, last_token_idxs = (
+        self._split_rows(x) for x in (tokens, positions, last_token_idxs)
+    )
+    metadata = jax.tree.map(self._split_rows, metadata)
+    sampling_metadata = jax.tree.map(self._split_rows, sampling_metadata)
+
     # Each row samples from the logits of its last token, so the model only
     # computes those.
-    last_token_idxs = jnp.maximum(0, jnp.cumsum(metadata.query_lens) - 1)
     logits, updated_cache = transformer(
         tokens,
         positions,
@@ -524,6 +668,16 @@ class ModelRunner:
         metadata=metadata,
         mesh=config.mesh,
         logits_idxs=last_token_idxs,
+    )
+    # Sampling sorts every row's logits over the whole vocabulary, so each
+    # device samples only its share of the rows rather than all of them. Keep
+    # axis 1 sharded on `'tp'` so two-stage `top_k` only gathers `k` candidates
+    # per block instead of the full vocabulary.
+    tp_size = (
+        int(config.mesh.shape['tp']) if 'tp' in config.mesh.axis_names else 1
+    )
+    logits = self._split_rows(
+        logits, trailing_spec=('tp',) if tp_size > 1 else ()
     )
 
     rng, step_rng = jax.random.split(rng)
@@ -533,17 +687,53 @@ class ModelRunner:
         sampling_metadata,
         max_top_k=config.max_top_k,
         return_logprobs=config.return_logprobs,
+        tp_size=tp_size,
     )
 
     res_logits = logits if config.return_logits else None
     return next_tokens, res_logits, logp, updated_cache, rng
+
+  def _split_rows(
+      self,
+      x: jax.Array,
+      *,
+      trailing_spec: tuple[str | None, ...] = (),
+  ) -> jax.Array:
+    """Splits the rows of `x` across the mesh's DP axes, if they divide evenly.
+
+    The `"dp"` and `"fsdp"` axes index the DP groups, as in `kv_cache_manager`.
+
+    Args:
+      x: An array with one row per scheduled row of the batch.
+      trailing_spec: Optional `PartitionSpec` entries for axes after axis 0.
+
+    Returns:
+      `x` constrained to shard axis 0 across the DP axes (when there are
+      multiple DP shards and `x.shape[0]` divides evenly, else `None`) and any
+      `trailing_spec`, or `x` unchanged when neither axis 0 nor `trailing_spec`
+      applies a sharding constraint.
+    """
+    mesh = self._config.mesh
+    dp_axes = utils.kv_cache_dp_axes(mesh)
+    num_shards = math.prod(mesh.shape[axis] for axis in dp_axes)
+    row_spec = (
+        dp_axes if num_shards > 1 and x.shape[0] % num_shards == 0 else None
+    )
+    if row_spec is None and not any(trailing_spec):
+      return x
+    return jax.lax.with_sharding_constraint(
+        x,
+        jax.sharding.NamedSharding(
+            mesh, jax.sharding.PartitionSpec(row_spec, *trailing_spec)
+        ),
+    )
 
   def _decode_loop_fn(
       self,
       params: list[nnx.Variable],
       cache: Cache,
       next_tokens: jax.Array,
-      metadata: RPAMetadata,
+      metadata: paged_attention.PagedAttnMetadata,
       sampling_metadata: SamplingMetadata,
       rng: jax.Array,
       num_steps: int,
@@ -570,48 +760,60 @@ class ModelRunner:
       - rng: The updated PRNG key for subsequent steps.
     """
     num_rows = metadata.query_lens.shape[0]
-    distribution = metadata.distribution
+    distribution = jnp.asarray(metadata.distribution, dtype=jnp.int32)
+    num_groups = distribution.shape[0]
+    rows_per_group = num_rows // num_groups
 
-    # Rows are ordered `[decodes, chunked prefills, full prefills]`. A chunked
-    # prefill still has prompt left to process, so its sampled token is
-    # discarded and it leaves the batch for the decode loop.
-    rows = jnp.arange(num_rows, dtype=jnp.int32)
-    is_chunked_prefill = (rows >= distribution[0]) & (rows < distribution[1])
-    is_surviving = (rows < distribution[2]) & ~is_chunked_prefill
-    num_decodes = distribution[0]
-    num_full_prefills = distribution[2] - distribution[1]
-    num_surviving = num_decodes + num_full_prefills
-    # Move the surviving rows to the front.
-    order = jnp.argsort(~is_surviving)
+    # Each DP group's slice of `rows_per_group` rows is ordered `[decodes,
+    # chunked prefills, full prefills, padding]`. A chunked prefill still has
+    # prompt left to process, so its sampled token is discarded and it leaves
+    # the batch for the decode loop.
+    group_rows = jnp.arange(rows_per_group, dtype=jnp.int32)[None, :]
+    is_chunked_prefill = (group_rows >= distribution[:, 0:1]) & (
+        group_rows < distribution[:, 1:2]
+    )
+    is_surviving = (group_rows < distribution[:, 2:3]) & ~is_chunked_prefill
+    # Each group's surviving rows are its decodes and full prefills.
+    num_surviving_per_group = (
+        distribution[:, 0] + distribution[:, 2] - distribution[:, 1]
+    )
+    # Move each group's surviving rows to the front of its own slice.
+    local_order = jnp.argsort(~is_surviving, axis=1)
+    group_row_offsets = (
+        jnp.arange(num_groups, dtype=local_order.dtype)[:, None]
+        * rows_per_group
+    )
+    order = (local_order + group_row_offsets).reshape(-1)
+    is_active_decode = (group_rows < num_surviving_per_group[:, None]).reshape(
+        -1
+    )
 
-    query_lens = jnp.where(rows < num_surviving, jnp.int32(1), jnp.int32(0))
+    query_lens = jnp.where(is_active_decode, jnp.int32(1), jnp.int32(0))
     kv_lens = (
         jnp.where(
-            rows < num_surviving,
+            is_active_decode,
             jnp.asarray(metadata.kv_lens, dtype=jnp.int32)[order],
             jnp.int32(0),
         )
         + query_lens
     )
-    decode_metadata = RPAMetadata(
+    decode_metadata = paged_attention.PagedAttnMetadata(
         page_indices={
             cache_name: jnp.asarray(idxs, dtype=jnp.int32)[order]
             for cache_name, idxs in metadata.page_indices.items()
         },
         kv_lens=kv_lens,
         query_lens=query_lens,
-        distribution=jnp.full_like(
-            distribution, num_surviving, dtype=jnp.int32
-        ),
-        chunk_prefill_size=metadata.chunk_prefill_size,
+        distribution=jnp.stack([num_surviving_per_group] * 3, axis=1),
+        decode_only=True,
     )
 
     # Each surviving request's sampling settings move along with its row. The
-    # rows past `num_surviving` become padding.
+    # rows past `num_surviving_per_group` in each group's slice become padding.
     def compact(values, padding):
       arr = jnp.asarray(values)
       return jnp.where(
-          rows < num_surviving,
+          is_active_decode,
           arr[order],
           jnp.asarray(padding, dtype=arr.dtype),
       )
@@ -620,12 +822,16 @@ class ModelRunner:
         temperature=compact(sampling_metadata.temperature, jnp.float32(0.0)),
         top_p=compact(sampling_metadata.top_p, jnp.float32(1.0)),
         top_k=compact(sampling_metadata.top_k, jnp.int32(1)),
+        unconstrained=sampling_metadata.unconstrained,
     )
 
     # Each surviving sequence feeds the token it just sampled back in, packed
-    # into the leading rows to match the compacted metadata.
-    decode_tokens = next_tokens[order]
-    inverse_order = jnp.argsort(order)
+    # into the leading rows of its group's slice to match the compacted
+    # metadata.
+    decode_tokens = next_tokens[order].reshape(num_groups, rows_per_group)
+    inverse_order = (
+        jnp.argsort(local_order, axis=1) + group_row_offsets
+    ).reshape(-1)
 
     def decode_step(carry, _):
       cache, tokens, kv_lens, rng = carry
@@ -638,7 +844,12 @@ class ModelRunner:
           decode_sampling_metadata,
           rng,
       )
-      carry = (cache, next_tokens, kv_lens + query_lens, rng)
+      carry = (
+          cache,
+          next_tokens.reshape(num_groups, rows_per_group),
+          kv_lens + query_lens,
+          rng,
+      )
       return carry, (next_tokens, logits, logp)
 
     carry, outputs = jax.lax.scan(
@@ -671,8 +882,8 @@ class ModelRunner:
       self,
       cache: Cache,
       tokens: jax.Array,
-      metadata: RPAMetadata,
-      sampling_params: Sequence[sampler_lib.SamplingParams],
+      metadata: paged_attention.PagedAttnMetadata,
+      sampling_params: Sequence[request_lib.SamplingParams],
   ) -> tuple[jax.Array, jax.Array | None, jax.Array | None, Cache]:
     """Runs model forward passes on a batch of requests, and samples tokens.
 
@@ -681,7 +892,8 @@ class ModelRunner:
 
     Args:
       cache: The physical KV cache pages to read and write.
-      tokens: The ragged array of tokens for the batch.
+      tokens: `[num_groups, tokens_per_group]` array of tokens for the batch,
+        where each row is a DP group's padded ragged token array.
       metadata: Ragged execution metadata for the attention kernel.
       sampling_params: The sampling settings of each scheduled request, in row
         order.
@@ -701,7 +913,8 @@ class ModelRunner:
     """
     config = self._config
     num_rows = metadata.query_lens.shape[0]
-    num_scheduled = int(metadata.distribution[2])
+    distribution = np.asarray(metadata.distribution)
+    num_scheduled = int(np.sum(distribution[:, 2]))
     if len(sampling_params) != num_scheduled:
       raise ValueError(
           f'Got {len(sampling_params)} sampling params for {num_scheduled}'
@@ -711,7 +924,10 @@ class ModelRunner:
     device_metadata, sampling_metadata = self._to_device((
         metadata,
         SamplingMetadata.from_sampling_params(
-            sampling_params, num_rows, self._config.max_top_k
+            sampling_params,
+            num_rows,
+            self._config.max_top_k,
+            distribution=distribution,
         ),
     ))
 
@@ -726,14 +942,14 @@ class ModelRunner:
     num_steps = config.num_scheduler_steps
 
     # Chunked prefills drop out, but the rest of the batch carries on.
-    distribution = metadata.distribution
-
-    # distribution = [i, j, k]
+    # Each DP group's distribution is [i, j, k]:
     # i: num decodes
     # j: i + num chunked prefills
     # k: j + num full prefills
     # num_surviving: num decodes + num full prefills = i + k - j
-    num_surviving = distribution[0] + distribution[2] - distribution[1]
+    num_surviving = int(
+        np.sum(distribution[:, 0] + distribution[:, 2] - distribution[:, 1])
+    )
 
     num_decode_steps = num_steps - 1 if num_surviving else 0
 
@@ -744,7 +960,7 @@ class ModelRunner:
               self._flattened_transformer_state,
               cache,
               next_tokens,
-              device_metadata,
+              dataclasses.replace(device_metadata, decode_only=True),
               sampling_metadata,
               self._rng,
               num_steps=num_decode_steps,

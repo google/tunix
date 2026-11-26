@@ -25,10 +25,12 @@ from typing import Any
 from unittest import mock
 
 from absl.testing import absltest
+from absl.testing import parameterized
 import omegaconf
 from tunix.cli import base_rl_pipeline
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import rl_cluster as rl_engine_lib
+from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -290,8 +292,6 @@ agentic_dummy_config:
   max_concurrency: 1
   off_policy_steps: 0
   max_turns: 1
-sglang_jax_config:
-  mem_fraction_static: 0.8
 vllm_config:
   hbm_utilization: 0.4
 """
@@ -342,8 +342,6 @@ agentic_dummy_config:
   max_concurrency: 1
   off_policy_steps: 0
   max_turns: 1
-sglang_jax_config:
-  mem_fraction_static: 0.8
 vllm_config:
   hbm_utilization: 0.4
 """
@@ -385,8 +383,6 @@ agentic_dummy_config:
   max_concurrency: 1
   off_policy_steps: 0
   max_turns: 1
-sglang_jax_config:
-  mem_fraction_static: 0.8
 vllm_config:
   hbm_utilization: 0.4
 """
@@ -434,8 +430,6 @@ agentic_dummy_config:
   max_concurrency: 1
   off_policy_steps: 0
   max_turns: 1
-sglang_jax_config:
-  mem_fraction_static: 0.8
 vllm_config:
   hbm_utilization: 0.4
 """
@@ -498,8 +492,6 @@ agentic_dummy_config:
   max_concurrency: 1
   off_policy_steps: 0
   max_turns: 1
-sglang_jax_config:
-  mem_fraction_static: 0.8
 vllm_config:
   hbm_utilization: 0.4
 """
@@ -544,8 +536,6 @@ agentic_dummy_config:
   max_concurrency: 1
   off_policy_steps: 0
   max_turns: {max_turns}
-sglang_jax_config:
-  mem_fraction_static: 0.8
 vllm_config:
   hbm_utilization: 0.4
 """
@@ -632,8 +622,6 @@ agentic_dummy_config:
   max_concurrency: 1
   off_policy_steps: 0
   {agentic_overrides}
-sglang_jax_config:
-  mem_fraction_static: 0.8
 vllm_config:
   hbm_utilization: 0.4
 """
@@ -694,8 +682,6 @@ agentic_dummy_config:
   max_concurrency: 1
   off_policy_steps: 0
   max_turns: 1
-sglang_jax_config:
-  mem_fraction_static: 0.8
 vllm_config:
   hbm_utilization: 0.4
 """
@@ -801,8 +787,6 @@ agentic_dummy_config:
   max_concurrency: 1
   off_policy_steps: 0
   max_turns: 1
-sglang_jax_config:
-  mem_fraction_static: 0.8
 vllm_config:
   hbm_utilization: 0.4
 """
@@ -847,6 +831,361 @@ vllm_config:
         [("actor_model_config", 2), ("rollout_model_config", 2)],
         devices=fake_devices,
         allocation_policy="PERFORMANCE",
+    )
+
+  def test_score_centering_auto_derives_and_validates_num_logprobs(self):
+    sc_yaml = """
+grpo_config:
+  num_generations: 2
+  num_iterations: 1
+  score_centering: true
+  score_centering_top_k: 64
+"""
+    pipeline = _make_pipeline(sc_yaml)
+    self.assertEqual(pipeline.create_rollout_config().num_logprobs, 64)
+
+    top1_pipeline = _make_pipeline_with_cli_args(
+        sc_yaml, ["grpo_config.score_centering_top_k=1"]
+    )
+    self.assertEqual(top1_pipeline.create_rollout_config().num_logprobs, 2)
+
+    bad_pipeline = _make_pipeline_with_cli_args(
+        sc_yaml, ["rollout_config.num_logprobs=16"]
+    )
+    with self.assertRaisesRegex(ValueError, "num_logprobs.*score_centering"):
+      bad_pipeline.create_rollout_config()
+
+
+class ChatParserConfigTest(parameterized.TestCase):
+
+  @parameterized.named_parameters(
+      (
+          "qwen_null_defaults_true",
+          "qwen",
+          None,
+          [],
+          chat_parser_lib.QwenChatTemplateParser,
+          True,
+      ),
+      (
+          "qwen_cli_false_disables",
+          "qwen",
+          None,
+          ["chat_parser_config.enable_thinking=false"],
+          chat_parser_lib.QwenChatTemplateParser,
+          False,
+      ),
+      (
+          "qwen_quoted_string_false_disables",
+          "qwen",
+          "false",
+          [],
+          chat_parser_lib.QwenChatTemplateParser,
+          False,
+      ),
+      (
+          "qwen_quoted_string_true_enables",
+          "qwen",
+          "true",
+          [],
+          chat_parser_lib.QwenChatTemplateParser,
+          True,
+      ),
+      (
+          "qwen3p5_null_defaults_true",
+          "qwen3.5",
+          None,
+          [],
+          chat_parser_lib.Qwen35ChatTemplateParser,
+          True,
+      ),
+      (
+          "qwen3p5_cli_false_disables",
+          "qwen3.5",
+          None,
+          ["chat_parser_config.enable_thinking=false"],
+          chat_parser_lib.Qwen35ChatTemplateParser,
+          False,
+      ),
+      (
+          "gemma4_null_defaults_false",
+          "gemma4",
+          None,
+          [],
+          chat_parser_lib.Gemma4ChatTemplateParser,
+          False,
+      ),
+      (
+          "gemma4_cli_true_enables",
+          "gemma4",
+          None,
+          ["chat_parser_config.enable_thinking=true"],
+          chat_parser_lib.Gemma4ChatTemplateParser,
+          True,
+      ),
+  )
+  def test_chat_parser_enable_thinking_resolution(
+      self,
+      parser_type,
+      raw_value,
+      cli_args,
+      expected_cls,
+      expected_thinking,
+  ):
+    tokenizer = mock.MagicMock(bos_token="<bos>", eos_token="<eos>")
+    pipeline = _make_pipeline_with_cli_args(
+        f'chat_parser_config:\n  type: "{parser_type}"\n  enable_thinking:'
+        " null\n",
+        cli_args,
+    )
+    if raw_value is not None:
+      pipeline.config["chat_parser_config"]["enable_thinking"] = raw_value
+    parser = pipeline._create_chat_parser(tokenizer)
+    self.assertIsInstance(parser, expected_cls)
+    self.assertIs(parser.enable_thinking, expected_thinking)
+
+  @parameterized.named_parameters(
+      ("invalid_string", "invalid", r"chat_parser_config\.enable_thinking"),
+      ("non_bool_int", 123, "must be a bool, bool string"),
+  )
+  def test_chat_parser_rejects_invalid_enable_thinking(
+      self, bad_value, expected_regex
+  ):
+    tokenizer = mock.MagicMock(bos_token="<bos>", eos_token="<eos>")
+    pipeline = _make_pipeline(
+        'chat_parser_config:\n  type: "qwen"\n  enable_thinking: null\n'
+    )
+    pipeline.config["chat_parser_config"]["enable_thinking"] = bad_value
+    with self.assertRaisesRegex(ValueError, expected_regex):
+      pipeline._create_chat_parser(tokenizer)
+
+
+class Qwen3p5VllmRolloutConfigTest(parameterized.TestCase):
+
+  @parameterized.named_parameters(
+      (
+          "tp_gt_1",
+          (1, 2),
+          "",
+          [],
+          None,
+          NotImplementedError,
+          "tensor_parallel_size=1 only",
+      ),
+      (
+          "inferred_tp_gt_1_from_minus_one_sentinel",
+          (1, 2),
+          "  tensor_parallel_size: -1\n",
+          [],
+          None,
+          NotImplementedError,
+          "got tensor_parallel_size=2",
+      ),
+      (
+          "inferred_tp_gt_1_with_dp_minus_one_and_ep_2",
+          (2, 2),
+          "  tensor_parallel_size: -1\n  data_parallel_size: -1\n",
+          ["rollout_config.expert_parallel_size=2"],
+          None,
+          NotImplementedError,
+          "got tensor_parallel_size=2",
+      ),
+      (
+          "lora_enabled",
+          (1, 1),
+          "",
+          [],
+          {"rank": 8},
+          NotImplementedError,
+          "Qwen3.5 LoRA",
+      ),
+      (
+          "moe_variant",
+          (1, 1),
+          "",
+          ["actor_model_config.model_id=Qwen/Qwen3.5-35B-A3B"],
+          None,
+          NotImplementedError,
+          "Qwen3.5 MoE",
+      ),
+      (
+          "disabled_random_weight_init",
+          (1, 1),
+          "",
+          ["rollout_config.rollout_vllm_init_with_random_weights=false"],
+          None,
+          ValueError,
+          "requires init_with_random_weights=True",
+      ),
+  )
+  def test_qwen3p5_vllm_rollout_rejects_unsupported_configs(
+      self,
+      mesh_shape,
+      extra_vllm_yaml,
+      extra_cli,
+      lora_cfg,
+      exc_type,
+      expected_regex,
+  ):
+    pipeline = _make_pipeline_with_cli_args(
+        f"vllm_config:\n  hbm_utilization: 0.4\n{extra_vllm_yaml}",
+        [
+            "rollout_engine=vllm",
+            "actor_model_config.model_id=Qwen/Qwen3.5-0.8B",
+            *extra_cli,
+        ],
+    )
+    if lora_cfg is not None:
+      pipeline.config["actor_model_config"]["lora_config"] = lora_cfg
+    role_to_mesh = {
+        rl_engine_lib.Role.ROLLOUT: mock.Mock(
+            devices=mock.Mock(shape=mesh_shape)
+        )
+    }
+    with self.assertRaisesRegex(exc_type, expected_regex):
+      pipeline.create_rollout_config(role_to_mesh=role_to_mesh)
+
+  @parameterized.named_parameters(
+      (
+          "missing_hf_overrides_sets_default",
+          omegaconf.MISSING,
+          {"architectures": ["Qwen3_5ForCausalLM"]},
+      ),
+      (
+          "null_hf_overrides_sets_default",
+          None,
+          {"architectures": ["Qwen3_5ForCausalLM"]},
+      ),
+      (
+          "caller_extra_keys_merge_with_default_architecture",
+          {"max_position_embeddings": 8192},
+          {
+              "max_position_embeddings": 8192,
+              "architectures": ["Qwen3_5ForCausalLM"],
+          },
+      ),
+      (
+          "caller_architecture_is_preserved",
+          {"architectures": ["CustomQwen3_5ForCausalLM"]},
+          {"architectures": ["CustomQwen3_5ForCausalLM"]},
+      ),
+  )
+  def test_qwen3p5_vllm_rollout_merges_hf_overrides_without_mutating_config(
+      self, initial_hf_overrides, expected_hf_overrides
+  ):
+    pipeline = _make_pipeline_with_cli_args(
+        "vllm_config:\n  hbm_utilization: 0.4\n  tensor_parallel_size: -1\n",
+        [
+            "rollout_engine=vllm",
+            "actor_model_config.model_id=Qwen/Qwen3.5-0.8B",
+        ],
+    )
+    if initial_hf_overrides is not omegaconf.MISSING:
+      caller_dict = (
+          dict(initial_hf_overrides)
+          if isinstance(initial_hf_overrides, dict)
+          else None
+      )
+      pipeline.config["vllm_config"]["kwargs"] = {"hf_overrides": caller_dict}
+    role_to_mesh = {
+        rl_engine_lib.Role.ROLLOUT: mock.Mock(devices=mock.Mock(shape=(1, 1)))
+    }
+    rollout_cfg = pipeline.create_rollout_config(role_to_mesh=role_to_mesh)
+    self.assertEqual(rollout_cfg.tensor_parallel_size, -1)
+    self.assertEqual(
+        rollout_cfg.rollout_vllm_kwargs["hf_overrides"], expected_hf_overrides
+    )
+    if isinstance(initial_hf_overrides, dict):
+      self.assertEqual(
+          pipeline.config["vllm_config"]["kwargs"]["hf_overrides"],
+          initial_hf_overrides,
+      )
+
+  def test_qwen3p5_vllm_detection_keys_on_actor_model_not_local_model_version(
+      self,
+  ):
+    def _mesh(shape):
+      return {
+          rl_engine_lib.Role.ROLLOUT: mock.Mock(devices=mock.Mock(shape=shape))
+      }
+
+    # Local `vllm_config.model_version` without family token still triggers
+    # Qwen3.5 validation and `hf_overrides` from `actor_model_config.model_id`.
+    qwen3p5_pipeline = _make_pipeline_with_cli_args(
+        'vllm_config:\n  model_version: "/scratch/ckpts/local_ckpt"\n'
+        "  hbm_utilization: 0.4\n",
+        [
+            "rollout_engine=vllm",
+            "actor_model_config.model_id=Qwen/Qwen3.5-0.8B",
+        ],
+    )
+    with self.assertRaisesRegex(
+        NotImplementedError, "tensor_parallel_size=1 only"
+    ):
+      qwen3p5_pipeline.create_rollout_config(role_to_mesh=_mesh((1, 2)))
+    self.assertEqual(
+        qwen3p5_pipeline.create_rollout_config(
+            role_to_mesh=_mesh((1, 1))
+        ).rollout_vllm_kwargs["hf_overrides"],
+        {"architectures": ["Qwen3_5ForCausalLM"]},
+    )
+
+    # A `qwen3.5` parent directory does not misclassify an actor `Qwen3-8B`
+    # checkpoint, and `model_source="maxtext"` bypasses Tunix-only guards.
+    qwen3_cfg = _make_pipeline_with_cli_args(
+        'vllm_config:\n  model_version: "/scratch/qwen3.5_exp/my-finetune"\n'
+        "  hbm_utilization: 0.4\n",
+        [
+            "rollout_engine=vllm",
+            "actor_model_config.model_id=/ckpt/qwen3.5-baselines/Qwen3-8B",
+        ],
+    ).create_rollout_config(role_to_mesh=_mesh((1, 4)))
+    self.assertEqual(qwen3_cfg.tensor_parallel_size, 4)
+    self.assertNotIn("hf_overrides", qwen3_cfg.rollout_vllm_kwargs)
+
+    maxtext_cfg = _make_pipeline_with_cli_args(
+        "vllm_config:\n  hbm_utilization: 0.4\n",
+        [
+            "rollout_engine=vllm",
+            "actor_model_config.model_source=maxtext",
+            "actor_model_config.model_id=Qwen/Qwen3.5-35B-A3B",
+        ],
+    ).create_rollout_config(role_to_mesh=_mesh((1, 4)))
+    self.assertEqual(maxtext_cfg.tensor_parallel_size, 4)
+
+  def test_qwen3p5_frozenlake_yaml_loads_and_builds_configs(self):
+    cfg_path = _REPO_ROOT / "examples/frozenlake/configs/qwen3p5_0p8b.yaml"
+    self.assertTrue(cfg_path.exists(), f"Missing config file: {cfg_path}")
+
+    tokenizer = mock.MagicMock(bos_token="<bos>", eos_token="<eos>")
+    with mock.patch.dict(os.environ, {"HF_TOKEN": "fake"}):
+      pipeline = DummyPipeline([
+          "",
+          "base_agentic_config.yaml",
+          f"override_config_file={cfg_path}",
+      ])
+    self.assertEqual(
+        pipeline.config["actor_model_config"]["load_dtype"], "float32"
+    )
+    self.assertEqual(
+        pipeline.config["reference_model_config"]["load_dtype"], "float32"
+    )
+    self.assertEqual(pipeline.config["actor_model_config"]["dtype"], "bfloat16")
+    chat_parser = pipeline._create_chat_parser(tokenizer)
+    self.assertIsInstance(chat_parser, chat_parser_lib.QwenChatTemplateParser)
+    self.assertIs(chat_parser.enable_thinking, False)
+    base_rl_pipeline.BasePipeline.compute_params(pipeline, list(range(320)))
+    training_cfg = pipeline.create_rl_training_config()
+    self.assertEqual(training_cfg.max_steps, 5)
+    self.assertIsNotNone(training_cfg.actor_optimizer)
+    role_to_mesh = {
+        rl_engine_lib.Role.ROLLOUT: mock.Mock(devices=mock.Mock(shape=(1, 1)))
+    }
+    rollout_cfg = pipeline.create_rollout_config(role_to_mesh=role_to_mesh)
+    self.assertEqual(rollout_cfg.tensor_parallel_size, 1)
+    self.assertEqual(
+        rollout_cfg.rollout_vllm_kwargs["hf_overrides"],
+        {"architectures": ["Qwen3_5ForCausalLM"]},
     )
 
 

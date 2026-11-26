@@ -15,7 +15,9 @@
 """Base classes and factory for parsing chat messages into model-specific formats."""
 
 import abc
+from collections.abc import Mapping
 import dataclasses
+import re
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
@@ -348,6 +350,44 @@ class QwenChatTemplateParser(BaseChatTemplateParser):
     return block
 
 
+class Qwen35ChatTemplateParser(QwenChatTemplateParser):
+  r"""Parser for Qwen3.5 models matching `chat_template.jinja`.
+
+  Unlike Qwen3, Qwen3.5's official chat template prefills `<think>\n` in the
+  generation prompt when `enable_thinking=True` (and
+  `<think>\n\n</think>\n\n` when `enable_thinking=False`). Without the
+  `<think>\n` prefill, Qwen3.5 randomly emits empty `<think>\n\n</think>`
+  blocks on turn 0 and locks into non-thinking mode for the rest of the
+  episode.
+  """
+
+  def __init__(self, tokenizer, enable_thinking: bool = True):
+    super().__init__(tokenizer, enable_thinking=enable_thinking)
+    # `assistant_token` includes `<think>\n`, so add the base `<|im_start|>`
+    # control token to prevent unsanitized turn injection in user/tool outputs.
+    self._tokens_to_sanitize.add("<|im_start|>")
+
+  def _get_assistant_token(self) -> str:
+    if self.enable_thinking:
+      return "<|im_start|>assistant\n<think>\n"
+    return "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+
+  def _parse_assistant(self, content: str) -> str:
+    if not self.enable_thinking:
+      return super()._parse_assistant(content)
+    if content.startswith("<think>"):
+      return "<|im_start|>assistant\n" + content + self.tokens.eot_token
+    if "</think>" in content:
+      return (
+          "<|im_start|>assistant\n<think>\n" + content + self.tokens.eot_token
+      )
+    return (
+        "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        + content
+        + self.tokens.eot_token
+    )
+
+
 class LlamaChatTemplateParser(BaseChatTemplateParser):
   """Parser for Llama models."""
 
@@ -401,9 +441,14 @@ class GemmaChatTemplateParser(BaseChatTemplateParser):
     if processed_messages and processed_messages[0]["role"] == "system":
       system_message = processed_messages.pop(0)
       if processed_messages and processed_messages[0]["role"] == "user":
-        processed_messages[0]["content"] = (
-            system_message["content"] + "\n" + processed_messages[0]["content"]
-        )
+        processed_messages[0] = {
+            **processed_messages[0],
+            "content": (
+                system_message["content"]
+                + "\n"
+                + processed_messages[0]["content"]
+            ),
+        }
       else:
         processed_messages.insert(
             0, {"role": "user", "content": system_message["content"]}
@@ -538,3 +583,46 @@ class Gemma4ChatTemplateParser(BaseChatTemplateParser):
     if eos_id is not None:
       eos_id = eos_id() if callable(eos_id) else eos_id
     return [t for t in suffix_tokens if t != bos_id and t != eos_id]
+
+
+_MODEL_SEGMENT_PATTERN = re.compile(
+    r"(?<![a-z0-9])(?:gemma[-_]?[1-9]|qwen[-_]?[1-9]"
+    r"|llama[-_]?[1-9]|phi[-_]?[1-9]"
+    r"|(?:deepseek|mistral|mixtral)(?![a-z]))",
+    re.IGNORECASE,
+)
+
+MODEL_FAMILY_CHAT_PARSERS: dict[str, type[BaseChatTemplateParser]] = {
+    "gemma-4": Gemma4ChatTemplateParser,
+    "gemma4": Gemma4ChatTemplateParser,
+    "qwen-3.5": Qwen35ChatTemplateParser,
+    "qwen3.5": Qwen35ChatTemplateParser,
+    "qwen3_5": Qwen35ChatTemplateParser,
+    "qwen3p5": Qwen35ChatTemplateParser,
+    "qwen35": Qwen35ChatTemplateParser,
+    "qwen": QwenChatTemplateParser,
+    "llama": LlamaChatTemplateParser,
+    "gemma": GemmaChatTemplateParser,
+}
+
+
+def _target_model_segment(model_name: str) -> str:
+  """Returns the last path segment in `model_name` naming a model family."""
+  segments = [seg for seg in re.split(r"[/\\]+", model_name) if seg]
+  for seg in reversed(segments):
+    if _MODEL_SEGMENT_PATTERN.search(seg):
+      return seg
+  return segments[-1] if segments else model_name
+
+
+def resolve_chat_parser_cls(
+    model_name: str,
+    parsers: Mapping[str, type[BaseChatTemplateParser]] | None = None,
+) -> type[BaseChatTemplateParser]:
+  """Resolves the chat template parser class for a model ID or path."""
+  parser_map = MODEL_FAMILY_CHAT_PARSERS if parsers is None else parsers
+  segment = _target_model_segment(model_name).lower()
+  for family, parser_cls in parser_map.items():
+    if family in segment:
+      return parser_cls
+  return DefaultChatTemplateParser

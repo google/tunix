@@ -13,10 +13,10 @@
 # limitations under the License.
 
 model_config:
-  model_name: "gemma2_2b_it"
-  model_id: "gemma2_2b_it"
-  model_path: "google/gemma-2/flax/gemma2-2b-it"
-  model_source: "kaggle"
+  model_name: "gemma-2-2b-it"
+  model_id: "google/gemma-2-2b-it"
+  model_path: "gs://gemma-data/checkpoints/gemma2-2b-it"
+  model_source: "gcs"
   mesh:
     shape: "(2,2)"
     axis_names: "('fsdp','tp')"

@@ -175,6 +175,9 @@ class SWEEnv(BaseTaskEnv):
         image=task_img_str,
         metadata={"ds": self.entry},
     )
+    sandbox_utils.ensure_tasks_in_fleet_plan(
+        fleet, [task], scaffold=self.scaffold
+    )
     max_acquire_retries = 5
     for attempt in range(max_acquire_retries):
       try:

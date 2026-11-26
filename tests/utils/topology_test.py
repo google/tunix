@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from unittest import mock
+
 from absl.testing import absltest
+import jax
 from tunix.utils import topology
 
 
@@ -234,6 +237,57 @@ class TopologyTest(absltest.TestCase):
         topology._pathways_device_host_attr(FakeDevice(), "logical_task"), 7
     )
 
+  def test_is_pathways_backend_used_detects_borg_pathways_config(self):
+    prev = jax.config.jax_platforms
+    self.addCleanup(jax.config.update, "jax_platforms", prev)
+
+    jax.config.update("jax_platforms", None)
+    with mock.patch.dict("os.environ", {}, clear=True):
+      self.assertFalse(topology._is_pathways_backend_used())
+
+    jax.config.update("jax_platforms", "cpu")
+    with mock.patch.dict("os.environ", {"JAX_PLATFORMS": "cpu"}, clear=True):
+      self.assertFalse(topology._is_pathways_backend_used())
+
+    jax.config.update("jax_platforms", "pathways")
+    with mock.patch.dict("os.environ", {}, clear=True):
+      self.assertTrue(topology._is_pathways_backend_used())
+
+    jax.config.update("jax_platforms", "proxy,cpu")
+    with mock.patch.dict("os.environ", {}, clear=True):
+      self.assertTrue(topology._is_pathways_backend_used())
+
+    jax.config.update("jax_platforms", None)
+    with mock.patch.dict(
+        "os.environ", {"JAX_PLATFORMS": "pathways"}, clear=True
+    ):
+      self.assertTrue(topology._is_pathways_backend_used())
+
+  def test_gpu_device_families_normalize_and_never_apply_fish_cube_rules(self):
+    expected_families = (
+        ("NVIDIA GB200", "b200"),
+        ("NVIDIA B200", "b200"),
+        ("NVIDIA H200", "h200"),
+        ("NVIDIA H100 80GB HBM3", "h100"),
+        ("NVIDIA A100-SXM4-40GB", "a100"),
+        ("NVIDIA L4", "l4"),
+    )
+    for device_kind, expected_family in expected_families:
+      self.assertEqual(
+          topology._normalize_device_kind(device_kind), expected_family
+      )
+      self.assertTrue(topology.is_gpu_family(device_kind))
+      self.assertTrue(topology.is_gpu_family(expected_family))
+      self.assertIn(expected_family, topology._SUPPORTED_FAMILIES)
+      for chip_count in (1, 4, 8, 16, 72, 96):
+        self.assertEqual(
+            topology.supported_topology_shapes_for_chip_count(
+                device_kind, chip_count
+            ),
+            [],
+        )
+    self.assertFalse(topology.is_gpu_family("TPU v6e"))
+    self.assertFalse(topology.is_gpu_family(None))
 
 if __name__ == "__main__":
   absltest.main()

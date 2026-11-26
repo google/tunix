@@ -34,7 +34,7 @@ import jax
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
-from tunix.common import configs
+from tunix.common import datatypes
 from tunix.generate import base_sampler
 from tunix.generate import utils
 import tunix.generate.beam_search as beam_search_lib
@@ -42,9 +42,18 @@ import tunix.generate.tokenizer_adapter as tok_adapter
 from tunix.processors import audio_processor
 from tunix.processors import image_processor
 from tunix.rl import reshard
-from tunix.rl import utils as rl_utils
 
-CacheConfig = configs.CacheConfig
+
+def _to_flat_dict(
+    tree: jaxtyping.PyTree | statelib.State,
+) -> tuple[dict[tuple[str, ...], jaxtyping.Array], jaxtyping.PyTreeDef]:
+  if isinstance(tree, statelib.State):
+    tree = nnx.to_pure_dict(tree)
+  flattened, tree_def = jax.tree.flatten_with_path(tree)
+  return {tuple(k.key for k in keys): v for keys, v in flattened}, tree_def
+
+
+CacheConfig = datatypes.CacheConfig
 
 LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]
@@ -127,6 +136,11 @@ def sample_top_p(
     return_logprobs: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray | None]:
   """Sample a token using top-p sampling."""
+  if temperature <= 0.0:
+    raise ValueError(
+        f'Temperature must be strictly positive in sample_top_p, got'
+        f' {temperature}'
+    )
   # Upcast to float32 for numerical stability of softmax and subsequent cumsum.
   next_token_logits = logits[:, -1].astype(jnp.float32) / temperature
 
@@ -380,7 +394,7 @@ class Sampler(base_sampler.BaseSampler):
         resharded_params = updated_weights
     else:
       resharded_params = updated_weights
-    flat_new_params, _ = rl_utils.to_flat_dict(resharded_params)
+    flat_new_params, _ = _to_flat_dict(resharded_params)
     # TODO(linchai): Cast on rollout devices when from lower precision to
     # higher precision.
     new_params_precision = jax.tree.leaves(flat_new_params)[0].dtype
@@ -389,7 +403,7 @@ class Sampler(base_sampler.BaseSampler):
       flat_new_params = jax.tree.map(
           lambda x: x.astype(rollout_precision), flat_new_params
       )
-    flat_old_params, tree_def = rl_utils.to_flat_dict(
+    flat_old_params, tree_def = _to_flat_dict(
         self.transformer_state
     )
     merged_params = functools.reduce(
@@ -491,6 +505,17 @@ class Sampler(base_sampler.BaseSampler):
       utils.check_sampling_mode_conflict(sampling_mode, 'top_p')  # pyrefly: ignore[bad-argument-type]
       sampling_parameters['top_p'] = top_p
       sampling_parameters['top_k'] = top_k
+      if temperature <= 0:
+        error_msg = (
+            'Temperature must be a positive number when using top_p'
+            f' sampling, got {temperature}.'
+        )
+        if temperature == 0:
+          error_msg += (
+              ' If you want to use greedy sampling, set top_p to None (or null'
+              ' in YAML config) and beam_size to None.'
+          )
+        raise ValueError(error_msg)
 
     if sampling_mode[0] is None:
       sampling_mode[0] = 'greedy'  # pyrefly: ignore[unsupported-operation]

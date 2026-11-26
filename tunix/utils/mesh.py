@@ -689,11 +689,12 @@ def _supported_coord_box_shapes(
     family is unknown.
   """
   family = topology._device_family(devices)  # pylint: disable=protected-access
-  if family is None:
+  if family is None or topology.is_gpu_family(family):
     logging.info(
         "Coord allocation is using generic contiguous-box enumeration because "
-        "the accelerator family could not be resolved: required_devices=%d "
-        "topology_shape=%s device_sample=%s.",
+        "the accelerator family (%s) does not impose fixed 3D torus shapes: "
+        "required_devices=%d topology_shape=%s device_sample=%s.",
+        family,
         required_devices,
         coord_topology.max_shape,
         summarize_devices_for_logging(devices, debug=True, limit=8),
