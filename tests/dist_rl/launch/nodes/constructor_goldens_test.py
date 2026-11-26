@@ -371,6 +371,21 @@ def _label(target: types.ModuleType | type[object], attribute: str) -> str:
   return f"{target.__module__}.{target.__qualname__}.{attribute}"
 
 
+def _golden_name(cls: type[object]) -> str:
+  """Returns the name the goldens write a recorded class as.
+
+  That is its qualified name, except for Orbax's `CheckpointManagerOptions`,
+  which is written by its public name: the module Orbax defines it in is an
+  implementation detail that differs between Orbax versions.
+
+  Args:
+    cls: A recorded class (`_RECORDED_INITS`).
+  """
+  if cls is ocp.CheckpointManagerOptions:
+    return "orbax.checkpoint.CheckpointManagerOptions"
+  return f"{cls.__module__}.{cls.__qualname__}"
+
+
 class _Recorder:
   """Records the calls a node's `main` makes to the patched callables.
 
@@ -424,7 +439,7 @@ class _Recorder:
     Args:
       cls: The class to record.
     """
-    label = f"{cls.__module__}.{cls.__qualname__}"
+    label = _golden_name(cls)
     init = cls.__init__
 
     def recorded_init(

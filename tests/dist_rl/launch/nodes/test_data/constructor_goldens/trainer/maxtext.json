@@ -25,7 +25,7 @@
       }
     },
     {
-      "orbax.checkpoint.checkpoint_manager.CheckpointManagerOptions": {
+      "orbax.checkpoint.CheckpointManagerOptions": {
         "kwargs": {
           "max_to_keep": 10,
           "save_interval_steps": 1
@@ -83,7 +83,7 @@
           "attention": "flash",
           "base_num_kv_heads": 0,
           "base_output_directory": "/artifacts/maxtext",
-          "checkpointing_options": "<orbax.checkpoint.checkpoint_manager.CheckpointManagerOptions()>",
+          "checkpointing_options": "<orbax.checkpoint.CheckpointManagerOptions()>",
           "device_host_concurrent_gb": null,
           "extra_flags": [],
           "gradient_accumulation_steps": 32,
