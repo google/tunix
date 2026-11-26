@@ -41,14 +41,19 @@ except ImportError:
 class _JAXProfilerBackend:
   """Duck-typed wrapper for JAX tracing with Pathways session ID plumbing."""
 
-  def __init__(self, output_dir: str):
+  def __init__(
+      self, output_dir: str, enable_continuous_profiling: bool = False
+  ):
     self._output_dir = output_dir
+    self._enable_continuous_profiling = enable_continuous_profiling
 
   def start(self, session_id: Optional[str] = None) -> None:
     options = jax.profiler.ProfileOptions()
     if session_id:
       # Plumb session_id so PathwaysUtils intercepts it for separated profiles
       options.session_id = session_id
+    if self._enable_continuous_profiling:
+      options.advanced_configuration = {"enable_continuous_profiling": True}
     jax.profiler.start_trace(self._output_dir, profiler_options=options)
 
   def stop(self) -> None:
@@ -80,6 +85,11 @@ class RLProfiler:
             "RLProfileConfig.managed_mldiagnostics is True, but "
             "google_cloud_mldiagnostics is not available."
         )
+      if config.enable_continuous_profiling:
+        logging.warning(
+            "RLProfiler: enable_continuous_profiling=True is ignored when"
+            " managed_mldiagnostics=True."
+        )
       # Hardcoded None to capture multi-role (Trainer + Sampler) Pathways
       # topologies.
       self._profiler = mldiag_xprof(  # type: ignore[not-callable]
@@ -93,7 +103,10 @@ class RLProfiler:
     else:
       # Fallback chain: Explicit diagnostics dir -> Standard output dir
       output_dir = getattr(config, "mldiagnostics_dir", "") or config.output_dir
-      self._profiler = _JAXProfilerBackend(output_dir)
+      self._profiler = _JAXProfilerBackend(
+          output_dir,
+          enable_continuous_profiling=config.enable_continuous_profiling,
+      )
 
     self._is_active: bool = False
     self._active_role: Optional[str] = None
