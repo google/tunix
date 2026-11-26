@@ -685,7 +685,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       )
       if eval_ds is not None:
         eval_ds = _ProcessShardedIterable(
-            eval_ds, self._shard_batch_for_process
+            eval_ds, self._shard_eval_batch_for_process
         )
       self._rollout_micro_batch_size = local_size(
           self._training_config.rollout_micro_batch_size,
@@ -779,6 +779,12 @@ class RLLearner(abc.ABC, Generic[TConfig]):
     # use the full batch iterator directly.
     if iterator_batch_size == full_batch_size:
       train_iterator = full_batch_iterator
+      if per_host:
+        # Batches are used as they come, so a smaller last batch is a train
+        # micro-batch of its own: check every batch like the configured size.
+        train_iterator = self._check_per_host_batches(
+            train_iterator, "train batch"
+        )
     else:
       train_iterator = self._create_micro_batch_iterator(
           full_batch_iterator, iterator_batch_size
@@ -859,6 +865,33 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         batch, jax.process_index(), jax.process_count()
     )
 
+  def _shard_eval_batch_for_process(
+      self, batch: TrainingInputT
+  ) -> TrainingInputT:
+    """`_shard_batch_for_process` for an eval batch, with its row check.
+
+    Eval batches are not re-batched: each one, including a smaller last one,
+    reaches `shard_input` in the trainer's eval step (and the per-host logprob
+    chunks) with its own row count, so it gets the train micro-batch's check.
+
+    Args:
+      batch: A global eval batch.
+
+    Returns:
+      This process's shard.
+    """
+    local = self._shard_batch_for_process(batch)
+    self._check_per_host_rows(len(local["prompts"]), "eval batch")  # pyrefly: ignore[bad-argument-type]
+    return local
+
+  def _check_per_host_batches(
+      self, batches: Iterator[TrainingInputT], what: str
+  ) -> Iterator[TrainingInputT]:
+    """Yields `batches`, checking the rows of each (`_check_per_host_rows`)."""
+    for batch in batches:
+      self._check_per_host_rows(len(batch["prompts"]), what)  # pyrefly: ignore[bad-argument-type]
+      yield batch
+
   def _per_host_size(self, size: int | None, name: str) -> int | None:
     """Divides a configured global batch size by the process count."""
     if size is None:
@@ -899,24 +932,8 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       passes.append(f"trainer logprobs ({', '.join(reasons)})")
     return passes
 
-  def _check_per_host_data_axis(
-      self,
-      train_micro_batch_size: int,
-      logps_micro_batch_size: int | None,
-  ) -> None:
-    """Fails fast where `shard_input` would silently replicate local data.
-
-    `shard_input` falls back to a replicated sharding when the leading
-    dimension of the input is not divisible by the global data axis size
-    (judged by the process-local rows, or by local rows x process count with
-    TUNIX_PER_HOST_SAFE_LOGPS=1). Process-local rows that differ between
-    processes must never be treated as replicated.
-
-    Args:
-      train_micro_batch_size: Per-host prompts per train micro-batch.
-      logps_micro_batch_size: Per-host prompts per reference/trainer logps
-        chunk, or None if no trainer-side logps pass runs.
-    """
+  def _data_axis_size(self) -> int:
+    """Actor-mesh size of the trainer's data sharding axes (their product)."""
     mesh = self.rl_engine.cluster_config.role_to_mesh[rl_engine_lib.Role.ACTOR]
     axis_size = 1
     for axis in self._training_config.data_sharding_axis:
@@ -930,26 +947,58 @@ class RLLearner(abc.ABC, Generic[TConfig]):
               " replicate process-local data."
           )
         axis_size *= mesh.shape[name]
-    generations = self._num_generations() or 1
+    return axis_size
+
+  def _check_per_host_rows(self, prompts: int, what: str) -> None:
+    """Fails fast where `shard_input` would silently replicate local data.
+
+    `shard_input` falls back to a replicated sharding when the leading
+    dimension of the input is not divisible by the global data axis size
+    (judged by the process-local rows, or by local rows x process count with
+    TUNIX_PER_HOST_SAFE_LOGPS=1). Process-local rows that differ between
+    processes must never be treated as replicated.
+
+    Args:
+      prompts: Per-host prompts of the batch, `_num_generations()` rows each.
+      what: The batch, for the error message.
+
+    Raises:
+      ValueError: `shard_input` would replicate the batch.
+    """
+    rows = prompts * (self._num_generations() or 1)
     global_rows = sharding_utils.per_host_safe_logps_enabled()
     factor = jax.process_count() if global_rows else 1
-    checks = [(train_micro_batch_size, "train micro-batch")]
+    axis_size = self._data_axis_size()
+    if (rows * factor) % axis_size:
+      counted = (
+          "local rows x process count (TUNIX_PER_HOST_SAFE_LOGPS=1)"
+          if global_rows
+          else "process-local rows"
+      )
+      raise ValueError(
+          f"TUNIX_PER_HOST_LEARNER=1: the per-host {what} has {rows} rows;"
+          f" shard_input judges {rows * factor} ({counted}), which is not"
+          f" divisible by the data axis size {axis_size}, so it would"
+          " replicate process-local data."
+      )
+
+  def _check_per_host_data_axis(
+      self,
+      train_micro_batch_size: int,
+      logps_micro_batch_size: int | None,
+  ) -> None:
+    """Checks the configured per-host batch sizes (`_check_per_host_rows`).
+
+    Args:
+      train_micro_batch_size: Per-host prompts per train micro-batch.
+      logps_micro_batch_size: Per-host prompts per reference/trainer logps
+        chunk, or None if no trainer-side logps pass runs.
+    """
+    self._check_per_host_rows(train_micro_batch_size, "train micro-batch")
     if logps_micro_batch_size is not None:
-      checks.append((logps_micro_batch_size, "reference/trainer logps chunk"))
-    for prompts, what in checks:
-      rows = prompts * generations
-      if (rows * factor) % axis_size:
-        counted = (
-            "local rows x process count (TUNIX_PER_HOST_SAFE_LOGPS=1)"
-            if global_rows
-            else "process-local rows"
-        )
-        raise ValueError(
-            f"TUNIX_PER_HOST_LEARNER=1: the per-host {what} has {rows} rows;"
-            f" shard_input judges {rows * factor} ({counted}), which is not"
-            f" divisible by the data axis size {axis_size}, so it would"
-            " replicate process-local data."
-        )
+      self._check_per_host_rows(
+          logps_micro_batch_size, "reference/trainer logps chunk"
+      )
 
   def _run_global_step(
       self,

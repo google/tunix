@@ -110,6 +110,49 @@ class PerHostLearnerTest(parameterized.TestCase):
     submit.assert_called_once()
     self.assertIs(submit.call_args.kwargs['async_loading'], False)
 
+  @parameterized.named_parameters(
+      # TUNIX_PER_HOST_SAFE_LOGPS=1: rows x 2 processes must divide fsdp=4.
+      ('global_rows', {'TUNIX_PER_HOST_SAFE_LOGPS': '1'}, 4),
+      # Otherwise the process-local rows must divide fsdp=2 by themselves.
+      ('process_local_rows', {}, 2),
+  )
+  def test_eval_batches_must_divide_the_data_axis(self, switches, fsdp):
+    mesh = _mesh(fsdp)
+    with _per_host_env(2, TUNIX_PER_HOST_LEARNER='1', **switches):
+      learner = _learner(_mock_engine(mesh, mesh))
+      # 4 prompts: 2 rows per process.
+      local = learner._shard_eval_batch_for_process(
+          {'prompts': ['a', 'b', 'c', 'd']}
+      )
+      self.assertEqual(list(local['prompts']), ['a', 'c'])
+      # A last eval batch of 2 prompts: 1 row per process.
+      with self.assertRaisesRegex(ValueError, 'eval batch has 1 rows'):
+        learner._shard_eval_batch_for_process({'prompts': ['e', 'f']})
+
+  def test_train_checks_eval_batches_and_unbatched_train_tails(self):
+    mesh = _mesh(4)
+    engine = _mock_engine(mesh, mesh)
+    with _per_host_env(
+        2, TUNIX_PER_HOST_LEARNER='1', TUNIX_PER_HOST_SAFE_LOGPS='1'
+    ):
+      learner = _learner(engine)
+      engine.actor_trainer.train_steps = 1  # Stop after one global step.
+      with mock.patch.object(learner, '_run_global_step') as run_global_step:
+        learner.train(
+            [{'prompts': [''] * 8}, {'prompts': [''] * 2}],
+            [{'prompts': [''] * 4}, {'prompts': [''] * 2}],
+        )
+      train_iterator, eval_ds = run_global_step.call_args.args[4:6]
+      # The configured train micro-batch (8 prompts) is fine, the smaller last
+      # batch is not.
+      self.assertLen(next(train_iterator)['prompts'], 4)
+      with self.assertRaisesRegex(ValueError, 'train batch has 1 rows'):
+        next(train_iterator)
+      eval_batches = iter(eval_ds)
+      self.assertLen(next(eval_batches)['prompts'], 2)
+      with self.assertRaisesRegex(ValueError, 'eval batch has 1 rows'):
+        next(eval_batches)
+
 
 class RLLearnerTest(parameterized.TestCase):
 

@@ -1685,13 +1685,16 @@ class RLEngine:
     then slice the global array with process-local offsets, so every process
     but the first would get another process's rows. Here the process-local
     batch is chunked first; each chunk is globalised and run through
-    `compute_fn` on every process in lockstep (all processes hold the same
-    number of rows), and this process's rows of each result are copied back,
-    so the result is host-local like every other TrainExample field.
+    `compute_fn` on every process in lockstep, and this process's rows of each
+    result are copied back, so the result is host-local like every other
+    TrainExample field. Every process holds the same number of rows (the
+    learner splits every batch evenly), so every process runs the same chunk
+    sequence, including a smaller last chunk (e.g. the tail of an eval set).
 
     Args:
       compute_fn: Called with the globalised chunk of every input (by name).
-      micro_batch_size: Process-local rows per chunk.
+      micro_batch_size: Process-local rows per chunk (the last may have
+        fewer).
       **inputs: Process-local inputs (None entries are passed through).
 
     Returns:
@@ -1706,16 +1709,11 @@ class RLEngine:
             f"TUNIX_PER_HOST_SAFE_LOGPS: {name} is a global array; the per-host"
             " logps path expects process-local rows."
         )
-    if batch_size % micro_batch_size:
-      raise ValueError(
-          f"TUNIX_PER_HOST_SAFE_LOGPS: the process-local batch of {batch_size}"
-          f" rows is not divisible by micro_batch_size={micro_batch_size};"
-          " every process must run the same number of equal chunks."
-      )
     outs = []
     for batch_slice in rl_utils.chunk_slices_by_size(
         stop=batch_size, step=micro_batch_size
     ):
+      rows = batch_slice.stop - batch_slice.start
       chunk = {}
       for name, x in inputs.items():
         if x is None:
@@ -1724,8 +1722,8 @@ class RLEngine:
         chunk[name] = sharding_utils.shard_input(x[batch_slice], axis)
         if getattr(chunk[name].sharding, "spec", None) != pspec:
           raise ValueError(
-              f"TUNIX_PER_HOST_SAFE_LOGPS: a {name} chunk of"
-              f" {micro_batch_size} rows per process got sharding"
+              f"TUNIX_PER_HOST_SAFE_LOGPS: a {name} chunk of {rows} rows per"
+              " process got sharding"
               f" {chunk[name].sharding}, not {pspec}; process-local rows must"
               " never be treated as replicated."
           )
@@ -1737,7 +1735,7 @@ class RLEngine:
           if isinstance(out, jax.Array) and not out.is_fully_addressable
           else None
       )
-      if out_rows != in_rows or local.shape[0] != micro_batch_size:
+      if out_rows != in_rows or local.shape[0] != rows:
         raise RuntimeError(
             f"TUNIX_PER_HOST_SAFE_LOGPS: output rows {out_rows} (shape"
             f" {local.shape}) of process {jax.process_index()} do not match its"
