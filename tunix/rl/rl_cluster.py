@@ -195,7 +195,9 @@ class _AsyncMetricsExporter:
       except queue.Full:
         pass
     self._worker.join(max(deadline - time.monotonic(), 0.0))
-    if not self._worker.is_alive() and not self._queue.unfinished_tasks:
+    # Once the worker has exited, a flush is left only if it died before
+    # reaching the stop sentinel.
+    if not self._worker.is_alive() and self._queue.empty():
       return True
 
     self._abandoned.set()
