@@ -52,8 +52,16 @@ _P, _C, _BUDGET = 6, 10, 16
 # (prompt_len, completion_len); under FFD with budget 16 the rows are
 # [16], [14, 2], [10, 4, 2], [10, 4], [8, 8].
 _LENGTHS = [
-    (6, 10), (5, 9), (3, 7), (1, 1), (2, 2),
-    (1, 3), (4, 4), (2, 6), (6, 4), (1, 1),
+    (6, 10),
+    (5, 9),
+    (3, 7),
+    (1, 1),
+    (2, 2),
+    (1, 3),
+    (4, 4),
+    (2, 6),
+    (6, 4),
+    (1, 1),
 ]
 
 
@@ -212,7 +220,7 @@ class PlanTest(parameterized.TestCase):
 
   @parameterized.parameters(
       (78, 8, 0, 1, (1, 80)),
-      (78, 8, 2, 1, (5, 16)),  # O06 with a cap of 2 rows per data shard
+      (78, 8, 2, 1, (5, 16)),  # OpenMath-like plan, cap of 2 rows per shard
       (78, 8, 0, 4, (1, 96)),
       (78, 8, 4, 2, (3, 32)),
       (0, 8, 0, 1, (1, 8)),
@@ -452,11 +460,16 @@ class PackedLossEquivalenceTest(parameterized.TestCase):
     ids[row, a0 + 1] = ids[row, a0 + 1] % (_VOCAB - 1) + 1
     before = _logps(self.model, packed)
     after = _logps(self.model, packed.replace(completion_ids=ids))
-    self.assertGreater(np.max(np.abs(after[row, a0:b0] - before[row, a0:b0])), 1e-6)
+    self.assertGreater(
+        np.max(np.abs(after[row, a0:b0] - before[row, a0:b0])), 1e-6
+    )
     for a, b in others:
-      # logp[a] (the segment's first token, a prompt token outside the loss) is predicted from logit[a-1], the previous
-      # segment's last position, by construction of packed logps; isolation applies to positions a+1..b-1.
-      np.testing.assert_allclose(after[row, a + 1:b], before[row, a + 1:b], atol=1e-6)
+      # logp[a] (the segment's first token, a prompt token outside the loss)
+      # is predicted from logit[a-1], the previous segment's last position, by
+      # construction of packed logps; isolation applies to positions a+1..b-1.
+      np.testing.assert_allclose(
+          after[row, a + 1 : b], before[row, a + 1 : b], atol=1e-6
+      )
 
   @parameterized.parameters(
       ("sequence-mean-token-mean", "grpo"),
@@ -505,7 +518,12 @@ _NUM_PROCESSES = 2
 _TRAIN_STEPS = 2
 _JOB_TIMEOUT_S = 900
 _PROMPTS = ["hello world", "My name", "input string", "hello there"]
-_BASE_LENGTH = {"hello world": 1, "My name": 6, "input string": 3, "hello there": 8}
+_BASE_LENGTH = {
+    "hello world": 1,
+    "My name": 6,
+    "input string": 3,
+    "hello there": 8,
+}
 
 
 def _run_child():
