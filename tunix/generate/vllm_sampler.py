@@ -47,12 +47,20 @@ from vllm.sampling_params import SamplingParams
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
 
-_TRUTHY = ("1", "true", "True")
+_ENV_BOOLS = {"0": False, "1": True, "false": False, "true": True}
 
 
 def _env_flag(name: str, default: str = "0") -> bool:
-  """True iff the environment variable `name` is set to 1/true/True."""
-  return (os.environ.get(name, default) or default).strip() in _TRUTHY
+  """Parses environment variable `name` (or `default` if unset) as a bool.
+
+  Raises:
+    ValueError: The value is not 0, 1, true or false (in any case).
+  """
+  raw = os.environ.get(name, default)
+  value = _ENV_BOOLS.get(raw.strip().lower())
+  if value is None:
+    raise ValueError(f"{name}={raw!r}: expected 0, 1, true or false.")
+  return value
 
 
 @dataclasses.dataclass
@@ -784,8 +792,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     with self._fast_logprobs_lock:
       self._fast_logprobs_calls += 1
       calls = self._fast_logprobs_calls
-    fields = getattr(type(sampling_params), "__struct_fields__", ())
-    if "flat_logprobs" in fields:
+    if hasattr(sampling_params, "flat_logprobs"):
       sampling_params.flat_logprobs = True
     elif calls == 1:
       logging.warning(

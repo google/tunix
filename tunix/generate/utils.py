@@ -364,15 +364,19 @@ def _flat_logprobs_fast(
 
   Args:
     token_ids: Sampled token ids.
-    logprobs: A vLLM `FlatLogprobs` (start/end indices and flat lists).
+    logprobs: Per-position logprobs from vLLM. Only a `FlatLogprobs` (start
+      and end indices plus flat lists) is read; for a list of dicts or None
+      the result is None.
 
   Returns:
     The logprobs, or None.
   """
-  starts = getattr(logprobs, 'start_indices', None)
-  ends = getattr(logprobs, 'end_indices', None)
-  ids = getattr(logprobs, 'token_ids', None)
-  values = getattr(logprobs, 'logprobs', None)
+  if logprobs is None or isinstance(logprobs, list):
+    return None
+  starts = logprobs.start_indices
+  ends = logprobs.end_indices
+  ids = logprobs.token_ids
+  values = logprobs.logprobs
   if not all(isinstance(x, list) for x in (starts, ends, ids, values)):
     return None
   n = len(starts)
