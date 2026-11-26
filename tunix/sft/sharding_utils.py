@@ -20,6 +20,10 @@ import jax
 from jax.interpreters import pxla
 import jax.sharding as shd
 import numpy as np
+from tunix.utils import sharding_utils as common_sharding_utils
+
+place_array_on_target = common_sharding_utils.place_array_on_target
+place_arrays_on_targets = common_sharding_utils.place_arrays_on_targets
 
 
 def shard_input(
@@ -73,8 +77,10 @@ def shard_input(
     )
 
 
-def get_sharding(x: jax.Array, mesh: shd.Mesh, pspec: shd.PartitionSpec):
-  """Get a sharding for an tensor given a mesh and partition spec."""
+def get_sharding(
+    x: jax.Array | np.ndarray, mesh: shd.Mesh, pspec: shd.PartitionSpec
+) -> shd.NamedSharding:
+  """Get a sharding for a tensor given a mesh and partition spec."""
   # Only shard arrays with rank > 0.
   if not isinstance(x, (np.ndarray, jax.Array)) or x.ndim == 0:
     return shd.NamedSharding(mesh, shd.PartitionSpec())  # Replicated

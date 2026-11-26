@@ -24,6 +24,8 @@ class InMemoryTrajectoryReaderTest(store_testing.TrajectoryReaderTestCase):
     mem_store = in_memory_store.InMemoryTrajectoryStore()
     if initial_data:
       for meta, steps in initial_data:
+        if not steps:
+          mem_store.update_metadata(meta)
         for step in steps:
           mem_store.add_step(step, meta)
       mem_store.flush()
@@ -53,7 +55,7 @@ class InMemoryTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
     mem_store.add_step(step, meta)
     meta.extra["status"] = "SUCCEEDED"
     mem_store.update_metadata(meta)
-    read_meta = mem_store.get_trajectories_metadata()[0]
+    read_meta = mem_store.get_trajectories_metadata()["t1"]
     self.assertEqual(read_meta.extra["status"], "SUCCEEDED")
 
   def test_metadata_mutation_isolation(self) -> None:
@@ -71,14 +73,52 @@ class InMemoryTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
     mem_store.add_step(step, meta)
 
     # Caller mutates the returned metadata
-    read_meta = mem_store.get_trajectories_metadata()[0]
+    read_meta = mem_store.get_trajectories_metadata()["iso_1"]
     read_meta.notes = "mutated notes"
     read_meta.extra["count"] = 99
 
     # Re-reading from store should still reflect original state
-    stored_meta = mem_store.get_trajectories_metadata()[0]
+    stored_meta = mem_store.get_trajectories_metadata()["iso_1"]
     self.assertEqual(stored_meta.notes, "initial notes")
     self.assertEqual(stored_meta.extra["count"], 1)
+
+  def test_metrics_mutation_isolation(self) -> None:
+    """Verifies that mutating returned metrics does not alter internal store state."""
+    mem_store = in_memory_store.InMemoryTrajectoryStore()
+    metrics = trajectory_lib.TrajectoryMetrics(extra={"tags": ["a", "b"]})
+    mem_store.update_metrics("t1", metrics)
+
+    retrieved = mem_store.get_trajectories_metrics(["t1"])["t1"]
+    self.assertIsNotNone(retrieved.extra)
+    retrieved.extra["tags"].append("c")
+
+    re_read = mem_store.get_trajectories_metrics(["t1"])["t1"]
+    self.assertEqual(re_read.extra["tags"], ["a", "b"])
+
+  def test_add_step_when_caller_mutates_step_preserves_stored_step(
+      self,
+  ) -> None:
+    """Verifies mutating input step after add_step keeps stored step intact."""
+    mem_store = in_memory_store.InMemoryTrajectoryStore()
+    meta = trajectory_lib.TrajectoryMetadata(
+        trajectory_id="step_iso_1",
+        agent=trajectory_lib.Agent(name="a1", version="1.0"),
+    )
+    step = trajectory_lib.Step(
+        step_id=1,
+        source=trajectory_lib.Source.AGENT,
+        message="initial message",
+        extra={"nested": ["v1"]},
+    )
+
+    mem_store.add_step(step, meta)
+    step.message = "mutated message"
+    assert step.extra is not None
+    step.extra["nested"].append("v2")
+
+    stored_traj = mem_store.get_trajectories(["step_iso_1"])["step_iso_1"]
+    self.assertEqual(stored_traj.steps[0].message, "initial message")
+    self.assertEqual(stored_traj.steps[0].extra, {"nested": ["v1"]})
 
 
 class InMemoryTrajectoryStoreMetadataClsTest(

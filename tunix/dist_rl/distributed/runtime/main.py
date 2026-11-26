@@ -53,6 +53,9 @@ import os
 import sys
 from typing import Any, Callable
 
+from tunix.dist_rl.common import execution_target
+from tunix.dist_rl.distributed.runtime import context
+
 
 @dataclasses.dataclass(frozen=True)
 class PreparedProcess:
@@ -164,8 +167,23 @@ def prepare_process(argv: list[str]) -> PreparedProcess:
       default="",
       help="Addresses of other processes, that this process registers to.",
   )
+  parser.add_argument(
+      "--process_framework_spec",
+      type=str,
+      default="",
+      help=(
+          "Optional '<framework>:<accelerator>' execution target prepared"
+          " before importing --process_main."
+      ),
+  )
 
   context_args, process_argv = parser.parse_known_args(argv)
+  if context_args.process_framework_spec:
+    context.ProcessContext().prepare_env(
+        execution_target.ExecutionTarget.parse(
+            context_args.process_framework_spec
+        )
+    )
 
   try:
     process_main = import_symbol(context_args.process_main)

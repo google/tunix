@@ -27,19 +27,12 @@ from __future__ import annotations
 
 import abc
 import dataclasses
-import enum
 from typing import Any, Mapping, Optional, Protocol, Sequence, runtime_checkable
 
+from tunix.common import datatypes as common_datatypes
 
-class WeightSyncMode(str, enum.Enum):
-  """Modes for weight synchronization across workers."""
-
-  NONE = "none"
-  FALLBACK = "fallback"
-  RAIDEN = "raiden"
-
-
-DEFAULT_WEIGHT_SYNC_MODE = WeightSyncMode.FALLBACK
+WeightSyncMode = common_datatypes.WeightSyncMode
+DEFAULT_WEIGHT_SYNC_MODE = common_datatypes.DEFAULT_WEIGHT_SYNC_MODE
 
 
 @dataclasses.dataclass(frozen=True)
@@ -154,6 +147,43 @@ class TensorMetadata:
       )
 
 
+def _parse_tensor_metadata(variables_raw: Any) -> tuple[TensorMetadata, ...]:
+  """Normalizes raw manifest entries into `TensorMetadata` tuples."""
+  variables: list[TensorMetadata] = []
+  for v in variables_raw:
+    if isinstance(v, TensorMetadata):
+      variables.append(v)
+    elif isinstance(v, dict):
+      variables.append(
+          TensorMetadata(
+              name=v["name"],
+              shape=tuple(v["shape"]),
+              mesh_shape=tuple(v["mesh_shape"]),
+              layout=tuple(v["layout"]),
+              item_size=int(v["item_size"]),
+              layer_idx=int(v.get("layer_idx", 0)),
+              sharding_spec=tuple(v.get("sharding_spec", ())),
+              global_shard_indices=tuple(v.get("global_shard_indices", ())),
+          )
+      )
+    elif hasattr(v, "name"):
+      variables.append(
+          TensorMetadata(
+              name=v.name,
+              shape=tuple(v.shape),
+              mesh_shape=tuple(v.mesh_shape),
+              layout=tuple(v.layout),
+              item_size=int(v.item_size),
+              layer_idx=int(getattr(v, "layer_idx", 0)),
+              sharding_spec=tuple(getattr(v, "sharding_spec", ())),
+              global_shard_indices=tuple(
+                  getattr(v, "global_shard_indices", ())
+              ),
+          )
+      )
+  return tuple(variables)
+
+
 @dataclasses.dataclass(frozen=True)
 class WorkUnitMetadata:
   """Wire-safe metadata describing one source or destination work unit.
@@ -192,10 +222,15 @@ class WorkUnitMetadata:
       mesh dimension each name is. Both sides are needed before the a transport
       can map device coordinates without guessing axes from equal dimension
       sizes.
-    transport_mode: Transport this unit is bound on, "ffi" or "tcp". None means
-      unreported, not a default. Source and destination need not match.
+    transport_mode: Transport this unit is bound on, e.g. "ffi", "tcp", or
+      "gcs". None means unreported, not a default. Source and destination need
+      not match.
     use_ffi: `transport_mode == "ffi"` as a bool, for consumers that would
       otherwise compare strings. None when unreported.
+    artifact_uri: Optional URI or directory path of a prepared checkpoint
+      artifact staged by a file/object-store source for this round.
+    checksums: Optional wire-safe per-tensor/aggregate L1 checksum dictionary
+      computed by the source when weight verification is enabled.
   """
 
   unit: WorkUnitId
@@ -209,6 +244,19 @@ class WorkUnitMetadata:
   mesh_axes: Optional[tuple[str, ...]] = None
   transport_mode: Optional[str] = None
   use_ffi: Optional[bool] = None
+  artifact_uri: Optional[str] = None
+  # Excluded from `__hash__`: a dict is unhashable, and every other field is a
+  # tuple/scalar precisely so the frozen metadata stays hashable. Still part of
+  # `__eq__`, which is consistent because equal objects keep equal hashes.
+  checksums: Optional[dict[str, float | int]] = dataclasses.field(
+      default=None, hash=False
+  )
+
+  def __post_init__(self) -> None:
+    if self.artifact_uri is not None and not self.artifact_uri.strip():
+      raise ValueError(
+          "WorkUnitMetadata.artifact_uri must not be empty when set"
+      )
 
   @classmethod
   def from_dict(cls, d: Any) -> WorkUnitMetadata:
@@ -226,40 +274,6 @@ class WorkUnitMetadata:
     else:
       unit = WorkUnitId(job_name=str(unit_raw or "destination"))
 
-    variables_raw = d.get("variables", ())
-    variables = []
-    for v in variables_raw:
-      if isinstance(v, TensorMetadata):
-        variables.append(v)
-      elif isinstance(v, dict):
-        variables.append(
-            TensorMetadata(
-                name=v["name"],
-                shape=tuple(v["shape"]),
-                mesh_shape=tuple(v["mesh_shape"]),
-                layout=tuple(v["layout"]),
-                item_size=int(v["item_size"]),
-                layer_idx=int(v.get("layer_idx", 0)),
-                sharding_spec=tuple(v.get("sharding_spec", ())),
-                global_shard_indices=tuple(v.get("global_shard_indices", ())),
-            )
-        )
-      elif hasattr(v, "name"):
-        variables.append(
-            TensorMetadata(
-                name=v.name,
-                shape=tuple(v.shape),
-                mesh_shape=tuple(v.mesh_shape),
-                layout=tuple(v.layout),
-                item_size=int(v.item_size),
-                layer_idx=int(getattr(v, "layer_idx", 0)),
-                sharding_spec=tuple(getattr(v, "sharding_spec", ())),
-                global_shard_indices=tuple(
-                    getattr(v, "global_shard_indices", ())
-                ),
-            )
-        )
-
     return cls(
         unit=unit,
         shards=tuple(d.get("shards", ())),
@@ -276,12 +290,20 @@ class WorkUnitMetadata:
         item_size=(
             int(d["item_size"]) if d.get("item_size") is not None else None
         ),
-        variables=tuple(variables),
+        variables=_parse_tensor_metadata(d.get("variables", ())),
         mesh_axes=(
             tuple(d["mesh_axes"]) if d.get("mesh_axes") is not None else None
         ),
         transport_mode=d.get("transport_mode"),
         use_ffi=d.get("use_ffi"),
+        artifact_uri=(
+            str(d["artifact_uri"])
+            if d.get("artifact_uri") is not None
+            else None
+        ),
+        checksums=(
+            dict(d["checksums"]) if d.get("checksums") is not None else None
+        ),
     )
 
 
@@ -345,6 +367,17 @@ class WeightSyncHandler(abc.ABC):
     Callers running an event loop wrap it in an executor.
     """
 
+  @property
+  def transfers_from_staged_copy(self) -> bool:
+    """Whether `transfer` reads only what `prepare_weight_sync` staged.
+
+    True by default. A handler whose `transfer` reads the source's live
+    weights must override this to return False: a source may train again as
+    soon as it has staged its weights, and the coordinator refuses a round
+    given `source_prepared` for such a handler.
+    """
+    return True
+
   def close(self) -> None:
     """Releases any transport resources. Optional for implementations."""
 
@@ -360,9 +393,11 @@ class WeightSyncSource(Protocol):
   Metadata is the return value of the per-round prepare call rather than a
   separately polled property. The same objects are registered and carried in
   the round's request, so a handler always sees the identity and placement
-  information for exactly the version that was prepared. A JAX/Raiden source
-  commonly rebinds new arrays and D2Hs here; a file handler may instead write
-  a checkpoint and return metadata naming that prepared artifact.
+  information for exactly the version that was prepared. Because the default
+  Raiden handler transfers with `skip_d2h=True`, a Raiden source must stage
+  host bytes (D2H) before `prepare_weight_sync` returns; a file handler may
+  instead write a checkpoint and return metadata naming that prepared
+  artifact.
   """
 
   async def prepare_weight_sync(
@@ -441,9 +476,7 @@ class WeightSyncDestination(Protocol):
     """
     ...
 
-  async def pre_weight_sync(
-      self, sync_request: Any = None, **kwargs: Any
-  ) -> Any:
+  async def pre_weight_sync(self, sync_request: Any, **kwargs: Any) -> Any:
     """Quiesces the worker so the arriving weights have somewhere to land.
 
     Must actually gate admission: stop accepting new requests, drain or cancel
@@ -452,12 +485,12 @@ class WeightSyncDestination(Protocol):
     setting a pause flag does not satisfy this.
 
     Args:
-      sync_request: Optional request context for the sync round.
+      sync_request: Request context for the sync round.
       **kwargs: Additional transport-specific options.
     """
     ...
 
-  async def weight_sync(self, sync_request: Any = None, **kwargs: Any) -> Any:
+  async def weight_sync(self, sync_request: Any, **kwargs: Any) -> Any:
     """Materializes the received weights into the staging copy.
 
     Called only after the transport reported success. A Raiden/JAX worker
@@ -466,14 +499,12 @@ class WeightSyncDestination(Protocol):
     pending policy version for post to publish.
 
     Args:
-      sync_request: Optional request context for the sync round.
+      sync_request: Request context for the sync round.
       **kwargs: Additional transport-specific options.
     """
     ...
 
-  async def post_weight_sync(
-      self, sync_request: Any = None, **kwargs: Any
-  ) -> Any:
+  async def post_weight_sync(self, sync_request: Any, **kwargs: Any) -> Any:
     """Publishes the pending weights atomically, rebuilds caches, resumes.
 
     Must be idempotent for the round key: a retry after a lost reply, or
@@ -481,14 +512,12 @@ class WeightSyncDestination(Protocol):
     same committed state rather than fail or double-apply.
 
     Args:
-      sync_request: Optional request context for the sync round.
+      sync_request: Request context for the sync round.
       **kwargs: Additional transport-specific options.
     """
     ...
 
-  async def abort_weight_sync(
-      self, sync_request: Any = None, **kwargs: Any
-  ) -> Any:
+  async def abort_weight_sync(self, sync_request: Any, **kwargs: Any) -> Any:
     """Rolls back to serving the previous weights.
 
     Invalidates this round's staging -- physically or logically: a
@@ -510,7 +539,7 @@ class WeightSyncDestination(Protocol):
     expensively.
 
     Args:
-      sync_request: Optional request context for the sync round.
+      sync_request: Request context for the sync round.
       **kwargs: Additional transport-specific options.
     """
     ...

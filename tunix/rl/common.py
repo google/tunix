@@ -15,18 +15,20 @@
 
 import functools
 import inspect
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence, TypeAlias
 
 from absl import logging
 import flax
 from flax import nnx
 import jax
 from jax import numpy as jnp
-from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import jax.tree_util as jtu
 import numpy as np
+from tunix.common import datatypes
+from tunix.rl import packing
 from tunix.sft import utils
 
+ArrayLike: TypeAlias = datatypes.ArrayLike
 make_causal_attn_mask = utils.make_causal_attn_mask
 build_positions_from_mask = utils.build_positions_from_mask
 
@@ -125,6 +127,10 @@ class TrainExample:
   # to dampen positions where the trainer's recomputed log-probability
   # diverges from the rollout sampler's. ``None`` disables the correction.
   sampler_is_weights: ArrayType | None = None
+  # The rollout sampler's `[B, C, k]` top-k token ids and log probs at each
+  # completion position, used by Score Centering (arXiv:2609.20807).
+  old_topk_token_ids: ArrayType | None = None
+  old_topk_logps: ArrayType | None = None
   # `[B, P + C, num_layers, top_k]` MoE experts the rollout routed through,
   # laid out over the same `[prompt | completion]` padding as the token ids.
   # When set, a model that accepts `forced_routed_experts` replays these
@@ -205,25 +211,74 @@ def compute_kl_divergence(
 
 
 def selective_log_softmax(logits: jax.Array, input_ids: jax.Array) -> jax.Array:
-  """Compute the log probablity based on the input ids.
-
-  Args:
-    logits: Logits from the model.
-    input_ids: Input ids to get logits.
-
-  Returns:
-    Selected log probabilities.
-  """
+  """Computes log probabilities at `input_ids` (`[B, L]` or `[B, L, K]`)."""
   logits_f32 = jnp.where(
       jnp.isnan(logits),
       -1e9,
       jnp.clip(logits.astype(jnp.float32), min=-1e9, max=1e9),
   )
-  target_logits = jnp.take_along_axis(
-      logits_f32, input_ids[..., None], axis=-1
-  ).squeeze(-1)
-  normalizer = jax.nn.logsumexp(logits_f32, axis=-1)
-  return target_logits - normalizer
+  idx = input_ids[..., None] if input_ids.ndim < logits.ndim else input_ids
+  logps = jnp.take_along_axis(logits_f32, idx, axis=-1) - jax.nn.logsumexp(
+      logits_f32, axis=-1, keepdims=True
+  )
+  return logps.squeeze(-1) if input_ids.ndim < logits.ndim else logps
+
+
+pad_topk = packing.pad_topk
+
+
+def compute_score_centering_correction(
+    trainer_topk_logps: jax.Array,
+    sampler_topk_logps: jax.Array,
+    sampler_is: str | None,
+    sampler_is_threshold: float | None,
+    eps: float,
+    completion_mask: jax.Array | None = None,
+    has_sampler_is_weights: bool = True,
+) -> tuple[jax.Array, dict[str, utils.WeightedMetric]]:
+  """Zero-value Score Centering gradient correction and weighted diagnostics."""
+  sg_p = jax.lax.stop_gradient(trainer_topk_logps).astype(jnp.float32)
+  sg_q = jax.lax.stop_gradient(sampler_topk_logps).astype(jnp.float32)
+  valid = jnp.isfinite(sg_q)
+  safe_p = jnp.where(valid, sg_p, -1e9)
+  safe_q = jnp.where(valid, sg_q, -1e9)
+  p = jnp.where(valid, jnp.exp(safe_p), 0.0)
+  q = jnp.where(valid, jnp.exp(safe_q), 0.0)
+  head_mass_q = jnp.sum(q, axis=-1)
+  rho = jnp.maximum(1.0 - head_mass_q, eps) / jnp.maximum(
+      1.0 - jnp.sum(p, axis=-1), eps
+  )
+  if sampler_is == "token" and has_sampler_is_weights:
+    c = jnp.inf if sampler_is_threshold is None else sampler_is_threshold
+    w = jnp.minimum(jnp.exp(jnp.clip(safe_p - safe_q, -20.0, 20.0)), c)
+    alpha = jnp.minimum(1.0, c * rho)
+  else:
+    w, alpha = 1.0, rho
+  coeff = jnp.where(valid, q * w - alpha[..., None] * p, 0.0)
+
+  has_valid_topk = jnp.any(valid, axis=-1)
+  valid_pos = (
+      has_valid_topk
+      if completion_mask is None
+      else (completion_mask > 0) & has_valid_topk
+  )
+  mask_f = valid_pos.astype(jnp.float32)
+  denom = jnp.sum(mask_f)
+  stats = {
+      f"score_centering/{name}_mean": utils.WeightedMetric(
+          jnp.sum(val * mask_f), denom, min_denom=1.0
+      )
+      for name, val in (
+          ("head_mass_q", head_mass_q),
+          ("tail_ratio_rho", rho),
+          ("abs_coeff_sum", jnp.sum(jnp.abs(coeff), axis=-1)),
+      )
+  }
+  safe_trainer_logps = jnp.where(
+      valid, trainer_topk_logps.astype(jnp.float32), 0.0
+  )
+  raw = jnp.sum(jax.lax.stop_gradient(coeff) * safe_trainer_logps, axis=-1)
+  return raw - jax.lax.stop_gradient(raw), stats
 
 
 # TODO(tsbao): remove this once old callsite is cleaned up.
@@ -417,7 +472,8 @@ def decode_routed_experts_jax(routed_experts: jax.Array) -> jax.Array:
 
   Only batched layouts are accepted:
   - Mode 2 (`uint10` packed as 4 values per 5 bytes, 5D `(B, T, L, K // 4, 5)`
-    `uint8`): branchless bitwise shift/mask unpack followed by `- 1` offset.
+    or tail-packed `(B, T, L, 1, ceil(10 * K / 8))` `uint8`): branchless bitwise
+    shift/mask unpack followed by `- 1` offset.
   - Mode 1 (`+1`-shifted `uint8`, 4D `(B, T, L, K)` `uint8`, including
     `K == 5`): `routed_experts.astype(jnp.int32) - 1`.
   - Raw `int16` / `int32` (4D `(B, T, L, K)`):
@@ -432,23 +488,30 @@ def decode_routed_experts_jax(routed_experts: jax.Array) -> jax.Array:
   """
   arr = jnp.asarray(routed_experts)
   if arr.dtype == jnp.uint8:
-    if arr.ndim == 5 and arr.shape[4] == 5:
-      b0 = arr[..., 0].astype(jnp.int32)
-      b1 = arr[..., 1].astype(jnp.int32)
-      b2 = arr[..., 2].astype(jnp.int32)
-      b3 = arr[..., 3].astype(jnp.int32)
-      b4 = arr[..., 4].astype(jnp.int32)
-      v0 = (b0 | ((b1 & 0x03) << 8)) - 1
-      v1 = ((b1 >> 2) | ((b2 & 0x0F) << 6)) - 1
-      v2 = ((b2 >> 4) | ((b3 & 0x3F) << 4)) - 1
-      v3 = ((b3 >> 6) | (b4 << 2)) - 1
-      stacked = jnp.stack([v0, v1, v2, v3], axis=-1)
-      return stacked.reshape(*arr.shape[:-2], arr.shape[-2] * 4)
+    if arr.ndim == 5:
+      top_k = packing.uint10_logical_k(arr.shape[3], arr.shape[4])
+      if top_k is not None:
+        if arr.shape[4] != 5:
+          pad_b = (5 - arr.shape[4] % 5) % 5
+          arr = jnp.pad(arr, ((0, 0), (0, 0), (0, 0), (0, 0), (0, pad_b)))
+          arr = arr.reshape(*arr.shape[:3], arr.shape[4] // 5, 5)
+        b0 = arr[..., 0].astype(jnp.int32)
+        b1 = arr[..., 1].astype(jnp.int32)
+        b2 = arr[..., 2].astype(jnp.int32)
+        b3 = arr[..., 3].astype(jnp.int32)
+        b4 = arr[..., 4].astype(jnp.int32)
+        v0 = (b0 | ((b1 & 0x03) << 8)) - 1
+        v1 = ((b1 >> 2) | ((b2 & 0x0F) << 6)) - 1
+        v2 = ((b2 >> 4) | ((b3 & 0x3F) << 4)) - 1
+        v3 = ((b3 >> 6) | (b4 << 2)) - 1
+        stacked = jnp.stack([v0, v1, v2, v3], axis=-1)
+        return stacked.reshape(*arr.shape[:-2], arr.shape[-2] * 4)[..., :top_k]
     if arr.ndim == 4:
       return arr.astype(jnp.int32) - jnp.int32(1)
     raise ValueError(
         "decode_routed_experts_jax expects a batched 4D (B, T, L, K) uint8 or"
-        f" 5D (B, T, L, K // 4, 5) uint10 array, got shape={arr.shape}."
+        " 5D (B, T, L, K // 4, 5) / (B, T, L, 1, ceil(10 * K / 8)) uint10"
+        f" array, got shape={arr.shape}."
     )
   if arr.ndim != 4:
     raise ValueError(
@@ -456,6 +519,41 @@ def decode_routed_experts_jax(routed_experts: jax.Array) -> jax.Array:
         f" int16/int32 array, got dtype={arr.dtype} and shape={arr.shape}."
     )
   return arr.astype(jnp.int32)
+
+
+def _prepare_target_ids(
+    input_tokens_to_keep: jax.Array,
+    topk_token_ids: jax.Array | None,
+    segment_ids: jax.Array | None,
+) -> jax.Array:
+  """Combines `[B, L]` target ids with optional `[B, L, K]` top-k ids."""
+  if topk_token_ids is None:
+    return input_tokens_to_keep
+  if segment_ids is not None:
+    raise ValueError("topk_token_ids is not supported with sequence packing.")
+  return jnp.concatenate(
+      [input_tokens_to_keep[..., None], topk_token_ids], axis=-1
+  )
+
+
+def _format_logp_outputs(
+    logps: jax.Array,
+    entropy: jax.Array | None,
+    has_topk: bool,
+    stop_gradient: bool,
+) -> (
+    jax.Array
+    | tuple[jax.Array, jax.Array]
+    | tuple[jax.Array | tuple[jax.Array, jax.Array], jax.Array]
+):
+  """Applies `stop_gradient` and splits combined `[B, L, 1 + K]` logps."""
+  if stop_gradient:
+    logps = jax.lax.stop_gradient(logps)
+    if entropy is not None:
+      entropy = jax.lax.stop_gradient(entropy)
+  per_token = logps[..., 0] if has_topk else logps
+  result = per_token if entropy is None else (per_token, entropy)
+  return (result, logps[..., 1:]) if has_topk else result
 
 
 @functools.partial(
@@ -485,7 +583,12 @@ def compute_per_token_logps(
     chunk_size: int = 0,
     routed_experts: jax.Array | None = None,
     token_mask: jax.Array | None = None,
-) -> jax.Array | tuple[jax.Array, jax.Array]:
+    topk_token_ids: jax.Array | None = None,
+) -> (
+    jax.Array
+    | tuple[jax.Array, jax.Array]
+    | tuple[jax.Array | tuple[jax.Array, jax.Array], jax.Array]
+):
   """Computes the per-token log probabilities.
 
   Args:
@@ -510,11 +613,14 @@ def compute_per_token_logps(
       this size.
     routed_experts: Optional `[B, T, num_layers, top_k]` MoE experts captured
       during rollout (either `int16`/`int32`, `+1`-shifted `uint8`, or 5D `[B,
-      T, num_layers, top_k // 4, 5]` `+1`-shifted `uint10`). Decoded on device
-      and forwarded to the model as `forced_routed_experts` -- the name
-      MaxText's adapter uses -- so it replays this routing instead of re-running
-      its router. Ignored by models that do not accept the kwarg.
+      T, num_layers, top_k // 4, 5]` / `[B, T, num_layers, 1, ceil(10 * top_k /
+      8)]` `+1`-shifted `uint10`). Decoded on device and forwarded to the model
+      as `forced_routed_experts` -- the name MaxText's adapter uses -- so it
+      replays this routing instead of re-running its router. Ignored by models
+      that do not accept the kwarg.
     token_mask: Optional explicit valid positions for prompt plus completion.
+    topk_token_ids: Optional `[B, L, K]` token ids (e.g. the rollout sampler's
+      top-k) whose log probs are also returned. Not supported with packing.
 
   Returns:
     per_token_logps: jax.Array token-level logarithmic values.
@@ -526,6 +632,8 @@ def compute_per_token_logps(
     entropy: optional per-token entropy jax.Array of shape matches
     per_token_logps,
       returned if return_entropy is True.
+    With `topk_token_ids`, returns `(result, topk_logps)`: the value above and
+    the `[B, L, K]` log probs of `topk_token_ids`.
   """
   model = nnx.merge(graphdef, state)
 
@@ -595,63 +703,50 @@ def compute_per_token_logps(
   else:
     logits_to_keep = completion_tokens.shape[1]
 
-  input_tokens_to_keep = input_tokens[:, -logits_to_keep:]
+  target_ids = _prepare_target_ids(
+      input_tokens[:, -logits_to_keep:], topk_token_ids, segment_ids
+  )
+  has_topk = topk_token_ids is not None
 
   if chunk_size > 0:
     hidden_state = outputs[:, -logits_to_keep - 1 : -1, :]
     out = compute_chunked_logps(
         model,
         hidden_state,
-        input_tokens_to_keep,
+        target_ids,
         temperature,
         chunk_size,
         return_entropy,
     )
-    if return_entropy:
-      per_token_logps, per_token_entropy = out
-    else:
-      per_token_logps = out
-
+    per_token_logps, entropy = out if return_entropy else (out, None)
     if segment_ids is not None:
       per_token_logps = jnp.pad(
           per_token_logps, ((0, 0), (1, 0)), constant_values=0.0
       )
-      if return_entropy:
-        per_token_entropy = jnp.pad(
-            per_token_entropy, ((0, 0), (1, 0)), constant_values=0.0  # pyrefly: ignore[unbound-name]
-        )
+      if entropy is not None:
+        entropy = jnp.pad(entropy, ((0, 0), (1, 0)), constant_values=0.0)
+    return _format_logp_outputs(
+        per_token_logps, entropy, has_topk, stop_gradient
+    )
 
-    if stop_gradient:
-      per_token_logps = jax.lax.stop_gradient(per_token_logps)
-      if return_entropy:
-        per_token_entropy = jax.lax.stop_gradient(per_token_entropy)  # pyrefly: ignore[unbound-name]
+  logits = outputs[:, -logits_to_keep - 1 : -1, :]
+  if temperature != 0.0 and temperature != 1.0:
+    logits /= temperature
 
-    if return_entropy:
-      return per_token_logps, per_token_entropy  # pyrefly: ignore[unbound-name]
-    return per_token_logps
-  else:
-    logits = outputs[:, -logits_to_keep - 1 : -1, :]
-    if temperature != 0.0 and temperature != 1.0:
-      logits /= temperature
+  per_token_logps = selective_log_softmax(logits, target_ids)
 
-    per_token_logps = selective_log_softmax(logits, input_tokens_to_keep)
+  if segment_ids is not None:
+    # Pad the front with 0.0 to restore [Batch, FullSeqLen] so logp[i] matches
+    # token[i] without downstream mask slicing.
+    per_token_logps = jnp.pad(
+        per_token_logps, ((0, 0), (1, 0)), constant_values=0.0
+    )
+    logits = jnp.pad(logits, ((0, 0), (1, 0), (0, 0)), constant_values=0.0)
 
-    if segment_ids is not None:
-      # Pad the front with 0.0 to make shape back to [Batch, FullSeqLen]. This
-      # aligns indices (logp[i] matches token[i]) and avoids mask slicing downstream.
-      per_token_logps = jnp.pad(
-          per_token_logps, ((0, 0), (1, 0)), constant_values=0.0
-      )
-      logits = jnp.pad(logits, ((0, 0), (1, 0), (0, 0)), constant_values=0.0)
-
-    if stop_gradient:
-      per_token_logps = jax.lax.stop_gradient(per_token_logps)
-      logits = jax.lax.stop_gradient(logits)
-
-    if return_entropy:
-      entropy = compute_entropy_from_logits(logits)
-      return per_token_logps, entropy
-    return per_token_logps
+  if stop_gradient:
+    logits = jax.lax.stop_gradient(logits)
+  entropy = compute_entropy_from_logits(logits) if return_entropy else None
+  return _format_logp_outputs(per_token_logps, entropy, has_topk, stop_gradient)
 
 
 @flax.struct.dataclass
@@ -1271,20 +1366,25 @@ def compute_chunked_logps(
   Args:
       model: The actor model (needs to expose `lm_head`)
       hidden_states: [Batch, SeqLen, HiddenDim]
-      target_ids:    [Batch, SeqLen]
-      chunk_size:    Number of tokens to process at a time per sequence.
+      target_ids: [Batch, SeqLen] or [Batch, SeqLen, K]
+      temperature: Sampling temperature.
+      chunk_size: Number of tokens to process at a time per sequence.
+      return_entropy: Whether to also compute per-token entropy.
 
   Returns:
-     per_token_logps: [Batch, SeqLen]
+     per_token_logps (matching `target_ids` shape), or `(per_token_logps,
+     per_token_entropy)` when `return_entropy` is True.
   """
   batch_size, seq_len, hidden_dim = hidden_states.shape
+  extra_dims = target_ids.shape[2:]
 
   # 1. Pad the sequence dimension if it's not perfectly divisible by chunk_size
   pad_len = (chunk_size - (seq_len % chunk_size)) % chunk_size
   if pad_len > 0:
     # Pad sequence dimension (axis 1)
     hidden_states = jnp.pad(hidden_states, ((0, 0), (0, pad_len), (0, 0)))
-    target_ids = jnp.pad(target_ids, ((0, 0), (0, pad_len)))
+    id_pads = ((0, 0), (0, pad_len)) + ((0, 0),) * len(extra_dims)
+    target_ids = jnp.pad(target_ids, id_pads)
 
   padded_seq_len = seq_len + pad_len
   num_chunks = padded_seq_len // chunk_size
@@ -1293,7 +1393,9 @@ def compute_chunked_logps(
   hs_reshaped = hidden_states.reshape(
       batch_size, num_chunks, chunk_size, hidden_dim
   )
-  ids_reshaped = target_ids.reshape(batch_size, num_chunks, chunk_size)
+  ids_reshaped = target_ids.reshape(
+      batch_size, num_chunks, chunk_size, *extra_dims
+  )
 
   # 3. Swap B, T axes to make it time-major for jax.lax.scan
   hs_scannable = jnp.swapaxes(hs_reshaped, 0, 1)
@@ -1316,36 +1418,25 @@ def compute_chunked_logps(
     if return_entropy:
       entropy_chunk = compute_entropy_from_logits(logits_chunk)
       return None, (logps_chunk, entropy_chunk)
-    else:
-      return None, logps_chunk
+    return None, logps_chunk
 
   # 4. Scan over the NumChunks dimension
   _, scanned_out = jax.lax.scan(
       logp_step, init=None, xs=(hs_scannable, ids_scannable)
   )
 
+  logps_shape = (batch_size, padded_seq_len, *extra_dims)
   if return_entropy:
     logps_chunked, entropy_chunked = scanned_out
-    # 5. Swap back to batch-major and flatten the sequence dimension
-    logps_reshaped = jnp.swapaxes(logps_chunked, 0, 1)
-    entropy_reshaped = jnp.swapaxes(entropy_chunked, 0, 1)
-    # 6. Slice off any padding we added initially.
-    per_token_logps = logps_reshaped.reshape(batch_size, padded_seq_len)[
+    per_token_logps = jnp.swapaxes(logps_chunked, 0, 1).reshape(logps_shape)[
         :, :seq_len
     ]
-    per_token_entropy = entropy_reshaped.reshape(batch_size, padded_seq_len)[
-        :, :seq_len
-    ]
+    per_token_entropy = jnp.swapaxes(entropy_chunked, 0, 1).reshape(
+        batch_size, padded_seq_len
+    )[:, :seq_len]
     return per_token_logps, per_token_entropy
-  else:
-    logps_chunked = scanned_out
-    # 5. Swap back to batch-major and flatten the sequence dimension
-    logps_reshaped = jnp.swapaxes(logps_chunked, 0, 1)
-    # 6. Slice off any padding we added initially.
-    per_token_logps = logps_reshaped.reshape(batch_size, padded_seq_len)[
-        :, :seq_len
-    ]
-    return per_token_logps
+  logps_chunked = scanned_out
+  return jnp.swapaxes(logps_chunked, 0, 1).reshape(logps_shape)[:, :seq_len]
 
 
 @nnx.jit(static_argnames=("pad_id", "eos_id", "stop_gradient"))
@@ -1912,6 +2003,13 @@ def global_weighted_mean(values: Iterable[utils.WeightedMetric]) -> float:
   covariance/variance reduction for Pearson correlation metrics.
   """
   return utils.weighted_metric_mean(values)
+
+
+SCORE_CENTERING_METRICS: Mapping[str, Callable[[Any], Any]] = {
+    "score_centering/head_mass_q_mean": global_weighted_mean,
+    "score_centering/tail_ratio_rho_mean": global_weighted_mean,
+    "score_centering/abs_coeff_sum_mean": global_weighted_mean,
+}
 
 
 def compute_entropy_from_logits(logits: jax.Array) -> jax.Array:

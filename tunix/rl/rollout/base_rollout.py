@@ -63,8 +63,14 @@ class RolloutOutput:
   # unless the backend was asked to capture them, or for dense models.
   routed_experts: list[np.ndarray | None] | None = None
 
-  # Valid prompt length per row, before left padding. Optional for old backends.
+  # Valid prompt length per row, before left padding. Required when
+  # TrajectoryCollectEngine tracks tokens (both tokenizer and chat_parser set).
   prompt_lengths: np.ndarray | None = None
+
+  # Per generation `[gen_length, k]` top-k token ids and log probs, set when
+  # `RolloutConfig.num_logprobs > 1`.
+  topk_token_ids: list[np.ndarray] | None = None
+  topk_logprobs: list[np.ndarray] | None = None
 
 
 class BaseRollout(ABC):
@@ -110,3 +116,17 @@ class BaseRollout(ABC):
   @abstractmethod
   def model(self) -> Any:
     """Returns the rollout model."""
+
+  def release_for_training(
+      self,
+      free_weights: bool = True,
+      src_state: jaxtyping.PyTree | None = None,
+  ) -> None:
+    """Releases rollout HBM resources before training when colocated."""
+    del free_weights, src_state
+
+  def restore_after_training(self) -> None:
+    """Restores rollout HBM resources after training when colocated."""
+
+  def close(self) -> None:
+    """Releases background rollout resources when shutting down."""

@@ -220,9 +220,14 @@ def _print_report_table(report: benchmark_lib.BenchmarkReport) -> None:
       if report.workload.writer_per_worker and report.workload.num_workers > 1
       else "shared writer"
   )
+  metrics_desc = (
+      f" | {report.workload.metrics_updates_per_trajectory} metrics/traj"
+      if report.workload.metrics_updates_per_trajectory > 0
+      else ""
+  )
   print(
-      f"Config: {report.workload.steps_per_trajectory} steps/traj |"
-      f" {report.workload.step_payload_chars} chars/step"
+      f"Config: {report.workload.steps_per_trajectory} steps/traj{metrics_desc}"
+      f" | {report.workload.step_payload_chars} chars/step"
       f" (~{report.workload.step_payload_chars // 1000}KB) |"
       f" {report.workload.num_workers} worker(s) ({writer_mode})"
   )

@@ -196,7 +196,7 @@ class Qwen25MathEvaluator:
       mesh_config=None,
       max_prompt_length: int = 1024,  # Increased from 512
       max_generation_steps: int = 1024,  # Increased from 512
-      sampler_type: str = "vanilla",  # vanilla, vllm, or sglang-jax
+      sampler_type: str = "vanilla",  # vanilla or vllm
   ):
     self.model_config = model_config
     self.model_version = model_version
@@ -296,32 +296,6 @@ class Qwen25MathEvaluator:
           tokenizer=self.tokenizer,
           cache_config=cache_config,
       )
-    elif self.sampler_type == "sglang_jax":
-      from tunix.generate import sglang_jax_sampler  # pylint: disable=g-import-not-at-top
-
-      mapping_config = mappings.MappingConfig.build(
-          mapping_obj=None,
-          model=self.model,
-          backend="sglang_jax",
-      )
-      self.sampler_sglang = sglang_jax_sampler.SglangJaxSampler(  # pyrefly: ignore[bad-instantiation]
-          tokenizer=self.tokenizer,
-          config=sglang_jax_sampler.SglangJaxConfig(
-              mesh=self.mesh,
-              context_length=self.max_prompt_length
-              + self.max_generation_steps
-              + 100,
-              model_version=self.model_version,
-              mem_fraction_static=0.4,
-              init_with_random_weights=False,
-              disable_radix_cache=True,
-              enable_deterministic_sampling=False,
-              mapping_config=mapping_config,
-          ),
-      )
-      # sync weights from self.model to the sampler's internal model
-      print("Syncing model weights to SGLang JAX sampler...")
-      self.sampler_sglang.update_params(nnx.state(self.model))
     elif self.sampler_type == "vllm":
       from tunix.generate import vllm_sampler  # pylint: disable=g-import-not-at-top
 
@@ -452,18 +426,6 @@ class Qwen25MathEvaluator:
           echo=False,
           eos_tokens=[stop_token_id],
           seed=jax.random.PRNGKey(seed) if seed is not None else None,  # pyrefly: ignore[bad-argument-type]
-      )
-    elif self.sampler_type == "sglang_jax":
-      out_data = self.sampler_sglang(
-          input_strings=prompts,
-          max_generation_steps=safe_gen_length,
-          max_prompt_length=self.max_prompt_length,
-          temperature=temperature,
-          top_p=top_p,
-          top_k=top_k,
-          seed=seed,
-          echo=False,
-          pad_output=True,
       )
     elif self.sampler_type == "vllm":
       out_data = self.sampler_vllm(

@@ -16,24 +16,30 @@
 
 import asyncio
 import dataclasses
+import pathlib
 import types
 import unittest
 from unittest import mock
 
 from absl.testing import absltest
+import jax.numpy as jnp
 import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import test_utils as mocks
-from tunix.dist_rl.common import timeouts
-from tunix.dist_rl.orchestrator import algorithm_adapter
 from tunix.dist_rl.orchestrator import batch_assembly
+from tunix.dist_rl.orchestrator import payload_builder
 from tunix.dist_rl.rollout import collector
 from tunix.dist_rl.rollout import sampler as sampler_lib
+from tunix.dist_rl.trajectory import converter as converter_lib
+from tunix.dist_rl.trajectory import file_store
 from tunix.dist_rl.trajectory import in_memory_store
+from tunix.dist_rl.trajectory import sql_store
 from tunix.rl import algorithm_config
+from tunix.rl import common as rl_common
 from tunix.rl import packing
 from tunix.rl.agentic.agents import model_agent
 from tunix.rl.agentic.environments import base_environment
+from tunix.rl.rollout import base_rollout
 
 
 class _MultiStepEnv(base_environment.BaseTaskEnv):
@@ -83,14 +89,13 @@ class _MockTokenizer:
 class _MockSampler(sampler_lib.Sampler):
 
   def __init__(self, token_lengths=None, routed_experts=None):
-    self.sampled_params = []
+    self.sampled_requests = []
     self.token_lengths = token_lengths or [30, 20]
     self._call_count = 0
     self.routed_experts = routed_experts
 
-  async def sample(self, req, **kwargs):
-    if hasattr(req, "sampling_params"):
-      self.sampled_params.append(req.sampling_params)
+  async def sample(self, req):
+    self.sampled_requests.append(req)
     tok_len = (
         self.token_lengths[self._call_count]
         if self._call_count < len(self.token_lengths)
@@ -113,31 +118,13 @@ class _MockSampler(sampler_lib.Sampler):
     )
 
 
-class _MockVanillaSampler(sampler_lib.Sampler):
-
-  def __init__(self):
-    self.calls = []
-
-  async def sample(self, req, **kwargs):
-    self.calls.append((req, kwargs))
-    sp = getattr(req, "sampling_params", None)
-    seed = getattr(sp, "seed", None)
-    tok_seed = int(seed if seed is not None else 0)
-    return sampler_lib.SamplingResponse(
-        request_id=getattr(req, "request_id", ""),
-        text=f"action_seed_{seed}",
-        token_ids=np.array([tok_seed, tok_seed + 1], dtype=np.int32),
-        prompt_token_ids=np.array([1, 2], dtype=np.int32),
-    )
-
-
 class _MockVllmSampler(sampler_lib.Sampler):
 
   def __init__(self):
     self.calls = []
 
-  async def sample(self, req, **kwargs):
-    self.calls.append((req, kwargs))
+  async def sample(self, req):
+    self.calls.append(req)
     return sampler_lib.SamplingResponse(
         request_id=getattr(req, "request_id", ""),
         text="action_vllm",
@@ -185,14 +172,12 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
         agent=agent,
         tokenizer=tokenizer,
         chat_parser=parser,
+        config=base_rollout.RolloutConfig(),
     )
     self.assertEqual(engine1.max_response_length, 512)
 
     # None when absent
-    req2 = datatypes.RolloutRequest(
-        prompt_id="p2",
-        generation_kwargs={},
-    )
+    req2 = datatypes.RolloutRequest(prompt_id="p2")
     engine2 = collector.TrajectoryCollectorEngine(
         traj_id="t2",
         request=req2,
@@ -201,6 +186,7 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
         agent=agent,
         tokenizer=tokenizer,
         chat_parser=parser,
+        config=base_rollout.RolloutConfig(),
     )
     self.assertIsNone(engine2.max_response_length)
 
@@ -208,7 +194,6 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
     request = datatypes.RolloutRequest(
         prompt_id="p1",
         max_response_length=512,
-        metadata={"episode_timeout": 10800, "overlong_filter": True},
     )
     agent = mock.MagicMock()
     agent.name = "agent"
@@ -220,6 +205,9 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
         agent=agent,
         tokenizer=_MockTokenizer(),
         chat_parser=_RecordingParser(),
+        config=base_rollout.RolloutConfig(
+            episode_timeout=10800, overlong_filter=True
+        ),
     )
 
     with mock.patch.object(
@@ -231,48 +219,8 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
     self.assertEqual(inner_engine_cls.call_args.kwargs["timeout"], 10800)
     self.assertTrue(inner_engine_cls.call_args.kwargs["overlong_filter"])
 
-  def test_episode_timeout_defaults_to_constant(self):
-    req_empty_meta = datatypes.RolloutRequest(
-        prompt_id="p1",
-        generation_kwargs={},
-    )
-    engine1 = collector.TrajectoryCollectorEngine(
-        traj_id="t1",
-        request=req_empty_meta,
-        sampler=_MockSampler(),
-        env_client=mock.MagicMock(),
-        agent=mock.MagicMock(),
-        tokenizer=_MockTokenizer(),
-        chat_parser=_RecordingParser(),
-    )
-    self.assertEqual(
-        engine1.episode_timeout, timeouts.DEFAULT_EPISODE_TIMEOUT_S
-    )
-
-    req_none_meta = datatypes.RolloutRequest(
-        prompt_id="p2",
-        generation_kwargs={},
-        metadata={"episode_timeout": None},
-    )
-    engine2 = collector.TrajectoryCollectorEngine(
-        traj_id="t2",
-        request=req_none_meta,
-        sampler=_MockSampler(),
-        env_client=mock.MagicMock(),
-        agent=mock.MagicMock(),
-        tokenizer=_MockTokenizer(),
-        chat_parser=_RecordingParser(),
-    )
-    self.assertEqual(
-        engine2.episode_timeout, timeouts.DEFAULT_EPISODE_TIMEOUT_S
-    )
-
   def test_episode_timeout_invalid_raises_value_error(self):
-    req = datatypes.RolloutRequest(
-        prompt_id="p1",
-        generation_kwargs={},
-        metadata={"episode_timeout": 0},
-    )
+    req = datatypes.RolloutRequest(prompt_id="p1")
     with self.assertRaises(ValueError):
       collector.TrajectoryCollectorEngine(
           traj_id="t1",
@@ -282,58 +230,8 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
           agent=mock.MagicMock(),
           tokenizer=_MockTokenizer(),
           chat_parser=_RecordingParser(),
+          config=base_rollout.RolloutConfig(episode_timeout=0),
       )
-
-  def test_overlong_filter_defaults_to_false(self):
-    req_empty_meta = datatypes.RolloutRequest(
-        prompt_id="p1",
-        generation_kwargs={},
-    )
-    engine1 = collector.TrajectoryCollectorEngine(
-        traj_id="t1",
-        request=req_empty_meta,
-        sampler=_MockSampler(),
-        env_client=mock.MagicMock(),
-        agent=mock.MagicMock(),
-        tokenizer=_MockTokenizer(),
-        chat_parser=_RecordingParser(),
-    )
-    self.assertFalse(engine1.overlong_filter)
-
-    req_none_meta = datatypes.RolloutRequest(
-        prompt_id="p2",
-        generation_kwargs={},
-        metadata={"overlong_filter": None},
-    )
-    engine2 = collector.TrajectoryCollectorEngine(
-        traj_id="t2",
-        request=req_none_meta,
-        sampler=_MockSampler(),
-        env_client=mock.MagicMock(),
-        agent=mock.MagicMock(),
-        tokenizer=_MockTokenizer(),
-        chat_parser=_RecordingParser(),
-    )
-    self.assertFalse(engine2.overlong_filter)
-
-  def test_overlong_filter_invalid_type_raises_type_error(self):
-    for invalid_val in ("False", "True", "false", 1, 0, [True]):
-      with self.subTest(invalid_val=invalid_val):
-        req = datatypes.RolloutRequest(
-            prompt_id="p1",
-            generation_kwargs={},
-            metadata={"overlong_filter": invalid_val},
-        )
-        with self.assertRaises(TypeError):
-          collector.TrajectoryCollectorEngine(
-              traj_id="t1",
-              request=req,
-              sampler=_MockSampler(),
-              env_client=mock.MagicMock(),
-              agent=mock.MagicMock(),
-              tokenizer=_MockTokenizer(),
-              chat_parser=_RecordingParser(),
-          )
 
   def test_dynamic_capping_of_max_tokens_across_turns(self):
     async def _run():
@@ -357,15 +255,16 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
           agent=agent,
           tokenizer=tokenizer,
           chat_parser=parser,
+          config=base_rollout.RolloutConfig(),
       )
 
       await engine.run_episode()
       self.assertTrue(engine.is_done)
-      self.assertGreaterEqual(len(sampler.sampled_params), 2)
+      self.assertGreaterEqual(len(sampler.sampled_requests), 2)
       # Turn 1: remaining budget is 50.
-      self.assertEqual(sampler.sampled_params[0].max_tokens, 50)
+      self.assertEqual(sampler.sampled_requests[0].max_tokens, 50)
       # Turn 1 generated 30 tokens, so Turn 2 remaining budget is 50 - 30 = 20.
-      self.assertEqual(sampler.sampled_params[1].max_tokens, 20)
+      self.assertEqual(sampler.sampled_requests[1].max_tokens, 20)
 
     asyncio.run(_run())
 
@@ -377,7 +276,6 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
               prompt_id="p1",
               prompt="What is 2+2?",
               max_response_length=50,
-              metadata={"overlong_filter": True},
           ),
           sampler=_MockSampler(token_lengths=[30, 20]),
           env_client=_MultiStepEnv(
@@ -386,102 +284,59 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
           agent=model_agent.ModelAgent("test_agent"),
           tokenizer=_MockTokenizer(),
           chat_parser=_RecordingParser(),
+          config=base_rollout.RolloutConfig(overlong_filter=True),
       )
       return await engine.run_episode()
 
-    item = asyncio.run(_run())
+    with mock.patch.object(collector, "time") as mock_time:
+      mock_time.perf_counter.side_effect = [10.0, 10.45, 20.0, 20.30]
+      item = asyncio.run(_run())
 
     # The second turn uses up the response budget, so the overlong filter
     # zeroes the training mask; the per-turn lengths are recorded regardless.
     self.assertEqual(item.traj["status"], "MAX_CONTEXT_LIMIT_REACHED")
     self.assertFalse(np.any(item.traj["conversation_masks"]))
     self.assertEqual(item.traj["assistant_turn_lengths"], [30, 20])
+    self.assertAlmostEqual(item.traj["sampler_time_s"], 0.75)
 
-  def test_model_call_preserves_explicit_seed_in_generation_kwargs(self):
+  def test_run_episode_records_sampler_time_on_timed_out_turn(self):
+    never_set = asyncio.Event()
+
+    class _SlowSecondTurnSampler(_MockSampler):
+
+      async def sample(self, req):
+        if self._call_count == 1:
+          await never_set.wait()
+        return await super().sample(req)
+
     async def _run():
-      sampler = _MockVanillaSampler()
-      req = datatypes.RolloutRequest(
-          prompt_id="prompt_42",
-          prompt="test prompt",
-          group_index=1,
-          generation_kwargs={
-              "max_generation_steps": 128,
-              "seed": 99999,
-              "temperature": 0.7,
-          },
-      )
-      mock_agent = mock.MagicMock()
-      mock_agent.name = "test_agent"
       engine = collector.TrajectoryCollectorEngine(
-          traj_id="traj_1",
-          request=req,
-          sampler=sampler,
-          env_client=mock.MagicMock(),
-          agent=mock_agent,
-          tokenizer=mock.MagicMock(),
-          chat_parser=mock.MagicMock(),
+          traj_id="t_timeout",
+          request=datatypes.RolloutRequest(
+              prompt_id="p1",
+              prompt="What is 2+2?",
+              max_response_length=50,
+          ),
+          sampler=_SlowSecondTurnSampler(token_lengths=[10, 10]),
+          env_client=_MultiStepEnv(
+              task={"question": "2+2", "answer": "4"}, max_steps=3
+          ),
+          agent=model_agent.ModelAgent("test_agent"),
+          tokenizer=_MockTokenizer(),
+          chat_parser=_RecordingParser(),
+          config=base_rollout.RolloutConfig(episode_timeout=0.25),
       )
+      return await engine.run_episode()
 
-      with mock.patch(
-          "tunix.rl.agentic.trajectory.trajectory_collect_engine.TrajectoryCollectEngine"
-      ) as mock_engine_cls:
-        mock_instance = mock.AsyncMock()
-        mock_instance.collect.return_value = {}
-        mock_engine_cls.return_value = mock_instance
+    with mock.patch.object(collector, "time") as mock_time:
+      mock_time.perf_counter.side_effect = [1.0, 1.15, 2.0, 2.05]
+      item = asyncio.run(_run())
 
-        await engine.run_episode()
+    self.assertEqual(item.traj["status"], "TIMEOUT")
+    self.assertEqual(item.traj["assistant_turn_lengths"], [10])
+    self.assertAlmostEqual(item.traj["sampler_time_s"], 0.20)
 
-        model_call = mock_engine_cls.call_args.kwargs["model_call"]
-        await model_call("prompt text")
-
-      self.assertLen(sampler.calls, 1)
-      sampling_req, _ = sampler.calls[0]
-      self.assertEqual(sampling_req.sampling_params.seed, 99999)
-
-    asyncio.run(_run())
-
-  def test_model_call_seeds_not_passed_to_vllm(self):
-    async def _run():
-      sampler = _MockVllmSampler()
-      req = datatypes.RolloutRequest(
-          prompt_id="prompt_42",
-          prompt="test prompt",
-          group_index=1,
-          generation_kwargs={"max_generation_steps": 128, "temperature": 0.7},
-      )
-      mock_agent = mock.MagicMock()
-      mock_agent.name = "test_agent"
-      engine = collector.TrajectoryCollectorEngine(
-          traj_id="traj_1",
-          request=req,
-          sampler=sampler,
-          env_client=mock.MagicMock(),
-          agent=mock_agent,
-          tokenizer=mock.MagicMock(),
-          chat_parser=mock.MagicMock(),
-      )
-
-      with mock.patch(
-          "tunix.rl.agentic.trajectory.trajectory_collect_engine.TrajectoryCollectEngine"
-      ) as mock_engine_cls:
-        mock_instance = mock.AsyncMock()
-        mock_instance.collect.return_value = {}
-        mock_engine_cls.return_value = mock_instance
-
-        await engine.run_episode()
-
-        model_call = mock_engine_cls.call_args.kwargs["model_call"]
-        await model_call("prompt text")
-
-      self.assertLen(sampler.calls, 1)
-      sampling_req, _ = sampler.calls[0]
-      self.assertIsNone(sampling_req.sampling_params.seed)
-
-    asyncio.run(_run())
-
-  def test_model_call_propagates_return_routed_experts_in_generation_kwargs(
-      self,
-  ):
+  def test_model_call_returns_routed_experts(self):
     async def _run():
       mock_routed = np.ones((10, 4, 8), dtype=np.int32)
       sampler = _MockSampler(routed_experts=mock_routed)
@@ -489,10 +344,6 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
           prompt_id="prompt_routed",
           prompt="test prompt",
           group_index=0,
-          generation_kwargs={
-              "max_generation_steps": 128,
-              "return_routed_experts": True,
-          },
       )
       mock_agent = mock.MagicMock()
       mock_agent.name = "test_agent"
@@ -504,6 +355,7 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
           agent=mock_agent,
           tokenizer=mock.MagicMock(),
           chat_parser=mock.MagicMock(),
+          config=base_rollout.RolloutConfig(),
       )
 
       with mock.patch(
@@ -518,8 +370,7 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
         model_call = mock_engine_cls.call_args.kwargs["model_call"]
         output = await model_call("prompt text", env=mock.MagicMock())
 
-      self.assertLen(sampler.sampled_params, 1)
-      self.assertTrue(sampler.sampled_params[0].return_routed_experts)
+      self.assertLen(sampler.sampled_requests, 1)
       self.assertIsNotNone(output.routed_experts)
       np.testing.assert_array_equal(output.routed_experts[0], mock_routed)
 
@@ -530,10 +381,13 @@ class _RecordingSampler:
 
   def __init__(self):
     self.seen_max_tokens = []
+    self.seen_routed_experts_prompt_starts = []
 
-  async def sample(self, sampling_req, **kwargs):
-    del kwargs
-    self.seen_max_tokens.append(sampling_req.sampling_params.max_tokens)
+  async def sample(self, sampling_req):
+    self.seen_max_tokens.append(sampling_req.max_tokens)
+    self.seen_routed_experts_prompt_starts.append(
+        sampling_req.routed_experts_prompt_start
+    )
     return sampler_lib.SamplingResponse(
         request_id=getattr(sampling_req, "request_id", "req"),
         text="FINAL_ANSWER: 4",
@@ -546,6 +400,7 @@ class _RecordingSampler:
 class _FakeInnerEngine:
 
   next_max_generation_steps = None
+  next_routed_experts_prompt_start = 0
 
   def __init__(self, *, model_call, env, **kwargs):
     del kwargs
@@ -558,6 +413,7 @@ class _FakeInnerEngine:
         [{"role": "user", "content": "hi"}],
         self._env,
         max_generation_steps=self.next_max_generation_steps,
+        routed_experts_prompt_start=self.next_routed_experts_prompt_start,
     )
     return {
         "conversation_text": "",
@@ -567,19 +423,18 @@ class _FakeInnerEngine:
         "old_logprobs": np.array([], dtype=np.float32),
         "trajectory_reward": 0.0,
         "status": "COMPLETED",
-        "policy_version": 0,
+        "policy_versions": [0],
     }
 
 
 class RunEpisodeSamplingParamsTest(absltest.TestCase):
 
-  def _make_collector(self, generation_kwargs: dict[str, object]):
+  def _make_collector(self, max_tokens_to_generate: int):
     request = datatypes.RolloutRequest(
         request_id="req_0",
         prompt="What is 2+2?",
         prompt_id="prompt_0",
         group_index=0,
-        generation_kwargs=generation_kwargs,
     )
     return collector.TrajectoryCollectorEngine(
         traj_id=request.traj_id,
@@ -589,12 +444,18 @@ class RunEpisodeSamplingParamsTest(absltest.TestCase):
         agent=mocks.MockAgent(),
         tokenizer=mocks.MockTokenizer(),
         chat_parser=mocks.MockChatParser(),
+        config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=max_tokens_to_generate
+        ),
     )
 
-  def test_run_episode_uses_request_max_generation_steps_when_unbounded(self):
-    engine = self._make_collector({"max_generation_steps": 123})
-    _FakeInnerEngine.next_max_generation_steps = None
-
+  def _run_with_inner_budget(
+      self, engine, max_generation_steps, routed_experts_prompt_start=0
+  ):
+    _FakeInnerEngine.next_max_generation_steps = max_generation_steps
+    _FakeInnerEngine.next_routed_experts_prompt_start = (
+        routed_experts_prompt_start
+    )
     with unittest.mock.patch.object(
         collector.rl_collect_engine,
         "TrajectoryCollectEngine",
@@ -602,50 +463,25 @@ class RunEpisodeSamplingParamsTest(absltest.TestCase):
     ):
       asyncio.run(engine.run_episode())
 
+  def test_run_episode_uses_config_max_tokens_when_unbounded(self):
+    engine = self._make_collector(max_tokens_to_generate=123)
+    self._run_with_inner_budget(engine, None)
     self.assertEqual(engine.sampler.seen_max_tokens, [123])
 
-  def test_run_episode_prefers_explicit_max_generation_steps(self):
-    engine = self._make_collector({"max_generation_steps": 123})
-    _FakeInnerEngine.next_max_generation_steps = 17
-
-    with unittest.mock.patch.object(
-        collector.rl_collect_engine,
-        "TrajectoryCollectEngine",
-        _FakeInnerEngine,
-    ):
-      asyncio.run(engine.run_episode())
-
+  def test_run_episode_uses_inner_budget_below_config_max_tokens(self):
+    engine = self._make_collector(max_tokens_to_generate=123)
+    self._run_with_inner_budget(engine, 17)
     self.assertEqual(engine.sampler.seen_max_tokens, [17])
 
-  def test_run_episode_caps_at_request_max_generation_steps_when_episode_budget_larger(
-      self,
-  ):
-    engine = self._make_collector({"max_generation_steps": 123})
-    _FakeInnerEngine.next_max_generation_steps = 500
-
-    with unittest.mock.patch.object(
-        collector.rl_collect_engine,
-        "TrajectoryCollectEngine",
-        _FakeInnerEngine,
-    ):
-      asyncio.run(engine.run_episode())
-
+  def test_run_episode_caps_inner_budget_at_config_max_tokens(self):
+    engine = self._make_collector(max_tokens_to_generate=123)
+    self._run_with_inner_budget(engine, 500)
     self.assertEqual(engine.sampler.seen_max_tokens, [123])
 
-  def test_run_episode_caps_at_episode_budget_when_request_max_generation_steps_larger(
-      self,
-  ):
-    engine = self._make_collector({"max_generation_steps": 123})
-    _FakeInnerEngine.next_max_generation_steps = 50
-
-    with unittest.mock.patch.object(
-        collector.rl_collect_engine,
-        "TrajectoryCollectEngine",
-        _FakeInnerEngine,
-    ):
-      asyncio.run(engine.run_episode())
-
-    self.assertEqual(engine.sampler.seen_max_tokens, [50])
+  def test_run_episode_forwards_routed_experts_prompt_start(self):
+    engine = self._make_collector(max_tokens_to_generate=123)
+    self._run_with_inner_budget(engine, None, routed_experts_prompt_start=5)
+    self.assertEqual(engine.sampler.seen_routed_experts_prompt_starts, [5])
 
 
 class ConvertTrajectoryItemTest(absltest.TestCase):
@@ -655,15 +491,16 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
         request_id="eval-1",
         prompt="task",
         prompt_id="task-1",
-        generation_kwargs={"max_generation_steps": 8},
         metadata={"record_episode_summary": True},
     )
     agent = mocks.MockAgent()
     agent.trajectory.steps = [
-        types.SimpleNamespace(info={"guard_blocked": True,
-                                    "guard_reason": "invalid_action"}),
-        types.SimpleNamespace(info={"guard_blocked": True,
-                                    "guard_reason": "invalid_action"}),
+        types.SimpleNamespace(
+            info={"guard_blocked": True, "guard_reason": "invalid_action"}
+        ),
+        types.SimpleNamespace(
+            info={"guard_blocked": True, "guard_reason": "invalid_action"}
+        ),
         types.SimpleNamespace(info={"guard_blocked": False}),
     ]
     engine = collector.TrajectoryCollectorEngine(
@@ -674,6 +511,7 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
         agent=agent,
         tokenizer=mocks.MockTokenizer(),
         chat_parser=mocks.MockChatParser(),
+        config=base_rollout.RolloutConfig(),
     )
 
     item = engine._convert_to_trajectory({"status": "SUCCEEDED"})
@@ -696,7 +534,6 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
         prompt_id="prompt_test",
         group_index=2,
         target_policy_version=5,
-        generation_kwargs={"max_generation_steps": 64},
         metadata={"custom_key": "custom_val"},
     )
     engine = collector.TrajectoryCollectorEngine(
@@ -707,6 +544,7 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
         agent=mocks.MockAgent(),
         tokenizer=mocks.MockTokenizer(),
         chat_parser=mocks.MockChatParser(),
+        config=base_rollout.RolloutConfig(return_logprobs=True),
     )
 
     rl_traj = {
@@ -721,14 +559,14 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
         "old_logprobs": np.array([-0.1, -0.2, -0.3], dtype=np.float32),
         "trajectory_reward": 2.5,
         "status": "COMPLETED",
-        "policy_version": 5,
+        "policy_versions": [5],
     }
 
     item = engine._convert_to_trajectory(rl_traj)
     self.assertIsInstance(item, datatypes.TrajectoryItem)
     self.assertEqual(item.prompt_id, "prompt_test")
     self.assertEqual(item.group_index, 2)
-    self.assertEqual(item.policy_version, 5)
+    self.assertEqual(item.policy_versions, [5])
     self.assertEqual(item.metadata.get("custom_key"), "custom_val")
     np.testing.assert_array_equal(item.prompt_tokens, [1, 2, 3])
     np.testing.assert_array_equal(item.conversation_tokens, [10, 11, 12])
@@ -778,7 +616,6 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
         prompt_id="prompt_multi",
         group_index=0,
         target_policy_version=1,
-        generation_kwargs={"max_generation_steps": 64},
     )
     engine = collector.TrajectoryCollectorEngine(
         traj_id=request.traj_id,
@@ -788,6 +625,7 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
         agent=mocks.MockAgent(),
         tokenizer=mocks.MockTokenizer(),
         chat_parser=mocks.MockChatParser(),
+        config=base_rollout.RolloutConfig(return_logprobs=True),
     )
 
     rl_traj = {
@@ -802,7 +640,7 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
         ),
         "trajectory_reward": 1.0,
         "status": "COMPLETED",
-        "policy_version": 1,
+        "policy_versions": [1],
     }
 
     item = engine._convert_to_trajectory(rl_traj)
@@ -813,6 +651,28 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
         item.conversation_masks, [1.0, 1.0, 0.0, 0.0, 1.0]
     )
     np.testing.assert_allclose(item.old_logprobs, [-0.1, -0.2, 0.0, 0.0, -0.3])
+
+  def test_convert_to_trajectory_drops_logprobs_when_not_returned(self):
+    request = datatypes.RolloutRequest(
+        request_id="req", prompt_id="prompt", prompt="p"
+    )
+    engine = collector.TrajectoryCollectorEngine(
+        traj_id=request.traj_id,
+        request=request,
+        sampler=_RecordingSampler(),
+        env_client=object(),
+        agent=mocks.MockAgent(),
+        tokenizer=mocks.MockTokenizer(),
+        chat_parser=mocks.MockChatParser(),
+        config=base_rollout.RolloutConfig(return_logprobs=False),
+    )
+    item = engine._convert_to_trajectory({
+        "prompt_tokens": np.array([1], dtype=np.int32),
+        "conversation_tokens": np.array([10, 11], dtype=np.int32),
+        "conversation_masks": np.array([1.0, 1.0], dtype=np.float32),
+        "old_logprobs": np.zeros(2, dtype=np.float32),
+    })
+    self.assertIsNone(item.traj["old_logprobs"])
 
   def test_convert_to_trajectory_rejects_non_dict(self):
     request = datatypes.RolloutRequest(
@@ -830,6 +690,7 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
         agent=mocks.MockAgent(),
         tokenizer=mocks.MockTokenizer(),
         chat_parser=mocks.MockChatParser(),
+        config=base_rollout.RolloutConfig(),
     )
     mock_traj = types.SimpleNamespace(
         reward=1.5,
@@ -838,50 +699,6 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
     )
     with self.assertRaisesRegex(TypeError, "Expected rl_traj to be a dict"):
       engine._convert_to_trajectory(mock_traj)
-
-  def test_model_call_respects_min_of_remaining_budget_and_request_max_tokens(
-      self,
-  ):
-    sampler = _MockVllmSampler()
-    request = datatypes.RolloutRequest(
-        prompt="test",
-        prompt_id="p_budget",
-        generation_kwargs={"max_tokens": 4, "max_response_length": 16},
-    )
-    engine = collector.TrajectoryCollectorEngine(
-        traj_id=request.traj_id,
-        request=request,
-        sampler=sampler,
-        env_client=object(),
-        agent=mocks.MockAgent(),
-        tokenizer=mocks.MockTokenizer(),
-        chat_parser=mocks.MockChatParser(),
-    )
-    captured_model_call = None
-
-    def _capture_engine(*args, **kwargs):
-      del args
-      nonlocal captured_model_call
-      captured_model_call = kwargs["model_call"]
-      mock_inner = mock.MagicMock()
-      mock_inner.collect = mock.AsyncMock(return_value={})
-      return mock_inner
-
-    with mock.patch.object(
-        collector.rl_collect_engine,
-        "TrajectoryCollectEngine",
-        side_effect=_capture_engine,
-    ):
-      asyncio.run(engine.run_episode())
-
-    self.assertIsNotNone(captured_model_call)
-    # Remaining budget 12 > request max_tokens 4 -> should use 4
-    asyncio.run(captured_model_call("prompt", max_generation_steps=12))
-    self.assertEqual(sampler.calls[-1][0].sampling_params.max_tokens, 4)
-
-    # Remaining budget 2 < request max_tokens 4 -> should use 2
-    asyncio.run(captured_model_call("prompt", max_generation_steps=2))
-    self.assertEqual(sampler.calls[-1][0].sampling_params.max_tokens, 2)
 
 
 class ResponseBudgetAnnotationTest(absltest.TestCase):
@@ -894,7 +711,6 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
     request = datatypes.RolloutRequest(
         prompt_id="p1",
         max_response_length=max_response_length,
-        generation_kwargs={},
     )
     return collector.TrajectoryCollectorEngine(
         traj_id="t1",
@@ -904,7 +720,7 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
         agent=mock.MagicMock(),
         tokenizer=tokenizer or self._EosTokenizer(),
         chat_parser=_RecordingParser(),
-        eos_ids=eos_ids,
+        config=base_rollout.RolloutConfig(eos_tokens=eos_ids),
     )
 
   def test_truncated_without_eos_is_clipped(self):
@@ -1163,6 +979,7 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
         agent=mocks.MockAgent(),
         tokenizer=mocks.MockTokenizer(),
         chat_parser=mocks.MockChatParser(),
+        config=base_rollout.RolloutConfig(),
     )
     mock_routed = np.ones((10, 4, 8), dtype=np.int32)
     rl_traj = {
@@ -1174,14 +991,14 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
         "routed_experts": mock_routed,
         "trajectory_reward": 1.0,
         "status": "COMPLETED",
-        "policy_version": 1,
+        "policy_versions": [1],
     }
     item = engine._convert_to_trajectory(rl_traj)
     self.assertNotIn("routed_experts", item.metadata)
     np.testing.assert_array_equal(item.traj["routed_experts"], mock_routed)
     np.testing.assert_array_equal(item.routed_experts, mock_routed)
 
-  def test_multi_turn_exact_token_continuity_passes_prompt_token_ids(self):
+  def test_multi_turn_token_continuity_passes_prompt_token_ids(self):
     class _TwoTurnEnv(base_environment.BaseTaskEnv):
 
       def __init__(self):
@@ -1205,8 +1022,7 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
       def __init__(self):
         self.requests = []
 
-      async def sample(self, req, **kwargs):
-        del kwargs
+      async def sample(self, req):
         self.requests.append(req)
         turn = len(self.requests)
         prompt_toks = (
@@ -1232,7 +1048,6 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
         prompt="q0",
         max_response_length=64,
     )
-    self.assertTrue(req.exact_token_continuity)
     engine = collector.TrajectoryCollectorEngine(
         traj_id="traj_tito",
         request=req,
@@ -1241,6 +1056,7 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
         agent=agent,
         tokenizer=tokenizer,
         chat_parser=parser,
+        config=base_rollout.RolloutConfig(),
     )
     item = asyncio.run(engine.run_episode())
     self.assertLen(sampler.requests, 2)
@@ -1287,8 +1103,7 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
       def __init__(self):
         self.requests = []
 
-      async def sample(self, req, **kwargs):
-        del kwargs
+      async def sample(self, req):
         self.requests.append(req)
         turn = len(self.requests)
         if turn == 1:
@@ -1323,25 +1138,130 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
         agent=model_agent.ModelAgent("sys"),
         tokenizer=_MockTokenizer(),
         chat_parser=_RecordingParser(),
-        partial_rollout=True,
+        config=base_rollout.RolloutConfig(partial_rollout=True),
         policy_version_fn=lambda: current_policy_version[0],
     )
     item = asyncio.run(engine.run_episode())
     self.assertLen(sampler.requests, 2)
     # Both Turn 1 and Turn 2 must use the Turn-1 cache_salt ("policy_v2")
-    self.assertEqual(
-        sampler.requests[0].sampling_params.cache_salt, "policy_v2"
-    )
-    self.assertEqual(
-        sampler.requests[1].sampling_params.cache_salt, "policy_v2"
-    )
-    # Conservative oldest version is preserved in policy_version, while per-turn
-    # history is recorded in policy_versions.
-    self.assertEqual(item.policy_version, 2)
-    self.assertEqual(item.metadata["policy_version"], 2)
-    self.assertEqual(item.metadata["policy_versions"], [2, 3])
-    self.assertEqual(item.traj["policy_version"], 2)
+    self.assertEqual(sampler.requests[0].cache_salt, "policy_v2")
+    self.assertEqual(sampler.requests[1].cache_salt, "policy_v2")
+    # Per-turn history is recorded in policy_versions on item.traj (SSOT).
+    self.assertEqual(item.policy_versions, [2, 3])
+    self.assertNotIn("policy_version", item.traj)
     self.assertEqual(item.traj["policy_versions"], [2, 3])
+    self.assertNotIn("policy_version", item.metadata)
+    self.assertNotIn("policy_versions", item.metadata)
+
+  def test_partial_rollout_handles_arbitrary_v_first_and_advancing_versions(
+      self,
+  ):
+    class _ThreeTurnEnv(base_environment.BaseTaskEnv):
+
+      def __init__(self):
+        super().__init__(task={"question": "q0"}, max_steps=3)
+        self._step_idx = 0
+
+      def _initial_observation(self):
+        return "obs0"
+
+      def _step_impl(self, action):
+        self._step_idx += 1
+        return base_environment.EnvStepResult(
+            observation=f"obs{self._step_idx}",
+            reward=1.0,
+            done=self._step_idx >= 3,
+            info={},
+        )
+
+    # Turn 0 starts at arbitrary v_first=42, Turn 1 advances to 45, Turn 2
+    # advances to 48.
+    turn_versions = [42, 45, 48]
+    current_policy_version = [turn_versions[0]]
+
+    class _DynamicVersionSampler(sampler_lib.Sampler):
+
+      def __init__(self):
+        self.requests = []
+
+      async def sample(self, req):
+        self.requests.append(req)
+        turn = len(self.requests)
+        if turn < len(turn_versions):
+          current_policy_version[0] = turn_versions[turn]
+        prompt_toks = (
+            np.asarray(req.prompt, dtype=np.int32)
+            if isinstance(req.prompt, np.ndarray)
+            else np.array([10, 11], dtype=np.int32)
+        )
+        return sampler_lib.SamplingResponse(
+            request_id=req.request_id,
+            text=f"ans_{turn}",
+            token_ids=np.array([20 + turn, 21 + turn], dtype=np.int32),
+            prompt_token_ids=prompt_toks,
+            logprobs=np.array([-0.1, -0.2], dtype=np.float32),
+        )
+
+    sampler = _DynamicVersionSampler()
+    req = datatypes.RolloutRequest(
+        prompt_id="p_arbitrary_start",
+        prompt="q0",
+        target_policy_version=42,
+        max_response_length=64,
+    )
+    engine = collector.TrajectoryCollectorEngine(
+        traj_id="traj_arbitrary_start",
+        request=req,
+        sampler=sampler,
+        env_client=_ThreeTurnEnv(),
+        agent=model_agent.ModelAgent("sys"),
+        tokenizer=_MockTokenizer(),
+        chat_parser=_RecordingParser(),
+        config=base_rollout.RolloutConfig(partial_rollout=True),
+        policy_version_fn=lambda: current_policy_version[0],
+    )
+    item = asyncio.run(engine.run_episode())
+    self.assertEqual(item.traj["policy_versions"], [42, 45, 48])
+    self.assertEqual(item.policy_versions, [42, 45, 48])
+    self.assertNotIn("policy_version", item.traj)
+    self.assertNotIn("policy_version", item.metadata)
+
+  def test_convert_to_trajectory_preserves_store_recovered_step_versions(self):
+    request = datatypes.RolloutRequest(
+        request_id="req_recovered",
+        prompt="hello",
+        prompt_id="prompt_recovered",
+        group_index=0,
+        target_policy_version=46,
+    )
+    engine = collector.TrajectoryCollectorEngine(
+        traj_id=request.traj_id,
+        request=request,
+        sampler=_RecordingSampler(),
+        env_client=object(),
+        agent=mocks.MockAgent(),
+        tokenizer=mocks.MockTokenizer(),
+        chat_parser=mocks.MockChatParser(),
+        config=base_rollout.RolloutConfig(),
+    )
+    # Resumed worker invocation only observed Turn 2 live (v=46), while
+    # step-backed rl_traj["policy_versions"] carries pre-crash turns [42, 43]
+    # restored from TrajectoryStore plus live turn [46].
+    rl_traj = {
+        "conversation_text": "recovered rollout",
+        "prompt_tokens": np.array([1, 2], dtype=np.int32),
+        "conversation_tokens": np.array([10, 11], dtype=np.int32),
+        "conversation_masks": np.array([1.0, 1.0], dtype=np.float32),
+        "old_logprobs": np.array([-0.1, -0.2], dtype=np.float32),
+        "trajectory_reward": 1.0,
+        "status": "COMPLETED",
+        "policy_versions": [42, 43, 46],
+    }
+    item = engine._convert_to_trajectory(rl_traj)
+    self.assertEqual(item.traj["policy_versions"], [42, 43, 46])
+    self.assertEqual(item.policy_versions, [42, 43, 46])
+    self.assertNotIn("policy_version", item.traj)
+    self.assertNotIn("policy_version", item.metadata)
 
   def test_pause_blocks_model_call_until_resume(self):
     async def _run():
@@ -1349,7 +1269,6 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
       req = datatypes.RolloutRequest(
           prompt_id="p_pause",
           prompt="q0",
-          generation_kwargs={"max_generation_steps": 16},
       )
       mock_agent = mock.MagicMock()
       mock_agent.name = "test_agent"
@@ -1361,6 +1280,7 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
           agent=mock_agent,
           tokenizer=mock.MagicMock(),
           chat_parser=mock.MagicMock(),
+          config=base_rollout.RolloutConfig(),
       )
       with mock.patch(
           "tunix.rl.agentic.trajectory.trajectory_collect_engine.TrajectoryCollectEngine"
@@ -1419,7 +1339,9 @@ class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
           agent=mock.MagicMock(),
           tokenizer=_MockTokenizer(),
           chat_parser=_RecordingParser(),
-          routed_experts_encode_mode="bad_mode",
+          config=base_rollout.RolloutConfig(
+              routed_experts_encode_mode="bad_mode"
+          ),
       )
     for bad_num in (0, -2, True, False):
       with self.assertRaisesRegex(
@@ -1433,7 +1355,9 @@ class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
             agent=mock.MagicMock(),
             tokenizer=_MockTokenizer(),
             chat_parser=_RecordingParser(),
-            routed_experts_num_experts=bad_num,
+            config=base_rollout.RolloutConfig(
+                routed_experts_num_experts=bad_num
+            ),
         )
 
   def test_run_episode_encodes_routed_experts_in_rollout_and_preserves_store(
@@ -1459,12 +1383,11 @@ class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
         prompt="What is 2+2?",
         group_index=0,
         max_response_length=16,
-        generation_kwargs={"return_routed_experts": True},
     )
 
     # 1. Default mode="auto" with max_val=31 <= 254 produces compact 3D uint8
-    # via asyncio.to_thread, while InMemoryTrajectoryStore still persists
-    # decoded int16 prefill_routed_experts from agent.trajectory.steps.
+    # both on TrajectoryItem.routed_experts and in TrajectoryStore's per-turn
+    # prefill_routed_experts.
     store = in_memory_store.InMemoryTrajectoryStore()
     engine_u8 = collector.TrajectoryCollectorEngine(
         traj_id="traj_u8",
@@ -1476,14 +1399,10 @@ class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
         agent=model_agent.ModelAgent("sys"),
         tokenizer=_MockTokenizer(),
         chat_parser=_RecordingParser(),
+        config=base_rollout.RolloutConfig(store_routed_experts=True),
         trajectory_store=store,
-        store_routed_experts=True,
     )
-    with mock.patch.object(
-        collector.asyncio, "to_thread", wraps=asyncio.to_thread
-    ) as spy_to_thread:
-      item_u8 = asyncio.run(engine_u8.run_episode())
-    spy_to_thread.assert_called_once()
+    item_u8 = asyncio.run(engine_u8.run_episode())
     self.assertEqual(item_u8.routed_experts.dtype, np.uint8)
     self.assertEqual(item_u8.routed_experts.shape, (5, 2, 4))
     np.testing.assert_array_equal(
@@ -1493,19 +1412,22 @@ class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
     stored_trajs = store.get_trajectories(["traj_u8"])
     self.assertLen(stored_trajs, 1)
     # Step 1 is the TunixAgentStep containing prefill_routed_experts (2 prompt
-    # tokens).
+    # tokens + 2 routed decode tokens).
     agent_steps = [
-        s for s in stored_trajs[0].steps if s.source.value == "agent"
+        s for s in stored_trajs["traj_u8"].steps if s.source.value == "agent"
     ]
     self.assertLen(agent_steps, 1)
-    self.assertEqual(agent_steps[0].prefill_routed_experts.dtype, np.int16)
+    self.assertEqual(agent_steps[0].prefill_routed_experts.dtype, np.uint8)
+    self.assertEqual(agent_steps[0].prefill_routed_experts.shape, (4, 2, 4))
     np.testing.assert_array_equal(
-        agent_steps[0].prefill_routed_experts,
+        packing.decode_routed_experts(
+            agent_steps[0].prefill_routed_experts, batched=False
+        ),
         raw_routed_steps,
     )
 
     # 2. Deterministic tier via routed_experts_num_experts=256 encodes into 4D
-    # uint10 [T, L, K//4, 5] even though max_val=31 <= 254.
+    # uint10 [T, L, K//4, 5] both in TrajectoryItem and TrajectoryStore.
     engine_u10 = collector.TrajectoryCollectorEngine(
         traj_id="traj_u10",
         request=req,
@@ -1516,8 +1438,12 @@ class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
         agent=model_agent.ModelAgent("sys"),
         tokenizer=_MockTokenizer(),
         chat_parser=_RecordingParser(),
-        routed_experts_encode_mode="auto",
-        routed_experts_num_experts=256,
+        config=base_rollout.RolloutConfig(
+            store_routed_experts=True,
+            routed_experts_encode_mode="auto",
+            routed_experts_num_experts=256,
+        ),
+        trajectory_store=store,
     )
     item_u10 = asyncio.run(engine_u10.run_episode())
     self.assertEqual(item_u10.routed_experts.dtype, np.uint8)
@@ -1525,6 +1451,20 @@ class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
     np.testing.assert_array_equal(
         packing.decode_routed_experts(item_u10.routed_experts, batched=False),
         expected_full_routed,
+    )
+    stored_u10 = store.get_trajectories(["traj_u10"])
+    agent_steps_u10 = [
+        s for s in stored_u10["traj_u10"].steps if s.source.value == "agent"
+    ]
+    self.assertEqual(agent_steps_u10[0].prefill_routed_experts.dtype, np.uint8)
+    self.assertEqual(
+        agent_steps_u10[0].prefill_routed_experts.shape, (4, 2, 1, 5)
+    )
+    np.testing.assert_array_equal(
+        packing.decode_routed_experts(
+            agent_steps_u10[0].prefill_routed_experts, batched=False
+        ),
+        raw_routed_steps,
     )
 
     # 3. Explicit mode="int16" preserves 3D int16.
@@ -1538,12 +1478,24 @@ class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
         agent=model_agent.ModelAgent("sys"),
         tokenizer=_MockTokenizer(),
         chat_parser=_RecordingParser(),
-        routed_experts_encode_mode="int16",
+        config=base_rollout.RolloutConfig(
+            store_routed_experts=True, routed_experts_encode_mode="int16"
+        ),
+        trajectory_store=store,
     )
     item_i16 = asyncio.run(engine_i16.run_episode())
     self.assertEqual(item_i16.routed_experts.dtype, np.int16)
     self.assertEqual(item_i16.routed_experts.shape, (5, 2, 4))
     np.testing.assert_array_equal(item_i16.routed_experts, expected_full_routed)
+    stored_i16 = store.get_trajectories(["traj_i16"])
+    agent_steps_i16 = [
+        s for s in stored_i16["traj_i16"].steps if s.source.value == "agent"
+    ]
+    self.assertEqual(agent_steps_i16[0].prefill_routed_experts.dtype, np.int16)
+    np.testing.assert_array_equal(
+        agent_steps_i16[0].prefill_routed_experts,
+        raw_routed_steps,
+    )
 
   def test_end_to_end_rollout_encoded_to_adapter_and_assemblers(self):
     raw_g0 = np.array(
@@ -1577,7 +1529,6 @@ class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
               prompt="What is 2+2?",
               group_index=g_idx,
               max_response_length=16,
-              generation_kwargs={"return_routed_experts": True},
           )
           engine = collector.TrajectoryCollectorEngine(
               traj_id=f"traj_g{g_idx}",
@@ -1589,22 +1540,25 @@ class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
               agent=model_agent.ModelAgent("sys"),
               tokenizer=_MockTokenizer(),
               chat_parser=_RecordingParser(),
-              routed_experts_encode_mode="auto",
-              routed_experts_num_experts=num_experts,
+              config=base_rollout.RolloutConfig(
+                  routed_experts_encode_mode="auto",
+                  routed_experts_num_experts=num_experts,
+              ),
           )
           items.append(asyncio.run(engine.run_episode()))
           self.assertEqual(
               items[-1].routed_experts.shape, expected_unbatched_shape
           )
 
-        adapter = algorithm_adapter.GRPOAdapter(
-            algo_config=algorithm_config.GRPOConfig(
-                num_generations=2,
-                routed_experts_encode_mode="auto",
-                routed_experts_num_experts=num_experts,
-            )
+        algo_cfg = algorithm_config.GRPOConfig(
+            num_generations=2,
+            use_rollout_logps=False,
+            routed_experts_encode_mode="auto",
+            routed_experts_num_experts=num_experts,
         )
-        payloads = adapter.create_trainer_payloads(items, rewards=[0.0, 1.0])
+        payloads = payload_builder.create_trainer_payloads(
+            items, rewards=[0.0, 1.0], algo_config=algo_cfg
+        )
         self.assertTrue(
             np.shares_memory(
                 payloads[0].routed_experts, items[0].routed_experts
@@ -1696,6 +1650,541 @@ class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
     self.assertEqual(mixed_batch.routed_experts.dtype, np.int16)
     np.testing.assert_array_equal(mixed_batch.routed_experts[0, 0:4], raw_g0)
     np.testing.assert_array_equal(mixed_batch.routed_experts[0, 5:9], raw_g1)
+
+  def test_run_episode_strips_binary_env_config_from_item_store_and_logger(
+      self,
+  ):
+    class _PromptTaskEnv(base_environment.BaseTaskEnv):
+
+      def _initial_observation(self):
+        return "Solve Q0"
+
+      def _step_impl(self, action):
+        del action
+        return base_environment.EnvStepResult(
+            observation="",
+            reward=1.0,
+            done=True,
+            info={},
+        )
+
+    req = datatypes.RolloutRequest(
+        prompt_id="p_gsm",
+        prompt="",
+        group_index=0,
+        max_response_length=16,
+        metadata={
+            "question": "Q0",
+            "answer": "0",
+            "env_config": {
+                "prompt": "Solve Q0",
+                "verifier_bytes": b"\x80\xff",
+            },
+        },
+    )
+    with file_store.FileTrajectoryStore(
+        self.create_tempdir().full_path
+    ) as store:
+      engine = collector.TrajectoryCollectorEngine(
+          traj_id="traj_bin",
+          request=req,
+          sampler=_MockSampler(token_lengths=[3]),
+          env_client=_PromptTaskEnv(task={}, max_steps=1),
+          agent=model_agent.ModelAgent("sys"),
+          tokenizer=_MockTokenizer(),
+          chat_parser=_RecordingParser(),
+          config=base_rollout.RolloutConfig(),
+          trajectory_store=store,
+      )
+      item = asyncio.run(engine.run_episode())
+      store.flush()
+      stored = store.get_trajectories(["traj_bin"])
+
+    self.assertNotIn("env_config", item.metadata)
+    self.assertEqual(item.metadata["question"], "Q0")
+    self.assertEqual(item.metadata["answer"], "0")
+    self.assertEqual(req.metadata["env_config"]["verifier_bytes"], b"\x80\xff")
+    self.assertLen(stored, 1)
+    self.assertEqual(
+        stored["traj_bin"].extra, {"question": "Q0", "answer": "0"}
+    )
+    config = base_rollout.RolloutConfig()
+    self.assertEqual(
+        stored["traj_bin"].hyperparams,
+        {
+            "temperature": config.temperature,
+            "top_p": config.top_p,
+            "top_k": config.top_k,
+            "max_tokens_to_generate": config.max_tokens_to_generate,
+        },
+    )
+
+  def test_multi_turn_trajectory_store_compression_and_jax_decode_parity(self):
+    rng = np.random.default_rng(42)
+
+    class _MultiStepTextEnv(base_environment.BaseTaskEnv):
+
+      def _initial_observation(self):
+        return "start"
+
+      def _step_impl(self, action):
+        del action
+        return base_environment.EnvStepResult(
+            observation="env_feedback",
+            reward=1.0,
+            done=False,
+            info={},
+        )
+
+    class _MultiTurnRoutedSampler(sampler_lib.Sampler):
+
+      def __init__(self, asst_lengths, routed_per_turn):
+        self._asst_lengths = asst_lengths
+        self._routed_per_turn = routed_per_turn
+        self._idx = 0
+
+      async def sample(self, req):
+        i = self._idx
+        self._idx += 1
+        req_prompt = getattr(req, "prompt", None)
+        prompt_token_ids = (
+            np.asarray(req_prompt, dtype=np.int32)
+            if isinstance(req_prompt, np.ndarray)
+            else np.asarray([ord(c) % 1000 for c in "PARSED"], dtype=np.int32)
+        )
+        return sampler_lib.SamplingResponse(
+            request_id=getattr(req, "request_id", ""),
+            text=f"turn_{i}",
+            token_ids=np.arange(1, self._asst_lengths[i] + 1, dtype=np.int32),
+            prompt_token_ids=prompt_token_ids,
+            routed_experts=self._routed_per_turn[i],
+        )
+
+    prompt_len = 6
+    env_len = 6
+    asst_lengths = [128, 128, 113]
+    step_lengths = [
+        prompt_len + asst_lengths[0] - 1,
+        1 + env_len + asst_lengths[1] - 1,
+        1 + env_len + asst_lengths[2] - 1,
+    ]
+
+    def _collect_with_mode(
+        encode_mode, store_backend, traj_id, routed_turns, num_experts
+    ):
+      req = datatypes.RolloutRequest(
+          prompt_id="p_bench",
+          prompt="Solve multi-turn task",
+          group_index=0,
+          max_response_length=512,
+      )
+      engine = collector.TrajectoryCollectorEngine(
+          traj_id=traj_id,
+          request=req,
+          sampler=_MultiTurnRoutedSampler(asst_lengths, routed_turns),
+          env_client=_MultiStepTextEnv(task={"q": "1"}, max_steps=3),
+          agent=model_agent.ModelAgent("sys"),
+          tokenizer=_MockTokenizer(),
+          chat_parser=_RecordingParser(),
+          config=base_rollout.RolloutConfig(
+              store_routed_experts=True,
+              routed_experts_encode_mode=encode_mode,
+              routed_experts_num_experts=num_experts
+              if encode_mode == "auto"
+              else None,
+          ),
+          trajectory_store=store_backend,
+      )
+      return asyncio.run(engine.run_episode())
+
+    for (
+        model_label,
+        num_layers,
+        top_k,
+        num_experts,
+        expected_tier,
+        expected_ratio,
+    ) in (
+        ("Qwen3-30B-A3B (E=128, K=8)", 48, 8, 128, "uint8", 0.50),
+        ("DeepSeek-V2 (E=160, K=6)", 30, 6, 160, "uint8", 0.50),
+        ("DeepSeek-V3 / Qwen3.5 (E=256, K=8)", 60, 8, 256, "uint10", 0.625),
+        ("Large-MoE (E=512, K=8)", 60, 8, 512, "uint10", 0.625),
+        ("Qwen3.5-397B-A17B (E=512, K=10)", 60, 10, 512, "uint10", 0.65),
+    ):
+      with self.subTest(model_label=model_label):
+        routed_turns = [
+            rng.integers(
+                0, num_experts, size=(t_len, num_layers, top_k), dtype=np.int16
+            )
+            for t_len in step_lengths
+        ]
+        # Inject -1 (UNSET_ROUTED_EXPERT) at periodic slots for sentinel parity.
+        routed_turns[0][0, ::4, :] = -1
+        routed_turns[1][-1, ::3, -1] = -1
+
+        tmp_root = pathlib.Path(self.create_tempdir().full_path)
+        mem_i16 = in_memory_store.InMemoryTrajectoryStore()
+        mem_cmp = in_memory_store.InMemoryTrajectoryStore()
+        file_i16_dir = tmp_root / "file_i16"
+        file_cmp_dir = tmp_root / "file_cmp"
+        f_store_i16 = file_store.FileTrajectoryStore(root_dir=str(file_i16_dir))
+        f_store_cmp = file_store.FileTrajectoryStore(root_dir=str(file_cmp_dir))
+        sql_i16_db = tmp_root / "sql_i16.db"
+        sql_cmp_db = tmp_root / "sql_cmp.db"
+        s_store_i16 = sql_store.SqlTrajectoryStore(
+            run_id="r1", db_url=f"sqlite:///{sql_i16_db}"
+        )
+        s_store_cmp = sql_store.SqlTrajectoryStore(
+            run_id="r1", db_url=f"sqlite:///{sql_cmp_db}"
+        )
+
+        try:
+          item_i16 = _collect_with_mode(
+              "int16", mem_i16, "t_i16", routed_turns, num_experts
+          )
+          item_cmp = _collect_with_mode(
+              "auto", mem_cmp, "t_cmp", routed_turns, num_experts
+          )
+
+          _collect_with_mode(
+              "int16", f_store_i16, "t_f_i16", routed_turns, num_experts
+          )
+          f_store_i16.flush()
+
+          _collect_with_mode(
+              "auto", f_store_cmp, "t_f_cmp", routed_turns, num_experts
+          )
+          f_store_cmp.flush()
+
+          _collect_with_mode(
+              "int16", s_store_i16, "t_s_i16", routed_turns, num_experts
+          )
+          s_store_i16.flush()
+          _collect_with_mode(
+              "auto", s_store_cmp, "t_s_cmp", routed_turns, num_experts
+          )
+          s_store_cmp.flush()
+
+          stored_f_i16 = f_store_i16.get_trajectories(["t_f_i16"])["t_f_i16"]
+          stored_f_cmp = f_store_cmp.get_trajectories(["t_f_cmp"])["t_f_cmp"]
+
+          stored_s_i16 = s_store_i16.get_trajectories(["t_s_i16"])["t_s_i16"]
+          stored_s_cmp = s_store_cmp.get_trajectories(["t_s_cmp"])["t_s_cmp"]
+        finally:
+          f_store_i16.close()
+          f_store_cmp.close()
+          s_store_i16.close()
+          s_store_cmp.close()
+
+        # 1. Storage size measurements across InMemory, File (JSON), and SQLite.
+        steps_i16 = [s for s in stored_f_i16.steps if s.source.value == "agent"]
+        steps_cmp = [s for s in stored_f_cmp.steps if s.source.value == "agent"]
+        self.assertLen(steps_cmp, 3)
+
+        ram_bytes_i16 = sum(s.prefill_routed_experts.nbytes for s in steps_i16)
+        ram_bytes_cmp = sum(s.prefill_routed_experts.nbytes for s in steps_cmp)
+        self.assertAlmostEqual(
+            ram_bytes_cmp / ram_bytes_i16, expected_ratio, places=4
+        )
+
+        file_bytes_i16 = sum(
+            p.stat().st_size
+            for p in (file_i16_dir / "traj_t_f_i16").glob("step*")
+        )
+        file_bytes_cmp = sum(
+            p.stat().st_size
+            for p in (file_cmp_dir / "traj_t_f_cmp").glob("step*")
+        )
+        self.assertGreater(file_bytes_cmp, 0)
+        self.assertLess(file_bytes_cmp, file_bytes_i16)
+
+        sql_bytes_i16 = len(
+            stored_s_i16.model_dump_json(exclude_none=True).encode("utf-8")
+        )
+        sql_bytes_cmp = len(
+            stored_s_cmp.model_dump_json(exclude_none=True).encode("utf-8")
+        )
+        self.assertLess(sql_bytes_cmp, sql_bytes_i16)
+        sql_db_bytes_i16 = sql_i16_db.stat().st_size
+        sql_db_bytes_cmp = sql_cmp_db.stat().st_size
+        self.assertLess(sql_db_bytes_cmp, sql_db_bytes_i16)
+
+        # 2. Bitwise parity on stored prefill_routed_experts (File & SQL).
+        for idx, raw_turn in enumerate(routed_turns):
+          self.assertEqual(
+              packing.routed_experts_encoding(
+                  steps_cmp[idx].prefill_routed_experts, batched=False
+              ),
+              expected_tier,
+          )
+          np.testing.assert_array_equal(
+              packing.decode_routed_experts(
+                  steps_cmp[idx].prefill_routed_experts, batched=False
+              ),
+              raw_turn,
+          )
+        steps_sql_cmp = [
+            s for s in stored_s_cmp.steps if s.source.value == "agent"
+        ]
+        for idx, raw_turn in enumerate(routed_turns):
+          np.testing.assert_array_equal(
+              packing.decode_routed_experts(
+                  steps_sql_cmp[idx].prefill_routed_experts, batched=False
+              ),
+              raw_turn,
+          )
+
+        # 3. Bitwise parity on converter.to_tunix_trajectory rehydration and
+        # prefill-context vs decode-token stitching across multi-turn steps.
+        rehydrated_i16 = converter_lib.to_tunix_trajectory(stored_f_i16)
+        rehydrated_cmp = converter_lib.to_tunix_trajectory(stored_f_cmp)
+        decoded_prompt = packing.decode_routed_experts(
+            rehydrated_cmp.prompt_routed_experts, batched=False
+        )
+        np.testing.assert_array_equal(
+            decoded_prompt, rehydrated_i16.prompt_routed_experts
+        )
+        np.testing.assert_array_equal(
+            decoded_prompt, routed_turns[0][:prompt_len]
+        )
+        for turn_idx, (s_i16, s_cmp) in enumerate(
+            zip(rehydrated_i16.steps, rehydrated_cmp.steps)
+        ):
+          decoded_asst = packing.decode_routed_experts(
+              s_cmp.assistant_routed_experts, batched=False
+          )
+          np.testing.assert_array_equal(
+              decoded_asst, s_i16.assistant_routed_experts
+          )
+          own_start = prompt_len if turn_idx == 0 else 1 + env_len
+          if turn_idx < 2:
+            # Non-final turn: decode prefix from turn_idx stitched with the
+            # delayed final decode token prefilled in turn_idx + 1.
+            expected_asst = np.concatenate(
+                [
+                    routed_turns[turn_idx][own_start:],
+                    routed_turns[turn_idx + 1][:1],
+                ],
+                axis=0,
+            )
+          else:
+            # Final turn: decode prefix from turn 2 (last token never
+            # prefilled).
+            expected_asst = routed_turns[turn_idx][own_start:]
+          np.testing.assert_array_equal(decoded_asst, expected_asst)
+          if s_i16.env_routed_experts is not None:
+            decoded_env = packing.decode_routed_experts(
+                s_cmp.env_routed_experts, batched=False
+            )
+            np.testing.assert_array_equal(decoded_env, s_i16.env_routed_experts)
+            np.testing.assert_array_equal(
+                decoded_env,
+                routed_turns[turn_idx + 1][1 : 1 + env_len],
+            )
+
+        # 4. Bitwise parity on TrajectoryItem, BatchAssembly, JAX decode, and
+        # direct bit-matching against original raw rollout router indices.
+        raw_all_routed = np.concatenate(routed_turns, axis=0)
+        decoded_item_routed = packing.decode_routed_experts(
+            item_cmp.routed_experts, batched=False
+        )
+        np.testing.assert_array_equal(
+            decoded_item_routed, item_i16.routed_experts
+        )
+        np.testing.assert_array_equal(decoded_item_routed[:-1], raw_all_routed)
+        # Final unprefilled decode token of the trajectory is padded with -1.
+        np.testing.assert_array_equal(decoded_item_routed[-1], -1)
+        p_i16 = payload_builder.create_trainer_payloads(
+            [item_i16, dataclasses.replace(item_i16, group_index=1)],
+            rewards=[0.0, 1.0],
+            algo_config=algorithm_config.GRPOConfig(
+                num_generations=2, use_rollout_logps=False
+            ),
+        )
+        p_cmp = payload_builder.create_trainer_payloads(
+            [item_cmp, dataclasses.replace(item_cmp, group_index=1)],
+            rewards=[0.0, 1.0],
+            algo_config=algorithm_config.GRPOConfig(
+                num_generations=2,
+                use_rollout_logps=False,
+                routed_experts_encode_mode="auto",
+                routed_experts_num_experts=num_experts,
+            ),
+        )
+        pad_asm_i16 = batch_assembly.PaddedBatchAssembler(
+            batch_size=2,
+            num_generations=2,
+            mini_batch_size=1,
+            max_prompt_length=16,
+            max_response_length=400,
+            pad_id=0,
+        )
+        pad_asm_cmp = batch_assembly.PaddedBatchAssembler(
+            batch_size=2,
+            num_generations=2,
+            mini_batch_size=1,
+            max_prompt_length=16,
+            max_response_length=400,
+            pad_id=0,
+        )
+        pad_payload_i16 = list(pad_asm_i16.feed(p_i16))[0].payload
+        pad_payload_cmp = list(pad_asm_cmp.feed(p_cmp))[0].payload
+        batch_i16 = pad_payload_i16.routed_experts
+        batch_cmp = pad_payload_cmp.routed_experts
+        jax_decoded_i16 = np.asarray(
+            rl_common.decode_routed_experts_jax(jnp.asarray(batch_i16))
+        )
+        jax_decoded_cmp = np.asarray(
+            rl_common.decode_routed_experts_jax(jnp.asarray(batch_cmp))
+        )
+        np.testing.assert_array_equal(jax_decoded_cmp, jax_decoded_i16)
+        left_pad = 16 - prompt_len
+        np.testing.assert_array_equal(
+            jax_decoded_cmp[0, left_pad : left_pad + len(raw_all_routed)],
+            raw_all_routed,
+        )
+        self.assertEqual(jax_decoded_cmp.shape[-2:], (num_layers, top_k))
+
+        seq_asm_i16 = batch_assembly.SequencePackedBatchAssembler(
+            batch_size=1,
+            num_generations=2,
+            mini_batch_size=1,
+            max_packed_len=800,
+            pad_id=0,
+            segment_alignment_boundary=1,
+        )
+        seq_asm_cmp = batch_assembly.SequencePackedBatchAssembler(
+            batch_size=1,
+            num_generations=2,
+            mini_batch_size=1,
+            max_packed_len=800,
+            pad_id=0,
+            segment_alignment_boundary=1,
+        )
+        seq_batch_i16 = list(seq_asm_i16.feed(p_i16))[0].payload.routed_experts
+        seq_batch_cmp = list(seq_asm_cmp.feed(p_cmp))[0].payload.routed_experts
+        jax_seq_i16 = np.asarray(
+            rl_common.decode_routed_experts_jax(jnp.asarray(seq_batch_i16))
+        )
+        jax_seq_cmp = np.asarray(
+            rl_common.decode_routed_experts_jax(jnp.asarray(seq_batch_cmp))
+        )
+        np.testing.assert_array_equal(jax_seq_cmp, jax_seq_i16)
+        np.testing.assert_array_equal(
+            jax_seq_cmp[0, : len(raw_all_routed)], raw_all_routed
+        )
+
+    # 5. End-to-end rollout -> store -> batch assembly -> trainer JAX decode
+    # with dynamic cross-turn tier promotion (num_experts=None: uint8 -> uint10)
+    # for both K % 4 == 0 (K=8) and K % 4 != 0 (K=10).
+    for promo_k in (8, 10):
+      with self.subTest(dynamic_promotion_top_k=promo_k):
+        promo_turns = [
+            rng.integers(
+                0, 128, size=(step_lengths[0], 16, promo_k), dtype=np.int16
+            ),
+            rng.integers(
+                256, 512, size=(step_lengths[1], 16, promo_k), dtype=np.int16
+            ),
+            rng.integers(
+                0, 64, size=(step_lengths[2], 16, promo_k), dtype=np.int16
+            ),
+        ]
+        raw_promo_all = np.concatenate(promo_turns, axis=0)
+        promo_store_i16 = in_memory_store.InMemoryTrajectoryStore()
+        promo_store_cmp = in_memory_store.InMemoryTrajectoryStore()
+        promo_i16 = _collect_with_mode(
+            "int16", promo_store_i16, f"p_i16_{promo_k}", promo_turns, None
+        )
+        promo_cmp = _collect_with_mode(
+            "auto", promo_store_cmp, f"p_cmp_{promo_k}", promo_turns, None
+        )
+        promo_payloads_i16 = payload_builder.create_trainer_payloads(
+            [promo_i16, dataclasses.replace(promo_i16, group_index=1)],
+            rewards=[0.0, 1.0],
+            algo_config=algorithm_config.GRPOConfig(
+                num_generations=2, use_rollout_logps=False
+            ),
+        )
+        promo_payloads_cmp = payload_builder.create_trainer_payloads(
+            [promo_cmp, dataclasses.replace(promo_cmp, group_index=1)],
+            rewards=[0.0, 1.0],
+            algo_config=algorithm_config.GRPOConfig(
+                num_generations=2,
+                use_rollout_logps=False,
+                routed_experts_encode_mode="auto",
+            ),
+        )
+        promo_seq_i16 = list(
+            batch_assembly.SequencePackedBatchAssembler(
+                batch_size=1,
+                num_generations=2,
+                mini_batch_size=1,
+                max_packed_len=800,
+                pad_id=0,
+                segment_alignment_boundary=1,
+            ).feed(promo_payloads_i16)
+        )[0].payload.routed_experts
+        promo_seq_cmp = list(
+            batch_assembly.SequencePackedBatchAssembler(
+                batch_size=1,
+                num_generations=2,
+                mini_batch_size=1,
+                max_packed_len=800,
+                pad_id=0,
+                segment_alignment_boundary=1,
+            ).feed(promo_payloads_cmp)
+        )[0].payload.routed_experts
+        jax_promo_i16 = np.asarray(
+            rl_common.decode_routed_experts_jax(jnp.asarray(promo_seq_i16))
+        )
+        jax_promo_cmp = np.asarray(
+            rl_common.decode_routed_experts_jax(jnp.asarray(promo_seq_cmp))
+        )
+        np.testing.assert_array_equal(jax_promo_cmp, jax_promo_i16)
+        np.testing.assert_array_equal(
+            jax_promo_cmp[0, : len(raw_promo_all)], raw_promo_all
+        )
+
+  def test_turn0_overlong_prompt_aborts_immediately_when_max_prompt_length_set(
+      self,
+  ):
+    sample_calls = 0
+
+    class _CountingPromptSampler:
+
+      async def sample(self, sampling_requests):
+        nonlocal sample_calls
+        sample_calls += 1
+        return sampler_lib.SamplingResponse(
+            request_id=sampling_requests.request_id,
+            text="TOOL_CALL: step1",
+            prompt_token_ids=np.arange(12, dtype=np.int32),
+            token_ids=np.array([101, 102], dtype=np.int32),
+            logprobs=np.zeros(2, dtype=np.float32),
+            routed_experts=np.zeros((14, 2, 4), dtype=np.int16),
+        )
+
+    engine = collector.TrajectoryCollectorEngine(
+        traj_id="traj_overlong_prompt",
+        request=datatypes.RolloutRequest(
+            prompt="overlong",
+            prompt_id="p_over",
+            max_turns=3,
+            max_response_length=32,
+            stage_routed_experts=True,
+        ),
+        sampler=_CountingPromptSampler(),
+        env_client=self._make_single_turn_env(),
+        agent=model_agent.ModelAgent("sys"),
+        tokenizer=_MockTokenizer(),
+        chat_parser=_RecordingParser(),
+        config=base_rollout.RolloutConfig(routed_experts_encode_mode="uint10"),
+        max_prompt_length=8,
+    )
+    with self.assertRaisesRegex(ValueError, "Turn-0 prompt length"):
+      asyncio.run(engine.run_episode())
+    self.assertEqual(sample_calls, 1)
 
 
 if __name__ == "__main__":

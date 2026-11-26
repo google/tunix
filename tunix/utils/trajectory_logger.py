@@ -38,8 +38,8 @@ from google.protobuf import message
 import numpy as np
 
 try:
-  from tunix.utils import _trajectory_logger_ext  # pylint: disable=g-import-not-at-top
-except ImportError:
+  import tunix.utils._trajectory_logger_ext as _trajectory_logger_ext  # pylint: disable=g-import-not-at-top,consider-using-from-import
+except ModuleNotFoundError:
   _trajectory_logger_ext = None
 
 csv.field_size_limit(2**31 - 1)

@@ -20,17 +20,42 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import orbax.checkpoint as ocp
+from tunix.models.gemma import params_safetensors
 
 Params = Mapping[str, Any]
+
+from_hf_impl = params_safetensors.from_hf_impl
+to_hf_impl = params_safetensors.to_hf_impl
+build_from_hf_manifest = params_safetensors.build_from_hf_manifest
+build_to_hf_manifest = params_safetensors.build_to_hf_manifest
+export_to_hf_state_dict = params_safetensors.export_to_hf_state_dict
+create_model_from_safe_tensors = (
+    params_safetensors.create_model_from_safe_tensors
+)
+
+
+def load_and_format_host_params(path: str) -> Params:
+  """Loads checkpoint parameters into host NumPy arrays and formats keys."""
+  with ocp.PyTreeCheckpointer() as checkpointer:
+    item_metadata = checkpointer.metadata(path).item_metadata
+    if item_metadata is None:
+      params = jax.device_get(checkpointer.restore(path))
+    else:
+      tree = item_metadata.tree
+      sharding_tree = jax.tree.map(lambda _: None, tree)
+      restore_args = ocp.checkpoint_utils.construct_restore_args(
+          tree, sharding_tree
+      )
+      params = checkpointer.restore(
+          path,
+          args=ocp.args.PyTreeRestore(item=tree, restore_args=restore_args),
+      )
+  return _unflatten_params(_param_remapper(params))
 
 
 def load_and_format_params(path: str) -> Params:
   """Loads parameters and formats them for compatibility."""
-  params = _load_params(path)
-  param_state = jax.tree.map(jnp.array, params)
-  remapped_params = _param_remapper(param_state)
-  nested_params = _unflatten_params(remapped_params)
-  return nested_params
+  return jax.tree.map(jnp.array, load_and_format_host_params(path))
 
 
 def load_metadata(path: str) -> Any | None:
@@ -38,13 +63,6 @@ def load_metadata(path: str) -> Any | None:
   checkpointer = ocp.StandardCheckpointer()
   metadata = checkpointer.metadata(path)
   return metadata
-
-
-def _load_params(path: str) -> Params:
-  """Loads parameters from a checkpoint path."""
-  checkpointer = ocp.StandardCheckpointer()
-  params = checkpointer.restore(path)
-  return params
 
 
 def _param_remapper(orig_params: Params) -> Params:

@@ -14,15 +14,20 @@
 
 """Unit tests for ClusterOrchestrator."""
 
+import signal
 import tempfile
+import threading
+import time
 from unittest import mock
 
 from absl.testing import absltest
 from etils import epath
 from tunix.dist_rl.common import datatypes
+from tunix.dist_rl.orchestrator import health_monitor
 from tunix.dist_rl.orchestrator import orchestrator
 from tunix.dist_rl.orchestrator import rl_program
 from tunix.dist_rl.orchestrator import worker_registry
+from tunix.dist_rl.testing import worker_registry_testing
 from tunix.dist_rl.trajectory import file_store
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.dist_rl.trajectory import trajectory_testing
@@ -38,6 +43,7 @@ class ClusterOrchestratorTest(absltest.TestCase):
     self.mock_registry = mock.MagicMock()
     self.mock_registry.worker_ids.return_value = []
     self.mock_registry.infos.return_value = []
+    self.mock_registry.targets.return_value = []
     self.mock_lifecycle = mock.MagicMock()
     self.mock_monitor = mock.MagicMock()
     self.orch = orchestrator.ClusterOrchestrator(
@@ -51,14 +57,49 @@ class ClusterOrchestratorTest(absltest.TestCase):
     orch = orchestrator.ClusterOrchestrator(registry=empty_registry)
     self.assertIs(orch.registry, empty_registry)
 
+  def test_context_manager_clean_exit_shuts_down_without_abort(self):
+    with self.orch:
+      pass
+
+    self.mock_lifecycle.shutdown.assert_called_once_with()
+
   def test_bring_up_and_shutdown(self):
     self.orch.bring_up_workers("dummy_warmup_data")
+    self.mock_lifecycle.enable_late_registration.assert_called_once_with(
+        require_weight_sync=False
+    )
     self.mock_lifecycle.bring_up.assert_called_once_with("dummy_warmup_data")
 
     self.orch.shutdown()
     self.mock_monitor.close.assert_called_once()
-    self.mock_lifecycle.shutdown.assert_called_once()
+    self.mock_lifecycle.shutdown.assert_called_once_with()
     self.mock_registry.close.assert_called_once()
+
+    self.mock_lifecycle.shutdown.reset_mock()
+    self.orch.shutdown(abort=True)
+    self.mock_lifecycle.shutdown.assert_called_once_with(abort=True)
+
+    # Context-manager failure exit forwards abort=True and preserves primary
+    # error.
+    self.mock_lifecycle.shutdown.reset_mock()
+    self.mock_lifecycle.shutdown.side_effect = RuntimeError("teardown failed")
+    with self.assertRaisesRegex(RuntimeError, "primary boom"):
+      with self.orch:
+        raise RuntimeError("primary boom")
+    self.mock_lifecycle.shutdown.assert_called_once_with(abort=True)
+    self.mock_lifecycle.shutdown.side_effect = None
+
+    mock_lifecycle_ws = mock.MagicMock()
+    orch_ws = orchestrator.ClusterOrchestrator(
+        registry=self.mock_registry,
+        lifecycle_driver=mock_lifecycle_ws,
+        monitor=self.mock_monitor,
+        weight_sync_handler=weight_sync_coordinator.NullHandler(),
+    )
+    orch_ws.bring_up_workers("dummy_warmup_data")
+    mock_lifecycle_ws.enable_late_registration.assert_called_once_with(
+        require_weight_sync=True
+    )
 
   def test_create_engine(self):
     mock_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
@@ -80,6 +121,10 @@ class ClusterOrchestratorTest(absltest.TestCase):
     ref_info = orch.registry.register_handle(
         "reference-0", [datatypes.Role.REFERENCE], mock_ref
     )
+    for wid in orch.registry.worker_ids():
+      worker_registry_testing.set_status(
+          orch.registry, wid, worker_registry.AdmissionStatus.ACTIVE
+      )
 
     engine = orch._create_engine()
     self.assertEqual(
@@ -105,12 +150,17 @@ class ClusterOrchestratorTest(absltest.TestCase):
 
     registry = worker_registry.WorkerRegistry()
     orch = orchestrator.ClusterOrchestrator(
-        registry=registry, weight_sync_mode="fallback"
+        registry=registry,
+        weight_sync_handler=weight_sync_coordinator.NullHandler(),
     )
     orch.registry.register_handle(
         "rollout-0", [datatypes.Role.ROLLOUT], mock_rollout
     )
     orch.registry.register_handle("actor-0", [datatypes.Role.ACTOR], mock_actor)
+    for wid in orch.registry.worker_ids():
+      worker_registry_testing.set_status(
+          orch.registry, wid, worker_registry.AdmissionStatus.ACTIVE
+      )
 
     engine = orch._create_engine()
     self.assertIsNotNone(engine._weight_sync_coordinator)
@@ -154,8 +204,8 @@ class ClusterOrchestratorTest(absltest.TestCase):
     self.mock_monitor.close.assert_called_once()
     mock_rollout.submit.assert_any_call("stop")
     mock_actor.submit.assert_any_call("stop")
-    mock_rollout.close.assert_awaited_once()
-    mock_actor.close.assert_awaited_once()
+    mock_rollout.sync_close.assert_called_once()
+    mock_actor.sync_close.assert_called_once()
 
   def test_create_engine_wraps_local_workers_as_in_process_handles(self):
     class LocalWorker(abstract_worker.Worker):
@@ -175,7 +225,8 @@ class ClusterOrchestratorTest(absltest.TestCase):
       def start(self):
         return datatypes.Response()
 
-      def stop(self):
+      def stop(self, *, abort: bool = False):
+        del abort
         return datatypes.Response()
 
       def heartbeat(self):
@@ -187,12 +238,48 @@ class ClusterOrchestratorTest(absltest.TestCase):
 
     registry = worker_registry.WorkerRegistry()
     registry.register(LocalWorker())
+    worker_registry_testing.set_status(
+        registry, "rollout-0", worker_registry.AdmissionStatus.ACTIVE
+    )
 
     orch = orchestrator.ClusterOrchestrator(registry=registry)
     engine = orch._create_engine()
     self.assertIsInstance(
         engine._rollout_handles()[0], remote_execution.InProcessActorHandle
     )
+
+  def test_create_engine_forwards_fault_tolerance_config(self):
+    ft_config = datatypes.FaultToleranceConfig(
+        enabled=True, max_task_retries=2, poll_retry_budget_s=45.0
+    )
+    orch = orchestrator.ClusterOrchestrator(
+        registry=worker_registry.WorkerRegistry(),
+        fault_tolerance_config=ft_config,
+    )
+    engine = orch._create_engine()
+    self.assertIs(engine._fault_tolerance_manager, orch.fault_tolerance_manager)
+    self.assertIs(
+        orch.fault_tolerance_manager._lifecycle_driver, orch.lifecycle_driver
+    )
+    self.assertEqual(engine._fault_tolerance_manager.config, ft_config)
+    self.assertEqual(engine._rollout_session._max_task_retries, 2)
+    self.assertEqual(engine._rollout_session._poll_retry_budget_s, 45.0)
+    self.assertEqual(
+        engine._rollout_session._on_worker_unreachable,
+        orch.fault_tolerance_manager.on_worker_unreachable,
+    )
+
+  def test_create_engine_disabled_fault_tolerance_zeroes_task_retries(self):
+    orch = orchestrator.ClusterOrchestrator(
+        registry=worker_registry.WorkerRegistry(),
+        fault_tolerance_config=datatypes.FaultToleranceConfig(
+            enabled=False, max_task_retries=5, poll_retry_budget_s=45.0
+        ),
+    )
+    engine = orch._create_engine()
+    self.assertEqual(engine._rollout_session._max_task_retries, 0)
+    self.assertIsNone(engine._rollout_session._on_worker_unreachable)
+    self.assertEqual(engine._rollout_session._poll_retry_budget_s, 45.0)
 
   def test_run_with_bring_up(self):
     mock_program = mock.MagicMock(spec=rl_program.RLProgram)
@@ -210,7 +297,9 @@ class ClusterOrchestratorTest(absltest.TestCase):
       )
 
     self.mock_lifecycle.bring_up.assert_called_once_with("dummy_init")
-    self.mock_monitor.poll.assert_called_once()
+    self.mock_monitor.poll.assert_called_once_with(
+        statuses=(worker_registry.AdmissionStatus.ACTIVE,)
+    )
     mock_program.run.assert_called_once_with(
         engine=mock_engine,
         train_dataset=["batch1", "batch2"],
@@ -228,10 +317,69 @@ class ClusterOrchestratorTest(absltest.TestCase):
     )
 
     self.mock_lifecycle.bring_up.assert_not_called()
-    self.mock_monitor.poll.assert_called_once()
+    self.mock_monitor.poll.assert_called_once_with(
+        statuses=(worker_registry.AdmissionStatus.ACTIVE,)
+    )
     mock_program.run.assert_called_once_with(
         engine=mock_engine,
     )
+
+  def test_run_skips_non_active_late_rollout_workers_in_health_poll(self):
+    registry = worker_registry.WorkerRegistry()
+    actor_handle = mock.MagicMock(spec=remote_execution.ActorHandle)
+    actor_handle.submit.side_effect = lambda method, *a, **kw: (
+        datatypes.HealthReport(state=datatypes.WorkerState.READY)
+        if method == "heartbeat"
+        else datatypes.Response()
+    )
+    pending_sync_handle = mock.MagicMock(spec=remote_execution.ActorHandle)
+
+    def _pending_submit(method, *unused_args, **unused_kwargs):
+      if method == "heartbeat":
+        raise RuntimeError("unexpected heartbeat on PENDING_WEIGHT_SYNC worker")
+      return datatypes.Response()
+
+    pending_sync_handle.submit.side_effect = _pending_submit
+    late_closed = threading.Event()
+    self.addCleanup(late_closed.set)
+    late_rollout_handle = mock.MagicMock(spec=remote_execution.ActorHandle)
+    late_rollout_handle.sync_close.side_effect = late_closed.set
+
+    def _late_submit(method, *unused_args, **unused_kwargs):
+      if method == "initialize":
+        late_closed.wait(timeout=5.0)
+      raise RuntimeError(f"unexpected {method} on REGISTERED newcomer")
+
+    late_rollout_handle.submit.side_effect = _late_submit
+    registry.register_handle("actor-0", [datatypes.Role.ACTOR], actor_handle)
+    orch = orchestrator.ClusterOrchestrator(
+        registry=registry, weight_sync_mode="none"
+    )
+    self.addCleanup(orch.shutdown)
+    orch.bring_up_workers()
+    registry.register_handle(
+        "rollout-pending", [datatypes.Role.ROLLOUT], pending_sync_handle
+    )
+    worker_registry_testing.set_status(
+        registry,
+        "rollout-pending",
+        worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
+    )
+    registry.register_handle(
+        "rollout-late", [datatypes.Role.ROLLOUT], late_rollout_handle
+    )
+    mock_program = mock.MagicMock(spec=rl_program.RLProgram)
+
+    orch.run(program=mock_program, bring_up=False)
+
+    self.assertIn(mock.call("heartbeat"), actor_handle.submit.call_args_list)
+    self.assertNotIn(
+        mock.call("heartbeat"), pending_sync_handle.submit.call_args_list
+    )
+    self.assertNotIn(
+        mock.call("heartbeat"), late_rollout_handle.submit.call_args_list
+    )
+    mock_program.run.assert_called_once()
 
 
 def _trajectory_store_orchestrator(
@@ -240,6 +388,7 @@ def _trajectory_store_orchestrator(
   mock_registry = mock.MagicMock()
   mock_registry.worker_ids.return_value = []
   mock_registry.infos.return_value = []
+  mock_registry.targets.return_value = []
   return orchestrator.ClusterOrchestrator(
       registry=mock_registry,
       lifecycle_driver=mock.MagicMock(),
@@ -363,6 +512,9 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
         "Rollout worker 'rollout-0' trajectory_store_config .* does not match",
     ):
       orch.bring_up_workers()
+    self.assertEqual(
+        mock_rollout.submit.call_args_list, [mock.call("initialize")]
+    )
     orch.shutdown()
 
   def test_bring_up_workers_raises_when_rollout_enables_store_but_orchestrator_disables(
@@ -394,6 +546,9 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
         "Rollout worker 'rollout-0' trajectory_store_config .* does not match",
     ):
       orch.bring_up_workers()
+    self.assertEqual(
+        mock_rollout.submit.call_args_list, [mock.call("initialize")]
+    )
     orch.shutdown()
 
   def test_bring_up_workers_raises_when_pre_timeout_shorter_than_drain(self):
@@ -402,7 +557,7 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
     orch_mismatch = orchestrator.ClusterOrchestrator(
         registry=worker_registry.WorkerRegistry(),
         monitor=mock.MagicMock(),
-        weight_sync_mode="fallback",
+        weight_sync_handler=weight_sync_coordinator.NullHandler(),
     )
     mock_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
     mock_rollout.submit.side_effect = [
@@ -423,6 +578,9 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
         " 2100.0s, but orchestrator weight_sync_timeouts.pre is 900.0s",
     ):
       orch_mismatch.bring_up_workers()
+    self.assertEqual(
+        mock_rollout.submit.call_args_list, [mock.call("initialize")]
+    )
     orch_mismatch.shutdown()
 
   def test_bring_up_workers_accepts_aligned_weight_sync_timeouts(self):
@@ -435,7 +593,7 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
     orch_aligned = orchestrator.ClusterOrchestrator(
         registry=worker_registry.WorkerRegistry(),
         monitor=mock.MagicMock(),
-        weight_sync_mode="fallback",
+        weight_sync_handler=weight_sync_coordinator.NullHandler(),
         weight_sync_timeouts=aligned_timeouts,
     )
     mock_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
@@ -465,7 +623,7 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
     orch_partial = orchestrator.ClusterOrchestrator(
         registry=worker_registry.WorkerRegistry(),
         monitor=mock.MagicMock(),
-        weight_sync_mode="fallback",
+        weight_sync_handler=weight_sync_coordinator.NullHandler(),
     )
     mock_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
     mock_rollout.submit.side_effect = [
@@ -486,7 +644,7 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
     orch = orchestrator.ClusterOrchestrator(
         registry=worker_registry.WorkerRegistry(),
         monitor=mock.MagicMock(),
-        weight_sync_mode="fallback",
+        weight_sync_handler=weight_sync_coordinator.NullHandler(),
     )
     mock_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
     mock_rollout.submit.return_value = datatypes.Response()
@@ -498,12 +656,65 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
     )
     with self.assertRaises(ValueError) as ctx:
       orch.bring_up_workers()
+    self.assertEqual(
+        mock_rollout.submit.call_args_list, [mock.call("initialize")]
+    )
     self.assertIn(
         "Rollout worker 'rollout-incomplete' is missing required resource key",
         str(ctx.exception),
     )
     self.assertIn("secret_key", str(ctx.exception))
     self.assertNotIn("secret_password", str(ctx.exception))
+    orch.shutdown()
+
+  def test_bring_up_workers_filters_non_rollout_workers_in_verify(self):
+    tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
+    cfg = {
+        "backend": "file",
+        "root_dir": str(tmp_dir),
+        "run_id": "shared_run",
+    }
+    orch = orchestrator.ClusterOrchestrator(
+        registry=worker_registry.WorkerRegistry(),
+        monitor=mock.MagicMock(),
+        weight_sync_handler=weight_sync_coordinator.NullHandler(),
+        trajectory_store_config=cfg,
+    )
+    mock_trainer = mock.MagicMock(spec=remote_execution.ActorHandle)
+    # Trainer returns empty metadata (no trajectory_store_config or
+    # drain_timeout_s), which must be ignored by rollout verification.
+    mock_trainer.submit.return_value = datatypes.Response()
+    mock_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_rollout.submit.side_effect = [
+        datatypes.Response(
+            metadata={
+                "trajectory_store_config": cfg,
+                "drain_timeout_s": 120.0,
+                "partial_rollout": False,
+            }
+        ),
+        datatypes.Response(),
+        datatypes.Response(),
+        datatypes.Response(),
+    ]
+    orch.registry.register_handle(
+        "actor-0", [datatypes.Role.ACTOR], mock_trainer
+    )
+    orch.registry.register_handle(
+        "rollout-0", [datatypes.Role.ROLLOUT], mock_rollout
+    )
+
+    orch.bring_up_workers(dummy_data="dummy")
+    mock_trainer.submit.assert_has_calls([
+        mock.call("initialize"),
+        mock.call("compile", "dummy"),
+        mock.call("start"),
+    ])
+    mock_rollout.submit.assert_has_calls([
+        mock.call("initialize"),
+        mock.call("compile", "dummy"),
+        mock.call("start"),
+    ])
     orch.shutdown()
 
   def test_bring_up_workers_skips_timeout_check_when_weight_sync_mode_none(
@@ -529,6 +740,253 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
       )
       orch.bring_up_workers()
       orch.shutdown()
+
+  def test_rollout_worker_registering_during_bring_up_is_brought_up_late(self):
+    orch = orchestrator.ClusterOrchestrator(
+        registry=worker_registry.WorkerRegistry(),
+        monitor=mock.MagicMock(),
+        weight_sync_handler=weight_sync_coordinator.NullHandler(),
+    )
+    self.addCleanup(orch.lifecycle_driver.shutdown)
+    mock_rollout_0 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_rollout_1 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_rollout_1.submit.side_effect = [
+        datatypes.Response(
+            metadata={"drain_timeout_s": 120.0, "partial_rollout": False}
+        ),
+        datatypes.Response(),
+        datatypes.Response(),
+        datatypes.Response(),
+    ]
+
+    def _r0_submit(method_name, *args, **kwargs):
+      del args, kwargs
+      if method_name == "initialize":
+        orch.registry.register_handle(
+            "rollout-1", [datatypes.Role.ROLLOUT], mock_rollout_1
+        )
+        return datatypes.Response(
+            metadata={"drain_timeout_s": 120.0, "partial_rollout": False}
+        )
+      return datatypes.Response()
+
+    mock_rollout_0.submit.side_effect = _r0_submit
+    orch.registry.register_handle(
+        "rollout-0", [datatypes.Role.ROLLOUT], mock_rollout_0
+    )
+
+    orch.bring_up_workers(dummy_data="warmup_batch")
+    orch.registry.wait_for_workers(
+        {datatypes.Role.ROLLOUT: 1},
+        statuses=(worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,),
+        timeout=5.0,
+    )
+
+    self.assertEqual(
+        orch.registry.status("rollout-0"),
+        worker_registry.AdmissionStatus.ACTIVE,
+    )
+    self.assertEqual(
+        orch.registry.status("rollout-1"),
+        worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
+    )
+    orch.shutdown()
+
+  def test_late_rollout_bring_up_failure_surfaces_in_fault_tolerance_metrics(
+      self,
+  ):
+    orch = orchestrator.ClusterOrchestrator(
+        registry=worker_registry.WorkerRegistry(),
+        monitor=mock.create_autospec(
+            health_monitor.HealthMonitor, instance=True
+        ),
+    )
+    self.addCleanup(orch.shutdown)
+    h_ok = mock.MagicMock(spec=remote_execution.ActorHandle)
+    h_ok.submit.return_value = datatypes.Response()
+    orch.registry.register_handle("rollout-0", [datatypes.Role.ROLLOUT], h_ok)
+    orch.bring_up_workers()
+    self.assertIsNotNone(orch.engine)
+    self.assertEqual(
+        orch.engine.fault_tolerance_metrics()[
+            "ft/rejoin/bring_up_failures_total"
+        ],
+        0.0,
+    )
+
+    h_bad = mock.MagicMock(spec=remote_execution.ActorHandle)
+    closed = threading.Event()
+    h_bad.sync_close.side_effect = closed.set
+    h_bad.submit.side_effect = [
+        datatypes.Response(),
+        RuntimeError("compile exploded"),
+    ]
+    orch.registry.register_handle(
+        "rollout-bad", [datatypes.Role.ROLLOUT], h_bad
+    )
+    self.assertTrue(closed.wait(timeout=5.0))
+    deadline = time.monotonic() + 5.0
+    while (
+        orch.engine.fault_tolerance_metrics()[
+            "ft/rejoin/bring_up_failures_total"
+        ]
+        < 1.0
+        and time.monotonic() < deadline
+    ):
+      time.sleep(0.005)
+    self.assertNotIn("rollout-bad", orch.registry)
+    self.assertEqual(
+        orch.engine.fault_tolerance_metrics()[
+            "ft/rejoin/bring_up_failures_total"
+        ],
+        1.0,
+    )
+
+
+def _mock_cluster() -> mock.MagicMock:
+  """Returns a `ClusterOrchestrator` mock with local resources attached."""
+  cluster = mock.MagicMock(spec=orchestrator.ClusterOrchestrator)
+  # Instance attributes are not part of the class spec, so set them explicitly.
+  cluster.monitor = mock.MagicMock()
+  cluster.trajectory_store = mock.MagicMock()
+  return cluster
+
+
+class ManagedClusterTeardownTest(absltest.TestCase):
+
+  def test_clean_exit_shuts_down_without_abort(self):
+    cluster = _mock_cluster()
+
+    with orchestrator.managed_cluster_teardown(cluster):
+      pass
+
+    cluster.shutdown.assert_called_once_with()
+
+  def test_error_aborts_workers_and_keeps_primary_error(self):
+    cluster = _mock_cluster()
+    cluster.shutdown.side_effect = RuntimeError("dead worker stop RPC failed")
+
+    with self.assertRaisesRegex(TimeoutError, "wait_for_workers timed out"):
+      with orchestrator.managed_cluster_teardown(cluster):
+        raise TimeoutError("wait_for_workers timed out")
+
+    cluster.shutdown.assert_called_once_with(abort=True)
+
+  def test_keep_workers_clean_exit_only_closes_local_resources(self):
+    cluster = _mock_cluster()
+
+    with orchestrator.managed_cluster_teardown(
+        cluster, stop_workers_on_exit=False
+    ):
+      pass
+
+    cluster.shutdown.assert_not_called()
+    cluster.monitor.close.assert_called_once_with()
+    cluster.trajectory_store.close.assert_called_once_with()
+
+  def test_keep_workers_error_closes_local_resources_and_keeps_error(self):
+    cluster = _mock_cluster()
+    cluster.monitor.close.side_effect = RuntimeError("monitor close failed")
+
+    with self.assertRaisesRegex(ValueError, "training failed"):
+      with orchestrator.managed_cluster_teardown(
+          cluster, stop_workers_on_exit=False
+      ):
+        raise ValueError("training failed")
+
+    cluster.shutdown.assert_not_called()
+    cluster.monitor.close.assert_called_once_with()
+    cluster.trajectory_store.close.assert_called_once_with()
+
+  def test_keep_workers_without_trajectory_store_only_closes_monitor(self):
+    cluster = _mock_cluster()
+    cluster.trajectory_store = None
+
+    with orchestrator.managed_cluster_teardown(
+        cluster, stop_workers_on_exit=False
+    ):
+      pass
+
+    cluster.shutdown.assert_not_called()
+    cluster.monitor.close.assert_called_once_with()
+
+  def test_sigterm_raises_system_exit_aborts_and_restores_handler(self):
+    cluster = _mock_cluster()
+    original_handler = signal.getsignal(signal.SIGTERM)
+    self.addCleanup(
+        signal.signal,
+        signal.SIGTERM,
+        signal.SIG_DFL if original_handler is None else original_handler,
+    )
+
+    # A known previous handler, so the test proves it is restored rather than
+    # relying on whatever handler the test process started with.
+    def _sentinel_handler(signum, frame):
+      del signum, frame
+
+    signal.signal(signal.SIGTERM, _sentinel_handler)
+
+    with self.assertRaises(SystemExit) as cm:
+      with orchestrator.managed_cluster_teardown(cluster):
+        signal.raise_signal(signal.SIGTERM)
+
+    self.assertEqual(cm.exception.code, 128 + signal.SIGTERM)
+    self.assertIs(signal.getsignal(signal.SIGTERM), _sentinel_handler)
+    cluster.shutdown.assert_called_once_with(abort=True)
+
+  def test_unknown_previous_sigterm_handler_is_restored_as_default(self):
+    cluster = _mock_cluster()
+
+    # `signal.signal` returns None when the previous handler was installed
+    # outside Python, and passing None back to it raises `TypeError`.
+    with mock.patch.object(signal, "signal", return_value=None) as mock_signal:
+      with orchestrator.managed_cluster_teardown(cluster):
+        pass
+
+    self.assertEqual(
+        mock_signal.call_args_list[-1],
+        mock.call(signal.SIGTERM, signal.SIG_DFL),
+    )
+    cluster.shutdown.assert_called_once_with()
+
+  def test_sigterm_restore_failure_does_not_skip_teardown(self):
+    cluster = _mock_cluster()
+
+    with mock.patch.object(
+        signal,
+        "signal",
+        side_effect=[signal.SIG_DFL, ValueError("restore failed")],
+    ):
+      with self.assertLogs(level="ERROR") as logs:
+        with orchestrator.managed_cluster_teardown(cluster):
+          pass
+
+    cluster.shutdown.assert_called_once_with()
+    self.assertIn(
+        "Failed to restore the previous SIGTERM handler",
+        "\n".join(logs.output),
+    )
+
+  def test_non_main_thread_does_not_install_sigterm_handler(self):
+    cluster = _mock_cluster()
+    errors = []
+
+    def _run() -> None:
+      try:
+        with orchestrator.managed_cluster_teardown(cluster):
+          pass
+      except BaseException as e:  # pylint: disable=broad-exception-caught
+        errors.append(e)
+
+    with mock.patch.object(signal, "signal") as mock_signal:
+      thread = threading.Thread(target=_run)
+      thread.start()
+      thread.join(timeout=10.0)
+
+    self.assertFalse(thread.is_alive())
+    self.assertEmpty(errors)
+    mock_signal.assert_not_called()
+    cluster.shutdown.assert_called_once_with()
 
 
 if __name__ == "__main__":

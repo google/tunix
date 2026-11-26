@@ -8,19 +8,22 @@ from __future__ import annotations
 
 import base64
 import binascii
-from collections.abc import Callable, Mapping, MutableMapping, Sequence
+from collections.abc import Callable, Collection, Mapping, MutableMapping, Sequence, Set
 import copy
 import dataclasses
 import datetime
 import enum
 import functools
+import logging
 import math
 import sys
-from typing import Annotated, Any, ClassVar, Final, Generic, Literal, Self, TypeVar, TypedDict, cast, get_args
+import types
+from typing import Annotated, Any, ClassVar, Final, Generic, Literal, Self, TypeGuard, TypeVar, TypedDict, Union, cast, get_args, get_origin
 import weakref
 
 import numpy as np
 import pydantic
+from tunix.rl import packing
 
 # ==============================================================================
 # --- Pure ATIF Base Classes ---
@@ -53,15 +56,59 @@ _JSON_SCALAR_TYPES: Final[frozenset[type[object]]] = frozenset(
 )
 
 
+class _JsonCompatibleDict(dict[str, Any]):
+  """A dict whose values `_pack_subclass_values_into_extra` already converted.
+
+  Projecting a subclass model to base ATIF stores its serialized extension
+  fields under `extra[EXTENSIONS_KEY]` in this type when every value is
+  JSON-compatible and every `list` stored directly in it is a flat list of JSON
+  scalars (token IDs, masks, logprobs, policy versions). `_to_json_compatible`
+  and `_deep_copy_into_memo` therefore copy those lists with one C-level
+  `list.copy()` instead of scanning every element again on each `model_dump()`
+  or `deep_copy()`.
+
+  Only `_pack_subclass_values_into_extra` creates instances; if any packed list
+  holds nested containers, it stores a plain `dict` instead. A plain `dict` with
+  the same keys that a caller builds by hand also takes the regular conversion
+  path, so unconverted arrays or tuples in it are still serialized correctly.
+  """
+
+  __slots__ = ()
+
+
 def _to_json_compatible(value: Any) -> Any:
-  """Recursively converts NumPy arrays and tuples nested in `value` to lists."""
+  """Recursively converts NumPy arrays and tuples nested in `value` to lists.
+
+  Every `list` and `dict` in the result is a new object, so the output of
+  `model_dump()` never shares a container with the model's `extra`.
+
+  Args:
+    value: The value to convert.
+
+  Returns:
+    The JSON-compatible equivalent of `value`.
+  """
+  value_type = type(value)
   if isinstance(value, np.ndarray):
     return value.tolist()
+  if value_type is _JsonCompatibleDict:
+    # Already converted when packed; copy flat scalar lists in one C call.
+    out: dict[str, Any] = {}
+    for key, element in value.items():
+      element_type = type(element)
+      if element_type is list:
+        out[key] = element.copy()
+      elif element_type in _JSON_SCALAR_TYPES:
+        out[key] = element
+      else:
+        out[key] = _to_json_compatible(element)
+    return out
   if isinstance(value, dict):
     return {k: _to_json_compatible(v) for k, v in value.items()}
   if isinstance(value, (list, tuple)):
-    # `to_atif_step()` packs long token, mask, and logprob lists into `extra`;
-    # copy scalar-only sequences without a Python call per element.
+    # Caller-supplied token or ID lists in `extra` are common; vet scalar-only
+    # sequences with one C-level scan and copy them without a Python call per
+    # element.
     if _JSON_SCALAR_TYPES.issuperset(map(type, value)):
       return list(value)
     return [_to_json_compatible(v) for v in value]
@@ -79,19 +126,131 @@ def _serialize_dict(value: dict[str, Any] | None) -> dict[str, Any] | None:
 _MISSING: Final[object] = object()
 
 
+def _copy_scalar_list(value: list[Any], memo: dict[int, Any]) -> list[Any]:
+  """Copies a list known to hold only JSON scalars, recording it in `memo`."""
+  memoized_copy = memo.get(id(value), _MISSING)
+  if memoized_copy is not _MISSING:
+    return memoized_copy
+  list_copy = value.copy()
+  memo[id(value)] = list_copy
+  return list_copy
+
+
+def _is_json_scalar_annotation(annotation: Any) -> bool:
+  """Returns whether `annotation` only admits `_JSON_SCALAR_TYPES` values."""
+  if get_origin(annotation) is Annotated:
+    annotation = get_args(annotation)[0]
+  if annotation in _JSON_SCALAR_TYPES:
+    return True
+  if get_origin(annotation) in (types.UnionType, Union):
+    return all(
+        _is_json_scalar_annotation(member) for member in get_args(annotation)
+    )
+  return False
+
+
+def _is_scalar_list_annotation(annotation: Any) -> bool:
+  """Returns whether `annotation` only admits `list` values of JSON scalars.
+
+  Matches `list[T]` (and unions of `list[T]` with non-list types such as `None`
+  or `np.ndarray`, like `IntArray` and `FloatArray`) where `T` only admits
+  `_JSON_SCALAR_TYPES` elements. Nested lists such as `Int3DArray`
+  (`list[list[list[int]]]`) and model or dict lists return `False`.
+
+  Args:
+    annotation: A resolved field annotation from `model_fields`.
+
+  Returns:
+    `True` if any `list` value validated by the field is a flat list of JSON
+    scalars.
+  """
+  if get_origin(annotation) is Annotated:
+    annotation = get_args(annotation)[0]
+  origin = get_origin(annotation)
+  members = (
+      get_args(annotation)
+      if origin in (types.UnionType, Union)
+      else (annotation,)
+  )
+  has_scalar_list = False
+  for member in members:
+    if get_origin(member) is Annotated:
+      member = get_args(member)[0]
+    if get_origin(member) is list:
+      args = get_args(member)
+      if len(args) != 1 or not _is_json_scalar_annotation(args[0]):
+        return False
+      has_scalar_list = True
+    elif member is not np.ndarray and not _is_json_scalar_annotation(member):
+      return False
+  return has_scalar_list
+
+
+def _scalar_list_fields(
+    model_cls: type[pydantic.BaseModel],
+) -> frozenset[str]:
+  """Returns the names of fields on `model_cls` annotated as flat scalar lists."""
+  return frozenset(
+      name
+      for name, field in model_cls.model_fields.items()
+      if _is_scalar_list_annotation(field.annotation)
+  )
+
+
+def _deep_copy_model_dict(
+    model: pydantic.BaseModel, memo: dict[int, Any]
+) -> dict[str, Any]:
+  """Deep-copies `model.__dict__` into `memo`.
+
+  Fields that the model class lists in `SCALAR_LIST_FIELDS` hold flat lists of
+  JSON scalars once validated (token IDs, masks, logprobs, policy versions), so
+  a `list` in such a field is copied with one C-level `list.copy()` instead of
+  a per-element type scan. Every other value takes `_deep_copy_into_memo`.
+
+  Args:
+    model: The model whose `__dict__` to copy.
+    memo: The `copy.deepcopy` memo, mapping the `id()` of each copied original
+      to its copy.
+
+  Returns:
+    A deep copy of `model.__dict__`.
+  """
+  model_dict = model.__dict__
+  memoized_copy = memo.get(id(model_dict), _MISSING)
+  if memoized_copy is not _MISSING:
+    return memoized_copy
+  scalar_list_fields = (
+      type(model).SCALAR_LIST_FIELDS
+      if isinstance(model, (Metrics, Step, TrajectoryMetadata))
+      else frozenset()
+  )
+  dict_copy: dict[str, Any] = {}
+  memo[id(model_dict)] = dict_copy
+  for key, element in model_dict.items():
+    element_type = type(element)
+    if element_type is list and key in scalar_list_fields:
+      element = _copy_scalar_list(element, memo)
+    elif element_type not in _JSON_SCALAR_TYPES:
+      element = _deep_copy_into_memo(element, memo)
+    dict_copy[key] = element
+  return dict_copy
+
+
 def _deep_copy_into_memo(value: Any, memo: dict[int, Any]) -> Any:
   """Returns a deep copy of `value`, sharing `memo` with `copy.deepcopy`.
 
   `copy.deepcopy` makes a Python call per element of a list or dict, which
   dominates the cost of copying long token ID and logprob lists and nested
-  JSON-like dicts such as tool definitions. This function copies exact `list`s
-  and `dict`s itself: it reuses elements of `_JSON_SCALAR_TYPES`, which are
-  immutable, without a call, and copies a list holding only such elements with
-  one C-level `list.copy()`. Like `copy.deepcopy`, it records each copy in
-  `memo` before copying the values nested in it, so shared and cyclic
-  references are copied once. Any other value goes to `copy.deepcopy` with the
-  same `memo`. For a pydantic model, it copies `__dict__` this way and then
-  calls the model's `__deepcopy__`, which finds that copy in `memo`.
+  JSON-like dicts such as tool definitions. This function copies exact `list`s,
+  `dict`s, `_JsonCompatibleDict`s, and NumPy arrays without object elements
+  itself: it reuses elements of `_JSON_SCALAR_TYPES`, which are immutable,
+  without a call, copies a list holding only such elements with one C-level
+  `list.copy()`, and copies an array with one `ndarray.copy()`. Like
+  `copy.deepcopy`, it records each copy in `memo` before copying the values
+  nested in it, so shared and cyclic references are copied once. Any other
+  value goes to `copy.deepcopy` with the same `memo`. For a pydantic model, it
+  copies `__dict__` via `_deep_copy_model_dict` and then calls the model's
+  `__deepcopy__`, which finds that copy in `memo`.
 
   Args:
     value: The value to copy.
@@ -107,6 +266,25 @@ def _deep_copy_into_memo(value: Any, memo: dict[int, Any]) -> Any:
   memoized_copy = memo.get(id(value), _MISSING)
   if memoized_copy is not _MISSING:
     return memoized_copy
+  if value_type is np.ndarray and not value.dtype.hasobject:
+    # Same buffer copy `ndarray.__deepcopy__` makes for these dtypes, without
+    # the `copy.deepcopy` dispatch. Arrays holding Python objects, including
+    # structured dtypes with an object field, must deep-copy their elements.
+    array_copy = value.copy()
+    memo[id(value)] = array_copy
+    return array_copy
+  if value_type is _JsonCompatibleDict:
+    packed_copy = _JsonCompatibleDict()
+    memo[id(value)] = packed_copy
+    for key, element in value.items():
+      element_type = type(element)
+      if element_type is list:
+        # Flat scalar lists by construction; see `_JsonCompatibleDict`.
+        element = _copy_scalar_list(element, memo)
+      elif element_type not in _JSON_SCALAR_TYPES:
+        element = _deep_copy_into_memo(element, memo)
+      packed_copy[key] = element
+    return packed_copy
   # Subclasses of `list` and `dict` are left to `copy.deepcopy`, which
   # preserves their type.
   if value_type is list:
@@ -134,7 +312,7 @@ def _deep_copy_into_memo(value: Any, memo: dict[int, Any]) -> Any:
     return dict_copy
   if isinstance(value, pydantic.BaseModel):
     # Copied here first, so that `__deepcopy__` finds this copy in `memo`.
-    _deep_copy_into_memo(value.__dict__, memo)
+    _deep_copy_model_dict(value, memo)
     # Calls `__deepcopy__` itself, as `copy.deepcopy(value, memo)` does on a
     # memo miss. If a field refers back to `value`, copying `__dict__` has
     # already put an inner copy of `value` in `memo`, which `copy.deepcopy`
@@ -167,6 +345,13 @@ def deep_copy(model: _ModelT) -> _ModelT:
 
 _EXTRA_FIELD: Final[str] = "extra"
 
+# Subclass fields promoted onto TrajectoryMetadata whose legacy packed entries
+# inside `extra[EXTENSIONS_KEY]` remain valid for backward compatibility when
+# the top-level canonical field is unset.
+_PROMOTED_METADATA_EXTENSION_FIELDS: Final[frozenset[str]] = frozenset(
+    {"status", "total_reward"}
+)
+
 
 @functools.lru_cache(maxsize=None)
 def _get_field_names(model_cls: type[pydantic.BaseModel]) -> set[str]:
@@ -198,6 +383,15 @@ def _get_non_none_fields(
     if value is not None:
       values_by_field[field] = value
   return values_by_field
+
+
+def _is_flat_scalar_source(
+    raw: Any, field: str, scalar_list_fields: frozenset[str]
+) -> bool:
+  """Returns whether packing `raw` yields a flat list of JSON scalars."""
+  if isinstance(raw, np.ndarray):
+    return raw.ndim == 1 and raw.dtype.kind in "biuf"
+  return isinstance(raw, list) and field in scalar_list_fields
 
 
 def _pack_subclass_values_into_extra(
@@ -250,8 +444,21 @@ def _pack_subclass_values_into_extra(
   extra = dict(subclass_model.extra or {})
   if subclass_values_by_field:
     extensions_key = subclass_model.EXTENSIONS_KEY
-    existing_extensions = extra.get(extensions_key) or {}
-    extra[extensions_key] = existing_extensions | subclass_values_by_field
+    # Caller-supplied extensions are converted here so that everything stored
+    # in the packed dict is JSON-compatible; `_JsonCompatibleDict` is used only
+    # when every top-level list is a flat list of JSON scalars.
+    existing_extensions = _to_json_compatible(extra.get(extensions_key) or {})
+    packed = existing_extensions | subclass_values_by_field
+    scalar_list_fields = type(subclass_model).SCALAR_LIST_FIELDS
+    is_flat = all(
+        not isinstance(value, list)
+        or _is_flat_scalar_source(
+            subclass_fields.get(key), key, scalar_list_fields
+        )
+        or _JSON_SCALAR_TYPES.issuperset(map(type, value))
+        for key, value in packed.items()
+    )
+    extra[extensions_key] = _JsonCompatibleDict(packed) if is_flat else packed
   if extra:
     base_values_by_field[_EXTRA_FIELD] = extra
   return base_values_by_field
@@ -286,9 +493,16 @@ def _unpack_subclass_values_from_extra(
       atif_model, (base_field_names & subclass_all_fields) - {_EXTRA_FIELD}
   )
 
-  # Promote only fields declared on `subclass_cls` from `extra[extensions_key]`,
-  # leaving any unrecognized keys in place so `extra="forbid"` is not tripped.
-  for field in packed_extensions.keys() & extension_field_names:
+  # Promote fields declared on `subclass_cls` (plus legacy promoted metadata
+  # fields when unset at the top level), leaving unrecognized keys in `extra`.
+  promoted_fallbacks = (
+      _PROMOTED_METADATA_EXTENSION_FIELDS - values_by_field.keys()
+      if isinstance(atif_model, TrajectoryMetadata)
+      else frozenset()
+  )
+  for field in packed_extensions.keys() & (
+      extension_field_names | promoted_fallbacks
+  ):
     values_by_field[field] = packed_extensions.pop(field)
   if packed_extensions and extensions_key:
     extra[extensions_key] = packed_extensions
@@ -331,118 +545,186 @@ IntArray = Annotated[
 ]
 
 _INT3D_DTYPE: Final[np.dtype[np.int16]] = np.dtype("<i2")
+_UINT8_DTYPE: Final[np.dtype[np.uint8]] = np.dtype("uint8")
 _INT3D_DTYPE_NAME: Final[Literal["int16"]] = "int16"
+_UINT8_DTYPE_NAME: Final[Literal["uint8"]] = "uint8"
 _INT3D_BLOB_KEYS: Final[frozenset[str]] = frozenset({"shape", "dtype", "data"})
 
 
 class SerializedInt3DArray(TypedDict):
-  """Compact JSON-serializable base64 binary representation of a 3D int16 array."""
+  """JSON-serializable base64 binary representation of MoE routed experts.
+
+  Supported layouts:
+  - 3D `int16` `(T, L, K)`: raw expert IDs (`0 <= id < E`), `-1` for unset. Raw
+    unshifted expert IDs must be passed as `int16`.
+  - 3D `uint8` `(T, L, K)`: `+1`-shifted expert IDs (`id + 1`), `0` for unset
+    (any `uint8` array is interpreted as already `+1`-shifted).
+  - 4D `uint8` `(T, L, K // 4, 5)` (or `(T, L, 1, ceil(10 * K / 8))` when
+    `K % 4 != 0`): `uint10` packing `+1`-shifted 10-bit values (`id + 1`, `0`
+    for unset) into little-endian bytes.
+
+  Note: Offline readers or older binaries consuming a `TrajectoryStore` written
+  with `dtype="uint8"` blobs must include this schema version (otherwise older
+  readers fail with `Unsupported Int3DArray dtype 'uint8'`).
+  """
 
   shape: list[int]
-  dtype: Literal["int16"]
+  dtype: Literal["int16", "uint8"]
   data: str
+
+
+def _is_valid_uint8_routed_shape(shape: Sequence[int]) -> bool:
+  """Returns True if `shape` is a valid 3D uint8 or 4D uint10-packed shape."""
+  return len(shape) == 3 or (
+      len(shape) == 4
+      and packing.uint10_logical_k(shape[2], shape[3]) is not None
+  )
+
+
+def _decode_int_3d_array_blob(value: Mapping[str, Any]) -> np.ndarray:
+  """Decodes and validates a base64-serialized routed-experts blob dict."""
+  if set(value.keys()) != _INT3D_BLOB_KEYS:
+    raise ValueError(
+        f"Invalid serialized Int3DArray keys {sorted(value.keys())};"
+        f" expected {sorted(_INT3D_BLOB_KEYS)}."
+    )
+  dtype = value["dtype"]
+  if dtype == _INT3D_DTYPE_NAME:
+    np_dtype, out_dtype = _INT3D_DTYPE, np.int16
+  elif dtype == _UINT8_DTYPE_NAME:
+    np_dtype, out_dtype = _UINT8_DTYPE, np.uint8
+  else:
+    raise ValueError(
+        f"Unsupported Int3DArray dtype {dtype!r}; expected"
+        f" {_INT3D_DTYPE_NAME!r} or {_UINT8_DTYPE_NAME!r}."
+    )
+  raw_shape = value["shape"]
+  valid_dims = isinstance(raw_shape, (list, tuple)) and all(
+      isinstance(dim, int) and not isinstance(dim, bool) and dim >= 0
+      for dim in raw_shape
+  )
+  valid_rank = valid_dims and (
+      (dtype == _INT3D_DTYPE_NAME and len(raw_shape) == 3)
+      or (
+          dtype == _UINT8_DTYPE_NAME and _is_valid_uint8_routed_shape(raw_shape)
+      )
+  )
+  if not valid_rank:
+    raise ValueError(
+        f"Invalid Int3DArray shape {raw_shape!r} for dtype {dtype!r}; expected"
+        " 3 non-negative integers (or 4D uint10 shape for uint8)."
+    )
+  shape = tuple(int(dim) for dim in raw_shape)
+  encoded = value["data"]
+  if not isinstance(encoded, str):
+    raise ValueError(
+        "Expected base64 string for Int3DArray data, got"
+        f" {type(encoded).__name__}."
+    )
+  try:
+    raw_bytes = base64.b64decode(encoded.encode("ascii"), validate=True)
+  except (UnicodeEncodeError, binascii.Error) as exc:
+    raise ValueError(f"Failed to decode Int3DArray blob: {exc}") from exc
+  expected_bytes = math.prod(shape) * np_dtype.itemsize
+  if len(raw_bytes) != expected_bytes:
+    raise ValueError(
+        f"Decoded Int3DArray byte length {len(raw_bytes)} does not match"
+        f" shape {shape} * {np_dtype.itemsize} ({expected_bytes} bytes)."
+    )
+  return (
+      np.frombuffer(raw_bytes, dtype=np_dtype)
+      .reshape(shape)
+      .astype(out_dtype, copy=True)
+  )
+
+
+def _is_valid_contiguous_int_3d_array(value: Any) -> TypeGuard[np.ndarray]:
+  """Returns True if `value` is already a C-contiguous valid Int3DArray ndarray."""
+  return (
+      isinstance(value, np.ndarray)
+      and value.flags.c_contiguous
+      and (
+          (value.dtype == _INT3D_DTYPE and value.ndim == 3)
+          or (
+              value.dtype == _UINT8_DTYPE
+              and _is_valid_uint8_routed_shape(value.shape)
+          )
+      )
+  )
 
 
 def _validate_int_3d_array(
     value: np.ndarray | list[list[list[int]]] | Mapping[str, Any] | None,
 ) -> np.ndarray | None:
-  """Validates and normalizes a 3D int16 array or decodes its base64 blob."""
+  """Validates a 3D int16/uint8 or 4D uint10-packed uint8 array or blob."""
   if value is None:
     return None
+  if _is_valid_contiguous_int_3d_array(value):
+    return value
   if isinstance(value, Mapping):
-    if set(value.keys()) != _INT3D_BLOB_KEYS:
-      raise ValueError(
-          f"Invalid serialized Int3DArray keys {sorted(value.keys())};"
-          f" expected {sorted(_INT3D_BLOB_KEYS)}."
-      )
-    dtype = value["dtype"]
-    if dtype != _INT3D_DTYPE_NAME:
-      raise ValueError(
-          f"Unsupported Int3DArray dtype {dtype!r}; expected"
-          f" {_INT3D_DTYPE_NAME!r}."
-      )
-    raw_shape = value["shape"]
-    if (
-        not isinstance(raw_shape, (list, tuple))
-        or len(raw_shape) != 3
-        or not all(
-            isinstance(dim, int) and not isinstance(dim, bool) and dim >= 0
-            for dim in raw_shape
-        )
-    ):
-      raise ValueError(
-          f"Invalid Int3DArray shape {raw_shape!r}; expected 3 non-negative"
-          " integers."
-      )
-    shape = (raw_shape[0], raw_shape[1], raw_shape[2])
-    encoded = value["data"]
-    if not isinstance(encoded, str):
-      raise ValueError(
-          "Expected base64 string for Int3DArray data, got"
-          f" {type(encoded).__name__}."
-      )
-    try:
-      raw_bytes = base64.b64decode(encoded.encode("ascii"), validate=True)
-    except (UnicodeEncodeError, binascii.Error) as exc:
-      raise ValueError(f"Failed to decode Int3DArray blob: {exc}") from exc
-    expected_bytes = math.prod(shape) * _INT3D_DTYPE.itemsize
-    if len(raw_bytes) != expected_bytes:
-      raise ValueError(
-          f"Decoded Int3DArray byte length {len(raw_bytes)} does not match"
-          f" shape {shape} * {_INT3D_DTYPE.itemsize} ({expected_bytes} bytes)."
-      )
-    return (
-        np.frombuffer(raw_bytes, dtype=_INT3D_DTYPE)
-        .reshape(shape)
-        .astype(np.int16, copy=True)
+    return _decode_int_3d_array_blob(value)
+  if not isinstance(value, (np.ndarray, list)):
+    raise ValueError(
+        f"Unsupported type for Int3DArray: {type(value).__name__}."
     )
-  if isinstance(value, (np.ndarray, list)):
-    arr = np.asarray(value)
-    if arr.ndim != 3:
+  arr = np.asarray(value)
+  if isinstance(value, np.ndarray) and arr.dtype == np.uint8:
+    if _is_valid_uint8_routed_shape(arr.shape):
+      return np.ascontiguousarray(arr, dtype=np.uint8)
+    raise ValueError(
+        "Expected a 3D uint8 array or 4D uint10-packed uint8 array for"
+        f" Int3DArray, got shape {arr.shape}."
+    )
+  if arr.ndim != 3:
+    raise ValueError(
+        f"Expected a 3D array for Int3DArray, got shape {arr.shape}."
+    )
+  if arr.size == 0:
+    return np.zeros(arr.shape, dtype=np.int16)
+  if not np.issubdtype(arr.dtype, np.integer) or np.issubdtype(
+      arr.dtype, np.bool_
+  ):
+    raise ValueError(
+        f"Expected an integer array for Int3DArray, got dtype {arr.dtype}."
+    )
+  if arr.dtype != np.int16:
+    info = np.iinfo(np.int16)
+    min_val, max_val = int(arr.min()), int(arr.max())
+    if min_val < info.min or max_val > info.max:
       raise ValueError(
-          f"Expected a 3D array for Int3DArray, got shape {arr.shape}."
+          f"Int3DArray values [{min_val}, {max_val}] exceed int16 range"
+          f" [{info.min}, {info.max}]."
       )
-    if arr.size == 0:
-      return np.zeros(arr.shape, dtype=np.int16)
-    if not np.issubdtype(arr.dtype, np.integer) or np.issubdtype(
-        arr.dtype, np.bool_
-    ):
-      raise ValueError(
-          f"Expected an integer array for Int3DArray, got dtype {arr.dtype}."
-      )
-    if arr.dtype != np.int16:
-      info = np.iinfo(np.int16)
-      min_val, max_val = int(arr.min()), int(arr.max())
-      if min_val < info.min or max_val > info.max:
-        raise ValueError(
-            f"Int3DArray values [{min_val}, {max_val}] exceed int16 range"
-            f" [{info.min}, {info.max}]."
-        )
-    return np.ascontiguousarray(arr, dtype=np.int16)
-  raise ValueError(f"Unsupported type for Int3DArray: {type(value).__name__}.")
+  return np.ascontiguousarray(arr, dtype=np.int16)
 
 
 def _serialize_int_3d_array(
     value: np.ndarray | list[list[list[int]]] | Mapping[str, Any] | None,
 ) -> SerializedInt3DArray | None:
-  """Serializes a 3D int16 array into a base64 binary blob dict."""
+  """Serializes a 3D int16/uint8 or 4D uint10-packed uint8 array into base64."""
   if value is None:
     return None
-  if (
-      isinstance(value, np.ndarray)
-      and value.ndim == 3
-      and value.dtype == _INT3D_DTYPE
-      and value.flags.c_contiguous
-  ):
-    arr = value
+  if _is_valid_contiguous_int_3d_array(value):
+    contig = value
   else:
-    validated = _validate_int_3d_array(value)
-    assert validated is not None
-    arr = np.ascontiguousarray(validated, dtype=_INT3D_DTYPE)
+    arr = _validate_int_3d_array(value)
+    if arr is None:
+      return None
+    contig = np.ascontiguousarray(
+        arr,
+        dtype=_UINT8_DTYPE if arr.dtype == np.uint8 else _INT3D_DTYPE,
+    )
+  dtype_name: Literal["int16", "uint8"] = (
+      _UINT8_DTYPE_NAME if contig.dtype == np.uint8 else _INT3D_DTYPE_NAME
+  )
   return {
-      "shape": list(arr.shape),
-      "dtype": _INT3D_DTYPE_NAME,
-      "data": base64.b64encode(arr.tobytes()).decode("ascii"),
+      "shape": list(contig.shape),
+      "dtype": dtype_name,
+      "data": (
+          base64.b64encode(
+              memoryview(contig)  # pyrefly: ignore[bad-argument-type]
+          ).decode("ascii")
+      ),
   }
 
 
@@ -541,6 +823,16 @@ class Observation(pydantic.BaseModel):
 class Metrics(pydantic.BaseModel):
   """LLM operational and confidence data for a step."""
 
+  # Fields whose `list` values hold only JSON scalars once validated, so
+  # `deep_copy` copies them with one `list.copy()` instead of a per-element
+  # scan. Populated from `model_fields` for `Metrics` and its subclasses.
+  SCALAR_LIST_FIELDS: ClassVar[frozenset[str]] = frozenset()
+
+  @classmethod
+  def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
+    super().__pydantic_init_subclass__(**kwargs)
+    cls.SCALAR_LIST_FIELDS = _scalar_list_fields(cls)
+
   prompt_tokens: int | None = pydantic.Field(
       default=None,
       description="Total input tokens, including cached and non-cached.",
@@ -573,6 +865,9 @@ class Metrics(pydantic.BaseModel):
       default=None,
       description="Other operational metrics.",
   )
+
+
+Metrics.SCALAR_LIST_FIELDS = _scalar_list_fields(Metrics)
 
 
 class FinalMetrics(pydantic.BaseModel):
@@ -678,11 +973,22 @@ class Step(pydantic.BaseModel):
   # projecting to base ATIF. Subclasses must define this ClassVar.
   EXTENSIONS_KEY: ClassVar[str]
 
+  # Fields whose `list` values hold only JSON scalars once validated, so
+  # `deep_copy` copies them with one `list.copy()` instead of a per-element
+  # scan. Populated in `__pydantic_init_subclass__` from `model_fields`.
+  SCALAR_LIST_FIELDS: ClassVar[frozenset[str]] = frozenset()
+
+  # Heavy array fields that stores may be configured to drop before writing
+  # (via `exclude_step_arrays`), e.g. for observability-only runs. Subclasses
+  # declare their own fields; base ATIF steps define none.
+  EXCLUDABLE_ARRAY_FIELDS: ClassVar[frozenset[str]] = frozenset()
+
   @classmethod
   def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
-    """Validates that Step subclasses define a non-empty EXTENSIONS_KEY."""
+    """Validates `EXTENSIONS_KEY` and records scalar-list fields."""
     super().__pydantic_init_subclass__(**kwargs)
     _validate_subclass_extensions_key(cls)
+    cls.SCALAR_LIST_FIELDS = _scalar_list_fields(cls)
 
   step_id: int = pydantic.Field(
       description="Ordinal index of the turn (starting from 1).",
@@ -761,6 +1067,30 @@ class Step(pydantic.BaseModel):
         )
     return self
 
+  def without_excluded_fields(self, exclude: Set[str]) -> Self:
+    """Returns this step with the `exclude` fields set to None.
+
+    Uses a shallow `model_copy`, so this step is never mutated and the dropped
+    values are never copied. Names this step's class does not define, or whose
+    values are already None, are ignored. Callers are expected to pass names
+    validated against `EXCLUDABLE_ARRAY_FIELDS`.
+
+    Args:
+      exclude: Names of fields to drop.
+
+    Returns:
+      A shallow copy with the fields dropped, or `self` if nothing was dropped.
+    """
+    if not exclude:
+      return self
+    fields = type(self).model_fields
+    update = {
+        field: None
+        for field in exclude
+        if field in fields and getattr(self, field) is not None
+    }
+    return self.model_copy(update=update) if update else self
+
   # TODO(tunix-dev): Add automatic Step subclass registration and resolution
   # (mirroring TrajectoryMetadata._SUBCLASS_FIELDS and resolve_subclass) so
   # persistent stores rehydrate custom Step subclasses automatically.
@@ -771,6 +1101,53 @@ class Step(pydantic.BaseModel):
       return self
     target_values_by_field["step_id"] = self.step_id + step_id_offset
     return Step.model_validate(target_values_by_field)
+
+
+def validate_step_array_exclusions(
+    fields: Collection[str],
+    allowed_fields: Set[str] | None = None,
+) -> frozenset[str]:
+  """Validates and normalizes a collection of step array fields to exclude.
+
+  The check is schema-agnostic: callers that know the step schema pass its
+  excludable fields (e.g. `TrajectoryMetadata.excludable_step_array_fields()`)
+  as `allowed_fields`.
+
+  Args:
+    fields: Names of step array fields to drop before queueing writes.
+    allowed_fields: If given, every name in `fields` must be in this set.
+
+  Returns:
+    The validated field names as a frozenset.
+
+  Raises:
+    TypeError: If `fields` is not a collection, is a string, bytes, or mapping
+      (e.g. `{"logprobs": False}`), or contains non-string entries.
+    ValueError: If `allowed_fields` is given and `fields` contains names
+      outside it.
+  """
+  if isinstance(fields, (str, bytes, Mapping)) or not isinstance(
+      fields, Collection
+  ):
+    raise TypeError(
+        "exclude_step_arrays must be a collection of field names (e.g. a"
+        f" list), not a string, bytes, or mapping; got {fields!r}."
+    )
+  excluded = frozenset(fields)
+  non_str = [field for field in excluded if not isinstance(field, str)]
+  if non_str:
+    raise TypeError(
+        "exclude_step_arrays must contain only field name strings; got"
+        f" {non_str!r}."
+    )
+  if allowed_fields is not None:
+    unknown = excluded - allowed_fields
+    if unknown:
+      raise ValueError(
+          f"Unsupported exclude_step_arrays fields {sorted(unknown)}; supported"
+          f" fields are {sorted(allowed_fields)}."
+      )
+  return excluded
 
 
 class Agent(pydantic.BaseModel):
@@ -796,6 +1173,16 @@ class Agent(pydantic.BaseModel):
   )
 
 
+def _rehydrate_sequence(
+    items: Sequence[Any],
+    rehydrator: Callable[[Any], Any] | None,
+) -> list[Any]:
+  """Copies `items` into a list, applying `rehydrator` when provided."""
+  if rehydrator is None:
+    return list(items)
+  return [rehydrator(item) for item in items]
+
+
 class TrajectoryMetadata(pydantic.BaseModel):
   """Metadata for a trajectory (excluding steps and subagents)."""
 
@@ -804,6 +1191,15 @@ class TrajectoryMetadata(pydantic.BaseModel):
   # Key in `extra` under which subclass-specific fields are packed when
   # projecting to base ATIF. Subclasses must define this ClassVar.
   EXTENSIONS_KEY: ClassVar[str]
+
+  # Fields whose `list` values hold only JSON scalars once validated, so
+  # `deep_copy` copies them with one `list.copy()` instead of a per-element
+  # scan. Populated in `__pydantic_init_subclass__` from `model_fields`.
+  SCALAR_LIST_FIELDS: ClassVar[frozenset[str]] = frozenset()
+
+  # Step classes written to trajectories with this metadata type. Used to
+  # validate a store's `exclude_step_arrays` against the bound step schema.
+  STEP_CLASSES: ClassVar[tuple[type[Step], ...]] = (Step,)
 
   # Maps each registered TrajectoryMetadata subclass to the set of extension
   # field names it defines beyond the base ATIF TrajectoryMetadata schema.
@@ -848,6 +1244,7 @@ class TrajectoryMetadata(pydantic.BaseModel):
           TrajectoryMetadata._PAIRED_TRAJECTORY_CLASSES[base] = cls
       return
     _validate_subclass_extensions_key(cls)
+    cls.SCALAR_LIST_FIELDS = _scalar_list_fields(cls)
     extension_fields = frozenset(
         cls.model_fields.keys() - TrajectoryMetadata.model_fields.keys()
     )
@@ -881,10 +1278,33 @@ class TrajectoryMetadata(pydantic.BaseModel):
       default=None,
       description="Reference to the continuation trajectory file.",
   )
+  attempt: int = pydantic.Field(
+      default=1,
+      ge=1,
+      description="1-based retry attempt counter for this trajectory.",
+  )
+  status: str | None = pydantic.Field(
+      default=None,
+      description=(
+          "Execution outcome or lifecycle status of the trajectory, or None"
+          " if not stated."
+      ),
+  )
+  total_reward: float | None = pydantic.Field(
+      default=None,
+      description="Total cumulative reward, or None if unreported.",
+  )
   extra: MetadataDict = pydantic.Field(
       default=None,
       description="Custom root-level metadata.",
   )
+
+  @classmethod
+  def excludable_step_array_fields(cls) -> frozenset[str]:
+    """Returns the step array fields a store bound to `cls` may exclude."""
+    return frozenset().union(
+        *(step_cls.EXCLUDABLE_ARRAY_FIELDS for step_cls in cls.STEP_CLASSES)
+    )
 
   def to_atif_metadata(self) -> TrajectoryMetadata:
     """Converts this metadata to base ATIF TrajectoryMetadata, storing subclass fields in extra."""
@@ -965,10 +1385,16 @@ class TrajectoryMetadata(pydantic.BaseModel):
       packed_extensions = metadata.extra.get(subclass.EXTENSIONS_KEY)
       if not isinstance(packed_extensions, Mapping) or not packed_extensions:
         continue
-      extension_keys = packed_extensions.keys()
-      if extension_keys <= subclass_fields:
+      unpromoted_keys = (
+          packed_extensions.keys() - _PROMOTED_METADATA_EXTENSION_FIELDS
+      )
+      if not unpromoted_keys and all(
+          getattr(metadata, key) is not None for key in packed_extensions
+      ):
+        continue
+      if unpromoted_keys <= subclass_fields:
         subset_matches.append(subclass)
-      elif subclass_fields <= extension_keys:
+      elif subclass_fields <= unpromoted_keys:
         superset_matches.append(subclass)
     # In Python, `False < True` (0 < 1). To break equal-length ties in favor of
     # `cls`, `min()` uses `candidate is not cls` (False=0 for `cls`) and `max()`
@@ -1004,6 +1430,11 @@ class TrajectoryMetadata(pydantic.BaseModel):
       trajectory_cls: type[TrajectoryT],
       steps: Sequence[Any] | None,
       subagent_trajectories: Sequence[Any] | None,
+      *,
+      step_rehydrator: Callable[[Any], Any] | None = None,
+      subagent_rehydrator: Callable[..., Any] | None = None,
+      strict: bool = True,
+      is_incomplete: bool = False,
   ) -> TrajectoryT:
     """Constructs `trajectory_cls` from this metadata, steps, and subagents.
 
@@ -1015,6 +1446,15 @@ class TrajectoryMetadata(pydantic.BaseModel):
       trajectory_cls: Concrete Trajectory class to build.
       steps: Sequence of step instances, or None.
       subagent_trajectories: Sequence of subagent trajectory instances, or None.
+      step_rehydrator: Optional callable applied to each step before validation.
+      subagent_rehydrator: Optional callable applied to each subagent trajectory
+        before validation.
+      strict: Whether to raise on validation or step-sequence errors. When
+        False, skips corrupt items, retains the longest contiguous step prefix
+        starting from `trajectory_cls.STEP_ID_START`, and resets `status` and
+        `total_reward` to `None` when incomplete.
+      is_incomplete: Whether any step was already skipped as corrupted before
+        calling this method.
 
     Returns:
       The constructed paired trajectory instance.
@@ -1035,11 +1475,105 @@ class TrajectoryMetadata(pydantic.BaseModel):
         "subagent_trajectories",
     }
     data = {field: getattr(self, field) for field in metadata_fields}
+    if strict:
+      if steps is not None:
+        data["steps"] = _rehydrate_sequence(steps, step_rehydrator)
+      if subagent_trajectories is not None:
+        data["subagent_trajectories"] = _rehydrate_sequence(
+            subagent_trajectories,
+            subagent_rehydrator,
+        )
+      return trajectory_cls(**data)
+
+    rehydrated_steps: list[Any] = []
+    if steps:
+      for step in steps:
+        try:
+          rehydrated_step = (
+              step_rehydrator(step) if step_rehydrator is not None else step
+          )
+          if not isinstance(rehydrated_step, Step):
+            raise TypeError(
+                f"Expected Step instance, got {type(rehydrated_step).__name__}"
+            )
+          rehydrated_steps.append(rehydrated_step)
+        except Exception:  # pylint: disable=broad-exception-caught
+          logging.warning(
+              "Skipping corrupted step %s in trajectory %r.",
+              getattr(step, "step_id", None),
+              self.trajectory_id,
+              exc_info=True,
+          )
+    sorted_steps = sorted(rehydrated_steps, key=lambda s: s.step_id)
+    valid_steps: list[Any] = []
+    expected_step_id = trajectory_cls.STEP_ID_START
+    for step in sorted_steps:
+      if step.step_id != expected_step_id:
+        break
+      valid_steps.append(step)
+      expected_step_id += 1
     if steps is not None:
-      data["steps"] = list(steps)
+      data["steps"] = valid_steps
     if subagent_trajectories is not None:
-      data["subagent_trajectories"] = list(subagent_trajectories)
-    return trajectory_cls(**data)
+      valid_subagents: list[Any] = []
+      seen_subagent_ids: set[str] = set()
+      for subagent_trajectory in subagent_trajectories:
+        try:
+          rehydrated_subagent = (
+              subagent_rehydrator(subagent_trajectory, strict=False)
+              if subagent_rehydrator is not None
+              else subagent_trajectory
+          )
+          if not isinstance(rehydrated_subagent, Trajectory):
+            raise TypeError(
+                "Expected Trajectory instance, got"
+                f" {type(rehydrated_subagent).__name__}"
+            )
+          subagent_id = rehydrated_subagent.trajectory_id
+          if subagent_id is None or subagent_id in seen_subagent_ids:
+            raise ValueError(
+                f"Invalid or duplicate subagent trajectory_id: {subagent_id!r}"
+            )
+          seen_subagent_ids.add(subagent_id)
+          valid_subagents.append(rehydrated_subagent)
+        except Exception:  # pylint: disable=broad-exception-caught
+          logging.warning(
+              "Skipping corrupted subagent trajectory %r in trajectory %r.",
+              getattr(subagent_trajectory, "trajectory_id", None),
+              self.trajectory_id,
+              exc_info=True,
+          )
+      data["subagent_trajectories"] = valid_subagents
+    trajectory = trajectory_cls(**data)
+    if not strict:
+      self._reset_incomplete_outcome(
+          trajectory,
+          num_input_steps=len(steps) if steps is not None else 0,
+          is_incomplete=is_incomplete,
+      )
+    return trajectory
+
+  def _reset_incomplete_outcome(
+      self,
+      trajectory: Trajectory[Any],
+      *,
+      num_input_steps: int,
+      is_incomplete: bool,
+  ) -> None:
+    """Clears completion fields on `trajectory` when steps are incomplete."""
+    num_valid_steps = len(trajectory.steps)
+    expected_total = (
+        self.final_metrics.total_steps
+        if self.final_metrics is not None
+        else None
+    )
+    tail_mismatch = self.status in ("COMPLETED", "SUCCEEDED") and (
+        (expected_total is not None and num_valid_steps < expected_total)
+        or (expected_total is None and num_valid_steps == 0)
+    )
+    if is_incomplete or num_valid_steps < num_input_steps or tail_mismatch:
+      trajectory.status = None
+      trajectory.total_reward = None
 
   @classmethod
   def _get_or_create_paired_trajectory_cls(cls) -> type[Trajectory[Any]]:
@@ -1082,6 +1616,9 @@ class TrajectoryMetadata(pydantic.BaseModel):
       self,
       steps: Sequence[Any] | None = None,
       subagent_trajectories: Sequence[Any] | None = None,
+      *,
+      strict: bool = True,
+      is_incomplete: bool = False,
   ) -> Trajectory[Any]:
     """Creates a full Trajectory from this metadata, steps, and subagents.
 
@@ -1093,13 +1630,23 @@ class TrajectoryMetadata(pydantic.BaseModel):
     Args:
       steps: Sequence of step instances, or None.
       subagent_trajectories: Sequence of subagent trajectory instances, or None.
+      strict: Whether to enforce strict sequential step IDs and raise on step
+        validation errors. When False, skips corrupted steps, retains the
+        longest contiguous prefix starting from `STEP_ID_START`, and resets
+        `status` and `total_reward` to `None` when incomplete.
+      is_incomplete: Whether any step was already skipped as corrupted before
+        calling this method.
 
     Returns:
       The constructed trajectory instance.
     """
     trajectory_cls = self._get_or_create_paired_trajectory_cls()
     return self._create_paired_trajectory(
-        trajectory_cls, steps, subagent_trajectories
+        trajectory_cls,
+        steps,
+        subagent_trajectories,
+        strict=strict,
+        is_incomplete=is_incomplete,
     )
 
 
@@ -1111,7 +1658,7 @@ class Trajectory(TrajectoryMetadata, Generic[StepT]):
 
   # First step_id in a well-formed trajectory; step_ids must be sequential
   # from here.
-  _STEP_ID_START: ClassVar[int] = 1
+  STEP_ID_START: ClassVar[int] = 1
 
   steps: list[StepT] = pydantic.Field(
       default_factory=list,
@@ -1125,14 +1672,19 @@ class Trajectory(TrajectoryMetadata, Generic[StepT]):
   @pydantic.field_validator("steps")
   @classmethod
   def validate_step_ids(cls, steps: list[StepT]) -> list[StepT]:
-    """Validate that step_ids are sequential from `_STEP_ID_START`."""
-    steps.sort(key=lambda step: step.step_id)
-    for expected_step_id, step in enumerate(steps, start=cls._STEP_ID_START):
+    """Validate that step_ids are sequential from `STEP_ID_START`."""
+    for expected_step_id, step in enumerate(steps, start=cls.STEP_ID_START):
       if step.step_id != expected_step_id:
-        raise ValueError(
-            f"Expected step_id {expected_step_id} (sequential from"
-            f" {cls._STEP_ID_START}), got {step.step_id}"
-        )
+        steps.sort(key=lambda s: s.step_id)
+        for sorted_expected_id, sorted_step in enumerate(
+            steps, start=cls.STEP_ID_START
+        ):
+          if sorted_step.step_id != sorted_expected_id:
+            raise ValueError(
+                f"Expected step_id {sorted_expected_id} (sequential from"
+                f" {cls.STEP_ID_START}), got {sorted_step.step_id}"
+            )
+        break
     return steps
 
   @pydantic.field_validator("subagent_trajectories")
@@ -1197,7 +1749,7 @@ class Trajectory(TrajectoryMetadata, Generic[StepT]):
     Returns:
       The newly created and appended step.
     """
-    step_id = len(self.steps) + self._STEP_ID_START
+    step_id = len(self.steps) + self.STEP_ID_START
     new_step = Step(
         step_id=step_id,
         timestamp=timestamp or datetime.datetime.now(datetime.timezone.utc),
@@ -1262,6 +1814,20 @@ class TunixAgentStep(Step):
 
   EXTENSIONS_KEY: ClassVar[str] = TUNIX_EXTENSIONS_KEY
 
+  EXCLUDABLE_ARRAY_FIELDS: ClassVar[frozenset[str]] = frozenset({
+      "assistant_tokens",
+      "assistant_masks",
+      "logprobs",
+      "prefill_routed_experts",
+  })
+
+  # Scalars that must be all set or all None with `prefill_routed_experts` (see
+  # `validate_agent_source`), so they are dropped along with it.
+  _PREFILL_COMPANION_FIELDS: ClassVar[frozenset[str]] = frozenset({
+      "prefill_start",
+      "prefill_num_context",
+  })
+
   assistant_tokens: IntArray = pydantic.Field(
       default=None,
       description="Token IDs generated by the assistant for this step.",
@@ -1281,13 +1847,20 @@ class TunixAgentStep(Step):
   prefill_routed_experts: Int3DArray = pydantic.Field(
       default=None,
       description=(
-          "MoE routed expert IDs returned by this step's model call, shape"
-          " (T, L, K), covering sequence positions [prefill_start,"
-          " prefill_start + T). The last sampled token of a turn (plus any"
-          " chat-parser suffix tokens appended to assistant_tokens) is only"
-          " routed by the next turn's prefill, so rows are: turn 0 = prompt +"
-          " this turn's routed assistant prefix; turn t > 0 = previous turn's"
-          " unrouted assistant tail + previous env tokens + this turn's routed"
+          "MoE routed expert IDs returned by this step's model call, covering"
+          " sequence positions [prefill_start, prefill_start + T). Stored in"
+          " one of three layouts (decode with"
+          " tunix.rl.packing.decode_routed_experts): (1) 3D int16 (T, L, K)"
+          " holding raw expert IDs with -1 for unset (raw IDs must be written"
+          " as int16); (2) 3D uint8 (T, L, K) holding +1-shifted expert IDs"
+          " (id + 1) with 0 for unset; or (3) 4D uint8 (T, L, K // 4, 5) (or"
+          " (T, L, 1, ceil(10 * K / 8)) when K % 4 != 0) packing +1-shifted"
+          " 10-bit values (id + 1, 0 for unset) into bytes. The last sampled"
+          " token of a turn (plus any chat-parser"
+          " suffix tokens appended to assistant_tokens) is only routed by the"
+          " next turn's prefill, so rows are: turn 0 = prompt + this turn's"
+          " routed assistant prefix; turn t > 0 = previous turn's unrouted"
+          " assistant tail + previous env tokens + this turn's routed"
           " assistant prefix. Written once and never rewritten."
       ),
   )
@@ -1344,6 +1917,33 @@ class TunixAgentStep(Step):
         )
     return self
 
+  def without_excluded_fields(self, exclude: Set[str]) -> Self:
+    """Drops `exclude` fields, clearing prefill scalars with routed experts.
+
+    Args:
+      exclude: Names of fields to drop.
+
+    Returns:
+      A shallow copy with the fields dropped, or `self` if nothing was dropped.
+    """
+    if "prefill_routed_experts" in exclude:
+      exclude = exclude | self._PREFILL_COMPANION_FIELDS
+    return super().without_excluded_fields(exclude)
+
+  @pydantic.model_validator(mode="after")
+  def validate_assistant_tokens_match_logprobs(self) -> TunixAgentStep:
+    """Validate that `assistant_tokens` and `logprobs` have equal lengths."""
+    if (
+        self.assistant_tokens is not None
+        and self.logprobs is not None
+        and len(self.assistant_tokens) != len(self.logprobs)
+    ):
+      raise ValueError(
+          f"Length of assistant_tokens ({len(self.assistant_tokens)}) must"
+          f" match length of logprobs ({len(self.logprobs)})."
+      )
+    return self
+
   def to_atif_step(self, step_id_offset: int = 1) -> Step:
     """Converts this 0-indexed Tunix step to a 1-indexed base ATIF Step."""
     return super().to_atif_step(step_id_offset=step_id_offset)
@@ -1365,6 +1965,15 @@ class TunixEnvStep(Step):
   )
 
   EXTENSIONS_KEY: ClassVar[str] = TUNIX_EXTENSIONS_KEY
+
+  # Note: `converter.to_tunix_trajectory` uses the previous step's
+  # `env_tokens` length to split `prefill_num_context` when reconstructing
+  # multi-turn MoE routing, so keep `env_tokens` when `prefill_routed_experts`
+  # is retained and that reconstruction is needed.
+  EXCLUDABLE_ARRAY_FIELDS: ClassVar[frozenset[str]] = frozenset({
+      "env_tokens",
+      "env_masks",
+  })
 
   reward: float | None = pydantic.Field(
       default=None,
@@ -1431,6 +2040,11 @@ class TunixTrajectoryMetadata(TrajectoryMetadata):
 
   EXTENSIONS_KEY: ClassVar[str] = TUNIX_EXTENSIONS_KEY
 
+  STEP_CLASSES: ClassVar[tuple[type[Step], ...]] = (
+      TunixAgentStep,
+      TunixEnvStep,
+  )
+
   prompt_id: str | None = pydantic.Field(
       default=None,
       description="Identifier for the initial prompt/task.",
@@ -1442,17 +2056,6 @@ class TunixTrajectoryMetadata(TrajectoryMetadata):
   target_policy_versions: list[int] | None = pydantic.Field(
       default=None,
       description="List of policy versions for each step in the trajectory.",
-  )
-  status: str | None = pydantic.Field(
-      default=None,
-      description=(
-          "Trajectory status as an `agent_types.TrajectoryStatus` name (e.g."
-          ' "RUNNING", "SUCCEEDED", "FAILED"), or None if not stated.'
-      ),
-  )
-  total_reward: float | None = pydantic.Field(
-      default=None,
-      description="Total cumulative reward.",
   )
   gamma: float | None = pydantic.Field(
       default=None,
@@ -1481,7 +2084,10 @@ class TunixTrajectoryMetadata(TrajectoryMetadata):
   def create_trajectory(
       self,
       steps: Sequence[Step] | None = None,
-      subagent_trajectories: Sequence[Trajectory] | None = None,
+      subagent_trajectories: Sequence[Trajectory[Any]] | None = None,
+      *,
+      strict: bool = True,
+      is_incomplete: bool = False,
   ) -> TunixTrajectory:
     """Creates a TunixTrajectory, rehydrating 1-indexed ATIF inputs.
 
@@ -1490,19 +2096,24 @@ class TunixTrajectoryMetadata(TrajectoryMetadata):
         the Tunix subclass for their source), or None.
       subagent_trajectories: Embedded Tunix subagent trajectories (kept as-is)
         or 1-indexed ATIF trajectories (rehydrated recursively), or None.
+      strict: Whether to enforce sequential step IDs and raise on step or
+        subagent rehydration errors. When False, skips corrupted items, retains
+        the longest contiguous prefix from `STEP_ID_START`, and resets `status`
+        and `total_reward` to `None` when incomplete.
+      is_incomplete: Whether any step was already skipped as corrupted before
+        calling this method.
 
     Returns:
       The constructed TunixTrajectory.
     """
-    if steps is not None:
-      steps = [_upcast_atif_step(step) for step in steps]
-    if subagent_trajectories is not None:
-      subagent_trajectories = [
-          TunixTrajectory.from_atif_trajectory(subagent_trajectory)
-          for subagent_trajectory in subagent_trajectories
-      ]
     return self._create_paired_trajectory(
-        TunixTrajectory, steps, subagent_trajectories
+        TunixTrajectory,
+        steps,
+        subagent_trajectories,
+        step_rehydrator=_upcast_atif_step,
+        subagent_rehydrator=TunixTrajectory.from_atif_trajectory,
+        strict=strict,
+        is_incomplete=is_incomplete,
     )
 
 
@@ -1512,7 +2123,7 @@ class TunixTrajectory(
 ):
   """Tunix-specific trajectory object containing the interaction history."""
 
-  _STEP_ID_START: ClassVar[int] = 0
+  STEP_ID_START: ClassVar[int] = 0
 
   subagent_trajectories: list[TunixTrajectory] | None = pydantic.Field(
       default=None,
@@ -1547,7 +2158,7 @@ class TunixTrajectory(
       extra: dict[str, Any] | None = None,
   ) -> TunixAgentStep | TunixEnvStep:
     """Helper to create and append a step, automatically assigning step_id."""
-    step_id = len(self.steps) + self._STEP_ID_START
+    step_id = len(self.steps) + self.STEP_ID_START
     ts = timestamp or datetime.datetime.now(datetime.timezone.utc)
     if source == Source.AGENT:
       new_step = TunixAgentStep(
@@ -1603,7 +2214,12 @@ class TunixTrajectory(
     return TunixTrajectoryMetadata(**data)
 
   @classmethod
-  def from_atif_trajectory(cls, atif_trajectory: Trajectory) -> TunixTrajectory:
+  def from_atif_trajectory(
+      cls,
+      atif_trajectory: Trajectory[Any],
+      *,
+      strict: bool = True,
+  ) -> TunixTrajectory:
     """Rehydrates a 1-indexed ATIF Trajectory to a 0-indexed TunixTrajectory."""
     if isinstance(atif_trajectory, cls):
       return atif_trajectory
@@ -1613,4 +2229,5 @@ class TunixTrajectory(
     ).create_trajectory(
         steps=atif_trajectory.steps,
         subagent_trajectories=atif_trajectory.subagent_trajectories,
+        strict=strict,
     )
