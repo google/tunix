@@ -587,9 +587,11 @@ class _RecordingPool:
 
   def __init__(self):
     self.submitted = []
+    self.options = []
 
   def submit(self, fn, request_output, **kwargs):
     self.submitted.append(request_output.request_id)
+    self.options.append(kwargs)
     future = concurrent.futures.Future()
     future.set_result(fn(request_output, **kwargs))
     return future
@@ -999,7 +1001,7 @@ class VllmSamplerConfigTest(absltest.TestCase):
     sampler._postprocess_pool = _RecordingPool()
     return sampler, sampler._postprocess_pool
 
-  def _run_two_requests(self, sampler, runner=None, defer=True):
+  def _run_two_requests(self, sampler, runner=None, defer=True, **options):
     """Request "1" finishes in the first step, "0" in the second.
 
     With `runner`, each step goes through its continue-decode path (dispatch,
@@ -1010,6 +1012,7 @@ class VllmSamplerConfigTest(absltest.TestCase):
       sampler: From `_overlap_sampler`.
       runner: From `_fake_runner`, or None.
       defer: TUNIX_DEFER_POSTPROCESS_SUBMIT for the call.
+      **options: Per-call logprob options for `_generate_offline`.
 
     Returns:
       The outputs, and per step the request ids submitted when the step
@@ -1035,7 +1038,7 @@ class VllmSamplerConfigTest(absltest.TestCase):
     prompts = [{"prompt_token_ids": [1]}, {"prompt_token_ids": [2]}]
     with _defer_flag(defer):
       outputs = sampler._generate_offline(
-          prompts, vllm_sampler.SamplingParams()
+          prompts, vllm_sampler.SamplingParams(), **options
       )
     return outputs, started, returned
 
@@ -1190,6 +1193,15 @@ class VllmSamplerConfigTest(absltest.TestCase):
         sampler.detokenize(["a", "b"], outputs)[0],
         plain.detokenize(["a", "b"], plain_outputs)[0],
     )
+
+  def test_deferred_submits_forward_the_call_logprob_options(self):
+    runner = self._fake_runner()
+    sampler, pool = self._overlap_sampler()
+    options = {"return_logprobs": False, "num_logprobs": 1}
+    self._run_two_requests(sampler, runner, **options)
+    # Deferred requests decode with the same per-call options as direct ones.
+    self.assertEqual(pool.submitted, ["1", "0"])
+    self.assertEqual(pool.options, [options, options])
 
   def test_deferral_belongs_to_one_call_at_a_time(self):
     runner = self._fake_runner()
