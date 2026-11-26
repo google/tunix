@@ -16,6 +16,7 @@
 
 import atexit
 import collections
+from collections.abc import Callable
 import concurrent.futures
 import copy
 import dataclasses
@@ -56,6 +57,10 @@ def _env_flag(name: str, default: str = "0") -> bool:
   return (os.environ.get(name, default) or default).strip() in _TRUTHY
 
 
+# Token ids as `VllmSampler.tokenize` returns them.
+_TokenIds = np.ndarray | list[int]
+
+
 class _TokenizeMemo:
   """Per-sampler memo of `VllmSampler.tokenize` (TUNIX_TOKENIZE_MEMO=1).
 
@@ -70,7 +75,9 @@ class _TokenizeMemo:
   _MAX_ENTRIES = 1024
 
   def __init__(self, checks: int):
-    self._cache: collections.OrderedDict[str, Any] = collections.OrderedDict()
+    self._cache: collections.OrderedDict[str, _TokenIds] = (
+        collections.OrderedDict()
+    )
     self._lock = threading.Lock()
     self._checks_left = checks
     self._off = False
@@ -78,16 +85,20 @@ class _TokenizeMemo:
     self.hits = 0
 
   @staticmethod
-  def _copy(ids: Any) -> Any:
+  def _copy(ids: _TokenIds) -> _TokenIds:
     return ids.copy() if isinstance(ids, np.ndarray) else list(ids)
 
   @staticmethod
-  def _same(a: Any, b: Any) -> bool:
+  def _same(a: _TokenIds, b: _TokenIds) -> bool:
     return type(a) is type(b) and np.array_equal(np.asarray(a), np.asarray(b))
 
-  def lookup(self, text: str, tokenize_fn: Any) -> Any:
+  def lookup(
+      self, text: str, tokenize_fn: Callable[[str], _TokenIds]
+  ) -> _TokenIds:
+    """Returns the token ids of `text`, from the memo when it has them."""
     if self._off:
       return tokenize_fn(text)
+    check = False
     with self._lock:
       self.calls += 1
       cached = self._cache.get(text)
@@ -97,7 +108,7 @@ class _TokenizeMemo:
         check = self._checks_left > 0
         if check:
           self._checks_left -= 1
-        out = self._copy(cached)
+        cached = self._copy(cached)
     if cached is None:
       ids = tokenize_fn(text)
       with self._lock:
@@ -105,13 +116,13 @@ class _TokenizeMemo:
         if len(self._cache) > self._MAX_ENTRIES:
           self._cache.popitem(last=False)
       return ids
-    if check and not self._same(out, tokenize_fn(text)):
+    if check and not self._same(cached, tokenize_fn(text)):
       self._off = True
       logging.error(
           "TUNIX_TOKENIZE_MEMO: cached ids differ from the tokenizer; memo off."
       )
       return tokenize_fn(text)
-    return out
+    return cached
 
 
 @dataclasses.dataclass
@@ -253,6 +264,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     )
     self._postprocess_pool_lock = threading.Lock()
     self._thread_local = threading.local()
+    # Created on the first tokenize call with TUNIX_TOKENIZE_MEMO=1.
+    self._tokenize_memo: _TokenizeMemo | None = None
     self._driver: VLLMInProcessDriver | None = None
     self.llm: LLM | None = None
     self._request_counter = count()
@@ -603,7 +616,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
   def tokenize(self, input_string: str) -> np.ndarray | list[int]:
     """Tokenizes the input string (memoized with TUNIX_TOKENIZE_MEMO=1)."""
     if _env_flag("TUNIX_TOKENIZE_MEMO") and isinstance(input_string, str):
-      memo = self.__dict__.get("_tokenize_memo")
+      memo = self._tokenize_memo
       if memo is None:
         checks = int(os.environ.get("TUNIX_TOKENIZE_MEMO_CHECK", "3") or "0")
         memo = self._tokenize_memo = _TokenizeMemo(checks)
