@@ -258,6 +258,10 @@ class VanillaSampler(
           )
       )
 
+    self._sync_delegate = (
+        self.raiden_sync_delegate if self.enable_raiden else None
+    )
+
     if not self.enable_raiden and self.raiden_sync_delegate:
       logging.warning(
           'VanillaSampler [%s] raiden_sync_delegate is set but'

@@ -14,6 +14,7 @@
 
 """Unit tests for RaidenDestinationWeightSyncMixin."""
 
+import asyncio
 import unittest
 from unittest import mock
 
@@ -43,6 +44,9 @@ class _MockAdapter(raiden_weight_sync_mixin.RaidenDestinationWeightSyncMixin):
     self.enable_raiden = enable_raiden
     self.raiden_sync_delegate = mock.AsyncMock()
     self.raiden_sync_delegate.is_bounded = mock.MagicMock(return_value=True)
+    self.raiden_sync_delegate.serving_corrupted = False
+    self.raiden_sync_delegate.has_uncommitted_mutation = False
+    self._sync_delegate = self.raiden_sync_delegate if enable_raiden else None
     self._transformer_state = {"param": 1}
     self.update_params = mock.MagicMock()
     self.pause = mock.AsyncMock(return_value=True)
@@ -64,6 +68,9 @@ class _SelfHostedAdapter(
     self.enable_raiden = enable_raiden
     self.raiden_sync_delegate = mock.AsyncMock()
     self.raiden_sync_delegate.is_bounded = mock.MagicMock(return_value=False)
+    self.raiden_sync_delegate.serving_corrupted = False
+    self.raiden_sync_delegate.has_uncommitted_mutation = False
+    self._sync_delegate = self.raiden_sync_delegate if enable_raiden else None
     self._transformer_state = {"param": 2}
     self.update_params = mock.MagicMock()
 
@@ -100,6 +107,24 @@ class RaidenDestinationWeightSyncMixinTest(unittest.IsolatedAsyncioTestCase):
     res = await adapter.bind_weight_sync()
     self.assertTrue(res)
     adapter.raiden_sync_delegate.bind_weight_sync.assert_awaited_once()
+
+  async def test_bind_weight_sync_non_raiden_delegate_passes_none_state(self):
+    adapter = _MockAdapter(enable_raiden=False)
+    mock_delegate = mock.AsyncMock()
+    mock_delegate.is_bounded = mock.MagicMock(return_value=False)
+    mock_delegate.bind_weight_sync.return_value = True
+    adapter._sync_delegate = mock_delegate
+    with mock.patch.object(
+        type(adapter),
+        "transformer_state",
+        new_callable=mock.PropertyMock,
+        side_effect=AssertionError("should not read transformer_state"),
+    ):
+      res = await adapter.bind_weight_sync()
+    self.assertTrue(res)
+    mock_delegate.bind_weight_sync.assert_awaited_once_with(
+        sync_request=None, state=None, sampler=adapter
+    )
 
   async def test_pre_weight_sync_delegates(self):
     adapter = _MockAdapter(enable_raiden=True)
@@ -221,6 +246,70 @@ class RaidenDestinationWeightSyncMixinTest(unittest.IsolatedAsyncioTestCase):
       adapter.reinitialize_cache()
     with self.assertRaises(NotImplementedError):
       adapter.refresh_state_leaves()
+
+  async def test_abort_weight_sync_inhibits_resume_when_corrupted(self):
+    adapter = _MockAdapter(enable_raiden=False)
+    mock_delegate = mock.AsyncMock()
+    mock_delegate.serving_corrupted = True
+    mock_delegate.has_uncommitted_mutation = False
+    mock_delegate.abort_weight_sync.side_effect = RuntimeError("corrupted")
+    adapter._sync_delegate = mock_delegate
+
+    with self.assertRaisesRegex(RuntimeError, "corrupted"):
+      await adapter.abort_weight_sync(base_sampler_lib.WeightSyncRequest())
+    adapter.resume.assert_not_awaited()
+
+  async def test_post_weight_sync_inhibits_resume_when_corrupted(self):
+    adapter = _MockAdapter(enable_raiden=False)
+    mock_delegate = mock.AsyncMock()
+    mock_delegate.serving_corrupted = True
+    mock_delegate.has_uncommitted_mutation = False
+    mock_delegate.post_weight_sync.side_effect = RuntimeError("corrupted")
+    adapter._sync_delegate = mock_delegate
+
+    with self.assertRaisesRegex(RuntimeError, "corrupted"):
+      await adapter.post_weight_sync(base_sampler_lib.WeightSyncRequest())
+    adapter.resume.assert_not_awaited()
+
+  async def test_pre_weight_sync_partial_rollout_none_keeps_config_default(
+      self,
+  ):
+    adapter = _MockAdapter(enable_raiden=True, partial_rollout=True)
+    await adapter.pre_weight_sync(
+        base_sampler_lib.WeightSyncRequest(), partial_rollout=None
+    )
+    adapter.pause.assert_awaited_once_with(mode="keep", clear_cache=False)
+
+  async def test_post_and_abort_skip_resume_on_cancel_or_uncommitted_mutation(
+      self,
+  ):
+    adapter = _MockAdapter(enable_raiden=False)
+    mock_delegate = mock.AsyncMock()
+    mock_delegate.serving_corrupted = False
+    mock_delegate.has_uncommitted_mutation = True
+    mock_delegate.post_weight_sync.side_effect = ValueError("stale")
+    mock_delegate.abort_weight_sync.side_effect = ValueError("stale")
+    adapter._sync_delegate = mock_delegate
+
+    with self.assertRaisesRegex(ValueError, "stale"):
+      await adapter.post_weight_sync(base_sampler_lib.WeightSyncRequest())
+    adapter.resume.assert_not_awaited()
+
+    with self.assertRaisesRegex(ValueError, "stale"):
+      await adapter.abort_weight_sync(base_sampler_lib.WeightSyncRequest())
+    adapter.resume.assert_not_awaited()
+
+    # CancelledError skips resume even when delegate is clean.
+    mock_delegate.has_uncommitted_mutation = False
+    mock_delegate.post_weight_sync.side_effect = asyncio.CancelledError()
+    mock_delegate.abort_weight_sync.side_effect = asyncio.CancelledError()
+    with self.assertRaises(asyncio.CancelledError):
+      await adapter.post_weight_sync(base_sampler_lib.WeightSyncRequest())
+    adapter.resume.assert_not_awaited()
+
+    with self.assertRaises(asyncio.CancelledError):
+      await adapter.abort_weight_sync(base_sampler_lib.WeightSyncRequest())
+    adapter.resume.assert_not_awaited()
 
 
 if __name__ == "__main__":
