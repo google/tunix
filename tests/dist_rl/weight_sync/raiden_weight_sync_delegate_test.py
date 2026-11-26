@@ -56,10 +56,15 @@ class _FakeWorker:
     return {}
 
 
-def _request(policy_version=0, req_id=None):
+def _request(policy_version=0, req_id=None, uuid=None):
+  extra_config = {}
+  if req_id:
+    extra_config["req_id"] = req_id
+  if uuid is not None:
+    extra_config["uuid"] = uuid
   return datatypes.WeightSyncRequest(
       policy_version=policy_version,
-      extra_config={"req_id": req_id} if req_id else {},
+      extra_config=extra_config,
   )
 
 
@@ -234,6 +239,70 @@ class RaidenWeightSyncDelegateTest(unittest.IsolatedAsyncioTestCase):
     req = _request(policy_version=1, req_id="req-1")
     res = await delegate.abort_weight_sync(sync_request=req)
     self.assertTrue(res)
+
+  async def test_h2d_failure_latches_serving_corrupted_and_blocks_future_rounds(
+      self,
+  ):
+    delegate = self._delegate()
+    sampler = _sampler()
+    await delegate.bind_weight_sync(state={"w": 1}, sampler=sampler)
+    req1 = _request(policy_version=1, req_id="req-1", uuid=1)
+    await delegate.pre_weight_sync(sync_request=req1)
+
+    with mock.patch.object(
+        delegate._synchronizers[0],
+        "h2d",
+        side_effect=RuntimeError("partial h2d failure"),
+    ):
+      with self.assertRaisesRegex(RuntimeError, "partial h2d failure"):
+        await delegate.weight_sync(sync_request=req1)
+
+    self.assertTrue(delegate.serving_corrupted)
+    self.assertTrue(delegate.has_uncommitted_mutation)
+
+    req2 = _request(policy_version=2, req_id="req-2", uuid=2)
+    with self.assertRaisesRegex(RuntimeError, "corrupted"):
+      await delegate.abort_weight_sync(sync_request=req1)
+    with self.assertRaisesRegex(RuntimeError, "corrupted"):
+      await delegate.pre_weight_sync(sync_request=req2)
+    with self.assertRaisesRegex(RuntimeError, "corrupted"):
+      await delegate.weight_sync(sync_request=req2)
+    with self.assertRaisesRegex(RuntimeError, "corrupted"):
+      await delegate.post_weight_sync(sync_request=req2)
+
+  async def test_abort_after_live_h2d_latches_serving_corrupted(self):
+    delegate = self._delegate()
+    await delegate.bind_weight_sync(state={"w": 1}, sampler=_sampler())
+    req = _request(policy_version=1, req_id="req-1", uuid=1)
+    await delegate.pre_weight_sync(sync_request=req)
+    await delegate.weight_sync(sync_request=req)
+    self.assertTrue(delegate.has_uncommitted_mutation)
+
+    with self.assertRaisesRegex(RuntimeError, "Cannot roll back uncommitted"):
+      await delegate.abort_weight_sync(sync_request=req)
+
+    self.assertTrue(delegate.serving_corrupted)
+    self.assertEqual(delegate.get_weight_sync_status()["phase"], "h2d_done")
+
+  async def test_abort_after_pre_only_does_not_latch(self):
+    delegate = self._delegate()
+    await delegate.bind_weight_sync(state={"w": 1}, sampler=_sampler())
+    req1 = _request(policy_version=1, req_id="req-1", uuid=1)
+    await delegate.pre_weight_sync(sync_request=req1)
+    self.assertFalse(delegate.has_uncommitted_mutation)
+
+    self.assertTrue(await delegate.abort_weight_sync(sync_request=req1))
+    self.assertFalse(delegate.serving_corrupted)
+    self.assertEqual(delegate.get_weight_sync_status()["phase"], "aborted")
+
+    req2 = _request(policy_version=2, req_id="req-2", uuid=2)
+    await delegate.pre_weight_sync(sync_request=req2)
+    await delegate.weight_sync(sync_request=req2)
+    self.assertTrue(delegate.has_uncommitted_mutation)
+    await delegate.post_weight_sync(sync_request=req2)
+    self.assertFalse(delegate.has_uncommitted_mutation)
+    self.assertFalse(delegate.serving_corrupted)
+    self.assertEqual(delegate.get_weight_sync_status()["phase"], "committed")
 
 
 if __name__ == "__main__":

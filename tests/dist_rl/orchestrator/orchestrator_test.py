@@ -34,6 +34,7 @@ from tunix.dist_rl.trajectory import trajectory_testing
 from tunix.dist_rl.weight_sync import weight_sync_coordinator
 from tunix.dist_rl.worker import abstract_worker
 from tunix.dist_rl.worker import remote_execution
+from tunix.rl import algorithm_config
 
 
 class ClusterOrchestratorTest(absltest.TestCase):
@@ -666,6 +667,69 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
     self.assertIn("secret_key", str(ctx.exception))
     self.assertNotIn("secret_password", str(ctx.exception))
     orch.shutdown()
+
+  def test_bring_up_workers_with_standard_program_configures_and_precompiles(
+      self,
+  ):
+    for precompile_trainer in (True, False):
+      with self.subTest(precompile_trainer=precompile_trainer):
+        registry = worker_registry.WorkerRegistry()
+        mock_actor = mock.MagicMock(spec=remote_execution.ActorHandle)
+        mock_actor.submit.return_value = datatypes.Response()
+        mock_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
+        mock_rollout.submit.return_value = datatypes.Response()
+        registry.register_handle("actor-0", [datatypes.Role.ACTOR], mock_actor)
+        registry.register_handle(
+            "rollout-0", [datatypes.Role.ROLLOUT], mock_rollout
+        )
+
+        orch = orchestrator.ClusterOrchestrator(
+            registry=registry,
+            monitor=mock.MagicMock(),
+            weight_sync_mode="none",
+        )
+        self.addCleanup(orch.shutdown)
+        program = rl_program.StandardRLProgram(
+            algo_config=algorithm_config.GRPOConfig(
+                beta=0.0, reward_mode="env"
+            ),
+            rollout_temperature=1.0,
+            rollout_returns_routed_experts=False,
+            precompile_trainer=precompile_trainer,
+            sync_weights=False,
+        )
+
+        orch.bring_up_workers(dummy_data=None, program=program)
+
+        actor_calls = mock_actor.submit.call_args_list
+        methods = [c.args[0] for c in actor_calls]
+        self.assertEqual(
+            methods, ["initialize", "with_loss_fn", "compile", "start"]
+        )
+        compile_arg = actor_calls[2].args[1]
+        if precompile_trainer:
+          self.assertIsInstance(compile_arg, datatypes.RLTrainerPayload)
+        else:
+          self.assertIsNone(compile_arg)
+        mock_rollout.submit.assert_any_call("compile", None)
+
+        # Calling configure_worker afterwards with identical spec skips RPC.
+        assert orch.engine is not None
+        orch.engine.configure_worker(
+            role=datatypes.Role.ACTOR,
+            algo_config=program.algo_config,
+            assembler=program.assembler,
+            pad_id=program.pad_id,
+            eos_id=program.eos_id,
+            can_fuse_agreement_in_loss=program.can_fuse_agreement_in_loss,
+            return_routed_experts=program.rollout_returns_routed_experts,
+        )
+        self.assertEqual(
+            [c.args[0] for c in mock_actor.submit.call_args_list].count(
+                "with_loss_fn"
+            ),
+            1,
+        )
 
   def test_bring_up_workers_filters_non_rollout_workers_in_verify(self):
     tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))

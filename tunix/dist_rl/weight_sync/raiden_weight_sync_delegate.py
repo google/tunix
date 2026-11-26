@@ -143,9 +143,22 @@ class RaidenWeightSyncDelegate:
 
   Caveat: the transport binds the live transformer state directly, so
   weight_sync writes into the serving copy rather than a shadow buffer.
-  Serving is protected by the manager's closed-admission window, but an
-  abort after a partial weight_sync cannot restore the previous weights.
+  Serving is protected by the manager's closed-admission window, and this
+  delegate tracks the live-HBM mutation window from weight_sync()'s install
+  until post_weight_sync() commits: a failed h2d() or an abort after
+  weight_sync() latches serving_corrupted=True and rejects subsequent phases.
+  Known gap: with auto_h2d=True, chunks may land in the bound live state during
+  handler.transfer(), and the delegate has no transfer-started signal, so an
+  abort during transfer (before weight_sync) is not latched.
   """
+
+  @property
+  def serving_corrupted(self) -> bool:
+    return self._serving_corrupted
+
+  @property
+  def has_uncommitted_mutation(self) -> bool:
+    return self._uncommitted_mutation
 
   def __init__(
       self,
@@ -167,6 +180,11 @@ class RaidenWeightSyncDelegate:
     ]
     self._version = 0
     self._tracker = weight_sync_coordinator.WorkerRoundTracker()
+    self._uncommitted_mutation: bool = False
+    self._serving_corrupted: bool = False
+
+  def close(self) -> None:
+    pass
 
   def is_bounded(
       self,
@@ -207,6 +225,11 @@ class RaidenWeightSyncDelegate:
   ) -> Any:
     """Pre-sync phase hook executed before weight transfer begins."""
     del kwargs
+    if self._serving_corrupted:
+      raise RuntimeError(
+          "Serving weights are corrupted from a previous failed or aborted"
+          " Raiden H2D; cannot admit new round."
+      )
     if self._has_round(sync_request):
       if not self._tracker.admit(sync_request, "prepared"):
         return True
@@ -232,6 +255,11 @@ class RaidenWeightSyncDelegate:
   ) -> Any:
     """Executes weight installation on device from host staging buffer."""
     del kwargs
+    if self._serving_corrupted:
+      raise RuntimeError(
+          "Serving weights are corrupted from a previous failed or aborted"
+          " Raiden H2D; cannot admit weight_sync."
+      )
     if self._has_round(sync_request):
       if not self._tracker.admit(sync_request, "h2d_done"):
         return self._version
@@ -239,11 +267,17 @@ class RaidenWeightSyncDelegate:
     for sync in self._synchronizers:
       if not sync.bound:
         raise RuntimeError("bind_weight_sync must run before weight_sync")
-      # auto_h2d installs chunks as they arrive; this call is the round's
-      # awaited install, so completion is guaranteed before checksums/post.
-      sync.h2d()
-      if os.environ.get("VERIFY_WEIGHTS", "").lower() == "true":
-        logging.info("destination checksums: %s", sync.checksums())
+    self._uncommitted_mutation = True
+    try:
+      for sync in self._synchronizers:
+        # auto_h2d installs chunks as they arrive; this call is the round's
+        # awaited install, so completion is guaranteed before checksums/post.
+        sync.h2d()
+        if os.environ.get("VERIFY_WEIGHTS", "").lower() == "true":
+          logging.info("destination checksums: %s", sync.checksums())
+    except Exception:
+      self._serving_corrupted = True
+      raise
     self._version = sync_request.policy_version
 
     if self._has_round(sync_request):
@@ -256,6 +290,11 @@ class RaidenWeightSyncDelegate:
   ) -> Any:
     """Post-sync phase hook executed after weight installation completes."""
     del kwargs
+    if self._serving_corrupted:
+      raise RuntimeError(
+          "Serving weights are corrupted from a previous failed or aborted"
+          " Raiden H2D; cannot commit round."
+      )
     if self._has_round(sync_request):
       if not self._tracker.admit(sync_request, "committed"):
         return True
@@ -276,6 +315,7 @@ class RaidenWeightSyncDelegate:
     else:
       self._sampler.refresh_state_leaves()
 
+    self._uncommitted_mutation = False
     if self._has_round(sync_request):
       self._tracker.complete(sync_request, "committed")
 
@@ -286,9 +326,21 @@ class RaidenWeightSyncDelegate:
   ) -> Any:
     """Safely handles abort of weight sync round."""
     del kwargs
+    if self._serving_corrupted:
+      raise RuntimeError(
+          "Cannot abort weight sync after partial Raiden H2D failure; serving"
+          " weights are corrupted."
+      )
     if self._has_round(sync_request):
       if not self._tracker.admit(sync_request, "aborted"):
         return False
+    if self._uncommitted_mutation:
+      self._serving_corrupted = True
+      raise RuntimeError(
+          "Cannot roll back uncommitted in-place Raiden H2D weight update when"
+          " aborting round; serving weights may be partially overwritten."
+      )
+    if self._has_round(sync_request):
       self._tracker.complete(sync_request, "aborted")
     return True
 

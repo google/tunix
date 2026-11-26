@@ -124,6 +124,29 @@ class VllmModelConfigTest(parameterized.TestCase):
         vllm_model_config.vllm_hf_overrides_for_model("Qwen/Qwen3.5-35B-A3B")
     )
 
+  def test_basic_weight_sync_selects_hf_mapping_for_qwen3_only(self):
+    qwen3_basic_cfg = vllm_model_config.vllm_mapping_config_for_model(
+        "Qwen/Qwen3-1.7B",
+        weight_sync_mode="basic",
+    )
+    self.assertEqual(qwen3_basic_cfg, mappings_lib.MappingConfig())
+
+  @parameterized.parameters(
+      ("google/gemma-4-E2B-it",),
+      ("Qwen/Qwen3.5-0.8B",),
+      ("Qwen/Qwen3.5-35B-A3B",),
+  )
+  def test_basic_weight_sync_raises_not_implemented_for_unsupported_families(
+      self, model_name: str
+  ):
+    with self.assertRaisesRegex(
+        NotImplementedError, "Hugging Face-to-vLLM JAX mapping"
+    ):
+      vllm_model_config.vllm_mapping_config_for_model(
+          model_name,
+          weight_sync_mode="basic",
+      )
+
   @parameterized.parameters(
       ("Qwen/Qwen3.5-0.8B", "", common_datatypes.WeightSyncMode.NONE),
       ("Qwen/Qwen3.5-35B-A3B", "", common_datatypes.WeightSyncMode.NOOP),
@@ -242,6 +265,56 @@ class VllmModelConfigTest(parameterized.TestCase):
           ValueError,
           "not a valid WeightSyncMode",
       ),
+      (
+          "Qwen/Qwen3-1.7B",
+          "vllm",
+          1,
+          "basic",
+          False,
+          True,
+          ValueError,
+          "use inprocess_vllm instead",
+      ),
+      (
+          "Qwen/Qwen3-1.7B",
+          "inprocess_vllm",
+          1,
+          "basic",
+          True,
+          True,
+          NotImplementedError,
+          "LoRA rollout weight sync",
+      ),
+      (
+          "Qwen/Qwen3.5-0.8B",
+          "inprocess_vllm",
+          1,
+          "basic",
+          False,
+          True,
+          NotImplementedError,
+          "Hugging Face-to-vLLM JAX mapping",
+      ),
+      (
+          "google/gemma-4-E2B-it",
+          "inprocess_vllm",
+          1,
+          "basic",
+          False,
+          True,
+          NotImplementedError,
+          "Hugging Face-to-vLLM JAX mapping",
+      ),
+      (
+          "meta-llama/Llama-3.1-8B",
+          "inprocess_vllm",
+          1,
+          "basic",
+          False,
+          True,
+          ValueError,
+          "supports Qwen3",
+      ),
   )
   def test_validate_rejects_invalid_or_unsupported_configs(
       self,
@@ -302,6 +375,15 @@ class VllmModelConfigTest(parameterized.TestCase):
           True,
           True,
       ),
+      (
+          "Qwen/Qwen3-1.7B",
+          "inprocess_vllm",
+          2,
+          "basic",
+          "",
+          False,
+          True,
+      ),
   )
   def test_validate_allows_supported_and_no_sync_or_maxtext_configs(
       self,
@@ -321,6 +403,92 @@ class VllmModelConfigTest(parameterized.TestCase):
         maxtext_model_name=maxtext_model_name,
         use_lora=use_lora,
         init_with_random_weights=init_with_random_weights,
+    )
+
+  def test_basic_weight_sync_rejects_maxtext_rollout(self):
+    with self.assertRaisesRegex(
+        NotImplementedError, "MaxText rollout with weight_sync_mode='basic'"
+    ):
+      vllm_model_config.validate_vllm_rollout_config(
+          "Qwen/Qwen3-1.7B",
+          sampler_type="inprocess_vllm",
+          tp_size=4,
+          weight_sync_mode="basic",
+          maxtext_model_name="qwen3-1.7b",
+      )
+    with self.assertRaisesRegex(
+        NotImplementedError, "MaxText rollout with weight_sync_mode='basic'"
+    ):
+      vllm_model_config.vllm_mapping_config_for_model(
+          "Qwen/Qwen3-1.7B",
+          maxtext_model_name="qwen3-1.7b",
+          weight_sync_mode="basic",
+      )
+
+  @parameterized.parameters(
+      ("Qwen/Qwen3-30B-A3B", True),
+      ("Qwen/Qwen3-235B-A22B", True),
+      ("qwen3_30b_a3b", True),
+      ("qwen3-moe", True),
+      ("/ckpt/myqwen3-30b-a3b/items", True),
+      ("/gcs/moe_experiments/Qwen3-8B", False),
+      ("/gcs/moe_experiments/myqwen3/items", False),
+      ("Qwen/Qwen3-1.7B", False),
+      ("Qwen/Qwen3.5-35B-A3B", False),
+  )
+  def test_is_qwen3_moe_model(self, model_name: str, expected: bool):
+    self.assertEqual(
+        vllm_model_config.is_qwen3_moe_model(model_name), expected
+    )
+    self.assertFalse(vllm_model_config._is_qwen3_model("Qwen/Qwen3.5-0.8B"))
+
+  @parameterized.parameters(
+      ("Qwen/Qwen3-30B-A3B",),
+      ("Qwen/Qwen3-235B-A22B",),
+      ("qwen3_30b_a3b",),
+      ("qwen3-moe",),
+      ("/ckpt/myqwen3-30b-a3b/items",),
+  )
+  def test_basic_weight_sync_rejects_qwen3_moe_models(self, model_name: str):
+    with self.assertRaisesRegex(NotImplementedError, "Qwen3 MoE"):
+      vllm_model_config.validate_vllm_rollout_config(
+          model_name,
+          sampler_type="inprocess_vllm",
+          tp_size=1,
+          weight_sync_mode="basic",
+      )
+    with self.assertRaisesRegex(NotImplementedError, "Qwen3 MoE"):
+      vllm_model_config.vllm_mapping_config_for_model(
+          model_name,
+          weight_sync_mode="basic",
+      )
+
+  def test_basic_weight_sync_non_qwen3_error_mentions_qwen3_only(self):
+    with self.assertRaisesRegex(ValueError, r"supports Qwen3 with") as ctx:
+      vllm_model_config.vllm_mapping_config_for_model(
+          "meta-llama/Llama-3.1-8B",
+          weight_sync_mode="basic",
+      )
+    self.assertNotIn("Qwen3.5", str(ctx.exception))
+    self.assertNotIn("Gemma4", str(ctx.exception))
+
+  @parameterized.parameters(
+      ("/gcs/moe_experiments/Qwen3-8B",),
+      ("Qwen/Qwen3-1.7B",),
+  )
+  def test_basic_weight_sync_allows_dense_qwen3_models(self, model_name: str):
+    vllm_model_config.validate_vllm_rollout_config(
+        model_name,
+        sampler_type="inprocess_vllm",
+        tp_size=1,
+        weight_sync_mode="basic",
+    )
+    self.assertEqual(
+        vllm_model_config.vllm_mapping_config_for_model(
+            model_name,
+            weight_sync_mode="basic",
+        ),
+        mappings_lib.MappingConfig(),
     )
 
 

@@ -1191,8 +1191,6 @@ class RLProgramTest(absltest.TestCase):
         [
             ("restore_checkpoint", None),
             ("with_loss_fn", None),
-            ("with_gen_model_input_fn", None),
-            ("compile", None),
             ("sync", 3),
         ],
     )
@@ -5401,9 +5399,7 @@ class RLProgramTest(absltest.TestCase):
 
   def test_distributed_engine_train_step_and_get_metrics(self):
     async def _run():
-      metrics_buf = datatypes.MetricsBuffer(
-          id=1, scalar_metrics={"loss": 0.1}
-      )
+      metrics_buf = datatypes.MetricsBuffer(id=1, scalar_metrics={"loss": 0.1})
       mock_worker = mock.MagicMock(spec=remote_execution.ActorHandle)
       mock_worker.asubmit.side_effect = lambda method, *args, **kwargs: {
           "fwd_bwd": "fwd_bwd_done",
@@ -6568,7 +6564,6 @@ class RLProgramTest(absltest.TestCase):
           pad_id=program.batch_config.pad_id,
           eos_id=program.eos_id,
           can_fuse_agreement_in_loss=True,
-          precompile=True,
           return_routed_experts=False,
       )
       self.assertIs(
@@ -6586,26 +6581,37 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_precompile_trainer_forwarded_to_configure_worker(self):
-    for precompile_trainer in (True, False):
-      with self.subTest(precompile_trainer=precompile_trainer):
+  def test_loss_fn_forwarded_to_configure_worker_when_set(self):
+    def _custom_loss(inputs, cfg):
+      del cfg
+      return algorithm_config.PolicyLossOutput(
+          loss_sum=-inputs.per_token_logps.sum(),
+          denominator=inputs.completion_mask.sum(),
+      )
+
+    for loss_fn in (None, "grpo", _custom_loss):
+      with self.subTest(loss_fn=loss_fn):
         self.mock_engine.configure_worker.reset_mock()
         program = self._create_program(
             dataset=[],
             max_steps=0,
-            precompile_trainer=precompile_trainer,
+            loss_fn=loss_fn,
             sync_weights=False,
         )
         asyncio.run(program.run_async(self.mock_engine))
-        self.mock_engine.configure_worker.assert_called_once_with(
+        expected_kwargs = dict(
             role=datatypes.Role.ACTOR,
             algo_config=program.algo_config,
             assembler=program.assembler,
             pad_id=program.batch_config.pad_id,
             eos_id=program.eos_id,
             can_fuse_agreement_in_loss=program.can_fuse_agreement_in_loss,
-            precompile=precompile_trainer,
             return_routed_experts=False,
+        )
+        if loss_fn is not None:
+          expected_kwargs["loss_fn"] = loss_fn
+        self.mock_engine.configure_worker.assert_called_once_with(
+            **expected_kwargs
         )
 
   def test_run_async_configures_worker_before_prepare_rollout_policy(self):

@@ -22,7 +22,7 @@ from absl.testing import absltest
 from flax import nnx
 import jax
 import jax.numpy as jnp
-
+from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.train import peft_trainer_v2
 from tunix.dist_rl.weight_sync import raiden_synchronizer
 from tunix.generate import mappings as mappings_lib
@@ -76,7 +76,9 @@ class WeightSyncStagingTest(absltest.TestCase):
 
   def test_prepare_stages_and_returns_metadata(self):
     fake = self._fake_trainer()
-    with mock.patch.object(raiden_synchronizer, "RaidenSynchronizer", _FakeSynchronizer):
+    with mock.patch.object(
+        raiden_synchronizer, "RaidenSynchronizer", _FakeSynchronizer
+    ):
       md = peft_trainer_v2.PeftTrainer.prepare_weight_sync(fake)
     worker = fake._weight_sync_worker
     self.assertEqual(md, [{"unit": "trainer"}])
@@ -85,7 +87,9 @@ class WeightSyncStagingTest(absltest.TestCase):
 
   def test_prepare_reuses_the_worker(self):
     fake = self._fake_trainer()
-    with mock.patch.object(raiden_synchronizer, "RaidenSynchronizer", _FakeSynchronizer):
+    with mock.patch.object(
+        raiden_synchronizer, "RaidenSynchronizer", _FakeSynchronizer
+    ):
       peft_trainer_v2.PeftTrainer.prepare_weight_sync(fake)
       first = fake._weight_sync_worker
       peft_trainer_v2.PeftTrainer.prepare_weight_sync(fake)
@@ -93,7 +97,9 @@ class WeightSyncStagingTest(absltest.TestCase):
 
   def test_prepare_uses_ffi_under_proxy(self):
     fake = self._fake_trainer()
-    with mock.patch.object(raiden_synchronizer, "RaidenSynchronizer", _FakeSynchronizer):
+    with mock.patch.object(
+        raiden_synchronizer, "RaidenSynchronizer", _FakeSynchronizer
+    ):
       with mock.patch.dict(os.environ, {"JAX_PLATFORMS": "proxy,cpu"}):
         peft_trainer_v2.PeftTrainer.prepare_weight_sync(fake)
     self.assertTrue(fake._weight_sync_worker.is_proxy)
@@ -215,6 +221,44 @@ class WeightSyncStagingTest(absltest.TestCase):
       ):
         with self.assertRaisesRegex(ValueError, "shape mismatch"):
           peft_trainer_v2.PeftTrainer.prepare_weight_sync(fake)
+
+  def test_set_target_state_rehydrates_target_param_spec_dict(self):
+    fake = self._fake_trainer()
+    serialized = {
+        "w": datatypes.TargetParamSpec(shape=(2, 2), dtype="bfloat16"),
+        "nested": {
+            "b": datatypes.TargetParamSpec(shape=(2,), dtype="float32"),
+        },
+    }
+    peft_trainer_v2.PeftTrainer.set_target_state(fake, serialized)
+    self.assertIsInstance(fake._target_state, nnx.State)
+    self.assertIsInstance(fake._target_state["w"], nnx.Param)
+    self.assertEqual(
+        fake._target_state["w"].value,
+        jax.ShapeDtypeStruct((2, 2), jnp.bfloat16),
+    )
+    self.assertIsInstance(fake._target_state["nested"], nnx.State)
+    self.assertEqual(
+        fake._target_state["nested"]["b"].value,
+        jax.ShapeDtypeStruct((2,), jnp.float32),
+    )
+
+    peft_trainer_v2.PeftTrainer.set_target_state(fake, {})
+    self.assertIsInstance(fake._target_state, nnx.State)
+    self.assertEmpty(fake._target_state)
+
+    # Round-trip through prepare_weight_sync casts model weights to bfloat16.
+    peft_trainer_v2.PeftTrainer.set_target_state(
+        fake,
+        {"w": datatypes.TargetParamSpec(shape=(2, 2), dtype="bfloat16")},
+    )
+    with mock.patch.object(
+        raiden_synchronizer, "RaidenSynchronizer", _FakeSynchronizer
+    ):
+      peft_trainer_v2.PeftTrainer.prepare_weight_sync(fake)
+    self.assertEqual(
+        fake._weight_sync_worker.bound_state["w"].value.dtype, jnp.bfloat16
+    )
 
 
 if __name__ == "__main__":

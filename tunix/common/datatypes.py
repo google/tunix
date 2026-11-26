@@ -242,6 +242,10 @@ class WeightSyncMode(str, enum.Enum):
     GCS: Experimental Orbax checkpoint-staged transfer through a shared
       `gs://` or filesystem staging directory (wired via
       `tunix.experimental.weight_sync`).
+    BASIC: Multi-process basic weight transfer staging canonical HuggingFace
+      weights in host RAM and streaming over TCP (wired in
+      `WeightSyncCoordinator` via `BasicWeightSyncHandler`); built for
+      simplicity and generality across framework pairs, not peak performance.
   """
 
   NONE = "none"
@@ -251,6 +255,7 @@ class WeightSyncMode(str, enum.Enum):
   FS = "fs"
   NCCL = "nccl"
   GCS = "gcs"
+  BASIC = "basic"
 
 
 DEFAULT_WEIGHT_SYNC_MODE = WeightSyncMode.NONE

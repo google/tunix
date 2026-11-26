@@ -347,6 +347,20 @@ class RolloutConfigTest(absltest.TestCase):
     self.assertIsNone(config.eos_tokens)
     self.assertIsNone(config.trajectory_store_config)
 
+  def test_rollout_config_accepts_basic(self):
+    hp = _hp("weight_sync_config.mode=basic")
+    config = rollout._rollout_config(
+        hp,
+        mock.Mock(),
+        sampler_type="inprocess_vllm",
+    )
+    self.assertEqual(
+        config.weight_sync_mode, weight_sync_lib.WeightSyncMode.BASIC
+    )
+    self.assertEqual(
+        config.rollout_mapping_config, mappings_lib.MappingConfig()
+    )
+
   def test_eos_token_strings_resolve_through_tokenizer(self):
     tokenizer = mock.Mock()
     tokenizer.encode.return_value = [7]
