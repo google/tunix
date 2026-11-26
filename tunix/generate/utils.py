@@ -1150,6 +1150,66 @@ def _shapes_are_repeatable(
   return True
 
 
+def _resolve_scanned_axis(
+    src_shape: Tuple[int, ...],
+    tgt_shape: Tuple[int, ...],
+    scan_axis: Optional[int] = None,
+) -> Optional[int]:
+  """Resolves the scanned layer axis between `src_shape` and `tgt_shape`.
+
+  Honors `scan_axis` when removing it matches `tgt_shape` (or can be aligned
+  to `tgt_shape` when no axis matches `tgt_shape` exactly), while falling back
+  to dynamic axis detection when `scan_axis` is None, out of bounds, or
+  incompatible with `tgt_shape`.
+
+  Args:
+    src_shape: Shape of the stacked source array.
+    tgt_shape: Shape of a single unrolled target layer array.
+    scan_axis: Preferred axis index for the scanned layer dimension, or None.
+
+  Returns:
+    The resolved axis index in `[0, len(src_shape))`, or None if no valid
+    scanned axis exists.
+  """
+  if len(src_shape) != len(tgt_shape) + 1:
+    return None
+
+  per_layer = (
+      src_shape[:scan_axis] + src_shape[scan_axis + 1 :]
+      if scan_axis is not None and 0 <= scan_axis < len(src_shape)
+      else None
+  )
+  if per_layer == tgt_shape:
+    return scan_axis
+
+  exact_axis = next(
+      (
+          i
+          for i in range(len(src_shape))
+          if src_shape[:i] + src_shape[i + 1 :] == tgt_shape
+      ),
+      None,
+  )
+  if exact_axis is not None:
+    return exact_axis
+
+  if per_layer is not None and all(
+      s <= t for s, t in zip(per_layer, tgt_shape)
+  ):
+    return scan_axis
+
+  return next(
+      (
+          i
+          for i in range(len(src_shape))
+          if _shapes_are_repeatable(
+              src_shape[:i] + src_shape[i + 1 :], tgt_shape
+          )
+      ),
+      None,
+  )
+
+
 def _unstack_scanned_param(
     src_val: jax.Array | np.ndarray,
     tgt_val: jax.Array | np.ndarray,
@@ -1184,13 +1244,7 @@ def _unstack_scanned_param(
     return (src_val,)
 
   if len(src_shape) == len(tgt_shape) + 1:
-    # If scan_axis not provided, try to detect it
-    if scan_axis is None:
-      for i in range(len(src_shape)):
-        candidate = src_shape[:i] + src_shape[i + 1 :]
-        if _shapes_are_repeatable(candidate, tgt_shape):
-          scan_axis = i
-          break
+    scan_axis = _resolve_scanned_axis(src_shape, tgt_shape, scan_axis)
 
     if scan_axis is not None:
       # Transpose the scanned axis to the 0th position
@@ -2244,13 +2298,18 @@ def transfer_state_directly(
             candidate_path = '.'.join(str(k) for k in found_candidate)
             # Cast the bulk tensor once before unstacking.
             src_val = _apply_dtype_cast(src_val, tgt_val.dtype, candidate_path)
-            scanned_per_layer_shape = (
-                src_val.shape[:scan_axis] + src_val.shape[scan_axis + 1 :]
+            resolved_axis = _resolve_scanned_axis(
+                src_val.shape, tgt_val.shape, scan_axis
             )
-            if scanned_per_layer_shape == tgt_val.shape:
-              # Pure unstack — no alignment needed.
+            if (
+                resolved_axis is None
+                or src_val.shape[:resolved_axis]
+                + src_val.shape[resolved_axis + 1 :]
+                == tgt_val.shape
+            ):
+              # Pure unstack (or unresolved axis fallback).
               unstacked_cache[cache_key] = _unstack_scanned_param(
-                  src_val, tgt_val, candidate_path, scan_axis=scan_axis
+                  src_val, tgt_val, candidate_path, scan_axis=resolved_axis
               )
             else:
               # Bulk align (repeat / zero-pad per axis) on the full scanned
@@ -2263,7 +2322,7 @@ def transfer_state_directly(
                   tgt_val.shape,
               )
               unstacked_cache[cache_key] = _bulk_align_and_unstack(
-                  src_val, scan_axis, tgt_val, candidate_path
+                  src_val, resolved_axis, tgt_val, candidate_path
               )
 
           # Extract the layer_idx-th element from the unstacked cache.
@@ -2411,7 +2470,9 @@ def transfer_state_directly(
         traverse_util.flatten_dict(resharded_weights),
         prev_spec_refs,
     )
+    del final_source, src_flat
   nnx.update(dst_state, resharded_weights)
+  gc.collect()
 
 
 def resolve_parallelism_sizes(

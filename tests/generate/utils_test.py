@@ -2849,6 +2849,111 @@ class UtilsTest(parameterized.TestCase):
     self.assertFalse(dst_embed.is_deleted())
     self.assertFalse(dst_lm.is_deleted())
 
+  def test_transfer_state_directly_auto_detects_scan_axis(self):
+    """Tests dynamic scan_axis fallback when default scan_axis=1 fails."""
+    mock_reshard = lambda source, target: source
+
+    # Case 1: 1D scanned scalar (shape (2,)) -> 0D scalar target under default
+    # scan_axis=1 (out-of-bounds for 1D source).
+    src_scalar = nnx.Dict(
+        base=nnx.Dict(
+            decoder=nnx.Dict(
+                layers=nnx.Dict(
+                    mlp=nnx.Dict(weight=nnx.Param(jnp.array([10.0, 20.0])))
+                )
+            )
+        )
+    )
+    dst_scalar = nnx.Dict(
+        model=nnx.Dict(
+            decoder=nnx.Dict(
+                layers_0=nnx.Dict(
+                    mlp=nnx.Dict(weight=nnx.Param(jnp.array(0.0)))
+                ),
+                layers_1=nnx.Dict(
+                    mlp=nnx.Dict(weight=nnx.Param(jnp.array(0.0)))
+                ),
+            )
+        )
+    )
+    utils.transfer_state_directly(
+        src_scalar, dst_scalar, reshard_fn=mock_reshard
+    )
+    np.testing.assert_array_equal(
+        dst_scalar["model"]["decoder"]["layers_0"]["mlp"]["weight"][...],
+        jnp.array(10.0),
+    )
+    np.testing.assert_array_equal(
+        dst_scalar["model"]["decoder"]["layers_1"]["mlp"]["weight"][...],
+        jnp.array(20.0),
+    )
+
+    # Case 2: param_scan_axis=0 3D tensor (num_layers=2, embed=4, mlp=6) -> 2D
+    # target (4, 6) under default scan_axis=1 (must slice axis 0 rather than
+    # repeating axis 0 by 2x and unstacking axis 1).
+    layer0_w = jnp.arange(24, dtype=jnp.float32).reshape(4, 6)
+    layer1_w = layer0_w + 100.0
+    stacked_w = jnp.stack([layer0_w, layer1_w], axis=0)
+    src_axis0 = nnx.Dict(
+        base=nnx.Dict(
+            decoder=nnx.Dict(
+                layers=nnx.Dict(mlp=nnx.Dict(kernel=nnx.Param(stacked_w)))
+            )
+        )
+    )
+    dst_axis0 = nnx.Dict(
+        model=nnx.Dict(
+            decoder=nnx.Dict(
+                layers_0=nnx.Dict(
+                    mlp=nnx.Dict(
+                        kernel=nnx.Param(jnp.zeros((4, 6), dtype=jnp.float32))
+                    )
+                ),
+                layers_1=nnx.Dict(
+                    mlp=nnx.Dict(
+                        kernel=nnx.Param(jnp.zeros((4, 6), dtype=jnp.float32))
+                    )
+                ),
+            )
+        )
+    )
+    utils.transfer_state_directly(src_axis0, dst_axis0, reshard_fn=mock_reshard)
+    np.testing.assert_array_equal(
+        dst_axis0["model"]["decoder"]["layers_0"]["mlp"]["kernel"][...],
+        layer0_w,
+    )
+    np.testing.assert_array_equal(
+        dst_axis0["model"]["decoder"]["layers_1"]["mlp"]["kernel"][...],
+        layer1_w,
+    )
+
+    # Case 3: Ambiguous square shape (2, 2) -> (2,) still honors explicit
+    # scan_axis=1 over axis 0.
+    square_src = nnx.Dict(
+        layers=nnx.Dict(
+            mlp=nnx.Dict(
+                weight=nnx.Param(jnp.array([[1.0, 2.0], [3.0, 4.0]]))
+            )
+        )
+    )
+    square_dst = nnx.Dict(
+        layers_0=nnx.Dict(
+            mlp=nnx.Dict(weight=nnx.Param(jnp.zeros((2,), dtype=jnp.float32)))
+        ),
+        layers_1=nnx.Dict(
+            mlp=nnx.Dict(weight=nnx.Param(jnp.zeros((2,), dtype=jnp.float32)))
+        ),
+    )
+    utils.transfer_state_directly(
+        square_src, square_dst, reshard_fn=mock_reshard, scan_axis=1
+    )
+    np.testing.assert_array_equal(
+        square_dst["layers_0"]["mlp"]["weight"][...], jnp.array([1.0, 3.0])
+    )
+    np.testing.assert_array_equal(
+        square_dst["layers_1"]["mlp"]["weight"][...], jnp.array([2.0, 4.0])
+    )
+
 
 class ResolveParallelismSizesTest(parameterized.TestCase):
 
