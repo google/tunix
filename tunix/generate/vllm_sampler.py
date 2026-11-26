@@ -50,12 +50,31 @@ from vllm.sampling_params import SamplingParams
 # Colocate vllm engine and worker in the main process
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
-_TRUTHY = ("1", "true", "True")
+
+_ENV_BOOLS = {"0": False, "1": True, "false": False, "true": True}
 
 
 def _env_flag(name: str, default: str = "0") -> bool:
-  """True iff the environment variable `name` is set to 1/true/True."""
-  return (os.environ.get(name, default) or default).strip() in _TRUTHY
+  """Reads environment variable `name` as a bool.
+
+  Unset or empty means `default`; 0, 1, true and false are accepted in any
+  case.
+
+  Args:
+    name: The environment variable.
+    default: The value used when `name` is unset or empty.
+
+  Returns:
+    The parsed value.
+
+  Raises:
+    ValueError: `name` holds anything else.
+  """
+  raw = os.environ.get(name, "")
+  value = _ENV_BOOLS.get((raw.strip() or default).lower())
+  if value is None:
+    raise ValueError(f"{name}={raw!r}: expected 0, 1, true or false.")
+  return value
 
 
 class _DeferHookState:
