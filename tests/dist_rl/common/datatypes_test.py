@@ -14,15 +14,51 @@
 
 """Serialization-discipline tests for the common wire DTOs."""
 
+from collections.abc import Callable
+import dataclasses
 import time
+from typing import Any
 
 from absl.testing import absltest
 import cloudpickle
-import jax
 import numpy as np
+from tunix.common import datatypes as common_datatypes
+from tunix.common import test_utils as common_test_utils
 from tunix.dist_rl.common import datatypes
+from tunix.dist_rl.common import rpc_utils
 
 WorkerState = datatypes.WorkerState
+
+
+@dataclasses.dataclass(frozen=True)
+class _HostWeightedMetric:
+  unreduced_sum: float
+  denominator: float
+  eps: float | None = None
+  min_denom: float | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class _TensorWeightedMetric:
+  unreduced_sum: common_test_utils.CustomTensor
+  denominator: common_test_utils.CustomTensor
+  eps: float | None = None
+  min_denom: float | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class _TensorMetricsBuffer:
+  id: Any
+  weighted_metrics: dict[str, _TensorWeightedMetric] = dataclasses.field(
+      default_factory=dict
+  )
+  scalar_metrics: dict[str, common_test_utils.CustomTensor] = dataclasses.field(
+      default_factory=dict
+  )
+  aggregation_fns: dict[
+      str, Callable[[common_test_utils.CustomTensor], Any]
+  ] = dataclasses.field(default_factory=dict)
+  mode: str = "train"
 
 
 def _rollout_response_dto() -> datatypes.RolloutResponse:
@@ -54,7 +90,6 @@ def _rollout_request_dto() -> datatypes.RolloutRequest:
       prompt="Solve 2+2",
       prompt_id="req-rollout-42",
       group_index=1,
-      generation_kwargs={"max_tokens": 128, "temperature": 0.5},
       max_turns=5,
       target_policy_version=3,
       metadata={"env": "math"},
@@ -72,7 +107,6 @@ class WireSerializationTest(absltest.TestCase):
     self.assertEqual(restored.prompt, original.prompt)
     self.assertEqual(restored.prompt_id, original.prompt_id)
     self.assertEqual(restored.group_index, original.group_index)
-    self.assertEqual(restored.generation_kwargs, original.generation_kwargs)
     self.assertEqual(restored.max_turns, original.max_turns)
     self.assertEqual(
         restored.target_policy_version, original.target_policy_version
@@ -113,14 +147,13 @@ class WireSerializationTest(absltest.TestCase):
     self.assertEqual(restored.metadata, original.metadata)
     self.assertIsNone(restored.error)
     self.assertIsNotNone(restored.payload)
+    assert original.payload is not None
     self.assertEqual(restored.payload.prompt_id, original.payload.prompt_id)
     self.assertEqual(restored.payload.group_index, original.payload.group_index)
     self.assertEqual(
         restored.payload.policy_version, original.payload.policy_version
     )
-    self.assertEqual(
-        restored.payload.traj.reward, original.payload.traj.reward
-    )
+    self.assertEqual(restored.payload.traj.reward, original.payload.traj.reward)
     np.testing.assert_array_equal(
         restored.payload.prompt_tokens, original.payload.prompt_tokens
     )
@@ -149,6 +182,98 @@ class WireSerializationTest(absltest.TestCase):
     self.assertTrue(restored.error.retryable)
     self.assertIsNone(restored.payload)
 
+  def test_metrics_buffer_defaults_and_wire_round_trip(self):
+    empty = datatypes.MetricsBuffer(id=-1)
+    empty_like: datatypes.MetricsBufferLike = empty
+    self.assertIsInstance(empty_like, datatypes.MetricsBufferLike)
+    self.assertEqual(empty.id, -1)
+    self.assertEqual(empty.weighted_metrics, {})
+    self.assertEqual(empty.scalar_metrics, {})
+    self.assertEqual(empty.aggregation_fns, {})
+    self.assertEqual(empty.mode, "train")
+    rpc_utils.validate_wire_safe(empty)
+    with self.assertRaises(dataclasses.FrozenInstanceError):
+      setattr(empty, "mode", "eval")
+
+    weighted: dict[str, _HostWeightedMetric] = {
+        "kl": _HostWeightedMetric(unreduced_sum=3.0, denominator=2.0, eps=1e-8)
+    }
+    scalars: dict[str, np.ndarray | np.number | float] = {
+        "loss": np.float32(0.25),
+        "grad_norm": np.array(1.5, dtype=np.float32),
+        "lr": 1e-4,
+    }
+    original = datatypes.MetricsBuffer(
+        id=7,
+        weighted_metrics=weighted,
+        scalar_metrics=scalars,
+        aggregation_fns={"grad_norm": np.mean},
+        mode="eval",
+    )
+    rpc_utils.validate_wire_safe(original)
+
+    restored = cloudpickle.loads(  # pylint: disable=g-unsafe-pickle-load
+        cloudpickle.dumps(original)
+    )
+
+    rpc_utils.validate_wire_safe(restored)
+    self.assertEqual(restored.id, 7)
+    self.assertEqual(restored.mode, "eval")
+    self.assertEqual(restored.weighted_metrics["kl"].unreduced_sum, 3.0)
+    self.assertEqual(restored.weighted_metrics["kl"].denominator, 2.0)
+    self.assertAlmostEqual(float(restored.scalar_metrics["loss"]), 0.25)
+    np.testing.assert_allclose(restored.scalar_metrics["grad_norm"], 1.5)
+    self.assertEqual(restored.scalar_metrics["lr"], 1e-4)
+    self.assertAlmostEqual(
+        float(restored.aggregation_fns["grad_norm"](np.array([1.0, 2.0]))), 1.5
+    )
+
+  def test_weighted_metric_like_covariance_and_metrics_buffer_like(self):
+    host_metric = _HostWeightedMetric(unreduced_sum=3.0, denominator=2.0)
+    host_proto: datatypes.WeightedMetricLike[np.ndarray | np.number | float] = (
+        host_metric
+    )
+    array_proto_from_host: datatypes.WeightedMetricLike[
+        common_datatypes.ArrayLike
+    ] = host_proto
+    self.assertEqual(array_proto_from_host.unreduced_sum, 3.0)
+    self.assertEqual(array_proto_from_host.denominator, 2.0)
+
+    tensor_metric = _TensorWeightedMetric(
+        unreduced_sum=common_test_utils.CustomTensor(np.array(4.0)),
+        denominator=common_test_utils.CustomTensor(np.array(2.0)),
+        eps=1e-6,
+    )
+    array_proto_from_tensor: datatypes.WeightedMetricLike[
+        common_datatypes.ArrayLike
+    ] = tensor_metric
+    self.assertEqual(array_proto_from_tensor.eps, 1e-6)
+
+    host_buf = datatypes.MetricsBuffer(
+        id=1,
+        weighted_metrics={"kl": host_metric},
+        scalar_metrics={"loss": np.float32(0.5)},
+    )
+    host_buf_like: datatypes.MetricsBufferLike = host_buf
+    self.assertIsInstance(host_buf_like, datatypes.MetricsBufferLike)
+
+    tensor_buf = _TensorMetricsBuffer(
+        id="step-1",
+        weighted_metrics={"kl": tensor_metric},
+        scalar_metrics={
+            "loss": common_test_utils.CustomTensor(np.array(0.25))
+        },
+        aggregation_fns={"loss": lambda arr: float(np.asarray(arr))},
+    )
+    tensor_buf_like: datatypes.MetricsBufferLike = tensor_buf
+    self.assertIsInstance(tensor_buf_like, datatypes.MetricsBufferLike)
+    self.assertAlmostEqual(
+        tensor_buf_like.aggregation_fns["loss"](
+            tensor_buf_like.scalar_metrics["loss"]
+        ),
+        0.25,
+    )
+
   def test_token_segment_enforces_shapes(self):
     with self.assertRaisesRegex(
         ValueError, "loss_mask shape .* != tokens shape"
@@ -166,8 +291,6 @@ class WireSerializationTest(absltest.TestCase):
           loss_mask=np.array([1, 1]),
           logps=np.array([0.5]),
       )
-
-
 
   def test_trajectory_item_to_and_from_dict(self):
     traj = {
@@ -232,15 +355,84 @@ class WireSerializationTest(absltest.TestCase):
     item = datatypes.TrajectoryItem(prompt_id="42", group_index=2, traj={})
     self.assertEqual(item.traj_id, "traj_42_g2")
 
-
   def test_trajectory_item_fields(self):
-    item = datatypes.TrajectoryItem(prompt_id="prompt_88", group_index=4, traj={})
+    item = datatypes.TrajectoryItem(
+        prompt_id="prompt_88", group_index=4, traj={}
+    )
     self.assertEqual(item.prompt_id, "prompt_88")
     self.assertEqual(item.group_index, 4)
 
     item_default = datatypes.TrajectoryItem(prompt_id="prompt_99", traj={})
     self.assertEqual(item_default.prompt_id, "prompt_99")
     self.assertEqual(item_default.group_index, 0)
+
+  def test_fault_tolerance_config_defaults_and_disabled_override(self):
+    cfg = datatypes.FaultToleranceConfig()
+    self.assertTrue(cfg.enabled)
+    self.assertEqual(cfg.max_task_retries, 1)
+    self.assertIsNone(cfg.poll_retry_budget_s)
+    self.assertEqual(cfg.min_active_rollout_ratio, 0.5)
+    self.assertEqual(cfg.min_active_rollout_grace_s, 900.0)
+    self.assertEqual(cfg.effective_max_task_retries, 1)
+    self.assertEqual(cfg.effective_poll_retry_budget_s, 60.0)
+
+    custom_enabled_cfg = datatypes.FaultToleranceConfig(
+        enabled=True,
+        min_active_rollout_ratio=0.75,
+        min_active_rollout_grace_s=0.0,
+    )
+    self.assertTrue(custom_enabled_cfg.enabled)
+    self.assertEqual(custom_enabled_cfg.effective_max_task_retries, 1)
+    self.assertEqual(custom_enabled_cfg.effective_poll_retry_budget_s, 60.0)
+    self.assertEqual(custom_enabled_cfg.min_active_rollout_ratio, 0.75)
+    self.assertEqual(custom_enabled_cfg.min_active_rollout_grace_s, 0.0)
+
+    no_guardrail_cfg = datatypes.FaultToleranceConfig(
+        min_active_rollout_ratio=None
+    )
+    self.assertIsNone(no_guardrail_cfg.min_active_rollout_ratio)
+
+    full_ratio_cfg = datatypes.FaultToleranceConfig(
+        min_active_rollout_ratio=1.0
+    )
+    self.assertEqual(full_ratio_cfg.min_active_rollout_ratio, 1.0)
+
+    disabled_default_budget = dataclasses.replace(cfg, enabled=False)
+    self.assertFalse(disabled_default_budget.enabled)
+    self.assertEqual(disabled_default_budget.effective_max_task_retries, 0)
+    self.assertEqual(
+        disabled_default_budget.effective_poll_retry_budget_s, 300.0
+    )
+
+    disabled_cfg = datatypes.FaultToleranceConfig(
+        enabled=False, max_task_retries=5, poll_retry_budget_s=15.0
+    )
+    self.assertFalse(disabled_cfg.enabled)
+    self.assertEqual(disabled_cfg.effective_max_task_retries, 0)
+    self.assertEqual(disabled_cfg.effective_poll_retry_budget_s, 15.0)
+
+    zero_budget_cfg = datatypes.FaultToleranceConfig(poll_retry_budget_s=0.0)
+    self.assertEqual(zero_budget_cfg.effective_poll_retry_budget_s, 0.0)
+
+    with self.assertRaisesRegex(ValueError, "max_task_retries must be >= 0"):
+      datatypes.FaultToleranceConfig(max_task_retries=-1)
+
+    with self.assertRaisesRegex(ValueError, "poll_retry_budget_s must be >= 0"):
+      datatypes.FaultToleranceConfig(poll_retry_budget_s=-5.0)
+
+    for bad_ratio in (0.0, -0.1, 1.01, float("nan"), float("inf")):
+      with self.subTest(bad_ratio=bad_ratio):
+        with self.assertRaisesRegex(
+            ValueError, r"min_active_rollout_ratio must be in \(0\.0, 1\.0\]"
+        ):
+          datatypes.FaultToleranceConfig(min_active_rollout_ratio=bad_ratio)
+
+    for bad_grace in (-0.1, float("-inf"), float("nan")):
+      with self.subTest(bad_grace=bad_grace):
+        with self.assertRaisesRegex(
+            ValueError, "min_active_rollout_grace_s must be >= 0"
+        ):
+          datatypes.FaultToleranceConfig(min_active_rollout_grace_s=bad_grace)
 
 
 class RLTrainerPayloadTest(absltest.TestCase):
@@ -258,31 +450,49 @@ class RLTrainerPayloadTest(absltest.TestCase):
     self.assertEqual(payload.num_segments, 3)
     self.assertEqual(payload.metadata, {"step": 1})
 
-    replaced = payload.replace(num_segments=4)
+    replaced = dataclasses.replace(payload, num_segments=4)
     self.assertEqual(replaced.num_segments, 4)
     np.testing.assert_array_equal(replaced.prompt_ids, payload.prompt_ids)
 
-  def test_rl_trainer_payload_pytree_structure(self):
-    payload = datatypes.RLTrainerPayload(
-        prompt_ids=np.array([1, 2], dtype=np.int32),
-        prompt_mask=np.ones(2, dtype=np.float32),
-        completion_ids=np.array([3, 4], dtype=np.int32),
-        completion_mask=np.ones(2, dtype=np.float32),
-        advantages=np.array([1.0, 2.0], dtype=np.float32),
-        num_segments=5,
-        metadata={"key": "value"},
+  def test_rl_trainer_payload_static_field_metadata(self):
+    static = {
+        f.name
+        for f in dataclasses.fields(datatypes.RLTrainerPayload)
+        if f.metadata == datatypes.STATIC_FIELD_METADATA
+    }
+    self.assertEqual(
+        static,
+        {
+            "num_segments",
+            "sampler_agreement_applied",
+            "routed_experts_ref",
+            "metadata",
+        },
     )
-    leaves, treedef = jax.tree_util.tree_flatten(payload)
-    # num_segments and metadata are pytree_node=False, so they are not in leaves
-    for leaf in leaves:
-      if leaf is not None:
-        self.assertIsInstance(leaf, np.ndarray)
+    self.assertEmpty([
+        f.name
+        for f in dataclasses.fields(datatypes.SFTTrainerPayload)
+        if f.metadata
+    ])
 
-    # Tree unflatten restores full object
-    restored = jax.tree_util.tree_unflatten(treedef, leaves)
-    self.assertEqual(restored.num_segments, 5)
-    self.assertEqual(restored.metadata, {"key": "value"})
-    np.testing.assert_allclose(restored.advantages, [1.0, 2.0])
+  def test_logprobs_scoring_payload_static_field_metadata(self):
+    static = {
+        f.name
+        for f in dataclasses.fields(datatypes.LogprobsScoringPayload)
+        if f.metadata == datatypes.STATIC_FIELD_METADATA
+    }
+    self.assertEqual(static, {"pad_id", "eos_id", "temperature"})
+    payload = datatypes.LogprobsScoringPayload(
+        prompt_ids=np.array([[1, 2]], dtype=np.int32),
+        completion_ids=np.array([[3, 4]], dtype=np.int32),
+        pad_id=0,
+        eos_id=2,
+        temperature=0.8,
+    )
+    self.assertEqual(payload.pad_id, 0)
+    self.assertEqual(payload.eos_id, 2)
+    self.assertEqual(payload.temperature, 0.8)
+    self.assertIsNone(payload.segment_ids)
 
   def test_rl_trainer_payload_cloudpickle_roundtrip(self):
     payload = datatypes.RLTrainerPayload(
@@ -318,24 +528,137 @@ class TokenSegmentRoutingTest(absltest.TestCase):
       )
 
 
-class GenerationArgsTest(absltest.TestCase):
+class IsValidTrajectoryTest(absltest.TestCase):
+  """Tests for datatypes.is_valid_trajectory and TrajectoryItem.is_valid."""
 
-  def test_generation_args_as_kwargs(self):
-    args = datatypes.GenerationArgs(
-        max_generation_steps=128,
-        temperature=0.7,
-        top_p=0.95,
-        return_logprobs=True,
-        return_routed_experts=True,
+  def _item(
+      self,
+      *,
+      status=datatypes.TrajectoryStatus.SUCCEEDED,
+      reward=1.0,
+      tokens=(3, 4),
+      masks=(1.0, 1.0),
+  ):
+    return datatypes.TrajectoryItem(
+        prompt_id="p0",
+        group_index=0,
+        traj={
+            "status": status,
+            "trajectory_reward": reward,
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array(tokens, dtype=np.int32),
+            "conversation_masks": np.array(masks, dtype=np.float32),
+        },
     )
-    expected = {
-        "max_generation_steps": 128,
-        "temperature": 0.7,
-        "top_p": 0.95,
-        "return_logprobs": True,
-        "return_routed_experts": True,
-    }
-    self.assertEqual(args.as_kwargs(), expected)
+
+  def test_valid_succeeded_and_max_steps_items(self):
+    self.assertTrue(self._item().is_valid)
+    self.assertTrue(
+        self._item(status=datatypes.TrajectoryStatus.MAX_STEPS_REACHED).is_valid
+    )
+
+  def test_rejects_failed_and_timeout_status(self):
+    for bad_status in (
+        datatypes.TrajectoryStatus.FAILED,
+        datatypes.TrajectoryStatus.TIMEOUT,
+        datatypes.TrajectoryStatus.ENV_TIMEOUT,
+        datatypes.TrajectoryStatus.CANCELLED,
+        "FAILED",
+        "TIMEOUT",
+        "ENV_TIMEOUT",
+        "CANCELLED",
+    ):
+      with self.subTest(status=bad_status):
+        self.assertFalse(self._item(status=bad_status).is_valid)
+
+  def test_rejects_empty_completion_or_all_zero_mask(self):
+    self.assertFalse(self._item(tokens=(), masks=()).is_valid)
+    self.assertFalse(self._item(tokens=(3, 4), masks=(0.0, 0.0)).is_valid)
+
+  def test_rejects_missing_traj_dict(self):
+    item = datatypes.TrajectoryItem(prompt_id="p0", group_index=0, traj=None)
+    self.assertFalse(item.is_valid)
+
+  def test_missing_status_defaults_to_valid_when_tokens_and_mask_present(self):
+    item = datatypes.TrajectoryItem(
+        prompt_id="p0",
+        group_index=0,
+        traj={
+            "prompt_tokens": np.array([1], dtype=np.int32),
+            "conversation_tokens": np.array([2], dtype=np.int32),
+            "conversation_masks": np.array([1.0], dtype=np.float32),
+        },
+    )
+    self.assertTrue(item.is_valid)
+
+  def test_routed_experts_ref_and_static_wire_encoding_helpers(self):
+    ref = datatypes.RoutedExpertsRef(
+        worker_id="w0", instance_id="inst0", ref_id=(5 << 32) | 9
+    )
+    self.assertEqual(ref.worker_id, "w0")
+    self.assertEqual(ref.instance_id, "inst0")
+    with self.assertRaises(ValueError):
+      datatypes.RoutedExpertsRef(worker_id="", instance_id="inst0", ref_id=1)
+    with self.assertRaises(ValueError):
+      datatypes.RoutedExpertsRef(worker_id="w0", instance_id="", ref_id=1)
+    with self.assertRaises(ValueError):
+      datatypes.RoutedExpertsRef(worker_id="w0", instance_id="inst0", ref_id=-1)
+    with self.assertRaises(ValueError):
+      datatypes.RoutedExpertsRef(
+          worker_id="w0", instance_id="inst0", ref_id=1 << 63
+      )
+    with self.assertRaises(ValueError):
+      datatypes.routed_experts_bytes_per_token(4.0, 8, "uint10")  # pyrefly: ignore[bad-argument-type]
+    with self.assertRaises(ValueError):
+      datatypes.routed_experts_bytes_per_token(4, "8", "uint10")  # pyrefly: ignore[bad-argument-type]
+
+    self.assertEqual(
+        datatypes.resolve_routed_experts_wire_encoding("auto", 128), "uint8"
+    )
+    self.assertEqual(
+        datatypes.resolve_routed_experts_wire_encoding("auto", 384), "uint10"
+    )
+    self.assertEqual(
+        datatypes.resolve_routed_experts_wire_encoding("auto", 2048), "int16"
+    )
+    with self.assertRaisesRegex(ValueError, "auto"):
+      datatypes.resolve_routed_experts_wire_encoding("auto", None)
+
+    self.assertEqual(
+        datatypes.routed_experts_bytes_per_token(61, 8, "uint10"), 610
+    )
+    self.assertEqual(
+        datatypes.routed_experts_bytes_per_token(61, 8, "uint8"), 488
+    )
+    self.assertEqual(
+        datatypes.routed_experts_bytes_per_token(61, 8, "int16"), 976
+    )
+
+    zeros_i = np.zeros((2,), dtype=np.int32)
+    zeros_f = np.zeros((2,), dtype=np.float32)
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=zeros_i,
+        prompt_mask=zeros_f,
+        completion_ids=zeros_i,
+        completion_mask=zeros_f,
+        advantages=zeros_f,
+        routed_experts_ref=ref,
+    )
+    self.assertEqual(payload.routed_experts_ref, ref)
+    with self.assertRaisesRegex(ValueError, "cannot hold both"):
+      datatypes.RLTrainerPayload(
+          prompt_ids=zeros_i,
+          prompt_mask=zeros_f,
+          completion_ids=zeros_i,
+          completion_mask=zeros_f,
+          advantages=zeros_f,
+          routed_experts=np.zeros((4, 2, 2), dtype=np.int16),
+          routed_experts_ref=ref,
+      )
+    with self.assertRaises(TypeError):
+      datatypes.WeightSyncRequest(policy_version=True)  # pyrefly: ignore[bad-argument-type]
+    with self.assertRaises(TypeError):
+      datatypes.WeightSyncRequest(min_retained_policy_version=True)  # pyrefly: ignore[bad-argument-type]
 
 
 if __name__ == "__main__":

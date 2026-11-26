@@ -1740,16 +1740,30 @@ class ProcessIdsTokenMaskTest(absltest.TestCase):
     self.assertEqual(jax_u8.dtype, jnp.int32)
     np.testing.assert_array_equal(np.asarray(jax_u8), raw_u8.astype(np.int32))
 
-    # 2. Mode 2: uint10 [B, T, L, K//4, 5]
-    raw_u10 = rng.integers(-1, 1023, size=(2, 8, 4, 8), dtype=np.int16)
-    raw_u10[0, 0, 0, 0] = 777
-    raw_u10[:, -2:] = -1
-    enc_u10 = packing.encode_routed_experts(raw_u10)
-    self.assertEqual(enc_u10.dtype, np.uint8)
-    self.assertEqual(enc_u10.ndim, 5)
-    jax_u10 = jax.jit(common.decode_routed_experts_jax)(jnp.asarray(enc_u10))
-    self.assertEqual(jax_u10.dtype, jnp.int32)
-    np.testing.assert_array_equal(np.asarray(jax_u10), raw_u10.astype(np.int32))
+    # 2. Mode 2: uint10 [B, T, L, K//4, 5] and non-div4
+    # [B, T, L, 1, ceil(10*K/8)] across all K % 4 in {0, 1, 2, 3} remainder
+    # classes (including pure tail K < 4).
+    for k_u10, expected_trailing in (
+        (1, (1, 2)),
+        (2, (1, 3)),
+        (3, (1, 4)),
+        (5, (1, 7)),
+        (6, (1, 8)),
+        (7, (1, 9)),
+        (8, (2, 5)),
+        (10, (1, 13)),
+    ):
+      raw_u10 = rng.integers(-1, 1023, size=(2, 8, 4, k_u10), dtype=np.int16)
+      raw_u10[0, 0, 0, 0] = 777
+      raw_u10[:, -2:] = -1
+      enc_u10 = packing.encode_routed_experts(raw_u10, batched=True)
+      self.assertEqual(enc_u10.dtype, np.uint8)
+      self.assertEqual(enc_u10.shape, (2, 8, 4, *expected_trailing))
+      jax_u10 = jax.jit(common.decode_routed_experts_jax)(jnp.asarray(enc_u10))
+      self.assertEqual(jax_u10.dtype, jnp.int32)
+      np.testing.assert_array_equal(
+          np.asarray(jax_u10), raw_u10.astype(np.int32)
+      )
 
     # 3. Raw int16 [B, T, L, K]
     raw_i16 = rng.integers(-1, 2048, size=(2, 8, 4, 8), dtype=np.int16)
@@ -1823,6 +1837,7 @@ class ProcessIdsTokenMaskTest(absltest.TestCase):
         (4, 128, "uint8"),
         (5, 200, "uint8"),
         (8, 512, "uint10"),
+        (10, 512, "uint10"),
     ):
       with self.subTest(top_k=top_k, mode=mode):
         raw_i16 = rng.integers(
@@ -1869,6 +1884,193 @@ class ProcessIdsTokenMaskTest(absltest.TestCase):
         np.testing.assert_array_equal(
             np.asarray(logps_compact), np.asarray(logps_i16)
         )
+
+
+class ScoreCenteringTest(parameterized.TestCase):
+
+  def test_selective_log_softmax_3d_topk_matches_per_column(self):
+    # A clip-boundary logit, NaN and +/-inf, also at the top-k ids.
+    raw_logits = [[
+        [1.0, 2.0, -1e9, 0.0],
+        [jnp.nan, -jnp.inf, 0.5, -1.0],
+        [jnp.inf, 0.0, 1.0, jnp.nan],
+    ]]
+    topk_ids = jnp.array([[[1, 2], [2, 3], [0, 3]]], dtype=jnp.int32)
+    for dtype in (jnp.float32, jnp.bfloat16):
+      with self.subTest(dtype=jnp.dtype(dtype).name):
+        logits = jnp.array(raw_logits, dtype=dtype)
+        topk_logps = common.selective_log_softmax(logits, topk_ids)
+        for k in range(topk_ids.shape[-1]):
+          np.testing.assert_allclose(
+              topk_logps[..., k],
+              common.selective_log_softmax(logits, topk_ids[..., k]),
+              rtol=1e-6,
+          )
+        grads = jax.grad(
+            lambda x: common.selective_log_softmax(x, topk_ids).sum()
+        )(logits)
+        self.assertTrue(np.isfinite(topk_logps).all())
+        self.assertTrue(np.isfinite(grads).all())
+
+  def test_chunked_topk_logps_match_unchunked(self):
+    vocab_size, hidden_dim, nan_token = 8, 4, 7
+
+    class EmbedModel(nnx.Module):
+      """Per-token model whose `nan_token` hidden state is NaN."""
+
+      def __init__(self):
+        embed = jax.random.normal(jax.random.key(0), (vocab_size, hidden_dim))
+        self.embed = nnx.Param(embed.at[nan_token].set(jnp.nan))
+        self.head = nnx.Param(
+            jax.random.normal(jax.random.key(1), (hidden_dim, vocab_size))
+        )
+
+      def compute_final_logits(self, hidden):
+        return hidden @ self.head[...]
+
+      def __call__(
+          self, tokens, positions, cache, attention_mask, skip_lm_head=False
+      ):
+        del positions, cache, attention_mask
+        hidden = self.embed[...][tokens]
+        logits = hidden if skip_lm_head else self.compute_final_logits(hidden)
+        return logits, None
+
+    graphdef, state = nnx.split(EmbedModel())
+    prompt_tokens = jnp.array([[1, 2], [3, 4]], dtype=jnp.int32)
+    # The completion length (5) is not a multiple of the chunk sizes below. In
+    # row 1 the NaN hidden state of `nan_token` predicts completion position 2.
+    completion_tokens = jnp.array(
+        [[1, 2, 3, 4, 5], [6, nan_token, 1, 2, 3]], dtype=jnp.int32
+    )
+    # Column 0 is the sampled token itself.
+    topk_token_ids = (
+        jnp.stack([completion_tokens + k for k in range(3)], axis=-1)
+        % vocab_size
+    )
+    finite = np.ones(completion_tokens.shape, dtype=bool)
+    finite[1, 2] = False
+
+    def run(state, chunk_size, return_entropy=False, stop_gradient=True):
+      return common.compute_per_token_logps(
+          graphdef,
+          state,
+          prompt_tokens,
+          completion_tokens,
+          pad_id=0,
+          eos_id=-1,
+          stop_gradient=stop_gradient,
+          return_entropy=return_entropy,
+          temperature=0.7,
+          chunk_size=chunk_size,
+          topk_token_ids=topk_token_ids,
+      )
+
+    (ref_logps, ref_entropy), ref_topk = run(state, 0, return_entropy=True)
+    np.testing.assert_allclose(ref_topk[..., 0], ref_logps, rtol=1e-6)
+    for chunk_size in (2, 8):
+      with self.subTest(chunk_size=chunk_size):
+        logps, topk = run(state, chunk_size)
+        (_, entropy), topk_with_entropy = run(
+            state, chunk_size, return_entropy=True
+        )
+        np.testing.assert_array_equal(topk_with_entropy, topk)
+        for out, ref in ((logps, ref_logps), (entropy, ref_entropy)):
+          self.assertTrue(np.isfinite(out).all())
+          np.testing.assert_allclose(out[finite], ref[finite], atol=1e-5)
+        np.testing.assert_allclose(topk[finite], ref_topk[finite], atol=1e-5)
+        # The non-finite hidden state is zeroed, so that position is uniform.
+        np.testing.assert_allclose(
+            topk[1, 2], np.full(3, -np.log(vocab_size)), rtol=1e-5
+        )
+
+    grads = jax.grad(lambda s: run(s, 2, stop_gradient=False)[1].sum())(state)
+    for grad in jax.tree.leaves(grads):
+      self.assertTrue(np.isfinite(grad).all())
+
+  @parameterized.parameters(
+      dict(sampler_is=None, threshold=2.0),
+      dict(sampler_is="token", threshold=2.0),
+      dict(sampler_is="token", threshold=0.5),
+      dict(sampler_is="token", threshold=None),
+  )
+  def test_score_centering_matches_full_vocab_gradient(
+      self, sampler_is, threshold
+  ):
+    vocab_size, top_k = 16, 4
+    rng = np.random.default_rng(42)
+    z_q = jnp.asarray(rng.normal(size=(1, 2, vocab_size)), dtype=jnp.float32)
+    z_p = jnp.asarray(rng.normal(size=(1, 2, vocab_size)), dtype=jnp.float32)
+    q_logps = jax.nn.log_softmax(z_q, axis=-1)
+    topk_q_logps, topk_ids = jax.lax.top_k(q_logps, top_k)
+
+    def topk_loss(logits):
+      trainer_topk_logps = common.selective_log_softmax(logits, topk_ids)
+      correction, _ = common.compute_score_centering_correction(
+          trainer_topk_logps, topk_q_logps, sampler_is, threshold, eps=1e-12
+      )
+      return correction.sum()
+
+    def full_vocab_loss(logits):
+      # Expected (clipped-IS-weighted) score under q_hat, which keeps the
+      # sampler's top-k probabilities and rescales the trainer's tail.
+      p_logps = jax.nn.log_softmax(logits, axis=-1)
+      p = jax.lax.stop_gradient(jnp.exp(p_logps))
+      q = jnp.exp(q_logps)
+      head = (jnp.arange(vocab_size) == topk_ids[..., None]).any(axis=-2)
+      rho = (1 - jnp.where(head, q, 0).sum(-1, keepdims=True)) / (
+          1 - jnp.where(head, p, 0).sum(-1, keepdims=True)
+      )
+      q_hat = jnp.where(head, q, rho * p)
+      w = jnp.where(head, p / q, 1 / rho)
+      if sampler_is == "token":
+        w = jnp.minimum(w, jnp.inf if threshold is None else threshold)
+      else:
+        w = jnp.ones_like(w)
+      return jnp.sum(jax.lax.stop_gradient(q_hat * w) * p_logps)
+
+    np.testing.assert_allclose(
+        jax.grad(topk_loss)(z_p),
+        jax.grad(full_vocab_loss)(z_p),
+        rtol=1e-5,
+        atol=1e-6,
+    )
+
+  def test_score_centering_padded_slots_and_weighted_metrics(self):
+    # Position 0 has two valid slots (0.6 + 0.2 = 0.8); position 1 is all -inf
+    # padding despite completion_mask=1 and must be excluded from denominators.
+    sampler_topk_logps = jnp.array(
+        [[[jnp.log(0.6), jnp.log(0.2), -jnp.inf], [-jnp.inf] * 3]],
+        dtype=jnp.float32,
+    )
+    topk_ids = jnp.array([[[4, 7, 0], [0, 0, 0]]], dtype=jnp.int32)
+    mask = jnp.array([[1.0, 1.0]], dtype=jnp.float32)
+
+    def run(logits, m):
+      trainer_topk_logps = common.selective_log_softmax(logits, topk_ids)
+      return common.compute_score_centering_correction(
+          trainer_topk_logps,
+          sampler_topk_logps,
+          "token",
+          2.0,
+          eps=1e-6,
+          completion_mask=m,
+      )
+
+    logits = jnp.ones((1, 2, 16), dtype=jnp.float32)
+    value, grads = jax.value_and_grad(lambda x: run(x, mask)[0].sum())(logits)
+    self.assertTrue(np.isfinite(value) and np.isfinite(grads).all())
+
+    _, stats = run(logits, mask)
+    hm_q = stats["score_centering/head_mass_q_mean"]
+    self.assertAlmostEqual(float(hm_q.denominator), 1.0)
+    self.assertAlmostEqual(float(hm_q.compute()), 0.8, places=5)
+
+    _, empty_stats = run(logits, jnp.zeros_like(mask))
+    combined = common.global_weighted_mean(
+        [hm_q, empty_stats["score_centering/head_mass_q_mean"]]
+    )
+    self.assertAlmostEqual(float(combined), 0.8, places=5)
 
 
 if __name__ == "__main__":

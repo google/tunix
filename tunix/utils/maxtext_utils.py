@@ -16,9 +16,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 import dataclasses
 import logging
 import os
+import types
 from typing import Any
 
 
@@ -62,6 +64,57 @@ def maxtext_modules():
   return pyconfig, maxtext_engine, maxtext_utils
 
 
+# TODO(tunix-dev): [legacy-maxtext-a2cf3bc8b] Once pinned MaxText container
+# images predating `rollout_weight_dtype` (e.g. `--maxtext-commit=a2cf3bc8b` /
+# `68792f55`) are retired, remove all legacy-MaxText compatibility shims:
+#   1. Delete `_maxtext_get_weight_dtype()`, `_pyconfig_supports_field()`,
+#      `_ROLLOUT_DTYPE_MODULE_ALIASES`, and the top-level `Mapping` and `types`
+#      imports.
+#   2. In `build_maxtext_config()`, remove `supports_rollout_weight_dtype`
+#      gating (and its fallback `logging.info`) and emit
+#      `f"rollout_weight_dtype={DEFAULT_ROLLOUT_WEIGHT_DTYPE}"` unconditionally.
+#   3. Delete `_configure_target_free_rollout_dtypes()` and remove its call from
+#      `create_maxtext_engine()`.
+#   4. In `maxtext_utils_test.py`, replace the `[legacy-maxtext-a2cf3bc8b]`
+#      compatibility tests (and remove `jax`/`jnp` test deps in `utils/BUILD` if
+#      unused) with a direct assertion that `build_maxtext_config()` emits
+#      `rollout_weight_dtype=bfloat16`.
+def _maxtext_get_weight_dtype():
+  """Returns MaxText's `common_types.get_weight_dtype` helper when available."""
+  try:
+    from maxtext.common import common_types  # pylint: disable=g-import-not-at-top
+
+    return getattr(common_types, "get_weight_dtype", None)
+  except (ImportError, ModuleNotFoundError):
+    return None
+
+
+def _pyconfig_supports_field(pyconfig: Any, field_name: str) -> bool:
+  """Returns whether `pyconfig`'s `MaxTextConfig` schema declares `field_name`.
+
+  Inspects `pyconfig.types.MaxTextConfig.model_fields` (the schema dictionary
+  `pyconfig` validates CLI keys against) so older pinned MaxText installs that
+  predate `field_name` skip it up front without triggering
+  `pyconfig._handle_config_exception` (which writes `/dev/termination-log` and
+  calls `sys.exit(2)` outside test runners). Returns `True` when `pyconfig` is
+  a mock or pre-pydantic install without a `Mapping` `model_fields`.
+
+  Args:
+    pyconfig: Imported MaxText `pyconfig` module (or test double).
+    field_name: Name of the `MaxTextConfig` field to check.
+
+  Returns:
+    `True` if `field_name` is declared on `MaxTextConfig` (or if `model_fields`
+    is unavailable), `False` otherwise.
+  """
+  cfg_types = getattr(pyconfig, "types", None)
+  cfg_cls = getattr(cfg_types, "MaxTextConfig", None)
+  model_fields = getattr(cfg_cls, "model_fields", None)
+  if isinstance(model_fields, Mapping):
+    return field_name in model_fields
+  return True
+
+
 def get_tokenizer_pad_id(
     model_id: str,
     tokenizer_path: str = "",
@@ -85,6 +138,25 @@ VLLM_MAXTEXT_HF_OVERRIDES = {"architectures": ["MaxTextForCausalLM"]}
 
 DEFAULT_TRAINER_WEIGHT_DTYPE = "float32"
 DEFAULT_ROLLOUT_WEIGHT_DTYPE = "bfloat16"
+
+# TODO(tunix-dev): [legacy-maxtext-a2cf3bc8b] Delete with
+# `_configure_target_free_rollout_dtypes` once pinned MaxText images predating
+# `rollout_weight_dtype` are retired.
+# Maps source tree path segments onto the canonical module names that MaxText
+# passes to `common_types.get_weight_dtype(config, module_name)` when building
+# the rollout model (`decoder_norm`, `query_norm`, and `key_norm` read
+# `config.weight_dtype` directly and are intentionally omitted).
+_ROLLOUT_DTYPE_MODULE_ALIASES = {
+    "norm": "norm",
+    "input_layernorm": "norm",
+    "post_attention_layernorm": "norm",
+    "gate": "gate",
+    "shared_expert_gate": "shared_expert_gate",
+    "A_log": "A_log",
+    "dt_bias": "dt_bias",
+    "conv1d": "conv1d",
+    "logits_dense": "logits_dense",
+}
 
 
 def build_vllm_maxtext_additional_config(
@@ -142,6 +214,19 @@ def build_vllm_maxtext_additional_config(
   return {"maxtext_config": overrides}
 
 
+def _d2h_concurrent_gb_argv(gb: int | None) -> list[str]:
+  """Formats MaxText's checkpoint D2H cap CLI argument after checking `gb`."""
+  if gb is None:
+    return []
+  if isinstance(gb, bool) or not isinstance(gb, int):
+    raise TypeError(
+        f"device_host_concurrent_gb must be an int or None, got {gb!r}."
+    )
+  if gb <= 0:
+    raise ValueError(f"device_host_concurrent_gb must be positive, got {gb}.")
+  return [f"checkpoint_storage_device_host_concurrent_gb={gb}"]
+
+
 def build_maxtext_config(
     model_name: str,
     worker_id: str = "",
@@ -172,6 +257,12 @@ def build_maxtext_config(
     adamw_options: AdamWOptions | None = None,
     weight_dtype: str = DEFAULT_TRAINER_WEIGHT_DTYPE,
     attention: str = "",
+    device_host_concurrent_gb: int | None = None,
+    extra_flags: Sequence[str] = (),
+    skip_step_on_spikes: bool = False,
+    skip_step_on_nan: bool | None = None,
+    skip_step_interval: int = 128,
+    skip_step_scaling_factor: float = 6.0,
 ) -> Any:
   """Builds the MaxText HyperParameters the training engine runs on.
 
@@ -179,6 +270,12 @@ def build_maxtext_config(
     mesh_context: ICI context-parallelism degree; when > 1, disables
       `context_parallel_load_balance` because Tunix RL feeds batches in natural
       token order rather than MaxText's grain `DUAL_CHUNK_SWAP` order.
+    device_host_concurrent_gb: Caps the GB that checkpoint saves copy from
+      device to host at once (`checkpoint_storage_device_host_concurrent_gb`);
+      None keeps MaxText's default.
+    extra_flags: Extra MaxText config arguments, each `key=value` (a
+      ValueError otherwise), appended last so they override the ones built
+      here.
   """
   pyconfig, _, _ = maxtext_modules()
 
@@ -220,6 +317,17 @@ def build_maxtext_config(
     raise ValueError(
         "max_seq_token_per_tpu must be non-negative, got"
         f" {max_seq_token_per_tpu}"
+    )
+  if isinstance(skip_step_interval, bool) or skip_step_interval <= 0:
+    raise ValueError(
+        f"skip_step_interval must be > 0, got {skip_step_interval!r}."
+    )
+  if isinstance(skip_step_scaling_factor, bool) or not (
+      0 < skip_step_scaling_factor < float("inf")
+  ):
+    raise ValueError(
+        "skip_step_scaling_factor must be finite and > 0, got"
+        f" {skip_step_scaling_factor!r}."
     )
 
   num_data_shards = mesh_fsdp * mesh_expert
@@ -461,6 +569,12 @@ def build_maxtext_config(
         f"{adamw_options.gradient_clipping_threshold}",
     ])
 
+  # TODO(tunix-dev): [legacy-maxtext-a2cf3bc8b] Remove
+  # `_pyconfig_supports_field` gating and emit `rollout_weight_dtype`
+  # unconditionally once legacy pinned MaxText images are retired.
+  supports_rollout_weight_dtype = _pyconfig_supports_field(
+      pyconfig, "rollout_weight_dtype"
+  )
   argv.extend([
       "scan_layers=True",
       "convert_checkpoint_if_possible=False",
@@ -503,7 +617,11 @@ def build_maxtext_config(
       f"warmup_steps_fraction={warmup_steps_fraction}",
       "dtype=bfloat16",
       f"weight_dtype={weight_dtype}",
-      f"rollout_weight_dtype={DEFAULT_ROLLOUT_WEIGHT_DTYPE}",
+      *(
+          [f"rollout_weight_dtype={DEFAULT_ROLLOUT_WEIGHT_DTYPE}"]
+          if supports_rollout_weight_dtype
+          else []
+      ),
       "grad_dtype=float32",
       "enable_tensorboard=False",
       "record_internal_nn_metrics=False",
@@ -518,6 +636,28 @@ def build_maxtext_config(
           else []
       ),
   ])
+  if skip_step_on_spikes:
+    if not _pyconfig_supports_field(pyconfig, "skip_step_on_spikes"):
+      raise ValueError(
+          "skip_step_on_spikes=True requires a MaxText version that defines"
+          " 'skip_step_on_spikes' on MaxTextConfig."
+      )
+    argv.extend([
+        "skip_step_on_spikes=True",
+        f"skip_step_interval={skip_step_interval}",
+        f"skip_step_scaling_factor={skip_step_scaling_factor}",
+    ])
+  if skip_step_on_nan is not None:
+    if not _pyconfig_supports_field(pyconfig, "skip_step_on_nan"):
+      raise ValueError(
+          "skip_step_on_nan requires a MaxText version that defines"
+          " 'skip_step_on_nan' on MaxTextConfig."
+      )
+    argv.append(
+        "skip_step_on_nan=True"
+        if skip_step_on_nan
+        else "skip_step_on_nan=False"
+    )
   # Pathways persistence: let the TPU workers write the checkpoint themselves
   # The persistence handler rejects the OCDBT/zarr3 layout MaxText writes by
   # default (see maxtext/common/checkpoint_context.py), so both must be off
@@ -531,29 +671,27 @@ def build_maxtext_config(
         "checkpoint_storage_use_zarr3=false",
     ])
 
-  _d2h_gb = os.environ.get("CKPT_D2H_CONCURRENT_GB", "").strip()
-  if _d2h_gb:
-    logging.info(
-        "CKPT_D2H_CONCURRENT_GB=%s; overriding "
-        "checkpoint_storage_device_host_concurrent_gb.",
-        _d2h_gb,
-    )
-    argv.append(f"checkpoint_storage_device_host_concurrent_gb={_d2h_gb}")
+  argv.extend(_d2h_concurrent_gb_argv(device_host_concurrent_gb))
 
-  _extra = os.environ.get("MAXTEXT_EXTRA_FLAGS", "").strip()
-  if _extra:
-    _pairs = [tok for tok in _extra.split() if tok]
-    _bad = [tok for tok in _pairs if "=" not in tok]
-    if _bad:
+  if extra_flags:
+    malformed = [flag for flag in extra_flags if "=" not in flag]
+    if malformed:
       raise ValueError(
-          "MAXTEXT_EXTRA_FLAGS entries must be key=value, got: "
-          f"{' '.join(_bad)}"
+          f"extra_flags entries must be key=value, got: {' '.join(malformed)}"
       )
+    # Log tooling parses this line from the trainer logs; keep its format.
     logging.info(
-        "MAXTEXT_EXTRA_FLAGS adding %d flag(s): %s", len(_pairs), _pairs
+        "MAXTEXT_EXTRA_FLAGS adding %d flag(s): %s",
+        len(extra_flags),
+        list(extra_flags),
     )
-    argv.extend(_pairs)
+    argv.extend(extra_flags)
 
+  if not supports_rollout_weight_dtype:
+    logging.info(
+        "Installed MaxText does not declare 'rollout_weight_dtype'; omitting"
+        " CLI override."
+    )
   logging.info("MaxText config argv: %s", argv)
   return pyconfig.initialize(argv)
 
@@ -587,6 +725,148 @@ def log_param_shapes(model: Any) -> None:
   logging.info("MaxText model has %d parameter arrays.", len(shapes))
 
 
+def _configure_target_free_rollout_dtypes(
+    engine: Any, maxtext_config: Any
+) -> None:
+  """Aligns target-free weight conversion dtypes with the installed MaxText.
+
+  Trainer `weight_dtype=float32` keeps master weights and AdamW moments in FP32
+  while the vLLM rollout model uses `DEFAULT_ROLLOUT_WEIGHT_DTYPE` (`bfloat16`).
+  Older pinned MaxText container images (predating `rollout_weight_dtype`, such
+  as images built for the `a2cf3bc8b` 35B recipe) default
+  `MaxTextToMaxTextConverter.target_dtype` to the trainer's `weight_dtype`,
+  unconditionally retain raw FP32 source dtypes on `"gate"`/`"router"` paths in
+  `_execute_group_target_free` even when `float32_gate_logits=False`, and retain
+  the `float32_gate_logits` FP32 exceptions in `common_types.get_weight_dtype`.
+
+  We probe `common_types.get_weight_dtype` once at engine creation time (relying
+  on the recipe invariant that trainer `maxtext_config.float32_gate_logits`
+  matches the rollout node's `--maxtext_float32_gate_logits`). On upstream
+  MaxText `main`, where `maxtext_config` declares `rollout_weight_dtype`,
+  `fp32_modules` is empty, and `MaxTextToMaxTextConverter` already casts via
+  `_resolve_target_dtype`, this function is a strict no-op.
+
+  TODO(tunix-dev): [legacy-maxtext-a2cf3bc8b] Delete this shim (see cleanup
+  manifest above `_maxtext_get_weight_dtype`) once older pinned MaxText images
+  predating `rollout_weight_dtype` are retired.
+
+  Args:
+    engine: Initialized `MaxTextTrainingEngine` instance.
+    maxtext_config: Trainer `HyperParameters` configuration.
+  """
+  # pylint: disable=protected-access
+  direct_converter: Any = getattr(
+      getattr(engine, "_weight_converter", None), "_direct", None
+  )
+  if direct_converter is None:
+    return
+
+  orig_exec_target_free = getattr(
+      direct_converter, "_execute_group_target_free", None
+  )
+  if not callable(orig_exec_target_free):
+    logging.warning(
+        "MaxText direct weight converter has no callable"
+        " '_execute_group_target_free'; skipping target-free rollout dtype"
+        " shim."
+    )
+    return
+
+  import jax  # pylint: disable=g-import-not-at-top
+  from jax import numpy as jnp  # pylint: disable=g-import-not-at-top
+
+  # Explicit type check avoids passing auto-created `MagicMock` attributes into
+  # `jnp.dtype(...)` in unit tests that pass a bare `MagicMock` config.
+  cfg_rollout_dtype = getattr(maxtext_config, "rollout_weight_dtype", None)
+  has_rollout_weight_dtype = (
+      isinstance(cfg_rollout_dtype, jnp.dtype)
+      or (isinstance(cfg_rollout_dtype, str) and bool(cfg_rollout_dtype))
+      or (
+          isinstance(cfg_rollout_dtype, type)
+          and issubclass(cfg_rollout_dtype, jnp.generic)
+      )
+  )
+  if has_rollout_weight_dtype:
+    rollout_dtype = jnp.dtype(cfg_rollout_dtype)
+  else:
+    # Mirrors `build_vllm_maxtext_additional_config`'s rollout `weight_dtype`.
+    rollout_dtype = jnp.dtype(DEFAULT_ROLLOUT_WEIGHT_DTYPE)
+  direct_converter.target_dtype = rollout_dtype
+
+  get_weight_dtype = _maxtext_get_weight_dtype()
+  if not callable(get_weight_dtype):
+    return
+
+  # Invariant: trainer `maxtext_config.float32_gate_logits` must match the
+  # rollout worker's `--maxtext_float32_gate_logits` flag so both sides agree on
+  # per-module storage dtypes during target-free Raiden weight sync.
+  fp32_gate_logits = bool(
+      getattr(maxtext_config, "float32_gate_logits", False)
+  )
+  rollout_probe = types.SimpleNamespace(
+      weight_dtype=rollout_dtype,
+      float32_gate_logits=fp32_gate_logits,
+  )
+  fp32_modules = frozenset(
+      module_name
+      for module_name in set(_ROLLOUT_DTYPE_MODULE_ALIASES.values())
+      if jnp.dtype(get_weight_dtype(rollout_probe, module_name))
+      != rollout_dtype
+  )
+  if has_rollout_weight_dtype and not fp32_modules:
+    return
+
+  logging.info(
+      "Installing target-free rollout dtype shim (rollout_dtype=%s,"
+      " float32_gate_logits=%s, fp32_modules=%s).",
+      rollout_dtype,
+      fp32_gate_logits,
+      sorted(fp32_modules),
+  )
+
+  def _exec_target_free_rollout_dtypes(group: Any, src_flat: Any) -> Any:
+    source_keys = getattr(group, "source_keys", ())
+    keep_fp32 = (
+        bool(fp32_modules)
+        and bool(source_keys)
+        and any(
+            _ROLLOUT_DTYPE_MODULE_ALIASES.get(str(part)) in fp32_modules
+            for part in tuple(source_keys[0])
+        )
+    )
+    prev_target_dtype = direct_converter.target_dtype
+    desired_dtype = jnp.float32 if keep_fp32 else jnp.dtype(prev_target_dtype)
+    direct_converter.target_dtype = (
+        jnp.float32 if keep_fp32 else prev_target_dtype
+    )
+    try:
+      outs = orig_exec_target_free(group, src_flat)
+    finally:
+      direct_converter.target_dtype = prev_target_dtype
+    if getattr(group, "quantize_to_fp8", False):
+      return outs
+    fixed = []
+    for tgt_key, val in outs:
+      if (
+          hasattr(val, "dtype")
+          and jnp.issubdtype(val.dtype, jnp.floating)
+          and val.dtype != desired_dtype
+      ):
+        if isinstance(val, jax.ShapeDtypeStruct):
+          val = jax.ShapeDtypeStruct(
+              val.shape,
+              desired_dtype,
+              sharding=getattr(val, "sharding", None),
+          )
+        else:
+          val = val.astype(desired_dtype)
+      fixed.append((tgt_key, val))
+    return fixed
+
+  direct_converter._execute_group_target_free = _exec_target_free_rollout_dtypes
+  # pylint: enable=protected-access
+
+
 def create_maxtext_engine(
     maxtext_config: Any,
     mesh: Any,
@@ -606,6 +886,10 @@ def create_maxtext_engine(
         wrap_with_tunix_adapter=wrap_with_tunix_adapter,
         tokenizer_pad_id=tokenizer_pad_id,
     )
+
+  # TODO(tunix-dev): [legacy-maxtext-a2cf3bc8b] Remove once legacy pinned
+  # MaxText images predating `rollout_weight_dtype` are retired.
+  _configure_target_free_rollout_dtypes(engine, maxtext_config)
 
   model_type = type(engine.model).__name__
   logging.info(

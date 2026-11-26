@@ -29,7 +29,6 @@ import enum
 from typing import Literal, SupportsFloat
 
 import numpy as np
-from tunix.dist_rl.rollout import sampler as sampler_lib
 
 
 class RequestStatus(enum.Enum):
@@ -56,6 +55,51 @@ _DONE_STATUSES = frozenset({
 
 FinishReason = Literal['stop', 'length']
 
+_FINISH_REASONS: dict[RequestStatus, FinishReason] = {
+    RequestStatus.FINISHED_EOS: 'stop',
+    RequestStatus.FINISHED_LENGTH: 'length',
+}
+
+
+@dataclasses.dataclass(kw_only=True)
+class SamplingParams:
+  """Engine-neutral sampling configuration for a generation request.
+
+  Attributes:
+    max_tokens: Maximum number of tokens to generate.
+    temperature: Softmax temperature applied while sampling. Kept explicit so it
+      can be carried through to any later log-probability scoring, ensuring the
+      sampling distribution and the scoring distribution match.
+    top_p: Nucleus sampling probability threshold.
+    top_k: Top-k sampling candidate count threshold.
+    seed: Random seed for reproducible generation.
+    return_logprobs: Whether to record per-token log probabilities.
+    return_logits: Whether to record per-token output logits.
+    return_routed_experts: Whether to record the MoE expert ids each token was
+      routed through, so training can replay them instead of re-routing. Only
+      meaningful for MoE models on a backend that supports capture; the backend
+      must also be configured to capture, since it is an engine-level setting.
+    routed_experts_prompt_start: Token index in prompt from which to start
+      returning routing data. In multi-turn rollouts, set to the cumulative
+      length of previously processed tokens to return only newly prefilled
+      environment tokens and completion.
+    beam_size: Beam width for beam search decoding.
+    cache_salt: Optional salt string for isolating KV prefix cache entries
+      (e.g., pinned to Turn-1 policy version during partial rollout).
+  """
+
+  max_tokens: int = 64
+  temperature: float = 1.0
+  top_p: float | None = None
+  top_k: int | None = None
+  seed: int | None = None
+  return_logprobs: bool = False
+  return_logits: bool = False
+  return_routed_experts: bool = False
+  routed_experts_prompt_start: int = 0
+  beam_size: int | None = None
+  cache_salt: str | None = None
+
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class EngineRequest:
@@ -66,7 +110,10 @@ class EngineRequest:
   # The prompt tokens.
   prompt_token_ids: list[int]
   # Sampling parameters for the request.
-  sampling_params: sampler_lib.SamplingParams
+  sampling_params: SamplingParams
+  # Requests with the same route key run in the same data parallel rank, and
+  # so can share its prefix cache. None routes the request by its id.
+  route_key: int | str | None = None
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -96,7 +143,7 @@ class RequestState:
       self,
       req_id: str,
       prompt_token_ids: list[int],
-      sampling_params: sampler_lib.SamplingParams,
+      sampling_params: SamplingParams,
   ):
     # Unique identifier of the request.
     self._request_id = req_id
@@ -117,6 +164,11 @@ class RequestState:
     self.num_computed_tokens = 0
     # Number of tokens being sampled by an in-flight model runner step.
     self.num_in_flight_tokens = 0
+    # Number of tokens an in-flight step was sampling when the request was
+    # preempted. They are still appended once that step's output arrives, but
+    # until then the request must not sample: it would sample the same
+    # positions a second time.
+    self.num_stale_output_tokens = 0
     # Whether the request is scheduled as a decode step.
     self.is_decode = False
     # Whether the request is scheduled as a chunked prefill step.
@@ -137,3 +189,25 @@ class RequestState:
   @property
   def request_id(self) -> str:
     return self._request_id
+
+  def to_response(self) -> EngineResponse:
+    """Returns the output of the finished request."""
+    generated = self.token_ids[self.prompt_length :]
+    return EngineResponse(
+        request_id=self._request_id,
+        prompt_token_ids=np.asarray(
+            self.token_ids[: self.prompt_length], dtype=np.int32
+        ),
+        token_ids=np.asarray(generated, dtype=np.int32),
+        logprobs=(
+            np.asarray(self.logprobs, dtype=np.float32)
+            if self.sampling_params.return_logprobs
+            else None
+        ),
+        logits=(
+            np.asarray(self.logits)
+            if self.sampling_params.return_logits
+            else None
+        ),
+        finish_reason=_FINISH_REASONS[self.status],
+    )

@@ -1,5 +1,7 @@
 """Tests for rpc_utils."""
 
+import types
+
 from absl.testing import absltest
 import jax.numpy as jnp
 import numpy as np
@@ -67,6 +69,20 @@ class RpcUtilsTest(absltest.TestCase):
   def test_validate_wire_safe_accepts_sets(self):
     test_set = {1, 2, "three"}
     rpc_utils.validate_wire_safe(test_set)  # Should not raise
+
+  def test_validate_wire_safe_accepts_numpy_scalars_and_mappings(self):
+    buf = datatypes.MetricsBuffer(
+        id=1,
+        scalar_metrics=types.MappingProxyType({"loss": np.float32(0.5)}),
+    )
+    rpc_utils.validate_wire_safe(buf)
+
+    bad_buf = datatypes.MetricsBuffer(
+        id=1,
+        scalar_metrics=types.MappingProxyType({"loss": jnp.asarray(0.5)}),
+    )
+    with self.assertRaises(TypeError):
+      rpc_utils.validate_wire_safe(bad_buf)
 
 
 if __name__ == "__main__":

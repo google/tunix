@@ -37,6 +37,7 @@ from tunix.dist_rl.orchestrator import worker_registry
 from tunix.dist_rl.rollout import inprocess_vllm_sampler
 from tunix.dist_rl.rollout import sampler as base_sampler_lib
 from tunix.dist_rl.rollout import vanilla_sampler
+from tunix.dist_rl.testing import worker_registry_testing
 from tunix.dist_rl.train import peft_trainer_v2
 from tunix.dist_rl.weight_sync import raiden_handler
 from tunix.dist_rl.weight_sync import raiden_synchronizer
@@ -190,10 +191,33 @@ class NeutralContractTest(absltest.TestCase):
     self.assertFalse(hasattr(weight_sync, "RaidenHandler"))
     self.assertFalse(hasattr(weight_sync, "RaidenTransferOptions"))
     self.assertFalse(hasattr(weight_sync, "raiden_controller"))
+    self.assertFalse(hasattr(weight_sync, "create_weight_synchronizer"))
+
+  def test_gcs_mode_and_artifact_metadata_roundtrip(self):
+    self.assertEqual(weight_sync.WeightSyncMode.GCS.value, "gcs")
+    with self.assertRaisesRegex(ValueError, "artifact_uri"):
+      weight_sync.WorkUnitMetadata(
+          unit=weight_sync.WorkUnitId("trainer"), artifact_uri="   "
+      )
+
+    meta = weight_sync.dict_to_metadata({
+        "unit": {"job_name": "trainer"},
+        "artifact_uri": "gs://bucket/step_1_r1",
+        "checksums": {"w": 2.0, "__grand_total__": 2.0, "__tensor_count__": 1},
+    })
+    self.assertEqual(meta.artifact_uri, "gs://bucket/step_1_r1")
+    self.assertEqual(meta.checksums["__tensor_count__"], 1)
+    self.assertIsInstance(hash(meta), int)
+    # A dict-valued `checksums` must not make the frozen metadata unhashable.
+    without_checksums = dataclasses.replace(meta, checksums=None)
+    self.assertEqual(hash(meta), hash(without_checksums))
+    self.assertNotEqual(meta, without_checksums)
 
 
 class MockVllmSampler(base_sampler.BaseSampler):
   """Mock vLLM sampler exposing VllmToyTransformer state and update_params."""
+
+  model_runner = None
 
   def __init__(self, config: test_common.ModelConfig, *, rngs: nnx.Rngs):
     self._transformer = test_common.VllmToyTransformer(config, rngs=rngs)
@@ -223,7 +247,6 @@ class MockVllmSampler(base_sampler.BaseSampler):
         dst_state=self._transformer_state,
         key_mappings=test_common.TOY_TRANSFORMER_TO_HF_MAPPINGS,
         reshard_fn=reshard.reshard_pytree,
-        rollout_engine="vllm_jax",
     )
     self._transformer_state = converted
 
@@ -246,6 +269,12 @@ class MockVllmSampler(base_sampler.BaseSampler):
         self._transformer_state,
         is_leaf=lambda x: isinstance(x, nnx.Variable),
     )
+
+  def pause(self, mode: str = "keep", *, clear_cache: bool = False) -> None:
+    del mode, clear_cache
+
+  def resume(self) -> None:
+    pass
 
   def stop(self) -> None:
     pass
@@ -310,10 +339,10 @@ def _trainer_process_fn(
 def _rollout_process_fn(
     conn,
     model_config_kwargs: dict[str, Any],
+    sampler_type: str,
     adapter_config_kwargs: dict[str, Any],
 ):
   model_config = test_common.ModelConfig(**model_config_kwargs)
-  sampler_type = adapter_config_kwargs.get("sampler_type", "inprocess_vllm")
   delegate = raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
   adapter_config = RolloutConfig(**adapter_config_kwargs)
 
@@ -333,6 +362,7 @@ def _rollout_process_fn(
     mock_vllm_sampler = MockVllmSampler(model_config, rngs=nnx.Rngs(1))
     adapter = inprocess_vllm_sampler.InprocessVllmSampler(
         server_id="vllm_sampler_coord_0",
+        tokenizer=test_common.MockVocab(),
         config=adapter_config,
         raiden_sync_delegate=delegate,
     )
@@ -578,7 +608,8 @@ class _RemoteWorkerProxy(abstract_worker.Worker):
         "Lifecycle methods are not used in WeightSyncE2ETest."
     )
 
-  def stop(self) -> datatypes.Response:
+  def stop(self, *, abort: bool = False) -> datatypes.Response:
+    del abort
     raise NotImplementedError(
         "Lifecycle methods are not used in WeightSyncE2ETest."
     )
@@ -710,18 +741,17 @@ class WeightSyncE2ETest(absltest.TestCase):
         self.model_config, rngs=nnx.Rngs(1)
     )
 
-  def test_fallback_mode_weight_sync_with_vanilla_adapter(self):
-    """Verifies Fallback mode weight transfer from PeftTrainer to VanillaSampler."""
+  def test_in_memory_mode_weight_sync_with_vanilla_adapter(self):
+    """Verifies IN_MEMORY mode weight transfer from PeftTrainer to VanillaSampler."""
     adapter_config = RolloutConfig(
-        sampler_type="vanilla",
         kv_cache_size=64,
-        weight_sync_mode=WeightSyncMode.FALLBACK,
+        weight_sync_mode=WeightSyncMode.IN_MEMORY,
     )
     vanilla_model = test_common.ToyTransformer(
         self.model_config, rngs=nnx.Rngs(2)
     )
     adapter = vanilla_sampler.VanillaSampler(
-        server_id="vanilla_sampler_fallback_0",
+        server_id="vanilla_sampler_in_memory_0",
         config=adapter_config,
         transformer=vanilla_model,
         tokenizer=test_common.MockVocab(),
@@ -735,19 +765,19 @@ class WeightSyncE2ETest(absltest.TestCase):
         model=self.toy_trainer_model,
         optimizer=optax.sgd(1e-3),
         training_config=trainer_config,
-        sampler_type=adapter_config.sampler_type,
+        sampler_type="vanilla",
     )
 
     # Mutate trainer model weights
     new_embedding = jnp.ones_like(self.toy_trainer_model.emb.embedding.value) * 99.0
     self.toy_trainer_model.emb.embedding.value = new_embedding
 
-    # Execute weight sync in fallback mode
+    # Execute weight sync in IN_MEMORY mode
     sync_request = base_sampler_lib.WeightSyncRequest(
         weights=nnx.state(trainer.model),
     )
     result = asyncio.run(adapter.weight_sync(sync_request))
-    self.assertTrue(result)
+    self.assertIsNone(result)
 
     # Verify sampler received the updated weights directly
     tgt_flat = _to_flat_dict(adapter.transformer_state)
@@ -756,14 +786,14 @@ class WeightSyncE2ETest(absltest.TestCase):
         np.array(new_embedding),
     )
 
-  def test_fallback_mode_weight_sync_with_vllm_adapter(self):
-    """Verifies Fallback mode weight transfer from PeftTrainer to InprocessVllmSampler."""
+  def test_in_memory_mode_weight_sync_with_vllm_adapter(self):
+    """Verifies IN_MEMORY mode weight transfer from PeftTrainer to InprocessVllmSampler."""
     adapter_config = RolloutConfig(
-        sampler_type="inprocess_vllm",
-        weight_sync_mode=WeightSyncMode.FALLBACK,
+        weight_sync_mode=WeightSyncMode.IN_MEMORY,
     )
     adapter = inprocess_vllm_sampler.InprocessVllmSampler(
-        server_id="vllm_sampler_fallback_0",
+        server_id="vllm_sampler_in_memory_0",
+        tokenizer=test_common.MockVocab(),
         config=adapter_config,
     )
     adapter.vllm_sampler = self.mock_vllm_sampler
@@ -776,19 +806,19 @@ class WeightSyncE2ETest(absltest.TestCase):
         model=self.toy_trainer_model,
         optimizer=optax.sgd(1e-3),
         training_config=trainer_config,
-        sampler_type=adapter_config.sampler_type,
+        sampler_type="inprocess_vllm",
     )
 
     # Mutate trainer model weights
     new_embedding = jnp.ones_like(self.toy_trainer_model.emb.embedding.value) * 42.0
     self.toy_trainer_model.emb.embedding.value = new_embedding
 
-    # Execute weight sync in fallback mode
+    # Execute weight sync in IN_MEMORY mode
     sync_request = base_sampler_lib.WeightSyncRequest(
         weights=nnx.state(trainer.model),
     )
     result = asyncio.run(adapter.weight_sync(sync_request))
-    self.assertTrue(result)
+    self.assertIsNone(result)
 
     # Verify mock_vllm_sampler received the converted parameter under the vLLM key
     tgt_flat = _to_flat_dict(self.mock_vllm_sampler.transformer_state)
@@ -804,8 +834,8 @@ class WeightSyncE2ETest(absltest.TestCase):
   def test_raiden_mode_multiprocess_weight_sync_with_vanilla_sampler(self):
     """Verifies end-to-end Raiden weight sync with VanillaSampler across separate processes."""
     model_config_dict = dataclasses.asdict(self.model_config)
+    sampler_type = "vanilla"
     adapter_config = RolloutConfig(
-        sampler_type="vanilla",
         kv_cache_size=64,
         weight_sync_mode=WeightSyncMode.RAIDEN,
     )
@@ -816,6 +846,7 @@ class WeightSyncE2ETest(absltest.TestCase):
         "rollout_proc_0",
         _rollout_process_fn,
         model_config_dict,
+        sampler_type,
         adapter_config_dict,
     )
     self.addCleanup(rollout_proc.shutdown)
@@ -828,7 +859,7 @@ class WeightSyncE2ETest(absltest.TestCase):
         "trainer_proc_0",
         _trainer_process_fn,
         model_config_dict,
-        adapter_config.sampler_type,
+        sampler_type,
         target_state,
     )
     self.addCleanup(trainer_proc.shutdown)
@@ -841,6 +872,10 @@ class WeightSyncE2ETest(absltest.TestCase):
     self.addCleanup(registry.close)
     registry.register(trainer_worker_proxy)
     registry.register(rollout_worker_proxy)
+    for wid in registry.worker_ids():
+      worker_registry_testing.set_status(
+          registry, wid, worker_registry.AdmissionStatus.ACTIVE
+      )
 
     # 4. Run real RaidenHandler and WeightSyncCoordinator in main process
     handler = raiden_handler.RaidenHandler(port=0)
@@ -863,8 +898,8 @@ class WeightSyncE2ETest(absltest.TestCase):
   def test_raiden_mode_multiprocess_weight_sync_with_vllm_sampler(self):
     """Verifies end-to-end Raiden weight sync with vLLM Sampler across separate processes."""
     model_config_dict = dataclasses.asdict(self.model_config)
+    sampler_type = "inprocess_vllm"
     adapter_config = RolloutConfig(
-        sampler_type="inprocess_vllm",
         kv_cache_size=64,
         weight_sync_mode=WeightSyncMode.RAIDEN,
     )
@@ -875,6 +910,7 @@ class WeightSyncE2ETest(absltest.TestCase):
         "rollout_proc_0",
         _rollout_process_fn,
         model_config_dict,
+        sampler_type,
         adapter_config_dict,
     )
     self.addCleanup(rollout_proc.shutdown)
@@ -887,7 +923,7 @@ class WeightSyncE2ETest(absltest.TestCase):
         "trainer_proc_0",
         _trainer_process_fn,
         model_config_dict,
-        adapter_config.sampler_type,
+        sampler_type,
         target_state,
     )
     self.addCleanup(trainer_proc.shutdown)
@@ -900,6 +936,10 @@ class WeightSyncE2ETest(absltest.TestCase):
     self.addCleanup(registry.close)
     registry.register(trainer_worker_proxy)
     registry.register(rollout_worker_proxy)
+    for wid in registry.worker_ids():
+      worker_registry_testing.set_status(
+          registry, wid, worker_registry.AdmissionStatus.ACTIVE
+      )
 
     # 4. Run real RaidenHandler and WeightSyncCoordinator in main process
     handler = raiden_handler.RaidenHandler(port=0)

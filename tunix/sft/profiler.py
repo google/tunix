@@ -12,19 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Profiler class for Tunix trainers."""
+"""Profiler class and backend protocol for Tunix trainers."""
+
+from __future__ import annotations
 
 import dataclasses
-import inspect
 import threading
+from typing import Protocol
 
 from absl import logging
-import jax
 
 
 @dataclasses.dataclass(frozen=True)
 class ProfilerOptions:
-  """Options for configuring the JAX profiler."""
+  """Options for configuring the profiler."""
+
   # Directory to write the profile to.
   log_dir: str
   # Number of steps to skip before profiling.
@@ -43,6 +45,23 @@ class ProfilerOptions:
   # Whether to enable continuous profiling via JAX advanced_configuration.
   enable_continuous_profiling: bool = False
 
+
+class ProfilerBackend(Protocol):
+  """Backend interface for starting and stopping step-window profiler traces."""
+
+  def is_main_process(self) -> bool:
+    """Returns True if the current process should record profiles."""
+    ...
+
+  def start(self, options: ProfilerOptions) -> None:
+    """Starts profiling with the given options."""
+    ...
+
+  def stop(self) -> None:
+    """Stops the active profiling session."""
+    ...
+
+
 class Profiler:
   """Activate/deactivate a profiler based on the ProfilerOptions."""
 
@@ -54,13 +73,19 @@ class Profiler:
       initial_step: int,
       max_step: int | None,
       profiler_options: ProfilerOptions | None,
+      backend: ProfilerBackend | None = None,
   ):
-    if jax.process_index() != 0 or profiler_options is None:
+    if profiler_options is None:
+      self._do_not_profile = True
+      return
+    if backend is None:
+      raise ValueError("backend must be provided when profiler_options is set.")
+    self._backend: ProfilerBackend = backend
+    if not self._backend.is_main_process():
       self._do_not_profile = True
       return
     self._profiler_options = profiler_options
     self._do_not_profile = False
-    self._output_path = profiler_options.log_dir
     # This is step number, starting from 0.
     self._first_profile_step = (
         initial_step + profiler_options.skip_first_n_steps
@@ -89,97 +114,41 @@ class Profiler:
       return
     self._started_by_this_instance = False
 
-  def _check_if_max_num_hosts_supported(self) -> bool:
-    """Returns True if max_num_hosts is set and supported by JAX start_trace."""
-    if self._profiler_options.max_num_hosts is None:
-      return False
-    try:
-      sig = inspect.signature(jax.profiler.start_trace)
-      if "max_num_hosts" in sig.parameters:
-        return True
-      logging.warning(
-          "max_num_hosts is specified in ProfilerOptions but "
-          "jax.profiler.start_trace does not accept it. This is "
-          "only supported for Pathways workloads using pathwaysutils."
-      )
-    except (ValueError, TypeError) as e:
-      logging.warning(
-          "Failed to inspect signature of jax.profiler.start_trace: %s. "
-          "Not passing max_num_hosts.",
-          e,
-      )
-    return False
-
-  def _start_trace(
-      self,
-      log_dir: str,
-      profiler_options: jax.profiler.ProfileOptions | None = None,
-  ) -> None:
-    """Starts JAX trace, conditionally passing max_num_hosts if supported."""
-    if self._check_if_max_num_hosts_supported():
-      jax.profiler.start_trace(
-          log_dir=log_dir,
-          profiler_options=profiler_options,
-          max_num_hosts=self._profiler_options.max_num_hosts,  # pyrefly: ignore[unexpected-keyword]
-      )
-    else:
-      jax.profiler.start_trace(
-          log_dir=log_dir,
-          profiler_options=profiler_options,
-      )
-
-  def maybe_activate(self, step: int):
+  def maybe_activate(self, step: int) -> None:
     """Start the profiler."""
     if self._do_not_profile or step != self._first_profile_step:
       return
     with Profiler._lock:
       if Profiler._is_active:
         logging.warning(
-            "A JAX profiler is already active. Skipping activation of this"
+            "A profiler is already active. Skipping activation of this"
             " profiler."
         )
         return
-      logging.info("Starting JAX profiler at step %d.", step)
-      profile_options = None
-      if (
-          self._profiler_options.set_profile_options
-          or self._profiler_options.enable_continuous_profiling
-      ):
-        profile_options = jax.profiler.ProfileOptions()
-        if self._profiler_options.set_profile_options:
-          profile_options.host_tracer_level = (
-              self._profiler_options.host_tracer_level
-          )
-          profile_options.python_tracer_level = (
-              self._profiler_options.python_tracer_level
-          )
-        if self._profiler_options.enable_continuous_profiling:
-          profile_options.advanced_configuration = {
-              "enable_continuous_profiling": True
-          }
-      self._start_trace(
-          log_dir=self._output_path, profiler_options=profile_options
-      )
+      logging.info("Starting profiler at step %d.", step)
+      self._backend.start(self._profiler_options)
       Profiler._is_active = True
       self._started_by_this_instance = True
 
-  def maybe_deactivate(self, step: int):
+  def maybe_deactivate(self, step: int) -> None:
     """End the profiler."""
     if self._do_not_profile or step != self._last_profile_step:
       return
     with Profiler._lock:
       if not self._started_by_this_instance:
         logging.warning(
-            "This profiler instance did not start JAX profiler. Skipping"
+            "This profiler instance did not start the profiler. Skipping"
             " deactivation."
         )
         return
-      logging.info("Stopping JAX profiler at step %d.", step)
-      jax.profiler.stop_trace()
+      logging.info("Stopping profiler at step %d.", step)
+      self._backend.stop()
       Profiler._is_active = False
       self._started_by_this_instance = False
 
-  def _set_last_profile_step(self, profiler_steps, max_step):
+  def _set_last_profile_step(
+      self, profiler_steps: int, max_step: int | None
+  ) -> int:
     calculated_last_step = self._first_profile_step + profiler_steps
     if max_step is None:
       return calculated_last_step

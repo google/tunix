@@ -131,7 +131,6 @@ class WeightSyncStagingTest(absltest.TestCase):
         key_mapping_hook_fns={"w": mock.sentinel.hook},
         transpose_keys={"w": (1, 0)},
         reshard_fn=None,
-        rollout_engine="vllm_jax",
         tp_size=4,
     )
     self.assertIs(

@@ -15,6 +15,7 @@
 from collections.abc import Sequence
 import dataclasses
 from absl import logging
+from tunix.common import configs as common_configs
 from tunix.common import datatypes as common_datatypes
 from tunix.rl import function_registry
 
@@ -27,12 +28,46 @@ class AlgorithmConfig:
     algo_variant: The core algorithm variant to use.
     advantage_estimator: The advantage estimator to use.
     policy_loss_fn: The policy loss function to use.
+    reward_mode: The reward computation mode. `"reward_fn"` evaluates
+      `reward_fns` (`SequenceRewardManager`). `"env"` uses environment
+      `trajectory_rewards`, and also sums `reward_fns` on top when `reward_fns`
+      are provided (`AgenticSequenceRewardManager`). Custom managers registered
+      via `function_registry.register_reward_manager` are also accepted.
+    num_generations: Number of trajectories sampled per prompt (the group size
+      `G`). Must be positive; GRPO-style estimators require more than one.
+    num_iterations: Number of optimizer passes over each batch of rollouts.
+    beta: Coefficient of the KL penalty against the reference model. `0.0`
+      disables the penalty.
+    force_compute_kl: Compute reference KL for logging even when `beta` is
+      `0.0`. See `requires_reference_kl`.
+    score_centering: Adds Score Centering (arXiv:2609.20807) to the GRPO policy
+      loss, using the rollout sampler's top-k log probabilities. Requires a
+      vLLM rollout returning `num_logprobs >= score_centering_top_k` logprobs
+      per token, one on-policy update per batch (`num_iterations=1` and a
+      single mini-batch) and no sequence packing. The PPO ratio is then taken
+      against the trainer's own log probabilities, as with sampler IS, so SC
+      rather than the ratio corrects for the sampler. Composes with clipped
+      `sampler_is="token"`.
+    score_centering_top_k: Number of sampler top-k tokens used per position.
+    score_centering_eps: Floor for the tail probability masses.
+    drop_zero_variance_groups: Drops prompt groups whose rewards tie
+      (`advantages.tied_rewards`) before policy training so replacement prompts
+      can fill the step, as in DAPO dynamic sampling
+      (https://arxiv.org/abs/2503.14476). Enforced only by the distributed
+      `StandardRLProgram`.
+    max_consecutive_filtered_groups: Raises `RuntimeError` after this many
+      consecutive groups are dropped by `drop_zero_variance_groups` in the
+      distributed `StandardRLProgram`. `None` disables the guard.
   """
 
   algo_variant: str = "grpo"
   advantage_estimator: str = "grpo"
   policy_loss_fn: str = "grpo"
-  reward_manager: str = "sequence-level"
+  reward_mode: str = "reward_fn"
+  num_generations: int = 1
+  num_iterations: int = 1
+  beta: float = 0.0
+  force_compute_kl: bool = False
   # Optional symmetric clamp applied to per-token KL inside
   # `common.compute_kl_divergence`. `None` (default) disables the clamp and
   # preserves prior behavior bit-for-bit. Set to a positive float (e.g.
@@ -67,9 +102,6 @@ class AlgorithmConfig:
   # probabilities. If False, recompute old-policy log probabilities on the
   # trainer actor.
   use_rollout_logps: bool = True
-  # Whether to preserve exact token IDs across multi-turn rollout steps
-  # without detokenizing and re-tokenizing intermediate turns (TITO).
-  exact_token_continuity: bool = True
   # Optional importance-sampling and rejection-sampling controls between the
   # rollout sampler and trainer actor.
   sampler_is: str | None = None
@@ -78,6 +110,10 @@ class AlgorithmConfig:
   sampler_rs_min: float | None = None
   sampler_rs_max: float | None = None
   seq_logprob_error_threshold: float | None = None
+  # Optional Score Centering correction; see the class docstring.
+  score_centering: bool = False
+  score_centering_top_k: int = 128
+  score_centering_eps: float = 1e-6
   # Compact encoding mode for captured MoE routed_experts ("auto", "uint8",
   # "uint10", or "int16").
   routed_experts_encode_mode: common_datatypes.RoutedExpertsEncodeMode = "auto"
@@ -88,6 +124,15 @@ class AlgorithmConfig:
   # IDs happen to be `< 255` do not flip between 4D `uint8` and 5D `uint10`
   # across steps and trigger an extra XLA compilation.
   routed_experts_num_experts: int | None = None
+  # Drops prompt groups whose rewards tie (`advantages.tied_rewards`), so they
+  # carry no group-relative signal, before policy training so replacement
+  # prompts can fill the step (DAPO's dynamic sampling). Enforced only by the
+  # distributed `StandardRLProgram`.
+  drop_zero_variance_groups: bool = False
+  # Raise `RuntimeError` after this many consecutive groups are dropped by
+  # `drop_zero_variance_groups` in `StandardRLProgram`. `None` disables the
+  # guard.
+  max_consecutive_filtered_groups: int | None = None
 
   def __post_init__(self):
     self.temperature = None
@@ -100,6 +145,7 @@ class AlgorithmConfig:
     ]
     valid_advantage_estimators = ["grpo", "gae", "drgrpo", "rloo", "grpo-loo"]
     valid_policy_loss_fns = ["grpo", "ppo"]
+    valid_reward_modes = ["reward_fn", "env"]
     if self.algo_variant not in valid_algo_variants:
       raise ValueError(
           f"algo_variant must be one of {valid_algo_variants}. "
@@ -123,6 +169,18 @@ class AlgorithmConfig:
           f"policy_loss_fn must be one of {valid_policy_loss_fns} or registered"
           f" in function_registry. Received: {self.policy_loss_fn}"
       )
+    if (
+        self.reward_mode not in valid_reward_modes
+        and self.reward_mode not in function_registry.list_reward_managers()
+    ):
+      raise ValueError(
+          f"reward_mode must be one of {valid_reward_modes} or registered"
+          f" in function_registry. Received: {self.reward_mode!r}"
+      )
+    if self.num_generations <= 0:
+      raise ValueError(
+          f"num_generations must be positive. Received: {self.num_generations}"
+      )
     if self.reward_num_workers < -1:
       raise ValueError(
           "reward_num_workers must be >= 0, or -1 for one worker per CPU."
@@ -133,17 +191,50 @@ class AlgorithmConfig:
           "reward_worker_timeout_seconds must be > 0."
           f" Received: {self.reward_worker_timeout_seconds}"
       )
-    common_datatypes.validate_routed_experts_encode_config(
+    common_configs.validate_routed_experts_encode_config(
         self.routed_experts_encode_mode,
         self.routed_experts_num_experts,
     )
+    self._validate_drop_zero_variance_groups()
     self._validate_sampler_is_and_rs_options()
 
     # Automatically prints configuration upon initialization.
     self.print_config()
 
+  @property
+  def requires_reference_kl(self) -> bool:
+    """Whether reference-model KL log-probabilities must be computed."""
+    return self.beta != 0.0 or self.force_compute_kl
+
+  def _validate_drop_zero_variance_groups(self) -> None:
+    """Validates the options for dropping zero-variance prompt groups."""
+    if not isinstance(self.drop_zero_variance_groups, bool):
+      raise TypeError(
+          "drop_zero_variance_groups must be a bool, got"
+          f" {self.drop_zero_variance_groups!r}."
+      )
+    if self.drop_zero_variance_groups:
+      if self.advantage_estimator == "gae":
+        raise ValueError(
+            "drop_zero_variance_groups requires a group-relative"
+            " advantage_estimator, not 'gae'."
+        )
+      if self.num_generations < 2:
+        raise ValueError(
+            "drop_zero_variance_groups requires num_generations >= 2; got"
+            f" {self.num_generations}."
+        )
+    limit = self.max_consecutive_filtered_groups
+    if limit is not None and (
+        isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
+    ):
+      raise ValueError(
+          "max_consecutive_filtered_groups must be a positive int or None,"
+          f" got {limit!r}."
+      )
+
   def _validate_sampler_is_and_rs_options(self):
-    """Checks sampler-vs-trainer error masking, IS, and RS options.
+    """Checks sampler-vs-trainer error masking, IS and RS.
 
     Raises:
       ValueError: If an option is unsupported, incomplete, or out of order.
@@ -184,9 +275,7 @@ class AlgorithmConfig:
       )
     if lo is not None and hi is not None:
       if lo < 0.0:
-        raise ValueError(
-            f"sampler_rs_min must be >= 0.0. Received: {lo}"
-        )
+        raise ValueError(f"sampler_rs_min must be >= 0.0. Received: {lo}")
       if lo > hi:
         raise ValueError(
             "sampler_rs_min must not exceed sampler_rs_max. Received:"
@@ -197,6 +286,7 @@ class AlgorithmConfig:
           "sampler_rs requires a keep-band. Set sampler_rs_min and"
           " sampler_rs_max."
       )
+    validate_score_centering_options(self)
 
   def print_config(self):
     """Prints all configuration fields, working dynamically for child classes."""
@@ -204,6 +294,52 @@ class AlgorithmConfig:
     for field in dataclasses.fields(self):
       value = getattr(self, field.name)
       logging.info(f"  {field.name}: {value}")
+
+
+def validate_score_centering_options(config: AlgorithmConfig) -> None:
+  """Validates `score_centering*` options on `config`."""
+  if config.score_centering_top_k < 1 or config.score_centering_eps <= 0:
+    raise ValueError(
+        "score_centering_top_k must be >= 1 and score_centering_eps > 0."
+    )
+  if not config.score_centering:
+    return
+  if config.policy_loss_fn != "grpo":
+    raise ValueError(
+        "score_centering is only implemented by the 'grpo' policy loss."
+    )
+  if config.num_iterations != 1:
+    raise ValueError("score_centering requires num_iterations == 1.")
+  if config.sampler_rs is not None:
+    raise ValueError("score_centering does not support sampler_rs.")
+  if config.sampler_is == "token" and config.sampler_is_threshold is None:
+    raise ValueError(
+        "score_centering is a no-op with unclipped token IS"
+        " (sampler_is_threshold=None)."
+    )
+
+
+def validate_score_centering_rollout(
+    config: AlgorithmConfig,
+    rollout_engine: object,
+    rollout_config: common_configs.RolloutConfig,
+    packing_enabled: bool,
+) -> None:
+  """Validates `score_centering` rollout and packing requirements."""
+  if not config.score_centering:
+    return
+  if (
+      rollout_engine != "vllm"
+      or (config.use_rollout_logps and not rollout_config.return_logprobs)
+      or rollout_config.num_logprobs < max(2, config.score_centering_top_k)
+      or packing_enabled
+  ):
+    raise ValueError(
+        "score_centering requires the vLLM rollout with"
+        " num_logprobs >= max(2, score_centering_top_k) (and"
+        " return_logprobs=True when use_rollout_logps=True) on the train"
+        " RolloutConfig, and no sequence packing."
+    )
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -218,7 +354,8 @@ class GRPOConfig(AlgorithmConfig):
       include `token-mean`, `sequence-mean-token-mean`,
       `sequence-mean-token-scale`, `seq-mean-token-sum`, and
       `sequence-mean-token-sum-norm`. Default: `sequence-mean-token-mean`.
-    reward_manager: The reward manager to use. Default: `sequence-level`.
+    reward_mode: The reward computation mode to use (`reward_fn` or `env`).
+      Default: `reward_fn`.
     loss_algo: use GRPO or GSPO for loss computation. GRPO loss is per-batch
       normalized instead of per-response normalized as mentioned in the paper.
       For GSPO, we use gspo-token loss which is more flexible.
@@ -265,6 +402,7 @@ class GRPOConfig(AlgorithmConfig):
 
   References:
     - GRPO: https://arxiv.org/abs/2402.03300
+    - DAPO: https://arxiv.org/abs/2503.14476
     - GSPO: https://arxiv.org/abs/2507.18071
   """
 
@@ -272,7 +410,7 @@ class GRPOConfig(AlgorithmConfig):
   advantage_estimator: str = "grpo"
   policy_loss_fn: str = "grpo"
   loss_agg_mode: str = "sequence-mean-token-mean"
-  reward_manager: str = "sequence-level"
+  reward_mode: str = "reward_fn"
   loss_algo: str = "grpo"
   num_generations: int = 2
   num_iterations: int = 1
@@ -286,16 +424,97 @@ class GRPOConfig(AlgorithmConfig):
     if self.epsilon_high is None:
       self.epsilon_high = self.epsilon
 
-    super().__post_init__()
-
     if self.num_generations <= 1:
       raise ValueError(
           "num_generations must be greater than 1. Received: "
           f"{self.num_generations}"
       )
 
+    super().__post_init__()
+
     if self.loss_algo not in ["grpo", "gspo-token"]:
       raise ValueError(
           "loss_algo should be either grpo or gspo-token. Received: "
           f"{self.loss_algo}"
       )
+
+
+@dataclasses.dataclass(kw_only=True)
+class PPOConfig(AlgorithmConfig):
+  """Configuration for PPO algorithms.
+
+  Attributes:
+    algo_variant: The algorithm variant to use. Default: `ppo`.
+    advantage_estimator: The advantage estimator to use. Default: `gae`.
+    policy_loss_fn: The policy loss function to use. Default: `ppo`.
+    value_loss_fn: The value loss function to use. Default: `ppo`.
+    reward_mode: The reward computation mode to use. Default: `reward_fn`.
+    num_iterations: The number of optimization epochs per batch of rollouts.
+      This corresponds to the number of times the policy updates its weights for
+      a given batch of rollouts.
+    gamma: The discount factor for future rewards in GAE.
+    gae_lambda: The lambda parameter for Generalized Advantage Estimation (GAE).
+    beta: The coefficient for the KL divergence penalty.
+    epsilon: Epsilon value for clipping the ratio for the policy objective.
+    epsilon_low: Lower bound for clipping the ratio for the policy objective.
+      Set to `epsilon` if not provided.
+    epsilon_high: Upper bound for clipping the ratio for the policy objective.
+      Set to `epsilon` if not provided.
+    epsilon_c: Lower bound for clipping for dual-clip PPO. If not provided, we
+      don't do dual-clip PPO. Reference: https://arxiv.org/abs/1912.09729.
+    entropy_coef: Entropy coefficient for the policy loss. Set to `None` or
+      `0.0` to disable entropy regularization.
+    clip_range_value: The range for clipping the value function loss.
+    kl_method: The method for computing KL divergence. Must be one of
+      `["low_var_kl", "kl", "mse_kl"]`.
+  """
+
+  algo_variant: str = "ppo"
+  advantage_estimator: str = "gae"
+  policy_loss_fn: str = "ppo"
+  value_loss_fn: str = "ppo"
+  reward_mode: str = "reward_fn"
+  num_iterations: int = 1
+
+  # PPO loss and advantage computation configs.
+  gamma: float = 1.0
+  gae_lambda: float = 0.95
+  beta: float = 0.04
+  epsilon: float = 0.2
+  epsilon_low: float | None = None
+  epsilon_high: float | None = None
+  epsilon_c: float | None = None
+  entropy_coef: float | None = None
+  clip_range_value: float = 0.2
+  kl_method: str = "low_var_kl"
+
+  def __post_init__(self):
+    self.epsilon_low = (
+        self.epsilon_low if self.epsilon_low is not None else self.epsilon
+    )
+    self.epsilon_high = (
+        self.epsilon_high if self.epsilon_high is not None else self.epsilon
+    )
+
+    if self.epsilon_c is not None and self.epsilon_c <= 1.0:
+      raise ValueError(
+          f"`epsilon_c` must be greater than 1. Received: {self.epsilon_c}."
+      )
+
+    if self.kl_method not in ["kl", "mse_kl", "low_var_kl"]:
+      raise ValueError(
+          f"Invalid KL method: {self.kl_method}. Must be one of"
+          " ['low_var_kl', 'kl', 'mse_kl']."
+      )
+
+    valid_value_loss_fns = ["ppo"]
+    if (
+        self.value_loss_fn not in valid_value_loss_fns
+        and self.value_loss_fn not in function_registry.list_value_loss_fns()
+    ):
+      raise ValueError(
+          f"value_loss_fn must be one of {valid_value_loss_fns} or registered"
+          f" in function_registry. Received: {self.value_loss_fn}"
+      )
+
+    super().__post_init__()
