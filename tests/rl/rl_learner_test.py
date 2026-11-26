@@ -18,6 +18,8 @@ from tunix.rl import rl_learner
 # Full collections the tests run themselves, e.g. in place of the one after
 # the weight sync. The `gc.collect` spy in GcFreezeTest does not count them.
 _real_collect = gc.collect
+_real_freeze = gc.freeze
+_real_unfreeze = gc.unfreeze
 _GC_FREEZE_ENV_VARS = (
     'TUNIX_GC_FREEZE',
     'TUNIX_GC_FREEZE_AT',
@@ -387,32 +389,49 @@ class RLLearnerTest(parameterized.TestCase):
 class GcFreezeTest(absltest.TestCase):
   """Drives `_GcFreeze` with patched env and checks the interpreter's GC state.
 
-  `gc.collect` is wrapped to count the collections `_GcFreeze` runs. Every test
-  restores the GC state and the environment it started with.
+  Some CPython builds freeze objects at startup, so a freeze is checked against
+  the freeze count in setUp. After a freeze, `close()` leaves the count at 0:
+  `gc.unfreeze()` also releases what the interpreter froze. A frozen object
+  freed by reference counting lowers the count, so where nothing should be
+  frozen or unfrozen the tests check the `gc.freeze` and `gc.unfreeze` spies
+  instead. `gc.collect` is wrapped to count the collections `_GcFreeze` runs.
+  Each test restores the environment and, as far as possible, the GC state it
+  started with.
   """
 
   def setUp(self):
     super().setUp()
-    if gc.get_freeze_count():
-      self.skipTest('Objects are already frozen in this process.')
-    was_enabled = gc.isenabled()
+    self.freeze_count_before = gc.get_freeze_count()
+    self.gc_enabled_before = gc.isenabled()
     self.callbacks_before = list(gc.callbacks)
-
-    def restore_gc_state():
-      gc.unfreeze()
-      gc.callbacks[:] = self.callbacks_before
-      if was_enabled:
-        gc.enable()
-      else:
-        gc.disable()
-
-    self.addCleanup(restore_gc_state)
     self.enter_context(mock.patch.dict(os.environ))
     for name in _GC_FREEZE_ENV_VARS:
       os.environ.pop(name, None)
     self.collect = self.enter_context(
         mock.patch.object(gc, 'collect', wraps=_real_collect)
     )
+    self.freeze = self.enter_context(
+        mock.patch.object(gc, 'freeze', wraps=_real_freeze)
+    )
+    self.unfreeze = self.enter_context(
+        mock.patch.object(gc, 'unfreeze', wraps=_real_unfreeze)
+    )
+
+  def tearDown(self):
+    gc.callbacks[:] = self.callbacks_before
+    if self.gc_enabled_before:
+      gc.enable()
+    else:
+      gc.disable()
+    # `close()` unfreezes everything, including what the interpreter froze at
+    # startup. Freezing again freezes every live object rather than that exact
+    # set, which cannot be recreated; only the tests in this class look at
+    # freeze counts.
+    if gc.get_freeze_count() != self.freeze_count_before:
+      _real_unfreeze()
+      if self.freeze_count_before:
+        _real_freeze()
+    super().tearDown()
 
   def _make_gc_freeze(self, env):
     os.environ.update(env)
@@ -425,14 +444,15 @@ class GcFreezeTest(absltest.TestCase):
     for _ in range(2):
       gc_freeze.step_end()
       self.assertTrue(gc.isenabled())
-      self.assertEqual(gc.get_freeze_count(), 0)
     self.collect.assert_not_called()
+    self.freeze.assert_not_called()
 
     gc_freeze.step_end()
 
     self.collect.assert_called_once_with()
+    self.freeze.assert_called_once_with()
     self.assertFalse(gc.isenabled())
-    self.assertGreater(gc.get_freeze_count(), 0)
+    self.assertGreater(gc.get_freeze_count(), self.freeze_count_before)
 
     gc_freeze.close()
 
@@ -444,7 +464,7 @@ class GcFreezeTest(absltest.TestCase):
     gc.disable()
     gc_freeze = self._make_gc_freeze({'TUNIX_GC_FREEZE_AT': '1'})
     gc_freeze.step_end()
-    self.assertGreater(gc.get_freeze_count(), 0)
+    self.assertGreater(gc.get_freeze_count(), self.freeze_count_before)
 
     gc_freeze.close()
 
@@ -461,8 +481,10 @@ class GcFreezeTest(absltest.TestCase):
     gc_freeze.close()  # Idempotent.
 
     self.collect.assert_not_called()
+    # Nothing was frozen, so close() unfreezes nothing.
+    self.freeze.assert_not_called()
+    self.unfreeze.assert_not_called()
     self.assertTrue(gc.isenabled())
-    self.assertEqual(gc.get_freeze_count(), 0)
     self.assertEqual(gc.callbacks, self.callbacks_before)
 
   def test_disable_0_keeps_automatic_gc_on(self):
@@ -473,7 +495,7 @@ class GcFreezeTest(absltest.TestCase):
     gc_freeze.step_end()
 
     self.assertTrue(gc.isenabled())
-    self.assertGreater(gc.get_freeze_count(), 0)
+    self.assertGreater(gc.get_freeze_count(), self.freeze_count_before)
     gc_freeze.close()
     self.assertEqual(gc.get_freeze_count(), 0)
 
@@ -515,16 +537,8 @@ class GcFreezeTest(absltest.TestCase):
     gc_freeze.step_end()  # Freezes.
     calls = mock.Mock()
     calls.attach_mock(self.collect, 'collect')
-    calls.attach_mock(
-        self.enter_context(mock.patch.object(gc, 'freeze', wraps=gc.freeze)),
-        'freeze',
-    )
-    calls.attach_mock(
-        self.enter_context(
-            mock.patch.object(gc, 'unfreeze', wraps=gc.unfreeze)
-        ),
-        'unfreeze',
-    )
+    calls.attach_mock(self.freeze, 'freeze')
+    calls.attach_mock(self.unfreeze, 'unfreeze')
     calls.reset_mock()
 
     gc_freeze.step_end()  # Step 2: periodic.
@@ -533,6 +547,8 @@ class GcFreezeTest(absltest.TestCase):
         calls.mock_calls,
         [mock.call.unfreeze(), mock.call.collect(), mock.call.freeze()],
     )
+    # Every live object is frozen again, which can be fewer objects than in
+    # setUp if frozen ones died in the meantime.
     self.assertGreater(gc.get_freeze_count(), 0)
     gc_freeze.close()
     self.assertEqual(gc.get_freeze_count(), 0)
@@ -612,7 +628,7 @@ class GcFreezeTest(absltest.TestCase):
 
     def run_global_step(*args, **kwargs):
       del args, kwargs
-      frozen_during_step.append(gc.get_freeze_count() > 0)
+      frozen_during_step.append(self.freeze.called)
       mock_engine.actor_trainer.train_steps += 1
 
     with mock.patch.object(
