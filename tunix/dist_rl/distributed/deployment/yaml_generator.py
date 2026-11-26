@@ -15,13 +15,343 @@
 """Generates Kubernetes deployment YAML manifests from templates."""
 
 import argparse
+from collections.abc import Sequence
+import json
 import math
 import os
+import re
 import string
+import types
+from typing import Any
+
+from tunix.dist_rl.common import env_utils
+
+_K8S_LABEL_VALUE_RE = re.compile(r"^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$")
+_STANDALONE_PLACEHOLDER_RE = re.compile(
+    r"^(?P<indent>[ \t]*)\$\{(?P<key>[A-Z0-9_]+)\}[ \t]*\n",
+    re.MULTILINE,
+)
+_GCS_BUCKET_NAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]")
+
+# A shell environment variable name. The manifests write names unquoted, so
+# any other name could change the rendered YAML.
+ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
+
+_PATHWAYS_WORKER_TEMPLATE_ENV = frozenset({
+    "RAIDEN_BROADCAST_K",
+    "ENABLE_MULTI_NUMA",
+    "TPU_RAIDEN_DATA_NICS",
+    "TPU_MIN_LOG_LEVEL",
+    "TF_CPP_MIN_LOG_LEVEL",
+    "XCLOUD_ENVIRONMENT",
+    "MEGASCALE_GRPC_ENABLE_XOR_TRACER",
+    "MEGASCALE_NUM_SLICES",
+    "JOBSET_NAME",
+    "REPLICATED_JOB_NAME",
+    "MEGASCALE_SLICE_ID",
+    "PATHWAYS_HEAD",
+    "MEGASCALE_COORDINATOR_ADDRESS",
+})
+
+_WORKER_NONZERO_EXIT_GUARD = """\
+                  if [ "$EXIT_CODE" -eq 0 ]; then
+                    echo "ERROR: Worker exited with code 0 unexpectedly; forcing exit code 1." >&2
+                    EXIT_CODE=1
+                  fi"""
 
 
-def main() -> None:
-  """Parses command-line arguments and renders a deployment YAML from a template."""
+def _substitute_template(
+    template_text: str, substitutions: dict[str, Any]
+) -> str:
+  """Substitutes template variables, aligning or dropping standalone lines."""
+
+  def _replace_standalone(match: re.Match[str]) -> str:
+    key = match.group("key")
+    if key not in substitutions:
+      return match.group(0)
+    indent = match.group("indent")
+    val = substitutions[key]
+    raw = "" if val is None else str(val).strip("\n")
+    if not raw.strip():
+      return ""
+    lines = raw.splitlines()
+    if indent and not all(
+        not line or line.startswith(indent) for line in lines
+    ):
+      formatted = (
+          "\n".join((indent + line if line else "") for line in lines) + "\n"
+      )
+    else:
+      formatted = raw + "\n"
+    return formatted.replace("$", "$$")
+
+  expanded = _STANDALONE_PLACEHOLDER_RE.sub(_replace_standalone, template_text)
+  return string.Template(expanded).substitute(substitutions)
+
+
+def memory_line(quantity: str) -> str:
+  """Returns a `memory: <quantity>` resources entry, or "" for none."""
+  return f"memory: {quantity}" if quantity else ""
+
+
+def render_memory_resources(request: str, limit: str) -> str:
+  """Renders a container's `resources` that set only memory.
+
+  Args:
+    request: Memory request, as a Kubernetes quantity; empty sets none.
+    limit: Memory limit, as a Kubernetes quantity; empty sets none.
+
+  Returns:
+    The `resources:` block, or "" when both are empty.
+  """
+  sections = [
+      f"  {name}:\n    memory: {quantity}"
+      for name, quantity in (("requests", request), ("limits", limit))
+      if quantity
+  ]
+  return "resources:\n" + "\n".join(sections) if sections else ""
+
+
+def parse_ckpt_gcsfuse_bucket(value: str) -> str:
+  """Returns the bucket name in `value`, or "" when `value` is empty.
+
+  Args:
+    value: A bucket name, optionally with a `gs://` prefix and a trailing slash.
+
+  Raises:
+    ValueError: If `value` is not empty and does not name a bucket.
+  """
+  raw = value.strip()
+  if not raw:
+    return ""
+  bucket = raw.removeprefix("gs://").rstrip("/")
+  if not _GCS_BUCKET_NAME_RE.fullmatch(bucket):
+    raise ValueError(
+        f"invalid checkpoint GCSFuse bucket {raw!r}: expected a bucket name"
+        " such as 'my-bucket' or 'gs://my-bucket'. To mount a subdirectory,"
+        " add 'only-dir=<prefix>' to the mount options."
+    )
+  return bucket
+
+
+def validate_ckpt_gcsfuse_mount_path(mount_path: str) -> None:
+  """Raises ValueError unless `mount_path` is an absolute path."""
+  if not mount_path.startswith("/"):
+    raise ValueError(
+        "the checkpoint GCSFuse mount path must be an absolute path, got"
+        f" {mount_path!r}."
+    )
+
+
+def validate_gang_id(gang_id: str | None) -> None:
+  """Validates gang_id against Kubernetes label value syntax rules."""
+  if not gang_id:
+    return
+  if len(gang_id) > 63 or not _K8S_LABEL_VALUE_RE.fullmatch(gang_id):
+    raise ValueError(
+        f"Invalid gang_id {gang_id!r}: must be a valid Kubernetes label value "
+        "(<=63 chars, alphanumeric start/end, [-A-Za-z0-9_.])."
+    )
+
+
+def render_gang_labels(gang_id: str | None) -> str:
+  """Renders the gang-id label line if gang_id is provided."""
+  if not gang_id:
+    return ""
+  validate_gang_id(gang_id)
+  return f'    scheduling.x-k8s.io/gang-id: "{gang_id}"\n'
+
+
+def parse_head_excluded_nodepools(value: str) -> tuple[str, ...]:
+  """Parses `--head_excluded_nodepools` into validated GKE node pool names.
+
+  Args:
+    value: Comma-separated node pool names; empty for none.
+
+  Returns:
+    The node pool names, in the given order.
+
+  Raises:
+    ValueError: If a name is not a valid Kubernetes label value or repeats.
+  """
+  if not value:
+    return ()
+  pools = tuple(pool.strip() for pool in value.split(","))
+  for pool in pools:
+    if len(pool) > 63 or not _K8S_LABEL_VALUE_RE.fullmatch(pool):
+      raise ValueError(
+          f"Invalid --head_excluded_nodepools entry {pool!r} in {value!r}: must"
+          " be a valid Kubernetes label value (<=63 chars, alphanumeric"
+          " start/end, [-A-Za-z0-9_.])."
+      )
+  if len(set(pools)) != len(pools):
+    raise ValueError(f"--head_excluded_nodepools repeats a name: {value!r}")
+  return pools
+
+
+def render_colocated_head_affinity(
+    jobset_name: str, excluded_nodepools: tuple[str, ...]
+) -> str:
+  """Renders the affinity of a Pathways head pod that runs on a pw-node host.
+
+  The head pod requests no `google.com/tpu`. Kueue matches a pod set against a
+  ResourceFlavor using only the node selector keys the flavor lists in its
+  `nodeLabels`, so the head pod's TPU `nodeSelector` does not rule out a CPU
+  flavor that lists only `cloud.google.com/gke-nodepool`. If such a flavor comes
+  before the TPU flavor in the ClusterQueue, Kueue admits the head pod to it and
+  adds that node pool to its `nodeSelector`, which no pw-node host matches.
+  Listing those node pools in `excluded_nodepools` makes the CPU flavors fail to
+  match.
+
+  Args:
+    jobset_name: Name of the Pathways JobSet.
+    excluded_nodepools: GKE node pools the head pod must not be admitted to.
+
+  Returns:
+    The `affinity` block of the head pod spec.
+  """
+  node_affinity = ""
+  if excluded_nodepools:
+    node_affinity = (
+        "  nodeAffinity:\n"
+        "    requiredDuringSchedulingIgnoredDuringExecution:\n"
+        "      nodeSelectorTerms:\n"
+        "      - matchExpressions:\n"
+        "        - key: cloud.google.com/gke-nodepool\n"
+        "          operator: NotIn\n"
+        "          values:\n"
+        + "".join(
+            f"          - {json.dumps(pool)}\n" for pool in excluded_nodepools
+        )
+    )
+  return (
+      "affinity:\n"
+      f"{node_affinity}"
+      "  podAffinity:\n"
+      "    requiredDuringSchedulingIgnoredDuringExecution:\n"
+      "    # place on one of the pathways-worker nodes\n"
+      "    - topologyKey: kubernetes.io/hostname\n"
+      "      labelSelector:\n"
+      "        matchExpressions:\n"
+      "        - key: jobset.sigs.k8s.io/jobset-name\n"
+      "          operator: In\n"
+      "          values:\n"
+      f"          - {jobset_name}\n"
+      "        - key: jobset.sigs.k8s.io/replicatedjob-name\n"
+      "          operator: In\n"
+      "          values:\n"
+      "          - pw-node"
+  )
+
+
+def render_teardown_on_exit(
+    teardown_gang_on_exit: bool,
+    gang_id: str | None,
+    namespace: str,
+    jobset_name: str,
+) -> str:
+  """Renders a shell block for the CPU orchestrator to delete sibling JobSets."""
+  if not teardown_gang_on_exit:
+    return ""
+  if not gang_id:
+    raise ValueError(
+        "--teardown_gang_on_exit requires --gang_id (or GANG_ID) to be set."
+    )
+  validate_gang_id(gang_id)
+  # A failed delete only warns, so the orchestrator keeps its own exit code.
+  return (
+      f'echo "Orchestrator finished (exit=${{EXIT_CODE}});'
+      f' tearing down sibling JobSets in gang {gang_id}..."\n'
+      "if ! kubectl delete jobsets.jobset.x-k8s.io"
+      f' -n "{namespace}"'
+      f' -l "scheduling.x-k8s.io/gang-id={gang_id}"'
+      f' --field-selector="metadata.name!={jobset_name}"'
+      " --ignore-not-found=true --wait=false; then\n"
+      f'  echo "WARNING: Failed to tear down sibling JobSets in gang {gang_id}'
+      ' (check kubectl and ServiceAccount RBAC)." >&2\n'
+      "fi"
+  )
+
+
+def render_fail_fast_fields(
+    fail_fast: bool, startup_retries: int
+) -> dict[str, str]:
+  """Renders JobSet/Job fail-fast and startup retry fields."""
+  if startup_retries < 0:
+    raise ValueError(f"--startup_retries must be >= 0, got {startup_retries}")
+  if not fail_fast:
+    return {
+        "STARTUP_RETRIES": str(startup_retries),
+        "BACKOFF_LIMIT": "2048000",
+        "RESTART_POLICY": "OnFailure",
+        "WORKER_NONZERO_EXIT_GUARD": "",
+    }
+  return {
+      "STARTUP_RETRIES": str(startup_retries),
+      "BACKOFF_LIMIT": "0",
+      "RESTART_POLICY": "Never",
+      "WORKER_NONZERO_EXIT_GUARD": _WORKER_NONZERO_EXIT_GUARD,
+  }
+
+
+def parse_pathways_worker_env_json(text: str) -> dict[str, str]:
+  """Parses the `--pathways_worker_env_json` value: a JSON object of strings.
+
+  Args:
+    text: The flag value.
+
+  Returns:
+    The variables, in order.
+
+  Raises:
+    ValueError: If the value is not a JSON object of strings to strings, or a
+      name is not a variable name or is one the Pathways template sets itself.
+  """
+  try:
+    worker_env = json.loads(text)
+  except json.JSONDecodeError as e:
+    raise ValueError(
+        f"Pathways worker environment {text!r} is not valid JSON: {e}"
+    ) from e
+  if not isinstance(worker_env, dict) or not all(
+      isinstance(value, str) for value in worker_env.values()
+  ):
+    raise ValueError(
+        f"Pathways worker environment {text!r} must be a JSON object of"
+        " strings."
+    )
+  for key in worker_env:
+    if not ENV_VAR_NAME_RE.match(key):
+      raise ValueError(
+          f"Pathways worker environment variable name {key!r} is not a"
+          " variable name."
+      )
+    if key in _PATHWAYS_WORKER_TEMPLATE_ENV:
+      raise ValueError(
+          f"Pathways worker environment variable {key!r} is set by the"
+          " template (RAIDEN_BROADCAST_K, ENABLE_MULTI_NUMA and"
+          " TPU_RAIDEN_DATA_NICS have their own settings)."
+      )
+  return worker_env
+
+
+_DATA_NICS_ENV = "TPU_RAIDEN_DATA_NICS"
+# Environment variables this module read before each got a flag. A caller that
+# still sets one fails, since the value would otherwise be ignored.
+_RETIRED_ENV_FLAGS = types.MappingProxyType({
+    "COLOCATED_PYTHON_SIDECAR_IMAGE": "--colocated_python_sidecar_image",
+    "COLOCATED_PYTHON_SIDECAR_MEMORY": "--colocated_python_sidecar_memory",
+    "COLOCATED_PYTHON_SIDECAR_SHM": "--[no-]colocated_python_sidecar_shm",
+    "ENABLE_MULTI_NUMA": "--enable_multi_numa",
+    "PATHWAYS_PROXY_EXTRA_ARGS": "--pathways_proxy_extra_args",
+    "PATHWAYS_WORKER_EXTRA_ENV": "--pathways_worker_env_json",
+    "RAIDEN_BROADCAST_K": "--raiden_broadcast_k",
+    "TPU_RESERVATION": "--tpu_reservation",
+})
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+  """Parses command line arguments."""
   parser = argparse.ArgumentParser(
       description="Generate Kubernetes deployment YAML from template."
   )
@@ -45,6 +375,21 @@ def main() -> None:
       help="CPU machine type (e.g. n2-standard-64)",
   )
   parser.add_argument(
+      "--cpu_nodepool",
+      default=os.environ.get("CPU_NODEPOOL") or None,
+      help="GKE nodepool for CPU jobs (e.g. cpu-np, cpu-highmem-np).",
+  )
+  parser.add_argument(
+      "--cpu_memory",
+      default=os.environ.get("CPU_MEMORY") or None,
+      help="Memory request for CPU jobs (e.g. 240G, 300Gi).",
+  )
+  parser.add_argument(
+      "--cpu_memory_limit",
+      default=None,
+      help="Memory limit for CPU jobs; empty sets none.",
+  )
+  parser.add_argument(
       "--namespace",
       default=os.environ.get("K8S_NAMESPACE", "default"),
       help="Kubernetes namespace to deploy into.",
@@ -54,16 +399,117 @@ def main() -> None:
       default=os.environ.get("KUEUE_QUEUE_NAME", ""),
       help="Kueue local queue name for scheduling (optional).",
   )
+  parser.add_argument(
+      "--preemptible",
+      action=argparse.BooleanOptionalAction,
+      default=None,
+      help=(
+          'Add scheduling.x-k8s.io/preemptible: "true" label to JobSet'
+          " metadata (or set PREEMPTIBLE=true)."
+      ),
+  )
+  parser.add_argument(
+      "--gang_id",
+      default=os.environ.get("GANG_ID"),
+      help=(
+          "Per-run unique identifier shared across all JobSets in a single RL"
+          " run (emits scheduling.x-k8s.io/gang-id JobSet label; must be unique"
+          " per concurrent run in the namespace so teardown only deletes"
+          " sibling JobSets of the same run)."
+      ),
+  )
+  parser.add_argument(
+      "--service_account",
+      default=os.environ.get("SERVICE_ACCOUNT") or None,
+      help="Kubernetes service account for pods.",
+  )
+  parser.add_argument(
+      "--priority_class",
+      default=os.environ.get("PRIORITY_CLASS")
+      or os.environ.get("KUEUE_PRIORITY_CLASS")
+      or None,
+      help="Kubernetes priority class for pods.",
+  )
+  parser.add_argument(
+      "--use_dynamic_slicing",
+      action=argparse.BooleanOptionalAction,
+      default=None,
+      help="Enable GKE dynamic slicing annotations and topology selectors.",
+  )
+  parser.add_argument(
+      "--head_nodepool",
+      default=None,
+      help="Kubernetes nodepool for Pathways head pod (e.g. cpu-np).",
+  )
+  parser.add_argument(
+      "--head_excluded_nodepools",
+      default="",
+      help=(
+          "Comma-separated GKE node pools that the Pathways head pod, which"
+          " runs on a pw-node host when --use_dynamic_slicing is off, must not"
+          " be admitted to. Set it to the node pools of the Kueue CPU"
+          " ResourceFlavors listed before the TPU flavor (see"
+          " `render_colocated_head_affinity`)."
+      ),
+  )
+  parser.add_argument(
+      "--termination_grace_seconds",
+      default=(
+          int(os.environ["TERMINATION_GRACE_SECONDS"])
+          if os.environ.get("TERMINATION_GRACE_SECONDS")
+          else None
+      ),
+      type=int,
+      help=(
+          "Termination grace period in seconds for pods (default: 300 for CPU"
+          " orchestrator, 10 for TPU/Pathways templates)."
+      ),
+  )
+  parser.add_argument(
+      "--teardown_gang_on_exit",
+      action="store_true",
+      default=None,
+      help=(
+          "When rendering jobset.cpu.yaml with --gang_id, append a kubectl"
+          " delete of sibling JobSets in the same gang after the orchestrator"
+          " exits (or set TEARDOWN_GANG_ON_EXIT=1)."
+      ),
+  )
+  parser.add_argument(
+      "--fail_fast",
+      action="store_true",
+      default=None,
+      help=(
+          "Disable in-place pod restarts (backoffLimit=0, restartPolicy=Never)"
+          " and map unexpected zero worker exits to 1 (or set FAIL_FAST=1)."
+      ),
+  )
+  parser.add_argument(
+      "--startup_retries",
+      type=int,
+      default=int(os.environ.get("STARTUP_RETRIES") or "3"),
+      help=(
+          "JobSet failurePolicy.maxRestarts (default: STARTUP_RETRIES or 3):"
+          " whole-JobSet recreations over the JobSet's lifetime, not only at"
+          " startup. Trainer/reference workers can re-register only before"
+          " bring_up; with --fail_fast, use --gang_id and"
+          " --teardown_gang_on_exit so the orchestrator's exit deletes the"
+          " sibling JobSets."
+      ),
+  )
 
   parser.add_argument(
       "--pathways_server_image",
-      default="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest",
+      default=(
+          "us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/server:latest"
+      ),
       help="Pathways server image",
   )
   parser.add_argument(
       "--pathways_proxy_server_image",
       default=(
-          "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest"
+          "us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/"
+          "proxy_server:latest"
       ),
       help="Pathways proxy server image",
   )
@@ -75,7 +521,7 @@ def main() -> None:
   parser.add_argument(
       "--pathways_proxy_memory_limit",
       default="100G",
-      help="Memory limit of the Pathways proxy container",
+      help="Memory limit of the Pathways proxy container; empty sets none",
   )
   parser.add_argument(
       "--pathways_proxy_memory",
@@ -84,28 +530,45 @@ def main() -> None:
           "Memory request for the Pathways proxy container. Kept well below"
           " --pathways_proxy_memory_limit: requests are the scheduling floor,"
           " and the head pod is co-located with pw-node via podAffinity, so"
-          " requesting the full limit over-reserves the node."
+          " requesting the full limit over-reserves the node. Empty sets"
+          " none."
       ),
   )
   parser.add_argument(
       "--pathways_rm_memory",
       default="4G",
-      help="Memory request for the pathways-rm container",
+      help="Memory request for the pathways-rm container; empty sets none",
+  )
+  parser.add_argument(
+      "--pathways_rm_memory_limit",
+      default="32G",
+      help="Memory limit for the pathways-rm container; empty sets none",
   )
   parser.add_argument(
       "--user_container_memory",
       default="48G",
-      help="Memory request for the user/worker container",
+      help="Memory request for the user/worker container; empty sets none",
   )
   parser.add_argument(
       "--user_container_memory_limit",
       default="70G",
-      help="Memory limit for the user/worker container",
+      help=(
+          "Memory limit for the user/worker container, and the size limit of"
+          " its IFRT large-transfer volume; empty sets none"
+      ),
   )
   parser.add_argument(
       "--pathways_worker_memory",
       default="100G",
-      help="Memory request for the pathways-worker container",
+      help=(
+          "Memory request for the pathways-worker container (the Pathways"
+          " server on each TPU host); empty sets none"
+      ),
+  )
+  parser.add_argument(
+      "--pathways_worker_memory_limit",
+      default="",
+      help="Memory limit for the pathways-worker container; empty sets none",
   )
   parser.add_argument(
       "--ifrt_proxy_large_transfer_threshold_bytes",
@@ -119,6 +582,93 @@ def main() -> None:
           " takes memory in the user container until it has been sent to the"
           " workers. The default, like the IFRT proxy client's, turns this"
           " off."
+      ),
+  )
+
+  parser.add_argument(
+      "--pathways_worker_env_json",
+      default="{}",
+      help=(
+          "Pathways templates: extra environment variables for the"
+          " pathways-worker container, as a JSON object of strings such as"
+          ' {"KEY": "VALUE"}'
+      ),
+  )
+  parser.add_argument(
+      "--pathways_proxy_extra_args",
+      default="",
+      help=(
+          "Pathways templates: extra arguments for the pathways-proxy"
+          " container, separated by whitespace"
+      ),
+  )
+  parser.add_argument(
+      "--colocated_python_sidecar_image",
+      default="",
+      help=(
+          "Pathways templates: image of the colocated Python sidecar of the"
+          " pathways-worker pods; empty runs no sidecar"
+      ),
+  )
+  parser.add_argument(
+      "--colocated_python_sidecar_memory",
+      default="16Gi",
+      help="Memory request of the colocated Python sidecar; empty sets none",
+  )
+  parser.add_argument(
+      "--colocated_python_sidecar_memory_limit",
+      default="",
+      help="Memory limit of the colocated Python sidecar; empty sets none",
+  )
+  parser.add_argument(
+      "--colocated_python_sidecar_shm",
+      action=argparse.BooleanOptionalAction,
+      default=True,
+      help=(
+          "Whether the colocated Python sidecar shares a memory-backed"
+          " directory with pathways-worker"
+      ),
+  )
+  parser.add_argument(
+      "--ckpt_gcsfuse_bucket",
+      default="",
+      help=(
+          "GCS bucket to mount with GCSFuse for checkpoints in a Pathways"
+          " JobSet; empty mounts none"
+      ),
+  )
+  parser.add_argument(
+      "--ckpt_gcsfuse_mount_path",
+      default="/gcs/ckpt",
+      help="Absolute path at which --ckpt_gcsfuse_bucket is mounted",
+  )
+  parser.add_argument(
+      "--ckpt_gcsfuse_mount_options",
+      default="implicit-dirs,metadata-cache:negative-ttl-secs:0",
+      help="gcsfuse mount options of --ckpt_gcsfuse_bucket",
+  )
+  parser.add_argument(
+      "--tpu_reservation",
+      default="",
+      help="Compute Engine reservation the TPU pods must run on",
+  )
+  parser.add_argument(
+      "--raiden_broadcast_k",
+      type=int,
+      default=64,
+      help="RAIDEN_BROADCAST_K of the TPU containers",
+  )
+  parser.add_argument(
+      "--enable_multi_numa",
+      action="store_true",
+      help="Sets ENABLE_MULTI_NUMA=1 on the TPU containers (0 otherwise)",
+  )
+  parser.add_argument(
+      "--raiden_data_nics",
+      default="eth0",
+      help=(
+          "Comma-separated NICs for TPU_RAIDEN_DATA_NICS on the TPU"
+          " containers; empty leaves the variable unset"
       ),
   )
 
@@ -153,15 +703,40 @@ def main() -> None:
       default="",
       help="Command to run on Ray worker pods before joining the Ray cluster.",
   )
+  parser.add_argument(
+      "--otel_googlecloud",
+      action=argparse.BooleanOptionalAction,
+      default=True,
+      help=(
+          "Enable Cloud Monitoring and Cloud Logging (`googlecloud`) exporters"
+          " in `jobset.otel.yaml` (default: True; pass --no-otel_googlecloud to"
+          " keep only `debug` and `file/events`)."
+      ),
+  )
 
-  args = parser.parse_args()
+  args = parser.parse_args(argv)
+  retired = [
+      f"{name} (use {flag})"
+      for name, flag in _RETIRED_ENV_FLAGS.items()
+      if name in os.environ and os.environ[name]
+  ]
+  if retired:
+    parser.error(
+        "these environment variables are no longer read: " + ", ".join(retired)
+    )
   if not 0 < args.ifrt_proxy_large_transfer_threshold_bytes <= 2**63 - 1:
     # The IFRT proxy client parses the value as a positive int64.
     parser.error(
         "--ifrt_proxy_large_transfer_threshold_bytes must be in [1, 2**63 - 1],"
         f" got {args.ifrt_proxy_large_transfer_threshold_bytes}"
     )
+  return args
 
+
+def build_substitutions(
+    args: argparse.Namespace, template_text: str = ""
+) -> dict[str, Any]:
+  """Computes substitution dictionary for template rendering."""
   tpu_type = None
   tpu_topology = None
   num_chips = None
@@ -208,53 +783,511 @@ def main() -> None:
       raise ValueError(f"Unsupported TPU type {tpu_type}")
 
   jobset_name = args.jobset_name
-  if args.jobset_name is None:
+  if jobset_name is None:
     jobset_name = f"{os.environ.get('USER')}-{pw_instance_type}-{num_chips}"
 
-  queue_label = (
-      f"  labels:\n    kueue.x-k8s.io/queue-name: {args.queue_name}\n"
-      if args.queue_name
+  if args.preemptible is not None:
+    preemptible = args.preemptible
+  else:
+    preemptible = env_utils.parse_env_bool("PREEMPTIBLE")
+
+  labels: list[str] = []
+  if args.queue_name:
+    labels.append(f"    kueue.x-k8s.io/queue-name: {args.queue_name}\n")
+  if preemptible:
+    labels.append('    scheduling.x-k8s.io/preemptible: "true"\n')
+  if args.gang_id:
+    labels.append(render_gang_labels(args.gang_id))
+  queue_label = "  labels:\n" + "".join(labels) if labels else ""
+
+  supports_fail_fast = (
+      not template_text or "${WORKER_NONZERO_EXIT_GUARD}" in template_text
+  )
+  fail_fast = (
+      bool(args.fail_fast)
+      if args.fail_fast is not None
+      else (env_utils.parse_env_bool("FAIL_FAST") and supports_fail_fast)
+  )
+  supports_teardown = (
+      not template_text or "${TEARDOWN_ON_EXIT}" in template_text
+  )
+  teardown_gang_on_exit = (
+      bool(args.teardown_gang_on_exit)
+      if args.teardown_gang_on_exit is not None
+      else (
+          env_utils.parse_env_bool("TEARDOWN_GANG_ON_EXIT")
+          and supports_teardown
+      )
+  )
+
+  if args.cpu_nodepool:
+    cpu_node_selector = f"cloud.google.com/gke-nodepool: {args.cpu_nodepool}"
+  else:
+    cpu_node_selector = f"node.kubernetes.io/instance-type: {args.cpu_machine}"
+
+  cpu_resource_sections = []
+  if args.cpu_memory:
+    cpu_resource_sections.append(
+        "  requests:\n"
+        '    cpu: "24"\n'
+        f"    memory: {args.cpu_memory}\n"
+        "    ephemeral-storage: 20Gi"
+    )
+  if args.cpu_memory_limit:
+    cpu_resource_sections.append(
+        f"  limits:\n    memory: {args.cpu_memory_limit}"
+    )
+  cpu_resources = (
+      "resources:\n" + "\n".join(cpu_resource_sections)
+      if cpu_resource_sections
       else ""
   )
 
-  with open(args.template_file, "r") as f:
-    template = string.Template(f.read())
-    content = template.substitute(
-        JOBSET_NAME=jobset_name,
-        USER=os.environ.get("USER"),
-        NAMESPACE=args.namespace,
-        QUEUE_NAME=args.queue_name,
-        QUEUE_LABEL=queue_label,
-        SERVER_IMAGE=args.pathways_server_image,
-        PROXY_IMAGE=args.pathways_proxy_server_image,
-        GCS_SCRATCH_LOCATION=args.pathways_gcs_scratch_location,
-        PATHWAYS_PROXY_MEMORY_LIMIT=args.pathways_proxy_memory_limit,
-        PATHWAYS_PROXY_MEMORY=args.pathways_proxy_memory,
-        PATHWAYS_RM_MEMORY=args.pathways_rm_memory,
-        USER_CONTAINER_MEMORY=args.user_container_memory,
-        USER_CONTAINER_MEMORY_LIMIT=args.user_container_memory_limit,
-        PATHWAYS_WORKER_MEMORY=args.pathways_worker_memory,
-        IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES=(
-            args.ifrt_proxy_large_transfer_threshold_bytes
-        ),
-        CPU_MACHINE=args.cpu_machine,
-        TPU_MACHINE=tpu_machine,
-        TPU_TYPE=tpu_type,
-        TPU_TOPOLOGY=tpu_topology,
-        PW_INSTANCE_TYPE=pw_instance_type,
-        REPLICAS=1,
-        COMPLETIONS=num_chips // 4 if num_chips else None,
-        PARALLELISM=num_chips // 4 if num_chips else None,
-        PODSET_SLICE_TOPOLOGY=slice_topology,
-        PODSET_SLICE_SIZE=slice_size,
-        USER_CONTAINER=args.worker_container_name,
-        USER_CONTAINER_IMAGE=args.worker_container_image,
-        USER_CONTAINER_PORT=args.worker_container_port,
-        STARTUP_COMMAND=args.worker_startup_command,
-        RAY_HEAD_PRE_INIT_COMMAND=args.ray_head_pre_init_command,
-        RAY_WORKER_PRE_INIT_COMMAND=args.ray_worker_pre_init_command,
+  priority_class_line = (
+      f"priorityClassName: {args.priority_class}" if args.priority_class else ""
+  )
+  service_account_line = (
+      f"serviceAccountName: {args.service_account}"
+      if args.service_account
+      else ""
+  )
+
+  if args.termination_grace_seconds is not None:
+    termination_grace_seconds = args.termination_grace_seconds
+  elif os.path.basename(args.template_file or "") == "jobset.cpu.yaml":
+    termination_grace_seconds = 300
+  else:
+    termination_grace_seconds = 10
+
+  reservation_name = args.tpu_reservation.strip()
+  reservation_selector = (
+      f"cloud.google.com/reservation-name: {reservation_name}"
+      if reservation_name
+      else ""
+  )
+
+  if args.use_dynamic_slicing is not None:
+    use_dynamic_slicing = args.use_dynamic_slicing
+  else:
+    use_dynamic_slicing = env_utils.parse_env_bool("USE_DYNAMIC_SLICING")
+
+  explicit_head_nodepool = (
+      args.head_nodepool or os.environ.get("HEAD_NODEPOOL", "").strip()
+  )
+  if explicit_head_nodepool and not use_dynamic_slicing:
+    raise ValueError(
+        "--head_nodepool (or HEAD_NODEPOOL) requires --use_dynamic_slicing."
     )
-    print(content)
+  head_excluded_nodepools = parse_head_excluded_nodepools(
+      args.head_excluded_nodepools
+  )
+  if head_excluded_nodepools and use_dynamic_slicing:
+    raise ValueError(
+        "--head_excluded_nodepools applies only without"
+        " --use_dynamic_slicing; with it, set --head_nodepool."
+    )
+
+  if use_dynamic_slicing:
+    if explicit_head_nodepool:
+      head_nodepool = explicit_head_nodepool
+      head_node_selector = f"cloud.google.com/gke-nodepool: {head_nodepool}"
+    elif args.cpu_machine:
+      head_nodepool = ""
+      head_node_selector = (
+          f"node.kubernetes.io/instance-type: {args.cpu_machine}"
+      )
+    else:
+      head_nodepool = "cpu-np"
+      head_node_selector = f"cloud.google.com/gke-nodepool: {head_nodepool}"
+    head_affinity = ""
+    toleration_op = "Equal" if head_nodepool else "Exists"
+    toleration_val = f'  value: "{head_nodepool}"\n' if head_nodepool else ""
+    head_tolerations = (
+        "tolerations:\n"
+        '- key: "cloud.google.com/gke-nodepool"\n'
+        f'  operator: "{toleration_op}"\n'
+        f"{toleration_val}"
+        '  effect: "NoSchedule"'
+    )
+    tpu_topology_selector = ""
+  else:
+    head_selector_lines = [
+        f"cloud.google.com/gke-tpu-accelerator: {tpu_type}",
+        f"cloud.google.com/gke-tpu-topology: {tpu_topology}",
+    ]
+    if reservation_selector:
+      head_selector_lines.append(reservation_selector)
+    head_node_selector = "\n".join(head_selector_lines)
+    head_affinity = render_colocated_head_affinity(
+        jobset_name, head_excluded_nodepools
+    )
+    head_tolerations = ""
+    tpu_topology_selector = (
+        f"cloud.google.com/gke-tpu-topology: {tpu_topology}"
+        if tpu_topology
+        else ""
+    )
+
+  if use_dynamic_slicing and slice_topology:
+    if slice_size and slice_size > 1:
+      anno_lines = [
+          f'cloud.google.com/gke-tpu-slice-topology: "{tpu_topology}"',
+          'cloud.google.com/skip-tpu-webhook-check: "true"',
+          (
+              "kueue.x-k8s.io/podset-required-topology:"
+              " cloud.google.com/gce-topology-block"
+          ),
+          (
+              "kueue.x-k8s.io/podset-slice-required-topology:"
+              f" cloud.google.com/gke-tpu-partition-{slice_topology}-id"
+          ),
+          f'kueue.x-k8s.io/podset-slice-size: "{slice_size}"',
+      ]
+    else:
+      anno_lines = [
+          f'cloud.google.com/gke-tpu-slice-topology: "{slice_topology}"',
+          'cloud.google.com/skip-tpu-webhook-check: "true"',
+      ]
+    tpu_annotations = "\n".join(anno_lines)
+  else:
+    tpu_annotations = ""
+
+  if use_dynamic_slicing:
+    if slice_size and slice_size > 1:
+      pw_node_affinity = (
+          "affinity:\n"
+          "  nodeAffinity:\n"
+          "    requiredDuringSchedulingIgnoredDuringExecution:\n"
+          "      nodeSelectorTerms:\n"
+          "      - matchExpressions:\n"
+          "        - key:"
+          f" cloud.google.com/gke-tpu-partition-{slice_topology}-state\n"
+          "          operator: In\n"
+          '          values: ["HEALTHY", "DEGRADED"]'
+      )
+      tpu_affinity = pw_node_affinity
+    else:
+      pw_node_affinity = ""
+      tpu_affinity = ""
+  else:
+    pw_node_affinity = (
+        "affinity:\n"
+        "  # place on nodes in the same nodepool\n"
+        "  podAffinity:\n"
+        "    requiredDuringSchedulingIgnoredDuringExecution:\n"
+        "    - topologyKey: cloud.google.com/gke-nodepool\n"
+        "      labelSelector:\n"
+        "        matchExpressions:\n"
+        "        - key: jobset.sigs.k8s.io/jobset-name\n"
+        "          operator: In\n"
+        "          values:\n"
+        f"          - {jobset_name}\n"
+        "  # ensure exclusive access to the nodepool\n"
+        "  podAntiAffinity:\n"
+        "    requiredDuringSchedulingIgnoredDuringExecution:\n"
+        "    - topologyKey: cloud.google.com/gke-nodepool\n"
+        "      labelSelector:\n"
+        "        matchExpressions:\n"
+        "        - key: jobset.sigs.k8s.io/jobset-name\n"
+        "          operator: Exists\n"
+        "        - key: jobset.sigs.k8s.io/jobset-name\n"
+        "          operator: NotIn\n"
+        "          values:\n"
+        f"          - {jobset_name}"
+    )
+    tpu_affinity = ""
+
+  sidecar_image = args.colocated_python_sidecar_image.strip()
+  sidecar_shm = args.colocated_python_sidecar_shm
+  sidecar_memory = args.colocated_python_sidecar_memory.strip()
+  sidecar_memory_limit = args.colocated_python_sidecar_memory_limit.strip()
+  sidecar_memory_request_entry = (
+      f"      memory: {sidecar_memory}\n" if sidecar_memory else ""
+  )
+  sidecar_memory_limits = (
+      f"    limits:\n      memory: {sidecar_memory_limit}\n"
+      if sidecar_memory_limit
+      else ""
+  )
+  if sidecar_shm:
+    worker_shm_mount = (
+        "  - mountPath: /tmp/sidecar\n"
+        "    name: sidecar-shared-memory\n"
+    )
+    sidecar_shm_env = (
+        "\n  - name: CLOUD_PATHWAYS_SIDECAR_SHM_DIRECTORY\n"
+        "    value: /tmp/sidecar"
+    )
+    sidecar_volume_mount = (
+        "  - mountPath: /tmp/sidecar\n"
+        "    name: sidecar-shared-memory"
+    )
+  else:
+    worker_shm_mount = ""
+    sidecar_shm_env = ""
+    sidecar_volume_mount = (
+        "  - mountPath: /tmp\n"
+        "    name: shared-tmp"
+    )
+  if sidecar_image:
+    colocated_python_sidecar_block = (
+        f"{worker_shm_mount}"
+        "initContainers:\n"
+        "- name: colocated-python-sidecar\n"
+        f"  image: {sidecar_image}\n"
+        "  imagePullPolicy: Always\n"
+        "  env:\n"
+        "  - name: GRPC_SERVER_ADDRESS\n"
+        f'    value: "0.0.0.0:50051"{sidecar_shm_env}\n'
+        "  ports:\n"
+        "  - containerPort: 50051\n"
+        "    protocol: TCP\n"
+        "  resources:\n"
+        "    requests:\n"
+        '      cpu: "4"\n'
+        f"{sidecar_memory_request_entry}"
+        f"{sidecar_memory_limits}"
+        "  restartPolicy: Always\n"
+        "  volumeMounts:\n"
+        f"{sidecar_volume_mount}"
+    )
+    colocated_python_proxy_args = "- --sidecar_name=external"
+  else:
+    colocated_python_sidecar_block = ""
+    colocated_python_proxy_args = ""
+  if sidecar_image and sidecar_shm:
+    colocated_python_worker_args = (
+        "- --cloud_pathways_sidecar_shm_directory=/tmp/sidecar"
+    )
+    colocated_python_sidecar_volume = (
+        "- name: sidecar-shared-memory\n"
+        "  emptyDir:\n"
+        "    medium: Memory"
+    )
+  else:
+    colocated_python_worker_args = ""
+    colocated_python_sidecar_volume = ""
+
+  # GCSFuse mount for checkpoints (e.g. a zonal Rapid bucket), at one path in
+  # every container that touches checkpoint files, whichever one writes arrays.
+  gcsfuse_bucket = parse_ckpt_gcsfuse_bucket(args.ckpt_gcsfuse_bucket)
+  if gcsfuse_bucket:
+    validate_ckpt_gcsfuse_mount_path(args.ckpt_gcsfuse_mount_path)
+    gcsfuse_mount_path = json.dumps(args.ckpt_gcsfuse_mount_path)
+    # Zero limits lift the gcsfuse sidecar's default caps for checkpoint bursts.
+    gcsfuse_pod_annotations = (
+        'gke-gcsfuse/volumes: "true"\n'
+        'gke-gcsfuse/cpu-limit: "0"\n'
+        'gke-gcsfuse/memory-limit: "0"\n'
+        'gke-gcsfuse/ephemeral-storage-limit: "0"'
+    )
+    # hostNetworkPodKSA lets hostNetwork pods authenticate as their own KSA.
+    gcsfuse_volume = (
+        "- name: ckpt-gcsfuse\n"
+        "  csi:\n"
+        "    driver: gcsfuse.csi.storage.gke.io\n"
+        "    volumeAttributes:\n"
+        f"      bucketName: {json.dumps(gcsfuse_bucket)}\n"
+        "      mountOptions:"
+        f" {json.dumps(args.ckpt_gcsfuse_mount_options)}\n"
+        '      hostNetworkPodKSA: "true"'
+    )
+    gcsfuse_volume_mount = (
+        f"- mountPath: {gcsfuse_mount_path}\n  name: ckpt-gcsfuse"
+    )
+    if colocated_python_sidecar_block:
+      colocated_python_sidecar_block += (
+          f"\n  - mountPath: {gcsfuse_mount_path}\n    name: ckpt-gcsfuse"
+      )
+  else:
+    gcsfuse_pod_annotations = ""
+    gcsfuse_volume = ""
+    gcsfuse_volume_mount = ""
+
+  worker_env = parse_pathways_worker_env_json(args.pathways_worker_env_json)
+  pathways_worker_extra_env = "\n".join(
+      f"- name: {key}\n  value: {json.dumps(value)}"
+      for key, value in worker_env.items()
+  )
+
+  pathways_proxy_extra_args = "\n".join(
+      f"- {json.dumps(flag)}"
+      for flag in args.pathways_proxy_extra_args.split()
+  )
+
+  raiden_data_nics = args.raiden_data_nics.strip()
+  # Empty drops the entry, so Raiden picks the NICs by its own heuristic.
+  tpu_raiden_data_nics_env = ""
+  if raiden_data_nics:
+    tpu_raiden_data_nics_env = (
+        "- name: TPU_RAIDEN_DATA_NICS\n"
+        f"  value: {json.dumps(raiden_data_nics)}"
+    )
+  if args.otel_googlecloud:
+    otel_pipeline_args = (
+        "- --set=service::pipelines::metrics::exporters=[debug,googlecloud]\n"
+        "- --set=service::pipelines::logs::exporters="
+        "[debug,googlecloud,file/events]"
+    )
+  else:
+    otel_pipeline_args = (
+        "- --set=service::pipelines::logs::exporters=[debug,file/events]"
+    )
+
+  return {
+      "JOBSET_NAME": jobset_name,
+      "OTEL_PIPELINE_ARGS": otel_pipeline_args,
+      "USER": os.environ.get("USER"),
+      "NAMESPACE": args.namespace,
+      "QUEUE_NAME": args.queue_name,
+      "QUEUE_LABEL": queue_label,
+      "SERVICE_ACCOUNT_LINE": service_account_line,
+      "PRIORITY_CLASS_LINE": priority_class_line,
+      "CPU_NODE_SELECTOR": cpu_node_selector,
+      "CPU_RESOURCES": cpu_resources,
+      "TERMINATION_GRACE_SECONDS": termination_grace_seconds,
+      "TPU_TOPOLOGY_SELECTOR": tpu_topology_selector,
+      "TPU_ANNOTATIONS": tpu_annotations,
+      "TPU_AFFINITY": tpu_affinity,
+      "PW_NODE_AFFINITY": pw_node_affinity,
+      "HEAD_NODE_SELECTOR": head_node_selector,
+      "HEAD_AFFINITY": head_affinity,
+      "HEAD_TOLERATIONS": head_tolerations,
+      "RESERVATION_SELECTOR": reservation_selector,
+      "COLOCATED_PYTHON_SIDECAR_BLOCK": colocated_python_sidecar_block,
+      "COLOCATED_PYTHON_SIDECAR_VOLUME": colocated_python_sidecar_volume,
+      "COLOCATED_PYTHON_WORKER_ARGS": colocated_python_worker_args,
+      "COLOCATED_PYTHON_PROXY_ARGS": colocated_python_proxy_args,
+      "GCSFUSE_POD_ANNOTATIONS": gcsfuse_pod_annotations,
+      "GCSFUSE_VOLUME": gcsfuse_volume,
+      "GCSFUSE_VOLUME_MOUNT": gcsfuse_volume_mount,
+      "PATHWAYS_WORKER_EXTRA_ENV": pathways_worker_extra_env,
+      "PATHWAYS_PROXY_EXTRA_ARGS": pathways_proxy_extra_args,
+      "RAIDEN_BROADCAST_K": args.raiden_broadcast_k,
+      "ENABLE_MULTI_NUMA": "1" if args.enable_multi_numa else "0",
+      "TPU_RAIDEN_DATA_NICS_ENV": tpu_raiden_data_nics_env,
+      "TEARDOWN_ON_EXIT": render_teardown_on_exit(
+          teardown_gang_on_exit,
+          args.gang_id,
+          args.namespace,
+          jobset_name,
+      ),
+      **render_fail_fast_fields(fail_fast, args.startup_retries),
+      "SERVER_IMAGE": args.pathways_server_image,
+      "PROXY_IMAGE": args.pathways_proxy_server_image,
+      "GCS_SCRATCH_LOCATION": args.pathways_gcs_scratch_location,
+      "PATHWAYS_PROXY_MEMORY_REQUEST_LINE": memory_line(
+          args.pathways_proxy_memory
+      ),
+      "PATHWAYS_PROXY_MEMORY_LIMIT_LINE": memory_line(
+          args.pathways_proxy_memory_limit
+      ),
+      "PATHWAYS_RM_MEMORY_REQUEST_LINE": memory_line(args.pathways_rm_memory),
+      "PATHWAYS_RM_MEMORY_LIMIT_LINE": memory_line(
+          args.pathways_rm_memory_limit
+      ),
+      "USER_CONTAINER_RESOURCES": render_memory_resources(
+          args.user_container_memory, args.user_container_memory_limit
+      ),
+      "IFRT_PROXY_LARGE_TRANSFER_SIZE_LIMIT": (
+          f"sizeLimit: {args.user_container_memory_limit}"
+          if args.user_container_memory_limit
+          else ""
+      ),
+      "PATHWAYS_WORKER_MEMORY_REQUEST_LINE": memory_line(
+          args.pathways_worker_memory
+      ),
+      "PATHWAYS_WORKER_MEMORY_LIMIT_LINE": memory_line(
+          args.pathways_worker_memory_limit
+      ),
+      "IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES": (
+          args.ifrt_proxy_large_transfer_threshold_bytes
+      ),
+      "CPU_MACHINE": args.cpu_machine,
+      "TPU_MACHINE": tpu_machine,
+      "TPU_TYPE": tpu_type,
+      "TPU_TOPOLOGY": tpu_topology,
+      "NUM_CHIPS": num_chips,
+      "PW_INSTANCE_TYPE": pw_instance_type,
+      "REPLICAS": 1,
+      "COMPLETIONS": num_chips // 4 if num_chips else None,
+      "PARALLELISM": num_chips // 4 if num_chips else None,
+      "PODSET_SLICE_TOPOLOGY": slice_topology,
+      "PODSET_SLICE_SIZE": slice_size,
+      "USER_CONTAINER": args.worker_container_name,
+      "USER_CONTAINER_IMAGE": args.worker_container_image,
+      "USER_CONTAINER_PORT": args.worker_container_port,
+      "STARTUP_COMMAND": args.worker_startup_command,
+      "RAY_HEAD_PRE_INIT_COMMAND": args.ray_head_pre_init_command,
+      "RAY_WORKER_PRE_INIT_COMMAND": args.ray_worker_pre_init_command,
+  }
+
+
+def render_template(template_text: str, args: argparse.Namespace) -> str:
+  """Validates template compatibility and renders substituted YAML."""
+  if args.fail_fast and "${WORKER_NONZERO_EXIT_GUARD}" not in template_text:
+    raise ValueError(
+        f"--fail_fast is not supported by template {args.template_file}"
+    )
+  if args.teardown_gang_on_exit and "${TEARDOWN_ON_EXIT}" not in template_text:
+    raise ValueError(
+        f"--teardown_gang_on_exit is not supported by template"
+        f" {args.template_file}"
+    )
+  # Only the templates that set the variable took it from the environment.
+  if (
+      "${TPU_RAIDEN_DATA_NICS_ENV}" in template_text
+      and _DATA_NICS_ENV in os.environ
+      and os.environ[_DATA_NICS_ENV]
+  ):
+    raise ValueError(
+        f"{_DATA_NICS_ENV} is set in the environment, which is no longer read;"
+        " use --raiden_data_nics."
+    )
+  is_pathways = "name: pathways-worker" in template_text
+  sidecar_image = args.colocated_python_sidecar_image.strip()
+  if is_pathways and sidecar_image:
+    missing_placeholders = [
+        p
+        for p in (
+            "${COLOCATED_PYTHON_SIDECAR_BLOCK}",
+            "${COLOCATED_PYTHON_WORKER_ARGS}",
+            "${COLOCATED_PYTHON_PROXY_ARGS}",
+            "${COLOCATED_PYTHON_SIDECAR_VOLUME}",
+        )
+        if p not in template_text
+    ]
+    if missing_placeholders:
+      raise ValueError(
+          f"--colocated_python_sidecar_image is set, but template "
+          f"{args.template_file} lacks {', '.join(missing_placeholders)}"
+      )
+  if is_pathways and parse_ckpt_gcsfuse_bucket(args.ckpt_gcsfuse_bucket):
+    missing_placeholders = [
+        p
+        for p in (
+            "${GCSFUSE_POD_ANNOTATIONS}",
+            "${GCSFUSE_VOLUME}",
+            "${GCSFUSE_VOLUME_MOUNT}",
+        )
+        if p not in template_text
+    ]
+    if missing_placeholders:
+      raise ValueError(
+          f"--ckpt_gcsfuse_bucket is set, but template "
+          f"{args.template_file} lacks {', '.join(missing_placeholders)}"
+      )
+  substitutions = build_substitutions(args, template_text=template_text)
+  return _substitute_template(template_text, substitutions)
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+  """Parses command-line arguments and renders a deployment YAML from a template."""
+  args = parse_args(argv)
+  with open(args.template_file, "r") as f:
+    template_text = f.read()
+  content = render_template(template_text, args)
+  print(content)
 
 
 if __name__ == "__main__":

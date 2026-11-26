@@ -1,8 +1,12 @@
 from concurrent import futures
+import importlib.abc
+import importlib.machinery
+import importlib.util
 import json
 import locale
 import os
 import pathlib
+import sys
 import tempfile
 import threading
 import time
@@ -612,6 +616,91 @@ class TrajectoryLoggerTest(absltest.TestCase):
   def test_trajectory_logger_ext_is_available(self):
     """Tests that the C++ extension is built in every build, including OSS."""
     self.assertIsNotNone(trajectory_logger._trajectory_logger_ext)
+
+  def test_missing_ext_falls_back_while_corrupt_so_raises_import_error(self):
+    assert trajectory_logger.__file__ is not None
+    src_path = pathlib.Path(trajectory_logger.__file__)
+    target_names = frozenset({
+        'tunix.utils._trajectory_logger_ext',
+        f'{trajectory_logger.__package__}._trajectory_logger_ext',
+    })
+
+    class _MissingExtFinder(importlib.abc.MetaPathFinder):
+
+      def find_spec(self, fullname, path, target=None):
+        del path, target
+        if fullname in target_names:
+          raise ModuleNotFoundError(
+              f'No module named {fullname!r}', name=fullname
+          )
+        return None
+
+    utils_pkg = sys.modules.get('tunix.utils')
+    saved_modules = {
+        name: sys.modules.pop(name)
+        for name in list(sys.modules)
+        if name in target_names
+    }
+    had_attr = (
+        utils_pkg is not None
+        and '_trajectory_logger_ext' in utils_pkg.__dict__
+    )
+    saved_attr = (
+        utils_pkg.__dict__.pop('_trajectory_logger_ext', None)
+        if utils_pkg is not None
+        else None
+    )
+    try:
+      with mock.patch.object(
+          sys, 'meta_path', [_MissingExtFinder(), *sys.meta_path]
+      ):
+        spec = importlib.util.spec_from_file_location(
+            '_tunix_traj_logger_unbuilt_probe', src_path
+        )
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = mod
+        try:
+          spec.loader.exec_module(mod)
+        finally:
+          sys.modules.pop(spec.name, None)
+        self.assertIsNone(mod._trajectory_logger_ext)
+        self.assertEqual(mod.dumps_json({'x': [1, 2]}), '{"x": [1, 2]}')
+
+      with tempfile.TemporaryDirectory() as tmp_dir:
+        corrupt_so = pathlib.Path(tmp_dir) / '_trajectory_logger_ext.abi3.so'
+        corrupt_so.write_bytes(b'corrupt-elf-shared-object')
+
+        class _CorruptExtFinder(importlib.abc.MetaPathFinder):
+
+          def find_spec(self, fullname, path, target=None):
+            del path, target
+            if fullname in target_names:
+              loader = importlib.machinery.ExtensionFileLoader(
+                  fullname, str(corrupt_so)
+              )
+              return importlib.util.spec_from_loader(fullname, loader)
+            return None
+
+        with mock.patch.object(
+            sys, 'meta_path', [_CorruptExtFinder(), *sys.meta_path]
+        ):
+          broken_spec = importlib.util.spec_from_file_location(
+              '_tunix_traj_logger_corrupt_probe', src_path
+          )
+          assert broken_spec is not None and broken_spec.loader is not None
+          broken_mod = importlib.util.module_from_spec(broken_spec)
+          sys.modules[broken_spec.name] = broken_mod
+          try:
+            with self.assertRaises(ImportError) as cm:
+              broken_spec.loader.exec_module(broken_mod)
+            self.assertNotIsInstance(cm.exception, ModuleNotFoundError)
+          finally:
+            sys.modules.pop(broken_spec.name, None)
+    finally:
+      sys.modules.update(saved_modules)
+      if had_attr and utils_pkg is not None:
+        setattr(utils_pkg, '_trajectory_logger_ext', saved_attr)
 
   def test_pure_python_fallback_matches_extension(self):
     """Tests that the pure-Python fallback serializes like the C++ extension."""

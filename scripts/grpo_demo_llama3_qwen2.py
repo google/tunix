@@ -20,6 +20,8 @@ includes training, evaluation, and inference.
 Example usage:
 python3 grpo_demo_llama3_qwen2.py --root-dir=/path/to/root_dir \
 --model-version=Qwen/Qwen2.5-0.5B-Instruct
+python3 grpo_demo_llama3_qwen2.py --root-dir=/path/to/root_dir \
+--model-version=unsloth/Llama-3.2-1B-Instruct
 
 """
 
@@ -39,7 +41,6 @@ from tqdm.auto import tqdm
 import transformers
 from tunix.cli.utils import data as data_lib
 from tunix.examples.data import math_dataset
-from tunix.generate import mappings
 from tunix.models.llama3 import model as llama_lib
 from tunix.models.llama3 import params as llama_params
 from tunix.models.qwen2 import model as qwen2_lib
@@ -58,282 +59,14 @@ from tunix.sft import utils
 from tunix.tests import test_common as tc
 from tunix.utils import script_utils
 
-if os.getenv("JAX_PLATFORMS", None) == "proxy":
-  import pathwaysutils
-
-  pathwaysutils.initialize()
-
 create_dataset = math_dataset.create_dataset
 show_hbm_usage = utils.show_hbm_usage
-
-print("This script is still WIP and try at your own discretion")
-
-# Disable precompilation for faster iteration, need to toggle it back for
-# official run
-os.environ["SKIP_JAX_PRECOMPILE"] = "1"
-
-# Parse command line options
-parser = argparse.ArgumentParser(description="Arguments for GRPO demo")
-parser.add_argument(
-    "--root-dir",
-    type=str,
-    required=True,
-    help="The root dir of model, data, etc.",
-)
-parser.add_argument(
-    "--enable-profiler",
-    type=bool,
-    default=False,
-    required=False,
-    help="Enable profiler.",
-)
-parser.add_argument(
-    "--profiler-skip-first-n-steps",
-    type=int,
-    default=2,
-    required=False,
-    help="Number of steps to skip for profiler.",
-)
-parser.add_argument(
-    "--profiler-steps",
-    type=int,
-    default=2,
-    required=False,
-    help="Number of steps to run for profiler.",
-)
-parser.add_argument(
-    "--model-version",
-    type=str,
-    default="meta-llama/Llama-3.2-1B-Instruct",
-    required=False,
-    help="The model version to use.",
-)
-parser.add_argument(
-    "--num-generations",
-    type=int,
-    default=4,
-    required=False,
-    help="Number of generations for training. Defaults to 4.",
-)
-parser.add_argument(
-    "--num-batches",
-    type=int,
-    default=1869,
-    required=False,
-    help=(
-        "Number of batches for training. Defaults to total number of samples //"
-        " global batch size."
-    ),
-)
-parser.add_argument(
-    "--num-test-batches",
-    type=int,
-    default=50,
-    required=False,
-    help="Number of test batches for evaluation.",
-)
-
-# Training arguments
-parser.add_argument(
-    "--global-batch-size",
-    type=int,
-    default=4,
-    required=False,
-    help="Number of global batches for learning.",
-)
-parser.add_argument(
-    "--train-micro-batch-size",
-    type=int,
-    default=2,
-    required=False,
-    help="Number of micro batches for training.",
-)
-parser.add_argument(
-    "--train-mini-batch-size",
-    type=int,
-    default=4,
-    required=False,
-    help="Number of mini batches for training.",
-)
-
-# Rollout arguments
-parser.add_argument(
-    "--rollout-engine",
-    type=str,
-    default="vanilla",
-    choices=["vanilla", "vllm", "sglang_jax"],
-    required=False,
-    help="Rollout engine to use (vanilla or vllm).",
-)
-parser.add_argument(
-    "--rollout-server-mode",
-    type=bool,
-    default=False,
-    required=False,
-    help="Rollout engine server model.",
-)
-parser.add_argument(
-    "--async-scheduling",
-    type=bool,
-    default=False,
-    required=False,
-    help="Rollout engine asynchronous scheduling.",
-)
-parser.add_argument(
-  "--rollout-server-mode-submission-threshold",
-  type=int,
-  default=0,
-  required=False,
-  help=(
-    "Only drain the vLLM server-mode submission queue after at least this "
-    "many requests have accumulated. 0 disables the threshold."
-  ),
-)
-parser.add_argument(
-  "--rollout-server-mode-submission-timeout-s",
-  type=float,
-  default=0.0,
-  required=False,
-  help=(
-    "Flush the vLLM server-mode submission queue after this many seconds "
-    "since the first request of the current window arrived, even if the "
-    "submission threshold has not been reached. 0 disables the timeout."
-  ),
-)
-parser.add_argument(
-    "--rollout-dp",
-    type=int,
-    default=-1,
-    required=False,
-    help="Rollout engine data parallel size.",
-)
-parser.add_argument(
-    "--rollout-tp",
-    type=int,
-    default=-1,
-    required=False,
-    help="Rollout engine tensor parallel size.",
-)
-parser.add_argument(
-    "--log-level",
-    type=str,
-    default="WARNING",
-    required=False,
-    help="Logging level.",
-)
-parser.add_argument(
-    "--cluster-setup",
-    type=str,
-    default="colocated",
-    required=False,
-    help=(
-        "Cluster setup type, colocated or disaggregated-2-way,"
-        " disaggregated-3-way."
-    ),
-)
-parser.add_argument(
-    "--max-tpu-to-use",
-    type=int,
-    default=-1,
-    required=False,
-    help="Max TPU to use.",
-)
-parser.add_argument(
-    "--trainer-fsdp",
-    type=int,
-    default=-1,
-    required=False,
-    help="Trainer FSDP option, -1 for default",
-)
-parser.add_argument(
-    "--trainer-tp",
-    type=int,
-    default=-1,
-    required=False,
-    help="Trainer TP option, -1 for default",
-)
-parser.add_argument(
-    "--data-source",
-    type=str,
-    default="tfds",
-    required=False,
-    help="Data source of dataset",
-)
-parser.add_argument(
-    "--dataset",
-    type=str,
-    default="gsm8k",
-    required=False,
-    help="Name of dataset, required when data_source is tfds",
-)
-parser.add_argument(
-    "--enable-lora",
-    action="store_true",
-    default=False,
-    required=False,
-    help="Enable LoRA.",
-)
-parser.add_argument(
-    "--lora-rank",
-    type=int,
-    default=64,
-    required=False,
-    help="Rank of LoRA.",
-)
-parser.add_argument(
-    "--lora-alpha",
-    type=float,
-    default=64.0,
-    required=False,
-    help="Alpha of LoRA.",
-)
-parser.add_argument(
-    "--lora-target-modules",
-    nargs="+",
-    type=str,
-    default=None,
-    help="List of target modules to apply LoRA",
-)
-parser.add_argument(
-    "--enable-perf-v1",
-    action="store_true",
-    default=False,
-    help="Enable PerfMetrics v1.",
-)
-parser.add_argument(
-    "--enable-perf-v2",
-    action="store_true",
-    default=False,
-    help="Enable PerfMetrics v2.",
-)
-parser.add_argument(
-    "--trace-dir",
-    type=str,
-    default="/tmp/perf_traces",
-    help="Directory to write Perfetto trace files to.",
-)
-
-
-# Parse arguments
-args = parser.parse_args()
-
-
-def validata_args():
-  if args.data_source == "tfds":
-    assert args.dataset == "gsm8k"
-
-
-logging.set_verbosity(
-    script_utils.DEBUG_LEVELS.get(args.log_level.upper(), logging.WARNING)
-)
 
 GCS_BUCKET_PREFIX = "gs://tunix/"
 PROFILER_SUBDIR = "rl/grpo/profiler/"
 DATA_SUBDIR = "rl/grpo/data/"
 TRAIN_DATA = "gsm8k_train.json"
 TEST_DATA = "gsm8k_test.json"
-HF_MODEL_VERSION = args.model_version
-
 
 TRAIN_FRACTION = 1.0
 # Derived profiler path
@@ -343,191 +76,10 @@ PROFILER_PATH = os.path.join(GCS_BUCKET_PREFIX, PROFILER_SUBDIR)
 GCS_TRAIN_DATA_PATH = os.path.join(GCS_BUCKET_PREFIX, DATA_SUBDIR, TRAIN_DATA)
 GCS_TEST_DATA_PATH = os.path.join(GCS_BUCKET_PREFIX, DATA_SUBDIR, TEST_DATA)
 
-LOCAL_TRAIN_DATA_DIR = os.path.join(args.root_dir, DATA_SUBDIR)
-LOCAL_TEST_DATA_DIR = os.path.join(args.root_dir, DATA_SUBDIR)
-
 VLLM_MODEL_SUBDIR = "rl/grpo/models/"
-VLLM_MODEL_VERSION = os.path.join(
-    args.root_dir, VLLM_MODEL_SUBDIR, HF_MODEL_VERSION
-)
-
-SGLANGJAX_MODEL_VERSION = VLLM_MODEL_VERSION
-
-# ====== Base Model ======
-NNX_CKPT_DIR = os.path.join(args.root_dir, "rl/grpo/models/", HF_MODEL_VERSION)
 
 # ====== Reproducibility ======
 SEED = 42
-
-# ====== LoRA ======
-ENABLE_LORA = args.enable_lora
-RANK = args.lora_rank
-ALPHA = args.lora_alpha
-LORA_TARGET_MODULES = args.lora_target_modules
-if ENABLE_LORA and LORA_TARGET_MODULES is None:
-  raise ValueError(
-      f"{LORA_TARGET_MODULES} can not be None when LoRA is enabled!"
-  )
-
-# ====== Sharding ======
-if "Qwen2.5-0.5B-Instruct" in args.model_version:
-  MAX_TP_SIZE = 2
-elif "Qwen2.5-7B-Instruct" in args.model_version:
-  MAX_TP_SIZE = 4
-else:
-  MAX_TP_SIZE = 8
-
-TOTAL_TPU_TO_USE = (
-    min(jax.device_count(), args.max_tpu_to_use)
-    if args.max_tpu_to_use > 0
-    else jax.device_count()
-)
-
-if args.cluster_setup == "colocated":
-  TRAINER_TPU_TO_USE = TOTAL_TPU_TO_USE
-  REF_TPU_TO_USE = TOTAL_TPU_TO_USE
-  ROLLOUT_TPU_TO_USE = TOTAL_TPU_TO_USE
-elif args.cluster_setup == "disaggregated-2-way":
-  TRAINER_TPU_TO_USE = TOTAL_TPU_TO_USE // 2
-  REF_TPU_TO_USE = TRAINER_TPU_TO_USE
-  ROLLOUT_TPU_TO_USE = TOTAL_TPU_TO_USE - TRAINER_TPU_TO_USE
-elif args.cluster_setup == "disaggregated-3-way":
-  TRAINER_TPU_TO_USE = TOTAL_TPU_TO_USE // 2
-  REF_TPU_TO_USE = TOTAL_TPU_TO_USE // 4
-  ROLLOUT_TPU_TO_USE = TOTAL_TPU_TO_USE - TRAINER_TPU_TO_USE - REF_TPU_TO_USE
-else:
-  raise ValueError(f"Unknown cluster setup: {args.cluster_setup}")
-
-if ENABLE_LORA:
-  assert (
-      args.cluster_setup != "disaggregated-3-way"
-  ), "LoRA is not supported in disaggregated-3-way setup."
-
-# vLLM mesh has issue to start from non-zero device index
-ROLLOUT_DEVICE_START_IDX = 0
-ROLLOUT_DEVICE_END_IDX = ROLLOUT_TPU_TO_USE
-
-
-if args.cluster_setup == "colocated":
-  REF_DEVICE_START_IDX = ROLLOUT_DEVICE_START_IDX
-  REF_DEVICE_END_IDX = ROLLOUT_DEVICE_END_IDX
-
-  TRAINER_DEVICE_START_IDX = ROLLOUT_DEVICE_START_IDX
-  TRAINER_DEVICE_END_IDX = ROLLOUT_DEVICE_END_IDX
-
-elif args.cluster_setup == "disaggregated-2-way":
-  TRAINER_DEVICE_START_IDX = ROLLOUT_DEVICE_END_IDX
-  TRAINER_DEVICE_END_IDX = TRAINER_DEVICE_START_IDX + TRAINER_TPU_TO_USE
-
-  REF_DEVICE_START_IDX = TRAINER_DEVICE_START_IDX
-  REF_DEVICE_END_IDX = TRAINER_DEVICE_END_IDX
-
-elif args.cluster_setup == "disaggregated-3-way":
-  REF_DEVICE_START_IDX = ROLLOUT_DEVICE_END_IDX
-  REF_DEVICE_END_IDX = REF_DEVICE_START_IDX + REF_TPU_TO_USE
-
-  TRAINER_DEVICE_START_IDX = REF_DEVICE_END_IDX
-  TRAINER_DEVICE_END_IDX = TRAINER_DEVICE_START_IDX + TRAINER_TPU_TO_USE
-
-else:
-  raise ValueError(f"Unknown cluster setup: {args.cluster_setup}")
-
-print(
-    f"{ROLLOUT_DEVICE_START_IDX=}, {ROLLOUT_DEVICE_END_IDX=},"
-    f" {REF_DEVICE_START_IDX=}, {REF_DEVICE_END_IDX=},"
-    f" {TRAINER_DEVICE_START_IDX=}, {TRAINER_DEVICE_END_IDX=}"
-)
-
-# Trainer sharding
-assert TRAINER_TPU_TO_USE >= args.trainer_fsdp, (
-    f"TRAINER_TPU_TO_USE {TRAINER_TPU_TO_USE} must be >= trainer_fsdp"
-    f" {args.trainer_fsdp}"
-)
-assert TRAINER_TPU_TO_USE % args.trainer_fsdp == 0, (
-    f"TRAINER_TPU_TO_USE {TRAINER_TPU_TO_USE} must be divisible by"
-    f" trainer_fsdp {args.trainer_fsdp}"
-)
-if args.trainer_tp == -1 and args.trainer_fsdp == -1:
-  trainer_fsdp = TRAINER_TPU_TO_USE
-  trainer_tp = 1
-elif args.trainer_tp == -1:
-  trainer_fsdp = args.trainer_fsdp
-  trainer_tp = TRAINER_TPU_TO_USE // trainer_fsdp
-elif args.trainer_fsdp == -1:
-  trainer_tp = args.trainer_tp
-  trainer_fsdp = TRAINER_TPU_TO_USE // trainer_tp
-else:
-  trainer_fsdp = args.trainer_fsdp
-  trainer_tp = args.trainer_tp
-
-assert trainer_fsdp * trainer_tp == TRAINER_TPU_TO_USE, (
-    f"trainer_fsdp {trainer_fsdp} * trainer_tp {trainer_tp} must equal"
-    f" TRAINER_TPU_TO_USE {TRAINER_TPU_TO_USE}"
-)
-
-assert (
-    trainer_tp <= MAX_TP_SIZE
-), f"trainer_tp {trainer_tp} must be <= MAX_TP_SIZE {MAX_TP_SIZE}"
-
-# Rollout sharding
-assert ROLLOUT_TPU_TO_USE >= args.rollout_dp, (
-    f"ROLLOUT_TPU_TO_USE {ROLLOUT_TPU_TO_USE} must be >= rollout_dp"
-    f" {args.rollout_dp}"
-)
-assert ROLLOUT_TPU_TO_USE % args.rollout_dp == 0, (
-    f"ROLLOUT_TPU_TO_USE {ROLLOUT_TPU_TO_USE} must be divisible by"
-    f" rollout_dp {args.rollout_dp}"
-)
-assert ROLLOUT_TPU_TO_USE >= args.rollout_tp, (
-    f"ROLLOUT_TPU_TO_USE {ROLLOUT_TPU_TO_USE} must be >= rollout_tp"
-    f" {args.rollout_tp}"
-)
-assert ROLLOUT_TPU_TO_USE % args.rollout_tp == 0, (
-    f"ROLLOUT_TPU_TO_USE {ROLLOUT_TPU_TO_USE} must be divisible by"
-    f" rollout_tp {args.rollout_tp}"
-)
-assert (
-    args.rollout_tp <= MAX_TP_SIZE
-), f"rollout_tp {args.rollout_tp} must be <= MAX_TP_SIZE {MAX_TP_SIZE}"
-if args.rollout_dp == -1 and args.rollout_tp == -1:
-  rollout_tp = min(MAX_TP_SIZE, ROLLOUT_TPU_TO_USE)
-  rollout_dp = ROLLOUT_TPU_TO_USE // rollout_tp
-elif args.rollout_dp == -1:
-  rollout_tp = args.rollout_tp
-  rollout_dp = ROLLOUT_TPU_TO_USE // rollout_tp
-elif args.rollout_tp == -1:
-  rollout_dp = args.rollout_dp
-  rollout_tp = ROLLOUT_TPU_TO_USE // rollout_dp
-else:
-  rollout_dp = args.rollout_dp
-  rollout_tp = args.rollout_tp
-
-assert rollout_dp * rollout_tp == ROLLOUT_TPU_TO_USE, (
-    f"rollout_dp {rollout_dp} * rollout_tp {rollout_tp} must equal"
-    f" ROLLOUT_TPU_TO_USE {ROLLOUT_TPU_TO_USE}"
-)
-
-print(f"{ROLLOUT_TPU_TO_USE=}, {REF_TPU_TO_USE=}, {TRAINER_TPU_TO_USE=}")
-print(f" {rollout_dp=}, {rollout_tp=}, {trainer_fsdp=}, {trainer_tp=}")
-
-MESH = [(trainer_fsdp, trainer_tp), ("fsdp", "tp")]
-
-if args.cluster_setup == "colocated":
-  REF_MESH = MESH
-elif args.cluster_setup == "disaggregated-2-way":
-  REF_MESH = MESH
-elif args.cluster_setup == "disaggregated-3-way":
-  # Ref share the same sharding as trainer
-  ref_fsdp = min(trainer_fsdp, REF_TPU_TO_USE)
-  ref_tp = REF_TPU_TO_USE // ref_fsdp
-  REF_MESH = [(ref_fsdp, ref_tp), ("fsdp", "tp")]
-else:
-  raise ValueError(f"Unknown cluster setup: {args.cluster_setup}")
-
-ROLLOUT_MESH = [(rollout_dp, rollout_tp), ("fsdp", "tp")]
-print(
-    f"Trainer mesh: {MESH}, Ref mesh: {REF_MESH}, Rollout mesh: {ROLLOUT_MESH}"
-)
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
@@ -538,10 +90,6 @@ TOTAL_GENERATION_STEPS = 768
 TEMPERATURE = 0.9
 TOP_P = 1.0  # implies we don't do nucleus sampling
 TOP_K = 50
-# The number of times the policy generates multiple responses for a given prompt
-# within a single training step. This corresponds to `G` in Algorithm 1 in the
-# paper. The "group" in GRPO comes from here.
-NUM_GENERATIONS = args.num_generations
 
 # === other GRPO configs ===
 # The number of iterations per batch (𝜇 in GRPO algo 1).
@@ -554,39 +102,18 @@ BETA = 0.08
 # stable updates.
 EPSILON = 0.2
 
-# ====== Training ======
-# To speed up for quick workflow validation, we can change NUM_BATCHES to e.g. 2
-NUM_BATCHES = min(args.num_batches, 7473 // args.global_batch_size)
-# Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
-# increased to a max. of 330 (if batch size is 4).
-# To speed up for quick workflow validation, we can change it to e.g. 1
-NUM_TEST_BATCHES = args.num_test_batches
-
 EVAL_EVERY_N_STEPS = 1000  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
 NUM_EPOCHS = 1  # can potentially train for more epochs
-
-# Number of training steps.
-MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
 
 # === AdamW, warmup, cosine scheduler ===
 LEARNING_RATE = 3e-6
 B1 = 0.9  # Adam beta1
 B2 = 0.99  # Adam beta2
 WEIGHT_DECAY = 0.1
-# == Cosine decay with warmup scheduler ==
-# Linearly increase learning rate from 0. to 5e-6 in the first 10% training
-# steps, and then gradually decrease the learning rate to 0 using cosine
-# scheduler.
-WARMUP_STEPS = 0.1 * MAX_STEPS
 # == Grad clipping ==
 # Grad clipping to prevent large gradients. Found this
 # important to keep KL divergence in check.
 MAX_GRAD_NORM = 0.1
-
-# ====== Checkpoint saving ======
-CKPT_DIR = os.path.join(
-    args.root_dir, "rl/grpo/demo/experiments/llama3/training_runs/2"
-)
 
 SAVE_INTERVAL_STEPS = (
     500  # To speed up for quick workflow validation, we can change it to e.g. 2
@@ -605,27 +132,6 @@ GENERATION_CONFIGS = {
     "liberal": {"temperature": 0.85, "top_k": 2000, "top_p": 1.0},
 }
 
-
-# Delete local checkpoint directory
-tc.delete_directory(CKPT_DIR)
-tc.clear_jax_arrays()
-
-# Download checkpoints
-tc.download_from_huggingface(
-    repo_id=HF_MODEL_VERSION, model_path=VLLM_MODEL_VERSION
-)
-
-
-def load_json_from_local(path):
-  # with gfile.Open(path, "rb") as f:
-  with open(path, "rb") as f:
-    return json.loads(f.read())
-
-
-show_hbm_usage()
-
-model_tokenizer = transformers.AutoTokenizer.from_pretrained(VLLM_MODEL_VERSION)
-
 reasoning_start = "<reasoning>"
 reasoning_end = "</reasoning>"
 solution_start = "<answer>"
@@ -637,156 +143,16 @@ provide your reasoning. Place it between {reasoning_start} and \
 {reasoning_end}. Then, provide the final answer (i.e., just one numerical \
 value) between {solution_start} and {solution_end}."""
 
-
-def extract_hash_answer(text: str) -> str | None:
-  if "####" not in text:
-    return None
-  return text.split("####")[1].strip()
-
-
-dataset = create_dataset(
-    args.data_source,
-    args.dataset if args.data_source == "tfds" else LOCAL_TRAIN_DATA_DIR,
-    tokenizer=model_tokenizer,
-    tfds_download=True,
-    split="train",
-    apply_chat_template_to_dataset=True,
-)
-
-train_dataset, val_dataset = data_lib.post_init_dataset(
-    dataset,
-    model_tokenizer,
-    batch_size=args.global_batch_size,
-    num_batches=NUM_BATCHES,
-    max_prompt_length=MAX_PROMPT_LENGTH,
-    fraction=TRAIN_FRACTION,
-    num_epochs=NUM_EPOCHS,
-)
-
-test_dataset = create_dataset(
-    args.data_source,
-    args.dataset if args.data_source == "tfds" else LOCAL_TRAIN_DATA_DIR,
-    tokenizer=model_tokenizer,
-    tfds_download=True,
-    split="test",
-    apply_chat_template_to_dataset=True,
-)
-
-test_dataset, _ = data_lib.post_init_dataset(
-    test_dataset,
-    model_tokenizer,
-    batch_size=args.global_batch_size,
-    num_batches=NUM_TEST_BATCHES,
-    max_prompt_length=MAX_PROMPT_LENGTH,
-)
-
 MODEL_CONFIG = {
     "meta-llama/Llama-3.2-1B-Instruct": llama_lib.ModelConfig.llama3p2_1b,
     "meta-llama/Llama-3.2-3B-Instruct": llama_lib.ModelConfig.llama3p2_3b,
+    "unsloth/Llama-3.2-1B-Instruct": llama_lib.ModelConfig.llama3p2_1b,
+    "unsloth/Llama-3.2-3B-Instruct": llama_lib.ModelConfig.llama3p2_3b,
     "meta-llama/Llama-3.1-8B-Instruct": llama_lib.ModelConfig.llama3p1_8b,
     "Qwen/Qwen2.5-0.5B-Instruct": qwen2_lib.ModelConfig.qwen2p5_0p5b,
     "Qwen/Qwen2.5-7B-Instruct": qwen2_lib.ModelConfig.qwen2p5_7b,
     "Qwen/Qwen3-4B-Instruct-2507": qwen3_lib.ModelConfig.qwen3_4b,
 }
-
-
-def get_trainer_model(ckpt_path, model_mesh, ref_model_config):
-  if "Llama" in HF_MODEL_VERSION:
-    return llama_params.create_model_from_safe_tensors(
-        ckpt_path, ref_model_config, model_mesh
-    )
-  elif "Qwen2.5" in HF_MODEL_VERSION:
-    return qwen2_params.create_model_from_safe_tensors(
-        ckpt_path, ref_model_config, model_mesh
-    )
-  elif "Qwen3" in HF_MODEL_VERSION:
-    return qwen3_params.create_model_from_safe_tensors(
-        ckpt_path, ref_model_config, model_mesh
-    )
-  raise NotImplementedError(
-      f"{HF_MODEL_VERSION} tensor loading not implemented"
-  )
-
-
-def get_model(
-    device_start_idx: int, device_end_idx: int, mesh: list[tuple[int]]
-):
-  ckpt_path = os.path.join(NNX_CKPT_DIR)
-  model_mesh = jax.make_mesh(
-      *mesh,
-      devices=jax.devices()[device_start_idx:device_end_idx],
-      axis_types=(jax.sharding.AxisType.Auto,) * len(mesh[0]),
-  )
-  ref_model_config = MODEL_CONFIG[HF_MODEL_VERSION]()
-  model = get_trainer_model(ckpt_path, model_mesh, ref_model_config)
-  return model, model_mesh, ref_model_config
-
-
-def get_lora_model(base_model, model_mesh=None):
-  """Creates a LoRA model from a base model.
-
-  Args:
-    base_model: The base model to apply LoRA to.
-    model_mesh: The mesh to use for sharding the model.
-
-  Returns:
-    A LoRA model.
-  """
-  if isinstance(base_model, llama_lib.Llama3):
-    module_path = (
-        ".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*down_proj|.*up_proj"
-    )
-  else:
-    module_path = ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|.*attn_vec_einsum"
-
-  lora_provider = qwix.LoraProvider(
-      module_path=(module_path),
-      rank=RANK,
-      alpha=ALPHA,
-  )
-
-  model_input = base_model.get_model_input()
-  lora_model = qwix.apply_lora_to_model(
-      base_model, lora_provider, **model_input
-  )
-
-  return lora_model
-
-
-# Reference model
-ref_model, ref_mesh, model_config = get_model(
-    REF_DEVICE_START_IDX, REF_DEVICE_END_IDX, REF_MESH
-)
-
-if DO_MODEL_DISPLAY:
-  nnx.display(ref_model)
-
-# Policy model
-# TODO(b/434959964): Supports lora in vLLM Jax backend
-if ENABLE_LORA:
-  training_model = get_lora_model(ref_model)
-  training_mesh = ref_mesh
-else:
-  training_model, training_mesh, _ = get_model(
-      TRAINER_DEVICE_START_IDX, TRAINER_DEVICE_END_IDX, MESH
-  )
-
-if DO_MODEL_DISPLAY:
-  nnx.display(training_model)
-
-show_hbm_usage("After creating the reference lora model")
-
-rollout_device_arrays = mesh_utils.create_device_mesh(
-    ROLLOUT_MESH[0],
-    devices=jax.devices()[ROLLOUT_DEVICE_START_IDX:ROLLOUT_DEVICE_END_IDX],
-    allow_split_physical_axes=True,
-)
-
-rollout_mesh = jax.sharding.Mesh(
-    rollout_device_arrays,
-    ROLLOUT_MESH[1],
-    axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH[0]),
-)
 
 match_format = re.compile(
     rf"^[\s]{{0,}}"
@@ -796,10 +162,22 @@ match_format = re.compile(
     flags=re.MULTILINE | re.DOTALL,
 )
 
-match_format.search(
-    f"{reasoning_start}Let me"
-    f" think!{reasoning_end}{solution_start}2{solution_end}",
+match_numbers = re.compile(
+    rf"{solution_start}.*?([+-]?(?:\d[\d,]*)(?:\.\d+)?|[+-]?\.\d+)",
+    flags=re.MULTILINE | re.DOTALL,
 )
+
+
+def load_json_from_local(path):
+  # with gfile.Open(path, "rb") as f:
+  with open(path, "rb") as f:
+    return json.loads(f.read())
+
+
+def extract_hash_answer(text: str) -> str | None:
+  if "####" not in text:
+    return None
+  return text.split("####")[1].strip()
 
 
 def match_format_exactly(prompts, completions, **kargs):  # pylint: disable=unused-argument
@@ -887,13 +265,6 @@ def check_answer(prompts, completions, answer, **kargs):  # pylint: disable=unus
   return scores
 
 
-match_numbers = re.compile(
-    rf"{solution_start}.*?([+-]?(?:\d[\d,]*)(?:\.\d+)?|[+-]?\.\d+)",
-    flags=re.MULTILINE | re.DOTALL,
-)
-match_numbers.findall(f"{solution_start}  0.34  {solution_end}")
-
-
 def check_numbers(prompts, completions, answer, **kargs):  # pylint: disable=unused-argument
   """Computes a score based on the correctness of the extracted number.
 
@@ -935,394 +306,978 @@ def check_numbers(prompts, completions, answer, **kargs):  # pylint: disable=unu
   return scores
 
 
-def generate(
-    question, sampler, temperature=0.7, top_k=50, top_p=0.95, seed=None
-):
-  """Given prompt, generates text."""
+if __name__ == "__main__":
+  if os.getenv("JAX_PLATFORMS", None) == "proxy":
+    import pathwaysutils
 
-  if isinstance(question, str):
-    input_batch = [
-        model_tokenizer.apply_chat_template(
-            [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": question},
-            ],
-            tokenize=False,
-            add_generation_prompt=True,
-        ),
-    ]
+    pathwaysutils.initialize()
+
+  print("This script is still WIP and try at your own discretion")
+
+  # Disable precompilation for faster iteration, need to toggle it back for
+  # official run
+  os.environ["SKIP_JAX_PRECOMPILE"] = "1"
+
+  # Parse command line options
+  parser = argparse.ArgumentParser(description="Arguments for GRPO demo")
+  parser.add_argument(
+      "--root-dir",
+      type=str,
+      required=True,
+      help="The root dir of model, data, etc.",
+  )
+  parser.add_argument(
+      "--enable-profiler",
+      type=bool,
+      default=False,
+      required=False,
+      help="Enable profiler.",
+  )
+  parser.add_argument(
+      "--profiler-skip-first-n-steps",
+      type=int,
+      default=2,
+      required=False,
+      help="Number of steps to skip for profiler.",
+  )
+  parser.add_argument(
+      "--profiler-steps",
+      type=int,
+      default=2,
+      required=False,
+      help="Number of steps to run for profiler.",
+  )
+  parser.add_argument(
+      "--model-version",
+      type=str,
+      default="Qwen/Qwen2.5-0.5B-Instruct",
+      required=False,
+      help=(
+          "Hugging Face model ID to use (e.g., Qwen/Qwen2.5-0.5B-Instruct, "
+          "unsloth/Llama-3.2-1B-Instruct, or unsloth/Llama-3.2-3B-Instruct)."
+      ),
+  )
+  parser.add_argument(
+      "--num-generations",
+      type=int,
+      default=4,
+      required=False,
+      help="Number of generations for training. Defaults to 4.",
+  )
+  parser.add_argument(
+      "--num-batches",
+      type=int,
+      default=1869,
+      required=False,
+      help=(
+          "Number of batches for training. Defaults to total number of"
+          " samples // global batch size."
+      ),
+  )
+  parser.add_argument(
+      "--num-test-batches",
+      type=int,
+      default=50,
+      required=False,
+      help="Number of test batches for evaluation.",
+  )
+
+  # Training arguments
+  parser.add_argument(
+      "--global-batch-size",
+      type=int,
+      default=4,
+      required=False,
+      help="Number of global batches for learning.",
+  )
+  parser.add_argument(
+      "--train-micro-batch-size",
+      type=int,
+      default=2,
+      required=False,
+      help="Number of micro batches for training.",
+  )
+  parser.add_argument(
+      "--train-mini-batch-size",
+      type=int,
+      default=4,
+      required=False,
+      help="Number of mini batches for training.",
+  )
+
+  # Rollout arguments
+  parser.add_argument(
+      "--rollout-engine",
+      type=str,
+      default="vanilla",
+      choices=["vanilla", "vllm"],
+      required=False,
+      help="Rollout engine to use (vanilla or vllm).",
+  )
+  parser.add_argument(
+      "--rollout-server-mode",
+      type=bool,
+      default=False,
+      required=False,
+      help="Rollout engine server model.",
+  )
+  parser.add_argument(
+      "--async-scheduling",
+      type=bool,
+      default=False,
+      required=False,
+      help="Rollout engine asynchronous scheduling.",
+  )
+  parser.add_argument(
+    "--rollout-server-mode-submission-threshold",
+    type=int,
+    default=0,
+    required=False,
+    help=(
+      "Only drain the vLLM server-mode submission queue after at least this "
+      "many requests have accumulated. 0 disables the threshold."
+    ),
+  )
+  parser.add_argument(
+    "--rollout-server-mode-submission-timeout-s",
+    type=float,
+    default=0.0,
+    required=False,
+    help=(
+      "Flush the vLLM server-mode submission queue after this many seconds "
+      "since the first request of the current window arrived, even if the "
+      "submission threshold has not been reached. 0 disables the timeout."
+    ),
+  )
+  parser.add_argument(
+      "--rollout-dp",
+      type=int,
+      default=-1,
+      required=False,
+      help="Rollout engine data parallel size.",
+  )
+  parser.add_argument(
+      "--rollout-tp",
+      type=int,
+      default=-1,
+      required=False,
+      help="Rollout engine tensor parallel size.",
+  )
+  parser.add_argument(
+      "--log-level",
+      type=str,
+      default="WARNING",
+      required=False,
+      help="Logging level.",
+  )
+  parser.add_argument(
+      "--cluster-setup",
+      type=str,
+      default="colocated",
+      required=False,
+      help=(
+          "Cluster setup type, colocated or disaggregated-2-way,"
+          " disaggregated-3-way."
+      ),
+  )
+  parser.add_argument(
+      "--max-tpu-to-use",
+      type=int,
+      default=-1,
+      required=False,
+      help="Max TPU to use.",
+  )
+  parser.add_argument(
+      "--trainer-fsdp",
+      type=int,
+      default=-1,
+      required=False,
+      help="Trainer FSDP option, -1 for default",
+  )
+  parser.add_argument(
+      "--trainer-tp",
+      type=int,
+      default=-1,
+      required=False,
+      help="Trainer TP option, -1 for default",
+  )
+  parser.add_argument(
+      "--data-source",
+      type=str,
+      default="tfds",
+      required=False,
+      help="Data source of dataset",
+  )
+  parser.add_argument(
+      "--dataset",
+      type=str,
+      default="gsm8k",
+      required=False,
+      help="Name of dataset, required when data_source is tfds",
+  )
+  parser.add_argument(
+      "--enable-lora",
+      action="store_true",
+      default=False,
+      required=False,
+      help="Enable LoRA.",
+  )
+  parser.add_argument(
+      "--lora-rank",
+      type=int,
+      default=64,
+      required=False,
+      help="Rank of LoRA.",
+  )
+  parser.add_argument(
+      "--lora-alpha",
+      type=float,
+      default=64.0,
+      required=False,
+      help="Alpha of LoRA.",
+  )
+  parser.add_argument(
+      "--enable-perf-v1",
+      action="store_true",
+      default=False,
+      help="Enable PerfMetrics v1.",
+  )
+  parser.add_argument(
+      "--enable-perf-v2",
+      action="store_true",
+      default=False,
+      help="Enable PerfMetrics v2.",
+  )
+  parser.add_argument(
+      "--trace-dir",
+      type=str,
+      default="/tmp/perf_traces",
+      help="Directory to write Perfetto trace files to.",
+  )
+
+  # Parse arguments
+  args = parser.parse_args()
+
+  logging.set_verbosity(
+      script_utils.DEBUG_LEVELS.get(args.log_level.upper(), logging.WARNING)
+  )
+
+  HF_MODEL_VERSION = args.model_version
+  LOCAL_TRAIN_DATA_DIR = os.path.join(args.root_dir, DATA_SUBDIR)
+  LOCAL_TEST_DATA_DIR = os.path.join(args.root_dir, DATA_SUBDIR)
+  VLLM_MODEL_VERSION = os.path.join(
+      args.root_dir, VLLM_MODEL_SUBDIR, HF_MODEL_VERSION
+  )
+
+  # ====== Base Model ======
+  NNX_CKPT_DIR = os.path.join(
+      args.root_dir, "rl/grpo/models/", HF_MODEL_VERSION
+  )
+
+  # ====== LoRA ======
+  ENABLE_LORA = args.enable_lora
+  RANK = args.lora_rank
+  ALPHA = args.lora_alpha
+
+  # ====== Sharding ======
+  if "Qwen2.5-0.5B-Instruct" in args.model_version:
+    MAX_TP_SIZE = 2
+  elif "Qwen2.5-7B-Instruct" in args.model_version:
+    MAX_TP_SIZE = 4
   else:
-    input_batch = [
-        model_tokenizer.apply_chat_template(
-            [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": q},
-            ],
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-        for q in question
-    ]
+    MAX_TP_SIZE = 8
 
-  out_data = sampler(
-      input_strings=input_batch,
-      max_generation_steps=TOTAL_GENERATION_STEPS,
-      temperature=temperature,
-      top_k=top_k,
-      top_p=top_p,
-      echo=False,
-      seed=seed if seed is not None else None,
+  TOTAL_TPU_TO_USE = (
+      min(jax.device_count(), args.max_tpu_to_use)
+      if args.max_tpu_to_use > 0
+      else jax.device_count()
   )
 
-  output = out_data.text
-  if isinstance(question, str):
-    return output[0]
-  return output
+  if args.cluster_setup == "colocated":
+    TRAINER_TPU_TO_USE = TOTAL_TPU_TO_USE
+    REF_TPU_TO_USE = TOTAL_TPU_TO_USE
+    ROLLOUT_TPU_TO_USE = TOTAL_TPU_TO_USE
+  elif args.cluster_setup == "disaggregated-2-way":
+    TRAINER_TPU_TO_USE = TOTAL_TPU_TO_USE // 2
+    REF_TPU_TO_USE = TRAINER_TPU_TO_USE
+    ROLLOUT_TPU_TO_USE = TOTAL_TPU_TO_USE - TRAINER_TPU_TO_USE
+  elif args.cluster_setup == "disaggregated-3-way":
+    TRAINER_TPU_TO_USE = TOTAL_TPU_TO_USE // 2
+    REF_TPU_TO_USE = TOTAL_TPU_TO_USE // 4
+    ROLLOUT_TPU_TO_USE = TOTAL_TPU_TO_USE - TRAINER_TPU_TO_USE - REF_TPU_TO_USE
+  else:
+    raise ValueError(f"Unknown cluster setup: {args.cluster_setup}")
 
+  if ENABLE_LORA:
+    assert (
+        args.cluster_setup != "disaggregated-3-way"
+    ), "LoRA is not supported in disaggregated-3-way setup."
 
-def evaluate(
-    eval_dataset,
-    sampler,
-    temperature=0.7,
-    top_k=50,
-    top_p=0.95,
-    num_passes=1,
-    corr_lst=False,
-    make_lst=False,
-):
-  """Computes accuracy and percentage of outputs matching the format."""
+  # vLLM mesh has issue to start from non-zero device index
+  ROLLOUT_DEVICE_START_IDX = 0
+  ROLLOUT_DEVICE_END_IDX = ROLLOUT_TPU_TO_USE
 
-  response_lst = []
-  corr = 0
-  partially_corr = 0
-  corr_format = 0
-  total = 0
+  if args.cluster_setup == "colocated":
+    REF_DEVICE_START_IDX = ROLLOUT_DEVICE_START_IDX
+    REF_DEVICE_END_IDX = ROLLOUT_DEVICE_END_IDX
 
-  for batch in tqdm(eval_dataset):
-    answers = batch["answer"]
-    questions = batch["question"]
+    TRAINER_DEVICE_START_IDX = ROLLOUT_DEVICE_START_IDX
+    TRAINER_DEVICE_END_IDX = ROLLOUT_DEVICE_END_IDX
 
-    multiple_call_responses = [[] for _ in range(len(questions))]
-    for p in range(num_passes):
-      responses = generate(
-          questions, sampler, temperature, top_k, top_p, seed=None
-      )
-      for idx, response in enumerate(responses):
-        multiple_call_responses[idx].append(response)
+  elif args.cluster_setup == "disaggregated-2-way":
+    TRAINER_DEVICE_START_IDX = ROLLOUT_DEVICE_END_IDX
+    TRAINER_DEVICE_END_IDX = TRAINER_DEVICE_START_IDX + TRAINER_TPU_TO_USE
 
-    for question, multiple_call_response, answer in zip(
-        questions, multiple_call_responses, answers
-    ):
-      # check answer
-      corr_ctr_per_question = 0
-      partially_corr_per_question = 0
-      corr_format_per_question = 0
-      for response in multiple_call_response:
-        # Grab the last matched number from this response (not a generator)
-        matches = match_numbers.findall(response)
-        extracted_response = matches[-1] if matches else "-1000000"
-        try:
-          response_num = float(extracted_response.replace(",", "").strip())
-          answer_num = float(answer.replace(",", "").strip())
-          if response_num == answer_num:
-            corr_ctr_per_question += 1
+    REF_DEVICE_START_IDX = TRAINER_DEVICE_START_IDX
+    REF_DEVICE_END_IDX = TRAINER_DEVICE_END_IDX
 
-          ratio = response_num / answer_num
-          if ratio >= 0.9 and ratio <= 1.1:
-            partially_corr_per_question += 1
-        except (ValueError, ZeroDivisionError) as e:
-          print(f"SKIPPED: {e}")
+  elif args.cluster_setup == "disaggregated-3-way":
+    REF_DEVICE_START_IDX = ROLLOUT_DEVICE_END_IDX
+    REF_DEVICE_END_IDX = REF_DEVICE_START_IDX + REF_TPU_TO_USE
 
-        # check format
-        if match_format.search(response) is not None:
-          corr_format_per_question += 1
+    TRAINER_DEVICE_START_IDX = REF_DEVICE_END_IDX
+    TRAINER_DEVICE_END_IDX = TRAINER_DEVICE_START_IDX + TRAINER_TPU_TO_USE
 
-        if (
-            corr_ctr_per_question > 0
-            and partially_corr_per_question > 0
-            and corr_format_per_question > 0
-        ):
-          break
+  else:
+    raise ValueError(f"Unknown cluster setup: {args.cluster_setup}")
 
-      if corr_ctr_per_question > 0:
-        corr += 1
-        if corr_lst and make_lst:
-          response_lst.append((question, answer, multiple_call_response))
-      else:
-        if not corr_lst and make_lst:
-          response_lst.append((question, answer, multiple_call_response))
-      if partially_corr_per_question > 0:
-        partially_corr += 1
-      if corr_format_per_question > 0:
-        corr_format += 1
-
-      total += 1
-      if total % 10 == 0:
-        print(
-            f"===> {corr=}, {total=}, {corr / total * 100=}, "
-            f"{partially_corr / total * 100=}, {corr_format / total * 100=}"
-        )
-
-  to_return = (
-      corr,
-      total,
-      corr / total * 100,
-      partially_corr / total * 100,
-      corr_format / total * 100,
-  )
-  if make_lst:
-    return to_return, response_lst
-  return to_return
-
-
-show_hbm_usage("After creating a raw sampler")
-
-
-# Ckpt saving
-checkpointing_options = ocp.CheckpointManagerOptions(
-    save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP
-)
-# Metrics logger
-metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-    log_dir="/tmp/tensorboard/grpo", flush_every_n_steps=20
-)
-
-
-show_hbm_usage("After creating a new rollout worker")
-# Optimizer, learning rate scheduler, gradient clipping
-optimizer = optax.adamw(
-    learning_rate=optax.schedules.warmup_cosine_decay_schedule(
-        init_value=0.0,
-        peak_value=LEARNING_RATE,
-        warmup_steps=WARMUP_STEPS,
-        decay_steps=MAX_STEPS,
-        end_value=0.0,
-    ),
-    b1=B1,
-    b2=B2,
-    weight_decay=WEIGHT_DECAY,
-)
-if MAX_GRAD_NORM is not None:
-  optimizer = optax.chain(
-      optax.clip_by_global_norm(max_norm=MAX_GRAD_NORM),
-      optimizer,
+  print(
+      f"{ROLLOUT_DEVICE_START_IDX=}, {ROLLOUT_DEVICE_END_IDX=},"
+      f" {REF_DEVICE_START_IDX=}, {REF_DEVICE_END_IDX=},"
+      f" {TRAINER_DEVICE_START_IDX=}, {TRAINER_DEVICE_END_IDX=}"
   )
 
-profiler_options = None
-if args.enable_profiler:
-  profiler_options = profiler.ProfilerOptions(
-      profiler_steps=args.profiler_steps,
-      skip_first_n_steps=args.profiler_skip_first_n_steps,
-      set_profile_options=False,
-      log_dir=PROFILER_PATH,
+  # Trainer sharding
+  assert TRAINER_TPU_TO_USE >= args.trainer_fsdp, (
+      f"TRAINER_TPU_TO_USE {TRAINER_TPU_TO_USE} must be >= trainer_fsdp"
+      f" {args.trainer_fsdp}"
+  )
+  assert TRAINER_TPU_TO_USE % args.trainer_fsdp == 0, (
+      f"TRAINER_TPU_TO_USE {TRAINER_TPU_TO_USE} must be divisible by"
+      f" trainer_fsdp {args.trainer_fsdp}"
+  )
+  if args.trainer_tp == -1 and args.trainer_fsdp == -1:
+    trainer_fsdp = TRAINER_TPU_TO_USE
+    trainer_tp = 1
+  elif args.trainer_tp == -1:
+    trainer_fsdp = args.trainer_fsdp
+    trainer_tp = TRAINER_TPU_TO_USE // trainer_fsdp
+  elif args.trainer_fsdp == -1:
+    trainer_tp = args.trainer_tp
+    trainer_fsdp = TRAINER_TPU_TO_USE // trainer_tp
+  else:
+    trainer_fsdp = args.trainer_fsdp
+    trainer_tp = args.trainer_tp
+
+  assert trainer_fsdp * trainer_tp == TRAINER_TPU_TO_USE, (
+      f"trainer_fsdp {trainer_fsdp} * trainer_tp {trainer_tp} must equal"
+      f" TRAINER_TPU_TO_USE {TRAINER_TPU_TO_USE}"
   )
 
+  assert (
+      trainer_tp <= MAX_TP_SIZE
+  ), f"trainer_tp {trainer_tp} must be <= MAX_TP_SIZE {MAX_TP_SIZE}"
 
-def get_rollout_config(engine: str) -> base_rollout.RolloutConfig:
-  if engine == "sglang_jax":
-    config = base_rollout.RolloutConfig(
-        max_tokens_to_generate=TOTAL_GENERATION_STEPS,
-        max_prompt_length=MAX_PROMPT_LENGTH,
-        kv_cache_size=MAX_PROMPT_LENGTH + TOTAL_GENERATION_STEPS + 256,
-        temperature=TEMPERATURE,
-        top_p=TOP_P,
-        top_k=TOP_K,
-        rollout_mapping_config=mappings.MappingConfig.build(
-            model=ref_model, backend="sglang_jax"
-        ),
-        rollout_sglang_jax_model_version=SGLANGJAX_MODEL_VERSION,
-        rollout_sglang_jax_mem_fraction_static=0.2,
-        rollout_sglang_jax_init_with_random_weights=True,
-        rollout_sglang_jax_disable_radix_cache=True,
-        rollout_sglang_jax_enable_deterministic_sampling=False,
-        rollout_sglang_jax_precompile_bs_paddings=[8],
-        rollout_sglang_jax_precompile_token_paddings=[2048],
-        rollout_sglang_jax_chunked_prefill_size=2048,
-        rollout_sglang_jax_page_size=64,
-    )
-    if ENABLE_LORA:
-      config.rollout_sglang_jax_enable_static_lora = True
-      config.rollout_sglang_jax_lora_target_modules = LORA_TARGET_MODULES
-      config.rollout_sglang_jax_max_lora_rank = RANK
-      config.rollout_sglang_jax_lora_scaling = ALPHA / RANK
+  # Rollout sharding
+  assert ROLLOUT_TPU_TO_USE >= args.rollout_dp, (
+      f"ROLLOUT_TPU_TO_USE {ROLLOUT_TPU_TO_USE} must be >= rollout_dp"
+      f" {args.rollout_dp}"
+  )
+  assert ROLLOUT_TPU_TO_USE % args.rollout_dp == 0, (
+      f"ROLLOUT_TPU_TO_USE {ROLLOUT_TPU_TO_USE} must be divisible by"
+      f" rollout_dp {args.rollout_dp}"
+  )
+  assert ROLLOUT_TPU_TO_USE >= args.rollout_tp, (
+      f"ROLLOUT_TPU_TO_USE {ROLLOUT_TPU_TO_USE} must be >= rollout_tp"
+      f" {args.rollout_tp}"
+  )
+  assert ROLLOUT_TPU_TO_USE % args.rollout_tp == 0, (
+      f"ROLLOUT_TPU_TO_USE {ROLLOUT_TPU_TO_USE} must be divisible by"
+      f" rollout_tp {args.rollout_tp}"
+  )
+  assert (
+      args.rollout_tp <= MAX_TP_SIZE
+  ), f"rollout_tp {args.rollout_tp} must be <= MAX_TP_SIZE {MAX_TP_SIZE}"
+  if args.rollout_dp == -1 and args.rollout_tp == -1:
+    rollout_tp = min(MAX_TP_SIZE, ROLLOUT_TPU_TO_USE)
+    rollout_dp = ROLLOUT_TPU_TO_USE // rollout_tp
+  elif args.rollout_dp == -1:
+    rollout_tp = args.rollout_tp
+    rollout_dp = ROLLOUT_TPU_TO_USE // rollout_tp
+  elif args.rollout_tp == -1:
+    rollout_dp = args.rollout_dp
+    rollout_tp = ROLLOUT_TPU_TO_USE // rollout_dp
+  else:
+    rollout_dp = args.rollout_dp
+    rollout_tp = args.rollout_tp
 
-    return config
+  assert rollout_dp * rollout_tp == ROLLOUT_TPU_TO_USE, (
+      f"rollout_dp {rollout_dp} * rollout_tp {rollout_tp} must equal"
+      f" ROLLOUT_TPU_TO_USE {ROLLOUT_TPU_TO_USE}"
+  )
 
-  return base_rollout.RolloutConfig(
-      max_tokens_to_generate=TOTAL_GENERATION_STEPS,
+  print(f"{ROLLOUT_TPU_TO_USE=}, {REF_TPU_TO_USE=}, {TRAINER_TPU_TO_USE=}")
+  print(f" {rollout_dp=}, {rollout_tp=}, {trainer_fsdp=}, {trainer_tp=}")
+
+  MESH = [(trainer_fsdp, trainer_tp), ("fsdp", "tp")]
+
+  if args.cluster_setup == "colocated":
+    REF_MESH = MESH
+  elif args.cluster_setup == "disaggregated-2-way":
+    REF_MESH = MESH
+  elif args.cluster_setup == "disaggregated-3-way":
+    # Ref share the same sharding as trainer
+    ref_fsdp = min(trainer_fsdp, REF_TPU_TO_USE)
+    ref_tp = REF_TPU_TO_USE // ref_fsdp
+    REF_MESH = [(ref_fsdp, ref_tp), ("fsdp", "tp")]
+  else:
+    raise ValueError(f"Unknown cluster setup: {args.cluster_setup}")
+
+  ROLLOUT_MESH = [(rollout_dp, rollout_tp), ("fsdp", "tp")]
+  print(
+      f"Trainer mesh: {MESH}, Ref mesh: {REF_MESH},"
+      f" Rollout mesh: {ROLLOUT_MESH}"
+  )
+
+  # The number of times the policy generates multiple responses for a given
+  # prompt within a single training step. This corresponds to `G` in Algorithm 1
+  # in the paper. The "group" in GRPO comes from here.
+  NUM_GENERATIONS = args.num_generations
+
+  # ====== Training ======
+  # To speed up for quick workflow validation, we can change NUM_BATCHES to
+  # e.g. 2.
+  NUM_BATCHES = min(args.num_batches, 7473 // args.global_batch_size)
+  # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
+  # increased to a max. of 330 (if batch size is 4).
+  # To speed up for quick workflow validation, we can change it to e.g. 1
+  NUM_TEST_BATCHES = args.num_test_batches
+
+  # Number of training steps.
+  MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
+
+  # == Cosine decay with warmup scheduler ==
+  # Linearly increase learning rate from 0. to 5e-6 in the first 10% training
+  # steps, and then gradually decrease the learning rate to 0 using cosine
+  # scheduler.
+  WARMUP_STEPS = 0.1 * MAX_STEPS
+
+  # ====== Checkpoint saving ======
+  CKPT_DIR = os.path.join(
+      args.root_dir, "rl/grpo/demo/experiments/llama3/training_runs/2"
+  )
+
+  # Delete local checkpoint directory
+  tc.delete_directory(CKPT_DIR)
+  tc.clear_jax_arrays()
+
+  # Download checkpoints
+  tc.download_from_huggingface(
+      repo_id=HF_MODEL_VERSION, model_path=VLLM_MODEL_VERSION
+  )
+
+  show_hbm_usage()
+
+  model_tokenizer = transformers.AutoTokenizer.from_pretrained(
+      VLLM_MODEL_VERSION
+  )
+
+  dataset = create_dataset(
+      args.data_source,
+      args.dataset if args.data_source == "tfds" else LOCAL_TRAIN_DATA_DIR,
+      tokenizer=model_tokenizer,
+      tfds_download=True,
+      split="train",
+      apply_chat_template_to_dataset=True,
+  )
+
+  train_dataset, val_dataset = data_lib.post_init_dataset(
+      dataset,
+      model_tokenizer,
+      batch_size=args.global_batch_size,
+      num_batches=NUM_BATCHES,
       max_prompt_length=MAX_PROMPT_LENGTH,
-      kv_cache_size=MAX_PROMPT_LENGTH + TOTAL_GENERATION_STEPS + 256,
-      temperature=TEMPERATURE,
-      top_p=TOP_P,
-      top_k=TOP_K,
-      data_parallel_size=ROLLOUT_MESH[0][0],
-      tensor_parallel_size=ROLLOUT_MESH[0][1],
-      rollout_vllm_model_version=VLLM_MODEL_VERSION,
-      rollout_vllm_hbm_utilization=0.2,
-      rollout_vllm_tpu_backend_type="jax",
-      rollout_vllm_server_mode=args.rollout_server_mode,
-        rollout_vllm_server_mode_submission_threshold=(
-          args.rollout_server_mode_submission_threshold
-        ),
-        rollout_vllm_server_mode_submission_timeout_s=(
-          args.rollout_server_mode_submission_timeout_s
-        ),
-      rollout_vllm_async_scheduling=args.async_scheduling,
+      fraction=TRAIN_FRACTION,
+      num_epochs=NUM_EPOCHS,
   )
 
-
-# Training config
-cluster_config = rl_engine_lib.ClusterConfig(
-    role_to_mesh={
-        rl_engine_lib.Role.ACTOR: training_mesh,
-        rl_engine_lib.Role.REFERENCE: ref_mesh,
-        rl_engine_lib.Role.ROLLOUT: rollout_mesh,
-    },
-    rollout_engine=args.rollout_engine,
-    offload_to_cpu=False,
-    training_config=rl_engine_lib.RLTrainingConfig(
-        actor_optimizer=optimizer,
-        eval_every_n_steps=EVAL_EVERY_N_STEPS,
-        max_steps=MAX_STEPS,
-        mini_batch_size=args.train_mini_batch_size,
-        train_micro_batch_size=args.train_micro_batch_size,
-        # metrics logging
-        metrics_logging_options=metrics_logging_options,
-        # checkpoint saving
-        checkpoint_root_directory=CKPT_DIR,
-        checkpointing_options=checkpointing_options,
-        profiler_options=profiler_options,
-    ),
-    rollout_config=get_rollout_config(args.rollout_engine),
-)
-
-grpo_config = grpo_learner.GRPOConfig(
-    num_generations=NUM_GENERATIONS,
-    num_iterations=NUM_ITERATIONS,
-    beta=BETA,
-    epsilon=EPSILON,
-)
-
-
-perf_config = (
-    perf_metrics.PerfMetricsConfig()
-    if (args.enable_perf_v1 or args.enable_perf_v2)
-    else None
-)
-if args.enable_perf_v1:
-  perf_config.custom_export_fn = (
-      perf_export.PerfMetricsExport.from_cluster_config(cluster_config)
-  )
-if args.enable_perf_v2:
-  perf_config.custom_export_fn_v2 = (
-      perf_export_v2.PerfMetricsExport.from_cluster_config(
-          cluster_config=cluster_config,
-          trace_dir=args.trace_dir,
-      ).export_metrics
+  test_dataset = create_dataset(
+      args.data_source,
+      args.dataset if args.data_source == "tfds" else LOCAL_TRAIN_DATA_DIR,
+      tokenizer=model_tokenizer,
+      tfds_download=True,
+      split="test",
+      apply_chat_template_to_dataset=True,
   )
 
-# RL engine
-rl_engine = rl_engine_lib.RLEngine(
-    actor=training_model,
-    reference=ref_model,
-    tokenizer=model_tokenizer,
-    cluster_config=cluster_config,
-    perf_config=perf_config,
-)
+  test_dataset, _ = data_lib.post_init_dataset(
+      test_dataset,
+      model_tokenizer,
+      batch_size=args.global_batch_size,
+      num_batches=NUM_TEST_BATCHES,
+      max_prompt_length=MAX_PROMPT_LENGTH,
+  )
 
-# GRPO Trainer
-grpo_trainer = grpo_learner.GRPOLearner(
-    rl_engine=rl_engine,
-    reward_fns=[
-        match_format_exactly,
-        match_format_approximately,
-        check_answer,
-        check_numbers,
-    ],
-    algo_config=grpo_config,
-)
+  def get_trainer_model(ckpt_path, model_mesh, ref_model_config):
+    if "Llama" in HF_MODEL_VERSION:
+      return llama_params.create_model_from_safe_tensors(
+          ckpt_path, ref_model_config, model_mesh
+      )
+    elif "Qwen2.5" in HF_MODEL_VERSION:
+      return qwen2_params.create_model_from_safe_tensors(
+          ckpt_path, ref_model_config, model_mesh
+      )
+    elif "Qwen3" in HF_MODEL_VERSION:
+      return qwen3_params.create_model_from_safe_tensors(
+          ckpt_path, ref_model_config, model_mesh
+      )
+    raise NotImplementedError(
+        f"{HF_MODEL_VERSION} tensor loading not implemented"
+    )
 
-show_hbm_usage("After creating the learner")
+  def get_model(
+      device_start_idx: int, device_end_idx: int, mesh: list[tuple[int]]
+  ):
+    ckpt_path = os.path.join(NNX_CKPT_DIR)
+    model_mesh = jax.make_mesh(
+        *mesh,
+        devices=jax.devices()[device_start_idx:device_end_idx],
+        axis_types=(jax.sharding.AxisType.Auto,) * len(mesh[0]),
+    )
+    ref_model_config = MODEL_CONFIG[HF_MODEL_VERSION]()
+    model = get_trainer_model(ckpt_path, model_mesh, ref_model_config)
+    return model, model_mesh, ref_model_config
 
+  def get_lora_model(base_model, model_mesh=None):
+    """Creates a LoRA model from a base model.
 
-rollout_sampler = rl_engine._rollout._sampler  # pylint: disable=protected-access
-(eval_corr, eval_total, eval_accuracy, eval_partial_accuracy, eval_format_accuracy) = evaluate(  # pylint: disable=unbalanced-tuple-unpacking
-    test_dataset,
-    rollout_sampler,
-    **GENERATION_CONFIGS["greedy"],
-)
-print(
-    f"{eval_corr=}, {eval_total=}, {eval_accuracy=}%,"
-    f" {eval_partial_accuracy=}%, {eval_format_accuracy=}%"
-)
+    Args:
+      base_model: The base model to apply LoRA to.
+      model_mesh: The mesh to use for sharding the model.
 
-# for eval_example in QUALITATIVE_EVAL_EXAMPLES:
-#   question = eval_example["question"]
-#   answer = eval_example["answer"]
-#   response = generate(
-#       question,
-#       rollout_sampler,
-#       temperature=INFERENCE_TEMPERATURE,
-#       top_k=INFERENCE_TOP_K,
-#       top_p=INFERENCE_TOP_P,
-#   )
+    Returns:
+      A LoRA model.
+    """
+    if isinstance(base_model, llama_lib.Llama3):
+      module_path = (
+          ".*q_proj|.*k_proj|.*v_proj|.*o_proj|"
+          ".*gate_proj|.*down_proj|.*up_proj"
+      )
+    else:
+      module_path = (
+          ".*q_einsum|.*kv_einsum|.*gate_proj|"
+          ".*down_proj|.*up_proj|.*attn_vec_einsum"
+      )
 
-#   print(f"Question:\n{question}")
-#   print(f"Answer:\n{answer}")
-#   print(f"Response:\n{response}")
-#   print("===============")
+    lora_provider = qwix.LoraProvider(
+        module_path=(module_path),
+        rank=RANK,
+        alpha=ALPHA,
+    )
 
+    model_input = base_model.get_model_input()
+    lora_model = qwix.apply_lora_to_model(
+        base_model, lora_provider, **model_input
+    )
 
-show_hbm_usage("Right before training")
-grpo_trainer.train(train_dataset, eval_ds=val_dataset)
+    return lora_model
 
-# Load checkpoint first.
+  # Reference model
+  ref_model, ref_mesh, model_config = get_model(
+      REF_DEVICE_START_IDX, REF_DEVICE_END_IDX, REF_MESH
+  )
 
-show_hbm_usage("After training the model")
+  if DO_MODEL_DISPLAY:
+    nnx.display(ref_model)
 
-trained_ckpt_path = os.path.join(
-    CKPT_DIR, "actor", str(MAX_STEPS), "model_params"
-)
+  # Policy model
+  # TODO(b/434959964): Supports lora in vLLM Jax backend
+  if ENABLE_LORA:
+    training_model = get_lora_model(ref_model)
+    training_mesh = ref_mesh
+  else:
+    training_model, training_mesh, _ = get_model(
+        TRAINER_DEVICE_START_IDX, TRAINER_DEVICE_END_IDX, MESH
+    )
 
-filter_type = nnx.LoRAParam if ENABLE_LORA else nnx.Param
-abs_params = jax.tree.map(
-    lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype),
-    nnx.state(training_model, filter_type),
-)
-checkpointer = ocp.StandardCheckpointer()
-trained_lora_params = checkpointer.restore(trained_ckpt_path, target=abs_params)
+  if DO_MODEL_DISPLAY:
+    nnx.display(training_model)
 
-nnx.update(
-    training_model,
-    jax.tree.map(
-        lambda a, b: b,
-        nnx.state(training_model, filter_type),
-        trained_lora_params,
-    ),
-)
+  show_hbm_usage("After creating the reference lora model")
 
-(eval_corr, eval_total, eval_accuracy, eval_partial_accuracy, eval_format_accuracy) = evaluate(  # pylint: disable=unbalanced-tuple-unpacking
-    test_dataset,
-    rollout_sampler,
-    **GENERATION_CONFIGS["greedy"],
-)
-print(
-    f"{eval_corr=}, {eval_total=}, {eval_accuracy=}%,"
-    f" {eval_partial_accuracy=}%, {eval_format_accuracy=}%"
-)
+  rollout_device_arrays = mesh_utils.create_device_mesh(
+      ROLLOUT_MESH[0],
+      devices=jax.devices()[ROLLOUT_DEVICE_START_IDX:ROLLOUT_DEVICE_END_IDX],
+      allow_split_physical_axes=True,
+  )
 
-# for eval_example in QUALITATIVE_EVAL_EXAMPLES:
-#   question = eval_example["question"]
-#   answer = eval_example["answer"]
-#   response = generate(
-#       question,
-#       rollout_sampler,
-#       temperature=INFERENCE_TEMPERATURE,
-#       top_k=INFERENCE_TOP_K,
-#       top_p=INFERENCE_TOP_P,
-#   )
+  rollout_mesh = jax.sharding.Mesh(
+      rollout_device_arrays,
+      ROLLOUT_MESH[1],
+      axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH[0]),
+  )
 
-#   print(f"Question:\n{question}")
-#   print(f"Answer:\n{answer}")
-#   print(f"Response:\n{response}")
-#   print("===============")
+  def generate(
+      question, sampler, temperature=0.7, top_k=50, top_p=0.95, seed=None
+  ):
+    """Given prompt, generates text."""
+
+    if isinstance(question, str):
+      input_batch = [
+          model_tokenizer.apply_chat_template(
+              [
+                  {"role": "system", "content": SYSTEM_PROMPT},
+                  {"role": "user", "content": question},
+              ],
+              tokenize=False,
+              add_generation_prompt=True,
+          ),
+      ]
+    else:
+      input_batch = [
+          model_tokenizer.apply_chat_template(
+              [
+                  {"role": "system", "content": SYSTEM_PROMPT},
+                  {"role": "user", "content": q},
+              ],
+              tokenize=False,
+              add_generation_prompt=True,
+          )
+          for q in question
+      ]
+
+    out_data = sampler(
+        input_strings=input_batch,
+        max_generation_steps=TOTAL_GENERATION_STEPS,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+        echo=False,
+        seed=seed if seed is not None else None,
+    )
+
+    output = out_data.text
+    if isinstance(question, str):
+      return output[0]
+    return output
+
+  def evaluate(
+      eval_dataset,
+      sampler,
+      temperature=0.7,
+      top_k=50,
+      top_p=0.95,
+      num_passes=1,
+      corr_lst=False,
+      make_lst=False,
+  ):
+    """Computes accuracy and percentage of outputs matching the format."""
+
+    response_lst = []
+    corr = 0
+    partially_corr = 0
+    corr_format = 0
+    total = 0
+
+    for batch in tqdm(eval_dataset):
+      answers = batch["answer"]
+      questions = batch["question"]
+
+      multiple_call_responses = [[] for _ in range(len(questions))]
+      for p in range(num_passes):
+        responses = generate(
+            questions, sampler, temperature, top_k, top_p, seed=None
+        )
+        for idx, response in enumerate(responses):
+          multiple_call_responses[idx].append(response)
+
+      for question, multiple_call_response, answer in zip(
+          questions, multiple_call_responses, answers
+      ):
+        # check answer
+        corr_ctr_per_question = 0
+        partially_corr_per_question = 0
+        corr_format_per_question = 0
+        for response in multiple_call_response:
+          # Grab the last matched number from this response (not a generator)
+          matches = match_numbers.findall(response)
+          extracted_response = matches[-1] if matches else "-1000000"
+          try:
+            response_num = float(extracted_response.replace(",", "").strip())
+            answer_num = float(answer.replace(",", "").strip())
+            if response_num == answer_num:
+              corr_ctr_per_question += 1
+
+            ratio = response_num / answer_num
+            if ratio >= 0.9 and ratio <= 1.1:
+              partially_corr_per_question += 1
+          except (ValueError, ZeroDivisionError) as e:
+            print(f"SKIPPED: {e}")
+
+          # check format
+          if match_format.search(response) is not None:
+            corr_format_per_question += 1
+
+          if (
+              corr_ctr_per_question > 0
+              and partially_corr_per_question > 0
+              and corr_format_per_question > 0
+          ):
+            break
+
+        if corr_ctr_per_question > 0:
+          corr += 1
+          if corr_lst and make_lst:
+            response_lst.append((question, answer, multiple_call_response))
+        else:
+          if not corr_lst and make_lst:
+            response_lst.append((question, answer, multiple_call_response))
+        if partially_corr_per_question > 0:
+          partially_corr += 1
+        if corr_format_per_question > 0:
+          corr_format += 1
+
+        total += 1
+        if total % 10 == 0:
+          print(
+              f"===> {corr=}, {total=}, {corr / total * 100=}, "
+              f"{partially_corr / total * 100=}, {corr_format / total * 100=}"
+          )
+
+    to_return = (
+        corr,
+        total,
+        corr / total * 100,
+        partially_corr / total * 100,
+        corr_format / total * 100,
+    )
+    if make_lst:
+      return to_return, response_lst
+    return to_return
+
+  show_hbm_usage("After creating a raw sampler")
+
+  # Ckpt saving
+  checkpointing_options = ocp.CheckpointManagerOptions(
+      save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP
+  )
+  # Metrics logger
+  metrics_logging_options = metrics_logger.MetricsLoggerOptions(
+      log_dir="/tmp/tensorboard/grpo", flush_every_n_steps=20
+  )
+
+  show_hbm_usage("After creating a new rollout worker")
+  # Optimizer, learning rate scheduler, gradient clipping
+  optimizer = optax.adamw(
+      learning_rate=optax.schedules.warmup_cosine_decay_schedule(
+          init_value=0.0,
+          peak_value=LEARNING_RATE,
+          warmup_steps=WARMUP_STEPS,
+          decay_steps=MAX_STEPS,
+          end_value=0.0,
+      ),
+      b1=B1,
+      b2=B2,
+      weight_decay=WEIGHT_DECAY,
+  )
+  if MAX_GRAD_NORM is not None:
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(max_norm=MAX_GRAD_NORM),
+        optimizer,
+    )
+
+  profiler_options = None
+  if args.enable_profiler:
+    profiler_options = profiler.ProfilerOptions(
+        profiler_steps=args.profiler_steps,
+        skip_first_n_steps=args.profiler_skip_first_n_steps,
+        set_profile_options=False,
+        log_dir=PROFILER_PATH,
+    )
+
+  # Training config
+  cluster_config = rl_engine_lib.ClusterConfig(
+      role_to_mesh={
+          rl_engine_lib.Role.ACTOR: training_mesh,
+          rl_engine_lib.Role.REFERENCE: ref_mesh,
+          rl_engine_lib.Role.ROLLOUT: rollout_mesh,
+      },
+      rollout_engine=args.rollout_engine,
+      offload_to_cpu=False,
+      training_config=rl_engine_lib.RLTrainingConfig(
+          actor_optimizer=optimizer,
+          eval_every_n_steps=EVAL_EVERY_N_STEPS,
+          max_steps=MAX_STEPS,
+          mini_batch_size=args.train_mini_batch_size,
+          train_micro_batch_size=args.train_micro_batch_size,
+          # metrics logging
+          metrics_logging_options=metrics_logging_options,
+          # checkpoint saving
+          checkpoint_root_directory=CKPT_DIR,
+          checkpointing_options=checkpointing_options,
+          profiler_options=profiler_options,
+      ),
+      rollout_config=base_rollout.RolloutConfig(
+          max_tokens_to_generate=TOTAL_GENERATION_STEPS,
+          max_prompt_length=MAX_PROMPT_LENGTH,
+          kv_cache_size=MAX_PROMPT_LENGTH + TOTAL_GENERATION_STEPS + 256,
+          temperature=TEMPERATURE,
+          top_p=TOP_P,
+          top_k=TOP_K,
+          data_parallel_size=ROLLOUT_MESH[0][0],
+          tensor_parallel_size=ROLLOUT_MESH[0][1],
+          rollout_vllm_model_version=VLLM_MODEL_VERSION,
+          rollout_vllm_hbm_utilization=0.2,
+          rollout_vllm_tpu_backend_type="jax",
+          rollout_vllm_server_mode=args.rollout_server_mode,
+          rollout_vllm_server_mode_submission_threshold=(
+              args.rollout_server_mode_submission_threshold
+          ),
+          rollout_vllm_server_mode_submission_timeout_s=(
+              args.rollout_server_mode_submission_timeout_s
+          ),
+          rollout_vllm_async_scheduling=args.async_scheduling,
+      ),
+  )
+
+  grpo_config = grpo_learner.GRPOConfig(
+      num_generations=NUM_GENERATIONS,
+      num_iterations=NUM_ITERATIONS,
+      beta=BETA,
+      epsilon=EPSILON,
+  )
+
+  perf_config = (
+      perf_metrics.PerfMetricsConfig()
+      if (args.enable_perf_v1 or args.enable_perf_v2)
+      else None
+  )
+  if args.enable_perf_v1:
+    perf_config.custom_export_fn = (
+        perf_export.PerfMetricsExport.from_cluster_config(cluster_config)
+    )
+  if args.enable_perf_v2:
+    perf_config.custom_export_fn_v2 = (
+        perf_export_v2.PerfMetricsExport.from_cluster_config(
+            cluster_config=cluster_config,
+            trace_dir=args.trace_dir,
+        ).export_metrics
+    )
+
+  # RL engine
+  rl_engine = rl_engine_lib.RLEngine(
+      actor=training_model,
+      reference=ref_model,
+      tokenizer=model_tokenizer,
+      cluster_config=cluster_config,
+      perf_config=perf_config,
+  )
+
+  # GRPO Trainer
+  grpo_trainer = grpo_learner.GRPOLearner(
+      rl_engine=rl_engine,
+      reward_fns=[
+          match_format_exactly,
+          match_format_approximately,
+          check_answer,
+          check_numbers,
+      ],
+      algo_config=grpo_config,
+  )
+
+  show_hbm_usage("After creating the learner")
+
+  rollout_sampler = rl_engine._rollout._sampler  # pylint: disable=protected-access
+  (
+      eval_corr,
+      eval_total,
+      eval_accuracy,
+      eval_partial_accuracy,
+      eval_format_accuracy,
+  ) = evaluate(  # pylint: disable=unbalanced-tuple-unpacking
+      test_dataset,
+      rollout_sampler,
+      **GENERATION_CONFIGS["greedy"],
+  )
+  print(
+      f"{eval_corr=}, {eval_total=}, {eval_accuracy=}%,"
+      f" {eval_partial_accuracy=}%, {eval_format_accuracy=}%"
+  )
+
+  # for eval_example in QUALITATIVE_EVAL_EXAMPLES:
+  #   question = eval_example["question"]
+  #   answer = eval_example["answer"]
+  #   response = generate(
+  #       question,
+  #       rollout_sampler,
+  #       temperature=INFERENCE_TEMPERATURE,
+  #       top_k=INFERENCE_TOP_K,
+  #       top_p=INFERENCE_TOP_P,
+  #   )
+
+  #   print(f"Question:\n{question}")
+  #   print(f"Answer:\n{answer}")
+  #   print(f"Response:\n{response}")
+  #   print("===============")
+
+  show_hbm_usage("Right before training")
+  grpo_trainer.train(train_dataset, eval_ds=val_dataset)
+
+  # Load checkpoint first.
+
+  show_hbm_usage("After training the model")
+
+  trained_ckpt_path = os.path.join(
+      CKPT_DIR, "actor", str(MAX_STEPS), "model_params"
+  )
+
+  filter_type = nnx.LoRAParam if ENABLE_LORA else nnx.Param
+  abs_params = jax.tree.map(
+      lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype),
+      nnx.state(training_model, filter_type),
+  )
+  checkpointer = ocp.StandardCheckpointer()
+  trained_lora_params = checkpointer.restore(
+      trained_ckpt_path, target=abs_params
+  )
+
+  nnx.update(
+      training_model,
+      jax.tree.map(
+          lambda a, b: b,
+          nnx.state(training_model, filter_type),
+          trained_lora_params,
+      ),
+  )
+
+  (
+      eval_corr,
+      eval_total,
+      eval_accuracy,
+      eval_partial_accuracy,
+      eval_format_accuracy,
+  ) = evaluate(  # pylint: disable=unbalanced-tuple-unpacking
+      test_dataset,
+      rollout_sampler,
+      **GENERATION_CONFIGS["greedy"],
+  )
+  print(
+      f"{eval_corr=}, {eval_total=}, {eval_accuracy=}%,"
+      f" {eval_partial_accuracy=}%, {eval_format_accuracy=}%"
+  )
+
+  # for eval_example in QUALITATIVE_EVAL_EXAMPLES:
+  #   question = eval_example["question"]
+  #   answer = eval_example["answer"]
+  #   response = generate(
+  #       question,
+  #       rollout_sampler,
+  #       temperature=INFERENCE_TEMPERATURE,
+  #       top_k=INFERENCE_TOP_K,
+  #       top_p=INFERENCE_TOP_P,
+  #   )
+
+  #   print(f"Question:\n{question}")
+  #   print(f"Answer:\n{answer}")
+  #   print(f"Response:\n{response}")
+  #   print("===============")

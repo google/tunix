@@ -24,6 +24,7 @@ from tunix.dist_rl.trajectory import in_memory_store
 from tunix.dist_rl.trajectory import sql_store
 from tunix.dist_rl.trajectory import store as store_lib
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
+from tunix.dist_rl.trajectory import trajectory_testing
 
 
 class BackendRegistrationTest(absltest.TestCase):
@@ -175,11 +176,15 @@ class FromConfigTest(absltest.TestCase):
             "backend": self.BACKEND,
         }
 
-      def get_trajectories_metadata(self, trajectory_ids=None):
-        return []
+      def get_trajectories_metadata(
+          self, trajectory_ids=None, *, ignore_missing=False
+      ):
+        return {}
 
-      def get_trajectories(self, trajectory_ids):
-        return []
+      def get_trajectories(
+          self, trajectory_ids, *, ignore_missing=False, strict=True
+      ):
+        return {}
 
       def add_step(self, step, metadata):
         pass
@@ -230,6 +235,78 @@ class FromConfigTest(absltest.TestCase):
           )
       )
     store.close()
+
+  def test_tunix_store_from_config_validates_exclude_step_arrays(self):
+    store = store_lib.TunixTrajectoryStore.from_config(
+        self._file_config(exclude_step_arrays=["env_tokens", "logprobs"])
+    )
+    self.addCleanup(store.close)
+    self.assertEqual(
+        store.exclude_step_arrays, frozenset({"env_tokens", "logprobs"})
+    )
+
+    with self.assertRaisesRegex(ValueError, r"Unsupported.*'message'"):
+      store_lib.TunixTrajectoryStore.from_config(
+          self._sql_config(exclude_step_arrays=["logprobs", "message"])
+      )
+    with self.assertRaisesRegex(TypeError, r"not a string"):
+      store_lib.TunixTrajectoryStore.from_config(
+          self._file_config(exclude_step_arrays="logprobs")
+      )
+
+  def test_backend_from_config_rejects_falsy_non_collection_exclusions(self):
+    # Falsy non-collections (e.g. "" or False) must raise like a schema-bound
+    # `TunixTrajectoryStore.from_config` does, not silently mean "keep all".
+    for config in (self._file_config(), self._sql_config()):
+      for value in ("", False):
+        with self.subTest(backend=config["backend"], value=value):
+          with self.assertRaisesRegex(TypeError, r"collection of field names"):
+            store_lib.TrajectoryStore.from_config(
+                dict(config, exclude_step_arrays=value)
+            )
+          with self.assertRaisesRegex(TypeError, r"collection of field names"):
+            store_lib.TunixTrajectoryStore.from_config(
+                dict(config, exclude_step_arrays=value)
+            )
+
+  def test_backend_from_config_treats_none_exclusions_as_default(self):
+    store = store_lib.TrajectoryStore.from_config(
+        self._sql_config(exclude_step_arrays=None)
+    )
+    self.addCleanup(store.close)
+
+    self.assertEqual(store.exclude_step_arrays, frozenset())
+    self.assertNotIn("exclude_step_arrays", store.to_config())
+
+  def test_unbound_store_validates_exclude_step_arrays_on_first_write(self):
+    for config in (self._file_config(), self._sql_config()):
+      with self.subTest(config["backend"]):
+        store = store_lib.TrajectoryStore.from_config(
+            dict(config, exclude_step_arrays=["logprobs", "message"])
+        )
+        self.addCleanup(store.close)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"bound to TunixTrajectoryMetadata: Unsupported.*'message'",
+        ):
+          store.add_step(
+              trajectory_testing.TUNIX_ENV_STEP_0,
+              trajectory_testing.TUNIX_METADATA_1,
+          )
+
+  def test_base_metadata_store_rejects_tunix_exclusions_on_first_write(self):
+    store = file_store.FileTrajectoryStore(
+        root_dir=self.tmp_dir, run_id="run_1", exclude_step_arrays=["logprobs"]
+    )
+    self.addCleanup(store.close)
+
+    with self.assertRaisesRegex(
+        ValueError, r"bound to TrajectoryMetadata: Unsupported.*'logprobs'"
+    ):
+      store.add_step(
+          trajectory_testing.make_step(), trajectory_testing.make_metadata()
+      )
 
   def test_bound_metadata_cls_property_reports_bound_metadata_class(self):
     file_s = store_lib.TunixTrajectoryStore.from_config(self._file_config())
@@ -330,6 +407,58 @@ class GenericTypeParametersTest(absltest.TestCase):
     self.assertIsInstance(sql_s, store_lib.TrajectoryReader)
     self.assertIsInstance(sql_s, store_lib.TrajectoryWriter)
     sql_s.close()
+
+  def test_trajectory_metrics_not_found_error(self) -> None:
+    """Verifies TrajectoryMetricsNotFoundError attributes and string representation."""
+    err = store_lib.TrajectoryMetricsNotFoundError("t1")
+    self.assertEqual(err.trajectory_id, "t1")
+    self.assertIn("t1", str(err))
+    self.assertIsInstance(err, KeyError)
+
+  def test_base_trajectory_store_unimplemented_metrics_methods_raise(
+      self,
+  ) -> None:
+    """Verifies that TrajectoryStore base methods raise NotImplementedError."""
+
+    class MinimalStore(
+        store_lib.TrajectoryStore[trajectory_lib.TrajectoryMetadata]
+    ):
+      BACKEND = "minimal"
+
+      @classmethod
+      def _from_config(cls, config):
+        return cls()
+
+      def to_config(self):
+        return {"backend": "minimal"}
+
+      def get_trajectories_metadata(
+          self, trajectory_ids=None, *, ignore_missing=False
+      ):
+        return {}
+
+      def get_trajectories(
+          self, trajectory_ids, *, ignore_missing=False, strict=True
+      ):
+        return {}
+
+      def add_step(self, step, metadata):
+        pass
+
+      def update_metadata(self, metadata):
+        pass
+
+      def flush(self):
+        pass
+
+      def close(self):
+        pass
+
+    s = MinimalStore()
+    with self.assertRaises(NotImplementedError):
+      s.update_metrics("t1", trajectory_lib.TrajectoryMetrics(extra={}))
+    with self.assertRaises(NotImplementedError):
+      s.get_trajectories_metrics()
 
   def test_subclassing_closes_type_parameters(self) -> None:
     """Verifies that concrete subclassing binds and closes type parameters."""
@@ -594,8 +723,8 @@ class GenericTypeParametersTest(absltest.TestCase):
     try:
       metas = reader.get_trajectories_metadata(["t_tie"])
       self.assertLen(metas, 1)
-      self.assertIs(type(metas[0]), DuplicateMetaB)
-      self.assertEqual(metas[0].shared_metric, 7)
+      self.assertIs(type(metas["t_tie"]), DuplicateMetaB)
+      self.assertEqual(metas["t_tie"].shared_metric, 7)
     finally:
       reader.close()
 

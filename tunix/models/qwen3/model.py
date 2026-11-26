@@ -32,6 +32,8 @@ import jax.sharding as shd
 from jax.sharding import PartitionSpec as P
 import jaxtyping
 from tunix.generate.mappings import BackendMappingMixin
+from tunix.models import gpu_kernels as kernels_lib
+from tunix.models import reference_attention as reference_attention_lib
 from tunix.utils import compat
 from tunix.utils import env_utils
 
@@ -600,48 +602,50 @@ class Attention(nnx.Module):
       cache_value_proj = value_proj
       cache_key_proj = key_proj
 
-    b, t, qh, d = query_proj.shape
+    b, _, qh, _ = query_proj.shape
     _, _, kh, _ = key_proj.shape
 
-    # NB: flash attention doesn't work for decoding step
-    if self.config.use_flash_attention and seq_len > 1:
+    # NB: flash attention doesn't work for decoding step or non-zero cache
+    # offset.
+    if (
+        self.config.use_flash_attention
+        and seq_len > 1
+        and cache is None
+        and jax.default_backend() == 'gpu'
+    ):
+      qkv = kernels_lib.gpu_flash_attention(
+          query_proj,
+          key_proj,
+          value_proj,
+          scale=self.scale,
+          is_causal=attn_mask is None,
+          mask=attn_mask,
+          segment_ids=segment_ids,
+          query_sharding_spec=self.shd_config.act_btnh,
+      )
+    elif (
+        self.config.use_flash_attention
+        and seq_len > 1
+        and cache is None
+        and jax.default_backend() != 'gpu'
+    ):
       query_proj = query_proj.transpose(0, 2, 1, 3)
       key_proj = key_proj.transpose(0, 2, 1, 3)
       value_proj = value_proj.transpose(0, 2, 1, 3)
 
       query_proj = query_proj * self.scale
 
-      mesh = pxla.thread_resources.env.physical_mesh
-      if mesh.empty:
-        try:
-          abs_mesh = jax.sharding.get_abstract_mesh()
-          if abs_mesh is not None and not abs_mesh.empty:
-            mesh = abs_mesh
-          else:
-            ctx_mesh = jax.sharding.get_mesh()
-            if ctx_mesh is not None and not ctx_mesh.empty:
-              mesh = ctx_mesh
-        except Exception:
-          pass
-
-      shd_b, shd_t, shd_n, shd_h = self.shd_config.act_btnh
-      if mesh is None or not mesh.shape:
-        shd_b = shd_t = shd_n = shd_h = None
-      else:
-        if shd_b is not None and (shd_b not in mesh.shape or b % mesh.shape[shd_b] != 0):
-          shd_b = None
-        if shd_t is not None and shd_t not in mesh.shape:
-          shd_t = None
-        if shd_n is not None and shd_n not in mesh.shape:
-          shd_n = None
-        if shd_h is not None and shd_h not in mesh.shape:
-          shd_h = None
-
-      head_shards = (
-          mesh.shape[shd_n] if mesh is not None and shd_n is not None and shd_n in mesh.shape else 1
-      )
-      q_seq_shards = (
-          mesh.shape[shd_t] if mesh is not None and shd_t is not None and shd_t in mesh.shape else 1
+      (
+          mesh,
+          shd_b,
+          shd_t,
+          shd_n,
+          shd_h,
+          shd_n_kv,
+          head_shards,
+          q_seq_shards,
+      ) = reference_attention_lib.resolve_splash_sharding(
+          self.shd_config.act_btnh, b, kh
       )
 
       bs = self.config.flash_attention_block_size
@@ -666,12 +670,8 @@ class Attention(nnx.Module):
             config=splash_config,
             q_seq_shards=q_seq_shards,
         )
-        kernel_spec = (
-            splash_attn_kernel.manual_sharding_spec(
-                shd.NamedSharding(mesh, P(shd_t))
-            )
-            if mesh is not None
-            else None
+        kernel_spec = splash_attn_kernel.manual_sharding_spec(
+            shd.NamedSharding(mesh, P(shd_t))
         )
         segment_ids_cls = tokamax_splash.SegmentIds
       else:
@@ -694,31 +694,23 @@ class Attention(nnx.Module):
             head_shards=head_shards,
             q_seq_shards=q_seq_shards,
         )
-        kernel_spec = (
-            splash_attn_kernel.manual_sharding_spec(
-                shd.NamedSharding(mesh, P(shd_n, shd_t))
-            )
-            if mesh is not None
-            else None
+        kernel_spec = splash_attn_kernel.manual_sharding_spec(
+            shd.NamedSharding(mesh, P(shd_n, shd_t))
         )
         segment_ids_cls = splash.SegmentIds
 
       shd_spec = P(shd_b, shd_n, shd_t, shd_h)
-      shd_n_kv = (
-          shd_n
-          if mesh is not None
-          and shd_n is not None
-          and shd_n in mesh.shape
-          and kh % mesh.shape[shd_n] == 0
-          else None
-      )
       unsharded_seq_kv = P(shd_b, shd_n_kv, None, shd_h)
+
+      effective_segment_ids = reference_attention_lib.extract_token_mask(
+          attn_mask, seq_len, segment_ids=segment_ids, dtype=jnp.int32
+      )
 
       # Per-position segment ids let splash suppress cross-segment attention
       # (e.g. real-token to pad-token, or sequence-packing cross-boundary).
       # The pallas splash kernel only accepts a static causal mask kernel-side,
       # so per-batch dynamic padding masks have to flow in via segment_ids.
-      if segment_ids is not None:
+      if effective_segment_ids is not None:
         seg_spec = P(shd_b, shd_t)
         unsharded_seg_spec = P(shd_b, None)
 
@@ -749,8 +741,8 @@ class Attention(nnx.Module):
             query_proj,
             key_proj,
             value_proj,
-            segment_ids,
-            segment_ids,
+            effective_segment_ids,
+            effective_segment_ids,
         )
       else:
 
@@ -774,23 +766,15 @@ class Attention(nnx.Module):
         )
       qkv = qkv.transpose(0, 2, 1, 3)
     else:
-      # GQA
-      query_proj = query_proj.reshape((b, t, kh, qh // kh, d))
-      attn = jnp.einsum('BTHGD,BSHD->BHGTS', query_proj, key_proj) * self.scale
-
-      if attn_mask is not None:
-        attn = jnp.where(attn_mask[:, None, None, :, :], attn, K_MASK)
-
-      if segment_ids is not None:
-        seg_mask = segment_ids[:, :, None] == segment_ids[:, None, :]
-        attn = jnp.where(seg_mask[:, None, None, :, :], attn, K_MASK)
-
-      attn = jax.nn.softmax(attn.astype(jnp.float32), axis=-1).astype(
-          key_proj.dtype
+      qkv = reference_attention_lib.reference_attention(
+          query_proj,
+          key_proj,
+          value_proj,
+          scale=self.scale,
+          attn_mask=attn_mask,
+          segment_ids=segment_ids,
+          mask_value=K_MASK,
       )
-
-      qkv = jnp.einsum('BHGTS,BSHD->BTHGD', attn, value_proj)
-      qkv = qkv.reshape((b, t, qh, d))
 
     outputs = self.o_proj(qkv)
     outputs = shard(
@@ -908,7 +892,7 @@ class MoELayer(nnx.Module):
     # -------------------------------------------------------------
     # Fallback to Vanilla dense routing if CPU or un-meshed environment
     # -------------------------------------------------------------
-    if not use_megablox or (mesh.empty or jax.devices()[0].platform == 'cpu'):
+    if not use_megablox or mesh.empty or jax.devices()[0].platform == 'cpu':
       dispatch_mask = jax.nn.one_hot(
           routing_idx,
           num_classes=self.num_experts,  # pyrefly: ignore[bad-argument-type]
@@ -971,14 +955,14 @@ class MoELayer(nnx.Module):
     def sharded_megablox_moe(inputs, weights, indices, gate_w, up_w, down_w):
       tp_axis = self.shd_config.act_btd[-1]
 
-      if tp_axis is not None and tp_axis in mesh.axis_names:
+      if tp_axis in mesh.axis_names:
         inputs = jax.lax.all_gather(
             inputs, axis_name=tp_axis, tiled=True, axis=2
         )
 
       B, T, D_global = inputs.shape
 
-      if ep_axis is not None and ep_axis in mesh.axis_names:
+      if ep_axis in mesh.axis_names:
         num_ep = jax.lax.psum(1, axis_name=ep_axis)
         ep_shard_idx = jax.lax.axis_index(ep_axis)
       else:
@@ -1070,36 +1054,56 @@ class MoELayer(nnx.Module):
         local_group_sizes = group_sizes
         local_expert_sort_indices = jnp.arange(sorted_inputs.shape[0])
 
-      m, k_dim = sorted_inputs.shape
-      n = gate_w.shape[-1]
-      ffn0_tiling = (
-          round_up_to_base(min(128, m), base=8, threshold=8),
-          round_up_to_base(min(128, k_dim), base=128, threshold=128),
-          round_up_to_base(min(128, n), base=128, threshold=128),
-      )
-      ffn1_tiling = (ffn0_tiling[0], ffn0_tiling[2], ffn0_tiling[1])
+      if jax.default_backend() == 'gpu':
+        projected = kernels_lib.gpu_ragged_dot(
+            sorted_inputs,
+            gate_w,
+            group_sizes=local_group_sizes,
+            preferred_element_type=inputs.dtype,
+        )
+        middle = jax.nn.silu(projected) * kernels_lib.gpu_ragged_dot(
+            sorted_inputs,
+            up_w,
+            group_sizes=local_group_sizes,
+            preferred_element_type=inputs.dtype,
+        )
+        sorted_outputs = kernels_lib.gpu_ragged_dot(
+            middle,
+            down_w,
+            group_sizes=local_group_sizes,
+            preferred_element_type=inputs.dtype,
+        )
+      else:
+        m, k_dim = sorted_inputs.shape
+        n = gate_w.shape[-1]
+        ffn0_tiling = (
+            round_up_to_base(min(128, m), base=8, threshold=8),
+            round_up_to_base(min(128, k_dim), base=128, threshold=128),
+            round_up_to_base(min(128, n), base=128, threshold=128),
+        )
+        ffn1_tiling = (ffn0_tiling[0], ffn0_tiling[2], ffn0_tiling[1])
 
-      projected = megablox.gmm(
-          sorted_inputs,
-          gate_w,
-          group_sizes=local_group_sizes,
-          tiling=ffn0_tiling,
-          preferred_element_type=inputs.dtype,
-      )
-      middle = jax.nn.silu(projected) * megablox.gmm(
-          sorted_inputs,
-          up_w,
-          group_sizes=local_group_sizes,
-          tiling=ffn0_tiling,
-          preferred_element_type=inputs.dtype,
-      )
-      sorted_outputs = megablox.gmm(
-          middle,
-          down_w,
-          group_sizes=local_group_sizes,
-          tiling=ffn1_tiling,
-          preferred_element_type=inputs.dtype,
-      )
+        projected = megablox.gmm(
+            sorted_inputs,
+            gate_w,
+            group_sizes=local_group_sizes,
+            tiling=ffn0_tiling,
+            preferred_element_type=inputs.dtype,
+        )
+        middle = jax.nn.silu(projected) * megablox.gmm(
+            sorted_inputs,
+            up_w,
+            group_sizes=local_group_sizes,
+            tiling=ffn0_tiling,
+            preferred_element_type=inputs.dtype,
+        )
+        sorted_outputs = megablox.gmm(
+            middle,
+            down_w,
+            group_sizes=local_group_sizes,
+            tiling=ffn1_tiling,
+            preferred_element_type=inputs.dtype,
+        )
 
       if num_ep > 1:
         sorted_outputs = _custom_permute(

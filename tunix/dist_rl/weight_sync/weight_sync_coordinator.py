@@ -26,15 +26,17 @@ One round, in order:
 
     source                          destination
     ------                          -----------
-                                    bind_weight_sync()       idempotent; builds
-                                                             the synchronizer if
-                                                             absent, keeps ports
-                                    get_weight_sync_metadata()
     prepare_weight_sync()                                    (both sides still
       rebind arrays, FFI D2H,                                serving; metadata
       return this round's metadata                           and registration
-    [register all units]                                     happen before any
-                                    pre_weight_sync()        downtime)
+      [source_prepared is set]                               happen before any
+                                    bind_weight_sync()       downtime)
+                                      idempotent; builds
+                                      the synchronizer if
+                                      absent, keeps ports
+                                    get_weight_sync_metadata()
+    [register all units]
+                                    pre_weight_sync()
                                       stop admitting, drain,
                                       free prefix + KV cache
     [handler.transfer]  --------->  (transport delivers the prepared weights)
@@ -122,20 +124,28 @@ weight sync begins once workers are up and serving.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Collection
 import dataclasses
 import enum
 import functools
 import os
 import threading
 import time
-from typing import Any, Optional, Sequence
+from typing import Any, Optional, Sequence, TYPE_CHECKING
 
 from absl import logging
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import timeouts as timeouts_lib
-from tunix.dist_rl.orchestrator import worker_registry
 from tunix.dist_rl.weight_sync import weight_sync
 from tunix.dist_rl.worker import remote_execution
+
+if TYPE_CHECKING:
+  # Type-only: rollout workers import this module and must not import the
+  # orchestrator at runtime (packaged `tunix.dist_rl.worker` would cycle).
+  from tunix.dist_rl.orchestrator import worker_registry  # pylint: disable=g-bad-import-order,g-import-not-at-top
+
+_SOURCE_RELEASE_MAX_ATTEMPTS = 3
+_SOURCE_RELEASE_RETRY_BACKOFF_S = 0.05
 
 
 class NullHandler(weight_sync.WeightSyncHandler):
@@ -158,12 +168,24 @@ class NullHandler(weight_sync.WeightSyncHandler):
 def create_default_handler(
     mode: str | weight_sync.WeightSyncMode | None = None,
 ) -> weight_sync.WeightSyncHandler:
-  """Creates the default weight sync handler based on options or env vars."""
-  mode_name = mode or os.getenv("WEIGHT_SYNC_MODE", "raiden")
-  if isinstance(mode_name, weight_sync.WeightSyncMode):
-    mode_name = mode_name.value
-  mode_name = str(mode_name).lower()
-  if mode_name == weight_sync.WeightSyncMode.RAIDEN.value:
+  """Creates the default coordinator weight sync handler.
+
+  Supports `WeightSyncMode.RAIDEN` for production TPU RMA weight sync and
+  `WeightSyncMode.NOOP` / `WeightSyncMode.NONE` for protocol-only no-op
+  transfers (`NullHandler`).
+  Raises `NotImplementedError` for valid modes without a coordinator transport
+  handler yet, and `ValueError` for unknown mode strings.
+  """
+  raw_mode = mode or os.getenv("WEIGHT_SYNC_MODE", "raiden")
+  try:
+    resolved_mode = (
+        raw_mode
+        if isinstance(raw_mode, weight_sync.WeightSyncMode)
+        else weight_sync.WeightSyncMode(str(raw_mode).lower())
+    )
+  except ValueError as exc:
+    raise ValueError(f"Unknown weight sync mode: {raw_mode!r}") from exc
+  if resolved_mode == weight_sync.WeightSyncMode.RAIDEN:
     from tunix.dist_rl.weight_sync import raiden_handler
 
     handler = raiden_handler.RaidenHandler(
@@ -171,18 +193,18 @@ def create_default_handler(
     )
     logging.info("Built RaidenHandler natively; port %d", handler.port)
     return handler
-  elif mode_name in (weight_sync.WeightSyncMode.FALLBACK.value, "noop", "no-op"):
+  if resolved_mode in (
+      weight_sync.WeightSyncMode.NONE,
+      weight_sync.WeightSyncMode.NOOP,
+  ):
     logging.info(
-        "Built fallback NullHandler; weight sync running protocol-only."
+        "Built protocol-only NullHandler; weight sync running protocol-only."
     )
     return NullHandler()
-  elif mode_name == weight_sync.WeightSyncMode.NONE.value:
-    raise ValueError(
-        "WEIGHT_SYNC_MODE=none disables weight sync; no handler should be"
-        " constructed."
-    )
-  else:
-    raise ValueError(f"Unknown weight sync mode: {mode_name!r}")
+  raise NotImplementedError(
+      f"Weight sync handler for mode={resolved_mode.value!r} is not"
+      " implemented in WeightSyncCoordinator yet."
+  )
 
 
 _Participant = tuple[str, remote_execution.ActorHandle]
@@ -510,17 +532,28 @@ class PhaseTimeouts:
     )
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, kw_only=True)
 class WorkerRoundReport:
   """Per-destination outcome of one round.
 
-  `phase` is the worker's last known self-reported phase ("unknown" when the
-  worker could not be reached at all). Version consistency and health are
-  separate axes: a worker can hold the old weights and still be down.
+  Version consistency and health are separate axes: a worker can hold the old
+  weights and still be down.
+
+  Attributes:
+    worker_id: Registry id of the destination worker.
+    phase: The worker's last known self-reported phase ("unknown" when the
+      worker could not be reached at all).
+    handle: The exact `ActorHandle` that participated in this round, so callers
+      promoting `PENDING_WEIGHT_SYNC` workers can guard against ABA handle
+      re-registration.
+    error: Failure details for this worker, or "" if it did not fail.
+    needs_restart: Whether the worker is in an unknown state and must be
+      restarted before it can serve again.
   """
 
   worker_id: str
   phase: str
+  handle: remote_execution.ActorHandle
   error: str = ""
   needs_restart: bool = False
 
@@ -639,20 +672,30 @@ class WeightSyncCoordinator:
 
   # ---------------------------------------------------------------- lookup
 
-  def _members(self, role: str) -> list[_Participant]:
-    infos = self._registry.infos(role)
-    if not infos:
-      raise ValueError(f"no workers registered for role {role!r}")
-    return [
-        (info.worker_id, self._registry.handle(info.worker_id))
-        for info in infos
-    ]
+  def _members(
+      self,
+      role: str,
+      *,
+      statuses: Collection[datatypes.AdmissionStatus] = (
+          datatypes.AdmissionStatus.ACTIVE,
+      ),
+  ) -> list[_Participant]:
+    """Returns `(worker_id, handle)` for `role` workers in `statuses`."""
+    targets = self._registry.targets(role, statuses=statuses)
+    if not targets:
+      raise ValueError(
+          f"no workers registered for role {role!r} with status in"
+          f" {[s.value for s in statuses]}"
+      )
+    return [(info.worker_id, handle) for info, handle in targets]
 
   def _sources(self) -> list[_Participant]:
     return self._members(self._source_role)
 
-  def _destinations(self) -> list[_Participant]:
-    return self._members(self._destination_role)
+  def _destinations(
+      self, statuses: Collection[datatypes.AdmissionStatus]
+  ) -> list[_Participant]:
+    return self._members(self._destination_role, statuses=statuses)
 
   # ---------------------------------------------------------------- request
 
@@ -663,6 +706,7 @@ class WeightSyncCoordinator:
       uuid: int = 0,
       round_index: int = 0,
       source_metadata: Any = None,
+      min_retained_policy_version: int | None = None,
       **extra_config,
   ) -> datatypes.WeightSyncRequest:
     """Builds the request carried through every phase of one round.
@@ -674,6 +718,7 @@ class WeightSyncCoordinator:
         controller_id=self._controller_id,
         policy_version=policy_version,
         source_metadata=source_metadata,
+        min_retained_policy_version=min_retained_policy_version,
         extra_config=dict(
             req_id=req_id, uuid=uuid, round_index=round_index, **extra_config
         ),
@@ -786,6 +831,12 @@ class WeightSyncCoordinator:
   async def sync(
       self,
       policy_version: int = 0,
+      *,
+      destination_statuses: Collection[datatypes.AdmissionStatus] = (
+          datatypes.AdmissionStatus.ACTIVE,
+      ),
+      min_retained_policy_version: int | None = None,
+      source_prepared: asyncio.Event | None = None,
       **extra_config,
   ) -> WeightSyncResult:
     """Runs one full round; returns only if it committed.
@@ -798,6 +849,15 @@ class WeightSyncCoordinator:
       policy_version: Version of the weights being pushed. Must not regress
         below the last committed version; pushing the same version again is
         allowed (it is how a failed round is retried).
+      destination_statuses: `AdmissionStatus` values of the destination workers
+        to include. Defaults to `(ACTIVE,)`.
+      min_retained_policy_version: Optional zombie-eviction floor forwarded on
+        `WeightSyncRequest` to rollout workers during `post_weight_sync`.
+      source_prepared: Set once every source has staged this round's weights
+        and returned its metadata. A caller running this round as a task may
+        then let the source train again, so the handler must transfer only the
+        staged copy. Never set if the round fails before or during source
+        prepare.
       **extra_config: Carried to the workers in the request.
     """
     if self._poisoned:
@@ -808,6 +868,15 @@ class WeightSyncCoordinator:
     if self._in_flight:
       raise RuntimeError(
           "a weight sync round is already in flight; rounds must not overlap"
+      )
+    if (
+        source_prepared is not None
+        and not self._handler.transfers_from_staged_copy
+    ):
+      raise ValueError(
+          "the source may train while this round runs, but the handler's"
+          " transfer reads the source's live weights; transfer the staged"
+          " copy instead (for Raiden: skip_d2h=True with no skip_tiling layer)"
       )
     if (
         self._last_committed_version is not None
@@ -821,7 +890,13 @@ class WeightSyncCoordinator:
     self._in_flight = True
     start_time = time.monotonic()
     try:
-      return await self._run_round(policy_version, extra_config)
+      return await self._run_round(
+          policy_version,
+          extra_config,
+          destination_statuses=destination_statuses,
+          min_retained_policy_version=min_retained_policy_version,
+          source_prepared=source_prepared,
+      )
     finally:
       elapsed_time = time.monotonic() - start_time
       logging.info("Weight sync finished in %.2f seconds.", elapsed_time)
@@ -831,6 +906,10 @@ class WeightSyncCoordinator:
       self,
       policy_version: int,
       extra_config: dict[str, Any],
+      *,
+      destination_statuses: Collection[datatypes.AdmissionStatus],
+      min_retained_policy_version: int | None = None,
+      source_prepared: asyncio.Event | None = None,
   ) -> WeightSyncResult:
     round_index = self._round_index
     self._round_index += 1
@@ -839,7 +918,7 @@ class WeightSyncCoordinator:
     req_id = f"{self._req_id_prefix}-v{policy_version}-r{round_index}"
 
     sources = self._sources()
-    destinations = self._destinations()
+    destinations = self._destinations(destination_statuses)
 
     state = RoundState.PREPARING
     transfer: Optional[weight_sync.TransferResult] = None
@@ -883,7 +962,7 @@ class WeightSyncCoordinator:
 
     async def record_workers(final_error: str = "") -> None:
       for destination in destinations:
-        wid = destination[0]
+        wid, handle = destination
         if wid in worker_reports:
           continue
         phase = await self._worker_phase(
@@ -894,6 +973,7 @@ class WeightSyncCoordinator:
             phase=phase or "unknown",
             error=final_error if phase is None else "",
             needs_restart=phase is None and quiesce_attempted,
+            handle=handle,
         )
 
     request = self.build_request(
@@ -901,6 +981,7 @@ class WeightSyncCoordinator:
         req_id=req_id,
         uuid=uuid,
         round_index=round_index,
+        min_retained_policy_version=min_retained_policy_version,
         **extra_config,
     )
     prepared_request: Optional[datatypes.WeightSyncRequest] = None
@@ -909,7 +990,25 @@ class WeightSyncCoordinator:
       # Everything up to `pre` runs while the destinations are still serving:
       # bind (a no-op on an already-bound worker), metadata collection, and
       # registration cost no downtime. Failures here need no rollback either.
+      # The source goes first so `source_prepared` fires as early as it can.
       try:
+        # Metadata is collected exactly once and the same objects flow to both
+        # registration and the request. Collecting twice would hand the
+        # controller endpoints from a different rebind than the one staged.
+        src_meta_lists = await asyncio.gather(*[
+            asyncio.wait_for(
+                handle.asubmit("prepare_weight_sync", request),
+                self._timeouts.source_prepare,
+            )
+            for _, handle in sources
+        ])
+        src_metadata = [
+            weight_sync.dict_to_metadata(m)
+            for per_source in src_meta_lists
+            for m in per_source
+        ]
+        if src_metadata and source_prepared is not None:
+          source_prepared.set()
         await asyncio.gather(*[
             asyncio.wait_for(
                 handle.asubmit("bind_weight_sync"), self._timeouts.bind
@@ -923,16 +1022,6 @@ class WeightSyncCoordinator:
             )
             for _, handle in destinations
         ])
-        # Metadata is collected exactly once and the same objects flow to both
-        # registration and the request. Collecting twice would hand the
-        # controller endpoints from a different rebind than the one staged.
-        src_meta_lists = await asyncio.gather(*[
-            asyncio.wait_for(
-                handle.asubmit("prepare_weight_sync", request),
-                self._timeouts.source_prepare,
-            )
-            for _, handle in sources
-        ])
       except asyncio.CancelledError:
         raise
       except Exception as e:  # pylint: disable=broad-except
@@ -943,11 +1032,6 @@ class WeightSyncCoordinator:
             " quiesced; no rollback needed"
         ) from e
 
-      src_metadata = [
-          weight_sync.dict_to_metadata(m)
-          for per_source in src_meta_lists
-          for m in per_source
-      ]
       dst_metadata = [
           weight_sync.dict_to_metadata(m)
           for per_dest in dst_meta_lists
@@ -1098,6 +1182,7 @@ class WeightSyncCoordinator:
           uuid=uuid,
           round_index=round_index,
           source_metadata=tuple(src_metadata),
+          min_retained_policy_version=min_retained_policy_version,
           **extra_config,
       )
 
@@ -1213,9 +1298,10 @@ class WeightSyncCoordinator:
 
       state = RoundState.COMMITTED
       self._last_committed_version = policy_version
-      for wid, _ in destinations:
+      for wid, handle in destinations:
         worker_reports.setdefault(
-            wid, WorkerRoundReport(worker_id=wid, phase="committed")
+            wid,
+            WorkerRoundReport(worker_id=wid, phase="committed", handle=handle),
         )
       return result()
 
@@ -1380,19 +1466,47 @@ class WeightSyncCoordinator:
     finally:
       if release_source:
         release_request = prepared_request or request
+
+        async def _release_one_source(wid: str, handle: Any) -> None:
+          for attempt in range(1, _SOURCE_RELEASE_MAX_ATTEMPTS + 1):
+            try:
+              await asyncio.wait_for(
+                  handle.asubmit("release_weight_sync", release_request),
+                  self._timeouts.release,
+              )
+              break
+            except (asyncio.CancelledError, TimeoutError):
+              # Do not retry timeouts: an unanswered release RPC may still be
+              # queued or executing on the source worker (and a late duplicate
+              # could overlap the next round's prepare), and retrying timeouts
+              # would multiply worst-case `finally:` latency by
+              # `_SOURCE_RELEASE_MAX_ATTEMPTS`.
+              raise
+            except Exception as e:  # pylint: disable=broad-except
+              if attempt == _SOURCE_RELEASE_MAX_ATTEMPTS:
+                raise
+              logging.warning(
+                  "source %s failed to release round %d staging (attempt"
+                  " %d/%d), retrying: %r",
+                  wid,
+                  round_index,
+                  attempt,
+                  _SOURCE_RELEASE_MAX_ATTEMPTS,
+                  e,
+              )
+              await asyncio.sleep(_SOURCE_RELEASE_RETRY_BACKOFF_S)
+
         # Shielded AND awaited to completion on cancellation. The shield
         # alone only stops the cancel from killing the release; the awaiting
         # coroutine still leaves immediately, so the release would run on
         # behind a round the caller already considers over -- overlapping the
         # next round's prepare, or a close() that frees what it is reading.
+        # Because `TimeoutError` is not retried, worst-case wait here is
+        # typically bounded to one `timeouts.release` deadline (or up to
+        # `_SOURCE_RELEASE_MAX_ATTEMPTS * timeouts.release` plus backoff if
+        # every attempt fails late with a non-timeout transport error).
         release_gather = asyncio.gather(
-            *[
-                asyncio.wait_for(
-                    handle.asubmit("release_weight_sync", release_request),
-                    self._timeouts.release,
-                )
-                for _, handle in sources
-            ],
+            *[_release_one_source(wid, handle) for wid, handle in sources],
             return_exceptions=True,
         )
         try:
@@ -1459,7 +1573,7 @@ class WeightSyncCoordinator:
     unknown: list[_Participant] = []
     for destination, error in failed_posts:
       phase = await self._worker_phase(destination, request)
-      wid = destination[0]
+      wid, handle = destination
       if phase == "committed":
         # The RPC failed but the worker finished publishing between
         # _call_phase's reconciliation poll and this one -- a timed-out post
@@ -1480,7 +1594,7 @@ class WeightSyncCoordinator:
             f"{wid}: post_weight_sync: {error!r} (worker aborted the round)"
         )
         worker_reports[wid] = WorkerRoundReport(
-            worker_id=wid, phase="aborted", error=repr(error)
+            worker_id=wid, phase="aborted", error=repr(error), handle=handle
         )
       else:
         unknown.append(destination)
@@ -1490,6 +1604,7 @@ class WeightSyncCoordinator:
             phase=phase or "unknown",
             error=repr(error),
             needs_restart=True,
+            handle=handle,
         )
 
     still_failed: list[_Participant] = []
@@ -1508,7 +1623,7 @@ class WeightSyncCoordinator:
       )
       for destination, error in retry_results:
         if error is not None:
-          wid = destination[0]
+          wid, handle = destination
           # Classify by the worker's CURRENT report, not the pre-retry one:
           # the same late-completion and out-of-band-abort races apply here,
           # and so does the unknown rule -- a worker that was h2d_done before
@@ -1524,7 +1639,7 @@ class WeightSyncCoordinator:
                 f"{wid}: post_weight_sync retry: {error!r} (worker aborted)"
             )
             worker_reports[wid] = WorkerRoundReport(
-                worker_id=wid, phase="aborted", error=repr(error)
+                worker_id=wid, phase="aborted", error=repr(error), handle=handle
             )
             continue
           if phase == "h2d_done":
@@ -1535,6 +1650,7 @@ class WeightSyncCoordinator:
                 phase="h2d_done",
                 error=repr(error),
                 needs_restart=True,
+                handle=handle,
             )
             continue
           unknown.append(destination)
@@ -1547,6 +1663,7 @@ class WeightSyncCoordinator:
               phase=phase or "unknown",
               error=repr(error),
               needs_restart=True,
+              handle=handle,
           )
 
     if not unknown and not still_failed and not rolled_back:
@@ -1573,13 +1690,14 @@ class WeightSyncCoordinator:
         phase_name = (
             "aborted" if rollback_state is RoundState.ABORTED else "committed"
         )
-        for wid, _ in to_abort:
+        for wid, handle in to_abort:
           previous = worker_reports.get(wid)
           worker_reports[wid] = WorkerRoundReport(
               worker_id=wid,
               phase=phase_name,
               error=previous.error if previous else "",
               needs_restart=False,
+              handle=handle,
           )
       return rollback_state
     return RoundState.PARTIALLY_COMMITTED

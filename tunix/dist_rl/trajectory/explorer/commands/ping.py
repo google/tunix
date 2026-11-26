@@ -14,11 +14,13 @@
 
 """Minimal placeholder command to verify CLI execution."""
 
+from collections.abc import Sequence
 import dataclasses
 import json
 import termcolor
 from tunix.dist_rl.trajectory import store
 from tunix.dist_rl.trajectory.explorer.commands import base
+from tunix.dist_rl.trajectory.explorer.diagnostics import schema_diagnostics
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -26,17 +28,23 @@ class PingCommand(base.BaseCommand):
   """Verifies trajectory store connectivity and reports trajectory count."""
 
   def execute(
-      self, reader: store.TrajectoryReader, output_json: bool = False
+      self,
+      reader: store.TrajectoryReader,
+      output_json: bool = False,
+      *,
+      diagnostics: Sequence[schema_diagnostics.SchemaDiagnostics] = (),
   ) -> int:
     """Executes the ping command against the reader.
 
     Args:
       reader: The trajectory store reader backend.
       output_json: Whether to format output as machine-readable JSON.
+      diagnostics: Unused.
 
     Returns:
       Process exit code (0 for success).
     """
+    del diagnostics  # Unused.
     metas = reader.get_trajectories_metadata()
     if output_json:
       print(json.dumps({"status": "ok", "trajectories_count": len(metas)}))
