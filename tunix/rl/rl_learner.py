@@ -980,11 +980,8 @@ class RLLearner(abc.ABC, Generic[TConfig]):
     """
     cfg = self.algo_config
     passes = []
-    # `beta` is not an `AlgorithmConfig` field (GRPOConfig and PPOConfig have
-    # it); the other fields below are.
-    beta = getattr(cfg, "beta", 0.0)
-    if beta is not None and beta != 0.0:
-      passes.append(f"reference logprobs (beta={beta})")
+    if cfg.beta != 0.0:
+      passes.append(f"reference logprobs (beta={cfg.beta})")
     reasons = [] if cfg.use_rollout_logps else ["use_rollout_logps=False"]
     reasons += [
         f"{name}={value!r}"
