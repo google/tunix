@@ -223,6 +223,7 @@ _NUM_SLOWEST_ROLLOUTS_LOGGED = 3
 _NON_REWARD_METADATA_KEYS: frozenset[str] = frozenset({
     "prompts",
     "completions",
+    "completion_token_lengths",
     "trajectory_rewards",
     "mode",
     "lineage",
@@ -963,7 +964,7 @@ class StandardRLProgram(RLProgram):
   def _score_group(
       self,
       group: Sequence[datatypes.TrajectoryItem],
-  ) -> tuple[list[float], RewardLogMetrics]:
+  ) -> tuple[list[float], list[float], RewardLogMetrics]:
     """Scores a trajectory group via `self.reward_manager`.
 
     Skips reward evaluation or extraction for failed, timed-out, or masked-out
@@ -973,35 +974,43 @@ class StandardRLProgram(RLProgram):
     (and an aborted trajectory may lack a user turn or `trajectory_reward`).
 
     Forwards prompt text (`datatypes.prompt_text(conversation_text)`), assistant
-    completions (`datatypes.assistant_text(conversation_text)`), environment
-    `trajectory_rewards`, and the non-plumbing `metadata` fields shared by all
-    valid items to `self.reward_manager`. Also returns the reward manager's
-    `log_metrics` entries that carry an aggregation function, which
-    `_collect_and_log_step_metrics` reduces once per training step.
+    completions (`datatypes.assistant_text(conversation_text)`), response token
+    counts (`completion_token_lengths` from `conversation_tokens`, including
+    environment/tool tokens in multi-turn trajectories, the same count the
+    `max_response_length` budget uses), environment `trajectory_rewards`, and
+    the non-plumbing `metadata` fields shared by all valid items to
+    `self.reward_manager`. Also returns unshaped `task_rewards` alongside final
+    `rewards` and the reward manager's `log_metrics` entries that carry an
+    aggregation function, which `_collect_and_log_step_metrics` reduces once per
+    training step.
 
     Args:
       group: Sequence of `TrajectoryItem`s in the group.
 
     Returns:
-      A `(rewards, log_metrics)` tuple aligned with `group` (`0.0` for invalid
-      items).
+      A `(rewards, task_rewards, log_metrics)` tuple aligned with `group` (`0.0`
+      for invalid items).
 
     Raises:
-      KeyError: If any valid item's `traj` is missing `"conversation_text"` or
-        `"trajectory_reward"`.
+      KeyError: If any valid item's `traj` is missing `"conversation_text"`,
+        `"conversation_tokens"`, or `"trajectory_reward"`.
       TypeError: If `conversation_text` or `traj` does not match the Token-mode
         schema.
       ValueError: If `conversation_text` contains no `"user"` message.
     """
     valid_items = [item for item in group if item.is_valid]
     if not valid_items:
-      return [0.0] * len(group), {}
+      return [0.0] * len(group), [0.0] * len(group), {}
     prompts = [
         datatypes.prompt_text(item.traj["conversation_text"])
         for item in valid_items
     ]
     completions = [
         datatypes.assistant_text(item.traj["conversation_text"])
+        for item in valid_items
+    ]
+    completion_token_lengths = [
+        int(np.asarray(item.traj["conversation_tokens"]).size)
         for item in valid_items
     ]
     trajectory_rewards = [_extract_reward(item) for item in valid_items]
@@ -1017,6 +1026,7 @@ class StandardRLProgram(RLProgram):
     rewards_info = self.reward_manager(
         prompts=prompts,
         completions=completions,
+        completion_token_lengths=completion_token_lengths,
         trajectory_rewards=trajectory_rewards,
         mode=str(self.mode),
         **reward_kwargs,
@@ -1027,10 +1037,27 @@ class StandardRLProgram(RLProgram):
         if agg_fn is not None
     }
     valid_rewards = iter(rewards_info["rewards"])
-    rewards = [
-        float(next(valid_rewards)) if item.is_valid else 0.0 for item in group
-    ]
-    return rewards, log_metrics
+    # Fallback triggers only when a user registers a custom reward manager via
+    # `@register_reward_manager` that returns only `{rewards, log_metrics}` (as
+    # shown in `docs/algorithms.md`). Built-in `reward_fn` and `env` managers
+    # always populate `task_rewards`, and falling back here preserves backward
+    # compatibility for custom managers without breaking their return contract.
+    raw_task_rewards = (
+        rewards_info["task_rewards"]
+        if "task_rewards" in rewards_info
+        else rewards_info["rewards"]
+    )
+    valid_task_rewards = iter(raw_task_rewards)
+    rewards: list[float] = []
+    task_rewards: list[float] = []
+    for item in group:
+      if item.is_valid:
+        rewards.append(float(next(valid_rewards)))
+        task_rewards.append(float(next(valid_task_rewards)))
+      else:
+        rewards.append(0.0)
+        task_rewards.append(0.0)
+    return rewards, task_rewards, log_metrics
 
   def _build_scored_item(
       self,
@@ -1106,12 +1133,11 @@ class StandardRLProgram(RLProgram):
       is on and the group's rewards tie.
     """
     critique_start = time.monotonic()
-    rewards, group_reward_log_metrics = self._score_group(group)
-    if (
-        self.algo_config.drop_zero_variance_groups
-        and advantages_lib.tied_rewards(
-            rewards, [item.is_valid for item in group]
-        )
+    rewards, task_rewards, group_reward_log_metrics = self._score_group(group)
+    valid_mask = [item.is_valid for item in group]
+    if self.algo_config.drop_zero_variance_groups and (
+        advantages_lib.tied_rewards(task_rewards, valid_mask)
+        or advantages_lib.tied_rewards(rewards, valid_mask)
     ):
       return None
     payloads = payload_builder.create_trainer_payloads(

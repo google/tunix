@@ -12,8 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 import dataclasses
+import functools
+import operator
+import typing
+import warnings
 from absl import logging
 from tunix.common import configs as common_configs
 from tunix.common import datatypes as common_datatypes
@@ -437,6 +441,228 @@ class GRPOConfig(AlgorithmConfig):
           "loss_algo should be either grpo or gspo-token. Received: "
           f"{self.loss_algo}"
       )
+
+
+def _default_overlong_buffer() -> dict[str, bool | int | float | None]:
+  return {
+      "enable": True,
+      "overlong_buffer_length": 4096,  # Threshold before penalties apply.
+      "overlong_buffer_penalty": 1.0,
+      "max_response_length": 20480,  # Hard maximum generation length.
+  }
+
+
+@dataclasses.dataclass(kw_only=True)
+class DAPOConfig(GRPOConfig):
+  """Configuration for DAPO (https://arxiv.org/abs/2503.14476).
+
+  Attributes:
+    algo_variant: The algorithm variant to use (`"dapo"`).
+    advantage_estimator: The advantage estimator to use.
+    policy_loss_fn: The policy loss function to use.
+    loss_agg_mode: The aggregation mode for the loss function (`"token-mean"`).
+    loss_algo: The loss algorithm to use.
+    num_generations: Number of responses generated per prompt (`G`).
+    num_iterations: Number of optimizer passes per batch.
+    beta: Coefficient for the KL divergence penalty. Always `0.0` for DAPO.
+    epsilon: Lower-bound PPO ratio clipping parameter (`0.2`).
+    epsilon_high: Upper-bound Clip-Higher parameter (`0.28`).
+    drop_zero_variance_groups: Drops prompt groups whose task rewards tie
+      (zero variance) and samples replacement prompts (DAPO dynamic sampling).
+      On by default for DAPO; applied by `StandardRLProgram`.
+    max_consecutive_filtered_groups: Raises `RuntimeError` after this many
+      consecutive groups are dropped by `drop_zero_variance_groups`. `None`
+      disables the guard.
+    overlong_buffer: Mapping configuring DAPO soft overlong reward shaping
+      (`enable`, `overlong_buffer_length`, `overlong_buffer_penalty`,
+      `max_response_length`), or `None` to disable it.
+
+  References:
+    - DAPO: https://arxiv.org/abs/2503.14476
+  """
+
+  algo_variant: str = "dapo"
+  advantage_estimator: str = "grpo"
+  policy_loss_fn: str = "grpo"
+  loss_agg_mode: str = "token-mean"
+  reward_mode: str = "reward_fn"
+  num_generations: int = 2
+  num_iterations: int = 1
+  beta: float = 0.0  # No KL term.
+  epsilon: float = 0.2
+  epsilon_high: float | None = 0.28  # Clip-Higher.
+  # TODO(sizhi): Drop zero-variance groups in `DAPOLearner` too.
+  drop_zero_variance_groups: bool = True
+  max_consecutive_filtered_groups: int | None = None
+  overlong_buffer: Mapping[str, bool | int | float | None] | None = (
+      dataclasses.field(default_factory=_default_overlong_buffer)
+  )
+
+  if typing.TYPE_CHECKING:
+    # Type-checker-only alias so legacy `DAPOConfig(dynamic_sampling=...)` and
+    # `cfg.dynamic_sampling` type-check without adding a runtime dataclass field
+    # or `InitVar` (which breaks `dataclasses.replace`).
+    dynamic_sampling: bool = True
+  else:
+
+    @property
+    def dynamic_sampling(self) -> bool:
+      """Deprecated alias for `drop_zero_variance_groups`."""
+      warnings.warn(
+          "DAPOConfig.dynamic_sampling is deprecated; use"
+          " drop_zero_variance_groups instead.",
+          DeprecationWarning,
+          stacklevel=2,
+      )
+      return self.drop_zero_variance_groups
+
+  def __post_init__(self):
+    super().__post_init__()
+    assert self.epsilon_high is not None
+    if self.beta != 0.0:
+      raise ValueError(
+          "DAPO does not use a KL penalty, so beta must be 0.0. Received:"
+          f" {self.beta}"
+      )
+    if self.epsilon_high < self.epsilon:
+      raise ValueError("epsilon_high must be greater than or equal to epsilon.")
+    self.overlong_buffer = common_configs.validate_overlong_buffer(
+        self.overlong_buffer
+    )
+
+
+def _alias_dynamic_sampling_init(init_fn):
+  """Preserves deprecated `dynamic_sampling` keyword on `DAPOConfig`."""
+
+  @functools.wraps(init_fn)
+  def _wrapped(self, *args, **kwargs):
+    if "dynamic_sampling" in kwargs:
+      if "drop_zero_variance_groups" in kwargs:
+        raise ValueError(
+            "Cannot specify both 'drop_zero_variance_groups' and"
+            " 'dynamic_sampling'. Please use 'drop_zero_variance_groups' only."
+        )
+      warnings.warn(
+          "DAPOConfig(dynamic_sampling=...) is deprecated; use"
+          " drop_zero_variance_groups instead.",
+          DeprecationWarning,
+          stacklevel=2,
+      )
+      kwargs["drop_zero_variance_groups"] = kwargs.pop("dynamic_sampling")
+    return init_fn(self, *args, **kwargs)
+
+  return _wrapped
+
+
+setattr(
+    DAPOConfig,
+    "__init__",
+    _alias_dynamic_sampling_init(DAPOConfig.__init__),
+)
+
+
+def _resolve_output_lengths(
+    completions: Sequence[str],
+    completion_token_lengths: Sequence[int] | None,
+) -> list[int]:
+  """Returns validated response lengths in tokens, or char counts if omitted."""
+  if completion_token_lengths is None:
+    # Fallback only when standalone callers invoke `reward_shaping(...)`
+    # directly without tokenized outputs; both `GrpoLearner` and
+    # `StandardRLProgram` always pass `completion_token_lengths` from generated
+    # token IDs so `SequenceRewardManager` needs no tokenizer dependency.
+    return [len(completion) for completion in completions]
+  if len(completion_token_lengths) != len(completions):
+    raise ValueError(
+        "completion_token_lengths length"
+        f" ({len(completion_token_lengths)}) must match completions length"
+        f" ({len(completions)})."
+    )
+  output_lengths: list[int] = []
+  for raw_len in completion_token_lengths:
+    if isinstance(raw_len, bool):
+      raise TypeError(
+          "completion_token_lengths entries must be non-negative ints, got"
+          f" {raw_len!r}."
+      )
+    token_len = operator.index(raw_len)
+    if token_len < 0:
+      raise ValueError(
+          "completion_token_lengths entries must be non-negative, got"
+          f" {token_len}."
+      )
+    output_lengths.append(token_len)
+  return output_lengths
+
+
+def reward_shaping(
+    prompts: Sequence[str],
+    completions: Sequence[str],
+    mode: object = None,
+    overlong_buffer: Mapping[str, bool | int | float | None] | None = None,
+    completion_token_lengths: Sequence[int] | None = None,
+    **kwargs: object,
+) -> list[float]:
+  """Computes the DAPO soft overlong length penalty.
+
+  Implements Eq. 13 of https://arxiv.org/abs/2503.14476.
+
+  Args:
+    prompts: Input prompts aligned with `completions` (unused).
+    completions: Decoded text completions for the batch.
+    mode: Execution mode (`"train"` or `"eval"`, unused).
+    overlong_buffer: Mapping containing `overlong_buffer_length`,
+      `overlong_buffer_penalty`, and `max_response_length`, plus optional
+      `enable` (defaults to `True` when omitted; returns zeros when `False`).
+    completion_token_lengths: Per-completion response token counts aligned with
+      `completions` (including EOS and, in multi-turn trajectories,
+      environment/tool tokens, matching the `max_response_length` budget). When
+      `None`, falls back to character length `len(completion)` for standalone
+      callers.
+    **kwargs: Additional per-example metadata columns (unused).
+
+  Returns:
+    Overlong penalty scores in `[-overlong_buffer_penalty, 0.0]` aligned with
+    `completions`.
+  """
+  del prompts, mode, kwargs
+  if overlong_buffer is None:
+    raise ValueError("reward_shaping is called but with empty overlong_buffer.")
+  buffer_to_validate = (
+      {"enable": True, **overlong_buffer}
+      if isinstance(overlong_buffer, Mapping)
+      else overlong_buffer
+  )
+  validated = common_configs.validate_overlong_buffer(buffer_to_validate)
+  assert validated is not None
+  if not validated["enable"]:
+    return [0.0] * len(completions)
+  raw_buf_len = validated["overlong_buffer_length"]
+  raw_penalty = validated["overlong_buffer_penalty"]
+  raw_max_len = validated["max_response_length"]
+  assert isinstance(raw_buf_len, int)
+  assert isinstance(raw_penalty, (int, float))
+  assert isinstance(raw_max_len, int)
+  overlong_buffer_length = raw_buf_len
+  overlong_buffer_penalty = float(raw_penalty)
+  max_response_length = raw_max_len
+
+  output_lengths = _resolve_output_lengths(
+      completions, completion_token_lengths
+  )
+  expected_response_length = max_response_length - overlong_buffer_length
+  scores: list[float] = []
+  for output_length in output_lengths:
+    exceed_length = output_length - expected_response_length
+    overlong_reward = max(
+        min(
+            -exceed_length / overlong_buffer_length * overlong_buffer_penalty,
+            0.0,
+        ),
+        -overlong_buffer_penalty,
+    )
+    scores.append(float(overlong_reward))
+  return scores
 
 
 @dataclasses.dataclass(kw_only=True)

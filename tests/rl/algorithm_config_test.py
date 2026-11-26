@@ -414,6 +414,95 @@ class AlgorithmConfigTest(parameterized.TestCase):
       with self.assertRaisesRegex(ValueError, "positive int or None"):
         algorithm_config.GRPOConfig(max_consecutive_filtered_groups=bad_limit)
 
+  def test_dapo_config_and_reward_shaping_validation_and_cap(self):
+    cfg = algorithm_config.DAPOConfig(epsilon=0.15, epsilon_high=None)
+    self.assertEqual(cfg.epsilon_high, 0.15)
+    assert cfg.overlong_buffer is not None
+    self.assertIs(cfg.overlong_buffer["enable"], True)
+    with self.assertRaisesRegex(ValueError, "must specify 'enable'"):
+      algorithm_config.DAPOConfig(
+          overlong_buffer={
+              "overlong_buffer_length": 20,
+              "overlong_buffer_penalty": 1.0,
+              "max_response_length": 100,
+          }
+      )
+    with self.assertRaisesRegex(ValueError, "must be less than"):
+      algorithm_config.DAPOConfig(
+          overlong_buffer={
+              "enable": True,
+              "overlong_buffer_length": 1024,
+              "overlong_buffer_penalty": 1.0,
+              "max_response_length": 1024,
+          }
+      )
+    scores = algorithm_config.reward_shaping(
+        prompts=["p0", "p1", "p2"],
+        completions=["long" * 50, "mid", "huge"],
+        overlong_buffer={
+            "overlong_buffer_length": 20,
+            "overlong_buffer_penalty": 2.0,
+            "max_response_length": 100,
+        },
+        completion_token_lengths=[80, 90, 250],
+    )
+    self.assertSequenceAlmostEqual(scores, [0.0, -1.0, -2.0], places=4)
+
+  def test_reward_shaping_preserves_disabled_flag_and_validates_buffer(self):
+    # Explicit `enable=False` returns zero penalties without requiring numeric
+    # buffer keys or applying shaping when those keys are present.
+    self.assertEqual(
+        algorithm_config.reward_shaping(
+            prompts=["p0", "p1"],
+            completions=["x" * 200, "y" * 200],
+            overlong_buffer={"enable": False},
+            completion_token_lengths=[150, 200],
+        ),
+        [0.0, 0.0],
+    )
+    self.assertEqual(
+        algorithm_config.reward_shaping(
+            prompts=["p0", "p1"],
+            completions=["x" * 200, "y" * 200],
+            overlong_buffer={
+                "enable": False,
+                "overlong_buffer_length": 20,
+                "overlong_buffer_penalty": 10.0,
+                "max_response_length": 100,
+            },
+            completion_token_lengths=[90, 150],
+        ),
+        [0.0, 0.0],
+    )
+    with self.assertRaisesRegex(TypeError, "must be a mapping or None"):
+      algorithm_config.reward_shaping(
+          prompts=["p0"],
+          completions=["a"],
+          overlong_buffer="not_a_mapping",  # pyrefly: ignore[bad-argument-type]
+      )
+    with self.assertRaisesRegex(TypeError, "overlong_buffer.enable must be"):
+      algorithm_config.reward_shaping(
+          prompts=["p0"],
+          completions=["a"],
+          overlong_buffer={"enable": "yes"},  # pyrefly: ignore[bad-argument-type]
+      )
+    with self.assertRaisesRegex(ValueError, "unexpected keys"):
+      algorithm_config.reward_shaping(
+          prompts=["p0"],
+          completions=["a"],
+          overlong_buffer={"enable": False, "unknown_key": 1},
+      )
+    with self.assertRaisesRegex(ValueError, "must be less than"):
+      algorithm_config.reward_shaping(
+          prompts=["p0"],
+          completions=["a"],
+          overlong_buffer={
+              "overlong_buffer_length": 100,
+              "overlong_buffer_penalty": 1.0,
+              "max_response_length": 100,
+          },
+      )
+
 
 if __name__ == "__main__":
   absltest.main()

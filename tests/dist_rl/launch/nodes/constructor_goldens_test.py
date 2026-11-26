@@ -281,11 +281,18 @@ GOLDEN_CASES: Mapping[str, GoldenCase] = {
             " 'allow_split_physical_axes': False}}}"
         ),
     )),
+    # DAPO variant on the orchestrator, building `DAPOConfig` with token-mean
+    # loss, zero-variance group filtering, and soft overlong buffer shaping.
+    "dapo": GoldenCase((
+        "agentic_grpo_config.algo_variant=dapo",
+        "agentic_grpo_config.overlong_buffer.enable=true",
+        "agentic_grpo_config.overlong_buffer.overlong_buffer_length=256",
+    )),
 }
 
 # The cases each role's goldens cover.
 GOLDEN_CASES_BY_ROLE: Mapping[node_utils.ProcessRole, tuple[str, ...]] = {
-    "orchestrator": ("base", "k8s", "kl_penalty"),
+    "orchestrator": ("base", "k8s", "kl_penalty", "dapo"),
     "inference": ("kl_penalty",),
     "trainer": ("base", "k8s", "lora", "maxtext"),
     "rollout": (
@@ -320,6 +327,7 @@ _RECORD = {"prompt": "golden prompt", "metadata": {"answer": "42"}}
 
 # Config dataclasses the nodes build, recorded where they are constructed.
 _RECORDED_INITS: tuple[type[object], ...] = (
+    algorithm_config.DAPOConfig,
     algorithm_config.GRPOConfig,
     batch_assembly.BatchConfig,
     checkpoint_options.TunixCheckpointingOptions,

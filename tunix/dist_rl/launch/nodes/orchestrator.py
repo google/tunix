@@ -90,10 +90,11 @@ _RUN_WIDE_METADATA_KEYS = frozenset({"episode_timeout", "overlong_filter"})
 def build_grpo_config(
     hp: resolve_config.DistHyperParameters,
 ) -> algorithm_config.GRPOConfig:
-  """Builds `GRPOConfig` from `agentic_grpo_config` and `vllm_config`.
+  """Builds `GRPOConfig` or `DAPOConfig` from `agentic_grpo_config` and `vllm_config`.
 
-  Every `agentic_grpo_config` key that is a `GRPOConfig` field is forwarded, as
-  in `tunix.cli.grpo_main`; the other keys (e.g. `max_turns`,
+  Every `agentic_grpo_config` key that is an init field of the selected config
+  class (`DAPOConfig` when `algo_variant == "dapo"`, else `GRPOConfig`) is
+  forwarded, as in `tunix.cli.grpo_main`; the other keys (e.g. `max_turns`,
   `off_policy_steps`) configure the program and the rollout workers. The
   routing-replay encoding comes from the typed `vllm_config` keys shared with
   the rollout node.
@@ -102,16 +103,19 @@ def build_grpo_config(
     hp: Resolved distributed RL configuration.
 
   Returns:
-    The validated `GRPOConfig`.
+    The validated `GRPOConfig` (or `DAPOConfig` subclass).
   """
-  init_fields = {
-      field.name
-      for field in dataclasses.fields(algorithm_config.GRPOConfig)
-      if field.init
-  }
   grpo = hp.config_mapping("agentic_grpo_config")
   vllm = hp.config_mapping("vllm_config")
-  return algorithm_config.GRPOConfig(
+  config_cls = (
+      algorithm_config.DAPOConfig
+      if grpo["algo_variant"] == "dapo"
+      else algorithm_config.GRPOConfig
+  )
+  init_fields = {
+      field.name for field in dataclasses.fields(config_cls) if field.init
+  }
+  return config_cls(
       **{key: grpo[key] for key in init_fields & grpo.keys()},
       routed_experts_encode_mode=vllm["routed_experts_encode_mode"],
       routed_experts_num_experts=vllm["routed_experts_num_experts"],

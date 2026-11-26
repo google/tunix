@@ -221,12 +221,13 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         for completion_ids in rollout_output.tokens
     ])
     prompt_ids = jnp.array(rollout_output.left_padded_prompt_tokens)
+    completion_lengths = [len(t) for t in rollout_output.tokens]
     # Router replay: lay the rollout's routing out over the same
     # `[prompt | completion]` padding the token ids just got, so a replayed
     # expert stays attached to the token it was captured for.
     routed_experts = common.align_routed_experts(
         rollout_output.routed_experts,
-        completion_lengths=[len(t) for t in rollout_output.tokens],
+        completion_lengths=completion_lengths,
         prompt_width=prompt_ids.shape[-1],
         completion_width=rollout_config.max_tokens_to_generate,
     )
@@ -332,11 +333,17 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         perf_constants.ADVANTAGE_COMPUTATION, tags=perf_tags
     ):
       # Compute rewards and advantages
+      extra_reward_kwargs = {
+          k: v
+          for k, v in training_input.items()
+          if k not in ("prompts", "completion_token_lengths")
+      }
       rewards = self._compute_rewards(
           prompts=training_input["prompts"],  # pyrefly: ignore[bad-argument-type]
           completions=rollout_output.text,
           mode=mode,
-          **{k: v for k, v in training_input.items() if k != "prompts"},  # pyrefly: ignore[bad-argument-type]
+          completion_token_lengths=completion_lengths,
+          **extra_reward_kwargs,  # pyrefly: ignore[bad-argument-type]
       )
       advantage_estimator = function_registry.get_advantage_estimator(
           self.algo_config.advantage_estimator

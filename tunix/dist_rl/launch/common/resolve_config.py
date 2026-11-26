@@ -287,6 +287,7 @@ def finalize_dist_config(
     Resolved `ClusterTargets` for the cluster run.
   """
   _finalize_dist_defaults(hp)
+  _finalize_grpo_defaults(hp)
   _validate_local_settings(hp)
   _validate_dist_invariants(hp)
   cluster_targets = resolve_cluster_targets(hp)
@@ -547,6 +548,64 @@ def _finalize_dist_defaults(hp: cli_config.HyperParameters) -> None:
       k8s["otel_id"] = f"{user}-otel"
 
   _finalize_otel_config(hp, target)
+
+
+def _finalize_grpo_defaults(hp: cli_config.HyperParameters) -> None:
+  """Resolves `agentic_grpo_config` algo_variant and overlong_buffer defaults."""
+  grpo = _mutable_section(hp, "agentic_grpo_config")
+  algo_variant = grpo["algo_variant"]
+  if not isinstance(algo_variant, str):
+    raise TypeError(
+        "agentic_grpo_config.algo_variant must be a str, got"
+        f" {algo_variant!r}."
+    )
+  _check_choice(
+      "agentic_grpo_config.algo_variant", algo_variant, _GRPO_ALGO_VARIANTS
+  )
+  if grpo["loss_agg_mode"] is None:
+    grpo["loss_agg_mode"] = (
+        "token-mean"
+        if algo_variant == "dapo"
+        else "sequence-mean-token-mean"
+    )
+  _check_choice(
+      "agentic_grpo_config.loss_agg_mode",
+      grpo["loss_agg_mode"],
+      _LOSS_AGG_MODES,
+  )
+  if grpo["drop_zero_variance_groups"] is None:
+    grpo["drop_zero_variance_groups"] = algo_variant == "dapo"
+  elif not isinstance(grpo["drop_zero_variance_groups"], bool):
+    raise TypeError(
+        "agentic_grpo_config.drop_zero_variance_groups must be a bool or null,"
+        f" got {grpo['drop_zero_variance_groups']!r}."
+    )
+  raw_overlong = grpo["overlong_buffer"]
+  if raw_overlong is None:
+    return
+  if algo_variant != "dapo":
+    raise ValueError(
+        "agentic_grpo_config.overlong_buffer requires"
+        f" agentic_grpo_config.algo_variant='dapo', got {algo_variant!r}."
+    )
+  if not isinstance(raw_overlong, Mapping):
+    raise TypeError(
+        "agentic_grpo_config.overlong_buffer must be a mapping or null, got"
+        f" {type(raw_overlong).__name__}."
+    )
+  overlong_dict = dict(raw_overlong)
+  enable = overlong_dict.get("enable")
+  if isinstance(enable, bool) and enable:
+    if overlong_dict.get("overlong_buffer_penalty") is None:
+      overlong_dict["overlong_buffer_penalty"] = 1.0
+    if overlong_dict.get("max_response_length") is None:
+      overlong_dict["max_response_length"] = int(
+          hp.config_mapping("rollout_config")["total_generation_steps"]
+      )
+  grpo["overlong_buffer"] = common_configs.validate_overlong_buffer(
+      overlong_dict,
+      field_name="agentic_grpo_config.overlong_buffer",
+  )
 
 
 def _validate_otel_cluster_settings(
@@ -1427,6 +1486,26 @@ def _validate_drop_zero_variance_settings(grpo: Mapping[str, Any]) -> None:
       )
 
 
+def _validate_dapo_settings(grpo: Mapping[str, Any]) -> None:
+  """Validates `agentic_grpo_config` DAPO-specific KL and clipping bounds."""
+  if grpo["algo_variant"] != "dapo":
+    return
+  if float(grpo["beta"]) != 0.0:
+    raise ValueError(
+        "agentic_grpo_config.algo_variant='dapo' does not use a KL penalty,"
+        f" so agentic_grpo_config.beta must be 0.0; got {grpo['beta']}."
+    )
+  if grpo["epsilon_high"] is None or float(grpo["epsilon_high"]) < float(
+      grpo["epsilon"]
+  ):
+    raise ValueError(
+        "agentic_grpo_config.epsilon_high must be set and >="
+        " agentic_grpo_config.epsilon when algo_variant='dapo'; got"
+        f" epsilon_high={grpo['epsilon_high']!r},"
+        f" epsilon={grpo['epsilon']!r}."
+    )
+
+
 def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   """Validates cross-field invariants across trainer and rollout configs."""
   # TODO(noghabi): Check which of these checks can be consolidated with the
@@ -1520,6 +1599,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
           " trajectory_group_order='trajectory_completion'."
       )
   _validate_drop_zero_variance_settings(grpo)
+  _validate_dapo_settings(grpo)
   _check_choice(
       "weight_sync_config.mode",
       hp.config_mapping("weight_sync_config")["mode"],
@@ -2012,6 +2092,14 @@ _MODEL_DTYPES = ("bfloat16", "float32")
 _REMAT_CONFIGS = ("none", "block", "decoder")
 _ROLLOUT_ENGINES = ("inprocess_vllm", "vllm", "vanilla")
 _CHAT_PARSER_TYPES = ("auto", "raw")
+_GRPO_ALGO_VARIANTS = ("grpo", "dapo")
+_LOSS_AGG_MODES = (
+    "token-mean",
+    "sequence-mean-token-mean",
+    "sequence-mean-token-scale",
+    "seq-mean-token-sum",
+    "sequence-mean-token-sum-norm",
+)
 
 
 def _check_choice(key: str, value: object, choices: Sequence[str]) -> None:

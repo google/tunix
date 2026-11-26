@@ -11,6 +11,7 @@
       "tunix.rl.algorithm_config.GRPOConfig": {
         "kwargs": {
           "advantage_estimator": "grpo",
+          "algo_variant": "grpo",
           "beta": 0.04,
           "drop_zero_variance_groups": false,
           "epsilon": 0.2,

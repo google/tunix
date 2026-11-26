@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import dataclasses
 import math
 from typing import Any, Optional, TYPE_CHECKING, Tuple
@@ -62,6 +63,85 @@ def _check_divisibility(small_size, big_size, small_size_name, big_size_name):
     raise ValueError(
         f"{big_size_name} must be a multiple of {small_size_name}."
     )
+
+
+OVERLONG_BUFFER_KEYS: frozenset[str] = frozenset({
+    "enable",
+    "overlong_buffer_length",
+    "overlong_buffer_penalty",
+    "max_response_length",
+})
+
+
+def _require_positive_int(
+    buffer: Mapping[str, object], key: str, field_name: str
+) -> int:
+  val = buffer[key]
+  if isinstance(val, bool) or not isinstance(val, int):
+    raise TypeError(f"{field_name}.{key} must be an int, got {val!r}.")
+  if val <= 0:
+    raise ValueError(f"{key} must be positive.")
+  return val
+
+
+def validate_overlong_buffer(
+    overlong_buffer: object,
+    *,
+    field_name: str = "overlong_buffer",
+) -> dict[str, bool | int | float | None] | None:
+  """Validates and copies a DAPO `overlong_buffer` mapping, or returns `None`."""
+  if overlong_buffer is None:
+    return None
+  if not isinstance(overlong_buffer, Mapping):
+    raise TypeError(
+        f"{field_name} must be a mapping or None, got"
+        f" {type(overlong_buffer).__name__}."
+    )
+  unknown = sorted(set(overlong_buffer) - OVERLONG_BUFFER_KEYS)
+  if unknown:
+    raise ValueError(
+        f"{field_name} has unexpected keys {unknown}; allowed keys are"
+        f" {sorted(OVERLONG_BUFFER_KEYS)}."
+    )
+  buffer = dict(overlong_buffer)
+  if "enable" not in buffer:
+    raise ValueError(f"{field_name} must specify 'enable' (bool).")
+  if not isinstance(buffer["enable"], bool):
+    raise TypeError(
+        f"{field_name}.enable must be a bool, got {buffer['enable']!r}."
+    )
+  if not buffer["enable"]:
+    return buffer
+
+  required = (
+      "overlong_buffer_length",
+      "overlong_buffer_penalty",
+      "max_response_length",
+  )
+  missing = [k for k in required if buffer.get(k) is None]
+  if missing:
+    raise ValueError(f"{field_name} is enabled but missing: {missing}")
+
+  penalty = buffer["overlong_buffer_penalty"]
+  if isinstance(penalty, bool) or not isinstance(penalty, (int, float)):
+    raise TypeError(
+        f"{field_name}.overlong_buffer_penalty must be a number, got"
+        f" {penalty!r}."
+    )
+  if not math.isfinite(penalty) or penalty < 0:
+    raise ValueError(
+        "overlong_buffer_penalty must be non-negative and finite, got"
+        f" {penalty!r}."
+    )
+
+  buf_len = _require_positive_int(buffer, "overlong_buffer_length", field_name)
+  max_len = _require_positive_int(buffer, "max_response_length", field_name)
+  if buf_len >= max_len:
+    raise ValueError(
+        f"{field_name}.overlong_buffer_length ({buf_len}) must be less than"
+        f" max_response_length ({max_len})."
+    )
+  return buffer
 
 
 def validate_routed_experts_encode_config(

@@ -155,6 +155,9 @@ def _create_rollout_response(
           "policy_versions": [policy_version],
           "trajectory_reward": reward,
           "status": datatypes.TrajectoryStatus.SUCCEEDED,
+          "prompt_tokens": np.array([1, 2], dtype=np.int32),
+          "conversation_tokens": np.array([3, 4], dtype=np.int32),
+          "conversation_masks": np.array([1, 1], dtype=np.float32),
           "conversation_text": [
               {"role": "user", "content": "question"},
               {"role": "assistant", "content": "answer"},
@@ -2132,6 +2135,81 @@ class RLProgramTest(absltest.TestCase):
             reward_fns=[lambda prompts, completions, **_: [1.0, 1.0]],
             **kwargs,
         )
+
+  def test_dapo_drops_tied_task_rewards_despite_overlong_shaping_and_uses_token_lengths(
+      self,
+  ):
+    dapo_cfg = algorithm_config.DAPOConfig(
+        num_generations=2,
+        reward_mode="env",
+        use_rollout_logps=False,
+        overlong_buffer={
+            "enable": True,
+            "overlong_buffer_length": 20,
+            "overlong_buffer_penalty": 10.0,
+            "max_response_length": 100,
+        },
+    )
+    program = rl_program.StandardRLProgram(
+        dataset=["p_tied", "p_varied"],
+        algo_config=dapo_cfg,
+        rollout_temperature=0.9,
+        rollout_returns_routed_experts=False,
+        batch_config=self.batch_config,
+        reward_fns=[],
+        assembler=self.assembler,
+    )
+    self.addCleanup(program.close)
+
+    def _dapo_item(
+        pid: str, idx: int, env_reward: float, num_tokens: int, text: str
+    ) -> datatypes.TrajectoryItem:
+      return datatypes.TrajectoryItem(
+          prompt_id=pid,
+          group_index=idx,
+          start_step=0,
+          traj={
+              "policy_versions": [0],
+              "status": datatypes.TrajectoryStatus.SUCCEEDED,
+              "trajectory_reward": env_reward,
+              "prompt_tokens": np.array([1, 2], dtype=np.int32),
+              "conversation_tokens": np.ones(num_tokens, dtype=np.int32),
+              "conversation_masks": np.ones(num_tokens, dtype=np.float32),
+              "conversation_text": [
+                  {"role": "user", "content": "q"},
+                  {"role": "assistant", "content": text},
+              ],
+          },
+      )
+
+    # Group 0: both trajectories get env_reward=1.0 (tied task accuracy), while
+    # token lengths [70, 90] yield distinct shaped totals [1.0, -4.0]. Must
+    # still be dropped because unshaped task_rewards tie ([1.0, 1.0]).
+    tied_group = [
+        _dapo_item("p_tied", 0, env_reward=1.0, num_tokens=70, text="same"),
+        _dapo_item("p_tied", 1, env_reward=1.0, num_tokens=90, text="same"),
+    ]
+    self.assertIsNone(program._critique_group(tied_group))
+
+    # Group 1: env_rewards [1.0, 0.0] have non-zero variance; character lengths
+    # are both 4 ("abcd", "efgh"), while token lengths [90, 70] apply -5.0 only
+    # to rollout 0 -> shaped rewards [-4.0, 0.0].
+    varied_group = [
+        _dapo_item("p_varied", 0, env_reward=1.0, num_tokens=90, text="abcd"),
+        _dapo_item("p_varied", 1, env_reward=0.0, num_tokens=70, text="efgh"),
+    ]
+    scored = program._critique_group(varied_group)
+    self.assertIsNotNone(scored)
+    assert scored is not None
+    self.assertEqual(list(scored.rewards), [-4.0, 0.0])
+
+    # Group 2: env_rewards [10.0, 0.0] vary, but overlong shaping [-10.0, 0.0]
+    # makes total rewards tie ([0.0, 0.0] -> zero advantage). Must also drop.
+    tied_totals_group = [
+        _dapo_item("p_tied_tot", 0, env_reward=10.0, num_tokens=100, text="a"),
+        _dapo_item("p_tied_tot", 1, env_reward=0.0, num_tokens=70, text="b"),
+    ]
+    self.assertIsNone(program._critique_group(tied_totals_group))
 
   def test_window_advances_a_whole_batch_when_a_group_goes_missing(self):
     async def _run():
@@ -5562,6 +5640,7 @@ class RLProgramTest(absltest.TestCase):
           traj={
               "policy_versions": [0],
               "trajectory_reward": 1.0,
+              "conversation_tokens": np.arange(6, dtype=np.int32),
               "conversation_text": [
                   {"role": "user", "content": "question"},
                   {"role": "assistant", "content": "answer"},
@@ -5577,6 +5656,7 @@ class RLProgramTest(absltest.TestCase):
           traj={
               "policy_versions": [0],
               "trajectory_reward": 1.0,
+              "conversation_tokens": np.arange(6, dtype=np.int32),
               "conversation_text": [
                   {"role": "user", "content": "question"},
                   {"role": "assistant", "content": "answer"},
@@ -5636,6 +5716,7 @@ class RLProgramTest(absltest.TestCase):
           traj={
               "policy_versions": [0],
               "trajectory_reward": 1.0,
+              "conversation_tokens": np.arange(5, dtype=np.int32),
               "conversation_text": [
                   {"role": "user", "content": "question"},
                   {"role": "assistant", "content": "answer"},
@@ -5651,6 +5732,7 @@ class RLProgramTest(absltest.TestCase):
           traj={
               "policy_versions": [0],
               "trajectory_reward": 1.0,
+              "conversation_tokens": np.arange(5, dtype=np.int32),
               "conversation_text": [
                   {"role": "user", "content": "question"},
                   {"role": "assistant", "content": "answer"},
@@ -5694,6 +5776,7 @@ class RLProgramTest(absltest.TestCase):
               "policy_versions": [0],
               "trajectory_reward": 1.0,
               "status": None,
+              "conversation_tokens": np.array([3, 4], dtype=np.int32),
               "conversation_text": [
                   {"role": "user", "content": "question"},
                   {"role": "assistant", "content": "answer"},
@@ -5710,6 +5793,7 @@ class RLProgramTest(absltest.TestCase):
               "policy_versions": [0],
               "trajectory_reward": 1.0,
               "status": None,
+              "conversation_tokens": np.array([3, 4], dtype=np.int32),
               "conversation_text": [
                   {"role": "user", "content": "question"},
                   {"role": "assistant", "content": "answer"},
@@ -5801,6 +5885,7 @@ class RLProgramTest(absltest.TestCase):
               traj={
                   "policy_versions": [0],
                   "trajectory_reward": 1.0,
+                  "conversation_tokens": np.array([3, 4], dtype=np.int32),
                   "conversation_text": _conversation(num_turns),
               },
           )
@@ -6076,6 +6161,7 @@ class RLProgramTest(absltest.TestCase):
                   # The collector reports the status by name.
                   "status": status_name,
                   "conversation_text": conversation,
+                  "conversation_tokens": np.arange(6, dtype=np.int32),
                   "conversation_masks": np.array(
                       [1, 1, 0, 1, 1, 1], dtype=np.float32
                   ),
@@ -7307,6 +7393,7 @@ class RLProgramTest(absltest.TestCase):
                 {"role": "user", "content": "question"},
                 {"role": "assistant", "content": "answer"},
             ],
+            "conversation_tokens": np.array([3, 4], dtype=np.int32),
             "conversation_masks": (
                 np.zeros(2, dtype=np.float32)
                 if masked
@@ -7399,6 +7486,7 @@ class RLProgramTest(absltest.TestCase):
               "policy_versions": [0],
               "status": datatypes.TrajectoryStatus.SUCCEEDED,
               "trajectory_reward": 2.5,
+              "conversation_tokens": np.array([3, 4], dtype=np.int32),
               "conversation_masks": np.ones(2, dtype=np.float32),
               "conversation_text": [
                   {"role": "user", "content": "question"},
@@ -7497,7 +7585,7 @@ class RLProgramTest(absltest.TestCase):
   def test_collect_and_log_step_metrics_logs_invalid_trajectory_frac(self):
     program = self._create_program()
     items = self._masked_metrics_items()
-    _, reward_log_metrics = program._score_group(items)
+    _, _, reward_log_metrics = program._score_group(items)
 
     program._collect_and_log_step_metrics(
         all_step_items=items,
@@ -8050,7 +8138,8 @@ class RLProgramTest(absltest.TestCase):
                   "policy_versions": [0],
                   "status": datatypes.TrajectoryStatus.SUCCEEDED,
                   "trajectory_reward": 0.0,
-                  "conversation_masks": np.ones(2, dtype=np.float32),
+                  "conversation_tokens": np.array([10, 11, 12], dtype=np.int32),
+                  "conversation_masks": np.ones(3, dtype=np.float32),
                   "conversation_text": [
                       {"role": "system", "content": "you are a math tutor"},
                       {
@@ -8071,6 +8160,7 @@ class RLProgramTest(absltest.TestCase):
               metadata={
                   "gold_answer": "4",
                   "num_generations": 999,
+                  "completion_token_lengths": 999,
                   "routed_experts": "ignored",
                   "env_config": {"id": 1},
                   "lineage": "ignored",
@@ -8085,6 +8175,7 @@ class RLProgramTest(absltest.TestCase):
                   "policy_versions": [0],
                   "status": datatypes.TrajectoryStatus.SUCCEEDED,
                   "trajectory_reward": 0.0,
+                  "conversation_tokens": np.array([20, 21], dtype=np.int32),
                   "conversation_masks": np.ones(2, dtype=np.float32),
                   "conversation_text": [
                       {
@@ -8100,6 +8191,7 @@ class RLProgramTest(absltest.TestCase):
               metadata={
                   "gold_answer": "4",
                   "num_generations": 999,
+                  "completion_token_lengths": 999,
                   "routed_experts": "ignored",
                   "env_config": {"id": 1},
                   "lineage": "ignored",
@@ -8153,6 +8245,9 @@ class RLProgramTest(absltest.TestCase):
       # item.metadata (999.0).
       self.assertEqual(
           captured["extra_kwargs"]["trajectory_rewards"], [0.0, 0.0]
+      )
+      self.assertEqual(
+          captured["extra_kwargs"]["completion_token_lengths"], [3, 2]
       )
       for excluded_key in (
           "prompts",
@@ -9717,6 +9812,7 @@ class StandardRLProgramRoutedExpertsCleanupTest(absltest.TestCase):
               "policy_versions": [0],
               "trajectory_reward": 1.0,
               "routed_experts": routed,
+              "conversation_tokens": np.array([20, 21], dtype=np.int32),
               "conversation_text": [
                   {"role": "user", "content": "q0"},
                   {"role": "assistant", "content": "answer"},
@@ -10621,6 +10717,7 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
               start_step=0,
               traj={
                   **_scored_traj(reward),
+                  "conversation_tokens": np.array([3, 4], dtype=np.int32),
                   "conversation_text": [
                       {"role": "user", "content": pid},
                       {"role": "assistant", "content": "answer"},
@@ -10762,6 +10859,7 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
               traj={
                   **_scored_traj(1.0),
                   "policy_versions": list(versions),
+                  "conversation_tokens": np.array([3, 4], dtype=np.int32),
                   "conversation_text": [
                       {"role": "user", "content": prompt_id},
                       {"role": "assistant", "content": "answer"},
