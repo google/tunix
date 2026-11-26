@@ -14,30 +14,36 @@
 
 """Common configuration classes for Tunix."""
 
+from __future__ import annotations
+
 import dataclasses
 import math
-from typing import Any, List, Optional, TYPE_CHECKING, Tuple
+from typing import Any, Optional, TYPE_CHECKING, Tuple
 
-import flax
-import jax
-from jax import numpy as jnp
-from jax.sharding import Mesh
 import numpy as np
-import optax
 from tunix.common import datatypes
 from tunix.generate import mappings
-from tunix.perf import metrics as perf_metrics
-from tunix.sft import checkpoint_options
-from tunix.sft import metrics_logger as sft_metrics_logger
-from tunix.sft import profiler
 
 if TYPE_CHECKING:
+  import flax  # pyrefly: ignore[missing-import]
+  import jax  # pyrefly: ignore[missing-import]
+  from jax import numpy as jnp  # pyrefly: ignore[missing-import]
+  from jax.sharding import Mesh  # pyrefly: ignore[missing-import]
+  import optax  # pyrefly: ignore[missing-import]
+  from tunix.perf import metrics as perf_metrics  # pyrefly: ignore[missing-import]
   from tunix.rl.rollout import base_rollout  # pyrefly: ignore[missing-import]
+  from tunix.sft import checkpoint_options  # pyrefly: ignore[missing-import]
+  from tunix.sft import metrics_logger as sft_metrics_logger  # pyrefly: ignore[missing-import]
+  from tunix.sft import profiler  # pyrefly: ignore[missing-import]
+
+  MetricsLoggerOptions = sft_metrics_logger.MetricsLoggerOptions
 
 # For rl_utils calls inside RLTrainingConfig
 # For base_rollout typing inside ClusterConfig
 
-MetricsLoggerOptions = sft_metrics_logger.MetricsLoggerOptions
+_VALID_WEIGHT_SYNC_MODES = tuple(
+    mode.value for mode in datatypes.WeightSyncMode
+)
 Mode = datatypes.Mode
 Role = datatypes.Role
 
@@ -58,17 +64,73 @@ def _check_divisibility(small_size, big_size, small_size_name, big_size_name):
     )
 
 
-@dataclasses.dataclass(frozen=True)
-class CacheConfig:
-  """Configuration for the KV cache."""
+def validate_routed_experts_encode_config(
+    encode_mode: str,
+    num_experts: int | None,
+) -> None:
+  """Validates `routed_experts_encode_mode` and `routed_experts_num_experts`."""
+  if encode_mode not in datatypes.ROUTED_EXPERTS_ENCODE_MODES:
+    raise ValueError(
+        "routed_experts_encode_mode must be one of"
+        f" {datatypes.ROUTED_EXPERTS_ENCODE_MODES}. Received: {encode_mode!r}"
+    )
+  if num_experts is not None and (
+      isinstance(num_experts, bool)
+      or not isinstance(num_experts, int)
+      or int(num_experts) <= 0
+  ):
+    raise ValueError(
+        "routed_experts_num_experts must be a positive int or None."
+        f" Received: {num_experts!r}"
+    )
 
-  cache_size: int
-  num_layers: int
-  num_kv_heads: int
-  head_dim: int
+
+def resolve_seq_tokens_budget(
+    per_device: int | None,
+    per_tpu: int | None,
+) -> int | None:
+  """Validates and resolves `max_seq_tokens_per_device` and `max_seq_token_per_tpu`."""
+  for field_name, val in (
+      ("max_seq_tokens_per_device", per_device),
+      ("max_seq_token_per_tpu", per_tpu),
+  ):
+    if val is not None and (
+        isinstance(val, bool) or not isinstance(val, int) or val < 0
+    ):
+      raise ValueError(
+          f"{field_name} must be a non-negative integer or None, got {val!r}."
+      )
+  per_device = per_device or None
+  per_tpu = per_tpu or None
+  if per_device is not None and per_tpu is not None and per_device != per_tpu:
+    raise ValueError(
+        "max_seq_tokens_per_device and max_seq_token_per_tpu must match when"
+        f" both are set, got {per_device} vs {per_tpu}."
+    )
+  return per_device if per_device is not None else per_tpu
 
 
-@dataclasses.dataclass
+def replica_seed(seed: int | None, replica_index: int) -> int | None:
+  """Derives a 32-bit seed for `replica_index`, or `None` when unseeded."""
+  if (
+      isinstance(replica_index, bool)
+      or not isinstance(replica_index, int)
+      or replica_index < 0
+  ):
+    raise ValueError(
+        f"replica_index must be a non-negative int, got {replica_index!r}."
+    )
+  if seed is None:
+    return None
+  if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+    raise ValueError(f"seed must be a non-negative int or None, got {seed!r}.")
+  return (seed + replica_index) % (2**32)
+
+
+CacheConfig = datatypes.CacheConfig
+
+
+@dataclasses.dataclass(kw_only=True)
 class RolloutConfig:
   """Configuration for the rollout worker.
 
@@ -76,8 +138,12 @@ class RolloutConfig:
   https://docs.vllm.ai/en/v0.6.4/dev/sampling_params.html
   """
 
-  # Maximum number of tokens to generate per output sequence
+  # Maximum number of tokens to generate per single-turn output sequence.
   max_tokens_to_generate: int = 64
+
+  # Optional cumulative response token budget across all turns of a rollout
+  # trajectory.
+  max_response_length: int | None = None
 
   # Float that controls the randomness of the sampling.
   # Lower values make the model more deterministic, while higher values make the
@@ -93,14 +159,25 @@ class RolloutConfig:
   top_k: int | None = None
 
   # Random seed to use for the generation.
-  seed: jax.Array | None = None
+  seed: int | jax.Array | None = None
+
+  # TODO(yatlas): Beam_size is currently only wired into the Vanilla Sampler.
+  # It should be wired into the vLLM sampler as well.
+  # Beam width for beam search decoding.
+  beam_size: int | None = None
 
   # Maximum length of the prompt. The prompt will be padded/truncated to this
   # length.
   max_prompt_length: int = 64
 
-  # Only used for vanilla rollout engine.
-  kv_cache_size: int = 1024  # Only used for vanilla rollout engine.
+  # TODO(yatlas): Deprecate this field. Switch to
+  # rollout_vanilla_kv_cache_size, and require
+  # rollout_vllm_kwargs['max_model_len'] in the vLLM sampler.
+
+  # KV cache size of the vanilla rollout engine. `VllmRollout` and
+  # `InprocessVllmSampler` use it as vLLM's `max_model_len` unless
+  # `rollout_vllm_kwargs` sets one.
+  kv_cache_size: int = 1024
 
   # data type of the rollout model.
   data_type: jnp.dtype | None = None
@@ -109,7 +186,8 @@ class RolloutConfig:
   # will be used.
   eos_tokens: list[int] | None = None
 
-  # Weights mapping config for the rollout model.
+  # Weights mapping config for the rollout model. If None, derived from the
+  # rollout model when supported.
   rollout_mapping_config: mappings.MappingConfig | None = None
 
   # Parallelism configs.
@@ -120,15 +198,13 @@ class RolloutConfig:
   # Whether to return logprobs from the sampler.
   return_logprobs: bool = False
 
+  # Number of most likely tokens whose logprobs the vLLM sampler returns per
+  # generated token. Values > 1 also return the `[gen_len, k]` top-k token ids
+  # and log probs used by Score Centering.
+  num_logprobs: int = 1
+
   # Whether to return output logits from the sampler.
   return_logits: bool = False
-
-  # Beam width for beam search decoding.
-  beam_size: int | None = None
-
-  # TODO(yatlas): Throw an error if this flag is set in the non-agentic path.
-  # Mode of weight synchronization ("none", "fallback", "raiden").
-  weight_sync_mode: str = "none"
 
   # Whether to capture the MoE experts each token was routed through, so the
   # trainer can replay them instead of re-running its own router. MoE models on
@@ -193,6 +269,10 @@ class RolloutConfig:
   # The number of model forward passes per engine step.
   rollout_vanilla_v2_num_scheduler_steps: int = 1
 
+  # Trajectory execution configs.
+  episode_timeout: float = 600.0
+  overlong_filter: bool = False
+
   # vLLM specific rollout configs.
 
   # Whether to run rollout in vLLM server mode or batch inference mode.
@@ -214,14 +294,19 @@ class RolloutConfig:
   # LoRA config for vLLM rollout engine.
   rollout_vllm_lora_config: dict[str, Any] | None = None
 
-  # Allocated HBM fraction for vLLM rollout engine.
-  rollout_vllm_hbm_utilization: float = 0.2
+  # TODO(yatlas): Once the HBM usage fixes land, make this non-optional and
+  # consolidate on a single default here instead of per-sampler defaults.
+  # Allocated HBM fraction for vLLM rollout engine. `None` falls back to each
+  # sampler's default (`0.2` in colocated `VllmRollout`, `0.5` in `dist_rl`'s
+  # `InprocessVllmSampler`, and vLLM's own default in `dist_rl`'s
+  # `VllmSampler`).
+  rollout_vllm_hbm_utilization: float | None = None
 
   # Whether to initialize vLLM model with random weights or huggingface weights.
   rollout_vllm_init_with_random_weights: bool = True
 
   # TPU backend type for vLLM rollout engine, "jax" or "torchax", default to "jax".
-  rollout_vllm_tpu_backend_type: str | None = None
+  rollout_vllm_tpu_backend_type: str = "jax"
 
   # Whether to enable asynchronous scheduling for vLLM rollout engine.
   rollout_vllm_async_scheduling: bool = False
@@ -281,70 +366,41 @@ class RolloutConfig:
       default_factory=dict
   )
 
-  # SG-Lang JAX specific rollout configs.
-
-  # Model version for SG-Lang JAX rollout engine.
-  rollout_sglang_jax_model_version: str = ""
-
-  # Context length for SG-Lang JAX rollout engine.
-  rollout_sglang_jax_context_length: Optional[int] = None
-
-  # Allocated HBM fraction for SG-Lang JAX rollout engine.
-  rollout_sglang_jax_mem_fraction_static: float = 0.2
-
-  # Whether to initialize SG-Lang JAX model with random weights.
-  rollout_sglang_jax_init_with_random_weights: bool = True
-
-  # Radix cache disabling flag for SG-Lang JAX rollout engine. Default to True for RL.
-  rollout_sglang_jax_disable_radix_cache: bool = True
-
-  # Whether to enable deterministic sampling for SG-Lang JAX rollout engine.
-  rollout_sglang_jax_enable_deterministic_sampling: bool = False
-
-  # Whether to use lora
-  rollout_sglang_jax_enable_static_lora: bool = False
-
-  # Whether to use single controller mode, single controller mode is required in pathways
-  rollout_sglang_jax_enable_single_process: bool = True
-
-  # Specify the modules which are required to use lora
-  rollout_sglang_jax_lora_target_modules: Optional[List[str]] = None
-
-  # Specify the lora RANK
-  rollout_sglang_jax_max_lora_rank: Optional[int] = None
-
-  rollout_sglang_jax_lora_scaling: Optional[float] = None
-
-  # Specify the paddings for batch_size
-  rollout_sglang_jax_precompile_bs_paddings: Optional[List[int]] = None
-
-  # Specify the paddings for tokens which is used in prefll
-  rollout_sglang_jax_precompile_token_paddings: Optional[List[int]] = None
-
-  # Specify the the maximum number of tokens in a chunk for the chunked prefill
-  rollout_sglang_jax_chunked_prefill_size: Optional[int] = -1
-
-  # The number of tokens in a page
-  rollout_sglang_jax_page_size: int = 128
-
-  # The format of the model weights to load.
-  rollout_sglang_jax_load_format: str = "auto"
-
-  # The maximum number of running requests to accumulate batch
-  rollout_sglang_jax_max_running_requests: Optional[int] = None
-
-  # The log level of sglang_jax
-  rollout_sglang_jax_log_level: Optional[str] = "info"
-
-  # Additional keyword arguments forwarded directly to the SG-Lang JAX sampler/engine.
-  rollout_sglang_jax_kwargs: dict[str, Any] = dataclasses.field(
-      default_factory=dict
-  )
+  # Distributed rollout worker & sampler orchestration configs.
+  weight_sync_mode: str = "none"
 
   def __post_init__(self):
-    datatypes.validate_routed_experts_encode_config(
+    _is_positive_integer(self.max_response_length, "max_response_length")
+    validate_routed_experts_encode_config(
         self.routed_experts_encode_mode, self.routed_experts_num_experts
     )
+    if (
+        isinstance(self.episode_timeout, bool)
+        or not isinstance(self.episode_timeout, (int, float))
+        or not math.isfinite(self.episode_timeout)
+        or self.episode_timeout <= 0
+    ):
+      raise ValueError(
+          "episode_timeout must be a positive finite number, got"
+          f" {self.episode_timeout!r}."
+      )
+    self.episode_timeout = float(self.episode_timeout)
+    if self.weight_sync_mode not in _VALID_WEIGHT_SYNC_MODES:
+      raise ValueError(
+          f"weight_sync_mode must be one of {_VALID_WEIGHT_SYNC_MODES}, got"
+          f" {self.weight_sync_mode!r}."
+      )
+    if self.num_logprobs < 1:
+      raise ValueError(f"num_logprobs must be >= 1, got {self.num_logprobs}.")
+    if not math.isfinite(self.temperature) or self.temperature < 0:
+      raise ValueError(
+          f"temperature must be a finite number >= 0, got {self.temperature!r}."
+      )
+    if self.top_p is not None and not 0 < self.top_p <= 1:
+      raise ValueError(f"top_p must be in (0, 1], got {self.top_p!r}.")
+    if self.top_k is not None and self.top_k < -1:
+      raise ValueError(f"top_k must be >= -1, got {self.top_k!r}.")
+    _is_positive_integer(self.max_tokens_to_generate, "max_tokens_to_generate")
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -430,18 +486,31 @@ class TrainingConfig:
   pbar_description: str | None = "Training"
 
   # Sequence packing configuration.
+  max_seq_tokens_per_device: int | None = None
+  # TODO(b/583675740): Deprecate max_seq_token_per_tpu in favor of
+  # max_seq_tokens_per_device.
+  # Note: because both fields are synced in `__post_init__`, callers using
+  # `dataclasses.replace` to change one must also pass or clear the other.
   max_seq_token_per_tpu: int | None = None
   # Static upper bound on real segments (sequences) per packed row, used to size
   # the segment-aware loss buckets (num_segments = this + 1 for the padding
-  # bucket). ``None`` defaults to ``max_seq_token_per_tpu`` -- provably safe (a
-  # pack of ``budget`` tokens holds at most ``budget`` unit-length segments) and
-  # needs no tuning. Set a smaller value only to shrink the loss buckets at very
-  # large budgets; ``pack_sequences`` raises if a pack exceeds it.
+  # bucket). ``None`` defaults to ``max_seq_tokens_per_device`` -- provably safe
+  # (a pack of ``budget`` tokens holds at most ``budget`` unit-length segments)
+  # and needs no tuning. Set a smaller value only to shrink the loss buckets at
+  # very large budgets; ``pack_sequences`` raises if a pack exceeds it.
   max_segments_per_packed_row: int | None = None
+
+  def __post_init__(self):
+    resolved = resolve_seq_tokens_budget(
+        self.max_seq_tokens_per_device,
+        self.max_seq_token_per_tpu,
+    )
+    self.max_seq_tokens_per_device = resolved
+    self.max_seq_token_per_tpu = resolved
 
   @property
   def sequence_packing_enabled(self) -> bool:
-    """Returns True if sequence packing (`max_seq_token_per_tpu > 0`) is enabled."""
+    """Returns True if sequence packing (`max_seq_tokens_per_device > 0`) is enabled."""
     return is_sequence_packing_enabled(self)
 
   def get_with_default(self, key: str, default: Any) -> Any:
@@ -451,10 +520,12 @@ class TrainingConfig:
     return val
 
 
-def is_sequence_packing_enabled(config: Any) -> bool:
-  """Returns True if sequence packing (`max_seq_token_per_tpu > 0`) is enabled."""
-  budget = getattr(config, "max_seq_token_per_tpu", None)
-  return isinstance(budget, int) and budget > 0
+def is_sequence_packing_enabled(
+    config: Any,
+) -> bool:
+  """Returns True if sequence packing (`max_seq_tokens_per_device > 0`) is enabled."""
+  budget = getattr(config, "max_seq_tokens_per_device", None)
+  return isinstance(budget, int) and not isinstance(budget, bool) and budget > 0
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -496,6 +567,11 @@ class RLTrainingConfig(TrainingConfig):
 
   def __post_init__(self):
     """Validates the configuration after initialization."""
+    # Call TrainingConfig.__post_init__(self) explicitly instead of
+    # super().__post_init__(): in Python <= 3.12, @dataclass(slots=True)
+    # recreates the class without updating the implicit __class__ closure cell
+    # used by zero-arg super() (CPython gh-90562).
+    TrainingConfig.__post_init__(self)
     if (
         self.profiler_options is not None
         and self.rl_profiler_config is not None
@@ -551,7 +627,7 @@ class ClusterConfig:
     role_to_logical_axis_rule: Mapping from model role to logical axis rule.
       This is used when models are sharded with logical axis and expects a
       logical to physical axis mapping at runtime.
-    rollout_engine: Rollout engine to use. E.g. "vanilla", "vllm", "sglang_jax".
+    rollout_engine: Rollout engine to use. E.g. "vanilla", "vanilla_v2", "vllm".
       Alternatively, if a subclass of `BaseRollout` is provided, it will be used
       as the rollout engine.
     offload_to_cpu: Whether to offload models to CPU at each step..

@@ -250,6 +250,10 @@ grpo_config:
   # stable updates.
   epsilon: 0.2
 
+  score_centering: false
+  score_centering_top_k: 128
+  score_centering_eps: 1.0e-6
+
 
 ############################### Rollout Config ###############################
 rollout_config:
@@ -265,11 +269,14 @@ rollout_config:
 
   top_k: 50
 
+  return_logprobs: false
+
+  num_logprobs: 1
+
 
 ############################### Other RL  Config ###############################
 
 rollout_engine: "vanilla"
-sglang_jax_config: {}
 vllm_config: {}
 
 offload_to_cpu: false
@@ -278,6 +285,7 @@ training_mode: "grpo"
 
 chat_parser_config:
   type: "default"
+  enable_thinking: null
 
 agent_class_path: null
 agent_kwargs: {}

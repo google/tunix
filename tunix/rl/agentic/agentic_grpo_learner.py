@@ -37,7 +37,6 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from tunix.generate import utils as generate_utils
 from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import algo_core  # pylint: disable=unused-import
 from tunix.rl import common
@@ -51,7 +50,6 @@ from tunix.rl.agentic.agents import model_agent
 from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.environments import task_environment
 from tunix.utils import compat
-from tunix.utils import trajectory_logger
 
 TrainingInputT = agentic_rl_learner.TrainingInputT
 RewardFn = agentic_rl_learner.RewardFn
@@ -79,6 +77,8 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
       when it would normally be skipped (e.g., when beta is 0.0).
     epsilon: PPO-style clipping epsilon.
     epsilon_high: PPO-style clipping epsilon upper bound.
+    epsilon_c: Dual-clip lower bound applied when advantages are negative.
+      `None` (default) disables dual clipping.
     loss_algo: "grpo" or "gspo-token".
     system_prompt: System prompt for the agent.
     max_concurrency: Maximum number of concurrent rollout engines.
@@ -110,6 +110,7 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
   system_prompt: str = ""
   max_concurrency: int = 16
   epsilon_high: float | None = None  # 0.28 from DAPO.
+  epsilon_c: float | None = None
   off_policy_steps: int = 0
   # Deprecated. Will remove in the next release.
   degenerate_group_masking: bool = (
@@ -129,6 +130,7 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
           "loss_algo should be either grpo or gspo-token. Received: "
           f"{self.loss_algo}"
       )
+    self._validate_drop_zero_variance_groups()
     self._validate_sampler_is_and_rs_options()
 
 
@@ -191,6 +193,12 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       env_class: The class of the environment to be used.
       env_kwargs: Keyword arguments to pass to the environment class.
     """  # fmt: skip
+    if algo_config.drop_zero_variance_groups:
+      raise ValueError(
+          "drop_zero_variance_groups is only supported by the distributed"
+          " StandardRLProgram; non-distributed agentic GRPOLearner does not"
+          " drop zero-variance groups."
+      )
     super().__init__(
         rl_engine=rl_engine,
         reward_fns=reward_fns,
@@ -202,21 +210,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         env_class=env_class,
         env_kwargs=env_kwargs,
     )
-
-    self._trajectory_logger = None
-    metrics_logger_options = (
-        self.rl_engine.cluster_config.training_config.metrics_logging_options
-    )
-    metrics_log_dir = (
-        metrics_logger_options.log_dir if metrics_logger_options else None
-    )
-
-    if metrics_log_dir:
-      self._trajectory_logger = trajectory_logger.AsyncTrajectoryLogger(
-          metrics_log_dir
-      )
-    else:
-      logging.warning("Metrics log dir is None, skipping trajectory logging.")
 
     self.algo_config.temperature = (
         self.rl_engine.get_rollout_config(
@@ -261,10 +254,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         "log_ratio/abs_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
         "pg_loss/unclipped_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
         "pg_loss/clipped_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
-        "advantage/abs_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
-        "advantage/max": np.max,
-        "advantage/min": np.min,
-        "advantage/nonzero_frac": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
         "sampler_is/weight_mean": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
         "sampler_is/weight_min": np.min,
         "sampler_is/weight_max": np.max,
@@ -490,10 +479,11 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     policy_versions_list: List[int] = []
     trajectory_rewards_list: List[float] = []
     raw_completion_lengths: List[int] = []
-    trajectories_to_log = []
+    # (index, trajectory_id, metrics) of the trajectories whose metrics are
+    # persisted to the trajectory store.
+    trajectory_metrics: List[tuple[int, str, Dict[str, Any]]] = []
 
-    for item in trajectories:
-      trajectories_to_log.append(item.traj)
+    for index, item in enumerate(trajectories):
       conversation = item.traj.get("conversation_text") or []
       assistant_text = next(
           (
@@ -517,16 +507,36 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       old_logprobs_list.append(
           np.asarray(old_logprobs) if old_logprobs is not None else None
       )
-      policy_version = item.traj.get("policy_version")
-      if policy_version is None:
-        raise ValueError("policy_version is missing from trajectory task.")
-      policy_versions_list.append(policy_version)
-      trajectory_rewards_list.append(item.traj.get("trajectory_reward"))
+      policy_versions = item.traj.get("policy_versions")
+      if not policy_versions:
+        raise ValueError("policy_versions is missing from trajectory task.")
+      policy_versions_list.append(policy_versions[-1])
+      trajectory_reward = item.traj.get("trajectory_reward")
+      trajectory_rewards_list.append(trajectory_reward)
 
-    # Log trajectory.
-    if self._trajectory_logger and trajectories_to_log:
-      for traj in trajectories_to_log:
-        self._trajectory_logger.log_item_async(traj)
+      traj_id = getattr(item, "traj_id", None)
+      if traj_id is None:
+        continue
+      if mode == rl_engine_lib.Mode.EVAL and expected_step is not None:
+        # Every eval round derives its group ids from the current global step,
+        # so ids of consecutive rounds can overlap; scope them by step.
+        traj_id = f"{traj_id}_step{expected_step}"
+      trajectory_metrics.append((
+          index,
+          traj_id,
+          {
+              "rollout_policy_version": int(policy_versions[-1]),
+              "status": item.traj.get("status"),
+              "trajectory_reward": (
+                  float(trajectory_reward)
+                  if trajectory_reward is not None
+                  else None
+              ),
+              "env_time": item.traj.get("env_time"),
+              "reward_time": item.traj.get("reward_time"),
+              "conversation_text": conversation,
+          },
+      ))
 
     # Pad all prompts and completions to consistent lengths.
     rollout_config = self.rl_engine.cluster_config.rollout_config
@@ -560,12 +570,12 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           if prompt_len_raw is not None
           else len(prompt_tokens)
       )
-      if self.algo_config.exact_token_continuity and (
+      if (
           prompt_len > rollout_config.max_prompt_length
           or len(completion_tokens) > max_response_length
       ):
         raise ValueError(
-            "Exact trajectory exceeds training padding budget:"
+            "Trajectory exceeds training padding budget:"
             f" prompt={prompt_len}/{rollout_config.max_prompt_length},"
             f" completion={len(completion_tokens)}/{max_response_length}"
         )
@@ -616,19 +626,15 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           )
 
     prompt_ids = jnp.asarray(padded_prompt_ids)
-    prompt_mask = prompt_ids != pad_value
     completion_ids = jnp.asarray(padded_completion_ids)
     completion_mask = jnp.asarray(padded_completion_masks)
-    completion_attention_mask = None
-    token_mask = None
-    if self.algo_config.exact_token_continuity:
-      # Validity by length: environment/template tokens are context, and a
-      # real token equal to the pad id stays valid.
-      prompt_mask = jnp.asarray(padded_prompt_masks)
-      completion_attention_mask = jnp.asarray(padded_completion_attention_masks)
-      token_mask = jnp.concatenate(
-          [prompt_mask, completion_attention_mask], axis=1
-      )
+    # Validity by length: environment/template tokens are context, and a real
+    # token equal to the pad id stays valid.
+    prompt_mask = jnp.asarray(padded_prompt_masks)
+    completion_attention_mask = jnp.asarray(padded_completion_attention_masks)
+    token_mask = jnp.concatenate(
+        [prompt_mask, completion_attention_mask], axis=1
+    )
     logging.debug(
         "Token shapes: prompt_ids=%s, completion_ids=%s",
         prompt_ids.shape,
@@ -648,9 +654,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     have_actor_mesh = actor_mesh is not None and not actor_mesh.empty
     # pack-first: defer old/ref logp to the packed buffer (computed after
     # pack_sequences in the consumer). Leave the non-packed path untouched.
-    is_packed = (
-        self.rl_engine.cluster_config.training_config.max_seq_token_per_tpu
-        is not None
+    is_packed = rl_engine_lib.configs.is_sequence_packing_enabled(
+        self.rl_engine.cluster_config.training_config
     )
 
     configured_compute_logps = (
@@ -795,6 +800,24 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       )
 
     logging.debug("Advantages computed: %s", advantages)
+
+    rewards_np = np.asarray(rewards)
+    advantages_np = np.asarray(advantages)
+    self.rl_engine.log_trajectory_metrics(
+        [
+            (
+                traj_id,
+                {
+                    **metrics,
+                    "reward": float(rewards_np[index]),
+                    "advantage": float(advantages_np[index]),
+                },
+            )
+            for index, traj_id, metrics in trajectory_metrics
+        ],
+        mode=mode,
+        step=expected_step,
+    )
 
     policy_versions = np.array(policy_versions_list, dtype=np.int32)
 

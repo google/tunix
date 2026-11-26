@@ -166,6 +166,11 @@ def register_reward_manager(
   return default_registry.register(_REWARD_MANAGER_CATEGORY, name)
 
 
+def list_reward_managers() -> List[str]:
+  """Lists the names of all registered reward manager functions."""
+  return default_registry.list_functions(_REWARD_MANAGER_CATEGORY)
+
+
 def get_value_loss_fn(name: str) -> Callable[..., Any]:
   """Returns the value loss function by name."""
   return default_registry.get(_VALUE_LOSS_FN_CATEGORY, name)
@@ -176,3 +181,8 @@ def register_value_loss_fn(
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
   """Returns a decorator to register a value loss function by name."""
   return default_registry.register(_VALUE_LOSS_FN_CATEGORY, name)
+
+
+def list_value_loss_fns() -> List[str]:
+  """Lists the names of all registered value loss functions."""
+  return default_registry.list_functions(_VALUE_LOSS_FN_CATEGORY)

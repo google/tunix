@@ -43,12 +43,13 @@ def _make_rollout_worker(
     jax_cache_config: gcs_cache.JaxCacheConfig | None = None,
 ) -> rollout_worker.RolloutWorker:
   return rollout_worker.RolloutWorker(
+      config=rollout_worker.RolloutConfig(),
       worker_id=worker_id,
       sampler=mocks.MockBaseSamplerImpl(
           sampler_name="test_sampler", default_delay=0.0
       ),
-      env_pool=mocks.MockEnvironmentPool(pool_size=4, default_delay=0.0),
-      agent_factory=mocks.MockAgent,
+      env_name="mock_env",
+      agent_name="mock_agent",
       tokenizer=mocks.MockTokenizer(),
       chat_parser=mocks.MockChatParser(),
       jax_cache_config=jax_cache_config,
@@ -338,14 +339,12 @@ class GcsCacheTest(absltest.TestCase):
           prompt="What is 2+2?",
           prompt_id="p1",
           group_index=0,
-          generation_kwargs={"max_generation_steps": 16},
       )
       req2 = datatypes.RolloutRequest(
           request_id="req_2",
           prompt="What is 3+3?",
           prompt_id="p2",
           group_index=0,
-          generation_kwargs={"max_generation_steps": 16},
       )
       await worker.generate(requests=req1)
       await worker.generate(requests=req2)

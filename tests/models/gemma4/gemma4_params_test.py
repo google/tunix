@@ -18,6 +18,7 @@ from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 from flax.traverse_util import flatten_dict
+import jax
 import numpy as np
 from tunix.models.gemma4 import params
 
@@ -574,6 +575,33 @@ class CreateModelTest(absltest.TestCase):
         self.checkpoint_path, self.config, mesh=None
     )
     self.assertIs(result, self.fake_model)
+
+  def test_create_model_evaluates_shapes_under_mesh(self):
+    """Verifies param shardings are resolved against `mesh` (b/577464623)."""
+    mesh = jax.sharding.Mesh(
+        np.array(jax.devices()[:1]).reshape(1, 1), ('fsdp', 'tp')
+    )
+    active_meshes = []
+
+    def _eval_shape(fn):
+      del fn
+      active_meshes.append(jax.sharding.get_abstract_mesh())
+      return self.fake_model
+
+    self.mock_eval_shape.side_effect = _eval_shape
+    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+    with mock.patch.object(
+        params.nnx, 'get_named_sharding', autospec=True
+    ), mock.patch.object(
+        params.nnx,
+        'to_pure_dict',
+        autospec=True,
+        return_value={'layers': {0: {'w': sharding}}},
+    ):
+      params.create_model_from_checkpoint(
+          self.checkpoint_path, self.config, mesh=mesh
+      )
+    self.assertEqual(active_meshes, [mesh.abstract_mesh])
 
   def test_create_model_text_only_flag(self):
     """Verifies text_only flag is propagated to Gemma4."""

@@ -17,9 +17,18 @@
 import asyncio
 
 from absl.testing import absltest
+from absl.testing import parameterized
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.queue_manager import trajectory_queue_manager
 from tunix.rl.agentic.queue_manager import group_queue_manager
+
+
+def _token_traj(
+    reward: float = 1.0,
+    status: datatypes.TrajectoryStatus = datatypes.TrajectoryStatus.SUCCEEDED,
+) -> dict[str, object]:
+  """Minimal Token-mode trajectory dict, the shape `raw_q` sees in production."""
+  return {"status": status, "trajectory_reward": reward}
 
 
 def _create_item(
@@ -31,17 +40,20 @@ def _create_item(
     batch_idx: int | None = None,
 ) -> datatypes.TrajectoryItem:
   """Helper to create a TrajectoryItem for testing."""
-  traj = datatypes.Trajectory(reward=reward)
-  metadata: dict[str, object] = {"task_id": task_id}
+  metadata: dict[str, object] = {
+      "task_id": task_id,
+  }
   if batch_idx is not None:
     metadata["batch_idx"] = batch_idx
   return datatypes.TrajectoryItem(
       group_index=group_index,
       prompt_id=prompt_id,
       start_step=0,
-      traj=traj,
+      traj={
+          **_token_traj(reward=reward),
+          "policy_versions": [policy_version],
+      },
       metadata=metadata,
-      policy_version=policy_version,
   )
 
 
@@ -58,10 +70,10 @@ class QueueManagerTest(absltest.TestCase):
       item2 = _create_item("g1", group_index=1)
 
       await manager.put(item1)
-      self.assertEmpty(manager._ready_groups)
+      self.assertEqual(manager.ready_groups_count, 0)
 
       await manager.put(item2)
-      self.assertLen(manager._ready_groups, 1)
+      self.assertEqual(manager.ready_groups_count, 1)
 
       batch = await manager.get_batch(2)
       self.assertLen(batch, 2)
@@ -120,10 +132,10 @@ class QueueManagerTest(absltest.TestCase):
       item2 = _create_item("g2", group_index=0)
 
       await manager.put(item1)
-      self.assertEmpty(manager._ready_groups)
+      self.assertEqual(manager.ready_groups_count, 0)
 
       await manager.put(item2)
-      self.assertLen(manager._ready_groups, 1)
+      self.assertEqual(manager.ready_groups_count, 1)
 
       batch = await manager.get_batch(2)
       self.assertCountEqual([item1, item2], batch)
@@ -137,7 +149,7 @@ class QueueManagerTest(absltest.TestCase):
       def positive_reward_filter_fn(
           group: list[datatypes.TrajectoryItem],
       ) -> list[datatypes.TrajectoryItem]:
-        return [item for item in group if item.traj.reward > 0]
+        return [item for item in group if item.traj["trajectory_reward"] > 0]
 
       manager = trajectory_queue_manager.TrajectoryQueueManager(
           num_generations=2, filter_fn=positive_reward_filter_fn
@@ -162,8 +174,10 @@ class QueueManagerTest(absltest.TestCase):
     """Tests item-granular get_batch splitting a group across calls."""
 
     async def _run_test():
+      now = 12.5
       manager = trajectory_queue_manager.TrajectoryQueueManager(
-          num_generations=3
+          num_generations=3,
+          clock=lambda: now,
       )
       items = [_create_item("g1", group_index=i) for i in range(3)]
       for item in items:
@@ -172,12 +186,67 @@ class QueueManagerTest(absltest.TestCase):
       batch1 = await manager.get_batch(2)
       self.assertLen(batch1, 2)
       self.assertCountEqual(items[:2], batch1)
-      self.assertLen(manager._ready_groups, 1)
+      self.assertEqual(manager.ready_groups_count, 1)
 
-      batch2 = await manager.get_batch(1)
-      self.assertLen(batch2, 1)
-      self.assertEqual(batch2[0], items[2])
-      self.assertEmpty(manager._ready_groups)
+      now = 99.0
+      leftover = await manager.get_timed_group()
+      self.assertIsNotNone(leftover)
+      group_slice, ready_time_s = leftover
+      self.assertEqual(group_slice, [items[2]])
+      self.assertAlmostEqual(ready_time_s, 12.5)
+      self.assertEqual(manager.ready_groups_count, 0)
+
+    asyncio.run(_run_test())
+
+  def test_get_timed_group_stamps_completion_ignores_filtered_and_clears(self):
+    """Tests get_timed_group() completion timestamp, filtering, EOF, and clear()."""
+
+    async def _run_test():
+      now = 1.0
+      manager = trajectory_queue_manager.TrajectoryQueueManager.create(
+          num_generations=2,
+          max_staleness=0,
+          current_policy_version=lambda: 2,
+          clock=lambda: now,
+      )
+
+      # Stale group dropped at t=2.0 -> not staged in _timed_ready_groups.
+      now = 2.0
+      await manager.put(
+          _create_item("g_stale", group_index=0, policy_version=1)
+      )
+      await manager.put(
+          _create_item("g_stale", group_index=1, policy_version=1)
+      )
+      self.assertEqual(manager.ready_groups_count, 0)
+
+      # Valid group first item at t=3.0, completes on second item at t=7.5.
+      now = 3.0
+      i0 = _create_item("g_valid", group_index=0, policy_version=2)
+      await manager.put(i0)
+      now = 7.5
+      i1 = _create_item("g_valid", group_index=1, policy_version=2)
+      await manager.put(i1)
+
+      timed = await manager.get_timed_group()
+      self.assertIsNotNone(timed)
+      group, ready_time_s = timed
+      self.assertEqual(group, [i0, i1])
+      self.assertAlmostEqual(ready_time_s, 7.5)
+
+      # Put another group, then clear() and close() -> get_timed_group() is None.
+      now = 11.0
+      await manager.put(
+          _create_item("g_cleared", group_index=0, policy_version=2)
+      )
+      await manager.put(
+          _create_item("g_cleared", group_index=1, policy_version=2)
+      )
+      self.assertEqual(manager.ready_groups_count, 1)
+      await manager.clear()
+      self.assertEqual(manager.ready_groups_count, 0)
+      await manager.close()
+      self.assertIsNone(await manager.get_timed_group())
 
     asyncio.run(_run_test())
 
@@ -260,36 +329,362 @@ class QueueManagerTest(absltest.TestCase):
 
     asyncio.run(_run_test())
 
-  def test_staleness_filter_falls_back_to_metadata_when_traj_policy_version_is_none(
-      self,
-  ):
-    """Tests staleness filter reading metadata['policy_version'] when traj['policy_version'] is None."""
+  def test_staleness_filter_uses_latest_in_flight_policy_versions(self):
+    """Tests staleness filter evaluating the latest turn of `traj['policy_versions']`."""
 
     async def _run_test():
       manager = trajectory_queue_manager.TrajectoryQueueManager.create(
           num_generations=1,
           max_staleness=1,
-          current_policy_version=lambda: 2,
+          current_policy_version=lambda: 3,
       )
-      fresh = datatypes.TrajectoryItem(
-          prompt_id="p_fresh",
+      updated_inflight = datatypes.TrajectoryItem(
+          prompt_id="p_inflight",
           group_index=0,
-          traj={"policy_version": None, "status": "SUCCEEDED"},
-          metadata={"policy_version": 1},
+          traj={"policy_versions": [1, 2], "status": "SUCCEEDED"},
       )
-      stale = datatypes.TrajectoryItem(
+      genuinely_stale = datatypes.TrajectoryItem(
           prompt_id="p_stale",
           group_index=0,
-          traj={"policy_version": None, "status": "SUCCEEDED"},
-          metadata={"policy_version": 0},
+          traj={"policy_versions": [1, 1], "status": "SUCCEEDED"},
       )
 
-      await manager.put(fresh)
-      await manager.put(stale)
+      await manager.put(updated_inflight)
+      await manager.put(genuinely_stale)
 
       self.assertEqual(manager.ready_groups_count, 1)
       self.assertEqual(manager.filtered_groups_count, 1)
-      self.assertEqual(await manager.get_group(), [fresh])
+      self.assertEqual(await manager.get_group(), [updated_inflight])
+
+    asyncio.run(_run_test())
+
+  def test_max_version_span_filters_groups_spanning_too_many_versions(self):
+    """Tests max_version_span rejecting groups whose max-min policy_versions exceeds the bound."""
+    with self.assertRaises(ValueError):
+      trajectory_queue_manager.TrajectoryQueueManager.create(
+          num_generations=1,
+          max_version_span=-1,
+      )
+    with self.assertRaises(ValueError):
+      trajectory_queue_manager.item_policy_version(
+          datatypes.TrajectoryItem(
+              prompt_id="p_empty_versions",
+              group_index=0,
+              traj={"status": "SUCCEEDED", "policy_versions": []},
+          )
+      )
+    with self.assertRaises(ValueError):
+      trajectory_queue_manager.item_policy_version(
+          datatypes.TrajectoryItem(
+              prompt_id="p_missing_version",
+              group_index=0,
+              traj={"status": "SUCCEEDED"},
+          )
+      )
+
+    async def _run_test():
+      # 1. Combined staleness + max_version_span filtering.
+      manager = trajectory_queue_manager.TrajectoryQueueManager.create(
+          num_generations=1,
+          max_staleness=1,
+          max_version_span=2,
+          current_policy_version=lambda: 3,
+      )
+      bounded_span = datatypes.TrajectoryItem(
+          prompt_id="p_bounded",
+          group_index=0,
+          traj={"policy_versions": [1, 2, 3], "status": "SUCCEEDED"},
+      )
+      excessive_span = datatypes.TrajectoryItem(
+          prompt_id="p_excessive",
+          group_index=0,
+          traj={"policy_versions": [0, 1, 2, 3], "status": "SUCCEEDED"},
+      )
+
+      await manager.put(bounded_span)
+      await manager.put(excessive_span)
+
+      self.assertEqual(manager.ready_groups_count, 1)
+      self.assertEqual(manager.filtered_groups_count, 1)
+      self.assertEqual(await manager.get_group(), [bounded_span])
+
+      # 2. Span-only filtering (max_staleness=0, current_policy_version=None).
+      span_only = trajectory_queue_manager.TrajectoryQueueManager.create(
+          num_generations=1,
+          max_staleness=0,
+          max_version_span=1,
+      )
+      await span_only.put(bounded_span)
+      self.assertEqual(span_only.ready_groups_count, 0)
+      self.assertEqual(span_only.filtered_groups_count, 1)
+
+      # 3. Unbounded span when max_version_span=None (default).
+      unbounded = trajectory_queue_manager.TrajectoryQueueManager.create(
+          num_generations=1,
+          max_staleness=1,
+          max_version_span=None,
+          current_policy_version=lambda: 3,
+      )
+      await unbounded.put(excessive_span)
+      self.assertEqual(unbounded.ready_groups_count, 1)
+      self.assertEqual(unbounded.filtered_groups_count, 0)
+
+    asyncio.run(_run_test())
+
+  def test_multi_generation_partial_rollout_group_staleness_and_invalid_items(
+      self,
+  ):
+    """Tests G>1 group completion staleness, group-wide span, and skipping invalid items."""
+
+    async def _run_test():
+      manager = trajectory_queue_manager.TrajectoryQueueManager.create(
+          num_generations=2,
+          max_staleness=1,
+          max_version_span=2,
+          current_policy_version=lambda: 3,
+      )
+
+      # 1. Early-finishing rollout (v=1) paired with multi-turn sibling
+      # ([1, 2, 3]): group completed at v=3 (>= 2) with group span 3 - 1 = 2.
+      early_sibling = datatypes.TrajectoryItem(
+          prompt_id="p_mixed_valid",
+          group_index=0,
+          traj={"policy_versions": [1], "status": "SUCCEEDED"},
+      )
+      long_sibling = datatypes.TrajectoryItem(
+          prompt_id="p_mixed_valid",
+          group_index=1,
+          traj={"policy_versions": [1, 2, 3], "status": "SUCCEEDED"},
+      )
+      await manager.put(early_sibling)
+      self.assertEqual(manager.incomplete_buckets_count, 1)
+      await manager.put(long_sibling)
+      self.assertEqual(manager.incomplete_buckets_count, 0)
+      self.assertEqual(manager.ready_groups_count, 1)
+      self.assertEqual(
+          await manager.get_group(), [early_sibling, long_sibling]
+      )
+
+      # 2. Cross-sibling span 3 - 0 = 3 > max_version_span=2 -> rejected.
+      too_old_sibling = datatypes.TrajectoryItem(
+          prompt_id="p_cross_span_exceeded",
+          group_index=0,
+          traj={"policy_versions": [0], "status": "SUCCEEDED"},
+      )
+      recent_sibling = datatypes.TrajectoryItem(
+          prompt_id="p_cross_span_exceeded",
+          group_index=1,
+          traj={"policy_versions": [1, 2, 3], "status": "SUCCEEDED"},
+      )
+      await manager.put(too_old_sibling)
+      await manager.put(recent_sibling)
+      self.assertEqual(manager.ready_groups_count, 0)
+      self.assertEqual(manager.filtered_groups_count, 1)
+
+      # 3. Tombstoned/failed error item (is_valid=False, even without version
+      # or with old version) does not cause valid sibling group to be dropped.
+      failed_tombstone = datatypes.TrajectoryItem(
+          prompt_id="p_one_failed",
+          group_index=0,
+          traj={"status": "FAILED"},
+          metadata={},
+          is_valid=False,
+      )
+      valid_sibling = datatypes.TrajectoryItem(
+          prompt_id="p_one_failed",
+          group_index=1,
+          traj={"policy_versions": [2, 3], "status": "SUCCEEDED"},
+      )
+      await manager.put(failed_tombstone)
+      await manager.put(valid_sibling)
+      self.assertEqual(manager.ready_groups_count, 1)
+      self.assertEqual(
+          await manager.get_batch(num_groups=1),
+          [failed_tombstone, valid_sibling],
+      )
+
+      # 4. Group where all valid items completed at v=1 (< 2) is dropped.
+      stale_a = datatypes.TrajectoryItem(
+          prompt_id="p_all_stale",
+          group_index=0,
+          traj={"policy_versions": [1], "status": "SUCCEEDED"},
+      )
+      stale_b = datatypes.TrajectoryItem(
+          prompt_id="p_all_stale",
+          group_index=1,
+          traj={"policy_versions": [1], "status": "SUCCEEDED"},
+      )
+      await manager.put(stale_a)
+      await manager.put(stale_b)
+      self.assertEqual(manager.ready_groups_count, 0)
+      self.assertEqual(manager.filtered_groups_count, 2)
+
+      manager.commit(step=1, groups=[])
+      await manager.close()
+      collected = [g async for g in manager]
+      self.assertEmpty(collected)
+
+    asyncio.run(_run_test())
+
+  def test_staleness_filter_enforced_when_max_staleness_zero(self):
+    """Tests max_staleness=0 installs filter and enforces exact version."""
+
+    async def _run_test():
+      manager = trajectory_queue_manager.TrajectoryQueueManager.create(
+          num_generations=1,
+          max_staleness=0,
+          current_policy_version=lambda: 3,
+      )
+      await manager.put(_create_item("p_old", group_index=0, policy_version=2))
+      await manager.put(
+          _create_item("p_future", group_index=0, policy_version=4)
+      )
+      exact = _create_item("p_exact", group_index=0, policy_version=3)
+      await manager.put(exact)
+
+      self.assertEqual(manager.ready_groups_count, 1)
+      self.assertEqual(manager.filtered_groups_count, 2)
+      self.assertEqual(await manager.get_group(), [exact])
+
+    asyncio.run(_run_test())
+
+  def test_no_staleness_filter_without_current_policy_version(self):
+    """Tests create() without current_policy_version installs no filter."""
+
+    async def _run_test():
+      manager = trajectory_queue_manager.TrajectoryQueueManager.create(
+          num_generations=2, max_staleness=0
+      )
+      # This is how PROMPT_ARRIVAL mode builds `raw_q`: no version callback,
+      # so nothing is checked or dropped here, not even a missing version.
+      unversioned = datatypes.TrajectoryItem(
+          prompt_id="p_any", group_index=0, traj=_token_traj()
+      )
+      versioned = _create_item("p_any", group_index=1, policy_version=99)
+      await manager.put(unversioned)
+      await manager.put(versioned)
+
+      self.assertEqual(manager.ready_groups_count, 1)
+      self.assertEqual(manager.filtered_groups_count, 0)
+      self.assertEqual(await manager.get_group(), [unversioned, versioned])
+
+    asyncio.run(_run_test())
+
+  def test_staleness_filter_two_sided_scalar_policy_version(self):
+    """Tests scalar policy_version two-sided window and missing version."""
+
+    async def _run_test():
+      manager = trajectory_queue_manager.TrajectoryQueueManager.create(
+          num_generations=2,
+          max_staleness=2,
+          current_policy_version=lambda: 5,
+      )
+      await manager.put(_create_item("p_ok", group_index=0, policy_version=3))
+      await manager.put(_create_item("p_ok", group_index=1, policy_version=5))
+      self.assertEqual(manager.ready_groups_count, 1)
+
+      # Future version v > cur_v (6 > 5) is dropped.
+      await manager.put(
+          _create_item("p_future", group_index=0, policy_version=6)
+      )
+      await manager.put(
+          _create_item("p_future", group_index=1, policy_version=5)
+      )
+      self.assertEqual(manager.ready_groups_count, 1)
+      self.assertEqual(manager.filtered_groups_count, 1)
+
+      # Non-monotonic per-turn versions (e.g. [5, 4] straddling a checkpoint
+      # rollback) are dropped even though both 5 and 4 lie inside [3, 5].
+      await manager.put(
+          datatypes.TrajectoryItem(
+              prompt_id="p_regressed",
+              group_index=0,
+              traj={
+                  **_token_traj(),
+                  "policy_versions": [5, 4],
+              },
+          )
+      )
+      await manager.put(
+          _create_item("p_regressed", group_index=1, policy_version=5)
+      )
+      self.assertEqual(manager.ready_groups_count, 1)
+      self.assertEqual(manager.filtered_groups_count, 2)
+
+      # Missing policy_version on a valid item fails fast with ValueError.
+      empty_pv_0 = datatypes.TrajectoryItem(
+          prompt_id="p_empty_pv", group_index=0, traj=_token_traj()
+      )
+      empty_pv_1 = _create_item("p_empty_pv", group_index=1, policy_version=5)
+      await manager.put(empty_pv_0)
+      with self.assertRaisesRegex(ValueError, "is missing policy_version"):
+        await manager.put(empty_pv_1)
+
+      # Stale sibling arriving BEFORE a missing-policy_version sibling must also
+      # fail fast regardless of arrival order.
+      await manager.put(
+          _create_item("p_stale_then_empty", group_index=0, policy_version=1)
+      )
+      with self.assertRaisesRegex(ValueError, "is missing policy_version"):
+        await manager.put(
+            datatypes.TrajectoryItem(
+                prompt_id="p_stale_then_empty",
+                group_index=1,
+                traj=_token_traj(),
+            )
+        )
+
+    asyncio.run(_run_test())
+
+  def test_staleness_filter_judges_valid_items_only(self):
+    """Tests invalid items neither fail fast nor count toward the window.
+
+    A 0-turn FAILED tombstone has no sampled version, so it must not raise
+    and must not drag its valid sibling out of the window. A group with no
+    valid item has nothing to judge and passes through (it trains with zero
+    advantage) instead of being dropped as if it were version 0.
+    """
+
+    async def _run_test():
+      dropped_groups = []
+      manager = trajectory_queue_manager.TrajectoryQueueManager.create(
+          num_generations=2,
+          max_staleness=1,
+          current_policy_version=lambda: 5,
+          on_group_filtered=dropped_groups.append,
+      )
+      failed_tombstone = datatypes.TrajectoryItem(
+          prompt_id="p_partial_fail",
+          group_index=0,
+          traj={"status": datatypes.TrajectoryStatus.FAILED},
+      )
+      valid_sibling = _create_item(
+          "p_partial_fail", group_index=1, policy_version=5
+      )
+      await manager.put(failed_tombstone)
+      await manager.put(valid_sibling)
+      self.assertEqual(manager.ready_groups_count, 1)
+      self.assertEqual(
+          await manager.get_group(), [failed_tombstone, valid_sibling]
+      )
+
+      # Every item invalid: versions 0 (would be stale) and None are ignored.
+      all_failed_0 = datatypes.TrajectoryItem(
+          prompt_id="p_all_fail",
+          group_index=0,
+          traj={"status": datatypes.TrajectoryStatus.FAILED},
+          metadata={"policy_version": 0},
+      )
+      all_failed_1 = datatypes.TrajectoryItem(
+          prompt_id="p_all_fail",
+          group_index=1,
+          traj={"status": datatypes.TrajectoryStatus.TIMEOUT},
+      )
+      await manager.put(all_failed_0)
+      await manager.put(all_failed_1)
+      self.assertEqual(manager.ready_groups_count, 1)
+      self.assertEqual(await manager.get_group(), [all_failed_0, all_failed_1])
+      self.assertEmpty(dropped_groups)
 
     asyncio.run(_run_test())
 
@@ -314,6 +709,30 @@ class FifoGroupQueueTest(absltest.TestCase):
 
       with self.assertRaises(RuntimeError):
         await q.put("g2")
+
+    asyncio.run(_run_test())
+
+  def test_priority_fn_breaks_ties_among_simultaneously_ready_groups(self):
+    async def _run_test():
+      calls = 0
+
+      def _priority(g: tuple[str, int]) -> int:
+        nonlocal calls
+        calls += 1
+        return g[1]
+
+      q: trajectory_queue_manager.FifoGroupQueue[tuple[str, int]] = (
+          trajectory_queue_manager.FifoGroupQueue.create(priority_fn=_priority)
+      )
+      await q.put(("newer", 2))
+      await q.put(("older_a", 1))
+      await q.put(("older_b", 1))
+      self.assertEqual(calls, 3)
+
+      self.assertEqual(await q.get(), ("older_a", 1))
+      self.assertEqual(await q.get(), ("older_b", 1))
+      self.assertEqual(await q.get(), ("newer", 2))
+      self.assertEqual(calls, 3)
 
     asyncio.run(_run_test())
 
@@ -579,6 +998,101 @@ class BatchOrderedGroupQueueTest(absltest.TestCase):
       self.assertEqual(await manager.get_ordered_group(), (0, fresh))
 
     asyncio.run(_run_test())
+
+
+class GroupQueueDropCallbackTest(parameterized.TestCase):
+  """Covers `on_group_dropped` across FIFO and batch-ordered group queues."""
+
+  @parameterized.named_parameters(
+      dict(testcase_name="fifo_clear", mode="fifo_clear"),
+      dict(testcase_name="fifo_put_after_abort", mode="fifo_put_after_abort"),
+      dict(
+          testcase_name="fifo_put_abort_under_lock",
+          mode="fifo_put_abort_under_lock",
+      ),
+      dict(testcase_name="ordered_clear", mode="ordered_clear"),
+      dict(
+          testcase_name="ordered_put_after_abort",
+          mode="ordered_put_after_abort",
+      ),
+      dict(
+          testcase_name="ordered_put_abort_under_lock",
+          mode="ordered_put_abort_under_lock",
+      ),
+      dict(testcase_name="ordered_late_arrival", mode="ordered_late_arrival"),
+      dict(testcase_name="ordered_skip_pending", mode="ordered_skip_pending"),
+  )
+  def test_on_group_dropped_invoked_once_per_discarded_group(self, mode: str):
+    async def _run():
+      dropped: list[tuple[str, int]] = []
+      if mode.startswith("fifo_"):
+        q = trajectory_queue_manager.FifoGroupQueue.create(
+            on_group_dropped=dropped.append
+        )
+        kept = ("kept", 0)
+        await q.put(kept)
+        self.assertEqual(await q.get(), kept)
+        self.assertEmpty(dropped)
+
+        if mode == "fifo_clear":
+          await q.put(("g0", 0))
+          await q.put(("g1", 0))
+          await q.clear()
+          self.assertEqual(dropped, [("g0", 0), ("g1", 0)])
+        elif mode == "fifo_put_after_abort":
+          await q.abort(RuntimeError("boom"))
+          await q.put(("g_abort", 0))
+          self.assertEqual(dropped, [("g_abort", 0)])
+        else:
+          async with q._lock:
+            put_task = asyncio.create_task(q.put(("g_locked_abort", 0)))
+            await asyncio.sleep(0)
+            q._clearing = True
+          await put_task
+          self.assertEqual(dropped, [("g_locked_abort", 0)])
+        return
+
+      ordered = trajectory_queue_manager.BatchOrderedGroupQueue.create(
+          full_batch_size=1,
+          batch_idx_fn=lambda g: g[1],
+          on_group_dropped=dropped.append,
+      )
+      kept = ("kept", 0)
+      await ordered.put(kept)
+      self.assertEqual(await ordered.get(), kept)
+      self.assertEmpty(dropped)
+
+      if mode == "ordered_clear":
+        ordered.commit_batch(0)
+        await ordered.put(("b1", 1))
+        await ordered.put(("b2", 2))
+        await ordered.clear()
+        self.assertEqual(dropped, [("b1", 1), ("b2", 2)])
+      elif mode == "ordered_put_after_abort":
+        await ordered.abort(RuntimeError("boom"))
+        await ordered.put(("b_abort", 1))
+        self.assertEqual(dropped, [("b_abort", 1)])
+      elif mode == "ordered_put_abort_under_lock":
+        async with ordered._lock:
+          put_task = asyncio.create_task(ordered.put(("b_locked_abort", 1)))
+          await asyncio.sleep(0)
+          ordered._clearing = True
+        await put_task
+        self.assertEqual(dropped, [("b_locked_abort", 1)])
+      elif mode == "ordered_late_arrival":
+        ordered.commit_batch(0)
+        await ordered.put(("b_late", 0))
+        self.assertEqual(dropped, [("b_late", 0)])
+      else:
+        ordered.commit_batch(0)
+        await ordered.put(("b1_skip", 1))
+        await ordered.put(("b2_skip", 2))
+        await ordered.put(("b3_keep", 3))
+        ordered.skip(1, 3)
+        self.assertEqual(dropped, [("b1_skip", 1), ("b2_skip", 2)])
+        self.assertEqual(await ordered.get(), ("b3_keep", 3))
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":
