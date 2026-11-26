@@ -1,8 +1,10 @@
 """Metric logger with a unified, protocol-based backend system."""
 
 import collections
+from collections.abc import Mapping
 import dataclasses
 import enum
+import importlib.metadata
 from typing import Any, Callable
 
 from absl import logging
@@ -16,8 +18,11 @@ TensorboardBackend = metrax_logging.TensorboardBackend
 WandbBackend = metrax_logging.WandbBackend
 CluBackend = getattr(metrax_logging, "CluBackend", None)
 
+METRICS_BACKEND_ENTRY_POINT_GROUP = "tunix.metrics_backends"
+
 # User backends MUST be factories (callables) to keep Options pure and copyable.
 BackendFactory = Callable[[], LoggingBackend]
+BackendPluginFactory = Callable[["MetricsLoggerOptions"], LoggingBackend | None]
 
 
 @dataclasses.dataclass
@@ -32,6 +37,10 @@ class MetricsLoggerOptions:
   # (e.g., 'wandb', 'clu', 'tensorboard' or 'custom_backend' which uses custom
   # LoggingBackend factories) and the value is a dictionary of
   # keyword arguments to be passed to the backend's constructor.
+  # External packages can also register plugins under the
+  # 'tunix.metrics_backends' entry-point group; configure a plugin via
+  # backend_kwargs['<plugin_name>'] or disable it with
+  # backend_kwargs['<plugin_name>'] = None.
   # For example:
   # backend_kwargs={
   #   'wandb': {
@@ -45,7 +54,7 @@ class MetricsLoggerOptions:
   #      'flush_every_n_steps': 100,
   #   }
   # }
-  backend_kwargs: dict[str, dict[str, Any] | list[BackendFactory]] = (
+  backend_kwargs: dict[str, dict[str, Any] | list[BackendFactory] | None] = (
       dataclasses.field(default_factory=dict)
   )
 
@@ -93,7 +102,44 @@ class MetricsLoggerOptions:
         )
       except (ImportError, Exception) as e:
         logging.info("WandbBackend skipped: %s", e)
+
+    active_backends.extend(_load_entry_point_backends(self, kwargs_dict))
     return active_backends
+
+
+def _load_entry_point_backends(
+    options: MetricsLoggerOptions,
+    kwargs_dict: Mapping[str, Any],
+) -> list[LoggingBackend]:
+  """Discovers and instantiates external metrics backend plugins."""
+  backends: list[LoggingBackend] = []
+  seen_names: set[str] = set()
+  entry_points = sorted(
+      importlib.metadata.entry_points(group=METRICS_BACKEND_ENTRY_POINT_GROUP),
+      key=lambda ep: ep.name,
+  )
+  for ep in entry_points:
+    if ep.name in seen_names:
+      logging.warning("Duplicate metrics backend plugin %r ignored.", ep.name)
+      continue
+    seen_names.add(ep.name)
+    if ep.name in kwargs_dict:
+      plugin_kwargs = kwargs_dict[ep.name]
+      if plugin_kwargs is None:
+        continue
+      if not isinstance(plugin_kwargs, Mapping):
+        raise TypeError(
+            f"backend_kwargs[{ep.name!r}] must be a mapping or None, got"
+            f" {type(plugin_kwargs).__name__}."
+        )
+    try:
+      factory: BackendPluginFactory = ep.load()
+      backend = factory(options)
+      if backend is not None:
+        backends.append(backend)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logging.warning("Metrics backend plugin %r skipped: %s", ep.name, e)
+  return backends
 
 
 class Mode(str, enum.Enum):

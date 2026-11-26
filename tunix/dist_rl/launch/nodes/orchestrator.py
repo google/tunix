@@ -166,6 +166,34 @@ def build_batch_config(
   )
 
 
+# Built-in `MetricsLoggerOptions.backend_kwargs` keys that do not receive
+# automatic plugin `config` injection (W&B is handled explicitly below).
+_BUILT_IN_NON_CONFIG_BACKENDS = frozenset({
+    "clu",
+    "custom_backend",
+    "tensorboard",
+    "wandb",
+})
+
+
+def _merge_backend_config(
+    backend_kwargs: Mapping[str, object],
+    backend_name: str,
+    config: dict[str, object],
+) -> dict[str, object]:
+  """Merges resolved `config` into `backend_kwargs[backend_name]`."""
+  if backend_name not in backend_kwargs:
+    return {"config": config}
+  existing = backend_kwargs[backend_name]
+  if not isinstance(existing, Mapping):
+    raise TypeError(
+        "rl_training_config.metrics_logging_options.backend_kwargs"
+        f"[{backend_name!r}] must be a mapping, got"
+        f" {type(existing).__name__}."
+    )
+  return {"config": config, **existing}
+
+
 def build_metrics_logging_options(
     hp: resolve_config.DistHyperParameters,
 ) -> metrics_logger_lib.MetricsLoggerOptions | None:
@@ -179,8 +207,9 @@ def build_metrics_logging_options(
     hp: Resolved distributed RL configuration.
 
   Returns:
-    The metrics logger options, with the resolved config logged to W&B; None
-    when `rl_training_config.metrics_logging_options` is null, so the program
+    The metrics logger options, with the resolved config injected into W&B and
+    any configured plugin backends; None when
+    `rl_training_config.metrics_logging_options` is null, so the program
     creates no metrics backends and logs no trajectories unless
     `dist_training_config.trajectory_log_dir` is set.
   """
@@ -194,10 +223,17 @@ def build_metrics_logging_options(
         "rl_training_config.metrics_logging_options must be a mapping or"
         f" null, got {options!r}."
     )
-  return dataclasses.replace(
-      options,
-      backend_kwargs={"wandb": {"config": resolve_config.plain_config(hp)}},
+  plain_cfg = resolve_config.plain_config(hp)
+  backend_kwargs = dict(options.backend_kwargs)
+  backend_kwargs["wandb"] = _merge_backend_config(
+      backend_kwargs, "wandb", plain_cfg
   )
+  for name, value in options.backend_kwargs.items():
+    if name not in _BUILT_IN_NON_CONFIG_BACKENDS and value is not None:
+      backend_kwargs[name] = _merge_backend_config(
+          backend_kwargs, name, plain_cfg
+      )
+  return dataclasses.replace(options, backend_kwargs=backend_kwargs)
 
 
 def _trajectory_log_dir(hp: resolve_config.DistHyperParameters) -> str | None:

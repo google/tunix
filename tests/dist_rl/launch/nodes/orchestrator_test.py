@@ -430,11 +430,68 @@ class BuildersTest(absltest.TestCase):
     assert isinstance(options, metrics_logger_lib.MetricsLoggerOptions)
     self.assertEqual(options.log_dir, "/tmp/metrics")
     self.assertEqual(options.project_name, "proj")
+    self.assertEqual(set(options.backend_kwargs.keys()), {"wandb"})
     wandb_kwargs = options.backend_kwargs["wandb"]
     assert isinstance(wandb_kwargs, dict)  # Narrows the type for pytype.
+    self.assertEqual(set(wandb_kwargs.keys()), {"config"})
     logged = wandb_kwargs["config"]
     self.assertEqual(logged["batch_size"], 8)
     self.assertEqual(logged["rl_training_config"]["mini_batch_size"], 8)
+
+  def test_metrics_logging_options_preserves_and_merges_backend_kwargs(self):
+    hp = _config(
+        "rl_training_config.metrics_logging_options.log_dir=/tmp/metrics",
+        "batch_size=8",
+        "rl_training_config.metrics_logging_options.backend_kwargs.wandb.entity=wandb-team",
+        "rl_training_config.metrics_logging_options.backend_kwargs.my_plugin.entity=team",
+        "rl_training_config.metrics_logging_options.backend_kwargs.custom_config_plugin.config.custom=true",
+        "rl_training_config.metrics_logging_options.backend_kwargs.tensorboard.flush_interval_s=10.0",
+    )
+    options = orchestrator.build_metrics_logging_options(hp)
+    assert isinstance(options, metrics_logger_lib.MetricsLoggerOptions)
+
+    wandb_kwargs = options.backend_kwargs["wandb"]
+    assert isinstance(wandb_kwargs, dict)
+    self.assertEqual(wandb_kwargs["entity"], "wandb-team")
+    self.assertEqual(wandb_kwargs["config"]["batch_size"], 8)
+
+    plugin_kwargs = options.backend_kwargs["my_plugin"]
+    assert isinstance(plugin_kwargs, dict)
+    self.assertEqual(plugin_kwargs["entity"], "team")
+    self.assertEqual(plugin_kwargs["config"]["batch_size"], 8)
+
+    custom_cfg_kwargs = options.backend_kwargs["custom_config_plugin"]
+    assert isinstance(custom_cfg_kwargs, dict)
+    self.assertEqual(custom_cfg_kwargs["config"], {"custom": True})
+
+    self.assertEqual(
+        options.backend_kwargs["tensorboard"], {"flush_interval_s": 10.0}
+    )
+
+  def test_metrics_logging_options_preserves_none_disable_signal(self):
+    hp = _config(
+        "rl_training_config.metrics_logging_options.log_dir=/tmp/metrics",
+        "rl_training_config.metrics_logging_options.backend_kwargs.my_plugin=null",
+    )
+    options = orchestrator.build_metrics_logging_options(hp)
+    assert isinstance(options, metrics_logger_lib.MetricsLoggerOptions)
+    self.assertIsNone(options.backend_kwargs["my_plugin"])
+    wandb_kwargs = options.backend_kwargs["wandb"]
+    assert isinstance(wandb_kwargs, dict)
+    self.assertIn("config", wandb_kwargs)
+
+  def test_metrics_logging_options_rejects_non_mapping_backend_kwargs(self):
+    for backend in ("wandb", "my_plugin"):
+      with self.subTest(backend=backend):
+        hp = _config(
+            "rl_training_config.metrics_logging_options.log_dir=/tmp/metrics",
+            f"rl_training_config.metrics_logging_options.backend_kwargs.{backend}=not-a-mapping",
+        )
+        with self.assertRaisesRegex(
+            TypeError,
+            rf"backend_kwargs\['{backend}'\] must be a mapping, got str\.",
+        ):
+          orchestrator.build_metrics_logging_options(hp)
 
   def test_base_weight_sync_timeouts_match_coordinator_defaults(self):
     # `episode_timeout=600` derives the default `PhaseTimeouts`, and the

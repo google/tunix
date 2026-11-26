@@ -121,6 +121,7 @@ rl_training_config:
     # is set or `dist_training_config.trajectory_logging` is false.
     log_dir: ""
     flush_every_n_steps: 1
+    backend_kwargs: {}
   profiler_options:
     log_dir: "/tmp/profiling"
     skip_first_n_steps: 1

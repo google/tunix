@@ -1,6 +1,7 @@
 """Metrics logger unittest."""
 
 import copy
+import importlib.metadata
 import os
 import tempfile
 from unittest import mock
@@ -13,6 +14,13 @@ from tunix.sft import metrics_logger
 from tunix.utils import env_utils
 
 
+def _fake_ep(name: str, factory=None, *, err=None) -> mock.Mock:
+  ep = mock.Mock(spec=importlib.metadata.EntryPoint)
+  ep.name = name
+  ep.load.configure_mock(side_effect=err, return_value=factory)
+  return ep
+
+
 class MetricLoggerTest(absltest.TestCase):
 
   def setUp(self):
@@ -20,6 +28,9 @@ class MetricLoggerTest(absltest.TestCase):
     self._temp_dir_obj = tempfile.TemporaryDirectory()
     self.log_dir = self._temp_dir_obj.name
     self.mock_backends = []
+    self.mock_entry_points = self.enter_context(
+        mock.patch.object(importlib.metadata, "entry_points", return_value=())
+    )
 
     if env_utils.is_internal_env():
       self.mock_backends.append(
@@ -228,6 +239,88 @@ class MetricLoggerTest(absltest.TestCase):
           id="12345",
           settings=mock_wandb.Settings.return_value,
       )
+
+  def test_entry_point_plugins_lifecycle_and_opt_out(self):
+    b_a, b_z = [mock.Mock(spec=metrax_logging.LoggingBackend) for _ in range(2)]
+    ep_off = _fake_ep("off", mock.Mock())
+    f_none = mock.Mock(return_value=None)
+    self.mock_entry_points.return_value = [
+        _fake_ep("z", mock.Mock(return_value=b_z)),
+        ep_off,
+        _fake_ep("none", f_none),
+        _fake_ep("a", mock.Mock(return_value=b_a)),
+    ]
+    opts = metrics_logger.MetricsLoggerOptions(
+        log_dir=self.log_dir, backend_kwargs={"a": {"k": 1}, "off": None}
+    )
+    logger = metrics_logger.MetricsLogger(metrics_logger_options=opts)
+    try:
+      self.mock_entry_points.assert_called_once_with(
+          group=metrics_logger.METRICS_BACKEND_ENTRY_POINT_GROUP
+      )
+      self.assertEqual(logger._backends[len(self.mock_backends) :], [b_a, b_z])
+      f_none.assert_called_once_with(opts)
+      ep_off.load.assert_not_called()
+      logger.log("m", "loss", 0.25, metrics_logger.Mode.TRAIN, 5)
+      b_a.log_scalar.assert_called_once_with("m/train/loss", 0.25, step=5)
+    finally:
+      logger.close()
+    b_a.close.assert_called_once_with()
+    b_z.close.assert_called_once_with()
+
+  def test_entry_point_plugin_error_and_type_validation(self):
+    good = mock.Mock(spec=metrax_logging.LoggingBackend)
+    self.mock_entry_points.return_value = [
+        _fake_ep("bad_load", err=ImportError("no dep")),
+        _fake_ep("bad_init", mock.Mock(side_effect=RuntimeError("boom"))),
+        _fake_ep("good", mock.Mock(return_value=good)),
+    ]
+    opts = metrics_logger.MetricsLoggerOptions(self.log_dir)
+    with self.assertLogs(level="WARNING") as logs:
+      backends = opts.create_backends()
+    self.assertEqual(backends[len(self.mock_backends) :], [good])
+    self.assertIn("bad_load", "\n".join(logs.output))
+    self.assertIn("bad_init", "\n".join(logs.output))
+
+    bad_ep = _fake_ep("p", mock.Mock())
+    self.mock_entry_points.return_value = [bad_ep]
+    bad_opts = metrics_logger.MetricsLoggerOptions(
+        self.log_dir, backend_kwargs={"p": "invalid"}  # type: ignore
+    )
+    with self.assertRaisesRegex(TypeError, r"backend_kwargs\['p'\]"):
+      bad_opts.create_backends()
+    bad_ep.load.assert_not_called()
+
+  def test_entry_point_duplicate_plugin_name_ignored(self):
+    first = mock.Mock(spec=metrax_logging.LoggingBackend)
+    dup_ep = _fake_ep("dup", mock.Mock())
+    self.mock_entry_points.return_value = [
+        _fake_ep("dup", mock.Mock(return_value=first)),
+        dup_ep,
+    ]
+    opts = metrics_logger.MetricsLoggerOptions(self.log_dir)
+    with self.assertLogs(level="WARNING") as logs:
+      backends = opts.create_backends()
+    self.assertEqual(backends[len(self.mock_backends) :], [first])
+    dup_ep.load.assert_not_called()
+    self.assertIn(
+        "Duplicate metrics backend plugin 'dup'", "\n".join(logs.output)
+    )
+
+  def test_entry_point_plugins_skipped_on_custom_or_secondary(self):
+    ep = _fake_ep("p", mock.Mock())
+    self.mock_entry_points.return_value = [ep]
+    custom = mock.Mock(spec=metrax_logging.LoggingBackend)
+    opts = metrics_logger.MetricsLoggerOptions(
+        self.log_dir, backend_kwargs={"custom_backend": [lambda: custom]}
+    )
+    self.assertEqual(opts.create_backends(), [custom])
+    with mock.patch.object(jax, "process_index", return_value=1):
+      self.assertEmpty(
+          metrics_logger.MetricsLoggerOptions(self.log_dir).create_backends()
+      )
+    self.mock_entry_points.assert_not_called()
+    ep.load.assert_not_called()
 
 
 if __name__ == "__main__":

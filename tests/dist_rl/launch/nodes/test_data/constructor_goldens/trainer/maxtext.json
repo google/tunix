@@ -55,6 +55,7 @@
     {
       "tunix.sft.metrics_logger.MetricsLoggerOptions": {
         "kwargs": {
+          "backend_kwargs": {},
           "flush_every_n_steps": 1,
           "log_dir": "/artifacts/metrics",
           "project_name": "tunix-dist-rl",
