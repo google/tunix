@@ -120,7 +120,9 @@ class LLMEngine:
     )
 
     self._model_runner_config = utils.to_model_runner_config(
-        rollout_config, mesh
+        rollout_config,
+        mesh,
+        transformer.num_embed,  # pyrefly: ignore[missing-attribute]
     )
     self._model_runner = model_runner_lib.ModelRunner(
         transformer, self._model_runner_config

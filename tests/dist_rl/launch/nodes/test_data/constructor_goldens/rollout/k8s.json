@@ -103,6 +103,7 @@
           "rollout_vanilla_v2_hbm_utilization": 0.2,
           "rollout_vanilla_v2_host_size_gib": 0.0,
           "rollout_vanilla_v2_kv_cache_page_size": 16,
+          "rollout_vanilla_v2_max_logprobs": 0,
           "rollout_vanilla_v2_max_num_batched_tokens": 2048,
           "rollout_vanilla_v2_max_num_seqs": 32,
           "rollout_vanilla_v2_num_scheduler_steps": 1,
