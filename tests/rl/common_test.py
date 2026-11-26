@@ -1577,6 +1577,157 @@ class SamplerTrainerAgreementTest(parameterized.TestCase):
           err_msg=f"Mismatch for {k}",
       )
 
+  def test_pearson_metric_stacked_microbatches_compute_and_reduce(self):
+    mb_easy_r = np.full((4, 8), -0.001, dtype=np.float32)
+    mb_easy_t = mb_easy_r + np.array(
+        [[1e-4, -1e-4, 1e-4, -1e-4, 1e-4, -1e-4, 1e-4, -1e-4]] * 4,
+        dtype=np.float32,
+    )
+    mb_hard_r = np.full((4, 8), -0.700, dtype=np.float32)
+    mb_hard_t = mb_hard_r + np.array(
+        [[1e-4, -1e-4, 1e-4, -1e-4, 1e-4, -1e-4, 1e-4, -1e-4]] * 4,
+        dtype=np.float32,
+    )
+    mask = np.ones((4, 8), dtype=np.int32)
+    pm_easy = common.compute_sampler_trainer_agreement_jax(
+        jnp.asarray(mb_easy_r), jnp.asarray(mb_easy_t), jnp.asarray(mask)
+    )[0]["sampler_trainer/probs_pearson_corr"][0]
+    pm_hard = common.compute_sampler_trainer_agreement_jax(
+        jnp.asarray(mb_hard_r), jnp.asarray(mb_hard_t), jnp.asarray(mask)
+    )[0]["sampler_trainer/probs_pearson_corr"][0]
+    expected = float(
+        common.compute_sampler_trainer_agreement_jax(
+            jnp.asarray(np.concatenate([mb_easy_r, mb_hard_r], axis=0)),
+            jnp.asarray(np.concatenate([mb_easy_t, mb_hard_t], axis=0)),
+            jnp.asarray(np.concatenate([mask, mask], axis=0)),
+        )[0]["sampler_trainer/probs_pearson_corr"][0].compute()
+    )
+
+    # Single-microbatch (1, 3) stacked representation matches (3,).
+    stacked_single = common.PearsonMetric(
+        unreduced_sum=jnp.stack([pm_easy.unreduced_sum], axis=0),
+        denominator=jnp.stack([pm_easy.denominator], axis=0),
+        eps=pm_easy.eps,
+        min_denom=pm_easy.min_denom,
+    )
+    np.testing.assert_allclose(
+        float(stacked_single.compute()),
+        float(pm_easy.compute()),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        common.PearsonMetric.reduce([stacked_single]),
+        float(pm_easy.compute()),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+    # Multi-microbatch (M, 3) stacked representation (MaxText MetricsRecorder).
+    stacked_multi = common.PearsonMetric(
+        unreduced_sum=jnp.stack(
+            [pm_easy.unreduced_sum, pm_hard.unreduced_sum], axis=0
+        ),
+        denominator=jnp.stack(
+            [pm_easy.denominator, pm_hard.denominator], axis=0
+        ),
+        eps=pm_easy.eps,
+        min_denom=pm_easy.min_denom,
+    )
+    np.testing.assert_allclose(
+        float(stacked_multi.compute()), expected, rtol=1e-5, atol=1e-5
+    )
+    np.testing.assert_allclose(
+        common.PearsonMetric.reduce([stacked_multi]),
+        expected,
+        rtol=1e-7,
+        atol=1e-7,
+    )
+    # Multiple stacked chunks combine identically to a single concatenated pass.
+    stacked_hard = common.PearsonMetric(
+        unreduced_sum=jnp.stack([pm_hard.unreduced_sum], axis=0),
+        denominator=jnp.stack([pm_hard.denominator], axis=0),
+        eps=pm_hard.eps,
+        min_denom=pm_hard.min_denom,
+    )
+    np.testing.assert_allclose(
+        common.PearsonMetric.reduce([stacked_single, stacked_hard]),
+        expected,
+        rtol=1e-7,
+        atol=1e-7,
+    )
+
+    # Zero-count single- and multi-microbatch stacks return 0.0 cleanly.
+    zero_single = common.PearsonMetric(
+        unreduced_sum=jnp.array([1.0, 1.0, 1.0], dtype=jnp.float32),
+        denominator=jnp.zeros((3,), dtype=jnp.float32),
+        min_denom=1e-12,
+    )
+    self.assertEqual(float(zero_single.compute()), 0.0)
+    self.assertEqual(common.PearsonMetric.reduce([zero_single]), 0.0)
+
+    zero_stacked = common.PearsonMetric(
+        unreduced_sum=jnp.zeros((2, 3), dtype=jnp.float32),
+        denominator=jnp.zeros((2, 3), dtype=jnp.float32),
+        min_denom=1e-12,
+    )
+    self.assertEqual(float(zero_stacked.compute()), 0.0)
+    self.assertEqual(common.PearsonMetric.reduce([zero_stacked]), 0.0)
+
+    # Zero-variance float32 inputs must stay 0.0 (shifted coordinates avoid
+    # 1-ULP cancellation exceeding min_denom=1e-12).
+    const_single = common.PearsonMetric(
+        unreduced_sum=jnp.zeros((3,), dtype=jnp.float32),
+        denominator=jnp.array([366.0, 0.7, 0.7], dtype=jnp.float32),
+        min_denom=1e-12,
+    )
+    self.assertEqual(float(const_single.compute()), 0.0)
+    const_stacked = common.PearsonMetric(
+        unreduced_sum=jnp.zeros((8, 3), dtype=jnp.float32),
+        denominator=jnp.concatenate(
+            [
+                jnp.zeros((1, 3), dtype=jnp.float32),
+                jnp.tile(
+                    jnp.array([[128.0, 0.7, 0.7]], dtype=jnp.float32), (7, 1)
+                ),
+            ],
+            axis=0,
+        ),
+        min_denom=1e-12,
+    )
+    self.assertEqual(float(const_stacked.compute()), 0.0)
+
+    # Empty (0, 3) and flattened (3*M,) arrays fail fast instead of silently
+    # corrupting Pearson.
+    bad_empty = common.PearsonMetric(
+        unreduced_sum=jnp.zeros((0, 3), dtype=jnp.float32),
+        denominator=jnp.zeros((0, 3), dtype=jnp.float32),
+        min_denom=1e-12,
+    )
+    with self.assertRaisesRegex(ValueError, r"shape \(3,\) or \(M, 3\)"):
+      bad_empty.compute()
+    with self.assertRaisesRegex(ValueError, r"shape \(3,\) or \(M, 3\)"):
+      common.PearsonMetric.reduce([bad_empty])
+
+    bad_flattened = common.PearsonMetric(
+        unreduced_sum=jnp.zeros((6,), dtype=jnp.float32),
+        denominator=jnp.zeros((6,), dtype=jnp.float32),
+        min_denom=1e-12,
+    )
+    with self.assertRaisesRegex(ValueError, r"shape \(3,\) or \(M, 3\)"):
+      bad_flattened.compute()
+    with self.assertRaisesRegex(ValueError, r"shape \(3,\) or \(M, 3\)"):
+      common.PearsonMetric.reduce([bad_flattened])
+    with self.assertRaisesRegex(ValueError, "consistent bounds"):
+      common.PearsonMetric.reduce([
+          pm_easy,
+          common.PearsonMetric(
+              unreduced_sum=pm_hard.unreduced_sum,
+              denominator=pm_hard.denominator,
+              min_denom=1e-6,
+          ),
+      ])
+
 
 class ProcessIdsTokenMaskTest(absltest.TestCase):
 

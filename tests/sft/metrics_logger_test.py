@@ -3,17 +3,21 @@
 import copy
 import os
 import tempfile
+import types
 from unittest import mock
 
 from absl.testing import absltest
+from absl.testing import parameterized
 import jax
+import jax.numpy as jnp
 import metrax.logging as metrax_logging
 import numpy as np
 from tunix.sft import metrics_logger
+from tunix.sft import utils as sft_utils
 from tunix.utils import env_utils
 
 
-class MetricLoggerTest(absltest.TestCase):
+class MetricLoggerTest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
@@ -228,6 +232,151 @@ class MetricLoggerTest(absltest.TestCase):
           id="12345",
           settings=mock_wandb.Settings.return_value,
       )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="suffix_underscore_max",
+          name="sampler_trainer/logp_diff_max",
+          expected=np.max,
+      ),
+      dict(
+          testcase_name="suffix_slash_max",
+          name="is_ratio/max",
+          expected=np.max,
+      ),
+      dict(
+          testcase_name="suffix_underscore_min",
+          name="sampler_is/weight_min",
+          expected=np.min,
+      ),
+      dict(
+          testcase_name="suffix_slash_min",
+          name="is_ratio/min",
+          expected=np.min,
+      ),
+      dict(
+          testcase_name="suffix_underscore_count",
+          name="sampler_trainer/seq_error_masked_count",
+          expected=np.sum,
+      ),
+      dict(
+          testcase_name="suffix_slash_count",
+          name="rollout/count",
+          expected=np.sum,
+      ),
+      dict(
+          testcase_name="default_mean",
+          name="gradient_norm",
+          expected=np.mean,
+      ),
+  )
+  def test_default_scalar_reducer(self, name, expected):
+    self.assertIs(metrics_logger.default_scalar_reducer(name), expected)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="max_reducer",
+          values=np.array([0.8, 28.4, 1.1, 0.9]),
+          aggregation_fn=np.max,
+          expected=28.4,
+      ),
+      dict(
+          testcase_name="custom_percentile",
+          values=np.array([1.0, 2.0, 3.0, 4.0, 5.0]),
+          aggregation_fn=lambda arr: float(np.percentile(arr, 75)),
+          expected=4.0,
+      ),
+      dict(
+          testcase_name="default_none_uses_mean",
+          values=np.array([2.0, 4.0, 6.0]),
+          aggregation_fn=None,
+          expected=4.0,
+      ),
+      dict(
+          testcase_name="scalar_with_custom_fn",
+          values=0.5,
+          aggregation_fn=float,
+          expected=0.5,
+      ),
+  )
+  def test_extract_scalar_applies_aggregation_fn(
+      self, values, aggregation_fn, expected
+  ):
+    result = metrics_logger.extract_scalar(
+        values, aggregation_fn=aggregation_fn
+    )
+    self.assertIsNotNone(result)
+    self.assertAlmostEqual(result, expected, places=9)
+
+  def test_extract_scalar_empty_array_returns_none(self):
+    self.assertIsNone(metrics_logger.extract_scalar(np.array([])))
+    self.assertIsNone(
+        metrics_logger.extract_scalar(np.array([]), aggregation_fn=np.max)
+    )
+
+  def test_extract_scalar_weighted_metric_reduces_globally_not_by_microbatch(
+      self,
+  ):
+    # Microbatch 0 has 1 token (mean 1.0); microbatch 1 has 99 tokens
+    # (mean 9/99). True global weighted mean is 10/100 = 0.1, NOT 0.545.
+    stacked = sft_utils.WeightedMetric(
+        unreduced_sum=jnp.array([1.0, 9.0]),
+        denominator=jnp.array([1.0, 99.0]),
+        min_denom=1.0,
+    )
+    stacked_val = metrics_logger.extract_scalar(stacked)
+    self.assertIsNotNone(stacked_val)
+    self.assertAlmostEqual(stacked_val, 0.1)
+
+    with_eps = sft_utils.WeightedMetric(
+        unreduced_sum=jnp.array([2.0, 6.0]),
+        denominator=jnp.array([1.0, 2.0]),
+        eps=1.0,
+    )
+    eps_val = metrics_logger.extract_scalar(with_eps)
+    self.assertIsNotNone(eps_val)
+    self.assertAlmostEqual(eps_val, 2.0)
+
+    zero_denom = sft_utils.WeightedMetric(
+        unreduced_sum=jnp.array([0.0, 0.0]),
+        denominator=jnp.array([0.0, 0.0]),
+    )
+    self.assertEqual(metrics_logger.extract_scalar(zero_denom), 0.0)
+
+    clamped_min_denom = sft_utils.WeightedMetric(
+        unreduced_sum=jnp.array([2.0, 2.0]),
+        denominator=jnp.array([0.5, 0.5]),
+        min_denom=2.0,
+    )
+    clamped_val = metrics_logger.extract_scalar(clamped_min_denom)
+    self.assertIsNotNone(clamped_val)
+    self.assertAlmostEqual(clamped_val, 2.0)
+
+    bad_eps = types.SimpleNamespace(
+        unreduced_sum=jnp.array([1.0, 2.0]),
+        denominator=jnp.array([1.0, 2.0]),
+        eps=np.array([1.0, 2.0]),
+        min_denom=None,
+    )
+    self.assertIsNone(metrics_logger.extract_scalar(bad_eps))
+
+  def test_extract_scalar_invokes_custom_weighted_metric_reduce(self):
+    class _CustomReducibleMetric(sft_utils.WeightedMetric):
+
+      @classmethod
+      def reduce(cls, values):
+        vals = list(values)
+        return float(
+            np.max(vals[0].unreduced_sum) - np.min(vals[0].denominator)
+        )
+
+    metric = _CustomReducibleMetric(
+        unreduced_sum=jnp.array([1.0, 5.0]),
+        denominator=jnp.array([2.0, 4.0]),
+    )
+    reduced = metrics_logger.extract_scalar(metric)
+    self.assertIsNotNone(reduced)
+    self.assertAlmostEqual(reduced, 3.0)
 
 
 if __name__ == "__main__":

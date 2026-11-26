@@ -743,12 +743,7 @@ class PeftTrainer:
           perplexity,
       )
     for k, v in (additional_metrics or {}).items():
-      if k.startswith((
-          "sampler_trainer/",
-          "sampler_is/",
-          "sampler_rs/",
-          "score_centering/",
-      )):
+      if k.startswith(sft_metrics_logger.TOP_LEVEL_METRIC_PREFIXES):
         prefix, metric_name = k.split("/", maxsplit=1)
         self.metrics_logger.log(prefix, metric_name, v, self._mode, step)  # pyrefly: ignore[missing-attribute]
       else:

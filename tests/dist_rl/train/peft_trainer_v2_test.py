@@ -1935,6 +1935,39 @@ class V1ParityTest(parameterized.TestCase):
     self.assertEqual(prepared[0].metadata['keep_key'], 42)
     self.assertIn('routed_experts_encode_fn', dummy.metadata)
 
+  def test_buffer_aux_metrics_dispatches_weighted_before_scalar_suffixes(self):
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = self._make_trainer_v2(model, accum_steps=2)
+    buf = peft_trainer_v2.MetricsBuffer(step=0, losses=[])
+    wm = sft_utils.WeightedMetric(
+        unreduced_sum=jnp.array(1.0), denominator=jnp.array(2.0)
+    )
+
+    trainer._buffer_aux_metrics(
+        buf,
+        {
+            'logp_diff_max': 1.5,
+            'weight_min': 0.2,
+            'masked_count': 3.0,
+            'loss_aux': 4.0,
+            'weighted_max': wm,
+            'weighted/count': wm,
+        },
+    )
+
+    self.assertIs(buf.additional_metrics['logp_diff_max'][1], np.max)
+    self.assertIs(buf.additional_metrics['weight_min'][1], np.min)
+    self.assertIs(buf.additional_metrics['masked_count'][1], np.sum)
+    self.assertIs(buf.additional_metrics['loss_aux'][1], np.mean)
+    self.assertIs(
+        buf.additional_metrics['weighted_max'][1],
+        sft_utils.weighted_metric_mean,
+    )
+    self.assertIs(
+        buf.additional_metrics['weighted/count'][1],
+        sft_utils.weighted_metric_mean,
+    )
+
 
 class GradientAccumulatorTest(parameterized.TestCase):
 

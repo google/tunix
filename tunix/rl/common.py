@@ -753,57 +753,73 @@ def compute_per_token_logps(
 class PearsonMetric(utils.WeightedMetric):
   """WeightedMetric subclass for exact parallel Pearson correlation via Chan's formula.
 
-  Packs `(c_xy, c_xx, c_yy)` into `unreduced_sum` (shape `(3,)`) and
-  `(count, mean_x, mean_y)` into `denominator` (shape `(3,)`).
+  Packs `(c_xy, c_xx, c_yy)` into `unreduced_sum` (shape `(3,)` per microbatch,
+  or `(M, 3)` when stacked across `M` microbatches) and `(count, mean_x,
+  mean_y)` into `denominator` (shape `(3,)` or `(M, 3)`).
   """
 
+  def _stats_2d(self, xp: Any, dtype: Any = None) -> tuple[Any, Any]:
+    raw_sum = xp.asarray(self.unreduced_sum, dtype=dtype)
+    raw_denom = xp.asarray(self.denominator, dtype=dtype)
+    sums, denoms = xp.atleast_2d(raw_sum), xp.atleast_2d(raw_denom)
+    if (
+        sums.ndim != 2
+        or sums.shape[0] == 0
+        or sums.shape[-1] != 3
+        or denoms.shape != sums.shape
+    ):
+      raise ValueError(
+          "PearsonMetric expects unreduced_sum and denominator of shape (3,)"
+          f" or (M, 3), got {raw_sum.shape} and {raw_denom.shape}."
+      )
+    return sums, denoms
+
+  @staticmethod
+  def _combine_stats(
+      sums: Any,
+      denoms: Any,
+      eps: float | None,
+      min_denom: float | None,
+      xp: Any,
+  ) -> Any:
+    """Combines 2D `(M, 3)` Pearson stats into a scalar via Chan's formula."""
+    ns, mean_xs, mean_ys = denoms[:, 0], denoms[:, 1], denoms[:, 2]
+    total_n = xp.sum(ns)
+    safe_n = xp.where(total_n > 0, total_n, 1.0)
+    idx = xp.argmax(ns > 0)
+    sx = mean_xs - mean_xs[idx]
+    sy = mean_ys - mean_ys[idx]
+    dx = sx - xp.sum(ns * sx) / safe_n
+    dy = sy - xp.sum(ns * sy) / safe_n
+    c_xy = xp.sum(sums[:, 0] + ns * dx * dy)
+    c_xx = xp.sum(sums[:, 1] + ns * dx * dx)
+    c_yy = xp.sum(sums[:, 2] + ns * dy * dy)
+    denom = xp.sqrt(xp.maximum(c_xx * c_yy, 0.0))
+    if eps is not None:
+      denom = denom + eps
+    if min_denom is not None:
+      denom = xp.maximum(denom, min_denom)
+    safe_denom = xp.where(denom == 0, 1.0, denom)
+    return xp.where((total_n > 0) & (denom != 0), c_xy / safe_denom, 0.0)
+
   def compute(self) -> jax.Array:
-    """Computes single-microbatch Pearson correlation."""
-    c_xy = self.unreduced_sum[0]
-    c_xx = self.unreduced_sum[1]
-    c_yy = self.unreduced_sum[2]
-    denom = jnp.sqrt(jnp.maximum(c_xx * c_yy, 0.0))
-    if self.eps is not None:
-      denom = denom + self.eps
-    if self.min_denom is not None:
-      denom = jnp.maximum(denom, self.min_denom)
-    safe_denom = jnp.where(denom == 0, 1.0, denom)
-    return jnp.where(denom == 0, 0.0, c_xy / safe_denom)
+    """Computes Pearson correlation from single or stacked microbatches."""
+    sums, denoms = self._stats_2d(jnp)
+    return self._combine_stats(sums, denoms, self.eps, self.min_denom, jnp)
 
   @classmethod
   def reduce(cls, values: Iterable["PearsonMetric"]) -> float:
-    """Combines per-microbatch statistics via Chan's parallel covariance/variance formula."""
+    """Combines single `(3,)` or stacked `(M, 3)` stats via Chan's formula."""
     values = list(values)
     if not values:
       return 0.0
-    eps = values[0].eps
-    min_denom = values[0].min_denom
-    sums = np.asarray(
-        [np.asarray(v.unreduced_sum, dtype=np.float64) for v in values],
-        dtype=np.float64,
-    )
-    denoms = np.asarray(
-        [np.asarray(v.denominator, dtype=np.float64) for v in values],
-        dtype=np.float64,
-    )
-    c_xys, c_xxs, c_yys = sums[:, 0], sums[:, 1], sums[:, 2]
-    ns, mean_xs, mean_ys = denoms[:, 0], denoms[:, 1], denoms[:, 2]
-    total_n = float(ns.sum())
-    if total_n <= 0:
-      return 0.0
-    global_mean_x = float((ns * mean_xs).sum() / total_n)
-    global_mean_y = float((ns * mean_ys).sum() / total_n)
-    dx = mean_xs - global_mean_x
-    dy = mean_ys - global_mean_y
-    total_c_xy = float(c_xys.sum() + (ns * dx * dy).sum())
-    total_c_xx = float(c_xxs.sum() + (ns * dx * dx).sum())
-    total_c_yy = float(c_yys.sum() + (ns * dy * dy).sum())
-    denominator = float(np.sqrt(max(total_c_xx * total_c_yy, 0.0)))
-    if eps is not None:
-      denominator += eps
-    if min_denom is not None:
-      denominator = max(denominator, min_denom)
-    return total_c_xy / denominator if denominator else 0.0
+    eps, min_denom = values[0].eps, values[0].min_denom
+    if any(v.eps != eps or v.min_denom != min_denom for v in values[1:]):
+      raise ValueError("PearsonMetric values must use consistent bounds.")
+    blocks = [v._stats_2d(np, np.float64) for v in values]  # pylint: disable=protected-access
+    sums = np.concatenate([b[0] for b in blocks], axis=0)
+    denoms = np.concatenate([b[1] for b in blocks], axis=0)
+    return float(cls._combine_stats(sums, denoms, eps, min_denom, np))
 
 
 def make_pearson_metric(
