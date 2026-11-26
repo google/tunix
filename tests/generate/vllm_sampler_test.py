@@ -904,6 +904,29 @@ class VllmSamplerConfigTest(absltest.TestCase):
     )
     self.assertFalse(override_sampler.args["language_model_only"])
 
+  def test_env_flag_has_one_parsing_rule(self):
+    name = "TUNIX_TEST_ENV_FLAG"
+    os.environ.pop(name, None)  # setUp restores the environment afterwards.
+    self.assertFalse(vllm_sampler._env_flag(name))
+    self.assertTrue(vllm_sampler._env_flag(name, default="1"))
+    for raw, want in (
+        ("", False),
+        (" ", False),
+        ("1", True),
+        ("TRUE", True),
+        (" true ", True),
+        ("0", False),
+        ("False", False),
+    ):
+      with self.subTest(raw=raw), mock.patch.dict(os.environ, {name: raw}):
+        self.assertIs(vllm_sampler._env_flag(name), want)
+    with mock.patch.dict(os.environ, {name: ""}):
+      self.assertTrue(vllm_sampler._env_flag(name, default="1"))
+    for raw in ("yes", "2", "on"):
+      with self.subTest(raw=raw), mock.patch.dict(os.environ, {name: raw}):
+        with self.assertRaisesRegex(ValueError, f"{name}='{raw}'"):
+          vllm_sampler._env_flag(name)
+
   # `_TokenizeMemo` and `VllmSampler.tokenize` with fake tokenizers.
 
   def _counting_tokenizer(self):
