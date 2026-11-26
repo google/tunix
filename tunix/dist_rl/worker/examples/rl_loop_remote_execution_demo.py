@@ -57,7 +57,8 @@ class MockRolloutWorker(abstract_worker.Worker):
   def start(self) -> datatypes.Response:
     return datatypes.Response()
 
-  def stop(self) -> datatypes.Response:
+  def stop(self, *, abort: bool = False) -> datatypes.Response:
+    del abort
     self._state = datatypes.WorkerState.STOPPED
     return datatypes.Response()
 

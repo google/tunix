@@ -21,6 +21,10 @@ import jax
 from jax.interpreters import pxla
 import jax.sharding as shd
 import numpy as np
+from tunix.utils import sharding_utils as common_sharding_utils
+
+place_array_on_target = common_sharding_utils.place_array_on_target
+place_arrays_on_targets = common_sharding_utils.place_arrays_on_targets
 
 
 def _env_flag(name: str) -> bool:
@@ -114,12 +118,12 @@ def shard_input(
 
 
 def get_sharding(
-    x: jax.Array,
+    x: jax.Array | np.ndarray,
     mesh: shd.Mesh,
     pspec: shd.PartitionSpec,
     leading_dim_factor: int = 1,
 ) -> shd.NamedSharding:
-  """Get a sharding for an tensor given a mesh and partition spec.
+  """Get a sharding for a tensor given a mesh and partition spec.
 
   Args:
     x: The array to shard.

@@ -17,6 +17,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from tunix.rl import algo_core
+from tunix.rl import algorithm_config
+from tunix.rl import function_registry
 
 
 class AlgoCoreTest(absltest.TestCase):
@@ -390,7 +392,6 @@ class AlgoCoreTest(absltest.TestCase):
     np.testing.assert_array_equal(adv, np.zeros(8, dtype=np.float32))
 
   def test_grpo_loo_registered_in_function_registry(self):
-    from tunix.rl import function_registry  # pylint: disable=g-import-not-at-top
 
     fn = function_registry.get_advantage_estimator('grpo-loo')
     self.assertIs(fn, algo_core.compute_grpo_loo_advantages)
@@ -483,6 +484,7 @@ class AlgoCoreTest(absltest.TestCase):
           sampler_rs_max=None,
           seq_logprob_error_threshold=None,
           use_rollout_logps=True,
+          score_centering=False,
       )
       lp = float(
           algo_core.grpo_loss_fn(
@@ -579,6 +581,7 @@ class AlgoCoreTest(absltest.TestCase):
             sampler_rs_min=rs_min,
             sampler_rs_max=rs_max,
             seq_logprob_error_threshold=seq_err_thresh,
+            score_centering=False,
         )
         # 1. Fused single-pass example (raw rollout_logps)
         ex_fused = common.TrainExample(
@@ -675,6 +678,9 @@ class GrpoLossSequenceLevelControlsTest(absltest.TestCase):
         self.vocab = vocab
         self.bias = nnx.Param(jnp.zeros((vocab,), dtype=jnp.float32))
 
+      def compute_final_logits(self, h):
+        return h
+
       def __call__(
           self,
           x,
@@ -682,8 +688,9 @@ class GrpoLossSequenceLevelControlsTest(absltest.TestCase):
           positions=None,
           cache=None,
           attention_mask=None,
+          skip_lm_head=False,
       ):
-        del segment_ids, positions, attention_mask
+        del segment_ids, positions, attention_mask, skip_lm_head
         logits = jnp.broadcast_to(self.bias[...], x.shape + (self.vocab,))
         return logits, cache
 
@@ -714,13 +721,13 @@ class GrpoLossSequenceLevelControlsTest(absltest.TestCase):
         sampler_rs_max=None,
         seq_logprob_error_threshold=None,
         use_rollout_logps=True,
+        score_centering=False,
+        score_centering_eps=1e-6,
     )
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
 
   def _example(self, **overrides):
-    from tunix.rl import common  # pylint: disable=g-import-not-at-top
-
     defaults = dict(
         prompt_ids=jnp.array([[1, 2], [1, 2]], jnp.int32),
         prompt_mask=jnp.array([[1, 1], [1, 1]], jnp.int32),
@@ -731,7 +738,138 @@ class GrpoLossSequenceLevelControlsTest(absltest.TestCase):
         old_per_token_logps=None,
     )
     defaults.update(overrides)
-    return common.TrainExample(**defaults)
+    return algo_core.common.TrainExample(**defaults)
+
+  def test_score_centering_requires_sampler_topk_and_fused_agreement(self):
+    topk_ids = jnp.zeros((2, 3, 2), jnp.int32)
+    topk_logps = jnp.zeros((2, 3, 2), jnp.float32)
+    for ex in (self._example(), self._example(old_topk_token_ids=topk_ids)):
+      with self.assertRaisesRegex(ValueError, 'top-k logprobs'):
+        algo_core.grpo_loss_fn(
+            self.model, ex, self._config(score_centering=True), 0, -1
+        )
+    for bad_ids, bad_logps in (
+        (jnp.zeros((2, 3, 4), jnp.int32), topk_logps),
+        (jnp.zeros((2, 2, 2), jnp.int32), jnp.zeros((2, 2, 2), jnp.float32)),
+        (jnp.zeros((2, 3), jnp.int32), jnp.zeros((2, 3), jnp.float32)),
+    ):
+      with self.assertRaisesRegex(ValueError, 'matching \\[B, C, K\\]'):
+        algo_core.grpo_loss_fn(
+            self.model,
+            self._example(old_topk_token_ids=bad_ids, old_topk_logps=bad_logps),
+            self._config(score_centering=True),
+            0,
+            -1,
+        )
+    ex_old = self._example(
+        old_per_token_logps=jnp.zeros((2, 3), jnp.float32),
+        old_topk_token_ids=topk_ids,
+        old_topk_logps=topk_logps,
+    )
+    for ex_bad, cfg_bad in (
+        (
+            ex_old.replace(sampler_agreement_applied=True),
+            self._config(score_centering=True),
+        ),
+        (ex_old, self._config(score_centering=True, use_rollout_logps=False)),
+    ):
+      with self.assertRaisesRegex(ValueError, 'fused single-step'):
+        algo_core.grpo_loss_fn(self.model, ex_bad, cfg_bad, 0, -1)
+
+  def test_score_centering_on_policy_ratio_and_gradient(self):
+    from flax import nnx  # pylint: disable=g-import-not-at-top
+
+    q = np.array([0.05, 0.65], dtype=np.float32)
+    topk_ids = jnp.broadcast_to(jnp.array([1, 2], jnp.int32), (2, 3, 2))
+    topk_logps = jnp.broadcast_to(jnp.log(q), (2, 3, 2)).at[1, 2].set(-jnp.inf)
+
+    # 1. Even with drifted rollout logps and sampler_is=None, Score Centering
+    # keeps the PPO ratio on-policy and matches chunked logp computation.
+    drifted_ex = self._example(
+        old_per_token_logps=jnp.full((2, 3), np.log(0.05), jnp.float32),
+        old_topk_token_ids=topk_ids,
+        old_topk_logps=topk_logps,
+    )
+    sc_cfg = self._config(score_centering=True)
+    out = algo_core.grpo_loss_fn(self.model, drifted_ex, sc_cfg, 0, -1)
+    chunked = algo_core.grpo_loss_fn(
+        self.model, drifted_ex, sc_cfg, 0, -1, compute_logps_chunk_size=2
+    )
+    self.assertAlmostEqual(float(out.aux_metrics['is_ratio/mean']), 1.0)
+    self.assertAlmostEqual(float(out.aux_metrics['ppo_kl'].compute()), 0.0)
+    self.assertGreater(
+        float(out.aux_metrics['score_centering/abs_coeff_sum_mean'].compute()),
+        0.0,
+    )
+    for key in algo_core.common.SCORE_CENTERING_METRICS:
+      self.assertIn(key, out.aux_metrics)
+    self.assertAlmostEqual(
+        float(out.primary_loss.compute()), float(chunked.primary_loss.compute())
+    )
+    np.testing.assert_allclose(
+        nnx.grad(
+            lambda m: algo_core.grpo_loss_fn(
+                m, drifted_ex, sc_cfg, 0, -1, compute_logps_chunk_size=2
+            ).primary_loss.compute()
+        )(self.model).bias[...],
+        nnx.grad(
+            lambda m: algo_core.grpo_loss_fn(
+                m, drifted_ex, sc_cfg, 0, -1
+            ).primary_loss.compute()
+        )(self.model).bias[...],
+        rtol=1e-5,
+        atol=1e-6,
+    )
+
+    # 2. Value is unchanged and gradient adds exact expected score under q_hat.
+    p = np.full(self.vocab, 1.0 / self.vocab, dtype=np.float32)
+    p_head = p[1:3]
+    rho = (1.0 - q.sum()) / (1.0 - p_head.sum())
+    ex = self._example(
+        old_per_token_logps=jnp.full((2, 3), self.trainer_logp, jnp.float32),
+        old_topk_token_ids=topk_ids,
+        old_topk_logps=topk_logps,
+    )
+    def loss_fn(m, sc, sis):
+      return algo_core.grpo_loss_fn(
+          m,
+          ex,
+          self._config(
+              loss_agg_mode='token-mean',
+              sampler_is=sis,
+              sampler_is_threshold=2.0,
+              score_centering=sc,
+          ),
+          0,
+          -1,
+      ).primary_loss.compute()
+
+    for sampler_is in (None, 'token'):
+      with self.subTest(sampler_is=sampler_is):
+        self.assertAlmostEqual(
+            float(loss_fn(self.model, True, sampler_is)),
+            float(loss_fn(self.model, False, sampler_is)),
+        )
+        grad_diff = (
+            nnx.grad(lambda m, sis=sampler_is: loss_fn(m, True, sis))(
+                self.model
+            ).bias[...]
+            - nnx.grad(lambda m, sis=sampler_is: loss_fn(m, False, sis))(
+                self.model
+            ).bias[...]
+        )
+        coeff = (
+            q * np.minimum(p_head / q, 2.0) - min(1.0, 2.0 * rho) * p_head
+            if sampler_is == 'token'
+            else q - rho * p_head
+        )
+        # 5 active tokens: 3 with advantage 2.0 and 2 with advantage 4.0 -> 2.8.
+        np.testing.assert_allclose(
+            grad_diff,
+            2.8 * (coeff @ (np.eye(self.vocab)[1:3] - p)),
+            rtol=1e-5,
+            atol=1e-6,
+        )
 
   def test_seq_logprob_error_threshold_masks_drifted_sequence_in_loss(self):
     lp = self.trainer_logp
@@ -1191,8 +1329,107 @@ class GrpoLossSequenceLevelControlsTest(absltest.TestCase):
     )
     self.assertTrue(bool(jnp.isfinite(out_ppo.primary_loss.compute())))
 
+  def test_trainer_model_input_builders_and_registry_lookup(self):
+    cfg = algorithm_config.GRPOConfig(num_generations=2)
+    self.assertIs(
+        function_registry.get_policy_loss_fn(cfg.policy_loss_fn),
+        algo_core.grpo_loss_fn,
+    )
+
+    with self.assertRaisesRegex(
+        ValueError, 'Trainer temperature is unset on algo_config'
+    ):
+      algo_core.build_gen_model_input_fn(cfg, pad_id=0, eos_id=2)
+
+    dummy_batch = object()
+    cfg.temperature = 0.8
+    gen_fn = algo_core.build_gen_model_input_fn(cfg, pad_id=0, eos_id=2)
+    self.assertEqual(
+        gen_fn(dummy_batch),
+        {
+            'train_example': dummy_batch,
+            'algo_config': cfg,
+            'pad_id': 0,
+            'eos_id': 2,
+        },
+    )
+
+    ppo_cfg = algorithm_config.PPOConfig(clip_range_value=0.3)
+    self.assertIs(
+        function_registry.get_value_loss_fn(ppo_cfg.value_loss_fn),
+        algo_core.ppo_value_loss_fn,
+    )
+    critic_gen_fn = algo_core.build_critic_model_input_fn(
+        ppo_cfg, pad_id=5, eos_id=6
+    )
+    self.assertEqual(
+        critic_gen_fn(dummy_batch),
+        {
+            'train_example': dummy_batch,
+            'clip_range_value': 0.3,
+            'pad_id': 5,
+            'eos_id': 6,
+        },
+    )
+
+    estimator = function_registry.get_advantage_estimator(
+        cfg.advantage_estimator
+    )
+    rewards = np.array([1.0, 3.0], dtype=np.float32)
+    adv = estimator(rewards, num_generations=cfg.num_generations)
+    expected = algo_core.compute_advantages(rewards, num_generations=2)
+    np.testing.assert_allclose(adv, expected, rtol=1e-5)
+
+    # Verify valid_mask forwarding through registered advantage estimator.
+    rewards_4 = np.array([1.0, 2.0, 3.0, -999.0], dtype=np.float32)
+    valid_mask_4 = np.array([True, True, True, False])
+    cfg_4 = algorithm_config.GRPOConfig(num_generations=4)
+    adv_masked = estimator(
+        rewards_4,
+        num_generations=cfg_4.num_generations,
+        valid_mask=valid_mask_4,
+    )
+    np.testing.assert_allclose(
+        adv_masked,
+        np.array([-1.0, 0.0, 1.0, 0.0], dtype=np.float32),
+        rtol=1e-4,
+        atol=1e-4,
+    )
+
+  def test_grpo_loss_fn_asymmetric_and_dual_clipping(self):
+    lp = self.trainer_logp
+    # Seq 0: positive advantage (2.0), ratio = exp(1.0) ~= 2.718
+    # (> 1 + epsilon_high = 1.5).
+    # Seq 1: negative advantage (-2.0), ratio = exp(1.5) ~= 4.481
+    # (> epsilon_c = 3.0).
+    rollout = jnp.array(
+        [
+            [lp - 1.0, lp - 1.0, lp - 1.0],
+            [lp - 1.5, lp - 1.5, lp - 1.5],
+        ],
+        dtype=jnp.float32,
+    )
+    ex = self._example(
+        completion_mask=jnp.ones((2, 3), dtype=jnp.float32),
+        advantages=jnp.array([2.0, -2.0], dtype=jnp.float32),
+        old_per_token_logps=rollout,
+    )
+    cfg = self._config(
+        epsilon=0.2,
+        epsilon_high=0.5,
+        epsilon_c=3.0,
+    )
+    out = algo_core.grpo_loss_fn(self.model, ex, cfg, pad_id=0, eos_id=-1)
+    # Seq 0 clipped at 1 + epsilon_high = 1.5 -> -2.0 * 1.5 = -3.0
+    # Seq 1 dual-clipped at epsilon_c = 3.0 -> -(-2.0) * 3.0 = 6.0
+    # Mean over 2 sequences = (-3.0 + 6.0) / 2 = 1.5
+    np.testing.assert_allclose(
+        float(out.primary_loss.compute()), 1.5, rtol=1e-5
+    )
+    np.testing.assert_allclose(
+        float(out.aux_metrics['pg_clipfrac_lower'].compute()), 0.5, rtol=1e-5
+    )
+
 
 if __name__ == '__main__':
   absltest.main()
-
-

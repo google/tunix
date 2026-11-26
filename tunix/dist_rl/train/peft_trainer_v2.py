@@ -20,7 +20,7 @@ import dataclasses
 import functools
 import os
 import time
-from typing import Any, Callable, Concatenate, Dict, List, ParamSpec, Tuple
+from typing import Any, Callable, Concatenate, Dict, List, ParamSpec, Tuple, TypeAlias
 
 from absl import logging
 import flax
@@ -29,14 +29,14 @@ import jax
 from jax.interpreters import pxla
 import jax.numpy as jnp
 import jax.sharding as shd
-from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 from jax.typing import DTypeLike  # pylint: disable=g-importing-member
 import numpy as np
 import optax
 from tunix.common import configs
+from tunix.common import datatypes as common_datatypes
 from tunix.dist_rl.common import datatypes
-from tunix.dist_rl.metrics import metrics as exp_metrics
 from tunix.dist_rl.train import abstract_trainer
+from tunix.dist_rl.train import jax_pytrees  # pylint: disable=unused-import
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
@@ -46,11 +46,13 @@ from tunix.sft import hooks
 from tunix.sft import inflight_throttler
 from tunix.sft import metrics_logger as sft_metrics_logger
 from tunix.sft import profiler
+from tunix.sft import profiler_jax
 from tunix.sft import progress_bar
 from tunix.sft import sharding_utils
 from tunix.sft import utils
 from typing_extensions import override
 
+ArrayLike: TypeAlias = common_datatypes.ArrayLike
 _ModelInputT = dict[str, ArrayLike]
 P = ParamSpec("P")
 MetricsLogger = sft_metrics_logger.MetricsLogger
@@ -444,7 +446,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
   ):
     # TODO(noghabi): Implement sequence packing for SFT and remove this check.
     if (
-        training_config.max_seq_token_per_tpu is not None
+        configs.is_sequence_packing_enabled(training_config)
         and not self.supports_sequence_packing
     ):
       raise ValueError(
@@ -460,8 +462,12 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         self.model, wrt_target, allocate_grads=not self._is_single_microstep()
     )
 
-    self.loss_fn = _default_loss_fn
-    self.eval_loss_fn = _default_loss_fn
+    self.loss_fn: Callable[
+        ..., jax.Array | Tuple[jax.Array, Any] | utils.LossOutput
+    ] = _default_loss_fn
+    self.eval_loss_fn: Callable[
+        ..., jax.Array | Tuple[jax.Array, Any] | utils.LossOutput
+    ] = _default_loss_fn
     self.gen_model_input_fn = lambda x: x
     self.checkpoint_manager = checkpoint_manager.CheckpointManager(
         root_directory=self.config.checkpoint_root_directory,
@@ -491,9 +497,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._mode: sft_metrics_logger.Mode = sft_metrics_logger.Mode.TRAIN
     self._has_aux = False
     self._pbar = None
-    self._last_fwd_bwd_loss: ArrayLike | None = None
-    self._last_eval_loss: ArrayLike = 0.0
-    self._last_update_grad_norm: ArrayLike | None = None
+    self._last_fwd_bwd_loss: jax.Array | None = None
+    self._last_eval_loss: jax.Array | float = 0.0
+    self._last_update_grad_norm: jax.Array | None = None
     self._restored_custom_metadata: Mapping[str, Any] = {}
     if self.config.get_with_default("resume_from_checkpoint_on_init", True):
       self._train_steps, self._restored_custom_metadata = (
@@ -508,6 +514,8 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._jitted_update_step_fn = None
     self._jitted_eval_step_fn = None
     self._jitted_train_step_fn = None
+    self._fwd_only_fn: Callable[..., Any] | None = None
+    self._jitted_fwd_only_fn: Callable[..., Any] | None = None
     self._prof: profiler.Profiler | None = None
     self._sync_step_derived_state()
     self._buffered_train_metrics: MetricsBuffer | None = None
@@ -518,7 +526,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     # get_metrics to retrieve metrics from trainer, we need to write metrics to
     # a buffer. We should delete this once the metrics logging implementations
     # are updated according to the new design.
-    self._written_metrics: exp_metrics.MetricsBuffer | None = None
+    self._written_metrics: datatypes.MetricsBuffer | None = None
     self.training_hooks = None
     self.data_hooks = None
     self._jit_cache = set()
@@ -549,6 +557,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         initial_step=self._iter_steps,
         max_step=max_step,
         profiler_options=self.config.profiler_options,
+        backend=profiler_jax.JaxProfilerBackend(),
     )
 
   def with_training_hooks(self, training_hooks: hooks.TrainingHooks):
@@ -570,19 +579,20 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._jitted_update_step_fn = None
     self._jitted_eval_step_fn = None
     self._jitted_train_step_fn = None
+    self._jitted_fwd_only_fn = None
 
   @override
   def with_loss_fn(
       self,
       loss_fn: Callable[
           Concatenate[nnx.Module, P],
-          ArrayLike | Tuple[ArrayLike, Any] | utils.LossOutput,
+          jax.Array | Tuple[jax.Array, Any] | utils.LossOutput,
       ],
       has_aux: bool = False,
   ) -> "PeftTrainer":
     self.clear_jit_cache()
-    self.loss_fn = loss_fn  # pyrefly: ignore[bad-assignment]
-    self.eval_loss_fn = loss_fn  # pyrefly: ignore[bad-assignment]
+    self.loss_fn = loss_fn
+    self.eval_loss_fn = loss_fn
     self._has_aux = has_aux
     return self
 
@@ -607,17 +617,16 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     return self
 
   def _is_single_microstep(self) -> bool:
-    return (
-        self.config.get_with_default("gradient_accumulation_steps", 1) == 1
-        and self.config.max_seq_token_per_tpu is None
-    )
+    return self.config.get_with_default(
+        "gradient_accumulation_steps", 1
+    ) == 1 and not configs.is_sequence_packing_enabled(self.config)
 
   def _fwd_bwd_step(
       self,
       model: nnx.Module,
       grad_accumulator: GradientAccumulator,
       inputs: Any,
-  ) -> Tuple[ArrayLike, Any | None]:
+  ) -> Tuple[jax.Array, Any | None]:
     """Forward and backward passes through grad_fn.
 
     Args:
@@ -637,7 +646,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       if isinstance(out, utils.LossOutput):
         return out.primary_loss.unreduced_sum, out
       elif self._has_aux:
-        return out[0], out[1]  # pyrefly: ignore[bad-index]
+        return out[0], out[1]
       else:
         return out, None
 
@@ -669,7 +678,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       model: nnx.Module,
       optimizer: nnx.Optimizer,
       grad_accumulator: GradientAccumulator,
-  ) -> ArrayLike:
+  ) -> jax.Array:
     """Updates the model weights.
 
     Args:
@@ -699,7 +708,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       optimizer: nnx.Optimizer,
       grad_accumulator: GradientAccumulator,
       inputs: Any,
-  ) -> Tuple[ArrayLike, Any | None, ArrayLike]:
+  ) -> Tuple[jax.Array, Any | None, jax.Array]:
     """`_fwd_bwd_step` followed by `_update_step`, in one traced function.
 
     Only valid when `_is_single_microstep()`: there is exactly one micro-batch
@@ -711,44 +720,54 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
     The bodies are reused verbatim, so the fused and split paths are the same
     arithmetic in the same order; only XLA's buffer assignment differs.
+
+    Args:
+      model: The model to train.
+      optimizer: The optimizer to use.
+      grad_accumulator: The gradient accumulator to use.
+      inputs: The training input.
+
+    Returns:
+      A tuple containing the loss, auxiliary data (or None if has_aux is False),
+      and the gradient norm.
     """
     loss, aux = self._fwd_bwd_step(model, grad_accumulator, inputs)
     return loss, aux, self._update_step(model, optimizer, grad_accumulator)
 
   def _eval_step(
       self, model: nnx.Module, inputs: Any
-  ) -> ArrayLike | Tuple[ArrayLike, Any]:
+  ) -> Tuple[jax.Array, Any | None]:
     inputs = self.gen_model_input_fn(inputs)
     out = self.eval_loss_fn(model, **inputs)
     if isinstance(out, utils.LossOutput):
       return out.primary_loss.compute(), out
     elif self._has_aux:
-      loss, aux = out  # pyrefly: ignore[not-iterable]
+      loss, aux = out
       return loss, aux
     else:
-      return out, None
+      return out, None  # pyrefly: ignore[bad-return]
 
   def create_fwd_bwd_step_fn(
       self,
-  ) -> Callable[..., Tuple[ArrayLike, Any | None]]:
+  ) -> Callable[..., Tuple[jax.Array, Any | None]]:
     """Creates the forward and backward step function."""
     return self._fwd_bwd_step
 
   def create_update_step_fn(
       self,
-  ) -> Callable[..., ArrayLike]:
+  ) -> Callable[..., jax.Array]:
     """Creates the update step function."""
     return self._update_step
 
   def create_train_step_fn(
       self,
-  ) -> Callable[..., Tuple[ArrayLike, Any | None, ArrayLike]]:
+  ) -> Callable[..., Tuple[jax.Array, Any | None, jax.Array]]:
     """Creates the fused forward/backward/update step function."""
     return self._train_step
 
   def create_eval_step_fn(
       self,
-  ) -> Callable[..., ArrayLike | Tuple[ArrayLike, Any]]:
+  ) -> Callable[..., Tuple[jax.Array, Any | None]]:
     """Creates the eval step function."""
     return self._eval_step
 
@@ -763,18 +782,13 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     if mesh.empty:
       return
 
-    def _shard(x, p):
+    def _shard(x: Any, p: shd.PartitionSpec | None) -> Any:
       if not isinstance(x, (jax.Array, np.ndarray)):
         return x
-      if p is None:
-        p = shd.PartitionSpec()
-      sharding = sharding_utils.get_sharding(x, mesh, p)  # pyrefly: ignore[bad-argument-type]
-      if hasattr(x, "sharding") and x.sharding == sharding:
-        return x
-      if getattr(x, "is_fully_addressable", True):
-        with jax.transfer_guard("allow"):
-          return jax.device_put(x, sharding)
-      return x
+      sharding = sharding_utils.get_sharding(
+          x, mesh, shd.PartitionSpec() if p is None else p
+      )
+      return sharding_utils.place_array_on_target(x, sharding)
 
     optimizer_state = nnx.state(self.optimizer, nnx.optimizer.OptState)
     optimizer_pspecs = nnx.get_partition_spec(optimizer_state)
@@ -794,9 +808,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       )
 
     # Denominator is a scalar — replicate across all devices
-    self.grad_accumulator.denom[...] = jax.device_put(
+    self.grad_accumulator.denom[...] = _shard(
         self.grad_accumulator.denom[...],
-        jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()),
+        shd.PartitionSpec(),
     )
 
   def jit_fwd_bwd_update_and_eval_step(
@@ -1054,11 +1068,13 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     weighted_metrics = {}
     scalar_metrics = {"loss": loss}
     for k, val in additional_metrics.items():
-      if isinstance(val, (utils.WeightedMetric, exp_metrics.WeightedMetric)):
+      if isinstance(val, utils.WeightedMetric):
         weighted_metrics[k] = val
       else:
         scalar_metrics[k] = val
-    self._written_metrics = exp_metrics.MetricsBuffer(
+    if weighted_metrics:
+      weighted_metrics = jax.device_get(weighted_metrics)
+    self._written_metrics = datatypes.MetricsBuffer(
         id=metrics_buffer.step,
         weighted_metrics=weighted_metrics,
         scalar_metrics=scalar_metrics,
@@ -1099,7 +1115,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       payload = dataclasses.replace(payload, metadata={})
     return sharding_utils.shard_input(payload, self.config.data_sharding_axis)
 
-  def _record_fwd_bwd(self, train_loss: ArrayLike, aux: Any) -> None:
+  def _record_fwd_bwd(self, train_loss: jax.Array, aux: Any) -> None:
     """Bookkeeping for one forward/backward pass, independent of how it ran."""
     self._last_fwd_bwd_loss = train_loss
     buffered_loss = (
@@ -1115,7 +1131,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     )
     self._post_process_train_step(post_process_aux)
 
-  def _record_update(self, grad_norm: ArrayLike) -> int:
+  def _record_update(self, grad_norm: jax.Array) -> int:
     """Bookkeeping for one optimizer update, independent of how it ran."""
     self._last_update_grad_norm = grad_norm
     if self._buffered_train_metrics is not None:
@@ -1151,33 +1167,41 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self.clear_jit_cache()
 
   @override
-  def fwd_bwd(self, payload: datatypes.TrainerPayload | Any, **kwargs) -> None:
-    """Executes forward and backward passes."""
+  def fwd_bwd(
+      self,
+      payload: datatypes.TrainerPayload | Any,
+      *,
+      skip_jit: bool = False,
+      cache_nnx_graph: bool = True,
+  ) -> jax.Array:
+    """Executes forward and backward passes and returns the micro-batch loss."""
     self._ensure_persistent_grad_accumulator()
-    cache_nnx_graph = kwargs.pop("cache_nnx_graph", True)
-    skip_jit = kwargs.pop("skip_jit", False)
     fwd_bwd_step, _, _ = self.jit_fwd_bwd_update_and_eval_step(
         skip_jit, cache_nnx_graph
     )
-    self._record_fwd_bwd(
-        *fwd_bwd_step(
-            grad_accumulator=self.grad_accumulator,
-            inputs=self._prepare_payload(payload),
-        )
+    train_loss, aux = fwd_bwd_step(
+        grad_accumulator=self.grad_accumulator,
+        inputs=self._prepare_payload(payload),
     )
+    self._record_fwd_bwd(train_loss, aux)
+    return jnp.asarray(train_loss)
 
   @override
-  def update(self, **kwargs) -> int:
+  def update(
+      self, *, skip_jit: bool = False, cache_nnx_graph: bool = True
+  ) -> int:
     """Applies the accumulated gradients."""
-    cache_nnx_graph = kwargs.pop("cache_nnx_graph", True)
-    skip_jit = kwargs.pop("skip_jit", False)
     _, update_step, _ = self.jit_fwd_bwd_update_and_eval_step(
         skip_jit, cache_nnx_graph
     )
     return self._record_update(update_step())
 
   def train_step(
-      self, payload: datatypes.TrainerPayload | Any, **kwargs
+      self,
+      payload: datatypes.TrainerPayload | Any,
+      *,
+      skip_jit: bool = False,
+      cache_nnx_graph: bool = True,
   ) -> int:
     """Runs forward, backward and update as a single executable.
 
@@ -1187,8 +1211,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     available in the single-microstep regime; when accumulating there is work
     between the two halves, so they must stay separate.
     """
-    cache_nnx_graph = kwargs.pop("cache_nnx_graph", True)
-    skip_jit = kwargs.pop("skip_jit", False)
     self.jit_fwd_bwd_update_and_eval_step(skip_jit, cache_nnx_graph)
     if self._jitted_train_step_fn is None:
       raise ValueError(
@@ -1210,34 +1232,13 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     if dummy_data is None:
       return
 
-    def _resolve_dummy_routed_experts(data: Any) -> Any:
-      if not isinstance(data, datatypes.RLTrainerPayload):
-        return data
-      if data.routed_experts is None:
-        return data
-      routed_experts = np.asarray(data.routed_experts)
-      if routed_experts.size != 0:
-        return data
-      assert hasattr(self.model, "config")
-      cfg = self.model.config
-      batch_size, seq_len = routed_experts.shape[:2]
-      expanded = np.zeros(
-          (batch_size, seq_len, cfg.num_layers, cfg.num_experts_per_tok),
-          dtype=routed_experts.dtype,
-      )
-      metadata = dict(data.metadata)
-      if "routed_experts_encode_fn" in metadata:
-        encode_fn = metadata.pop("routed_experts_encode_fn")
-        expanded = encode_fn(expanded, num_experts=cfg.num_experts)
-      return dataclasses.replace(
-          data, routed_experts=expanded, metadata=metadata
-      )
-
     self._ensure_persistent_grad_accumulator()
     fwd_bwd_step, update_step, eval_step = (
         self.jit_fwd_bwd_update_and_eval_step()
     )
-    inputs = self._prepare_payload(_resolve_dummy_routed_experts(dummy_data))
+    inputs = self._prepare_payload(
+        abstract_trainer.resolve_dummy_routed_experts(self, dummy_data)
+    )
     # maybe_cache_and_partial wraps nnx.cached_partial(jitted, ...) in
     # functools.partial so the jitted fn stays reachable via .func;
     # .func.__wrapped__ is the nnx.jit whose cache serves the real steps.
@@ -1258,7 +1259,11 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
   @override
   def eval_step(
-      self, payload: datatypes.TrainerPayload | Any, **kwargs
+      self,
+      payload: datatypes.TrainerPayload | Any,
+      *,
+      skip_jit: bool = False,
+      cache_nnx_graph: bool = True,
   ) -> None:
     """Executes one eval micro-batch step.
 
@@ -1267,8 +1272,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     a sequence of eval_step calls with eval_context() so that the metrics
     mode is set to EVAL and buffered metrics are written on exit.
     """
-    skip_jit = kwargs.pop("skip_jit", False)
-    cache_nnx_graph = kwargs.pop("cache_nnx_graph", True)
     _, _, eval_step_fn = self.jit_fwd_bwd_update_and_eval_step(
         skip_jit=skip_jit, cache_nnx_graph=cache_nnx_graph,
     )
@@ -1309,60 +1312,101 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
           self._buffered_eval_metrics = None
 
   @override
-  def fwd_only(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-    """Runs `fn(model, *args, **kwargs)` on `self.model'.
+  def with_fwd_only_fn(self, fn: Callable[..., Any]) -> "PeftTrainer":
+    def _step(
+        graphdef: nnx.GraphDef,
+        state: nnx.State,
+        payload: datatypes.TrainerPayload,
+    ) -> Any:
+      model = nnx.merge(graphdef, state, copy=True)
+      model.eval()
+      return fn(model, payload)
 
-    Shards the inputs and passes them to the function along with the live
-    model.
-    """
-    axis = self.config.data_sharding_axis
-
-    def _shard(x: Any) -> Any:
-      if not isinstance(x, (jax.Array, np.ndarray)):
-        return x
-      x = jnp.asarray(x)
-      # Skip zero-column arrays (e.g. the empty prompt in packed mode) to avoid
-      # constructing degenerate global arrays.
-      if x.ndim >= 2 and x.shape[1] == 0:
-        return x
-      return sharding_utils.shard_input(x, axis)
-
-    args, kwargs = jax.tree.map(_shard, (args, kwargs))
-    return fn(self.model, *args, **kwargs)
+    self._fwd_only_fn = _step
+    self._jitted_fwd_only_fn = None
+    return self
 
   @override
-  def save_checkpoint(self, metadata: Any = None, **kwargs) -> None:
+  def fwd_only(self, payload: datatypes.TrainerPayload) -> Any:
+    """Runs the registered `with_fwd_only_fn` callback under `jax.jit`.
+
+    Prepares and shards `payload` via `_prepare_payload` (stripping host
+    `metadata` and sharding arrays on `config.data_sharding_axis`),
+    reconstructs a read-only copy of the model (`nnx.merge(graphdef, state,
+    copy=True)` so live trainer state is never mutated), and invokes
+    `fn(model, payload)`.
+
+    Args:
+      payload: Input payload to prepare and shard on
+        `config.data_sharding_axis`.
+
+    Returns:
+      Whatever the callback returns.
+
+    Raises:
+      ValueError: If `with_fwd_only_fn` has not been called.
+    """
+    if self._fwd_only_fn is None:
+      raise ValueError(
+          "PeftTrainer.fwd_only needs a callback: call with_fwd_only_fn()"
+          " first."
+      )
+    payload = self._prepare_payload(payload)
+    if self._jitted_fwd_only_fn is None:
+      self._jitted_fwd_only_fn = jax.jit(self._fwd_only_fn)
+    graphdef, state = nnx.split(self.model)
+    return self._jitted_fwd_only_fn(graphdef, state, payload)
+
+  @override
+  def save_checkpoint(
+      self,
+      metadata: Mapping[str, Any] | None = None,
+      *,
+      step: int | None = None,
+      force: bool = False,
+      save_only_lora_params: bool | None = None,
+  ) -> None:
     """Saves a checkpoint of the trainer state (model + optimizer).
 
     Vanilla implementation of save_checkpoint on a train_steps. Sub-batch
     checkpointing will be added later once it is supported in the checkpoint
     manager.
+
+    Args:
+      metadata: Metadata to save alongside the checkpoint. Defaults to
+        `custom_checkpoint_metadata()`.
+      step: The step to save under. Defaults to `metadata["step"]`, then to the
+        current train step.
+      force: Save even if the checkpoint manager's save interval would skip this
+        step.
+      save_only_lora_params: Save only the LoRA params. Defaults to whether LoRA
+        is enabled.
     """
     if metadata is None:
       metadata = self.custom_checkpoint_metadata()
-    step = None
-    if isinstance(metadata, (dict, Mapping)):
-      step = metadata.get("step", self._train_steps)
-    elif hasattr(metadata, "step"):
-      step = getattr(metadata, "step")
     if step is None:
-      step = self._train_steps
-    save_only_lora_params = kwargs.pop(
-        "save_only_lora_params", self._lora_enabled
-    )
+      step = metadata.get("step", self._train_steps)
+    if save_only_lora_params is None:
+      save_only_lora_params = self._lora_enabled
     self.checkpoint_manager.save(
         step,
         self.model,
         self.optimizer,
         save_only_lora_params=save_only_lora_params,
+        force=force,
         custom_metadata=metadata,
-        **kwargs,
     )
 
   @override
-  def restore_checkpoint(self, step: int | None = None, **kwargs) -> Any:
-    """Restores model, optimizer and step count from a checkpoint."""
-    del kwargs
+  def restore_checkpoint(self, *, step: int | None = None) -> Any:
+    """Restores model, optimizer and step count from a checkpoint.
+
+    Args:
+      step: Checkpoint step to restore. If None, restores the latest one.
+
+    Returns:
+      The restored custom metadata, with `step` set to the restored step.
+    """
     self._train_steps, self._restored_custom_metadata = (
         self.checkpoint_manager.maybe_restore(
             self.model,
@@ -1382,9 +1426,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     return metadata
 
   @override
-  def prepare_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+  def prepare_weight_sync(self, *, sync_request: Any = None) -> Any:
     """Stages this round's weights on the raiden transport, returns metadata."""
-    del sync_request, kwargs
+    del sync_request
     worker = self._weight_sync_worker
     if worker is None:
       worker = _default_weight_sync_worker()
@@ -1425,7 +1469,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
           key_mapping_hook_fns=mapping_config.to_hf_hook_fns,
           transpose_keys=mapping_config.to_hf_transpose_keys,
           reshard_fn=None,
-          rollout_engine=backend,
           tp_size=self._rollout_tp_size,
       )
       worker.bind(converted_state)
@@ -1441,23 +1484,24 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       logging.info("source checksums: %s", worker.checksums())
     return [worker.work_unit_metadata()]
 
-  def release_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+  @override
+  def release_weight_sync(self, *, sync_request: Any = None) -> Any:
     """Ends this round's staging hold."""
-    del sync_request, kwargs
+    del sync_request
     worker = self._weight_sync_worker
     if worker is not None and worker.bound:
       logging.vlog(1, "raiden metrics: %s", worker.metrics())
     return True
 
   @override
-  def get_metrics(self) -> exp_metrics.MetricsBuffer:
+  def get_metrics(self) -> datatypes.MetricsBuffer:
     if (
         self._written_metrics is None
         and self._prev_buffered_train_metrics is not None
     ):
       self._write_train_metrics()
     if self._written_metrics is None:
-      return exp_metrics.MetricsBuffer(id=-1)
+      return datatypes.MetricsBuffer(id=-1)
     ret = self._written_metrics
     self._written_metrics = None
     return ret
@@ -1627,7 +1671,8 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
           span.device_end([computation_to_track])
           span_v2.async_end([computation_to_track])
 
-        self._throttler.add_computation(computation_to_track)  # pyrefly: ignore[bad-argument-type]
+        assert computation_to_track is not None
+        self._throttler.add_computation(computation_to_track)
         if is_update_step_val:
           self.save_checkpoint()
           if (
@@ -1742,7 +1787,7 @@ def _default_loss_fn(
     positions: jax.Array,
     attention_mask: jax.Array,
     images: jax.Array | None = None,
-) -> utils.LossOutput | ArrayLike:
+) -> utils.LossOutput:
   """Default loss function for PEFT training."""
   # Weird kwargs workaround because not all models support `images` right now.
   kwargs = {} if images is None else {"images": images}

@@ -1,0 +1,123 @@
+# Copyright 2026 The Tunix Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Configuration dataclasses for the v2 continuous batching generation engine."""
+
+import dataclasses
+
+import jax
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class CacheConfig:
+  """Raw configuration parameters for KV Cache allocation and sharding.
+
+  Attributes:
+    max_device_size_gib: The maximum number of GiB to allocate on each device.
+    max_host_size_gib: The maximum number of GiB to allocate on the host.
+    page_size: The number of tokens per page.
+    enable_prefix_caching: Whether pages may be shared between requests with a
+      common prefix.
+    dtype: The data type of KV cache entries.
+  """
+
+  max_device_size_gib: float
+  max_host_size_gib: float = 0.0
+  page_size: int = 16
+  enable_prefix_caching: bool = True
+  dtype: jax.typing.DTypeLike
+
+  def __post_init__(self):
+    positive_checks = {
+        "page_size": self.page_size,
+        "max_device_size_gib": self.max_device_size_gib,
+    }
+    for field_name, value in positive_checks.items():
+      if value <= 0:
+        raise ValueError(f"{field_name} must be positive, got {value}.")
+
+    if self.max_host_size_gib < 0:
+      raise ValueError(
+          f"max_host_size_gib cannot be negative, got {self.max_host_size_gib}."
+      )
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class SchedulerConfig:
+  """Configuration for the scheduler.
+
+  Attributes:
+    max_num_batched_tokens: The maximum number of tokens that can be scheduled
+      in a single batch.
+    max_num_seqs: The maximum number of sequences that can be scheduled in a
+      single batch.
+    max_chunked_prefill_length: The maximum size of a chunked prefill request
+      in tokens.
+    num_scheduler_steps: The number of model forward passes to execute per
+      engine step.
+  """
+
+  max_num_batched_tokens: int
+  max_num_seqs: int
+  max_chunked_prefill_length: int
+  num_scheduler_steps: int = 1
+
+  def __post_init__(self):
+    is_positive = {
+        "max_num_batched_tokens": self.max_num_batched_tokens,
+        "max_num_seqs": self.max_num_seqs,
+        "max_chunked_prefill_length": self.max_chunked_prefill_length,
+        "num_scheduler_steps": self.num_scheduler_steps,
+    }
+    for field_name, value in is_positive.items():
+      if value <= 0:
+        raise ValueError(f"{field_name} must be positive, got {value}.")
+
+    if self.max_chunked_prefill_length > self.max_num_batched_tokens:
+      raise ValueError(
+          "max_chunked_prefill_length must be less than or equal to "
+          f"max_num_batched_tokens. Got {self.max_chunked_prefill_length} "
+          f"and {self.max_num_batched_tokens}."
+      )
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class ModelRunnerConfig:
+  """Configuration for the model runner.
+
+  Attributes:
+    max_top_k: The maximum `top_k` value allowed in `SamplingParams`.
+      <= 0 to set no limit.
+    mesh: The device mesh the transformer runs on.
+    return_logprobs: Whether to return logprobs.
+    return_logits: Whether to return logits.
+    num_scheduler_steps: The number of model forward passes to execute per
+      engine step.
+    seed: The engine's single sampling seed. Each step's key is derived from it,
+      and every row samples independently under that key.
+  """
+
+  max_top_k: int
+  mesh: jax.sharding.Mesh
+  return_logprobs: bool = False
+  return_logits: bool = False
+  num_scheduler_steps: int = 1
+  seed: int = 0
+
+  def __post_init__(self):
+    if self.num_scheduler_steps < 1:
+      raise ValueError(
+          "num_scheduler_steps must be positive, got"
+          f" {self.num_scheduler_steps}."
+      )

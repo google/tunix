@@ -92,6 +92,24 @@ class TunixCheckpointingOptions:
   step_name_format: StepNameFormatType | None = None
   enable_async_checkpointing: bool | None = None
   async_options: AsyncOptionsType | None = None
+  # Caps the GB a save copies from device to host at once; None: no cap.
+  device_host_concurrent_gb: int | None = None
+
+  def __post_init__(self) -> None:
+    if self.device_host_concurrent_gb is None:
+      return
+    if isinstance(self.device_host_concurrent_gb, bool) or not isinstance(
+        self.device_host_concurrent_gb, int
+    ):
+      raise TypeError(
+          "device_host_concurrent_gb must be an int or None, got"
+          f" {self.device_host_concurrent_gb!r}."
+      )
+    if self.device_host_concurrent_gb <= 0:
+      raise ValueError(
+          "device_host_concurrent_gb must be positive, got"
+          f" {self.device_host_concurrent_gb}."
+      )
 
 
 # Default checkpointing options for Tunix:
@@ -118,6 +136,7 @@ def create_checkpointing_options(
     step_name_format: StepNameFormatType | None = None,
     enable_async_checkpointing: bool | None = None,
     async_options: AsyncOptionsType | None = None,
+    device_host_concurrent_gb: int | None = None,
 ) -> TunixCheckpointingOptions:
   """Creates a TunixCheckpointingOptions instance."""
   return TunixCheckpointingOptions(
@@ -126,6 +145,7 @@ def create_checkpointing_options(
       step_name_format=step_name_format,
       enable_async_checkpointing=enable_async_checkpointing,
       async_options=async_options,
+      device_host_concurrent_gb=device_host_concurrent_gb,
   )
 
 
@@ -138,7 +158,8 @@ def resolve_checkpointing_defaults(
   protocol and cleanly extracts fields essential for Tunix. Legacy v0 fields
   (`save_interval_steps` or `max_to_keep`) are applied strictly as second-tier
   fallbacks, matching the explicit internal configuration logic used by Orbax V1
-  for backwards compatibility.
+  for backwards compatibility. `device_host_concurrent_gb` is kept from a
+  `TunixCheckpointingOptions`; other options carry no such cap.
 
   Args:
     options: The options object to resolve.
@@ -201,12 +222,21 @@ def resolve_checkpointing_defaults(
   else:
     async_options = DEFAULT_CHECKPOINTING_OPTIONS.async_options
 
+  # The cap is a Tunix extension: `CheckpointingOptions` has no such field, and
+  # v0 `ocp.CheckpointManagerOptions` do not set one.
+  device_host_concurrent_gb = (
+      options.device_host_concurrent_gb
+      if isinstance(options, TunixCheckpointingOptions)
+      else None
+  )
+
   return create_checkpointing_options(
       save_decision_policy=save_policy,
       preservation_policy=preserve_policy,
       step_name_format=step_name_format,
       enable_async_checkpointing=enable_async,
       async_options=async_options,
+      device_host_concurrent_gb=device_host_concurrent_gb,
   )
 
 

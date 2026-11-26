@@ -275,6 +275,16 @@ class VanillaInProcessDriver:
     with self._engine_lock:
       self._engine.reset_kv_caches()
 
+  def delete_kv_caches(self) -> None:
+    """Deletes the engine's physical device KV page buffers between steps."""
+    with self._engine_lock:
+      outputs = self._engine.delete_kv_caches()
+      with self._queue_lock:
+        finished = self._pop_finished_futures_locked(outputs)
+    for future, output in finished:
+      if not future.cancelled():
+        future.set_result(output)
+
   def stop(self) -> None:
     """Stops the loop thread, leaving pending futures untouched."""
     self._stop_event.set()
@@ -350,12 +360,17 @@ class VanillaInProcessDriver:
         return []
       outputs = self._engine.step()
       with self._queue_lock:
-        finished = []
-        for output in outputs:
-          future = self._pending.pop(output.request_id, None)
-          if future is not None:
-            finished.append((future, output))
-        return finished
+        return self._pop_finished_futures_locked(outputs)
+
+  def _pop_finished_futures_locked(
+      self, outputs: Sequence[request_lib.EngineResponse]
+  ) -> list[tuple[RequestFuture, request_lib.EngineResponse]]:
+    finished = []
+    for output in outputs:
+      future = self._pending.pop(output.request_id, None)
+      if future is not None:
+        finished.append((future, output))
+    return finished
 
   def __enter__(self) -> 'VanillaInProcessDriver':
     self.start()

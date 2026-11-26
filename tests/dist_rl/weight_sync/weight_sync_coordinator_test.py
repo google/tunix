@@ -32,13 +32,13 @@ import asyncio
 import dataclasses
 import threading
 import time
-import unittest
 from typing import Any, Mapping, Optional, Sequence
+import unittest
 
 from absl.testing import absltest
-
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.orchestrator import worker_registry
+from tunix.dist_rl.testing import worker_registry_testing
 
 try:
   from tunix.dist_rl.weight_sync import weight_sync
@@ -92,6 +92,7 @@ class FakeSource:
     self.port = 20000
     self.prepare_calls = 0
     self.release_calls = 0
+    self.release_failures_remaining = 0
 
   def info(self) -> datatypes.WorkerInfo:
     return self._info
@@ -126,6 +127,11 @@ class FakeSource:
   async def release_weight_sync(self, sync_request: Any = None, **kwargs):
     del sync_request, kwargs
     self._log.append(f"{self._info.worker_id}:release-start")
+    if self.release_failures_remaining > 0:
+      self.release_failures_remaining -= 1
+      raise ConnectionResetError(
+          f"{self._info.worker_id}: transient release failure"
+      )
     if self.release_gate is not None:
       self.release_entered.set()
       await self.release_gate.wait()
@@ -346,6 +352,8 @@ class FakeDestination:
 class FakeHandler(weight_sync.WeightSyncHandler):
   """Records registrations and transfers; moves the wire pattern on transfer."""
 
+  transfers_from_staged_copy = True
+
   def __init__(self, wire: Wire, log: list[str]):
     self._wire = wire
     self._log = log
@@ -418,10 +426,16 @@ class CoordinatorTestBase(absltest.TestCase):
         s._log = self.log  # pylint: disable=protected-access
     self.sources = sources
     for source in sources:
-      self.registry.register(source)
+      info = self.registry.register(source)
+      worker_registry_testing.set_status(
+          self.registry, info.worker_id, worker_registry.AdmissionStatus.ACTIVE
+      )
     for destination in destinations:
       destination._log = self.log  # pylint: disable=protected-access
-      self.registry.register(destination)
+      info = self.registry.register(destination)
+      worker_registry_testing.set_status(
+          self.registry, info.worker_id, worker_registry.AdmissionStatus.ACTIVE
+      )
     self.coordinator = weight_sync_coordinator.WeightSyncCoordinator(
         registry=self.registry,
         handler=self.handler,
@@ -549,6 +563,48 @@ class SuccessPathTest(CoordinatorTestBase):
     self.sync()
 
     self.assertEqual(self.sources[0].release_calls, 1)
+
+  def test_source_release_retries_on_transient_failure(self):
+    dest = FakeDestination("sampler", [])
+    self.make(dest)
+    self.sources[0].release_failures_remaining = 2
+
+    self.sync()
+
+    self.assertEqual(self.sources[0].release_calls, 1)
+    self.assertEqual(self.log.count("trainer:release-start"), 3)
+
+  def test_source_release_caps_retries_and_still_commits(self):
+    dest = FakeDestination("sampler", [])
+    self.make(dest)
+    self.sources[0].release_failures_remaining = 5
+
+    result = self.sync()
+
+    self.assertTrue(result.success)
+    self.assertEqual(self.sources[0].release_calls, 0)
+    self.assertEqual(self.log.count("trainer:release-start"), 3)
+
+  def test_source_release_does_not_retry_timeout(self):
+    dest = FakeDestination("sampler", [])
+    self.make(
+        dest,
+        timeouts=dataclasses.replace(FAST_TIMEOUTS, release=0.05),
+    )
+
+    async def _run():
+      self.sources[0].release_gate = asyncio.Event()
+      self.sources[0].release_entered = asyncio.Event()
+      try:
+        return await self.coordinator.sync(policy_version=1)
+      finally:
+        self.sources[0].release_gate.set()
+
+    result = asyncio.run(_run())
+
+    self.assertTrue(result.success)
+    self.assertEqual(self.sources[0].release_calls, 0)
+    self.assertEqual(self.log.count("trainer:release-start"), 1)
 
   def test_fresh_req_id_and_uuid_even_for_the_same_policy_version(self):
     dest = FakeDestination("sampler", [])
@@ -962,6 +1018,10 @@ class ProtocolRejectionTest(CoordinatorTestBase):
     registry = worker_registry.WorkerRegistry()
     registry.register(Bare())
     registry.register(dest)
+    for wid in registry.worker_ids():
+      worker_registry_testing.set_status(
+          registry, wid, worker_registry.AdmissionStatus.ACTIVE
+      )
     coordinator = weight_sync_coordinator.WeightSyncCoordinator(
         registry=registry, handler=FakeHandler(Wire(), []),
         timeouts=FAST_TIMEOUTS,
@@ -988,6 +1048,10 @@ class ProtocolRejectionTest(CoordinatorTestBase):
     registry = worker_registry.WorkerRegistry()
     registry.register(FakeSource("trainer", wire, []))
     registry.register(MetadataOnly())
+    for wid in registry.worker_ids():
+      worker_registry_testing.set_status(
+          registry, wid, worker_registry.AdmissionStatus.ACTIVE
+      )
     coordinator = weight_sync_coordinator.WeightSyncCoordinator(
         registry=registry, handler=FakeHandler(wire, []),
         timeouts=FAST_TIMEOUTS,
@@ -1004,6 +1068,9 @@ class ProtocolRejectionTest(CoordinatorTestBase):
     wire = Wire()
     registry = worker_registry.WorkerRegistry()
     registry.register(FakeSource("trainer", wire, []))
+    worker_registry_testing.set_status(
+        registry, "trainer", worker_registry.AdmissionStatus.ACTIVE
+    )
     coordinator = weight_sync_coordinator.WeightSyncCoordinator(
         registry=registry, handler=FakeHandler(wire, []),
         timeouts=FAST_TIMEOUTS,
@@ -1853,6 +1920,96 @@ class SourcePrepareTimeoutTest(CoordinatorTestBase):
     self.assertEqual(slow_source.release_calls, 1)
 
 
+class SourcePreparedSignalTest(CoordinatorTestBase):
+
+  def test_signal_fires_once_staged_and_before_destinations_are_touched(self):
+    dest = FakeDestination("sampler", [])
+    coordinator = self.make(dest)
+
+    async def scenario():
+      source_prepared = asyncio.Event()
+      round_task = asyncio.create_task(
+          coordinator.sync(2, source_prepared=source_prepared)
+      )
+      await asyncio.wait_for(source_prepared.wait(), timeout=5)
+      log_at_signal = list(self.log)
+      round_open_at_signal = not round_task.done()
+      return log_at_signal, round_open_at_signal, await round_task
+
+    log_at_signal, round_open_at_signal, result = asyncio.run(scenario())
+
+    # The source is staged and nothing else has happened: the caller may let
+    # the trainer go while the whole destination side is still ahead.
+    self.assertEqual(log_at_signal, ["trainer:prepare"])
+    self.assertTrue(round_open_at_signal)
+    self.assertTrue(result.success)
+    self.assertEqual(dest.serving, expected_pattern(2))
+
+  def test_signal_stays_unset_when_source_stages_nothing(self):
+    class _EmptySource(FakeSource):
+
+      async def prepare_weight_sync(self, sync_request: Any = None, **kwargs):
+        del sync_request, kwargs
+        return []
+
+    coordinator = self.make(
+        FakeDestination("sampler", []),
+        sources=[_EmptySource("trainer", Wire(), [])],
+    )
+    signal_set_after_round = []
+
+    async def scenario():
+      source_prepared = asyncio.Event()
+      try:
+        await coordinator.sync(1, source_prepared=source_prepared)
+      finally:
+        signal_set_after_round.append(source_prepared.is_set())
+
+    with self.assertRaises(WeightSyncError):
+      asyncio.run(scenario())
+
+    # A source that returned no metadata staged nothing a round can transfer.
+    self.assertEqual(signal_set_after_round, [False])
+
+  def test_signal_stays_unset_when_source_prepare_fails(self):
+    dest = FakeDestination("sampler", [])
+    slow_source = FakeSource("trainer", Wire(), [], prepare_delay=60)
+    coordinator = self.make(
+        dest,
+        sources=[slow_source],
+        timeouts=dataclasses.replace(FAST_TIMEOUTS, source_prepare=0.05),
+    )
+    signal_set_after_round = []
+
+    async def scenario():
+      source_prepared = asyncio.Event()
+      try:
+        await coordinator.sync(1, source_prepared=source_prepared)
+      finally:
+        signal_set_after_round.append(source_prepared.is_set())
+
+    with self.assertRaises(WeightSyncError):
+      asyncio.run(scenario())
+
+    # A caller waiting on the signal must learn of the failure from the round
+    # itself, never by being told the source is staged.
+    self.assertEqual(signal_set_after_round, [False])
+    self.assertEmpty(self.phases("sampler"))
+    self.assertEqual(slow_source.release_calls, 1)
+
+  def test_round_is_refused_when_transfer_reads_live_source_weights(self):
+    dest = FakeDestination("sampler", [])
+    coordinator = self.make(dest)
+    self.handler.transfers_from_staged_copy = False
+
+    # The caller may train once the source is staged, which such a transfer
+    # cannot tolerate; without the signal the round is an ordinary one.
+    with self.assertRaisesRegex(ValueError, "live weights"):
+      asyncio.run(coordinator.sync(2, source_prepared=asyncio.Event()))
+    self.assertEmpty(self.log)
+    self.assertTrue(asyncio.run(coordinator.sync(2)).success)
+
+
 class PhaseTimeoutsTest(absltest.TestCase):
 
   def test_defaults_align_with_default_rollout_drain(self):
@@ -1880,6 +2037,80 @@ class PhaseTimeoutsTest(absltest.TestCase):
 
     with self.assertRaises(ValueError):
       PhaseTimeouts.for_drain_timeout(0.0)
+
+
+class DestinationStatusFilterTest(CoordinatorTestBase):
+
+  def test_destination_statuses_filters_pending_weight_sync_workers(self):
+    d_active = FakeDestination("s-active", [])
+    d_pending = FakeDestination("s-pending", [])
+    self.make(d_active, d_pending)
+    worker_registry_testing.set_status(
+        self.registry,
+        "s-pending",
+        worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
+    )
+
+    # Default sync only targets ACTIVE destinations.
+    result_1 = self.sync(policy_version=1)
+    self.assertTrue(result_1.success)
+    self.assertEqual(d_active.serving, expected_pattern(1))
+    self.assertEqual(d_pending.serving, [0.0] * 4)
+    self.assertEqual([w.worker_id for w in result_1.workers], ["s-active"])
+
+    # Passing destination_statuses=(ACTIVE, PENDING_WEIGHT_SYNC) syncs both.
+    result_2 = asyncio.run(
+        self.coordinator.sync(
+            2,
+            destination_statuses=(
+                worker_registry.AdmissionStatus.ACTIVE,
+                worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
+            ),
+        )
+    )
+    self.assertTrue(result_2.success)
+    self.assertEqual(d_active.serving, expected_pattern(2))
+    self.assertEqual(d_pending.serving, expected_pattern(2))
+    self.assertEqual(
+        {w.worker_id: w.phase for w in result_2.workers},
+        {"s-active": "committed", "s-pending": "committed"},
+    )
+    self.assertEqual(
+        {w.worker_id: w.handle for w in result_2.workers},
+        {
+            "s-active": self.registry.handle("s-active"),
+            "s-pending": self.registry.handle("s-pending"),
+        },
+    )
+
+  def test_create_default_handler_returns_null_handler_for_none_and_rejects_invalid_modes(
+      self,
+  ):
+    for mode in (
+        weight_sync.WeightSyncMode.NONE,
+        "none",
+        "NONE",
+        weight_sync.WeightSyncMode.NOOP,
+        "noop",
+        "NOOP",
+    ):
+      with self.subTest(mode=mode):
+        self.assertIsInstance(
+            weight_sync_coordinator.create_default_handler(mode),
+            weight_sync_coordinator.NullHandler,
+        )
+    for mode in (
+        weight_sync.WeightSyncMode.IN_MEMORY,
+        weight_sync.WeightSyncMode.FS,
+        weight_sync.WeightSyncMode.NCCL,
+    ):
+      with self.subTest(mode=mode.value):
+        with self.assertRaisesRegex(NotImplementedError, "not implemented"):
+          weight_sync_coordinator.create_default_handler(mode)
+    for invalid_mode in ("no-op", "fallback", "invalid"):
+      with self.subTest(invalid_mode=invalid_mode):
+        with self.assertRaisesRegex(ValueError, "Unknown weight sync mode"):
+          weight_sync_coordinator.create_default_handler(invalid_mode)
 
 
 if __name__ == "__main__":

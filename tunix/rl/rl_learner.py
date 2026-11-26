@@ -21,16 +21,17 @@ from concurrent import futures
 import itertools
 import math
 import os
-from typing import Any, Callable, Dict, Generic, Iterable, Iterator, List, Sequence, TypeVar
+from typing import Any, Callable, Dict, Generic, Iterable, Iterator, List, Sequence, TypeAlias, TypeVar
 
 from absl import logging
 import jax
-from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
+from tunix.common import datatypes
 from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import common
 from tunix.rl import function_registry
+from tunix.rl import packing
 from tunix.rl import reward_manager
 from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl import utils as rl_utils
@@ -39,10 +40,10 @@ from tunix.sft import sharding_utils
 from tunix.sft import utils as sft_utils
 from tunix.utils import compat
 
-
 ABC = abc.ABC
 abstractmethod = abc.abstractmethod
 
+ArrayLike: TypeAlias = datatypes.ArrayLike
 TrainingInputT = Dict[str, List[str] | ArrayLike]
 
 # prompts, completions, **kargs -> rewards
@@ -151,12 +152,20 @@ class _ProcessShardedIterable:
 class RLLearner(abc.ABC, Generic[TConfig]):
   """Base class that should be extended by specific RL algorithms."""
 
+  def _uses_reward_model(self) -> bool:
+    """Returns True if this learner scores completions via a reward model."""
+    return (
+        self.algo_config.algo_variant == "ppo"
+        and "reward" in self.rl_engine.inference_worker._models
+        and self.rl_engine.inference_worker._models["reward"] is not None
+    )
+
   @compat.alias_init_param("rl_cluster", "rl_engine")
   def __init__(
       self,
       rl_engine: rl_engine_lib.RLEngine,
       algo_config: TConfig,
-      reward_fns: RewardFn | List[RewardFn],
+      reward_fns: RewardFn | Sequence[RewardFn] | None,
       metric_fns: Sequence[MetricFn] | None = None,
       data_shuffle_seed: int | None = None,
   ):
@@ -166,10 +175,13 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       rl_engine: RL engine containing actor, reference and reward models.
       algo_config: An instance of `AlgorithmConfig` containing all
         training-specific configuration options.
-      reward_fns: A single callable or a list of callables that compute a scalar
-        reward for given prompts and completions. Each function should accept
-        `prompts`, `completions` and optional keyword arguments, and return a
-        list of float rewards.
+      reward_fns: A single callable or a sequence of callables that compute a
+        scalar reward for given prompts and completions. Each function should
+        accept `prompts`, `completions` and optional keyword arguments, and
+        return a list of float rewards. Pass `None` when rewards are supplied
+        externally (e.g. `reward_mode='env'` trajectory rewards) or when the
+        learner scores completions with a reward model on `rl_engine` instead
+        (e.g. `PPOLearner`).
       metric_fns: A sequence of callables that compute metrics for the
         completions. Each callable should accept `prompts`, `completions`,
         `rewards`, `advantages` and optional keyword arguments, and return a
@@ -182,13 +194,15 @@ class RLLearner(abc.ABC, Generic[TConfig]):
     self.rl_engine = rl_engine
     self.algo_config = algo_config
 
-    reward_manager_fn = function_registry.get_reward_manager(
-        algo_config.reward_manager
-    )
-    self.reward_manager = reward_manager_fn(
-        reward_fns=reward_fns,
-        algo_config=algo_config,
-    )
+    self.reward_manager: reward_manager.AbstractRewardManager | None = None
+    if not (reward_fns is None and self._uses_reward_model()):
+      reward_manager_fn = function_registry.get_reward_manager(
+          algo_config.reward_mode
+      )
+      self.reward_manager = reward_manager_fn(
+          reward_fns=reward_fns,
+          algo_config=algo_config,
+      )
 
     self.metric_fns = metric_fns or []
     self.rl_engine.actor_trainer.is_managed_externally = True
@@ -207,7 +221,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
     )
 
     if self._packing_enabled:
-      assert self._training_config.max_seq_token_per_tpu is not None
+      assert self._training_config.max_seq_tokens_per_device is not None
       # Fail now rather than mid-run: a maximal sequence must fit one packed
       # row. `max_response_length` lives on the algo config for agentic
       # learners and on the rollout config elsewhere.
@@ -220,8 +234,8 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       else:
         r_config = rollout_config
 
-      rl_utils.validate_packing_budget(
-          self._training_config.max_seq_token_per_tpu,
+      packing.validate_packing_budget(
+          self._training_config.max_seq_tokens_per_device,
           getattr(r_config, "max_prompt_length", 1000000),
           getattr(algo_config, "max_response_length", None)
           or r_config.max_tokens_to_generate,
@@ -242,14 +256,11 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         )
     )
 
-    # Enable async rollout if trainer and rollout are not on the same mesh.
-    # If they do, then doesn't make sense for the interleave because they will
-    # have resource contention.
-    self.can_enable_async_rollout = (
-        self.rl_engine.cluster_config.role_to_mesh[rl_engine_lib.Role.ACTOR]
-        != self.rl_engine.cluster_config.role_to_mesh[
-            rl_engine_lib.Role.ROLLOUT
-        ]
+    # Enable async rollout if trainer and rollout are not colocated on the same
+    # physical devices. If they are colocated, interleaving causes resource
+    # contention.
+    self.can_enable_async_rollout = not self.rl_engine.is_colocated(
+        rl_engine_lib.Role.ACTOR, rl_engine_lib.Role.ROLLOUT
     )
     self.executor = futures.ThreadPoolExecutor(max_workers=1)
     self._last_iter_step = self.rl_engine.actor_trainer.iter_steps
@@ -307,10 +318,17 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       provided reward functions.
 
     Raises:
-        RuntimeError: If 'r' reward is None, indicating a failure to obtain the
+      ValueError: If `self.reward_manager` is None or if `kwargs` already
+        contains `mode` as a key.
+      RuntimeError: If 'r' reward is None, indicating a failure to obtain the
         result, or if the length of 'r' reward does not match the length of
         'prompts'.
     """
+    if self.reward_manager is None:
+      raise ValueError(
+          "reward_manager is not initialized because this learner uses a"
+          " reward model instead of reward_fns."
+      )
     if "mode" in kwargs:
       raise ValueError(f"kwargs already contains mode as a key: {kwargs}")
     kwargs["mode"] = str(mode)
@@ -625,8 +643,8 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         if key not in buffer:
           buffer[key] = []
 
-        if isinstance(values, (np.ndarray, jax.Array)):
-          buffer[key].extend(list(values.flatten()))
+        if isinstance(values, datatypes.TensorLike):
+          buffer[key].extend(list(np.asarray(values).flatten()))
         elif isinstance(values, (list, tuple)):
           buffer[key].extend(values)
         else:
@@ -674,10 +692,10 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         # every process must launch in the same order; from two threads they
         # can interleave differently on different processes and hang.
         logging.warning(
-            "TUNIX_PER_HOST_LEARNER=1: the actor and rollout meshes differ,"
-            " but asynchronous rollout is turned off. Data loading stays"
-            " synchronous so that every process launches its multi-process"
-            " programs (logprobs, train steps) in the same order."
+            "TUNIX_PER_HOST_LEARNER=1: the actor and rollout are not"
+            " colocated, but asynchronous rollout is turned off. Data loading"
+            " stays synchronous so that every process launches its"
+            " multi-process programs (logprobs, train steps) in the same order."
         )
         self.can_enable_async_rollout = False
       train_ds = _ProcessShardedIterable(
@@ -909,8 +927,8 @@ class RLLearner(abc.ABC, Generic[TConfig]):
 
     Under the per-host learner they need TUNIX_PER_HOST_SAFE_LOGPS=1. Mirrors
     GRPOLearner: reference logps when beta != 0; trainer (actor) logps when
-    use_rollout_logps is off or sampler_is/sampler_rs/
-    seq_logprob_error_threshold is set.
+    score_centering is off and use_rollout_logps is off or sampler_is/
+    sampler_rs/seq_logprob_error_threshold is set.
 
     Returns:
       A description of each pass that runs; empty if none does.
@@ -932,7 +950,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         )
         if value is not None
     ]
-    if reasons:
+    if reasons and not cfg.score_centering:
       passes.append(f"trainer logprobs ({', '.join(reasons)})")
     return passes
 
@@ -1015,6 +1033,11 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       skip_jit: bool,
   ) -> None:
     """Run one global step."""
+    if self.algo_config.score_centering and mini_batch_size < full_batch_size:
+      raise ValueError(
+          "score_centering needs one on-policy update per batch:"
+          " num_iterations=1 and mini_batch_size >= the batch size."
+      )
     for _ in range(full_batch_size // mini_batch_size):
       initial_steps = self._iter_steps
 
@@ -1097,7 +1120,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
 
     train_data_gen = queue_iterator()
     if self._packing_enabled:
-      assert self._training_config.max_seq_token_per_tpu is not None
+      assert self._training_config.max_seq_tokens_per_device is not None
       mesh = self.rl_engine.cluster_config.role_to_mesh[
           rl_engine_lib.Role.ACTOR
       ]
@@ -1106,16 +1129,16 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       pack_size = rl_utils.compute_pack_size(mesh)
 
       logging.info(
-          "Using sequence packing with max_seq_token_per_tpu: %d, "
+          "Using sequence packing with max_seq_tokens_per_device: %d, "
           " pack_size: %d",
-          self._training_config.max_seq_token_per_tpu,
+          self._training_config.max_seq_tokens_per_device,
           pack_size,
       )
       # Update boundary in sequences (mini-batch semantics): packing is
       # independent of any micro-batch/streaming granularity.
       train_data_gen = rl_utils.pack_sequences(
           train_data_gen,
-          self._training_config.max_seq_token_per_tpu,
+          self._training_config.max_seq_tokens_per_device,
           sequences_per_update=mini_batch_size * self._num_generations(),
           pack_size=pack_size,
           max_segments_per_packed_row=getattr(

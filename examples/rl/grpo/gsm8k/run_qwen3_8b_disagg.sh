@@ -103,7 +103,7 @@ python -m tunix.cli.grpo_main \
   reward_functions=["tunix/cli/reward_fn/gsm8k.py"] \
   verl_compatible=false \
   \
-  `# -- Rollout engine (vanilla | vllm | sglang_jax) ---------------------` \
+  `# -- Rollout engine (vanilla | vllm) ----------------------------------` \
   rollout_engine="vllm" \
   offload_to_cpu=false \
   \

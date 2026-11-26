@@ -1,0 +1,637 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Base configuration for the distributed RL launchers in tunix/dist_rl/launch/.
+# Sections shared with tunix/cli/base_agentic_config.yaml keep its key names.
+# Keys the distributed RL nodes do not read are left out, so setting one is an
+# error instead of a silent no-op.
+
+################################## LOAD MODEL ##################################
+model_config: &base_model_config
+  model_name: "Qwen3-1.7B"
+  # Supported sources: "kaggle" | "huggingface" | "gcs" | "internal" | "maxtext"
+  model_source: "huggingface"
+  model_id: "Qwen/Qwen3-1.7B"
+  # If model_source is "maxtext", this is the Orbax checkpoint path.
+  model_path: ""
+  # Defaults to <artifact_root>/models/<model_name> when empty.
+  model_download_path: ""
+  # Not used by the distributed RL nodes: the shared `tunix.cli` config
+  # validation requires it for the "huggingface" and "kaggle" sources.
+  intermediate_ckpt_dir: "/tmp/intermediate_ckpt/"
+  # Not supported yet: the resolver rejects any value but null. LoRA always
+  # initializes with seed 0.
+  # TODO(noghabi): Seed the LoRA init (and the model init, once the trainer
+  # loads through `tunix.cli`'s `create_model`) and rollout sampling from it.
+  rng_seed: null
+  dtype: "float32"
+  load_dtype: "float32"
+  remat_config: "none"
+  use_flash_attention: false
+  flash_attention_block_size: null
+  lora_config: {}
+  mesh:
+    shape: "(1,2)"
+    axis_names: "('fsdp','tp')"
+  # Architecture / MaxText overrides (e.g. maxtext_model_name, maxtext_output_dir,
+  # padded_moe_mlp_dim, warmup_steps_fraction, attention, skip_step_on_spikes,
+  # skip_step_on_nan, skip_step_interval, skip_step_scaling_factor).
+  # `maxtext_model_name` (e.g. "qwen3-0.6b") is required when `model_source` is
+  # "maxtext".
+  kwargs: {}
+
+actor_model_config:
+  <<: *base_model_config
+  # Stops gradients into MoE router weights (`router_logits` and `router_scale`);
+  # requires the Tunix trainer and a model supporting `freeze_router` (Gemma 4).
+  freeze_router: false
+
+reference_model_config:
+  <<: *base_model_config
+
+rollout_model_config:
+  <<: *base_model_config
+
+################################## Tokenizer ##################################
+tokenizer_config:
+  # Accepts a Hugging Face hub id or a local, CNS, or GCS path.
+  tokenizer_path: "Qwen/Qwen3-1.7B"
+  tokenizer_type: "huggingface"
+
+################################## TASK ##################################
+# Every task YAML sets `data_module`, `registry_module`, `env_class_path` and
+# `agent_class_path`; `launch.sh` does not start a run without them.
+# Module whose `create_dataset(**data_config)` returns the task records.
+data_module: ""
+# Module (e.g. `tunix.dist_rl.examples.math_gsm8k_dist.gsm8k`) that the rollout
+# node imports to register the task's environments and agents.
+registry_module: ""
+# Default semantic task_name for data_module records without one; required
+# unless every record sets task_name.
+task_name: ""
+data_config:
+  split: "train"
+  shuffle: true
+  seed: 42
+batch_size: 4
+# Not supported yet: the resolver rejects any value but null. The dataset
+# repeats, and `rl_training_config.max_steps` alone sets the training length.
+# TODO(noghabi): Stop after `num_train_epochs` passes over the dataset.
+num_train_epochs: null
+# Not supported yet: the resolver rejects any value but null, since the
+# distributed RL path runs no evaluation.
+# TODO(noghabi): Hold out `train_fraction` of the dataset and evaluate on
+# `num_test_batches` batches of it every
+# `rl_training_config.eval_every_n_steps` steps.
+train_fraction: null
+num_test_batches: null
+
+############################### Training Config ###############################
+rl_training_config:
+  max_steps: 1
+  # Not supported yet (see `train_fraction`): the resolver rejects any value
+  # but null.
+  eval_every_n_steps: null
+  # Defaults to <cluster_config.artifact_root>/checkpoints when empty.
+  checkpoint_root_directory: ""
+  checkpointing_options:
+    max_to_keep: 10
+    save_interval_steps: 1
+    enable_async_checkpointing: true
+    timeout_secs: 1200
+  # Null logs no metrics, and no trajectories unless
+  # `dist_training_config.trajectory_log_dir` is set.
+  metrics_logging_options:
+    project_name: "tunix-dist-rl"
+    run_name: ""
+    # Defaults to <cluster_config.artifact_root>/metrics when empty. The
+    # orchestrator also logs the trajectories of each step under
+    # <log_dir>/trajectories, unless `dist_training_config.trajectory_log_dir`
+    # is set or `dist_training_config.trajectory_logging` is false.
+    log_dir: ""
+    flush_every_n_steps: 1
+  profiler_options:
+    log_dir: "/tmp/profiling"
+    skip_first_n_steps: 1
+    profiler_steps: 0
+  max_seq_tokens_per_device: null
+  # TODO(b/583675740): Deprecate max_seq_token_per_tpu in favor of
+  # max_seq_tokens_per_device.
+  max_seq_token_per_tpu: null
+  max_segments_per_packed_row: null
+  # Defaults to `batch_size` when null.
+  mini_batch_size: null
+  train_micro_batch_size: 1
+  compute_logps_micro_batch_size: 1
+  compute_logps_chunk_size: 0
+  actor_optimizer_config:
+    learning_rate: 2.0e-7
+    opt_type: "adamw"
+    schedule_type: "warmup_cosine_decay_schedule"
+    value: null
+    peak_value: null
+    init_value: 0.0
+    end_value: 0.0
+    warmup_ratio: 0.1
+    b1: 0.9
+    b2: 0.999
+    eps: 1.0e-8
+    weight_decay: 0.01
+    warmup_steps: null
+    decay_steps: 500
+    # Gradient clipping, chained ahead of the optimizer (same contract as
+    # `tunix.cli.config.create_optimizer`).
+    opt_chain_type: "clip_by_global_norm"
+    chain_kwargs:
+      max_norm: 1.0
+
+############################### Rollout Config ###############################
+rollout_config:
+  total_generation_steps: 1024
+  max_prompt_length: 1024
+  temperature: 1.0
+  top_p: 1.0
+  top_k: -1
+  # Comma-separated token ids or token strings that end a generation, e.g.
+  # "151645,151643" for Qwen3. When empty, generation stops on the tokenizer's
+  # EOS token only, and the rollout cannot tell a finished response from a
+  # truncated one. Each task YAML sets it for its model.
+  eos_tokens: ""
+
+############################### Other RL Config ###############################
+rollout_engine: "inprocess_vllm"
+vllm_config:
+  # null: `rollout_engine: vllm` defers to vLLM's native default
+  # (`gpu_memory_utilization` is not set); `inprocess_vllm` uses 0.5.
+  hbm_utilization: null
+  tpu_backend_type: "jax"
+  # Start the rollout from random weights instead of loading the checkpoint.
+  # Null means true exactly when `weight_sync_config.mode` is "raiden", whose
+  # bootstrap sync loads the trainer's weights before step 0; otherwise a
+  # non-MaxText rollout loads the checkpoint. An explicit true requires
+  # "raiden"; only `rollout_engine: inprocess_vllm` reads it. A MaxText rollout
+  # (`rollout_model_config.model_source: maxtext`) never loads the checkpoint,
+  # so it always needs "raiden".
+  init_with_random_weights: null
+  enable_prefix_caching: false
+  async_scheduling: false
+  max_num_seqs: null
+  max_num_batched_tokens: null
+  max_model_len: null
+  dtype: "bfloat16"
+  # Distributed rollout settings, validated by `DistHyperParameters` and read
+  # by the rollout node and the orchestrator.
+  # Capture the MoE experts each token was routed to, so the trainer can replay
+  # them (needs a vLLM `rollout_engine`, not "vanilla").
+  return_routed_experts: false
+  # Compact encoding for captured routed experts, one of
+  # `tunix.common.datatypes.ROUTED_EXPERTS_ENCODE_MODES`.
+  routed_experts_encode_mode: "auto"
+  # Experts per MoE layer (E), a positive int or null; captured ids >= E are
+  # rejected. With `routed_experts_encode_mode: "auto"`, the tier comes from E
+  # instead of the ids seen.
+  routed_experts_num_experts: null
+  # Detokenize vLLM outputs so `SamplingResponse.text` is populated
+  # (`rollout_engine: vllm` only). Agentic recipes that parse the action from
+  # the completion text need this. Token-only workflows can set it to false,
+  # but vLLM then rejects stop strings, so stop on `eos_tokens` ids instead.
+  # TODO(yatlas): Always detokenize and remove this option.
+  detokenize: true
+  # Skip tpu_inference's precompilation of every input shape at engine start;
+  # each shape then compiles on first use. The rollout node sets
+  # `SKIP_JAX_PRECOMPILE` from it.
+  skip_jax_precompile: true
+  # Extra vLLM engine arguments for `rollout_engine: vllm` or `inprocess_vllm`.
+  # Keys owned by other config fields are rejected; `additional_config` (and its
+  # `maxtext_config`) is deep-merged onto what the rollout node builds.
+  engine_kwargs: {}
+
+chat_parser_config:
+  type: "raw"
+  enable_thinking: false
+
+# Registered names of the task's agent and environment (see `registry_module`).
+# Each task YAML sets them.
+agent_class_path: ""
+agent_kwargs: {}
+env_class_path: ""
+env_kwargs: {}
+kubernetes_config: {}
+
+agentic_grpo_config:
+  num_generations: 8
+  # Optimizer passes over each rollout batch. Not supported yet: the resolver
+  # rejects any value but 1.
+  # TODO(noghabi): Run `num_iterations` passes per batch in
+  # `StandardRLProgram`.
+  num_iterations: 1
+  # KL penalty against the reference model. Above 0, the run needs a reference
+  # inference worker (`cluster_config.run_inference_node`).
+  beta: 0.0
+  epsilon: 0.2
+  epsilon_high: 0.28
+  loss_algo: "grpo"
+  loss_agg_mode: "sequence-mean-token-mean"
+  kl_loss_mode: "low_var_kl"
+  advantage_estimator: "grpo"
+  sampler_is: "token"
+  sampler_is_threshold: 2.0
+  # Rejection sampling, separate from `sampler_is`. "geometric" zeroes the loss
+  # weight of each sequence whose geometric-mean trainer/sampler probability
+  # ratio is outside [sampler_rs_min, sampler_rs_max], "token" that of each
+  # token whose ratio is; null disables it.
+  sampler_rs: null
+  # Keep-band of `sampler_rs`, which requires it. Set both ends or neither,
+  # with 0 <= sampler_rs_min <= sampler_rs_max.
+  sampler_rs_min: null
+  sampler_rs_max: null
+  # Drops from the loss each sequence whose mean per-token
+  # exp|log p_trainer - log q_sampler| exceeds this (>= 1.0); null disables
+  # it. This and `sampler_rs` need `use_rollout_logps: true`, which the
+  # resolver checks.
+  seq_logprob_error_threshold: null
+  max_concurrency: 256
+  off_policy_steps: 0
+  max_version_span: null
+  trajectory_group_order: "trajectory_completion"
+  # Drop prompt groups whose rewards tie (zero variance) and sample replacement
+  # prompts, as in DAPO's dynamic sampling (https://arxiv.org/abs/2503.14476).
+  # Requires `trajectory_group_order: "trajectory_completion"`.
+  drop_zero_variance_groups: false
+  # Fail after this many consecutive groups are dropped by
+  # `drop_zero_variance_groups`. Null disables the guard.
+  max_consecutive_filtered_groups: null
+  reward_mode: "env"
+  episode_timeout: 600
+  max_turns: 8
+  overlong_filter: false
+  use_rollout_logps: true
+
+############################# Reward Fns #############################
+verl_compatible: false
+# Orchestrator-side reward functions (`HyperParameters.obtain_reward_fn`).
+# `agentic_grpo_config.reward_mode: "reward_fn"` needs at least one; with
+# `"env"` they are added to the environment rewards.
+reward_functions: []
+
+######################## Distributed RL Extensions ########################
+# Per-role `<framework>:<accelerator>` execution target contract
+# (e.g. "jax:tpu", "jax:gpu", "torch:tpu"). Role-specific keys (`trainer`,
+# `rollout`, `inference`) inherit from `target` when left empty.
+execution_targets:
+  target: "jax:tpu"
+  trainer: ""
+  rollout: ""
+  inference: ""
+  placement: "disaggregated" # "colocated" or "disaggregated"
+
+# Trainer/orchestrator knobs that are not part of the `tunix.cli` training
+# config. Kept out of `rl_training_config` so the shared
+# `BasePipeline.create_rl_training_config()` builder accepts it unchanged.
+dist_training_config:
+  # Caps the GB a checkpoint save copies from device to host at once. null
+  # keeps the backend's default: MaxText's own cap
+  # (`checkpoint_storage_device_host_concurrent_gb`, 8 GB). Only the MaxText
+  # trainer takes a value; the Tunix trainer rejects one for now.
+  ckpt_d2h_concurrent_gb: null
+  # Extra MaxText config keys for a MaxText trainer
+  # (`actor_model_config.model_source: maxtext`): a mapping of MaxText key to a
+  # str, int, float or bool, e.g. `{remat_policy: custom, sa_block_q: 1024}`,
+  # or `dist_training_config.maxtext_extra_config.remat_policy=custom` on the
+  # command line. The trainer appends them to the MaxText config it builds.
+  # Keys it builds from this config (e.g. `learning_rate`,
+  # `per_device_batch_size`, `ici_fsdp_parallelism`) are rejected; set the
+  # config keys instead. Set them here, not in the `MAXTEXT_EXTRA_FLAGS` or
+  # `M_<KEY>` environment variables, which `launch.sh` rejects.
+  maxtext_extra_config: {}
+  profiler_period: -1
+  segment_alignment_boundary: 1
+  # Precompile the trainer step before the first rollout batch arrives.
+  precompile_trainer: true
+  # Whether the orchestrator logs the trajectories of each step, to
+  # `trajectory_log_dir` or, when that is empty, under <log_dir>/trajectories
+  # of `rl_training_config.metrics_logging_options` (none when that is null).
+  # false requires an empty `trajectory_log_dir`.
+  trajectory_logging: true
+  trajectory_log_dir: ""
+
+weight_sync_config:
+  # Weight synchronization transport mode ("none", "in_memory", "raiden", "fs",
+  # or "nccl"). "fs" selects disaggregated file/object-store staged weight sync,
+  # orthogonal to checkpoint serialization format ("orbax" vs "safetensors") and
+  # storage backend ("gcs" gs://, "GOOGLE_INTERNAL_STOAGE_PATH" /GOOGLE_INTERNAL_STOAGE_PATH/, or "local" POSIX paths via epath).
+  mode: "none"
+  use_weight_converter: true
+  prefuse_moe_weights: true
+  # Log weight checksums on both sides of each sync, and Raiden's transfer
+  # metrics. The trainer and rollout nodes set `VERIFY_WEIGHTS` from it.
+  verify_weights: false
+  in_flight_weight_updates: false
+  # Settings of `mode: "raiden"`.
+  raiden:
+    # Whether the k8s trainer syncs through Raiden's FFI path
+    # (`RAIDEN_USE_FFI`). null: on for a Pathways trainer
+    # (`jobset.pathways.yaml`), otherwise left to Raiden. The k8s rollout never
+    # uses it. `local.sh` does not apply it.
+    use_ffi: null
+    # Comma-separated NICs Raiden sends weights over, e.g. "eth0,eth1". Empty
+    # lets Raiden pick by its own heuristic. The trainer and rollout nodes set
+    # `TPU_RAIDEN_DATA_NICS` from it when it is not empty, and so do the k8s
+    # templates that set Raiden variables on their containers
+    # (`jobset.pathways.yaml`, `jobset.mcjax.ray.yaml`, `jobset.tpu.yaml`).
+    data_nics: "eth0"
+    # `RAIDEN_BROADCAST_K` and `ENABLE_MULTI_NUMA` of the containers in those
+    # templates (`jobset.tpu.yaml` sets no `RAIDEN_BROADCAST_K`). Only `k8s.sh`
+    # applies them.
+    broadcast_k: 64
+    multi_numa: false
+
+trajectory_store_config:
+  enable: false
+  backend: "file"
+  # Empty with the "file" backend: `<cluster_config.artifact_root>/trajectory_store`.
+  dir: ""
+
+# OpenTelemetry export of every node's metrics and lineage event logs to an
+# OTLP/gRPC collector (`tunix/dist_rl/common/otel_setup.py`).
+otel_config:
+  enable: false
+  # On k8s (`launch.sh otel`), ship metrics and event logs from the in-cluster
+  # collector to Cloud Monitoring and Cloud Logging alongside `debug` and
+  # `file/events`. Set `false` on clusters without GCP credentials.
+  googlecloud: true
+  # Empty with `enable: true`: the collector that `launch.sh otel` deploys on
+  # k8s (`http://<cluster_config.k8s.otel_id>:<cluster_config.ports.otel>`), or
+  # `http://localhost:<cluster_config.ports.otel>` on local.
+  # `cluster_config.target: external` requires an explicit value.
+  endpoint: ""
+  # Keep in sync with `otel_setup.DEFAULT_EXPORT_INTERVAL_MS` / `_TIMEOUT_S`.
+  export_interval_ms: 10000
+  export_timeout_s: 5.0
+  # Cloud Monitoring dashboard the orchestrator links to at startup, filtered
+  # to `cluster_config.run_id`. Set both or neither.
+  dashboard_id: ""
+  dashboard_project: ""
+
+cluster_config:
+  # Where the processes run and what starts them: "local" (one host,
+  # `local.sh`) or "k8s" (GKE, `k8s.sh`), both through `launch.sh`; or
+  # "external", processes started by another launcher (e.g. a job scheduler
+  # that starts each process separately), which `launch.sh` rejects.
+  target: "local"
+  # Relative paths are resolved against the repo root on `target: local` and
+  # against the container working directory (repo root) on `target: k8s`;
+  # `target: external` requires an absolute filesystem path. URIs such as
+  # `gs://...` are rejected; set the output paths themselves (checkpoints,
+  # metrics, trajectory store) to URIs instead. The models, checkpoints, and
+  # metrics default to subdirectories of it. Each task recipe sets its own
+  # value.
+  artifact_root: "artifacts/dist_rl"
+  run_id: ""
+  # Print the commands (local) or manifests (k8s) instead of launching.
+  dry_run: false
+  debug: false
+  rpc_timeout_s: 1800.0
+  # Seconds the orchestrator waits for every worker to register; null waits
+  # forever (the previous example orchestrators did the same).
+  # TODO(noghabi): Default to a finite timeout, so a worker that never
+  # registers (e.g. a reference worker started separately) fails the run
+  # instead of hanging it. Choose the value per cluster target from measured
+  # worker startup times: one fixed value would also fail healthy k8s runs
+  # whose TPU JobSets Kueue is still queueing, or whose workers are still
+  # loading their model. On local, `local.sh` already fails a worker whose
+  # port never opens (`cluster_config.local.wait_timeout_secs`).
+  init_timeout_s: null
+  stop_workers_on_exit: true
+  # Rollout worker fault tolerance (`FaultToleranceConfig`). When `enabled` is
+  # false, `max_task_retries` resolves to 0, `min_active_rollout_ratio` is
+  # ignored, and a null `poll_retry_budget_s` resolves to 300.0 s instead of
+  # 60.0 s.
+  fault_tolerance:
+    enabled: true
+    max_task_retries: 1
+    poll_retry_budget_s: null
+    min_active_rollout_ratio: 0.5
+    min_active_rollout_grace_s: 900.0
+  # Start a reference inference worker (for the KL penalty). Null means
+  # `agentic_grpo_config.beta > 0`. Set false to use a reference worker started
+  # separately; it registers with the orchestrator through discovery.
+  run_inference_node: null
+  # Rollout workers in the cluster: `k8s.sh` deploys this many, and an external
+  # launcher starts this many. `target: local` requires 1 (`local.sh` starts
+  # one). With more than one, each rollout reads its 0-based index from the
+  # `DIST_RL_ROLLOUT_REPLICA` environment variable.
+  rollout_replicas: 1
+  # Minimum rollout workers the orchestrator waits for before starting
+  # bring-up; slower initial replicas join in the background and promote to
+  # `ACTIVE` on weight sync. Null waits for all `rollout_replicas`.
+  min_rollout_replicas: null
+  # One block per process. The keys mean the same on every target; a launcher
+  # that does not apply one says so below.
+  # - `main`: the process's entry point. The orchestrator main is shared by
+  #   every task; the task comes from `data_module`, `reward_functions` and the
+  #   rollout `env_class_path`/`agent_class_path`.
+  # - `port`: the port the process listens on. On `target: external`, a worker
+  #   (trainer, rollout, or inference) listens on the port in the
+  #   `DIST_RL_WORKER_PORT` environment variable instead; the launcher assigns
+  #   one to each worker.
+  # - `env`: extra `KEY: "VALUE"` string environment variables (`local.sh` and
+  #   `k8s.sh`; rejected on `target: external`). Rejects config-backed library
+  #   vars, `T_*`/`M_*` overrides, and worker identity vars; logged in resolved
+  #   configs, so omit credentials.
+  # - `memory`: `request` and `limit` of the process's container, as Kubernetes
+  #   quantities (e.g. "48G"); an empty value sets none. Only `k8s.sh` applies
+  #   them: to the orchestrator, and to a trainer or rollout whose template is
+  #   `jobset.pathways.yaml` (the other templates set their own).
+  # Per-role settings that apply to one target stay under that target:
+  # `k8s.<role>_id`, `k8s.trainer`/`k8s.rollout`, `k8s.cpu_machine` and
+  # `k8s.cpu_nodepool` (orchestrator), `local.<role>_devices`, and
+  # `local.trainer_shutdown_grace_secs`.
+  roles:
+    orchestrator:
+      main: "tunix.dist_rl.launch.nodes.orchestrator.main"
+      port: 30000
+      env: {}
+      memory:
+        request: ""
+        limit: ""
+    trainer:
+      main: "tunix.dist_rl.launch.nodes.trainer.main"
+      port: 20000
+      env: {}
+      memory:
+        request: "48G"
+        limit: "70G"
+    rollout:
+      main: "tunix.dist_rl.launch.nodes.rollout.main"
+      port: 20001
+      env: {}
+      memory:
+        request: "48G"
+        limit: "70G"
+    inference:
+      main: "tunix.dist_rl.launch.nodes.inference.main"
+      port: 20002
+      env: {}
+  ports:
+    # OTLP gRPC port of the OpenTelemetry collector that `launch.sh otel`
+    # deploys on k8s.
+    otel: 4317
+  # Pathways deployment of a trainer or rollout. Only `k8s.sh` applies these,
+  # to the roles whose template is `jobset.pathways.yaml`; `trainer` applies to
+  # the trainer only.
+  pathways:
+    server_image: "us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/server:latest"
+    proxy_image: "us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/proxy_server:latest"
+    # `request` and `limit` (Kubernetes quantities) of the Pathways containers;
+    # an empty value sets none. `proxy_memory` and `rm_memory` size the
+    # pathways-proxy and resource-manager containers of the head pod, which
+    # also runs the role's own container (`roles.<role>.memory`).
+    # `server_memory` sizes the Pathways server (the pathways-worker container,
+    # `server_image`) on each TPU host.
+    proxy_memory:
+      request: "16G"
+      limit: "190G"
+    rm_memory:
+      request: "4G"
+      limit: "32G"
+    server_memory:
+      request: "100G"
+      limit: ""
+    gcs_scratch_location: "gs://cloud-pathways-staging/tmp"
+    # Extra `KEY: "VALUE"` environment variables of the pathways-worker
+    # containers, e.g. `LIBTPU_INIT_ARGS`.
+    worker_env: {}
+    # Extra arguments of the pathways-proxy container, separated by spaces.
+    proxy_extra_args: ""
+    # Colocated Python sidecar of the pathways-worker pods. An empty `image`
+    # runs none. `shm` shares a memory-backed directory with pathways-worker.
+    sidecar:
+      image: ""
+      memory:
+        request: "16Gi"
+        limit: ""
+      shm: true
+    # Settings `k8s.sh` applies to the trainer's Pathways template alone.
+    trainer:
+      # Sets `ENABLE_PATHWAYS_PERSISTENCE` on the trainer.
+      persistence: false
+      # Host buffers of at least this many bytes go from the trainer to
+      # pathways-proxy through shared memory instead of localhost gRPC. null
+      # keeps the IFRT proxy client's default, which turns this off.
+      ifrt_proxy_large_transfer_threshold_bytes: null
+      # GCSFuse mount for checkpoints, e.g. of a zonal Rapid bucket near the
+      # TPUs: the trainer's role container, every pathways-worker and the
+      # sidecar mount `bucket` at `mount_path`. An empty `bucket` mounts none.
+      # To write checkpoints there, set a MaxText trainer's `checkpoint_dir`
+      # under `mount_path`
+      # (`dist_training_config.maxtext_extra_config.checkpoint_dir`).
+      checkpoint_gcsfuse:
+        bucket: ""
+        mount_path: "/gcs/ckpt"
+        mount_options: "implicit-dirs,metadata-cache:negative-ttl-secs:0"
+  local:
+    auto_detect_devices: false
+    download_model_weights: true
+    trainer_devices: "0,1"
+    rollout_devices: "2,3"
+    inference_devices: ""
+    tpu_chips_per_host_bounds: "1,2,1"
+    tpu_host_bounds: "1,1,1"
+    allow_multiple_libtpu_load: true
+    trainer_pathways: false
+    jax_backend_target: "grpc://127.0.0.1:29000"
+    worker_shutdown_grace_secs: 10
+    trainer_shutdown_grace_secs: 900
+    force_arm_secs: 5
+    # How long `local.sh` waits for each worker's port to open, how often it
+    # polls, and what it prints while waiting.
+    wait_timeout_secs: 1800
+    wait_poll_secs: 5
+    wait_debug_every_polls: 6
+    wait_log_tail_lines: 40
+  k8s:
+    namespace: "default"
+    kueue_queue_name: ""
+    # Kueue / GKE scheduling for every JobSet; a `leaderworkerset.*.yaml`
+    # rollout takes none of these. Empty values keep the template defaults.
+    preemptible: false
+    priority_class: ""
+    service_account: ""
+    # Pod termination grace period for every JobSet; null keeps each template's
+    # default (300 s for the orchestrator, 10 s for the workers).
+    termination_grace_seconds: null
+    orchestrator_id: ""
+    trainer_id: ""
+    rollout_id: ""
+    inference_id: ""
+    # Name of the OpenTelemetry collector Deployment and Service that
+    # `launch.sh otel` deploys (default `<user>-otel`). To export metrics and
+    # lineage event logs to it, set `otel_config.enable=true` when launching.
+    otel_id: ""
+    cpu_machine: "n2-standard-64"
+    # Orchestrator node pool. Empty selects the node by `cpu_machine`.
+    cpu_nodepool: ""
+    # Container image for the trainer/rollout pods; required for target=k8s
+    # (`k8s.sh` fails fast when empty). Example launchers set it.
+    tunix_image: ""
+    # Compute Engine reservation the TPU pods of a `jobset.*.yaml` trainer or
+    # rollout must run on; empty sets none. A `leaderworkerset.*.yaml` rollout
+    # does not take it.
+    tpu_reservation: ""
+    # Fail-fast restarts for the trainer and rollout JobSets: a failed pod fails
+    # its Job instead of restarting in place, and JobSet recreates the whole
+    # JobSet up to `startup_retries` times. Needs `jobset.*.yaml` worker
+    # templates; `leaderworkerset.*.yaml` has no fail-fast mode.
+    fail_fast: false
+    # JobSet `failurePolicy.maxRestarts` for the trainer and rollout JobSets,
+    # counted over each JobSet's lifetime. A recreated trainer can re-register
+    # only before `bring_up`, so pair `fail_fast` with `teardown_gang_on_exit`.
+    startup_retries: 3
+    # Labels every JobSet with `scheduling.x-k8s.io/gang-id: <run_id>`, and the
+    # orchestrator deletes the run's other JobSets when it exits. Its
+    # `service_account` needs RBAC to delete JobSets. Needs `jobset.*.yaml`
+    # worker templates (`leaderworkerset.*.yaml` is not deleted by gang
+    # teardown).
+    teardown_gang_on_exit: false
+    # tpu7x dynamic slicing for the trainer and rollout JobSets (needs
+    # `jobset.*.yaml` worker templates). `head_nodepool` (requires
+    # `use_dynamic_slicing`) pins the Pathways head pod to a node pool.
+    use_dynamic_slicing: false
+    head_nodepool: ""
+    # Without `use_dynamic_slicing`, the Pathways head pod runs on a pw-node
+    # host and requests no TPUs. List here the node pools of any Kueue CPU
+    # ResourceFlavors that come before the TPU flavor in the ClusterQueue, so
+    # Kueue does not admit the head pod to them (see
+    # `yaml_generator.render_colocated_head_affinity`).
+    head_excluded_nodepools: []
+    # Rollout JAX compilation cache. Unless `disable`, the rollout pods cache in
+    # `local_dir` and use a GCS cache: `rollout_gcs_dir`, or else a directory
+    # under `gcs_dir` (or `gs://<bucket>/jax_cache`) named by the rollout config
+    # (`resolve_config.rollout_cache_params`); none when all three are empty.
+    # TODO(noghabi): Lift `jax_cache` to `cluster_config` and drive local runs
+    # from the config too, then retire the cache env vars into `legacy_env.sh`.
+    jax_cache:
+      disable: false
+      local_dir: "/tmp/jax_cache"
+      gcs_dir: ""
+      rollout_gcs_dir: ""
+      bucket: ""
+      save: true
+    trainer:
+      jobset_yaml: "jobset.pathways.yaml"
+      tpu_slice: "tpuv5e:4x4"
+    rollout:
+      jobset_yaml: "leaderworkerset.mcjax.ray.yaml"
+      tpu_slice: "tpuv5e:4x4"

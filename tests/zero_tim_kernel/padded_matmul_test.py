@@ -11,12 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for padded_matmul (CPU, Pallas interpret mode)."""
+"""Tests for `padded_matmul` (CPU, Pallas interpret mode)."""
 
-import dataclasses
+from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
+import jax
+from jax.experimental import pallas as pl
 import jax.numpy as jnp
 import numpy as np
 from tunix.zero_tim_kernel import model_contracts
@@ -42,6 +44,7 @@ class ExtentsTest(parameterized.TestCase):
       ("qwen4b_tp4", 2432, 2560, (2432, 2560)),
       ("qwen4b_tp4", 2432, 2560, (2560, 2560), 256),
       ("qwen8b_tp8", 4096, 18992, (4096, 19200)),
+      ("qwen8b", 1000, 1000, (1024, 1024)),
   )
   def test_padded_extents(self, name, k, n, expected, block_k=None):
     self.assertEqual(
@@ -51,58 +54,40 @@ class ExtentsTest(parameterized.TestCase):
         expected,
     )
 
-  @parameterized.parameters(
-      ("qwen8b", 4096, 1000),  # N not admitted.
-      ("qwen8b", 1000, 4096),  # K not admitted.
-      ("qwen4b", 0, 128),  # Non-positive width.
-  )
-  def test_rejects_unadmitted_widths(self, name, k, n):
+  def test_rejects_non_positive_widths(self):
     with self.assertRaises(ValueError):
-      padded_matmul.padded_matmul_extents(k, n, contract=_contract(name))
+      padded_matmul.padded_matmul_extents(0, 128, contract=_contract("qwen4b"))
+    with self.assertRaises(ValueError):
+      padded_matmul.padded_matmul_extents(128, 0, contract=_contract("qwen4b"))
 
   def test_wide_n_tiles(self):
-    qwen4b = _contract("qwen4b")
-    qwen4b_tp4 = _contract("qwen4b_tp4")
-    tiles = qwen4b.tiles
-    # 4B MLP widths get a wide tile on their contract-padded width.
+    tiles = _contract("qwen4b").tiles
+    # 4B MLP widths get a wide tile on their 256-aligned padded width.
     self.assertEqual(
-        padded_matmul.wide_n_tiles(
-            128, 2560, 1216, tiles, qwen4b.matmul_n_padding
-        ),
+        padded_matmul.wide_n_tiles(128, 2560, 1216, tiles),
         (1280, 1280),
     )
     self.assertEqual(
-        padded_matmul.wide_n_tiles(
-            128, 2560, 2432, tiles, qwen4b_tp4.matmul_n_padding
-        ),
+        padded_matmul.wide_n_tiles(128, 2560, 2432, tiles),
         (2560, 1280),
     )
+    self.assertEqual(
+        padded_matmul.wide_n_tiles(8, 2560, 1216, (8, 128, 128)),
+        (1280, 1280),
+    )
     # A padded lm_head width no wide candidate divides keeps the contract.
+    self.assertIsNone(padded_matmul.wide_n_tiles(128, 2560, 37984, tiles))
+    # Widths the policy already tiles or explicit non-contract tiles.
+    self.assertIsNone(padded_matmul.wide_n_tiles(128, 2560, 2560, tiles))
     self.assertIsNone(
-        padded_matmul.wide_n_tiles(
-            128, 2560, 37984, tiles, qwen4b_tp4.matmul_n_padding
-        )
+        padded_matmul.wide_n_tiles(128, 2560, 1216, (128, 128, 256))
     )
-    # Widths the policy already tiles, explicit tiles, and unmapped widths.
-    self.assertIsNone(
-        padded_matmul.wide_n_tiles(
-            128, 2560, 2560, tiles, qwen4b.matmul_n_padding
-        )
-    )
-    self.assertIsNone(
-        padded_matmul.wide_n_tiles(
-            128, 2560, 1216, (128, 128, 256), qwen4b.matmul_n_padding
-        )
-    )
-    self.assertIsNone(padded_matmul.wide_n_tiles(128, 2560, 1216, tiles, {}))
 
 
 class PaddedMatmulTest(parameterized.TestCase):
 
   @parameterized.parameters(1, 7, 8, 100, 127)
   def test_decode_rows_equal_the_128_row_program(self, m):
-    # Every M <= 128 runs the identical 128-row program, so a decode row is
-    # bitwise the same row inside a 128-row prefill/scoring batch.
     contract = _contract("qwen8b")
     rng = np.random.default_rng(m)
     x = test_utils.random_bf16(rng, (128, 512))
@@ -122,12 +107,8 @@ class PaddedMatmulTest(parameterized.TestCase):
         out, test_utils.exact_matmul_reference(x, y)
     )
 
-  def test_contract_k_and_n_padding(self):
-    contract = dataclasses.replace(
-        _contract("qwen4b"),
-        matmul_k_padding={200: 256},
-        matmul_n_padding={200: 256},
-    )
+  def test_arbitrary_k_and_n_padding(self):
+    contract = _contract("qwen4b")
     rng = np.random.default_rng(2)
     x = test_utils.exact_bf16(rng, (16, 200))
     y = test_utils.exact_bf16(rng, (200, 200))
@@ -138,7 +119,6 @@ class PaddedMatmulTest(parameterized.TestCase):
     )
 
   def test_wide_padded_width_is_bitwise_neutral(self):
-    # qwen4b gate/up: N=1216 -> 1280 with a 1280-wide tile.
     contract = _contract("qwen4b")
     rng = np.random.default_rng(3)
     x = test_utils.exact_bf16(rng, (8, 256))
@@ -149,15 +129,47 @@ class PaddedMatmulTest(parameterized.TestCase):
         out, test_utils.exact_matmul_reference(x, y)
     )
 
+  @parameterized.parameters(
+      (1, 8),
+      (4, 8),
+      (8, 8),
+      (12, 16),
+      (32, 32),
+      (64, 64),
+      (100, 128),
+  )
+  def test_decode_uses_adaptive_row_bucket_and_skips_aligned_weight_pad(
+      self, m, expected_bm
+  ):
+    contract = _contract("qwen8b")
+    rng = np.random.default_rng(100 + m)
+    x = test_utils.random_bf16(rng, (m, 512))
+    y = test_utils.random_bf16(rng, (512, 1024), scale=0.05)
+    with (
+        mock.patch.object(pl, "pallas_call", wraps=pl.pallas_call) as spy,
+        mock.patch.object(padded_matmul.jnp, "pad", wraps=jnp.pad) as pad_spy,
+    ):
+      out = padded_matmul.matmul(x, y, contract=contract, interpret=True)
+    self.assertEqual(out.shape, (m, 1024))
+    self.assertLen(spy.call_args_list, 1)
+    call = spy.call_args_list[0]
+    self.assertEqual(
+        call.kwargs["name"], f"canon_matmul_bm{expected_bm}_bn1024_bk256"
+    )
+    self.assertEqual(tuple(call.kwargs["grid_spec"].grid), (1, 1, 2))
+    self.assertEqual(pad_spy.call_count, 0 if m == expected_bm else 1)
+    if m != expected_bm:
+      self.assertIs(pad_spy.call_args_list[0].args[0], x)
+    # Aligned weight `y` must not emit a zero-width `pad` instruction in JAXPR.
+    jaxpr = jax.make_jaxpr(
+        lambda a, b: padded_matmul.matmul(
+            a, b, contract=contract, interpret=True
+        )
+    )(x, y)
+    self.assertEqual(str(jaxpr).count(" pad["), 0 if m == expected_bm else 1)
+
   def test_rejects(self):
     contract = _contract("qwen8b")
-    with self.assertRaises(ValueError):
-      padded_matmul.matmul(
-          jnp.zeros((8, 1000), jnp.bfloat16),
-          jnp.zeros((1000, 256), jnp.bfloat16),
-          contract=contract,
-          interpret=True,
-      )
     with self.assertRaises(ValueError):
       padded_matmul.matmul(
           jnp.zeros((8, 256), jnp.bfloat16),

@@ -19,10 +19,70 @@ Defines:
 - LineageContext: Provenance tree node carrying tracking IDs and DAG causal edges.
 """
 
-from collections.abc import Sequence
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping, Sequence
 import dataclasses
+import logging
+import os
 import time
 from typing import Any
+
+_logger = logging.getLogger(__name__)
+LineageEventSink = Callable[["LineageContext", "LineageEvent"], None]
+
+_event_sink: LineageEventSink | None = None
+_sink_error_logged: bool = False
+
+
+def _clear_event_sink_in_child() -> None:
+  """Clears any inherited sink on `os.fork()` since child OTel export is off."""
+  global _event_sink, _sink_error_logged
+  _event_sink = None
+  _sink_error_logged = False
+
+
+if hasattr(os, "register_at_fork"):
+  os.register_at_fork(after_in_child=_clear_event_sink_in_child)
+
+
+def set_event_sink(sink: LineageEventSink | None) -> LineageEventSink | None:
+  """Sets or clears the process-local callback invoked on `add_event`.
+
+  `LineageContext` stays a pure, `cloudpickle`-safe data model without
+  OpenTelemetry dependencies; `common.lineage_otel` registers its structured
+  `LogRecord` emitter here when export is enabled. The sink is cleared in
+  forked children because child OpenTelemetry exporters are silenced.
+
+  Args:
+    sink: Callback receiving `(context, event)` on every recorded event, or
+      `None` to disable notifications.
+
+  Returns:
+    The previously registered sink.
+  """
+  global _event_sink, _sink_error_logged
+  prev = _event_sink
+  _event_sink = sink
+  _sink_error_logged = False
+  return prev
+
+
+def extract_lineage(
+    metadata: Mapping[str, Any] | None,
+) -> LineageContext | None:
+  """Extracts `LineageContext` from `metadata` or raises `TypeError`."""
+  if metadata is None:
+    return None
+  lineage_ctx = metadata.get("lineage")
+  if lineage_ctx is None:
+    return None
+  if not isinstance(lineage_ctx, LineageContext):
+    raise TypeError(
+        "Expected LineageContext for metadata['lineage'], got"
+        f" {type(lineage_ctx)!r}."
+    )
+  return lineage_ctx
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -31,10 +91,10 @@ class LineageEvent:
 
   Attributes:
     component: System component that generated the event (e.g.,
-      "engine.dispatch", "worker.rollout", "orchestrator.assembler",
-      "worker.trainer").
-    operation: Operation name (e.g., "rollout", "generate", "pack",
-      "fwd_bwd", "train_step").
+      "engine.dispatch", "worker.received", "worker.rollout",
+      "orchestrator.assembler", "worker.trainer").
+    operation: Operation name (e.g., "rollout", "generate", "pack", "fwd_bwd",
+      "train_step").
     timestamp_s: Unix timestamp in seconds when the event was recorded.
     attributes: Arbitrary key-value metadata associated with the event (e.g.,
       worker_id, latency_ms, loss, metrics).
@@ -53,12 +113,17 @@ class LineageContext:
   Attributes:
     tracking_id: Unique semantic tracking identifier for this entity (e.g.,
       "traj_prompt_1_0", "batch_0", "policy_v2").
+    task_name: Optional semantic task or dataset name for this entity. An empty
+      string (`""`) indicates that the task is unset/unknown or that upstream
+      contexts from multiple tasks (or a mix of labeled and unlabeled contexts)
+      were merged.
     parent_tracking_ids: List of upstream tracking IDs that contributed to this
       entity (directed causal edges in DAG).
     events: Chronological sequence of lifecycle events for this entity.
   """
 
   tracking_id: str
+  task_name: str = ""
   parent_tracking_ids: list[str] = dataclasses.field(default_factory=list)
   events: list[LineageEvent] = dataclasses.field(default_factory=list)
 
@@ -84,6 +149,15 @@ class LineageContext:
         attributes=dict(attributes) if attributes else {},
     )
     self.events.append(event)
+    sink = _event_sink
+    if sink is not None:
+      try:
+        sink(self, event)
+      except Exception:  # pylint: disable=broad-exception-caught
+        global _sink_error_logged
+        if not _sink_error_logged:
+          _sink_error_logged = True
+          _logger.warning("Lineage event sink failed.", exc_info=True)
     return event
 
   @classmethod
@@ -109,8 +183,9 @@ class LineageContext:
       attributes: Optional metadata attributes for the merge event.
 
     Returns:
-      A new LineageContext with parent_tracking_ids set to the upstream IDs
-      and an initial merge event recorded.
+      A new LineageContext with parent_tracking_ids set to the upstream IDs,
+      task_name preserved when all non-None upstream contexts share the same
+      task_name (or "" otherwise), and an initial merge event recorded.
     """
     parent_ids = list(
         dict.fromkeys(
@@ -119,6 +194,11 @@ class LineageContext:
             if ctx is not None and ctx.tracking_id
         )
     )
-    new_ctx = cls(tracking_id=batch_id, parent_tracking_ids=parent_ids)
+    task_names = {ctx.task_name for ctx in contexts if ctx is not None}
+    new_ctx = cls(
+        tracking_id=batch_id,
+        task_name=next(iter(task_names)) if len(task_names) == 1 else "",
+        parent_tracking_ids=parent_ids,
+    )
     new_ctx.add_event(component, operation, attributes)
     return new_ctx
