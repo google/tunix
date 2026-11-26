@@ -68,7 +68,10 @@ _LEAVES = {
     'd_bias': ((8,), jnp.bfloat16, (), ()),
     'e_step': ((16,), np.int32, (('data', 'model'),), ('tp',)),
 }
-_REPLICATED_TARGETS = 2  # b_norm and d_bias.
+# Replicated targets in `TwoProcessPublishTest` (b_norm and d_bias), where
+# every process has four devices. The single-process tests count them from
+# their targets: on one target device, every target is replicated.
+_REPLICATED_TARGETS = 2
 
 if _CHILD_ENV not in os.environ:
   os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=8'
@@ -148,8 +151,12 @@ def _per_leaf(source, target):
 def _bridge():
   """Lets the leaves of a single process take the batched path.
 
-  They are always fully addressable, which `_bp_decline` rejects; every other
-  reason it gives still applies.
+  `_bp_decline` returns the first reason it finds. The leaves of a single
+  process are fully addressable, so unless the publish is disabled or empty,
+  or the first leaf fails an earlier check, the reason is 'fully_addressable'
+  on the first leaf. The bridge replaces only that verdict with None, so the
+  checks after it, and every check on the other leaves, do not run in these
+  tests; `DeclineTest` covers each reason.
 
   Returns:
     A patch of `reshard._bp_decline`.
@@ -171,7 +178,9 @@ class _PublishTestCase(parameterized.TestCase):
     devices = jax.devices()
     if len(devices) < 2:
       self.skipTest('needs at least 2 devices')
-    half = len(devices) // 2
+    # Under xdist, another test may have set the device count. Every dim of
+    # `_LEAVES` divides 4, 2 and 1.
+    half = next(h for h in (4, 2, 1) if 2 * h <= len(devices))
     # A process's engine holds its copy on a strict subset of the devices
     # that the trainer's source leaves span.
     self.src_mesh = _mesh(devices[: 2 * half], (2, half), ('data', 'model'))
@@ -280,15 +289,21 @@ class PlaceTest(_PublishTestCase):
     outs, zero_copied = reshard._bp_place(
         [self.rep, self.rep], self.shardings, zero_copy=True
     )
-    self.assertEqual(zero_copied, 1)
+    # The sharded target is replicated too on a single target device.
+    replicated = [s.is_fully_replicated for s in self.shardings]
+    self.assertTrue(replicated[0])
+    self.assertEqual(zero_copied, sum(replicated))
     buffers = {
         shard.device: shard.data.unsafe_buffer_pointer()
         for shard in self.rep.addressable_shards
     }
-    for shard in outs[0].addressable_shards:
-      self.assertEqual(
-          shard.data.unsafe_buffer_pointer(), buffers[shard.device]
-      )
+    for out, is_replicated in zip(outs, replicated):
+      if not is_replicated:
+        continue
+      for shard in out.addressable_shards:
+        self.assertEqual(
+            shard.data.unsafe_buffer_pointer(), buffers[shard.device]
+        )
     self._check_values(outs)
 
   def test_without_zero_copy_every_leaf_is_put(self):
@@ -350,7 +365,8 @@ class CheckTest(_PublishTestCase):
     self.assertFalse(reshard._bp_check(1, self.xs, self.ts, self.outs))
 
   def test_fails_on_a_wrong_sharding_of_a_leaf_it_does_not_compare(self):
-    self.outs[2] = jax.device_put(self.outs[2], _named(self.dst_mesh))
+    # Other devices than its target's, so never an equivalent sharding.
+    self.outs[2] = jax.device_put(self.outs[2], _named(self.src_mesh))
     self.assertFalse(reshard._bp_check(1, self.xs, self.ts, self.outs))
     self.assertNotIn(2, self.references)
 
@@ -400,10 +416,12 @@ class BatchedPublishTest(_PublishTestCase):
     self.assertIsNone(reshard._BP_STATE.off)  # The check passed.
     # One placement per group.
     self.assertLen(counts, 1 if group_mb == '2048' else 2)
-    self.assertEqual(sum(counts), _REPLICATED_TARGETS if mode == '2' else 0)
+    replicated = sum(s.is_fully_replicated for s in target.values())
+    self.assertEqual(sum(counts), replicated if mode == '2' else 0)
 
   def test_each_group_is_placed_and_released_before_the_next_gather(self):
-    if jax.device_count() < 4:
+    if self.src_mesh.shape['model'] < 2:
+      # b_norm's source would be replicated, like a gathered replica.
       self.skipTest('needs at least 4 devices')
     os.environ['TUNIX_BATCHED_PUBLISH_GROUP_MB'] = _GROUP_MB_1KIB
     # No replicated source leaf, so every live array replicated over all
