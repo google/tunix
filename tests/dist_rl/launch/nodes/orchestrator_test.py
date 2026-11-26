@@ -213,9 +213,15 @@ class _FakeCluster(cluster_orchestrator.ClusterOrchestrator):
     self._run_error = run_error
     self._on_run = on_run
 
-  def bring_up_workers(self, dummy_data: object = None) -> None:
+  def bring_up_workers(
+      self,
+      dummy_data: object = None,
+      *,
+      program: object = None,
+  ) -> None:
     del dummy_data  # Unused.
     self.calls.append("bring_up_workers")
+    self.brought_up_program = program
 
   def run(
       self,
@@ -1214,6 +1220,7 @@ class ProgramTest(absltest.TestCase):
     self.assertLen(cluster.registry.infos(), 2)
     # The caller tears the cluster down (`managed_cluster_teardown`).
     self.assertEqual(cluster.calls, ["bring_up_workers", "run"])
+    self.assertIs(cluster.brought_up_program, program)
     self.assertEqual(cluster.programs, [program])
     # `StandardRLProgram` stops after its own `max_steps`.
     self.assertEqual(cluster.run_kwargs, {"bring_up": False})
@@ -1645,9 +1652,7 @@ rl_training_config:
     sha = resolve_config.config_fingerprint(resolve_config.initialize(argv))
     prev_sigint = signal.getsignal(signal.SIGINT)
     prev_sigterm = signal.getsignal(signal.SIGTERM)
-    cluster = _FakeCluster(
-        on_run=lambda: signal.raise_signal(signal.SIGTERM)
-    )
+    cluster = _FakeCluster(on_run=lambda: signal.raise_signal(signal.SIGTERM))
     with (
         mock.patch.object(
             node_utils,

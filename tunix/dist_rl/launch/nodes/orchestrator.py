@@ -710,7 +710,7 @@ def run_program(
         config_sha256=config_sha256,
     )
     logging.info("Bringing up remote workers...")
-    cluster.bring_up_workers(dummy_data=None)
+    cluster.bring_up_workers(dummy_data=None, program=program)
     logging.info(
         "Workers ready: %s. Running StandardRLProgram...",
         [info.worker_id for info in cluster.registry.infos()],

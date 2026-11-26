@@ -2213,6 +2213,33 @@ weight_sync_config:
         with self.assertRaisesRegex(exc_type, pattern):
           resolve_config.initialize(overrides)
 
+  def test_basic_weight_sync_mode_validation(self):
+    hp = resolve_config.initialize(["weight_sync_config.mode=basic"])
+    self.assertEqual(hp.config_mapping("weight_sync_config")["mode"], "basic")
+    self.assertIs(resolve_config.rollout_init_with_random_weights(hp), True)
+
+    with self.assertRaisesRegex(
+        ValueError,
+        r"weight_sync_config\.mode='basic' requires"
+        r" rollout_engine='inprocess_vllm'",
+    ):
+      resolve_config.initialize([
+          "weight_sync_config.mode=basic",
+          "rollout_engine=vanilla",
+      ])
+
+    with self.assertRaisesRegex(
+        ValueError,
+        r"A MaxText inprocess_vllm rollout.* needs"
+        r" weight_sync_config\.mode=raiden, got 'basic'",
+    ):
+      resolve_config.initialize([
+          "model_config.model_source=maxtext",
+          "model_config.model_path=/ckpt/qwen3-1.7b/0/items",
+          "model_config.kwargs.maxtext_model_name=qwen3-1.7b",
+          "weight_sync_config.mode=basic",
+      ])
+
 
 def _has_key(config: object, dotted_key: str) -> bool:
   """Returns whether the nested mapping `config` has `dotted_key`."""

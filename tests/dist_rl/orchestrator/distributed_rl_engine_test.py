@@ -34,7 +34,6 @@ from tunix.dist_rl.orchestrator import worker_registry
 from tunix.dist_rl.testing import worker_registry_testing
 from tunix.dist_rl.weight_sync import weight_sync_coordinator as weight_sync_coordinator_lib
 from tunix.dist_rl.worker import remote_execution
-from tunix.rl import algo_core
 from tunix.rl import algorithm_config
 
 
@@ -95,6 +94,7 @@ class MockActorHandle(mock.MagicMock):
     self.clear_staged = mock.AsyncMock(return_value=0)
     self.with_loss_fn = mock.MagicMock()
     self.with_gen_model_input_fn = mock.MagicMock()
+    self.configure_algorithm = mock.MagicMock()
     self.compile = mock.MagicMock()
 
   def submit(self, method_name: str, *args, **kwargs):
@@ -164,9 +164,7 @@ def _make_engine(
       registry if registry is not None else worker_registry.WorkerRegistry()
   )
   for idx, handle in enumerate(rollout_workers):
-    registry.register_handle(
-        f"rollout-{idx}", [datatypes.Role.ROLLOUT], handle
-    )
+    registry.register_handle(f"rollout-{idx}", [datatypes.Role.ROLLOUT], handle)
   for role, handle in (trainer_workers or {}).items():
     registry.register_handle(f"trainer-{role}", [role], handle)
   for role, handle in (inference_workers or {}).items():
@@ -251,9 +249,7 @@ class DistributedRLEngineTest(absltest.TestCase):
           for req in mock.generate.call_args.kwargs["requests"]
       ]
       self.assertCountEqual([req.prompt for req in dispatched], ["p1", "p2"])
-      self.assertCountEqual(
-          [req.prompt_id for req in dispatched], ["p1", "p2"]
-      )
+      self.assertCountEqual([req.prompt_id for req in dispatched], ["p1", "p2"])
 
     asyncio.run(_run())
 
@@ -827,9 +823,7 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.mock_rollout_1.get_target_state.side_effect = RuntimeError(
           "Worker connection timed out"
       )
-      with self.assertRaisesRegex(
-          RuntimeError, "Worker connection timed out"
-      ):
+      with self.assertRaisesRegex(RuntimeError, "Worker connection timed out"):
         await self.engine._maybe_configure_trainer_target_state(
             datatypes.Role.ACTOR
         )
@@ -869,9 +863,7 @@ class DistributedRLEngineTest(absltest.TestCase):
 
       # No trajectory is dropped or duplicated.
       self.assertEqual(
-          sorted(
-              r.group_index for r in (*dispatched_1, *dispatched_2)
-          ),
+          sorted(r.group_index for r in (*dispatched_1, *dispatched_2)),
           [0, 1, 2, 3],
       )
 
@@ -908,9 +900,7 @@ class DistributedRLEngineTest(absltest.TestCase):
 
       # Both requests in the batch resolve to the same least-loaded worker.
       landed = dispatched_1 or dispatched_2
-      self.assertEqual(
-          [r.request_id for r in landed], ["first", "retry"]
-      )
+      self.assertEqual([r.request_id for r in landed], ["first", "retry"])
       self.assertEmpty(dispatched_2 if dispatched_1 else dispatched_1)
 
     asyncio.run(_run())
@@ -1633,7 +1623,7 @@ class DistributedRLEngineTest(absltest.TestCase):
     with self.assertRaises(TypeError):
       distributed_rl_engine._response_to_trajectory_item(item)
 
-  def test_configure_worker_actor_configures_loss_and_gen_model_input_fn(self):
+  def test_configure_worker_actor_configures_loss_via_with_loss_fn(self):
     algo_cfg = algorithm_config.GRPOConfig(
         beta=0.0,
         use_rollout_logps=True,
@@ -1642,14 +1632,6 @@ class DistributedRLEngineTest(absltest.TestCase):
     algo_cfg.temperature = 1.0
     mock_assembler = mock.MagicMock()
     mock_assembler.pad_id = 10
-    mock_dummy = mock.MagicMock()
-    mock_assembler.build_dummy_payload.return_value = mock_dummy
-    parent = mock.MagicMock()
-    parent.attach_mock(self.mock_actor.with_loss_fn, "with_loss_fn")
-    parent.attach_mock(
-        self.mock_actor.with_gen_model_input_fn, "with_gen_model_input_fn"
-    )
-    parent.attach_mock(self.mock_actor.compile, "compile")
 
     self.engine.configure_worker(
         role=datatypes.Role.ACTOR,
@@ -1659,35 +1641,19 @@ class DistributedRLEngineTest(absltest.TestCase):
     )
 
     self.mock_actor.with_loss_fn.assert_called_once_with(
-        algo_core.grpo_loss_fn, has_aux=True
+        "grpo",
+        algo_config=algo_cfg,
+        role=datatypes.Role.ACTOR,
+        pad_id=10,
+        eos_id=20,
+        fuse_agreement_in_loss=True,
+        return_routed_experts=False,
     )
-    self.mock_actor.with_gen_model_input_fn.assert_called_once()
-    gen_fn = self.mock_actor.with_gen_model_input_fn.call_args.args[0]
-    self.assertEqual(
-        gen_fn("batch"),
-        {
-            "train_example": "batch",
-            "algo_config": algo_cfg,
-            "pad_id": 10,
-            "eos_id": 20,
-        },
-    )
-    mock_assembler.build_dummy_payload.assert_called_once_with(
-        with_old_per_token_logps=True,
-        with_ref_per_token_logps=False,
-        with_sampler_is_weights=False,
-        sampler_agreement_applied=False,
-        with_routed_experts=False,
-        routed_experts_encode_mode="auto",
-    )
-    self.mock_actor.compile.assert_called_once_with(mock_dummy)
-    # Both setters clear the trainer JIT cache; compile must come last.
-    self.assertEqual(
-        [c[0] for c in parent.mock_calls],
-        ["with_loss_fn", "with_gen_model_input_fn", "compile"],
-    )
+    self.mock_actor.with_gen_model_input_fn.assert_not_called()
+    mock_assembler.build_dummy_payload.assert_not_called()
+    self.mock_actor.compile.assert_not_called()
 
-  def test_configure_worker_actor_forwards_non_fused_sampler_agreement_flags(
+  def test_configure_worker_actor_forwards_non_fused_and_routed_experts_flags(
       self,
   ):
     algo_cfg = algorithm_config.GRPOConfig(
@@ -1695,6 +1661,7 @@ class DistributedRLEngineTest(absltest.TestCase):
         use_rollout_logps=True,
         sampler_is="token",
         sampler_rs=None,
+        routed_experts_encode_mode="uint10",
     )
     algo_cfg.temperature = 1.0
     mock_assembler = mock.MagicMock()
@@ -1705,28 +1672,58 @@ class DistributedRLEngineTest(absltest.TestCase):
         algo_config=algo_cfg,
         assembler=mock_assembler,
         can_fuse_agreement_in_loss=False,
+        return_routed_experts=True,
     )
 
-    mock_assembler.build_dummy_payload.assert_called_once_with(
-        with_old_per_token_logps=True,
-        with_ref_per_token_logps=True,
-        with_sampler_is_weights=True,
-        sampler_agreement_applied=True,
-        with_routed_experts=False,
-        routed_experts_encode_mode="auto",
+    self.mock_actor.with_loss_fn.assert_called_once_with(
+        "grpo",
+        algo_config=algo_cfg,
+        role=datatypes.Role.ACTOR,
+        pad_id=0,
+        eos_id=0,
+        fuse_agreement_in_loss=False,
+        return_routed_experts=True,
     )
+    self.mock_actor.compile.assert_not_called()
 
-  def test_configure_worker_actor_builds_routed_experts_dummy_from_assembler(
+  def test_configure_worker_skips_when_spec_unchanged_and_reruns_on_change(
       self,
   ):
+    algo_cfg = algorithm_config.GRPOConfig(beta=0.0, use_rollout_logps=True)
+    algo_cfg.temperature = 1.0
+    mock_assembler = mock.MagicMock(spec=["pad_id"], pad_id=0)
+
+    self.engine.configure_worker(
+        role=datatypes.Role.ACTOR,
+        algo_config=algo_cfg,
+        assembler=mock_assembler,
+    )
+    self.mock_actor.with_loss_fn.assert_called_once()
+
+    # Second identical call is a no-op (preserves AOT-compiled JIT cache).
+    self.engine.configure_worker(
+        role=datatypes.Role.ACTOR,
+        algo_config=algo_cfg,
+        assembler=mock_assembler,
+    )
+    self.mock_actor.with_loss_fn.assert_called_once()
+
+    # Changing a configuration knob invalidates the spec and re-submits.
+    self.engine.configure_worker(
+        role=datatypes.Role.ACTOR,
+        algo_config=algo_cfg,
+        assembler=mock_assembler,
+        eos_id=9,
+    )
+    self.assertEqual(self.mock_actor.with_loss_fn.call_count, 2)
+
+  def test_build_trainer_dummy_payload_builds_expected_fields(self):
     algo_cfg = algorithm_config.GRPOConfig(
-        beta=0.0,
+        beta=0.04,
         use_rollout_logps=True,
-        sampler_is=None,
-        sampler_rs=None,
+        sampler_is="token",
         routed_experts_encode_mode="uint10",
     )
-    algo_cfg.temperature = 1.0
     assembler = batch_assembly.PaddedBatchAssembler(
         batch_size=2,
         max_prompt_length=4,
@@ -1736,44 +1733,23 @@ class DistributedRLEngineTest(absltest.TestCase):
         mini_batch_size=1,
     )
 
-    self.engine.configure_worker(
-        role=datatypes.Role.ACTOR,
-        algo_config=algo_cfg,
-        assembler=assembler,
+    payload = distributed_rl_engine.build_trainer_dummy_payload(
+        algo_cfg,
+        assembler,
+        can_fuse_agreement_in_loss=False,
         return_routed_experts=True,
     )
-
-    self.mock_actor.compile.assert_called_once()
-    compiled_payload = self.mock_actor.compile.call_args.args[0]
-    self.assertIsNotNone(compiled_payload.routed_experts)
-    self.assertEqual(compiled_payload.routed_experts.shape, (2, 8, 0, 0))
-    self.assertEqual(compiled_payload.routed_experts.dtype, np.int16)
-    self.assertIn("routed_experts_encode_fn", compiled_payload.metadata)
+    self.assertIsNotNone(payload.old_per_token_logps)
+    self.assertIsNotNone(payload.ref_per_token_logps)
+    self.assertIsNotNone(payload.sampler_is_weights)
+    self.assertTrue(payload.sampler_agreement_applied)
+    self.assertIsNotNone(payload.routed_experts)
+    self.assertEqual(payload.routed_experts.shape, (2, 8, 0, 0))
+    self.assertEqual(payload.routed_experts.dtype, np.int16)
     self.assertEqual(
-        compiled_payload.metadata["routed_experts_encode_fn"].keywords["mode"],
+        payload.metadata["routed_experts_encode_fn"].keywords["mode"],
         "uint10",
     )
-
-  def test_configure_worker_actor_precompile_false_skips_compile(self):
-    algo_cfg = algorithm_config.GRPOConfig(
-        beta=0.0,
-        use_rollout_logps=True,
-    )
-    algo_cfg.temperature = 1.0
-    mock_assembler = mock.MagicMock()
-    mock_assembler.pad_id = 0
-
-    self.engine.configure_worker(
-        role=datatypes.Role.ACTOR,
-        algo_config=algo_cfg,
-        assembler=mock_assembler,
-        precompile=False,
-    )
-
-    self.mock_actor.with_loss_fn.assert_called_once()
-    self.mock_actor.with_gen_model_input_fn.assert_called_once()
-    mock_assembler.build_dummy_payload.assert_not_called()
-    self.mock_actor.compile.assert_not_called()
 
   def test_configure_worker_actor_raises_when_algo_none(self):
     with self.assertRaisesRegex(ValueError, "algo_config is required"):
@@ -1791,7 +1767,7 @@ class DistributedRLEngineTest(absltest.TestCase):
           assembler=None,
       )
 
-  def test_configure_worker_critic_configures_loss_and_gen_model_input_fn(self):
+  def test_configure_worker_critic_configures_loss_with_ppo_config(self):
     mock_critic = MockActorHandle()
     algo_cfg = algorithm_config.PPOConfig()
     algo_cfg.temperature = 1.0
@@ -1816,19 +1792,15 @@ class DistributedRLEngineTest(absltest.TestCase):
     )
 
     mock_critic.with_loss_fn.assert_called_once_with(
-        algo_core.ppo_value_loss_fn, has_aux=True
+        "ppo",
+        algo_config=algo_cfg,
+        role=datatypes.Role.CRITIC,
+        pad_id=5,
+        eos_id=6,
+        fuse_agreement_in_loss=True,
+        return_routed_experts=False,
     )
-    mock_critic.with_gen_model_input_fn.assert_called_once()
-    gen_fn = mock_critic.with_gen_model_input_fn.call_args.args[0]
-    self.assertEqual(
-        gen_fn("batch"),
-        {
-            "train_example": "batch",
-            "clip_range_value": algo_cfg.clip_range_value,
-            "pad_id": 5,
-            "eos_id": 6,
-        },
-    )
+    mock_critic.with_gen_model_input_fn.assert_not_called()
 
   def test_configure_worker_fallback_pad_and_eos_kwargs(self):
     algo_cfg = algorithm_config.GRPOConfig()
@@ -1837,22 +1809,19 @@ class DistributedRLEngineTest(absltest.TestCase):
     self.engine.configure_worker(
         role=datatypes.Role.ACTOR,
         algo_config=algo_cfg,
-        assembler=mock.MagicMock(
-            spec=["pad_id", "build_dummy_payload"], pad_id=0
-        ),
+        assembler=mock.MagicMock(spec=["pad_id"], pad_id=0),
         pad_id=42,
         eos_id=43,
     )
 
-    gen_fn = self.mock_actor.with_gen_model_input_fn.call_args.args[0]
-    self.assertEqual(
-        gen_fn("batch"),
-        {
-            "train_example": "batch",
-            "algo_config": algo_cfg,
-            "pad_id": 42,
-            "eos_id": 43,
-        },
+    self.mock_actor.with_loss_fn.assert_called_once_with(
+        "grpo",
+        algo_config=algo_cfg,
+        role=datatypes.Role.ACTOR,
+        pad_id=42,
+        eos_id=43,
+        fuse_agreement_in_loss=True,
+        return_routed_experts=False,
     )
 
   def test_configure_worker_raises_on_missing_worker(self):
@@ -1923,18 +1892,13 @@ class DistributedRLEngineTest(absltest.TestCase):
     )
 
     self.mock_actor.with_loss_fn.assert_called_once_with(
-        algo_core.grpo_loss_fn, has_aux=True
-    )
-    self.mock_actor.with_gen_model_input_fn.assert_called_once()
-    gen_fn = self.mock_actor.with_gen_model_input_fn.call_args.args[0]
-    self.assertEqual(
-        gen_fn("batch"),
-        {
-            "train_example": "batch",
-            "algo_config": algo_cfg,
-            "pad_id": 1,
-            "eos_id": 2,
-        },
+        "grpo",
+        algo_config=algo_cfg,
+        role=datatypes.Role.ACTOR,
+        pad_id=1,
+        eos_id=2,
+        fuse_agreement_in_loss=True,
+        return_routed_experts=False,
     )
 
   def test_configure_worker_actor_raises_when_no_actor_worker(self):
@@ -1959,41 +1923,65 @@ class DistributedRLEngineTest(absltest.TestCase):
     self.engine.configure_worker(
         role=datatypes.Role.ACTOR,
         algo_config=algo_cfg,
-        assembler=mock.MagicMock(
-            spec=["pad_id", "build_dummy_payload"], pad_id=0
-        ),
+        assembler=mock.MagicMock(spec=["pad_id"], pad_id=0),
     )
-    gen_fn = self.mock_actor.with_gen_model_input_fn.call_args.args[0]
-    self.assertEqual(
-        gen_fn("batch"),
-        {
-            "train_example": "batch",
-            "algo_config": algo_cfg,
-            "pad_id": 0,
-            "eos_id": 0,
-        },
-    )
+    self.assertEqual(self.mock_actor.with_loss_fn.call_args.kwargs["pad_id"], 0)
+    self.assertEqual(self.mock_actor.with_loss_fn.call_args.kwargs["eos_id"], 0)
 
     # 2. eos_id defaults to pad_id when only pad_id is set on assembler
-    mock_assembler_pad_only = mock.MagicMock(
-        spec=["pad_id", "build_dummy_payload"]
-    )
+    mock_assembler_pad_only = mock.MagicMock(spec=["pad_id"])
     mock_assembler_pad_only.pad_id = 7
     self.engine.configure_worker(
         role=datatypes.Role.ACTOR,
         algo_config=algo_cfg,
         assembler=mock_assembler_pad_only,
     )
-    gen_fn = self.mock_actor.with_gen_model_input_fn.call_args.args[0]
-    self.assertEqual(
-        gen_fn("batch"),
-        {
-            "train_example": "batch",
-            "algo_config": algo_cfg,
-            "pad_id": 7,
-            "eos_id": 7,
-        },
+    self.assertEqual(self.mock_actor.with_loss_fn.call_args.kwargs["pad_id"], 7)
+    self.assertEqual(self.mock_actor.with_loss_fn.call_args.kwargs["eos_id"], 7)
+
+  def test_registered_worker_ignored_until_active(self):
+    actor_active = MockActorHandle()
+    actor_pending = MockActorHandle()
+    mock_rollout = MockActorHandle()
+    registry = worker_registry.WorkerRegistry()
+    registry.register_handle(
+        "trainer_active",
+        [datatypes.Role.ACTOR],
+        actor_active,
     )
+    registry.register_handle(
+        "trainer_unadmitted",
+        [datatypes.Role.ACTOR],
+        actor_pending,
+    )
+    registry.register_handle(
+        "rollout_0",
+        [datatypes.Role.ROLLOUT],
+        mock_rollout,
+    )
+    worker_registry_testing.set_status(
+        registry, "trainer_active", worker_registry.AdmissionStatus.ACTIVE
+    )
+    worker_registry_testing.set_status(
+        registry, "rollout_0", worker_registry.AdmissionStatus.ACTIVE
+    )
+    # trainer_unadmitted stays in REGISTERED status.
+    engine = distributed_rl_engine.DistributedRLEngine(registry=registry)
+    mock_assembler = mock.MagicMock(spec=["pad_id"], pad_id=0)
+
+    algo_cfg = algorithm_config.GRPOConfig()
+    algo_cfg.temperature = 1.0
+    engine.configure_worker(
+        role=datatypes.Role.ACTOR,
+        algo_config=algo_cfg,
+        assembler=mock_assembler,
+    )
+    actor_active.with_loss_fn.assert_called_once()
+    actor_pending.with_loss_fn.assert_not_called()
+
+    asyncio.run(engine.prepare_rollout_policy(sync_weights=False))
+    mock_rollout.get_target_state.assert_called_once()
+    actor_active.set_target_state.assert_called_once()
 
   def test_poll_rollouts_does_not_block_on_slow_or_idle_worker(self):
     async def _run():
@@ -3437,9 +3425,7 @@ class DistributedRLEngineTest(absltest.TestCase):
           sorted(item.group_index for item in completed), list(range(32))
       )
       self.assertNotIn("rollout-0", registry)
-      retried_per_survivor = [
-          w.generate.call_count - 8 for w in (w1, w2, w3)
-      ]
+      retried_per_survivor = [w.generate.call_count - 8 for w in (w1, w2, w3)]
       self.assertEqual(sum(retried_per_survivor), 8)
       # Retries hash distinct traj_id strings across all 3 survivors instead of
       # collapsing all 8 orphaned tasks onto a single k % (N - 1) survivor.
