@@ -1186,13 +1186,11 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           sequences_per_update=mini_batch_size * self._num_generations(),
           pad_id=self.rl_engine.rollout.pad_id(),
           data_axis_size=self._data_axis_size(),
-          leading_dim_factor=(
-              jax.process_count()
-              if sharding_utils.per_host_safe_logps_enabled()
-              else 1
-          ),
-          max_segments_per_packed_row=getattr(
-              self._training_config, "max_segments_per_packed_row", None
+          # `train` requires TUNIX_PER_HOST_SAFE_LOGPS=1 for packing, so
+          # `shard_input` judges local rows x process count.
+          leading_dim_factor=jax.process_count(),
+          max_segments_per_packed_row=(
+              self._training_config.max_segments_per_packed_row
           ),
           max_rows_per_shard=max_rows_per_shard,
           row_multiple=row_multiple,
