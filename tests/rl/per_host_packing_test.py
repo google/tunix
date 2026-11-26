@@ -35,6 +35,7 @@ import threading
 import time
 import traceback
 import types
+from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -507,6 +508,87 @@ class PackedLossEquivalenceTest(parameterized.TestCase):
     _assert_trees_close(
         self, grads_u, jax.tree.map(lambda x: x / den, acc), 2e-4
     )
+
+
+class _DummyModel(nnx.Module):
+  pass
+
+
+class PerHostRowChecksTest(absltest.TestCase):
+  """`RLLearner`'s per-host row checks with packing on (mock engine)."""
+
+  def test_packing_skips_the_train_batch_row_checks(self):
+    # Imported here, as in `_run_child`: this file is also the 2-process job's
+    # child program, which starts jax.distributed before loading them.
+    # pylint: disable=g-import-not-at-top
+    import optax
+    from tunix.rl import algorithm_config
+    from tunix.rl import rl_cluster as rl_engine_lib
+    from tunix.rl import rl_learner
+    # pylint: enable=g-import-not-at-top
+
+    class Learner(rl_learner.RLLearner):
+
+      def _generate_and_compute_advantage(self, training_input, mode=None):
+        raise NotImplementedError()
+
+      def _compute_trajectory_ids(self, example, steps):
+        return [""] * len(example["prompts"])
+
+      def _num_iterations(self):
+        return 1
+
+      def _num_generations(self):
+        return 1
+
+    def learner(**training_config):
+      mesh = mock.MagicMock()
+      mesh.shape = {"fsdp": 8}
+      engine = mock.MagicMock()
+      engine.actor_trainer.model = _DummyModel()
+      engine.rollout.model.return_value = _DummyModel()
+      engine.cluster_config.training_config = rl_engine_lib.RLTrainingConfig(
+          actor_optimizer=optax.sgd(1e-3),
+          eval_every_n_steps=1,
+          max_steps=1,
+          **training_config,
+      )
+      engine.cluster_config.role_to_mesh = {
+          rl_engine_lib.Role.ACTOR: mesh,
+          rl_engine_lib.Role.ROLLOUT: mesh,
+      }
+      engine.cluster_config.rollout_config = mock.MagicMock(
+          max_prompt_length=8, max_tokens_to_generate=8
+      )
+      engine.is_colocated.return_value = True
+      engine.actor_trainer.train_steps = 0
+      engine.actor_trainer.iter_steps = 0
+      return Learner(
+          rl_engine=engine,
+          algo_config=algorithm_config.AlgorithmConfig(),
+          reward_fns=lambda prompts, completions, **kw: [1.0] * len(prompts),
+      )
+
+    # 2 processes, fsdp=8: 2 prompts per process are 4 global rows, which
+    # `shard_input` would replicate, so unpacked training is refused. Packed
+    # chunks hold a multiple of `per_host_pack_unit` rows instead.
+    batches = [{"prompts": [""] * 4}]
+    env = {"TUNIX_PER_HOST_LEARNER": "1", "TUNIX_PER_HOST_SAFE_LOGPS": "1"}
+    with mock.patch.dict(os.environ, env), mock.patch.object(
+        rl_learner.jax, "process_count", return_value=2
+    ):
+      with self.assertRaisesRegex(ValueError, "train micro-batch has 2 rows"):
+        learner().train(batches)
+
+      packed = learner(max_seq_tokens_per_device=64)
+      packed.rl_engine.actor_trainer.train_steps = 1  # One global step.
+      with mock.patch.object(packed, "_run_global_step") as run_global_step:
+        packed.train(batches)
+      train_iterator = run_global_step.call_args.args[4]
+      self.assertLen(next(train_iterator)["prompts"], 2)
+      # Eval batches are not packed: they keep their check.
+      with self.assertRaisesRegex(ValueError, "eval batch has 1 rows"):
+        packed._shard_eval_batch_for_process({"prompts": ["e", "f"]})
 
 
 # -----------------------------------------------------------------------------
