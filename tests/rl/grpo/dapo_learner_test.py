@@ -12,8 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 import dataclasses
+import re
 from unittest import mock
+import warnings
 from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
@@ -22,6 +25,35 @@ from tunix.rl import function_registry as fr
 from tunix.rl.grpo import dapo_learner as dapo_lib
 from tunix.rl.grpo import grpo_learner as grpo_lib
 from tunix.tests import test_common as tc
+
+
+@contextlib.contextmanager
+def _assert_deprecation_warning(test_case, pattern):
+  """Like `assertWarnsRegex` but without scanning `sys.modules`.
+
+  `unittest`'s `assertWarns*` calls `getattr` on every loaded module, which
+  triggers lazy imports (e.g. `transformers` vision processors importing
+  `torch`) and fails in environments without those optional dependencies.
+
+  Args:
+    test_case: The running test case.
+    pattern: Regex that a recorded `DeprecationWarning` message must match.
+
+  Yields:
+    None.
+  """
+  with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    yield
+  messages = [
+      str(w.message)
+      for w in caught
+      if issubclass(w.category, DeprecationWarning)
+  ]
+  test_case.assertTrue(
+      any(re.search(pattern, m) for m in messages),
+      f"No DeprecationWarning matching {pattern!r}; got {messages!r}",
+  )
 
 
 class DAPOlearnerTest(parameterized.TestCase):
@@ -147,12 +179,12 @@ class TestDAPOConfigPostInit(parameterized.TestCase):
       dapo_lib.DAPOConfig(max_consecutive_filtered_groups=0)
 
   def test_dynamic_sampling_deprecated_alias(self):
-    with self.assertWarnsRegex(DeprecationWarning, "dynamic_sampling"):
+    with _assert_deprecation_warning(self, "dynamic_sampling"):
       cfg = dapo_lib.DAPOConfig(dynamic_sampling=False)
     self.assertFalse(cfg.drop_zero_variance_groups)
-    with self.assertWarnsRegex(DeprecationWarning, "dynamic_sampling"):
+    with _assert_deprecation_warning(self, "dynamic_sampling"):
       self.assertFalse(cfg.dynamic_sampling)
-    with self.assertWarnsRegex(DeprecationWarning, "dynamic_sampling"):
+    with _assert_deprecation_warning(self, "dynamic_sampling"):
       self.assertTrue(dapo_lib.DAPOConfig().dynamic_sampling)
 
     replaced_epsilon = dataclasses.replace(dapo_lib.DAPOConfig(), epsilon=0.1)
