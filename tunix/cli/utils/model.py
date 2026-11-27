@@ -26,6 +26,13 @@ from tunix.models import naming
 from tunix.rl import reshard
 
 _DEFAULT_TOKENIZER_PATH = 'meta-llama/Llama-3.1-8B'
+_GCS_DEFAULT_TOKENIZER_PATHS = {
+    'gemma': 'gs://gemma-data/tokenizers/tokenizer_gemma2.model',
+    'gemma1p1': 'gs://gemma-data/tokenizers/tokenizer_gemma2.model',
+    'gemma2': 'gs://gemma-data/tokenizers/tokenizer_gemma2.model',
+    'gemma3': 'gs://gemma-data/tokenizers/tokenizer_gemma3.model',
+    'gemma4': 'gs://gemma-data/tokenizers/tokenizer_gemma4.model',
+}
 
 
 def apply_lora_to_model(base_model, mesh, lora_config, rng_seed=0):
@@ -86,14 +93,21 @@ def resolve_tokenizer_path(
   if not model_source_str:
     return tokenizer_path
 
+  is_default_tokenizer = (
+      not tokenizer_path or tokenizer_path == _DEFAULT_TOKENIZER_PATH
+  )
   model_family = naming.ModelNaming(
       model_name=model_config['model_name']
   ).model_family
 
-  if model_family == 'gemma3' and model_source_str == 'gcs':
-    if not tokenizer_path or tokenizer_path == _DEFAULT_TOKENIZER_PATH:
-      return 'gs://gemma-data/tokenizers/tokenizer_gemma3.model'
-  elif (
+  if (
+      model_source_str == 'gcs'
+      and is_default_tokenizer
+      and model_family in _GCS_DEFAULT_TOKENIZER_PATHS
+  ):
+    return _GCS_DEFAULT_TOKENIZER_PATHS[model_family]
+
+  if (
       model_family in ('gemma', 'gemma1p1', 'gemma2')
       and model_source_str == 'kaggle'
   ):
@@ -104,7 +118,7 @@ def resolve_tokenizer_path(
     resolved_model_path = automodel.download_model(
         model_path, model_config.get('model_download_path'), model_source
     )
-    if not tokenizer_path or tokenizer_path == _DEFAULT_TOKENIZER_PATH:
+    if is_default_tokenizer:
       return os.path.join(resolved_model_path, 'tokenizer.model')
 
   return tokenizer_path
@@ -138,12 +152,13 @@ def create_tokenizer(
       tokenizer_config['add_eos'],
   )
 
+  hf_access_token = os.getenv('HF_TOKEN', '').strip() or None
   return tokenizer_lib.Tokenizer(
       tokenizer_type,
       tokenizer_path,
       add_bos,
       add_eos,
-      os.environ.get('HF_TOKEN'),
+      hf_access_token,
   )
 
 

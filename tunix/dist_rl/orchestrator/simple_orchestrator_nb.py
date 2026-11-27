@@ -18,7 +18,6 @@ from typing import Any
 from absl import logging
 import numpy as np
 from tunix.dist_rl.common import datatypes
-from tunix.dist_rl.orchestrator import algorithm_adapter
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.orchestrator import orchestrator
 from tunix.dist_rl.orchestrator import rl_program
@@ -48,7 +47,8 @@ class SimulatedRolloutWorker(abstract_worker.Worker):
   def start(self) -> datatypes.Response:
     return datatypes.Response()
 
-  def stop(self) -> datatypes.Response:
+  def stop(self, *, abort: bool = False) -> datatypes.Response:
+    del abort
     return datatypes.Response()
 
   def generate(
@@ -115,22 +115,24 @@ class SimulatedTrainerWorker(abstract_worker.Worker):
   def start(self) -> datatypes.Response:
     return datatypes.Response()
 
-  def stop(self) -> datatypes.Response:
+  def stop(self, *, abort: bool = False) -> datatypes.Response:
+    del abort
     return datatypes.Response()
 
-  def fwd_bwd(self, batch: Any, accumulate_gradients: bool = False, apply_optimizer: bool = True, skip_jit: bool = False) -> dict[str, float]:
+  def fwd_bwd(
+      self,
+      batch: Any,
+      accumulate_gradients: bool = False,
+      apply_optimizer: bool = True,
+      skip_jit: bool = False,
+  ) -> dict[str, float]:
     del batch, accumulate_gradients, apply_optimizer, skip_jit
     logging.info("[%s] Executing gradient update (fwd_bwd)", self.worker_id)
     return {"loss": 0.25, "grad_norm": 1.2}
 
-  def prepare_weight_sync(self) -> datatypes.WeightSyncMetadata:
+  def prepare_weight_sync(self) -> datatypes.WeightSyncRequest:
     logging.info("[%s] Staging weights for sync", self.worker_id)
-    meta = datatypes.WeightSyncMetadata(
-        new_policy_version=1,
-        transfer_mode="p2p",
-        source_endpoints=["trainer:50051"],
-    )
-    return meta
+    return datatypes.WeightSyncRequest(policy_version=1)
 
   def heartbeat(self) -> datatypes.HealthReport:
     return datatypes.HealthReport(state=datatypes.WorkerState.READY)
@@ -152,11 +154,6 @@ def main():
   algo_config = algorithm_config.GRPOConfig(
       num_generations=2,
   )
-  algo = algorithm_adapter.GRPOAdapter(
-      algo_config=algo_config,
-      mini_batch_size=1,
-      max_packed_len=32,
-  )
   assembler = batch_assembly.SequencePackedBatchAssembler(
       batch_size=1, num_generations=2, mini_batch_size=1, max_packed_len=32
   )
@@ -168,11 +165,13 @@ def main():
 
   print("Executing Run via ClusterOrchestrator...")
   program = rl_program.StandardRLProgram(
-      algo=algo,
+      algo_config=algo_config,
       dataset=train_dataset,
-      reward_fns=[lambda x: 1.0],
+      reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
       assembler=assembler,
-      generation_args=datatypes.GenerationArgs(temperature=1.0),
+      batch_config=batch_assembly.BatchConfig(mini_batch_size=1),
+      rollout_temperature=1.0,
+      rollout_returns_routed_experts=False,
       max_steps=2,
   )
   orch.run(program=program)

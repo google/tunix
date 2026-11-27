@@ -12,7 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
+import dataclasses
+import re
 from unittest import mock
+import warnings
 from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
@@ -21,6 +25,35 @@ from tunix.rl import function_registry as fr
 from tunix.rl.grpo import dapo_learner as dapo_lib
 from tunix.rl.grpo import grpo_learner as grpo_lib
 from tunix.tests import test_common as tc
+
+
+@contextlib.contextmanager
+def _assert_deprecation_warning(test_case, pattern):
+  """Like `assertWarnsRegex` but without scanning `sys.modules`.
+
+  `unittest`'s `assertWarns*` calls `getattr` on every loaded module, which
+  triggers lazy imports (e.g. `transformers` vision processors importing
+  `torch`) and fails in environments without those optional dependencies.
+
+  Args:
+    test_case: The running test case.
+    pattern: Regex that a recorded `DeprecationWarning` message must match.
+
+  Yields:
+    None.
+  """
+  with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    yield
+  messages = [
+      str(w.message)
+      for w in caught
+      if issubclass(w.category, DeprecationWarning)
+  ]
+  test_case.assertTrue(
+      any(re.search(pattern, m) for m in messages),
+      f"No DeprecationWarning matching {pattern!r}; got {messages!r}",
+  )
 
 
 class DAPOlearnerTest(parameterized.TestCase):
@@ -133,6 +166,83 @@ class TestDAPOConfigPostInit(parameterized.TestCase):
       dapo_lib.DAPOConfig()
     except ValueError as e:
       self.fail(f"DAPOConfig raised ValueError on default initialization: {e}")
+
+  def test_drop_zero_variance_groups_defaults_on_and_is_tunable(self):
+    self.assertTrue(dapo_lib.DAPOConfig().drop_zero_variance_groups)
+    self.assertIsNone(dapo_lib.DAPOConfig().max_consecutive_filtered_groups)
+    config = dapo_lib.DAPOConfig(
+        drop_zero_variance_groups=False, max_consecutive_filtered_groups=16
+    )
+    self.assertFalse(config.drop_zero_variance_groups)
+    self.assertEqual(config.max_consecutive_filtered_groups, 16)
+    with self.assertRaisesRegex(ValueError, "positive int or None"):
+      dapo_lib.DAPOConfig(max_consecutive_filtered_groups=0)
+
+  def test_dynamic_sampling_deprecated_alias(self):
+    with _assert_deprecation_warning(self, "dynamic_sampling"):
+      cfg = dapo_lib.DAPOConfig(dynamic_sampling=False)
+    self.assertFalse(cfg.drop_zero_variance_groups)
+    with _assert_deprecation_warning(self, "dynamic_sampling"):
+      self.assertFalse(cfg.dynamic_sampling)
+    with _assert_deprecation_warning(self, "dynamic_sampling"):
+      self.assertTrue(dapo_lib.DAPOConfig().dynamic_sampling)
+
+    replaced_epsilon = dataclasses.replace(dapo_lib.DAPOConfig(), epsilon=0.1)
+    self.assertEqual(replaced_epsilon.epsilon, 0.1)
+    self.assertTrue(replaced_epsilon.drop_zero_variance_groups)
+    replaced_flag = dataclasses.replace(
+        dapo_lib.DAPOConfig(), drop_zero_variance_groups=False
+    )
+    self.assertFalse(replaced_flag.drop_zero_variance_groups)
+
+    with self.assertRaisesRegex(
+        ValueError,
+        "Cannot specify both 'drop_zero_variance_groups' and"
+        " 'dynamic_sampling'",
+    ):
+      dapo_lib.DAPOConfig(
+          drop_zero_variance_groups=True, dynamic_sampling=False
+      )
+
+  def test_dapo_learner_warns_instead_of_raising_on_default_config(self):
+    vocab = tc.MockVocab()
+    toy_model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    mock_engine = mock.MagicMock()
+    mock_engine.actor_trainer.model = toy_model
+    mock_engine.rollout.model.return_value = toy_model
+    mock_engine.get_rollout_config.return_value.temperature = 1.0
+    mock_engine.cluster_config.rollout_engine = "vanilla"
+    mock_engine.cluster_config.training_config.max_steps = 1
+    mock_engine.cluster_config.training_config.eval_every_n_steps = 1
+    mock_engine.cluster_config.training_config.mini_batch_size = 1
+    for algo_config in (
+        dapo_lib.DAPOConfig(),
+        dapo_lib.DAPOConfig(algo_variant="grpo"),
+    ):
+      with self.subTest(algo_variant=algo_config.algo_variant):
+        with self.assertLogs(level="WARNING") as cm:
+          dapo_lib.DAPOLearner(
+              rl_engine=mock_engine,
+              algo_config=algo_config,
+              reward_fns=lambda prompts, completions, **_: [1.0] * len(prompts),
+          )
+        self.assertTrue(
+            any(
+                "drop_zero_variance_groups=True is not yet implemented" in msg
+                for msg in cm.output
+            )
+        )
+    with self.assertRaisesRegex(
+        ValueError, "only supported by the distributed StandardRLProgram"
+    ):
+      grpo_lib.GRPOLearner(
+          rl_engine=mock_engine,
+          algo_config=dapo_lib.DAPOConfig(),
+          reward_fns=lambda prompts, completions, **_: [1.0] * len(prompts),
+      )
 
   def test_beta_defaults_to_zero(self):
     """DAPO has no KL term; beta must be 0.0 so learners skip the ref model."""

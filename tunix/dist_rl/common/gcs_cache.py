@@ -181,9 +181,6 @@ class RolloutCacheKeyParams:
         if self.vllm_data_parallel_size is not None
         else self.mesh_fsdp
     )
-    effective_server_mode = (
-        True if self.vllm_server_mode is None else bool(self.vllm_server_mode)
-    )
     parts = (
         f"model={self.model_name}",
         f"sampler={self.sampler}",
@@ -198,7 +195,7 @@ class RolloutCacheKeyParams:
         f"lora={int(self.use_lora)}",
         f"lora_rank={self.lora_rank if self.use_lora else 0}",
         f"prefix_cache={int(self.enable_prefix_caching)}",
-        f"server_mode={effective_server_mode}",
+        f"server_mode={self.vllm_server_mode}",
         f"async_sched={int(self.vllm_async_scheduling)}",
         f"fp8={self.rollout_fp8}",
         f"quant={self.rollout_quantization}",

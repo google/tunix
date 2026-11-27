@@ -15,6 +15,8 @@
 """Tests for standalone distributed DeepSWE evaluation."""
 
 import asyncio
+import contextlib
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -22,6 +24,7 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
+from etils import epath
 from tunix.dist_rl.examples.deepswe_dist import eval_deepswe
 
 
@@ -54,12 +57,6 @@ class EvalDeepSWETest(unittest.TestCase):
     self.assertEqual(request["prompt"], "Fix the test")
     self.assertEqual(request["max_turns"], 30)
     self.assertEqual(request["max_response_length"], 32512)
-    self.assertEqual(request["generation_kwargs"], {
-        "max_generation_steps": 8192,
-        "temperature": 0.0,
-        "return_logprobs": False,
-    })
-    self.assertFalse(request["metadata"]["exact_token_continuity"])
     self.assertTrue(request["metadata"]["record_episode_summary"])
     self.assertEqual(request["metadata"]["env_config"]["entry"], entry)
 
@@ -204,6 +201,349 @@ class EvalDeepSWETest(unittest.TestCase):
       self.assertEqual(row["docker_image"], "image-1")
       self.assertEqual(summary["pass_at_1"], 1.0)
       self.assertTrue(results[0].with_suffix(".summary.json").exists())
+
+  def test_sampling_flags_and_validation(self):
+    args = eval_deepswe.parse_args([
+        "--num_rollouts_per_instance",
+        "4",
+        "--temperature",
+        "0.6",
+        "--top_p",
+        "0.95",
+        "--top_k",
+        "20",
+    ])
+    entry = {"instance_id": "task-1", "docker_image": "image-1"}
+
+    request = eval_deepswe.request_fields(args, entry, 3, 2)
+
+    self.assertEqual(request["request_id"], "eval_3_2")
+    self.assertEqual(request["prompt_id"], "eval_3")
+    self.assertEqual(request["group_index"], 2)
+    self.assertNotIn("generation_kwargs", request)
+    profile = eval_deepswe.model_profile(args)
+    self.assertEqual(
+        (profile["temperature"], profile["top_p"], profile["top_k"]),
+        (0.6, 0.95, 20),
+    )
+    for bad in (
+        ["--num_rollouts_per_instance", "0"],
+        ["--temperature", "-1"],
+        ["--top_p", "0"],
+        ["--top_k", "0"],
+    ):
+      with self.subTest(bad=bad), self.assertRaises(SystemExit):
+        eval_deepswe.parse_args(bad)
+
+  def test_multiple_rollouts_require_positive_temperature(self) -> None:
+    greedy = eval_deepswe.parse_args(["--num_rollouts_per_instance", "1"])
+    self.assertEqual(greedy.num_rollouts_per_instance, 1)
+    self.assertEqual(greedy.temperature, 0.0)
+
+    sampled = eval_deepswe.parse_args([
+        "--num_rollouts_per_instance",
+        "2",
+        "--temperature",
+        "0.6",
+    ])
+    self.assertEqual(sampled.num_rollouts_per_instance, 2)
+    self.assertEqual(sampled.temperature, 0.6)
+
+    for bad in (
+        ["--num_rollouts_per_instance", "2"],
+        ["--num_rollouts_per_instance", "2", "--temperature", "0"],
+    ):
+      stderr = io.StringIO()
+      with (
+          self.subTest(bad=bad),
+          contextlib.redirect_stderr(stderr),
+          self.assertRaises(SystemExit) as ctx,
+      ):
+        eval_deepswe.parse_args(bad)
+      self.assertEqual(ctx.exception.code, 2)
+      self.assertIn(
+          "--num_rollouts_per_instance > 1 requires --temperature > 0",
+          stderr.getvalue(),
+      )
+
+  def test_seed_and_worker_index_flags_and_model_profile(self) -> None:
+    defaults = eval_deepswe.parse_args([])
+    self.assertIsNone(defaults.seed)
+    self.assertEqual(defaults.worker_index, 0)
+    self.assertIsNone(eval_deepswe.model_profile(defaults)["seed"])
+
+    args = eval_deepswe.parse_args(["--seed", "42", "--worker_index", "15"])
+    self.assertEqual((args.seed, args.worker_index), (42, 15))
+    profile = eval_deepswe.model_profile(args)
+    self.assertEqual(profile["seed"], 42)
+    self.assertNotIn("worker_index", profile)
+
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as e:
+      eval_deepswe.parse_args(["--seed", "-1"])
+    self.assertEqual(e.exception.code, 2)
+    self.assertIn(
+        "--seed and --worker_index must be nonnegative", stderr.getvalue()
+    )
+
+  def test_pass_at_k_counts_failed_and_missing_attempts(self):
+    def row(pair_index, reward, error=None):
+      return {
+          "pair_index": pair_index,
+          "instance_id": "same-id",
+          "reward": reward,
+          "num_steps": 1,
+          "status": "ERROR" if error else "SUCCEEDED",
+          "guard_blocked_steps": 0,
+          "guard_reasons": [],
+          "error": error,
+      }
+
+    # Task 0: 1 of 2 resolved; task 1: 0 of 2 (one failed); task 2: missing.
+    # Duplicate instance ids must not merge tasks.
+    rows = [
+        row(0, 1.0),
+        row(0, 0.0),
+        row(1, 0.0),
+        row(1, 0.0, error="sandbox failed"),
+    ]
+
+    summary = eval_deepswe.summarize(rows, 3, attempts=2)
+
+    self.assertEqual(summary["total_attempts"], 6)
+    self.assertEqual(summary["completed_attempts"], 4)
+    self.assertEqual(summary["pass_at_1"], 1 / 6)
+    self.assertEqual(summary["pass_at_k"], {"2": 1 / 3})
+    self.assertEqual(summary["errors"], 1)
+    self.assertNotIn("pass_at_k", eval_deepswe.summarize(rows, 3))
+
+  def test_each_task_dispatches_all_attempts(self):
+    args = eval_deepswe.parse_args([
+        "--num_rollouts_per_instance",
+        "2",
+        "--temperature",
+        "0.6",
+        "--max_concurrent",
+        "3",
+    ])
+    entries = [
+        {"instance_id": f"task-{i}", "docker_image": f"image-{i}"}
+        for i in range(2)
+    ]
+
+    class FakeHandle:
+
+      def __init__(self):
+        self.pending = []
+        self.dispatched = []
+
+      async def dispatch_task(self, request_id, method, fields):
+        del method
+        self.pending.append(request_id)
+        self.dispatched.append((request_id, fields["group_index"]))
+        return request_id
+
+      async def poll_responses(self, timeout_s):
+        del timeout_s
+        request_id = self.pending.pop()
+        return SimpleNamespace(
+            request_id=request_id,
+            unwrap=lambda: {
+                "reward": 1.0,
+                "num_steps": 1,
+                "status": "SUCCEEDED",
+                "guard_blocked_steps": 0,
+                "guard_reasons": [],
+                "error": None,
+            },
+        )
+
+    handle = FakeHandle()
+    rows = []
+    asyncio.run(
+        eval_deepswe.collect_worker(
+            handle, iter(enumerate(entries)), 3, args, rows.append
+        )
+    )
+
+    self.assertEqual(
+        sorted(handle.dispatched),
+        [
+            ("eval_0_0", 0),
+            ("eval_0_1", 1),
+            ("eval_1_0", 0),
+            ("eval_1_1", 1),
+        ],
+    )
+    self.assertEqual(
+        sorted((row["instance_id"], row["attempt"]) for row in rows),
+        [("task-0", 0), ("task-0", 1), ("task-1", 0), ("task-1", 1)],
+    )
+    self.assertEqual(
+        eval_deepswe.summarize(rows, 2, 2)["pass_at_k"], {"2": 1.0}
+    )
+
+  def test_write_helpers_persist_attempts_config_and_summary(self):
+    row = {"request_id": "eval_0_1", "instance_id": "task-0", "reward": 1.0}
+    with tempfile.TemporaryDirectory() as temp_dir, contextlib.chdir(temp_dir):
+      for run_dir, out in (
+          (epath.Path(temp_dir) / "out" / "run", Path(temp_dir) / "out"),
+          (epath.Path("eval_results") / "run", Path(temp_dir) / "eval_results"),
+      ):
+        with self.subTest(run_dir=str(run_dir)):
+          eval_deepswe.write_json(
+              run_dir / "config.json", {"num_rollouts_per_instance": 2}
+          )
+          eval_deepswe.write_json(run_dir / "attempts" / "eval_0_1.json", row)
+          eval_deepswe.write_results(run_dir, [row], {"pass_at_1": 1.0})
+
+          self.assertEqual(
+              json.loads(
+                  (out / "run/attempts/eval_0_1.json").read_text(
+                      encoding="utf-8"
+                  )
+              ),
+              row,
+          )
+          self.assertEqual(
+              json.loads((out / "run/config.json").read_text(encoding="utf-8")),
+              {"num_rollouts_per_instance": 2},
+          )
+          self.assertEqual(
+              json.loads((out / "run.jsonl").read_text(encoding="utf-8")), row
+          )
+          self.assertEqual(
+              json.loads(
+                  (out / "run.summary.json").read_text(encoding="utf-8")
+              ),
+              {"pass_at_1": 1.0},
+          )
+
+  def test_write_helpers_support_gcs_epath(self):
+    run_dir = epath.Path("gs://bkt/out") / "run"
+    row = {"request_id": "eval_0", "reward": 0.0}
+    summary = {"pass_at_1": 0.0}
+    path_cls = type(run_dir)
+
+    with (
+        mock.patch.object(path_cls, "mkdir", autospec=True) as mock_mkdir,
+        mock.patch.object(path_cls, "write_text", autospec=True) as mock_write,
+    ):
+      eval_deepswe.write_json(run_dir / "attempts" / "eval_0.json", row)
+      eval_deepswe.write_results(run_dir, [row], summary)
+
+    mock_mkdir.assert_not_called()
+    self.assertEqual(
+        mock_write.call_args_list,
+        [
+            mock.call(
+                epath.Path("gs://bkt/out/run/attempts/eval_0.json"),
+                json.dumps(row, indent=2) + "\n",
+                encoding="utf-8",
+            ),
+            mock.call(
+                epath.Path("gs://bkt/out/run.jsonl"),
+                json.dumps(row) + "\n",
+                encoding="utf-8",
+            ),
+            mock.call(
+                epath.Path("gs://bkt/out/run.summary.json"),
+                json.dumps(summary, indent=2) + "\n",
+                encoding="utf-8",
+            ),
+        ],
+    )
+
+  def test_controller_survives_attempt_write_oserror(self) -> None:
+    args = eval_deepswe.parse_args(["--tasks_limit", "2"])
+    entries: list[dict[str, object]] = [
+        {"instance_id": "task-0", "docker_image": "image-0"},
+        {"instance_id": "task-1", "docker_image": "image-1"},
+    ]
+    replies = iter([
+        SimpleNamespace(
+            request_id="eval_0",
+            unwrap=lambda: {
+                "reward": 1.0,
+                "num_steps": 2,
+                "status": "SUCCEEDED",
+                "guard_blocked_steps": 0,
+                "guard_reasons": [],
+                "error": None,
+            },
+        ),
+        SimpleNamespace(
+            request_id="eval_1",
+            unwrap=lambda: {
+                "reward": 0.0,
+                "num_steps": 3,
+                "status": "SUCCEEDED",
+                "guard_blocked_steps": 0,
+                "guard_reasons": [],
+                "error": None,
+            },
+        ),
+    ])
+    handle = mock.AsyncMock()
+    handle.asubmit.return_value = eval_deepswe.model_profile(args)
+    handle.dispatch_task.side_effect = (
+        lambda request_id, method, fields: request_id
+    )
+    handle.poll_responses.side_effect = lambda timeout_s: next(replies)
+    real_write_json = eval_deepswe.write_json
+
+    def flaky_write_json(path: epath.PathLike, value: object) -> None:
+      if epath.Path(path).name == "eval_0.json":
+        raise OSError("transient GCS error")
+      real_write_json(path, value)
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+      args.output_dir = temp_dir
+      with (
+          mock.patch.object(eval_deepswe, "load_entries", return_value=entries),
+          mock.patch(
+              "tunix.dist_rl.worker.remote_execution.ActorHandle.from_address",
+              return_value=handle,
+          ),
+          mock.patch.object(
+              eval_deepswe,
+              "write_json",
+              autospec=True,
+              side_effect=flaky_write_json,
+          ),
+          self.assertLogs(level="INFO") as logs,
+      ):
+        summary = asyncio.run(eval_deepswe.run_controller(args))
+
+      self.assertTrue(
+          any(
+              record.levelname == "WARNING"
+              and "eval_0" in record.getMessage()
+              and "transient GCS error" in record.getMessage()
+              for record in logs.records
+          )
+      )
+      results = list(Path(temp_dir).glob("*.jsonl"))
+      self.assertEqual(len(results), 1)
+      run_dir = Path(temp_dir) / results[0].stem
+      self.assertTrue((run_dir / "config.json").exists())
+      self.assertFalse((run_dir / "attempts" / "eval_0.json").exists())
+      self.assertTrue((run_dir / "attempts" / "eval_1.json").exists())
+      written_rows = [
+          json.loads(line)
+          for line in results[0].read_text(encoding="utf-8").splitlines()
+      ]
+      self.assertEqual(
+          [row["instance_id"] for row in written_rows], ["task-0", "task-1"]
+      )
+      saved_summary = json.loads(
+          results[0].with_suffix(".summary.json").read_text(encoding="utf-8")
+      )
+      self.assertEqual(summary["completed_attempts"], 2)
+      self.assertEqual(summary["resolved"], 1)
+      self.assertEqual(summary["pass_at_1"], 0.5)
+      self.assertIsNone(summary["fatal_error"])
+      self.assertEqual(saved_summary, summary)
 
 
 if __name__ == "__main__":

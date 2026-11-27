@@ -60,6 +60,8 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
   group's performance to update the policy.
   """
 
+  _allow_unimplemented_drop_zero_variance: bool = False
+
   @compat.alias_init_param("rl_cluster", "rl_engine")
   def __init__(
       self,
@@ -89,6 +91,15 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         ... }
       data_shuffle_seed: The seed used to shuffle the training data.
     """  # fmt: skip
+    if (
+        algo_config.drop_zero_variance_groups
+        and not self._allow_unimplemented_drop_zero_variance
+    ):
+      raise ValueError(
+          "drop_zero_variance_groups is only supported by the distributed"
+          " StandardRLProgram; non-distributed GRPOLearner does not drop"
+          " zero-variance groups."
+      )
     super().__init__(
         rl_engine=rl_engine,
         algo_config=algo_config,
@@ -97,9 +108,16 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         data_shuffle_seed=data_shuffle_seed,
     )
 
-    self.algo_config.temperature = self.rl_engine.get_rollout_config(
+    rollout_config = self.rl_engine.get_rollout_config(
         mode=rl_engine_lib.Mode.TRAIN
-    ).temperature
+    )
+    self.algo_config.temperature = rollout_config.temperature
+    algo_config_lib.validate_score_centering_rollout(
+        self.algo_config,
+        self.rl_engine.cluster_config.rollout_engine,
+        rollout_config,
+        self._packing_enabled,
+    )
 
     policy_loss_fn = function_registry.get_policy_loss_fn(
         self.algo_config.policy_loss_fn
@@ -146,6 +164,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         "sampler_trainer/probs_pearson_corr": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
         "sampler_trainer/seq_error_masked_frac": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
         "sampler_trainer/seq_error_masked_count": np.sum,
+        **common.SCORE_CENTERING_METRICS,
     })
     self.rl_engine.actor_trainer.with_tqdm_metrics_to_display([  # pyrefly: ignore[bad-argument-type]
         lambda: "kl" if self.algo_config.beta != 0.0 else None,
@@ -262,12 +281,15 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
           for logprobs in rollout_output.logprobs
       ])
       old_per_token_logps = rollout_per_token_logps
-    needs_trainer_logps = not self.algo_config.use_rollout_logps or (
-        rollout_per_token_logps is not None
-        and (
-            self.algo_config.sampler_is is not None
-            or self.algo_config.sampler_rs is not None
-            or self.algo_config.seq_logprob_error_threshold is not None
+    needs_trainer_logps = not self.algo_config.score_centering and (
+        not self.algo_config.use_rollout_logps
+        or (
+            rollout_per_token_logps is not None
+            and (
+                self.algo_config.sampler_is is not None
+                or self.algo_config.sampler_rs is not None
+                or self.algo_config.seq_logprob_error_threshold is not None
+            )
         )
     )
     if needs_trainer_logps:
@@ -380,6 +402,16 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
       )
       self.rl_engine.buffer_metrics(user_defined_metric, mode=mode)
 
+    old_topk_token_ids = old_topk_logps = None
+    if self.algo_config.score_centering:
+      old_topk_token_ids, old_topk_logps = common.pad_topk(
+          rollout_output.topk_token_ids,
+          rollout_output.topk_logprobs,
+          [len(t) for t in rollout_output.tokens],
+          rollout_config.max_tokens_to_generate,
+          self.algo_config.score_centering_top_k,
+      )
+
     return TrainExample(
         prompt_ids=prompt_ids,
         prompt_mask=prompt_mask,
@@ -389,6 +421,8 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         advantages=jax.device_put(advantages),
         old_per_token_logps=old_per_token_logps,
         sampler_is_weights=sampler_is_weights,
+        old_topk_token_ids=old_topk_token_ids,
+        old_topk_logps=old_topk_logps,
         routed_experts=(
             None if routed_experts is None else jax.device_put(routed_experts)
         ),

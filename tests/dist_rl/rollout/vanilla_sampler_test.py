@@ -39,9 +39,7 @@ def _make_requests(prompts, max_tokens: int = 10):
       base_sampler_lib.SamplingRequest(
           request_id=f'req_{i}',
           prompt=p,
-          sampling_params=base_sampler_lib.SamplingParams(
-              max_tokens=max_tokens
-          ),
+          max_tokens=max_tokens,
       )
       for i, p in enumerate(prompts)
   ]
@@ -59,7 +57,7 @@ class VanillaSamplerTest(parameterized.TestCase):
     self.config = configs.RolloutConfig(
         kv_cache_size=64,
         temperature=0.0,
-        weight_sync_mode=weight_sync.WeightSyncMode.FALLBACK,
+        weight_sync_mode=weight_sync.WeightSyncMode.IN_MEMORY,
     )
     self.vanilla_sampler = vanilla_sampler.VanillaSampler(
         server_id='tpu_slice_01',
@@ -68,6 +66,14 @@ class VanillaSamplerTest(parameterized.TestCase):
         tokenizer=self.vocab,
     )
     self.vanilla_sampler.initialize()
+
+  def test_missing_tokenizer_raises(self):
+    with self.assertRaises(TypeError):
+      vanilla_sampler.VanillaSampler(  # pyrefly: ignore[missing-argument]
+          server_id='tpu_slice_01',
+          transformer=self.transformer,
+          config=self.config,
+      )
 
   def _make_sampler(
       self,
@@ -89,6 +95,23 @@ class VanillaSamplerTest(parameterized.TestCase):
     )
     sampler.initialize()
     return sampler
+
+  def test_request_without_max_tokens_uses_config_max_tokens_to_generate(self):
+    sampler = self._make_sampler(max_tokens_to_generate=3)
+    default = asyncio.run(
+        sampler.sample(
+            base_sampler_lib.SamplingRequest(request_id='r', prompt='input')
+        )
+    )
+    explicit = asyncio.run(
+        sampler.sample(
+            base_sampler_lib.SamplingRequest(
+                request_id='r', prompt='input', max_tokens=3
+            )
+        )
+    )
+    self.assertLessEqual(len(default.token_ids), 3)
+    np.testing.assert_array_equal(default.token_ids, explicit.token_ids)
 
   def assertReasonableTensor(self, array, expected_shape=None):
     self.assertIsNotNone(array)
@@ -1038,9 +1061,7 @@ class VanillaSamplerTest(parameterized.TestCase):
     req = base_sampler_lib.SamplingRequest(
         request_id='req_01',
         prompt='input string',
-        sampling_params=base_sampler_lib.SamplingParams(
-            max_tokens=10,
-        ),
+        max_tokens=10,
     )
     response = asyncio.run(self.vanilla_sampler.sample(req))
     self.assertIsInstance(response, base_sampler_lib.SamplingResponse)
@@ -1056,7 +1077,7 @@ class VanillaSamplerTest(parameterized.TestCase):
             temperature=1.0,
             top_p=1.0,
             seed=42,
-            weight_sync_mode=weight_sync.WeightSyncMode.FALLBACK,
+            weight_sync_mode=weight_sync.WeightSyncMode.IN_MEMORY,
         ),
         transformer=self.transformer,
         tokenizer=self.vocab,
@@ -1066,12 +1087,12 @@ class VanillaSamplerTest(parameterized.TestCase):
     req1 = base_sampler_lib.SamplingRequest(
         request_id='req_seed_1',
         prompt='input string',
-        sampling_params=base_sampler_lib.SamplingParams(max_tokens=8),
+        max_tokens=8,
     )
     req2 = base_sampler_lib.SamplingRequest(
         request_id='req_seed_2',
         prompt='input string',
-        sampling_params=base_sampler_lib.SamplingParams(max_tokens=8),
+        max_tokens=8,
     )
     asyncio.run(stochastic_sampler.sample(req1))
     rng_after_1 = np.asarray(stochastic_sampler._rng).copy()
@@ -1087,7 +1108,7 @@ class VanillaSamplerTest(parameterized.TestCase):
             kv_cache_size=64,
             temperature=0.0,
             return_logprobs=True,
-            weight_sync_mode=weight_sync.WeightSyncMode.FALLBACK,
+            weight_sync_mode=weight_sync.WeightSyncMode.IN_MEMORY,
         ),
         transformer=self.transformer,
         tokenizer=self.vocab,
@@ -1096,9 +1117,7 @@ class VanillaSamplerTest(parameterized.TestCase):
     req = base_sampler_lib.SamplingRequest(
         request_id='req_logprobs',
         prompt='input string',
-        sampling_params=base_sampler_lib.SamplingParams(
-            max_tokens=10,
-        ),
+        max_tokens=10,
     )
     response = asyncio.run(sampler_with_logprobs.sample(req))
     self.assertIsInstance(response, base_sampler_lib.SamplingResponse)
@@ -1110,18 +1129,12 @@ class VanillaSamplerTest(parameterized.TestCase):
         base_sampler_lib.SamplingRequest(
             request_id='req_a',
             prompt='input string 1',
-            sampling_params=base_sampler_lib.SamplingParams(
-                max_tokens=8,
-                temperature=0.0,
-            ),
+            max_tokens=8,
         ),
         base_sampler_lib.SamplingRequest(
             request_id='req_b',
             prompt='hello world 2',
-            sampling_params=base_sampler_lib.SamplingParams(
-                max_tokens=8,
-                temperature=0.0,
-            ),
+            max_tokens=8,
         ),
     ]
     responses = asyncio.run(self.vanilla_sampler.sample(reqs))
@@ -1136,13 +1149,25 @@ class VanillaSamplerTest(parameterized.TestCase):
 
   def test_weight_sync_without_raiden_delegate(self):
     self.assertIsNone(asyncio.run(self.vanilla_sampler.bind_weight_sync()))
-    self.assertTrue(asyncio.run(self.vanilla_sampler.pre_weight_sync()))
+    self.assertTrue(
+        asyncio.run(
+            self.vanilla_sampler.pre_weight_sync(
+                base_sampler_lib.WeightSyncRequest()
+            )
+        )
+    )
     new_state = self.vanilla_sampler.transformer_state
     req = base_sampler_lib.WeightSyncRequest(weights=new_state)
-    self.assertTrue(
+    self.assertIsNone(
         asyncio.run(self.vanilla_sampler.weight_sync(sync_request=req))
     )
-    self.assertTrue(asyncio.run(self.vanilla_sampler.post_weight_sync()))
+    self.assertTrue(
+        asyncio.run(
+            self.vanilla_sampler.post_weight_sync(
+                base_sampler_lib.WeightSyncRequest()
+            )
+        )
+    )
     with self.assertRaises(NotImplementedError):
       asyncio.run(self.vanilla_sampler.get_weight_sync_metadata())
 
@@ -1261,16 +1286,12 @@ class SamplerTokenInputTest(absltest.TestCase):
                   base_sampler_lib.SamplingRequest(
                       request_id='req_0',
                       prompt=[0, 3],
-                      sampling_params=base_sampler_lib.SamplingParams(
-                          max_tokens=2
-                      ),
+                      max_tokens=2,
                   ),
                   base_sampler_lib.SamplingRequest(
                       request_id='req_1',
                       prompt=[4, 0, 5],
-                      sampling_params=base_sampler_lib.SamplingParams(
-                          max_tokens=2
-                      ),
+                      max_tokens=2,
                   ),
               ],
               max_prompt_length=4,
@@ -1320,12 +1341,12 @@ class SamplerTokenInputTest(absltest.TestCase):
             base_sampler_lib.SamplingRequest(
                 request_id='req_0',
                 prompt='input string',
-                sampling_params=base_sampler_lib.SamplingParams(max_tokens=2),
+                max_tokens=2,
             ),
             base_sampler_lib.SamplingRequest(
                 request_id='req_1',
                 prompt='hello world',
-                sampling_params=base_sampler_lib.SamplingParams(max_tokens=2),
+                max_tokens=2,
             ),
         ])
     )
@@ -1346,19 +1367,21 @@ class SamplerTokenInputTest(absltest.TestCase):
     sampler_beam = self._make_sampler(cache_size=5, beam_size=2)
     with self.assertRaisesRegex(ValueError, 'one output per row'):
       asyncio.run(
-          sampler_beam.sample([
-              base_sampler_lib.SamplingRequest(
-                  prompt=[1],
-                  sampling_params=base_sampler_lib.SamplingParams(max_tokens=1),
-              )
-          ])
+          sampler_beam.sample(
+              [
+                  base_sampler_lib.SamplingRequest(
+                      prompt=[1],
+                      max_tokens=1,
+                  )
+              ]
+          )
       )
     with self.assertRaisesRegex(ValueError, 'exceeds cache_size'):
       asyncio.run(
           sampler.sample([
               base_sampler_lib.SamplingRequest(
                   prompt=[1, 2, 3, 4],
-                  sampling_params=base_sampler_lib.SamplingParams(max_tokens=2),
+                  max_tokens=2,
               )
           ])
       )
@@ -1369,7 +1392,7 @@ class SamplerTokenInputTest(absltest.TestCase):
           sampler.sample([
               base_sampler_lib.SamplingRequest(
                   prompt=np.zeros((1, 2), dtype=np.int32),
-                  sampling_params=base_sampler_lib.SamplingParams(max_tokens=1),
+                  max_tokens=1,
               )
           ])
       )

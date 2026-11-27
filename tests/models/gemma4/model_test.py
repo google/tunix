@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from unittest import mock
 
 from absl.testing import absltest
@@ -25,7 +26,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import qwix
+from tunix.common import datatypes
+from tunix.experimental.generate import configs as generate_configs
+from tunix.experimental.generate import kv_cache_manager
 from tunix.models import cache_utils
+from tunix.models import paged_attention
 from tunix.models.gemma4 import attention as attention_lib
 from tunix.models.gemma4 import model as model_lib
 
@@ -181,6 +186,171 @@ class ModelTest(parameterized.TestCase):
     self.assertNotIn('layer_3', final_cache)
     self.assertEqual(int(final_cache['layer_0']['end_index'][0]), 5)
     self.assertEqual(int(final_cache['layer_1']['end_index'][0]), 5)
+
+  def test_paged_forward_matches_dense(self):
+    config = model_lib.ModelConfig.gemma4_e2b()
+    config.num_layers = 4
+    config.num_embed = 128
+    config.embed_dim = 256
+    config.hidden_dim = 512
+    config.num_heads = 4
+    config.head_dim = 32
+    config.num_kv_heads = 4
+    config.num_global_kv_heads = 2
+    config.global_key_size = 64
+    config.sliding_window_size = 4
+    config.frac_shared_layers = 0.5
+    config.use_flash_attention = False
+    config.attention_pattern = (
+        model_lib.AttentionType.LOCAL_SLIDING,
+        model_lib.AttentionType.GLOBAL,
+    )
+    model = model_lib.Gemma4(config, rngs=nnx.Rngs(0))
+    # Many weights start at zero; randomize them so every layer matters.
+    state = nnx.state(model, nnx.Param)
+    leaves, treedef = jax.tree.flatten(state)
+    keys = jax.random.split(jax.random.PRNGKey(1), len(leaves))
+    nnx.update(
+        model,
+        jax.tree.unflatten(
+            treedef,
+            [
+                0.1 * jax.random.normal(k, x.shape, x.dtype)
+                for k, x in zip(keys, leaves)
+            ],
+        ),
+    )
+
+    lens = [7, 3]
+    full_seqs = [
+        jax.random.randint(
+            jax.random.PRNGKey(2 + i), (n + 1,), 0, config.num_embed
+        )
+        for i, n in enumerate(lens)
+    ]
+    seqs = [seq[:-1] for seq in full_seqs]
+    decode_tokens = jnp.array([seq[-1] for seq in full_seqs])
+    dense_prefill_logits = []
+    dense_decode_logits = []
+    for seq in full_seqs:
+      n = seq.shape[0]
+      logits, _ = model(
+          seq[None],
+          positions=jnp.arange(n)[None],
+          attention_mask=jnp.tril(jnp.ones((n, n), dtype=jnp.bool_))[None],
+      )
+      dense_prefill_logits.append(logits[0, :-1])
+      dense_decode_logits.append(logits[0, -1:])
+
+    geometries = model.cache_geometries()
+    self.assertEqual(
+        geometries,
+        {
+            'layer_0': datatypes.CacheGeometry(
+                num_kv_heads=4, head_dim=32, window_size=4
+            ),
+            'layer_1': datatypes.CacheGeometry(
+                num_kv_heads=2, head_dim=64, window_size=None
+            ),
+        },
+    )
+    mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ('tp',))
+    with jax.set_mesh(mesh):
+      manager = kv_cache_manager.KVCacheManager(
+          generate_configs.CacheConfig(
+              max_device_size_gib=(1 << 20) / (1 << 30),
+              page_size=4,
+              dtype=jnp.float32,
+          ),
+          geometries,
+      )
+    cache = manager.get_physical_pages()
+    # Distinct page tables per cache verify `cache_name` routing; -1 marks
+    # unallocated page slots. The last row and trailing tokens are padding.
+    pages_0 = np.array([[0, 1], [2, -1], [-1, -1]], dtype=np.int32)
+    pages_1 = np.array([[3, 0], [1, -1], [-1, -1]], dtype=np.int32)
+    metadata = paged_attention.PagedAttnMetadata(
+        page_indices={'layer_0': pages_0, 'layer_1': pages_1},
+        kv_lens=np.array([*lens, 0], dtype=np.int32),
+        query_lens=np.array([*lens, 0], dtype=np.int32),
+        distribution=np.array([[0, 0, 2]], dtype=np.int32),
+    )
+    padded_tokens = jnp.concatenate([*seqs, jnp.zeros((2,), jnp.int32)])[None]
+    padded_positions = jnp.concatenate(
+        [*(jnp.arange(n) for n in lens), jnp.zeros((2,), jnp.int32)]
+    )[None]
+    paged_logits, new_cache = model(
+        padded_tokens,
+        positions=padded_positions,
+        cache=cache,
+        metadata=metadata,
+        mesh=mesh,
+    )
+
+    self.assertEqual(set(new_cache), set(cache))
+    np.testing.assert_allclose(
+        paged_logits[: sum(lens)],
+        jnp.concatenate(dense_prefill_logits),
+        rtol=1e-4,
+        atol=1e-4,
+    )
+
+    # Decode one more token per sequence from the populated paged KV cache.
+    # For seq 0 (kv_len=8, window_size=4), page 0 (tokens 0..3) is now outside
+    # the sliding window on `layer_0` and is marked evicted (-1).
+    decode_pages_0 = np.array([[-1, 1], [2, -1], [-1, -1]], dtype=np.int32)
+    decode_metadata = paged_attention.PagedAttnMetadata(
+        page_indices={'layer_0': decode_pages_0, 'layer_1': pages_1},
+        kv_lens=np.array([*(n + 1 for n in lens), 0], dtype=np.int32),
+        query_lens=np.array([1, 1, 0], dtype=np.int32),
+        distribution=np.array([[2, 2, 2]], dtype=np.int32),
+    )
+    paged_decode_logits, _ = model(
+        jnp.concatenate([decode_tokens, jnp.zeros((1,), jnp.int32)])[None],
+        positions=jnp.array([[*lens, 0]], dtype=jnp.int32),
+        cache=new_cache,
+        metadata=decode_metadata,
+        mesh=mesh,
+        logits_idxs=jnp.array([[0, 1]]),
+    )
+    np.testing.assert_allclose(
+        paged_decode_logits,
+        jnp.concatenate(dense_decode_logits),
+        rtol=1e-4,
+        atol=1e-4,
+    )
+
+    with self.assertRaisesRegex(TypeError, 'PagedCache'):
+      model(
+          jnp.concatenate(seqs)[None],
+          positions=jnp.concatenate([jnp.arange(n) for n in lens])[None],
+          cache={'layer_0': {'k': cache['layer_0']}},
+          metadata=metadata,
+          mesh=mesh,
+      )
+    with self.assertRaisesRegex(TypeError, 'Cache'):
+      model(
+          seqs[0][None],
+          positions=jnp.arange(lens[0])[None],
+          cache=cache,
+      )
+
+    # With `logits_idxs`, only those tokens' logits are computed.
+    last_token_idxs = jnp.array([[lens[0] - 1, sum(lens) - 1]])
+    last_token_logits, _ = model(
+        padded_tokens,
+        positions=padded_positions,
+        cache=cache,
+        metadata=metadata,
+        mesh=mesh,
+        logits_idxs=last_token_idxs,
+    )
+    np.testing.assert_allclose(
+        last_token_logits,
+        paged_logits[last_token_idxs[0]],
+        rtol=1e-4,
+        atol=1e-4,
+    )
 
   def test_forward_pass_dense(self):
     config = model_lib.ModelConfig.gemma4_e2b()
@@ -379,6 +549,103 @@ class ModelTest(parameterized.TestCase):
     loss, grads = train_step(lora_model, tokens, positions, attn_mask)
     self.assertIsNotNone(loss)
     self.assertIsNotNone(grads)
+
+  def test_qwix_qlora_nf4_train_step(self):
+    config = model_lib.ModelConfig.gemma4_e2b()
+    config.num_layers = 1
+    config.embed_dim = 256
+    config.hidden_dim = 512
+    config.num_heads = 4
+    config.head_dim = 64
+    config.num_kv_heads = 1
+    config.frac_shared_layers = 0.0
+
+    model = model_lib.Gemma4(config, rngs=nnx.Rngs(0))
+    lora_provider = qwix.LoraProvider(
+        module_path='.*q_einsum|.*kv_einsum|.*attn_vec_einsum|.*gate_proj|.*up_proj|.*down_proj',
+        rank=4,
+        alpha=2.0,
+        weight_qtype='nf4',
+        tile_size=32,
+    )
+    lora_model = qwix.apply_lora_to_model(
+        model, lora_provider, **model.get_model_input()
+    )
+
+    tokens = jax.random.randint(
+        jax.random.PRNGKey(0), (2, 32), 0, config.num_embed
+    )
+    positions = jnp.tile(
+        jnp.arange(tokens.shape[1])[None, :], (tokens.shape[0], 1)
+    )
+    attn_mask = jnp.tril(
+        jnp.ones((tokens.shape[1], tokens.shape[1]), dtype=jnp.bool_)
+    )[None, ...]
+
+    @nnx.jit
+    def train_step(m, tok, pos, mask):
+      def loss_fn(model_in):
+        logits, _ = model_in(tok, positions=pos, attention_mask=mask)
+        return jnp.mean(logits)
+
+      grad_fn = nnx.value_and_grad(
+          loss_fn, argnums=nnx.DiffState(0, nnx.LoRAParam)
+      )
+      return grad_fn(m)
+
+    loss, grads = train_step(lora_model, tokens, positions, attn_mask)
+    self.assertTrue(jnp.isfinite(loss))
+    lora_grads = jax.tree.leaves(grads)
+    self.assertNotEmpty(lora_grads)
+    self.assertTrue(all(jnp.all(jnp.isfinite(g)) for g in lora_grads))
+    self.assertTrue(any(jnp.any(g != 0) for g in lora_grads))
+
+  def test_einsum_mixed_precision_dtype_cast(self):
+    einsum = model_lib.Einsum(
+        einsum_str='BTD,NDH->BTNH',
+        shape=(2, 32, 16),
+        rngs=nnx.Rngs(0),
+        sharding=(None, None, None),
+        dtype=jnp.bfloat16,
+        param_dtype=jnp.float32,
+    )
+    x = jnp.ones((2, 4, 32), dtype=jnp.float32)
+
+    self.assertEqual(einsum.w.value.dtype, jnp.float32)
+    plain_out = einsum(x)
+    self.assertEqual(plain_out.dtype, jnp.bfloat16)
+    self.assertTrue(jnp.all(jnp.isfinite(plain_out)))
+
+    lora_provider = qwix.LoraProvider(
+        module_path='.*',
+        rank=4,
+        alpha=2.0,
+        weight_qtype='nf4',
+        tile_size=16,
+    )
+    qlora_einsum = qwix.apply_lora_to_model(einsum, lora_provider, x)
+    qlora_out = nnx.jit(lambda m, inp: m(inp))(qlora_einsum, x)
+    self.assertEqual(qlora_out.dtype, jnp.bfloat16)
+    self.assertTrue(jnp.all(jnp.isfinite(qlora_out)))
+
+    ptq_provider = qwix.PtqProvider([
+        qwix.QuantizationRule(
+            module_path='.*',
+            weight_qtype='nf4',
+            tile_size=16,
+        )
+    ])
+    ptq_einsum = nnx.eval_shape(
+        lambda: qwix.quantize_model(einsum, ptq_provider, x)
+    )
+    quantized_params = qwix.quantize_params(
+        nnx.to_pure_dict(nnx.state(einsum, nnx.Param)), ptq_einsum
+    )
+    nnx.update(ptq_einsum, quantized_params)
+    self.assertEqual(ptq_einsum.w.dtype, jnp.float32)
+    ptq_out = nnx.jit(lambda m, inp: m(inp))(ptq_einsum, x)
+    self.assertEqual(ptq_out.dtype, jnp.bfloat16)
+    self.assertTrue(jnp.all(jnp.isfinite(ptq_out)))
 
   def test_remat_while_loop_trace_context(self):
     config = model_lib.ModelConfig.gemma4_e2b()
@@ -1105,6 +1372,231 @@ class ModelTest(parameterized.TestCase):
       passed_positions = mock_layer.call_args.args[1]
       expected_positions = jnp.arange(8, 12, dtype=jnp.int32)[None, :]
       np.testing.assert_array_equal(passed_positions, expected_positions)
+
+  @parameterized.named_parameters(
+      ('sampling', True, jax.sharding.PartitionSpec(None)),
+      ('training', False, jax.sharding.PartitionSpec('tp')),
+  )
+  def test_default_sharding_rms_norm_weight(
+      self, is_sampling, expected_spec
+  ):
+    cfg = dataclasses.replace(
+        model_lib.ModelConfig.gemma4_12b(
+            sharding_config=model_lib.ShardingConfig.get_default_sharding(
+                is_sampling=is_sampling
+            )
+        ),
+        num_layers=1,
+        num_embed=128,
+        embed_dim=64,
+        hidden_dim=128,
+        num_heads=2,
+        head_dim=32,
+        num_kv_heads=1,
+    )
+    abs_model = nnx.eval_shape(lambda: model_lib.Gemma4(cfg, rngs=nnx.Rngs(0)))
+    pspecs = nnx.get_partition_spec(nnx.state(abs_model))
+    self.assertEqual(
+        pspecs['layers'][0]['pre_attention_norm']['scale'].get_value(),
+        expected_spec,
+    )
+    self.assertEqual(
+        pspecs['layers'][0]['post_ffw_norm']['scale'].get_value(),
+        expected_spec,
+    )
+    self.assertEqual(pspecs['final_norm']['scale'].get_value(), expected_spec)
+
+
+_MOE_SHAPE = (2, 8, 2, 2)  # (batch, seq, layers, top_k)
+
+
+def _tiny_moe_model(**overrides) -> model_lib.Gemma4:
+  cfg = dataclasses.replace(
+      model_lib.ModelConfig.gemma4_26b_a4b(),
+      num_layers=2,
+      num_embed=128,
+      embed_dim=64,
+      hidden_dim=128,
+      num_heads=2,
+      head_dim=32,
+      num_kv_heads=1,
+      num_global_kv_heads=1,
+      global_key_size=32,
+      sliding_window_size=4,
+      num_experts=4,
+      num_experts_per_tok=2,
+      expert_dim=32,
+      use_flash_attention=False,
+      attention_pattern=(
+          model_lib.AttentionType.LOCAL_SLIDING,
+          model_lib.AttentionType.GLOBAL,
+      ),
+      **overrides,
+  )
+  model = model_lib.Gemma4(cfg, rngs=nnx.Rngs(0))
+  leaves, treedef = jax.tree.flatten(nnx.state(model, nnx.Param))
+  keys = jax.random.split(jax.random.PRNGKey(1), len(leaves))
+  rand = [
+      0.1 * jax.random.normal(k, x.shape, x.dtype)
+      for k, x in zip(keys, leaves)
+  ]
+  nnx.update(model, jax.tree.unflatten(treedef, rand))
+  return model
+
+
+class RouterReplayTest(parameterized.TestCase):
+
+  def _inputs(self):
+    b, s = _MOE_SHAPE[:2]
+    tokens = jax.random.randint(jax.random.PRNGKey(2), (b, s), 0, 128)
+    positions = jnp.broadcast_to(jnp.arange(s)[None, :], (b, s))
+    mask = jnp.tril(jnp.ones((s, s), dtype=jnp.bool_))[None]
+    return tokens, positions, mask
+
+  def test_replay_remat_and_freeze_router(self):
+    model = _tiny_moe_model()
+    tokens, positions, mask = self._inputs()
+    route_01 = jnp.broadcast_to(jnp.array([0, 1], jnp.int32), _MOE_SHAPE)
+    route_23 = jnp.broadcast_to(jnp.array([2, 3], jnp.int32), _MOE_SHAPE)
+    per_layer = jnp.broadcast_to(
+        jnp.array([[0, 1], [2, 3]], jnp.int32), _MOE_SHAPE
+    )
+    per_layer_swapped = per_layer[:, :, ::-1, :]
+    last_tok_changed = route_01.at[:, -1].set(jnp.array([2, 3], jnp.int32))
+
+    base, _ = model(tokens, positions=positions, attention_mask=mask)
+    unset, _ = model(
+        tokens,
+        positions=positions,
+        attention_mask=mask,
+        forced_routed_experts=jnp.full(_MOE_SHAPE, -1, jnp.int32),
+    )
+    np.testing.assert_allclose(unset, base, rtol=1e-5, atol=1e-5)
+
+    out_01, _ = model(
+        tokens,
+        positions=positions,
+        attention_mask=mask,
+        forced_routed_experts=route_01,
+    )
+    out_23, _ = model(
+        tokens,
+        positions=positions,
+        attention_mask=mask,
+        forced_routed_experts=route_23,
+    )
+    self.assertFalse(np.allclose(out_01, out_23))
+
+    out_layer, _ = model(
+        tokens,
+        positions=positions,
+        attention_mask=mask,
+        forced_routed_experts=per_layer,
+    )
+    out_layer_swapped, _ = model(
+        tokens,
+        positions=positions,
+        attention_mask=mask,
+        forced_routed_experts=per_layer_swapped,
+    )
+    self.assertFalse(np.allclose(out_layer, out_layer_swapped))
+    self.assertFalse(np.allclose(out_layer, out_01))
+    self.assertFalse(np.allclose(out_layer, out_23))
+
+    out_tok, _ = model(
+        tokens,
+        positions=positions,
+        attention_mask=mask,
+        forced_routed_experts=last_tok_changed,
+    )
+    np.testing.assert_allclose(
+        out_tok[:, :-1], out_01[:, :-1], rtol=1e-5, atol=1e-5
+    )
+    self.assertFalse(np.allclose(out_tok[:, -1], out_01[:, -1]))
+
+    def loss_fn(m):
+      out, _ = m(
+          tokens,
+          positions=positions,
+          attention_mask=mask,
+          forced_routed_experts=per_layer,
+      )
+      return jnp.sum(out**2), out
+
+    (_, ref_out), ref_grads = nnx.jit(
+        nnx.value_and_grad(loss_fn, has_aux=True)
+    )(_tiny_moe_model())
+    np.testing.assert_allclose(ref_out, out_layer, rtol=1e-4, atol=1e-4)
+    for remat in (model_lib.RematConfig.BLOCK, model_lib.RematConfig.DECODER):
+      (_, remat_out), remat_grads = nnx.jit(
+          nnx.value_and_grad(loss_fn, has_aux=True)
+      )(_tiny_moe_model(remat_config=remat))
+      np.testing.assert_allclose(remat_out, ref_out, rtol=1e-4, atol=1e-4)
+      jax.tree.map(
+          lambda g, r: np.testing.assert_allclose(g, r, rtol=1e-4, atol=1e-4),
+          nnx.state(remat_grads, nnx.Param),
+          nnx.state(ref_grads, nnx.Param),
+      )
+
+    grads = nnx.grad(lambda m: loss_fn(m)[0])(
+        _tiny_moe_model(freeze_router=True)
+    )
+    for i in range(2):
+      np.testing.assert_array_equal(grads.layers[i].moe.router_logits.value, 0)
+      np.testing.assert_array_equal(grads.layers[i].moe.router_scale.value, 0)
+      self.assertTrue(np.any(grads.layers[i].moe.gating_einsum.value != 0))
+
+  def test_invalid_forced_routed_experts(self):
+    model = _tiny_moe_model()
+    tokens, positions, mask = self._inputs()
+    zeros = jnp.zeros(_MOE_SHAPE, jnp.int32)
+
+    with self.assertRaisesRegex(ValueError, 'num_layers'):
+      model(
+          tokens,
+          positions=positions,
+          attention_mask=mask,
+          forced_routed_experts=zeros[..., 0],
+      )
+    for bad_dtype in (jnp.float32, jnp.uint8):
+      with self.assertRaisesRegex(TypeError, 'signed integer'):
+        model(
+            tokens,
+            positions=positions,
+            attention_mask=mask,
+            forced_routed_experts=zeros.astype(bad_dtype),
+        )
+    with self.assertRaisesRegex(ValueError, 'metadata'):
+      model(
+          tokens[0],
+          positions=positions[0],
+          cache={},
+          metadata=paged_attention.PagedAttnMetadata(
+              page_indices={},
+              kv_lens=np.zeros((1,), np.int32),
+              query_lens=np.zeros((1,), np.int32),
+              distribution=np.zeros((3,), np.int32),
+          ),
+          mesh=jax.sharding.Mesh(np.array(jax.devices()[:1]), ('tp',)),
+          forced_routed_experts=zeros,
+      )
+    dense_cfg = dataclasses.replace(
+        model_lib.ModelConfig.gemma4_12b(),
+        num_layers=2,
+        num_embed=128,
+        embed_dim=64,
+        hidden_dim=128,
+        num_heads=2,
+        head_dim=32,
+        num_kv_heads=1,
+    )
+    with self.assertRaisesRegex(ValueError, 'enable_moe'):
+      model_lib.Gemma4(dense_cfg, rngs=nnx.Rngs(0))(
+          tokens,
+          positions=positions,
+          attention_mask=mask,
+          forced_routed_experts=zeros,
+      )
 
 
 if __name__ == '__main__':

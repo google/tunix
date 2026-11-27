@@ -22,12 +22,16 @@ from typing import Any
 
 from absl import logging
 from flax import nnx
+from flax import traverse_util
 import jax
 import numpy as np
 from orbax.checkpoint import pathways as ocp_pathways
 from orbax.checkpoint import utils as ocp_utils
 from orbax.checkpoint import v1 as ocp
+from tunix.models import hf_mapping
+from tunix.models import safetensors_saver
 from tunix.sft import checkpoint_options
+from tunix.utils import sharding_utils
 
 
 def _convert_host_local_array(x: Any) -> Any:
@@ -42,13 +46,16 @@ def _convert_host_local_array(x: Any) -> Any:
         mesh, jax.sharding.PartitionSpec()
     )
     if not x.shape:
-      val = x.item()
-      return jax.device_put(val, replicated_sharding)
+      return sharding_utils.place_array_on_target(
+          np.asarray(x.item()), replicated_sharding
+      )
     else:
       try:
         return ocp_utils.fully_replicated_host_local_array_to_global_array(x)
       except ValueError:
-        return jax.device_put(np.asarray(x), replicated_sharding)
+        return sharding_utils.place_array_on_target(
+            np.asarray(x), replicated_sharding
+        )
   return x
 
 
@@ -136,10 +143,9 @@ class CheckpointManager:
         the checkpoint manager will be disabled.
       options: The options for the checkpoint manager.
     """
+    self._root_directory: str | None = root_directory
     self._checkpointer: ocp.training.Checkpointer | None = None
-    self._options = checkpoint_options.resolve_checkpointing_defaults(
-        options
-    )
+    self._options = checkpoint_options.resolve_checkpointing_defaults(options)
     if root_directory:
       self._checkpointer = ocp.training.Checkpointer(
           root_directory,
@@ -158,13 +164,22 @@ class CheckpointManager:
         and self._options.async_options.timeout_secs is not None
     ):
       ctx.asynchronous.timeout_secs = self._options.async_options.timeout_secs
+    if self._options.device_host_concurrent_gb is not None:
+      # Decimal GB (10**9 bytes): Orbax v0's `save_device_host_concurrent_gb`,
+      # which MaxText's `checkpoint_storage_device_host_concurrent_gb` sets,
+      # counts them the same way.
+      ctx.memory.transfer_concurrent_bytes = (
+          self._options.device_host_concurrent_gb * 10**9
+      )
 
     # When using Pathways, the checkpoint manager only supports persistence
     # APIs now.
     # TODO: b/528053113 - Refactor the pathways check once internal pathways
     # properly enables persistence API.
     is_proxy_pathways = 'proxy' in os.getenv('JAX_PLATFORMS', '')
-    use_persistence = bool(os.getenv('ENABLE_PATHWAYS_PERSISTENCE', ''))
+    # Pathways and Orbax take "1" or "0" (k8s.sh passes "0" when persistence
+    # is off), so any other value, including "0", means no persistence.
+    use_persistence = os.getenv('ENABLE_PATHWAYS_PERSISTENCE', '') == '1'
 
     if is_proxy_pathways and use_persistence:
       logging.info('Using persistence API for checkpointing with Pathways.')
@@ -216,6 +231,11 @@ class CheckpointManager:
     if self._checkpointer is None or self._checkpointer.latest is None:
       return None
     return self._checkpointer.latest.step
+
+  def wait(self) -> None:
+    """Blocks until pending saves are durable."""
+    if self._checkpointer is not None:
+      self._checkpointer.wait()
 
   def save(
       self,
@@ -356,3 +376,61 @@ class CheckpointManager:
     if self._checkpointer is None:
       return
     self._checkpointer.close()
+
+  def export_safetensors(
+      self,
+      step: int,
+      model: nnx.Module,
+      *,
+      to_hf_manifest: hf_mapping.RuleSpec,
+      output_dir: str | None = None,
+  ) -> safetensors_saver.SafetensorsSaveResult:
+    """Exports the model's full `nnx.Param` weights as safetensors.
+
+    Collective: every process must call it. Export is independent of the
+    Orbax checkpointer's async save and close lifecycle: it reads the current
+    weights from `model` directly, never awaits or affects in-flight Orbax
+    saves, and may be called after `close()` (e.g. after `train()` returns).
+
+    Args:
+      step: Training step naming the default output directory.
+      model: Model whose `nnx.Param` state is exported; must hold no LoRA
+        parameters (use `<family>.params.save_lora_merged_model_as_safetensors`
+        to export merged LoRA weights).
+      to_hf_manifest: `hf_mapping` manifest mapping dotted `nnx` parameter
+        paths to canonical Hugging Face tensor names and layouts.
+      output_dir: Destination directory; defaults to
+        `<root_directory>/safetensors/<step>`, beside the Orbax step dirs.
+
+    Returns:
+      The committed safetensors paths (commit marker last) and checksums.
+
+    Raises:
+      ValueError: If `output_dir` is empty or missing while checkpointing is
+        disabled, or if `model` holds LoRA parameters.
+    """
+    if output_dir is None:
+      if not self._root_directory:
+        raise ValueError(
+            'export_safetensors() needs output_dir when checkpointing is'
+            ' disabled.'
+        )
+      output_dir = os.path.join(self._root_directory, 'safetensors', str(step))
+    elif not output_dir:
+      raise ValueError('export_safetensors() output_dir must not be empty.')
+    if jax.tree.leaves(nnx.state(model, nnx.LoRAParam)):
+      raise ValueError(
+          'export_safetensors() would drop the LoRA deltas of a LoRA model; use'
+          ' `<family>.params.save_lora_merged_model_as_safetensors` instead.'
+      )
+    flat_params = traverse_util.flatten_dict(
+        nnx.to_pure_dict(nnx.state(model, nnx.Param))
+    )
+    return safetensors_saver.save_safetensors(
+        {
+            safetensors_saver.join_path(path): value
+            for path, value in flat_params.items()
+        },
+        output_dir,
+        to_hf_manifest=to_hf_manifest,
+    )

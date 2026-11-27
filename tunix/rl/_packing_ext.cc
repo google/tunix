@@ -75,6 +75,27 @@ struct RawArrayView {
   int64_t size = 0;
 };
 
+inline size_t Uint10LayerBytes(int64_t k) noexcept {
+  return k > 0 ? static_cast<size_t>((10 * k + 7) / 8) : 0;
+}
+
+inline std::pair<size_t, size_t> Uint10TrailingShape(size_t k) noexcept {
+  if (k % 4 == 0) {
+    return {k / 4, 5};
+  }
+  return {1, Uint10LayerBytes(static_cast<int64_t>(k))};
+}
+
+inline int64_t ExtractUint10LogicalK(size_t d_penult, size_t d_last) noexcept {
+  if (d_last == 5) {
+    return static_cast<int64_t>(d_penult * 4);
+  }
+  if (d_penult == 1 && (d_last % 5) >= 2) {
+    return static_cast<int64_t>((d_last * 8) / 10);
+  }
+  return -1;
+}
+
 inline size_t RoutedTokenBytes(RoutedEncoding enc, int64_t layers,
                                int64_t k) noexcept {
   if (layers <= 0 || k <= 0) {
@@ -85,7 +106,7 @@ inline size_t RoutedTokenBytes(RoutedEncoding enc, int64_t layers,
     case RoutedEncoding::kUint8:
       return lk;
     case RoutedEncoding::kUint10:
-      return static_cast<size_t>(layers * (k / 4) * 5);
+      return static_cast<size_t>(layers) * Uint10LayerBytes(k);
     case RoutedEncoding::kInt16:
       return lk * sizeof(int16_t);
     case RoutedEncoding::kNone:
@@ -120,6 +141,79 @@ inline void UnpackUint10ToFour(const uint8_t* src, uint16_t* dst) noexcept {
   UnpackUint10ToFour(src, &dst[0], &dst[1], &dst[2], &dst[3]);
 }
 
+template <typename SrcT, typename LoadFn>
+inline void PackSpanToUint10(const SrcT* src, size_t count, uint8_t* dst,
+                             LoadFn&& load_u10) noexcept {
+  const size_t full_groups = count / 4;
+  for (size_t g = 0; g < full_groups; ++g) {
+    const SrcT* s = src + g * 4;
+    PackFourToUint10(load_u10(s[0]), load_u10(s[1]), load_u10(s[2]),
+                     load_u10(s[3]), dst + g * 5);
+  }
+  const size_t rem = count % 4;
+  if (rem > 0) {
+    uint16_t tail_v[4] = {0, 0, 0, 0};
+    const SrcT* s = src + full_groups * 4;
+    for (size_t r = 0; r < rem; ++r) {
+      tail_v[r] = load_u10(s[r]);
+    }
+    uint8_t tail_bytes[5];
+    PackFourToUint10(tail_v[0], tail_v[1], tail_v[2], tail_v[3], tail_bytes);
+    std::memcpy(dst + full_groups * 5, tail_bytes, rem + 1);
+  }
+}
+
+inline void PackInt16LayerToUint10(const int16_t* src, size_t count,
+                                   uint8_t* dst) noexcept {
+  PackSpanToUint10(src, count, dst,
+                   [](int16_t v) { return static_cast<uint16_t>(v + 1); });
+}
+
+inline void PackUint8LayerToUint10(const uint8_t* src, size_t count,
+                                   uint8_t* dst) noexcept {
+  PackSpanToUint10(src, count, dst,
+                   [](uint8_t v) { return static_cast<uint16_t>(v); });
+}
+
+template <typename EmitGroupFn>
+inline void UnpackUint10Span(const uint8_t* src, size_t count,
+                             EmitGroupFn&& emit) noexcept {
+  const size_t full_groups = count / 4;
+  for (size_t g = 0; g < full_groups; ++g) {
+    uint16_t v[4];
+    UnpackUint10ToFour(src + g * 5, v);
+    emit(g * 4, v, 4);
+  }
+  const size_t rem = count % 4;
+  if (rem > 0) {
+    uint8_t tail_bytes[5] = {0, 0, 0, 0, 0};
+    std::memcpy(tail_bytes, src + full_groups * 5, rem + 1);
+    uint16_t tail_v[4];
+    UnpackUint10ToFour(tail_bytes, tail_v);
+    emit(full_groups * 4, tail_v, rem);
+  }
+}
+
+inline void UnpackUint10LayerToInt16(const uint8_t* src, size_t count,
+                                     int16_t* dst) noexcept {
+  UnpackUint10Span(src, count, [dst](size_t base, const uint16_t* v, size_t n) {
+    for (size_t i = 0; i < n; ++i) {
+      dst[base + i] = static_cast<int16_t>(v[i]) - 1;
+    }
+  });
+}
+
+inline uint16_t MaxUint10InLayer(const uint8_t* src, size_t count) noexcept {
+  uint16_t max_u10 = 0;
+  UnpackUint10Span(src, count,
+                   [&max_u10](size_t /*base*/, const uint16_t* v, size_t n) {
+                     for (size_t i = 0; i < n; ++i) {
+                       if (v[i] > max_u10) max_u10 = v[i];
+                     }
+                   });
+  return max_u10;
+}
+
 inline void PadUnsetRoutedBytes(uint8_t* dst_base, RoutedEncoding enc,
                                 int64_t start_tok, int64_t num_tokens,
                                 int64_t layers, int64_t k) noexcept {
@@ -140,7 +234,8 @@ inline RoutedEncoding ClassifyUint8RoutedEncoding(
     bool batched) {
   const size_t ndim = u8_arr.ndim();
   if (batched) {
-    if (ndim == 5 && u8_arr.shape(4) == 5) {
+    if (ndim == 5 &&
+        ExtractUint10LogicalK(u8_arr.shape(3), u8_arr.shape(4)) >= 0) {
       return RoutedEncoding::kUint10;
     }
     if (ndim == 4) {
@@ -148,10 +243,11 @@ inline RoutedEncoding ClassifyUint8RoutedEncoding(
     }
     throw std::invalid_argument(
         "batched uint8 routed_experts must have 4D (B, T, L, K) or 5D "
-        "(B, T, L, K // 4, 5) shape, got ndim=" +
+        "(B, T, L, G, 5) / (B, T, L, 1, ceil(10*K/8)) shape, got ndim=" +
         std::to_string(ndim) + ".");
   }
-  if (ndim == 4 && u8_arr.shape(3) == 5) {
+  if (ndim == 4 &&
+      ExtractUint10LogicalK(u8_arr.shape(2), u8_arr.shape(3)) >= 0) {
     return RoutedEncoding::kUint10;
   }
   if (ndim == 3) {
@@ -159,7 +255,7 @@ inline RoutedEncoding ClassifyUint8RoutedEncoding(
   }
   throw std::invalid_argument(
       "unbatched uint8 routed_experts must have 3D (T, L, K) or 4D "
-      "(T, L, K // 4, 5) shape, got ndim=" +
+      "(T, L, G, 5) / (T, L, 1, ceil(10*K/8)) shape, got ndim=" +
       std::to_string(ndim) + ".");
 }
 
@@ -186,21 +282,22 @@ inline void CopyOrTranscodeRoutedTokens(const void* src_base,
                 static_cast<size_t>(num_tokens) * dst_tok_bytes);
     return;
   }
+  const size_t total_layers = static_cast<size_t>(num_tokens * layers);
+  const size_t k_sz = static_cast<size_t>(k);
+  const size_t u10_layer_bytes = Uint10LayerBytes(k);
   if (src_enc == RoutedEncoding::kUint8 && dst_enc == RoutedEncoding::kUint10) {
-    if (k % 4 != 0) {
-      throw std::invalid_argument(
-          "CopyOrTranscodeRoutedTokens: uint10 target requires k % 4 == 0.");
-    }
-    const size_t num_groups =
-        static_cast<size_t>(num_tokens * layers * (k / 4));
-    for (size_t g = 0; g < num_groups; ++g) {
-      const uint8_t* s = src_ptr + g * 4;
-      PackFourToUint10(s[0], s[1], s[2], s[3], dst_ptr + g * 5);
+    if (k_sz % 4 == 0) {
+      PackUint8LayerToUint10(src_ptr, total_layers * k_sz, dst_ptr);
+    } else {
+      for (size_t tl = 0; tl < total_layers; ++tl) {
+        PackUint8LayerToUint10(src_ptr + tl * k_sz, k_sz,
+                               dst_ptr + tl * u10_layer_bytes);
+      }
     }
     return;
   }
   if (src_enc == RoutedEncoding::kUint8 && dst_enc == RoutedEncoding::kInt16) {
-    const size_t total = static_cast<size_t>(num_tokens * layers * k);
+    const size_t total = total_layers * k_sz;
     int16_t* d16 = reinterpret_cast<int16_t*>(dst_ptr);
     for (size_t i = 0; i < total; ++i) {
       d16[i] = static_cast<int16_t>(src_ptr[i]) - 1;
@@ -208,20 +305,14 @@ inline void CopyOrTranscodeRoutedTokens(const void* src_base,
     return;
   }
   if (src_enc == RoutedEncoding::kUint10 && dst_enc == RoutedEncoding::kInt16) {
-    if (k % 4 != 0) {
-      throw std::invalid_argument(
-          "CopyOrTranscodeRoutedTokens: uint10 source requires k % 4 == 0.");
-    }
-    const size_t num_groups =
-        static_cast<size_t>(num_tokens * layers * (k / 4));
     int16_t* d16 = reinterpret_cast<int16_t*>(dst_ptr);
-    for (size_t g = 0; g < num_groups; ++g) {
-      uint16_t v0, v1, v2, v3;
-      UnpackUint10ToFour(src_ptr + g * 5, &v0, &v1, &v2, &v3);
-      d16[g * 4 + 0] = static_cast<int16_t>(v0) - 1;
-      d16[g * 4 + 1] = static_cast<int16_t>(v1) - 1;
-      d16[g * 4 + 2] = static_cast<int16_t>(v2) - 1;
-      d16[g * 4 + 3] = static_cast<int16_t>(v3) - 1;
+    if (k_sz % 4 == 0) {
+      UnpackUint10LayerToInt16(src_ptr, total_layers * k_sz, d16);
+    } else {
+      for (size_t tl = 0; tl < total_layers; ++tl) {
+        UnpackUint10LayerToInt16(src_ptr + tl * u10_layer_bytes, k_sz,
+                                 d16 + tl * k_sz);
+      }
     }
     return;
   }
@@ -240,7 +331,7 @@ inline RoutedEncoding ResolveChunkRoutedEncoding(bool has_u8, bool has_u10,
     return RoutedEncoding::kInt16;
   }
   if (has_u10) {
-    return (k % 4 == 0) ? RoutedEncoding::kUint10 : RoutedEncoding::kInt16;
+    return RoutedEncoding::kUint10;
   }
   if (has_u8) {
     return RoutedEncoding::kUint8;
@@ -348,13 +439,17 @@ inline void ExtractRoutedView(PyObject* obj, SegmentView* out,
     out->routed_encoding = RoutedEncoding::kUint8;
     return;
   }
-  if (view.ndim == 4 && IsUint8BufferFormat(view) && view.shape[3] == 5) {
-    out->routed_ptr = view.buf;
-    out->routed_tokens = static_cast<int64_t>(view.shape[0]);
-    out->routed_layers = static_cast<int64_t>(view.shape[1]);
-    out->routed_k = static_cast<int64_t>(view.shape[2]) * 4;
-    out->routed_encoding = RoutedEncoding::kUint10;
-    return;
+  if (view.ndim == 4 && IsUint8BufferFormat(view)) {
+    const int64_t logical_k = ExtractUint10LogicalK(
+        static_cast<size_t>(view.shape[2]), static_cast<size_t>(view.shape[3]));
+    if (logical_k >= 0) {
+      out->routed_ptr = view.buf;
+      out->routed_tokens = static_cast<int64_t>(view.shape[0]);
+      out->routed_layers = static_cast<int64_t>(view.shape[1]);
+      out->routed_k = logical_k;
+      out->routed_encoding = RoutedEncoding::kUint10;
+      return;
+    }
   }
   if (view.ndim == 3 && IsInt16BufferFormat(view)) {
     out->routed_ptr = view.buf;
@@ -463,7 +558,9 @@ inline nb::object WrapBatchedRoutedBuffer(RawBufferPtr<uint8_t> buf,
     return Wrap4DArray<uint8_t>(std::move(buf), b_sz, seq_sz, layers, k);
   }
   if (enc == RoutedEncoding::kUint10) {
-    return Wrap5DArray<uint8_t>(std::move(buf), b_sz, seq_sz, layers, k / 4, 5);
+    const auto [d_penult, d_last] = Uint10TrailingShape(k);
+    return Wrap5DArray<uint8_t>(std::move(buf), b_sz, seq_sz, layers, d_penult,
+                                d_last);
   }
   int16_t* raw16 = reinterpret_cast<int16_t*>(buf.release());
   RawBufferPtr<int16_t> buf16(raw16);
@@ -1487,14 +1584,18 @@ inline void ExtractPaddedRoutedView(nb::object r_obj, PaddedItemView* v,
     return;
   }
   nb::ndarray<nb::numpy, const uint8_t, nb::ndim<4>, nb::c_contig> u8_4d;
-  if (nb::try_cast(r_obj, u8_4d, /*convert=*/false) && u8_4d.shape(3) == 5) {
-    v->routed_ptr = u8_4d.data();
-    v->routed_encoding = RoutedEncoding::kUint10;
-    v->routed_tokens = static_cast<int64_t>(u8_4d.shape(0));
-    v->routed_layers = static_cast<int64_t>(u8_4d.shape(1));
-    v->routed_k = static_cast<int64_t>(u8_4d.shape(2)) * 4;
-    keep->push_back(std::move(r_obj));
-    return;
+  if (nb::try_cast(r_obj, u8_4d, /*convert=*/false)) {
+    const int64_t logical_k =
+        ExtractUint10LogicalK(u8_4d.shape(2), u8_4d.shape(3));
+    if (logical_k >= 0) {
+      v->routed_ptr = u8_4d.data();
+      v->routed_encoding = RoutedEncoding::kUint10;
+      v->routed_tokens = static_cast<int64_t>(u8_4d.shape(0));
+      v->routed_layers = static_cast<int64_t>(u8_4d.shape(1));
+      v->routed_k = logical_k;
+      keep->push_back(std::move(r_obj));
+      return;
+    }
   }
   nb::ndarray<nb::numpy, const int16_t, nb::ndim<3>, nb::c_contig> i16_3d;
   if (!nb::try_cast(r_obj, i16_3d, /*convert=*/false)) {
@@ -2045,10 +2146,10 @@ nb::object ConvertPayloadToPackItem(PyObject* it, nb::handle pack_item_cls,
       r_layers = static_cast<int64_t>(u8_3d.shape(1));
       r_k = static_cast<int64_t>(u8_3d.shape(2));
     } else if (nb::try_cast(r_obj, u8_4d, /*convert=*/false) &&
-               u8_4d.shape(3) == 5) {
+               ExtractUint10LogicalK(u8_4d.shape(2), u8_4d.shape(3)) >= 0) {
       r_tokens = static_cast<int64_t>(u8_4d.shape(0));
       r_layers = static_cast<int64_t>(u8_4d.shape(1));
-      r_k = static_cast<int64_t>(u8_4d.shape(2)) * 4;
+      r_k = ExtractUint10LogicalK(u8_4d.shape(2), u8_4d.shape(3));
     } else if (nb::try_cast(r_obj, r_arr, /*convert=*/false)) {
       r_tokens = static_cast<int64_t>(r_arr.shape(0));
       r_layers = static_cast<int64_t>(r_arr.shape(1));
@@ -2223,15 +2324,22 @@ nb::object EncodeRoutedExpertsFast(nb::object routed_obj,
       if (mode == "uint10" ||
           (mode == "auto" &&
            (!has_num_experts || (num_experts >= 256 && num_experts <= 1023)))) {
-        if (has_num_experts && num_experts <= 1022) {
+        if (has_num_experts && num_experts <= 1022 && u8_any.size() > 0) {
+          const size_t nd = u8_any.ndim();
+          const size_t k_sz = static_cast<size_t>(ExtractUint10LogicalK(
+              u8_any.shape(nd - 2), u8_any.shape(nd - 1)));
+          const size_t layer_bytes =
+              u8_any.shape(nd - 2) * u8_any.shape(nd - 1);
+          const size_t num_layers_total =
+              layer_bytes > 0 ? (u8_any.size() / layer_bytes) : 0;
           const uint8_t* p = u8_any.data();
-          const size_t n_groups = u8_any.size() / 5;
           uint16_t max_u10 = 0;
-          for (size_t g = 0; g < n_groups; ++g) {
-            uint16_t v[4];
-            UnpackUint10ToFour(p + g * 5, v);
-            for (int k = 0; k < 4; ++k) {
-              if (v[k] > max_u10) max_u10 = v[k];
+          if (k_sz % 4 == 0) {
+            max_u10 = MaxUint10InLayer(p, num_layers_total * k_sz);
+          } else {
+            for (size_t tl = 0; tl < num_layers_total; ++tl) {
+              const uint16_t m = MaxUint10InLayer(p + tl * layer_bytes, k_sz);
+              if (m > max_u10) max_u10 = m;
             }
           }
           const int64_t max_val = static_cast<int64_t>(max_u10) - 1;
@@ -2283,11 +2391,6 @@ nb::object EncodeRoutedExpertsFast(nb::object routed_obj,
   } else if (mode == "uint8") {
     target_enc = RoutedEncoding::kUint8;
   } else if (mode == "uint10") {
-    if (top_k % 4 != 0) {
-      throw std::invalid_argument(
-          "uint10 encoding requires top_k divisible by 4, got top_k=" +
-          std::to_string(top_k) + ".");
-    }
     target_enc = RoutedEncoding::kUint10;
   } else if (mode != "auto") {
     throw std::invalid_argument("Unsupported routed_experts encoding mode: " +
@@ -2321,7 +2424,7 @@ nb::object EncodeRoutedExpertsFast(nb::object routed_obj,
     if (mode == "auto") {
       if (effective_max <= 254) {
         target_enc = RoutedEncoding::kUint8;
-      } else if (effective_max <= 1022 && (top_k % 4 == 0)) {
+      } else if (effective_max <= 1022) {
         target_enc = RoutedEncoding::kUint10;
       } else {
         target_enc = RoutedEncoding::kInt16;
@@ -2343,15 +2446,18 @@ nb::object EncodeRoutedExpertsFast(nb::object routed_obj,
         dst[i] = static_cast<uint8_t>(src[i] + 1);
       }
     } else if (target_enc == RoutedEncoding::kUint10) {
-      const size_t num_groups = total_elems / 4;
-      out_buf = AllocRawBuffer<uint8_t>(num_groups * 5);
+      const size_t total_layers = top_k > 0 ? (total_elems / top_k) : 0;
+      const size_t u10_layer_bytes =
+          Uint10LayerBytes(static_cast<int64_t>(top_k));
+      out_buf = AllocRawBuffer<uint8_t>(total_layers * u10_layer_bytes);
       uint8_t* dst = out_buf.get();
-      for (size_t g = 0; g < num_groups; ++g) {
-        const int16_t* s = src + g * 4;
-        PackFourToUint10(static_cast<uint16_t>(s[0] + 1),
-                         static_cast<uint16_t>(s[1] + 1),
-                         static_cast<uint16_t>(s[2] + 1),
-                         static_cast<uint16_t>(s[3] + 1), dst + g * 5);
+      if (top_k % 4 == 0) {
+        PackInt16LayerToUint10(src, total_elems, dst);
+      } else {
+        for (size_t tl = 0; tl < total_layers; ++tl) {
+          PackInt16LayerToUint10(src + tl * top_k, top_k,
+                                 dst + tl * u10_layer_bytes);
+        }
       }
     }
   }
@@ -2364,7 +2470,8 @@ nb::object EncodeRoutedExpertsFast(nb::object routed_obj,
     if (target_enc == RoutedEncoding::kUint8) {
       return Wrap3DArray(std::move(out_buf), t_dim, num_layers, top_k);
     }
-    return Wrap4DArray(std::move(out_buf), t_dim, num_layers, top_k / 4, 5);
+    const auto [d_penult, d_last] = Uint10TrailingShape(top_k);
+    return Wrap4DArray(std::move(out_buf), t_dim, num_layers, d_penult, d_last);
   }
   const size_t b_dim = arr.shape(0);
   const size_t t_dim = arr.shape(1);
@@ -2377,9 +2484,10 @@ nb::object EncodeRoutedExpertsFast(nb::object routed_obj,
 // `batched=true`).
 //
 // Contract: `batched` explicitly selects between unbatched per-trajectory
-// layouts (`3D` `uint8`/`int16` `(T, L, K)` or `4D` `uint10` `(T, L, K//4, 5)`)
-// and batched microbatch layouts (`4D` `uint8`/`int16` `(B, T, L, K)` or `5D`
-// `uint10` `(B, T, L, K//4, 5)`), so batched `uint8` with `K == 5` never
+// layouts (`3D` `uint8`/`int16` `(T, L, K)` or `4D` `uint10` `(T, L, G, 5)` /
+// `(T, L, 1, ceil(10*K/8))`) and batched microbatch layouts (`4D`
+// `uint8`/`int16` `(B, T, L, K)` or `5D` `uint10` `(B, T, L, G, 5)` /
+// `(B, T, L, 1, ceil(10*K/8))`), so batched `uint8` with `K == 5` never
 // collides with unbatched `uint10`.
 nb::object DecodeRoutedExpertsFast(nb::object encoded_obj, bool batched) {
   if (encoded_obj.is_none()) {
@@ -2425,25 +2533,26 @@ nb::object DecodeRoutedExpertsFast(nb::object encoded_obj, bool batched) {
   const uint8_t* src = u8_arr.data();
   if (batched) {
     if (src_enc == RoutedEncoding::kUint10) {
-      // Batched uint10: (B, T, L, K//4, 5)
+      // Batched uint10: (B, T, L, G, 5) or (B, T, L, 1, ceil(10*K/8))
       const size_t b_dim = u8_arr.shape(0);
       const size_t t_dim = u8_arr.shape(1);
       const size_t l_dim = u8_arr.shape(2);
-      const size_t g_dim = u8_arr.shape(3);
-      const size_t k_dim = g_dim * 4;
-      const size_t num_groups = b_dim * t_dim * l_dim * g_dim;
+      const size_t k_dim = static_cast<size_t>(
+          ExtractUint10LogicalK(u8_arr.shape(3), u8_arr.shape(4)));
+      const size_t u10_layer_bytes = u8_arr.shape(3) * u8_arr.shape(4);
+      const size_t total_layers = b_dim * t_dim * l_dim;
       RawBufferPtr<int16_t> out;
       {
         nb::gil_scoped_release release;
-        out = AllocRawBuffer<int16_t>(num_groups * 4);
+        out = AllocRawBuffer<int16_t>(total_layers * k_dim);
         int16_t* dst = out.get();
-        for (size_t g = 0; g < num_groups; ++g) {
-          uint16_t v[4];
-          UnpackUint10ToFour(src + g * 5, v);
-          dst[g * 4 + 0] = static_cast<int16_t>(v[0]) - 1;
-          dst[g * 4 + 1] = static_cast<int16_t>(v[1]) - 1;
-          dst[g * 4 + 2] = static_cast<int16_t>(v[2]) - 1;
-          dst[g * 4 + 3] = static_cast<int16_t>(v[3]) - 1;
+        if (k_dim % 4 == 0) {
+          UnpackUint10LayerToInt16(src, total_layers * k_dim, dst);
+        } else {
+          for (size_t tl = 0; tl < total_layers; ++tl) {
+            UnpackUint10LayerToInt16(src + tl * u10_layer_bytes, k_dim,
+                                     dst + tl * k_dim);
+          }
         }
       }
       return Wrap4DArray(std::move(out), b_dim, t_dim, l_dim, k_dim);
@@ -2467,24 +2576,25 @@ nb::object DecodeRoutedExpertsFast(nb::object encoded_obj, bool batched) {
   }
 
   if (src_enc == RoutedEncoding::kUint10) {
-    // Unbatched uint10: (T, L, K//4, 5)
+    // Unbatched uint10: (T, L, G, 5) or (T, L, 1, ceil(10*K/8))
     const size_t t_dim = u8_arr.shape(0);
     const size_t l_dim = u8_arr.shape(1);
-    const size_t g_dim = u8_arr.shape(2);
-    const size_t k_dim = g_dim * 4;
-    const size_t num_groups = t_dim * l_dim * g_dim;
+    const size_t k_dim = static_cast<size_t>(
+        ExtractUint10LogicalK(u8_arr.shape(2), u8_arr.shape(3)));
+    const size_t u10_layer_bytes = u8_arr.shape(2) * u8_arr.shape(3);
+    const size_t total_layers = t_dim * l_dim;
     RawBufferPtr<int16_t> out;
     {
       nb::gil_scoped_release release;
-      out = AllocRawBuffer<int16_t>(num_groups * 4);
+      out = AllocRawBuffer<int16_t>(total_layers * k_dim);
       int16_t* dst = out.get();
-      for (size_t g = 0; g < num_groups; ++g) {
-        uint16_t v[4];
-        UnpackUint10ToFour(src + g * 5, v);
-        dst[g * 4 + 0] = static_cast<int16_t>(v[0]) - 1;
-        dst[g * 4 + 1] = static_cast<int16_t>(v[1]) - 1;
-        dst[g * 4 + 2] = static_cast<int16_t>(v[2]) - 1;
-        dst[g * 4 + 3] = static_cast<int16_t>(v[3]) - 1;
+      if (k_dim % 4 == 0) {
+        UnpackUint10LayerToInt16(src, total_layers * k_dim, dst);
+      } else {
+        for (size_t tl = 0; tl < total_layers; ++tl) {
+          UnpackUint10LayerToInt16(src + tl * u10_layer_bytes, k_dim,
+                                   dst + tl * k_dim);
+        }
       }
     }
     return Wrap3DArray(std::move(out), t_dim, l_dim, k_dim);

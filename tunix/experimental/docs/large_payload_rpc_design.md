@@ -16,7 +16,7 @@ During distributed RL training in [`rl_program.py`](https://github.com/google/tu
 ### 1.1 Why Payloads Exceed 128 MiB and 4 GiB
 
 1. **Global Mesh Packing (`pack_size = trainer_fsdp * trainer_dp`)**:
-   In `create_batch_assembler`, a single microbatch packs `B = trainer_fsdp * trainer_dp` rows, each of length `T = max_seq_token_per_tpu` (or `max_prompt_length + max_response_length`).
+   In `create_batch_assembler`, a single microbatch packs `B = trainer_fsdp * trainer_dp` rows, each of length `T = max_seq_tokens_per_device` (or `max_prompt_length + max_response_length`).
 2. **Per-Token Array Footprint in `RLTrainerPayload`**:
    - **Standard 2D fields** (`completion_ids`, `completion_mask`, `advantages`, `segment_ids`, `segment_positions`, `old_per_token_logps`, `ref_per_token_logps`, `sampler_is_weights`): **7-9 arrays** x 4 bytes (`int32`/`float32`) = **28-36 bytes/token**.
    - **MoE Router Replay (`routed_experts`)**: Shape `[B, T, num_layers, top_k]` in `int16` (2 bytes). For a 94-layer, top-8 MoE model (e.g. Qwen3-235B / DeepSeek-V3 class), `routed_experts` requires `94 * 8 * 2 = 1,504 bytes/token` (**~50x larger** than all other fields combined).
