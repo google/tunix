@@ -32,6 +32,52 @@ from tunix.tests import test_common as tc
 
 class SamplerTest(parameterized.TestCase):
 
+  def test_default_seed_is_fresh_for_each_single_host_call(self):
+    with (
+        mock.patch.object(sampler_lib.jax, "process_count", return_value=1),
+        mock.patch.object(
+            sampler_lib.secrets, "randbits", side_effect=[123, 456]
+        ) as randbits,
+    ):
+      first = sampler_lib._make_sampling_seed(None)
+      second = sampler_lib._make_sampling_seed(None)
+
+    np.testing.assert_array_equal(first, jax.random.PRNGKey(123))
+    np.testing.assert_array_equal(second, jax.random.PRNGKey(456))
+    randbits.assert_has_calls([mock.call(32), mock.call(32)])
+
+  def test_default_seed_is_broadcast_across_hosts(self):
+    with (
+        mock.patch.object(sampler_lib.jax, "process_count", return_value=2),
+        mock.patch.object(
+            sampler_lib.jax, "process_index", side_effect=[0, 1]
+        ),
+        mock.patch.object(
+            sampler_lib.secrets, "randbits", return_value=123
+        ) as randbits,
+        mock.patch.object(
+            sampler_lib.multihost_utils,
+            "broadcast_one_to_all",
+            side_effect=lambda _: jnp.asarray(123, dtype=jnp.uint32),
+        ) as broadcast,
+    ):
+      source_seed = sampler_lib._make_sampling_seed(None)
+      other_seed = sampler_lib._make_sampling_seed(None)
+
+    np.testing.assert_array_equal(source_seed, jax.random.PRNGKey(123))
+    np.testing.assert_array_equal(other_seed, source_seed)
+    randbits.assert_called_once_with(32)
+    self.assertEqual(broadcast.call_count, 2)
+
+  def test_explicit_integer_seed_remains_deterministic(self):
+    with mock.patch.object(sampler_lib.secrets, "randbits") as randbits:
+      first = sampler_lib._make_sampling_seed(123)
+      second = sampler_lib._make_sampling_seed(123)
+
+    np.testing.assert_array_equal(first, jax.random.PRNGKey(123))
+    np.testing.assert_array_equal(second, first)
+    randbits.assert_not_called()
+
   def assertReasonableTensor(self, array, expected_shape=None):
     self.assertIsNotNone(array)
     if expected_shape is not None:
