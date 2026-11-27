@@ -15,6 +15,8 @@
 """Sampler for vLLM-style autoregressive decoding using JAX and NNX models."""
 
 import atexit
+import collections
+from collections.abc import Callable
 import concurrent.futures
 import copy
 import dataclasses
@@ -44,6 +46,100 @@ from vllm.sampling_params import SamplingParams
 
 # Colocate vllm engine and worker in the main process
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+
+
+_ENV_BOOLS = {"0": False, "1": True, "false": False, "true": True}
+
+
+def _env_flag(name: str, default: str = "0") -> bool:
+  """Reads environment variable `name` as a bool.
+
+  Unset or empty means `default`; 0, 1, true and false are accepted in any
+  case.
+
+  Args:
+    name: The environment variable.
+    default: The value used when `name` is unset or empty.
+
+  Returns:
+    The parsed value.
+
+  Raises:
+    ValueError: `name` holds anything else.
+  """
+  raw = os.environ.get(name, "")
+  value = _ENV_BOOLS.get((raw.strip() or default).lower())
+  if value is None:
+    raise ValueError(f"{name}={raw!r}: expected 0, 1, true or false.")
+  return value
+
+
+# Token ids as `VllmSampler.tokenize` returns them.
+_TokenIds = np.ndarray | list[int]
+
+
+class _TokenizeMemo:
+  """Per-sampler memo of `VllmSampler.tokenize` (TUNIX_TOKENIZE_MEMO=1).
+
+  GRPO hands the sampler every prompt `num_generations` times, and each copy
+  is tokenized again on the rollout host path. The memo keeps up to 1024
+  recent strings and returns a fresh copy of the cached ids, so callers never
+  share or mutate one object. The first TUNIX_TOKENIZE_MEMO_CHECK cache hits
+  (default 3) also run the tokenizer and compare; a mismatch turns the memo
+  off for the rest of the run.
+  """
+
+  _MAX_ENTRIES = 1024
+
+  def __init__(self, checks: int):
+    self._cache: collections.OrderedDict[str, _TokenIds] = (
+        collections.OrderedDict()
+    )
+    self._lock = threading.Lock()
+    self._checks_left = checks
+    self._off = False
+    self.calls = 0
+    self.hits = 0
+
+  @staticmethod
+  def _copy(ids: _TokenIds) -> _TokenIds:
+    return ids.copy() if isinstance(ids, np.ndarray) else list(ids)
+
+  @staticmethod
+  def _same(a: _TokenIds, b: _TokenIds) -> bool:
+    return type(a) is type(b) and np.array_equal(np.asarray(a), np.asarray(b))
+
+  def lookup(
+      self, text: str, tokenize_fn: Callable[[str], _TokenIds]
+  ) -> _TokenIds:
+    """Returns the token ids of `text`, from the memo when it has them."""
+    if self._off:
+      return tokenize_fn(text)
+    check = False
+    with self._lock:
+      self.calls += 1
+      cached = self._cache.get(text)
+      if cached is not None:
+        self._cache.move_to_end(text)
+        self.hits += 1
+        check = self._checks_left > 0
+        if check:
+          self._checks_left -= 1
+        cached = self._copy(cached)
+    if cached is None:
+      ids = tokenize_fn(text)
+      with self._lock:
+        self._cache[text] = self._copy(ids)
+        if len(self._cache) > self._MAX_ENTRIES:
+          self._cache.popitem(last=False)
+      return ids
+    if check and not self._same(cached, tokenize_fn(text)):
+      self._off = True
+      logging.error(
+          "TUNIX_TOKENIZE_MEMO: cached ids differ from the tokenizer; memo off."
+      )
+      return tokenize_fn(text)
+    return cached
 
 
 @dataclasses.dataclass
@@ -191,6 +287,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     )
     self._postprocess_pool_lock = threading.Lock()
     self._thread_local = threading.local()
+    # Created on the first tokenize call with TUNIX_TOKENIZE_MEMO=1.
+    self._tokenize_memo: _TokenizeMemo | None = None
     self._driver: VLLMInProcessDriver | None = None
     self.llm: LLM | None = None
     self._kv_cache_deleted = False
@@ -619,6 +717,21 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     return (num_layers, top_k)
 
   def tokenize(self, input_string: str) -> np.ndarray | list[int]:
+    """Tokenizes the input string (memoized with TUNIX_TOKENIZE_MEMO=1)."""
+    if _env_flag("TUNIX_TOKENIZE_MEMO") and isinstance(input_string, str):
+      memo = self._tokenize_memo
+      if memo is None:
+        checks = int(os.environ.get("TUNIX_TOKENIZE_MEMO_CHECK", "3") or "0")
+        memo = self._tokenize_memo = _TokenizeMemo(checks)
+        logging.info(
+            "TUNIX_TOKENIZE_MEMO: tokenize memoized per prompt (checking the"
+            " first %d hits).",
+            checks,
+        )
+      return memo.lookup(input_string, self._tokenize_uncached)
+    return self._tokenize_uncached(input_string)
+
+  def _tokenize_uncached(self, input_string: str) -> np.ndarray | list[int]:
     """Tokenizes the input string."""
     input_ids = self.tokenizer.encode(input_string)
     bos_tok = [self.tokenizer.bos_id()] if self.tokenizer.bos_id() else []

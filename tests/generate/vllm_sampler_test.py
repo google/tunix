@@ -904,6 +904,130 @@ class VllmSamplerConfigTest(absltest.TestCase):
     )
     self.assertFalse(override_sampler.args["language_model_only"])
 
+  def test_env_flag_has_one_parsing_rule(self):
+    name = "TUNIX_TEST_ENV_FLAG"
+    os.environ.pop(name, None)  # setUp restores the environment afterwards.
+    self.assertFalse(vllm_sampler._env_flag(name))
+    self.assertTrue(vllm_sampler._env_flag(name, default="1"))
+    for raw, want in (
+        ("", False),
+        (" ", False),
+        ("1", True),
+        ("TRUE", True),
+        (" true ", True),
+        ("0", False),
+        ("False", False),
+    ):
+      with self.subTest(raw=raw), mock.patch.dict(os.environ, {name: raw}):
+        self.assertIs(vllm_sampler._env_flag(name), want)
+    with mock.patch.dict(os.environ, {name: ""}):
+      self.assertTrue(vllm_sampler._env_flag(name, default="1"))
+    for raw in ("yes", "2", "on"):
+      with self.subTest(raw=raw), mock.patch.dict(os.environ, {name: raw}):
+        with self.assertRaisesRegex(ValueError, f"{name}='{raw}'"):
+          vllm_sampler._env_flag(name)
+
+  # `_TokenizeMemo` and `VllmSampler.tokenize` with fake tokenizers.
+
+  def _counting_tokenizer(self):
+    """A tokenizer mapping "ab" to [97, 98], and the list of its inputs."""
+    inputs = []
+
+    def tokenize(text):
+      inputs.append(text)
+      return [ord(c) for c in text]
+
+    return tokenize, inputs
+
+  def test_miss_inserts_and_hits_return_copies(self):
+    tokenize, inputs = self._counting_tokenizer()
+    memo = vllm_sampler._TokenizeMemo(checks=0)
+    memo.lookup("ab", tokenize).append(0)  # The memo keeps its own copy.
+    hit = memo.lookup("ab", tokenize)
+    self.assertEqual(hit, [97, 98])
+    hit.append(1)
+    self.assertEqual(memo.lookup("ab", tokenize), [97, 98])
+    self.assertEqual(inputs, ["ab"])
+    self.assertEqual((memo.calls, memo.hits), (3, 2))
+
+  def test_array_ids_are_copied_on_insert_and_on_hit(self):
+    memo = vllm_sampler._TokenizeMemo(checks=0)
+    first = memo.lookup("ab", lambda s: np.array([97, 98], np.int32))
+    first[0] = -1
+
+    def tokenize_again(text):
+      raise AssertionError(f"tokenized {text!r} again")
+
+    hit = memo.lookup("ab", tokenize_again)
+    self.assertIsInstance(hit, np.ndarray)
+    np.testing.assert_array_equal(hit, [97, 98])
+    hit[1] = -2
+    np.testing.assert_array_equal(memo.lookup("ab", tokenize_again), [97, 98])
+
+  def test_evicts_the_least_recently_used_entry_past_1024(self):
+    tokenize, inputs = self._counting_tokenizer()
+    memo = vllm_sampler._TokenizeMemo(checks=0)
+    self.assertEqual(memo._MAX_ENTRIES, 1024)
+    for i in range(1024):
+      memo.lookup(f"s{i}", tokenize)
+    memo.lookup("s0", tokenize)  # A hit makes s0 the most recent entry.
+    memo.lookup("s1024", tokenize)  # One entry past the cap evicts s1.
+    self.assertLen(memo._cache, 1024)
+    self.assertNotIn("s1", memo._cache)
+    del inputs[:]
+    memo.lookup("s0", tokenize)
+    self.assertEqual(inputs, [])
+    memo.lookup("s1", tokenize)  # Tokenized again; evicts s2 in turn.
+    self.assertEqual(inputs, ["s1"])
+    self.assertLen(memo._cache, 1024)
+    self.assertNotIn("s2", memo._cache)
+    self.assertEqual((memo.calls, memo.hits), (1028, 2))
+
+  def test_first_hits_are_checked_against_the_tokenizer(self):
+    tokenize, inputs = self._counting_tokenizer()
+    memo = vllm_sampler._TokenizeMemo(checks=2)
+    for _ in range(4):
+      self.assertEqual(memo.lookup("ab", tokenize), [97, 98])
+    # The miss and the two checked hits ran the tokenizer; the last hit did
+    # not.
+    self.assertEqual(inputs, ["ab"] * 3)
+    self.assertFalse(memo._off)
+    self.assertEqual((memo.calls, memo.hits), (4, 3))
+
+  def test_checked_mismatch_turns_the_memo_off(self):
+    version = [0]
+    inputs = []
+
+    def tokenize(text):
+      inputs.append(text)
+      return [len(text), version[0]]
+
+    memo = vllm_sampler._TokenizeMemo(checks=1)
+    self.assertEqual(memo.lookup("ab", tokenize), [2, 0])
+    version[0] = 1  # The tokenizer no longer agrees with the cached ids.
+    self.assertEqual(memo.lookup("ab", tokenize), [2, 1])
+    self.assertTrue(memo._off)
+    # Off: every lookup runs the tokenizer and is no longer counted.
+    del inputs[:]
+    self.assertEqual(memo.lookup("ab", tokenize), [2, 1])
+    self.assertEqual(inputs, ["ab"])
+    self.assertEqual((memo.calls, memo.hits), (2, 1))
+
+  def test_tokenize_uses_the_memo_only_with_the_flag(self):
+    for flag, checks, encodes in (("0", "0", 3), ("1", "0", 1), ("1", "1", 2)):
+      env = {"TUNIX_TOKENIZE_MEMO": flag, "TUNIX_TOKENIZE_MEMO_CHECK": checks}
+      with self.subTest(**env), mock.patch.dict(os.environ, env):
+        obj = object.__new__(vllm_sampler.VllmSampler)
+        obj._tokenize_memo = None  # set by __init__, which is bypassed here
+        obj.tokenizer = mock.Mock()
+        obj.tokenizer.encode.side_effect = lambda s: [ord(c) for c in s]
+        obj.tokenizer.bos_id.return_value = None
+        obj.tokenizer.dedup_bos_ids.side_effect = lambda ids: ids
+        for _ in range(3):
+          self.assertEqual(list(obj.tokenize("ab")), [97, 98])
+        self.assertEqual(obj.tokenizer.encode.call_count, encodes)
+        self.assertEqual(obj._tokenize_memo is None, flag == "0")
+
 
 class VllmSamplerTokenInputTest(absltest.TestCase):
   """Explicit token-ID prompts through the real sampler with a fake engine."""
@@ -943,6 +1067,7 @@ class VllmSamplerTokenInputTest(absltest.TestCase):
     obj.args = {"max_model_len": 64}
     obj._thread_local = threading.local()
     obj._postprocessed = None  # set by __init__ upstream; fixture bypasses it
+    obj._tokenize_memo = None
     obj.config = SimpleNamespace(
         return_logprobs=True,
         return_routed_experts=False,
@@ -1208,6 +1333,24 @@ class VllmSamplerTokenInputTest(absltest.TestCase):
       obj.llm.generate = mock.Mock(return_value=outputs)
       with self.assertRaisesRegex(ValueError, message):
         obj(None, 4, prompt_token_ids=[[1, 1], [2, 2]])
+
+  def test_repeated_text_prompts_hit_the_tokenize_memo(self):
+    obj = self._sampler()
+    obj.tokenizer.encode.side_effect = lambda s: [4, len(s)]
+    env = {"TUNIX_TOKENIZE_MEMO": "1", "TUNIX_TOKENIZE_MEMO_CHECK": "0"}
+    with mock.patch.dict(os.environ, env):
+      out = obj(["aa", "b", "aa", "aa", "b"], 4)
+    self.assertEqual(
+        [c.args for c in obj.tokenizer.encode.call_args_list],
+        [("aa",), ("b",)],
+    )
+    submitted = obj.llm.generate.call_args.kwargs["prompts"]
+    self.assertEqual(
+        [p["prompt_token_ids"] for p in submitted],
+        [[4, 2], [4, 1], [4, 2], [4, 2], [4, 1]],
+    )
+    np.testing.assert_array_equal(out.prompt_lengths, [2, 2, 2, 2, 2])
+    self.assertEqual(obj._tokenize_memo.hits, 3)
 
   def test_text_path_still_encodes(self):
     obj = self._sampler()
