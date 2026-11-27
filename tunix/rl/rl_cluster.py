@@ -1565,7 +1565,19 @@ class RLEngine:
       raise ValueError("Cannot generate from an empty list of prompts.")
     micro_batch_size = micro_batch_size or len(prompt_rows)
 
-    with self._generate_mesh_cm() as (mesh, _):
+    # With TUNIX_ROLLOUT_NO_MESH_CONTEXT=1, `generate` yields the ROLLOUT mesh
+    # without entering it. A host-local in-process engine
+    # (TUNIX_VLLM_HOST_LOCAL_ENGINE=1) sets its own per-process mesh inside
+    # `execute_model`; entering the global ROLLOUT mesh around it makes jit
+    # read two meshes, and eager ops in the engine's decode loop then fail on
+    # some processes with "Attempted to execute with N argument lists when
+    # local device count is M". Other roles and the ROLLOUT uses outside
+    # `generate` keep the normal context.
+    if _env_flag("TUNIX_ROLLOUT_NO_MESH_CONTEXT"):
+      generate_mesh_cm = contextlib.nullcontext((self.r2m[Role.ROLLOUT], None))
+    else:
+      generate_mesh_cm = self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT)
+    with generate_mesh_cm as (mesh, _):
       self.maybe_restore_rollout_for_generation()
       model = self.rollout.model()
       self._maybe_load_model_from_cpu(model, Role.ROLLOUT)
@@ -2267,26 +2279,6 @@ class RLEngine:
       return self.cluster_config.rollout_config[mode]
     else:
       return self.cluster_config.rollout_config
-
-  def _generate_mesh_cm(self):
-    """Mesh context for `generate`.
-
-    By default `generate` enters the ROLLOUT mesh (`r2m[Role.ROLLOUT]`) and its
-    logical axis rules. With `TUNIX_ROLLOUT_NO_MESH_CONTEXT=1` it yields that
-    mesh without entering it. A host-local in-process engine
-    (TUNIX_VLLM_HOST_LOCAL_ENGINE=1) sets its own per-process mesh inside
-    `execute_model`; entering the global ROLLOUT mesh around it makes jit read
-    two meshes, and eager ops in the engine's decode loop then fail on some
-    processes with "Attempted to execute with N argument lists when local
-    device count is M". Other roles and the ROLLOUT uses outside `generate`
-    keep the normal context.
-
-    Returns:
-      A context manager yielding `(mesh, logical_axis_rules_or_None)`.
-    """
-    if _env_flag("TUNIX_ROLLOUT_NO_MESH_CONTEXT"):
-      return contextlib.nullcontext((self.r2m[Role.ROLLOUT], None))
-    return self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT)
 
   @contextlib.contextmanager
   def _get_mesh_and_logical_axis_rules_cm(self, role: Role):
