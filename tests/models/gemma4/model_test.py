@@ -550,6 +550,103 @@ class ModelTest(parameterized.TestCase):
     self.assertIsNotNone(loss)
     self.assertIsNotNone(grads)
 
+  def test_qwix_qlora_nf4_train_step(self):
+    config = model_lib.ModelConfig.gemma4_e2b()
+    config.num_layers = 1
+    config.embed_dim = 256
+    config.hidden_dim = 512
+    config.num_heads = 4
+    config.head_dim = 64
+    config.num_kv_heads = 1
+    config.frac_shared_layers = 0.0
+
+    model = model_lib.Gemma4(config, rngs=nnx.Rngs(0))
+    lora_provider = qwix.LoraProvider(
+        module_path='.*q_einsum|.*kv_einsum|.*attn_vec_einsum|.*gate_proj|.*up_proj|.*down_proj',
+        rank=4,
+        alpha=2.0,
+        weight_qtype='nf4',
+        tile_size=32,
+    )
+    lora_model = qwix.apply_lora_to_model(
+        model, lora_provider, **model.get_model_input()
+    )
+
+    tokens = jax.random.randint(
+        jax.random.PRNGKey(0), (2, 32), 0, config.num_embed
+    )
+    positions = jnp.tile(
+        jnp.arange(tokens.shape[1])[None, :], (tokens.shape[0], 1)
+    )
+    attn_mask = jnp.tril(
+        jnp.ones((tokens.shape[1], tokens.shape[1]), dtype=jnp.bool_)
+    )[None, ...]
+
+    @nnx.jit
+    def train_step(m, tok, pos, mask):
+      def loss_fn(model_in):
+        logits, _ = model_in(tok, positions=pos, attention_mask=mask)
+        return jnp.mean(logits)
+
+      grad_fn = nnx.value_and_grad(
+          loss_fn, argnums=nnx.DiffState(0, nnx.LoRAParam)
+      )
+      return grad_fn(m)
+
+    loss, grads = train_step(lora_model, tokens, positions, attn_mask)
+    self.assertTrue(jnp.isfinite(loss))
+    lora_grads = jax.tree.leaves(grads)
+    self.assertNotEmpty(lora_grads)
+    self.assertTrue(all(jnp.all(jnp.isfinite(g)) for g in lora_grads))
+    self.assertTrue(any(jnp.any(g != 0) for g in lora_grads))
+
+  def test_einsum_mixed_precision_dtype_cast(self):
+    einsum = model_lib.Einsum(
+        einsum_str='BTD,NDH->BTNH',
+        shape=(2, 32, 16),
+        rngs=nnx.Rngs(0),
+        sharding=(None, None, None),
+        dtype=jnp.bfloat16,
+        param_dtype=jnp.float32,
+    )
+    x = jnp.ones((2, 4, 32), dtype=jnp.float32)
+
+    self.assertEqual(einsum.w.value.dtype, jnp.float32)
+    plain_out = einsum(x)
+    self.assertEqual(plain_out.dtype, jnp.bfloat16)
+    self.assertTrue(jnp.all(jnp.isfinite(plain_out)))
+
+    lora_provider = qwix.LoraProvider(
+        module_path='.*',
+        rank=4,
+        alpha=2.0,
+        weight_qtype='nf4',
+        tile_size=16,
+    )
+    qlora_einsum = qwix.apply_lora_to_model(einsum, lora_provider, x)
+    qlora_out = nnx.jit(lambda m, inp: m(inp))(qlora_einsum, x)
+    self.assertEqual(qlora_out.dtype, jnp.bfloat16)
+    self.assertTrue(jnp.all(jnp.isfinite(qlora_out)))
+
+    ptq_provider = qwix.PtqProvider([
+        qwix.QuantizationRule(
+            module_path='.*',
+            weight_qtype='nf4',
+            tile_size=16,
+        )
+    ])
+    ptq_einsum = nnx.eval_shape(
+        lambda: qwix.quantize_model(einsum, ptq_provider, x)
+    )
+    quantized_params = qwix.quantize_params(
+        nnx.to_pure_dict(nnx.state(einsum, nnx.Param)), ptq_einsum
+    )
+    nnx.update(ptq_einsum, quantized_params)
+    self.assertEqual(ptq_einsum.w.dtype, jnp.float32)
+    ptq_out = nnx.jit(lambda m, inp: m(inp))(ptq_einsum, x)
+    self.assertEqual(ptq_out.dtype, jnp.bfloat16)
+    self.assertTrue(jnp.all(jnp.isfinite(ptq_out)))
+
   def test_remat_while_loop_trace_context(self):
     config = model_lib.ModelConfig.gemma4_e2b()
     config.num_layers = 1

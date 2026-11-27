@@ -264,7 +264,7 @@ class Einsum(nnx.Module):
     if self.w_scale is not None:
       w = w * self.w_scale
     x = jnp.astype(x, self.dtype)
-    w = jnp.astype(w, self.dtype)
+    w = jnp.asarray(w, dtype=self.dtype)
     return jnp.einsum(self.einsum_str, x, w)
 
 
