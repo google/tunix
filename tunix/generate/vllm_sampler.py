@@ -45,6 +45,210 @@ from vllm.sampling_params import SamplingParams
 # Colocate vllm engine and worker in the main process
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
+_TRUTHY = ("1", "true", "True")
+
+
+def _env_flag(name: str, default: str = "0") -> bool:
+  """True iff the environment variable `name` is set to 1/true/True."""
+  return (os.environ.get(name, default) or default).strip() in _TRUTHY
+
+
+def _env_positive_int(name: str) -> Optional[int]:
+  """Parses a positive integer environment variable; None when unset."""
+  raw = (os.environ.get(name, "") or "").strip()
+  if not raw:
+    return None
+  if not raw.isdigit() or int(raw) < 1:
+    raise ValueError(f"{name}={raw!r} must be a positive integer")
+  return int(raw)
+
+
+def _chip_ring(nx: int, ny: int) -> List[Tuple[int, int]]:
+  """A cycle through every chip of an nx x ny grid in one-hop steps.
+
+  With an even number of rows: out along row 0, a boustrophedon through
+  columns 1..nx-1 of the other rows, and back down column 0. On a face with a
+  side of 2 (e.g. 2x4) that is the snake along the longer side.
+
+  Args:
+    nx: Chips along x.
+    ny: Chips along y.
+
+  Returns:
+    The `(x, y)` chip positions in ring order.
+
+  Raises:
+    ValueError: The grid has no such cycle: both sides odd, or a line of more
+      than two chips.
+  """
+  if nx == 1 or ny == 1:
+    if nx * ny > 2:
+      raise ValueError(
+          f"a {nx}x{ny} line of chips has no ICI-adjacent ring (its ends are"
+          f" {nx * ny - 1} hops apart)"
+      )
+    return [(i, 0) if ny == 1 else (0, i) for i in range(nx * ny)]
+  if ny % 2:
+    if nx % 2:
+      raise ValueError(
+          f"a {nx}x{ny} chip face has no ICI-adjacent ring (both sides odd)"
+      )
+    return [(x, y) for y, x in _chip_ring(ny, nx)]
+  ring = [(0, 0)]
+  for y in range(ny):
+    xs = range(1, nx) if y % 2 == 0 else range(nx - 1, 0, -1)
+    ring += [(x, y) for x in xs]
+  return ring + [(0, y) for y in range(ny - 1, 0, -1)]
+
+
+def _snake_device_order(devices: Sequence[jax.Device]) -> List[int]:
+  """Orders a host's devices along an ICI-adjacent ring of its chip face.
+
+  The chips must fill one x-y face: one z, every (x, y) of the bounding box
+  present, the same cores on every chip. They are walked along a cycle of
+  one-hop steps that closes back on the first chip (`_chip_ring`; the snake
+  along the longer side of a 2x4 face), so a TP all-reduce ring over all the
+  local devices only uses neighboring links. A chip's cores stay together,
+  flipped on every other chip so the chip-to-chip step stays a single hop.
+  Only the full ring is guaranteed: a prefix (fewer TP devices than local
+  devices) is a path.
+
+  Args:
+    devices: The host's local TPU devices.
+
+  Returns:
+    The device ids in ring order.
+
+  Raises:
+    ValueError: The devices do not fill one chip face, or the face has no
+      ICI-adjacent ring.
+  """
+  chips: Dict[Tuple[int, int], List[Tuple[int, int]]] = {}
+  faces = set()
+  for d in devices:
+    coords = tuple(int(c) for c in d.coords)
+    if len(coords) < 2:
+      raise ValueError(f"device {d} has no x-y coords: {coords}")
+    faces.add(coords[2:])
+    chips.setdefault(coords[:2], []).append((int(d.core_on_chip), int(d.id)))
+  x0 = min(x for x, _ in chips)
+  y0 = min(y for _, y in chips)
+  nx = max(x for x, _ in chips) - x0 + 1
+  ny = max(y for _, y in chips) - y0 + 1
+  cores = {tuple(sorted(core for core, _ in chip)) for chip in chips.values()}
+  if len(faces) > 1 or len(chips) != nx * ny or len(cores) > 1:
+    raise ValueError(
+        "the local devices do not fill one chip face with the same cores on"
+        f" every chip: chips {sorted(chips)}, z {sorted(faces)}, cores"
+        f" {sorted(cores)}"
+    )
+  order = []
+  for position, (x, y) in enumerate(_chip_ring(nx, ny)):
+    chip = sorted(chips[(x0 + x, y0 + y)])
+    if position % 2:
+      chip.reverse()
+    order += [device_id for _, device_id in chip]
+  return order
+
+
+def _host_local_engine_args(
+    args: Dict[str, Any], devices: Optional[Sequence[jax.Device]] = None
+) -> Dict[str, Any]:
+  """Points the in-process vLLM engine at this process's local devices.
+
+  Multi-controller JAX (one process per host, `jax.distributed`, no Pathways
+  and no Ray) builds one in-process engine per process. The default path
+  forwards the ids of the whole rollout mesh (`config.mesh.device_ids`), but
+  the tpu-inference worker resolves `device_indexes` against
+  `jax.local_devices()` only, so every process but one fails with a KeyError.
+  With `TUNIX_VLLM_HOST_LOCAL_ENGINE=1` each process instead runs its own engine
+  over its own local devices:
+
+    device_indexes       = the local device ids
+    tensor_parallel_size = TUNIX_VLLM_HOST_LOCAL_TP (default: all local devices)
+    data_parallel_size   = TUNIX_VLLM_HOST_LOCAL_DP (default: 1)
+
+  Global rollout data parallelism is then the number of processes; processes
+  only meet in `jax.distributed` collectives (training, weight publish).
+
+  With a local DP of 1, TPU_MULTIPROCESS_DP defaults to 1 (tpu-inference's
+  per-process DP switch). A local DP > 1 runs tpu-inference's single-process
+  DP (a 'data' mesh axis plus DPScheduler), which needs TPU_MULTIPROCESS_DP=0
+  and NEW_MODEL_DESIGN=1.
+
+  `TUNIX_VLLM_SNAKE_DEVICE_ORDER=1` orders the local ids along an ICI-adjacent
+  cycle (see `_snake_device_order`). Id order is row-major on a 2x2 chip face,
+  whose wrap-around step is a diagonal; a TP > 1 decode all-reduce ring built
+  from it can be rejected at compile time on some TPU topologies.
+
+  Args:
+    args: Engine args built by `VllmSampler._vllm_config`, which always set
+      `additional_config["sharding"]["sharding_strategy"]`.
+    devices: The process-local devices; defaults to `jax.local_devices()`.
+
+  Returns:
+    The rewritten engine args.
+  """
+  dp_local = _env_positive_int("TUNIX_VLLM_HOST_LOCAL_DP") or 1
+  tp_env = _env_positive_int("TUNIX_VLLM_HOST_LOCAL_TP")
+  if dp_local > 1:
+    os.environ["TPU_MULTIPROCESS_DP"] = "0"
+    os.environ.setdefault("NEW_MODEL_DESIGN", "1")
+  else:
+    os.environ.setdefault("TPU_MULTIPROCESS_DP", "1")
+
+  devices = list(jax.local_devices() if devices is None else devices)
+  if not devices:
+    raise ValueError(
+        "TUNIX_VLLM_HOST_LOCAL_ENGINE=1 but no local devices found"
+    )
+  local_ids = [int(d.id) for d in devices]
+  if _env_flag("TUNIX_VLLM_SNAKE_DEVICE_ORDER"):
+    local_ids = _snake_device_order(devices)
+  n_local = len(local_ids)
+  tp_local = tp_env or n_local
+  if tp_local * dp_local > n_local:
+    raise ValueError(
+        f"TUNIX_VLLM_HOST_LOCAL_DP={dp_local} x"
+        f" TUNIX_VLLM_HOST_LOCAL_TP={tp_local} exceeds the {n_local} local"
+        " devices"
+    )
+  local_ids = local_ids[: tp_local * dp_local]
+
+  args = dict(args)
+  args["tensor_parallel_size"] = tp_local
+  args["data_parallel_size"] = dp_local
+  additional_config = dict(args["additional_config"])
+  sharding = dict(additional_config["sharding"])
+  strategy = dict(sharding["sharding_strategy"])
+  if dp_local > 1 and strategy.get("tensor_parallelism") not in (
+      None,
+      tp_local,
+  ):
+    raise ValueError(
+        "sharding_strategy.tensor_parallelism="
+        f"{strategy['tensor_parallelism']} overrides the local"
+        f" tensor_parallel_size={tp_local}"
+    )
+  strategy["device_indexes"] = local_ids
+  for key in ("total_devices", "num_devices"):
+    if key in strategy:
+      strategy[key] = len(local_ids)
+  sharding["sharding_strategy"] = strategy
+  additional_config["sharding"] = sharding
+  args["additional_config"] = additional_config
+  logging.info(
+      "TUNIX_VLLM_HOST_LOCAL_ENGINE: process %d runs its own engine on local"
+      " device_indexes=%s tensor_parallel_size=%d data_parallel_size=%d"
+      " (TPU_MULTIPROCESS_DP=%s).",
+      jax.process_index(),
+      local_ids,
+      tp_local,
+      dp_local,
+      os.environ.get("TPU_MULTIPROCESS_DP"),
+  )
+  return args
+
 
 @dataclasses.dataclass
 class VllmConfig:
@@ -550,6 +754,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       args["additional_config"] = dict(args["additional_config"])
       args["additional_config"]["sharding"] = sharding
 
+    if _env_flag("TUNIX_VLLM_HOST_LOCAL_ENGINE"):
+      args = _host_local_engine_args(args)
     return args
 
   def _build_engine_args(self) -> EngineArgs:

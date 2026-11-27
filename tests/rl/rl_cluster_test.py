@@ -1661,6 +1661,22 @@ class RlEngineTokenInputTest(parameterized.TestCase):
     )
     self.assertLen(out.logprobs, 2)
 
+  def test_no_mesh_context_flag_skips_entering_the_rollout_mesh(self):
+    from types import SimpleNamespace  # pylint: disable=g-import-not-at-top
+
+    engine = self._fake_engine()
+    engine._get_mesh_and_logical_axis_rules_cm = mock.Mock(
+        side_effect=AssertionError('entered the ROLLOUT mesh')
+    )
+    engine.r2m = {rl_engine_lib.Role.ROLLOUT: SimpleNamespace(devices=[])}
+    with mock.patch.dict(os.environ, {'TUNIX_ROLLOUT_NO_MESH_CONTEXT': '1'}):
+      out = rl_engine_lib.RLEngine.generate(
+          engine, None, prompt_token_ids=[[0, 3]]
+      )
+    engine._get_mesh_and_logical_axis_rules_cm.assert_not_called()
+    self.assertEqual(engine.rollout.generate.call_count, 1)
+    self.assertLen(out.logprobs, 1)
+
   @unittest.skipIf(is_run_core, 'Skipping in run_core')
   def test_vllm_rollout_forwards_token_rows_and_returns_own_result(self):
     import threading  # pylint: disable=g-import-not-at-top
