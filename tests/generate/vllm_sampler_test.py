@@ -649,6 +649,45 @@ class VllmSamplerConfigTest(absltest.TestCase):
     rpcs = [c.args[0] for c in sampler.llm.collective_rpc.call_args_list]
     self.assertEqual(rpcs, ["delete_kv_cache", "reinitialize_kv_cache"])
 
+  def test_maxtext_direct_weight_sync_and_additional_config_merge(self):
+    missing_cfg = vllm_sampler.VllmConfig(init_with_random_weights=False)
+    missing_sampler = self._make_sampler(missing_cfg)
+    missing_sampler.to_hf_key_mappings = {}
+    with mock.patch.object(vllm_sampler.jax, "effects_barrier"):
+      with self.assertRaisesRegex(ValueError, "maxtext_config"):
+        missing_sampler.update_params({"w": 1})
+
+    base_add = {
+        "maxtext_config": {"model_name": "custom", "attention": "dot_product"}
+    }
+    kw_add = {"maxtext_config": {"attention": "flash"}, "extra": True}
+    engine_kw = {"additional_config": kw_add, "hf_config_path": "/tmp/hf"}
+    config = vllm_sampler.VllmConfig(
+        init_with_random_weights=False,
+        delete_dst_buffers=False,
+        reshard_chunk_size=16,
+        additional_config=base_add,
+        engine_kwargs=engine_kw,
+    )
+    sampler = self._make_sampler(config)
+    self.assertEqual(sampler.args["hf_config_path"], "/tmp/hf")
+    self.assertEqual(
+        sampler.args["additional_config"]["maxtext_config"],
+        {"model_name": "custom", "attention": "flash"},
+    )
+    self.assertTrue(sampler.args["additional_config"]["extra"])
+    self.assertIn("additional_config", engine_kw)
+
+    with mock.patch.object(
+        vllm_sampler.utils, "transfer_state_directly"
+    ) as mock_transfer, mock.patch.object(vllm_sampler.jax, "effects_barrier"):
+      sampler.update_params({"base": {"w": 1}})
+
+    mock_transfer.assert_called_once()
+    call_kwargs = mock_transfer.call_args.kwargs
+    self.assertFalse(call_kwargs["delete_dst_buffers"])
+    self.assertEqual(call_kwargs["reshard_chunk_size"], 16)
+
   def test_overlap_postprocessing_decodes_finished_requests_early(self):
     config = vllm_sampler.VllmConfig(init_with_random_weights=False)
     sampler = self._make_sampler(config)

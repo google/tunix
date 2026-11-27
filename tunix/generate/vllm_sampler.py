@@ -121,12 +121,16 @@ class VllmConfig:
   sampling_kwargs: Dict[str, Any] = dataclasses.field(default_factory=dict)
 
   def __post_init__(self, engine_kwargs: Optional[Dict[str, Any]]):
-    engine_kwargs = engine_kwargs or {}
+    engine_kwargs = dict(engine_kwargs) if engine_kwargs else {}
     illegal = self._RESERVED_KEYS & engine_kwargs.keys()
     if illegal:
       raise ValueError(
           "VllmConfig fields must be set directly on VllmConfig, not passed"
           f" via engine_kwargs: {sorted(illegal)}"
+      )
+    if "additional_config" in engine_kwargs:
+      self.additional_config = utils.merge_additional_config(
+          self.additional_config, engine_kwargs.pop("additional_config")
       )
     self._processed_engine_kwargs = engine_kwargs
     if self.postprocessing_threads < 1:
@@ -391,7 +395,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           src_state=updated_weights,
           dst_state=self.transformer_state,
           reshard_fn=reshard.reshard_pytree,
-          delete_dst_buffers=True,  # Ensure old weights are deleted to free up HBM memory
+          delete_dst_buffers=self.config.delete_dst_buffers,
           reshard_chunk_size=self.config.reshard_chunk_size,
       )
 
