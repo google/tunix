@@ -137,6 +137,25 @@ class DPOTrainingConfig(peft_trainer.TrainingConfig):
   max_response_length: int | None = None
 
 
+def _sft_target_mask(full_mask: jax.Array | None) -> jax.Array:
+  """Returns the [B, L - 1] mask of tokens the ORPO SFT loss scores.
+
+  A token is scored only when the token before it is real. Prompts are left
+  padded, so their first token would otherwise be predicted from a pad.
+
+  Args:
+    full_mask: [B, L] mask over prompt + completion, 1 for real tokens.
+
+  Raises:
+    ValueError: If `full_mask` is None.
+  """
+  if full_mask is None:
+    raise ValueError(
+        "full_mask must be provided when enable_prompt_loss_orpo is True."
+    )
+  return full_mask[:, 1:] * full_mask[:, :-1]
+
+
 @nnx.jit(static_argnums=(4, 7))
 def compute_logps(
     model,
@@ -165,7 +184,7 @@ def compute_logps(
     completion_logps = (completion_logps * completion_mask).sum(axis=-1)
 
     # Extract log probs for prompt + completion (excluding first token)
-    full_sequence_mask = full_mask[:, 1:]  # pyrefly: ignore[unsupported-operation]
+    full_sequence_mask = _sft_target_mask(full_mask)
     full_logps = (token_logps * full_sequence_mask).sum(axis=-1)
 
     batch_size = token_logps.shape[0]
@@ -498,7 +517,11 @@ def dpo_loss_fn(
     # SFT log probs (can include prompt)
     if enable_prompt_loss_orpo:
       if average_log_prob_orpo:
-        chosen_full_mask = train_example.full_mask[:batch_size, 1:]  # pyrefly: ignore[unsupported-operation]
+        chosen_full_mask = _sft_target_mask(
+            train_example.full_mask[:batch_size]
+            if train_example.full_mask is not None
+            else None
+        )
         chosen_sft_lengths = jnp.maximum(chosen_full_mask.sum(axis=-1), 1.0)
         sft_loss = -prompt_chosen_logps / chosen_sft_lengths
       else:
