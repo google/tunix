@@ -163,6 +163,7 @@ class RLEngine:
     )
     self._init_backbone_sharing_map(actor, reference)
     self._anchor_policy_state = None
+    self._anchor_train_steps: int | None = None
 
     if self.cluster_config.rollout_engine == "vanilla_v2":
       # The engine runs each DP rank on its own slice of the rollout devices,
@@ -402,7 +403,22 @@ class RLEngine:
     self._rollout_released_for_training = True
 
   def maybe_restore_rollout_for_generation(self) -> None:
-    """Restores rollout KV cache (and weights if needed) if released for training."""
+    """Restores rollout KV cache (and weights if needed) if released for training.
+
+    With SHARED weights, also re-snapshots the old-logp anchor after an update.
+    """
+    if (
+        self._weight_placement is WeightPlacement.SHARED
+        and self._anchor_train_steps != self.actor_trainer.train_steps
+    ):
+      # The rollout samples with the actor's own weights, so the learners skip
+      # `sync_weights`, which refreshes the anchor for the other placements.
+      # Snapshot the weights about to sample, so trainer-side old logps score
+      # the policy that produced the batch.
+      self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
+          nnx.state(self.actor_trainer.model), "pinned_host"
+      )
+      self._anchor_train_steps = self.actor_trainer.train_steps
     if not self._rollout_released_for_training:
       return
     if self._weight_placement is WeightPlacement.SWAPPED:
@@ -600,6 +616,7 @@ class RLEngine:
     self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
         nnx.state(self.actor_trainer.model), "pinned_host"
     )
+    self._anchor_train_steps = self.actor_trainer.train_steps
 
     # 3. Initialize rollout.
     if isinstance(self.cluster_config.rollout_config, dict):
@@ -1545,7 +1562,7 @@ class RLEngine:
           )
       )
 
-      # Use the anchor (start-of-global-step) actor weights so old_per_token_logps
+      # Use the anchor (sampling-time) actor weights so old_per_token_logps
       # reference the same policy vllm sampled with even when mini_batch_size <
       # full_batch_size or num_iterations > 1. Only offload the live actor when
       # `offload_to_cpu` is enabled cluster-wide; otherwise the host round-trip
@@ -1647,6 +1664,7 @@ class RLEngine:
         self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
             nnx.state(self.actor_trainer.model), "pinned_host"
         )
+        self._anchor_train_steps = self.actor_trainer.train_steps
       if self.cluster_config.gc_collect_after_weight_sync:
         gc.collect()
 
