@@ -14,6 +14,7 @@
 
 """Client facing abstraction for interacting with RL training engine."""
 
+import atexit
 import collections
 import contextlib
 import copy
@@ -24,6 +25,8 @@ import gc
 import itertools
 import operator
 import os
+import queue
+import threading
 import time
 from typing import Any, Callable, Mapping, Sequence, cast
 
@@ -97,6 +100,149 @@ class WeightPlacement(enum.Enum):
   SEPARATE = "separate"
 
 
+def _env_flag(name: str, default: str = "0") -> bool:
+  """True iff the environment variable `name` is set to 1/true/True."""
+  return (os.environ.get(name, default) or default).strip() in (
+      "1",
+      "true",
+      "True",
+  )
+
+
+# Upper bound on how long `close` waits for queued metric flushes.
+_ASYNC_METRICS_CLOSE_TIMEOUT_S = 30.0
+# Queued behind every accepted flush by `close`; tells the worker to exit.
+_ASYNC_METRICS_STOP = object()
+
+
+class _AsyncMetricsExporter:
+  """Runs metric flushes on one background thread (TUNIX_ASYNC_METRICS=1).
+
+  The queue is bounded (TUNIX_ASYNC_METRICS_QUEUE_DEPTH, default 3) and a
+  flush that does not fit is dropped with a warning: telemetry must never
+  block or crash training. `close` (also run at exit) runs every accepted
+  flush, stops the worker thread and releases every callback, so the objects a
+  callback is bound to (e.g. the RLEngine) can be garbage collected.
+
+  Callbacks run on a background thread of one process, so they must not issue
+  cross-process collectives; any global aggregation has to happen on the train
+  loop before `submit`.
+  """
+
+  def __init__(self, maxsize: int):
+    self._queue: queue.Queue[Any] = queue.Queue(maxsize=maxsize)
+    self._dropped = 0
+    # Orders `submit` against `close`: every accepted flush is queued ahead of
+    # the stop sentinel.
+    self._lock = threading.Lock()
+    self._closed = False
+    # Set when `close` times out: the worker then skips what is still queued.
+    self._abandoned = threading.Event()
+    self._worker = threading.Thread(
+        target=self._run, name="tunix-async-metrics", daemon=True
+    )
+    self._worker.start()
+    atexit.register(self.close)
+
+  @property
+  def closed(self) -> bool:
+    return self._closed
+
+  def _run(self) -> None:
+    while True:
+      fn = self._queue.get()
+      try:
+        if fn is _ASYNC_METRICS_STOP:
+          return
+        if not self._abandoned.is_set():
+          fn()
+      except Exception:  # pylint: disable=broad-exception-caught
+        logging.exception("TUNIX_ASYNC_METRICS: metrics flush failed.")
+      finally:
+        # Release the callback before blocking on the next one, so a finished
+        # flush does not keep the objects it is bound to alive.
+        del fn
+        self._queue.task_done()
+
+  def submit(self, fn: Callable[[], None]) -> bool:
+    """Queues `fn`, or drops it with a warning if the queue is full.
+
+    Args:
+      fn: The flush to run on the worker thread.
+
+    Returns:
+      False if the exporter is closed (`close` may run concurrently, e.g. as
+      the exit hook): `fn` was neither queued nor dropped, so the caller has
+      to run it. True if `fn` was queued (it runs before `close` returns) or
+      dropped because the queue was full.
+    """
+    with self._lock:
+      if self._closed:
+        return False
+      try:
+        self._queue.put_nowait(fn)
+        return True
+      except queue.Full:
+        self._dropped += 1
+        dropped = self._dropped
+    if dropped <= 3 or dropped % 50 == 0:
+      logging.warning(
+          "TUNIX_ASYNC_METRICS: queue full, dropped metrics flush #%d.",
+          dropped,
+      )
+    return True
+
+  def close(self, timeout_s: float = _ASYNC_METRICS_CLOSE_TIMEOUT_S) -> bool:
+    """Runs every accepted flush, then stops the worker thread. Idempotent.
+
+    Args:
+      timeout_s: How long to wait for the queued flushes.
+
+    Returns:
+      True if every accepted flush ran and the worker thread exited. On
+      timeout, the flushes still queued are discarded with a warning (the
+      metrics backends are closed next), the flush in progress finishes and
+      the worker thread then exits; False is returned.
+    """
+    deadline = time.monotonic() + timeout_s
+    with self._lock:
+      first_close = not self._closed
+      self._closed = True
+    if first_close:
+      atexit.unregister(self.close)
+      try:
+        self._queue.put(_ASYNC_METRICS_STOP, timeout=max(timeout_s, 0.0))
+      except queue.Full:
+        pass
+    self._worker.join(max(deadline - time.monotonic(), 0.0))
+    # Once the worker has exited, a flush is left only if it died before
+    # reaching the stop sentinel.
+    if not self._worker.is_alive() and self._queue.empty():
+      return True
+
+    self._abandoned.set()
+    discarded = 0
+    while True:
+      try:
+        fn = self._queue.get_nowait()
+      except queue.Empty:
+        break
+      if fn is not _ASYNC_METRICS_STOP:
+        discarded += 1
+      del fn
+      self._queue.task_done()
+    if self._worker.is_alive():
+      # The queue is empty and `submit` is closed, so this cannot block.
+      self._queue.put_nowait(_ASYNC_METRICS_STOP)
+    logging.warning(
+        "TUNIX_ASYNC_METRICS: metrics flushes did not finish within %.1fs;"
+        " discarded %d queued metrics flushes.",
+        timeout_s,
+        discarded,
+    )
+    return False
+
+
 @contextlib.contextmanager
 def _profile_scope(
     engine: Any,
@@ -163,6 +309,7 @@ class RLEngine:
     )
     self._init_backbone_sharing_map(actor, reference)
     self._anchor_policy_state = None
+    self._async_metrics_exporter: _AsyncMetricsExporter | None = None
 
     if self.cluster_config.rollout_engine == "vanilla_v2":
       # The engine runs each DP rank on its own slice of the rollout devices,
@@ -862,6 +1009,12 @@ class RLEngine:
 
   def close(self):
     """Closes engine components and flushes buffered metrics and profiler traces."""
+    if self._async_metrics_exporter is not None:
+      # Runs the queued flushes, stops the worker thread and drops its
+      # references to this engine.
+      self._async_metrics_exporter.close(
+          timeout_s=_ASYNC_METRICS_CLOSE_TIMEOUT_S
+      )
     for m in self._buffered_train_metrics + self._buffered_eval_metrics:
       self._log_metrics(m)
     self.rollout.close()
@@ -985,6 +1138,43 @@ class RLEngine:
     if self._external_metrics_logger is not None:
       self._external_metrics_logger(metrics_buffer)
 
+  def _flush_metrics_buffer(self, metrics_buffer: MetricsBuffer) -> None:
+    """Logs a completed metrics buffer.
+
+    With TUNIX_ASYNC_METRICS=1 the flush (metric conversion, the metrics
+    logger backends, e.g. a TensorBoard writer on remote storage, and the
+    external logger) runs on a background thread. Only the main process writes
+    metrics, so a synchronous flush stalls process 0 every step while the other
+    processes wait for it at the next collective; under multi-controller JAX
+    that stall becomes every host's step time. The buffer has already been
+    removed from the step buffers, so the background thread is its only user.
+
+    Args:
+      metrics_buffer: The completed buffer of one step.
+    """
+    if not _env_flag("TUNIX_ASYNC_METRICS"):
+      self._log_metrics(metrics_buffer)
+      return
+    exporter = self._async_metrics_exporter
+    if exporter is None:
+      qdepth = int(
+          os.environ.get("TUNIX_ASYNC_METRICS_QUEUE_DEPTH", "3") or "3"
+      )
+      exporter = _AsyncMetricsExporter(max(1, qdepth))
+      self._async_metrics_exporter = exporter
+      logging.info(
+          "TUNIX_ASYNC_METRICS: metrics flushes run off the train loop"
+          " (queue depth %d).",
+          max(1, qdepth),
+      )
+    if not exporter.submit(
+        functools.partial(self._log_metrics, metrics_buffer)
+    ):
+      # `close` already ran, possibly on another thread after this flush
+      # started: flush inline, as with the flag off, instead of starting
+      # another worker thread.
+      self._log_metrics(metrics_buffer)
+
   def with_external_metrics_logger(
       self, external_metrics_logger: Callable[[MetricsBuffer], None]
   ):
@@ -1023,7 +1213,7 @@ class RLEngine:
           if self._buffered_eval_metrics
           else []
       ):
-        self._log_metrics(m)
+        self._flush_metrics_buffer(m)
 
     cur_metrics = buffered_metrics[-1]
     for metric_name, (value, op) in metrics.items():
@@ -1078,13 +1268,13 @@ class RLEngine:
         and self._buffered_train_metrics[0].global_steps < self.global_steps
     ):
       for m in [self._buffered_train_metrics.pop(0)]:
-        self._log_metrics(m)
+        self._flush_metrics_buffer(m)
     if (
         self._buffered_eval_metrics
         and self._buffered_eval_metrics[0].global_steps < self.global_steps
     ):
       for m in [self._buffered_eval_metrics.pop(0)]:
-        self._log_metrics(m)
+        self._flush_metrics_buffer(m)
 
   def train(
       self,
