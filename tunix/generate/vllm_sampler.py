@@ -14,10 +14,15 @@
 
 """Sampler for vLLM-style autoregressive decoding using JAX and NNX models."""
 
+import ast
 import atexit
+from collections.abc import Callable
 import concurrent.futures
 import copy
 import dataclasses
+import functools
+import importlib
+import inspect
 from itertools import count
 import os
 import threading
@@ -44,6 +49,170 @@ from vllm.sampling_params import SamplingParams
 
 # Colocate vllm engine and worker in the main process
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+
+
+_ENV_BOOLS = {"0": False, "1": True, "false": False, "true": True}
+
+
+def _env_flag(name: str, default: str = "0") -> bool:
+  """Reads environment variable `name` as a bool.
+
+  Unset or empty means `default`; 0, 1, true and false are accepted in any
+  case.
+
+  Args:
+    name: The environment variable.
+    default: The value used when `name` is unset or empty.
+
+  Returns:
+    The parsed value.
+
+  Raises:
+    ValueError: `name` holds anything else.
+  """
+  raw = os.environ.get(name, "")
+  value = _ENV_BOOLS.get((raw.strip() or default).lower())
+  if value is None:
+    raise ValueError(f"{name}={raw!r}: expected 0, 1, true or false.")
+  return value
+
+
+class _DeferHookState:
+  """State of the TUNIX_DEFER_POSTPROCESS_SUBMIT runner hook; one per process.
+
+  Process-wide on purpose, not thread-local: with async scheduling, vLLM's
+  uniprocess executor runs `AsyncModelRunnerOutput.get_output`, where
+  tpu-inference calls `_process_continue_decode_outputs`, on its own output
+  thread rather than on the thread that steps the engine, so the hook would
+  never see a thread-local callback there. One `_generate_offline` call at a
+  time owns `flush`; nested or concurrent calls submit right away.
+  """
+
+  def __init__(self):
+    self.lock = threading.Lock()
+    # Called by the hook; set by the `_generate_offline` call that owns it.
+    self.flush: Optional[Callable[[], None]] = None
+    # The tpu-inference runner file that was hooked; empty until then.
+    self.hooked = ""
+
+
+_DEFER = _DeferHookState()
+
+
+def _call_name(call: ast.Call) -> str:
+  """The called name: `f` for both `f(...)` and `obj.f(...)`."""
+  if isinstance(call.func, ast.Name):
+    return call.func.id
+  if isinstance(call.func, ast.Attribute):
+    return call.func.attr
+  return ""
+
+
+def _check_continue_decode_runner(source: str) -> List[str]:
+  """Problems with the tpu-inference runner structure the deferral relies on.
+
+  The deferred post-processing jobs are submitted at the start of
+  `_process_continue_decode_outputs`, i.e. right after the next decode window
+  was dispatched by `continue_decode` and before its blocking device-to-host
+  fetch. That requires a module-level `_process_continue_decode_outputs`
+  whose first statement is a `device_get` (jax.device_get or
+  common_utils.safe_device_get), called after `continue_decode` in
+  `_execute_continue_decode`. The hook replaces that module-level function,
+  so the runner must call it by its bare name; a call through an attribute
+  (`self.` or another module) would bypass the hook and is reported.
+  `continue_decode` only anchors the order and may be called either way.
+
+  Args:
+    source: Source of tpu_inference.runner.tpu_runner.
+
+  Returns:
+    A list of problems; empty when the anchors hold.
+  """
+  hooked = "_process_continue_decode_outputs"
+  tree = ast.parse(source)
+  fns = [
+      n
+      for n in tree.body
+      if isinstance(n, ast.FunctionDef) and n.name == hooked
+  ]
+  if len(fns) != 1:
+    return [f"module-level {hooked} x{len(fns)}"]
+  body = [
+      st
+      for st in fns[0].body
+      if not (isinstance(st, ast.Expr) and isinstance(st.value, ast.Constant))
+  ]
+  problems = []
+  if not body or "device_get(" not in ast.unparse(body[0]):
+    problems.append(f"first statement of {hooked} is not a device_get")
+  bypassing = sorted(
+      c.lineno
+      for c in ast.walk(tree)
+      if isinstance(c, ast.Call)
+      and isinstance(c.func, ast.Attribute)
+      and c.func.attr == hooked
+  )
+  if bypassing:
+    problems.append(
+        f"{hooked} called through an attribute at lines {bypassing}, which"
+        " the hook does not intercept"
+    )
+  execs = [
+      n
+      for n in ast.walk(tree)
+      if isinstance(n, ast.FunctionDef) and n.name == "_execute_continue_decode"
+  ]
+  if len(execs) != 1:
+    return problems + [f"_execute_continue_decode x{len(execs)}"]
+  calls = sorted(
+      (c.lineno, c.col_offset, _call_name(c))
+      for c in ast.walk(execs[0])
+      if isinstance(c, ast.Call)
+      and _call_name(c) in ("continue_decode", hooked)
+  )
+  order = [name for _, _, name in calls]
+  if order != ["continue_decode", hooked]:
+    problems.append(f"_execute_continue_decode call order {order}")
+  return problems
+
+
+def _install_defer_hook() -> None:
+  """Wraps tpu-inference's `_process_continue_decode_outputs`, once.
+
+  Runs under `_DEFER.lock`, so concurrent first calls check the runner and
+  wrap the function exactly once.
+
+  Raises:
+    RuntimeError: The runner lacks the structure the deferral relies on.
+  """
+  with _DEFER.lock:
+    if _DEFER.hooked:
+      return
+    runner = importlib.import_module("tpu_inference.runner.tpu_runner")
+    problems = _check_continue_decode_runner(inspect.getsource(runner))
+    if problems:
+      raise RuntimeError(
+          "TUNIX_DEFER_POSTPROCESS_SUBMIT=1 but the tpu-inference runner does"
+          f" not match ({'; '.join(problems)}; {runner.__file__}); refusing"
+          " to run with an inert deferral."
+      )
+    name = "_process_continue_decode_outputs"
+    original = getattr(runner, name)
+
+    @functools.wraps(original)
+    def _process_continue_decode_outputs(*args, **kwargs):
+      flush = _DEFER.flush
+      if flush is not None:
+        flush()
+      return original(*args, **kwargs)
+
+    setattr(runner, name, _process_continue_decode_outputs)
+    _DEFER.hooked = runner.__file__
+  logging.info(
+      "TUNIX_DEFER_POSTPROCESS_SUBMIT: post-processing submits deferred to"
+      " the next continue-decode dispatch (%s).",
+      runner.__file__,
+  )
 
 
 @dataclasses.dataclass
@@ -834,6 +1003,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     self._postprocessed = None
     engine = self.llm.llm_engine  # pyrefly: ignore[missing-attribute]
     counter = self.llm.request_counter  # pyrefly: ignore[missing-attribute]
+    if _env_flag("TUNIX_DEFER_POSTPROCESS_SUBMIT"):
+      _install_defer_hook()  # May raise; before any request is queued.
     for idx, prompt in enumerate(prompts):
       params = (
           sampling_params[idx]
@@ -844,22 +1015,67 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       engine.add_request(str(next(counter)), prompt, params)
     outputs: List[RequestOutput] = []
     futures: Dict[str, concurrent.futures.Future[Any]] = {}
+    # TUNIX_DEFER_POSTPROCESS_SUBMIT=1: queue finished requests and submit them
+    # right after the next decode window is dispatched instead of at the
+    # chunk boundary, where the pool's pure-Python decode would compete for
+    # the GIL with the engine's schedule/prepare/dispatch work. Same function
+    # on the same outputs in the same order; only the submit time moves. A
+    # step that does not reach the hook submits the queue when it returns, as
+    # with the deferral off.
+    deferred: List[RequestOutput] = []
+    deferred_lock = threading.Lock()
+    hook_ran = threading.Event()
+
+    def submit_deferred() -> None:
+      with deferred_lock:
+        ready = list(deferred)
+        deferred.clear()
+        for done in ready:
+          futures[done.request_id] = pool.submit(
+              self._postprocess_request_output,
+              done,
+              return_logprobs=return_logprobs,
+              num_logprobs=num_logprobs,
+          )
+
+    def flush_from_hook() -> None:
+      hook_ran.set()
+      submit_deferred()
+
     progress = tqdm.tqdm(
         total=len(prompts), desc="Processed prompts", dynamic_ncols=True
     )
+    defer = False
+    if _DEFER.hooked and _env_flag("TUNIX_DEFER_POSTPROCESS_SUBMIT"):
+      with _DEFER.lock:
+        if _DEFER.flush is None:  # Nested or concurrent calls submit now.
+          _DEFER.flush = flush_from_hook
+          defer = True
     try:
       while engine.has_unfinished_requests():
+        hook_ran.clear()
         for output in engine.step():
           if output.finished:
             outputs.append(output)
-            futures[output.request_id] = pool.submit(
-                self._postprocess_request_output,
-                output,
-                return_logprobs=return_logprobs,
-                num_logprobs=num_logprobs,
-            )
+            if defer:
+              with deferred_lock:
+                deferred.append(output)
+            else:
+              futures[output.request_id] = pool.submit(
+                  self._postprocess_request_output,
+                  output,
+                  return_logprobs=return_logprobs,
+                  num_logprobs=num_logprobs,
+              )
             progress.update(1)
+        if defer and not hook_ran.is_set():
+          # The hook did not run in this step; submit now, as with defer off.
+          submit_deferred()
     finally:
+      if defer:
+        with _DEFER.lock:
+          _DEFER.flush = None
+        submit_deferred()
       progress.close()
     self._postprocessed = {rid: f.result() for rid, f in futures.items()}
     # vLLM's LLM.generate returns outputs sorted by request id as well.

@@ -15,9 +15,11 @@
 import asyncio
 import concurrent.futures
 import functools
+import importlib.util
 import itertools
 
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -555,6 +557,65 @@ class VllmSamplerTest(absltest.TestCase):
     self.assertEqual(sampling_params.presence_penalty, 0.3)
 
 
+# The tpu_inference.runner.tpu_runner structure the deferral hook relies on.
+_FAKE_RUNNER = '''"""Stand-in for tpu_inference.runner.tpu_runner."""
+import types
+
+common_utils = types.SimpleNamespace(safe_device_get=lambda x: x)
+
+
+def continue_decode(window):
+  return window, len(window)
+
+
+def _process_continue_decode_outputs(tokens, steps):
+  """Host transfer of one continue-decode window."""
+  tokens, steps = common_utils.safe_device_get((tokens, steps))
+  return tokens, steps
+
+
+class TPUModelRunner:
+
+  def _execute_continue_decode(self, window):
+    out = continue_decode(window)
+    return _process_continue_decode_outputs(*out)
+'''
+
+
+class _RecordingPool:
+  """Inline stand-in for the post-processing pool; logs every submit."""
+
+  def __init__(self):
+    self.submitted = []
+    self.options = []
+
+  def submit(self, fn, request_output, **kwargs):
+    self.submitted.append(request_output.request_id)
+    self.options.append(kwargs)
+    future = concurrent.futures.Future()
+    future.set_result(fn(request_output, **kwargs))
+    return future
+
+
+def _finished_output(rid, finished):
+  """A RequestOutput stand-in whose one sample decodes to "t<rid><rid+1>"."""
+  out = mock.MagicMock()
+  out.request_id = rid
+  out.finished = finished
+  sample = mock.MagicMock()
+  sample.token_ids = [int(rid), int(rid) + 1]
+  sample.logprobs = None
+  out.outputs = [sample]
+  return out
+
+
+def _defer_flag(on):
+  """Sets TUNIX_DEFER_POSTPROCESS_SUBMIT inside the context."""
+  return mock.patch.dict(
+      os.environ, {"TUNIX_DEFER_POSTPROCESS_SUBMIT": "1" if on else "0"}
+  )
+
+
 class VllmSamplerConfigTest(absltest.TestCase):
   """Unit tests for VllmSampler config plumbing (no hardware required)."""
 
@@ -903,6 +964,281 @@ class VllmSamplerConfigTest(absltest.TestCase):
         )
     )
     self.assertFalse(override_sampler.args["language_model_only"])
+
+  def test_env_flag_has_one_parsing_rule(self):
+    name = "TUNIX_TEST_ENV_FLAG"
+    os.environ.pop(name, None)  # setUp restores the environment afterwards.
+    self.assertFalse(vllm_sampler._env_flag(name))
+    self.assertTrue(vllm_sampler._env_flag(name, default="1"))
+    for raw, want in (
+        ("", False),
+        (" ", False),
+        ("1", True),
+        ("TRUE", True),
+        (" true ", True),
+        ("0", False),
+        ("False", False),
+    ):
+      with self.subTest(raw=raw), mock.patch.dict(os.environ, {name: raw}):
+        self.assertIs(vllm_sampler._env_flag(name), want)
+    with mock.patch.dict(os.environ, {name: ""}):
+      self.assertTrue(vllm_sampler._env_flag(name, default="1"))
+    for raw in ("yes", "2", "on"):
+      with self.subTest(raw=raw), mock.patch.dict(os.environ, {name: raw}):
+        with self.assertRaisesRegex(ValueError, f"{name}='{raw}'"):
+          vllm_sampler._env_flag(name)
+
+  def _runner_variant(self, *edits):
+    source = _FAKE_RUNNER
+    for old, new in edits:
+      self.assertEqual(source.count(old), 1, old)
+      source = source.replace(old, new)
+    return source
+
+  def _fake_runner(self, source=_FAKE_RUNNER):
+    """Imports `source` as tpu_inference.runner.tpu_runner; fresh hook state."""
+    path = os.path.join(self.create_tempdir().full_path, "tpu_runner.py")
+    with open(path, "w") as f:
+      f.write(source)
+    name = "tpu_inference.runner.tpu_runner"
+    spec = importlib.util.spec_from_file_location(name, path)
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+    self.enter_context(mock.patch.dict(sys.modules, {name: runner}))
+    self.enter_context(
+        mock.patch.object(
+            vllm_sampler, "_DEFER", vllm_sampler._DeferHookState()
+        )
+    )
+    return runner
+
+  def _overlap_sampler(self):
+    sampler = self._make_sampler(
+        vllm_sampler.VllmConfig(init_with_random_weights=False)
+    )
+    sampler.tokenizer = mock.MagicMock()
+    sampler.tokenizer.decode.side_effect = lambda ids: "t" + "".join(
+        str(i) for i in ids
+    )
+    sampler.llm.request_counter = itertools.count()
+    sampler._postprocess_pool = _RecordingPool()
+    return sampler, sampler._postprocess_pool
+
+  def _run_two_requests(self, sampler, runner=None, defer=True, **options):
+    """Request "1" finishes in the first step, "0" in the second.
+
+    With `runner`, each step goes through its continue-decode path (dispatch,
+    then the hooked function) before returning, like a continue-decode step;
+    without, steps never reach the hook.
+
+    Args:
+      sampler: From `_overlap_sampler`.
+      runner: From `_fake_runner`, or None.
+      defer: TUNIX_DEFER_POSTPROCESS_SUBMIT for the call.
+      **options: Per-call logprob options for `_generate_offline`.
+
+    Returns:
+      The outputs, and per step the request ids submitted when the step
+      started and when it returned.
+    """
+    pool = sampler._postprocess_pool
+    steps = iter([
+        [_finished_output("1", True), _finished_output("0", False)],
+        [_finished_output("0", True)],
+    ])
+    started, returned = [], []
+
+    def step():
+      started.append(list(pool.submitted))
+      if runner is not None:
+        runner.TPUModelRunner()._execute_continue_decode([7])
+      returned.append(list(pool.submitted))
+      return next(steps)
+
+    engine = sampler.llm.llm_engine
+    engine.has_unfinished_requests.side_effect = [True, True, False]
+    engine.step.side_effect = step
+    prompts = [{"prompt_token_ids": [1]}, {"prompt_token_ids": [2]}]
+    with _defer_flag(defer):
+      outputs = sampler._generate_offline(
+          prompts, vllm_sampler.SamplingParams(), **options
+      )
+    return outputs, started, returned
+
+  def test_runner_check_accepts_the_expected_structure(self):
+    check = vllm_sampler._check_continue_decode_runner
+    self.assertEqual(check(_FAKE_RUNNER), [])
+    # jax.device_get, and continue_decode called through its module.
+    self.assertEqual(
+        check(
+            self._runner_variant(
+                ("common_utils.safe_device_get(", "jax.device_get("),
+                (
+                    "out = continue_decode(window)",
+                    "out = decode_loop.continue_decode(window)",
+                ),
+            )
+        ),
+        [],
+    )
+
+  def test_runner_check_reports_an_inert_hook(self):
+    for name, edits, problem in (
+        (
+            "missing_device_get",
+            [(
+                "tokens, steps = common_utils.safe_device_get((tokens, steps))",
+                "tokens, steps = list(tokens), steps",
+            )],
+            "is not a device_get",
+        ),
+        (
+            "swapped_order",
+            [(
+                "out = continue_decode(window)\n"
+                "    return _process_continue_decode_outputs(*out)",
+                "out = _process_continue_decode_outputs(window, 1)\n"
+                "    return continue_decode(out)",
+            )],
+            "call order",
+        ),
+        (
+            "hooked_function_called_through_self",
+            [(
+                "return _process_continue_decode_outputs(",
+                "return self._process_continue_decode_outputs(",
+            )],
+            "through an attribute",
+        ),
+        (
+            "no_module_level_function",
+            [(
+                "def _process_continue_decode_outputs(",
+                "def _process_outputs(",
+            )],
+            "module-level _process_continue_decode_outputs x0",
+        ),
+        (
+            "no_execute_continue_decode",
+            [("def _execute_continue_decode(", "def _execute_model(")],
+            "_execute_continue_decode x0",
+        ),
+    ):
+      with self.subTest(name):
+        problems = vllm_sampler._check_continue_decode_runner(
+            self._runner_variant(*edits)
+        )
+        self.assertTrue(any(problem in p for p in problems), problems)
+
+  def test_defer_hook_refuses_a_mismatched_runner(self):
+    runner = self._fake_runner(
+        self._runner_variant((
+            "return _process_continue_decode_outputs(",
+            "return self._process_continue_decode_outputs(",
+        ))
+    )
+    sampler, _ = self._overlap_sampler()
+    with _defer_flag(True), self.assertRaisesRegex(
+        RuntimeError, "through an attribute"
+    ):
+      sampler._generate_offline(
+          [{"prompt_token_ids": [1]}], vllm_sampler.SamplingParams()
+      )
+    sampler.llm.llm_engine.add_request.assert_not_called()
+    self.assertFalse(
+        hasattr(runner._process_continue_decode_outputs, "__wrapped__")
+    )
+    self.assertEqual(vllm_sampler._DEFER.hooked, "")
+
+  def test_defer_hook_is_installed_once_by_concurrent_calls(self):
+    runner = self._fake_runner()
+    original = runner._process_continue_decode_outputs
+    barrier = threading.Barrier(8)
+
+    def install():
+      barrier.wait()
+      vllm_sampler._install_defer_hook()
+
+    with mock.patch.object(
+        vllm_sampler,
+        "_check_continue_decode_runner",
+        wraps=vllm_sampler._check_continue_decode_runner,
+    ) as check:
+      threads = [threading.Thread(target=install) for _ in range(8)]
+      for thread in threads:
+        thread.start()
+      for thread in threads:
+        thread.join()
+    check.assert_called_once()
+    self.assertIs(runner._process_continue_decode_outputs.__wrapped__, original)
+    self.assertEqual(vllm_sampler._DEFER.hooked, runner.__file__)
+
+  def test_deferred_submits_decode_each_finished_request_once(self):
+    # The overlap test above with TUNIX_DEFER_POSTPROCESS_SUBMIT=1.
+    runner = self._fake_runner()
+    sampler, pool = self._overlap_sampler()
+    outputs, started, returned = self._run_two_requests(sampler, runner)
+
+    # "1" finished in step 1 and was submitted by step 2's hook, after the
+    # next window was dispatched; "0" finished last and went in the final
+    # flush. Each was submitted once.
+    self.assertEqual(started, [[], []])
+    self.assertEqual(returned, [[], ["1"]])
+    self.assertEqual(pool.submitted, ["1", "0"])
+    self.assertIsNone(vllm_sampler._DEFER.flush)
+    sampler.llm.generate.assert_not_called()
+    self.assertEqual([o.request_id for o in outputs], ["0", "1"])
+    texts, logprobs, tokens, _, _, _ = sampler.detokenize(
+        ["a", "b"], outputs
+    )
+    self.assertEqual(texts, [["t01", "t12"]])
+    self.assertEqual(logprobs, [[[], []]])
+    self.assertEqual([t.tolist() for t in tokens[0]], [[0, 1], [1, 2]])
+    # Decoded once each, in the pool, not again in detokenize.
+    self.assertEqual(sampler.tokenizer.decode.call_count, 2)
+
+  def test_deferred_submits_flush_after_a_step_without_the_hook(self):
+    self._fake_runner()
+    sampler, pool = self._overlap_sampler()
+    outputs, started, _ = self._run_two_requests(sampler)
+    plain, plain_pool = self._overlap_sampler()
+    plain_outputs, plain_started, _ = self._run_two_requests(
+        plain, defer=False
+    )
+
+    # No step reached the hook, so "1" was submitted when step 1 returned,
+    # exactly as with the deferral off.
+    self.assertEqual(started, [[], ["1"]])
+    self.assertEqual(started, plain_started)
+    self.assertEqual(pool.submitted, plain_pool.submitted)
+    self.assertEqual(pool.submitted, ["1", "0"])
+    self.assertEqual(
+        sampler.detokenize(["a", "b"], outputs)[0],
+        plain.detokenize(["a", "b"], plain_outputs)[0],
+    )
+
+  def test_deferred_submits_forward_the_call_logprob_options(self):
+    runner = self._fake_runner()
+    sampler, pool = self._overlap_sampler()
+    options = {"return_logprobs": False, "num_logprobs": 1}
+    self._run_two_requests(sampler, runner, **options)
+    # Deferred requests decode with the same per-call options as direct ones.
+    self.assertEqual(pool.submitted, ["1", "0"])
+    self.assertEqual(pool.options, [options, options])
+
+  def test_deferral_belongs_to_one_call_at_a_time(self):
+    runner = self._fake_runner()
+    sampler, pool = self._overlap_sampler()
+    vllm_sampler._install_defer_hook()
+    other_call = mock.Mock()
+    vllm_sampler._DEFER.flush = other_call  # Another call owns the hook.
+    _, started, _ = self._run_two_requests(sampler, runner)
+
+    # This call submits right away; the hook keeps serving the owner.
+    self.assertEqual(started, [[], ["1"]])
+    self.assertEqual(pool.submitted, ["1", "0"])
+    self.assertEqual(other_call.call_count, 2)
+    self.assertIs(vllm_sampler._DEFER.flush, other_call)
 
 
 class VllmSamplerTokenInputTest(absltest.TestCase):
