@@ -3537,5 +3537,289 @@ class MergeAdditionalConfigTest(absltest.TestCase):
     )
 
 
+class _FlatLogprobs:
+  """Test double of vLLM's `FlatLogprobs`, filled the way vLLM fills it.
+
+  For each sampled position vLLM appends the sampled token and then the top-k
+  tokens to flat lists (`FlatLogprobs.append_fast`), and indexing a position
+  rebuilds its `{token_id: Logprob}` dict, so a token listed twice keeps its
+  later entry. `offset` unreferenced entries come before the first position.
+  """
+
+  def __init__(self, positions=(), offset=0):
+    self.start_indices, self.end_indices = [], []
+    self.token_ids = [-1] * offset
+    self.logprobs = [0.0] * offset
+    self.ranks = [None] * offset
+    self.decoded_tokens = [None] * offset
+    for entries in positions:
+      self.start_indices.append(len(self.logprobs))
+      for token_id, logprob in entries:
+        self.token_ids.append(token_id)
+        self.logprobs.append(logprob)
+        self.ranks.append(None)
+        self.decoded_tokens.append(None)
+      self.end_indices.append(len(self.logprobs))
+
+  def __len__(self):
+    return len(self.start_indices)
+
+  def __getitem__(self, position):
+    start, end = self.start_indices[position], self.end_indices[position]
+    return {
+        self.token_ids[i]: Logprob(
+            self.logprobs[i], self.ranks[i], self.decoded_tokens[i]
+        )
+        for i in range(start, end)
+    }
+
+  def __iter__(self):
+    for position in range(len(self)):
+      yield self[position]
+
+
+def _dict_logprobs(positions):
+  """The per-position dicts vLLM builds when flat_logprobs is off."""
+  return [{t: Logprob(lp) for t, lp in entries} for entries in positions]
+
+
+def _outcome(fn, *args, **kwargs):
+  """("ok", result) or ("raised", exception type) for fn(*args, **kwargs)."""
+  try:
+    return "ok", fn(*args, **kwargs)
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    return "raised", type(e)
+
+
+class FlatLogprobsTest(parameterized.TestCase):
+  """`get_logprobs_from_vllm_output(fast=True)` against the dict loop."""
+
+  def setUp(self):
+    super().setUp()
+    # A failed check switches the fast path off for the process; every test
+    # starts with it on and leaves the module state as it found it.
+    self.enter_context(
+        mock.patch.dict(utils._FAST_LOGPROBS_STATE, {"off": False})
+    )
+
+  def assert_fast_matches_dict_loop(self, tokens, positions, offset=0):
+    want = utils.get_logprobs_from_vllm_output(
+        tokens, _dict_logprobs(positions)
+    )
+    flat = _FlatLogprobs(positions, offset)
+    # The stock loop reads the same container through its per-position dicts.
+    self.assertEqual(utils.get_logprobs_from_vllm_output(tokens, flat), want)
+    # The fast reader takes the layout itself instead of falling back.
+    self.assertIsNotNone(utils._flat_logprobs_fast(tokens, flat))
+    for check in (False, True):
+      got = utils.get_logprobs_from_vllm_output(
+          tokens, flat, fast=True, check=check
+      )
+      np.testing.assert_array_equal(
+          np.asarray(got, np.float64).view(np.int64),
+          np.asarray(want, np.float64).view(np.int64),
+      )
+    self.assertFalse(utils._FAST_LOGPROBS_STATE["off"])
+    return want
+
+  def test_width_1(self):
+    # SamplingParams.logprobs=0: each position lists only the sampled token.
+    want = self.assert_fast_matches_dict_loop(
+        [5, 9, 5], [[(5, -0.5)], [(9, -1.5)], [(5, -0.25)]]
+    )
+    self.assertEqual(want, [-0.5, -1.5, -0.25])
+
+  def test_width_2_sampled_tokens_are_top_1(self):
+    # logprobs=1, greedy: every position lists its sampled token twice.
+    want = self.assert_fast_matches_dict_loop(
+        [5, 9], [[(5, -0.5), (5, -0.5)], [(9, -0.125), (9, -0.125)]]
+    )
+    self.assertEqual(want, [-0.5, -0.125])
+
+  def test_width_2_stochastic(self):
+    # logprobs=1, sampling: some sampled tokens are not the top-1 token.
+    want = self.assert_fast_matches_dict_loop(
+        [5, 9, 4],
+        [
+            [(5, -1.25), (2, -0.25)],
+            [(9, -0.5), (9, -0.5)],
+            [(4, -2.0), (1, -0.5)],
+        ],
+    )
+    self.assertEqual(want, [-1.25, -0.5, -2.0])
+
+  def test_width_3(self):
+    # logprobs=2: the sampled token can repeat as the top-1 or top-2 token.
+    want = self.assert_fast_matches_dict_loop(
+        [5, 9, 4],
+        [
+            [(5, -0.5), (5, -0.5), (2, -1.0)],
+            [(9, -1.25), (1, -0.25), (9, -1.25)],
+            [(4, -2.0), (1, -0.5), (3, -0.75)],
+        ],
+    )
+    self.assertEqual(want, [-0.5, -1.25, -2.0])
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="at_every_position",
+          tokens=[5, 7],
+          positions=[[(5, -0.5), (5, -0.375)], [(7, -1.0), (7, -0.25)]],
+          want=[-0.375, -0.25],
+      ),
+      dict(
+          testcase_name="at_some_positions",
+          tokens=[5, 3],
+          positions=[[(5, -0.5), (5, -0.375)], [(3, -0.75), (8, -0.125)]],
+          want=[-0.375, -0.75],
+      ),
+  )
+  def test_repeated_token_keeps_the_later_entry(self, tokens, positions, want):
+    # vLLM lists both copies with one value; distinct values pin the order.
+    self.assertEqual(
+        self.assert_fast_matches_dict_loop(tokens, positions), want
+    )
+
+  @parameterized.parameters(1, 2)
+  def test_first_position_after_unreferenced_entries(self, width):
+    positions = [
+        [(5, -0.5), (6, -0.25)][:width],
+        [(9, -1.5), (9, -1.5)][:width],
+    ]
+    self.assert_fast_matches_dict_loop([5, 9], positions, offset=3)
+
+  def test_seeded_random_layouts(self):
+    rng = np.random.default_rng(0)
+    for _ in range(200):
+      width = int(rng.integers(1, 4))
+      tokens = rng.integers(0, 6, size=int(rng.integers(1, 12))).tolist()
+      positions = []
+      for token in tokens:
+        lp = float(-rng.random())
+        entries = [(token, lp)]
+        for _ in range(width - 1):
+          top = token if rng.random() < 0.5 else int(rng.integers(0, 6))
+          entries.append((top, lp if top == token else float(-rng.random())))
+        positions.append(entries)
+      self.assert_fast_matches_dict_loop(
+          tokens, positions, offset=int(rng.integers(0, 3))
+      )
+
+  @parameterized.named_parameters(
+      ("no_tokens", [], _FlatLogprobs()),
+      ("no_positions", [7], _FlatLogprobs()),
+      ("none", [7], None),
+      ("dicts", [5], [{5: Logprob(-0.5)}]),
+  )
+  def test_inputs_the_fast_reader_leaves_to_the_dict_loop(
+      self, tokens, logprobs
+  ):
+    self.assertIsNone(utils._flat_logprobs_fast(tokens, logprobs))
+    self.assertEqual(
+        utils.get_logprobs_from_vllm_output(tokens, logprobs, fast=True),
+        utils.get_logprobs_from_vllm_output(tokens, logprobs),
+    )
+
+  @parameterized.parameters(1, 2)
+  def test_missing_sampled_token_falls_back_and_raises(self, width):
+    positions = [
+        [(5, -0.5), (5, -0.5)][:width],
+        [(4, -0.25), (6, -1.0)][:width],
+    ]
+    flat = _FlatLogprobs(positions)
+    self.assertIsNone(utils._flat_logprobs_fast([5, 9], flat))
+    with self.assertRaises(ValueError):
+      utils.get_logprobs_from_vllm_output([5, 9], flat, fast=True)
+
+  def test_irregular_layouts_fall_back_to_the_dict_loop(self):
+    def two_by_two():
+      return _FlatLogprobs([[(1, -0.5), (2, -1.0)], [(3, -0.25), (4, -2.0)]])
+
+    gap = two_by_two()  # Position 1 starts one entry late.
+    gap.start_indices[1] += 1
+    gap.end_indices[1] += 1
+    for values in (gap.token_ids, gap.logprobs, gap.ranks, gap.decoded_tokens):
+      values.append(values[-1])
+    short = two_by_two()
+    short.logprobs.pop()
+    tuples = two_by_two()
+    tuples.token_ids = tuple(tuples.token_ids)
+    layouts = {
+        "mixed_widths": (
+            [1, 3],
+            _FlatLogprobs([[(1, -0.5)], [(3, -0.25), (4, -2.0)]]),
+        ),
+        "empty_position": ([1, 3], _FlatLogprobs([[], [(3, -0.25)]])),
+        "gap": ([1, 4], gap),
+        # The sampled tokens sit last in each block, the fast slice's case.
+        "short_logprobs": ([2, 4], short),
+        "more_positions_than_tokens": ([1], two_by_two()),
+        "tuple_fields": ([1, 3], tuples),
+    }
+    for name, (tokens, flat) in layouts.items():
+      with self.subTest(name):
+        self.assertIsNone(utils._flat_logprobs_fast(tokens, flat))
+        self.assertEqual(
+            _outcome(
+                utils.get_logprobs_from_vllm_output, tokens, flat, fast=True
+            ),
+            _outcome(utils.get_logprobs_from_vllm_output, tokens, flat),
+        )
+    self.assertFalse(utils._FAST_LOGPROBS_STATE["off"])
+
+  def test_forced_mismatch_returns_the_dict_loop_and_turns_fast_off(self):
+    flat = _FlatLogprobs([[(5, -0.5), (6, -0.25)], [(9, -1.5), (9, -1.5)]])
+    read = utils._flat_logprobs_fast
+
+    def read_off_by_one(tokens, logprobs):
+      return [value - 1.0 for value in read(tokens, logprobs)]
+
+    with mock.patch.object(
+        utils, "_flat_logprobs_fast", side_effect=read_off_by_one
+    ):
+      # Unchecked calls return what the fast reader returns.
+      self.assertEqual(
+          utils.get_logprobs_from_vllm_output([5, 9], flat, fast=True),
+          [-1.5, -2.5],
+      )
+      # A checked call compares, returns the dict loop's values and switches
+      # the fast path off.
+      self.assertEqual(
+          utils.get_logprobs_from_vllm_output(
+              [5, 9], flat, fast=True, check=True
+          ),
+          [-0.5, -1.5],
+      )
+    self.assertTrue(utils._FAST_LOGPROBS_STATE["off"])
+    with mock.patch.object(
+        utils, "_flat_logprobs_fast", wraps=read
+    ) as reader:
+      self.assertEqual(
+          utils.get_logprobs_from_vllm_output([5, 9], flat, fast=True),
+          [-0.5, -1.5],
+      )
+    reader.assert_not_called()
+
+  def test_check_catches_dicts_that_disagree_with_the_flat_lists(self):
+    class Skewed(_FlatLogprobs):
+
+      def __getitem__(self, position):
+        entries = super().__getitem__(position)
+        return {t: Logprob(lp.logprob / 2) for t, lp in entries.items()}
+
+    flat = Skewed([[(5, -0.5)], [(9, -1.5)]])
+    self.assertEqual(
+        utils.get_logprobs_from_vllm_output([5, 9], flat, fast=True),
+        [-0.5, -1.5],
+    )
+    self.assertEqual(
+        utils.get_logprobs_from_vllm_output(
+            [5, 9], flat, fast=True, check=True
+        ),
+        [-0.25, -0.75],
+    )
+    self.assertTrue(utils._FAST_LOGPROBS_STATE["off"])
+
+
 if __name__ == "__main__":
   absltest.main()

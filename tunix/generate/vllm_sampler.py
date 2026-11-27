@@ -46,6 +46,32 @@ from vllm.sampling_params import SamplingParams
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
 
+_ENV_BOOLS = {"0": False, "1": True, "false": False, "true": True}
+
+
+def _env_flag(name: str, default: str = "0") -> bool:
+  """Reads environment variable `name` as a bool.
+
+  Unset or empty means `default`; 0, 1, true and false are accepted in any
+  case.
+
+  Args:
+    name: The environment variable.
+    default: The value used when `name` is unset or empty.
+
+  Returns:
+    The parsed value.
+
+  Raises:
+    ValueError: `name` holds anything else.
+  """
+  raw = os.environ.get(name, "")
+  value = _ENV_BOOLS.get((raw.strip() or default).lower())
+  if value is None:
+    raise ValueError(f"{name}={raw!r}: expected 0, 1, true or false.")
+  return value
+
+
 @dataclasses.dataclass
 class VllmConfig:
   """Vllm rollout configuations."""
@@ -191,6 +217,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     )
     self._postprocess_pool_lock = threading.Lock()
     self._thread_local = threading.local()
+    # TUNIX_FAST_LOGPROBS: calls so far, counted under the lock by
+    # `_request_flat_logprobs`.
+    self._fast_logprobs_lock = threading.Lock()
+    self._fast_logprobs_calls = 0
     self._driver: VLLMInProcessDriver | None = None
     self.llm: LLM | None = None
     self._kv_cache_deleted = False
@@ -654,6 +684,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       *,
       return_logprobs: bool | None = None,
       num_logprobs: int | None = None,
+      check_fast_logprobs: bool = False,
   ) -> Tuple[
       List[List[str]],
       List[List[List[float] | None]],
@@ -696,6 +727,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
               single_output,
               return_logprobs=return_logprobs,
               num_logprobs=num_logprobs,
+              check_fast_logprobs=check_fast_logprobs,
           )
         decoded_outputs[idx].append(text)
         out_logprobs[idx].append(logprobs)
@@ -726,6 +758,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       *,
       return_logprobs: bool | None = None,
       num_logprobs: int | None = None,
+      check_fast_logprobs: bool = False,
   ) -> Tuple[str, List[float] | None, Tuple[np.ndarray, np.ndarray] | None]:
     """Text, per-token logprobs, and optional top-k of one sampled completion."""
     eff_return, eff_num = self._resolve_logprob_options(
@@ -734,7 +767,12 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     token_ids = list(single_output.token_ids)
     text = self.tokenizer.decode(single_output.token_ids)
     logprobs = (
-        utils.get_logprobs_from_vllm_output(token_ids, single_output.logprobs)
+        utils.get_logprobs_from_vllm_output(
+            token_ids,
+            single_output.logprobs,
+            fast=_env_flag("TUNIX_FAST_LOGPROBS"),
+            check=check_fast_logprobs,
+        )
         if eff_return or single_output.logprobs is None
         else None
     )
@@ -758,13 +796,17 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       *,
       return_logprobs: bool | None = None,
       num_logprobs: int | None = None,
+      check_fast_logprobs: bool = False,
   ) -> List[
       Tuple[str, List[float] | None, Tuple[np.ndarray, np.ndarray] | None]
   ]:
     """Decodes every sample of a finished request (runs in the thread pool)."""
     return [
         self._decode_single_output(
-            o, return_logprobs=return_logprobs, num_logprobs=num_logprobs
+            o,
+            return_logprobs=return_logprobs,
+            num_logprobs=num_logprobs,
+            check_fast_logprobs=check_fast_logprobs,
         )
         for o in request_output.outputs
     ]
@@ -785,6 +827,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       *,
       return_logprobs: bool | None = None,
       num_logprobs: int | None = None,
+      check_fast_logprobs: bool = False,
   ) -> None:
     """Server mode: decodes each request as its driver future resolves."""
     pool = self._get_postprocess_pool()
@@ -798,6 +841,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
             result,
             return_logprobs=return_logprobs,
             num_logprobs=num_logprobs,
+            check_fast_logprobs=check_fast_logprobs,
         )
     self._postprocessed = {rid: f.result() for rid, f in pending.items()}
 
@@ -810,6 +854,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       *,
       return_logprobs: bool | None = None,
       num_logprobs: int | None = None,
+      check_fast_logprobs: bool = False,
   ) -> List[RequestOutput]:
     """Offline generation; overlaps post-processing with decode when enabled.
 
@@ -857,6 +902,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
                 output,
                 return_logprobs=return_logprobs,
                 num_logprobs=num_logprobs,
+                check_fast_logprobs=check_fast_logprobs,
             )
             progress.update(1)
     finally:
@@ -874,6 +920,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       *,
       return_logprobs: bool | None = None,
       num_logprobs: int | None = None,
+      check_fast_logprobs: bool = False,
   ) -> List[RequestOutput]:
     """Generate the response in server mode."""
     if self._driver is None:
@@ -900,6 +947,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           futures,
           return_logprobs=return_logprobs,
           num_logprobs=num_logprobs,
+          check_fast_logprobs=check_fast_logprobs,
       )
 
     outputs: List[RequestOutput] = []
@@ -911,6 +959,45 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         )
       outputs.append(result)
     return outputs
+
+  def _request_flat_logprobs(
+      self, sampling_params: SamplingParams, extracts_logprobs: bool
+  ) -> bool:
+    """TUNIX_FAST_LOGPROBS=1: ask vLLM for `FlatLogprobs` containers.
+
+    FlatLogprobs keeps a request's logprobs in a few flat lists instead of one
+    dict per position (far fewer Python objects), and lets
+    `utils.get_logprobs_from_vllm_output` read the sampled-token values with
+    slicing. The first TUNIX_FAST_LOGPROBS_CHECK calls (default 1) that
+    extract those values also verify every extraction against the
+    per-position loop.
+
+    Args:
+      sampling_params: The request's sampling params (updated in place).
+      extracts_logprobs: Whether the call extracts the sampled tokens'
+        logprobs (its effective `return_logprobs`). Only such calls are
+        counted; the others are never checked and use up no check.
+
+    Returns:
+      Whether this call verifies its extractions. The calls are counted under
+      a lock and the decision is passed down to `_decode_single_output`, so
+      concurrent calls cannot skip or overwrite each other's check.
+    """
+    supported = hasattr(sampling_params, "flat_logprobs")
+    if supported:
+      sampling_params.flat_logprobs = True
+    if not extracts_logprobs:
+      return False
+    checks = int(os.environ.get("TUNIX_FAST_LOGPROBS_CHECK", "1") or "0")
+    with self._fast_logprobs_lock:
+      self._fast_logprobs_calls += 1
+      calls = self._fast_logprobs_calls
+    if not supported and calls == 1:
+      logging.warning(
+          "TUNIX_FAST_LOGPROBS: this vLLM has no SamplingParams.flat_logprobs;"
+          " logprobs stay per-position dicts (stock extraction)."
+      )
+    return calls <= checks
 
   def _eos_token_ids(self) -> List[int]:
     """Returns the token ids that terminate a generation.
@@ -984,6 +1071,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       )
     raw_prompt_start = None
     raw_cache_salt = None
+    check_fast_logprobs = False
     if beam_size is not None:
       sampling_params = BeamSearchParams(
           beam_width=beam_size,
@@ -1022,6 +1110,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       # at every turn boundary in the recorded sequence, biasing logp
       # recomputation against the model's actual sampling context.
       sampling_params.include_stop_str_in_output = True
+      if _env_flag("TUNIX_FAST_LOGPROBS"):
+        check_fast_logprobs = self._request_flat_logprobs(
+            sampling_params, eff_return_logprobs
+        )
 
       if top_p is not None:
         sampling_params.top_p = top_p
@@ -1144,6 +1236,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           target_sampling_params,
           return_logprobs=eff_return_logprobs,
           num_logprobs=eff_num_logprobs,
+          check_fast_logprobs=check_fast_logprobs,
       )
     else:
       outputs = self._generate_offline(
@@ -1151,6 +1244,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           target_sampling_params,
           return_logprobs=eff_return_logprobs,
           num_logprobs=eff_num_logprobs,
+          check_fast_logprobs=check_fast_logprobs,
       )
     if exact_input:
       utils.check_prompt_echo(prompt_ids, outputs, backend_name="vLLM")
@@ -1166,6 +1260,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         outputs,
         return_logprobs=eff_return_logprobs,
         num_logprobs=eff_num_logprobs,
+        check_fast_logprobs=check_fast_logprobs,
     )
     if eff_return_logprobs and (
         out_logprobs is None or out_logprobs[0] is None
