@@ -15,8 +15,11 @@
 """Simple utils used by RL algorithms."""
 
 from itertools import chain  # pylint: disable=g-importing-member
+import math
 import operator
-from typing import Any, Iterator, Mapping, Optional, Sequence
+import time
+from typing import Any, Callable, Iterator, Mapping, Optional, Sequence
+import zlib
 
 from absl import logging
 from flax import nnx
@@ -624,6 +627,583 @@ def pack_sequences(
 
   if buffered or received:
     raise ValueError("pack_sequences stream ended mid-mini-batch.")
+
+
+# ------------------------------------------------------------------------------
+# Per-host (multi-controller) sequence packing.
+#
+# Under the per-host learner (TUNIX_PER_HOST_LEARNER=1) every process packs its
+# own rollouts only. `pack_sequences` would then emit a data-dependent number of
+# chunks per process, and the processes would run different numbers of train
+# steps (mismatched collectives). `pack_sequences_per_host` packs a process's
+# whole mini-batch at once and agrees on the packed shape with one small
+# allgather, so every process runs the same number of identically shaped steps.
+# ------------------------------------------------------------------------------
+
+# Columns of the int32 header every process contributes to the allgather.
+_PH_ERR, _PH_ROWS, _PH_SEQS, _PH_TOKENS, _PH_LOSS_TOKENS, _PH_HOLES, _PH_SIG = (
+    range(7)
+)
+_PH_NUM_COLS = 7
+_PH_ERR_EXCEPTION = 1
+_PH_ERR_TOO_LONG = 2
+_PH_ERR_HOLES = 3
+_PH_ERR_NO_PROMPT = 4
+_PH_ERR_MASK_PAST_END = 5
+_PH_ERR_UNSUPPORTED = 6
+_PH_ERR_FIELDS = 7
+_PH_ERROR_NAMES = {
+    _PH_ERR_EXCEPTION: "unexpected error",
+    _PH_ERR_TOO_LONG: "sequence longer than max_seq_tokens_per_device",
+    _PH_ERR_HOLES: "pad-valued token inside a completion",
+    _PH_ERR_NO_PROMPT: "empty prompt",
+    _PH_ERR_MASK_PAST_END: "completion_mask set on padding",
+    _PH_ERR_UNSUPPORTED: "unsupported TrainExample content",
+    _PH_ERR_FIELDS: "sequences disagree on per-token fields",
+}
+
+
+class _PerHostPackError(Exception):
+  """A per-host packing failure, reported to every process as an error code."""
+
+  def __init__(self, code: int, detail: str):
+    super().__init__(f"{_PH_ERROR_NAMES[code]}: {detail}")
+    self.code = code
+
+
+def per_host_pack_unit(data_axis_size: int, leading_dim_factor: int) -> int:
+  """Smallest process-local row count that shards evenly over the data axis.
+
+  `sharding_utils.shard_input` builds the global batch from process-local rows
+  (`jax.make_array_from_process_local_data`) and falls back to a replicated
+  sharding unless `local_rows * leading_dim_factor` divides by the data axis
+  size (`leading_dim_factor` is the process count with
+  TUNIX_PER_HOST_SAFE_LOGPS=1, else 1). Replicated process-local rows would
+  silently train on the wrong data, so every packed chunk holds a multiple of
+  this many rows per process.
+
+  Args:
+    data_axis_size: Product of the actor-mesh sizes of `data_sharding_axis`.
+    leading_dim_factor: The factor `shard_input` applies to local rows.
+
+  Returns:
+    The row unit.
+  """
+  if data_axis_size <= 0 or leading_dim_factor <= 0:
+    raise ValueError(
+        f"data_axis_size={data_axis_size} and"
+        f" leading_dim_factor={leading_dim_factor} must be positive."
+    )
+  return data_axis_size // math.gcd(data_axis_size, leading_dim_factor)
+
+
+def per_host_pack_plan(
+    max_local_rows: int,
+    unit: int,
+    max_rows_per_shard: int = 0,
+    row_multiple: int = 1,
+) -> tuple[int, int]:
+  """Returns `(num_chunks, local_rows_per_chunk)` for one packed mini-batch.
+
+  Every process calls this with the same allgathered `max_local_rows`, so every
+  process derives the same plan.
+
+  Args:
+    max_local_rows: The most packed rows any process needs.
+    unit: Row unit from `per_host_pack_unit`.
+    max_rows_per_shard: If > 0, the most rows per data shard
+      (`local_rows_per_chunk // unit`) in one train step; the mini-batch is then
+      split into equal chunks whose gradients are accumulated. 0 = one step.
+    row_multiple: Rounds the rows per data shard up to a multiple of this, so
+      fewer distinct shapes are compiled. Must divide `max_rows_per_shard`.
+
+  Returns:
+    The number of train steps and the process-local rows of each.
+  """
+  if unit <= 0 or max_local_rows < 0:
+    raise ValueError(
+        f"per_host_pack_plan: unit={unit} must be > 0 and"
+        f" max_local_rows={max_local_rows} >= 0."
+    )
+  if max_rows_per_shard < 0 or row_multiple <= 0:
+    raise ValueError(
+        f"per_host_pack_plan: max_rows_per_shard={max_rows_per_shard} must be"
+        f" >= 0 and row_multiple={row_multiple} > 0."
+    )
+  if max_rows_per_shard and max_rows_per_shard % row_multiple:
+    raise ValueError(
+        f"per_host_pack_plan: row_multiple={row_multiple} must divide"
+        f" max_rows_per_shard={max_rows_per_shard}."
+    )
+  rows_per_shard = max(1, _ceildiv(max_local_rows, unit))
+  num_chunks = (
+      _ceildiv(rows_per_shard, max_rows_per_shard) if max_rows_per_shard else 1
+  )
+  chunk_rows = _ceildiv(rows_per_shard, num_chunks)
+  chunk_rows = _ceildiv(chunk_rows, row_multiple) * row_multiple
+  return num_chunks, unit * chunk_rows
+
+
+def _host_array(x: Any) -> np.ndarray:
+  """Process-local host copy of a TrainExample leaf."""
+  if isinstance(x, jax.Array):
+    if not x.is_fully_addressable:
+      # Never device_get a global array here: the other processes are not in
+      # the same call, so the transfer would hang.
+      raise _PerHostPackError(
+          _PH_ERR_UNSUPPORTED, "a TrainExample leaf is a global array"
+      )
+    x = jax.device_get(x)
+  return np.asarray(x)
+
+
+def train_example_to_exact_pack_items(
+    example: common.TrainExample, pad_id: int
+) -> tuple[list[packing.PackItem], int]:
+  """Unpads a TrainExample into PackItems whose packed loss is the unpacked one.
+
+  The unpacked forward attends to exactly the tokens that are not `pad_id`
+  (`common.process_ids`), while a packed segment attends to every token it
+  holds. So here a completion ends at its last non-pad token (or follows
+  `completion_attention_mask` when the example has one): loss-mask zeros before
+  that point (e.g. rejected tokens) stay in the segment as context, as they do
+  unpacked. A pad-valued token before that point (a "hole") has no packed
+  equivalent; holes are counted so that the caller can refuse to pack.
+
+  Args:
+    example: A process-local TrainExample (left-padded prompts, right-padded
+      completions).
+    pad_id: The rollout pad id.
+
+  Returns:
+    `(items, num_holes)`.
+
+  Raises:
+    _PerHostPackError: if the example cannot be packed exactly.
+  """
+  if example.routed_experts is not None:
+    raise _PerHostPackError(_PH_ERR_UNSUPPORTED, "routed_experts")
+  if (
+      example.old_topk_token_ids is not None
+      or example.old_topk_logps is not None
+  ):
+    # Score Centering's `[B, C, K]` sampler top-k: packed rows do not carry it.
+    raise _PerHostPackError(
+        _PH_ERR_UNSUPPORTED, "old_topk_token_ids / old_topk_logps"
+    )
+  prompt_ids = _host_array(example.prompt_ids)
+  prompt_mask = _host_array(example.prompt_mask).astype(bool)
+  completion_ids = _host_array(example.completion_ids)
+  completion_mask = _host_array(example.completion_mask)
+  # Mirror `common.process_ids`: with an explicit completion_attention_mask the
+  # forward attends to prompt_mask | completion_attention_mask, else to every
+  # token that is not `pad_id`.
+  valid = getattr(example, "completion_attention_mask", None)
+  if isinstance(valid, (jax.Array, np.ndarray)):
+    valid = _host_array(valid).astype(bool)
+    prompt_valid = prompt_mask
+  else:
+    valid = completion_ids != pad_id
+    prompt_valid = prompt_ids != pad_id
+  advantages = _host_array(example.advantages).astype(np.float32)
+  per_token = {
+      name: _host_array(getattr(example, name)).astype(np.float32)
+      for name in packing.PER_TOKEN_FIELDS
+      if getattr(example, name, None) is not None
+  }
+  versions = getattr(example, "policy_version", None)
+  if versions is not None:
+    versions = _host_array(versions).reshape(-1)
+  positions = np.arange(completion_ids.shape[1])
+  lengths = np.where(valid, positions[None, :] + 1, 0).max(axis=1, initial=0)
+  inside = positions[None, :] < lengths[:, None]
+  holes = int(np.sum(inside & ~valid))
+  if np.any((completion_mask != 0) & ~inside):
+    raise _PerHostPackError(
+        _PH_ERR_MASK_PAST_END, "a loss-mask token lies past the last valid one"
+    )
+  items = []
+  for i in range(completion_ids.shape[0]):
+    prompt = prompt_ids[i][prompt_valid[i]]
+    if not prompt.size:
+      # Its first completion token would be scored from the previous segment.
+      raise _PerHostPackError(_PH_ERR_NO_PROMPT, f"row {i}")
+    n = int(lengths[i])
+    items.append(
+        packing.PackItem(
+            prompt_ids=prompt.astype(np.int32),
+            completion_ids=completion_ids[i, :n].astype(np.int32),
+            completion_mask=completion_mask[i, :n].astype(np.float32),
+            advantages=(
+                advantages[i, :n]
+                if advantages.ndim == 2
+                else np.full((n,), advantages[i], np.float32)
+            ),
+            per_token={name: arr[i, :n] for name, arr in per_token.items()},
+            policy_version=None if versions is None else versions[i : i + 1],
+        )
+    )
+  return items, holes
+
+
+def _process_allgather_rows(row: np.ndarray) -> np.ndarray:
+  """Gathers one int32 row from every JAX process, in process order.
+
+  A collective: every process must call it at the same point of the program,
+  from the thread that issues the other multi-process computations.
+
+  Args:
+    row: This process's 1-D int32 row.
+
+  Returns:
+    `[process_count, len(row)]`.
+  """
+  from jax.experimental import multihost_utils  # pylint: disable=g-import-not-at-top
+
+  row = np.asarray(row, dtype=np.int32)
+  with jax.transfer_guard("allow"):
+    gathered = multihost_utils.process_allgather(row)
+  return np.asarray(gathered).reshape(-1, row.shape[0])
+
+
+def _pad_rows(arr: np.ndarray, rows: int, fill: Any = 0) -> np.ndarray:
+  """Appends `fill` rows to `arr` up to `rows` rows."""
+  extra = rows - arr.shape[0]
+  if extra < 0:
+    raise ValueError(f"_pad_rows: {arr.shape[0]} rows > {rows}.")
+  if not extra:
+    return arr
+  pad = np.full((extra,) + arr.shape[1:], fill, dtype=arr.dtype)
+  return np.concatenate([arr, pad], axis=0)
+
+
+def _pack_mini_batch_per_host(
+    examples: Sequence[common.TrainExample],
+    *,
+    budget: int,
+    pad_id: int,
+    unit: int,
+    max_segments: int,
+    max_rows_per_shard: int,
+    row_multiple: int,
+    allgather_fn: Callable[[np.ndarray], np.ndarray],
+    process_index: int,
+    step: int,
+) -> list[common.TrainExample]:
+  """Packs one process-local mini-batch into the globally agreed chunks."""
+  t0 = time.perf_counter()
+  num_segments = max_segments + 1
+  example_cls: type[Any] = type(examples[0])
+  mask_dtype = np.dtype(np.float32)
+  applied = False
+  err, detail = 0, ""
+  items: list[packing.PackItem] = []
+  holes = 0
+  packed = None
+  signature = 0
+  # Phase A (local): every failure becomes an error code and nothing raises,
+  # so no process skips the allgather below and leaves the others hanging.
+  try:
+    mask_dtype = _host_array(examples[0].completion_mask).dtype
+    # Static flag of the unpacked examples; the packed chunks keep it.
+    applied = bool(examples[0].sampler_agreement_applied)
+    for example in examples:
+      example_items, example_holes = train_example_to_exact_pack_items(
+          example, pad_id
+      )
+      items.extend(example_items)
+      holes += example_holes
+    if holes:
+      raise _PerHostPackError(
+          _PH_ERR_HOLES,
+          f"{holes} token(s); the unpacked forward treats them as padding. Add"
+          " the pad id to the rollout stop tokens, or disable packing.",
+      )
+    longest = max((item.num_tokens for item in items), default=0)
+    if longest > budget:
+      raise _PerHostPackError(_PH_ERR_TOO_LONG, f"{longest} > {budget}")
+    try:
+      carried = packing.carried_per_token_fields(items)
+    except ValueError as e:
+      raise _PerHostPackError(_PH_ERR_FIELDS, str(e)) from e
+    bins, leftover = packing.fill_one_chunk(
+        items,
+        pack_size=max(1, len(items)),
+        budget=budget,
+        max_segments=max_segments,
+    )
+    if leftover:
+      raise _PerHostPackError(
+          _PH_ERR_EXCEPTION, f"{len(leftover)} sequence(s) fit no row"
+      )
+    packed = packing.pack_chunk(
+        [b for b in bins if b], budget=budget, pad_id=pad_id, carried=carried
+    )
+    signature = zlib.crc32(
+        repr((
+            budget,
+            num_segments,
+            tuple(carried),
+            mask_dtype.str,
+            example_cls.__name__,
+            applied,
+        )).encode()
+    ) & 0x7FFFFFFF
+  except _PerHostPackError as e:
+    err, detail = e.code, str(e)
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    err, detail = _PH_ERR_EXCEPTION, repr(e)[:300]
+  rows_used = 0 if packed is None else len(packed)
+  tokens = sum(item.num_tokens for item in items)
+  loss_tokens = int(
+      round(sum(float(item.completion_mask.sum()) for item in items))
+  )
+  header = np.array(
+      [err, rows_used, len(items), tokens, loss_tokens, holes, signature],
+      dtype=np.int32,
+  )
+  t1 = time.perf_counter()
+  table = np.asarray(allgather_fn(header), dtype=np.int64).reshape(
+      -1, _PH_NUM_COLS
+  )
+  t2 = time.perf_counter()
+  failed = np.flatnonzero(table[:, _PH_ERR])
+  if failed.size:
+    reasons = {
+        int(p): _PH_ERROR_NAMES.get(int(table[p, _PH_ERR]), "unknown")
+        for p in failed
+    }
+    logging.error(
+        "[TUNIX-PH-PACK] FAILED step=%d proc=%d local=%s header_table=%s",
+        step,
+        process_index,
+        detail or "ok",
+        table.tolist(),
+    )
+    raise RuntimeError(
+        f"pack_sequences_per_host: packing failed on process(es) {reasons};"
+        f" this process ({process_index}): {detail or 'ok'}. Every process"
+        " raises here."
+    )
+  if len(set(table[:, _PH_SIG].tolist())) != 1:
+    raise RuntimeError(
+        "pack_sequences_per_host: processes disagree on the packed layout"
+        f" (budget, segments, per-token fields, dtypes): {table.tolist()}"
+    )
+  assert packed is not None
+  # Phase B (local, deterministic): the same plan on every process.
+  num_chunks, rows_per_chunk = per_host_pack_plan(
+      int(table[:, _PH_ROWS].max()), unit, max_rows_per_shard, row_multiple
+  )
+  total_rows = num_chunks * rows_per_chunk
+  ids = _pad_rows(packed.ids, total_rows, fill=pad_id)
+  completion_mask = _pad_rows(packed.completion_mask, total_rows).astype(
+      mask_dtype
+  )
+  advantages = _pad_rows(packed.advantages, total_rows)
+  segment_ids = _pad_rows(packed.segment_ids, total_rows)
+  segment_positions = _pad_rows(packed.segment_positions, total_rows)
+  per_token = {
+      name: _pad_rows(arr, total_rows) for name, arr in packed.per_token.items()
+  }
+  versions = list(packed.policy_versions) + [None] * (total_rows - rows_used)
+  policy_version = None
+  if any(v is not None for v in versions):
+    fallback = next(v for v in versions if v is not None)
+    policy_version = np.concatenate([
+        np.asarray(v if v is not None else fallback).reshape(-1)
+        for v in versions
+    ])
+  chunks = []
+  for c in range(num_chunks):
+    rows = slice(c * rows_per_chunk, (c + 1) * rows_per_chunk)
+    kwargs: dict[str, Any] = dict(
+        prompt_ids=np.zeros((rows_per_chunk, 0), dtype=np.int32),
+        prompt_mask=np.zeros((rows_per_chunk, 0), dtype=mask_dtype),
+        completion_ids=ids[rows],
+        completion_mask=completion_mask[rows],
+        advantages=advantages[rows],
+        segment_ids=segment_ids[rows],
+        segment_positions=segment_positions[rows],
+        ref_per_token_logps=None,
+        old_per_token_logps=None,
+    )
+    for name, arr in per_token.items():
+      kwargs[name] = arr[rows]
+    if policy_version is not None:
+      kwargs["policy_version"] = policy_version[rows]
+    chunk = example_cls(**kwargs)
+    # A 0-d flag: `shard_input` replicates it on any mesh, and the trainer
+    # reads it with `.item()`.
+    chunks.append(
+        chunk.replace(
+            is_update_step=np.asarray(c == num_chunks - 1),
+            num_segments=num_segments,
+            sampler_agreement_applied=applied,
+        )
+    )
+  t3 = time.perf_counter()
+  nproc = table.shape[0]
+  glob_pad_frac = 1.0 - float(table[:, _PH_TOKENS].sum()) / float(
+      nproc * total_rows * budget
+  )
+  logging.info(
+      "[TUNIX-PH-PACK] step=%d proc=%d/%d seqs=%d rows_used=%d chunks=%d"
+      " rows_per_chunk=%d rows_per_shard=%d tokens=%d loss_tokens=%d"
+      " pad_frac=%.4f | glob_seqs=%d glob_rows_used=%d max_rows_used=%d"
+      " glob_rows=%d glob_pad_frac=%.4f | pack_ms=%.1f allgather_ms=%.1f"
+      " build_ms=%.1f",
+      step,
+      process_index,
+      nproc,
+      len(items),
+      rows_used,
+      num_chunks,
+      rows_per_chunk,
+      rows_per_chunk // unit,
+      tokens,
+      loss_tokens,
+      1.0 - tokens / float(total_rows * budget),
+      int(table[:, _PH_SEQS].sum()),
+      int(table[:, _PH_ROWS].sum()),
+      int(table[:, _PH_ROWS].max()),
+      nproc * total_rows,
+      glob_pad_frac,
+      (t1 - t0) * 1e3,
+      (t2 - t1) * 1e3,
+      (t3 - t2) * 1e3,
+  )
+  if process_index == 0:
+    # One summary line per step: K = packed rows per data shard the fullest
+    # process needs; steps = train steps (chunks) this mini-batch runs.
+    logging.info(
+        "Per-host packing: step=%d K=%d steps=%d rows_per_shard_per_step=%d"
+        " glob_rows_used=%d glob_rows=%d pad_frac=%.4f pack_ms=%.1f"
+        " allgather_ms=%.1f build_ms=%.1f",
+        step,
+        max(1, _ceildiv(int(table[:, _PH_ROWS].max()), unit)),
+        num_chunks,
+        rows_per_chunk // unit,
+        int(table[:, _PH_ROWS].sum()),
+        nproc * total_rows,
+        glob_pad_frac,
+        (t1 - t0) * 1e3,
+        (t2 - t1) * 1e3,
+        (t3 - t2) * 1e3,
+    )
+  return chunks
+
+
+def pack_sequences_per_host(
+    item_iterator: Iterator[Sequence[common.TrainExample]],
+    max_token_budget: int,
+    sequences_per_update: int,
+    *,
+    pad_id: int,
+    data_axis_size: int,
+    leading_dim_factor: int,
+    max_segments_per_packed_row: int | None = None,
+    max_rows_per_shard: int = 0,
+    row_multiple: int = 1,
+    allgather_fn: Callable[[np.ndarray], np.ndarray] | None = None,
+    process_index: int | None = None,
+    first_step: int = 0,
+) -> Iterator[list[common.TrainExample]]:
+  """Per-host learner counterpart of `pack_sequences`, with an agreed shape.
+
+  Under TUNIX_PER_HOST_LEARNER=1 each process packs only its own sequences, so
+  the number of packed rows differs between processes. Per mini-batch
+  (`sequences_per_update` process-local sequences) this:
+
+  1. Packs locally, FFD, into rows of `max_token_budget` tokens: one segment
+     per sequence, `[prompt | completion]`, positions restarting at 0.
+     Failures become an error code; nothing raises yet.
+  2. Allgathers one int32 header per process (a collective, once per
+     mini-batch). Any failure or disagreement raises the same error on every
+     process.
+  3. Derives the same plan on every process from the gathered table
+     (`per_host_pack_plan`): `num_chunks` train steps of `rows_per_chunk`
+     process-local rows each, a multiple of the row unit. Unused rows are dummy
+     rows (segment 0, every mask 0) that add nothing to the loss or to its
+     denominators. The last chunk has `is_update_step=True`.
+
+  Every process therefore runs the same number of train steps on identically
+  shaped and structured inputs, and one optimizer update still covers one
+  global mini-batch.
+
+  Args:
+    item_iterator: Stream of lists of process-local TrainExamples.
+    max_token_budget: Tokens per packed row (= max_seq_tokens_per_device).
+    sequences_per_update: Process-local sequences per mini-batch.
+    pad_id: The rollout pad id (marks invalid tokens, fills padding).
+    data_axis_size: Product of the actor-mesh sizes of `data_sharding_axis`.
+    leading_dim_factor: The factor `shard_input` applies to process-local rows
+      (the process count with TUNIX_PER_HOST_SAFE_LOGPS=1, else 1).
+    max_segments_per_packed_row: As in `pack_sequences`.
+    max_rows_per_shard: As in `per_host_pack_plan` (0 = one step).
+    row_multiple: As in `per_host_pack_plan`.
+    allgather_fn: Gathers a 1-D int32 row from every process into
+      `[process_count, len]`; defaults to `multihost_utils.process_allgather`.
+    process_index: This process's index, for logs; defaults to JAX's.
+    first_step: Step number of the first mini-batch, for logs.
+
+  Yields:
+    Single-element lists, each holding one packed TrainExample.
+
+  Raises:
+    ValueError: a mini-batch boundary inside an input example, or a stream
+      that ends mid-mini-batch.
+    RuntimeError: packing failed on any process (raised on every process).
+  """
+  if max_token_budget <= 0 or sequences_per_update <= 0:
+    raise ValueError(
+        f"max_token_budget={max_token_budget} and"
+        f" sequences_per_update={sequences_per_update} must be positive."
+    )
+  unit = per_host_pack_unit(data_axis_size, leading_dim_factor)
+  per_host_pack_plan(0, unit, max_rows_per_shard, row_multiple)  # Validates.
+  max_segments = packing.effective_max_segments(
+      max_token_budget, max_segments_per_packed_row
+  )
+  if max_segments <= 0:
+    raise ValueError(f"max_segments_per_packed_row={max_segments} must be > 0.")
+  if allgather_fn is None:
+    allgather_fn = _process_allgather_rows
+  if process_index is None:
+    process_index = jax.process_index()
+  buffered: list[common.TrainExample] = []
+  received = 0
+  step = first_step
+  for example_list in item_iterator:
+    for example in example_list:
+      buffered.append(example)
+      received += int(np.shape(example.completion_ids)[0])
+    if received > sequences_per_update:
+      raise ValueError(
+          "pack_sequences_per_host: mini-batch boundary falls inside an input"
+          f" example (received {received} sequences, expected"
+          f" {sequences_per_update} per update)."
+      )
+    if received < sequences_per_update:
+      continue
+    chunks = _pack_mini_batch_per_host(
+        buffered,
+        budget=max_token_budget,
+        pad_id=pad_id,
+        unit=unit,
+        max_segments=max_segments,
+        max_rows_per_shard=max_rows_per_shard,
+        row_multiple=row_multiple,
+        allgather_fn=allgather_fn,
+        process_index=process_index,
+        step=step,
+    )
+    buffered, received = [], 0
+    step += 1
+    for chunk in chunks:
+      yield [chunk]
+  if buffered or received:
+    raise ValueError("pack_sequences_per_host: stream ended mid-mini-batch.")
 
 
 VERIFY_UPDATE_PARAMS_KEY = "VERIFY_UPDATE_PARAMS_SRC_TO_TGT_MODULE_NAME"
