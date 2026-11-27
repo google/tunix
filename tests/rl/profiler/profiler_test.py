@@ -14,6 +14,7 @@
 
 """Tests for RL Profiler invocation bounding and lifecycle."""
 
+import threading
 from unittest import mock
 from absl.testing import absltest
 from tunix.common import configs
@@ -21,7 +22,25 @@ from tunix.common.datatypes import Role
 from tunix.rl.profiler import profiler
 
 
+def _join_stop_thread(p: profiler.RLProfiler) -> None:
+  # Read `_stop_thread` once: the stop thread clears it when it finishes.
+  stop_thread = p._stop_thread
+  if stop_thread is not None:
+    stop_thread.join(timeout=5.0)
+
+
 class RLProfilerTest(absltest.TestCase):
+
+  def _release_and_join_stop_thread(
+      self, p: profiler.RLProfiler, release: threading.Event
+  ) -> None:
+    """Asserts the stop thread is blocked, then releases and joins it."""
+    stop_thread = p._stop_thread
+    self.assertIsNotNone(stop_thread)
+    self.assertTrue(stop_thread.is_alive())
+    release.set()
+    stop_thread.join(timeout=5.0)
+    self.assertFalse(stop_thread.is_alive())
 
   def test_should_profile_window_matching(self):
     config = configs.RLProfileConfig(
@@ -158,17 +177,21 @@ class RLProfilerTest(absltest.TestCase):
     p = profiler.RLProfiler(config)
     p._profiler = mock.MagicMock()
     mock_future_output = [mock.MagicMock()]
+    release = threading.Event()
 
-    with mock.patch.object(profiler.jax, "block_until_ready") as mock_block:
+    with mock.patch.object(
+        profiler.jax,
+        "block_until_ready",
+        side_effect=lambda _: release.wait(5.0),
+    ) as mock_block:
       p.maybe_activate(Role.ACTOR.value)
       p.maybe_deactivate(Role.ACTOR.value, future_output=mock_future_output)
 
       # Invocation count advances immediately on caller thread.
       self.assertEqual(p._call_counts[Role.ACTOR.value], 1)
 
-      # Background thread was spawned.
-      self.assertIsNotNone(p._stop_thread)
-      p._stop_thread.join(timeout=5.0)
+      # Background thread was spawned and is blocked on the future output.
+      self._release_and_join_stop_thread(p, release)
 
       mock_block.assert_called_once_with(mock_future_output)
       p._profiler.stop.assert_called_once()
@@ -330,8 +353,7 @@ class RLProfilerTest(absltest.TestCase):
         session_id=f"{Role.ACTOR.value}_invocation_1"
     )
     p.maybe_deactivate(Role.ACTOR.value, future_output=mock_future_output)
-    if p._stop_thread is not None:
-      p._stop_thread.join(timeout=5.0)
+    _join_stop_thread(p)
     self.assertEqual(p._call_counts[Role.ACTOR.value], 2)
     self.assertEqual(p._profiler.stop.call_count, 1)
     self.assertFalse(p._is_active)
@@ -340,8 +362,7 @@ class RLProfilerTest(absltest.TestCase):
     p.maybe_activate(Role.ACTOR.value)
     self.assertEqual(p._profiler.start.call_count, 2)
     p.maybe_deactivate(Role.ACTOR.value, future_output=mock_future_output)
-    if p._stop_thread is not None:
-      p._stop_thread.join(timeout=5.0)
+    _join_stop_thread(p)
     self.assertEqual(p._call_counts[Role.ACTOR.value], 3)
     self.assertEqual(p._profiler.stop.call_count, 2)
     self.assertFalse(p._is_active)
@@ -382,8 +403,7 @@ class RLProfilerTest(absltest.TestCase):
     p.maybe_deactivate(Role.ACTOR.value, future_output=mock_future_output)
     self.assertEqual(p._profiler.start.call_count, 4)
 
-    if p._stop_thread is not None:
-      p._stop_thread.join(timeout=5.0)
+    _join_stop_thread(p)
     self.assertEqual(p._profiler.stop.call_count, 4)
 
   def test_async_deactivation_clears_thread_reference(self):
@@ -394,10 +414,14 @@ class RLProfilerTest(absltest.TestCase):
     p._profiler = mock.MagicMock()
     mock_future_output = [mock.MagicMock()]
 
+    release = threading.Event()
+    mock_future_output[0].block_until_ready.side_effect = lambda: release.wait(
+        5.0
+    )
+
     p.maybe_activate(Role.ACTOR.value)
     p.maybe_deactivate(Role.ACTOR.value, future_output=mock_future_output)
-    self.assertIsNotNone(p._stop_thread)
-    p._stop_thread.join(timeout=5.0)
+    self._release_and_join_stop_thread(p, release)
 
     self.assertIsNone(p._stop_thread)
     self.assertFalse(p._is_active)
@@ -424,8 +448,7 @@ class RLProfilerTest(absltest.TestCase):
     p.maybe_deactivate(Role.ACTOR.value, future_output=mock_future_output)
     self.assertEqual(p._call_counts[Role.ACTOR.value], 2)
 
-    if p._stop_thread is not None:
-      p._stop_thread.join(timeout=5.0)
+    _join_stop_thread(p)
     self.assertEqual(p._profiler.stop.call_count, 1)
 
   def test_sequential_roles_future_output_handoff(self):
@@ -444,8 +467,7 @@ class RLProfilerTest(absltest.TestCase):
     p.maybe_activate(Role.ACTOR.value)
     p.maybe_deactivate(Role.ACTOR.value, future_output=mock_future_output)
 
-    if p._stop_thread is not None:
-      p._stop_thread.join(timeout=5.0)
+    _join_stop_thread(p)
 
     self.assertEqual(p._profiler.start.call_count, 2)
     self.assertEqual(p._profiler.stop.call_count, 2)
@@ -457,12 +479,16 @@ class RLProfilerTest(absltest.TestCase):
     p = profiler.RLProfiler(config)
     p._profiler = mock.MagicMock()
 
+    # `jax.block_until_ready` calls `leaf.block_until_ready()` on non-jax.Array
+    # leaves. Block it on an event so the stop thread cannot finish (and clear
+    # `_stop_thread`) before the assertions below.
+    release = threading.Event()
     mock_array = mock.MagicMock()
+    mock_array.block_until_ready.side_effect = lambda: release.wait(5.0)
     p.maybe_activate(Role.ACTOR.value)
     p.maybe_deactivate(Role.ACTOR.value, future_output=[mock_array])
 
-    self.assertIsNotNone(p._stop_thread)
-    p._stop_thread.join(timeout=5.0)
+    self._release_and_join_stop_thread(p, release)
 
     mock_array.block_until_ready.assert_called_once()
     p._profiler.stop.assert_called_once()
@@ -495,17 +521,19 @@ class RLProfilerTest(absltest.TestCase):
     p = profiler.RLProfiler(config)
     p._profiler = mock.MagicMock()
     mock_future_output = [mock.MagicMock()]
+    release = threading.Event()
+
+    def _block_then_raise(_):
+      release.wait(5.0)
+      raise RuntimeError("Device error")
 
     with mock.patch.object(
-        profiler.jax,
-        "block_until_ready",
-        side_effect=RuntimeError("Device error"),
+        profiler.jax, "block_until_ready", side_effect=_block_then_raise
     ) as mock_block:
       p.maybe_activate(Role.ACTOR.value)
       p.maybe_deactivate(Role.ACTOR.value, future_output=mock_future_output)
 
-      self.assertIsNotNone(p._stop_thread)
-      p._stop_thread.join(timeout=5.0)
+      self._release_and_join_stop_thread(p, release)
 
       mock_block.assert_called_once_with(mock_future_output)
       # Profiler stop MUST still be called despite block_until_ready exception.
