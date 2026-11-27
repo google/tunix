@@ -1,5 +1,7 @@
 """Tests for `rl_learner`."""
 
+import contextlib
+import os
 from unittest import mock
 
 from absl.testing import absltest
@@ -34,6 +36,170 @@ class DummyLearner(rl_learner.RLLearner[DummyConfig]):
 
   def _num_generations(self):
     return 1
+
+
+_PER_HOST_SWITCHES = ('TUNIX_PER_HOST_LEARNER', 'TUNIX_PER_HOST_SAFE_LOGPS')
+
+
+@contextlib.contextmanager
+def _per_host_env(process_count, **switches):
+  """Sets exactly `switches` and fakes `process_count` JAX processes."""
+  with mock.patch.dict(os.environ), mock.patch.object(
+      rl_learner.jax, 'process_count', return_value=process_count
+  ):
+    for name in _PER_HOST_SWITCHES:
+      os.environ.pop(name, None)
+    os.environ.update(switches)
+    yield
+
+
+def _mesh(fsdp):
+  mesh = mock.MagicMock()
+  mesh.shape = {'fsdp': fsdp}
+  return mesh
+
+
+def _mock_engine(actor_mesh, rollout_mesh):
+  config = rl_engine_lib.RLTrainingConfig(
+      actor_optimizer=optax.sgd(1e-3),
+      eval_every_n_steps=1,
+      max_steps=1,
+  )
+  engine = mock.MagicMock()
+  engine.actor_trainer.model = DummyModel()
+  engine.rollout.model.return_value = DummyModel()
+  engine.cluster_config.training_config = config
+  engine.cluster_config.role_to_mesh = {
+      rl_engine_lib.Role.ACTOR: actor_mesh,
+      rl_engine_lib.Role.ROLLOUT: rollout_mesh,
+  }
+  # Separate mesh objects stand for actor and rollout on different devices.
+  engine.is_colocated.return_value = actor_mesh is rollout_mesh
+  engine.actor_trainer.train_steps = 0
+  engine.actor_trainer.iter_steps = 0
+  return engine
+
+
+def _learner(engine):
+  return DummyLearner(
+      rl_engine=engine,
+      algo_config=DummyConfig(),
+      reward_fns=lambda prompts, completions, **kwargs: [1.0] * len(prompts),
+  )
+
+
+class PerHostLearnerTest(parameterized.TestCase):
+  """The per-host learner (TUNIX_PER_HOST_LEARNER=1) with a mock engine."""
+
+  def test_separate_meshes_load_data_synchronously(self):
+    engine = _mock_engine(_mesh(2), _mesh(2))
+    with _per_host_env(2):
+      learner = _learner(engine)
+    # Not colocated: asynchronous rollout is on without the per-host learner.
+    self.assertTrue(learner.can_enable_async_rollout)
+
+    def fake_submit(fn, **kwargs):
+      del fn
+      kwargs['data_queue'].put(None)  # An empty mini-batch.
+      return mock.MagicMock()
+
+    engine.actor_trainer.train_steps = 1  # Stop after one global step.
+    with _per_host_env(2, TUNIX_PER_HOST_LEARNER='1'), mock.patch.object(
+        learner.executor, 'submit', side_effect=fake_submit
+    ) as submit:
+      with self.assertLogs(level='WARNING') as logs:
+        learner.train([{'prompts': [''] * 8}])
+    self.assertFalse(learner.can_enable_async_rollout)
+    self.assertIn('asynchronous rollout is turned off', '\n'.join(logs.output))
+    submit.assert_called_once()
+    self.assertIs(submit.call_args.kwargs['async_loading'], False)
+
+  def test_shard_batch_by_process_slices_tensor_like_columns(self):
+    values = np.arange(4, dtype=np.float32)
+    batch = {
+        'prompts': ['a', 'b', 'c', 'd'],
+        'array': values,
+        'tensor': test_utils.CustomTensor(values.reshape(4, 1)),
+        'scalar': test_utils.CustomTensor(np.array(0.5, dtype=np.float32)),
+        'tag': 'shared',
+    }
+    local = rl_learner.shard_batch_by_process(batch, 1, 2)
+    self.assertEqual(local['prompts'], ['b', 'd'])
+    np.testing.assert_array_equal(local['array'], [1.0, 3.0])
+    np.testing.assert_array_equal(local['tensor'], [[1.0], [3.0]])
+    self.assertIs(local['scalar'], batch['scalar'])  # Not batch-aligned.
+    self.assertEqual(local['tag'], 'shared')
+    # Explicit rows, e.g. a length-balanced shard.
+    local = rl_learner.shard_batch_by_process(batch, 0, 2, indices=[0, 3])
+    self.assertEqual(local['prompts'], ['a', 'd'])
+    np.testing.assert_array_equal(local['tensor'], [[0.0], [3.0]])
+
+  @parameterized.named_parameters(
+      ('none', {}, []),
+      ('reference_logps', {'beta': 0.04}, ['reference logprobs (beta=0.04)']),
+      (
+          'trainer_logps',
+          {'use_rollout_logps': False},
+          ['trainer logprobs (use_rollout_logps=False)'],
+      ),
+      # GRPOLearner skips trainer logprobs under score centering.
+      (
+          'score_centering',
+          {'use_rollout_logps': False, 'score_centering': True},
+          [],
+      ),
+  )
+  def test_trainer_side_logps_mirror_grpo(self, config, want):
+    mesh = _mesh(2)
+    learner = DummyLearner(
+        rl_engine=_mock_engine(mesh, mesh),
+        algo_config=DummyConfig(**config),
+        reward_fns=lambda prompts, completions, **kwargs: [1.0] * len(prompts),
+    )
+    self.assertEqual(learner._per_host_trainer_side_logps(), want)
+
+  @parameterized.named_parameters(
+      # TUNIX_PER_HOST_SAFE_LOGPS=1: rows x 2 processes must divide fsdp=4.
+      ('global_rows', {'TUNIX_PER_HOST_SAFE_LOGPS': '1'}, 4),
+      # Otherwise the process-local rows must divide fsdp=2 by themselves.
+      ('process_local_rows', {}, 2),
+  )
+  def test_eval_batches_must_divide_the_data_axis(self, switches, fsdp):
+    mesh = _mesh(fsdp)
+    with _per_host_env(2, TUNIX_PER_HOST_LEARNER='1', **switches):
+      learner = _learner(_mock_engine(mesh, mesh))
+      # 4 prompts: 2 rows per process.
+      local = learner._shard_eval_batch_for_process(
+          {'prompts': ['a', 'b', 'c', 'd']}
+      )
+      self.assertEqual(list(local['prompts']), ['a', 'c'])
+      # A last eval batch of 2 prompts: 1 row per process.
+      with self.assertRaisesRegex(ValueError, 'eval batch has 1 rows'):
+        learner._shard_eval_batch_for_process({'prompts': ['e', 'f']})
+
+  def test_train_checks_eval_batches_and_unbatched_train_tails(self):
+    mesh = _mesh(4)
+    engine = _mock_engine(mesh, mesh)
+    with _per_host_env(
+        2, TUNIX_PER_HOST_LEARNER='1', TUNIX_PER_HOST_SAFE_LOGPS='1'
+    ):
+      learner = _learner(engine)
+      engine.actor_trainer.train_steps = 1  # Stop after one global step.
+      with mock.patch.object(learner, '_run_global_step') as run_global_step:
+        learner.train(
+            [{'prompts': [''] * 8}, {'prompts': [''] * 2}],
+            [{'prompts': [''] * 4}, {'prompts': [''] * 2}],
+        )
+      train_iterator, eval_ds = run_global_step.call_args.args[4:6]
+      # The configured train micro-batch (8 prompts) is fine, the smaller last
+      # batch is not.
+      self.assertLen(next(train_iterator)['prompts'], 4)
+      with self.assertRaisesRegex(ValueError, 'train batch has 1 rows'):
+        next(train_iterator)
+      eval_batches = iter(eval_ds)
+      self.assertLen(next(eval_batches)['prompts'], 2)
+      with self.assertRaisesRegex(ValueError, 'eval batch has 1 rows'):
+        next(eval_batches)
 
 
 class RLLearnerTest(parameterized.TestCase):
