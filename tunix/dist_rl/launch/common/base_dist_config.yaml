@@ -62,6 +62,11 @@ reference_model_config:
 
 rollout_model_config:
   <<: *base_model_config
+  # Scanned MaxText checkpoint (a checkpoint step directory or its Orbax
+  # parameter directory; see MaxText's `scanned_checkpoint_loader`) that an
+  # `inprocess_vllm` MaxText rollout with `weight_sync_config.mode: none` loads
+  # at startup, converted in memory to vLLM's unscanned layout. Empty: none.
+  scanned_checkpoint_path: ""
 
 ################################## Tokenizer ##################################
 tokenizer_config:
@@ -176,13 +181,15 @@ vllm_config:
   # (`gpu_memory_utilization` is not set); `inprocess_vllm` uses 0.5.
   hbm_utilization: null
   tpu_backend_type: "jax"
-  # Start the rollout from random weights instead of loading the checkpoint.
-  # Null means true exactly when `weight_sync_config.mode` is "raiden", whose
-  # bootstrap sync loads the trainer's weights before step 0; otherwise a
-  # non-MaxText rollout loads the checkpoint. An explicit true requires
-  # "raiden"; only `rollout_engine: inprocess_vllm` reads it. A MaxText rollout
-  # (`rollout_model_config.model_source: maxtext`) never loads the checkpoint,
-  # so it always needs "raiden".
+  # Start the rollout from random weights instead of loading the checkpoint
+  # (`rollout_engine: inprocess_vllm` only). Null resolves to true when
+  # `weight_sync_config.mode` is "raiden" (whose bootstrap sync loads the
+  # trainer's weights before step 0) or when
+  # `rollout_model_config.scanned_checkpoint_path` is set (loaded over the
+  # random weights at startup); an explicit true requires one of those. A
+  # MaxText rollout (`rollout_model_config.model_source: maxtext`) needs
+  # "raiden", or "none" with `scanned_checkpoint_path` or
+  # `maxtext_config.load_parameters_path`.
   init_with_random_weights: null
   enable_prefix_caching: false
   async_scheduling: false
@@ -489,8 +496,8 @@ cluster_config:
     # deploys on k8s.
     otel: 4317
   # Pathways deployment of a trainer or rollout. Only `k8s.sh` applies these,
-  # to the roles whose template is `jobset.pathways.yaml`; `trainer` applies to
-  # the trainer only.
+  # to the roles whose template is `jobset.pathways.yaml`; `trainer` and
+  # `rollout` apply to that role only.
   pathways:
     server_image: "us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/server:latest"
     proxy_image: "us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/proxy_server:latest"
@@ -541,6 +548,12 @@ cluster_config:
         bucket: ""
         mount_path: "/gcs/ckpt"
         mount_options: "implicit-dirs,metadata-cache:negative-ttl-secs:0"
+    # Settings `k8s.sh` applies to the rollout's Pathways template alone.
+    rollout:
+      # Sets `ENABLE_PATHWAYS_PERSISTENCE` on the rollout, so the TPU workers
+      # read a plain Zarr v2 `rollout_model_config.scanned_checkpoint_path`
+      # directly instead of staging it through the rollout container's memory.
+      persistence: false
   local:
     auto_detect_devices: false
     download_model_weights: true

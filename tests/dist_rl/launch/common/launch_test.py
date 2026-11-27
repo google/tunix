@@ -590,6 +590,31 @@ class LaunchScriptsTest(absltest.TestCase):
     self.assertIn("ENABLE_PATHWAYS_PERSISTENCE=1", res_persistence.stdout)
     self.assertNotIn("ENABLE_PATHWAYS_PERSISTENCE=true", res_persistence.stdout)
 
+  def test_k8s_rollout_pathways_persistence(self):
+    args = [
+        "rollout",
+        "--dry-run",
+        "cluster_config.target=k8s",
+        "cluster_config.k8s.tunix_image=test-image",
+        "agentic_grpo_config.beta=0.0",
+        "cluster_config.k8s.rollout.tpu_slice=tpu7x:2x2x1",
+    ]
+    pathways = ["cluster_config.k8s.rollout.jobset_yaml=jobset.pathways.yaml"]
+    persistence = ["cluster_config.pathways.rollout.persistence=true"]
+    for overrides, expected in (
+        (pathways, False),
+        (pathways + persistence, True),
+        # Persistence is a Pathways setting; other templates ignore it.
+        (persistence, False),
+    ):
+      with self.subTest(overrides=overrides):
+        res = self._run_launch(args + overrides)
+        self.assertEqual(res.returncode, 0, msg=res.stderr)
+        self.assertEqual(
+            "ENABLE_PATHWAYS_PERSISTENCE=1" in res.stdout, expected
+        )
+        self.assertNotIn("ENABLE_PATHWAYS_PERSISTENCE=0", res.stdout)
+
   def test_k8s_requires_tunix_image(self):
     res = self._run_launch([
         "--dry-run",

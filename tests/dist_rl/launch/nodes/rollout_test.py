@@ -39,7 +39,7 @@ from tunix.models import automodel
 from tunix.rl.agentic.parser.chat_template_parser import parser
 from tunix.utils import maxtext_utils
 
-# A MaxText rollout gets real weights only from a MaxText trainer over Raiden.
+# MaxText rollout paired with a MaxText trainer over Raiden.
 _MAXTEXT_ROLLOUT_ARGV = (
     "model_config.model_source=maxtext",
     "model_config.model_name=qwen3-30b-a3b",
@@ -89,6 +89,27 @@ def _inprocess_vllm_rollout_config(*argv: str):
   """Returns the RolloutConfig built for the `inprocess_vllm` worker."""
   hp = _hp(*argv)
   return rollout._rollout_config(hp, mock.Mock(), sampler_type="inprocess_vllm")
+
+
+@contextlib.contextmanager
+def _patch_scanned_checkpoint_loader():
+  """Stubs `maxtext.integration.vllm.scanned_checkpoint_loader` in `sys.modules`."""
+  loader = mock.MagicMock()
+  vllm_pkg = mock.MagicMock(scanned_checkpoint_loader=loader)
+  with mock.patch.dict(
+      "sys.modules",
+      {
+          "maxtext": mock.MagicMock(),
+          "maxtext.integration": mock.MagicMock(),
+          "maxtext.integration.vllm": vllm_pkg,
+          "maxtext.integration.vllm.scanned_checkpoint_loader": loader,
+          "maxtext.src.maxtext.integration.vllm": vllm_pkg,
+          "maxtext.src.maxtext.integration.vllm.scanned_checkpoint_loader": (
+              loader
+          ),
+      },
+  ):
+    yield loader
 
 
 def _rollout_config(*argv: str):
@@ -613,6 +634,111 @@ class CreateRolloutWorkerTest(absltest.TestCase):
       )
     worker_kwargs = self._worker_kwargs()
     self.assertIs(worker_kwargs["sampler"], sampler_cls.return_value)
+    sampler_cls.return_value.initialize.assert_not_called()
+
+  def test_inprocess_vllm_loads_scanned_checkpoint_before_serving(self):
+    hp = _hp(
+        *_MAXTEXT_ROLLOUT_ARGV,
+        "weight_sync_config.mode=none",
+        "rollout_model_config.scanned_checkpoint_path=/ckpt/scanned/0",
+        "vllm_config.engine_kwargs={'additional_config': {'maxtext_config':"
+        " {'fp8_moe': True}}}",
+    )
+    calls = mock.Mock()
+    with (
+        mock.patch.object(
+            rollout, "_import_vllm_sampler", return_value=mock.Mock()
+        ),
+        mock.patch.object(node_utils, "create_mesh"),
+        mock.patch.object(
+            inprocess_vllm_sampler, "InprocessVllmSampler", autospec=True
+        ) as sampler_cls,
+        _patch_scanned_checkpoint_loader() as loader,
+    ):
+      sampler = sampler_cls.return_value
+
+      def mutate_additional_config() -> None:
+        cfg = sampler_cls.call_args.kwargs["config"]
+        cfg.rollout_vllm_additional_config["maxtext_config"][
+            "padded_base_moe_mlp_dim"
+        ] = 2048
+
+      sampler.initialize.side_effect = mutate_additional_config
+      calls.attach_mock(loader.resolve_scanned_checkpoint, "resolve")
+      calls.attach_mock(sampler.initialize, "initialize")
+      calls.attach_mock(loader.load_scanned_checkpoint, "load")
+      rollout._create_rollout_worker(hp, "rollout-0", self.tokenizer)
+    self.assertIs(self._worker_kwargs()["sampler"], sampler)
+    # The file-only resolve runs before the engine is built; the load then
+    # replaces its random weights before serving.
+    self.assertEqual(
+        [name for name, _, _ in calls.mock_calls],
+        ["resolve", "initialize", "load"],
+    )
+    loader.resolve_scanned_checkpoint.assert_called_once_with("/ckpt/scanned/0")
+    loader.load_scanned_checkpoint.assert_called_once()
+    path, target, maxtext_config = loader.load_scanned_checkpoint.call_args.args
+    self.assertEqual(path, "/ckpt/scanned/0")
+    self.assertIs(target, sampler)
+    # `fp8_moe` reaches the loader with the rest of the rollout's MaxText
+    # config, and `MaxTextForCausalLM` in-place padding during `initialize()`
+    # does not leak.
+    self.assertEqual(maxtext_config["model_name"], "qwen3-30b-a3b")
+    self.assertIs(maxtext_config["fp8_moe"], True)
+    self.assertNotIn("padded_base_moe_mlp_dim", maxtext_config)
+
+  def test_scanned_checkpoint_without_maxtext_config_fails_before_init(self):
+    hp = _hp(
+        *_MAXTEXT_ROLLOUT_ARGV,
+        "weight_sync_config.mode=none",
+        "rollout_model_config.scanned_checkpoint_path=/ckpt/scanned/0",
+    )
+    with (
+        mock.patch.object(
+            rollout, "_import_vllm_sampler", return_value=mock.Mock()
+        ),
+        mock.patch.object(node_utils, "create_mesh"),
+        mock.patch.object(
+            inprocess_vllm_sampler, "InprocessVllmSampler", autospec=True
+        ) as sampler_cls,
+        # Validated configs always yield one; simulate a missing one.
+        mock.patch.object(
+            rollout, "_maxtext_additional_config", return_value=None
+        ),
+        _patch_scanned_checkpoint_loader() as loader,
+    ):
+      with self.assertRaisesRegex(
+          ValueError, r"needs a vLLM additional_config\.maxtext_config"
+      ):
+        rollout._create_rollout_worker(hp, "rollout-0", self.tokenizer)
+    sampler_cls.return_value.initialize.assert_not_called()
+    loader.load_scanned_checkpoint.assert_not_called()
+
+  def test_scanned_checkpoint_fails_fast_before_building_engine(self):
+    hp = _hp(
+        *_MAXTEXT_ROLLOUT_ARGV,
+        "weight_sync_config.mode=none",
+        "rollout_model_config.scanned_checkpoint_path=/ckpt/missing",
+    )
+    with (
+        mock.patch.object(
+            rollout, "_import_vllm_sampler", return_value=mock.Mock()
+        ),
+        mock.patch.object(node_utils, "create_mesh") as create_mesh,
+        mock.patch.object(
+            inprocess_vllm_sampler, "InprocessVllmSampler", autospec=True
+        ) as sampler_cls,
+        _patch_scanned_checkpoint_loader() as loader,
+    ):
+      loader.resolve_scanned_checkpoint.side_effect = FileNotFoundError(
+          "missing _METADATA"
+      )
+      with self.assertRaisesRegex(FileNotFoundError, "missing _METADATA"):
+        rollout._create_rollout_worker(hp, "rollout-0", self.tokenizer)
+    # No JAX mesh or engine is created before the path is rejected.
+    create_mesh.assert_not_called()
+    sampler_cls.assert_not_called()
+    loader.load_scanned_checkpoint.assert_not_called()
 
 
 class SamplerTest(absltest.TestCase):

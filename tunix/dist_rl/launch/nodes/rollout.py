@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping
+import copy
 import dataclasses
 import importlib
 import logging
@@ -43,6 +44,7 @@ from tunix.dist_rl.launch.nodes import node_utils
 from tunix.dist_rl.rollout import sampler as sampler_lib
 from tunix.dist_rl.weight_sync import weight_sync as weight_sync_lib
 from tunix.dist_rl.worker import rollout_worker
+from tunix.generate import utils as generate_utils
 from tunix.generate import vllm_model_config
 from tunix.models import automodel
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
@@ -234,9 +236,11 @@ def _vllm_engine_kwargs(
         "vllm_config.engine_kwargs.load_format has no effect with"
         " rollout_engine: inprocess_vllm while vllm_config."
         "init_with_random_weights is true (the default with"
-        " weight_sync_config.mode: raiden): the rollout starts from random"
-        " weights. Set vllm_config.init_with_random_weights: false to load the"
-        " checkpoint instead."
+        " weight_sync_config.mode: raiden or"
+        " rollout_model_config.scanned_checkpoint_path): the rollout starts"
+        " from random weights. Remove load_format, or (without"
+        " scanned_checkpoint_path) set vllm_config.init_with_random_weights:"
+        " false to load the checkpoint through vLLM instead."
     )
   if "additional_config" in engine_kwargs:
     additional = engine_kwargs["additional_config"]
@@ -685,10 +689,19 @@ def _create_inprocess_vllm_sampler(
 ) -> sampler_lib.Sampler:
   """Creates the in-process vLLM sampler."""
   _validate_vllm_model_config(hp)
+  scanned_ckpt = resolve_config.rollout_scanned_checkpoint_path(hp)
   _import_vllm_sampler()
   from tunix.dist_rl.rollout import (  # pylint: disable=g-import-not-at-top
       inprocess_vllm_sampler,
   )
+
+  if scanned_ckpt:
+    from maxtext.integration.vllm import (  # pylint: disable=g-import-not-at-top
+        scanned_checkpoint_loader,
+    )
+
+    # File I/O only: rejects a bad path before JAX or the engine starts.
+    scanned_checkpoint_loader.resolve_scanned_checkpoint(scanned_ckpt)
 
   multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "")
   rollout_mesh = (
@@ -699,13 +712,39 @@ def _create_inprocess_vllm_sampler(
   max_concurrency = int(
       hp.config_mapping("agentic_grpo_config")["max_concurrency"]
   )
-  return inprocess_vllm_sampler.InprocessVllmSampler(
+  sampler = inprocess_vllm_sampler.InprocessVllmSampler(
       server_id=worker_id,
       tokenizer=tokenizer,
       config=config,
       mesh=rollout_mesh,
       max_concurrency=max_concurrency,
   )
+  if scanned_ckpt:
+    # Snapshot before `initialize()`: `MaxTextForCausalLM` mutates
+    # `additional_config["maxtext_config"]` in place with rollout padding.
+    additional = copy.deepcopy(
+        generate_utils.merge_additional_config(
+            config.rollout_vllm_additional_config,
+            config.rollout_vllm_kwargs.get("additional_config"),
+        )
+    )
+    if not additional or not isinstance(
+        additional.get("maxtext_config"), Mapping
+    ):
+      raise ValueError(
+          "rollout_model_config.scanned_checkpoint_path needs a vLLM"
+          " additional_config.maxtext_config describing the checkpoint's"
+          " MaxText model (from rollout_model_config.kwargs.maxtext_model_name,"
+          " overridable via"
+          " vllm_config.engine_kwargs.additional_config.maxtext_config)."
+      )
+    # Build the engine on random weights now and load the checkpoint over them,
+    # so the worker registers only once it serves the real weights.
+    sampler.initialize()
+    scanned_checkpoint_loader.load_scanned_checkpoint(
+        scanned_ckpt, sampler, additional["maxtext_config"]
+    )
+  return sampler
 
 
 def _create_vllm_sampler(

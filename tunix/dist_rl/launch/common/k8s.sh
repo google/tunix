@@ -314,6 +314,10 @@ render_rollout_yaml() {
   if [[ "${WEIGHT_SYNC_MODE}" == "raiden" ]]; then
     env_prefix+=" RAIDEN_USE_FFI=0"
   fi
+  if [[ "${K8S_ROLLOUT_JOBSET_YAML}" == "jobset.pathways.yaml" ]] \
+    && is_true "${K8S_ROLLOUT_ENABLE_PATHWAYS_PERSISTENCE}"; then
+    env_prefix+=" ENABLE_PATHWAYS_PERSISTENCE=1"
+  fi
   env_prefix+=" ${SANDBOX_ENV_PREFIX% }"
 
   if is_jax_cache_disabled; then
