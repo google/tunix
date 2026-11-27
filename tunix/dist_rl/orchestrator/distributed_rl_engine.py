@@ -25,9 +25,11 @@ import bisect
 import collections
 from collections.abc import Iterable, Mapping, Sequence
 import concurrent.futures
+import contextlib
 import inspect
 import itertools
 import math
+import re
 from typing import Any
 import uuid
 
@@ -52,11 +54,49 @@ _ROLLOUT_PROMPT_STRIPE_SIZE: int = 4
 # Lower-bound target on stripes per prompt when capping stripe size for fanout.
 _TARGET_STRIPES_PER_PROMPT: int = 4
 
+
 # Weight sync pushes to serving workers and to late joiners awaiting first sync.
 _WEIGHT_SYNC_DESTINATION_STATUSES = (
     worker_registry.AdmissionStatus.ACTIVE,
     worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
 )
+# Roles whose workers form one SPMD trainer (e.g. a multi-host McJAX trainer):
+# every call fans out to all of their workers. Other roles (e.g. REFERENCE)
+# are independent replicas, so a call goes to one worker only.
+_SPMD_ROLES = (datatypes.Role.ACTOR, datatypes.Role.CRITIC)
+
+
+def _natural_worker_key(
+    info: datatypes.WorkerInfo,
+) -> tuple[tuple[int, int | str], ...]:
+  """Orders workers by natural `worker_id` (`trainer-2` before `trainer-10`).
+
+  Multi-host trainer replica `r` runs as JAX process `r`, so this is also the
+  JAX process order.
+  """
+  return tuple(
+      (0, int(tok)) if tok.isdigit() else (1, tok)
+      for tok in re.split(r"(\d+)", info.worker_id)
+      if tok
+  )
+
+
+def _restored_step_signature(result: Any) -> tuple[Any, Any] | None:
+  """Returns the `(step, global_step)` a restore result resumes from.
+
+  Reads the result as `resume_from_checkpoint` does: a non-mapping result is a
+  fresh run, and either key may be absent (legacy checkpoints carry only
+  `step`), which then compares as None.
+
+  Args:
+    result: One worker's `restore_checkpoint` result.
+
+  Returns:
+    The comparable step pair, or None for a fresh run.
+  """
+  if not isinstance(result, Mapping):
+    return None
+  return (result.get("step"), result.get("global_step"))
 
 
 def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
@@ -369,6 +409,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     self._staging_overcommit_factor: float = 1.0
     self._evicted_release_skips_total: int = 0
     self._rollout_epoch: int = 0
+    self._expected_role_counts: dict[datatypes.Role | str, int] = {}
+    self._spmd_locks_loop: asyncio.AbstractEventLoop | None = None
+    self._spmd_locks_by_handle: dict[int, asyncio.Lock] = {}
 
   def _rollout_handles(self) -> list[remote_execution.ActorHandle]:
     return self._registry.handles(datatypes.Role.ROLLOUT)
@@ -381,11 +424,149 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         )
     }
 
+  def _role_handles(
+      self, role: datatypes.Role | str
+  ) -> list[remote_execution.ActorHandle]:
+    """Returns active handles for `role` in deterministic SPMD order."""
+    targets = self._registry.targets(
+        role, statuses=(worker_registry.AdmissionStatus.ACTIVE,)
+    )
+    return [
+        handle
+        for _, handle in sorted(
+            targets, key=lambda item: _natural_worker_key(item[0])
+        )
+    ]
+
+  def _require_role_handles(
+      self,
+      role: datatypes.Role | str,
+      *,
+      missing_error: str | None = None,
+  ) -> list[remote_execution.ActorHandle]:
+    """Returns the `role` handles a call fans out to.
+
+    All active workers of an SPMD role (`_SPMD_ROLES`), else only the first.
+
+    Args:
+      role: Worker role.
+      missing_error: Error message when no `role` worker is active.
+
+    Raises:
+      ValueError: If no `role` worker is active.
+      RuntimeError: If an SPMD role has fewer active workers than before.
+    """
+    workers = self._role_handles(role)
+    if not workers:
+      raise ValueError(
+          missing_error or f"No worker registered for role {role}"
+      )
+    if role not in _SPMD_ROLES:
+      return workers[:1]
+    expected = self._expected_role_counts.get(role)
+    if expected is None or len(workers) > expected:
+      self._expected_role_counts[role] = len(workers)
+    elif len(workers) < expected:
+      raise RuntimeError(
+          f"SPMD role {role} shrunk from {expected} active worker(s) to"
+          f" {len(workers)}; aborting to prevent collective deadlock."
+      )
+    return workers
+
   def _role_handle(
       self, role: datatypes.Role | str
   ) -> remote_execution.ActorHandle | None:
-    handles = self._registry.handles(role)
+    handles = self._role_handles(role)
     return handles[0] if handles else None
+
+  async def _invoke_role_workers(
+      self,
+      workers: Sequence[remote_execution.ActorHandle],
+      method_name: str,
+      *,
+      return_all: bool = False,
+      **kwargs: Any,
+  ) -> Any:
+    """Invokes `method_name` concurrently on `workers`; returns first or all.
+
+    Fan-outs to more than one worker (one SPMD program on several hosts) are
+    serialized per worker in FIFO order, so every host receives the same call
+    sequence even when several callers fan out at once.
+    """
+    if not workers:
+      raise ValueError(f"No workers provided for {method_name}.")
+    if len(workers) == 1:
+      result = await self._invoke_worker(workers[0], method_name, **kwargs)
+      return [result] if return_all else result
+    # Each worker runs its calls in arrival order only by accident (a non-FIFO
+    # lock), so concurrent fan-outs could reach the SPMD hosts in different
+    # orders and leave them in different collectives. Hold every host's lock
+    # until all hosts have finished, so each host sees the same call sequence.
+    async with contextlib.AsyncExitStack() as stack:
+      for lock in self._spmd_locks(workers):
+        await stack.enter_async_context(lock)
+      return await self._fan_out(
+          workers, method_name, return_all=return_all, **kwargs
+      )
+
+  def _spmd_locks(
+      self, workers: Sequence[remote_execution.ActorHandle]
+  ) -> list[asyncio.Lock]:
+    """Returns the FIFO locks of `workers`, in one global acquisition order."""
+    loop = asyncio.get_running_loop()
+    if self._spmd_locks_loop is not loop:
+      # An `asyncio.Lock` is bound to the loop it first waited on.
+      self._spmd_locks_loop = loop
+      self._spmd_locks_by_handle = {}
+    return [
+        self._spmd_locks_by_handle.setdefault(key, asyncio.Lock())
+        for key in sorted({id(w) for w in workers})
+    ]
+
+  async def _fan_out(
+      self,
+      workers: Sequence[remote_execution.ActorHandle],
+      method_name: str,
+      *,
+      return_all: bool,
+      **kwargs: Any,
+  ) -> Any:
+    """Invokes `method_name` concurrently on all `workers`; fails on any."""
+    tasks = [
+        asyncio.create_task(self._invoke_worker(w, method_name, **kwargs))
+        for w in workers
+    ]
+    pending = set(tasks)
+    try:
+      # FIRST_EXCEPTION ignores a peer that ended cancelled, so wake on every
+      # completion and fail on the first raised or cancelled peer.
+      while pending:
+        done, pending = await asyncio.wait(
+            pending, return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in done:
+          exc = (
+              asyncio.CancelledError() if task.cancelled() else task.exception()
+          )
+          if exc is not None:
+            raise RuntimeError(
+                f"SPMD call {method_name!r} failed on one of {len(workers)}"
+                f" workers ({type(exc).__name__}: {exc}); cancelled"
+                f" {len(pending)} remaining peer task(s) (surviving SPMD"
+                " peers may require teardown)."
+            ) from exc
+    except BaseException:
+      for task in tasks:
+        if not task.done():
+          task.cancel()
+          task.add_done_callback(
+              lambda t: t.exception() if not t.cancelled() else None
+          )
+        elif not task.cancelled():
+          task.exception()
+      raise
+    results = [task.result() for task in tasks]
+    return results if return_all else results[0]
 
   @property
   def restored_checkpoint_metadata(self) -> dict[str, Any] | None:
@@ -402,20 +583,20 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       role: datatypes.Role,
   ) -> None:
     """Seeds trainer-side weight sync with the rollout target-state skeleton."""
-    trainer = self._role_handle(role)
+    trainers = self._role_handles(role)
     # Match the weight sync destinations: a rejoined rollout worker still in
     # PENDING_WEIGHT_SYNC can seed the trainer before its first sync.
     rollout_handles = self._registry.handles(
         datatypes.Role.ROLLOUT, statuses=_WEIGHT_SYNC_DESTINATION_STATUSES
     )
-    if trainer is None or not rollout_handles:
+    if not trainers or not rollout_handles:
       return
 
     rollout = rollout_handles[0]
     try:
       target_state = await self._invoke_worker(rollout, "get_target_state")
-      await self._invoke_worker(
-          trainer, "set_target_state", target_state=target_state
+      await self._invoke_role_workers(
+          trainers, "set_target_state", target_state=target_state
       )
     except (AttributeError, RuntimeError) as exc:
       if isinstance(exc, RuntimeError) and "AttributeError" not in str(exc):
@@ -796,18 +977,20 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       **kwargs: Any,
   ) -> Any:
     """Evaluates reference model or actor logprobs on a padded batch/request."""
-    worker = self._role_handle(role)
-    if worker is None:
-      raise ValueError(
-          f"No worker registered for per_token_logps with role {role}"
-      )
+    workers = self._require_role_handles(
+        role,
+        missing_error=(
+            f"No worker registered for per_token_logps with role {role}"
+        ),
+    )
     role_name = role.value if isinstance(role, datatypes.Role) else str(role)
     logging.info(
-        "Evaluating per-token log probabilities on %s worker...",
+        "Evaluating per-token log probabilities on %d %s worker(s)...",
+        len(workers),
         role_name,
     )
-    return await self._invoke_worker(
-        worker, "per_token_logps", items=items, **kwargs
+    return await self._invoke_role_workers(
+        workers, "per_token_logps", items=items, **kwargs
     )
 
   async def train_step(
@@ -817,14 +1000,13 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       accumulate_gradients: bool = False,
       apply_optimizer: bool = True,
   ) -> Any:
-    """Executes atomic gradient accumulation / update on TrainerWorker."""
-    worker = self._role_handle(role)
-    if worker is None:
-      raise ValueError(f"No trainer worker registered for role {role}")
+    """Executes atomic gradient accumulation / update on TrainerWorker(s)."""
+    workers = self._require_role_handles(role)
     role_name = role.value if isinstance(role, datatypes.Role) else str(role)
     logging.info(
-        "Executing train_step on %s worker (accumulate_gradients=%s,"
+        "Executing train_step on %d %s worker(s) (accumulate_gradients=%s,"
         " apply_optimizer=%s)...",
+        len(workers),
         role_name,
         accumulate_gradients,
         apply_optimizer,
@@ -842,8 +1024,8 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     )
     inflight_set.add(fwd_bwd_done)
     try:
-      fwd_bwd_result = await self._invoke_worker(
-          worker, "fwd_bwd", request=request
+      fwd_bwd_result = await self._invoke_role_workers(
+          workers, "fwd_bwd", request=request
       )
     except BaseException as exc:
       if not fwd_bwd_done.done():
@@ -871,7 +1053,16 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         await asyncio.shield(prior)
     finally:
       inflight_set.difference_update(prior_fwd_bwd)
-    train_step, metrics = await self._invoke_worker(worker, "update")
+    update_results = await self._invoke_role_workers(
+        workers, "update", return_all=True
+    )
+    steps = [res[0] for res in update_results]
+    if len(set(steps)) != 1:
+      raise RuntimeError(
+          f"SPMD {role_name} workers disagreed on train_step after update:"
+          f" {steps}."
+      )
+    train_step, metrics = update_results[0]
     return {
         "fwd_bwd": fwd_bwd_result,
         "updated": True,
@@ -926,10 +1117,58 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       ))
       return [r for ok, r in results if ok and r is not None]
     else:
-      worker = self._role_handle(role)
-      if worker is None:
-        raise ValueError(f"No worker registered for role {role}")
-      return await self._invoke_worker(worker, "get_metrics", **kwargs)
+      workers = self._require_role_handles(role)
+      return await self._invoke_role_workers(workers, "get_metrics", **kwargs)
+
+  def _configure_trainer_workers(
+      self,
+      workers: Sequence[remote_execution.ActorHandle],
+      role_name: str,
+      loss_fn: Any,
+      gen_fn: Any,
+      dummy_payload: Any,
+      precompile: bool,
+  ) -> None:
+    """Configures and optionally precompiles all SPMD trainer workers."""
+
+    def _configure_one(worker: remote_execution.ActorHandle) -> None:
+      # Both setters clear the trainer's JIT cache, so the ahead-of-time
+      # compile must run strictly after them.
+      worker.submit("with_loss_fn", loss_fn, has_aux=True)
+      worker.submit("with_gen_model_input_fn", gen_fn)
+      if not precompile:
+        return
+      # TODO(tunix-dev): Move to the worker lifecycle (e.g., the `initialize`
+      # step) so pre-compilation runs during the standard lifecycle `compile`
+      # phase instead of re-compiling here.
+      logging.info(
+          "Precompiling trainer step executables on %s worker...",
+          role_name,
+      )
+      worker.submit("compile", dummy_payload)
+
+    try:
+      loop = asyncio.get_running_loop()
+    except RuntimeError:
+      loop = None
+
+    if len(workers) == 1 and loop is None:
+      _configure_one(workers[0])
+      return
+
+    # Multi-host SPMD trainers must enter `compile` concurrently so cross-host
+    # lowering/collectives run in lockstep. Avoid `with ThreadPoolExecutor` so
+    # an early failure on one worker does not block `shutdown(wait=True)` on
+    # peers stuck in SPMD compile.
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=len(workers))
+    futs = [pool.submit(_configure_one, w) for w in workers]
+    try:
+      for fut in concurrent.futures.as_completed(futs):
+        fut.result()
+    except BaseException:
+      pool.shutdown(wait=False, cancel_futures=True)
+      raise
+    pool.shutdown(wait=True)
 
   def configure_worker(
       self,
@@ -970,11 +1209,16 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       )
     match role:
       case datatypes.Role.ACTOR | datatypes.Role.CRITIC:
-        worker = self._role_handle(role)
-        if worker is None:
-          raise ValueError(f"No trainer worker registered for role {role_name}")
+        workers = self._require_role_handles(
+            role,
+            missing_error=(
+                f"No trainer worker registered for role {role_name}"
+            ),
+        )
         logging.info(
-            "Auto-configuring trainer loss and model input fn on %s worker...",
+            "Auto-configuring trainer loss and model input fn on %d %s"
+            " worker(s)...",
+            len(workers),
             role_name,
         )
         pad_id = kwargs.get("pad_id", assembler.pad_id)
@@ -1020,15 +1264,8 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
             algo_config.sampler_is is not None
             or algo_config.sampler_rs is not None
         )
-
-        def _configure():
-          assert worker is not None
-          # Both setters clear the trainer's JIT cache, so the ahead-of-time
-          # compile must run strictly after them.
-          worker.submit("with_loss_fn", loss_fn, has_aux=True)
-          worker.submit("with_gen_model_input_fn", gen_fn)
-          if not precompile:
-            return
+        dummy_payload = None
+        if precompile:
           routed_experts_encode_mode = (
               algo_config.routed_experts_encode_mode
               if return_routed_experts
@@ -1042,25 +1279,14 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
               with_routed_experts=return_routed_experts,
               routed_experts_encode_mode=routed_experts_encode_mode,
           )
-          # TODO(tunix-dev): Move to the worker lifecycle (e.g., the
-          # `initialize` step) so pre-compilation runs during the standard
-          # lifecycle `compile` phase instead of re-compiling here.
-          logging.info(
-              "Precompiling trainer step executables on %s worker...",
-              role_name,
-          )
-          worker.submit("compile", dummy_payload)
-
-        try:
-          loop = asyncio.get_running_loop()
-        except RuntimeError:
-          loop = None
-
-        if loop is not None and loop.is_running():
-          with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            pool.submit(_configure).result()
-        else:
-          _configure()
+        self._configure_trainer_workers(
+            workers,
+            role_name,
+            loss_fn,
+            gen_fn,
+            dummy_payload,
+            precompile,
+        )
 
       case datatypes.Role.ROLLOUT:
         if not self._rollout_handles():
@@ -1087,9 +1313,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
   ) -> int | None:
     """Bootstraps the rollout-visible policy state before step 0."""
     del kwargs
-    trainer = self._role_handle(role)
-    if trainer is None:
-      raise ValueError(f"No trainer worker registered for role {role}")
+    self._require_role_handles(role)
 
     await self._maybe_configure_trainer_target_state(role)
 
@@ -1484,17 +1708,16 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       step: int | None = None,
       force: bool = False,
   ) -> Any:
-    """Requests the trainer worker for `role` to save a checkpoint."""
-    worker = self._role_handle(role)
-    if worker is None:
-      raise ValueError(f"No trainer worker registered for role {role}")
+    """Requests the trainer worker(s) for `role` to save a checkpoint."""
+    workers = self._require_role_handles(role)
     role_name = role.value if isinstance(role, datatypes.Role) else str(role)
     logging.info(
-        "Saving checkpoint on %s worker...",
+        "Saving checkpoint on %d %s worker(s)...",
+        len(workers),
         role_name,
     )
-    return await self._invoke_worker(
-        worker, "save_checkpoint", metadata=metadata, step=step, force=force
+    return await self._invoke_role_workers(
+        workers, "save_checkpoint", metadata=metadata, step=step, force=force
     )
 
   async def _restore_checkpoint(
@@ -1503,10 +1726,21 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       step: int | None = None,
   ) -> Any:
     role_name = role.name
-    worker = self._role_handle(role)
-    if worker is None:
-      raise ValueError(f"No trainer worker registered for role {role_name}")
-    return await self._invoke_worker(worker, "restore_checkpoint", step=step)
+    workers = self._require_role_handles(
+        role,
+        missing_error=f"No trainer worker registered for role {role_name}",
+    )
+    results = await self._invoke_role_workers(
+        workers, "restore_checkpoint", return_all=True, step=step
+    )
+    if len(results) > 1:
+      signatures = [_restored_step_signature(res) for res in results]
+      if len(set(signatures)) != 1:
+        raise RuntimeError(
+            f"SPMD {role_name} workers disagreed on restored checkpoint step:"
+            f" {signatures}."
+        )
+    return results[0]
 
   async def resume_from_checkpoint(
       self,
@@ -1523,27 +1757,26 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     self._restored_checkpoint_metadata = None
     self._inflight_fwd_bwd[role].clear()
     metadata = await self._restore_checkpoint(role=role)
-    if not isinstance(metadata, Mapping):
-      if metadata is not None:
-        logging.warning(
-            "restore_checkpoint returned %s, not a mapping; starting from"
-            " fresh run.",
-            type(metadata).__name__,
-        )
+    if metadata is None:
       return 0
+    # A malformed result could hide a real checkpoint; never train from the
+    # base weights on a guess.
+    if not isinstance(metadata, Mapping):
+      raise TypeError(
+          f"restore_checkpoint returned {type(metadata).__name__}, not a"
+          " mapping; cannot tell whether a checkpoint was restored."
+      )
     metadata = dict(metadata)
     try:
       restored_optimizer_step = int(metadata.get("step", 0) or 0)
       restored_step = int(
           metadata.get("global_step", restored_optimizer_step) or 0
       )
-    except (TypeError, ValueError):
-      logging.warning(
-          "restore_checkpoint returned a non-integer step %r; starting from"
-          " fresh run.",
-          metadata.get("global_step", metadata.get("step")),
-      )
-      return 0
+    except (TypeError, ValueError) as exc:
+      raise ValueError(
+          "restore_checkpoint returned a non-integer step"
+          f" {metadata.get('global_step', metadata.get('step'))!r}."
+      ) from exc
     if restored_step <= 0:
       logging.info("No checkpoint to resume from; starting from step 0.")
       return 0

@@ -33,6 +33,7 @@ import sys
 import types
 from typing import Any, cast
 
+import jax
 from tunix.common import datatypes as common_datatypes
 from tunix.dist_rl.common import execution_target
 from tunix.dist_rl.common import gcs_cache
@@ -639,6 +640,32 @@ def _vllm_passthrough_kwargs(
   return kwargs
 
 
+def _rollout_mesh(
+    hp: resolve_config.DistHyperParameters,
+) -> jax.sharding.Mesh:
+  """Builds the rollout mesh over the devices this rollout process owns.
+
+  With ICI weight sync the rollout shares one multi-process JAX world with the
+  trainer, so `jax.devices()` also lists the trainer's chips.
+
+  Args:
+    hp: Validated distributed RL configuration.
+
+  Returns:
+    The rollout `(fsdp, tp)` mesh.
+  """
+  is_ici = (
+      hp.cluster_targets.weight_sync_mode
+      == common_datatypes.WeightSyncMode.ICI
+  )
+  return node_utils.create_mesh(
+      hp,
+      _ROLLOUT_KEY,
+      "Rollout",
+      devices=jax.local_devices() if is_ici else None,
+  )
+
+
 def _create_vanilla_sampler(
     hp: resolve_config.DistHyperParameters,
     worker_id: str,
@@ -659,7 +686,7 @@ def _create_vanilla_sampler(
       model_key=_ROLLOUT_KEY,
   )
   logging.info("Creating native sampler on the rollout mesh...")
-  mesh = node_utils.create_mesh(hp, _ROLLOUT_KEY, "Rollout")
+  mesh = _rollout_mesh(hp)
   logging.info("Rollout mesh: %s", mesh)
   with mesh:
     model, _ = automodel.AutoModel.from_pretrained(
@@ -685,17 +712,22 @@ def _create_inprocess_vllm_sampler(
 ) -> sampler_lib.Sampler:
   """Creates the in-process vLLM sampler."""
   _validate_vllm_model_config(hp)
+  multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "")
+  if (
+      multihost_backend
+      and hp.cluster_targets.weight_sync_mode
+      == common_datatypes.WeightSyncMode.ICI
+  ):
+    raise ValueError(
+        f"TPU_MULTIHOST_BACKEND={multihost_backend!r} is incompatible with"
+        " weight_sync_config.mode='ici': each ICI rollout replica must stay"
+        " local to a single JAX process."
+    )
   _import_vllm_sampler()
   from tunix.dist_rl.rollout import (  # pylint: disable=g-import-not-at-top
       inprocess_vllm_sampler,
   )
-
-  multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "")
-  rollout_mesh = (
-      None
-      if multihost_backend
-      else node_utils.create_mesh(hp, _ROLLOUT_KEY, "Rollout")
-  )
+  rollout_mesh = None if multihost_backend else _rollout_mesh(hp)
   max_concurrency = int(
       hp.config_mapping("agentic_grpo_config")["max_concurrency"]
   )
@@ -774,6 +806,25 @@ def _create_rollout_worker(
   )
 
 
+def _should_initialize_runtime(
+    hp: resolve_config.DistHyperParameters,
+    rollout_target: execution_target.ExecutionTarget,
+) -> bool:
+  """Returns whether `rollout.main` should initialize the JAX/device runtime.
+
+  On JAX, vLLM samplers initialize the JAX/Ray runtime internally unless ICI
+  weight sync is active (in which case the rollout must join the shared
+  `jax.distributed` world before building its local-device mesh). Vanilla JAX
+  and non-JAX (e.g. `torch:tpu`) rollouts always initialize their runtime here.
+  """
+  return (
+      str(hp.config["rollout_engine"]) == "vanilla"
+      or rollout_target.framework != execution_target.Framework.JAX
+      or hp.cluster_targets.weight_sync_mode
+      == common_datatypes.WeightSyncMode.ICI
+  )
+
+
 def main(
     argv: list[str], context: context_lib.ProcessContext | None = None
 ) -> None:
@@ -829,14 +880,7 @@ def main(
   # before the JAX initialization, which can block on the other processes.
   config_sha256 = node_utils.log_resolved_config(hp, "rollout")
 
-  sampler_type = str(hp.config["rollout_engine"])
-  # On JAX, vLLM samplers (`inprocess_vllm`, `vllm`) initialize the JAX/Ray
-  # distributed runtime internally; vanilla JAX and non-JAX (e.g. `torch:tpu`)
-  # rollouts initialize their runtime here.
-  if (
-      sampler_type == "vanilla"
-      or rollout_target.framework != execution_target.Framework.JAX
-  ):
+  if _should_initialize_runtime(hp, rollout_target):
     process_context.initialize_runtime(rollout_target)
 
   tokenizer = node_utils.load_hf_tokenizer(hp)

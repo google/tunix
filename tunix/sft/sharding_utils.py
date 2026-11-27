@@ -24,6 +24,7 @@ from tunix.utils import sharding_utils as common_sharding_utils
 
 place_array_on_target = common_sharding_utils.place_array_on_target
 place_arrays_on_targets = common_sharding_utils.place_arrays_on_targets
+place_array_leaf = common_sharding_utils.place_array_leaf
 
 
 def shard_input(

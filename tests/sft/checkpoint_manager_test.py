@@ -722,6 +722,16 @@ class CheckpointManagerTest(parameterized.TestCase):
     self.assertIsInstance(converted, jax.Array)
     np.testing.assert_allclose(converted, np.array([1.0, 2.0, 3.0]))
 
+  def test_convert_host_local_array_preserves_scalar_dtypes(self):
+    devices = jax.devices()
+    for dtype in (jnp.int32, jnp.bfloat16, jnp.float32):
+      arr = jax.device_put(jnp.asarray(7, dtype=dtype), devices[0])
+      out = checkpoint_manager._convert_host_local_array(
+          arr, mesh_devices=devices
+      )
+      self.assertEqual(out.dtype, dtype)
+      self.assertEqual(set(out.devices()), set(devices))
+
   def test_unknown_partition_spec_axis_is_replicated_for_restore(self):
     pspec = shd.PartitionSpec('norm')
     fixed_pspec = checkpoint_manager._replicate_if_pspec_uses_unknown_mesh_axis(
@@ -811,6 +821,25 @@ class CheckpointManagerTest(parameterized.TestCase):
     with self.assertRaisesRegex(ValueError, 'save_lora_merged_model'):
       cp_manager.export_safetensors(0, lora, to_hf_manifest={'rules': []})
     cp_manager.close()
+
+  def test_export_safetensors_rejects_subworld(self):
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+    cp_manager = checkpoint_manager.CheckpointManager(
+        None,
+        options=checkpoint_options.create_checkpointing_options(
+            active_processes=frozenset({0})
+        ),
+    )
+    with (
+        mock.patch.object(jax, 'process_count', return_value=2),
+        self.assertRaisesRegex(NotImplementedError, r'processes \[0\]'),
+    ):
+      cp_manager.export_safetensors(
+          0,
+          model,
+          to_hf_manifest=self._hf_manifest(model),
+          output_dir=f'{self.temp_path}/{self.id()}_out',
+      )
 
 
 if __name__ == '__main__':

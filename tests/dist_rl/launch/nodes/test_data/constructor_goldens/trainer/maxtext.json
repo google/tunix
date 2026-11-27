@@ -35,6 +35,7 @@
     {
       "tunix.sft.checkpoint_options.TunixCheckpointingOptions": {
         "kwargs": {
+          "active_processes": null,
           "async_options": {
             "__type__": "AsyncOptions"
           },
@@ -118,7 +119,13 @@
       "tunix.utils.maxtext_utils.create_maxtext_mesh": {
         "args": [
           "<tunix.utils.maxtext_utils.build_maxtext_config()>"
-        ]
+        ],
+        "kwargs": {
+          "devices": [
+            "<jax.devices()[0]>",
+            "<jax.devices()[1]>"
+          ]
+        }
       }
     },
     {

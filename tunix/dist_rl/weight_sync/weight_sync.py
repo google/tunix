@@ -26,7 +26,10 @@ separate module makes this contract importable without importing Raiden.
 from __future__ import annotations
 
 import abc
+from collections.abc import Callable
+from concurrent import futures
 import dataclasses
+import threading
 from typing import Any, Mapping, Optional, Protocol, Sequence, runtime_checkable
 
 from tunix.common import datatypes as common_datatypes
@@ -89,6 +92,9 @@ class TensorMetadata:
       published from, in shard order. Lets a transport pair source and
       destination shards explicitly instead of inferring them from mesh
       geometry, which expert parallelism breaks. Empty means unreported.
+    dtype: Element dtype name, e.g. "bfloat16". Empty means unreported.
+      `item_size` cannot tell apart two dtypes of the same width, which a
+      transport that moves typed device arrays (rather than bytes) must.
   """
 
   name: str
@@ -99,6 +105,7 @@ class TensorMetadata:
   layer_idx: int = 0
   sharding_spec: tuple[str, ...] = ()
   global_shard_indices: tuple[int, ...] = ()
+  dtype: str = ""
 
   def __post_init__(self) -> None:
     rank = len(self.shape)
@@ -164,6 +171,7 @@ def _parse_tensor_metadata(variables_raw: Any) -> tuple[TensorMetadata, ...]:
               layer_idx=int(v.get("layer_idx", 0)),
               sharding_spec=tuple(v.get("sharding_spec", ())),
               global_shard_indices=tuple(v.get("global_shard_indices", ())),
+              dtype=str(v.get("dtype", "")),
           )
       )
     elif hasattr(v, "name"):
@@ -179,6 +187,7 @@ def _parse_tensor_metadata(variables_raw: Any) -> tuple[TensorMetadata, ...]:
               global_shard_indices=tuple(
                   getattr(v, "global_shard_indices", ())
               ),
+              dtype=str(getattr(v, "dtype", "")),
           )
       )
   return tuple(variables)
@@ -231,6 +240,11 @@ class WorkUnitMetadata:
       artifact staged by a file/object-store source for this round.
     checksums: Optional wire-safe per-tensor/aggregate L1 checksum dictionary
       computed by the source when weight verification is enabled.
+    process_indices: `jax.process_index()` of every process whose devices hold
+      this unit, for transports that move weights with JAX collectives inside
+      one multi-process JAX world (see `ici_handler`). Empty means unreported.
+    devices_per_process: Local device count of each of those processes. None
+      means unreported.
   """
 
   unit: WorkUnitId
@@ -251,6 +265,8 @@ class WorkUnitMetadata:
   checksums: Optional[dict[str, float | int]] = dataclasses.field(
       default=None, hash=False
   )
+  process_indices: tuple[int, ...] = ()
+  devices_per_process: int | None = None
 
   def __post_init__(self) -> None:
     if self.artifact_uri is not None and not self.artifact_uri.strip():
@@ -303,6 +319,12 @@ class WorkUnitMetadata:
         ),
         checksums=(
             dict(d["checksums"]) if d.get("checksums") is not None else None
+        ),
+        process_indices=tuple(int(p) for p in d.get("process_indices", ())),
+        devices_per_process=(
+            int(d["devices_per_process"])
+            if d.get("devices_per_process") is not None
+            else None
         ),
     )
 
@@ -378,8 +400,62 @@ class WeightSyncHandler(abc.ABC):
     """
     return True
 
+  @property
+  def source_joins_transfer(self) -> bool:
+    """Whether the source runs device work inside `transfer`.
+
+    False by default: the source is idle once it has staged its weights. A
+    handler whose `transfer` drives collectives on the source's devices must
+    return True, so the source does not train again until the transfer
+    returns; the coordinator then signals `source_prepared` after `transfer`
+    instead of after staging.
+    """
+    return False
+
+  @property
+  def shares_world(self) -> bool:
+    """Whether sources and destinations are processes of one JAX world.
+
+    False by default. In a shared world no single process can be restarted,
+    and a failed collective may leave its peers blocked inside it, so the
+    coordinator treats every failed round as fatal to the run instead of
+    rolling back and waiting for worker restarts.
+    """
+    return False
+
   def close(self) -> None:
     """Releases any transport resources. Optional for implementations."""
+
+
+def call_in_daemon_thread(
+    fn: Callable[..., Any], *args: Any
+) -> futures.Future[Any]:
+  """Runs `fn(*args)` on a new daemon thread; returns its future.
+
+  For calls that may never return (a peer blocked in a collective): unlike an
+  executor's threads, a daemon thread does not keep the process from exiting.
+
+  Args:
+    fn: The blocking callable.
+    *args: Positional arguments for `fn`.
+
+  Returns:
+    A future resolved with `fn`'s result or exception.
+  """
+  future: futures.Future[Any] = futures.Future()
+
+  def _run() -> None:
+    if not future.set_running_or_notify_cancel():
+      return
+    try:
+      future.set_result(fn(*args))
+    except BaseException as e:  # pylint: disable=broad-except
+      future.set_exception(e)
+
+  threading.Thread(
+      target=_run, name=f"daemon_{getattr(fn, '__name__', 'call')}", daemon=True
+  ).start()
+  return future
 
 
 @runtime_checkable

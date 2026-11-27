@@ -264,6 +264,13 @@ class VanillaSampler(
           ' enable_raiden is False.',
           self.server_id,
       )
+    self._init_ici_delegate(
+        weight_sync_mode=self.weight_sync_mode,
+        partial_rollout=self.config.partial_rollout,
+        free_kv_cache=(
+            self.config.rollout_vllm_free_kv_cache_during_weight_sync
+        ),
+    )
 
     self._transformer_graphdef: graph.NodeDef = nnx.graphdef(transformer)  # pyrefly: ignore[bad-assignment]
     self._transformer_state: statelib.State = nnx.variables(transformer)

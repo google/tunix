@@ -16,7 +16,9 @@
 
 import asyncio
 import collections
+import threading
 import types
+from typing import Any
 from unittest import mock
 
 from absl.testing import absltest
@@ -579,21 +581,30 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_resume_from_checkpoint_tolerates_bad_metadata(self):
-    for bad_value in (None, "not-a-dict", {"step": "bogus"}):
+  def test_resume_from_checkpoint_without_checkpoint_support_is_fresh(self):
+    async def _run():
+      self.mock_actor.restore_checkpoint.return_value = None
+      coordinator = _FakeWeightSyncCoordinator()
+      engine = self._engine_with_coordinator(coordinator)
+
+      result = await engine.resume_from_checkpoint()
+
+      self.assertEqual(result, 0)
+      self.assertEqual(coordinator.calls, [])
+
+    asyncio.run(_run())
+
+  def test_resume_from_checkpoint_fails_fast_on_bad_metadata(self):
+    for bad_value, error in (
+        ("not-a-dict", TypeError),
+        ({"step": "bogus"}, ValueError),
+    ):
       with self.subTest(bad_value=bad_value):
+        self.mock_actor.restore_checkpoint.return_value = bad_value
+        engine = self._engine_with_coordinator(_FakeWeightSyncCoordinator())
 
-        async def _run(bad_value=bad_value):
-          self.mock_actor.restore_checkpoint.return_value = bad_value
-          coordinator = _FakeWeightSyncCoordinator()
-          engine = self._engine_with_coordinator(coordinator)
-
-          result = await engine.resume_from_checkpoint()
-
-          self.assertEqual(result, 0)
-          self.assertEqual(coordinator.calls, [])
-
-        asyncio.run(_run())
+        with self.assertRaises(error):
+          asyncio.run(engine.resume_from_checkpoint())
 
   def test_train_step_sends_only_the_request_to_fwd_bwd(self):
     async def _run():
@@ -4156,6 +4167,327 @@ class DistributedRLEngineTest(absltest.TestCase):
       await engine.close()
 
     asyncio.run(_run())
+
+
+class _BarrierFakeActorHandle(remote_execution.ActorHandle):
+  """Fake handle that blocks until all `n` actors enter an SPMD call."""
+
+  def __init__(
+      self,
+      wid: str,
+      barrier: threading.Barrier | None,
+      step_val: int,
+      restore_step: int = 3,
+      fail_on: str | None = None,
+      hang_on: str | None = None,
+  ):
+    self.wid = wid
+    self._barrier = barrier
+    self._step_val = step_val
+    self._restore_step = restore_step
+    self._fail_on = fail_on
+    self._hang_on = hang_on
+    self._hang_event = threading.Event()
+    self.calls: list[tuple[str, dict[str, Any]]] = []
+
+  def release_hang(self) -> None:
+    self._hang_event.set()
+
+  def submit(self, method: str, *args: Any, **kwargs: Any) -> Any:
+    self.calls.append((method, {"args": args, "kwargs": kwargs}))
+    if method == self._fail_on:
+      raise RuntimeError(f"{self.wid} boom on {method}")
+    if method == self._hang_on:
+      self._hang_event.wait(timeout=30.0)
+      return {"ok": True, "worker": self.wid}
+    if self._barrier is not None and method in (
+        "compile",
+        "fwd_bwd",
+        "update",
+        "save_checkpoint",
+        "restore_checkpoint",
+        "per_token_logps",
+    ):
+      # Proves calls are fanned out concurrently (sequential calls deadlock).
+      self._barrier.wait(timeout=5.0)
+    if method == "update":
+      return (self._step_val, {"worker": self.wid})
+    if method == "restore_checkpoint":
+      return {
+          "step": self._restore_step,
+          "global_step": self._restore_step,
+          "worker": self.wid,
+      }
+    if method == "get_metrics":
+      return {"worker": self.wid}
+    return {"ok": True, "worker": self.wid}
+
+  async def asubmit(self, method: str, *args: Any, **kwargs: Any) -> Any:
+    return await asyncio.to_thread(self.submit, method, *args, **kwargs)
+
+  def dispatch_task(self, request: Any) -> Any:
+    raise NotImplementedError
+
+  async def poll_responses(self, timeout_s: float = 0.0) -> Any:
+    del timeout_s
+    raise NotImplementedError
+
+
+class MultiActorFanOutUnitTest(absltest.TestCase):
+
+  def _register_active(
+      self,
+      reg: worker_registry.WorkerRegistry,
+      wid: str,
+      handle: remote_execution.ActorHandle,
+  ) -> None:
+    reg.register_handle(wid, [datatypes.Role.ACTOR], handle)
+    reg.set_status(
+        wid,
+        worker_registry.AdmissionStatus.ACTIVE,
+        expected_handle=handle,
+        expected_status=worker_registry.AdmissionStatus.REGISTERED,
+    )
+
+  def _make_engine(self):
+    reg = worker_registry.WorkerRegistry()
+    barrier = threading.Barrier(2)
+    # Register out of order (trainer-1 before trainer-0) to verify deterministic
+    # primary-worker selection by natural `worker_id`.
+    h1 = _BarrierFakeActorHandle("trainer-1", barrier, step_val=7)
+    h0 = _BarrierFakeActorHandle("trainer-0", barrier, step_val=7)
+    self._register_active(reg, "trainer-1", h1)
+    self._register_active(reg, "trainer-0", h0)
+    engine = distributed_rl_engine.DistributedRLEngine(registry=reg)
+    return engine, reg, h0, h1
+
+  def _dummy_payload(self) -> datatypes.RLTrainerPayload:
+    return datatypes.RLTrainerPayload(
+        prompt_ids=np.zeros((4, 2), np.int32),
+        prompt_mask=np.ones((4, 2), np.int32),
+        completion_ids=np.zeros((4, 2), np.int32),
+        completion_mask=np.ones((4, 2), np.int32),
+        advantages=np.zeros((4,), np.float32),
+    )
+
+  def test_engine_fans_out_spmd_calls_concurrently_and_returns_primary(self):
+    engine, _, h0, h1 = self._make_engine()
+    payload = self._dummy_payload()
+
+    async def _run():
+      out = await engine.train_step(payload, apply_optimizer=True)
+      self.assertEqual(out["train_step"], 7)
+      self.assertEqual(out["metrics"], {"worker": "trainer-0"})
+      lp = await engine.per_token_logps(datatypes.Role.ACTOR, items="batch")
+      self.assertEqual(lp["worker"], "trainer-0")
+      metrics = await engine.get_metrics(datatypes.Role.ACTOR)
+      self.assertEqual(metrics, {"worker": "trainer-0"})
+      saved = await engine.save_checkpoint(
+          datatypes.Role.ACTOR, metadata={"step": 7}, step=7, force=True
+      )
+      self.assertEqual(saved["worker"], "trainer-0")
+      restored_step = await engine.resume_from_checkpoint(datatypes.Role.ACTOR)
+      self.assertEqual(restored_step, 3)
+
+    asyncio.run(_run())
+    expected_methods = [
+        "fwd_bwd",
+        "update",
+        "per_token_logps",
+        "get_metrics",
+        "save_checkpoint",
+        "restore_checkpoint",
+    ]
+    self.assertEqual([m for m, _ in h0.calls], expected_methods)
+    self.assertEqual([m for m, _ in h1.calls], expected_methods)
+
+  def test_natural_worker_id_ordering(self):
+    reg = worker_registry.WorkerRegistry()
+    h10 = _BarrierFakeActorHandle("trainer-10", None, step_val=1)
+    h2 = _BarrierFakeActorHandle("trainer-2", None, step_val=1)
+    self._register_active(reg, "trainer-10", h10)
+    self._register_active(reg, "trainer-2", h2)
+    engine = distributed_rl_engine.DistributedRLEngine(registry=reg)
+    self.assertEqual(engine._role_handles(datatypes.Role.ACTOR), [h2, h10])
+
+  def test_update_and_restore_fail_fast_on_step_disagreement(self):
+    reg = worker_registry.WorkerRegistry()
+    barrier = threading.Barrier(2)
+    h0 = _BarrierFakeActorHandle(
+        "trainer-0", barrier, step_val=7, restore_step=3
+    )
+    h1 = _BarrierFakeActorHandle(
+        "trainer-1", barrier, step_val=8, restore_step=0
+    )
+    self._register_active(reg, "trainer-0", h0)
+    self._register_active(reg, "trainer-1", h1)
+    engine = distributed_rl_engine.DistributedRLEngine(registry=reg)
+
+    with self.assertRaisesRegex(RuntimeError, "disagreed on train_step"):
+      asyncio.run(engine.train_step(self._dummy_payload()))
+    with self.assertRaisesRegex(
+        RuntimeError, "disagreed on restored checkpoint step"
+    ):
+      asyncio.run(engine.resume_from_checkpoint(datatypes.Role.ACTOR))
+
+  def test_non_spmd_role_calls_only_the_primary_worker(self):
+    reg = worker_registry.WorkerRegistry()
+    handles = [
+        _BarrierFakeActorHandle(f"reference-{i}", None, step_val=1)
+        for i in range(2)
+    ]
+    for handle in handles:
+      reg.register_handle(handle.wid, [datatypes.Role.REFERENCE], handle)
+      reg.set_status(
+          handle.wid,
+          worker_registry.AdmissionStatus.ACTIVE,
+          expected_handle=handle,
+          expected_status=worker_registry.AdmissionStatus.REGISTERED,
+      )
+    engine = distributed_rl_engine.DistributedRLEngine(registry=reg)
+
+    out = asyncio.run(
+        engine.per_token_logps(datatypes.Role.REFERENCE, items="batch")
+    )
+
+    self.assertEqual(out["worker"], "reference-0")
+    self.assertEqual([m for m, _ in handles[0].calls], ["per_token_logps"])
+    self.assertEqual(handles[1].calls, [])
+
+  def test_actor_pool_shrinkage_fails_fast(self):
+    engine, reg, _, h1 = self._make_engine()
+    asyncio.run(engine.get_metrics(datatypes.Role.ACTOR))
+    reg.set_status(
+        "trainer-1",
+        worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
+        expected_handle=h1,
+        expected_status=worker_registry.AdmissionStatus.ACTIVE,
+    )
+    with self.assertRaisesRegex(RuntimeError, "shrunk from 2 active"):
+      asyncio.run(engine.get_metrics(datatypes.Role.ACTOR))
+
+  def test_configure_worker_fails_fast_without_waiting_on_hung_peer(self):
+    reg = worker_registry.WorkerRegistry()
+    h0 = _BarrierFakeActorHandle(
+        "trainer-0", None, step_val=1, hang_on="compile"
+    )
+    h1 = _BarrierFakeActorHandle(
+        "trainer-1", None, step_val=1, fail_on="compile"
+    )
+    self._register_active(reg, "trainer-0", h0)
+    self._register_active(reg, "trainer-1", h1)
+    engine = distributed_rl_engine.DistributedRLEngine(registry=reg)
+    try:
+      with self.assertRaisesRegex(RuntimeError, "trainer-1 boom on compile"):
+        engine._configure_trainer_workers(
+            [h0, h1], "actor", object(), object(), object(), precompile=True
+        )
+    finally:
+      h0.release_hang()
+
+  def test_cancelled_peer_fails_with_wrapped_error(self):
+    h0 = _BarrierFakeActorHandle("trainer-0", None, step_val=1)
+    h1 = _BarrierFakeActorHandle("trainer-1", None, step_val=1)
+    engine = distributed_rl_engine.DistributedRLEngine(
+        registry=worker_registry.WorkerRegistry()
+    )
+
+    async def _hang(*args: Any, **kwargs: Any) -> Any:
+      del args, kwargs
+      await asyncio.Event().wait()
+
+    with (
+        mock.patch.object(h0, "asubmit", side_effect=_hang, autospec=True),
+        mock.patch.object(
+            h1, "asubmit", side_effect=asyncio.CancelledError, autospec=True
+        ),
+    ):
+      with self.assertRaisesRegex(
+          RuntimeError, "SPMD call 'update' failed on one of 2 workers"
+      ) as raised:
+        asyncio.run(
+            asyncio.wait_for(
+                engine._invoke_role_workers([h0, h1], "update"), timeout=10
+            )
+        )
+    self.assertIsInstance(raised.exception.__cause__, asyncio.CancelledError)
+
+  def test_concurrent_spmd_fan_outs_reach_every_worker_in_one_order(self):
+    engine = distributed_rl_engine.DistributedRLEngine(
+        registry=worker_registry.WorkerRegistry()
+    )
+    events: list[tuple[str, str, str]] = []
+
+    class _Handle:
+
+      def __init__(self, wid: str, delays: dict[str, float]):
+        self.wid = wid
+        self._delays = delays
+
+      async def asubmit(self, method: str, **kwargs: Any) -> Any:
+        tag = kwargs["tag"]
+        events.append(("start", self.wid, tag))
+        # Unequal per-host latency: an unordered fan-out lets the fast host
+        # start the next call while the slow host is still in this one.
+        await asyncio.sleep(self._delays[tag])
+        events.append(("end", self.wid, tag))
+        return tag
+
+    h0 = _Handle("trainer-0", {"mb1": 0.05, "mb2": 0.0, "mb3": 0.0})
+    h1 = _Handle("trainer-1", {"mb1": 0.0, "mb2": 0.05, "mb3": 0.0})
+
+    async def _run():
+      return await asyncio.gather(*(
+          engine._invoke_role_workers([h0, h1], "fwd_bwd", tag=tag)
+          for tag in ("mb1", "mb2", "mb3")
+      ))
+
+    self.assertEqual(asyncio.run(_run()), ["mb1", "mb2", "mb3"])
+    for wid in ("trainer-0", "trainer-1"):
+      self.assertEqual(
+          [t for kind, w, t in events if kind == "start" and w == wid],
+          ["mb1", "mb2", "mb3"],
+      )
+    # No call starts on any host before the previous one ended on every host.
+    for prev, nxt in (("mb1", "mb2"), ("mb2", "mb3")):
+      last_end = max(
+          i
+          for i, (kind, _, t) in enumerate(events)
+          if (kind, t) == ("end", prev)
+      )
+      first_start = min(
+          i
+          for i, (kind, _, t) in enumerate(events)
+          if (kind, t) == ("start", nxt)
+      )
+      self.assertLess(last_end, first_start)
+
+  def test_single_worker_calls_are_not_serialized(self):
+    engine = distributed_rl_engine.DistributedRLEngine(
+        registry=worker_registry.WorkerRegistry()
+    )
+    both_started = asyncio.Event()
+    started = []
+
+    class _Handle:
+
+      async def asubmit(self, method: str, **kwargs: Any) -> Any:
+        del method
+        started.append(kwargs["tag"])
+        if len(started) == 2:
+          both_started.set()
+        await asyncio.wait_for(both_started.wait(), timeout=5)
+
+    handle = _Handle()
+
+    async def _run():
+      await asyncio.gather(
+          engine._invoke_role_workers([handle], "fwd_bwd", tag="a"),
+          engine._invoke_role_workers([handle], "fwd_bwd", tag="b"),
+      )
+
+    asyncio.run(_run())
+    self.assertEqual(started, ["a", "b"])
 
 
 if __name__ == "__main__":

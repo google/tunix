@@ -10506,6 +10506,14 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
       rollout_handle.poll_responses = mock.AsyncMock(
           side_effect=_failing_poll_responses
       )
+      default_actor_asubmit = actor_handle.asubmit
+
+      async def _actor_asubmit(method_name=None, *args, **kwargs):
+        if method_name == "restore_checkpoint":
+          return None  # A fresh run.
+        return await default_actor_asubmit(method_name, *args, **kwargs)
+
+      actor_handle.asubmit = _actor_asubmit
 
       engine = _make_engine(
           rollout_workers=[rollout_handle],

@@ -53,6 +53,7 @@ class ClusterOrchestrator:
       weight_sync_timeouts: weight_sync_coordinator.PhaseTimeouts | None = None,
       fault_tolerance_config: datatypes.FaultToleranceConfig | None = None,
       weight_sync_handler: weight_sync.WeightSyncHandler | None = None,
+      ici_chunk_bytes: int | None = None,
   ):
     """Initializes ClusterOrchestrator.
 
@@ -73,6 +74,8 @@ class ClusterOrchestrator:
         `FaultToleranceManager`, or None to use `FaultToleranceConfig()`
         defaults.
       weight_sync_handler: Optional explicit WeightSyncHandler instance for DI.
+      ici_chunk_bytes: Optional upper bound on global bytes per ICI collective
+        when `weight_sync_mode` is `"ici"`.
     """
     self.config = config
     self.registry = (
@@ -95,6 +98,7 @@ class ClusterOrchestrator:
     self._weight_sync_mode = str(mode).lower() if mode is not None else None
     self._weight_sync_timeouts = weight_sync_timeouts
     self._weight_sync_handler = weight_sync_handler
+    self._ici_chunk_bytes = ici_chunk_bytes
     # The sole construction site for this process's Trajectory Store: one
     # ClusterOrchestrator exists per orchestrator process, so building it
     # here — once, in __init__ — is the whole guard. Its lifetime is meant
@@ -249,7 +253,9 @@ class ClusterOrchestrator:
           self._weight_sync_handler
           if self._weight_sync_handler is not None
           else weight_sync_coordinator.create_default_handler(
-              mode=self._weight_sync_mode
+              mode=self._weight_sync_mode,
+              registry=self.registry,
+              ici_chunk_bytes=self._ici_chunk_bytes,
           )
       )
       coordinator = weight_sync_coordinator.WeightSyncCoordinator(

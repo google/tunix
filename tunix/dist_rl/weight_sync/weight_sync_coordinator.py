@@ -85,6 +85,12 @@ calls raise until `reset_after_recovery()` is called, because starting a new
 round against workers in unknown states can corrupt them further (or regress
 policy versions).
 
+A handler that `shares_world` (ICI: trainer and rollouts are processes of one
+JAX world) gets none of this recovery machinery. No process can be restarted
+alone and a peer may be blocked in a collective, so any failed round skips
+rollback and source release and raises `FatalWeightSyncError`; the run must
+stop.
+
 Rounds are STRICTLY SYNCHRONOUS by design: rollout resumes only once the
 serving fleet is on one policy version, so a round either publishes
 everywhere or rolls back, and a split fleet is a failure rather than a mode.
@@ -165,16 +171,63 @@ class NullHandler(weight_sync.WeightSyncHandler):
     return weight_sync.TransferResult(req_id=req_id or "", success=True)
 
 
+def _build_ici_handler(
+    registry: worker_registry.WorkerRegistry | None,
+    ici_chunk_bytes: int | None,
+) -> weight_sync.WeightSyncHandler:
+  """Constructs an `IciHandler` bound to all trainer and rollout workers."""
+  # Lazy imports match `raiden_handler` so rollout workers importing
+  # `WorkerRoundTracker` do not pull coordinator handlers at import time.
+  # pylint: disable=g-import-not-at-top
+  from tunix.dist_rl.weight_sync import ici_handler
+  from tunix.dist_rl.weight_sync import ici_transport
+  # pylint: enable=g-import-not-at-top
+
+  if registry is None:
+    raise ValueError(
+        "weight sync mode 'ici' needs the worker registry: its handler runs"
+        " the transfer on the trainer and rollout workers"
+    )
+
+  def _world_workers() -> list[remote_execution.ActorHandle]:
+    # Every trainer and rollout worker, whatever its admission status: a
+    # collective needs every process of the JAX world, serving or not.
+    handles: dict[str, remote_execution.ActorHandle] = {}
+    for role in (datatypes.Role.ACTOR, datatypes.Role.ROLLOUT):
+      for info, handle in registry.targets(role, statuses=None):
+        handles[info.worker_id] = handle
+    return list(handles.values())
+
+  chunk_bytes = (
+      ici_transport.DEFAULT_CHUNK_BYTES
+      if ici_chunk_bytes is None
+      else int(ici_chunk_bytes)
+  )
+  logging.info("Built IciHandler (chunk_bytes=%d).", chunk_bytes)
+  return ici_handler.IciHandler(_world_workers, chunk_bytes=chunk_bytes)
+
+
 def create_default_handler(
     mode: str | weight_sync.WeightSyncMode | None = None,
+    registry: worker_registry.WorkerRegistry | None = None,
+    ici_chunk_bytes: int | None = None,
 ) -> weight_sync.WeightSyncHandler:
   """Creates the default coordinator weight sync handler.
 
-  Supports `WeightSyncMode.RAIDEN` for production TPU RMA weight sync and
-  `WeightSyncMode.NOOP` / `WeightSyncMode.NONE` for protocol-only no-op
-  transfers (`NullHandler`).
+  Supports `WeightSyncMode.RAIDEN` for production TPU RMA weight sync,
+  `WeightSyncMode.ICI` for device-to-device sync between workers sharing one
+  JAX world, and `WeightSyncMode.NOOP` / `WeightSyncMode.NONE` for
+  protocol-only no-op transfers (`NullHandler`).
   Raises `NotImplementedError` for valid modes without a coordinator transport
   handler yet, and `ValueError` for unknown mode strings.
+
+  Args:
+    mode: Weight sync mode; defaults to the `WEIGHT_SYNC_MODE` environment
+      variable, then "raiden".
+    registry: The orchestrator's worker registry. Required by `ICI`, whose
+      handler fans the transfer out to the workers itself.
+    ici_chunk_bytes: Optional upper bound on global bytes per ICI collective;
+      defaults to `ici_transport.DEFAULT_CHUNK_BYTES` when None.
   """
   raw_mode = mode or os.getenv("WEIGHT_SYNC_MODE", "raiden")
   try:
@@ -193,6 +246,8 @@ def create_default_handler(
     )
     logging.info("Built RaidenHandler natively; port %d", handler.port)
     return handler
+  if resolved_mode == weight_sync.WeightSyncMode.ICI:
+    return _build_ici_handler(registry, ici_chunk_bytes)
   if resolved_mode in (
       weight_sync.WeightSyncMode.NONE,
       weight_sync.WeightSyncMode.NOOP,
@@ -318,6 +373,12 @@ def _manifest_mismatches(
           f" destination {dst_item}"
       )
   return problems
+
+
+def has_round(sync_request: Any) -> bool:
+  """Whether `sync_request` belongs to a coordinator-tracked round."""
+  extra = getattr(sync_request, "extra_config", None) or {}
+  return extra.get("req_id") is not None
 
 
 class StaleRoundError(RuntimeError):
@@ -592,6 +653,20 @@ class WeightSyncError(RuntimeError):
     self.result = result
 
 
+class FatalWeightSyncError(RuntimeError):
+  """A round failed in a world where no worker can be restarted.
+
+  Raised instead of `WeightSyncError` when the handler `shares_world`: one
+  process of a shared JAX world cannot be restarted on its own, and a peer may
+  still be blocked inside a collective, so the run must stop. No rollback is
+  attempted. `result` is the round's result when the round produced one.
+  """
+
+  def __init__(self, message: str, result: Optional[WeightSyncResult]):
+    super().__init__(message)
+    self.result = result
+
+
 class WeightSyncCoordinator:
   """Runs weight sync rounds against a `WorkerRegistry`.
 
@@ -666,7 +741,16 @@ class WeightSyncCoordinator:
 
     Deliberately explicit: the coordinator cannot verify the recovery, it can
     only insist a human (or supervisor) claims it happened.
+
+    Raises:
+      RuntimeError: If the handler `shares_world`, where the fleet cannot be
+        restored without restarting every process.
     """
+    if self._handler.shares_world:
+      raise RuntimeError(
+          "a shared-world (ICI) fleet cannot recover from a failed round;"
+          f" restart the whole run ({self._poisoned})"
+      )
     logging.warning("coordinator poison cleared: %s", self._poisoned)
     self._poisoned = None
 
@@ -856,8 +940,9 @@ class WeightSyncCoordinator:
       source_prepared: Set once every source has staged this round's weights
         and returned its metadata. A caller running this round as a task may
         then let the source train again, so the handler must transfer only the
-        staged copy. Never set if the round fails before or during source
-        prepare.
+        staged copy. When the handler's `source_joins_transfer` is True it
+        is set after a successful `transfer` instead. Never set if the round
+        fails before that point.
       **extra_config: Carried to the workers in the request.
     """
     if self._poisoned:
@@ -897,6 +982,18 @@ class WeightSyncCoordinator:
           min_retained_policy_version=min_retained_policy_version,
           source_prepared=source_prepared,
       )
+    except Exception as e:
+      if not self._handler.shares_world:
+        raise
+      self._poisoned = self._poisoned or f"fatal shared-world failure: {e!r}"
+      result = getattr(e, "result", None)
+      failures = list(result.failures) if result is not None else []
+      raise FatalWeightSyncError(
+          "weight sync failed in a shared JAX world (ICI); a process cannot be"
+          " restarted on its own and peers may be blocked in a collective, so"
+          f" the run must stop: {e}; failures: {failures}",
+          result,
+      ) from e
     finally:
       elapsed_time = time.monotonic() - start_time
       logging.info("Weight sync finished in %.2f seconds.", elapsed_time)
@@ -961,6 +1058,8 @@ class WeightSyncCoordinator:
         )
 
     async def record_workers(final_error: str = "") -> None:
+      if self._handler.shares_world:
+        return  # The round is fatal; probing wedged workers only delays it.
       for destination in destinations:
         wid, handle = destination
         if wid in worker_reports:
@@ -1007,7 +1106,11 @@ class WeightSyncCoordinator:
             for per_source in src_meta_lists
             for m in per_source
         ]
-        if src_metadata and source_prepared is not None:
+        if (
+            src_metadata
+            and source_prepared is not None
+            and not self._handler.source_joins_transfer
+        ):
           source_prepared.set()
         await asyncio.gather(*[
             asyncio.wait_for(
@@ -1202,17 +1305,21 @@ class WeightSyncCoordinator:
       state = RoundState.TRANSFERRING
       transfer_in_flight = True
       try:
+        transfer_call = functools.partial(
+            self._handler.transfer,
+            src_units=list(source_units),
+            dst_units=list(destination_units),
+            req_id=req_id,
+            generation=uuid,
+        )
+        # A shared-world transfer that fails may never return; a daemon
+        # thread keeps it from blocking process exit.
         transfer = await asyncio.wait_for(
-            loop.run_in_executor(
-                None,
-                functools.partial(
-                    self._handler.transfer,
-                    src_units=list(source_units),
-                    dst_units=list(destination_units),
-                    req_id=req_id,
-                    generation=uuid,
-                ),
-            ),
+            asyncio.wrap_future(
+                weight_sync.call_in_daemon_thread(transfer_call)
+            )
+            if self._handler.shares_world
+            else loop.run_in_executor(None, transfer_call),
             self._timeouts.transfer,
         )
         transfer_in_flight = False
@@ -1261,6 +1368,8 @@ class WeightSyncCoordinator:
         poison_if_needed()
         await record_workers("transfer failed")
         raise fail("transfer failed")
+      if source_prepared is not None and self._handler.source_joins_transfer:
+        source_prepared.set()
 
       state = RoundState.H2D_IN_PROGRESS
       h2d_failures = await self._phase_on_all(
@@ -1307,6 +1416,13 @@ class WeightSyncCoordinator:
 
     except asyncio.CancelledError:
       # The caller's task got cancelled mid-round.
+      if self._handler.shares_world and state is not RoundState.COMMITTED:
+        # No rollback: in a shared world the run is over anyway.
+        self._poisoned = self._poisoned or (
+            f"round {round_index} (req_id {req_id}) cancelled in a shared"
+            " world"
+        )
+        raise
       if transfer_in_flight:
         # The cancel landed while the blocking transfer may still be running
         # in its executor thread, which cancellation cannot reach. This is
@@ -1464,7 +1580,14 @@ class WeightSyncCoordinator:
             state = RoundState.ABORTED
       raise
     finally:
-      if release_source:
+      if self._handler.shares_world and state is not RoundState.COMMITTED:
+        # A fatal round: do not wait on sources that may be wedged.
+        logging.error(
+            "round %d failed in a shared JAX world: source staging NOT"
+            " released; the run must stop",
+            round_index,
+        )
+      elif release_source:
         release_request = prepared_request or request
 
         async def _release_one_source(wid: str, handle: Any) -> None:
@@ -1736,6 +1859,11 @@ class WeightSyncCoordinator:
         "aborted" and "possibly serving the new weights" must never be the
         same verdict.
     """
+    if self._handler.shares_world:
+      failures.append(
+          "shared JAX world: no rollback, the failure is fatal to the run"
+      )
+      return RoundState.FAILED_NEEDS_RESTART
     abort_failures = await self._abort_all(destinations, request)
     if abort_failures:
       failures += abort_failures

@@ -14,7 +14,7 @@
 
 """Checkpoint manager for PEFT."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 import functools
 import os
 import time
@@ -32,30 +32,46 @@ from tunix.models import hf_mapping
 from tunix.models import safetensors_saver
 from tunix.sft import checkpoint_options
 from tunix.utils import sharding_utils
+from tunix.utils import subworld_checkpoint
 
 
-def _convert_host_local_array(x: Any) -> Any:
-  """Converts host-local arrays to global arrays in multi-device/multi-host settings."""
-  if (
-      isinstance(x, jax.Array)
-      and len(x.devices()) == 1
-      and len(jax.devices()) > 1
-  ):
-    mesh = jax.sharding.Mesh(np.array(jax.devices()), axis_names=('x',))
-    replicated_sharding = jax.sharding.NamedSharding(
-        mesh, jax.sharding.PartitionSpec()
-    )
-    if not x.shape:
-      return sharding_utils.place_array_on_target(
-          np.asarray(x.item()), replicated_sharding
-      )
-    else:
+def _mesh_devices(state: Any) -> list[jax.Device] | None:
+  """Returns the devices of the first `NamedSharding` mesh in `state`."""
+  for leaf in jax.tree_util.tree_leaves(state):
+    sharding = getattr(leaf, 'sharding', None)
+    if isinstance(sharding, jax.sharding.NamedSharding):
+      return list(sharding.mesh.devices.flat)
+  return None
+
+
+def _convert_host_local_array(
+    x: Any, *, mesh_devices: Sequence[jax.Device] | None = None
+) -> Any:
+  """Converts host-local arrays to global arrays replicated on `mesh_devices`.
+
+  Args:
+    x: PyTree leaf.
+    mesh_devices: Target devices; all devices when None. Pass the model's
+      devices so a shared multi-process JAX world never pulls in others.
+
+  Returns:
+    `x` as a replicated global array, or unchanged if already global.
+  """
+  devices = list(mesh_devices) if mesh_devices else jax.devices()
+  if isinstance(x, jax.Array) and len(x.devices()) == 1 and len(devices) > 1:
+    if x.shape and mesh_devices is None:
       try:
         return ocp_utils.fully_replicated_host_local_array_to_global_array(x)
       except ValueError:
-        return sharding_utils.place_array_on_target(
-            np.asarray(x), replicated_sharding
-        )
+        pass
+    mesh = jax.sharding.Mesh(np.array(devices), axis_names=('x',))
+    replicated_sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec()
+    )
+    # `np.asarray(x)` keeps the dtype (e.g. int32 step counts, bfloat16).
+    return sharding_utils.place_array_on_target(
+        np.asarray(x), replicated_sharding
+    )
   return x
 
 
@@ -147,6 +163,8 @@ class CheckpointManager:
     self._checkpointer: ocp.training.Checkpointer | None = None
     self._options = checkpoint_options.resolve_checkpointing_defaults(options)
     if root_directory:
+      if subworld_checkpoint.is_subworld(self._options.active_processes):
+        subworld_checkpoint.allow_subworld_root_directory_creation()
       self._checkpointer = ocp.training.Checkpointer(
           root_directory,
           context=self._context,
@@ -197,7 +215,9 @@ class CheckpointManager:
     if is_proxy_pathways:
       ctx.array.saving.use_ocdbt = False
       ctx.array.saving.use_zarr3 = False
-    return ctx
+    return subworld_checkpoint.configure_v1_context(
+        ctx, self._options.active_processes
+    )
 
   def _save_checkpointables(
       self,
@@ -271,8 +291,14 @@ class CheckpointManager:
 
     if optimizer is not None:
       optimizer_state = nnx.state(optimizer, nnx.optimizer.OptState)
-      # Convert host-local arrays in state PyTree to global arrays.
-      optimizer_state = jax.tree.map(_convert_host_local_array, optimizer_state)
+      # Convert host-local arrays in state PyTree to global arrays on the
+      # model's devices.
+      optimizer_state = jax.tree.map(
+          functools.partial(
+              _convert_host_local_array, mesh_devices=_mesh_devices(params)
+          ),
+          optimizer_state,
+      )
       checkpointables = {
           'model_params': params,
           'optimizer_state': optimizer_state,
@@ -408,7 +434,18 @@ class CheckpointManager:
     Raises:
       ValueError: If `output_dir` is empty or missing while checkpointing is
         disabled, or if `model` holds LoRA parameters.
+      NotImplementedError: If checkpointing runs on a sub-world of the JAX
+        processes (`active_processes`).
     """
+    if subworld_checkpoint.is_subworld(self._options.active_processes):
+      # `save_safetensors` barriers and broadcasts over every process of the
+      # world; the processes outside the sub-world never join, so all hang.
+      raise NotImplementedError(
+          'export_safetensors() runs collectives over all'
+          f' {jax.process_count()} JAX processes, but checkpointing is scoped'
+          ' to processes'
+          f' {sorted(self._options.active_processes or ())}.'
+      )
     if output_dir is None:
       if not self._root_directory:
         raise ValueError(

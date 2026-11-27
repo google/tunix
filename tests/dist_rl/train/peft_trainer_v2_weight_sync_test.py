@@ -72,6 +72,7 @@ class WeightSyncStagingTest(absltest.TestCase):
         _sampler_type="inprocess_vllm",
         _rollout_tp_size=1,
         _weight_sync_worker=None,
+        _weight_sync_worker_factory=None,
     )
 
   def test_prepare_stages_and_returns_metadata(self):

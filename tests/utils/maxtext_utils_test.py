@@ -18,6 +18,7 @@ from absl.testing import absltest
 import jax
 from jax import numpy as jnp
 from tunix.utils import maxtext_utils
+from tunix.utils import subworld_checkpoint
 
 # MaxText optimizer config keys. `AdamWOptions` sets all but opt_type, which
 # stays at MaxText's default (adamw) so env overrides of it keep working.
@@ -1254,6 +1255,73 @@ class MaxTextUtilsTest(absltest.TestCase):
       )
     self.assertIn(
         "no callable '_execute_group_target_free'", "\n".join(warn_logs.output)
+    )
+
+  def test_create_maxtext_mesh_forwards_devices(self):
+    mock_mutils = mock.MagicMock()
+    cfg = mock.MagicMock(mesh_axes=("fsdp", "tp"))
+    devices = [mock.sentinel.dev0, mock.sentinel.dev1]
+
+    with (
+        mock.patch.object(
+            maxtext_utils,
+            "maxtext_modules",
+            return_value=(None, None, mock_mutils),
+            autospec=True,
+        ),
+        mock.patch.object(jax.sharding, "Mesh", autospec=True) as mock_mesh,
+    ):
+      maxtext_utils.create_maxtext_mesh(cfg, devices=devices)
+
+    mock_mutils.create_device_mesh.assert_called_once_with(
+        cfg, devices=devices
+    )
+    mock_mesh.assert_called_once_with(
+        mock_mutils.create_device_mesh.return_value, ("fsdp", "tp")
+    )
+
+
+  def test_create_maxtext_engine_scopes_checkpoints_in_subworld(self):
+    mock_engine_mod = mock.MagicMock()
+    mock_engine_mod.MaxTextTrainingEngine.return_value.model = object()
+    cfg = mock.MagicMock(logical_axis_rules=())
+    mesh = mock.MagicMock()
+
+    with (
+        mock.patch.object(
+            maxtext_utils,
+            "maxtext_modules",
+            return_value=(None, mock_engine_mod, None),
+            autospec=True,
+        ),
+        mock.patch.object(
+            maxtext_utils, "_configure_target_free_rollout_dtypes"
+        ),
+        mock.patch.object(
+            subworld_checkpoint,
+            "mesh_process_indices",
+            return_value=frozenset({0, 1}),
+        ),
+        mock.patch.object(
+            subworld_checkpoint, "is_subworld", return_value=True
+        ),
+        mock.patch.object(
+            subworld_checkpoint,
+            "multiprocessing_options",
+            return_value=mock.sentinel.mp_options,
+        ) as mp_options,
+    ):
+      maxtext_utils.create_maxtext_engine(
+          cfg, mesh, wrap_with_tunix_adapter=False, log_shapes=False
+      )
+
+    mp_options.assert_called_once_with(frozenset({0, 1}))
+    mock_engine_mod.MaxTextTrainingEngine.assert_called_once_with(
+        cfg,
+        mesh=mesh,
+        wrap_with_tunix_adapter=False,
+        tokenizer_pad_id=0,
+        checkpoint_multiprocessing_options=mock.sentinel.mp_options,
     )
 
 

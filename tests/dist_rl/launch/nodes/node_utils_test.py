@@ -25,7 +25,7 @@ import pickle
 import signal
 import sys
 import tempfile
-from typing import Literal
+from typing import Any, Literal
 import threading
 from unittest import mock
 
@@ -364,6 +364,29 @@ class WorkerIdAndPortTest(absltest.TestCase):
     with mock.patch.dict(os.environ, env, clear=True):
       with self.assertRaisesRegex(ValueError, "must be set"):
         node_utils.worker_id(hp, "rollout", "r-0")
+
+  def test_k8s_trainer_replica_appends_index_and_base_id_omits_it(self):
+    hp = resolve_config.initialize([
+        "cluster_config.target=k8s",
+        "cluster_config.k8s.tunix_image=img:latest",
+        "cluster_config.k8s.trainer_id=my-train",
+        "cluster_config.trainer_replicas=2",
+        "weight_sync_config.mode=ici",
+        "cluster_config.fault_tolerance.enabled=false",
+        "rollout_engine=inprocess_vllm",
+    ])
+    replica_env = node_utils.TRAINER_REPLICA_ENV
+    with mock.patch.dict(os.environ, {replica_env: "1"}):
+      self.assertEqual(
+          node_utils.worker_id(hp, "trainer", "trainer-0"), "my-train-1"
+      )
+    self.assertEqual(
+        node_utils.base_worker_id(hp, "trainer", "trainer-0"), "my-train"
+    )
+    env = {k: v for k, v in os.environ.items() if k != replica_env}
+    with mock.patch.dict(os.environ, env, clear=True):
+      with self.assertRaisesRegex(ValueError, f"{replica_env} must be set"):
+        node_utils.worker_id(hp, "trainer", "trainer-0")
 
   def test_external_target_uses_fixed_local_worker_ids(self):
     hp = resolve_config.initialize(list(_EXTERNAL))
@@ -981,7 +1004,8 @@ class CreateMeshTest(absltest.TestCase):
 
   def test_validates_device_count(self):
     hp = resolve_config.initialize(["actor_model_config.mesh.shape=(2,2)"])
-    with mock.patch.object(jax, "device_count", return_value=2):
+    devices = [_FakeTpuDevice(id=i, coords=(i, 0, 0)) for i in range(2)]
+    with mock.patch.object(jax, "devices", return_value=devices):
       with self.assertRaisesRegex(
           ValueError, "Trainer mesh dimensions must multiply"
       ):
@@ -1019,13 +1043,50 @@ class CreateMeshTest(absltest.TestCase):
     hp = resolve_config.initialize(["actor_model_config.mesh.shape=(8,8)"])
     with (
         mock.patch.object(jax, "devices", return_value=devices),
-        mock.patch.object(jax, "device_count", return_value=len(devices)),
         mock.patch.object(node_utils, "Mesh", autospec=True) as mesh_cls,
     ):
       node_utils.create_mesh(hp, "actor_model_config", "Trainer")
     device_mesh = mesh_cls.call_args.args[0]
     self.assertEqual(device_mesh.shape, (8, 8))
     self.assertCountEqual([d.id for d in device_mesh.flat], range(64))
+
+  def _mesh_device_ids(
+      self, shape: str, *, second_process_only: bool = False
+  ) -> list[int]:
+    # Two processes with four devices each, as in a multi-host JAX world.
+    devices: list[Any] = [
+        _FakeTpuDevice(id=i, coords=coords)
+        for i, coords in enumerate(
+            itertools.product(range(2), range(2), range(2))
+        )
+    ]
+    hp = resolve_config.initialize([
+        f"actor_model_config.mesh.shape={shape}",
+        "weight_sync_config.mode=ici",
+        "cluster_config.fault_tolerance.enabled=false",
+        "rollout_engine=vanilla",
+    ])
+    with (
+        mock.patch.object(jax, "devices", return_value=devices),
+        mock.patch.object(node_utils, "Mesh", autospec=True) as mesh_cls,
+    ):
+      node_utils.create_mesh(
+          hp,
+          "actor_model_config",
+          "Trainer",
+          devices=devices[4:] if second_process_only else None,
+      )
+    return [d.id for d in mesh_cls.call_args.args[0].flat]
+
+  def test_mesh_spans_every_process_by_default(self):
+    # Also under ICI: a node outside the shared world (e.g. the reference)
+    # meshes over all of its devices.
+    self.assertCountEqual(self._mesh_device_ids("(8,1)"), range(8))
+
+  def test_mesh_spans_only_the_explicit_devices(self):
+    self.assertCountEqual(
+        self._mesh_device_ids("(4,1)", second_process_only=True), range(4, 8)
+    )
 
 
 @dataclasses.dataclass(frozen=True)

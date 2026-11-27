@@ -42,6 +42,7 @@ from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import tracer as perf_tracer_lib
 from tunix.sft import checkpoint_manager
+from tunix.sft import checkpoint_options
 from tunix.sft import hooks
 from tunix.sft import inflight_throttler
 from tunix.sft import metrics_logger as sft_metrics_logger
@@ -50,6 +51,7 @@ from tunix.sft import profiler_jax
 from tunix.sft import progress_bar
 from tunix.sft import sharding_utils
 from tunix.sft import utils
+from tunix.utils import subworld_checkpoint
 from typing_extensions import override
 
 ArrayLike: TypeAlias = common_datatypes.ArrayLike
@@ -406,6 +408,22 @@ def _cast_state_to_target_dtypes(
   return jax.tree_util.tree_unflatten(src_treedef, converted_leaves)
 
 
+def _resolve_subworld_checkpoint_options(
+    model: nnx.Module,
+    ckpt_options: checkpoint_options.CheckpointingOptions | None,
+) -> checkpoint_options.CheckpointingOptions | None:
+  """Infers `active_processes` when `model` spans a sub-world of JAX hosts."""
+  if jax.process_count() <= 1:
+    return ckpt_options
+  model_procs = subworld_checkpoint.state_process_indices(nnx.state(model))
+  if not subworld_checkpoint.is_subworld(model_procs):
+    return ckpt_options
+  resolved = checkpoint_options.resolve_checkpointing_defaults(ckpt_options)
+  if resolved.active_processes is not None:
+    return ckpt_options
+  return dataclasses.replace(resolved, active_processes=model_procs)
+
+
 class PeftTrainer(abstract_trainer.AbstractTrainer):
   """PEFT trainer for LoRA. Only LoRA parameters are updated.
 
@@ -469,9 +487,12 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         ..., jax.Array | Tuple[jax.Array, Any] | utils.LossOutput
     ] = _default_loss_fn
     self.gen_model_input_fn = lambda x: x
+    ckpt_options = _resolve_subworld_checkpoint_options(
+        self.model, self.config.checkpointing_options
+    )
     self.checkpoint_manager = checkpoint_manager.CheckpointManager(
         root_directory=self.config.checkpoint_root_directory,
-        options=self.config.checkpointing_options,
+        options=ckpt_options,
     )
     self.metrics_logger = metrics_logger
     self.metrics_prefix = self.config.metrics_prefix
@@ -542,6 +563,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._sampler_type = sampler_type
     self._rollout_tp_size = rollout_tp_size
     self._weight_sync_worker: Any = None
+    self._weight_sync_worker_factory = weight_sync_worker_factory
 
   def _sync_step_derived_state(self) -> None:
     """Recomputes everything derived from `_train_steps`"""
@@ -1113,6 +1135,22 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     payload = self._prepare_inputs(payload)
     if dataclasses.is_dataclass(payload) and hasattr(payload, "metadata"):
       payload = dataclasses.replace(payload, metadata={})
+    mesh = pxla.thread_resources.env.physical_mesh
+    if not mesh.empty and len(
+        subworld_checkpoint.mesh_process_indices(mesh)
+    ) > 1:
+      # Under multi-host McJAX, the orchestrator broadcasts the full global
+      # micro-batch to every trainer host; slice each host's addressable piece
+      # via `place_array_leaf` (`make_array_from_callback`) instead of
+      # `make_array_from_process_local_data`, which would multiply the global
+      # batch size by the trainer process count.
+      pspec = shd.PartitionSpec(*self.config.data_sharding_axis)
+      return jax.tree.map(
+          lambda x: sharding_utils.place_array_leaf(
+              x, sharding_utils.get_sharding(x, mesh=mesh, pspec=pspec)
+          ),
+          payload,
+      )
     return sharding_utils.shard_input(payload, self.config.data_sharding_axis)
 
   def _record_fwd_bwd(self, train_loss: jax.Array, aux: Any) -> None:
@@ -1427,11 +1465,14 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
   @override
   def prepare_weight_sync(self, *, sync_request: Any = None) -> Any:
-    """Stages this round's weights on the raiden transport, returns metadata."""
+    """Stages this round's weights on the sync transport, returns metadata."""
     del sync_request
     worker = self._weight_sync_worker
     if worker is None:
-      worker = _default_weight_sync_worker()
+      factory = (
+          self._weight_sync_worker_factory or _default_weight_sync_worker
+      )
+      worker = factory()
       self._weight_sync_worker = worker
 
     backend = "vllm_jax" if "vllm" in self._sampler_type else self._sampler_type
@@ -1487,11 +1528,36 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
   @override
   def release_weight_sync(self, *, sync_request: Any = None) -> Any:
     """Ends this round's staging hold."""
-    del sync_request
     worker = self._weight_sync_worker
     if worker is not None and worker.bound:
-      logging.vlog(1, "raiden metrics: %s", worker.metrics())
+      logging.vlog(1, "weight sync metrics: %s", worker.metrics())
+      # Lets a transport drop its references to this round's converted copy
+      # (a no-op for Raiden, whose staging is persistent).
+      worker.release(sync_request)
     return True
+
+  def ici_check(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Validates this trainer's part of an ICI transfer plan."""
+    if (
+        self._weight_sync_worker is None
+        and request["plan"] is None
+        and self._weight_sync_worker_factory is not None
+    ):
+      self._weight_sync_worker = self._weight_sync_worker_factory()
+    return self._require_ici_worker().check(request)
+
+  def ici_transfer(self, request: Mapping[str, Any]) -> Mapping[str, float]:
+    """Enters the ICI transfer collectives as the source."""
+    return self._require_ici_worker().transfer(request)
+
+  def _require_ici_worker(self) -> Any:
+    worker = self._weight_sync_worker
+    if worker is None:
+      raise RuntimeError(
+          "ICI weight sync needs prepare_weight_sync to have run with an ICI"
+          " source synchronizer (weight_sync_config.mode: ici)"
+      )
+    return worker
 
   @override
   def get_metrics(self) -> datatypes.MetricsBuffer:

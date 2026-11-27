@@ -242,6 +242,10 @@ class WeightSyncMode(str, enum.Enum):
     GCS: Experimental Orbax checkpoint-staged transfer through a shared
       `gs://` or filesystem staging directory (wired via
       `tunix.experimental.weight_sync`).
+    ICI: Device-to-device transfer with JAX collectives over the TPU
+      interconnect, for trainer and rollout processes that share one
+      multi-process JAX world on a single slice (wired in
+      `WeightSyncCoordinator` via `IciHandler`).
   """
 
   NONE = "none"
@@ -251,6 +255,7 @@ class WeightSyncMode(str, enum.Enum):
   FS = "fs"
   NCCL = "nccl"
   GCS = "gcs"
+  ICI = "ici"
 
 
 DEFAULT_WEIGHT_SYNC_MODE = WeightSyncMode.NONE

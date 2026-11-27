@@ -453,11 +453,12 @@ def required_workers(
     The minimum worker count per role.
   """
   cluster = hp.config_mapping("cluster_config")
+  num_trainers = cluster["trainer_replicas"]
   num_rollouts = int(cluster["rollout_replicas"])
   min_rollouts = cluster["min_rollout_replicas"]
   beta = float(hp.config_mapping("agentic_grpo_config")["beta"])
   return {
-      datatypes.Role.ACTOR: 1,
+      datatypes.Role.ACTOR: num_trainers,
       datatypes.Role.ROLLOUT: (
           int(min_rollouts) if min_rollouts is not None else num_rollouts
       ),
@@ -474,8 +475,9 @@ def create_cluster(
   ft = hp.config_mapping("cluster_config")["fault_tolerance"]
   budget = ft["poll_retry_budget_s"]
   ratio = ft["min_active_rollout_ratio"]
+  mode = _weight_sync_mode(hp)
   return cluster_orchestrator.ClusterOrchestrator(
-      weight_sync_mode=_weight_sync_mode(hp).value,
+      weight_sync_mode=mode.value,
       trajectory_store_config=node_utils.trajectory_store_config(hp),
       weight_sync_timeouts=weight_sync_timeouts,
       fault_tolerance_config=datatypes.FaultToleranceConfig(
@@ -484,6 +486,11 @@ def create_cluster(
           poll_retry_budget_s=None if budget is None else float(budget),
           min_active_rollout_ratio=None if ratio is None else float(ratio),
           min_active_rollout_grace_s=float(ft["min_active_rollout_grace_s"]),
+      ),
+      ici_chunk_bytes=(
+          resolve_config.ici_chunk_bytes(hp)
+          if mode == weight_sync.WeightSyncMode.ICI
+          else None
       ),
   )
 
