@@ -890,6 +890,12 @@ class TrajectoryWriterTestCase(
           " yet."
       )
 
+  def _skip_if_resume_attempt_not_implemented(self) -> None:
+    if type(self.writer).resume_attempt is store.TrajectoryStore.resume_attempt:
+      self.skipTest(
+          f"{type(self.writer).__name__} does not implement resume_attempt yet."
+      )
+
   def test_update_metrics(self) -> None:
     """Tests that update_metrics records metrics for a trajectory."""
     self._skip_if_metrics_not_implemented()
@@ -1050,6 +1056,314 @@ class TrajectoryWriterTestCase(
     # Reading metrics alone should succeed
     retrieved = self.reader.get_trajectories_metrics(["metrics_only_traj"])
     self.assertEqual(retrieved, {"metrics_only_traj": metrics})
+
+  def test_resume_attempt_trims_trailing_steps_and_overwrites_metadata(
+      self,
+  ) -> None:
+    """Tests that resume_attempt keeps steps 1..keep_steps and updates metadata."""
+    self._skip_if_resume_attempt_not_implemented()
+    attempt1_meta = trajectory_testing.METADATA_2.model_copy(
+        update={"attempt": 1, "status": "FAILED", "notes": "attempt_1"}
+    )
+    for step in (
+        trajectory_testing.STEP_2_1,
+        trajectory_testing.STEP_2_2,
+        trajectory_testing.STEP_2_3,
+        trajectory_testing.STEP_2_4,
+        trajectory_testing.STEP_2_5,
+    ):
+      self.writer.add_step(step, attempt1_meta)
+    # Intentionally skip flush() before resume_attempt to verify synchronous
+    # drain of locally queued writes prior to takeover.
+    attempt2_meta = trajectory_testing.METADATA_2.model_copy(
+        update={"attempt": 2, "status": None, "notes": "attempt_2"}
+    )
+    self.writer.resume_attempt(attempt2_meta, keep_steps=2)
+
+    retry_step_3 = trajectory_testing.STEP_2_3.model_copy(
+        update={"message": "retry step 3"}
+    )
+    retry_step_4 = trajectory_testing.STEP_2_4.model_copy(
+        update={"message": "retry step 4"}
+    )
+    self.writer.add_step(retry_step_3, attempt2_meta)
+    self.writer.add_step(retry_step_4, attempt2_meta)
+    self.writer.flush()
+
+    metas = self.reader.get_trajectories_metadata(
+        [trajectory_testing.TRAJECTORY_ID_2]
+    )
+    self.assertEqual(metas, {trajectory_testing.TRAJECTORY_ID_2: attempt2_meta})
+    traj = self.reader.get_trajectories([trajectory_testing.TRAJECTORY_ID_2])[
+        trajectory_testing.TRAJECTORY_ID_2
+    ]
+    self.assertEqual(
+        traj.steps,
+        [
+            trajectory_testing.STEP_2_1,
+            trajectory_testing.STEP_2_2,
+            retry_step_3,
+            retry_step_4,
+        ],
+    )
+    self.assertEqual(traj.attempt, 2)
+    self.assertIsNone(traj.status)
+    self.assertEqual(traj.notes, "attempt_2")
+
+  def test_resume_attempt_default_keep_steps_discards_all_steps(self) -> None:
+    """Tests that resume_attempt with default keep_steps=0 clears all prior steps."""
+    self._skip_if_resume_attempt_not_implemented()
+    attempt1_meta = trajectory_testing.METADATA_2.model_copy(
+        update={"attempt": 1, "notes": "attempt_1"}
+    )
+    self.writer.add_step(trajectory_testing.STEP_2_1, attempt1_meta)
+    self.writer.add_step(trajectory_testing.STEP_2_2, attempt1_meta)
+    self.writer.flush()
+
+    attempt2_meta = trajectory_testing.METADATA_2.model_copy(
+        update={"attempt": 2, "notes": "attempt_2"}
+    )
+    self.writer.resume_attempt(attempt2_meta)
+
+    traj = self.reader.get_trajectories([trajectory_testing.TRAJECTORY_ID_2])[
+        trajectory_testing.TRAJECTORY_ID_2
+    ]
+    self.assertEmpty(traj.steps)
+    self.assertEqual(traj.attempt, 2)
+
+    new_step_1 = trajectory_testing.STEP_2_1.model_copy(
+        update={"message": "fresh step 1"}
+    )
+    self.writer.add_step(new_step_1, attempt2_meta)
+    self.writer.flush()
+    traj_after = self.reader.get_trajectories(
+        [trajectory_testing.TRAJECTORY_ID_2]
+    )[trajectory_testing.TRAJECTORY_ID_2]
+    self.assertEqual(traj_after.steps, [new_step_1])
+
+  def test_resume_attempt_on_unseen_trajectory_seeds_fencing(self) -> None:
+    """Tests claiming a retry attempt before any steps exist seeds attempt fencing."""
+    self._skip_if_resume_attempt_not_implemented()
+    traj_id = "unseen_traj_retry"
+    attempt2_meta = trajectory_testing.METADATA_1.model_copy(
+        update={"trajectory_id": traj_id, "attempt": 2, "notes": "claimed"}
+    )
+    self.writer.resume_attempt(attempt2_meta, keep_steps=2)
+
+    self.assertEqual(
+        self.reader.get_trajectories_metadata([traj_id]),
+        {traj_id: attempt2_meta},
+    )
+    self.assertEmpty(self.reader.get_trajectories([traj_id])[traj_id].steps)
+
+    stale_meta = attempt2_meta.model_copy(
+        update={"attempt": 1, "notes": "stale"}
+    )
+    self.writer.add_step(trajectory_testing.STEP_1_1, stale_meta)
+    self.writer.update_metadata(stale_meta)
+    self.writer.flush()
+
+    self.assertEqual(
+        self.reader.get_trajectories_metadata([traj_id]),
+        {traj_id: attempt2_meta},
+    )
+    self.assertEmpty(self.reader.get_trajectories([traj_id])[traj_id].steps)
+
+  def test_resume_attempt_fences_stale_writes(self) -> None:
+    """Tests that late add_step and update_metadata from older attempts are ignored."""
+    self._skip_if_resume_attempt_not_implemented()
+    attempt1_meta = trajectory_testing.METADATA_2.model_copy(
+        update={"attempt": 1, "notes": "attempt_1"}
+    )
+    self.writer.add_step(trajectory_testing.STEP_2_1, attempt1_meta)
+    self.writer.add_step(trajectory_testing.STEP_2_2, attempt1_meta)
+    self.writer.add_step(trajectory_testing.STEP_2_3, attempt1_meta)
+    self.writer.flush()
+
+    attempt2_meta = trajectory_testing.METADATA_2.model_copy(
+        update={"attempt": 2, "notes": "attempt_2"}
+    )
+    self.writer.resume_attempt(attempt2_meta, keep_steps=1)
+
+    zombie_step_1 = trajectory_testing.STEP_2_1.model_copy(
+        update={"message": "zombie overwrite"}
+    )
+    zombie_step_2 = trajectory_testing.STEP_2_2.model_copy(
+        update={"message": "zombie step 2"}
+    )
+    zombie_step_99 = trajectory_testing.STEP_2_5.model_copy(
+        update={"step_id": 99, "message": "zombie step 99"}
+    )
+    stale_meta = attempt1_meta.model_copy(update={"notes": "zombie meta"})
+    self.writer.add_step(zombie_step_1, stale_meta)
+    self.writer.add_step(zombie_step_2, stale_meta)
+    self.writer.add_step(zombie_step_99, stale_meta)
+    self.writer.update_metadata(stale_meta)
+    self.writer.flush()
+
+    self.assertEqual(
+        self.reader.get_trajectories_metadata(
+            [trajectory_testing.TRAJECTORY_ID_2]
+        ),
+        {trajectory_testing.TRAJECTORY_ID_2: attempt2_meta},
+    )
+    traj = self.reader.get_trajectories([trajectory_testing.TRAJECTORY_ID_2])[
+        trajectory_testing.TRAJECTORY_ID_2
+    ]
+    self.assertEqual(traj.steps, [trajectory_testing.STEP_2_1])
+
+    valid_step_2 = trajectory_testing.STEP_2_2.model_copy(
+        update={"message": "valid attempt 2"}
+    )
+    self.writer.add_step(valid_step_2, attempt2_meta)
+    self.writer.flush()
+    traj_after = self.reader.get_trajectories(
+        [trajectory_testing.TRAJECTORY_ID_2]
+    )[trajectory_testing.TRAJECTORY_ID_2]
+    self.assertEqual(
+        traj_after.steps, [trajectory_testing.STEP_2_1, valid_step_2]
+    )
+
+  def test_resume_attempt_stale_claim_raises_without_mutating(self) -> None:
+    """Tests that resume_attempt with an older attempt raises StaleAttemptError cleanly."""
+    self._skip_if_resume_attempt_not_implemented()
+    attempt2_meta = trajectory_testing.METADATA_1.model_copy(
+        update={"attempt": 2, "notes": "active_2"}
+    )
+    self.writer.add_step(trajectory_testing.STEP_1_1, attempt2_meta)
+    self.writer.flush()
+
+    stale_claim = trajectory_testing.METADATA_1.model_copy(
+        update={"attempt": 1, "notes": "stale_1"}
+    )
+    with self.assertRaises(store.StaleAttemptError) as ctx:
+      self.writer.resume_attempt(stale_claim, keep_steps=0)
+    self.assertEqual(
+        ctx.exception.trajectory_id, trajectory_testing.TRAJECTORY_ID_1
+    )
+    self.assertEqual(ctx.exception.attempted, 1)
+    self.assertEqual(ctx.exception.current_attempt, 2)
+
+    traj = self.reader.get_trajectories([trajectory_testing.TRAJECTORY_ID_1])[
+        trajectory_testing.TRAJECTORY_ID_1
+    ]
+    self.assertEqual(traj.attempt, 2)
+    self.assertEqual(traj.notes, "active_2")
+    self.assertEqual(traj.steps, [trajectory_testing.STEP_1_1])
+
+  def test_resume_attempt_same_attempt_idempotent_and_tightens(self) -> None:
+    """Tests repeated resume_attempt on the same attempt is idempotent and can trim further."""
+    self._skip_if_resume_attempt_not_implemented()
+    meta_a2 = trajectory_testing.METADATA_2.model_copy(
+        update={"attempt": 2, "notes": "first"}
+    )
+    self.writer.add_step(trajectory_testing.STEP_2_1, meta_a2)
+    self.writer.add_step(trajectory_testing.STEP_2_2, meta_a2)
+    self.writer.add_step(trajectory_testing.STEP_2_3, meta_a2)
+    self.writer.flush()
+
+    self.writer.resume_attempt(meta_a2, keep_steps=2)
+    meta_a2_updated = meta_a2.model_copy(update={"notes": "second"})
+    self.writer.resume_attempt(meta_a2_updated, keep_steps=2)
+    traj = self.reader.get_trajectories([trajectory_testing.TRAJECTORY_ID_2])[
+        trajectory_testing.TRAJECTORY_ID_2
+    ]
+    self.assertEqual(traj.notes, "second")
+    self.assertEqual(
+        traj.steps, [trajectory_testing.STEP_2_1, trajectory_testing.STEP_2_2]
+    )
+
+    self.writer.resume_attempt(meta_a2_updated, keep_steps=1)
+    traj_tighter = self.reader.get_trajectories(
+        [trajectory_testing.TRAJECTORY_ID_2]
+    )[trajectory_testing.TRAJECTORY_ID_2]
+    self.assertEqual(traj_tighter.steps, [trajectory_testing.STEP_2_1])
+
+  def test_resume_attempt_tunix_trajectory_with_step_zero(self) -> None:
+    """Tests keep_steps ordinal trimming on 0-indexed Tunix steps and snapshots metadata."""
+    self._skip_if_resume_attempt_not_implemented()
+    traj_id = "tunix_resume_1"
+    meta_a1 = trajectory_lib.TunixTrajectoryMetadata(
+        trajectory_id=traj_id,
+        agent=trajectory_lib.Agent(name="tunix_agent", version="1.0"),
+        attempt=1,
+        status="FAILED",
+    )
+    steps = [
+        trajectory_lib.TunixEnvStep(
+            step_id=0, source=trajectory_lib.Source.USER, message="prompt"
+        ),
+        trajectory_lib.TunixAgentStep(
+            step_id=1, source=trajectory_lib.Source.AGENT, message="act1"
+        ),
+        trajectory_lib.TunixEnvStep(
+            step_id=2, source=trajectory_lib.Source.SYSTEM, message="obs2"
+        ),
+        trajectory_lib.TunixAgentStep(
+            step_id=3, source=trajectory_lib.Source.AGENT, message="act3"
+        ),
+    ]
+    for s in steps:
+      self.writer.add_step(s, meta_a1)
+    self.writer.flush()
+
+    meta_a2 = meta_a1.model_copy(update={"attempt": 2, "status": None})
+    caller_meta = meta_a2.model_copy(deep=True)
+    self.writer.resume_attempt(caller_meta, keep_steps=2)
+    caller_meta.status = "MUTATED_AFTER_CALL"
+
+    traj = self.reader.get_trajectories([traj_id])[traj_id]
+    self.assertIsInstance(traj, trajectory_lib.TunixTrajectory)
+    self.assertEqual(traj.attempt, 2)
+    self.assertIsNone(traj.status)
+    self.assertEqual([s.step_id for s in traj.steps], [0, 1])
+
+    retry_step2 = trajectory_lib.TunixEnvStep(
+        step_id=2, source=trajectory_lib.Source.SYSTEM, message="retry obs2"
+    )
+    self.writer.add_step(retry_step2, meta_a2)
+    self.writer.flush()
+    traj_resumed = self.reader.get_trajectories([traj_id])[traj_id]
+    self.assertEqual(traj_resumed.steps, [steps[0], steps[1], retry_step2])
+
+    meta_a3 = meta_a1.model_copy(update={"attempt": 3, "status": None})
+    self.writer.resume_attempt(meta_a3, keep_steps=0)
+    self.assertEmpty(self.reader.get_trajectories([traj_id])[traj_id].steps)
+
+  @parameterized.named_parameters(
+      ("negative", -1),
+      ("bool_true", True),
+      ("bool_false", False),
+      ("float", 1.5),
+  )
+  def test_resume_attempt_invalid_keep_steps(self, keep_steps: Any) -> None:
+    """Tests that invalid keep_steps values raise ValueError."""
+    self._skip_if_resume_attempt_not_implemented()
+    with self.assertRaises(ValueError):
+      self.writer.resume_attempt(
+          trajectory_testing.METADATA_1, keep_steps=keep_steps
+      )
+
+  def test_resume_attempt_invalid_metadata_raises(self) -> None:
+    """Tests invalid trajectory_id, wrong bound type, and non-metadata objects."""
+    self._skip_if_resume_attempt_not_implemented()
+    for bad_id in ("", None):
+      bad_meta = trajectory_lib.TrajectoryMetadata(
+          trajectory_id=bad_id,
+          agent=trajectory_lib.Agent(name="a", version="1.0"),
+      )
+      with self.assertRaises(ValueError):
+        self.writer.resume_attempt(bad_meta)
+    with self.assertRaises(TypeError):
+      self.writer.resume_attempt(trajectory_testing.TRAJECTORY_1)  # type: ignore[arg-type]
+
+    self.writer.update_metadata(trajectory_testing.METADATA_1)
+    tunix_meta = trajectory_lib.TunixTrajectoryMetadata(
+        trajectory_id=trajectory_testing.TRAJECTORY_ID_2,
+        agent=trajectory_lib.Agent(name="a", version="1.0"),
+    )
+    with self.assertRaisesRegex(TypeError, "is bound to metadata type"):
+      self.writer.resume_attempt(cast(Any, tunix_meta))
 
 
 class TrajectoryStoreMetadataClsTestCase(
